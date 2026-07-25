@@ -69,6 +69,10 @@ struct RawTaskInfo {
     core_preference: u8,
     _reserved2: [u8; 3],
     sched_migration_count: u64,
+    sched_nice: i32,
+    sched_weight: u32,
+    sched_vruntime: u64,
+    sched_deadline: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -85,6 +89,10 @@ struct TaskInfo {
     sched_required_capacity: u32,
     core_preference: u8,
     sched_migration_count: u64,
+    sched_nice: i32,
+    sched_weight: u32,
+    sched_vruntime: u64,
+    sched_deadline: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -147,6 +155,10 @@ impl RawTaskInfo {
             sched_required_capacity: self.sched_required_capacity,
             core_preference: self.core_preference,
             sched_migration_count: self.sched_migration_count,
+            sched_nice: self.sched_nice,
+            sched_weight: self.sched_weight,
+            sched_vruntime: self.sched_vruntime,
+            sched_deadline: self.sched_deadline,
         }
     }
 }
@@ -330,6 +342,10 @@ fn task_info() -> Vec<TaskInfo> {
             core_preference: 0,
             _reserved2: [0; 3],
             sched_migration_count: 0,
+            sched_nice: 0,
+            sched_weight: 0,
+            sched_vruntime: 0,
+            sched_deadline: 0,
         };
         total
     ];
@@ -396,24 +412,15 @@ fn previous_cpu_time(tasks: &[TaskInfo], task: &TaskInfo) -> Option<u64> {
 }
 
 fn print_table(samples: &[TaskSample]) {
-    let mut max_pid = 3;
-    let mut max_cmd = 7;
-    let mut max_cpu = 4;
-    let mut max_time = 5;
-
-    for sample in samples {
-        let task = &sample.task;
-        max_pid = max_pid.max(decimal_digits_usize(task.pid));
-        max_cmd = max_cmd.max(task.name.len());
-        max_cpu = max_cpu.max(cpu_label_width(task.cpu));
-        max_time = max_time.max(time_width_ns(task.cpu_time_ns));
-    }
+    let widths = TableWidths::from_samples(samples);
 
     println!(
-        "{:>w_pid$} {:<4} {:<2} {:<5} {:<w_cpu$} {:>5} {:>4} {:>4} {:>4} {:<4} {:>5} {:>w_time$} {:<w_cmd$} {}",
+        "{:>pid$} {:<user$} {:<priority$} {:>nice$} {:>weight$} {:<state$} {:<cpu$} {:>percent$} {:>util$} {:>util_min$} {:>required$} {:<preference$} {:>migrations$} {:>vruntime$} {:>deadline$} {:>time$} {:<command$} {:>tgid$}",
         "PID",
         "USER",
         "PR",
+        "NI",
+        "WEIGHT",
         "STAT",
         "CPU",
         "%CPU",
@@ -422,13 +429,29 @@ fn print_table(samples: &[TaskSample]) {
         "REQ",
         "PREF",
         "MIG",
+        "VRUNTIME",
+        "DEADLINE",
         "TIME+",
         "COMMAND",
         "TGID",
-        w_pid = max_pid,
-        w_cpu = max_cpu,
-        w_time = max_time,
-        w_cmd = max_cmd,
+        pid = widths.pid,
+        user = widths.user,
+        priority = widths.priority,
+        nice = widths.nice,
+        weight = widths.weight,
+        state = widths.state,
+        cpu = widths.cpu,
+        percent = widths.percent,
+        util = widths.util,
+        util_min = widths.util_min,
+        required = widths.required,
+        preference = widths.preference,
+        migrations = widths.migrations,
+        vruntime = widths.vruntime,
+        deadline = widths.deadline,
+        time = widths.time,
+        command = widths.command,
+        tgid = widths.tgid,
     );
 
     for sample in samples {
@@ -438,10 +461,12 @@ fn print_table(samples: &[TaskSample]) {
             TaskType::User => "U",
         };
         println!(
-            "{:>w_pid$} {:<4} {:<2} {:<5} {:<w_cpu$} {:>5} {:>4} {:>4} {:>4} {:<4} {:>5} {:>w_time$} {:<w_cmd$} {}",
+            "{:>pid$} {:<user$} {:<priority$} {:>nice$} {:>weight$} {:<state$} {:<cpu$} {:>percent$} {:>util$} {:>util_min$} {:>required$} {:<preference$} {:>migrations$} {:>vruntime$} {:>deadline$} {:>time$} {:<command$} {:>tgid$}",
             task.pid,
             user,
             "-",
+            task.sched_nice,
+            task.sched_weight,
             format_stat(task.state),
             CpuLabel(task.cpu),
             Percent(sample.cpu_per_mille),
@@ -450,14 +475,110 @@ fn print_table(samples: &[TaskSample]) {
             task.sched_required_capacity,
             format_core_preference(task.core_preference),
             task.sched_migration_count,
+            task.sched_vruntime,
+            task.sched_deadline,
             TimeNs(task.cpu_time_ns),
             task.name,
             task.tgid,
-            w_pid = max_pid,
-            w_cpu = max_cpu,
-            w_time = max_time,
-            w_cmd = max_cmd,
+            pid = widths.pid,
+            user = widths.user,
+            priority = widths.priority,
+            nice = widths.nice,
+            weight = widths.weight,
+            state = widths.state,
+            cpu = widths.cpu,
+            percent = widths.percent,
+            util = widths.util,
+            util_min = widths.util_min,
+            required = widths.required,
+            preference = widths.preference,
+            migrations = widths.migrations,
+            vruntime = widths.vruntime,
+            deadline = widths.deadline,
+            time = widths.time,
+            command = widths.command,
+            tgid = widths.tgid,
         );
+    }
+}
+
+struct TableWidths {
+    pid: usize,
+    user: usize,
+    priority: usize,
+    nice: usize,
+    weight: usize,
+    state: usize,
+    cpu: usize,
+    percent: usize,
+    util: usize,
+    util_min: usize,
+    required: usize,
+    preference: usize,
+    migrations: usize,
+    vruntime: usize,
+    deadline: usize,
+    time: usize,
+    command: usize,
+    tgid: usize,
+}
+
+impl TableWidths {
+    fn from_samples(samples: &[TaskSample]) -> Self {
+        let mut widths = Self {
+            pid: "PID".len(),
+            user: "USER".len(),
+            priority: "PR".len(),
+            nice: "NI".len(),
+            weight: "WEIGHT".len(),
+            state: "STAT".len(),
+            cpu: "CPU".len(),
+            percent: "%CPU".len(),
+            util: "UTIL".len(),
+            util_min: "MIN".len(),
+            required: "REQ".len(),
+            preference: "PREF".len(),
+            migrations: "MIG".len(),
+            vruntime: "VRUNTIME".len(),
+            deadline: "DEADLINE".len(),
+            time: "TIME+".len(),
+            command: "COMMAND".len(),
+            tgid: "TGID".len(),
+        };
+
+        for sample in samples {
+            let task = &sample.task;
+            widths.pid = widths.pid.max(decimal_digits_usize(task.pid));
+            widths.nice = widths.nice.max(signed_decimal_width_i32(task.sched_nice));
+            widths.weight = widths
+                .weight
+                .max(decimal_digits_u64(u64::from(task.sched_weight)));
+            widths.state = widths.state.max(format_stat(task.state).len());
+            widths.cpu = widths.cpu.max(cpu_label_width(task.cpu));
+            widths.percent = widths.percent.max(percent_width(sample.cpu_per_mille));
+            widths.util = widths
+                .util
+                .max(decimal_digits_u64(u64::from(task.sched_util_avg)));
+            widths.util_min = widths
+                .util_min
+                .max(decimal_digits_u64(u64::from(task.sched_util_min)));
+            widths.required = widths
+                .required
+                .max(decimal_digits_u64(u64::from(task.sched_required_capacity)));
+            widths.preference = widths
+                .preference
+                .max(format_core_preference(task.core_preference).len());
+            widths.migrations = widths
+                .migrations
+                .max(decimal_digits_u64(task.sched_migration_count));
+            widths.vruntime = widths.vruntime.max(decimal_digits_u64(task.sched_vruntime));
+            widths.deadline = widths.deadline.max(decimal_digits_u64(task.sched_deadline));
+            widths.time = widths.time.max(time_width_ns(task.cpu_time_ns));
+            widths.command = widths.command.max(task.name.len());
+            widths.tgid = widths.tgid.max(decimal_digits_usize(task.tgid));
+        }
+
+        widths
     }
 }
 
@@ -581,6 +702,15 @@ fn time_width_ns(ns: u64) -> usize {
 
 fn cpu_label_width(cpu: u8) -> usize {
     3 + decimal_digits_usize(usize::from(cpu))
+}
+
+fn percent_width(per_mille: u64) -> usize {
+    decimal_digits_u64(per_mille / 10) + 2
+}
+
+fn signed_decimal_width_i32(value: i32) -> usize {
+    let sign = usize::from(value.is_negative());
+    sign + decimal_digits_u64(u64::from(value.unsigned_abs()))
 }
 
 fn decimal_digits_usize(mut value: usize) -> usize {
