@@ -250,7 +250,10 @@ pub fn sys_sleep(
     trapframe.increment_pc_next(&task);
 
     // Call the blocking sleep method - this will return when sleep completes
-    task.sleep(trapframe, ticks);
+    task.sleep(
+        trapframe,
+        ticks.saturating_mul(crate::timer::SCHEDULER_ACCOUNTING_QUANTUM_NS),
+    );
 
     // Set return value to 0 for successful sleep
     0

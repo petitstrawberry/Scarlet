@@ -449,6 +449,13 @@ pub extern "C" fn arch_user_trap_handler(addr: usize) {
     }
 
     set_trapvector(saved_stvec);
+
+    let cpu_id = get_cpu().get_cpuid();
+    if crate::sched::scheduler::may_schedule_from_interrupt(cpu_id)
+        && crate::sched::scheduler::take_deferred_reschedule(cpu_id)
+    {
+        crate::sched::scheduler::schedule(trapframe);
+    }
 }
 
 /// Switch to user space using the trampoline mechanism

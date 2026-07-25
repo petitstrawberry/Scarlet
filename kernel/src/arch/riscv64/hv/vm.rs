@@ -260,11 +260,11 @@ impl VcpuObject for Riscv64VcpuObject {
             return;
         }
 
-        let timeout_ticks = {
+        let timeout_ns = {
             let state = self.state.lock();
-            super::trap::sbi_timer_timeout_ticks(&state.guest)
+            super::trap::sbi_timer_timeout_ns(&state.guest)
         };
-        if matches!(timeout_ticks, Some(0)) {
+        if matches!(timeout_ns, Some(0)) {
             let mut state = self.state.lock();
             super::trap::check_sbi_timer_expired(&mut state.guest);
             return;
@@ -273,8 +273,12 @@ impl VcpuObject for Riscv64VcpuObject {
         let Some(task) = mytask() else {
             return;
         };
-        self.wfi_waker
-            .wait_with_timeout(task.get_id(), trapframe, timeout_ticks);
+        self.wfi_waker.wait_with_timeout_precision(
+            task.get_id(),
+            trapframe,
+            timeout_ns,
+            crate::timer::TimerPrecision::Exact,
+        );
 
         let mut state = self.state.lock();
         super::trap::check_sbi_timer_expired(&mut state.guest);

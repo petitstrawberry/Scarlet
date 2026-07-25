@@ -19,6 +19,10 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 
 const DIAGNOSTIC_WAKE_EVENT_WAITERS_ON_SOURCE_CPU: bool = false;
 
+fn timer_fired_before_wait(fired: bool, timer_is_registered: bool) -> bool {
+    fired || !timer_is_registered
+}
+
 /// A synchronization primitive that manages waiting and waking of tasks
 ///
 /// The `Waker` struct provides a mechanism for tasks to wait for specific events
@@ -304,122 +308,221 @@ impl Waker {
         &self,
         task_id: usize,
         trapframe: &mut Trapframe,
-        timeout_ticks: Option<u64>,
+        timeout_ns: Option<u64>,
     ) -> bool {
-        if matches!(timeout_ticks, Some(0)) {
+        self.wait_with_timeout_precision(
+            task_id,
+            trapframe,
+            timeout_ns,
+            crate::timer::TimerPrecision::Normal,
+        )
+    }
+
+    /// Block the task until woken or the timeout elapses with explicit timer precision.
+    ///
+    /// # Arguments
+    ///
+    /// * `task_id` - Task to block and wake.
+    /// * `trapframe` - Current task trapframe.
+    /// * `timeout_ns` - Optional relative timeout in nanoseconds.
+    /// * `precision` - Permitted timer delivery range.
+    ///
+    /// # Returns
+    ///
+    /// `true` if woken by an event, `false` if the timeout elapsed.
+    pub fn wait_with_timeout_precision(
+        &self,
+        task_id: usize,
+        trapframe: &mut Trapframe,
+        timeout_ns: Option<u64>,
+        precision: crate::timer::TimerPrecision,
+    ) -> bool {
+        if matches!(timeout_ns, Some(0)) {
             return false;
         }
 
-        if let Some(ticks) = timeout_ticks {
-            use crate::timer::{TimerHandler, add_timer, cancel_timer, get_tick};
+        if let Some(duration_ns) = timeout_ns {
+            use crate::timer::{TimerHandle, TimerHandler, add_timer, get_time_ns};
             use alloc::sync::Arc;
             use core::sync::atomic::{AtomicBool, Ordering};
 
             struct TimeoutWake {
                 task_id: usize,
-                timed_out: AtomicBool,
+                fired: AtomicBool,
+                timer_handle: crate::sync::IrqSpinLock<Option<TimerHandle>>,
             }
 
             impl TimerHandler for TimeoutWake {
                 fn on_timer_expired(self: Arc<Self>, _context: usize) {
-                    self.timed_out.store(true, Ordering::SeqCst);
+                    self.fired.store(true, Ordering::SeqCst);
+                    if let Some(task) = crate::sched::scheduler::get_task_by_id(self.task_id) {
+                        if let Some(timer_handle) = self.timer_handle.lock().take() {
+                            task.finish_software_timer(timer_handle);
+                        }
+                    }
                     let _ = wake_task(self.task_id);
                 }
             }
 
-            let handler: Arc<TimeoutWake> = Arc::new(TimeoutWake {
-                task_id,
-                timed_out: AtomicBool::new(false),
-            });
-            let handler_ref: Arc<dyn TimerHandler> = handler.clone();
-            let id = add_timer(get_tick().saturating_add(ticks), &handler_ref, 0);
+            let (timer_handle, timer_fired_before_registration) = {
+                let Some(task) = crate::sched::scheduler::get_task_by_id(task_id) else {
+                    return false;
+                };
+                let handler = Arc::new(TimeoutWake {
+                    task_id,
+                    fired: AtomicBool::new(false),
+                    timer_handle: crate::sync::IrqSpinLock::new(None),
+                });
+                let handler_ref: Arc<dyn TimerHandler> = handler.clone();
+                let timer_handle = add_timer(
+                    get_time_ns().saturating_add(duration_ns),
+                    precision,
+                    &handler_ref,
+                    0,
+                );
+                *handler.timer_handle.lock() = Some(timer_handle);
+                task.register_software_timer(timer_handle, handler_ref.clone());
+                let timer_fired_before_registration = handler.fired.load(Ordering::SeqCst);
+                drop(handler_ref);
+                drop(handler);
+                drop(task);
+                (timer_handle, timer_fired_before_registration)
+            };
+
+            let timer_is_registered = crate::sched::scheduler::get_task_by_id(task_id)
+                .is_some_and(|task| task.has_software_timer(timer_handle));
+            if timer_fired_before_wait(timer_fired_before_registration, timer_is_registered) {
+                if let Some(task) = crate::sched::scheduler::get_task_by_id(task_id) {
+                    let _event_won = task.finish_software_timer(timer_handle);
+                }
+                return false;
+            }
 
             let should_schedule = self.prepare_wait(task_id);
-            if handler.timed_out.load(Ordering::SeqCst) {
+            let timer_is_registered = crate::sched::scheduler::get_task_by_id(task_id)
+                .is_some_and(|task| task.has_software_timer(timer_handle));
+            if timer_fired_before_wait(false, timer_is_registered) {
                 let _cancelled = self.cancel_prepared_wait(task_id);
-                cancel_timer(id);
+                if let Some(task) = crate::sched::scheduler::get_task_by_id(task_id) {
+                    let _event_won = task.finish_software_timer(timer_handle);
+                }
                 return false;
             }
             if should_schedule {
                 schedule(trapframe);
             }
 
-            cancel_timer(id);
-
-            let timed_out = handler.timed_out.load(Ordering::SeqCst);
-            if timed_out {
+            let event_won = crate::sched::scheduler::get_task_by_id(task_id)
+                .is_some_and(|task| task.finish_software_timer(timer_handle));
+            if !event_won {
                 let _cancelled = self.cancel_prepared_wait(task_id);
             }
 
-            !timed_out
+            event_won
         } else {
             self.wait(task_id, trapframe);
             true
         }
     }
 
-    /// Block the task until woken, but wait at least `min_wait_ticks` before
+    /// Block the task until woken, but wait at least `min_wait_ns` before
     /// returning even if woken early by the selectable waker. After the minimum
-    /// wait elapses, continues blocking until woken or `timeout_ticks` expires.
+    /// wait elapses, continues blocking until woken or `timeout_ns` expires.
     ///
     /// Returns `true` if woken by an event, `false` if the overall timeout elapsed.
     pub fn wait_with_min_timeout(
         &self,
         task_id: usize,
         trapframe: &mut Trapframe,
-        timeout_ticks: Option<u64>,
-        min_wait_ticks: u64,
+        timeout_ns: Option<u64>,
+        min_wait_ns: u64,
     ) -> bool {
-        use crate::timer::{TimerHandler, add_timer, cancel_timer, get_tick};
+        use crate::timer::{TimerHandle, TimerHandler, add_timer, get_time_ns};
         use alloc::sync::Arc;
         use core::sync::atomic::{AtomicBool, Ordering};
 
         struct MinTimeoutWake {
             task_id: usize,
             fired: AtomicBool,
+            timer_handle: crate::sync::IrqSpinLock<Option<TimerHandle>>,
         }
 
         impl TimerHandler for MinTimeoutWake {
             fn on_timer_expired(self: Arc<Self>, _context: usize) {
                 self.fired.store(true, Ordering::SeqCst);
+                if let Some(task) = crate::sched::scheduler::get_task_by_id(self.task_id) {
+                    if let Some(timer_handle) = self.timer_handle.lock().take() {
+                        task.finish_software_timer(timer_handle);
+                    }
+                }
                 let _ = wake_task(self.task_id);
             }
         }
 
-        let min_handler: Arc<MinTimeoutWake> = Arc::new(MinTimeoutWake {
-            task_id,
-            fired: AtomicBool::new(false),
-        });
-        let min_handler_ref: Arc<dyn TimerHandler> = min_handler.clone();
-        let min_timer_id = add_timer(
-            get_tick().saturating_add(min_wait_ticks),
-            &min_handler_ref,
-            0,
-        );
+        let (min_timer_handle, min_timer_fired_before_registration) = {
+            let Some(task) = crate::sched::scheduler::get_task_by_id(task_id) else {
+                return false;
+            };
+            let min_handler = Arc::new(MinTimeoutWake {
+                task_id,
+                fired: AtomicBool::new(false),
+                timer_handle: crate::sync::IrqSpinLock::new(None),
+            });
+            let min_handler_ref: Arc<dyn TimerHandler> = min_handler.clone();
+            let min_timer_handle = add_timer(
+                get_time_ns().saturating_add(min_wait_ns),
+                crate::timer::TimerPrecision::Normal,
+                &min_handler_ref,
+                0,
+            );
+            *min_handler.timer_handle.lock() = Some(min_timer_handle);
+            task.register_software_timer(min_timer_handle, min_handler_ref.clone());
+            let min_timer_fired_before_registration = min_handler.fired.load(Ordering::SeqCst);
+            drop(min_handler_ref);
+            drop(min_handler);
+            drop(task);
+            (min_timer_handle, min_timer_fired_before_registration)
+        };
 
-        let should_schedule = self.prepare_wait(task_id);
-        if min_handler.fired.load(Ordering::SeqCst) {
-            let _cancelled = self.cancel_prepared_wait(task_id);
-        } else if should_schedule {
-            schedule(trapframe);
-        }
-
-        while !min_handler.fired.load(Ordering::SeqCst) {
-            let should_schedule = self.prepare_wait(task_id);
-            if min_handler.fired.load(Ordering::SeqCst) {
-                let _cancelled = self.cancel_prepared_wait(task_id);
-                break;
+        let min_timer_is_registered = crate::sched::scheduler::get_task_by_id(task_id)
+            .is_some_and(|task| task.has_software_timer(min_timer_handle));
+        if timer_fired_before_wait(min_timer_fired_before_registration, min_timer_is_registered) {
+            if let Some(task) = crate::sched::scheduler::get_task_by_id(task_id) {
+                let _event_won = task.finish_software_timer(min_timer_handle);
             }
-            if should_schedule {
+        } else {
+            let should_schedule = self.prepare_wait(task_id);
+            let min_timer_is_registered = crate::sched::scheduler::get_task_by_id(task_id)
+                .is_some_and(|task| task.has_software_timer(min_timer_handle));
+            if !min_timer_is_registered {
+                let _cancelled = self.cancel_prepared_wait(task_id);
+            } else if should_schedule {
                 schedule(trapframe);
             }
+
+            while crate::sched::scheduler::get_task_by_id(task_id)
+                .is_some_and(|task| task.has_software_timer(min_timer_handle))
+            {
+                let should_schedule = self.prepare_wait(task_id);
+                let min_timer_is_registered = crate::sched::scheduler::get_task_by_id(task_id)
+                    .is_some_and(|task| task.has_software_timer(min_timer_handle));
+                if !min_timer_is_registered {
+                    let _cancelled = self.cancel_prepared_wait(task_id);
+                    break;
+                }
+                if should_schedule {
+                    schedule(trapframe);
+                }
+            }
+
+            if let Some(task) = crate::sched::scheduler::get_task_by_id(task_id) {
+                let _event_won = task.finish_software_timer(min_timer_handle);
+            }
         }
 
-        cancel_timer(min_timer_id);
-
-        if let Some(ticks) = timeout_ticks {
-            if ticks > min_wait_ticks {
-                let remaining = ticks - min_wait_ticks;
+        if let Some(duration_ns) = timeout_ns {
+            if duration_ns > min_wait_ns {
+                let remaining = duration_ns - min_wait_ns;
                 self.wait_with_timeout(task_id, trapframe, Some(remaining))
             } else {
                 true
@@ -738,6 +841,13 @@ mod tests {
             BlockedType::Uninterruptible
         );
         assert_eq!(uninterruptible_waker.waiting_count(), 0);
+    }
+
+    #[test_case]
+    fn timeout_fired_latch_prevents_wait_after_late_registration() {
+        assert!(timer_fired_before_wait(true, true));
+        assert!(timer_fired_before_wait(false, false));
+        assert!(!timer_fired_before_wait(false, true));
     }
 
     #[test_case]

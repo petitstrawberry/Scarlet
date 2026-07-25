@@ -44,8 +44,8 @@ use crate::drivers::usb::xhci::trb::{Trb, TrbType};
 use crate::interrupt::{InterruptClaim, InterruptId, InterruptManager};
 use crate::mem::page::ContiguousPages;
 use crate::object::capability::{ControlOps, MemoryMappingInfo, MemoryMappingOps, Selectable};
-use crate::sync::{IrqSpinLock, IrqSpinLockGuard};
-use crate::timer::{TimerHandler, add_timer, get_tick, ms_to_ticks};
+use crate::sync::{IrqSpinLock, IrqSpinLockGuard, Once};
+use crate::timer::{TimerHandler, add_timer, get_time_ns, ms_to_ns};
 use crate::vm;
 use crate::{print, println};
 use alloc::boxed::Box;
@@ -4313,16 +4313,24 @@ impl UsbHostController for XhciController {
 
 /// xHCI driver instance container
 static NEXT_USB_HOST_ID: AtomicUsize = AtomicUsize::new(1);
+static XHCI_POLL_HANDLER: Once<Arc<XhciPollHandler>> = Once::new();
 
 struct XhciPollHandler;
+
+fn xhci_poll_handler() -> Arc<dyn TimerHandler> {
+    XHCI_POLL_HANDLER
+        .call_once(|| Arc::new(XhciPollHandler))
+        .clone()
+}
+
 impl TimerHandler for XhciPollHandler {
     fn on_timer_expired(self: Arc<Self>, _context: usize) {
         DeviceManager::get_manager().for_each_usb_host(|ctrl| {
             ctrl.poll_events();
         });
         let handler: Arc<dyn TimerHandler> = self.clone();
-        let expires = crate::timer::get_tick() + crate::timer::ms_to_ticks(500);
-        crate::timer::add_timer(expires, &handler, 0);
+        let expires = crate::timer::get_time_ns().saturating_add(crate::timer::ms_to_ns(500));
+        crate::timer::add_timer(expires, crate::timer::TimerPrecision::Coarse, &handler, 0);
     }
 }
 
@@ -4389,8 +4397,13 @@ fn register_xhci_host(controller: Arc<XhciController>) {
     let host: Arc<dyn UsbHostController> = controller.clone();
     DeviceManager::get_manager().register_usb_host(host_id, host);
 
-    let poll_handler: Arc<dyn TimerHandler> = Arc::new(XhciPollHandler);
-    add_timer(get_tick() + ms_to_ticks(1000), &poll_handler, 0);
+    let poll_handler = xhci_poll_handler();
+    add_timer(
+        get_time_ns().saturating_add(ms_to_ns(1000)),
+        crate::timer::TimerPrecision::Coarse,
+        &poll_handler,
+        0,
+    );
 
     println!("[xHCI] Platform controller registered successfully");
 }

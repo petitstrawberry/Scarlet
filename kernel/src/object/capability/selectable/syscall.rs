@@ -117,21 +117,14 @@ pub fn sys_poll(trapframe: &mut Trapframe) -> usize {
     let fds: &mut [PollHandle] =
         unsafe { core::slice::from_raw_parts_mut(fds_buf.as_mut_ptr() as *mut PollHandle, nfds) };
 
-    let timeout_ticks: Option<u64> = if options.timeout_ns < 0 {
+    let timeout_ns: Option<u64> = if options.timeout_ns < 0 {
         None
-    } else if options.timeout_ns == 0 && options.min_timeout_ns == 0 {
-        Some(0)
     } else {
-        Some(crate::timer::ns_to_ticks(options.timeout_ns as u64))
+        Some(options.timeout_ns as u64)
     };
 
-    let min_wait_ticks = if options.min_timeout_ns > 0 {
-        crate::timer::ns_to_ticks(options.min_timeout_ns)
-    } else {
-        0
-    };
-
-    if min_wait_ticks > 0 && timeout_ticks.is_some() && min_wait_ticks > timeout_ticks.unwrap() {
+    let min_wait_ns = options.min_timeout_ns;
+    if min_wait_ns > 0 && timeout_ns.is_some_and(|timeout_ns| min_wait_ns > timeout_ns) {
         return usize::MAX;
     }
 
@@ -153,20 +146,22 @@ pub fn sys_poll(trapframe: &mut Trapframe) -> usize {
     }
 
     if !any_ready {
-        let zero_poll = matches!(timeout_ticks, Some(t) if t == 0);
+        let zero_poll = matches!(timeout_ns, Some(t) if t == 0);
         if !zero_poll {
             if selectable_count > 1 {
-                use crate::timer::get_tick;
+                use crate::object::capability::selectable::multi_readiness_recheck_delay;
+                use crate::timer::{TimerPrecision, get_time_ns};
 
-                let deadline = timeout_ticks.map(|ticks| get_tick().saturating_add(ticks));
+                let deadline =
+                    timeout_ns.map(|duration_ns| get_time_ns().saturating_add(duration_ns));
                 loop {
-                    if let Some(deadline) = deadline {
-                        if get_tick() >= deadline {
-                            break;
-                        }
-                    }
+                    let Some(recheck_delay_ns) =
+                        multi_readiness_recheck_delay(deadline, get_time_ns())
+                    else {
+                        break;
+                    };
 
-                    task.sleep(trapframe, 1);
+                    task.sleep_with_precision(trapframe, recheck_delay_ns, TimerPrecision::Exact);
 
                     any_ready = false;
                     for pfd in fds.iter_mut() {
@@ -194,8 +189,8 @@ pub fn sys_poll(trapframe: &mut Trapframe) -> usize {
                                 except: want_except,
                             },
                             trapframe,
-                            timeout_ticks,
-                            min_wait_ticks,
+                            timeout_ns,
+                            min_wait_ns,
                         );
                     }
                 }

@@ -17,7 +17,7 @@ use crate::object::capability::{ControlOps, MemoryMappingOps};
 use crate::sync::waker::Waker;
 use crate::sync::{IrqRwSpinLock, IrqSpinLock};
 use crate::task::mytask;
-use crate::timer::{TimerHandler, add_timer, cancel_timer, get_tick};
+use crate::timer::{TimerHandler, add_timer, cancel_timer, get_time_ns};
 use alloc::collections::VecDeque;
 use alloc::sync::{Arc, Weak};
 use core::any::Any;
@@ -544,12 +544,12 @@ impl TtyDevice {
     pub fn wait_until_readable_with_timeout_ticks(
         &self,
         trapframe: &mut Trapframe,
-        ticks: u64,
+        timeout_ns: u64,
     ) -> bool {
         if self.can_read() {
             return false;
         }
-        if ticks == 0 {
+        if timeout_ns == 0 {
             return true;
         }
 
@@ -566,11 +566,11 @@ impl TtyDevice {
             }
         }
 
-        let deadline = get_tick().saturating_add(ticks);
+        let deadline = get_time_ns().saturating_add(timeout_ns);
         let handler: Arc<dyn TimerHandler> = Arc::new(TtyTimeoutHandler {
             tty_ptr: self as *const TtyDevice,
         });
-        let timer_id = add_timer(deadline, &handler, 0);
+        let timer_id = add_timer(deadline, crate::timer::TimerPrecision::Normal, &handler, 0);
 
         if let Some(task) = mytask() {
             self.input_waker.wait(task.get_id(), trapframe);

@@ -25,6 +25,39 @@ static XORSHIFT_STATE: AtomicU64 = AtomicU64::new(0);
 static NEXT_EPOLL_HANDLE_ID: AtomicU32 = AtomicU32::new(1);
 static EPOLL_INTERESTS: Once<IrqRwSpinLock<Vec<EpollInterest>>> = Once::new();
 
+const NSEC_PER_SEC_I64: i64 = 1_000_000_000;
+
+#[repr(C)]
+struct LinuxTimespec {
+    tv_sec: i64,
+    tv_nsec: i64,
+}
+
+fn linux_timespec_timeout_ns(timespec: &LinuxTimespec) -> Result<u64, usize> {
+    if timespec.tv_sec < 0 || timespec.tv_nsec < 0 || timespec.tv_nsec >= NSEC_PER_SEC_I64 {
+        return Err(errno::EINVAL);
+    }
+
+    Ok((timespec.tv_sec as u128)
+        .saturating_mul(NSEC_PER_SEC_I64 as u128)
+        .saturating_add(timespec.tv_nsec as u128)
+        .min(u64::MAX as u128) as u64)
+}
+
+fn read_linux_timespec_timeout_ns(
+    task: &crate::task::Task,
+    userspace_address: usize,
+) -> Result<u64, usize> {
+    let kernel_address = task
+        .vm_manager
+        .translate_to_kva(userspace_address)
+        .ok_or(errno::EFAULT)? as *const LinuxTimespec;
+    // SAFETY: The virtual-memory translation validated the userspace address;
+    // read_unaligned supports the Linux ABI's packed userspace representation.
+    let timespec = unsafe { core::ptr::read_unaligned(kernel_address) };
+    linux_timespec_timeout_ns(&timespec)
+}
+
 fn mozc_ipc_path(file: &dyn crate::object::capability::FileObject) -> Option<&str> {
     let vfs_file = file
         .as_any()
@@ -3776,12 +3809,13 @@ pub fn sys_epoll_wait(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         return errno::to_result(errno::EINVAL);
     }
 
-    let timeout_ticks = if timeout_ms < 0 {
+    let timeout_ns = if timeout_ms < 0 {
         None
     } else {
-        Some(crate::timer::ns_to_ticks(timeout_ms as u64 * 1_000_000))
+        Some((timeout_ms as u64).saturating_mul(1_000_000))
     };
-    let deadline = timeout_ticks.map(|ticks| crate::timer::get_tick().saturating_add(ticks));
+    let deadline =
+        timeout_ns.map(|duration_ns| crate::timer::get_time_ns().saturating_add(duration_ns));
 
     loop {
         let interests: Vec<EpollInterest> = epoll_interests()
@@ -3809,15 +3843,27 @@ pub fn sys_epoll_wait(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
             return ready_count;
         }
 
-        if matches!(timeout_ticks, Some(0)) {
+        if matches!(timeout_ns, Some(0)) {
             return 0;
         }
         if let Some(deadline) = deadline
-            && crate::timer::get_tick() >= deadline
+            && crate::timer::get_time_ns() >= deadline
         {
             return 0;
         }
-        task.sleep(trapframe, 1);
+        let Some(recheck_delay_ns) =
+            crate::object::capability::selectable::multi_readiness_recheck_delay(
+                deadline,
+                crate::timer::get_time_ns(),
+            )
+        else {
+            return 0;
+        };
+        task.sleep_with_precision(
+            trapframe,
+            recheck_delay_ns,
+            crate::timer::TimerPrecision::Exact,
+        );
     }
 }
 
@@ -3844,11 +3890,11 @@ pub fn sys_epoll_pwait(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     sys_epoll_wait(abi, trapframe)
 }
 
-/// Minimal Linux pselect6 implementation (stub)
+/// Minimal Linux pselect6 implementation.
 ///
-/// Temporary reset: always returns immediately with 0 (no fds ready) and
-/// does not block. This avoids complex readiness/timeout semantics until
-/// the final design is in place.
+/// The implementation evaluates all requested descriptors and, when none are
+/// ready, waits on the first selectable descriptor before rechecking the full
+/// set. Multi-object Waker registration is not available yet.
 ///
 /// Arguments (register usage):
 ///   arg0: nfds (number of file descriptors to check)
@@ -3861,7 +3907,6 @@ pub fn sys_epoll_pwait(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 /// Returns: number of ready descriptors, or -1 (usize::MAX) on error.
 pub fn sys_pselect6(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     use crate::object::capability::selectable::{ReadyInterest, ReadySet};
-    use crate::timer::ns_to_ticks;
 
     let task = match mytask() {
         Some(t) => t,
@@ -3875,7 +3920,7 @@ pub fn sys_pselect6(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let timeout_ptr = trapframe.get_arg(4);
     let _sigmask_ptr = trapframe.get_arg(5);
 
-    // Only support up to 64 fds in this minimal implementation
+    // Only support up to 64 fds in this minimal implementation.
     let max_fds = core::cmp::min(nfds, 64);
 
     // Translate fd_set user pointers (treat as u64 bitmask)
@@ -3895,24 +3940,12 @@ pub fn sys_pselect6(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         unsafe { in_except = core::ptr::read_unaligned(kptr) };
     }
 
-    // Parse timeout (timespec)
-    #[repr(C)]
-    struct LinuxTimespec {
-        tv_sec: i64,
-        tv_nsec: i64,
-    }
-    let mut timeout_ticks: Option<u64> = None;
+    let mut timeout_ns: Option<u64> = None;
     if timeout_ptr != 0 {
-        let kptr = task.vm_manager.translate_to_kva(timeout_ptr).unwrap() as *const LinuxTimespec;
-        let ts = unsafe { core::ptr::read_unaligned(kptr) };
-        // Zero timeout behaves as poll
-        if ts.tv_sec == 0 && ts.tv_nsec == 0 {
-            timeout_ticks = Some(0);
-        } else {
-            let ns = (ts.tv_sec as i128) * 1_000_000_000i128 + (ts.tv_nsec as i128);
-            let ns_u = if ns <= 0 { 0 } else { (ns as u128) as u64 };
-            timeout_ticks = Some(ns_to_ticks(ns_u));
-        }
+        timeout_ns = match read_linux_timespec_timeout_ns(&task, timeout_ptr) {
+            Ok(timeout_ns) => Some(timeout_ns),
+            Err(error) => return errno::to_result(error),
+        };
     }
 
     // First pass: compute immediate readiness; default-ready for non-selectables
@@ -3977,9 +4010,10 @@ pub fn sys_pselect6(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         }
     }
 
-    // If nothing is ready and a non-zero timeout is provided, attempt to block
+    // If nothing is ready and a non-zero timeout is provided, wait on the
+    // first selectable descriptor then re-evaluate every requested descriptor.
     if !any_ready {
-        let zero_poll = matches!(timeout_ticks, Some(t) if t == 0);
+        let zero_poll = matches!(timeout_ns, Some(t) if t == 0);
         if !zero_poll {
             // Best-effort: wait on the first selectable fd's primary interest
             if let Some(fd_wait) = first_selectable_fd {
@@ -3997,7 +4031,7 @@ pub fn sys_pselect6(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                                     except: want_except,
                                 },
                                 trapframe,
-                                timeout_ticks,
+                                timeout_ns,
                                 0,
                             );
                             // After wake or timeout, recompute readiness for all fds properly
@@ -4082,7 +4116,6 @@ pub fn sys_pselect6(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 /// Returns: number of fds with non-zero revents, or -1 (usize::MAX) on error.
 pub fn sys_ppoll(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     use crate::object::capability::selectable::{ReadyInterest, ReadySet, SelectWaitOutcome};
-    use crate::timer::ns_to_ticks;
 
     let task = match mytask() {
         Some(t) => t,
@@ -4111,6 +4144,14 @@ pub fn sys_ppoll(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 
     trapframe.increment_pc_next(&task);
 
+    let mut timeout_ns: Option<u64> = None;
+    if timeout_ptr != 0 {
+        timeout_ns = match read_linux_timespec_timeout_ns(&task, timeout_ptr) {
+            Ok(timeout_ns) => Some(timeout_ns),
+            Err(error) => return errno::to_result(error),
+        };
+    }
+
     if fds_ptr == 0 {
         return usize::MAX;
     }
@@ -4122,27 +4163,6 @@ pub fn sys_ppoll(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         return usize::MAX;
     }
     let fds: &mut [PollFd] = unsafe { core::slice::from_raw_parts_mut(kptr, nfds) };
-
-    #[repr(C)]
-    struct LinuxTimespec {
-        tv_sec: i64,
-        tv_nsec: i64,
-    }
-    let mut timeout_ticks: Option<u64> = None;
-    if timeout_ptr != 0 {
-        let tsp = match task.vm_manager.translate_to_kva(timeout_ptr) {
-            Some(p) => p as *const LinuxTimespec,
-            None => return usize::MAX,
-        };
-        let ts = unsafe { core::ptr::read_unaligned(tsp) };
-        if ts.tv_sec == 0 && ts.tv_nsec == 0 {
-            timeout_ticks = Some(0);
-        } else {
-            let ns = (ts.tv_sec as i128) * 1_000_000_000i128 + (ts.tv_nsec as i128);
-            let ns_u = if ns <= 0 { 0 } else { (ns as u128) as u64 };
-            timeout_ticks = Some(ns_to_ticks(ns_u));
-        }
-    }
 
     struct EvalResult {
         ready: bool,
@@ -4244,25 +4264,22 @@ pub fn sys_ppoll(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     }
 
     if !any_ready {
-        let zero_poll = matches!(timeout_ticks, Some(t) if t == 0);
+        let zero_poll = matches!(timeout_ns, Some(t) if t == 0);
         if !zero_poll {
             if selectable_count > 1 {
-                use crate::timer::get_tick;
+                use crate::object::capability::selectable::multi_readiness_recheck_delay;
+                use crate::timer::{TimerPrecision, get_time_ns};
 
-                let deadline = timeout_ticks.map(|ticks| get_tick().saturating_add(ticks));
+                let deadline =
+                    timeout_ns.map(|duration_ns| get_time_ns().saturating_add(duration_ns));
                 loop {
-                    if let Some(deadline) = deadline {
-                        let now = get_tick();
-                        if now >= deadline {
-                            break;
-                        }
-                        let remaining = deadline.saturating_sub(now);
-                        if remaining == 0 {
-                            break;
-                        }
-                    }
+                    let Some(recheck_delay_ns) =
+                        multi_readiness_recheck_delay(deadline, get_time_ns())
+                    else {
+                        break;
+                    };
 
-                    task.sleep(trapframe, 1);
+                    task.sleep_with_precision(trapframe, recheck_delay_ns, TimerPrecision::Exact);
 
                     any_ready = false;
                     {
@@ -4281,12 +4298,13 @@ pub fn sys_ppoll(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                     }
                 }
             } else if let Some(wait_idx) = first_selectable_index {
-                use crate::timer::get_tick;
+                use crate::timer::get_time_ns;
 
-                let deadline = timeout_ticks.map(|ticks| get_tick().saturating_add(ticks));
+                let deadline =
+                    timeout_ns.map(|duration_ns| get_time_ns().saturating_add(duration_ns));
                 loop {
                     let remaining_timeout = if let Some(deadline) = deadline {
-                        let now = get_tick();
+                        let now = get_time_ns();
                         if now >= deadline {
                             break;
                         }
@@ -4980,4 +4998,39 @@ pub fn sys_eventfd2(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     }
 
     fd
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{LinuxTimespec, linux_timespec_timeout_ns};
+    use crate::abi::linux::generic::errno;
+
+    #[test_case]
+    fn timespec_timeout_rejects_invalid_fields() {
+        assert_eq!(
+            linux_timespec_timeout_ns(&LinuxTimespec {
+                tv_sec: -1,
+                tv_nsec: 0,
+            }),
+            Err(errno::EINVAL)
+        );
+        assert_eq!(
+            linux_timespec_timeout_ns(&LinuxTimespec {
+                tv_sec: 0,
+                tv_nsec: 1_000_000_000,
+            }),
+            Err(errno::EINVAL)
+        );
+    }
+
+    #[test_case]
+    fn timespec_timeout_saturates_far_future_values() {
+        assert_eq!(
+            linux_timespec_timeout_ns(&LinuxTimespec {
+                tv_sec: i64::MAX,
+                tv_nsec: 999_999_999,
+            }),
+            Ok(u64::MAX)
+        );
+    }
 }

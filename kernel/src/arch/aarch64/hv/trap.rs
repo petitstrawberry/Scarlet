@@ -309,29 +309,35 @@ fn handle_host_irq_from_guest(
     _trapframe: &Trapframe,
     _guest: &GuestVcpu,
 ) -> bool {
-    let mut scratch = Trapframe::new();
+    let cpu_id = crate::arch::get_cpu().get_cpuid() as u32;
+    let mut must_exit_guest = false;
 
     if trap_kind == 2 && crate::arch::interrupt::is_arch_timer_pending() {
-        crate::timer::tick_with_scheduler(&mut scratch, false);
-        return false;
+        crate::timer::handle_local_timer_irq();
+        must_exit_guest |= crate::sched::scheduler::consume_guest_timer_reschedule(cpu_id as usize);
     }
 
-    let cpu_id = crate::arch::get_cpu().get_cpuid() as u32;
     match crate::interrupt::InterruptManager::global()
         .claim_and_handle_pending_external_interrupt(cpu_id)
     {
         Ok(Some(pending)) => {
             let interrupt_id = pending.mapping.virq;
             if crate::arch::interrupt::is_reschedule_interrupt(&pending) {
-                crate::sched::scheduler::debug_log_reschedule_ipi(cpu_id as usize, false, true);
-                return crate::sched::scheduler::has_ready_tasks(cpu_id as usize);
+                crate::sched::scheduler::acknowledge_reschedule_ipi(cpu_id as usize);
+                crate::sched::scheduler::debug_log_reschedule_ipi(cpu_id as usize, false, false);
+                crate::sched::scheduler::defer_reschedule(cpu_id as usize);
+                must_exit_guest = true;
             } else if interrupt_id == crate::drivers::pic::arm_generic_timer::timer_ppi_irq() {
-                crate::timer::tick_with_scheduler(&mut scratch, false);
+                crate::timer::handle_local_timer_irq();
+                must_exit_guest |=
+                    crate::sched::scheduler::consume_guest_timer_reschedule(cpu_id as usize);
             }
         }
         Ok(None) => {
             if crate::arch::interrupt::is_arch_timer_pending() {
-                crate::timer::tick_with_scheduler(&mut scratch, false);
+                crate::timer::handle_local_timer_irq();
+                must_exit_guest |=
+                    crate::sched::scheduler::consume_guest_timer_reschedule(cpu_id as usize);
             }
         }
         Err(e) => {
@@ -339,7 +345,7 @@ fn handle_host_irq_from_guest(
         }
     }
 
-    false
+    must_exit_guest
 }
 
 pub fn is_from_guest() -> bool {

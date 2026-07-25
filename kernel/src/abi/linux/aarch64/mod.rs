@@ -134,6 +134,9 @@ impl AbiModule for LinuxAarch64Abi {
         if !_flags.is_set(crate::task::CloneFlagsDef::Files) {
             self.0.unshare_fd_table();
         }
+        if !_flags.is_set(crate::task::CloneFlagsDef::Thread) {
+            self.0.reset_posix_timers();
+        }
 
         let clear_child_tid = if _flags.is_set(crate::task::CloneFlagsDef::ClearChildTid) {
             self.0.thread_state.clear_child_tid_ptr
@@ -162,6 +165,11 @@ impl AbiModule for LinuxAarch64Abi {
 
     fn on_task_exit(&mut self, task: &crate::task::Task) {
         task.clear_linux_child_tid_on_exit();
+        self.0.release_posix_timers_on_task_exit();
+    }
+
+    fn on_process_exit(&mut self, _task: &crate::task::Task) {
+        self.0.cancel_posix_timers_on_process_exit();
     }
 
     fn get_task_namespace(&self) -> Arc<crate::task::namespace::TaskNamespace> {

@@ -1,21 +1,37 @@
-//! Kernel timer module.
+//! Per-CPU one-shot hardware and software timer support.
 //!
-//! This module provides the kernel timer functionality, which is responsible for
-//! managing the system timer and scheduling tasks based on time intervals.
-//!
+//! Software timers are queued on their owner CPU with absolute monotonic
+//! nanosecond deadlines.  The timer module deliberately knows nothing about
+//! trapframes or scheduling: architecture interrupt handlers own trapframes
+//! and decide whether a pending reschedule can safely enter the scheduler.
 
-use crate::arch::Trapframe;
+extern crate alloc;
+
+use alloc::collections::{BTreeMap, BinaryHeap};
+use alloc::sync::{Arc, Weak};
+use core::cell::UnsafeCell;
+use core::cmp::Ordering as CmpOrdering;
+use core::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+
 use crate::arch::timer::ArchTimer;
 use crate::environment::MAX_NUM_CPUS;
-use crate::sched::scheduler::sched_on_tick;
-use core::cell::UnsafeCell;
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-extern crate alloc;
-use alloc::collections::BinaryHeap;
-use alloc::sync::{Arc, Weak};
-use core::cmp::Ordering as CmpOrdering;
+use crate::sync::{IrqSpinLock, Once};
 
 const DEBUG_TIMER_STALL_LOGGING: bool = false;
+const TIMER_HEARTBEAT_IRQS: u64 = 512;
+const MAX_DUE_CALLBACKS_PER_IRQ: usize = 64;
+const STALE_HEAP_NODE_COMPACT_THRESHOLD: usize = 32;
+pub const NANOSECONDS_PER_MICROSECOND: u64 = 1_000;
+pub const NANOSECONDS_PER_MILLISECOND: u64 = 1_000_000;
+/// Compatibility and scheduler accounting quantum retained from the former
+/// 10 ms tick. It is not a periodic hardware interrupt interval.
+pub const SCHEDULER_ACCOUNTING_QUANTUM_NS: u64 = 10 * NANOSECONDS_PER_MILLISECOND;
+/// Minimum delay applied to every newly inserted software timer.
+///
+/// Software timers retain absolute-nanosecond deadlines and FIFO ordering for
+/// equal deadlines. This lower bound only prevents a newly armed past or
+/// near-future deadline from retriggering the same hardware IRQ immediately.
+pub const SOFTWARE_TIMER_MIN_INTERVAL_NS: u64 = SCHEDULER_ACCOUNTING_QUANTUM_NS;
 
 pub struct KernelTimer {
     // SAFETY: Each CPU only accesses its own timer via cpu_id index.
@@ -31,73 +47,57 @@ unsafe impl Sync for KernelTimer {}
 static KERNEL_TIMER: Once<KernelTimer> = Once::new();
 
 pub fn get_kernel_timer() -> &'static KernelTimer {
-    KERNEL_TIMER.call_once(|| KernelTimer::new())
+    KERNEL_TIMER.call_once(KernelTimer::new)
 }
 
 impl KernelTimer {
     fn new() -> Self {
-        KernelTimer {
+        Self {
             core_local_timer: core::array::from_fn(|_| UnsafeCell::new(ArchTimer::new())),
-            interval: 0xffffffff_ffffffff,
+            interval: u64::MAX,
         }
     }
 
     /// Initialize the timer for a specific CPU.
-    /// This must be called by each CPU individually during its initialization.
     ///
     /// # Arguments
-    /// * `cpu_id` - The ID of the CPU whose timer should be initialized
+    ///
+    /// * `cpu_id` - The CPU whose local timer is initialized.
     pub fn init(&self, cpu_id: usize) {
-        // SAFETY: Only the specified CPU's timer is accessed, maintaining
-        // the per-CPU access invariant.
+        // SAFETY: Only the specified CPU's local timer is accessed during its
+        // initialization before it can service interrupts.
         unsafe { (*self.core_local_timer[cpu_id].get()).stop() };
     }
 
     pub fn start(&self, cpu_id: usize) {
-        // SAFETY: Each CPU only accesses its own timer
+        // SAFETY: Callers only program their own CPU's local timer.
         unsafe { (*self.core_local_timer[cpu_id].get()).start() };
     }
 
     pub fn stop(&self, cpu_id: usize) {
-        // SAFETY: Each CPU only accesses its own timer
+        // SAFETY: Callers only program their own CPU's local timer.
         unsafe { (*self.core_local_timer[cpu_id].get()).stop() };
     }
 
-    pub fn restart(&self, cpu_id: usize) {
-        self.stop(cpu_id);
-        self.start(cpu_id);
+    /// Program a local hardware timer from an absolute monotonic nanosecond
+    /// deadline. The architecture implementation converts it to counter units
+    /// and clamps past deadlines to a safe minimum delta.
+    pub fn set_deadline_ns(&self, cpu_id: usize, deadline_ns: u64) {
+        // SAFETY: Callers only program their own CPU's local timer.
+        unsafe { (*self.core_local_timer[cpu_id].get()).set_deadline_ns(deadline_ns) };
     }
 
-    /* Set the interval in microseconds */
-    pub fn set_interval_us(&self, cpu_id: usize, interval: u64) {
-        // SAFETY: Each CPU only accesses its own timer
-        unsafe { (*self.core_local_timer[cpu_id].get()).set_interval_us(interval) };
+    pub fn get_time_ns(&self, cpu_id: usize) -> u64 {
+        // SAFETY: Reading a CPU-local architected counter is safe on its owner CPU.
+        unsafe { (*self.core_local_timer[cpu_id].get()).get_time_ns() }
     }
 
     pub fn get_time_us(&self, cpu_id: usize) -> u64 {
-        // SAFETY: Each CPU only accesses its own timer
-        unsafe { (*self.core_local_timer[cpu_id].get()).get_time_us() }
+        self.get_time_ns(cpu_id) / NANOSECONDS_PER_MICROSECOND
     }
 }
 
-// Last architected-counter tick processed by the global timekeeper.
-static TICK_COUNT: AtomicU64 = AtomicU64::new(0);
 static TIMER_IRQ_COUNTS: [AtomicU64; MAX_NUM_CPUS] = [const { AtomicU64::new(0) }; MAX_NUM_CPUS];
-const STALL_REPORT_AFTER_SAMPLES: u64 = 2;
-const STALL_REPEAT_SAMPLES: u64 = 6;
-const STALL_SAMPLE_SLOTS: usize = MAX_NUM_CPUS * MAX_NUM_CPUS;
-static STALL_SAMPLE_INITIALIZED: [AtomicBool; STALL_SAMPLE_SLOTS] =
-    [const { AtomicBool::new(false) }; STALL_SAMPLE_SLOTS];
-static STALL_LAST_TIMER_COUNT: [AtomicU64; STALL_SAMPLE_SLOTS] =
-    [const { AtomicU64::new(0) }; STALL_SAMPLE_SLOTS];
-static STALL_LAST_PHASE: [AtomicU64; STALL_SAMPLE_SLOTS] =
-    [const { AtomicU64::new(0) }; STALL_SAMPLE_SLOTS];
-static STALL_LAST_AUX: [AtomicU64; STALL_SAMPLE_SLOTS] =
-    [const { AtomicU64::new(0) }; STALL_SAMPLE_SLOTS];
-static STALL_LAST_AUX2: [AtomicU64; STALL_SAMPLE_SLOTS] =
-    [const { AtomicU64::new(0) }; STALL_SAMPLE_SLOTS];
-static STALL_STALE_SAMPLES: [AtomicU64; STALL_SAMPLE_SLOTS] =
-    [const { AtomicU64::new(0) }; STALL_SAMPLE_SLOTS];
 
 /// Return a CPU's local timer IRQ count without taking a lock.
 ///
@@ -107,381 +107,819 @@ static STALL_STALE_SAMPLES: [AtomicU64; STALL_SAMPLE_SLOTS] =
 ///
 /// # Returns
 ///
-/// The current count, or `None` when `cpu_id` is outside the supported CPU
-/// range. The count is sampled relaxed and is safe to read in interrupt
-/// context without allocation.
+/// The current count, or `None` when `cpu_id` is outside the supported range.
 #[inline(always)]
 pub fn timer_irq_count(cpu_id: usize) -> Option<u64> {
     (cpu_id < MAX_NUM_CPUS).then(|| TIMER_IRQ_COUNTS[cpu_id].load(Ordering::Relaxed))
 }
 
-#[inline]
-fn sample_cpu_stalls(observer_cpu: usize) {
-    if observer_cpu >= MAX_NUM_CPUS {
-        return;
-    }
-
-    for target_cpu in 0..MAX_NUM_CPUS {
-        if target_cpu == observer_cpu {
-            continue;
-        }
-
-        let Some(timer_count) = timer_irq_count(target_cpu) else {
-            continue;
-        };
-        let Some(breadcrumb) = crate::breadcrumb::snapshot(target_cpu) else {
-            continue;
-        };
-        let Some(scheduler) = crate::sched::scheduler::diagnostic_snapshot(target_cpu) else {
-            continue;
-        };
-        if timer_count == 0
-            && breadcrumb.phase == crate::breadcrumb::NONE
-            && scheduler.current_task_id == 0
-        {
-            continue;
-        }
-
-        let slot = observer_cpu * MAX_NUM_CPUS + target_cpu;
-        let changed = !STALL_SAMPLE_INITIALIZED[slot].swap(true, Ordering::Relaxed)
-            || STALL_LAST_TIMER_COUNT[slot].load(Ordering::Relaxed) != timer_count
-            || STALL_LAST_PHASE[slot].load(Ordering::Relaxed) != breadcrumb.phase
-            || STALL_LAST_AUX[slot].load(Ordering::Relaxed) != breadcrumb.aux
-            || STALL_LAST_AUX2[slot].load(Ordering::Relaxed) != breadcrumb.aux2;
-        if changed {
-            STALL_LAST_TIMER_COUNT[slot].store(timer_count, Ordering::Relaxed);
-            STALL_LAST_PHASE[slot].store(breadcrumb.phase, Ordering::Relaxed);
-            STALL_LAST_AUX[slot].store(breadcrumb.aux, Ordering::Relaxed);
-            STALL_LAST_AUX2[slot].store(breadcrumb.aux2, Ordering::Relaxed);
-            STALL_STALE_SAMPLES[slot].store(0, Ordering::Relaxed);
-            continue;
-        }
-
-        let stale_samples = STALL_STALE_SAMPLES[slot]
-            .load(Ordering::Relaxed)
-            .saturating_add(1);
-        STALL_STALE_SAMPLES[slot].store(stale_samples, Ordering::Relaxed);
-        let should_report = stale_samples == STALL_REPORT_AFTER_SAMPLES
-            || (stale_samples > STALL_REPORT_AFTER_SAMPLES
-                && (stale_samples - STALL_REPORT_AFTER_SAMPLES) % STALL_REPEAT_SAMPLES == 0);
-        if !should_report {
-            continue;
-        }
-
-        crate::early_println!(
-            "[timer] stall observer={} cpu={} count={} phase={:#06x} aux={:#x} aux2={:#x} task={} idle={} pending_reschedule={}",
-            observer_cpu,
-            target_cpu,
-            timer_count,
-            breadcrumb.phase,
-            breadcrumb.aux,
-            breadcrumb.aux2,
-            scheduler.current_task_id,
-            scheduler.is_idle,
-            scheduler.pending_reschedule,
-        );
-    }
-}
-
-#[inline]
-fn current_counter_tick() -> u64 {
-    get_time_us() / TICK_INTERVAL_US
-}
-
-/// The CPU ID designated as the global timekeeper.
-/// Only this CPU advances TICK_COUNT and fires software timers.
-/// Initialized to u64::MAX (unset); call set_global_timekeeper() during boot.
-static GLOBAL_TIMEKEEPER_CPU: AtomicU64 = AtomicU64::new(u64::MAX);
-
-/// Designate a CPU as the global timekeeper.
-/// Must be called once during boot (from start_kernel) before any timer interrupts fire.
-pub fn set_global_timekeeper(cpu_id: usize) {
-    GLOBAL_TIMEKEEPER_CPU.store(cpu_id as u64, Ordering::Relaxed);
-}
-
-/// Timer interrupt handler. Called on every CPU local timer interrupt.
+/// A stable reference to a software timer.
 ///
-/// - Re-arms the per-CPU local timer (all CPUs).
-/// - Advances software timers from the architected counter only on the
-///   designated global timekeeper CPU. Delayed/coalesced timer IRQs therefore
-///   cannot make software time run slow.
-/// - Always calls sched_on_tick() for per-CPU scheduler accounting.
-pub fn tick(trapframe: &mut Trapframe) {
-    tick_with_scheduler(trapframe, true);
+/// A handle is owned by one local timer queue. It can safely be cancelled from
+/// any CPU, but only its owner CPU can reprogram its local hardware timer.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub struct TimerHandle {
+    pub owner_cpu: usize,
+    pub id: u64,
 }
 
-/// Timer interrupt handler with optional scheduler accounting.
+/// Timer entry lifecycle.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum TimerState {
+    Pending = 0,
+    Running = 1,
+    Cancelled = 2,
+    Completed = 3,
+}
+
+/// Permitted delivery range for a software timer.
 ///
-/// Kernel-mode traps on a non-idle user task must not preempt via the normal
-/// user-task scheduler path: the trapframe describes an in-kernel continuation,
-/// not the task's user context.  Such paths still need timer re-arming and
-/// global timer processing, but scheduler accounting is deferred until the task
-/// returns to user mode or blocks explicitly.
-pub fn tick_with_scheduler(trapframe: &mut Trapframe, run_scheduler: bool) {
-    let cpu_id = crate::arch::get_cpu().get_cpuid();
-    let irq_count = TIMER_IRQ_COUNTS[cpu_id].fetch_add(1, Ordering::Relaxed) + 1;
-    if DEBUG_TIMER_STALL_LOGGING {
-        let heartbeat_ticks = 5_000_000 / TICK_INTERVAL_US;
-        if irq_count <= 3 || irq_count % heartbeat_ticks == 0 {
-            crate::early_println!(
-                "[timer] irq heartbeat cpu={} count={} scheduler={}",
-                cpu_id,
-                irq_count,
-                run_scheduler
-            );
+/// Timers never run before their soft deadline. The hard deadline is used for
+/// queue ordering and hardware programming, allowing compatible work to be
+/// coalesced without rounding deadlines into fixed buckets.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TimerPrecision {
+    /// No additional delivery slack; soft and hard deadlines are identical.
+    ///
+    /// Exact timers still use the common
+    /// [`SOFTWARE_TIMER_MIN_INTERVAL_NS`] lower bound when armed, so they do
+    /// not bypass the minimum future interval.
+    Exact,
+    /// Modest coalescing slack for waits and non-protocol maintenance.
+    Normal,
+    /// Broad coalescing slack for polling and deferred device work.
+    Coarse,
+}
+
+impl TimerPrecision {
+    /// Return the maximum permitted delay after a timer's soft deadline.
+    #[inline]
+    pub const fn slack_ns(self) -> u64 {
+        match self {
+            Self::Exact => 0,
+            Self::Normal => NANOSECONDS_PER_MILLISECOND,
+            Self::Coarse => 10 * NANOSECONDS_PER_MILLISECOND,
         }
-        if irq_count % heartbeat_ticks == 0 {
-            sample_cpu_stalls(cpu_id);
+    }
+}
+
+impl TimerState {
+    #[inline]
+    fn from_raw(value: u8) -> Self {
+        match value {
+            0 => Self::Pending,
+            1 => Self::Running,
+            2 => Self::Cancelled,
+            3 => Self::Completed,
+            _ => unreachable!("invalid software timer state"),
         }
     }
-    crate::breadcrumb::drop(
-        crate::breadcrumb::TIMER_TICK,
-        irq_count,
-        run_scheduler as u64,
-    );
-    let timer = get_kernel_timer();
-    timer.set_interval_us(cpu_id, TICK_INTERVAL_US);
-    timer.start(cpu_id);
-
-    // Only the designated global timekeeper advances global time and fires
-    // software timers. All other CPUs skip this block entirely.
-    if cpu_id as u64 == GLOBAL_TIMEKEEPER_CPU.load(Ordering::Relaxed) {
-        crate::breadcrumb::drop(crate::breadcrumb::TIMER_SW_TIMERS, irq_count, 0);
-        let now = current_counter_tick();
-        TICK_COUNT.store(now, Ordering::Relaxed);
-        check_software_timers(now);
-    }
-
-    if run_scheduler {
-        // Per-CPU scheduler accounting runs on every CPU when preemption is safe.
-        sched_on_tick(cpu_id, trapframe);
-    }
 }
 
-/// Get the current tick count (monotonic, since boot)
-pub fn get_tick() -> u64 {
-    current_counter_tick()
-}
-
-pub fn get_time_ns() -> u64 {
-    let cpu_id = crate::arch::get_cpu().get_cpuid();
-    let timer = get_kernel_timer();
-    timer.get_time_us(cpu_id) * 1_000
-}
-
-pub fn get_time_us() -> u64 {
-    let cpu_id = crate::arch::get_cpu().get_cpuid();
-    let timer = get_kernel_timer();
-    timer.get_time_us(cpu_id)
-}
-
-/// Trait for timer expiration callback
+/// Trait invoked after a software timer reaches its absolute deadline.
 pub trait TimerHandler: Send + Sync {
+    /// Handle a timer expiration.
+    ///
+    /// # Arguments
+    ///
+    /// * `context` - Opaque value supplied when the timer was armed.
+    ///
+    /// # Returns
+    ///
+    /// This method returns no value. It may arm, cancel, or wake timers/tasks,
+    /// but runs with no timer queue lock held.
     fn on_timer_expired(self: Arc<Self>, context: usize);
 }
 
-/// Software timer structure
-pub struct SoftwareTimer {
-    pub id: u64,                         // Unique timer ID
-    pub expires: u64,                    // Expiration tick
-    pub handler: Weak<dyn TimerHandler>, // Weak reference to callback handler
-    pub context: usize,                  // User context
-    pub active: bool,                    // Is this timer active?
+struct SoftwareTimer {
+    id: u64,
+    soft_deadline_ns: u64,
+    hard_deadline_ns: u64,
+    sequence: u64,
+    handler: Weak<dyn TimerHandler>,
+    context: usize,
+    state: AtomicU8,
 }
 
-// Global timer ID counter
-static TIMER_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
+impl SoftwareTimer {
+    fn state(&self) -> TimerState {
+        TimerState::from_raw(self.state.load(Ordering::Acquire))
+    }
 
-impl PartialEq for SoftwareTimer {
+    fn cancel(&self) -> bool {
+        self.state
+            .compare_exchange(
+                TimerState::Pending as u8,
+                TimerState::Cancelled as u8,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+    }
+
+    fn claim(&self) -> bool {
+        self.state
+            .compare_exchange(
+                TimerState::Pending as u8,
+                TimerState::Running as u8,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+    }
+
+    fn complete(&self) {
+        self.state
+            .store(TimerState::Completed as u8, Ordering::Release);
+    }
+}
+
+#[derive(Clone)]
+struct QueuedTimer(Arc<SoftwareTimer>);
+
+impl PartialEq for QueuedTimer {
     fn eq(&self, other: &Self) -> bool {
-        self.expires == other.expires
-            && self.context == other.context
-            && self.active == other.active
+        self.0.hard_deadline_ns == other.0.hard_deadline_ns && self.0.sequence == other.0.sequence
     }
 }
 
-impl Eq for SoftwareTimer {}
+impl Eq for QueuedTimer {}
 
-impl Ord for SoftwareTimer {
+impl Ord for QueuedTimer {
     fn cmp(&self, other: &Self) -> CmpOrdering {
-        // Reverse order for min-heap (BinaryHeap is max-heap by default)
-        other.expires.cmp(&self.expires)
+        // BinaryHeap is a max-heap, so reverse hard deadline and sequence keys.
+        other
+            .0
+            .hard_deadline_ns
+            .cmp(&self.0.hard_deadline_ns)
+            .then_with(|| other.0.sequence.cmp(&self.0.sequence))
     }
 }
 
-impl PartialOrd for SoftwareTimer {
+impl PartialOrd for QueuedTimer {
     fn partial_cmp(&self, other: &Self) -> Option<CmpOrdering> {
         Some(self.cmp(other))
     }
 }
 
-use crate::sync::{IrqRwSpinLock, IrqSpinLock, Once};
-use alloc::collections::BTreeMap;
-
-// Heap-based timer list protected by an IRQ spin lock.
-static SOFTWARE_TIMER_HEAP: IrqSpinLock<BinaryHeap<SoftwareTimer>> =
-    IrqSpinLock::new(BinaryHeap::new());
-
-// Active timer flags protected by an IRQ reader-writer spin lock.
-// Maps timer ID -> active status
-static TIMER_ACTIVE_FLAGS: IrqRwSpinLock<BTreeMap<u64, bool>> = IrqRwSpinLock::new(BTreeMap::new());
-
-/// Add a new software timer. Returns timer id.
-pub fn add_timer(expires: u64, handler: &Arc<dyn TimerHandler>, context: usize) -> u64 {
-    let id = TIMER_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let timer = SoftwareTimer {
-        id,
-        expires,
-        handler: Arc::downgrade(handler),
-        context,
-        active: true,
-    };
-
-    // Keep the global software-timer lock order consistent with
-    // check_software_timers(): heap first, then active flags. Taking these in
-    // the opposite order can deadlock the timekeeper FIQ against a CPU adding
-    // a timer.
-    let mut heap = SOFTWARE_TIMER_HEAP.lock();
-    TIMER_ACTIVE_FLAGS.write().insert(id, true);
-    heap.push(timer);
-    id
+struct TimerQueue {
+    heap: BinaryHeap<QueuedTimer>,
+    entries: BTreeMap<u64, Arc<SoftwareTimer>>,
+    next_sequence: u64,
+    stale_heap_nodes: usize,
 }
 
-/// Cancel a timer by id (O(1) operation - just marks as inactive)
-pub fn cancel_timer(id: u64) {
-    // Simply mark as inactive - the timer will be skipped in check_software_timers()
-    // and cleaned up when it expires
-    if let Some(active) = TIMER_ACTIVE_FLAGS.write().get_mut(&id) {
-        *active = false;
+impl TimerQueue {
+    fn new() -> Self {
+        Self {
+            heap: BinaryHeap::new(),
+            entries: BTreeMap::new(),
+            next_sequence: 0,
+            stale_heap_nodes: 0,
+        }
     }
-}
 
-/// Check if a timer is active (used by check_software_timers)
-#[inline]
-fn is_timer_active(id: u64) -> bool {
-    TIMER_ACTIVE_FLAGS.read().get(&id).copied().unwrap_or(false)
-}
+    fn add(
+        &mut self,
+        id: u64,
+        soft_deadline_ns: u64,
+        precision: TimerPrecision,
+        handler: &Arc<dyn TimerHandler>,
+        context: usize,
+    ) {
+        let timer = Arc::new(SoftwareTimer {
+            id,
+            soft_deadline_ns,
+            hard_deadline_ns: soft_deadline_ns.saturating_add(precision.slack_ns()),
+            sequence: self.next_sequence,
+            handler: Arc::downgrade(handler),
+            context,
+            state: AtomicU8::new(TimerState::Pending as u8),
+        });
+        self.next_sequence = self.next_sequence.wrapping_add(1);
+        self.entries.insert(id, timer.clone());
+        self.heap.push(QueuedTimer(timer));
+    }
 
-/// Call this from tick() to check and fire expired timers
-fn check_software_timers(now: u64) {
-    use alloc::vec::Vec;
-    let mut expired = Vec::new();
-    let mut cleanup_ids = Vec::new();
+    fn cancel(&mut self, id: u64) -> bool {
+        let cancelled = self.entries.get(&id).is_some_and(|timer| timer.cancel());
+        if cancelled {
+            self.entries.remove(&id);
+            self.stale_heap_nodes = self.stale_heap_nodes.saturating_add(1);
+            self.compact_stale_heap_nodes_if_needed();
+        }
+        cancelled
+    }
 
-    {
-        let mut heap = SOFTWARE_TIMER_HEAP.lock();
-        let active_flags = TIMER_ACTIVE_FLAGS.read();
+    fn compact_stale_heap_nodes_if_needed(&mut self) {
+        if self.stale_heap_nodes < STALE_HEAP_NODE_COMPACT_THRESHOLD
+            && self.stale_heap_nodes.saturating_mul(2) < self.heap.len()
+        {
+            return;
+        }
 
-        while let Some(timer) = heap.peek() {
-            if timer.expires <= now {
-                let timer = heap.pop().unwrap();
-                // Check if still active
-                if active_flags.get(&timer.id).copied().unwrap_or(false) {
-                    expired.push(timer);
-                } else {
-                    // Mark for cleanup (will be done outside locks)
-                    cleanup_ids.push(timer.id);
-                }
-            } else {
-                break;
+        let stale_heap = core::mem::take(&mut self.heap);
+        self.heap = stale_heap
+            .into_iter()
+            .filter(|queued| {
+                queued.0.state() == TimerState::Pending && self.entries.contains_key(&queued.0.id)
+            })
+            .collect();
+        self.stale_heap_nodes = 0;
+    }
+
+    fn discard_non_pending_head(&mut self) {
+        while let Some(timer) = self.heap.peek() {
+            if timer.0.state() == TimerState::Pending {
+                return;
             }
-        }
-    } // Unlock the heap
-
-    // Clean up inactive timers (outside of read lock to avoid deadlock)
-    if !cleanup_ids.is_empty() {
-        let mut active_flags = TIMER_ACTIVE_FLAGS.write();
-        for id in cleanup_ids {
-            active_flags.remove(&id);
+            let timer = self
+                .heap
+                .pop()
+                .expect("software timer heap entry disappeared");
+            if timer.0.state() == TimerState::Cancelled {
+                self.stale_heap_nodes = self.stale_heap_nodes.saturating_sub(1);
+            }
+            self.entries.remove(&timer.0.id);
         }
     }
 
-    // Execute callbacks outside of all locks
-    for timer in expired {
-        // Double-check active status before executing
-        let should_execute = {
-            let active_flags = TIMER_ACTIVE_FLAGS.read();
-            active_flags.get(&timer.id).copied().unwrap_or(false)
+    fn earliest_live_hard_deadline(&mut self) -> Option<u64> {
+        self.discard_non_pending_head();
+        self.heap.peek().map(|timer| timer.0.hard_deadline_ns)
+    }
+
+    #[cfg(test)]
+    fn has_due(&mut self, now_ns: u64) -> bool {
+        self.discard_non_pending_head();
+        self.heap
+            .peek()
+            .is_some_and(|timer| timer.0.soft_deadline_ns <= now_ns)
+    }
+
+    fn claim_due(&mut self, now_ns: u64) -> Option<Arc<SoftwareTimer>> {
+        loop {
+            self.discard_non_pending_head();
+            let timer = self.heap.peek()?.0.clone();
+            if timer.soft_deadline_ns > now_ns {
+                return None;
+            }
+            let timer = self.heap.pop().expect("due software timer disappeared").0;
+            if timer.claim() {
+                return Some(timer);
+            }
+            self.entries.remove(&timer.id);
+        }
+    }
+
+    fn finish(&mut self, timer: &Arc<SoftwareTimer>) {
+        timer.complete();
+        self.entries.remove(&timer.id);
+    }
+}
+
+static TIMER_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
+static SOFTWARE_TIMER_QUEUES: Once<[IrqSpinLock<TimerQueue>; MAX_NUM_CPUS]> = Once::new();
+
+fn timer_queues() -> &'static [IrqSpinLock<TimerQueue>; MAX_NUM_CPUS] {
+    SOFTWARE_TIMER_QUEUES
+        .call_once(|| core::array::from_fn(|_| IrqSpinLock::new(TimerQueue::new())))
+}
+
+fn local_cpu_id() -> usize {
+    crate::arch::get_cpu().get_cpuid()
+}
+
+#[inline]
+fn clamp_software_timer_deadline(now_ns: u64, requested_deadline_ns: u64) -> u64 {
+    requested_deadline_ns.max(now_ns.saturating_add(SOFTWARE_TIMER_MIN_INTERVAL_NS))
+}
+
+#[inline]
+fn software_timer_deadlines(
+    now_ns: u64,
+    requested_deadline_ns: u64,
+    precision: TimerPrecision,
+) -> (u64, u64) {
+    let soft_deadline_ns = clamp_software_timer_deadline(now_ns, requested_deadline_ns);
+    (
+        soft_deadline_ns,
+        soft_deadline_ns.saturating_add(precision.slack_ns()),
+    )
+}
+
+/// Advance a periodic timer to the first interval strictly after `now_ns`.
+///
+/// The returned overrun count is the number of elapsed intervals in addition
+/// to the expiration currently being delivered. It coalesces delayed hardware
+/// IRQs instead of replaying every missed interval.
+pub(crate) fn coalesce_periodic_deadline(
+    expired_deadline_ns: u64,
+    interval_ns: u64,
+    now_ns: u64,
+) -> (u64, u64) {
+    debug_assert!(interval_ns > 0);
+
+    let elapsed_ns = now_ns.saturating_sub(expired_deadline_ns);
+    let overruns = elapsed_ns / interval_ns;
+    let periods = overruns.saturating_add(1);
+    let next_deadline_ns = expired_deadline_ns.saturating_add(interval_ns.saturating_mul(periods));
+
+    if next_deadline_ns > now_ns {
+        (next_deadline_ns, overruns)
+    } else {
+        (now_ns.saturating_add(interval_ns), overruns)
+    }
+}
+
+/// Add a timer to the current CPU's local queue.
+///
+/// # Arguments
+///
+/// * `deadline_ns` - Requested absolute monotonic soft expiration in nanoseconds.
+/// * `precision` - Explicit permitted delivery range for this timer.
+/// * `handler` - Callback object held weakly until expiration.
+/// * `context` - Opaque callback context.
+///
+/// # Returns
+///
+/// A handle that can be cancelled from any CPU.
+pub fn add_timer(
+    deadline_ns: u64,
+    precision: TimerPrecision,
+    handler: &Arc<dyn TimerHandler>,
+    context: usize,
+) -> TimerHandle {
+    let owner_cpu = local_cpu_id();
+    let id = TIMER_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let (soft_deadline_ns, _) = software_timer_deadlines(get_time_ns(), deadline_ns, precision);
+    {
+        let mut queue = timer_queues()[owner_cpu].lock();
+        queue.add(id, soft_deadline_ns, precision, handler, context);
+    }
+    // This is deliberately local: add_timer owns the new entry on the current
+    // CPU and must never program a remote CPU's local hardware comparator.
+    reprogram_local_timer();
+    TimerHandle { owner_cpu, id }
+}
+
+/// Cancel a timer if it is still pending.
+///
+/// # Arguments
+///
+/// * `handle` - Timer to cancel.
+///
+/// # Returns
+///
+/// `true` only when this call changed `Pending` to `Cancelled`. A successful
+/// return guarantees the callback will not execute. Remote cancellation does
+/// not program the owner's local hardware timer; a stale early IRQ is harmless.
+pub fn cancel_timer(handle: TimerHandle) -> bool {
+    if handle.owner_cpu >= MAX_NUM_CPUS {
+        return false;
+    }
+    let cancelled = timer_queues()[handle.owner_cpu].lock().cancel(handle.id);
+    if cancelled && handle.owner_cpu == local_cpu_id() {
+        reprogram_local_timer();
+    }
+    cancelled
+}
+
+/// Inspect the earliest live hard deadline owned by the current CPU.
+pub fn peek_local_deadline() -> Option<u64> {
+    let cpu_id = local_cpu_id();
+    timer_queues()[cpu_id].lock().earliest_live_hard_deadline()
+}
+
+/// Hardware timer policy for a local queue head.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LocalTimerProgram {
+    Stop,
+    Deadline(u64),
+}
+
+#[inline]
+pub const fn local_timer_program(next_deadline_ns: Option<u64>) -> LocalTimerProgram {
+    match next_deadline_ns {
+        Some(deadline_ns) => LocalTimerProgram::Deadline(deadline_ns),
+        None => LocalTimerProgram::Stop,
+    }
+}
+
+/// Program or stop the current CPU's hardware timer from its queue head.
+pub fn reprogram_local_timer() {
+    let cpu_id = local_cpu_id();
+    match local_timer_program(peek_local_deadline()) {
+        LocalTimerProgram::Deadline(deadline_ns) => {
+            let timer = get_kernel_timer();
+            timer.set_deadline_ns(cpu_id, deadline_ns);
+            timer.start(cpu_id);
+        }
+        LocalTimerProgram::Stop => get_kernel_timer().stop(cpu_id),
+    }
+}
+
+/// Drain due callbacks from the current CPU's queue.
+///
+/// Entries transition from `Pending` to `Running` while held by the queue lock,
+/// then callbacks execute with all timer locks released. A callback may freely
+/// arm, cancel, or wake other timers before the queue is inspected again.
+///
+/// Processing stops after the per-IRQ callback budget. Any remaining queue head
+/// is reprogrammed by the caller through the architecture's safe comparator
+/// delta.
+fn drain_local_due_timers() {
+    let cpu_id = local_cpu_id();
+    for _ in 0..MAX_DUE_CALLBACKS_PER_IRQ {
+        let now_ns = get_time_ns();
+        let timer = { timer_queues()[cpu_id].lock().claim_due(now_ns) };
+        let Some(timer) = timer else {
+            return;
         };
 
-        if should_execute {
-            // Clean up from flags map before executing handler
-            TIMER_ACTIVE_FLAGS.write().remove(&timer.id);
+        if let Some(handler) = timer.handler.upgrade() {
+            handler.on_timer_expired(timer.context);
+        }
 
+        timer_queues()[cpu_id].lock().finish(&timer);
+    }
+}
+
+/// Process a local hardware timer IRQ without making scheduler decisions.
+///
+/// Architecture trap code must call its scheduler helper afterwards while it
+/// still owns the trapframe and can evaluate whether scheduling is legal.
+pub fn handle_local_timer_irq() {
+    let cpu_id = local_cpu_id();
+    let irq_count = TIMER_IRQ_COUNTS[cpu_id].fetch_add(1, Ordering::Relaxed) + 1;
+    if DEBUG_TIMER_STALL_LOGGING && (irq_count <= 3 || irq_count % TIMER_HEARTBEAT_IRQS == 0) {
+        crate::early_println!("[timer] irq heartbeat cpu={} count={}", cpu_id, irq_count);
+        crate::breadcrumb::sample_timer_stalls(cpu_id, timer_irq_count);
+    }
+    crate::breadcrumb::drop(crate::breadcrumb::TIMER_TICK, irq_count, 0);
+    crate::breadcrumb::drop(crate::breadcrumb::TIMER_SW_TIMERS, irq_count, 0);
+    drain_local_due_timers();
+    // A remaining queue head may already be due. Program it unchanged and let
+    // the architecture timer apply its safe minimum comparator delta.
+    reprogram_local_timer();
+}
+
+/// Get monotonic local time in nanoseconds.
+pub fn get_time_ns() -> u64 {
+    let cpu_id = local_cpu_id();
+    get_kernel_timer().get_time_ns(cpu_id)
+}
+
+/// Get monotonic local time in microseconds.
+pub fn get_time_us() -> u64 {
+    get_time_ns() / NANOSECONDS_PER_MICROSECOND
+}
+
+/// Return 10 ms compatibility units for legacy non-deadline accounting only.
+/// Software timer callers must use [`get_time_ns`] and absolute deadlines.
+pub fn get_tick() -> u64 {
+    get_time_ns() / SCHEDULER_ACCOUNTING_QUANTUM_NS
+}
+
+#[inline]
+pub const fn ms_to_ns(milliseconds: u64) -> u64 {
+    milliseconds.saturating_mul(NANOSECONDS_PER_MILLISECOND)
+}
+
+#[inline]
+pub const fn us_to_ns(microseconds: u64) -> u64 {
+    microseconds.saturating_mul(NANOSECONDS_PER_MICROSECOND)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use core::sync::atomic::{AtomicUsize, Ordering};
+
+    struct RecordingHandler {
+        calls: Arc<IrqSpinLock<alloc::vec::Vec<usize>>>,
+    }
+
+    impl TimerHandler for RecordingHandler {
+        fn on_timer_expired(self: Arc<Self>, context: usize) {
+            self.calls.lock().push(context);
+        }
+    }
+
+    fn queue_with_handler() -> (
+        TimerQueue,
+        Arc<dyn TimerHandler>,
+        Arc<IrqSpinLock<alloc::vec::Vec<usize>>>,
+    ) {
+        let calls = Arc::new(IrqSpinLock::new(alloc::vec::Vec::new()));
+        let handler: Arc<dyn TimerHandler> = Arc::new(RecordingHandler {
+            calls: calls.clone(),
+        });
+        (TimerQueue::new(), handler, calls)
+    }
+
+    fn run_due(queue: &mut TimerQueue, now_ns: u64) {
+        while let Some(timer) = queue.claim_due(now_ns) {
             if let Some(handler) = timer.handler.upgrade() {
                 handler.on_timer_expired(timer.context);
             }
+            queue.finish(&timer);
         }
     }
+
+    fn run_due_with_budget(queue: &mut TimerQueue, now_ns: u64, budget: usize) -> bool {
+        for _ in 0..budget {
+            let Some(timer) = queue.claim_due(now_ns) else {
+                return false;
+            };
+            if let Some(handler) = timer.handler.upgrade() {
+                handler.on_timer_expired(timer.context);
+            }
+            queue.finish(&timer);
+        }
+        queue.has_due(now_ns)
+    }
+
+    #[test_case]
+    fn lower_bound_clamps_only_near_deadlines() {
+        let now_ns = 1_000;
+        let minimum_deadline = now_ns + SOFTWARE_TIMER_MIN_INTERVAL_NS;
+
+        assert_eq!(clamp_software_timer_deadline(now_ns, 0), minimum_deadline);
+        assert_eq!(
+            clamp_software_timer_deadline(now_ns, minimum_deadline - 1),
+            minimum_deadline
+        );
+        assert_eq!(
+            clamp_software_timer_deadline(now_ns, minimum_deadline + 17),
+            minimum_deadline + 17
+        );
+    }
+
+    #[test_case]
+    fn lower_bound_saturates_at_the_end_of_time() {
+        assert_eq!(clamp_software_timer_deadline(u64::MAX - 1, 0), u64::MAX);
+    }
+
+    #[test_case]
+    fn precision_ranges_preserve_soft_deadlines_and_slack() {
+        assert_eq!(TimerPrecision::Exact.slack_ns(), 0);
+        assert_eq!(TimerPrecision::Normal.slack_ns(), ms_to_ns(1));
+        assert_eq!(TimerPrecision::Coarse.slack_ns(), ms_to_ns(10));
+        assert_eq!(
+            software_timer_deadlines(0, ms_to_ns(20), TimerPrecision::Exact),
+            (ms_to_ns(20), ms_to_ns(20))
+        );
+        assert_eq!(
+            software_timer_deadlines(0, ms_to_ns(20), TimerPrecision::Normal),
+            (ms_to_ns(20), ms_to_ns(21))
+        );
+        assert_eq!(
+            software_timer_deadlines(0, ms_to_ns(20), TimerPrecision::Coarse),
+            (ms_to_ns(20), ms_to_ns(30))
+        );
+    }
+
+    #[test_case]
+    fn precision_ranges_clamp_soft_deadlines_and_saturate_hard_deadlines() {
+        assert_eq!(
+            software_timer_deadlines(1_000, 0, TimerPrecision::Normal),
+            (
+                1_000 + SOFTWARE_TIMER_MIN_INTERVAL_NS,
+                1_000 + SOFTWARE_TIMER_MIN_INTERVAL_NS + ms_to_ns(1),
+            )
+        );
+        assert_eq!(
+            software_timer_deadlines(u64::MAX - 1, 0, TimerPrecision::Coarse),
+            (u64::MAX, u64::MAX)
+        );
+    }
+
+    #[test_case]
+    fn exact_precision_has_no_slack_but_keeps_the_common_minimum() {
+        let (soft_deadline_ns, hard_deadline_ns) =
+            software_timer_deadlines(1_000, 0, TimerPrecision::Exact);
+
+        assert_eq!(soft_deadline_ns, 1_000 + SOFTWARE_TIMER_MIN_INTERVAL_NS);
+        assert_eq!(hard_deadline_ns, soft_deadline_ns);
+    }
+
+    #[test_case]
+    fn periodic_deadline_coalesces_missed_intervals() {
+        assert_eq!(coalesce_periodic_deadline(100, 10, 145), (150, 4));
+        assert_eq!(coalesce_periodic_deadline(100, 10, 150), (160, 5));
+    }
+
+    #[test_case]
+    fn periodic_deadline_saturates_without_replaying_overflowed_intervals() {
+        assert_eq!(
+            coalesce_periodic_deadline(u64::MAX - 4, 10, u64::MAX - 1),
+            (u64::MAX, 0)
+        );
+    }
+
+    #[test_case]
+    fn absolute_deadlines_are_ordered_and_ties_are_fifo() {
+        let (mut queue, handler, calls) = queue_with_handler();
+        queue.add(1, 30, TimerPrecision::Exact, &handler, 3);
+        queue.add(2, 10, TimerPrecision::Exact, &handler, 1);
+        queue.add(3, 10, TimerPrecision::Exact, &handler, 2);
+
+        run_due(&mut queue, 30);
+
+        assert_eq!(*calls.lock(), alloc::vec![1, 2, 3]);
+    }
+
+    #[test_case]
+    fn hardware_head_uses_hard_deadline() {
+        let (mut queue, handler, _) = queue_with_handler();
+        queue.add(1, ms_to_ns(20), TimerPrecision::Coarse, &handler, 1);
+        queue.add(2, ms_to_ns(25), TimerPrecision::Exact, &handler, 2);
+
+        assert_eq!(queue.earliest_live_hard_deadline(), Some(ms_to_ns(25)));
+    }
+
+    #[test_case]
+    fn no_timer_fires_before_its_soft_deadline() {
+        let (mut queue, handler, calls) = queue_with_handler();
+        queue.add(1, 100, TimerPrecision::Coarse, &handler, 1);
+
+        run_due(&mut queue, 99);
+        assert!(calls.lock().is_empty());
+        run_due(&mut queue, 100);
+        assert_eq!(*calls.lock(), alloc::vec![1]);
+    }
+
+    #[test_case]
+    fn exact_wake_coalesces_soft_eligible_coarse_work_in_hard_order() {
+        let (mut queue, handler, calls) = queue_with_handler();
+        queue.add(1, 50, TimerPrecision::Exact, &handler, 1);
+        queue.add(2, 45, TimerPrecision::Coarse, &handler, 2);
+
+        run_due(&mut queue, 50);
+        assert_eq!(*calls.lock(), alloc::vec![1, 2]);
+    }
+
+    #[test_case]
+    fn hard_deadline_head_blocks_later_range_until_its_soft_deadline() {
+        let (mut queue, handler, calls) = queue_with_handler();
+        queue.add(1, ms_to_ns(49), TimerPrecision::Normal, &handler, 1);
+        queue.add(2, ms_to_ns(42), TimerPrecision::Coarse, &handler, 2);
+
+        run_due(&mut queue, ms_to_ns(45));
+        assert!(calls.lock().is_empty());
+        assert_eq!(queue.earliest_live_hard_deadline(), Some(ms_to_ns(50)));
+
+        run_due(&mut queue, ms_to_ns(49));
+        assert_eq!(*calls.lock(), alloc::vec![1, 2]);
+    }
+
+    #[test_case]
+    fn equal_hard_deadlines_are_fifo_across_precision_classes() {
+        let (mut queue, handler, calls) = queue_with_handler();
+        queue.add(1, ms_to_ns(1), TimerPrecision::Normal, &handler, 1);
+        queue.add(2, ms_to_ns(2), TimerPrecision::Exact, &handler, 2);
+
+        run_due(&mut queue, ms_to_ns(2));
+        assert_eq!(*calls.lock(), alloc::vec![1, 2]);
+    }
+
+    #[test_case]
+    fn due_callback_budget_defers_remaining_fifo_work() {
+        let (mut queue, handler, calls) = queue_with_handler();
+        queue.add(1, 10, TimerPrecision::Exact, &handler, 1);
+        queue.add(2, 10, TimerPrecision::Exact, &handler, 2);
+        queue.add(3, 10, TimerPrecision::Exact, &handler, 3);
+
+        assert!(run_due_with_budget(&mut queue, 10, 2));
+        assert_eq!(*calls.lock(), alloc::vec![1, 2]);
+        assert!(!run_due_with_budget(&mut queue, 10, 2));
+        assert_eq!(*calls.lock(), alloc::vec![1, 2, 3]);
+    }
+
+    #[test_case]
+    fn cancelled_non_head_timers_are_compacted_behind_a_live_anchor() {
+        let (mut queue, handler, _) = queue_with_handler();
+        queue.add(1, 10, TimerPrecision::Exact, &handler, 1);
+        for id in 2..=130 {
+            queue.add(id, 20 + id, TimerPrecision::Exact, &handler, id as usize);
+        }
+
+        for id in 2..=130 {
+            assert!(queue.cancel(id));
+        }
+
+        assert_eq!(queue.entries.len(), 1);
+        assert_eq!(queue.earliest_live_hard_deadline(), Some(10));
+        assert!(queue.heap.len() <= STALE_HEAP_NODE_COMPACT_THRESHOLD + 1);
+        assert_eq!(queue.stale_heap_nodes, 0);
+    }
+
+    #[test_case]
+    fn per_cpu_queues_are_isolated() {
+        let (mut cpu_zero, handler, calls) = queue_with_handler();
+        let mut cpu_one = TimerQueue::new();
+        cpu_zero.add(1, 10, TimerPrecision::Exact, &handler, 0);
+        cpu_one.add(2, 5, TimerPrecision::Exact, &handler, 1);
+
+        assert_eq!(cpu_zero.earliest_live_hard_deadline(), Some(10));
+        assert_eq!(cpu_one.earliest_live_hard_deadline(), Some(5));
+        run_due(&mut cpu_zero, 10);
+        assert_eq!(*calls.lock(), alloc::vec![0]);
+        assert_eq!(cpu_one.earliest_live_hard_deadline(), Some(5));
+    }
+
+    #[test_case]
+    fn cancellation_wins_while_pending_and_prevents_callback() {
+        let (mut queue, handler, calls) = queue_with_handler();
+        queue.add(7, 10, TimerPrecision::Exact, &handler, 7);
+
+        assert!(queue.cancel(7));
+        run_due(&mut queue, 10);
+
+        assert!(calls.lock().is_empty());
+        assert_eq!(queue.earliest_live_hard_deadline(), None);
+    }
+
+    #[test_case]
+    fn claim_wins_over_late_cancellation() {
+        let (mut queue, handler, calls) = queue_with_handler();
+        queue.add(7, 10, TimerPrecision::Exact, &handler, 7);
+        let timer = queue.claim_due(10).expect("timer must be due");
+
+        assert!(!queue.cancel(7));
+        if let Some(handler) = timer.handler.upgrade() {
+            handler.on_timer_expired(timer.context);
+        }
+        queue.finish(&timer);
+
+        assert_eq!(*calls.lock(), alloc::vec![7]);
+    }
+
+    struct SelfRearmingHandler {
+        queue: &'static IrqSpinLock<TimerQueue>,
+        weak_self: IrqSpinLock<Option<Weak<dyn TimerHandler>>>,
+        calls: AtomicUsize,
+    }
+
+    impl TimerHandler for SelfRearmingHandler {
+        fn on_timer_expired(self: Arc<Self>, _context: usize) {
+            if self.calls.fetch_add(1, Ordering::Relaxed) == 0 {
+                let handler = self
+                    .weak_self
+                    .lock()
+                    .as_ref()
+                    .and_then(Weak::upgrade)
+                    .expect("self-rearming handler must remain alive");
+                self.queue
+                    .lock()
+                    .add(2, 20, TimerPrecision::Exact, &handler, 0);
+            }
+        }
+    }
+
+    #[test_case]
+    fn callback_can_rearm_a_timer() {
+        let queue =
+            alloc::boxed::Box::leak(alloc::boxed::Box::new(IrqSpinLock::new(TimerQueue::new())));
+        let handler = Arc::new(SelfRearmingHandler {
+            queue,
+            weak_self: IrqSpinLock::new(None),
+            calls: AtomicUsize::new(0),
+        });
+        let handler_dyn: Arc<dyn TimerHandler> = handler.clone();
+        *handler.weak_self.lock() = Some(Arc::downgrade(&handler_dyn));
+        queue
+            .lock()
+            .add(1, 10, TimerPrecision::Exact, &handler_dyn, 0);
+
+        {
+            let mut queue_guard = queue.lock();
+            let timer = queue_guard.claim_due(10).expect("first timer must be due");
+            drop(queue_guard);
+            handler_dyn.clone().on_timer_expired(0);
+            queue.lock().finish(&timer);
+        }
+        let mut queue = queue.lock();
+        let timer = queue.claim_due(20).expect("rearmed timer must be due");
+        queue.finish(&timer);
+        assert_eq!(handler.calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[test_case]
+    fn empty_queue_selects_stop_policy() {
+        assert_eq!(local_timer_program(None), LocalTimerProgram::Stop);
+        assert_eq!(
+            local_timer_program(Some(123)),
+            LocalTimerProgram::Deadline(123)
+        );
+    }
+
+    #[test_case]
+    fn conversion_helpers_saturate() {
+        assert_eq!(ms_to_ns(1), 1_000_000);
+        assert_eq!(us_to_ns(1), 1_000);
+        assert_eq!(ms_to_ns(u64::MAX), u64::MAX);
+    }
 }
-
-// Tick interval in microseconds (e.g., 10_000 for 10ms tick)
-pub const TICK_INTERVAL_US: u64 = 10_000; // 10ms tick
-
-/// Convert milliseconds to ticks
-#[inline]
-pub fn ms_to_ticks(ms: u64) -> u64 {
-    (ms * 1_000) / TICK_INTERVAL_US
-}
-
-/// Convert microseconds to ticks
-#[inline]
-pub fn us_to_ticks(us: u64) -> u64 {
-    us / TICK_INTERVAL_US
-}
-
-/// Convert nanoseconds to ticks
-#[inline]
-pub fn ns_to_ticks(ns: u64) -> u64 {
-    (ns / 1_000) / TICK_INTERVAL_US
-}
-
-/// Convert ticks to milliseconds
-#[inline]
-pub fn ticks_to_ms(ticks: u64) -> u64 {
-    (ticks * TICK_INTERVAL_US) / 1_000
-}
-
-/// Convert ticks to microseconds
-#[inline]
-pub fn ticks_to_us(ticks: u64) -> u64 {
-    ticks * TICK_INTERVAL_US
-}
-
-/// Convert ticks to nanoseconds
-#[inline]
-pub fn ticks_to_ns(ticks: u64) -> u64 {
-    (ticks * TICK_INTERVAL_US) * 1_000
-}
-
-// static mut TEST_HANDLER: Option<Arc<dyn TimerHandler>> = None;
-
-// // TEST
-// fn register_test_timer() {
-//     use alloc::sync::Arc;
-
-//     struct TestHandler;
-//     impl TimerHandler for TestHandler {
-//         #[allow(static_mut_refs)]
-//         fn on_timer_expired(&self, context: usize) {
-//             crate::println!("[Software Timer] Test timer expired with context: {}", context);
-//             if let Some(handler) = unsafe { TEST_HANDLER.clone() } {
-//                 crate::println!("[Software Timer] Test handler is still available.");
-//                 let handler = handler.clone();
-//                 add_timer(get_tick() + 100, &handler, context);
-//             } else {
-//                 crate::println!("[Software Timer] Test handler is no longer available.");
-//             }
-//         }
-//     }
-
-//     let handler: Arc<dyn TimerHandler>  = Arc::new(TestHandler);
-//     let target_tick = get_tick() + 100; // 100 ticks from now
-//     let id = add_timer(target_tick, &handler, 42);
-//     crate::println!("Test timer registered with ID: {}, tick: {}", id, target_tick);
-//     unsafe {
-//         TEST_HANDLER = Some(handler);
-//     }
-// }
-
-// late_initcall!(register_test_timer);

@@ -193,20 +193,16 @@ impl UdpSocket {
         }
     }
 
-    fn timeout_ms_to_ticks(timeout_ms: u64) -> Option<u64> {
+    fn timeout_ms_to_ns(timeout_ms: u64) -> Option<u64> {
         if timeout_ms == 0 {
             None
         } else {
-            let us = timeout_ms.saturating_mul(1_000);
-            Some(
-                us.saturating_add(crate::timer::TICK_INTERVAL_US - 1)
-                    / crate::timer::TICK_INTERVAL_US,
-            )
+            Some(timeout_ms.saturating_mul(crate::timer::NANOSECONDS_PER_MILLISECOND))
         }
     }
 
-    fn read_timeout_ticks(&self) -> Option<u64> {
-        Self::timeout_ms_to_ticks(*self.read_timeout_ms.lock())
+    fn read_timeout_ns(&self) -> Option<u64> {
+        Self::timeout_ms_to_ns(*self.read_timeout_ms.lock())
     }
 
     fn set_read_timeout_ms(&self, timeout_ms: usize) -> Result<(), SocketError> {
@@ -318,7 +314,7 @@ impl SocketObject for UdpSocket {
                     self,
                     interest,
                     trapframe,
-                    self.read_timeout_ticks(),
+                    self.read_timeout_ns(),
                     0,
                 );
                 if matches!(
@@ -501,8 +497,8 @@ impl crate::object::capability::Selectable for UdpSocket {
         &self,
         interest: crate::object::capability::selectable::ReadyInterest,
         trapframe: &mut crate::arch::Trapframe,
-        timeout_ticks: Option<u64>,
-        _min_wait_ticks: u64,
+        timeout_ns: Option<u64>,
+        _min_wait_ns: u64,
     ) -> crate::object::capability::selectable::SelectWaitOutcome {
         let current = self.current_ready(interest);
         if (interest.read && current.read) || (interest.write && current.write) {
@@ -524,12 +520,12 @@ impl crate::object::capability::Selectable for UdpSocket {
                     })
                     .clone()
             };
-            waker.wait_with_timeout(task_id, trapframe, timeout_ticks)
+            waker.wait_with_timeout(task_id, trapframe, timeout_ns)
         } else {
             true
         };
 
-        if timeout_ticks.is_some() && !woke {
+        if timeout_ns.is_some() && !woke {
             let after = self.current_ready(interest);
             if (interest.read && !after.read) && (interest.write && !after.write) {
                 return crate::object::capability::selectable::SelectWaitOutcome::TimedOut;

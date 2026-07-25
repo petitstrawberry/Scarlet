@@ -7,7 +7,6 @@ use crate::arch::hv::csr::{self, read_htinst};
 use crate::arch::hv::guest_vcpu::GuestVcpu;
 use crate::arch::hv::vm::Riscv64VmObject;
 use crate::hypervisor::types::VmExit;
-use crate::timer::tick;
 
 const VSTIP_BIT: u64 = 1 << 6;
 const VS_INTERRUPT_BITS: u64 = (1 << 2) | (1 << 6) | (1 << 10);
@@ -48,7 +47,7 @@ pub fn check_sbi_timer_expired(vcpu: &mut GuestVcpu) -> bool {
     false
 }
 
-pub fn sbi_timer_timeout_ticks(vcpu: &GuestVcpu) -> Option<u64> {
+pub fn sbi_timer_timeout_ns(vcpu: &GuestVcpu) -> Option<u64> {
     let next = vcpu.sbi_timer_next_event();
     if next == u64::MAX {
         return None;
@@ -67,16 +66,21 @@ pub fn sbi_timer_timeout_ticks(vcpu: &GuestVcpu) -> Option<u64> {
         return Some(1);
     }
 
-    let delta_cycles = next - now;
-    let tick_cycles =
-        ((freq as u128) * (crate::timer::TICK_INTERVAL_US as u128)).div_ceil(1_000_000) as u64;
-    let tick_cycles = tick_cycles.max(1);
+    Some(cycles_to_timeout_ns(next - now, freq))
+}
 
-    Some(delta_cycles.div_ceil(tick_cycles).max(1))
+#[inline]
+fn cycles_to_timeout_ns(delta_cycles: u64, frequency_hz: u64) -> u64 {
+    ((delta_cycles as u128)
+        .saturating_mul(1_000_000_000)
+        .saturating_div(frequency_hz as u128))
+    .max(1)
+    .min(u64::MAX as u128) as u64
 }
 
 const CAUSE_ILLEGAL_INSTRUCTION: usize = 2;
 const CAUSE_BREAKPOINT: usize = 3;
+const SUPERVISOR_SOFTWARE_INTERRUPT: usize = 1;
 const SUPERVISOR_TIMER_INTERRUPT: usize = 5;
 const CAUSE_ECALL_FROM_VS: usize = 10;
 const CAUSE_INST_GUEST_PAGE_FAULT: usize = 20;
@@ -260,8 +264,24 @@ fn arch_guest_trap_handler_inner(
     let cause = (scause & 0x7fff_ffff_ffff_ffff) as usize;
 
     if is_interrupt {
+        if cause == SUPERVISOR_SOFTWARE_INTERRUPT {
+            // SAFETY: HS-mode owns SSIP after the guest trap exits. Clearing
+            // the pending bit acknowledges the host reschedule IPI before the
+            // VCPU run loop returns to host scheduling.
+            unsafe {
+                asm!("csrc sip, {0}", in(reg) 1usize << 1, options(nostack));
+            }
+            let cpu_id = crate::arch::get_cpu().get_cpuid();
+            crate::sched::scheduler::acknowledge_reschedule_ipi(cpu_id);
+            crate::sched::scheduler::debug_log_reschedule_ipi(cpu_id, false, false);
+            crate::sched::scheduler::defer_reschedule(cpu_id);
+            return Some(VmExit::HostInterrupt);
+        }
         if cause == SUPERVISOR_TIMER_INTERRUPT {
-            tick(trapframe);
+            crate::timer::handle_local_timer_irq();
+            let host_reschedule = crate::sched::scheduler::consume_guest_timer_reschedule(
+                crate::arch::get_cpu().get_cpuid(),
+            );
             check_sbi_timer_expired(vcpu);
             let c = TIMER_NONE_COUNT.fetch_add(1, Ordering::Relaxed);
             if c < 5 {
@@ -269,7 +289,7 @@ fn arch_guest_trap_handler_inner(
                 let vsatp = csr::read_vsatp();
                 crate::println!("[TIMER] #{} sepc={:#x} vsatp={:#x}", c, sepc, vsatp);
             }
-            return None;
+            return host_reschedule.then_some(VmExit::HostInterrupt);
         }
         return Some(VmExit::Unknown(scause));
     }
@@ -448,7 +468,7 @@ pub fn clear_guest_mode() {
 
 #[cfg(test)]
 mod tests {
-    use super::read_guest_halfword;
+    use super::{cycles_to_timeout_ns, read_guest_halfword};
 
     #[repr(C, align(4))]
     struct TwoByteAlignedInstruction {
@@ -475,5 +495,11 @@ mod tests {
         let odd_ptr = data.as_ptr() as usize + 1;
 
         assert_eq!(read_guest_halfword(odd_ptr), None);
+    }
+
+    #[test_case]
+    fn test_guest_timer_timeout_saturates() {
+        assert_eq!(cycles_to_timeout_ns(1, 1), 1_000_000_000);
+        assert_eq!(cycles_to_timeout_ns(u64::MAX, 1), u64::MAX);
     }
 }

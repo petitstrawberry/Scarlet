@@ -106,7 +106,7 @@ impl<T> Once<T> {
                 UNINIT,
                 INITIALIZING,
                 Ordering::Acquire,
-                Ordering::Relaxed,
+                Ordering::Acquire,
             ) {
                 Ok(_) => {
                     // SAFETY: We hold INITIALIZING; no other writer can
@@ -121,7 +121,7 @@ impl<T> Once<T> {
                     return unsafe { (*self.data.get()).assume_init_ref() };
                 }
                 Err(_) => {
-                    while self.state.load(Ordering::Relaxed) != COMPLETE {
+                    while self.state.load(Ordering::Acquire) != COMPLETE {
                         core::hint::spin_loop();
                     }
                 }

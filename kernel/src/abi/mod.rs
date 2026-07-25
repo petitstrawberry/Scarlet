@@ -88,6 +88,18 @@ pub trait AbiModule: Send + Sync + 'static {
     /// clearing TLS/robust-list pointers, or delivering exit-related signals.
     fn on_task_exit(&mut self, _task: &crate::task::Task) {}
 
+    /// Hook invoked by the current task before it terminates its thread group.
+    ///
+    /// # Arguments
+    ///
+    /// * `task` - The current task initiating process-wide teardown.
+    ///
+    /// # Returns
+    ///
+    /// This method does not return a value. The default implementation preserves
+    /// ABI modules that have no process-shared resources.
+    fn on_process_exit(&mut self, _task: &crate::task::Task) {}
+
     /// Get the task namespace for this ABI.
     ///
     /// This allows each ABI to have its own namespace for task IDs.

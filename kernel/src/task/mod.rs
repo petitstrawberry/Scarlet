@@ -44,7 +44,7 @@ use crate::{
         get_all_task_ids, get_task_by_id, remove_from_ready_queues, schedule, setup_task_execution,
         unmark_blocked,
     },
-    timer::{TimerHandler, add_timer, get_tick},
+    timer::{TimerHandler, add_timer, get_time_ns, ms_to_ns},
     vm::{
         addr::{phys_to_virt, virt_to_phys},
         manager::VirtualMemoryManager,
@@ -477,6 +477,11 @@ impl<T> TaskLocal<T> {
     }
 }
 
+struct SoftwareTimerRegistration {
+    handle: crate::timer::TimerHandle,
+    handler: Arc<dyn TimerHandler>,
+}
+
 pub struct Task {
     // === Read-only fields (set at creation) ===
     id: usize,
@@ -539,9 +544,8 @@ pub struct Task {
     ///
     /// Used to avoid demoting a task after only one low-utilization sample.
     sched_low_util_since_ns: AtomicU64,
-    /// Time slice for scheduling
-    pub time_slice: AtomicU32,
-    pub default_time_slice: AtomicU32,
+    /// Scheduler time-slice duration in absolute nanoseconds.
+    pub time_slice_duration_ns: AtomicU64,
     /// Cumulative CPU time charged to this task, in nanoseconds.
     pub cpu_time_ns: AtomicU64,
     /// Monotonic timestamp at which the current CPU run began.
@@ -592,8 +596,9 @@ pub struct Task {
     /// VfsManager is thread-safe and can be shared between tasks using Arc.
     /// All internal operations use `IrqRwSpinLock` for concurrent access protection.
     pub vfs: IrqRwSpinLock<Option<Arc<VfsManager>>>,
-    /// Software timer handlers
-    pub software_timers_handlers: IrqRwSpinLock<Vec<Arc<dyn TimerHandler>>>,
+    /// Pending task-owned timer callbacks and handles, cancelled together when
+    /// the task wakes or is dropped.
+    software_timers: IrqSpinLock<Vec<SoftwareTimerRegistration>>,
 
     // === IRQ spin lock fields (complex operations) ===
     /// VCPU state for context switching
@@ -800,8 +805,9 @@ impl Task {
             sched_last_migration_ns: AtomicU64::new(0),
             sched_migration_count: AtomicU64::new(0),
             sched_low_util_since_ns: AtomicU64::new(0),
-            time_slice: AtomicU32::new(DEFAULT_TIME_SLICE),
-            default_time_slice: AtomicU32::new(DEFAULT_TIME_SLICE),
+            time_slice_duration_ns: AtomicU64::new(
+                (DEFAULT_TIME_SLICE as u64).saturating_mul(ms_to_ns(10)),
+            ),
             cpu_time_ns: AtomicU64::new(0),
             cpu_run_start_ns: AtomicU64::new(0),
             stack_size: AtomicUsize::new(0),
@@ -818,7 +824,7 @@ impl Task {
             page_allocations: IrqRwSpinLock::new(Vec::new()),
             task_pages: IrqRwSpinLock::new(Vec::new()),
             vfs: IrqRwSpinLock::new(None),
-            software_timers_handlers: IrqRwSpinLock::new(Vec::new()),
+            software_timers: IrqSpinLock::new(Vec::new()),
             // IRQ spin lock fields
             vcpu: IrqSpinLock::new(Vcpu::new(match task_type {
                 TaskType::Kernel => crate::arch::Mode::Kernel,
@@ -865,10 +871,6 @@ impl Task {
 
         /* Set the task state to Ready */
         self.state.store(TaskState::Ready, Ordering::SeqCst);
-        self.time_slice.store(
-            self.default_time_slice.load(Ordering::SeqCst),
-            Ordering::SeqCst,
-        );
     }
 
     /// Return the scheduler core preference hint.
@@ -1742,8 +1744,11 @@ impl Task {
     }
 
     fn begin_exit(&self) {
-        let _children = self.children.write();
-        self.exiting.store(true, Ordering::Release);
+        {
+            let _children = self.children.write();
+            self.exiting.store(true, Ordering::Release);
+        }
+        self.cancel_software_timers();
     }
 
     fn try_adopt_child(&self, child: &Task, expected_parent_id: Option<usize>) -> bool {
@@ -2391,18 +2396,15 @@ impl Task {
         child.is_session_leader.store(false, Ordering::SeqCst);
 
         // Copy scheduling and event handling state
-        child
-            .time_slice
-            .store(self.time_slice.load(Ordering::SeqCst), Ordering::SeqCst);
-        child.default_time_slice.store(
-            self.default_time_slice.load(Ordering::SeqCst),
+        child.time_slice_duration_ns.store(
+            self.time_slice_duration_ns.load(Ordering::SeqCst),
             Ordering::SeqCst,
         );
         child.set_core_preference(self.core_preference());
         child
             .sched_util_min
             .store(self.sched_util_min(), Ordering::SeqCst);
-        // Note: software_timers_handlers, sleep_waker, event_queue are NOT copied
+        // Note: software_timers, sleep_waker, event_queue are NOT copied
         // as they are task-specific runtime state that should start fresh
 
         // Set the same entry point
@@ -2650,6 +2652,10 @@ impl Task {
         let leader_id = thread_group_id;
         let is_current = mytask().is_some_and(|task| task.get_id() == my_id);
 
+        if is_current {
+            self.with_default_abi_mut(|abi, task| abi.on_process_exit(task));
+        }
+
         // The process is exiting, so shared file tables must be closed even
         // while sibling Task objects still hold HandleTable Arc references.
         self.handle_table.close_all();
@@ -2757,43 +2763,73 @@ impl Task {
         }
     }
 
-    /// Sleep the current task for the specified number of ticks.
+    /// Sleep the current task for the specified duration.
     /// This blocks the task and registers a timer to wake it up.
     ///
     /// # Arguments
     /// * `trapframe` - The trapframe of the current CPU state
-    /// * `ticks` - The number of ticks to sleep
+    /// * `duration_ns` - Relative sleep duration in nanoseconds.
     ///
-    pub fn sleep(&self, trapframe: &mut Trapframe, ticks: u64) {
+    pub fn sleep(&self, trapframe: &mut Trapframe, duration_ns: u64) {
+        self.sleep_with_precision(trapframe, duration_ns, crate::timer::TimerPrecision::Normal);
+    }
+
+    /// Sleep the current task for the specified duration with explicit timer precision.
+    /// This blocks the task and registers a timer to wake it up.
+    ///
+    /// # Arguments
+    ///
+    /// * `trapframe` - The trapframe of the current CPU state.
+    /// * `duration_ns` - Relative sleep duration in nanoseconds.
+    /// * `precision` - Permitted delivery range for the wake timer.
+    ///
+    /// # Returns
+    ///
+    /// This function does not return a value.
+    pub fn sleep_with_precision(
+        &self,
+        trapframe: &mut Trapframe,
+        duration_ns: u64,
+        precision: crate::timer::TimerPrecision,
+    ) {
+        if duration_ns == 0 {
+            return;
+        }
+
         struct SleepWakerHandler {
             task_id: usize,
-            _start_tick: u64,
+            timer_handle: IrqSpinLock<Option<crate::timer::TimerHandle>>,
         }
 
         impl TimerHandler for SleepWakerHandler {
             fn on_timer_expired(self: Arc<Self>, _context: usize) {
                 if let Some(task) = get_task_by_id(self.task_id) {
-                    let handler: Arc<dyn TimerHandler> = self.clone();
-                    task.remove_software_timer_handler(&handler);
+                    if let Some(timer_handle) = self.timer_handle.lock().take() {
+                        task.finish_software_timer(timer_handle);
+                    }
                     // Memory barrier to ensure state change is visible
                     core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
-                    // crate::println!("Task {} woke up after {} ticks", self.task_id, get_tick() - self.start_tick);
                     task.sleep_waker.wake_all();
                 }
             }
         }
 
-        let wake_tick = get_tick() + ticks;
-        let handler: Arc<dyn crate::timer::TimerHandler> = Arc::new(SleepWakerHandler {
+        let wake_deadline_ns = get_time_ns().saturating_add(duration_ns);
+        let handler = Arc::new(SleepWakerHandler {
             task_id: self.id,
-            _start_tick: get_tick(),
+            timer_handle: IrqSpinLock::new(None),
         });
-        add_timer(wake_tick, &handler, 0);
+        let handler_ref: Arc<dyn crate::timer::TimerHandler> = handler.clone();
 
-        self.add_software_timer_handler(handler);
-        // Memory barrier to ensure timer handler registration is visible
-        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+        // Keep a strong reference visible to the callback before arming it. A
+        // wake that races the first wait is retained by Waker::pending_wakes.
+        let timer_handle = add_timer(wake_deadline_ns, precision, &handler_ref, 0);
+        *handler.timer_handle.lock() = Some(timer_handle);
+        self.register_software_timer(timer_handle, handler_ref.clone());
+        drop(handler_ref);
+        drop(handler);
         self.sleep_waker.wait(self.get_id(), trapframe);
+        self.finish_software_timer(timer_handle);
     }
 
     // VFS Helper Methods
@@ -2811,14 +2847,67 @@ impl Task {
         self.vfs.read().clone()
     }
 
-    pub fn add_software_timer_handler(&self, timer: Arc<dyn TimerHandler>) {
-        self.software_timers_handlers.write().push(timer);
+    /// Register an armed task-owned timer with its callback.
+    ///
+    /// # Arguments
+    ///
+    /// * `timer_handle` - Handle for the armed timer.
+    /// * `timer` - Strong callback reference retained until cleanup.
+    ///
+    /// # Returns
+    ///
+    /// This function does not return a value.
+    pub(crate) fn register_software_timer(
+        &self,
+        timer_handle: crate::timer::TimerHandle,
+        timer: Arc<dyn TimerHandler>,
+    ) {
+        self.software_timers.lock().push(SoftwareTimerRegistration {
+            handle: timer_handle,
+            handler: timer,
+        });
     }
 
-    pub fn remove_software_timer_handler(&self, timer: &Arc<dyn TimerHandler>) {
-        let mut handlers = self.software_timers_handlers.write();
-        if let Some(pos) = handlers.iter().position(|x| Arc::ptr_eq(x, timer)) {
-            handlers.remove(pos);
+    pub(crate) fn has_software_timer(&self, timer_handle: crate::timer::TimerHandle) -> bool {
+        self.software_timers
+            .lock()
+            .iter()
+            .any(|registration| registration.handle == timer_handle)
+    }
+
+    /// Complete cleanup for a task-owned timer from its callback or caller.
+    ///
+    /// # Arguments
+    ///
+    /// * `timer_handle` - Handle for the timer registration to remove.
+    ///
+    /// # Returns
+    ///
+    /// `true` when cancellation changed a pending timer to cancelled, which
+    /// means an event wake beat timer expiration. `false` means the timer had
+    /// already expired, was not registered, or could not be cancelled.
+    pub(crate) fn finish_software_timer(&self, timer_handle: crate::timer::TimerHandle) -> bool {
+        let registration = {
+            let mut timers = self.software_timers.lock();
+            let position = timers
+                .iter()
+                .position(|registration| registration.handle == timer_handle);
+            position.map(|position| timers.swap_remove(position))
+        };
+
+        let Some(registration) = registration else {
+            return false;
+        };
+        let cancelled = crate::timer::cancel_timer(registration.handle);
+        drop(registration.handler);
+        cancelled
+    }
+
+    fn cancel_software_timers(&self) {
+        let timers = core::mem::take(&mut *self.software_timers.lock());
+        for registration in timers {
+            let _ = crate::timer::cancel_timer(registration.handle);
+            drop(registration.handler);
         }
     }
 
@@ -3032,6 +3121,7 @@ impl WaitError {
 
 impl Drop for Task {
     fn drop(&mut self) {
+        self.cancel_software_timers();
         crate::vm::teardown_trampoline_for_task_kstack_window(self);
     }
 }
@@ -3221,10 +3311,17 @@ mod tests {
     };
     use crate::sched::scheduler::{add_task, finalize_zombie, get_task_by_id, reset};
     use crate::task::{CloneFlags, CloneFlagsDef, TaskState};
+    use crate::timer::{TimerHandle, TimerHandler};
     use crate::vm::addr::{phys_to_virt, virt_to_phys};
 
     struct MappingCountOwner {
         mappings: AtomicUsize,
+    }
+
+    struct TestTimerHandler;
+
+    impl TimerHandler for TestTimerHandler {
+        fn on_timer_expired(self: Arc<Self>, _context: usize) {}
     }
 
     impl MemoryMappingOps for MappingCountOwner {
@@ -3264,6 +3361,67 @@ mod tests {
         assert_eq!(Arc::strong_count(&task), strong_count);
         clear_mock_current_task();
         assert_eq!(Arc::strong_count(&task), 1);
+    }
+
+    #[test_case]
+    fn task_timer_cleanup_releases_retained_callback() {
+        let task = Task::new("TimerOwner".to_string(), 1, TaskType::Kernel);
+        let handler: Arc<dyn TimerHandler> = Arc::new(TestTimerHandler);
+        let weak_handler = Arc::downgrade(&handler);
+        let timer_handle = TimerHandle {
+            owner_cpu: crate::environment::MAX_NUM_CPUS,
+            id: 1,
+        };
+
+        task.register_software_timer(timer_handle, handler.clone());
+        drop(handler);
+        assert!(weak_handler.upgrade().is_some());
+        assert!(task.has_software_timer(timer_handle));
+
+        assert!(!task.finish_software_timer(timer_handle));
+        assert!(!task.has_software_timer(timer_handle));
+        assert!(weak_handler.upgrade().is_none());
+    }
+
+    #[test_case]
+    fn task_drop_releases_paired_timer_registration() {
+        let weak_handler = {
+            let task = Task::new("TimerDropOwner".to_string(), 1, TaskType::Kernel);
+            let handler: Arc<dyn TimerHandler> = Arc::new(TestTimerHandler);
+            let weak_handler = Arc::downgrade(&handler);
+            task.register_software_timer(
+                TimerHandle {
+                    owner_cpu: crate::environment::MAX_NUM_CPUS,
+                    id: 2,
+                },
+                handler.clone(),
+            );
+            drop(handler);
+            assert!(weak_handler.upgrade().is_some());
+            weak_handler
+        };
+
+        assert!(weak_handler.upgrade().is_none());
+    }
+
+    #[test_case]
+    fn begin_exit_cancels_task_owned_timer_registrations_idempotently() {
+        let task = Task::new("ExitTimerOwner".to_string(), 1, TaskType::Kernel);
+        let handler: Arc<dyn TimerHandler> = Arc::new(TestTimerHandler);
+        let weak_handler = Arc::downgrade(&handler);
+        let timer_handle = TimerHandle {
+            owner_cpu: crate::environment::MAX_NUM_CPUS,
+            id: 3,
+        };
+
+        task.register_software_timer(timer_handle, handler.clone());
+        drop(handler);
+        task.begin_exit();
+        assert!(!task.has_software_timer(timer_handle));
+        assert!(weak_handler.upgrade().is_none());
+
+        task.begin_exit();
+        assert!(!task.has_software_timer(timer_handle));
     }
 
     #[test_case]

@@ -607,7 +607,7 @@ pub fn sys_sysinfo(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     };
 
     let info = LinuxSysinfo {
-        uptime: crate::timer::ticks_to_ms(crate::timer::get_tick()) as isize / 1000,
+        uptime: (crate::timer::get_time_ns() / 1_000_000_000) as isize,
         loads: [0; 3],
         totalram: 0,
         freeram: 0,
