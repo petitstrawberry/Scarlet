@@ -415,8 +415,9 @@ fn print_table(samples: &[TaskSample]) {
     let widths = TableWidths::from_samples(samples);
 
     println!(
-        "{:>pid$} {:<user$} {:<priority$} {:>nice$} {:>weight$} {:<state$} {:<cpu$} {:>percent$} {:>util$} {:>util_min$} {:>required$} {:<preference$} {:>migrations$} {:>vruntime$} {:>deadline$} {:>time$} {:<command$} {:>tgid$}",
+        "{:>pid$} {:>tgid$} {:<user$} {:<priority$} {:>nice$} {:>weight$} {:<state$} {:<cpu$} {:>percent$} {:>util$} {:>util_min$} {:>required$} {:<preference$} {:>migrations$} {:>vruntime$} {:>deadline$} {:>time$} {:<command$}",
         "PID",
+        "TGID",
         "USER",
         "PR",
         "NI",
@@ -433,8 +434,8 @@ fn print_table(samples: &[TaskSample]) {
         "DEADLINE",
         "TIME+",
         "COMMAND",
-        "TGID",
         pid = widths.pid,
+        tgid = widths.tgid,
         user = widths.user,
         priority = widths.priority,
         nice = widths.nice,
@@ -451,7 +452,6 @@ fn print_table(samples: &[TaskSample]) {
         deadline = widths.deadline,
         time = widths.time,
         command = widths.command,
-        tgid = widths.tgid,
     );
 
     for sample in samples {
@@ -461,8 +461,9 @@ fn print_table(samples: &[TaskSample]) {
             TaskType::User => "U",
         };
         println!(
-            "{:>pid$} {:<user$} {:<priority$} {:>nice$} {:>weight$} {:<state$} {:<cpu$} {:>percent$} {:>util$} {:>util_min$} {:>required$} {:<preference$} {:>migrations$} {:>vruntime$} {:>deadline$} {:>time$} {:<command$} {:>tgid$}",
+            "{:>pid$} {:>tgid$} {:<user$} {:<priority$} {:>nice$} {:>weight$} {:<state$} {:<cpu$} {:>percent$} {:>util$} {:>util_min$} {:>required$} {:<preference$} {:>migrations$} {:>vruntime$} {:>deadline$} {:>time$} {:<command$}",
             task.pid,
+            task.tgid,
             user,
             "-",
             task.sched_nice,
@@ -479,8 +480,8 @@ fn print_table(samples: &[TaskSample]) {
             task.sched_deadline,
             TimeNs(task.cpu_time_ns),
             task.name,
-            task.tgid,
             pid = widths.pid,
+            tgid = widths.tgid,
             user = widths.user,
             priority = widths.priority,
             nice = widths.nice,
@@ -497,7 +498,6 @@ fn print_table(samples: &[TaskSample]) {
             deadline = widths.deadline,
             time = widths.time,
             command = widths.command,
-            tgid = widths.tgid,
         );
     }
 }
