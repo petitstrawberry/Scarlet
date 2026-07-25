@@ -17,6 +17,13 @@ use crate::timer::{
 
 /// Kernel timer object usable through ABI handle layers.
 pub trait TimerObject: StreamOps + Selectable {
+    /// Return the clock id associated with this timer.
+    ///
+    /// # Returns
+    ///
+    /// The ABI clock id supplied when the timer was created.
+    fn clock_id(&self) -> i32;
+
     /// Arm or disarm the timer.
     fn set_time(&self, first_ns: u64, interval_ns: u64, absolute: bool);
 
@@ -118,6 +125,10 @@ impl Drop for Timer {
 }
 
 impl TimerObject for Timer {
+    fn clock_id(&self) -> i32 {
+        self.clock_id
+    }
+
     fn set_time(&self, first_ns: u64, interval_ns: u64, absolute: bool) {
         let mut state = self.shared.state.lock();
         if let Some(entry_id) = state.timer_entry_id.take() {

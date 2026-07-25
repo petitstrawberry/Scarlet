@@ -15,7 +15,7 @@ use crate::{
     object::timer::Timer,
     sched::scheduler::wake_task,
     task::mytask,
-    time::{current_time, current_time_ns},
+    time::{current_time, current_time_ns, system_time_ns},
     timer::{
         TimerHandle, TimerHandler, add_timer, cancel_timer, coalesce_periodic_deadline, get_time_ns,
     },
@@ -274,6 +274,17 @@ fn is_supported_clock(clock_id: i32) -> bool {
     )
 }
 
+fn realtime_deadline_to_monotonic(
+    realtime_deadline_ns: u64,
+    realtime_now_ns: u64,
+    monotonic_now_ns: u64,
+) -> u64 {
+    monotonic_now_ns
+        .saturating_add(realtime_deadline_ns.saturating_sub(realtime_now_ns))
+        // TimerObject reserves zero as the disarmed value.
+        .max(1)
+}
+
 fn timespec_to_ns(ts: &TimeSpec) -> Result<u64, usize> {
     if ts.tv_sec < 0 || ts.tv_nsec < 0 || ts.tv_nsec >= NSEC_PER_SEC_I64 {
         return Err(errno::EINVAL);
@@ -417,7 +428,7 @@ pub fn sys_timerfd_settime(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usi
     };
     let new_spec = unsafe { *(new_value_paddr as *const ItimerSpec) };
 
-    let first_ns = match timespec_to_ns(&new_spec.it_value) {
+    let mut first_ns = match timespec_to_ns(&new_spec.it_value) {
         Ok(ns) => ns,
         Err(errno_val) => return errno::to_result(errno_val),
     };
@@ -441,7 +452,17 @@ pub fn sys_timerfd_settime(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usi
         }
     }
 
-    timer.set_time(first_ns, interval_ns, (flags & TIMER_ABSTIME) != 0);
+    let absolute = (flags & TIMER_ABSTIME) != 0;
+    if absolute
+        && first_ns != 0
+        && matches!(timer.clock_id(), CLOCK_REALTIME | CLOCK_REALTIME_COARSE)
+    {
+        let monotonic_now_ns = get_time_ns();
+        let realtime_now_ns = system_time_ns().unwrap_or(monotonic_now_ns);
+        first_ns = realtime_deadline_to_monotonic(first_ns, realtime_now_ns, monotonic_now_ns);
+    }
+
+    timer.set_time(first_ns, interval_ns, absolute);
     0
 }
 
@@ -901,5 +922,21 @@ mod tests {
         assert_eq!(CLOCK_MONOTONIC, 1);
         assert_eq!(CLOCK_PROCESS_CPUTIME_ID, 2);
         assert_eq!(CLOCK_THREAD_CPUTIME_ID, 3);
+    }
+
+    #[test_case]
+    fn realtime_deadline_preserves_remaining_wall_time() {
+        assert_eq!(realtime_deadline_to_monotonic(1_050, 1_000, 200), 250);
+    }
+
+    #[test_case]
+    fn past_realtime_deadline_maps_to_monotonic_now() {
+        assert_eq!(realtime_deadline_to_monotonic(999, 1_000, 200), 200);
+        assert_eq!(realtime_deadline_to_monotonic(999, 1_000, 0), 1);
+    }
+
+    #[test_case]
+    fn realtime_deadline_conversion_saturates() {
+        assert_eq!(realtime_deadline_to_monotonic(u64::MAX, 0, 1), u64::MAX);
     }
 }
