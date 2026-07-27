@@ -88,6 +88,70 @@ impl PartitionBlockDevice {
         let sector_count = request.sector_count as u64;
         sector < self.lba_count && sector_count <= self.lba_count - sector
     }
+
+    fn submit_request(&self, mut request: Box<BlockIORequest>) -> BlockIOResult {
+        if request.sector_count == 0 {
+            if matches!(request.request_type, BlockIORequestType::Read) {
+                request.buffer.clear();
+            }
+            return BlockIOResult {
+                request,
+                result: Ok(()),
+            };
+        }
+
+        if !self.request_is_in_range(&request) {
+            return BlockIOResult {
+                request,
+                result: Err("Partition request out of range"),
+            };
+        }
+
+        let parent_sector = match self.first_lba.checked_add(request.sector as u64) {
+            Some(sector) if sector <= usize::MAX as u64 => sector as usize,
+            _ => {
+                return BlockIOResult {
+                    request,
+                    result: Err("Partition parent sector overflow"),
+                };
+            }
+        };
+
+        let parent_request = Box::new(BlockIORequest {
+            request_type: request.request_type,
+            sector: parent_sector,
+            sector_count: request.sector_count,
+            head: request.head,
+            cylinder: request.cylinder,
+            buffer: request.buffer.clone(),
+        });
+        let mut parent_results = self
+            .parent
+            .submit_requests(vec![parent_request])
+            .into_iter();
+        let Some(parent_result) = parent_results.next() else {
+            return BlockIOResult {
+                request,
+                result: Err("No result from parent block device"),
+            };
+        };
+        if parent_results.next().is_some() {
+            return BlockIOResult {
+                request,
+                result: Err("Unexpected result count from parent block device"),
+            };
+        }
+
+        let BlockIOResult {
+            request: parent_request,
+            result,
+        } = parent_result;
+        if result.is_ok() && matches!(request.request_type, BlockIORequestType::Read) {
+            request.buffer = parent_request.buffer;
+        }
+
+        BlockIOResult { request, result }
+    }
 }
 
 impl Device for PartitionBlockDevice {
@@ -140,70 +204,14 @@ impl BlockDevice for PartitionBlockDevice {
             core::mem::take(&mut *queue)
         };
 
-        let mut results = Vec::new();
-        for mut request in requests {
-            if request.sector_count == 0 {
-                if matches!(request.request_type, BlockIORequestType::Read) {
-                    request.buffer.clear();
-                }
-                results.push(BlockIOResult {
-                    request,
-                    result: Ok(()),
-                });
-                continue;
-            }
+        self.submit_requests(requests)
+    }
 
-            if !self.request_is_in_range(&request) {
-                results.push(BlockIOResult {
-                    request,
-                    result: Err("Partition request out of range"),
-                });
-                continue;
-            }
-
-            let parent_sector = match self.first_lba.checked_add(request.sector as u64) {
-                Some(sector) if sector <= usize::MAX as u64 => sector as usize,
-                _ => {
-                    results.push(BlockIOResult {
-                        request,
-                        result: Err("Partition parent sector overflow"),
-                    });
-                    continue;
-                }
-            };
-
-            let parent_request = Box::new(BlockIORequest {
-                request_type: request.request_type,
-                sector: parent_sector,
-                sector_count: request.sector_count,
-                head: request.head,
-                cylinder: request.cylinder,
-                buffer: request.buffer.clone(),
-            });
-
-            self.parent.enqueue_request(parent_request);
-            let mut parent_results = self.parent.process_requests();
-            if parent_results.is_empty() {
-                results.push(BlockIOResult {
-                    request,
-                    result: Err("No result from parent block device"),
-                });
-                continue;
-            }
-
-            let BlockIOResult {
-                request: parent_request,
-                result,
-            } = parent_results.remove(0);
-            let parent_request = *parent_request;
-            if result.is_ok() && matches!(request.request_type, BlockIORequestType::Read) {
-                request.buffer = parent_request.buffer;
-            }
-
-            results.push(BlockIOResult { request, result });
-        }
-
-        results
+    fn submit_requests(&self, requests: Vec<Box<BlockIORequest>>) -> Vec<BlockIOResult> {
+        requests
+            .into_iter()
+            .map(|request| self.submit_request(request))
+            .collect()
     }
 }
 
@@ -804,5 +812,35 @@ mod tests {
 
         let parent_sector = read_sector(&device, 34);
         assert_eq!(parent_sector, vec![0xab; 512]);
+    }
+
+    #[test_case]
+    fn test_partition_submission_preserves_parent_queue() {
+        let device = Arc::new(MockBlockDevice::new("test_disk", 512, TEST_SECTORS));
+        let partition =
+            PartitionBlockDevice::new("vblk0p1".to_string(), device.clone(), 34, 16, 512);
+        device.enqueue_request(Box::new(BlockIORequest {
+            request_type: BlockIORequestType::Read,
+            sector: 7,
+            sector_count: 1,
+            head: 0,
+            cylinder: 0,
+            buffer: vec![0; 512],
+        }));
+
+        let results = partition.submit_requests(vec![Box::new(BlockIORequest {
+            request_type: BlockIORequestType::Read,
+            sector: 0,
+            sector_count: 1,
+            head: 0,
+            cylinder: 0,
+            buffer: vec![0; 512],
+        })]);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].result, Ok(()));
+
+        let queued = device.process_requests();
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].request.sector, 7);
     }
 }

@@ -314,7 +314,17 @@ impl VirtualMemoryManager {
     /// A result indicating success or failure.
     ///
     pub fn add_memory_map(&self, map: VirtualMemoryMap) -> Result<(), &'static str> {
-        // Check if the address and size is aligned
+        Self::validate_memory_map(&map)?;
+
+        let mut g = self.inner.write();
+        self.record_inner_writer(WRITE_SITE_ADD_MAP);
+        Self::insert_memory_map(&mut g.memmap, map)?;
+
+        g.last_search_cache = None;
+        Ok(())
+    }
+
+    fn validate_memory_map(map: &VirtualMemoryMap) -> Result<(), &'static str> {
         if map.vmarea.start % PAGE_SIZE != 0 || map.vmarea.size() % PAGE_SIZE != 0 {
             return Err("Address or size is not aligned to PAGE_SIZE");
         }
@@ -323,25 +333,25 @@ impl VirtualMemoryManager {
         {
             return Err("pmarea is not aligned to PAGE_SIZE");
         }
-        Self::validate_mapping_direct_map_alias(&map)?;
+        Self::validate_mapping_direct_map_alias(map)
+    }
 
-        let mut g = self.inner.write();
-        self.record_inner_writer(WRITE_SITE_ADD_MAP);
-        // 1. prev adjacency check
-        if let Some((_, prev_map)) = g.memmap.range(..map.vmarea.start).next_back() {
+    fn insert_memory_map(
+        maps: &mut BTreeMap<usize, VirtualMemoryMap>,
+        map: VirtualMemoryMap,
+    ) -> Result<(), &'static str> {
+        if let Some((_, prev_map)) = maps.range(..map.vmarea.start).next_back() {
             if prev_map.vmarea.end > map.vmarea.start {
                 return Err("Memory mapping overlaps with a preceding map");
             }
         }
-        // 2. next adjacency check
-        if let Some((_, next_map)) = g.memmap.range(map.vmarea.start..).next() {
+        if let Some((_, next_map)) = maps.range(map.vmarea.start..).next() {
             if next_map.vmarea.start < map.vmarea.end {
                 return Err("Memory mapping overlaps with a succeeding map");
             }
         }
 
-        g.last_search_cache = None;
-        g.memmap.insert(map.vmarea.start, map);
+        maps.insert(map.vmarea.start, map);
         Ok(())
     }
 
@@ -658,7 +668,7 @@ impl VirtualMemoryManager {
         memmap.into_values()
     }
 
-    /// Restores the memory maps from a given iterator.
+    /// Replaces the current memory maps with a validated restored set.
     ///
     /// # Arguments
     /// * `maps` - The iterator of memory maps to restore
@@ -670,11 +680,21 @@ impl VirtualMemoryManager {
     where
         I: IntoIterator<Item = VirtualMemoryMap>,
     {
+        let mut restored_maps = BTreeMap::new();
         for map in maps {
-            if let Err(e) = self.add_memory_map(map) {
-                return Err(e);
-            }
+            Self::validate_memory_map(&map)?;
+            Self::insert_memory_map(&mut restored_maps, map)?;
         }
+
+        let replaced_maps = {
+            let mut g = self.inner.write();
+            self.record_inner_writer(WRITE_SITE_REMOVE_ALL);
+            g.last_search_cache = None;
+            core::mem::replace(&mut g.memmap, restored_maps)
+        };
+
+        self.unmap_all_from_mmu();
+        drop(replaced_maps);
         Ok(())
     }
 
@@ -1745,6 +1765,33 @@ mod tests {
             vmm.get_memory_map_by_addr(0x1000).unwrap().vmarea.start,
             0x1000
         );
+    }
+
+    #[test_case]
+    fn restore_memory_maps_replaces_partial_exec_state_transactionally() {
+        let vmm = VirtualMemoryManager::new();
+        let vmarea = MemoryArea::new(0x2000, 0x2fff);
+        let partial_map =
+            VirtualMemoryMap::new(MemoryArea::new(0x3000, 0x3fff), vmarea, 0, false, None);
+        vmm.add_memory_map(partial_map).unwrap();
+
+        let original_map =
+            VirtualMemoryMap::new(MemoryArea::new(0x1000, 0x1fff), vmarea, 0, false, None);
+        vmm.restore_memory_maps([original_map]).unwrap();
+
+        assert_eq!(vmm.memmap_len(), 1);
+        assert_eq!(vmm.search_memory_map(0x2000).unwrap().pmarea.start, 0x1000);
+
+        let invalid_map = VirtualMemoryMap::new(
+            MemoryArea::new(0x5000, 0x5fff),
+            MemoryArea::new(0x2800, 0x37ff),
+            0,
+            false,
+            None,
+        );
+        assert!(vmm.restore_memory_maps([invalid_map]).is_err());
+        assert_eq!(vmm.memmap_len(), 1);
+        assert_eq!(vmm.search_memory_map(0x2000).unwrap().pmarea.start, 0x1000);
     }
 
     #[test_case]

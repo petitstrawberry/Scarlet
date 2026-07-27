@@ -4176,7 +4176,11 @@ impl BlockDevice for UsbMassStorageBlockDevice {
             requests
         };
 
-        let mut results = Vec::new();
+        self.submit_requests(requests)
+    }
+
+    fn submit_requests(&self, requests: Vec<Box<BlockIORequest>>) -> Vec<BlockIOResult> {
+        let mut results = Vec::with_capacity(requests.len());
         for mut request in requests {
             let result = self.process_request(&mut request);
             results.push(BlockIOResult { request, result });

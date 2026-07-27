@@ -4,8 +4,9 @@
 //! It does NOT contain ABI-specific knowledge - each ABI module handles
 //! its own binary format and conversion logic.
 
-use crate::arch::Trapframe;
-use crate::mem::page::ContiguousPages;
+use crate::arch::{Trapframe, vcpu::Vcpu};
+use crate::fs::VfsManager;
+use crate::mem::page::{ContiguousPages, TaskPages};
 use crate::vm::vmem::VirtualMemoryMap;
 use crate::{fs::manager::get_global_vfs_manager, task::Task};
 use alloc::{
@@ -21,14 +22,17 @@ use core::sync::atomic::Ordering;
 ///
 /// This structure contains a complete backup of task state that can be
 /// restored if execve fails. Includes memory state, metadata, and trapframe.
-#[derive(Debug)]
 struct TaskStateBackup {
     page_allocations: Vec<ContiguousPages>,
+    task_pages: Vec<TaskPages>,
     vm_mapping: Vec<VirtualMemoryMap>,
     text_size: usize,
     data_size: usize,
     stack_size: usize,
+    brk: usize,
     name: String,
+    vcpu: Vcpu,
+    vfs: Option<Arc<VfsManager>>,
     trapframe: Trapframe,
 }
 
@@ -41,29 +45,49 @@ impl TaskStateBackup {
             let mut pages_guard = task.page_allocations.write();
             core::mem::take(&mut *pages_guard)
         };
+        let backup_task_pages = {
+            let mut pages_guard = task.task_pages.write();
+            core::mem::take(&mut *pages_guard)
+        };
 
         let backup_vm_mapping = task.vm_manager.remove_all_memory_maps().collect();
 
         Self {
             page_allocations: backup_pages,
+            task_pages: backup_task_pages,
             vm_mapping: backup_vm_mapping,
             text_size: task.text_size.load(Ordering::SeqCst),
             data_size: task.data_size.load(Ordering::SeqCst),
             stack_size: task.stack_size.load(Ordering::SeqCst),
+            brk: task.brk.load(Ordering::SeqCst),
             name: task.name.read().clone(),
+            vcpu: task.vcpu.lock().clone(),
+            vfs: task.vfs.read().clone(),
             trapframe: trapframe.clone(),
         }
     }
 
     fn restore_to_task(self, task: &Task, trapframe: &mut Trapframe) -> Result<(), &'static str> {
-        *task.page_allocations.write() = self.page_allocations;
-
         task.vm_manager.restore_memory_maps(self.vm_mapping)?;
+
+        let partial_page_allocations = {
+            let mut pages = task.page_allocations.write();
+            core::mem::replace(&mut *pages, self.page_allocations)
+        };
+        let partial_task_pages = {
+            let mut pages = task.task_pages.write();
+            core::mem::replace(&mut *pages, self.task_pages)
+        };
+        drop(partial_page_allocations);
+        drop(partial_task_pages);
 
         task.text_size.store(self.text_size, Ordering::SeqCst);
         task.data_size.store(self.data_size, Ordering::SeqCst);
         task.stack_size.store(self.stack_size, Ordering::SeqCst);
+        task.brk.store(self.brk, Ordering::SeqCst);
         *task.name.write() = self.name;
+        *task.vcpu.lock() = self.vcpu;
+        *task.vfs.write() = self.vfs;
 
         *trapframe = self.trapframe;
 
@@ -274,7 +298,15 @@ impl TransparentExecutor {
         abi.execute_binary(&file_object, argv, envp, task, trapframe)
             .map_err(|e| ExecutorError::ExecutionFailed(e.to_string()))?;
 
-        // Step 7: Update task's ABI if switch occurred
+        // Step 7: Convert inherited handles only after the new image is loaded.
+        // Some ABIs destructively rebuild handle state, which must not happen
+        // before an ELF loading failure can return to the previous image.
+        if rebuild_required {
+            abi.initialize_from_existing_handles(task)
+                .map_err(|e| ExecutorError::ExecutionFailed(e.to_string()))?;
+        }
+
+        // Step 8: Update task's ABI if switch occurred
         if abi_switch_required {
             // SAFETY: This is the currently executing task on this hart
             unsafe {
@@ -401,7 +433,7 @@ impl TransparentExecutor {
 
     /// Setup complete task environment for target ABI
     ///
-    /// This method ensures the task has proper VFS, working directory, and handle conversion
+    /// This method ensures the task has a proper VFS and working directory
     /// for the target ABI. The TransparentExecutor is responsible for:
     /// 1. Providing clean VFS and base VFS references
     /// 2. Verifying that ABI directories exist in base VFS (user should prepare them)
@@ -473,10 +505,6 @@ impl TransparentExecutor {
             let _ = vfs.set_cwd_by_path(abi.get_default_cwd());
         }
 
-        // Let ABI module handle conversion from previous ABI (handles, etc.)
-        abi.initialize_from_existing_handles(task)
-            .map_err(|e| ExecutorError::ExecutionFailed(e.to_string()))?;
-
         Ok(())
     }
 
@@ -487,5 +515,100 @@ impl TransparentExecutor {
     fn create_clean_vfs() -> Result<Arc<crate::fs::VfsManager>, &'static str> {
         let vfs = crate::fs::VfsManager::new();
         Ok(Arc::new(vfs))
+    }
+}
+
+#[cfg(test)]
+mod rollback_tests {
+    use core::sync::atomic::Ordering;
+
+    use super::*;
+    use crate::environment::PAGE_SIZE;
+    use crate::task::new_user_task;
+    use crate::vm::vmem::MemoryArea;
+
+    fn memory_map(paddr: usize) -> VirtualMemoryMap {
+        VirtualMemoryMap::new(
+            MemoryArea::new(paddr, paddr + PAGE_SIZE - 1),
+            MemoryArea::new(0x20_0000, 0x20_0000 + PAGE_SIZE - 1),
+            0,
+            false,
+            None,
+        )
+    }
+
+    #[test_case]
+    fn rollback_replaces_partial_exec_memory_and_context() {
+        let task = new_user_task("exec-original".to_string(), 0);
+        let original_page = ContiguousPages::new(1).expect("original page allocation failed");
+        let original_paddr = original_page.as_paddr();
+        task.page_allocations.write().push(original_page);
+        let original_task_pages = TaskPages::new(1).expect("original task pages allocation failed");
+        let original_task_page_paddr = original_task_pages.page_paddr(0).unwrap();
+        task.task_pages.write().push(original_task_pages);
+        task.vm_manager
+            .add_memory_map(memory_map(original_paddr))
+            .unwrap();
+        task.text_size.store(PAGE_SIZE, Ordering::SeqCst);
+        task.data_size.store(PAGE_SIZE * 2, Ordering::SeqCst);
+        task.stack_size.store(PAGE_SIZE * 3, Ordering::SeqCst);
+        task.brk.store(0x40_0000, Ordering::SeqCst);
+        task.vcpu.lock().set_pc(0x20_0100);
+        let original_vfs = Arc::new(VfsManager::new());
+        *task.vfs.write() = Some(Arc::clone(&original_vfs));
+        let mut trapframe = Trapframe::new();
+        trapframe.set_pc(0x20_0200);
+
+        let backup = TaskStateBackup::create_backup(&task, &trapframe);
+
+        let partial_page = ContiguousPages::new(1).expect("partial page allocation failed");
+        let partial_paddr = partial_page.as_paddr();
+        task.page_allocations.write().push(partial_page);
+        task.task_pages
+            .write()
+            .push(TaskPages::new(1).expect("partial task pages allocation failed"));
+        task.vm_manager
+            .add_memory_map(memory_map(partial_paddr))
+            .unwrap();
+        task.text_size.store(1, Ordering::SeqCst);
+        task.data_size.store(2, Ordering::SeqCst);
+        task.stack_size.store(3, Ordering::SeqCst);
+        task.brk.store(4, Ordering::SeqCst);
+        *task.name.write() = "exec-partial".to_string();
+        task.vcpu.lock().set_pc(0xdead);
+        *task.vfs.write() = None;
+        trapframe.set_pc(0xbeef);
+
+        backup.restore_to_task(&task, &mut trapframe).unwrap();
+
+        assert_eq!(task.vm_manager.memmap_len(), 1);
+        assert_eq!(
+            task.vm_manager
+                .search_memory_map(0x20_0000)
+                .unwrap()
+                .pmarea
+                .start,
+            original_paddr
+        );
+        assert_eq!(task.page_allocations.read().len(), 1);
+        assert_eq!(task.page_allocations.read()[0].as_paddr(), original_paddr);
+        assert_eq!(task.task_pages.read().len(), 1);
+        assert_eq!(
+            task.task_pages.read()[0].page_paddr(0),
+            Some(original_task_page_paddr)
+        );
+        assert_eq!(task.text_size.load(Ordering::SeqCst), PAGE_SIZE);
+        assert_eq!(task.data_size.load(Ordering::SeqCst), PAGE_SIZE * 2);
+        assert_eq!(task.stack_size.load(Ordering::SeqCst), PAGE_SIZE * 3);
+        assert_eq!(task.brk.load(Ordering::SeqCst), 0x40_0000);
+        assert_eq!(*task.name.read(), "exec-original");
+        assert_eq!(task.vcpu.lock().get_pc(), 0x20_0100);
+        assert!(
+            task.vfs
+                .read()
+                .as_ref()
+                .is_some_and(|vfs| Arc::ptr_eq(vfs, &original_vfs))
+        );
+        assert_eq!(trapframe.get_current_pc(), 0x20_0200);
     }
 }

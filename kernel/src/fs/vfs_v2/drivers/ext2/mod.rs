@@ -882,8 +882,7 @@ impl Ext2FileSystem {
             buffer: vec![0u8; self.block_size as usize],
         });
 
-        self.block_device.enqueue_request(request);
-        let results = self.block_device.process_requests();
+        let results = self.block_device.submit_requests(vec![request]);
 
         let bgd_data = if let Some(result) = results.first() {
             match &result.result {
@@ -931,8 +930,7 @@ impl Ext2FileSystem {
             buffer: vec![0u8; self.block_size as usize],
         });
 
-        self.block_device.enqueue_request(request);
-        let results = self.block_device.process_requests();
+        let results = self.block_device.submit_requests(vec![request]);
 
         let inode_data = if let Some(result) = results.first() {
             match &result.result {
@@ -4270,6 +4268,7 @@ impl Ext2FileSystem {
 
             // Store information about each request range for later processing
             let mut request_ranges = Vec::new();
+            let mut requests = Vec::new();
 
             let mut i = 0;
             while i < missing_blocks.len() {
@@ -4299,13 +4298,12 @@ impl Ext2FileSystem {
                 // Store range info for later processing
                 request_ranges.push((start_block, count));
 
-                // Enqueue the request but don't process yet
-                self.block_device.enqueue_request(request);
+                requests.push(request);
                 i += count; // Move to the next non-consecutive block
             }
 
-            // Process all enqueued requests in one batch
-            let read_results = self.block_device.process_requests();
+            // Submit only this caller's requests as one isolated batch.
+            let read_results = self.block_device.submit_requests(requests);
 
             // Validate that we got the expected number of results
             if read_results.len() != request_ranges.len() {
@@ -4433,6 +4431,7 @@ impl Ext2FileSystem {
 
         // Store information about each request range for later processing
         let mut request_ranges = Vec::new();
+        let mut requests = Vec::new();
 
         let mut i = 0;
         while i < sorted_blocks.len() {
@@ -4463,8 +4462,7 @@ impl Ext2FileSystem {
             // Store range info for later processing
             request_ranges.push((start_block, count));
 
-            // Enqueue the request but don't process yet
-            self.block_device.enqueue_request(request);
+            requests.push(request);
             i += count; // Move to the next non-consecutive block
         }
 
@@ -4474,7 +4472,7 @@ impl Ext2FileSystem {
             "[ext2] write_blocks_cached: Processing {} requests in batch",
             request_ranges.len()
         );
-        let write_results = self.block_device.process_requests();
+        let write_results = self.block_device.submit_requests(requests);
 
         // Validate that we got the expected number of results
         if write_results.len() != request_ranges.len() {

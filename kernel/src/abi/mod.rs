@@ -171,7 +171,20 @@ pub trait AbiModule: Send + Sync + 'static {
         None
     }
 
-    /// Handle conversion when switching ABIs
+    /// Convert inherited handles when switching ABIs.
+    ///
+    /// The executor calls this after the new binary image has loaded but before
+    /// installing this ABI as the task's default ABI. Implementations that
+    /// mutate task state must leave it unchanged when returning an error.
+    ///
+    /// # Arguments
+    ///
+    /// * `task` - Task whose inherited handles should be converted.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` when handle conversion succeeds, or an error when the new ABI
+    /// cannot initialize its inherited handle state.
     fn initialize_from_existing_handles(
         &mut self,
         _task: &crate::task::Task,

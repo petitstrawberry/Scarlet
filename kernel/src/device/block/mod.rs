@@ -55,6 +55,21 @@ pub trait BlockDevice: Device {
     ///
     /// A vector of results for all processed requests
     fn process_requests(&self) -> Vec<BlockIOResult>;
+
+    /// Submit and process a caller-owned batch of block I/O requests
+    ///
+    /// Unlike the legacy enqueue/process pair, this method does not consume
+    /// requests submitted by other callers. Results are returned in the same
+    /// order as the supplied requests.
+    ///
+    /// # Arguments
+    ///
+    /// * `requests` - Requests owned by this submission.
+    ///
+    /// # Returns
+    ///
+    /// One result for each supplied request, in input order.
+    fn submit_requests(&self, requests: Vec<Box<BlockIORequest>>) -> Vec<BlockIOResult>;
 }
 
 /// A generic implementation of a block device
@@ -179,14 +194,17 @@ impl BlockDevice for GenericBlockDevice {
     /// # Returns
     /// Vector of `BlockIOResult` containing completed requests and their results
     fn process_requests(&self) -> Vec<BlockIOResult> {
-        let mut results = Vec::new();
-
         // Extract all requests at once to minimize lock time
         let requests = {
             let mut queue = self.request_queue.lock();
             core::mem::take(&mut *queue)
         }; // Lock is automatically released here
 
+        self.submit_requests(requests)
+    }
+
+    fn submit_requests(&self, requests: Vec<Box<BlockIORequest>>) -> Vec<BlockIOResult> {
+        let mut results = Vec::with_capacity(requests.len());
         // Process all requests without holding any locks
         for mut request in requests {
             // Process the request using the function pointer

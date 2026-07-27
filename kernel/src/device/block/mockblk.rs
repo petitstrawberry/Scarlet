@@ -92,14 +92,17 @@ impl BlockDevice for MockBlockDevice {
     /// # Returns
     /// Vector of `BlockIOResult` containing completed requests and their results
     fn process_requests(&self) -> Vec<BlockIOResult> {
-        let mut results = Vec::new();
-
         // Extract all requests at once to minimize lock time
         let requests = {
             let mut queue = self.request_queue.lock();
             core::mem::replace(&mut *queue, Vec::new())
         }; // request_queue lock is automatically released here
 
+        self.submit_requests(requests)
+    }
+
+    fn submit_requests(&self, requests: Vec<Box<BlockIORequest>>) -> Vec<BlockIOResult> {
+        let mut results = Vec::with_capacity(requests.len());
         // Process all requests without holding the request_queue lock
         for mut request in requests {
             let result = match request.request_type {

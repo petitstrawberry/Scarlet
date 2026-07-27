@@ -855,6 +855,11 @@ impl BlockDevice for VirtioBlockDevice {
         }
         drop(queue); // Release the lock early
 
+        self.submit_requests(requests)
+    }
+
+    fn submit_requests(&self, mut requests: Vec<Box<BlockIORequest>>) -> Vec<BlockIOResult> {
+        crate::profile_scope!("virtio_blk::submit_requests");
         if requests.is_empty() {
             return Vec::new();
         }
