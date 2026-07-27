@@ -24,17 +24,232 @@ use crate::fs::MAX_PATH_LENGTH;
 use crate::library::std::string::{
     parse_c_string_from_userspace, parse_string_array_from_userspace,
 };
-use crate::library::std::usercopy::copy_to_user;
+use crate::library::std::usercopy::{copy_from_user, copy_to_user};
 use crate::sched::scheduler::{
-    cleanup_zombie, cpu_usage_snapshot, enqueue_task, get_all_task_ids, get_task_by_id,
-    remove_task_from_queues, schedule,
+    SchedulerAffinity, SchedulerAttr, SchedulerControlResult, SchedulerPolicy, cleanup_zombie,
+    cpu_usage_snapshot, current_task_deadline, current_task_scheduler_attr,
+    current_task_scheduler_state, disable_current_task_deadline, enable_current_task_deadline,
+    enqueue_task, get_all_task_ids, get_task_by_id, remove_task_from_queues, schedule,
+    set_current_task_scheduler_affinity, set_current_task_scheduler_attr,
+    update_current_task_scheduler_fair_fields,
 };
 use crate::task::{
-    CloneFlags, CloneFlagsDef, SCHED_UTIL_SCALE, TaskState, WaitError, get_parent_waitpid_waker,
-    get_waitpid_waker,
+    CloneFlags, CloneFlagsDef, SCHED_NICE_MAX, SCHED_NICE_MIN, SCHED_UTIL_SCALE,
+    TaskDeadlineParams, TaskState, WaitError, get_parent_waitpid_waker, get_waitpid_waker,
 };
 
 const MAX_ARG_COUNT: usize = 256; // Maximum number of arguments for execve
+const SCHEDULER_CONTROL_VERSION_V1: u32 = 1;
+const RAW_SCHEDULER_ATTR_V1_SIZE: usize = 128;
+const RAW_SCHEDULER_STATE_V1_SIZE: usize = 160;
+const SCHED_POLICY_FAIR: u32 = 0;
+const SCHED_POLICY_DEADLINE: u32 = 1;
+const SCHED_AFFINITY_ANY: u32 = 0;
+const SCHED_AFFINITY_SINGLE: u32 = 1;
+const SCHED_AFFINITY_MASK: u32 = 2;
+const SCHED_CPU_ID_NONE: u32 = u32::MAX;
+
+fn decode_native_u64(bytes: &[u8], offset: usize) -> u64 {
+    let mut word = [0u8; core::mem::size_of::<u64>()];
+    let end = offset + word.len();
+    word.copy_from_slice(&bytes[offset..end]);
+    u64::from_ne_bytes(word)
+}
+
+fn decode_native_u32(bytes: &[u8], offset: usize) -> u32 {
+    let mut word = [0u8; core::mem::size_of::<u32>()];
+    let end = offset + word.len();
+    word.copy_from_slice(&bytes[offset..end]);
+    u32::from_ne_bytes(word)
+}
+
+fn decode_native_i32(bytes: &[u8], offset: usize) -> i32 {
+    i32::from_ne_bytes(decode_native_u32(bytes, offset).to_ne_bytes())
+}
+
+fn encode_native_u32(bytes: &mut [u8], offset: usize, value: u32) {
+    bytes[offset..offset + core::mem::size_of::<u32>()].copy_from_slice(&value.to_ne_bytes());
+}
+
+fn encode_native_i32(bytes: &mut [u8], offset: usize, value: i32) {
+    bytes[offset..offset + core::mem::size_of::<i32>()].copy_from_slice(&value.to_ne_bytes());
+}
+
+fn encode_native_u64(bytes: &mut [u8], offset: usize, value: u64) {
+    bytes[offset..offset + core::mem::size_of::<u64>()].copy_from_slice(&value.to_ne_bytes());
+}
+
+fn validate_scheduler_attr_header(bytes: &[u8]) -> Result<(), SchedulerControlResult> {
+    if decode_native_u32(bytes, 0) as usize != RAW_SCHEDULER_ATTR_V1_SIZE {
+        return Err(SchedulerControlResult::BadSize);
+    }
+    if decode_native_u32(bytes, 4) != SCHEDULER_CONTROL_VERSION_V1 {
+        return Err(SchedulerControlResult::UnsupportedVersion);
+    }
+    if decode_native_u32(bytes, 12) != 0 {
+        return Err(SchedulerControlResult::InvalidFlags);
+    }
+    if decode_native_u32(bytes, 76) != 0
+        || (0..6).any(|index| decode_native_u64(bytes, 80 + index * 8) != 0)
+    {
+        return Err(SchedulerControlResult::InvalidArgument);
+    }
+    Ok(())
+}
+
+fn decode_scheduler_attr(
+    task: &crate::task::Task,
+    bytes: &[u8],
+) -> Result<SchedulerAttr, SchedulerControlResult> {
+    validate_scheduler_attr_header(bytes)?;
+    let affinity = match decode_native_u32(bytes, 16) {
+        SCHED_AFFINITY_ANY => {
+            if decode_native_u32(bytes, 20) != SCHED_CPU_ID_NONE
+                || decode_native_u64(bytes, 32) != 0
+                || decode_native_u32(bytes, 40) != 0
+                || decode_native_u32(bytes, 44) != 0
+            {
+                return Err(SchedulerControlResult::InvalidArgument);
+            }
+            SchedulerAffinity::Any
+        }
+        SCHED_AFFINITY_SINGLE => {
+            if decode_native_u32(bytes, 20) == SCHED_CPU_ID_NONE
+                || decode_native_u64(bytes, 32) != 0
+                || decode_native_u32(bytes, 40) != 0
+                || decode_native_u32(bytes, 44) != 0
+            {
+                return Err(SchedulerControlResult::InvalidArgument);
+            }
+            SchedulerAffinity::Single(decode_native_u32(bytes, 20) as usize)
+        }
+        SCHED_AFFINITY_MASK => {
+            let mask_ptr = decode_native_u64(bytes, 32) as usize;
+            let mask_bytes = decode_native_u32(bytes, 40) as usize;
+            let nbits = decode_native_u32(bytes, 44) as usize;
+            if decode_native_u32(bytes, 20) != SCHED_CPU_ID_NONE
+                || mask_ptr == 0
+                || nbits == 0
+                || nbits > crate::environment::MAX_NUM_CPUS
+            {
+                return Err(SchedulerControlResult::InvalidArgument);
+            }
+            let required_bytes = nbits.div_ceil(8);
+            if mask_bytes < required_bytes {
+                return Err(SchedulerControlResult::BufferTooSmall);
+            }
+            let mut raw_mask = [0u8; (crate::environment::MAX_NUM_CPUS + 7) / 8];
+            if copy_from_user(task, mask_ptr, &mut raw_mask[..required_bytes]).is_err() {
+                return Err(SchedulerControlResult::BadAddress);
+            }
+            if nbits % 8 != 0 && raw_mask[required_bytes - 1] >> (nbits % 8) != 0 {
+                return Err(SchedulerControlResult::InvalidArgument);
+            }
+            let mask = raw_mask
+                .iter()
+                .enumerate()
+                .fold(0usize, |mask, (index, byte)| {
+                    mask | ((*byte as usize) << (index * 8))
+                });
+            SchedulerAffinity::Mask(mask)
+        }
+        _ => return Err(SchedulerControlResult::InvalidArgument),
+    };
+
+    let policy = match decode_native_u32(bytes, 8) {
+        SCHED_POLICY_FAIR => {
+            if decode_native_u64(bytes, 48) != 0
+                || decode_native_u64(bytes, 56) != 0
+                || decode_native_u64(bytes, 64) != 0
+                || decode_native_u32(bytes, 72) != SCHED_CPU_ID_NONE
+            {
+                return Err(SchedulerControlResult::InvalidArgument);
+            }
+            SchedulerPolicy::Fair
+        }
+        SCHED_POLICY_DEADLINE => SchedulerPolicy::Deadline {
+            params: TaskDeadlineParams {
+                runtime_ns: decode_native_u64(bytes, 48),
+                deadline_ns: decode_native_u64(bytes, 56),
+                period_ns: decode_native_u64(bytes, 64),
+            },
+            cpu_id: decode_native_u32(bytes, 72) as usize,
+        },
+        _ => return Err(SchedulerControlResult::InvalidPolicy),
+    };
+
+    Ok(SchedulerAttr {
+        policy,
+        affinity,
+        nice: decode_native_i32(bytes, 24),
+        util_min: decode_native_u32(bytes, 28),
+    })
+}
+
+fn validate_scheduler_state_header(bytes: &[u8]) -> Result<(), SchedulerControlResult> {
+    if decode_native_u32(bytes, 0) as usize != RAW_SCHEDULER_STATE_V1_SIZE {
+        return Err(SchedulerControlResult::BadSize);
+    }
+    if decode_native_u32(bytes, 4) != SCHEDULER_CONTROL_VERSION_V1 {
+        return Err(SchedulerControlResult::UnsupportedVersion);
+    }
+    if decode_native_u32(bytes, 16) != 0
+        || decode_native_u32(bytes, 44) != 0
+        || decode_native_u32(bytes, 100) != 0
+        || (0..5).any(|index| decode_native_u64(bytes, 120 + index * 8) != 0)
+    {
+        return Err(SchedulerControlResult::InvalidArgument);
+    }
+    Ok(())
+}
+
+fn raw_affinity(affinity: SchedulerAffinity) -> (u32, u32, usize) {
+    match affinity {
+        SchedulerAffinity::Any => (SCHED_AFFINITY_ANY, SCHED_CPU_ID_NONE, 0),
+        SchedulerAffinity::Single(cpu_id) => (SCHED_AFFINITY_SINGLE, cpu_id as u32, 0),
+        SchedulerAffinity::Mask(mask) => (SCHED_AFFINITY_MASK, SCHED_CPU_ID_NONE, mask),
+    }
+}
+
+fn write_scheduler_attr(
+    bytes: &mut [u8],
+    attributes: crate::sched::scheduler::SchedulerAttrSnapshot,
+) {
+    let (policy, runtime_ns, deadline_ns, period_ns, deadline_cpu_id) = match attributes.policy {
+        SchedulerPolicy::Fair => (SCHED_POLICY_FAIR, 0, 0, 0, SCHED_CPU_ID_NONE),
+        SchedulerPolicy::Deadline { params, cpu_id } => (
+            SCHED_POLICY_DEADLINE,
+            params.runtime_ns,
+            params.deadline_ns,
+            params.period_ns,
+            cpu_id as u32,
+        ),
+    };
+    let (affinity_kind, cpu_id, _) = raw_affinity(attributes.affinity);
+    encode_native_u32(bytes, 0, RAW_SCHEDULER_ATTR_V1_SIZE as u32);
+    encode_native_u32(bytes, 4, SCHEDULER_CONTROL_VERSION_V1);
+    encode_native_u32(bytes, 8, policy);
+    encode_native_u32(bytes, 12, 0);
+    encode_native_u32(bytes, 16, affinity_kind);
+    encode_native_u32(bytes, 20, cpu_id);
+    encode_native_i32(bytes, 24, attributes.nice);
+    encode_native_u32(bytes, 28, attributes.util_min);
+    encode_native_u64(bytes, 48, runtime_ns);
+    encode_native_u64(bytes, 56, deadline_ns);
+    encode_native_u64(bytes, 64, period_ns);
+    encode_native_u32(bytes, 72, deadline_cpu_id);
+}
+
+fn write_scheduler_mask_metadata(
+    bytes: &mut [u8],
+    mask_ptr: usize,
+    mask_bytes: usize,
+    mask_nbits: usize,
+) {
+    encode_native_u64(bytes, 32, mask_ptr as u64);
+    encode_native_u32(bytes, 40, mask_bytes as u32);
+    encode_native_u32(bytes, 44, mask_nbits as u32);
+}
 
 // Flags for execve system calls
 pub const EXECVE_FORCE_ABI_REBUILD: usize = 0x1; // Force ABI environment reconstruction
@@ -927,9 +1142,10 @@ pub fn sys_set_task_util_min(trapframe: &mut Trapframe) -> usize {
     if util_min > SCHED_UTIL_SCALE as usize {
         return usize::MAX;
     }
-    task.set_sched_util_min(util_min as u32)
-        .map(|()| 0)
-        .unwrap_or(usize::MAX)
+    match update_current_task_scheduler_fair_fields(None, Some(util_min as u32)) {
+        SchedulerControlResult::Ok => 0,
+        _ => usize::MAX,
+    }
 }
 
 /// Return the current task's minimum scheduler utilization clamp.
@@ -945,6 +1161,355 @@ pub fn sys_get_task_util_min(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     trapframe.increment_pc_next(&task);
     task.sched_util_min() as usize
+}
+
+/// Set the current task's EEVDF nice value.
+///
+/// # Arguments
+///
+/// * `trapframe.arg(0)` - Signed nice value encoded in the native register width.
+///
+/// # Returns
+///
+/// `0` on success, or `usize::MAX` if the value is outside the supported range.
+pub fn sys_set_task_nice(trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    let nice = trapframe.get_arg(0) as isize as i32;
+    trapframe.increment_pc_next(&task);
+
+    if !(SCHED_NICE_MIN..=SCHED_NICE_MAX).contains(&nice) {
+        return usize::MAX;
+    }
+    match update_current_task_scheduler_fair_fields(Some(nice), None) {
+        SchedulerControlResult::Ok => {
+            schedule(trapframe);
+            0
+        }
+        _ => usize::MAX,
+    }
+}
+
+/// Return the current task's EEVDF nice value.
+///
+/// # Arguments
+///
+/// None.
+///
+/// # Returns
+///
+/// Signed nice value encoded in the native register width.
+pub fn sys_get_task_nice(trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    trapframe.increment_pc_next(&task);
+    task.nice() as isize as usize
+}
+
+/// Set or clear the current task's single-CPU affinity pin.
+///
+/// # Arguments
+///
+/// * `trapframe.arg(0)` - Online CPU ID, or `usize::MAX` to clear the pin.
+///
+/// # Returns
+///
+/// `0` on success, or `usize::MAX` if the requested CPU is not online.
+pub fn sys_set_task_cpu_affinity(trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    let cpu_id = trapframe.get_arg(0);
+    trapframe.increment_pc_next(&task);
+
+    let affinity = if cpu_id == usize::MAX {
+        SchedulerAffinity::Any
+    } else {
+        SchedulerAffinity::Single(cpu_id)
+    };
+    match set_current_task_scheduler_affinity(affinity) {
+        SchedulerControlResult::Ok => {
+            schedule(trapframe);
+            0
+        }
+        _ => usize::MAX,
+    }
+}
+
+/// Return the current task's single-CPU affinity pin.
+///
+/// # Arguments
+///
+/// None.
+///
+/// # Returns
+///
+/// Pinned CPU ID, or `usize::MAX` when the task may run on any online CPU.
+pub fn sys_get_task_cpu_affinity(trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    trapframe.increment_pc_next(&task);
+    task.pinned_cpu().unwrap_or(usize::MAX)
+}
+
+/// Configure or disable the current task's periodic deadline reservation.
+///
+/// # Arguments
+///
+/// * `trapframe.arg(0)` - Pointer to three native-endian `u64` values containing
+///   runtime, relative deadline, and period in nanoseconds. Three zero values
+///   disable the current reservation.
+///
+/// # Returns
+///
+/// `0` on success, or `usize::MAX` for an invalid pointer, invalid parameters,
+/// missing reservation on disable, or failed admission control.
+pub fn sys_set_task_deadline(trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    let params_ptr = trapframe.get_arg(0);
+    trapframe.increment_pc_next(&task);
+
+    let mut bytes = [0u8; 24];
+    if copy_from_user(&task, params_ptr, &mut bytes).is_err() {
+        return usize::MAX;
+    }
+    let params = TaskDeadlineParams {
+        runtime_ns: decode_native_u64(&bytes, 0),
+        deadline_ns: decode_native_u64(&bytes, 8),
+        period_ns: decode_native_u64(&bytes, 16),
+    };
+    let result = if params.runtime_ns == 0 && params.deadline_ns == 0 && params.period_ns == 0 {
+        disable_current_task_deadline()
+    } else {
+        enable_current_task_deadline(params)
+    };
+    if result.is_err() {
+        return usize::MAX;
+    }
+    schedule(trapframe);
+    0
+}
+
+/// Return the current task's periodic deadline reservation parameters.
+///
+/// # Arguments
+///
+/// * `trapframe.arg(0)` - Destination pointer for three native-endian `u64`
+///   values containing runtime, relative deadline, and period in nanoseconds.
+///
+/// # Returns
+///
+/// `0` on success, or `usize::MAX` when deadline scheduling is disabled or the
+/// destination pointer is invalid.
+pub fn sys_get_task_deadline(trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    let params_ptr = trapframe.get_arg(0);
+    trapframe.increment_pc_next(&task);
+
+    let Some(snapshot) = current_task_deadline() else {
+        return usize::MAX;
+    };
+    let mut bytes = [0u8; 24];
+    bytes[0..8].copy_from_slice(&snapshot.params.runtime_ns.to_ne_bytes());
+    bytes[8..16].copy_from_slice(&snapshot.params.deadline_ns.to_ne_bytes());
+    bytes[16..24].copy_from_slice(&snapshot.params.period_ns.to_ne_bytes());
+    if copy_to_user(&task, params_ptr, &bytes).is_err() {
+        usize::MAX
+    } else {
+        0
+    }
+}
+
+/// Atomically replace the current task's versioned scheduler attributes.
+///
+/// # Arguments
+///
+/// * `trapframe.arg(0)` - Pointer to a 128-byte native-endian v1 scheduler
+///   attribute block.
+///
+/// # Returns
+///
+/// A raw `RawSchedulerResult` value in the inclusive range `0..=11`.
+pub fn sys_set_scheduler_attr(trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    let attributes_ptr = trapframe.get_arg(0);
+    trapframe.increment_pc_next(&task);
+
+    let mut bytes = [0u8; RAW_SCHEDULER_ATTR_V1_SIZE];
+    if copy_from_user(&task, attributes_ptr, &mut bytes).is_err() {
+        return SchedulerControlResult::BadAddress.as_raw();
+    }
+    let attributes = match decode_scheduler_attr(&task, &bytes) {
+        Ok(attributes) => attributes,
+        Err(result) => return result.as_raw(),
+    };
+    let result = set_current_task_scheduler_attr(attributes);
+    if result == SchedulerControlResult::Ok {
+        schedule(trapframe);
+    }
+    result.as_raw()
+}
+
+/// Return the current task's versioned scheduler attributes.
+///
+/// # Arguments
+///
+/// * `trapframe.arg(0)` - Pointer to a 128-byte v1 scheduler attribute block.
+///   For mask affinity, its `cpu_mask_ptr` and `cpu_mask_bytes` describe the
+///   caller-provided destination buffer.
+///
+/// # Returns
+///
+/// A raw `RawSchedulerResult` value in the inclusive range `0..=11`.
+pub fn sys_get_scheduler_attr(trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    let attributes_ptr = trapframe.get_arg(0);
+    trapframe.increment_pc_next(&task);
+
+    let mut input = [0u8; RAW_SCHEDULER_ATTR_V1_SIZE];
+    if copy_from_user(&task, attributes_ptr, &mut input).is_err() {
+        return SchedulerControlResult::BadAddress.as_raw();
+    }
+    if let Err(result) = validate_scheduler_attr_header(&input) {
+        return result.as_raw();
+    }
+
+    let Some(attributes) = current_task_scheduler_attr() else {
+        return SchedulerControlResult::Busy.as_raw();
+    };
+    let mut output = [0u8; RAW_SCHEDULER_ATTR_V1_SIZE];
+    write_scheduler_attr(&mut output, attributes);
+    if let SchedulerAffinity::Mask(mask) = attributes.affinity {
+        let mask_ptr = decode_native_u64(&input, 32) as usize;
+        let mask_capacity = decode_native_u32(&input, 40) as usize;
+        let mask_nbits = crate::environment::MAX_NUM_CPUS;
+        let mask_bytes = mask_nbits.div_ceil(8);
+        if mask_capacity < mask_bytes {
+            write_scheduler_mask_metadata(&mut output, mask_ptr, mask_bytes, mask_nbits);
+            return if copy_to_user(&task, attributes_ptr, &output).is_err() {
+                SchedulerControlResult::BadAddress.as_raw()
+            } else {
+                SchedulerControlResult::BufferTooSmall.as_raw()
+            };
+        }
+        let mut raw_mask = [0u8; (crate::environment::MAX_NUM_CPUS + 7) / 8];
+        for (index, byte) in raw_mask.iter_mut().enumerate() {
+            *byte = (mask >> (index * 8)) as u8;
+        }
+        if copy_to_user(&task, mask_ptr, &raw_mask[..mask_bytes]).is_err() {
+            return SchedulerControlResult::BadAddress.as_raw();
+        }
+        write_scheduler_mask_metadata(&mut output, mask_ptr, mask_bytes, mask_nbits);
+    }
+    if copy_to_user(&task, attributes_ptr, &output).is_err() {
+        SchedulerControlResult::BadAddress.as_raw()
+    } else {
+        SchedulerControlResult::Ok.as_raw()
+    }
+}
+
+/// Return the current task's versioned runtime scheduler state.
+///
+/// # Arguments
+///
+/// * `trapframe.arg(0)` - Pointer to a 160-byte v1 scheduler state block.
+///
+/// # Returns
+///
+/// A raw `RawSchedulerResult` value in the inclusive range `0..=11`.
+pub fn sys_get_scheduler_state(trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    let state_ptr = trapframe.get_arg(0);
+    trapframe.increment_pc_next(&task);
+
+    let mut input = [0u8; RAW_SCHEDULER_STATE_V1_SIZE];
+    if copy_from_user(&task, state_ptr, &mut input).is_err() {
+        return SchedulerControlResult::BadAddress.as_raw();
+    }
+    if let Err(result) = validate_scheduler_state_header(&input) {
+        return result.as_raw();
+    }
+    let Some(state) = current_task_scheduler_state() else {
+        return SchedulerControlResult::Busy.as_raw();
+    };
+
+    let mut output = [0u8; RAW_SCHEDULER_STATE_V1_SIZE];
+    let policy = match state.attributes.policy {
+        SchedulerPolicy::Fair => SCHED_POLICY_FAIR,
+        SchedulerPolicy::Deadline { .. } => SCHED_POLICY_DEADLINE,
+    };
+    let (affinity_kind, configured_cpu_id, _) = raw_affinity(state.active_affinity);
+    encode_native_u32(&mut output, 0, RAW_SCHEDULER_STATE_V1_SIZE as u32);
+    encode_native_u32(&mut output, 4, SCHEDULER_CONTROL_VERSION_V1);
+    encode_native_u32(&mut output, 8, state.status);
+    encode_native_u32(&mut output, 12, policy);
+    encode_native_u32(&mut output, 16, 0);
+    encode_native_u32(&mut output, 20, affinity_kind);
+    encode_native_u32(&mut output, 24, configured_cpu_id);
+    encode_native_u32(
+        &mut output,
+        28,
+        state
+            .current_cpu
+            .map_or(SCHED_CPU_ID_NONE, |cpu_id| cpu_id as u32),
+    );
+    encode_native_u32(
+        &mut output,
+        32,
+        state
+            .queued_cpu
+            .map_or(SCHED_CPU_ID_NONE, |cpu_id| cpu_id as u32),
+    );
+    encode_native_i32(&mut output, 36, state.attributes.nice);
+    encode_native_u32(&mut output, 40, state.attributes.util_min);
+    encode_native_u64(&mut output, 48, state.fair_vruntime_ns);
+    encode_native_u64(&mut output, 56, state.fair_vdeadline_ns);
+    encode_native_u64(&mut output, 64, state.fair_slice_remaining_ns);
+    encode_native_u64(&mut output, 72, state.deadline_runtime_remaining_ns);
+    encode_native_u64(&mut output, 80, state.deadline_absolute_ns);
+    encode_native_u64(&mut output, 88, state.deadline_replenishment_ns);
+    encode_native_u32(&mut output, 96, state.deadline_admission_units);
+    encode_native_u64(&mut output, 104, state.deadline_miss_count);
+    encode_native_u64(&mut output, 112, state.deadline_overrun_count);
+    if copy_to_user(&task, state_ptr, &output).is_err() {
+        SchedulerControlResult::BadAddress.as_raw()
+    } else {
+        SchedulerControlResult::Ok.as_raw()
+    }
+}
+
+#[cfg(test)]
+mod scheduler_control_tests {
+    use super::*;
+    use crate::sched::scheduler::SchedulerAttrSnapshot;
+
+    #[test_case]
+    fn scheduler_attr_codec_uses_revised_deadline_cpu_offset() {
+        let params = TaskDeadlineParams {
+            runtime_ns: 4,
+            deadline_ns: 10,
+            period_ns: 10,
+        };
+        let mut bytes = [0u8; RAW_SCHEDULER_ATTR_V1_SIZE];
+        write_scheduler_attr(
+            &mut bytes,
+            SchedulerAttrSnapshot {
+                policy: SchedulerPolicy::Deadline { params, cpu_id: 3 },
+                affinity: SchedulerAffinity::Mask(0b101),
+                nice: -4,
+                util_min: 512,
+            },
+        );
+
+        assert_eq!(decode_native_u32(&bytes, 72), 3);
+        assert_eq!(decode_native_u32(&bytes, 76), 0);
+        assert!(bytes[80..128].iter().all(|byte| *byte == 0));
+    }
+
+    #[test_case]
+    fn scheduler_mask_probe_metadata_preserves_pointer_and_reports_requirement() {
+        let mut bytes = [0u8; RAW_SCHEDULER_ATTR_V1_SIZE];
+        write_scheduler_mask_metadata(&mut bytes, 0x1234, 2, 16);
+
+        assert_eq!(decode_native_u64(&bytes, 32), 0x1234);
+        assert_eq!(decode_native_u32(&bytes, 40), 2);
+        assert_eq!(decode_native_u32(&bytes, 44), 16);
+    }
 }
 
 pub fn sys_sleep(trapframe: &mut Trapframe) -> usize {
