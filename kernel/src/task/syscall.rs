@@ -26,12 +26,12 @@ use crate::library::std::string::{
 };
 use crate::library::std::usercopy::copy_to_user;
 use crate::sched::scheduler::{
-    cleanup_zombie, cpu_usage_snapshot, enqueue_task, get_all_task_ids, get_task_by_id,
-    remove_task_from_queues, schedule,
+    account_current_fair_runtime, cleanup_zombie, cpu_usage_snapshot, enqueue_task,
+    get_all_task_ids, get_task_by_id, is_cpu_online, remove_task_from_queues, schedule,
 };
 use crate::task::{
-    CloneFlags, CloneFlagsDef, SCHED_UTIL_SCALE, TaskState, WaitError, get_parent_waitpid_waker,
-    get_waitpid_waker,
+    CloneFlags, CloneFlagsDef, SCHED_NICE_MAX, SCHED_NICE_MIN, SCHED_UTIL_SCALE, TaskState,
+    WaitError, get_parent_waitpid_waker, get_waitpid_waker,
 };
 
 const MAX_ARG_COUNT: usize = 256; // Maximum number of arguments for execve
@@ -945,6 +945,85 @@ pub fn sys_get_task_util_min(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     trapframe.increment_pc_next(&task);
     task.sched_util_min() as usize
+}
+
+/// Set the current task's EEVDF nice value.
+///
+/// # Arguments
+///
+/// * `trapframe.arg(0)` - Signed nice value encoded in the native register width.
+///
+/// # Returns
+///
+/// `0` on success, or `usize::MAX` if the value is outside the supported range.
+pub fn sys_set_task_nice(trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    let nice = trapframe.get_arg(0) as isize as i32;
+    trapframe.increment_pc_next(&task);
+
+    if !(SCHED_NICE_MIN..=SCHED_NICE_MAX).contains(&nice) {
+        return usize::MAX;
+    }
+    account_current_fair_runtime();
+    task.set_nice(nice);
+    task.reset_sched_request();
+    schedule(trapframe);
+    0
+}
+
+/// Return the current task's EEVDF nice value.
+///
+/// # Arguments
+///
+/// None.
+///
+/// # Returns
+///
+/// Signed nice value encoded in the native register width.
+pub fn sys_get_task_nice(trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    trapframe.increment_pc_next(&task);
+    task.nice() as isize as usize
+}
+
+/// Set or clear the current task's single-CPU affinity pin.
+///
+/// # Arguments
+///
+/// * `trapframe.arg(0)` - Online CPU ID, or `usize::MAX` to clear the pin.
+///
+/// # Returns
+///
+/// `0` on success, or `usize::MAX` if the requested CPU is not online.
+pub fn sys_set_task_cpu_affinity(trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    let cpu_id = trapframe.get_arg(0);
+    trapframe.increment_pc_next(&task);
+
+    if cpu_id == usize::MAX {
+        task.set_pinned_cpu(None);
+    } else if is_cpu_online(cpu_id) {
+        task.set_pinned_cpu(Some(cpu_id));
+    } else {
+        return usize::MAX;
+    }
+    schedule(trapframe);
+    0
+}
+
+/// Return the current task's single-CPU affinity pin.
+///
+/// # Arguments
+///
+/// None.
+///
+/// # Returns
+///
+/// Pinned CPU ID, or `usize::MAX` when the task may run on any online CPU.
+pub fn sys_get_task_cpu_affinity(trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    trapframe.increment_pc_next(&task);
+    task.pinned_cpu().unwrap_or(usize::MAX)
 }
 
 pub fn sys_sleep(trapframe: &mut Trapframe) -> usize {
