@@ -113,14 +113,14 @@ use crate::object::handle::syscall::{
 use crate::random::sys_get_random;
 use crate::task::syscall::{
     sys_brk, sys_clone, sys_create_namespace, sys_create_session, sys_execve, sys_execve_abi,
-    sys_exit, sys_exit_group, sys_get_cpu_usage_info, sys_get_process_group_id, sys_get_session_id,
-    sys_get_task_cpu_affinity, sys_get_task_deadline, sys_get_task_info_count,
-    sys_get_task_info_list, sys_get_task_nice, sys_get_task_util_min, sys_get_tls, sys_getchar,
-    sys_getpid, sys_getppid, sys_monotonic_time, sys_putchar, sys_register_abi_zone, sys_sbrk,
-    sys_set_process_group, sys_set_task_cpu_affinity, sys_set_task_deadline, sys_set_task_nice,
-    sys_set_task_util_min, sys_set_tid_address, sys_set_tls, sys_shutdown, sys_sleep,
-    sys_system_time, sys_thread_detach, sys_thread_exit_cleanup, sys_unregister_abi_zone,
-    sys_waitpid, sys_yield,
+    sys_exit, sys_exit_group, sys_get_cpu_usage_info, sys_get_process_group_id,
+    sys_get_scheduler_attr, sys_get_scheduler_state, sys_get_session_id, sys_get_task_cpu_affinity,
+    sys_get_task_deadline, sys_get_task_info_count, sys_get_task_info_list, sys_get_task_nice,
+    sys_get_task_util_min, sys_get_tls, sys_getchar, sys_getpid, sys_getppid, sys_monotonic_time,
+    sys_putchar, sys_register_abi_zone, sys_sbrk, sys_set_process_group, sys_set_scheduler_attr,
+    sys_set_task_cpu_affinity, sys_set_task_deadline, sys_set_task_nice, sys_set_task_util_min,
+    sys_set_tid_address, sys_set_tls, sys_shutdown, sys_sleep, sys_system_time, sys_thread_detach,
+    sys_thread_exit_cleanup, sys_unregister_abi_zone, sys_waitpid, sys_yield,
 };
 
 #[macro_use]
@@ -219,6 +219,9 @@ syscall_table! {
     GetTaskCpuAffinity = 43 => sys_get_task_cpu_affinity,
     SetTaskDeadline = 44 => sys_set_task_deadline,
     GetTaskDeadline = 45 => sys_get_task_deadline,
+    SetSchedulerAttr = 46 => sys_set_scheduler_attr,
+    GetSchedulerAttr = 47 => sys_get_scheduler_attr,
+    GetSchedulerState = 48 => sys_get_scheduler_state,
 
     // ABI Zone Management
     RegisterAbiZone = 90 => sys_register_abi_zone,

@@ -84,6 +84,9 @@ pub const NICE_0_LOAD: u32 = 1024;
 /// Nice bounds (inclusive) honoured by [`Task::set_nice`] and the scheduler.
 pub const SCHED_NICE_MIN: i32 = -20;
 pub const SCHED_NICE_MAX: i32 = 19;
+pub(crate) const SCHED_AFFINITY_KIND_ANY: u8 = 0;
+pub(crate) const SCHED_AFFINITY_KIND_SINGLE: u8 = 1;
+pub(crate) const SCHED_AFFINITY_KIND_MASK: u8 = 2;
 
 /// Load weight table indexed by `nice + 20` (i.e. `0..=39`).
 ///
@@ -600,6 +603,8 @@ pub struct TaskDeadlineSnapshot {
     pub deadline_misses: u64,
     /// Number of times the task exhausted its runtime budget.
     pub budget_overruns: u64,
+    /// Deadline bandwidth admission reserved for this task.
+    pub admission_units: u32,
 }
 
 pub(crate) struct TaskDeadlineState {
@@ -809,6 +814,8 @@ pub struct Task {
     pub kernel_stack_window_base: IrqSpinLock<Option<(usize, usize)>>,
     /// CPUs on which this task may run. Each set bit is one scheduler CPU.
     cpu_affinity_mask: AtomicUsize,
+    /// Encoding used to configure [`Task::cpu_affinity_mask`].
+    scheduler_affinity_kind: AtomicU8,
     pub last_cpu: atomic::AtomicUsize,
     /// CPU that currently "owns" this task (has saved its context or is
     /// actively running it). `usize::MAX` means unowned / available.
@@ -1036,6 +1043,7 @@ impl Task {
             sleep_waker: Waker::new_interruptible("task_sleep_waker"),
             kernel_stack_window_base: IrqSpinLock::new(None),
             cpu_affinity_mask: AtomicUsize::new(usize::MAX),
+            scheduler_affinity_kind: AtomicU8::new(SCHED_AFFINITY_KIND_ANY),
             last_cpu: atomic::AtomicUsize::new(0),
             running_cpu: atomic::AtomicUsize::new(usize::MAX),
             // Already protected
@@ -1108,7 +1116,12 @@ impl Task {
         let mask = cpu_id
             .and_then(|cpu_id| 1usize.checked_shl(cpu_id as u32))
             .unwrap_or_else(|| if cpu_id.is_none() { usize::MAX } else { 0 });
-        self.set_cpu_affinity_mask(mask);
+        let kind = if cpu_id.is_some() {
+            SCHED_AFFINITY_KIND_SINGLE
+        } else {
+            SCHED_AFFINITY_KIND_ANY
+        };
+        self.set_scheduler_affinity_config(kind, mask);
     }
 
     /// Return the task's allowed CPU mask.
@@ -1129,7 +1142,18 @@ impl Task {
     ///
     /// * `mask` - Bit mask in which bit `n` permits scheduler CPU `n`.
     pub fn set_cpu_affinity_mask(&self, mask: usize) {
+        self.set_scheduler_affinity_config(SCHED_AFFINITY_KIND_MASK, mask);
+    }
+
+    /// Return the encoding used to configure this task's CPU affinity.
+    pub(crate) fn scheduler_affinity_kind(&self) -> u8 {
+        self.scheduler_affinity_kind.load(Ordering::SeqCst)
+    }
+
+    /// Publish a scheduler affinity encoding and its CPU mask together.
+    pub(crate) fn set_scheduler_affinity_config(&self, kind: u8, mask: usize) {
         self.cpu_affinity_mask.store(mask, Ordering::SeqCst);
+        self.scheduler_affinity_kind.store(kind, Ordering::SeqCst);
     }
 
     /// Return whether this task has an active deadline reservation.
@@ -1158,6 +1182,7 @@ impl Task {
             throttled: state.throttled,
             deadline_misses: state.deadline_misses,
             budget_overruns: state.budget_overruns,
+            admission_units: state.admission_units,
         })
     }
 
@@ -2751,7 +2776,10 @@ impl Task {
             .sched_weight
             .store(nice_to_weight(nice), Ordering::SeqCst);
         child.set_core_preference(self.core_preference());
-        child.set_cpu_affinity_mask(self.cpu_affinity_mask());
+        child.set_scheduler_affinity_config(
+            self.scheduler_affinity_kind(),
+            self.cpu_affinity_mask(),
+        );
         child
             .sched_util_min
             .store(self.sched_util_min(), Ordering::SeqCst);
