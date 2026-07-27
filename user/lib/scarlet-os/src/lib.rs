@@ -26,6 +26,9 @@ pub mod poll;
 /// Scarlet Native socket APIs.
 pub mod socket;
 
+/// Safe current-task scheduler control APIs.
+pub mod scheduler;
+
 /// Scarlet time APIs.
 pub mod time;
 

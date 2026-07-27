@@ -2,6 +2,8 @@ use crate::boxed::Box;
 use crate::string::ToString;
 use crate::syscall::{Syscall, syscall0, syscall1, syscall2, syscall3, syscall4, syscall5};
 use crate::vec::Vec;
+use core::time::Duration;
+use scarlet_os::scheduler::{self, DeadlineConfig, OwnedFairAffinity, SchedulerPolicy};
 
 /// Scheduler utilization scale used by Scarlet task placement hints.
 pub const SCHED_UTIL_SCALE: u32 = scarlet_sys::SCHED_UTIL_SCALE;
@@ -1213,12 +1215,13 @@ pub fn set_sched_util_min(util_min: u32) -> Result<(), SchedulerHintError> {
         return Err(SchedulerHintError::InvalidUtilization);
     }
 
-    let ret = syscall1(Syscall::SetTaskUtilMin, util_min as usize);
-    if ret == usize::MAX {
-        Err(SchedulerHintError::SyscallFailed)
-    } else {
-        Ok(())
-    }
+    let mut configured = scheduler::configured().map_err(|_| SchedulerHintError::SyscallFailed)?;
+    configured
+        .set_fair_util_min(util_min)
+        .map_err(|_| SchedulerHintError::InvalidUtilization)?;
+    configured
+        .apply()
+        .map_err(|_| SchedulerHintError::SyscallFailed)
 }
 
 /// Return the current task's minimum scheduler utilization clamp.
@@ -1227,12 +1230,9 @@ pub fn set_sched_util_min(util_min: u32) -> Result<(), SchedulerHintError> {
 ///
 /// Minimum utilization in scheduler capacity units.
 pub fn sched_util_min() -> Result<u32, SchedulerHintError> {
-    let ret = syscall0(Syscall::GetTaskUtilMin);
-    if ret == usize::MAX {
-        Err(SchedulerHintError::SyscallFailed)
-    } else {
-        Ok(ret as u32)
-    }
+    scheduler::configured()
+        .map(|configured| configured.fair_util_min())
+        .map_err(|_| SchedulerHintError::SyscallFailed)
 }
 
 /// Set the current task's EEVDF nice value.
@@ -1249,12 +1249,13 @@ pub fn set_task_nice(nice: i32) -> Result<(), SchedulerHintError> {
         return Err(SchedulerHintError::InvalidNice);
     }
 
-    let ret = syscall1(Syscall::SetTaskNice, nice as isize as usize);
-    if ret == usize::MAX {
-        Err(SchedulerHintError::SyscallFailed)
-    } else {
-        Ok(())
-    }
+    let mut configured = scheduler::configured().map_err(|_| SchedulerHintError::SyscallFailed)?;
+    configured
+        .set_fair_nice(nice)
+        .map_err(|_| SchedulerHintError::InvalidNice)?;
+    configured
+        .apply()
+        .map_err(|_| SchedulerHintError::SyscallFailed)
 }
 
 /// Return the current task's EEVDF nice value.
@@ -1263,7 +1264,12 @@ pub fn set_task_nice(nice: i32) -> Result<(), SchedulerHintError> {
 ///
 /// Current signed nice value.
 pub fn task_nice() -> i32 {
-    syscall0(Syscall::GetTaskNice) as isize as i32
+    match scheduler::configured() {
+        Ok(configured) => configured.fair_nice(),
+        // This infallible legacy signature cannot expose a configuration-query
+        // error, so preserve its historical raw-getter fallback.
+        Err(_) => syscall0(Syscall::GetTaskNice) as isize as i32,
+    }
 }
 
 /// Set or clear the current task's single-CPU affinity pin.
@@ -1276,12 +1282,20 @@ pub fn task_nice() -> i32 {
 ///
 /// `Ok(())` on success, or an error if the kernel rejects the CPU ID.
 pub fn set_task_cpu_affinity(cpu_id: Option<usize>) -> Result<(), SchedulerHintError> {
-    let ret = syscall1(Syscall::SetTaskCpuAffinity, cpu_id.unwrap_or(usize::MAX));
-    if ret == usize::MAX {
-        Err(SchedulerHintError::SyscallFailed)
-    } else {
-        Ok(())
+    let mut configured = scheduler::configured().map_err(|_| SchedulerHintError::SyscallFailed)?;
+    if configured.policy() == SchedulerPolicy::Deadline {
+        return Err(SchedulerHintError::SyscallFailed);
     }
+    let affinity = match cpu_id {
+        Some(cpu_id) => OwnedFairAffinity::Single(
+            u32::try_from(cpu_id).map_err(|_| SchedulerHintError::SyscallFailed)?,
+        ),
+        None => OwnedFairAffinity::Any,
+    };
+    configured.set_fair_affinity(affinity);
+    configured
+        .apply()
+        .map_err(|_| SchedulerHintError::SyscallFailed)
 }
 
 /// Return the current task's single-CPU affinity pin.
@@ -1290,8 +1304,18 @@ pub fn set_task_cpu_affinity(cpu_id: Option<usize>) -> Result<(), SchedulerHintE
 ///
 /// Pinned CPU ID, or `None` when the task may run on any online CPU.
 pub fn task_cpu_affinity() -> Option<usize> {
-    let cpu_id = syscall0(Syscall::GetTaskCpuAffinity);
-    (cpu_id != usize::MAX).then_some(cpu_id)
+    match scheduler::configured() {
+        Ok(configured) => match configured.fair_affinity() {
+            OwnedFairAffinity::Single(cpu_id) => Some(*cpu_id as usize),
+            OwnedFairAffinity::Any | OwnedFairAffinity::Mask(_) => None,
+        },
+        // This infallible legacy signature cannot expose a configuration-query
+        // error, so preserve its historical raw-getter fallback.
+        Err(_) => {
+            let cpu_id = syscall0(Syscall::GetTaskCpuAffinity);
+            (cpu_id != usize::MAX).then_some(cpu_id)
+        }
+    }
 }
 
 /// Enable a periodic deadline reservation for the current task.
@@ -1313,17 +1337,24 @@ pub fn set_task_deadline(params: TaskDeadlineParams) -> Result<(), SchedulerHint
     {
         return Err(SchedulerHintError::InvalidDeadline);
     }
-    let raw = scarlet_sys::RawTaskDeadlineParams {
-        runtime_ns: params.runtime_ns,
-        deadline_ns: params.deadline_ns,
-        period_ns: params.period_ns,
+    let mut configured = scheduler::configured().map_err(|_| SchedulerHintError::SyscallFailed)?;
+    let cpu_id = match configured.deadline() {
+        Some(deadline) => deadline.cpu_id(),
+        None => scheduler::runtime_state()
+            .map_err(|_| SchedulerHintError::SyscallFailed)?
+            .current_cpu_id()
+            .ok_or(SchedulerHintError::SyscallFailed)?,
     };
-    let ret = syscall1(Syscall::SetTaskDeadline, core::ptr::addr_of!(raw) as usize);
-    if ret == usize::MAX {
-        Err(SchedulerHintError::SyscallFailed)
-    } else {
-        Ok(())
-    }
+    let deadline = DeadlineConfig::new(
+        Duration::from_nanos(params.runtime_ns),
+        Duration::from_nanos(params.period_ns),
+        cpu_id,
+    )
+    .map_err(|_| SchedulerHintError::InvalidDeadline)?;
+    configured.activate_deadline(deadline);
+    configured
+        .apply()
+        .map_err(|_| SchedulerHintError::SyscallFailed)
 }
 
 /// Disable the current task's periodic deadline reservation.
@@ -1332,13 +1363,11 @@ pub fn set_task_deadline(params: TaskDeadlineParams) -> Result<(), SchedulerHint
 ///
 /// `Ok(())` on success, or an error when no reservation is active.
 pub fn clear_task_deadline() -> Result<(), SchedulerHintError> {
-    let raw = scarlet_sys::RawTaskDeadlineParams::default();
-    let ret = syscall1(Syscall::SetTaskDeadline, core::ptr::addr_of!(raw) as usize);
-    if ret == usize::MAX {
-        Err(SchedulerHintError::SyscallFailed)
-    } else {
-        Ok(())
-    }
+    let mut configured = scheduler::configured().map_err(|_| SchedulerHintError::SyscallFailed)?;
+    configured.activate_fair();
+    configured
+        .apply()
+        .map_err(|_| SchedulerHintError::SyscallFailed)
 }
 
 /// Return the current task's periodic deadline reservation.
@@ -1347,14 +1376,11 @@ pub fn clear_task_deadline() -> Result<(), SchedulerHintError> {
 ///
 /// The configured reservation, or `None` when deadline scheduling is disabled.
 pub fn task_deadline() -> Option<TaskDeadlineParams> {
-    let mut raw = scarlet_sys::RawTaskDeadlineParams::default();
-    let ret = syscall1(
-        Syscall::GetTaskDeadline,
-        core::ptr::addr_of_mut!(raw) as usize,
-    );
-    (ret != usize::MAX).then_some(TaskDeadlineParams {
-        runtime_ns: raw.runtime_ns,
-        deadline_ns: raw.deadline_ns,
-        period_ns: raw.period_ns,
+    scheduler::configured().ok().and_then(|configured| {
+        configured.deadline().map(|deadline| TaskDeadlineParams {
+            runtime_ns: deadline.runtime().as_nanos() as u64,
+            deadline_ns: deadline.period().as_nanos() as u64,
+            period_ns: deadline.period().as_nanos() as u64,
+        })
     })
 }
