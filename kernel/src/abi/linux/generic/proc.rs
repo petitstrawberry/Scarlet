@@ -1,10 +1,14 @@
-use alloc::sync::Arc;
+use alloc::{sync::Arc, vec::Vec};
 
 use crate::{
     abi::linux::generic::{LinuxAbi, errno},
     arch::Trapframe,
-    sched::scheduler::{get_all_task_ids, get_task_by_id, schedule},
-    task::{CloneFlags, mytask},
+    library::std::usercopy::{copy_from_user, copy_to_user},
+    sched::scheduler::{
+        get_all_task_ids, get_task_by_id, online_cpu_mask, reconcile_task_affinity, schedule,
+        update_task_nice,
+    },
+    task::{CloneFlags, SCHED_NICE_MAX, SCHED_NICE_MIN, Task, TaskType, mytask},
 };
 
 // /// VFS v2 helper function for path absolutization
@@ -117,33 +121,210 @@ pub fn sys_unshare(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     0
 }
 
-pub fn sys_sched_getaffinity(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
-    let task = mytask().unwrap();
-    let _pid = trapframe.get_arg(0);
+const LINUX_CPU_MASK_SIZE: usize = core::mem::size_of::<usize>();
+const PRIO_PROCESS: usize = 0;
+const PRIO_PGRP: usize = 1;
+const PRIO_USER: usize = 2;
+
+fn cpu_mask_from_bytes(bytes: [u8; LINUX_CPU_MASK_SIZE]) -> usize {
+    usize::from_ne_bytes(bytes)
+}
+
+fn linux_raw_priority(nice: i32) -> usize {
+    (20 - nice) as usize
+}
+
+fn is_linux_scheduler_target(task: &Task) -> bool {
+    matches!(task.task_type, TaskType::User)
+}
+
+fn resolve_task_pid(caller: &Task, pid: usize) -> Result<Arc<Task>, usize> {
+    let global_id = if pid == 0 {
+        caller.get_id()
+    } else {
+        caller
+            .get_namespace()
+            .resolve_global_id(pid)
+            .ok_or(errno::ESRCH)?
+    };
+    get_task_by_id(global_id)
+        .filter(|task| is_linux_scheduler_target(task))
+        .ok_or(errno::ESRCH)
+}
+
+fn priority_targets(caller: &Task, which: usize, who: usize) -> Result<Vec<Arc<Task>>, usize> {
+    if which == PRIO_PROCESS {
+        return resolve_task_pid(caller, who).map(|task| alloc::vec![task]);
+    }
+
+    let namespace = caller.get_namespace();
+    let process_group_id = if which == PRIO_PGRP {
+        Some(if who == 0 {
+            caller.get_process_group_id()
+        } else {
+            namespace.resolve_global_id(who).ok_or(errno::ESRCH)?
+        })
+    } else if which == PRIO_USER {
+        if who != 0 {
+            return Err(errno::ESRCH);
+        }
+        None
+    } else {
+        return Err(errno::EINVAL);
+    };
+
+    let targets: Vec<_> = get_all_task_ids()
+        .into_iter()
+        .filter_map(get_task_by_id)
+        .filter(|task| is_linux_scheduler_target(task))
+        .filter(|task| namespace.resolve_local_id(task.get_id()).is_some())
+        .filter(|task| {
+            process_group_id.is_none_or(|group_id| task.get_process_group_id() == group_id)
+        })
+        .collect();
+    if targets.is_empty() {
+        Err(errno::ESRCH)
+    } else {
+        Ok(targets)
+    }
+}
+
+/// Set a Linux thread's allowed CPU mask.
+///
+/// # Arguments
+///
+/// * `trapframe.arg(0)` - Namespace-local thread ID, or zero for the caller.
+/// * `trapframe.arg(1)` - Number of bytes supplied at the mask pointer.
+/// * `trapframe.arg(2)` - Userspace pointer to the CPU mask.
+///
+/// # Returns
+///
+/// Zero on success or a negated Linux errno.
+pub fn sys_sched_setaffinity(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
+    let caller = mytask().unwrap();
+    let pid = trapframe.get_arg(0);
     let cpusetsize = trapframe.get_arg(1);
     let mask_ptr = trapframe.get_arg(2);
-
-    trapframe.increment_pc_next(&task);
+    trapframe.increment_pc_next(&caller);
 
     if cpusetsize == 0 {
         return errno::to_result(errno::EINVAL);
     }
-    if mask_ptr == 0 {
+    let target = match resolve_task_pid(&caller, pid) {
+        Ok(target) => target,
+        Err(error) => return errno::to_result(error),
+    };
+    let mut mask_bytes = [0u8; LINUX_CPU_MASK_SIZE];
+    let bytes_to_copy = cpusetsize.min(LINUX_CPU_MASK_SIZE);
+    if copy_from_user(&caller, mask_ptr, &mut mask_bytes[..bytes_to_copy]).is_err() {
         return errno::to_result(errno::EFAULT);
     }
 
-    let kva = match task.vm_manager.translate_to_kva(mask_ptr) {
-        Some(kva) => kva,
-        None => return errno::to_result(errno::EFAULT),
-    };
+    let mask = cpu_mask_from_bytes(mask_bytes) & online_cpu_mask() as usize;
+    if mask == 0 {
+        return errno::to_result(errno::EINVAL);
+    }
+    target.set_cpu_affinity_mask(mask);
+    reconcile_task_affinity(&target);
+    if target.get_id() == caller.get_id() {
+        schedule(trapframe);
+    }
+    0
+}
 
-    let bytes_to_clear = cpusetsize.min(128);
-    unsafe {
-        core::ptr::write_bytes(kva as *mut u8, 0, bytes_to_clear);
-        *(kva as *mut usize) = 1;
+/// Return a Linux thread's effective allowed CPU mask.
+///
+/// # Arguments
+///
+/// * `trapframe.arg(0)` - Namespace-local thread ID, or zero for the caller.
+/// * `trapframe.arg(1)` - Size of the destination CPU mask in bytes.
+/// * `trapframe.arg(2)` - Userspace destination pointer.
+///
+/// # Returns
+///
+/// The number of mask bytes written or a negated Linux errno.
+pub fn sys_sched_getaffinity(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
+    let caller = mytask().unwrap();
+    let pid = trapframe.get_arg(0);
+    let cpusetsize = trapframe.get_arg(1);
+    let mask_ptr = trapframe.get_arg(2);
+    trapframe.increment_pc_next(&caller);
+
+    if cpusetsize < LINUX_CPU_MASK_SIZE {
+        return errno::to_result(errno::EINVAL);
+    }
+    let target = match resolve_task_pid(&caller, pid) {
+        Ok(target) => target,
+        Err(error) => return errno::to_result(error),
+    };
+    let mask = target.cpu_affinity_mask() & online_cpu_mask() as usize;
+    if copy_to_user(&caller, mask_ptr, &mask.to_ne_bytes()).is_err() {
+        return errno::to_result(errno::EFAULT);
     }
 
-    core::mem::size_of::<usize>()
+    LINUX_CPU_MASK_SIZE
+}
+
+/// Set the nice value for Linux priority-selected tasks.
+///
+/// # Arguments
+///
+/// * `trapframe.arg(0)` - `PRIO_PROCESS`, `PRIO_PGRP`, or `PRIO_USER`.
+/// * `trapframe.arg(1)` - Selector ID, or zero for the caller's corresponding ID.
+/// * `trapframe.arg(2)` - Signed nice value; values outside the range are clamped.
+///
+/// # Returns
+///
+/// Zero on success or a negated Linux errno.
+pub fn sys_setpriority(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
+    let caller = mytask().unwrap();
+    let which = trapframe.get_arg(0);
+    let who = trapframe.get_arg(1);
+    let nice = (trapframe.get_arg(2) as isize as i32).clamp(SCHED_NICE_MIN, SCHED_NICE_MAX);
+    trapframe.increment_pc_next(&caller);
+
+    let targets = match priority_targets(&caller, which, who) {
+        Ok(targets) => targets,
+        Err(error) => return errno::to_result(error),
+    };
+    let reschedule_caller = targets
+        .iter()
+        .any(|target| target.get_id() == caller.get_id());
+    for target in targets {
+        update_task_nice(&target, nice);
+    }
+    if reschedule_caller {
+        schedule(trapframe);
+    }
+    0
+}
+
+/// Return the highest priority among Linux priority-selected tasks.
+///
+/// # Arguments
+///
+/// * `trapframe.arg(0)` - `PRIO_PROCESS`, `PRIO_PGRP`, or `PRIO_USER`.
+/// * `trapframe.arg(1)` - Selector ID, or zero for the caller's corresponding ID.
+///
+/// # Returns
+///
+/// Linux's raw `20 - nice` encoding or a negated Linux errno.
+pub fn sys_getpriority(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
+    let caller = mytask().unwrap();
+    let which = trapframe.get_arg(0);
+    let who = trapframe.get_arg(1);
+    trapframe.increment_pc_next(&caller);
+
+    let targets = match priority_targets(&caller, which, who) {
+        Ok(targets) => targets,
+        Err(error) => return errno::to_result(error),
+    };
+    let nice = targets
+        .iter()
+        .map(|target| target.nice())
+        .min()
+        .unwrap_or(SCHED_NICE_MAX);
+    linux_raw_priority(nice)
 }
 
 #[repr(C)]
@@ -1491,4 +1672,31 @@ pub fn sys_memfd_create(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize 
     // );
 
     fd
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test_case]
+    fn linux_cpu_mask_uses_native_word_layout() {
+        let mask = (1usize << 1) | (1usize << 3);
+        assert_eq!(cpu_mask_from_bytes(mask.to_ne_bytes()), mask);
+    }
+
+    #[test_case]
+    fn linux_getpriority_raw_encoding_covers_nice_range() {
+        assert_eq!(linux_raw_priority(SCHED_NICE_MIN), 40);
+        assert_eq!(linux_raw_priority(0), 20);
+        assert_eq!(linux_raw_priority(SCHED_NICE_MAX), 1);
+    }
+
+    #[test_case]
+    fn linux_scheduler_controls_reject_kernel_tasks() {
+        let kernel_task = Task::new(alloc::string::String::from("Kernel"), 0, TaskType::Kernel);
+        let user_task = Task::new(alloc::string::String::from("User"), 0, TaskType::User);
+
+        assert!(!is_linux_scheduler_target(&kernel_task));
+        assert!(is_linux_scheduler_target(&user_task));
+    }
 }
