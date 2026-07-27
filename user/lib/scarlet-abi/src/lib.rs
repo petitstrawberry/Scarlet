@@ -41,6 +41,418 @@ pub struct RawTaskDeadlineParams {
 
 const _: [(); 24] = [(); core::mem::size_of::<RawTaskDeadlineParams>()];
 
+/// Scheduler-control ABI version implemented by the v1 raw structures.
+pub const SCHEDULER_CONTROL_VERSION_V1: u32 = 1;
+
+/// Fair, weighted EEVDF scheduler policy.
+pub const SCHED_POLICY_FAIR: u32 = 0;
+/// Periodic deadline-reservation scheduler policy.
+pub const SCHED_POLICY_DEADLINE: u32 = 1;
+
+/// Allow execution on any online CPU.
+pub const SCHED_AFFINITY_ANY: u32 = 0;
+/// Allow execution only on the CPU identified by `cpu_id`.
+pub const SCHED_AFFINITY_SINGLE: u32 = 1;
+/// Allow execution on the CPUs selected by a user-provided bit mask.
+pub const SCHED_AFFINITY_MASK: u32 = 2;
+
+/// Sentinel used when a scheduler state has no associated CPU.
+pub const SCHED_CPU_ID_NONE: u32 = u32::MAX;
+
+/// The only valid scheduler-attribute flag value in v1.
+///
+/// Callers must set [`RawSchedulerAttrV1::flags`] to this value. No scheduler
+/// attribute flag bits are defined in v1; nonzero values are reserved for a
+/// future ABI version and must be rejected. In particular, implicit-deadline
+/// validation is a kernel policy and is not selected by a user-visible flag.
+pub const SCHED_ATTR_FLAGS_NONE: u32 = 0;
+
+/// Stable result code returned by a scheduler-control syscall.
+///
+/// This type describes the success or failure of a scheduler-control request.
+/// It is intentionally distinct from [`RawSchedulerStatus`], which describes
+/// the calling task's runtime scheduler state in [`RawSchedulerStateV1`].
+#[repr(u32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RawSchedulerResult {
+    /// The request completed successfully.
+    Ok = 0,
+    /// A user-provided structure or affinity-mask address was invalid.
+    BadAddress = 1,
+    /// The supplied structure size was invalid for the requested ABI version.
+    BadSize = 2,
+    /// The requested scheduler-control ABI version is not implemented.
+    UnsupportedVersion = 3,
+    /// The request contained one or more undefined scheduler attribute flags.
+    InvalidFlags = 4,
+    /// The request selected an unsupported scheduler policy.
+    InvalidPolicy = 5,
+    /// The request contained invalid scheduler parameters.
+    InvalidArgument = 6,
+    /// A requested CPU is not online.
+    CpuOffline = 7,
+    /// A requested CPU affinity mask selected no online CPUs.
+    EmptyCpuMask = 8,
+    /// Deadline admission control rejected the requested reservation.
+    AdmissionFailed = 9,
+    /// The request cannot complete while the current task is busy.
+    Busy = 10,
+    /// A user-provided output or affinity-mask buffer was too small.
+    BufferTooSmall = 11,
+}
+
+impl RawSchedulerResult {
+    /// Convert a raw ABI result value into a recognized scheduler result.
+    ///
+    /// # Arguments
+    ///
+    /// * `value` - Raw `u32` value returned by a scheduler-control syscall.
+    ///
+    /// # Returns
+    ///
+    /// The matching result code, or `None` for a value reserved by a newer ABI.
+    pub const fn from_raw(value: u32) -> Option<Self> {
+        match value {
+            0 => Some(Self::Ok),
+            1 => Some(Self::BadAddress),
+            2 => Some(Self::BadSize),
+            3 => Some(Self::UnsupportedVersion),
+            4 => Some(Self::InvalidFlags),
+            5 => Some(Self::InvalidPolicy),
+            6 => Some(Self::InvalidArgument),
+            7 => Some(Self::CpuOffline),
+            8 => Some(Self::EmptyCpuMask),
+            9 => Some(Self::AdmissionFailed),
+            10 => Some(Self::Busy),
+            11 => Some(Self::BufferTooSmall),
+            _ => None,
+        }
+    }
+
+    /// Return the stable raw ABI representation of this result.
+    ///
+    /// # Returns
+    ///
+    /// The `u32` value returned by a scheduler-control syscall.
+    pub const fn as_raw(self) -> u32 {
+        self as u32
+    }
+}
+
+/// Stable runtime status reported by [`RawSchedulerStateV1`].
+///
+/// The raw state structure stores this value as `u32` so later ABI revisions
+/// can add statuses without making an older user library interpret an unknown
+/// discriminant as a known one.
+#[repr(u32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RawSchedulerStatus {
+    /// The kernel did not report a recognized scheduler status.
+    Unknown = 0,
+    /// The task is executing on [`RawSchedulerStateV1::current_cpu_id`].
+    Running = 1,
+    /// The task is runnable on [`RawSchedulerStateV1::queued_cpu_id`].
+    Queued = 2,
+    /// The task is blocked and not runnable.
+    Blocked = 3,
+    /// The task is suspended after exhausting a deadline runtime budget.
+    Throttled = 4,
+}
+
+impl RawSchedulerStatus {
+    /// Convert a raw ABI status value into a recognized scheduler status.
+    ///
+    /// # Arguments
+    ///
+    /// * `value` - Raw `u32` value supplied by the scheduler state ABI.
+    ///
+    /// # Returns
+    ///
+    /// The matching status, or `None` for a value reserved by a newer ABI.
+    pub const fn from_raw(value: u32) -> Option<Self> {
+        match value {
+            0 => Some(Self::Unknown),
+            1 => Some(Self::Running),
+            2 => Some(Self::Queued),
+            3 => Some(Self::Blocked),
+            4 => Some(Self::Throttled),
+            _ => None,
+        }
+    }
+
+    /// Return the stable raw ABI representation of this status.
+    ///
+    /// # Returns
+    ///
+    /// The `u32` discriminant stored in [`RawSchedulerStateV1::status`].
+    pub const fn as_raw(self) -> u32 {
+        self as u32
+    }
+}
+
+/// Raw v1 requested scheduler attributes for the calling task.
+///
+/// This is a current-task-only ABI: it deliberately contains no process ID,
+/// thread ID, handle, or other cross-task selector. Set and get scheduler
+/// attribute syscalls exchange this exact fixed layout. All integer fields are
+/// fixed-width so the layout is identical on supported 64-bit architectures.
+///
+/// Fair fallback affinity, nice, and utilization are present for both active
+/// policies. Deadline requests add the reservation fields and a separate
+/// [`RawSchedulerAttrV1::deadline_cpu_id`], allowing a complete configuration
+/// to be atomically reapplied without losing the Fair fallback.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RawSchedulerAttrV1 {
+    /// Size of this user-provided structure in bytes.
+    ///
+    /// Set this to [`RAW_SCHEDULER_ATTR_V1_SIZE`] for v1. The kernel uses it to
+    /// verify the available layout before reading or writing the structure.
+    pub size: u32,
+    /// ABI version, which must be [`SCHEDULER_CONTROL_VERSION_V1`] for v1.
+    pub version: u32,
+    /// Requested policy: [`SCHED_POLICY_FAIR`] or [`SCHED_POLICY_DEADLINE`].
+    pub policy: u32,
+    /// Requested flags, which must be [`SCHED_ATTR_FLAGS_NONE`] in v1.
+    pub flags: u32,
+    /// Fair fallback affinity encoding: [`SCHED_AFFINITY_ANY`],
+    /// [`SCHED_AFFINITY_SINGLE`], or [`SCHED_AFFINITY_MASK`].
+    pub affinity_kind: u32,
+    /// Fair fallback CPU ID for [`SCHED_AFFINITY_SINGLE`].
+    ///
+    /// Set this to [`SCHED_CPU_ID_NONE`] for any-CPU or mask affinity.
+    pub cpu_id: u32,
+    /// Requested Fair fallback nice value in the inclusive
+    /// [`SCHED_NICE_MIN`]..=[`SCHED_NICE_MAX`] range.
+    pub nice: i32,
+    /// Requested Fair fallback minimum scheduler utilization in
+    /// `0..=[SCHED_UTIL_SCALE]` capacity units.
+    pub util_min: u32,
+    /// User virtual address of the first byte of a Fair fallback affinity mask.
+    ///
+    /// This is a `u64` ABI address rather than a Rust pointer. It is used only
+    /// with [`SCHED_AFFINITY_MASK`] and must be zero otherwise.
+    pub cpu_mask_ptr: u64,
+    /// Number of bytes readable at [`RawSchedulerAttrV1::cpu_mask_ptr`].
+    ///
+    /// This must be sufficient for [`RawSchedulerAttrV1::cpu_mask_nbits`] and
+    /// zero for any-CPU or single-CPU affinity.
+    pub cpu_mask_bytes: u32,
+    /// Number of meaningful bits in the Fair fallback affinity mask.
+    ///
+    /// Bit `n` is the least-significant bit of byte `n / 8` shifted by
+    /// `n % 8`, and permits scheduler CPU `n`. This must be zero for any-CPU
+    /// or single-CPU affinity.
+    pub cpu_mask_nbits: u32,
+    /// Active Deadline runtime budget per period, in nanoseconds.
+    ///
+    /// This is zero when deadline scheduling is disabled.
+    pub runtime_ns: u64,
+    /// Active Deadline relative deadline, in nanoseconds.
+    ///
+    /// This is zero when deadline scheduling is disabled. v1 leaves
+    /// implicit-deadline enforcement to the kernel rather than a flag bit.
+    pub deadline_ns: u64,
+    /// Active Deadline reservation period, in nanoseconds.
+    ///
+    /// This is zero when deadline scheduling is disabled.
+    pub period_ns: u64,
+    /// Sole CPU used by the active Deadline reservation.
+    ///
+    /// Set this to [`SCHED_CPU_ID_NONE`] when [`RawSchedulerAttrV1::policy`]
+    /// is [`SCHED_POLICY_FAIR`]. The Fair fallback affinity remains encoded by
+    /// [`RawSchedulerAttrV1::affinity_kind`] and related mask fields regardless
+    /// of the active policy.
+    pub deadline_cpu_id: u32,
+    /// Reserved fixed-width field following [`RawSchedulerAttrV1::deadline_cpu_id`].
+    ///
+    /// Callers must initialize this to zero. The kernel must reject a nonzero
+    /// input value and return zero for output.
+    pub reserved0: u32,
+    /// Reserved for future ABI expansion.
+    ///
+    /// Callers must initialize every element to zero. The kernel must reject a
+    /// nonzero input element and must return zero for every output element.
+    pub reserved: [u64; 6],
+}
+
+/// Wire size of [`RawSchedulerAttrV1`] in bytes.
+pub const RAW_SCHEDULER_ATTR_V1_SIZE: u32 = 128;
+
+impl RawSchedulerAttrV1 {
+    /// Create zeroed v1 scheduler attributes with the required size and version.
+    ///
+    /// # Returns
+    ///
+    /// A fair-policy, any-CPU attribute block with all optional scheduler
+    /// controls disabled.
+    pub const fn new() -> Self {
+        Self {
+            size: RAW_SCHEDULER_ATTR_V1_SIZE,
+            version: SCHEDULER_CONTROL_VERSION_V1,
+            policy: SCHED_POLICY_FAIR,
+            flags: SCHED_ATTR_FLAGS_NONE,
+            affinity_kind: SCHED_AFFINITY_ANY,
+            cpu_id: SCHED_CPU_ID_NONE,
+            nice: 0,
+            util_min: 0,
+            cpu_mask_ptr: 0,
+            cpu_mask_bytes: 0,
+            cpu_mask_nbits: 0,
+            runtime_ns: 0,
+            deadline_ns: 0,
+            period_ns: 0,
+            deadline_cpu_id: SCHED_CPU_ID_NONE,
+            reserved0: 0,
+            reserved: [0; 6],
+        }
+    }
+}
+
+impl Default for RawSchedulerAttrV1 {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+const _: [(); 128] = [(); core::mem::size_of::<RawSchedulerAttrV1>()];
+const _: [(); 72] = [(); core::mem::offset_of!(RawSchedulerAttrV1, deadline_cpu_id)];
+const _: [(); 76] = [(); core::mem::offset_of!(RawSchedulerAttrV1, reserved0)];
+const _: [(); 80] = [(); core::mem::offset_of!(RawSchedulerAttrV1, reserved)];
+
+/// Raw v1 runtime scheduler state for the calling task.
+///
+/// This structure reports scheduler-observed state separately from the
+/// requested configuration in [`RawSchedulerAttrV1`]. It contains no
+/// cross-task selector and therefore always describes the current task.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RawSchedulerStateV1 {
+    /// Size of this user-provided structure in bytes.
+    ///
+    /// Set this to [`RAW_SCHEDULER_STATE_V1_SIZE`] before a state query.
+    pub size: u32,
+    /// ABI version, which must be [`SCHEDULER_CONTROL_VERSION_V1`] for v1.
+    pub version: u32,
+    /// Runtime status encoded as a [`RawSchedulerStatus`] discriminant.
+    pub status: u32,
+    /// Active policy: [`SCHED_POLICY_FAIR`] or [`SCHED_POLICY_DEADLINE`].
+    pub policy: u32,
+    /// Configured scheduler flags, which are always [`SCHED_ATTR_FLAGS_NONE`]
+    /// in v1.
+    pub flags: u32,
+    /// Active placement encoding.
+    ///
+    /// This is always single-CPU placement for Deadline. Query
+    /// [`RawSchedulerAttrV1`] for the retained Fair fallback affinity.
+    pub affinity_kind: u32,
+    /// Active single CPU, or [`SCHED_CPU_ID_NONE`] for Fair any-CPU or mask
+    /// placement. Query [`RawSchedulerAttrV1`] for the complete Fair fallback.
+    pub configured_cpu_id: u32,
+    /// CPU currently executing the task, or [`SCHED_CPU_ID_NONE`] when it is
+    /// not executing.
+    pub current_cpu_id: u32,
+    /// CPU whose ready queue owns the task, or [`SCHED_CPU_ID_NONE`] when the
+    /// task is not queued.
+    pub queued_cpu_id: u32,
+    /// Configured Fair fallback nice value.
+    pub nice: i32,
+    /// Configured Fair fallback minimum utilization in capacity units.
+    pub util_min: u32,
+    /// Reserved for future fixed-width state fields.
+    ///
+    /// The kernel must return this as zero; callers must ignore it.
+    pub reserved0: u32,
+    /// Current EEVDF virtual runtime, in scheduler virtual-time units.
+    pub fair_vruntime_ns: u64,
+    /// Current EEVDF virtual deadline, in scheduler virtual-time units.
+    pub fair_vdeadline_ns: u64,
+    /// Wall-clock fair slice remaining before the task should be reconsidered,
+    /// in nanoseconds.
+    pub fair_slice_remaining_ns: u64,
+    /// Runtime budget remaining in the active deadline period, in nanoseconds.
+    pub deadline_runtime_remaining_ns: u64,
+    /// Active deadline's absolute monotonic timestamp, in nanoseconds.
+    pub deadline_absolute_ns: u64,
+    /// Monotonic timestamp of the next deadline budget replenishment, in
+    /// nanoseconds.
+    pub deadline_replenishment_ns: u64,
+    /// Deadline bandwidth admission currently reserved for this task.
+    ///
+    /// This is a scheduler-defined fixed-point capacity value, not a duration
+    /// or a count. It is zero when deadline scheduling is disabled.
+    pub deadline_admission_units: u32,
+    /// Reserved for future deadline-state flags or metrics.
+    ///
+    /// The kernel must return this as zero; callers must ignore it.
+    pub reserved1: u32,
+    /// Number of deadline periods observed after their absolute deadline.
+    pub deadline_miss_count: u64,
+    /// Number of deadline runtime-budget overruns observed for this task.
+    pub deadline_overrun_count: u64,
+    /// Reserved for future ABI expansion.
+    ///
+    /// The kernel must return every element as zero; callers must ignore all
+    /// elements until a later ABI version assigns them meaning.
+    pub reserved: [u64; 5],
+}
+
+/// Wire size of [`RawSchedulerStateV1`] in bytes.
+pub const RAW_SCHEDULER_STATE_V1_SIZE: u32 = 160;
+
+impl RawSchedulerStateV1 {
+    /// Create a v1 state-query buffer with the required size and version.
+    ///
+    /// # Returns
+    ///
+    /// A zeroed state buffer whose header is ready to pass to the kernel.
+    pub const fn new() -> Self {
+        Self {
+            size: RAW_SCHEDULER_STATE_V1_SIZE,
+            version: SCHEDULER_CONTROL_VERSION_V1,
+            status: RawSchedulerStatus::Unknown.as_raw(),
+            policy: SCHED_POLICY_FAIR,
+            flags: SCHED_ATTR_FLAGS_NONE,
+            affinity_kind: SCHED_AFFINITY_ANY,
+            configured_cpu_id: SCHED_CPU_ID_NONE,
+            current_cpu_id: SCHED_CPU_ID_NONE,
+            queued_cpu_id: SCHED_CPU_ID_NONE,
+            nice: 0,
+            util_min: 0,
+            reserved0: 0,
+            fair_vruntime_ns: 0,
+            fair_vdeadline_ns: 0,
+            fair_slice_remaining_ns: 0,
+            deadline_runtime_remaining_ns: 0,
+            deadline_absolute_ns: 0,
+            deadline_replenishment_ns: 0,
+            deadline_admission_units: 0,
+            reserved1: 0,
+            deadline_miss_count: 0,
+            deadline_overrun_count: 0,
+            reserved: [0; 5],
+        }
+    }
+
+    /// Decode the stable scheduler status reported by this state snapshot.
+    ///
+    /// # Returns
+    ///
+    /// The recognized status, or `None` if a newer kernel returned an unknown
+    /// raw value.
+    pub const fn scheduler_status(&self) -> Option<RawSchedulerStatus> {
+        RawSchedulerStatus::from_raw(self.status)
+    }
+}
+
+impl Default for RawSchedulerStateV1 {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+const _: [(); 160] = [(); core::mem::size_of::<RawSchedulerStateV1>()];
+
 /// Raw regular file type value used in [`RawFileMetadata::file_type`].
 pub const FILE_TYPE_REGULAR: u32 = 0;
 /// Raw directory file type value used in [`RawFileMetadata::file_type`].
@@ -137,6 +549,9 @@ pub enum Syscall {
     GetTaskCpuAffinity = 43,
     SetTaskDeadline = 44,
     GetTaskDeadline = 45,
+    SetSchedulerAttr = 46,
+    GetSchedulerAttr = 47,
+    GetSchedulerState = 48,
 
     // Process information
     GetTaskInfoCount = 24,
