@@ -737,7 +737,8 @@ pub struct Task {
     pub sleep_waker: Waker,
     /// Kernel stack window base (slot_index, base_vaddr)
     pub kernel_stack_window_base: IrqSpinLock<Option<(usize, usize)>>,
-    pub pinned_cpu: Option<usize>,
+    /// CPUs on which this task may run. Each set bit is one scheduler CPU.
+    cpu_affinity_mask: AtomicUsize,
     pub last_cpu: atomic::AtomicUsize,
     /// CPU that currently "owns" this task (has saved its context or is
     /// actively running it). `usize::MAX` means unowned / available.
@@ -962,7 +963,7 @@ impl Task {
             handle_table: HandleTable::new(),
             sleep_waker: Waker::new_interruptible("task_sleep_waker"),
             kernel_stack_window_base: IrqSpinLock::new(None),
-            pinned_cpu: None,
+            cpu_affinity_mask: AtomicUsize::new(usize::MAX),
             last_cpu: atomic::AtomicUsize::new(0),
             running_cpu: atomic::AtomicUsize::new(usize::MAX),
             // Already protected
@@ -1013,6 +1014,65 @@ impl Task {
     pub fn set_core_preference(&self, preference: TaskCorePreference) {
         self.core_preference
             .store(preference.to_u8(), Ordering::SeqCst);
+    }
+
+    /// Return the CPU to which this task is pinned.
+    ///
+    /// # Returns
+    ///
+    /// The pinned CPU ID, or `None` when the task may run on any online CPU.
+    pub fn pinned_cpu(&self) -> Option<usize> {
+        let mask = self.cpu_affinity_mask();
+        mask.is_power_of_two()
+            .then_some(mask.trailing_zeros() as usize)
+    }
+
+    /// Set or clear this task's single-CPU affinity pin.
+    ///
+    /// # Arguments
+    ///
+    /// * `cpu_id` - Destination CPU ID, or `None` to allow any online CPU.
+    pub fn set_pinned_cpu(&self, cpu_id: Option<usize>) {
+        let mask = cpu_id
+            .and_then(|cpu_id| 1usize.checked_shl(cpu_id as u32))
+            .unwrap_or_else(|| if cpu_id.is_none() { usize::MAX } else { 0 });
+        self.set_cpu_affinity_mask(mask);
+    }
+
+    /// Return the task's allowed CPU mask.
+    ///
+    /// # Returns
+    ///
+    /// A bit mask in which bit `n` permits execution on scheduler CPU `n`.
+    pub fn cpu_affinity_mask(&self) -> usize {
+        self.cpu_affinity_mask.load(Ordering::SeqCst)
+    }
+
+    /// Replace the task's allowed CPU mask.
+    ///
+    /// Callers must ensure the mask contains at least one online CPU before
+    /// publishing it for a runnable task.
+    ///
+    /// # Arguments
+    ///
+    /// * `mask` - Bit mask in which bit `n` permits scheduler CPU `n`.
+    pub fn set_cpu_affinity_mask(&self, mask: usize) {
+        self.cpu_affinity_mask.store(mask, Ordering::SeqCst);
+    }
+
+    /// Return whether this task may execute on a scheduler CPU.
+    ///
+    /// # Arguments
+    ///
+    /// * `cpu_id` - Scheduler CPU ID to test.
+    ///
+    /// # Returns
+    ///
+    /// `true` when the CPU's bit is set in the task's affinity mask.
+    pub fn cpu_allowed(&self, cpu_id: usize) -> bool {
+        1usize
+            .checked_shl(cpu_id as u32)
+            .is_some_and(|bit| self.cpu_affinity_mask() & bit != 0)
     }
 
     /// Return the minimum scheduler utilization requested by this task.
@@ -1175,6 +1235,15 @@ impl Task {
     /// Return the task's current fair-scheduler quantum in nanoseconds.
     pub fn sched_slice_ns(&self) -> u64 {
         self.sched_slice_ns.load(Ordering::SeqCst)
+    }
+
+    /// Invalidate the active EEVDF request after its weight changes.
+    ///
+    /// The scheduler will derive a new slice and virtual deadline when the task
+    /// is next placed on a fair queue.
+    pub(crate) fn reset_sched_request(&self) {
+        self.sched_slice_ns.store(0, Ordering::SeqCst);
+        self.sched_deadline.store(0, Ordering::SeqCst);
     }
 
     /// Return whether the task is currently inserted in a fair run queue.
@@ -2580,6 +2649,7 @@ impl Task {
             .sched_weight
             .store(nice_to_weight(nice), Ordering::SeqCst);
         child.set_core_preference(self.core_preference());
+        child.set_cpu_affinity_mask(self.cpu_affinity_mask());
         child
             .sched_util_min
             .store(self.sched_util_min(), Ordering::SeqCst);
@@ -4864,5 +4934,48 @@ mod tests {
         let ns3_id = get_task_by_id(id3).unwrap().get_namespace().get_id();
         assert_eq!(ns1_id, ns2_id, "All tasks should share root namespace");
         assert_eq!(ns2_id, ns3_id, "All tasks should share root namespace");
+    }
+
+    #[test_case]
+    fn test_task_cpu_affinity_round_trip() {
+        let task = Task::new("AffinityTask".to_string(), 0, TaskType::Kernel);
+
+        assert_eq!(task.pinned_cpu(), None);
+        assert!(task.cpu_allowed(0));
+        task.set_pinned_cpu(Some(3));
+        assert_eq!(task.pinned_cpu(), Some(3));
+        assert_eq!(task.cpu_affinity_mask(), 1 << 3);
+        assert!(task.cpu_allowed(3));
+        assert!(!task.cpu_allowed(2));
+        task.set_cpu_affinity_mask((1 << 1) | (1 << 3));
+        assert_eq!(task.pinned_cpu(), None);
+        assert!(task.cpu_allowed(1));
+        assert!(task.cpu_allowed(3));
+        assert!(!task.cpu_allowed(0));
+        task.set_pinned_cpu(None);
+        assert_eq!(task.pinned_cpu(), None);
+        assert_eq!(task.cpu_affinity_mask(), usize::MAX);
+    }
+
+    #[test_case]
+    fn test_task_nice_updates_weight_and_clamps() {
+        let task = Task::new("NiceTask".to_string(), 0, TaskType::Kernel);
+
+        task.set_nice(-5);
+        assert_eq!(task.nice(), -5);
+        assert_eq!(task.sched_weight(), super::nice_to_weight(-5));
+
+        task.set_nice(super::SCHED_NICE_MAX + 1);
+        assert_eq!(task.nice(), super::SCHED_NICE_MAX);
+        assert_eq!(
+            task.sched_weight(),
+            super::nice_to_weight(super::SCHED_NICE_MAX)
+        );
+
+        task.sched_slice_ns.store(1_000, Ordering::SeqCst);
+        task.sched_deadline.store(2_000, Ordering::SeqCst);
+        task.reset_sched_request();
+        assert_eq!(task.sched_slice_ns(), 0);
+        assert_eq!(task.sched_deadline(), 0);
     }
 }

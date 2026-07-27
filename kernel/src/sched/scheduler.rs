@@ -1137,9 +1137,9 @@ fn set_scheduler_ready(cpu_id: usize, ready: bool) {
 /// * `parent_cpu` - CPU currently executing the parent task.
 pub fn apply_fork_child_diagnostic_affinity(child: &mut Task, parent_cpu: usize) {
     if DIAGNOSTIC_PIN_FORK_CHILD_TO_BSP {
-        child.pinned_cpu = Some(BOOT_CPU_ID.load(Ordering::Acquire));
+        child.set_pinned_cpu(Some(BOOT_CPU_ID.load(Ordering::Acquire)));
     } else if DIAGNOSTIC_PIN_FORK_CHILD_TO_PARENT_CPU {
-        child.pinned_cpu = Some(parent_cpu);
+        child.set_pinned_cpu(Some(parent_cpu));
     }
 }
 
@@ -1265,9 +1265,7 @@ fn release_deferred_prev(cpu_id: usize) {
             // safely claim the saved kernel context from its ready queue.
             TaskState::Ready => {
                 let now_ns = get_time_ns();
-                let target_cpu = migration_target_for_task(&task, cpu_id, now_ns, true)
-                    .filter(|&target_cpu| is_cpu_online(target_cpu))
-                    .unwrap_or(cpu_id);
+                let target_cpu = runnable_requeue_target(&task, cpu_id, now_ns, true);
                 if target_cpu != cpu_id {
                     record_scheduler_migration(&task, cpu_id, target_cpu, now_ns);
                 }
@@ -1278,7 +1276,9 @@ fn release_deferred_prev(cpu_id: usize) {
                 };
                 push_ready_task_with_mode(target_cpu, prev_id, mode);
                 task.last_cpu.store(target_cpu, Ordering::SeqCst);
-                notify_remote_ready_task(target_cpu, prev_id, "migrate-ipi-send");
+                if target_cpu != cpu_id {
+                    notify_remote_ready_task(target_cpu, prev_id, "migrate-ipi-send");
+                }
             }
             TaskState::Zombie => {
                 finalize_zombie(prev_id, task.get_parent_id());
@@ -1309,6 +1309,29 @@ fn release_deferred_prev(cpu_id: usize) {
         //     );
         // }
     }
+}
+
+fn runnable_requeue_target(
+    task: &Task,
+    current_cpu: usize,
+    now_ns: u64,
+    record_skip: bool,
+) -> usize {
+    if !task.cpu_allowed(current_cpu) {
+        let target_cpu = select_target_cpu_at(Some(task), now_ns);
+        if is_cpu_online(target_cpu) && task.cpu_allowed(target_cpu) {
+            return target_cpu;
+        }
+    }
+
+    migration_target_for_task(task, current_cpu, now_ns, record_skip)
+        .filter(|&target_cpu| is_cpu_online(target_cpu))
+        .unwrap_or(current_cpu)
+}
+
+fn current_task_must_switch(task: &Task, current_cpu: usize, now_ns: u64) -> bool {
+    !task.cpu_allowed(current_cpu)
+        || migration_target_for_task(task, current_cpu, now_ns, false).is_some()
 }
 
 fn charge_finished_cpu_time(cpu_id: usize, task_id: usize, delta_ns: u64) {
@@ -1479,6 +1502,65 @@ fn account_local_fair_clock(cpu_id: usize, now_ns: u64) {
     }
 }
 
+/// Charge the current task's EEVDF runtime through the current timestamp.
+///
+/// Call this before changing a running task's scheduler weight so elapsed
+/// runtime is charged using the weight that applied while it executed.
+pub fn account_current_fair_runtime() {
+    let cpu_id = get_cpu().get_cpuid();
+    account_local_fair_clock(cpu_id, get_time_ns());
+}
+
+/// Change a task's nice value while preserving fair-scheduler accounting.
+///
+/// Running time already consumed is charged with the old weight. A queued task
+/// is removed and reinserted so its EEVDF request is rebuilt with the new
+/// weight.
+///
+/// # Arguments
+///
+/// * `task` - Task whose nice value should change.
+/// * `nice` - New validated scheduler nice value.
+pub fn update_task_nice(task: &Task, nice: i32) {
+    let now_ns = get_time_ns();
+    let running_cpu = task.running_cpu.load(Ordering::SeqCst);
+    if running_cpu < MAX_NUM_CPUS {
+        let mut queue = fair_queue(running_cpu).lock();
+        if task.running_cpu.load(Ordering::SeqCst) == running_cpu {
+            update_curr_fair(task, &mut queue, now_ns);
+            task.set_nice(nice);
+            task.reset_sched_request();
+            drop(queue);
+            if running_cpu != get_cpu().get_cpuid() && is_cpu_online(running_cpu) {
+                request_remote_reschedule(running_cpu);
+            }
+            return;
+        }
+    }
+
+    let task_id = task.get_id();
+    let mut queued_cpu = None;
+    for_each_online_cpu(|cpu_id| {
+        if queued_cpu.is_none() && remove_ready_task_from_cpu(cpu_id, task_id) {
+            queued_cpu = Some(cpu_id);
+        }
+    });
+
+    task.set_nice(nice);
+    task.reset_sched_request();
+    if let Some(previous_cpu) = queued_cpu {
+        let target_cpu = select_enqueue_cpu_for_task(task, previous_cpu, now_ns);
+        let mode = if target_cpu == previous_cpu {
+            PlaceMode::LocalPreempt
+        } else {
+            PlaceMode::Migrate
+        };
+        push_ready_task_with_mode(target_cpu, task_id, mode);
+        task.last_cpu.store(target_cpu, Ordering::SeqCst);
+        notify_remote_ready_task(target_cpu, task_id, "nice");
+    }
+}
+
 /// Return a system-wide CPU accounting snapshot.
 ///
 /// # Returns
@@ -1546,6 +1628,37 @@ fn try_claim_ready_task(task: &Task, cpu_id: usize) -> bool {
         return false;
     }
     task.last_cpu.store(cpu_id, Ordering::SeqCst);
+    true
+}
+
+fn reject_disallowed_claim(task: &Task, cpu_id: usize, now_ns: u64) -> bool {
+    if task.cpu_allowed(cpu_id) {
+        return false;
+    }
+    if task
+        .running_cpu
+        .compare_exchange(cpu_id, NO_CPU, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return true;
+    }
+
+    match task.state.compare_exchange(
+        TaskState::Running,
+        TaskState::Ready,
+        Ordering::SeqCst,
+        Ordering::SeqCst,
+    ) {
+        Ok(_) | Err(TaskState::Ready) => {
+            let target_cpu = select_target_cpu_at(Some(task), now_ns);
+            push_ready_task_with_mode(target_cpu, task.get_id(), PlaceMode::Migrate);
+            task.last_cpu.store(target_cpu, Ordering::SeqCst);
+            notify_remote_ready_task(target_cpu, task.get_id(), "affinity-claim");
+        }
+        Err(TaskState::Zombie) => finalize_zombie(task.get_id(), task.get_parent_id()),
+        Err(TaskState::Terminated) => cleanup_zombie(task.get_id()),
+        Err(TaskState::NotInitialized | TaskState::Running | TaskState::Blocked(_)) => {}
+    }
     true
 }
 
@@ -2031,11 +2144,16 @@ fn cpu_better_for_preference(
 }
 
 fn select_target_cpu_at(task: Option<&Task>, now_ns: u64) -> usize {
-    if task.is_some_and(diagnostic_run_task_on_bsp) {
-        return BOOT_CPU_ID.load(Ordering::Acquire);
+    let boot_cpu = BOOT_CPU_ID.load(Ordering::Acquire);
+    if task.is_some_and(diagnostic_run_task_on_bsp)
+        && task.is_none_or(|task| task.cpu_allowed(boot_cpu))
+    {
+        return boot_cpu;
     }
-    if DIAGNOSTIC_RUN_UNPINNED_TASKS_ON_BSP && task.is_none_or(|task| task.pinned_cpu.is_none()) {
-        return BOOT_CPU_ID.load(Ordering::Acquire);
+    if DIAGNOSTIC_RUN_UNPINNED_TASKS_ON_BSP
+        && task.is_none_or(|task| task.pinned_cpu().is_none() && task.cpu_allowed(boot_cpu))
+    {
+        return boot_cpu;
     }
 
     let cpus = ONLINE_CPUS.lock();
@@ -2053,6 +2171,9 @@ fn select_target_cpu_at(task: Option<&Task>, now_ns: u64) -> usize {
 
     for offset in 0..cpus.len() {
         let cpu_id = cpus[(start + offset) % cpus.len()];
+        if task.is_some_and(|task| !task.cpu_allowed(cpu_id)) {
+            continue;
+        }
         let score = cpu_load_score(cpu_id);
 
         if fallback
@@ -2090,19 +2211,23 @@ fn select_target_cpu(task: Option<&Task>) -> usize {
 }
 
 fn select_enqueue_cpu_for_task(task: &Task, requested_cpu: usize, now_ns: u64) -> usize {
-    if diagnostic_run_task_on_bsp(task) {
-        return BOOT_CPU_ID.load(Ordering::Acquire);
+    let boot_cpu = BOOT_CPU_ID.load(Ordering::Acquire);
+    if diagnostic_run_task_on_bsp(task) && task.cpu_allowed(boot_cpu) {
+        return boot_cpu;
     }
-    if let Some(pinned_cpu) = task.pinned_cpu {
+    if let Some(pinned_cpu) = task.pinned_cpu() {
         return pinned_cpu;
     }
     if DIAGNOSTIC_RUN_UNPINNED_TASKS_ON_BSP {
-        return BOOT_CPU_ID.load(Ordering::Acquire);
+        if task.cpu_allowed(boot_cpu) {
+            return boot_cpu;
+        }
     }
 
     let selected = select_target_cpu_at(Some(task), now_ns);
     let selected_score = cpu_load_score(selected);
     if is_cpu_online(requested_cpu)
+        && task.cpu_allowed(requested_cpu)
         && cpu_capacity(requested_cpu) >= task_min_cpu_capacity_at(Some(task), now_ns)
         && cpu_load_score(requested_cpu) <= selected_score
     {
@@ -2116,10 +2241,7 @@ fn task_can_run_on_cpu(task: &Task, cpu_id: usize, now_ns: u64) -> bool {
     if diagnostic_run_task_on_bsp(task) && cpu_id != BOOT_CPU_ID.load(Ordering::Acquire) {
         return false;
     }
-    if task
-        .pinned_cpu
-        .is_some_and(|pinned_cpu| pinned_cpu != cpu_id)
-    {
+    if !task.cpu_allowed(cpu_id) {
         return false;
     }
 
@@ -2237,20 +2359,26 @@ fn steal_ready_task_for_cpu(target_cpu: usize, now_ns: u64) -> Option<usize> {
         }
         return None;
     }
+    if reject_disallowed_claim(&task, target_cpu, now_ns) {
+        return None;
+    }
 
     record_work_steal(&task, now_ns);
     Some(task_id)
 }
 
 fn select_wake_cpu_for_task(task: &Task, now_ns: u64) -> usize {
-    if diagnostic_run_task_on_bsp(task) {
-        return BOOT_CPU_ID.load(Ordering::Acquire);
+    let boot_cpu = BOOT_CPU_ID.load(Ordering::Acquire);
+    if diagnostic_run_task_on_bsp(task) && task.cpu_allowed(boot_cpu) {
+        return boot_cpu;
     }
-    if let Some(pinned_cpu) = task.pinned_cpu {
+    if let Some(pinned_cpu) = task.pinned_cpu() {
         return pinned_cpu;
     }
     if DIAGNOSTIC_RUN_UNPINNED_TASKS_ON_BSP {
-        return BOOT_CPU_ID.load(Ordering::Acquire);
+        if task.cpu_allowed(boot_cpu) {
+            return boot_cpu;
+        }
     }
 
     let min_capacity = task_min_cpu_capacity_at(Some(task), now_ns);
@@ -2258,6 +2386,7 @@ fn select_wake_cpu_for_task(task: &Task, now_ns: u64) -> usize {
     let selected_score = cpu_load_score(selected);
     let last = task.last_cpu.load(Ordering::SeqCst);
     if is_cpu_online(last)
+        && task.cpu_allowed(last)
         && cpu_capacity(last) >= min_capacity
         && cpu_load_score(last) <= selected_score
     {
@@ -2265,6 +2394,7 @@ fn select_wake_cpu_for_task(task: &Task, now_ns: u64) -> usize {
     } else {
         let current = get_cpu().get_cpuid();
         if is_cpu_online(current)
+            && task.cpu_allowed(current)
             && cpu_capacity(current) >= min_capacity
             && cpu_load_score(current) <= selected_score
         {
@@ -2296,6 +2426,9 @@ fn select_lower_capacity_cpu(task: &Task, current_cpu: usize, min_capacity: u32)
 
     for &cpu_id in cpus.iter() {
         if cpu_id == current_cpu {
+            continue;
+        }
+        if !task.cpu_allowed(cpu_id) {
             continue;
         }
 
@@ -2404,7 +2537,7 @@ fn migration_target_for_task(
     if DIAGNOSTIC_DISABLE_TASK_MIGRATION {
         return None;
     }
-    if task.pinned_cpu.is_some() || !is_cpu_online(current_cpu) {
+    if !is_cpu_online(current_cpu) {
         return None;
     }
 
@@ -2510,6 +2643,45 @@ pub fn num_online_cpus() -> usize {
     ONLINE_CPUS.lock().len()
 }
 
+/// Reconcile a runnable task after its allowed CPU mask changes.
+///
+/// A queued task is moved immediately when its current queue is no longer
+/// allowed. A task running on a newly disallowed CPU receives a reschedule IPI;
+/// the normal switch path then requeues it on an allowed CPU.
+///
+/// # Arguments
+///
+/// * `task` - Task whose affinity mask was just replaced.
+pub fn reconcile_task_affinity(task: &Task) {
+    let running_cpu = task.running_cpu.load(Ordering::SeqCst);
+    if running_cpu != NO_CPU {
+        if !task.cpu_allowed(running_cpu) && is_cpu_online(running_cpu) {
+            request_remote_reschedule(running_cpu);
+        }
+        return;
+    }
+
+    if !matches!(task.state.load(Ordering::SeqCst), TaskState::Ready) {
+        return;
+    }
+
+    let task_id = task.get_id();
+    let mut removed = false;
+    for_each_online_cpu(|cpu_id| {
+        if !removed && !task.cpu_allowed(cpu_id) {
+            removed = remove_ready_task_from_cpu(cpu_id, task_id);
+        }
+    });
+    if !removed {
+        return;
+    }
+
+    let target_cpu = select_target_cpu_at(Some(task), get_time_ns());
+    push_ready_task_with_mode(target_cpu, task_id, PlaceMode::Migrate);
+    task.last_cpu.store(target_cpu, Ordering::SeqCst);
+    notify_remote_ready_task(target_cpu, task_id, "affinity");
+}
+
 /// Register the logical CPU that entered the architecture-independent kernel.
 ///
 /// # Arguments
@@ -2533,7 +2705,7 @@ pub fn register_boot_cpu(cpu_id: usize) {
 ///
 /// Selected scheduler CPU ID.
 pub fn select_cpu_for_task(task: &Task) -> usize {
-    if let Some(pinned_cpu) = task.pinned_cpu {
+    if let Some(pinned_cpu) = task.pinned_cpu() {
         return pinned_cpu;
     }
 
@@ -2763,14 +2935,14 @@ pub fn push_ready_task(cpu_id: usize, task_id: usize) {
 }
 
 fn push_ready_task_with_mode(cpu_id: usize, task_id: usize, mode: PlaceMode) {
-    let cpu_id =
-        if TaskPool::get_task(task_id).is_some_and(|task| diagnostic_run_task_on_bsp(&task)) {
-            BOOT_CPU_ID.load(Ordering::Acquire)
-        } else {
-            cpu_id
-        };
     let Some(task) = TaskPool::get_task(task_id) else {
         return;
+    };
+    let boot_cpu = BOOT_CPU_ID.load(Ordering::Acquire);
+    let cpu_id = if diagnostic_run_task_on_bsp(&task) && task.cpu_allowed(boot_cpu) {
+        boot_cpu
+    } else {
+        cpu_id
     };
     enqueue_fair(cpu_id, &task, mode);
 }
@@ -2964,12 +3136,10 @@ fn pick_next(cpu: &Arch) -> (Option<usize>, Option<usize>) {
                 let Some(task) = TaskPool::get_task(task_id) else {
                     continue;
                 };
-                if task.pinned_cpu.is_some_and(|p| p != cpu_id) {
-                    push_ready_task_with_mode(
-                        task.pinned_cpu.unwrap(),
-                        task_id,
-                        PlaceMode::Migrate,
-                    );
+                if !task.cpu_allowed(cpu_id) {
+                    let target_cpu = select_target_cpu_at(Some(&task), get_time_ns());
+                    push_ready_task_with_mode(target_cpu, task_id, PlaceMode::Migrate);
+                    notify_remote_ready_task(target_cpu, task_id, "affinity-pick");
                     continue;
                 }
                 match task.state.load(Ordering::SeqCst) {
@@ -2992,6 +3162,9 @@ fn pick_next(cpu: &Arch) -> (Option<usize>, Option<usize>) {
                             continue;
                         }
                         if try_claim_ready_task(&task, cpu_id) {
+                            if reject_disallowed_claim(&task, cpu_id, get_time_ns()) {
+                                continue;
+                            }
                             // if take_fork_trace_first_pick(task_id) {
                             //     crate::early_println!(
                             //         "[fork-trace] child_task_id={} picked cpu={}",
@@ -3052,7 +3225,8 @@ fn pick_next(cpu: &Arch) -> (Option<usize>, Option<usize>) {
                     TaskState::Running | TaskState::Ready
                 )
             {
-                if migration_target_for_task(&ot, cpu_id, get_time_ns(), false).is_some() {
+                let must_switch = current_task_must_switch(ot, cpu_id, get_time_ns());
+                if must_switch {
                     let idle_id = IDLE_TASK_IDS[cpu_id].load(Ordering::SeqCst);
                     if idle_id != 0
                         && oid != idle_id
@@ -3062,7 +3236,7 @@ fn pick_next(cpu: &Arch) -> (Option<usize>, Option<usize>) {
                         next_id = Some(idle_id);
                     }
                 }
-                if next_id.is_none() {
+                if next_id.is_none() && !must_switch {
                     ot.state.store(TaskState::Running, Ordering::SeqCst);
                     account_current_task_slice_boundary(cpu_id);
                     replace_local_slice(cpu_id, Some(oid));
@@ -3358,8 +3532,8 @@ fn idle_entry() {
 
 pub fn spawn_idle_task(cpu_id: usize) -> usize {
     let name = alloc::format!("idle{}", cpu_id);
-    let mut task = new_kernel_task(name, 0, idle_entry);
-    task.pinned_cpu = Some(cpu_id);
+    let task = new_kernel_task(name, 0, idle_entry);
+    task.set_pinned_cpu(Some(cpu_id));
     task.init();
     // Idle task is used as a fallback in pick_next when no real tasks are available.
     let task_id = match get_task_pool().add_task(task) {
@@ -4344,8 +4518,8 @@ mod tests {
         register_cpu_topology(source_cpu, CpuCoreClass::Balanced, 0).unwrap();
         register_cpu_topology(target_cpu, CpuCoreClass::Balanced, 0).unwrap();
 
-        let mut task = Task::new("PinnedTask".to_string(), 1, TaskType::Kernel);
-        task.pinned_cpu = Some(source_cpu);
+        let task = Task::new("PinnedTask".to_string(), 1, TaskType::Kernel);
+        task.set_pinned_cpu(Some(source_cpu));
         let task_id = register_task(task);
         let task = TaskPool::get_task(task_id).unwrap();
         task.state.store(TaskState::Ready, Ordering::SeqCst);
@@ -4361,6 +4535,70 @@ mod tests {
         );
         assert_eq!(steal_ready_task_for_cpu(target_cpu, 20_000_000), None);
         assert!(fair_queue(source_cpu).lock().contains(&task_id));
+    }
+
+    #[test_case]
+    fn test_new_pin_forces_switch_and_pinned_requeue_target() {
+        if MAX_NUM_CPUS < 2 {
+            return;
+        }
+
+        reset();
+        let source_cpu = 0;
+        let target_cpu = 1;
+        register_online_cpu(source_cpu);
+        register_online_cpu(target_cpu);
+        let task = Task::new("RepinnedTask".to_string(), 1, TaskType::Kernel);
+        task.set_pinned_cpu(Some(target_cpu));
+
+        assert!(current_task_must_switch(&task, source_cpu, 20_000_000));
+        assert_eq!(
+            runnable_requeue_target(&task, source_cpu, 20_000_000, false),
+            target_cpu
+        );
+    }
+
+    #[test_case]
+    fn test_multi_cpu_affinity_constrains_placement_and_requeue() {
+        if MAX_NUM_CPUS < 3 {
+            return;
+        }
+
+        reset();
+        register_online_cpu(0);
+        register_online_cpu(1);
+        register_online_cpu(2);
+        let task = Task::new("MaskedTask".to_string(), 1, TaskType::Kernel);
+        task.set_cpu_affinity_mask((1 << 1) | (1 << 2));
+
+        let selected = select_cpu_for_task(&task);
+        assert!(selected == 1 || selected == 2);
+        assert!(current_task_must_switch(&task, 0, 20_000_000));
+        let target = runnable_requeue_target(&task, 0, 20_000_000, false);
+        assert!(target == 1 || target == 2);
+        assert!(!task_can_run_on_cpu(&task, 0, 20_000_000));
+        assert!(task_can_run_on_cpu(&task, target, 20_000_000));
+    }
+
+    #[test_case]
+    fn test_post_claim_affinity_change_requeues_disallowed_task() {
+        if MAX_NUM_CPUS < 2 {
+            return;
+        }
+
+        reset();
+        register_online_cpu(0);
+        register_online_cpu(1);
+        let task_id = register_task(Task::new("ClaimRaceTask".to_string(), 1, TaskType::Kernel));
+        let task = TaskPool::get_task(task_id).unwrap();
+        task.state.store(TaskState::Ready, Ordering::SeqCst);
+        assert!(try_claim_ready_task(&task, 0));
+
+        task.set_cpu_affinity_mask(1 << 1);
+        assert!(reject_disallowed_claim(&task, 0, 20_000_000));
+        assert_eq!(task.running_cpu.load(Ordering::SeqCst), NO_CPU);
+        assert_eq!(task.state.load(Ordering::SeqCst), TaskState::Ready);
+        assert!(fair_queue(1).lock().contains(&task_id));
     }
 
     #[test_case]
@@ -4396,8 +4634,8 @@ mod tests {
         reset();
         register_online_cpu(0);
         register_online_cpu(1);
-        let mut new_task = Task::new("RemoteWakeTask".to_string(), 1, TaskType::Kernel);
-        new_task.pinned_cpu = Some(1);
+        let new_task = Task::new("RemoteWakeTask".to_string(), 1, TaskType::Kernel);
+        new_task.set_pinned_cpu(Some(1));
         let task_id = register_task(new_task);
         let task = TaskPool::get_task(task_id).unwrap();
         task.state.store(
