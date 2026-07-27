@@ -5,6 +5,10 @@ use crate::vec::Vec;
 
 /// Scheduler utilization scale used by Scarlet task placement hints.
 pub const SCHED_UTIL_SCALE: u32 = scarlet_sys::SCHED_UTIL_SCALE;
+/// Minimum nice value accepted by Scarlet Native scheduler controls.
+pub const SCHED_NICE_MIN: i32 = scarlet_sys::SCHED_NICE_MIN;
+/// Maximum nice value accepted by Scarlet Native scheduler controls.
+pub const SCHED_NICE_MAX: i32 = scarlet_sys::SCHED_NICE_MAX;
 
 // Flags for execve system calls
 pub const EXECVE_FORCE_ABI_REBUILD: usize = 0x1; // Force ABI environment reconstruction
@@ -213,6 +217,8 @@ pub enum TaskControlError {
 pub enum SchedulerHintError {
     /// The requested utilization value is outside the supported range.
     InvalidUtilization,
+    /// The requested nice value is outside the supported range.
+    InvalidNice,
     /// The kernel rejected the scheduler hint operation.
     SyscallFailed,
 }
@@ -1214,4 +1220,63 @@ pub fn sched_util_min() -> Result<u32, SchedulerHintError> {
     } else {
         Ok(ret as u32)
     }
+}
+
+/// Set the current task's EEVDF nice value.
+///
+/// # Arguments
+///
+/// * `nice` - Nice value from [`SCHED_NICE_MIN`] through [`SCHED_NICE_MAX`].
+///
+/// # Returns
+///
+/// `Ok(())` on success, or an error if the value is invalid or rejected.
+pub fn set_task_nice(nice: i32) -> Result<(), SchedulerHintError> {
+    if !(SCHED_NICE_MIN..=SCHED_NICE_MAX).contains(&nice) {
+        return Err(SchedulerHintError::InvalidNice);
+    }
+
+    let ret = syscall1(Syscall::SetTaskNice, nice as isize as usize);
+    if ret == usize::MAX {
+        Err(SchedulerHintError::SyscallFailed)
+    } else {
+        Ok(())
+    }
+}
+
+/// Return the current task's EEVDF nice value.
+///
+/// # Returns
+///
+/// Current signed nice value.
+pub fn task_nice() -> i32 {
+    syscall0(Syscall::GetTaskNice) as isize as i32
+}
+
+/// Set or clear the current task's single-CPU affinity pin.
+///
+/// # Arguments
+///
+/// * `cpu_id` - CPU to pin to, or `None` to allow any online CPU.
+///
+/// # Returns
+///
+/// `Ok(())` on success, or an error if the kernel rejects the CPU ID.
+pub fn set_task_cpu_affinity(cpu_id: Option<usize>) -> Result<(), SchedulerHintError> {
+    let ret = syscall1(Syscall::SetTaskCpuAffinity, cpu_id.unwrap_or(usize::MAX));
+    if ret == usize::MAX {
+        Err(SchedulerHintError::SyscallFailed)
+    } else {
+        Ok(())
+    }
+}
+
+/// Return the current task's single-CPU affinity pin.
+///
+/// # Returns
+///
+/// Pinned CPU ID, or `None` when the task may run on any online CPU.
+pub fn task_cpu_affinity() -> Option<usize> {
+    let cpu_id = syscall0(Syscall::GetTaskCpuAffinity);
+    (cpu_id != usize::MAX).then_some(cpu_id)
 }

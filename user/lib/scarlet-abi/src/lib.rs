@@ -22,6 +22,11 @@ pub type Tid = u32;
 /// heterogeneous systems.
 pub const SCHED_UTIL_SCALE: u32 = 1024;
 
+/// Highest-priority nice value accepted by Scarlet Native scheduler controls.
+pub const SCHED_NICE_MIN: i32 = -20;
+/// Lowest-priority nice value accepted by Scarlet Native scheduler controls.
+pub const SCHED_NICE_MAX: i32 = 19;
+
 /// Raw regular file type value used in [`RawFileMetadata::file_type`].
 pub const FILE_TYPE_REGULAR: u32 = 0;
 /// Raw directory file type value used in [`RawFileMetadata::file_type`].
@@ -112,6 +117,10 @@ pub enum Syscall {
     SystemTime = 37,
     SetTaskUtilMin = 38,
     GetTaskUtilMin = 39,
+    SetTaskNice = 40,
+    GetTaskNice = 41,
+    SetTaskCpuAffinity = 42,
+    GetTaskCpuAffinity = 43,
 
     // Process information
     GetTaskInfoCount = 24,
