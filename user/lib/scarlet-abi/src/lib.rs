@@ -27,6 +27,20 @@ pub const SCHED_NICE_MIN: i32 = -20;
 /// Lowest-priority nice value accepted by Scarlet Native scheduler controls.
 pub const SCHED_NICE_MAX: i32 = 19;
 
+/// Fixed-layout periodic deadline reservation parameters.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RawTaskDeadlineParams {
+    /// CPU runtime available during each period, in nanoseconds.
+    pub runtime_ns: u64,
+    /// Relative completion deadline, in nanoseconds.
+    pub deadline_ns: u64,
+    /// Reservation period, in nanoseconds.
+    pub period_ns: u64,
+}
+
+const _: [(); 24] = [(); core::mem::size_of::<RawTaskDeadlineParams>()];
+
 /// Raw regular file type value used in [`RawFileMetadata::file_type`].
 pub const FILE_TYPE_REGULAR: u32 = 0;
 /// Raw directory file type value used in [`RawFileMetadata::file_type`].
@@ -121,6 +135,8 @@ pub enum Syscall {
     GetTaskNice = 41,
     SetTaskCpuAffinity = 42,
     GetTaskCpuAffinity = 43,
+    SetTaskDeadline = 44,
+    GetTaskDeadline = 45,
 
     // Process information
     GetTaskInfoCount = 24,

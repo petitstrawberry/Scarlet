@@ -24,17 +24,25 @@ use crate::fs::MAX_PATH_LENGTH;
 use crate::library::std::string::{
     parse_c_string_from_userspace, parse_string_array_from_userspace,
 };
-use crate::library::std::usercopy::copy_to_user;
+use crate::library::std::usercopy::{copy_from_user, copy_to_user};
 use crate::sched::scheduler::{
-    account_current_fair_runtime, cleanup_zombie, cpu_usage_snapshot, enqueue_task,
-    get_all_task_ids, get_task_by_id, is_cpu_online, remove_task_from_queues, schedule,
+    account_current_fair_runtime, cleanup_zombie, cpu_usage_snapshot, current_task_deadline,
+    disable_current_task_deadline, enable_current_task_deadline, enqueue_task, get_all_task_ids,
+    get_task_by_id, is_cpu_online, remove_task_from_queues, schedule,
 };
 use crate::task::{
-    CloneFlags, CloneFlagsDef, SCHED_NICE_MAX, SCHED_NICE_MIN, SCHED_UTIL_SCALE, TaskState,
-    WaitError, get_parent_waitpid_waker, get_waitpid_waker,
+    CloneFlags, CloneFlagsDef, SCHED_NICE_MAX, SCHED_NICE_MIN, SCHED_UTIL_SCALE,
+    TaskDeadlineParams, TaskState, WaitError, get_parent_waitpid_waker, get_waitpid_waker,
 };
 
 const MAX_ARG_COUNT: usize = 256; // Maximum number of arguments for execve
+
+fn decode_native_u64(bytes: &[u8], offset: usize) -> u64 {
+    let mut word = [0u8; core::mem::size_of::<u64>()];
+    let end = offset + word.len();
+    word.copy_from_slice(&bytes[offset..end]);
+    u64::from_ne_bytes(word)
+}
 
 // Flags for execve system calls
 pub const EXECVE_FORCE_ABI_REBUILD: usize = 0x1; // Force ABI environment reconstruction
@@ -1000,6 +1008,10 @@ pub fn sys_set_task_cpu_affinity(trapframe: &mut Trapframe) -> usize {
     let cpu_id = trapframe.get_arg(0);
     trapframe.increment_pc_next(&task);
 
+    if task.deadline_enabled() {
+        return usize::MAX;
+    }
+
     if cpu_id == usize::MAX {
         task.set_pinned_cpu(None);
     } else if is_cpu_online(cpu_id) {
@@ -1024,6 +1036,74 @@ pub fn sys_get_task_cpu_affinity(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     trapframe.increment_pc_next(&task);
     task.pinned_cpu().unwrap_or(usize::MAX)
+}
+
+/// Configure or disable the current task's periodic deadline reservation.
+///
+/// # Arguments
+///
+/// * `trapframe.arg(0)` - Pointer to three native-endian `u64` values containing
+///   runtime, relative deadline, and period in nanoseconds. Three zero values
+///   disable the current reservation.
+///
+/// # Returns
+///
+/// `0` on success, or `usize::MAX` for an invalid pointer, invalid parameters,
+/// missing reservation on disable, or failed admission control.
+pub fn sys_set_task_deadline(trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    let params_ptr = trapframe.get_arg(0);
+    trapframe.increment_pc_next(&task);
+
+    let mut bytes = [0u8; 24];
+    if copy_from_user(&task, params_ptr, &mut bytes).is_err() {
+        return usize::MAX;
+    }
+    let params = TaskDeadlineParams {
+        runtime_ns: decode_native_u64(&bytes, 0),
+        deadline_ns: decode_native_u64(&bytes, 8),
+        period_ns: decode_native_u64(&bytes, 16),
+    };
+    let result = if params.runtime_ns == 0 && params.deadline_ns == 0 && params.period_ns == 0 {
+        disable_current_task_deadline()
+    } else {
+        enable_current_task_deadline(params)
+    };
+    if result.is_err() {
+        return usize::MAX;
+    }
+    schedule(trapframe);
+    0
+}
+
+/// Return the current task's periodic deadline reservation parameters.
+///
+/// # Arguments
+///
+/// * `trapframe.arg(0)` - Destination pointer for three native-endian `u64`
+///   values containing runtime, relative deadline, and period in nanoseconds.
+///
+/// # Returns
+///
+/// `0` on success, or `usize::MAX` when deadline scheduling is disabled or the
+/// destination pointer is invalid.
+pub fn sys_get_task_deadline(trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    let params_ptr = trapframe.get_arg(0);
+    trapframe.increment_pc_next(&task);
+
+    let Some(snapshot) = current_task_deadline() else {
+        return usize::MAX;
+    };
+    let mut bytes = [0u8; 24];
+    bytes[0..8].copy_from_slice(&snapshot.params.runtime_ns.to_ne_bytes());
+    bytes[8..16].copy_from_slice(&snapshot.params.deadline_ns.to_ne_bytes());
+    bytes[16..24].copy_from_slice(&snapshot.params.period_ns.to_ne_bytes());
+    if copy_to_user(&task, params_ptr, &bytes).is_err() {
+        usize::MAX
+    } else {
+        0
+    }
 }
 
 pub fn sys_sleep(trapframe: &mut Trapframe) -> usize {

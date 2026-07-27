@@ -214,6 +214,9 @@ pub fn sys_sched_setaffinity(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> 
         Ok(target) => target,
         Err(error) => return errno::to_result(error),
     };
+    if target.deadline_enabled() {
+        return errno::to_result(errno::EBUSY);
+    }
     let mut mask_bytes = [0u8; LINUX_CPU_MASK_SIZE];
     let bytes_to_copy = cpusetsize.min(LINUX_CPU_MASK_SIZE);
     if copy_from_user(&caller, mask_ptr, &mut mask_bytes[..bytes_to_copy]).is_err() {

@@ -10,6 +10,17 @@ pub const SCHED_NICE_MIN: i32 = scarlet_sys::SCHED_NICE_MIN;
 /// Maximum nice value accepted by Scarlet Native scheduler controls.
 pub const SCHED_NICE_MAX: i32 = scarlet_sys::SCHED_NICE_MAX;
 
+/// Periodic CPU reservation used by Scarlet's deadline scheduler class.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TaskDeadlineParams {
+    /// CPU runtime available during each period, in nanoseconds.
+    pub runtime_ns: u64,
+    /// Relative completion deadline, in nanoseconds.
+    pub deadline_ns: u64,
+    /// Reservation period, in nanoseconds.
+    pub period_ns: u64,
+}
+
 // Flags for execve system calls
 pub const EXECVE_FORCE_ABI_REBUILD: usize = 0x1; // Force ABI environment reconstruction
 
@@ -219,6 +230,8 @@ pub enum SchedulerHintError {
     InvalidUtilization,
     /// The requested nice value is outside the supported range.
     InvalidNice,
+    /// The deadline reservation parameters are inconsistent or unsupported.
+    InvalidDeadline,
     /// The kernel rejected the scheduler hint operation.
     SyscallFailed,
 }
@@ -1279,4 +1292,69 @@ pub fn set_task_cpu_affinity(cpu_id: Option<usize>) -> Result<(), SchedulerHintE
 pub fn task_cpu_affinity() -> Option<usize> {
     let cpu_id = syscall0(Syscall::GetTaskCpuAffinity);
     (cpu_id != usize::MAX).then_some(cpu_id)
+}
+
+/// Enable a periodic deadline reservation for the current task.
+///
+/// Scarlet currently accepts implicit-deadline reservations only, so
+/// `deadline_ns` must equal `period_ns` and runtime must not exceed either.
+///
+/// # Arguments
+///
+/// * `params` - Runtime, relative deadline, and period in nanoseconds.
+///
+/// # Returns
+///
+/// `Ok(())` on success, or an error for invalid parameters or failed admission.
+pub fn set_task_deadline(params: TaskDeadlineParams) -> Result<(), SchedulerHintError> {
+    if params.runtime_ns == 0
+        || params.runtime_ns > params.deadline_ns
+        || params.deadline_ns != params.period_ns
+    {
+        return Err(SchedulerHintError::InvalidDeadline);
+    }
+    let raw = scarlet_sys::RawTaskDeadlineParams {
+        runtime_ns: params.runtime_ns,
+        deadline_ns: params.deadline_ns,
+        period_ns: params.period_ns,
+    };
+    let ret = syscall1(Syscall::SetTaskDeadline, core::ptr::addr_of!(raw) as usize);
+    if ret == usize::MAX {
+        Err(SchedulerHintError::SyscallFailed)
+    } else {
+        Ok(())
+    }
+}
+
+/// Disable the current task's periodic deadline reservation.
+///
+/// # Returns
+///
+/// `Ok(())` on success, or an error when no reservation is active.
+pub fn clear_task_deadline() -> Result<(), SchedulerHintError> {
+    let raw = scarlet_sys::RawTaskDeadlineParams::default();
+    let ret = syscall1(Syscall::SetTaskDeadline, core::ptr::addr_of!(raw) as usize);
+    if ret == usize::MAX {
+        Err(SchedulerHintError::SyscallFailed)
+    } else {
+        Ok(())
+    }
+}
+
+/// Return the current task's periodic deadline reservation.
+///
+/// # Returns
+///
+/// The configured reservation, or `None` when deadline scheduling is disabled.
+pub fn task_deadline() -> Option<TaskDeadlineParams> {
+    let mut raw = scarlet_sys::RawTaskDeadlineParams::default();
+    let ret = syscall1(
+        Syscall::GetTaskDeadline,
+        core::ptr::addr_of_mut!(raw) as usize,
+    );
+    (ret != usize::MAX).then_some(TaskDeadlineParams {
+        runtime_ns: raw.runtime_ns,
+        deadline_ns: raw.deadline_ns,
+        period_ns: raw.period_ns,
+    })
 }

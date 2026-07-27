@@ -32,6 +32,12 @@ pub const SCHEDULER_ACCOUNTING_QUANTUM_NS: u64 = 10 * NANOSECONDS_PER_MILLISECON
 /// equal deadlines. This lower bound only prevents a newly armed past or
 /// near-future deadline from retriggering the same hardware IRQ immediately.
 pub const SOFTWARE_TIMER_MIN_INTERVAL_NS: u64 = SCHEDULER_ACCOUNTING_QUANTUM_NS;
+/// Minimum delay for scheduler-owned exact timers.
+///
+/// Scheduler budget enforcement must support intervals below the general
+/// software-timer lower bound. A one-nanosecond floor still prevents a timer
+/// armed at or before `now` from immediately retriggering the same IRQ.
+const SCHEDULER_TIMER_MIN_INTERVAL_NS: u64 = 1;
 
 pub struct KernelTimer {
     // SAFETY: Each CPU only accesses its own timer via cpu_id index.
@@ -409,6 +415,11 @@ fn software_timer_deadlines(
     )
 }
 
+#[inline]
+fn scheduler_timer_deadline(now_ns: u64, requested_deadline_ns: u64) -> u64 {
+    requested_deadline_ns.max(now_ns.saturating_add(SCHEDULER_TIMER_MIN_INTERVAL_NS))
+}
+
 /// Advance a periodic timer to the first interval strictly after `now_ns`.
 ///
 /// The returned overrun count is the number of elapsed intervals in addition
@@ -460,6 +471,43 @@ pub fn add_timer(
     }
     // This is deliberately local: add_timer owns the new entry on the current
     // CPU and must never program a remote CPU's local hardware comparator.
+    reprogram_local_timer();
+    TimerHandle { owner_cpu, id }
+}
+
+/// Add an exact scheduler timer to the current CPU's local queue.
+///
+/// Unlike [`add_timer`], this internal API does not apply the general 10 ms
+/// software-timer lower bound. It is reserved for scheduler budget and
+/// replenishment deadlines that require sub-quantum precision.
+///
+/// # Arguments
+///
+/// * `deadline_ns` - Requested absolute monotonic expiration in nanoseconds.
+/// * `handler` - Callback object held weakly until expiration.
+/// * `context` - Opaque callback context.
+///
+/// # Returns
+///
+/// A handle that can be cancelled from any CPU.
+pub(crate) fn add_scheduler_timer(
+    deadline_ns: u64,
+    handler: &Arc<dyn TimerHandler>,
+    context: usize,
+) -> TimerHandle {
+    let owner_cpu = local_cpu_id();
+    let id = TIMER_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let soft_deadline_ns = scheduler_timer_deadline(get_time_ns(), deadline_ns);
+    {
+        let mut queue = timer_queues()[owner_cpu].lock();
+        queue.add(
+            id,
+            soft_deadline_ns,
+            TimerPrecision::Exact,
+            handler,
+            context,
+        );
+    }
     reprogram_local_timer();
     TimerHandle { owner_cpu, id }
 }
@@ -703,6 +751,17 @@ mod tests {
 
         assert_eq!(soft_deadline_ns, 1_000 + SOFTWARE_TIMER_MIN_INTERVAL_NS);
         assert_eq!(hard_deadline_ns, soft_deadline_ns);
+    }
+
+    #[test_case]
+    fn scheduler_deadline_bypasses_the_general_timer_minimum() {
+        let now_ns = 1_000;
+
+        assert_eq!(scheduler_timer_deadline(now_ns, 0), now_ns + 1);
+        assert_eq!(scheduler_timer_deadline(now_ns, now_ns + 5), now_ns + 5);
+        assert!(
+            scheduler_timer_deadline(now_ns, now_ns + 5) < now_ns + SOFTWARE_TIMER_MIN_INTERVAL_NS
+        );
     }
 
     #[test_case]

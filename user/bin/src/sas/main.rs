@@ -26,6 +26,7 @@ use std::ipc::{SharedMemory, permissions};
 use std::println;
 use std::socket::Socket;
 use std::sync::Mutex;
+use std::task::{TaskDeadlineParams, set_task_deadline};
 use std::thread::{self, sleep};
 use userprogram::sas_protocol as protocol;
 
@@ -658,6 +659,19 @@ fn parse_output_value(value: &str) -> OutputPreference {
 }
 
 fn audio_thread(state: Arc<Mutex<ServerState>>, output: OutputDevice) {
+    let period_ns = u64::from(output.params.period_frames).saturating_mul(1_000_000_000)
+        / u64::from(output.params.rate);
+    let deadline = TaskDeadlineParams {
+        runtime_ns: period_ns / 4,
+        deadline_ns: period_ns,
+        period_ns,
+    };
+    if let Err(error) = set_task_deadline(deadline) {
+        println!(
+            "sas: deadline reservation unavailable ({:?}); continuing with fair scheduling",
+            error
+        );
+    }
     println!(
         "sas: output configured S16LE {} Hz {}ch period={} buffer={} master_volume={}%",
         output.params.rate,

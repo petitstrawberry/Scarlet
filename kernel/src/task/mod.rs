@@ -41,10 +41,10 @@ use crate::{
     },
     sched::scheduler::{
         cleanup_zombie, complete_non_current_task_exit, current_task, finalize_zombie,
-        get_all_task_ids, get_task_by_id, remove_from_ready_queues, schedule, setup_task_execution,
-        unmark_blocked,
+        get_all_task_ids, get_task_by_id, release_task_deadline, remove_from_ready_queues,
+        schedule, setup_task_execution, unmark_blocked,
     },
-    timer::{TimerHandler, add_timer, get_time_ns, ms_to_ns},
+    timer::{TimerHandle, TimerHandler, add_timer, get_time_ns, ms_to_ns},
     vm::{
         addr::{phys_to_virt, virt_to_phys},
         manager::VirtualMemoryManager,
@@ -570,6 +570,72 @@ struct SoftwareTimerRegistration {
     handler: Arc<dyn TimerHandler>,
 }
 
+/// Parameters for a periodic deadline reservation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TaskDeadlineParams {
+    /// CPU runtime available during each period, in nanoseconds.
+    pub runtime_ns: u64,
+    /// Relative completion deadline, in nanoseconds.
+    pub deadline_ns: u64,
+    /// Reservation period, in nanoseconds.
+    pub period_ns: u64,
+}
+
+/// Observable state of a task's deadline reservation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TaskDeadlineSnapshot {
+    /// Configured reservation parameters.
+    pub params: TaskDeadlineParams,
+    /// Runtime remaining in the current period, in nanoseconds.
+    pub remaining_ns: u64,
+    /// Current absolute deadline on the monotonic clock.
+    pub absolute_deadline_ns: u64,
+    /// Start of the next reservation period on the monotonic clock.
+    pub next_replenishment_ns: u64,
+    /// CPU that owns this partitioned reservation.
+    pub cpu_id: usize,
+    /// Whether execution is suspended until replenishment.
+    pub throttled: bool,
+    /// Number of periods observed after their absolute deadline.
+    pub deadline_misses: u64,
+    /// Number of times the task exhausted its runtime budget.
+    pub budget_overruns: u64,
+}
+
+pub(crate) struct TaskDeadlineState {
+    pub(crate) params: Option<TaskDeadlineParams>,
+    pub(crate) remaining_ns: u64,
+    pub(crate) absolute_deadline_ns: u64,
+    pub(crate) next_replenishment_ns: u64,
+    pub(crate) cpu_id: usize,
+    pub(crate) throttled: bool,
+    pub(crate) deadline_misses: u64,
+    pub(crate) budget_overruns: u64,
+    pub(crate) admission_units: u32,
+    pub(crate) generation: u64,
+    pub(crate) replenishment_timer: Option<TimerHandle>,
+    pub(crate) replenishment_token: Option<usize>,
+}
+
+impl TaskDeadlineState {
+    const fn new() -> Self {
+        Self {
+            params: None,
+            remaining_ns: 0,
+            absolute_deadline_ns: 0,
+            next_replenishment_ns: 0,
+            cpu_id: usize::MAX,
+            throttled: false,
+            deadline_misses: 0,
+            budget_overruns: 0,
+            admission_units: 0,
+            generation: 0,
+            replenishment_timer: None,
+            replenishment_token: None,
+        }
+    }
+}
+
 pub struct Task {
     // === Read-only fields (set at creation) ===
     id: usize,
@@ -660,6 +726,8 @@ pub struct Task {
     pub(crate) sched_slice_ns: AtomicU64,
     /// True while the task is currently inserted in a per-CPU fair run queue.
     pub(crate) sched_on_rq: AtomicBool,
+    /// True while the task is inserted in its partitioned deadline run queue.
+    pub(crate) deadline_on_rq: AtomicBool,
     /// Monotonic timestamp from which the current EEVDF execution interval is charged.
     pub(crate) sched_exec_start_ns: AtomicU64,
     /// Cumulative CPU time charged to this task, in nanoseconds.
@@ -715,6 +783,8 @@ pub struct Task {
     /// Pending task-owned timer callbacks and handles, cancelled together when
     /// the task wakes or is dropped.
     software_timers: IrqSpinLock<Vec<SoftwareTimerRegistration>>,
+    /// Periodic deadline reservation state.
+    pub(crate) deadline: IrqSpinLock<TaskDeadlineState>,
 
     // === IRQ spin lock fields (complex operations) ===
     /// VCPU state for context switching
@@ -931,6 +1001,7 @@ impl Task {
             sched_deadline: AtomicU64::new(0),
             sched_slice_ns: AtomicU64::new(0),
             sched_on_rq: AtomicBool::new(false),
+            deadline_on_rq: AtomicBool::new(false),
             sched_exec_start_ns: AtomicU64::new(0),
             cpu_time_ns: AtomicU64::new(0),
             cpu_run_start_ns: AtomicU64::new(0),
@@ -949,6 +1020,7 @@ impl Task {
             task_pages: IrqRwSpinLock::new(Vec::new()),
             vfs: IrqRwSpinLock::new(None),
             software_timers: IrqSpinLock::new(Vec::new()),
+            deadline: IrqSpinLock::new(TaskDeadlineState::new()),
             // IRQ spin lock fields
             vcpu: IrqSpinLock::new(Vcpu::new(match task_type {
                 TaskType::Kernel => crate::arch::Mode::Kernel,
@@ -1058,6 +1130,35 @@ impl Task {
     /// * `mask` - Bit mask in which bit `n` permits scheduler CPU `n`.
     pub fn set_cpu_affinity_mask(&self, mask: usize) {
         self.cpu_affinity_mask.store(mask, Ordering::SeqCst);
+    }
+
+    /// Return whether this task has an active deadline reservation.
+    ///
+    /// # Returns
+    ///
+    /// `true` when the deadline scheduler class is enabled for this task.
+    pub fn deadline_enabled(&self) -> bool {
+        self.deadline.lock().params.is_some()
+    }
+
+    /// Return the task's deadline reservation state.
+    ///
+    /// # Returns
+    ///
+    /// A consistent snapshot, or `None` when deadline scheduling is disabled.
+    pub fn deadline_snapshot(&self) -> Option<TaskDeadlineSnapshot> {
+        let state = self.deadline.lock();
+        let params = state.params?;
+        Some(TaskDeadlineSnapshot {
+            params,
+            remaining_ns: state.remaining_ns,
+            absolute_deadline_ns: state.absolute_deadline_ns,
+            next_replenishment_ns: state.next_replenishment_ns,
+            cpu_id: state.cpu_id,
+            throttled: state.throttled,
+            deadline_misses: state.deadline_misses,
+            budget_overruns: state.budget_overruns,
+        })
     }
 
     /// Return whether this task may execute on a scheduler CPU.
@@ -1989,6 +2090,7 @@ impl Task {
             self.exiting.store(true, Ordering::Release);
         }
         self.cancel_software_timers();
+        release_task_deadline(self);
     }
 
     fn try_adopt_child(&self, child: &Task, expected_parent_id: Option<usize>) -> bool {
@@ -3371,6 +3473,7 @@ impl WaitError {
 impl Drop for Task {
     fn drop(&mut self) {
         self.cancel_software_timers();
+        release_task_deadline(self);
         crate::vm::teardown_trampoline_for_task_kstack_window(self);
     }
 }
@@ -3559,7 +3662,7 @@ mod tests {
         AccessOp, MemoryMappingInfo, MemoryMappingOps,
     };
     use crate::sched::scheduler::{add_task, finalize_zombie, get_task_by_id, reset};
-    use crate::task::{CloneFlags, CloneFlagsDef, TaskState};
+    use crate::task::{CloneFlags, CloneFlagsDef, TaskDeadlineParams, TaskState};
     use crate::timer::{TimerHandle, TimerHandler};
     use crate::vm::addr::{phys_to_virt, virt_to_phys};
 
@@ -4045,6 +4148,34 @@ mod tests {
         assert_eq!(child.get_task_group_id(), parent.get_process_group_id());
         assert!(!child.is_session_leader());
         assert!(child.get_controlling_tty().is_none());
+    }
+
+    #[test_case]
+    fn test_clone_does_not_inherit_deadline_reservation() {
+        reset();
+
+        let parent = super::new_user_task("DeadlineParent".to_string(), 0);
+        parent.init();
+        let parent_id = add_task(parent, 0);
+        let parent = get_task_by_id(parent_id).unwrap();
+        {
+            let mut state = parent.deadline.lock();
+            state.params = Some(TaskDeadlineParams {
+                runtime_ns: 5,
+                deadline_ns: 20,
+                period_ns: 20,
+            });
+            state.remaining_ns = 5;
+            state.absolute_deadline_ns = 20;
+            state.next_replenishment_ns = 20;
+            state.cpu_id = 0;
+        }
+
+        let child = parent.clone_task(CloneFlags::default()).unwrap();
+        assert!(!child.deadline_enabled());
+        assert!(child.deadline_snapshot().is_none());
+
+        crate::sched::scheduler::release_task_deadline(&parent);
     }
 
     #[test_case]
