@@ -88,7 +88,7 @@ const VIRTIO_GPU_FORMAT_R8G8B8X8_UNORM: u32 = 134;
 // VirGL Gallium texture target and bind flags.
 const PIPE_TEXTURE_2D: u32 = 2;
 const PIPE_BIND_RENDER_TARGET: u32 = 1 << 1;
-const PIPE_BIND_SCANOUT: u32 = 1 << 18;
+const PIPE_BIND_SCANOUT: u32 = 1 << 19;
 
 // Maximum number of scanouts
 const VIRTIO_GPU_MAX_SCANOUTS: usize = 16;
@@ -494,8 +494,17 @@ impl VirtioGpuDeviceCore {
     }
 
     fn send_execution_command<T>(&self, cmd: &T) -> Result<(), &'static str> {
+        // SAFETY: the command remains borrowed until the synchronous control
+        // request completes, and every command type passed here is repr(C).
+        let cmd_buffer = unsafe {
+            core::slice::from_raw_parts(cmd as *const T as *const u8, core::mem::size_of::<T>())
+        };
+        self.send_execution_bytes(cmd_buffer)
+    }
+
+    fn send_execution_bytes(&self, cmd_buffer: &[u8]) -> Result<(), &'static str> {
         let mut resp_buffer = [0u8; core::mem::size_of::<VirtioGpuCtrlHdr>()];
-        self.send_control_command_with_resp_buffer(cmd, &mut resp_buffer)?;
+        self.send_control_bytes_with_resp_buffer(cmd_buffer, &mut resp_buffer)?;
         // SAFETY: `resp_buffer` contains exactly one VirtIO GPU control header
         // written by the synchronous control queue response path and may be
         // unaligned because it is byte storage.
@@ -845,7 +854,7 @@ impl VirtioGpuDeviceCore {
             flags: description.flags,
             padding: 0,
         };
-        self.send_control_command(&cmd)?;
+        self.send_execution_command(&cmd)?;
         Ok(resource_id)
     }
 
@@ -867,7 +876,7 @@ impl VirtioGpuDeviceCore {
             resource_id,
             padding: 0,
         };
-        self.send_control_command(&cmd)
+        self.send_execution_command(&cmd)
     }
 
     #[allow(dead_code)]
@@ -892,7 +901,7 @@ impl VirtioGpuDeviceCore {
             resource_id,
             padding: 0,
         };
-        self.send_control_command(&cmd)
+        self.send_execution_command(&cmd)
     }
 
     #[allow(dead_code)]
@@ -917,7 +926,7 @@ impl VirtioGpuDeviceCore {
             resource_id,
             padding: 0,
         };
-        self.send_control_command(&cmd)
+        self.send_execution_command(&cmd)
     }
 
     #[allow(dead_code)]
@@ -1164,7 +1173,7 @@ impl VirtioGpuDeviceCore {
             );
         }
 
-        self.send_control_bytes_with_resp_buffer(&cmd_buffer, &mut [0u8; 128])
+        self.send_execution_bytes(&cmd_buffer)
     }
 
     /// Attach one contiguous backing memory range to a resource.
@@ -1200,7 +1209,7 @@ impl VirtioGpuDeviceCore {
             resource_id,
             padding: 0,
         };
-        self.send_control_command(&cmd)
+        self.send_execution_command(&cmd)
     }
 
     /// Set up framebuffer
