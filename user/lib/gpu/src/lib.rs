@@ -1,318 +1,405 @@
 //! GPU control library for Scarlet OS.
 //!
-//! This library exposes Scarlet's neutral GPU control ABI. It is intentionally
-//! thin: virgl command encoding remains the caller's responsibility, while this
-//! wrapper handles device opening, capset discovery, context lifetime, and
-//! command submission.
+//! This library opens a GPU control connection, creates GPU buffer and timeline
+//! child handles, and exposes fixed-width ABI mirrors for generic controls.
 
 #![no_std]
 
-extern crate alloc;
 extern crate scarlet_std as std;
 
-use alloc::{string::String, vec, vec::Vec};
 use std::{
     fs::File,
-    handle::{HandleError, HandleResult},
+    handle::{Handle, HandleError, HandleResult},
 };
 
 /// GPU control command constants.
 pub mod commands {
-    /// Query GPU backend capabilities.
-    pub const GPU_GET_CAPABILITIES: u32 = 0x4700;
-    /// Query one capset's metadata.
-    pub const GPU_GET_CAPSET_INFO: u32 = 0x4701;
-    /// Read capset bytes into a user-provided buffer.
-    pub const GPU_READ_CAPSET: u32 = 0x4702;
-    /// Create a GPU execution context.
-    pub const GPU_CREATE_CONTEXT: u32 = 0x4703;
-    /// Destroy a GPU execution context.
-    pub const GPU_DESTROY_CONTEXT: u32 = 0x4704;
-    /// Submit backend-specific GPU commands.
-    pub const GPU_SUBMIT_COMMANDS: u32 = 0x4705;
-    /// Create a backend 3D resource.
-    pub const GPU_CREATE_3D_RESOURCE: u32 = 0x4706;
-    /// Unreference a backend resource.
-    pub const GPU_UNREF_RESOURCE: u32 = 0x4707;
-    /// Attach a resource to a GPU context.
-    pub const GPU_ATTACH_RESOURCE: u32 = 0x4708;
-    /// Detach a resource from a GPU context.
-    pub const GPU_DETACH_RESOURCE: u32 = 0x4709;
-    /// Attach userspace memory backing to a resource.
-    pub const GPU_ATTACH_RESOURCE_BACKING: u32 = 0x470a;
-    /// Detach memory backing from a resource.
-    pub const GPU_DETACH_RESOURCE_BACKING: u32 = 0x470b;
-    /// Transfer attached backing memory to a host 3D resource.
-    pub const GPU_TRANSFER_TO_HOST_3D: u32 = 0x470c;
-    /// Transfer a host 3D resource into attached backing memory.
-    pub const GPU_TRANSFER_FROM_HOST_3D: u32 = 0x470d;
-    /// Present a GPU resource through the display pipeline.
-    pub const GPU_PRESENT_RESOURCE: u32 = 0x470e;
+    /// Query generic GPU and backend information.
+    pub const GPU_QUERY_INFO: u32 = 0x4750;
+    /// Create a kernel-owned GPU buffer child handle.
+    pub const GPU_CREATE_BUFFER: u32 = 0x4751;
+    /// Query a GPU buffer child handle.
+    pub const GPU_BUFFER_QUERY_INFO: u32 = 0x4752;
+    /// Create a GPU timeline child handle.
+    pub const GPU_CREATE_TIMELINE: u32 = 0x4753;
+    /// Query a GPU timeline child handle.
+    pub const GPU_TIMELINE_QUERY: u32 = 0x4754;
+    /// Advance a GPU timeline child handle.
+    pub const GPU_TIMELINE_SIGNAL: u32 = 0x4755;
+    /// Permanently fail a GPU timeline child handle.
+    pub const GPU_TIMELINE_FAIL: u32 = 0x4756;
+    /// Create a fixed-target GPU timeline point child handle.
+    pub const GPU_TIMELINE_CREATE_POINT: u32 = 0x4757;
 }
 
-/// Capability bit for virgl command submission.
-pub const GPU_CAPABILITY_VIRGL: u32 = 1 << 0;
-/// Capability bit for host-visible blob resources.
-pub const GPU_CAPABILITY_RESOURCE_BLOB: u32 = 1 << 1;
-/// Capability bit for explicit fences.
-pub const GPU_CAPABILITY_FENCES: u32 = 1 << 2;
-/// Capability bit for context initialization parameters.
-pub const GPU_CAPABILITY_CONTEXT_INIT: u32 = 1 << 3;
-/// Submission flag indicating `fence_id` should be used.
-pub const GPU_SUBMIT_FLAG_FENCE: u32 = 1 << 0;
-/// Transfer flag indicating `fence_id` should be used.
-pub const GPU_TRANSFER_FLAG_FENCE: u32 = 1 << 0;
+/// ABI version accepted by [`GpuQueryInfo`].
+pub const GPU_ABI_VERSION: u32 = 1;
+/// Query completed successfully.
+pub const GPU_RESULT_SUCCESS: u32 = 0;
+/// The request used an unsupported ABI version.
+pub const GPU_RESULT_INVALID_ABI: u32 = 1;
+/// The request contained invalid flags, reserved fields, or sizes.
+pub const GPU_RESULT_INVALID_ARGUMENT: u32 = 2;
+/// The kernel could not allocate the requested object or handle.
+pub const GPU_RESULT_OUT_OF_RESOURCES: u32 = 3;
+/// The operation is invalid for the object's current state.
+pub const GPU_RESULT_INVALID_STATE: u32 = 4;
 
-/// GPU capability response.
+/// Create buffer flag permitting CPU memory mappings.
+pub const GPU_BUFFER_FLAG_CPU_VISIBLE: u32 = 1 << 0;
+/// All currently defined GPU buffer creation flags.
+pub const GPU_BUFFER_FLAGS_VALID: u32 = GPU_BUFFER_FLAG_CPU_VISIBLE;
+
+/// The GPU backend is not available for control.
+pub const GPU_DEVICE_STATE_UNAVAILABLE: u32 = 0;
+/// The GPU backend is available for its advertised operations.
+pub const GPU_DEVICE_STATE_READY: u32 = 1;
+/// The GPU backend was lost after it became available.
+pub const GPU_DEVICE_STATE_LOST: u32 = 2;
+
+/// No generic execution support is available.
+pub const GPU_EXECUTION_SUPPORT_NONE: u32 = 0;
+/// Generic address-space operations are available.
+pub const GPU_EXECUTION_SUPPORT_ADDRESS_SPACE: u32 = 1 << 0;
+/// Generic memory operations are available.
+pub const GPU_EXECUTION_SUPPORT_MEMORY: u32 = 1 << 1;
+/// Generic queue operations are available.
+pub const GPU_EXECUTION_SUPPORT_QUEUE: u32 = 1 << 2;
+/// Generic timeline operations are available.
+pub const GPU_EXECUTION_SUPPORT_TIMELINE: u32 = 1 << 3;
+/// Generic presentation operations are available.
+pub const GPU_EXECUTION_SUPPORT_PRESENTATION: u32 = 1 << 4;
+
+/// Fixed byte capacity of an opaque backend or dialect identifier.
+pub const GPU_BACKEND_ID_BYTES: usize = 32;
+/// Fixed byte capacity of opaque backend-defined information.
+pub const GPU_BACKEND_INFO_BYTES: usize = 64;
+
+/// Fixed-width request and response for [`commands::GPU_QUERY_INFO`].
+///
+/// Initialize with [`GpuQueryInfo::new`] and inspect `result` after the
+/// operation. The explicit result is retained even when the control syscall
+/// itself succeeds.
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Default)]
-pub struct GpuCapabilitiesInfo {
-    /// Bitset of `GPU_CAPABILITY_*` values.
-    pub feature_bits: u32,
-    /// Number of backend capsets available.
-    pub capset_count: u32,
+#[derive(Debug, Clone, Copy)]
+pub struct GpuQueryInfo {
+    /// ABI version supplied by userspace and echoed by the kernel.
+    pub abi_version: u32,
+    /// Explicit `GPU_RESULT_*` result code.
+    pub result: u32,
+    /// Stable `GPU_DEVICE_STATE_*` value.
+    pub device_state: u32,
+    /// Bitset of `GPU_EXECUTION_SUPPORT_*` values.
+    pub execution_support: u32,
+    /// Maximum generic opaque command size, or zero when no command operation exists.
+    pub max_opaque_command_size: u32,
+    /// Reserved for ABI-compatible future use. Must be zero.
+    pub reserved: u32,
+    /// Backend-defined negotiated feature bits with backend-specific meaning.
+    pub backend_feature_bits: u64,
+    /// Number of meaningful bytes in `backend_id`.
+    pub backend_id_len: u32,
+    /// Number of meaningful bytes in `backend_info`.
+    pub backend_info_len: u32,
+    /// Opaque backend or dialect identifier, not NUL-terminated.
+    pub backend_id: [u8; GPU_BACKEND_ID_BYTES],
+    /// Opaque backend-defined information bytes.
+    pub backend_info: [u8; GPU_BACKEND_INFO_BYTES],
 }
 
-impl GpuCapabilitiesInfo {
-    /// Check whether virgl is available.
+impl GpuQueryInfo {
+    /// Create a query request for the current ABI version.
     ///
     /// # Returns
     ///
-    /// `true` if virgl command submission is supported.
-    pub fn supports_virgl(&self) -> bool {
-        (self.feature_bits & GPU_CAPABILITY_VIRGL) != 0
+    /// A zeroed request structure with `abi_version` set.
+    pub const fn new() -> Self {
+        Self {
+            abi_version: GPU_ABI_VERSION,
+            result: GPU_RESULT_SUCCESS,
+            device_state: GPU_DEVICE_STATE_UNAVAILABLE,
+            execution_support: GPU_EXECUTION_SUPPORT_NONE,
+            max_opaque_command_size: 0,
+            reserved: 0,
+            backend_feature_bits: 0,
+            backend_id_len: 0,
+            backend_info_len: 0,
+            backend_id: [0; GPU_BACKEND_ID_BYTES],
+            backend_info: [0; GPU_BACKEND_INFO_BYTES],
+        }
+    }
+
+    /// Return the meaningful opaque backend identifier bytes.
+    ///
+    /// # Returns
+    ///
+    /// A bounded slice of `backend_id`.
+    pub fn backend_id_bytes(&self) -> &[u8] {
+        &self.backend_id[..(self.backend_id_len as usize).min(GPU_BACKEND_ID_BYTES)]
+    }
+
+    /// Return the meaningful opaque backend information bytes.
+    ///
+    /// # Returns
+    ///
+    /// A bounded slice of `backend_info`.
+    pub fn backend_info_bytes(&self) -> &[u8] {
+        &self.backend_info[..(self.backend_info_len as usize).min(GPU_BACKEND_INFO_BYTES)]
     }
 }
 
-/// Capset metadata request/response.
-#[repr(C)]
-#[derive(Debug, Clone, Copy, Default)]
-pub struct GpuCapsetInfoRequest {
-    /// Zero-based capset index supplied by userspace.
-    pub index: u32,
-    /// Backend-defined capset identifier returned by the kernel.
-    pub id: u32,
-    /// Highest supported capset version returned by the kernel.
-    pub max_version: u32,
-    /// Maximum capset byte size returned by the kernel.
-    pub max_size: u32,
+impl Default for GpuQueryInfo {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
-/// Capset read request.
+/// Fixed-width request and response for [`commands::GPU_CREATE_BUFFER`].
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Default)]
-pub struct GpuReadCapsetRequest {
-    /// Backend-defined capset identifier.
-    pub id: u32,
-    /// Capset version to read.
-    pub version: u32,
-    /// Destination buffer pointer.
-    pub buffer_ptr: usize,
-    /// Destination buffer length in bytes.
-    pub buffer_len: usize,
-    /// Number of bytes copied by the kernel.
-    pub bytes_written: usize,
-}
-
-/// GPU context request.
-#[repr(C)]
-#[derive(Debug, Clone, Copy, Default)]
-pub struct GpuContextRequest {
-    /// Caller-selected GPU context identifier.
-    pub context_id: u32,
-    /// Optional debug-name pointer.
-    pub name_ptr: usize,
-    /// Debug-name length in bytes.
-    pub name_len: usize,
-}
-
-/// GPU command submission request.
-#[repr(C)]
-#[derive(Debug, Clone, Copy, Default)]
-pub struct GpuSubmitRequest {
-    /// GPU context that owns the command stream.
-    pub context_id: u32,
-    /// Submission flags such as `GPU_SUBMIT_FLAG_FENCE`.
+#[derive(Debug, Clone, Copy)]
+pub struct GpuCreateBuffer {
+    /// ABI version supplied by userspace and echoed by the kernel.
+    pub abi_version: u32,
+    /// Explicit `GPU_RESULT_*` result code.
+    pub result: u32,
+    /// `GPU_BUFFER_FLAG_*` creation flags.
     pub flags: u32,
-    /// Optional fence identifier.
-    pub fence_id: u64,
-    /// Command buffer pointer.
-    pub commands_ptr: usize,
-    /// Command buffer length in bytes.
-    pub commands_len: usize,
+    /// Reserved for ABI-compatible future use. Must be zero.
+    pub reserved: u32,
+    /// Requested logical buffer size in bytes.
+    pub size_bytes: u64,
+    /// Newly created child handle on success, otherwise zero.
+    pub buffer_handle: u32,
+    /// Whether the resulting buffer exposes CPU mapping capability.
+    pub cpu_visible: u32,
+    /// Page-rounded allocation size backing the child object.
+    pub allocated_size: u64,
 }
 
-/// GPU 3D resource creation descriptor.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct GpuResource3dDescription {
-    /// Caller-selected resource identifier, or `0` to let the backend allocate one.
-    pub resource_id: u32,
-    /// Backend-specific resource target.
-    pub target: u32,
-    /// Backend-specific resource format.
-    pub format: u32,
-    /// Backend-specific bind flags.
-    pub bind: u32,
-    /// Resource width in pixels or elements.
-    pub width: u32,
-    /// Resource height in pixels or elements.
-    pub height: u32,
-    /// Resource depth in pixels or elements.
-    pub depth: u32,
-    /// Array layer count.
-    pub array_size: u32,
-    /// Last mip level.
-    pub last_level: u32,
-    /// Multisample count.
-    pub nr_samples: u32,
-    /// Backend-specific creation flags.
+impl GpuCreateBuffer {
+    /// Create a buffer request for the current ABI version.
+    pub const fn new(size_bytes: u64, flags: u32) -> Self {
+        Self {
+            abi_version: GPU_ABI_VERSION,
+            result: GPU_RESULT_SUCCESS,
+            flags,
+            reserved: 0,
+            size_bytes,
+            buffer_handle: 0,
+            cpu_visible: 0,
+            allocated_size: 0,
+        }
+    }
+}
+
+/// Fixed-width response for [`commands::GPU_BUFFER_QUERY_INFO`].
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct GpuBufferInfo {
+    /// ABI version supplied by userspace and echoed by the kernel.
+    pub abi_version: u32,
+    /// Explicit `GPU_RESULT_*` result code.
+    pub result: u32,
+    /// Creation flags retained by the buffer.
     pub flags: u32,
+    /// Whether the buffer exposes CPU mapping capability.
+    pub cpu_visible: u32,
+    /// Page-rounded buffer size in bytes.
+    pub size_bytes: u64,
+    /// Reserved for ABI-compatible future use. Always zero.
+    pub reserved: u64,
 }
 
-/// GPU 3D transfer descriptor.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct GpuTransfer3d {
-    /// GPU context associated with the transfer.
-    pub context_id: u32,
-    /// Resource identifier.
-    pub resource_id: u32,
-    /// Optional fence identifier signaled when the transfer completes.
-    pub fence_id: Option<u64>,
-    /// Offset into the attached backing memory.
-    pub offset: u64,
-    /// Mip level.
-    pub level: u32,
-    /// Row stride in bytes.
-    pub stride: u32,
-    /// Layer stride in bytes.
-    pub layer_stride: u32,
-    /// X origin.
-    pub x: u32,
-    /// Y origin.
-    pub y: u32,
-    /// Z origin.
-    pub z: u32,
-    /// Transfer width.
-    pub width: u32,
-    /// Transfer height.
-    pub height: u32,
-    /// Transfer depth.
-    pub depth: u32,
+impl GpuBufferInfo {
+    /// Create a zeroed buffer query for the current ABI version.
+    pub const fn new() -> Self {
+        Self {
+            abi_version: GPU_ABI_VERSION,
+            result: GPU_RESULT_SUCCESS,
+            flags: 0,
+            cpu_visible: 0,
+            size_bytes: 0,
+            reserved: 0,
+        }
+    }
 }
 
-/// GPU 3D resource creation request.
+impl Default for GpuBufferInfo {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Fixed-width request and response for [`commands::GPU_CREATE_TIMELINE`].
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Default)]
-pub struct GpuCreate3dResourceRequest {
-    /// Caller-selected resource identifier, or `0` to let the backend allocate one.
-    pub resource_id: u32,
-    /// Backend-specific resource target.
-    pub target: u32,
-    /// Backend-specific resource format.
-    pub format: u32,
-    /// Backend-specific bind flags.
-    pub bind: u32,
-    /// Resource width in pixels or elements.
-    pub width: u32,
-    /// Resource height in pixels or elements.
-    pub height: u32,
-    /// Resource depth in pixels or elements.
-    pub depth: u32,
-    /// Array layer count.
-    pub array_size: u32,
-    /// Last mip level.
-    pub last_level: u32,
-    /// Multisample count.
-    pub nr_samples: u32,
-    /// Backend-specific creation flags.
+#[derive(Debug, Clone, Copy)]
+pub struct GpuCreateTimeline {
+    /// ABI version supplied by userspace and echoed by the kernel.
+    pub abi_version: u32,
+    /// Explicit `GPU_RESULT_*` result code.
+    pub result: u32,
+    /// Reserved creation flags. Must be zero in this phase.
     pub flags: u32,
+    /// Reserved for ABI-compatible future use. Must be zero.
+    pub reserved: u32,
+    /// Initial completed timeline value.
+    pub initial_value: u64,
+    /// Newly created child handle on success, otherwise zero.
+    pub timeline_handle: u32,
+    /// Whether the timeline is failed at creation. Always zero.
+    pub failed: u32,
+    /// Current completed timeline value after creation.
+    pub current_value: u64,
 }
 
-/// GPU resource-only request.
+impl GpuCreateTimeline {
+    /// Create a timeline request for the current ABI version.
+    pub const fn new(initial_value: u64) -> Self {
+        Self {
+            abi_version: GPU_ABI_VERSION,
+            result: GPU_RESULT_SUCCESS,
+            flags: 0,
+            reserved: 0,
+            initial_value,
+            timeline_handle: 0,
+            failed: 0,
+            current_value: 0,
+        }
+    }
+}
+
+/// Fixed-width response for [`commands::GPU_TIMELINE_QUERY`].
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Default)]
-pub struct GpuResourceRequest {
-    /// Resource identifier.
-    pub resource_id: u32,
+#[derive(Debug, Clone, Copy)]
+pub struct GpuTimelineInfo {
+    /// ABI version supplied by userspace and echoed by the kernel.
+    pub abi_version: u32,
+    /// Explicit `GPU_RESULT_*` result code.
+    pub result: u32,
+    /// Non-zero when the timeline is permanently failed.
+    pub failed: u32,
+    /// Reserved for ABI-compatible future use. Always zero.
+    pub reserved: u32,
+    /// Current completed timeline value.
+    pub current_value: u64,
+    /// Reserved for ABI-compatible future use. Always zero.
+    pub reserved2: u64,
 }
 
-/// GPU context/resource association request.
+impl GpuTimelineInfo {
+    /// Create a zeroed timeline query for the current ABI version.
+    pub const fn new() -> Self {
+        Self {
+            abi_version: GPU_ABI_VERSION,
+            result: GPU_RESULT_SUCCESS,
+            failed: 0,
+            reserved: 0,
+            current_value: 0,
+            reserved2: 0,
+        }
+    }
+}
+
+impl Default for GpuTimelineInfo {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Fixed-width request and response for [`commands::GPU_TIMELINE_SIGNAL`].
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Default)]
-pub struct GpuContextResourceRequest {
-    /// Context identifier.
-    pub context_id: u32,
-    /// Resource identifier.
-    pub resource_id: u32,
+#[derive(Debug, Clone, Copy)]
+pub struct GpuTimelineSignal {
+    /// ABI version supplied by userspace and echoed by the kernel.
+    pub abi_version: u32,
+    /// Explicit `GPU_RESULT_*` result code.
+    pub result: u32,
+    /// Requested completed timeline value.
+    pub value: u64,
+    /// Completed timeline value after the request.
+    pub current_value: u64,
+    /// Non-zero when the timeline is permanently failed.
+    pub failed: u32,
+    /// Reserved for ABI-compatible future use. Always zero.
+    pub reserved: u32,
 }
 
-/// GPU resource backing attachment request.
+impl GpuTimelineSignal {
+    /// Create a timeline signal request for the current ABI version.
+    pub const fn new(value: u64) -> Self {
+        Self {
+            abi_version: GPU_ABI_VERSION,
+            result: GPU_RESULT_SUCCESS,
+            value,
+            current_value: 0,
+            failed: 0,
+            reserved: 0,
+        }
+    }
+}
+
+/// Fixed-width request and response for [`commands::GPU_TIMELINE_FAIL`].
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Default)]
-pub struct GpuAttachResourceBackingRequest {
-    /// Resource identifier.
-    pub resource_id: u32,
-    /// Userspace buffer pointer.
-    pub buffer_ptr: usize,
-    /// Userspace buffer length in bytes.
-    pub buffer_len: usize,
+#[derive(Debug, Clone, Copy)]
+pub struct GpuTimelineFail {
+    /// ABI version supplied by userspace and echoed by the kernel.
+    pub abi_version: u32,
+    /// Explicit `GPU_RESULT_*` result code.
+    pub result: u32,
+    /// Completed timeline value after the request.
+    pub current_value: u64,
+    /// Non-zero when the timeline is permanently failed.
+    pub failed: u32,
+    /// Reserved for ABI-compatible future use. Must be zero.
+    pub reserved: u32,
 }
 
-/// GPU 3D transfer request.
+impl GpuTimelineFail {
+    /// Create a timeline failure request for the current ABI version.
+    pub const fn new() -> Self {
+        Self {
+            abi_version: GPU_ABI_VERSION,
+            result: GPU_RESULT_SUCCESS,
+            current_value: 0,
+            failed: 0,
+            reserved: 0,
+        }
+    }
+}
+
+/// Fixed-width request and response for [`commands::GPU_TIMELINE_CREATE_POINT`].
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Default)]
-pub struct GpuTransfer3dRequest {
-    /// GPU context associated with the transfer.
-    pub context_id: u32,
-    /// Transfer flags such as `GPU_TRANSFER_FLAG_FENCE`.
-    pub flags: u32,
-    /// Optional fence identifier.
-    pub fence_id: u64,
-    /// Resource identifier.
-    pub resource_id: u32,
-    /// Mip level.
-    pub level: u32,
-    /// Offset into attached backing memory.
-    pub offset: u64,
-    /// Row stride in bytes.
-    pub stride: u32,
-    /// Layer stride in bytes.
-    pub layer_stride: u32,
-    /// X origin.
-    pub x: u32,
-    /// Y origin.
-    pub y: u32,
-    /// Z origin.
-    pub z: u32,
-    /// Transfer width.
-    pub width: u32,
-    /// Transfer height.
-    pub height: u32,
-    /// Transfer depth.
-    pub depth: u32,
+#[derive(Debug, Clone, Copy)]
+pub struct GpuTimelineCreatePoint {
+    /// ABI version supplied by userspace and echoed by the kernel.
+    pub abi_version: u32,
+    /// Explicit `GPU_RESULT_*` result code.
+    pub result: u32,
+    /// Fixed completed-value target for the point.
+    pub target_value: u64,
+    /// Newly created point child handle on success, otherwise zero.
+    pub point_handle: u32,
+    /// Non-zero when the parent timeline is permanently failed.
+    pub failed: u32,
+    /// Current completed value of the parent timeline.
+    pub current_value: u64,
 }
 
-/// GPU resource present request.
-#[repr(C)]
-#[derive(Debug, Clone, Copy, Default)]
-pub struct GpuPresentResourceRequest {
-    /// Resource identifier.
-    pub resource_id: u32,
-    /// Resource width in pixels.
-    pub resource_width: u32,
-    /// Resource height in pixels.
-    pub resource_height: u32,
-    /// Updated region X origin.
-    pub x: u32,
-    /// Updated region Y origin.
-    pub y: u32,
-    /// Updated region width.
-    pub width: u32,
-    /// Updated region height.
-    pub height: u32,
+impl GpuTimelineCreatePoint {
+    /// Create a timeline point request for the current ABI version.
+    pub const fn new(target_value: u64) -> Self {
+        Self {
+            abi_version: GPU_ABI_VERSION,
+            result: GPU_RESULT_SUCCESS,
+            target_value,
+            point_handle: 0,
+            failed: 0,
+            current_value: 0,
+        }
+    }
 }
 
-/// GPU control device wrapper.
+/// GPU control connection wrapper.
 pub struct Gpu {
     file: File,
 }
@@ -326,400 +413,278 @@ impl Gpu {
     ///
     /// # Returns
     ///
-    /// GPU wrapper or a handle error.
+    /// An independent GPU connection or a handle error.
     pub fn open(path: &str) -> HandleResult<Self> {
         let file = File::open(path).map_err(|_| HandleError::NotFound)?;
         Ok(Self { file })
     }
 
-    /// Query GPU backend capabilities.
+    /// Query stable device information and opaque backend information.
     ///
     /// # Returns
     ///
-    /// Backend capability information.
-    pub fn capabilities(&self) -> HandleResult<GpuCapabilitiesInfo> {
-        let mut info = GpuCapabilitiesInfo::default();
+    /// Fixed-width query information. Inspect `result` for request-level errors.
+    pub fn query_info(&self) -> HandleResult<GpuQueryInfo> {
+        let mut info = GpuQueryInfo::new();
         self.file
             .as_handle()
-            .control(commands::GPU_GET_CAPABILITIES, &mut info as *mut _ as usize)?;
+            .control(commands::GPU_QUERY_INFO, &mut info as *mut _ as usize)?;
         Ok(info)
     }
 
-    /// Query one capset's metadata.
+    /// Create a kernel-owned GPU buffer child object.
     ///
     /// # Arguments
     ///
-    /// * `index` - Zero-based capset index.
+    /// * `size_bytes` - Requested non-zero buffer size.
+    /// * `flags` - `GPU_BUFFER_FLAG_*` creation flags.
     ///
     /// # Returns
     ///
-    /// Capset metadata.
-    pub fn capset_info(&self, index: u32) -> HandleResult<GpuCapsetInfoRequest> {
-        let mut request = GpuCapsetInfoRequest {
-            index,
-            ..GpuCapsetInfoRequest::default()
-        };
+    /// An owning buffer wrapper or a handle error.
+    pub fn create_buffer(&self, size_bytes: u64, flags: u32) -> HandleResult<GpuBuffer> {
+        let mut request = GpuCreateBuffer::new(size_bytes, flags);
+        self.file
+            .as_handle()
+            .control(commands::GPU_CREATE_BUFFER, &mut request as *mut _ as usize)?;
+        result_to_handle_error(request.result)?;
+        let handle = adopt_child_handle(request.buffer_handle)?;
+        Ok(GpuBuffer {
+            handle,
+            allocated_size: request.allocated_size,
+            flags: request.flags,
+        })
+    }
+
+    /// Create a kernel-owned GPU timeline child object.
+    ///
+    /// # Arguments
+    ///
+    /// * `initial_value` - Initial completed timeline value.
+    ///
+    /// # Returns
+    /// An owning timeline wrapper or a handle error.
+    pub fn create_timeline(&self, initial_value: u64) -> HandleResult<GpuTimeline> {
+        let mut request = GpuCreateTimeline::new(initial_value);
         self.file.as_handle().control(
-            commands::GPU_GET_CAPSET_INFO,
+            commands::GPU_CREATE_TIMELINE,
             &mut request as *mut _ as usize,
         )?;
+        result_to_handle_error(request.result)?;
+        Ok(GpuTimeline {
+            handle: adopt_child_handle(request.timeline_handle)?,
+        })
+    }
+
+    /// Return the underlying connection handle.
+    ///
+    /// # Returns
+    /// A borrowed RAII handle for advanced control operations.
+    pub fn as_handle(&self) -> &Handle {
+        self.file.as_handle()
+    }
+}
+
+/// Owning RAII wrapper for a connection-created GPU buffer child handle.
+pub struct GpuBuffer {
+    handle: Handle,
+    allocated_size: u64,
+    flags: u32,
+}
+
+impl GpuBuffer {
+    /// Query the current immutable buffer details.
+    ///
+    /// # Returns
+    /// Fixed-width buffer information or a handle error.
+    pub fn query_info(&self) -> HandleResult<GpuBufferInfo> {
+        let mut info = GpuBufferInfo::new();
+        self.handle.control(
+            commands::GPU_BUFFER_QUERY_INFO,
+            &mut info as *mut _ as usize,
+        )?;
+        result_to_handle_error(info.result)?;
+        Ok(info)
+    }
+
+    /// Return the page-rounded allocation size reported at creation.
+    ///
+    /// # Returns
+    ///
+    /// The buffer's stable backing size in bytes.
+    pub const fn allocated_size(&self) -> u64 {
+        self.allocated_size
+    }
+
+    /// Return the creation flags reported at creation.
+    ///
+    /// # Returns
+    ///
+    /// The original `GPU_BUFFER_FLAG_*` bits.
+    pub const fn flags(&self) -> u32 {
+        self.flags
+    }
+
+    /// Return whether this buffer exposes CPU mapping capability.
+    ///
+    /// # Returns
+    ///
+    /// `true` when CPU-visible memory was requested at creation.
+    pub const fn cpu_visible(&self) -> bool {
+        self.flags & GPU_BUFFER_FLAG_CPU_VISIBLE != 0
+    }
+
+    /// Return the underlying child handle.
+    ///
+    /// # Returns
+    ///
+    /// A borrowed owning-handle wrapper for advanced operations.
+    pub fn as_handle(&self) -> &Handle {
+        &self.handle
+    }
+
+    /// Consume this wrapper and return its owning handle.
+    ///
+    /// # Returns
+    ///
+    /// The RAII handle previously owned by this wrapper.
+    pub fn into_handle(self) -> Handle {
+        self.handle
+    }
+}
+
+/// Owning RAII wrapper for a connection-created GPU timeline child handle.
+pub struct GpuTimeline {
+    handle: Handle,
+}
+
+impl GpuTimeline {
+    /// Query the timeline's completed value and sticky failure state.
+    ///
+    /// # Returns
+    ///
+    /// Fixed-width timeline information or a handle error.
+    pub fn query(&self) -> HandleResult<GpuTimelineInfo> {
+        let mut info = GpuTimelineInfo::new();
+        self.handle
+            .control(commands::GPU_TIMELINE_QUERY, &mut info as *mut _ as usize)?;
+        result_to_handle_error(info.result)?;
+        Ok(info)
+    }
+
+    /// Advance this timeline to a non-decreasing completed value.
+    ///
+    /// # Arguments
+    ///
+    /// * `value` - New completed value, which may not decrease the timeline.
+    ///
+    /// # Returns
+    /// Fixed-width signal results or a handle error.
+    pub fn signal(&self, value: u64) -> HandleResult<GpuTimelineSignal> {
+        let mut request = GpuTimelineSignal::new(value);
+        self.handle.control(
+            commands::GPU_TIMELINE_SIGNAL,
+            &mut request as *mut _ as usize,
+        )?;
+        result_to_handle_error(request.result)?;
         Ok(request)
     }
 
-    /// Read capset bytes.
-    ///
-    /// # Arguments
-    ///
-    /// * `id` - Backend-defined capset identifier.
-    /// * `version` - Capset version.
-    /// * `max_size` - Maximum number of bytes to read.
+    /// Mark this timeline permanently failed.
     ///
     /// # Returns
-    ///
-    /// Capset byte vector.
-    pub fn read_capset(&self, id: u32, version: u32, max_size: usize) -> HandleResult<Vec<u8>> {
-        let mut buffer = vec![0u8; max_size];
-        let mut request = GpuReadCapsetRequest {
-            id,
-            version,
-            buffer_ptr: buffer.as_mut_ptr() as usize,
-            buffer_len: buffer.len(),
-            bytes_written: 0,
-        };
-        self.file
-            .as_handle()
-            .control(commands::GPU_READ_CAPSET, &mut request as *mut _ as usize)?;
-        buffer.truncate(request.bytes_written);
-        Ok(buffer)
+    /// Fixed-width failure results or a handle error.
+    pub fn fail(&self) -> HandleResult<GpuTimelineFail> {
+        let mut request = GpuTimelineFail::new();
+        self.handle
+            .control(commands::GPU_TIMELINE_FAIL, &mut request as *mut _ as usize)?;
+        result_to_handle_error(request.result)?;
+        Ok(request)
     }
 
-    /// Create a GPU execution context.
+    /// Create a fixed-target, selectable timeline point child object.
     ///
     /// # Arguments
     ///
-    /// * `context_id` - Caller-selected context identifier.
-    /// * `debug_name` - Human-readable debug name.
+    /// * `target_value` - Completed timeline value that makes the point ready.
     ///
     /// # Returns
-    ///
-    /// Success or a handle error.
-    pub fn create_context(&self, context_id: u32, debug_name: &str) -> HandleResult<()> {
-        let request = GpuContextRequest {
-            context_id,
-            name_ptr: debug_name.as_ptr() as usize,
-            name_len: debug_name.len(),
-        };
-        self.file
-            .as_handle()
-            .control(commands::GPU_CREATE_CONTEXT, &request as *const _ as usize)?;
-        Ok(())
-    }
-
-    /// Destroy a GPU execution context.
-    ///
-    /// # Arguments
-    ///
-    /// * `context_id` - Context identifier to destroy.
-    ///
-    /// # Returns
-    ///
-    /// Success or a handle error.
-    pub fn destroy_context(&self, context_id: u32) -> HandleResult<()> {
-        let request = GpuContextRequest {
-            context_id,
-            ..GpuContextRequest::default()
-        };
-        self.file
-            .as_handle()
-            .control(commands::GPU_DESTROY_CONTEXT, &request as *const _ as usize)?;
-        Ok(())
-    }
-
-    /// Create a backend 3D resource.
-    ///
-    /// # Arguments
-    ///
-    /// * `description` - Resource target, format, dimensions, and creation flags.
-    ///
-    /// # Returns
-    ///
-    /// Resource identifier allocated by the backend or a handle error.
-    pub fn create_3d_resource(&self, description: GpuResource3dDescription) -> HandleResult<u32> {
-        let mut request = GpuCreate3dResourceRequest {
-            resource_id: description.resource_id,
-            target: description.target,
-            format: description.format,
-            bind: description.bind,
-            width: description.width,
-            height: description.height,
-            depth: description.depth,
-            array_size: description.array_size,
-            last_level: description.last_level,
-            nr_samples: description.nr_samples,
-            flags: description.flags,
-        };
-        self.file.as_handle().control(
-            commands::GPU_CREATE_3D_RESOURCE,
+    /// An owning selectable point wrapper or a handle error.
+    pub fn create_point(&self, target_value: u64) -> HandleResult<GpuTimelinePoint> {
+        let mut request = GpuTimelineCreatePoint::new(target_value);
+        self.handle.control(
+            commands::GPU_TIMELINE_CREATE_POINT,
             &mut request as *mut _ as usize,
         )?;
-        Ok(request.resource_id)
+        result_to_handle_error(request.result)?;
+        Ok(GpuTimelinePoint {
+            handle: adopt_child_handle(request.point_handle)?,
+            target_value,
+        })
     }
 
-    /// Unreference a backend resource.
-    ///
-    /// # Arguments
-    ///
-    /// * `resource_id` - Resource identifier to release.
+    /// Return the underlying child handle.
     ///
     /// # Returns
-    ///
-    /// Success or a handle error.
-    pub fn unref_resource(&self, resource_id: u32) -> HandleResult<()> {
-        let request = GpuResourceRequest { resource_id };
-        self.file
-            .as_handle()
-            .control(commands::GPU_UNREF_RESOURCE, &request as *const _ as usize)?;
-        Ok(())
+    /// A borrowed owning-handle wrapper for advanced operations.
+    pub fn as_handle(&self) -> &Handle {
+        &self.handle
     }
 
-    /// Attach a resource to a GPU context.
-    ///
-    /// # Arguments
-    ///
-    /// * `context_id` - Context that should see the resource.
-    /// * `resource_id` - Resource to attach.
+    /// Consume this wrapper and return its owning handle.
     ///
     /// # Returns
-    ///
-    /// Success or a handle error.
-    pub fn attach_resource(&self, context_id: u32, resource_id: u32) -> HandleResult<()> {
-        let request = GpuContextResourceRequest {
-            context_id,
-            resource_id,
-        };
-        self.file
-            .as_handle()
-            .control(commands::GPU_ATTACH_RESOURCE, &request as *const _ as usize)?;
-        Ok(())
+    /// The RAII handle previously owned by this wrapper.
+    pub fn into_handle(self) -> Handle {
+        self.handle
     }
+}
 
-    /// Detach a resource from a GPU context.
-    ///
-    /// # Arguments
-    ///
-    /// * `context_id` - Context that owns the attachment.
-    /// * `resource_id` - Resource to detach.
+/// Owning RAII wrapper for a fixed-target GPU timeline point child handle.
+pub struct GpuTimelinePoint {
+    handle: Handle,
+    target_value: u64,
+}
+
+impl GpuTimelinePoint {
+    /// Return this point's fixed timeline target.
     ///
     /// # Returns
-    ///
-    /// Success or a handle error.
-    pub fn detach_resource(&self, context_id: u32, resource_id: u32) -> HandleResult<()> {
-        let request = GpuContextResourceRequest {
-            context_id,
-            resource_id,
-        };
-        self.file
-            .as_handle()
-            .control(commands::GPU_DETACH_RESOURCE, &request as *const _ as usize)?;
-        Ok(())
+    /// The completed timeline value that makes the point ready.
+    pub const fn target_value(&self) -> u64 {
+        self.target_value
     }
 
-    /// Attach userspace memory backing to a resource.
-    ///
-    /// # Arguments
-    ///
-    /// * `resource_id` - Resource that should use the backing memory.
-    /// * `buffer` - Backing memory buffer.
+    /// Return the underlying selectable child handle.
     ///
     /// # Returns
-    ///
-    /// Success or a handle error.
-    pub fn attach_resource_backing(&self, resource_id: u32, buffer: &mut [u8]) -> HandleResult<()> {
-        let request = GpuAttachResourceBackingRequest {
-            resource_id,
-            buffer_ptr: buffer.as_mut_ptr() as usize,
-            buffer_len: buffer.len(),
-        };
-        self.file.as_handle().control(
-            commands::GPU_ATTACH_RESOURCE_BACKING,
-            &request as *const _ as usize,
-        )?;
-        Ok(())
+    /// A borrowed owning-handle wrapper for poll/select integration.
+    pub fn as_handle(&self) -> &Handle {
+        &self.handle
     }
 
-    /// Detach memory backing from a resource.
-    ///
-    /// # Arguments
-    ///
-    /// * `resource_id` - Resource whose backing should be detached.
+    /// Consume this wrapper and return its owning handle.
     ///
     /// # Returns
-    ///
-    /// Success or a handle error.
-    pub fn detach_resource_backing(&self, resource_id: u32) -> HandleResult<()> {
-        let request = GpuResourceRequest { resource_id };
-        self.file.as_handle().control(
-            commands::GPU_DETACH_RESOURCE_BACKING,
-            &request as *const _ as usize,
-        )?;
-        Ok(())
+    /// The RAII handle previously owned by this wrapper.
+    pub fn into_handle(self) -> Handle {
+        self.handle
     }
+}
 
-    fn transfer_request(transfer: GpuTransfer3d) -> GpuTransfer3dRequest {
-        GpuTransfer3dRequest {
-            context_id: transfer.context_id,
-            flags: if transfer.fence_id.is_some() {
-                GPU_TRANSFER_FLAG_FENCE
-            } else {
-                0
-            },
-            fence_id: transfer.fence_id.unwrap_or(0),
-            resource_id: transfer.resource_id,
-            level: transfer.level,
-            offset: transfer.offset,
-            stride: transfer.stride,
-            layer_stride: transfer.layer_stride,
-            x: transfer.x,
-            y: transfer.y,
-            z: transfer.z,
-            width: transfer.width,
-            height: transfer.height,
-            depth: transfer.depth,
-        }
-    }
+fn adopt_child_handle(raw: u32) -> HandleResult<Handle> {
+    // SAFETY: A successful GPU create control response contains a newly inserted
+    // handle in the caller's handle table. `Handle::from_raw` verifies it with
+    // kernel introspection and closes it if that verification fails.
+    unsafe { Handle::from_raw(raw as i32) }
+}
 
-    /// Transfer attached backing memory to a host 3D resource.
-    ///
-    /// # Arguments
-    ///
-    /// * `transfer` - Transfer region, strides, and optional fence.
-    ///
-    /// # Returns
-    ///
-    /// Success or a handle error.
-    pub fn transfer_to_host_3d(&self, transfer: GpuTransfer3d) -> HandleResult<()> {
-        let request = Self::transfer_request(transfer);
-        self.file.as_handle().control(
-            commands::GPU_TRANSFER_TO_HOST_3D,
-            &request as *const _ as usize,
-        )?;
-        Ok(())
-    }
-
-    /// Transfer a host 3D resource into attached backing memory.
-    ///
-    /// # Arguments
-    ///
-    /// * `transfer` - Transfer region, strides, and optional fence.
-    ///
-    /// # Returns
-    ///
-    /// Success or a handle error.
-    pub fn transfer_from_host_3d(&self, transfer: GpuTransfer3d) -> HandleResult<()> {
-        let request = Self::transfer_request(transfer);
-        self.file.as_handle().control(
-            commands::GPU_TRANSFER_FROM_HOST_3D,
-            &request as *const _ as usize,
-        )?;
-        Ok(())
-    }
-
-    /// Present a GPU resource region through the display pipeline.
-    ///
-    /// # Arguments
-    ///
-    /// * `resource_id` - Resource identifier.
-    /// * `resource_width` - Resource width in pixels.
-    /// * `resource_height` - Resource height in pixels.
-    /// * `x` - Updated region X origin.
-    /// * `y` - Updated region Y origin.
-    /// * `width` - Updated region width.
-    /// * `height` - Updated region height.
-    ///
-    /// # Returns
-    ///
-    /// Success or a handle error.
-    pub fn present_resource_region(
-        &self,
-        resource_id: u32,
-        resource_width: u32,
-        resource_height: u32,
-        x: u32,
-        y: u32,
-        width: u32,
-        height: u32,
-    ) -> HandleResult<()> {
-        let request = GpuPresentResourceRequest {
-            resource_id,
-            resource_width,
-            resource_height,
-            x,
-            y,
-            width,
-            height,
-        };
-        self.file.as_handle().control(
-            commands::GPU_PRESENT_RESOURCE,
-            &request as *const _ as usize,
-        )?;
-        Ok(())
-    }
-
-    /// Present a whole GPU resource through the display pipeline.
-    ///
-    /// # Arguments
-    ///
-    /// * `resource_id` - Resource identifier.
-    /// * `width` - Resource width in pixels.
-    /// * `height` - Resource height in pixels.
-    ///
-    /// # Returns
-    ///
-    /// Success or a handle error.
-    pub fn present_resource(&self, resource_id: u32, width: u32, height: u32) -> HandleResult<()> {
-        self.present_resource_region(resource_id, width, height, 0, 0, width, height)
-    }
-
-    /// Submit a virgl command stream.
-    ///
-    /// # Arguments
-    ///
-    /// * `context_id` - GPU context that owns the command stream.
-    /// * `commands` - Backend-specific command bytes.
-    /// * `fence_id` - Optional fence identifier.
-    ///
-    /// # Returns
-    ///
-    /// Success or a handle error.
-    pub fn submit_commands(
-        &self,
-        context_id: u32,
-        commands: &[u8],
-        fence_id: Option<u64>,
-    ) -> HandleResult<()> {
-        let request = GpuSubmitRequest {
-            context_id,
-            flags: if fence_id.is_some() {
-                GPU_SUBMIT_FLAG_FENCE
-            } else {
-                0
-            },
-            fence_id: fence_id.unwrap_or(0),
-            commands_ptr: commands.as_ptr() as usize,
-            commands_len: commands.len(),
-        };
-        self.file
-            .as_handle()
-            .control(commands::GPU_SUBMIT_COMMANDS, &request as *const _ as usize)?;
-        Ok(())
-    }
-
-    /// Get the underlying file path-independent debug label.
-    ///
-    /// # Returns
-    ///
-    /// Static wrapper label.
-    pub fn label(&self) -> String {
-        String::from("gpu")
+fn result_to_handle_error(result: u32) -> HandleResult<()> {
+    match result {
+        GPU_RESULT_SUCCESS => Ok(()),
+        GPU_RESULT_INVALID_ABI | GPU_RESULT_INVALID_ARGUMENT => Err(HandleError::InvalidParameter),
+        GPU_RESULT_OUT_OF_RESOURCES => Err(HandleError::OutOfResources),
+        GPU_RESULT_INVALID_STATE => Err(HandleError::Unsupported),
+        _ => Err(HandleError::SystemError(result as i32)),
     }
 }
