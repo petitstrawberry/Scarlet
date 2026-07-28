@@ -62,6 +62,11 @@ cargo make run-riscv64
 # Build and run the AArch64 QEMU full image.
 cargo make run-aarch64
 
+# Pass QEMU display and GPU arguments through explicitly.
+SCARLET_QEMU_DISPLAY='cocoa,gl=on,retina=on' \
+SCARLET_QEMU_GPU=virtio-gpu-gl-pci \
+cargo make run-aarch64
+
 # Run kernel tests for both maintained architectures.
 cargo make test-riscv64
 cargo make test-aarch64
