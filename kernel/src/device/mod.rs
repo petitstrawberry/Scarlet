@@ -151,11 +151,6 @@ pub trait Device: Send + Sync + ControlOps + MemoryMappingOps + Selectable {
         None
     }
 
-    /// Cast to GpuDevice if this device provides GPU acceleration.
-    fn as_gpu_device(&self) -> Option<&dyn gpu::GpuDevice> {
-        None
-    }
-
     /// Cast to NetworkDevice if this device is a network device
     fn as_network_device(&self) -> Option<&dyn network::NetworkDevice> {
         None
@@ -182,14 +177,6 @@ pub trait Device: Send + Sync + ControlOps + MemoryMappingOps + Selectable {
     fn into_graphics_device(
         self: alloc::sync::Arc<Self>,
     ) -> Option<alloc::sync::Arc<dyn graphics::GraphicsDevice>> {
-        None
-    }
-
-    /// Cast Arc<Self> to Arc<dyn GpuDevice> if this device provides GPU acceleration.
-    /// This allows direct ownership of the GPU device for efficient operations.
-    fn into_gpu_device(
-        self: alloc::sync::Arc<Self>,
-    ) -> Option<alloc::sync::Arc<dyn gpu::GpuDevice>> {
         None
     }
 
@@ -382,10 +369,6 @@ impl<T: Device + ?Sized + 'static> Device for DefaultDeviceOpen<T> {
 
     fn as_graphics_device(&self) -> Option<&dyn graphics::GraphicsDevice> {
         self.device.as_graphics_device()
-    }
-
-    fn as_gpu_device(&self) -> Option<&dyn gpu::GpuDevice> {
-        self.device.as_gpu_device()
     }
 
     fn as_network_device(&self) -> Option<&dyn network::NetworkDevice> {
