@@ -1,0 +1,69 @@
+diff --git a/config.h.meson b/config.h.meson
+index 55497ff..fb5f150 100644
+--- a/config.h.meson
++++ b/config.h.meson
+@@ -53,0 +54 @@
++#mesondefine HAVE_KQUEUE
+diff --git a/meson.build b/meson.build
+index 69c1bb8..95b4782 100644
+--- a/meson.build
++++ b/meson.build
+@@ -209,0 +210,4 @@ endif
++if cc.has_function('kqueue', prefix : '#include <sys/event.h>')
++   conf_data.set('HAVE_KQUEUE', 1)
++endif
++
+diff --git a/src/virgl_util.c b/src/virgl_util.c
+index 8184650..0b95b75 100644
+--- a/src/virgl_util.c
++++ b/src/virgl_util.c
+@@ -34,0 +35,4 @@
++#ifdef HAVE_KQUEUE
++#include <fcntl.h>
++#include <sys/event.h>
++#endif
+@@ -91 +95 @@ bool has_eventfd(void)
+-#ifdef HAVE_EVENTFD_H
++#if defined(HAVE_EVENTFD_H) || defined(HAVE_KQUEUE)
+@@ -101,0 +106,22 @@ int create_eventfd(unsigned int initval)
++#elif defined(HAVE_KQUEUE)
++   struct kevent change;
++   int fd = kqueue();
++
++   if (fd < 0)
++      return -1;
++
++   if (fcntl(fd, F_SETFD, FD_CLOEXEC) < 0)
++      goto fail;
++
++   EV_SET(&change, 0, EVFILT_USER, EV_ADD | EV_CLEAR, 0, 0, NULL);
++   if (kevent(fd, &change, 1, NULL, 0, NULL) < 0)
++      goto fail;
++
++   if (initval && write_eventfd(fd, initval))
++      goto fail;
++
++   return fd;
++
++fail:
++   close(fd);
++   return -1;
+@@ -109,0 +136,6 @@ int write_eventfd(int fd, uint64_t val)
++#ifdef HAVE_KQUEUE
++   struct kevent change;
++
++   EV_SET(&change, 0, EVFILT_USER, 0, NOTE_TRIGGER, val, NULL);
++   return kevent(fd, &change, 1, NULL, 0, NULL) < 0 ? -1 : 0;
++#else
+@@ -125,0 +158 @@ int write_eventfd(int fd, uint64_t val)
++#endif
+@@ -129,0 +163,7 @@ void flush_eventfd(int fd)
++#ifdef HAVE_KQUEUE
++    struct kevent event;
++    struct timespec timeout = { 0 };
++
++    while (kevent(fd, NULL, 0, &event, 1, &timeout) > 0) {
++    }
++#else
+@@ -134,0 +175 @@ void flush_eventfd(int fd)
++#endif
