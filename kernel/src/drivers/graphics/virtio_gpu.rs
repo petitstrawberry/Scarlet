@@ -66,6 +66,8 @@ const VIRTIO_GPU_RESP_OK_CAPSET: u32 = 0x1103;
 const VIRTIO_GPU_FLAG_FENCE: u32 = 1;
 const VIRTIO_GPU_MAX_CONTEXT_NAME: usize = 64;
 const VIRTIO_GPU_CONFIG_NUM_CAPSETS_OFFSET: usize = 12;
+const VIRTIO_GPU_CONTROL_QUEUE_SIZE: usize = 64;
+const VIRTIO_GPU_CURSOR_QUEUE_SIZE: usize = 16;
 
 // VirtIO GPU Formats
 const VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM: u32 = 1;
@@ -347,7 +349,10 @@ impl VirtioGpuDeviceCore {
         let mut device = Self {
             base_addr,
             pci_transport,
-            virtqueues: IrqSpinLock::new([VirtQueue::new(64), VirtQueue::new(64)]), // Control and Cursor queues with 64 descriptors each
+            virtqueues: IrqSpinLock::new([
+                VirtQueue::new(VIRTIO_GPU_CONTROL_QUEUE_SIZE),
+                VirtQueue::new(VIRTIO_GPU_CURSOR_QUEUE_SIZE),
+            ]),
             display_info: IrqRwSpinLock::new(None),
             framebuffer_addr: IrqRwSpinLock::new(None),
             framebuffer_alloc: IrqRwSpinLock::new(None),
@@ -1524,6 +1529,11 @@ impl GraphicsDevice for VirtioGpuDevice {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test_case]
+    fn virtio_gpu_cursor_queue_fits_qemu_limit() {
+        assert_eq!(VIRTIO_GPU_CURSOR_QUEUE_SIZE, 16);
+    }
 
     /// Physical address of the VirtIO GPU device on QEMU RISC-V virt.
     const VIRTIO_GPU_PADDR: usize = 0x10002000;
