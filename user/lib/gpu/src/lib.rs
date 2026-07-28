@@ -30,6 +30,24 @@ pub mod commands {
     pub const GPU_TIMELINE_FAIL: u32 = 0x4756;
     /// Create a fixed-target GPU timeline point child handle.
     pub const GPU_TIMELINE_CREATE_POINT: u32 = 0x4757;
+    /// Query one backend-defined execution dialect.
+    pub const GPU_QUERY_DIALECT: u32 = 0x4758;
+    /// Create a GPU execution context child handle.
+    pub const GPU_CREATE_CONTEXT: u32 = 0x4759;
+    /// Query a GPU execution context child handle.
+    pub const GPU_CONTEXT_QUERY: u32 = 0x475a;
+    /// Create a GPU execution queue child handle.
+    pub const GPU_CREATE_QUEUE: u32 = 0x475b;
+    /// Query a GPU execution queue child handle.
+    pub const GPU_QUEUE_QUERY: u32 = 0x475c;
+    /// Synchronously submit opaque commands to a GPU queue.
+    pub const GPU_QUEUE_SUBMIT: u32 = 0x475d;
+    /// Create a backend-owned GPU image child handle.
+    pub const GPU_CREATE_IMAGE: u32 = 0x475e;
+    /// Query a GPU image child handle.
+    pub const GPU_IMAGE_QUERY_INFO: u32 = 0x475f;
+    /// Attach a GPU image to an execution context.
+    pub const GPU_CONTEXT_ATTACH_IMAGE: u32 = 0x4760;
 }
 
 /// ABI version accepted by [`GpuQueryInfo`].
@@ -44,11 +62,22 @@ pub const GPU_RESULT_INVALID_ARGUMENT: u32 = 2;
 pub const GPU_RESULT_OUT_OF_RESOURCES: u32 = 3;
 /// The operation is invalid for the object's current state.
 pub const GPU_RESULT_INVALID_STATE: u32 = 4;
+/// The requested backend operation is not available.
+pub const GPU_RESULT_UNSUPPORTED: u32 = 5;
 
 /// Create buffer flag permitting CPU memory mappings.
 pub const GPU_BUFFER_FLAG_CPU_VISIBLE: u32 = 1 << 0;
 /// All currently defined GPU buffer creation flags.
 pub const GPU_BUFFER_FLAGS_VALID: u32 = GPU_BUFFER_FLAG_CPU_VISIBLE;
+
+/// Generic BGRA8 normalized unsigned image format.
+pub const GPU_IMAGE_FORMAT_BGRA8_UNORM: u32 = 1;
+/// Image usage permitting the image to be bound as a render target.
+pub const GPU_IMAGE_USAGE_RENDER_TARGET: u32 = 1 << 0;
+/// Image usage permitting the image to be selected for display scanout.
+pub const GPU_IMAGE_USAGE_PRESENTABLE: u32 = 1 << 1;
+/// All currently defined GPU image usage flags.
+pub const GPU_IMAGE_USAGE_VALID: u32 = GPU_IMAGE_USAGE_RENDER_TARGET | GPU_IMAGE_USAGE_PRESENTABLE;
 
 /// The GPU backend is not available for control.
 pub const GPU_DEVICE_STATE_UNAVAILABLE: u32 = 0;
@@ -74,6 +103,154 @@ pub const GPU_EXECUTION_SUPPORT_PRESENTATION: u32 = 1 << 4;
 pub const GPU_BACKEND_ID_BYTES: usize = 32;
 /// Fixed byte capacity of opaque backend-defined information.
 pub const GPU_BACKEND_INFO_BYTES: usize = 64;
+/// Fixed byte capacity of opaque backend-defined dialect information.
+pub const GPU_DIALECT_INFO_BYTES: usize = 256;
+/// Maximum command stream length accepted by the generic queue ABI.
+pub const GPU_MAX_OPAQUE_COMMAND_SIZE: u32 = 64 * 1024;
+
+/// Submit flag requesting a timeline update after successful backend completion.
+pub const GPU_QUEUE_SUBMIT_FLAG_SIGNAL_TIMELINE: u32 = 1 << 0;
+
+/// Fixed-width request and response for [`commands::GPU_CREATE_IMAGE`].
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct GpuCreateImage {
+    /// ABI version supplied by userspace and echoed by the kernel.
+    pub abi_version: u32,
+    /// Explicit `GPU_RESULT_*` result code.
+    pub result: u32,
+    /// Generic `GPU_IMAGE_FORMAT_*` image format.
+    pub format: u32,
+    /// `GPU_IMAGE_USAGE_*` image usage flags.
+    pub usage: u32,
+    /// Image width in pixels.
+    pub width: u32,
+    /// Image height in pixels.
+    pub height: u32,
+    /// Newly created child handle on success, otherwise zero.
+    pub image_handle: u32,
+    /// Reserved for ABI-compatible future use. Must be zero.
+    pub reserved: u32,
+    /// Opaque backend command resource token for the image.
+    pub command_resource_token: u64,
+    /// Backing allocation size in bytes.
+    pub allocation_size: u64,
+}
+
+impl GpuCreateImage {
+    /// Create a BGRA8 render-target and presentable image request.
+    ///
+    /// # Arguments
+    ///
+    /// * `width` - Requested non-zero image width in pixels.
+    /// * `height` - Requested non-zero image height in pixels.
+    ///
+    /// # Returns
+    ///
+    /// A zeroed request for the current ABI version.
+    pub const fn new(width: u32, height: u32) -> Self {
+        Self {
+            abi_version: GPU_ABI_VERSION,
+            result: GPU_RESULT_SUCCESS,
+            format: GPU_IMAGE_FORMAT_BGRA8_UNORM,
+            usage: GPU_IMAGE_USAGE_VALID,
+            width,
+            height,
+            image_handle: 0,
+            reserved: 0,
+            command_resource_token: 0,
+            allocation_size: 0,
+        }
+    }
+}
+
+/// Fixed-width response for [`commands::GPU_IMAGE_QUERY_INFO`].
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct GpuImageInfo {
+    /// ABI version supplied by userspace and echoed by the kernel.
+    pub abi_version: u32,
+    /// Explicit `GPU_RESULT_*` result code.
+    pub result: u32,
+    /// Generic `GPU_IMAGE_FORMAT_*` image format.
+    pub format: u32,
+    /// `GPU_IMAGE_USAGE_*` image usage flags.
+    pub usage: u32,
+    /// Image width in pixels.
+    pub width: u32,
+    /// Image height in pixels.
+    pub height: u32,
+    /// Opaque backend command resource token for the image.
+    pub command_resource_token: u64,
+    /// Backing allocation size in bytes.
+    pub allocation_size: u64,
+}
+
+impl GpuImageInfo {
+    /// Create a zeroed image query for the current ABI version.
+    ///
+    /// # Returns
+    ///
+    /// A zeroed image query structure.
+    pub const fn new() -> Self {
+        Self {
+            abi_version: GPU_ABI_VERSION,
+            result: GPU_RESULT_SUCCESS,
+            format: 0,
+            usage: 0,
+            width: 0,
+            height: 0,
+            command_resource_token: 0,
+            allocation_size: 0,
+        }
+    }
+}
+
+impl Default for GpuImageInfo {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Fixed-width request and response for [`commands::GPU_CONTEXT_ATTACH_IMAGE`].
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct GpuContextAttachImage {
+    /// ABI version supplied by userspace and echoed by the kernel.
+    pub abi_version: u32,
+    /// Explicit `GPU_RESULT_*` result code.
+    pub result: u32,
+    /// Existing GPU image child handle to attach.
+    pub image_handle: u32,
+    /// Reserved attachment flags. Must be zero.
+    pub flags: u32,
+    /// Opaque command resource token authorized for this context on success.
+    pub command_resource_token: u64,
+    /// Reserved for ABI-compatible future use. Must be zero.
+    pub reserved: u64,
+}
+
+impl GpuContextAttachImage {
+    /// Create an image attachment request for the current ABI version.
+    ///
+    /// # Arguments
+    ///
+    /// * `image_handle` - Existing image capability handle.
+    ///
+    /// # Returns
+    ///
+    /// A zeroed image attachment request.
+    pub const fn new(image_handle: u32) -> Self {
+        Self {
+            abi_version: GPU_ABI_VERSION,
+            result: GPU_RESULT_SUCCESS,
+            image_handle,
+            flags: 0,
+            command_resource_token: 0,
+            reserved: 0,
+        }
+    }
+}
 
 /// Fixed-width request and response for [`commands::GPU_QUERY_INFO`].
 ///
@@ -367,6 +544,12 @@ impl GpuTimelineFail {
     }
 }
 
+impl Default for GpuTimelineFail {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Fixed-width request and response for [`commands::GPU_TIMELINE_CREATE_POINT`].
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
@@ -396,6 +579,286 @@ impl GpuTimelineCreatePoint {
             failed: 0,
             current_value: 0,
         }
+    }
+}
+
+/// Fixed-width request and response for [`commands::GPU_QUERY_DIALECT`].
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct GpuQueryDialect {
+    /// ABI version supplied by userspace and echoed by the kernel.
+    pub abi_version: u32,
+    /// Explicit `GPU_RESULT_*` result code.
+    pub result: u32,
+    /// Reserved query flags. Must be zero.
+    pub flags: u32,
+    /// Reserved for ABI-compatible future use. Must be zero.
+    pub reserved: u32,
+    /// Backend-defined dialect index to query.
+    pub dialect_index: u32,
+    /// Reserved for ABI-compatible future use. Must be zero.
+    pub reserved2: u32,
+    /// Opaque backend token describing the queried dialect.
+    pub dialect_token: u64,
+    /// Number of meaningful bytes in `dialect_info`.
+    pub dialect_info_len: u32,
+    /// Reserved for ABI-compatible future use. Must be zero.
+    pub reserved3: u32,
+    /// Opaque backend-defined dialect information bytes.
+    pub dialect_info: [u8; GPU_DIALECT_INFO_BYTES],
+}
+
+impl GpuQueryDialect {
+    /// Create a dialect query for the current ABI version.
+    ///
+    /// # Arguments
+    ///
+    /// * `dialect_index` - Backend-defined dialect index to query.
+    pub const fn new(dialect_index: u32) -> Self {
+        Self {
+            abi_version: GPU_ABI_VERSION,
+            result: GPU_RESULT_SUCCESS,
+            flags: 0,
+            reserved: 0,
+            dialect_index,
+            reserved2: 0,
+            dialect_token: 0,
+            dialect_info_len: 0,
+            reserved3: 0,
+            dialect_info: [0; GPU_DIALECT_INFO_BYTES],
+        }
+    }
+
+    /// Return the meaningful opaque dialect information bytes.
+    ///
+    /// # Returns
+    ///
+    /// A bounded slice of `dialect_info`.
+    pub fn dialect_info_bytes(&self) -> &[u8] {
+        &self.dialect_info[..(self.dialect_info_len as usize).min(GPU_DIALECT_INFO_BYTES)]
+    }
+}
+
+/// Fixed-width request and response for [`commands::GPU_CREATE_CONTEXT`].
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct GpuCreateContext {
+    /// ABI version supplied by userspace and echoed by the kernel.
+    pub abi_version: u32,
+    /// Explicit `GPU_RESULT_*` result code.
+    pub result: u32,
+    /// Reserved context creation flags. Must be zero.
+    pub flags: u32,
+    /// Reserved for ABI-compatible future use. Must be zero.
+    pub reserved: u32,
+    /// Requested backend-defined dialect index.
+    pub dialect_index: u32,
+    /// Newly created context child handle on success, otherwise zero.
+    pub context_handle: u32,
+    /// Opaque token previously reported for the requested dialect.
+    pub requested_dialect_token: u64,
+    /// Effective backend-defined dialect index selected for the context.
+    pub effective_dialect_index: u32,
+    /// Reserved for ABI-compatible future use. Must be zero.
+    pub reserved2: u32,
+    /// Opaque token for the dialect actually selected by the backend.
+    pub effective_dialect_token: u64,
+}
+
+impl GpuCreateContext {
+    /// Create a context request for the current ABI version.
+    ///
+    /// # Arguments
+    ///
+    /// * `dialect_index` - Requested backend-defined dialect index.
+    /// * `requested_dialect_token` - Token returned by a dialect query.
+    pub const fn new(dialect_index: u32, requested_dialect_token: u64) -> Self {
+        Self {
+            abi_version: GPU_ABI_VERSION,
+            result: GPU_RESULT_SUCCESS,
+            flags: 0,
+            reserved: 0,
+            dialect_index,
+            context_handle: 0,
+            requested_dialect_token,
+            effective_dialect_index: 0,
+            reserved2: 0,
+            effective_dialect_token: 0,
+        }
+    }
+}
+
+/// Fixed-width response for [`commands::GPU_CONTEXT_QUERY`].
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct GpuContextInfo {
+    /// ABI version supplied by userspace and echoed by the kernel.
+    pub abi_version: u32,
+    /// Explicit `GPU_RESULT_*` result code.
+    pub result: u32,
+    /// Effective backend-defined dialect index selected for this context.
+    pub effective_dialect_index: u32,
+    /// Reserved for ABI-compatible future use. Must be zero.
+    pub reserved: u32,
+    /// Opaque token for the dialect actually selected by the backend.
+    pub effective_dialect_token: u64,
+    /// Reserved for ABI-compatible future use. Must be zero.
+    pub reserved2: u64,
+}
+
+impl GpuContextInfo {
+    /// Create a zeroed context query for the current ABI version.
+    pub const fn new() -> Self {
+        Self {
+            abi_version: GPU_ABI_VERSION,
+            result: GPU_RESULT_SUCCESS,
+            effective_dialect_index: 0,
+            reserved: 0,
+            effective_dialect_token: 0,
+            reserved2: 0,
+        }
+    }
+}
+
+impl Default for GpuContextInfo {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Fixed-width request and response for [`commands::GPU_CREATE_QUEUE`].
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct GpuCreateQueue {
+    /// ABI version supplied by userspace and echoed by the kernel.
+    pub abi_version: u32,
+    /// Explicit `GPU_RESULT_*` result code.
+    pub result: u32,
+    /// Reserved queue creation flags. Must be zero.
+    pub flags: u32,
+    /// Reserved for ABI-compatible future use. Must be zero.
+    pub reserved: u32,
+    /// Newly created queue child handle on success, otherwise zero.
+    pub queue_handle: u32,
+    /// Maximum opaque command size accepted by the queue.
+    pub max_opaque_command_size: u32,
+    /// Reserved for ABI-compatible future use. Must be zero.
+    pub reserved2: u64,
+}
+
+impl GpuCreateQueue {
+    /// Create a queue request for the current ABI version.
+    pub const fn new() -> Self {
+        Self {
+            abi_version: GPU_ABI_VERSION,
+            result: GPU_RESULT_SUCCESS,
+            flags: 0,
+            reserved: 0,
+            queue_handle: 0,
+            max_opaque_command_size: 0,
+            reserved2: 0,
+        }
+    }
+}
+
+impl Default for GpuCreateQueue {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Fixed-width response for [`commands::GPU_QUEUE_QUERY`].
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct GpuQueueInfo {
+    /// ABI version supplied by userspace and echoed by the kernel.
+    pub abi_version: u32,
+    /// Explicit `GPU_RESULT_*` result code.
+    pub result: u32,
+    /// Maximum opaque command size accepted by this queue.
+    pub max_opaque_command_size: u32,
+    /// Reserved for ABI-compatible future use. Must be zero.
+    pub reserved: u32,
+    /// Reserved for ABI-compatible future use. Must be zero.
+    pub reserved2: u64,
+}
+
+impl GpuQueueInfo {
+    /// Create a zeroed queue query for the current ABI version.
+    pub const fn new() -> Self {
+        Self {
+            abi_version: GPU_ABI_VERSION,
+            result: GPU_RESULT_SUCCESS,
+            max_opaque_command_size: 0,
+            reserved: 0,
+            reserved2: 0,
+        }
+    }
+}
+
+impl Default for GpuQueueInfo {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Fixed-width request and response for [`commands::GPU_QUEUE_SUBMIT`].
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct GpuQueueSubmit {
+    /// ABI version supplied by userspace and echoed by the kernel.
+    pub abi_version: u32,
+    /// Explicit `GPU_RESULT_*` result code.
+    pub result: u32,
+    /// `GPU_QUEUE_SUBMIT_FLAG_*` submission flags.
+    pub flags: u32,
+    /// Reserved for ABI-compatible future use. Must be zero.
+    pub reserved: u32,
+    /// Userspace address of opaque command bytes.
+    pub command_ptr: u64,
+    /// Number of opaque command bytes to copy and submit.
+    pub command_size: u32,
+    /// Existing GPU timeline handle used when timeline signalling is requested.
+    pub signal_timeline_handle: u32,
+    /// Value to signal after successful fenced backend completion.
+    pub signal_value: u64,
+    /// Completed value after the submission result is determined.
+    pub completed_value: u64,
+    /// Non-zero when the requested timeline is permanently failed.
+    pub timeline_failed: u32,
+    /// Reserved for ABI-compatible future use. Must be zero.
+    pub reserved2: u32,
+}
+
+impl GpuQueueSubmit {
+    /// Create a queue submission request for the current ABI version.
+    ///
+    /// # Arguments
+    ///
+    /// * `commands` - Non-empty backend-defined command byte stream.
+    ///
+    /// # Returns
+    ///
+    /// A request that borrows the command slice for the synchronous control call.
+    pub fn new(commands: &[u8]) -> HandleResult<Self> {
+        let command_size =
+            u32::try_from(commands.len()).map_err(|_| HandleError::InvalidParameter)?;
+        if command_size == 0 || command_size > GPU_MAX_OPAQUE_COMMAND_SIZE {
+            return Err(HandleError::InvalidParameter);
+        }
+        Ok(Self {
+            abi_version: GPU_ABI_VERSION,
+            result: GPU_RESULT_SUCCESS,
+            flags: 0,
+            reserved: 0,
+            command_ptr: commands.as_ptr() as usize as u64,
+            command_size,
+            signal_timeline_handle: 0,
+            signal_value: 0,
+            completed_value: 0,
+            timeline_failed: 0,
+            reserved2: 0,
+        })
     }
 }
 
@@ -476,6 +939,74 @@ impl Gpu {
         })
     }
 
+    /// Create a BGRA8 render-target and presentable GPU image.
+    ///
+    /// # Arguments
+    ///
+    /// * `width` - Requested non-zero image width in pixels.
+    /// * `height` - Requested non-zero image height in pixels.
+    ///
+    /// # Returns
+    ///
+    /// An owning image capability wrapper or a handle error.
+    pub fn create_image(&self, width: u32, height: u32) -> HandleResult<GpuImage> {
+        let mut request = GpuCreateImage::new(width, height);
+        self.file
+            .as_handle()
+            .control(commands::GPU_CREATE_IMAGE, &mut request as *mut _ as usize)?;
+        result_to_handle_error(request.result)?;
+        Ok(GpuImage {
+            handle: adopt_child_handle(request.image_handle)?,
+            command_resource_token: request.command_resource_token,
+        })
+    }
+
+    /// Query one backend-defined execution dialect.
+    ///
+    /// # Arguments
+    ///
+    /// * `dialect_index` - Backend-defined dialect index.
+    ///
+    /// # Returns
+    ///
+    /// An opaque dialect descriptor suitable for context creation.
+    pub fn query_dialect(&self, dialect_index: u32) -> HandleResult<GpuDialect> {
+        let mut request = GpuQueryDialect::new(dialect_index);
+        self.file
+            .as_handle()
+            .control(commands::GPU_QUERY_DIALECT, &mut request as *mut _ as usize)?;
+        result_to_handle_error(request.result)?;
+        Ok(GpuDialect {
+            index: request.dialect_index,
+            token: request.dialect_token,
+            opaque_info: request.dialect_info,
+            opaque_info_len: request.dialect_info_len,
+        })
+    }
+
+    /// Create an execution context for a queried backend dialect.
+    ///
+    /// # Arguments
+    ///
+    /// * `dialect` - Opaque dialect descriptor returned by [`Gpu::query_dialect`].
+    ///
+    /// # Returns
+    ///
+    /// An owning execution context wrapper or a handle error.
+    pub fn create_context(&self, dialect: &GpuDialect) -> HandleResult<GpuContext> {
+        let mut request = GpuCreateContext::new(dialect.index, dialect.token);
+        self.file.as_handle().control(
+            commands::GPU_CREATE_CONTEXT,
+            &mut request as *mut _ as usize,
+        )?;
+        result_to_handle_error(request.result)?;
+        Ok(GpuContext {
+            handle: adopt_child_handle(request.context_handle)?,
+            effective_dialect_index: request.effective_dialect_index,
+            effective_dialect_token: request.effective_dialect_token,
+        })
+    }
+
     /// Return the underlying connection handle.
     ///
     /// # Returns
@@ -485,11 +1016,301 @@ impl Gpu {
     }
 }
 
+/// Opaque backend-defined execution dialect descriptor.
+#[derive(Debug, Clone, Copy)]
+pub struct GpuDialect {
+    index: u32,
+    token: u64,
+    opaque_info: [u8; GPU_DIALECT_INFO_BYTES],
+    opaque_info_len: u32,
+}
+
+impl GpuDialect {
+    /// Return the backend-defined dialect index.
+    ///
+    /// # Returns
+    ///
+    /// The index used to query this dialect.
+    pub const fn index(&self) -> u32 {
+        self.index
+    }
+
+    /// Return the opaque backend dialect token.
+    ///
+    /// # Returns
+    ///
+    /// The token used when creating a context.
+    pub const fn token(&self) -> u64 {
+        self.token
+    }
+
+    /// Return the meaningful opaque backend dialect information bytes.
+    ///
+    /// # Returns
+    ///
+    /// A bounded slice of backend-defined capability data.
+    pub fn opaque_info(&self) -> &[u8] {
+        &self.opaque_info[..(self.opaque_info_len as usize).min(GPU_DIALECT_INFO_BYTES)]
+    }
+}
+
+/// Owning RAII wrapper for a GPU execution context child handle.
+pub struct GpuContext {
+    handle: Handle,
+    effective_dialect_index: u32,
+    effective_dialect_token: u64,
+}
+
+impl GpuContext {
+    /// Query the context's effective execution dialect.
+    ///
+    /// # Returns
+    ///
+    /// Current context information or a handle error.
+    pub fn query(&self) -> HandleResult<GpuContextInfo> {
+        let mut info = GpuContextInfo::new();
+        self.handle
+            .control(commands::GPU_CONTEXT_QUERY, &mut info as *mut _ as usize)?;
+        result_to_handle_error(info.result)?;
+        Ok(info)
+    }
+
+    /// Create an execution queue owned by this context.
+    ///
+    /// # Returns
+    ///
+    /// An owning queue wrapper or a handle error.
+    pub fn create_queue(&self) -> HandleResult<GpuQueue> {
+        let mut request = GpuCreateQueue::new();
+        self.handle
+            .control(commands::GPU_CREATE_QUEUE, &mut request as *mut _ as usize)?;
+        result_to_handle_error(request.result)?;
+        Ok(GpuQueue {
+            handle: adopt_child_handle(request.queue_handle)?,
+            max_opaque_command_size: request.max_opaque_command_size,
+        })
+    }
+
+    /// Attach an image so this context's opaque commands may reference it.
+    ///
+    /// # Arguments
+    ///
+    /// * `image` - Image capability to attach.
+    ///
+    /// # Returns
+    ///
+    /// The opaque command resource token authorized for this context.
+    pub fn attach_image(&self, image: &GpuImage) -> HandleResult<u64> {
+        let image_handle =
+            u32::try_from(image.handle.as_raw()).map_err(|_| HandleError::InvalidHandle)?;
+        let mut request = GpuContextAttachImage::new(image_handle);
+        self.handle.control(
+            commands::GPU_CONTEXT_ATTACH_IMAGE,
+            &mut request as *mut _ as usize,
+        )?;
+        result_to_handle_error(request.result)?;
+        if request.command_resource_token != image.command_resource_token {
+            return Err(HandleError::SystemError(-1));
+        }
+        Ok(request.command_resource_token)
+    }
+
+    /// Return the effective backend-defined dialect index.
+    ///
+    /// # Returns
+    ///
+    /// The dialect index selected by the backend.
+    pub const fn effective_dialect_index(&self) -> u32 {
+        self.effective_dialect_index
+    }
+
+    /// Return the effective opaque backend dialect token.
+    ///
+    /// # Returns
+    ///
+    /// The dialect token selected by the backend.
+    pub const fn effective_dialect_token(&self) -> u64 {
+        self.effective_dialect_token
+    }
+
+    /// Return the underlying context handle.
+    ///
+    /// # Returns
+    ///
+    /// A borrowed owning-handle wrapper for advanced operations.
+    pub fn as_handle(&self) -> &Handle {
+        &self.handle
+    }
+
+    /// Consume this wrapper and return its owning handle.
+    ///
+    /// # Returns
+    ///
+    /// The RAII handle previously owned by this wrapper.
+    pub fn into_handle(self) -> Handle {
+        self.handle
+    }
+}
+
+/// Owning RAII wrapper for a GPU execution queue child handle.
+pub struct GpuQueue {
+    handle: Handle,
+    max_opaque_command_size: u32,
+}
+
+impl GpuQueue {
+    /// Query this queue's current command limits.
+    ///
+    /// # Returns
+    ///
+    /// Current queue information or a handle error.
+    pub fn query(&self) -> HandleResult<GpuQueueInfo> {
+        let mut info = GpuQueueInfo::new();
+        self.handle
+            .control(commands::GPU_QUEUE_QUERY, &mut info as *mut _ as usize)?;
+        result_to_handle_error(info.result)?;
+        Ok(info)
+    }
+
+    /// Synchronously submit one opaque backend command stream.
+    ///
+    /// # Arguments
+    ///
+    /// * `commands` - Non-empty backend-defined command bytes.
+    ///
+    /// # Returns
+    ///
+    /// Submission results after fenced backend completion.
+    pub fn submit(&self, commands: &[u8]) -> HandleResult<GpuQueueSubmit> {
+        let mut request = self.prepare_submission(commands)?;
+        self.control_submission(&mut request)?;
+        Ok(request)
+    }
+
+    /// Synchronously submit commands and signal a timeline after completion.
+    ///
+    /// # Arguments
+    ///
+    /// * `commands` - Non-empty backend-defined command bytes.
+    /// * `timeline` - Timeline to update only after successful backend completion.
+    /// * `value` - Non-decreasing completed value to signal.
+    ///
+    /// # Returns
+    ///
+    /// Submission and timeline state after fenced backend completion.
+    pub fn submit_and_signal(
+        &self,
+        commands: &[u8],
+        timeline: &GpuTimeline,
+        value: u64,
+    ) -> HandleResult<GpuQueueSubmit> {
+        let mut request = self.prepare_submission(commands)?;
+        request.flags = GPU_QUEUE_SUBMIT_FLAG_SIGNAL_TIMELINE;
+        request.signal_timeline_handle =
+            u32::try_from(timeline.handle.as_raw()).map_err(|_| HandleError::InvalidHandle)?;
+        request.signal_value = value;
+        self.control_submission(&mut request)?;
+        Ok(request)
+    }
+
+    /// Return the queue's creation-time command limit.
+    ///
+    /// # Returns
+    ///
+    /// Maximum accepted command stream size in bytes.
+    pub const fn max_opaque_command_size(&self) -> u32 {
+        self.max_opaque_command_size
+    }
+
+    /// Return the underlying queue handle.
+    ///
+    /// # Returns
+    ///
+    /// A borrowed owning-handle wrapper for advanced operations.
+    pub fn as_handle(&self) -> &Handle {
+        &self.handle
+    }
+
+    /// Consume this wrapper and return its owning handle.
+    ///
+    /// # Returns
+    ///
+    /// The RAII handle previously owned by this wrapper.
+    pub fn into_handle(self) -> Handle {
+        self.handle
+    }
+
+    fn prepare_submission(&self, commands: &[u8]) -> HandleResult<GpuQueueSubmit> {
+        let request = GpuQueueSubmit::new(commands)?;
+        if request.command_size > self.max_opaque_command_size {
+            return Err(HandleError::InvalidParameter);
+        }
+        Ok(request)
+    }
+
+    fn control_submission(&self, request: &mut GpuQueueSubmit) -> HandleResult<()> {
+        self.handle
+            .control(commands::GPU_QUEUE_SUBMIT, request as *mut _ as usize)?;
+        result_to_handle_error(request.result)
+    }
+}
+
 /// Owning RAII wrapper for a connection-created GPU buffer child handle.
 pub struct GpuBuffer {
     handle: Handle,
     allocated_size: u64,
     flags: u32,
+}
+
+/// Owning RAII wrapper for a connection-created GPU image child handle.
+pub struct GpuImage {
+    handle: Handle,
+    command_resource_token: u64,
+}
+
+impl GpuImage {
+    /// Query the image's immutable format, usage, extent, and allocation details.
+    ///
+    /// # Returns
+    ///
+    /// Fixed-width image information or a handle error.
+    pub fn query(&self) -> HandleResult<GpuImageInfo> {
+        let mut info = GpuImageInfo::new();
+        self.handle
+            .control(commands::GPU_IMAGE_QUERY_INFO, &mut info as *mut _ as usize)?;
+        result_to_handle_error(info.result)?;
+        Ok(info)
+    }
+
+    /// Return the opaque backend command resource token.
+    ///
+    /// This token is not authority. The image capability handle remains required
+    /// to attach the image to a context or present it through a display surface.
+    ///
+    /// # Returns
+    ///
+    /// The backend-defined opaque command resource token.
+    pub const fn token(&self) -> u64 {
+        self.command_resource_token
+    }
+
+    /// Return the underlying image capability handle.
+    ///
+    /// # Returns
+    ///
+    /// A borrowed owning-handle wrapper for display presentation.
+    pub fn as_handle(&self) -> &Handle {
+        &self.handle
+    }
+
+    /// Consume this wrapper and return its owning handle.
+    ///
+    /// # Returns
+    ///
+    /// The RAII handle previously owned by this wrapper.
+    pub fn into_handle(self) -> Handle {
+        self.handle
+    }
 }
 
 impl GpuBuffer {
@@ -684,7 +1505,17 @@ fn result_to_handle_error(result: u32) -> HandleResult<()> {
         GPU_RESULT_SUCCESS => Ok(()),
         GPU_RESULT_INVALID_ABI | GPU_RESULT_INVALID_ARGUMENT => Err(HandleError::InvalidParameter),
         GPU_RESULT_OUT_OF_RESOURCES => Err(HandleError::OutOfResources),
-        GPU_RESULT_INVALID_STATE => Err(HandleError::Unsupported),
+        GPU_RESULT_INVALID_STATE | GPU_RESULT_UNSUPPORTED => Err(HandleError::Unsupported),
         _ => Err(HandleError::SystemError(result as i32)),
     }
 }
+
+const _: [(); 296] = [(); core::mem::size_of::<GpuQueryDialect>()];
+const _: [(); 48] = [(); core::mem::size_of::<GpuCreateContext>()];
+const _: [(); 32] = [(); core::mem::size_of::<GpuContextInfo>()];
+const _: [(); 32] = [(); core::mem::size_of::<GpuCreateQueue>()];
+const _: [(); 24] = [(); core::mem::size_of::<GpuQueueInfo>()];
+const _: [(); 56] = [(); core::mem::size_of::<GpuQueueSubmit>()];
+const _: [(); 48] = [(); core::mem::size_of::<GpuCreateImage>()];
+const _: [(); 40] = [(); core::mem::size_of::<GpuImageInfo>()];
+const _: [(); 32] = [(); core::mem::size_of::<GpuContextAttachImage>()];

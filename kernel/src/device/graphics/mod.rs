@@ -100,12 +100,10 @@ impl FramebufferConfig {
 /// GPU resource that can be presented through the display pipeline.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GpuDisplayResource {
-    /// Backend resource identifier.
-    pub resource_id: u32,
-    /// Resource width in pixels.
-    pub width: u32,
-    /// Resource height in pixels.
-    pub height: u32,
+    resource_id: u32,
+    width: u32,
+    height: u32,
+    backend_cookie: u64,
 }
 
 impl GpuDisplayResource {
@@ -116,16 +114,43 @@ impl GpuDisplayResource {
     /// * `resource_id` - Backend resource identifier.
     /// * `width` - Resource width in pixels.
     /// * `height` - Resource height in pixels.
+    /// * `backend_cookie` - Internal identity of the owning graphics backend.
     ///
     /// # Returns
     ///
     /// A GPU display resource descriptor.
-    pub const fn new(resource_id: u32, width: u32, height: u32) -> Self {
+    pub(crate) const fn new(
+        resource_id: u32,
+        width: u32,
+        height: u32,
+        backend_cookie: u64,
+    ) -> Self {
         Self {
             resource_id,
             width,
             height,
+            backend_cookie,
         }
+    }
+
+    /// Return the backend resource identifier.
+    pub(crate) const fn resource_id(&self) -> u32 {
+        self.resource_id
+    }
+
+    /// Return the resource width in pixels.
+    pub(crate) const fn width(&self) -> u32 {
+        self.width
+    }
+
+    /// Return the resource height in pixels.
+    pub(crate) const fn height(&self) -> u32 {
+        self.height
+    }
+
+    /// Return the opaque identity of the graphics backend that owns this resource.
+    pub(crate) const fn backend_cookie(&self) -> u64 {
+        self.backend_cookie
     }
 
     /// Get the full resource region.

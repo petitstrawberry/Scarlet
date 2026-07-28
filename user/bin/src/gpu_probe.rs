@@ -5,7 +5,7 @@
 
 extern crate scarlet_std as std;
 
-use gpu::{GPU_BUFFER_FLAG_CPU_VISIBLE, GPU_RESULT_SUCCESS, Gpu};
+use gpu::{GPU_BUFFER_FLAG_CPU_VISIBLE, GPU_EXECUTION_SUPPORT_QUEUE, GPU_RESULT_SUCCESS, Gpu};
 use std::println;
 
 #[unsafe(no_mangle)]
@@ -63,30 +63,71 @@ fn main() -> i32 {
         buffer_info.size_bytes, buffer_info.cpu_visible
     );
 
-    let timeline = match gpu.create_timeline(1) {
+    if info.execution_support & GPU_EXECUTION_SUPPORT_QUEUE == 0 {
+        println!("GPU execution queues are not supported");
+        return 1;
+    }
+
+    let dialect = match gpu.query_dialect(0) {
+        Ok(dialect) => dialect,
+        Err(e) => {
+            println!("failed to query GPU execution dialect: {:?}", e);
+            return 1;
+        }
+    };
+    println!(
+        "GPU dialect: index={} token=0x{:x} info_bytes={}",
+        dialect.index(),
+        dialect.token(),
+        dialect.opaque_info().len()
+    );
+
+    let context = match gpu.create_context(&dialect) {
+        Ok(context) => context,
+        Err(e) => {
+            println!("failed to create GPU execution context: {:?}", e);
+            return 1;
+        }
+    };
+    let queue = match context.create_queue() {
+        Ok(queue) => queue,
+        Err(e) => {
+            println!("failed to create GPU execution queue: {:?}", e);
+            return 1;
+        }
+    };
+    println!(
+        "GPU queue: max_opaque_command_size={}",
+        queue.max_opaque_command_size()
+    );
+
+    let timeline = match gpu.create_timeline(0) {
         Ok(timeline) => timeline,
         Err(e) => {
             println!("failed to create GPU timeline: {:?}", e);
             return 1;
         }
     };
-    let point = match timeline.create_point(2) {
+    let point = match timeline.create_point(1) {
         Ok(point) => point,
         Err(e) => {
             println!("failed to create GPU timeline point: {:?}", e);
             return 1;
         }
     };
-    let signal = match timeline.signal(2) {
-        Ok(signal) => signal,
+
+    const VIRGL_CCMD_NOP: [u8; 4] = 0u32.to_le_bytes();
+    let submission = match queue.submit_and_signal(&VIRGL_CCMD_NOP, &timeline, 1) {
+        Ok(submission) => submission,
         Err(e) => {
-            println!("failed to signal GPU timeline: {:?}", e);
+            println!("failed to submit VirGL NOP: {:?}", e);
             return 1;
         }
     };
     println!(
-        "GPU timeline: value={} point_target={}",
-        signal.current_value,
+        "VirGL NOP completed: timeline_value={} failed={} point_target={}",
+        submission.completed_value,
+        submission.timeline_failed,
         point.target_value()
     );
 

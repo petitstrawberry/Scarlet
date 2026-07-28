@@ -2,32 +2,45 @@
 //!
 //! This module exposes the backend-neutral GPU control ABI. Display scanout
 //! remains in [`crate::device::graphics`]. GPU connections expose generic
-//! device information and create kernel-owned memory and timeline capability
-//! objects. Address spaces, queues, and command submission remain deferred to
-//! later ABI phases.
+//! device information and create kernel-owned memory, timeline, execution
+//! context, and queue capability objects. Queue command bytes are opaque to
+//! this module and synchronously complete in the current ABI phase.
 
 mod abi;
 mod backend;
 mod connection;
+mod execution;
 mod object;
 mod resource;
 
 pub use abi::{
     GPU_ABI_VERSION, GPU_BACKEND_ID_BYTES, GPU_BACKEND_INFO_BYTES, GPU_BUFFER_FLAG_CPU_VISIBLE,
-    GPU_BUFFER_FLAGS_VALID, GPU_BUFFER_QUERY_INFO, GPU_CREATE_BUFFER, GPU_CREATE_TIMELINE,
-    GPU_QUERY_INFO, GPU_RESULT_INVALID_ABI, GPU_RESULT_INVALID_ARGUMENT, GPU_RESULT_INVALID_STATE,
-    GPU_RESULT_OUT_OF_RESOURCES, GPU_RESULT_SUCCESS, GPU_TIMELINE_CREATE_POINT, GPU_TIMELINE_FAIL,
-    GPU_TIMELINE_QUERY, GPU_TIMELINE_SIGNAL, GpuBufferInfo, GpuCreateBuffer, GpuCreateTimeline,
-    GpuQueryInfo, GpuTimelineCreatePoint, GpuTimelineFail, GpuTimelineInfo, GpuTimelineSignal,
+    GPU_BUFFER_FLAGS_VALID, GPU_BUFFER_QUERY_INFO, GPU_CONTEXT_ATTACH_IMAGE, GPU_CONTEXT_QUERY,
+    GPU_CREATE_BUFFER, GPU_CREATE_CONTEXT, GPU_CREATE_IMAGE, GPU_CREATE_QUEUE, GPU_CREATE_TIMELINE,
+    GPU_DIALECT_INFO_BYTES, GPU_IMAGE_FORMAT_BGRA8_UNORM, GPU_IMAGE_QUERY_INFO,
+    GPU_IMAGE_USAGE_PRESENTABLE, GPU_IMAGE_USAGE_RENDER_TARGET, GPU_IMAGE_USAGE_VALID,
+    GPU_MAX_OPAQUE_COMMAND_SIZE, GPU_QUERY_DIALECT, GPU_QUERY_INFO, GPU_QUEUE_QUERY,
+    GPU_QUEUE_SUBMIT, GPU_QUEUE_SUBMIT_FLAG_SIGNAL_TIMELINE, GPU_QUEUE_SUBMIT_FLAGS_VALID,
+    GPU_RESULT_INVALID_ABI, GPU_RESULT_INVALID_ARGUMENT, GPU_RESULT_INVALID_STATE,
+    GPU_RESULT_OUT_OF_RESOURCES, GPU_RESULT_SUCCESS, GPU_RESULT_UNSUPPORTED,
+    GPU_TIMELINE_CREATE_POINT, GPU_TIMELINE_FAIL, GPU_TIMELINE_QUERY, GPU_TIMELINE_SIGNAL,
+    GpuBufferInfo, GpuContextAttachImage, GpuContextInfo, GpuCreateBuffer, GpuCreateContext,
+    GpuCreateImage, GpuCreateQueue, GpuCreateTimeline, GpuImageInfo, GpuQueryDialect, GpuQueryInfo,
+    GpuQueueInfo, GpuQueueSubmit, GpuTimelineCreatePoint, GpuTimelineFail, GpuTimelineInfo,
+    GpuTimelineSignal,
 };
 pub use backend::{
     GPU_EXECUTION_SUPPORT_ADDRESS_SPACE, GPU_EXECUTION_SUPPORT_MEMORY, GPU_EXECUTION_SUPPORT_NONE,
     GPU_EXECUTION_SUPPORT_PRESENTATION, GPU_EXECUTION_SUPPORT_QUEUE,
-    GPU_EXECUTION_SUPPORT_TIMELINE, GpuBackend, GpuBackendInfo, GpuDeviceInfo, GpuDeviceState,
+    GPU_EXECUTION_SUPPORT_TIMELINE, GpuBackend, GpuBackendContext, GpuBackendContextInfo,
+    GpuBackendDialectDescriptor, GpuBackendDialectInfo, GpuBackendImage, GpuBackendImageInfo,
+    GpuBackendInfo, GpuBackendQueue, GpuBackendQueueInfo, GpuDeviceInfo, GpuDeviceState,
+    GpuImageCreateInfo,
 };
 pub use connection::GpuConnection;
+pub use execution::{GpuContext, GpuQueue};
 pub use object::GpuControlDevice;
-pub use resource::{GpuBuffer, GpuObject, GpuTimeline, GpuTimelinePoint};
+pub use resource::{GpuBuffer, GpuImage, GpuObject, GpuTimeline, GpuTimelinePoint};
 
 fn child_handle_metadata(
     access_mode: crate::object::handle::AccessMode,
@@ -45,9 +58,11 @@ mod tests {
 
     use super::{
         GPU_ABI_VERSION, GPU_BUFFER_FLAG_CPU_VISIBLE, GPU_EXECUTION_SUPPORT_MEMORY,
-        GPU_EXECUTION_SUPPORT_TIMELINE, GPU_RESULT_INVALID_ABI, GPU_RESULT_INVALID_ARGUMENT,
+        GPU_EXECUTION_SUPPORT_TIMELINE, GPU_IMAGE_FORMAT_BGRA8_UNORM, GPU_IMAGE_USAGE_PRESENTABLE,
+        GPU_IMAGE_USAGE_RENDER_TARGET, GPU_RESULT_INVALID_ABI, GPU_RESULT_INVALID_ARGUMENT,
         GPU_RESULT_SUCCESS, GpuBackend, GpuBackendInfo, GpuBuffer, GpuConnection, GpuControlDevice,
-        GpuDeviceInfo, GpuDeviceState, GpuObject, GpuQueryInfo, GpuTimeline, GpuTimelinePoint,
+        GpuDeviceInfo, GpuDeviceState, GpuImageCreateInfo, GpuObject, GpuQueryInfo, GpuTimeline,
+        GpuTimelinePoint,
     };
     use crate::device::Device;
     use crate::object::KernelObject;
@@ -153,7 +168,7 @@ mod tests {
     }
 
     #[test_case]
-    fn gpu_phase_two_abi_records_are_fixed_width() {
+    fn gpu_abi_records_are_fixed_width() {
         assert_eq!(core::mem::size_of::<super::GpuCreateBuffer>(), 40);
         assert_eq!(core::mem::size_of::<super::GpuBufferInfo>(), 32);
         assert_eq!(core::mem::size_of::<super::GpuCreateTimeline>(), 40);
@@ -161,6 +176,40 @@ mod tests {
         assert_eq!(core::mem::size_of::<super::GpuTimelineSignal>(), 32);
         assert_eq!(core::mem::size_of::<super::GpuTimelineFail>(), 24);
         assert_eq!(core::mem::size_of::<super::GpuTimelineCreatePoint>(), 32);
+        assert_eq!(core::mem::size_of::<super::GpuQueryDialect>(), 296);
+        assert_eq!(core::mem::size_of::<super::GpuCreateContext>(), 48);
+        assert_eq!(core::mem::size_of::<super::GpuContextInfo>(), 32);
+        assert_eq!(core::mem::size_of::<super::GpuCreateQueue>(), 32);
+        assert_eq!(core::mem::size_of::<super::GpuQueueInfo>(), 24);
+        assert_eq!(core::mem::size_of::<super::GpuQueueSubmit>(), 56);
+        assert_eq!(core::mem::size_of::<super::GpuCreateImage>(), 48);
+        assert_eq!(core::mem::size_of::<super::GpuImageInfo>(), 40);
+        assert_eq!(core::mem::size_of::<super::GpuContextAttachImage>(), 32);
+    }
+
+    #[test_case]
+    fn gpu_image_format_usage_and_extent_validation_is_strict() {
+        let valid = GpuImageCreateInfo::new(
+            GPU_IMAGE_FORMAT_BGRA8_UNORM,
+            GPU_IMAGE_USAGE_RENDER_TARGET | GPU_IMAGE_USAGE_PRESENTABLE,
+            64,
+            64,
+        );
+        assert!(super::resource::image_create_is_valid(valid));
+        assert!(!super::resource::image_create_is_valid(
+            GpuImageCreateInfo::new(0, valid.usage, valid.width, valid.height,)
+        ));
+        assert!(!super::resource::image_create_is_valid(
+            GpuImageCreateInfo::new(
+                valid.format,
+                GPU_IMAGE_USAGE_RENDER_TARGET,
+                valid.width,
+                valid.height,
+            )
+        ));
+        assert!(!super::resource::image_create_is_valid(
+            GpuImageCreateInfo::new(valid.format, valid.usage, 0, valid.height,)
+        ));
     }
 
     #[test_case]

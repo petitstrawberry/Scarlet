@@ -50,7 +50,7 @@ fn test_generic_graphics_device() {
     assert!(
         device
             .present_gpu_resource_region(
-                GpuDisplayResource::new(1, 100, 100),
+                GpuDisplayResource::new(1, 100, 100, 1),
                 DisplayRegion::new(0, 0, 100, 100),
             )
             .is_err()

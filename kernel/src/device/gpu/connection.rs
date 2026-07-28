@@ -4,10 +4,12 @@ use alloc::sync::Arc;
 use core::any::Any;
 
 use super::{
-    GPU_ABI_VERSION, GPU_BUFFER_FLAGS_VALID, GPU_CREATE_BUFFER, GPU_CREATE_TIMELINE,
-    GPU_QUERY_INFO, GPU_RESULT_INVALID_ABI, GPU_RESULT_INVALID_ARGUMENT,
-    GPU_RESULT_OUT_OF_RESOURCES, GpuBackend, GpuBuffer, GpuCreateBuffer, GpuCreateTimeline,
-    GpuQueryInfo, GpuTimeline,
+    GPU_ABI_VERSION, GPU_BUFFER_FLAGS_VALID, GPU_CREATE_BUFFER, GPU_CREATE_CONTEXT,
+    GPU_CREATE_IMAGE, GPU_CREATE_TIMELINE, GPU_QUERY_DIALECT, GPU_QUERY_INFO,
+    GPU_RESULT_INVALID_ABI, GPU_RESULT_INVALID_ARGUMENT, GPU_RESULT_OUT_OF_RESOURCES,
+    GPU_RESULT_UNSUPPORTED, GpuBackend, GpuBackendDialectDescriptor, GpuBuffer, GpuContext,
+    GpuCreateBuffer, GpuCreateContext, GpuCreateImage, GpuCreateTimeline, GpuImage,
+    GpuImageCreateInfo, GpuQueryDialect, GpuQueryInfo, GpuTimeline,
 };
 use crate::device::{Device, DeviceType, char::CharDevice};
 use crate::library::std::usercopy::{copy_from_user, copy_to_user};
@@ -160,6 +162,149 @@ impl GpuConnection {
             }
         }
     }
+
+    fn handle_create_image(&self, arg: usize) -> Result<i32, &'static str> {
+        let mut request: GpuCreateImage = read_user_value(arg)?;
+        request.clear_response();
+        if request.abi_version != GPU_ABI_VERSION {
+            request.result = GPU_RESULT_INVALID_ABI;
+            write_user_value(arg, &request)?;
+            return Ok(0);
+        }
+        if request.reserved != 0 {
+            request.result = GPU_RESULT_INVALID_ARGUMENT;
+            write_user_value(arg, &request)?;
+            return Ok(0);
+        }
+        let create =
+            GpuImageCreateInfo::new(request.format, request.usage, request.width, request.height);
+        if !super::resource::image_create_is_valid(create) {
+            request.result = GPU_RESULT_INVALID_ARGUMENT;
+            write_user_value(arg, &request)?;
+            return Ok(0);
+        }
+        let backend_image = match self.backend.create_image(create) {
+            Ok(image) => image,
+            Err(_) => {
+                request.result = GPU_RESULT_UNSUPPORTED;
+                write_user_value(arg, &request)?;
+                return Ok(0);
+            }
+        };
+        let image = match GpuImage::new(backend_image, create) {
+            Ok(image) => image,
+            Err(_) => {
+                request.result = GPU_RESULT_OUT_OF_RESOURCES;
+                write_user_value(arg, &request)?;
+                return Ok(0);
+            }
+        };
+        let info = image.query_info();
+        let task = crate::task::mytask().ok_or("No current task for GPU image creation")?;
+        let handle = task.handle_table.insert_with_metadata(
+            KernelObject::Gpu(Arc::new(image)),
+            super::child_handle_metadata(AccessMode::ReadWrite),
+        );
+        match handle {
+            Ok(handle) => {
+                request.image_handle = handle;
+                request.command_resource_token = info.command_resource_token;
+                request.allocation_size = info.allocation_size;
+                if let Err(error) = write_user_value(arg, &request) {
+                    task.handle_table.remove(handle);
+                    return Err(error);
+                }
+                Ok(0)
+            }
+            Err(_) => {
+                request.result = GPU_RESULT_OUT_OF_RESOURCES;
+                write_user_value(arg, &request)?;
+                Ok(0)
+            }
+        }
+    }
+
+    fn handle_query_dialect(&self, arg: usize) -> Result<i32, &'static str> {
+        let mut query: GpuQueryDialect = read_user_value(arg)?;
+        let reserved = query.reserved;
+        let reserved2 = query.reserved2;
+        let reserved3 = query.reserved3;
+        query.clear_response();
+        if query.abi_version != GPU_ABI_VERSION {
+            query.result = GPU_RESULT_INVALID_ABI;
+            write_user_value(arg, &query)?;
+            return Ok(0);
+        }
+        if query.flags != 0 || reserved != 0 || reserved2 != 0 || reserved3 != 0 {
+            query.result = GPU_RESULT_INVALID_ARGUMENT;
+            write_user_value(arg, &query)?;
+            return Ok(0);
+        }
+        match self.backend.query_dialect(query.dialect_index) {
+            Ok(info) => {
+                query.dialect_token = info.token;
+                query.dialect_info_len = info.opaque_info_len;
+                query.dialect_info = info.opaque_info;
+            }
+            Err(_) => query.result = GPU_RESULT_UNSUPPORTED,
+        }
+        write_user_value(arg, &query)?;
+        Ok(0)
+    }
+
+    fn handle_create_context(&self, arg: usize) -> Result<i32, &'static str> {
+        let mut request: GpuCreateContext = read_user_value(arg)?;
+        let reserved2 = request.reserved2;
+        request.clear_response();
+        if request.abi_version != GPU_ABI_VERSION {
+            request.result = GPU_RESULT_INVALID_ABI;
+            write_user_value(arg, &request)?;
+            return Ok(0);
+        }
+        if request.flags != 0 || request.reserved != 0 || reserved2 != 0 {
+            request.result = GPU_RESULT_INVALID_ARGUMENT;
+            write_user_value(arg, &request)?;
+            return Ok(0);
+        }
+
+        let backend_context = match self
+            .backend
+            .create_context(GpuBackendDialectDescriptor::new(
+                request.dialect_index,
+                request.requested_dialect_token,
+            )) {
+            Ok(context) => context,
+            Err(_) => {
+                request.result = GPU_RESULT_UNSUPPORTED;
+                write_user_value(arg, &request)?;
+                return Ok(0);
+            }
+        };
+        let context = GpuContext::new(backend_context);
+        let info = context.query_info();
+        let task = crate::task::mytask().ok_or("No current task for GPU context creation")?;
+        let handle = task.handle_table.insert_with_metadata(
+            KernelObject::Gpu(Arc::new(context)),
+            super::child_handle_metadata(AccessMode::ReadWrite),
+        );
+        match handle {
+            Ok(handle) => {
+                request.context_handle = handle;
+                request.effective_dialect_index = info.dialect_index;
+                request.effective_dialect_token = info.dialect_token;
+                if let Err(error) = write_user_value(arg, &request) {
+                    task.handle_table.remove(handle);
+                    return Err(error);
+                }
+                Ok(0)
+            }
+            Err(_) => {
+                request.result = GPU_RESULT_OUT_OF_RESOURCES;
+                write_user_value(arg, &request)?;
+                Ok(0)
+            }
+        }
+    }
 }
 
 impl Device for GpuConnection {
@@ -216,6 +361,9 @@ impl ControlOps for GpuConnection {
             GPU_QUERY_INFO => self.handle_query_info(arg),
             GPU_CREATE_BUFFER => self.handle_create_buffer(arg),
             GPU_CREATE_TIMELINE => self.handle_create_timeline(arg),
+            GPU_CREATE_IMAGE => self.handle_create_image(arg),
+            GPU_QUERY_DIALECT => self.handle_query_dialect(arg),
+            GPU_CREATE_CONTEXT => self.handle_create_context(arg),
             _ => Err("Unsupported GPU control command"),
         }
     }
@@ -225,6 +373,12 @@ impl ControlOps for GpuConnection {
             (GPU_QUERY_INFO, "Query GPU and backend information"),
             (GPU_CREATE_BUFFER, "Create a GPU buffer child handle"),
             (GPU_CREATE_TIMELINE, "Create a GPU timeline child handle"),
+            (GPU_CREATE_IMAGE, "Create a GPU image child handle"),
+            (GPU_QUERY_DIALECT, "Query an opaque GPU execution dialect"),
+            (
+                GPU_CREATE_CONTEXT,
+                "Create a GPU execution context child handle"
+            ),
         ]
     }
 }

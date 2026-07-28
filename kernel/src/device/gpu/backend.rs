@@ -1,6 +1,9 @@
 //! Backend-neutral GPU information model.
 
+use alloc::sync::Arc;
+
 use super::{GPU_BACKEND_ID_BYTES, GPU_BACKEND_INFO_BYTES};
+use crate::device::graphics::GpuDisplayResource;
 
 /// The device is not usable for GPU control.
 pub const GPU_DEVICE_STATE_UNAVAILABLE: u32 = 0;
@@ -125,7 +128,290 @@ impl GpuBackendInfo {
     }
 }
 
-/// A backend that provides only stable GPU and opaque backend information.
+/// Opaque dialect selection data supplied by a backend query.
+///
+/// This descriptor is not a capability. It only carries query data used by a
+/// backend to choose an execution dialect; GPU object handles remain the only
+/// authority for subsequent operations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GpuBackendDialectDescriptor {
+    /// Backend-defined index selected by the caller.
+    pub index: u32,
+    /// Opaque backend token returned by a prior dialect query.
+    pub token: u64,
+}
+
+impl GpuBackendDialectDescriptor {
+    /// Build an opaque dialect selection descriptor.
+    ///
+    /// # Arguments
+    ///
+    /// * `index` - Backend-defined dialect index.
+    /// * `token` - Opaque token returned from a dialect query.
+    ///
+    /// # Returns
+    ///
+    /// A descriptor that a backend must validate before use.
+    pub const fn new(index: u32, token: u64) -> Self {
+        Self { index, token }
+    }
+}
+
+/// Bounded backend-defined information for one execution dialect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GpuBackendDialectInfo {
+    /// Backend-defined query index for this dialect.
+    pub index: u32,
+    /// Opaque backend token for this dialect.
+    pub token: u64,
+    /// Fixed-capacity opaque dialect information.
+    pub opaque_info: [u8; super::GPU_DIALECT_INFO_BYTES],
+    /// Number of meaningful bytes in `opaque_info`.
+    pub opaque_info_len: u32,
+}
+
+impl GpuBackendDialectInfo {
+    /// Build bounded opaque information for one execution dialect.
+    ///
+    /// # Arguments
+    ///
+    /// * `index` - Backend-defined query index.
+    /// * `token` - Opaque backend token for the dialect.
+    /// * `opaque_info` - Backend-defined dialect data to expose.
+    ///
+    /// # Returns
+    ///
+    /// A fixed-capacity dialect information record. Input data is truncated to
+    /// the ABI-defined capacity.
+    pub fn new(index: u32, token: u64, opaque_info: &[u8]) -> Self {
+        let mut result = Self {
+            index,
+            token,
+            opaque_info: [0; super::GPU_DIALECT_INFO_BYTES],
+            opaque_info_len: 0,
+        };
+        let opaque_info_len = opaque_info.len().min(super::GPU_DIALECT_INFO_BYTES);
+        result.opaque_info[..opaque_info_len].copy_from_slice(&opaque_info[..opaque_info_len]);
+        result.opaque_info_len = opaque_info_len as u32;
+        result
+    }
+
+    /// Return the descriptor corresponding to this query result.
+    ///
+    /// # Returns
+    ///
+    /// Opaque selection data that a backend must validate again when creating
+    /// an execution context.
+    pub const fn descriptor(&self) -> GpuBackendDialectDescriptor {
+        GpuBackendDialectDescriptor::new(self.index, self.token)
+    }
+}
+
+/// Effective execution context information reported by a backend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GpuBackendContextInfo {
+    /// Effective backend-defined dialect index.
+    pub dialect_index: u32,
+    /// Opaque backend token for the effective dialect.
+    pub dialect_token: u64,
+}
+
+impl GpuBackendContextInfo {
+    /// Build effective execution context information.
+    ///
+    /// # Arguments
+    ///
+    /// * `dialect_index` - Backend-defined effective dialect index.
+    /// * `dialect_token` - Opaque token for the effective dialect.
+    ///
+    /// # Returns
+    ///
+    /// Effective context information.
+    pub const fn new(dialect_index: u32, dialect_token: u64) -> Self {
+        Self {
+            dialect_index,
+            dialect_token,
+        }
+    }
+}
+
+/// Execution queue limits reported by a backend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GpuBackendQueueInfo {
+    /// Maximum opaque command byte length accepted by this queue.
+    pub max_opaque_command_size: u32,
+}
+
+impl GpuBackendQueueInfo {
+    /// Build execution queue limits.
+    ///
+    /// # Arguments
+    ///
+    /// * `max_opaque_command_size` - Maximum bounded opaque command size.
+    ///
+    /// # Returns
+    ///
+    /// Queue information for an execution backend.
+    pub const fn new(max_opaque_command_size: u32) -> Self {
+        Self {
+            max_opaque_command_size,
+        }
+    }
+}
+
+/// Validated backend-neutral image creation parameters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GpuImageCreateInfo {
+    /// Generic image format.
+    pub format: u32,
+    /// Generic image usage flags.
+    pub usage: u32,
+    /// Image width in pixels.
+    pub width: u32,
+    /// Image height in pixels.
+    pub height: u32,
+}
+
+impl GpuImageCreateInfo {
+    /// Build validated image creation parameters.
+    ///
+    /// # Arguments
+    ///
+    /// * `format` - Generic image format.
+    /// * `usage` - Generic image usage flags.
+    /// * `width` - Non-zero image width in pixels.
+    /// * `height` - Non-zero image height in pixels.
+    ///
+    /// # Returns
+    ///
+    /// Backend-neutral image creation parameters.
+    pub const fn new(format: u32, usage: u32, width: u32, height: u32) -> Self {
+        Self {
+            format,
+            usage,
+            width,
+            height,
+        }
+    }
+}
+
+/// Backend-neutral immutable image information.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GpuBackendImageInfo {
+    /// Generic image format.
+    pub format: u32,
+    /// Generic image usage flags.
+    pub usage: u32,
+    /// Image width in pixels.
+    pub width: u32,
+    /// Image height in pixels.
+    pub height: u32,
+    /// Opaque backend token used only by opaque command bytes.
+    pub command_resource_token: u64,
+    /// Backing allocation size in bytes.
+    pub allocation_size: u64,
+}
+
+impl GpuBackendImageInfo {
+    /// Build immutable image information.
+    ///
+    /// # Arguments
+    ///
+    /// * `create` - Validated generic image parameters.
+    /// * `command_resource_token` - Opaque command resource token.
+    /// * `allocation_size` - Actual backing allocation size in bytes.
+    ///
+    /// # Returns
+    ///
+    /// Backend-neutral immutable image information.
+    pub const fn new(
+        create: GpuImageCreateInfo,
+        command_resource_token: u64,
+        allocation_size: u64,
+    ) -> Self {
+        Self {
+            format: create.format,
+            usage: create.usage,
+            width: create.width,
+            height: create.height,
+            command_resource_token,
+            allocation_size,
+        }
+    }
+}
+
+/// Backend image retained by a [`crate::device::gpu::GpuImage`].
+pub trait GpuBackendImage: Send + Sync {
+    /// Query immutable backend-neutral image information.
+    ///
+    /// # Returns
+    ///
+    /// Generic image metadata and an opaque command resource token.
+    fn query_info(&self) -> GpuBackendImageInfo;
+
+    /// Return the display descriptor when this image is presentable.
+    ///
+    /// # Returns
+    ///
+    /// An internal display descriptor, or `None` when the image cannot be
+    /// presented by the display subsystem.
+    fn display_resource(&self) -> Option<GpuDisplayResource>;
+}
+
+/// Backend execution context retained by a [`crate::device::gpu::GpuContext`].
+pub trait GpuBackendContext: Send + Sync {
+    /// Query the effective execution dialect selected for this context.
+    ///
+    /// # Returns
+    ///
+    /// Effective backend-neutral context information.
+    fn query_info(&self) -> GpuBackendContextInfo;
+
+    /// Create one backend execution queue for this context.
+    ///
+    /// # Returns
+    ///
+    /// A backend queue whose commands execute in this context.
+    fn create_queue(&self) -> Result<Arc<dyn GpuBackendQueue>, &'static str>;
+
+    /// Attach an image so opaque commands in this context may reference it.
+    ///
+    /// # Arguments
+    ///
+    /// * `image` - Backend image retained by the calling kernel capability.
+    ///
+    /// # Returns
+    ///
+    /// An opaque command resource token authorized for this context, or an
+    /// error when the image does not belong to this backend or cannot attach.
+    fn attach_image(&self, _image: &dyn GpuBackendImage) -> Result<u64, &'static str> {
+        Err("GPU backend context does not support image attachment")
+    }
+}
+
+/// Backend execution queue retained by a [`crate::device::gpu::GpuQueue`].
+pub trait GpuBackendQueue: Send + Sync {
+    /// Query limits for this backend queue.
+    ///
+    /// # Returns
+    ///
+    /// Backend-neutral execution queue information.
+    fn query_info(&self) -> GpuBackendQueueInfo;
+
+    /// Synchronously submit one opaque command stream.
+    ///
+    /// # Arguments
+    ///
+    /// * `commands` - Bounded backend-defined command bytes owned by the caller.
+    ///
+    /// # Returns
+    ///
+    /// Nothing after the backend has completed the submitted work, or an error
+    /// if the backend rejected or failed the submission.
+    fn submit(&self, commands: &[u8]) -> Result<(), &'static str>;
+}
+
+/// A backend that provides GPU information and optional execution capabilities.
 pub trait GpuBackend: Send + Sync {
     /// Query the current backend-neutral GPU information.
     ///
@@ -133,4 +419,52 @@ pub trait GpuBackend: Send + Sync {
     ///
     /// Stable device information plus backend-defined opaque identity and data.
     fn query_info(&self) -> GpuBackendInfo;
+
+    /// Query one backend-defined execution dialect.
+    ///
+    /// # Arguments
+    ///
+    /// * `index` - Backend-defined dialect index.
+    ///
+    /// # Returns
+    ///
+    /// Bounded opaque dialect information, or an error when execution dialects
+    /// are not available.
+    fn query_dialect(&self, _index: u32) -> Result<GpuBackendDialectInfo, &'static str> {
+        Err("GPU backend does not support execution dialect queries")
+    }
+
+    /// Create an execution context for a backend-defined dialect.
+    ///
+    /// # Arguments
+    ///
+    /// * `dialect` - Opaque selection data from a prior dialect query.
+    ///
+    /// # Returns
+    ///
+    /// A backend context that retains the real backend context lifetime, or an
+    /// error when execution contexts are not available.
+    fn create_context(
+        &self,
+        _dialect: GpuBackendDialectDescriptor,
+    ) -> Result<Arc<dyn GpuBackendContext>, &'static str> {
+        Err("GPU backend does not support execution contexts")
+    }
+
+    /// Create a backend-owned render-target and presentable image.
+    ///
+    /// # Arguments
+    ///
+    /// * `create` - Validated backend-neutral image creation parameters.
+    ///
+    /// # Returns
+    ///
+    /// A real backend image, or an error when images are unsupported or cannot
+    /// be allocated.
+    fn create_image(
+        &self,
+        _create: GpuImageCreateInfo,
+    ) -> Result<Arc<dyn GpuBackendImage>, &'static str> {
+        Err("GPU backend does not support images")
+    }
 }

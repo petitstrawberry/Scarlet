@@ -4,9 +4,11 @@ use alloc::{string::String, sync::Arc};
 
 use super::connection::{read_user_value, write_user_value};
 use super::{
-    GPU_ABI_VERSION, GPU_BUFFER_QUERY_INFO, GPU_RESULT_INVALID_ABI, GPU_TIMELINE_CREATE_POINT,
-    GPU_TIMELINE_FAIL, GPU_TIMELINE_QUERY, GPU_TIMELINE_SIGNAL, GpuBackend, GpuBufferInfo,
-    GpuTimelineCreatePoint, GpuTimelineFail, GpuTimelineInfo, GpuTimelineSignal,
+    GPU_ABI_VERSION, GPU_BUFFER_QUERY_INFO, GPU_IMAGE_FORMAT_BGRA8_UNORM, GPU_IMAGE_QUERY_INFO,
+    GPU_IMAGE_USAGE_VALID, GPU_RESULT_INVALID_ABI, GPU_TIMELINE_CREATE_POINT, GPU_TIMELINE_FAIL,
+    GPU_TIMELINE_QUERY, GPU_TIMELINE_SIGNAL, GpuBackend, GpuBackendImage, GpuBufferInfo,
+    GpuImageCreateInfo, GpuImageInfo, GpuTimelineCreatePoint, GpuTimelineFail, GpuTimelineInfo,
+    GpuTimelineSignal,
 };
 use crate::environment::PAGE_SIZE;
 use crate::mem::page::{Page, allocate_raw_pages, free_raw_pages};
@@ -53,6 +55,155 @@ pub trait GpuObject: Send + Sync {
     /// The readiness capability, or `None` when this object is not selectable.
     fn as_selectable(&self) -> Option<&dyn Selectable> {
         None
+    }
+
+    /// Return this object as an execution context when it is one.
+    ///
+    /// # Returns
+    ///
+    /// The execution context capability, or `None` for other GPU objects.
+    fn as_context(&self) -> Option<&super::GpuContext> {
+        None
+    }
+
+    /// Return this object as an image when it is one.
+    ///
+    /// # Returns
+    ///
+    /// The image capability, or `None` for other GPU objects.
+    fn as_image(&self) -> Option<&GpuImage> {
+        None
+    }
+
+    /// Return this object as a timeline when it is one.
+    ///
+    /// # Returns
+    ///
+    /// The timeline capability, or `None` for other GPU objects.
+    fn as_timeline(&self) -> Option<&GpuTimeline> {
+        None
+    }
+}
+
+/// Return whether a generic image descriptor is supported by this ABI phase.
+///
+/// # Arguments
+///
+/// * `create` - Image format, usage, and extent to validate.
+///
+/// # Returns
+///
+/// `true` only for a non-empty BGRA8 render-target and presentable image.
+pub(crate) const fn image_create_is_valid(create: GpuImageCreateInfo) -> bool {
+    create.format == GPU_IMAGE_FORMAT_BGRA8_UNORM
+        && create.usage == GPU_IMAGE_USAGE_VALID
+        && create.width != 0
+        && create.height != 0
+}
+
+/// Kernel-owned backend image capability.
+pub struct GpuImage {
+    backend_image: Arc<dyn GpuBackendImage>,
+}
+
+impl GpuImage {
+    /// Adopt a real backend image after validating its immutable metadata.
+    ///
+    /// # Arguments
+    ///
+    /// * `backend_image` - Real backend image to own.
+    /// * `create` - Generic descriptor used to create the image.
+    ///
+    /// # Returns
+    ///
+    /// A capability retaining the backend image, or an error when the backend
+    /// returned metadata inconsistent with the validated request.
+    pub fn new(
+        backend_image: Arc<dyn GpuBackendImage>,
+        create: GpuImageCreateInfo,
+    ) -> Result<Self, &'static str> {
+        if !image_create_is_valid(create) {
+            return Err("GPU image descriptor is invalid");
+        }
+        let info = backend_image.query_info();
+        if info.format != create.format
+            || info.usage != create.usage
+            || info.width != create.width
+            || info.height != create.height
+            || info.command_resource_token == 0
+            || info.allocation_size == 0
+        {
+            return Err("GPU backend image metadata is invalid");
+        }
+        Ok(Self { backend_image })
+    }
+
+    /// Return immutable backend-neutral image information.
+    ///
+    /// # Returns
+    ///
+    /// The image format, usage, extent, command token, and allocation size.
+    pub fn query_info(&self) -> super::GpuBackendImageInfo {
+        self.backend_image.query_info()
+    }
+
+    /// Clone the backend image for a context lifetime reference.
+    ///
+    /// # Returns
+    ///
+    /// A strong reference to the real backend image.
+    pub(crate) fn backend_image(&self) -> Arc<dyn GpuBackendImage> {
+        Arc::clone(&self.backend_image)
+    }
+
+    /// Return this image's display descriptor when it is presentable.
+    ///
+    /// # Returns
+    ///
+    /// An internal descriptor accepted by the graphics display bridge.
+    pub(crate) fn display_resource(&self) -> Option<crate::device::graphics::GpuDisplayResource> {
+        self.backend_image.display_resource()
+    }
+
+    fn fill_query_info(&self, info: &mut GpuImageInfo) {
+        info.clear_response();
+        if info.abi_version != GPU_ABI_VERSION {
+            info.result = GPU_RESULT_INVALID_ABI;
+            return;
+        }
+        let backend_info = self.query_info();
+        info.format = backend_info.format;
+        info.usage = backend_info.usage;
+        info.width = backend_info.width;
+        info.height = backend_info.height;
+        info.command_resource_token = backend_info.command_resource_token;
+        info.allocation_size = backend_info.allocation_size;
+    }
+
+    fn handle_query_info(&self, arg: usize) -> Result<i32, &'static str> {
+        let mut info: GpuImageInfo = read_user_value(arg)?;
+        self.fill_query_info(&mut info);
+        write_user_value(arg, &info)?;
+        Ok(0)
+    }
+}
+
+impl ControlOps for GpuImage {
+    fn control(&self, command: u32, arg: usize) -> Result<i32, &'static str> {
+        match command {
+            GPU_IMAGE_QUERY_INFO => self.handle_query_info(arg),
+            _ => Err("Unsupported GPU image control command"),
+        }
+    }
+}
+
+impl GpuObject for GpuImage {
+    fn as_control_ops(&self) -> Option<&dyn ControlOps> {
+        Some(self)
+    }
+
+    fn as_image(&self) -> Option<&GpuImage> {
+        Some(self)
     }
 }
 
@@ -509,6 +660,10 @@ impl ControlOps for GpuTimeline {
 
 impl GpuObject for GpuTimeline {
     fn as_control_ops(&self) -> Option<&dyn ControlOps> {
+        Some(self)
+    }
+
+    fn as_timeline(&self) -> Option<&GpuTimeline> {
         Some(self)
     }
 }

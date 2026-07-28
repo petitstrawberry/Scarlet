@@ -13,7 +13,7 @@ use std::{
     fs::File,
     handle::{
         capability::memory_mapping::{flags, munmap, prot},
-        HandleError, HandleResult,
+        Handle, HandleError, HandleResult,
     },
     io::SeekFrom,
 };
@@ -43,6 +43,8 @@ pub mod display_commands {
     pub const DISPLAY_GET_SWAPCHAIN: u32 = 0x5003;
     /// Present one direct scanout buffer.
     pub const DISPLAY_PRESENT_BUFFER: u32 = 0x5004;
+    /// Present one GPU image capability through this display device.
+    pub const DISPLAY_PRESENT_IMAGE: u32 = 0x5005;
 }
 
 /// 32-bit RGBA pixel layout.
@@ -135,6 +137,29 @@ pub struct DisplayPresentBuffer {
     /// User pointer to `damage_count` [`DisplayPresentRegion`] entries.
     pub damage_ptr: usize,
 }
+
+/// Argument for `DISPLAY_PRESENT_IMAGE`.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DisplayPresentImage {
+    /// GPU image capability handle owned by the current task.
+    pub image_handle: u32,
+    /// `DISPLAY_PRESENT_IMAGE_FLAG_*` values.
+    pub flags: u32,
+    /// Left edge in pixels when not presenting the full image.
+    pub x: u32,
+    /// Top edge in pixels when not presenting the full image.
+    pub y: u32,
+    /// Region width in pixels when not presenting the full image.
+    pub width: u32,
+    /// Region height in pixels when not presenting the full image.
+    pub height: u32,
+}
+
+/// Present the full GPU image and require zero region fields.
+pub const DISPLAY_PRESENT_IMAGE_FLAG_FULL_FRAME: u32 = 1 << 0;
+/// All currently defined GPU image presentation flags.
+pub const DISPLAY_PRESENT_IMAGE_FLAGS_VALID: u32 = DISPLAY_PRESENT_IMAGE_FLAG_FULL_FRAME;
 
 /// Color bit field information
 #[repr(C)]
@@ -854,6 +879,53 @@ impl DisplaySurface {
         self.file
             .as_handle()
             .control(display_commands::DISPLAY_PRESENT, 0)?;
+        Ok(())
+    }
+
+    /// Present a GPU image capability through this display surface.
+    ///
+    /// The borrowed handle avoids a dependency on the GPU library while the
+    /// kernel still resolves the capability in the current task and verifies
+    /// that it is a presentable image owned by this display's graphics device.
+    ///
+    /// # Arguments
+    ///
+    /// * `image` - Borrowed GPU image capability handle.
+    /// * `region` - `None` for a full-frame present, otherwise the modified image region.
+    ///
+    /// # Returns
+    ///
+    /// Success or a handle error.
+    pub fn present_image(
+        &self,
+        image: &Handle,
+        region: Option<DisplayPresentRegion>,
+    ) -> HandleResult<()> {
+        let image_handle = u32::try_from(image.as_raw()).map_err(|_| HandleError::InvalidHandle)?;
+        let request = match region {
+            Some(region) => {
+                if region.width == 0 || region.height == 0 {
+                    return Err(HandleError::InvalidParameter);
+                }
+                DisplayPresentImage {
+                    image_handle,
+                    x: region.x,
+                    y: region.y,
+                    width: region.width,
+                    height: region.height,
+                    ..DisplayPresentImage::default()
+                }
+            }
+            None => DisplayPresentImage {
+                image_handle,
+                flags: DISPLAY_PRESENT_IMAGE_FLAG_FULL_FRAME,
+                ..DisplayPresentImage::default()
+            },
+        };
+        self.file.as_handle().control(
+            display_commands::DISPLAY_PRESENT_IMAGE,
+            &request as *const DisplayPresentImage as usize,
+        )?;
         Ok(())
     }
 
@@ -2070,3 +2142,5 @@ impl Drop for DisplaySurface {
         }
     }
 }
+
+const _: [(); 24] = [(); core::mem::size_of::<DisplayPresentImage>()];
