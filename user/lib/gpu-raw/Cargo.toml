@@ -1,0 +1,11 @@
+[package]
+name = "gpu-raw"
+version = "0.16.0"
+edition = "2024"
+
+[dependencies]
+scarlet-std = { path = "../std" }
+
+[lib]
+name = "gpu_raw"
+path = "src/lib.rs"
