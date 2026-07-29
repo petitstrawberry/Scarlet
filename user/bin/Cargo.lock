@@ -96,6 +96,15 @@ dependencies = [
 name = "gpu"
 version = "0.16.0"
 dependencies = [
+ "framebuffer",
+ "gpu-raw",
+ "scarlet-std",
+]
+
+[[package]]
+name = "gpu-raw"
+version = "0.16.0"
+dependencies = [
  "scarlet-std",
 ]
 
@@ -458,6 +467,7 @@ version = "0.16.0"
 dependencies = [
  "framebuffer",
  "gpu",
+ "libm",
  "sas-client",
  "sas-protocol",
  "sbus",
