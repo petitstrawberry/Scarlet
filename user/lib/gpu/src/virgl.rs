@@ -51,6 +51,26 @@ const VIRGL_RASTERIZER_DEPTH_CLIP: u32 = 1 << 1;
 const VIRGL_RASTERIZER_CULL_FACE_SHIFT: u32 = 8;
 const VIRGL_RASTERIZER_FRONT_CCW: u32 = 1 << 15;
 
+#[derive(Clone, Copy)]
+struct FramebufferOrientation {
+    origin_upper_left: bool,
+}
+
+impl FramebufferOrientation {
+    const UPPER_LEFT: Self = Self {
+        origin_upper_left: true,
+    };
+
+    fn viewport_scale_y(self, height: u32) -> f32 {
+        let scale = height as f32 / 2.0;
+        if self.origin_upper_left {
+            -scale
+        } else {
+            scale
+        }
+    }
+}
+
 const VERTEX_SHADER: &str = "VERT\n\
 DCL IN[0]\n\
 DCL IN[1]\n\
@@ -126,6 +146,7 @@ impl Context {
             raw,
             resource_id,
             context_handle: self.handle_id(),
+            orientation: FramebufferOrientation::UPPER_LEFT,
         })
     }
 
@@ -208,7 +229,7 @@ impl Queue {
         } else {
             Vec::with_capacity(2048)
         };
-        push_viewport(&mut commands, viewport);
+        push_viewport(&mut commands, viewport, image.orientation);
         push_inline_write(&mut commands, pipeline.vertex_resource_id, vertices);
         push_clear_and_draw(&mut commands, clear_color, vertices.len());
         self.raw.submit(&commands)?;
@@ -223,6 +244,7 @@ pub(crate) struct Image {
     raw: RawImage,
     resource_id: u32,
     context_handle: i32,
+    orientation: FramebufferOrientation,
 }
 
 impl Image {
@@ -317,14 +339,14 @@ fn push_inline_write(commands: &mut Vec<u8>, resource_id: u32, vertices: &[Verte
     }
 }
 
-fn push_viewport(commands: &mut Vec<u8>, viewport: Viewport) {
+fn push_viewport(commands: &mut Vec<u8>, viewport: Viewport, orientation: FramebufferOrientation) {
     push_dword(
         commands,
         command_header(VIRGL_CCMD_SET_VIEWPORT_STATE, 0, 7),
     );
     push_dword(commands, 0);
     push_float(commands, viewport.width() as f32 / 2.0);
-    push_float(commands, viewport.height() as f32 / 2.0);
+    push_float(commands, orientation.viewport_scale_y(viewport.height()));
     push_float(commands, 0.5);
     push_float(commands, viewport.width() as f32 / 2.0);
     push_float(commands, viewport.height() as f32 / 2.0);
@@ -476,9 +498,10 @@ fn rasterizer_flags(cull_mode: CullMode, front_face: FrontFace) -> u32 {
         CullMode::Front => 1,
         CullMode::Back => 2,
     } << VIRGL_RASTERIZER_CULL_FACE_SHIFT;
-    let front_ccw = match front_face {
-        FrontFace::Clockwise => 0,
-        FrontFace::CounterClockwise => VIRGL_RASTERIZER_FRONT_CCW,
+    let front_ccw = if matches!(front_face, FrontFace::CounterClockwise) {
+        VIRGL_RASTERIZER_FRONT_CCW
+    } else {
+        0
     };
     VIRGL_RASTERIZER_DEPTH_CLIP | cull_face | front_ccw
 }
