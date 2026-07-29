@@ -3,12 +3,20 @@
 //! This library provides user-space APIs for framebuffer control operations,
 //! including device access, drawing primitives, and display management.
 
-#![no_std]
+#![cfg_attr(not(feature = "std"), no_std)]
 
 extern crate alloc;
+#[cfg(not(feature = "std"))]
 extern crate scarlet_std as std;
 
 use alloc::{format, vec};
+#[cfg(feature = "std")]
+use scarlet_os::handle::capability::memory_mapping::{flags, munmap, prot};
+#[cfg(feature = "std")]
+use scarlet_os::handle::capability::SeekFrom;
+#[cfg(feature = "std")]
+use scarlet_os::handle::{Handle, HandleError, HandleResult};
+#[cfg(not(feature = "std"))]
 use std::{
     fs::File,
     handle::{
@@ -17,6 +25,37 @@ use std::{
     },
     io::SeekFrom,
 };
+#[cfg(feature = "std")]
+pub struct File {
+    handle: Handle,
+}
+
+#[cfg(feature = "std")]
+impl File {
+    fn open(path: &str) -> Result<Self, HandleError> {
+        Handle::open(path, 0).map(|handle| Self { handle })
+    }
+
+    fn as_handle(&self) -> &Handle {
+        &self.handle
+    }
+
+    fn seek(&self, position: SeekFrom) -> Result<u64, HandleError> {
+        self.handle
+            .as_file()
+            .map_err(|_| HandleError::Unsupported)?
+            .seek(position)
+            .map_err(|_| HandleError::SystemError(-1))
+    }
+
+    fn write(&self, buffer: &[u8]) -> Result<usize, HandleError> {
+        self.handle
+            .as_stream()
+            .map_err(|_| HandleError::Unsupported)?
+            .write(buffer)
+            .map_err(|_| HandleError::SystemError(-1))
+    }
+}
 
 /// Linux framebuffer ioctl command constants
 /// These provide compatibility with Linux framebuffer applications

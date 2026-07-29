@@ -9,6 +9,9 @@ use gpu_raw::{
     GPU_RESULT_SUCCESS, Gpu as RawGpu, GpuBuffer as RawBuffer, GpuContext as RawContext,
     GpuDialect as RawDialect, GpuImage as RawImage, GpuQueue as RawQueue,
 };
+#[cfg(feature = "std")]
+use scarlet_os::handle::{HandleError, HandleResult};
+#[cfg(not(feature = "std"))]
 use std::handle::{HandleError, HandleResult};
 
 use crate::{

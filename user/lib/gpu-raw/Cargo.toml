@@ -3,8 +3,13 @@ name = "gpu-raw"
 version = "0.16.0"
 edition = "2024"
 
+[features]
+default = ["scarlet-std"]
+std = ["dep:scarlet-os"]
+
 [dependencies]
-scarlet-std = { path = "../std" }
+scarlet-os = { path = "../scarlet-os", default-features = false, features = ["std"], optional = true }
+scarlet-std = { path = "../std", optional = true }
 
 [lib]
 name = "gpu_raw"

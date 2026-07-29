@@ -136,15 +136,14 @@ to = "/system/scarlet/bin/video_player"
 kind = "cargo"
 source = "../../user/bin"
 package = "user-bin"
-bin = "gpu_probe"
-to = "/system/scarlet/bin/gpu_probe"
+bin = "sgfx_probe"
+to = "/system/scarlet/bin/sgfx_probe"
 
 [[layers]]
 kind = "cargo"
-source = "../../user/bin"
-package = "user-bin"
-bin = "gpu_cube"
-to = "/system/scarlet/bin/gpu_cube"
+source = "../../user/std-bin"
+bin = "sgfx_cube"
+to = "/system/scarlet/bin/sgfx_cube"
 
 [[layers]]
 kind = "cargo"

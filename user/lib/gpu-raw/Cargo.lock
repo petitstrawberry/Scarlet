@@ -24,6 +24,7 @@ checksum = "d9c4f5dac5e15c24eb999c26181a6ca40b39fe946cbe4c263c7209467bc83af2"
 name = "gpu-raw"
 version = "0.16.0"
 dependencies = [
+ "scarlet-os",
  "scarlet-std",
 ]
 

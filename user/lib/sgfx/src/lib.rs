@@ -4,13 +4,17 @@
 //! selected driver backend and its command transport remain private so future
 //! backends can preserve this application interface.
 
-#![no_std]
+#![cfg_attr(not(feature = "std"), no_std)]
 
 extern crate alloc;
+#[cfg(not(feature = "std"))]
 extern crate scarlet_std as std;
 
 use alloc::{rc::Rc, vec::Vec};
-use std::handle::HandleResult;
+#[cfg(feature = "std")]
+use scarlet_os::handle::{HandleError, HandleResult};
+#[cfg(not(feature = "std"))]
+use std::handle::{HandleError, HandleResult};
 
 mod driver;
 mod virgl;
@@ -159,7 +163,7 @@ impl Queue {
         let draw = render_pass
             .draw
             .as_ref()
-            .ok_or(std::handle::HandleError::InvalidParameter)?;
+            .ok_or(HandleError::InvalidParameter)?;
         self.backend.submit(
             &render_pass.image.backend,
             render_pass.viewport,

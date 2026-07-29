@@ -1,20 +1,14 @@
 //! Standalone rotating colored cube sample.
 
-#![no_std]
-#![no_main]
-
-extern crate alloc;
-extern crate scarlet_std as std;
-
-use alloc::vec::Vec;
-use core::time::Duration;
+use std::process::ExitCode;
+use std::thread;
+use std::time::Duration;
+use std::vec::Vec;
 
 use framebuffer::DisplaySurface;
-use gpu::{
+use sgfx::{
     Color, CullMode, Device, FrontFace, PipelineDesc, RenderPass, VertexClip4Color3, Viewport,
 };
-use std::println;
-
 const FACE_COUNT: usize = 6;
 const VERTICES_PER_FACE: usize = 4;
 const VERTEX_COUNT: usize = FACE_COUNT * 6;
@@ -208,46 +202,45 @@ fn build_vertices(frame: usize, width: u32, height: u32) -> Vec<VertexClip4Color
     vertices
 }
 
-#[unsafe(no_mangle)]
-fn main() -> i32 {
+fn main() -> ExitCode {
     let display = match DisplaySurface::open_primary() {
         Ok(display) => display,
         Err(error) => {
-            println!("gpu_cube: failed to open primary display: {:?}", error);
-            return 1;
+            println!("sgfx_cube: failed to open primary display: {:?}", error);
+            return ExitCode::from(1);
         }
     };
     let display_info = match display.get_info() {
         Ok(info) => info,
         Err(error) => {
-            println!("gpu_cube: failed to query display: {:?}", error);
-            return 1;
+            println!("sgfx_cube: failed to query display: {:?}", error);
+            return ExitCode::from(1);
         }
     };
     let device = match Device::open("/dev/gpu0") {
         Ok(device) => device,
         Err(error) => {
-            println!("gpu_cube: failed to open GPU: {:?}", error);
-            return 1;
+            println!("sgfx_cube: failed to open GPU: {:?}", error);
+            return ExitCode::from(1);
         }
     };
     let capabilities = device.capabilities();
     if !capabilities.supports_rendering() || !capabilities.supports_presentation() {
-        println!("gpu_cube: rendering or presentation is unsupported");
-        return 1;
+        println!("sgfx_cube: rendering or presentation is unsupported");
+        return ExitCode::from(1);
     }
     let context = match device.create_context() {
         Ok(context) => context,
         Err(error) => {
-            println!("gpu_cube: failed to create context: {:?}", error);
-            return 1;
+            println!("sgfx_cube: failed to create context: {:?}", error);
+            return ExitCode::from(1);
         }
     };
     let image = match context.create_image(display_info.width, display_info.height) {
         Ok(image) => image,
         Err(error) => {
-            println!("gpu_cube: failed to create render target: {:?}", error);
-            return 1;
+            println!("sgfx_cube: failed to create render target: {:?}", error);
+            return ExitCode::from(1);
         }
     };
     let pipeline = match context.create_pipeline(
@@ -258,22 +251,22 @@ fn main() -> i32 {
     ) {
         Ok(pipeline) => pipeline,
         Err(error) => {
-            println!("gpu_cube: failed to create pipeline: {:?}", error);
-            return 1;
+            println!("sgfx_cube: failed to create pipeline: {:?}", error);
+            return ExitCode::from(1);
         }
     };
     let queue = match context.create_queue() {
         Ok(queue) => queue,
         Err(error) => {
-            println!("gpu_cube: failed to create queue: {:?}", error);
-            return 1;
+            println!("sgfx_cube: failed to create queue: {:?}", error);
+            return ExitCode::from(1);
         }
     };
     let viewport = Viewport::new(image.width(), image.height());
     let clear_color = Color::rgba(0.45, 0.45, 0.45, 1.0);
 
     println!(
-        "gpu_cube: rendering {}x{} rotating cube",
+        "sgfx_cube: rendering {}x{} rotating cube",
         image.width(),
         image.height()
     );
@@ -284,14 +277,14 @@ fn main() -> i32 {
         let mut render_pass = RenderPass::new(&image, viewport, clear_color);
         render_pass.draw_clip_space_vertex_color(&pipeline, &vertices);
         if let Err(error) = queue.submit(&render_pass) {
-            println!("gpu_cube: draw failed: {:?}", error);
-            return 1;
+            println!("sgfx_cube: draw failed: {:?}", error);
+            return ExitCode::from(1);
         }
         if let Err(error) = image.present(&display) {
-            println!("gpu_cube: image present failed: {:?}", error);
-            return 1;
+            println!("sgfx_cube: image present failed: {:?}", error);
+            return ExitCode::from(1);
         }
         frame = frame.wrapping_add(1);
-        std::thread::sleep(Duration::from_millis(16));
+        thread::sleep(Duration::from_millis(16));
     }
 }

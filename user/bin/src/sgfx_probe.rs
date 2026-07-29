@@ -5,7 +5,7 @@
 
 extern crate scarlet_std as std;
 
-use gpu::Device;
+use sgfx::Device;
 use std::println;
 
 #[unsafe(no_mangle)]

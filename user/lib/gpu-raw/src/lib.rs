@@ -5,14 +5,34 @@
 //! tokens, and opaque command streams are driver-private transport details;
 //! applications should use the higher-level `gpu` facade instead.
 
-#![no_std]
+#![cfg_attr(not(feature = "std"), no_std)]
 
+#[cfg(not(feature = "std"))]
 extern crate scarlet_std as std;
 
+#[cfg(feature = "std")]
+use scarlet_os::handle::{Handle, HandleError, HandleResult};
+#[cfg(not(feature = "std"))]
 use std::{
     fs::File,
     handle::{Handle, HandleError, HandleResult},
 };
+
+#[cfg(feature = "std")]
+struct File {
+    handle: Handle,
+}
+
+#[cfg(feature = "std")]
+impl File {
+    fn open(path: &str) -> Result<Self, HandleError> {
+        Handle::open(path, 0).map(|handle| Self { handle })
+    }
+
+    fn as_handle(&self) -> &Handle {
+        &self.handle
+    }
+}
 
 /// GPU control command constants.
 pub mod commands {

@@ -3,6 +3,9 @@
 use alloc::rc::Rc;
 
 use framebuffer::DisplaySurface;
+#[cfg(feature = "std")]
+use scarlet_os::handle::HandleResult;
+#[cfg(not(feature = "std"))]
 use std::handle::HandleResult;
 
 use crate::{Capabilities, Color, PipelineDesc, VertexClip4Color3, Viewport, virgl};
