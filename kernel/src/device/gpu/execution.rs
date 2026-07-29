@@ -4,13 +4,13 @@ use alloc::{sync::Arc, vec::Vec};
 
 use super::connection::{read_user_value, write_user_value};
 use super::{
-    GPU_ABI_VERSION, GPU_CONTEXT_ATTACH_IMAGE, GPU_CONTEXT_QUERY, GPU_CREATE_QUEUE,
-    GPU_MAX_OPAQUE_COMMAND_SIZE, GPU_QUEUE_QUERY, GPU_QUEUE_SUBMIT,
+    GPU_ABI_VERSION, GPU_CONTEXT_ATTACH_IMAGE, GPU_CONTEXT_QUERY, GPU_CONTEXT_UPLOAD_IMAGE_BGRA,
+    GPU_CREATE_QUEUE, GPU_MAX_OPAQUE_COMMAND_SIZE, GPU_QUEUE_QUERY, GPU_QUEUE_SUBMIT,
     GPU_QUEUE_SUBMIT_FLAG_SIGNAL_TIMELINE, GPU_QUEUE_SUBMIT_FLAGS_VALID, GPU_RESULT_INVALID_ABI,
     GPU_RESULT_INVALID_ARGUMENT, GPU_RESULT_INVALID_STATE, GPU_RESULT_OUT_OF_RESOURCES,
     GpuBackendBuffer, GpuBackendContext, GpuBackendContextInfo, GpuBackendImage, GpuBackendQueue,
     GpuBackendQueueInfo, GpuBuffer, GpuContextAttachBuffer, GpuContextAttachImage, GpuContextInfo,
-    GpuCreateQueue, GpuImage, GpuObject, GpuQueueInfo, GpuQueueSubmit,
+    GpuContextUploadImageBgra, GpuCreateQueue, GpuImage, GpuObject, GpuQueueInfo, GpuQueueSubmit,
 };
 use crate::library::std::usercopy::copy_from_user;
 use crate::object::KernelObject;
@@ -24,7 +24,7 @@ use crate::object::handle::AccessMode;
 /// a real backend context while one of its child queues remains usable.
 pub struct GpuContext {
     backend_context: Arc<dyn GpuBackendContext>,
-    attached_images: Arc<crate::sync::IrqSpinLock<Vec<Arc<dyn GpuBackendImage>>>>,
+    attached_images: Arc<crate::sync::IrqSpinLock<Vec<GpuAttachedImage>>>,
     attached_buffers: Arc<crate::sync::IrqSpinLock<Vec<GpuAttachedBuffer>>>,
 }
 
@@ -32,6 +32,12 @@ pub struct GpuContext {
 struct GpuAttachedBuffer {
     _backend_buffer: Arc<dyn GpuBackendBuffer>,
     _backing: Arc<super::resource::GpuBufferBacking>,
+}
+
+/// Backend image and generic backing retained by a context and its queues.
+struct GpuAttachedImage {
+    backend_image: Arc<dyn GpuBackendImage>,
+    _backing: Arc<super::resource::GpuImageBacking>,
 }
 
 impl GpuContext {
@@ -100,7 +106,10 @@ impl GpuContext {
             let _ = self.backend_context.detach_image(backend_image.as_ref());
             return Err("GPU backend returned an invalid image attachment token");
         }
-        attached_images.push(backend_image);
+        attached_images.push(GpuAttachedImage {
+            backend_image,
+            _backing: image.backing(),
+        });
         Ok(token)
     }
 
@@ -275,6 +284,76 @@ impl GpuContext {
         write_user_value(arg, &request)?;
         Ok(0)
     }
+
+    fn image_is_attached(&self, image: &GpuImage) -> bool {
+        let backend_image = image.backend_image();
+        self.attached_images
+            .lock()
+            .iter()
+            .any(|attached| Arc::ptr_eq(&attached.backend_image, &backend_image))
+    }
+
+    fn handle_upload_image_bgra(&self, arg: usize) -> Result<i32, &'static str> {
+        let mut request: GpuContextUploadImageBgra = read_user_value(arg)?;
+        let reserved = request.reserved;
+        let reserved2 = request.reserved2;
+        request.clear_response();
+        if request.abi_version != GPU_ABI_VERSION {
+            request.result = GPU_RESULT_INVALID_ABI;
+            write_user_value(arg, &request)?;
+            return Ok(0);
+        }
+        if reserved != 0 || reserved2 != 0 || request.image_handle == 0 {
+            request.result = GPU_RESULT_INVALID_ARGUMENT;
+            write_user_value(arg, &request)?;
+            return Ok(0);
+        }
+        let task = crate::task::mytask().ok_or("No current task for GPU image upload")?;
+        let image_owner = match task.handle_table.get_arc_clone(request.image_handle) {
+            Some(object) if object.as_gpu().and_then(GpuObject::as_image).is_some() => object,
+            _ => {
+                request.result = GPU_RESULT_INVALID_ARGUMENT;
+                write_user_value(arg, &request)?;
+                return Ok(0);
+            }
+        };
+        let image = image_owner
+            .as_gpu()
+            .and_then(GpuObject::as_image)
+            .ok_or("GPU image handle changed while uploading")?;
+        let layout = match super::resource::image_upload_layout(&request, image.query_info()) {
+            Ok(layout) => layout,
+            Err(_) => {
+                request.result = GPU_RESULT_INVALID_ARGUMENT;
+                write_user_value(arg, &request)?;
+                return Ok(0);
+            }
+        };
+        let source_ptr = match usize::try_from(request.source_ptr) {
+            Ok(pointer) => pointer,
+            Err(_) => {
+                request.result = GPU_RESULT_INVALID_ARGUMENT;
+                write_user_value(arg, &request)?;
+                return Ok(0);
+            }
+        };
+        if !self.image_is_attached(image) {
+            request.result = GPU_RESULT_INVALID_STATE;
+            write_user_value(arg, &request)?;
+            return Ok(0);
+        }
+        if image
+            .upload_bgra_from_user(source_ptr, layout, |backend_image, upload| {
+                self.backend_context
+                    .upload_image_bgra(backend_image, upload)
+            })
+            .is_err()
+        {
+            request.result = GPU_RESULT_INVALID_STATE;
+        }
+        write_user_value(arg, &request)?;
+        Ok(0)
+    }
 }
 
 impl ControlOps for GpuContext {
@@ -284,6 +363,7 @@ impl ControlOps for GpuContext {
             GPU_CREATE_QUEUE => self.handle_create_queue(arg),
             GPU_CONTEXT_ATTACH_IMAGE => self.handle_attach_image(arg),
             super::GPU_CONTEXT_ATTACH_BUFFER => self.handle_attach_buffer(arg),
+            GPU_CONTEXT_UPLOAD_IMAGE_BGRA => self.handle_upload_image_bgra(arg),
             _ => Err("Unsupported GPU context control command"),
         }
     }
@@ -302,7 +382,7 @@ impl GpuObject for GpuContext {
 /// Kernel-owned GPU execution queue child capability.
 pub struct GpuQueue {
     _backend_context: Arc<dyn GpuBackendContext>,
-    _attached_images: Arc<crate::sync::IrqSpinLock<Vec<Arc<dyn GpuBackendImage>>>>,
+    _attached_images: Arc<crate::sync::IrqSpinLock<Vec<GpuAttachedImage>>>,
     _attached_buffers: Arc<crate::sync::IrqSpinLock<Vec<GpuAttachedBuffer>>>,
     backend_queue: Arc<dyn GpuBackendQueue>,
 }
@@ -545,6 +625,35 @@ mod tests {
 
     struct TestImage {
         drops: Arc<IrqSpinLock<u32>>,
+        create: GpuImageCreateInfo,
+        allocation_size: u64,
+    }
+
+    struct TestImageBackend {
+        drops: Arc<IrqSpinLock<u32>>,
+    }
+
+    impl GpuBackend for TestImageBackend {
+        fn query_info(&self) -> GpuBackendInfo {
+            GpuBackendInfo::new(
+                GpuDeviceInfo::new(GpuDeviceState::Ready, GPU_EXECUTION_SUPPORT_NONE, 0),
+                0,
+                b"test-image",
+                &[],
+            )
+        }
+
+        fn create_image(
+            &self,
+            create: GpuImageCreateInfo,
+            backing: crate::device::gpu::GpuImageBackingInfo,
+        ) -> Result<Arc<dyn GpuBackendImage>, &'static str> {
+            Ok(Arc::new(TestImage {
+                drops: Arc::clone(&self.drops),
+                create,
+                allocation_size: backing.allocation_size,
+            }))
+        }
     }
 
     impl Drop for TestImage {
@@ -555,7 +664,11 @@ mod tests {
 
     impl GpuBackendImage for TestImage {
         fn query_info(&self) -> GpuBackendImageInfo {
-            GpuBackendImageInfo::new(GpuImageCreateInfo::new(1, 3, 8, 8), 9, 4096)
+            GpuBackendImageInfo::new(self.create, 9, self.allocation_size)
+        }
+
+        fn backend_cookie(&self) -> u64 {
+            1
         }
 
         fn display_resource(&self) -> Option<GpuDisplayResource> {
@@ -628,10 +741,10 @@ mod tests {
     #[test_case]
     fn attached_image_survives_context_until_derived_queue_drops() {
         let drops = Arc::new(IrqSpinLock::new(0));
-        let backend_image: Arc<dyn GpuBackendImage> = Arc::new(TestImage {
+        let backend: Arc<dyn GpuBackend> = Arc::new(TestImageBackend {
             drops: Arc::clone(&drops),
         });
-        let image = GpuImage::new(backend_image, GpuImageCreateInfo::new(1, 3, 8, 8))
+        let image = GpuImage::new(backend, GpuImageCreateInfo::new(1, 3, 8, 8))
             .expect("test image metadata should be valid");
         let backend_context: Arc<dyn GpuBackendContext> = Arc::new(TestContext {
             drops: Arc::new(IrqSpinLock::new(0)),

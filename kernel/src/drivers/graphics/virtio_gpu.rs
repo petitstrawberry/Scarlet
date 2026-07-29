@@ -13,13 +13,16 @@ use crate::{
     device::{
         Device, DeviceType,
         gpu::{
-            GPU_DIALECT_INFO_BYTES, GPU_EXECUTION_SUPPORT_MEMORY,
-            GPU_EXECUTION_SUPPORT_PRESENTATION, GPU_EXECUTION_SUPPORT_QUEUE,
-            GPU_EXECUTION_SUPPORT_TIMELINE, GPU_MAX_OPAQUE_COMMAND_SIZE, GpuBackend,
+            GPU_DIALECT_INFO_BYTES, GPU_EXECUTION_SUPPORT_IMAGE_UPLOAD,
+            GPU_EXECUTION_SUPPORT_MEMORY, GPU_EXECUTION_SUPPORT_PRESENTATION,
+            GPU_EXECUTION_SUPPORT_QUEUE, GPU_EXECUTION_SUPPORT_TIMELINE,
+            GPU_IMAGE_USAGE_PRESENTABLE, GPU_IMAGE_USAGE_RENDER_TARGET, GPU_IMAGE_USAGE_SAMPLED,
+            GPU_IMAGE_USAGE_TRANSFER_DST, GPU_MAX_OPAQUE_COMMAND_SIZE, GpuBackend,
             GpuBackendBuffer, GpuBackendBufferInfo, GpuBackendContext, GpuBackendContextInfo,
             GpuBackendDialectDescriptor, GpuBackendDialectInfo, GpuBackendImage,
             GpuBackendImageInfo, GpuBackendInfo, GpuBackendQueue, GpuBackendQueueInfo,
-            GpuBufferCreateInfo, GpuDeviceInfo, GpuDeviceState, GpuImageCreateInfo,
+            GpuBufferCreateInfo, GpuDeviceInfo, GpuDeviceState, GpuImageBackingInfo,
+            GpuImageCreateInfo, GpuImageUploadInfo,
         },
         graphics::{
             FramebufferConfig, GpuDisplayResource, GraphicsDevice, PixelFormat,
@@ -89,6 +92,7 @@ const VIRTIO_GPU_FORMAT_R8G8B8X8_UNORM: u32 = 134;
 const PIPE_BUFFER: u32 = 0;
 const PIPE_TEXTURE_2D: u32 = 2;
 const PIPE_BIND_RENDER_TARGET: u32 = 1 << 1;
+const PIPE_BIND_SAMPLER_VIEW: u32 = 1 << 3;
 const PIPE_BIND_VERTEX_BUFFER: u32 = 1 << 4;
 const PIPE_BIND_SCANOUT: u32 = 1 << 19;
 
@@ -294,6 +298,20 @@ struct VirtioGpuAccelerationTransfer3d {
     width: u32,
     height: u32,
     depth: u32,
+}
+
+fn virgl_image_bind(usage: u32) -> u32 {
+    let mut bind = 0;
+    if usage & GPU_IMAGE_USAGE_RENDER_TARGET != 0 {
+        bind |= PIPE_BIND_RENDER_TARGET;
+    }
+    if usage & GPU_IMAGE_USAGE_SAMPLED != 0 {
+        bind |= PIPE_BIND_SAMPLER_VIEW;
+    }
+    if usage & GPU_IMAGE_USAGE_PRESENTABLE != 0 {
+        bind |= PIPE_BIND_SCANOUT;
+    }
+    bind
 }
 
 /// Internal VirtIO backend dialect metadata.
@@ -687,7 +705,9 @@ impl VirtioGpuDeviceCore {
                 GPU_EXECUTION_SUPPORT_MEMORY
                     | GPU_EXECUTION_SUPPORT_TIMELINE
                     | if acceleration_usable {
-                        GPU_EXECUTION_SUPPORT_QUEUE | GPU_EXECUTION_SUPPORT_PRESENTATION
+                        GPU_EXECUTION_SUPPORT_IMAGE_UPLOAD
+                            | GPU_EXECUTION_SUPPORT_QUEUE
+                            | GPU_EXECUTION_SUPPORT_PRESENTATION
                     } else {
                         0
                     },
@@ -971,7 +991,7 @@ impl VirtioGpuDeviceCore {
             stride: transfer.stride,
             layer_stride: transfer.layer_stride,
         };
-        self.send_control_command(&cmd)
+        self.send_execution_command(&cmd)
     }
 
     #[allow(dead_code)]
@@ -1666,13 +1686,13 @@ struct VirtioGpuBackendContext {
     attached_resources: IrqSpinLock<Vec<u32>>,
 }
 
-/// Real VirtIO image resource with owned PMM contiguous backing.
+/// Real VirtIO image resource using generic kernel-owned backing when required.
 struct VirtioGpuBackendImage {
     core: Arc<IrqSpinLock<VirtioGpuDeviceCore>>,
     resource_id: u32,
     create: GpuImageCreateInfo,
     allocation_size: u64,
-    backing: ContiguousPages,
+    has_attached_backing: bool,
     backend_cookie: u64,
 }
 
@@ -1687,9 +1707,10 @@ struct VirtioGpuBackendBuffer {
 impl Drop for VirtioGpuBackendImage {
     fn drop(&mut self) {
         let core = self.core.lock();
-        let _ = core.detach_backing_from_resource(self.resource_id);
+        if self.has_attached_backing {
+            let _ = core.detach_backing_from_resource(self.resource_id);
+        }
         let _ = core.unref_acceleration_resource(self.resource_id);
-        let _ = &self.backing;
     }
 }
 
@@ -1702,8 +1723,12 @@ impl GpuBackendImage for VirtioGpuBackendImage {
         )
     }
 
+    fn backend_cookie(&self) -> u64 {
+        self.backend_cookie
+    }
+
     fn display_resource(&self) -> Option<GpuDisplayResource> {
-        Some(GpuDisplayResource::new(
+        (self.create.usage & GPU_IMAGE_USAGE_PRESENTABLE != 0).then_some(GpuDisplayResource::new(
             self.resource_id,
             self.create.width,
             self.create.height,
@@ -1754,40 +1779,78 @@ impl GpuBackendContext for VirtioGpuBackendContext {
     }
 
     fn attach_image(&self, image: &dyn GpuBackendImage) -> Result<u64, &'static str> {
-        let resource = image
-            .display_resource()
-            .ok_or("VirtIO GPU image is not presentable")?;
+        let info = image.query_info();
+        let resource_id = u32::try_from(info.command_resource_token)
+            .map_err(|_| "VirtIO GPU image token does not fit a resource ID")?;
         let core = self.core.lock();
-        if resource.backend_cookie() != core.backend_cookie() {
+        if resource_id == 0 || image.backend_cookie() != core.backend_cookie() {
             return Err("GPU image belongs to a different VirtIO GPU device");
         }
-        core.attach_acceleration_resource(self.context_id, resource.resource_id())?;
+        core.attach_acceleration_resource(self.context_id, resource_id)?;
         let mut attached_resources = self.attached_resources.lock();
         if attached_resources.try_reserve(1).is_err() {
-            let _ = core.detach_acceleration_resource(self.context_id, resource.resource_id());
+            let _ = core.detach_acceleration_resource(self.context_id, resource_id);
             return Err("Failed to retain VirtIO GPU image attachment");
         }
-        attached_resources.push(resource.resource_id());
-        Ok(u64::from(resource.resource_id()))
+        attached_resources.push(resource_id);
+        Ok(u64::from(resource_id))
     }
 
     fn detach_image(&self, image: &dyn GpuBackendImage) -> Result<(), &'static str> {
-        let resource = image
-            .display_resource()
-            .ok_or("VirtIO GPU image is not presentable")?;
+        let info = image.query_info();
+        let resource_id = u32::try_from(info.command_resource_token)
+            .map_err(|_| "VirtIO GPU image token does not fit a resource ID")?;
         let core = self.core.lock();
-        if resource.backend_cookie() != core.backend_cookie() {
+        if resource_id == 0 || image.backend_cookie() != core.backend_cookie() {
             return Err("GPU image belongs to a different VirtIO GPU device");
         }
-        core.detach_acceleration_resource(self.context_id, resource.resource_id())?;
+        core.detach_acceleration_resource(self.context_id, resource_id)?;
         let mut attached_resources = self.attached_resources.lock();
         if let Some(index) = attached_resources
             .iter()
-            .position(|&resource_id| resource_id == resource.resource_id())
+            .position(|&attached_resource_id| attached_resource_id == resource_id)
         {
             attached_resources.swap_remove(index);
         }
         Ok(())
+    }
+
+    fn upload_image_bgra(
+        &self,
+        image: &dyn GpuBackendImage,
+        upload: GpuImageUploadInfo,
+    ) -> Result<(), &'static str> {
+        let info = image.query_info();
+        let resource_id = u32::try_from(info.command_resource_token)
+            .map_err(|_| "VirtIO GPU image token does not fit a resource ID")?;
+        let core = self.core.lock();
+        if resource_id == 0 || image.backend_cookie() != core.backend_cookie() {
+            return Err("GPU image belongs to a different VirtIO GPU device");
+        }
+        if !self
+            .attached_resources
+            .lock()
+            .iter()
+            .any(|&attached_resource_id| attached_resource_id == resource_id)
+        {
+            return Err("VirtIO GPU image is not attached to this context");
+        }
+        let fence_id = core.next_acceleration_fence_id()?;
+        core.transfer_acceleration_to_host(VirtioGpuAccelerationTransfer3d {
+            context_id: self.context_id,
+            resource_id,
+            fence_id: Some(fence_id),
+            offset: upload.backing_offset,
+            level: 0,
+            stride: upload.backing_stride,
+            layer_stride: upload.backing_layer_stride,
+            x: upload.dst_x,
+            y: upload.dst_y,
+            z: 0,
+            width: upload.width,
+            height: upload.height,
+            depth: 1,
+        })
     }
 
     fn attach_buffer(&self, buffer: &dyn GpuBackendBuffer) -> Result<u64, &'static str> {
@@ -1894,39 +1957,22 @@ impl GpuBackend for VirtioGpuBackend {
     fn create_image(
         &self,
         create: GpuImageCreateInfo,
+        backing: GpuImageBackingInfo,
     ) -> Result<Arc<dyn GpuBackendImage>, &'static str> {
-        let width = usize::try_from(create.width)
-            .map_err(|_| "GPU image width does not fit the kernel address size")?;
-        let height = usize::try_from(create.height)
-            .map_err(|_| "GPU image height does not fit the kernel address size")?;
-        let backing_size = width
-            .checked_mul(height)
-            .and_then(|pixels| pixels.checked_mul(4))
-            .ok_or("GPU image backing size overflow")?;
-        let page_count = backing_size
-            .checked_add(crate::environment::PAGE_SIZE - 1)
-            .ok_or("GPU image page count overflow")?
-            / crate::environment::PAGE_SIZE;
-        let backing = ContiguousPages::new(page_count)
-            .ok_or("Failed to allocate contiguous GPU image backing")?;
-        // SAFETY: `backing` owns exactly `page_count` contiguous PMM pages,
-        // which covers at least `backing_size` bytes and is initialized before
-        // the VirtIO device can read the attached range.
-        unsafe {
-            ptr::write_bytes(backing.as_ptr() as *mut u8, 0, backing_size);
+        if backing.paddr == 0 || backing.allocation_size == 0 {
+            return Err("VirtIO GPU image backing is invalid");
         }
-        let allocation_size = page_count
-            .checked_mul(crate::environment::PAGE_SIZE)
-            .ok_or("GPU image allocation size overflow")?;
-        let allocation_size = u64::try_from(allocation_size)
-            .map_err(|_| "GPU image backing size does not fit the ABI")?;
+        let backing_size = usize::try_from(backing.allocation_size)
+            .map_err(|_| "VirtIO GPU image backing does not fit kernel address size")?;
+        let has_attached_backing =
+            create.usage & (GPU_IMAGE_USAGE_PRESENTABLE | GPU_IMAGE_USAGE_TRANSFER_DST) != 0;
         let core = self.core.lock();
         core.require_virgl()?;
         let resource_id = core.create_acceleration_resource(VirtioGpuAccelerationResource3d {
             resource_id: 0,
             target: PIPE_TEXTURE_2D,
             format: VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM,
-            bind: PIPE_BIND_RENDER_TARGET | PIPE_BIND_SCANOUT,
+            bind: virgl_image_bind(create.usage),
             width: create.width,
             height: create.height,
             depth: 1,
@@ -1935,8 +1981,9 @@ impl GpuBackend for VirtioGpuBackend {
             nr_samples: 0,
             flags: 0,
         })?;
-        if let Err(error) =
-            core.attach_backing_to_resource(resource_id, backing.as_paddr(), backing_size)
+        if has_attached_backing
+            && let Err(error) =
+                core.attach_backing_to_resource(resource_id, backing.paddr, backing_size)
         {
             let _ = core.unref_acceleration_resource(resource_id);
             return Err(error);
@@ -1945,8 +1992,8 @@ impl GpuBackend for VirtioGpuBackend {
             core: Arc::clone(&self.core),
             resource_id,
             create,
-            allocation_size,
-            backing,
+            allocation_size: backing.allocation_size,
+            has_attached_backing,
             backend_cookie: core.backend_cookie(),
         }))
     }
@@ -2079,6 +2126,22 @@ mod tests {
     #[test_case]
     fn virtio_gpu_cursor_queue_fits_qemu_limit() {
         assert_eq!(VIRTIO_GPU_CURSOR_QUEUE_SIZE, 16);
+    }
+
+    #[test_case]
+    fn virgl_image_bind_flags_follow_generic_usage() {
+        assert_eq!(
+            virgl_image_bind(GPU_IMAGE_USAGE_SAMPLED),
+            PIPE_BIND_SAMPLER_VIEW
+        );
+        assert_eq!(
+            virgl_image_bind(
+                GPU_IMAGE_USAGE_RENDER_TARGET
+                    | GPU_IMAGE_USAGE_PRESENTABLE
+                    | GPU_IMAGE_USAGE_SAMPLED,
+            ),
+            PIPE_BIND_RENDER_TARGET | PIPE_BIND_SCANOUT | PIPE_BIND_SAMPLER_VIEW
+        );
     }
 
     /// Physical address of the VirtIO GPU device on QEMU RISC-V virt.

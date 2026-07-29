@@ -183,18 +183,10 @@ impl GpuConnection {
             write_user_value(arg, &request)?;
             return Ok(0);
         }
-        let backend_image = match self.backend.create_image(create) {
+        let image = match GpuImage::new(Arc::clone(&self.backend), create) {
             Ok(image) => image,
             Err(_) => {
                 request.result = GPU_RESULT_UNSUPPORTED;
-                write_user_value(arg, &request)?;
-                return Ok(0);
-            }
-        };
-        let image = match GpuImage::new(backend_image, create) {
-            Ok(image) => image,
-            Err(_) => {
-                request.result = GPU_RESULT_OUT_OF_RESOURCES;
                 write_user_value(arg, &request)?;
                 return Ok(0);
             }

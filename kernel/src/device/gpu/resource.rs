@@ -5,12 +5,15 @@ use alloc::{string::String, sync::Arc};
 use super::connection::{read_user_value, write_user_value};
 use super::{
     GPU_ABI_VERSION, GPU_BUFFER_QUERY_INFO, GPU_IMAGE_FORMAT_BGRA8_UNORM, GPU_IMAGE_QUERY_INFO,
-    GPU_IMAGE_USAGE_VALID, GPU_RESULT_INVALID_ABI, GPU_TIMELINE_CREATE_POINT, GPU_TIMELINE_FAIL,
-    GPU_TIMELINE_QUERY, GPU_TIMELINE_SIGNAL, GpuBackend, GpuBackendBuffer, GpuBackendImage,
-    GpuBufferCreateInfo, GpuBufferInfo, GpuImageCreateInfo, GpuImageInfo, GpuTimelineCreatePoint,
-    GpuTimelineFail, GpuTimelineInfo, GpuTimelineSignal,
+    GPU_IMAGE_USAGE_TRANSFER_DST, GPU_IMAGE_USAGE_VALID, GPU_MAX_IMAGE_UPLOAD_SIZE,
+    GPU_RESULT_INVALID_ABI, GPU_TIMELINE_CREATE_POINT, GPU_TIMELINE_FAIL, GPU_TIMELINE_QUERY,
+    GPU_TIMELINE_SIGNAL, GpuBackend, GpuBackendBuffer, GpuBackendImage, GpuBufferCreateInfo,
+    GpuBufferInfo, GpuContextUploadImageBgra, GpuImageBackingInfo, GpuImageCreateInfo,
+    GpuImageInfo, GpuImageUploadInfo, GpuTimelineCreatePoint, GpuTimelineFail, GpuTimelineInfo,
+    GpuTimelineSignal,
 };
 use crate::environment::PAGE_SIZE;
+use crate::library::std::usercopy::copy_from_user;
 use crate::mem::page::{Page, allocate_raw_pages, free_raw_pages};
 use crate::object::capability::ControlOps;
 use crate::object::capability::memory_mapping::{
@@ -102,49 +105,241 @@ pub trait GpuObject: Send + Sync {
 ///
 /// # Returns
 ///
-/// `true` only for a non-empty BGRA8 render-target and presentable image.
+/// `true` only for a non-empty BGRA8 image with one or more known usage bits.
 pub(crate) const fn image_create_is_valid(create: GpuImageCreateInfo) -> bool {
     create.format == GPU_IMAGE_FORMAT_BGRA8_UNORM
-        && create.usage == GPU_IMAGE_USAGE_VALID
+        && create.usage != 0
+        && create.usage & !GPU_IMAGE_USAGE_VALID == 0
         && create.width != 0
         && create.height != 0
+        && create.width <= u32::MAX / 4
+}
+
+/// Validated layout for one source-to-image BGRA upload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct GpuImageUploadLayout {
+    source_stride: usize,
+    source_row_bytes: usize,
+    destination_offset: usize,
+    destination_stride: usize,
+    height: usize,
+    transfer: GpuImageUploadInfo,
+}
+
+/// Validate a BGRA upload request and derive its kernel-backing layout.
+pub(crate) fn image_upload_layout(
+    request: &GpuContextUploadImageBgra,
+    image: super::GpuBackendImageInfo,
+) -> Result<GpuImageUploadLayout, &'static str> {
+    if request.source_ptr == 0
+        || request.source_length == 0
+        || request.width == 0
+        || request.height == 0
+        || image.format != GPU_IMAGE_FORMAT_BGRA8_UNORM
+        || image.usage & GPU_IMAGE_USAGE_TRANSFER_DST == 0
+    {
+        return Err("GPU image upload request is invalid");
+    }
+
+    let row_bytes = request
+        .width
+        .checked_mul(4)
+        .ok_or("GPU image upload row width overflows")?;
+    if request.source_stride < row_bytes {
+        return Err("GPU image upload source stride is too small");
+    }
+    let dst_x_end = request
+        .dst_x
+        .checked_add(request.width)
+        .ok_or("GPU image upload x range overflows")?;
+    let dst_y_end = request
+        .dst_y
+        .checked_add(request.height)
+        .ok_or("GPU image upload y range overflows")?;
+    if dst_x_end > image.width || dst_y_end > image.height {
+        return Err("GPU image upload rectangle exceeds image bounds");
+    }
+
+    let source_length = usize::try_from(request.source_length)
+        .map_err(|_| "GPU image upload source length does not fit kernel address size")?;
+    let source_stride = usize::try_from(request.source_stride)
+        .map_err(|_| "GPU image upload source stride does not fit kernel address size")?;
+    let source_row_bytes = usize::try_from(row_bytes)
+        .map_err(|_| "GPU image upload row width does not fit kernel address size")?;
+    let height = usize::try_from(request.height)
+        .map_err(|_| "GPU image upload height does not fit kernel address size")?;
+    let required_source_len = height
+        .checked_sub(1)
+        .and_then(|rows| rows.checked_mul(source_stride))
+        .and_then(|offset| offset.checked_add(source_row_bytes))
+        .ok_or("GPU image upload source range overflows")?;
+    if source_length < required_source_len {
+        return Err("GPU image upload source length is too small");
+    }
+    let copy_size = source_row_bytes
+        .checked_mul(height)
+        .ok_or("GPU image upload copy size overflows")?;
+    if copy_size > GPU_MAX_IMAGE_UPLOAD_SIZE as usize {
+        return Err("GPU image upload exceeds the maximum copy size");
+    }
+
+    let destination_stride = usize::try_from(image.width)
+        .map_err(|_| "GPU image width does not fit kernel address size")?
+        .checked_mul(4)
+        .ok_or("GPU image backing stride overflows")?;
+    let destination_offset = usize::try_from(request.dst_y)
+        .map_err(|_| "GPU image upload y coordinate does not fit kernel address size")?
+        .checked_mul(destination_stride)
+        .and_then(|offset| {
+            usize::try_from(request.dst_x)
+                .ok()
+                .and_then(|x| x.checked_mul(4))
+                .and_then(|x_offset| offset.checked_add(x_offset))
+        })
+        .ok_or("GPU image upload destination offset overflows")?;
+    let destination_end = height
+        .checked_sub(1)
+        .and_then(|rows| rows.checked_mul(destination_stride))
+        .and_then(|offset| offset.checked_add(destination_offset))
+        .and_then(|offset| offset.checked_add(source_row_bytes))
+        .ok_or("GPU image upload destination range overflows")?;
+    let allocation_size = usize::try_from(image.allocation_size)
+        .map_err(|_| "GPU image backing size does not fit kernel address size")?;
+    if destination_end > allocation_size {
+        return Err("GPU image upload exceeds image backing");
+    }
+    let backing_stride = u32::try_from(destination_stride)
+        .map_err(|_| "GPU image backing stride does not fit the backend ABI")?;
+    let backing_layer_stride = u32::try_from(
+        destination_stride
+            .checked_mul(
+                usize::try_from(image.height)
+                    .map_err(|_| "GPU image height does not fit kernel address size")?,
+            )
+            .ok_or("GPU image backing layer stride overflows")?,
+    )
+    .map_err(|_| "GPU image backing layer stride does not fit the backend ABI")?;
+    let backing_offset = u64::try_from(destination_offset)
+        .map_err(|_| "GPU image backing offset does not fit the backend ABI")?;
+
+    Ok(GpuImageUploadLayout {
+        source_stride,
+        source_row_bytes,
+        destination_offset,
+        destination_stride,
+        height,
+        transfer: GpuImageUploadInfo::new(
+            backing_offset,
+            backing_stride,
+            backing_layer_stride,
+            request.dst_x,
+            request.dst_y,
+            request.width,
+            request.height,
+        ),
+    })
+}
+
+/// Stable page-backed allocation retained by a GPU image and its attachments.
+pub(crate) struct GpuImageBacking {
+    paddr: usize,
+    allocation_size: usize,
+}
+
+impl GpuImageBacking {
+    fn new(create: GpuImageCreateInfo) -> Result<Self, &'static str> {
+        let image_size = usize::try_from(create.width)
+            .map_err(|_| "GPU image width does not fit kernel address size")?
+            .checked_mul(
+                usize::try_from(create.height)
+                    .map_err(|_| "GPU image height does not fit kernel address size")?,
+            )
+            .and_then(|pixels| pixels.checked_mul(4))
+            .ok_or("GPU image backing size overflows")?;
+        let allocation_size = image_size
+            .checked_add(PAGE_SIZE - 1)
+            .ok_or("GPU image backing size overflows page alignment")?
+            & !(PAGE_SIZE - 1);
+        let page_count = allocation_size / PAGE_SIZE;
+        let pages = allocate_raw_pages(page_count);
+        if pages.is_null() {
+            return Err("Failed to allocate GPU image pages");
+        }
+        // SAFETY: `pages` is a valid contiguous allocation of `allocation_size`
+        // bytes returned by `allocate_raw_pages`; zeroing initializes all backing
+        // bytes before the backend can attach the image resource.
+        unsafe {
+            core::ptr::write_bytes(pages as *mut u8, 0, allocation_size);
+        }
+        Ok(Self {
+            paddr: virt_to_phys(pages as usize),
+            allocation_size,
+        })
+    }
+
+    fn info(&self) -> Result<GpuImageBackingInfo, &'static str> {
+        Ok(GpuImageBackingInfo::new(
+            self.paddr,
+            u64::try_from(self.allocation_size)
+                .map_err(|_| "GPU image backing size does not fit backend metadata")?,
+        ))
+    }
+}
+
+impl Drop for GpuImageBacking {
+    fn drop(&mut self) {
+        let page_count = self.allocation_size / PAGE_SIZE;
+        if page_count != 0 {
+            let pages = phys_to_virt(self.paddr) as *mut Page;
+            free_raw_pages(pages, page_count);
+        }
+    }
 }
 
 /// Kernel-owned backend image capability.
 pub struct GpuImage {
     backend_image: Arc<dyn GpuBackendImage>,
+    backing: Arc<GpuImageBacking>,
+    upload_lock: IrqSpinLock<()>,
 }
 
 impl GpuImage {
-    /// Adopt a real backend image after validating its immutable metadata.
+    /// Create a real backend image with kernel-owned backing.
     ///
     /// # Arguments
     ///
-    /// * `backend_image` - Real backend image to own.
+    /// * `backend` - Backend that creates and retains the real image resource.
     /// * `create` - Generic descriptor used to create the image.
     ///
     /// # Returns
     ///
-    /// A capability retaining the backend image, or an error when the backend
-    /// returned metadata inconsistent with the validated request.
+    /// A capability retaining the backend image and its backing, or an error
+    /// when allocation, backend creation, or immutable metadata validation fails.
     pub fn new(
-        backend_image: Arc<dyn GpuBackendImage>,
+        backend: Arc<dyn GpuBackend>,
         create: GpuImageCreateInfo,
     ) -> Result<Self, &'static str> {
         if !image_create_is_valid(create) {
             return Err("GPU image descriptor is invalid");
         }
+        let backing = Arc::new(GpuImageBacking::new(create)?);
+        let backing_info = backing.info()?;
+        let backend_image = backend.create_image(create, backing_info)?;
         let info = backend_image.query_info();
         if info.format != create.format
             || info.usage != create.usage
             || info.width != create.width
             || info.height != create.height
             || info.command_resource_token == 0
-            || info.allocation_size == 0
+            || info.allocation_size != backing_info.allocation_size
         {
             return Err("GPU backend image metadata is invalid");
         }
-        Ok(Self { backend_image })
+        Ok(Self {
+            backend_image,
+            backing,
+            upload_lock: IrqSpinLock::new(()),
+        })
     }
 
     /// Return immutable backend-neutral image information.
@@ -163,6 +358,49 @@ impl GpuImage {
     /// A strong reference to the real backend image.
     pub(crate) fn backend_image(&self) -> Arc<dyn GpuBackendImage> {
         Arc::clone(&self.backend_image)
+    }
+
+    /// Clone the image backing for a context lifetime reference.
+    pub(crate) fn backing(&self) -> Arc<GpuImageBacking> {
+        Arc::clone(&self.backing)
+    }
+
+    pub(crate) fn upload_bgra_from_user<F>(
+        &self,
+        source_ptr: usize,
+        layout: GpuImageUploadLayout,
+        transfer: F,
+    ) -> Result<(), &'static str>
+    where
+        F: FnOnce(&dyn GpuBackendImage, GpuImageUploadInfo) -> Result<(), &'static str>,
+    {
+        let _upload_guard = self.upload_lock.lock();
+        let task = crate::task::mytask().ok_or("No current task for GPU image upload")?;
+        let backing_base = phys_to_virt(self.backing.paddr) as *mut u8;
+        for row in 0..layout.height {
+            let source_offset = row
+                .checked_mul(layout.source_stride)
+                .ok_or("GPU image upload source row offset overflows")?;
+            let source_address = source_ptr
+                .checked_add(source_offset)
+                .ok_or("GPU image upload source address overflows")?;
+            let destination_offset = row
+                .checked_mul(layout.destination_stride)
+                .and_then(|offset| offset.checked_add(layout.destination_offset))
+                .ok_or("GPU image upload destination row offset overflows")?;
+            // SAFETY: `image_upload_layout` proved that every destination row
+            // lies within this image's allocated kernel backing. The upload lock
+            // serializes writers while the synchronous user-copy fills the row.
+            let destination = unsafe {
+                core::slice::from_raw_parts_mut(
+                    backing_base.add(destination_offset),
+                    layout.source_row_bytes,
+                )
+            };
+            copy_from_user(&task, source_address, destination)
+                .map_err(|_| "Failed to copy GPU image pixels from user")?;
+        }
+        transfer(self.backend_image.as_ref(), layout.transfer)
     }
 
     /// Return this image's display descriptor when it is presentable.
