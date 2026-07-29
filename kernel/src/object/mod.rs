@@ -8,6 +8,7 @@ pub mod handle;
 pub mod introspection;
 pub mod timer;
 
+use crate::device::gpu::GpuObject;
 use crate::fs::FileObject;
 use crate::ipc::StreamIpcOps;
 use crate::ipc::counter::{Counter, CounterObject};
@@ -39,6 +40,8 @@ pub enum KernelObject {
     #[cfg(feature = "network")]
     Socket(Arc<dyn SocketObject>),
     SharedMemory(Arc<dyn SharedMemoryObject>),
+    /// GPU child capability object with optional control, mapping, and readiness capabilities.
+    Gpu(Arc<dyn GpuObject>),
     #[cfg(feature = "hypervisor")]
     HypervisorVm(hypervisor::VmRef),
     #[cfg(feature = "hypervisor")]
@@ -46,6 +49,76 @@ pub enum KernelObject {
     // Future variants will be added here:
     // MessageQueue(Arc<dyn MessageQueueObject>),
     // CharDevice(Arc<dyn CharDevice>),
+}
+
+/// Strong mapping owner that retains a GPU child object while a VMA exists.
+struct GpuMemoryMappingOwner {
+    gpu: Arc<dyn GpuObject>,
+}
+
+impl MemoryMappingOps for GpuMemoryMappingOwner {
+    fn get_mapping_info(
+        &self,
+        offset: usize,
+        length: usize,
+    ) -> Result<capability::MemoryMappingInfo, &'static str> {
+        self.gpu
+            .as_memory_mappable()
+            .ok_or("GPU object lost memory mapping capability")?
+            .get_mapping_info(offset, length)
+    }
+
+    fn get_mapping_info_with(
+        &self,
+        offset: usize,
+        length: usize,
+        is_shared: bool,
+    ) -> Result<capability::MemoryMappingInfo, &'static str> {
+        self.gpu
+            .as_memory_mappable()
+            .ok_or("GPU object lost memory mapping capability")?
+            .get_mapping_info_with(offset, length, is_shared)
+    }
+
+    fn on_mapped(&self, vaddr: usize, paddr: usize, length: usize, offset: usize) {
+        if let Some(mapping) = self.gpu.as_memory_mappable() {
+            mapping.on_mapped(vaddr, paddr, length, offset);
+        }
+    }
+
+    fn on_unmapped(&self, vaddr: usize, length: usize) {
+        if let Some(mapping) = self.gpu.as_memory_mappable() {
+            mapping.on_unmapped(vaddr, length);
+        }
+    }
+
+    fn supports_mmap(&self) -> bool {
+        self.gpu
+            .as_memory_mappable()
+            .is_some_and(MemoryMappingOps::supports_mmap)
+    }
+
+    fn mmap_owner_name(&self) -> alloc::string::String {
+        self.gpu.as_memory_mappable().map_or_else(
+            || alloc::string::String::from("gpu"),
+            MemoryMappingOps::mmap_owner_name,
+        )
+    }
+
+    fn resolve_fault(
+        &self,
+        access: &capability::memory_mapping::AccessKind,
+        page_idx: usize,
+        vm_start: usize,
+    ) -> Result<
+        capability::memory_mapping::ResolveFaultResult,
+        capability::memory_mapping::ResolveFaultError,
+    > {
+        self.gpu
+            .as_memory_mappable()
+            .ok_or(capability::memory_mapping::ResolveFaultError::Invalid)?
+            .resolve_fault(access, page_idx, vm_start)
+    }
 }
 
 /// Borrowed view of a kernel object that does not expose `Arc` ownership.
@@ -128,6 +201,7 @@ impl<'a> KernelObjectRef<'a> {
             KernelObject::EventChannel(_) => "EventChannel",
             KernelObject::EventSubscription(_) => "EventSubscription",
             KernelObject::SharedMemory(_) => "SharedMemory",
+            KernelObject::Gpu(_) => "Gpu",
             #[cfg(feature = "network")]
             KernelObject::Socket(_) => "Socket",
             #[cfg(feature = "hypervisor")]
@@ -216,6 +290,15 @@ impl<'a> KernelObjectRef<'a> {
     /// Shared memory capability if the borrowed object is shared memory.
     pub fn as_shared_memory(&self) -> Option<&'a dyn SharedMemoryObject> {
         self.object().as_shared_memory()
+    }
+
+    /// Try to get a GPU child capability object.
+    ///
+    /// # Returns
+    ///
+    /// GPU object if this borrowed object is GPU-backed.
+    pub fn as_gpu(&self) -> Option<&'a dyn GpuObject> {
+        self.object().as_gpu()
     }
 
     /// Try to get ControlOps capability.
@@ -314,6 +397,11 @@ impl KernelObject {
         KernelObject::SharedMemory(shared_memory)
     }
 
+    /// Create a KernelObject from a GPU child capability object.
+    pub fn from_gpu_object(gpu: Arc<dyn GpuObject>) -> Self {
+        KernelObject::Gpu(gpu)
+    }
+
     /// Create a KernelObject from a Counter
     pub fn from_counter(counter: Arc<Counter>) -> Self {
         KernelObject::Counter(counter as Arc<dyn CounterObject>)
@@ -364,6 +452,7 @@ impl KernelObject {
                 // Shared memory doesn't provide stream operations
                 None
             }
+            KernelObject::Gpu(_) => None,
             #[cfg(feature = "hypervisor")]
             KernelObject::HypervisorVm(_) => None,
             #[cfg(feature = "hypervisor")]
@@ -406,6 +495,7 @@ impl KernelObject {
                 // Shared memory doesn't provide stream IPC operations
                 None
             }
+            KernelObject::Gpu(_) => None,
             #[cfg(feature = "hypervisor")]
             KernelObject::HypervisorVm(_) => None,
             #[cfg(feature = "hypervisor")]
@@ -447,6 +537,7 @@ impl KernelObject {
                 // Shared memory doesn't provide file operations
                 None
             }
+            KernelObject::Gpu(_) => None,
             #[cfg(feature = "hypervisor")]
             KernelObject::HypervisorVm(_) => None,
             #[cfg(feature = "hypervisor")]
@@ -487,6 +578,7 @@ impl KernelObject {
                 // Shared memory doesn't provide pipe operations
                 None
             }
+            KernelObject::Gpu(_) => None,
             #[cfg(feature = "hypervisor")]
             KernelObject::HypervisorVm(_) => None,
             #[cfg(feature = "hypervisor")]
@@ -513,6 +605,18 @@ impl KernelObject {
                 let shmem_ops: &dyn SharedMemoryObject = shared_memory.as_ref();
                 Some(shmem_ops)
             }
+            _ => None,
+        }
+    }
+
+    /// Try to get a GPU child capability object.
+    ///
+    /// # Returns
+    ///
+    /// GPU object if this object is GPU-backed.
+    pub fn as_gpu(&self) -> Option<&dyn GpuObject> {
+        match self {
+            KernelObject::Gpu(gpu) => Some(gpu.as_ref()),
             _ => None,
         }
     }
@@ -553,6 +657,7 @@ impl KernelObject {
                 // Shared memory doesn't implement CloneOps, use Arc::clone directly
                 None
             }
+            KernelObject::Gpu(_) => None,
             #[cfg(feature = "hypervisor")]
             KernelObject::HypervisorVm(_) => None,
             #[cfg(feature = "hypervisor")]
@@ -594,6 +699,7 @@ impl KernelObject {
                 // Shared memory doesn't provide control operations
                 None
             }
+            KernelObject::Gpu(gpu) => gpu.as_control_ops(),
             #[cfg(feature = "hypervisor")]
             KernelObject::HypervisorVm(vm) => {
                 let control_ops: &dyn ControlOps = vm.as_ref();
@@ -642,6 +748,7 @@ impl KernelObject {
                 let memory_mapping_ops: &dyn MemoryMappingOps = shared_memory.as_ref();
                 Some(memory_mapping_ops)
             }
+            KernelObject::Gpu(gpu) => gpu.as_memory_mappable(),
             #[cfg(feature = "hypervisor")]
             KernelObject::HypervisorVm(_) => None,
             #[cfg(feature = "hypervisor")]
@@ -686,6 +793,7 @@ impl KernelObject {
                 let weak_shmem = Arc::downgrade(shared_memory);
                 Some(weak_shmem)
             }
+            KernelObject::Gpu(_) => None,
             #[cfg(feature = "hypervisor")]
             KernelObject::HypervisorVm(_) => None,
             #[cfg(feature = "hypervisor")]
@@ -709,6 +817,11 @@ impl KernelObject {
             KernelObject::SharedMemory(shared_memory) => {
                 Some(Arc::clone(shared_memory) as Arc<dyn MemoryMappingOps>)
             }
+            KernelObject::Gpu(gpu) => gpu.as_memory_mappable().map(|_| {
+                Arc::new(GpuMemoryMappingOwner {
+                    gpu: Arc::clone(gpu),
+                }) as Arc<dyn MemoryMappingOps>
+            }),
             #[cfg(feature = "hypervisor")]
             KernelObject::HypervisorVm(_) => None,
             #[cfg(feature = "hypervisor")]
@@ -783,6 +896,7 @@ impl KernelObject {
             KernelObject::EventChannel(_) => None,
             KernelObject::EventSubscription(_) => None,
             KernelObject::SharedMemory(_) => None,
+            KernelObject::Gpu(gpu) => gpu.as_selectable(),
             #[cfg(feature = "hypervisor")]
             KernelObject::HypervisorVm(_) => None,
             #[cfg(feature = "hypervisor")]
@@ -816,6 +930,7 @@ impl KernelObject {
             KernelObject::SharedMemory(shared_memory) => {
                 KernelObject::SharedMemory(Arc::clone(shared_memory))
             }
+            KernelObject::Gpu(gpu) => KernelObject::Gpu(Arc::clone(gpu)),
             #[cfg(feature = "hypervisor")]
             KernelObject::HypervisorVm(vm) => KernelObject::HypervisorVm(Arc::clone(vm)),
             #[cfg(feature = "hypervisor")]
@@ -847,6 +962,7 @@ impl Clone for KernelObject {
                 KernelObject::SharedMemory(shared_memory) => {
                     KernelObject::SharedMemory(Arc::clone(shared_memory))
                 }
+                KernelObject::Gpu(gpu) => KernelObject::Gpu(Arc::clone(gpu)),
                 #[cfg(feature = "hypervisor")]
                 KernelObject::HypervisorVm(vm) => KernelObject::HypervisorVm(Arc::clone(vm)),
                 #[cfg(feature = "hypervisor")]

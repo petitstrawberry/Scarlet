@@ -87,16 +87,6 @@ QEMU_MACHINE="${SCARLET_QEMU_MACHINE_AARCH64:-virt,gic-version=3,acpi=off}"
 QEMU_CPU="${SCARLET_QEMU_CPU_AARCH64:-max}"
 QEMU_DISPLAY="${SCARLET_QEMU_DISPLAY:-none}"
 QEMU_GPU="${SCARLET_QEMU_GPU:-none}"
-QEMU_VIRTIO_GPU_XRES="${SCARLET_QEMU_VIRTIO_GPU_XRES:-1280}"
-QEMU_VIRTIO_GPU_YRES="${SCARLET_QEMU_VIRTIO_GPU_YRES:-800}"
-
-case "$QEMU_GPU" in
-    virgl|virtio-gpu-gl)
-        if [ -z "${SCARLET_QEMU_DISPLAY+x}" ]; then
-            QEMU_DISPLAY="egl-headless"
-        fi
-        ;;
-esac
 
 case ",$QEMU_MACHINE," in
     *,virtualization=*)
@@ -144,64 +134,12 @@ if [ "$CHECK_TEST_OUTPUT" = "1" ] || [ "$CHECK_TEST_OUTPUT" = "true" ]; then
 fi
 
 
-require_virtio_gpu_gl_device() {
-    if ! "$1" -device help 2>/dev/null | grep -q 'virtio-gpu-gl-device'; then
-        echo "Error: $1 does not provide virtio-gpu-gl-device; install a QEMU build with virgl/GL support or use SCARLET_QEMU_GPU=virtio-gpu"
-        exit 1
-    fi
-}
-
-QEMU_DISPLAY_ARGS=()
-case "$QEMU_DISPLAY" in
-    vnc)
-        QEMU_DISPLAY_ARGS=(-nographic -serial mon:stdio -display vnc=:0)
-        ;;
-    cocoa)
-        QEMU_DISPLAY_ARGS=(-serial mon:stdio -display cocoa)
-        ;;
-    sdl)
-        QEMU_DISPLAY_ARGS=(-serial mon:stdio -display sdl)
-        ;;
-    gtk-gl)
-        QEMU_DISPLAY_ARGS=(-serial mon:stdio -display gtk,gl=on)
-        ;;
-    sdl-gl)
-        QEMU_DISPLAY_ARGS=(-serial mon:stdio -display sdl,gl=on)
-        ;;
-    egl-headless)
-        QEMU_DISPLAY_ARGS=(-nographic -serial mon:stdio -display egl-headless,gl=on)
-        ;;
-    none)
-        QEMU_DISPLAY_ARGS=(-nographic -serial mon:stdio)
-        ;;
-    *)
-        echo "Error: unsupported SCARLET_QEMU_DISPLAY=$QEMU_DISPLAY (expected vnc, cocoa, sdl, gtk-gl, sdl-gl, egl-headless, or none)"
-        exit 1
-        ;;
-esac
+QEMU_DISPLAY_ARGS=(-serial mon:stdio -display "$QEMU_DISPLAY")
 
 QEMU_GPU_ARGS=()
-case "$QEMU_GPU" in
-    virtio-gpu)
-        QEMU_GPU_ARGS=(-device virtio-gpu-device,bus=virtio-mmio-bus.2,xres="$QEMU_VIRTIO_GPU_XRES",yres="$QEMU_VIRTIO_GPU_YRES")
-        ;;
-    virtio-gpu-pci)
-        QEMU_GPU_ARGS=(-device virtio-gpu-pci,bus=pcie.0,xres="$QEMU_VIRTIO_GPU_XRES",yres="$QEMU_VIRTIO_GPU_YRES")
-        ;;
-    virgl|virtio-gpu-gl)
-        require_virtio_gpu_gl_device qemu-system-aarch64
-        QEMU_GPU_ARGS=(-device virtio-gpu-gl-device,bus=virtio-mmio-bus.2,xres="$QEMU_VIRTIO_GPU_XRES",yres="$QEMU_VIRTIO_GPU_YRES")
-        ;;
-    ramfb)
-        QEMU_GPU_ARGS=(-device ramfb)
-        ;;
-    none)
-        ;;
-    *)
-        echo "Error: unsupported SCARLET_QEMU_GPU=$QEMU_GPU (expected virtio-gpu, virtio-gpu-pci, virgl, virtio-gpu-gl, ramfb, or none)"
-        exit 1
-        ;;
-esac
+if [ "$QEMU_GPU" != "none" ]; then
+    QEMU_GPU_ARGS=(-device "$QEMU_GPU")
+fi
 
 QEMU_AUDIO="${SCARLET_QEMU_AUDIO:-0}"
 QEMU_AUDIO_DRIVER="${SCARLET_QEMU_AUDIO_DRIVER:-coreaudio}"

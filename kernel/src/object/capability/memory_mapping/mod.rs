@@ -134,6 +134,17 @@ pub trait MemoryMappingOps: Send + Sync {
         true
     }
 
+    /// Return whether this object supports private copy-on-write mappings.
+    ///
+    /// Objects whose mappings must preserve shared device-memory semantics can
+    /// reject `MAP_PRIVATE` without affecting their shared mapping capability.
+    ///
+    /// # Returns
+    /// `true` when private mappings are supported.
+    fn supports_private_mmap(&self) -> bool {
+        true
+    }
+
     /// Diagnostic helper: return a short owner name for logging
     ///
     /// Default implementation returns a generic "object" string. Implementers

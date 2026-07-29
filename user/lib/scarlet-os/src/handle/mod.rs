@@ -238,6 +238,9 @@ impl Handle {
             | KernelObjectType::CharDevice
             | KernelObjectType::BlockDevice
             | KernelObjectType::SharedMemory => Ok(MemoryMappingOps::from_handle(self)),
+            KernelObjectType::Gpu if self.info.capabilities.reserved[0] => {
+                Ok(MemoryMappingOps::from_handle(self))
+            }
             _ => Err(HandleError::Unsupported),
         }
     }

@@ -19,6 +19,10 @@
       url = "github:AsahiLinux/macvdmtool";
       flake = false;
     };
+    qemu-cocoa-virgl = {
+      url = "git+https://gitlab.com/petitstrawberry/qemu.git?ref=cocoa-virgl&submodules=1";
+      flake = false;
+    };
   };
 
   outputs =
@@ -28,6 +32,7 @@
       scarlet-rust-toolchain,
       scarlet-sdk,
       macvdmtool-src,
+      qemu-cocoa-virgl,
     }:
     let
       supportedSystems = [
@@ -81,6 +86,27 @@
           };
 
           rustToolchain = scarlet-rust-toolchain.packages.${system}.scarlet-rust-toolchain;
+
+          keycodemapdb = pkgs.fetchurl {
+            url = "https://gitlab.com/qemu-project/keycodemapdb/-/archive/f5772a62ec52591ff6870b7e8ef32482371f22c6/keycodemapdb-f5772a62ec52591ff6870b7e8ef32482371f22c6.tar.gz";
+            hash = "sha256-0BS1M4LbsXuBlq0S9Q3n8g0O8bn31UsL5RpsuxQgkZU=";
+          };
+
+          berkeley-softfloat-3 = pkgs.fetchurl {
+            url = "https://gitlab.com/qemu-project/berkeley-softfloat-3/-/archive/b64af41c3276f97f0e181920400ee056b9c88037/berkeley-softfloat-3-b64af41c3276f97f0e181920400ee056b9c88037.tar.gz";
+            hash = "sha256-+q6ImBTqaikvfKA9mzbmx+lbqypkd3gEiDzIIrjUh1c=";
+          };
+
+          berkeley-testfloat-3 = pkgs.fetchurl {
+            url = "https://gitlab.com/qemu-project/berkeley-testfloat-3/-/archive/e7af9751d9f9fd3b47911f51a5cfd08af256a9ab/berkeley-testfloat-3-e7af9751d9f9fd3b47911f51a5cfd08af256a9ab.tar.gz";
+            hash = "sha256-56CdUdx+lsuEIskZyF/Dgz1PeIVnY4yRYu9c19tZsd8=";
+          };
+
+          virglrenderer = pkgs.virglrenderer.overrideAttrs (_finalAttrs: prevAttrs: {
+            patches = (prevAttrs.patches or [ ]) ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [
+              ./nix/patches/virglrenderer-macos-kqueue-sync.patch
+            ];
+          });
 
           cargo-scarlet = pkgs.rustPlatform.buildRustPackage {
             pname = "cargo-scarlet";
@@ -220,18 +246,46 @@
           };
 
           qemu = pkgs.qemu.overrideAttrs (_finalAttrs: _prevAttrs: {
-            version = "10.2.2";
-            src = pkgs.fetchurl {
-              url = "https://download.qemu.org/qemu-10.2.2.tar.xz";
-              hash = "sha256-eEspb/KcFBeqcjI6vLLS6pq5dxck9Xfc14XDsE8h4XY=";
-            };
-            configureFlags = (_prevAttrs.configureFlags or [ ]) ++ [
+            version = "11.0.91-cocoa-virgl";
+            src = qemu-cocoa-virgl;
+            configureFlags = (_prevAttrs.configureFlags or [ ]) ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [
+              "--enable-cocoa"
+              "--enable-hvf"
+            ] ++ [
+              "--enable-opengl"
+              "--enable-virglrenderer"
               "--enable-vhost-user"
               "--disable-vhost-net"
+              "--target-list=aarch64-softmmu,riscv64-softmmu"
             ];
+            buildInputs = (_prevAttrs.buildInputs or [ ]) ++ [
+              pkgs.libepoxy
+              virglrenderer
+            ] ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [
+              # QEMU 11 AArch64 HVF EL2/SME2 needs Apple SDK 15+; the
+              # nixpkgs Darwin stdenv may otherwise default to SDK 14.4.
+              pkgs.apple-sdk_15
+            ];
+            nativeBuildInputs = (_prevAttrs.nativeBuildInputs or [ ]) ++ [ pkgs.git ];
             patches = (_prevAttrs.patches or [ ]) ++ [
               ./nix/patches/qemu-10-cocoa-retina-toggle.patch
             ];
+            postPatch = (_prevAttrs.postPatch or "") + ''
+              ${pkgs.gnutar}/bin/tar -xf ${keycodemapdb} -C subprojects
+              rm -rf subprojects/keycodemapdb
+              mv subprojects/keycodemapdb-f5772a62ec52591ff6870b7e8ef32482371f22c6 subprojects/keycodemapdb
+              rm -f subprojects/keycodemapdb.wrap
+              ${pkgs.gnutar}/bin/tar -xf ${berkeley-softfloat-3} -C subprojects
+              rm -rf subprojects/berkeley-softfloat-3
+              mv subprojects/berkeley-softfloat-3-b64af41c3276f97f0e181920400ee056b9c88037 subprojects/berkeley-softfloat-3
+              cp -R subprojects/packagefiles/berkeley-softfloat-3/. subprojects/berkeley-softfloat-3/
+              rm -f subprojects/berkeley-softfloat-3.wrap
+              ${pkgs.gnutar}/bin/tar -xf ${berkeley-testfloat-3} -C subprojects
+              rm -rf subprojects/berkeley-testfloat-3
+              mv subprojects/berkeley-testfloat-3-e7af9751d9f9fd3b47911f51a5cfd08af256a9ab subprojects/berkeley-testfloat-3
+              cp -R subprojects/packagefiles/berkeley-testfloat-3/. subprojects/berkeley-testfloat-3/
+              rm -f subprojects/berkeley-testfloat-3.wrap
+            '';
           });
 
           devPackages = [

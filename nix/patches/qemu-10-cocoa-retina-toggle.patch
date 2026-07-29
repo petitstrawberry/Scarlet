@@ -1,23 +1,19 @@
-From a3b23b946c85062ff6fbdcc3d1f10557715516e4 Mon Sep 17 00:00:00 2001
 From: Akihiko Odaki <odaki@rsg.ci.i.u-tokyo.ac.jp>
-Date: Wed, 4 Mar 2026 15:39:12 +0900
 Subject: [PATCH] ui/cocoa: Make Retina backing pixels optional
 
-Cocoa automatically zooms for a Retina display and makes
-the display blurry. Add a Cocoa display option that reports and sizes
-the guest display in backing pixels when explicitly requested.
+Cocoa otherwise exposes a one-pixel-per-point surface and scales it on a
+Retina display.  Add a Cocoa display option that sizes and reports the guest
+display in backing pixels when requested.  The OpenGL path must also opt its
+view into a high-resolution surface before creating the display context.
 
-This is based on upstream commit a3b23b946c85062ff6fbdcc3d1f10557715516e4.
----
- qapi/ui.json | 6 +++++-
- ui/cocoa.m   | 24 +++++++++++++++++++-----
- 2 files changed, 24 insertions(+), 6 deletions(-)
+This ports upstream commit a3b23b946c85062ff6fbdcc3d1f10557715516e4 to the
+QEMU 11 cocoa-virgl branch.  The filename is retained because flakes based on
+a Git worktree exclude untracked replacement files.
 
 diff --git a/qapi/ui.json b/qapi/ui.json
-index 452754b3c7..bc110d5301 100644
 --- a/qapi/ui.json
 +++ b/qapi/ui.json
-@@ -1446,6 +1446,9 @@
+@@ -1448,6 +1448,9 @@
  # @zoom-interpolation: Apply interpolation to smooth output when
  #     zoom-to-fit is enabled.  Defaults to "off".  (Since 9.0)
  #
@@ -27,7 +23,7 @@ index 452754b3c7..bc110d5301 100644
  # Since: 7.0
  ##
  { 'struct': 'DisplayCocoa',
-@@ -1454,7 +1457,8 @@
+@@ -1456,5 +1459,6 @@
        '*full-grab': 'bool',
        '*swap-opt-cmd': 'bool',
        '*zoom-to-fit': 'bool',
@@ -35,27 +31,27 @@ index 452754b3c7..bc110d5301 100644
 +      '*zoom-interpolation': 'bool',
 +      '*retina': 'bool'
    } }
- 
- ##
+
 diff --git a/ui/cocoa.m b/ui/cocoa.m
-index 23b7a736d7..27f01308ab 100644
 --- a/ui/cocoa.m
 +++ b/ui/cocoa.m
-@@ -102,6 +102,7 @@ static QKbdState *kbd;
+@@ -130,6 +130,7 @@ static QKbdState *kbd;
+ static int cursor_hide = 1;
+ static int left_command_key_enabled = 1;
  static bool swap_opt_cmd;
- static bool left_command_key_enabled = true;
- static bool allow_events;
 +static bool cocoa_retina;
- 
+
  static CGInterpolationQuality zoom_interpolation = kCGInterpolationNone;
- 
-@@ -627,7 +628,13 @@ - (void) resizeWindow
+ static NSTextField *pauseLabel;
+@@ -548,10 +549,13 @@
      [[self window] setContentAspectRatio:NSMakeSize(screen.width, screen.height)];
- 
+
      if (!([[self window] styleMask] & NSWindowStyleMaskResizable)) {
--        [[self window] setContentSize:NSMakeSize(screen.width, screen.height)];
+-        CGFloat width = screen.width / [[self window] backingScaleFactor];
+-        CGFloat height = screen.height / [[self window] backingScaleFactor];
 +        NSSize contentSize = NSMakeSize(screen.width, screen.height);
-+
+
+-        [[self window] setContentSize:NSMakeSize(width, height)];
 +        if (cocoa_retina) {
 +            contentSize.width /= [[self window] backingScaleFactor];
 +            contentSize.height /= [[self window] backingScaleFactor];
@@ -64,15 +60,15 @@ index 23b7a736d7..27f01308ab 100644
          [[self window] center];
      } else if ([[self window] styleMask] & NSWindowStyleMaskFullScreen) {
          [[self window] setContentSize:[self fixAspectRatio:[self screenSafeAreaSize]]];
-@@ -656,6 +663,7 @@ - (void) updateUIInfoLocked
+@@ -574,6 +579,7 @@
      /* Must be called with the BQL, i.e. via updateUIInfo */
      NSSize frameSize;
      QemuUIInfo info;
 +    CGFloat backingScaleFactor = 1.0;
- 
+
      if (!qemu_console_is_graphic(dcl.con)) {
          return;
-@@ -664,6 +672,7 @@ - (void) updateUIInfoLocked
+@@ -582,6 +588,7 @@
      if ([self window]) {
          NSDictionary *description = [[[self window] screen] deviceDescription];
          CGDirectDisplayID display = [[description objectForKey:@"NSScreenNumber"] unsignedIntValue];
@@ -80,27 +76,28 @@ index 23b7a736d7..27f01308ab 100644
          NSSize screenSize = [[[self window] screen] frame].size;
          CGSize screenPhysicalSize = CGDisplayScreenSize(display);
          bool isFullscreen = ([[self window] styleMask] & NSWindowStyleMaskFullScreen) != 0;
-@@ -685,8 +694,8 @@ - (void) updateUIInfoLocked
- 
+@@ -609,8 +616,8 @@
+
      info.xoff = 0;
      info.yoff = 0;
--    info.width = frameSize.width;
--    info.height = frameSize.height;
+-    info.width = frameSize.width * [[self window] backingScaleFactor];
+-    info.height = frameSize.height * [[self window] backingScaleFactor];
 +    info.width = frameSize.width * (cocoa_retina ? backingScaleFactor : 1.0);
 +    info.height = frameSize.height * (cocoa_retina ? backingScaleFactor : 1.0);
- 
-     dpy_set_ui_info(dcl.con, &info, TRUE);
+
+     qemu_console_set_ui_info(dcl.con, &info, TRUE);
  }
-@@ -2132,6 +2141,10 @@ static void cocoa_display_init(DisplayState *ds, DisplayOptions *opts)
-         zoom_interpolation = kCGInterpolationLow;
-     }
- 
+@@ -2132,8 +2139,13 @@ static void cocoa_display_init(DisplayState *ds, DisplayOptions *opts)
+     QemuCocoaAppController *controller = [[QemuCocoaAppController alloc] init];
+     [NSApp setDelegate:controller];
+
 +    if (opts->u.cocoa.has_retina) {
 +        cocoa_retina = opts->u.cocoa.retina;
 +    }
 +
-     create_initial_menus();
-     /*
-      * Create the menu entries which depend on QEMU state (for consoles
--- 
-2.53.0
+ #ifdef CONFIG_OPENGL
+     if (display_opengl) {
++        [cocoaView setWantsBestResolutionOpenGLSurface:cocoa_retina];
+         cocoa_gl = cocoa_gl_create(cocoaView, &dcl_gl_ops, &error_fatal);
+         for (i = 0; (con = qemu_console_lookup_by_index(i)) != NULL; i++) {
+             if (qemu_console_is_graphic(con)) {

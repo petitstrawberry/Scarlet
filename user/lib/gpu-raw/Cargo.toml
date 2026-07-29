@@ -1,7 +1,7 @@
 [package]
-name = "framebuffer"
+name = "gpu-raw"
 version = "0.16.0"
-edition = "2021"
+edition = "2024"
 
 [features]
 default = ["scarlet-std"]
@@ -12,5 +12,5 @@ scarlet-os = { path = "../scarlet-os", default-features = false, features = ["st
 scarlet-std = { path = "../std", optional = true }
 
 [lib]
-name = "framebuffer"
+name = "gpu_raw"
 path = "src/lib.rs"

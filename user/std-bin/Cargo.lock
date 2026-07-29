@@ -648,6 +648,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "framebuffer"
+version = "0.16.0"
+dependencies = [
+ "scarlet-os 0.16.0",
+]
+
+[[package]]
 name = "futures-core"
 version = "0.3.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -700,6 +707,13 @@ dependencies = [
  "libc",
  "r-efi",
  "wasip2",
+]
+
+[[package]]
+name = "gpu-raw"
+version = "0.16.0"
+dependencies = [
+ "scarlet-os 0.16.0",
 ]
 
 [[package]]
@@ -1775,7 +1789,9 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "csv",
+ "framebuffer",
  "httparse",
+ "libm",
  "pulldown-cmark",
  "ratatui",
  "regex",
@@ -1788,6 +1804,7 @@ dependencies = [
  "scarlet-ui-macros",
  "serde",
  "serde_json",
+ "sgfx",
  "symphonia-codec-aac",
  "symphonia-core",
  "url",
@@ -1929,6 +1946,15 @@ dependencies = [
  "serde",
  "serde_core",
  "zmij",
+]
+
+[[package]]
+name = "sgfx"
+version = "0.16.0"
+dependencies = [
+ "framebuffer",
+ "gpu-raw",
+ "scarlet-os 0.16.0",
 ]
 
 [[package]]

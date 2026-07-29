@@ -32,6 +32,8 @@ pub mod display_commands {
     pub const DISPLAY_GET_SWAPCHAIN: u32 = 0x5003;
     /// Present one direct scanout buffer.
     pub const DISPLAY_PRESENT_BUFFER: u32 = 0x5004;
+    /// Present one GPU image capability through this display device.
+    pub const DISPLAY_PRESENT_IMAGE: u32 = 0x5005;
 }
 
 /// 32-bit RGBA pixel layout.
@@ -124,6 +126,29 @@ pub struct DisplayPresentBuffer {
     /// User pointer to `damage_count` [`DisplayPresentRegion`] entries.
     pub damage_ptr: usize,
 }
+
+/// Argument for `DISPLAY_PRESENT_IMAGE`.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DisplayPresentImage {
+    /// GPU image capability handle owned by the current task.
+    pub image_handle: u32,
+    /// `DISPLAY_PRESENT_IMAGE_FLAG_*` values.
+    pub flags: u32,
+    /// Left edge in pixels when not presenting the full image.
+    pub x: u32,
+    /// Top edge in pixels when not presenting the full image.
+    pub y: u32,
+    /// Region width in pixels when not presenting the full image.
+    pub width: u32,
+    /// Region height in pixels when not presenting the full image.
+    pub height: u32,
+}
+
+/// Present the full GPU image and require zero region fields.
+pub const DISPLAY_PRESENT_IMAGE_FLAG_FULL_FRAME: u32 = 1 << 0;
+/// All currently defined GPU image presentation flags.
+pub const DISPLAY_PRESENT_IMAGE_FLAGS_VALID: u32 = DISPLAY_PRESENT_IMAGE_FLAG_FULL_FRAME;
 
 #[derive(Debug, Clone)]
 struct DisplayBackingInfo {
@@ -418,6 +443,72 @@ impl DisplayCharDevice {
         Ok(0)
     }
 
+    fn handle_present_image(&self, arg: usize) -> Result<i32, &'static str> {
+        if arg == 0 {
+            return Err("Invalid display image present pointer");
+        }
+        let task = crate::task::mytask().ok_or("Display image present has no current task")?;
+        let mut request = core::mem::MaybeUninit::<DisplayPresentImage>::uninit();
+        // SAFETY: the byte slice covers the complete uninitialized request,
+        // which copy_from_user initializes before assume_init.
+        let bytes = unsafe {
+            core::slice::from_raw_parts_mut(
+                request.as_mut_ptr() as *mut u8,
+                core::mem::size_of::<DisplayPresentImage>(),
+            )
+        };
+        copy_from_user(&task, arg, bytes)
+            .map_err(|_| "Failed to copy display image present from user")?;
+        // SAFETY: copy_from_user initialized every byte of the request.
+        let request = unsafe { request.assume_init() };
+        if request.image_handle == 0 || request.flags & !DISPLAY_PRESENT_IMAGE_FLAGS_VALID != 0 {
+            return Err("Display image present request is invalid");
+        }
+        let full_frame = request.flags & DISPLAY_PRESENT_IMAGE_FLAG_FULL_FRAME != 0;
+        if full_frame
+            && (request.x != 0 || request.y != 0 || request.width != 0 || request.height != 0)
+        {
+            return Err("Full-frame display image present has region fields");
+        }
+        if !full_frame && (request.width == 0 || request.height == 0) {
+            return Err("Display image present region is empty");
+        }
+        let image_owner = task
+            .handle_table
+            .get_arc_clone(request.image_handle)
+            .ok_or("Display image handle is invalid")?;
+        let image = image_owner
+            .as_gpu()
+            .and_then(crate::device::gpu::GpuObject::as_image)
+            .ok_or("Display image handle is not a GPU image")?;
+        let resource = image
+            .display_resource()
+            .ok_or("GPU image is not presentable")?;
+        let region = if full_frame {
+            resource.full_region()
+        } else {
+            if request.x >= resource.width() || request.y >= resource.height() {
+                return Err("Display image region lies outside the image");
+            }
+            DisplayRegion::new(
+                request.x,
+                request.y,
+                request.width.min(resource.width() - request.x),
+                request.height.min(resource.height() - request.y),
+            )
+        };
+        let device = self
+            .device_manager()
+            .get_device(self.fb_resource.source_device_id)
+            .ok_or("Display source device not found")?;
+        let graphics = device
+            .as_graphics_device()
+            .ok_or("Display source device is not graphics-capable")?;
+        // `image_owner` remains live until this synchronous presentation returns.
+        graphics.present_gpu_resource_region(resource, region)?;
+        Ok(0)
+    }
+
     fn present_region(&self, region: DisplayRegion) -> Result<(), &'static str> {
         let device = self
             .device_manager()
@@ -551,6 +642,7 @@ impl ControlOps for DisplayCharDevice {
             DISPLAY_PRESENT_REGION => self.handle_present_region(arg),
             DISPLAY_GET_SWAPCHAIN => self.handle_get_swapchain(arg),
             DISPLAY_PRESENT_BUFFER => self.handle_present_buffer(arg),
+            DISPLAY_PRESENT_IMAGE => self.handle_present_image(arg),
             _ => Err("Unsupported display control command"),
         }
     }
@@ -563,6 +655,7 @@ impl ControlOps for DisplayCharDevice {
             (DISPLAY_PRESENT_REGION, "Present display surface region"),
             (DISPLAY_GET_SWAPCHAIN, "Get direct scanout swapchain"),
             (DISPLAY_PRESENT_BUFFER, "Present direct scanout buffer"),
+            (DISPLAY_PRESENT_IMAGE, "Present a GPU image capability"),
         ]
     }
 }

@@ -153,6 +153,7 @@ impl HandleTable {
                 HandleType::IpcChannel
             }
             KernelObject::Timer(_) => HandleType::IpcChannel,
+            KernelObject::Gpu(_) => HandleType::Regular,
             #[cfg(feature = "hypervisor")]
             KernelObject::HypervisorVm(_) => HandleType::Regular,
             #[cfg(feature = "hypervisor")]
@@ -440,6 +441,14 @@ impl HandleTable {
                 handle_role,
                 readable,
                 writable,
+            )),
+            KernelObject::Gpu(gpu) => Some(introspection::KernelObjectInfo::for_gpu(
+                handle_role,
+                readable,
+                writable,
+                gpu.as_memory_mappable().is_some(),
+                gpu.as_selectable().is_some(),
+                gpu.as_control_ops().is_some(),
             )),
             #[cfg(feature = "hypervisor")]
             KernelObject::HypervisorVm(_) => None,

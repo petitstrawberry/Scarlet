@@ -93,7 +93,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "gpu"
+name = "gpu-raw"
 version = "0.16.0"
 dependencies = [
  "scarlet-std",
@@ -377,6 +377,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "sgfx"
+version = "0.16.0"
+dependencies = [
+ "framebuffer",
+ "gpu-raw",
+ "scarlet-std",
+]
+
+[[package]]
 name = "spin"
 version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -457,7 +466,7 @@ name = "userprogram"
 version = "0.16.0"
 dependencies = [
  "framebuffer",
- "gpu",
+ "libm",
  "sas-client",
  "sas-protocol",
  "sbus",
@@ -470,6 +479,7 @@ dependencies = [
  "scpm",
  "serde",
  "serde-json-core",
+ "sgfx",
  "sws-client",
  "sws-protocol",
  "vm-fdt",

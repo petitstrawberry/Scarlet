@@ -140,6 +140,9 @@ pub fn sys_memory_map(trapframe: &mut Trapframe) -> usize {
     let is_shared = (flags & MAP_SHARED) != 0;
     let is_map_fixed = (flags & MAP_FIXED) != 0;
     let is_map_private_flag = (flags & MAP_PRIVATE) != 0;
+    if is_map_private_flag && !is_shared && !memory_mappable.supports_private_mmap() {
+        return usize::MAX;
+    }
 
     // Determine final address
     let final_vaddr = if vaddr == 0 {

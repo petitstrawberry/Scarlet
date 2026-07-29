@@ -48,6 +48,12 @@ pub enum KernelObjectType {
     Socket = 7,
     /// Shared memory for IPC
     SharedMemory = 8,
+    /// Counter for event notification
+    Counter = 9,
+    /// Timer object
+    Timer = 10,
+    /// GPU child capability object
+    Gpu = 11,
     /// Unknown or unsupported type
     Unknown = 0,
 }

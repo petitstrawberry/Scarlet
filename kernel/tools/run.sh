@@ -152,7 +152,7 @@ qemu-system-riscv64 \
     -netdev user,id=net0,hostfwd=tcp::8080-:8080,hostfwd=udp::8080-:8080,hostfwd=udp::1234-:1234 \
     -device virtio-net-pci,netdev=net0,bus=pcie.0 \
     -device virtio-keyboard-device,bus=virtio-mmio-bus.3 \
-    -device virtio-mouse-device,bus=virtio-mmio-bus.4,wheel-axis=true \
+    -device virtio-mouse-device,bus=virtio-mmio-bus.4 \
     -device virtio-rng-device,bus=virtio-mmio-bus.5 \
     -device qemu-xhci,id=xhci,bus=pcie.0 \
     -device usb-kbd,bus=xhci.0 \

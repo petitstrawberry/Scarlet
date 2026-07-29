@@ -12,8 +12,7 @@ use crate::{
     arch::io_mb,
     device::{
         Device,
-        gpu::{GpuCharDevice, GpuDevice},
-        graphics::GraphicsDevice,
+        gpu::{GpuBackend, GpuControlDevice},
         manager::{DeviceManager, DriverPriority},
         platform::{
             PlatformDeviceDriver, PlatformDeviceInfo, resource::PlatformDeviceResourceType,
@@ -1199,10 +1198,10 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
             let graphics_dev: Arc<dyn Device> = dev.clone();
             DeviceManager::get_manager().register_device(graphics_dev);
 
-            let gpu_backend: Arc<dyn GpuDevice> = dev.clone();
-            let display: Arc<dyn GraphicsDevice> = dev.clone();
-            let gpu_char_dev: Arc<dyn Device> = Arc::new(GpuCharDevice::new(gpu_backend, display));
-            DeviceManager::get_manager().register_device_with_name(gpu_name, gpu_char_dev);
+            let gpu_backend: Arc<dyn GpuBackend> =
+                Arc::new(crate::drivers::graphics::virtio_gpu::VirtioGpuBackend::from_device(&dev));
+            let gpu_control: Arc<dyn Device> = Arc::new(GpuControlDevice::new(gpu_backend));
+            DeviceManager::get_manager().register_device_with_name(gpu_name, gpu_control);
         }
         VirtioDeviceType::Input => {
             crate::early_println!("[Virtio] Detected Virtio Input Device at {:#x}", base_addr);

@@ -38,8 +38,8 @@ name = "fb_test"
 path = "src/fb_test.rs"
 
 [[bin]]
-name = "gpu_probe"
-path = "src/gpu_probe.rs"
+name = "sgfx_probe"
+path = "src/sgfx_probe.rs"
 
 [[bin]]
 name = "dcp_flip_test"
@@ -174,7 +174,7 @@ path = "src/sas/main.rs"
 scarlet-std = { path = "../lib/std", features = ["alloc_debug"] }
 scpm = { path = "../lib/scpm" }
 framebuffer = { path = "../lib/framebuffer" }
-gpu = { path = "../lib/gpu" }
+sgfx = { path = "../lib/sgfx" }
 sws-protocol = { path = "../lib/sws-protocol" }
 sws-client = { path = "../lib/sws-client" }
 scarlet-os = { path = "../lib/scarlet-os" }
@@ -188,6 +188,7 @@ sas-client = { path = "../lib/sas-client", default-features = false, features = 
 vm-fdt = { version = "0.3", default-features = false, features = ["alloc"] }
 serde = { version = "1.0", default-features = false, features = ["alloc", "derive"] }
 serde-json-core = { package = "serde-json-core", version = "0.6", default-features = false }
+libm = { version = "0.2", default-features = false }
 
 [patch."https://github.com/petitstrawberry/Scarlet"]
 scarlet-abi = { path = "../lib/scarlet-abi" }

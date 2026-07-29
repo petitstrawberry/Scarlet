@@ -12,8 +12,7 @@ use alloc::vec;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::device::Device;
-use crate::device::gpu::{GpuCharDevice, GpuDevice};
-use crate::device::graphics::GraphicsDevice;
+use crate::device::gpu::{GpuBackend, GpuControlDevice};
 use crate::device::manager::{DeviceManager, DriverPriority};
 use crate::device::pci::config::{self, PciConfig, capability, command, status, vendor};
 use crate::device::pci::device::PciDeviceInfo;
@@ -431,10 +430,10 @@ fn probe_virtio_pci(device: &PciDeviceInfo) -> Result<(), &'static str> {
             let graphics_dev: Arc<dyn Device> = dev.clone();
             DeviceManager::get_manager().register_device(graphics_dev);
 
-            let gpu_backend: Arc<dyn GpuDevice> = dev.clone();
-            let display: Arc<dyn GraphicsDevice> = dev.clone();
-            let gpu_char_dev: Arc<dyn Device> = Arc::new(GpuCharDevice::new(gpu_backend, display));
-            DeviceManager::get_manager().register_device_with_name(gpu_name.clone(), gpu_char_dev);
+            let gpu_backend: Arc<dyn GpuBackend> =
+                Arc::new(crate::drivers::graphics::virtio_gpu::VirtioGpuBackend::from_device(&dev));
+            let gpu_control: Arc<dyn Device> = Arc::new(GpuControlDevice::new(gpu_backend));
+            DeviceManager::get_manager().register_device_with_name(gpu_name.clone(), gpu_control);
             println!("[virtio-pci] Registered GPU device {}", gpu_name);
             Ok(())
         }

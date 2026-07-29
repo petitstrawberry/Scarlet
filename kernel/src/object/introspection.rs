@@ -41,6 +41,8 @@ pub enum KernelObjectType {
     Counter = 9,
     /// Timer object
     Timer = 10,
+    /// GPU child capability object
+    Gpu = 11,
     /// Unknown or unsupported type
     Unknown = 0,
 }
@@ -208,6 +210,34 @@ impl KernelObjectInfo {
                 event_ops: false,
                 clone_ops: false, // Uses Arc::clone directly
                 reserved: [false; 3],
+            },
+            handle_role,
+            access_mode: Self::encode_access_mode(readable, writable),
+        }
+    }
+
+    /// Create info for a GPU child KernelObject.
+    ///
+    /// The three reserved capability bits are assigned, in order, to mapping,
+    /// selectable readiness, and control because this ABI predates dedicated
+    /// fields for those optional capabilities.
+    pub fn for_gpu(
+        handle_role: HandleRole,
+        readable: bool,
+        writable: bool,
+        memory_mapping: bool,
+        selectable: bool,
+        control: bool,
+    ) -> Self {
+        Self {
+            object_type: KernelObjectType::Gpu,
+            capabilities: ObjectCapabilities {
+                stream_ops: false,
+                file_ops: false,
+                pipe_ops: false,
+                event_ops: false,
+                clone_ops: false,
+                reserved: [memory_mapping, selectable, control],
             },
             handle_role,
             access_mode: Self::encode_access_mode(readable, writable),
