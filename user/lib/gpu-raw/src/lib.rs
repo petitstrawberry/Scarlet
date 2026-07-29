@@ -72,6 +72,8 @@ pub mod commands {
     pub const GPU_CONTEXT_ATTACH_IMAGE: u32 = 0x4760;
     /// Attach a GPU buffer to an execution context.
     pub const GPU_CONTEXT_ATTACH_BUFFER: u32 = 0x4761;
+    /// Upload BGRA pixels into an image attached to an execution context.
+    pub const GPU_CONTEXT_UPLOAD_IMAGE_BGRA: u32 = 0x4762;
 }
 
 /// ABI version accepted by [`GpuQueryInfo`].
@@ -100,8 +102,15 @@ pub const GPU_IMAGE_FORMAT_BGRA8_UNORM: u32 = 1;
 pub const GPU_IMAGE_USAGE_RENDER_TARGET: u32 = 1 << 0;
 /// Image usage permitting the image to be selected for display scanout.
 pub const GPU_IMAGE_USAGE_PRESENTABLE: u32 = 1 << 1;
+/// Image usage permitting the image to be sampled by GPU commands.
+pub const GPU_IMAGE_USAGE_SAMPLED: u32 = 1 << 2;
+/// Image usage permitting BGRA pixel transfers into the image.
+pub const GPU_IMAGE_USAGE_TRANSFER_DST: u32 = 1 << 3;
 /// All currently defined GPU image usage flags.
-pub const GPU_IMAGE_USAGE_VALID: u32 = GPU_IMAGE_USAGE_RENDER_TARGET | GPU_IMAGE_USAGE_PRESENTABLE;
+pub const GPU_IMAGE_USAGE_VALID: u32 = GPU_IMAGE_USAGE_RENDER_TARGET
+    | GPU_IMAGE_USAGE_PRESENTABLE
+    | GPU_IMAGE_USAGE_SAMPLED
+    | GPU_IMAGE_USAGE_TRANSFER_DST;
 
 /// The GPU backend is not available for control.
 pub const GPU_DEVICE_STATE_UNAVAILABLE: u32 = 0;
@@ -122,6 +131,8 @@ pub const GPU_EXECUTION_SUPPORT_QUEUE: u32 = 1 << 2;
 pub const GPU_EXECUTION_SUPPORT_TIMELINE: u32 = 1 << 3;
 /// Generic presentation operations are available.
 pub const GPU_EXECUTION_SUPPORT_PRESENTATION: u32 = 1 << 4;
+/// Generic image upload operations are available.
+pub const GPU_EXECUTION_SUPPORT_IMAGE_UPLOAD: u32 = 1 << 5;
 
 /// Fixed byte capacity of an opaque backend or dialect identifier.
 pub const GPU_BACKEND_ID_BYTES: usize = 32;
@@ -131,6 +142,8 @@ pub const GPU_BACKEND_INFO_BYTES: usize = 64;
 pub const GPU_DIALECT_INFO_BYTES: usize = 256;
 /// Maximum command stream length accepted by the generic queue ABI.
 pub const GPU_MAX_OPAQUE_COMMAND_SIZE: u32 = 64 * 1024;
+/// Maximum BGRA pixel payload accepted by one image upload request.
+pub const GPU_MAX_IMAGE_UPLOAD_SIZE: u32 = 64 * 1024 * 1024;
 
 /// Submit flag requesting a timeline update after successful backend completion.
 pub const GPU_QUEUE_SUBMIT_FLAG_SIGNAL_TIMELINE: u32 = 1 << 0;
@@ -173,11 +186,30 @@ impl GpuCreateImage {
     ///
     /// A zeroed request for the current ABI version.
     pub const fn new(width: u32, height: u32) -> Self {
+        Self::new_with_usage(
+            width,
+            height,
+            GPU_IMAGE_USAGE_RENDER_TARGET | GPU_IMAGE_USAGE_PRESENTABLE,
+        )
+    }
+
+    /// Create a BGRA8 image request with explicit generic usage flags.
+    ///
+    /// # Arguments
+    ///
+    /// * `width` - Requested non-zero image width in pixels.
+    /// * `height` - Requested non-zero image height in pixels.
+    /// * `usage` - Requested `GPU_IMAGE_USAGE_*` flags.
+    ///
+    /// # Returns
+    ///
+    /// A zeroed request for the current ABI version.
+    pub const fn new_with_usage(width: u32, height: u32, usage: u32) -> Self {
         Self {
             abi_version: GPU_ABI_VERSION,
             result: GPU_RESULT_SUCCESS,
             format: GPU_IMAGE_FORMAT_BGRA8_UNORM,
-            usage: GPU_IMAGE_USAGE_VALID,
+            usage,
             width,
             height,
             image_handle: 0,
@@ -313,6 +345,108 @@ impl GpuContextAttachImage {
             command_resource_token: 0,
             reserved: 0,
         }
+    }
+}
+
+/// Typed destination rectangle for [`GpuContext::upload_image_bgra`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GpuImageBgraRect {
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+}
+
+impl GpuImageBgraRect {
+    /// Create a destination BGRA image rectangle.
+    ///
+    /// # Arguments
+    ///
+    /// * `x` - Destination x coordinate in pixels.
+    /// * `y` - Destination y coordinate in pixels.
+    /// * `width` - Rectangle width in pixels.
+    /// * `height` - Rectangle height in pixels.
+    ///
+    /// # Returns
+    ///
+    /// A typed rectangle validated by the kernel against the destination image.
+    pub const fn new(x: u32, y: u32, width: u32, height: u32) -> Self {
+        Self {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+}
+
+/// Fixed-width request and response for [`commands::GPU_CONTEXT_UPLOAD_IMAGE_BGRA`].
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct GpuContextUploadImageBgra {
+    /// ABI version supplied by userspace and echoed by the kernel.
+    pub abi_version: u32,
+    /// Explicit `GPU_RESULT_*` result code.
+    pub result: u32,
+    /// Existing GPU image child handle attached to the context.
+    pub image_handle: u32,
+    /// Reserved for ABI-compatible future use. Must be zero.
+    pub reserved: u32,
+    /// Userspace address of source BGRA pixels.
+    pub source_ptr: u64,
+    /// Length of the source userspace byte range.
+    pub source_length: u64,
+    /// Source row stride in bytes.
+    pub source_stride: u32,
+    /// Destination image x coordinate in pixels.
+    pub dst_x: u32,
+    /// Destination image y coordinate in pixels.
+    pub dst_y: u32,
+    /// Rectangle width in pixels.
+    pub width: u32,
+    /// Rectangle height in pixels.
+    pub height: u32,
+    /// Reserved for ABI-compatible future use. Must be zero.
+    pub reserved2: u64,
+}
+
+impl GpuContextUploadImageBgra {
+    /// Create a request borrowing one safe BGRA source slice for the control call.
+    ///
+    /// # Arguments
+    ///
+    /// * `image_handle` - Image capability handle attached to the context.
+    /// * `pixels` - Source BGRA pixel bytes.
+    /// * `source_stride` - Source row stride in bytes.
+    /// * `rect` - Destination rectangle in the image.
+    ///
+    /// # Returns
+    ///
+    /// A fixed-width upload request, or an error when the source slice cannot
+    /// contain the requested non-empty strided rectangle.
+    pub fn new(
+        image_handle: u32,
+        pixels: &[u8],
+        source_stride: u32,
+        rect: GpuImageBgraRect,
+    ) -> HandleResult<Self> {
+        validate_bgra_upload_pixels(pixels, source_stride, rect)?;
+        let source_length =
+            u64::try_from(pixels.len()).map_err(|_| HandleError::InvalidParameter)?;
+        Ok(Self {
+            abi_version: GPU_ABI_VERSION,
+            result: GPU_RESULT_SUCCESS,
+            image_handle,
+            reserved: 0,
+            source_ptr: pixels.as_ptr() as usize as u64,
+            source_length,
+            source_stride,
+            dst_x: rect.x,
+            dst_y: rect.y,
+            width: rect.width,
+            height: rect.height,
+            reserved2: 0,
+        })
     }
 }
 
@@ -1022,9 +1156,34 @@ impl Gpu {
     /// An owning image capability wrapper or a handle error.
     pub fn create_image(&self, width: u32, height: u32) -> HandleResult<GpuImage> {
         let mut request = GpuCreateImage::new(width, height);
+        self.create_image_request(&mut request)
+    }
+
+    /// Create a BGRA8 GPU image with explicit generic usage flags.
+    ///
+    /// # Arguments
+    ///
+    /// * `width` - Requested non-zero image width in pixels.
+    /// * `height` - Requested non-zero image height in pixels.
+    /// * `usage` - `GPU_IMAGE_USAGE_*` flags for the image.
+    ///
+    /// # Returns
+    ///
+    /// An owning image capability wrapper or a handle error.
+    pub fn create_image_with_usage(
+        &self,
+        width: u32,
+        height: u32,
+        usage: u32,
+    ) -> HandleResult<GpuImage> {
+        let mut request = GpuCreateImage::new_with_usage(width, height, usage);
+        self.create_image_request(&mut request)
+    }
+
+    fn create_image_request(&self, request: &mut GpuCreateImage) -> HandleResult<GpuImage> {
         self.file
             .as_handle()
-            .control(commands::GPU_CREATE_IMAGE, &mut request as *mut _ as usize)?;
+            .control(commands::GPU_CREATE_IMAGE, request as *mut _ as usize)?;
         result_to_handle_error(request.result)?;
         Ok(GpuImage {
             handle: adopt_child_handle(request.image_handle)?,
@@ -1208,6 +1367,40 @@ impl GpuContext {
             return Err(HandleError::SystemError(-1));
         }
         Ok(request.command_resource_token)
+    }
+
+    /// Upload a strided BGRA source rectangle into an image attached to this context.
+    ///
+    /// The kernel validates the destination bounds and image usage, copies the
+    /// source into kernel-owned backing, and synchronously transfers that backing
+    /// to the backend. The source slice is never retained after this call returns.
+    ///
+    /// # Arguments
+    ///
+    /// * `image` - Image capability previously attached with [`GpuContext::attach_image`].
+    /// * `pixels` - Source BGRA pixel bytes.
+    /// * `source_stride` - Source row stride in bytes.
+    /// * `rect` - Destination rectangle in the image.
+    ///
+    /// # Returns
+    ///
+    /// Nothing after synchronous upload completion, or a handle error.
+    pub fn upload_image_bgra(
+        &self,
+        image: &GpuImage,
+        pixels: &[u8],
+        source_stride: u32,
+        rect: GpuImageBgraRect,
+    ) -> HandleResult<()> {
+        let image_handle =
+            u32::try_from(image.handle.as_raw()).map_err(|_| HandleError::InvalidHandle)?;
+        let mut request =
+            GpuContextUploadImageBgra::new(image_handle, pixels, source_stride, rect)?;
+        self.handle.control(
+            commands::GPU_CONTEXT_UPLOAD_IMAGE_BGRA,
+            &mut request as *mut _ as usize,
+        )?;
+        result_to_handle_error(request.result)
     }
 
     /// Return the effective backend-defined dialect index.
@@ -1618,6 +1811,39 @@ fn result_to_handle_error(result: u32) -> HandleResult<()> {
     }
 }
 
+fn validate_bgra_upload_pixels(
+    pixels: &[u8],
+    source_stride: u32,
+    rect: GpuImageBgraRect,
+) -> HandleResult<()> {
+    if rect.width == 0 || rect.height == 0 {
+        return Err(HandleError::InvalidParameter);
+    }
+    let row_bytes = rect
+        .width
+        .checked_mul(4)
+        .ok_or(HandleError::InvalidParameter)?;
+    if source_stride < row_bytes {
+        return Err(HandleError::InvalidParameter);
+    }
+    let height = usize::try_from(rect.height).map_err(|_| HandleError::InvalidParameter)?;
+    let row_bytes = usize::try_from(row_bytes).map_err(|_| HandleError::InvalidParameter)?;
+    let source_stride =
+        usize::try_from(source_stride).map_err(|_| HandleError::InvalidParameter)?;
+    let required_source_len = height
+        .checked_sub(1)
+        .and_then(|rows| rows.checked_mul(source_stride))
+        .and_then(|offset| offset.checked_add(row_bytes))
+        .ok_or(HandleError::InvalidParameter)?;
+    let copy_size = row_bytes
+        .checked_mul(height)
+        .ok_or(HandleError::InvalidParameter)?;
+    if pixels.len() < required_source_len || copy_size > GPU_MAX_IMAGE_UPLOAD_SIZE as usize {
+        return Err(HandleError::InvalidParameter);
+    }
+    Ok(())
+}
+
 const _: [(); 296] = [(); core::mem::size_of::<GpuQueryDialect>()];
 const _: [(); 48] = [(); core::mem::size_of::<GpuCreateContext>()];
 const _: [(); 32] = [(); core::mem::size_of::<GpuContextInfo>()];
@@ -1630,3 +1856,4 @@ const _: [(); 32] = [(); core::mem::size_of::<GpuContextAttachImage>()];
 const _: [(); 48] = [(); core::mem::size_of::<GpuCreateBuffer>()];
 const _: [(); 40] = [(); core::mem::size_of::<GpuBufferInfo>()];
 const _: [(); 32] = [(); core::mem::size_of::<GpuContextAttachBuffer>()];
+const _: [(); 64] = [(); core::mem::size_of::<GpuContextUploadImageBgra>()];
