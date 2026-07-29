@@ -24,6 +24,7 @@ mod virgl;
 pub struct Capabilities {
     rendering: bool,
     presentation: bool,
+    image_upload: bool,
 }
 
 impl Capabilities {
@@ -43,6 +44,15 @@ impl Capabilities {
     /// `true` when presentation is available.
     pub const fn supports_presentation(&self) -> bool {
         self.presentation
+    }
+
+    /// Return whether sampled BGRA textures can be uploaded and composed.
+    ///
+    /// # Returns
+    ///
+    /// `true` when sampled texture upload and composition are available.
+    pub const fn supports_image_upload(&self) -> bool {
+        self.image_upload
     }
 }
 
@@ -112,6 +122,56 @@ impl Context {
         })
     }
 
+    /// Create a sampled BGRA texture for subsequent composition passes.
+    ///
+    /// # Arguments
+    ///
+    /// * `width` - Non-zero texture width in pixels.
+    /// * `height` - Non-zero texture height in pixels.
+    ///
+    /// # Returns
+    ///
+    /// A texture that may be uploaded through this context and sampled by a
+    /// [`CompositionPass`], or a handle error.
+    pub fn create_sampled_bgra_texture(&self, width: u32, height: u32) -> HandleResult<Texture> {
+        Ok(Texture {
+            backend: self.backend.create_sampled_bgra_texture(width, height)?,
+            width,
+            height,
+        })
+    }
+
+    /// Upload one strided BGRA damage rectangle into a sampled texture.
+    ///
+    /// Source rows begin at the first byte of `pixels`; `damage` specifies the
+    /// destination rectangle in the texture using top-left pixel coordinates.
+    /// The source slice must contain one `damage.width()`-pixel BGRA row for
+    /// every row in `damage` using `source_stride` bytes between row starts.
+    ///
+    /// # Arguments
+    ///
+    /// * `texture` - Texture created by this context.
+    /// * `pixels` - BGRA source rectangle bytes.
+    /// * `source_stride` - Source row stride in bytes.
+    /// * `damage` - Destination texture rectangle in top-left pixel coordinates.
+    ///
+    /// # Returns
+    ///
+    /// Success after the synchronous GPU upload, or a handle error.
+    pub fn upload_texture_bgra(
+        &self,
+        texture: &Texture,
+        pixels: &[u8],
+        source_stride: u32,
+        damage: PixelRect,
+    ) -> HandleResult<()> {
+        if !damage.is_within(texture.width, texture.height) {
+            return Err(HandleError::InvalidParameter);
+        }
+        self.backend
+            .upload_texture_bgra(&texture.backend, pixels, source_stride, damage)
+    }
+
     /// Create the built-in vertex-color triangle pipeline for one render target.
     ///
     /// # Arguments
@@ -172,6 +232,23 @@ impl Queue {
             &draw.vertices,
         )
     }
+
+    /// Submit a complete ordered 2D composition pass synchronously.
+    ///
+    /// # Arguments
+    ///
+    /// * `composition` - Render target, clear color, and ordered composition operations.
+    ///
+    /// # Returns
+    ///
+    /// Success after all composition draws complete, or a handle error.
+    pub fn submit_composition(&self, composition: &CompositionPass<'_>) -> HandleResult<()> {
+        self.backend.submit_composition(
+            &composition.image.backend,
+            composition.clear_color,
+            &composition.operations,
+        )
+    }
 }
 
 /// Renderable image that can be presented through a display surface.
@@ -179,6 +256,33 @@ pub struct Image {
     backend: driver::Image,
     width: u32,
     height: u32,
+}
+
+/// Sampled BGRA texture owned by one rendering context.
+pub struct Texture {
+    backend: driver::Texture,
+    width: u32,
+    height: u32,
+}
+
+impl Texture {
+    /// Return the texture width in pixels.
+    ///
+    /// # Returns
+    ///
+    /// The texture width.
+    pub const fn width(&self) -> u32 {
+        self.width
+    }
+
+    /// Return the texture height in pixels.
+    ///
+    /// # Returns
+    ///
+    /// The texture height.
+    pub const fn height(&self) -> u32 {
+        self.height
+    }
 }
 
 impl Image {
@@ -358,6 +462,258 @@ impl Color {
             blue,
             alpha,
         }
+    }
+
+    pub(crate) fn is_finite_unit(self) -> bool {
+        self.red.is_finite()
+            && self.green.is_finite()
+            && self.blue.is_finite()
+            && self.alpha.is_finite()
+            && (0.0..=1.0).contains(&self.red)
+            && (0.0..=1.0).contains(&self.green)
+            && (0.0..=1.0).contains(&self.blue)
+            && (0.0..=1.0).contains(&self.alpha)
+    }
+}
+
+/// Top-left pixel rectangle used for texture, destination, and clip regions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PixelRect {
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+}
+
+impl PixelRect {
+    /// Construct a top-left pixel rectangle.
+    ///
+    /// # Arguments
+    ///
+    /// * `x` - Left pixel coordinate.
+    /// * `y` - Top pixel coordinate.
+    /// * `width` - Rectangle width in pixels.
+    /// * `height` - Rectangle height in pixels.
+    ///
+    /// # Returns
+    ///
+    /// The requested rectangle. Operations validate non-zero dimensions and
+    /// destination bounds before submission.
+    pub const fn new(x: u32, y: u32, width: u32, height: u32) -> Self {
+        Self {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
+    /// Return the left pixel coordinate.
+    ///
+    /// # Returns
+    ///
+    /// The left pixel coordinate.
+    pub const fn x(&self) -> u32 {
+        self.x
+    }
+
+    /// Return the top pixel coordinate.
+    ///
+    /// # Returns
+    ///
+    /// The top pixel coordinate.
+    pub const fn y(&self) -> u32 {
+        self.y
+    }
+
+    /// Return the rectangle width in pixels.
+    ///
+    /// # Returns
+    ///
+    /// The rectangle width.
+    pub const fn width(&self) -> u32 {
+        self.width
+    }
+
+    /// Return the rectangle height in pixels.
+    ///
+    /// # Returns
+    ///
+    /// The rectangle height.
+    pub const fn height(&self) -> u32 {
+        self.height
+    }
+
+    pub(crate) fn is_within(&self, width: u32, height: u32) -> bool {
+        self.width != 0
+            && self.height != 0
+            && self
+                .x
+                .checked_add(self.width)
+                .is_some_and(|right| right <= width)
+            && self
+                .y
+                .checked_add(self.height)
+                .is_some_and(|bottom| bottom <= height)
+    }
+}
+
+/// Choice of how a textured composition operation derives effective alpha.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceAlpha {
+    /// Multiply sampled source alpha by global opacity.
+    Respect,
+    /// Ignore sampled source alpha and use global opacity directly.
+    Ignore,
+}
+
+/// Maximum ordered operations accepted by one composition pass.
+pub const MAX_COMPOSITION_OPERATIONS: usize = 96;
+
+/// Ordered 2D composition of sampled textures and solid overlays into one image.
+pub struct CompositionPass<'a> {
+    image: &'a Image,
+    clear_color: Color,
+    operations: Vec<driver::CompositionOperation<'a>>,
+    operation_capacity: usize,
+}
+
+impl<'a> CompositionPass<'a> {
+    /// Begin a composition pass with the maximum supported operation capacity.
+    ///
+    /// # Arguments
+    ///
+    /// * `image` - Render target for the composition.
+    /// * `clear_color` - Straight-alpha background color written before operations.
+    ///
+    /// # Returns
+    ///
+    /// An empty composition pass, or a handle error for an invalid clear color.
+    pub fn new(image: &'a Image, clear_color: Color) -> HandleResult<Self> {
+        Self::with_operation_capacity(image, clear_color, MAX_COMPOSITION_OPERATIONS)
+    }
+
+    /// Begin a composition pass with a bounded operation capacity.
+    ///
+    /// # Arguments
+    ///
+    /// * `image` - Render target for the composition.
+    /// * `clear_color` - Straight-alpha background color written before operations.
+    /// * `operation_capacity` - Maximum ordered operations for this pass.
+    ///
+    /// # Returns
+    ///
+    /// An empty composition pass, or a handle error when the capacity or clear
+    /// color is invalid.
+    pub fn with_operation_capacity(
+        image: &'a Image,
+        clear_color: Color,
+        operation_capacity: usize,
+    ) -> HandleResult<Self> {
+        if !clear_color.is_finite_unit()
+            || operation_capacity == 0
+            || operation_capacity > MAX_COMPOSITION_OPERATIONS
+        {
+            return Err(HandleError::InvalidParameter);
+        }
+        Ok(Self {
+            image,
+            clear_color,
+            operations: Vec::new(),
+            operation_capacity,
+        })
+    }
+
+    /// Append an ordered textured rectangle operation.
+    ///
+    /// Source and destination coordinates use top-left pixels directly. When
+    /// source alpha is respected, effective alpha is sampled alpha multiplied by
+    /// `opacity`; otherwise effective alpha is exactly `opacity`. Source RGB is
+    /// always interpreted as straight alpha.
+    ///
+    /// # Arguments
+    ///
+    /// * `texture` - Sampled source texture.
+    /// * `destination` - Destination render-target rectangle.
+    /// * `source` - Source texture rectangle.
+    /// * `opacity` - Finite global opacity in the inclusive range `0.0..=1.0`.
+    /// * `source_alpha` - Whether to respect sampled alpha.
+    /// * `clip` - Optional destination scissor rectangle.
+    ///
+    /// # Returns
+    ///
+    /// Success after appending the operation, or a handle error for invalid
+    /// rectangles, opacity, or operation capacity.
+    pub fn draw_textured_rect(
+        &mut self,
+        texture: &'a Texture,
+        destination: PixelRect,
+        source: PixelRect,
+        opacity: f32,
+        source_alpha: SourceAlpha,
+        clip: Option<PixelRect>,
+    ) -> HandleResult<()> {
+        if !destination.is_within(self.image.width, self.image.height)
+            || !source.is_within(texture.width, texture.height)
+            || clip.is_some_and(|rect| !rect.is_within(self.image.width, self.image.height))
+            || !opacity.is_finite()
+            || !(0.0..=1.0).contains(&opacity)
+        {
+            return Err(HandleError::InvalidParameter);
+        }
+        self.reserve_operation()?;
+        self.operations
+            .push(driver::CompositionOperation::Textured {
+                texture: &texture.backend,
+                destination,
+                source,
+                opacity,
+                source_alpha,
+                clip,
+            });
+        Ok(())
+    }
+
+    /// Append an ordered straight-alpha solid rectangle operation.
+    ///
+    /// # Arguments
+    ///
+    /// * `destination` - Destination render-target rectangle.
+    /// * `color` - Finite straight-alpha overlay color with unit components.
+    /// * `clip` - Optional destination scissor rectangle.
+    ///
+    /// # Returns
+    ///
+    /// Success after appending the operation, or a handle error for invalid
+    /// rectangles, color, or operation capacity.
+    pub fn draw_solid_rect(
+        &mut self,
+        destination: PixelRect,
+        color: Color,
+        clip: Option<PixelRect>,
+    ) -> HandleResult<()> {
+        if !destination.is_within(self.image.width, self.image.height)
+            || !color.is_finite_unit()
+            || clip.is_some_and(|rect| !rect.is_within(self.image.width, self.image.height))
+        {
+            return Err(HandleError::InvalidParameter);
+        }
+        self.reserve_operation()?;
+        self.operations.push(driver::CompositionOperation::Solid {
+            destination,
+            color,
+            clip,
+        });
+        Ok(())
+    }
+
+    fn reserve_operation(&mut self) -> HandleResult<()> {
+        if self.operations.len() >= self.operation_capacity {
+            return Err(HandleError::OutOfResources);
+        }
+        self.operations
+            .try_reserve(1)
+            .map_err(|_| HandleError::OutOfResources)
     }
 }
 
