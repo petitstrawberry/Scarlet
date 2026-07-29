@@ -96,8 +96,7 @@ impl GpuConnection {
                 return Ok(0);
             }
         };
-        let allocated_size = u64::try_from(buffer.allocation_size())
-            .map_err(|_| "GPU buffer allocation size does not fit ABI")?;
+        let buffer_info = buffer.backend_info();
         let task = crate::task::mytask().ok_or("No current task for GPU buffer creation")?;
         let handle = task.handle_table.insert_with_metadata(
             KernelObject::Gpu(Arc::new(buffer)),
@@ -108,7 +107,8 @@ impl GpuConnection {
                 request.buffer_handle = handle;
                 request.cpu_visible =
                     u32::from(request.flags & super::GPU_BUFFER_FLAG_CPU_VISIBLE != 0);
-                request.allocated_size = allocated_size;
+                request.command_resource_token = buffer_info.command_resource_token;
+                request.allocation_size = buffer_info.allocation_size;
                 if let Err(error) = write_user_value(arg, &request) {
                     task.handle_table.remove(handle);
                     return Err(error);

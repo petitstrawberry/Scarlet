@@ -8,9 +8,9 @@ use super::{
     GPU_MAX_OPAQUE_COMMAND_SIZE, GPU_QUEUE_QUERY, GPU_QUEUE_SUBMIT,
     GPU_QUEUE_SUBMIT_FLAG_SIGNAL_TIMELINE, GPU_QUEUE_SUBMIT_FLAGS_VALID, GPU_RESULT_INVALID_ABI,
     GPU_RESULT_INVALID_ARGUMENT, GPU_RESULT_INVALID_STATE, GPU_RESULT_OUT_OF_RESOURCES,
-    GpuBackendContext, GpuBackendContextInfo, GpuBackendImage, GpuBackendQueue,
-    GpuBackendQueueInfo, GpuContextAttachImage, GpuContextInfo, GpuCreateQueue, GpuImage,
-    GpuObject, GpuQueueInfo, GpuQueueSubmit,
+    GpuBackendBuffer, GpuBackendContext, GpuBackendContextInfo, GpuBackendImage, GpuBackendQueue,
+    GpuBackendQueueInfo, GpuBuffer, GpuContextAttachBuffer, GpuContextAttachImage, GpuContextInfo,
+    GpuCreateQueue, GpuImage, GpuObject, GpuQueueInfo, GpuQueueSubmit,
 };
 use crate::library::std::usercopy::copy_from_user;
 use crate::object::KernelObject;
@@ -25,6 +25,13 @@ use crate::object::handle::AccessMode;
 pub struct GpuContext {
     backend_context: Arc<dyn GpuBackendContext>,
     attached_images: Arc<crate::sync::IrqSpinLock<Vec<Arc<dyn GpuBackendImage>>>>,
+    attached_buffers: Arc<crate::sync::IrqSpinLock<Vec<GpuAttachedBuffer>>>,
+}
+
+/// Backend buffer and page backing retained by a context and its child queues.
+struct GpuAttachedBuffer {
+    _backend_buffer: Arc<dyn GpuBackendBuffer>,
+    _backing: Arc<super::resource::GpuBufferBacking>,
 }
 
 impl GpuContext {
@@ -41,6 +48,7 @@ impl GpuContext {
         Self {
             backend_context,
             attached_images: Arc::new(crate::sync::IrqSpinLock::new(Vec::new())),
+            attached_buffers: Arc::new(crate::sync::IrqSpinLock::new(Vec::new())),
         }
     }
 
@@ -67,6 +75,7 @@ impl GpuContext {
         Ok(GpuQueue {
             _backend_context: Arc::clone(&self.backend_context),
             _attached_images: Arc::clone(&self.attached_images),
+            _attached_buffers: Arc::clone(&self.attached_buffers),
             backend_queue,
         })
     }
@@ -88,9 +97,41 @@ impl GpuContext {
             .map_err(|_| "Failed to retain GPU image for context lifetime")?;
         let token = self.backend_context.attach_image(backend_image.as_ref())?;
         if token == 0 || token != backend_image.query_info().command_resource_token {
+            let _ = self.backend_context.detach_image(backend_image.as_ref());
             return Err("GPU backend returned an invalid image attachment token");
         }
         attached_images.push(backend_image);
+        Ok(token)
+    }
+
+    /// Attach a buffer to this context and retain its backing for all derived queues.
+    ///
+    /// # Arguments
+    ///
+    /// * `buffer` - Buffer capability authorized by the caller's handle table.
+    ///
+    /// # Returns
+    ///
+    /// The opaque command resource token authorized for this context.
+    pub fn attach_buffer(&self, buffer: &GpuBuffer) -> Result<u64, &'static str> {
+        let backend_buffer = buffer.backend_buffer();
+        let backing = buffer.backing();
+        let backend_info = backend_buffer.query_info();
+        let mut attached_buffers = self.attached_buffers.lock();
+        attached_buffers
+            .try_reserve(1)
+            .map_err(|_| "Failed to retain GPU buffer for context lifetime")?;
+        let token = self
+            .backend_context
+            .attach_buffer(backend_buffer.as_ref())?;
+        if token == 0 || token != backend_info.command_resource_token {
+            let _ = self.backend_context.detach_buffer(backend_buffer.as_ref());
+            return Err("GPU backend returned an invalid buffer attachment token");
+        }
+        attached_buffers.push(GpuAttachedBuffer {
+            _backend_buffer: backend_buffer,
+            _backing: backing,
+        });
         Ok(token)
     }
 
@@ -199,6 +240,41 @@ impl GpuContext {
         write_user_value(arg, &request)?;
         Ok(0)
     }
+
+    fn handle_attach_buffer(&self, arg: usize) -> Result<i32, &'static str> {
+        let mut request: GpuContextAttachBuffer = read_user_value(arg)?;
+        let reserved = request.reserved;
+        request.clear_response();
+        if request.abi_version != GPU_ABI_VERSION {
+            request.result = GPU_RESULT_INVALID_ABI;
+            write_user_value(arg, &request)?;
+            return Ok(0);
+        }
+        if request.flags != 0 || reserved != 0 || request.buffer_handle == 0 {
+            request.result = GPU_RESULT_INVALID_ARGUMENT;
+            write_user_value(arg, &request)?;
+            return Ok(0);
+        }
+        let task = crate::task::mytask().ok_or("No current task for GPU buffer attachment")?;
+        let buffer_owner = match task.handle_table.get_arc_clone(request.buffer_handle) {
+            Some(object) if object.as_gpu().and_then(GpuObject::as_buffer).is_some() => object,
+            _ => {
+                request.result = GPU_RESULT_INVALID_ARGUMENT;
+                write_user_value(arg, &request)?;
+                return Ok(0);
+            }
+        };
+        let buffer = buffer_owner
+            .as_gpu()
+            .and_then(GpuObject::as_buffer)
+            .ok_or("GPU buffer handle changed while attaching")?;
+        match self.attach_buffer(buffer) {
+            Ok(token) => request.command_resource_token = token,
+            Err(_) => request.result = GPU_RESULT_INVALID_STATE,
+        }
+        write_user_value(arg, &request)?;
+        Ok(0)
+    }
 }
 
 impl ControlOps for GpuContext {
@@ -207,6 +283,7 @@ impl ControlOps for GpuContext {
             GPU_CONTEXT_QUERY => self.handle_query_info(arg),
             GPU_CREATE_QUEUE => self.handle_create_queue(arg),
             GPU_CONTEXT_ATTACH_IMAGE => self.handle_attach_image(arg),
+            super::GPU_CONTEXT_ATTACH_BUFFER => self.handle_attach_buffer(arg),
             _ => Err("Unsupported GPU context control command"),
         }
     }
@@ -226,6 +303,7 @@ impl GpuObject for GpuContext {
 pub struct GpuQueue {
     _backend_context: Arc<dyn GpuBackendContext>,
     _attached_images: Arc<crate::sync::IrqSpinLock<Vec<Arc<dyn GpuBackendImage>>>>,
+    _attached_buffers: Arc<crate::sync::IrqSpinLock<Vec<GpuAttachedBuffer>>>,
     backend_queue: Arc<dyn GpuBackendQueue>,
 }
 

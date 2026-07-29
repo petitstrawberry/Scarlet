@@ -242,6 +242,79 @@ pub struct GpuBackendQueueInfo {
     pub max_opaque_command_size: u32,
 }
 
+/// Backend-neutral physical backing for a GPU buffer resource.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GpuBufferCreateInfo {
+    /// Physical address of the stable contiguous backing allocation.
+    pub paddr: usize,
+    /// Page-rounded allocation size in bytes.
+    pub allocation_size: u64,
+}
+
+impl GpuBufferCreateInfo {
+    /// Build buffer backing information for a backend resource.
+    ///
+    /// # Arguments
+    ///
+    /// * `paddr` - Physical address of the contiguous backing allocation.
+    /// * `allocation_size` - Non-zero backing allocation size in bytes.
+    ///
+    /// # Returns
+    ///
+    /// Backend-neutral buffer backing information.
+    pub const fn new(paddr: usize, allocation_size: u64) -> Self {
+        Self {
+            paddr,
+            allocation_size,
+        }
+    }
+}
+
+/// Immutable metadata for a backend-owned GPU buffer resource.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GpuBackendBufferInfo {
+    /// Opaque backend token used only by opaque command bytes.
+    pub command_resource_token: u64,
+    /// Page-rounded backing allocation size in bytes.
+    pub allocation_size: u64,
+}
+
+impl GpuBackendBufferInfo {
+    /// Build immutable backend buffer metadata.
+    ///
+    /// # Arguments
+    ///
+    /// * `command_resource_token` - Opaque command resource token.
+    /// * `allocation_size` - Actual backing allocation size in bytes.
+    ///
+    /// # Returns
+    ///
+    /// Backend buffer metadata.
+    pub const fn new(command_resource_token: u64, allocation_size: u64) -> Self {
+        Self {
+            command_resource_token,
+            allocation_size,
+        }
+    }
+}
+
+/// Backend buffer retained by a [`crate::device::gpu::GpuBuffer`].
+pub trait GpuBackendBuffer: Send + Sync {
+    /// Query immutable backend-neutral buffer information.
+    ///
+    /// # Returns
+    ///
+    /// An opaque command resource token and backing allocation size.
+    fn query_info(&self) -> GpuBackendBufferInfo;
+
+    /// Return an opaque backend identity used only for attachment validation.
+    ///
+    /// # Returns
+    ///
+    /// A token that distinguishes backend instances without granting authority.
+    fn backend_cookie(&self) -> u64;
+}
+
 impl GpuBackendQueueInfo {
     /// Build execution queue limits.
     ///
@@ -387,6 +460,45 @@ pub trait GpuBackendContext: Send + Sync {
     fn attach_image(&self, _image: &dyn GpuBackendImage) -> Result<u64, &'static str> {
         Err("GPU backend context does not support image attachment")
     }
+
+    /// Detach an image previously attached to this context.
+    ///
+    /// # Arguments
+    ///
+    /// * `image` - Backend image to detach.
+    ///
+    /// # Returns
+    ///
+    /// Nothing after the image is no longer attached to this context.
+    fn detach_image(&self, _image: &dyn GpuBackendImage) -> Result<(), &'static str> {
+        Err("GPU backend context does not support image detachment")
+    }
+
+    /// Attach a buffer so opaque commands in this context may reference it.
+    ///
+    /// # Arguments
+    ///
+    /// * `buffer` - Backend buffer retained by the calling kernel capability.
+    ///
+    /// # Returns
+    ///
+    /// An opaque command resource token authorized for this context.
+    fn attach_buffer(&self, _buffer: &dyn GpuBackendBuffer) -> Result<u64, &'static str> {
+        Err("GPU backend context does not support buffer attachment")
+    }
+
+    /// Detach a buffer previously attached to this context.
+    ///
+    /// # Arguments
+    ///
+    /// * `buffer` - Backend buffer to detach.
+    ///
+    /// # Returns
+    ///
+    /// Nothing after the buffer is no longer attached to this context.
+    fn detach_buffer(&self, _buffer: &dyn GpuBackendBuffer) -> Result<(), &'static str> {
+        Err("GPU backend context does not support buffer detachment")
+    }
 }
 
 /// Backend execution queue retained by a [`crate::device::gpu::GpuQueue`].
@@ -466,5 +578,21 @@ pub trait GpuBackend: Send + Sync {
         _create: GpuImageCreateInfo,
     ) -> Result<Arc<dyn GpuBackendImage>, &'static str> {
         Err("GPU backend does not support images")
+    }
+
+    /// Create a backend-owned GPU buffer resource from generic page backing.
+    ///
+    /// # Arguments
+    ///
+    /// * `create` - Stable contiguous buffer backing owned by the generic capability.
+    ///
+    /// # Returns
+    ///
+    /// A real backend buffer, or an error when buffers are unsupported.
+    fn create_buffer(
+        &self,
+        _create: GpuBufferCreateInfo,
+    ) -> Result<Arc<dyn GpuBackendBuffer>, &'static str> {
+        Err("GPU backend does not support buffers")
     }
 }

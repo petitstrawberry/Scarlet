@@ -6,9 +6,9 @@ use super::connection::{read_user_value, write_user_value};
 use super::{
     GPU_ABI_VERSION, GPU_BUFFER_QUERY_INFO, GPU_IMAGE_FORMAT_BGRA8_UNORM, GPU_IMAGE_QUERY_INFO,
     GPU_IMAGE_USAGE_VALID, GPU_RESULT_INVALID_ABI, GPU_TIMELINE_CREATE_POINT, GPU_TIMELINE_FAIL,
-    GPU_TIMELINE_QUERY, GPU_TIMELINE_SIGNAL, GpuBackend, GpuBackendImage, GpuBufferInfo,
-    GpuImageCreateInfo, GpuImageInfo, GpuTimelineCreatePoint, GpuTimelineFail, GpuTimelineInfo,
-    GpuTimelineSignal,
+    GPU_TIMELINE_QUERY, GPU_TIMELINE_SIGNAL, GpuBackend, GpuBackendBuffer, GpuBackendImage,
+    GpuBufferCreateInfo, GpuBufferInfo, GpuImageCreateInfo, GpuImageInfo, GpuTimelineCreatePoint,
+    GpuTimelineFail, GpuTimelineInfo, GpuTimelineSignal,
 };
 use crate::environment::PAGE_SIZE;
 use crate::mem::page::{Page, allocate_raw_pages, free_raw_pages};
@@ -72,6 +72,15 @@ pub trait GpuObject: Send + Sync {
     ///
     /// The image capability, or `None` for other GPU objects.
     fn as_image(&self) -> Option<&GpuImage> {
+        None
+    }
+
+    /// Return this object as a buffer when it is one.
+    ///
+    /// # Returns
+    ///
+    /// The buffer capability, or `None` for other GPU objects.
+    fn as_buffer(&self) -> Option<&GpuBuffer> {
         None
     }
 
@@ -207,11 +216,26 @@ impl GpuObject for GpuImage {
     }
 }
 
-/// Kernel-owned, fixed-size GPU buffer.
-pub struct GpuBuffer {
-    backend: Arc<dyn GpuBackend>,
+/// Stable page-backed allocation retained by a GPU buffer and its attachments.
+pub(crate) struct GpuBufferBacking {
     paddr: usize,
     allocation_size: usize,
+}
+
+impl Drop for GpuBufferBacking {
+    fn drop(&mut self) {
+        let page_count = self.allocation_size / PAGE_SIZE;
+        if page_count != 0 {
+            let pages = phys_to_virt(self.paddr) as *mut Page;
+            free_raw_pages(pages, page_count);
+        }
+    }
+}
+
+/// Kernel-owned, fixed-size GPU buffer.
+pub struct GpuBuffer {
+    backing: Arc<GpuBufferBacking>,
+    backend_buffer: Arc<dyn GpuBackendBuffer>,
     flags: u32,
 }
 
@@ -250,10 +274,24 @@ impl GpuBuffer {
         unsafe {
             core::ptr::write_bytes(pages as *mut u8, 0, allocation_size);
         }
-        Ok(Self {
-            backend,
+        let backing = Arc::new(GpuBufferBacking {
             paddr: virt_to_phys(pages as usize),
             allocation_size,
+        });
+        let backend_buffer = backend.create_buffer(GpuBufferCreateInfo::new(
+            backing.paddr,
+            u64::try_from(backing.allocation_size)
+                .map_err(|_| "GPU buffer allocation size does not fit backend metadata")?,
+        ))?;
+        let backend_info = backend_buffer.query_info();
+        if backend_info.command_resource_token == 0
+            || backend_info.allocation_size != backing.allocation_size as u64
+        {
+            return Err("GPU backend buffer metadata is invalid");
+        }
+        Ok(Self {
+            backing,
+            backend_buffer,
             flags,
         })
     }
@@ -272,8 +310,27 @@ impl GpuBuffer {
     /// # Returns
     ///
     /// The stable contiguous allocation size in bytes.
-    pub const fn allocation_size(&self) -> usize {
-        self.allocation_size
+    pub fn allocation_size(&self) -> usize {
+        self.backing.allocation_size
+    }
+
+    /// Return immutable backend-neutral buffer information.
+    ///
+    /// # Returns
+    ///
+    /// The opaque command resource token and allocation size.
+    pub fn backend_info(&self) -> super::GpuBackendBufferInfo {
+        self.backend_buffer.query_info()
+    }
+
+    /// Clone the backend buffer for a context lifetime reference.
+    pub(crate) fn backend_buffer(&self) -> Arc<dyn GpuBackendBuffer> {
+        Arc::clone(&self.backend_buffer)
+    }
+
+    /// Clone the page backing for a context lifetime reference.
+    pub(crate) fn backing(&self) -> Arc<GpuBufferBacking> {
+        Arc::clone(&self.backing)
     }
 
     fn query_info(&self, info: &mut GpuBufferInfo) {
@@ -283,9 +340,11 @@ impl GpuBuffer {
             return;
         }
         info.flags = self.flags;
-        info.size_bytes = self.allocation_size as u64;
+        info.size_bytes = self.allocation_size() as u64;
         info.cpu_visible = u32::from(self.cpu_visible());
-        let _ = &self.backend;
+        let backend_info = self.backend_info();
+        info.command_resource_token = backend_info.command_resource_token;
+        info.allocation_size = backend_info.allocation_size;
     }
 
     fn handle_query_info(&self, arg: usize) -> Result<i32, &'static str> {
@@ -293,16 +352,6 @@ impl GpuBuffer {
         self.query_info(&mut info);
         write_user_value(arg, &info)?;
         Ok(0)
-    }
-}
-
-impl Drop for GpuBuffer {
-    fn drop(&mut self) {
-        let page_count = self.allocation_size / PAGE_SIZE;
-        if page_count != 0 {
-            let pages = phys_to_virt(self.paddr) as *mut Page;
-            free_raw_pages(pages, page_count);
-        }
     }
 }
 
@@ -321,10 +370,11 @@ impl MemoryMappingOps for GpuBuffer {
         let end = offset
             .checked_add(length)
             .ok_or("GPU buffer mapping range overflows")?;
-        if end > self.allocation_size {
+        if end > self.allocation_size() {
             return Err("GPU buffer mapping range exceeds allocation");
         }
         let paddr = self
+            .backing
             .paddr
             .checked_add(offset)
             .ok_or("GPU buffer physical address overflows")?;
@@ -362,11 +412,12 @@ impl MemoryMappingOps for GpuBuffer {
         let offset = page_idx
             .checked_mul(PAGE_SIZE)
             .ok_or(ResolveFaultError::Invalid)?;
-        if offset >= self.allocation_size {
+        if offset >= self.allocation_size() {
             return Err(ResolveFaultError::Unmapped);
         }
         Ok(ResolveFaultResult {
             paddr_page_base: self
+                .backing
                 .paddr
                 .checked_add(offset)
                 .ok_or(ResolveFaultError::Invalid)?,
@@ -399,6 +450,10 @@ impl GpuObject for GpuBuffer {
 
     fn as_memory_mappable(&self) -> Option<&dyn MemoryMappingOps> {
         self.cpu_visible().then_some(self)
+    }
+
+    fn as_buffer(&self) -> Option<&GpuBuffer> {
+        Some(self)
     }
 }
 

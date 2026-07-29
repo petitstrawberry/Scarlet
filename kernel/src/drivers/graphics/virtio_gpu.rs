@@ -16,10 +16,10 @@ use crate::{
             GPU_DIALECT_INFO_BYTES, GPU_EXECUTION_SUPPORT_MEMORY,
             GPU_EXECUTION_SUPPORT_PRESENTATION, GPU_EXECUTION_SUPPORT_QUEUE,
             GPU_EXECUTION_SUPPORT_TIMELINE, GPU_MAX_OPAQUE_COMMAND_SIZE, GpuBackend,
-            GpuBackendContext, GpuBackendContextInfo, GpuBackendDialectDescriptor,
-            GpuBackendDialectInfo, GpuBackendImage, GpuBackendImageInfo, GpuBackendInfo,
-            GpuBackendQueue, GpuBackendQueueInfo, GpuDeviceInfo, GpuDeviceState,
-            GpuImageCreateInfo,
+            GpuBackendBuffer, GpuBackendBufferInfo, GpuBackendContext, GpuBackendContextInfo,
+            GpuBackendDialectDescriptor, GpuBackendDialectInfo, GpuBackendImage,
+            GpuBackendImageInfo, GpuBackendInfo, GpuBackendQueue, GpuBackendQueueInfo,
+            GpuBufferCreateInfo, GpuDeviceInfo, GpuDeviceState, GpuImageCreateInfo,
         },
         graphics::{
             FramebufferConfig, GpuDisplayResource, GraphicsDevice, PixelFormat,
@@ -86,8 +86,10 @@ const VIRTIO_GPU_FORMAT_A8B8G8R8_UNORM: u32 = 121;
 const VIRTIO_GPU_FORMAT_R8G8B8X8_UNORM: u32 = 134;
 
 // VirGL Gallium texture target and bind flags.
+const PIPE_BUFFER: u32 = 0;
 const PIPE_TEXTURE_2D: u32 = 2;
 const PIPE_BIND_RENDER_TARGET: u32 = 1 << 1;
+const PIPE_BIND_VERTEX_BUFFER: u32 = 1 << 4;
 const PIPE_BIND_SCANOUT: u32 = 1 << 19;
 
 // Maximum number of scanouts
@@ -1661,6 +1663,7 @@ struct VirtioGpuBackendContext {
     core: Arc<IrqSpinLock<VirtioGpuDeviceCore>>,
     context_id: u32,
     info: GpuBackendContextInfo,
+    attached_resources: IrqSpinLock<Vec<u32>>,
 }
 
 /// Real VirtIO image resource with owned PMM contiguous backing.
@@ -1670,6 +1673,14 @@ struct VirtioGpuBackendImage {
     create: GpuImageCreateInfo,
     allocation_size: u64,
     backing: ContiguousPages,
+    backend_cookie: u64,
+}
+
+/// Real VirtIO buffer resource backed by a generic GPU buffer allocation.
+struct VirtioGpuBackendBuffer {
+    core: Arc<IrqSpinLock<VirtioGpuDeviceCore>>,
+    resource_id: u32,
+    allocation_size: u64,
     backend_cookie: u64,
 }
 
@@ -1701,12 +1712,32 @@ impl GpuBackendImage for VirtioGpuBackendImage {
     }
 }
 
+impl Drop for VirtioGpuBackendBuffer {
+    fn drop(&mut self) {
+        let core = self.core.lock();
+        let _ = core.detach_backing_from_resource(self.resource_id);
+        let _ = core.unref_acceleration_resource(self.resource_id);
+    }
+}
+
+impl GpuBackendBuffer for VirtioGpuBackendBuffer {
+    fn query_info(&self) -> GpuBackendBufferInfo {
+        GpuBackendBufferInfo::new(u64::from(self.resource_id), self.allocation_size)
+    }
+
+    fn backend_cookie(&self) -> u64 {
+        self.backend_cookie
+    }
+}
+
 impl Drop for VirtioGpuBackendContext {
     fn drop(&mut self) {
-        let _ = self
-            .core
-            .lock()
-            .destroy_acceleration_context(self.context_id);
+        let core = self.core.lock();
+        let mut attached_resources = self.attached_resources.lock();
+        for resource_id in attached_resources.drain(..) {
+            let _ = core.detach_acceleration_resource(self.context_id, resource_id);
+        }
+        let _ = core.destroy_acceleration_context(self.context_id);
     }
 }
 
@@ -1731,7 +1762,69 @@ impl GpuBackendContext for VirtioGpuBackendContext {
             return Err("GPU image belongs to a different VirtIO GPU device");
         }
         core.attach_acceleration_resource(self.context_id, resource.resource_id())?;
+        let mut attached_resources = self.attached_resources.lock();
+        if attached_resources.try_reserve(1).is_err() {
+            let _ = core.detach_acceleration_resource(self.context_id, resource.resource_id());
+            return Err("Failed to retain VirtIO GPU image attachment");
+        }
+        attached_resources.push(resource.resource_id());
         Ok(u64::from(resource.resource_id()))
+    }
+
+    fn detach_image(&self, image: &dyn GpuBackendImage) -> Result<(), &'static str> {
+        let resource = image
+            .display_resource()
+            .ok_or("VirtIO GPU image is not presentable")?;
+        let core = self.core.lock();
+        if resource.backend_cookie() != core.backend_cookie() {
+            return Err("GPU image belongs to a different VirtIO GPU device");
+        }
+        core.detach_acceleration_resource(self.context_id, resource.resource_id())?;
+        let mut attached_resources = self.attached_resources.lock();
+        if let Some(index) = attached_resources
+            .iter()
+            .position(|&resource_id| resource_id == resource.resource_id())
+        {
+            attached_resources.swap_remove(index);
+        }
+        Ok(())
+    }
+
+    fn attach_buffer(&self, buffer: &dyn GpuBackendBuffer) -> Result<u64, &'static str> {
+        let info = buffer.query_info();
+        let resource_id = u32::try_from(info.command_resource_token)
+            .map_err(|_| "VirtIO GPU buffer token does not fit a resource ID")?;
+        if resource_id == 0 || buffer.backend_cookie() != self.core.lock().backend_cookie() {
+            return Err("GPU buffer belongs to a different VirtIO GPU device");
+        }
+        let core = self.core.lock();
+        core.attach_acceleration_resource(self.context_id, resource_id)?;
+        let mut attached_resources = self.attached_resources.lock();
+        if attached_resources.try_reserve(1).is_err() {
+            let _ = core.detach_acceleration_resource(self.context_id, resource_id);
+            return Err("Failed to retain VirtIO GPU buffer attachment");
+        }
+        attached_resources.push(resource_id);
+        Ok(u64::from(resource_id))
+    }
+
+    fn detach_buffer(&self, buffer: &dyn GpuBackendBuffer) -> Result<(), &'static str> {
+        let info = buffer.query_info();
+        let resource_id = u32::try_from(info.command_resource_token)
+            .map_err(|_| "VirtIO GPU buffer token does not fit a resource ID")?;
+        let core = self.core.lock();
+        if resource_id == 0 || buffer.backend_cookie() != core.backend_cookie() {
+            return Err("GPU buffer belongs to a different VirtIO GPU device");
+        }
+        core.detach_acceleration_resource(self.context_id, resource_id)?;
+        let mut attached_resources = self.attached_resources.lock();
+        if let Some(index) = attached_resources
+            .iter()
+            .position(|&attached_resource_id| attached_resource_id == resource_id)
+        {
+            attached_resources.swap_remove(index);
+        }
+        Ok(())
     }
 }
 
@@ -1794,6 +1887,7 @@ impl GpuBackend for VirtioGpuBackend {
             core: Arc::clone(&self.core),
             context_id,
             info: GpuBackendContextInfo::new(effective_index, effective_token),
+            attached_resources: IrqSpinLock::new(Vec::new()),
         }))
     }
 
@@ -1853,6 +1947,44 @@ impl GpuBackend for VirtioGpuBackend {
             create,
             allocation_size,
             backing,
+            backend_cookie: core.backend_cookie(),
+        }))
+    }
+
+    fn create_buffer(
+        &self,
+        create: GpuBufferCreateInfo,
+    ) -> Result<Arc<dyn GpuBackendBuffer>, &'static str> {
+        if create.paddr == 0 || create.allocation_size == 0 {
+            return Err("VirtIO GPU buffer backing is invalid");
+        }
+        let backing_size = usize::try_from(create.allocation_size)
+            .map_err(|_| "VirtIO GPU buffer allocation does not fit kernel address size")?;
+        let core = self.core.lock();
+        core.require_virgl()?;
+        let resource_id = core.create_acceleration_resource(VirtioGpuAccelerationResource3d {
+            resource_id: 0,
+            target: PIPE_BUFFER,
+            format: 0,
+            bind: PIPE_BIND_VERTEX_BUFFER,
+            width: u32::try_from(create.allocation_size)
+                .map_err(|_| "VirtIO GPU buffer allocation exceeds PIPE_BUFFER limits")?,
+            height: 1,
+            depth: 1,
+            array_size: 1,
+            last_level: 0,
+            nr_samples: 0,
+            flags: 0,
+        })?;
+        if let Err(error) = core.attach_backing_to_resource(resource_id, create.paddr, backing_size)
+        {
+            let _ = core.unref_acceleration_resource(resource_id);
+            return Err(error);
+        }
+        Ok(Arc::new(VirtioGpuBackendBuffer {
+            core: Arc::clone(&self.core),
+            resource_id,
+            allocation_size: create.allocation_size,
             backend_cookie: core.backend_cookie(),
         }))
     }

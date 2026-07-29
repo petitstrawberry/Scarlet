@@ -37,6 +37,8 @@ pub const GPU_CREATE_IMAGE: u32 = 0x475e;
 pub const GPU_IMAGE_QUERY_INFO: u32 = 0x475f;
 /// Control command that attaches a GPU image to an execution context.
 pub const GPU_CONTEXT_ATTACH_IMAGE: u32 = 0x4760;
+/// Control command that attaches a GPU buffer to an execution context.
+pub const GPU_CONTEXT_ATTACH_BUFFER: u32 = 0x4761;
 
 /// Query completed successfully.
 pub const GPU_RESULT_SUCCESS: u32 = 0;
@@ -245,6 +247,52 @@ impl GpuContextAttachImage {
     }
 }
 
+/// Fixed-width request and response for [`GPU_CONTEXT_ATTACH_BUFFER`].
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct GpuContextAttachBuffer {
+    /// ABI version supplied by userspace and echoed by the kernel.
+    pub abi_version: u32,
+    /// Explicit `GPU_RESULT_*` result code.
+    pub result: u32,
+    /// Existing GPU buffer child handle to attach.
+    pub buffer_handle: u32,
+    /// Reserved attachment flags. Must be zero.
+    pub flags: u32,
+    /// Opaque command resource token authorized for this context on success.
+    pub command_resource_token: u64,
+    /// Reserved for ABI-compatible future use. Must be zero.
+    pub reserved: u64,
+}
+
+impl GpuContextAttachBuffer {
+    /// Create a buffer attachment request for the current ABI version.
+    ///
+    /// # Arguments
+    ///
+    /// * `buffer_handle` - Existing buffer capability handle.
+    ///
+    /// # Returns
+    ///
+    /// A zeroed buffer attachment request.
+    pub const fn new(buffer_handle: u32) -> Self {
+        Self {
+            abi_version: GPU_ABI_VERSION,
+            result: GPU_RESULT_SUCCESS,
+            buffer_handle,
+            flags: 0,
+            command_resource_token: 0,
+            reserved: 0,
+        }
+    }
+
+    /// Clear response fields while preserving request fields.
+    pub(crate) fn clear_response(&mut self) {
+        self.result = GPU_RESULT_SUCCESS;
+        self.command_resource_token = 0;
+    }
+}
+
 /// Fixed-width request and response for [`GPU_QUERY_INFO`].
 ///
 /// Callers initialize this structure with [`GpuQueryInfo::new`], then pass its
@@ -338,8 +386,10 @@ pub struct GpuCreateBuffer {
     pub buffer_handle: u32,
     /// Whether the resulting buffer exposes CPU mapping capability.
     pub cpu_visible: u32,
+    /// Opaque command resource token returned by the backend.
+    pub command_resource_token: u64,
     /// Page-rounded allocation size backing the child object.
-    pub allocated_size: u64,
+    pub allocation_size: u64,
 }
 
 impl GpuCreateBuffer {
@@ -353,7 +403,8 @@ impl GpuCreateBuffer {
             size_bytes,
             buffer_handle: 0,
             cpu_visible: 0,
-            allocated_size: 0,
+            command_resource_token: 0,
+            allocation_size: 0,
         }
     }
 
@@ -362,7 +413,8 @@ impl GpuCreateBuffer {
         self.result = GPU_RESULT_SUCCESS;
         self.buffer_handle = 0;
         self.cpu_visible = 0;
-        self.allocated_size = 0;
+        self.command_resource_token = 0;
+        self.allocation_size = 0;
     }
 }
 
@@ -380,8 +432,10 @@ pub struct GpuBufferInfo {
     pub cpu_visible: u32,
     /// Page-rounded buffer size in bytes.
     pub size_bytes: u64,
-    /// Reserved for ABI-compatible future use. Always zero.
-    pub reserved: u64,
+    /// Opaque command resource token returned by the backend.
+    pub command_resource_token: u64,
+    /// Page-rounded allocation size backing the buffer.
+    pub allocation_size: u64,
 }
 
 impl GpuBufferInfo {
@@ -393,7 +447,8 @@ impl GpuBufferInfo {
             flags: 0,
             cpu_visible: 0,
             size_bytes: 0,
-            reserved: 0,
+            command_resource_token: 0,
+            allocation_size: 0,
         }
     }
 
@@ -403,7 +458,8 @@ impl GpuBufferInfo {
         self.flags = 0;
         self.cpu_visible = 0;
         self.size_bytes = 0;
-        self.reserved = 0;
+        self.command_resource_token = 0;
+        self.allocation_size = 0;
     }
 }
 
