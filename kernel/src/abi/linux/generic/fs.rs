@@ -962,8 +962,8 @@ pub fn sys_dup(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     // Get handle from Linux fd
     if let Some(old_handle) = abi.get_handle(fd) {
         // Use clone_for_dup to get proper dup() semantics (increments Pipe reader/writer counts etc.)
-        if let Some(kernel_obj) = task.handle_table.clone_for_dup(old_handle) {
-            let handle = task.handle_table.insert(kernel_obj);
+        if let Some((kernel_obj, metadata)) = task.handle_table.clone_for_dup(old_handle) {
+            let handle = task.handle_table.insert_with_metadata(kernel_obj, metadata);
             match handle {
                 Ok(new_handle) => {
                     match abi.allocate_fd(new_handle as u32) {
@@ -1001,8 +1001,8 @@ pub fn sys_dup3(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     // Get handle from old fd
     if let Some(old_handle) = abi.get_handle(oldfd) {
         // Use clone_for_dup to get proper dup() semantics (increments Pipe reader/writer counts etc.)
-        if let Some(kernel_obj) = task.handle_table.clone_for_dup(old_handle) {
-            let handle = task.handle_table.insert(kernel_obj);
+        if let Some((kernel_obj, metadata)) = task.handle_table.clone_for_dup(old_handle) {
+            let handle = task.handle_table.insert_with_metadata(kernel_obj, metadata);
             match handle {
                 Ok(new_handle) => {
                     // Close newfd if it's already open
@@ -2649,8 +2649,8 @@ pub fn sys_fcntl(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                 Some(h) => h,
                 None => return errno::to_result(errno::EBADF),
             };
-            let kernel_obj = match task.handle_table.clone_for_dup(old_handle) {
-                Some(obj) => obj,
+            let (kernel_obj, metadata) = match task.handle_table.clone_for_dup(old_handle) {
+                Some(entry) => entry,
                 None => return errno::to_result(errno::EBADF),
             };
             let mut new_fd = None;
@@ -2664,7 +2664,7 @@ pub fn sys_fcntl(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                 Some(fd) => fd,
                 None => return errno::to_result(errno::EMFILE),
             };
-            let new_handle = match task.handle_table.insert(kernel_obj) {
+            let new_handle = match task.handle_table.insert_with_metadata(kernel_obj, metadata) {
                 Ok(handle) => handle,
                 Err(_) => return errno::to_result(errno::ENFILE),
             };
@@ -2858,8 +2858,8 @@ pub fn sys_fcntl(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                 Some(h) => h,
                 None => return errno::to_result(errno::EBADF),
             };
-            let kernel_obj = match task.handle_table.clone_for_dup(old_handle) {
-                Some(obj) => obj,
+            let (kernel_obj, metadata) = match task.handle_table.clone_for_dup(old_handle) {
+                Some(entry) => entry,
                 None => return errno::to_result(errno::EBADF),
             };
             let mut new_fd = None;
@@ -2873,7 +2873,7 @@ pub fn sys_fcntl(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                 Some(fd) => fd,
                 None => return errno::to_result(errno::EMFILE),
             };
-            let new_handle = match task.handle_table.insert(kernel_obj) {
+            let new_handle = match task.handle_table.insert_with_metadata(kernel_obj, metadata) {
                 Ok(handle) => handle,
                 Err(_) => return errno::to_result(errno::ENFILE),
             };

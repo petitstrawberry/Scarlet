@@ -1,7 +1,8 @@
 //! HandleTable tests
 
-use super::super::{Handle, HandleTable, KernelObject};
-use super::mock::MockFileObject;
+use super::super::{AccessMode, Handle, HandleMetadata, HandleTable, HandleType, KernelObject};
+use super::mock::{MockFileObject, MockPipeObject};
+use crate::ipc::pipe::PipeObject;
 use alloc::{format, sync::Arc, vec::Vec};
 
 #[test_case]
@@ -48,6 +49,65 @@ fn test_handle_table_with_object_ref_does_not_clone_arc() {
     assert!(has_stream);
     assert_eq!(Arc::strong_count(&mock_file), count_before);
     assert!(table.with_object_ref(999, |_| true).is_none());
+}
+
+#[test_case]
+fn test_handle_table_get_arc_clone_with_metadata() {
+    let table = HandleTable::new();
+    let mock_file: Arc<dyn crate::fs::FileObject> =
+        Arc::new(MockFileObject::new(b"paired lookup".to_vec()));
+    let metadata = HandleMetadata {
+        handle_type: HandleType::IpcChannel,
+        access_mode: AccessMode::ReadOnly,
+        special_semantics: None,
+    };
+    let handle = table
+        .insert_with_metadata(KernelObject::File(Arc::clone(&mock_file)), metadata)
+        .unwrap();
+    let count_before = Arc::strong_count(&mock_file);
+
+    let (object, metadata) = table.get_arc_clone_with_metadata(handle).unwrap();
+    assert!(matches!(&object, KernelObject::File(_)));
+    assert_eq!(metadata.handle_type, HandleType::IpcChannel);
+    assert_eq!(metadata.access_mode, AccessMode::ReadOnly);
+    assert_eq!(Arc::strong_count(&mock_file), count_before + 1);
+
+    drop(object);
+    assert_eq!(Arc::strong_count(&mock_file), count_before);
+    assert!(
+        table
+            .get_arc_clone_with_metadata(HandleTable::MAX_HANDLES as Handle)
+            .is_none()
+    );
+    table.remove(handle);
+    assert!(table.get_arc_clone_with_metadata(handle).is_none());
+}
+
+#[test_case]
+fn test_handle_table_clone_for_dup_preserves_metadata() {
+    let table = HandleTable::new();
+    let pipe: Arc<dyn PipeObject> = Arc::new(MockPipeObject::new());
+    let metadata = HandleMetadata {
+        handle_type: HandleType::IpcChannel,
+        access_mode: AccessMode::WriteOnly,
+        special_semantics: None,
+    };
+    let handle = table
+        .insert_with_metadata(KernelObject::Pipe(Arc::clone(&pipe)), metadata)
+        .unwrap();
+
+    let (object, duplicated_metadata) = table.clone_for_dup(handle).unwrap();
+
+    let duplicated_pipe = match object {
+        KernelObject::Pipe(pipe) => pipe,
+        _ => panic!("clone_for_dup should retain the pipe object type"),
+    };
+    assert!(
+        !Arc::ptr_eq(&pipe, &duplicated_pipe),
+        "clone_for_dup must use the pipe's custom clone semantics"
+    );
+    assert_eq!(duplicated_metadata.handle_type, HandleType::IpcChannel);
+    assert_eq!(duplicated_metadata.access_mode, AccessMode::WriteOnly);
 }
 
 #[test_case]

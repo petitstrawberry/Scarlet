@@ -1,6 +1,7 @@
 //! Cursor management module
 
 use framebuffer::Framebuffer;
+use std::vec::Vec;
 
 /// Cursor bitmap - simple 0/1/2 format
 const CURSOR_WIDTH: usize = 16;
@@ -259,6 +260,44 @@ impl Cursor {
                 }
             }
         }
+    }
+
+    /// Return the scaled cursor bitmap as straight-alpha BGRA pixels.
+    ///
+    /// # Returns
+    ///
+    /// A tightly packed BGRA bitmap with the cursor's current dimensions.
+    pub fn bgra_pixels(&self) -> Vec<u8> {
+        let mut pixels = Vec::new();
+        pixels.resize((self.width as usize) * (self.height as usize) * 4, 0);
+
+        for y in 0..CURSOR_HEIGHT {
+            for x in 0..CURSOR_WIDTH {
+                let pixel = CURSOR_BITMAP[y][x];
+                if pixel == 0 {
+                    continue;
+                }
+
+                let color = if pixel == 2 {
+                    CURSOR_BORDER
+                } else {
+                    CURSOR_COLOR
+                };
+                let (x0, x1) = scaled_cell_bounds(x, self.scale_milli);
+                let (y0, y1) = scaled_cell_bounds(y, self.scale_milli);
+
+                for dy in y0..y1 {
+                    for dx in x0..x1 {
+                        let offset = ((dy as usize * self.width as usize) + dx as usize) * 4;
+                        if offset + 4 <= pixels.len() {
+                            pixels[offset..offset + 4].copy_from_slice(&color);
+                        }
+                    }
+                }
+            }
+        }
+
+        pixels
     }
 
     /// Clear previous cursor by restoring saved pixels

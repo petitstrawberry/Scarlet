@@ -152,8 +152,263 @@ pub struct Window {
     pub extension_owner: Option<(u32, u32)>,
 }
 
+/// Validated SharedMemory layout suitable for importing a window as BGRA texture backing.
+pub struct WindowShmLayout<'a> {
+    shared_memory: &'a SharedMemory,
+    width: u32,
+    height: u32,
+    offset: usize,
+    stride: u32,
+    size: usize,
+    format: u32,
+}
+
+impl<'a> WindowShmLayout<'a> {
+    /// Return the SharedMemory owner for this layout.
+    ///
+    /// # Returns
+    ///
+    /// The live SharedMemory reference whose handle authorizes import.
+    pub fn shared_memory(&self) -> &'a SharedMemory {
+        self.shared_memory
+    }
+
+    /// Return the imported texture width in pixels.
+    ///
+    /// # Returns
+    ///
+    /// The validated width.
+    pub const fn width(&self) -> u32 {
+        self.width
+    }
+
+    /// Return the imported texture height in pixels.
+    ///
+    /// # Returns
+    ///
+    /// The validated height.
+    pub const fn height(&self) -> u32 {
+        self.height
+    }
+
+    /// Return the byte offset of pixel `(0, 0)` in SharedMemory.
+    ///
+    /// # Returns
+    ///
+    /// The validated byte offset.
+    pub const fn offset(&self) -> usize {
+        self.offset
+    }
+
+    /// Return the number of bytes between SharedMemory pixel rows.
+    ///
+    /// # Returns
+    ///
+    /// The validated row stride.
+    pub const fn stride(&self) -> u32 {
+        self.stride
+    }
+
+    /// Return the size of the mapped SharedMemory backing in bytes.
+    ///
+    /// # Returns
+    ///
+    /// The recorded mapping size used to validate this layout.
+    pub const fn size(&self) -> usize {
+        self.size
+    }
+
+    /// Return the Wayland shared-memory pixel format.
+    ///
+    /// # Returns
+    ///
+    /// The validated BGRA-compatible format value.
+    pub const fn format(&self) -> u32 {
+        self.format
+    }
+}
+
+/// Validated BGRA pixel view for a window backing store.
+pub struct WindowPixels<'a> {
+    pixels: &'a [u8],
+    stride: u32,
+    width: u32,
+    height: u32,
+}
+
+impl<'a> WindowPixels<'a> {
+    /// Return the complete validated backing slice, beginning at pixel `(0, 0)`.
+    pub fn bytes(&self) -> &'a [u8] {
+        self.pixels
+    }
+
+    /// Return the number of bytes between pixel rows.
+    pub const fn stride(&self) -> u32 {
+        self.stride
+    }
+
+    /// Return the validated backing width.
+    pub const fn width(&self) -> u32 {
+        self.width
+    }
+
+    /// Return the validated backing height.
+    pub const fn height(&self) -> u32 {
+        self.height
+    }
+
+    /// Return a source slice beginning at the requested local BGRA rectangle.
+    pub fn damage_bytes(
+        &self,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+    ) -> Result<&'a [u8], &'static str> {
+        if width == 0
+            || height == 0
+            || x.checked_add(width).is_none_or(|right| right > self.width)
+            || y.checked_add(height)
+                .is_none_or(|bottom| bottom > self.height)
+        {
+            return Err("Window damage is outside its backing store");
+        }
+
+        let offset = (y as usize)
+            .checked_mul(self.stride as usize)
+            .and_then(|offset| offset.checked_add(x as usize * 4))
+            .ok_or("Window damage offset overflow")?;
+        let row_bytes = (width as usize)
+            .checked_mul(4)
+            .ok_or("Window damage row width overflow")?;
+        let end = (height as usize - 1)
+            .checked_mul(self.stride as usize)
+            .and_then(|last_row_offset| last_row_offset.checked_add(row_bytes))
+            .and_then(|damage_len| offset.checked_add(damage_len))
+            .ok_or("Window damage size overflow")?;
+        if end > self.pixels.len() {
+            return Err("Window damage exceeds backing store");
+        }
+        Ok(&self.pixels[offset..end])
+    }
+}
+
 #[allow(dead_code)]
 impl Window {
+    /// Return whether this window currently has a CPU-readable pixel backing.
+    pub fn has_pixel_buffer(&self) -> bool {
+        self.shm_mapped_addr.is_some() || self.buffer.is_some()
+    }
+
+    /// Return the validated CPU-readable BGRA backing store.
+    ///
+    /// # Returns
+    ///
+    /// A view beginning at local pixel `(0, 0)`, or an error when the backing
+    /// store is unavailable or does not cover the window geometry.
+    pub fn pixels(&self) -> Result<WindowPixels<'_>, &'static str> {
+        let stride = if self.shm_mapped_addr.is_some() && self.shm_stride != 0 {
+            self.shm_stride
+        } else {
+            self.width.checked_mul(4).ok_or("Window stride overflow")?
+        };
+        let row_bytes = self
+            .width
+            .checked_mul(4)
+            .ok_or("Window row width overflow")?;
+        if self.width == 0 || self.height == 0 || stride < row_bytes {
+            return Err("Window backing stride is invalid");
+        }
+        let required = (self.height as usize - 1)
+            .checked_mul(stride as usize)
+            .and_then(|offset| offset.checked_add(row_bytes as usize))
+            .ok_or("Window backing size overflow")?;
+
+        if let Some(mapped_addr) = self.shm_mapped_addr {
+            let mapping_size = self.shm_size;
+            let end = self
+                .shm_offset
+                .checked_add(required)
+                .ok_or("Window SHM range overflow")?;
+            if mapping_size == 0 || end > mapping_size {
+                return Err("Window SHM backing does not cover its geometry");
+            }
+            // SAFETY: `mapped_addr` is owned by this live window, and the checked
+            // `shm_offset..end` range is entirely inside its recorded SHM mapping.
+            let mapping =
+                unsafe { core::slice::from_raw_parts(mapped_addr as *const u8, mapping_size) };
+            return Ok(WindowPixels {
+                pixels: &mapping[self.shm_offset..end],
+                stride,
+                width: self.width,
+                height: self.height,
+            });
+        }
+
+        if let Some(buffer) = self.buffer.as_deref() {
+            if required > buffer.len() {
+                return Err("Window buffer does not cover its geometry");
+            }
+            return Ok(WindowPixels {
+                pixels: &buffer[..required],
+                stride,
+                width: self.width,
+                height: self.height,
+            });
+        }
+
+        Err("Window has no pixel buffer")
+    }
+
+    /// Return a validated BGRA SharedMemory layout for GPU texture import.
+    ///
+    /// # Returns
+    ///
+    /// A SharedMemory owner and fixed pixel layout, or an error when this window
+    /// is not backed by BGRA-compatible SharedMemory covering its geometry.
+    pub fn shm_layout(&self) -> Result<WindowShmLayout<'_>, &'static str> {
+        const WL_SHM_FORMAT_ARGB8888: u32 = 0;
+
+        let shared_memory = self
+            .shm
+            .as_ref()
+            .ok_or("Window does not own shared memory")?;
+        if self.width == 0
+            || self.height == 0
+            || self.shm_size == 0
+            || self.shm_format != WL_SHM_FORMAT_ARGB8888
+        {
+            return Err("Window shared memory layout is not BGRA-compatible");
+        }
+        let row_bytes = self
+            .width
+            .checked_mul(4)
+            .ok_or("Window shared memory row width overflow")?;
+        if self.shm_stride < row_bytes {
+            return Err("Window shared memory stride is too small");
+        }
+        let required = (self.height as usize - 1)
+            .checked_mul(self.shm_stride as usize)
+            .and_then(|offset| offset.checked_add(row_bytes as usize))
+            .ok_or("Window shared memory layout overflows")?;
+        let end = self
+            .shm_offset
+            .checked_add(required)
+            .ok_or("Window shared memory layout overflows")?;
+        if end > self.shm_size {
+            return Err("Window shared memory layout exceeds its mapping");
+        }
+        Ok(WindowShmLayout {
+            shared_memory,
+            width: self.width,
+            height: self.height,
+            offset: self.shm_offset,
+            stride: self.shm_stride,
+            size: self.shm_size,
+            format: self.shm_format,
+        })
+    }
+
     /// Create a new window
     pub fn new(id: WindowId, x: i32, y: i32, width: u32, height: u32) -> Self {
         Self {
@@ -563,6 +818,11 @@ impl WindowManager {
             .find(|window| window.id == id)
             .ok_or("Window not found")?;
 
+        if let (Some(old_addr), old_size) = (window.shm_mapped_addr.take(), window.shm_size)
+            && old_size != 0
+        {
+            let _ = munmap(old_addr, old_size);
+        }
         window.width = width;
         window.height = height;
         window.buffer = None;

@@ -182,6 +182,10 @@ name = "sgfx_cube"
 path = "src/sgfx_cube.rs"
 
 [[bin]]
+name = "sgfx_texture"
+path = "src/sgfx_texture.rs"
+
+[[bin]]
 name = "markdown_demo"
 path = "src/markdown_demo.rs"
 

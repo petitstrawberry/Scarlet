@@ -1,6 +1,7 @@
 //! Compositor module - manages window composition and rendering
 
 use super::cursor::Cursor;
+use super::gpu_compositor::GpuCompositor;
 use super::input::{CompositorInputEvent, InputManager, key_codes};
 use super::ipc::{IpcEvent, IpcServer, send_message_to_client, send_response_to_client};
 use super::window::WindowManager;
@@ -402,6 +403,7 @@ fn normalize_scale_milli(scale_milli: u32) -> u32 {
 /// Compositor - the main window server with proper layer compositing
 pub struct Compositor {
     display: DisplaySurface,
+    gpu_compositor: Option<GpuCompositor>,
     window_manager: WindowManager,
     ipc_server: IpcServer,
     wake_read: Handle,
@@ -550,8 +552,20 @@ impl Compositor {
         let mut backbuffer = Vec::with_capacity(buffer_size);
         backbuffer.resize(buffer_size, 0);
 
+        let gpu_compositor = match GpuCompositor::new(screen_width, screen_height, &cursor) {
+            Ok(compositor) => {
+                println!("[Compositor] GPU composition enabled");
+                Some(compositor)
+            }
+            Err(error) => {
+                println!("[Compositor] GPU composition unavailable: {}", error);
+                None
+            }
+        };
+
         Ok(Self {
             display,
+            gpu_compositor,
             window_manager,
             ipc_server,
             wake_read,
@@ -783,6 +797,15 @@ impl Compositor {
         super::input::set_screen_size(new_width, new_height);
         self.cursor
             .set_position(self.cursor.x, self.cursor.y, new_width, new_height);
+
+        let gpu_resize_failed = match self.gpu_compositor.as_mut() {
+            Some(gpu_compositor) => gpu_compositor.resize_target(new_width, new_height).is_err(),
+            None => false,
+        };
+        if gpu_resize_failed {
+            println!("[Compositor] Disabling GPU composition after display resize failure");
+            self.gpu_compositor = None;
+        }
 
         let payload = sws_protocol::payload_screen_size(new_width, new_height);
         super::ipc::broadcast_message_to_all_clients(
@@ -1327,8 +1350,66 @@ impl Compositor {
 
     /// Composite all layers directly to the display backing store.
     fn composite_and_present(&mut self) -> Result<(), &'static str> {
+        if self.composite_and_present_gpu() {
+            return Ok(());
+        }
         let dirty_rects = self.composite_pending_to_display()?;
         self.present_damage(dirty_rects)
+    }
+
+    /// Release one cached GPU window texture before its backing can be replaced.
+    fn release_gpu_window_texture(&mut self, window_id: u32) {
+        let release_failed = match self.gpu_compositor.as_mut() {
+            Some(gpu_compositor) => gpu_compositor.remove_window(window_id).is_err(),
+            None => false,
+        };
+        if release_failed {
+            println!(
+                "[Compositor] GPU texture release failed for window {}; disabling GPU composition",
+                window_id
+            );
+            self.gpu_compositor = None;
+            self.full_redraw_needed = true;
+            self.pending_damage.clear();
+            self.presented_damage.clear();
+        }
+    }
+
+    /// Compose and present the whole scene through the optional GPU path.
+    ///
+    /// A GPU error is intentionally contained here: the caller continues with a
+    /// full CPU redraw during this same frame.
+    fn composite_and_present_gpu(&mut self) -> bool {
+        let Some(gpu_compositor) = self.gpu_compositor.as_mut() else {
+            return false;
+        };
+        let result = gpu_compositor.compose_and_present(
+            &self.display,
+            self.window_manager.get_windows(),
+            &self.cursor,
+            self.bg_color,
+            self.resize_outline,
+        );
+        match result {
+            Ok(()) => {
+                self.cursor.mark_drawn();
+                self.full_redraw_needed = false;
+                self.pending_damage.clear();
+                self.presented_damage.clear();
+                true
+            }
+            Err(error) => {
+                println!(
+                    "[Compositor] GPU composition failed: {}; using CPU fallback",
+                    error
+                );
+                self.gpu_compositor = None;
+                self.full_redraw_needed = true;
+                self.pending_damage.clear();
+                self.presented_damage.clear();
+                false
+            }
+        }
     }
 
     fn validate_vram_samples(
@@ -2280,16 +2361,24 @@ impl Compositor {
 
             // Re-composite and present if needed
             if self.has_pending_redraw(needs_redraw) {
-                let mut present_damage = self.composite_pending_to_display()?;
-                needs_redraw |= self.wait_for_frame_batch()?;
-                if self.full_redraw_needed {
-                    sws_debug!("[Compositor] Full redraw triggered");
+                if self.gpu_compositor.is_some() {
+                    self.wait_for_frame_batch()?;
+                    if self.full_redraw_needed {
+                        sws_debug!("[Compositor] Full redraw triggered");
+                    }
+                    self.composite_and_present()?;
+                } else {
+                    let mut present_damage = self.composite_pending_to_display()?;
+                    needs_redraw |= self.wait_for_frame_batch()?;
+                    if self.full_redraw_needed {
+                        sws_debug!("[Compositor] Full redraw triggered");
+                    }
+                    if self.has_pending_redraw(needs_redraw) {
+                        let next_damage = self.composite_pending_to_display()?;
+                        Self::merge_present_damage(&mut present_damage, next_damage);
+                    }
+                    self.present_damage(present_damage)?;
                 }
-                if self.has_pending_redraw(needs_redraw) {
-                    let next_damage = self.composite_pending_to_display()?;
-                    Self::merge_present_damage(&mut present_damage, next_damage);
-                }
-                self.present_damage(present_damage)?;
                 self.event_counter += 1;
             }
 
@@ -2880,6 +2969,9 @@ impl Compositor {
             .collect();
         self.clear_interaction_state_for_removed_windows(&removed_ids);
         self.remove_ime_popup_windows(&removed_ids);
+        for window_id in &removed_ids {
+            self.release_gpu_window_texture(*window_id);
+        }
 
         let mut active_app_removed = false;
         for (window_id, rect, app_id) in &removed_windows {
@@ -3384,6 +3476,15 @@ impl Compositor {
                 // );
 
                 self.add_pending_damage((sx0, sy0, w, h));
+                if let Some(gpu_compositor) = self.gpu_compositor.as_mut() {
+                    gpu_compositor.mark_window_damage(
+                        window_id,
+                        damage_x,
+                        damage_y,
+                        damage_width,
+                        damage_height,
+                    );
+                }
             }
             IpcEvent::RequestMove { window_id } => {
                 sws_debug!("[Compositor] Window #{} requested move", window_id);
@@ -3520,6 +3621,7 @@ impl Compositor {
                     .get_window(window_id)
                     .map(|w| (w.x, w.y, w.width, w.height));
                 if let Some(shm) = shm {
+                    self.release_gpu_window_texture(window_id);
                     if self.window_manager.resize_window_with_shm(
                         window_id,
                         width,
@@ -3821,6 +3923,15 @@ impl Compositor {
                         damage_width,
                         damage_height,
                     ));
+                    if let Some(gpu_compositor) = self.gpu_compositor.as_mut() {
+                        gpu_compositor.mark_window_damage(
+                            window_id,
+                            damage_x,
+                            damage_y,
+                            damage_width,
+                            damage_height,
+                        );
+                    }
                 }
             }
             IpcEvent::ExtensionAttachBuffer {
@@ -3849,6 +3960,7 @@ impl Compositor {
                     // println!("[Compositor] Attaching external buffer at address 0x{:x}", addr);
                     if let Some(shm_handle) = shm {
                         // We have both handle and address (normal case)
+                        self.release_gpu_window_texture(window_id);
                         if let Err(e) = self.window_manager.replace_window_shm_from_event(
                             window_id,
                             width,
@@ -3873,7 +3985,17 @@ impl Compositor {
                         // We have address but no SharedMemory wrapper (e.g., File handle from Linux compat)
                         // This is zero-copy mode - just update the mapped address
                         // println!("[Compositor] Zero-copy mode: updating mapped address without SharedMemory wrapper");
+                        self.release_gpu_window_texture(window_id);
                         let rect = if let Some(w) = self.window_manager.get_window_mut(window_id) {
+                            if let (Some(old_addr), old_size) =
+                                (w.shm_mapped_addr.take(), w.shm_size)
+                                && old_size != 0
+                            {
+                                let _ = std::handle::capability::memory_mapping::munmap(
+                                    old_addr, old_size,
+                                );
+                            }
+                            w.shm = None;
                             w.width = width;
                             w.height = height;
                             w.shm_mapped_addr = Some(addr);
@@ -3887,7 +4009,6 @@ impl Compositor {
                             w.shm_format = format;
                             w.has_alpha_content = format == 0;
                             w.buffer = None; // Clear Vec buffer if present
-                            // Keep existing shm if any (for ownership tracking)
                             Some((w.x, w.y, w.width, w.height))
                         } else {
                             println!("[Compositor] Window {} not found", window_id);

@@ -34,10 +34,10 @@ use super::{
     SocketError, SocketObject, SocketProtocol, SocketState, SocketType,
 };
 use crate::ipc::StreamIpcOps;
-use crate::object::KernelObject;
 use crate::object::capability::{
     ControlOps, ReadyInterest, ReadySet, SelectWaitOutcome, Selectable, StreamError, StreamOps,
 };
+use crate::object::{KernelObject, handle::HandleMetadata};
 use crate::sync::Waker;
 
 const LOCALSOCKET_LOG: bool = false;
@@ -147,9 +147,9 @@ pub struct LocalSocket {
     /// Waker for blocking recv_handle() operations
     handle_waker: Waker,
 
-    /// Queue of handles (KernelObjects) received from peer
+    /// Queue of handles and handle-scoped metadata received from peer
     /// This allows passing file descriptors / kernel objects between tasks
-    handle_queue: IrqRwSpinLock<VecDeque<KernelObject>>,
+    handle_queue: IrqRwSpinLock<VecDeque<(KernelObject, HandleMetadata)>>,
 
     /// Nonblocking I/O flag
     nonblocking: IrqRwSpinLock<bool>,
@@ -203,7 +203,20 @@ impl LocalSocket {
     /// Send a KernelObject handle through this socket
     ///
     /// This is LocalSocket-only (SCM_RIGHTS equivalent) and uses dup() semantics.
-    pub fn send_handle(&self, object: KernelObject) -> Result<(), crate::ipc::IpcError> {
+    ///
+    /// # Arguments
+    ///
+    /// * `object` - Duplicated kernel object to transfer.
+    /// * `metadata` - Exact handle-scoped metadata to preserve for the receiver.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` when queued, otherwise an IPC error.
+    pub fn send_handle(
+        &self,
+        object: KernelObject,
+        metadata: HandleMetadata,
+    ) -> Result<(), crate::ipc::IpcError> {
         use crate::ipc::IpcError;
 
         // Verify socket is connected
@@ -223,7 +236,7 @@ impl LocalSocket {
         }
 
         // Add handle to peer's receive queue
-        peer_queue.push_back(object);
+        peer_queue.push_back((object, metadata));
         drop(peer_queue);
 
         // Wake one task potentially blocked on recv_handle
@@ -243,6 +256,7 @@ impl LocalSocket {
     pub fn send_handle_and_data(
         &self,
         object: KernelObject,
+        metadata: HandleMetadata,
         data: &[u8],
     ) -> Result<(), crate::ipc::IpcError> {
         use crate::ipc::IpcError;
@@ -301,7 +315,7 @@ impl LocalSocket {
         );
 
         // Add handle to peer's receive queue
-        peer_handle_queue.push_back(object);
+        peer_handle_queue.push_back((object, metadata));
         let queue_len = peer_handle_queue.len();
         drop(peer_handle_queue);
 
@@ -335,12 +349,12 @@ impl LocalSocket {
     ///
     /// # Returns
     ///
-    /// * `(KernelObject, Vec<u8>)` - Handle and data on success
+    /// * `(KernelObject, HandleMetadata, Vec<u8>)` - Handle, metadata, and data on success
     /// * `IpcError` - Error if no handle/data available or other error
     pub fn recv_handle_and_data(
         &self,
         max_data_len: usize,
-    ) -> Result<(KernelObject, Vec<u8>), crate::ipc::IpcError> {
+    ) -> Result<(KernelObject, HandleMetadata, Vec<u8>), crate::ipc::IpcError> {
         use crate::ipc::IpcError;
 
         localsocket_log!(
@@ -362,7 +376,7 @@ impl LocalSocket {
             queue.len()
         );
 
-        let handle = match queue.pop_front() {
+        let (object, metadata) = match queue.pop_front() {
             Some(h) => h,
             None => {
                 localsocket_log!(
@@ -396,11 +410,15 @@ impl LocalSocket {
             data.len()
         );
 
-        Ok((handle, data))
+        Ok((object, metadata, data))
     }
 
-    /// Receive a KernelObject handle from this socket (non-blocking)
-    pub fn recv_handle(&self) -> Result<KernelObject, crate::ipc::IpcError> {
+    /// Receive a KernelObject handle and its metadata from this socket (non-blocking).
+    ///
+    /// # Returns
+    ///
+    /// The transferred object and exact handle metadata, or an IPC error.
+    pub fn recv_handle(&self) -> Result<(KernelObject, HandleMetadata), crate::ipc::IpcError> {
         use crate::ipc::IpcError;
 
         // Verify socket is connected
@@ -531,7 +549,7 @@ impl LocalSocket {
         &self,
         task_id: usize,
         trapframe: &mut crate::arch::Trapframe,
-    ) -> Result<KernelObject, crate::ipc::IpcError> {
+    ) -> Result<(KernelObject, HandleMetadata), crate::ipc::IpcError> {
         use crate::ipc::IpcError;
 
         loop {
@@ -1319,6 +1337,7 @@ mod tests {
     #[test_case]
     fn test_handle_transfer_send_recv() {
         use crate::ipc::SharedMemory;
+        use crate::object::handle::{AccessMode, HandleType};
         use alloc::sync::Arc;
 
         // Create a connected socket pair
@@ -1337,7 +1356,13 @@ mod tests {
         let shmem_obj = KernelObject::from_shared_memory_object(Arc::new(shmem));
 
         // Send handle from sock1 to sock2
-        let result = sock1.send_handle(shmem_obj);
+        let metadata = HandleMetadata {
+            handle_type: HandleType::IpcChannel,
+            access_mode: AccessMode::WriteOnly,
+            special_semantics: Some(crate::object::handle::SpecialSemantics::CloseOnExec),
+        };
+        let expected_metadata = metadata.clone();
+        let result = sock1.send_handle(shmem_obj, metadata);
         assert!(result.is_ok(), "send_handle should succeed");
 
         // Receive handle at sock2
@@ -1345,10 +1370,16 @@ mod tests {
         assert!(received.is_ok(), "recv_handle should succeed");
 
         // Verify it's a SharedMemory object
-        let received_obj = received.unwrap();
+        let (received_obj, received_metadata) = received.unwrap();
         assert!(
             received_obj.as_shared_memory().is_some(),
             "Received object should be SharedMemory"
+        );
+        assert_eq!(received_metadata.handle_type, expected_metadata.handle_type);
+        assert_eq!(received_metadata.access_mode, AccessMode::WriteOnly);
+        assert_eq!(
+            received_metadata.special_semantics,
+            expected_metadata.special_semantics
         );
     }
 
@@ -1365,7 +1396,11 @@ mod tests {
         for i in 0..3 {
             if let Ok(shmem) = SharedMemory::new(4096 * (i + 1), 0x3) {
                 let shmem_obj = KernelObject::from_shared_memory_object(Arc::new(shmem));
-                assert!(sock1.send_handle(shmem_obj).is_ok());
+                assert!(
+                    sock1
+                        .send_handle(shmem_obj, HandleMetadata::default())
+                        .is_ok()
+                );
             }
         }
 
@@ -1374,7 +1409,7 @@ mod tests {
             let received = sock2.recv_handle();
             assert!(received.is_ok(), "recv_handle should succeed");
             assert!(
-                received.unwrap().as_shared_memory().is_some(),
+                received.unwrap().0.as_shared_memory().is_some(),
                 "Received object should be SharedMemory"
             );
         }
@@ -1399,7 +1434,7 @@ mod tests {
         if let Ok(shmem) = SharedMemory::new(4096, 0x3) {
             // READ | WRITE
             let shmem_obj = KernelObject::from_shared_memory_object(Arc::new(shmem));
-            let result = sock.send_handle(shmem_obj);
+            let result = sock.send_handle(shmem_obj, HandleMetadata::default());
             assert!(
                 result.is_err(),
                 "send_handle should fail on disconnected socket"

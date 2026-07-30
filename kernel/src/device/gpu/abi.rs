@@ -39,6 +39,14 @@ pub const GPU_IMAGE_QUERY_INFO: u32 = 0x475f;
 pub const GPU_CONTEXT_ATTACH_IMAGE: u32 = 0x4760;
 /// Control command that attaches a GPU buffer to an execution context.
 pub const GPU_CONTEXT_ATTACH_BUFFER: u32 = 0x4761;
+/// Control command that uploads BGRA pixels into an image attached to a context.
+pub const GPU_CONTEXT_UPLOAD_IMAGE_BGRA: u32 = 0x4762;
+/// Control command that detaches an image from an execution context.
+pub const GPU_CONTEXT_DETACH_IMAGE: u32 = 0x4763;
+/// Control command that creates a sampled BGRA image imported from shared memory.
+pub const GPU_CREATE_IMPORTED_IMAGE_BGRA: u32 = 0x4764;
+/// Control command that transfers one imported BGRA damage rectangle.
+pub const GPU_CONTEXT_TRANSFER_IMPORTED_IMAGE_BGRA: u32 = 0x4765;
 
 /// Query completed successfully.
 pub const GPU_RESULT_SUCCESS: u32 = 0;
@@ -66,6 +74,8 @@ pub const GPU_BACKEND_INFO_BYTES: usize = 64;
 pub const GPU_DIALECT_INFO_BYTES: usize = 256;
 /// Maximum command stream length accepted by the generic queue ABI.
 pub const GPU_MAX_OPAQUE_COMMAND_SIZE: u32 = 64 * 1024;
+/// Maximum BGRA pixel payload accepted by one image upload request.
+pub const GPU_MAX_IMAGE_UPLOAD_SIZE: u32 = 64 * 1024 * 1024;
 
 /// Submit flag requesting a timeline update after successful backend completion.
 pub const GPU_QUEUE_SUBMIT_FLAG_SIGNAL_TIMELINE: u32 = 1 << 0;
@@ -78,8 +88,15 @@ pub const GPU_IMAGE_FORMAT_BGRA8_UNORM: u32 = 1;
 pub const GPU_IMAGE_USAGE_RENDER_TARGET: u32 = 1 << 0;
 /// Image usage permitting the image to be selected for display scanout.
 pub const GPU_IMAGE_USAGE_PRESENTABLE: u32 = 1 << 1;
+/// Image usage permitting the image to be sampled by GPU commands.
+pub const GPU_IMAGE_USAGE_SAMPLED: u32 = 1 << 2;
+/// Image usage permitting BGRA pixel transfers into the image.
+pub const GPU_IMAGE_USAGE_TRANSFER_DST: u32 = 1 << 3;
 /// All currently defined GPU image usage flags.
-pub const GPU_IMAGE_USAGE_VALID: u32 = GPU_IMAGE_USAGE_RENDER_TARGET | GPU_IMAGE_USAGE_PRESENTABLE;
+pub const GPU_IMAGE_USAGE_VALID: u32 = GPU_IMAGE_USAGE_RENDER_TARGET
+    | GPU_IMAGE_USAGE_PRESENTABLE
+    | GPU_IMAGE_USAGE_SAMPLED
+    | GPU_IMAGE_USAGE_TRANSFER_DST;
 
 /// Fixed-width request and response for [`GPU_CREATE_IMAGE`].
 #[repr(C)]
@@ -119,11 +136,30 @@ impl GpuCreateImage {
     ///
     /// A BGRA8 render-target and presentable image request.
     pub const fn new(width: u32, height: u32) -> Self {
+        Self::new_with_usage(
+            width,
+            height,
+            GPU_IMAGE_USAGE_RENDER_TARGET | GPU_IMAGE_USAGE_PRESENTABLE,
+        )
+    }
+
+    /// Create an image request with explicit generic usage flags.
+    ///
+    /// # Arguments
+    ///
+    /// * `width` - Requested non-zero image width in pixels.
+    /// * `height` - Requested non-zero image height in pixels.
+    /// * `usage` - Requested `GPU_IMAGE_USAGE_*` flags.
+    ///
+    /// # Returns
+    ///
+    /// A BGRA8 image request for the requested generic usages.
+    pub const fn new_with_usage(width: u32, height: u32, usage: u32) -> Self {
         Self {
             abi_version: GPU_ABI_VERSION,
             result: GPU_RESULT_SUCCESS,
             format: GPU_IMAGE_FORMAT_BGRA8_UNORM,
-            usage: GPU_IMAGE_USAGE_VALID,
+            usage,
             width,
             height,
             image_handle: 0,
@@ -247,6 +283,188 @@ impl GpuContextAttachImage {
     }
 }
 
+/// Fixed-width request and response for [`GPU_CONTEXT_DETACH_IMAGE`].
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct GpuContextDetachImage {
+    /// ABI version supplied by userspace and echoed by the kernel.
+    pub abi_version: u32,
+    /// Explicit `GPU_RESULT_*` result code.
+    pub result: u32,
+    /// Existing attached GPU image child handle to detach.
+    pub image_handle: u32,
+    /// Reserved detachment flags. Must be zero.
+    pub flags: u32,
+    /// Reserved for ABI-compatible future use. Must be zero.
+    pub reserved: u64,
+}
+
+impl GpuContextDetachImage {
+    /// Create an image detachment request for the current ABI version.
+    ///
+    /// # Arguments
+    ///
+    /// * `image_handle` - Existing attached image capability handle.
+    ///
+    /// # Returns
+    ///
+    /// A zeroed image detachment request.
+    pub const fn new(image_handle: u32) -> Self {
+        Self {
+            abi_version: GPU_ABI_VERSION,
+            result: GPU_RESULT_SUCCESS,
+            image_handle,
+            flags: 0,
+            reserved: 0,
+        }
+    }
+
+    /// Clear response fields while preserving request fields.
+    pub(crate) fn clear_response(&mut self) {
+        self.result = GPU_RESULT_SUCCESS;
+    }
+}
+
+/// Fixed-width request and response for [`GPU_CREATE_IMPORTED_IMAGE_BGRA`].
+///
+/// The shared-memory capability remains the authority for the backing. The
+/// kernel validates and pins it; userspace does not provide a physical address.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct GpuCreateImportedImageBgra {
+    /// ABI version supplied by userspace and echoed by the kernel.
+    pub abi_version: u32,
+    /// Explicit `GPU_RESULT_*` result code.
+    pub result: u32,
+    /// Existing SharedMemory capability handle.
+    pub shm_handle: u32,
+    /// Generic `GPU_IMAGE_FORMAT_*` image format.
+    pub format: u32,
+    /// `GPU_IMAGE_USAGE_*` image usage flags.
+    pub usage: u32,
+    /// Image width in pixels.
+    pub width: u32,
+    /// Image height in pixels.
+    pub height: u32,
+    /// Number of bytes between source rows in SharedMemory.
+    pub source_stride: u32,
+    /// Newly created image child handle on success, otherwise zero.
+    pub image_handle: u32,
+    /// Reserved for ABI-compatible future use. Must be zero.
+    pub reserved: u32,
+    /// Byte offset of pixel `(0, 0)` in SharedMemory.
+    pub shm_offset: u64,
+    /// Opaque backend command resource token for the image.
+    pub command_resource_token: u64,
+    /// Imported backing allocation size in bytes.
+    pub allocation_size: u64,
+}
+
+impl GpuCreateImportedImageBgra {
+    /// Create an imported BGRA image request for the current ABI version.
+    ///
+    /// # Arguments
+    ///
+    /// * `shm_handle` - Existing SharedMemory capability handle.
+    /// * `width` - Requested non-zero image width in pixels.
+    /// * `height` - Requested non-zero image height in pixels.
+    /// * `shm_offset` - Byte offset of pixel `(0, 0)` in SharedMemory.
+    /// * `source_stride` - Number of bytes between source rows in SharedMemory.
+    ///
+    /// # Returns
+    ///
+    /// A sampled, transfer-destination BGRA image request.
+    pub const fn new(
+        shm_handle: u32,
+        width: u32,
+        height: u32,
+        shm_offset: u64,
+        source_stride: u32,
+    ) -> Self {
+        Self {
+            abi_version: GPU_ABI_VERSION,
+            result: GPU_RESULT_SUCCESS,
+            shm_handle,
+            format: GPU_IMAGE_FORMAT_BGRA8_UNORM,
+            usage: GPU_IMAGE_USAGE_SAMPLED | GPU_IMAGE_USAGE_TRANSFER_DST,
+            width,
+            height,
+            source_stride,
+            image_handle: 0,
+            reserved: 0,
+            shm_offset,
+            command_resource_token: 0,
+            allocation_size: 0,
+        }
+    }
+
+    /// Clear response fields while preserving request fields.
+    pub(crate) fn clear_response(&mut self) {
+        self.result = GPU_RESULT_SUCCESS;
+        self.image_handle = 0;
+        self.command_resource_token = 0;
+        self.allocation_size = 0;
+    }
+}
+
+/// Fixed-width request and response for [`GPU_CONTEXT_TRANSFER_IMPORTED_IMAGE_BGRA`].
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct GpuContextTransferImportedImageBgra {
+    /// ABI version supplied by userspace and echoed by the kernel.
+    pub abi_version: u32,
+    /// Explicit `GPU_RESULT_*` result code.
+    pub result: u32,
+    /// Existing imported GPU image child handle attached to this context.
+    pub image_handle: u32,
+    /// Reserved for ABI-compatible future use. Must be zero.
+    pub reserved: u32,
+    /// Destination image x coordinate in pixels.
+    pub dst_x: u32,
+    /// Destination image y coordinate in pixels.
+    pub dst_y: u32,
+    /// Rectangle width in pixels.
+    pub width: u32,
+    /// Rectangle height in pixels.
+    pub height: u32,
+    /// Reserved for ABI-compatible future use. Must be zero.
+    pub reserved2: u64,
+}
+
+impl GpuContextTransferImportedImageBgra {
+    /// Create an imported BGRA rectangle transfer request for the current ABI version.
+    ///
+    /// # Arguments
+    ///
+    /// * `image_handle` - Imported image capability handle attached to the context.
+    /// * `dst_x` - Destination image x coordinate in pixels.
+    /// * `dst_y` - Destination image y coordinate in pixels.
+    /// * `width` - Non-zero rectangle width in pixels.
+    /// * `height` - Non-zero rectangle height in pixels.
+    ///
+    /// # Returns
+    ///
+    /// A pointer-free transfer request that uses the image's fixed imported backing.
+    pub const fn new(image_handle: u32, dst_x: u32, dst_y: u32, width: u32, height: u32) -> Self {
+        Self {
+            abi_version: GPU_ABI_VERSION,
+            result: GPU_RESULT_SUCCESS,
+            image_handle,
+            reserved: 0,
+            dst_x,
+            dst_y,
+            width,
+            height,
+            reserved2: 0,
+        }
+    }
+
+    /// Clear response fields while preserving request fields.
+    pub(crate) fn clear_response(&mut self) {
+        self.result = GPU_RESULT_SUCCESS;
+    }
+}
+
 /// Fixed-width request and response for [`GPU_CONTEXT_ATTACH_BUFFER`].
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
@@ -290,6 +508,90 @@ impl GpuContextAttachBuffer {
     pub(crate) fn clear_response(&mut self) {
         self.result = GPU_RESULT_SUCCESS;
         self.command_resource_token = 0;
+    }
+}
+
+/// Fixed-width request and response for [`GPU_CONTEXT_UPLOAD_IMAGE_BGRA`].
+///
+/// `image_handle` is the authority for the destination image. The supplied
+/// source pointer is copied synchronously into kernel-owned image backing and
+/// is never retained after this control operation returns.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct GpuContextUploadImageBgra {
+    /// ABI version supplied by userspace and echoed by the kernel.
+    pub abi_version: u32,
+    /// Explicit `GPU_RESULT_*` result code.
+    pub result: u32,
+    /// Existing GPU image child handle attached to this execution context.
+    pub image_handle: u32,
+    /// Reserved for ABI-compatible future use. Must be zero.
+    pub reserved: u32,
+    /// Userspace address of source BGRA pixels.
+    pub source_ptr: u64,
+    /// Length of the source userspace byte range.
+    pub source_length: u64,
+    /// Source row stride in bytes.
+    pub source_stride: u32,
+    /// Destination image x coordinate in pixels.
+    pub dst_x: u32,
+    /// Destination image y coordinate in pixels.
+    pub dst_y: u32,
+    /// Rectangle width in pixels.
+    pub width: u32,
+    /// Rectangle height in pixels.
+    pub height: u32,
+    /// Reserved for ABI-compatible future use. Must be zero.
+    pub reserved2: u64,
+}
+
+impl GpuContextUploadImageBgra {
+    /// Create a BGRA image upload request for the current ABI version.
+    ///
+    /// # Arguments
+    ///
+    /// * `image_handle` - Existing image capability attached to the context.
+    /// * `source_ptr` - Userspace address of source BGRA pixels.
+    /// * `source_length` - Length of the source userspace byte range.
+    /// * `source_stride` - Source row stride in bytes.
+    /// * `dst_x` - Destination image x coordinate in pixels.
+    /// * `dst_y` - Destination image y coordinate in pixels.
+    /// * `width` - Rectangle width in pixels.
+    /// * `height` - Rectangle height in pixels.
+    ///
+    /// # Returns
+    ///
+    /// A zeroed upload response with the supplied request parameters.
+    #[allow(clippy::too_many_arguments)]
+    pub const fn new(
+        image_handle: u32,
+        source_ptr: u64,
+        source_length: u64,
+        source_stride: u32,
+        dst_x: u32,
+        dst_y: u32,
+        width: u32,
+        height: u32,
+    ) -> Self {
+        Self {
+            abi_version: GPU_ABI_VERSION,
+            result: GPU_RESULT_SUCCESS,
+            image_handle,
+            reserved: 0,
+            source_ptr,
+            source_length,
+            source_stride,
+            dst_x,
+            dst_y,
+            width,
+            height,
+            reserved2: 0,
+        }
+    }
+
+    /// Clear response fields while preserving request fields.
+    pub(crate) fn clear_response(&mut self) {
+        self.result = GPU_RESULT_SUCCESS;
     }
 }
 

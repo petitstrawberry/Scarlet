@@ -24,6 +24,8 @@ pub const GPU_EXECUTION_SUPPORT_QUEUE: u32 = 1 << 2;
 pub const GPU_EXECUTION_SUPPORT_TIMELINE: u32 = 1 << 3;
 /// Generic presentation operations are available.
 pub const GPU_EXECUTION_SUPPORT_PRESENTATION: u32 = 1 << 4;
+/// Generic image upload operations are available.
+pub const GPU_EXECUTION_SUPPORT_IMAGE_UPLOAD: u32 = 1 << 5;
 
 /// Stable state of a GPU device.
 #[repr(u32)]
@@ -345,6 +347,91 @@ pub struct GpuImageCreateInfo {
     pub height: u32,
 }
 
+/// Backend-neutral physical backing for a GPU image resource.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GpuImageBackingInfo {
+    /// Physical address of the stable contiguous backing allocation.
+    pub paddr: usize,
+    /// Page-rounded allocation size in bytes.
+    pub allocation_size: u64,
+}
+
+impl GpuImageBackingInfo {
+    /// Build image backing information for a backend resource.
+    ///
+    /// # Arguments
+    ///
+    /// * `paddr` - Physical address of the contiguous image backing.
+    /// * `allocation_size` - Non-zero backing allocation size in bytes.
+    ///
+    /// # Returns
+    ///
+    /// Backend-neutral image backing information.
+    pub const fn new(paddr: usize, allocation_size: u64) -> Self {
+        Self {
+            paddr,
+            allocation_size,
+        }
+    }
+}
+
+/// Validated kernel-backing region for one image upload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GpuImageUploadInfo {
+    /// Byte offset of the first uploaded pixel in the image backing.
+    pub backing_offset: u64,
+    /// Full image row stride in bytes.
+    pub backing_stride: u32,
+    /// Full image layer stride in bytes.
+    pub backing_layer_stride: u32,
+    /// Destination image x coordinate in pixels.
+    pub dst_x: u32,
+    /// Destination image y coordinate in pixels.
+    pub dst_y: u32,
+    /// Uploaded rectangle width in pixels.
+    pub width: u32,
+    /// Uploaded rectangle height in pixels.
+    pub height: u32,
+}
+
+impl GpuImageUploadInfo {
+    /// Build validated backend-neutral image upload information.
+    ///
+    /// # Arguments
+    ///
+    /// * `backing_offset` - Byte offset of the rectangle in image backing.
+    /// * `backing_stride` - Full image row stride in bytes.
+    /// * `backing_layer_stride` - Full image layer stride in bytes.
+    /// * `dst_x` - Destination x coordinate in pixels.
+    /// * `dst_y` - Destination y coordinate in pixels.
+    /// * `width` - Uploaded width in pixels.
+    /// * `height` - Uploaded height in pixels.
+    ///
+    /// # Returns
+    ///
+    /// Backend upload information that contains no userspace pointer.
+    #[allow(clippy::too_many_arguments)]
+    pub const fn new(
+        backing_offset: u64,
+        backing_stride: u32,
+        backing_layer_stride: u32,
+        dst_x: u32,
+        dst_y: u32,
+        width: u32,
+        height: u32,
+    ) -> Self {
+        Self {
+            backing_offset,
+            backing_stride,
+            backing_layer_stride,
+            dst_x,
+            dst_y,
+            width,
+            height,
+        }
+    }
+}
+
 impl GpuImageCreateInfo {
     /// Build validated image creation parameters.
     ///
@@ -422,6 +509,13 @@ pub trait GpuBackendImage: Send + Sync {
     /// Generic image metadata and an opaque command resource token.
     fn query_info(&self) -> GpuBackendImageInfo;
 
+    /// Return an opaque identity for the backend that owns this image.
+    ///
+    /// # Returns
+    ///
+    /// An internal backend identity used only to validate context attachment.
+    fn backend_cookie(&self) -> u64;
+
     /// Return the display descriptor when this image is presentable.
     ///
     /// # Returns
@@ -472,6 +566,44 @@ pub trait GpuBackendContext: Send + Sync {
     /// Nothing after the image is no longer attached to this context.
     fn detach_image(&self, _image: &dyn GpuBackendImage) -> Result<(), &'static str> {
         Err("GPU backend context does not support image detachment")
+    }
+
+    /// Upload an already copied BGRA rectangle into an attached image.
+    ///
+    /// # Arguments
+    ///
+    /// * `image` - Backend image retained by the calling kernel capability.
+    /// * `upload` - Validated kernel-backing rectangle to transfer.
+    ///
+    /// # Returns
+    ///
+    /// Nothing after the backend has synchronously completed the upload, or an
+    /// error when image transfer is unavailable.
+    fn upload_image_bgra(
+        &self,
+        _image: &dyn GpuBackendImage,
+        _upload: GpuImageUploadInfo,
+    ) -> Result<(), &'static str> {
+        Err("GPU backend context does not support image uploads")
+    }
+
+    /// Transfer a rectangle from fixed imported image backing.
+    ///
+    /// # Arguments
+    ///
+    /// * `image` - Backend image retained by the calling kernel capability.
+    /// * `transfer` - Validated imported-backing rectangle to transfer.
+    ///
+    /// # Returns
+    ///
+    /// Nothing after the backend has synchronously completed the transfer, or an
+    /// error when imported image transfer is unavailable.
+    fn transfer_imported_image_bgra(
+        &self,
+        _image: &dyn GpuBackendImage,
+        _transfer: GpuImageUploadInfo,
+    ) -> Result<(), &'static str> {
+        Err("GPU backend context does not support imported image transfers")
     }
 
     /// Attach a buffer so opaque commands in this context may reference it.
@@ -563,11 +695,12 @@ pub trait GpuBackend: Send + Sync {
         Err("GPU backend does not support execution contexts")
     }
 
-    /// Create a backend-owned render-target and presentable image.
+    /// Create a backend-owned image with generic usage and kernel-owned backing.
     ///
     /// # Arguments
     ///
     /// * `create` - Validated backend-neutral image creation parameters.
+    /// * `backing` - Stable contiguous backing owned by the generic capability.
     ///
     /// # Returns
     ///
@@ -576,6 +709,7 @@ pub trait GpuBackend: Send + Sync {
     fn create_image(
         &self,
         _create: GpuImageCreateInfo,
+        _backing: GpuImageBackingInfo,
     ) -> Result<Arc<dyn GpuBackendImage>, &'static str> {
         Err("GPU backend does not support images")
     }

@@ -16,6 +16,56 @@ use crate::vm::vmem::VirtualMemoryMap;
 
 const LOG_SHARED_MEMORY_RESIZE: bool = false;
 
+/// Kernel-only description of stable shared-memory backing.
+///
+/// This is returned only after a shared-memory range has been pinned. Its
+/// physical address is never exposed through a userspace ABI.
+#[derive(Debug, Clone, Copy)]
+pub struct SharedMemoryBacking {
+    paddr: usize,
+    size: usize,
+}
+
+impl SharedMemoryBacking {
+    pub(crate) const fn paddr(&self) -> usize {
+        self.paddr
+    }
+
+    pub(crate) const fn size(&self) -> usize {
+        self.size
+    }
+}
+
+/// Strong shared-memory pin retained by a kernel importer.
+///
+/// The owner Arc keeps the SharedMemory object alive until after the pin is
+/// released, so a consumer never relies on a raw physical address alone.
+pub(crate) struct SharedMemoryPin {
+    owner: Arc<dyn SharedMemoryObject>,
+    backing: SharedMemoryBacking,
+}
+
+impl SharedMemoryPin {
+    pub(crate) fn new(
+        owner: Arc<dyn SharedMemoryObject>,
+        offset: usize,
+        length: usize,
+    ) -> Result<Self, &'static str> {
+        let backing = owner.pin_range(offset, length)?;
+        Ok(Self { owner, backing })
+    }
+
+    pub(crate) const fn backing(&self) -> SharedMemoryBacking {
+        self.backing
+    }
+}
+
+impl Drop for SharedMemoryPin {
+    fn drop(&mut self) {
+        self.owner.unpin_range();
+    }
+}
+
 /// Shared memory operations
 ///
 /// This trait extends the base functionality for shared memory objects.
@@ -31,6 +81,28 @@ pub trait SharedMemoryObject: MemoryMappingOps + Send + Sync {
 
     /// Check if the shared memory is still valid
     fn is_valid(&self) -> bool;
+
+    /// Pin a live range so its backing cannot change while imported.
+    ///
+    /// # Arguments
+    ///
+    /// * `offset` - Byte offset of the range to validate.
+    /// * `length` - Non-zero byte length of the range to validate.
+    ///
+    /// # Returns
+    ///
+    /// Kernel-only metadata for the stable backing, or an error when the
+    /// object is invalid or the range is outside its current size. Each
+    /// successful call must be paired with [`SharedMemoryObject::unpin_range`].
+    fn pin_range(&self, offset: usize, length: usize) -> Result<SharedMemoryBacking, &'static str>;
+
+    /// Release one prior shared-memory backing pin.
+    ///
+    /// # Returns
+    ///
+    /// Nothing. Calls without a corresponding pin are ignored so importer drop
+    /// paths remain safe during error cleanup.
+    fn unpin_range(&self);
 }
 
 /// Internal state of a shared memory object
@@ -47,6 +119,8 @@ struct SharedMemoryState {
     valid: bool,
     /// Number of active mappings
     mapping_count: usize,
+    /// Number of active kernel imports retaining this backing.
+    pin_count: usize,
     /// Old allocations kept alive while mappings still exist
     stale_pages: Vec<(usize, usize)>,
     /// Whether this object owns the physical memory (should free on drop)
@@ -62,6 +136,7 @@ impl SharedMemoryState {
             permissions,
             valid: true,
             mapping_count: 0,
+            pin_count: 0,
             stale_pages: Vec::new(),
             owns_memory,
         }
@@ -166,6 +241,10 @@ impl SharedMemoryObject for SharedMemory {
             num_pages * PAGE_SIZE
         };
 
+        if state.pin_count != 0 && aligned_size != state.size {
+            return Err("Shared memory cannot resize while imported");
+        }
+
         // 容量内であればサイズ更新のみ
         if aligned_size <= state.capacity {
             state.size = aligned_size;
@@ -239,6 +318,37 @@ impl SharedMemoryObject for SharedMemory {
 
     fn is_valid(&self) -> bool {
         self.state.read().valid
+    }
+
+    fn pin_range(&self, offset: usize, length: usize) -> Result<SharedMemoryBacking, &'static str> {
+        if length == 0 {
+            return Err("Shared memory import range must be non-empty");
+        }
+        let mut state = self.state.write();
+        if !state.valid || state.paddr == 0 {
+            return Err("Shared memory backing is not live");
+        }
+        let end = offset
+            .checked_add(length)
+            .ok_or("Shared memory import range overflows")?;
+        if end > state.size {
+            return Err("Shared memory import range exceeds backing");
+        }
+        state.pin_count = state
+            .pin_count
+            .checked_add(1)
+            .ok_or("Shared memory import pin count overflows")?;
+        Ok(SharedMemoryBacking {
+            paddr: state.paddr,
+            size: state.size,
+        })
+    }
+
+    fn unpin_range(&self) {
+        let mut state = self.state.write();
+        if state.pin_count != 0 {
+            state.pin_count -= 1;
+        }
     }
 }
 
@@ -503,6 +613,36 @@ mod tests {
 
         shmem.on_unmapped(0x20000000, 4096);
         assert_eq!(shmem.state.read().mapping_count, 0);
+    }
+
+    #[test_case]
+    fn test_shared_memory_pin_blocks_all_size_changes() {
+        let paddr = 0x80000000;
+        let size = 8192;
+        let permissions = 0x3;
+        let shmem = unsafe { SharedMemory::from_paddr(paddr, size, permissions) };
+
+        assert!(shmem.pin_range(0, size).is_ok());
+        assert_eq!(shmem.state.read().pin_count, 1);
+        assert!(shmem.resize(4096).is_err());
+        assert!(shmem.resize(12288).is_err());
+        assert_eq!(shmem.resize(size), Ok(()));
+        shmem.unpin_range();
+        assert_eq!(shmem.state.read().pin_count, 0);
+        assert_eq!(shmem.resize(4096), Ok(()));
+    }
+
+    #[test_case]
+    fn test_shared_memory_pin_validates_import_range() {
+        let paddr = 0x80000000;
+        let size = 8192;
+        let permissions = 0x3;
+        let shmem = unsafe { SharedMemory::from_paddr(paddr, size, permissions) };
+
+        assert!(shmem.pin_range(0, 0).is_err());
+        assert!(shmem.pin_range(size, 1).is_err());
+        assert!(shmem.pin_range(size - 1, 2).is_err());
+        assert_eq!(shmem.state.read().pin_count, 0);
     }
 
     #[test_case]
