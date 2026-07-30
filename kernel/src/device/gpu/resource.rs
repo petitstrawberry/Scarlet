@@ -715,6 +715,16 @@ impl GpuImage {
             copy_from_user(&task, source_address, destination)
                 .map_err(|_| "Failed to copy GPU image pixels from user")?;
         }
+        for row in 0..layout.height {
+            let destination_offset = row
+                .checked_mul(layout.destination_stride)
+                .and_then(|offset| offset.checked_add(layout.destination_offset))
+                .ok_or("GPU image upload destination row offset overflows")?;
+            let destination_address = (backing_base as usize)
+                .checked_add(destination_offset)
+                .ok_or("GPU image upload destination row address overflows")?;
+            crate::arch::clean_dcache_to_poc_range(destination_address, layout.source_row_bytes);
+        }
         transfer(self.backend_image.as_ref(), layout.transfer)
     }
 

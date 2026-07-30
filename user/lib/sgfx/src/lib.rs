@@ -249,6 +249,19 @@ impl Context {
         self.backend.release_texture(texture.backend)
     }
 
+    /// Detach a render-target image from this context and consume it deterministically.
+    ///
+    /// # Arguments
+    ///
+    /// * `image` - Render-target image to detach and release.
+    ///
+    /// # Returns
+    ///
+    /// Success after backend detach completes, or a handle error.
+    pub fn release_image(&self, image: Image) -> HandleResult<()> {
+        self.backend.release_image(image.backend)
+    }
+
     /// Create the built-in vertex-color triangle pipeline for one render target.
     ///
     /// # Arguments

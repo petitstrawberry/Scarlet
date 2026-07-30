@@ -345,6 +345,13 @@ impl Context {
         self.raw.detach_image(&texture.raw)
     }
 
+    pub(crate) fn release_image(&self, image: Image) -> HandleResult<()> {
+        if image.context_handle != self.handle_id() {
+            return Err(HandleError::InvalidParameter);
+        }
+        self.raw.detach_image(&image.raw)
+    }
+
     pub(crate) fn create_pipeline(
         &self,
         image: &Image,

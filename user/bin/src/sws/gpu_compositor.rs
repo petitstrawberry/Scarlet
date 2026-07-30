@@ -1,5 +1,7 @@
 //! Optional GPU-backed scene composition for SWS.
 
+use core::mem;
+
 use super::cursor::Cursor;
 use super::window::{Window, WindowId};
 use framebuffer::DisplaySurface;
@@ -82,10 +84,14 @@ impl GpuCompositor {
 
     /// Recreate the screen-sized target after an output resize.
     pub(super) fn resize_target(&mut self, width: u32, height: u32) -> Result<(), &'static str> {
-        self.target = self
+        let target = self
             ._context
             .create_image(width, height)
             .map_err(|_| "Failed to resize GPU render target")?;
+        let old_target = mem::replace(&mut self.target, target);
+        self._context
+            .release_image(old_target)
+            .map_err(|_| "Failed to detach GPU render target")?;
         Ok(())
     }
 

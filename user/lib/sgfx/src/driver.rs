@@ -113,6 +113,12 @@ impl Context {
         }
     }
 
+    pub(crate) fn release_image(&self, image: Image) -> HandleResult<()> {
+        match (self, image) {
+            (Self::Virgl(context), Image::Virgl(image)) => context.release_image(image),
+        }
+    }
+
     pub(crate) fn create_pipeline(
         &self,
         image: &Image,
