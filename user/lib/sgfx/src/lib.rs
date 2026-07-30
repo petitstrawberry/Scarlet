@@ -22,8 +22,17 @@ use std::{
     ipc::SharedMemory,
 };
 
+/// Backend-neutral logical graphics intermediate representation.
+///
+/// This module defines validated resource descriptors and command buffers.
+/// Supported command subsets can be lowered through [`Queue::submit_ir`].
+pub mod ir;
+
 mod driver;
+mod ir_execute;
 mod virgl;
+
+pub use ir_execute::{IrPresentTarget, IrSubmitError, UnsupportedIrFeature};
 
 /// Device capabilities expressed in application rendering terms.
 #[derive(Debug, Clone, Copy)]
