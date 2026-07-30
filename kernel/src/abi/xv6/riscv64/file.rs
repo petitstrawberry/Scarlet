@@ -193,8 +193,8 @@ pub fn sys_dup(
     // Get handle from XV6 fd
     if let Some(old_handle) = abi.get_handle(fd) {
         // Use clone_for_dup to get proper dup() semantics (increments Pipe reader/writer counts etc.)
-        if let Some(kernel_obj) = task.handle_table.clone_for_dup(old_handle) {
-            let handle = task.handle_table.insert(kernel_obj);
+        if let Some((kernel_obj, metadata)) = task.handle_table.clone_for_dup(old_handle) {
+            let handle = task.handle_table.insert_with_metadata(kernel_obj, metadata);
             match handle {
                 Ok(new_handle) => {
                     match abi.allocate_fd(new_handle as u32) {

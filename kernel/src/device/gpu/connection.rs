@@ -5,11 +5,12 @@ use core::any::Any;
 
 use super::{
     GPU_ABI_VERSION, GPU_BUFFER_FLAGS_VALID, GPU_CREATE_BUFFER, GPU_CREATE_CONTEXT,
-    GPU_CREATE_IMAGE, GPU_CREATE_TIMELINE, GPU_QUERY_DIALECT, GPU_QUERY_INFO,
-    GPU_RESULT_INVALID_ABI, GPU_RESULT_INVALID_ARGUMENT, GPU_RESULT_OUT_OF_RESOURCES,
-    GPU_RESULT_UNSUPPORTED, GpuBackend, GpuBackendDialectDescriptor, GpuBuffer, GpuContext,
-    GpuCreateBuffer, GpuCreateContext, GpuCreateImage, GpuCreateTimeline, GpuImage,
-    GpuImageCreateInfo, GpuQueryDialect, GpuQueryInfo, GpuTimeline,
+    GPU_CREATE_IMAGE, GPU_CREATE_IMPORTED_IMAGE_BGRA, GPU_CREATE_TIMELINE, GPU_QUERY_DIALECT,
+    GPU_QUERY_INFO, GPU_RESULT_INVALID_ABI, GPU_RESULT_INVALID_ARGUMENT,
+    GPU_RESULT_OUT_OF_RESOURCES, GPU_RESULT_UNSUPPORTED, GpuBackend, GpuBackendDialectDescriptor,
+    GpuBuffer, GpuContext, GpuCreateBuffer, GpuCreateContext, GpuCreateImage,
+    GpuCreateImportedImageBgra, GpuCreateTimeline, GpuImage, GpuImageCreateInfo, GpuQueryDialect,
+    GpuQueryInfo, GpuTimeline,
 };
 use crate::device::{Device, DeviceType, char::CharDevice};
 use crate::library::std::usercopy::{copy_from_user, copy_to_user};
@@ -17,6 +18,10 @@ use crate::object::KernelObject;
 use crate::object::capability::selectable::{ReadyInterest, ReadySet, SelectWaitOutcome};
 use crate::object::capability::{ControlOps, MemoryMappingInfo, MemoryMappingOps, Selectable};
 use crate::object::handle::AccessMode;
+
+pub(super) const fn shared_memory_import_access_is_allowed(access_mode: AccessMode) -> bool {
+    matches!(access_mode, AccessMode::ReadOnly | AccessMode::ReadWrite)
+}
 
 /// Independent GPU endpoint created for each `/dev/gpuN` open.
 pub struct GpuConnection {
@@ -216,6 +221,90 @@ impl GpuConnection {
         }
     }
 
+    fn handle_create_imported_image_bgra(&self, arg: usize) -> Result<i32, &'static str> {
+        let mut request: GpuCreateImportedImageBgra = read_user_value(arg)?;
+        request.clear_response();
+        if request.abi_version != GPU_ABI_VERSION {
+            request.result = GPU_RESULT_INVALID_ABI;
+            write_user_value(arg, &request)?;
+            return Ok(0);
+        }
+        if request.reserved != 0 || request.shm_handle == 0 || request.source_stride == 0 {
+            request.result = GPU_RESULT_INVALID_ARGUMENT;
+            write_user_value(arg, &request)?;
+            return Ok(0);
+        }
+        let create =
+            GpuImageCreateInfo::new(request.format, request.usage, request.width, request.height);
+        if !super::resource::imported_image_create_is_valid(create) {
+            request.result = GPU_RESULT_INVALID_ARGUMENT;
+            write_user_value(arg, &request)?;
+            return Ok(0);
+        }
+        let task =
+            crate::task::mytask().ok_or("No current task for imported GPU image creation")?;
+        let (shared_memory_object, metadata) = match task
+            .handle_table
+            .get_arc_clone_with_metadata(request.shm_handle)
+        {
+            Some(pair) => pair,
+            None => {
+                request.result = GPU_RESULT_INVALID_ARGUMENT;
+                write_user_value(arg, &request)?;
+                return Ok(0);
+            }
+        };
+        if !shared_memory_import_access_is_allowed(metadata.access_mode) {
+            request.result = GPU_RESULT_INVALID_ARGUMENT;
+            write_user_value(arg, &request)?;
+            return Ok(0);
+        }
+        let shared_memory_owner = match shared_memory_object {
+            KernelObject::SharedMemory(shared_memory) => shared_memory,
+            _ => {
+                request.result = GPU_RESULT_INVALID_ARGUMENT;
+                write_user_value(arg, &request)?;
+                return Ok(0);
+            }
+        };
+        let image = match GpuImage::new_imported(
+            Arc::clone(&self.backend),
+            create,
+            shared_memory_owner,
+            request.shm_offset,
+            request.source_stride,
+        ) {
+            Ok(image) => image,
+            Err(_) => {
+                request.result = GPU_RESULT_INVALID_ARGUMENT;
+                write_user_value(arg, &request)?;
+                return Ok(0);
+            }
+        };
+        let info = image.query_info();
+        let handle = task.handle_table.insert_with_metadata(
+            KernelObject::Gpu(Arc::new(image)),
+            super::child_handle_metadata(AccessMode::ReadWrite),
+        );
+        match handle {
+            Ok(handle) => {
+                request.image_handle = handle;
+                request.command_resource_token = info.command_resource_token;
+                request.allocation_size = info.allocation_size;
+                if let Err(error) = write_user_value(arg, &request) {
+                    task.handle_table.remove(handle);
+                    return Err(error);
+                }
+                Ok(0)
+            }
+            Err(_) => {
+                request.result = GPU_RESULT_OUT_OF_RESOURCES;
+                write_user_value(arg, &request)?;
+                Ok(0)
+            }
+        }
+    }
+
     fn handle_query_dialect(&self, arg: usize) -> Result<i32, &'static str> {
         let mut query: GpuQueryDialect = read_user_value(arg)?;
         let reserved = query.reserved;
@@ -354,6 +443,7 @@ impl ControlOps for GpuConnection {
             GPU_CREATE_BUFFER => self.handle_create_buffer(arg),
             GPU_CREATE_TIMELINE => self.handle_create_timeline(arg),
             GPU_CREATE_IMAGE => self.handle_create_image(arg),
+            GPU_CREATE_IMPORTED_IMAGE_BGRA => self.handle_create_imported_image_bgra(arg),
             GPU_QUERY_DIALECT => self.handle_query_dialect(arg),
             GPU_CREATE_CONTEXT => self.handle_create_context(arg),
             _ => Err("Unsupported GPU control command"),
@@ -366,6 +456,10 @@ impl ControlOps for GpuConnection {
             (GPU_CREATE_BUFFER, "Create a GPU buffer child handle"),
             (GPU_CREATE_TIMELINE, "Create a GPU timeline child handle"),
             (GPU_CREATE_IMAGE, "Create a GPU image child handle"),
+            (
+                GPU_CREATE_IMPORTED_IMAGE_BGRA,
+                "Create a sampled GPU image imported from shared memory"
+            ),
             (GPU_QUERY_DIALECT, "Query an opaque GPU execution dialect"),
             (
                 GPU_CREATE_CONTEXT,

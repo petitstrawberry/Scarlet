@@ -10,11 +10,17 @@ use std::vec::Vec;
 
 type DamageRect = (u32, u32, u32, u32);
 
+enum WindowTextureBacking {
+    Imported,
+    Private,
+}
+
 struct CachedWindowTexture {
     window_id: WindowId,
     width: u32,
     height: u32,
     texture: Texture,
+    backing: WindowTextureBacking,
     pending_damage: Option<DamageRect>,
 }
 
@@ -136,15 +142,16 @@ impl GpuCompositor {
         });
     }
 
-    /// Forget a texture when its backing store changes or its window disappears.
-    pub(super) fn remove_window(&mut self, window_id: WindowId) {
+    /// Detach and forget a texture before its backing store changes or disappears.
+    pub(super) fn remove_window(&mut self, window_id: WindowId) -> Result<(), &'static str> {
         if let Some(index) = self
             .textures
             .iter()
             .position(|entry| entry.window_id == window_id)
         {
-            self.textures.remove(index);
+            self.release_window_texture(index)?;
         }
+        Ok(())
     }
 
     /// Upload all changed window textures, compose the complete scene, and present it.
@@ -157,7 +164,7 @@ impl GpuCompositor {
         resize_outline: Option<(i32, i32, u32, u32)>,
     ) -> Result<(), &'static str> {
         for window in windows {
-            if window.visible && window.has_pixel_buffer() {
+            if window.visible && (window.has_pixel_buffer() || window.shm_layout().is_ok()) {
                 self.sync_window_texture(window)?;
             }
         }
@@ -180,7 +187,7 @@ impl GpuCompositor {
                 continue;
             };
 
-            if window.has_pixel_buffer() {
+            if window.has_pixel_buffer() || window.shm_layout().is_ok() {
                 let texture = self
                     .textures
                     .iter()
@@ -251,57 +258,111 @@ impl GpuCompositor {
     }
 
     fn sync_window_texture(&mut self, window: &Window) -> Result<(), &'static str> {
-        let pixels = window.pixels()?;
+        let imported_layout = window.shm_layout().ok();
+        let pixels = window.pixels().ok();
+        let (width, height) = match imported_layout.as_ref() {
+            Some(layout) => (layout.width(), layout.height()),
+            None => {
+                let pixels = pixels
+                    .as_ref()
+                    .ok_or("Window has no importable or CPU-readable pixel backing")?;
+                (pixels.width(), pixels.height())
+            }
+        };
         let matching_index = self
             .textures
             .iter()
             .position(|entry| entry.window_id == window.id);
         let texture_index = match matching_index {
             Some(index)
-                if self.textures[index].width == pixels.width()
-                    && self.textures[index].height == pixels.height() =>
+                if self.textures[index].width == width && self.textures[index].height == height =>
             {
                 index
             }
             Some(index) => {
-                self.textures.remove(index);
-                self.create_window_texture(window.id, pixels.width(), pixels.height())?
+                self.release_window_texture(index)?;
+                self.create_window_texture(window, width, height)?
             }
-            None => self.create_window_texture(window.id, pixels.width(), pixels.height())?,
+            None => self.create_window_texture(window, width, height)?,
         };
         let entry = &mut self.textures[texture_index];
-        let Some(damage) = entry.pending_damage.take() else {
+        let Some(damage) = entry.pending_damage else {
             return Ok(());
         };
-        let source = pixels.damage_bytes(damage.0, damage.1, damage.2, damage.3)?;
-        self._context
-            .upload_texture_bgra(
-                &entry.texture,
-                source,
-                pixels.stride(),
-                PixelRect::new(damage.0, damage.1, damage.2, damage.3),
-            )
-            .map_err(|_| "Failed to upload GPU window texture")
+        let damage_rect = PixelRect::new(damage.0, damage.1, damage.2, damage.3);
+        let transfer_result = match &entry.backing {
+            WindowTextureBacking::Imported => self
+                ._context
+                .transfer_imported_bgra_rect(&entry.texture, damage_rect)
+                .map_err(|_| "Failed to transfer imported GPU window texture"),
+            WindowTextureBacking::Private => {
+                let pixels = pixels
+                    .as_ref()
+                    .ok_or("Fallback GPU texture has no CPU-readable pixel backing")?;
+                let source = pixels.damage_bytes(damage.0, damage.1, damage.2, damage.3)?;
+                self._context
+                    .upload_texture_bgra(&entry.texture, source, pixels.stride(), damage_rect)
+                    .map_err(|_| "Failed to upload GPU window texture")
+            }
+        };
+        transfer_result?;
+        entry.pending_damage = None;
+        Ok(())
     }
 
     fn create_window_texture(
         &mut self,
-        window_id: WindowId,
+        window: &Window,
         width: u32,
         height: u32,
     ) -> Result<usize, &'static str> {
-        let texture = self
-            ._context
-            .create_sampled_bgra_texture(width, height)
-            .map_err(|_| "Failed to create GPU window texture")?;
+        let (texture, backing) = match window.shm_layout() {
+            Ok(layout) if layout.size() != 0 && layout.format() == 0 => {
+                match self._context.create_imported_bgra_texture(
+                    layout.shared_memory(),
+                    layout.width(),
+                    layout.height(),
+                    layout.offset(),
+                    layout.stride(),
+                ) {
+                    Ok(texture) => (texture, WindowTextureBacking::Imported),
+                    Err(_) => (
+                        self._context
+                            .create_sampled_bgra_texture(width, height)
+                            .map_err(|_| "Failed to create fallback GPU window texture")?,
+                        WindowTextureBacking::Private,
+                    ),
+                }
+            }
+            Err(_) => (
+                self._context
+                    .create_sampled_bgra_texture(width, height)
+                    .map_err(|_| "Failed to create GPU window texture")?,
+                WindowTextureBacking::Private,
+            ),
+            Ok(_) => (
+                self._context
+                    .create_sampled_bgra_texture(width, height)
+                    .map_err(|_| "Failed to create fallback GPU window texture")?,
+                WindowTextureBacking::Private,
+            ),
+        };
         self.textures.push(CachedWindowTexture {
-            window_id,
+            window_id: window.id,
             width,
             height,
             texture,
+            backing,
             pending_damage: Some((0, 0, width, height)),
         });
         Ok(self.textures.len() - 1)
+    }
+
+    fn release_window_texture(&mut self, index: usize) -> Result<(), &'static str> {
+        let entry = self.textures.remove(index);
+        self._context
+            .release_texture(entry.texture)
+            .map_err(|_| "Failed to detach GPU window texture")
     }
 }
 

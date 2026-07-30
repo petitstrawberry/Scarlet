@@ -16,20 +16,23 @@ mod resource;
 pub use abi::{
     GPU_ABI_VERSION, GPU_BACKEND_ID_BYTES, GPU_BACKEND_INFO_BYTES, GPU_BUFFER_FLAG_CPU_VISIBLE,
     GPU_BUFFER_FLAGS_VALID, GPU_BUFFER_QUERY_INFO, GPU_CONTEXT_ATTACH_BUFFER,
-    GPU_CONTEXT_ATTACH_IMAGE, GPU_CONTEXT_QUERY, GPU_CONTEXT_UPLOAD_IMAGE_BGRA, GPU_CREATE_BUFFER,
-    GPU_CREATE_CONTEXT, GPU_CREATE_IMAGE, GPU_CREATE_QUEUE, GPU_CREATE_TIMELINE,
-    GPU_DIALECT_INFO_BYTES, GPU_IMAGE_FORMAT_BGRA8_UNORM, GPU_IMAGE_QUERY_INFO,
-    GPU_IMAGE_USAGE_PRESENTABLE, GPU_IMAGE_USAGE_RENDER_TARGET, GPU_IMAGE_USAGE_SAMPLED,
-    GPU_IMAGE_USAGE_TRANSFER_DST, GPU_IMAGE_USAGE_VALID, GPU_MAX_IMAGE_UPLOAD_SIZE,
-    GPU_MAX_OPAQUE_COMMAND_SIZE, GPU_QUERY_DIALECT, GPU_QUERY_INFO, GPU_QUEUE_QUERY,
-    GPU_QUEUE_SUBMIT, GPU_QUEUE_SUBMIT_FLAG_SIGNAL_TIMELINE, GPU_QUEUE_SUBMIT_FLAGS_VALID,
-    GPU_RESULT_INVALID_ABI, GPU_RESULT_INVALID_ARGUMENT, GPU_RESULT_INVALID_STATE,
-    GPU_RESULT_OUT_OF_RESOURCES, GPU_RESULT_SUCCESS, GPU_RESULT_UNSUPPORTED,
-    GPU_TIMELINE_CREATE_POINT, GPU_TIMELINE_FAIL, GPU_TIMELINE_QUERY, GPU_TIMELINE_SIGNAL,
-    GpuBufferInfo, GpuContextAttachBuffer, GpuContextAttachImage, GpuContextInfo,
-    GpuContextUploadImageBgra, GpuCreateBuffer, GpuCreateContext, GpuCreateImage, GpuCreateQueue,
-    GpuCreateTimeline, GpuImageInfo, GpuQueryDialect, GpuQueryInfo, GpuQueueInfo, GpuQueueSubmit,
-    GpuTimelineCreatePoint, GpuTimelineFail, GpuTimelineInfo, GpuTimelineSignal,
+    GPU_CONTEXT_ATTACH_IMAGE, GPU_CONTEXT_DETACH_IMAGE, GPU_CONTEXT_QUERY,
+    GPU_CONTEXT_TRANSFER_IMPORTED_IMAGE_BGRA, GPU_CONTEXT_UPLOAD_IMAGE_BGRA, GPU_CREATE_BUFFER,
+    GPU_CREATE_CONTEXT, GPU_CREATE_IMAGE, GPU_CREATE_IMPORTED_IMAGE_BGRA, GPU_CREATE_QUEUE,
+    GPU_CREATE_TIMELINE, GPU_DIALECT_INFO_BYTES, GPU_IMAGE_FORMAT_BGRA8_UNORM,
+    GPU_IMAGE_QUERY_INFO, GPU_IMAGE_USAGE_PRESENTABLE, GPU_IMAGE_USAGE_RENDER_TARGET,
+    GPU_IMAGE_USAGE_SAMPLED, GPU_IMAGE_USAGE_TRANSFER_DST, GPU_IMAGE_USAGE_VALID,
+    GPU_MAX_IMAGE_UPLOAD_SIZE, GPU_MAX_OPAQUE_COMMAND_SIZE, GPU_QUERY_DIALECT, GPU_QUERY_INFO,
+    GPU_QUEUE_QUERY, GPU_QUEUE_SUBMIT, GPU_QUEUE_SUBMIT_FLAG_SIGNAL_TIMELINE,
+    GPU_QUEUE_SUBMIT_FLAGS_VALID, GPU_RESULT_INVALID_ABI, GPU_RESULT_INVALID_ARGUMENT,
+    GPU_RESULT_INVALID_STATE, GPU_RESULT_OUT_OF_RESOURCES, GPU_RESULT_SUCCESS,
+    GPU_RESULT_UNSUPPORTED, GPU_TIMELINE_CREATE_POINT, GPU_TIMELINE_FAIL, GPU_TIMELINE_QUERY,
+    GPU_TIMELINE_SIGNAL, GpuBufferInfo, GpuContextAttachBuffer, GpuContextAttachImage,
+    GpuContextDetachImage, GpuContextInfo, GpuContextTransferImportedImageBgra,
+    GpuContextUploadImageBgra, GpuCreateBuffer, GpuCreateContext, GpuCreateImage,
+    GpuCreateImportedImageBgra, GpuCreateQueue, GpuCreateTimeline, GpuImageInfo, GpuQueryDialect,
+    GpuQueryInfo, GpuQueueInfo, GpuQueueSubmit, GpuTimelineCreatePoint, GpuTimelineFail,
+    GpuTimelineInfo, GpuTimelineSignal,
 };
 pub use backend::{
     GPU_EXECUTION_SUPPORT_ADDRESS_SPACE, GPU_EXECUTION_SUPPORT_IMAGE_UPLOAD,
@@ -213,8 +216,17 @@ mod tests {
         assert_eq!(core::mem::size_of::<super::GpuCreateImage>(), 48);
         assert_eq!(core::mem::size_of::<super::GpuImageInfo>(), 40);
         assert_eq!(core::mem::size_of::<super::GpuContextAttachImage>(), 32);
+        assert_eq!(core::mem::size_of::<super::GpuContextDetachImage>(), 24);
+        assert_eq!(
+            core::mem::size_of::<super::GpuCreateImportedImageBgra>(),
+            64
+        );
         assert_eq!(core::mem::size_of::<super::GpuContextAttachBuffer>(), 32);
         assert_eq!(core::mem::size_of::<super::GpuContextUploadImageBgra>(), 64);
+        assert_eq!(
+            core::mem::size_of::<super::GpuContextTransferImportedImageBgra>(),
+            40
+        );
     }
 
     #[test_case]
@@ -294,6 +306,49 @@ mod tests {
         let mut out_of_bounds = request;
         out_of_bounds.dst_x = 6;
         assert!(super::resource::image_upload_layout(&out_of_bounds, image).is_err());
+    }
+
+    #[test_case]
+    fn imported_image_layout_validates_offsets_strides_and_damage_rectangles() {
+        let create = GpuImageCreateInfo::new(
+            GPU_IMAGE_FORMAT_BGRA8_UNORM,
+            GPU_IMAGE_USAGE_SAMPLED | GPU_IMAGE_USAGE_TRANSFER_DST,
+            8,
+            4,
+        );
+        let layout = super::resource::imported_image_layout(create, 256, 16, 40)
+            .expect("valid imported image layout should succeed");
+        let image = GpuBackendImageInfo::new(create, 7, 256);
+        let transfer =
+            super::resource::imported_image_transfer_layout(image, 256, layout, 2, 1, 3, 2)
+                .expect("valid imported damage rectangle should succeed");
+        assert_eq!(transfer.backing_offset, 64);
+        assert_eq!(transfer.backing_stride, 40);
+        assert_eq!(transfer.backing_layer_stride, 160);
+
+        assert!(super::resource::imported_image_layout(create, 256, u64::MAX, 40).is_err());
+        assert!(super::resource::imported_image_layout(create, 256, 16, 31).is_err());
+        assert!(
+            super::resource::imported_image_transfer_layout(image, 256, layout, 7, 1, 2, 1)
+                .is_err()
+        );
+        assert!(
+            super::resource::imported_image_transfer_layout(image, 115, layout, 2, 1, 3, 2)
+                .is_err()
+        );
+    }
+
+    #[test_case]
+    fn imported_image_rejects_write_only_shared_memory_handles() {
+        assert!(super::connection::shared_memory_import_access_is_allowed(
+            AccessMode::ReadOnly
+        ));
+        assert!(super::connection::shared_memory_import_access_is_allowed(
+            AccessMode::ReadWrite
+        ));
+        assert!(!super::connection::shared_memory_import_access_is_allowed(
+            AccessMode::WriteOnly
+        ));
     }
 
     #[test_case]

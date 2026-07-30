@@ -12,9 +12,15 @@ extern crate scarlet_std as std;
 
 use alloc::{rc::Rc, vec::Vec};
 #[cfg(feature = "std")]
-use scarlet_os::handle::{HandleError, HandleResult};
+use scarlet_os::{
+    handle::{HandleError, HandleResult},
+    ipc::SharedMemory,
+};
 #[cfg(not(feature = "std"))]
-use std::handle::{HandleError, HandleResult};
+use std::{
+    handle::{HandleError, HandleResult},
+    ipc::SharedMemory,
+};
 
 mod driver;
 mod virgl;
@@ -141,6 +147,40 @@ impl Context {
         })
     }
 
+    /// Create a sampled BGRA texture imported from a SharedMemory backing store.
+    ///
+    /// # Arguments
+    ///
+    /// * `shared_memory` - SharedMemory object containing the source pixels.
+    /// * `width` - Non-zero texture width in pixels.
+    /// * `height` - Non-zero texture height in pixels.
+    /// * `shm_offset` - Byte offset of pixel `(0, 0)` in SharedMemory.
+    /// * `source_stride` - Number of bytes between SharedMemory source rows.
+    ///
+    /// # Returns
+    ///
+    /// A sampled texture retaining a kernel-side import pin, or a handle error.
+    pub fn create_imported_bgra_texture(
+        &self,
+        shared_memory: &SharedMemory,
+        width: u32,
+        height: u32,
+        shm_offset: usize,
+        source_stride: u32,
+    ) -> HandleResult<Texture> {
+        Ok(Texture {
+            backend: self.backend.create_imported_bgra_texture(
+                shared_memory,
+                width,
+                height,
+                shm_offset,
+                source_stride,
+            )?,
+            width,
+            height,
+        })
+    }
+
     /// Upload one strided BGRA damage rectangle into a sampled texture.
     ///
     /// Source rows begin at the first byte of `pixels`; `damage` specifies the
@@ -170,6 +210,43 @@ impl Context {
         }
         self.backend
             .upload_texture_bgra(&texture.backend, pixels, source_stride, damage)
+    }
+
+    /// Transfer one damage rectangle from an imported texture's SharedMemory backing.
+    ///
+    /// # Arguments
+    ///
+    /// * `texture` - Texture created by [`Context::create_imported_bgra_texture`].
+    /// * `damage` - Destination texture rectangle in top-left pixel coordinates.
+    ///
+    /// # Returns
+    ///
+    /// Success after synchronous transfer completion, or a handle error. This
+    /// path does not pass a userspace pixel pointer to the kernel.
+    pub fn transfer_imported_bgra_rect(
+        &self,
+        texture: &Texture,
+        damage: PixelRect,
+    ) -> HandleResult<()> {
+        if !damage.is_within(texture.width, texture.height) {
+            return Err(HandleError::InvalidParameter);
+        }
+        self.backend
+            .transfer_imported_bgra_rect(&texture.backend, damage)
+    }
+
+    /// Detach a texture from this context and consume it deterministically.
+    ///
+    /// # Arguments
+    ///
+    /// * `texture` - Texture to detach and release.
+    ///
+    /// # Returns
+    ///
+    /// Success after backend detach completes. If detach fails, callers should
+    /// discard the context before dropping or replacing imported SharedMemory.
+    pub fn release_texture(&self, texture: Texture) -> HandleResult<()> {
+        self.backend.release_texture(texture.backend)
     }
 
     /// Create the built-in vertex-color triangle pipeline for one render target.

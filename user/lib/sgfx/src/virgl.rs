@@ -12,8 +12,13 @@ use gpu_raw::{
 };
 #[cfg(feature = "std")]
 use scarlet_os::handle::{HandleError, HandleResult};
+#[cfg(feature = "std")]
+use scarlet_os::ipc::SharedMemory;
 #[cfg(not(feature = "std"))]
-use std::handle::{HandleError, HandleResult};
+use std::{
+    handle::{HandleError, HandleResult},
+    ipc::SharedMemory,
+};
 
 use crate::{
     Capabilities, Color, CullMode, FrontFace, MAX_COMPOSITION_OPERATIONS, PipelineDesc,
@@ -266,6 +271,37 @@ impl Context {
         })
     }
 
+    pub(crate) fn create_imported_bgra_texture(
+        &self,
+        shared_memory: &SharedMemory,
+        width: u32,
+        height: u32,
+        shm_offset: usize,
+        source_stride: u32,
+    ) -> HandleResult<Texture> {
+        if width == 0 || height == 0 || !self.device.capabilities.supports_image_upload() {
+            return Err(HandleError::InvalidParameter);
+        }
+        let shm_offset = u64::try_from(shm_offset).map_err(|_| HandleError::InvalidParameter)?;
+        let raw = self.device.raw.create_imported_bgra_image(
+            shared_memory,
+            width,
+            height,
+            shm_offset,
+            source_stride,
+        )?;
+        let resource_id = resource_id_from_token(self.raw.attach_image(&raw)?)?;
+        Ok(Texture {
+            raw,
+            resource_id,
+            width,
+            height,
+            context_handle: self.handle_id(),
+            sampler_view_handle: self.allocate_object_handle()?,
+            sampler_view_initialized: Cell::new(false),
+        })
+    }
+
     pub(crate) fn upload_texture_bgra(
         &self,
         texture: &Texture,
@@ -284,6 +320,29 @@ impl Context {
             source_stride,
             GpuImageBgraRect::new(damage.x(), damage.y(), damage.width(), damage.height()),
         )
+    }
+
+    pub(crate) fn transfer_imported_bgra_rect(
+        &self,
+        texture: &Texture,
+        damage: PixelRect,
+    ) -> HandleResult<()> {
+        if texture.context_handle != self.handle_id()
+            || !damage.is_within(texture.width, texture.height)
+        {
+            return Err(HandleError::InvalidParameter);
+        }
+        self.raw.transfer_imported_image_bgra(
+            &texture.raw,
+            GpuImageBgraRect::new(damage.x(), damage.y(), damage.width(), damage.height()),
+        )
+    }
+
+    pub(crate) fn release_texture(&self, texture: Texture) -> HandleResult<()> {
+        if texture.context_handle != self.handle_id() {
+            return Err(HandleError::InvalidParameter);
+        }
+        self.raw.detach_image(&texture.raw)
     }
 
     pub(crate) fn create_pipeline(

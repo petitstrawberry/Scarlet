@@ -4,12 +4,14 @@ use alloc::{sync::Arc, vec::Vec};
 
 use super::connection::{read_user_value, write_user_value};
 use super::{
-    GPU_ABI_VERSION, GPU_CONTEXT_ATTACH_IMAGE, GPU_CONTEXT_QUERY, GPU_CONTEXT_UPLOAD_IMAGE_BGRA,
-    GPU_CREATE_QUEUE, GPU_MAX_OPAQUE_COMMAND_SIZE, GPU_QUEUE_QUERY, GPU_QUEUE_SUBMIT,
+    GPU_ABI_VERSION, GPU_CONTEXT_ATTACH_IMAGE, GPU_CONTEXT_DETACH_IMAGE, GPU_CONTEXT_QUERY,
+    GPU_CONTEXT_TRANSFER_IMPORTED_IMAGE_BGRA, GPU_CONTEXT_UPLOAD_IMAGE_BGRA, GPU_CREATE_QUEUE,
+    GPU_MAX_OPAQUE_COMMAND_SIZE, GPU_QUEUE_QUERY, GPU_QUEUE_SUBMIT,
     GPU_QUEUE_SUBMIT_FLAG_SIGNAL_TIMELINE, GPU_QUEUE_SUBMIT_FLAGS_VALID, GPU_RESULT_INVALID_ABI,
     GPU_RESULT_INVALID_ARGUMENT, GPU_RESULT_INVALID_STATE, GPU_RESULT_OUT_OF_RESOURCES,
     GpuBackendBuffer, GpuBackendContext, GpuBackendContextInfo, GpuBackendImage, GpuBackendQueue,
-    GpuBackendQueueInfo, GpuBuffer, GpuContextAttachBuffer, GpuContextAttachImage, GpuContextInfo,
+    GpuBackendQueueInfo, GpuBuffer, GpuContextAttachBuffer, GpuContextAttachImage,
+    GpuContextDetachImage, GpuContextInfo, GpuContextTransferImportedImageBgra,
     GpuContextUploadImageBgra, GpuCreateQueue, GpuImage, GpuObject, GpuQueueInfo, GpuQueueSubmit,
 };
 use crate::library::std::usercopy::copy_from_user;
@@ -98,6 +100,12 @@ impl GpuContext {
     pub fn attach_image(&self, image: &GpuImage) -> Result<u64, &'static str> {
         let backend_image = image.backend_image();
         let mut attached_images = self.attached_images.lock();
+        if attached_images
+            .iter()
+            .any(|attached| Arc::ptr_eq(&attached.backend_image, &backend_image))
+        {
+            return Err("GPU image is already attached to this context");
+        }
         attached_images
             .try_reserve(1)
             .map_err(|_| "Failed to retain GPU image for context lifetime")?;
@@ -111,6 +119,28 @@ impl GpuContext {
             _backing: image.backing(),
         });
         Ok(token)
+    }
+
+    /// Detach an image and release the context's retained backing reference.
+    ///
+    /// # Arguments
+    ///
+    /// * `image` - Image capability currently attached to this context.
+    ///
+    /// # Returns
+    ///
+    /// Nothing after the backend detached the image and the context released its
+    /// matching retained image/backing pair.
+    pub fn detach_image(&self, image: &GpuImage) -> Result<(), &'static str> {
+        let backend_image = image.backend_image();
+        let mut attached_images = self.attached_images.lock();
+        let index = attached_images
+            .iter()
+            .position(|attached| Arc::ptr_eq(&attached.backend_image, &backend_image))
+            .ok_or("GPU image is not attached to this context")?;
+        self.backend_context.detach_image(backend_image.as_ref())?;
+        attached_images.swap_remove(index);
+        Ok(())
     }
 
     /// Attach a buffer to this context and retain its backing for all derived queues.
@@ -285,6 +315,40 @@ impl GpuContext {
         Ok(0)
     }
 
+    fn handle_detach_image(&self, arg: usize) -> Result<i32, &'static str> {
+        let mut request: GpuContextDetachImage = read_user_value(arg)?;
+        let reserved = request.reserved;
+        request.clear_response();
+        if request.abi_version != GPU_ABI_VERSION {
+            request.result = GPU_RESULT_INVALID_ABI;
+            write_user_value(arg, &request)?;
+            return Ok(0);
+        }
+        if request.flags != 0 || reserved != 0 || request.image_handle == 0 {
+            request.result = GPU_RESULT_INVALID_ARGUMENT;
+            write_user_value(arg, &request)?;
+            return Ok(0);
+        }
+        let task = crate::task::mytask().ok_or("No current task for GPU image detachment")?;
+        let image_owner = match task.handle_table.get_arc_clone(request.image_handle) {
+            Some(object) if object.as_gpu().and_then(GpuObject::as_image).is_some() => object,
+            _ => {
+                request.result = GPU_RESULT_INVALID_ARGUMENT;
+                write_user_value(arg, &request)?;
+                return Ok(0);
+            }
+        };
+        let image = image_owner
+            .as_gpu()
+            .and_then(GpuObject::as_image)
+            .ok_or("GPU image handle changed while detaching")?;
+        if self.detach_image(image).is_err() {
+            request.result = GPU_RESULT_INVALID_STATE;
+        }
+        write_user_value(arg, &request)?;
+        Ok(0)
+    }
+
     fn image_is_attached(&self, image: &GpuImage) -> bool {
         let backend_image = image.backend_image();
         self.attached_images
@@ -354,6 +418,59 @@ impl GpuContext {
         write_user_value(arg, &request)?;
         Ok(0)
     }
+
+    fn handle_transfer_imported_image_bgra(&self, arg: usize) -> Result<i32, &'static str> {
+        let mut request: GpuContextTransferImportedImageBgra = read_user_value(arg)?;
+        let reserved = request.reserved;
+        let reserved2 = request.reserved2;
+        request.clear_response();
+        if request.abi_version != GPU_ABI_VERSION {
+            request.result = GPU_RESULT_INVALID_ABI;
+            write_user_value(arg, &request)?;
+            return Ok(0);
+        }
+        if reserved != 0 || reserved2 != 0 || request.image_handle == 0 {
+            request.result = GPU_RESULT_INVALID_ARGUMENT;
+            write_user_value(arg, &request)?;
+            return Ok(0);
+        }
+        let task =
+            crate::task::mytask().ok_or("No current task for imported GPU image transfer")?;
+        let image_owner = match task.handle_table.get_arc_clone(request.image_handle) {
+            Some(object) if object.as_gpu().and_then(GpuObject::as_image).is_some() => object,
+            _ => {
+                request.result = GPU_RESULT_INVALID_ARGUMENT;
+                write_user_value(arg, &request)?;
+                return Ok(0);
+            }
+        };
+        let image = image_owner
+            .as_gpu()
+            .and_then(GpuObject::as_image)
+            .ok_or("GPU image handle changed while transferring")?;
+        if !self.image_is_attached(image) {
+            request.result = GPU_RESULT_INVALID_STATE;
+            write_user_value(arg, &request)?;
+            return Ok(0);
+        }
+        if image
+            .transfer_imported_bgra(
+                request.dst_x,
+                request.dst_y,
+                request.width,
+                request.height,
+                |backend_image, transfer| {
+                    self.backend_context
+                        .transfer_imported_image_bgra(backend_image, transfer)
+                },
+            )
+            .is_err()
+        {
+            request.result = GPU_RESULT_INVALID_STATE;
+        }
+        write_user_value(arg, &request)?;
+        Ok(0)
+    }
 }
 
 impl ControlOps for GpuContext {
@@ -362,8 +479,12 @@ impl ControlOps for GpuContext {
             GPU_CONTEXT_QUERY => self.handle_query_info(arg),
             GPU_CREATE_QUEUE => self.handle_create_queue(arg),
             GPU_CONTEXT_ATTACH_IMAGE => self.handle_attach_image(arg),
+            GPU_CONTEXT_DETACH_IMAGE => self.handle_detach_image(arg),
             super::GPU_CONTEXT_ATTACH_BUFFER => self.handle_attach_buffer(arg),
             GPU_CONTEXT_UPLOAD_IMAGE_BGRA => self.handle_upload_image_bgra(arg),
+            GPU_CONTEXT_TRANSFER_IMPORTED_IMAGE_BGRA => {
+                self.handle_transfer_imported_image_bgra(arg)
+            }
             _ => Err("Unsupported GPU context control command"),
         }
     }

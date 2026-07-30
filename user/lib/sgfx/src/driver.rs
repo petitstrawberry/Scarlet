@@ -11,6 +11,10 @@ use std::handle::{HandleError, HandleResult};
 use crate::{
     Capabilities, Color, PipelineDesc, PixelRect, SourceAlpha, VertexClip4Color3, Viewport, virgl,
 };
+#[cfg(feature = "std")]
+use scarlet_os::ipc::SharedMemory;
+#[cfg(not(feature = "std"))]
+use std::ipc::SharedMemory;
 
 pub(crate) enum Device {
     Virgl(Rc<virgl::Device>),
@@ -58,6 +62,25 @@ impl Context {
         }
     }
 
+    pub(crate) fn create_imported_bgra_texture(
+        &self,
+        shared_memory: &SharedMemory,
+        width: u32,
+        height: u32,
+        shm_offset: usize,
+        source_stride: u32,
+    ) -> HandleResult<Texture> {
+        match self {
+            Self::Virgl(context) => Ok(Texture::Virgl(context.create_imported_bgra_texture(
+                shared_memory,
+                width,
+                height,
+                shm_offset,
+                source_stride,
+            )?)),
+        }
+    }
+
     pub(crate) fn upload_texture_bgra(
         &self,
         texture: &Texture,
@@ -69,6 +92,24 @@ impl Context {
             (Self::Virgl(context), Texture::Virgl(texture)) => {
                 context.upload_texture_bgra(texture, pixels, source_stride, damage)
             }
+        }
+    }
+
+    pub(crate) fn transfer_imported_bgra_rect(
+        &self,
+        texture: &Texture,
+        damage: PixelRect,
+    ) -> HandleResult<()> {
+        match (self, texture) {
+            (Self::Virgl(context), Texture::Virgl(texture)) => {
+                context.transfer_imported_bgra_rect(texture, damage)
+            }
+        }
+    }
+
+    pub(crate) fn release_texture(&self, texture: Texture) -> HandleResult<()> {
+        match (self, texture) {
+            (Self::Virgl(context), Texture::Virgl(texture)) => context.release_texture(texture),
         }
     }
 

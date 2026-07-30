@@ -587,6 +587,25 @@ pub trait GpuBackendContext: Send + Sync {
         Err("GPU backend context does not support image uploads")
     }
 
+    /// Transfer a rectangle from fixed imported image backing.
+    ///
+    /// # Arguments
+    ///
+    /// * `image` - Backend image retained by the calling kernel capability.
+    /// * `transfer` - Validated imported-backing rectangle to transfer.
+    ///
+    /// # Returns
+    ///
+    /// Nothing after the backend has synchronously completed the transfer, or an
+    /// error when imported image transfer is unavailable.
+    fn transfer_imported_image_bgra(
+        &self,
+        _image: &dyn GpuBackendImage,
+        _transfer: GpuImageUploadInfo,
+    ) -> Result<(), &'static str> {
+        Err("GPU backend context does not support imported image transfers")
+    }
+
     /// Attach a buffer so opaque commands in this context may reference it.
     ///
     /// # Arguments

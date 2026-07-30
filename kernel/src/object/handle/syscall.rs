@@ -150,8 +150,8 @@ pub fn sys_handle_duplicate(trapframe: &mut Trapframe) -> usize {
     trapframe.increment_pc_next(&task);
 
     // Duplicate using object-specific dup semantics where available.
-    if let Some(kernel_obj) = task.handle_table.clone_for_dup(handle) {
-        match task.handle_table.insert(kernel_obj) {
+    if let Some((kernel_obj, metadata)) = task.handle_table.clone_for_dup(handle) {
+        match task.handle_table.insert_with_metadata(kernel_obj, metadata) {
             Ok(new_handle) => new_handle as usize,
             Err(_) => usize::MAX, // Handle table full
         }

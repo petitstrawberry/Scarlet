@@ -13,6 +13,7 @@ use super::{
     GpuTimelineSignal,
 };
 use crate::environment::PAGE_SIZE;
+use crate::ipc::shared_memory::{SharedMemoryObject, SharedMemoryPin};
 use crate::library::std::usercopy::copy_from_user;
 use crate::mem::page::{Page, allocate_raw_pages, free_raw_pages};
 use crate::object::capability::ControlOps;
@@ -113,6 +114,157 @@ pub(crate) const fn image_create_is_valid(create: GpuImageCreateInfo) -> bool {
         && create.width != 0
         && create.height != 0
         && create.width <= u32::MAX / 4
+}
+
+/// Return whether a generic image descriptor is valid for imported SHM backing.
+pub(crate) const fn imported_image_create_is_valid(create: GpuImageCreateInfo) -> bool {
+    image_create_is_valid(create)
+        && create.format == GPU_IMAGE_FORMAT_BGRA8_UNORM
+        && create.usage == super::GPU_IMAGE_USAGE_SAMPLED | super::GPU_IMAGE_USAGE_TRANSFER_DST
+}
+
+/// Fixed SharedMemory layout retained by an imported BGRA image.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct GpuImportedImageLayout {
+    shm_offset: usize,
+    source_stride: usize,
+    layer_stride: usize,
+}
+
+/// Validate one imported image layout against its pinned SharedMemory backing.
+pub(crate) fn imported_image_layout(
+    create: GpuImageCreateInfo,
+    backing_size: usize,
+    shm_offset: u64,
+    source_stride: u32,
+) -> Result<GpuImportedImageLayout, &'static str> {
+    if !imported_image_create_is_valid(create) {
+        return Err("Imported GPU image descriptor is invalid");
+    }
+    let shm_offset = usize::try_from(shm_offset)
+        .map_err(|_| "Imported GPU image offset does not fit kernel address size")?;
+    let source_stride = usize::try_from(source_stride)
+        .map_err(|_| "Imported GPU image stride does not fit kernel address size")?;
+    let row_bytes = usize::try_from(create.width)
+        .map_err(|_| "Imported GPU image width does not fit kernel address size")?
+        .checked_mul(4)
+        .ok_or("Imported GPU image row width overflows")?;
+    if source_stride < row_bytes {
+        return Err("Imported GPU image stride is too small");
+    }
+    let height = usize::try_from(create.height)
+        .map_err(|_| "Imported GPU image height does not fit kernel address size")?;
+    let required = height
+        .checked_sub(1)
+        .and_then(|rows| rows.checked_mul(source_stride))
+        .and_then(|offset| offset.checked_add(row_bytes))
+        .ok_or("Imported GPU image range overflows")?;
+    let required_end = shm_offset
+        .checked_add(required)
+        .ok_or("Imported GPU image range overflows")?;
+    if required_end > backing_size {
+        return Err("Imported GPU image range exceeds shared memory");
+    }
+    let layer_stride = source_stride
+        .checked_mul(height)
+        .ok_or("Imported GPU image layer stride overflows")?;
+    u32::try_from(source_stride)
+        .map_err(|_| "Imported GPU image stride does not fit backend ABI")?;
+    u32::try_from(layer_stride)
+        .map_err(|_| "Imported GPU image layer stride does not fit backend ABI")?;
+    Ok(GpuImportedImageLayout {
+        shm_offset,
+        source_stride,
+        layer_stride,
+    })
+}
+
+/// Validate one rectangle transfer from an imported image's fixed backing layout.
+pub(crate) fn imported_image_transfer_layout(
+    image: super::GpuBackendImageInfo,
+    backing_size: usize,
+    layout: GpuImportedImageLayout,
+    dst_x: u32,
+    dst_y: u32,
+    width: u32,
+    height: u32,
+) -> Result<GpuImageUploadInfo, &'static str> {
+    if width == 0
+        || height == 0
+        || image.format != GPU_IMAGE_FORMAT_BGRA8_UNORM
+        || image.usage & (super::GPU_IMAGE_USAGE_SAMPLED | GPU_IMAGE_USAGE_TRANSFER_DST)
+            != (super::GPU_IMAGE_USAGE_SAMPLED | super::GPU_IMAGE_USAGE_TRANSFER_DST)
+    {
+        return Err("Imported GPU image transfer request is invalid");
+    }
+    let image_row_bytes = usize::try_from(image.width)
+        .map_err(|_| "Imported GPU image width does not fit kernel address size")?
+        .checked_mul(4)
+        .ok_or("Imported GPU image row width overflows")?;
+    if layout.source_stride < image_row_bytes {
+        return Err("Imported GPU image stride is too small");
+    }
+    let image_height = usize::try_from(image.height)
+        .map_err(|_| "Imported GPU image height does not fit kernel address size")?;
+    if layout.layer_stride
+        != layout
+            .source_stride
+            .checked_mul(image_height)
+            .ok_or("Imported GPU image layer stride overflows")?
+    {
+        return Err("Imported GPU image layer stride is invalid");
+    }
+    let dst_x_end = dst_x
+        .checked_add(width)
+        .ok_or("Imported GPU image transfer x range overflows")?;
+    let dst_y_end = dst_y
+        .checked_add(height)
+        .ok_or("Imported GPU image transfer y range overflows")?;
+    if dst_x_end > image.width || dst_y_end > image.height {
+        return Err("Imported GPU image transfer rectangle exceeds image bounds");
+    }
+    let row_bytes = usize::try_from(width)
+        .map_err(|_| "Imported GPU image transfer width does not fit kernel address size")?
+        .checked_mul(4)
+        .ok_or("Imported GPU image transfer row width overflows")?;
+    let row_offset = usize::try_from(dst_y)
+        .map_err(|_| "Imported GPU image transfer y coordinate does not fit kernel address size")?
+        .checked_mul(layout.source_stride)
+        .and_then(|offset| {
+            usize::try_from(dst_x)
+                .ok()
+                .and_then(|x| x.checked_mul(4))
+                .and_then(|x_offset| offset.checked_add(x_offset))
+        })
+        .ok_or("Imported GPU image transfer offset overflows")?;
+    let backing_offset = layout
+        .shm_offset
+        .checked_add(row_offset)
+        .ok_or("Imported GPU image transfer offset overflows")?;
+    let height = usize::try_from(height)
+        .map_err(|_| "Imported GPU image transfer height does not fit kernel address size")?;
+    let transfer_end = height
+        .checked_sub(1)
+        .and_then(|rows| rows.checked_mul(layout.source_stride))
+        .and_then(|offset| offset.checked_add(backing_offset))
+        .and_then(|offset| offset.checked_add(row_bytes))
+        .ok_or("Imported GPU image transfer range overflows")?;
+    if transfer_end > backing_size {
+        return Err("Imported GPU image transfer range exceeds shared memory");
+    }
+    Ok(GpuImageUploadInfo::new(
+        u64::try_from(backing_offset)
+            .map_err(|_| "Imported GPU image transfer offset does not fit backend ABI")?,
+        u32::try_from(layout.source_stride)
+            .map_err(|_| "Imported GPU image stride does not fit backend ABI")?,
+        u32::try_from(layout.layer_stride)
+            .map_err(|_| "Imported GPU image layer stride does not fit backend ABI")?,
+        dst_x,
+        dst_y,
+        width,
+        u32::try_from(height)
+            .map_err(|_| "Imported GPU image transfer height does not fit backend ABI")?,
+    ))
 }
 
 /// Validated layout for one source-to-image BGRA upload.
@@ -240,13 +392,13 @@ pub(crate) fn image_upload_layout(
     })
 }
 
-/// Stable page-backed allocation retained by a GPU image and its attachments.
-pub(crate) struct GpuImageBacking {
+/// Stable private page-backed allocation retained by a GPU image and its attachments.
+struct GpuPrivateImageBacking {
     paddr: usize,
     allocation_size: usize,
 }
 
-impl GpuImageBacking {
+impl GpuPrivateImageBacking {
     fn new(create: GpuImageCreateInfo) -> Result<Self, &'static str> {
         let image_size = usize::try_from(create.width)
             .map_err(|_| "GPU image width does not fit kernel address size")?
@@ -276,23 +428,140 @@ impl GpuImageBacking {
             allocation_size,
         })
     }
-
-    fn info(&self) -> Result<GpuImageBackingInfo, &'static str> {
-        Ok(GpuImageBackingInfo::new(
-            self.paddr,
-            u64::try_from(self.allocation_size)
-                .map_err(|_| "GPU image backing size does not fit backend metadata")?,
-        ))
-    }
 }
 
-impl Drop for GpuImageBacking {
+impl Drop for GpuPrivateImageBacking {
     fn drop(&mut self) {
         let page_count = self.allocation_size / PAGE_SIZE;
         if page_count != 0 {
             let pages = phys_to_virt(self.paddr) as *mut Page;
             free_raw_pages(pages, page_count);
         }
+    }
+}
+
+/// Fixed layout of a sampled BGRA image imported from SharedMemory.
+struct GpuImportedImageBacking {
+    pin: SharedMemoryPin,
+    layout: GpuImportedImageLayout,
+}
+
+/// Private image backing that is either allocated by the kernel or pinned from SharedMemory.
+pub(crate) enum GpuImageBacking {
+    Private(GpuPrivateImageBacking),
+    Imported(GpuImportedImageBacking),
+}
+
+impl GpuImageBacking {
+    fn private(create: GpuImageCreateInfo) -> Result<Self, &'static str> {
+        Ok(Self::Private(GpuPrivateImageBacking::new(create)?))
+    }
+
+    fn imported(
+        create: GpuImageCreateInfo,
+        shared_memory: Arc<dyn SharedMemoryObject>,
+        shm_offset: u64,
+        source_stride: u32,
+    ) -> Result<Self, &'static str> {
+        let shm_size = shared_memory.size();
+        let pin = SharedMemoryPin::new(shared_memory, 0, shm_size)?;
+        let layout =
+            imported_image_layout(create, pin.backing().size(), shm_offset, source_stride)?;
+        Ok(Self::Imported(GpuImportedImageBacking { pin, layout }))
+    }
+
+    fn info(&self) -> Result<GpuImageBackingInfo, &'static str> {
+        match self {
+            Self::Private(backing) => Ok(GpuImageBackingInfo::new(
+                backing.paddr,
+                u64::try_from(backing.allocation_size)
+                    .map_err(|_| "GPU image backing size does not fit backend metadata")?,
+            )),
+            Self::Imported(backing) => {
+                let backing = backing.pin.backing();
+                Ok(GpuImageBackingInfo::new(
+                    backing.paddr(),
+                    u64::try_from(backing.size()).map_err(
+                        |_| "Imported GPU image backing size does not fit backend metadata",
+                    )?,
+                ))
+            }
+        }
+    }
+
+    fn private_paddr(&self) -> Result<usize, &'static str> {
+        match self {
+            Self::Private(backing) => Ok(backing.paddr),
+            Self::Imported(_) => Err("Imported GPU images cannot copy pixels from userspace"),
+        }
+    }
+
+    fn imported_transfer_layout(
+        &self,
+        image: super::GpuBackendImageInfo,
+        dst_x: u32,
+        dst_y: u32,
+        width: u32,
+        height: u32,
+    ) -> Result<GpuImageUploadInfo, &'static str> {
+        let Self::Imported(backing) = self else {
+            return Err("GPU image does not use imported shared memory");
+        };
+        imported_image_transfer_layout(
+            image,
+            backing.pin.backing().size(),
+            backing.layout,
+            dst_x,
+            dst_y,
+            width,
+            height,
+        )
+    }
+
+    fn clean_imported_transfer_range(
+        &self,
+        transfer: GpuImageUploadInfo,
+    ) -> Result<(), &'static str> {
+        let Self::Imported(backing) = self else {
+            return Err("GPU image does not use imported shared memory");
+        };
+        let transfer_offset = usize::try_from(transfer.backing_offset)
+            .map_err(|_| "Imported GPU image transfer offset does not fit kernel address size")?;
+        let transfer_stride = usize::try_from(transfer.backing_stride)
+            .map_err(|_| "Imported GPU image transfer stride does not fit kernel address size")?;
+        let transfer_height = usize::try_from(transfer.height)
+            .map_err(|_| "Imported GPU image transfer height does not fit kernel address size")?;
+        let row_bytes = usize::try_from(transfer.width)
+            .map_err(|_| "Imported GPU image transfer width does not fit kernel address size")?
+            .checked_mul(4)
+            .ok_or("Imported GPU image transfer row width overflows")?;
+        if transfer_stride != backing.layout.source_stride
+            || usize::try_from(transfer.backing_layer_stride)
+                .map_err(|_| "Imported GPU image layer stride does not fit kernel address size")?
+                != backing.layout.layer_stride
+            || transfer_height == 0
+        {
+            return Err("Imported GPU image transfer layout changed unexpectedly");
+        }
+        let transfer_length = transfer_height
+            .checked_sub(1)
+            .and_then(|rows| rows.checked_mul(transfer_stride))
+            .and_then(|offset| offset.checked_add(row_bytes))
+            .ok_or("Imported GPU image transfer range overflows")?;
+        let backing_info = backing.pin.backing();
+        let transfer_end = transfer_offset
+            .checked_add(transfer_length)
+            .ok_or("Imported GPU image transfer range overflows")?;
+        if transfer_end > backing_info.size() {
+            return Err("Imported GPU image transfer range exceeds shared memory");
+        }
+        let direct_map_vaddr = phys_to_virt(backing_info.paddr())
+            .checked_add(transfer_offset)
+            .ok_or("Imported GPU image direct-map address overflows")?;
+        // The SharedMemory pin retains this contiguous backing unchanged until
+        // transfer completion, so its physical direct-map address remains valid.
+        crate::arch::clean_dcache_to_poc_range(direct_map_vaddr, transfer_length);
+        Ok(())
     }
 }
 
@@ -322,7 +591,7 @@ impl GpuImage {
         if !image_create_is_valid(create) {
             return Err("GPU image descriptor is invalid");
         }
-        let backing = Arc::new(GpuImageBacking::new(create)?);
+        let backing = Arc::new(GpuImageBacking::private(create)?);
         let backing_info = backing.info()?;
         let backend_image = backend.create_image(create, backing_info)?;
         let info = backend_image.query_info();
@@ -334,6 +603,52 @@ impl GpuImage {
             || info.allocation_size != backing_info.allocation_size
         {
             return Err("GPU backend image metadata is invalid");
+        }
+        Ok(Self {
+            backend_image,
+            backing,
+            upload_lock: IrqSpinLock::new(()),
+        })
+    }
+
+    /// Create a sampled BGRA image backed by a pinned SharedMemory object.
+    ///
+    /// # Arguments
+    ///
+    /// * `backend` - Backend that creates and retains the real image resource.
+    /// * `create` - Validated sampled BGRA image descriptor.
+    /// * `shared_memory` - Strong SharedMemory capability owner retained by the image.
+    /// * `shm_offset` - Byte offset of pixel `(0, 0)` in SharedMemory.
+    /// * `source_stride` - Number of bytes between SharedMemory source rows.
+    ///
+    /// # Returns
+    ///
+    /// A capability retaining both the backend image and its pinned SharedMemory
+    /// backing, or an error when any layout or backend validation fails.
+    pub(crate) fn new_imported(
+        backend: Arc<dyn GpuBackend>,
+        create: GpuImageCreateInfo,
+        shared_memory: Arc<dyn SharedMemoryObject>,
+        shm_offset: u64,
+        source_stride: u32,
+    ) -> Result<Self, &'static str> {
+        let backing = Arc::new(GpuImageBacking::imported(
+            create,
+            shared_memory,
+            shm_offset,
+            source_stride,
+        )?);
+        let backing_info = backing.info()?;
+        let backend_image = backend.create_image(create, backing_info)?;
+        let info = backend_image.query_info();
+        if info.format != create.format
+            || info.usage != create.usage
+            || info.width != create.width
+            || info.height != create.height
+            || info.command_resource_token == 0
+            || info.allocation_size != backing_info.allocation_size
+        {
+            return Err("GPU backend imported image metadata is invalid");
         }
         Ok(Self {
             backend_image,
@@ -376,7 +691,7 @@ impl GpuImage {
     {
         let _upload_guard = self.upload_lock.lock();
         let task = crate::task::mytask().ok_or("No current task for GPU image upload")?;
-        let backing_base = phys_to_virt(self.backing.paddr) as *mut u8;
+        let backing_base = phys_to_virt(self.backing.private_paddr()?) as *mut u8;
         for row in 0..layout.height {
             let source_offset = row
                 .checked_mul(layout.source_stride)
@@ -401,6 +716,29 @@ impl GpuImage {
                 .map_err(|_| "Failed to copy GPU image pixels from user")?;
         }
         transfer(self.backend_image.as_ref(), layout.transfer)
+    }
+
+    pub(crate) fn transfer_imported_bgra<F>(
+        &self,
+        dst_x: u32,
+        dst_y: u32,
+        width: u32,
+        height: u32,
+        transfer: F,
+    ) -> Result<(), &'static str>
+    where
+        F: FnOnce(&dyn GpuBackendImage, GpuImageUploadInfo) -> Result<(), &'static str>,
+    {
+        let _upload_guard = self.upload_lock.lock();
+        let layout = self.backing.imported_transfer_layout(
+            self.query_info(),
+            dst_x,
+            dst_y,
+            width,
+            height,
+        )?;
+        self.backing.clean_imported_transfer_range(layout)?;
+        transfer(self.backend_image.as_ref(), layout)
     }
 
     /// Return this image's display descriptor when it is presentable.

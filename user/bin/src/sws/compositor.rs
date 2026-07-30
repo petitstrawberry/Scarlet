@@ -1357,6 +1357,24 @@ impl Compositor {
         self.present_damage(dirty_rects)
     }
 
+    /// Release one cached GPU window texture before its backing can be replaced.
+    fn release_gpu_window_texture(&mut self, window_id: u32) {
+        let release_failed = match self.gpu_compositor.as_mut() {
+            Some(gpu_compositor) => gpu_compositor.remove_window(window_id).is_err(),
+            None => false,
+        };
+        if release_failed {
+            println!(
+                "[Compositor] GPU texture release failed for window {}; disabling GPU composition",
+                window_id
+            );
+            self.gpu_compositor = None;
+            self.full_redraw_needed = true;
+            self.pending_damage.clear();
+            self.presented_damage.clear();
+        }
+    }
+
     /// Compose and present the whole scene through the optional GPU path.
     ///
     /// A GPU error is intentionally contained here: the caller continues with a
@@ -2951,10 +2969,8 @@ impl Compositor {
             .collect();
         self.clear_interaction_state_for_removed_windows(&removed_ids);
         self.remove_ime_popup_windows(&removed_ids);
-        if let Some(gpu_compositor) = self.gpu_compositor.as_mut() {
-            for window_id in &removed_ids {
-                gpu_compositor.remove_window(*window_id);
-            }
+        for window_id in &removed_ids {
+            self.release_gpu_window_texture(*window_id);
         }
 
         let mut active_app_removed = false;
@@ -3605,6 +3621,7 @@ impl Compositor {
                     .get_window(window_id)
                     .map(|w| (w.x, w.y, w.width, w.height));
                 if let Some(shm) = shm {
+                    self.release_gpu_window_texture(window_id);
                     if self.window_manager.resize_window_with_shm(
                         window_id,
                         width,
@@ -3613,9 +3630,6 @@ impl Compositor {
                         shm_mapped_addr,
                         shm_size,
                     ) {
-                        if let Some(gpu_compositor) = self.gpu_compositor.as_mut() {
-                            gpu_compositor.remove_window(window_id);
-                        }
                         if let Some(w) = self.window_manager.get_window(window_id) {
                             let rect = (w.x, w.y, w.width, w.height);
                             if let Some(old_rect) = old_rect {
@@ -3946,6 +3960,7 @@ impl Compositor {
                     // println!("[Compositor] Attaching external buffer at address 0x{:x}", addr);
                     if let Some(shm_handle) = shm {
                         // We have both handle and address (normal case)
+                        self.release_gpu_window_texture(window_id);
                         if let Err(e) = self.window_manager.replace_window_shm_from_event(
                             window_id,
                             width,
@@ -3962,9 +3977,6 @@ impl Compositor {
                                 window_id, e
                             );
                         } else {
-                            if let Some(gpu_compositor) = self.gpu_compositor.as_mut() {
-                                gpu_compositor.remove_window(window_id);
-                            }
                             if let Some(w) = self.window_manager.get_window(window_id) {
                                 self.add_pending_damage((w.x, w.y, w.width, w.height));
                             }
@@ -3973,7 +3985,17 @@ impl Compositor {
                         // We have address but no SharedMemory wrapper (e.g., File handle from Linux compat)
                         // This is zero-copy mode - just update the mapped address
                         // println!("[Compositor] Zero-copy mode: updating mapped address without SharedMemory wrapper");
+                        self.release_gpu_window_texture(window_id);
                         let rect = if let Some(w) = self.window_manager.get_window_mut(window_id) {
+                            if let (Some(old_addr), old_size) =
+                                (w.shm_mapped_addr.take(), w.shm_size)
+                                && old_size != 0
+                            {
+                                let _ = std::handle::capability::memory_mapping::munmap(
+                                    old_addr, old_size,
+                                );
+                            }
+                            w.shm = None;
                             w.width = width;
                             w.height = height;
                             w.shm_mapped_addr = Some(addr);
@@ -3987,7 +4009,6 @@ impl Compositor {
                             w.shm_format = format;
                             w.has_alpha_content = format == 0;
                             w.buffer = None; // Clear Vec buffer if present
-                            // Keep existing shm if any (for ownership tracking)
                             Some((w.x, w.y, w.width, w.height))
                         } else {
                             println!("[Compositor] Window {} not found", window_id);
@@ -3995,9 +4016,6 @@ impl Compositor {
                         };
 
                         if let Some(rect) = rect {
-                            if let Some(gpu_compositor) = self.gpu_compositor.as_mut() {
-                                gpu_compositor.remove_window(window_id);
-                            }
                             self.add_pending_damage(rect);
                         }
                     }

@@ -112,6 +112,13 @@ The payload length must equal `8 + title_len`.
 
 This is currently treated as a **damage notification only** (no pixel payload is transferred).
 
+> Implementation note: clients continue to receive and map the window shared
+> memory buffer, write pixels into it, and send damage notifications only. SWS
+> may internally pin and import that SharedMemory as GPU backing for composition.
+> Resize or buffer replacement creates a new backing generation and releases the
+> prior one first. Buffers that are not represented by SharedMemory retain the
+> CPU/private upload fallback.
+
 Payload (20 bytes):
 
 | Offset | Size | Field    | Type |

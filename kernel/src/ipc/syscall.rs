@@ -606,13 +606,13 @@ pub fn sys_socket_send_handle(trapframe: &mut Trapframe) -> usize {
 
     // Get the kernel object to send with dup semantics
     // Use clone_for_dup() to properly increment reference counts for objects like Pipes
-    let object = match task.handle_table.clone_for_dup(object_handle) {
-        Some(obj) => obj,
+    let (object, metadata) = match task.handle_table.clone_for_dup(object_handle) {
+        Some(entry) => entry,
         None => return usize::MAX, // Invalid object handle
     };
 
     // Send the handle through the socket
-    match local_socket.send_handle(object) {
+    match local_socket.send_handle(object, metadata) {
         Ok(()) => 0,
         Err(_) => usize::MAX,
     }
@@ -658,13 +658,13 @@ pub fn sys_socket_recv_handle(trapframe: &mut Trapframe) -> usize {
         None => return usize::MAX, // Not a LocalSocket
     };
 
-    let object = match local_socket.recv_handle_blocking(task.get_id(), trapframe) {
-        Ok(obj) => obj,
+    let (object, metadata) = match local_socket.recv_handle_blocking(task.get_id(), trapframe) {
+        Ok(entry) => entry,
         Err(_) => return usize::MAX,
     };
 
     // Insert the received object into this task's handle table
-    match task.handle_table.insert(object) {
+    match task.handle_table.insert_with_metadata(object, metadata) {
         Ok(handle) => handle as usize,
         Err(_) => usize::MAX, // Too many open handles
     }
@@ -716,15 +716,15 @@ pub fn sys_socket_send_handle_and_data(trapframe: &mut Trapframe) -> usize {
     };
 
     // Get the kernel object to send with dup semantics
-    let object = match task.handle_table.clone_for_dup(object_handle) {
-        Some(obj) => obj,
+    let (object, metadata) = match task.handle_table.clone_for_dup(object_handle) {
+        Some(entry) => entry,
         None => return usize::MAX, // Invalid object handle
     };
 
     // Validate and translate data pointer
     if data_len == 0 {
         // No data to send, just send the handle
-        match local_socket.send_handle(object) {
+        match local_socket.send_handle(object, metadata) {
             Ok(()) => return 0,
             Err(_) => return usize::MAX,
         }
@@ -740,7 +740,7 @@ pub fn sys_socket_send_handle_and_data(trapframe: &mut Trapframe) -> usize {
     }
 
     // Send the handle and data atomically
-    match local_socket.send_handle_and_data(object, &data) {
+    match local_socket.send_handle_and_data(object, metadata, &data) {
         Ok(()) => 0,
         Err(_) => usize::MAX,
     }
@@ -795,13 +795,13 @@ pub fn sys_socket_recv_handle_and_data(trapframe: &mut Trapframe) -> usize {
     let max_data_len = max_data_len.min(MAX_RECV_SIZE);
 
     // Receive handle and data atomically
-    let (object, data) = match local_socket.recv_handle_and_data(max_data_len) {
-        Ok((h, d)) => (h, d),
+    let (object, metadata, data) = match local_socket.recv_handle_and_data(max_data_len) {
+        Ok(entry) => entry,
         Err(_) => return usize::MAX,
     };
 
     // Insert the received object into this task's handle table
-    let new_handle = match task.handle_table.insert(object) {
+    let new_handle = match task.handle_table.insert_with_metadata(object, metadata) {
         Ok(h) => h,
         Err(_) => return usize::MAX, // Too many open handles
     };

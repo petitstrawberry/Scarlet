@@ -383,6 +383,21 @@ fn append_pod_bytes<T>(buffer: &mut Vec<u8>, value: &T) {
     buffer.extend_from_slice(bytes);
 }
 
+fn validate_execution_response(
+    response: VirtioGpuCtrlHdr,
+    expected_fence_id: Option<u64>,
+) -> Result<(), &'static str> {
+    if response.hdr_type != VIRTIO_GPU_RESP_OK_NODATA {
+        return Err("VirtIO GPU execution command returned unexpected response");
+    }
+    if let Some(fence_id) = expected_fence_id
+        && (response.flags & VIRTIO_GPU_FLAG_FENCE == 0 || response.fence_id != fence_id)
+    {
+        return Err("VirtIO GPU execution command returned an unexpected fence response");
+    }
+    Ok(())
+}
+
 /// VirtIO GPU Device Core
 pub struct VirtioGpuDeviceCore {
     base_addr: usize,
@@ -530,10 +545,7 @@ impl VirtioGpuDeviceCore {
         // unaligned because it is byte storage.
         let response =
             unsafe { core::ptr::read_unaligned(resp_buffer.as_ptr() as *const VirtioGpuCtrlHdr) };
-        if response.hdr_type != VIRTIO_GPU_RESP_OK_NODATA {
-            return Err("VirtIO GPU execution command returned unexpected response");
-        }
-        Ok(())
+        validate_execution_response(response, None)
     }
 
     /// Send a command to the control queue, using a caller-provided response buffer.
@@ -991,7 +1003,14 @@ impl VirtioGpuDeviceCore {
             stride: transfer.stride,
             layer_stride: transfer.layer_stride,
         };
-        self.send_execution_command(&cmd)
+        let mut resp_buffer = [0u8; core::mem::size_of::<VirtioGpuCtrlHdr>()];
+        self.send_control_command_with_resp_buffer(&cmd, &mut resp_buffer)?;
+        // SAFETY: `resp_buffer` contains exactly one VirtIO GPU control header
+        // written by the synchronous control queue response path and may be
+        // unaligned because it is byte storage.
+        let response =
+            unsafe { core::ptr::read_unaligned(resp_buffer.as_ptr() as *const VirtioGpuCtrlHdr) };
+        validate_execution_response(response, transfer.fence_id)
     }
 
     #[allow(dead_code)]
@@ -1049,15 +1068,7 @@ impl VirtioGpuDeviceCore {
         // unaligned because it is byte storage.
         let response =
             unsafe { core::ptr::read_unaligned(resp_buffer.as_ptr() as *const VirtioGpuCtrlHdr) };
-        if response.hdr_type != VIRTIO_GPU_RESP_OK_NODATA {
-            return Err("SUBMIT_3D returned unexpected response");
-        }
-        if let Some(fence_id) = fence_id
-            && (response.flags & VIRTIO_GPU_FLAG_FENCE == 0 || response.fence_id != fence_id)
-        {
-            return Err("SUBMIT_3D returned an unexpected fence response");
-        }
-        Ok(())
+        validate_execution_response(response, fence_id)
     }
 
     /// Get display information from the device
@@ -1766,59 +1777,11 @@ impl Drop for VirtioGpuBackendContext {
     }
 }
 
-impl GpuBackendContext for VirtioGpuBackendContext {
-    fn query_info(&self) -> GpuBackendContextInfo {
-        self.info
-    }
-
-    fn create_queue(&self) -> Result<Arc<dyn GpuBackendQueue>, &'static str> {
-        Ok(Arc::new(VirtioGpuBackendQueue {
-            core: Arc::clone(&self.core),
-            context_id: self.context_id,
-        }))
-    }
-
-    fn attach_image(&self, image: &dyn GpuBackendImage) -> Result<u64, &'static str> {
-        let info = image.query_info();
-        let resource_id = u32::try_from(info.command_resource_token)
-            .map_err(|_| "VirtIO GPU image token does not fit a resource ID")?;
-        let core = self.core.lock();
-        if resource_id == 0 || image.backend_cookie() != core.backend_cookie() {
-            return Err("GPU image belongs to a different VirtIO GPU device");
-        }
-        core.attach_acceleration_resource(self.context_id, resource_id)?;
-        let mut attached_resources = self.attached_resources.lock();
-        if attached_resources.try_reserve(1).is_err() {
-            let _ = core.detach_acceleration_resource(self.context_id, resource_id);
-            return Err("Failed to retain VirtIO GPU image attachment");
-        }
-        attached_resources.push(resource_id);
-        Ok(u64::from(resource_id))
-    }
-
-    fn detach_image(&self, image: &dyn GpuBackendImage) -> Result<(), &'static str> {
-        let info = image.query_info();
-        let resource_id = u32::try_from(info.command_resource_token)
-            .map_err(|_| "VirtIO GPU image token does not fit a resource ID")?;
-        let core = self.core.lock();
-        if resource_id == 0 || image.backend_cookie() != core.backend_cookie() {
-            return Err("GPU image belongs to a different VirtIO GPU device");
-        }
-        core.detach_acceleration_resource(self.context_id, resource_id)?;
-        let mut attached_resources = self.attached_resources.lock();
-        if let Some(index) = attached_resources
-            .iter()
-            .position(|&attached_resource_id| attached_resource_id == resource_id)
-        {
-            attached_resources.swap_remove(index);
-        }
-        Ok(())
-    }
-
-    fn upload_image_bgra(
+impl VirtioGpuBackendContext {
+    fn transfer_image_bgra(
         &self,
         image: &dyn GpuBackendImage,
-        upload: GpuImageUploadInfo,
+        transfer: GpuImageUploadInfo,
     ) -> Result<(), &'static str> {
         let info = image.query_info();
         let resource_id = u32::try_from(info.command_resource_token)
@@ -1840,17 +1803,88 @@ impl GpuBackendContext for VirtioGpuBackendContext {
             context_id: self.context_id,
             resource_id,
             fence_id: Some(fence_id),
-            offset: upload.backing_offset,
+            offset: transfer.backing_offset,
             level: 0,
-            stride: upload.backing_stride,
-            layer_stride: upload.backing_layer_stride,
-            x: upload.dst_x,
-            y: upload.dst_y,
+            stride: transfer.backing_stride,
+            layer_stride: transfer.backing_layer_stride,
+            x: transfer.dst_x,
+            y: transfer.dst_y,
             z: 0,
-            width: upload.width,
-            height: upload.height,
+            width: transfer.width,
+            height: transfer.height,
             depth: 1,
         })
+    }
+}
+
+impl GpuBackendContext for VirtioGpuBackendContext {
+    fn query_info(&self) -> GpuBackendContextInfo {
+        self.info
+    }
+
+    fn create_queue(&self) -> Result<Arc<dyn GpuBackendQueue>, &'static str> {
+        Ok(Arc::new(VirtioGpuBackendQueue {
+            core: Arc::clone(&self.core),
+            context_id: self.context_id,
+        }))
+    }
+
+    fn attach_image(&self, image: &dyn GpuBackendImage) -> Result<u64, &'static str> {
+        let info = image.query_info();
+        let resource_id = u32::try_from(info.command_resource_token)
+            .map_err(|_| "VirtIO GPU image token does not fit a resource ID")?;
+        let core = self.core.lock();
+        if resource_id == 0 || image.backend_cookie() != core.backend_cookie() {
+            return Err("GPU image belongs to a different VirtIO GPU device");
+        }
+        let mut attached_resources = self.attached_resources.lock();
+        if attached_resources
+            .iter()
+            .any(|&attached_resource_id| attached_resource_id == resource_id)
+        {
+            return Err("VirtIO GPU image is already attached to this context");
+        }
+        core.attach_acceleration_resource(self.context_id, resource_id)?;
+        if attached_resources.try_reserve(1).is_err() {
+            let _ = core.detach_acceleration_resource(self.context_id, resource_id);
+            return Err("Failed to retain VirtIO GPU image attachment");
+        }
+        attached_resources.push(resource_id);
+        Ok(u64::from(resource_id))
+    }
+
+    fn detach_image(&self, image: &dyn GpuBackendImage) -> Result<(), &'static str> {
+        let info = image.query_info();
+        let resource_id = u32::try_from(info.command_resource_token)
+            .map_err(|_| "VirtIO GPU image token does not fit a resource ID")?;
+        let core = self.core.lock();
+        if resource_id == 0 || image.backend_cookie() != core.backend_cookie() {
+            return Err("GPU image belongs to a different VirtIO GPU device");
+        }
+        let mut attached_resources = self.attached_resources.lock();
+        let index = attached_resources
+            .iter()
+            .position(|&attached_resource_id| attached_resource_id == resource_id)
+            .ok_or("VirtIO GPU image is not attached to this context")?;
+        core.detach_acceleration_resource(self.context_id, resource_id)?;
+        attached_resources.swap_remove(index);
+        Ok(())
+    }
+
+    fn upload_image_bgra(
+        &self,
+        image: &dyn GpuBackendImage,
+        upload: GpuImageUploadInfo,
+    ) -> Result<(), &'static str> {
+        self.transfer_image_bgra(image, upload)
+    }
+
+    fn transfer_imported_image_bgra(
+        &self,
+        image: &dyn GpuBackendImage,
+        transfer: GpuImageUploadInfo,
+    ) -> Result<(), &'static str> {
+        self.transfer_image_bgra(image, transfer)
     }
 
     fn attach_buffer(&self, buffer: &dyn GpuBackendBuffer) -> Result<u64, &'static str> {

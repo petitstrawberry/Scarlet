@@ -1240,8 +1240,9 @@ pub fn sys_sendmsg(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                                 return errno::to_result(errno::EBADF);
                             }
                         };
-                        let dup_obj = match task.handle_table.clone_for_dup(send_handle) {
-                            Some(obj) => obj,
+                        let (dup_obj, metadata) = match task.handle_table.clone_for_dup(send_handle)
+                        {
+                            Some(entry) => entry,
                             None => {
                                 crate::early_println!(
                                     "[linux socket] sendmsg clone_for_dup failed"
@@ -1249,7 +1250,7 @@ pub fn sys_sendmsg(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                                 return errno::to_result(errno::EBADF);
                             }
                         };
-                        if local_socket.send_handle(dup_obj).is_err() {
+                        if local_socket.send_handle(dup_obj, metadata).is_err() {
                             crate::early_println!("[linux socket] sendmsg send_handle failed");
                             return errno::to_result(errno::EIO);
                         }
@@ -1485,8 +1486,8 @@ pub fn sys_recvmsg(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 
         if let Some(local_socket) = LocalSocket::from_socket_object(socket) {
             match local_socket.recv_handle_and_data(total_buffer_size) {
-                Ok((obj, data)) => {
-                    let new_handle = match task.handle_table.insert(obj) {
+                Ok((obj, metadata, data)) => {
+                    let new_handle = match task.handle_table.insert_with_metadata(obj, metadata) {
                         Ok(h) => h,
                         Err(_) => return errno::to_result(errno::EMFILE),
                     };

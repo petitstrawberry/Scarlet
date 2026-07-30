@@ -254,17 +254,54 @@ impl HandleTable {
             .map(|obj| obj.arc_clone())
     }
 
-    /// O(1) access - returns a full clone with dup() semantics
+    /// Return Arc-level clones of a handle's object and metadata from one table snapshot.
     ///
-    /// This method uses the KernelObject's Clone trait which may invoke custom_clone()
-    /// for objects like Pipes. This is appropriate when duplicating a file descriptor
-    /// (dup/dup2 syscalls) where the new descriptor should be tracked separately.
-    pub fn clone_for_dup(&self, handle: Handle) -> Option<KernelObject> {
+    /// The object and metadata are read while holding the same inner read lock, so the
+    /// returned pair always describes the same handle-table slot state.
+    ///
+    /// # Arguments
+    ///
+    /// * `handle` - Handle number to access.
+    ///
+    /// # Returns
+    ///
+    /// An Arc-level object clone and metadata clone when both exist for `handle`, otherwise
+    /// `None`.
+    pub fn get_arc_clone_with_metadata(
+        &self,
+        handle: Handle,
+    ) -> Option<(KernelObject, HandleMetadata)> {
         if handle as usize >= Self::MAX_HANDLES {
             return None;
         }
         let inner = self.inner.read();
-        inner.handles[handle as usize].clone()
+        let object = inner.handles[handle as usize].as_ref()?;
+        let metadata = inner.metadata[handle as usize].as_ref()?;
+        Some((object.arc_clone(), metadata.clone()))
+    }
+
+    /// O(1) access - returns a full clone and metadata with dup() semantics.
+    ///
+    /// This method uses the KernelObject's Clone trait which may invoke custom_clone()
+    /// for objects like Pipes. The object and metadata are cloned under the same read
+    /// lock so duplication cannot widen or otherwise reconstruct handle-scoped rights.
+    ///
+    /// # Arguments
+    ///
+    /// * `handle` - Handle number to duplicate.
+    ///
+    /// # Returns
+    ///
+    /// The duplicated object and exact handle metadata when the handle exists,
+    /// otherwise `None`.
+    pub fn clone_for_dup(&self, handle: Handle) -> Option<(KernelObject, HandleMetadata)> {
+        if handle as usize >= Self::MAX_HANDLES {
+            return None;
+        }
+        let inner = self.inner.read();
+        let object = inner.handles[handle as usize].as_ref()?;
+        let metadata = inner.metadata[handle as usize].as_ref()?;
+        Some((object.clone(), metadata.clone()))
     }
 
     /// O(1) removal
