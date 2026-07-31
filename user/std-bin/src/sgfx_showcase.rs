@@ -1,4 +1,4 @@
-//! Visible advanced scene submitted through the backend-neutral `sgfx` IR.
+//! Animated multi-pass showcase for the backend-neutral `sgfx` IR.
 
 use std::process::ExitCode;
 use std::thread;
@@ -8,329 +8,641 @@ use std::vec::Vec;
 use framebuffer::DisplaySurface;
 use sgfx::Device;
 use sgfx::ir::{
-    BlendState, BufferDesc, BufferUsage, Color, CommandEncoder, DrawUniforms, Error, Extent2D,
-    FragmentProgram, LoadOp, PixelRect, PrimitiveTopology, RasterState, RenderPassDesc,
-    RenderPipelineDesc, ResourceTable, StoreOp, TextureDesc, TextureFormat, TextureUsage,
-    Transform, VertexAttribute, VertexBufferLayout, VertexFormat,
+    AddressMode, BlendState, BufferDesc, BufferUsage, Color, CommandEncoder, DrawUniforms, Error,
+    Extent2D, FilterMode, FragmentProgram, IndexFormat, LoadOp, PixelRect, PrimitiveTopology,
+    RasterState, RenderPassDesc, RenderPipelineDesc, ResourceTable, SamplerDesc, StoreOp,
+    TextureDesc, TextureFormat, TextureSampleMode, TextureUsage, TextureWrite, Transform,
+    VertexAttribute, VertexBufferLayout, VertexFormat,
 };
 
-const VERTEX_STRIDE: usize = 28;
-const STAR_SEGMENTS: usize = 32;
-const FRAME_HOLD_INTERVAL: Duration = Duration::from_secs(1);
+const COLOR_VERTEX_STRIDE: usize = 32;
+const TEXTURE_VERTEX_STRIDE: usize = 24;
+const QUAD_VERTEX_COUNT: usize = 4;
+const INDEX_COUNT: u32 = 6;
+const MASK_SIZE: u32 = 64;
+const FRAME_INTERVAL: Duration = Duration::from_millis(16);
 
 fn fail(message: &str, error: impl core::fmt::Debug) -> ExitCode {
     println!("sgfx_showcase: {message}: {error:?}");
     ExitCode::from(1)
 }
 
-fn push_f32(bytes: &mut Vec<u8>, value: f32) {
-    bytes.extend_from_slice(&value.to_le_bytes());
-}
-
-fn push_vertex(bytes: &mut Vec<u8>, x: f32, y: f32, color: [f32; 3]) {
-    for component in [x, y, 0.0, 1.0] {
-        push_f32(bytes, component);
-    }
-    for component in color {
-        push_f32(bytes, component);
-    }
-}
-
-fn push_triangle(bytes: &mut Vec<u8>, positions: [[f32; 2]; 3], colors: [[f32; 3]; 3]) {
-    for index in 0..3 {
-        push_vertex(
-            bytes,
-            positions[index][0],
-            positions[index][1],
-            colors[index],
-        );
-    }
-}
-
-fn push_panel(
-    bytes: &mut Vec<u8>,
-    left: f32,
-    bottom: f32,
-    right: f32,
-    top: f32,
-    colors: [[f32; 3]; 4],
-) {
-    push_triangle(
-        bytes,
-        [[left, bottom], [right, bottom], [left, top]],
-        [colors[0], colors[1], colors[2]],
-    );
-    push_triangle(
-        bytes,
-        [[left, top], [right, bottom], [right, top]],
-        [colors[2], colors[1], colors[3]],
-    );
-}
-
-fn scene_vertices(width: u32, height: u32) -> sgfx::ir::Result<(Vec<u8>, u32)> {
-    let maximum_vertices = STAR_SEGMENTS
-        .checked_mul(3)
-        .and_then(|value| value.checked_add(30))
-        .ok_or(Error::Overflow)?;
-    let capacity = maximum_vertices
-        .checked_mul(VERTEX_STRIDE)
-        .ok_or(Error::Overflow)?;
+fn reserved_bytes(capacity: usize) -> sgfx::ir::Result<Vec<u8>> {
     let mut bytes = Vec::new();
     bytes
         .try_reserve_exact(capacity)
         .map_err(|_| Error::OutOfMemory)?;
+    Ok(bytes)
+}
 
-    let aspect_scale = if width > height {
-        height as f32 / width as f32
-    } else {
-        1.0
-    };
-    push_panel(
-        &mut bytes,
-        -0.96,
-        -0.90,
-        0.96,
-        0.90,
-        [
-            [0.025, 0.055, 0.13],
-            [0.08, 0.03, 0.17],
-            [0.025, 0.16, 0.22],
-            [0.18, 0.055, 0.22],
-        ],
-    );
-    push_panel(
-        &mut bytes,
-        -0.88,
-        -0.78,
-        -0.50,
-        0.72,
-        [
-            [0.04, 0.22, 0.30],
-            [0.04, 0.08, 0.16],
-            [0.14, 0.48, 0.56],
-            [0.10, 0.18, 0.34],
-        ],
-    );
-    push_panel(
-        &mut bytes,
-        0.54,
-        -0.70,
-        0.86,
-        -0.18,
-        [
-            [0.50, 0.10, 0.30],
-            [0.20, 0.04, 0.24],
-            [0.96, 0.34, 0.38],
-            [0.52, 0.08, 0.36],
-        ],
-    );
+fn push_f32(bytes: &mut Vec<u8>, value: f32) {
+    bytes.extend_from_slice(&value.to_le_bytes());
+}
 
-    let center = [0.16 * aspect_scale, 0.10];
-    let outer_radius_x = 0.62 * aspect_scale;
-    let outer_radius_y = 0.62;
-    let inner_radius_x = 0.24 * aspect_scale;
-    let inner_radius_y = 0.24;
-    for segment in 0..STAR_SEGMENTS {
-        let angle0 = core::f32::consts::TAU * segment as f32 / STAR_SEGMENTS as f32;
-        let angle1 = core::f32::consts::TAU * (segment + 1) as f32 / STAR_SEGMENTS as f32;
-        let radius0 = if segment % 2 == 0 {
-            [outer_radius_x, outer_radius_y]
-        } else {
-            [inner_radius_x, inner_radius_y]
-        };
-        let radius1 = if (segment + 1) % 2 == 0 {
-            [outer_radius_x, outer_radius_y]
-        } else {
-            [inner_radius_x, inner_radius_y]
-        };
-        let edge0 = [
-            center[0] + libm::cosf(angle0) * radius0[0],
-            center[1] + libm::sinf(angle0) * radius0[1],
-        ];
-        let edge1 = [
-            center[0] + libm::cosf(angle1) * radius1[0],
-            center[1] + libm::sinf(angle1) * radius1[1],
-        ];
-        let phase = segment as f32 / STAR_SEGMENTS as f32;
-        let edge_color0 = [0.20 + phase * 0.76, 0.82 - phase * 0.42, 0.92];
-        let edge_color1 = [0.96, 0.20 + phase * 0.55, 0.50 + phase * 0.42];
-        push_triangle(
-            &mut bytes,
-            [center, edge0, edge1],
-            [[1.0, 0.92, 0.64], edge_color0, edge_color1],
-        );
+fn push_position(bytes: &mut Vec<u8>, x: f32, y: f32) {
+    for component in [x, y, 0.0, 1.0] {
+        push_f32(bytes, component);
     }
+}
 
-    let vertex_count = bytes.len() / VERTEX_STRIDE;
-    if bytes.len() % VERTEX_STRIDE != 0 || vertex_count % 3 != 0 {
+fn color_quad_bytes() -> sgfx::ir::Result<Vec<u8>> {
+    let capacity = QUAD_VERTEX_COUNT
+        .checked_mul(COLOR_VERTEX_STRIDE)
+        .ok_or(Error::Overflow)?;
+    let mut bytes = reserved_bytes(capacity)?;
+    let vertices = [
+        ([-0.78, -0.72], [0.02, 0.72, 0.82, 0.94]),
+        ([0.78, -0.72], [0.96, 0.25, 0.30, 0.94]),
+        ([0.78, 0.72], [1.0, 0.73, 0.24, 0.96]),
+        ([-0.78, 0.72], [0.04, 0.28, 0.42, 0.94]),
+    ];
+    for (position, color) in vertices {
+        push_position(&mut bytes, position[0], position[1]);
+        for component in color {
+            push_f32(&mut bytes, component);
+        }
+    }
+    if bytes.len() != capacity {
         return Err(Error::InvalidValue);
     }
-    Ok((
-        bytes,
-        u32::try_from(vertex_count).map_err(|_| Error::Overflow)?,
-    ))
+    Ok(bytes)
+}
+
+fn texture_quad_bytes() -> sgfx::ir::Result<Vec<u8>> {
+    let capacity = QUAD_VERTEX_COUNT
+        .checked_mul(TEXTURE_VERTEX_STRIDE)
+        .ok_or(Error::Overflow)?;
+    let mut bytes = reserved_bytes(capacity)?;
+    let vertices = [
+        ([-1.0, -1.0], [0.0, 1.0]),
+        ([1.0, -1.0], [1.0, 1.0]),
+        ([1.0, 1.0], [1.0, 0.0]),
+        ([-1.0, 1.0], [0.0, 0.0]),
+    ];
+    for (position, uv) in vertices {
+        push_position(&mut bytes, position[0], position[1]);
+        push_f32(&mut bytes, uv[0]);
+        push_f32(&mut bytes, uv[1]);
+    }
+    if bytes.len() != capacity {
+        return Err(Error::InvalidValue);
+    }
+    Ok(bytes)
+}
+
+fn index_bytes() -> sgfx::ir::Result<Vec<u8>> {
+    let mut bytes = reserved_bytes(INDEX_COUNT as usize * core::mem::size_of::<u16>())?;
+    for index in [0_u16, 1, 2, 0, 2, 3] {
+        bytes.extend_from_slice(&index.to_le_bytes());
+    }
+    Ok(bytes)
+}
+
+fn mask_bytes() -> sgfx::ir::Result<Vec<u8>> {
+    let side = usize::try_from(MASK_SIZE).map_err(|_| Error::Overflow)?;
+    let length = side.checked_mul(side).ok_or(Error::Overflow)?;
+    let mut bytes = reserved_bytes(length)?;
+    bytes.resize(length, 0);
+    let center = MASK_SIZE as f32 * 0.5;
+    for y in 0..MASK_SIZE {
+        for x in 0..MASK_SIZE {
+            let dx = x as f32 + 0.5 - center;
+            let dy = y as f32 + 0.5 - center;
+            let radius = libm::sqrtf(dx * dx + dy * dy);
+            let spoke = libm::sinf(libm::atan2f(dy, dx) * 8.0).abs();
+            let ring = (radius - 19.0).abs() < 2.3;
+            let core = radius < 9.0;
+            let rays = radius > 11.0 && radius < 27.0 && spoke > 0.86;
+            let coverage = if ring || core || rays { 255 } else { 0 };
+            let offset = usize::try_from(y)
+                .ok()
+                .and_then(|row| row.checked_mul(side))
+                .and_then(|row| {
+                    usize::try_from(x)
+                        .ok()
+                        .and_then(|column| row.checked_add(column))
+                })
+                .ok_or(Error::Overflow)?;
+            bytes[offset] = coverage;
+        }
+    }
+    Ok(bytes)
+}
+
+fn attributes(values: &[(u32, VertexFormat, u32)]) -> sgfx::ir::Result<Vec<VertexAttribute>> {
+    let mut attributes = Vec::new();
+    attributes
+        .try_reserve_exact(values.len())
+        .map_err(|_| Error::OutOfMemory)?;
+    for (location, format, offset) in values {
+        attributes.push(VertexAttribute::new(*location, *format, *offset));
+    }
+    Ok(attributes)
+}
+
+fn transform_2d(
+    scale_x: f32,
+    scale_y: f32,
+    angle: f32,
+    x: f32,
+    y: f32,
+) -> sgfx::ir::Result<Transform> {
+    let cosine = libm::cosf(angle);
+    let sine = libm::sinf(angle);
+    Transform::from_columns([
+        cosine * scale_x,
+        sine * scale_x,
+        0.0,
+        0.0,
+        -sine * scale_y,
+        cosine * scale_y,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        0.0,
+        x,
+        y,
+        0.0,
+        1.0,
+    ])
+}
+
+fn inset_rect(width: u32, height: u32) -> sgfx::ir::Result<PixelRect> {
+    let margin = (width.min(height) / 18).max(1);
+    let horizontal = margin.checked_mul(2).ok_or(Error::Overflow)?;
+    if width <= horizontal || height <= horizontal {
+        PixelRect::new(0, 0, width, height)
+    } else {
+        PixelRect::new(margin, margin, width - horizontal, height - horizontal)
+    }
 }
 
 fn main() -> ExitCode {
-    let display = match DisplaySurface::open_primary() {
-        Ok(display) => display,
-        Err(error) => return fail("failed to open primary display", error),
-    };
-    let display_info = match display.get_info() {
-        Ok(info) => info,
-        Err(error) => return fail("failed to query display", error),
-    };
-    let device = match Device::open("/dev/gpu0") {
-        Ok(device) => device,
-        Err(error) => return fail("failed to open GPU", error),
-    };
+    macro_rules! attempt {
+        ($expression:expr, $message:literal) => {
+            match $expression {
+                Ok(value) => value,
+                Err(error) => return fail($message, error),
+            }
+        };
+    }
+
+    let display = attempt!(
+        DisplaySurface::open_primary(),
+        "failed to open primary display"
+    );
+    let display_info = attempt!(display.get_info(), "failed to query display");
+    let device = attempt!(Device::open("/dev/gpu0"), "failed to open GPU");
     let capabilities = device.capabilities();
-    if !capabilities.supports_rendering() || !capabilities.supports_presentation() {
-        println!("sgfx_showcase: rendering or presentation is unsupported");
+    if !capabilities.supports_rendering()
+        || !capabilities.supports_presentation()
+        || !capabilities.supports_image_upload()
+    {
+        println!("sgfx_showcase: required GPU capabilities are unavailable");
         return ExitCode::from(1);
     }
-    let context = match device.create_context() {
-        Ok(context) => context,
-        Err(error) => return fail("failed to create context", error),
-    };
-    let image = match context.create_image(display_info.width, display_info.height) {
-        Ok(image) => image,
-        Err(error) => return fail("failed to create render target", error),
-    };
-    let queue = match context.create_queue() {
-        Ok(queue) => queue,
-        Err(error) => return fail("failed to create queue", error),
-    };
-    let (vertex_bytes, vertex_count) = match scene_vertices(image.width(), image.height()) {
-        Ok(scene) => scene,
-        Err(error) => return fail("failed to build scene vertices", error),
-    };
+    let context = attempt!(device.create_context(), "failed to create context");
+    let image = attempt!(
+        context.create_image(display_info.width, display_info.height),
+        "failed to create presentation image"
+    );
+    let queue = attempt!(context.create_queue(), "failed to create queue");
+
+    let offscreen_width = image.width().min(640).max(1);
+    let offscreen_height = image.height().min(400).max(1);
+    let screen_extent = attempt!(
+        Extent2D::new(image.width(), image.height()),
+        "invalid screen extent"
+    );
+    let offscreen_extent = attempt!(
+        Extent2D::new(offscreen_width, offscreen_height),
+        "invalid offscreen extent"
+    );
+    let mask_extent = attempt!(Extent2D::new(MASK_SIZE, MASK_SIZE), "invalid mask extent");
+    let screen_area = attempt!(
+        PixelRect::new(0, 0, image.width(), image.height()),
+        "invalid screen area"
+    );
+    let offscreen_area = attempt!(
+        PixelRect::new(0, 0, offscreen_width, offscreen_height),
+        "invalid offscreen area"
+    );
+    let mask_area = attempt!(
+        PixelRect::new(0, 0, MASK_SIZE, MASK_SIZE),
+        "invalid mask area"
+    );
+
+    let color_vertices = attempt!(color_quad_bytes(), "failed to build color vertices");
+    let texture_vertices = attempt!(texture_quad_bytes(), "failed to build texture vertices");
+    let indices = attempt!(index_bytes(), "failed to build indices");
+    let mask = attempt!(mask_bytes(), "failed to build alpha mask");
+    let color_buffer_size = attempt!(
+        u64::try_from(color_vertices.len()).map_err(|_| Error::Overflow),
+        "color vertex buffer is too large"
+    );
+    let texture_buffer_size = attempt!(
+        u64::try_from(texture_vertices.len()).map_err(|_| Error::Overflow),
+        "texture vertex buffer is too large"
+    );
+    let index_buffer_size = attempt!(
+        u64::try_from(indices.len()).map_err(|_| Error::Overflow),
+        "index buffer is too large"
+    );
 
     let resources = ResourceTable::new();
-    let extent = match Extent2D::new(image.width(), image.height()) {
-        Ok(extent) => extent,
-        Err(error) => return fail("invalid display extent", error),
-    };
-    let target_desc = match TextureDesc::new(
-        TextureFormat::Bgra8Unorm,
-        extent,
-        TextureUsage::RENDER_ATTACHMENT | TextureUsage::PRESENT,
-    ) {
-        Ok(desc) => desc,
-        Err(error) => return fail("invalid target descriptor", error),
-    };
-    let target = match resources.define_texture(target_desc) {
-        Ok(target) => target,
-        Err(error) => return fail("failed to define IR target", error),
-    };
-    let buffer_size = match u64::try_from(vertex_bytes.len()) {
-        Ok(size) => size,
-        Err(error) => return fail("vertex buffer size overflow", error),
-    };
-    let vertex_buffer_desc =
-        match BufferDesc::new(buffer_size, BufferUsage::VERTEX | BufferUsage::COPY_DST) {
-            Ok(desc) => desc,
-            Err(error) => return fail("invalid vertex buffer descriptor", error),
-        };
-    let vertex_buffer = match resources.define_buffer(vertex_buffer_desc) {
-        Ok(buffer) => buffer,
-        Err(error) => return fail("failed to define IR vertex buffer", error),
-    };
-    let mut attributes = Vec::new();
-    if attributes.try_reserve_exact(2).is_err() {
-        return fail("failed to reserve vertex attributes", Error::OutOfMemory);
-    }
-    attributes.push(VertexAttribute::new(0, VertexFormat::Float32x4, 0));
-    attributes.push(VertexAttribute::new(1, VertexFormat::Float32x3, 16));
-    let layout = match VertexBufferLayout::new(VERTEX_STRIDE as u32, attributes) {
-        Ok(layout) => layout,
-        Err(error) => return fail("invalid vertex layout", error),
-    };
-    let pipeline_desc = match RenderPipelineDesc::new(
-        TextureFormat::Bgra8Unorm,
-        PrimitiveTopology::TriangleList,
-        layout,
-        FragmentProgram::VertexColor,
-        BlendState::REPLACE,
-        RasterState::new(
-            sgfx::ir::CullMode::None,
-            sgfx::ir::FrontFace::CounterClockwise,
-        ),
-    ) {
-        Ok(desc) => desc,
-        Err(error) => return fail("invalid pipeline descriptor", error),
-    };
-    let pipeline = match resources.define_render_pipeline(pipeline_desc) {
-        Ok(pipeline) => pipeline,
-        Err(error) => return fail("failed to define IR pipeline", error),
-    };
+    let screen = attempt!(
+        resources.define_texture(attempt!(
+            TextureDesc::new(
+                TextureFormat::Bgra8Unorm,
+                screen_extent,
+                TextureUsage::RENDER_ATTACHMENT | TextureUsage::PRESENT,
+            ),
+            "invalid screen descriptor"
+        )),
+        "failed to define screen texture"
+    );
+    let offscreen = attempt!(
+        resources.define_texture(attempt!(
+            TextureDesc::new(
+                TextureFormat::Bgra8Unorm,
+                offscreen_extent,
+                TextureUsage::RENDER_ATTACHMENT | TextureUsage::SAMPLED | TextureUsage::COPY_SRC,
+            ),
+            "invalid offscreen descriptor"
+        )),
+        "failed to define offscreen texture"
+    );
+    let copied = attempt!(
+        resources.define_texture(attempt!(
+            TextureDesc::new(
+                TextureFormat::Bgra8Unorm,
+                offscreen_extent,
+                TextureUsage::SAMPLED | TextureUsage::COPY_DST,
+            ),
+            "invalid copied texture descriptor"
+        )),
+        "failed to define copied texture"
+    );
+    let alpha_mask = attempt!(
+        resources.define_texture(attempt!(
+            TextureDesc::new(
+                TextureFormat::R8Unorm,
+                mask_extent,
+                TextureUsage::SAMPLED | TextureUsage::COPY_DST,
+            ),
+            "invalid alpha-mask descriptor"
+        )),
+        "failed to define alpha-mask texture"
+    );
 
-    let mut encoder = CommandEncoder::new(&resources);
-    if let Err(error) = encoder.write_buffer(vertex_buffer, 0, &vertex_bytes) {
-        return fail("failed to record vertex upload", error);
-    }
-    let area = match PixelRect::new(0, 0, image.width(), image.height()) {
-        Ok(area) => area,
-        Err(error) => return fail("invalid render area", error),
-    };
-    let pass_desc = match RenderPassDesc::new(
-        &resources,
-        target,
-        area,
-        LoadOp::Clear(match Color::rgba(0.008, 0.012, 0.028, 1.0) {
-            Ok(color) => color,
-            Err(error) => return fail("invalid clear color", error),
-        }),
-        StoreOp::Store,
-    ) {
-        Ok(desc) => desc,
-        Err(error) => return fail("invalid render pass", error),
-    };
-    let mut pass = match encoder.begin_render_pass(pass_desc) {
-        Ok(pass) => pass,
-        Err(error) => return fail("failed to begin IR render pass", error),
-    };
-    if let Err(error) = pass.set_pipeline(pipeline) {
-        return fail("failed to bind IR pipeline", error);
-    }
-    if let Err(error) = pass.set_vertex_buffer(vertex_buffer, 0) {
-        return fail("failed to bind IR vertex buffer", error);
-    }
-    let white = match Color::rgba(1.0, 1.0, 1.0, 1.0) {
-        Ok(color) => color,
-        Err(error) => return fail("invalid draw color", error),
-    };
-    if let Err(error) = pass.set_uniforms(DrawUniforms::new(Transform::identity(), white)) {
-        return fail("failed to bind IR uniforms", error);
-    }
-    if let Err(error) = pass.draw(vertex_count, 0) {
-        return fail("failed to record IR draw", error);
-    }
-    if let Err(error) = pass.end() {
-        return fail("failed to end IR render pass", error);
-    }
-    let commands = match encoder.finish() {
-        Ok(commands) => commands,
-        Err(error) => return fail("failed to finish IR commands", error),
-    };
-    let present_target = match image.map_ir_present_target(&resources, target) {
-        Ok(target) => target,
-        Err(error) => return fail("failed to map IR presentation target", error),
-    };
-    if let Err(error) = queue.submit_ir(&context, present_target, &commands) {
-        return fail("IR submission failed", error);
-    }
-    if let Err(error) = image.present(&display) {
-        return fail("image present failed", error);
+    let color_buffer = attempt!(
+        resources.define_buffer(attempt!(
+            BufferDesc::new(
+                color_buffer_size,
+                BufferUsage::VERTEX | BufferUsage::COPY_DST,
+            ),
+            "invalid color buffer descriptor"
+        )),
+        "failed to define color buffer"
+    );
+    let texture_buffer = attempt!(
+        resources.define_buffer(attempt!(
+            BufferDesc::new(
+                texture_buffer_size,
+                BufferUsage::VERTEX | BufferUsage::COPY_DST,
+            ),
+            "invalid texture buffer descriptor"
+        )),
+        "failed to define texture buffer"
+    );
+    let index_buffer = attempt!(
+        resources.define_buffer(attempt!(
+            BufferDesc::new(
+                index_buffer_size,
+                BufferUsage::INDEX | BufferUsage::COPY_DST,
+            ),
+            "invalid index buffer descriptor"
+        )),
+        "failed to define index buffer"
+    );
+
+    let color_layout = attempt!(
+        VertexBufferLayout::new(
+            COLOR_VERTEX_STRIDE as u32,
+            attempt!(
+                attributes(&[
+                    (0, VertexFormat::Float32x4, 0),
+                    (1, VertexFormat::Float32x4, 16),
+                ]),
+                "failed to build color attributes"
+            ),
+        ),
+        "invalid color vertex layout"
+    );
+    let texture_layout = attempt!(
+        VertexBufferLayout::new(
+            TEXTURE_VERTEX_STRIDE as u32,
+            attempt!(
+                attributes(&[
+                    (0, VertexFormat::Float32x4, 0),
+                    (1, VertexFormat::Float32x2, 16),
+                ]),
+                "failed to build texture attributes"
+            ),
+        ),
+        "invalid texture vertex layout"
+    );
+    let raster = RasterState::new(
+        sgfx::ir::CullMode::None,
+        sgfx::ir::FrontFace::CounterClockwise,
+    );
+    let color_pipeline = attempt!(
+        resources.define_render_pipeline(attempt!(
+            RenderPipelineDesc::new(
+                TextureFormat::Bgra8Unorm,
+                PrimitiveTopology::TriangleList,
+                color_layout.clone(),
+                FragmentProgram::VertexColor,
+                BlendState::SOURCE_OVER_STRAIGHT_ALPHA,
+                raster,
+            ),
+            "invalid color pipeline"
+        )),
+        "failed to define color pipeline"
+    );
+    let solid_pipeline = attempt!(
+        resources.define_render_pipeline(attempt!(
+            RenderPipelineDesc::new(
+                TextureFormat::Bgra8Unorm,
+                PrimitiveTopology::TriangleList,
+                color_layout,
+                FragmentProgram::Solid,
+                BlendState::SOURCE_OVER_STRAIGHT_ALPHA,
+                raster,
+            ),
+            "invalid solid pipeline"
+        )),
+        "failed to define solid pipeline"
+    );
+    let texture_pipeline = attempt!(
+        resources.define_render_pipeline(attempt!(
+            RenderPipelineDesc::new(
+                TextureFormat::Bgra8Unorm,
+                PrimitiveTopology::TriangleList,
+                texture_layout.clone(),
+                FragmentProgram::Texture(TextureSampleMode::Rgba),
+                BlendState::SOURCE_OVER_STRAIGHT_ALPHA,
+                raster,
+            ),
+            "invalid texture pipeline"
+        )),
+        "failed to define texture pipeline"
+    );
+    let mask_pipeline = attempt!(
+        resources.define_render_pipeline(attempt!(
+            RenderPipelineDesc::new(
+                TextureFormat::Bgra8Unorm,
+                PrimitiveTopology::TriangleList,
+                texture_layout,
+                FragmentProgram::Texture(TextureSampleMode::AlphaMask),
+                BlendState::SOURCE_OVER_STRAIGHT_ALPHA,
+                raster,
+            ),
+            "invalid mask pipeline"
+        )),
+        "failed to define mask pipeline"
+    );
+    let sampler = attempt!(
+        resources.define_sampler(SamplerDesc::new(
+            FilterMode::Linear,
+            FilterMode::Linear,
+            AddressMode::ClampToEdge,
+            AddressMode::ClampToEdge,
+        )),
+        "failed to define sampler"
+    );
+
+    let mut ir_resources = attempt!(
+        context.create_ir_resources(&resources),
+        "failed to create IR resource cache"
+    );
+    if let Err(error) = ir_resources.map_image(screen, &image) {
+        return fail("failed to map presentation image", error);
     }
 
     println!(
-        "sgfx_showcase: displaying {} IR-derived vertices at {}x{}",
-        vertex_count,
+        "sgfx_showcase: animated {}x{} multi-pass IR scene",
         image.width(),
         image.height()
     );
+    let white = attempt!(Color::rgba(1.0, 1.0, 1.0, 1.0), "invalid white color");
+    let mut first_frame = true;
+    let mut frame = 0_u32;
     loop {
-        thread::sleep(FRAME_HOLD_INTERVAL);
+        let phase = frame as f32 * 0.012;
+        let mut encoder = CommandEncoder::new(&resources);
+        if first_frame {
+            if let Err(error) = encoder.write_buffer(color_buffer, 0, &color_vertices) {
+                return fail("failed to upload color vertices", error);
+            }
+            if let Err(error) = encoder.write_buffer(texture_buffer, 0, &texture_vertices) {
+                return fail("failed to upload texture vertices", error);
+            }
+            if let Err(error) = encoder.write_buffer(index_buffer, 0, &indices) {
+                return fail("failed to upload indices", error);
+            }
+            let mask_write = attempt!(
+                TextureWrite::new(mask_area, MASK_SIZE, &mask),
+                "invalid mask upload"
+            );
+            if let Err(error) = encoder.write_texture(alpha_mask, mask_write) {
+                return fail("failed to record mask upload", error);
+            }
+        }
+
+        let offscreen_pass = attempt!(
+            RenderPassDesc::new(
+                &resources,
+                offscreen,
+                offscreen_area,
+                LoadOp::Clear(attempt!(
+                    Color::rgba(0.008, 0.035, 0.065, 1.0),
+                    "invalid offscreen clear color"
+                )),
+                StoreOp::Store,
+            ),
+            "invalid offscreen pass"
+        );
+        {
+            let mut pass = attempt!(
+                encoder.begin_render_pass(offscreen_pass),
+                "failed to begin offscreen pass"
+            );
+            if let Err(error) = pass.set_pipeline(color_pipeline) {
+                return fail("failed to bind color pipeline", error);
+            }
+            if let Err(error) = pass.set_vertex_buffer(color_buffer, 0) {
+                return fail("failed to bind color vertices", error);
+            }
+            if let Err(error) = pass.set_index_buffer(index_buffer, 0, IndexFormat::Uint16) {
+                return fail("failed to bind indices", error);
+            }
+            if let Err(error) = pass.set_scissor(Some(attempt!(
+                inset_rect(offscreen_width, offscreen_height),
+                "invalid offscreen scissor"
+            ))) {
+                return fail("failed to set offscreen scissor", error);
+            }
+            let orbit = attempt!(
+                transform_2d(0.92, 0.92, phase, 0.0, 0.0),
+                "invalid orbit transform"
+            );
+            if let Err(error) = pass.set_uniforms(DrawUniforms::new(orbit, white)) {
+                return fail("failed to set orbit uniforms", error);
+            }
+            if let Err(error) = pass.draw_indexed(INDEX_COUNT, 0, 0) {
+                return fail("failed to record indexed orbit", error);
+            }
+            let echo = attempt!(
+                transform_2d(0.42, 0.42, -phase * 1.7, 0.42, -0.34),
+                "invalid echo transform"
+            );
+            let echo_tint = attempt!(Color::rgba(0.25, 0.92, 1.0, 0.72), "invalid echo tint");
+            if let Err(error) = pass.set_uniforms(DrawUniforms::new(echo, echo_tint)) {
+                return fail("failed to set echo uniforms", error);
+            }
+            if let Err(error) = pass.draw_indexed(INDEX_COUNT, 0, 0) {
+                return fail("failed to record indexed echo", error);
+            }
+            if let Err(error) = pass.end() {
+                return fail("failed to end offscreen pass", error);
+            }
+        }
+        if let Err(error) =
+            encoder.copy_texture_to_texture(offscreen, offscreen_area, copied, offscreen_area)
+        {
+            return fail("failed to record offscreen copy", error);
+        }
+
+        let screen_pass = attempt!(
+            RenderPassDesc::new(
+                &resources,
+                screen,
+                screen_area,
+                LoadOp::Clear(attempt!(
+                    Color::rgba(0.004, 0.008, 0.018, 1.0),
+                    "invalid screen clear color"
+                )),
+                StoreOp::Store,
+            ),
+            "invalid screen pass"
+        );
+        {
+            let mut pass = attempt!(
+                encoder.begin_render_pass(screen_pass),
+                "failed to begin screen pass"
+            );
+            if let Err(error) = pass.set_pipeline(texture_pipeline) {
+                return fail("failed to bind texture pipeline", error);
+            }
+            if let Err(error) = pass.set_vertex_buffer(texture_buffer, 0) {
+                return fail("failed to bind texture vertices", error);
+            }
+            if let Err(error) = pass.set_index_buffer(index_buffer, 0, IndexFormat::Uint16) {
+                return fail("failed to bind screen indices", error);
+            }
+            if let Err(error) = pass.set_texture(copied) {
+                return fail("failed to bind copied texture", error);
+            }
+            if let Err(error) = pass.set_sampler(sampler) {
+                return fail("failed to bind sampler", error);
+            }
+            if let Err(error) = pass.set_scissor(Some(attempt!(
+                inset_rect(image.width(), image.height()),
+                "invalid screen scissor"
+            ))) {
+                return fail("failed to set screen scissor", error);
+            }
+            let main_panel = attempt!(
+                transform_2d(0.72, 0.70, 0.025 * libm::sinf(phase), -0.10, 0.02),
+                "invalid main-panel transform"
+            );
+            if let Err(error) = pass.set_uniforms(DrawUniforms::new(main_panel, white)) {
+                return fail("failed to set main-panel uniforms", error);
+            }
+            if let Err(error) = pass.draw_indexed(INDEX_COUNT, 0, 0) {
+                return fail("failed to draw copied panel", error);
+            }
+
+            if let Err(error) = pass.set_texture(offscreen) {
+                return fail("failed to bind offscreen texture", error);
+            }
+            let thumbnail = attempt!(
+                transform_2d(0.23, 0.23, -phase * 0.65, 0.67, -0.62),
+                "invalid thumbnail transform"
+            );
+            let cool_tint = attempt!(Color::rgba(0.50, 0.92, 1.0, 0.82), "invalid thumbnail tint");
+            if let Err(error) = pass.set_uniforms(DrawUniforms::new(thumbnail, cool_tint)) {
+                return fail("failed to set thumbnail uniforms", error);
+            }
+            if let Err(error) = pass.draw_indexed(INDEX_COUNT, 0, 0) {
+                return fail("failed to draw offscreen thumbnail", error);
+            }
+
+            if let Err(error) = pass.set_pipeline(mask_pipeline) {
+                return fail("failed to bind mask pipeline", error);
+            }
+            if let Err(error) = pass.set_texture(alpha_mask) {
+                return fail("failed to bind alpha mask", error);
+            }
+            if let Err(error) = pass.set_scissor(None) {
+                return fail("failed to reset scissor", error);
+            }
+            let badge = attempt!(
+                transform_2d(0.17, 0.17, phase * 1.9, -0.72, 0.62),
+                "invalid badge transform"
+            );
+            let gold = attempt!(Color::rgba(1.0, 0.72, 0.22, 0.94), "invalid badge color");
+            if let Err(error) = pass.set_uniforms(DrawUniforms::new(badge, gold)) {
+                return fail("failed to set badge uniforms", error);
+            }
+            if let Err(error) = pass.draw_indexed(INDEX_COUNT, 0, 0) {
+                return fail("failed to draw alpha-mask badge", error);
+            }
+
+            if let Err(error) = pass.set_pipeline(solid_pipeline) {
+                return fail("failed to bind solid pipeline", error);
+            }
+            if let Err(error) = pass.set_vertex_buffer(color_buffer, 0) {
+                return fail("failed to bind solid vertices", error);
+            }
+            let accent = attempt!(
+                transform_2d(0.10, 0.018, 0.0, -0.72, 0.38),
+                "invalid accent transform"
+            );
+            let coral = attempt!(Color::rgba(1.0, 0.24, 0.28, 0.88), "invalid accent color");
+            if let Err(error) = pass.set_uniforms(DrawUniforms::new(accent, coral)) {
+                return fail("failed to set accent uniforms", error);
+            }
+            if let Err(error) = pass.draw_indexed(INDEX_COUNT, 0, 0) {
+                return fail("failed to draw solid accent", error);
+            }
+            if let Err(error) = pass.end() {
+                return fail("failed to end screen pass", error);
+            }
+        }
+
+        let commands = attempt!(encoder.finish(), "failed to finish IR commands");
+        if let Err(error) = queue.submit_ir(&context, &mut ir_resources, &commands) {
+            return fail("IR submission failed", error);
+        }
+        if let Err(error) = image.present(&display) {
+            return fail("image present failed", error);
+        }
+        first_frame = false;
+        frame = frame.wrapping_add(1);
+        thread::sleep(FRAME_INTERVAL);
     }
 }

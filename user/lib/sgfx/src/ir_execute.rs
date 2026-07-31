@@ -1,22 +1,25 @@
-//! Lowering of the currently supported logical IR subset to the active backend.
+//! Ordered lowering of portable logical IR to the active backend.
 
 use alloc::vec::Vec;
-use core::mem::size_of;
 
+use crate::driver::{
+    self, IrAddressMode, IrBlendComponent, IrBlendFactor, IrBlendOp, IrBlendState, IrCullMode,
+    IrDraw, IrFilterMode, IrFragmentProgram, IrFrontFace, IrPipelineState, IrRect, IrSamplerState,
+    IrSubmission, IrTextureFormat, IrTextureUpload, IrUniforms, IrVertex, MAX_IR_VERTICES,
+};
 use crate::ir::{
-    self, BlendState, BufferRef, BufferUsage, Command, CommandBuffer, DrawUniforms,
-    FragmentProgram, LoadOp, PrimitiveTopology, RenderPassDesc, RenderPipelineRef, ResourceTable,
-    StoreOp, TextureFormat, TextureRef, TextureUsage, VertexFormat,
+    self, AddressMode, BlendComponent, BlendFactor, BlendOp, BlendState, BufferRef, BufferUsage,
+    Command, CommandBuffer, DrawUniforms, FilterMode, FragmentProgram, IndexFormat, LoadOp,
+    MAX_BUFFERS, PrimitiveTopology, RenderPipelineRef, ResourceTable, SamplerDesc, SamplerRef,
+    TextureDesc, TextureFormat, TextureRef, TextureSampleMode, TextureUsage, TextureWrite,
+    VertexAttribute, VertexFormat,
 };
-use crate::{
-    Color, Context, CullMode, FrontFace, HandleError, Image, PipelineDesc, Queue, RenderPass,
-    VertexClip4Color3, Viewport,
-};
+use crate::{Context, HandleError, Image, Queue};
 
 /// An IR feature that the active backend facade cannot lower faithfully yet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnsupportedIrFeature {
-    /// The command sequence is not the single-upload, single-pass shape currently supported.
+    /// The command sequence is outside the one-upload-phase, one-pass subset.
     CommandSequence,
     /// More than one buffer upload was recorded.
     MultipleBufferUploads,
@@ -24,29 +27,29 @@ pub enum UnsupportedIrFeature {
     MultipleRenderPasses,
     /// More than one draw was recorded.
     MultipleDraws,
-    /// Texture upload is not available through the initial IR lowering path.
+    /// Texture upload is unavailable through an older lowering path.
     TextureUpload,
-    /// Texture-to-texture copies are not available through the initial IR lowering path.
+    /// Texture-to-texture copies are not available through this lowering path.
     TextureCopy,
-    /// Index buffers and indexed draws are not available through the initial IR lowering path.
+    /// Index buffers and indexed draws are not available through this lowering path.
     IndexedDrawing,
-    /// Sampled textures are not available through the initial IR lowering path.
+    /// Texture sampling is unavailable through an older lowering path.
     TextureSampling,
-    /// Sampler objects are not available through the initial IR lowering path.
+    /// Sampler objects are unavailable through an older lowering path.
     Sampler,
-    /// Scissor state is not available through the initial IR lowering path.
+    /// Scissor state is unavailable through an older lowering path.
     Scissor,
     /// The presentation target format is unsupported.
     TargetFormat,
     /// The presentation target usage combination is unsupported.
     TargetUsage,
-    /// Only a render pass covering the complete presentation target is supported.
+    /// The render area is unsupported.
     RenderArea,
-    /// Only a clear attachment load operation is supported.
+    /// The attachment load operation is unsupported.
     LoadOperation,
-    /// Only a store attachment operation is supported.
+    /// The attachment store operation is unsupported.
     StoreOperation,
-    /// The clear color cannot be represented by the active backend facade.
+    /// The clear color is unsupported.
     ClearColor,
     /// The pipeline target format is unsupported.
     PipelineTargetFormat,
@@ -60,8 +63,10 @@ pub enum UnsupportedIrFeature {
     BlendState,
     /// The logical vertex buffer usage or upload layout is unsupported.
     VertexBuffer,
-    /// Draw uniforms require backend functionality that is not implemented yet.
+    /// Draw uniforms are unsupported.
     DrawUniforms,
+    /// The backend command stream would exceed its fixed 64 KiB transport limit.
+    CommandStream,
 }
 
 /// Failure while mapping or submitting a logical IR command buffer.
@@ -69,17 +74,25 @@ pub enum UnsupportedIrFeature {
 pub enum IrSubmitError {
     /// A logical resource reference or descriptor failed validation.
     InvalidIr(ir::Error),
-    /// The command buffer and presentation target use different resource tables.
+    /// The command buffer and resource cache use different resource tables.
     ResourceTableMismatch,
+    /// A context or queue differs from the context that created the resource cache.
+    ContextMismatch,
     /// The logical target extent differs from the physical presentation image.
     TargetExtentMismatch,
+    /// The active render-pass texture has no mapped physical image.
+    ImageNotMapped,
+    /// A logical texture was already mapped to an image.
+    TextureAlreadyMapped,
+    /// A physical image was already mapped to a different logical texture.
+    ImageAlreadyMapped,
     /// A valid IR feature is not implemented by the active lowering path.
     Unsupported(UnsupportedIrFeature),
     /// Uploaded vertex bytes are malformed, non-finite, or outside the supported color range.
     InvalidVertexData,
-    /// Allocation for decoded backend vertices failed.
+    /// Allocation for persistent shadow data or decoded backend data failed.
     OutOfMemory,
-    /// The active graphics backend rejected resource creation or submission.
+    /// The active graphics backend rejected resource creation, upload, or submission.
     Backend(HandleError),
 }
 
@@ -95,446 +108,1366 @@ impl From<HandleError> for IrSubmitError {
     }
 }
 
-/// Typed association between one logical presentation texture and one real image.
-///
-/// The mapping retains only safe references. Backend resource identifiers and
-/// transport details remain private to `sgfx`.
-#[derive(Clone, Copy)]
-pub struct IrPresentTarget<'r, 'image> {
+/// Persistent association between one resource table, CPU buffer shadows, and
+/// private backend materialization owned by one creating context.
+pub struct IrResources<'r, 'image> {
     resources: &'r ResourceTable,
-    texture: TextureRef<'r>,
-    image: &'image Image,
+    context_id: i32,
+    backend: driver::IrResources,
+    images: Vec<ImageMapping<'r, 'image>>,
+    buffer_shadows: Vec<Option<Vec<u8>>>,
 }
 
-impl Image {
-    /// Associate this image with one logical presentation texture.
-    ///
-    /// # Arguments
-    ///
-    /// * `resources` - Resource table that owns `texture`.
-    /// * `texture` - BGRA render attachment with presentation usage.
+struct ImageMapping<'r, 'image> {
+    texture: TextureRef<'r>,
+    image: &'image Image,
+    backend_registered: bool,
+}
+
+impl<'r, 'image> IrResources<'r, 'image> {
+    pub(crate) fn new(
+        resources: &'r ResourceTable,
+        context: &driver::Context,
+    ) -> Result<Self, IrSubmitError> {
+        let mut images = Vec::new();
+        images
+            .try_reserve_exact(1_024)
+            .map_err(|_| IrSubmitError::OutOfMemory)?;
+        let mut buffer_shadows = Vec::new();
+        buffer_shadows
+            .try_reserve_exact(MAX_BUFFERS)
+            .map_err(|_| IrSubmitError::OutOfMemory)?;
+        for _ in 0..MAX_BUFFERS {
+            buffer_shadows.push(None);
+        }
+        Ok(Self {
+            resources,
+            context_id: context.context_id(),
+            backend: context.create_ir_resources()?,
+            images,
+            buffer_shadows,
+        })
+    }
+
+    /// Return the resource table that owns this cache's logical references.
     ///
     /// # Returns
     ///
-    /// A typed target accepted by [`Queue::submit_ir`], or an error when the
-    /// logical texture cannot be represented by this image.
-    pub fn map_ir_present_target<'r>(
-        &self,
-        resources: &'r ResourceTable,
+    /// The lifetime-branded table supplied to [`Context::create_ir_resources`].
+    pub const fn resources(&self) -> &'r ResourceTable {
+        self.resources
+    }
+
+    /// Map a logical presentation texture to a physical render-target image.
+    ///
+    /// # Arguments
+    ///
+    /// * `texture` - Texture owned by this cache's resource table.
+    /// * `image` - Physical image created by this cache's creating context.
+    ///
+    /// # Returns
+    ///
+    /// Success after retaining the safe image reference, or an error for a
+    /// table/context mismatch, an unsupported target descriptor, extent
+    /// mismatch, or a conflicting mapping.
+    pub fn map_image(
+        &mut self,
         texture: TextureRef<'r>,
-    ) -> Result<IrPresentTarget<'r, '_>, IrSubmitError> {
-        let descriptor = resources.texture(texture)?;
+        image: &'image Image,
+    ) -> Result<(), IrSubmitError> {
+        if image.backend.context_id() != self.context_id {
+            return Err(IrSubmitError::ContextMismatch);
+        }
+        if !core::ptr::eq(texture.owner, self.resources) {
+            return Err(IrSubmitError::ResourceTableMismatch);
+        }
+        let descriptor = self.resources.texture(texture)?;
         if descriptor.format() != TextureFormat::Bgra8Unorm {
             return Err(IrSubmitError::Unsupported(
                 UnsupportedIrFeature::TargetFormat,
             ));
         }
-        let supported_usage = TextureUsage::RENDER_ATTACHMENT | TextureUsage::PRESENT;
-        if descriptor.usage() != supported_usage {
+        let required_usage = TextureUsage::RENDER_ATTACHMENT | TextureUsage::PRESENT;
+        let allowed_usage = required_usage | TextureUsage::SAMPLED | TextureUsage::COPY_DST;
+        if !descriptor.usage().contains(required_usage)
+            || !allowed_usage.contains(descriptor.usage())
+        {
             return Err(IrSubmitError::Unsupported(
                 UnsupportedIrFeature::TargetUsage,
             ));
         }
         let extent = descriptor.extent();
-        if extent.width() != self.width || extent.height() != self.height {
+        if extent.width() != image.width || extent.height() != image.height {
             return Err(IrSubmitError::TargetExtentMismatch);
         }
-        Ok(IrPresentTarget {
-            resources,
+        if self.images.iter().any(|mapping| mapping.texture == texture) {
+            return Err(IrSubmitError::TextureAlreadyMapped);
+        }
+        if self
+            .images
+            .iter()
+            .any(|mapping| core::ptr::eq(mapping.image, image))
+        {
+            return Err(IrSubmitError::ImageAlreadyMapped);
+        }
+        self.images.push(ImageMapping {
             texture,
-            image: self,
-        })
+            image,
+            backend_registered: false,
+        });
+        Ok(())
+    }
+
+    fn mapped_image(&self, texture: TextureRef<'r>) -> Result<&'image Image, IrSubmitError> {
+        if !core::ptr::eq(texture.owner, self.resources) {
+            return Err(IrSubmitError::ResourceTableMismatch);
+        }
+        self.resources.texture(texture)?;
+        self.images
+            .iter()
+            .find(|mapping| mapping.texture == texture)
+            .map(|mapping| mapping.image)
+            .ok_or(IrSubmitError::ImageNotMapped)
+    }
+
+    fn shadow(&self, buffer: BufferRef<'r>) -> Result<Option<&[u8]>, IrSubmitError> {
+        self.resources.buffer(buffer)?;
+        Ok(self
+            .buffer_shadows
+            .get(buffer.index)
+            .and_then(Option::as_deref))
+    }
+
+    fn commit_buffer_updates(&mut self, updates: Vec<BufferShadowUpdate>) {
+        for update in updates {
+            if let Some(slot) = self.buffer_shadows.get_mut(update.slot) {
+                *slot = Some(update.bytes);
+            }
+        }
     }
 }
 
-struct ExecutionPlan {
-    clear_color: Color,
-    pipeline: PipelineDesc,
-    vertices: Vec<VertexClip4Color3>,
+struct BufferShadowUpdate {
+    slot: usize,
+    bytes: Vec<u8>,
 }
 
-struct VertexDecodeRequest<'r, 'data> {
-    resources: &'r ResourceTable,
-    upload_buffer: BufferRef<'r>,
-    upload_offset: u64,
-    upload_data: &'data [u8],
-    vertex_buffer: BufferRef<'r>,
-    vertex_offset: u64,
-    first_vertex: u32,
-    vertex_count: u32,
+struct PendingBuffers {
+    updates: Vec<BufferShadowUpdate>,
+}
+
+enum BufferBytes<'pending, 'resource> {
+    Pending(&'pending [u8]),
+    Persistent(&'resource [u8]),
+}
+
+impl BufferBytes<'_, '_> {
+    fn as_slice(&self) -> &[u8] {
+        match self {
+            Self::Pending(bytes) => bytes,
+            Self::Persistent(bytes) => bytes,
+        }
+    }
+}
+
+impl PendingBuffers {
+    fn new() -> Self {
+        Self {
+            updates: Vec::new(),
+        }
+    }
+
+    fn write(
+        &mut self,
+        resources: &IrResources<'_, '_>,
+        buffer: BufferRef<'_>,
+        offset: u64,
+        data: &[u8],
+    ) -> Result<(), IrSubmitError> {
+        let descriptor = resources.resources.buffer(buffer)?;
+        if !descriptor.usage().contains(BufferUsage::COPY_DST) {
+            return Err(IrSubmitError::InvalidIr(ir::Error::InvalidUsage));
+        }
+        let length = u64::try_from(data.len()).map_err(|_| IrSubmitError::InvalidVertexData)?;
+        let end = offset
+            .checked_add(length)
+            .ok_or(IrSubmitError::InvalidVertexData)?;
+        if end > descriptor.size() {
+            return Err(IrSubmitError::InvalidVertexData);
+        }
+        let slot = buffer.index;
+        let bytes = if let Some(update) = self.updates.iter_mut().find(|update| update.slot == slot)
+        {
+            &mut update.bytes
+        } else {
+            let size =
+                usize::try_from(descriptor.size()).map_err(|_| IrSubmitError::OutOfMemory)?;
+            let bytes = if let Some(previous) = resources.shadow(buffer)? {
+                Vec::from(previous)
+            } else {
+                let mut initial = Vec::new();
+                initial
+                    .try_reserve_exact(size)
+                    .map_err(|_| IrSubmitError::OutOfMemory)?;
+                initial.resize(size, 0);
+                initial
+            };
+            if bytes.len() != size {
+                return Err(IrSubmitError::InvalidVertexData);
+            }
+            self.updates
+                .try_reserve(1)
+                .map_err(|_| IrSubmitError::OutOfMemory)?;
+            self.updates.push(BufferShadowUpdate { slot, bytes });
+            &mut self
+                .updates
+                .last_mut()
+                .ok_or(IrSubmitError::OutOfMemory)?
+                .bytes
+        };
+        let start = usize::try_from(offset).map_err(|_| IrSubmitError::InvalidVertexData)?;
+        let end = start
+            .checked_add(data.len())
+            .ok_or(IrSubmitError::InvalidVertexData)?;
+        let destination = bytes
+            .get_mut(start..end)
+            .ok_or(IrSubmitError::InvalidVertexData)?;
+        destination.copy_from_slice(data);
+        Ok(())
+    }
+
+    fn bytes<'pending, 'resource, 'r, 'image>(
+        &'pending self,
+        resources: &'resource IrResources<'r, 'image>,
+        buffer: BufferRef<'r>,
+    ) -> Result<BufferBytes<'pending, 'resource>, IrSubmitError> {
+        if let Some(update) = self
+            .updates
+            .iter()
+            .find(|update| update.slot == buffer.index)
+        {
+            return Ok(BufferBytes::Pending(&update.bytes));
+        }
+        resources
+            .shadow(buffer)?
+            .map(BufferBytes::Persistent)
+            .ok_or(IrSubmitError::InvalidVertexData)
+    }
+}
+
+struct ExecutionPlan<'image> {
+    events: Vec<ExecutionEvent<'image>>,
+    buffer_updates: Vec<BufferShadowUpdate>,
+}
+
+enum ExecutionEvent<'image> {
+    Upload(driver::IrTextureSpec, driver::IrTextureUpload),
+    Copy(driver::IrTextureCopy),
+    Pass(ExecutionPass<'image>),
+}
+
+struct ExecutionPass<'image> {
+    target: ExecutionTarget<'image>,
+    submission: IrSubmission,
+}
+
+enum ExecutionTarget<'image> {
+    Mapped(&'image Image),
+    Internal(driver::IrTextureSpec),
+}
+
+struct ActivePass<'r, 'image> {
+    attachment: TextureRef<'r>,
+    target: ExecutionTarget<'image>,
+    submission: IrSubmission,
+    pipeline: Option<RenderPipelineRef<'r>>,
+    vertex_buffer: Option<(BufferRef<'r>, u64)>,
+    index_buffer: Option<(BufferRef<'r>, u64, IndexFormat)>,
+    texture: Option<TextureRef<'r>>,
+    sampler: Option<SamplerRef<'r>>,
+    uniforms: Option<DrawUniforms>,
+    scissor: Option<ir::PixelRect>,
+}
+
+#[derive(Clone, Copy)]
+struct PipelineInfo {
+    state: IrPipelineState,
+    stride: u32,
+    position: VertexAttribute,
+    secondary: Option<VertexAttribute>,
 }
 
 impl Queue {
     /// Validate, lower, and synchronously submit one logical IR command buffer.
     ///
-    /// The initial lowering path intentionally supports one explicit subset:
-    /// one complete-target clear/store render pass containing one non-indexed
-    /// vertex-color triangle-list draw. Unsupported valid IR features return an
-    /// explicit [`IrSubmitError::Unsupported`] error before backend submission.
+    /// The supported subset contains any number of `WriteBuffer` and
+    /// `WriteTexture` commands before one or more mapped presentation render
+    /// passes. Each pass may contain ordered indexed and non-indexed triangle
+    /// draws. Texture copies and internally allocated offscreen targets remain
+    /// unsupported.
     ///
     /// # Arguments
     ///
-    /// * `context` - Context used to materialize backend pipeline state.
-    /// * `target` - Explicit mapping from the logical presentation texture to an image.
+    /// * `context` - Context that created `resources` and this queue.
+    /// * `resources` - Persistent logical-resource cache created by `context`.
     /// * `commands` - Finished logical command buffer to execute.
     ///
     /// # Returns
     ///
-    /// Success after synchronous backend submission, or a validation,
-    /// unsupported-feature, allocation, or backend error.
+    /// Success after synchronous texture upload and ordered backend queue
+    /// submissions, or a validation, unsupported-feature, allocation, or
+    /// backend error. The entire command stream, including every resolved index,
+    /// is validated before the first backend submission.
     pub fn submit_ir<'r, 'image, 'data>(
         &self,
         context: &Context,
-        target: IrPresentTarget<'r, 'image>,
+        resources: &mut IrResources<'r, 'image>,
         commands: &CommandBuffer<'r, 'data>,
     ) -> Result<(), IrSubmitError> {
-        if !core::ptr::eq(target.resources, commands.resources()) {
+        if !core::ptr::eq(resources.resources(), commands.resources()) {
             return Err(IrSubmitError::ResourceTableMismatch);
         }
-
-        let plan = ExecutionPlan::from_commands(target, commands)?;
-        let pipeline = context.create_pipeline(target.image, plan.pipeline)?;
-        let viewport = Viewport::new(target.image.width, target.image.height);
-        let mut render_pass = RenderPass::new(target.image, viewport, plan.clear_color);
-        render_pass.draw_clip_space_vertex_color(&pipeline, &plan.vertices);
-        self.submit(&render_pass).map_err(IrSubmitError::Backend)
+        if resources.context_id != context.backend.context_id()
+            || self.backend.context_id() != resources.context_id
+        {
+            return Err(IrSubmitError::ContextMismatch);
+        }
+        let plan = ExecutionPlan::from_commands(resources, commands)?;
+        register_mapped_images(context, resources)?;
+        for event in &plan.events {
+            match event {
+                ExecutionEvent::Upload(texture, upload) => self.backend.upload_ir_texture(
+                    &context.backend,
+                    &mut resources.backend,
+                    *texture,
+                    upload,
+                ),
+                ExecutionEvent::Copy(copy) => {
+                    self.backend
+                        .copy_ir_texture(&context.backend, &mut resources.backend, *copy)
+                }
+                ExecutionEvent::Pass(pass) => match pass.target {
+                    ExecutionTarget::Mapped(image) => self.backend.submit_ir(
+                        &context.backend,
+                        &mut resources.backend,
+                        &image.backend,
+                        &pass.submission,
+                    ),
+                    ExecutionTarget::Internal(target) => self.backend.submit_ir_internal(
+                        &context.backend,
+                        &mut resources.backend,
+                        target,
+                        &pass.submission,
+                    ),
+                },
+            }
+            .map_err(IrSubmitError::Backend)?;
+        }
+        resources.commit_buffer_updates(plan.buffer_updates);
+        Ok(())
     }
 }
 
-impl ExecutionPlan {
-    fn from_commands<'r, 'image, 'data>(
-        target: IrPresentTarget<'r, 'image>,
+fn register_mapped_images(
+    context: &Context,
+    resources: &mut IrResources<'_, '_>,
+) -> Result<(), IrSubmitError> {
+    for index in 0..resources.images.len() {
+        let (texture, image, registered) = {
+            let mapping = resources
+                .images
+                .get(index)
+                .ok_or(IrSubmitError::ImageNotMapped)?;
+            (mapping.texture, mapping.image, mapping.backend_registered)
+        };
+        if !registered {
+            let descriptor = resources.resources.texture(texture)?;
+            context.backend.map_ir_image(
+                &mut resources.backend,
+                texture_spec(texture, descriptor),
+                &image.backend,
+            )?;
+            if let Some(mapping) = resources.images.get_mut(index) {
+                mapping.backend_registered = true;
+            }
+        }
+    }
+    Ok(())
+}
+
+impl<'image> ExecutionPlan<'image> {
+    fn from_commands<'r, 'data>(
+        resources: &IrResources<'r, 'image>,
         commands: &CommandBuffer<'r, 'data>,
     ) -> Result<Self, IrSubmitError> {
-        let stream = commands.commands();
-        Self::reject_unimplemented_commands(stream)?;
-        Self::validate_command_counts(stream)?;
-        if stream.len() != 7 {
+        let mut pending_buffers = PendingBuffers::new();
+        let mut events = Vec::new();
+        let mut active = None;
+        let mut seen_pass = false;
+
+        for command in commands.commands() {
+            match command {
+                Command::CopyTextureToTexture {
+                    source,
+                    source_rect,
+                    destination,
+                    destination_rect,
+                } if active.is_none() => {
+                    let source_desc = resources.resources.texture(*source)?;
+                    let destination_desc = resources.resources.texture(*destination)?;
+                    if !source_desc.usage().contains(TextureUsage::COPY_SRC)
+                        || !destination_desc.usage().contains(TextureUsage::COPY_DST)
+                        || source_desc.format() != destination_desc.format()
+                        || !source_rect.same_extent(*destination_rect)
+                        || !source_rect.is_within(source_desc.extent())
+                        || !destination_rect.is_within(destination_desc.extent())
+                    {
+                        return Err(IrSubmitError::InvalidIr(ir::Error::InvalidUsage));
+                    }
+                    let source_spec = texture_spec(*source, source_desc);
+                    let destination_spec = texture_spec(*destination, destination_desc);
+                    if !materializable_texture(source_spec)
+                        || !materializable_texture(destination_spec)
+                    {
+                        return Err(IrSubmitError::Unsupported(
+                            UnsupportedIrFeature::TargetUsage,
+                        ));
+                    }
+                    events
+                        .try_reserve(1)
+                        .map_err(|_| IrSubmitError::OutOfMemory)?;
+                    events.push(ExecutionEvent::Copy(driver::IrTextureCopy {
+                        source: source_spec,
+                        source_rect: ir_rect(*source_rect),
+                        destination: destination_spec,
+                        destination_rect: ir_rect(*destination_rect),
+                    }));
+                }
+                Command::WriteBuffer {
+                    buffer,
+                    offset,
+                    data,
+                } if !seen_pass && active.is_none() => {
+                    pending_buffers.write(resources, *buffer, *offset, data)?;
+                }
+                Command::WriteTexture { texture, write } if active.is_none() => {
+                    let descriptor = resources.resources.texture(*texture)?;
+                    if !descriptor.usage().contains(TextureUsage::COPY_DST) {
+                        return Err(IrSubmitError::InvalidIr(ir::Error::InvalidUsage));
+                    }
+                    let spec = texture_spec(*texture, descriptor);
+                    if !materializable_texture(spec) {
+                        return Err(IrSubmitError::Unsupported(
+                            UnsupportedIrFeature::TargetUsage,
+                        ));
+                    }
+                    if resources
+                        .images
+                        .iter()
+                        .any(|mapping| mapping.texture == *texture)
+                    {
+                        return Err(IrSubmitError::Unsupported(
+                            UnsupportedIrFeature::TextureUpload,
+                        ));
+                    }
+                    events
+                        .try_reserve(1)
+                        .map_err(|_| IrSubmitError::OutOfMemory)?;
+                    events.push(ExecutionEvent::Upload(
+                        spec,
+                        convert_texture_upload(spec, *write)?,
+                    ));
+                }
+                Command::BeginRenderPass(desc) if active.is_none() => {
+                    let descriptor = resources.resources.texture(desc.target())?;
+                    if descriptor.format() != TextureFormat::Bgra8Unorm {
+                        return Err(IrSubmitError::Unsupported(
+                            UnsupportedIrFeature::TargetFormat,
+                        ));
+                    }
+                    let target = match resources.mapped_image(desc.target()) {
+                        Ok(image) => {
+                            if !area_within_image(desc.area(), image) {
+                                return Err(IrSubmitError::InvalidIr(ir::Error::OutOfBounds));
+                            }
+                            ExecutionTarget::Mapped(image)
+                        }
+                        Err(IrSubmitError::ImageNotMapped) => {
+                            let spec = texture_spec(desc.target(), descriptor);
+                            if spec.present || !spec.render_attachment {
+                                return Err(IrSubmitError::ImageNotMapped);
+                            }
+                            ExecutionTarget::Internal(spec)
+                        }
+                        Err(error) => return Err(error),
+                    };
+                    if !desc.area().is_within(descriptor.extent()) {
+                        return Err(IrSubmitError::InvalidIr(ir::Error::OutOfBounds));
+                    }
+                    active = Some(ActivePass {
+                        attachment: desc.target(),
+                        target,
+                        submission: IrSubmission {
+                            clear_color: match desc.load() {
+                                LoadOp::Clear(color) => Some(color.components()),
+                                LoadOp::Load | LoadOp::DontCare => None,
+                            },
+                            render_area: IrRect {
+                                x: desc.area().x(),
+                                y: desc.area().y(),
+                                width: desc.area().width(),
+                                height: desc.area().height(),
+                            },
+                            vertices: Vec::new(),
+                            draws: Vec::new(),
+                            texture_uploads: Vec::new(),
+                        },
+                        pipeline: None,
+                        vertex_buffer: None,
+                        index_buffer: None,
+                        texture: None,
+                        sampler: None,
+                        uniforms: None,
+                        scissor: None,
+                    });
+                    seen_pass = true;
+                }
+                Command::EndRenderPass => {
+                    let pass = active.take().ok_or(IrSubmitError::Unsupported(
+                        UnsupportedIrFeature::CommandSequence,
+                    ))?;
+                    if pass.submission.draws.is_empty() {
+                        return Err(IrSubmitError::Unsupported(
+                            UnsupportedIrFeature::CommandSequence,
+                        ));
+                    }
+                    events
+                        .try_reserve(1)
+                        .map_err(|_| IrSubmitError::OutOfMemory)?;
+                    events.push(ExecutionEvent::Pass(ExecutionPass {
+                        target: pass.target,
+                        submission: pass.submission,
+                    }));
+                }
+                Command::SetPipeline(reference) => {
+                    active_pass_mut(&mut active)?.pipeline = Some(*reference)
+                }
+                Command::SetVertexBuffer { buffer, offset } => {
+                    active_pass_mut(&mut active)?.vertex_buffer = Some((*buffer, *offset));
+                }
+                Command::SetIndexBuffer {
+                    buffer,
+                    offset,
+                    format,
+                } => {
+                    active_pass_mut(&mut active)?.index_buffer = Some((*buffer, *offset, *format));
+                }
+                Command::SetTexture(reference) => {
+                    active_pass_mut(&mut active)?.texture = Some(*reference)
+                }
+                Command::SetSampler(reference) => {
+                    active_pass_mut(&mut active)?.sampler = Some(*reference)
+                }
+                Command::SetUniforms(value) => {
+                    active_pass_mut(&mut active)?.uniforms = Some(*value)
+                }
+                Command::SetScissor(value) => {
+                    let pass = active_pass_mut(&mut active)?;
+                    if let Some(rectangle) = value {
+                        if !rect_within(*rectangle, pass.submission.render_area) {
+                            return Err(IrSubmitError::InvalidIr(ir::Error::OutOfBounds));
+                        }
+                    }
+                    pass.scissor = *value;
+                }
+                Command::Draw {
+                    vertex_count,
+                    first_vertex,
+                } => {
+                    let pass = active_pass_mut(&mut active)?;
+                    let decoded = decode_draw_vertices(
+                        resources,
+                        &pending_buffers,
+                        pass,
+                        *first_vertex,
+                        *vertex_count,
+                    )?;
+                    append_draw(pass, decoded)?;
+                }
+                Command::DrawIndexed {
+                    index_count,
+                    first_index,
+                    base_vertex,
+                } => {
+                    let pass = active_pass_mut(&mut active)?;
+                    let decoded = decode_indexed_draw_vertices(
+                        resources,
+                        &pending_buffers,
+                        pass,
+                        *first_index,
+                        *index_count,
+                        *base_vertex,
+                    )?;
+                    append_draw(pass, decoded)?;
+                }
+                _ => {
+                    return Err(IrSubmitError::Unsupported(
+                        UnsupportedIrFeature::CommandSequence,
+                    ));
+                }
+            }
+        }
+        if active.is_some() || events.is_empty() {
             return Err(IrSubmitError::Unsupported(
                 UnsupportedIrFeature::CommandSequence,
             ));
         }
-
-        let (upload_buffer, upload_offset, upload_data) = match &stream[0] {
-            Command::WriteBuffer {
-                buffer,
-                offset,
-                data,
-            } => (*buffer, *offset, *data),
-            _ => return Err(Self::unsupported_sequence()),
-        };
-        let pass = match &stream[1] {
-            Command::BeginRenderPass(pass) => *pass,
-            _ => return Err(Self::unsupported_sequence()),
-        };
-        let pipeline = match &stream[2] {
-            Command::SetPipeline(pipeline) => *pipeline,
-            _ => return Err(Self::unsupported_sequence()),
-        };
-        let (vertex_buffer, vertex_offset) = match &stream[3] {
-            Command::SetVertexBuffer { buffer, offset } => (*buffer, *offset),
-            _ => return Err(Self::unsupported_sequence()),
-        };
-        let uniforms = match &stream[4] {
-            Command::SetUniforms(uniforms) => *uniforms,
-            _ => return Err(Self::unsupported_sequence()),
-        };
-        let (vertex_count, first_vertex) = match &stream[5] {
-            Command::Draw {
-                vertex_count,
-                first_vertex,
-            } => (*vertex_count, *first_vertex),
-            _ => return Err(Self::unsupported_sequence()),
-        };
-        if !matches!(stream[6], Command::EndRenderPass) {
-            return Err(Self::unsupported_sequence());
-        }
-
-        let clear_color = Self::validate_pass(target, pass)?;
-        let pipeline_description =
-            Self::validate_pipeline(target.resources, pipeline, vertex_count)?;
-        Self::validate_uniforms(uniforms)?;
-        let vertices = Self::decode_vertices(VertexDecodeRequest {
-            resources: target.resources,
-            upload_buffer,
-            upload_offset,
-            upload_data,
-            vertex_buffer,
-            vertex_offset,
-            first_vertex,
-            vertex_count,
-        })?;
         Ok(Self {
-            clear_color,
-            pipeline: pipeline_description,
-            vertices,
+            events,
+            buffer_updates: pending_buffers.updates,
         })
     }
+}
 
-    fn reject_unimplemented_commands(stream: &[Command<'_, '_>]) -> Result<(), IrSubmitError> {
-        for command in stream {
-            let unsupported = match command {
-                Command::WriteTexture { .. } => Some(UnsupportedIrFeature::TextureUpload),
-                Command::CopyTextureToTexture { .. } => Some(UnsupportedIrFeature::TextureCopy),
-                Command::SetIndexBuffer { .. } | Command::DrawIndexed { .. } => {
-                    Some(UnsupportedIrFeature::IndexedDrawing)
-                }
-                Command::SetTexture(_) => Some(UnsupportedIrFeature::TextureSampling),
-                Command::SetSampler(_) => Some(UnsupportedIrFeature::Sampler),
-                Command::SetScissor(_) => Some(UnsupportedIrFeature::Scissor),
-                _ => None,
-            };
-            if let Some(feature) = unsupported {
-                return Err(IrSubmitError::Unsupported(feature));
-            }
-        }
-        Ok(())
+struct DecodedDraw {
+    vertices: Vec<IrVertex>,
+    pipeline: IrPipelineState,
+    texture: Option<driver::IrTextureSpec>,
+    sampler: Option<IrSamplerState>,
+    uniforms: IrUniforms,
+    scissor: IrRect,
+}
+
+fn active_pass_mut<'pass, 'r, 'image>(
+    active: &'pass mut Option<ActivePass<'r, 'image>>,
+) -> Result<&'pass mut ActivePass<'r, 'image>, IrSubmitError> {
+    active.as_mut().ok_or(IrSubmitError::Unsupported(
+        UnsupportedIrFeature::CommandSequence,
+    ))
+}
+
+fn area_within_image(area: ir::PixelRect, image: &Image) -> bool {
+    area.x()
+        .checked_add(area.width())
+        .is_some_and(|right| right <= image.width)
+        && area
+            .y()
+            .checked_add(area.height())
+            .is_some_and(|bottom| bottom <= image.height)
+}
+
+fn decode_draw_vertices(
+    resources: &IrResources<'_, '_>,
+    pending_buffers: &PendingBuffers,
+    pass: &ActivePass<'_, '_>,
+    first_vertex: u32,
+    vertex_count: u32,
+) -> Result<DecodedDraw, IrSubmitError> {
+    let (info, buffer, offset, uniforms, texture, sampler) = draw_state(resources, pass)?;
+    let bytes = pending_buffers.bytes(resources, buffer)?;
+    let vertices = decode_vertices(
+        resources.resources,
+        bytes.as_slice(),
+        buffer,
+        offset,
+        first_vertex,
+        vertex_count,
+        info,
+    )?;
+    Ok(DecodedDraw {
+        vertices,
+        pipeline: info.state,
+        texture,
+        sampler,
+        uniforms,
+        scissor: pass_scissor(pass),
+    })
+}
+
+fn decode_indexed_draw_vertices(
+    resources: &IrResources<'_, '_>,
+    pending_buffers: &PendingBuffers,
+    pass: &ActivePass<'_, '_>,
+    first_index: u32,
+    index_count: u32,
+    base_vertex: i32,
+) -> Result<DecodedDraw, IrSubmitError> {
+    if index_count == 0 || index_count % 3 != 0 {
+        return Err(IrSubmitError::InvalidVertexData);
     }
-
-    fn validate_command_counts(stream: &[Command<'_, '_>]) -> Result<(), IrSubmitError> {
-        let uploads = stream
-            .iter()
-            .filter(|command| matches!(command, Command::WriteBuffer { .. }))
-            .count();
-        let passes = stream
-            .iter()
-            .filter(|command| matches!(command, Command::BeginRenderPass(_)))
-            .count();
-        let draws = stream
-            .iter()
-            .filter(|command| matches!(command, Command::Draw { .. }))
-            .count();
-        if uploads != 1 {
-            return Err(IrSubmitError::Unsupported(
-                UnsupportedIrFeature::MultipleBufferUploads,
-            ));
-        }
-        if passes != 1 {
-            return Err(IrSubmitError::Unsupported(
-                UnsupportedIrFeature::MultipleRenderPasses,
-            ));
-        }
-        if draws != 1 {
-            return Err(IrSubmitError::Unsupported(
-                UnsupportedIrFeature::MultipleDraws,
-            ));
-        }
-        Ok(())
+    let (info, vertex_buffer, vertex_offset, uniforms, texture, sampler) =
+        draw_state(resources, pass)?;
+    let (index_buffer, index_offset, index_format) = pass
+        .index_buffer
+        .ok_or(IrSubmitError::InvalidIr(ir::Error::IndexBufferNotSet))?;
+    let index_descriptor = resources.resources.buffer(index_buffer)?;
+    if !index_descriptor.usage().contains(BufferUsage::INDEX) {
+        return Err(IrSubmitError::InvalidIr(ir::Error::InvalidUsage));
     }
-
-    fn validate_pass(
-        target: IrPresentTarget<'_, '_>,
-        pass: RenderPassDesc<'_>,
-    ) -> Result<Color, IrSubmitError> {
-        if pass.target() != target.texture {
-            return Err(IrSubmitError::Unsupported(
-                UnsupportedIrFeature::MultipleRenderPasses,
-            ));
-        }
-        let area = pass.area();
-        if area.x() != 0
-            || area.y() != 0
-            || area.width() != target.image.width
-            || area.height() != target.image.height
-        {
-            return Err(IrSubmitError::Unsupported(UnsupportedIrFeature::RenderArea));
-        }
-        let clear = match pass.load() {
-            LoadOp::Clear(color) => color,
-            LoadOp::Load | LoadOp::DontCare => {
-                return Err(IrSubmitError::Unsupported(
-                    UnsupportedIrFeature::LoadOperation,
-                ));
-            }
+    let index_bytes = pending_buffers.bytes(resources, index_buffer)?;
+    let vertex_bytes = pending_buffers.bytes(resources, vertex_buffer)?;
+    let index_size =
+        usize::try_from(index_format.byte_size()).map_err(|_| IrSubmitError::InvalidVertexData)?;
+    let first = usize::try_from(first_index).map_err(|_| IrSubmitError::InvalidVertexData)?;
+    let count = usize::try_from(index_count).map_err(|_| IrSubmitError::InvalidVertexData)?;
+    let start = usize::try_from(index_offset)
+        .ok()
+        .and_then(|offset| {
+            first
+                .checked_mul(index_size)
+                .and_then(|value| offset.checked_add(value))
+        })
+        .ok_or(IrSubmitError::InvalidVertexData)?;
+    let end = start
+        .checked_add(
+            count
+                .checked_mul(index_size)
+                .ok_or(IrSubmitError::InvalidVertexData)?,
+        )
+        .ok_or(IrSubmitError::InvalidVertexData)?;
+    let encoded = index_bytes
+        .as_slice()
+        .get(start..end)
+        .ok_or(IrSubmitError::InvalidVertexData)?;
+    let mut vertices = Vec::new();
+    vertices
+        .try_reserve_exact(count)
+        .map_err(|_| IrSubmitError::OutOfMemory)?;
+    for item in encoded.chunks_exact(index_size) {
+        let index = match index_format {
+            IndexFormat::Uint16 => u32::from(read_u16(item, 0)?),
+            IndexFormat::Uint32 => read_u32(item, 0)?,
         };
-        if pass.store() != StoreOp::Store {
-            return Err(IrSubmitError::Unsupported(
-                UnsupportedIrFeature::StoreOperation,
-            ));
+        let resolved = i64::from(index) + i64::from(base_vertex);
+        if resolved < 0 {
+            return Err(IrSubmitError::InvalidVertexData);
         }
-        let [red, green, blue, alpha] = clear.components();
-        if ![red, green, blue, alpha]
-            .iter()
-            .all(|component| (0.0..=1.0).contains(component))
-        {
-            return Err(IrSubmitError::Unsupported(UnsupportedIrFeature::ClearColor));
-        }
-        Ok(Color::rgba(red, green, blue, alpha))
-    }
-
-    fn validate_pipeline(
-        resources: &ResourceTable,
-        pipeline: RenderPipelineRef<'_>,
-        vertex_count: u32,
-    ) -> Result<PipelineDesc, IrSubmitError> {
-        let (target_format, topology, layout_valid, fragment, blend, raster) = resources
-            .with_pipeline(pipeline, |descriptor| {
-                let attributes = descriptor.vertex_buffer().attributes();
-                let layout_valid = usize::try_from(descriptor.vertex_buffer().stride()).ok()
-                    == Some(size_of::<VertexClip4Color3>())
-                    && attributes.len() == 2
-                    && attributes[0].location() == 0
-                    && attributes[0].format() == VertexFormat::Float32x4
-                    && attributes[0].offset() == 0
-                    && attributes[1].location() == 1
-                    && attributes[1].format() == VertexFormat::Float32x3
-                    && attributes[1].offset() == 16;
-                (
-                    descriptor.target_format(),
-                    descriptor.topology(),
-                    layout_valid,
-                    descriptor.fragment(),
-                    descriptor.blend(),
-                    descriptor.raster(),
-                )
-            })?;
-        if target_format != TextureFormat::Bgra8Unorm {
-            return Err(IrSubmitError::Unsupported(
-                UnsupportedIrFeature::PipelineTargetFormat,
-            ));
-        }
-        if topology != PrimitiveTopology::TriangleList {
-            return Err(IrSubmitError::Unsupported(
-                UnsupportedIrFeature::PrimitiveTopology,
-            ));
-        }
-        if !layout_valid {
-            return Err(IrSubmitError::Unsupported(
-                UnsupportedIrFeature::VertexLayout,
-            ));
-        }
-        if fragment != FragmentProgram::VertexColor {
-            return Err(IrSubmitError::Unsupported(
-                UnsupportedIrFeature::FragmentProgram,
-            ));
-        }
-        if blend != BlendState::REPLACE {
-            return Err(IrSubmitError::Unsupported(UnsupportedIrFeature::BlendState));
-        }
-        let max_vertices =
-            usize::try_from(vertex_count).map_err(|_| IrSubmitError::InvalidVertexData)?;
-        let cull_mode = match raster.cull_mode() {
-            ir::CullMode::None => CullMode::None,
-            ir::CullMode::Front => CullMode::Front,
-            ir::CullMode::Back => CullMode::Back,
-        };
-        let front_face = match raster.front_face() {
-            ir::FrontFace::Clockwise => FrontFace::Clockwise,
-            ir::FrontFace::CounterClockwise => FrontFace::CounterClockwise,
-        };
-        Ok(PipelineDesc::clip_space_vertex_color(max_vertices)
-            .with_cull_mode(cull_mode)
-            .with_front_face(front_face))
-    }
-
-    fn validate_uniforms(uniforms: DrawUniforms) -> Result<(), IrSubmitError> {
-        if uniforms.transform() != ir::Transform::identity()
-            || uniforms.color().components() != [1.0, 1.0, 1.0, 1.0]
-        {
-            Err(IrSubmitError::Unsupported(
-                UnsupportedIrFeature::DrawUniforms,
-            ))
-        } else {
-            Ok(())
-        }
-    }
-
-    fn decode_vertices(
-        request: VertexDecodeRequest<'_, '_>,
-    ) -> Result<Vec<VertexClip4Color3>, IrSubmitError> {
-        let VertexDecodeRequest {
-            resources,
-            upload_buffer,
-            upload_offset,
-            upload_data,
+        let vertex_index =
+            usize::try_from(resolved).map_err(|_| IrSubmitError::InvalidVertexData)?;
+        vertices.push(decode_vertex(
+            resources.resources,
+            vertex_bytes.as_slice(),
             vertex_buffer,
             vertex_offset,
-            first_vertex,
-            vertex_count,
-        } = request;
-        if upload_buffer != vertex_buffer || upload_offset != 0 {
-            return Err(IrSubmitError::Unsupported(
-                UnsupportedIrFeature::VertexBuffer,
-            ));
-        }
-        let descriptor = resources.buffer(vertex_buffer)?;
-        let supported_usage = BufferUsage::VERTEX | BufferUsage::COPY_DST;
-        let upload_len =
-            u64::try_from(upload_data.len()).map_err(|_| IrSubmitError::InvalidVertexData)?;
-        if descriptor.usage() != supported_usage || descriptor.size() != upload_len {
-            return Err(IrSubmitError::Unsupported(
-                UnsupportedIrFeature::VertexBuffer,
-            ));
-        }
+            vertex_index,
+            info,
+        )?);
+    }
+    if vertices.len() != count {
+        return Err(IrSubmitError::InvalidVertexData);
+    }
+    Ok(DecodedDraw {
+        vertices,
+        pipeline: info.state,
+        texture,
+        sampler,
+        uniforms,
+        scissor: pass_scissor(pass),
+    })
+}
 
-        let stride = size_of::<VertexClip4Color3>();
-        let first = usize::try_from(first_vertex).map_err(|_| IrSubmitError::InvalidVertexData)?;
-        let count = usize::try_from(vertex_count).map_err(|_| IrSubmitError::InvalidVertexData)?;
-        let base = usize::try_from(vertex_offset)
-            .ok()
-            .and_then(|offset| {
-                first
-                    .checked_mul(stride)
-                    .and_then(|first_bytes| offset.checked_add(first_bytes))
-            })
-            .ok_or(IrSubmitError::InvalidVertexData)?;
-        let byte_len = count
-            .checked_mul(stride)
-            .ok_or(IrSubmitError::InvalidVertexData)?;
-        let end = base
-            .checked_add(byte_len)
-            .ok_or(IrSubmitError::InvalidVertexData)?;
-        let selected = upload_data
-            .get(base..end)
-            .ok_or(IrSubmitError::InvalidVertexData)?;
+fn draw_state<'r>(
+    resources: &IrResources<'r, '_>,
+    pass: &ActivePass<'r, '_>,
+) -> Result<
+    (
+        PipelineInfo,
+        BufferRef<'r>,
+        u64,
+        IrUniforms,
+        Option<driver::IrTextureSpec>,
+        Option<IrSamplerState>,
+    ),
+    IrSubmitError,
+> {
+    let pipeline = pass
+        .pipeline
+        .ok_or(IrSubmitError::InvalidIr(ir::Error::PipelineNotSet))?;
+    let info = pipeline_info(resources.resources, pipeline)?;
+    let (buffer, offset) = pass
+        .vertex_buffer
+        .ok_or(IrSubmitError::InvalidIr(ir::Error::VertexBufferNotSet))?;
+    let uniforms = pass
+        .uniforms
+        .ok_or(IrSubmitError::InvalidIr(ir::Error::UniformsNotSet))?;
+    let (texture, sampler) =
+        texture_binding(resources.resources, info, pass.texture, pass.sampler)?;
+    if pass
+        .texture
+        .is_some_and(|texture| texture == pass.attachment)
+    {
+        return Err(IrSubmitError::InvalidIr(ir::Error::AttachmentFeedback));
+    }
+    Ok((
+        info,
+        buffer,
+        offset,
+        uniform_state(uniforms),
+        texture,
+        sampler,
+    ))
+}
 
-        let mut vertices = Vec::new();
-        vertices
-            .try_reserve_exact(count)
-            .map_err(|_| IrSubmitError::OutOfMemory)?;
-        for encoded in selected.chunks_exact(stride) {
-            let mut cursor = 0usize;
-            let clip_position = [
-                Self::read_f32(encoded, &mut cursor)?,
-                Self::read_f32(encoded, &mut cursor)?,
-                Self::read_f32(encoded, &mut cursor)?,
-                Self::read_f32(encoded, &mut cursor)?,
-            ];
-            let color = [
-                Self::read_f32(encoded, &mut cursor)?,
-                Self::read_f32(encoded, &mut cursor)?,
-                Self::read_f32(encoded, &mut cursor)?,
-            ];
-            if !clip_position.iter().all(|component| component.is_finite())
-                || !color
-                    .iter()
-                    .all(|component| component.is_finite() && (0.0..=1.0).contains(component))
+fn pass_scissor(pass: &ActivePass<'_, '_>) -> IrRect {
+    match pass.scissor {
+        Some(value) => IrRect {
+            x: value.x(),
+            y: value.y(),
+            width: value.width(),
+            height: value.height(),
+        },
+        None => pass.submission.render_area,
+    }
+}
+
+fn append_draw(pass: &mut ActivePass<'_, '_>, draw: DecodedDraw) -> Result<(), IrSubmitError> {
+    let start_vertex = pass.submission.vertices.len();
+    let new_len =
+        start_vertex
+            .checked_add(draw.vertices.len())
+            .ok_or(IrSubmitError::Unsupported(
+                UnsupportedIrFeature::CommandStream,
+            ))?;
+    if new_len > MAX_IR_VERTICES {
+        return Err(IrSubmitError::Unsupported(
+            UnsupportedIrFeature::CommandStream,
+        ));
+    }
+    pass.submission
+        .vertices
+        .try_reserve(draw.vertices.len())
+        .map_err(|_| IrSubmitError::OutOfMemory)?;
+    pass.submission.vertices.extend(draw.vertices);
+    pass.submission
+        .draws
+        .try_reserve(1)
+        .map_err(|_| IrSubmitError::OutOfMemory)?;
+    pass.submission.draws.push(IrDraw {
+        start_vertex,
+        vertex_count: new_len - start_vertex,
+        pipeline: draw.pipeline,
+        texture: draw.texture,
+        sampler: draw.sampler,
+        uniforms: draw.uniforms,
+        scissor: draw.scissor,
+    });
+    Ok(())
+}
+
+fn pipeline_info(
+    resources: &ResourceTable,
+    reference: RenderPipelineRef<'_>,
+) -> Result<PipelineInfo, IrSubmitError> {
+    let (target, topology, fragment, blend, raster, stride, position, secondary) = resources
+        .with_pipeline(reference, |descriptor| {
+            let layout = descriptor.vertex_buffer();
+            let position = layout
+                .attributes()
+                .iter()
+                .find(|attribute| attribute.location() == 0)
+                .copied();
+            let secondary = layout
+                .attributes()
+                .iter()
+                .find(|attribute| attribute.location() == 1)
+                .copied();
+            (
+                descriptor.target_format(),
+                descriptor.topology(),
+                descriptor.fragment(),
+                descriptor.blend(),
+                descriptor.raster(),
+                layout.stride(),
+                position,
+                secondary,
+            )
+        })?;
+    if target != TextureFormat::Bgra8Unorm {
+        return Err(IrSubmitError::Unsupported(
+            UnsupportedIrFeature::PipelineTargetFormat,
+        ));
+    }
+    if topology != PrimitiveTopology::TriangleList {
+        return Err(IrSubmitError::Unsupported(
+            UnsupportedIrFeature::PrimitiveTopology,
+        ));
+    }
+    let position = position.ok_or(IrSubmitError::Unsupported(
+        UnsupportedIrFeature::VertexLayout,
+    ))?;
+    if !matches!(
+        position.format(),
+        VertexFormat::Float32x2 | VertexFormat::Float32x3 | VertexFormat::Float32x4
+    ) {
+        return Err(IrSubmitError::Unsupported(
+            UnsupportedIrFeature::VertexLayout,
+        ));
+    }
+    let secondary_valid = match fragment {
+        FragmentProgram::Solid => true,
+        FragmentProgram::VertexColor => matches!(
+            secondary.map(VertexAttribute::format),
+            Some(VertexFormat::Float32x3 | VertexFormat::Float32x4 | VertexFormat::Unorm8x4)
+        ),
+        FragmentProgram::Texture(_) => matches!(
+            secondary.map(VertexAttribute::format),
+            Some(VertexFormat::Float32x2)
+        ),
+    };
+    if !secondary_valid {
+        return Err(IrSubmitError::Unsupported(
+            UnsupportedIrFeature::VertexLayout,
+        ));
+    }
+    Ok(PipelineInfo {
+        state: IrPipelineState {
+            slot: reference.index,
+            fragment: fragment_program(fragment),
+            blend: blend_state(blend),
+            cull_mode: match raster.cull_mode() {
+                ir::CullMode::None => IrCullMode::None,
+                ir::CullMode::Front => IrCullMode::Front,
+                ir::CullMode::Back => IrCullMode::Back,
+            },
+            front_face: match raster.front_face() {
+                ir::FrontFace::Clockwise => IrFrontFace::Clockwise,
+                ir::FrontFace::CounterClockwise => IrFrontFace::CounterClockwise,
+            },
+        },
+        stride,
+        position,
+        secondary,
+    })
+}
+
+fn texture_binding(
+    resources: &ResourceTable,
+    pipeline: PipelineInfo,
+    texture: Option<TextureRef<'_>>,
+    sampler: Option<SamplerRef<'_>>,
+) -> Result<(Option<driver::IrTextureSpec>, Option<IrSamplerState>), IrSubmitError> {
+    if !matches!(
+        pipeline.state.fragment,
+        IrFragmentProgram::TextureRgba
+            | IrFragmentProgram::TextureRgbIgnoreAlpha
+            | IrFragmentProgram::TextureAlphaMask
+    ) {
+        return Ok((None, None));
+    }
+    let texture = texture.ok_or(IrSubmitError::InvalidIr(ir::Error::TextureBindingNotSet))?;
+    let sampler = sampler.ok_or(IrSubmitError::InvalidIr(ir::Error::TextureBindingNotSet))?;
+    let descriptor = resources.texture(texture)?;
+    if !descriptor.usage().contains(TextureUsage::SAMPLED) {
+        return Err(IrSubmitError::InvalidIr(ir::Error::InvalidUsage));
+    }
+    if descriptor.format() == TextureFormat::R8Unorm
+        && !matches!(pipeline.state.fragment, IrFragmentProgram::TextureAlphaMask)
+    {
+        return Err(IrSubmitError::Unsupported(
+            UnsupportedIrFeature::FragmentProgram,
+        ));
+    }
+    let sampler_descriptor = resources.sampler(sampler)?;
+    Ok((
+        Some(texture_spec(texture, descriptor)),
+        Some(sampler_state(sampler_descriptor, sampler.index)),
+    ))
+}
+
+fn sampler_state(descriptor: SamplerDesc, slot: usize) -> IrSamplerState {
+    IrSamplerState {
+        slot,
+        min_filter: match descriptor.min_filter() {
+            FilterMode::Nearest => IrFilterMode::Nearest,
+            FilterMode::Linear => IrFilterMode::Linear,
+        },
+        mag_filter: match descriptor.mag_filter() {
+            FilterMode::Nearest => IrFilterMode::Nearest,
+            FilterMode::Linear => IrFilterMode::Linear,
+        },
+        address_u: match descriptor.address_u() {
+            AddressMode::ClampToEdge => IrAddressMode::ClampToEdge,
+            AddressMode::Repeat => IrAddressMode::Repeat,
+            AddressMode::MirrorRepeat => IrAddressMode::MirrorRepeat,
+        },
+        address_v: match descriptor.address_v() {
+            AddressMode::ClampToEdge => IrAddressMode::ClampToEdge,
+            AddressMode::Repeat => IrAddressMode::Repeat,
+            AddressMode::MirrorRepeat => IrAddressMode::MirrorRepeat,
+        },
+    }
+}
+
+fn decode_vertices(
+    resources: &ResourceTable,
+    bytes: &[u8],
+    buffer: BufferRef<'_>,
+    vertex_offset: u64,
+    first_vertex: u32,
+    vertex_count: u32,
+    pipeline: PipelineInfo,
+) -> Result<Vec<IrVertex>, IrSubmitError> {
+    let count = usize::try_from(vertex_count).map_err(|_| IrSubmitError::InvalidVertexData)?;
+    let first = usize::try_from(first_vertex).map_err(|_| IrSubmitError::InvalidVertexData)?;
+    if vertex_count == 0 || vertex_count % 3 != 0 {
+        return Err(IrSubmitError::InvalidVertexData);
+    }
+    let mut vertices = Vec::new();
+    vertices
+        .try_reserve_exact(count)
+        .map_err(|_| IrSubmitError::OutOfMemory)?;
+    for relative in 0..count {
+        let vertex_index = first
+            .checked_add(relative)
+            .ok_or(IrSubmitError::InvalidVertexData)?;
+        vertices.push(decode_vertex(
+            resources,
+            bytes,
+            buffer,
+            vertex_offset,
+            vertex_index,
+            pipeline,
+        )?);
+    }
+    if vertices.len() != count {
+        return Err(IrSubmitError::InvalidVertexData);
+    }
+    Ok(vertices)
+}
+
+fn decode_vertex(
+    resources: &ResourceTable,
+    bytes: &[u8],
+    buffer: BufferRef<'_>,
+    vertex_offset: u64,
+    vertex_index: usize,
+    pipeline: PipelineInfo,
+) -> Result<IrVertex, IrSubmitError> {
+    let descriptor = resources.buffer(buffer)?;
+    if !descriptor.usage().contains(BufferUsage::VERTEX) {
+        return Err(IrSubmitError::InvalidIr(ir::Error::InvalidUsage));
+    }
+    let stride = usize::try_from(pipeline.stride).map_err(|_| IrSubmitError::InvalidVertexData)?;
+    let start = usize::try_from(vertex_offset)
+        .ok()
+        .and_then(|offset| {
+            vertex_index
+                .checked_mul(stride)
+                .and_then(|value| offset.checked_add(value))
+        })
+        .ok_or(IrSubmitError::InvalidVertexData)?;
+    let end = start
+        .checked_add(stride)
+        .ok_or(IrSubmitError::InvalidVertexData)?;
+    let record = bytes
+        .get(start..end)
+        .ok_or(IrSubmitError::InvalidVertexData)?;
+    let position = decode_position(record, pipeline.position)?;
+    let (color, uv) = decode_secondary(record, pipeline.secondary, pipeline.state.fragment)?;
+    Ok(IrVertex {
+        position,
+        color,
+        uv,
+    })
+}
+
+fn decode_position(record: &[u8], attribute: VertexAttribute) -> Result<[f32; 4], IrSubmitError> {
+    let offset =
+        usize::try_from(attribute.offset()).map_err(|_| IrSubmitError::InvalidVertexData)?;
+    let position = match attribute.format() {
+        VertexFormat::Float32x2 => [
+            read_f32(record, offset)?,
+            read_f32(record, offset + 4)?,
+            0.0,
+            1.0,
+        ],
+        VertexFormat::Float32x3 => [
+            read_f32(record, offset)?,
+            read_f32(record, offset + 4)?,
+            read_f32(record, offset + 8)?,
+            1.0,
+        ],
+        VertexFormat::Float32x4 => [
+            read_f32(record, offset)?,
+            read_f32(record, offset + 4)?,
+            read_f32(record, offset + 8)?,
+            read_f32(record, offset + 12)?,
+        ],
+        VertexFormat::Unorm8x4 => return Err(IrSubmitError::InvalidVertexData),
+    };
+    if !position.iter().all(|value| value.is_finite()) {
+        return Err(IrSubmitError::InvalidVertexData);
+    }
+    Ok(position)
+}
+
+fn decode_secondary(
+    record: &[u8],
+    attribute: Option<VertexAttribute>,
+    fragment: IrFragmentProgram,
+) -> Result<([f32; 4], [f32; 2]), IrSubmitError> {
+    let Some(attribute) = attribute else {
+        return Ok(([1.0; 4], [0.0; 2]));
+    };
+    let offset =
+        usize::try_from(attribute.offset()).map_err(|_| IrSubmitError::InvalidVertexData)?;
+    match fragment {
+        IrFragmentProgram::Solid => Ok(([1.0; 4], [0.0; 2])),
+        IrFragmentProgram::VertexColor => {
+            let color = match attribute.format() {
+                VertexFormat::Float32x3 => [
+                    read_f32(record, offset)?,
+                    read_f32(record, offset + 4)?,
+                    read_f32(record, offset + 8)?,
+                    1.0,
+                ],
+                VertexFormat::Float32x4 => [
+                    read_f32(record, offset)?,
+                    read_f32(record, offset + 4)?,
+                    read_f32(record, offset + 8)?,
+                    read_f32(record, offset + 12)?,
+                ],
+                VertexFormat::Unorm8x4 => [
+                    read_u8(record, offset)? as f32 / 255.0,
+                    read_u8(record, offset + 1)? as f32 / 255.0,
+                    read_u8(record, offset + 2)? as f32 / 255.0,
+                    read_u8(record, offset + 3)? as f32 / 255.0,
+                ],
+                VertexFormat::Float32x2 => return Err(IrSubmitError::InvalidVertexData),
+            };
+            if !color
+                .iter()
+                .all(|value| value.is_finite() && (0.0..=1.0).contains(value))
             {
                 return Err(IrSubmitError::InvalidVertexData);
             }
-            vertices.push(VertexClip4Color3::new(clip_position, color));
+            Ok((color, [0.0; 2]))
         }
-        if vertices.len() != count {
-            return Err(IrSubmitError::InvalidVertexData);
+        IrFragmentProgram::TextureRgba
+        | IrFragmentProgram::TextureRgbIgnoreAlpha
+        | IrFragmentProgram::TextureAlphaMask => {
+            if attribute.format() != VertexFormat::Float32x2 {
+                return Err(IrSubmitError::InvalidVertexData);
+            }
+            let uv = [read_f32(record, offset)?, read_f32(record, offset + 4)?];
+            if !uv.iter().all(|value| value.is_finite()) {
+                return Err(IrSubmitError::InvalidVertexData);
+            }
+            Ok(([1.0; 4], uv))
         }
-        Ok(vertices)
     }
+}
 
-    fn read_f32(bytes: &[u8], cursor: &mut usize) -> Result<f32, IrSubmitError> {
-        let end = cursor
-            .checked_add(size_of::<f32>())
-            .ok_or(IrSubmitError::InvalidVertexData)?;
-        let encoded = bytes
-            .get(*cursor..end)
-            .ok_or(IrSubmitError::InvalidVertexData)?;
-        let encoded: [u8; 4] = encoded
-            .try_into()
-            .map_err(|_| IrSubmitError::InvalidVertexData)?;
-        *cursor = end;
-        Ok(f32::from_le_bytes(encoded))
-    }
+fn read_f32(bytes: &[u8], offset: usize) -> Result<f32, IrSubmitError> {
+    let end = offset
+        .checked_add(4)
+        .ok_or(IrSubmitError::InvalidVertexData)?;
+    let array: [u8; 4] = bytes
+        .get(offset..end)
+        .ok_or(IrSubmitError::InvalidVertexData)?
+        .try_into()
+        .map_err(|_| IrSubmitError::InvalidVertexData)?;
+    Ok(f32::from_le_bytes(array))
+}
 
-    const fn unsupported_sequence() -> IrSubmitError {
-        IrSubmitError::Unsupported(UnsupportedIrFeature::CommandSequence)
+fn read_u16(bytes: &[u8], offset: usize) -> Result<u16, IrSubmitError> {
+    let end = offset
+        .checked_add(2)
+        .ok_or(IrSubmitError::InvalidVertexData)?;
+    let array: [u8; 2] = bytes
+        .get(offset..end)
+        .ok_or(IrSubmitError::InvalidVertexData)?
+        .try_into()
+        .map_err(|_| IrSubmitError::InvalidVertexData)?;
+    Ok(u16::from_le_bytes(array))
+}
+
+fn read_u32(bytes: &[u8], offset: usize) -> Result<u32, IrSubmitError> {
+    let end = offset
+        .checked_add(4)
+        .ok_or(IrSubmitError::InvalidVertexData)?;
+    let array: [u8; 4] = bytes
+        .get(offset..end)
+        .ok_or(IrSubmitError::InvalidVertexData)?
+        .try_into()
+        .map_err(|_| IrSubmitError::InvalidVertexData)?;
+    Ok(u32::from_le_bytes(array))
+}
+
+fn read_u8(bytes: &[u8], offset: usize) -> Result<u8, IrSubmitError> {
+    bytes
+        .get(offset)
+        .copied()
+        .ok_or(IrSubmitError::InvalidVertexData)
+}
+
+fn convert_texture_upload(
+    texture: driver::IrTextureSpec,
+    write: TextureWrite<'_>,
+) -> Result<IrTextureUpload, IrSubmitError> {
+    let destination = write.destination();
+    let tight = usize::try_from(destination.width())
+        .ok()
+        .and_then(|width| {
+            width.checked_mul(match texture.format {
+                IrTextureFormat::R8 => 1,
+                IrTextureFormat::Bgra8 | IrTextureFormat::Rgba8 => 4,
+            })
+        })
+        .ok_or(IrSubmitError::InvalidVertexData)?;
+    let source_stride =
+        usize::try_from(write.bytes_per_row()).map_err(|_| IrSubmitError::InvalidVertexData)?;
+    let height =
+        usize::try_from(destination.height()).map_err(|_| IrSubmitError::InvalidVertexData)?;
+    let required = source_stride
+        .checked_mul(
+            height
+                .checked_sub(1)
+                .ok_or(IrSubmitError::InvalidVertexData)?,
+        )
+        .and_then(|value| value.checked_add(tight))
+        .ok_or(IrSubmitError::InvalidVertexData)?;
+    if write.data().len() < required || source_stride < tight {
+        return Err(IrSubmitError::InvalidVertexData);
     }
+    let output_len = usize::try_from(destination.width())
+        .ok()
+        .and_then(|width| width.checked_mul(height))
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or(IrSubmitError::OutOfMemory)?;
+    let mut pixels = Vec::new();
+    pixels
+        .try_reserve_exact(output_len)
+        .map_err(|_| IrSubmitError::OutOfMemory)?;
+    for row in 0..height {
+        let start = row
+            .checked_mul(source_stride)
+            .ok_or(IrSubmitError::InvalidVertexData)?;
+        let source = write
+            .data()
+            .get(start..start + tight)
+            .ok_or(IrSubmitError::InvalidVertexData)?;
+        match texture.format {
+            IrTextureFormat::Bgra8 => pixels.extend_from_slice(source),
+            IrTextureFormat::Rgba8 => {
+                for pixel in source.chunks_exact(4) {
+                    pixels.extend_from_slice(&[pixel[2], pixel[1], pixel[0], pixel[3]]);
+                }
+            }
+            IrTextureFormat::R8 => {
+                for value in source {
+                    pixels.extend_from_slice(&[0, 0, 0, *value]);
+                }
+            }
+        }
+    }
+    Ok(IrTextureUpload {
+        texture,
+        destination: IrRect {
+            x: destination.x(),
+            y: destination.y(),
+            width: destination.width(),
+            height: destination.height(),
+        },
+        pixels,
+    })
+}
+
+fn uniform_state(uniforms: DrawUniforms) -> IrUniforms {
+    IrUniforms {
+        transform: uniforms.transform().columns(),
+        color: uniforms.color().components(),
+    }
+}
+
+fn fragment_program(fragment: FragmentProgram) -> IrFragmentProgram {
+    match fragment {
+        FragmentProgram::Solid => IrFragmentProgram::Solid,
+        FragmentProgram::VertexColor => IrFragmentProgram::VertexColor,
+        FragmentProgram::Texture(TextureSampleMode::Rgba) => IrFragmentProgram::TextureRgba,
+        FragmentProgram::Texture(TextureSampleMode::RgbIgnoreAlpha) => {
+            IrFragmentProgram::TextureRgbIgnoreAlpha
+        }
+        FragmentProgram::Texture(TextureSampleMode::AlphaMask) => {
+            IrFragmentProgram::TextureAlphaMask
+        }
+    }
+}
+
+fn blend_state(state: BlendState) -> IrBlendState {
+    IrBlendState {
+        color: blend_component(state.color()),
+        alpha: blend_component(state.alpha()),
+    }
+}
+
+fn blend_component(component: BlendComponent) -> IrBlendComponent {
+    IrBlendComponent {
+        source_factor: match component.source_factor() {
+            BlendFactor::Zero => IrBlendFactor::Zero,
+            BlendFactor::One => IrBlendFactor::One,
+            BlendFactor::SourceAlpha => IrBlendFactor::SourceAlpha,
+            BlendFactor::OneMinusSourceAlpha => IrBlendFactor::OneMinusSourceAlpha,
+            BlendFactor::DestinationAlpha => IrBlendFactor::DestinationAlpha,
+            BlendFactor::OneMinusDestinationAlpha => IrBlendFactor::OneMinusDestinationAlpha,
+        },
+        destination_factor: match component.destination_factor() {
+            BlendFactor::Zero => IrBlendFactor::Zero,
+            BlendFactor::One => IrBlendFactor::One,
+            BlendFactor::SourceAlpha => IrBlendFactor::SourceAlpha,
+            BlendFactor::OneMinusSourceAlpha => IrBlendFactor::OneMinusSourceAlpha,
+            BlendFactor::DestinationAlpha => IrBlendFactor::DestinationAlpha,
+            BlendFactor::OneMinusDestinationAlpha => IrBlendFactor::OneMinusDestinationAlpha,
+        },
+        operation: match component.operation() {
+            BlendOp::Add => IrBlendOp::Add,
+            BlendOp::Subtract => IrBlendOp::Subtract,
+            BlendOp::ReverseSubtract => IrBlendOp::ReverseSubtract,
+        },
+    }
+}
+
+fn rect_within(rectangle: ir::PixelRect, area: IrRect) -> bool {
+    rectangle.x() >= area.x
+        && rectangle.y() >= area.y
+        && rectangle
+            .x()
+            .checked_add(rectangle.width())
+            .is_some_and(|right| right <= area.x + area.width)
+        && rectangle
+            .y()
+            .checked_add(rectangle.height())
+            .is_some_and(|bottom| bottom <= area.y + area.height)
+}
+
+fn ir_rect(rectangle: ir::PixelRect) -> IrRect {
+    IrRect {
+        x: rectangle.x(),
+        y: rectangle.y(),
+        width: rectangle.width(),
+        height: rectangle.height(),
+    }
+}
+
+fn texture_spec(texture: TextureRef<'_>, descriptor: TextureDesc) -> driver::IrTextureSpec {
+    let extent = descriptor.extent();
+    let usage = descriptor.usage();
+    driver::IrTextureSpec {
+        slot: texture.index,
+        width: extent.width(),
+        height: extent.height(),
+        sampled: usage.contains(TextureUsage::SAMPLED),
+        render_attachment: usage.contains(TextureUsage::RENDER_ATTACHMENT),
+        copy_destination: usage.contains(TextureUsage::COPY_DST),
+        present: usage.contains(TextureUsage::PRESENT),
+        format: match descriptor.format() {
+            TextureFormat::Bgra8Unorm => IrTextureFormat::Bgra8,
+            TextureFormat::Rgba8Unorm => IrTextureFormat::Rgba8,
+            TextureFormat::R8Unorm => IrTextureFormat::R8,
+        },
+    }
+}
+
+fn materializable_texture(spec: driver::IrTextureSpec) -> bool {
+    spec.sampled || spec.render_attachment || spec.copy_destination || spec.present
 }

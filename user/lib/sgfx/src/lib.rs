@@ -32,7 +32,7 @@ mod driver;
 mod ir_execute;
 mod virgl;
 
-pub use ir_execute::{IrPresentTarget, IrSubmitError, UnsupportedIrFeature};
+pub use ir_execute::{IrResources, IrSubmitError, UnsupportedIrFeature};
 
 /// Device capabilities expressed in application rendering terms.
 #[derive(Debug, Clone, Copy)]
@@ -119,6 +119,25 @@ pub struct Context {
 }
 
 impl Context {
+    /// Create an empty persistent cache for one logical IR resource table.
+    ///
+    /// # Arguments
+    ///
+    /// * `resources` - Table whose opaque logical references this cache will resolve.
+    ///
+    /// # Returns
+    ///
+    /// An empty IR resource cache, or [`IrSubmitError::OutOfMemory`] when its
+    /// bounded mapping metadata or persistent private backend storage cannot be
+    /// allocated. Textures, samplers, and pipelines materialize lazily for this
+    /// context as they are first referenced by IR submission.
+    pub fn create_ir_resources<'r, 'image>(
+        &self,
+        resources: &'r ir::ResourceTable,
+    ) -> Result<IrResources<'r, 'image>, IrSubmitError> {
+        IrResources::new(resources, &self.backend)
+    }
+
     /// Create a presentation-capable render-target image.
     ///
     /// # Arguments
