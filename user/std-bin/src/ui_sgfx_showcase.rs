@@ -2,6 +2,8 @@
 
 use std::any::Any;
 use std::boxed::Box;
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Instant;
 use std::vec::Vec;
@@ -13,51 +15,93 @@ use scarlet_ui::geometry::{Point, Size};
 use scarlet_ui::renderer::PaintContext;
 use scarlet_ui::prelude::*;
 use scarlet_ui::{
-    SgfxCanvas, SgfxCanvasDraw, SgfxCanvasFrame, SgfxCanvasHandle, SgfxCanvasVertex, SgfxMesh,
-    SgfxTexture, hstack, vstack,
+    MenuBarModel, MenuEntry, MenuItemModel, SgfxCanvas, SgfxCanvasDraw, SgfxCanvasFrame,
+    SgfxCanvasHandle, SgfxCanvasVertex, SgfxMesh, SgfxTexture, scenes, vstack,
 };
 
-const WINDOW_WIDTH: f32 = 1024.0;
-const WINDOW_HEIGHT: f32 = 720.0;
+const WINDOW_WIDTH: f32 = 760.0;
+const WINDOW_HEIGHT: f32 = 540.0;
 const HUD_HEIGHT: f32 = 48.0;
 const WINDOW_CONTENT_LAYOUT: WindowContentLayout = WindowContentLayout::new(true);
 const CONTENT_WIDTH: f32 =
     WINDOW_WIDTH - WINDOW_CONTENT_LAYOUT.decoration_size().width;
 const CONTENT_HEIGHT: f32 =
     WINDOW_HEIGHT - WINDOW_CONTENT_LAYOUT.decoration_size().height;
-const CANVAS_WIDTH: f32 = CONTENT_WIDTH;
-const CANVAS_HEIGHT: f32 = CONTENT_HEIGHT - HUD_HEIGHT;
+const CANVAS_ASPECT: f32 = CONTENT_WIDTH / (CONTENT_HEIGHT - HUD_HEIGHT);
 const STATS_INTERVAL_NS: u64 = 500_000_000;
 const PARTICLE_COUNT: usize = 72;
-const WINDOW_KEY: &str = "main";
+const CUBE_WINDOW_KEY: &str = "cube";
+const GEARS_WINDOW_KEY: &str = "gears";
+const SWARM_WINDOW_KEY: &str = "swarm";
 
-#[derive(Clone, Copy, Debug)]
-struct FpsStats {
+#[derive(Debug)]
+struct FpsMeter {
+    started_at: Instant,
+    last_paint_at: Instant,
+    frames: u64,
     fps_milli: u64,
     frame_us: u64,
-    draws: usize,
-    triangles: usize,
 }
 
-impl FpsStats {
-    const fn initial(draws: usize, triangles: usize) -> Self {
+impl FpsMeter {
+    fn new() -> Self {
+        let now = Instant::now();
         Self {
+            started_at: now,
+            last_paint_at: now,
+            frames: 0,
             fps_milli: 0,
             frame_us: 0,
-            draws,
-            triangles,
         }
+    }
+
+    fn record_paint(&mut self) -> (u64, u64) {
+        let now = Instant::now();
+        let idle_ns = u64::try_from(now.duration_since(self.last_paint_at).as_nanos())
+            .unwrap_or(u64::MAX);
+        if idle_ns > STATS_INTERVAL_NS.saturating_mul(2) {
+            self.started_at = now;
+            self.frames = 0;
+        }
+        self.last_paint_at = now;
+        self.frames = self.frames.saturating_add(1);
+        let elapsed_ns = u64::try_from(now.duration_since(self.started_at).as_nanos())
+            .unwrap_or(u64::MAX);
+        if elapsed_ns >= STATS_INTERVAL_NS {
+            self.fps_milli = self
+                .frames
+                .saturating_mul(1_000_000_000)
+                .saturating_mul(1_000)
+                / elapsed_ns.max(1);
+            self.frame_us = elapsed_ns / self.frames.max(1) / 1_000;
+            self.started_at = now;
+            self.frames = 0;
+        }
+        (self.fps_milli, self.frame_us)
     }
 }
 
 #[derive(Clone)]
 struct FpsHud {
-    stats: State<FpsStats>,
+    title: &'static str,
+    meter: Rc<RefCell<FpsMeter>>,
+    draws: usize,
+    triangles: usize,
 }
 
 impl FpsHud {
-    fn new(stats: State<FpsStats>) -> Self {
-        Self { stats }
+    fn new(
+        title: &'static str,
+        meter: Rc<RefCell<FpsMeter>>,
+        draws: usize,
+        triangles: usize,
+    ) -> Self {
+        Self {
+            title,
+            meter,
+            draws,
+            triangles,
+        }
     }
 }
 
@@ -66,14 +110,13 @@ impl View for FpsHud {
         Box::new(RenderElement::new(
             self.clone(),
             FpsHudRenderObject {
-                stats: self.stats.clone(),
-                size: Size::new(440.0, 42.0),
+                title: self.title,
+                meter: Rc::clone(&self.meter),
+                draws: self.draws,
+                triangles: self.triangles,
+                size: Size::new(1.0, HUD_HEIGHT),
             },
         ))
-    }
-
-    fn listenables(&self) -> Vec<&dyn Listenable> {
-        vec![&self.stats]
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -82,13 +125,16 @@ impl View for FpsHud {
 }
 
 struct FpsHudRenderObject {
-    stats: State<FpsStats>,
+    title: &'static str,
+    meter: Rc<RefCell<FpsMeter>>,
+    draws: usize,
+    triangles: usize,
     size: Size,
 }
 
 impl ElementRenderObject for FpsHudRenderObject {
     fn layout(&mut self, constraints: LayoutConstraints) -> Size {
-        self.size = constraints.constrain(self.size);
+        self.size = constraints.constrain(Size::new(constraints.max_width, HUD_HEIGHT));
         self.size
     }
 
@@ -99,21 +145,22 @@ impl ElementRenderObject for FpsHudRenderObject {
     fn render(&mut self) {}
 
     fn paint<'a>(&'a self, ctx: &mut PaintContext<'a>, origin: Point) -> bool {
-        let stats = self.stats.get();
+        let (fps_milli, frame_us) = self.meter.borrow_mut().record_paint();
         let text = format!(
-            "FPS {}.{:03}  frame {}.{:03} ms  draws {}  triangles {}",
-            stats.fps_milli / 1_000,
-            stats.fps_milli % 1_000,
-            stats.frame_us / 1_000,
-            stats.frame_us % 1_000,
-            stats.draws,
-            stats.triangles,
+            "{}   FPS {}.{:03}   frame {}.{:03} ms   draws {}   triangles {}",
+            self.title,
+            fps_milli / 1_000,
+            fps_milli % 1_000,
+            frame_us / 1_000,
+            frame_us % 1_000,
+            self.draws,
+            self.triangles,
         );
         ctx.draw_text(
-            Point::new(origin.x, origin.y + 27.0),
+            Point::new(origin.x + 8.0, origin.y + 29.0),
             text,
             Color::WHITE,
-            17.0,
+            16.0,
         );
         true
     }
@@ -130,24 +177,31 @@ impl ElementRenderObject for FpsHudRenderObject {
         let Some(hud) = new_view.as_any().downcast_ref::<FpsHud>() else {
             return UpdateResult::Replaced;
         };
-        self.stats = hud.stats.clone();
+        self.title = hud.title;
+        self.meter = Rc::clone(&hud.meter);
+        self.draws = hud.draws;
+        self.triangles = hud.triangles;
         UpdateResult::Updated
     }
 }
 
 #[derive(Clone)]
 struct SgfxShowcaseApp {
-    canvas: SgfxCanvasHandle,
-    frame: State<Arc<SgfxCanvasFrame>>,
-    stats: State<FpsStats>,
+    cube_canvas: SgfxCanvasHandle,
+    gears_canvas: SgfxCanvasHandle,
+    swarm_canvas: SgfxCanvasHandle,
+    cube_frame: State<Arc<SgfxCanvasFrame>>,
+    gears_frame: State<Arc<SgfxCanvasFrame>>,
+    swarm_frame: State<Arc<SgfxCanvasFrame>>,
+    cube_meter: Rc<RefCell<FpsMeter>>,
+    gears_meter: Rc<RefCell<FpsMeter>>,
+    swarm_meter: Rc<RefCell<FpsMeter>>,
     cube: Arc<SgfxMesh>,
     cube_texture: Arc<SgfxTexture>,
     gears: [Arc<SgfxMesh>; 3],
     particle: Arc<SgfxMesh>,
     frame_number: u64,
     animation_started_at: Instant,
-    stats_started_at: Instant,
-    stats_frames: u64,
 }
 
 impl SgfxShowcaseApp {
@@ -160,71 +214,70 @@ impl SgfxShowcaseApp {
             gear_mesh(12, 0.26),
         ];
         let particle = particle_mesh();
-        let initial = showcase_frame(0, 0.0, &cube, &cube_texture, &gears, &particle);
-        let draws = initial.draw_count();
-        let triangles = showcase_triangle_count();
-        let now = Instant::now();
+        let initial_cube = cube_frame(0, 0.0, &cube, &cube_texture);
+        let initial_gears = gears_frame(0, 0.0, &gears);
+        let initial_swarm = swarm_frame(0, 0.0, &particle);
         Self {
-            canvas: SgfxCanvasHandle::new(),
-            frame: State::new(StateId::new(300), Arc::new(initial)),
-            stats: State::new(StateId::new(301), FpsStats::initial(draws, triangles)),
+            cube_canvas: SgfxCanvasHandle::new(),
+            gears_canvas: SgfxCanvasHandle::new(),
+            swarm_canvas: SgfxCanvasHandle::new(),
+            cube_frame: State::new(StateId::new(300), Arc::new(initial_cube.clone())),
+            gears_frame: State::new(StateId::new(301), Arc::new(initial_gears.clone())),
+            swarm_frame: State::new(StateId::new(302), Arc::new(initial_swarm.clone())),
+            cube_meter: Rc::new(RefCell::new(FpsMeter::new())),
+            gears_meter: Rc::new(RefCell::new(FpsMeter::new())),
+            swarm_meter: Rc::new(RefCell::new(FpsMeter::new())),
             cube,
             cube_texture,
             gears,
             particle,
             frame_number: 0,
-            animation_started_at: now,
-            stats_started_at: now,
-            stats_frames: 0,
+            animation_started_at: Instant::now(),
         }
     }
 
-    fn content(&self) -> impl View + Clone {
+    fn content(
+        &self,
+        title: &'static str,
+        canvas: SgfxCanvasHandle,
+        frame: State<Arc<SgfxCanvasFrame>>,
+        meter: Rc<RefCell<FpsMeter>>,
+        draws: usize,
+        triangles: usize,
+    ) -> impl View + Clone {
         vstack! {
-            hstack! {
-                Text::new("SgfxCanvas: kmscube / Mesa gears / mesh swarm")
-                    .font_size(20.0),
-                Spacer::new(),
-                FpsHud::new(self.stats.clone()),
-            }
-            .frame(f32::INFINITY, HUD_HEIGHT),
+            FpsHud::new(title, meter, draws, triangles),
             SgfxCanvas::from_state(
-                self.canvas,
-                CANVAS_WIDTH,
-                CANVAS_HEIGHT,
-                self.frame.clone(),
+                canvas,
+                f32::INFINITY,
+                f32::INFINITY,
+                frame,
             ),
         }
-        .frame(CONTENT_WIDTH, CONTENT_HEIGHT)
+        .frame(f32::INFINITY, f32::INFINITY)
     }
 
-    fn update_stats(&mut self, now: Instant, frame: &SgfxCanvasFrame) {
-        self.stats_frames = self.stats_frames.saturating_add(1);
-        let elapsed = u64::try_from(now.duration_since(self.stats_started_at).as_nanos())
-            .unwrap_or(u64::MAX);
-        if elapsed < STATS_INTERVAL_NS {
-            return;
+    fn launcher_content(&self) -> impl View + Clone {
+        vstack! {
+            Text::new("ScarletUI SGFX Showcase").font_size(24.0),
+            Text::new("Open each GPU demo in its own resizable window.").font_size(15.0),
+            Spacer::new().frame_height(18.0),
+            Button::new("Open Textured Cube").on_click(|| open_window(CUBE_WINDOW_KEY)),
+            Button::new("Open Mesa-style Gears").on_click(|| open_window(GEARS_WINDOW_KEY)),
+            Button::new("Open Mesh Swarm").on_click(|| open_window(SWARM_WINDOW_KEY)),
+            Button::new("Open All").on_click(|| {
+                open_window(CUBE_WINDOW_KEY);
+                open_window(GEARS_WINDOW_KEY);
+                open_window(SWARM_WINDOW_KEY);
+            }),
         }
-        let fps_milli = self
-            .stats_frames
-            .saturating_mul(1_000_000_000)
-            .saturating_mul(1_000)
-            / elapsed.max(1);
-        let frame_us = elapsed / self.stats_frames.max(1) / 1_000;
-        self.stats.set(FpsStats {
-            fps_milli,
-            frame_us,
-            draws: frame.draw_count(),
-            triangles: showcase_triangle_count(),
-        });
-        self.stats_started_at = now;
-        self.stats_frames = 0;
+        .padding(24.0)
     }
 }
 
 impl View for SgfxShowcaseApp {
     fn create_element(&self) -> Box<dyn Element> {
-        self.content().create_element()
+        self.launcher_content().create_element()
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -234,14 +287,70 @@ impl View for SgfxShowcaseApp {
 
 impl Application for SgfxShowcaseApp {
     fn scenes(&self) -> impl Scene {
-        WindowGroup::new(
-            WINDOW_KEY,
-            Window::new("ScarletUI SGFX Canvas Showcase", self.content())
+        scenes! {
+            Window::new("ScarletUI SGFX Showcase", self.launcher_content())
                 .app_id("org.scarlet-os.scarlet-ui-sgfx-showcase")
+                .menu_bar(showcase_menu_bar())
+                .size(Size::new(420.0, 340.0))
+                .min_size(Size::new(360.0, 300.0)),
+            Window::new(
+                    "SGFX Textured Cube",
+                    self.content(
+                        "Textured Cube",
+                        self.cube_canvas,
+                        self.cube_frame.clone(),
+                        Rc::clone(&self.cube_meter),
+                        1,
+                        cube_mesh_triangle_count(),
+                    ),
+                )
+                .scene_key(CUBE_WINDOW_KEY)
+                .open_at_launch(false)
+                .app_id("org.scarlet-os.scarlet-ui-sgfx-showcase")
+                .menu_bar(showcase_menu_bar())
                 .size(Size::new(WINDOW_WIDTH, WINDOW_HEIGHT))
-                .resizable(false)
+                .min_size(Size::new(360.0, 280.0))
+                .resizable(true)
                 .background_color(Color::rgb(8u8, 12u8, 22u8)),
-        )
+            Window::new(
+                    "SGFX Mesa Gears",
+                    self.content(
+                        "Mesa-style Gears",
+                        self.gears_canvas,
+                        self.gears_frame.clone(),
+                        Rc::clone(&self.gears_meter),
+                        3,
+                        gears_triangle_count(),
+                    ),
+                )
+                .scene_key(GEARS_WINDOW_KEY)
+                .open_at_launch(false)
+                .app_id("org.scarlet-os.scarlet-ui-sgfx-showcase")
+                .menu_bar(showcase_menu_bar())
+                .size(Size::new(WINDOW_WIDTH, WINDOW_HEIGHT))
+                .min_size(Size::new(360.0, 280.0))
+                .resizable(true)
+                .background_color(Color::rgb(8u8, 12u8, 22u8)),
+            Window::new(
+                    "SGFX Mesh Swarm",
+                    self.content(
+                        "Animated Mesh Swarm",
+                        self.swarm_canvas,
+                        self.swarm_frame.clone(),
+                        Rc::clone(&self.swarm_meter),
+                        PARTICLE_COUNT,
+                        PARTICLE_COUNT,
+                    ),
+                )
+                .scene_key(SWARM_WINDOW_KEY)
+                .open_at_launch(false)
+                .app_id("org.scarlet-os.scarlet-ui-sgfx-showcase")
+                .menu_bar(showcase_menu_bar())
+                .size(Size::new(WINDOW_WIDTH, WINDOW_HEIGHT))
+                .min_size(Size::new(360.0, 280.0))
+                .resizable(true)
+                .background_color(Color::rgb(8u8, 12u8, 22u8)),
+        }
     }
 
     fn on_idle(&mut self) {
@@ -250,16 +359,17 @@ impl Application for SgfxShowcaseApp {
         let elapsed_ns = u64::try_from(now.duration_since(self.animation_started_at).as_nanos())
             .unwrap_or(u64::MAX);
         let animation_seconds = elapsed_ns as f32 / 1_000_000_000.0;
-        let frame = showcase_frame(
+        let cube = cube_frame(
             self.frame_number,
             animation_seconds,
             &self.cube,
             &self.cube_texture,
-            &self.gears,
-            &self.particle,
         );
-        self.update_stats(now, &frame);
-        self.frame.set(Arc::new(frame));
+        let gears = gears_frame(self.frame_number, animation_seconds, &self.gears);
+        let swarm = swarm_frame(self.frame_number, animation_seconds, &self.particle);
+        self.cube_frame.set(Arc::new(cube));
+        self.gears_frame.set(Arc::new(gears));
+        self.swarm_frame.set(Arc::new(swarm));
     }
 
     fn debug_logging(&self) -> bool {
@@ -267,28 +377,51 @@ impl Application for SgfxShowcaseApp {
     }
 }
 
-fn showcase_frame(
+fn showcase_menu_bar() -> MenuBarModel {
+    MenuBarModel::new(vec![MenuItemModel::app().children(vec![
+        MenuEntry::Item(
+            MenuItemModel::new("open-cube", "Open Textured Cube")
+                .on_activate(Arc::new(|| open_window(CUBE_WINDOW_KEY))),
+        ),
+        MenuEntry::Item(
+            MenuItemModel::new("open-gears", "Open Mesa-style Gears")
+                .on_activate(Arc::new(|| open_window(GEARS_WINDOW_KEY))),
+        ),
+        MenuEntry::Item(
+            MenuItemModel::new("open-swarm", "Open Mesh Swarm")
+                .on_activate(Arc::new(|| open_window(SWARM_WINDOW_KEY))),
+        ),
+    ])])
+}
+
+fn base_frame(frame_number: u64) -> SgfxCanvasFrame {
+    SgfxCanvasFrame::new(frame_number, Color::rgb(6u8, 11u8, 24u8))
+        .reference_aspect(CANVAS_ASPECT)
+}
+
+fn projection() -> [f32; 16] {
+    perspective(
+        50.0 * core::f32::consts::PI / 180.0,
+        CANVAS_ASPECT,
+        0.5,
+        40.0,
+    )
+}
+
+fn cube_frame(
     frame_number: u64,
     animation_seconds: f32,
     cube: &Arc<SgfxMesh>,
     cube_texture: &Arc<SgfxTexture>,
-    gear_meshes: &[Arc<SgfxMesh>; 3],
-    particle: &Arc<SgfxMesh>,
 ) -> SgfxCanvasFrame {
     let phase = animation_seconds;
-    let mut frame = SgfxCanvasFrame::new(frame_number, Color::rgb(6u8, 11u8, 24u8));
-    let projection = perspective(
-        50.0 * core::f32::consts::PI / 180.0,
-        CANVAS_WIDTH / CANVAS_HEIGHT,
-        0.5,
-        40.0,
-    );
-    let view_projection = matrix_mul(projection, translation(0.0, 0.0, -7.0));
+    let mut frame = base_frame(frame_number);
+    let view_projection = matrix_mul(projection(), translation(0.0, 0.0, -5.0));
 
     // Follow kmscube's three-axis motion and use a real perspective
     // object-to-clip transform so edges foreshorten instead of shearing.
     let cube_model = matrix_mul(
-        translation(-2.18, 0.72, 0.0),
+        translation(0.0, 0.0, 0.0),
         matrix_mul(
             rotation_z(0.17 + phase * 0.31),
             matrix_mul(
@@ -304,29 +437,39 @@ fn showcase_frame(
         SgfxCanvasDraw::new(Arc::clone(cube), matrix_mul(view_projection, cube_model))
             .texture(Arc::clone(cube_texture)),
     );
+    frame
+}
 
+fn gears_frame(
+    frame_number: u64,
+    animation_seconds: f32,
+    gear_meshes: &[Arc<SgfxMesh>; 3],
+) -> SgfxCanvasFrame {
+    let phase = animation_seconds;
+    let mut frame = base_frame(frame_number);
+    let view_projection = matrix_mul(projection(), translation(0.0, 0.0, -6.0));
     // Mesa's classic gears use one positive rotation and two counter-rotating
     // gears at twice the angular speed with fixed phase offsets.
     let gear_instances = [
         (
-            1.02,
-            0.57,
+            -0.58,
+            0.28,
             0.00,
             0.92,
             phase * 1.35,
             Color::rgb(204u8, 51u8, 0u8),
         ),
         (
-            2.25,
-            0.27,
+            1.03,
+            0.48,
             -0.04,
             0.55,
             -phase * 2.70 - 0.157,
             Color::rgb(0u8, 204u8, 51u8),
         ),
         (
-            1.38,
-            -0.89,
+            0.30,
+            -1.05,
             0.04,
             0.65,
             -phase * 2.70 - 0.436,
@@ -352,13 +495,23 @@ fn showcase_frame(
             .tint(tint),
         );
     }
+    frame
+}
 
+fn swarm_frame(
+    frame_number: u64,
+    animation_seconds: f32,
+    particle: &Arc<SgfxMesh>,
+) -> SgfxCanvasFrame {
+    let phase = animation_seconds;
+    let mut frame = base_frame(frame_number);
+    let view_projection = matrix_mul(projection(), translation(0.0, 0.0, -5.0));
     for index in 0..PARTICLE_COUNT {
         let seed = index as f32 * 0.754_877_7;
         let orbit = phase * (0.72 + (index % 9) as f32 * 0.045) + seed;
         let radius = 0.42 + (index % 13) as f32 * 0.055;
-        let x = -1.72 + libm::cosf(orbit * 1.13) * radius;
-        let y = -1.47 + libm::sinf(orbit * 0.91) * 0.48;
+        let x = libm::cosf(orbit * 1.13) * radius * 1.7;
+        let y = libm::sinf(orbit * 0.91) * 1.05;
         let z = -0.15 + (index % 7) as f32 * 0.045;
         let size = 0.052 + (index % 5) as f32 * 0.011;
         let model = matrix_mul(
@@ -378,12 +531,10 @@ fn showcase_frame(
     frame
 }
 
-const fn showcase_triangle_count() -> usize {
-    cube_mesh_triangle_count()
-        + gear_mesh_triangle_count(20)
+const fn gears_triangle_count() -> usize {
+    gear_mesh_triangle_count(20)
         + gear_mesh_triangle_count(10)
         + gear_mesh_triangle_count(12)
-        + PARTICLE_COUNT
 }
 
 const fn cube_mesh_triangle_count() -> usize {
