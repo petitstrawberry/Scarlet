@@ -15,6 +15,7 @@ use sws_protocol::{self as protocol, ServerMessage};
 const HANDLE_RECORD_CAPACITY: usize =
     protocol::MessageHeader::SIZE + protocol::MAX_PAYLOAD_SIZE;
 const MAX_DISPATCH_FRAMES: usize = 64;
+const MAX_STREAM_WRITE_CHUNK: usize = 16 * 1024;
 
 /// Window list entry
 #[derive(Debug, Clone)]
@@ -156,40 +157,6 @@ impl FrameReader {
             }
         }
     }
-}
-
-fn write_all(socket: &mut Socket, buf: &[u8]) -> Result<(), Error> {
-    let mut written = 0;
-    while written < buf.len() {
-        match socket_write(socket, &buf[written..]) {
-            Ok(n) => written += n,
-            Err(Error::WouldBlock) => {
-                crate::os::yield_now();
-                continue;
-            }
-            Err(error) => return Err(error),
-        }
-    }
-    Ok(())
-}
-
-fn write_frame_routed(
-    socket: &mut Socket,
-    msg_type: u32,
-    flags: u8,
-    request_id: u8,
-    payload: &[u8],
-) -> Result<(), Error> {
-    // Write header + payload directly to avoid allocating a temporary Vec.
-    let header =
-        protocol::MessageHeader::with_routing(msg_type, flags, request_id, payload.len() as u32);
-    let header_bytes = header.to_le_bytes();
-    write_all(socket, &header_bytes)?;
-    if !payload.is_empty() {
-        write_all(socket, payload)?;
-    }
-    socket_flush(socket)?;
-    Ok(())
 }
 
 /// Identifier for one in-flight request on an SWS connection.
@@ -462,6 +429,66 @@ impl TransportState {
         }
     }
 
+    fn pump_write_backpressure(&mut self) -> Result<(), Error> {
+        match self.pump_once() {
+            Ok(_) => {
+                crate::os::yield_now();
+                Ok(())
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn write_all_pumping(&mut self, bytes: &[u8]) -> Result<(), Error> {
+        let mut written = 0usize;
+        while written < bytes.len() {
+            let chunk_end = written
+                .saturating_add(MAX_STREAM_WRITE_CHUNK)
+                .min(bytes.len());
+            match socket_write(&mut self.socket, &bytes[written..chunk_end]) {
+                Ok(0) => return Err(Error::SendFailed),
+                Ok(count) => written += count,
+                Err(Error::WouldBlock) => self.pump_write_backpressure()?,
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(())
+    }
+
+    fn write_frame_routed(
+        &mut self,
+        msg_type: u32,
+        flags: u8,
+        request_id: u8,
+        payload: &[u8],
+    ) -> Result<(), Error> {
+        let header = protocol::MessageHeader::with_routing(
+            msg_type,
+            flags,
+            request_id,
+            payload.len() as u32,
+        );
+        self.write_all_pumping(&header.to_le_bytes())?;
+        if !payload.is_empty() {
+            self.write_all_pumping(payload)?;
+        }
+        socket_flush(&mut self.socket)
+    }
+
+    fn send_handle_record_pumping(
+        &mut self,
+        handle: &Handle,
+        record: &[u8],
+    ) -> Result<(), Error> {
+        loop {
+            match socket_send_handle_and_data(&self.socket, handle, record) {
+                Ok(()) => return Ok(()),
+                Err(Error::WouldBlock) => self.pump_write_backpressure()?,
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
     fn fail_pending(&mut self, error: Error) {
         if self.terminal_error.is_none() {
             self.terminal_error = Some(error);
@@ -522,9 +549,9 @@ impl TransportState {
             let mut record = Vec::with_capacity(protocol::MessageHeader::SIZE + payload.len());
             record.extend_from_slice(&header.to_le_bytes());
             record.extend_from_slice(payload);
-            socket_send_handle_and_data(&self.socket, handle, &record)
+            self.send_handle_record_pumping(handle, &record)
         } else {
-            write_frame_routed(&mut self.socket, msg_type, 0, request_id, payload)
+            self.write_frame_routed(msg_type, 0, request_id, payload)
                 .map_err(|_| Error::SendFailed)
         };
 
@@ -540,7 +567,7 @@ impl TransportState {
         if let Some(error) = self.terminal_error {
             return Err(error);
         }
-        write_frame_routed(&mut self.socket, msg_type, 0, 0, payload).map_err(|error| {
+        self.write_frame_routed(msg_type, 0, 0, payload).map_err(|error| {
             self.fail_pending(error);
             Error::SendFailed
         })

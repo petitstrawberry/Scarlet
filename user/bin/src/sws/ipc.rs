@@ -6,12 +6,12 @@ use std::env;
 use std::handle::Handle;
 use std::handle::capability::memory_mapping::flags as mmap_flags;
 use std::ipc::{SharedMemory, permissions};
-use std::poll::{POLLIN, PollHandle, poll};
+use std::poll::{POLLIN, POLLOUT, PollHandle, poll};
 use std::println;
 use std::socket::Socket;
 use std::string::String;
 use std::sync::Mutex;
-use std::thread::{self, sleep, yield_now};
+use std::thread::{self, yield_now};
 use std::vec::Vec;
 use sws_protocol as protocol;
 use sws_protocol::ClientMessageRef;
@@ -172,8 +172,96 @@ static PENDING_IME_KEYS: Mutex<BTreeMap<u32, PendingImeKey>> = Mutex::new(BTreeM
 enum FrameIoError {
     WouldBlock,
     Disconnected,
+    Backpressure,
     Io,
     Protocol,
+}
+
+const MAX_CLIENT_OUTBOUND_BYTES: usize = 4 * 1024 * 1024;
+const MAX_CLIENT_WRITE_BYTES_PER_TICK: usize = 64 * 1024;
+const MAX_CLIENT_WRITE_CHUNK: usize = 16 * 1024;
+const CLIENT_POLL_TIMEOUT_NS: i64 = 8_000_000;
+
+struct PendingStreamFrame {
+    bytes: Vec<u8>,
+    offset: usize,
+}
+
+struct ClientStreamWriter {
+    frames: Vec<PendingStreamFrame>,
+    head: usize,
+    pending_bytes: usize,
+}
+
+impl ClientStreamWriter {
+    fn new() -> Self {
+        Self {
+            frames: Vec::new(),
+            head: 0,
+            pending_bytes: 0,
+        }
+    }
+
+    fn has_pending(&self) -> bool {
+        self.head < self.frames.len()
+    }
+
+    fn enqueue(
+        &mut self,
+        msg_type: u32,
+        flags: u8,
+        request_id: u8,
+        payload: &[u8],
+    ) -> Result<(), FrameIoError> {
+        if payload.len() > protocol::MAX_PAYLOAD_SIZE {
+            return Err(FrameIoError::Protocol);
+        }
+        let bytes = protocol::encode_routed_frame(msg_type, flags, request_id, payload);
+        if self.pending_bytes.saturating_add(bytes.len()) > MAX_CLIENT_OUTBOUND_BYTES {
+            return Err(FrameIoError::Backpressure);
+        }
+        self.pending_bytes += bytes.len();
+        self.frames.push(PendingStreamFrame { bytes, offset: 0 });
+        Ok(())
+    }
+
+    fn flush(&mut self, socket: &mut Socket) -> Result<bool, FrameIoError> {
+        use std::io::Write;
+
+        let mut written_this_tick = 0usize;
+        while written_this_tick < MAX_CLIENT_WRITE_BYTES_PER_TICK {
+            let Some(frame) = self.frames.get_mut(self.head) else {
+                break;
+            };
+            let remaining_budget = MAX_CLIENT_WRITE_BYTES_PER_TICK - written_this_tick;
+            let chunk_len = remaining_budget
+                .min(MAX_CLIENT_WRITE_CHUNK)
+                .min(frame.bytes.len().saturating_sub(frame.offset));
+            if chunk_len == 0 {
+                self.head += 1;
+                continue;
+            }
+            let chunk_end = frame.offset + chunk_len;
+            match socket.write(&frame.bytes[frame.offset..chunk_end]) {
+                Ok(0) => return Err(FrameIoError::Disconnected),
+                Ok(written) => {
+                    frame.offset += written;
+                    written_this_tick += written;
+                    self.pending_bytes = self.pending_bytes.saturating_sub(written);
+                    if frame.offset == frame.bytes.len() {
+                        self.head += 1;
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(_) => return Err(FrameIoError::Io),
+            }
+        }
+        if self.head > 0 && self.head.saturating_mul(2) >= self.frames.len() {
+            self.frames.drain(..self.head);
+            self.head = 0;
+        }
+        Ok(written_this_tick != 0)
+    }
 }
 
 /// Non-blocking framed-message reader.
@@ -328,39 +416,22 @@ fn poll_atomic_handle_frame(
     Ok(Some((header, payload, handle)))
 }
 
-fn write_all(socket: &mut Socket, buf: &[u8]) -> Result<(), FrameIoError> {
-    use std::io::Write;
-
-    let mut written = 0;
-    while written < buf.len() {
-        match socket.write(&buf[written..]) {
-            Ok(0) => return Err(FrameIoError::Disconnected),
-            Ok(n) => written += n,
-            Err(e) => {
-                if e.kind() == std::io::ErrorKind::WouldBlock {
-                    // Non-blocking socket; give the scheduler a chance and retry.
-                    sleep(core::time::Duration::from_millis(1));
-                    continue;
-                }
-                return Err(FrameIoError::Io);
-            }
-        }
-    }
-    Ok(())
-}
-
-fn write_frame(socket: &mut Socket, msg_type: u32, payload: &[u8]) -> Result<(), FrameIoError> {
-    write_frame_routed(socket, msg_type, 0, 0, payload)
+fn write_frame(
+    writer: &mut ClientStreamWriter,
+    msg_type: u32,
+    payload: &[u8],
+) -> Result<(), FrameIoError> {
+    write_frame_routed(writer, msg_type, 0, 0, payload)
 }
 
 fn write_frame_response(
-    socket: &mut Socket,
+    writer: &mut ClientStreamWriter,
     msg_type: u32,
     request_id: u8,
     payload: &[u8],
 ) -> Result<(), FrameIoError> {
     write_frame_routed(
-        socket,
+        writer,
         msg_type,
         protocol::MessageHeader::FLAG_IS_RESPONSE,
         request_id,
@@ -369,41 +440,30 @@ fn write_frame_response(
 }
 
 fn write_frame_routed(
-    socket: &mut Socket,
+    writer: &mut ClientStreamWriter,
     msg_type: u32,
     flags: u8,
     request_id: u8,
     payload: &[u8],
 ) -> Result<(), FrameIoError> {
-    use std::io::Write;
-
-    // Write header + payload directly to avoid allocating a temporary Vec.
-    let header =
-        protocol::MessageHeader::with_routing(msg_type, flags, request_id, payload.len() as u32);
-    let header_bytes = header.to_le_bytes();
-    write_all(socket, &header_bytes)?;
-    if !payload.is_empty() {
-        write_all(socket, payload)?;
-    }
-    socket.flush().map_err(|_| FrameIoError::Io)?;
-    Ok(())
+    writer.enqueue(msg_type, flags, request_id, payload)
 }
 
 fn write_protocol_error(
-    socket: &mut Socket,
+    writer: &mut ClientStreamWriter,
     request_id: u8,
     code: u32,
 ) -> Result<(), FrameIoError> {
     let payload = protocol::payload_error(code);
     if request_id == 0 {
-        write_frame(socket, protocol::server_msg::ERROR, &payload)
+        write_frame(writer, protocol::server_msg::ERROR, &payload)
     } else {
-        write_frame_response(socket, protocol::server_msg::ERROR, request_id, &payload)
+        write_frame_response(writer, protocol::server_msg::ERROR, request_id, &payload)
     }
 }
 
 fn write_sgfx_frame_rejected(
-    socket: &mut Socket,
+    writer: &mut ClientStreamWriter,
     window_id: u32,
     buffer_id: u32,
     generation: u32,
@@ -420,7 +480,7 @@ fn write_sgfx_frame_rejected(
         code,
     );
     write_frame(
-        socket,
+        writer,
         protocol::server_msg::SGFX_FRAME_REJECTED,
         &payload,
     )
@@ -1665,11 +1725,13 @@ fn pop_pending_client_responses(client_id: usize) -> Vec<PendingServerFrame> {
             Vec::new()
         } else {
             let frames = core::mem::take(frames);
-            println!(
-                "[IpcServer] Popping {} pending responses for client {}",
-                frames.len(),
-                client_id
-            );
+            if is_sws_debug_enabled() {
+                println!(
+                    "[IpcServer] Popping {} pending responses for client {}",
+                    frames.len(),
+                    client_id
+                );
+            }
             frames
         }
     } else {
@@ -1882,28 +1944,41 @@ fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Ha
 
     let mut frame_reader = FrameReader::new();
     let mut atomic_frame = Vec::new();
+    let mut stream_writer = ClientStreamWriter::new();
     println!("[ClientThread {}] Entering main loop", client_id);
 
     'main: loop {
         loop_count += 1;
         let _should_log = loop_count % 100 == 0; // Log every 100 iterations (more frequent)
 
+        let mut has_events = match stream_writer.flush(&mut socket) {
+            Ok(progressed) => progressed,
+            Err(error) => {
+                println!(
+                    "[ClientThread {}] Failed to flush queued output: {:?}",
+                    client_id, error
+                );
+                break;
+            }
+        };
+
         // Send any pending input events for this client's windows
-        let mut has_events = false;
         let mut _total_events = 0;
 
         // First, check for pending responses addressed directly to this client
         // (for clients that don't have windows, like stemd)
         let client_responses = pop_pending_client_responses(client_id);
         for frame in client_responses {
-            println!(
-                "[ClientThread {}] Sending client response (msg_type={}, payload_len={})",
-                client_id,
-                frame.msg_type,
-                frame.payload.len()
-            );
+            if is_sws_debug_enabled() {
+                println!(
+                    "[ClientThread {}] Queueing client response (msg_type={}, payload_len={})",
+                    client_id,
+                    frame.msg_type,
+                    frame.payload.len()
+                );
+            }
             if let Err(e) = write_frame_routed(
-                &mut socket,
+                &mut stream_writer,
                 frame.msg_type,
                 frame.flags,
                 frame.request_id,
@@ -1923,7 +1998,7 @@ fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Ha
             let frames = pop_pending_server_frames(window_id);
             for frame in frames {
                 if let Err(e) = write_frame_routed(
-                    &mut socket,
+                    &mut stream_writer,
                     frame.msg_type,
                     frame.flags,
                     frame.request_id,
@@ -1955,7 +2030,7 @@ fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Ha
                                 event.value,
                             );
                             if let Err(e) = write_frame(
-                                &mut socket,
+                                &mut stream_writer,
                                 protocol::server_msg::EXTENSION_INPUT_EVENT,
                                 &payload,
                             ) {
@@ -1989,8 +2064,11 @@ fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Ha
                             event.code,
                             event.value,
                         );
-                        if let Err(e) =
-                            write_frame(&mut socket, protocol::server_msg::INPUT_EVENT, &payload)
+                        if let Err(e) = write_frame(
+                            &mut stream_writer,
+                            protocol::server_msg::INPUT_EVENT,
+                            &payload,
+                        )
                         {
                             println!(
                                 "[ClientThread {}] Failed to send input event to window {}: {:?}",
@@ -2005,6 +2083,17 @@ fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Ha
                         }
                     }
                 }
+            }
+        }
+
+        match stream_writer.flush(&mut socket) {
+            Ok(progressed) => has_events |= progressed,
+            Err(error) => {
+                println!(
+                    "[ClientThread {}] Failed to flush queued output: {:?}",
+                    client_id, error
+                );
+                break;
             }
         }
 
@@ -2050,20 +2139,26 @@ fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Ha
             None => match frame_reader.poll(&mut socket) {
                 Ok(Some((header, payload))) => (header, payload, None),
                 Ok(None) => {
-                    if has_events {
+                    if has_events && !stream_writer.has_pending() {
                         continue;
                     }
+                    let socket_interest = POLLIN
+                        | if stream_writer.has_pending() {
+                            POLLOUT
+                        } else {
+                            0
+                        };
                     let mut handles = match wake_read.as_ref() {
                         Some(wake) => [
-                            PollHandle::new(socket.as_raw() as u32, POLLIN),
+                            PollHandle::new(socket.as_raw() as u32, socket_interest),
                             PollHandle::new(wake.as_raw() as u32, POLLIN),
                         ],
                         None => [
-                            PollHandle::new(socket.as_raw() as u32, POLLIN),
+                            PollHandle::new(socket.as_raw() as u32, socket_interest),
                             PollHandle::new(socket.as_raw() as u32, 0),
                         ],
                     };
-                    let _ = poll(&mut handles, 8);
+                    let _ = poll(&mut handles, CLIENT_POLL_TIMEOUT_NS);
                     if let Some(wake) = wake_read.as_ref()
                         && (handles[1].revents & POLLIN) != 0
                         && let Ok(stream) = wake.as_stream()
@@ -2092,7 +2187,7 @@ fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Ha
         );
         if handle_required != received_handle.is_some() {
             let _ = write_protocol_error(
-                &mut socket,
+                &mut stream_writer,
                 request_id,
                 protocol::error_codes::INVALID_SGFX_BUFFER,
             );
@@ -2500,7 +2595,7 @@ fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Ha
                 // Send ExtensionRegistered response
                 let payload = protocol::payload_extension_registered(extension_id);
                 if let Err(e) = write_frame_response(
-                    &mut socket,
+                    &mut stream_writer,
                     protocol::server_msg::EXTENSION_REGISTERED,
                     request_id,
                     &payload,
@@ -2835,7 +2930,7 @@ fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Ha
                     compositor_backend_id(),
                 );
                 if let Err(error) = write_frame_response(
-                    &mut socket,
+                    &mut stream_writer,
                     protocol::server_msg::CAPABILITIES,
                     request_id,
                     &payload,
@@ -2857,7 +2952,7 @@ fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Ha
             }) => {
                 let Some(handle) = received_handle else {
                     let _ = write_protocol_error(
-                        &mut socket,
+                        &mut stream_writer,
                         request_id,
                         protocol::error_codes::INVALID_SGFX_BUFFER,
                     );
@@ -2865,7 +2960,7 @@ fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Ha
                 };
                 if !managed_windows.contains(&window_id) {
                     let _ = write_protocol_error(
-                        &mut socket,
+                        &mut stream_writer,
                         request_id,
                         protocol::error_codes::WINDOW_NOT_OWNED,
                     );
@@ -2873,7 +2968,7 @@ fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Ha
                 }
                 if request_epoch != compositor_epoch() {
                     let _ = write_protocol_error(
-                        &mut socket,
+                        &mut stream_writer,
                         request_id,
                         protocol::error_codes::STALE_SGFX_GENERATION,
                     );
@@ -2881,7 +2976,7 @@ fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Ha
                 }
                 if !SGFX_SHARED_IMAGES_AVAILABLE.load(Ordering::Acquire) {
                     let _ = write_protocol_error(
-                        &mut socket,
+                        &mut stream_writer,
                         request_id,
                         protocol::error_codes::SGFX_UNAVAILABLE,
                     );
@@ -2909,7 +3004,7 @@ fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Ha
             }) => {
                 let mut reject = |code| {
                     write_sgfx_frame_rejected(
-                        &mut socket,
+                        &mut stream_writer,
                         window_id,
                         buffer_id,
                         generation,
@@ -2959,7 +3054,7 @@ fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Ha
             }) => {
                 if !managed_windows.contains(&window_id) {
                     let _ = write_protocol_error(
-                        &mut socket,
+                        &mut stream_writer,
                         request_id,
                         protocol::error_codes::WINDOW_NOT_OWNED,
                     );
@@ -2967,7 +3062,7 @@ fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Ha
                 }
                 if request_epoch != compositor_epoch() {
                     let _ = write_protocol_error(
-                        &mut socket,
+                        &mut stream_writer,
                         request_id,
                         protocol::error_codes::STALE_SGFX_GENERATION,
                     );
@@ -2975,7 +3070,7 @@ fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Ha
                 }
                 if !SGFX_SHARED_IMAGES_AVAILABLE.load(Ordering::Acquire) {
                     let _ = write_protocol_error(
-                        &mut socket,
+                        &mut stream_writer,
                         request_id,
                         protocol::error_codes::SGFX_UNAVAILABLE,
                     );
@@ -2998,7 +3093,7 @@ fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Ha
                 let payload =
                     protocol::payload_text_input_created(context.context_id, context.serial);
                 if let Err(e) = write_frame_response(
-                    &mut socket,
+                    &mut stream_writer,
                     protocol::server_msg::TEXT_INPUT_CREATED,
                     request_id,
                     &payload,
@@ -3058,7 +3153,7 @@ fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Ha
             Ok(ClientMessageRef::ImeGetMethods {}) => {
                 let payload = input_methods_payload();
                 if let Err(e) = write_frame_response(
-                    &mut socket,
+                    &mut stream_writer,
                     protocol::server_msg::IME_METHODS,
                     request_id,
                     &payload,
@@ -3073,7 +3168,7 @@ fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Ha
             Ok(ClientMessageRef::ImeGetActive {}) => {
                 let payload = active_input_method_payload();
                 if let Err(e) = write_frame_response(
-                    &mut socket,
+                    &mut stream_writer,
                     protocol::server_msg::IME_ACTIVE,
                     request_id,
                     &payload,
@@ -3093,7 +3188,7 @@ fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Ha
                 );
                 let payload = protocol::payload_ime_registered(service.ime_id);
                 if let Err(e) = write_frame_response(
-                    &mut socket,
+                    &mut stream_writer,
                     protocol::server_msg::IME_REGISTERED,
                     request_id,
                     &payload,
