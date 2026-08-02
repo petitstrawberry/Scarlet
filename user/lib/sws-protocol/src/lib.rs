@@ -27,6 +27,42 @@ use std::vec::Vec;
 /// This prevents unbounded allocations on malformed frames.
 pub const MAX_PAYLOAD_SIZE: usize = 1024 * 1024; // 1 MiB
 
+/// Current SWS capability-negotiation protocol version.
+pub const SWS_PROTOCOL_VERSION: u32 = 2;
+
+/// Maximum damage rectangles carried by one shared SGFX frame commit.
+pub const SGFX_MAX_DAMAGE_RECTS: usize = 16;
+
+/// Optional SWS capabilities returned by `GET_CAPABILITIES`.
+pub mod capabilities {
+    /// Shared SGFX images may be registered and committed without CPU copies.
+    pub const SGFX_SHARED_IMAGE: u64 = 1 << 0;
+}
+
+/// SWS compositor backend identifiers reported by capability negotiation.
+pub mod compositor_backends {
+    /// CPU compositor is active.
+    pub const CPU: u32 = 0;
+    /// SGFX compositor is active.
+    pub const SGFX: u32 = 1;
+}
+
+/// Stable protocol error codes used by SGFX lifecycle requests.
+pub mod error_codes {
+    /// The selected SWS backend does not accept shared SGFX images.
+    pub const SGFX_UNAVAILABLE: u32 = 100;
+    /// The requesting connection does not own the target window.
+    pub const WINDOW_NOT_OWNED: u32 = 101;
+    /// The referenced SGFX buffer is unknown or has invalid metadata.
+    pub const INVALID_SGFX_BUFFER: u32 = 102;
+    /// The buffer generation or negotiated SWS SGFX epoch is stale.
+    pub const STALE_SGFX_GENERATION: u32 = 103;
+    /// The referenced SGFX buffer is still retained by SWS.
+    pub const SGFX_BUFFER_BUSY: u32 = 104;
+    /// SWS could not import the transferred GPU image capability.
+    pub const SGFX_IMPORT_FAILED: u32 = 105;
+}
+
 /// Message type IDs (client -> server).
 pub mod client_msg {
     pub const CREATE_WINDOW: u32 = 1;
@@ -65,6 +101,12 @@ pub mod client_msg {
     pub const SET_WINDOW_MENU_TITLES: u32 = 29; // Update menu titles for a window
     pub const ACTIVATE_MENU_ITEM: u32 = 30; // Request menu item activation for a window
     pub const GET_OUTPUT_SCALE: u32 = 31; // Get output scale in milli-units (1000 = 1.0)
+
+    // Shared SGFX buffer API (32-37)
+    pub const GET_CAPABILITIES: u32 = 32;
+    pub const REGISTER_SGFX_BUFFER: u32 = 33;
+    pub const COMMIT_SGFX_FRAME: u32 = 34;
+    pub const DESTROY_SGFX_BUFFER: u32 = 35;
 
     // Text input client API messages (200-219)
     pub const TEXT_INPUT_CREATE: u32 = 200;
@@ -115,6 +157,14 @@ pub mod server_msg {
     pub const SCREEN_SIZE_CHANGED: u32 = 22; // Broadcast when the display size changes
     pub const OUTPUT_SCALE: u32 = 23; // Response to GET_OUTPUT_SCALE
     pub const OUTPUT_SCALE_CHANGED: u32 = 24; // Broadcast when output scale changes
+
+    // Shared SGFX buffer API (25-29)
+    pub const CAPABILITIES: u32 = 25;
+    pub const SGFX_BUFFER_REGISTERED: u32 = 26;
+    pub const SGFX_FRAME_REJECTED: u32 = 27;
+    pub const SGFX_BUFFER_RELEASED: u32 = 28;
+    pub const SGFX_BACKEND_LOST: u32 = 29;
+    pub const SGFX_BUFFER_DESTROYED: u32 = 30;
 
     // Text input client events (200-219)
     pub const TEXT_INPUT_CREATED: u32 = 200;
@@ -265,6 +315,42 @@ pub mod window_types {
     pub const DESKTOP: u32 = 3;
     /// Input-method-owned popup surface anchored to the active text input.
     pub const IME_POPUP: u32 = 4;
+}
+
+/// One window-local damage rectangle in an SGFX frame commit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SgfxDamageRect {
+    /// Horizontal origin in window-local pixels.
+    pub x: i32,
+    /// Vertical origin in window-local pixels.
+    pub y: i32,
+    /// Damage width in pixels.
+    pub width: u32,
+    /// Damage height in pixels.
+    pub height: u32,
+}
+
+impl SgfxDamageRect {
+    /// Create a window-local SGFX damage rectangle.
+    ///
+    /// # Arguments
+    ///
+    /// * `x` - Horizontal origin in pixels.
+    /// * `y` - Vertical origin in pixels.
+    /// * `width` - Width in pixels.
+    /// * `height` - Height in pixels.
+    ///
+    /// # Returns
+    ///
+    /// A damage rectangle with the supplied coordinates.
+    pub const fn new(x: i32, y: i32, width: u32, height: u32) -> Self {
+        Self {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
 }
 
 /// Message header.
@@ -734,6 +820,37 @@ pub enum ClientMessageRef<'a> {
     /// Get list of all windows
     GetWindowList {},
 
+    /// Query protocol version and optional server capabilities.
+    GetCapabilities {},
+
+    /// Register one transferred SGFX image capability for a window.
+    RegisterSgfxBuffer {
+        window_id: u32,
+        buffer_id: u32,
+        generation: u32,
+        compositor_epoch: u32,
+        width: u32,
+        height: u32,
+    },
+
+    /// Atomically commit a registered SGFX buffer and its damage rectangles.
+    CommitSgfxFrame {
+        window_id: u32,
+        buffer_id: u32,
+        generation: u32,
+        compositor_epoch: u32,
+        commit_serial: u64,
+        damage_rects: &'a [u8],
+    },
+
+    /// Remove a registered SGFX buffer after it has been released.
+    DestroySgfxBuffer {
+        window_id: u32,
+        buffer_id: u32,
+        generation: u32,
+        compositor_epoch: u32,
+    },
+
     /// Launch an application or focus an existing window
     ///
     /// If a window with the given app_id already exists, focus it.
@@ -1015,6 +1132,46 @@ pub enum ServerMessage {
     /// Scale is encoded in milli-units: `1000` means 1.0, `2000` means 2.0.
     OutputScaleChanged {
         scale_milli: u32,
+    },
+    /// Response containing the negotiated SWS version and capability mask.
+    Capabilities {
+        protocol_version: u32,
+        capabilities: u64,
+        compositor_epoch: u32,
+        compositor_backend: u32,
+    },
+    /// Confirmation that a transferred SGFX image was imported.
+    SgfxBufferRegistered {
+        window_id: u32,
+        buffer_id: u32,
+        generation: u32,
+        compositor_epoch: u32,
+    },
+    /// Asynchronous notification that one SGFX frame commit was rejected.
+    SgfxFrameRejected {
+        window_id: u32,
+        buffer_id: u32,
+        generation: u32,
+        compositor_epoch: u32,
+        commit_serial: u64,
+        code: u32,
+    },
+    /// Asynchronous notification that SWS no longer retains a buffer.
+    SgfxBufferReleased {
+        window_id: u32,
+        buffer_id: u32,
+        generation: u32,
+        compositor_epoch: u32,
+        commit_serial: u64,
+    },
+    /// Asynchronous notification that shared SGFX composition is unavailable.
+    SgfxBackendLost { compositor_epoch: u32 },
+    /// Confirmation that SWS dropped a registered SGFX image capability.
+    SgfxBufferDestroyed {
+        window_id: u32,
+        buffer_id: u32,
+        generation: u32,
+        compositor_epoch: u32,
     },
     /// Response to GET_WINDOW_LIST request
     /// Contains a serialized list of windows
@@ -1476,6 +1633,62 @@ pub fn parse_client_message<'a>(
             }
             Ok(ClientMessageRef::GetWindowList {})
         }
+        client_msg::GET_CAPABILITIES => {
+            if !payload.is_empty() {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            Ok(ClientMessageRef::GetCapabilities {})
+        }
+        client_msg::REGISTER_SGFX_BUFFER => {
+            if payload.len() != 24 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            Ok(ClientMessageRef::RegisterSgfxBuffer {
+                window_id: read_u32(payload, 0)?,
+                buffer_id: read_u32(payload, 4)?,
+                generation: read_u32(payload, 8)?,
+                compositor_epoch: read_u32(payload, 12)?,
+                width: read_u32(payload, 16)?,
+                height: read_u32(payload, 20)?,
+            })
+        }
+        client_msg::COMMIT_SGFX_FRAME => {
+            if payload.len() < 28 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            let commit_serial = read_u64(payload, 16)?;
+            let damage_count = read_u32(payload, 24)? as usize;
+            let expected_len = damage_count
+                .checked_mul(16)
+                .and_then(|bytes| bytes.checked_add(28))
+                .ok_or(ProtocolError::MalformedPayload)?;
+            if commit_serial == 0
+                || damage_count == 0
+                || damage_count > SGFX_MAX_DAMAGE_RECTS
+                || payload.len() != expected_len
+            {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            Ok(ClientMessageRef::CommitSgfxFrame {
+                window_id: read_u32(payload, 0)?,
+                buffer_id: read_u32(payload, 4)?,
+                generation: read_u32(payload, 8)?,
+                compositor_epoch: read_u32(payload, 12)?,
+                commit_serial,
+                damage_rects: &payload[28..],
+            })
+        }
+        client_msg::DESTROY_SGFX_BUFFER => {
+            if payload.len() != 16 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            Ok(ClientMessageRef::DestroySgfxBuffer {
+                window_id: read_u32(payload, 0)?,
+                buffer_id: read_u32(payload, 4)?,
+                generation: read_u32(payload, 8)?,
+                compositor_epoch: read_u32(payload, 12)?,
+            })
+        }
         client_msg::LAUNCH_OR_FOCUS => {
             // Payload: app_id_len (u32) + app_id_bytes + exec_path_len (u32) + exec_path_bytes
             if payload.len() < 8 {
@@ -1832,6 +2045,18 @@ fn parse_ime_context_message(
     }
 }
 
+fn parse_sgfx_buffer_identity(payload: &[u8]) -> Result<(u32, u32, u32, u32), ProtocolError> {
+    if payload.len() != 16 {
+        return Err(ProtocolError::MalformedPayload);
+    }
+    Ok((
+        read_u32(payload, 0)?,
+        read_u32(payload, 4)?,
+        read_u32(payload, 8)?,
+        read_u32(payload, 12)?,
+    ))
+}
+
 /// Parse a server->client message from `(msg_type, payload)`.
 pub fn parse_server_message(msg_type: u32, payload: &[u8]) -> Result<ServerMessage, ProtocolError> {
     match msg_type {
@@ -2108,6 +2333,78 @@ pub fn parse_server_message(msg_type: u32, payload: &[u8]) -> Result<ServerMessa
             }
             let scale_milli = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
             Ok(ServerMessage::OutputScaleChanged { scale_milli })
+        }
+        server_msg::CAPABILITIES => {
+            if payload.len() != 20 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            Ok(ServerMessage::Capabilities {
+                protocol_version: read_u32(payload, 0)?,
+                capabilities: read_u64(payload, 4)?,
+                compositor_epoch: read_u32(payload, 12)?,
+                compositor_backend: read_u32(payload, 16)?,
+            })
+        }
+        server_msg::SGFX_BUFFER_REGISTERED => {
+            let (window_id, buffer_id, generation, compositor_epoch) =
+                parse_sgfx_buffer_identity(payload)?;
+            Ok(ServerMessage::SgfxBufferRegistered {
+                window_id,
+                buffer_id,
+                generation,
+                compositor_epoch,
+            })
+        }
+        server_msg::SGFX_FRAME_REJECTED => {
+            if payload.len() != 28 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            let commit_serial = read_u64(payload, 16)?;
+            if commit_serial == 0 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            Ok(ServerMessage::SgfxFrameRejected {
+                window_id: read_u32(payload, 0)?,
+                buffer_id: read_u32(payload, 4)?,
+                generation: read_u32(payload, 8)?,
+                compositor_epoch: read_u32(payload, 12)?,
+                commit_serial,
+                code: read_u32(payload, 24)?,
+            })
+        }
+        server_msg::SGFX_BUFFER_RELEASED => {
+            if payload.len() != 24 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            let commit_serial = read_u64(payload, 16)?;
+            if commit_serial == 0 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            Ok(ServerMessage::SgfxBufferReleased {
+                window_id: read_u32(payload, 0)?,
+                buffer_id: read_u32(payload, 4)?,
+                generation: read_u32(payload, 8)?,
+                compositor_epoch: read_u32(payload, 12)?,
+                commit_serial,
+            })
+        }
+        server_msg::SGFX_BACKEND_LOST => {
+            if payload.len() != 4 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            Ok(ServerMessage::SgfxBackendLost {
+                compositor_epoch: read_u32(payload, 0)?,
+            })
+        }
+        server_msg::SGFX_BUFFER_DESTROYED => {
+            let (window_id, buffer_id, generation, compositor_epoch) =
+                parse_sgfx_buffer_identity(payload)?;
+            Ok(ServerMessage::SgfxBufferDestroyed {
+                window_id,
+                buffer_id,
+                generation,
+                compositor_epoch,
+            })
         }
         server_msg::WINDOW_LIST => {
             // Window list payload is variable length, just validate it's not empty
@@ -3181,6 +3478,240 @@ pub fn payload_screen_size(width: u32, height: u32) -> [u8; 8] {
 /// Scale is encoded in milli-units: `1000` means 1.0, `2000` means 2.0.
 pub fn payload_output_scale(scale_milli: u32) -> [u8; 4] {
     scale_milli.to_le_bytes()
+}
+
+/// Build a shared SGFX buffer registration payload.
+///
+/// # Arguments
+///
+/// * `window_id` - Target SWS window.
+/// * `buffer_id` - Client-assigned buffer slot identifier.
+/// * `generation` - Window-buffer generation, incremented after resize.
+/// * `compositor_epoch` - SWS shared-image epoch returned by capability negotiation.
+/// * `width` - Image width in pixels.
+/// * `height` - Image height in pixels.
+///
+/// # Returns
+///
+/// Fixed-width registration payload carried in the same atomic socket record
+/// as exactly one GPU image capability.
+pub fn payload_register_sgfx_buffer(
+    window_id: u32,
+    buffer_id: u32,
+    generation: u32,
+    compositor_epoch: u32,
+    width: u32,
+    height: u32,
+) -> [u8; 24] {
+    let mut payload = [0u8; 24];
+    payload[0..4].copy_from_slice(&window_id.to_le_bytes());
+    payload[4..8].copy_from_slice(&buffer_id.to_le_bytes());
+    payload[8..12].copy_from_slice(&generation.to_le_bytes());
+    payload[12..16].copy_from_slice(&compositor_epoch.to_le_bytes());
+    payload[16..20].copy_from_slice(&width.to_le_bytes());
+    payload[20..24].copy_from_slice(&height.to_le_bytes());
+    payload
+}
+
+/// Build an SGFX buffer identity payload.
+///
+/// # Arguments
+///
+/// * `window_id` - Target SWS window.
+/// * `buffer_id` - Client-assigned buffer slot identifier.
+/// * `generation` - Window-buffer generation.
+/// * `compositor_epoch` - SWS shared-image epoch returned by capability negotiation.
+///
+/// # Returns
+///
+/// Fixed-width identity used by register, commit, destroy, reject, and release.
+pub fn payload_sgfx_buffer_identity(
+    window_id: u32,
+    buffer_id: u32,
+    generation: u32,
+    compositor_epoch: u32,
+) -> [u8; 16] {
+    let mut payload = [0u8; 16];
+    payload[0..4].copy_from_slice(&window_id.to_le_bytes());
+    payload[4..8].copy_from_slice(&buffer_id.to_le_bytes());
+    payload[8..12].copy_from_slice(&generation.to_le_bytes());
+    payload[12..16].copy_from_slice(&compositor_epoch.to_le_bytes());
+    payload
+}
+
+/// Build an atomic shared SGFX frame commit payload.
+///
+/// # Arguments
+///
+/// * `window_id` - Target SWS window.
+/// * `buffer_id` - Registered buffer slot identifier.
+/// * `generation` - Window-buffer generation.
+/// * `compositor_epoch` - Current SWS shared-image epoch.
+/// * `commit_serial` - Non-zero client-generated serial for this buffer use.
+/// * `damage_rects` - Non-empty bounded list of window-local damage rectangles.
+///
+/// # Returns
+///
+/// A complete commit payload, or [`ProtocolError::MalformedPayload`] when the
+/// damage list is empty or exceeds [`SGFX_MAX_DAMAGE_RECTS`].
+pub fn payload_commit_sgfx_frame(
+    window_id: u32,
+    buffer_id: u32,
+    generation: u32,
+    compositor_epoch: u32,
+    commit_serial: u64,
+    damage_rects: &[SgfxDamageRect],
+) -> Result<Vec<u8>, ProtocolError> {
+    if commit_serial == 0
+        || damage_rects.is_empty()
+        || damage_rects.len() > SGFX_MAX_DAMAGE_RECTS
+    {
+        return Err(ProtocolError::MalformedPayload);
+    }
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&window_id.to_le_bytes());
+    payload.extend_from_slice(&buffer_id.to_le_bytes());
+    payload.extend_from_slice(&generation.to_le_bytes());
+    payload.extend_from_slice(&compositor_epoch.to_le_bytes());
+    payload.extend_from_slice(&commit_serial.to_le_bytes());
+    payload.extend_from_slice(&(damage_rects.len() as u32).to_le_bytes());
+    for rect in damage_rects {
+        payload.extend_from_slice(&rect.x.to_le_bytes());
+        payload.extend_from_slice(&rect.y.to_le_bytes());
+        payload.extend_from_slice(&rect.width.to_le_bytes());
+        payload.extend_from_slice(&rect.height.to_le_bytes());
+    }
+    Ok(payload)
+}
+
+/// Build an asynchronous SGFX frame-rejection payload.
+///
+/// # Arguments
+///
+/// * `window_id` - Target SWS window.
+/// * `buffer_id` - Registered buffer slot identifier.
+/// * `generation` - Window-buffer generation.
+/// * `compositor_epoch` - SWS shared-image epoch.
+/// * `commit_serial` - Serial supplied by the rejected commit.
+/// * `code` - Stable protocol error code explaining the rejection.
+///
+/// # Returns
+///
+/// Fixed-width rejection payload that identifies one exact buffer use.
+pub fn payload_sgfx_frame_rejected(
+    window_id: u32,
+    buffer_id: u32,
+    generation: u32,
+    compositor_epoch: u32,
+    commit_serial: u64,
+    code: u32,
+) -> [u8; 28] {
+    let mut payload = [0u8; 28];
+    payload[0..4].copy_from_slice(&window_id.to_le_bytes());
+    payload[4..8].copy_from_slice(&buffer_id.to_le_bytes());
+    payload[8..12].copy_from_slice(&generation.to_le_bytes());
+    payload[12..16].copy_from_slice(&compositor_epoch.to_le_bytes());
+    payload[16..24].copy_from_slice(&commit_serial.to_le_bytes());
+    payload[24..28].copy_from_slice(&code.to_le_bytes());
+    payload
+}
+
+/// Build an asynchronous SGFX buffer-release payload.
+///
+/// # Arguments
+///
+/// * `window_id` - Target SWS window.
+/// * `buffer_id` - Registered buffer slot identifier.
+/// * `generation` - Window-buffer generation.
+/// * `compositor_epoch` - SWS shared-image epoch.
+/// * `commit_serial` - Serial of the buffer use that is no longer retained.
+///
+/// # Returns
+///
+/// Fixed-width release payload that identifies one exact buffer use.
+pub fn payload_sgfx_buffer_released(
+    window_id: u32,
+    buffer_id: u32,
+    generation: u32,
+    compositor_epoch: u32,
+    commit_serial: u64,
+) -> [u8; 24] {
+    let mut payload = [0u8; 24];
+    payload[0..4].copy_from_slice(&window_id.to_le_bytes());
+    payload[4..8].copy_from_slice(&buffer_id.to_le_bytes());
+    payload[8..12].copy_from_slice(&generation.to_le_bytes());
+    payload[12..16].copy_from_slice(&compositor_epoch.to_le_bytes());
+    payload[16..24].copy_from_slice(&commit_serial.to_le_bytes());
+    payload
+}
+
+/// Parse the packed rectangle suffix from an SGFX frame commit.
+///
+/// # Arguments
+///
+/// * `payload` - Packed 16-byte rectangle records after the commit prefix.
+///
+/// # Returns
+///
+/// Parsed rectangles, or [`ProtocolError::MalformedPayload`] for an empty,
+/// misaligned, or oversized list.
+pub fn parse_sgfx_damage_rects(payload: &[u8]) -> Result<Vec<SgfxDamageRect>, ProtocolError> {
+    if payload.is_empty()
+        || payload.len() % 16 != 0
+        || payload.len() / 16 > SGFX_MAX_DAMAGE_RECTS
+    {
+        return Err(ProtocolError::MalformedPayload);
+    }
+    let mut rects = Vec::new();
+    for offset in (0..payload.len()).step_by(16) {
+        rects.push(SgfxDamageRect {
+            x: read_i32(payload, offset)?,
+            y: read_i32(payload, offset + 4)?,
+            width: read_u32(payload, offset + 8)?,
+            height: read_u32(payload, offset + 12)?,
+        });
+    }
+    Ok(rects)
+}
+
+/// Build an SWS capability response payload.
+///
+/// # Arguments
+///
+/// * `protocol_version` - Negotiated SWS protocol version.
+/// * `capabilities` - Bitmask from [`capabilities`].
+/// * `compositor_epoch` - Current shared-image epoch.
+/// * `compositor_backend` - Active backend from [`compositor_backends`].
+///
+/// # Returns
+///
+/// Fixed-width capability response payload.
+pub fn payload_capabilities(
+    protocol_version: u32,
+    capabilities: u64,
+    compositor_epoch: u32,
+    compositor_backend: u32,
+) -> [u8; 20] {
+    let mut payload = [0u8; 20];
+    payload[0..4].copy_from_slice(&protocol_version.to_le_bytes());
+    payload[4..12].copy_from_slice(&capabilities.to_le_bytes());
+    payload[12..16].copy_from_slice(&compositor_epoch.to_le_bytes());
+    payload[16..20].copy_from_slice(&compositor_backend.to_le_bytes());
+    payload
+}
+
+/// Build an SGFX backend-loss notification payload.
+///
+/// # Arguments
+///
+/// * `compositor_epoch` - New minimum SWS shared-image epoch. All lower identities
+///   are invalid and clients must renegotiate before registering replacements.
+///
+/// # Returns
+///
+/// Fixed-width backend-loss payload.
+pub fn payload_sgfx_backend_lost(compositor_epoch: u32) -> [u8; 4] {
+    compositor_epoch.to_le_bytes()
 }
 
 /// Window list entry for WINDOW_LIST message

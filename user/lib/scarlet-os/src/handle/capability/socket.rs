@@ -71,6 +71,15 @@ pub type SocketObjectResult<T> = Result<T, SocketObjectError>;
 /// Errors that can occur during socket operations
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SocketObjectError {
+    /// The requested operation cannot consume the first queued segment yet
+    WouldBlock,
+    /// The supplied receive buffer cannot hold the complete record
+    ReceiveBufferTooSmall {
+        /// Exact number of bytes required for the queued record
+        required_len: usize,
+    },
+    /// The record exceeds the maximum supported local-socket record size
+    MessageTooLarge,
     /// Other system error
     SystemError(i32),
 }
@@ -79,6 +88,13 @@ impl SocketObjectError {
     fn from_syscall_result(result: usize) -> Result<usize, Self> {
         if result == usize::MAX {
             Err(SocketObjectError::SystemError(-1))
+        } else if result > isize::MAX as usize {
+            let errno = -(result as isize) as i32;
+            match errno {
+                11 => Err(SocketObjectError::WouldBlock),
+                90 => Err(SocketObjectError::MessageTooLarge),
+                _ => Err(SocketObjectError::SystemError(errno)),
+            }
         } else {
             Ok(result)
         }
@@ -254,13 +270,18 @@ impl<'a> SocketObject<'a> {
 
     /// Send a kernel object handle and data atomically through a socket
     ///
-    /// This method ensures that both the handle and data are available before
-    /// waking the peer, preventing race conditions in Wayland protocol.
+    /// The handle and bytes form one boundary-preserving record ordered with
+    /// normal byte writes and handle-only transfers on the socket.
     ///
     /// # Arguments
     ///
     /// * `object_handle` - The raw handle of the kernel object to send
     /// * `data` - The data to send with the handle
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` when the complete record is queued, or a socket error when the
+    /// peer queue cannot accept it.
     pub fn send_handle_and_data(
         &self,
         object_handle: RawHandle,
@@ -278,7 +299,8 @@ impl<'a> SocketObject<'a> {
 
     /// Receive a kernel object handle and data atomically through a socket
     ///
-    /// Returns both a handle and data in a single atomic operation.
+    /// Returns one complete handle-and-data record. If `data_out` is too small,
+    /// the error contains the required size and the record remains queued.
     ///
     /// # Arguments
     ///
@@ -294,14 +316,20 @@ impl<'a> SocketObject<'a> {
         handle_out: &mut RawHandle,
         data_out: &mut [u8],
     ) -> SocketObjectResult<usize> {
+        let mut required_len = 0usize;
         let result = syscall5(
             Syscall::SocketRecvHandleAndData,
             self.handle.as_raw() as usize,
             handle_out as *mut RawHandle as usize,
             data_out.as_mut_ptr() as usize,
             data_out.len(),
-            0, // reserved
+            &mut required_len as *mut usize as usize,
         );
-        SocketObjectError::from_syscall_result(result)
+        match SocketObjectError::from_syscall_result(result) {
+            Err(SocketObjectError::MessageTooLarge) => {
+                Err(SocketObjectError::ReceiveBufferTooSmall { required_len })
+            }
+            other => other,
+        }
     }
 }

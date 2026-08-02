@@ -6,11 +6,12 @@ use std::env;
 use std::handle::Handle;
 use std::handle::capability::memory_mapping::flags as mmap_flags;
 use std::ipc::{SharedMemory, permissions};
+use std::poll::{POLLERR, POLLHUP, POLLIN, POLLNVAL, POLLOUT, PollHandle, poll};
 use std::println;
 use std::socket::Socket;
 use std::string::String;
 use std::sync::Mutex;
-use std::thread::{self, sleep, yield_now};
+use std::thread::{self, yield_now};
 use std::vec::Vec;
 use sws_protocol as protocol;
 use sws_protocol::ClientMessageRef;
@@ -22,7 +23,10 @@ fn is_sws_debug_enabled() -> bool {
         return cached != 0;
     }
     let enabled = match env::var("SWS_LOG") {
-        Some(val) => matches!(val.as_str(), "debug" | "DEBUG" | "3"),
+        Some(val) => matches!(
+            val.as_str(),
+            "debug" | "DEBUG" | "3" | "trace" | "TRACE" | "4"
+        ),
         None => false,
     };
     LOG_CACHE.store(enabled as u8, Ordering::Relaxed);
@@ -171,8 +175,96 @@ static PENDING_IME_KEYS: Mutex<BTreeMap<u32, PendingImeKey>> = Mutex::new(BTreeM
 enum FrameIoError {
     WouldBlock,
     Disconnected,
+    Backpressure,
     Io,
     Protocol,
+}
+
+const MAX_CLIENT_OUTBOUND_BYTES: usize = 4 * 1024 * 1024;
+const MAX_CLIENT_WRITE_BYTES_PER_TICK: usize = 64 * 1024;
+const MAX_CLIENT_WRITE_CHUNK: usize = 16 * 1024;
+const CLIENT_POLL_TIMEOUT_NS: i64 = 8_000_000;
+
+struct PendingStreamFrame {
+    bytes: Vec<u8>,
+    offset: usize,
+}
+
+struct ClientStreamWriter {
+    frames: Vec<PendingStreamFrame>,
+    head: usize,
+    pending_bytes: usize,
+}
+
+impl ClientStreamWriter {
+    fn new() -> Self {
+        Self {
+            frames: Vec::new(),
+            head: 0,
+            pending_bytes: 0,
+        }
+    }
+
+    fn has_pending(&self) -> bool {
+        self.head < self.frames.len()
+    }
+
+    fn enqueue(
+        &mut self,
+        msg_type: u32,
+        flags: u8,
+        request_id: u8,
+        payload: &[u8],
+    ) -> Result<(), FrameIoError> {
+        if payload.len() > protocol::MAX_PAYLOAD_SIZE {
+            return Err(FrameIoError::Protocol);
+        }
+        let bytes = protocol::encode_routed_frame(msg_type, flags, request_id, payload);
+        if self.pending_bytes.saturating_add(bytes.len()) > MAX_CLIENT_OUTBOUND_BYTES {
+            return Err(FrameIoError::Backpressure);
+        }
+        self.pending_bytes += bytes.len();
+        self.frames.push(PendingStreamFrame { bytes, offset: 0 });
+        Ok(())
+    }
+
+    fn flush(&mut self, socket: &mut Socket) -> Result<bool, FrameIoError> {
+        use std::io::Write;
+
+        let mut written_this_tick = 0usize;
+        while written_this_tick < MAX_CLIENT_WRITE_BYTES_PER_TICK {
+            let Some(frame) = self.frames.get_mut(self.head) else {
+                break;
+            };
+            let remaining_budget = MAX_CLIENT_WRITE_BYTES_PER_TICK - written_this_tick;
+            let chunk_len = remaining_budget
+                .min(MAX_CLIENT_WRITE_CHUNK)
+                .min(frame.bytes.len().saturating_sub(frame.offset));
+            if chunk_len == 0 {
+                self.head += 1;
+                continue;
+            }
+            let chunk_end = frame.offset + chunk_len;
+            match socket.write(&frame.bytes[frame.offset..chunk_end]) {
+                Ok(0) => return Err(FrameIoError::Disconnected),
+                Ok(written) => {
+                    frame.offset += written;
+                    written_this_tick += written;
+                    self.pending_bytes = self.pending_bytes.saturating_sub(written);
+                    if frame.offset == frame.bytes.len() {
+                        self.head += 1;
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(_) => return Err(FrameIoError::Io),
+            }
+        }
+        if self.head > 0 && self.head.saturating_mul(2) >= self.frames.len() {
+            self.frames.drain(..self.head);
+            self.head = 0;
+        }
+        Ok(written_this_tick != 0)
+    }
 }
 
 /// Non-blocking framed-message reader.
@@ -277,39 +369,72 @@ impl FrameReader {
     }
 }
 
-fn write_all(socket: &mut Socket, buf: &[u8]) -> Result<(), FrameIoError> {
-    use std::io::Write;
-
-    let mut written = 0;
-    while written < buf.len() {
-        match socket.write(&buf[written..]) {
-            Ok(0) => return Err(FrameIoError::Disconnected),
-            Ok(n) => written += n,
-            Err(e) => {
-                if e.kind() == std::io::ErrorKind::WouldBlock {
-                    // Non-blocking socket; give the scheduler a chance and retry.
-                    sleep(core::time::Duration::from_millis(1));
-                    continue;
-                }
-                return Err(FrameIoError::Io);
-            }
-        }
+fn decode_atomic_handle_frame(
+    bytes: &[u8],
+) -> Result<(protocol::MessageHeader, Vec<u8>), FrameIoError> {
+    if bytes.len() < protocol::MessageHeader::SIZE {
+        return Err(FrameIoError::Protocol);
     }
-    Ok(())
+    let mut encoded_header = [0u8; protocol::MessageHeader::SIZE];
+    encoded_header.copy_from_slice(&bytes[..protocol::MessageHeader::SIZE]);
+    let header = protocol::MessageHeader::from_le_bytes(encoded_header);
+    let payload_len = header.payload_size as usize;
+    if payload_len > protocol::MAX_PAYLOAD_SIZE
+        || bytes.len() != protocol::MessageHeader::SIZE + payload_len
+    {
+        return Err(FrameIoError::Protocol);
+    }
+    Ok((header, bytes[protocol::MessageHeader::SIZE..].to_vec()))
 }
 
-fn write_frame(socket: &mut Socket, msg_type: u32, payload: &[u8]) -> Result<(), FrameIoError> {
-    write_frame_routed(socket, msg_type, 0, 0, payload)
+fn poll_atomic_handle_frame(
+    socket: &Socket,
+    frame: &mut Vec<u8>,
+) -> Result<Option<(protocol::MessageHeader, Vec<u8>, Handle)>, FrameIoError> {
+    let mut probe = [];
+    let required_len = match socket.recv_handle_and_data(&mut probe) {
+        Err(std::socket::SocketError::ReceiveBufferTooSmall { required_len }) => required_len,
+        Err(std::socket::SocketError::WouldBlock) => return Ok(None),
+        Ok(_) => return Err(FrameIoError::Protocol),
+        Err(_) => return Err(FrameIoError::Io),
+    };
+
+    let maximum_len = protocol::MessageHeader::SIZE + protocol::MAX_PAYLOAD_SIZE;
+    if !(protocol::MessageHeader::SIZE..=maximum_len).contains(&required_len) {
+        return Err(FrameIoError::Protocol);
+    }
+    frame.clear();
+    frame
+        .try_reserve_exact(required_len)
+        .map_err(|_| FrameIoError::Io)?;
+    frame.resize(required_len, 0);
+
+    let (handle, length) = socket
+        .recv_handle_and_data(frame)
+        .map_err(|_| FrameIoError::Io)?;
+    if length != required_len {
+        return Err(FrameIoError::Protocol);
+    }
+    let (header, payload) = decode_atomic_handle_frame(frame)?;
+    Ok(Some((header, payload, handle)))
+}
+
+fn write_frame(
+    writer: &mut ClientStreamWriter,
+    msg_type: u32,
+    payload: &[u8],
+) -> Result<(), FrameIoError> {
+    write_frame_routed(writer, msg_type, 0, 0, payload)
 }
 
 fn write_frame_response(
-    socket: &mut Socket,
+    writer: &mut ClientStreamWriter,
     msg_type: u32,
     request_id: u8,
     payload: &[u8],
 ) -> Result<(), FrameIoError> {
     write_frame_routed(
-        socket,
+        writer,
         msg_type,
         protocol::MessageHeader::FLAG_IS_RESPONSE,
         request_id,
@@ -318,24 +443,68 @@ fn write_frame_response(
 }
 
 fn write_frame_routed(
-    socket: &mut Socket,
+    writer: &mut ClientStreamWriter,
     msg_type: u32,
     flags: u8,
     request_id: u8,
     payload: &[u8],
 ) -> Result<(), FrameIoError> {
-    use std::io::Write;
+    writer.enqueue(msg_type, flags, request_id, payload)
+}
 
-    // Write header + payload directly to avoid allocating a temporary Vec.
-    let header =
-        protocol::MessageHeader::with_routing(msg_type, flags, request_id, payload.len() as u32);
-    let header_bytes = header.to_le_bytes();
-    write_all(socket, &header_bytes)?;
-    if !payload.is_empty() {
-        write_all(socket, payload)?;
+fn write_protocol_error(
+    writer: &mut ClientStreamWriter,
+    request_id: u8,
+    code: u32,
+) -> Result<(), FrameIoError> {
+    let payload = protocol::payload_error(code);
+    if request_id == 0 {
+        write_frame(writer, protocol::server_msg::ERROR, &payload)
+    } else {
+        write_frame_response(writer, protocol::server_msg::ERROR, request_id, &payload)
     }
-    socket.flush().map_err(|_| FrameIoError::Io)?;
-    Ok(())
+}
+
+fn write_sgfx_frame_rejected(
+    writer: &mut ClientStreamWriter,
+    window_id: u32,
+    buffer_id: u32,
+    generation: u32,
+    compositor_epoch: u32,
+    commit_serial: u64,
+    code: u32,
+) -> Result<(), FrameIoError> {
+    let payload = protocol::payload_sgfx_frame_rejected(
+        window_id,
+        buffer_id,
+        generation,
+        compositor_epoch,
+        commit_serial,
+        code,
+    );
+    write_frame(
+        writer,
+        protocol::server_msg::SGFX_FRAME_REJECTED,
+        &payload,
+    )
+}
+
+fn write_handle_frame_response(
+    socket: &Socket,
+    handle: &Handle,
+    msg_type: u32,
+    request_id: u8,
+    payload: &[u8],
+) -> Result<(), FrameIoError> {
+    let frame = protocol::encode_routed_frame(
+        msg_type,
+        protocol::MessageHeader::FLAG_IS_RESPONSE,
+        request_id,
+        payload,
+    );
+    socket
+        .send_handle_and_data(handle, &frame)
+        .map_err(|_| FrameIoError::Io)
 }
 
 /// Input event to be sent to a client
@@ -392,6 +561,64 @@ fn push_input_event_coalesced(events: &mut Vec<PendingInputEvent>, event: Pendin
 /// Wake pipe used by worker threads to interrupt the compositor event loop.
 static COMPOSITOR_WAKE_WRITE: Mutex<Option<Handle>> = Mutex::new(None);
 static COMPOSITOR_WAKE_PENDING: AtomicBool = AtomicBool::new(false);
+static CLIENT_WAKE_WRITES: Mutex<BTreeMap<usize, Handle>> = Mutex::new(BTreeMap::new());
+static WINDOW_OWNERS: Mutex<BTreeMap<u32, usize>> = Mutex::new(BTreeMap::new());
+
+/// Whether the selected SWS compositor backend currently accepts shared SGFX images.
+static SGFX_SHARED_IMAGES_AVAILABLE: AtomicBool = AtomicBool::new(false);
+static COMPOSITOR_EPOCH: AtomicU32 = AtomicU32::new(1);
+
+/// Publish shared-SGFX availability before accepting client connections.
+///
+/// # Arguments
+///
+/// * `available` - Whether the active compositor can import shared SGFX images.
+///
+/// # Returns
+///
+/// This function returns no value.
+pub fn set_sgfx_shared_images_available(available: bool) {
+    SGFX_SHARED_IMAGES_AVAILABLE.store(available, Ordering::Release);
+}
+
+fn sws_capabilities() -> u64 {
+    if SGFX_SHARED_IMAGES_AVAILABLE.load(Ordering::Acquire) {
+        protocol::capabilities::SGFX_SHARED_IMAGE
+    } else {
+        0
+    }
+}
+
+fn compositor_epoch() -> u32 {
+    COMPOSITOR_EPOCH.load(Ordering::Acquire)
+}
+
+fn compositor_backend_id() -> u32 {
+    if SGFX_SHARED_IMAGES_AVAILABLE.load(Ordering::Acquire) {
+        protocol::compositor_backends::SGFX
+    } else {
+        protocol::compositor_backends::CPU
+    }
+}
+
+/// Disable shared SGFX registration and notify all connected clients.
+///
+/// # Returns
+///
+/// This function returns no value. Repeated calls after the backend has already
+/// been disabled do not advance the compositor epoch again.
+pub fn notify_sgfx_backend_lost() {
+    if !SGFX_SHARED_IMAGES_AVAILABLE.swap(false, Ordering::AcqRel) {
+        return;
+    }
+    let mut next_epoch = COMPOSITOR_EPOCH.fetch_add(1, Ordering::AcqRel).wrapping_add(1);
+    if next_epoch == 0 {
+        COMPOSITOR_EPOCH.store(1, Ordering::Release);
+        next_epoch = 1;
+    }
+    let payload = protocol::payload_sgfx_backend_lost(next_epoch).to_vec();
+    broadcast_message_to_all_clients(protocol::server_msg::SGFX_BACKEND_LOST, payload);
+}
 
 /// Install the compositor wake pipe write handle.
 ///
@@ -405,10 +632,12 @@ pub fn set_compositor_wake_handle(write_handle: Handle) {
 
 /// Wake the compositor if it is sleeping on the wake pipe.
 pub fn wake_compositor() {
+    super::trace::wake_call();
     if COMPOSITOR_WAKE_PENDING
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
         .is_err()
     {
+        super::trace::wake_coalesced();
         return;
     }
 
@@ -431,6 +660,24 @@ pub fn wake_compositor() {
 /// Mark the currently pending compositor wake as consumed.
 pub fn consume_compositor_wake() {
     COMPOSITOR_WAKE_PENDING.store(false, Ordering::Release);
+}
+
+fn wake_client(client_id: usize) {
+    let wakes = CLIENT_WAKE_WRITES.lock();
+    let Some(handle) = wakes.get(&client_id) else {
+        return;
+    };
+    let Ok(stream) = handle.as_stream() else {
+        return;
+    };
+    let _ = stream.write(&[1]);
+}
+
+fn wake_window_owner(window_id: u32) {
+    let client_id = WINDOW_OWNERS.lock().get(&window_id).copied();
+    if let Some(client_id) = client_id {
+        wake_client(client_id);
+    }
 }
 
 /// Global event queue for IPC events
@@ -549,7 +796,9 @@ pub fn has_pending_ipc_events() -> bool {
 }
 
 /// Register a window for input event routing
-fn register_window(window_id: u32, _client_id: usize) {
+fn register_window(window_id: u32, client_id: usize) {
+    WINDOW_OWNERS.lock().insert(window_id, client_id);
+
     {
         let mut pending = PENDING_INPUT_EVENTS.lock();
         pending.entry(window_id).or_insert_with(Vec::new);
@@ -563,6 +812,8 @@ fn register_window(window_id: u32, _client_id: usize) {
 
 /// Unregister a window
 fn unregister_window(window_id: u32) {
+    WINDOW_OWNERS.lock().remove(&window_id);
+
     {
         let mut pending = PENDING_INPUT_EVENTS.lock();
         pending.remove(&window_id);
@@ -585,6 +836,7 @@ fn cleanup_window_state(window_id: u32) {
 pub fn send_input_to_window(window_id: u32, time: u64, type_: u16, code: u16, value: i32) {
     let mut pending = PENDING_INPUT_EVENTS.lock();
     let events = pending.entry(window_id).or_insert_with(Vec::new);
+    let should_wake = events.is_empty();
     push_input_event_coalesced(
         events,
         PendingInputEvent {
@@ -594,6 +846,10 @@ pub fn send_input_to_window(window_id: u32, time: u64, type_: u16, code: u16, va
             value,
         },
     );
+    drop(pending);
+    if should_wake {
+        wake_window_owner(window_id);
+    }
 }
 
 /// Pending extension input events: BTreeMap from (extension_id, external_client_id) to events
@@ -653,27 +909,24 @@ fn cleanup_extension_input_events(extension_id: u32, external_client_id: u32) {
 /// Queue a server->client protocol message for a specific window.
 pub fn send_message_to_window(window_id: u32, msg_type: u32, payload: Vec<u8>) {
     let mut pending = PENDING_SERVER_FRAMES.lock();
-    match pending.get_mut(&window_id) {
-        Some(frames) => frames.push(PendingServerFrame {
-            msg_type,
-            flags: 0,
-            request_id: 0,
-            payload,
-        }),
-        None => {
-            println!(
-                "[IpcServer] Warning: server message queued for unregistered window {} (msg_type={}); creating queue",
-                window_id, msg_type
-            );
-            let mut frames = Vec::new();
-            frames.push(PendingServerFrame {
-                msg_type,
-                flags: 0,
-                request_id: 0,
-                payload,
-            });
-            pending.insert(window_id, frames);
-        }
+    let was_registered = pending.contains_key(&window_id);
+    let frames = pending.entry(window_id).or_insert_with(Vec::new);
+    let should_wake = frames.is_empty();
+    if !was_registered {
+        println!(
+            "[IpcServer] Warning: server message queued for unregistered window {} (msg_type={}); creating queue",
+            window_id, msg_type
+        );
+    }
+    frames.push(PendingServerFrame {
+        msg_type,
+        flags: 0,
+        request_id: 0,
+        payload,
+    });
+    drop(pending);
+    if should_wake {
+        wake_window_owner(window_id);
     }
 }
 
@@ -701,29 +954,17 @@ fn send_message_to_client_routed(
     payload: Vec<u8>,
 ) {
     let mut pending = PENDING_CLIENT_RESPONSES.lock();
-    match pending.get_mut(&client_id) {
-        Some(frames) => frames.push(PendingServerFrame {
-            msg_type,
-            flags,
-            request_id,
-            payload,
-        }),
-        None => {
-            println!(
-                "[IpcServer] Sending message to client {} (msg_type={}, payload_len={})",
-                client_id,
-                msg_type,
-                payload.len()
-            );
-            let mut frames = Vec::new();
-            frames.push(PendingServerFrame {
-                msg_type,
-                flags,
-                request_id,
-                payload,
-            });
-            pending.insert(client_id, frames);
-        }
+    let frames = pending.entry(client_id).or_insert_with(Vec::new);
+    let should_wake = frames.is_empty();
+    frames.push(PendingServerFrame {
+        msg_type,
+        flags,
+        request_id,
+        payload,
+    });
+    drop(pending);
+    if should_wake {
+        wake_client(client_id);
     }
 }
 
@@ -1489,11 +1730,13 @@ fn pop_pending_client_responses(client_id: usize) -> Vec<PendingServerFrame> {
             Vec::new()
         } else {
             let frames = core::mem::take(frames);
-            println!(
-                "[IpcServer] Popping {} pending responses for client {}",
-                frames.len(),
-                client_id
-            );
+            if is_sws_debug_enabled() {
+                println!(
+                    "[IpcServer] Popping {} pending responses for client {}",
+                    frames.len(),
+                    client_id
+                );
+            }
             frames
         }
     } else {
@@ -1632,9 +1875,23 @@ fn accept_thread_main(server_socket: Socket) {
                     );
                 }
 
+                let client_wake = match std::task::pipe() {
+                    Ok((wake_read, wake_write)) => {
+                        CLIENT_WAKE_WRITES.lock().insert(client_id, wake_write);
+                        Some(wake_read)
+                    }
+                    Err(_) => {
+                        println!(
+                            "[AcceptThread] Failed to create wake pipe for client {}",
+                            client_id
+                        );
+                        None
+                    }
+                };
+
                 // Spawn client handler thread
                 thread::spawn(move || {
-                    client_thread_main(client_id, client_socket);
+                    client_thread_main(client_id, client_socket, client_wake);
                 });
             }
             Err(std::socket::SocketError::WouldBlock) => {
@@ -1652,7 +1909,7 @@ fn accept_thread_main(server_socket: Socket) {
 }
 
 /// Client thread main function
-fn client_thread_main(client_id: usize, mut socket: Socket) {
+fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Handle>) {
     println!(
         "[ClientThread {}] Started (socket handle: {})",
         client_id,
@@ -1691,30 +1948,48 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
     let mut loop_count: u64 = 0;
 
     let mut frame_reader = FrameReader::new();
-    let mut idle_backoff_ms = 1u64;
-
+    let mut atomic_frame = Vec::new();
+    let mut stream_writer = ClientStreamWriter::new();
     println!("[ClientThread {}] Entering main loop", client_id);
 
     'main: loop {
+        super::trace::ipc_client_loop();
         loop_count += 1;
         let _should_log = loop_count % 100 == 0; // Log every 100 iterations (more frequent)
 
+        let mut has_events = match stream_writer.flush(&mut socket) {
+            Ok(progressed) => {
+                if progressed {
+                    super::trace::ipc_flush_progress();
+                }
+                progressed
+            }
+            Err(error) => {
+                println!(
+                    "[ClientThread {}] Failed to flush queued output: {:?}",
+                    client_id, error
+                );
+                break;
+            }
+        };
+
         // Send any pending input events for this client's windows
-        let mut has_events = false;
         let mut _total_events = 0;
 
         // First, check for pending responses addressed directly to this client
         // (for clients that don't have windows, like stemd)
         let client_responses = pop_pending_client_responses(client_id);
         for frame in client_responses {
-            println!(
-                "[ClientThread {}] Sending client response (msg_type={}, payload_len={})",
-                client_id,
-                frame.msg_type,
-                frame.payload.len()
-            );
+            if is_sws_debug_enabled() {
+                println!(
+                    "[ClientThread {}] Queueing client response (msg_type={}, payload_len={})",
+                    client_id,
+                    frame.msg_type,
+                    frame.payload.len()
+                );
+            }
             if let Err(e) = write_frame_routed(
-                &mut socket,
+                &mut stream_writer,
                 frame.msg_type,
                 frame.flags,
                 frame.request_id,
@@ -1734,7 +2009,7 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
             let frames = pop_pending_server_frames(window_id);
             for frame in frames {
                 if let Err(e) = write_frame_routed(
-                    &mut socket,
+                    &mut stream_writer,
                     frame.msg_type,
                     frame.flags,
                     frame.request_id,
@@ -1766,7 +2041,7 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
                                 event.value,
                             );
                             if let Err(e) = write_frame(
-                                &mut socket,
+                                &mut stream_writer,
                                 protocol::server_msg::EXTENSION_INPUT_EVENT,
                                 &payload,
                             ) {
@@ -1800,8 +2075,11 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
                             event.code,
                             event.value,
                         );
-                        if let Err(e) =
-                            write_frame(&mut socket, protocol::server_msg::INPUT_EVENT, &payload)
+                        if let Err(e) = write_frame(
+                            &mut stream_writer,
+                            protocol::server_msg::INPUT_EVENT,
+                            &payload,
+                        )
                         {
                             println!(
                                 "[ClientThread {}] Failed to send input event to window {}: {:?}",
@@ -1819,6 +2097,22 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
             }
         }
 
+        match stream_writer.flush(&mut socket) {
+            Ok(progressed) => {
+                if progressed {
+                    super::trace::ipc_flush_progress();
+                }
+                has_events |= progressed;
+            }
+            Err(error) => {
+                println!(
+                    "[ClientThread {}] Failed to flush queued output: {:?}",
+                    client_id, error
+                );
+                break;
+            }
+        }
+
         // // Debug: log event queue status periodically
         // if should_log && !managed_windows.is_empty() {
         //     println!(
@@ -1829,13 +2123,6 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
         //         total_events
         //     );
         // }
-
-        // If we sent events, loop back immediately to check for more
-        // This ensures rapid delivery during input bursts
-        if has_events {
-            idle_backoff_ms = 1;
-            continue;
-        }
 
         // // Always log before first read attempt or periodically
         // if loop_count <= 5 || loop_count % 100 == 0 {
@@ -1848,33 +2135,108 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
         //     );
         // }
 
-        let (header, payload) = match frame_reader.poll(&mut socket) {
-            Ok(Some(v)) => {
-                idle_backoff_ms = 1;
-                // println!(
-                //     "[ClientThread {}] Loop #{}: read_frame SUCCESS (msg_type={})",
-                //     client_id, loop_count, v.0
-                // );
-                v
-            }
-            Ok(None) => {
-                // No complete frame available yet; keep looping so we can deliver input events.
-                // Back off to avoid a tight busy loop when idle.
-                sleep(core::time::Duration::from_millis(idle_backoff_ms));
-                idle_backoff_ms = (idle_backoff_ms * 2).min(8);
-                continue;
-            }
-            Err(FrameIoError::Disconnected) => {
-                println!("[ClientThread {}] Client disconnected", client_id);
+        let atomic_record = match poll_atomic_handle_frame(&socket, &mut atomic_frame) {
+            Ok(record) => record,
+            Err(FrameIoError::Protocol) => {
+                println!("[ClientThread {}] Invalid atomic handle frame", client_id);
                 break;
             }
-            Err(e) => {
-                println!("[ClientThread {}] Failed to read frame: {:?}", client_id, e);
+            Err(error) => {
+                println!(
+                    "[ClientThread {}] Failed to receive atomic handle frame: {:?}",
+                    client_id, error
+                );
                 break;
             }
         };
 
+        let (header, payload, received_handle) = match atomic_record {
+            Some((header, payload, handle)) => (header, payload, Some(handle)),
+            None => match frame_reader.poll(&mut socket) {
+                Ok(Some((header, payload))) => (header, payload, None),
+                Ok(None) => {
+                    if has_events && !stream_writer.has_pending() {
+                        continue;
+                    }
+                    let socket_interest = POLLIN
+                        | if stream_writer.has_pending() {
+                            POLLOUT
+                        } else {
+                            0
+                        };
+                    let mut handles = match wake_read.as_ref() {
+                        Some(wake) => [
+                            PollHandle::new(socket.as_raw() as u32, socket_interest),
+                            PollHandle::new(wake.as_raw() as u32, POLLIN),
+                        ],
+                        None => [
+                            PollHandle::new(socket.as_raw() as u32, socket_interest),
+                            PollHandle::new(socket.as_raw() as u32, 0),
+                        ],
+                    };
+                    super::trace::ipc_poll();
+                    let ready = poll(&mut handles, CLIENT_POLL_TIMEOUT_NS).unwrap_or(0);
+                    if ready > 0 {
+                        super::trace::ipc_poll_ready();
+                    }
+                    let socket_revents = handles[0].revents;
+                    let wake_revents = handles[1].revents;
+                    let fatal_mask = POLLERR | POLLHUP | POLLNVAL;
+                    super::trace::ipc_poll_result(
+                        ready,
+                        socket_revents,
+                        wake_revents,
+                        fatal_mask,
+                    );
+                    if (socket_revents & fatal_mask) != 0 {
+                        println!(
+                            "[ClientThread {}] Socket poll failed: revents=0x{:x}",
+                            client_id, socket_revents
+                        );
+                        break;
+                    }
+                    if (wake_revents & fatal_mask) != 0 {
+                        println!(
+                            "[ClientThread {}] Wake pipe poll failed: revents=0x{:x}",
+                            client_id, wake_revents
+                        );
+                        break;
+                    }
+                    if let Some(wake) = wake_read.as_ref()
+                        && (handles[1].revents & POLLIN) != 0
+                        && let Ok(stream) = wake.as_stream()
+                    {
+                        let mut byte = [0u8; 1];
+                        let _ = stream.read(&mut byte);
+                    }
+                    continue;
+                }
+                Err(FrameIoError::Disconnected) => {
+                    println!("[ClientThread {}] Client disconnected", client_id);
+                    break;
+                }
+                Err(e) => {
+                    println!("[ClientThread {}] Failed to read frame: {:?}", client_id, e);
+                    break;
+                }
+            },
+        };
+
         let request_id = header.request_id;
+        super::trace::ipc_frame();
+        let handle_required = matches!(
+            header.msg_type_u32(),
+            protocol::client_msg::REGISTER_SGFX_BUFFER
+                | protocol::client_msg::EXTENSION_ATTACH_BUFFER
+        );
+        if handle_required != received_handle.is_some() {
+            let _ = write_protocol_error(
+                &mut stream_writer,
+                request_id,
+                protocol::error_codes::INVALID_SGFX_BUFFER,
+            );
+            continue;
+        }
 
         match protocol::parse_client_message(header.msg_type_u32(), &payload) {
             Ok(ClientMessageRef::CreateWindow {
@@ -1995,22 +2357,20 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
 
                         window_resizable.insert(window_id, resizable);
 
-                        // Reply to client with window created message
-                        send_window_created(&mut socket, request_id, window_id, buffer_size);
-
-                        // Send SHM handle out-of-band
-                        println!(
-                            "[ClientThread {}] Sending SHM handle for window {}",
-                            client_id, window_id
-                        );
-                        if let Err(e) = socket.send_handle(shm.as_handle()) {
+                        let payload = protocol::payload_window_created(window_id, buffer_size);
+                        if let Err(e) = write_handle_frame_response(
+                            &socket,
+                            shm.as_handle(),
+                            protocol::server_msg::WINDOW_CREATED,
+                            request_id,
+                            &payload,
+                        ) {
                             println!(
-                                "[ClientThread {}] Failed to send SHM handle: {:?}",
+                                "[ClientThread {}] Failed to send atomic WINDOW_CREATED: {:?}",
                                 client_id, e
                             );
                             continue;
                         }
-                        println!("[ClientThread {}] SHM handle sent successfully", client_id);
 
                         // Register window for input event routing
                         register_window(window_id, client_id);
@@ -2172,22 +2532,15 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
                         // Reply to client with WINDOW_RESIZED + SHM handle.
                         let payload =
                             protocol::payload_window_resized(window_id, buffer_size, width, height);
-                        if let Err(e) = write_frame_response(
-                            &mut socket,
+                        if let Err(e) = write_handle_frame_response(
+                            &socket,
+                            shm.as_handle(),
                             protocol::server_msg::WINDOW_RESIZED,
                             request_id,
                             &payload,
                         ) {
                             println!(
                                 "[ClientThread {}] ResizeWindow: failed to send WINDOW_RESIZED: {:?}",
-                                client_id, e
-                            );
-                            continue;
-                        }
-
-                        if let Err(e) = socket.send_handle(shm.as_handle()) {
-                            println!(
-                                "[ClientThread {}] ResizeWindow: failed to send SHM handle: {:?}",
                                 client_id, e
                             );
                             continue;
@@ -2286,7 +2639,7 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
                 // Send ExtensionRegistered response
                 let payload = protocol::payload_extension_registered(extension_id);
                 if let Err(e) = write_frame_response(
-                    &mut socket,
+                    &mut stream_writer,
                     protocol::server_msg::EXTENSION_REGISTERED,
                     request_id,
                     &payload,
@@ -2346,15 +2699,19 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
                             Err(_) => None,
                         };
 
-                        // Reply with window created
-                        send_window_created(&mut socket, request_id, window_id, buffer_size);
-
-                        // Send SHM handle
-                        if let Err(e) = socket.send_handle(shm.as_handle()) {
+                        let payload = protocol::payload_window_created(window_id, buffer_size);
+                        if let Err(e) = write_handle_frame_response(
+                            &socket,
+                            shm.as_handle(),
+                            protocol::server_msg::WINDOW_CREATED,
+                            request_id,
+                            &payload,
+                        ) {
                             println!(
-                                "[ClientThread {}] Failed to send SHM handle: {:?}",
+                                "[ClientThread {}] Failed to send atomic WINDOW_CREATED: {:?}",
                                 client_id, e
                             );
+                            continue;
                         }
 
                         // TODO: Map extension_id to client_id for routing
@@ -2423,30 +2780,10 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
                 //     client_id, offset, stride, format, shm_size
                 // );
 
-                let shm_handle = match socket.recv_handle() {
-                    Ok(handle) => {
-                        // println!("[ClientThread {}]   Received SHM handle: {:?}", client_id, handle.as_raw());
-                        handle
-                    }
-                    Err(e) => {
-                        println!(
-                            "[ClientThread {}] Failed to recv handle: {:?}",
-                            client_id, e
-                        );
-                        push_ipc_event(IpcEvent::ExtensionAttachBuffer {
-                            external_client_id,
-                            window_id,
-                            width,
-                            height,
-                            offset,
-                            stride,
-                            format,
-                            shm: None,
-                            shm_mapped_addr: None,
-                            shm_size: 0,
-                        });
-                        continue;
-                    }
+                // The frame and its capability are one ordered socket record.
+                // Presence was validated before protocol parsing.
+                let Some(shm_handle) = received_handle else {
+                    continue;
                 };
 
                 let shm_size_usize = shm_size as usize;
@@ -2629,6 +2966,169 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
                     request_id,
                 });
             }
+            Ok(ClientMessageRef::GetCapabilities {}) => {
+                let payload = protocol::payload_capabilities(
+                    protocol::SWS_PROTOCOL_VERSION,
+                    sws_capabilities(),
+                    compositor_epoch(),
+                    compositor_backend_id(),
+                );
+                if let Err(error) = write_frame_response(
+                    &mut stream_writer,
+                    protocol::server_msg::CAPABILITIES,
+                    request_id,
+                    &payload,
+                ) {
+                    println!(
+                        "[ClientThread {}] Failed to send SWS capabilities: {:?}",
+                        client_id, error
+                    );
+                    break;
+                }
+            }
+            Ok(ClientMessageRef::RegisterSgfxBuffer {
+                window_id,
+                buffer_id,
+                generation,
+                compositor_epoch: request_epoch,
+                width,
+                height,
+            }) => {
+                let Some(handle) = received_handle else {
+                    let _ = write_protocol_error(
+                        &mut stream_writer,
+                        request_id,
+                        protocol::error_codes::INVALID_SGFX_BUFFER,
+                    );
+                    continue;
+                };
+                if !managed_windows.contains(&window_id) {
+                    let _ = write_protocol_error(
+                        &mut stream_writer,
+                        request_id,
+                        protocol::error_codes::WINDOW_NOT_OWNED,
+                    );
+                    continue;
+                }
+                if request_epoch != compositor_epoch() {
+                    let _ = write_protocol_error(
+                        &mut stream_writer,
+                        request_id,
+                        protocol::error_codes::STALE_SGFX_GENERATION,
+                    );
+                    continue;
+                }
+                if !SGFX_SHARED_IMAGES_AVAILABLE.load(Ordering::Acquire) {
+                    let _ = write_protocol_error(
+                        &mut stream_writer,
+                        request_id,
+                        protocol::error_codes::SGFX_UNAVAILABLE,
+                    );
+                    continue;
+                }
+                push_ipc_event(IpcEvent::RegisterSgfxBuffer {
+                    client_id,
+                    request_id,
+                    window_id,
+                    buffer_id,
+                    generation,
+                    compositor_epoch: request_epoch,
+                    width,
+                    height,
+                    handle,
+                });
+            }
+            Ok(ClientMessageRef::CommitSgfxFrame {
+                window_id,
+                buffer_id,
+                generation,
+                compositor_epoch: request_epoch,
+                commit_serial,
+                damage_rects,
+            }) => {
+                let mut reject = |code| {
+                    write_sgfx_frame_rejected(
+                        &mut stream_writer,
+                        window_id,
+                        buffer_id,
+                        generation,
+                        request_epoch,
+                        commit_serial,
+                        code,
+                    )
+                };
+                if header.flags != 0 || request_id != 0 {
+                    let _ = reject(protocol::error_codes::INVALID_SGFX_BUFFER);
+                    continue;
+                }
+                if !managed_windows.contains(&window_id) {
+                    let _ = reject(protocol::error_codes::WINDOW_NOT_OWNED);
+                    continue;
+                }
+                if request_epoch != compositor_epoch() {
+                    let _ = reject(protocol::error_codes::STALE_SGFX_GENERATION);
+                    continue;
+                }
+                if !SGFX_SHARED_IMAGES_AVAILABLE.load(Ordering::Acquire) {
+                    let _ = reject(protocol::error_codes::SGFX_UNAVAILABLE);
+                    continue;
+                }
+                let damage_rects = match protocol::parse_sgfx_damage_rects(damage_rects) {
+                    Ok(rects) => rects,
+                    Err(_) => {
+                        let _ = reject(protocol::error_codes::INVALID_SGFX_BUFFER);
+                        continue;
+                    }
+                };
+                push_ipc_event(IpcEvent::CommitSgfxFrame {
+                    client_id,
+                    window_id,
+                    buffer_id,
+                    generation,
+                    compositor_epoch: request_epoch,
+                    commit_serial,
+                    damage_rects,
+                });
+            }
+            Ok(ClientMessageRef::DestroySgfxBuffer {
+                window_id,
+                buffer_id,
+                generation,
+                compositor_epoch: request_epoch,
+            }) => {
+                if !managed_windows.contains(&window_id) {
+                    let _ = write_protocol_error(
+                        &mut stream_writer,
+                        request_id,
+                        protocol::error_codes::WINDOW_NOT_OWNED,
+                    );
+                    continue;
+                }
+                if request_epoch != compositor_epoch() {
+                    let _ = write_protocol_error(
+                        &mut stream_writer,
+                        request_id,
+                        protocol::error_codes::STALE_SGFX_GENERATION,
+                    );
+                    continue;
+                }
+                if !SGFX_SHARED_IMAGES_AVAILABLE.load(Ordering::Acquire) {
+                    let _ = write_protocol_error(
+                        &mut stream_writer,
+                        request_id,
+                        protocol::error_codes::SGFX_UNAVAILABLE,
+                    );
+                    continue;
+                }
+                push_ipc_event(IpcEvent::DestroySgfxBuffer {
+                    client_id,
+                    request_id,
+                    window_id,
+                    buffer_id,
+                    generation,
+                    compositor_epoch: request_epoch,
+                });
+            }
             Ok(ClientMessageRef::TextInputCreate { window_id, seat_id }) => {
                 if !managed_windows.iter().any(|id| *id == window_id) {
                     continue;
@@ -2637,7 +3137,7 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
                 let payload =
                     protocol::payload_text_input_created(context.context_id, context.serial);
                 if let Err(e) = write_frame_response(
-                    &mut socket,
+                    &mut stream_writer,
                     protocol::server_msg::TEXT_INPUT_CREATED,
                     request_id,
                     &payload,
@@ -2697,7 +3197,7 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
             Ok(ClientMessageRef::ImeGetMethods {}) => {
                 let payload = input_methods_payload();
                 if let Err(e) = write_frame_response(
-                    &mut socket,
+                    &mut stream_writer,
                     protocol::server_msg::IME_METHODS,
                     request_id,
                     &payload,
@@ -2712,7 +3212,7 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
             Ok(ClientMessageRef::ImeGetActive {}) => {
                 let payload = active_input_method_payload();
                 if let Err(e) = write_frame_response(
-                    &mut socket,
+                    &mut stream_writer,
                     protocol::server_msg::IME_ACTIVE,
                     request_id,
                     &payload,
@@ -2732,7 +3232,7 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
                 );
                 let payload = protocol::payload_ime_registered(service.ime_id);
                 if let Err(e) = write_frame_response(
-                    &mut socket,
+                    &mut stream_writer,
                     protocol::server_msg::IME_REGISTERED,
                     request_id,
                     &payload,
@@ -2875,6 +3375,7 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
             client_id, client_id
         );
     }
+    CLIENT_WAKE_WRITES.lock().remove(&client_id);
     cleanup_text_input_contexts_for_client(client_id);
     cleanup_input_methods_for_client(client_id);
 
@@ -2891,28 +3392,6 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
     }
 
     println!("[ClientThread {}] Exiting", client_id);
-}
-
-/// Send WindowCreated message
-fn send_window_created(socket: &mut Socket, request_id: u8, window_id: u32, shm_size: u64) {
-    let payload = protocol::payload_window_created(window_id, shm_size);
-    if let Err(e) = write_frame_response(
-        socket,
-        protocol::server_msg::WINDOW_CREATED,
-        request_id,
-        &payload,
-    ) {
-        println!(
-            "[IpcServer] Failed to send WindowCreated: {:?} (window_id={}, shm_size={})",
-            e, window_id, shm_size
-        );
-        return;
-    }
-
-    println!(
-        "[IpcServer] Sent WindowCreated: window_id={}, shm_size={}",
-        window_id, shm_size
-    );
 }
 
 /// IPC Events that can be sent from clients
@@ -2954,6 +3433,37 @@ pub enum IpcEvent {
         damage_y: i32,
         damage_width: u32,
         damage_height: u32,
+    },
+    /// Import one transferred shared SGFX image into the compositor context.
+    RegisterSgfxBuffer {
+        client_id: usize,
+        request_id: u8,
+        window_id: u32,
+        buffer_id: u32,
+        generation: u32,
+        compositor_epoch: u32,
+        width: u32,
+        height: u32,
+        handle: Handle,
+    },
+    /// Atomically publish one registered SGFX buffer and its damage list.
+    CommitSgfxFrame {
+        client_id: usize,
+        window_id: u32,
+        buffer_id: u32,
+        generation: u32,
+        compositor_epoch: u32,
+        commit_serial: u64,
+        damage_rects: Vec<protocol::SgfxDamageRect>,
+    },
+    /// Drop one released shared SGFX buffer capability.
+    DestroySgfxBuffer {
+        client_id: usize,
+        request_id: u8,
+        window_id: u32,
+        buffer_id: u32,
+        generation: u32,
+        compositor_epoch: u32,
     },
     /// Client requested window move
     RequestMove {

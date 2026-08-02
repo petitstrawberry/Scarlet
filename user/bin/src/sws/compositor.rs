@@ -1,13 +1,16 @@
 //! Compositor module - manages window composition and rendering
 
 use super::cursor::Cursor;
-use super::gpu_compositor::GpuCompositor;
+use super::gpu_compositor::{
+    GpuCompositor, SgfxBufferError, SgfxBufferIdentity, SgfxCommitToken,
+};
 use super::input::{CompositorInputEvent, InputManager, key_codes};
 use super::ipc::{IpcEvent, IpcServer, send_message_to_client, send_response_to_client};
 use super::window::WindowManager;
 use core::sync::atomic::{AtomicU8, Ordering};
 use core::time::Duration;
 use framebuffer::{DisplayPresentRegion, DisplaySurface};
+use scarlet_os::time::monotonic_time_ns;
 use std::env;
 use std::fs::File;
 use std::handle::Handle;
@@ -25,7 +28,10 @@ fn is_sws_debug_enabled() -> bool {
         return cached != 0;
     }
     let enabled = match env::var("SWS_LOG") {
-        Some(val) => matches!(val.as_str(), "debug" | "DEBUG" | "3"),
+        Some(val) => matches!(
+            val.as_str(),
+            "debug" | "DEBUG" | "3" | "trace" | "TRACE" | "4"
+        ),
         None => false,
     };
     LOG_CACHE.store(enabled as u8, Ordering::Relaxed);
@@ -38,6 +44,84 @@ macro_rules! sws_debug {
             std::println!($($arg)*);
         }
     };
+}
+
+fn sgfx_error_code(error: SgfxBufferError) -> u32 {
+    match error {
+        SgfxBufferError::Unavailable => sws_protocol::error_codes::SGFX_UNAVAILABLE,
+        SgfxBufferError::InvalidBuffer => sws_protocol::error_codes::INVALID_SGFX_BUFFER,
+        SgfxBufferError::StaleGeneration => sws_protocol::error_codes::STALE_SGFX_GENERATION,
+        SgfxBufferError::BufferBusy => sws_protocol::error_codes::SGFX_BUFFER_BUSY,
+        SgfxBufferError::ImportFailed => sws_protocol::error_codes::SGFX_IMPORT_FAILED,
+    }
+}
+
+fn send_sgfx_protocol_error(client_id: usize, request_id: u8, code: u32) {
+    let payload = sws_protocol::payload_error(code).to_vec();
+    if request_id == 0 {
+        send_message_to_client(client_id, sws_protocol::server_msg::ERROR, payload);
+    } else {
+        send_response_to_client(
+            client_id,
+            sws_protocol::server_msg::ERROR,
+            request_id,
+            payload,
+        );
+    }
+}
+
+fn send_sgfx_frame_rejected(
+    client_id: usize,
+    identity: SgfxBufferIdentity,
+    commit_serial: u64,
+    code: u32,
+) {
+    let payload = sws_protocol::payload_sgfx_frame_rejected(
+        identity.window_id,
+        identity.buffer_id,
+        identity.generation,
+        identity.compositor_epoch,
+        commit_serial,
+        code,
+    );
+    send_message_to_client(
+        client_id,
+        sws_protocol::server_msg::SGFX_FRAME_REJECTED,
+        payload.to_vec(),
+    );
+}
+
+fn send_sgfx_buffer_released(release: SgfxCommitToken) {
+    let identity = release.identity;
+    let payload = sws_protocol::payload_sgfx_buffer_released(
+        identity.window_id,
+        identity.buffer_id,
+        identity.generation,
+        identity.compositor_epoch,
+        release.commit_serial,
+    );
+    super::ipc::send_message_to_window(
+        identity.window_id,
+        sws_protocol::server_msg::SGFX_BUFFER_RELEASED,
+        payload.to_vec(),
+    );
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SwsBackend {
+    Auto,
+    Cpu,
+    Sgfx,
+}
+
+fn selected_sws_backend() -> Result<SwsBackend, &'static str> {
+    match env::var("SWS_BACKEND") {
+        None => Ok(SwsBackend::Auto),
+        Some(value) if value.eq_ignore_ascii_case("auto") => Ok(SwsBackend::Auto),
+        Some(value) if value.eq_ignore_ascii_case("cpu") => Ok(SwsBackend::Cpu),
+        Some(value) if value.eq_ignore_ascii_case("sgfx") => Ok(SwsBackend::Sgfx),
+        Some(_) => Err("SWS_BACKEND must be one of: auto, cpu, sgfx"),
+    }
 }
 
 // NOTE: The compositor intentionally opens the modern display surface endpoint,
@@ -56,7 +140,7 @@ const LOG_RENDER_VALIDATION: bool = false;
 const ENABLE_DIRTY_RECT: bool = true;
 const MAX_PENDING_DAMAGE_RECTS: usize = 8;
 const DAMAGE_MERGE_AREA_FACTOR: u64 = 2;
-const FRAME_BATCH_INTERVAL: Duration = Duration::from_nanos(16_666_667);
+const FRAME_BATCH_INTERVAL_NS: u64 = 16_666_667;
 const DEFAULT_OUTPUT_SCALE_MILLI: u32 = 2000;
 const SWS_CONFIG_PATH: &str = "/etc/sws/config.toml";
 
@@ -403,6 +487,7 @@ fn normalize_scale_milli(scale_milli: u32) -> u32 {
 /// Compositor - the main window server with proper layer compositing
 pub struct Compositor {
     display: DisplaySurface,
+    backend: SwsBackend,
     gpu_compositor: Option<GpuCompositor>,
     window_manager: WindowManager,
     ipc_server: IpcServer,
@@ -419,6 +504,7 @@ pub struct Compositor {
     pending_damage: Vec<(i32, i32, u32, u32)>,
     presented_damage: Vec<PresentDamage>,
     event_counter: u64,
+    next_frame_deadline_ns: Option<u64>,
     left_button_down: bool,
     last_left_down_cursor: Option<(i32, i32)>,
     pointer_grab_window_id: Option<u32>,
@@ -504,6 +590,7 @@ impl Compositor {
 
         let screen_width = var_info.xres;
         let screen_height = var_info.yres;
+        let backend = selected_sws_backend()?;
         let sws_config = load_sws_config();
         let output_scale_milli = sws_config.output_scale_milli;
         let bytes_per_pixel = 4; // BGRA
@@ -522,6 +609,7 @@ impl Compositor {
             "[Compositor] Framebuffer: bpp={} line_length={} smem_len={}",
             var_info.bits_per_pixel, fix_info.line_length, fix_info.smem_len
         );
+        println!("[Compositor] Selected backend: {:?}", backend);
 
         let (wake_read, wake_write) =
             std::task::pipe().map_err(|_| "Failed to create compositor wake pipe")?;
@@ -532,7 +620,6 @@ impl Compositor {
 
         // Initialize IPC server
         let mut ipc_server = IpcServer::new("/tmp/sws.sock")?;
-        ipc_server.listen()?;
 
         // Initialize window manager
         let window_manager = WindowManager::new();
@@ -552,19 +639,32 @@ impl Compositor {
         let mut backbuffer = Vec::with_capacity(buffer_size);
         backbuffer.resize(buffer_size, 0);
 
-        let gpu_compositor = match GpuCompositor::new(screen_width, screen_height, &cursor) {
-            Ok(compositor) => {
-                println!("[Compositor] GPU composition enabled");
-                Some(compositor)
-            }
-            Err(error) => {
-                println!("[Compositor] GPU composition unavailable: {}", error);
+        let gpu_compositor = match backend {
+            SwsBackend::Cpu => {
+                println!("[Compositor] CPU composition forced by SWS_BACKEND");
                 None
             }
+            SwsBackend::Auto => match GpuCompositor::new(screen_width, screen_height, &cursor) {
+                Ok(compositor) => {
+                    println!("[Compositor] GPU composition enabled");
+                    Some(compositor)
+                }
+                Err(error) => {
+                    println!("[Compositor] GPU composition unavailable: {}", error);
+                    None
+                }
+            },
+            SwsBackend::Sgfx => Some(
+                GpuCompositor::new(screen_width, screen_height, &cursor)
+                    .map_err(|_| "SWS_BACKEND=sgfx requested but GPU initialization failed")?,
+            ),
         };
+        super::ipc::set_sgfx_shared_images_available(gpu_compositor.is_some());
+        ipc_server.listen()?;
 
         Ok(Self {
             display,
+            backend,
             gpu_compositor,
             window_manager,
             ipc_server,
@@ -581,6 +681,7 @@ impl Compositor {
             pending_damage: Vec::new(),
             presented_damage: Vec::new(),
             event_counter: 0,
+            next_frame_deadline_ns: None,
             left_button_down: false,
             last_left_down_cursor: None,
             pointer_grab_window_id: None,
@@ -804,7 +905,7 @@ impl Compositor {
         };
         if gpu_resize_failed {
             println!("[Compositor] Disabling GPU composition after display resize failure");
-            self.gpu_compositor = None;
+            self.disable_gpu_after_runtime_failure("SWS_BACKEND=sgfx target resize failed")?;
         }
 
         let payload = sws_protocol::payload_screen_size(new_width, new_height);
@@ -1350,38 +1451,78 @@ impl Compositor {
 
     /// Composite all layers directly to the display backing store.
     fn composite_and_present(&mut self) -> Result<(), &'static str> {
-        if self.composite_and_present_gpu() {
+        if self.backend == SwsBackend::Sgfx && self.gpu_compositor.is_none() {
+            return Err("SWS_BACKEND=sgfx compositor is unavailable");
+        }
+        if self.composite_and_present_gpu()? {
             return Ok(());
         }
         let dirty_rects = self.composite_pending_to_display()?;
         self.present_damage(dirty_rects)
     }
 
-    /// Release one cached GPU window texture before its backing can be replaced.
-    fn release_gpu_window_texture(&mut self, window_id: u32) {
+    /// Disable the failed GPU backend and apply the selected fallback policy.
+    fn disable_gpu_after_runtime_failure(
+        &mut self,
+        strict_error: &'static str,
+    ) -> Result<(), &'static str> {
+        self.gpu_compositor = None;
+        self.full_redraw_needed = true;
+        self.pending_damage.clear();
+        self.presented_damage.clear();
+        super::ipc::notify_sgfx_backend_lost();
+        if self.backend == SwsBackend::Sgfx {
+            Err(strict_error)
+        } else {
+            if self.backend == SwsBackend::Auto {
+                println!("[Compositor] Using CPU fallback");
+            }
+            Ok(())
+        }
+    }
+
+    /// Release one compositor-owned upload texture before CPU backing changes.
+    ///
+    /// Shared SGFX registrations are generation-tracked client resources and
+    /// must survive resize until their replacement commit releases them.
+    fn release_gpu_window_texture(&mut self, window_id: u32) -> Result<(), &'static str> {
+        let release_failed = match self.gpu_compositor.as_mut() {
+            Some(gpu_compositor) => gpu_compositor.remove_window_texture(window_id).is_err(),
+            None => false,
+        };
+        if !release_failed {
+            return Ok(());
+        }
+        println!(
+            "[Compositor] GPU texture release failed for window {}; disabling GPU composition",
+            window_id
+        );
+        self.disable_gpu_after_runtime_failure("SWS_BACKEND=sgfx texture release failed")
+    }
+
+    /// Release every GPU resource owned by a window that is being closed.
+    fn release_gpu_window(&mut self, window_id: u32) -> Result<(), &'static str> {
         let release_failed = match self.gpu_compositor.as_mut() {
             Some(gpu_compositor) => gpu_compositor.remove_window(window_id).is_err(),
             None => false,
         };
-        if release_failed {
-            println!(
-                "[Compositor] GPU texture release failed for window {}; disabling GPU composition",
-                window_id
-            );
-            self.gpu_compositor = None;
-            self.full_redraw_needed = true;
-            self.pending_damage.clear();
-            self.presented_damage.clear();
+        if !release_failed {
+            return Ok(());
         }
+        println!(
+            "[Compositor] GPU resource release failed for window {}; disabling GPU composition",
+            window_id
+        );
+        self.disable_gpu_after_runtime_failure("SWS_BACKEND=sgfx window release failed")
     }
 
     /// Compose and present the whole scene through the optional GPU path.
     ///
-    /// A GPU error is intentionally contained here: the caller continues with a
-    /// full CPU redraw during this same frame.
-    fn composite_and_present_gpu(&mut self) -> bool {
+    /// In `auto` mode a GPU error triggers a full CPU redraw during this same
+    /// frame. The strict `sgfx` mode instead propagates a fatal error.
+    fn composite_and_present_gpu(&mut self) -> Result<bool, &'static str> {
         let Some(gpu_compositor) = self.gpu_compositor.as_mut() else {
-            return false;
+            return Ok(false);
         };
         let result = gpu_compositor.compose_and_present(
             &self.display,
@@ -1391,23 +1532,21 @@ impl Compositor {
             self.resize_outline,
         );
         match result {
-            Ok(()) => {
+            Ok(releases) => {
+                super::trace::set_compositor_stage(super::trace::STAGE_GPU_NOTIFY_RELEASES);
+                for release in releases {
+                    send_sgfx_buffer_released(release);
+                }
                 self.cursor.mark_drawn();
                 self.full_redraw_needed = false;
                 self.pending_damage.clear();
                 self.presented_damage.clear();
-                true
+                Ok(true)
             }
             Err(error) => {
-                println!(
-                    "[Compositor] GPU composition failed: {}; using CPU fallback",
-                    error
-                );
-                self.gpu_compositor = None;
-                self.full_redraw_needed = true;
-                self.pending_damage.clear();
-                self.presented_damage.clear();
-                false
+                println!("[Compositor] GPU composition failed: {}", error);
+                self.disable_gpu_after_runtime_failure("SWS_BACKEND=sgfx compositor failed")?;
+                Ok(false)
             }
         }
     }
@@ -2342,10 +2481,43 @@ impl Compositor {
         // page flip. Sleeping for another frame here would double-pace the
         // compositor and reduce interactive updates to roughly 30 Hz.
         if !self.display.has_swapchain() {
-            thread::sleep(FRAME_BATCH_INTERVAL);
+            let now = monotonic_time_ns();
+            let deadline = self.next_frame_deadline_ns.unwrap_or(now);
+            if deadline > now {
+                thread::sleep(Duration::from_nanos(deadline - now));
+            }
         }
         self.consume_event_signal_if_ready();
         self.process_pending_events()
+    }
+
+    fn note_frame_presented(&mut self) {
+        if self.display.has_swapchain() {
+            self.next_frame_deadline_ns = None;
+            return;
+        }
+
+        let now = monotonic_time_ns();
+        let next = self
+            .next_frame_deadline_ns
+            .unwrap_or(now)
+            .saturating_add(FRAME_BATCH_INTERVAL_NS);
+        let next = if next > now {
+            next
+        } else {
+            let skipped = now
+                .saturating_sub(next)
+                .checked_div(FRAME_BATCH_INTERVAL_NS)
+                .unwrap_or(0)
+                .saturating_add(1);
+            next.saturating_add(skipped.saturating_mul(FRAME_BATCH_INTERVAL_NS))
+        };
+        let next = if next > now {
+            next
+        } else {
+            now.saturating_add(FRAME_BATCH_INTERVAL_NS)
+        };
+        self.next_frame_deadline_ns = Some(next);
     }
 
     fn has_queued_event_work(&self) -> bool {
@@ -2357,28 +2529,43 @@ impl Compositor {
         println!("[Compositor] Starting main loop (multithreaded)");
 
         loop {
+            super::trace::compositor_loop();
+            super::trace::set_compositor_stage(super::trace::STAGE_PROCESS_EVENTS);
             let mut needs_redraw = self.process_pending_events()?;
+            super::trace::set_compositor_stage(super::trace::STAGE_ACTIVE);
+            if self.backend == SwsBackend::Sgfx && self.gpu_compositor.is_none() {
+                return Err("SWS_BACKEND=sgfx compositor is unavailable");
+            }
 
             // Re-composite and present if needed
             if self.has_pending_redraw(needs_redraw) {
                 if self.gpu_compositor.is_some() {
+                    super::trace::set_compositor_stage(super::trace::STAGE_FRAME_BATCH);
                     self.wait_for_frame_batch()?;
                     if self.full_redraw_needed {
                         sws_debug!("[Compositor] Full redraw triggered");
                     }
+                    super::trace::set_compositor_stage(super::trace::STAGE_GPU_COMPOSITE);
                     self.composite_and_present()?;
                 } else {
+                    super::trace::set_compositor_stage(super::trace::STAGE_CPU_COMPOSITE);
                     let mut present_damage = self.composite_pending_to_display()?;
+                    super::trace::set_compositor_stage(super::trace::STAGE_FRAME_BATCH);
                     needs_redraw |= self.wait_for_frame_batch()?;
                     if self.full_redraw_needed {
                         sws_debug!("[Compositor] Full redraw triggered");
                     }
                     if self.has_pending_redraw(needs_redraw) {
+                        super::trace::set_compositor_stage(super::trace::STAGE_CPU_COMPOSITE);
                         let next_damage = self.composite_pending_to_display()?;
                         Self::merge_present_damage(&mut present_damage, next_damage);
                     }
+                    super::trace::set_compositor_stage(super::trace::STAGE_PRESENT);
                     self.present_damage(present_damage)?;
                 }
+                super::trace::compositor_present();
+                super::trace::set_compositor_stage(super::trace::STAGE_ACTIVE);
+                self.note_frame_presented();
                 self.event_counter += 1;
             }
 
@@ -2388,7 +2575,9 @@ impl Compositor {
             if self.has_queued_event_work() {
                 self.consume_event_signal_if_ready();
             } else {
+                super::trace::set_compositor_stage(super::trace::STAGE_WAIT_SIGNAL);
                 self.wait_for_event_signal();
+                super::trace::set_compositor_stage(super::trace::STAGE_ACTIVE);
             }
 
             // Periodically print Z-order (every 100 redraws)
@@ -2947,7 +3136,7 @@ impl Compositor {
         client_id: usize,
         window_ids: &[u32],
         notify_client: bool,
-    ) -> bool {
+    ) -> Result<bool, &'static str> {
         let mut removed_windows: Vec<(u32, (i32, i32, u32, u32), Vec<u8>)> = Vec::new();
         for &window_id in window_ids {
             if let Some(window) = self.window_manager.get_window(window_id) {
@@ -2960,7 +3149,7 @@ impl Compositor {
         }
 
         if removed_windows.is_empty() {
-            return false;
+            return Ok(false);
         }
 
         let removed_ids: Vec<u32> = removed_windows
@@ -2970,7 +3159,7 @@ impl Compositor {
         self.clear_interaction_state_for_removed_windows(&removed_ids);
         self.remove_ime_popup_windows(&removed_ids);
         for window_id in &removed_ids {
-            self.release_gpu_window_texture(*window_id);
+            self.release_gpu_window(*window_id)?;
         }
 
         let mut active_app_removed = false;
@@ -3026,7 +3215,7 @@ impl Compositor {
         }
 
         self.full_redraw_needed = true;
-        true
+        Ok(true)
     }
 
     fn set_ime_popup_window(
@@ -3182,6 +3371,12 @@ impl Compositor {
     ///
     /// Returns `Ok(true)` if an immediate redraw is required (e.g., window created/destroyed).
     /// Returns `Ok(false)` if only damage was accumulated (redraw via `pending_damage`).
+    fn client_owns_window(&self, client_id: usize, window_id: u32) -> bool {
+        self.window_manager
+            .get_window(window_id)
+            .is_some_and(|window| window.owner_client_id == Some(client_id))
+    }
+
     fn handle_ipc_event(&mut self, event: IpcEvent) -> Result<bool, &'static str> {
         match event {
             IpcEvent::CreateWindow {
@@ -3304,6 +3499,7 @@ impl Compositor {
 
                 if let Some(window) = self.window_manager.get_window_mut(window_id) {
                     window.app_id = Some(app_id);
+                    window.owner_client_id = Some(client_id);
                 }
                 if self.window_manager.set_window_type(window_id, wtype) {
                     println!("[Compositor] Set window #{} type to {:?}", window_id, wtype);
@@ -3403,7 +3599,7 @@ impl Compositor {
                     client_id, window_id
                 );
 
-                if self.close_client_windows(client_id, &[window_id], true) {
+                if self.close_client_windows(client_id, &[window_id], true)? {
                     self.dump_memory_layout("after IPC DestroyWindow");
                     return Ok(true);
                 }
@@ -3418,7 +3614,7 @@ impl Compositor {
                     window_ids.len()
                 );
 
-                if self.close_client_windows(client_id, &window_ids, false) {
+                if self.close_client_windows(client_id, &window_ids, false)? {
                     self.dump_memory_layout("after IPC ClientDisconnected");
                     return Ok(true);
                 }
@@ -3484,6 +3680,196 @@ impl Compositor {
                         damage_width,
                         damage_height,
                     );
+                }
+            }
+            IpcEvent::RegisterSgfxBuffer {
+                client_id,
+                request_id,
+                window_id,
+                buffer_id,
+                generation,
+                compositor_epoch,
+                width,
+                height,
+                handle,
+            } => {
+                if !self.client_owns_window(client_id, window_id) {
+                    send_sgfx_protocol_error(
+                        client_id,
+                        request_id,
+                        sws_protocol::error_codes::WINDOW_NOT_OWNED,
+                    );
+                    return Ok(false);
+                }
+                let identity = SgfxBufferIdentity {
+                    window_id,
+                    buffer_id,
+                    generation,
+                    compositor_epoch,
+                };
+                let extent_matches = self
+                    .window_manager
+                    .get_window(window_id)
+                    .is_some_and(|window| window.width == width && window.height == height);
+                let result = if !extent_matches {
+                    Err(SgfxBufferError::InvalidBuffer)
+                } else {
+                    match self.gpu_compositor.as_mut() {
+                        Some(gpu) => gpu.register_shared_buffer(identity, width, height, handle),
+                        None => Err(SgfxBufferError::Unavailable),
+                    }
+                };
+                match result {
+                    Ok(()) => {
+                        let payload = sws_protocol::payload_sgfx_buffer_identity(
+                            window_id,
+                            buffer_id,
+                            generation,
+                            compositor_epoch,
+                        );
+                        super::ipc::send_response_to_client(
+                            client_id,
+                            sws_protocol::server_msg::SGFX_BUFFER_REGISTERED,
+                            request_id,
+                            payload.to_vec(),
+                        );
+                    }
+                    Err(error) => {
+                        println!(
+                            "[Compositor] Failed to register shared SGFX buffer for window {}: {:?}",
+                            window_id, error
+                        );
+                        let code = sgfx_error_code(error);
+                        super::ipc::send_response_to_client(
+                            client_id,
+                            sws_protocol::server_msg::ERROR,
+                            request_id,
+                            sws_protocol::payload_error(code).to_vec(),
+                        );
+                        if error == SgfxBufferError::Unavailable {
+                            self.disable_gpu_after_runtime_failure(
+                                "SWS_BACKEND=sgfx shared-buffer registration failed",
+                            )?;
+                        }
+                    }
+                }
+            }
+            IpcEvent::CommitSgfxFrame {
+                client_id,
+                window_id,
+                buffer_id,
+                generation,
+                compositor_epoch,
+                commit_serial,
+                damage_rects,
+            } => {
+                let identity = SgfxBufferIdentity {
+                    window_id,
+                    buffer_id,
+                    generation,
+                    compositor_epoch,
+                };
+                if !self.client_owns_window(client_id, window_id) {
+                    send_sgfx_frame_rejected(
+                        client_id,
+                        identity,
+                        commit_serial,
+                        sws_protocol::error_codes::WINDOW_NOT_OWNED,
+                    );
+                    return Ok(false);
+                }
+                let result = match self.gpu_compositor.as_mut() {
+                    Some(gpu) => {
+                        gpu.commit_shared_buffer(identity, commit_serial, &damage_rects)
+                    }
+                    None => Err(SgfxBufferError::Unavailable),
+                };
+                match result {
+                    Ok(damage) => {
+                        if let Some((window_x, window_y)) = self
+                            .window_manager
+                            .get_window(window_id)
+                            .map(|window| (window.x, window.y))
+                        {
+                            for (x, y, width, height) in damage {
+                                self.add_pending_damage((
+                                    window_x.saturating_add(x as i32),
+                                    window_y.saturating_add(y as i32),
+                                    width,
+                                    height,
+                                ));
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        println!(
+                            "[Compositor] Failed to commit shared SGFX buffer for window {}: {:?}",
+                            window_id, error
+                        );
+                        send_sgfx_frame_rejected(
+                            client_id,
+                            identity,
+                            commit_serial,
+                            sgfx_error_code(error),
+                        );
+                        if error == SgfxBufferError::Unavailable {
+                            self.disable_gpu_after_runtime_failure(
+                                "SWS_BACKEND=sgfx shared-buffer commit failed",
+                            )?;
+                        }
+                    }
+                }
+            }
+            IpcEvent::DestroySgfxBuffer {
+                client_id,
+                request_id,
+                window_id,
+                buffer_id,
+                generation,
+                compositor_epoch,
+            } => {
+                if !self.client_owns_window(client_id, window_id) {
+                    send_sgfx_protocol_error(
+                        client_id,
+                        request_id,
+                        sws_protocol::error_codes::WINDOW_NOT_OWNED,
+                    );
+                    return Ok(false);
+                }
+                let identity = SgfxBufferIdentity {
+                    window_id,
+                    buffer_id,
+                    generation,
+                    compositor_epoch,
+                };
+                let result = match self.gpu_compositor.as_mut() {
+                    Some(gpu) => gpu.destroy_shared_buffer(identity),
+                    None => Err(SgfxBufferError::Unavailable),
+                };
+                let backend_failed = result == Err(SgfxBufferError::Unavailable);
+                let (msg_type, payload) = match result {
+                    Ok(()) => (
+                        sws_protocol::server_msg::SGFX_BUFFER_DESTROYED,
+                        sws_protocol::payload_sgfx_buffer_identity(
+                            window_id,
+                            buffer_id,
+                            generation,
+                            compositor_epoch,
+                        )
+                        .to_vec(),
+                    ),
+                    Err(error) => (
+                        sws_protocol::server_msg::ERROR,
+                        sws_protocol::payload_error(sgfx_error_code(error)).to_vec(),
+                    ),
+                };
+                super::ipc::send_response_to_client(
+                    client_id, msg_type, request_id, payload,
+                );
+                if backend_failed {
+                    self.disable_gpu_after_runtime_failure(
+                        "SWS_BACKEND=sgfx shared-buffer destruction failed",
+                    )?;
                 }
             }
             IpcEvent::RequestMove { window_id } => {
@@ -3621,7 +4007,7 @@ impl Compositor {
                     .get_window(window_id)
                     .map(|w| (w.x, w.y, w.width, w.height));
                 if let Some(shm) = shm {
-                    self.release_gpu_window_texture(window_id);
+                    self.release_gpu_window_texture(window_id)?;
                     if self.window_manager.resize_window_with_shm(
                         window_id,
                         width,
@@ -3960,7 +4346,7 @@ impl Compositor {
                     // println!("[Compositor] Attaching external buffer at address 0x{:x}", addr);
                     if let Some(shm_handle) = shm {
                         // We have both handle and address (normal case)
-                        self.release_gpu_window_texture(window_id);
+                        self.release_gpu_window_texture(window_id)?;
                         if let Err(e) = self.window_manager.replace_window_shm_from_event(
                             window_id,
                             width,
@@ -3985,7 +4371,7 @@ impl Compositor {
                         // We have address but no SharedMemory wrapper (e.g., File handle from Linux compat)
                         // This is zero-copy mode - just update the mapped address
                         // println!("[Compositor] Zero-copy mode: updating mapped address without SharedMemory wrapper");
-                        self.release_gpu_window_texture(window_id);
+                        self.release_gpu_window_texture(window_id)?;
                         let rect = if let Some(w) = self.window_manager.get_window_mut(window_id) {
                             if let (Some(old_addr), old_size) =
                                 (w.shm_mapped_addr.take(), w.shm_size)

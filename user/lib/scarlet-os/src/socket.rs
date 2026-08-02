@@ -61,8 +61,15 @@ pub enum SocketError {
     NotListening,
     /// Connection refused
     ConnectionRefused,
-    /// Would block (no pending connections)
+    /// Operation would block
     WouldBlock,
+    /// The supplied destination cannot hold the next complete socket record
+    ReceiveBufferTooSmall {
+        /// Exact number of bytes required for the queued record
+        required_len: usize,
+    },
+    /// The outgoing record exceeds the local socket record limit
+    MessageTooLarge,
 }
 
 pub type Result<T> = core::result::Result<T, SocketError>;
@@ -236,27 +243,38 @@ impl Socket {
         unsafe { Handle::from_raw(raw) }.map_err(|_| SocketError::SyscallFailed)
     }
 
-    /// Send a kernel object handle and data atomically through this connected socket.
+    /// Send one ordered handle-and-data record through this connected socket.
     ///
-    /// This method ensures that both the handle and data are available before
-    /// waking the peer, preventing race conditions in protocols like Wayland.
+    /// The record boundary and its order relative to normal writes and
+    /// handle-only transfers are preserved.
     ///
     /// # Arguments
     ///
     /// * `object` - The kernel object handle to send
     /// * `data` - The data to send with the handle
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` when the record is queued, or a socket error otherwise.
     pub fn send_handle_and_data(&self, object: &Handle, data: &[u8]) -> Result<()> {
+        use crate::handle::capability::socket::SocketObjectError;
+
         let sock = self
             .handle
             .as_socket()
             .map_err(|_| SocketError::InvalidHandle)?;
         sock.send_handle_and_data(object.as_raw(), data)
-            .map_err(|_| SocketError::SyscallFailed)
+            .map_err(|error| match error {
+                SocketObjectError::WouldBlock => SocketError::WouldBlock,
+                SocketObjectError::MessageTooLarge => SocketError::MessageTooLarge,
+                _ => SocketError::SyscallFailed,
+            })
     }
 
     /// Receive a kernel object handle and data atomically through this connected socket.
     ///
-    /// Returns both a handle and data in a single atomic operation.
+    /// Returns one complete handle-and-data record. A short destination leaves
+    /// the record queued and reports its required size.
     ///
     /// # Arguments
     ///
@@ -267,6 +285,8 @@ impl Socket {
     /// * `(Handle, usize)` - The received handle and number of bytes on success
     /// * `SocketError` - Error on failure
     pub fn recv_handle_and_data(&self, data_out: &mut [u8]) -> Result<(Handle, usize)> {
+        use crate::handle::capability::socket::SocketObjectError;
+
         let sock = self
             .handle
             .as_socket()
@@ -274,7 +294,13 @@ impl Socket {
         let mut raw_handle = 0;
         let bytes_read = sock
             .recv_handle_and_data(&mut raw_handle, data_out)
-            .map_err(|_| SocketError::WouldBlock)?;
+            .map_err(|error| match error {
+                SocketObjectError::WouldBlock => SocketError::WouldBlock,
+                SocketObjectError::ReceiveBufferTooSmall { required_len } => {
+                    SocketError::ReceiveBufferTooSmall { required_len }
+                }
+                _ => SocketError::SyscallFailed,
+            })?;
         let handle =
             unsafe { Handle::from_raw(raw_handle) }.map_err(|_| SocketError::SyscallFailed)?;
         Ok((handle, bytes_read))

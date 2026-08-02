@@ -77,6 +77,8 @@ const VIRTIO_GPU_MAX_CONTEXT_NAME: usize = 64;
 const VIRTIO_GPU_CONFIG_NUM_CAPSETS_OFFSET: usize = 12;
 const VIRTIO_GPU_CONTROL_QUEUE_SIZE: usize = 64;
 const VIRTIO_GPU_CURSOR_QUEUE_SIZE: usize = 16;
+const VIRTIO_GPU_CONTROL_TIMEOUT_NS: u64 = 2_000_000_000;
+const VIRTIO_GPU_CONTROL_MAX_SPINS: u64 = 10_000_000;
 
 // VirtIO GPU Formats
 const VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM: u32 = 1;
@@ -414,6 +416,7 @@ pub struct VirtioGpuDeviceCore {
     scanout_resource_id: IrqRwSpinLock<Option<u32>>,
     negotiated_features: IrqRwSpinLock<u64>,
     transport_ready: IrqRwSpinLock<bool>,
+    control_queue_failed: IrqRwSpinLock<bool>,
     initialized: IrqSpinLock<bool>,
     // Track resources and their associated memory
     resources: IrqSpinLock<alloc::collections::BTreeMap<u32, (usize, usize)>>, // resource_id -> (addr, size)
@@ -465,6 +468,7 @@ impl VirtioGpuDeviceCore {
             scanout_resource_id: IrqRwSpinLock::new(None),
             negotiated_features: IrqRwSpinLock::new(0),
             transport_ready: IrqRwSpinLock::new(false),
+            control_queue_failed: IrqRwSpinLock::new(false),
             initialized: IrqSpinLock::new(false),
             resources: IrqSpinLock::new(alloc::collections::BTreeMap::new()),
         };
@@ -571,6 +575,9 @@ impl VirtioGpuDeviceCore {
         if cmd_buffer.is_empty() || resp_buffer.is_empty() {
             return Err("VirtIO GPU control buffers must not be empty");
         }
+        if *self.control_queue_failed.read() {
+            return Err("VirtIO GPU control queue is unavailable after a timeout");
+        }
 
         let page_size = crate::environment::PAGE_SIZE;
         let cmd_pages = cmd_buffer.len().div_ceil(page_size);
@@ -636,9 +643,32 @@ impl VirtioGpuDeviceCore {
         // Notify the device
         self.notify(0); // Notify control queue
 
-        // Wait for response (simplified polling)
-        while control_queue.is_busy() {}
-        while *control_queue.used.idx == control_queue.last_used_idx {}
+        // Wait for the device-owned used index through VirtQueue's volatile
+        // accessor. A second plain dereference of used.idx used to follow this
+        // loop; that is not a valid way to observe DMA updates and could spin
+        // forever even after the device completed the request.
+        let wait_started_ns = crate::timer::get_time_ns();
+        let mut wait_spins = 0u64;
+        while control_queue.is_busy() {
+            wait_spins = wait_spins.saturating_add(1);
+            let timed_out = crate::timer::get_time_ns()
+                .saturating_sub(wait_started_ns)
+                >= VIRTIO_GPU_CONTROL_TIMEOUT_NS;
+            if timed_out || wait_spins >= VIRTIO_GPU_CONTROL_MAX_SPINS
+            {
+                *self.control_queue_failed.write() = true;
+
+                // The device may still own both descriptors. Keep their DMA
+                // allocations alive and leave the descriptors reserved rather
+                // than allowing a late device write into freed memory. The
+                // failed queue is permanently rejected above, so this bounded
+                // one-request quarantine cannot accumulate.
+                core::mem::forget(cmd_dma);
+                core::mem::forget(resp_dma);
+                return Err("VirtIO GPU control queue timed out");
+            }
+            core::hint::spin_loop();
+        }
 
         // Process response
         let _resp_idx = match control_queue.pop() {

@@ -43,87 +43,93 @@ fn draw_gradient_background(
     bottom: Color,
     draw_lines: bool,
 ) {
-    let Some(surface) = conn.surface_mut(surface_id) else {
-        return;
-    };
-
-    let w = surface.width();
-    let h = surface.height();
-    surface.with_buffer(|buf, width, _height| {
-        if h == 0 {
-            return;
-        }
-
-        // Draw gradient
-        for y in 0..h {
-            let t = y.saturating_mul(255) / (h.saturating_sub(1).max(1));
-            let r = (top.r * 255.0 * (255.0 - t as f32) + bottom.r * 255.0 * t as f32) / 255.0;
-            let g = (top.g * 255.0 * (255.0 - t as f32) + bottom.g * 255.0 * t as f32) / 255.0;
-            let b_val = (top.b * 255.0 * (255.0 - t as f32) + bottom.b * 255.0 * t as f32) / 255.0;
-            let color = Color::rgb(r / 255.0, g / 255.0, b_val / 255.0);
-            let bgra = color.to_bgra();
-
-            for x in 0..w {
-                let idx = ((y as usize) * width as usize + (x as usize)) * 4;
-                if idx + 3 < buf.len() {
-                    buf[idx] = (bgra & 0xFF) as u8;
-                    buf[idx + 1] = ((bgra >> 8) & 0xFF) as u8;
-                    buf[idx + 2] = ((bgra >> 16) & 0xFF) as u8;
-                    buf[idx + 3] = ((bgra >> 24) & 0xFF) as u8;
-                }
+    let Some(()) = conn.with_surface_mut(surface_id, |surface| {
+        let w = surface.width();
+        let h = surface.height();
+        surface.with_buffer(|buf, width, _height| {
+            if h == 0 {
+                return;
             }
-        }
 
-        if draw_lines {
-            // Subtle diagonal accent lines
-            let accent = Color::rgba(0.392, 0.471, 0.549, 0.110); // RGB(100, 120, 140) with alpha 28/255
-            let bgra = accent.to_bgra();
-            let mut x = 0i32;
-            while x < w as i32 + h as i32 {
-                // Draw diagonal line from (x, 0) to (x-h, h-1)
-                for i in 0..h as i32 {
-                    let px = x - i;
-                    let py = i;
-                    if px >= 0 && px < w as i32 && py >= 0 && py < h as i32 {
-                        let idx = (py as usize * width as usize + px as usize) * 4;
-                        if idx + 3 < buf.len() {
-                            buf[idx] = (bgra & 0xFF) as u8;
-                            buf[idx + 1] = ((bgra >> 8) & 0xFF) as u8;
-                            buf[idx + 2] = ((bgra >> 16) & 0xFF) as u8;
-                            buf[idx + 3] = ((bgra >> 24) & 0xFF) as u8;
-                        }
+            // Draw gradient
+            for y in 0..h {
+                let t = y.saturating_mul(255) / (h.saturating_sub(1).max(1));
+                let r =
+                    (top.r * 255.0 * (255.0 - t as f32) + bottom.r * 255.0 * t as f32)
+                        / 255.0;
+                let g =
+                    (top.g * 255.0 * (255.0 - t as f32) + bottom.g * 255.0 * t as f32)
+                        / 255.0;
+                let b_val =
+                    (top.b * 255.0 * (255.0 - t as f32) + bottom.b * 255.0 * t as f32)
+                        / 255.0;
+                let color = Color::rgb(r / 255.0, g / 255.0, b_val / 255.0);
+                let bgra = color.to_bgra();
+
+                for x in 0..w {
+                    let idx = ((y as usize) * width as usize + (x as usize)) * 4;
+                    if idx + 3 < buf.len() {
+                        buf[idx] = (bgra & 0xFF) as u8;
+                        buf[idx + 1] = ((bgra >> 8) & 0xFF) as u8;
+                        buf[idx + 2] = ((bgra >> 16) & 0xFF) as u8;
+                        buf[idx + 3] = ((bgra >> 24) & 0xFF) as u8;
                     }
                 }
-                x += 64;
             }
-        }
-    });
+
+            if draw_lines {
+                // Subtle diagonal accent lines
+                let accent = Color::rgba(0.392, 0.471, 0.549, 0.110); // RGB(100, 120, 140) with alpha 28/255
+                let bgra = accent.to_bgra();
+                let mut x = 0i32;
+                while x < w as i32 + h as i32 {
+                    // Draw diagonal line from (x, 0) to (x-h, h-1)
+                    for i in 0..h as i32 {
+                        let px = x - i;
+                        let py = i;
+                        if px >= 0 && px < w as i32 && py >= 0 && py < h as i32 {
+                            let idx = (py as usize * width as usize + px as usize) * 4;
+                            if idx + 3 < buf.len() {
+                                buf[idx] = (bgra & 0xFF) as u8;
+                                buf[idx + 1] = ((bgra >> 8) & 0xFF) as u8;
+                                buf[idx + 2] = ((bgra >> 16) & 0xFF) as u8;
+                                buf[idx + 3] = ((bgra >> 24) & 0xFF) as u8;
+                            }
+                        }
+                    }
+                    x += 64;
+                }
+            }
+        });
+    }) else {
+        return;
+    };
 
     let _ = conn.commit(surface_id);
 }
 
 fn draw_solid_background(conn: &mut Connection, surface_id: u32, color: Color) {
-    let Some(surface) = conn.surface_mut(surface_id) else {
-        return;
-    };
+    let Some(()) = conn.with_surface_mut(surface_id, |surface| {
+        let w = surface.width();
+        let h = surface.height();
+        surface.with_buffer(|buf, width, _height| {
+            let bgra = color.to_bgra();
 
-    let w = surface.width();
-    let h = surface.height();
-    surface.with_buffer(|buf, width, _height| {
-        let bgra = color.to_bgra();
-
-        for y in 0..h {
-            for x in 0..w {
-                let idx = ((y as usize) * width as usize + (x as usize)) * 4;
-                if idx + 3 < buf.len() {
-                    buf[idx] = (bgra & 0xFF) as u8;
-                    buf[idx + 1] = ((bgra >> 8) & 0xFF) as u8;
-                    buf[idx + 2] = ((bgra >> 16) & 0xFF) as u8;
-                    buf[idx + 3] = ((bgra >> 24) & 0xFF) as u8;
+            for y in 0..h {
+                for x in 0..w {
+                    let idx = ((y as usize) * width as usize + (x as usize)) * 4;
+                    if idx + 3 < buf.len() {
+                        buf[idx] = (bgra & 0xFF) as u8;
+                        buf[idx + 1] = ((bgra >> 8) & 0xFF) as u8;
+                        buf[idx + 2] = ((bgra >> 16) & 0xFF) as u8;
+                        buf[idx + 3] = ((bgra >> 24) & 0xFF) as u8;
+                    }
                 }
             }
-        }
-    });
+        });
+    }) else {
+        return;
+    };
 
     let _ = conn.commit(surface_id);
 }

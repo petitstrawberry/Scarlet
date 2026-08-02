@@ -54,22 +54,31 @@ For APIs that need a synchronous server answer, such as `create_surface`,
 messages into client events. This keeps resize/configure/input broadcasts from
 being misinterpreted as replies to synchronous calls.
 
+Shared SGFX frame commits are the deliberate exception to synchronous request
+routing. `commit_sgfx_frame` serializes a frame with `request_id = 0` and returns
+without waiting for the compositor. The caller must retain the exact
+`(window_id, buffer_id, generation, compositor_epoch, commit_serial)` token
+until `SgfxBufferReleased` or `SgfxFrameRejected` is dispatched. Registration
+and destruction remain ordinary non-zero-ID requests. This lets two shared
+images pipeline rendering and presentation without allowing either image to be
+overwritten while SWS can still sample it.
+
 ## Minimal example
 
 ```rust
 use sws_client::Connection;
 
-let mut conn = Connection::connect_default()?;
+let conn = Connection::connect_default()?;
 let surface_id = conn.create_surface(400, 300)?;
 
 // draw
-{
-    let surface = conn.surface_mut(surface_id).unwrap();
+conn.with_surface_mut(surface_id, |surface| {
     surface.with_buffer(|buf, w, h| {
         let _ = (buf, w, h);
         // write pixels (BGRA)
     });
-}
+})
+.ok_or(sws_client::Error::SurfaceNotFound)?;
 
 conn.commit(surface_id)?;
 

@@ -1,6 +1,7 @@
 //! Animated multi-pass showcase for the backend-neutral `sgfx` IR.
 
 use std::process::ExitCode;
+use std::rc::Rc;
 use std::thread;
 use std::time::Duration;
 use std::vec::Vec;
@@ -204,10 +205,10 @@ fn main() -> ExitCode {
         return ExitCode::from(1);
     }
     let context = attempt!(device.create_context(), "failed to create context");
-    let image = attempt!(
+    let image = Rc::new(attempt!(
         context.create_image(display_info.width, display_info.height),
         "failed to create presentation image"
-    );
+    ));
     let queue = attempt!(context.create_queue(), "failed to create queue");
 
     let offscreen_width = image.width().min(640).max(1);
@@ -251,7 +252,7 @@ fn main() -> ExitCode {
         "index buffer is too large"
     );
 
-    let resources = ResourceTable::new();
+    let resources = Rc::new(ResourceTable::new());
     let screen = attempt!(
         resources.define_texture(attempt!(
             TextureDesc::new(
@@ -425,10 +426,10 @@ fn main() -> ExitCode {
     );
 
     let mut ir_resources = attempt!(
-        context.create_ir_resources(&resources),
+        context.create_ir_resources(Rc::clone(&resources)),
         "failed to create IR resource cache"
     );
-    if let Err(error) = ir_resources.map_image(screen, &image) {
+    if let Err(error) = ir_resources.map_image(screen.id(), Rc::clone(&image)) {
         return fail("failed to map presentation image", error);
     }
 

@@ -2,6 +2,7 @@
 name = "video_player"
 version = "0.16.0"
 edition = "2024"
+workspace = "../../.cargo"
 
 [features]
 default = ["av1-stateful-hw", "h264-stateful-hw", "mp4-aac"]
@@ -17,12 +18,6 @@ mp4-aac = ["dep:symphonia-core", "dep:symphonia-codec-aac"]
 vp9-stateful-hw = []
 vp9-stateless-hw = ["dep:scarlet-codecs", "scarlet-codecs/vp9"]
 
-[profile.dev]
-panic = "abort"
-
-[profile.release]
-panic = "abort"
-
 [dependencies]
 scarlet-std = { path = "../lib/std", features = ["alloc_debug"] }
 scarlet-codecs = { path = "../lib/scarlet-codecs", default-features = false, optional = true }
@@ -31,12 +26,3 @@ sas-client = { path = "../lib/sas-client", default-features = false, features = 
 rust_h264 = { git = "https://github.com/petitstrawberry/rust_h264.git", rev = "a559fe2545fd88def12146dcc06286475b53ead3", default-features = false, features = ["portable-simd"], optional = true }
 symphonia-core = { git = "https://github.com/petitstrawberry/Symphonia.git", rev = "71f92f0bc0fdd9d4f2a77129a543ee6c99611009", default-features = false, optional = true }
 symphonia-codec-aac = { git = "https://github.com/petitstrawberry/Symphonia.git", rev = "71f92f0bc0fdd9d4f2a77129a543ee6c99611009", default-features = false, optional = true }
-
-[patch."https://github.com/petitstrawberry/Scarlet"]
-scarlet-abi = { path = "../lib/scarlet-abi" }
-scarlet-os = { path = "../lib/scarlet-os" }
-scarlet-rt = { path = "../lib/scarlet-rt" }
-scarlet-std = { path = "../lib/std" }
-scarlet-sys = { path = "../lib/scarlet-sys" }
-sws-client = { path = "../lib/sws-client" }
-sws-protocol = { path = "../lib/sws-protocol" }

@@ -7,17 +7,17 @@ use framebuffer::DisplaySurface;
 use gpu_raw::{
     GPU_DEVICE_STATE_READY, GPU_EXECUTION_SUPPORT_IMAGE_UPLOAD, GPU_EXECUTION_SUPPORT_PRESENTATION,
     GPU_EXECUTION_SUPPORT_QUEUE, GPU_IMAGE_USAGE_RENDER_TARGET, GPU_IMAGE_USAGE_SAMPLED,
-    GPU_IMAGE_USAGE_TRANSFER_DST, GPU_RESULT_SUCCESS, Gpu as RawGpu, GpuBuffer as RawBuffer,
-    GpuContext as RawContext, GpuDialect as RawDialect, GpuImage as RawImage, GpuImageBgraRect,
-    GpuQueue as RawQueue,
+    GPU_IMAGE_USAGE_PRESENTABLE, GPU_IMAGE_USAGE_TRANSFER_DST, GPU_RESULT_SUCCESS, Gpu as RawGpu,
+    GpuBuffer as RawBuffer, GpuContext as RawContext, GpuDialect as RawDialect,
+    GpuImage as RawImage, GpuImageBgraRect, GpuQueue as RawQueue,
 };
 #[cfg(feature = "std")]
-use scarlet_os::handle::{HandleError, HandleResult};
+use scarlet_os::handle::{Handle, HandleError, HandleResult};
 #[cfg(feature = "std")]
 use scarlet_os::ipc::SharedMemory;
 #[cfg(not(feature = "std"))]
 use std::{
-    handle::{HandleError, HandleResult},
+    handle::{Handle, HandleError, HandleResult},
     ipc::SharedMemory,
 };
 
@@ -45,6 +45,7 @@ const VIRGL_CCMD_SET_CONSTANT_BUFFER: u32 = 12;
 const VIRGL_CCMD_SET_SCISSOR_STATE: u32 = 15;
 const VIRGL_CCMD_BIND_SAMPLER_STATES: u32 = 18;
 const VIRGL_CCMD_BIND_SHADER: u32 = 31;
+const VIRGL_CCMD_CLEAR_SURFACE: u32 = 62;
 
 const VIRGL_OBJECT_BLEND: u32 = 1;
 const VIRGL_OBJECT_RASTERIZER: u32 = 2;
@@ -108,7 +109,7 @@ const PIPE_SWIZZLE_X: u32 = 0;
 const PIPE_SWIZZLE_Y: u32 = 1;
 const PIPE_SWIZZLE_Z: u32 = 2;
 const PIPE_SWIZZLE_W: u32 = 3;
-const IR_VERTEX_BUFFER_BYTES: usize = MAX_IR_VERTICES * 10 * core::mem::size_of::<f32>();
+const IR_VERTEX_BUFFER_BYTES: usize = MAX_IR_VERTICES * 8 * core::mem::size_of::<f32>();
 const IR_TEXTURE_SLOTS: usize = 1_024;
 const IR_SAMPLER_SLOTS: usize = 256;
 const IR_PIPELINE_SLOTS: usize = 256;
@@ -197,7 +198,6 @@ DCL OUT[0], COLOR\n\
 const IR_VERTEX_SHADER: &str = "VERT\n\
 DCL IN[0]\n\
 DCL IN[1]\n\
-DCL IN[2]\n\
 DCL CONST[0..3]\n\
 DCL OUT[0], POSITION\n\
 DCL OUT[1], COLOR\n\
@@ -208,7 +208,7 @@ DCL TEMP[0]\n\
   2: MAD TEMP[0], CONST[2], IN[0].zzzz, TEMP[0]\n\
   3: MAD OUT[0], CONST[3], IN[0].wwww, TEMP[0]\n\
   4: MOV OUT[1], IN[1]\n\
-  5: MOV OUT[2], IN[2]\n\
+  5: MOV OUT[2], IN[1]\n\
   6: END\n";
 
 const IR_SOLID_FRAGMENT_SHADER: &str = "FRAG\n\
@@ -336,6 +336,31 @@ impl Context {
         })
     }
 
+    pub(crate) fn create_shared_image(&self, width: u32, height: u32) -> HandleResult<Image> {
+        if width == 0 || height == 0 {
+            return Err(HandleError::InvalidParameter);
+        }
+
+        let raw = self.device.raw.create_image_with_usage(
+            width,
+            height,
+            GPU_IMAGE_USAGE_RENDER_TARGET | GPU_IMAGE_USAGE_PRESENTABLE | GPU_IMAGE_USAGE_SAMPLED,
+        )?;
+        let resource_id = resource_id_from_token(self.raw.attach_image(&raw)?)?;
+        Ok(Image {
+            raw,
+            resource_id,
+            context_handle: self.handle_id(),
+            orientation: FramebufferOrientation::UPPER_LEFT,
+            width,
+            height,
+            composition_surface_handle: self.allocate_object_handle()?,
+            composition_surface_initialized: Cell::new(false),
+            ir_surface_handle: self.allocate_object_handle()?,
+            ir_surface_initialized: Cell::new(false),
+        })
+    }
+
     pub(crate) fn create_sampled_bgra_texture(
         &self,
         width: u32,
@@ -397,6 +422,34 @@ impl Context {
             ir_surface_handle: self.allocate_object_handle()?,
             ir_surface_initialized: Cell::new(false),
         })
+    }
+
+    pub(crate) fn import_shared_bgra_texture(
+        &self,
+        handle: Handle,
+    ) -> HandleResult<(Texture, u32, u32)> {
+        let raw = RawImage::from_handle(handle)?;
+        let info = raw.query()?;
+        if info.format != gpu_raw::GPU_IMAGE_FORMAT_BGRA8_UNORM
+            || info.usage & GPU_IMAGE_USAGE_SAMPLED == 0
+            || info.width == 0
+            || info.height == 0
+        {
+            return Err(HandleError::InvalidParameter);
+        }
+        let resource_id = resource_id_from_token(self.raw.attach_image(&raw)?)?;
+        let texture = Texture {
+            raw,
+            resource_id,
+            width: info.width,
+            height: info.height,
+            context_handle: self.handle_id(),
+            sampler_view_handle: self.allocate_object_handle()?,
+            sampler_view_initialized: Cell::new(false),
+            ir_surface_handle: self.allocate_object_handle()?,
+            ir_surface_initialized: Cell::new(false),
+        };
+        Ok((texture, info.width, info.height))
     }
 
     pub(crate) fn upload_texture_bgra(
@@ -1026,12 +1079,25 @@ impl Queue {
             resources.vertex_shader_handle,
             resources.vertex_elements_handle,
         );
-        push_scissor(
+        push_ir_scissor(
             &mut commands,
             ir_rect_to_pixel_rect(submission.render_area)?,
         )?;
         if let Some(clear_color) = submission.clear_color {
-            push_ir_clear(&mut commands, clear_color);
+            if submission.render_area.x == 0
+                && submission.render_area.y == 0
+                && submission.render_area.width == target.width
+                && submission.render_area.height == target.height
+            {
+                push_ir_clear(&mut commands, clear_color);
+            } else {
+                push_ir_clear_surface(
+                    &mut commands,
+                    target.surface_handle,
+                    submission.render_area,
+                    clear_color,
+                )?;
+            }
         }
         push_ir_inline_write(
             &mut commands,
@@ -1056,7 +1122,10 @@ impl Queue {
             );
             push_constant_buffer(&mut commands, PIPE_SHADER_VERTEX, &draw.uniforms.transform)?;
             push_constant_buffer(&mut commands, PIPE_SHADER_FRAGMENT, &draw.uniforms.color)?;
-            push_scissor(&mut commands, ir_rect_to_pixel_rect(draw.scissor)?)?;
+            push_ir_scissor(
+                &mut commands,
+                ir_rect_to_pixel_rect(draw.scissor)?,
+            )?;
             if let (Some(texture_spec), Some(sampler)) = (draw.texture, draw.sampler) {
                 let texture = resources
                     .textures
@@ -1404,6 +1473,10 @@ impl Image {
 
     pub(crate) fn present(&self, display: &DisplaySurface) -> HandleResult<()> {
         display.present_image(self.raw.as_handle(), None)
+    }
+
+    pub(crate) fn shared_handle(&self) -> &Handle {
+        self.raw.as_handle()
     }
 }
 
@@ -2084,7 +2157,7 @@ fn push_ir_setup(commands: &mut Vec<u8>, resources: &IrResources) {
     );
     push_dword(
         commands,
-        command_header(VIRGL_CCMD_CREATE_OBJECT, VIRGL_OBJECT_VERTEX_ELEMENTS, 13),
+        command_header(VIRGL_CCMD_CREATE_OBJECT, VIRGL_OBJECT_VERTEX_ELEMENTS, 9),
     );
     push_dword(commands, resources.vertex_elements_handle);
     push_dword(commands, 0);
@@ -2095,10 +2168,6 @@ fn push_ir_setup(commands: &mut Vec<u8>, resources: &IrResources) {
     push_dword(commands, 0);
     push_dword(commands, 0);
     push_dword(commands, VIRGL_FORMAT_R32G32B32A32_FLOAT);
-    push_dword(commands, 32);
-    push_dword(commands, 0);
-    push_dword(commands, 0);
-    push_dword(commands, VIRGL_FORMAT_R32G32_FLOAT);
 }
 
 fn push_ir_pipeline(commands: &mut Vec<u8>, pipeline: &IrPipeline) {
@@ -2196,7 +2265,7 @@ fn push_ir_bind_pass_state(
         commands,
         command_header(VIRGL_CCMD_SET_VERTEX_BUFFERS, 0, 3),
     );
-    push_dword(commands, 40);
+    push_dword(commands, 32);
     push_dword(commands, 0);
     push_dword(commands, vertex_resource_id);
     push_viewport(commands, Viewport::new(width, height), orientation);
@@ -2214,6 +2283,30 @@ fn push_ir_clear(commands: &mut Vec<u8>, color: [f32; 4]) {
     push_dword(commands, 0);
 }
 
+fn push_ir_clear_surface(
+    commands: &mut Vec<u8>,
+    surface_handle: u32,
+    area: crate::driver::IrRect,
+    color: [f32; 4],
+) -> HandleResult<()> {
+    // VIRGL_CCMD_CLEAR disables scissoring. CLEAR_SURFACE carries an explicit
+    // rectangle and therefore implements SGFX LoadOp::Clear's render-area
+    // semantics without touching preserved pixels outside `area`. IR targets
+    // already use an upper-left framebuffer orientation through the negative
+    // viewport, so protocol rectangles stay in the same upper-left space.
+    push_dword(commands, command_header(VIRGL_CCMD_CLEAR_SURFACE, 0, 10));
+    push_dword(commands, PIPE_CLEAR_COLOR0 << 1);
+    push_dword(commands, surface_handle);
+    for component in color {
+        push_float(commands, component);
+    }
+    push_dword(commands, area.x);
+    push_dword(commands, area.y);
+    push_dword(commands, area.width);
+    push_dword(commands, area.height);
+    Ok(())
+}
+
 fn push_ir_inline_write(
     commands: &mut Vec<u8>,
     resource_id: u32,
@@ -2221,12 +2314,12 @@ fn push_ir_inline_write(
 ) -> HandleResult<()> {
     let components = vertices
         .len()
-        .checked_mul(10)
+        .checked_mul(8)
         .ok_or(HandleError::InvalidParameter)?;
     let components = u32::try_from(components).map_err(|_| HandleError::InvalidParameter)?;
     let byte_len = vertices
         .len()
-        .checked_mul(40)
+        .checked_mul(32)
         .and_then(|length| u32::try_from(length).ok())
         .ok_or(HandleError::InvalidParameter)?;
     push_dword(
@@ -2244,10 +2337,7 @@ fn push_ir_inline_write(
         for component in vertex.position {
             push_float(commands, component);
         }
-        for component in vertex.color {
-            push_float(commands, component);
-        }
-        for component in vertex.uv {
+        for component in vertex.secondary {
             push_float(commands, component);
         }
     }
@@ -2335,6 +2425,12 @@ fn push_scissor(commands: &mut Vec<u8>, clip: PixelRect) -> HandleResult<()> {
     push_dword(commands, clip.x() | (clip.y() << 16));
     push_dword(commands, max_x | (max_y << 16));
     Ok(())
+}
+
+fn push_ir_scissor(commands: &mut Vec<u8>, clip: PixelRect) -> HandleResult<()> {
+    // The IR viewport establishes an upper-left framebuffer orientation.
+    // Converting Y here would mirror partial damage a second time.
+    push_scissor(commands, clip)
 }
 
 fn push_clear(commands: &mut Vec<u8>, clear_color: Color) {

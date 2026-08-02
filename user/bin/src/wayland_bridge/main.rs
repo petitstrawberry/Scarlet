@@ -30,6 +30,7 @@ use registry::Registry;
 use shm::ShmManager;
 use std::collections::BTreeMap;
 use std::env;
+use std::handle::Handle;
 use std::handle::capability::memory_mapping::flags;
 use std::io::{Read, Write};
 use std::ipc::{SharedMemory, permissions};
@@ -45,6 +46,7 @@ use xdg_shell::XdgShellManager;
 
 const MAX_PENDING_DAMAGE_RECTS: usize = 8;
 const DAMAGE_MERGE_AREA_FACTOR: u64 = 2;
+const MAX_WAYLAND_RECORD_SIZE: usize = 1024 * 1024 + MessageHeader::SIZE;
 
 /// Log level for the Wayland bridge
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -235,8 +237,12 @@ struct WaylandBridge {
     focused_pointer: Option<u32>,
     /// Incoming buffer for SWS frames
     sws_rx_buffer: Vec<u8>,
-    /// Pending SWS responses that are not input events
-    sws_pending: Vec<protocol_sws::ServerMessage>,
+    /// Scratch buffer for one SWS handle-and-data record
+    sws_handle_record: Vec<u8>,
+    /// Pending SWS responses keyed by their non-zero request ID.
+    sws_pending: Vec<(u8, protocol_sws::ServerMessage, Option<Handle>)>,
+    /// Next non-zero request ID for synchronous SWS requests.
+    next_sws_request_id: u8,
     /// Coalesced SWS updates waiting to be sent per window
     pending_damage: BTreeMap<u32, PendingDamage>,
     /// Frame callbacks waiting for the next SWS update flush per surface
@@ -277,6 +283,11 @@ impl WaylandBridge {
         let input_event_queue = Arc::new(StdMutex::new(Vec::new()));
         let objects_for_input_thread = Arc::new(StdMutex::new(BTreeMap::new()));
         let pointer_position_for_thread = Arc::new(StdMutex::new((0, 0)));
+        let mut sws_handle_record = Vec::new();
+        sws_handle_record.resize(
+            protocol_sws::MessageHeader::SIZE + protocol_sws::MAX_PAYLOAD_SIZE,
+            0,
+        );
 
         Ok(Self {
             registry: Registry::new(),
@@ -301,7 +312,9 @@ impl WaylandBridge {
             focused_keyboard: None,
             focused_pointer: None,
             sws_rx_buffer: Vec::new(),
+            sws_handle_record,
             sws_pending: Vec::new(),
+            next_sws_request_id: 1,
             pending_damage: BTreeMap::new(),
             pending_frame_callbacks: BTreeMap::new(),
             flush_deferred: false,
@@ -332,29 +345,20 @@ impl WaylandBridge {
 
         bridge_log!("[Bridge] Connected to SWS, registering as extension");
 
-        // Send REGISTER_EXTENSION message
-        let extension_name = b"wayland_bridge";
-        let payload = protocol_sws::payload_register_extension(extension_name);
-        let header = protocol_sws::MessageHeader::new(
-            protocol_sws::client_msg::REGISTER_EXTENSION,
-            payload.len() as u32,
-        );
-
-        let mut msg_bytes = Vec::new();
-        msg_bytes.extend_from_slice(&header.to_le_bytes());
-        msg_bytes.extend_from_slice(&payload);
-
         let mut sws_socket_mut = sws_socket;
-        sws_socket_mut
-            .write(&msg_bytes)
-            .map_err(|_| "Failed to send REGISTER_EXTENSION")?;
         sws_socket_mut
             .set_nonblocking(true)
             .map_err(|_| "Failed to set SWS socket non-blocking")?;
 
         self.sws_connection = Some(sws_socket_mut);
+        let extension_name = b"wayland_bridge";
+        let payload = protocol_sws::payload_register_extension(extension_name);
+        let request_id = self.send_sws_request(
+            protocol_sws::client_msg::REGISTER_EXTENSION,
+            &payload,
+        )?;
         if let protocol_sws::ServerMessage::ExtensionRegistered { extension_id } = self
-            .wait_for_sws_message(|msg| {
+            .wait_for_sws_message(request_id, |msg| {
                 matches!(msg, protocol_sws::ServerMessage::ExtensionRegistered { .. })
             })?
         {
@@ -373,16 +377,11 @@ impl WaylandBridge {
     /// integer, matching the `wl_output.scale` requirement of being a
     /// positive integer.
     fn query_output_scale(&mut self) -> Result<(), &'static str> {
-        let sws_conn = self.sws_connection.as_mut().ok_or("Not connected to SWS")?;
-
-        let header =
-            protocol_sws::MessageHeader::new(protocol_sws::client_msg::GET_OUTPUT_SCALE, 0);
-        sws_conn
-            .write(&header.to_le_bytes())
-            .map_err(|_| "Failed to send GET_OUTPUT_SCALE")?;
+        let request_id =
+            self.send_sws_request(protocol_sws::client_msg::GET_OUTPUT_SCALE, &[])?;
 
         if let protocol_sws::ServerMessage::OutputScale { scale_milli } = self
-            .wait_for_sws_message(|msg| {
+            .wait_for_sws_message(request_id, |msg| {
                 matches!(msg, protocol_sws::ServerMessage::OutputScale { .. })
             })?
         {
@@ -671,15 +670,168 @@ impl WaylandBridge {
         }
     }
 
+    fn allocate_sws_request_id(&mut self) -> Result<u8, &'static str> {
+        for _ in 0..u8::MAX {
+            let request_id = self.next_sws_request_id.max(1);
+            self.next_sws_request_id = request_id.wrapping_add(1).max(1);
+            if !self
+                .sws_pending
+                .iter()
+                .any(|(pending_id, _, _)| *pending_id == request_id)
+            {
+                return Ok(request_id);
+            }
+        }
+        Err("SWS request IDs exhausted")
+    }
+
+    fn send_sws_request(
+        &mut self,
+        msg_type: u32,
+        payload: &[u8],
+    ) -> Result<u8, &'static str> {
+        if payload.len() > protocol_sws::MAX_PAYLOAD_SIZE {
+            return Err("SWS request payload is too large");
+        }
+        let request_id = self.allocate_sws_request_id()?;
+        let header =
+            protocol_sws::MessageHeader::request(msg_type, request_id, payload.len() as u32);
+        let mut frame = Vec::with_capacity(protocol_sws::MessageHeader::SIZE + payload.len());
+        frame.extend_from_slice(&header.to_le_bytes());
+        frame.extend_from_slice(payload);
+        let connection = self
+            .sws_connection
+            .as_mut()
+            .ok_or("Not connected to SWS")?;
+        let mut written = 0;
+        while written < frame.len() {
+            match connection.write(&frame[written..]) {
+                Ok(0) => return Err("SWS connection closed while sending request"),
+                Ok(count) => written += count,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(1));
+                }
+                Err(_) => return Err("Failed to send SWS request"),
+            }
+        }
+        connection
+            .flush()
+            .map_err(|_| "Failed to flush SWS request")?;
+        Ok(request_id)
+    }
+
+    fn route_sws_message(
+        &mut self,
+        header: protocol_sws::MessageHeader,
+        message: protocol_sws::ServerMessage,
+        handle: Option<Handle>,
+    ) -> Result<(), &'static str> {
+        if header.is_response() {
+            if header.request_id == 0 {
+                return Err("SWS response used reserved request ID zero");
+            }
+            self.sws_pending
+                .push((header.request_id, message, handle));
+            return Ok(());
+        }
+        if header.request_id != 0 || handle.is_some() {
+            return Err("Invalid unsolicited SWS frame routing");
+        }
+        match message {
+            protocol_sws::ServerMessage::InputEvent {
+                window_id,
+                time,
+                type_,
+                code,
+                value,
+            } => {
+                if handle.is_some() {
+                    return Err("Unexpected handle attached to SWS input event");
+                }
+                self.handle_sws_input_event(window_id, time, type_, code, value);
+            }
+            protocol_sws::ServerMessage::ExtensionInputEvent {
+                external_client_id,
+                window_id,
+                time,
+                type_,
+                code,
+                value,
+            } => {
+                if handle.is_some() {
+                    return Err("Unexpected handle attached to SWS extension input event");
+                }
+                if let Some(surface_id) = self.surface_id_for_window(window_id)
+                    && external_client_id != surface_id
+                {
+                    bridge_log!(
+                        "[Bridge] EXTENSION_INPUT_EVENT client mismatch: window={} external_client_id={} surface_id={}",
+                        window_id,
+                        external_client_id,
+                        surface_id
+                    );
+                }
+                self.handle_sws_input_event(window_id, time, type_, code, value);
+            }
+            protocol_sws::ServerMessage::OutputScaleChanged { scale_milli } => {
+                self.output_scale = ((scale_milli + 500) / 1000).max(1) as i32;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
     fn poll_sws_messages(&mut self) -> Result<(), &'static str> {
-        let sws_conn = match self.sws_connection.as_mut() {
-            Some(conn) => conn,
-            None => return Ok(()),
-        };
+        if self.sws_connection.is_none() {
+            return Ok(());
+        }
+
+        loop {
+            let result = self
+                .sws_connection
+                .as_ref()
+                .ok_or("Not connected to SWS")?
+                .recv_handle_and_data(&mut self.sws_handle_record);
+            match result {
+                Ok((handle, bytes_read)) => {
+                    if bytes_read < protocol_sws::MessageHeader::SIZE {
+                        return Err("Truncated SWS handle record");
+                    }
+                    let mut header_bytes = [0u8; protocol_sws::MessageHeader::SIZE];
+                    header_bytes.copy_from_slice(
+                        &self.sws_handle_record[..protocol_sws::MessageHeader::SIZE],
+                    );
+                    let header = protocol_sws::MessageHeader::from_le_bytes(header_bytes);
+                    let frame_len = protocol_sws::MessageHeader::SIZE
+                        + header.payload_size as usize;
+                    if frame_len != bytes_read
+                        || header.payload_size as usize > protocol_sws::MAX_PAYLOAD_SIZE
+                    {
+                        return Err("Invalid SWS handle record length");
+                    }
+                    let message = protocol_sws::parse_server_message(
+                        header.msg_type_u32(),
+                        &self.sws_handle_record[protocol_sws::MessageHeader::SIZE..frame_len],
+                    )
+                    .map_err(|_| "Invalid SWS handle record")?;
+                    self.route_sws_message(header, message, Some(handle))?;
+                }
+                Err(std::socket::SocketError::ReceiveBufferTooSmall { required_len }) => {
+                    self.sws_handle_record.resize(required_len, 0);
+                }
+                Err(std::socket::SocketError::WouldBlock) => break,
+                Err(_) => return Err("Failed to receive SWS handle record"),
+            }
+        }
 
         let mut buf = [0u8; 1024];
         loop {
-            match sws_conn.read(&mut buf) {
+            let read_result = self
+                .sws_connection
+                .as_mut()
+                .ok_or("Not connected to SWS")?
+                .read(&mut buf);
+            match read_result {
                 Ok(0) => break,
                 Ok(n) => {
                     self.sws_rx_buffer.extend_from_slice(&buf[..n]);
@@ -695,71 +847,77 @@ impl WaylandBridge {
             let mut header_bytes = [0u8; protocol_sws::MessageHeader::SIZE];
             header_bytes.copy_from_slice(&self.sws_rx_buffer[..protocol_sws::MessageHeader::SIZE]);
             let header = protocol_sws::MessageHeader::from_le_bytes(header_bytes);
-            let frame_len = protocol_sws::MessageHeader::SIZE + header.payload_size as usize;
+            if header.payload_size as usize > protocol_sws::MAX_PAYLOAD_SIZE {
+                return Err("SWS frame payload is too large");
+            }
+            let frame_len = protocol_sws::MessageHeader::SIZE
+                .checked_add(header.payload_size as usize)
+                .ok_or("Invalid SWS frame length")?;
             if self.sws_rx_buffer.len() < frame_len {
                 break;
             }
             let payload = &self.sws_rx_buffer[protocol_sws::MessageHeader::SIZE..frame_len];
-            if let Ok(msg) = protocol_sws::parse_server_message(header.msg_type_u32(), payload) {
-                match msg {
-                    protocol_sws::ServerMessage::InputEvent {
-                        window_id,
-                        time,
-                        type_,
-                        code,
-                        value,
-                    } => {
-                        self.handle_sws_input_event(window_id, time, type_, code, value);
-                    }
-                    protocol_sws::ServerMessage::ExtensionInputEvent {
-                        external_client_id,
-                        window_id,
-                        time,
-                        type_,
-                        code,
-                        value,
-                    } => {
-                        if let Some(surface_id) = self.surface_id_for_window(window_id)
-                            && external_client_id != surface_id
-                        {
-                            bridge_log!(
-                                "[Bridge] EXTENSION_INPUT_EVENT client mismatch: window={} external_client_id={} surface_id={}",
-                                window_id,
-                                external_client_id,
-                                surface_id
-                            );
-                        }
-                        self.handle_sws_input_event(window_id, time, type_, code, value);
-                    }
-                    other => {
-                        self.sws_pending.push(other);
-                    }
-                }
-            }
+            let message = protocol_sws::parse_server_message(header.msg_type_u32(), payload)
+                .map_err(|_| "Invalid SWS frame")?;
+            self.route_sws_message(header, message, None)?;
             self.sws_rx_buffer.drain(0..frame_len);
         }
 
         Ok(())
     }
 
-    fn wait_for_sws_message<F>(
+    fn wait_for_sws_entry(
         &mut self,
-        mut matches: F,
-    ) -> Result<protocol_sws::ServerMessage, &'static str>
-    where
-        F: FnMut(&protocol_sws::ServerMessage) -> bool,
-    {
+        request_id: u8,
+    ) -> Result<(protocol_sws::ServerMessage, Option<Handle>), &'static str> {
+        if request_id == 0 {
+            return Err("Cannot wait for reserved SWS request ID zero");
+        }
         loop {
             self.poll_sws_messages()?;
             let mut idx = 0;
             while idx < self.sws_pending.len() {
-                if matches(&self.sws_pending[idx]) {
-                    return Ok(self.sws_pending.remove(idx));
+                if self.sws_pending[idx].0 == request_id {
+                    let (_, message, handle) = self.sws_pending.remove(idx);
+                    return Ok((message, handle));
                 }
                 idx += 1;
             }
             thread::sleep(Duration::from_millis(1));
         }
+    }
+
+    fn wait_for_sws_message<F>(
+        &mut self,
+        request_id: u8,
+        mut matches: F,
+    ) -> Result<protocol_sws::ServerMessage, &'static str>
+    where
+        F: FnMut(&protocol_sws::ServerMessage) -> bool,
+    {
+        let (message, handle) = self.wait_for_sws_entry(request_id)?;
+        if handle.is_some() {
+            return Err("Unexpected handle attached to SWS response");
+        }
+        if !matches(&message) {
+            return Err("Unexpected SWS response");
+        }
+        Ok(message)
+    }
+
+    fn wait_for_sws_message_with_handle<F>(
+        &mut self,
+        request_id: u8,
+        mut matches: F,
+    ) -> Result<(protocol_sws::ServerMessage, Handle), &'static str>
+    where
+        F: FnMut(&protocol_sws::ServerMessage) -> bool,
+    {
+        let (message, handle) = self.wait_for_sws_entry(request_id)?;
+        if !matches(&message) {
+            return Err("Unexpected SWS response");
+        }
+        Ok((message, handle.ok_or("Missing handle on SWS response")?))
     }
 
     fn get_object_version(&self, id: u32) -> Option<u32> {
@@ -855,42 +1013,31 @@ impl WaylandBridge {
         }
 
         let mut window_id_opt = None;
-        {
-            let sws_conn = self.sws_connection.as_mut().ok_or("Not connected to SWS")?;
+        // Default size for now (800x600)
+        let width = 800u32;
+        let height = 600u32;
 
-            // Default size for now (800x600)
-            let width = 800u32;
-            let height = 600u32;
+        bridge_log!(
+            "[Bridge] Creating SWS window for surface {} ({}x{})",
+            wl_surface_id,
+            width,
+            height
+        );
 
-            bridge_log!(
-                "[Bridge] Creating SWS window for surface {} ({}x{})",
-                wl_surface_id,
-                width,
-                height
-            );
-
-            // Send EXTENSION_CREATE_WINDOW message
-            let payload =
-                protocol_sws::payload_extension_create_window(wl_surface_id, width, height);
-            let header = protocol_sws::MessageHeader::new(
-                protocol_sws::client_msg::EXTENSION_CREATE_WINDOW,
-                payload.len() as u32,
-            );
-
-            let mut msg_bytes = Vec::new();
-            msg_bytes.extend_from_slice(&header.to_le_bytes());
-            msg_bytes.extend_from_slice(&payload);
-
-            sws_conn
-                .write(&msg_bytes)
-                .map_err(|_| "Failed to send EXTENSION_CREATE_WINDOW")?;
-        }
+        let payload = protocol_sws::payload_extension_create_window(wl_surface_id, width, height);
+        let request_id = self.send_sws_request(
+            protocol_sws::client_msg::EXTENSION_CREATE_WINDOW,
+            &payload,
+        )?;
+        let (create_response, shm_handle) =
+            self.wait_for_sws_message_with_handle(request_id, |msg| {
+                matches!(msg, protocol_sws::ServerMessage::WindowCreated { .. })
+            })?;
         if let protocol_sws::ServerMessage::WindowCreated {
             window_id,
             shm_size,
-        } = self.wait_for_sws_message(|msg| {
-            matches!(msg, protocol_sws::ServerMessage::WindowCreated { .. })
-        })? {
+        } = create_response
+        {
             bridge_log!(
                 "[Bridge] SWS window created: {} for surface {} (shm_size={})",
                 window_id,
@@ -900,8 +1047,7 @@ impl WaylandBridge {
             self.surface_to_window.insert(wl_surface_id, window_id);
             window_id_opt = Some(window_id);
 
-            let sws_conn = self.sws_connection.as_mut().ok_or("Not connected to SWS")?;
-            if let Ok(shm_handle) = sws_conn.recv_handle() {
+            {
                 bridge_log!("[Bridge] Received SHM handle for window {}", window_id);
                 if let Ok(shm) = SharedMemory::from_handle(shm_handle) {
                     if let Ok(mapper) = shm.as_handle().as_memory_mapping() {
@@ -977,38 +1123,27 @@ impl WaylandBridge {
         }
 
         let mut window_id_opt = None;
-        {
-            let sws_conn = self.sws_connection.as_mut().ok_or("Not connected to SWS")?;
+        bridge_log!(
+            "[Bridge] Creating SWS window for surface {} ({}x{})",
+            wl_surface_id,
+            width,
+            height
+        );
 
-            bridge_log!(
-                "[Bridge] Creating SWS window for surface {} ({}x{})",
-                wl_surface_id,
-                width,
-                height
-            );
-
-            // Send EXTENSION_CREATE_WINDOW message
-            let payload =
-                protocol_sws::payload_extension_create_window(wl_surface_id, width, height);
-            let header = protocol_sws::MessageHeader::new(
-                protocol_sws::client_msg::EXTENSION_CREATE_WINDOW,
-                payload.len() as u32,
-            );
-
-            let mut msg_bytes = Vec::new();
-            msg_bytes.extend_from_slice(&header.to_le_bytes());
-            msg_bytes.extend_from_slice(&payload);
-
-            sws_conn
-                .write(&msg_bytes)
-                .map_err(|_| "Failed to send EXTENSION_CREATE_WINDOW")?;
-        }
+        let payload = protocol_sws::payload_extension_create_window(wl_surface_id, width, height);
+        let request_id = self.send_sws_request(
+            protocol_sws::client_msg::EXTENSION_CREATE_WINDOW,
+            &payload,
+        )?;
+        let (create_response, shm_handle) =
+            self.wait_for_sws_message_with_handle(request_id, |msg| {
+                matches!(msg, protocol_sws::ServerMessage::WindowCreated { .. })
+            })?;
         if let protocol_sws::ServerMessage::WindowCreated {
             window_id,
             shm_size,
-        } = self.wait_for_sws_message(|msg| {
-            matches!(msg, protocol_sws::ServerMessage::WindowCreated { .. })
-        })? {
+        } = create_response
+        {
             bridge_log!(
                 "[Bridge] SWS window created: {} for surface {} (shm_size={})",
                 window_id,
@@ -1018,8 +1153,7 @@ impl WaylandBridge {
             self.surface_to_window.insert(wl_surface_id, window_id);
             window_id_opt = Some(window_id);
 
-            let sws_conn = self.sws_connection.as_mut().ok_or("Not connected to SWS")?;
-            if let Ok(shm_handle) = sws_conn.recv_handle() {
+            {
                 bridge_log!("[Bridge] Received SHM handle for window {}", window_id);
 
                 if let Ok(shm) = SharedMemory::from_handle(shm_handle) {
@@ -1505,18 +1639,9 @@ impl WaylandBridge {
         msg_bytes.extend_from_slice(&header.to_le_bytes());
         msg_bytes.extend_from_slice(&payload);
 
-        // bridge_log!("[Bridge] Sending EXTENSION_ATTACH_BUFFER message ({} bytes)", msg_bytes.len());
         sws_conn
-            .write(&msg_bytes)
-            .map_err(|_| "Failed to send EXTENSION_ATTACH_BUFFER")?;
-        // bridge_log!("[Bridge] EXTENSION_ATTACH_BUFFER message sent successfully");
-
-        // bridge_log!("[Bridge] Sending client SHM handle to SWS...");
-        sws_conn
-            .send_handle(handle)
-            .map_err(|_| "Failed to send EXTENSION_ATTACH_BUFFER handle")?;
-        // bridge_log!("[Bridge] Client SHM handle sent successfully");
-        // bridge_log!("[Bridge] === EXTENSION_ATTACH_BUFFER COMPLETE ===");
+            .send_handle_and_data(handle, &msg_bytes)
+            .map_err(|_| "Failed to send EXTENSION_ATTACH_BUFFER record")?;
 
         if let Some(window_shm_info) = self.window_shm.get_mut(&window_id) {
             window_shm_info.external_buffer_attached = true;
@@ -1547,37 +1672,26 @@ impl WaylandBridge {
 
         // Send RESIZE_WINDOW message
         let payload = protocol_sws::payload_resize_window(window_id, new_width, new_height);
-        let header = protocol_sws::MessageHeader::new(
-            protocol_sws::client_msg::RESIZE_WINDOW,
-            payload.len() as u32,
-        );
+        let request_id =
+            self.send_sws_request(protocol_sws::client_msg::RESIZE_WINDOW, &payload)?;
 
-        let mut msg_bytes = Vec::new();
-        msg_bytes.extend_from_slice(&header.to_le_bytes());
-        msg_bytes.extend_from_slice(&payload);
-
-        {
-            let sws_conn = self.sws_connection.as_mut().ok_or("Not connected to SWS")?;
-            sws_conn
-                .write(&msg_bytes)
-                .map_err(|_| "Failed to send RESIZE_WINDOW")?;
-        }
-
+        let (resize_response, shm_handle) =
+            self.wait_for_sws_message_with_handle(request_id, |msg| {
+                matches!(msg, protocol_sws::ServerMessage::WindowResized { .. })
+            })?;
         if let protocol_sws::ServerMessage::WindowResized {
             window_id: resized_window_id,
             shm_size,
             ..
-        } = self.wait_for_sws_message(|msg| {
-            matches!(msg, protocol_sws::ServerMessage::WindowResized { .. })
-        })? {
+        } = resize_response
+        {
             bridge_log!(
                 "[Bridge] Window {} resized to shm_size={}",
                 resized_window_id,
                 shm_size
             );
 
-            let sws_conn = self.sws_connection.as_mut().ok_or("Not connected to SWS")?;
-            if let Ok(shm_handle) = sws_conn.recv_handle() {
+            {
                 bridge_log!("[Bridge] Received new SHM handle for window {}", window_id);
 
                 if let Ok(shm) = SharedMemory::from_handle(shm_handle) {
@@ -1631,11 +1745,32 @@ impl WaylandBridge {
             .map_err(|_| "Failed to set client socket non-blocking")?;
 
         let mut buffer: Vec<u8> = Vec::new();
+        let mut record_buffer = Vec::new();
+        record_buffer.resize(MAX_WAYLAND_RECORD_SIZE, 0);
+        let mut received_handles: Vec<(usize, Handle)> = Vec::new();
         let mut idle_backoff_ms = 1u64;
 
         loop {
             let mut got_data = false;
             loop {
+                match client.recv_handle_and_data(&mut record_buffer) {
+                    Ok((handle, bytes_read)) => {
+                        got_data = true;
+                        received_handles.push((buffer.len(), handle));
+                        buffer.extend_from_slice(&record_buffer[..bytes_read]);
+                        continue;
+                    }
+                    Err(std::socket::SocketError::ReceiveBufferTooSmall { required_len }) => {
+                        record_buffer.resize(required_len, 0);
+                        continue;
+                    }
+                    Err(std::socket::SocketError::WouldBlock) => {}
+                    Err(_) => {
+                        bridge_log!("[Bridge] Error receiving handle-and-data record");
+                        return Ok(());
+                    }
+                }
+
                 let mut read_buf = [0u8; 4096];
                 match client.read(&mut read_buf) {
                     Ok(0) => {
@@ -1696,11 +1831,24 @@ impl WaylandBridge {
                         );
                     }
 
+                    let attached_handle = match received_handles.first() {
+                        Some((handle_offset, _)) if *handle_offset < offset => {
+                            return Err("Handle record does not start at a Wayland message boundary");
+                        }
+                        Some((handle_offset, _)) if *handle_offset == offset => {
+                            Some(received_handles.remove(0).1)
+                        }
+                        Some((handle_offset, _)) if *handle_offset < offset + msg_size => {
+                            return Err("Handle record starts inside a Wayland message");
+                        }
+                        _ => None,
+                    };
+
                     // Handle the message
                     let responses = self.handle_message(
                         &header,
                         &buffer[offset + 8..offset + msg_size],
-                        &mut client,
+                        attached_handle,
                     )?;
                     for response in responses {
                         let response_bytes = response.encode();
@@ -1718,24 +1866,18 @@ impl WaylandBridge {
                                 .get(&response.header.object_id)
                                 .map(|iface| iface == "wl_keyboard")
                                 .unwrap_or(false);
-                            if is_keyboard && let Some(shm) = self.keymap_shm.as_ref() {
-                                match client.send_handle_and_data(shm.as_handle(), &response_bytes)
-                                {
-                                    Ok(()) => {
-                                        if is_debug_enabled() {
-                                            bridge_log!(
-                                                "[Bridge] KEYMAP sent with handle successfully"
-                                            );
-                                        }
-                                        continue;
-                                    }
-                                    Err(e) => {
-                                        bridge_log!(
-                                            "[Bridge] Failed to send KEYMAP with handle: {:?}, falling back",
-                                            e
-                                        );
-                                    }
+                            if is_keyboard {
+                                let shm = self
+                                    .keymap_shm
+                                    .as_ref()
+                                    .ok_or("Missing keymap shared memory")?;
+                                client
+                                    .send_handle_and_data(shm.as_handle(), &response_bytes)
+                                    .map_err(|_| "Failed to send KEYMAP handle record")?;
+                                if is_debug_enabled() {
+                                    bridge_log!("[Bridge] KEYMAP sent with handle successfully");
                                 }
+                                continue;
                             }
                         }
                         client
@@ -1748,6 +1890,9 @@ impl WaylandBridge {
 
                 if offset > 0 {
                     buffer.drain(0..offset);
+                    for (handle_offset, _) in received_handles.iter_mut() {
+                        *handle_offset = handle_offset.saturating_sub(offset);
+                    }
                 }
             }
 
@@ -1819,7 +1964,7 @@ impl WaylandBridge {
         &mut self,
         header: &MessageHeader,
         payload: &[u8],
-        client: &mut Socket,
+        attached_handle: Option<Handle>,
     ) -> Result<Vec<WaylandMessage>, &'static str> {
         let object_id = header.object_id;
         let opcode = header.opcode();
@@ -1833,12 +1978,16 @@ impl WaylandBridge {
             }
         };
 
+        if interface.as_str() != "wl_shm" && attached_handle.is_some() {
+            return Err("Unexpected handle attached to Wayland message");
+        }
+
         match interface.as_str() {
             "wl_display" => self.handle_display_message(opcode, payload),
             "wl_registry" => self.handle_registry_message(object_id, opcode, payload),
             "wl_compositor" => self.handle_compositor_message(opcode, payload),
             "wl_surface" => self.handle_surface_message(object_id, opcode, payload),
-            "wl_shm" => self.handle_shm_message(opcode, payload, client),
+            "wl_shm" => self.handle_shm_message(opcode, payload, attached_handle),
             "wl_shm_pool" => self.handle_shm_pool_message(object_id, opcode, payload),
             "wl_buffer" => self.handle_buffer_message(object_id, opcode, payload),
             "wl_seat" => self.handle_seat_message(object_id, opcode, payload),
@@ -2470,34 +2619,29 @@ impl WaylandBridge {
         &mut self,
         opcode: u16,
         payload: &[u8],
-        client: &mut Socket,
+        attached_handle: Option<Handle>,
     ) -> Result<Vec<WaylandMessage>, &'static str> {
         match opcode {
             shm::shm_request::CREATE_POOL => {
                 bridge_log!("[Bridge] wl_shm.create_pool");
                 // Payload: new_id (u32) + size (i32) = 8 bytes
-                // FD is passed via handle transfer (Socket::recv_handle)
-                if payload.len() >= 8 {
-                    let pool_id = Self::parse_u32(payload, 0).unwrap_or(0);
-                    let size = Self::parse_i32(payload, 4).unwrap_or(0);
-                    bridge_log!("[Bridge] Created pool ID: {} size: {}", pool_id, size);
-                    self.add_object(pool_id, String::from("wl_shm_pool"));
-                    let handle_result = client.recv_handle();
-                    let handle = match handle_result {
-                        Ok(h) => {
-                            bridge_log!("[Bridge] Received SHM handle for pool {}", pool_id);
-                            Some(h)
-                        }
-                        Err(e) => {
-                            bridge_log!("[Bridge] Failed to receive SHM handle: {:?}", e);
-                            None
-                        }
-                    };
-                    self.shm_manager.create_pool(pool_id, handle, size);
+                // SCM_RIGHTS arrives in the same ordered socket record as this message.
+                if payload.len() < 8 {
+                    return Err("Invalid wl_shm.create_pool payload");
                 }
+                let pool_id = Self::parse_u32(payload, 0).unwrap_or(0);
+                let size = Self::parse_i32(payload, 4).unwrap_or(0);
+                let handle = attached_handle.ok_or("Missing wl_shm.create_pool handle")?;
+                bridge_log!("[Bridge] Created pool ID: {} size: {}", pool_id, size);
+                bridge_log!("[Bridge] Received SHM handle for pool {}", pool_id);
+                self.add_object(pool_id, String::from("wl_shm_pool"));
+                self.shm_manager.create_pool(pool_id, Some(handle), size);
                 Ok(Vec::new())
             }
             _ => {
+                if attached_handle.is_some() {
+                    return Err("Unexpected handle attached to wl_shm request");
+                }
                 bridge_log!("[Bridge] Unknown wl_shm opcode: {}", opcode);
                 Ok(Vec::new())
             }

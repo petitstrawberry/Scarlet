@@ -188,6 +188,11 @@ impl EventLoop {
             SwsEvent::MenuItemActivated { .. } => {
                 // Menu item activated - not used in slint apps
             }
+            SwsEvent::SgfxFrameRejected { .. }
+            | SwsEvent::SgfxBufferReleased { .. }
+            | SwsEvent::SgfxBackendLost { .. } => {
+                // This CPU-backed integration does not own shared SGFX buffers.
+            }
             SwsEvent::TextInputPreedit { .. }
             | SwsEvent::TextInputCommit { .. }
             | SwsEvent::TextInputDeleteSurroundingText { .. }
@@ -406,7 +411,7 @@ impl EventLoop {
         }
 
         // Render using Slint's software renderer
-        if let Some(surf) = connection.surface_mut(surface_id) {
+        let rendered = connection.with_surface_mut(surface_id, |surf| {
             let renderer_borrowed = renderer.borrow_mut();
             surf.with_buffer(|buffer, width, height| {
                 let y_offset = if use_csd_titlebar() {
@@ -453,10 +458,12 @@ impl EventLoop {
                     }
                 }
             });
-        }
+        });
 
         // Commit only when we actually changed pixels.
-        let _ = connection.commit(surface_id);
+        if rendered.is_some() {
+            let _ = connection.commit(surface_id);
+        }
     }
 }
 

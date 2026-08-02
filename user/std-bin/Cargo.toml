@@ -2,16 +2,11 @@
 name = "scarlet-std-bin"
 version = "0.1.0"
 edition = "2024"
+workspace = "../../.cargo"
 
 [features]
 default = ["mp4-aac"]
 mp4-aac = ["dep:symphonia-core", "dep:symphonia-codec-aac"]
-
-[profile.dev]
-panic = "abort"
-
-[profile.release]
-panic = "abort"
 
 [dependencies]
 clap = { version = "4.5.32", features = ["derive"] }
@@ -188,6 +183,10 @@ path = "src/sgfx_texture.rs"
 [[bin]]
 name = "sgfx_showcase"
 path = "src/sgfx_showcase.rs"
+
+[[bin]]
+name = "ui-sgfx-showcase"
+path = "src/ui_sgfx_showcase.rs"
 
 [[bin]]
 name = "markdown_demo"

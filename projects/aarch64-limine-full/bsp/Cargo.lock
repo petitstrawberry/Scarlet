@@ -136,6 +136,10 @@ name = "scarlet-sys"
 version = "0.16.0"
 
 [[patch.unused]]
+name = "sgfx"
+version = "0.16.0"
+
+[[patch.unused]]
 name = "sws-client"
 version = "0.1.0"
 

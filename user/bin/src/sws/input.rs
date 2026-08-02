@@ -296,17 +296,20 @@ fn input_thread_main() {
     };
 
     loop {
+        super::trace::input_loop();
         match input_manager.read_event() {
             Ok(Some(event)) => {
+                super::trace::input_event();
                 process_mouse_event(&mut input_manager, event);
 
                 while let Ok(Some(event)) = input_manager.try_read_event() {
+                    super::trace::input_event();
                     process_mouse_event(&mut input_manager, event);
                 }
 
                 thread::sleep(core::time::Duration::from_millis(16));
             }
-            Ok(None) => {}
+            Ok(None) => super::trace::input_empty(),
             Err(e) => {
                 println!("[InputThread] Error reading event: {}", e);
                 break;
@@ -418,14 +421,17 @@ fn keyboard_thread_main() {
     };
 
     loop {
+        super::trace::keyboard_loop();
         let mut buffer = [0u8; InputEvent::SIZE];
 
         match keyboard_file.read(&mut buffer) {
             Ok(bytes_read) => {
                 if bytes_read != InputEvent::SIZE {
+                    super::trace::keyboard_short_read();
                     continue;
                 }
 
+                super::trace::keyboard_event();
                 let event = unsafe { core::ptr::read(buffer.as_ptr() as *const InputEvent) };
 
                 match event.type_ {
@@ -444,6 +450,7 @@ fn keyboard_thread_main() {
                     let mut buf = [0u8; InputEvent::SIZE];
                     match keyboard_file.read(&mut buf) {
                         Ok(n) if n == InputEvent::SIZE => {
+                            super::trace::keyboard_event();
                             let ev = unsafe { core::ptr::read(buf.as_ptr() as *const InputEvent) };
                             if ev.type_ == event_types::EV_KEY {
                                 let pressed = ev.value == 1 || ev.value == 2;

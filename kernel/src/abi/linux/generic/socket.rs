@@ -1200,13 +1200,14 @@ pub fn sys_sendmsg(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 
     let iovecs = unsafe { core::slice::from_raw_parts(iovec_addr, iovcnt) };
 
+    let mut attached_handle = None;
     if msg.msg_control != 0 && msg.msg_controllen as usize >= size_of::<LinuxCmsghdr>() {
         let socket = match kernel_obj.as_socket() {
             Some(socket) => socket,
             None => return errno::to_result(errno::ENOTSOCK),
         };
 
-        if let Some(local_socket) = LocalSocket::from_socket_object(socket) {
+        if LocalSocket::from_socket_object(socket).is_some() {
             let cmsg_addr = match task.vm_manager.translate_to_kva(msg.msg_control as usize) {
                 Some(addr) => addr as *const LinuxCmsghdr,
                 None => {
@@ -1221,40 +1222,39 @@ pub fn sys_sendmsg(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
             if !cmsg_addr.is_null() {
                 let cmsg = unsafe { *cmsg_addr };
                 if cmsg.cmsg_level == SOL_SOCKET && cmsg.cmsg_type == SCM_RIGHTS {
+                    if cmsg.cmsg_len > msg.msg_controllen as usize
+                        || cmsg.cmsg_len < size_of::<LinuxCmsghdr>() + size_of::<i32>()
+                    {
+                        return errno::to_result(errno::EINVAL);
+                    }
                     let data_len = cmsg.cmsg_len.saturating_sub(size_of::<LinuxCmsghdr>());
                     let fd_count = data_len / size_of::<i32>();
+                    if fd_count != 1 {
+                        return errno::to_result(errno::EINVAL);
+                    }
                     let data_ptr = unsafe { cmsg_addr.add(1) } as *const i32;
 
-                    for index in 0..fd_count {
-                        let fd = unsafe { *data_ptr.add(index) };
-                        if fd < 0 {
+                    let fd = unsafe { *data_ptr };
+                    if fd < 0 {
+                        return errno::to_result(errno::EBADF);
+                    }
+                    let send_handle = match abi.get_handle(fd as usize) {
+                        Some(h) => h,
+                        None => {
+                            crate::early_println!(
+                                "[linux socket] sendmsg bad fd in cmsg {}",
+                                fd
+                            );
                             return errno::to_result(errno::EBADF);
                         }
-                        let send_handle = match abi.get_handle(fd as usize) {
-                            Some(h) => h,
-                            None => {
-                                crate::early_println!(
-                                    "[linux socket] sendmsg bad fd in cmsg {}",
-                                    fd
-                                );
-                                return errno::to_result(errno::EBADF);
-                            }
-                        };
-                        let (dup_obj, metadata) = match task.handle_table.clone_for_dup(send_handle)
-                        {
-                            Some(entry) => entry,
-                            None => {
-                                crate::early_println!(
-                                    "[linux socket] sendmsg clone_for_dup failed"
-                                );
-                                return errno::to_result(errno::EBADF);
-                            }
-                        };
-                        if local_socket.send_handle(dup_obj, metadata).is_err() {
-                            crate::early_println!("[linux socket] sendmsg send_handle failed");
-                            return errno::to_result(errno::EIO);
+                    };
+                    attached_handle = match task.handle_table.clone_for_dup(send_handle) {
+                        Some(entry) => Some(entry),
+                        None => {
+                            crate::early_println!("[linux socket] sendmsg clone_for_dup failed");
+                            return errno::to_result(errno::EBADF);
                         }
-                    }
+                    };
                 }
             }
         }
@@ -1292,6 +1292,52 @@ pub fn sys_sendmsg(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     } else {
         None
     };
+
+    if let Some((object, metadata)) = attached_handle {
+        let total_len = match iovecs
+            .iter()
+            .try_fold(0usize, |total, iovec| total.checked_add(iovec.iov_len))
+        {
+            Some(total) => total,
+            None => return errno::to_result(errno::EMSGSIZE),
+        };
+        if total_len > crate::network::local::MAX_HANDLE_DATA_RECORD_SIZE {
+            return errno::to_result(errno::EMSGSIZE);
+        }
+
+        let mut record_data = Vec::with_capacity(total_len);
+        for iovec in iovecs {
+            if iovec.iov_len == 0 {
+                continue;
+            }
+            let old_len = record_data.len();
+            record_data.resize(old_len + iovec.iov_len, 0);
+            if copy_from_user(
+                &task,
+                iovec.iov_base as usize,
+                &mut record_data[old_len..],
+            )
+            .is_err()
+            {
+                return errno::to_result(errno::EFAULT);
+            }
+        }
+
+        let socket = match kernel_obj.as_socket() {
+            Some(socket) => socket,
+            None => return errno::to_result(errno::ENOTSOCK),
+        };
+        let local_socket = match LocalSocket::from_socket_object(socket) {
+            Some(socket) => socket,
+            None => return errno::to_result(errno::EOPNOTSUPP),
+        };
+        return match local_socket.send_handle_and_data(object, metadata, &record_data) {
+            Ok(()) => record_data.len(),
+            Err(IpcError::ChannelFull) => errno::to_result(errno::EAGAIN),
+            Err(IpcError::BufferTooSmall { .. }) => errno::to_result(errno::EMSGSIZE),
+            Err(_) => errno::to_result(errno::EIO),
+        };
+    }
 
     for iovec in iovecs {
         if iovec.iov_len == 0 {
@@ -1470,106 +1516,122 @@ pub fn sys_recvmsg(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     };
 
     // Calculate total buffer size for potential handle+data receive
-    let total_buffer_size: usize = iovecs.iter().map(|i| i.iov_len).sum();
-    let mut atomic_data: Option<Vec<u8>> = None;
-
-    // Try atomic handle+data receive if control buffer is provided
-    if msg.msg_control != 0
-        && (msg.msg_controllen as usize) >= size_of::<LinuxCmsghdr>() + size_of::<i32>()
+    let total_buffer_size = match iovecs
+        .iter()
+        .try_fold(0usize, |total, iovec| total.checked_add(iovec.iov_len))
     {
-        let socket = match kernel_obj.as_socket() {
-            Some(socket) => socket,
-            None => {
-                return errno::to_result(errno::ENOTSOCK);
-            }
-        };
+        Some(total) => total,
+        None => return errno::to_result(errno::EINVAL),
+    };
+    let can_receive_handle = msg.msg_control != 0
+        && (msg.msg_controllen as usize) >= size_of::<LinuxCmsghdr>() + size_of::<i32>();
+    let mut retried_atomic_after_stream_wake = false;
 
-        if let Some(local_socket) = LocalSocket::from_socket_object(socket) {
-            match local_socket.recv_handle_and_data(total_buffer_size) {
-                Ok((obj, metadata, data)) => {
-                    let new_handle = match task.handle_table.insert_with_metadata(obj, metadata) {
-                        Ok(h) => h,
-                        Err(_) => return errno::to_result(errno::EMFILE),
-                    };
-                    let new_fd = match abi.allocate_fd(new_handle) {
-                        Ok(fd) => fd,
-                        Err(_) => {
-                            let _ = task.handle_table.remove(new_handle);
-                            return errno::to_result(errno::EMFILE);
+    'receive: loop {
+        let mut atomic_data: Option<Vec<u8>> = None;
+
+        // Try atomic handle+data receive if control buffer is provided.
+        if can_receive_handle {
+            let socket = match kernel_obj.as_socket() {
+                Some(socket) => socket,
+                None => return errno::to_result(errno::ENOTSOCK),
+            };
+
+            if let Some(local_socket) = LocalSocket::from_socket_object(socket) {
+                match local_socket.recv_handle_and_data(total_buffer_size) {
+                    Ok((obj, metadata, data)) => {
+                        let new_handle =
+                            match task.handle_table.insert_with_metadata(obj, metadata) {
+                                Ok(h) => h,
+                                Err(_) => return errno::to_result(errno::EMFILE),
+                            };
+                        let new_fd = match abi.allocate_fd(new_handle) {
+                            Ok(fd) => fd,
+                            Err(_) => {
+                                let _ = task.handle_table.remove(new_handle);
+                                return errno::to_result(errno::EMFILE);
+                            }
+                        };
+                        pending_fd = Some(new_fd as i32);
+                        atomic_data = Some(data);
+                    }
+                    Err(IpcError::ChannelEmpty) => {
+                        // A byte segment may be first; fall back to regular stream read.
+                    }
+                    Err(IpcError::BufferTooSmall { .. }) => {
+                        // Preserve the complete record for a later recvmsg with
+                        // sufficient iovec capacity.
+                        return errno::to_result(errno::EMSGSIZE);
+                    }
+                    Err(_) => return errno::to_result(errno::EIO),
+                }
+            }
+        }
+
+        // Copy data from atomic receive or read from stream.
+        if let Some(ref data) = atomic_data {
+            let mut data_offset = 0;
+            let data_len = data.len();
+            for iovec in iovecs {
+                if data_offset >= data_len {
+                    break;
+                }
+                if iovec.iov_len == 0 {
+                    continue;
+                }
+
+                let remaining = data.len() - data_offset;
+                let to_copy = remaining.min(iovec.iov_len);
+                if copy_to_user(
+                    &task,
+                    iovec.iov_base as usize,
+                    &data[data_offset..data_offset + to_copy],
+                )
+                .is_err()
+                {
+                    return errno::to_result(errno::EFAULT);
+                }
+                data_offset += to_copy;
+                total_read += to_copy;
+            }
+        } else {
+            for iovec in iovecs {
+                if iovec.iov_len == 0 {
+                    continue;
+                }
+
+                let mut buffer = Vec::new();
+                buffer.resize(iovec.iov_len, 0);
+
+                match stream.read(&mut buffer) {
+                    Ok(n) => {
+                        if copy_to_user(&task, iovec.iov_base as usize, &buffer[..n]).is_err() {
+                            return errno::to_result(errno::EFAULT);
                         }
-                    };
-                    pending_fd = Some(new_fd as i32);
-                    atomic_data = Some(data);
-                }
-                Err(IpcError::ChannelEmpty) => {
-                    // No handle available; fall back to regular stream read
-                }
-                Err(_) => {
-                    return errno::to_result(errno::EIO);
-                }
-            }
-        }
-    }
-
-    // Copy data from atomic receive or read from stream
-    if let Some(ref data) = atomic_data {
-        // Copy atomically received data into iovecs
-        let mut data_offset = 0;
-        let data_len = data.len();
-        for iovec in iovecs {
-            if data_offset >= data_len {
-                break;
-            }
-            if iovec.iov_len == 0 {
-                continue;
-            }
-
-            let remaining = data.len() - data_offset;
-            let to_copy = remaining.min(iovec.iov_len);
-            if copy_to_user(
-                &task,
-                iovec.iov_base as usize,
-                &data[data_offset..data_offset + to_copy],
-            )
-            .is_err()
-            {
-                return errno::to_result(errno::EFAULT);
-            }
-            data_offset += to_copy;
-            total_read += to_copy;
-        }
-    } else {
-        // No handle received; read data from stream
-        for iovec in iovecs {
-            if iovec.iov_len == 0 {
-                continue;
-            }
-
-            let mut buffer = Vec::new();
-            buffer.resize(iovec.iov_len, 0);
-
-            match stream.read(&mut buffer) {
-                Ok(n) => {
-                    if copy_to_user(&task, iovec.iov_base as usize, &buffer[..n]).is_err() {
-                        return errno::to_result(errno::EFAULT);
+                        total_read = total_read.saturating_add(n);
+                        if n < iovec.iov_len {
+                            break;
+                        }
                     }
-                    total_read = total_read.saturating_add(n);
-                    if n < iovec.iov_len {
-                        break;
+                    Err(StreamError::WouldBlock) => {
+                        if total_read == 0
+                            && can_receive_handle
+                            && !retried_atomic_after_stream_wake
+                        {
+                            retried_atomic_after_stream_wake = true;
+                            continue 'receive;
+                        }
+                        return if total_read == 0 {
+                            errno::to_result(errno::EAGAIN)
+                        } else {
+                            total_read
+                        };
                     }
-                }
-                Err(StreamError::WouldBlock) => {
-                    return if total_read == 0 {
-                        errno::to_result(errno::EAGAIN)
-                    } else {
-                        total_read
-                    };
-                }
-                Err(_) => {
-                    return errno::to_result(errno::EIO);
+                    Err(_) => return errno::to_result(errno::EIO),
                 }
             }
         }
+        break 'receive;
     }
 
     if let Some(fd_value) = pending_fd {

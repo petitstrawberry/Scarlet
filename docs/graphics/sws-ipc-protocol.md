@@ -531,6 +531,51 @@ anchors and stacks that surface.
 
 Composition states: `DISABLED`, `DIRECT`, `COMPOSING`, `CANDIDATES`. Status flags include `MODE_ACTIVE`, `PRIVATE_MODE`, `PREDICTION_ENABLED`, and `CANDIDATES_VISIBLE`.
 
+### Shared SGFX frame lifecycle (protocol version 2)
+
+`REGISTER_SGFX_BUFFER` (33) and `DESTROY_SGFX_BUFFER` (35) are synchronous
+requests. They use a non-zero `request_id` and receive the corresponding
+registration or destruction response.
+
+`COMMIT_SGFX_FRAME` (34) is intentionally one-way. Its header has `flags = 0`
+and `request_id = 0`; SWS never sends a success acknowledgement. The payload is:
+
+| Offset | Size | Field              | Type |
+|--------|------|--------------------|------|
+| 0      | 4    | `window_id`        | u32  |
+| 4      | 4    | `buffer_id`        | u32  |
+| 8      | 4    | `generation`       | u32  |
+| 12     | 4    | `compositor_epoch` | u32  |
+| 16     | 8    | `commit_serial`    | u64  |
+| 24     | 4    | `damage_count`     | u32  |
+| 28     | 16N  | damage rectangles  | records |
+
+`commit_serial` is non-zero and identifies this exact use of a reusable buffer
+slot. Each damage record contains `x: i32`, `y: i32`, `width: u32`, and
+`height: u32` in window-local physical pixels.
+
+A successfully enqueued commit has no response. The client must treat the
+buffer as retained immediately after serializing the request and must not write
+it again until one of these asynchronous events arrives:
+
+- `SGFX_BUFFER_RELEASED` (28): payload is the 16-byte buffer identity followed
+  by the matching `commit_serial: u64`. It means SWS no longer retains that
+  exact use of the buffer. Releases are emitted only after a presentation
+  boundary. A queued frame superseded before sampling is retired with its
+  replacement at that boundary; a displayed front is retired only after its
+  replacement composition/present completed successfully. This preserves
+  two-slot display backpressure.
+- `SGFX_FRAME_REJECTED` (27): payload is the 16-byte buffer identity,
+  `commit_serial: u64`, and `error_code: u32`. A rejected buffer use was never
+  retained and may be reused after the client consumes this event.
+
+Both events have `flags = 0` and `request_id = 0`. Matching by the complete
+identity and serial is required: matching only by `buffer_id` or identity has
+an ABA race after a pool slot is reused. Backend-loss invalidates every token
+from the older compositor epoch. A malformed commit that does not contain a
+parseable identity and serial is a protocol violation rather than a routed
+request failure.
+
 ### Server → Client
 
 #### `WINDOW_CREATED` (type = 10)

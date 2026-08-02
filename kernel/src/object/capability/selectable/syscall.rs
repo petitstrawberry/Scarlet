@@ -1,5 +1,5 @@
 use crate::arch::Trapframe;
-use crate::library::std::usercopy::copy_from_user;
+use crate::library::std::usercopy::{copy_from_user, copy_to_user};
 use crate::object::capability::selectable::{ReadyInterest, Selectable};
 use crate::task::mytask;
 
@@ -207,6 +207,9 @@ pub fn sys_poll(trapframe: &mut Trapframe) -> usize {
         if pfd.revents != 0 {
             count += 1;
         }
+    }
+    if copy_to_user(&task, fds_ptr, &fds_buf).is_err() {
+        return usize::MAX;
     }
     count
 }
