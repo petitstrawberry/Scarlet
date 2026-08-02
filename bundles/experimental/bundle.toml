@@ -30,9 +30,5 @@ package = "yt-gui"
 bin = "yt-gui"
 to = "/system/scarlet/bin/yt-gui"
 
-[[layers]]
-kind = "cargo"
-source = { git = "https://github.com/petitstrawberry/carmine" }
-package = "carmine"
-bin = "carmine"
-to = "/system/scarlet/bin/carmine"
+# Carmine's pinned source targets an older ScarletUI event API. Keep it out of
+# this image until its source builds against the root-local ScarletUI patch.

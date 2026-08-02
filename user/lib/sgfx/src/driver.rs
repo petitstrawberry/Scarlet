@@ -4,9 +4,9 @@ use alloc::{rc::Rc, vec::Vec};
 
 use framebuffer::DisplaySurface;
 #[cfg(feature = "std")]
-use scarlet_os::handle::{HandleError, HandleResult};
+use scarlet_os::handle::{Handle, HandleError, HandleResult};
 #[cfg(not(feature = "std"))]
-use std::handle::{HandleError, HandleResult};
+use std::handle::{Handle, HandleError, HandleResult};
 
 use crate::{
     Capabilities, Color, PipelineDesc, PixelRect, SourceAlpha, VertexClip4Color3, Viewport, virgl,
@@ -75,6 +75,12 @@ impl Context {
         }
     }
 
+    pub(crate) fn create_shared_image(&self, width: u32, height: u32) -> HandleResult<Image> {
+        match self {
+            Self::Virgl(context) => Ok(Image::Virgl(context.create_shared_image(width, height)?)),
+        }
+    }
+
     pub(crate) fn create_sampled_bgra_texture(
         &self,
         width: u32,
@@ -103,6 +109,18 @@ impl Context {
                 shm_offset,
                 source_stride,
             )?)),
+        }
+    }
+
+    pub(crate) fn import_shared_bgra_texture(
+        &self,
+        handle: Handle,
+    ) -> HandleResult<(Texture, u32, u32)> {
+        match self {
+            Self::Virgl(context) => {
+                let (texture, width, height) = context.import_shared_bgra_texture(handle)?;
+                Ok((Texture::Virgl(texture), width, height))
+            }
         }
     }
 
@@ -303,17 +321,22 @@ impl Image {
             Self::Virgl(image) => image.context_id(),
         }
     }
+
+    pub(crate) fn shared_handle(&self) -> &Handle {
+        match self {
+            Self::Virgl(image) => image.shared_handle(),
+        }
+    }
 }
 
 /// Maximum canonical vertices accepted in one persistent IR submission.
-pub(crate) const MAX_IR_VERTICES: usize = 1_024;
+pub(crate) const MAX_IR_VERTICES: usize = 1_920;
 
 /// Canonical vertex representation shared by portable IR lowering and drivers.
 #[derive(Clone, Copy)]
 pub(crate) struct IrVertex {
     pub(crate) position: [f32; 4],
-    pub(crate) color: [f32; 4],
-    pub(crate) uv: [f32; 2],
+    pub(crate) secondary: [f32; 4],
 }
 
 /// Backend-neutral rectangle used by the private IR execution plan.

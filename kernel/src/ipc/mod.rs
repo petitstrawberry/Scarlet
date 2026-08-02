@@ -29,6 +29,11 @@ pub enum IpcError {
     ChannelFull,
     /// The IPC channel is empty (for non-blocking reads)
     ChannelEmpty,
+    /// The next record is larger than the supplied receive buffer
+    BufferTooSmall {
+        /// Exact record payload size required to complete the receive
+        required: usize,
+    },
     /// Invalid IPC object state
     InvalidState,
     /// Operation not supported by this IPC type

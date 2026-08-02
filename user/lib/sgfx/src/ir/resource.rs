@@ -4,6 +4,7 @@ use alloc::vec::Vec;
 use core::cell::RefCell;
 use core::fmt;
 use core::ops::{BitOr, BitOrAssign};
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 use super::pipeline::RenderPipelineDesc;
 use super::{Error, Extent2D, PixelRect, Result};
@@ -16,6 +17,8 @@ pub const MAX_BUFFERS: usize = 1_024;
 pub const MAX_SAMPLERS: usize = 256;
 /// Maximum render pipelines held by one [`ResourceTable`].
 pub const MAX_RENDER_PIPELINES: usize = 256;
+
+static NEXT_RESOURCE_TABLE_ID: AtomicUsize = AtomicUsize::new(1);
 
 /// Portable texture pixel format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -400,6 +403,7 @@ impl<'data> TextureWrite<'data> {
 
 /// Table that owns validated logical resource descriptors.
 pub struct ResourceTable {
+    id: usize,
     textures: RefCell<Vec<TextureDesc>>,
     buffers: RefCell<Vec<BufferDesc>>,
     samplers: RefCell<Vec<SamplerDesc>>,
@@ -411,8 +415,9 @@ impl ResourceTable {
     ///
     /// # Returns
     /// An empty table with bounded resource categories.
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self {
+            id: NEXT_RESOURCE_TABLE_ID.fetch_add(1, Ordering::Relaxed),
             textures: RefCell::new(Vec::new()),
             buffers: RefCell::new(Vec::new()),
             samplers: RefCell::new(Vec::new()),
@@ -472,6 +477,78 @@ impl ResourceTable {
         Ok(RenderPipelineRef { owner: self, index })
     }
 
+    /// Resolve a persistent texture identity into a borrowed table reference.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - Identity previously obtained from [`TextureRef::id`].
+    ///
+    /// # Returns
+    ///
+    /// A reference branded with this borrow of the owning table, or
+    /// [`Error::ResourceTableMismatch`] when `id` belongs to another table.
+    pub fn texture_ref(&self, id: TextureId) -> Result<TextureRef<'_>> {
+        self.validate_id(id.owner, id.index, &self.textures)?;
+        Ok(TextureRef {
+            owner: self,
+            index: id.index,
+        })
+    }
+
+    /// Resolve a persistent buffer identity into a borrowed table reference.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - Identity previously obtained from [`BufferRef::id`].
+    ///
+    /// # Returns
+    ///
+    /// A reference branded with this borrow of the owning table, or
+    /// [`Error::ResourceTableMismatch`] when `id` belongs to another table.
+    pub fn buffer_ref(&self, id: BufferId) -> Result<BufferRef<'_>> {
+        self.validate_id(id.owner, id.index, &self.buffers)?;
+        Ok(BufferRef {
+            owner: self,
+            index: id.index,
+        })
+    }
+
+    /// Resolve a persistent sampler identity into a borrowed table reference.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - Identity previously obtained from [`SamplerRef::id`].
+    ///
+    /// # Returns
+    ///
+    /// A reference branded with this borrow of the owning table, or
+    /// [`Error::ResourceTableMismatch`] when `id` belongs to another table.
+    pub fn sampler_ref(&self, id: SamplerId) -> Result<SamplerRef<'_>> {
+        self.validate_id(id.owner, id.index, &self.samplers)?;
+        Ok(SamplerRef {
+            owner: self,
+            index: id.index,
+        })
+    }
+
+    /// Resolve a persistent pipeline identity into a borrowed table reference.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - Identity previously obtained from [`RenderPipelineRef::id`].
+    ///
+    /// # Returns
+    ///
+    /// A reference branded with this borrow of the owning table, or
+    /// [`Error::ResourceTableMismatch`] when `id` belongs to another table.
+    pub fn render_pipeline_ref(&self, id: RenderPipelineId) -> Result<RenderPipelineRef<'_>> {
+        self.validate_id(id.owner, id.index, &self.pipelines)?;
+        Ok(RenderPipelineRef {
+            owner: self,
+            index: id.index,
+        })
+    }
+
     fn push<T>(items: &RefCell<Vec<T>>, value: T, maximum: usize) -> Result<usize> {
         let mut items = items.borrow_mut();
         if items.len() >= maximum {
@@ -481,6 +558,16 @@ impl ResourceTable {
         let index = items.len();
         items.push(value);
         Ok(index)
+    }
+
+    fn validate_id<T>(&self, owner: usize, index: usize, items: &RefCell<Vec<T>>) -> Result<()> {
+        if owner != self.id {
+            return Err(Error::ResourceTableMismatch);
+        }
+        if items.borrow().get(index).is_none() {
+            return Err(Error::InvalidDescriptor);
+        }
+        Ok(())
     }
     pub(crate) fn texture(&self, reference: TextureRef<'_>) -> Result<TextureDesc> {
         if !core::ptr::eq(reference.owner, self) {
@@ -563,6 +650,95 @@ pub struct SamplerRef<'r> {
 pub struct RenderPipelineRef<'r> {
     pub(crate) owner: &'r ResourceTable,
     pub(crate) index: usize,
+}
+
+/// Persistent table-qualified identity of a logical texture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TextureId {
+    owner: usize,
+    index: usize,
+}
+
+/// Persistent table-qualified identity of a logical buffer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct BufferId {
+    owner: usize,
+    index: usize,
+}
+
+/// Persistent table-qualified identity of a logical sampler.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SamplerId {
+    owner: usize,
+    index: usize,
+}
+
+/// Persistent table-qualified identity of a logical render pipeline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct RenderPipelineId {
+    owner: usize,
+    index: usize,
+}
+
+impl TextureRef<'_> {
+    /// Return an owned identity that may outlive this table borrow.
+    ///
+    /// # Returns
+    ///
+    /// The table-qualified texture identity. Resolve it with
+    /// [`ResourceTable::texture_ref`] when recording a later command buffer.
+    pub const fn id(self) -> TextureId {
+        TextureId {
+            owner: self.owner.id,
+            index: self.index,
+        }
+    }
+}
+
+impl BufferRef<'_> {
+    /// Return an owned identity that may outlive this table borrow.
+    ///
+    /// # Returns
+    ///
+    /// The table-qualified buffer identity. Resolve it with
+    /// [`ResourceTable::buffer_ref`] when recording a later command buffer.
+    pub const fn id(self) -> BufferId {
+        BufferId {
+            owner: self.owner.id,
+            index: self.index,
+        }
+    }
+}
+
+impl SamplerRef<'_> {
+    /// Return an owned identity that may outlive this table borrow.
+    ///
+    /// # Returns
+    ///
+    /// The table-qualified sampler identity. Resolve it with
+    /// [`ResourceTable::sampler_ref`] when recording a later command buffer.
+    pub const fn id(self) -> SamplerId {
+        SamplerId {
+            owner: self.owner.id,
+            index: self.index,
+        }
+    }
+}
+
+impl RenderPipelineRef<'_> {
+    /// Return an owned identity that may outlive this table borrow.
+    ///
+    /// # Returns
+    ///
+    /// The table-qualified pipeline identity. Resolve it with
+    /// [`ResourceTable::render_pipeline_ref`] when recording a later command
+    /// buffer.
+    pub const fn id(self) -> RenderPipelineId {
+        RenderPipelineId {
+            owner: self.owner.id,
+            index: self.index,
+        }
+    }
 }
 
 macro_rules! impl_resource_ref_traits {

@@ -1808,6 +1808,36 @@ pub struct GpuImage {
 }
 
 impl GpuImage {
+    /// Adopt a transferred GPU image capability handle.
+    ///
+    /// The handle is queried before it is accepted, which verifies that it is a
+    /// live GPU image capability and recovers the backend resource token needed
+    /// when attaching it to a context.
+    ///
+    /// # Arguments
+    ///
+    /// * `handle` - Owning GPU image capability received from another process.
+    ///
+    /// # Returns
+    ///
+    /// An owning image wrapper or a handle error when the transferred object is
+    /// not a valid GPU image.
+    pub fn from_handle(handle: Handle) -> HandleResult<Self> {
+        let mut info = GpuImageInfo::new();
+        handle.control(
+            commands::GPU_IMAGE_QUERY_INFO,
+            &mut info as *mut _ as usize,
+        )?;
+        result_to_handle_error(info.result)?;
+        if info.command_resource_token == 0 {
+            return Err(HandleError::InvalidHandle);
+        }
+        Ok(Self {
+            handle,
+            command_resource_token: info.command_resource_token,
+        })
+    }
+
     /// Query the image's immutable format, usage, extent, and allocation details.
     ///
     /// # Returns

@@ -13,12 +13,12 @@ extern crate scarlet_std as std;
 use alloc::{rc::Rc, vec::Vec};
 #[cfg(feature = "std")]
 use scarlet_os::{
-    handle::{HandleError, HandleResult},
+    handle::{Handle, HandleError, HandleResult},
     ipc::SharedMemory,
 };
 #[cfg(not(feature = "std"))]
 use std::{
-    handle::{HandleError, HandleResult},
+    handle::{Handle, HandleError, HandleResult},
     ipc::SharedMemory,
 };
 
@@ -123,7 +123,9 @@ impl Context {
     ///
     /// # Arguments
     ///
-    /// * `resources` - Table whose opaque logical references this cache will resolve.
+    /// * `resources` - Shared table retained for the full lifetime of the cache.
+    ///   Keep another [`Rc`] clone when command buffers and the mutable cache
+    ///   are stored in the same renderer.
     ///
     /// # Returns
     ///
@@ -131,10 +133,10 @@ impl Context {
     /// bounded mapping metadata or persistent private backend storage cannot be
     /// allocated. Textures, samplers, and pipelines materialize lazily for this
     /// context as they are first referenced by IR submission.
-    pub fn create_ir_resources<'r, 'image>(
+    pub fn create_ir_resources(
         &self,
-        resources: &'r ir::ResourceTable,
-    ) -> Result<IrResources<'r, 'image>, IrSubmitError> {
+        resources: Rc<ir::ResourceTable>,
+    ) -> Result<IrResources, IrSubmitError> {
         IrResources::new(resources, &self.backend)
     }
 
@@ -151,6 +153,28 @@ impl Context {
     pub fn create_image(&self, width: u32, height: u32) -> HandleResult<Image> {
         Ok(Image {
             backend: self.backend.create_image(width, height)?,
+            width,
+            height,
+        })
+    }
+
+    /// Create a render target whose GPU image capability can be shared.
+    ///
+    /// The image remains owned by this context and may be rendered through the
+    /// normal SGFX APIs. [`Image::shared_handle`] exposes a borrowed capability
+    /// suitable for transferring to a compositor without copying pixels.
+    ///
+    /// # Arguments
+    ///
+    /// * `width` - Non-zero image width in pixels.
+    /// * `height` - Non-zero image height in pixels.
+    ///
+    /// # Returns
+    ///
+    /// A render-target, presentable, sampled image or a handle error.
+    pub fn create_shared_image(&self, width: u32, height: u32) -> HandleResult<Image> {
+        Ok(Image {
+            backend: self.backend.create_shared_image(width, height)?,
             width,
             height,
         })
@@ -204,6 +228,28 @@ impl Context {
                 shm_offset,
                 source_stride,
             )?,
+            width,
+            height,
+        })
+    }
+
+    /// Import a transferred shared GPU image as a sampled BGRA texture.
+    ///
+    /// The transferred handle is consumed by the returned texture. The image
+    /// must have BGRA8 format and sampled usage, and it must originate from a
+    /// GPU backend compatible with this context.
+    ///
+    /// # Arguments
+    ///
+    /// * `handle` - Owning GPU image capability transferred from another process.
+    ///
+    /// # Returns
+    ///
+    /// A sampled texture attached to this context or a handle error.
+    pub fn import_shared_bgra_texture(&self, handle: Handle) -> HandleResult<Texture> {
+        let (backend, width, height) = self.backend.import_shared_bgra_texture(handle)?;
+        Ok(Texture {
+            backend,
             width,
             height,
         })
@@ -420,6 +466,19 @@ impl Image {
     /// The image height.
     pub const fn height(&self) -> u32 {
         self.height
+    }
+
+    /// Return the shareable GPU image capability owned by this image.
+    ///
+    /// The returned handle is borrowed. Transferring it through a Scarlet
+    /// socket creates a capability in the receiver without consuming this
+    /// image's ownership.
+    ///
+    /// # Returns
+    ///
+    /// The GPU image capability backing this render target.
+    pub fn shared_handle(&self) -> &Handle {
+        self.backend.shared_handle()
     }
 
     /// Present this image through a Scarlet display surface.

@@ -19,20 +19,21 @@
 //! use sws_client::{Connection, SurfaceBuilder};
 //!
 //! // Connect to SWS
-//! let mut connection = Connection::connect_default()?;
+//! let connection = Connection::connect_default()?;
 //!
 //! // Create a surface (window) using builder pattern
 //! let window_id = SurfaceBuilder::new()
 //!     .app_id("com.example.app")
 //!     .app_name("My App")
 //!     .size(800, 600)
-//!     .build(&mut connection)?;
+//!     .build(&connection)?;
 //!
 //! // Draw to the surface buffer
-//! if let Some(surface) = connection.surface(window_id) {
-//!     surface.with_buffer(|buffer| {
+//! if connection.with_surface_mut(window_id, |surface| {
+//!     surface.with_buffer(|buffer, _width, _height| {
 //!         // Draw pixels...
 //!     });
+//! }).is_some() {
 //!     connection.commit(window_id)?;
 //! }
 //!
@@ -98,31 +99,20 @@ pub mod event;
 mod os;
 mod surface;
 
-#[cfg(feature = "std")]
-macro_rules! logln {
-    ($($arg:tt)*) => {
-        std::println!($($arg)*)
-    };
-}
-
-#[cfg(not(feature = "std"))]
-macro_rules! logln {
-    ($($arg:tt)*) => {
-        scarlet_std::println!($($arg)*)
-    };
-}
-
-pub(crate) use logln;
-
 pub use builder::SurfaceBuilder;
-pub use connection::{Connection, InputMethodInfo};
+pub use connection::{
+    Capabilities, Connection, EventReceiver, InputMethodInfo, RequestToken, Response,
+    SgfxBufferIdentity, WindowListEntry,
+};
 pub use error::Error;
 pub use event::abs_code;
 pub use event::event_type;
 pub use event::key_code;
 pub use event::rel_code;
 pub use event::{Event, ImeContextState, InputEvent};
+pub use os::Handle;
 pub use surface::Surface;
+pub use sws_protocol::SgfxDamageRect;
 
 /// Transient relationship policy flags for child windows.
 ///

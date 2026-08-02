@@ -24,6 +24,11 @@ pub struct Surface {
     dirty: bool,
 }
 
+// SAFETY: `Surface` owns its mapping and never exposes the raw pointer without
+// borrowing itself. Shared connections guard every surface with a mutex, so a
+// surface can be transferred between threads without concurrent mutable access.
+unsafe impl Send for Surface {}
+
 impl Surface {
     /// Create a new surface from server-provided resources
     pub(crate) fn new(id: u32, width: u32, height: u32, shm: SharedMemory) -> Result<Self, Error> {
@@ -135,6 +140,10 @@ impl Surface {
     /// Clear the dirty flag (called after commit)
     pub(crate) fn clear_dirty(&mut self) {
         self.dirty = false;
+    }
+
+    pub(crate) fn mark_dirty(&mut self) {
+        self.dirty = true;
     }
 
     /// Get pixel at (x, y) as BGRA

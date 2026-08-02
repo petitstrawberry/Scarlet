@@ -19,6 +19,17 @@ use crate::{
 };
 use alloc::{string::ToString, sync::Arc, vec};
 
+const NATIVE_EAGAIN: usize = (-(11isize)) as usize;
+const NATIVE_EMSGSIZE: usize = (-(90isize)) as usize;
+
+fn socket_ipc_error_result(error: crate::ipc::IpcError) -> usize {
+    match error {
+        crate::ipc::IpcError::ChannelEmpty | crate::ipc::IpcError::ChannelFull => NATIVE_EAGAIN,
+        crate::ipc::IpcError::BufferTooSmall { .. } => NATIVE_EMSGSIZE,
+        _ => usize::MAX,
+    }
+}
+
 /// sys_pipe - Create a pipe pair
 ///
 /// Creates a unidirectional pipe with read and write ends.
@@ -612,10 +623,10 @@ pub fn sys_socket_send_handle(trapframe: &mut Trapframe) -> usize {
     };
 
     // Send the handle through the socket
-    match local_socket.send_handle(object, metadata) {
-        Ok(()) => 0,
-        Err(_) => usize::MAX,
-    }
+    local_socket
+        .send_handle(object, metadata)
+        .map(|()| 0)
+        .unwrap_or_else(socket_ipc_error_result)
 }
 
 /// sys_socket_recv_handle - Receive a kernel object handle from a socket
@@ -650,8 +661,8 @@ pub fn sys_socket_recv_handle(trapframe: &mut Trapframe) -> usize {
         None => return usize::MAX, // Invalid socket handle
     };
 
-    // For LocalSocket, we provide blocking semantics: if the handle queue is empty,
-    // block the task until a handle arrives or the peer is closed.
+    // Block only while the ordered receive queue is empty. If another segment
+    // type is first, recv_handle_blocking returns EAGAIN instead of skipping it.
     use crate::network::local::LocalSocket;
     let local_socket = match LocalSocket::from_socket_object(socket_obj) {
         Some(s) => s,
@@ -660,7 +671,7 @@ pub fn sys_socket_recv_handle(trapframe: &mut Trapframe) -> usize {
 
     let (object, metadata) = match local_socket.recv_handle_blocking(task.get_id(), trapframe) {
         Ok(entry) => entry,
-        Err(_) => return usize::MAX,
+        Err(error) => return socket_ipc_error_result(error),
     };
 
     // Insert the received object into this task's handle table
@@ -672,9 +683,9 @@ pub fn sys_socket_recv_handle(trapframe: &mut Trapframe) -> usize {
 
 /// sys_socket_send_handle_and_data - Send a kernel object handle and data atomically
 ///
-/// Sends a kernel object handle through a connected socket, along with data.
-/// This ensures both the handle and data are available before waking the peer,
-/// preventing race conditions in protocols like Wayland.
+/// Sends one boundary-preserving record containing a duplicated kernel object
+/// handle and its associated bytes. The record is ordered with ordinary byte
+/// writes and handle-only transfers on the same local socket.
 ///
 /// Arguments:
 /// - socket_handle: Handle to the connected socket
@@ -684,7 +695,9 @@ pub fn sys_socket_recv_handle(trapframe: &mut Trapframe) -> usize {
 ///
 /// Returns:
 /// - 0 on success
-/// - usize::MAX on error
+/// - `-EAGAIN` if the peer queue is full
+/// - `-EMSGSIZE` if the record exceeds the supported maximum
+/// - usize::MAX on other errors
 pub fn sys_socket_send_handle_and_data(trapframe: &mut Trapframe) -> usize {
     let task = match mytask() {
         Some(task) => task,
@@ -721,29 +734,19 @@ pub fn sys_socket_send_handle_and_data(trapframe: &mut Trapframe) -> usize {
         None => return usize::MAX, // Invalid object handle
     };
 
-    // Validate and translate data pointer
-    if data_len == 0 {
-        // No data to send, just send the handle
-        match local_socket.send_handle(object, metadata) {
-            Ok(()) => return 0,
-            Err(_) => return usize::MAX,
-        }
+    if data_len > crate::network::local::MAX_HANDLE_DATA_RECORD_SIZE {
+        return NATIVE_EMSGSIZE;
     }
 
-    // Limit data size to prevent DoS attacks
-    const MAX_SEND_SIZE: usize = 65536; // 64 KB max
-    let data_len = data_len.min(MAX_SEND_SIZE);
-
     let mut data = vec![0u8; data_len];
-    if copy_from_user(&task, data_ptr, &mut data).is_err() {
+    if data_len != 0 && copy_from_user(&task, data_ptr, &mut data).is_err() {
         return usize::MAX;
     }
 
-    // Send the handle and data atomically
-    match local_socket.send_handle_and_data(object, metadata, &data) {
-        Ok(()) => 0,
-        Err(_) => usize::MAX,
-    }
+    local_socket
+        .send_handle_and_data(object, metadata, &data)
+        .map(|()| 0)
+        .unwrap_or_else(socket_ipc_error_result)
 }
 
 /// sys_socket_recv_handle_and_data - Receive a kernel object handle and data atomically
@@ -755,11 +758,14 @@ pub fn sys_socket_send_handle_and_data(trapframe: &mut Trapframe) -> usize {
 /// - socket_handle: Handle to the connected socket
 /// - handle_ptr: Pointer to store the received handle (output)
 /// - data_ptr: Pointer to store the received data (output)
-/// - max_data_len: Maximum amount of data to receive
+/// - max_data_len: Capacity of the destination buffer
+/// - required_len_ptr: Optional pointer receiving the complete record length
 ///
 /// Returns:
 /// - Number of bytes received on success
-/// - usize::MAX on error
+/// - `-EAGAIN` if no handle-and-data record is first in receive order
+/// - `-EMSGSIZE` if the destination is too small; the record remains queued
+/// - usize::MAX on other errors
 pub fn sys_socket_recv_handle_and_data(trapframe: &mut Trapframe) -> usize {
     let task = match mytask() {
         Some(task) => task,
@@ -770,6 +776,7 @@ pub fn sys_socket_recv_handle_and_data(trapframe: &mut Trapframe) -> usize {
     let handle_ptr = trapframe.get_arg(1);
     let data_ptr = trapframe.get_arg(2);
     let max_data_len = trapframe.get_arg(3);
+    let required_len_ptr = trapframe.get_arg(4);
 
     // Increment PC to avoid infinite loop
     trapframe.increment_pc_next(&task);
@@ -790,15 +797,29 @@ pub fn sys_socket_recv_handle_and_data(trapframe: &mut Trapframe) -> usize {
         None => return usize::MAX, // Not a LocalSocket
     };
 
-    // Limit data size to prevent DoS attacks
-    const MAX_RECV_SIZE: usize = 65536; // 64 KB max
-    let max_data_len = max_data_len.min(MAX_RECV_SIZE);
+    if handle_ptr == 0 || (max_data_len != 0 && data_ptr == 0) {
+        return usize::MAX;
+    }
 
     // Receive handle and data atomically
     let (object, metadata, data) = match local_socket.recv_handle_and_data(max_data_len) {
         Ok(entry) => entry,
-        Err(_) => return usize::MAX,
+        Err(crate::ipc::IpcError::BufferTooSmall { required }) => {
+            if required_len_ptr != 0
+                && copy_to_user(&task, required_len_ptr, &required.to_le_bytes()).is_err()
+            {
+                return usize::MAX;
+            }
+            return NATIVE_EMSGSIZE;
+        }
+        Err(error) => return socket_ipc_error_result(error),
     };
+
+    if required_len_ptr != 0
+        && copy_to_user(&task, required_len_ptr, &data.len().to_le_bytes()).is_err()
+    {
+        return usize::MAX;
+    }
 
     // Insert the received object into this task's handle table
     let new_handle = match task.handle_table.insert_with_metadata(object, metadata) {
@@ -807,17 +828,18 @@ pub fn sys_socket_recv_handle_and_data(trapframe: &mut Trapframe) -> usize {
     };
 
     // Write the handle value to userspace
-    if handle_ptr != 0 {
-        if copy_to_user(&task, handle_ptr, &new_handle.to_le_bytes()).is_err() {
+    // Write the data to userspace
+    if !data.is_empty() {
+        if copy_to_user(&task, data_ptr, &data).is_err() {
+            let _ = task.handle_table.remove(new_handle);
             return usize::MAX;
         }
     }
 
-    // Write the data to userspace
-    if !data.is_empty() && data_ptr != 0 {
-        if copy_to_user(&task, data_ptr, &data).is_err() {
-            return usize::MAX;
-        }
+    // Publish the handle only after the complete record payload is copied.
+    if copy_to_user(&task, handle_ptr, &new_handle.to_le_bytes()).is_err() {
+        let _ = task.handle_table.remove(new_handle);
+        return usize::MAX;
     }
 
     data.len()

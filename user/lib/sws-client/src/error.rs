@@ -23,6 +23,11 @@ pub enum Error {
     SendFailed,
     /// Failed to receive message
     ReceiveFailed,
+    /// The destination is too small for the next atomic handle record
+    ReceiveBufferTooSmall {
+        /// Exact number of bytes required by the queued record
+        required_len: usize,
+    },
     /// Invalid server response
     InvalidResponse,
     /// Failed to receive shared memory handle
@@ -35,6 +40,10 @@ pub enum Error {
     ProtocolError,
     /// Invalid request (e.g., missing required field in builder)
     InvalidRequest,
+    /// All non-zero request identifiers are currently in use
+    RequestIdExhausted,
+    /// Error response returned by SWS
+    ServerError(u32),
 }
 
 impl Error {
@@ -51,12 +60,15 @@ impl Error {
             Error::IoError => "I/O error",
             Error::SendFailed => "failed to send message",
             Error::ReceiveFailed => "failed to receive message",
+            Error::ReceiveBufferTooSmall { .. } => "receive buffer is too small",
             Error::InvalidResponse => "invalid server response",
             Error::ShmHandleFailed => "failed to receive shared memory handle",
             Error::ShmMapFailed => "failed to map shared memory",
             Error::SurfaceNotFound => "surface not found",
             Error::ProtocolError => "protocol error",
             Error::InvalidRequest => "invalid request (missing required field)",
+            Error::RequestIdExhausted => "all request identifiers are in use",
+            Error::ServerError(_) => "server rejected the request",
         }
     }
 }

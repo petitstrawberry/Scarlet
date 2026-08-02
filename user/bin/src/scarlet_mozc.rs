@@ -348,7 +348,7 @@ impl ScarletMozc {
 
     fn ensure_candidate_popup(&mut self, conn: &mut Connection) -> Result<u32, Error> {
         if let Some(popup) = self.candidate_popup {
-            if conn.surface_mut(popup.window_id).is_some() {
+            if conn.with_surface(popup.window_id, |_| ()).is_some() {
                 return Ok(popup.window_id);
             }
             println!(
@@ -503,7 +503,7 @@ impl ScarletMozc {
         let Some(popup) = self.candidate_popup else {
             return Ok(());
         };
-        if conn.surface_mut(popup.window_id).is_none() {
+        if conn.with_surface(popup.window_id, |_| ()).is_none() {
             self.discard_candidate_popup(conn, "keep-local-surface-missing");
             return Ok(());
         }
@@ -723,27 +723,27 @@ fn draw_candidate_popup(
         draw_candidate_popup_ui(&mut canvas, rows);
     }
 
-    let Some(surface) = conn.surface_mut(window_id) else {
+    let Some(()) = conn.with_surface_mut(window_id, |surface| {
+        surface.with_buffer(|buffer, width, height| {
+            for byte in buffer.iter_mut() {
+                *byte = 0;
+            }
+
+            let src = ui_buffer.data();
+            let src_stride = ui_buffer.width() as usize * 4;
+            let dst_stride = width as usize * 4;
+            let copy_stride = src_stride.min(dst_stride);
+            let copy_rows = ui_buffer.height().min(height) as usize;
+            for row in 0..copy_rows {
+                let src_start = row * src_stride;
+                let dst_start = row * dst_stride;
+                buffer[dst_start..dst_start + copy_stride]
+                    .copy_from_slice(&src[src_start..src_start + copy_stride]);
+            }
+        });
+    }) else {
         return Err(Error::SurfaceNotFound);
     };
-
-    surface.with_buffer(|buffer, width, height| {
-        for byte in buffer.iter_mut() {
-            *byte = 0;
-        }
-
-        let src = ui_buffer.data();
-        let src_stride = ui_buffer.width() as usize * 4;
-        let dst_stride = width as usize * 4;
-        let copy_stride = src_stride.min(dst_stride);
-        let copy_rows = ui_buffer.height().min(height) as usize;
-        for row in 0..copy_rows {
-            let src_start = row * src_stride;
-            let dst_start = row * dst_stride;
-            buffer[dst_start..dst_start + copy_stride]
-                .copy_from_slice(&src[src_start..src_start + copy_stride]);
-        }
-    });
     conn.commit(window_id)
 }
 

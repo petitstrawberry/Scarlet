@@ -942,27 +942,27 @@ fn draw_candidate_popup(
         draw_candidate_popup_ui(&mut canvas, rows);
     }
 
-    let Some(surface) = conn.surface_mut(window_id) else {
+    let Some(()) = conn.with_surface_mut(window_id, |surface| {
+        surface.with_buffer(|buffer, width, height| {
+            for byte in buffer.iter_mut() {
+                *byte = 0;
+            }
+
+            let src = ui_buffer.data();
+            let src_stride = ui_buffer.width() as usize * 4;
+            let dst_stride = width as usize * 4;
+            let copy_stride = src_stride.min(dst_stride);
+            let copy_rows = ui_buffer.height().min(height) as usize;
+            for row in 0..copy_rows {
+                let src_start = row * src_stride;
+                let dst_start = row * dst_stride;
+                buffer[dst_start..dst_start + copy_stride]
+                    .copy_from_slice(&src[src_start..src_start + copy_stride]);
+            }
+        });
+    }) else {
         return Err(Error::SurfaceNotFound);
     };
-
-    surface.with_buffer(|buffer, width, height| {
-        for byte in buffer.iter_mut() {
-            *byte = 0;
-        }
-
-        let src = ui_buffer.data();
-        let src_stride = ui_buffer.width() as usize * 4;
-        let dst_stride = width as usize * 4;
-        let copy_stride = src_stride.min(dst_stride);
-        let copy_rows = ui_buffer.height().min(height) as usize;
-        for row in 0..copy_rows {
-            let src_start = row * src_stride;
-            let dst_start = row * dst_stride;
-            buffer[dst_start..dst_start + copy_stride]
-                .copy_from_slice(&src[src_start..src_start + copy_stride]);
-        }
-    });
     conn.commit(window_id)
 }
 

@@ -1,7 +1,6 @@
 //! OS compatibility layer for SWS client.
 
 use crate::Error;
-use core::time::Duration;
 
 #[cfg(feature = "std")]
 pub use scarlet_os::handle::capability::memory_mapping::flags as mmap_flags;
@@ -12,7 +11,11 @@ pub use scarlet_os::ipc::permissions;
 #[cfg(feature = "std")]
 pub use scarlet_os::{SharedMemory, Socket};
 #[cfg(feature = "std")]
+pub use scarlet_os::Handle;
+#[cfg(feature = "std")]
 pub use std::collections::BTreeMap;
+#[cfg(feature = "std")]
+pub use std::sync::{Arc, Mutex, MutexGuard};
 #[cfg(feature = "std")]
 pub use std::string::String;
 #[cfg(feature = "std")]
@@ -20,6 +23,8 @@ pub use std::vec::Vec;
 
 #[cfg(not(feature = "std"))]
 pub use scarlet_std::collections::BTreeMap;
+#[cfg(not(feature = "std"))]
+pub use scarlet_std::handle::Handle;
 #[cfg(not(feature = "std"))]
 pub use scarlet_std::handle::capability::memory_mapping::flags as mmap_flags;
 #[cfg(not(feature = "std"))]
@@ -31,9 +36,23 @@ pub use scarlet_std::ipc::permissions;
 #[cfg(not(feature = "std"))]
 pub use scarlet_std::socket::Socket;
 #[cfg(not(feature = "std"))]
+pub use scarlet_std::sync::{Arc, Mutex, MutexGuard};
+#[cfg(not(feature = "std"))]
 pub use scarlet_std::string::String;
 #[cfg(not(feature = "std"))]
 pub use scarlet_std::vec::Vec;
+
+#[cfg(feature = "std")]
+pub fn mutex_lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+#[cfg(not(feature = "std"))]
+pub fn mutex_lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock()
+}
 
 #[cfg(feature = "std")]
 pub fn socket_read(socket: &mut Socket, buf: &mut [u8]) -> Result<usize, Error> {
@@ -97,11 +116,67 @@ pub fn socket_flush(socket: &mut Socket) -> Result<(), Error> {
 }
 
 #[cfg(feature = "std")]
-pub fn sleep(duration: Duration) {
-    std::thread::sleep(duration);
+pub fn socket_send_handle_and_data(
+    socket: &Socket,
+    handle: &Handle,
+    data: &[u8],
+) -> Result<(), Error> {
+    socket
+        .send_handle_and_data(handle, data)
+        .map_err(|_| Error::SendFailed)
 }
 
 #[cfg(not(feature = "std"))]
-pub fn sleep(duration: Duration) {
-    let _ = scarlet_std::thread::sleep(duration);
+pub fn socket_send_handle_and_data(
+    socket: &Socket,
+    handle: &Handle,
+    data: &[u8],
+) -> Result<(), Error> {
+    socket
+        .send_handle_and_data(handle, data)
+        .map_err(|_| Error::SendFailed)
+}
+
+#[cfg(feature = "std")]
+pub fn socket_recv_handle_and_data(
+    socket: &Socket,
+    data: &mut [u8],
+) -> Result<(Handle, usize), Error> {
+    use scarlet_os::socket::SocketError;
+
+    match socket.recv_handle_and_data(data) {
+        Ok(record) => Ok(record),
+        Err(SocketError::WouldBlock) => Err(Error::WouldBlock),
+        Err(SocketError::ReceiveBufferTooSmall { required_len }) => {
+            Err(Error::ReceiveBufferTooSmall { required_len })
+        }
+        Err(_) => Err(Error::ReceiveFailed),
+    }
+}
+
+#[cfg(not(feature = "std"))]
+pub fn socket_recv_handle_and_data(
+    socket: &Socket,
+    data: &mut [u8],
+) -> Result<(Handle, usize), Error> {
+    use scarlet_std::socket::SocketError;
+
+    match socket.recv_handle_and_data(data) {
+        Ok(record) => Ok(record),
+        Err(SocketError::WouldBlock) => Err(Error::WouldBlock),
+        Err(SocketError::ReceiveBufferTooSmall { required_len }) => {
+            Err(Error::ReceiveBufferTooSmall { required_len })
+        }
+        Err(_) => Err(Error::ReceiveFailed),
+    }
+}
+
+#[cfg(feature = "std")]
+pub fn yield_now() {
+    std::thread::yield_now();
+}
+
+#[cfg(not(feature = "std"))]
+pub fn yield_now() {
+    scarlet_std::thread::yield_now();
 }

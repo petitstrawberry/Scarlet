@@ -150,7 +150,7 @@ impl<'a> SurfaceBuilder<'a> {
     /// - Required fields are missing
     /// - The connection fails
     /// - The server returns an error
-    pub fn build(self, conn: &mut Connection) -> Result<u32, Error> {
+    pub fn build(self, conn: &Connection) -> Result<u32, Error> {
         // Validate required fields
         let app_id = self.app_id.ok_or(Error::InvalidRequest)?;
         let app_name = self.app_name.ok_or(Error::InvalidRequest)?;

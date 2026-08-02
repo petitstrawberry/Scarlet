@@ -110,6 +110,25 @@ pub enum Event {
     ScreenSizeChanged { width: u32, height: u32 },
     /// Output scale changed.
     OutputScaleChanged { scale_milli: u32 },
+    /// SWS rejected one exact shared SGFX frame commit.
+    SgfxFrameRejected {
+        window_id: u32,
+        buffer_id: u32,
+        generation: u32,
+        compositor_epoch: u32,
+        commit_serial: u64,
+        code: u32,
+    },
+    /// SWS finished sampling one exact shared SGFX buffer use.
+    SgfxBufferReleased {
+        window_id: u32,
+        buffer_id: u32,
+        generation: u32,
+        compositor_epoch: u32,
+        commit_serial: u64,
+    },
+    /// The shared-image compositor backend was lost or recreated.
+    SgfxBackendLost { compositor_epoch: u32 },
     /// Window was destroyed by server
     SurfaceDestroyed { surface_id: u32 },
     /// Focus changed to a different window

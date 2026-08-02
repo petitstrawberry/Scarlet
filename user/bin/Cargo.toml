@@ -2,12 +2,7 @@
 name = "userprogram"
 version = "0.16.0"
 edition = "2024"
-
-[profile.dev]
-panic = "abort"
-
-[profile.release]
-panic = "abort"
+workspace = "../../.cargo"
 
 [[bin]]
 name = "init"
@@ -119,6 +114,10 @@ name = "ui-demo"
 path = "src/ui_demo.rs"
 
 [[bin]]
+name = "ui-benchmark"
+path = "src/ui_benchmark.rs"
+
+[[bin]]
 name = "wayland_bridge"
 path = "src/wayland_bridge/main.rs"
 
@@ -189,12 +188,3 @@ vm-fdt = { version = "0.3", default-features = false, features = ["alloc"] }
 serde = { version = "1.0", default-features = false, features = ["alloc", "derive"] }
 serde-json-core = { package = "serde-json-core", version = "0.6", default-features = false }
 libm = { version = "0.2", default-features = false }
-
-[patch."https://github.com/petitstrawberry/Scarlet"]
-scarlet-abi = { path = "../lib/scarlet-abi" }
-scarlet-os = { path = "../lib/scarlet-os" }
-scarlet-rt = { path = "../lib/scarlet-rt" }
-scarlet-std = { path = "../lib/std" }
-scarlet-sys = { path = "../lib/scarlet-sys" }
-sws-client = { path = "../lib/sws-client" }
-sws-protocol = { path = "../lib/sws-protocol" }

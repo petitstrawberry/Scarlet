@@ -85,6 +85,8 @@ impl Default for WindowType {
 #[derive(Debug)]
 pub struct Window {
     pub id: WindowId,
+    /// SWS connection that owns this window.
+    pub owner_client_id: Option<usize>,
     /// Application identifier (e.g., "org.scarlet-os.desktop.settings")
     pub app_id: Option<Vec<u8>>,
     /// Optional logical parent window (transient relationship).
@@ -413,6 +415,7 @@ impl Window {
     pub fn new(id: WindowId, x: i32, y: i32, width: u32, height: u32) -> Self {
         Self {
             id,
+            owner_client_id: None,
             app_id: None,
             parent: None,
             transient_flags: 0,
@@ -452,6 +455,7 @@ impl Window {
 
         Self {
             id,
+            owner_client_id: None,
             app_id: None,
             parent: None,
             transient_flags: 0,
@@ -517,6 +521,7 @@ impl Window {
 
         Ok(Self {
             id,
+            owner_client_id: None,
             app_id: None,
             parent: None,
             transient_flags: 0,
@@ -707,6 +712,7 @@ impl WindowManager {
 
         let window = Window {
             id,
+            owner_client_id: Some(extension_id as usize),
             app_id: None,
             parent: None,
             transient_flags: 0,
@@ -765,6 +771,7 @@ impl WindowManager {
 
         let window = Window {
             id,
+            owner_client_id: None,
             app_id: None, // Will be set from IPC CREATE_WINDOW message
             parent: None,
             transient_flags: 0,

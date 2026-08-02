@@ -1054,9 +1054,7 @@ impl TaskBarApp {
                         (popup_renderer.as_mut(), popup_surface_id)
                     {
                         renderer.render();
-                        if let Some(buffer) = renderer.buffer()
-                            && let Some(surface) = conn.surface_mut(surface_id)
-                        {
+                        if let Some(buffer) = renderer.buffer() {
                             let src = buffer.as_slice();
                             let src_bytes = unsafe {
                                 core::slice::from_raw_parts(
@@ -1064,12 +1062,21 @@ impl TaskBarApp {
                                     src.len() * 4,
                                 )
                             };
-                            surface.with_buffer(|dst, w, h| {
-                                let len = (w as usize).saturating_mul(h as usize).saturating_mul(4);
-                                let copy_len = len.min(dst.len()).min(src_bytes.len());
-                                dst[..copy_len].copy_from_slice(&src_bytes[..copy_len]);
-                            });
-                            let _ = conn.commit(surface_id);
+                            if conn
+                                .with_surface_mut(surface_id, |surface| {
+                                    surface.with_buffer(|dst, w, h| {
+                                        let len = (w as usize)
+                                            .saturating_mul(h as usize)
+                                            .saturating_mul(4);
+                                        let copy_len = len.min(dst.len()).min(src_bytes.len());
+                                        dst[..copy_len]
+                                            .copy_from_slice(&src_bytes[..copy_len]);
+                                    });
+                                })
+                                .is_some()
+                            {
+                                let _ = conn.commit(surface_id);
+                            }
                         }
                     }
                     needs_render = false;

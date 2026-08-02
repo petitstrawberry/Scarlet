@@ -280,6 +280,7 @@ dependencies = [
 [[package]]
 name = "scarlet-ui"
 version = "0.1.0"
+source = "git+https://github.com/petitstrawberry/scarlet-ui#c5751b15fc6ca73291b562d20941c117b247e0e5"
 dependencies = [
  "scarlet-ui-core",
  "scarlet-ui-platform-sws",
@@ -288,6 +289,7 @@ dependencies = [
 [[package]]
 name = "scarlet-ui-core"
 version = "0.1.0"
+source = "git+https://github.com/petitstrawberry/scarlet-ui#c5751b15fc6ca73291b562d20941c117b247e0e5"
 dependencies = [
  "ab_glyph",
  "bitflags",
@@ -301,6 +303,7 @@ dependencies = [
 [[package]]
 name = "scarlet-ui-macros"
 version = "0.1.0"
+source = "git+https://github.com/petitstrawberry/scarlet-ui#c5751b15fc6ca73291b562d20941c117b247e0e5"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -310,6 +313,7 @@ dependencies = [
 [[package]]
 name = "scarlet-ui-platform-sws"
 version = "0.1.0"
+source = "git+https://github.com/petitstrawberry/scarlet-ui#c5751b15fc6ca73291b562d20941c117b247e0e5"
 dependencies = [
  "scarlet-std",
  "scarlet-ui-core",

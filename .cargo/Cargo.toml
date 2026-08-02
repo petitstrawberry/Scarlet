@@ -1,0 +1,27 @@
+[workspace]
+resolver = "2"
+members = [
+    "../user/bin",
+    "../user/std-bin",
+    "../user/video_player",
+]
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+
+[patch."https://github.com/petitstrawberry/scarlet-ui"]
+scarlet-ui = { path = "../../scarlet-ui/crates/scarlet-ui" }
+scarlet-ui-macros = { path = "../../scarlet-ui/crates/scarlet-ui-macros" }
+
+[patch."https://github.com/petitstrawberry/Scarlet"]
+scarlet-abi = { path = "../user/lib/scarlet-abi" }
+scarlet-os = { path = "../user/lib/scarlet-os" }
+scarlet-rt = { path = "../user/lib/scarlet-rt" }
+scarlet-std = { path = "../user/lib/std" }
+scarlet-sys = { path = "../user/lib/scarlet-sys" }
+sgfx = { path = "../user/lib/sgfx" }
+sws-client = { path = "../user/lib/sws-client" }
+sws-protocol = { path = "../user/lib/sws-protocol" }

@@ -8,9 +8,36 @@ use framebuffer::DisplaySurface;
 use sgfx::{
     Color, CompositionPass, Context, Device, Image, PixelRect, Queue, SourceAlpha, Texture,
 };
+use std::handle::Handle;
 use std::vec::Vec;
 
 type DamageRect = (u32, u32, u32, u32);
+
+/// Complete identity of one client-owned shared SGFX buffer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct SgfxBufferIdentity {
+    pub(super) window_id: u32,
+    pub(super) buffer_id: u32,
+    pub(super) generation: u32,
+    pub(super) compositor_epoch: u32,
+}
+
+/// One exact accepted use of a shared SGFX buffer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct SgfxCommitToken {
+    pub(super) identity: SgfxBufferIdentity,
+    pub(super) commit_serial: u64,
+}
+
+/// Typed failure returned by the shared SGFX buffer state machine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SgfxBufferError {
+    Unavailable,
+    InvalidBuffer,
+    StaleGeneration,
+    BufferBusy,
+    ImportFailed,
+}
 
 enum WindowTextureBacking {
     Imported,
@@ -26,6 +53,22 @@ struct CachedWindowTexture {
     pending_damage: Option<DamageRect>,
 }
 
+struct SharedWindowTexture {
+    identity: SgfxBufferIdentity,
+    width: u32,
+    height: u32,
+    texture: Texture,
+}
+
+struct SharedWindowState {
+    window_id: WindowId,
+    latest_generation: u32,
+    compositor_epoch: u32,
+    presented: Option<SgfxCommitToken>,
+    pending: Option<SgfxCommitToken>,
+    retire_after_present: Option<SgfxCommitToken>,
+}
+
 /// GPU resources and texture cache used by the internal SWS compositor.
 pub(super) struct GpuCompositor {
     _context: Context,
@@ -35,6 +78,8 @@ pub(super) struct GpuCompositor {
     cursor_width: u32,
     cursor_height: u32,
     textures: Vec<CachedWindowTexture>,
+    shared_textures: Vec<SharedWindowTexture>,
+    shared_windows: Vec<SharedWindowState>,
 }
 
 impl GpuCompositor {
@@ -79,7 +124,189 @@ impl GpuCompositor {
             cursor_width: cursor.width,
             cursor_height: cursor.height,
             textures: Vec::new(),
+            shared_textures: Vec::new(),
+            shared_windows: Vec::new(),
         })
+    }
+
+    /// Import one client-owned shared image into the compositor context.
+    pub(super) fn register_shared_buffer(
+        &mut self,
+        identity: SgfxBufferIdentity,
+        width: u32,
+        height: u32,
+        handle: Handle,
+    ) -> Result<(), SgfxBufferError> {
+        if width == 0 || height == 0 {
+            return Err(SgfxBufferError::InvalidBuffer);
+        }
+        if self
+            .shared_textures
+            .iter()
+            .any(|entry| entry.identity == identity)
+        {
+            return Err(SgfxBufferError::InvalidBuffer);
+        }
+
+        let state_index = self
+            .shared_windows
+            .iter()
+            .position(|state| state.window_id == identity.window_id);
+        if let Some(index) = state_index {
+            let state = &self.shared_windows[index];
+            if identity.compositor_epoch != state.compositor_epoch
+                || identity.generation < state.latest_generation
+            {
+                return Err(SgfxBufferError::StaleGeneration);
+            }
+        }
+
+        // Do not advance the accepted generation until import and metadata
+        // validation succeed. A rejected capability must leave existing buffers
+        // usable so a client can retry the registration.
+        let texture = self
+            ._context
+            .import_shared_bgra_texture(handle)
+            .map_err(|_| SgfxBufferError::ImportFailed)?;
+        if texture.width() != width || texture.height() != height {
+            self._context
+                .release_texture(texture)
+                .map_err(|_| SgfxBufferError::Unavailable)?;
+            return Err(SgfxBufferError::InvalidBuffer);
+        }
+        match state_index {
+            Some(index) => {
+                self.shared_windows[index].latest_generation = identity.generation;
+            }
+            None => self.shared_windows.push(SharedWindowState {
+                window_id: identity.window_id,
+                latest_generation: identity.generation,
+                compositor_epoch: identity.compositor_epoch,
+                presented: None,
+                pending: None,
+                retire_after_present: None,
+            }),
+        }
+        self.shared_textures.push(SharedWindowTexture {
+            identity,
+            width,
+            height,
+            texture,
+        });
+        Ok(())
+    }
+
+    /// Atomically publish a registered buffer and bounded damage list.
+    pub(super) fn commit_shared_buffer(
+        &mut self,
+        identity: SgfxBufferIdentity,
+        commit_serial: u64,
+        damage_rects: &[sws_protocol::SgfxDamageRect],
+    ) -> Result<Vec<DamageRect>, SgfxBufferError> {
+        if commit_serial == 0 {
+            return Err(SgfxBufferError::InvalidBuffer);
+        }
+        let texture = self
+            .shared_textures
+            .iter()
+            .find(|entry| entry.identity == identity)
+            .ok_or(SgfxBufferError::InvalidBuffer)?;
+        let state = self
+            .shared_windows
+            .iter_mut()
+            .find(|state| state.window_id == identity.window_id)
+            .ok_or(SgfxBufferError::InvalidBuffer)?;
+        if identity.compositor_epoch != state.compositor_epoch
+            || identity.generation != state.latest_generation
+        {
+            return Err(SgfxBufferError::StaleGeneration);
+        }
+        if state
+            .presented
+            .is_some_and(|commit| commit.identity == identity)
+            || state
+                .pending
+                .is_some_and(|commit| commit.identity == identity)
+            || state
+                .retire_after_present
+                .is_some_and(|commit| commit.identity == identity)
+        {
+            return Err(SgfxBufferError::BufferBusy);
+        }
+
+        let mut clipped_damage = Vec::new();
+        for rect in damage_rects {
+            let left = i64::from(rect.x).max(0).min(i64::from(texture.width));
+            let top = i64::from(rect.y).max(0).min(i64::from(texture.height));
+            let right = i64::from(rect.x)
+                .saturating_add(i64::from(rect.width))
+                .max(0)
+                .min(i64::from(texture.width));
+            let bottom = i64::from(rect.y)
+                .saturating_add(i64::from(rect.height))
+                .max(0)
+                .min(i64::from(texture.height));
+            if right > left && bottom > top {
+                clipped_damage.push((
+                    left as u32,
+                    top as u32,
+                    (right - left) as u32,
+                    (bottom - top) as u32,
+                ));
+            }
+        }
+        if clipped_damage.is_empty() {
+            return Err(SgfxBufferError::InvalidBuffer);
+        }
+        let commit = SgfxCommitToken {
+            identity,
+            commit_serial,
+        };
+        if state.pending.is_some() {
+            // Keep a superseded, never-sampled frame retained until the same
+            // presentation boundary as its replacement. Releasing it here
+            // would let a two-slot client run without display backpressure and
+            // overwrite every visible animation frame before SWS presents.
+            if state.retire_after_present.is_some() {
+                return Err(SgfxBufferError::BufferBusy);
+            }
+            state.retire_after_present = state.pending.replace(commit);
+        } else {
+            state.pending = Some(commit);
+        }
+        Ok(clipped_damage)
+    }
+
+    /// Remove a registered shared buffer that is not retained by SWS.
+    pub(super) fn destroy_shared_buffer(
+        &mut self,
+        identity: SgfxBufferIdentity,
+    ) -> Result<(), SgfxBufferError> {
+        if let Some(state) = self
+            .shared_windows
+            .iter()
+            .find(|state| state.window_id == identity.window_id)
+            && (state
+                .presented
+                .is_some_and(|commit| commit.identity == identity)
+                || state
+                    .pending
+                    .is_some_and(|commit| commit.identity == identity)
+                || state
+                    .retire_after_present
+                    .is_some_and(|commit| commit.identity == identity))
+        {
+            return Err(SgfxBufferError::BufferBusy);
+        }
+        let index = self
+            .shared_textures
+            .iter()
+            .position(|entry| entry.identity == identity)
+            .ok_or(SgfxBufferError::InvalidBuffer)?;
+        let entry = self.shared_textures.remove(index);
+        self._context
+            .release_texture(entry.texture)
+            .map_err(|_| SgfxBufferError::Unavailable)
     }
 
     /// Recreate the screen-sized target after an output resize.
@@ -148,8 +375,16 @@ impl GpuCompositor {
         });
     }
 
-    /// Detach and forget a texture before its backing store changes or disappears.
-    pub(super) fn remove_window(&mut self, window_id: WindowId) -> Result<(), &'static str> {
+    /// Detach the compositor-owned upload texture before CPU backing changes.
+    ///
+    /// Client-owned shared SGFX registrations deliberately survive a window
+    /// resize. Their old generation remains committed until a new generation
+    /// is presented, at which point the normal release protocol lets the
+    /// client destroy it without losing a wakeup.
+    pub(super) fn remove_window_texture(
+        &mut self,
+        window_id: WindowId,
+    ) -> Result<(), &'static str> {
         if let Some(index) = self
             .textures
             .iter()
@@ -157,6 +392,24 @@ impl GpuCompositor {
         {
             self.release_window_texture(index)?;
         }
+        Ok(())
+    }
+
+    /// Detach all GPU resources after the window itself is closed.
+    pub(super) fn remove_window(&mut self, window_id: WindowId) -> Result<(), &'static str> {
+        self.remove_window_texture(window_id)?;
+        while let Some(index) = self
+            .shared_textures
+            .iter()
+            .position(|entry| entry.identity.window_id == window_id)
+        {
+            let entry = self.shared_textures.remove(index);
+            self._context
+                .release_texture(entry.texture)
+                .map_err(|_| "Failed to detach shared SGFX window texture")?;
+        }
+        self.shared_windows
+            .retain(|state| state.window_id != window_id);
         Ok(())
     }
 
@@ -168,9 +421,12 @@ impl GpuCompositor {
         cursor: &Cursor,
         background: [u8; 4],
         resize_outline: Option<(i32, i32, u32, u32)>,
-    ) -> Result<(), &'static str> {
+    ) -> Result<Vec<SgfxCommitToken>, &'static str> {
         for window in windows {
-            if window.visible && (window.has_pixel_buffer() || window.shm_layout().is_ok()) {
+            if window.visible
+                && !self.has_committed_shared_buffer(window.id)
+                && (window.has_pixel_buffer() || window.shm_layout().is_ok())
+            {
                 self.sync_window_texture(window)?;
             }
         }
@@ -182,24 +438,35 @@ impl GpuCompositor {
             if !window.visible {
                 continue;
             }
-            let Some((destination, source)) = clipped_rect(
-                window.x,
-                window.y,
-                window.width,
-                window.height,
-                self.target.width(),
-                self.target.height(),
-            ) else {
-                continue;
-            };
 
-            if window.has_pixel_buffer() || window.shm_layout().is_ok() {
-                let texture = self
-                    .textures
-                    .iter()
-                    .find(|entry| entry.window_id == window.id)
-                    .map(|entry| &entry.texture)
-                    .ok_or("GPU window texture cache is missing")?;
+            if self.has_committed_shared_buffer(window.id)
+                || window.has_pixel_buffer()
+                || window.shm_layout().is_ok()
+            {
+                let texture = match self.committed_shared_texture(window.id) {
+                    Some(texture) => texture,
+                    None => self
+                        .textures
+                        .iter()
+                        .find(|entry| entry.window_id == window.id)
+                        .map(|entry| &entry.texture)
+                        .ok_or("GPU window texture cache is missing")?,
+                };
+                // A resize event can be presented just before the client's
+                // replacement generation arrives. Keep the old committed
+                // shared image valid without sampling beyond its extent.
+                let content_width = window.width.min(texture.width());
+                let content_height = window.height.min(texture.height());
+                let Some((destination, source)) = clipped_rect(
+                    window.x,
+                    window.y,
+                    content_width,
+                    content_height,
+                    self.target.width(),
+                    self.target.height(),
+                ) else {
+                    continue;
+                };
                 let source_alpha = if window.has_alpha_content {
                     SourceAlpha::Respect
                 } else {
@@ -216,6 +483,16 @@ impl GpuCompositor {
                     )
                     .map_err(|_| "Failed to compose GPU window texture")?;
             } else {
+                let Some((destination, _)) = clipped_rect(
+                    window.x,
+                    window.y,
+                    window.width,
+                    window.height,
+                    self.target.width(),
+                    self.target.height(),
+                ) else {
+                    continue;
+                };
                 let color = if window.focused {
                     bgra_color([150, 150, 200, 255])
                 } else {
@@ -260,7 +537,45 @@ impl GpuCompositor {
             .map_err(|_| "Failed to submit GPU composition")?;
         self.target
             .present(display)
-            .map_err(|_| "Failed to present GPU composition")
+            .map_err(|_| "Failed to present GPU composition")?;
+        Ok(self.take_presented_releases())
+    }
+
+    fn has_committed_shared_buffer(&self, window_id: WindowId) -> bool {
+        self.shared_windows
+            .iter()
+            .any(|state| {
+                state.window_id == window_id
+                    && (state.pending.is_some() || state.presented.is_some())
+            })
+    }
+
+    fn committed_shared_texture(&self, window_id: WindowId) -> Option<&Texture> {
+        let state = self
+            .shared_windows
+            .iter()
+            .find(|state| state.window_id == window_id)?;
+        let identity = state.pending.or(state.presented)?.identity;
+        self.shared_textures
+            .iter()
+            .find(|entry| entry.identity == identity)
+            .map(|entry| &entry.texture)
+    }
+
+    fn take_presented_releases(&mut self) -> Vec<SgfxCommitToken> {
+        let mut releases = Vec::new();
+        for state in &mut self.shared_windows {
+            let Some(pending) = state.pending.take() else {
+                continue;
+            };
+            if let Some(previous) = state.presented.replace(pending) {
+                releases.push(previous);
+            }
+            if let Some(superseded) = state.retire_after_present.take() {
+                releases.push(superseded);
+            }
+        }
+        releases
     }
 
     fn sync_window_texture(&mut self, window: &Window) -> Result<(), &'static str> {
