@@ -651,7 +651,7 @@ dependencies = [
 name = "framebuffer"
 version = "0.16.0"
 dependencies = [
- "scarlet-os 0.16.0",
+ "scarlet-os",
 ]
 
 [[package]]
@@ -713,7 +713,7 @@ dependencies = [
 name = "gpu-raw"
 version = "0.16.0"
 dependencies = [
- "scarlet-os 0.16.0",
+ "scarlet-os",
 ]
 
 [[package]]
@@ -1742,7 +1742,7 @@ name = "sas-client"
 version = "0.1.0"
 dependencies = [
  "sas-protocol",
- "scarlet-os 0.16.0",
+ "scarlet-os",
 ]
 
 [[package]]
@@ -1754,33 +1754,19 @@ name = "scarlet-abi"
 version = "0.16.0"
 
 [[package]]
-name = "scarlet-abi"
-version = "0.16.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#75ae8a20a84a94d291250472a0b2a05a448243e9"
-
-[[package]]
 name = "scarlet-os"
 version = "0.16.0"
 dependencies = [
- "scarlet-abi 0.16.0",
+ "scarlet-abi",
  "scarlet-rt",
- "scarlet-sys 0.16.0",
-]
-
-[[package]]
-name = "scarlet-os"
-version = "0.16.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#75ae8a20a84a94d291250472a0b2a05a448243e9"
-dependencies = [
- "scarlet-abi 0.16.0 (git+https://github.com/petitstrawberry/Scarlet?branch=dev)",
- "scarlet-sys 0.16.0 (git+https://github.com/petitstrawberry/Scarlet?branch=dev)",
+ "scarlet-sys",
 ]
 
 [[package]]
 name = "scarlet-rt"
 version = "0.16.0"
 dependencies = [
- "scarlet-sys 0.16.0",
+ "scarlet-sys",
 ]
 
 [[package]]
@@ -1798,8 +1784,8 @@ dependencies = [
  "rust_h264",
  "sas-client",
  "sas-protocol",
- "scarlet-os 0.16.0",
- "scarlet-sys 0.16.0",
+ "scarlet-os",
+ "scarlet-sys",
  "scarlet-ui",
  "scarlet-ui-macros",
  "serde",
@@ -1814,21 +1800,12 @@ dependencies = [
 name = "scarlet-sys"
 version = "0.16.0"
 dependencies = [
- "scarlet-abi 0.16.0",
-]
-
-[[package]]
-name = "scarlet-sys"
-version = "0.16.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#75ae8a20a84a94d291250472a0b2a05a448243e9"
-dependencies = [
- "scarlet-abi 0.16.0 (git+https://github.com/petitstrawberry/Scarlet?branch=dev)",
+ "scarlet-abi",
 ]
 
 [[package]]
 name = "scarlet-ui"
 version = "0.1.0"
-source = "git+https://github.com/petitstrawberry/scarlet-ui#c5751b15fc6ca73291b562d20941c117b247e0e5"
 dependencies = [
  "scarlet-ui-core",
  "scarlet-ui-platform-sws",
@@ -1838,7 +1815,6 @@ dependencies = [
 [[package]]
 name = "scarlet-ui-core"
 version = "0.1.0"
-source = "git+https://github.com/petitstrawberry/scarlet-ui#c5751b15fc6ca73291b562d20941c117b247e0e5"
 dependencies = [
  "ab_glyph",
  "bitflags 2.13.0",
@@ -1852,7 +1828,6 @@ dependencies = [
 [[package]]
 name = "scarlet-ui-macros"
 version = "0.1.0"
-source = "git+https://github.com/petitstrawberry/scarlet-ui#c5751b15fc6ca73291b562d20941c117b247e0e5"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1862,7 +1837,6 @@ dependencies = [
 [[package]]
 name = "scarlet-ui-platform-sws"
 version = "0.1.0"
-source = "git+https://github.com/petitstrawberry/scarlet-ui#c5751b15fc6ca73291b562d20941c117b247e0e5"
 dependencies = [
  "scarlet-ui-core",
  "sws-client",
@@ -1872,7 +1846,6 @@ dependencies = [
 [[package]]
 name = "scarlet-ui-platform-winit"
 version = "0.1.0"
-source = "git+https://github.com/petitstrawberry/scarlet-ui#c5751b15fc6ca73291b562d20941c117b247e0e5"
 dependencies = [
  "raw-window-handle",
  "scarlet-ui-core",
@@ -1954,7 +1927,7 @@ version = "0.16.0"
 dependencies = [
  "framebuffer",
  "gpu-raw",
- "scarlet-os 0.16.0",
+ "scarlet-os",
 ]
 
 [[package]]
@@ -2112,16 +2085,14 @@ dependencies = [
 [[package]]
 name = "sws-client"
 version = "0.1.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#75ae8a20a84a94d291250472a0b2a05a448243e9"
 dependencies = [
- "scarlet-os 0.16.0 (git+https://github.com/petitstrawberry/Scarlet?branch=dev)",
+ "scarlet-os",
  "sws-protocol",
 ]
 
 [[package]]
 name = "sws-protocol"
 version = "0.16.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#75ae8a20a84a94d291250472a0b2a05a448243e9"
 
 [[package]]
 name = "symphonia-codec-aac"
@@ -2959,3 +2930,7 @@ checksum = "27bc9d5b815bc103f142aa054f561d9187d191692ec7c2d1e2b4737f8dbd7296"
 dependencies = [
  "zune-core",
 ]
+
+[[patch.unused]]
+name = "scarlet-std"
+version = "0.16.0"

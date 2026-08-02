@@ -154,6 +154,12 @@ to = "/system/scarlet/bin/sgfx_texture"
 [[layers]]
 kind = "cargo"
 source = "../../user/std-bin"
+bin = "sgfx_showcase"
+to = "/system/scarlet/bin/sgfx_showcase"
+
+[[layers]]
+kind = "cargo"
+source = "../../user/std-bin"
 bin = "httpd"
 to = "/system/scarlet/bin/httpd"
 

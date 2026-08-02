@@ -6,9 +6,10 @@ use core::cell::Cell;
 use framebuffer::DisplaySurface;
 use gpu_raw::{
     GPU_DEVICE_STATE_READY, GPU_EXECUTION_SUPPORT_IMAGE_UPLOAD, GPU_EXECUTION_SUPPORT_PRESENTATION,
-    GPU_EXECUTION_SUPPORT_QUEUE, GPU_IMAGE_USAGE_SAMPLED, GPU_IMAGE_USAGE_TRANSFER_DST,
-    GPU_RESULT_SUCCESS, Gpu as RawGpu, GpuBuffer as RawBuffer, GpuContext as RawContext,
-    GpuDialect as RawDialect, GpuImage as RawImage, GpuImageBgraRect, GpuQueue as RawQueue,
+    GPU_EXECUTION_SUPPORT_QUEUE, GPU_IMAGE_USAGE_RENDER_TARGET, GPU_IMAGE_USAGE_SAMPLED,
+    GPU_IMAGE_USAGE_TRANSFER_DST, GPU_RESULT_SUCCESS, Gpu as RawGpu, GpuBuffer as RawBuffer,
+    GpuContext as RawContext, GpuDialect as RawDialect, GpuImage as RawImage, GpuImageBgraRect,
+    GpuQueue as RawQueue,
 };
 #[cfg(feature = "std")]
 use scarlet_os::handle::{HandleError, HandleResult};
@@ -20,6 +21,11 @@ use std::{
     ipc::SharedMemory,
 };
 
+use crate::driver::{
+    IrAddressMode, IrBlendFactor, IrBlendOp, IrBlendState, IrCullMode, IrDraw, IrFilterMode,
+    IrFragmentProgram, IrFrontFace, IrPipelineState, IrSamplerState, IrSubmission, IrTextureCopy,
+    IrTextureSpec, IrTextureUpload, IrVertex, MAX_IR_VERTICES,
+};
 use crate::{
     Capabilities, Color, CullMode, FrontFace, MAX_COMPOSITION_OPERATIONS, PipelineDesc,
     PipelineKind, PixelRect, SourceAlpha, VertexClip4Color3, Viewport,
@@ -34,6 +40,8 @@ const VIRGL_CCMD_CLEAR: u32 = 7;
 const VIRGL_CCMD_DRAW_VBO: u32 = 8;
 const VIRGL_CCMD_RESOURCE_INLINE_WRITE: u32 = 9;
 const VIRGL_CCMD_SET_SAMPLER_VIEWS: u32 = 10;
+const VIRGL_CCMD_RESOURCE_COPY_REGION: u32 = 17;
+const VIRGL_CCMD_SET_CONSTANT_BUFFER: u32 = 12;
 const VIRGL_CCMD_SET_SCISSOR_STATE: u32 = 15;
 const VIRGL_CCMD_BIND_SAMPLER_STATES: u32 = 18;
 const VIRGL_CCMD_BIND_SHADER: u32 = 31;
@@ -72,7 +80,7 @@ const COMPOSITION_VERTEX_ELEMENTS_HANDLE: u32 = 22;
 const COMPOSITION_SAMPLER_STATE_HANDLE: u32 = 23;
 const FIRST_DYNAMIC_OBJECT_HANDLE: u32 = 64;
 const VIRGL_RASTERIZER_DEPTH_CLIP: u32 = 1 << 1;
-const VIRGL_RASTERIZER_SCISSOR: u32 = 1;
+const VIRGL_RASTERIZER_SCISSOR: u32 = 1 << 14;
 const VIRGL_RASTERIZER_CULL_FACE_SHIFT: u32 = 8;
 const VIRGL_RASTERIZER_FRONT_CCW: u32 = 1 << 15;
 const VIRGL_BLEND_ENABLE: u32 = 1;
@@ -83,14 +91,27 @@ const VIRGL_BLEND_ALPHA_DST_FACTOR_SHIFT: u32 = 22;
 const VIRGL_BLEND_COLORMASK_SHIFT: u32 = 27;
 const PIPE_BLENDFACTOR_ONE: u32 = 1;
 const PIPE_BLENDFACTOR_SRC_ALPHA: u32 = 3;
+const PIPE_BLENDFACTOR_DST_ALPHA: u32 = 4;
+const PIPE_BLENDFACTOR_ZERO: u32 = 0x11;
 const PIPE_BLENDFACTOR_INV_SRC_ALPHA: u32 = 19;
+const PIPE_BLENDFACTOR_INV_DST_ALPHA: u32 = 20;
+const PIPE_BLEND_ADD: u32 = 0;
+const PIPE_BLEND_SUBTRACT: u32 = 1;
+const PIPE_BLEND_REVERSE_SUBTRACT: u32 = 2;
+const PIPE_TEX_WRAP_REPEAT: u32 = 0;
 const PIPE_TEX_WRAP_CLAMP_TO_EDGE: u32 = 2;
+const PIPE_TEX_WRAP_MIRROR_REPEAT: u32 = 4;
+const PIPE_TEX_FILTER_NEAREST: u32 = 0;
 const PIPE_TEX_FILTER_LINEAR: u32 = 1;
 const PIPE_TEX_MIPFILTER_NONE: u32 = 2;
 const PIPE_SWIZZLE_X: u32 = 0;
 const PIPE_SWIZZLE_Y: u32 = 1;
 const PIPE_SWIZZLE_Z: u32 = 2;
 const PIPE_SWIZZLE_W: u32 = 3;
+const IR_VERTEX_BUFFER_BYTES: usize = MAX_IR_VERTICES * 10 * core::mem::size_of::<f32>();
+const IR_TEXTURE_SLOTS: usize = 1_024;
+const IR_SAMPLER_SLOTS: usize = 256;
+const IR_PIPELINE_SLOTS: usize = 256;
 
 #[derive(Clone, Copy)]
 struct FramebufferOrientation {
@@ -170,8 +191,78 @@ const COMPOSITION_SOLID_SHADER: &str = "FRAG\n\
 PROPERTY FS_COLOR0_WRITES_ALL_CBUFS 1\n\
 DCL IN[1], COLOR, PERSPECTIVE\n\
 DCL OUT[0], COLOR\n\
-  0: MOV OUT[0], IN[1]\n\
+   0: MOV OUT[0], IN[1]\n\
+   1: END\n";
+
+const IR_VERTEX_SHADER: &str = "VERT\n\
+DCL IN[0]\n\
+DCL IN[1]\n\
+DCL IN[2]\n\
+DCL CONST[0..3]\n\
+DCL OUT[0], POSITION\n\
+DCL OUT[1], COLOR\n\
+DCL OUT[2], GENERIC[0]\n\
+DCL TEMP[0]\n\
+  0: MUL TEMP[0], CONST[0], IN[0].xxxx\n\
+  1: MAD TEMP[0], CONST[1], IN[0].yyyy, TEMP[0]\n\
+  2: MAD TEMP[0], CONST[2], IN[0].zzzz, TEMP[0]\n\
+  3: MAD OUT[0], CONST[3], IN[0].wwww, TEMP[0]\n\
+  4: MOV OUT[1], IN[1]\n\
+  5: MOV OUT[2], IN[2]\n\
+  6: END\n";
+
+const IR_SOLID_FRAGMENT_SHADER: &str = "FRAG\n\
+PROPERTY FS_COLOR0_WRITES_ALL_CBUFS 1\n\
+DCL CONST[0]\n\
+DCL OUT[0], COLOR\n\
+  0: MOV OUT[0], CONST[0]\n\
   1: END\n";
+
+const IR_VERTEX_COLOR_FRAGMENT_SHADER: &str = "FRAG\n\
+PROPERTY FS_COLOR0_WRITES_ALL_CBUFS 1\n\
+DCL IN[0], COLOR, PERSPECTIVE\n\
+DCL CONST[0]\n\
+DCL OUT[0], COLOR\n\
+  0: MUL OUT[0], IN[0], CONST[0]\n\
+  1: END\n";
+
+const IR_TEXTURE_RGBA_FRAGMENT_SHADER: &str = "FRAG\n\
+PROPERTY FS_COLOR0_WRITES_ALL_CBUFS 1\n\
+DCL IN[0], GENERIC[0], PERSPECTIVE\n\
+DCL CONST[0]\n\
+DCL SAMP[0]\n\
+DCL SVIEW[0], 2D, FLOAT\n\
+DCL OUT[0], COLOR\n\
+DCL TEMP[0]\n\
+  0: TEX TEMP[0], IN[0], SAMP[0], 2D\n\
+  1: MUL OUT[0], TEMP[0], CONST[0]\n\
+  2: END\n";
+
+const IR_TEXTURE_RGB_IGNORE_ALPHA_FRAGMENT_SHADER: &str = "FRAG\n\
+PROPERTY FS_COLOR0_WRITES_ALL_CBUFS 1\n\
+DCL IN[0], GENERIC[0], PERSPECTIVE\n\
+DCL CONST[0]\n\
+DCL SAMP[0]\n\
+DCL SVIEW[0], 2D, FLOAT\n\
+DCL OUT[0], COLOR\n\
+DCL TEMP[0]\n\
+  0: TEX TEMP[0], IN[0], SAMP[0], 2D\n\
+  1: MUL OUT[0].xyz, TEMP[0].xyzx, CONST[0].xyzx\n\
+  2: MOV OUT[0].w, CONST[0].wwww\n\
+  3: END\n";
+
+const IR_TEXTURE_ALPHA_MASK_FRAGMENT_SHADER: &str = "FRAG\n\
+PROPERTY FS_COLOR0_WRITES_ALL_CBUFS 1\n\
+DCL IN[0], GENERIC[0], PERSPECTIVE\n\
+DCL CONST[0]\n\
+DCL SAMP[0]\n\
+DCL SVIEW[0], 2D, FLOAT\n\
+DCL OUT[0], COLOR\n\
+DCL TEMP[0]\n\
+  0: TEX TEMP[0], IN[0], SAMP[0], 2D\n\
+  1: MOV OUT[0].xyz, CONST[0].xyzx\n\
+  2: MUL OUT[0].w, TEMP[0].wwww, CONST[0].wwww\n\
+  3: END\n";
 
 pub(crate) struct Device {
     raw: RawGpu,
@@ -240,6 +331,8 @@ impl Context {
             height,
             composition_surface_handle: self.allocate_object_handle()?,
             composition_surface_initialized: Cell::new(false),
+            ir_surface_handle: self.allocate_object_handle()?,
+            ir_surface_initialized: Cell::new(false),
         })
     }
 
@@ -268,6 +361,8 @@ impl Context {
             context_handle: self.handle_id(),
             sampler_view_handle: self.allocate_object_handle()?,
             sampler_view_initialized: Cell::new(false),
+            ir_surface_handle: self.allocate_object_handle()?,
+            ir_surface_initialized: Cell::new(false),
         })
     }
 
@@ -299,6 +394,8 @@ impl Context {
             context_handle: self.handle_id(),
             sampler_view_handle: self.allocate_object_handle()?,
             sampler_view_initialized: Cell::new(false),
+            ir_surface_handle: self.allocate_object_handle()?,
+            ir_surface_initialized: Cell::new(false),
         })
     }
 
@@ -320,6 +417,41 @@ impl Context {
             source_stride,
             GpuImageBgraRect::new(damage.x(), damage.y(), damage.width(), damage.height()),
         )
+    }
+
+    fn create_ir_texture(&self, spec: IrTextureSpec) -> HandleResult<Texture> {
+        if spec.width == 0 || spec.height == 0 || spec.present {
+            return Err(HandleError::InvalidParameter);
+        }
+        let mut usage = 0;
+        if spec.render_attachment {
+            usage |= GPU_IMAGE_USAGE_RENDER_TARGET;
+        }
+        if spec.sampled {
+            usage |= GPU_IMAGE_USAGE_SAMPLED;
+        }
+        if spec.copy_destination {
+            usage |= GPU_IMAGE_USAGE_TRANSFER_DST;
+        }
+        if usage == 0 {
+            return Err(HandleError::InvalidParameter);
+        }
+        let raw = self
+            .device
+            .raw
+            .create_image_with_usage(spec.width, spec.height, usage)?;
+        let resource_id = resource_id_from_token(self.raw.attach_image(&raw)?)?;
+        Ok(Texture {
+            raw,
+            resource_id,
+            width: spec.width,
+            height: spec.height,
+            context_handle: self.handle_id(),
+            sampler_view_handle: self.allocate_object_handle()?,
+            sampler_view_initialized: Cell::new(false),
+            ir_surface_handle: self.allocate_object_handle()?,
+            ir_surface_initialized: Cell::new(false),
+        })
     }
 
     pub(crate) fn transfer_imported_bgra_rect(
@@ -404,6 +536,72 @@ impl Context {
         })
     }
 
+    pub(crate) fn create_ir_resources(&self) -> HandleResult<IrResources> {
+        let vertex_bytes =
+            u64::try_from(IR_VERTEX_BUFFER_BYTES).map_err(|_| HandleError::InvalidParameter)?;
+        let vertex_buffer = self.device.raw.create_buffer(vertex_bytes, 0)?;
+        let vertex_resource_id = resource_id_from_token(self.raw.attach_buffer(&vertex_buffer)?)?;
+        Ok(IrResources {
+            context_handle: self.handle_id(),
+            vertex_buffer,
+            vertex_resource_id,
+            textures: empty_slots(IR_TEXTURE_SLOTS)?,
+            texture_specs: empty_slots(IR_TEXTURE_SLOTS)?,
+            samplers: empty_slots(IR_SAMPLER_SLOTS)?,
+            pipelines: empty_slots(IR_PIPELINE_SLOTS)?,
+            vertex_shader_handle: self.allocate_object_handle()?,
+            solid_fragment_shader_handle: self.allocate_object_handle()?,
+            vertex_color_fragment_shader_handle: self.allocate_object_handle()?,
+            texture_rgba_fragment_shader_handle: self.allocate_object_handle()?,
+            texture_rgb_ignore_alpha_fragment_shader_handle: self.allocate_object_handle()?,
+            texture_alpha_mask_fragment_shader_handle: self.allocate_object_handle()?,
+            vertex_elements_handle: self.allocate_object_handle()?,
+            initialized: Cell::new(false),
+        })
+    }
+
+    pub(crate) fn map_ir_image(
+        &self,
+        resources: &mut IrResources,
+        texture: IrTextureSpec,
+        image: &Image,
+    ) -> HandleResult<()> {
+        if resources.context_handle != self.handle_id()
+            || image.context_handle != self.handle_id()
+            || texture.slot >= resources.textures.len()
+            || texture.width != image.width
+            || texture.height != image.height
+            || !texture.render_attachment
+            || !texture.present
+        {
+            return Err(HandleError::InvalidParameter);
+        }
+        let slot = resources
+            .textures
+            .get_mut(texture.slot)
+            .ok_or(HandleError::InvalidParameter)?;
+        if slot.is_some() {
+            return Err(HandleError::InvalidParameter);
+        }
+        *slot = Some(IrTexture::Mapped(MappedIrTexture {
+            resource_id: image.resource_id,
+            width: image.width,
+            height: image.height,
+            sampler_view_handle: self.allocate_object_handle()?,
+            sampler_view_initialized: Cell::new(false),
+            surface_handle: image.ir_surface_handle,
+            surface_initialized: Cell::new(image.ir_surface_initialized.get()),
+        }));
+        if let Some(spec) = resources.texture_specs.get_mut(texture.slot) {
+            *spec = Some(texture);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn context_id(&self) -> i32 {
+        self.handle_id()
+    }
+
     fn handle_id(&self) -> i32 {
         self.raw.as_handle().as_raw()
     }
@@ -443,6 +641,125 @@ pub(crate) enum CompositionOperation<'a> {
     },
 }
 
+pub(crate) struct IrResources {
+    context_handle: i32,
+    vertex_buffer: RawBuffer,
+    vertex_resource_id: u32,
+    textures: Vec<Option<IrTexture>>,
+    texture_specs: Vec<Option<IrTextureSpec>>,
+    samplers: Vec<Option<IrSampler>>,
+    pipelines: Vec<Option<IrPipeline>>,
+    vertex_shader_handle: u32,
+    solid_fragment_shader_handle: u32,
+    vertex_color_fragment_shader_handle: u32,
+    texture_rgba_fragment_shader_handle: u32,
+    texture_rgb_ignore_alpha_fragment_shader_handle: u32,
+    texture_alpha_mask_fragment_shader_handle: u32,
+    vertex_elements_handle: u32,
+    initialized: Cell<bool>,
+}
+
+struct IrSampler {
+    handle: u32,
+    state: IrSamplerState,
+    initialized: Cell<bool>,
+}
+
+struct IrPipeline {
+    blend_handle: u32,
+    rasterizer_handle: u32,
+    state: IrPipelineState,
+    initialized: Cell<bool>,
+}
+
+enum IrTexture {
+    Internal(Texture),
+    Mapped(MappedIrTexture),
+}
+
+struct MappedIrTexture {
+    resource_id: u32,
+    width: u32,
+    height: u32,
+    sampler_view_handle: u32,
+    sampler_view_initialized: Cell<bool>,
+    surface_handle: u32,
+    surface_initialized: Cell<bool>,
+}
+
+struct IrPassTarget {
+    resource_id: u32,
+    surface_handle: u32,
+    surface_initialized: bool,
+    width: u32,
+    height: u32,
+    orientation: FramebufferOrientation,
+}
+
+impl IrTexture {
+    fn resource_id(&self) -> u32 {
+        match self {
+            Self::Internal(texture) => texture.resource_id,
+            Self::Mapped(texture) => texture.resource_id,
+        }
+    }
+
+    fn dimensions(&self) -> (u32, u32) {
+        match self {
+            Self::Internal(texture) => (texture.width, texture.height),
+            Self::Mapped(texture) => (texture.width, texture.height),
+        }
+    }
+
+    fn sampler_view_handle(&self) -> u32 {
+        match self {
+            Self::Internal(texture) => texture.sampler_view_handle,
+            Self::Mapped(texture) => texture.sampler_view_handle,
+        }
+    }
+
+    fn sampler_view_initialized(&self) -> bool {
+        match self {
+            Self::Internal(texture) => texture.sampler_view_initialized.get(),
+            Self::Mapped(texture) => texture.sampler_view_initialized.get(),
+        }
+    }
+
+    fn set_sampler_view_initialized(&self) {
+        match self {
+            Self::Internal(texture) => texture.sampler_view_initialized.set(true),
+            Self::Mapped(texture) => texture.sampler_view_initialized.set(true),
+        }
+    }
+
+    fn surface_handle(&self) -> u32 {
+        match self {
+            Self::Internal(texture) => texture.ir_surface_handle,
+            Self::Mapped(texture) => texture.surface_handle,
+        }
+    }
+
+    fn surface_initialized(&self) -> bool {
+        match self {
+            Self::Internal(texture) => texture.ir_surface_initialized.get(),
+            Self::Mapped(texture) => texture.surface_initialized.get(),
+        }
+    }
+
+    fn set_surface_initialized(&self) {
+        match self {
+            Self::Internal(texture) => texture.ir_surface_initialized.set(true),
+            Self::Mapped(texture) => texture.surface_initialized.set(true),
+        }
+    }
+}
+
+impl Drop for IrResources {
+    fn drop(&mut self) {
+        let _ = &self.vertex_buffer;
+    }
+}
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct CompositionVertex {
@@ -476,6 +793,332 @@ struct CompositionQuad {
 }
 
 impl Queue {
+    pub(crate) fn context_id(&self) -> i32 {
+        self.context_handle
+    }
+
+    pub(crate) fn upload_ir_texture(
+        &self,
+        context: &Context,
+        resources: &mut IrResources,
+        spec: IrTextureSpec,
+        upload: &IrTextureUpload,
+    ) -> HandleResult<()> {
+        if self.context_handle != context.handle_id()
+            || resources.context_handle != context.handle_id()
+            || upload.texture.slot != spec.slot
+            || upload.texture.width != spec.width
+            || upload.texture.height != spec.height
+        {
+            return Err(HandleError::InvalidParameter);
+        }
+        let texture = ir_texture(context, resources, spec)?;
+        let IrTexture::Internal(texture) = texture else {
+            return Err(HandleError::InvalidParameter);
+        };
+        context.upload_texture_bgra(
+            texture,
+            &upload.pixels,
+            upload
+                .destination
+                .width
+                .checked_mul(4)
+                .ok_or(HandleError::InvalidParameter)?,
+            ir_rect_to_pixel_rect(upload.destination)?,
+        )
+    }
+
+    pub(crate) fn copy_ir_texture(
+        &self,
+        context: &Context,
+        resources: &mut IrResources,
+        copy: IrTextureCopy,
+    ) -> HandleResult<()> {
+        if self.context_handle != context.handle_id()
+            || resources.context_handle != context.handle_id()
+            || !ir_rect_is_within(copy.source_rect, copy.source.width, copy.source.height)
+            || !ir_rect_is_within(
+                copy.destination_rect,
+                copy.destination.width,
+                copy.destination.height,
+            )
+            || copy.source_rect.width != copy.destination_rect.width
+            || copy.source_rect.height != copy.destination_rect.height
+        {
+            return Err(HandleError::InvalidParameter);
+        }
+        let source = ir_texture(context, resources, copy.source)?;
+        let source_id = source.resource_id();
+        let destination = ir_texture(context, resources, copy.destination)?;
+        let destination_id = destination.resource_id();
+        let mut commands = Vec::new();
+        commands
+            .try_reserve_exact(56)
+            .map_err(|_| HandleError::OutOfResources)?;
+        push_resource_copy(
+            &mut commands,
+            destination_id,
+            copy.destination_rect,
+            source_id,
+            copy.source_rect,
+        );
+        self.raw.submit(&commands).map(|_| ())
+    }
+
+    pub(crate) fn submit_ir_internal(
+        &self,
+        context: &Context,
+        resources: &mut IrResources,
+        target: IrTextureSpec,
+        submission: &IrSubmission,
+    ) -> HandleResult<()> {
+        if !target.render_attachment
+            || self.context_handle != context.handle_id()
+            || resources.context_handle != context.handle_id()
+        {
+            return Err(HandleError::InvalidParameter);
+        }
+        let pass_target = {
+            let texture = ir_texture(context, resources, target)?;
+            let (width, height) = texture.dimensions();
+            if matches!(texture, IrTexture::Mapped(_))
+                || width != target.width
+                || height != target.height
+            {
+                return Err(HandleError::InvalidParameter);
+            }
+            IrPassTarget {
+                resource_id: texture.resource_id(),
+                surface_handle: texture.surface_handle(),
+                surface_initialized: texture.surface_initialized(),
+                width,
+                height,
+                orientation: FramebufferOrientation::UPPER_LEFT,
+            }
+        };
+        self.submit_ir_target(context, resources, pass_target, submission)?;
+        let texture = resources
+            .textures
+            .get(target.slot)
+            .and_then(Option::as_ref)
+            .ok_or(HandleError::InvalidParameter)?;
+        texture.set_surface_initialized();
+        Ok(())
+    }
+
+    pub(crate) fn submit_ir(
+        &self,
+        context: &Context,
+        resources: &mut IrResources,
+        image: &Image,
+        submission: &IrSubmission,
+    ) -> HandleResult<()> {
+        self.submit_ir_target(
+            context,
+            resources,
+            IrPassTarget {
+                resource_id: image.resource_id,
+                surface_handle: image.ir_surface_handle,
+                surface_initialized: image.ir_surface_initialized.get(),
+                width: image.width,
+                height: image.height,
+                orientation: image.orientation,
+            },
+            submission,
+        )?;
+        image.ir_surface_initialized.set(true);
+        Ok(())
+    }
+
+    fn submit_ir_target(
+        &self,
+        context: &Context,
+        resources: &mut IrResources,
+        target: IrPassTarget,
+        submission: &IrSubmission,
+    ) -> HandleResult<()> {
+        if self.context_handle != context.handle_id()
+            || resources.context_handle != context.handle_id()
+            || submission.vertices.len() > MAX_IR_VERTICES
+            || submission.draws.is_empty()
+            || !ir_rect_is_within(submission.render_area, target.width, target.height)
+            || submission
+                .clear_color
+                .is_some_and(|color| !color.iter().all(|component| component.is_finite()))
+        {
+            return Err(HandleError::InvalidParameter);
+        }
+
+        let mut commands = Vec::new();
+        commands
+            .try_reserve(16 * 1024)
+            .map_err(|_| HandleError::OutOfResources)?;
+        let mut initialized_samplers = Vec::new();
+        let mut initialized_pipelines = Vec::new();
+        let mut initialized_views = Vec::new();
+        if !resources.initialized.get() {
+            push_ir_setup(&mut commands, resources);
+        }
+        if !target.surface_initialized {
+            push_surface(&mut commands, target.surface_handle, target.resource_id);
+        }
+        for upload in &submission.texture_uploads {
+            let texture = ir_texture(context, resources, IrTextureSpec { ..upload.texture })?;
+            let view_is_pending = initialized_views
+                .iter()
+                .any(|slot| *slot == upload.texture.slot);
+            if !texture.sampler_view_initialized() && !view_is_pending {
+                push_sampler_view(
+                    &mut commands,
+                    texture.sampler_view_handle(),
+                    texture.resource_id(),
+                );
+                initialized_views.push(upload.texture.slot);
+            }
+        }
+        for draw in &submission.draws {
+            validate_ir_draw(
+                resources,
+                target.width,
+                target.height,
+                draw,
+                submission.vertices.len(),
+            )?;
+            let pipeline = ir_pipeline(context, resources, draw.pipeline)?;
+            let pipeline_is_pending = initialized_pipelines
+                .iter()
+                .any(|slot| *slot == draw.pipeline.slot);
+            if !pipeline.initialized.get() && !pipeline_is_pending {
+                push_ir_pipeline(&mut commands, pipeline);
+                initialized_pipelines.push(draw.pipeline.slot);
+            }
+            if let (Some(texture_spec), Some(sampler)) = (draw.texture, draw.sampler) {
+                let texture = ir_texture(context, resources, texture_spec)?;
+                let view_is_pending = initialized_views
+                    .iter()
+                    .any(|pending| *pending == texture_spec.slot);
+                if !texture.sampler_view_initialized() && !view_is_pending {
+                    push_sampler_view(
+                        &mut commands,
+                        texture.sampler_view_handle(),
+                        texture.resource_id(),
+                    );
+                    initialized_views.push(texture_spec.slot);
+                }
+                let sampler = ir_sampler(context, resources, sampler)?;
+                let sampler_is_pending = initialized_samplers
+                    .iter()
+                    .any(|slot| *slot == sampler.state.slot);
+                if !sampler.initialized.get() && !sampler_is_pending {
+                    push_ir_sampler(&mut commands, sampler);
+                    initialized_samplers.push(sampler.state.slot);
+                }
+            }
+        }
+
+        push_ir_bind_pass_state(
+            &mut commands,
+            target.surface_handle,
+            resources.vertex_resource_id,
+            target.width,
+            target.height,
+            target.orientation,
+            resources.vertex_shader_handle,
+            resources.vertex_elements_handle,
+        );
+        push_scissor(
+            &mut commands,
+            ir_rect_to_pixel_rect(submission.render_area)?,
+        )?;
+        if let Some(clear_color) = submission.clear_color {
+            push_ir_clear(&mut commands, clear_color);
+        }
+        push_ir_inline_write(
+            &mut commands,
+            resources.vertex_resource_id,
+            &submission.vertices,
+        )?;
+        for draw in &submission.draws {
+            let pipeline = resources
+                .pipelines
+                .get(draw.pipeline.slot)
+                .and_then(Option::as_ref)
+                .ok_or(HandleError::InvalidParameter)?;
+            push_bind_object(&mut commands, VIRGL_OBJECT_BLEND, pipeline.blend_handle);
+            push_bind_object(
+                &mut commands,
+                VIRGL_OBJECT_RASTERIZER,
+                pipeline.rasterizer_handle,
+            );
+            push_fragment_shader(
+                &mut commands,
+                ir_fragment_shader_handle(resources, draw.pipeline.fragment),
+            );
+            push_constant_buffer(&mut commands, PIPE_SHADER_VERTEX, &draw.uniforms.transform)?;
+            push_constant_buffer(&mut commands, PIPE_SHADER_FRAGMENT, &draw.uniforms.color)?;
+            push_scissor(&mut commands, ir_rect_to_pixel_rect(draw.scissor)?)?;
+            if let (Some(texture_spec), Some(sampler)) = (draw.texture, draw.sampler) {
+                let texture = resources
+                    .textures
+                    .get(texture_spec.slot)
+                    .and_then(Option::as_ref)
+                    .ok_or(HandleError::InvalidParameter)?;
+                let sampler = resources
+                    .samplers
+                    .get(sampler.slot)
+                    .and_then(Option::as_ref)
+                    .ok_or(HandleError::InvalidParameter)?;
+                push_sampler_view_binding(&mut commands, texture.sampler_view_handle());
+                push_sampler_state_binding(&mut commands, sampler.handle);
+            }
+            push_draw(&mut commands, draw.start_vertex, draw.vertex_count)?;
+        }
+        if commands.len() > self.raw.max_opaque_command_size() as usize {
+            return Err(HandleError::InvalidParameter);
+        }
+
+        for upload in &submission.texture_uploads {
+            let texture = resources
+                .textures
+                .get(upload.texture.slot)
+                .and_then(Option::as_ref)
+                .ok_or(HandleError::InvalidParameter)?;
+            let IrTexture::Internal(texture) = texture else {
+                return Err(HandleError::InvalidParameter);
+            };
+            context.upload_texture_bgra(
+                texture,
+                &upload.pixels,
+                upload
+                    .destination
+                    .width
+                    .checked_mul(4)
+                    .ok_or(HandleError::InvalidParameter)?,
+                ir_rect_to_pixel_rect(upload.destination)?,
+            )?;
+        }
+        self.raw.submit(&commands)?;
+        if !resources.initialized.get() {
+            resources.initialized.set(true);
+        }
+        for slot in initialized_samplers {
+            if let Some(Some(sampler)) = resources.samplers.get(slot) {
+                sampler.initialized.set(true);
+            }
+        }
+        for slot in initialized_pipelines {
+            if let Some(Some(pipeline)) = resources.pipelines.get(slot) {
+                pipeline.initialized.set(true);
+            }
+        }
+        for slot in initialized_views {
+            if let Some(Some(texture)) = resources.textures.get(slot) {
+                texture.set_sampler_view_initialized();
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn submit(
         &self,
         image: &Image,
@@ -732,6 +1375,8 @@ pub(crate) struct Image {
     height: u32,
     composition_surface_handle: u32,
     composition_surface_initialized: Cell<bool>,
+    ir_surface_handle: u32,
+    ir_surface_initialized: Cell<bool>,
 }
 
 pub(crate) struct Texture {
@@ -742,6 +1387,8 @@ pub(crate) struct Texture {
     context_handle: i32,
     sampler_view_handle: u32,
     sampler_view_initialized: Cell<bool>,
+    ir_surface_handle: u32,
+    ir_surface_initialized: Cell<bool>,
 }
 
 impl Drop for Queue {
@@ -751,6 +1398,10 @@ impl Drop for Queue {
 }
 
 impl Image {
+    pub(crate) fn context_id(&self) -> i32 {
+        self.context_handle
+    }
+
     pub(crate) fn present(&self, display: &DisplaySurface) -> HandleResult<()> {
         display.present_image(self.raw.as_handle(), None)
     }
@@ -771,6 +1422,229 @@ impl Drop for Pipeline {
     fn drop(&mut self) {
         let _ = &self.vertex_buffer;
     }
+}
+
+fn empty_slots<T>(count: usize) -> HandleResult<Vec<Option<T>>> {
+    let mut slots = Vec::new();
+    slots
+        .try_reserve_exact(count)
+        .map_err(|_| HandleError::OutOfResources)?;
+    for _ in 0..count {
+        slots.push(None);
+    }
+    Ok(slots)
+}
+
+fn ir_texture<'resources>(
+    context: &Context,
+    resources: &'resources mut IrResources,
+    spec: IrTextureSpec,
+) -> HandleResult<&'resources IrTexture> {
+    let known_spec = resources
+        .texture_specs
+        .get(spec.slot)
+        .and_then(|known| *known);
+    if let Some(known_spec) = known_spec {
+        if known_spec != spec {
+            return Err(HandleError::InvalidParameter);
+        }
+    } else if let Some(known_spec) = resources.texture_specs.get_mut(spec.slot) {
+        *known_spec = Some(spec);
+    }
+    let texture_slot = resources
+        .textures
+        .get_mut(spec.slot)
+        .ok_or(HandleError::InvalidParameter)?;
+    if texture_slot.is_none() {
+        *texture_slot = Some(IrTexture::Internal(context.create_ir_texture(spec)?));
+    }
+    let texture = texture_slot.as_ref().ok_or(HandleError::InvalidParameter)?;
+    let (width, height) = texture.dimensions();
+    if width != spec.width || height != spec.height {
+        return Err(HandleError::InvalidParameter);
+    }
+    Ok(texture)
+}
+
+fn ir_sampler<'resources>(
+    context: &Context,
+    resources: &'resources mut IrResources,
+    state: IrSamplerState,
+) -> HandleResult<&'resources IrSampler> {
+    let sampler_slot = resources
+        .samplers
+        .get_mut(state.slot)
+        .ok_or(HandleError::InvalidParameter)?;
+    if sampler_slot.is_none() {
+        *sampler_slot = Some(IrSampler {
+            handle: context.allocate_object_handle()?,
+            state,
+            initialized: Cell::new(false),
+        });
+    }
+    let sampler = sampler_slot.as_ref().ok_or(HandleError::InvalidParameter)?;
+    if !ir_sampler_states_equal(sampler.state, state) {
+        return Err(HandleError::InvalidParameter);
+    }
+    Ok(sampler)
+}
+
+fn ir_pipeline<'resources>(
+    context: &Context,
+    resources: &'resources mut IrResources,
+    state: IrPipelineState,
+) -> HandleResult<&'resources IrPipeline> {
+    let pipeline_slot = resources
+        .pipelines
+        .get_mut(state.slot)
+        .ok_or(HandleError::InvalidParameter)?;
+    if pipeline_slot.is_none() {
+        *pipeline_slot = Some(IrPipeline {
+            blend_handle: context.allocate_object_handle()?,
+            rasterizer_handle: context.allocate_object_handle()?,
+            state,
+            initialized: Cell::new(false),
+        });
+    }
+    let pipeline = pipeline_slot
+        .as_ref()
+        .ok_or(HandleError::InvalidParameter)?;
+    if !ir_pipeline_states_equal(pipeline.state, state) {
+        return Err(HandleError::InvalidParameter);
+    }
+    Ok(pipeline)
+}
+
+fn ir_sampler_states_equal(left: IrSamplerState, right: IrSamplerState) -> bool {
+    left.slot == right.slot
+        && ir_filter_modes_equal(left.min_filter, right.min_filter)
+        && ir_filter_modes_equal(left.mag_filter, right.mag_filter)
+        && ir_address_modes_equal(left.address_u, right.address_u)
+        && ir_address_modes_equal(left.address_v, right.address_v)
+}
+
+fn ir_pipeline_states_equal(left: IrPipelineState, right: IrPipelineState) -> bool {
+    left.slot == right.slot
+        && ir_fragment_programs_equal(left.fragment, right.fragment)
+        && ir_blend_states_equal(left.blend, right.blend)
+        && ir_cull_modes_equal(left.cull_mode, right.cull_mode)
+        && ir_front_faces_equal(left.front_face, right.front_face)
+}
+
+fn ir_fragment_programs_equal(left: IrFragmentProgram, right: IrFragmentProgram) -> bool {
+    core::mem::discriminant(&left) == core::mem::discriminant(&right)
+}
+
+fn ir_blend_states_equal(left: IrBlendState, right: IrBlendState) -> bool {
+    ir_blend_components_equal(left.color, right.color)
+        && ir_blend_components_equal(left.alpha, right.alpha)
+}
+
+fn ir_blend_components_equal(
+    left: crate::driver::IrBlendComponent,
+    right: crate::driver::IrBlendComponent,
+) -> bool {
+    ir_blend_factors_equal(left.source_factor, right.source_factor)
+        && ir_blend_factors_equal(left.destination_factor, right.destination_factor)
+        && ir_blend_ops_equal(left.operation, right.operation)
+}
+
+fn ir_blend_factors_equal(left: IrBlendFactor, right: IrBlendFactor) -> bool {
+    core::mem::discriminant(&left) == core::mem::discriminant(&right)
+}
+
+fn ir_blend_ops_equal(left: IrBlendOp, right: IrBlendOp) -> bool {
+    core::mem::discriminant(&left) == core::mem::discriminant(&right)
+}
+
+fn ir_cull_modes_equal(left: IrCullMode, right: IrCullMode) -> bool {
+    core::mem::discriminant(&left) == core::mem::discriminant(&right)
+}
+
+fn ir_front_faces_equal(left: IrFrontFace, right: IrFrontFace) -> bool {
+    core::mem::discriminant(&left) == core::mem::discriminant(&right)
+}
+
+fn ir_filter_modes_equal(left: IrFilterMode, right: IrFilterMode) -> bool {
+    core::mem::discriminant(&left) == core::mem::discriminant(&right)
+}
+
+fn ir_address_modes_equal(left: IrAddressMode, right: IrAddressMode) -> bool {
+    core::mem::discriminant(&left) == core::mem::discriminant(&right)
+}
+
+fn ir_rect_is_within(rect: crate::driver::IrRect, width: u32, height: u32) -> bool {
+    rect.width != 0
+        && rect.height != 0
+        && rect
+            .x
+            .checked_add(rect.width)
+            .is_some_and(|right| right <= width)
+        && rect
+            .y
+            .checked_add(rect.height)
+            .is_some_and(|bottom| bottom <= height)
+}
+
+fn ir_rect_to_pixel_rect(rect: crate::driver::IrRect) -> HandleResult<PixelRect> {
+    if rect.width == 0
+        || rect.height == 0
+        || rect.x.checked_add(rect.width).is_none()
+        || rect.y.checked_add(rect.height).is_none()
+    {
+        return Err(HandleError::InvalidParameter);
+    }
+    Ok(PixelRect::new(rect.x, rect.y, rect.width, rect.height))
+}
+
+fn validate_ir_draw(
+    resources: &IrResources,
+    target_width: u32,
+    target_height: u32,
+    draw: &IrDraw,
+    vertices_len: usize,
+) -> HandleResult<()> {
+    let end = draw
+        .start_vertex
+        .checked_add(draw.vertex_count)
+        .ok_or(HandleError::InvalidParameter)?;
+    if draw.vertex_count == 0
+        || draw.vertex_count % 3 != 0
+        || end > vertices_len
+        || !ir_rect_is_within(draw.scissor, target_width, target_height)
+        || !draw
+            .uniforms
+            .transform
+            .iter()
+            .all(|value| value.is_finite())
+        || !draw.uniforms.color.iter().all(|value| value.is_finite())
+        || draw.pipeline.slot >= resources.pipelines.len()
+    {
+        return Err(HandleError::InvalidParameter);
+    }
+    match draw.pipeline.fragment {
+        IrFragmentProgram::TextureRgba
+        | IrFragmentProgram::TextureRgbIgnoreAlpha
+        | IrFragmentProgram::TextureAlphaMask => {
+            let Some(texture) = draw.texture else {
+                return Err(HandleError::InvalidParameter);
+            };
+            if texture.width == 0
+                || texture.height == 0
+                || !texture.sampled
+                || texture.slot >= resources.textures.len()
+                || draw.sampler.is_none()
+            {
+                return Err(HandleError::InvalidParameter);
+            }
+        }
+        IrFragmentProgram::Solid | IrFragmentProgram::VertexColor => {
+            if draw.texture.is_some() || draw.sampler.is_some() {
+                return Err(HandleError::InvalidParameter);
+            }
+        }
+    }
+    Ok(())
 }
 
 fn resource_id_from_token(token: u64) -> HandleResult<u32> {
@@ -1112,6 +1986,332 @@ fn push_sampler_view_binding(commands: &mut Vec<u8>, handle: u32) {
     push_dword(commands, PIPE_SHADER_FRAGMENT);
     push_dword(commands, 0);
     push_dword(commands, handle);
+}
+
+fn push_resource_copy(
+    commands: &mut Vec<u8>,
+    destination_resource: u32,
+    destination: crate::driver::IrRect,
+    source_resource: u32,
+    source: crate::driver::IrRect,
+) {
+    push_dword(
+        commands,
+        command_header(VIRGL_CCMD_RESOURCE_COPY_REGION, 0, 13),
+    );
+    push_dword(commands, destination_resource);
+    push_dword(commands, 0);
+    push_dword(commands, destination.x);
+    push_dword(commands, destination.y);
+    push_dword(commands, 0);
+    push_dword(commands, source_resource);
+    push_dword(commands, 0);
+    push_dword(commands, source.x);
+    push_dword(commands, source.y);
+    push_dword(commands, 0);
+    push_dword(commands, source.width);
+    push_dword(commands, source.height);
+    push_dword(commands, 1);
+}
+
+fn push_sampler_state_binding(commands: &mut Vec<u8>, handle: u32) {
+    push_dword(
+        commands,
+        command_header(VIRGL_CCMD_BIND_SAMPLER_STATES, 0, 3),
+    );
+    push_dword(commands, PIPE_SHADER_FRAGMENT);
+    push_dword(commands, 0);
+    push_dword(commands, handle);
+}
+
+fn push_constant_buffer(
+    commands: &mut Vec<u8>,
+    shader_type: u32,
+    values: &[f32],
+) -> HandleResult<()> {
+    let payload = u32::try_from(values.len())
+        .ok()
+        .and_then(|length| length.checked_add(2))
+        .ok_or(HandleError::InvalidParameter)?;
+    push_dword(
+        commands,
+        command_header(VIRGL_CCMD_SET_CONSTANT_BUFFER, 0, payload),
+    );
+    push_dword(commands, shader_type);
+    push_dword(commands, 0);
+    for value in values {
+        push_float(commands, *value);
+    }
+    Ok(())
+}
+
+fn push_ir_setup(commands: &mut Vec<u8>, resources: &IrResources) {
+    push_shader(
+        commands,
+        resources.vertex_shader_handle,
+        PIPE_SHADER_VERTEX,
+        IR_VERTEX_SHADER,
+    );
+    push_shader(
+        commands,
+        resources.solid_fragment_shader_handle,
+        PIPE_SHADER_FRAGMENT,
+        IR_SOLID_FRAGMENT_SHADER,
+    );
+    push_shader(
+        commands,
+        resources.vertex_color_fragment_shader_handle,
+        PIPE_SHADER_FRAGMENT,
+        IR_VERTEX_COLOR_FRAGMENT_SHADER,
+    );
+    push_shader(
+        commands,
+        resources.texture_rgba_fragment_shader_handle,
+        PIPE_SHADER_FRAGMENT,
+        IR_TEXTURE_RGBA_FRAGMENT_SHADER,
+    );
+    push_shader(
+        commands,
+        resources.texture_rgb_ignore_alpha_fragment_shader_handle,
+        PIPE_SHADER_FRAGMENT,
+        IR_TEXTURE_RGB_IGNORE_ALPHA_FRAGMENT_SHADER,
+    );
+    push_shader(
+        commands,
+        resources.texture_alpha_mask_fragment_shader_handle,
+        PIPE_SHADER_FRAGMENT,
+        IR_TEXTURE_ALPHA_MASK_FRAGMENT_SHADER,
+    );
+    push_dword(
+        commands,
+        command_header(VIRGL_CCMD_CREATE_OBJECT, VIRGL_OBJECT_VERTEX_ELEMENTS, 13),
+    );
+    push_dword(commands, resources.vertex_elements_handle);
+    push_dword(commands, 0);
+    push_dword(commands, 0);
+    push_dword(commands, 0);
+    push_dword(commands, VIRGL_FORMAT_R32G32B32A32_FLOAT);
+    push_dword(commands, 16);
+    push_dword(commands, 0);
+    push_dword(commands, 0);
+    push_dword(commands, VIRGL_FORMAT_R32G32B32A32_FLOAT);
+    push_dword(commands, 32);
+    push_dword(commands, 0);
+    push_dword(commands, 0);
+    push_dword(commands, VIRGL_FORMAT_R32G32_FLOAT);
+}
+
+fn push_ir_pipeline(commands: &mut Vec<u8>, pipeline: &IrPipeline) {
+    push_dword(
+        commands,
+        command_header(VIRGL_CCMD_CREATE_OBJECT, VIRGL_OBJECT_BLEND, 11),
+    );
+    push_dword(commands, pipeline.blend_handle);
+    push_dword(commands, 0);
+    push_dword(commands, 0);
+    let blend = pipeline.state.blend;
+    push_dword(
+        commands,
+        VIRGL_BLEND_ENABLE
+            | (ir_blend_op(blend.color.operation) << 1)
+            | (ir_blend_factor(blend.color.source_factor) << VIRGL_BLEND_RGB_SRC_FACTOR_SHIFT)
+            | (ir_blend_factor(blend.color.destination_factor) << VIRGL_BLEND_RGB_DST_FACTOR_SHIFT)
+            | (ir_blend_op(blend.alpha.operation) << 14)
+            | (ir_blend_factor(blend.alpha.source_factor) << VIRGL_BLEND_ALPHA_SRC_FACTOR_SHIFT)
+            | (ir_blend_factor(blend.alpha.destination_factor)
+                << VIRGL_BLEND_ALPHA_DST_FACTOR_SHIFT)
+            | (0xf << VIRGL_BLEND_COLORMASK_SHIFT),
+    );
+    for _ in 0..7 {
+        push_dword(commands, 0);
+    }
+    push_dword(
+        commands,
+        command_header(VIRGL_CCMD_CREATE_OBJECT, VIRGL_OBJECT_RASTERIZER, 9),
+    );
+    push_dword(commands, pipeline.rasterizer_handle);
+    push_dword(
+        commands,
+        ir_rasterizer_flags(pipeline.state.cull_mode, pipeline.state.front_face),
+    );
+    push_float(commands, 1.0);
+    push_dword(commands, 0);
+    push_dword(commands, 0);
+    push_float(commands, 1.0);
+    push_float(commands, 0.0);
+    push_float(commands, 0.0);
+    push_float(commands, 0.0);
+}
+
+fn push_ir_sampler(commands: &mut Vec<u8>, sampler: &IrSampler) {
+    push_dword(
+        commands,
+        command_header(VIRGL_CCMD_CREATE_OBJECT, VIRGL_OBJECT_SAMPLER_STATE, 9),
+    );
+    push_dword(commands, sampler.handle);
+    let state = sampler.state;
+    push_dword(
+        commands,
+        ir_address_mode(state.address_u)
+            | (ir_address_mode(state.address_v) << 3)
+            | (PIPE_TEX_WRAP_CLAMP_TO_EDGE << 6)
+            | (ir_filter_mode(state.min_filter) << 9)
+            | (PIPE_TEX_MIPFILTER_NONE << 11)
+            | (ir_filter_mode(state.mag_filter) << 13),
+    );
+    push_float(commands, 0.0);
+    push_float(commands, 0.0);
+    push_float(commands, 0.0);
+    for _ in 0..4 {
+        push_dword(commands, 0);
+    }
+}
+
+fn push_ir_bind_pass_state(
+    commands: &mut Vec<u8>,
+    surface_handle: u32,
+    vertex_resource_id: u32,
+    width: u32,
+    height: u32,
+    orientation: FramebufferOrientation,
+    vertex_shader_handle: u32,
+    vertex_elements_handle: u32,
+) {
+    push_dword(commands, command_header(VIRGL_CCMD_BIND_SHADER, 0, 2));
+    push_dword(commands, vertex_shader_handle);
+    push_dword(commands, PIPE_SHADER_VERTEX);
+    push_bind_object(
+        commands,
+        VIRGL_OBJECT_VERTEX_ELEMENTS,
+        vertex_elements_handle,
+    );
+    push_dword(
+        commands,
+        command_header(VIRGL_CCMD_SET_FRAMEBUFFER_STATE, 0, 3),
+    );
+    push_dword(commands, 1);
+    push_dword(commands, 0);
+    push_dword(commands, surface_handle);
+    push_dword(
+        commands,
+        command_header(VIRGL_CCMD_SET_VERTEX_BUFFERS, 0, 3),
+    );
+    push_dword(commands, 40);
+    push_dword(commands, 0);
+    push_dword(commands, vertex_resource_id);
+    push_viewport(commands, Viewport::new(width, height), orientation);
+}
+
+fn push_ir_clear(commands: &mut Vec<u8>, color: [f32; 4]) {
+    push_dword(commands, command_header(VIRGL_CCMD_CLEAR, 0, 8));
+    push_dword(commands, PIPE_CLEAR_COLOR0);
+    for component in color {
+        push_float(commands, component);
+    }
+    let depth = 1.0f64.to_bits();
+    push_dword(commands, depth as u32);
+    push_dword(commands, (depth >> 32) as u32);
+    push_dword(commands, 0);
+}
+
+fn push_ir_inline_write(
+    commands: &mut Vec<u8>,
+    resource_id: u32,
+    vertices: &[IrVertex],
+) -> HandleResult<()> {
+    let components = vertices
+        .len()
+        .checked_mul(10)
+        .ok_or(HandleError::InvalidParameter)?;
+    let components = u32::try_from(components).map_err(|_| HandleError::InvalidParameter)?;
+    let byte_len = vertices
+        .len()
+        .checked_mul(40)
+        .and_then(|length| u32::try_from(length).ok())
+        .ok_or(HandleError::InvalidParameter)?;
+    push_dword(
+        commands,
+        command_header(VIRGL_CCMD_RESOURCE_INLINE_WRITE, 0, 11 + components),
+    );
+    push_dword(commands, resource_id);
+    for _ in 0..7 {
+        push_dword(commands, 0);
+    }
+    push_dword(commands, byte_len);
+    push_dword(commands, 1);
+    push_dword(commands, 1);
+    for vertex in vertices {
+        for component in vertex.position {
+            push_float(commands, component);
+        }
+        for component in vertex.color {
+            push_float(commands, component);
+        }
+        for component in vertex.uv {
+            push_float(commands, component);
+        }
+    }
+    Ok(())
+}
+
+fn ir_fragment_shader_handle(resources: &IrResources, fragment: IrFragmentProgram) -> u32 {
+    match fragment {
+        IrFragmentProgram::Solid => resources.solid_fragment_shader_handle,
+        IrFragmentProgram::VertexColor => resources.vertex_color_fragment_shader_handle,
+        IrFragmentProgram::TextureRgba => resources.texture_rgba_fragment_shader_handle,
+        IrFragmentProgram::TextureRgbIgnoreAlpha => {
+            resources.texture_rgb_ignore_alpha_fragment_shader_handle
+        }
+        IrFragmentProgram::TextureAlphaMask => resources.texture_alpha_mask_fragment_shader_handle,
+    }
+}
+
+fn ir_blend_factor(factor: IrBlendFactor) -> u32 {
+    match factor {
+        IrBlendFactor::Zero => PIPE_BLENDFACTOR_ZERO,
+        IrBlendFactor::One => PIPE_BLENDFACTOR_ONE,
+        IrBlendFactor::SourceAlpha => PIPE_BLENDFACTOR_SRC_ALPHA,
+        IrBlendFactor::OneMinusSourceAlpha => PIPE_BLENDFACTOR_INV_SRC_ALPHA,
+        IrBlendFactor::DestinationAlpha => PIPE_BLENDFACTOR_DST_ALPHA,
+        IrBlendFactor::OneMinusDestinationAlpha => PIPE_BLENDFACTOR_INV_DST_ALPHA,
+    }
+}
+
+fn ir_blend_op(operation: IrBlendOp) -> u32 {
+    match operation {
+        IrBlendOp::Add => PIPE_BLEND_ADD,
+        IrBlendOp::Subtract => PIPE_BLEND_SUBTRACT,
+        IrBlendOp::ReverseSubtract => PIPE_BLEND_REVERSE_SUBTRACT,
+    }
+}
+
+fn ir_filter_mode(filter: IrFilterMode) -> u32 {
+    match filter {
+        IrFilterMode::Nearest => PIPE_TEX_FILTER_NEAREST,
+        IrFilterMode::Linear => PIPE_TEX_FILTER_LINEAR,
+    }
+}
+
+fn ir_address_mode(address: IrAddressMode) -> u32 {
+    match address {
+        IrAddressMode::ClampToEdge => PIPE_TEX_WRAP_CLAMP_TO_EDGE,
+        IrAddressMode::Repeat => PIPE_TEX_WRAP_REPEAT,
+        IrAddressMode::MirrorRepeat => PIPE_TEX_WRAP_MIRROR_REPEAT,
+    }
+}
+
+fn ir_rasterizer_flags(cull_mode: IrCullMode, front_face: IrFrontFace) -> u32 {
+    let cull_face = match cull_mode {
+        IrCullMode::None => 0,
+        IrCullMode::Front => 1,
+        IrCullMode::Back => 2,
+    } << VIRGL_RASTERIZER_CULL_FACE_SHIFT;
+    let front_ccw = if matches!(front_face, IrFrontFace::CounterClockwise) {
+        VIRGL_RASTERIZER_FRONT_CCW
+    } else {
+        0
+    };
+    VIRGL_RASTERIZER_DEPTH_CLIP | VIRGL_RASTERIZER_SCISSOR | cull_face | front_ccw
 }
 
 fn push_scissor(commands: &mut Vec<u8>, clip: PixelRect) -> HandleResult<()> {
