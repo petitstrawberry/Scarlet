@@ -185,6 +185,10 @@ name = "sgfx_showcase"
 path = "src/sgfx_showcase.rs"
 
 [[bin]]
+name = "ui-sgfx-showcase"
+path = "src/ui_sgfx_showcase.rs"
+
+[[bin]]
 name = "markdown_demo"
 path = "src/markdown_demo.rs"
 

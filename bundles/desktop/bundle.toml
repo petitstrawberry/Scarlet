@@ -86,6 +86,12 @@ to = "/system/scarlet/bin/ui-benchmark"
 
 [[layers]]
 kind = "cargo"
+source = "../../user/std-bin"
+bin = "ui-sgfx-showcase"
+to = "/system/scarlet/bin/ui-sgfx-showcase"
+
+[[layers]]
+kind = "cargo"
 source = "../../user/bin"
 package = "user-bin"
 bin = "pdfview"
