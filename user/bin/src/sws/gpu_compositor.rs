@@ -425,9 +425,17 @@ impl GpuCompositor {
         super::trace::set_compositor_stage(super::trace::STAGE_GPU_SYNC_WINDOWS);
         for window in windows {
             super::trace::set_gpu_window(window.id);
+            // Window geometry is updated before a resize client installs its
+            // replacement backing.  During that transition the old SHM still
+            // exists, but it no longer validates against the new dimensions.
+            // Keep sampling the cached texture until a complete new backing is
+            // available instead of treating the expected transition as a GPU
+            // compositor failure.
+            let has_current_backing =
+                window.shm_layout().is_ok() || window.pixels().is_ok();
             if window.visible
                 && !self.has_committed_shared_buffer(window.id)
-                && (window.has_pixel_buffer() || window.shm_layout().is_ok())
+                && has_current_backing
             {
                 self.sync_window_texture(window)?;
             }
@@ -443,9 +451,15 @@ impl GpuCompositor {
                 continue;
             }
 
+            let has_cached_texture = self
+                .textures
+                .iter()
+                .any(|entry| entry.window_id == window.id);
+            let has_current_backing =
+                window.shm_layout().is_ok() || window.pixels().is_ok();
             if self.has_committed_shared_buffer(window.id)
-                || window.has_pixel_buffer()
-                || window.shm_layout().is_ok()
+                || has_cached_texture
+                || has_current_backing
             {
                 let texture = match self.committed_shared_texture(window.id) {
                     Some(texture) => texture,
