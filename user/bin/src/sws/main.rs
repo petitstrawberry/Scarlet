@@ -12,6 +12,7 @@ mod cursor;
 mod gpu_compositor;
 mod input;
 mod ipc;
+mod trace;
 mod window;
 
 use compositor::Compositor;
@@ -90,6 +91,7 @@ fn main() -> i32 {
 
     println!("Compositor ready. Starting main loop...");
     notify_service_ready("sws");
+    trace::start_watchdog();
 
     if set_sched_util_min(SWS_COMPOSITOR_UTIL_MIN).is_err() {
         println!("[sws] Failed to set compositor scheduler utilization hint");

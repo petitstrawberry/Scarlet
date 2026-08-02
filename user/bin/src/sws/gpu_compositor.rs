@@ -422,7 +422,9 @@ impl GpuCompositor {
         background: [u8; 4],
         resize_outline: Option<(i32, i32, u32, u32)>,
     ) -> Result<Vec<SgfxCommitToken>, &'static str> {
+        super::trace::set_compositor_stage(super::trace::STAGE_GPU_SYNC_WINDOWS);
         for window in windows {
+            super::trace::set_gpu_window(window.id);
             if window.visible
                 && !self.has_committed_shared_buffer(window.id)
                 && (window.has_pixel_buffer() || window.shm_layout().is_ok())
@@ -431,6 +433,8 @@ impl GpuCompositor {
             }
         }
 
+        super::trace::set_gpu_window(0);
+        super::trace::set_compositor_stage(super::trace::STAGE_GPU_ENCODE);
         let clear_color = bgra_color(background);
         let mut composition = CompositionPass::new(&self.target, clear_color)
             .map_err(|_| "Failed to begin GPU composition")?;
@@ -532,12 +536,15 @@ impl GpuCompositor {
                 .map_err(|_| "Failed to compose GPU cursor")?;
         }
 
+        super::trace::set_compositor_stage(super::trace::STAGE_GPU_SUBMIT);
         self.queue
             .submit_composition(&composition)
             .map_err(|_| "Failed to submit GPU composition")?;
+        super::trace::set_compositor_stage(super::trace::STAGE_GPU_PRESENT);
         self.target
             .present(display)
             .map_err(|_| "Failed to present GPU composition")?;
+        super::trace::set_compositor_stage(super::trace::STAGE_GPU_COLLECT_RELEASES);
         Ok(self.take_presented_releases())
     }
 

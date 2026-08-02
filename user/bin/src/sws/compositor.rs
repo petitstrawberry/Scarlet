@@ -28,7 +28,10 @@ fn is_sws_debug_enabled() -> bool {
         return cached != 0;
     }
     let enabled = match env::var("SWS_LOG") {
-        Some(val) => matches!(val.as_str(), "debug" | "DEBUG" | "3"),
+        Some(val) => matches!(
+            val.as_str(),
+            "debug" | "DEBUG" | "3" | "trace" | "TRACE" | "4"
+        ),
         None => false,
     };
     LOG_CACHE.store(enabled as u8, Ordering::Relaxed);
@@ -1530,6 +1533,7 @@ impl Compositor {
         );
         match result {
             Ok(releases) => {
+                super::trace::set_compositor_stage(super::trace::STAGE_GPU_NOTIFY_RELEASES);
                 for release in releases {
                     send_sgfx_buffer_released(release);
                 }
@@ -2525,7 +2529,10 @@ impl Compositor {
         println!("[Compositor] Starting main loop (multithreaded)");
 
         loop {
+            super::trace::compositor_loop();
+            super::trace::set_compositor_stage(super::trace::STAGE_PROCESS_EVENTS);
             let mut needs_redraw = self.process_pending_events()?;
+            super::trace::set_compositor_stage(super::trace::STAGE_ACTIVE);
             if self.backend == SwsBackend::Sgfx && self.gpu_compositor.is_none() {
                 return Err("SWS_BACKEND=sgfx compositor is unavailable");
             }
@@ -2533,23 +2540,31 @@ impl Compositor {
             // Re-composite and present if needed
             if self.has_pending_redraw(needs_redraw) {
                 if self.gpu_compositor.is_some() {
+                    super::trace::set_compositor_stage(super::trace::STAGE_FRAME_BATCH);
                     self.wait_for_frame_batch()?;
                     if self.full_redraw_needed {
                         sws_debug!("[Compositor] Full redraw triggered");
                     }
+                    super::trace::set_compositor_stage(super::trace::STAGE_GPU_COMPOSITE);
                     self.composite_and_present()?;
                 } else {
+                    super::trace::set_compositor_stage(super::trace::STAGE_CPU_COMPOSITE);
                     let mut present_damage = self.composite_pending_to_display()?;
+                    super::trace::set_compositor_stage(super::trace::STAGE_FRAME_BATCH);
                     needs_redraw |= self.wait_for_frame_batch()?;
                     if self.full_redraw_needed {
                         sws_debug!("[Compositor] Full redraw triggered");
                     }
                     if self.has_pending_redraw(needs_redraw) {
+                        super::trace::set_compositor_stage(super::trace::STAGE_CPU_COMPOSITE);
                         let next_damage = self.composite_pending_to_display()?;
                         Self::merge_present_damage(&mut present_damage, next_damage);
                     }
+                    super::trace::set_compositor_stage(super::trace::STAGE_PRESENT);
                     self.present_damage(present_damage)?;
                 }
+                super::trace::compositor_present();
+                super::trace::set_compositor_stage(super::trace::STAGE_ACTIVE);
                 self.note_frame_presented();
                 self.event_counter += 1;
             }
@@ -2560,7 +2575,9 @@ impl Compositor {
             if self.has_queued_event_work() {
                 self.consume_event_signal_if_ready();
             } else {
+                super::trace::set_compositor_stage(super::trace::STAGE_WAIT_SIGNAL);
                 self.wait_for_event_signal();
+                super::trace::set_compositor_stage(super::trace::STAGE_ACTIVE);
             }
 
             // Periodically print Z-order (every 100 redraws)

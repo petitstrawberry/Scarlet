@@ -6,7 +6,7 @@ use std::env;
 use std::handle::Handle;
 use std::handle::capability::memory_mapping::flags as mmap_flags;
 use std::ipc::{SharedMemory, permissions};
-use std::poll::{POLLIN, POLLOUT, PollHandle, poll};
+use std::poll::{POLLERR, POLLHUP, POLLIN, POLLNVAL, POLLOUT, PollHandle, poll};
 use std::println;
 use std::socket::Socket;
 use std::string::String;
@@ -23,7 +23,10 @@ fn is_sws_debug_enabled() -> bool {
         return cached != 0;
     }
     let enabled = match env::var("SWS_LOG") {
-        Some(val) => matches!(val.as_str(), "debug" | "DEBUG" | "3"),
+        Some(val) => matches!(
+            val.as_str(),
+            "debug" | "DEBUG" | "3" | "trace" | "TRACE" | "4"
+        ),
         None => false,
     };
     LOG_CACHE.store(enabled as u8, Ordering::Relaxed);
@@ -629,10 +632,12 @@ pub fn set_compositor_wake_handle(write_handle: Handle) {
 
 /// Wake the compositor if it is sleeping on the wake pipe.
 pub fn wake_compositor() {
+    super::trace::wake_call();
     if COMPOSITOR_WAKE_PENDING
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
         .is_err()
     {
+        super::trace::wake_coalesced();
         return;
     }
 
@@ -1948,11 +1953,17 @@ fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Ha
     println!("[ClientThread {}] Entering main loop", client_id);
 
     'main: loop {
+        super::trace::ipc_client_loop();
         loop_count += 1;
         let _should_log = loop_count % 100 == 0; // Log every 100 iterations (more frequent)
 
         let mut has_events = match stream_writer.flush(&mut socket) {
-            Ok(progressed) => progressed,
+            Ok(progressed) => {
+                if progressed {
+                    super::trace::ipc_flush_progress();
+                }
+                progressed
+            }
             Err(error) => {
                 println!(
                     "[ClientThread {}] Failed to flush queued output: {:?}",
@@ -2087,7 +2098,12 @@ fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Ha
         }
 
         match stream_writer.flush(&mut socket) {
-            Ok(progressed) => has_events |= progressed,
+            Ok(progressed) => {
+                if progressed {
+                    super::trace::ipc_flush_progress();
+                }
+                has_events |= progressed;
+            }
             Err(error) => {
                 println!(
                     "[ClientThread {}] Failed to flush queued output: {:?}",
@@ -2158,7 +2174,34 @@ fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Ha
                             PollHandle::new(socket.as_raw() as u32, 0),
                         ],
                     };
-                    let _ = poll(&mut handles, CLIENT_POLL_TIMEOUT_NS);
+                    super::trace::ipc_poll();
+                    let ready = poll(&mut handles, CLIENT_POLL_TIMEOUT_NS).unwrap_or(0);
+                    if ready > 0 {
+                        super::trace::ipc_poll_ready();
+                    }
+                    let socket_revents = handles[0].revents;
+                    let wake_revents = handles[1].revents;
+                    let fatal_mask = POLLERR | POLLHUP | POLLNVAL;
+                    super::trace::ipc_poll_result(
+                        ready,
+                        socket_revents,
+                        wake_revents,
+                        fatal_mask,
+                    );
+                    if (socket_revents & fatal_mask) != 0 {
+                        println!(
+                            "[ClientThread {}] Socket poll failed: revents=0x{:x}",
+                            client_id, socket_revents
+                        );
+                        break;
+                    }
+                    if (wake_revents & fatal_mask) != 0 {
+                        println!(
+                            "[ClientThread {}] Wake pipe poll failed: revents=0x{:x}",
+                            client_id, wake_revents
+                        );
+                        break;
+                    }
                     if let Some(wake) = wake_read.as_ref()
                         && (handles[1].revents & POLLIN) != 0
                         && let Ok(stream) = wake.as_stream()
@@ -2180,6 +2223,7 @@ fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Ha
         };
 
         let request_id = header.request_id;
+        super::trace::ipc_frame();
         let handle_required = matches!(
             header.msg_type_u32(),
             protocol::client_msg::REGISTER_SGFX_BUFFER
