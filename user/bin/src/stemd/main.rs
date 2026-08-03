@@ -32,10 +32,22 @@ use sws_client::Connection;
 mod desktop;
 mod protocol;
 
-use desktop::{load_desktop_files, lookup_app};
+use desktop::{
+    DesktopEntry, expand_exec, load_desktop_files, lookup_app, lookup_app_for_mime,
+    mime_type_for_path,
+};
 use protocol::cmd;
 
-const DEFAULT_APP_ENV: [&str; 3] = ["USER=root", "HOME=/root", "SHELL=/bin/sh"];
+fn application_environment() -> Vec<String> {
+    let user = std::env::var("USER").unwrap_or(String::from("root"));
+    let home = std::env::var("HOME").unwrap_or(String::from("/root"));
+    let shell = std::env::var("SHELL").unwrap_or(String::from("/bin/sh"));
+    vec![
+        format!("USER={user}"),
+        format!("HOME={home}"),
+        format!("SHELL={shell}"),
+    ]
+}
 
 fn try_attach_stdio_to_path(path: &str) {
     // Best-effort: rebind stdio handles (0/1/2) to the given path.
@@ -662,7 +674,9 @@ fn launch_or_focus(app_id: &str, exec_path: Option<&str>) -> Result<(), &'static
             let path = parts[0];
             let argv: Vec<&str> = parts.to_vec();
 
-            if std::task::execve(path, &argv, &DEFAULT_APP_ENV) != 0 {
+            let environment = application_environment();
+            let environment: Vec<&str> = environment.iter().map(|value| value.as_str()).collect();
+            if std::task::execve(path, &argv, &environment) != 0 {
                 println!("stemd: Failed to execve {}", path);
                 exit(-1);
             }
@@ -792,18 +806,31 @@ fn get_app_menu_titles(app_id: &str) -> Vec<String> {
 fn launch_app_by_id(app_id: &str) -> Result<i32, &'static str> {
     println!("stemd: launch_app_by_id called with app_id={}", app_id);
 
-    // Look up exec_path from registry
     println!("stemd: Looking up {} from .desktop files...", app_id);
-    let exec_path = match lookup_app(app_id) {
+    let entry = match lookup_app(app_id) {
         Some(entry) => {
             println!("stemd: Found app: {} -> {}", entry.name, entry.exec);
-            entry.exec
+            entry
         }
         None => {
             println!("stemd: App '{}' not found in registry", app_id);
             return Err("App not found in registry");
         }
     };
+
+    launch_desktop_entry(&entry, &[])
+}
+
+/// Launch a registered desktop entry with optional local file arguments.
+fn launch_desktop_entry(entry: &DesktopEntry, files: &[String]) -> Result<i32, &'static str> {
+    let argv_strings = expand_exec(&entry.exec, files)?;
+    let path = argv_strings
+        .first()
+        .ok_or("Invalid desktop Exec command")?
+        .clone();
+    let argv: Vec<&str> = argv_strings.iter().map(|value| value.as_str()).collect();
+    let app_id = entry.app_id.clone();
+    let exec_path = entry.exec.clone();
 
     // Fork and execute
     let pid = fork();
@@ -814,17 +841,9 @@ fn launch_app_by_id(app_id: &str) -> Result<i32, &'static str> {
 
             fence(core::sync::atomic::Ordering::SeqCst);
 
-            // Parse the exec command
-            let parts: Vec<&str> = exec_path.split_whitespace().collect();
-            if parts.is_empty() {
-                println!("stemd: Invalid exec command");
-                exit(-1);
-            }
-
-            let path = parts[0];
-            let argv: Vec<&str> = parts.to_vec();
-
-            if std::task::execve(path, &argv, &DEFAULT_APP_ENV) != 0 {
+            let environment = application_environment();
+            let environment: Vec<&str> = environment.iter().map(|value| value.as_str()).collect();
+            if std::task::execve(&path, &argv, &environment) != 0 {
                 println!("stemd: Failed to execve {}", path);
                 exit(-1);
             }
@@ -836,11 +855,23 @@ fn launch_app_by_id(app_id: &str) -> Result<i32, &'static str> {
         }
         pid => {
             // Parent process - track the launched app
-            add_running_app(app_id.to_string(), pid, exec_path.to_string());
+            add_running_app(app_id.clone(), pid, exec_path);
             println!("stemd: App '{}' launched with PID: {}", app_id, pid);
             Ok(pid)
         }
     }
+}
+
+/// Resolve and open a local path using its registered default application.
+fn open_path(path: &str) -> Result<i32, &'static str> {
+    let mime_type = mime_type_for_path(path).ok_or("Unsupported file type")?;
+    let entry = lookup_app_for_mime(mime_type).ok_or("No application registered for file type")?;
+    println!(
+        "stemd: Opening '{}' as {} with {}",
+        path, mime_type, entry.app_id
+    );
+    let files = vec![String::from(path)];
+    launch_desktop_entry(&entry, &files)
 }
 
 /// Launch a service by forking and executing
@@ -1423,6 +1454,47 @@ fn handle_sbus_message(
 
             // Handle the method call
             match method.as_str() {
+                "OpenPath" => {
+                    println!("[sbus] Handling OpenPath method");
+
+                    let path = match args.first() {
+                        Some(Argument::String(path)) if !path.is_empty() => path,
+                        _ => {
+                            if let Some(conn) = conn_guard.as_mut() {
+                                let _ = conn.send_method_error(
+                                    serial,
+                                    "org.scarlet-os.stemd.InvalidArgs",
+                                    "OpenPath requires a non-empty path argument",
+                                );
+                            }
+                            return Ok(());
+                        }
+                    };
+
+                    match open_path(path) {
+                        Ok(pid) => {
+                            println!("[sbus] OpenPath launched PID={}", pid);
+                            if let Some(conn) = conn_guard.as_mut() {
+                                let _ = conn.send_method_return(
+                                    serial,
+                                    vec![Argument::String(String::from("Launched"))],
+                                );
+                            }
+                        }
+                        Err(error) => {
+                            println!("[sbus] OpenPath failed: {}", error);
+                            if let Some(conn) = conn_guard.as_mut() {
+                                let _ = conn.send_method_error(
+                                    serial,
+                                    "org.scarlet-os.stemd.OpenFailed",
+                                    error,
+                                );
+                            }
+                        }
+                    }
+
+                    Ok(())
+                }
                 "LaunchOrFocus" => {
                     println!("[sbus] Handling LaunchOrFocus method");
 

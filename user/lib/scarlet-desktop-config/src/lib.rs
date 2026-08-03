@@ -58,6 +58,18 @@ pub const DESKTOP_FILE_MANAGER_OPEN_FILE_METHOD: &str = "OpenFile";
 /// Signal emitted after a picker request is accepted or cancelled.
 pub const DESKTOP_FILE_MANAGER_RESPONSE_SIGNAL: &str = "Response";
 
+/// Bus name owned by the desktop service manager.
+pub const DESKTOP_STEMD_BUS_NAME: &str = "org.scarlet-os.stemd";
+
+/// Object path used by the desktop service manager.
+pub const DESKTOP_STEMD_OBJECT_PATH: &str = "/org/scarlet/os/stemd";
+
+/// Interface implemented by the desktop service manager.
+pub const DESKTOP_STEMD_INTERFACE: &str = "org.scarlet-os.stemd";
+
+/// Method used to open a local filesystem path with its default application.
+pub const DESKTOP_STEMD_OPEN_PATH_METHOD: &str = "OpenPath";
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ThemeColors {
     /// Generated background color.

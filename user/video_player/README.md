@@ -17,6 +17,9 @@ That enables MP4/AAC playback, stateful AV1 hardware decode, and the stateful
 H.264 hardware decoder path. For H.264 decode, the default path is stateful
 hardware decode only.
 
+At runtime, `video_player` also defaults to hardware decode. Pass
+`--software` (or `--swdec`) to explicitly select the software path.
+
 ## Opt-In Codec Paths
 
 - `h264-stateless-hw` enables userspace H.264 request building through

@@ -7997,7 +7997,9 @@ fn parse_args(args: Vec<String>) -> PlayerArgs {
     let mut title = None;
     let mut audio_path = None;
     let mut audio_complete_path = None;
-    let mut hardware_decode = false;
+    // Hardware decode is the normal path. Use --software/--swdec when a
+    // software decoder is explicitly required.
+    let mut hardware_decode = true;
     let mut streaming = false;
     let mut loop_playback = false;
     let mut stream_complete_path = None;

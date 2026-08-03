@@ -1,0 +1,7 @@
+[Desktop Entry]
+Name=Video Player
+Exec=/bin/video_player %F
+Icon=video
+Type=Application
+Terminal=false
+MimeType=video/mp4;video/webm;

@@ -11,14 +11,15 @@ use std::cmp::Ordering;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use sbus::{Argument, Message};
 use sbus_client::Connection as SbusConnection;
 use scarlet_desktop_config::{
     DESKTOP_FILE_MANAGER_BUS_NAME, DESKTOP_FILE_MANAGER_INTERFACE,
     DESKTOP_FILE_MANAGER_OBJECT_PATH, DESKTOP_FILE_MANAGER_OPEN_FILE_METHOD,
-    DESKTOP_FILE_MANAGER_RESPONSE_SIGNAL,
+    DESKTOP_FILE_MANAGER_RESPONSE_SIGNAL, DESKTOP_STEMD_BUS_NAME, DESKTOP_STEMD_INTERFACE,
+    DESKTOP_STEMD_OBJECT_PATH, DESKTOP_STEMD_OPEN_PATH_METHOD,
 };
 use scarlet_ui::prelude::*;
 use scarlet_ui::{
@@ -41,6 +42,7 @@ const FILE_NAME_FONT_SIZE: f32 = 13.0;
 const FILE_NAME_HEIGHT: f32 = 32.0;
 const FILE_NAME_MAX_WIDTH: f32 = 132.0;
 const SERVICE_RETRY_DELAY: Duration = Duration::from_millis(100);
+const DOUBLE_CLICK_INTERVAL: Duration = Duration::from_millis(500);
 
 #[derive(Clone)]
 struct FileEntry {
@@ -67,6 +69,7 @@ struct FilerApp {
     entries: State<Vec<FileEntry>>,
     selected: State<Option<usize>>,
     hovered: State<Option<usize>>,
+    last_click: State<Option<(usize, Instant)>>,
     picker_request: State<Option<PickerRequest>>,
     status: State<String>,
     request_sequence: State<u32>,
@@ -81,9 +84,10 @@ impl FilerApp {
             entries: State::new(StateId::new(1), entries),
             selected: State::new(StateId::new(2), None),
             hovered: State::new(StateId::new(3), None),
-            picker_request: State::new(StateId::new(4), None),
-            status: State::new(StateId::new(5), String::from("Ready")),
-            request_sequence: State::new(StateId::new(6), 1),
+            last_click: State::new(StateId::new(4), None),
+            picker_request: State::new(StateId::new(5), None),
+            status: State::new(StateId::new(6), String::from("Ready")),
+            request_sequence: State::new(StateId::new(7), 1),
         }
     }
 
@@ -95,6 +99,7 @@ impl FilerApp {
                 self.entries.set(entries);
                 self.selected.set(None);
                 self.hovered.set(None);
+                self.last_click.set(None);
                 if picker.is_none() {
                     self.status.set(String::from("Ready"));
                 }
@@ -128,16 +133,53 @@ impl FilerApp {
             return;
         };
 
+        let now = Instant::now();
+        let double_click = self
+            .last_click
+            .get()
+            .is_some_and(|(last_index, timestamp)| {
+                last_index == index && now.duration_since(timestamp) <= DOUBLE_CLICK_INTERVAL
+            });
+        self.last_click.set(if double_click {
+            None
+        } else {
+            Some((index, now))
+        });
+
         let picker_selects_directories = self
             .picker_request
             .get()
             .as_ref()
             .is_some_and(|request| request.select_directories);
-        if entry.is_directory && !picker_selects_directories {
+
+        self.selected.set(Some(index));
+        self.status.set(entry.path.clone());
+
+        if !double_click || picker_selects_directories {
+            return;
+        }
+
+        if entry.is_directory {
             self.navigate_to(entry.path);
         } else {
-            self.selected.set(Some(index));
-            self.status.set(entry.path);
+            self.open_entry(entry.path);
+        }
+    }
+
+    fn open_entry(&self, path: String) {
+        let result = SbusConnection::connect().and_then(|mut connection| {
+            connection.call_method(
+                DESKTOP_STEMD_BUS_NAME,
+                DESKTOP_STEMD_OBJECT_PATH,
+                DESKTOP_STEMD_INTERFACE,
+                DESKTOP_STEMD_OPEN_PATH_METHOD,
+                vec![Argument::String(path.clone())],
+            )
+        });
+
+        match result {
+            Ok(_) => self.status.set(format!("Opening {path}")),
+            Err(error) => self.status.set(format!("Cannot open {path}: {error:?}")),
         }
     }
 

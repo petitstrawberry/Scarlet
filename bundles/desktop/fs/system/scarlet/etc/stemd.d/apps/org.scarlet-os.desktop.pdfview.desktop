@@ -1,0 +1,7 @@
+[Desktop Entry]
+Name=PDF Viewer
+Exec=/bin/pdfview %f
+Icon=file-description
+Type=Application
+Terminal=false
+MimeType=application/pdf;
