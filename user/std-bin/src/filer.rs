@@ -23,7 +23,7 @@ use scarlet_desktop_config::{
 use scarlet_ui::prelude::*;
 use scarlet_ui::{
     Alignment, Button, Color, ColorPalette, Divider, GridView, HeaderBar, Icon, IconSize, IconView,
-    Image, ImageFit, NavigationLink, Spacer, hstack, navigation, vstack,
+    Image, ImageFit, NavigationLink, Spacer, hstack, measure_text_sized, navigation, vstack,
 };
 use scarlet_ui_macros::View;
 
@@ -34,6 +34,11 @@ const ROOT_PATH: &str = "/";
 const HOME_PATH: &str = "/home";
 const GRID_COLUMNS: usize = 5;
 const GRID_ROW_HEIGHT: f32 = 146.0;
+const FILE_PREVIEW_WIDTH: f32 = 96.0;
+const FILE_PREVIEW_HEIGHT: f32 = 78.0;
+const FILE_NAME_FONT_SIZE: f32 = 13.0;
+const FILE_NAME_HEIGHT: f32 = 32.0;
+const FILE_NAME_MAX_WIDTH: f32 = 132.0;
 const SERVICE_RETRY_DELAY: Duration = Duration::from_millis(100);
 
 #[derive(Clone)]
@@ -232,21 +237,34 @@ impl FilerApp {
                 Either::A(
                     Image::from_path(entry.path.clone())
                         .fit_mode(ImageFit::Cover)
-                        .frame(96.0, 78.0),
+                        .frame(FILE_PREVIEW_WIDTH, FILE_PREVIEW_HEIGHT),
                 )
             } else {
-                Either::B(icon_for_entry(&entry.name, entry.is_directory).frame(96.0, 78.0))
+                Either::B(
+                    icon_for_entry(&entry.name, entry.is_directory)
+                        .frame(FILE_PREVIEW_WIDTH, FILE_PREVIEW_HEIGHT),
+                )
             };
         let detail = if entry.is_directory {
             String::from("Folder")
         } else {
             format_size(entry.size)
         };
+        let file_name = if entry.is_directory {
+            Either::A(Text::new(entry.name).font_size(FILE_NAME_FONT_SIZE))
+        } else {
+            Either::B(
+                Text::new(file_name_label(&entry.name))
+                    .font_size(FILE_NAME_FONT_SIZE)
+                    .alignment(Alignment::Center)
+                    .frame(f32::INFINITY, FILE_NAME_HEIGHT),
+            )
+        };
         let app = self.clone();
 
         vstack! {
             preview,
-            Text::new(entry.name).font_size(13.0),
+            file_name,
             Text::new(detail)
                 .font_size(10.0)
                 .color(palette.text_secondary()),
@@ -385,6 +403,65 @@ impl Application for FilerApp {
             .app_id(APP_ID)
             .size(Size::new(960.0, 640.0)),
         )
+    }
+}
+
+fn file_name_label(name: &str) -> String {
+    let normalized = name.replace('\n', " ");
+    if text_width(&normalized) <= FILE_NAME_MAX_WIDTH {
+        return normalized;
+    }
+
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    for character in normalized.chars() {
+        let mut candidate = current.clone();
+        candidate.push(character);
+        if !current.is_empty() && text_width(&candidate) > FILE_NAME_MAX_WIDTH {
+            lines.push(current);
+            current = character.to_string();
+        } else {
+            current.push(character);
+        }
+    }
+    if !current.is_empty() {
+        lines.push(current);
+    }
+
+    if lines.len() <= 2 {
+        return lines.join("\n");
+    }
+
+    let first = lines.remove(0);
+    let mut second = lines.remove(0);
+    while !second.is_empty() && text_width(&format!("{second}…")) > FILE_NAME_MAX_WIDTH {
+        second.pop();
+    }
+    if second.is_empty() {
+        return format!("{first}\n…");
+    }
+    format!("{first}\n{second}…")
+}
+
+fn text_width(text: &str) -> f32 {
+    measure_text_sized(text, FILE_NAME_FONT_SIZE).0 as f32
+}
+
+#[cfg(test)]
+mod layout_tests {
+    use super::{FILE_NAME_MAX_WIDTH, file_name_label, text_width};
+
+    #[test]
+    fn long_file_names_use_two_lines() {
+        let label = file_name_label("witch_hat_atelier_op_source.mp4");
+        let lines: Vec<&str> = label.lines().collect();
+
+        assert_eq!(lines.len(), 2);
+        assert!(
+            lines
+                .iter()
+                .all(|line| text_width(line) <= FILE_NAME_MAX_WIDTH)
+        );
     }
 }
 
