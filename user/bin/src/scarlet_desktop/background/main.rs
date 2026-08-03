@@ -7,10 +7,17 @@
 
 extern crate scarlet_std as std;
 
+use core::sync::atomic::{AtomicBool, Ordering};
 use core::time::Duration;
-use scarlet_desktop_config::BackgroundStyle;
-use scarlet_ui::Color;
+use sbus::Message as SbusMessage;
+use sbus_client::Connection as SbusConnection;
+use scarlet_desktop_config::{
+    BackgroundStyle, DESKTOP_BACKGROUND_BUS_NAME, DESKTOP_BACKGROUND_CHANGED_SIGNAL,
+    DESKTOP_SETTINGS_INTERFACE, DESKTOP_SETTINGS_OBJECT_PATH, DESKTOP_SETTINGS_SIGNAL_SENDER,
+};
+use scarlet_ui::{BitmapImage, Color};
 use std::println;
+use std::string::String;
 use std::thread;
 use sws_client::{Connection, Event, SurfaceBuilder};
 use sws_protocol::window_types;
@@ -18,9 +25,70 @@ use sws_protocol::window_types;
 const SWS_CONNECT_RETRIES: usize = 100;
 const SWS_RETRY_DELAY_MS: u64 = 50;
 
+static BACKGROUND_CHANGED: AtomicBool = AtomicBool::new(false);
+
+#[derive(Clone, PartialEq, Eq)]
+struct BackgroundState {
+    color: [u8; 3],
+    style: BackgroundStyle,
+    image: Option<String>,
+}
+
+fn load_background_state() -> BackgroundState {
+    let config = scarlet_desktop_config::load_desktop_config();
+    BackgroundState {
+        color: config.theme.background.unwrap_or([40, 40, 50]),
+        style: config
+            .theme
+            .background_style
+            .unwrap_or(BackgroundStyle::GradientLines),
+        image: config.theme.background_image,
+    }
+}
+
+fn background_signal_listener() {
+    loop {
+        let mut connection = match SbusConnection::connect() {
+            Ok(connection) => connection,
+            Err(_) => {
+                thread::sleep(Duration::from_millis(SWS_RETRY_DELAY_MS));
+                continue;
+            }
+        };
+
+        if connection
+            .register_service(DESKTOP_BACKGROUND_BUS_NAME)
+            .is_err()
+        {
+            thread::sleep(Duration::from_millis(SWS_RETRY_DELAY_MS));
+            continue;
+        }
+
+        loop {
+            match connection.receive_message() {
+                Ok(SbusMessage::Signal {
+                    sender,
+                    path,
+                    interface,
+                    signal,
+                    ..
+                }) if sender == DESKTOP_SETTINGS_SIGNAL_SENDER
+                    && path == DESKTOP_SETTINGS_OBJECT_PATH
+                    && interface == DESKTOP_SETTINGS_INTERFACE
+                    && signal == DESKTOP_BACKGROUND_CHANGED_SIGNAL =>
+                {
+                    BACKGROUND_CHANGED.store(true, Ordering::Release);
+                }
+                Ok(_) => {}
+                Err(_) => break,
+            }
+        }
+    }
+}
+
 fn connect_sws_with_retry() -> Result<Connection, ()> {
     for attempt in 0..SWS_CONNECT_RETRIES {
-        if let Ok(mut conn) = Connection::connect("/tmp/sws.sock")
+        if let Ok(conn) = Connection::connect("/tmp/sws.sock")
             && conn.get_screen_size().is_ok()
         {
             println!(
@@ -54,15 +122,10 @@ fn draw_gradient_background(
             // Draw gradient
             for y in 0..h {
                 let t = y.saturating_mul(255) / (h.saturating_sub(1).max(1));
-                let r =
-                    (top.r * 255.0 * (255.0 - t as f32) + bottom.r * 255.0 * t as f32)
-                        / 255.0;
-                let g =
-                    (top.g * 255.0 * (255.0 - t as f32) + bottom.g * 255.0 * t as f32)
-                        / 255.0;
+                let r = (top.r * 255.0 * (255.0 - t as f32) + bottom.r * 255.0 * t as f32) / 255.0;
+                let g = (top.g * 255.0 * (255.0 - t as f32) + bottom.g * 255.0 * t as f32) / 255.0;
                 let b_val =
-                    (top.b * 255.0 * (255.0 - t as f32) + bottom.b * 255.0 * t as f32)
-                        / 255.0;
+                    (top.b * 255.0 * (255.0 - t as f32) + bottom.b * 255.0 * t as f32) / 255.0;
                 let color = Color::rgb(r / 255.0, g / 255.0, b_val / 255.0);
                 let bgra = color.to_bgra();
 
@@ -134,44 +197,110 @@ fn draw_solid_background(conn: &mut Connection, surface_id: u32, color: Color) {
     let _ = conn.commit(surface_id);
 }
 
-fn draw_background(conn: &mut Connection, surface_id: u32) {
-    // Load config to get background color
-    let config = scarlet_desktop_config::load_desktop_config();
-    let style = config
-        .theme
-        .background_style
-        .unwrap_or(BackgroundStyle::GradientLines);
-
-    let (top, bottom, base) = if let Some(bg_color) = config.theme.background {
-        let base = Color::rgb(
-            bg_color[0] as f32 / 255.0,
-            bg_color[1] as f32 / 255.0,
-            bg_color[2] as f32 / 255.0,
+fn draw_image_background(conn: &mut Connection, surface_id: u32, path: &str) -> bool {
+    let Some(image) = BitmapImage::from_path(path) else {
+        println!(
+            "[scarlet_desktop_background] failed to decode image: {}",
+            path
         );
-        let darker = Color::rgb(
-            (bg_color[0] as f32 / 255.0 * 0.7).max(0.0),
-            (bg_color[1] as f32 / 255.0 * 0.7).max(0.0),
-            (bg_color[2] as f32 / 255.0 * 0.7).max(0.0),
-        );
-        (base, darker, base)
-    } else {
-        let top = Color::rgb(0.157, 0.157, 0.196);
-        let bottom = Color::rgb(0.078, 0.078, 0.118);
-        (top, bottom, top)
+        return false;
     };
 
-    match style {
+    let committed = conn.with_surface_mut(surface_id, |surface| {
+        let width = surface.width();
+        let height = surface.height();
+        let source_width = image.width();
+        let source_height = image.height();
+        if width == 0 || height == 0 || source_width == 0 || source_height == 0 {
+            return;
+        }
+
+        // Cover the surface while preserving the image aspect ratio. Integer
+        // arithmetic keeps the mapping deterministic on both target arches.
+        let (draw_width, draw_height) =
+            if width as u64 * source_height as u64 >= height as u64 * source_width as u64 {
+                (
+                    width,
+                    ((width as u64 * source_height as u64) / source_width as u64) as u32,
+                )
+            } else {
+                (
+                    ((height as u64 * source_width as u64) / source_height as u64) as u32,
+                    height,
+                )
+            };
+        let offset_x = (draw_width.saturating_sub(width)) / 2;
+        let offset_y = (draw_height.saturating_sub(height)) / 2;
+        let pixels = image.pixels();
+
+        surface.with_buffer(|buf, stride, _| {
+            for y in 0..height {
+                let source_y = ((y + offset_y) as u64 * source_height as u64
+                    / draw_height.max(1) as u64) as u32;
+                for x in 0..width {
+                    let source_x = ((x + offset_x) as u64 * source_width as u64
+                        / draw_width.max(1) as u64) as u32;
+                    let source_index = (source_y.min(source_height - 1) * source_width
+                        + source_x.min(source_width - 1))
+                        as usize;
+                    let Some(pixel) = pixels.get(source_index).copied() else {
+                        continue;
+                    };
+                    let index = (y as usize * stride as usize + x as usize) * 4;
+                    if index + 3 < buf.len() {
+                        buf[index] = (pixel & 0xFF) as u8;
+                        buf[index + 1] = ((pixel >> 8) & 0xFF) as u8;
+                        buf[index + 2] = ((pixel >> 16) & 0xFF) as u8;
+                        buf[index + 3] = ((pixel >> 24) & 0xFF) as u8;
+                    }
+                }
+            }
+        });
+    });
+
+    if committed.is_none() {
+        return false;
+    }
+    conn.commit(surface_id).is_ok()
+}
+
+fn draw_background(conn: &mut Connection, surface_id: u32, state: &BackgroundState) {
+    if let Some(image) = state.image.as_deref()
+        && draw_image_background(conn, surface_id, image)
+    {
+        return;
+    }
+
+    let base = Color::rgb(state.color[0], state.color[1], state.color[2]);
+    let top = if state.color == [40, 40, 50] {
+        Color::rgb(0.157, 0.157, 0.196)
+    } else {
+        base
+    };
+    let bottom = if state.color == [40, 40, 50] {
+        Color::rgb(0.078, 0.078, 0.118)
+    } else {
+        Color::rgb(
+            state.color[0] as f32 / 255.0 * 0.7,
+            state.color[1] as f32 / 255.0 * 0.7,
+            state.color[2] as f32 / 255.0 * 0.7,
+        )
+    };
+
+    match state.style {
         BackgroundStyle::GradientLines => {
             draw_gradient_background(conn, surface_id, top, bottom, true)
         }
         BackgroundStyle::Gradient => draw_gradient_background(conn, surface_id, top, bottom, false),
-        BackgroundStyle::Solid => draw_solid_background(conn, surface_id, base),
+        BackgroundStyle::Solid => draw_solid_background(conn, surface_id, top),
     }
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn main() -> i32 {
     println!("[scarlet_desktop_background] starting");
+
+    thread::spawn(background_signal_listener);
 
     let mut conn = match connect_sws_with_retry() {
         Ok(c) => c,
@@ -205,8 +334,8 @@ pub extern "C" fn main() -> i32 {
         }
     };
 
-    // Initial draw.
-    draw_background(&mut conn, surface_id);
+    let mut background_state = load_background_state();
+    draw_background(&mut conn, surface_id, &background_state);
 
     loop {
         let _ = conn.dispatch();
@@ -220,7 +349,7 @@ pub extern "C" fn main() -> i32 {
                     // Resize to requested screen dimensions.
                     if conn.resize_window(surface_id, width, height).is_ok() {
                         let _ = conn.move_window(surface_id, 0, 0);
-                        draw_background(&mut conn, surface_id);
+                        draw_background(&mut conn, surface_id, &background_state);
                     }
                 }
                 Event::SurfaceDestroyed { surface_id: sid } if sid == surface_id => {
@@ -228,6 +357,14 @@ pub extern "C" fn main() -> i32 {
                     return 0;
                 }
                 _ => {}
+            }
+        }
+
+        if BACKGROUND_CHANGED.swap(false, Ordering::Acquire) {
+            let next_state = load_background_state();
+            if next_state != background_state {
+                draw_background(&mut conn, surface_id, &next_state);
+                background_state = next_state;
             }
         }
 

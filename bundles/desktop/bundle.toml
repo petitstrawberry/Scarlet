@@ -33,6 +33,20 @@ to = "/system/scarlet/bin/scarlet_desktop_background"
 kind = "cargo"
 source = "../../user/bin"
 package = "user-bin"
+bin = "scarlet_desktop_settingsd"
+to = "/system/scarlet/bin/scarlet_desktop_settingsd"
+
+[[layers]]
+kind = "cargo"
+source = "../../user/std-bin"
+package = "scarlet-std-bin"
+bin = "scarlet_desktop_filer"
+to = "/system/scarlet/bin/scarlet_desktop_filer"
+
+[[layers]]
+kind = "cargo"
+source = "../../user/bin"
+package = "user-bin"
 bin = "scarlet_desktop_taskbar"
 to = "/system/scarlet/bin/scarlet_desktop_taskbar"
 
@@ -83,6 +97,13 @@ source = "../../user/bin"
 package = "user-bin"
 bin = "ui-benchmark"
 to = "/system/scarlet/bin/ui-benchmark"
+
+[[layers]]
+kind = "cargo"
+source = "../../../scarlet-ui/examples/widget-factory"
+package = "scarlet-ui-widget-factory"
+bin = "scarlet-ui-widget-factory"
+to = "/system/scarlet/bin/widget_factory"
 
 [[layers]]
 kind = "cargo"

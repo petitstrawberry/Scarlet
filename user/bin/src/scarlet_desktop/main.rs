@@ -20,7 +20,7 @@ const COMPONENT_RESPAWN_DELAY_MS: u64 = 100;
 
 fn wait_for_sws_ready() -> bool {
     for attempt in 0..SWS_READY_RETRIES {
-        if let Ok(mut conn) = sws_client::Connection::connect("/tmp/sws.sock")
+        if let Ok(conn) = sws_client::Connection::connect("/tmp/sws.sock")
             && conn.get_screen_size().is_ok()
         {
             println!(
@@ -88,6 +88,11 @@ pub extern "C" fn main() -> i32 {
         println!("[scarlet_desktop] background pid={}", bg_pid);
     }
 
+    let mut settingsd_pid = spawn_component("scarlet_desktop_settingsd", &[]);
+    if settingsd_pid > 0 {
+        println!("[scarlet_desktop] settingsd pid={}", settingsd_pid);
+    }
+
     let mut taskbar_pid = spawn_component("scarlet_desktop_taskbar", &[]);
     if taskbar_pid > 0 {
         println!("[scarlet_desktop] taskbar pid={}", taskbar_pid);
@@ -122,6 +127,19 @@ pub extern "C" fn main() -> i32 {
             taskbar_pid = spawn_component("scarlet_desktop_taskbar", &[]);
             if taskbar_pid > 0 {
                 println!("[scarlet_desktop] taskbar respawned pid={}", taskbar_pid);
+            }
+            continue;
+        }
+
+        if pid == settingsd_pid {
+            println!("[scarlet_desktop] settingsd exited; respawning");
+            thread::sleep(Duration::from_millis(COMPONENT_RESPAWN_DELAY_MS));
+            settingsd_pid = spawn_component("scarlet_desktop_settingsd", &[]);
+            if settingsd_pid > 0 {
+                println!(
+                    "[scarlet_desktop] settingsd respawned pid={}",
+                    settingsd_pid
+                );
             }
         }
     }

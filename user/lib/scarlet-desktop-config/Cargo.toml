@@ -6,5 +6,10 @@ edition = "2024"
 [lib]
 path = "src/lib.rs"
 
+[features]
+default = ["legacy-scarlet-std"]
+legacy-scarlet-std = ["dep:scarlet-std"]
+std = []
+
 [dependencies]
-scarlet-std = { path = "../std" }
+scarlet-std = { path = "../std", optional = true }

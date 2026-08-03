@@ -1,15 +1,8 @@
 //! sbus data types
 
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
 use core::convert::From;
-use alloc::string::ToString;
-
-// Use scarlet_std as std within this module
-use scarlet_std::string as std_string;
-use scarlet_std::vec as std_vec;
-
-// Re-export commonly used types at std path for convenience
-pub use std_string::String;
-pub use std_vec::Vec;
 
 /// Method argument
 pub enum Argument {

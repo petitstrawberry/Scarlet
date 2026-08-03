@@ -600,6 +600,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "euclid"
+version = "0.22.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f1a05365e3b1c6d1650318537c7460c6923f1abdd272ad6842baa2b509957a06"
+dependencies = [
+ "num-traits",
+]
+
+[[package]]
 name = "fastrand"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1019,6 +1028,17 @@ dependencies = [
  "cfg-if",
  "futures-util",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "kurbo"
+version = "0.11.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c62026ae44756f8a599ba21140f350303d4f08dcdcc71b5ad9c9bb8128c13c62"
+dependencies = [
+ "arrayvec",
+ "euclid",
+ "smallvec",
 ]
 
 [[package]]
@@ -1809,15 +1829,13 @@ dependencies = [
 [[package]]
 name = "sbus"
 version = "0.1.0"
-dependencies = [
- "scarlet-std",
-]
 
 [[package]]
 name = "sbus-client"
 version = "0.1.0"
 dependencies = [
  "sbus",
+ "scarlet-os",
  "scarlet-std",
 ]
 
@@ -1882,6 +1900,9 @@ dependencies = [
  "rust_h264",
  "sas-client",
  "sas-protocol",
+ "sbus",
+ "sbus-client",
+ "scarlet-desktop-config",
  "scarlet-os",
  "scarlet-sys",
  "scarlet-ui",
@@ -1919,9 +1940,17 @@ dependencies = [
  "libm",
  "raw-window-handle",
  "scarlet-std",
+ "scarlet-ui-icons-tabler",
  "scarlet-ui-macros",
  "unicode-segmentation",
  "zune-jpeg",
+]
+
+[[package]]
+name = "scarlet-ui-icons-tabler"
+version = "0.1.0"
+dependencies = [
+ "svgtypes",
 ]
 
 [[package]]
@@ -2089,6 +2118,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e"
 
 [[package]]
+name = "siphasher"
+version = "1.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8ee5873ec9cce0195efcb7a4e9507a04cd49aec9c83d0389df45b1ef7ba2e649"
+
+[[package]]
 name = "slab"
 version = "0.4.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2225,6 +2260,16 @@ dependencies = [
  "quote",
  "rustversion",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "svgtypes"
+version = "0.15.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "68c7541fff44b35860c1a7a47a7cadf3e4a304c457b58f9870d9706ece028afc"
+dependencies = [
+ "kurbo",
+ "siphasher",
 ]
 
 [[package]]

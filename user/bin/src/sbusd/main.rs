@@ -5,20 +5,17 @@
 #![no_std]
 #![no_main]
 
-extern crate alloc;
-
 extern crate scarlet_std as std;
 
-use alloc::collections::BTreeMap;
-use alloc::string::{String, ToString};
-use alloc::sync::Arc;
-use alloc::vec::Vec;
 use sbus::{DEFAULT_SOCKET_PATH, Message, ServiceInfo};
-use std::io::{Read, Write};
+use std::collections::BTreeMap;
+use std::io::{ErrorKind, Read, Write};
 use std::println;
 use std::socket::Socket;
-use std::sync::Mutex;
+use std::string::{String, ToString};
+use std::sync::{Arc, Mutex};
 use std::thread;
+use std::vec::Vec;
 
 /// Service registry
 static SERVICES: Mutex<BTreeMap<String, ServiceInfo>> = Mutex::new(BTreeMap::new());
@@ -34,6 +31,8 @@ static PENDING_CALLS: Mutex<BTreeMap<usize, PendingCall>> = Mutex::new(BTreeMap:
 
 /// Serial number generator for method calls
 static NEXT_SERIAL: Mutex<u32> = Mutex::new(1);
+
+const CLIENT_POLL_DELAY_MS: u64 = 1;
 
 /// Pending method call information
 #[derive(Clone, Debug)]
@@ -84,6 +83,14 @@ fn main() -> i32 {
                 client_id_counter += 1;
 
                 println!("sbusd: Accepted client {}", client_id);
+
+                if let Err(error) = client_socket.set_nonblocking(true) {
+                    println!(
+                        "sbusd: Failed to enable non-blocking mode for client {}: {:?}",
+                        client_id, error
+                    );
+                    continue;
+                }
 
                 // Wrap socket in Arc<Mutex<>> so it can be shared
                 let client_socket = Arc::new(Mutex::new(client_socket));
@@ -153,6 +160,9 @@ fn handle_client(client_id: usize, socket: Arc<Mutex<Socket>>) {
                         }
                     }
                 }
+            }
+            Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                thread::sleep(core::time::Duration::from_millis(CLIENT_POLL_DELAY_MS));
             }
             Err(e) => {
                 println!("[Client {}] Read error: {:?}", client_id, e);
@@ -455,6 +465,36 @@ fn handle_message(
 
             Ok(())
         }
+        Message::Signal { .. } => {
+            // Signals are broadcast to every other connected client. The
+            // payload already carries the sender/path/interface metadata, so
+            // clients can ignore signals they do not subscribe to.
+            let bytes = msg.to_bytes()?;
+            let destinations: Vec<(usize, Arc<Mutex<Socket>>)> = {
+                let clients = CLIENTS.lock();
+                clients
+                    .iter()
+                    .filter(|(destination_id, _)| **destination_id != client_id)
+                    .map(|(destination_id, destination_socket)| {
+                        (*destination_id, destination_socket.clone())
+                    })
+                    .collect()
+            };
+            for (destination_id, destination_socket) in destinations {
+                if destination_id == client_id {
+                    continue;
+                }
+
+                let mut destination_socket = destination_socket.lock();
+                if let Err(error) = write_all(&mut destination_socket, &bytes) {
+                    println!(
+                        "sbusd: Failed to broadcast signal to client {}: {}",
+                        destination_id, error
+                    );
+                }
+            }
+            Ok(())
+        }
         _ => {
             println!(
                 "[Client {}] Unhandled message type: {:?}",
@@ -503,8 +543,12 @@ fn write_all(socket: &mut Socket, bytes: &[u8]) -> Result<(), &'static str> {
                 println!("[write_all] Wrote {} bytes (total: {})", n, written);
             }
             Err(e) => {
-                println!("[write_all] Write error: {:?}", e);
-                return Err("Failed to send");
+                if e.kind() == ErrorKind::WouldBlock {
+                    thread::sleep(core::time::Duration::from_millis(CLIENT_POLL_DELAY_MS));
+                } else {
+                    println!("[write_all] Write error: {:?}", e);
+                    return Err("Failed to send");
+                }
             }
         }
     }

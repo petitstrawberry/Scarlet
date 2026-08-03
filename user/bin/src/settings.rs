@@ -5,8 +5,7 @@
 #![no_std]
 #![no_main]
 
-extern crate alloc;
-extern crate scarlet_std;
+extern crate scarlet_std as std;
 extern crate scarlet_ui_macros;
 
 use core::f32;
@@ -16,17 +15,29 @@ use sas_protocol::{
     CONTROL_FLAG_MUTED, ControlState, MASTER_VOLUME_UNITY_Q16, OUTPUT_ENTRY_FLAG_COMPATIBLE,
     OUTPUT_ENTRY_FLAG_CURRENT, OUTPUT_PREFERENCE_PATH, OutputInfo, OutputRequest,
 };
-use scarlet_desktop_config::BackgroundStyle;
-use scarlet_std::format;
-use scarlet_std::fs;
-use scarlet_std::println;
-use scarlet_std::string::String;
-use scarlet_std::sync::Mutex;
-use scarlet_std::vec::Vec;
+use sbus::{Argument, Message};
+use sbus_client::Connection as SbusConnection;
+use scarlet_desktop_config::{
+    BackgroundStyle, DESKTOP_FILE_MANAGER_BUS_NAME, DESKTOP_FILE_MANAGER_INTERFACE,
+    DESKTOP_FILE_MANAGER_OBJECT_PATH, DESKTOP_FILE_MANAGER_OPEN_FILE_METHOD,
+    DESKTOP_FILE_MANAGER_RESPONSE_SIGNAL, DESKTOP_SETTINGS_BUS_NAME,
+    DESKTOP_SETTINGS_RESET_BACKGROUND_METHOD, DESKTOP_SETTINGS_SERVICE_INTERFACE,
+    DESKTOP_SETTINGS_SERVICE_OBJECT_PATH, DESKTOP_SETTINGS_SET_BACKGROUND_METHOD,
+};
 use scarlet_ui::{
-    Icon, NavigationLink, State, StateId, hstack, navigation, prelude::*, vstack, zstack,
+    HeaderBar, Icon, IconSize, IconView, NavigationLink, State, StateId, hstack, navigation,
+    prelude::*, vstack, zstack,
 };
 use scarlet_ui_macros::View;
+use std::format;
+use std::fs;
+use std::println;
+use std::string::String;
+use std::sync::Mutex;
+use std::thread;
+use std::time::Duration;
+use std::vec;
+use std::vec::Vec;
 use sws_client::{Connection, InputMethodInfo};
 
 // Preset colors - Apple system-style palette
@@ -150,6 +161,174 @@ fn audio_status_text(state: ControlState) -> String {
     } else {
         format!("{} - {}%", label, volume)
     }
+}
+
+fn save_background_via_service(
+    color: [u8; 3],
+    style: BackgroundStyle,
+    image: Option<&str>,
+) -> core::result::Result<(), sbus_client::Error> {
+    let mut connection = SbusConnection::connect()?;
+    let method = if style == DEFAULT_STYLE && color == DEFAULT_BG_PREVIEW && image.is_none() {
+        DESKTOP_SETTINGS_RESET_BACKGROUND_METHOD
+    } else {
+        DESKTOP_SETTINGS_SET_BACKGROUND_METHOD
+    };
+    let args = if method == DESKTOP_SETTINGS_SET_BACKGROUND_METHOD {
+        vec![
+            Argument::String(format!("#{:02x}{:02x}{:02x}", color[0], color[1], color[2])),
+            Argument::String(String::from(style.as_str())),
+            Argument::String(String::from(image.unwrap_or_default())),
+        ]
+    } else {
+        Vec::new()
+    };
+    connection
+        .call_method(
+            DESKTOP_SETTINGS_BUS_NAME,
+            DESKTOP_SETTINGS_SERVICE_OBJECT_PATH,
+            DESKTOP_SETTINGS_SERVICE_INTERFACE,
+            method,
+            args,
+        )
+        .map(|_| ())
+}
+
+fn request_background_picker() -> core::result::Result<String, sbus_client::Error> {
+    let mut connection = SbusConnection::connect()?;
+    let result = connection.call_method(
+        DESKTOP_FILE_MANAGER_BUS_NAME,
+        DESKTOP_FILE_MANAGER_OBJECT_PATH,
+        DESKTOP_FILE_MANAGER_INTERFACE,
+        DESKTOP_FILE_MANAGER_OPEN_FILE_METHOD,
+        vec![
+            Argument::String(String::from("Choose Wallpaper")),
+            Argument::String(String::from("/home")),
+            Argument::String(String::from("image/jpeg")),
+            Argument::Boolean(false),
+            Argument::Boolean(false),
+        ],
+    )?;
+
+    match result.first() {
+        Some(Argument::String(request_id)) => Ok(request_id.clone()),
+        _ => Err(sbus_client::Error::ProtocolError(
+            "FileManager returned no picker request id",
+        )),
+    }
+}
+
+fn launch_file_manager() {
+    let Ok(mut connection) = SbusConnection::connect() else {
+        return;
+    };
+    let _ = connection.call_method(
+        "org.scarlet-os.stemd",
+        "/org/scarlet/os/stemd",
+        "org.scarlet-os.stemd",
+        "LaunchOrFocus",
+        vec![Argument::String(String::from(
+            "org.scarlet-os.desktop.filer",
+        ))],
+    );
+}
+
+fn start_picker_response_listener(app: &SettingsApp) {
+    let request_id = app.picker_request_id.clone();
+    let background_image = app.background_image.clone();
+    let background_image_label = app.background_image_label.clone();
+
+    thread::spawn(move || {
+        loop {
+            let Ok(mut connection) = SbusConnection::connect() else {
+                thread::sleep(Duration::from_millis(100));
+                continue;
+            };
+
+            loop {
+                let message = match connection.receive_message() {
+                    Ok(message) => message,
+                    Err(error) => {
+                        println!("[settings] picker response connection lost: {:?}", error);
+                        break;
+                    }
+                };
+                let Message::Signal {
+                    sender,
+                    path,
+                    interface,
+                    signal,
+                    args,
+                } = message
+                else {
+                    continue;
+                };
+                if sender != DESKTOP_FILE_MANAGER_BUS_NAME
+                    || path != DESKTOP_FILE_MANAGER_OBJECT_PATH
+                    || interface != DESKTOP_FILE_MANAGER_INTERFACE
+                    || signal != DESKTOP_FILE_MANAGER_RESPONSE_SIGNAL
+                {
+                    continue;
+                }
+
+                let Some(Argument::String(response_id)) = args.first() else {
+                    continue;
+                };
+                if request_id.get().as_deref() != Some(response_id.as_str()) {
+                    continue;
+                }
+
+                let accepted = matches!(args.get(1), Some(Argument::Boolean(true)));
+                let path = match args.get(2) {
+                    Some(Argument::String(path)) => path.clone(),
+                    _ => String::new(),
+                };
+                request_id.set(None);
+                if accepted && !path.is_empty() {
+                    background_image.set(Some(path.clone()));
+                    background_image_label.set(path.clone());
+                }
+            }
+        }
+    });
+}
+
+fn start_background_autosave(app: &SettingsApp) {
+    let style = app.background_style.clone();
+    let red = app.red_value.clone();
+    let green = app.green_value.clone();
+    let blue = app.blue_value.clone();
+    let image = app.background_image.clone();
+
+    thread::spawn(move || {
+        let mut last = (
+            style.get(),
+            [
+                red.get().max(0.0).min(255.0) as u8,
+                green.get().max(0.0).min(255.0) as u8,
+                blue.get().max(0.0).min(255.0) as u8,
+            ],
+            image.get(),
+        );
+
+        loop {
+            let current = (
+                style.get(),
+                [
+                    red.get().max(0.0).min(255.0) as u8,
+                    green.get().max(0.0).min(255.0) as u8,
+                    blue.get().max(0.0).min(255.0) as u8,
+                ],
+                image.get(),
+            );
+            if current != last {
+                if save_background_via_service(current.1, current.0, current.2.as_deref()).is_ok() {
+                    last = current;
+                }
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+    });
 }
 
 fn should_drop_sas_client(error: SasError) -> bool {
@@ -331,6 +510,9 @@ fn save_timezone(zone: &str) {
 #[derive(View, Clone)]
 struct SettingsApp {
     background_style: State<BackgroundStyle>,
+    background_image: State<Option<String>>,
+    background_image_label: State<String>,
+    picker_request_id: State<Option<String>>,
     red_value: State<f32>,
     green_value: State<f32>,
     blue_value: State<f32>,
@@ -352,6 +534,10 @@ impl SettingsApp {
         let config = scarlet_desktop_config::load_desktop_config();
         let style = config.theme.background_style.unwrap_or(DEFAULT_STYLE);
         let color = config.theme.background.unwrap_or(DEFAULT_BG_PREVIEW);
+        let background_image = config.theme.background_image.clone();
+        let background_image_label = background_image
+            .clone()
+            .unwrap_or_else(|| String::from("No image selected (using generated background)"));
         let input_methods = load_input_methods();
         let selected_ime_index = input_methods
             .iter()
@@ -376,53 +562,40 @@ impl SettingsApp {
             .unwrap_or(0);
         let (audio_outputs, audio_output_index, audio_volume, audio_muted, audio_status) =
             load_audio_controls();
-        Self {
+        let app = Self {
             background_style: State::new(StateId::new(0), style),
-            red_value: State::new(StateId::new(1), color[0] as f32),
-            green_value: State::new(StateId::new(2), color[1] as f32),
-            blue_value: State::new(StateId::new(3), color[2] as f32),
-            input_methods: State::new(StateId::new(4), input_methods),
-            selected_ime_index: State::new(StateId::new(5), selected_ime_index),
-            timezone_regions: State::new(StateId::new(6), timezone_regions),
-            timezone_region_index: State::new(StateId::new(7), region_index),
-            timezone_cities: State::new(StateId::new(8), timezone_cities),
-            timezone_city_index: State::new(StateId::new(9), city_index),
-            audio_outputs: State::new(StateId::new(10), audio_outputs),
-            audio_output_index: State::new(StateId::new(11), audio_output_index),
-            audio_volume_percent: State::new(StateId::new(12), audio_volume),
-            audio_muted: State::new(StateId::new(13), audio_muted),
-            audio_status: State::new(StateId::new(14), audio_status),
-        }
+            background_image: State::new(StateId::new(1), background_image),
+            background_image_label: State::new(StateId::new(2), background_image_label),
+            picker_request_id: State::new(StateId::new(3), None),
+            red_value: State::new(StateId::new(4), color[0] as f32),
+            green_value: State::new(StateId::new(5), color[1] as f32),
+            blue_value: State::new(StateId::new(6), color[2] as f32),
+            input_methods: State::new(StateId::new(7), input_methods),
+            selected_ime_index: State::new(StateId::new(8), selected_ime_index),
+            timezone_regions: State::new(StateId::new(9), timezone_regions),
+            timezone_region_index: State::new(StateId::new(10), region_index),
+            timezone_cities: State::new(StateId::new(11), timezone_cities),
+            timezone_city_index: State::new(StateId::new(12), city_index),
+            audio_outputs: State::new(StateId::new(13), audio_outputs),
+            audio_output_index: State::new(StateId::new(14), audio_output_index),
+            audio_volume_percent: State::new(StateId::new(15), audio_volume),
+            audio_muted: State::new(StateId::new(16), audio_muted),
+            audio_status: State::new(StateId::new(17), audio_status),
+        };
+        start_picker_response_listener(&app);
+        start_background_autosave(&app);
+        app
     }
 
     fn save_config(&self) {
-        let bg_color = self.current_color();
+        let color = self.current_color();
         let style = self.background_style.get();
-        if style == DEFAULT_STYLE && bg_color == DEFAULT_BG_PREVIEW {
-            let _ = fs::remove_file("/etc/scarlet-desktop.d/background.toml");
-            println!("[settings] Reset to default background");
-            return;
-        }
-
-        let config_content = format!(
-            "[theme]\nbackground = \"#{:02x}{:02x}{:02x}\"\nbackground_style = \"{}\"\n",
-            bg_color[0],
-            bg_color[1],
-            bg_color[2],
-            style.as_str()
-        );
-
-        let _ = fs::create_directory("/etc/scarlet-desktop.d");
-
-        match fs::File::create("/etc/scarlet-desktop.d/background.toml") {
-            Ok(mut file) => match file.write(config_content.as_bytes()) {
-                Ok(_) => println!(
-                    "[settings] Saved: {:02x}{:02x}{:02x}",
-                    bg_color[0], bg_color[1], bg_color[2]
-                ),
-                Err(e) => println!("[settings] Write error: {:?}", e),
-            },
-            Err(e) => println!("[settings] Create error: {:?}", e),
+        let image = self.background_image.get();
+        if let Err(error) = save_background_via_service(color, style, image.as_deref()) {
+            println!(
+                "[settings] failed to save background through settingsd: {:?}",
+                error
+            );
         }
     }
 
@@ -443,6 +616,35 @@ impl SettingsApp {
         None
     }
 
+    fn clear_background_image(&self) {
+        self.background_image.set(None);
+        self.background_image_label.set(String::from(
+            "No image selected (using generated background)",
+        ));
+        self.save_config();
+    }
+
+    fn open_background_picker(&self) {
+        let mut last_error = None;
+        for attempt in 0..20 {
+            match request_background_picker() {
+                Ok(request_id) => {
+                    self.picker_request_id.set(Some(request_id));
+                    println!("[settings] file picker opened");
+                    return;
+                }
+                Err(error) => {
+                    last_error = Some(error);
+                    if attempt == 0 {
+                        launch_file_manager();
+                    }
+                    thread::sleep(Duration::from_millis(50));
+                }
+            }
+        }
+        println!("[settings] failed to open file picker: {:?}", last_error);
+    }
+
     fn select_input_method(&self, index: usize) {
         let methods = self.input_methods.get();
         let Some(method) = methods.get(index) else {
@@ -451,7 +653,7 @@ impl SettingsApp {
         };
 
         match Connection::connect_default() {
-            Ok(mut connection) => match connection.set_active_input_method(method.ime_id) {
+            Ok(connection) => match connection.set_active_input_method(method.ime_id) {
                 Ok(()) => {
                     println!(
                         "[settings] Selected input method: {} ({})",
@@ -533,7 +735,7 @@ impl SettingsApp {
 
 fn load_input_methods() -> Vec<InputMethodInfo> {
     match Connection::connect_default() {
-        Ok(mut connection) => match connection.get_input_methods() {
+        Ok(connection) => match connection.get_input_methods() {
             Ok(methods) => methods,
             Err(e) => {
                 println!("[settings] Failed to get input methods: {:?}", e);
@@ -800,7 +1002,7 @@ fn appearance_page(
                 Text::new(format!("{}", app.blue_value.get().max(0.0).min(255.0) as u32)).font_size(12.0).frame_width(36.0),
             },
             Text::new("Preview").font_size(14.0),
-            Rectangle::new()
+        Rectangle::new()
                 .fill(Color::rgb(
                     app.current_color()[0],
                     app.current_color()[1],
@@ -808,6 +1010,27 @@ fn appearance_page(
                 ))
                 .frame(520.0, 70.0)
                 .clip_radius(10.0),
+        },
+
+        vstack! {
+            Text::new("Wallpaper Image").font_size(14.0),
+            hstack! {
+                IconView::new(Icon::Photo).size(IconSize::Large),
+                Text::from_state(app.background_image_label.clone()).font_size(12.0),
+                Spacer::new(),
+                Button::new("Choose…").on_click({
+                    let app = app.clone();
+                    move || app.open_background_picker()
+                }),
+                Button::new("Clear Image").on_click({
+                    let app = app.clone();
+                    move || app.clear_background_image()
+                }),
+            }
+            .padding(8.0),
+            Text::new("The standalone File Manager will open in image-picker mode.")
+                .font_size(11.0)
+                .color(ColorPalette::default().text_secondary()),
         },
 
         Divider::new(),
@@ -1115,43 +1338,57 @@ impl Application for SettingsApp {
         let highlight = ColorPalette::light().primary();
         let border = ColorPalette::light().border();
 
-        WindowGroup::new("main", Window::new(
-            "Settings",
-            navigation! {
-                NavigationLink::new("Appearance", Icon::Home, move || {
-                    appearance_page(
-                        r0.clone(), g0.clone(), b0.clone(),
-                        r1.clone(), g1.clone(), b1.clone(),
-                        r2.clone(), g2.clone(), b2.clone(),
-                        r3.clone(), g3.clone(), b3.clone(),
-                        r4.clone(), g4.clone(), b4.clone(),
-                        r5.clone(), g5.clone(), b5.clone(),
-                        r6.clone(), g6.clone(), b6.clone(),
-                        r7.clone(), g7.clone(), b7.clone(),
-                        s0.clone(), s1.clone(), s2.clone(),
-                        is0, is1, is2, is3, is4, is5, is6, is7,
-                        style_default, style_gradient, style_solid,
-                        highlight, border,
-                        app.clone()
+        WindowGroup::new(
+            "main",
+            Window::new(
+                "Settings",
+                navigation! {
+                    NavigationLink::new("Appearance", move || {
+                        appearance_page(
+                            r0.clone(), g0.clone(), b0.clone(),
+                            r1.clone(), g1.clone(), b1.clone(),
+                            r2.clone(), g2.clone(), b2.clone(),
+                            r3.clone(), g3.clone(), b3.clone(),
+                            r4.clone(), g4.clone(), b4.clone(),
+                            r5.clone(), g5.clone(), b5.clone(),
+                            r6.clone(), g6.clone(), b6.clone(),
+                            r7.clone(), g7.clone(), b7.clone(),
+                            s0.clone(), s1.clone(), s2.clone(),
+                            is0, is1, is2, is3, is4, is5, is6, is7,
+                            style_default, style_gradient, style_solid,
+                            highlight, border,
+                            app.clone()
+                        )
+                    }),
+                    NavigationLink::new("Display", display_page),
+                    NavigationLink::new("Audio", move || audio_page(audio_app.clone())),
+                    NavigationLink::new("Input", move || input_page(input_app.clone())),
+                    NavigationLink::new("Date & Time", move || {
+                        datetime_page(
+                            tz_regions.clone(),
+                            tz_region_idx.clone(),
+                            tz_cities.clone(),
+                            tz_city_idx.clone(),
+                        )
+                    }),
+                }
+                .header(|| {
+                    HeaderBar::new(
+                        hstack! {
+                            IconView::new(Icon::Settings).size(IconSize::Medium),
+                            Text::new("Scarlet Desktop Settings").font_size(14.0),
+                            Spacer::new(),
+                        }
+                        .padding(10.0),
                     )
-                }),
-                NavigationLink::new("Display", Icon::Search, display_page),
-                NavigationLink::new("Audio", Icon::Settings, move || audio_page(audio_app.clone())),
-                NavigationLink::new("Input", Icon::Settings, move || input_page(input_app.clone())),
-                NavigationLink::new("Date & Time", Icon::Search, move || {
-                    datetime_page(
-                        tz_regions.clone(),
-                        tz_region_idx.clone(),
-                        tz_cities.clone(),
-                        tz_city_idx.clone(),
-                    )
-                }),
-            }
-            .sidebar_width(150.0)
-            .frame(f32::INFINITY, f32::INFINITY),
+                    .height(44.0)
+                })
+                .sidebar_width(150.0)
+                .frame(f32::INFINITY, f32::INFINITY),
+            )
+            .app_id("org.scarlet-os.desktop.settings")
+            .size(Size::new(800.0, 600.0)),
         )
-        .app_id("org.scarlet-os.desktop.settings")
-        .size(Size::new(800.0, 600.0)))
     }
 
     fn debug_logging(&self) -> bool {

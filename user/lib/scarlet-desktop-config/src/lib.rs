@@ -1,14 +1,71 @@
-#![no_std]
+#![cfg_attr(not(feature = "std"), no_std)]
 
-extern crate scarlet_std as std;
+extern crate alloc;
 
-use std::string::{String, ToString};
-use std::vec::Vec;
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
 
-#[derive(Debug, Clone, Default)]
+/// Sender bus name used by Settings for desktop configuration signals.
+pub const DESKTOP_SETTINGS_SIGNAL_SENDER: &str = "org.scarlet-os.desktop.settings";
+
+/// Bus name owned by the headless desktop settings service.
+pub const DESKTOP_SETTINGS_BUS_NAME: &str = "org.scarlet-os.desktop.settings";
+
+/// Object path used by the desktop settings service.
+pub const DESKTOP_SETTINGS_SERVICE_OBJECT_PATH: &str = "/org/scarlet/os/desktop";
+
+/// Interface implemented by the desktop settings service.
+pub const DESKTOP_SETTINGS_SERVICE_INTERFACE: &str = "org.scarlet.desktop.Settings";
+
+/// Method used to persist the complete background configuration.
+pub const DESKTOP_SETTINGS_SET_BACKGROUND_METHOD: &str = "SetBackground";
+
+/// Method used to restore the generated default background.
+pub const DESKTOP_SETTINGS_RESET_BACKGROUND_METHOD: &str = "ResetBackground";
+
+/// User/system desktop configuration directory used by the current Scarlet
+/// desktop profile.
+pub const DESKTOP_CONFIG_DIR: &str = "/etc/scarlet-desktop.d";
+
+/// Persistent desktop background configuration path.
+pub const DESKTOP_BACKGROUND_CONFIG_PATH: &str = "/etc/scarlet-desktop.d/background.toml";
+
+/// Bus name registered by the desktop background listener.
+pub const DESKTOP_BACKGROUND_BUS_NAME: &str = "org.scarlet-os.desktop.background";
+
+/// Object path used for desktop configuration signals.
+pub const DESKTOP_SETTINGS_OBJECT_PATH: &str = "/org/scarlet/os/desktop";
+
+/// Interface used for desktop configuration signals.
+pub const DESKTOP_SETTINGS_INTERFACE: &str = "org.scarlet.desktop.Settings";
+
+/// Signal emitted after the desktop background configuration was saved.
+pub const DESKTOP_BACKGROUND_CHANGED_SIGNAL: &str = "BackgroundChanged";
+
+/// Bus name owned by the File Manager and its picker mode.
+pub const DESKTOP_FILE_MANAGER_BUS_NAME: &str = "org.scarlet-os.desktop.filemanager";
+
+/// Object path used by the File Manager service.
+pub const DESKTOP_FILE_MANAGER_OBJECT_PATH: &str = "/org/scarlet/os/filemanager";
+
+/// Interface implemented by the File Manager service.
+pub const DESKTOP_FILE_MANAGER_INTERFACE: &str = "org.scarlet.desktop.FileManager";
+
+/// Method used to open the File Manager in picker mode.
+pub const DESKTOP_FILE_MANAGER_OPEN_FILE_METHOD: &str = "OpenFile";
+
+/// Signal emitted after a picker request is accepted or cancelled.
+pub const DESKTOP_FILE_MANAGER_RESPONSE_SIGNAL: &str = "Response";
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ThemeColors {
+    /// Generated background color.
     pub background: Option<[u8; 3]>,
+    /// Generated background style.
     pub background_style: Option<BackgroundStyle>,
+    /// Optional local image path used as the desktop background.
+    pub background_image: Option<String>,
     pub taskbar: Option<[u8; 3]>,
     pub text: Option<[u8; 3]>,
     pub highlight: Option<[u8; 3]>,
@@ -41,7 +98,7 @@ impl BackgroundStyle {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TaskbarConfig {
     pub height: Option<u32>,
     pub position: Option<TaskbarPosition>,
@@ -63,7 +120,7 @@ impl TaskbarPosition {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DesktopConfig {
     pub theme: ThemeColors,
     pub taskbar: TaskbarConfig,
@@ -124,10 +181,14 @@ impl ConfigParser {
                         "highlight" => theme.highlight = Some(color),
                         _ => {}
                     }
-                } else if key == "background_style" {
+                } else {
                     let value = Self::unquote(value);
-                    if let Some(style) = BackgroundStyle::from_str(&value) {
-                        theme.background_style = Some(style);
+                    if key == "background_style" {
+                        if let Some(style) = BackgroundStyle::from_str(&value) {
+                            theme.background_style = Some(style);
+                        }
+                    } else if key == "background_image" && !value.is_empty() {
+                        theme.background_image = Some(value);
                     }
                 }
             }
@@ -225,63 +286,83 @@ impl ConfigParser {
 }
 
 pub fn read_config(path: &str) -> Result<String, &'static str> {
-    use std::fs::File;
-    let mut file = File::open(path).map_err(|_| "Failed to open config file")?;
-
-    let mut content = String::new();
-    let mut buf = [0u8; 4096];
-
-    loop {
-        let n = file
-            .read(&mut buf)
-            .map_err(|_| "Failed to read config file")?;
-        if n == 0 {
-            break;
-        }
-        let chunk =
-            core::str::from_utf8(&buf[..n]).map_err(|_| "Config file is not valid UTF-8")?;
-        content.push_str(chunk);
+    #[cfg(feature = "std")]
+    {
+        return std::fs::read_to_string(path).map_err(|_| "Failed to read config file");
     }
 
-    Ok(content)
+    #[cfg(not(feature = "std"))]
+    use scarlet_std::fs::File;
+    #[cfg(not(feature = "std"))]
+    {
+        let mut file = File::open(path).map_err(|_| "Failed to open config file")?;
+
+        let mut content = String::new();
+        let mut buf = [0u8; 4096];
+
+        loop {
+            let n = file
+                .read(&mut buf)
+                .map_err(|_| "Failed to read config file")?;
+            if n == 0 {
+                break;
+            }
+            let chunk =
+                core::str::from_utf8(&buf[..n]).map_err(|_| "Config file is not valid UTF-8")?;
+            content.push_str(chunk);
+        }
+
+        Ok(content)
+    }
+}
+
+#[cfg(feature = "std")]
+fn config_filenames(dir_path: &str) -> Result<Vec<String>, &'static str> {
+    let entries = std::fs::read_dir(dir_path).map_err(|_| "Failed to read config directory")?;
+    let mut filenames = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|_| "Failed to read config directory entry")?;
+        let file_type = entry
+            .file_type()
+            .map_err(|_| "Failed to read config file type")?;
+        let filename = entry.file_name().to_string_lossy().into_owned();
+        if file_type.is_file() && filename.ends_with(".toml") {
+            filenames.push(filename);
+        }
+    }
+    Ok(filenames)
+}
+
+#[cfg(not(feature = "std"))]
+fn config_filenames(dir_path: &str) -> Result<Vec<String>, &'static str> {
+    use scarlet_std::fs;
+
+    let entries = fs::list_directory(dir_path).map_err(|_| "Failed to read config directory")?;
+    let mut filenames = Vec::new();
+    for entry in entries {
+        if entry.name == "." || entry.name == ".." {
+            continue;
+        }
+        if entry.is_file() && entry.name.ends_with(".toml") {
+            filenames.push(entry.name);
+        }
+    }
+    Ok(filenames)
 }
 
 pub fn read_config_dir(dir_path: &str) -> Result<String, &'static str> {
-    use std::fs;
-
     let mut combined_content = String::new();
+    let mut toml_files = config_filenames(dir_path)?;
+    toml_files.sort();
 
-    match fs::list_directory(dir_path) {
-        Ok(entries) => {
-            let mut toml_files = Vec::new();
-            for entry in entries {
-                if entry.name == "." || entry.name == ".." {
-                    continue;
-                }
-                if entry.is_file() && entry.name.ends_with(".toml") {
-                    toml_files.push(entry.name);
-                }
-            }
-
-            toml_files.sort();
-
-            for filename in toml_files {
-                let file_path = std::format!("{}/{}", dir_path, filename);
-                match read_config(&file_path) {
-                    Ok(content) => {
-                        combined_content.push_str(&content);
-                        combined_content.push('\n');
-                    }
-                    Err(_e) => {
-                        return Err("Failed to read config file");
-                    }
-                }
-            }
-
-            Ok(combined_content)
-        }
-        Err(_) => Err("Failed to read config directory"),
+    for filename in toml_files {
+        let file_path = format!("{}/{}", dir_path, filename);
+        let content = read_config(&file_path).map_err(|_| "Failed to read config file")?;
+        combined_content.push_str(&content);
+        combined_content.push('\n');
     }
+
+    Ok(combined_content)
 }
 
 pub fn load_desktop_config() -> DesktopConfig {
