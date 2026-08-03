@@ -23,7 +23,8 @@ use scarlet_desktop_config::{
 use scarlet_ui::prelude::*;
 use scarlet_ui::{
     Alignment, Button, Color, ColorPalette, Divider, GridView, HeaderBar, Icon, IconSize, IconView,
-    Image, ImageFit, NavigationLink, Spacer, hstack, measure_text_sized, navigation, vstack,
+    Image, ImageFit, NavigationLink, Spacer, dismiss_window, hstack, measure_text_sized,
+    navigation, vstack,
 };
 use scarlet_ui_macros::View;
 
@@ -31,7 +32,6 @@ use file_icons::{FileKind, icon_for_entry};
 
 const APP_ID: &str = "org.scarlet-os.desktop.filer";
 const ROOT_PATH: &str = "/";
-const HOME_PATH: &str = "/home";
 const GRID_COLUMNS: usize = 5;
 const GRID_ROW_HEIGHT: f32 = 146.0;
 const FILE_PREVIEW_WIDTH: f32 = 96.0;
@@ -65,6 +65,7 @@ struct FilerApp {
     current_path: State<String>,
     entries: State<Vec<FileEntry>>,
     selected: State<Option<usize>>,
+    hovered: State<Option<usize>>,
     picker_request: State<Option<PickerRequest>>,
     status: State<String>,
     request_sequence: State<u32>,
@@ -78,9 +79,10 @@ impl FilerApp {
             current_path: State::new(StateId::new(0), current_path),
             entries: State::new(StateId::new(1), entries),
             selected: State::new(StateId::new(2), None),
-            picker_request: State::new(StateId::new(3), None),
-            status: State::new(StateId::new(4), String::from("Ready")),
-            request_sequence: State::new(StateId::new(5), 1),
+            hovered: State::new(StateId::new(3), None),
+            picker_request: State::new(StateId::new(4), None),
+            status: State::new(StateId::new(5), String::from("Ready")),
+            request_sequence: State::new(StateId::new(6), 1),
         }
     }
 
@@ -91,6 +93,7 @@ impl FilerApp {
             Ok(entries) => {
                 self.entries.set(entries);
                 self.selected.set(None);
+                self.hovered.set(None);
                 if picker.is_none() {
                     self.status.set(String::from("Ready"));
                 }
@@ -216,8 +219,7 @@ impl FilerApp {
         }
 
         self.picker_request.set(None);
-        self.status.set(String::from("Ready"));
-        self.refresh();
+        dismiss_window("main");
     }
 
     fn file_cell(
@@ -228,7 +230,14 @@ impl FilerApp {
     ) -> impl View + Clone + use<> {
         let palette = ColorPalette::default();
         let background = if selected_index == Some(index) {
-            palette.menu_active()
+            palette.primary_light().with_opacity(0.16)
+        } else if self.hovered.get() == Some(index) {
+            palette.background_tertiary()
+        } else {
+            Color::CLEAR
+        };
+        let border = if selected_index == Some(index) {
+            palette.primary()
         } else {
             Color::CLEAR
         };
@@ -261,6 +270,8 @@ impl FilerApp {
             )
         };
         let app = self.clone();
+        let hover_state = self.hovered.clone();
+        let exit_state = self.hovered.clone();
 
         vstack! {
             preview,
@@ -274,11 +285,17 @@ impl FilerApp {
         .padding(8.0)
         .background(background)
         .clip_radius(8.0)
+        .border_rounded(border, 2.0, 8.0)
+        .on_hover(move || hover_state.set(Some(index)))
+        .on_exit(move || {
+            if exit_state.get() == Some(index) {
+                exit_state.set(None);
+            }
+        })
         .on_click(move || app.activate_entry(index))
     }
 
     fn files_page(&self) -> impl View + Clone + use<> {
-        let app = self.clone();
         let grid_app = self.clone();
         let grid = GridView::new(
             self.entries.clone(),
@@ -294,19 +311,22 @@ impl FilerApp {
             .as_ref()
             .map(|request| request.title.clone())
             .unwrap_or_else(|| String::from("Files"));
-        let cancel_app = self.clone();
-        let create_app = self.clone();
-        let open_app = self.clone();
-        let refresh_app = self.clone();
-        let secondary_action = if picker.is_some() {
-            Either::A(Button::new("Cancel").on_click(move || cancel_app.finish_picker(false)))
+        let footer = if picker.is_some() {
+            let cancel_app = self.clone();
+            let open_app = self.clone();
+            Either::A(vstack! {
+                Divider::new(),
+                hstack! {
+                    Text::from_state(self.status.clone()).font_size(11.0),
+                    Spacer::new(),
+                    Button::new("Cancel").on_click(move || cancel_app.finish_picker(false)),
+                    Button::new("Open").on_click(move || open_app.finish_picker(true)),
+                }
+                .alignment(Alignment::Center)
+                .padding(8.0),
+            })
         } else {
-            Either::B(Button::new("New Folder").on_click(move || create_app.create_folder()))
-        };
-        let primary_action = if picker.is_some() {
-            Either::A(Button::new("Open").on_click(move || open_app.finish_picker(true)))
-        } else {
-            Either::B(Button::new("Refresh").on_click(move || refresh_app.refresh()))
+            Either::B(vstack! {})
         };
 
         vstack! {
@@ -314,15 +334,7 @@ impl FilerApp {
                 .font_size(12.0)
                 .color(ColorPalette::default().text_secondary()),
             grid,
-            Divider::new(),
-            hstack! {
-                Text::from_state(app.status.clone()).font_size(11.0),
-                Spacer::new(),
-                secondary_action,
-                primary_action,
-            }
-            .alignment(Alignment::Center)
-            .padding(8.0),
+            footer,
         }
         .alignment(Alignment::Leading)
         .padding(10.0)
@@ -331,6 +343,7 @@ impl FilerApp {
     fn header(&self) -> impl View + Clone + use<> {
         let back_app = self.clone();
         let up_app = self.clone();
+        let create_app = self.clone();
         let refresh_app = self.clone();
         HeaderBar::new(
             hstack! {
@@ -345,6 +358,9 @@ impl FilerApp {
                     .filled(),
                 Text::from_state(self.current_path.clone()).font_size(14.0),
                 Spacer::new(),
+                Button::icon_only(Icon::FolderPlus)
+                    .header_style()
+                    .on_click(move || create_app.create_folder()),
                 Button::icon_only(Icon::Refresh)
                     .header_style()
                     .on_click(move || refresh_app.refresh()),
@@ -365,6 +381,7 @@ impl Application for FilerApp {
         let pictures = self.clone();
         let downloads = self.clone();
         let header = self.clone();
+        let home_path = home_path();
 
         WindowGroup::new(
             "main",
@@ -375,7 +392,8 @@ impl Application for FilerApp {
                         .icon(Icon::Home)
                         .on_select({
                             let app = self.clone();
-                            move || app.navigate_to(HOME_PATH)
+                            let home_path = home_path.clone();
+                            move || app.navigate_to(home_path.clone())
                         }),
                     NavigationLink::new("Computer", move || computer.files_page())
                         .icon(Icon::DeviceDesktop)
@@ -466,11 +484,19 @@ mod layout_tests {
 }
 
 fn initial_path() -> String {
-    [HOME_PATH, "/tmp", ROOT_PATH]
+    let home = home_path();
+    [home.as_str(), "/tmp", ROOT_PATH]
         .into_iter()
         .find(|path| Path::new(path).is_dir())
         .unwrap_or(ROOT_PATH)
         .to_owned()
+}
+
+fn home_path() -> String {
+    std::env::var_os("HOME")
+        .map(|path| path.to_string_lossy().into_owned())
+        .filter(|path| !path.is_empty())
+        .unwrap_or_else(|| String::from(ROOT_PATH))
 }
 
 fn read_entries(path: &str, picker: Option<&PickerRequest>) -> std::io::Result<Vec<FileEntry>> {
