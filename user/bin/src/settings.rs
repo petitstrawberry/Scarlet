@@ -527,6 +527,7 @@ struct SettingsApp {
     audio_volume_percent: State<f32>,
     audio_muted: State<bool>,
     audio_status: State<String>,
+    navigation_title: State<String>,
 }
 
 impl SettingsApp {
@@ -581,6 +582,7 @@ impl SettingsApp {
             audio_volume_percent: State::new(StateId::new(15), audio_volume),
             audio_muted: State::new(StateId::new(16), audio_muted),
             audio_status: State::new(StateId::new(17), audio_status),
+            navigation_title: State::new(StateId::new(18), String::from("Appearance")),
         };
         start_picker_response_listener(&app);
         start_background_autosave(&app);
@@ -797,10 +799,6 @@ fn appearance_page(
     app: SettingsApp,
 ) -> impl View {
     vstack! {
-        Text::new("Appearance").font_size(28.0),
-        Text::new("Desktop Background").font_size(13.0),
-        Divider::new(),
-
         hstack! {
             vstack! {
                 Text::new("Style").font_size(14.0),
@@ -1052,10 +1050,6 @@ fn appearance_page(
 #[allow(dead_code)]
 fn about_page() -> impl View {
     vstack! {
-        Text::new("About").font_size(28.0),
-        Text::new("Scarlet Desktop").font_size(13.0),
-        Divider::new(),
-
         vstack! {
             Text::new("Scarlet Desktop").font_size(20.0),
             Text::new("Version 0.1.0").font_size(14.0),
@@ -1082,10 +1076,6 @@ fn about_page() -> impl View {
 #[allow(dead_code)]
 fn network_page() -> impl View {
     vstack! {
-        Text::new("Network").font_size(28.0),
-        Text::new("Network Settings").font_size(13.0),
-        Divider::new(),
-
         vstack! {
             Text::new("Coming Soon").font_size(20.0),
             Text::new("Network configuration will be available here").font_size(13.0),
@@ -1098,10 +1088,6 @@ fn network_page() -> impl View {
 
 fn display_page() -> impl View {
     vstack! {
-        Text::new("Display").font_size(28.0),
-        Text::new("Output").font_size(13.0),
-        Divider::new(),
-
         vstack! {
             Text::new("Scaling").font_size(14.0),
             hstack! {
@@ -1132,10 +1118,6 @@ fn audio_page(app: SettingsApp) -> impl View {
     let mute_app = app.clone();
 
     vstack! {
-        Text::new("Audio").font_size(28.0),
-        Text::new("Playback").font_size(13.0),
-        Divider::new(),
-
         vstack! {
             Text::new("Output Device").font_size(14.0),
             hstack! {
@@ -1197,10 +1179,6 @@ fn input_page(app: SettingsApp) -> impl View {
     let selected_id = selected_method.map(|method| method.ime_id).unwrap_or(0);
 
     vstack! {
-        Text::new("Input").font_size(28.0),
-        Text::new("Input Method").font_size(13.0),
-        Divider::new(),
-
         vstack! {
             Text::new("IME").font_size(14.0),
             hstack! {
@@ -1240,10 +1218,6 @@ fn datetime_page(
     let regions2 = regions.clone();
 
     vstack! {
-        Text::new("Date & Time").font_size(28.0),
-        Text::new("Timezone").font_size(13.0),
-        Divider::new(),
-
         vstack! {
             hstack! {
                 Text::new("Region").font_size(13.0).frame_width(120.0),
@@ -1288,6 +1262,7 @@ impl Application for SettingsApp {
         let app = self.clone();
         let audio_app = self.clone();
         let input_app = self.clone();
+        let navigation_title = self.navigation_title.clone();
         let tz_regions = self.timezone_regions.get();
         let tz_region_idx = self.timezone_region_index.clone();
         let tz_cities = self.timezone_cities.clone();
@@ -1359,10 +1334,23 @@ impl Application for SettingsApp {
                             highlight, border,
                             app.clone()
                         )
+                    })
+                    .on_select({
+                        let title = navigation_title.clone();
+                        move || title.set(String::from("Appearance"))
                     }),
-                    NavigationLink::new("Display", display_page),
-                    NavigationLink::new("Audio", move || audio_page(audio_app.clone())),
-                    NavigationLink::new("Input", move || input_page(input_app.clone())),
+                    NavigationLink::new("Display", display_page).on_select({
+                        let title = navigation_title.clone();
+                        move || title.set(String::from("Display"))
+                    }),
+                    NavigationLink::new("Audio", move || audio_page(audio_app.clone())).on_select({
+                        let title = navigation_title.clone();
+                        move || title.set(String::from("Audio"))
+                    }),
+                    NavigationLink::new("Input", move || input_page(input_app.clone())).on_select({
+                        let title = navigation_title.clone();
+                        move || title.set(String::from("Input"))
+                    }),
                     NavigationLink::new("Date & Time", move || {
                         datetime_page(
                             tz_regions.clone(),
@@ -1370,18 +1358,23 @@ impl Application for SettingsApp {
                             tz_cities.clone(),
                             tz_city_idx.clone(),
                         )
+                    })
+                    .on_select({
+                        let title = navigation_title.clone();
+                        move || title.set(String::from("Date & Time"))
                     }),
                 }
-                .header(|| {
+                .header(move || {
                     HeaderBar::new(
                         hstack! {
-                            IconView::new(Icon::Settings).size(IconSize::Medium),
-                            Text::new("Scarlet Desktop Settings").font_size(14.0),
+                            Spacer::new(),
+                            Text::from_state(navigation_title.clone()).font_size(20.0),
                             Spacer::new(),
                         }
+                        .alignment(Alignment::Center)
                         .padding(10.0),
                     )
-                    .height(44.0)
+                    .height(48.0)
                 })
                 .sidebar_width(150.0)
                 .frame(f32::INFINITY, f32::INFINITY),
