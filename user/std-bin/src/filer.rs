@@ -34,6 +34,7 @@ const APP_ID: &str = "org.scarlet-os.desktop.filer";
 const ROOT_PATH: &str = "/";
 const GRID_COLUMNS: usize = 5;
 const GRID_ROW_HEIGHT: f32 = 146.0;
+const FILE_CELL_WIDTH: f32 = 146.0;
 const FILE_PREVIEW_WIDTH: f32 = 96.0;
 const FILE_PREVIEW_HEIGHT: f32 = 78.0;
 const FILE_NAME_FONT_SIZE: f32 = 13.0;
@@ -304,7 +305,8 @@ impl FilerApp {
             GRID_ROW_HEIGHT,
             move |index, entry, selected| grid_app.file_cell(index, entry, selected),
         )
-        .spacing(10.0);
+        .spacing(10.0)
+        .minimum_cell_width(FILE_CELL_WIDTH);
 
         let picker = self.picker_request.get();
         let title = picker
@@ -467,7 +469,11 @@ fn text_width(text: &str) -> f32 {
 
 #[cfg(test)]
 mod layout_tests {
-    use super::{FILE_NAME_MAX_WIDTH, file_name_label, text_width};
+    use super::{FILE_NAME_MAX_WIDTH, FileEntry, FileKind, FilerApp, file_name_label, text_width};
+    use scarlet_ui::{
+        Application, Color, Event, MouseButton, MouseEvent, NavigationLink, NavigationView,
+        RenderingPipeline, Scene, SceneBuilder, Size, Text, View, Window,
+    };
 
     #[test]
     fn long_file_names_use_two_lines() {
@@ -479,6 +485,251 @@ mod layout_tests {
             lines
                 .iter()
                 .all(|line| text_width(line) <= FILE_NAME_MAX_WIDTH)
+        );
+    }
+
+    #[test]
+    fn renders_all_folder_columns_on_initial_paint() {
+        let app = FilerApp::new();
+        app.entries.set(
+            (0..20)
+                .map(|index| FileEntry {
+                    name: format!("Folder {index}"),
+                    path: format!("/tmp/folder-{index}"),
+                    is_directory: true,
+                    size: 0,
+                    kind: FileKind::Folder,
+                })
+                .collect(),
+        );
+        let page_app = app.clone();
+        let root = Window::new(
+            "Files",
+            NavigationView::new((NavigationLink::new("Files", move || page_app.files_page()),))
+                .sidebar_width(170.0),
+        )
+        .size(Size::new(960.0, 640.0));
+
+        let mut pipeline = RenderingPipeline::new();
+        pipeline.set_root(root.create_element());
+        pipeline.layout_initial();
+        let buffer = pipeline
+            .render_with_damage()
+            .map(|(buffer, _)| buffer)
+            .expect("filer should render");
+
+        let folder_orange = Color::rgb(255, 160, 0).to_bgra();
+        for column in 0..5 {
+            let left = 180 + column * 156;
+            let right = (left + 146).min(buffer.width());
+            let found = (left..right).any(|x| {
+                (0..buffer.height()).any(|y| buffer.get_pixel(x, y) == Some(folder_orange))
+            });
+            assert!(found, "folder column {column} should be painted");
+        }
+    }
+
+    #[test]
+    fn renders_all_folder_columns_after_navigation_switch() {
+        let app = FilerApp::new();
+        app.entries.set(
+            (0..20)
+                .map(|index| FileEntry {
+                    name: format!("Folder {index}"),
+                    path: format!("/tmp/folder-{index}"),
+                    is_directory: true,
+                    size: 0,
+                    kind: FileKind::Folder,
+                })
+                .collect(),
+        );
+        let page_app = app.clone();
+        let root = Window::new(
+            "Files",
+            NavigationView::new((
+                NavigationLink::new("First", || Text::new("First")),
+                NavigationLink::new("Files", move || page_app.files_page()),
+            ))
+            .sidebar_width(170.0),
+        )
+        .size(Size::new(960.0, 640.0));
+
+        let mut pipeline = RenderingPipeline::new();
+        pipeline.set_root(root.create_element());
+        pipeline.layout_initial();
+        pipeline
+            .render_with_damage()
+            .expect("initial page should render");
+        assert!(
+            pipeline.handle_event(&Event::Mouse(MouseEvent::ButtonReleased {
+                button: MouseButton::Left,
+                x: 10,
+                y: 85,
+                click_count: 1,
+            }))
+        );
+        let buffer = pipeline
+            .render_with_damage()
+            .map(|(buffer, _)| buffer)
+            .expect("filer page should render after navigation");
+
+        let folder_orange = Color::rgb(255, 160, 0).to_bgra();
+        for column in 0..5 {
+            let left = 180 + column * 156;
+            let right = (left + 146).min(buffer.width());
+            let found = (left..right).any(|x| {
+                (0..buffer.height()).any(|y| buffer.get_pixel(x, y) == Some(folder_orange))
+            });
+            assert!(
+                found,
+                "folder column {column} should be painted after navigation"
+            );
+        }
+    }
+
+    #[test]
+    fn renders_all_folder_columns_through_application_scene() {
+        let app = FilerApp::new();
+        app.entries.set(
+            (0..20)
+                .map(|index| FileEntry {
+                    name: format!("Folder {index}"),
+                    path: format!("/tmp/folder-{index}"),
+                    is_directory: true,
+                    size: 0,
+                    kind: FileKind::Folder,
+                })
+                .collect(),
+        );
+
+        let mut builder = SceneBuilder::new();
+        app.scenes().build(&mut builder);
+        let declaration = builder
+            .into_declarations()
+            .into_iter()
+            .next()
+            .expect("filer should declare its main window");
+
+        let mut pipeline = RenderingPipeline::new();
+        pipeline.set_root(declaration.view.create_element());
+        let window_info = pipeline.layout_initial();
+        assert_eq!(window_info.size, Size::new(960.0, 640.0));
+        let buffer = pipeline
+            .render_with_damage()
+            .map(|(buffer, _)| buffer)
+            .expect("filer scene should render");
+
+        let folder_orange = Color::rgb(255, 160, 0).to_bgra();
+        for column in 0..5 {
+            let left = 180 + column * 156;
+            let right = (left + 146).min(buffer.width());
+            let found = (left..right).any(|x| {
+                (0..buffer.height()).any(|y| buffer.get_pixel(x, y) == Some(folder_orange))
+            });
+            assert!(
+                found,
+                "folder column {column} should be painted in app scene"
+            );
+        }
+    }
+
+    #[test]
+    fn renders_new_folder_rows_after_entries_change() {
+        let app = FilerApp::new();
+        app.entries.set(
+            (0..5)
+                .map(|index| FileEntry {
+                    name: format!("Folder {index}"),
+                    path: format!("/tmp/folder-{index}"),
+                    is_directory: true,
+                    size: 0,
+                    kind: FileKind::Folder,
+                })
+                .collect(),
+        );
+
+        let mut builder = SceneBuilder::new();
+        app.scenes().build(&mut builder);
+        let declaration = builder
+            .into_declarations()
+            .into_iter()
+            .next()
+            .expect("filer should declare its main window");
+
+        let mut pipeline = RenderingPipeline::new();
+        pipeline.set_root(declaration.view.create_element());
+        pipeline.layout_initial();
+        pipeline
+            .render_with_damage()
+            .expect("initial filer scene should render");
+
+        app.entries.set(
+            (0..20)
+                .map(|index| FileEntry {
+                    name: format!("Folder {index}"),
+                    path: format!("/tmp/folder-{index}"),
+                    is_directory: true,
+                    size: 0,
+                    kind: FileKind::Folder,
+                })
+                .collect(),
+        );
+        let buffer = pipeline
+            .render_with_damage()
+            .map(|(buffer, _)| buffer)
+            .expect("filer scene should repaint after entries change");
+
+        let folder_orange = Color::rgb(255, 160, 0).to_bgra();
+        assert!(
+            (180..buffer.width()).any(|x| {
+                (200..buffer.height()).any(|y| buffer.get_pixel(x, y) == Some(folder_orange))
+            }),
+            "a second folder row should be painted after entries change"
+        );
+    }
+
+    #[test]
+    fn keeps_folder_cells_spaced_when_window_resizes() {
+        let app = FilerApp::new();
+        app.entries.set(
+            (0..10)
+                .map(|index| FileEntry {
+                    name: format!("Folder {index}"),
+                    path: format!("/tmp/folder-{index}"),
+                    is_directory: true,
+                    size: 0,
+                    kind: FileKind::Folder,
+                })
+                .collect(),
+        );
+
+        let mut builder = SceneBuilder::new();
+        app.scenes().build(&mut builder);
+        let declaration = builder
+            .into_declarations()
+            .into_iter()
+            .next()
+            .expect("filer should declare its main window");
+
+        let mut pipeline = RenderingPipeline::new();
+        pipeline.set_root(declaration.view.create_element());
+        pipeline.layout_initial();
+        pipeline
+            .render_with_damage()
+            .expect("initial filer scene should render");
+
+        pipeline.resize(Size::new(500.0, 640.0));
+        let buffer = pipeline
+            .render_with_damage()
+            .map(|(buffer, _)| buffer)
+            .expect("resized filer scene should render");
+
+        let folder_orange = Color::rgb(255, 160, 0).to_bgra();
+        assert!(
+            (180..buffer.width()).any(|x| {
+                (180..buffer.height()).any(|y| buffer.get_pixel(x, y) == Some(folder_orange))
+            }),
+            "resized filer should wrap folders into another row instead of squeezing them"
         );
     }
 }
