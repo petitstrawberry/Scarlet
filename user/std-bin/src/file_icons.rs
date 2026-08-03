@@ -14,8 +14,9 @@ use lyon_tessellation::{
 use scarlet_ui::{Color, Image, VectorImageData, VectorTriangle};
 use svgtypes::{PathParser, PathSegment};
 
-const ICON_THEME_ROOT: &str = "/system/scarlet/share/icons/default";
+const ICON_THEME_ROOT: &str = "/share/icons/default";
 const ICON_THEME_ROOT_ENV: &str = "SCARLET_ICON_THEME_ROOT";
+const DEFAULT_FILE_ICON: &str = "scalable/mimetypes/blank";
 
 static ICON_CACHE: OnceLock<Mutex<HashMap<String, Arc<VectorImageData>>>> = OnceLock::new();
 
@@ -88,12 +89,12 @@ pub(crate) fn icon_for_entry(name: &str, is_directory: bool) -> Image {
             .filter(|extension| !extension.is_empty());
         match extension {
             Some(extension) => format!("scalable/mimetypes/{extension}"),
-            None => String::from("scalable/mimetypes/default"),
+            None => String::from(DEFAULT_FILE_ICON),
         }
     };
 
     let data = load_asset(&relative)
-        .or_else(|| load_asset("scalable/mimetypes/default"))
+        .or_else(|| load_asset(DEFAULT_FILE_ICON))
         .unwrap_or_else(fallback_data);
     Image::from_vector((*data).clone())
 }
@@ -619,6 +620,11 @@ mod tests {
     use super::load_asset;
 
     #[test]
+    fn uses_process_root_for_installed_icon_theme() {
+        assert_eq!(super::ICON_THEME_ROOT, "/share/icons/default");
+    }
+
+    #[test]
     fn loads_mp4_with_css_class_colors() {
         let data = load_asset("scalable/mimetypes/mp4").expect("bundled mp4 icon");
         assert_eq!(data.width(), 72.0);
@@ -631,6 +637,14 @@ mod tests {
     #[test]
     fn loads_folder_from_the_default_places_context() {
         let data = load_asset("scalable/places/folder").expect("bundled folder icon");
+        assert!(!data.triangles().is_empty());
+    }
+
+    #[test]
+    fn loads_blank_as_the_default_file_icon() {
+        let data = load_asset(super::DEFAULT_FILE_ICON).expect("bundled blank icon");
+        assert_eq!(data.width(), 72.0);
+        assert_eq!(data.height(), 96.0);
         assert!(!data.triangles().is_empty());
     }
 
