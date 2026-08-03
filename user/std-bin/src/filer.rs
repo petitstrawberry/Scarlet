@@ -232,10 +232,13 @@ impl FilerApp {
             )
         } else {
             Either::B(
-                FileIconView::new(entry.kind)
-                    .size(IconSize::Pixels(64))
-                    .filled()
-                    .frame(96.0, 78.0),
+                if entry.is_directory {
+                    FileIconView::new(entry.kind)
+                } else {
+                    FileIconView::from_path(entry.path.clone())
+                }
+                .size(IconSize::Pixels(64))
+                .frame(96.0, 78.0),
             )
         };
         let detail = if entry.is_directory {
