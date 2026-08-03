@@ -15,6 +15,8 @@ framebuffer = { path = "../lib/framebuffer", default-features = false, features 
 sgfx = { path = "../lib/sgfx", default-features = false, features = ["std"] }
 httparse = "1.9"
 libm = "0.2"
+lyon_path = "1.0"
+lyon_tessellation = "1.0"
 scarlet-sys = { path = "../lib/scarlet-sys" }
 scarlet-ui-macros = { git = "https://github.com/petitstrawberry/scarlet-ui", package = "scarlet-ui-macros" }
 rust_h264 = { git = "https://github.com/petitstrawberry/rust_h264.git", rev = "a559fe2545fd88def12146dcc06286475b53ead3", default-features = false, features = ["portable-simd"] }
@@ -23,6 +25,7 @@ symphonia-codec-aac = { git = "https://github.com/petitstrawberry/Symphonia.git"
 url = "2.5"
 ratatui = { version = "0.29", default-features = false }
 regex = "1"
+svgtypes = "0.15"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 pulldown-cmark = "0.12"

@@ -5,6 +5,8 @@
 //! switch into picker mode through sbus without embedding picker UI in the
 //! calling application.
 
+mod file_icons;
+
 use std::cmp::Ordering;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -20,11 +22,12 @@ use scarlet_desktop_config::{
 };
 use scarlet_ui::prelude::*;
 use scarlet_ui::{
-    Alignment, Button, Color, ColorPalette, Divider, FileIconKind, FileIconView, GridView,
-    HeaderBar, Icon, IconSize, IconView, Image, ImageFit, NavigationLink, Spacer, hstack,
-    navigation, vstack,
+    Alignment, Button, Color, ColorPalette, Divider, GridView, HeaderBar, Icon, IconSize, IconView,
+    Image, ImageFit, NavigationLink, Spacer, hstack, navigation, vstack,
 };
 use scarlet_ui_macros::View;
+
+use file_icons::{FileKind, icon_for_entry};
 
 const APP_ID: &str = "org.scarlet-os.desktop.filer";
 const ROOT_PATH: &str = "/";
@@ -39,7 +42,7 @@ struct FileEntry {
     path: String,
     is_directory: bool,
     size: u64,
-    kind: FileIconKind,
+    kind: FileKind,
 }
 
 #[derive(Clone)]
@@ -224,20 +227,16 @@ impl FilerApp {
         } else {
             Color::CLEAR
         };
-        let preview = if entry.kind == FileIconKind::Image && !entry.is_directory {
-            Either::A(
-                Image::from_path(entry.path.clone())
-                    .fit_mode(ImageFit::Cover)
-                    .frame(96.0, 78.0),
-            )
-        } else {
-            Either::B(
-                FileIconView::new(entry.kind)
-                    .size(IconSize::Pixels(64))
-                    .filled()
-                    .frame(96.0, 78.0),
-            )
-        };
+        let preview =
+            if entry.kind == FileKind::Image && !entry.is_directory && is_jpeg(&entry.name) {
+                Either::A(
+                    Image::from_path(entry.path.clone())
+                        .fit_mode(ImageFit::Cover)
+                        .frame(96.0, 78.0),
+                )
+            } else {
+                Either::B(icon_for_entry(&entry.name, entry.is_directory).frame(96.0, 78.0))
+            };
         let detail = if entry.is_directory {
             String::from("Folder")
         } else {
@@ -417,9 +416,9 @@ fn read_entries(path: &str, picker: Option<&PickerRequest>) -> std::io::Result<V
         let path = entry.path().to_string_lossy().into_owned();
         entries.push(FileEntry {
             kind: if is_directory {
-                FileIconKind::Folder
+                FileKind::Folder
             } else {
-                FileIconKind::from_path(&name)
+                FileKind::from_path(&name)
             },
             name,
             path,
@@ -454,6 +453,12 @@ fn is_image(name: &str) -> bool {
         ["jpg", "jpeg", "png", "gif", "bmp", "webp"]
             .iter()
             .any(|candidate| extension.eq_ignore_ascii_case(candidate))
+    })
+}
+
+fn is_jpeg(name: &str) -> bool {
+    name.rsplit_once('.').is_some_and(|(_, extension)| {
+        extension.eq_ignore_ascii_case("jpg") || extension.eq_ignore_ascii_case("jpeg")
     })
 }
 
