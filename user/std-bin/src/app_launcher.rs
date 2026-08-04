@@ -443,21 +443,9 @@ fn request_file_manager_window() -> bool {
 
 impl Application for LauncherApp {
     fn init(&mut self) {
-        // Load the initial catalog before the first window is shown. Icons are
-        // resolved and rasterized by the visible GridView cells on demand.
-        let (applications, status) = load_applications();
-        self.applications.set(applications.clone());
-        self.filtered_applications.set(applications.clone());
-        self.selected.set(if applications.is_empty() {
-            None
-        } else {
-            Some(0)
-        });
-        self.status.set(status);
-        self.catalog_revision.update(|revision| {
-            *revision = revision.saturating_add(1);
-        });
-
+        // Do not block application startup or the first window request on
+        // SBUS. The catalog loader fills the state asynchronously; the grid
+        // can be shown immediately and will rebuild when results arrive.
         let loader_app = self.clone();
         thread::spawn(move || catalog_loader(loader_app));
     }
