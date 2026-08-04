@@ -1,23 +1,42 @@
+//! Live task and CPU overview for the Scarlet desktop.
+//!
+//! The task manager deliberately keeps the data path small and synchronous:
+//! the kernel is sampled on a worker thread, the resulting snapshot is sent
+//! through one UI state, and the view only formats already-collected data.
+
 use std::fs;
 use std::thread;
 use std::time::{Duration, Instant};
 
 use scarlet_sys::{Syscall, syscall0, syscall1, syscall2};
 use scarlet_ui::prelude::*;
-use scarlet_ui::{Color, ProgressView, ScrollView, hstack, vstack};
+use scarlet_ui::{
+    Color, Icon, IconSize, IconView, LazyVStack, ProgressView, ScrollView, hstack, vstack,
+};
 use scarlet_ui_macros::View;
+use std::process::ExitCode;
 
 const APP_ID: &str = "org.scarlet-os.desktop.task-manager";
 const APP_TITLE: &str = "Task Manager";
-const SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
-const WINDOW_WIDTH: f32 = 980.0;
-const WINDOW_HEIGHT: f32 = 660.0;
-const UTIL_SCALE: u32 = 1024;
-const MAX_VISIBLE_TASKS: usize = 10;
-const MAX_VISIBLE_CPUS: usize = 8;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+const WINDOW_WIDTH: f32 = 980.0;
+const WINDOW_HEIGHT: f32 = 620.0;
+const HEADER_HEIGHT: f32 = 100.0;
+const PANEL_HEIGHT: f32 = 450.0;
+const CPU_LIST_HEIGHT: f32 = 380.0;
+const TASK_LIST_HEIGHT: f32 = 360.0;
+const CPU_ROW_HEIGHT: f32 = 66.0;
+const TASK_ROW_HEIGHT: f32 = 34.0;
+const SAMPLE_INTERVAL: Duration = Duration::from_millis(750);
+const MAX_TASKS: usize = 8_192;
+const SCHED_UTIL_SCALE: u32 = 1_024;
+
+const CPU_PANEL_WIDTH: f32 = 280.0;
+const TASK_PANEL_WIDTH: f32 = 650.0;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum TaskState {
+    #[default]
     NotInitialized,
     Ready,
     Running,
@@ -28,7 +47,7 @@ enum TaskState {
 }
 
 impl TaskState {
-    fn from_u8(value: u8) -> Self {
+    fn from_raw(value: u8) -> Self {
         match value {
             1 => Self::Ready,
             2 => Self::Running,
@@ -39,24 +58,59 @@ impl TaskState {
             _ => Self::NotInitialized,
         }
     }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Ready => "Ready",
+            Self::Running => "Running",
+            Self::BlockedInterruptible => "Blocked",
+            Self::BlockedUninterruptible => "Blocked",
+            Self::Zombie => "Zombie",
+            Self::Terminated => "Exited",
+            Self::NotInitialized => "Unknown",
+        }
+    }
+
+    fn is_running(self) -> bool {
+        matches!(self, Self::Ready | Self::Running)
+    }
+
+    fn is_sleeping(self) -> bool {
+        matches!(
+            self,
+            Self::BlockedInterruptible | Self::BlockedUninterruptible
+        )
+    }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum TaskType {
+    #[default]
+    Unknown,
     Kernel,
     User,
 }
 
 impl TaskType {
-    fn from_u8(value: u8) -> Self {
+    fn from_raw(value: u8) -> Self {
         match value {
             1 => Self::User,
-            _ => Self::Kernel,
+            0 => Self::Kernel,
+            _ => Self::Unknown,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Kernel => "Kernel",
+            Self::User => "User",
+            Self::Unknown => "Other",
         }
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+/// Raw task information returned by the kernel task-info syscall.
+#[derive(Clone, Copy, Debug)]
 #[repr(C)]
 struct RawTaskInfo {
     pid: usize,
@@ -81,544 +135,9 @@ struct RawTaskInfo {
     sched_deadline: u64,
 }
 
-#[derive(Debug, Clone)]
-struct TaskInfo {
-    pid: usize,
-    state: TaskState,
-    task_type: TaskType,
-    cpu: u8,
-    tgid: usize,
-    name: String,
-    cpu_time_ns: u64,
-    sched_util_avg: u32,
-}
-
-impl RawTaskInfo {
-    fn decode(&self) -> TaskInfo {
-        let end = self
-            .name
-            .iter()
-            .position(|&byte| byte == 0)
-            .unwrap_or(self.name.len());
-        let name = std::str::from_utf8(&self.name[..end])
-            .unwrap_or("<invalid>")
-            .to_string();
-
-        TaskInfo {
-            pid: self.pid,
-            state: TaskState::from_u8(self.state),
-            task_type: TaskType::from_u8(self.task_type),
-            cpu: self.cpu_id,
-            tgid: self.tgid,
-            name,
-            cpu_time_ns: self.cpu_time_ns,
-            sched_util_avg: self.sched_util_avg,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-#[repr(C)]
-struct RawCpuUsageInfo {
-    online_cpus: usize,
-    busy_time_ns: u64,
-    idle_time_ns: u64,
-    total_time_ns: u64,
-    usage_per_mille: u32,
-    _reserved: u32,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct CpuUsageInfo {
-    busy_time_ns: u64,
-    idle_time_ns: u64,
-    usage_per_mille: u32,
-}
-
-#[derive(Clone, Default)]
-struct SchedulerStats {
-    migrations: u64,
-    promotions: u64,
-    demotions: u64,
-    cooldown_skips: u64,
-    work_steals: u64,
-}
-
-#[derive(Clone)]
-struct CpuRow {
-    id: usize,
-    class_name: String,
-    capacity: u32,
-    util_avg: u32,
-    util_min: u32,
-    runnable: u32,
-    cur_freq_khz: u32,
-    target_freq_khz: u32,
-    max_freq_khz: u32,
-}
-
-impl Default for CpuRow {
+impl Default for RawTaskInfo {
     fn default() -> Self {
         Self {
-            id: 0,
-            class_name: String::from("unknown"),
-            capacity: 0,
-            util_avg: 0,
-            util_min: 0,
-            runnable: 0,
-            cur_freq_khz: 0,
-            target_freq_khz: 0,
-            max_freq_khz: 0,
-        }
-    }
-}
-
-#[derive(Clone)]
-struct TaskRow {
-    pid: usize,
-    tgid: usize,
-    cpu: u8,
-    state: TaskState,
-    task_type: TaskType,
-    name: String,
-    cpu_time_ns: u64,
-    cpu_per_mille: u64,
-    util_avg: u32,
-}
-
-#[derive(Clone, Default)]
-struct TaskCounts {
-    total: usize,
-    running: usize,
-    sleeping: usize,
-    stopped: usize,
-    zombie: usize,
-    user: usize,
-    kernel: usize,
-}
-
-#[derive(Clone)]
-struct Snapshot {
-    counts: TaskCounts,
-    busy_per_mille: u64,
-    idle_per_mille: u64,
-    cpus: Vec<CpuRow>,
-    tasks: Vec<TaskRow>,
-    scheduler: SchedulerStats,
-    status: String,
-}
-
-impl Default for Snapshot {
-    fn default() -> Self {
-        Self {
-            counts: TaskCounts::default(),
-            busy_per_mille: 0,
-            idle_per_mille: 1000,
-            cpus: Vec::new(),
-            tasks: Vec::new(),
-            scheduler: SchedulerStats::default(),
-            status: String::from("Collecting scheduler samples..."),
-        }
-    }
-}
-
-#[derive(View, Clone)]
-struct TaskManagerApp {
-    snapshot: State<Snapshot>,
-}
-
-impl TaskManagerApp {
-    fn new() -> Self {
-        Self {
-            snapshot: State::new(StateId::new(1), Snapshot::default()),
-        }
-    }
-}
-
-impl Application for TaskManagerApp {
-    fn scenes(&self) -> impl Scene {
-        let snapshot = self.snapshot.get();
-        WindowGroup::new(
-            "main",
-            Window::new(
-                APP_TITLE,
-                app_content(snapshot).frame(f32::INFINITY, f32::INFINITY),
-            )
-            .app_id(APP_ID)
-            .background_color(bg())
-            .size(Size::new(WINDOW_WIDTH, WINDOW_HEIGHT)),
-        )
-    }
-
-    fn init(&mut self) {
-        start_sampler(self.snapshot.clone());
-    }
-
-    fn debug_logging(&self) -> bool {
-        false
-    }
-}
-
-fn app_content(snapshot: Snapshot) -> impl View + Clone {
-    vstack! {
-        header_view(&snapshot),
-        Spacer::new().frame_height(12.0),
-        hstack! {
-            section_title("CPU Cores"),
-            Spacer::new(),
-            body_text(format!(
-                "migrations {}  promotions {}  demotions {}  skips {}  steals {}",
-                snapshot.scheduler.migrations,
-                snapshot.scheduler.promotions,
-                snapshot.scheduler.demotions,
-                snapshot.scheduler.cooldown_skips,
-                snapshot.scheduler.work_steals,
-            )),
-        },
-        Spacer::new().frame_height(8.0),
-        hstack! {
-            cpu_tile(&snapshot, 0),
-            cpu_tile(&snapshot, 1),
-            cpu_tile(&snapshot, 2),
-            cpu_tile(&snapshot, 3),
-        },
-        hstack! {
-            cpu_tile(&snapshot, 4),
-            cpu_tile(&snapshot, 5),
-            cpu_tile(&snapshot, 6),
-            cpu_tile(&snapshot, 7),
-        },
-        Spacer::new().frame_height(14.0),
-        hstack! {
-            section_title("Tasks"),
-            Spacer::new(),
-            body_text(format!(
-                "showing top {} of {}",
-                snapshot.tasks.len().min(MAX_VISIBLE_TASKS),
-                snapshot.counts.total,
-            )),
-        },
-        table_header(),
-        ScrollView::new(vstack! {
-            task_row(&snapshot, 0),
-            task_row(&snapshot, 1),
-            task_row(&snapshot, 2),
-            task_row(&snapshot, 3),
-            task_row(&snapshot, 4),
-            task_row(&snapshot, 5),
-            task_row(&snapshot, 6),
-            task_row(&snapshot, 7),
-            task_row(&snapshot, 8),
-            task_row(&snapshot, 9),
-        })
-        .frame_height(250.0),
-    }
-    .padding(16.0)
-}
-
-fn header_view(snapshot: &Snapshot) -> impl View + Clone + use<> {
-    vstack! {
-        hstack! {
-            vstack! {
-                Text::new(APP_TITLE)
-                    .font_size(28.0)
-                    .color(text_primary()),
-                Text::new(snapshot.status.clone())
-                    .font_size(12.0)
-                    .color(text_secondary()),
-            },
-            Spacer::new(),
-            vstack! {
-                Text::new(format!(
-                    "CPU {}% busy / {}% idle",
-                    format_percent(snapshot.busy_per_mille),
-                    format_percent(snapshot.idle_per_mille),
-                ))
-                .font_size(14.0)
-                .color(text_primary()),
-                ProgressView::new(progress(snapshot.busy_per_mille, 1000))
-                    .frame_width(220.0),
-            },
-        },
-        Spacer::new().frame_height(10.0),
-        hstack! {
-            summary_cell("total", snapshot.counts.total),
-            summary_cell("running", snapshot.counts.running),
-            summary_cell("sleeping", snapshot.counts.sleeping),
-            summary_cell("stopped", snapshot.counts.stopped),
-            summary_cell("zombie", snapshot.counts.zombie),
-            summary_cell("user", snapshot.counts.user),
-            summary_cell("kernel", snapshot.counts.kernel),
-        },
-    }
-    .padding(14.0)
-    .background(surface())
-}
-
-fn summary_cell(label: &'static str, value: usize) -> impl View + Clone {
-    vstack! {
-        Text::new(value.to_string())
-            .font_size(18.0)
-            .color(text_primary()),
-        Text::new(label)
-            .font_size(11.0)
-            .color(text_secondary()),
-    }
-    .frame_width(92.0)
-}
-
-fn section_title(title: &'static str) -> impl View + Clone {
-    Text::new(title).font_size(18.0).color(text_primary())
-}
-
-fn body_text(text: String) -> impl View + Clone {
-    Text::new(text).font_size(12.0).color(text_secondary())
-}
-
-fn cpu_tile(snapshot: &Snapshot, index: usize) -> impl View + Clone + use<> {
-    let cpu = snapshot.cpus.get(index);
-    let id = cpu.map(|cpu| cpu.id).unwrap_or(index);
-    let class_name = cpu
-        .map(|cpu| cpu.class_name.clone())
-        .unwrap_or_else(|| String::from("offline"));
-    let capacity = cpu.map(|cpu| cpu.capacity).unwrap_or(0);
-    let util_avg = cpu.map(|cpu| cpu.util_avg).unwrap_or(0);
-    let util_min = cpu.map(|cpu| cpu.util_min).unwrap_or(0);
-    let runnable = cpu.map(|cpu| cpu.runnable).unwrap_or(0);
-    let cur_freq = cpu.map(|cpu| cpu.cur_freq_khz).unwrap_or(0);
-    let target_freq = cpu.map(|cpu| cpu.target_freq_khz).unwrap_or(0);
-    let max_freq = cpu.map(|cpu| cpu.max_freq_khz).unwrap_or(0);
-    let title_color = if index < snapshot.cpus.len() {
-        text_primary()
-    } else {
-        muted_text()
-    };
-
-    vstack! {
-        hstack! {
-            Text::new(format!("CPU{}", id))
-                .font_size(15.0)
-                .color(title_color),
-            Spacer::new(),
-            Text::new(class_name)
-                .font_size(11.0)
-                .color(text_secondary()),
-        },
-        ProgressView::new(progress(util_avg as u64, UTIL_SCALE as u64))
-            .frame_width(205.0),
-        hstack! {
-            metric_text(format!("util {}", util_avg)),
-            Spacer::new(),
-            metric_text(format!("min {}", util_min)),
-            Spacer::new(),
-            metric_text(format!("run {}", runnable)),
-        },
-        hstack! {
-            metric_text(format!("cap {}", capacity)),
-            Spacer::new(),
-            metric_text(freq_text(cur_freq, target_freq, max_freq)),
-        },
-    }
-    .padding(10.0)
-    .background(surface())
-    .frame_width(224.0)
-}
-
-fn metric_text(text: String) -> impl View + Clone {
-    Text::new(text).font_size(11.0).color(text_secondary())
-}
-
-fn table_header() -> impl View + Clone {
-    hstack! {
-        header_cell("PID", 54.0),
-        header_cell("CPU", 48.0),
-        header_cell("%CPU", 54.0),
-        header_cell("UTIL", 52.0),
-        header_cell("STAT", 48.0),
-        header_cell("TYPE", 52.0),
-        header_cell("TIME", 82.0),
-        header_cell("TGID", 54.0),
-        header_cell("COMMAND", 300.0),
-    }
-    .padding(8.0)
-    .background(header_bg())
-}
-
-fn header_cell(text: &'static str, width: f32) -> impl View + Clone {
-    Text::new(text)
-        .font_size(11.0)
-        .color(text_secondary())
-        .frame_width(width)
-}
-
-fn task_row(snapshot: &Snapshot, index: usize) -> impl View + Clone + use<> {
-    let task = snapshot.tasks.get(index);
-    let is_visible = task.is_some();
-    let row_bg = if index % 2 == 0 { surface() } else { row_alt() };
-    let text_color = if is_visible {
-        text_primary()
-    } else {
-        muted_text()
-    };
-    let pid = task.map(|task| task.pid.to_string()).unwrap_or_default();
-    let cpu = task
-        .map(|task| format!("CPU{}", task.cpu))
-        .unwrap_or_default();
-    let percent = task
-        .map(|task| format_percent(task.cpu_per_mille))
-        .unwrap_or_default();
-    let util = task
-        .map(|task| task.util_avg.to_string())
-        .unwrap_or_default();
-    let state = task
-        .map(|task| format_stat(task.state).to_string())
-        .unwrap_or_default();
-    let task_type = task
-        .map(|task| format_type(task.task_type).to_string())
-        .unwrap_or_default();
-    let time = task
-        .map(|task| format_time_ns(task.cpu_time_ns))
-        .unwrap_or_default();
-    let tgid = task.map(|task| task.tgid.to_string()).unwrap_or_default();
-    let name = task
-        .map(|task| truncate(&task.name, 34))
-        .unwrap_or_default();
-
-    hstack! {
-        row_cell(pid, 54.0, text_color),
-        row_cell(cpu, 48.0, text_color),
-        row_cell(percent, 54.0, text_color),
-        row_cell(util, 52.0, text_color),
-        row_cell(state, 48.0, text_color),
-        row_cell(task_type, 52.0, text_color),
-        row_cell(time, 82.0, text_color),
-        row_cell(tgid, 54.0, text_color),
-        row_cell(name, 300.0, text_color),
-    }
-    .padding(7.0)
-    .background(row_bg)
-}
-
-fn row_cell(text: String, width: f32, color: Color) -> impl View + Clone {
-    Text::new(text)
-        .font_size(12.0)
-        .color(color)
-        .frame_width(width)
-}
-
-fn start_sampler(snapshot: State<Snapshot>) {
-    thread::spawn(move || {
-        let mut previous_tasks = task_info();
-        let mut previous_cpu = cpu_usage();
-
-        loop {
-            let started_at = Instant::now();
-            thread::sleep(SAMPLE_INTERVAL);
-            let elapsed = started_at.elapsed();
-
-            let current_tasks = task_info();
-            let current_cpu = cpu_usage();
-            let sampled = collect_snapshot(
-                &previous_tasks,
-                &current_tasks,
-                previous_cpu,
-                current_cpu,
-                elapsed,
-            );
-            snapshot.set(sampled);
-
-            previous_tasks = current_tasks;
-            previous_cpu = current_cpu;
-        }
-    });
-}
-
-fn collect_snapshot(
-    previous_tasks: &[TaskInfo],
-    current_tasks: &[TaskInfo],
-    previous_cpu: Option<CpuUsageInfo>,
-    current_cpu: Option<CpuUsageInfo>,
-    elapsed: Duration,
-) -> Snapshot {
-    let (cpus, scheduler, cpuinfo_status) = read_cpuinfo();
-    let (busy_per_mille, idle_per_mille) = cpu_per_mille(previous_cpu, current_cpu);
-    let elapsed_ns = elapsed.as_nanos().max(1);
-
-    let mut rows = Vec::new();
-    let mut counts = TaskCounts::default();
-    for task in current_tasks {
-        if is_idle_task(task) {
-            continue;
-        }
-
-        counts.total += 1;
-        match task.state {
-            TaskState::Running | TaskState::Ready => counts.running += 1,
-            TaskState::BlockedInterruptible | TaskState::BlockedUninterruptible => {
-                counts.sleeping += 1;
-            }
-            TaskState::Terminated => counts.stopped += 1,
-            TaskState::Zombie => counts.zombie += 1,
-            TaskState::NotInitialized => {}
-        }
-        match task.task_type {
-            TaskType::Kernel => counts.kernel += 1,
-            TaskType::User => counts.user += 1,
-        }
-
-        let previous = previous_cpu_time(previous_tasks, task).unwrap_or(task.cpu_time_ns);
-        let delta = task.cpu_time_ns.saturating_sub(previous);
-        let cpu_per_mille = ((delta as u128 * 1000) / elapsed_ns) as u64;
-
-        rows.push(TaskRow {
-            pid: task.pid,
-            tgid: task.tgid,
-            cpu: task.cpu,
-            state: task.state,
-            task_type: task.task_type,
-            name: task.name.clone(),
-            cpu_time_ns: task.cpu_time_ns,
-            cpu_per_mille,
-            util_avg: task.sched_util_avg,
-        });
-    }
-
-    rows.sort_by(|a, b| {
-        b.cpu_per_mille
-            .cmp(&a.cpu_per_mille)
-            .then_with(|| b.util_avg.cmp(&a.util_avg))
-            .then_with(|| a.pid.cmp(&b.pid))
-    });
-
-    if rows.len() > MAX_VISIBLE_TASKS {
-        rows.truncate(MAX_VISIBLE_TASKS);
-    }
-
-    let status = cpuinfo_status.unwrap_or_else(|| {
-        format!(
-            "{} tasks, {} running, {} CPUs visible, {} cooldown skips",
-            counts.total,
-            counts.running,
-            cpus.len().min(MAX_VISIBLE_CPUS),
-            scheduler.cooldown_skips,
-        )
-    });
-
-    Snapshot {
-        counts,
-        busy_per_mille,
-        idle_per_mille,
-        cpus,
-        tasks: rows,
-        scheduler,
-        status,
-    }
-}
-
-fn task_info() -> Vec<TaskInfo> {
-    let total = syscall0(Syscall::GetTaskInfoCount);
-    let mut raw = vec![
-        RawTaskInfo {
             pid: 0,
             ppid: 0,
             state: 0,
@@ -639,275 +158,768 @@ fn task_info() -> Vec<TaskInfo> {
             sched_weight: 0,
             sched_vruntime: 0,
             sched_deadline: 0,
-        };
-        total
-    ];
-    let written = syscall2(
+        }
+    }
+}
+
+/// Raw aggregate CPU usage returned by the kernel CPU-info syscall.
+#[derive(Clone, Copy, Debug, Default)]
+#[repr(C)]
+struct RawCpuUsageInfo {
+    online_cpus: usize,
+    busy_time_ns: u64,
+    idle_time_ns: u64,
+    total_time_ns: u64,
+    usage_per_mille: u32,
+    _reserved: u32,
+}
+
+#[derive(Clone, Debug)]
+struct TaskInfo {
+    pid: usize,
+    tgid: usize,
+    cpu_id: usize,
+    state: TaskState,
+    task_type: TaskType,
+    name: String,
+    cpu_time_ns: u64,
+    sched_util_avg: u32,
+    sched_migration_count: u64,
+}
+
+impl TaskInfo {
+    fn from_raw(raw: RawTaskInfo) -> Self {
+        Self {
+            pid: raw.pid,
+            tgid: raw.tgid,
+            cpu_id: raw.cpu_id as usize,
+            state: TaskState::from_raw(raw.state),
+            task_type: TaskType::from_raw(raw.task_type),
+            name: decode_name(&raw.name),
+            cpu_time_ns: raw.cpu_time_ns,
+            sched_util_avg: raw.sched_util_avg,
+            sched_migration_count: raw.sched_migration_count,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+struct CpuSnapshot {
+    id: usize,
+    class_name: String,
+    capacity: u32,
+    util_avg: u32,
+    util_min: u32,
+    required_capacity: u32,
+    runnable_tasks: u32,
+    current_pid: usize,
+    current_name: String,
+    current_frequency_khz: u32,
+    target_frequency_khz: u32,
+    max_frequency_khz: u32,
+}
+
+#[derive(Clone, Debug, Default)]
+struct TaskCounts {
+    total: usize,
+    running: usize,
+    sleeping: usize,
+    stopped: usize,
+    exited: usize,
+}
+
+#[derive(Clone, Debug)]
+struct TaskRow {
+    pid: usize,
+    tgid: usize,
+    cpu_id: usize,
+    state: TaskState,
+    task_type: TaskType,
+    name: String,
+    cpu_per_mille: u64,
+    sched_util_avg: u32,
+    cpu_time_ns: u64,
+}
+
+#[derive(Clone, Debug, Default)]
+struct SchedulerSummary {
+    runnable: usize,
+}
+
+#[derive(Clone, Debug)]
+struct Snapshot {
+    cpus: Vec<CpuSnapshot>,
+    tasks: Vec<TaskRow>,
+    counts: TaskCounts,
+    scheduler: SchedulerSummary,
+    cpu_busy_per_mille: u32,
+    online_cpus: usize,
+    status: String,
+}
+
+impl Default for Snapshot {
+    fn default() -> Self {
+        Self {
+            cpus: Vec::new(),
+            tasks: Vec::new(),
+            counts: TaskCounts::default(),
+            scheduler: SchedulerSummary::default(),
+            cpu_busy_per_mille: 0,
+            online_cpus: 0,
+            status: String::from("Collecting scheduler data…"),
+        }
+    }
+}
+
+#[derive(View, Clone)]
+struct TaskManagerApp {
+    snapshot: State<Snapshot>,
+}
+
+impl TaskManagerApp {
+    fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl Application for TaskManagerApp {
+    fn init(&mut self) {
+        start_sampler(self.snapshot.clone());
+    }
+
+    fn scenes(&self) -> impl Scene {
+        WindowGroup::new(
+            "main",
+            Window::new(APP_TITLE, task_manager_view(self.snapshot.get()))
+                .app_id(APP_ID)
+                .size(Size::new(WINDOW_WIDTH, WINDOW_HEIGHT))
+                .size_limits(
+                    Size::new(WINDOW_WIDTH, WINDOW_HEIGHT),
+                    Size::new(WINDOW_WIDTH, WINDOW_HEIGHT),
+                )
+                .resizable(false)
+                .background_color(ColorPalette::default().window_background()),
+        )
+    }
+}
+
+fn start_sampler(snapshot: State<Snapshot>) {
+    thread::spawn(move || {
+        let mut previous_tasks = read_tasks();
+        let mut previous_cpu = read_cpu_usage();
+        let mut sample_number: u64 = 0;
+
+        loop {
+            let started = Instant::now();
+            thread::sleep(SAMPLE_INTERVAL);
+
+            let current_tasks = read_tasks();
+            let current_cpu = read_cpu_usage();
+            let cpus = read_cpuinfo();
+            sample_number = sample_number.saturating_add(1);
+
+            let next = build_snapshot(
+                &previous_tasks,
+                &current_tasks,
+                previous_cpu,
+                current_cpu,
+                cpus,
+                sample_number,
+                started.elapsed(),
+            );
+
+            previous_tasks = current_tasks;
+            previous_cpu = current_cpu;
+            snapshot.set(next);
+        }
+    });
+}
+
+fn build_snapshot(
+    previous_tasks: &[TaskInfo],
+    current_tasks: &[TaskInfo],
+    previous_cpu: Option<RawCpuUsageInfo>,
+    current_cpu: Option<RawCpuUsageInfo>,
+    cpus: Vec<CpuSnapshot>,
+    sample_number: u64,
+    elapsed: Duration,
+) -> Snapshot {
+    let elapsed_ns = elapsed.as_nanos().max(1) as u64;
+    let mut counts = TaskCounts::default();
+    let mut rows = Vec::with_capacity(current_tasks.len());
+    let mut migrations: u64 = 0;
+    let mut runnable: usize = 0;
+
+    for task in current_tasks {
+        if is_idle_task(task) {
+            continue;
+        }
+
+        counts.total = counts.total.saturating_add(1);
+        if task.state.is_running() {
+            counts.running = counts.running.saturating_add(1);
+            runnable = runnable.saturating_add(1);
+        } else if task.state.is_sleeping() {
+            counts.sleeping = counts.sleeping.saturating_add(1);
+        }
+        if matches!(task.state, TaskState::Zombie) {
+            counts.stopped = counts.stopped.saturating_add(1);
+        }
+        if matches!(task.state, TaskState::Terminated) {
+            counts.exited = counts.exited.saturating_add(1);
+        }
+
+        migrations = migrations.saturating_add(task.sched_migration_count);
+        rows.push(TaskRow {
+            pid: task.pid,
+            tgid: task.tgid,
+            cpu_id: task.cpu_id,
+            state: task.state,
+            task_type: task.task_type,
+            name: if task.name.is_empty() {
+                String::from("(unnamed)")
+            } else {
+                task.name.clone()
+            },
+            cpu_per_mille: task_cpu_per_mille(task, previous_tasks, elapsed_ns),
+            sched_util_avg: task.sched_util_avg,
+            cpu_time_ns: task.cpu_time_ns,
+        });
+    }
+
+    rows.sort_by(|left, right| {
+        right
+            .cpu_per_mille
+            .cmp(&left.cpu_per_mille)
+            .then_with(|| left.name.cmp(&right.name))
+            .then_with(|| left.pid.cmp(&right.pid))
+    });
+
+    let (online_cpus, cpu_busy_per_mille) = cpu_delta(previous_cpu, current_cpu);
+    let status = if online_cpus == 0 && cpus.is_empty() {
+        String::from("Kernel scheduler data is unavailable")
+    } else {
+        format!(
+            "Sample {} · updated every {} ms · {} migrations · {} zombies · {} exited",
+            sample_number,
+            SAMPLE_INTERVAL.as_millis(),
+            migrations,
+            counts.stopped,
+            counts.exited,
+        )
+    };
+
+    Snapshot {
+        cpus,
+        tasks: rows,
+        counts,
+        scheduler: SchedulerSummary { runnable },
+        cpu_busy_per_mille,
+        online_cpus,
+        status,
+    }
+}
+
+fn task_cpu_per_mille(task: &TaskInfo, previous_tasks: &[TaskInfo], elapsed_ns: u64) -> u64 {
+    let Some(previous) = previous_tasks
+        .iter()
+        .find(|previous| previous.pid == task.pid)
+    else {
+        return 0;
+    };
+
+    let delta = task.cpu_time_ns.saturating_sub(previous.cpu_time_ns);
+    ((delta.saturating_mul(1_000)) / elapsed_ns).min(1_000)
+}
+
+fn cpu_delta(previous: Option<RawCpuUsageInfo>, current: Option<RawCpuUsageInfo>) -> (usize, u32) {
+    let Some(current) = current else {
+        return (0, 0);
+    };
+    let Some(previous) = previous else {
+        return (current.online_cpus, current.usage_per_mille.min(1_000));
+    };
+
+    let busy_delta = current.busy_time_ns.saturating_sub(previous.busy_time_ns);
+    let idle_delta = current.idle_time_ns.saturating_sub(previous.idle_time_ns);
+    let total_delta = busy_delta.saturating_add(idle_delta);
+    if total_delta == 0 {
+        return (current.online_cpus, current.usage_per_mille.min(1_000));
+    }
+
+    (
+        current.online_cpus,
+        ((busy_delta.saturating_mul(1_000)) / total_delta).min(1_000) as u32,
+    )
+}
+
+fn read_tasks() -> Vec<TaskInfo> {
+    let count = syscall0(Syscall::GetTaskInfoCount);
+    if count == usize::MAX || count == 0 {
+        return Vec::new();
+    }
+
+    let count = count.min(MAX_TASKS);
+    let mut raw = vec![RawTaskInfo::default(); count];
+    let returned = syscall2(
         Syscall::GetTaskInfoList,
         raw.as_mut_ptr() as usize,
         raw.len(),
     );
-    if written == usize::MAX {
+    if returned == usize::MAX {
         return Vec::new();
     }
-    raw.truncate(written.min(raw.len()));
-    raw.iter().map(RawTaskInfo::decode).collect()
+
+    raw.truncate(returned.min(raw.len()));
+    raw.into_iter().map(TaskInfo::from_raw).collect()
 }
 
-fn cpu_usage() -> Option<CpuUsageInfo> {
-    let mut raw = RawCpuUsageInfo {
-        online_cpus: 0,
-        busy_time_ns: 0,
-        idle_time_ns: 0,
-        total_time_ns: 0,
-        usage_per_mille: 0,
-        _reserved: 0,
-    };
+fn read_cpu_usage() -> Option<RawCpuUsageInfo> {
+    let mut raw = RawCpuUsageInfo::default();
     let result = syscall1(
         Syscall::GetCpuUsageInfo,
         &mut raw as *mut RawCpuUsageInfo as usize,
     );
-    if result == usize::MAX {
-        None
-    } else {
-        Some(CpuUsageInfo {
-            busy_time_ns: raw.busy_time_ns,
-            idle_time_ns: raw.idle_time_ns,
-            usage_per_mille: raw.usage_per_mille,
-        })
-    }
+    (result != usize::MAX).then_some(raw)
 }
 
-fn previous_cpu_time(tasks: &[TaskInfo], task: &TaskInfo) -> Option<u64> {
-    tasks
+fn read_cpuinfo() -> Vec<CpuSnapshot> {
+    let Ok(contents) = fs::read_to_string("/dev/cpuinfo") else {
+        return Vec::new();
+    };
+
+    let mut cpus = Vec::new();
+    let mut current = CpuSnapshot::default();
+    let mut has_cpu = false;
+
+    for line in contents.lines() {
+        let Some((key, value)) = line.split_once(':') else {
+            continue;
+        };
+        let key = key.trim();
+        let value = value.trim();
+
+        match key {
+            "processor" => {
+                if has_cpu {
+                    cpus.push(current);
+                    current = CpuSnapshot::default();
+                }
+                current.id = parse_usize(value).unwrap_or(cpus.len());
+                has_cpu = true;
+            }
+            "core class" | "class" => current.class_name = value.to_string(),
+            "capacity" | "cpu capacity" => current.capacity = parse_u32(value),
+            "util avg" | "utilization average" => current.util_avg = parse_u32(value),
+            "util min" | "utilization minimum" => current.util_min = parse_u32(value),
+            "required capacity" => current.required_capacity = parse_u32(value),
+            "runnable" | "runnable tasks" => current.runnable_tasks = parse_u32(value),
+            "current pid" => current.current_pid = parse_usize(value).unwrap_or(0),
+            "current task" | "current name" => current.current_name = value.to_string(),
+            "cur freq kHz" | "current frequency" | "current frequency khz" => {
+                current.current_frequency_khz = parse_u32(value)
+            }
+            "target freq kHz"
+            | "policy target kHz"
+            | "target frequency"
+            | "target frequency khz" => current.target_frequency_khz = parse_u32(value),
+            "max freq kHz" | "max frequency" | "max frequency khz" => {
+                current.max_frequency_khz = parse_u32(value)
+            }
+            _ => {}
+        }
+    }
+
+    if has_cpu {
+        cpus.push(current);
+    }
+    cpus.sort_by_key(|cpu| cpu.id);
+    cpus
+}
+
+fn decode_name(bytes: &[u8; 64]) -> String {
+    let length = bytes
         .iter()
-        .find(|previous| {
-            previous.pid == task.pid && previous.tgid == task.tgid && previous.name == task.name
-        })
-        .map(|previous| previous.cpu_time_ns)
+        .position(|byte| *byte == 0)
+        .unwrap_or(bytes.len());
+    String::from_utf8_lossy(&bytes[..length]).trim().to_string()
+}
+
+fn parse_usize(value: &str) -> Option<usize> {
+    value
+        .split_whitespace()
+        .next()
+        .and_then(|number| number.parse().ok())
+}
+
+fn parse_u32(value: &str) -> u32 {
+    parse_usize(value).unwrap_or(0).min(u32::MAX as usize) as u32
 }
 
 fn is_idle_task(task: &TaskInfo) -> bool {
     task.task_type == TaskType::Kernel && task.name.starts_with("idle")
 }
 
-fn cpu_per_mille(before: Option<CpuUsageInfo>, after: Option<CpuUsageInfo>) -> (u64, u64) {
-    let Some(after) = after else {
-        return (0, 1000);
-    };
-    let Some(before) = before else {
-        let busy = after.usage_per_mille as u64;
-        return (busy, 1000u64.saturating_sub(busy));
-    };
+fn task_manager_view(snapshot: Snapshot) -> impl View + Clone + use<> {
+    let palette = ColorPalette::default();
+    let cpus = snapshot.cpus.clone();
+    let tasks = snapshot.tasks.clone();
+    let cpu_count = cpus.len().max(1);
+    let task_count = tasks.len().max(1);
 
-    let busy_delta = after.busy_time_ns.saturating_sub(before.busy_time_ns);
-    let idle_delta = after.idle_time_ns.saturating_sub(before.idle_time_ns);
-    let total_delta = busy_delta.saturating_add(idle_delta);
-    if total_delta == 0 {
-        let busy = after.usage_per_mille as u64;
-        return (busy, 1000u64.saturating_sub(busy));
-    }
+    let cpu_list = ScrollView::new(LazyVStack::new(cpu_count, CPU_ROW_HEIGHT, move |index| {
+        cpu_row(cpus.get(index).cloned())
+    }))
+    .frame(f32::INFINITY, CPU_LIST_HEIGHT);
 
-    let busy = ((busy_delta as u128 * 1000) / total_delta as u128) as u64;
-    (busy, 1000u64.saturating_sub(busy))
-}
+    let task_list = ScrollView::new(LazyVStack::new(task_count, TASK_ROW_HEIGHT, move |index| {
+        task_row(tasks.get(index).cloned(), index)
+    }))
+    .frame(f32::INFINITY, TASK_LIST_HEIGHT);
 
-fn read_cpuinfo() -> (Vec<CpuRow>, SchedulerStats, Option<String>) {
-    let Ok(content) = fs::read_to_string("/dev/cpuinfo") else {
-        return (
-            Vec::new(),
-            SchedulerStats::default(),
-            Some(String::from("/dev/cpuinfo unavailable")),
-        );
-    };
-
-    let mut cpus = Vec::new();
-    let mut stats = SchedulerStats::default();
-    let mut current: Option<CpuRow> = None;
-
-    for line in content.lines() {
-        if let Some(value) = field(line, "scheduler migrations") {
-            stats.migrations = parse_u64(value);
-            continue;
-        }
-        if let Some(value) = field(line, "scheduler promotions") {
-            stats.promotions = parse_u64(value);
-            continue;
-        }
-        if let Some(value) = field(line, "scheduler demotions") {
-            stats.demotions = parse_u64(value);
-            continue;
-        }
-        if let Some(value) = field(line, "scheduler cooldown skips") {
-            stats.cooldown_skips = parse_u64(value);
-            continue;
-        }
-        if let Some(value) = field(line, "scheduler work steals") {
-            stats.work_steals = parse_u64(value);
-            continue;
-        }
-
-        if let Some(value) = field(line, "processor") {
-            if let Some(cpu) = current.take() {
-                cpus.push(cpu);
+    vstack! {
+        header_view(&snapshot),
+        Spacer::new().frame_height(14.0),
+        hstack! {
+            vstack! {
+                panel_title(Icon::ChartBar, "CPU cores", palette.primary()),
+                cpu_list,
             }
-            current = Some(CpuRow {
-                id: parse_usize(value),
-                ..CpuRow::default()
-            });
-            continue;
+            .spacing(10.0)
+            .padding(14.0)
+            .frame(CPU_PANEL_WIDTH, PANEL_HEIGHT)
+            .background(palette.surface())
+            .clip_radius(12.0),
+            vstack! {
+                panel_title(Icon::List, "Processes", palette.primary()),
+                task_table_header(),
+                task_list,
+            }
+            .spacing(8.0)
+            .padding(14.0)
+            .frame(TASK_PANEL_WIDTH, PANEL_HEIGHT)
+            .background(palette.surface())
+            .clip_radius(12.0),
         }
-
-        let Some(cpu) = current.as_mut() else {
-            continue;
-        };
-        if let Some(value) = field(line, "core class") {
-            cpu.class_name = value.to_string();
-        } else if let Some(value) = field(line, "cpu capacity") {
-            cpu.capacity = parse_u32(value);
-        } else if let Some(value) = field(line, "util avg") {
-            cpu.util_avg = parse_u32(value);
-        } else if let Some(value) = field(line, "util min") {
-            cpu.util_min = parse_u32(value);
-        } else if let Some(value) = field(line, "runnable") {
-            cpu.runnable = parse_u32(value);
-        } else if let Some(value) = field(line, "cur freq kHz") {
-            cpu.cur_freq_khz = parse_u32(value);
-        } else if let Some(value) = field(line, "target freq kHz") {
-            cpu.target_freq_khz = parse_u32(value);
-        } else if let Some(value) = field(line, "policy target kHz") {
-            cpu.target_freq_khz = parse_u32(value);
-        } else if let Some(value) = field(line, "max freq kHz") {
-            cpu.max_freq_khz = parse_u32(value);
-        }
+        .spacing(14.0),
     }
-
-    if let Some(cpu) = current {
-        cpus.push(cpu);
-    }
-    cpus.sort_by(|a, b| a.id.cmp(&b.id));
-
-    (cpus, stats, None)
+    .padding(18.0)
+    .frame(WINDOW_WIDTH, WINDOW_HEIGHT)
+    .background(palette.window_background())
 }
 
-fn field<'a>(line: &'a str, expected: &str) -> Option<&'a str> {
-    let (key, value) = line.split_once(':')?;
-    if key.trim() == expected {
-        Some(value.trim())
+fn header_view(snapshot: &Snapshot) -> impl View + Clone + use<> {
+    let palette = ColorPalette::default();
+    let cpu_percent = format_percent(snapshot.cpu_busy_per_mille);
+    let process_count = snapshot.counts.total.to_string();
+    let running_count = snapshot.counts.running.to_string();
+    let sleeping_count = snapshot.counts.sleeping.to_string();
+    let core_count = snapshot.online_cpus.to_string();
+
+    vstack! {
+        hstack! {
+            IconView::new(Icon::ChartBar)
+                .size(IconSize::Large)
+                .color(palette.primary()),
+            vstack! {
+                Text::new(APP_TITLE)
+                    .font_size(24.0)
+                    .color(palette.text_primary()),
+                Text::new(snapshot.status.clone())
+                    .font_size(12.0)
+                    .color(palette.text_secondary()),
+            }
+            .spacing(3.0),
+            Spacer::new(),
+            vstack! {
+                Text::new(format!("{}% CPU", cpu_percent))
+                    .font_size(20.0)
+                    .color(palette.text_primary()),
+                ProgressView::new(snapshot.cpu_busy_per_mille as f32 / 1_000.0)
+                    .frame_width(150.0),
+            }
+            .spacing(6.0),
+        }
+        .spacing(12.0),
+        hstack! {
+            summary_card("PROCESSES", process_count, palette.info()),
+            summary_card("RUNNING", running_count, palette.success()),
+            summary_card("SLEEPING", sleeping_count, palette.secondary()),
+            summary_card("ONLINE", core_count, palette.primary()),
+            summary_card(
+                "RUNNABLE",
+                snapshot.scheduler.runnable.to_string(),
+                palette.warning(),
+            ),
+        }
+        .spacing(8.0),
+    }
+    .spacing(12.0)
+    .padding(14.0)
+    .frame(f32::INFINITY, HEADER_HEIGHT)
+    .background(palette.surface())
+    .clip_radius(12.0)
+}
+
+fn summary_card(label: &'static str, value: String, accent: Color) -> impl View + Clone + use<> {
+    vstack! {
+        Text::new(label)
+            .font_size(10.0)
+            .color(ColorPalette::default().text_secondary()),
+        Text::new(value)
+            .font_size(17.0)
+            .color(accent),
+    }
+    .spacing(2.0)
+    .padding(7.0)
+    .frame_width(104.0)
+    .background(ColorPalette::default().surface_variant())
+    .clip_radius(8.0)
+}
+
+fn panel_title(icon: Icon, title: &'static str, color: Color) -> impl View + Clone + use<> {
+    hstack! {
+        IconView::new(icon)
+            .size(IconSize::Medium)
+            .color(color),
+        Text::new(title)
+            .font_size(16.0)
+            .color(ColorPalette::default().text_primary()),
+        Spacer::new(),
+    }
+    .spacing(8.0)
+    .frame_height(24.0)
+}
+
+fn cpu_row(cpu: Option<CpuSnapshot>) -> impl View + Clone + use<> {
+    let palette = ColorPalette::default();
+    let available = cpu.is_some();
+    let cpu = cpu.unwrap_or_default();
+    let label = if available {
+        format!("CPU {}", cpu.id)
     } else {
-        None
+        String::from("CPU data unavailable")
+    };
+    let class_name = if cpu.class_name.is_empty() {
+        String::from("unknown class")
+    } else {
+        cpu.class_name.clone()
+    };
+    let utilization = cpu.util_avg.min(SCHED_UTIL_SCALE) as f32 / SCHED_UTIL_SCALE as f32;
+    let utilization_text = format_percent(util_to_per_mille(cpu.util_avg));
+    let frequency = if cpu.current_frequency_khz > 0 || cpu.target_frequency_khz > 0 {
+        format_frequency(
+            cpu.current_frequency_khz,
+            cpu.target_frequency_khz,
+            cpu.max_frequency_khz,
+        )
+    } else {
+        String::from("—")
+    };
+    let current = if cpu.current_pid > 0 {
+        format!("{} · {}", cpu.current_pid, truncate(&cpu.current_name, 20))
+    } else {
+        String::from("No current task")
+    };
+
+    vstack! {
+        hstack! {
+            Text::new(label)
+                .font_size(13.0)
+                .color(palette.text_primary()),
+            Text::new(class_name)
+                .font_size(10.0)
+                .color(palette.text_secondary()),
+            Spacer::new(),
+            Text::new(format!("{}%", utilization_text))
+                .font_size(12.0)
+                .color(palette.primary()),
+        },
+        ProgressView::new(utilization),
+        hstack! {
+            Text::new(current)
+                .font_size(10.0)
+                .color(palette.text_secondary()),
+            Spacer::new(),
+            Text::new(frequency)
+                .font_size(10.0)
+                .color(palette.text_secondary()),
+        },
     }
+    .spacing(4.0)
+    .padding(8.0)
+    .frame(f32::INFINITY, CPU_ROW_HEIGHT)
+    .background(palette.surface_variant())
+    .clip_radius(8.0)
 }
 
-fn parse_u32(value: &str) -> u32 {
-    value.parse::<u32>().unwrap_or(0)
-}
-
-fn parse_u64(value: &str) -> u64 {
-    value.parse::<u64>().unwrap_or(0)
-}
-
-fn parse_usize(value: &str) -> usize {
-    value.parse::<usize>().unwrap_or(0)
-}
-
-fn progress(value: u64, max: u64) -> f32 {
-    if max == 0 {
-        return 0.0;
+fn task_table_header() -> impl View + Clone + use<> {
+    let palette = ColorPalette::default();
+    hstack! {
+        table_cell(String::from("PID"), 48.0, palette.text_secondary()),
+        table_cell(String::from("CPU"), 44.0, palette.text_secondary()),
+        table_cell(String::from("CPU%"), 52.0, palette.text_secondary()),
+        table_cell(String::from("UTIL"), 48.0, palette.text_secondary()),
+        table_cell(String::from("STATE"), 55.0, palette.text_secondary()),
+        table_cell(String::from("TYPE"), 50.0, palette.text_secondary()),
+        table_cell(String::from("TIME"), 78.0, palette.text_secondary()),
+        table_cell(String::from("COMMAND"), 245.0, palette.text_secondary()),
     }
-    ((value.min(max) as f32) / max as f32).clamp(0.0, 1.0)
+    .padding(6.0)
+    .frame_height(28.0)
+    .background(palette.surface_variant())
+    .clip_radius(6.0)
 }
 
-fn format_stat(state: TaskState) -> &'static str {
-    match state {
-        TaskState::Running => "R",
-        TaskState::Ready => "R<",
-        TaskState::BlockedInterruptible => "S",
-        TaskState::BlockedUninterruptible => "D",
-        TaskState::Zombie => "Z",
-        TaskState::Terminated => "T",
-        TaskState::NotInitialized => "?",
+fn task_row(task: Option<TaskRow>, index: usize) -> impl View + Clone + use<> {
+    let palette = ColorPalette::default();
+    let (pid, cpu, cpu_percent, util, state, task_type, time, command) = match task {
+        Some(task) => (
+            task.pid.to_string(),
+            format!("{}", task.cpu_id),
+            format_percent(task.cpu_per_mille as u32),
+            format_percent(util_to_per_mille(task.sched_util_avg)),
+            task.state.label().to_string(),
+            task.task_type.label().to_string(),
+            format_duration(task.cpu_time_ns),
+            format!("{}  ({})", truncate(&task.name, 28), task.tgid),
+        ),
+        None => (
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+            String::from("No tasks"),
+            String::new(),
+            String::new(),
+            String::new(),
+        ),
+    };
+    let row_background = if index % 2 == 0 {
+        palette.background_secondary()
+    } else {
+        palette.surface_variant()
+    };
+
+    hstack! {
+        table_cell(pid, 48.0, palette.text_primary()),
+        table_cell(cpu, 44.0, palette.text_secondary()),
+        table_cell(cpu_percent, 52.0, palette.primary()),
+        table_cell(util, 48.0, palette.text_secondary()),
+        table_cell(state, 55.0, palette.text_primary()),
+        table_cell(task_type, 50.0, palette.text_secondary()),
+        table_cell(time, 78.0, palette.text_secondary()),
+        table_cell(command, 245.0, palette.text_primary()),
     }
+    .padding(6.0)
+    .frame(f32::INFINITY, TASK_ROW_HEIGHT)
+    .background(row_background)
 }
 
-fn format_type(task_type: TaskType) -> &'static str {
-    match task_type {
-        TaskType::Kernel => "K",
-        TaskType::User => "U",
-    }
+fn table_cell(value: String, width: f32, color: Color) -> impl View + Clone + use<> {
+    Text::new(value)
+        .font_size(11.0)
+        .color(color)
+        .frame_width(width)
 }
 
-fn format_percent(per_mille: u64) -> String {
+fn format_percent(per_mille: u32) -> String {
     format!("{}.{:01}", per_mille / 10, per_mille % 10)
 }
 
-fn format_time_ns(ns: u64) -> String {
-    let total_ms = ns / 1_000_000;
-    let ms = total_ms % 1000;
-    let total_secs = total_ms / 1000;
-    let secs = total_secs % 60;
-    let mins = (total_secs / 60) % 60;
-    let hours = total_secs / 3600;
+fn util_to_per_mille(util: u32) -> u32 {
+    ((util.min(SCHED_UTIL_SCALE) as u64 * 1_000) / SCHED_UTIL_SCALE as u64) as u32
+}
 
-    if hours > 0 {
-        format!("{}:{:02}:{:02}", hours, mins, secs)
+fn format_frequency(current_khz: u32, target_khz: u32, max_khz: u32) -> String {
+    let current = format_frequency_value(current_khz);
+    let target = format_frequency_value(target_khz);
+    if max_khz > 0 {
+        format!(
+            "{} → {} / {}",
+            current,
+            target,
+            format_frequency_value(max_khz)
+        )
     } else {
-        format!("{:02}:{:02}.{:03}", mins, secs, ms)
+        format!("{} → {}", current, target)
     }
 }
 
-fn freq_text(cur: u32, target: u32, max: u32) -> String {
-    if max == 0 {
-        return String::from("freq n/a");
+fn format_frequency_value(khz: u32) -> String {
+    if khz >= 1_000_000 {
+        format!("{}.{:02} GHz", khz / 1_000_000, (khz % 1_000_000) / 10_000)
+    } else if khz >= 1_000 {
+        format!("{}.{:02} MHz", khz / 1_000, (khz % 1_000) / 10)
+    } else {
+        format!("{} kHz", khz)
     }
-    format!("{} -> {} MHz", cur / 1000, target / 1000)
+}
+
+fn format_duration(nanoseconds: u64) -> String {
+    let total_milliseconds = nanoseconds / 1_000_000;
+    let milliseconds = total_milliseconds % 1_000;
+    let total_seconds = total_milliseconds / 1_000;
+    let seconds = total_seconds % 60;
+    let minutes = (total_seconds / 60) % 60;
+    let hours = total_seconds / 3_600;
+    if hours > 0 {
+        format!("{}:{:02}:{:02}", hours, minutes, seconds)
+    } else {
+        format!("{:02}:{:02}.{:03}", minutes, seconds, milliseconds)
+    }
 }
 
 fn truncate(value: &str, max_chars: usize) -> String {
-    if value.chars().count() <= max_chars {
-        return value.to_string();
+    let mut result = value.chars().take(max_chars).collect::<String>();
+    if value.chars().count() > max_chars {
+        result.push('…');
+    }
+    result
+}
+
+fn main() -> ExitCode {
+    println!("Starting Scarlet Task Manager...");
+    let _ = TaskManagerApp::new().run();
+    ExitCode::SUCCESS
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decodes_task_names_without_trailing_nul_bytes() {
+        let mut name = [0; 64];
+        name[..4].copy_from_slice(b"init");
+        assert_eq!(decode_name(&name), "init");
     }
 
-    let mut output = String::new();
-    for ch in value.chars().take(max_chars.saturating_sub(1)) {
-        output.push(ch);
+    #[test]
+    fn formats_percent_as_one_decimal_place() {
+        assert_eq!(format_percent(0), "0.0");
+        assert_eq!(format_percent(375), "37.5");
+        assert_eq!(format_percent(1_000), "100.0");
     }
-    output.push_str("...");
-    output
-}
 
-fn bg() -> Color {
-    Color::rgb(244, 246, 248)
-}
-
-fn surface() -> Color {
-    Color::rgb(255, 255, 255)
-}
-
-fn row_alt() -> Color {
-    Color::rgb(249, 251, 253)
-}
-
-fn header_bg() -> Color {
-    Color::rgb(235, 239, 244)
-}
-
-fn text_primary() -> Color {
-    Color::rgb(28, 34, 42)
-}
-
-fn text_secondary() -> Color {
-    Color::rgb(96, 106, 118)
-}
-
-fn muted_text() -> Color {
-    Color::rgb(156, 164, 174)
-}
-
-fn main() {
-    println!("[task_manager] starting");
-    let mut app = TaskManagerApp::new();
-    if let Err(error) = app.run() {
-        println!("[task_manager] error: {}", error);
+    #[test]
+    fn computes_cpu_delta_from_busy_and_idle_time() {
+        let previous = RawCpuUsageInfo {
+            online_cpus: 4,
+            busy_time_ns: 50,
+            idle_time_ns: 50,
+            total_time_ns: 100,
+            usage_per_mille: 500,
+            _reserved: 0,
+        };
+        let current = RawCpuUsageInfo {
+            online_cpus: 4,
+            busy_time_ns: 110,
+            idle_time_ns: 90,
+            total_time_ns: 200,
+            usage_per_mille: 550,
+            _reserved: 0,
+        };
+        assert_eq!(cpu_delta(Some(previous), Some(current)), (4, 600));
     }
 }
