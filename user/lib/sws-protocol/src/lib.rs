@@ -61,6 +61,8 @@ pub mod error_codes {
     pub const SGFX_BUFFER_BUSY: u32 = 104;
     /// SWS could not import the transferred GPU image capability.
     pub const SGFX_IMPORT_FAILED: u32 = 105;
+    /// The requested activation did not originate from the focused window.
+    pub const ACTIVATION_DENIED: u32 = 106;
 }
 
 /// Message type IDs (client -> server).
@@ -107,6 +109,9 @@ pub mod client_msg {
     pub const REGISTER_SGFX_BUFFER: u32 = 33;
     pub const COMMIT_SGFX_FRAME: u32 = 34;
     pub const DESTROY_SGFX_BUFFER: u32 = 35;
+
+    // Application activation (38-39)
+    pub const REQUEST_ACTIVATION_TOKEN: u32 = 38;
 
     // Text input client API messages (200-219)
     pub const TEXT_INPUT_CREATE: u32 = 200;
@@ -165,6 +170,7 @@ pub mod server_msg {
     pub const SGFX_BUFFER_RELEASED: u32 = 28;
     pub const SGFX_BACKEND_LOST: u32 = 29;
     pub const SGFX_BUFFER_DESTROYED: u32 = 30;
+    pub const ACTIVATION_TOKEN: u32 = 31;
 
     // Text input client events (200-219)
     pub const TEXT_INPUT_CREATED: u32 = 200;
@@ -191,6 +197,9 @@ pub const TEXT_INPUT_MAX_BYTES: usize = 1024;
 
 /// Maximum bytes used for binary preedit span payloads.
 pub const TEXT_INPUT_PREEDIT_SPANS_MAX_BYTES: usize = 512;
+
+/// Maximum UTF-8 bytes carried by an opaque SWS activation token.
+pub const ACTIVATION_TOKEN_MAX_BYTES: usize = 128;
 
 /// IME service capabilities advertised by `IME_REGISTER`.
 pub mod ime_capabilities {
@@ -687,6 +696,7 @@ pub enum ClientMessageRef<'a> {
         focus_on_create: bool,
         active_on_focus: bool,
         initial_position: WindowPlacement,
+        activation_token: Option<&'a [u8]>,
     },
     DestroyWindow {
         window_id: u32,
@@ -839,6 +849,12 @@ pub enum ClientMessageRef<'a> {
 
     /// Get list of all windows
     GetWindowList {},
+
+    /// Request an opaque token for activating a newly launched application.
+    RequestActivationToken {
+        source_window_id: u32,
+        target_app_id: &'a [u8],
+    },
 
     /// Query protocol version and optional server capabilities.
     GetCapabilities {},
@@ -1195,6 +1211,11 @@ pub enum ServerMessage {
         generation: u32,
         compositor_epoch: u32,
     },
+    /// Opaque token issued for one application activation.
+    ActivationToken {
+        token: [u8; ACTIVATION_TOKEN_MAX_BYTES],
+        token_len: u32,
+    },
     /// Response to GET_WINDOW_LIST request
     /// Contains a serialized list of windows
     WindowList,
@@ -1304,6 +1325,7 @@ pub fn parse_client_message<'a>(
                 && payload.len() != offset + 24
                 && payload.len() != offset + 32
                 && payload.len() != offset + 36
+                && payload.len() < offset + 40
             {
                 return Err(ProtocolError::MalformedPayload);
             }
@@ -1334,6 +1356,7 @@ pub fn parse_client_message<'a>(
                 || payload.len() == offset + 24
                 || payload.len() == offset + 32
                 || payload.len() == offset + 36
+                || payload.len() >= offset + 40
             {
                 u32::from_le_bytes([
                     payload[offset + 12],
@@ -1349,6 +1372,7 @@ pub fn parse_client_message<'a>(
             if payload.len() == offset + 24
                 || payload.len() == offset + 32
                 || payload.len() == offset + 36
+                || payload.len() >= offset + 40
             {
                 focus_on_create = u32::from_le_bytes([
                     payload[offset + 16],
@@ -1377,7 +1401,7 @@ pub fn parse_client_message<'a>(
                     payload[offset + 31],
                 ]);
                 WindowPlacement::Absolute { x, y }
-            } else if payload.len() == offset + 36 {
+            } else if payload.len() == offset + 36 || payload.len() >= offset + 40 {
                 let placement = u32::from_le_bytes([
                     payload[offset + 24],
                     payload[offset + 25],
@@ -1405,6 +1429,18 @@ pub fn parse_client_message<'a>(
             } else {
                 WindowPlacement::Default
             };
+            let activation_token = if payload.len() >= offset + 40 {
+                let token_len = read_u32(payload, offset + 36)? as usize;
+                if token_len == 0
+                    || token_len > ACTIVATION_TOKEN_MAX_BYTES
+                    || payload.len() != offset + 40 + token_len
+                {
+                    return Err(ProtocolError::MalformedPayload);
+                }
+                Some(&payload[offset + 40..])
+            } else {
+                None
+            };
             Ok(ClientMessageRef::CreateWindow {
                 app_id,
                 app_name,
@@ -1416,6 +1452,7 @@ pub fn parse_client_message<'a>(
                 focus_on_create,
                 active_on_focus,
                 initial_position,
+                activation_token,
             })
         }
         client_msg::DESTROY_WINDOW => {
@@ -1686,6 +1723,20 @@ pub fn parse_client_message<'a>(
                 return Err(ProtocolError::MalformedPayload);
             }
             Ok(ClientMessageRef::GetWindowList {})
+        }
+        client_msg::REQUEST_ACTIVATION_TOKEN => {
+            if payload.len() < 8 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            let source_window_id = read_u32(payload, 0)?;
+            let target_app_id_len = read_u32(payload, 4)? as usize;
+            if target_app_id_len == 0 || payload.len() != 8 + target_app_id_len {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            Ok(ClientMessageRef::RequestActivationToken {
+                source_window_id,
+                target_app_id: &payload[8..],
+            })
         }
         client_msg::GET_CAPABILITIES => {
             if !payload.is_empty() {
@@ -2460,6 +2511,14 @@ pub fn parse_server_message(msg_type: u32, payload: &[u8]) -> Result<ServerMessa
                 compositor_epoch,
             })
         }
+        server_msg::ACTIVATION_TOKEN => {
+            let token = read_len_prefixed_bytes(payload, 0, ACTIVATION_TOKEN_MAX_BYTES)?;
+            if token.is_empty() {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            let (token, token_len) = copy_bounded(token)?;
+            Ok(ServerMessage::ActivationToken { token, token_len })
+        }
         server_msg::WINDOW_LIST => {
             // Window list payload is variable length, just validate it's not empty
             if payload.is_empty() {
@@ -2909,6 +2968,98 @@ pub fn payload_create_window_with_placement(
     payload.extend_from_slice(&placement.to_le_bytes());
     payload.extend_from_slice(&initial_x.to_le_bytes());
     payload.extend_from_slice(&initial_y.to_le_bytes());
+    payload
+}
+
+/// Build a `CREATE_WINDOW` payload carrying an activation token.
+///
+/// The token is opaque to the client and is consumed by SWS when the first
+/// matching normal toplevel is created.
+///
+/// # Arguments
+///
+/// * `app_id` - Stable application identifier.
+/// * `app_name` - Human-readable application name.
+/// * `menu_titles` - Serialized application menu titles.
+/// * `width` - Initial buffer width.
+/// * `height` - Initial buffer height.
+/// * `window_type` - SWS window role.
+/// * `resizable` - Whether interactive resize is permitted.
+/// * `focus_on_create` - Whether the new window normally requests focus.
+/// * `active_on_focus` - Whether focus activates the application.
+/// * `placement` - Initial placement hint.
+/// * `initial_x` - Absolute horizontal position when requested.
+/// * `initial_y` - Absolute vertical position when requested.
+/// * `activation_token` - Opaque token issued by SWS.
+///
+/// # Returns
+///
+/// Serialized `CREATE_WINDOW` payload.
+pub fn payload_create_window_with_placement_and_activation_token(
+    app_id: &[u8],
+    app_name: &[u8],
+    menu_titles: &[u8],
+    width: u32,
+    height: u32,
+    window_type: u32,
+    resizable: bool,
+    focus_on_create: bool,
+    active_on_focus: bool,
+    placement: u32,
+    initial_x: i32,
+    initial_y: i32,
+    activation_token: &[u8],
+) -> Vec<u8> {
+    let mut payload = payload_create_window_with_placement(
+        app_id,
+        app_name,
+        menu_titles,
+        width,
+        height,
+        window_type,
+        resizable,
+        focus_on_create,
+        active_on_focus,
+        placement,
+        initial_x,
+        initial_y,
+    );
+    payload.extend_from_slice(&(activation_token.len() as u32).to_le_bytes());
+    payload.extend_from_slice(activation_token);
+    payload
+}
+
+/// Build a request for an opaque application activation token.
+///
+/// # Arguments
+///
+/// * `source_window_id` - Focused window initiating the activation.
+/// * `target_app_id` - Application identifier expected on the target toplevel.
+///
+/// # Returns
+///
+/// Serialized activation-token request payload.
+pub fn payload_request_activation_token(source_window_id: u32, target_app_id: &[u8]) -> Vec<u8> {
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&source_window_id.to_le_bytes());
+    payload.extend_from_slice(&(target_app_id.len() as u32).to_le_bytes());
+    payload.extend_from_slice(target_app_id);
+    payload
+}
+
+/// Build an activation-token response payload.
+///
+/// # Arguments
+///
+/// * `token` - Opaque token bytes generated by SWS.
+///
+/// # Returns
+///
+/// Length-prefixed activation-token response payload.
+pub fn payload_activation_token(token: &[u8]) -> Vec<u8> {
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&(token.len() as u32).to_le_bytes());
+    payload.extend_from_slice(token);
     payload
 }
 
@@ -4065,8 +4216,10 @@ pub fn payload_set_window_has_alpha_content(window_id: u32, has_alpha: bool) -> 
 #[cfg(all(test, feature = "std"))]
 mod tests {
     use super::{
-        ClientMessageRef, WindowPlacement, client_msg, parse_client_message,
-        payload_create_window_with_placement, payload_create_window_with_position,
+        ClientMessageRef, ServerMessage, WindowPlacement, client_msg, parse_client_message,
+        parse_server_message, payload_activation_token, payload_create_window_with_placement,
+        payload_create_window_with_placement_and_activation_token,
+        payload_create_window_with_position, payload_request_activation_token, server_msg,
         window_placement,
     };
 
@@ -4131,5 +4284,65 @@ mod tests {
             initial_position,
             WindowPlacement::Absolute { x: -20, y: 30 }
         );
+    }
+
+    #[test]
+    fn create_window_preserves_activation_token() {
+        let payload = payload_create_window_with_placement_and_activation_token(
+            b"org.example.app",
+            b"Example",
+            b"",
+            640,
+            480,
+            0,
+            true,
+            true,
+            true,
+            window_placement::DEFAULT,
+            0,
+            0,
+            b"sws-token",
+        );
+
+        let ClientMessageRef::CreateWindow {
+            activation_token,
+            initial_position,
+            ..
+        } = parse_client_message(client_msg::CREATE_WINDOW, &payload).unwrap()
+        else {
+            panic!("expected CREATE_WINDOW");
+        };
+
+        assert_eq!(activation_token, Some(b"sws-token".as_slice()));
+        assert_eq!(initial_position, WindowPlacement::Default);
+    }
+
+    #[test]
+    fn activation_token_request_preserves_source_and_target() {
+        let payload = payload_request_activation_token(42, b"org.example.target");
+
+        let ClientMessageRef::RequestActivationToken {
+            source_window_id,
+            target_app_id,
+        } = parse_client_message(client_msg::REQUEST_ACTIVATION_TOKEN, &payload).unwrap()
+        else {
+            panic!("expected REQUEST_ACTIVATION_TOKEN");
+        };
+
+        assert_eq!(source_window_id, 42);
+        assert_eq!(target_app_id, b"org.example.target");
+    }
+
+    #[test]
+    fn activation_token_response_is_opaque() {
+        let payload = payload_activation_token(b"sws-token");
+
+        let ServerMessage::ActivationToken { token, token_len } =
+            parse_server_message(server_msg::ACTIVATION_TOKEN, &payload).unwrap()
+        else {
+            panic!("expected ACTIVATION_TOKEN");
+        };
+
+        assert_eq!(&token[..token_len as usize], b"sws-token");
     }
 }

@@ -533,6 +533,8 @@ pub struct Compositor {
     ime_toggle_bindings: Vec<KeyBinding>,
     ime_trigger_key_down: Option<u16>,
     ime_popup_windows: Vec<ImePopupWindow>,
+    next_activation_token_serial: u64,
+    activation_tokens: Vec<ActivationRecord>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -567,6 +569,19 @@ struct ResizeDragState {
 const RESIZE_GRIP_PX: i32 = 8;
 const MIN_WINDOW_WIDTH: u32 = 64;
 const MIN_WINDOW_HEIGHT: u32 = 64;
+const ACTIVATION_TOKEN_TTL_NS: u64 = 10_000_000_000;
+const MAX_PENDING_ACTIVATION_TOKENS: usize = 64;
+const DEFAULT_WINDOW_INSET: i64 = 32;
+const DEFAULT_WINDOW_CASCADE: i64 = 28;
+
+#[derive(Debug, Clone)]
+struct ActivationRecord {
+    token: String,
+    source_window_id: u32,
+    source_app_id: Vec<u8>,
+    target_app_id: Vec<u8>,
+    created_at_ns: u64,
+}
 
 impl Compositor {
     /// Create a new compositor
@@ -710,6 +725,8 @@ impl Compositor {
             ime_toggle_bindings: sws_config.ime_toggle_bindings,
             ime_trigger_key_down: None,
             ime_popup_windows: Vec::new(),
+            next_activation_token_serial: 1,
+            activation_tokens: Vec::new(),
         })
     }
 
@@ -3458,45 +3475,155 @@ impl Compositor {
             .is_some_and(|window| window.owner_client_id == Some(client_id))
     }
 
+    fn prune_expired_activation_tokens(&mut self, now_ns: u64) {
+        self.activation_tokens.retain(|record| {
+            now_ns.saturating_sub(record.created_at_ns) <= ACTIVATION_TOKEN_TTL_NS
+        });
+    }
+
+    fn issue_activation_token(
+        &mut self,
+        source_window_id: u32,
+        target_app_id: Vec<u8>,
+    ) -> Option<String> {
+        if target_app_id.is_empty()
+            || self.window_manager.get_focused_window_id() != Some(source_window_id)
+        {
+            return None;
+        }
+
+        let source_app_id = {
+            let source = self.window_manager.get_window(source_window_id)?;
+            if !source.visible || source.minimized {
+                return None;
+            }
+            source.app_id.clone().unwrap_or_default()
+        };
+
+        let now_ns = monotonic_time_ns();
+        self.prune_expired_activation_tokens(now_ns);
+        if self.activation_tokens.len() >= MAX_PENDING_ACTIVATION_TOKENS {
+            self.activation_tokens.remove(0);
+        }
+
+        let serial = self.next_activation_token_serial;
+        self.next_activation_token_serial = self.next_activation_token_serial.wrapping_add(1);
+        if self.next_activation_token_serial == 0 {
+            self.next_activation_token_serial = 1;
+        }
+        let token = std::format!("sws-{:016x}-{:016x}", now_ns, serial);
+        self.activation_tokens.push(ActivationRecord {
+            token: token.clone(),
+            source_window_id,
+            source_app_id,
+            target_app_id,
+            created_at_ns: now_ns,
+        });
+        Some(token)
+    }
+
+    fn consume_activation_token(
+        &mut self,
+        token: Option<&[u8]>,
+        app_id: &[u8],
+        window_type: u32,
+        requested_placement: sws_protocol::WindowPlacement,
+    ) -> (sws_protocol::WindowPlacement, bool) {
+        if window_type != sws_protocol::window_types::NORMAL {
+            return (requested_placement, false);
+        }
+        let Some(token) = token else {
+            return (requested_placement, false);
+        };
+
+        self.prune_expired_activation_tokens(monotonic_time_ns());
+        let Some(index) = self
+            .activation_tokens
+            .iter()
+            .position(|record| record.token.as_bytes() == token)
+        else {
+            return (requested_placement, false);
+        };
+        let record = self.activation_tokens.remove(index);
+        if record.target_app_id != app_id {
+            return (requested_placement, false);
+        }
+
+        sws_debug!(
+            "[Compositor] Consumed activation from window #{} ({}) for {}",
+            record.source_window_id,
+            String::from_utf8_lossy(&record.source_app_id),
+            String::from_utf8_lossy(app_id)
+        );
+        let placement = if matches!(requested_placement, sws_protocol::WindowPlacement::Default) {
+            sws_protocol::WindowPlacement::Centered
+        } else {
+            requested_placement
+        };
+        (placement, true)
+    }
+
     /// Choose a safe compositor-managed position for a regular window.
     ///
     /// A newly created window may arrive before the shell has advertised a
-    /// workarea, and a secondary window may be created when no normal window is
-    /// focused.  Neither case should make an application window appear at the
-    /// display origin.  Keep the existing cascade when a normal window is
-    /// focused, then use the available workarea (or the full output) to center
-    /// the new window and clamp it inside the usable bounds.
+    /// workarea, and launching from shell UI temporarily moves focus away from
+    /// the previous application. Prefer the focused normal window as the
+    /// cascade anchor, then the topmost visible normal window. The first window
+    /// uses a small workarea inset. Centering is reserved for an explicit
+    /// placement or a validated activation token.
     fn default_window_position(&self, width: u32, height: u32) -> (i32, i32) {
-        let (work_x, work_y, work_width, work_height) =
-            self.workarea
-                .unwrap_or((0, 0, self.screen_width, self.screen_height));
-
-        let focused_pos = self
+        let focused_anchor = self
             .window_manager
             .get_focused_window_id()
             .and_then(|id| self.window_manager.get_window(id))
-            .filter(|window| matches!(window.window_type, super::window::WindowType::Normal))
-            .map(|window| (window.x, window.y));
+            .filter(|window| {
+                matches!(window.window_type, super::window::WindowType::Normal)
+                    && window.visible
+                    && !window.minimized
+            });
+        let anchor = focused_anchor.or_else(|| {
+            self.window_manager
+                .get_windows()
+                .iter()
+                .rev()
+                .find(|window| {
+                    matches!(window.window_type, super::window::WindowType::Normal)
+                        && window.visible
+                        && !window.minimized
+                })
+        });
+        let anchor_position = anchor.map(|window| (window.x, window.y));
 
-        let (desired_x, desired_y) = match focused_pos {
-            Some((x, y)) => (x as i64 + 20, y as i64 + 20),
-            None => (
-                work_x as i64 + (work_width as i64 - width as i64).max(0) / 2,
-                work_y as i64 + (work_height as i64 - height as i64).max(0) / 2,
+        let (bounds_x, bounds_y, bounds_width, bounds_height) =
+            self.workarea
+                .unwrap_or((0, 0, self.screen_width, self.screen_height));
+        let min_x = bounds_x as i64;
+        let min_y = bounds_y as i64;
+        let max_x = (min_x + bounds_width as i64 - width as i64).max(min_x);
+        let max_y = (min_y + bounds_height as i64 - height as i64).max(min_y);
+        let initial_x = (min_x + DEFAULT_WINDOW_INSET).min(max_x);
+        let initial_y = (min_y + DEFAULT_WINDOW_INSET).min(max_y);
+
+        let (mut desired_x, mut desired_y) = match anchor_position {
+            Some((x, y)) => (
+                x as i64 + DEFAULT_WINDOW_CASCADE,
+                y as i64 + DEFAULT_WINDOW_CASCADE,
             ),
+            None => (initial_x, initial_y),
         };
-
-        let work_x = work_x as i64;
-        let work_y = work_y as i64;
-        let max_x = (work_x + work_width as i64 - width as i64).max(work_x);
-        let max_y = (work_y + work_height as i64 - height as i64).max(work_y);
+        if desired_x > max_x {
+            desired_x = initial_x;
+        }
+        if desired_y > max_y {
+            desired_y = initial_y;
+        }
 
         (
             desired_x
-                .clamp(work_x, max_x)
+                .clamp(min_x, max_x)
                 .clamp(i32::MIN as i64, i32::MAX as i64) as i32,
             desired_y
-                .clamp(work_y, max_y)
+                .clamp(min_y, max_y)
                 .clamp(i32::MIN as i64, i32::MAX as i64) as i32,
         )
     }
@@ -3511,9 +3638,10 @@ impl Compositor {
                 height,
                 window_type,
                 resizable,
-                focus_on_create,
-                active_on_focus,
+                mut focus_on_create,
+                mut active_on_focus,
                 initial_position,
+                activation_token,
                 shm,
                 shm_mapped_addr,
                 shm_size,
@@ -3524,6 +3652,17 @@ impl Compositor {
                 );
 
                 use sws_protocol::window_types;
+
+                let (initial_position, activated) = self.consume_activation_token(
+                    activation_token.as_deref(),
+                    &app_id,
+                    window_type,
+                    initial_position,
+                );
+                if activated {
+                    focus_on_create = true;
+                    active_on_focus = true;
+                }
 
                 // Calculate initial position based on window type
                 let (x, y) = match initial_position {
@@ -4711,6 +4850,29 @@ impl Compositor {
                     entries.len(),
                     client_id
                 );
+            }
+            IpcEvent::RequestActivationToken {
+                client_id,
+                request_id,
+                source_window_id,
+                target_app_id,
+            } => {
+                if let Some(token) = self.issue_activation_token(source_window_id, target_app_id) {
+                    send_response_to_client(
+                        client_id,
+                        sws_protocol::server_msg::ACTIVATION_TOKEN,
+                        request_id,
+                        sws_protocol::payload_activation_token(token.as_bytes()),
+                    );
+                } else {
+                    send_response_to_client(
+                        client_id,
+                        sws_protocol::server_msg::ERROR,
+                        request_id,
+                        sws_protocol::payload_error(sws_protocol::error_codes::ACTIVATION_DENIED)
+                            .to_vec(),
+                    );
+                }
             }
         }
         Ok(false)

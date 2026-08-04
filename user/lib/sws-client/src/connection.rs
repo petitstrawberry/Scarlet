@@ -1509,6 +1509,80 @@ impl Connection {
         Ok(surface_id)
     }
 
+    /// Create a new surface with an initial placement and activation token.
+    ///
+    /// # Arguments
+    ///
+    /// * `app_id` - Stable application identifier for the new toplevel.
+    /// * `app_name` - Human-readable application name.
+    /// * `menu_titles` - Serialized application menu titles.
+    /// * `width` - Initial buffer width in physical pixels.
+    /// * `height` - Initial buffer height in physical pixels.
+    /// * `window_type` - SWS window role.
+    /// * `resizable` - Whether interactive resizing is permitted.
+    /// * `focus_on_create` - Whether the new window normally requests focus.
+    /// * `active_on_focus` - Whether focus makes this the active application.
+    /// * `placement` - Client-side placement hint, subject to compositor policy.
+    /// * `activation_token` - Opaque one-shot token previously issued by SWS.
+    ///
+    /// # Returns
+    ///
+    /// The new SWS surface identifier.
+    pub fn create_surface_with_type_and_policies_with_activation_token(
+        &self,
+        app_id: &str,
+        app_name: &str,
+        menu_titles: &str,
+        width: u32,
+        height: u32,
+        window_type: u32,
+        resizable: bool,
+        focus_on_create: bool,
+        active_on_focus: bool,
+        placement: protocol::WindowPlacement,
+        activation_token: &str,
+    ) -> Result<u32, Error> {
+        if activation_token.is_empty()
+            || activation_token.len() > protocol::ACTIVATION_TOKEN_MAX_BYTES
+        {
+            return Err(Error::InvalidRequest);
+        }
+
+        let (placement, initial_x, initial_y) = match placement {
+            protocol::WindowPlacement::Default => (protocol::window_placement::DEFAULT, 0, 0),
+            protocol::WindowPlacement::Centered => (protocol::window_placement::CENTERED, 0, 0),
+            protocol::WindowPlacement::Absolute { x, y } => {
+                (protocol::window_placement::ABSOLUTE, x, y)
+            }
+        };
+        let payload = protocol::payload_create_window_with_placement_and_activation_token(
+            app_id.as_bytes(),
+            app_name.as_bytes(),
+            menu_titles.as_bytes(),
+            width,
+            height,
+            window_type,
+            resizable,
+            focus_on_create,
+            active_on_focus,
+            placement,
+            initial_x,
+            initial_y,
+            activation_token.as_bytes(),
+        );
+        let mut response = self.request(protocol::client_msg::CREATE_WINDOW, &payload)?;
+        let surface_id = match response.message() {
+            ServerMessage::WindowCreated { window_id, .. } => window_id,
+            ServerMessage::Error { code } => return Err(Error::ServerError(code)),
+            _ => return Err(Error::InvalidResponse),
+        };
+        let shm_handle = response.take_handle().ok_or(Error::ShmHandleFailed)?;
+        let shm = SharedMemory::from_handle(shm_handle).map_err(|_| Error::ShmHandleFailed)?;
+        let surface = Surface::new(surface_id, width, height, shm)?;
+        mutex_lock(&self.surfaces).insert(surface_id, surface);
+        Ok(surface_id)
+    }
+
     /// Create a new surface (window) with explicit focus/active policies and initial position.
     pub fn create_surface_with_type_and_policies_at(
         &self,
@@ -2527,6 +2601,36 @@ impl Connection {
         let response = self.request(protocol::client_msg::GET_OUTPUT_SCALE, &[])?;
         match response.message() {
             ServerMessage::OutputScale { scale_milli } => Ok(scale_milli.max(1)),
+            _ => Err(Error::InvalidResponse),
+        }
+    }
+
+    /// Request an opaque token for transferring activation to another app.
+    ///
+    /// # Arguments
+    ///
+    /// * `source_window_id` - Focused window whose user interaction initiated the launch.
+    /// * `target_app_id` - Stable application identifier expected on the new toplevel.
+    ///
+    /// # Returns
+    ///
+    /// A one-shot opaque token to pass to the target process.
+    pub fn request_activation_token(
+        &self,
+        source_window_id: u32,
+        target_app_id: &str,
+    ) -> Result<String, Error> {
+        if source_window_id == 0 || target_app_id.is_empty() {
+            return Err(Error::InvalidRequest);
+        }
+        let payload =
+            protocol::payload_request_activation_token(source_window_id, target_app_id.as_bytes());
+        let response = self.request(protocol::client_msg::REQUEST_ACTIVATION_TOKEN, &payload)?;
+        match response.message() {
+            ServerMessage::ActivationToken { token, token_len } => {
+                Ok(String::from_utf8_lossy(&token[..token_len as usize]).into_owned())
+            }
+            ServerMessage::Error { code } => Err(Error::ServerError(code)),
             _ => Err(Error::InvalidResponse),
         }
     }

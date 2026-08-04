@@ -2242,6 +2242,7 @@ fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Ha
                 focus_on_create,
                 active_on_focus,
                 initial_position,
+                activation_token,
             }) => {
                 // Convert &[u8] to String
                 let app_id_str = String::from_utf8_lossy(app_id).into_owned();
@@ -2381,6 +2382,7 @@ fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Ha
                             focus_on_create,
                             active_on_focus,
                             initial_position,
+                            activation_token: activation_token.map(|token| token.to_vec()),
                             shm: Some(shm),
                             shm_mapped_addr,
                             shm_size: buffer_size as usize,
@@ -2956,6 +2958,17 @@ fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Ha
                     request_id,
                 });
             }
+            Ok(ClientMessageRef::RequestActivationToken {
+                source_window_id,
+                target_app_id,
+            }) => {
+                push_ipc_event(IpcEvent::RequestActivationToken {
+                    client_id,
+                    request_id,
+                    source_window_id,
+                    target_app_id: target_app_id.to_vec(),
+                });
+            }
             Ok(ClientMessageRef::GetCapabilities {}) => {
                 let payload = protocol::payload_capabilities(
                     protocol::SWS_PROTOCOL_VERSION,
@@ -3399,6 +3412,7 @@ pub enum IpcEvent {
         focus_on_create: bool,
         active_on_focus: bool,
         initial_position: protocol::WindowPlacement,
+        activation_token: Option<Vec<u8>>,
         /// Shared memory for the window buffer (server-allocated)
         shm: Option<SharedMemory>,
         shm_mapped_addr: Option<usize>,
@@ -3631,5 +3645,13 @@ pub enum IpcEvent {
     GetWindowList {
         client_id: usize,
         request_id: u8,
+    },
+
+    /// Request a one-shot token for activating a newly launched application.
+    RequestActivationToken {
+        client_id: usize,
+        request_id: u8,
+        source_window_id: u32,
+        target_app_id: Vec<u8>,
     },
 }
