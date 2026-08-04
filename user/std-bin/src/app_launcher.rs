@@ -186,10 +186,10 @@ impl LauncherApp {
             self.filtered_applications.set(filtered.clone());
         }
 
-        if query_changed || catalog_changed {
+        if query_changed || catalog_changed || selection_missing {
             let selected = if filtered.is_empty() {
                 None
-            } else if query_changed {
+            } else if query_changed || selection_missing {
                 Some(0)
             } else {
                 self.selected
