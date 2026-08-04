@@ -57,6 +57,9 @@ pub fn decode_loop(
     let mut seek_target_us = 0u64;
 
     loop {
+        if queue.is_cancelled() {
+            return Ok(());
+        }
         let mut decoder = OrderedDecoder::<u64>::new();
         let seek_plan = video_seek_plan(&source, seek_target_us);
         let mut display_index = seek_plan.publish_start_rank;
@@ -71,7 +74,7 @@ pub fn decode_loop(
                 restart_for_seek = true;
                 break;
             }
-            wait_while_paused(controls);
+            wait_while_paused(controls, queue);
             let access_unit_bytes = access_unit.bytes(mp4_data, &mut access_unit_scratch)?;
             let nals = parse_annex_b(access_unit_bytes);
             let unit_presentation_time_us = access_unit
@@ -177,7 +180,11 @@ pub fn decode_loop(
                 QueuePush::Closed => return Ok(()),
             }
             println!("[{}] finished: {} frames", APP_NAME, display_index);
-            seek_target_us = wait_for_replay_or_seek_request(controls).unwrap_or(0);
+            let replay_or_seek = wait_for_replay_or_seek_request(controls, queue);
+            if queue.is_cancelled() {
+                return Ok(());
+            }
+            seek_target_us = replay_or_seek.unwrap_or(0);
             if let Some(clock) = clock {
                 clock.reset_for_replay();
             }

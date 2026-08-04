@@ -23,6 +23,9 @@ scarlet-std = { path = "../lib/std", features = ["alloc_debug"] }
 scarlet-codecs = { path = "../lib/scarlet-codecs", default-features = false, optional = true }
 scarlet-ui = { git = "https://github.com/petitstrawberry/scarlet-ui", package = "scarlet-ui", default-features = false, features = ["legacy-scarlet-std", "platform-sws"] }
 sas-client = { path = "../lib/sas-client", default-features = false, features = ["legacy-scarlet-std"] }
+sbus = { path = "../lib/sbus" }
+sbus-client = { path = "../lib/sbus-client", default-features = false, features = ["legacy-scarlet-std"] }
+scarlet-desktop-config = { path = "../lib/scarlet-desktop-config", default-features = false, features = ["legacy-scarlet-std"] }
 rust_h264 = { git = "https://github.com/petitstrawberry/rust_h264.git", rev = "a559fe2545fd88def12146dcc06286475b53ead3", default-features = false, features = ["portable-simd"], optional = true }
 symphonia-core = { git = "https://github.com/petitstrawberry/Symphonia.git", rev = "71f92f0bc0fdd9d4f2a77129a543ee6c99611009", default-features = false, optional = true }
 symphonia-codec-aac = { git = "https://github.com/petitstrawberry/Symphonia.git", rev = "71f92f0bc0fdd9d4f2a77129a543ee6c99611009", default-features = false, optional = true }
