@@ -152,6 +152,11 @@ pub fn lookup_app(app_id: &str) -> Option<DesktopEntry> {
     result
 }
 
+/// Return a snapshot of all applications registered from desktop entries.
+pub fn list_apps() -> Vec<DesktopEntry> {
+    APP_REGISTRY.lock().clone()
+}
+
 /// Look up the first registered application advertising a MIME type.
 ///
 /// Exact MIME type matches take precedence over `type/*` and `*/*` matches.

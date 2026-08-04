@@ -1952,6 +1952,7 @@ dependencies = [
  "serde_json",
  "sgfx",
  "svgtypes",
+ "sws-protocol",
  "symphonia-codec-aac",
  "symphonia-core",
  "url",

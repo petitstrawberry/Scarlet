@@ -2,6 +2,6 @@
 Name=Application Launcher
 Comment=Launch applications
 Exec=/bin/scarlet_desktop_launcher
-Icon=launcher
+Icon=apps
 Type=Application
 Terminal=false

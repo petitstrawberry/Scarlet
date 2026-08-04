@@ -1,15 +1,18 @@
 //! Compositor module - manages window composition and rendering
 
 use super::cursor::Cursor;
-use super::gpu_compositor::{
-    GpuCompositor, SgfxBufferError, SgfxBufferIdentity, SgfxCommitToken,
-};
+use super::gpu_compositor::{GpuCompositor, SgfxBufferError, SgfxBufferIdentity, SgfxCommitToken};
 use super::input::{CompositorInputEvent, InputManager, key_codes};
 use super::ipc::{IpcEvent, IpcServer, send_message_to_client, send_response_to_client};
 use super::window::WindowManager;
 use core::sync::atomic::{AtomicU8, Ordering};
 use core::time::Duration;
 use framebuffer::{DisplayPresentRegion, DisplaySurface};
+use sbus_client::Connection as SbusConnection;
+use scarlet_desktop_config::{
+    DESKTOP_LAUNCHER_BUS_NAME, DESKTOP_LAUNCHER_INTERFACE, DESKTOP_LAUNCHER_OBJECT_PATH,
+    DESKTOP_LAUNCHER_SHOW_METHOD,
+};
 use scarlet_os::time::monotonic_time_ns;
 use std::env;
 use std::fs::File;
@@ -524,6 +527,7 @@ pub struct Compositor {
     right_alt_down: bool,
     left_meta_down: bool,
     right_meta_down: bool,
+    launcher_shortcut_consuming: bool,
     ime_toggle_bindings: Vec<KeyBinding>,
     ime_trigger_key_down: Option<u16>,
     ime_popup_windows: Vec<ImePopupWindow>,
@@ -699,6 +703,7 @@ impl Compositor {
             right_alt_down: false,
             left_meta_down: false,
             right_meta_down: false,
+            launcher_shortcut_consuming: false,
             ime_toggle_bindings: sws_config.ime_toggle_bindings,
             ime_trigger_key_down: None,
             ime_popup_windows: Vec::new(),
@@ -726,6 +731,27 @@ impl Compositor {
             alt: self.left_alt_down || self.right_alt_down,
             meta: self.left_meta_down || self.right_meta_down,
         }
+    }
+
+    fn request_launcher_show() {
+        thread::spawn(|| {
+            for _ in 0..10 {
+                if let Ok(mut connection) = SbusConnection::connect()
+                    && connection
+                        .call_method(
+                            DESKTOP_LAUNCHER_BUS_NAME,
+                            DESKTOP_LAUNCHER_OBJECT_PATH,
+                            DESKTOP_LAUNCHER_INTERFACE,
+                            DESKTOP_LAUNCHER_SHOW_METHOD,
+                            Vec::new(),
+                        )
+                        .is_ok()
+                {
+                    return;
+                }
+                thread::sleep(Duration::from_millis(20));
+            }
+        });
     }
 
     fn is_ime_toggle_key(&self, code: u16) -> bool {
@@ -3022,6 +3048,21 @@ impl Compositor {
             CompositorInputEvent::Keyboard { code, pressed } => {
                 self.update_modifier_key_state(code, pressed);
 
+                // Meta+Space is a desktop-global launcher shortcut.  Consume
+                // the chord here before it reaches the focused application;
+                // the resident launcher process handles the actual window.
+                if self.launcher_shortcut_consuming {
+                    if code == key_codes::KEY_SPACE && !pressed {
+                        self.launcher_shortcut_consuming = false;
+                    }
+                    return Ok(false);
+                }
+                if code == key_codes::KEY_SPACE && pressed && self.current_key_modifiers().meta {
+                    self.launcher_shortcut_consuming = true;
+                    Self::request_launcher_show();
+                    return Ok(false);
+                }
+
                 // Route keyboard events to focused window
                 if let Some(focused_id) = self.window_manager.get_focused_window_id() {
                     if let Some(window) = self.window_manager.get_window(focused_id) {
@@ -3779,9 +3820,7 @@ impl Compositor {
                     return Ok(false);
                 }
                 let result = match self.gpu_compositor.as_mut() {
-                    Some(gpu) => {
-                        gpu.commit_shared_buffer(identity, commit_serial, &damage_rects)
-                    }
+                    Some(gpu) => gpu.commit_shared_buffer(identity, commit_serial, &damage_rects),
                     None => Err(SgfxBufferError::Unavailable),
                 };
                 match result {
@@ -3863,9 +3902,7 @@ impl Compositor {
                         sws_protocol::payload_error(sgfx_error_code(error)).to_vec(),
                     ),
                 };
-                super::ipc::send_response_to_client(
-                    client_id, msg_type, request_id, payload,
-                );
+                super::ipc::send_response_to_client(client_id, msg_type, request_id, payload);
                 if backend_failed {
                     self.disable_gpu_after_runtime_failure(
                         "SWS_BACKEND=sgfx shared-buffer destruction failed",

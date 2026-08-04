@@ -14,6 +14,7 @@ extern crate scarlet_std as std;
 
 use core::sync::atomic::fence;
 use sbus_client as sbus;
+use scarlet_desktop_config::DESKTOP_STEMD_LIST_APPLICATIONS_METHOD;
 use std::{
     format,
     fs::File,
@@ -33,7 +34,7 @@ mod desktop;
 mod protocol;
 
 use desktop::{
-    DesktopEntry, expand_exec, load_desktop_files, lookup_app, lookup_app_for_mime,
+    DesktopEntry, expand_exec, list_apps, load_desktop_files, lookup_app, lookup_app_for_mime,
     mime_type_for_path,
 };
 use protocol::cmd;
@@ -1700,6 +1701,26 @@ fn handle_sbus_message(
                             .unwrap_or(&app.app_id);
                         let display_name = format!("{}|{}", app.app_id, name);
                         result_args.push(Argument::String(display_name));
+                    }
+
+                    if let Some(conn) = conn_guard.as_mut() {
+                        let result: core::result::Result<(), sbus::Error> =
+                            conn.send_method_return(serial, result_args);
+                        let _ = result;
+                    }
+                    Ok(())
+                }
+                DESKTOP_STEMD_LIST_APPLICATIONS_METHOD => {
+                    println!("[sbus] Handling ListApplications method");
+
+                    let mut result_args = Vec::new();
+                    for app in list_apps() {
+                        // The response is a flat sequence of triples so this
+                        // remains usable with the current sbus argument model:
+                        // app_id, display name, and desktop icon name.
+                        result_args.push(Argument::String(app.app_id));
+                        result_args.push(Argument::String(app.name));
+                        result_args.push(Argument::String(app.icon.unwrap_or_default()));
                     }
 
                     if let Some(conn) = conn_guard.as_mut() {

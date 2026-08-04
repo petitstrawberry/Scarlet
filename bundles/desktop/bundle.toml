@@ -45,6 +45,13 @@ to = "/system/scarlet/bin/scarlet_desktop_filer"
 
 [[layers]]
 kind = "cargo"
+source = "../../user/std-bin"
+package = "scarlet-std-bin"
+bin = "scarlet_desktop_launcher"
+to = "/system/scarlet/bin/scarlet_desktop_launcher"
+
+[[layers]]
+kind = "cargo"
 source = "../../user/bin"
 package = "user-bin"
 bin = "scarlet_desktop_taskbar"

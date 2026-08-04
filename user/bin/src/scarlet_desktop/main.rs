@@ -93,6 +93,11 @@ pub extern "C" fn main() -> i32 {
         println!("[scarlet_desktop] settingsd pid={}", settingsd_pid);
     }
 
+    let mut launcher_pid = spawn_component("scarlet_desktop_launcher", &[]);
+    if launcher_pid > 0 {
+        println!("[scarlet_desktop] launcher pid={}", launcher_pid);
+    }
+
     let mut taskbar_pid = spawn_component("scarlet_desktop_taskbar", &[]);
     if taskbar_pid > 0 {
         println!("[scarlet_desktop] taskbar pid={}", taskbar_pid);
@@ -140,6 +145,17 @@ pub extern "C" fn main() -> i32 {
                     "[scarlet_desktop] settingsd respawned pid={}",
                     settingsd_pid
                 );
+            }
+            continue;
+        }
+
+        if pid == launcher_pid {
+            println!("[scarlet_desktop] launcher exited; respawning");
+            thread::sleep(Duration::from_millis(COMPONENT_RESPAWN_DELAY_MS));
+            wait_for_sws_ready();
+            launcher_pid = spawn_component("scarlet_desktop_launcher", &[]);
+            if launcher_pid > 0 {
+                println!("[scarlet_desktop] launcher respawned pid={}", launcher_pid);
             }
         }
     }

@@ -16,6 +16,12 @@ use alloc::vec;
 use core::time::Duration;
 use sas_client::SasClient;
 use sas_protocol::{CONTROL_FLAG_MUTED, MASTER_VOLUME_UNITY_Q16};
+use sbus_client::Connection as SbusConnection;
+use scarlet_desktop_config::{
+    DESKTOP_FILE_MANAGER_BUS_NAME, DESKTOP_FILE_MANAGER_INTERFACE,
+    DESKTOP_FILE_MANAGER_OBJECT_PATH, DESKTOP_FILE_MANAGER_SHOW_METHOD, DESKTOP_LAUNCHER_BUS_NAME,
+    DESKTOP_LAUNCHER_INTERFACE, DESKTOP_LAUNCHER_OBJECT_PATH, DESKTOP_LAUNCHER_SHOW_METHOD,
+};
 use scarlet_os::time;
 use scarlet_ui::buffer::Buffer;
 use scarlet_ui::color::Color;
@@ -183,6 +189,13 @@ fn default_root_menu_items() -> Vec<TaskMenuItem> {
 fn default_system_menu_entries() -> Vec<TaskMenuEntry> {
     vec![
         TaskMenuEntry::Item(TaskMenuItem {
+            id: String::from("system_launcher"),
+            title: String::from("Applications"),
+            enabled: true,
+            shortcut: Some(String::from("Meta+Space")),
+            children: Vec::new(),
+        }),
+        TaskMenuEntry::Item(TaskMenuItem {
             id: String::from("system_terminal"),
             title: String::from("Terminal"),
             enabled: true,
@@ -284,6 +297,56 @@ fn launch_app(app_id: &[u8]) {
 
 fn launch_new_app(app_id: &[u8]) {
     send_launch_command(0x05, app_id);
+}
+
+fn show_file_manager() {
+    if request_file_manager_window() {
+        return;
+    }
+
+    launch_app(b"org.scarlet-os.desktop.filer");
+    for _ in 0..20 {
+        std::thread::sleep(Duration::from_millis(50));
+        if request_file_manager_window() {
+            return;
+        }
+    }
+    println!("[TaskBar] File Manager service is not ready");
+}
+
+fn request_file_manager_window() -> bool {
+    let Ok(mut connection) = SbusConnection::connect() else {
+        return false;
+    };
+    connection
+        .call_method(
+            DESKTOP_FILE_MANAGER_BUS_NAME,
+            DESKTOP_FILE_MANAGER_OBJECT_PATH,
+            DESKTOP_FILE_MANAGER_INTERFACE,
+            DESKTOP_FILE_MANAGER_SHOW_METHOD,
+            Vec::new(),
+        )
+        .is_ok()
+}
+
+fn show_launcher() {
+    for _ in 0..5 {
+        if let Ok(mut connection) = SbusConnection::connect()
+            && connection
+                .call_method(
+                    DESKTOP_LAUNCHER_BUS_NAME,
+                    DESKTOP_LAUNCHER_OBJECT_PATH,
+                    DESKTOP_LAUNCHER_INTERFACE,
+                    DESKTOP_LAUNCHER_SHOW_METHOD,
+                    Vec::new(),
+                )
+                .is_ok()
+        {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    println!("[TaskBar] Resident launcher is not ready");
 }
 
 fn send_launch_command(command: u8, app_id: &[u8]) {
@@ -572,12 +635,16 @@ fn build_menu_items(
                 content = content.callback(move || {
                     open_state.set(None);
                     // Handle system menu items
+                    if item_id == "system_launcher" {
+                        show_launcher();
+                        return;
+                    }
                     if item_id == "system_terminal" {
                         launch_new_app(b"org.scarlet-os.desktop.terminal");
                         return;
                     }
                     if item_id == "system_filer" {
-                        launch_new_app(b"org.scarlet-os.desktop.filer");
+                        show_file_manager();
                         return;
                     }
                     if item_id == "system_clock" {

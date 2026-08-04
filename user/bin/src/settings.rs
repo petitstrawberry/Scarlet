@@ -106,6 +106,12 @@ fn percent_to_q16(percent: u32) -> u32 {
     ((percent.min(100) as u64 * MASTER_VOLUME_UNITY_Q16 as u64 + 50) / 100) as u32
 }
 
+fn home_path() -> String {
+    std::env::var("HOME")
+        .filter(|path| !path.is_empty())
+        .unwrap_or_else(|| String::from("/"))
+}
+
 fn f32_to_percent(value: f32) -> u32 {
     (value.max(0.0).min(100.0) + 0.5) as u32
 }
@@ -203,7 +209,7 @@ fn request_background_picker() -> core::result::Result<String, sbus_client::Erro
         DESKTOP_FILE_MANAGER_OPEN_FILE_METHOD,
         vec![
             Argument::String(String::from("Choose Wallpaper")),
-            Argument::String(String::from("/home")),
+            Argument::String(home_path()),
             Argument::String(String::from("image/jpeg")),
             Argument::Boolean(false),
             Argument::Boolean(false),
@@ -218,7 +224,7 @@ fn request_background_picker() -> core::result::Result<String, sbus_client::Erro
     }
 }
 
-fn launch_file_manager() {
+fn ensure_file_manager_service() {
     let Ok(mut connection) = SbusConnection::connect() else {
         return;
     };
@@ -638,7 +644,7 @@ impl SettingsApp {
                 Err(error) => {
                     last_error = Some(error);
                     if attempt == 0 {
-                        launch_file_manager();
+                        ensure_file_manager_service();
                     }
                     thread::sleep(Duration::from_millis(50));
                 }

@@ -18,20 +18,21 @@ use sbus_client::Connection as SbusConnection;
 use scarlet_desktop_config::{
     DESKTOP_FILE_MANAGER_BUS_NAME, DESKTOP_FILE_MANAGER_INTERFACE,
     DESKTOP_FILE_MANAGER_OBJECT_PATH, DESKTOP_FILE_MANAGER_OPEN_FILE_METHOD,
-    DESKTOP_FILE_MANAGER_RESPONSE_SIGNAL, DESKTOP_STEMD_BUS_NAME, DESKTOP_STEMD_INTERFACE,
-    DESKTOP_STEMD_OBJECT_PATH, DESKTOP_STEMD_OPEN_PATH_METHOD,
+    DESKTOP_FILE_MANAGER_RESPONSE_SIGNAL, DESKTOP_FILE_MANAGER_SHOW_METHOD, DESKTOP_STEMD_BUS_NAME,
+    DESKTOP_STEMD_INTERFACE, DESKTOP_STEMD_OBJECT_PATH, DESKTOP_STEMD_OPEN_PATH_METHOD,
 };
 use scarlet_ui::prelude::*;
 use scarlet_ui::{
     Alignment, Button, Color, ColorPalette, Divider, GridView, HeaderBar, Icon, IconSize, IconView,
     Image, ImageFit, NavigationLink, Spacer, dismiss_window, hstack, measure_text_sized,
-    navigation, vstack,
+    navigation, open_new_window, open_window, vstack,
 };
 use scarlet_ui_macros::View;
 
 use file_icons::{FileKind, icon_for_entry};
 
 const APP_ID: &str = "org.scarlet-os.desktop.filer";
+const PICKER_WINDOW_KEY: &str = "picker";
 const ROOT_PATH: &str = "/";
 const GRID_COLUMNS: usize = 5;
 const GRID_ROW_HEIGHT: f32 = 146.0;
@@ -70,7 +71,13 @@ struct FilerApp {
     selected: State<Option<usize>>,
     hovered: State<Option<usize>>,
     last_click: State<Option<(usize, Instant)>>,
+    picker_current_path: State<String>,
+    picker_entries: State<Vec<FileEntry>>,
+    picker_selected: State<Option<usize>>,
+    picker_hovered: State<Option<usize>>,
+    picker_last_click: State<Option<(usize, Instant)>>,
     picker_request: State<Option<PickerRequest>>,
+    picker_status: State<String>,
     status: State<String>,
     request_sequence: State<u32>,
 }
@@ -79,16 +86,15 @@ impl FilerApp {
     fn new() -> Self {
         let current_path = initial_path();
         let entries = read_entries(&current_path, None).unwrap_or_default();
-        Self {
-            current_path: State::new(StateId::new(0), current_path),
-            entries: State::new(StateId::new(1), entries),
-            selected: State::new(StateId::new(2), None),
-            hovered: State::new(StateId::new(3), None),
-            last_click: State::new(StateId::new(4), None),
-            picker_request: State::new(StateId::new(5), None),
-            status: State::new(StateId::new(6), String::from("Ready")),
-            request_sequence: State::new(StateId::new(7), 1),
-        }
+        let app = Self::default();
+        app.current_path.set(current_path.clone());
+        app.entries.set(entries.clone());
+        app.picker_current_path.set(current_path);
+        app.picker_entries.set(entries);
+        app.picker_status.set(String::from("Ready"));
+        app.status.set(String::from("Ready"));
+        app.request_sequence.set(1);
+        app
     }
 
     fn refresh(&self) {
@@ -128,6 +134,42 @@ impl FilerApp {
         self.navigate_to(parent);
     }
 
+    fn refresh_picker(&self) {
+        let path = self.picker_current_path.get();
+        let picker = self.picker_request.get();
+        match read_entries(&path, picker.as_ref()) {
+            Ok(entries) => {
+                self.picker_entries.set(entries);
+                self.picker_selected.set(None);
+                self.picker_hovered.set(None);
+                self.picker_last_click.set(None);
+            }
+            Err(error) => self
+                .picker_status
+                .set(format!("Cannot open {path}: {error}")),
+        }
+    }
+
+    fn navigate_picker_to(&self, path: impl Into<String>) {
+        let path = path.into();
+        if !Path::new(&path).is_dir() {
+            self.picker_status.set(format!("Cannot open {path}"));
+            return;
+        }
+        self.picker_current_path.set(path);
+        self.refresh_picker();
+    }
+
+    fn navigate_picker_up(&self) {
+        let current = PathBuf::from(self.picker_current_path.get());
+        let parent = current
+            .parent()
+            .unwrap_or_else(|| Path::new(ROOT_PATH))
+            .to_string_lossy()
+            .into_owned();
+        self.navigate_picker_to(parent);
+    }
+
     fn activate_entry(&self, index: usize) {
         let Some(entry) = self.entries.get().get(index).cloned() else {
             return;
@@ -163,6 +205,44 @@ impl FilerApp {
             self.navigate_to(entry.path);
         } else {
             self.open_entry(entry.path);
+        }
+    }
+
+    fn activate_picker_entry(&self, index: usize) {
+        let Some(entry) = self.picker_entries.get().get(index).cloned() else {
+            return;
+        };
+
+        let now = Instant::now();
+        let double_click = self
+            .picker_last_click
+            .get()
+            .is_some_and(|(last_index, timestamp)| {
+                last_index == index && now.duration_since(timestamp) <= DOUBLE_CLICK_INTERVAL
+            });
+        self.picker_last_click.set(if double_click {
+            None
+        } else {
+            Some((index, now))
+        });
+
+        let select_directories = self
+            .picker_request
+            .get()
+            .as_ref()
+            .is_some_and(|request| request.select_directories);
+        self.picker_selected.set(Some(index));
+        self.picker_status.set(entry.path.clone());
+
+        if !double_click {
+            return;
+        }
+        if entry.is_directory {
+            if !select_directories {
+                self.navigate_picker_to(entry.path);
+            }
+        } else {
+            self.finish_picker(true);
         }
     }
 
@@ -225,9 +305,10 @@ impl FilerApp {
         let request_id = request.id.clone();
         let title = request.title.clone();
         self.picker_request.set(Some(request));
-        self.current_path.set(initial_folder);
-        self.refresh();
-        self.status.set(title);
+        self.picker_current_path.set(initial_folder);
+        self.refresh_picker();
+        self.picker_status.set(title);
+        open_new_window(PICKER_WINDOW_KEY);
         request_id
     }
 
@@ -235,8 +316,8 @@ impl FilerApp {
         let Some(request) = self.picker_request.get() else {
             return;
         };
-        let selected_path = self.selected.get().and_then(|index| {
-            self.entries
+        let selected_path = self.picker_selected.get().and_then(|index| {
+            self.picker_entries
                 .get()
                 .get(index)
                 .map(|entry| entry.path.clone())
@@ -262,7 +343,7 @@ impl FilerApp {
         }
 
         self.picker_request.set(None);
-        dismiss_window("main");
+        dismiss_window(PICKER_WINDOW_KEY);
     }
 
     fn file_cell(
@@ -270,11 +351,17 @@ impl FilerApp {
         index: usize,
         entry: FileEntry,
         selected_index: Option<usize>,
+        picker: bool,
     ) -> impl View + Clone + use<> {
         let palette = ColorPalette::default();
+        let hovered_index = if picker {
+            self.picker_hovered.get()
+        } else {
+            self.hovered.get()
+        };
         let background = if selected_index == Some(index) {
             palette.primary_light().with_opacity(0.16)
-        } else if self.hovered.get() == Some(index) {
+        } else if hovered_index == Some(index) {
             palette.background_tertiary()
         } else {
             Color::CLEAR
@@ -313,8 +400,12 @@ impl FilerApp {
             )
         };
         let app = self.clone();
-        let hover_state = self.hovered.clone();
-        let exit_state = self.hovered.clone();
+        let hover_state = if picker {
+            self.picker_hovered.clone()
+        } else {
+            self.hovered.clone()
+        };
+        let exit_state = hover_state.clone();
 
         vstack! {
             preview,
@@ -335,33 +426,53 @@ impl FilerApp {
                 exit_state.set(None);
             }
         })
-        .on_click(move || app.activate_entry(index))
+        .on_click(move || {
+            if picker {
+                app.activate_picker_entry(index);
+            } else {
+                app.activate_entry(index);
+            }
+        })
     }
 
-    fn files_page(&self) -> impl View + Clone + use<> {
+    fn browser_page(&self, picker: bool) -> impl View + Clone + use<> {
         let grid_app = self.clone();
+        let entries = if picker {
+            self.picker_entries.clone()
+        } else {
+            self.entries.clone()
+        };
+        let selected = if picker {
+            self.picker_selected.clone()
+        } else {
+            self.selected.clone()
+        };
         let grid = GridView::new(
-            self.entries.clone(),
-            self.selected.clone(),
+            entries,
+            selected,
             GRID_COLUMNS,
             GRID_ROW_HEIGHT,
-            move |index, entry, selected| grid_app.file_cell(index, entry, selected),
+            move |index, entry, selected| grid_app.file_cell(index, entry, selected, picker),
         )
         .spacing(10.0)
         .minimum_cell_width(FILE_CELL_WIDTH);
 
-        let picker = self.picker_request.get();
-        let title = picker
-            .as_ref()
-            .map(|request| request.title.clone())
-            .unwrap_or_else(|| String::from("Files"));
-        let footer = if picker.is_some() {
+        let title = if picker {
+            self.picker_request
+                .get()
+                .as_ref()
+                .map(|request| request.title.clone())
+                .unwrap_or_else(|| String::from("Open File"))
+        } else {
+            String::from("Files")
+        };
+        let footer = if picker {
             let cancel_app = self.clone();
             let open_app = self.clone();
             Either::A(vstack! {
                 Divider::new(),
                 hstack! {
-                    Text::from_state(self.status.clone()).font_size(11.0),
+                    Text::from_state(self.picker_status.clone()).font_size(11.0),
                     Spacer::new(),
                     Button::new("Cancel").on_click(move || cancel_app.finish_picker(false)),
                     Button::new("Open").on_click(move || open_app.finish_picker(true)),
@@ -384,30 +495,68 @@ impl FilerApp {
         .padding(10.0)
     }
 
-    fn header(&self) -> impl View + Clone + use<> {
+    fn files_page(&self) -> impl View + Clone + use<> {
+        self.browser_page(false)
+    }
+
+    fn picker_page(&self) -> impl View + Clone + use<> {
+        vstack! {
+            self.header_for(true),
+            self.browser_page(true),
+        }
+    }
+
+    fn header_for(&self, picker: bool) -> impl View + Clone + use<> {
         let back_app = self.clone();
         let up_app = self.clone();
         let create_app = self.clone();
         let refresh_app = self.clone();
+        let current_path = if picker {
+            self.picker_current_path.clone()
+        } else {
+            self.current_path.clone()
+        };
         HeaderBar::new(
             hstack! {
                 Button::icon_only(Icon::ChevronLeft)
                     .header_style()
-                    .on_click(move || back_app.navigate_up()),
+                    .on_click(move || {
+                        if picker {
+                            back_app.navigate_picker_up();
+                        } else {
+                            back_app.navigate_up();
+                        }
+                    }),
                 Button::icon_only(Icon::ArrowUp)
                     .header_style()
-                    .on_click(move || up_app.navigate_up()),
+                    .on_click(move || {
+                        if picker {
+                            up_app.navigate_picker_up();
+                        } else {
+                            up_app.navigate_up();
+                        }
+                    }),
                 IconView::new(Icon::Folder)
                     .size(IconSize::Medium)
                     .filled(),
-                Text::from_state(self.current_path.clone()).font_size(14.0),
+                Text::from_state(current_path).font_size(14.0),
                 Spacer::new(),
                 Button::icon_only(Icon::FolderPlus)
                     .header_style()
-                    .on_click(move || create_app.create_folder()),
+                    .on_click(move || {
+                        if !picker {
+                            create_app.create_folder();
+                        }
+                    }),
                 Button::icon_only(Icon::Refresh)
                     .header_style()
-                    .on_click(move || refresh_app.refresh()),
+                    .on_click(move || {
+                        if picker {
+                            refresh_app.refresh_picker();
+                        } else {
+                            refresh_app.refresh();
+                        }
+                    }),
                 Button::icon_only(Icon::LayoutGrid).header_style(),
                 Button::icon_only(Icon::Menu2).header_style(),
             }
@@ -425,46 +574,73 @@ impl Application for FilerApp {
         let pictures = self.clone();
         let downloads = self.clone();
         let header = self.clone();
+        let picker = self.clone();
         let home_path = home_path();
+        let pictures_path = PathBuf::from(&home_path)
+            .join("pictures")
+            .to_string_lossy()
+            .into_owned();
+        let downloads_path = PathBuf::from(&home_path)
+            .join("downloads")
+            .to_string_lossy()
+            .into_owned();
 
-        WindowGroup::new(
-            "main",
-            Window::new(
-                "Files",
-                navigation! {
-                    NavigationLink::new("Home", move || home.files_page())
-                        .icon(Icon::Home)
-                        .on_select({
-                            let app = self.clone();
-                            let home_path = home_path.clone();
-                            move || app.navigate_to(home_path.clone())
-                        }),
-                    NavigationLink::new("Computer", move || computer.files_page())
-                        .icon(Icon::DeviceDesktop)
-                        .on_select({
-                            let app = self.clone();
-                            move || app.navigate_to(ROOT_PATH)
-                        }),
-                    NavigationLink::new("Pictures", move || pictures.files_page())
-                        .icon(Icon::Photo)
-                        .on_select({
-                            let app = self.clone();
-                            move || app.navigate_to("/home/pictures")
-                        }),
-                    NavigationLink::new("Downloads", move || downloads.files_page())
-                        .icon(Icon::Download)
-                        .on_select({
-                            let app = self.clone();
-                            move || app.navigate_to("/home/downloads")
-                        }),
-                }
-                .header(move || header.header())
-                .shows_icons(true)
-                .sidebar_width(170.0),
-            )
-            .app_id(APP_ID)
-            .size(Size::new(960.0, 640.0)),
+        let main_window = Window::new(
+            "Files",
+            navigation! {
+                NavigationLink::new("Home", move || home.files_page())
+                    .icon(Icon::Home)
+                    .on_select({
+                        let app = self.clone();
+                        let home_path = home_path.clone();
+                        move || app.navigate_to(home_path.clone())
+                    }),
+                NavigationLink::new("Computer", move || computer.files_page())
+                    .icon(Icon::DeviceDesktop)
+                    .on_select({
+                        let app = self.clone();
+                        move || app.navigate_to(ROOT_PATH)
+                    }),
+                NavigationLink::new("Pictures", move || pictures.files_page())
+                    .icon(Icon::Photo)
+                    .on_select({
+                        let app = self.clone();
+                        let pictures_path = pictures_path.clone();
+                        move || app.navigate_to(pictures_path.clone())
+                    }),
+                NavigationLink::new("Downloads", move || downloads.files_page())
+                    .icon(Icon::Download)
+                    .on_select({
+                        let app = self.clone();
+                        let downloads_path = downloads_path.clone();
+                        move || app.navigate_to(downloads_path.clone())
+                    }),
+            }
+            .header(move || header.header_for(false))
+            .shows_icons(true)
+            .sidebar_width(170.0),
         )
+        .app_id(APP_ID)
+        .size(Size::new(960.0, 640.0))
+        .scene_key("main")
+        .open_at_launch(false);
+
+        let picker_title = self
+            .picker_request
+            .get()
+            .map(|request| request.title)
+            .unwrap_or_else(|| String::from("Open File"));
+        let picker_window = Window::new(picker_title, picker.picker_page())
+            .scene_key(PICKER_WINDOW_KEY)
+            .app_id(APP_ID)
+            .size(Size::new(960.0, 640.0))
+            .open_at_launch(false);
+
+        (main_window, picker_window)
+    }
+
+    fn exit_when_all_windows_closed(&self) -> bool {
+        false
     }
 }
 
@@ -528,6 +704,18 @@ mod layout_tests {
                 .iter()
                 .all(|line| text_width(line) <= FILE_NAME_MAX_WIDTH)
         );
+    }
+
+    #[test]
+    fn file_manager_windows_start_hidden() {
+        let app = FilerApp::new();
+        let mut builder = SceneBuilder::new();
+        app.scenes().build(&mut builder);
+        let declarations = builder.into_declarations();
+
+        assert_eq!(declarations.len(), 2);
+        assert!(!declarations[0].opens_at_launch);
+        assert!(!declarations[1].opens_at_launch);
     }
 
     #[test]
@@ -918,6 +1106,11 @@ fn run_picker_service(app: FilerApp) {
             if path != DESKTOP_FILE_MANAGER_OBJECT_PATH
                 || interface != DESKTOP_FILE_MANAGER_INTERFACE
             {
+                continue;
+            }
+            if method == DESKTOP_FILE_MANAGER_SHOW_METHOD {
+                open_window("main");
+                let _ = connection.send_method_return(0, Vec::new());
                 continue;
             }
             if method != DESKTOP_FILE_MANAGER_OPEN_FILE_METHOD {
