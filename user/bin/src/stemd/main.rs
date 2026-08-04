@@ -1447,18 +1447,7 @@ fn handle_sbus_message(
     use sbus::Message;
 
     match msg {
-        Message::CallMethod {
-            destination,
-            path,
-            interface,
-            method,
-            args,
-        } => {
-            println!(
-                "[sbus] CallMethod: dest={} path={} interface={} method={}",
-                destination, path, interface, method
-            );
-
+        Message::CallMethod { method, args, .. } => {
             // Get the serial from the message
             // For now, we don't have access to the serial number in the parsed message
             // We'll use 0 as a placeholder
@@ -1467,8 +1456,6 @@ fn handle_sbus_message(
             // Handle the method call
             match method.as_str() {
                 "OpenPath" => {
-                    println!("[sbus] Handling OpenPath method");
-
                     let path = match args.first() {
                         Some(Argument::String(path)) if !path.is_empty() => path,
                         _ => {
@@ -1484,8 +1471,7 @@ fn handle_sbus_message(
                     };
 
                     match open_path(path) {
-                        Ok(pid) => {
-                            println!("[sbus] OpenPath launched PID={}", pid);
+                        Ok(_) => {
                             if let Some(conn) = conn_guard.as_mut() {
                                 let _ = conn.send_method_return(
                                     serial,
@@ -1494,7 +1480,6 @@ fn handle_sbus_message(
                             }
                         }
                         Err(error) => {
-                            println!("[sbus] OpenPath failed: {}", error);
                             if let Some(conn) = conn_guard.as_mut() {
                                 let _ = conn.send_method_error(
                                     serial,
@@ -1508,11 +1493,8 @@ fn handle_sbus_message(
                     Ok(())
                 }
                 "LaunchOrFocus" => {
-                    println!("[sbus] Handling LaunchOrFocus method");
-
                     // Extract app_id from arguments
                     if args.is_empty() {
-                        println!("[sbus] LaunchOrFocus: missing app_id argument");
                         if let Some(conn) = conn_guard.as_mut() {
                             let result: core::result::Result<(), sbus::Error> = conn
                                 .send_method_error(
@@ -1528,7 +1510,6 @@ fn handle_sbus_message(
                     let app_id = match &args[0] {
                         Argument::String(s) => s,
                         _ => {
-                            println!("[sbus] LaunchOrFocus: invalid argument type");
                             if let Some(conn) = conn_guard.as_mut() {
                                 let result: core::result::Result<(), sbus::Error> = conn
                                     .send_method_error(
@@ -1547,18 +1528,11 @@ fn handle_sbus_message(
                         None
                     };
 
-                    println!("[sbus] LaunchOrFocus: app_id={}", app_id);
-
                     // Check if the app is already running
                     if let Some(running_app) = find_running_app(app_id) {
-                        println!(
-                            "[sbus] App {} is already running (PID={}), focusing",
-                            app_id, running_app.pid
-                        );
                         // Focus the existing window
                         match focus_window_by_app_id(app_id) {
                             Ok(_) => {
-                                println!("[sbus] Successfully focused window for {}", app_id);
                                 if let Some(conn) = conn_guard.as_mut() {
                                     let result: core::result::Result<(), sbus::Error> = conn
                                         .send_method_return(
@@ -1568,27 +1542,17 @@ fn handle_sbus_message(
                                     let _ = result;
                                 }
                             }
-                            Err(e) => {
-                                println!("[sbus] Failed to focus window: {}", e);
+                            Err(_) => {
                                 // Check if the process is still alive
                                 let pid = running_app.pid;
                                 let wait_result = waitpid(pid, 1); // WNOHANG = non-blocking
 
                                 if wait_result.0 > 0 {
                                     // Process has exited (waitpid reaped the zombie)
-                                    println!(
-                                        "[sbus] Process {} has exited (status={}), removing stale entry",
-                                        pid, wait_result.1
-                                    );
                                     remove_running_app_by_pid(pid);
 
-                                    println!("[sbus] Launching new instance of {}", app_id);
                                     match launch_app_by_id(app_id, window_placement) {
-                                        Ok(new_pid) => {
-                                            println!(
-                                                "[sbus] Successfully launched {} (PID={})",
-                                                app_id, new_pid
-                                            );
+                                        Ok(_) => {
                                             if let Some(conn) = conn_guard.as_mut() {
                                                 let result: core::result::Result<(), sbus::Error> =
                                                     conn.send_method_return(
@@ -1601,7 +1565,6 @@ fn handle_sbus_message(
                                             }
                                         }
                                         Err(launch_err) => {
-                                            println!("[sbus] Failed to launch app: {}", launch_err);
                                             if let Some(conn) = conn_guard.as_mut() {
                                                 let result: core::result::Result<(), sbus::Error> =
                                                     conn.send_method_error(
@@ -1615,19 +1578,10 @@ fn handle_sbus_message(
                                     }
                                 } else if wait_result.0 < 0 {
                                     // Process doesn't exist (waitpid error)
-                                    println!(
-                                        "[sbus] Process {} doesn't exist, removing stale entry",
-                                        pid
-                                    );
                                     remove_running_app_by_pid(pid);
 
-                                    println!("[sbus] Launching new instance of {}", app_id);
                                     match launch_app_by_id(app_id, window_placement) {
-                                        Ok(new_pid) => {
-                                            println!(
-                                                "[sbus] Successfully launched {} (PID={})",
-                                                app_id, new_pid
-                                            );
+                                        Ok(_) => {
                                             if let Some(conn) = conn_guard.as_mut() {
                                                 let result: core::result::Result<(), sbus::Error> =
                                                     conn.send_method_return(
@@ -1640,7 +1594,6 @@ fn handle_sbus_message(
                                             }
                                         }
                                         Err(launch_err) => {
-                                            println!("[sbus] Failed to launch app: {}", launch_err);
                                             if let Some(conn) = conn_guard.as_mut() {
                                                 let result: core::result::Result<(), sbus::Error> =
                                                     conn.send_method_error(
@@ -1654,10 +1607,6 @@ fn handle_sbus_message(
                                     }
                                 } else {
                                     // wait_result.0 == 0: Process is still alive (WNOHANG returned 0)
-                                    println!(
-                                        "[sbus] Process {} is still alive, window not ready yet",
-                                        pid
-                                    );
                                     if let Some(conn) = conn_guard.as_mut() {
                                         let result: core::result::Result<(), sbus::Error> = conn
                                             .send_method_error(
@@ -1671,11 +1620,9 @@ fn handle_sbus_message(
                             }
                         }
                     } else {
-                        println!("[sbus] App {} is not running, launching", app_id);
                         // Launch the application
                         match launch_app_by_id(app_id, window_placement) {
-                            Ok(pid) => {
-                                println!("[sbus] Successfully launched {} (PID={})", app_id, pid);
+                            Ok(_) => {
                                 if let Some(conn) = conn_guard.as_mut() {
                                     let result: core::result::Result<(), sbus::Error> = conn
                                         .send_method_return(
@@ -1686,7 +1633,6 @@ fn handle_sbus_message(
                                 }
                             }
                             Err(e) => {
-                                println!("[sbus] Failed to launch app: {}", e);
                                 if let Some(conn) = conn_guard.as_mut() {
                                     let result: core::result::Result<(), sbus::Error> = conn
                                         .send_method_error(
@@ -1703,8 +1649,6 @@ fn handle_sbus_message(
                     Ok(())
                 }
                 "GetRunningApps" => {
-                    println!("[sbus] Handling GetRunningApps method");
-
                     let apps = get_running_apps_list();
                     let mut result_args = Vec::new();
 
@@ -1727,8 +1671,6 @@ fn handle_sbus_message(
                     Ok(())
                 }
                 DESKTOP_STEMD_LIST_APPLICATIONS_METHOD => {
-                    println!("[sbus] Handling ListApplications method");
-
                     let mut result_args = Vec::new();
                     for app in list_apps() {
                         // The response is a flat sequence of triples so this
@@ -1783,14 +1725,6 @@ fn handle_sbus_message(
                     // Applications register menus via create_surface() in SWS.
                     // TaskBar receives menu info through FOCUS_CHANGED events.
                     // This handler is kept for backward compatibility only.
-                    println!(
-                        "[sbus] Handling GetAppMenus method for app: {}",
-                        args.first().map_or("", |a| match a {
-                            sbus::Argument::String(s) => s.as_str(),
-                            _ => "",
-                        })
-                    );
-
                     // Extract app_id from arguments
                     let app_id = if !args.is_empty() {
                         match &args[0] {
@@ -1818,7 +1752,6 @@ fn handle_sbus_message(
                     Ok(())
                 }
                 _ => {
-                    println!("[sbus] Unknown method: {}", method);
                     if let Some(conn) = conn_guard.as_mut() {
                         let mut error_msg = String::new();
                         error_msg.push_str("Unknown method: ");
@@ -1833,13 +1766,7 @@ fn handle_sbus_message(
                 }
             }
         }
-        _ => {
-            println!(
-                "[sbus] Received unhandled message type: {:?}",
-                msg.msg_type()
-            );
-            Ok(())
-        }
+        _ => Ok(()),
     }
 }
 
