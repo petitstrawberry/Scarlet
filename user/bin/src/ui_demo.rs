@@ -140,7 +140,7 @@ impl Application for DemoApp {
                 println!("[ui_demo] Menu: Help");
             })),
         ]))
-        .size(Size::new(800.0, 600.0)))
+        .size(Size::new(400.0, 300.0)))
     }
 
     fn debug_logging(&self) -> bool {

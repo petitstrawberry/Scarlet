@@ -19,8 +19,8 @@ use scarlet_ui::{
     SgfxCanvasHandle, SgfxCanvasVertex, SgfxMesh, SgfxTexture, scenes, vstack,
 };
 
-const WINDOW_WIDTH: f32 = 760.0;
-const WINDOW_HEIGHT: f32 = 540.0;
+const WINDOW_WIDTH: f32 = 380.0;
+const WINDOW_HEIGHT: f32 = 270.0;
 const HUD_HEIGHT: f32 = 48.0;
 const WINDOW_CONTENT_LAYOUT: WindowContentLayout = WindowContentLayout::new(true);
 const CONTENT_WIDTH: f32 = WINDOW_WIDTH - WINDOW_CONTENT_LAYOUT.decoration_size().width;
@@ -261,7 +261,7 @@ impl SgfxShowcaseApp {
             Text::new("Open each GPU demo in its own resizable window.").font_size(15.0),
             Spacer::new().frame_height(18.0),
             Button::new("Open Textured Cube").on_click(|| open_window(CUBE_WINDOW_KEY)),
-            Button::new("Open Mesa-style Gears").on_click(|| open_window(GEARS_WINDOW_KEY)),
+            Button::new("Open Gears").on_click(|| open_window(GEARS_WINDOW_KEY)),
             Button::new("Open Mesh Swarm").on_click(|| open_window(SWARM_WINDOW_KEY)),
             Button::new("Open All").on_click(|| {
                 open_window(CUBE_WINDOW_KEY);
@@ -289,8 +289,8 @@ impl Application for SgfxShowcaseApp {
             Window::new("ScarletUI SGFX Showcase", self.launcher_content())
                 .app_id("org.scarlet-os.scarlet-ui-sgfx-showcase")
                 .menu_bar(showcase_menu_bar())
-                .size(Size::new(420.0, 340.0))
-                .min_size(Size::new(360.0, 300.0)),
+                .size(Size::new(320.0, 260.0))
+                .min_size(Size::new(260.0, 220.0)),
             Window::new(
                     "SGFX Textured Cube",
                     self.content(
@@ -307,13 +307,13 @@ impl Application for SgfxShowcaseApp {
                 .app_id("org.scarlet-os.scarlet-ui-sgfx-showcase")
                 .menu_bar(showcase_menu_bar())
                 .size(Size::new(WINDOW_WIDTH, WINDOW_HEIGHT))
-                .min_size(Size::new(360.0, 280.0))
+                .min_size(Size::new(300.0, 220.0))
                 .resizable(true)
                 .background_color(Color::rgb(8u8, 12u8, 22u8)),
             Window::new(
-                    "SGFX Mesa Gears",
+                    "SGFX Gears",
                     self.content(
-                        "Mesa-style Gears",
+                        "Gears",
                         self.gears_canvas,
                         self.gears_frame.clone(),
                         Rc::clone(&self.gears_meter),
@@ -326,7 +326,7 @@ impl Application for SgfxShowcaseApp {
                 .app_id("org.scarlet-os.scarlet-ui-sgfx-showcase")
                 .menu_bar(showcase_menu_bar())
                 .size(Size::new(WINDOW_WIDTH, WINDOW_HEIGHT))
-                .min_size(Size::new(360.0, 280.0))
+                .min_size(Size::new(300.0, 220.0))
                 .resizable(true)
                 .background_color(Color::rgb(8u8, 12u8, 22u8)),
             Window::new(
@@ -345,7 +345,7 @@ impl Application for SgfxShowcaseApp {
                 .app_id("org.scarlet-os.scarlet-ui-sgfx-showcase")
                 .menu_bar(showcase_menu_bar())
                 .size(Size::new(WINDOW_WIDTH, WINDOW_HEIGHT))
-                .min_size(Size::new(360.0, 280.0))
+                .min_size(Size::new(300.0, 220.0))
                 .resizable(true)
                 .background_color(Color::rgb(8u8, 12u8, 22u8)),
         }
@@ -382,7 +382,7 @@ fn showcase_menu_bar() -> MenuBarModel {
                 .on_activate(Arc::new(|| open_window(CUBE_WINDOW_KEY))),
         ),
         MenuEntry::Item(
-            MenuItemModel::new("open-gears", "Open Mesa-style Gears")
+            MenuItemModel::new("open-gears", "Open Gears")
                 .on_activate(Arc::new(|| open_window(GEARS_WINDOW_KEY))),
         ),
         MenuEntry::Item(
@@ -442,7 +442,7 @@ fn gears_frame(
     let phase = animation_seconds;
     let mut frame = base_frame(frame_number);
     let view_projection = matrix_mul(projection(), translation(0.0, 0.0, -6.0));
-    // Mesa's classic gears use one positive rotation and two counter-rotating
+    // The classic gears use one positive rotation and two counter-rotating
     // gears at twice the angular speed with fixed phase offsets.
     let gear_instances = [
         (
