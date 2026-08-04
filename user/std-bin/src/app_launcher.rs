@@ -24,7 +24,8 @@ use scarlet_desktop_config::{
 use scarlet_ui::prelude::*;
 use scarlet_ui::{
     Alignment, Color, ColorPalette, GridView, Icon, IconSize, IconStyle, IconView, KeyCode,
-    PlatformWindow, Spacer, Window, WindowPlacement, hstack, rasterize_icon, vstack,
+    PlatformWindow, Spacer, Window, WindowPlacement, dismiss_window, hstack, rasterize_icon,
+    vstack,
 };
 use scarlet_ui_macros::View;
 use sws_protocol::window_types;
@@ -64,9 +65,6 @@ struct LauncherApp {
     status: State<String>,
     window_id: State<u32>,
     focus_ready: State<bool>,
-    service_ready: State<bool>,
-    show_requested: State<bool>,
-    hide_requested: State<bool>,
 }
 
 impl LauncherApp {
@@ -86,15 +84,10 @@ impl LauncherApp {
         self.launch_application(application);
     }
 
-    fn request_hide(&self) {
-        self.show_requested.set(false);
-        self.hide_requested.set(true);
-    }
-
     fn launch_application(&self, application: ApplicationEntry) {
         if application.app_id == FILE_MANAGER_APP_ID {
             if show_file_manager() {
-                self.request_hide();
+                dismiss_window("main");
             } else {
                 self.status.set(String::from("Could not open Files"));
             }
@@ -113,7 +106,7 @@ impl LauncherApp {
                 ],
             )
         }) {
-            Ok(_) => self.request_hide(),
+            Ok(_) => dismiss_window("main"),
             Err(error) => self
                 .status
                 .set(format!("Could not launch {}: {error:?}", application.name)),
@@ -166,7 +159,7 @@ impl LauncherApp {
                     true
                 }
                 KeyCode::Escape => {
-                    self.request_hide();
+                    dismiss_window("main");
                     true
                 }
                 _ => false,
@@ -315,7 +308,6 @@ impl LauncherApp {
         let key_app = self.clone();
         let submit_app = self.clone();
         let empty_app = self.clone();
-        let cancel_app = self.clone();
         let palette = ColorPalette::default();
         let searching = !self.query.get().trim().is_empty();
         let section_title = if searching {
@@ -332,7 +324,7 @@ impl LauncherApp {
             .border_color(palette.background_tertiary().with_opacity(0.7))
             .focused_border_color(palette.primary().with_opacity(0.8))
             .on_submit(move || submit_app.launch_selected())
-            .on_cancel(move || cancel_app.request_hide())
+            .on_cancel(|| dismiss_window("main"))
             .on_empty(move || empty_app.search_focused.set(false))
             .frame(560.0, 46.0);
         let grid = GridView::new(
@@ -475,11 +467,6 @@ impl Application for LauncherApp {
 
     fn on_window_created(&mut self, _ctx: &WindowContext, window: &mut dyn PlatformWindow) {
         self.window_id.set(window.surface_id());
-        // Keep the resident surface alive so showing the launcher only needs
-        // a restore/focus request instead of surface creation and first-frame
-        // setup on the hot path.
-        let _ = window.minimize();
-        self.service_ready.set(true);
         // A newly created launcher can first receive a FocusChanged event for
         // the window that was focused before it opened. Do not treat that
         // event as a loss of focus until this window has received its own
@@ -496,21 +483,7 @@ impl Application for LauncherApp {
             self.focus_ready.set(true);
         } else if self.focus_ready.get() {
             self.focus_ready.set(false);
-            self.request_hide();
-        }
-    }
-
-    fn on_window_sync(&mut self, _ctx: &WindowContext, window: &mut dyn PlatformWindow) {
-        if self.show_requested.get() {
-            let _ = window.restore();
-            let _ = window.focus();
-            self.show_requested.set(false);
-            self.hide_requested.set(false);
-            self.focus_ready.set(false);
-        } else if self.hide_requested.get() {
-            let _ = window.minimize();
-            self.hide_requested.set(false);
-            self.focus_ready.set(false);
+            dismiss_window("main");
         }
     }
 
@@ -529,9 +502,7 @@ impl Application for LauncherApp {
             .window_type(window_types::ALWAYS_ON_TOP)
             .placement(WindowPlacement::Centered)
             .scene_key("main")
-            .focus_on_create(false)
-            .active_on_focus(false)
-            .open_at_launch(true)
+            .open_at_launch(false)
     }
 
     fn exit_when_all_windows_closed(&self) -> bool {
@@ -660,10 +631,6 @@ fn load_applications() -> (Vec<ApplicationEntry>, String) {
 }
 
 fn run_launcher_service(app: LauncherApp) {
-    while !app.service_ready.get() {
-        thread::sleep(SERVICE_RETRY_DELAY);
-    }
-
     loop {
         let Ok(mut connection) = SbusConnection::connect() else {
             thread::sleep(SERVICE_RETRY_DELAY);
@@ -714,8 +681,6 @@ fn run_launcher_service(app: LauncherApp) {
             app.search_focused.set(false);
             app.selected.set(None);
             app.hovered.set(None);
-            app.show_requested.set(true);
-            app.hide_requested.set(false);
             open_window("main");
             let _ = connection.send_method_return(0, Vec::new());
         }
