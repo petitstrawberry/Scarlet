@@ -32,11 +32,13 @@ const APP_ID: &str = "org.scarlet-os.desktop.launcher";
 const FILE_MANAGER_APP_ID: &str = "org.scarlet-os.desktop.filer";
 const APP_TITLE: &str = "Applications";
 const WINDOW_WIDTH: f32 = 820.0;
-const WINDOW_HEIGHT: f32 = 500.0;
+const WINDOW_HEIGHT: f32 = 540.0;
 const GRID_COLUMNS: usize = 6;
 const GRID_ROW_HEIGHT: f32 = 112.0;
 const GRID_CELL_WIDTH: f32 = 116.0;
 const SEARCH_ROW_HEIGHT: f32 = 72.0;
+const SEARCH_VISIBLE_ROWS: usize = 5;
+const SEARCH_LIST_HEIGHT: f32 = SEARCH_ROW_HEIGHT * SEARCH_VISIBLE_ROWS as f32;
 const SERVICE_RETRY_DELAY: Duration = Duration::from_millis(100);
 const CATALOG_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 
@@ -339,8 +341,12 @@ impl LauncherApp {
                 list_app.application_list_row(index, application, selected)
             },
         );
-        let results: Either<ListView<ApplicationEntry>, GridView<ApplicationEntry>> = if searching {
-            Either::A(list)
+        // Keep the search viewport on an integral number of rows. Without an
+        // explicit height, VStack can give the ScrollView more space than the
+        // launcher surface has left, so the parent clips a row that the
+        // ScrollView still considers visible.
+        let results = if searching {
+            Either::A(list.frame(f32::INFINITY, SEARCH_LIST_HEIGHT))
         } else {
             Either::B(grid)
         };
