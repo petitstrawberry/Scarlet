@@ -104,6 +104,10 @@ impl CpuInfoDevice {
                 let _ = writeln!(output, "util min\t: {}", util.util_min);
                 let _ = writeln!(output, "runnable\t: {}", util.runnable_tasks);
             }
+            if let Some(time) = crate::sched::scheduler::cpu_time_snapshot(cpu_id) {
+                let _ = writeln!(output, "busy time ns\t: {}", time.busy_time_ns);
+                let _ = writeln!(output, "idle time ns\t: {}", time.idle_time_ns);
+            }
             if let Some(policy) = crate::device::cpufreq::cpu_frequency_policy_info(cpu_id) {
                 let _ = writeln!(output, "cpufreq gov\t: {}", policy.governor.as_str());
                 let _ = writeln!(output, "policy cpus\t: 0x{:x}", policy.cpus_mask);

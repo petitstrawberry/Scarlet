@@ -143,6 +143,11 @@ fn swatch(
 }
 
 fn draw_clock(canvas: &mut Canvas, w: u32, h: u32) {
+    // CanvasView retains its backing buffer across View updates. This clock
+    // redraws a complete frame, so clear the previous hands and tick marks
+    // before drawing the current time.
+    canvas.fill_rect(0, 0, w, h, Color::TRANSPARENT);
+
     let utc_ns = time::system_time_ns().unwrap_or(0);
     let offset = time::local_utc_offset_seconds().unwrap_or(0);
     let secs = (utc_ns / 1_000_000_000) as i64 + offset;

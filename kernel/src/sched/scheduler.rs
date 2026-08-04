@@ -750,6 +750,8 @@ static PENDING_RESCHEDULE_IPI: [AtomicBool; MAX_NUM_CPUS] =
     [const { AtomicBool::new(false) }; MAX_NUM_CPUS];
 static TOTAL_BUSY_CPU_TIME_NS: AtomicU64 = AtomicU64::new(0);
 static TOTAL_IDLE_CPU_TIME_NS: AtomicU64 = AtomicU64::new(0);
+static CPU_BUSY_TIME_NS: [AtomicU64; MAX_NUM_CPUS] = [const { AtomicU64::new(0) }; MAX_NUM_CPUS];
+static CPU_IDLE_TIME_NS: [AtomicU64; MAX_NUM_CPUS] = [const { AtomicU64::new(0) }; MAX_NUM_CPUS];
 static CPU_UTIL_AVG: [AtomicU32; MAX_NUM_CPUS] = [const { AtomicU32::new(0) }; MAX_NUM_CPUS];
 static CPU_UTIL_MIN: [AtomicU32; MAX_NUM_CPUS] = [const { AtomicU32::new(0) }; MAX_NUM_CPUS];
 static CPU_RUNNABLE_TASKS: [AtomicUsize; MAX_NUM_CPUS] =
@@ -1224,6 +1226,17 @@ pub struct CpuUsageSnapshot {
     pub idle_time_ns: u64,
 }
 
+/// Cumulative CPU accounting snapshot for one logical CPU.
+#[derive(Debug, Clone, Copy)]
+pub struct CpuTimeSnapshot {
+    /// Scheduler CPU ID.
+    pub cpu_id: usize,
+    /// Cumulative non-idle CPU time in nanoseconds.
+    pub busy_time_ns: u64,
+    /// Cumulative idle task CPU time in nanoseconds.
+    pub idle_time_ns: u64,
+}
+
 /// Scheduler utilization snapshot for one CPU.
 #[derive(Debug, Clone, Copy)]
 pub struct CpuUtilSnapshot {
@@ -1613,8 +1626,10 @@ fn charge_finished_cpu_time(cpu_id: usize, task_id: usize, delta_ns: u64) {
     let idle_id = IDLE_TASK_IDS[cpu_id].load(Ordering::SeqCst);
     if idle_id != 0 && task_id == idle_id {
         TOTAL_IDLE_CPU_TIME_NS.fetch_add(delta_ns, Ordering::SeqCst);
+        CPU_IDLE_TIME_NS[cpu_id].fetch_add(delta_ns, Ordering::SeqCst);
     } else {
         TOTAL_BUSY_CPU_TIME_NS.fetch_add(delta_ns, Ordering::SeqCst);
+        CPU_BUSY_TIME_NS[cpu_id].fetch_add(delta_ns, Ordering::SeqCst);
     }
 }
 
@@ -1894,6 +1909,46 @@ pub fn cpu_usage_snapshot() -> CpuUsageSnapshot {
         busy_time_ns,
         idle_time_ns,
     }
+}
+
+/// Return cumulative busy and idle time for one logical CPU.
+///
+/// The snapshot includes the elapsed time of the task currently running on the
+/// CPU, even when that task has not switched out yet.
+///
+/// # Arguments
+///
+/// * `cpu_id` - Scheduler CPU ID.
+///
+/// # Returns
+///
+/// Per-CPU accounting, or `None` when the CPU ID is invalid or offline.
+pub fn cpu_time_snapshot(cpu_id: usize) -> Option<CpuTimeSnapshot> {
+    if cpu_id >= MAX_NUM_CPUS || !is_cpu_online(cpu_id) {
+        return None;
+    }
+
+    let mut busy_time_ns = CPU_BUSY_TIME_NS[cpu_id].load(Ordering::SeqCst);
+    let mut idle_time_ns = CPU_IDLE_TIME_NS[cpu_id].load(Ordering::SeqCst);
+    let now_ns = get_time_ns();
+
+    if let Some(task_id) = current_task_id(cpu_id)
+        && let Some(task) = TaskPool::get_task(task_id)
+    {
+        let delta_ns = task.current_cpu_delta_ns(now_ns);
+        let idle_id = IDLE_TASK_IDS[cpu_id].load(Ordering::SeqCst);
+        if idle_id != 0 && task_id == idle_id {
+            idle_time_ns = idle_time_ns.saturating_add(delta_ns);
+        } else {
+            busy_time_ns = busy_time_ns.saturating_add(delta_ns);
+        }
+    }
+
+    Some(CpuTimeSnapshot {
+        cpu_id,
+        busy_time_ns,
+        idle_time_ns,
+    })
 }
 
 pub fn complete_deferred_context_switch(cpu_id: usize) {
@@ -5236,6 +5291,8 @@ pub fn reset() {
         CPU_CORE_CLASSES[cpu_id].store(CpuCoreClass::Balanced as u8, Ordering::SeqCst);
         CPU_CAPACITIES[cpu_id].store(DEFAULT_CPU_CAPACITY, Ordering::SeqCst);
         CPU_TOPOLOGY_DOMAINS[cpu_id].store(INVALID_CPU_TOPOLOGY_DOMAIN, Ordering::SeqCst);
+        CPU_BUSY_TIME_NS[cpu_id].store(0, Ordering::SeqCst);
+        CPU_IDLE_TIME_NS[cpu_id].store(0, Ordering::SeqCst);
         DEBUG_REMOTE_ENQUEUE_TASK[cpu_id].store(0, Ordering::SeqCst);
         DEBUG_REMOTE_ENQUEUE_FROM_CPU[cpu_id].store(NO_CPU, Ordering::SeqCst);
         DEBUG_REMOTE_ENQUEUE_SEQ[cpu_id].store(0, Ordering::SeqCst);

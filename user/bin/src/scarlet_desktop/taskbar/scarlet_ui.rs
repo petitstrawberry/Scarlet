@@ -104,7 +104,6 @@ fn connect_sws_with_screen_size_retry() -> core::result::Result<SwsScreenConnect
 #[derive(View, Clone)]
 struct TaskBarApp {
     cpu_usage: State<u8>,
-    memory_usage: State<u8>,
     clock: State<u32>,
     screen_width: State<f32>,
     menu_bar: State<MenuBarModel>,
@@ -124,8 +123,7 @@ impl TaskBarApp {
             items: default_root_menu_items(),
         };
         Self {
-            cpu_usage: State::new(StateId::new(0), 15),
-            memory_usage: State::new(StateId::new(1), 42),
+            cpu_usage: State::new(StateId::new(0), 0),
             clock: State::new(StateId::new(2), 0),
             screen_width: State::new(StateId::new(3), 1920.0),
             menu_bar: State::new(StateId::new(4), menu_bar_from_tree(&root_menu)),
@@ -792,7 +790,6 @@ impl Application for TaskBarApp {
 
     fn scenes(&self) -> impl Scene {
         let cpu = self.cpu_usage.get();
-        let mem = self.memory_usage.get();
         let clock = self.clock.get();
         let screen_width = self.screen_width.get();
         let _menu_bar = self.menu_bar.get();
@@ -821,12 +818,6 @@ impl Application for TaskBarApp {
             hstack! {
                 build_menu_bar_view(&menu_tree.items, active_window_id, self.open_menu_index.clone()),
                 Spacer::new(),
-                Text::new(format!("Mem {}%", mem))
-                    .font_size(12.0)
-                    .color(Color::rgb(0.280, 0.280, 0.310)),
-                Text::new("•")
-                    .font_size(12.0)
-                    .color(Color::rgb(0.600, 0.600, 0.630)),
                 Text::new(format!("CPU {}%", cpu))
                     .font_size(12.0)
                     .color(Color::rgb(0.280, 0.280, 0.310)),
@@ -908,9 +899,8 @@ impl TaskBarApp {
     }
 
     fn start_background_tasks(&mut self) {
-        // CPU/Memory simulation
+        // Sample real scheduler CPU accounting.
         let cpu = self.cpu_usage.clone();
-        let mem = self.memory_usage.clone();
         let open_menu_index = self.open_menu_index.clone();
         let popup_surface_id = self.popup_surface_id.clone();
         let screen_width_popup = self.screen_width.clone();
@@ -925,10 +915,28 @@ impl TaskBarApp {
         let audio_output = self.audio_output_label.clone();
 
         std::thread::spawn(move || {
+            let mut previous_cpu = std::task::cpu_usage();
             loop {
-                cpu.update(|c| *c = (*c + 7) % 85 + 10);
-                mem.update(|m| *m = (*m + 3) % 70 + 25);
                 std::thread::sleep(Duration::from_secs(1));
+
+                if let Some(current) = std::task::cpu_usage() {
+                    if let Some(previous) = previous_cpu {
+                        let busy_delta = current
+                            .busy_time_ns()
+                            .saturating_sub(previous.busy_time_ns());
+                        let idle_delta = current
+                            .idle_time_ns()
+                            .saturating_sub(previous.idle_time_ns());
+                        let total_delta = busy_delta.saturating_add(idle_delta);
+                        if total_delta > 0 {
+                            let percent = ((busy_delta as u128 * 100 + total_delta as u128 / 2)
+                                / total_delta as u128)
+                                .min(100) as u8;
+                            cpu.set(percent);
+                        }
+                    }
+                    previous_cpu = Some(current);
+                }
             }
         });
 
