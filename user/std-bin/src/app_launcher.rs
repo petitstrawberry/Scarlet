@@ -23,9 +23,8 @@ use scarlet_desktop_config::{
 };
 use scarlet_ui::prelude::*;
 use scarlet_ui::{
-    Alignment, Color, ColorPalette, GridView, Icon, IconSize, IconStyle, IconView, KeyCode,
-    PlatformWindow, Spacer, Window, WindowPlacement, dismiss_window, hstack, rasterize_icon,
-    vstack,
+    Alignment, Color, ColorPalette, GridView, Icon, IconSize, IconView, KeyCode, PlatformWindow,
+    Spacer, Window, WindowPlacement, dismiss_window, hstack, vstack,
 };
 use scarlet_ui_macros::View;
 use sws_protocol::window_types;
@@ -444,11 +443,9 @@ fn request_file_manager_window() -> bool {
 
 impl Application for LauncherApp {
     fn init(&mut self) {
-        // Load the catalog while the resident process is still warming up, so
-        // showing the launcher does not wait for the first SBUS round trip or
-        // the initial icon rasterization.
+        // Load the initial catalog before the first window is shown. Icons are
+        // resolved and rasterized by the visible GridView cells on demand.
         let (applications, status) = load_applications();
-        prewarm_icons(&applications);
         self.applications.set(applications.clone());
         self.filtered_applications.set(applications.clone());
         self.selected.set(if applications.is_empty() {
@@ -517,7 +514,6 @@ fn catalog_loader(app: LauncherApp) {
     loop {
         let (applications, status) = load_applications();
         if !loaded_once || applications != previous {
-            prewarm_icons(&applications);
             app.applications.set(applications.clone());
             app.status.set(status);
             app.catalog_revision.update(|revision| {
@@ -527,21 +523,6 @@ fn catalog_loader(app: LauncherApp) {
             loaded_once = true;
         }
         thread::sleep(CATALOG_REFRESH_INTERVAL);
-    }
-}
-
-fn prewarm_icons(applications: &[ApplicationEntry]) {
-    rasterize_icon(
-        Icon::Apps,
-        IconSize::Medium.logical_pixels(),
-        IconStyle::outline(),
-    );
-    for application in applications {
-        rasterize_icon(
-            icon_for_desktop_name(&application.icon),
-            IconSize::ExtraLarge.logical_pixels(),
-            IconStyle::outline(),
-        );
     }
 }
 
