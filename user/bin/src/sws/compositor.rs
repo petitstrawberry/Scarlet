@@ -3458,6 +3458,49 @@ impl Compositor {
             .is_some_and(|window| window.owner_client_id == Some(client_id))
     }
 
+    /// Choose a safe compositor-managed position for a regular window.
+    ///
+    /// A newly created window may arrive before the shell has advertised a
+    /// workarea, and a secondary window may be created when no normal window is
+    /// focused.  Neither case should make an application window appear at the
+    /// display origin.  Keep the existing cascade when a normal window is
+    /// focused, then use the available workarea (or the full output) to center
+    /// the new window and clamp it inside the usable bounds.
+    fn default_window_position(&self, width: u32, height: u32) -> (i32, i32) {
+        let (work_x, work_y, work_width, work_height) =
+            self.workarea
+                .unwrap_or((0, 0, self.screen_width, self.screen_height));
+
+        let focused_pos = self
+            .window_manager
+            .get_focused_window_id()
+            .and_then(|id| self.window_manager.get_window(id))
+            .filter(|window| matches!(window.window_type, super::window::WindowType::Normal))
+            .map(|window| (window.x, window.y));
+
+        let (desired_x, desired_y) = match focused_pos {
+            Some((x, y)) => (x as i64 + 20, y as i64 + 20),
+            None => (
+                work_x as i64 + (work_width as i64 - width as i64).max(0) / 2,
+                work_y as i64 + (work_height as i64 - height as i64).max(0) / 2,
+            ),
+        };
+
+        let work_x = work_x as i64;
+        let work_y = work_y as i64;
+        let max_x = (work_x + work_width as i64 - width as i64).max(work_x);
+        let max_y = (work_y + work_height as i64 - height as i64).max(work_y);
+
+        (
+            desired_x
+                .clamp(work_x, max_x)
+                .clamp(i32::MIN as i64, i32::MAX as i64) as i32,
+            desired_y
+                .clamp(work_y, max_y)
+                .clamp(i32::MIN as i64, i32::MAX as i64) as i32,
+        )
+    }
+
     fn handle_ipc_event(&mut self, event: IpcEvent) -> Result<bool, &'static str> {
         match event {
             IpcEvent::CreateWindow {
@@ -3503,54 +3546,24 @@ impl Compositor {
                         );
                         (x, y)
                     }
-                    sws_protocol::WindowPlacement::Default
-                        if window_type == window_types::NORMAL =>
-                    {
-                        // Normal windows: cascade from focused window or position in workarea
-                        const OFFSET: i32 = 20;
-
-                        // Check if there's a focused Normal window
-                        let focused_pos = self
-                            .window_manager
-                            .get_focused_window_id()
-                            .and_then(|id| self.window_manager.get_window(id))
-                            .filter(|w| matches!(w.window_type, super::window::WindowType::Normal))
-                            .map(|w| (w.x, w.y));
-
-                        match (focused_pos, self.workarea) {
-                            (Some((fx, fy)), _) => {
-                                // Cascade from focused window
-                                let x = fx + OFFSET;
-                                let y = fy + OFFSET;
+                    sws_protocol::WindowPlacement::Default => {
+                        match window_type {
+                            window_types::NORMAL | window_types::ALWAYS_ON_TOP => {
+                                let position = self.default_window_position(width, height);
                                 println!(
-                                    "[Compositor] Cascading Normal window from focused window at ({}, {}): ({}, {})",
-                                    fx, fy, x, y
+                                    "[Compositor] Default placement for window #{}: ({}, {})",
+                                    window_id, position.0, position.1
                                 );
-                                (x, y)
+                                position
                             }
-                            (None, Some((wx, wy, _ww, _wh))) => {
-                                // No focused Normal window: position in workarea with padding
-                                const PADDING: i32 = 20;
-                                let x = wx + PADDING;
-                                let y = wy + PADDING;
-                                println!(
-                                    "[Compositor] No focused Normal window, positioning in workarea with padding: ({}, {})",
-                                    x, y
-                                );
-                                (x, y)
-                            }
-                            (None, None) => {
-                                println!(
-                                    "[Compositor] No workarea and no focused window, using (0, 0)"
-                                );
+                            // Shell-owned surfaces intentionally use the output origin.
+                            window_types::TASKBAR | window_types::DESKTOP => {
+                                println!("[Compositor] Positioning shell window at output origin");
                                 (0, 0)
                             }
+                            // IME popups are positioned later from the text-input cursor.
+                            _ => (0, 0),
                         }
-                    }
-                    sws_protocol::WindowPlacement::Default => {
-                        // Non-Normal windows (Taskbar, AlwaysOnTop, Desktop): use (0, 0)
-                        println!("[Compositor] Positioning non-Normal window at (0, 0)");
-                        (0, 0)
                     }
                 };
 
