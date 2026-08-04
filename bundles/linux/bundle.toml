@@ -10,6 +10,11 @@ source = { git = "https://github.com/petitstrawberry/scarlet-bundle-linux", rev 
 subdir = "bundles/rootfs"
 
 [[layers]]
+kind = "bundle"
+source = { git = "https://github.com/petitstrawberry/scarlet-bundle-linux", rev = "8316aebb2ddcf7032120090fbac6a98d22b437f9" }
+subdir = "bundles/mozc"
+
+[[layers]]
 kind = "copy"
 source = "rootfs/data/config/linux-{arch}"
 to = "/data/config/linux-{arch}"

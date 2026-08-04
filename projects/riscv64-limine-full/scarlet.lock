@@ -219,6 +219,17 @@ hash = ""
 type = "path"
 path = "../../user/std-bin"
 
+[[sections.initramfs.layers]]
+kind = "cargo"
+package = "user-bin"
+bin = "fb_test"
+to = "/system/scarlet/bin/fb_test"
+hash = ""
+
+[sections.initramfs.layers.source]
+type = "path"
+path = "../../user/bin"
+
 [sections.rootfs]
 hash = "sha256:92e8ce44d855471d6c2e513d48f66600e05b95ffa87495174994c0fc6c44f6c2"
 
@@ -437,6 +448,17 @@ path = "../../user/std-bin"
 [[sections.rootfs.layers]]
 kind = "cargo"
 package = "user-bin"
+bin = "fb_test"
+to = "/system/scarlet/bin/fb_test"
+hash = ""
+
+[sections.rootfs.layers.source]
+type = "path"
+path = "../../user/bin"
+
+[[sections.rootfs.layers]]
+kind = "cargo"
+package = "user-bin"
 bin = "scarlet_desktop"
 to = "/system/scarlet/bin/scarlet_desktop"
 hash = "sha256:04e237d3c353ba60c9b37db234df6fbb6d25e754dbc339651ad914e85193c30d"
@@ -448,9 +470,9 @@ path = "../../user/bin"
 [[sections.rootfs.layers]]
 kind = "cargo"
 package = "user-bin"
-bin = "scarlet_desktop_background"
-to = "/system/scarlet/bin/scarlet_desktop_background"
-hash = "sha256:5d744fcc078a9887706e16b0a498d0222db0e44726dd5343a411bc300cca8d1d"
+bin = "desktop-background"
+to = "/system/scarlet/bin/desktop-background"
+hash = ""
 
 [sections.rootfs.layers.source]
 type = "path"
@@ -459,9 +481,53 @@ path = "../../user/bin"
 [[sections.rootfs.layers]]
 kind = "cargo"
 package = "user-bin"
-bin = "scarlet_desktop_taskbar"
-to = "/system/scarlet/bin/scarlet_desktop_taskbar"
-hash = "sha256:3582b2655372bfa89fa7ae8b93d045830639adfb20d634a38dfc7fce74417c2a"
+bin = "desktop-settings"
+to = "/system/scarlet/bin/desktop-settings"
+hash = ""
+
+[sections.rootfs.layers.source]
+type = "path"
+path = "../../user/bin"
+
+[[sections.rootfs.layers]]
+kind = "cargo"
+package = "scarlet-std-bin"
+bin = "files"
+to = "/system/scarlet/bin/files"
+hash = ""
+
+[sections.rootfs.layers.source]
+type = "path"
+path = "../../user/std-bin"
+
+[[sections.rootfs.layers]]
+kind = "cargo"
+package = "scarlet-std-bin"
+bin = "launcher"
+to = "/system/scarlet/bin/launcher"
+hash = ""
+
+[sections.rootfs.layers.source]
+type = "path"
+path = "../../user/std-bin"
+
+[[sections.rootfs.layers]]
+kind = "cargo"
+package = "scarlet-std-bin"
+bin = "notepad"
+to = "/system/scarlet/bin/notepad"
+hash = ""
+
+[sections.rootfs.layers.source]
+type = "path"
+path = "../../user/std-bin"
+
+[[sections.rootfs.layers]]
+kind = "cargo"
+package = "user-bin"
+bin = "taskbar"
+to = "/system/scarlet/bin/taskbar"
+hash = ""
 
 [sections.rootfs.layers.source]
 type = "path"
@@ -502,6 +568,27 @@ path = "../../user/bin"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
+bin = "sasctl"
+to = "/system/scarlet/bin/sasctl"
+hash = ""
+
+[sections.rootfs.layers.source]
+type = "path"
+path = "../../user/std-bin"
+
+[[sections.rootfs.layers]]
+kind = "cargo"
+package = "user-bin"
+bin = "mplayer"
+to = "/system/scarlet/bin/mplayer"
+hash = ""
+
+[sections.rootfs.layers.source]
+type = "path"
+path = "../../user/bin"
+
+[[sections.rootfs.layers]]
+kind = "cargo"
 package = "user-bin"
 bin = "ui-demo"
 to = "/system/scarlet/bin/ui-demo"
@@ -510,6 +597,38 @@ hash = "sha256:bdcfbce981e755162f654f004a28eecc2cfdb65d653afb9bad1fffe91bd741c6"
 [sections.rootfs.layers.source]
 type = "path"
 path = "../../user/bin"
+
+[[sections.rootfs.layers]]
+kind = "cargo"
+package = "user-bin"
+bin = "ui-benchmark"
+to = "/system/scarlet/bin/ui-benchmark"
+hash = ""
+
+[sections.rootfs.layers.source]
+type = "path"
+path = "../../user/bin"
+
+[[sections.rootfs.layers]]
+kind = "cargo"
+package = "scarlet-ui-widget-factory"
+bin = "scarlet-ui-widget-factory"
+to = "/system/scarlet/bin/widget_factory"
+hash = ""
+
+[sections.rootfs.layers.source]
+type = "path"
+path = "../../../scarlet-ui/examples/widget-factory"
+
+[[sections.rootfs.layers]]
+kind = "cargo"
+bin = "ui-sgfx-showcase"
+to = "/system/scarlet/bin/ui-sgfx-showcase"
+hash = ""
+
+[sections.rootfs.layers.source]
+type = "path"
+path = "../../user/std-bin"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
@@ -532,6 +651,16 @@ hash = "sha256:9ac4059d910c8b093e490e95f5a2c43a7ae4cfc9d72be79d63584bcef6ef8d1c"
 [sections.rootfs.layers.source]
 type = "path"
 path = "../../user/bin"
+
+[[sections.rootfs.layers]]
+kind = "cargo"
+bin = "task_manager"
+to = "/system/scarlet/bin/task_manager"
+hash = ""
+
+[sections.rootfs.layers.source]
+type = "path"
+path = "../../user/std-bin"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
@@ -577,9 +706,10 @@ path = "../../user/std-bin"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
-bin = "video_player"
-to = "/system/scarlet/bin/video_player"
-hash = "sha256:c56b8b8d6f572f4f48f13375f6077370e735e90324719e9fd1da235224948641"
+package = "user-bin"
+bin = "sgfx_probe"
+to = "/system/scarlet/bin/sgfx_probe"
+hash = ""
 
 [sections.rootfs.layers.source]
 type = "path"
@@ -587,14 +717,33 @@ path = "../../user/bin"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
-package = "user-bin"
-bin = "gpu_probe"
-to = "/system/scarlet/bin/gpu_probe"
-hash = "sha256:72388603c6b2dad5950079c04a9786b02dfd3e1ce31fbc0c4f18cf26b319ed53"
+bin = "sgfx_cube"
+to = "/system/scarlet/bin/sgfx_cube"
+hash = ""
 
 [sections.rootfs.layers.source]
 type = "path"
-path = "../../user/bin"
+path = "../../user/std-bin"
+
+[[sections.rootfs.layers]]
+kind = "cargo"
+bin = "sgfx_texture"
+to = "/system/scarlet/bin/sgfx_texture"
+hash = ""
+
+[sections.rootfs.layers.source]
+type = "path"
+path = "../../user/std-bin"
+
+[[sections.rootfs.layers]]
+kind = "cargo"
+bin = "sgfx_showcase"
+to = "/system/scarlet/bin/sgfx_showcase"
+hash = ""
+
+[sections.rootfs.layers.source]
+type = "path"
+path = "../../user/std-bin"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
@@ -689,6 +838,31 @@ type = "path"
 path = "../../user/bin"
 
 [[sections.rootfs.layers]]
+kind = "cargo"
+package = "user-bin"
+bin = "dcp_flip_test"
+to = "/system/scarlet/bin/dcp_flip_test"
+hash = ""
+
+[sections.rootfs.layers.source]
+type = "path"
+path = "../../user/bin"
+
+[[sections.rootfs.layers]]
+kind = "cargo"
+git = "https://github.com/petitstrawberry/carmine"
+resolved_rev = "6a2eb99cd50e09d82a3f61431a722767df9dfae1"
+package = "carmine"
+bin = "carmine"
+to = "/system/scarlet/bin/carmine"
+hash = ""
+
+[sections.rootfs.layers.source]
+type = "git"
+url = "https://github.com/petitstrawberry/carmine"
+rev = "6a2eb99cd50e09d82a3f61431a722767df9dfae1"
+
+[[sections.rootfs.layers]]
 kind = "archive"
 to = "/system/linux-riscv64"
 format = "tar-zst"
@@ -701,9 +875,39 @@ url = "https://github.com/petitstrawberry/scarlet-bundle-linux/releases/download
 sha256 = "sha256:b5911d2128a83d9bac7f79291a9e0ea2c5106b8fdfbb92d6b0e2177eee83ac4d"
 
 [[sections.rootfs.layers]]
+kind = "archive"
+to = "/system/linux-riscv64"
+format = "tar-zst"
+strip_components = 1
+hash = "sha256:72458aa767224fa7bd87a324a47faeeb524aad109b8c98aaaf83d304829eb5eb"
+
+[sections.rootfs.layers.source]
+type = "archive"
+url = "https://github.com/petitstrawberry/scarlet-bundle-linux/releases/download/v0.1.0/mozc-riscv64-v0.1.0.tar.zst"
+sha256 = "sha256:72458aa767224fa7bd87a324a47faeeb524aad109b8c98aaaf83d304829eb5eb"
+
+[[sections.rootfs.layers]]
+kind = "cargo"
+package = "video_player"
+bin = "video_player"
+features = [
+    "av1-stateful-hw",
+    "h264-stateful-hw",
+    "h264-stateless-hw",
+    "mp4-aac",
+]
+default-features = false
+to = "/system/scarlet/bin/video_player"
+hash = ""
+
+[sections.rootfs.layers.source]
+type = "path"
+path = "../../user/video_player"
+
+[[sections.rootfs.layers]]
 kind = "cargo"
 git = "https://github.com/petitstrawberry/yt-for-scarlet"
-resolved_rev = "589a6dad71d1bac22f72b3964b9470217cfe3355"
+resolved_rev = "b201e44f3b61acaa116048771ef0eaa7dcb74324"
 package = "yt"
 bin = "yt"
 to = "/system/scarlet/bin/yt"
@@ -712,12 +916,12 @@ hash = "sha256:5222d799d75492760026d0138b5f13829f88c5290443fd17c6de0709ccf36fbc"
 [sections.rootfs.layers.source]
 type = "git"
 url = "https://github.com/petitstrawberry/yt-for-scarlet"
-rev = "589a6dad71d1bac22f72b3964b9470217cfe3355"
+rev = "b201e44f3b61acaa116048771ef0eaa7dcb74324"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
 git = "https://github.com/petitstrawberry/yt-for-scarlet"
-resolved_rev = "589a6dad71d1bac22f72b3964b9470217cfe3355"
+resolved_rev = "b201e44f3b61acaa116048771ef0eaa7dcb74324"
 package = "yt-gui"
 bin = "yt-gui"
 to = "/system/scarlet/bin/yt-gui"
@@ -726,4 +930,4 @@ hash = "sha256:072a7fd5f4156b4eec4efbfccb581135f1fdc617d646face8fe84ef25061ec6f"
 [sections.rootfs.layers.source]
 type = "git"
 url = "https://github.com/petitstrawberry/yt-for-scarlet"
-rev = "589a6dad71d1bac22f72b3964b9470217cfe3355"
+rev = "b201e44f3b61acaa116048771ef0eaa7dcb74324"
