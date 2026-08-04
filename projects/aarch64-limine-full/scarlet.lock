@@ -867,6 +867,18 @@ url = "https://github.com/petitstrawberry/carmine"
 rev = "c5da3050418352711f993a822807b8dce310001f"
 
 [[sections.rootfs.layers]]
+kind = "archive"
+to = "/system/linux-aarch64"
+format = "tar-zst"
+strip_components = 1
+hash = "sha256:4d94a1870a9be510987c61eb7371d35a7d31415ca49a56ecb8df74791a4e2eb0"
+
+[sections.rootfs.layers.source]
+type = "archive"
+url = "https://github.com/petitstrawberry/scarlet-bundle-linux/releases/download/v0.1.0/rootfs-aarch64-v0.1.0.tar.zst"
+sha256 = "sha256:4d94a1870a9be510987c61eb7371d35a7d31415ca49a56ecb8df74791a4e2eb0"
+
+[[sections.rootfs.layers]]
 kind = "cargo"
 package = "video_player"
 bin = "video_player"

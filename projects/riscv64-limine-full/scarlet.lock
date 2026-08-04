@@ -689,6 +689,18 @@ type = "path"
 path = "../../user/bin"
 
 [[sections.rootfs.layers]]
+kind = "archive"
+to = "/system/linux-riscv64"
+format = "tar-zst"
+strip_components = 1
+hash = "sha256:b5911d2128a83d9bac7f79291a9e0ea2c5106b8fdfbb92d6b0e2177eee83ac4d"
+
+[sections.rootfs.layers.source]
+type = "archive"
+url = "https://github.com/petitstrawberry/scarlet-bundle-linux/releases/download/v0.1.0/rootfs-riscv64-v0.1.0.tar.zst"
+sha256 = "sha256:b5911d2128a83d9bac7f79291a9e0ea2c5106b8fdfbb92d6b0e2177eee83ac4d"
+
+[[sections.rootfs.layers]]
 kind = "cargo"
 git = "https://github.com/petitstrawberry/yt-for-scarlet"
 resolved_rev = "589a6dad71d1bac22f72b3964b9470217cfe3355"
