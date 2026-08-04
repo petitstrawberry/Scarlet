@@ -444,6 +444,23 @@ fn request_file_manager_window() -> bool {
 
 impl Application for LauncherApp {
     fn init(&mut self) {
+        // Load the catalog while the resident process is still warming up, so
+        // showing the launcher does not wait for the first SBUS round trip or
+        // the initial icon rasterization.
+        let (applications, status) = load_applications();
+        prewarm_icons(&applications);
+        self.applications.set(applications.clone());
+        self.filtered_applications.set(applications.clone());
+        self.selected.set(if applications.is_empty() {
+            None
+        } else {
+            Some(0)
+        });
+        self.status.set(status);
+        self.catalog_revision.update(|revision| {
+            *revision = revision.saturating_add(1);
+        });
+
         let loader_app = self.clone();
         thread::spawn(move || catalog_loader(loader_app));
     }
@@ -494,9 +511,8 @@ impl Application for LauncherApp {
 }
 
 fn catalog_loader(app: LauncherApp) {
-    thread::sleep(Duration::from_millis(50));
-    let mut previous = Vec::new();
-    let mut loaded_once = false;
+    let mut previous = app.applications.get();
+    let mut loaded_once = !previous.is_empty();
 
     loop {
         let (applications, status) = load_applications();
