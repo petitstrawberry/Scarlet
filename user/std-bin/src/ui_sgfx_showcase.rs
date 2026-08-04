@@ -15,12 +15,12 @@ use scarlet_ui::geometry::{Point, Size};
 use scarlet_ui::prelude::*;
 use scarlet_ui::renderer::PaintContext;
 use scarlet_ui::{
-    MenuBarModel, MenuEntry, MenuItemModel, SgfxCanvas, SgfxCanvasDraw, SgfxCanvasFrame,
-    SgfxCanvasHandle, SgfxCanvasVertex, SgfxMesh, SgfxTexture, scenes, vstack,
+    Icon, MenuBarModel, MenuEntry, MenuItemModel, SgfxCanvas, SgfxCanvasDraw, SgfxCanvasFrame,
+    SgfxCanvasHandle, SgfxCanvasVertex, SgfxMesh, SgfxTexture, hstack, scenes, vstack,
 };
 
-const WINDOW_WIDTH: f32 = 570.0;
-const WINDOW_HEIGHT: f32 = 570.0;
+const WINDOW_WIDTH: f32 = 480.0;
+const WINDOW_HEIGHT: f32 = 480.0;
 const HUD_HEIGHT: f32 = 48.0;
 const WINDOW_CONTENT_LAYOUT: WindowContentLayout = WindowContentLayout::new(true);
 const CONTENT_WIDTH: f32 = WINDOW_WIDTH - WINDOW_CONTENT_LAYOUT.decoration_size().width;
@@ -259,18 +259,56 @@ impl SgfxShowcaseApp {
         vstack! {
             Text::new("ScarletUI SGFX Showcase").font_size(24.0),
             Text::new("Open each GPU demo in its own resizable window.").font_size(15.0),
-            Spacer::new().frame_height(18.0),
-            Button::new("Open Textured Cube").on_click(|| open_window(CUBE_WINDOW_KEY)),
-            Button::new("Open Gears").on_click(|| open_window(GEARS_WINDOW_KEY)),
-            Button::new("Open Mesh Swarm").on_click(|| open_window(SWARM_WINDOW_KEY)),
-            Button::new("Open All").on_click(|| {
-                open_window(CUBE_WINDOW_KEY);
-                open_window(GEARS_WINDOW_KEY);
-                open_window(SWARM_WINDOW_KEY);
-            }),
+            Spacer::new().frame_height(14.0),
+            hstack! {
+                launcher_button(
+                    "Textured Cube",
+                    Icon::DeviceDesktop,
+                    150.0,
+                    || open_window(CUBE_WINDOW_KEY),
+                ),
+                launcher_button("Gears", Icon::Settings, 150.0, || {
+                    open_window(GEARS_WINDOW_KEY)
+                }),
+            }
+            .spacing(10.0),
+            hstack! {
+                launcher_button(
+                    "Mesh Swarm",
+                    Icon::Apps,
+                    150.0,
+                    || open_window(SWARM_WINDOW_KEY),
+                ),
+                launcher_button("Open All", Icon::LayoutGrid, 150.0, || {
+                    open_window(CUBE_WINDOW_KEY);
+                    open_window(GEARS_WINDOW_KEY);
+                    open_window(SWARM_WINDOW_KEY);
+                }),
+            }
+            .spacing(10.0),
         }
-        .padding(24.0)
+        .spacing(8.0)
+        .padding(18.0)
     }
+}
+
+fn launcher_button(
+    label: &'static str,
+    icon: Icon,
+    width: f32,
+    on_click: impl Fn() + 'static,
+) -> impl View + Clone {
+    let palette = ColorPalette::default();
+    Button::new(label)
+        .icon(icon)
+        .icon_color(palette.primary())
+        .header_style()
+        .background_color(palette.background_secondary().with_opacity(0.86))
+        .text_color(palette.text())
+        .font_size(14.0)
+        .padding(8.0)
+        .frame(width, 46.0)
+        .on_click(on_click)
 }
 
 impl View for SgfxShowcaseApp {
@@ -289,8 +327,8 @@ impl Application for SgfxShowcaseApp {
             Window::new("ScarletUI SGFX Showcase", self.launcher_content())
                 .app_id("org.scarlet-os.scarlet-ui-sgfx-showcase")
                 .menu_bar(showcase_menu_bar())
-                .size(Size::new(480.0, 480.0))
-                .min_size(Size::new(390.0, 390.0)),
+                .size(Size::new(360.0, 360.0))
+                .min_size(Size::new(300.0, 300.0)),
             Window::new(
                     "SGFX Textured Cube",
                     self.content(
@@ -307,7 +345,7 @@ impl Application for SgfxShowcaseApp {
                 .app_id("org.scarlet-os.scarlet-ui-sgfx-showcase")
                 .menu_bar(showcase_menu_bar())
                 .size(Size::new(WINDOW_WIDTH, WINDOW_HEIGHT))
-                .min_size(Size::new(400.0, 400.0))
+                .min_size(Size::new(340.0, 340.0))
                 .resizable(true)
                 .background_color(Color::rgb(8u8, 12u8, 22u8)),
             Window::new(
@@ -326,7 +364,7 @@ impl Application for SgfxShowcaseApp {
                 .app_id("org.scarlet-os.scarlet-ui-sgfx-showcase")
                 .menu_bar(showcase_menu_bar())
                 .size(Size::new(WINDOW_WIDTH, WINDOW_HEIGHT))
-                .min_size(Size::new(400.0, 400.0))
+                .min_size(Size::new(340.0, 340.0))
                 .resizable(true)
                 .background_color(Color::rgb(8u8, 12u8, 22u8)),
             Window::new(
@@ -345,7 +383,7 @@ impl Application for SgfxShowcaseApp {
                 .app_id("org.scarlet-os.scarlet-ui-sgfx-showcase")
                 .menu_bar(showcase_menu_bar())
                 .size(Size::new(WINDOW_WIDTH, WINDOW_HEIGHT))
-                .min_size(Size::new(400.0, 400.0))
+                .min_size(Size::new(340.0, 340.0))
                 .resizable(true)
                 .background_color(Color::rgb(8u8, 12u8, 22u8)),
         }
