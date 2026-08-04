@@ -267,3 +267,10 @@ source = "../../user/bin"
 package = "user-bin"
 bin = "dcp_flip_test"
 to = "/system/scarlet/bin/dcp_flip_test"
+
+[[layers]]
+kind = "cargo"
+source = { git = "https://github.com/petitstrawberry/carmine" }
+package = "carmine"
+bin = "carmine"
+to = "/system/scarlet/bin/carmine"

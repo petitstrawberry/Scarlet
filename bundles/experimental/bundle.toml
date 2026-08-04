@@ -29,6 +29,3 @@ source = { git = "https://github.com/petitstrawberry/yt-for-scarlet" }
 package = "yt-gui"
 bin = "yt-gui"
 to = "/system/scarlet/bin/yt-gui"
-
-# Carmine's pinned source targets an older ScarletUI event API. Keep it out of
-# this image until its source builds against the root-local ScarletUI patch.
