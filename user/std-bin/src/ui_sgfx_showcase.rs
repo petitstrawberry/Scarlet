@@ -296,7 +296,7 @@ fn launcher_button(
     label: &'static str,
     icon: Icon,
     width: f32,
-    on_click: impl Fn() + 'static,
+    on_click: impl Fn() + Clone + 'static,
 ) -> impl View + Clone {
     let palette = ColorPalette::default();
     Button::new(label)
