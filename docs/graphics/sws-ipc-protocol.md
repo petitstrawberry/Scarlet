@@ -609,6 +609,26 @@ Payload (16 bytes):
 | 10     | 2    | `code`  | u16 |
 | 12     | 4    | `value` | i32 |
 
+Pointer-motion semantics:
+
+- A motion sample is encoded as window-local `EV_ABS` / `ABS_X`, then
+  `EV_ABS` / `ABS_Y`, followed by `EV_SYN` / `SYN_REPORT`.
+- SWS tracks pointer focus independently from keyboard focus and routes normal
+  motion to the topmost window under the global cursor.
+- When pointer focus changes, SWS first sends one final, unclipped motion sample
+  to the previous window. Its coordinates may be outside that window's bounds;
+  clients use this sample to derive pointer leave and clear hover state. SWS
+  then sends the in-bounds sample to the new pointer-focused window.
+- Pressing the left button creates an implicit pointer grab for the target
+  window. Motion and the matching release continue to that window with
+  unclipped coordinates, while client-side hit testing remains responsible for
+  hover and click-cancellation within the surface. After release, SWS transfers
+  pointer focus to the actual window under the cursor even if the cursor does
+  not move again.
+
+The same pointer-motion and implicit-grab semantics apply when the packets are
+wrapped in `EXTENSION_INPUT_EVENT`.
+
 #### `ERROR` (type = 13)
 
 Payload (at least 4 bytes): `code: u32`

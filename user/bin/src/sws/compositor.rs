@@ -510,6 +510,8 @@ pub struct Compositor {
     next_frame_deadline_ns: Option<u64>,
     left_button_down: bool,
     last_left_down_cursor: Option<(i32, i32)>,
+    /// Window currently owning pointer hover while no implicit button grab is active.
+    pointer_focus_window_id: Option<u32>,
     pointer_grab_window_id: Option<u32>,
     move_drag: Option<MoveDragState>,
     resize_drag: Option<ResizeDragState>,
@@ -688,6 +690,7 @@ impl Compositor {
             next_frame_deadline_ns: None,
             left_button_down: false,
             last_left_down_cursor: None,
+            pointer_focus_window_id: None,
             pointer_grab_window_id: None,
             move_drag: None,
             resize_drag: None,
@@ -2434,6 +2437,38 @@ impl Compositor {
         self.send_mouse_position_to_window_coords(window_id, window, window_x, window_y);
     }
 
+    /// Update the surface that owns pointer hover.
+    ///
+    /// SWS input packets carry absolute coordinates rather than a separate
+    /// leave message. Before changing targets, send one final unclipped motion
+    /// to the previous window so clients can derive a pointer-exit transition.
+    fn update_pointer_focus(&mut self, next_window_id: Option<u32>) {
+        if self.pointer_focus_window_id == next_window_id {
+            return;
+        }
+
+        if let Some(previous_window_id) = self.pointer_focus_window_id
+            && let Some(previous_window) = self.window_manager.get_window(previous_window_id)
+        {
+            self.send_mouse_position_to_window_unclipped(previous_window_id, previous_window);
+        }
+
+        self.pointer_focus_window_id = next_window_id;
+    }
+
+    /// Route the current pointer position to the topmost window under it.
+    fn route_pointer_motion_at_cursor(&mut self) {
+        let target_id = self
+            .window_manager
+            .window_at_point(self.cursor.x, self.cursor.y);
+        self.update_pointer_focus(target_id);
+        if let Some(target_id) = target_id
+            && let Some(window) = self.window_manager.get_window(target_id)
+        {
+            self.send_mouse_position_to_window(target_id, window);
+        }
+    }
+
     fn wait_for_event_signal(&mut self) {
         let Ok(stream) = self.wake_read.as_stream() else {
             return;
@@ -2702,17 +2737,14 @@ impl Compositor {
 
                 if let Some(grab_id) = self.pointer_grab_window_id {
                     if let Some(window) = self.window_manager.get_window(grab_id) {
+                        self.pointer_focus_window_id = Some(grab_id);
                         self.send_mouse_position_to_window_unclipped(grab_id, window);
                         return Ok(true);
                     }
                 }
 
-                // Route mouse move to focused window (converted to absolute coordinates)
-                if let Some(focused_id) = self.window_manager.get_focused_window_id() {
-                    if let Some(window) = self.window_manager.get_window(focused_id) {
-                        self.send_mouse_position_to_window(focused_id, window);
-                    }
-                }
+                // Pointer focus follows geometry, independently from keyboard focus.
+                self.route_pointer_motion_at_cursor();
 
                 Ok(true)
             }
@@ -2782,20 +2814,13 @@ impl Compositor {
 
                 if let Some(grab_id) = self.pointer_grab_window_id {
                     if let Some(window) = self.window_manager.get_window(grab_id) {
+                        self.pointer_focus_window_id = Some(grab_id);
                         self.send_mouse_position_to_window_unclipped(grab_id, window);
                         return Ok(true);
                     }
                 }
 
-                // Route mouse position to the window under the cursor (TaskBar needs hover input).
-                if let Some(win_id) = self
-                    .window_manager
-                    .window_at_point(self.cursor.x, self.cursor.y)
-                {
-                    if let Some(window) = self.window_manager.get_window(win_id) {
-                        self.send_mouse_position_to_window(win_id, window);
-                    }
-                }
+                self.route_pointer_motion_at_cursor();
 
                 Ok(true)
             }
@@ -2926,6 +2951,7 @@ impl Compositor {
                         .window_at_point(self.cursor.x, self.cursor.y);
                     if let Some(win_id) = win_id_opt {
                         self.pointer_grab_window_id = Some(win_id);
+                        self.update_pointer_focus(Some(win_id));
                         // Only change focus if the window accepts focus
                         // Taskbar and Desktop windows are global UI elements that don't steal focus
                         if self.window_manager.window_accepts_focus(win_id) {
@@ -2970,6 +2996,7 @@ impl Compositor {
                         }
                     } else {
                         self.pointer_grab_window_id = None;
+                        self.update_pointer_focus(None);
                     }
 
                     // Normal click behavior (focus/raise).
@@ -3041,6 +3068,13 @@ impl Compositor {
                             );
                         }
                     }
+                }
+
+                // Ending the implicit grab transfers pointer hover to the
+                // actual window under the cursor, even when the mouse stays
+                // stationary after release.
+                if button == key_codes::BTN_LEFT && !pressed {
+                    self.route_pointer_motion_at_cursor();
                 }
 
                 Ok(true)
@@ -3149,6 +3183,12 @@ impl Compositor {
     }
 
     fn clear_interaction_state_for_removed_windows(&mut self, window_ids: &[u32]) {
+        if let Some(window_id) = self.pointer_focus_window_id
+            && Self::window_id_in(window_ids, window_id)
+        {
+            self.pointer_focus_window_id = None;
+        }
+
         if let Some(window_id) = self.pointer_grab_window_id {
             if Self::window_id_in(window_ids, window_id) {
                 self.pointer_grab_window_id = None;
