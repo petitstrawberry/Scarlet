@@ -98,15 +98,15 @@ name = "scarlet_desktop"
 path = "src/scarlet_desktop/main.rs"
 
 [[bin]]
-name = "scarlet_desktop_background"
+name = "desktop-background"
 path = "src/scarlet_desktop/background/main.rs"
 
 [[bin]]
-name = "scarlet_desktop_settingsd"
+name = "desktop-settings"
 path = "src/scarlet_desktop/settingsd.rs"
 
 [[bin]]
-name = "scarlet_desktop_taskbar"
+name = "taskbar"
 path = "src/scarlet_desktop/taskbar/scarlet_ui.rs"
 
 [[bin]]

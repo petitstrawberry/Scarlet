@@ -43,15 +43,13 @@ dependencies = [
 [[package]]
 name = "sbus"
 version = "0.1.0"
-dependencies = [
- "scarlet-std",
-]
 
 [[package]]
 name = "sbus-client"
 version = "0.1.0"
 dependencies = [
  "sbus",
+ "scarlet-os",
  "scarlet-std",
 ]
 
@@ -60,15 +58,34 @@ name = "scarlet-abi"
 version = "0.16.0"
 
 [[package]]
+name = "scarlet-os"
+version = "0.16.0"
+dependencies = [
+ "scarlet-abi",
+ "scarlet-rt",
+ "scarlet-sys",
+]
+
+[[package]]
+name = "scarlet-rt"
+version = "0.16.0"
+dependencies = [
+ "lock_api",
+ "scarlet-sys",
+ "spin",
+ "talc",
+]
+
+[[package]]
 name = "scarlet-std"
 version = "0.16.0"
 dependencies = [
  "hashbrown",
- "lock_api",
  "scarlet-abi",
+ "scarlet-os",
+ "scarlet-rt",
  "scarlet-sys",
  "spin",
- "talc",
 ]
 
 [[package]]
@@ -101,3 +118,23 @@ checksum = "a3ae828aa394de34c7de08f522d1b86bd1c182c668d27da69caadda00590f26d"
 dependencies = [
  "lock_api",
 ]
+
+[[patch.unused]]
+name = "scarlet-ui"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "scarlet-ui-macros"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "sgfx"
+version = "0.16.0"
+
+[[patch.unused]]
+name = "sws-client"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "sws-protocol"
+version = "0.16.0"

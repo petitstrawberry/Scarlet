@@ -1824,10 +1824,7 @@ impl GpuImage {
     /// not a valid GPU image.
     pub fn from_handle(handle: Handle) -> HandleResult<Self> {
         let mut info = GpuImageInfo::new();
-        handle.control(
-            commands::GPU_IMAGE_QUERY_INFO,
-            &mut info as *mut _ as usize,
-        )?;
+        handle.control(commands::GPU_IMAGE_QUERY_INFO, &mut info as *mut _ as usize)?;
         result_to_handle_error(info.result)?;
         if info.command_resource_token == 0 {
             return Err(HandleError::InvalidHandle);

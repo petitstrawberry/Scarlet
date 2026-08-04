@@ -353,10 +353,8 @@ impl WaylandBridge {
         self.sws_connection = Some(sws_socket_mut);
         let extension_name = b"wayland_bridge";
         let payload = protocol_sws::payload_register_extension(extension_name);
-        let request_id = self.send_sws_request(
-            protocol_sws::client_msg::REGISTER_EXTENSION,
-            &payload,
-        )?;
+        let request_id =
+            self.send_sws_request(protocol_sws::client_msg::REGISTER_EXTENSION, &payload)?;
         if let protocol_sws::ServerMessage::ExtensionRegistered { extension_id } = self
             .wait_for_sws_message(request_id, |msg| {
                 matches!(msg, protocol_sws::ServerMessage::ExtensionRegistered { .. })
@@ -377,8 +375,7 @@ impl WaylandBridge {
     /// integer, matching the `wl_output.scale` requirement of being a
     /// positive integer.
     fn query_output_scale(&mut self) -> Result<(), &'static str> {
-        let request_id =
-            self.send_sws_request(protocol_sws::client_msg::GET_OUTPUT_SCALE, &[])?;
+        let request_id = self.send_sws_request(protocol_sws::client_msg::GET_OUTPUT_SCALE, &[])?;
 
         if let protocol_sws::ServerMessage::OutputScale { scale_milli } = self
             .wait_for_sws_message(request_id, |msg| {
@@ -685,11 +682,7 @@ impl WaylandBridge {
         Err("SWS request IDs exhausted")
     }
 
-    fn send_sws_request(
-        &mut self,
-        msg_type: u32,
-        payload: &[u8],
-    ) -> Result<u8, &'static str> {
+    fn send_sws_request(&mut self, msg_type: u32, payload: &[u8]) -> Result<u8, &'static str> {
         if payload.len() > protocol_sws::MAX_PAYLOAD_SIZE {
             return Err("SWS request payload is too large");
         }
@@ -699,10 +692,7 @@ impl WaylandBridge {
         let mut frame = Vec::with_capacity(protocol_sws::MessageHeader::SIZE + payload.len());
         frame.extend_from_slice(&header.to_le_bytes());
         frame.extend_from_slice(payload);
-        let connection = self
-            .sws_connection
-            .as_mut()
-            .ok_or("Not connected to SWS")?;
+        let connection = self.sws_connection.as_mut().ok_or("Not connected to SWS")?;
         let mut written = 0;
         while written < frame.len() {
             match connection.write(&frame[written..]) {
@@ -730,8 +720,7 @@ impl WaylandBridge {
             if header.request_id == 0 {
                 return Err("SWS response used reserved request ID zero");
             }
-            self.sws_pending
-                .push((header.request_id, message, handle));
+            self.sws_pending.push((header.request_id, message, handle));
             return Ok(());
         }
         if header.request_id != 0 || handle.is_some() {
@@ -802,8 +791,8 @@ impl WaylandBridge {
                         &self.sws_handle_record[..protocol_sws::MessageHeader::SIZE],
                     );
                     let header = protocol_sws::MessageHeader::from_le_bytes(header_bytes);
-                    let frame_len = protocol_sws::MessageHeader::SIZE
-                        + header.payload_size as usize;
+                    let frame_len =
+                        protocol_sws::MessageHeader::SIZE + header.payload_size as usize;
                     if frame_len != bytes_read
                         || header.payload_size as usize > protocol_sws::MAX_PAYLOAD_SIZE
                     {
@@ -1025,12 +1014,10 @@ impl WaylandBridge {
         );
 
         let payload = protocol_sws::payload_extension_create_window(wl_surface_id, width, height);
-        let request_id = self.send_sws_request(
-            protocol_sws::client_msg::EXTENSION_CREATE_WINDOW,
-            &payload,
-        )?;
-        let (create_response, shm_handle) =
-            self.wait_for_sws_message_with_handle(request_id, |msg| {
+        let request_id =
+            self.send_sws_request(protocol_sws::client_msg::EXTENSION_CREATE_WINDOW, &payload)?;
+        let (create_response, shm_handle) = self
+            .wait_for_sws_message_with_handle(request_id, |msg| {
                 matches!(msg, protocol_sws::ServerMessage::WindowCreated { .. })
             })?;
         if let protocol_sws::ServerMessage::WindowCreated {
@@ -1131,12 +1118,10 @@ impl WaylandBridge {
         );
 
         let payload = protocol_sws::payload_extension_create_window(wl_surface_id, width, height);
-        let request_id = self.send_sws_request(
-            protocol_sws::client_msg::EXTENSION_CREATE_WINDOW,
-            &payload,
-        )?;
-        let (create_response, shm_handle) =
-            self.wait_for_sws_message_with_handle(request_id, |msg| {
+        let request_id =
+            self.send_sws_request(protocol_sws::client_msg::EXTENSION_CREATE_WINDOW, &payload)?;
+        let (create_response, shm_handle) = self
+            .wait_for_sws_message_with_handle(request_id, |msg| {
                 matches!(msg, protocol_sws::ServerMessage::WindowCreated { .. })
             })?;
         if let protocol_sws::ServerMessage::WindowCreated {
@@ -1675,8 +1660,8 @@ impl WaylandBridge {
         let request_id =
             self.send_sws_request(protocol_sws::client_msg::RESIZE_WINDOW, &payload)?;
 
-        let (resize_response, shm_handle) =
-            self.wait_for_sws_message_with_handle(request_id, |msg| {
+        let (resize_response, shm_handle) = self
+            .wait_for_sws_message_with_handle(request_id, |msg| {
                 matches!(msg, protocol_sws::ServerMessage::WindowResized { .. })
             })?;
         if let protocol_sws::ServerMessage::WindowResized {
@@ -1833,7 +1818,9 @@ impl WaylandBridge {
 
                     let attached_handle = match received_handles.first() {
                         Some((handle_offset, _)) if *handle_offset < offset => {
-                            return Err("Handle record does not start at a Wayland message boundary");
+                            return Err(
+                                "Handle record does not start at a Wayland message boundary",
+                            );
                         }
                         Some((handle_offset, _)) if *handle_offset == offset => {
                             Some(received_handles.remove(0).1)

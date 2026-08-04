@@ -190,7 +190,7 @@ fn default_system_menu_entries() -> Vec<TaskMenuEntry> {
             id: String::from("system_launcher"),
             title: String::from("Applications"),
             enabled: true,
-            shortcut: Some(String::from("Meta+Space")),
+            shortcut: Some(String::from("Super+Space")),
             children: Vec::new(),
         }),
         TaskMenuEntry::Item(TaskMenuItem {
@@ -201,7 +201,7 @@ fn default_system_menu_entries() -> Vec<TaskMenuEntry> {
             children: Vec::new(),
         }),
         TaskMenuEntry::Item(TaskMenuItem {
-            id: String::from("system_filer"),
+            id: String::from("system_files"),
             title: String::from("Files"),
             enabled: true,
             shortcut: None,
@@ -302,7 +302,7 @@ fn show_file_manager() {
         return;
     }
 
-    launch_app(b"org.scarlet-os.desktop.filer");
+    launch_app(scarlet_desktop_config::DESKTOP_FILES_APP_ID.as_bytes());
     for _ in 0..20 {
         std::thread::sleep(Duration::from_millis(50));
         if request_file_manager_window() {
@@ -423,14 +423,17 @@ fn build_menu_tree(app_name: &str, menu_titles: &str) -> MenuTree {
         let app_label = menu_bar_label(app_name);
 
         let mut app_children = Vec::new();
-        for item in &parsed {
+        let mut app_items = Vec::new();
+        for item in parsed {
             if item.id == "__app__" {
-                app_children.extend(item.children.iter().cloned());
+                app_children.extend(item.children);
             } else {
-                items.push(item.clone());
+                app_items.push(item);
             }
         }
 
+        // The current application's menu belongs immediately after the
+        // desktop menu. App menus must not be appended behind File/Edit/etc.
         items.push(TaskMenuItem {
             id: String::from("system_app"),
             title: app_label,
@@ -438,6 +441,7 @@ fn build_menu_tree(app_name: &str, menu_titles: &str) -> MenuTree {
             shortcut: None,
             children: app_children,
         });
+        items.extend(app_items);
     } else {
         items.extend(parsed);
     }
@@ -641,7 +645,7 @@ fn build_menu_items(
                         launch_new_app(b"org.scarlet-os.desktop.terminal");
                         return;
                     }
-                    if item_id == "system_filer" {
+                    if item_id == "system_files" {
                         show_file_manager();
                         return;
                     }
@@ -1024,6 +1028,14 @@ impl TaskBarApp {
                                         Ok(id) => {
                                             popup_surface_id = Some(id);
                                             popup_surface_id_popup.set(Some(id));
+                                            // Creating a surface with
+                                            // `focus_on_create` focuses it, but
+                                            // older SWS versions did not also
+                                            // raise it within its window-type
+                                            // layer. Explicitly raise the
+                                            // popup so it stays above the
+                                            // application menu and content.
+                                            let _ = conn.focus_window(id);
                                             id
                                         }
                                         Err(e) => {

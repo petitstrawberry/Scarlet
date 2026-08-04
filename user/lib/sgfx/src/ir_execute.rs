@@ -175,11 +175,7 @@ impl IrResources {
     /// Success after retaining shared ownership of the image, or an error for a
     /// table/context mismatch, an unsupported target descriptor, extent
     /// mismatch, or a conflicting mapping.
-    pub fn map_image(
-        &mut self,
-        texture: TextureId,
-        image: Rc<Image>,
-    ) -> Result<(), IrSubmitError> {
+    pub fn map_image(&mut self, texture: TextureId, image: Rc<Image>) -> Result<(), IrSubmitError> {
         if image.as_ref().backend.context_id() != self.context_id {
             return Err(IrSubmitError::ContextMismatch);
         }
@@ -203,9 +199,7 @@ impl IrResources {
             ));
         }
         let extent = descriptor.extent();
-        if extent.width() != image.as_ref().width
-            || extent.height() != image.as_ref().height
-        {
+        if extent.width() != image.as_ref().width || extent.height() != image.as_ref().height {
             return Err(IrSubmitError::TargetExtentMismatch);
         }
         if self.images.iter().any(|mapping| mapping.texture == texture) {

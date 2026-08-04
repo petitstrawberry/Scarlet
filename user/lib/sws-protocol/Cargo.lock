@@ -112,3 +112,19 @@ checksum = "a3ae828aa394de34c7de08f522d1b86bd1c182c668d27da69caadda00590f26d"
 dependencies = [
  "lock_api",
 ]
+
+[[patch.unused]]
+name = "sgfx"
+version = "0.16.0"
+
+[[patch.unused]]
+name = "sws-client"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "scarlet-ui"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "scarlet-ui-macros"
+version = "0.1.0"

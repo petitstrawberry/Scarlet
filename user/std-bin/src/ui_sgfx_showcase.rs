@@ -12,8 +12,8 @@ use scarlet_ui::element::{
     Element, ElementRenderObject, LayoutConstraints, RenderElement, UpdateResult,
 };
 use scarlet_ui::geometry::{Point, Size};
-use scarlet_ui::renderer::PaintContext;
 use scarlet_ui::prelude::*;
+use scarlet_ui::renderer::PaintContext;
 use scarlet_ui::{
     MenuBarModel, MenuEntry, MenuItemModel, SgfxCanvas, SgfxCanvasDraw, SgfxCanvasFrame,
     SgfxCanvasHandle, SgfxCanvasVertex, SgfxMesh, SgfxTexture, scenes, vstack,
@@ -23,10 +23,8 @@ const WINDOW_WIDTH: f32 = 760.0;
 const WINDOW_HEIGHT: f32 = 540.0;
 const HUD_HEIGHT: f32 = 48.0;
 const WINDOW_CONTENT_LAYOUT: WindowContentLayout = WindowContentLayout::new(true);
-const CONTENT_WIDTH: f32 =
-    WINDOW_WIDTH - WINDOW_CONTENT_LAYOUT.decoration_size().width;
-const CONTENT_HEIGHT: f32 =
-    WINDOW_HEIGHT - WINDOW_CONTENT_LAYOUT.decoration_size().height;
+const CONTENT_WIDTH: f32 = WINDOW_WIDTH - WINDOW_CONTENT_LAYOUT.decoration_size().width;
+const CONTENT_HEIGHT: f32 = WINDOW_HEIGHT - WINDOW_CONTENT_LAYOUT.decoration_size().height;
 const CANVAS_ASPECT: f32 = CONTENT_WIDTH / (CONTENT_HEIGHT - HUD_HEIGHT);
 const STATS_INTERVAL_NS: u64 = 500_000_000;
 const PARTICLE_COUNT: usize = 72;
@@ -57,16 +55,16 @@ impl FpsMeter {
 
     fn record_paint(&mut self) -> (u64, u64) {
         let now = Instant::now();
-        let idle_ns = u64::try_from(now.duration_since(self.last_paint_at).as_nanos())
-            .unwrap_or(u64::MAX);
+        let idle_ns =
+            u64::try_from(now.duration_since(self.last_paint_at).as_nanos()).unwrap_or(u64::MAX);
         if idle_ns > STATS_INTERVAL_NS.saturating_mul(2) {
             self.started_at = now;
             self.frames = 0;
         }
         self.last_paint_at = now;
         self.frames = self.frames.saturating_add(1);
-        let elapsed_ns = u64::try_from(now.duration_since(self.started_at).as_nanos())
-            .unwrap_or(u64::MAX);
+        let elapsed_ns =
+            u64::try_from(now.duration_since(self.started_at).as_nanos()).unwrap_or(u64::MAX);
         if elapsed_ns >= STATS_INTERVAL_NS {
             self.fps_milli = self
                 .frames
@@ -395,8 +393,7 @@ fn showcase_menu_bar() -> MenuBarModel {
 }
 
 fn base_frame(frame_number: u64) -> SgfxCanvasFrame {
-    SgfxCanvasFrame::new(frame_number, Color::rgb(6u8, 11u8, 24u8))
-        .reference_aspect(CANVAS_ASPECT)
+    SgfxCanvasFrame::new(frame_number, Color::rgb(6u8, 11u8, 24u8)).reference_aspect(CANVAS_ASPECT)
 }
 
 fn projection() -> [f32; 16] {
@@ -426,10 +423,7 @@ fn cube_frame(
             rotation_z(0.17 + phase * 0.31),
             matrix_mul(
                 rotation_y(0.79 - phase * 0.74),
-                matrix_mul(
-                    rotation_x(0.79 + phase * 0.46),
-                    scale(1.04, 1.04, 1.04),
-                ),
+                matrix_mul(rotation_x(0.79 + phase * 0.46), scale(1.04, 1.04, 1.04)),
             ),
         ),
     );
@@ -532,9 +526,7 @@ fn swarm_frame(
 }
 
 const fn gears_triangle_count() -> usize {
-    gear_mesh_triangle_count(20)
-        + gear_mesh_triangle_count(10)
-        + gear_mesh_triangle_count(12)
+    gear_mesh_triangle_count(20) + gear_mesh_triangle_count(10) + gear_mesh_triangle_count(12)
 }
 
 const fn cube_mesh_triangle_count() -> usize {
@@ -565,10 +557,8 @@ fn cube_texture() -> Arc<SgfxTexture> {
             let face = (row * 3 + column) as usize;
             let local_x = x % CELL_SIZE;
             let local_y = y % CELL_SIZE;
-            let border = local_x < 3
-                || local_y < 3
-                || local_x >= CELL_SIZE - 3
-                || local_y >= CELL_SIZE - 3;
+            let border =
+                local_x < 3 || local_y < 3 || local_x >= CELL_SIZE - 3 || local_y >= CELL_SIZE - 3;
             let diagonal = (local_x + local_y + face as u32 * 7) % 24 < 3;
             let center_x = local_x as i32 - CELL_SIZE as i32 / 2;
             let center_y = local_y as i32 - CELL_SIZE as i32 / 2;
@@ -816,8 +806,7 @@ fn matrix_mul(left: [f32; 16], right: [f32; 16]) -> [f32; 16] {
     for column in 0..4 {
         for row in 0..4 {
             for index in 0..4 {
-                result[column * 4 + row] +=
-                    left[index * 4 + row] * right[column * 4 + index];
+                result[column * 4 + row] += left[index * 4 + row] * right[column * 4 + index];
             }
         }
     }
@@ -865,8 +854,7 @@ fn rotation_x(angle: f32) -> [f32; 16] {
     let cosine = libm::cosf(angle);
     let sine = libm::sinf(angle);
     [
-        1.0, 0.0, 0.0, 0.0, 0.0, cosine, sine, 0.0, 0.0, -sine, cosine, 0.0, 0.0, 0.0, 0.0,
-        1.0,
+        1.0, 0.0, 0.0, 0.0, 0.0, cosine, sine, 0.0, 0.0, -sine, cosine, 0.0, 0.0, 0.0, 0.0, 1.0,
     ]
 }
 
@@ -874,8 +862,7 @@ fn rotation_y(angle: f32) -> [f32; 16] {
     let cosine = libm::cosf(angle);
     let sine = libm::sinf(angle);
     [
-        cosine, 0.0, -sine, 0.0, 0.0, 1.0, 0.0, 0.0, sine, 0.0, cosine, 0.0, 0.0, 0.0, 0.0,
-        1.0,
+        cosine, 0.0, -sine, 0.0, 0.0, 1.0, 0.0, 0.0, sine, 0.0, cosine, 0.0, 0.0, 0.0, 0.0, 1.0,
     ]
 }
 
@@ -883,8 +870,7 @@ fn rotation_z(angle: f32) -> [f32; 16] {
     let cosine = libm::cosf(angle);
     let sine = libm::sinf(angle);
     [
-        cosine, sine, 0.0, 0.0, -sine, cosine, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0,
-        1.0,
+        cosine, sine, 0.0, 0.0, -sine, cosine, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
     ]
 }
 

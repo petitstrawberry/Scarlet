@@ -46,6 +46,9 @@ pub const DESKTOP_BACKGROUND_CHANGED_SIGNAL: &str = "BackgroundChanged";
 /// Bus name owned by the File Manager and its picker mode.
 pub const DESKTOP_FILE_MANAGER_BUS_NAME: &str = "org.scarlet-os.desktop.filemanager";
 
+/// Application ID of the user-facing Files application.
+pub const DESKTOP_FILES_APP_ID: &str = "org.scarlet-os.desktop.files";
+
 /// Object path used by the File Manager service.
 pub const DESKTOP_FILE_MANAGER_OBJECT_PATH: &str = "/org/scarlet/os/filemanager";
 
@@ -54,6 +57,9 @@ pub const DESKTOP_FILE_MANAGER_INTERFACE: &str = "org.scarlet.desktop.FileManage
 
 /// Method used to open the File Manager in picker mode.
 pub const DESKTOP_FILE_MANAGER_OPEN_FILE_METHOD: &str = "OpenFile";
+
+/// Method used to open the File Manager in save-file picker mode.
+pub const DESKTOP_FILE_MANAGER_SAVE_FILE_METHOD: &str = "SaveFile";
 
 /// Method used to show the normal File Manager window.
 pub const DESKTOP_FILE_MANAGER_SHOW_METHOD: &str = "Show";

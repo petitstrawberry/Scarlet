@@ -18,7 +18,8 @@ use sbus_client::Connection as SbusConnection;
 use scarlet_desktop_config::{
     DESKTOP_FILE_MANAGER_BUS_NAME, DESKTOP_FILE_MANAGER_INTERFACE,
     DESKTOP_FILE_MANAGER_OBJECT_PATH, DESKTOP_FILE_MANAGER_OPEN_FILE_METHOD,
-    DESKTOP_FILE_MANAGER_RESPONSE_SIGNAL, DESKTOP_FILE_MANAGER_SHOW_METHOD, DESKTOP_STEMD_BUS_NAME,
+    DESKTOP_FILE_MANAGER_RESPONSE_SIGNAL, DESKTOP_FILE_MANAGER_SAVE_FILE_METHOD,
+    DESKTOP_FILE_MANAGER_SHOW_METHOD, DESKTOP_FILES_APP_ID, DESKTOP_STEMD_BUS_NAME,
     DESKTOP_STEMD_INTERFACE, DESKTOP_STEMD_OBJECT_PATH, DESKTOP_STEMD_OPEN_PATH_METHOD,
 };
 use scarlet_ui::prelude::*;
@@ -31,7 +32,7 @@ use scarlet_ui_macros::View;
 
 use file_icons::{FileKind, icon_for_entry};
 
-const APP_ID: &str = "org.scarlet-os.desktop.filer";
+const APP_ID: &str = DESKTOP_FILES_APP_ID;
 const PICKER_WINDOW_KEY: &str = "picker";
 const ROOT_PATH: &str = "/";
 const GRID_COLUMNS: usize = 5;
@@ -62,6 +63,8 @@ struct PickerRequest {
     filter: String,
     allow_multiple: bool,
     select_directories: bool,
+    save_mode: bool,
+    suggested_name: String,
 }
 
 #[derive(View, Clone)]
@@ -77,6 +80,7 @@ struct FilerApp {
     picker_hovered: State<Option<usize>>,
     picker_last_click: State<Option<(usize, Instant)>>,
     picker_request: State<Option<PickerRequest>>,
+    picker_file_name: State<String>,
     picker_status: State<String>,
     status: State<String>,
     request_sequence: State<u32>,
@@ -231,8 +235,17 @@ impl FilerApp {
             .get()
             .as_ref()
             .is_some_and(|request| request.select_directories);
+        let save_mode = self
+            .picker_request
+            .get()
+            .as_ref()
+            .is_some_and(|request| request.save_mode);
         self.picker_selected.set(Some(index));
         self.picker_status.set(entry.path.clone());
+
+        if save_mode && !entry.is_directory {
+            self.picker_file_name.set(entry.name.clone());
+        }
 
         if !double_click {
             return;
@@ -304,6 +317,7 @@ impl FilerApp {
         };
         let request_id = request.id.clone();
         let title = request.title.clone();
+        self.picker_file_name.set(request.suggested_name.clone());
         self.picker_request.set(Some(request));
         self.picker_current_path.set(initial_folder);
         self.refresh_picker();
@@ -316,14 +330,29 @@ impl FilerApp {
         let Some(request) = self.picker_request.get() else {
             return;
         };
-        let selected_path = self.picker_selected.get().and_then(|index| {
-            self.picker_entries
+        let path = if request.save_mode {
+            let file_name = self.picker_file_name.get();
+            let file_name = file_name.trim();
+            if file_name.is_empty() || file_name.contains('/') {
+                String::new()
+            } else {
+                PathBuf::from(self.picker_current_path.get())
+                    .join(file_name)
+                    .to_string_lossy()
+                    .into_owned()
+            }
+        } else {
+            self.picker_selected
                 .get()
-                .get(index)
-                .map(|entry| entry.path.clone())
-        });
-        let success = accepted && selected_path.is_some();
-        let path = selected_path.unwrap_or_default();
+                .and_then(|index| {
+                    self.picker_entries
+                        .get()
+                        .get(index)
+                        .map(|entry| entry.path.clone())
+                })
+                .unwrap_or_default()
+        };
+        let success = accepted && !path.is_empty();
 
         match SbusConnection::connect().and_then(|mut connection| {
             connection.emit_signal(
@@ -343,6 +372,7 @@ impl FilerApp {
         }
 
         self.picker_request.set(None);
+        self.picker_file_name.set(String::new());
         dismiss_window(PICKER_WINDOW_KEY);
     }
 
@@ -469,13 +499,29 @@ impl FilerApp {
         let footer = if picker {
             let cancel_app = self.clone();
             let open_app = self.clone();
+            let save_mode = self
+                .picker_request
+                .get()
+                .as_ref()
+                .is_some_and(|request| request.save_mode);
+            let file_name = if save_mode {
+                Either::A(
+                    TextField::new(self.picker_file_name.clone())
+                        .placeholder("File name")
+                        .frame_width(260.0),
+                )
+            } else {
+                Either::B(Spacer::new().frame_width(0.0))
+            };
+            let action_title = if save_mode { "Save" } else { "Open" };
             Either::A(vstack! {
                 Divider::new(),
                 hstack! {
                     Text::from_state(self.picker_status.clone()).font_size(11.0),
                     Spacer::new(),
+                    file_name,
                     Button::new("Cancel").on_click(move || cancel_app.finish_picker(false)),
-                    Button::new("Open").on_click(move || open_app.finish_picker(true)),
+                    Button::new(action_title).on_click(move || open_app.finish_picker(true)),
                 }
                 .alignment(Alignment::Center)
                 .padding(8.0),
@@ -1028,13 +1074,38 @@ fn matches_filter(name: &str, filter: &str) -> bool {
         "image/jpeg" | "image/jpg" => name.rsplit_once('.').is_some_and(|(_, extension)| {
             extension.eq_ignore_ascii_case("jpg") || extension.eq_ignore_ascii_case("jpeg")
         }),
+        "video/*" => is_video(name),
+        "video/mp4" => has_extension(name, &["mp4", "m4v", "m4a"]),
+        "video/webm" => has_extension(name, &["webm"]),
+        "text/*" | "text/plain" => is_text(name),
         _ => true,
     }
 }
 
 fn is_image(name: &str) -> bool {
+    has_extension(name, &["jpg", "jpeg", "png", "gif", "bmp", "webp"])
+}
+
+fn is_video(name: &str) -> bool {
+    has_extension(
+        name,
+        &["mp4", "m4v", "m4a", "webm", "h264", "264", "av1", "ivf"],
+    )
+}
+
+fn is_text(name: &str) -> bool {
+    has_extension(
+        name,
+        &[
+            "txt", "md", "markdown", "rs", "toml", "json", "yaml", "yml", "ini", "conf", "csv",
+            "xml", "html", "css", "js", "ts", "c", "h", "cpp", "hpp", "sh",
+        ],
+    )
+}
+
+fn has_extension(name: &str, extensions: &[&str]) -> bool {
     name.rsplit_once('.').is_some_and(|(_, extension)| {
-        ["jpg", "jpeg", "png", "gif", "bmp", "webp"]
+        extensions
             .iter()
             .any(|candidate| extension.eq_ignore_ascii_case(candidate))
     })
@@ -1113,22 +1184,40 @@ fn run_picker_service(app: FilerApp) {
                 let _ = connection.send_method_return(0, Vec::new());
                 continue;
             }
-            if method != DESKTOP_FILE_MANAGER_OPEN_FILE_METHOD {
+            let save_mode = if method == DESKTOP_FILE_MANAGER_OPEN_FILE_METHOD {
+                false
+            } else if method == DESKTOP_FILE_MANAGER_SAVE_FILE_METHOD {
+                true
+            } else {
                 let _ = connection.send_method_error(
                     0,
                     "org.scarlet.desktop.FileManager.UnknownMethod",
                     "Unknown FileManager method",
                 );
                 continue;
-            }
+            };
 
             let request = PickerRequest {
                 id: String::new(),
                 title: argument_string(&args, 0).unwrap_or_else(|| String::from("Open File")),
                 initial_folder: argument_string(&args, 1).unwrap_or_else(initial_path),
-                filter: argument_string(&args, 2).unwrap_or_default(),
-                allow_multiple: argument_bool(&args, 3),
-                select_directories: argument_bool(&args, 4),
+                filter: argument_string(&args, if save_mode { 3 } else { 2 }).unwrap_or_default(),
+                allow_multiple: if save_mode {
+                    false
+                } else {
+                    argument_bool(&args, 3)
+                },
+                select_directories: if save_mode {
+                    false
+                } else {
+                    argument_bool(&args, 4)
+                },
+                save_mode,
+                suggested_name: if save_mode {
+                    argument_string(&args, 2).unwrap_or_default()
+                } else {
+                    String::new()
+                },
             };
             if request.allow_multiple {
                 app.status

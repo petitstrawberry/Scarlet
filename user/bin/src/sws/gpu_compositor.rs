@@ -431,11 +431,8 @@ impl GpuCompositor {
             // Keep sampling the cached texture until a complete new backing is
             // available instead of treating the expected transition as a GPU
             // compositor failure.
-            let has_current_backing =
-                window.shm_layout().is_ok() || window.pixels().is_ok();
-            if window.visible
-                && !self.has_committed_shared_buffer(window.id)
-                && has_current_backing
+            let has_current_backing = window.shm_layout().is_ok() || window.pixels().is_ok();
+            if window.visible && !self.has_committed_shared_buffer(window.id) && has_current_backing
             {
                 self.sync_window_texture(window)?;
             }
@@ -455,8 +452,7 @@ impl GpuCompositor {
                 .textures
                 .iter()
                 .any(|entry| entry.window_id == window.id);
-            let has_current_backing =
-                window.shm_layout().is_ok() || window.pixels().is_ok();
+            let has_current_backing = window.shm_layout().is_ok() || window.pixels().is_ok();
             if self.has_committed_shared_buffer(window.id)
                 || has_cached_texture
                 || has_current_backing
@@ -563,12 +559,9 @@ impl GpuCompositor {
     }
 
     fn has_committed_shared_buffer(&self, window_id: WindowId) -> bool {
-        self.shared_windows
-            .iter()
-            .any(|state| {
-                state.window_id == window_id
-                    && (state.pending.is_some() || state.presented.is_some())
-            })
+        self.shared_windows.iter().any(|state| {
+            state.window_id == window_id && (state.pending.is_some() || state.presented.is_some())
+        })
     }
 
     fn committed_shared_texture(&self, window_id: WindowId) -> Option<&Texture> {

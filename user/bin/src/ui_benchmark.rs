@@ -28,8 +28,8 @@ use scarlet_ui::element::{
     Element, ElementRenderObject, LayoutConstraints, RenderElement, UpdateResult,
 };
 use scarlet_ui::geometry::{Point, Rect, Size};
-use scarlet_ui::renderer::{CompositorBackendKind, PaintContext, RendererBackendKind};
 use scarlet_ui::prelude::*;
+use scarlet_ui::renderer::{CompositorBackendKind, PaintContext, RendererBackendKind};
 use scarlet_ui::{PlatformWindow, zstack};
 use std::println;
 
@@ -235,10 +235,7 @@ impl UiBenchmarkApp {
         let fps_milli = if total_ns == 0 {
             0
         } else {
-            frames
-                .saturating_mul(1_000_000_000)
-                .saturating_mul(1_000)
-                / total_ns
+            frames.saturating_mul(1_000_000_000).saturating_mul(1_000) / total_ns
         };
 
         println!(

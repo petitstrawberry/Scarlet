@@ -2672,7 +2672,10 @@ version = "0.16.0"
 dependencies = [
  "rust_h264",
  "sas-client",
+ "sbus",
+ "sbus-client",
  "scarlet-codecs",
+ "scarlet-desktop-config",
  "scarlet-std",
  "scarlet-ui",
  "symphonia-codec-aac",

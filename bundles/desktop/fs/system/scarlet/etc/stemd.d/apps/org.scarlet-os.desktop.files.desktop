@@ -1,6 +1,6 @@
 [Desktop Entry]
 Name=Files
-Exec=/bin/scarlet_desktop_filer
+Exec=/bin/files
 Icon=folder
 Type=Application
 Terminal=false

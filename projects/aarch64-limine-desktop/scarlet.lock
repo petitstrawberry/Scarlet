@@ -219,6 +219,17 @@ hash = ""
 type = "path"
 path = "../../user/std-bin"
 
+[[sections.initramfs.layers]]
+kind = "cargo"
+package = "user-bin"
+bin = "fb_test"
+to = "/system/scarlet/bin/fb_test"
+hash = ""
+
+[sections.initramfs.layers.source]
+type = "path"
+path = "../../user/bin"
+
 [sections.rootfs]
 hash = "sha256:ab72c36790259d2c7c123ceeafffb92c29db09e16834162b74fbf89d4b496f99"
 
@@ -437,6 +448,17 @@ path = "../../user/std-bin"
 [[sections.rootfs.layers]]
 kind = "cargo"
 package = "user-bin"
+bin = "fb_test"
+to = "/system/scarlet/bin/fb_test"
+hash = ""
+
+[sections.rootfs.layers.source]
+type = "path"
+path = "../../user/bin"
+
+[[sections.rootfs.layers]]
+kind = "cargo"
+package = "user-bin"
 bin = "scarlet_desktop"
 to = "/system/scarlet/bin/scarlet_desktop"
 hash = "sha256:4132cf038e1bccfaa2ff1de409e9397ae083d6de18c4d1a9dc823e8137b06e0c"
@@ -448,9 +470,9 @@ path = "../../user/bin"
 [[sections.rootfs.layers]]
 kind = "cargo"
 package = "user-bin"
-bin = "scarlet_desktop_background"
-to = "/system/scarlet/bin/scarlet_desktop_background"
-hash = "sha256:21a4e0735eaa7bbd380a5fe993a34e493f3c26d9d56413ddf7ac613f8666ab68"
+bin = "desktop-background"
+to = "/system/scarlet/bin/desktop-background"
+hash = ""
 
 [sections.rootfs.layers.source]
 type = "path"
@@ -459,9 +481,53 @@ path = "../../user/bin"
 [[sections.rootfs.layers]]
 kind = "cargo"
 package = "user-bin"
-bin = "scarlet_desktop_taskbar"
-to = "/system/scarlet/bin/scarlet_desktop_taskbar"
-hash = "sha256:af950aaf4edf14a495394e7b1334a8f024a6b6608dd18f7cd768228db92813ac"
+bin = "desktop-settings"
+to = "/system/scarlet/bin/desktop-settings"
+hash = ""
+
+[sections.rootfs.layers.source]
+type = "path"
+path = "../../user/bin"
+
+[[sections.rootfs.layers]]
+kind = "cargo"
+package = "scarlet-std-bin"
+bin = "files"
+to = "/system/scarlet/bin/files"
+hash = ""
+
+[sections.rootfs.layers.source]
+type = "path"
+path = "../../user/std-bin"
+
+[[sections.rootfs.layers]]
+kind = "cargo"
+package = "scarlet-std-bin"
+bin = "launcher"
+to = "/system/scarlet/bin/launcher"
+hash = ""
+
+[sections.rootfs.layers.source]
+type = "path"
+path = "../../user/std-bin"
+
+[[sections.rootfs.layers]]
+kind = "cargo"
+package = "scarlet-std-bin"
+bin = "notepad"
+to = "/system/scarlet/bin/notepad"
+hash = ""
+
+[sections.rootfs.layers.source]
+type = "path"
+path = "../../user/std-bin"
+
+[[sections.rootfs.layers]]
+kind = "cargo"
+package = "user-bin"
+bin = "taskbar"
+to = "/system/scarlet/bin/taskbar"
+hash = ""
 
 [sections.rootfs.layers.source]
 type = "path"
@@ -502,6 +568,27 @@ path = "../../user/bin"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
+bin = "sasctl"
+to = "/system/scarlet/bin/sasctl"
+hash = ""
+
+[sections.rootfs.layers.source]
+type = "path"
+path = "../../user/std-bin"
+
+[[sections.rootfs.layers]]
+kind = "cargo"
+package = "user-bin"
+bin = "mplayer"
+to = "/system/scarlet/bin/mplayer"
+hash = ""
+
+[sections.rootfs.layers.source]
+type = "path"
+path = "../../user/bin"
+
+[[sections.rootfs.layers]]
+kind = "cargo"
 package = "user-bin"
 bin = "ui-demo"
 to = "/system/scarlet/bin/ui-demo"
@@ -510,6 +597,38 @@ hash = "sha256:63a14789b9098b441f5c3577f41f0de9d4dc747f40bf024859549cc827e6f224"
 [sections.rootfs.layers.source]
 type = "path"
 path = "../../user/bin"
+
+[[sections.rootfs.layers]]
+kind = "cargo"
+package = "user-bin"
+bin = "ui-benchmark"
+to = "/system/scarlet/bin/ui-benchmark"
+hash = ""
+
+[sections.rootfs.layers.source]
+type = "path"
+path = "../../user/bin"
+
+[[sections.rootfs.layers]]
+kind = "cargo"
+package = "scarlet-ui-widget-factory"
+bin = "scarlet-ui-widget-factory"
+to = "/system/scarlet/bin/widget_factory"
+hash = ""
+
+[sections.rootfs.layers.source]
+type = "path"
+path = "../../../scarlet-ui/examples/widget-factory"
+
+[[sections.rootfs.layers]]
+kind = "cargo"
+bin = "ui-sgfx-showcase"
+to = "/system/scarlet/bin/ui-sgfx-showcase"
+hash = ""
+
+[sections.rootfs.layers.source]
+type = "path"
+path = "../../user/std-bin"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
@@ -532,6 +651,16 @@ hash = "sha256:5d5806030637abb8dbf06fc761b26019c2566116512f76c602642ab3ee512893"
 [sections.rootfs.layers.source]
 type = "path"
 path = "../../user/bin"
+
+[[sections.rootfs.layers]]
+kind = "cargo"
+bin = "task_manager"
+to = "/system/scarlet/bin/task_manager"
+hash = ""
+
+[sections.rootfs.layers.source]
+type = "path"
+path = "../../user/std-bin"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
@@ -577,9 +706,27 @@ path = "../../user/std-bin"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
+package = "video_player"
 bin = "video_player"
+features = [
+    "av1-stateful-hw",
+    "h264-stateful-hw",
+    "mp4-aac",
+]
+default-features = false
 to = "/system/scarlet/bin/video_player"
-hash = "sha256:04ad42a282a67e36bde04ccca1c27dfe5f78513e56d2bdf0e54a6624529ba643"
+hash = ""
+
+[sections.rootfs.layers.source]
+type = "path"
+path = "../../user/video_player"
+
+[[sections.rootfs.layers]]
+kind = "cargo"
+package = "user-bin"
+bin = "sgfx_probe"
+to = "/system/scarlet/bin/sgfx_probe"
+hash = ""
 
 [sections.rootfs.layers.source]
 type = "path"
@@ -587,14 +734,33 @@ path = "../../user/bin"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
-package = "user-bin"
-bin = "gpu_probe"
-to = "/system/scarlet/bin/gpu_probe"
-hash = "sha256:657431e52b6ecb90408ac74d0d23898299ae99ee7f6444fae5e1965e6c3790c4"
+bin = "sgfx_cube"
+to = "/system/scarlet/bin/sgfx_cube"
+hash = ""
 
 [sections.rootfs.layers.source]
 type = "path"
-path = "../../user/bin"
+path = "../../user/std-bin"
+
+[[sections.rootfs.layers]]
+kind = "cargo"
+bin = "sgfx_texture"
+to = "/system/scarlet/bin/sgfx_texture"
+hash = ""
+
+[sections.rootfs.layers.source]
+type = "path"
+path = "../../user/std-bin"
+
+[[sections.rootfs.layers]]
+kind = "cargo"
+bin = "sgfx_showcase"
+to = "/system/scarlet/bin/sgfx_showcase"
+hash = ""
+
+[sections.rootfs.layers.source]
+type = "path"
+path = "../../user/std-bin"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
@@ -683,6 +849,17 @@ package = "user-bin"
 bin = "scarlet_mozc"
 to = "/system/scarlet/bin/scarlet_mozc"
 hash = "sha256:d370ad9e837a0d3fd00a4d8b1ff5792814a86985b4141ad014ea991e53f7585d"
+
+[sections.rootfs.layers.source]
+type = "path"
+path = "../../user/bin"
+
+[[sections.rootfs.layers]]
+kind = "cargo"
+package = "user-bin"
+bin = "dcp_flip_test"
+to = "/system/scarlet/bin/dcp_flip_test"
+hash = ""
 
 [sections.rootfs.layers.source]
 type = "path"

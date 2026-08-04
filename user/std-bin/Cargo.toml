@@ -32,7 +32,7 @@ pulldown-cmark = "0.12"
 sbus = { path = "../lib/sbus" }
 sbus-client = { path = "../lib/sbus-client", default-features = false, features = ["std"] }
 scarlet-desktop-config = { path = "../lib/scarlet-desktop-config", default-features = false, features = ["std"] }
-sws-protocol = { path = "../lib/sws-protocol", default-features = false }
+sws-protocol = { path = "../lib/sws-protocol", default-features = false, features = ["std"] }
 
 [target.'cfg(target_os = "scarlet")'.dependencies]
 scarlet-os = { path = "../lib/scarlet-os", default-features = false, features = ["std"] }
@@ -76,12 +76,16 @@ name = "task_manager"
 path = "src/task_manager.rs"
 
 [[bin]]
-name = "scarlet_desktop_filer"
+name = "files"
 path = "src/filer.rs"
 
 [[bin]]
-name = "scarlet_desktop_launcher"
+name = "launcher"
 path = "src/app_launcher.rs"
+
+[[bin]]
+name = "notepad"
+path = "src/notepad.rs"
 
 [[bin]]
 name = "date"

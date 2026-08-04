@@ -1241,10 +1241,7 @@ pub fn sys_sendmsg(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                     let send_handle = match abi.get_handle(fd as usize) {
                         Some(h) => h,
                         None => {
-                            crate::early_println!(
-                                "[linux socket] sendmsg bad fd in cmsg {}",
-                                fd
-                            );
+                            crate::early_println!("[linux socket] sendmsg bad fd in cmsg {}", fd);
                             return errno::to_result(errno::EBADF);
                         }
                     };
@@ -1312,12 +1309,7 @@ pub fn sys_sendmsg(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
             }
             let old_len = record_data.len();
             record_data.resize(old_len + iovec.iov_len, 0);
-            if copy_from_user(
-                &task,
-                iovec.iov_base as usize,
-                &mut record_data[old_len..],
-            )
-            .is_err()
+            if copy_from_user(&task, iovec.iov_base as usize, &mut record_data[old_len..]).is_err()
             {
                 return errno::to_result(errno::EFAULT);
             }
@@ -1540,11 +1532,11 @@ pub fn sys_recvmsg(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
             if let Some(local_socket) = LocalSocket::from_socket_object(socket) {
                 match local_socket.recv_handle_and_data(total_buffer_size) {
                     Ok((obj, metadata, data)) => {
-                        let new_handle =
-                            match task.handle_table.insert_with_metadata(obj, metadata) {
-                                Ok(h) => h,
-                                Err(_) => return errno::to_result(errno::EMFILE),
-                            };
+                        let new_handle = match task.handle_table.insert_with_metadata(obj, metadata)
+                        {
+                            Ok(h) => h,
+                            Err(_) => return errno::to_result(errno::EMFILE),
+                        };
                         let new_fd = match abi.allocate_fd(new_handle) {
                             Ok(fd) => fd,
                             Err(_) => {

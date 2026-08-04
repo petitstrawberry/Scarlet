@@ -6,8 +6,8 @@ use core::cell::Cell;
 use framebuffer::DisplaySurface;
 use gpu_raw::{
     GPU_DEVICE_STATE_READY, GPU_EXECUTION_SUPPORT_IMAGE_UPLOAD, GPU_EXECUTION_SUPPORT_PRESENTATION,
-    GPU_EXECUTION_SUPPORT_QUEUE, GPU_IMAGE_USAGE_RENDER_TARGET, GPU_IMAGE_USAGE_SAMPLED,
-    GPU_IMAGE_USAGE_PRESENTABLE, GPU_IMAGE_USAGE_TRANSFER_DST, GPU_RESULT_SUCCESS, Gpu as RawGpu,
+    GPU_EXECUTION_SUPPORT_QUEUE, GPU_IMAGE_USAGE_PRESENTABLE, GPU_IMAGE_USAGE_RENDER_TARGET,
+    GPU_IMAGE_USAGE_SAMPLED, GPU_IMAGE_USAGE_TRANSFER_DST, GPU_RESULT_SUCCESS, Gpu as RawGpu,
     GpuBuffer as RawBuffer, GpuContext as RawContext, GpuDialect as RawDialect,
     GpuImage as RawImage, GpuImageBgraRect, GpuQueue as RawQueue,
 };
@@ -1122,10 +1122,7 @@ impl Queue {
             );
             push_constant_buffer(&mut commands, PIPE_SHADER_VERTEX, &draw.uniforms.transform)?;
             push_constant_buffer(&mut commands, PIPE_SHADER_FRAGMENT, &draw.uniforms.color)?;
-            push_ir_scissor(
-                &mut commands,
-                ir_rect_to_pixel_rect(draw.scissor)?,
-            )?;
+            push_ir_scissor(&mut commands, ir_rect_to_pixel_rect(draw.scissor)?)?;
             if let (Some(texture_spec), Some(sampler)) = (draw.texture, draw.sampler) {
                 let texture = resources
                     .textures

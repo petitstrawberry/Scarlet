@@ -20,7 +20,7 @@ use sbus_client::Connection as SbusConnection;
 use scarlet_desktop_config::{
     BackgroundStyle, DESKTOP_FILE_MANAGER_BUS_NAME, DESKTOP_FILE_MANAGER_INTERFACE,
     DESKTOP_FILE_MANAGER_OBJECT_PATH, DESKTOP_FILE_MANAGER_OPEN_FILE_METHOD,
-    DESKTOP_FILE_MANAGER_RESPONSE_SIGNAL, DESKTOP_SETTINGS_BUS_NAME,
+    DESKTOP_FILE_MANAGER_RESPONSE_SIGNAL, DESKTOP_FILES_APP_ID, DESKTOP_SETTINGS_BUS_NAME,
     DESKTOP_SETTINGS_RESET_BACKGROUND_METHOD, DESKTOP_SETTINGS_SERVICE_INTERFACE,
     DESKTOP_SETTINGS_SERVICE_OBJECT_PATH, DESKTOP_SETTINGS_SET_BACKGROUND_METHOD,
 };
@@ -233,9 +233,7 @@ fn ensure_file_manager_service() {
         "/org/scarlet/os/stemd",
         "org.scarlet-os.stemd",
         "LaunchOrFocus",
-        vec![Argument::String(String::from(
-            "org.scarlet-os.desktop.filer",
-        ))],
+        vec![Argument::String(String::from(DESKTOP_FILES_APP_ID))],
     );
 }
 

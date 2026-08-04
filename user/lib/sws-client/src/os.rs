@@ -3,6 +3,8 @@
 use crate::Error;
 
 #[cfg(feature = "std")]
+pub use scarlet_os::Handle;
+#[cfg(feature = "std")]
 pub use scarlet_os::handle::capability::memory_mapping::flags as mmap_flags;
 #[cfg(feature = "std")]
 pub use scarlet_os::handle::capability::memory_mapping::munmap;
@@ -11,13 +13,11 @@ pub use scarlet_os::ipc::permissions;
 #[cfg(feature = "std")]
 pub use scarlet_os::{SharedMemory, Socket};
 #[cfg(feature = "std")]
-pub use scarlet_os::Handle;
-#[cfg(feature = "std")]
 pub use std::collections::BTreeMap;
 #[cfg(feature = "std")]
-pub use std::sync::{Arc, Mutex, MutexGuard};
-#[cfg(feature = "std")]
 pub use std::string::String;
+#[cfg(feature = "std")]
+pub use std::sync::{Arc, Mutex, MutexGuard};
 #[cfg(feature = "std")]
 pub use std::vec::Vec;
 
@@ -36,9 +36,9 @@ pub use scarlet_std::ipc::permissions;
 #[cfg(not(feature = "std"))]
 pub use scarlet_std::socket::Socket;
 #[cfg(not(feature = "std"))]
-pub use scarlet_std::sync::{Arc, Mutex, MutexGuard};
-#[cfg(not(feature = "std"))]
 pub use scarlet_std::string::String;
+#[cfg(not(feature = "std"))]
+pub use scarlet_std::sync::{Arc, Mutex, MutexGuard};
 #[cfg(not(feature = "std"))]
 pub use scarlet_std::vec::Vec;
 

@@ -651,11 +651,9 @@ impl VirtioGpuDeviceCore {
         let mut wait_spins = 0u64;
         while control_queue.is_busy() {
             wait_spins = wait_spins.saturating_add(1);
-            let timed_out = crate::timer::get_time_ns()
-                .saturating_sub(wait_started_ns)
+            let timed_out = crate::timer::get_time_ns().saturating_sub(wait_started_ns)
                 >= VIRTIO_GPU_CONTROL_TIMEOUT_NS;
-            if timed_out || wait_spins >= VIRTIO_GPU_CONTROL_MAX_SPINS
-            {
+            if timed_out || wait_spins >= VIRTIO_GPU_CONTROL_MAX_SPINS {
                 *self.control_queue_failed.write() = true;
 
                 // The device may still own both descriptors. Keep their DMA

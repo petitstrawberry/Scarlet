@@ -5,6 +5,7 @@ use alloc::vec::Vec;
 use core::convert::From;
 
 /// Method argument
+#[derive(Clone)]
 pub enum Argument {
     String(String),
     Int(i32),

@@ -1,6 +1,7 @@
 [Desktop Entry]
 Name=Notepad
-Exec=/bin/scarlet_desktop_notepad
+Exec=/bin/notepad
 Icon=text-editor
 Type=Application
 Terminal=false
+MimeType=text/plain;application/json;

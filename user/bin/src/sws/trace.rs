@@ -114,8 +114,8 @@ fn stage_name(stage: u32) -> &'static str {
 
 /// Start the trace watchdog when `SWS_LOG=trace` is selected.
 pub(crate) fn start_watchdog() {
-    let enabled = env::var("SWS_LOG")
-        .is_some_and(|value| matches!(value.as_str(), "trace" | "TRACE" | "4"));
+    let enabled =
+        env::var("SWS_LOG").is_some_and(|value| matches!(value.as_str(), "trace" | "TRACE" | "4"));
     ENABLED.store(enabled, Ordering::Release);
     if !enabled {
         return;
@@ -131,9 +131,15 @@ pub(crate) fn start_watchdog() {
                 "[SWS_TRACE] stage={} gpu_window={} comp(loop={},present={}) ipc(loop={},poll={}/{},socket={},wake={},fatal={},spurious={},frame={},flush={}) wake(call={},coalesced={}) input(loop={},event={},empty={}) keyboard(loop={},event={},short={})",
                 stage_name(COMPOSITOR_STAGE.load(Ordering::Acquire)),
                 GPU_WINDOW_ID.load(Ordering::Acquire),
-                current.compositor_loops.wrapping_sub(previous.compositor_loops),
-                current.compositor_presents.wrapping_sub(previous.compositor_presents),
-                current.ipc_client_loops.wrapping_sub(previous.ipc_client_loops),
+                current
+                    .compositor_loops
+                    .wrapping_sub(previous.compositor_loops),
+                current
+                    .compositor_presents
+                    .wrapping_sub(previous.compositor_presents),
+                current
+                    .ipc_client_loops
+                    .wrapping_sub(previous.ipc_client_loops),
                 current.ipc_poll_ready.wrapping_sub(previous.ipc_poll_ready),
                 current.ipc_polls.wrapping_sub(previous.ipc_polls),
                 current
@@ -154,7 +160,9 @@ pub(crate) fn start_watchdog() {
                 current.input_events.wrapping_sub(previous.input_events),
                 current.input_empty.wrapping_sub(previous.input_empty),
                 current.keyboard_loops.wrapping_sub(previous.keyboard_loops),
-                current.keyboard_events.wrapping_sub(previous.keyboard_events),
+                current
+                    .keyboard_events
+                    .wrapping_sub(previous.keyboard_events),
                 current
                     .keyboard_short_reads
                     .wrapping_sub(previous.keyboard_short_reads),
