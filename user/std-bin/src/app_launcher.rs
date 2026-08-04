@@ -15,21 +15,23 @@ use sbus::{Argument, Message};
 use sbus_client::Connection as SbusConnection;
 use scarlet_desktop_config::{
     DESKTOP_FILE_MANAGER_BUS_NAME, DESKTOP_FILE_MANAGER_INTERFACE,
-    DESKTOP_FILE_MANAGER_OBJECT_PATH, DESKTOP_FILE_MANAGER_SHOW_METHOD, DESKTOP_LAUNCHER_BUS_NAME,
-    DESKTOP_LAUNCHER_INTERFACE, DESKTOP_LAUNCHER_OBJECT_PATH, DESKTOP_LAUNCHER_SHOW_METHOD,
-    DESKTOP_STEMD_BUS_NAME, DESKTOP_STEMD_INTERFACE, DESKTOP_STEMD_LAUNCH_OR_FOCUS_METHOD,
-    DESKTOP_STEMD_LIST_APPLICATIONS_METHOD, DESKTOP_STEMD_OBJECT_PATH,
+    DESKTOP_FILE_MANAGER_OBJECT_PATH, DESKTOP_FILE_MANAGER_SHOW_METHOD, DESKTOP_FILES_APP_ID,
+    DESKTOP_LAUNCHER_BUS_NAME, DESKTOP_LAUNCHER_INTERFACE, DESKTOP_LAUNCHER_OBJECT_PATH,
+    DESKTOP_LAUNCHER_SHOW_METHOD, DESKTOP_STEMD_BUS_NAME, DESKTOP_STEMD_INTERFACE,
+    DESKTOP_STEMD_LAUNCH_OR_FOCUS_METHOD, DESKTOP_STEMD_LIST_APPLICATIONS_METHOD,
+    DESKTOP_STEMD_OBJECT_PATH,
 };
 use scarlet_ui::prelude::*;
 use scarlet_ui::{
     Alignment, Color, ColorPalette, GridView, Icon, IconSize, IconStyle, IconView, KeyCode,
-    PlatformWindow, Spacer, Window, dismiss_window, hstack, rasterize_icon, vstack,
+    PlatformWindow, Spacer, Window, WindowPlacement, dismiss_window, hstack, rasterize_icon,
+    vstack,
 };
 use scarlet_ui_macros::View;
 use sws_protocol::window_types;
 
 const APP_ID: &str = "org.scarlet-os.desktop.launcher";
-const FILE_MANAGER_APP_ID: &str = "org.scarlet-os.desktop.filer";
+const FILE_MANAGER_APP_ID: &str = DESKTOP_FILES_APP_ID;
 const APP_TITLE: &str = "Applications";
 const WINDOW_WIDTH: f32 = 820.0;
 const WINDOW_HEIGHT: f32 = 540.0;
@@ -98,7 +100,10 @@ impl LauncherApp {
                 DESKTOP_STEMD_OBJECT_PATH,
                 DESKTOP_STEMD_INTERFACE,
                 DESKTOP_STEMD_LAUNCH_OR_FOCUS_METHOD,
-                vec![Argument::String(application.app_id.clone())],
+                vec![
+                    Argument::String(application.app_id.clone()),
+                    Argument::Boolean(true),
+                ],
             )
         }) {
             Ok(_) => dismiss_window("main"),
@@ -358,7 +363,7 @@ impl LauncherApp {
                     .color(palette.primary()),
                 Text::new(APP_TITLE).font_size(22.0),
                 Spacer::new(),
-                Text::new("Meta + Space")
+                Text::new("Super + Space")
                     .font_size(11.0)
                     .color(palette.secondary()),
             }
@@ -406,7 +411,10 @@ fn show_file_manager() -> bool {
             DESKTOP_STEMD_OBJECT_PATH,
             DESKTOP_STEMD_INTERFACE,
             DESKTOP_STEMD_LAUNCH_OR_FOCUS_METHOD,
-            vec![Argument::String(String::from(FILE_MANAGER_APP_ID))],
+            vec![
+                Argument::String(String::from(FILE_MANAGER_APP_ID)),
+                Argument::Boolean(true),
+            ],
         )
     });
 
@@ -443,16 +451,10 @@ impl Application for LauncherApp {
     fn on_window_created(&mut self, _ctx: &WindowContext, window: &mut dyn PlatformWindow) {
         self.window_id.set(window.surface_id());
         // A newly created launcher can first receive a FocusChanged event for
-        // the window that was focused before it opened.  Do not treat that
+        // the window that was focused before it opened. Do not treat that
         // event as a loss of focus until this window has received its own
         // focus notification.
         self.focus_ready.set(false);
-        if let Ok((screen_width, screen_height)) = window.get_screen_size() {
-            let size = window.size();
-            let x = ((screen_width as f32 - size.width).max(0.0) * 0.5) as i32;
-            let y = ((screen_height as f32 - size.height).max(0.0) * 0.5) as i32;
-            let _ = window.move_window(x, y);
-        }
     }
 
     fn on_focus_changed(&mut self, window_id: u32, _app_name: &str, _menu_titles: &str) {
@@ -481,6 +483,7 @@ impl Application for LauncherApp {
             .opaque(false)
             .background_color(Color::TRANSPARENT)
             .window_type(window_types::ALWAYS_ON_TOP)
+            .placement(WindowPlacement::Centered)
             .scene_key("main")
             .open_at_launch(false)
     }

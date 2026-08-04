@@ -12,8 +12,7 @@ use crate::os::{
 use crate::surface::Surface;
 use sws_protocol::{self as protocol, ServerMessage};
 
-const HANDLE_RECORD_CAPACITY: usize =
-    protocol::MessageHeader::SIZE + protocol::MAX_PAYLOAD_SIZE;
+const HANDLE_RECORD_CAPACITY: usize = protocol::MessageHeader::SIZE + protocol::MAX_PAYLOAD_SIZE;
 const MAX_DISPATCH_FRAMES: usize = 64;
 const MAX_STREAM_WRITE_CHUNK: usize = 16 * 1024;
 
@@ -475,11 +474,7 @@ impl TransportState {
         socket_flush(&mut self.socket)
     }
 
-    fn send_handle_record_pumping(
-        &mut self,
-        handle: &Handle,
-        record: &[u8],
-    ) -> Result<(), Error> {
+    fn send_handle_record_pumping(&mut self, handle: &Handle, record: &[u8]) -> Result<(), Error> {
         loop {
             match socket_send_handle_and_data(&self.socket, handle, record) {
                 Ok(()) => return Ok(()),
@@ -520,8 +515,7 @@ impl TransportState {
 
     fn register_request(&mut self) -> Result<u8, Error> {
         let request_id = self.alloc_request_id()?;
-        self.responses
-            .insert(request_id, PendingResponse::Awaiting);
+        self.responses.insert(request_id, PendingResponse::Awaiting);
         Ok(request_id)
     }
 
@@ -534,18 +528,16 @@ impl TransportState {
         if payload.len() > protocol::MAX_PAYLOAD_SIZE {
             return Err(Error::ProtocolError);
         }
-        if handle.is_some() && protocol::MessageHeader::SIZE + payload.len() > HANDLE_RECORD_CAPACITY
+        if handle.is_some()
+            && protocol::MessageHeader::SIZE + payload.len() > HANDLE_RECORD_CAPACITY
         {
             return Err(Error::ProtocolError);
         }
 
         let request_id = self.register_request()?;
         let send_result = if let Some(handle) = handle {
-            let header = protocol::MessageHeader::request(
-                msg_type,
-                request_id,
-                payload.len() as u32,
-            );
+            let header =
+                protocol::MessageHeader::request(msg_type, request_id, payload.len() as u32);
             let mut record = Vec::with_capacity(protocol::MessageHeader::SIZE + payload.len());
             record.extend_from_slice(&header.to_le_bytes());
             record.extend_from_slice(payload);
@@ -567,10 +559,11 @@ impl TransportState {
         if let Some(error) = self.terminal_error {
             return Err(error);
         }
-        self.write_frame_routed(msg_type, 0, 0, payload).map_err(|error| {
-            self.fail_pending(error);
-            Error::SendFailed
-        })
+        self.write_frame_routed(msg_type, 0, 0, payload)
+            .map_err(|error| {
+                self.fail_pending(error);
+                Error::SendFailed
+            })
     }
 
     fn take_response(&mut self, request_id: u8) -> Option<Result<Response, Error>> {
@@ -578,8 +571,7 @@ impl TransportState {
             Some(PendingResponse::Ready(response)) => Some(Ok(response)),
             Some(PendingResponse::Failed(error)) => Some(Err(error)),
             Some(PendingResponse::Awaiting) => {
-                self.responses
-                    .insert(request_id, PendingResponse::Awaiting);
+                self.responses.insert(request_id, PendingResponse::Awaiting);
                 None
             }
             Some(PendingResponse::Cancelled) => {
@@ -628,9 +620,7 @@ impl TransportState {
                 self.responses.remove(&request_id);
                 Ok(())
             }
-            Some(PendingResponse::Ready(_))
-            | Some(PendingResponse::Failed(_))
-            | None => {
+            Some(PendingResponse::Ready(_)) | Some(PendingResponse::Failed(_)) | None => {
                 self.fail_pending(Error::ProtocolError);
                 Err(Error::ProtocolError)
             }
@@ -697,10 +687,8 @@ impl TransportState {
             .map_err(|_| Error::ReceiveFailed)?;
         self.handle_record.resize(required_len, 0);
 
-        let (handle, bytes_read) = socket_recv_handle_and_data(
-            &self.socket,
-            &mut self.handle_record,
-        )?;
+        let (handle, bytes_read) =
+            socket_recv_handle_and_data(&self.socket, &mut self.handle_record)?;
 
         if bytes_read != required_len {
             return Err(Error::ProtocolError);
@@ -826,8 +814,9 @@ impl TransportState {
             }
             Event::ImeActivate(state) | Event::ImeContextState(state) => Some(state.window_id),
             Event::ImeKeyEvent { window_id, .. } => Some(*window_id),
-            Event::SurfaceConfigure { surface_id, .. }
-            | Event::SurfaceDestroyed { surface_id } => Some(*surface_id),
+            Event::SurfaceConfigure { surface_id, .. } | Event::SurfaceDestroyed { surface_id } => {
+                Some(*surface_id)
+            }
             Event::MenuItemActivated { window_id, .. }
             | Event::SgfxFrameRejected { window_id, .. }
             | Event::SgfxBufferReleased { window_id, .. } => Some(*window_id),
@@ -1121,10 +1110,7 @@ impl Connection {
 
     pub fn destroy_text_input_context(&self, context_id: u32) -> Result<(), Error> {
         let payload = protocol::payload_text_input_context_id(context_id);
-        self.send_message(
-            protocol::client_msg::TEXT_INPUT_DESTROY,
-            &payload,
-        )?;
+        self.send_message(protocol::client_msg::TEXT_INPUT_DESTROY, &payload)?;
         mutex_lock(&self.transport)
             .text_input_windows
             .remove(&context_id);
@@ -1133,18 +1119,12 @@ impl Connection {
 
     pub fn enable_text_input(&self, context_id: u32) -> Result<(), Error> {
         let payload = protocol::payload_text_input_context_id(context_id);
-        self.send_message(
-            protocol::client_msg::TEXT_INPUT_ENABLE,
-            &payload,
-        )
+        self.send_message(protocol::client_msg::TEXT_INPUT_ENABLE, &payload)
     }
 
     pub fn disable_text_input(&self, context_id: u32) -> Result<(), Error> {
         let payload = protocol::payload_text_input_context_id(context_id);
-        self.send_message(
-            protocol::client_msg::TEXT_INPUT_DISABLE,
-            &payload,
-        )
+        self.send_message(protocol::client_msg::TEXT_INPUT_DISABLE, &payload)
     }
 
     pub fn set_text_input_cursor_rect(
@@ -1156,10 +1136,7 @@ impl Connection {
         height: u32,
     ) -> Result<(), Error> {
         let payload = protocol::payload_text_input_set_cursor_rect(context_id, x, y, width, height);
-        self.send_message(
-            protocol::client_msg::TEXT_INPUT_SET_CURSOR_RECT,
-            &payload,
-        )
+        self.send_message(protocol::client_msg::TEXT_INPUT_SET_CURSOR_RECT, &payload)
     }
 
     pub fn set_text_input_surrounding_text(
@@ -1188,17 +1165,10 @@ impl Connection {
         purpose: u32,
     ) -> Result<(), Error> {
         let payload = protocol::payload_text_input_set_content_type(context_id, hint, purpose);
-        self.send_message(
-            protocol::client_msg::TEXT_INPUT_SET_CONTENT_TYPE,
-            &payload,
-        )
+        self.send_message(protocol::client_msg::TEXT_INPUT_SET_CONTENT_TYPE, &payload)
     }
 
-    pub fn set_text_input_change_cause(
-        &self,
-        context_id: u32,
-        cause: u32,
-    ) -> Result<(), Error> {
+    pub fn set_text_input_change_cause(&self, context_id: u32, cause: u32) -> Result<(), Error> {
         let payload = protocol::payload_text_input_set_text_change_cause(context_id, cause);
         self.send_message(
             protocol::client_msg::TEXT_INPUT_SET_TEXT_CHANGE_CAUSE,
@@ -1208,10 +1178,7 @@ impl Connection {
 
     pub fn commit_text_input_state(&self, context_id: u32, serial: u32) -> Result<(), Error> {
         let payload = protocol::payload_text_input_commit_state(context_id, serial);
-        self.send_message(
-            protocol::client_msg::TEXT_INPUT_COMMIT_STATE,
-            &payload,
-        )
+        self.send_message(protocol::client_msg::TEXT_INPUT_COMMIT_STATE, &payload)
     }
 
     /// Register this connection as an input method service.
@@ -1226,10 +1193,7 @@ impl Connection {
 
     pub fn set_active_input_method(&self, ime_id: u32) -> Result<(), Error> {
         let payload = protocol::payload_ime_set_active(ime_id);
-        self.send_message(
-            protocol::client_msg::IME_SET_ACTIVE,
-            &payload,
-        )
+        self.send_message(protocol::client_msg::IME_SET_ACTIVE, &payload)
     }
 
     /// Get registered input methods.
@@ -1283,10 +1247,7 @@ impl Connection {
 
     pub fn ime_key_handled(&self, key_serial: u32, handled: bool) -> Result<(), Error> {
         let payload = protocol::payload_ime_key_handled(key_serial, handled);
-        self.send_message(
-            protocol::client_msg::IME_KEY_HANDLED,
-            &payload,
-        )
+        self.send_message(protocol::client_msg::IME_KEY_HANDLED, &payload)
     }
 
     pub fn ime_set_preedit(
@@ -1304,18 +1265,12 @@ impl Connection {
             text.as_bytes(),
             spans,
         );
-        self.send_message(
-            protocol::client_msg::IME_SET_PREEDIT,
-            &payload,
-        )
+        self.send_message(protocol::client_msg::IME_SET_PREEDIT, &payload)
     }
 
     pub fn ime_commit_text(&self, context_id: u32, text: &str) -> Result<(), Error> {
         let payload = protocol::payload_ime_commit_text(context_id, text.as_bytes());
-        self.send_message(
-            protocol::client_msg::IME_COMMIT_TEXT,
-            &payload,
-        )
+        self.send_message(protocol::client_msg::IME_COMMIT_TEXT, &payload)
     }
 
     pub fn ime_delete_surrounding_text(
@@ -1326,10 +1281,7 @@ impl Connection {
     ) -> Result<(), Error> {
         let payload =
             protocol::payload_ime_delete_surrounding_text(context_id, before_bytes, after_bytes);
-        self.send_message(
-            protocol::client_msg::IME_DELETE_SURROUNDING_TEXT,
-            &payload,
-        )
+        self.send_message(protocol::client_msg::IME_DELETE_SURROUNDING_TEXT, &payload)
     }
 
     pub fn ime_set_status(
@@ -1347,10 +1299,7 @@ impl Connection {
             flags,
             mode_label.as_bytes(),
         );
-        self.send_message(
-            protocol::client_msg::IME_SET_STATUS,
-            &payload,
-        )
+        self.send_message(protocol::client_msg::IME_SET_STATUS, &payload)
     }
 
     pub fn ime_set_popup_window(
@@ -1364,26 +1313,17 @@ impl Connection {
         let payload = protocol::payload_ime_set_popup_window(
             context_id, window_id, offset_x, offset_y, visible,
         );
-        self.send_message(
-            protocol::client_msg::IME_SET_POPUP_WINDOW,
-            &payload,
-        )
+        self.send_message(protocol::client_msg::IME_SET_POPUP_WINDOW, &payload)
     }
 
     pub fn ime_grab_keyboard(&self, context_id: u32) -> Result<(), Error> {
         let payload = protocol::payload_ime_grab_keyboard(context_id);
-        self.send_message(
-            protocol::client_msg::IME_GRAB_KEYBOARD,
-            &payload,
-        )
+        self.send_message(protocol::client_msg::IME_GRAB_KEYBOARD, &payload)
     }
 
     pub fn ime_release_keyboard(&self, context_id: u32) -> Result<(), Error> {
         let payload = protocol::payload_ime_release_keyboard(context_id);
-        self.send_message(
-            protocol::client_msg::IME_RELEASE_KEYBOARD,
-            &payload,
-        )
+        self.send_message(protocol::client_msg::IME_RELEASE_KEYBOARD, &payload)
     }
 
     /// Create a new surface (window)
@@ -1500,6 +1440,75 @@ impl Connection {
         Ok(surface_id)
     }
 
+    /// Create a new surface with an explicit initial placement policy.
+    pub fn create_surface_with_type_and_policies_with_placement(
+        &self,
+        app_id: &str,
+        app_name: &str,
+        menu_titles: &str,
+        width: u32,
+        height: u32,
+        window_type: u32,
+        resizable: bool,
+        focus_on_create: bool,
+        active_on_focus: bool,
+        placement: protocol::WindowPlacement,
+    ) -> Result<u32, Error> {
+        let payload = match placement {
+            protocol::WindowPlacement::Default => protocol::payload_create_window(
+                app_id.as_bytes(),
+                app_name.as_bytes(),
+                menu_titles.as_bytes(),
+                width,
+                height,
+                window_type,
+                resizable,
+                focus_on_create,
+                active_on_focus,
+            ),
+            protocol::WindowPlacement::Centered => protocol::payload_create_window_with_placement(
+                app_id.as_bytes(),
+                app_name.as_bytes(),
+                menu_titles.as_bytes(),
+                width,
+                height,
+                window_type,
+                resizable,
+                focus_on_create,
+                active_on_focus,
+                protocol::window_placement::CENTERED,
+                0,
+                0,
+            ),
+            protocol::WindowPlacement::Absolute { x, y } => {
+                protocol::payload_create_window_with_placement(
+                    app_id.as_bytes(),
+                    app_name.as_bytes(),
+                    menu_titles.as_bytes(),
+                    width,
+                    height,
+                    window_type,
+                    resizable,
+                    focus_on_create,
+                    active_on_focus,
+                    protocol::window_placement::ABSOLUTE,
+                    x,
+                    y,
+                )
+            }
+        };
+        let mut response = self.request(protocol::client_msg::CREATE_WINDOW, &payload)?;
+        let surface_id = match response.message() {
+            ServerMessage::WindowCreated { window_id, .. } => window_id,
+            _ => return Err(Error::InvalidResponse),
+        };
+        let shm_handle = response.take_handle().ok_or(Error::ShmHandleFailed)?;
+        let shm = SharedMemory::from_handle(shm_handle).map_err(|_| Error::ShmHandleFailed)?;
+        let surface = Surface::new(surface_id, width, height, shm)?;
+        mutex_lock(&self.surfaces).insert(surface_id, surface);
+        Ok(surface_id)
+    }
+
     /// Create a new surface (window) with explicit focus/active policies and initial position.
     pub fn create_surface_with_type_and_policies_at(
         &self,
@@ -1588,39 +1597,26 @@ impl Connection {
         let payload = protocol::payload_set_window_size_limits(
             surface_id, min_width, min_height, max_width, max_height,
         );
-        self.send_message(
-            protocol::client_msg::SET_WINDOW_SIZE_LIMITS,
-            &payload,
-        )
-        .map_err(|_| Error::SendFailed)
+        self.send_message(protocol::client_msg::SET_WINDOW_SIZE_LIMITS, &payload)
+            .map_err(|_| Error::SendFailed)
     }
 
     /// Update menu titles for a window (format: "menu1|menu2|menu3").
-    pub fn set_window_menu_titles(
-        &self,
-        surface_id: u32,
-        menu_titles: &str,
-    ) -> Result<(), Error> {
+    pub fn set_window_menu_titles(&self, surface_id: u32, menu_titles: &str) -> Result<(), Error> {
         if !mutex_lock(&self.surfaces).contains_key(&surface_id) {
             return Err(Error::SurfaceNotFound);
         }
 
         let payload = protocol::payload_set_window_menu_titles(surface_id, menu_titles.as_bytes());
-        self.send_message(
-            protocol::client_msg::SET_WINDOW_MENU_TITLES,
-            &payload,
-        )
-        .map_err(|_| Error::SendFailed)
+        self.send_message(protocol::client_msg::SET_WINDOW_MENU_TITLES, &payload)
+            .map_err(|_| Error::SendFailed)
     }
 
     /// Notify the server that a menu item was activated for a window.
     pub fn activate_menu_item(&self, window_id: u32, menu_item_id: &str) -> Result<(), Error> {
         let payload = protocol::payload_activate_menu_item(window_id, menu_item_id.as_bytes());
-        self.send_message(
-            protocol::client_msg::ACTIVATE_MENU_ITEM,
-            &payload,
-        )
-        .map_err(|_| Error::SendFailed)
+        self.send_message(protocol::client_msg::ACTIVATE_MENU_ITEM, &payload)
+            .map_err(|_| Error::SendFailed)
     }
 
     /// Execute a closure with shared access to a surface.
@@ -1749,21 +1745,15 @@ impl Connection {
     /// until the primary button is released.
     pub fn request_move_window(&self, surface_id: u32) -> Result<(), Error> {
         let payload = protocol::payload_request_move_window(surface_id);
-        self.send_message(
-            protocol::client_msg::REQUEST_MOVE_WINDOW,
-            &payload,
-        )
-        .map_err(|_| Error::SendFailed)
+        self.send_message(protocol::client_msg::REQUEST_MOVE_WINDOW, &payload)
+            .map_err(|_| Error::SendFailed)
     }
 
     /// Set the window position (absolute) for this surface.
     pub fn move_window(&self, surface_id: u32, x: i32, y: i32) -> Result<(), Error> {
         let payload = protocol::payload_move_window(surface_id, x, y);
-        self.send_message(
-            protocol::client_msg::MOVE_WINDOW,
-            &payload,
-        )
-        .map_err(|_| Error::SendFailed)
+        self.send_message(protocol::client_msg::MOVE_WINDOW, &payload)
+            .map_err(|_| Error::SendFailed)
     }
 
     /// Set (or clear) the logical parent of a window.
@@ -1779,11 +1769,8 @@ impl Connection {
     ) -> Result<(), Error> {
         let parent_id = parent_surface_id.unwrap_or(0);
         let payload = protocol::payload_set_window_parent(surface_id, parent_id);
-        self.send_message(
-            protocol::client_msg::SET_WINDOW_PARENT,
-            &payload,
-        )
-        .map_err(|_| Error::SendFailed)
+        self.send_message(protocol::client_msg::SET_WINDOW_PARENT, &payload)
+            .map_err(|_| Error::SendFailed)
     }
 
     /// Configure transient behavior flags for a window.
@@ -1798,17 +1785,10 @@ impl Connection {
     /// Configure transient behavior flags for a window (raw bits).
     ///
     /// Prefer [`set_window_transient_flags`] with [`TransientFlags`].
-    pub fn set_window_transient_flags_raw(
-        &self,
-        surface_id: u32,
-        flags: u32,
-    ) -> Result<(), Error> {
+    pub fn set_window_transient_flags_raw(&self, surface_id: u32, flags: u32) -> Result<(), Error> {
         let payload = protocol::payload_set_window_transient_flags(surface_id, flags);
-        self.send_message(
-            protocol::client_msg::SET_WINDOW_TRANSIENT_FLAGS,
-            &payload,
-        )
-        .map_err(|_| Error::SendFailed)
+        self.send_message(protocol::client_msg::SET_WINDOW_TRANSIENT_FLAGS, &payload)
+            .map_err(|_| Error::SendFailed)
     }
 
     /// Minimize a window (hide it; buffer size remains unchanged).
@@ -1817,11 +1797,8 @@ impl Connection {
             return Err(Error::SurfaceNotFound);
         }
         let payload = protocol::payload_minimize_window(surface_id);
-        self.send_message(
-            protocol::client_msg::MINIMIZE_WINDOW,
-            &payload,
-        )
-        .map_err(|_| Error::SendFailed)
+        self.send_message(protocol::client_msg::MINIMIZE_WINDOW, &payload)
+            .map_err(|_| Error::SendFailed)
     }
 
     /// Maximize a window.
@@ -1832,11 +1809,8 @@ impl Connection {
             return Err(Error::SurfaceNotFound);
         }
         let payload = protocol::payload_maximize_window(surface_id);
-        self.send_message(
-            protocol::client_msg::MAXIMIZE_WINDOW,
-            &payload,
-        )
-        .map_err(|_| Error::SendFailed)
+        self.send_message(protocol::client_msg::MAXIMIZE_WINDOW, &payload)
+            .map_err(|_| Error::SendFailed)
     }
 
     /// Restore a window from minimized or maximized state.
@@ -1845,11 +1819,8 @@ impl Connection {
             return Err(Error::SurfaceNotFound);
         }
         let payload = protocol::payload_restore_window(surface_id);
-        self.send_message(
-            protocol::client_msg::RESTORE_WINDOW,
-            &payload,
-        )
-        .map_err(|_| Error::SendFailed)
+        self.send_message(protocol::client_msg::RESTORE_WINDOW, &payload)
+            .map_err(|_| Error::SendFailed)
     }
 
     /// Focus and raise a window to the top of the Z-order.
@@ -1861,11 +1832,8 @@ impl Connection {
             return Err(Error::SurfaceNotFound);
         }
         let payload = protocol::payload_focus_window(surface_id);
-        self.send_message(
-            protocol::client_msg::FOCUS_WINDOW,
-            &payload,
-        )
-        .map_err(|_| Error::SendFailed)
+        self.send_message(protocol::client_msg::FOCUS_WINDOW, &payload)
+            .map_err(|_| Error::SendFailed)
     }
 
     /// Focus and raise any window (including those created by other clients).
@@ -1877,11 +1845,8 @@ impl Connection {
     /// The server will return an error if the window_id does not exist.
     pub fn focus_window_any(&self, window_id: u32) -> Result<(), Error> {
         let payload = protocol::payload_focus_window(window_id);
-        self.send_message(
-            protocol::client_msg::FOCUS_WINDOW,
-            &payload,
-        )
-        .map_err(|_| Error::SendFailed)
+        self.send_message(protocol::client_msg::FOCUS_WINDOW, &payload)
+            .map_err(|_| Error::SendFailed)
     }
 
     /// Set the window type used for Z-order management.
@@ -1904,11 +1869,8 @@ impl Connection {
             return Err(Error::SurfaceNotFound);
         }
         let payload = protocol::payload_set_window_type(surface_id, window_type);
-        self.send_message(
-            protocol::client_msg::SET_WINDOW_TYPE,
-            &payload,
-        )
-        .map_err(|_| Error::SendFailed)
+        self.send_message(protocol::client_msg::SET_WINDOW_TYPE, &payload)
+            .map_err(|_| Error::SendFailed)
     }
 
     /// Set per-window opacity (0 = fully transparent, 255 = fully opaque).
@@ -1917,11 +1879,8 @@ impl Connection {
             return Err(Error::SurfaceNotFound);
         }
         let payload = protocol::payload_set_window_opacity(surface_id, opacity);
-        self.send_message(
-            protocol::client_msg::SET_WINDOW_OPACITY,
-            &payload,
-        )
-        .map_err(|_| Error::SendFailed)
+        self.send_message(protocol::client_msg::SET_WINDOW_OPACITY, &payload)
+            .map_err(|_| Error::SendFailed)
     }
 
     /// Set whether window content contains alpha channel (semi-transparent pixels).
@@ -1940,11 +1899,8 @@ impl Connection {
             return Err(Error::SurfaceNotFound);
         }
         let payload = protocol::payload_set_window_has_alpha_content(surface_id, has_alpha);
-        self.send_message(
-            protocol::client_msg::SET_WINDOW_HAS_ALPHA_CONTENT,
-            &payload,
-        )
-        .map_err(|_| Error::SendFailed)
+        self.send_message(protocol::client_msg::SET_WINDOW_HAS_ALPHA_CONTENT, &payload)
+            .map_err(|_| Error::SendFailed)
     }
 
     /// Set the workarea (usable screen area) for the window manager.
@@ -1953,11 +1909,8 @@ impl Connection {
     /// should be placed, typically excluding the area occupied by the taskbar.
     pub fn set_workarea(&self, x: i32, y: i32, width: u32, height: u32) -> Result<(), Error> {
         let payload = protocol::payload_set_workarea(x, y, width, height);
-        self.send_message(
-            protocol::client_msg::SET_WORKAREA,
-            &payload,
-        )
-        .map_err(|_| Error::SendFailed)
+        self.send_message(protocol::client_msg::SET_WORKAREA, &payload)
+            .map_err(|_| Error::SendFailed)
     }
 
     /// Set whether a window can be resized by the user via interactive resize.
@@ -1966,11 +1919,8 @@ impl Connection {
             return Err(Error::SurfaceNotFound);
         }
         let payload = protocol::payload_set_window_resizable(surface_id, resizable);
-        self.send_message(
-            protocol::client_msg::SET_WINDOW_RESIZABLE,
-            &payload,
-        )
-        .map_err(|_| Error::SendFailed)
+        self.send_message(protocol::client_msg::SET_WINDOW_RESIZABLE, &payload)
+            .map_err(|_| Error::SendFailed)
     }
 
     /// Resize a surface.
@@ -2121,11 +2071,11 @@ impl TransportState {
                 after_bytes,
             } => {
                 self.push_event(Event::TextInputDeleteSurroundingText {
-                        context_id,
-                        serial,
-                        before_bytes,
-                        after_bytes,
-                    });
+                    context_id,
+                    serial,
+                    before_bytes,
+                    after_bytes,
+                });
                 true
             }
             ServerMessage::TextInputDone { context_id, serial } => {
@@ -2173,20 +2123,20 @@ impl TransportState {
                     String::from_utf8_lossy(&surrounding_text[..surrounding_text_len as usize])
                         .into_owned();
                 self.push_event(Event::ImeActivate(ImeContextState {
-                        context_id,
-                        window_id,
-                        serial,
-                        cursor_x,
-                        cursor_y,
-                        cursor_width,
-                        cursor_height,
-                        content_hint,
-                        content_purpose,
-                        text_change_cause,
-                        cursor_byte,
-                        anchor_byte,
-                        surrounding_text,
-                    }));
+                    context_id,
+                    window_id,
+                    serial,
+                    cursor_x,
+                    cursor_y,
+                    cursor_width,
+                    cursor_height,
+                    content_hint,
+                    content_purpose,
+                    text_change_cause,
+                    cursor_byte,
+                    anchor_byte,
+                    surrounding_text,
+                }));
                 true
             }
             ServerMessage::ImeDeactivate { context_id, serial } => {
@@ -2213,20 +2163,20 @@ impl TransportState {
                     String::from_utf8_lossy(&surrounding_text[..surrounding_text_len as usize])
                         .into_owned();
                 self.push_event(Event::ImeContextState(ImeContextState {
-                        context_id,
-                        window_id,
-                        serial,
-                        cursor_x,
-                        cursor_y,
-                        cursor_width,
-                        cursor_height,
-                        content_hint,
-                        content_purpose,
-                        text_change_cause,
-                        cursor_byte,
-                        anchor_byte,
-                        surrounding_text,
-                    }));
+                    context_id,
+                    window_id,
+                    serial,
+                    cursor_x,
+                    cursor_y,
+                    cursor_width,
+                    cursor_height,
+                    content_hint,
+                    content_purpose,
+                    text_change_cause,
+                    cursor_byte,
+                    anchor_byte,
+                    surrounding_text,
+                }));
                 true
             }
             ServerMessage::ImeKeyEvent {
@@ -2483,7 +2433,10 @@ impl Connection {
                 buffer_id,
                 generation,
                 compositor_epoch,
-            }) == identity => Ok(()),
+            }) == identity =>
+            {
+                Ok(())
+            }
             ServerMessage::Error { code } => Err(Error::ServerError(code)),
             _ => Err(Error::InvalidResponse),
         }
@@ -2547,7 +2500,10 @@ impl Connection {
                 buffer_id,
                 generation,
                 compositor_epoch,
-            }) == identity => Ok(()),
+            }) == identity =>
+            {
+                Ok(())
+            }
             ServerMessage::Error { code } => Err(Error::ServerError(code)),
             _ => Err(Error::InvalidResponse),
         }

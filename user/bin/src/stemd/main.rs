@@ -39,15 +39,21 @@ use desktop::{
 };
 use protocol::cmd;
 
-fn application_environment() -> Vec<String> {
+const WINDOW_PLACEMENT_ENV: &str = "SCARLET_WINDOW_PLACEMENT";
+
+fn application_environment(window_placement: Option<&str>) -> Vec<String> {
     let user = std::env::var("USER").unwrap_or(String::from("root"));
     let home = std::env::var("HOME").unwrap_or(String::from("/root"));
     let shell = std::env::var("SHELL").unwrap_or(String::from("/bin/sh"));
-    vec![
+    let mut environment = vec![
         format!("USER={user}"),
         format!("HOME={home}"),
         format!("SHELL={shell}"),
-    ]
+    ];
+    if let Some(placement) = window_placement {
+        environment.push(format!("{WINDOW_PLACEMENT_ENV}={placement}"));
+    }
+    environment
 }
 
 fn try_attach_stdio_to_path(path: &str) {
@@ -675,7 +681,7 @@ fn launch_or_focus(app_id: &str, exec_path: Option<&str>) -> Result<(), &'static
             let path = parts[0];
             let argv: Vec<&str> = parts.to_vec();
 
-            let environment = application_environment();
+            let environment = application_environment(None);
             let environment: Vec<&str> = environment.iter().map(|value| value.as_str()).collect();
             if std::task::execve(path, &argv, &environment) != 0 {
                 println!("stemd: Failed to execve {}", path);
@@ -804,7 +810,7 @@ fn get_app_menu_titles(app_id: &str) -> Vec<String> {
 
 /// Launch an application by app_id (looks up from .desktop registry)
 /// Returns the PID of the launched process
-fn launch_app_by_id(app_id: &str) -> Result<i32, &'static str> {
+fn launch_app_by_id(app_id: &str, window_placement: Option<&str>) -> Result<i32, &'static str> {
     println!("stemd: launch_app_by_id called with app_id={}", app_id);
 
     println!("stemd: Looking up {} from .desktop files...", app_id);
@@ -819,11 +825,15 @@ fn launch_app_by_id(app_id: &str) -> Result<i32, &'static str> {
         }
     };
 
-    launch_desktop_entry(&entry, &[])
+    launch_desktop_entry(&entry, &[], window_placement)
 }
 
 /// Launch a registered desktop entry with optional local file arguments.
-fn launch_desktop_entry(entry: &DesktopEntry, files: &[String]) -> Result<i32, &'static str> {
+fn launch_desktop_entry(
+    entry: &DesktopEntry,
+    files: &[String],
+    window_placement: Option<&str>,
+) -> Result<i32, &'static str> {
     let argv_strings = expand_exec(&entry.exec, files)?;
     let path = argv_strings
         .first()
@@ -842,7 +852,7 @@ fn launch_desktop_entry(entry: &DesktopEntry, files: &[String]) -> Result<i32, &
 
             fence(core::sync::atomic::Ordering::SeqCst);
 
-            let environment = application_environment();
+            let environment = application_environment(window_placement);
             let environment: Vec<&str> = environment.iter().map(|value| value.as_str()).collect();
             if std::task::execve(&path, &argv, &environment) != 0 {
                 println!("stemd: Failed to execve {}", path);
@@ -872,7 +882,7 @@ fn open_path(path: &str) -> Result<i32, &'static str> {
         path, mime_type, entry.app_id
     );
     let files = vec![String::from(path)];
-    launch_desktop_entry(&entry, &files)
+    launch_desktop_entry(&entry, &files, None)
 }
 
 /// Launch a service by forking and executing
@@ -903,7 +913,8 @@ fn launch_service(service: &Service) -> Result<i32, &'static str> {
 
             let path = parts[0];
             let argv: Vec<&str> = parts.to_vec();
-            let envp: Vec<&str> = Vec::new();
+            let environment = application_environment(None);
+            let envp: Vec<&str> = environment.iter().map(|value| value.as_str()).collect();
 
             if std::task::execve(path, &argv, &envp) != 0 {
                 println!("stemd: Failed to execve {}", path);
@@ -1175,7 +1186,7 @@ fn ipc_thread() {
                                                 };
 
                                                 let response = if launch_only {
-                                                    match launch_app_by_id(app_id) {
+                                                    match launch_app_by_id(app_id, None) {
                                                         Ok(_) => "OK: Launched\n".as_bytes(),
                                                         Err(_) => {
                                                             "ERROR: Failed to launch\n".as_bytes()
@@ -1530,6 +1541,11 @@ fn handle_sbus_message(
                             return Ok(());
                         }
                     };
+                    let window_placement = if matches!(args.get(1), Some(Argument::Boolean(true))) {
+                        Some("centered")
+                    } else {
+                        None
+                    };
 
                     println!("[sbus] LaunchOrFocus: app_id={}", app_id);
 
@@ -1567,7 +1583,7 @@ fn handle_sbus_message(
                                     remove_running_app_by_pid(pid);
 
                                     println!("[sbus] Launching new instance of {}", app_id);
-                                    match launch_app_by_id(app_id) {
+                                    match launch_app_by_id(app_id, window_placement) {
                                         Ok(new_pid) => {
                                             println!(
                                                 "[sbus] Successfully launched {} (PID={})",
@@ -1606,7 +1622,7 @@ fn handle_sbus_message(
                                     remove_running_app_by_pid(pid);
 
                                     println!("[sbus] Launching new instance of {}", app_id);
-                                    match launch_app_by_id(app_id) {
+                                    match launch_app_by_id(app_id, window_placement) {
                                         Ok(new_pid) => {
                                             println!(
                                                 "[sbus] Successfully launched {} (PID={})",
@@ -1657,7 +1673,7 @@ fn handle_sbus_message(
                     } else {
                         println!("[sbus] App {} is not running, launching", app_id);
                         // Launch the application
-                        match launch_app_by_id(app_id) {
+                        match launch_app_by_id(app_id, window_placement) {
                             Ok(pid) => {
                                 println!("[sbus] Successfully launched {} (PID={})", app_id, pid);
                                 if let Some(conn) = conn_guard.as_mut() {

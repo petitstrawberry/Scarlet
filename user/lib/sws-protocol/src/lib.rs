@@ -317,6 +317,16 @@ pub mod window_types {
     pub const IME_POPUP: u32 = 4;
 }
 
+/// Initial placement hints understood by the SWS window manager.
+pub mod window_placement {
+    /// Use the compositor's normal placement policy.
+    pub const DEFAULT: u32 = 0;
+    /// Center the window in the current workarea.
+    pub const CENTERED: u32 = 1;
+    /// Place the window at the supplied absolute coordinates.
+    pub const ABSOLUTE: u32 = 2;
+}
+
 /// One window-local damage rectangle in an SGFX frame commit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SgfxDamageRect {
@@ -652,6 +662,17 @@ pub fn parse_ime_active_payload(payload: &[u8]) -> Result<Option<InputMethodEntr
     }
 }
 
+/// Initial placement requested by a client when creating a window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowPlacement {
+    /// Let the compositor choose the initial position.
+    Default,
+    /// Center the window in the current workarea.
+    Centered,
+    /// Request an absolute screen position.
+    Absolute { x: i32, y: i32 },
+}
+
 /// Borrowed client->server messages (payload may be borrowed).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClientMessageRef<'a> {
@@ -665,8 +686,7 @@ pub enum ClientMessageRef<'a> {
         resizable: bool,
         focus_on_create: bool,
         active_on_focus: bool,
-        initial_x: Option<i32>,
-        initial_y: Option<i32>,
+        initial_position: WindowPlacement,
     },
     DestroyWindow {
         window_id: u32,
@@ -1165,7 +1185,9 @@ pub enum ServerMessage {
         commit_serial: u64,
     },
     /// Asynchronous notification that shared SGFX composition is unavailable.
-    SgfxBackendLost { compositor_epoch: u32 },
+    SgfxBackendLost {
+        compositor_epoch: u32,
+    },
     /// Confirmation that SWS dropped a registered SGFX image capability.
     SgfxBufferDestroyed {
         window_id: u32,
@@ -1281,6 +1303,7 @@ pub fn parse_client_message<'a>(
                 && payload.len() != offset + 16
                 && payload.len() != offset + 24
                 && payload.len() != offset + 32
+                && payload.len() != offset + 36
             {
                 return Err(ProtocolError::MalformedPayload);
             }
@@ -1307,7 +1330,11 @@ pub fn parse_client_message<'a>(
                 payload[offset + 10],
                 payload[offset + 11],
             ]);
-            let resizable = if payload.len() == offset + 16 || payload.len() == offset + 24 {
+            let resizable = if payload.len() == offset + 16
+                || payload.len() == offset + 24
+                || payload.len() == offset + 32
+                || payload.len() == offset + 36
+            {
                 u32::from_le_bytes([
                     payload[offset + 12],
                     payload[offset + 13],
@@ -1319,7 +1346,10 @@ pub fn parse_client_message<'a>(
             };
             let mut focus_on_create = true;
             let mut active_on_focus = window_type == window_types::NORMAL;
-            if payload.len() == offset + 24 || payload.len() == offset + 32 {
+            if payload.len() == offset + 24
+                || payload.len() == offset + 32
+                || payload.len() == offset + 36
+            {
                 focus_on_create = u32::from_le_bytes([
                     payload[offset + 16],
                     payload[offset + 17],
@@ -1333,7 +1363,7 @@ pub fn parse_client_message<'a>(
                     payload[offset + 23],
                 ]) != 0;
             }
-            let (initial_x, initial_y) = if payload.len() == offset + 32 {
+            let initial_position = if payload.len() == offset + 32 {
                 let x = i32::from_le_bytes([
                     payload[offset + 24],
                     payload[offset + 25],
@@ -1346,9 +1376,34 @@ pub fn parse_client_message<'a>(
                     payload[offset + 30],
                     payload[offset + 31],
                 ]);
-                (Some(x), Some(y))
+                WindowPlacement::Absolute { x, y }
+            } else if payload.len() == offset + 36 {
+                let placement = u32::from_le_bytes([
+                    payload[offset + 24],
+                    payload[offset + 25],
+                    payload[offset + 26],
+                    payload[offset + 27],
+                ]);
+                let x = i32::from_le_bytes([
+                    payload[offset + 28],
+                    payload[offset + 29],
+                    payload[offset + 30],
+                    payload[offset + 31],
+                ]);
+                let y = i32::from_le_bytes([
+                    payload[offset + 32],
+                    payload[offset + 33],
+                    payload[offset + 34],
+                    payload[offset + 35],
+                ]);
+                match placement {
+                    window_placement::DEFAULT => WindowPlacement::Default,
+                    window_placement::CENTERED => WindowPlacement::Centered,
+                    window_placement::ABSOLUTE => WindowPlacement::Absolute { x, y },
+                    _ => return Err(ProtocolError::MalformedPayload),
+                }
             } else {
-                (None, None)
+                WindowPlacement::Default
             };
             Ok(ClientMessageRef::CreateWindow {
                 app_id,
@@ -1360,8 +1415,7 @@ pub fn parse_client_message<'a>(
                 resizable,
                 focus_on_create,
                 active_on_focus,
-                initial_x,
-                initial_y,
+                initial_position,
             })
         }
         client_msg::DESTROY_WINDOW => {
@@ -2823,6 +2877,41 @@ pub fn payload_create_window_with_position(
     payload
 }
 
+/// Build a `CREATE_WINDOW` payload with an explicit initial placement policy.
+///
+/// The trailing fields are `placement`, `initial_x`, and `initial_y`.
+/// Coordinates are used only for [`window_placement::ABSOLUTE`].
+pub fn payload_create_window_with_placement(
+    app_id: &[u8],
+    app_name: &[u8],
+    menu_titles: &[u8],
+    width: u32,
+    height: u32,
+    window_type: u32,
+    resizable: bool,
+    focus_on_create: bool,
+    active_on_focus: bool,
+    placement: u32,
+    initial_x: i32,
+    initial_y: i32,
+) -> Vec<u8> {
+    let mut payload = payload_create_window(
+        app_id,
+        app_name,
+        menu_titles,
+        width,
+        height,
+        window_type,
+        resizable,
+        focus_on_create,
+        active_on_focus,
+    );
+    payload.extend_from_slice(&placement.to_le_bytes());
+    payload.extend_from_slice(&initial_x.to_le_bytes());
+    payload.extend_from_slice(&initial_y.to_le_bytes());
+    payload
+}
+
 /// Build payload for client->server `DESTROY_WINDOW`.
 pub fn payload_destroy_window(window_id: u32) -> [u8; 4] {
     window_id.to_le_bytes()
@@ -3562,10 +3651,7 @@ pub fn payload_commit_sgfx_frame(
     commit_serial: u64,
     damage_rects: &[SgfxDamageRect],
 ) -> Result<Vec<u8>, ProtocolError> {
-    if commit_serial == 0
-        || damage_rects.is_empty()
-        || damage_rects.len() > SGFX_MAX_DAMAGE_RECTS
-    {
+    if commit_serial == 0 || damage_rects.is_empty() || damage_rects.len() > SGFX_MAX_DAMAGE_RECTS {
         return Err(ProtocolError::MalformedPayload);
     }
     let mut payload = Vec::new();
@@ -3656,10 +3742,7 @@ pub fn payload_sgfx_buffer_released(
 /// Parsed rectangles, or [`ProtocolError::MalformedPayload`] for an empty,
 /// misaligned, or oversized list.
 pub fn parse_sgfx_damage_rects(payload: &[u8]) -> Result<Vec<SgfxDamageRect>, ProtocolError> {
-    if payload.is_empty()
-        || payload.len() % 16 != 0
-        || payload.len() / 16 > SGFX_MAX_DAMAGE_RECTS
-    {
+    if payload.is_empty() || payload.len() % 16 != 0 || payload.len() / 16 > SGFX_MAX_DAMAGE_RECTS {
         return Err(ProtocolError::MalformedPayload);
     }
     let mut rects = Vec::new();
@@ -3977,4 +4060,76 @@ pub fn payload_set_window_has_alpha_content(window_id: u32, has_alpha: bool) -> 
     payload[0..4].copy_from_slice(&window_id.to_le_bytes());
     payload[4] = if has_alpha { 1 } else { 0 };
     payload
+}
+
+#[cfg(all(test, feature = "std"))]
+mod tests {
+    use super::{
+        ClientMessageRef, WindowPlacement, client_msg, parse_client_message,
+        payload_create_window_with_placement, payload_create_window_with_position,
+        window_placement,
+    };
+
+    #[test]
+    fn create_window_placement_preserves_focus_policies() {
+        let payload = payload_create_window_with_placement(
+            b"org.example.app",
+            b"Example",
+            b"",
+            640,
+            480,
+            0,
+            false,
+            false,
+            true,
+            window_placement::CENTERED,
+            0,
+            0,
+        );
+
+        let ClientMessageRef::CreateWindow {
+            resizable,
+            focus_on_create,
+            active_on_focus,
+            initial_position,
+            ..
+        } = parse_client_message(client_msg::CREATE_WINDOW, &payload).unwrap()
+        else {
+            panic!("expected CREATE_WINDOW");
+        };
+
+        assert!(!resizable);
+        assert!(!focus_on_create);
+        assert!(active_on_focus);
+        assert_eq!(initial_position, WindowPlacement::Centered);
+    }
+
+    #[test]
+    fn legacy_window_position_is_parsed_as_absolute() {
+        let payload = payload_create_window_with_position(
+            b"org.example.app",
+            b"Example",
+            b"",
+            640,
+            480,
+            0,
+            true,
+            true,
+            true,
+            -20,
+            30,
+        );
+
+        let ClientMessageRef::CreateWindow {
+            initial_position, ..
+        } = parse_client_message(client_msg::CREATE_WINDOW, &payload).unwrap()
+        else {
+            panic!("expected CREATE_WINDOW");
+        };
+
+        assert_eq!(
+            initial_position,
+            WindowPlacement::Absolute { x: -20, y: 30 }
+        );
+    }
 }

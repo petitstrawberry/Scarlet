@@ -3082,7 +3082,7 @@ impl Compositor {
             CompositorInputEvent::Keyboard { code, pressed } => {
                 self.update_modifier_key_state(code, pressed);
 
-                // Meta+Space is a desktop-global launcher shortcut.  Consume
+                // Super+Space is a desktop-global launcher shortcut. Consume
                 // the chord here before it reaches the focused application;
                 // the resident launcher process handles the actual window.
                 if self.launcher_shortcut_consuming {
@@ -3470,8 +3470,7 @@ impl Compositor {
                 resizable,
                 focus_on_create,
                 active_on_focus,
-                initial_x,
-                initial_y,
+                initial_position,
                 shm,
                 shm_mapped_addr,
                 shm_size,
@@ -3484,57 +3483,75 @@ impl Compositor {
                 use sws_protocol::window_types;
 
                 // Calculate initial position based on window type
-                let (x, y) = if let (Some(x), Some(y)) = (initial_x, initial_y) {
-                    println!(
-                        "[Compositor] Using requested position for window #{}: ({}, {})",
-                        window_id, x, y
-                    );
-                    (x, y)
-                } else if window_type == window_types::NORMAL {
-                    // Normal windows: cascade from focused window or position in workarea
-                    const OFFSET: i32 = 20;
+                let (x, y) = match initial_position {
+                    sws_protocol::WindowPlacement::Absolute { x, y } => {
+                        println!(
+                            "[Compositor] Using requested position for window #{}: ({}, {})",
+                            window_id, x, y
+                        );
+                        (x, y)
+                    }
+                    sws_protocol::WindowPlacement::Centered => {
+                        let (work_x, work_y, work_width, work_height) =
+                            self.workarea
+                                .unwrap_or((0, 0, self.screen_width, self.screen_height));
+                        let x = work_x + (work_width as i32 - width as i32).max(0) / 2;
+                        let y = work_y + (work_height as i32 - height as i32).max(0) / 2;
+                        println!(
+                            "[Compositor] Centering window #{} in workarea at ({}, {})",
+                            window_id, x, y
+                        );
+                        (x, y)
+                    }
+                    sws_protocol::WindowPlacement::Default
+                        if window_type == window_types::NORMAL =>
+                    {
+                        // Normal windows: cascade from focused window or position in workarea
+                        const OFFSET: i32 = 20;
 
-                    // Check if there's a focused Normal window
-                    let focused_pos = self
-                        .window_manager
-                        .get_focused_window_id()
-                        .and_then(|id| self.window_manager.get_window(id))
-                        .filter(|w| matches!(w.window_type, super::window::WindowType::Normal))
-                        .map(|w| (w.x, w.y));
+                        // Check if there's a focused Normal window
+                        let focused_pos = self
+                            .window_manager
+                            .get_focused_window_id()
+                            .and_then(|id| self.window_manager.get_window(id))
+                            .filter(|w| matches!(w.window_type, super::window::WindowType::Normal))
+                            .map(|w| (w.x, w.y));
 
-                    match (focused_pos, self.workarea) {
-                        (Some((fx, fy)), _) => {
-                            // Cascade from focused window
-                            let x = fx + OFFSET;
-                            let y = fy + OFFSET;
-                            println!(
-                                "[Compositor] Cascading Normal window from focused window at ({}, {}): ({}, {})",
-                                fx, fy, x, y
-                            );
-                            (x, y)
-                        }
-                        (None, Some((wx, wy, _ww, _wh))) => {
-                            // No focused Normal window: position in workarea with padding
-                            const PADDING: i32 = 20;
-                            let x = wx + PADDING;
-                            let y = wy + PADDING;
-                            println!(
-                                "[Compositor] No focused Normal window, positioning in workarea with padding: ({}, {})",
-                                x, y
-                            );
-                            (x, y)
-                        }
-                        (None, None) => {
-                            println!(
-                                "[Compositor] No workarea and no focused window, using (0, 0)"
-                            );
-                            (0, 0)
+                        match (focused_pos, self.workarea) {
+                            (Some((fx, fy)), _) => {
+                                // Cascade from focused window
+                                let x = fx + OFFSET;
+                                let y = fy + OFFSET;
+                                println!(
+                                    "[Compositor] Cascading Normal window from focused window at ({}, {}): ({}, {})",
+                                    fx, fy, x, y
+                                );
+                                (x, y)
+                            }
+                            (None, Some((wx, wy, _ww, _wh))) => {
+                                // No focused Normal window: position in workarea with padding
+                                const PADDING: i32 = 20;
+                                let x = wx + PADDING;
+                                let y = wy + PADDING;
+                                println!(
+                                    "[Compositor] No focused Normal window, positioning in workarea with padding: ({}, {})",
+                                    x, y
+                                );
+                                (x, y)
+                            }
+                            (None, None) => {
+                                println!(
+                                    "[Compositor] No workarea and no focused window, using (0, 0)"
+                                );
+                                (0, 0)
+                            }
                         }
                     }
-                } else {
-                    // Non-Normal windows (Taskbar, AlwaysOnTop, Desktop): use (0, 0)
-                    println!("[Compositor] Positioning non-Normal window at (0, 0)");
-                    (0, 0)
+                    sws_protocol::WindowPlacement::Default => {
+                        // Non-Normal windows (Taskbar, AlwaysOnTop, Desktop): use (0, 0)
+                        println!("[Compositor] Positioning non-Normal window at (0, 0)");
+                        (0, 0)
+                    }
                 };
 
                 let wtype = match window_type {

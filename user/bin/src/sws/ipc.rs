@@ -482,11 +482,7 @@ fn write_sgfx_frame_rejected(
         commit_serial,
         code,
     );
-    write_frame(
-        writer,
-        protocol::server_msg::SGFX_FRAME_REJECTED,
-        &payload,
-    )
+    write_frame(writer, protocol::server_msg::SGFX_FRAME_REJECTED, &payload)
 }
 
 fn write_handle_frame_response(
@@ -611,7 +607,9 @@ pub fn notify_sgfx_backend_lost() {
     if !SGFX_SHARED_IMAGES_AVAILABLE.swap(false, Ordering::AcqRel) {
         return;
     }
-    let mut next_epoch = COMPOSITOR_EPOCH.fetch_add(1, Ordering::AcqRel).wrapping_add(1);
+    let mut next_epoch = COMPOSITOR_EPOCH
+        .fetch_add(1, Ordering::AcqRel)
+        .wrapping_add(1);
     if next_epoch == 0 {
         COMPOSITOR_EPOCH.store(1, Ordering::Release);
         next_epoch = 1;
@@ -2079,8 +2077,7 @@ fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Ha
                             &mut stream_writer,
                             protocol::server_msg::INPUT_EVENT,
                             &payload,
-                        )
-                        {
+                        ) {
                             println!(
                                 "[ClientThread {}] Failed to send input event to window {}: {:?}",
                                 client_id, window_id, e
@@ -2182,12 +2179,7 @@ fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Ha
                     let socket_revents = handles[0].revents;
                     let wake_revents = handles[1].revents;
                     let fatal_mask = POLLERR | POLLHUP | POLLNVAL;
-                    super::trace::ipc_poll_result(
-                        ready,
-                        socket_revents,
-                        wake_revents,
-                        fatal_mask,
-                    );
+                    super::trace::ipc_poll_result(ready, socket_revents, wake_revents, fatal_mask);
                     if (socket_revents & fatal_mask) != 0 {
                         println!(
                             "[ClientThread {}] Socket poll failed: revents=0x{:x}",
@@ -2249,8 +2241,7 @@ fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Ha
                 resizable,
                 focus_on_create,
                 active_on_focus,
-                initial_x,
-                initial_y,
+                initial_position,
             }) => {
                 // Convert &[u8] to String
                 let app_id_str = String::from_utf8_lossy(app_id).into_owned();
@@ -2389,8 +2380,7 @@ fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Ha
                             resizable,
                             focus_on_create,
                             active_on_focus,
-                            initial_x,
-                            initial_y,
+                            initial_position,
                             shm: Some(shm),
                             shm_mapped_addr,
                             shm_size: buffer_size as usize,
@@ -3408,8 +3398,7 @@ pub enum IpcEvent {
         resizable: bool,
         focus_on_create: bool,
         active_on_focus: bool,
-        initial_x: Option<i32>,
-        initial_y: Option<i32>,
+        initial_position: protocol::WindowPlacement,
         /// Shared memory for the window buffer (server-allocated)
         shm: Option<SharedMemory>,
         shm_mapped_addr: Option<usize>,
