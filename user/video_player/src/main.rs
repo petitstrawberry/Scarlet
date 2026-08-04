@@ -48,7 +48,7 @@ use scarlet_ui::{
     Application, ApplicationRunExt, Canvas, CanvasView, Color, ComponentElement, Element, Event,
     InvalidationKind, KeyCode, KeyEvent, Listenable, MenuBarModel, MenuEntry, MenuItemModel,
     MouseButton, MouseEvent, Scene, Size, SubscriptionId, View, ViewExt, Window, WindowGroup,
-    graphics,
+    dismiss_window, graphics,
 };
 use std::audio::AUDIO_PCM_FORMAT_S16LE;
 use std::fs::{File, OpenOptions};
@@ -56,7 +56,7 @@ use std::handle::capability::memory_mapping::{flags as mmap_flags, munmap, prot}
 use std::io::{ErrorKind, Read, SeekFrom};
 use std::socket::Socket;
 use std::sync::Mutex;
-use std::task::{SCHED_UTIL_SCALE, exit};
+use std::task::SCHED_UTIL_SCALE;
 use std::thread::JoinHandle;
 use std::{format, println, thread};
 #[cfg(feature = "mp4-aac")]
@@ -944,6 +944,51 @@ impl PlaybackController {
             state.active = None;
         }
     }
+
+    fn cancel_active(&self) {
+        let mut state = self.state.lock();
+        state.pending = None;
+        if let Some(active) = state.active.as_ref() {
+            active.cancel.store(true, Ordering::Release);
+        }
+    }
+}
+
+struct VideoPlayerRuntime {
+    shutdown: Arc<AtomicBool>,
+    playback: Arc<PlaybackController>,
+    workers: Mutex<Vec<JoinHandle>>,
+}
+
+impl VideoPlayerRuntime {
+    fn new(playback: Arc<PlaybackController>) -> Arc<Self> {
+        Arc::new(Self {
+            shutdown: Arc::new(AtomicBool::new(false)),
+            playback,
+            workers: Mutex::new(Vec::new()),
+        })
+    }
+
+    fn add_worker(&self, worker: JoinHandle) {
+        self.workers.lock().push(worker);
+    }
+
+    fn shutdown(&self) {
+        if !self.shutdown.swap(true, Ordering::AcqRel) {
+            self.playback.cancel_active();
+        }
+
+        let workers = core::mem::take(&mut *self.workers.lock());
+        for worker in workers {
+            let _ = worker.join();
+        }
+    }
+}
+
+impl Drop for VideoPlayerRuntime {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
 }
 
 #[derive(Clone)]
@@ -963,6 +1008,7 @@ struct VideoPlayerApp {
     title_signal: Arc<PaintSignal>,
     picker_request_id: Arc<Mutex<Option<String>>>,
     playback: Arc<PlaybackController>,
+    runtime: Arc<VideoPlayerRuntime>,
 }
 
 #[derive(Clone)]
@@ -996,6 +1042,8 @@ impl VideoPlayerApp {
         stream_complete_path: Option<String>,
         stream_socket_path: Option<String>,
     ) -> Self {
+        let playback = Arc::new(PlaybackController::new());
+        let runtime = VideoPlayerRuntime::new(playback.clone());
         Self {
             path,
             window_title: Arc::new(Mutex::new(window_title.clone())),
@@ -1011,7 +1059,8 @@ impl VideoPlayerApp {
             paint_signal: Arc::new(PaintSignal::new(InvalidationKind::Paint)),
             title_signal: Arc::new(PaintSignal::new(InvalidationKind::Build)),
             picker_request_id: Arc::new(Mutex::new(None)),
-            playback: Arc::new(PlaybackController::new()),
+            playback,
+            runtime,
         }
     }
 }
@@ -1201,16 +1250,22 @@ impl Application for VideoPlayerApp {
     }
 
     fn init(&mut self) {
-        start_controls_thread(self.controls.clone(), self.paint_signal.clone());
-        start_picker_listener(
+        let shutdown = self.runtime.shutdown.clone();
+        self.runtime.add_worker(start_controls_thread(
+            self.controls.clone(),
+            self.paint_signal.clone(),
+            shutdown.clone(),
+        ));
+        self.runtime.add_worker(start_picker_listener(
             self.picker_request_id.clone(),
             self.playback.clone(),
             self.hardware_decode,
             self.loop_playback,
             self.window_title.clone(),
             self.title_signal.clone(),
-        );
-        start_playback_supervisor(
+            shutdown.clone(),
+        ));
+        self.runtime.add_worker(start_playback_supervisor(
             PlaybackRequest {
                 path: self.path.clone(),
                 mp4_data: self.mp4_data.clone(),
@@ -1225,7 +1280,12 @@ impl Application for VideoPlayerApp {
             self.frame_store.clone(),
             self.paint_signal.clone(),
             self.controls.clone(),
-        );
+            shutdown,
+        ));
+    }
+
+    fn on_shutdown(&mut self) {
+        self.runtime.shutdown();
     }
 
     fn debug_logging(&self) -> bool {
@@ -1294,59 +1354,73 @@ fn start_picker_listener(
     loop_playback: bool,
     window_title: Arc<Mutex<String>>,
     title_signal: Arc<PaintSignal>,
-) {
-    thread::spawn(move || {
-        loop {
-            let Ok(mut connection) = SbusConnection::connect() else {
-                thread::sleep(Duration::from_millis(FILE_PICKER_RETRY_DELAY_MS));
-                continue;
-            };
-
+    shutdown: Arc<AtomicBool>,
+) -> JoinHandle {
+    thread::Builder::new()
+        .name("video-picker")
+        .spawn(move || {
             loop {
-                let message = match connection.receive_message() {
-                    Ok(message) => message,
-                    Err(_) => break,
-                };
-                let Message::Signal {
-                    sender,
-                    path,
-                    interface,
-                    signal,
-                    args,
-                } = message
-                else {
-                    continue;
-                };
-                if sender != DESKTOP_FILE_MANAGER_BUS_NAME
-                    || path != DESKTOP_FILE_MANAGER_OBJECT_PATH
-                    || interface != DESKTOP_FILE_MANAGER_INTERFACE
-                    || signal != DESKTOP_FILE_MANAGER_RESPONSE_SIGNAL
-                {
-                    continue;
+                if shutdown.load(Ordering::Acquire) {
+                    return;
                 }
+                let Ok(mut connection) = SbusConnection::connect() else {
+                    thread::sleep(Duration::from_millis(FILE_PICKER_RETRY_DELAY_MS));
+                    continue;
+                };
 
-                let Some(Argument::String(response_id)) = args.first() else {
-                    continue;
-                };
-                let matches_request = request_id.lock().as_deref() == Some(response_id.as_str());
-                if !matches_request {
-                    continue;
-                }
-                request_id.lock().take();
+                loop {
+                    let message = match connection.receive_message_timeout(100) {
+                        Ok(Some(message)) => message,
+                        Ok(None) => {
+                            if shutdown.load(Ordering::Acquire) {
+                                return;
+                            }
+                            continue;
+                        }
+                        Err(_) => break,
+                    };
+                    let Message::Signal {
+                        sender,
+                        path,
+                        interface,
+                        signal,
+                        args,
+                    } = message
+                    else {
+                        continue;
+                    };
+                    if sender != DESKTOP_FILE_MANAGER_BUS_NAME
+                        || path != DESKTOP_FILE_MANAGER_OBJECT_PATH
+                        || interface != DESKTOP_FILE_MANAGER_INTERFACE
+                        || signal != DESKTOP_FILE_MANAGER_RESPONSE_SIGNAL
+                    {
+                        continue;
+                    }
 
-                if !matches!(args.get(1), Some(Argument::Boolean(true))) {
-                    continue;
+                    let Some(Argument::String(response_id)) = args.first() else {
+                        continue;
+                    };
+                    let matches_request =
+                        request_id.lock().as_deref() == Some(response_id.as_str());
+                    if !matches_request {
+                        continue;
+                    }
+                    request_id.lock().take();
+
+                    if !matches!(args.get(1), Some(Argument::Boolean(true))) {
+                        continue;
+                    }
+                    let Some(Argument::String(path)) = args.get(2) else {
+                        continue;
+                    };
+                    *window_title.lock() = video_window_title(None, path);
+                    title_signal.notify();
+                    playback.request_path(path.clone(), hardware_decode, loop_playback);
                 }
-                let Some(Argument::String(path)) = args.get(2) else {
-                    continue;
-                };
-                *window_title.lock() = video_window_title(None, path);
-                title_signal.notify();
-                playback.request_path(path.clone(), hardware_decode, loop_playback);
+                thread::sleep(Duration::from_millis(FILE_PICKER_RETRY_DELAY_MS));
             }
-            thread::sleep(Duration::from_millis(FILE_PICKER_RETRY_DELAY_MS));
-        }
-    });
+        })
+        .expect("failed to spawn video picker thread")
 }
 
 fn home_path() -> String {
@@ -1359,12 +1433,16 @@ fn start_playback_supervisor(
     frame_store: Arc<VideoFrameStore>,
     paint_signal: Arc<PaintSignal>,
     controls: Arc<ControlsOverlay>,
-) {
+    shutdown: Arc<AtomicBool>,
+) -> JoinHandle {
     thread::Builder::new()
         .name("video-playback")
         .spawn(move || {
             let mut initial_request = Some(initial_request);
             loop {
+                if shutdown.load(Ordering::Acquire) {
+                    return;
+                }
                 let Some((request, cancel, generation)) = playback.begin(&mut initial_request)
                 else {
                     thread::sleep(Duration::from_millis(10));
@@ -1429,9 +1507,12 @@ fn start_playback_supervisor(
                     let _ = audio_thread.join();
                 }
                 playback.finish(generation);
+                if shutdown.load(Ordering::Acquire) {
+                    return;
+                }
             }
         })
-        .expect("failed to spawn video playback supervisor");
+        .expect("failed to spawn video playback supervisor")
 }
 
 fn start_decoder_thread(
@@ -1586,33 +1667,43 @@ fn start_display_thread(
         .expect("failed to spawn video display thread")
 }
 
-fn start_controls_thread(controls: Arc<ControlsOverlay>, paint_signal: Arc<PaintSignal>) {
-    thread::spawn(move || {
-        let mut last_epoch = controls.activity_epoch();
-        let mut idle_ticks = 0u32;
+fn start_controls_thread(
+    controls: Arc<ControlsOverlay>,
+    paint_signal: Arc<PaintSignal>,
+    shutdown: Arc<AtomicBool>,
+) -> JoinHandle {
+    thread::Builder::new()
+        .name("video-controls")
+        .spawn(move || {
+            let mut last_epoch = controls.activity_epoch();
+            let mut idle_ticks = 0u32;
 
-        loop {
-            thread::sleep(Duration::from_millis(CONTROLS_HIDE_INTERVAL_MS));
-            let epoch = controls.activity_epoch();
-            if epoch != last_epoch {
-                last_epoch = epoch;
-                idle_ticks = 0;
-                continue;
-            }
-
-            if controls.is_visible() {
-                idle_ticks = idle_ticks.saturating_add(1);
-                if idle_ticks >= CONTROLS_HIDE_IDLE_TICKS {
-                    idle_ticks = 0;
-                    if controls.hide() {
-                        paint_signal.notify();
-                    }
+            loop {
+                if shutdown.load(Ordering::Acquire) {
+                    return;
                 }
-            } else {
-                idle_ticks = 0;
+                thread::sleep(Duration::from_millis(CONTROLS_HIDE_INTERVAL_MS));
+                let epoch = controls.activity_epoch();
+                if epoch != last_epoch {
+                    last_epoch = epoch;
+                    idle_ticks = 0;
+                    continue;
+                }
+
+                if controls.is_visible() {
+                    idle_ticks = idle_ticks.saturating_add(1);
+                    if idle_ticks >= CONTROLS_HIDE_IDLE_TICKS {
+                        idle_ticks = 0;
+                        if controls.hide() {
+                            paint_signal.notify();
+                        }
+                    }
+                } else {
+                    idle_ticks = 0;
+                }
             }
-        }
-    });
+        })
+        .expect("failed to spawn video controls thread")
 }
 
 fn decode_loop_hardware(
@@ -7707,7 +7798,8 @@ fn handle_key_event(
             ..
         }
         | KeyEvent::Char { c: 'q' | 'Q' } => {
-            exit(0);
+            dismiss_window("main");
+            true
         }
         KeyEvent::Char { c: 'p' | 'P' } => {
             activate_play_pause(controls);

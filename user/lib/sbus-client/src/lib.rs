@@ -12,9 +12,13 @@ use alloc::vec::Vec;
 use sbus::DEFAULT_SOCKET_PATH;
 
 #[cfg(feature = "std")]
+use scarlet_os::poll::{POLLERR, POLLHUP, POLLIN, PollHandle, poll};
+#[cfg(feature = "std")]
 use scarlet_os::socket::Socket;
 #[cfg(not(feature = "std"))]
 use scarlet_std::io::{Read, Write};
+#[cfg(not(feature = "std"))]
+use scarlet_std::poll::{POLLERR, POLLHUP, POLLIN, PollHandle, poll};
 #[cfg(not(feature = "std"))]
 use scarlet_std::socket::Socket;
 
@@ -112,7 +116,7 @@ impl Connection {
         method: &str,
         args: Vec<Argument>,
     ) -> Result<Vec<Argument>, Error> {
-        let serial = self.next_serial;
+        let _serial = self.next_serial;
         self.next_serial = self.next_serial.wrapping_add(1);
 
         let msg = Message::CallMethod {
@@ -176,6 +180,22 @@ impl Connection {
     /// Receive any incoming message
     pub fn receive_message(&mut self) -> Result<Message, Error> {
         self.wait_for_response()
+    }
+
+    /// Receive an incoming message, waiting for at most `timeout_ms`.
+    ///
+    /// This keeps a listener thread from becoming permanently blocked while
+    /// its owning application is shutting down.
+    pub fn receive_message_timeout(&mut self, timeout_ms: u64) -> Result<Option<Message>, Error> {
+        let timeout_ns = timeout_ms.saturating_mul(1_000_000).min(i64::MAX as u64) as i64;
+        let mut poll_handle =
+            PollHandle::new(self.socket.as_raw() as u32, POLLIN | POLLERR | POLLHUP);
+        let ready = poll(core::slice::from_mut(&mut poll_handle), timeout_ns)
+            .map_err(|_| Error::IoError)?;
+        if ready == 0 {
+            return Ok(None);
+        }
+        self.wait_for_response().map(Some)
     }
 
     /// Send a method return response
