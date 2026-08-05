@@ -12,6 +12,16 @@ use crate::{
 };
 use alloc::vec::Vec;
 
+/// Create a Linux-compatible virtual memory mapping.
+///
+/// # Arguments
+///
+/// * `abi` - Linux ABI state used to resolve file descriptors.
+/// * `trapframe` - Register state containing the `mmap` syscall arguments.
+///
+/// # Returns
+///
+/// The mapped virtual address on success, or a negated Linux errno on failure.
 pub fn sys_mmap(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     // Linux mmap constants
     const MAP_ANONYMOUS: usize = 0x20;
@@ -41,20 +51,23 @@ pub fn sys_mmap(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 
     // Input validation
     if length == 0 {
-        return usize::MAX; // -EINVAL
+        return to_result(errno::EINVAL);
     }
 
     // Round up length to page boundary
-    let aligned_length = (length + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
-    let num_pages = aligned_length / PAGE_SIZE;
+    let aligned_length = match length.checked_add(PAGE_SIZE - 1) {
+        Some(length) => length & !(PAGE_SIZE - 1),
+        None => return to_result(errno::EINVAL),
+    };
 
     // Handle ANONYMOUS mappings specially
     if (flags & MAP_ANONYMOUS) != 0 {
-        if fd != -1 {
-            return to_result(errno::EINVAL);
-        }
-        let result = handle_anonymous_mapping(&task, addr, aligned_length, num_pages, prot, flags);
-        return result;
+        // Linux ignores both fd and offset for anonymous mappings.  In
+        // particular, raw variadic syscall wrappers on 64-bit architectures
+        // can pass an `int` -1 as 0x00000000ffffffff rather than a
+        // sign-extended register value.  Requiring one exact representation
+        // here rejects otherwise valid Linux binaries.
+        return handle_anonymous_mapping(&task, addr, aligned_length, prot, flags);
     }
 
     // Handle file-backed mappings
@@ -293,7 +306,6 @@ fn handle_anonymous_mapping(
     task: &crate::task::Task,
     vaddr: usize,
     aligned_length: usize,
-    _num_pages: usize,
     prot: usize,
     flags: usize,
 ) -> usize {
@@ -306,9 +318,16 @@ fn handle_anonymous_mapping(
     // For anonymous mappings, decide shareable based on flags
     const MAP_SHARED: usize = 0x01;
     let is_shared = (flags & MAP_SHARED) != 0;
+    let is_map_fixed = (flags & MAP_FIXED) != 0;
 
-    // Determine final address - if vaddr is 0, find an unmapped area
-    let final_vaddr = if vaddr == 0 {
+    // Determine the final address. MAP_FIXED is authoritative; otherwise a
+    // null address asks the kernel to choose a free range.
+    let final_vaddr = if is_map_fixed {
+        if vaddr % PAGE_SIZE != 0 {
+            return to_result(errno::EINVAL);
+        }
+        vaddr
+    } else if vaddr == 0 {
         match task
             .vm_manager
             .find_unmapped_area(aligned_length, PAGE_SIZE)
@@ -317,12 +336,25 @@ fn handle_anonymous_mapping(
             None => return to_result(errno::ENOMEM),
         }
     } else {
-        let is_fixed = (flags & MAP_FIXED) != 0;
-        if !is_fixed {
-            let requested_end = vaddr + aligned_length - 1;
+        // A non-fixed address is only a hint.  Linux rounds it to a page
+        // boundary and is free to choose another non-overlapping range.
+        let hint_vaddr = vaddr & !(PAGE_SIZE - 1);
+        if hint_vaddr == 0 {
+            match task
+                .vm_manager
+                .find_unmapped_area(aligned_length, PAGE_SIZE)
+            {
+                Some(addr) => addr,
+                None => return to_result(errno::ENOMEM),
+            }
+        } else {
+            let requested_end = match hint_vaddr.checked_add(aligned_length - 1) {
+                Some(end) => end,
+                None => return to_result(errno::EINVAL),
+            };
             let has_overlap = task.vm_manager.with_memmaps(|mm| {
                 mm.values()
-                    .any(|map| !(requested_end < map.vmarea.start || vaddr > map.vmarea.end))
+                    .any(|map| !(requested_end < map.vmarea.start || hint_vaddr > map.vmarea.end))
             });
 
             if has_overlap {
@@ -334,10 +366,8 @@ fn handle_anonymous_mapping(
                     None => return to_result(errno::ENOMEM),
                 }
             } else {
-                vaddr
+                hint_vaddr
             }
-        } else {
-            vaddr
         }
     };
 
@@ -372,9 +402,36 @@ fn handle_anonymous_mapping(
         owner: Some(owner),
     };
 
-    let removed_mappings = match task.vm_manager.add_memory_map_fixed(vm_map) {
-        Ok(removed) => removed,
-        Err(_) => return to_result(errno::ENOMEM),
+    let (mapped_vaddr, removed_mappings) = if is_map_fixed {
+        match task.vm_manager.add_memory_map_fixed(vm_map) {
+            Ok(removed) => (final_vaddr, removed),
+            Err(_) => return to_result(errno::ENOMEM),
+        }
+    } else {
+        match task.vm_manager.add_memory_map(vm_map.clone()) {
+            Ok(()) => (final_vaddr, Vec::new()),
+            Err(_) => {
+                // The address space may have changed between selecting the
+                // range and inserting it. Retry once with a fresh range.
+                let retry_vaddr = match task
+                    .vm_manager
+                    .find_unmapped_area(aligned_length, PAGE_SIZE)
+                {
+                    Some(addr) => addr,
+                    None => return to_result(errno::ENOMEM),
+                };
+                let retry_vmarea = MemoryArea::new(retry_vaddr, retry_vaddr + aligned_length - 1);
+                let retry_map = VirtualMemoryMap {
+                    vmarea: retry_vmarea,
+                    vm_start: retry_vaddr,
+                    ..vm_map
+                };
+                match task.vm_manager.add_memory_map(retry_map) {
+                    Ok(()) => (retry_vaddr, Vec::new()),
+                    Err(_) => return to_result(errno::ENOMEM),
+                }
+            }
+        }
     };
 
     for removed_map in &removed_mappings {
@@ -387,7 +444,7 @@ fn handle_anonymous_mapping(
     for removed_map in removed_mappings {
         reclaim_private_removed_mapping(task, &removed_map);
     }
-    final_vaddr
+    mapped_vaddr
 }
 
 pub fn sys_mprotect(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
