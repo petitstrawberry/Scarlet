@@ -13,7 +13,7 @@ use core::marker::PhantomData;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::sync::irq_guard::IrqGuard;
-use crate::sync::preempt::PreemptGuard;
+use crate::sync::preempt::{PreemptGuard, PreemptSourceKind};
 
 const WRITER_BIT: usize = 1 << (usize::BITS - 1);
 const READER_MASK: usize = !WRITER_BIT;
@@ -90,8 +90,12 @@ impl<T> RwSpinLock<T> {
     ///
     /// An [`RwSpinLockReadGuard`] granting `&` access to the protected data.
     #[inline]
+    #[cfg_attr(feature = "sync-debug", track_caller)]
     pub fn read(&self) -> RwSpinLockReadGuard<'_, T> {
-        let preempt = PreemptGuard::new();
+        let preempt = PreemptGuard::new_with_source(
+            PreemptSourceKind::RwSpinLockRead,
+            self as *const Self as usize,
+        );
         self.acquire_read();
         RwSpinLockReadGuard {
             lock: self,
@@ -107,8 +111,12 @@ impl<T> RwSpinLock<T> {
     /// `Some(guard)` if acquired, `None` if a writer holds the lock or the
     /// reader count is saturated. Existing readers do not prevent success.
     #[inline]
+    #[cfg_attr(feature = "sync-debug", track_caller)]
     pub fn try_read(&self) -> Option<RwSpinLockReadGuard<'_, T>> {
-        let preempt = PreemptGuard::new();
+        let preempt = PreemptGuard::new_with_source(
+            PreemptSourceKind::RwSpinLockRead,
+            self as *const Self as usize,
+        );
         if self.try_acquire_read() {
             Some(RwSpinLockReadGuard {
                 lock: self,
@@ -131,8 +139,12 @@ impl<T> RwSpinLock<T> {
     /// An [`RwSpinLockWriteGuard`] granting `&mut` access to the protected
     /// data.
     #[inline]
+    #[cfg_attr(feature = "sync-debug", track_caller)]
     pub fn write(&self) -> RwSpinLockWriteGuard<'_, T> {
-        let preempt = PreemptGuard::new();
+        let preempt = PreemptGuard::new_with_source(
+            PreemptSourceKind::RwSpinLockWrite,
+            self as *const Self as usize,
+        );
         self.acquire_write();
         RwSpinLockWriteGuard {
             lock: self,
@@ -148,8 +160,12 @@ impl<T> RwSpinLock<T> {
     /// `Some(guard)` if acquired, `None` if any reader or writer holds the
     /// lock.
     #[inline]
+    #[cfg_attr(feature = "sync-debug", track_caller)]
     pub fn try_write(&self) -> Option<RwSpinLockWriteGuard<'_, T>> {
-        let preempt = PreemptGuard::new();
+        let preempt = PreemptGuard::new_with_source(
+            PreemptSourceKind::RwSpinLockWrite,
+            self as *const Self as usize,
+        );
         if self
             .state
             .compare_exchange(0, WRITER_BIT, Ordering::Acquire, Ordering::Relaxed)
@@ -380,8 +396,12 @@ impl<T> IrqRwSpinLock<T> {
     /// An [`IrqRwSpinLockReadGuard`] granting `&` access to the protected
     /// data.
     #[inline]
+    #[cfg_attr(feature = "sync-debug", track_caller)]
     pub fn read(&self) -> IrqRwSpinLockReadGuard<'_, T> {
-        let irq_guard = IrqGuard::new();
+        let irq_guard = IrqGuard::new_with_source(
+            PreemptSourceKind::IrqRwSpinLockRead,
+            self as *const Self as usize,
+        );
         self.acquire_read();
         IrqRwSpinLockReadGuard {
             lock: self,
@@ -398,8 +418,12 @@ impl<T> IrqRwSpinLock<T> {
     /// reader count is saturated. Existing readers do not prevent success.
     /// On failure this drops the shared IRQ/preemption token before returning.
     #[inline]
+    #[cfg_attr(feature = "sync-debug", track_caller)]
     pub fn try_read(&self) -> Option<IrqRwSpinLockReadGuard<'_, T>> {
-        let irq_guard = IrqGuard::new();
+        let irq_guard = IrqGuard::new_with_source(
+            PreemptSourceKind::IrqRwSpinLockRead,
+            self as *const Self as usize,
+        );
         if self.try_acquire_read() {
             Some(IrqRwSpinLockReadGuard {
                 lock: self,
@@ -422,8 +446,12 @@ impl<T> IrqRwSpinLock<T> {
     /// An [`IrqRwSpinLockWriteGuard`] granting `&mut` access to the protected
     /// data.
     #[inline]
+    #[cfg_attr(feature = "sync-debug", track_caller)]
     pub fn write(&self) -> IrqRwSpinLockWriteGuard<'_, T> {
-        let irq_guard = IrqGuard::new();
+        let irq_guard = IrqGuard::new_with_source(
+            PreemptSourceKind::IrqRwSpinLockWrite,
+            self as *const Self as usize,
+        );
         self.acquire_write();
         IrqRwSpinLockWriteGuard {
             lock: self,
@@ -440,8 +468,12 @@ impl<T> IrqRwSpinLock<T> {
     /// lock. On failure this drops the shared IRQ/preemption token before
     /// returning.
     #[inline]
+    #[cfg_attr(feature = "sync-debug", track_caller)]
     pub fn try_write(&self) -> Option<IrqRwSpinLockWriteGuard<'_, T>> {
-        let irq_guard = IrqGuard::new();
+        let irq_guard = IrqGuard::new_with_source(
+            PreemptSourceKind::IrqRwSpinLockWrite,
+            self as *const Self as usize,
+        );
         if self
             .state
             .compare_exchange(0, WRITER_BIT, Ordering::Acquire, Ordering::Relaxed)

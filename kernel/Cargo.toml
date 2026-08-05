@@ -19,6 +19,7 @@ font8x8 = { version = "0.3", default-features = false, features = ["unicode"] }
 [features]
 default = ["network", "user-fpu", "user-vector", "hypervisor", "limine"]
 profiler = []
+sync-debug = []
 network = []
 user-fpu = []
 user-vector = []

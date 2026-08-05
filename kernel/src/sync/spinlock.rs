@@ -17,7 +17,7 @@ use core::marker::PhantomData;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::sync::irq_guard::IrqGuard;
-use crate::sync::preempt::PreemptGuard;
+use crate::sync::preempt::{PreemptGuard, PreemptSourceKind};
 
 /// Busy-wait mutual-exclusion lock that disables preemption while held.
 ///
@@ -54,8 +54,12 @@ impl<T> SpinLock<T> {
     ///
     /// A [`SpinLockGuard`] granting `&mut` access to the protected data.
     #[inline]
+    #[cfg_attr(feature = "sync-debug", track_caller)]
     pub fn lock(&self) -> SpinLockGuard<'_, T> {
-        let preempt = PreemptGuard::new();
+        let preempt = PreemptGuard::new_with_source(
+            PreemptSourceKind::SpinLock,
+            self as *const Self as usize,
+        );
         self.acquire();
         SpinLockGuard {
             lock: self,
@@ -70,8 +74,12 @@ impl<T> SpinLock<T> {
     ///
     /// `Some(guard)` if the lock was free, `None` if it was contended.
     #[inline]
+    #[cfg_attr(feature = "sync-debug", track_caller)]
     pub fn try_lock(&self) -> Option<SpinLockGuard<'_, T>> {
-        let preempt = PreemptGuard::new();
+        let preempt = PreemptGuard::new_with_source(
+            PreemptSourceKind::SpinLock,
+            self as *const Self as usize,
+        );
         if self
             .locked
             .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
@@ -281,14 +289,16 @@ unsafe impl lock_api::RawMutex for RawIrqSpinLock {
 
     #[inline]
     fn lock(&self) {
-        let irq_guard = IrqGuard::new();
+        let irq_guard =
+            IrqGuard::new_with_source(PreemptSourceKind::IrqSpinLock, self as *const Self as usize);
         self.lock_inner();
         self.store_irq_guard(irq_guard);
     }
 
     #[inline]
     fn try_lock(&self) -> bool {
-        let irq_guard = IrqGuard::new();
+        let irq_guard =
+            IrqGuard::new_with_source(PreemptSourceKind::IrqSpinLock, self as *const Self as usize);
         if self.try_lock_inner() {
             self.store_irq_guard(irq_guard);
             true
@@ -365,8 +375,10 @@ impl<T> IrqSpinLock<T> {
     ///
     /// An [`IrqSpinLockGuard`] granting `&mut` access to the protected data.
     #[inline]
+    #[cfg_attr(feature = "sync-debug", track_caller)]
     pub fn lock(&self) -> IrqSpinLockGuard<'_, T> {
-        let irq_guard = IrqGuard::new();
+        let irq_guard =
+            IrqGuard::new_with_source(PreemptSourceKind::IrqSpinLock, self as *const Self as usize);
         while self
             .locked
             .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
@@ -390,8 +402,10 @@ impl<T> IrqSpinLock<T> {
     /// `Some(guard)` if the lock was free, `None` if it was contended. On
     /// failure this drops the shared IRQ/preemption token before returning.
     #[inline]
+    #[cfg_attr(feature = "sync-debug", track_caller)]
     pub fn try_lock(&self) -> Option<IrqSpinLockGuard<'_, T>> {
-        let irq_guard = IrqGuard::new();
+        let irq_guard =
+            IrqGuard::new_with_source(PreemptSourceKind::IrqSpinLock, self as *const Self as usize);
         if self
             .locked
             .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)

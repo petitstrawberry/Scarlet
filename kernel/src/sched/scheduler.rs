@@ -4600,10 +4600,14 @@ pub fn enqueue_task(task_id: usize, cpu_id: usize) {
 
 /// Schedule tasks on the CPU with kernel context switching.
 pub fn schedule(trapframe: &mut Trapframe) {
-    assert!(
-        crate::sync::preemptible(),
-        "schedule called while preemption is disabled"
-    );
+    if !crate::sync::preemptible() {
+        let preempt_count = crate::sync::preempt_count();
+        crate::sync::dump_active_preempt_guards();
+        panic!(
+            "schedule called while preemption is disabled (preempt_count={})",
+            preempt_count
+        );
+    }
     crate::breadcrumb::drop(
         crate::breadcrumb::SCHED_ENTER,
         get_cpu().get_cpuid() as u64,

@@ -9,7 +9,7 @@ use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
 use crate::arch::try_get_cpuid;
 use crate::environment::MAX_NUM_CPUS;
-use crate::sync::preempt::PreemptGuard;
+use crate::sync::preempt::{PreemptGuard, PreemptSourceKind};
 
 static IRQ_DEPTH: [AtomicU32; MAX_NUM_CPUS] = [const { AtomicU32::new(0) }; MAX_NUM_CPUS];
 static SAVED_IRQ_STATE: [AtomicUsize; MAX_NUM_CPUS] = [const { AtomicUsize::new(0) }; MAX_NUM_CPUS];
@@ -42,10 +42,17 @@ impl IrqGuard {
     /// A CPU-bound token that keeps local interrupts masked until the final
     /// nested token on that CPU is dropped.
     #[inline]
+    #[cfg_attr(feature = "sync-debug", track_caller)]
     pub fn new() -> Self {
+        Self::new_with_source(PreemptSourceKind::IrqGuard, 0)
+    }
+
+    #[inline]
+    #[cfg_attr(feature = "sync-debug", track_caller)]
+    pub(crate) fn new_with_source(source: PreemptSourceKind, lock_address: usize) -> Self {
         let cpu = try_get_cpuid().expect("IrqGuard requires an initialized per-CPU identity");
         let saved_state = crate::arch::interrupt::save_and_disable_interrupts();
-        let preempt = PreemptGuard::new();
+        let preempt = PreemptGuard::new_with_source(source, lock_address);
         assert_eq!(
             try_get_cpuid(),
             Some(cpu),

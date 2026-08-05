@@ -21,7 +21,10 @@ pub use cpu_local::CpuLocal;
 pub use irq_guard::IrqGuard;
 pub use lazy::Lazy;
 pub use once::Once;
-pub use preempt::{PreemptGuard, preempt_count, preempt_disable, preempt_enable, preemptible};
+pub use preempt::{
+    PreemptGuard, dump_active_preempt_guards, preempt_count, preempt_disable, preempt_enable,
+    preemptible,
+};
 pub use rw_spinlock::{
     IrqRwSpinLock, IrqRwSpinLockReadGuard, IrqRwSpinLockWriteGuard, RwSpinLock,
     RwSpinLockReadGuard, RwSpinLockWriteGuard,
