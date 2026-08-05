@@ -39,9 +39,9 @@ use desktop::{
 };
 use protocol::cmd;
 
-const WINDOW_PLACEMENT_ENV: &str = "SCARLET_WINDOW_PLACEMENT";
+const ACTIVATION_TOKEN_ENV: &str = "SWS_ACTIVATION_TOKEN";
 
-fn application_environment(window_placement: Option<&str>) -> Vec<String> {
+fn application_environment(activation_token: Option<&str>) -> Vec<String> {
     let user = std::env::var("USER").unwrap_or(String::from("root"));
     let home = std::env::var("HOME").unwrap_or(String::from("/root"));
     let shell = std::env::var("SHELL").unwrap_or(String::from("/bin/sh"));
@@ -50,8 +50,8 @@ fn application_environment(window_placement: Option<&str>) -> Vec<String> {
         format!("HOME={home}"),
         format!("SHELL={shell}"),
     ];
-    if let Some(placement) = window_placement {
-        environment.push(format!("{WINDOW_PLACEMENT_ENV}={placement}"));
+    if let Some(token) = activation_token {
+        environment.push(format!("{ACTIVATION_TOKEN_ENV}={token}"));
     }
     environment
 }
@@ -810,7 +810,7 @@ fn get_app_menu_titles(app_id: &str) -> Vec<String> {
 
 /// Launch an application by app_id (looks up from .desktop registry)
 /// Returns the PID of the launched process
-fn launch_app_by_id(app_id: &str, window_placement: Option<&str>) -> Result<i32, &'static str> {
+fn launch_app_by_id(app_id: &str, activation_token: Option<&str>) -> Result<i32, &'static str> {
     println!("stemd: launch_app_by_id called with app_id={}", app_id);
 
     println!("stemd: Looking up {} from .desktop files...", app_id);
@@ -825,14 +825,14 @@ fn launch_app_by_id(app_id: &str, window_placement: Option<&str>) -> Result<i32,
         }
     };
 
-    launch_desktop_entry(&entry, &[], window_placement)
+    launch_desktop_entry(&entry, &[], activation_token)
 }
 
 /// Launch a registered desktop entry with optional local file arguments.
 fn launch_desktop_entry(
     entry: &DesktopEntry,
     files: &[String],
-    window_placement: Option<&str>,
+    activation_token: Option<&str>,
 ) -> Result<i32, &'static str> {
     let argv_strings = expand_exec(&entry.exec, files)?;
     let path = argv_strings
@@ -852,7 +852,7 @@ fn launch_desktop_entry(
 
             fence(core::sync::atomic::Ordering::SeqCst);
 
-            let environment = application_environment(window_placement);
+            let environment = application_environment(activation_token);
             let environment: Vec<&str> = environment.iter().map(|value| value.as_str()).collect();
             if std::task::execve(&path, &argv, &environment) != 0 {
                 println!("stemd: Failed to execve {}", path);
@@ -1522,10 +1522,19 @@ fn handle_sbus_message(
                             return Ok(());
                         }
                     };
-                    let window_placement = if matches!(args.get(1), Some(Argument::Boolean(true))) {
-                        Some("centered")
-                    } else {
-                        None
+                    let activation_token = match args.get(1) {
+                        None => None,
+                        Some(Argument::String(token)) if !token.is_empty() => Some(token.as_str()),
+                        _ => {
+                            if let Some(conn) = conn_guard.as_mut() {
+                                let _ = conn.send_method_error(
+                                    serial,
+                                    "org.scarlet-os.stemd.InvalidArgs",
+                                    "activation token must be a non-empty string",
+                                );
+                            }
+                            return Ok(());
+                        }
                     };
 
                     // Check if the app is already running
@@ -1551,7 +1560,7 @@ fn handle_sbus_message(
                                     // Process has exited (waitpid reaped the zombie)
                                     remove_running_app_by_pid(pid);
 
-                                    match launch_app_by_id(app_id, window_placement) {
+                                    match launch_app_by_id(app_id, activation_token) {
                                         Ok(_) => {
                                             if let Some(conn) = conn_guard.as_mut() {
                                                 let result: core::result::Result<(), sbus::Error> =
@@ -1580,7 +1589,7 @@ fn handle_sbus_message(
                                     // Process doesn't exist (waitpid error)
                                     remove_running_app_by_pid(pid);
 
-                                    match launch_app_by_id(app_id, window_placement) {
+                                    match launch_app_by_id(app_id, activation_token) {
                                         Ok(_) => {
                                             if let Some(conn) = conn_guard.as_mut() {
                                                 let result: core::result::Result<(), sbus::Error> =
@@ -1621,7 +1630,7 @@ fn handle_sbus_message(
                         }
                     } else {
                         // Launch the application
-                        match launch_app_by_id(app_id, window_placement) {
+                        match launch_app_by_id(app_id, activation_token) {
                             Ok(_) => {
                                 if let Some(conn) = conn_guard.as_mut() {
                                     let result: core::result::Result<(), sbus::Error> = conn

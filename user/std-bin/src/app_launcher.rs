@@ -27,6 +27,7 @@ use scarlet_ui::{
     Spacer, Window, WindowPlacement, dismiss_window, hstack, vstack,
 };
 use scarlet_ui_macros::View;
+use sws_client::Connection as SwsConnection;
 use sws_protocol::window_types;
 
 const APP_ID: &str = "org.scarlet-os.desktop.launcher";
@@ -85,13 +86,25 @@ impl LauncherApp {
 
     fn launch_application(&self, application: ApplicationEntry) {
         if application.app_id == FILE_MANAGER_APP_ID {
-            if show_file_manager() {
+            if show_file_manager(self.window_id.get()) {
                 dismiss_window("main");
             } else {
                 self.status.set(String::from("Could not open Files"));
             }
             return;
         }
+
+        let activation_token =
+            match request_activation_token(self.window_id.get(), application.app_id.as_str()) {
+                Ok(token) => token,
+                Err(error) => {
+                    self.status.set(format!(
+                        "Could not activate {}: {error:?}",
+                        application.name
+                    ));
+                    return;
+                }
+            };
 
         match SbusConnection::connect().and_then(|mut connection| {
             connection.call_method(
@@ -101,7 +114,7 @@ impl LauncherApp {
                 DESKTOP_STEMD_LAUNCH_OR_FOCUS_METHOD,
                 vec![
                     Argument::String(application.app_id.clone()),
-                    Argument::Boolean(true),
+                    Argument::String(activation_token.clone()),
                 ],
             )
         }) {
@@ -399,23 +412,41 @@ impl LauncherApp {
     }
 }
 
-fn show_file_manager() -> bool {
+fn request_activation_token(
+    source_window_id: u32,
+    target_app_id: &str,
+) -> core::result::Result<String, sws_client::Error> {
+    let connection = SwsConnection::connect_default()?;
+    connection.request_activation_token(source_window_id, target_app_id)
+}
+
+fn show_file_manager(source_window_id: u32) -> bool {
     if request_file_manager_window() {
         return true;
     }
 
-    let _ = SbusConnection::connect().and_then(|mut connection| {
-        connection.call_method(
-            DESKTOP_STEMD_BUS_NAME,
-            DESKTOP_STEMD_OBJECT_PATH,
-            DESKTOP_STEMD_INTERFACE,
-            DESKTOP_STEMD_LAUNCH_OR_FOCUS_METHOD,
-            vec![
-                Argument::String(String::from(FILE_MANAGER_APP_ID)),
-                Argument::Boolean(true),
-            ],
-        )
-    });
+    let Ok(activation_token) = request_activation_token(source_window_id, FILE_MANAGER_APP_ID)
+    else {
+        return false;
+    };
+
+    if SbusConnection::connect()
+        .and_then(|mut connection| {
+            connection.call_method(
+                DESKTOP_STEMD_BUS_NAME,
+                DESKTOP_STEMD_OBJECT_PATH,
+                DESKTOP_STEMD_INTERFACE,
+                DESKTOP_STEMD_LAUNCH_OR_FOCUS_METHOD,
+                vec![
+                    Argument::String(String::from(FILE_MANAGER_APP_ID)),
+                    Argument::String(activation_token.clone()),
+                ],
+            )
+        })
+        .is_err()
+    {
+        return false;
+    }
 
     for _ in 0..20 {
         thread::sleep(Duration::from_millis(50));
