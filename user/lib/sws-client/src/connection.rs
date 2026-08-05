@@ -1191,6 +1191,18 @@ impl Connection {
         }
     }
 
+    /// Select and persist the active input method.
+    ///
+    /// SWS resolves the runtime identifier to the input method's stable name
+    /// before storing the selection in its configuration.
+    ///
+    /// # Arguments
+    ///
+    /// * `ime_id` - Runtime identifier returned by `get_input_methods`.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` when the request was sent to SWS, or a connection error.
     pub fn set_active_input_method(&self, ime_id: u32) -> Result<(), Error> {
         let payload = protocol::payload_ime_set_active(ime_id);
         self.send_message(protocol::client_msg::IME_SET_ACTIVE, &payload)

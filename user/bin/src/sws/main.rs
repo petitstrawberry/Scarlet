@@ -8,6 +8,7 @@
 extern crate scarlet_std as std;
 
 mod compositor;
+mod config;
 mod cursor;
 mod gpu_compositor;
 mod input;

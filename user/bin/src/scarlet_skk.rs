@@ -1672,11 +1672,6 @@ fn main() -> i32 {
         }
     };
 
-    if let Err(err) = conn.set_active_input_method(ime_id) {
-        println!("[scarlet_skk] failed to activate IME {}: {:?}", ime_id, err);
-        return 1;
-    }
-
     println!("[scarlet_skk] registered {} as id={}", IME_NAME, ime_id);
 
     let mut ime = ScarletSkk::new(scale_milli);

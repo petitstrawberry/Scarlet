@@ -1754,14 +1754,6 @@ fn main() -> i32 {
         }
     };
 
-    if let Err(err) = conn.set_active_input_method(ime_id) {
-        println!(
-            "[scarlet_mozc] failed to activate IME {}: {:?}",
-            ime_id, err
-        );
-        return 1;
-    }
-
     println!("[scarlet_mozc] registered {} as id={}", IME_NAME, ime_id);
 
     let mut ime = ScarletMozc::new(scale_milli);

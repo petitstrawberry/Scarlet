@@ -1,5 +1,6 @@
 //! Compositor module - manages window composition and rendering
 
+use super::config;
 use super::cursor::Cursor;
 use super::gpu_compositor::{GpuCompositor, SgfxBufferError, SgfxBufferIdentity, SgfxCommitToken};
 use super::input::{CompositorInputEvent, InputManager, key_codes};
@@ -15,7 +16,6 @@ use scarlet_desktop_config::{
 };
 use scarlet_os::time::monotonic_time_ns;
 use std::env;
-use std::fs::File;
 use std::handle::Handle;
 use std::poll::{POLLIN, PollHandle, poll};
 use std::println;
@@ -145,7 +145,6 @@ const MAX_PENDING_DAMAGE_RECTS: usize = 8;
 const DAMAGE_MERGE_AREA_FACTOR: u64 = 2;
 const FRAME_BATCH_INTERVAL_NS: u64 = 16_666_667;
 const DEFAULT_OUTPUT_SCALE_MILLI: u32 = 2000;
-const SWS_CONFIG_PATH: &str = "/etc/sws/config.toml";
 
 type DamageRect = (i32, i32, u32, u32);
 type PresentDamage = Option<Vec<DamageRect>>;
@@ -154,6 +153,7 @@ type PresentDamage = Option<Vec<DamageRect>>;
 struct SwsConfig {
     output_scale_milli: u32,
     ime_toggle_bindings: Vec<KeyBinding>,
+    preferred_input_method_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -174,16 +174,18 @@ fn load_sws_config() -> SwsConfig {
     let mut config = SwsConfig {
         output_scale_milli: DEFAULT_OUTPUT_SCALE_MILLI,
         ime_toggle_bindings: default_ime_toggle_bindings(),
+        preferred_input_method_name: None,
     };
 
-    match read_sws_config(SWS_CONFIG_PATH) {
+    match config::read_sws_config() {
         Ok(content) => {
             if let Some(output_scale_milli) = parse_output_scale_milli(&content) {
                 config.output_scale_milli = output_scale_milli;
             } else {
                 println!(
                     "[Compositor] No output scale in {}; using default {}",
-                    SWS_CONFIG_PATH, DEFAULT_OUTPUT_SCALE_MILLI
+                    config::SWS_CONFIG_PATH,
+                    DEFAULT_OUTPUT_SCALE_MILLI
                 );
             }
 
@@ -191,12 +193,14 @@ fn load_sws_config() -> SwsConfig {
                 if bindings.is_empty() {
                     println!(
                         "[Compositor] Ignoring empty keybindings.ime_toggle in {}; using default",
-                        SWS_CONFIG_PATH
+                        config::SWS_CONFIG_PATH
                     );
                 } else {
                     config.ime_toggle_bindings = bindings;
                 }
             }
+
+            config.preferred_input_method_name = config::parse_active_input_method(&content);
         }
         Err(_) => {}
     }
@@ -216,26 +220,6 @@ fn default_ime_toggle_bindings() -> Vec<KeyBinding> {
         },
     });
     bindings
-}
-
-fn read_sws_config(path: &str) -> Result<String, &'static str> {
-    let mut file = File::open(path).map_err(|_| "Failed to open SWS config")?;
-    let mut content = String::new();
-    let mut buffer = [0u8; 1024];
-
-    loop {
-        let bytes = file
-            .read(&mut buffer)
-            .map_err(|_| "Failed to read SWS config")?;
-        if bytes == 0 {
-            break;
-        }
-        let chunk =
-            core::str::from_utf8(&buffer[..bytes]).map_err(|_| "SWS config is not valid UTF-8")?;
-        content.push_str(chunk);
-    }
-
-    Ok(content)
 }
 
 fn parse_output_scale_milli(content: &str) -> Option<u32> {
@@ -627,6 +611,13 @@ impl Compositor {
             sws_config.ime_toggle_bindings.len()
         );
         println!(
+            "[Compositor] Preferred input method: {}",
+            sws_config
+                .preferred_input_method_name
+                .as_deref()
+                .unwrap_or("automatic")
+        );
+        println!(
             "[Compositor] Framebuffer: bpp={} line_length={} smem_len={}",
             var_info.bits_per_pixel, fix_info.line_length, fix_info.smem_len
         );
@@ -635,6 +626,7 @@ impl Compositor {
         let (wake_read, wake_write) =
             std::task::pipe().map_err(|_| "Failed to create compositor wake pipe")?;
         super::ipc::set_compositor_wake_handle(wake_write);
+        super::ipc::set_preferred_input_method(sws_config.preferred_input_method_name.clone());
 
         // Start input thread
         InputManager::start_input_thread(screen_width, screen_height)?;

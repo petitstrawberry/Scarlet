@@ -1,5 +1,6 @@
 //! IPC Server module - handles client connections and messages
 
+use super::config;
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 use std::collections::BTreeMap;
 use std::env;
@@ -168,6 +169,7 @@ static NEXT_IME_KEY_SERIAL: AtomicU32 = AtomicU32::new(1);
 static TEXT_INPUT_CONTEXTS: Mutex<BTreeMap<u32, TextInputContext>> = Mutex::new(BTreeMap::new());
 static INPUT_METHODS: Mutex<BTreeMap<u32, InputMethodService>> = Mutex::new(BTreeMap::new());
 static ACTIVE_IME_ID: Mutex<Option<u32>> = Mutex::new(None);
+static PREFERRED_IME_NAME: Mutex<Option<String>> = Mutex::new(None);
 static ACTIVE_TEXT_INPUT_CONTEXT: Mutex<Option<u32>> = Mutex::new(None);
 static PENDING_IME_KEYS: Mutex<BTreeMap<u32, PendingImeKey>> = Mutex::new(BTreeMap::new());
 
@@ -1273,6 +1275,19 @@ fn commit_text_input_state(client_id: usize, context_id: u32, client_serial: u32
     push_ipc_event(IpcEvent::TextInputContextUpdated { context_id });
 }
 
+/// Set the stable input method name SWS should prefer as services register.
+///
+/// # Arguments
+///
+/// * `name` - Configured input method name, or `None` for first-registered fallback.
+///
+/// # Returns
+///
+/// This function does not return a value.
+pub fn set_preferred_input_method(name: Option<String>) {
+    *PREFERRED_IME_NAME.lock() = name;
+}
+
 fn register_input_method(client_id: usize, name: &[u8], capabilities: u32) -> InputMethodService {
     let ime_id = NEXT_IME_ID.fetch_add(1, Ordering::Relaxed);
     let service = InputMethodService {
@@ -1283,26 +1298,58 @@ fn register_input_method(client_id: usize, name: &[u8], capabilities: u32) -> In
     };
     INPUT_METHODS.lock().insert(ime_id, service.clone());
 
-    let mut active = ACTIVE_IME_ID.lock();
-    if active.is_none() {
-        *active = Some(ime_id);
+    let preferred_name = PREFERRED_IME_NAME.lock().clone();
+    let should_activate =
+        ACTIVE_IME_ID.lock().is_none() || preferred_name.as_deref() == Some(service.name.as_str());
+    if should_activate {
+        activate_input_method(ime_id, false);
     }
     service
 }
 
 fn set_active_input_method(ime_id: u32) {
-    let exists = INPUT_METHODS.lock().contains_key(&ime_id);
-    if !exists {
-        return;
+    if !activate_input_method(ime_id, true) {
+        println!("[SWS] Ignoring unknown input method id={}", ime_id);
     }
-    *ACTIVE_IME_ID.lock() = Some(ime_id);
-    release_pending_ime_keys(None);
-    clear_keyboard_grabs();
-    if let Some(context_id) = *ACTIVE_TEXT_INPUT_CONTEXT.lock()
-        && let Some(context) = text_input_context(context_id)
-    {
-        send_ime_context_frame(sws_protocol::server_msg::IME_ACTIVATE, &context);
+}
+
+fn activate_input_method(ime_id: u32, persist_selection: bool) -> bool {
+    let Some(service) = INPUT_METHODS.lock().get(&ime_id).cloned() else {
+        return false;
+    };
+
+    let changed = {
+        let mut active = ACTIVE_IME_ID.lock();
+        let changed = *active != Some(ime_id);
+        *active = Some(ime_id);
+        changed
+    };
+
+    if changed {
+        release_pending_ime_keys(None);
+        clear_keyboard_grabs();
+        if let Some(context_id) = *ACTIVE_TEXT_INPUT_CONTEXT.lock()
+            && let Some(context) = text_input_context(context_id)
+        {
+            send_ime_context_frame(sws_protocol::server_msg::IME_ACTIVATE, &context);
+        }
     }
+
+    if persist_selection {
+        *PREFERRED_IME_NAME.lock() = Some(service.name.clone());
+        match config::persist_active_input_method(&service.name) {
+            Ok(()) => println!(
+                "[SWS] Persisted active input method: {} ({})",
+                service.name, service.ime_id
+            ),
+            Err(error) => println!(
+                "[SWS] Failed to persist active input method {}: {}",
+                service.name, error
+            ),
+        }
+    }
+
+    true
 }
 
 fn append_input_method_payload(
@@ -1462,13 +1509,30 @@ fn cleanup_input_methods_for_client(client_id: usize) {
         ids
     };
 
-    let mut active = ACTIVE_IME_ID.lock();
-    if let Some(active_id) = *active
-        && removed.iter().any(|id| *id == active_id)
-    {
+    let active_was_removed = ACTIVE_IME_ID
+        .lock()
+        .is_some_and(|active_id| removed.iter().any(|id| *id == active_id));
+    if active_was_removed {
         release_pending_ime_keys(None);
         clear_keyboard_grabs();
-        *active = INPUT_METHODS.lock().keys().next().copied();
+        *ACTIVE_IME_ID.lock() = None;
+
+        let preferred_name = PREFERRED_IME_NAME.lock().clone();
+        let replacement = {
+            let methods = INPUT_METHODS.lock();
+            preferred_name
+                .as_deref()
+                .and_then(|name| {
+                    methods
+                        .values()
+                        .find(|method| method.name == name)
+                        .map(|method| method.ime_id)
+                })
+                .or_else(|| methods.keys().next().copied())
+        };
+        if let Some(ime_id) = replacement {
+            activate_input_method(ime_id, false);
+        }
     }
 }
 
