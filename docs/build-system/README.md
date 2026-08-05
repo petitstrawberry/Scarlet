@@ -296,6 +296,18 @@ bin = "sh"
 to = "/system/scarlet/bin/sh"
 ```
 
+For a package below the root of a Git checkout, set a relative `subdir`:
+
+```toml
+[[layers]]
+kind = "cargo"
+source = { git = "https://github.com/petitstrawberry/scarlet-ui" }
+subdir = "examples/widget-factory"
+package = "scarlet-ui-widget-factory"
+bin = "scarlet-ui-widget-factory"
+to = "/system/scarlet/bin/widget_factory"
+```
+
 Cargo layers can also control Cargo feature selection for that one installed
 binary:
 
@@ -314,6 +326,7 @@ to = "/system/scarlet/bin/video_player"
 |-------|-------------|
 | `kind` | Must be `"cargo"` |
 | `source` | Path or git source of the Cargo workspace |
+| `subdir` | Optional package/workspace directory relative to the source root |
 | `package` | Cargo package name |
 | `bin` | Binary target name |
 | `default-features` | Optional Cargo default feature switch |

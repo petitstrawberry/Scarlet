@@ -615,14 +615,18 @@ path = "../../user/bin"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
+git = "https://github.com/petitstrawberry/scarlet-ui"
+resolved_rev = "3e32889c93bf5591086dbcb018030168d775dee3"
 package = "scarlet-ui-widget-factory"
 bin = "scarlet-ui-widget-factory"
+subdir = "examples/widget-factory"
 to = "/system/scarlet/bin/widget_factory"
 hash = "sha256:6b59110c437078b0b02209c043bc753bb97f6e79264750ba9c575ca13c5101a1"
 
 [sections.rootfs.layers.source]
-type = "path"
-path = "../../../scarlet-ui/examples/widget-factory"
+type = "git"
+url = "https://github.com/petitstrawberry/scarlet-ui"
+rev = "3e32889c93bf5591086dbcb018030168d775dee3"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
