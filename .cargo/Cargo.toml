@@ -12,10 +12,6 @@ panic = "abort"
 [profile.release]
 panic = "abort"
 
-[patch."https://github.com/petitstrawberry/scarlet-ui"]
-scarlet-ui = { path = "../../scarlet-ui/crates/scarlet-ui" }
-scarlet-ui-macros = { path = "../../scarlet-ui/crates/scarlet-ui-macros" }
-
 [patch."https://github.com/petitstrawberry/Scarlet"]
 scarlet-abi = { path = "../user/lib/scarlet-abi" }
 scarlet-os = { path = "../user/lib/scarlet-os" }
