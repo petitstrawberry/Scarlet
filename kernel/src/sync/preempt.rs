@@ -279,8 +279,10 @@ impl PreemptGuard {
             increment_preempt_count(cpu);
         }
         #[cfg(feature = "sync-debug")]
-        let debug_slot = cpu
-            .and_then(|cpu| register_preempt_source(cpu, source, lock_address, Location::caller()));
+        let caller = Location::caller();
+        #[cfg(feature = "sync-debug")]
+        let debug_slot =
+            cpu.and_then(|cpu| register_preempt_source(cpu, source, lock_address, caller));
         #[cfg(not(feature = "sync-debug"))]
         let _ = (source, lock_address);
         Self {
