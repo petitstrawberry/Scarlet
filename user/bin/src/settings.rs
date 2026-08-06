@@ -9,6 +9,7 @@ extern crate scarlet_std as std;
 extern crate scarlet_ui_macros;
 
 use core::f32;
+use core::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 
 use sas_client::{Error as SasError, SasClient};
 use sas_protocol::{
@@ -53,6 +54,21 @@ const SWS_CONFIG_DIR: &str = "/etc/sws";
 const SWS_CONFIG_PATH: &str = "/etc/sws/config.toml";
 
 static AUDIO_SAS_CLIENT: Mutex<Option<SasClient>> = Mutex::new(None);
+static PICKER_REQUEST_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+static PICKER_UI_EVENTS: Mutex<Vec<PickerUiEvent>> = Mutex::new(Vec::new());
+
+const SBUS_METHOD_TIMEOUT_MS: u64 = 1_000;
+const PICKER_REQUEST_ATTEMPTS: usize = 5;
+
+enum PickerUiEvent {
+    Opened(String),
+    OpenFailed(String),
+    Response {
+        request_id: String,
+        accepted: bool,
+        path: String,
+    },
+}
 
 const PRESET_COLORS: &[PresetColor] = &[
     PresetColor {
@@ -190,19 +206,20 @@ fn save_background_via_service(
         Vec::new()
     };
     connection
-        .call_method(
+        .call_method_timeout(
             DESKTOP_SETTINGS_BUS_NAME,
             DESKTOP_SETTINGS_SERVICE_OBJECT_PATH,
             DESKTOP_SETTINGS_SERVICE_INTERFACE,
             method,
             args,
+            SBUS_METHOD_TIMEOUT_MS,
         )
         .map(|_| ())
 }
 
 fn request_background_picker() -> core::result::Result<String, sbus_client::Error> {
     let mut connection = SbusConnection::connect()?;
-    let result = connection.call_method(
+    let result = connection.call_method_timeout(
         DESKTOP_FILE_MANAGER_BUS_NAME,
         DESKTOP_FILE_MANAGER_OBJECT_PATH,
         DESKTOP_FILE_MANAGER_INTERFACE,
@@ -214,6 +231,7 @@ fn request_background_picker() -> core::result::Result<String, sbus_client::Erro
             Argument::Boolean(false),
             Argument::Boolean(false),
         ],
+        SBUS_METHOD_TIMEOUT_MS,
     )?;
 
     match result.first() {
@@ -224,24 +242,21 @@ fn request_background_picker() -> core::result::Result<String, sbus_client::Erro
     }
 }
 
-fn ensure_file_manager_service() {
-    let Ok(mut connection) = SbusConnection::connect() else {
-        return;
-    };
-    let _ = connection.call_method(
-        "org.scarlet-os.stemd",
-        "/org/scarlet/os/stemd",
-        "org.scarlet-os.stemd",
-        "LaunchOrFocus",
-        vec![Argument::String(String::from(DESKTOP_FILES_APP_ID))],
-    );
+fn ensure_file_manager_service() -> core::result::Result<(), sbus_client::Error> {
+    let mut connection = SbusConnection::connect()?;
+    connection
+        .call_method_timeout(
+            "org.scarlet-os.stemd",
+            "/org/scarlet/os/stemd",
+            "org.scarlet-os.stemd",
+            "LaunchOrFocus",
+            vec![Argument::String(String::from(DESKTOP_FILES_APP_ID))],
+            SBUS_METHOD_TIMEOUT_MS,
+        )
+        .map(|_| ())
 }
 
-fn start_picker_response_listener(app: &SettingsApp) {
-    let request_id = app.picker_request_id.clone();
-    let background_image = app.background_image.clone();
-    let background_image_label = app.background_image_label.clone();
-
+fn start_picker_response_listener() {
     thread::spawn(move || {
         loop {
             let Ok(mut connection) = SbusConnection::connect() else {
@@ -278,22 +293,68 @@ fn start_picker_response_listener(app: &SettingsApp) {
                 let Some(Argument::String(response_id)) = args.first() else {
                     continue;
                 };
-                if request_id.get().as_deref() != Some(response_id.as_str()) {
-                    continue;
-                }
 
                 let accepted = matches!(args.get(1), Some(Argument::Boolean(true)));
                 let path = match args.get(2) {
                     Some(Argument::String(path)) => path.clone(),
                     _ => String::new(),
                 };
-                request_id.set(None);
-                if accepted && !path.is_empty() {
-                    background_image.set(Some(path.clone()));
-                    background_image_label.set(path.clone());
-                }
+                PICKER_UI_EVENTS.lock().push(PickerUiEvent::Response {
+                    request_id: response_id.clone(),
+                    accepted,
+                    path,
+                });
             }
         }
+    });
+}
+
+fn start_background_picker_request() {
+    if PICKER_REQUEST_IN_FLIGHT
+        .compare_exchange(false, true, AtomicOrdering::AcqRel, AtomicOrdering::Acquire)
+        .is_err()
+    {
+        return;
+    }
+
+    thread::spawn(move || {
+        let mut last_error = String::from("file picker did not respond");
+
+        for attempt in 0..PICKER_REQUEST_ATTEMPTS {
+            match request_background_picker() {
+                Ok(request_id) => {
+                    PICKER_UI_EVENTS
+                        .lock()
+                        .push(PickerUiEvent::Opened(request_id));
+                    return;
+                }
+                // ServiceNotFound is the only retry-safe failure: sbusd did
+                // not deliver the method call, so it cannot create a duplicate
+                // picker. A timeout or I/O error is ambiguous because Files may
+                // already have accepted the request and only its reply was
+                // delayed; retrying that request would open multiple pickers.
+                Err(sbus_client::Error::ServiceNotFound) => {
+                    last_error = String::from("Files picker service is not available");
+                    if attempt == 0
+                        && let Err(error) = ensure_file_manager_service()
+                    {
+                        last_error = format!("failed to start Files: {error:?}");
+                    }
+                }
+                Err(error) => {
+                    last_error = format!("{error:?}");
+                    break;
+                }
+            }
+
+            if attempt + 1 < PICKER_REQUEST_ATTEMPTS {
+                thread::sleep(Duration::from_millis(100));
+            }
+        }
+
+        PICKER_UI_EVENTS
+            .lock()
+            .push(PickerUiEvent::OpenFailed(last_error));
     });
 }
 
@@ -588,7 +649,7 @@ impl SettingsApp {
             audio_status: State::new(StateId::new(17), audio_status),
             navigation_title: State::new(StateId::new(18), String::from("Appearance")),
         };
-        start_picker_response_listener(&app);
+        start_picker_response_listener();
         start_background_autosave(&app);
         app
     }
@@ -631,24 +692,57 @@ impl SettingsApp {
     }
 
     fn open_background_picker(&self) {
-        let mut last_error = None;
-        for attempt in 0..20 {
-            match request_background_picker() {
-                Ok(request_id) => {
+        start_background_picker_request();
+    }
+
+    fn process_picker_ui_events(&self) {
+        let events = {
+            let mut pending = PICKER_UI_EVENTS.lock();
+            core::mem::take(&mut *pending)
+        };
+
+        for event in events {
+            match event {
+                PickerUiEvent::Opened(request_id) => {
                     self.picker_request_id.set(Some(request_id));
                     println!("[settings] file picker opened");
-                    return;
                 }
-                Err(error) => {
-                    last_error = Some(error);
-                    if attempt == 0 {
-                        ensure_file_manager_service();
+                PickerUiEvent::OpenFailed(error) => {
+                    PICKER_REQUEST_IN_FLIGHT.store(false, AtomicOrdering::Release);
+                    println!("[settings] failed to open file picker: {error}");
+                }
+                PickerUiEvent::Response {
+                    request_id,
+                    accepted,
+                    path,
+                } => {
+                    let active_request_id = self.picker_request_id.get();
+                    if active_request_id.as_deref() != Some(request_id.as_str()) {
+                        // Files can emit the signal immediately after replying
+                        // to OpenFile. If the listener wins that race, retain
+                        // the response until the UI has applied Opened and
+                        // knows which request it belongs to.
+                        if active_request_id.is_none()
+                            && PICKER_REQUEST_IN_FLIGHT.load(AtomicOrdering::Acquire)
+                        {
+                            PICKER_UI_EVENTS.lock().push(PickerUiEvent::Response {
+                                request_id,
+                                accepted,
+                                path,
+                            });
+                        }
+                        continue;
                     }
-                    thread::sleep(Duration::from_millis(50));
+
+                    PICKER_REQUEST_IN_FLIGHT.store(false, AtomicOrdering::Release);
+                    self.picker_request_id.set(None);
+                    if accepted && !path.is_empty() {
+                        self.background_image.set(Some(path.clone()));
+                        self.background_image_label.set(path);
+                    }
                 }
             }
         }
-        println!("[settings] failed to open file picker: {:?}", last_error);
     }
 
     fn select_input_method(&self, index: usize) {
@@ -1262,6 +1356,10 @@ fn datetime_page(
 }
 
 impl Application for SettingsApp {
+    fn on_idle(&mut self) {
+        self.process_picker_ui_events();
+    }
+
     fn scenes(&self) -> impl Scene {
         let app = self.clone();
         let audio_app = self.clone();

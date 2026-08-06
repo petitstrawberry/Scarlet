@@ -7,9 +7,11 @@
 
 mod file_icons;
 
+use core::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::cmp::Ordering;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -26,7 +28,7 @@ use scarlet_ui::prelude::*;
 use scarlet_ui::{
     Alignment, Button, Color, ColorPalette, Divider, GridView, HeaderBar, Icon, IconSize, IconView,
     Image, ImageFit, NavigationLink, Spacer, dismiss_window, hstack, measure_text_sized,
-    navigation, open_new_window, open_window, vstack,
+    navigation, open_window, vstack,
 };
 use scarlet_ui_macros::View;
 
@@ -67,6 +69,38 @@ struct PickerRequest {
     suggested_name: String,
 }
 
+enum FilerUiRequest {
+    ShowMain,
+}
+
+struct PickerReadResult {
+    request_id: String,
+    generation: u32,
+    path: String,
+    result: std::result::Result<Vec<FileEntry>, String>,
+}
+
+struct DirectoryReadResult {
+    instance_id: u64,
+    generation: u32,
+    path: String,
+    result: std::result::Result<Vec<FileEntry>, String>,
+}
+
+static NEXT_FILER_INSTANCE_ID: Mutex<u64> = Mutex::new(1);
+static NEXT_PICKER_REQUEST_ID: Mutex<u32> = Mutex::new(1);
+static PENDING_UI_REQUESTS: Mutex<Vec<FilerUiRequest>> = Mutex::new(Vec::new());
+static PENDING_DIRECTORY_READS: Mutex<Vec<DirectoryReadResult>> = Mutex::new(Vec::new());
+static PENDING_PICKER_REQUESTS: Mutex<Vec<PickerRequest>> = Mutex::new(Vec::new());
+static PENDING_PICKER_READS: Mutex<Vec<PickerReadResult>> = Mutex::new(Vec::new());
+static PICKER_WINDOW_CLOSING: AtomicBool = AtomicBool::new(false);
+
+fn mutex_lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 #[derive(View, Clone)]
 struct FilerApp {
     current_path: State<String>,
@@ -82,48 +116,50 @@ struct FilerApp {
     picker_request: State<Option<PickerRequest>>,
     picker_file_name: State<String>,
     picker_status: State<String>,
+    picker_read_generation: State<u32>,
+    directory_read_instance: State<u64>,
+    directory_read_generation: State<u32>,
     status: State<String>,
-    request_sequence: State<u32>,
 }
 
 impl FilerApp {
     fn new() -> Self {
         let current_path = initial_path();
-        let entries = read_entries(&current_path, None).unwrap_or_default();
         let app = Self::default();
+        app.directory_read_instance.set(next_filer_instance_id());
         app.current_path.set(current_path.clone());
-        app.entries.set(entries.clone());
+        app.entries.set(Vec::new());
         app.picker_current_path.set(current_path);
-        app.picker_entries.set(entries);
+        app.picker_entries.set(Vec::new());
         app.picker_status.set(String::from("Ready"));
-        app.status.set(String::from("Ready"));
-        app.request_sequence.set(1);
+        app.refresh();
         app
     }
 
     fn refresh(&self) {
         let path = self.current_path.get();
-        let picker = self.picker_request.get();
-        match read_entries(&path, picker.as_ref()) {
-            Ok(entries) => {
-                self.entries.set(entries);
-                self.selected.set(None);
-                self.hovered.set(None);
-                self.last_click.set(None);
-                if picker.is_none() {
-                    self.status.set(String::from("Ready"));
-                }
-            }
-            Err(error) => self.status.set(format!("Cannot open {path}: {error}")),
-        }
+        let generation = self.directory_read_generation.get().wrapping_add(1);
+        let instance_id = self.directory_read_instance.get();
+        self.directory_read_generation.set(generation);
+        self.entries.set(Vec::new());
+        self.selected.set(None);
+        self.hovered.set(None);
+        self.last_click.set(None);
+        self.status.set(format!("Loading {path}"));
+
+        thread::spawn(move || {
+            let result = read_entries(&path, None).map_err(|error| error.to_string());
+            mutex_lock(&PENDING_DIRECTORY_READS).push(DirectoryReadResult {
+                instance_id,
+                generation,
+                path,
+                result,
+            });
+        });
     }
 
     fn navigate_to(&self, path: impl Into<String>) {
         let path = path.into();
-        if !Path::new(&path).is_dir() {
-            self.status.set(format!("Cannot open {path}"));
-            return;
-        }
         self.current_path.set(path);
         self.refresh();
     }
@@ -140,26 +176,30 @@ impl FilerApp {
 
     fn refresh_picker(&self) {
         let path = self.picker_current_path.get();
-        let picker = self.picker_request.get();
-        match read_entries(&path, picker.as_ref()) {
-            Ok(entries) => {
-                self.picker_entries.set(entries);
-                self.picker_selected.set(None);
-                self.picker_hovered.set(None);
-                self.picker_last_click.set(None);
-            }
-            Err(error) => self
-                .picker_status
-                .set(format!("Cannot open {path}: {error}")),
-        }
+        let Some(request) = self.picker_request.get() else {
+            return;
+        };
+        let generation = self.picker_read_generation.get().wrapping_add(1);
+        self.picker_read_generation.set(generation);
+        self.picker_entries.set(Vec::new());
+        self.picker_selected.set(None);
+        self.picker_hovered.set(None);
+        self.picker_last_click.set(None);
+        self.picker_status.set(format!("Loading {path}"));
+
+        thread::spawn(move || {
+            let result = read_entries(&path, Some(&request)).map_err(|error| error.to_string());
+            mutex_lock(&PENDING_PICKER_READS).push(PickerReadResult {
+                request_id: request.id,
+                generation,
+                path,
+                result,
+            });
+        });
     }
 
     fn navigate_picker_to(&self, path: impl Into<String>) {
         let path = path.into();
-        if !Path::new(&path).is_dir() {
-            self.picker_status.set(format!("Cannot open {path}"));
-            return;
-        }
         self.picker_current_path.set(path);
         self.refresh_picker();
     }
@@ -310,31 +350,105 @@ impl FilerApp {
             .set(String::from("Cannot choose a name for the new folder"));
     }
 
-    fn next_request_id(&self) -> String {
-        let sequence = self.request_sequence.get();
-        self.request_sequence.set(sequence.wrapping_add(1).max(1));
-        format!("request-{sequence}")
-    }
-
-    fn begin_picker(&self, mut request: PickerRequest) -> String {
-        request.id = self.next_request_id();
-        let initial_folder = if Path::new(&request.initial_folder).is_dir() {
-            request.initial_folder.clone()
+    fn begin_picker(&self, request: PickerRequest) {
+        let initial_folder = if request.initial_folder.is_empty() {
+            home_path()
         } else {
-            initial_path()
+            request.initial_folder.clone()
         };
-        let request_id = request.id.clone();
-        let title = request.title.clone();
+        let status = if request.allow_multiple {
+            String::from("Multiple selection is not supported yet")
+        } else {
+            request.title.clone()
+        };
         self.picker_file_name.set(request.suggested_name.clone());
         self.picker_request.set(Some(request));
         self.picker_current_path.set(initial_folder);
+        self.picker_entries.set(Vec::new());
+        self.picker_status.set(status);
+        open_window(PICKER_WINDOW_KEY);
         self.refresh_picker();
-        self.picker_status.set(title);
-        open_new_window(PICKER_WINDOW_KEY);
-        request_id
+    }
+
+    fn process_pending_ui_work(&self) {
+        let requests: Vec<_> = mutex_lock(&PENDING_UI_REQUESTS).drain(..).collect();
+        for request in requests {
+            match request {
+                FilerUiRequest::ShowMain => open_window("main"),
+            }
+        }
+
+        let directory_reads: Vec<_> = mutex_lock(&PENDING_DIRECTORY_READS).drain(..).collect();
+        for read in directory_reads {
+            let is_current = self.directory_read_instance.get() == read.instance_id
+                && self.directory_read_generation.get() == read.generation
+                && self.current_path.get() == read.path;
+            if !is_current {
+                continue;
+            }
+
+            match read.result {
+                Ok(entries) => {
+                    self.entries.set(entries);
+                    self.status.set(String::from("Ready"));
+                }
+                Err(error) => self
+                    .status
+                    .set(format!("Cannot open {}: {error}", read.path)),
+            }
+        }
+
+        // The picker scene has one shared state object, so service requests
+        // must be presented serially. Each caller already received its request
+        // id and will get the matching response signal when its turn finishes.
+        // Defer the next queued request for one idle pass after completing a
+        // picker. This lets either a queued DismissWindow command or a close
+        // request from the title bar finish removing the old window first.
+        let picker_window_closing = PICKER_WINDOW_CLOSING.swap(false, AtomicOrdering::AcqRel);
+        if !picker_window_closing && self.picker_request.get().is_none() {
+            let next_request = {
+                let mut pending = mutex_lock(&PENDING_PICKER_REQUESTS);
+                if pending.is_empty() {
+                    None
+                } else {
+                    Some(pending.remove(0))
+                }
+            };
+            if let Some(request) = next_request {
+                self.begin_picker(request);
+            }
+        }
+
+        let reads: Vec<_> = mutex_lock(&PENDING_PICKER_READS).drain(..).collect();
+        for read in reads {
+            let is_current = self
+                .picker_request
+                .get()
+                .as_ref()
+                .is_some_and(|request| request.id == read.request_id)
+                && self.picker_read_generation.get() == read.generation
+                && self.picker_current_path.get() == read.path;
+            if !is_current {
+                continue;
+            }
+
+            match read.result {
+                Ok(entries) => {
+                    self.picker_entries.set(entries);
+                    self.picker_status.set(String::from("Ready"));
+                }
+                Err(error) => self
+                    .picker_status
+                    .set(format!("Cannot open {}: {error}", read.path)),
+            }
+        }
     }
 
     fn finish_picker(&self, accepted: bool) {
+        self.complete_picker(accepted, true);
+    }
+
+    fn complete_picker(&self, accepted: bool, dismiss: bool) {
         let Some(request) = self.picker_request.get() else {
             return;
         };
@@ -362,26 +476,32 @@ impl FilerApp {
         };
         let success = accepted && !path.is_empty();
 
-        match SbusConnection::connect().and_then(|mut connection| {
-            connection.emit_signal(
-                DESKTOP_FILE_MANAGER_BUS_NAME,
-                DESKTOP_FILE_MANAGER_OBJECT_PATH,
-                DESKTOP_FILE_MANAGER_INTERFACE,
-                DESKTOP_FILE_MANAGER_RESPONSE_SIGNAL,
-                vec![
-                    Argument::String(request.id),
-                    Argument::Boolean(success),
-                    Argument::String(path),
-                ],
-            )
-        }) {
-            Ok(()) => {}
-            Err(error) => eprintln!("[filer] failed to send picker response: {error:?}"),
-        }
-
+        let request_id = request.id;
         self.picker_request.set(None);
         self.picker_file_name.set(String::new());
-        dismiss_window(PICKER_WINDOW_KEY);
+        PICKER_WINDOW_CLOSING.store(true, AtomicOrdering::Release);
+        if dismiss {
+            dismiss_window(PICKER_WINDOW_KEY);
+        }
+
+        thread::spawn(move || {
+            match SbusConnection::connect().and_then(|mut connection| {
+                connection.emit_signal(
+                    DESKTOP_FILE_MANAGER_BUS_NAME,
+                    DESKTOP_FILE_MANAGER_OBJECT_PATH,
+                    DESKTOP_FILE_MANAGER_INTERFACE,
+                    DESKTOP_FILE_MANAGER_RESPONSE_SIGNAL,
+                    vec![
+                        Argument::String(request_id),
+                        Argument::Boolean(success),
+                        Argument::String(path),
+                    ],
+                )
+            }) {
+                Ok(()) => {}
+                Err(error) => eprintln!("[filer] failed to send picker response: {error:?}"),
+            }
+        });
     }
 
     fn file_cell(
@@ -622,6 +742,17 @@ impl FilerApp {
 }
 
 impl Application for FilerApp {
+    fn on_idle(&mut self) {
+        self.process_pending_ui_work();
+    }
+
+    fn on_window_close_requested(&mut self, context: &WindowContext) -> bool {
+        if context.scene_key.as_str() == PICKER_WINDOW_KEY {
+            self.complete_picker(false, false);
+        }
+        true
+    }
+
     fn scenes(&self) -> impl Scene {
         let home = self.clone();
         let computer = self.clone();
@@ -1019,12 +1150,7 @@ mod layout_tests {
 }
 
 fn initial_path() -> String {
-    let home = home_path();
-    [home.as_str(), "/tmp", ROOT_PATH]
-        .into_iter()
-        .find(|path| Path::new(path).is_dir())
-        .unwrap_or(ROOT_PATH)
-        .to_owned()
+    home_path()
 }
 
 fn home_path() -> String {
@@ -1148,7 +1274,21 @@ fn argument_bool(arguments: &[Argument], index: usize) -> bool {
     matches!(arguments.get(index), Some(Argument::Boolean(true)))
 }
 
-fn run_picker_service(app: FilerApp) {
+fn next_picker_request_id() -> String {
+    let mut sequence = mutex_lock(&NEXT_PICKER_REQUEST_ID);
+    let request_id = *sequence;
+    *sequence = (*sequence).wrapping_add(1).max(1);
+    format!("request-{request_id}")
+}
+
+fn next_filer_instance_id() -> u64 {
+    let mut sequence = mutex_lock(&NEXT_FILER_INSTANCE_ID);
+    let instance_id = *sequence;
+    *sequence = (*sequence).wrapping_add(1).max(1);
+    instance_id
+}
+
+fn run_picker_service() {
     loop {
         let Ok(mut connection) = SbusConnection::connect() else {
             thread::sleep(SERVICE_RETRY_DELAY);
@@ -1188,7 +1328,7 @@ fn run_picker_service(app: FilerApp) {
                 continue;
             }
             if method == DESKTOP_FILE_MANAGER_SHOW_METHOD {
-                open_window("main");
+                mutex_lock(&PENDING_UI_REQUESTS).push(FilerUiRequest::ShowMain);
                 let _ = connection.send_method_return(0, Vec::new());
                 continue;
             }
@@ -1205,10 +1345,11 @@ fn run_picker_service(app: FilerApp) {
                 continue;
             };
 
+            let request_id = next_picker_request_id();
             let request = PickerRequest {
-                id: String::new(),
+                id: request_id.clone(),
                 title: argument_string(&args, 0).unwrap_or_else(|| String::from("Open File")),
-                initial_folder: argument_string(&args, 1).unwrap_or_else(initial_path),
+                initial_folder: argument_string(&args, 1).unwrap_or_else(home_path),
                 filter: argument_string(&args, if save_mode { 3 } else { 2 }).unwrap_or_default(),
                 allow_multiple: if save_mode {
                     false
@@ -1227,21 +1368,20 @@ fn run_picker_service(app: FilerApp) {
                     String::new()
                 },
             };
-            if request.allow_multiple {
-                app.status
-                    .set(String::from("Multiple selection is not supported yet"));
+            if connection
+                .send_method_return(0, vec![Argument::String(request_id)])
+                .is_ok()
+            {
+                mutex_lock(&PENDING_PICKER_REQUESTS).push(request);
             }
-            let request_id = app.begin_picker(request);
-            let _ = connection.send_method_return(0, vec![Argument::String(request_id)]);
         }
     }
 }
 
 fn main() {
     println!("[filer] starting");
+    thread::spawn(run_picker_service);
     let mut app = FilerApp::new();
-    let service_app = app.clone();
-    thread::spawn(move || run_picker_service(service_app));
     if let Err(error) = app.run() {
         eprintln!("[filer] error: {error}");
     }
