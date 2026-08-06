@@ -66,7 +66,7 @@ pub fn sys_shv_vcpu_create(trapframe: &mut Trapframe) -> usize {
     let vm = match task
         .handle_table
         .get(vm_handle)
-        .and_then(|obj| obj.as_hypervisor_vm_arc())
+        .and_then(KernelObject::into_hypervisor_vm_arc)
     {
         Some(vm) => vm,
         None => return usize::MAX,
@@ -134,7 +134,7 @@ pub fn sys_shv_vcpu_run(trapframe: &mut Trapframe) -> usize {
     let vcpu = match task
         .handle_table
         .get(vcpu_handle)
-        .and_then(|obj| obj.as_hypervisor_vcpu())
+        .and_then(KernelObject::into_hypervisor_vcpu_arc)
     {
         Some(vcpu) => vcpu,
         None => return usize::MAX,

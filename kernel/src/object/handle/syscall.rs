@@ -213,7 +213,7 @@ pub fn sys_handle_control(trapframe: &mut Trapframe) -> usize {
     // Increment PC to avoid infinite loop
     trapframe.increment_pc_next(&task);
 
-    // Get the kernel object from the handle table (without clone)
+    // Pin the kernel object for the duration of this control operation.
     let kernel_object = match task.handle_table.get(handle) {
         Some(obj) => obj,
         None => return usize::MAX,

@@ -463,10 +463,23 @@ impl Socket {
         if result == usize::MAX {
             return Err(SocketError::SyscallFailed);
         }
-        let handle0 = unsafe { Handle::from_raw(handles[0] as i32) }
-            .map_err(|_| SocketError::SyscallFailed)?;
-        let handle1 = unsafe { Handle::from_raw(handles[1] as i32) }
-            .map_err(|_| SocketError::SyscallFailed)?;
+        let handle0 = match unsafe { Handle::from_raw(handles[0] as i32) } {
+            Ok(handle) => handle,
+            Err(_) => {
+                // from_raw consumed and closed handles[0]. The other endpoint
+                // has not been adopted, so close it explicitly to avoid a leak.
+                let _ = syscall1(Syscall::HandleClose, handles[1]);
+                return Err(SocketError::SyscallFailed);
+            }
+        };
+        let handle1 = match unsafe { Handle::from_raw(handles[1] as i32) } {
+            Ok(handle) => handle,
+            Err(_) => {
+                // from_raw consumed and closed handles[1]; handle0 is closed by
+                // its Drop while returning this error.
+                return Err(SocketError::SyscallFailed);
+            }
+        };
         Ok((Socket { handle: handle0 }, Socket { handle: handle1 }))
     }
 

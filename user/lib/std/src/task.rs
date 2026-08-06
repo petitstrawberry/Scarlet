@@ -710,7 +710,8 @@ pub fn pipe() -> Result<(crate::handle::Handle, crate::handle::Handle), i32> {
     let read_handle = match unsafe { crate::handle::Handle::from_raw(pipefd[0] as i32) } {
         Ok(h) => h,
         Err(_) => {
-            let _ = syscall1(Syscall::HandleClose, pipefd[0] as usize);
+            // from_raw consumed and closed pipefd[0] after its query failed.
+            // pipefd[1] has not been adopted yet and remains our responsibility.
             let _ = syscall1(Syscall::HandleClose, pipefd[1] as usize);
             return Err(-1);
         }
@@ -718,8 +719,8 @@ pub fn pipe() -> Result<(crate::handle::Handle, crate::handle::Handle), i32> {
     let write_handle = match unsafe { crate::handle::Handle::from_raw(pipefd[1] as i32) } {
         Ok(h) => h,
         Err(_) => {
-            let _ = syscall1(Syscall::HandleClose, pipefd[0] as usize);
-            let _ = syscall1(Syscall::HandleClose, pipefd[1] as usize);
+            // from_raw consumed and closed pipefd[1]. Returning drops
+            // read_handle exactly once, so neither endpoint is closed twice.
             return Err(-1);
         }
     };

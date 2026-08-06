@@ -182,12 +182,12 @@ impl HandleTable {
         inner.handles[handle as usize].as_ref().map(f)
     }
 
-    /// O(1) borrowed access that hides `Arc` ownership from the caller.
+    /// O(1) access that keeps the object alive independently of the table slot.
     ///
-    /// This method returns a borrowed view of the handle-table object without
-    /// incrementing the object's `Arc` reference count. The returned view does
-    /// not expose the underlying `Arc`, so ordinary handle lookup cannot extend
-    /// object lifetime beyond the owning handle table.
+    /// The returned wrapper contains an Arc-level clone of the object. Closing
+    /// or replacing the handle from another task sharing this table therefore
+    /// cannot invalidate an operation already in progress. This is not dup
+    /// semantics and does not invoke custom clone hooks.
     ///
     /// # Arguments
     ///
@@ -195,16 +195,15 @@ impl HandleTable {
     ///
     /// # Returns
     ///
-    /// Borrowed object view if the handle exists, otherwise `None`.
-    pub fn get(&self, handle: Handle) -> Option<KernelObjectRef<'_>> {
+    /// Arc-level object clone if the handle exists, otherwise `None`.
+    pub fn get(&self, handle: Handle) -> Option<KernelObject> {
         if handle as usize >= Self::MAX_HANDLES {
             return None;
         }
         let inner = self.inner.read();
-        let object = inner.handles[handle as usize].as_ref()? as *const KernelObject;
-        // SAFETY: The pointer refers to a handle-table slot in `self`. The view
-        // is lifetime-bound to `&self` and does not own or clone the object.
-        Some(unsafe { KernelObjectRef::from_ptr(object) })
+        inner.handles[handle as usize]
+            .as_ref()
+            .map(KernelObject::arc_clone)
     }
 
     /// O(1) borrowed access that hides `Arc` ownership from the caller.
@@ -241,17 +240,9 @@ impl HandleTable {
     /// trait which may have side effects (e.g., incrementing Pipe reader/writer counts),
     /// this performs a simple Arc reference count increment without modifying object state.
     ///
-    /// Prefer [`HandleTable::get`] for ordinary handle lookup. Use this method only
-    /// when an operation must intentionally keep the object alive independently of
-    /// the owning handle table.
+    /// This is an explicit-name alias for [`HandleTable::get`].
     pub fn get_arc_clone(&self, handle: Handle) -> Option<KernelObject> {
-        if handle as usize >= Self::MAX_HANDLES {
-            return None;
-        }
-        let inner = self.inner.read();
-        inner.handles[handle as usize]
-            .as_ref()
-            .map(|obj| obj.arc_clone())
+        self.get(handle)
     }
 
     /// Return Arc-level clones of a handle's object and metadata from one table snapshot.

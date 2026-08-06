@@ -619,7 +619,7 @@ pub fn sys_listen(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let socket = match task
         .handle_table
         .get(handle_id)
-        .and_then(|obj| obj.as_socket())
+        .and_then(KernelObject::into_socket_arc)
     {
         Some(socket) => socket,
         None => {
@@ -674,7 +674,7 @@ fn accept_with_flags(abi: &mut LinuxAbi, trapframe: &mut Trapframe, flags: i32) 
     let socket_obj = match task
         .handle_table
         .get(handle_id)
-        .and_then(|obj| obj.as_socket())
+        .and_then(KernelObject::into_socket_arc)
     {
         Some(socket) => socket,
         None => {
@@ -684,15 +684,17 @@ fn accept_with_flags(abi: &mut LinuxAbi, trapframe: &mut Trapframe, flags: i32) 
     };
 
     // Try LocalSocket first, then TcpSocket
-    let accepted_socket = if let Some(local_socket) = LocalSocket::from_socket_object(socket_obj) {
-        local_socket.accept_blocking(task.get_id(), trapframe)
-    } else if let Some(tcp_socket) = crate::network::tcp::TcpSocket::from_socket_object(socket_obj)
-    {
-        tcp_socket.accept_blocking(task.get_id(), trapframe)
-    } else {
-        crate::early_println!("[linux socket] accept not supported socket type");
-        return usize::MAX;
-    };
+    let accepted_socket =
+        if let Some(local_socket) = LocalSocket::from_socket_object(socket_obj.as_ref()) {
+            local_socket.accept_blocking(task.get_id(), trapframe)
+        } else if let Some(tcp_socket) =
+            crate::network::tcp::TcpSocket::from_socket_object(socket_obj.as_ref())
+        {
+            tcp_socket.accept_blocking(task.get_id(), trapframe)
+        } else {
+            crate::early_println!("[linux socket] accept not supported socket type");
+            return usize::MAX;
+        };
 
     let accepted_socket = match accepted_socket {
         Ok(socket) => socket,
@@ -793,7 +795,7 @@ pub fn sys_connect(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let socket_arc = match task
         .handle_table
         .get(handle_id)
-        .and_then(|obj| obj.as_socket())
+        .and_then(KernelObject::into_socket_arc)
     {
         Some(socket) => socket,
         None => {
@@ -894,7 +896,7 @@ pub fn sys_getsockname(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let socket_arc = match task
         .handle_table
         .get(handle_id)
-        .and_then(|obj| obj.as_socket())
+        .and_then(KernelObject::into_socket_arc)
     {
         Some(socket) => socket,
         None => {
@@ -964,7 +966,7 @@ pub fn sys_getpeername(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let socket_arc = match task
         .handle_table
         .get(handle_id)
-        .and_then(|obj| obj.as_socket())
+        .and_then(KernelObject::into_socket_arc)
     {
         Some(socket) => socket,
         None => {
@@ -1697,7 +1699,7 @@ pub fn sys_sendto(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let socket = match task
         .handle_table
         .get(handle)
-        .and_then(|obj| obj.as_socket())
+        .and_then(KernelObject::into_socket_arc)
     {
         Some(socket) => socket,
         None => return errno::to_result(errno::ENOTSOCK),
@@ -1797,7 +1799,7 @@ pub fn sys_recvfrom(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let socket = match task
         .handle_table
         .get(handle)
-        .and_then(|obj| obj.as_socket())
+        .and_then(KernelObject::into_socket_arc)
     {
         Some(socket) => socket,
         None => return errno::to_result(errno::ENOTSOCK),
@@ -2042,7 +2044,7 @@ pub fn sys_shutdown(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let socket = match task
         .handle_table
         .get(handle)
-        .and_then(|obj| obj.as_socket())
+        .and_then(KernelObject::into_socket_arc)
     {
         Some(socket) => socket,
         None => return errno::to_result(errno::ENOTSOCK),

@@ -52,6 +52,60 @@ fn test_handle_table_insert_and_get() {
 }
 
 #[test_case]
+fn test_handle_table_get_pins_object_across_shared_close() {
+    let table = HandleTable::new();
+    let shared_table = table.clone();
+    let mock_file = Arc::new(MockFileObject::new(b"pinned".to_vec()));
+    let handle = table.insert(KernelObject::File(mock_file.clone())).unwrap();
+
+    let object = table.get(handle).unwrap();
+    assert_eq!(Arc::strong_count(&mock_file), 3);
+
+    drop(shared_table.remove(handle).unwrap());
+    assert!(table.get(handle).is_none());
+    assert_eq!(Arc::strong_count(&mock_file), 2);
+
+    let replacement = Arc::new(MockFileObject::new(b"newest".to_vec()));
+    let reused_handle = shared_table
+        .insert(KernelObject::File(replacement.clone()))
+        .unwrap();
+    assert_eq!(reused_handle, handle);
+
+    let replacement_object = table.get(reused_handle).unwrap();
+    let mut old_bytes = [0u8; 6];
+    let mut new_bytes = [0u8; 6];
+    assert_eq!(object.as_stream().unwrap().read(&mut old_bytes).unwrap(), 6);
+    assert_eq!(
+        replacement_object
+            .as_stream()
+            .unwrap()
+            .read(&mut new_bytes)
+            .unwrap(),
+        6
+    );
+    assert_eq!(&old_bytes, b"pinned");
+    assert_eq!(&new_bytes, b"newest");
+
+    drop(object);
+    assert_eq!(Arc::strong_count(&mock_file), 1);
+}
+
+#[test_case]
+fn test_handle_table_get_uses_arc_clone_not_dup_semantics() {
+    let table = HandleTable::new();
+    let pipe: Arc<dyn PipeObject> = Arc::new(MockPipeObject::new());
+    let handle = table.insert(KernelObject::Pipe(Arc::clone(&pipe))).unwrap();
+
+    let object = table.get(handle).unwrap();
+    let retrieved_pipe = match object {
+        KernelObject::Pipe(pipe) => pipe,
+        _ => panic!("get should retain the pipe object type"),
+    };
+
+    assert!(Arc::ptr_eq(&pipe, &retrieved_pipe));
+}
+
+#[test_case]
 fn test_handle_table_with_object_ref_does_not_clone_arc() {
     let table = HandleTable::new();
     let mock_file = Arc::new(MockFileObject::new(b"borrowed".to_vec()));

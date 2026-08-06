@@ -577,7 +577,7 @@ pub fn sys_socket_listen(tf: &mut Trapframe) -> usize {
     let socket = match task
         .handle_table
         .get(handle_id)
-        .and_then(|obj| obj.as_socket())
+        .and_then(KernelObject::into_socket_arc)
     {
         Some(socket) => socket,
         None => {
@@ -636,7 +636,7 @@ pub fn sys_socket_connect(tf: &mut Trapframe) -> usize {
     let socket = match task
         .handle_table
         .get(handle_id)
-        .and_then(|obj| obj.as_socket())
+        .and_then(KernelObject::into_socket_arc)
     {
         Some(socket) => socket,
         None => return usize::MAX,
@@ -707,7 +707,7 @@ pub fn sys_socket_accept(tf: &mut Trapframe) -> usize {
     let socket_obj = match task
         .handle_table
         .get(handle_id)
-        .and_then(|obj| obj.as_socket())
+        .and_then(KernelObject::into_socket_arc)
     {
         Some(socket) => socket,
         None => return usize::MAX,
@@ -716,29 +716,31 @@ pub fn sys_socket_accept(tf: &mut Trapframe) -> usize {
     // Try to downcast to LocalSocket or TcpSocket
     use crate::network::local::LocalSocket;
 
-    let accepted_socket = if let Some(local_socket) = LocalSocket::from_socket_object(socket_obj) {
-        // LocalSocket accept
-        match local_socket.accept_blocking(task.get_id(), tf) {
-            Ok(socket) => socket,
-            Err(e) => {
-                crate::println!(
-                    "[sys_socket_accept] LocalSocket accept_blocking failed: {:?}",
-                    e
-                );
-                return usize::MAX;
+    let accepted_socket =
+        if let Some(local_socket) = LocalSocket::from_socket_object(socket_obj.as_ref()) {
+            // LocalSocket accept
+            match local_socket.accept_blocking(task.get_id(), tf) {
+                Ok(socket) => socket,
+                Err(e) => {
+                    crate::println!(
+                        "[sys_socket_accept] LocalSocket accept_blocking failed: {:?}",
+                        e
+                    );
+                    return usize::MAX;
+                }
             }
-        }
-    } else if let Some(tcp_socket) = crate::network::tcp::TcpSocket::from_socket_object(socket_obj)
-    {
-        // TcpSocket accept
-        match tcp_socket.accept_blocking(task.get_id(), tf) {
-            Ok(socket) => socket,
-            Err(_) => return usize::MAX,
-        }
-    } else {
-        crate::println!("[sys_socket_accept] Not a supported socket type");
-        return usize::MAX;
-    };
+        } else if let Some(tcp_socket) =
+            crate::network::tcp::TcpSocket::from_socket_object(socket_obj.as_ref())
+        {
+            // TcpSocket accept
+            match tcp_socket.accept_blocking(task.get_id(), tf) {
+                Ok(socket) => socket,
+                Err(_) => return usize::MAX,
+            }
+        } else {
+            crate::println!("[sys_socket_accept] Not a supported socket type");
+            return usize::MAX;
+        };
 
     // Add the accepted socket to handle table
     let kernel_obj = KernelObject::Socket(accepted_socket);
@@ -867,7 +869,7 @@ pub fn sys_socket_shutdown(tf: &mut Trapframe) -> usize {
     let socket = match task
         .handle_table
         .get(handle_id)
-        .and_then(|obj| obj.as_socket())
+        .and_then(KernelObject::into_socket_arc)
     {
         Some(socket) => socket,
         None => return usize::MAX,
@@ -928,7 +930,7 @@ pub fn sys_socket_recvfrom(tf: &mut Trapframe) -> usize {
     let socket = match task
         .handle_table
         .get(handle_id)
-        .and_then(|obj| obj.as_socket())
+        .and_then(KernelObject::into_socket_arc)
     {
         Some(socket) => socket,
         None => return usize::MAX,
@@ -1019,7 +1021,7 @@ pub fn sys_socket_sendto(tf: &mut Trapframe) -> usize {
     let socket = match task
         .handle_table
         .get(handle_id)
-        .and_then(|obj| obj.as_socket())
+        .and_then(KernelObject::into_socket_arc)
     {
         Some(socket) => socket,
         None => return usize::MAX,

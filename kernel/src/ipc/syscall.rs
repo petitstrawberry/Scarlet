@@ -197,7 +197,7 @@ pub fn sys_event_unsubscribe(trapframe: &mut Trapframe) -> usize {
     let (channel_name, subscription_id) = match task
         .handle_table
         .get(handle)
-        .and_then(|obj| obj.as_event_subscription())
+        .and_then(KernelObject::into_event_subscription_arc)
     {
         Some(sub) => (
             sub.channel_name().to_string(),
@@ -603,14 +603,14 @@ pub fn sys_socket_send_handle(trapframe: &mut Trapframe) -> usize {
     let socket_obj = match task
         .handle_table
         .get(socket_handle)
-        .and_then(|obj| obj.as_socket())
+        .and_then(KernelObject::into_socket_arc)
     {
         Some(socket) => socket,
         None => return usize::MAX, // Invalid socket handle
     };
 
     use crate::network::local::LocalSocket;
-    let local_socket = match LocalSocket::from_socket_object(socket_obj) {
+    let local_socket = match LocalSocket::from_socket_object(socket_obj.as_ref()) {
         Some(s) => s,
         None => return usize::MAX, // Not a LocalSocket
     };
@@ -655,7 +655,7 @@ pub fn sys_socket_recv_handle(trapframe: &mut Trapframe) -> usize {
     let socket_obj = match task
         .handle_table
         .get(socket_handle)
-        .and_then(|obj| obj.as_socket())
+        .and_then(KernelObject::into_socket_arc)
     {
         Some(socket) => socket,
         None => return usize::MAX, // Invalid socket handle
@@ -664,7 +664,7 @@ pub fn sys_socket_recv_handle(trapframe: &mut Trapframe) -> usize {
     // Block only while the ordered receive queue is empty. If another segment
     // type is first, recv_handle_blocking returns EAGAIN instead of skipping it.
     use crate::network::local::LocalSocket;
-    let local_socket = match LocalSocket::from_socket_object(socket_obj) {
+    let local_socket = match LocalSocket::from_socket_object(socket_obj.as_ref()) {
         Some(s) => s,
         None => return usize::MAX, // Not a LocalSocket
     };
@@ -716,14 +716,14 @@ pub fn sys_socket_send_handle_and_data(trapframe: &mut Trapframe) -> usize {
     let socket_obj = match task
         .handle_table
         .get(socket_handle)
-        .and_then(|obj| obj.as_socket())
+        .and_then(KernelObject::into_socket_arc)
     {
         Some(socket) => socket,
         None => return usize::MAX, // Invalid socket handle
     };
 
     use crate::network::local::LocalSocket;
-    let local_socket = match LocalSocket::from_socket_object(socket_obj) {
+    let local_socket = match LocalSocket::from_socket_object(socket_obj.as_ref()) {
         Some(s) => s,
         None => return usize::MAX, // Not a LocalSocket
     };
@@ -785,14 +785,14 @@ pub fn sys_socket_recv_handle_and_data(trapframe: &mut Trapframe) -> usize {
     let socket_obj = match task
         .handle_table
         .get(socket_handle)
-        .and_then(|obj| obj.as_socket())
+        .and_then(KernelObject::into_socket_arc)
     {
         Some(socket) => socket,
         None => return usize::MAX, // Invalid socket handle
     };
 
     use crate::network::local::LocalSocket;
-    let local_socket = match LocalSocket::from_socket_object(socket_obj) {
+    let local_socket = match LocalSocket::from_socket_object(socket_obj.as_ref()) {
         Some(s) => s,
         None => return usize::MAX, // Not a LocalSocket
     };

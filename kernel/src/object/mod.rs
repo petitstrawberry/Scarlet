@@ -18,7 +18,6 @@ use crate::ipc::shared_memory::SharedMemoryObject;
 use crate::object::timer::{Timer, TimerObject};
 use alloc::sync::Arc;
 use capability::{CloneOps, ControlOps, MemoryMappingOps, Selectable, StreamOps};
-use core::marker::PhantomData;
 
 #[cfg(feature = "network")]
 use crate::network::SocketObject;
@@ -129,8 +128,7 @@ impl MemoryMappingOps for GpuMemoryMappingOwner {
 /// APIs that create strong or weak references.
 #[derive(Clone, Copy)]
 pub struct KernelObjectRef<'a> {
-    object: *const KernelObject,
-    _marker: PhantomData<&'a KernelObject>,
+    object: &'a KernelObject,
 }
 
 impl<'a> KernelObjectRef<'a> {
@@ -144,38 +142,12 @@ impl<'a> KernelObjectRef<'a> {
     ///
     /// A borrowed view that cannot clone the underlying object.
     pub(crate) const fn new(object: &'a KernelObject) -> Self {
-        Self {
-            object,
-            _marker: PhantomData,
-        }
-    }
-
-    /// Create a borrowed kernel object view from a stable handle-table slot.
-    ///
-    /// # Arguments
-    ///
-    /// * `object` - Pointer to a kernel object stored in a handle-table slot
-    ///
-    /// # Returns
-    ///
-    /// A borrowed view that cannot clone the underlying object.
-    ///
-    /// # Safety
-    ///
-    /// The pointer must be valid for `'a` and must point to a live
-    /// [`KernelObject`] while this borrowed view is used.
-    pub(crate) const unsafe fn from_ptr(object: *const KernelObject) -> Self {
-        Self {
-            object,
-            _marker: PhantomData,
-        }
+        Self { object }
     }
 
     #[inline]
     fn object(&self) -> &'a KernelObject {
-        // SAFETY: KernelObjectRef is constructed only from handle-table object
-        // references or stable slot pointers whose validity is tied to 'a.
-        unsafe { &*self.object }
+        self.object
     }
 
     /// Get the underlying borrowed [`KernelObject`].
@@ -366,6 +338,84 @@ impl<'a> KernelObjectRef<'a> {
 }
 
 impl KernelObject {
+    /// Get the underlying kernel object by reference.
+    pub(crate) fn as_kernel_object(&self) -> &KernelObject {
+        self
+    }
+
+    /// Get a human-readable object type name.
+    pub fn type_name(&self) -> &'static str {
+        match self {
+            KernelObject::File(_) => "File",
+            KernelObject::Pipe(_) => "Pipe",
+            KernelObject::Counter(_) => "Counter",
+            KernelObject::Timer(_) => "Timer",
+            KernelObject::EventChannel(_) => "EventChannel",
+            KernelObject::EventSubscription(_) => "EventSubscription",
+            KernelObject::SharedMemory(_) => "SharedMemory",
+            KernelObject::Gpu(_) => "Gpu",
+            #[cfg(feature = "network")]
+            KernelObject::Socket(_) => "Socket",
+            #[cfg(feature = "hypervisor")]
+            KernelObject::HypervisorVm(_) => "HypervisorVm",
+            #[cfg(feature = "hypervisor")]
+            KernelObject::HypervisorVcpu(_) => "HypervisorVcpu",
+        }
+    }
+
+    /// Try to get the hypervisor VM Arc by borrowed reference.
+    #[cfg(feature = "hypervisor")]
+    pub(crate) fn as_hypervisor_vm_arc(&self) -> Option<&hypervisor::VmRef> {
+        match self {
+            KernelObject::HypervisorVm(vm) => Some(vm),
+            _ => None,
+        }
+    }
+
+    /// Try to get the hypervisor vCPU object by borrowed reference.
+    #[cfg(feature = "hypervisor")]
+    pub(crate) fn as_hypervisor_vcpu(&self) -> Option<&dyn hypervisor::VcpuObject> {
+        match self {
+            KernelObject::HypervisorVcpu(vcpu) => Some(vcpu.as_ref()),
+            _ => None,
+        }
+    }
+
+    /// Consume this wrapper and return its socket Arc, if it is a socket.
+    #[cfg(feature = "network")]
+    pub(crate) fn into_socket_arc(self) -> Option<Arc<dyn SocketObject>> {
+        match self {
+            KernelObject::Socket(socket) => Some(socket),
+            _ => None,
+        }
+    }
+
+    /// Consume this wrapper and return its event-subscription Arc, if present.
+    pub(crate) fn into_event_subscription_arc(self) -> Option<Arc<EventSubscriptionObject>> {
+        match self {
+            KernelObject::EventSubscription(subscription) => Some(subscription),
+            _ => None,
+        }
+    }
+
+    /// Consume this wrapper and return its hypervisor VM Arc, if present.
+    #[cfg(feature = "hypervisor")]
+    pub(crate) fn into_hypervisor_vm_arc(self) -> Option<hypervisor::VmRef> {
+        match self {
+            KernelObject::HypervisorVm(vm) => Some(vm),
+            _ => None,
+        }
+    }
+
+    /// Consume this wrapper and return its hypervisor vCPU Arc, if present.
+    #[cfg(feature = "hypervisor")]
+    pub(crate) fn into_hypervisor_vcpu_arc(self) -> Option<hypervisor::VcpuRef> {
+        match self {
+            KernelObject::HypervisorVcpu(vcpu) => Some(vcpu),
+            _ => None,
+        }
+    }
+
     /// Create a KernelObject from a FileObject
     pub fn from_file_object(file_object: Arc<dyn FileObject>) -> Self {
         KernelObject::File(file_object)

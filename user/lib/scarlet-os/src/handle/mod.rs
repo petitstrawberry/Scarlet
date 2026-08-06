@@ -37,6 +37,8 @@ pub type HandleResult<T> = Result<T, HandleError>;
 
 pub use scarlet_abi::RawHandle;
 
+const INVALID_RAW_HANDLE: RawHandle = -1;
+
 /// Errors that can occur during handle operations
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HandleError {
@@ -78,6 +80,10 @@ pub struct Handle {
 }
 
 impl Handle {
+    fn take_raw(&mut self) -> RawHandle {
+        core::mem::replace(&mut self.raw, INVALID_RAW_HANDLE)
+    }
+
     fn query_info(raw: RawHandle) -> HandleResult<KernelObjectInfo> {
         let mut info = KernelObjectInfo::unknown();
         let result = syscall2(
@@ -133,7 +139,11 @@ impl Handle {
     /// Create a Handle from a raw handle value
     ///
     /// # Safety
-    /// The caller must ensure that the raw handle is valid
+    ///
+    /// The caller must own the valid raw handle exclusively and transfer that
+    /// ownership to this function exactly once. On return, including an error
+    /// return, the caller must treat `raw` as consumed and must not close or
+    /// adopt it again.
     pub unsafe fn from_raw(raw: RawHandle) -> HandleResult<Self> {
         // Caller guarantees ownership/validity; we still query the kernel so that
         // later capability conversions can be validated without extra syscalls.
@@ -154,7 +164,19 @@ impl Handle {
     ///
     /// After calling this method, the Handle becomes invalid
     pub fn close(self) -> HandleResult<()> {
-        let result = syscall1(Syscall::HandleClose, self.raw as usize);
+        self.close_with(|raw| syscall1(Syscall::HandleClose, raw as usize))
+    }
+
+    fn close_with<F>(mut self, close: F) -> HandleResult<()>
+    where
+        F: FnOnce(RawHandle) -> usize,
+    {
+        // Disarm Drop before issuing the syscall. Otherwise consuming `self`
+        // here closes once, then Drop closes the same numeric handle again.
+        // The kernel can reuse the number after the first close, so that
+        // second syscall may close an unrelated object.
+        let raw = self.take_raw();
+        let result = close(raw);
         HandleError::from_syscall_result(result).map(|_| ())
     }
 
@@ -268,6 +290,46 @@ impl Drop for Handle {
     fn drop(&mut self) {
         // Automatically close the handle when it goes out of scope
         // Ignore errors during drop
-        let _ = syscall1(Syscall::HandleClose, self.raw as usize);
+        if self.raw != INVALID_RAW_HANDLE {
+            let raw = self.take_raw();
+            let _ = syscall1(Syscall::HandleClose, raw as usize);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use core::cell::Cell;
+
+    #[test]
+    fn taking_raw_handle_disarms_drop() {
+        let mut handle = Handle {
+            raw: 7,
+            info: KernelObjectInfo::unknown(),
+        };
+
+        assert_eq!(handle.take_raw(), 7);
+        assert_eq!(handle.raw, INVALID_RAW_HANDLE);
+        assert_eq!(handle.take_raw(), INVALID_RAW_HANDLE);
+    }
+
+    #[test]
+    fn explicit_close_dispatches_exactly_once() {
+        let close_calls = Cell::new(0);
+        let handle = Handle {
+            raw: 11,
+            info: KernelObjectInfo::unknown(),
+        };
+
+        handle
+            .close_with(|raw| {
+                assert_eq!(raw, 11);
+                close_calls.set(close_calls.get() + 1);
+                0
+            })
+            .unwrap();
+
+        assert_eq!(close_calls.get(), 1);
     }
 }
