@@ -8,7 +8,7 @@ pub mod syscall;
 
 extern crate alloc;
 
-use crate::sync::{IrqRwSpinLock, IrqSpinLock};
+use crate::sync::{IrqRwSpinLock, IrqSpinLock, Mutex};
 use alloc::{
     boxed::Box,
     string::{String, ToString},
@@ -771,7 +771,7 @@ pub struct Task {
     /// Stack size in bytes
     pub stack_size: AtomicUsize,
     /// Data segment size in bytes
-    pub data_size: AtomicUsize,
+    pub data_size: Arc<AtomicUsize>,
     /// Text segment size in bytes
     pub text_size: AtomicUsize,
     /// Exit status (i32::MIN represents None)
@@ -782,8 +782,10 @@ pub struct Task {
     process_control_stopped: AtomicBool,
     /// Set after the current process-control stop has been reported once.
     process_control_stop_reported: AtomicBool,
-    /// Program break (already thread-safe)
+    /// Program break shared by every task using this address space.
     pub brk: Arc<AtomicUsize>,
+    /// Serializes compound brk updates, including page map/unmap changes.
+    brk_transaction: Arc<Mutex<()>>,
 
     // === IRQ reader-writer spin lock fields (frequent reads) ===
     /// Task name
@@ -795,13 +797,13 @@ pub struct Task {
     /// Each entry is a `ContiguousPages` RAII wrapper that returns its pages to the
     /// buddy-system PMM when dropped. Used for ELF segment and anonymous mappings
     /// that require physically contiguous memory.
-    pub page_allocations: IrqRwSpinLock<Vec<ContiguousPages>>,
+    pub page_allocations: Arc<IrqRwSpinLock<Vec<ContiguousPages>>>,
     /// Non-contiguous individual page allocations (PMM-backed, auto-freed on drop).
     ///
     /// Each entry is a `TaskPages` RAII wrapper holding a list of individual
     /// physical page addresses. Used for anonymous private mappings where
     /// physical contiguity is not required and partial reclaim on unmap is needed.
-    pub task_pages: IrqRwSpinLock<Vec<crate::mem::page::TaskPages>>,
+    pub task_pages: Arc<IrqRwSpinLock<Vec<crate::mem::page::TaskPages>>>,
     /// Virtual File System Manager
     ///
     /// # Usage Patterns
@@ -998,6 +1000,7 @@ impl Task {
         task_type: TaskType,
         ns: Arc<namespace::TaskNamespace>,
     ) -> Self {
+        let vm_manager = VirtualMemoryManager::new();
         Task {
             // Read-only fields
             id: 0,
@@ -1042,18 +1045,19 @@ impl Task {
             cpu_time_ns: AtomicU64::new(0),
             cpu_run_start_ns: AtomicU64::new(0),
             stack_size: AtomicUsize::new(0),
-            data_size: AtomicUsize::new(0),
+            data_size: vm_manager.data_size_handle(),
             text_size: AtomicUsize::new(0),
             exit_status: AtomicI32::new(i32::MIN),
             exiting: AtomicBool::new(false),
             process_control_stopped: AtomicBool::new(false),
             process_control_stop_reported: AtomicBool::new(false),
-            brk: Arc::new(AtomicUsize::new(usize::MAX)),
+            brk: vm_manager.brk_handle(),
+            brk_transaction: vm_manager.brk_transaction_handle(),
             // IRQ reader-writer spin lock fields
             name: IrqRwSpinLock::new(name),
             children: IrqRwSpinLock::new(Vec::new()),
-            page_allocations: IrqRwSpinLock::new(Vec::new()),
-            task_pages: IrqRwSpinLock::new(Vec::new()),
+            page_allocations: vm_manager.page_allocations_handle(),
+            task_pages: vm_manager.task_pages_handle(),
             vfs: IrqRwSpinLock::new(None),
             software_timers: IrqSpinLock::new(Vec::new()),
             deadline: IrqSpinLock::new(TaskDeadlineState::new()),
@@ -1063,7 +1067,7 @@ impl Task {
                 TaskType::User => crate::arch::Mode::User,
             })),
             kernel_context: KernelContextIrqSpinLock::new(KernelContext::new()),
-            vm_manager: VirtualMemoryManager::new(),
+            vm_manager,
             default_abi: TaskLocal::new(Some(Box::new(ScarletAbi::default()))),
             abi_zones: TaskLocal::new(BTreeMap::new()),
             deferred_exit_request: IrqSpinLock::new(None),
@@ -1820,19 +1824,62 @@ impl Task {
     /// # Returns
     /// If successful, returns Ok(()), otherwise returns an error.
     pub fn set_brk(&self, brk: usize) -> Result<(), &'static str> {
+        let _transaction = self.brk_transaction.lock();
+        self.set_brk_locked(brk)
+    }
+
+    /// Atomically adjust the program break and return `(old_brk, new_brk)`.
+    ///
+    /// The transaction lock covers the current-value read, checked arithmetic,
+    /// page-table changes, ownership tracking, and final brk publication.  A
+    /// plain atomic brk value is insufficient because CLONE_VM callers can
+    /// otherwise calculate two updates from the same stale value.
+    pub fn adjust_brk(&self, increment: isize) -> Result<(usize, usize), &'static str> {
+        let _transaction = self.brk_transaction.lock();
+        let prev_brk = self.get_brk();
+        if increment == 0 {
+            return Ok((prev_brk, prev_brk));
+        }
+
+        let brk = if increment > 0 {
+            prev_brk.checked_add(increment as usize)
+        } else {
+            increment
+                .checked_abs()
+                .and_then(|magnitude| prev_brk.checked_sub(magnitude as usize))
+        }
+        .ok_or("Program break adjustment overflows")?;
+
+        self.set_brk_locked(brk)?;
+        Ok((prev_brk, brk))
+    }
+
+    fn set_brk_locked(&self, brk: usize) -> Result<(), &'static str> {
         let prev_brk = self.get_brk();
         if brk < prev_brk {
             /* Free pages */
             /* Round address to the page boundary */
-            let prev_addr = (prev_brk + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
-            let addr = (brk + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+            let prev_addr = prev_brk
+                .checked_add(PAGE_SIZE - 1)
+                .ok_or("Program break page alignment overflows")?
+                & !(PAGE_SIZE - 1);
+            let addr = brk
+                .checked_add(PAGE_SIZE - 1)
+                .ok_or("Program break page alignment overflows")?
+                & !(PAGE_SIZE - 1);
             let num_of_pages = (prev_addr - addr) / PAGE_SIZE;
             self.free_data_pages(addr, num_of_pages);
         } else if brk > prev_brk {
             /* Allocate pages */
             /* Round address to the page boundary */
-            let prev_addr = (prev_brk + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
-            let addr = (brk + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+            let prev_addr = prev_brk
+                .checked_add(PAGE_SIZE - 1)
+                .ok_or("Program break page alignment overflows")?
+                & !(PAGE_SIZE - 1);
+            let addr = brk
+                .checked_add(PAGE_SIZE - 1)
+                .ok_or("Program break page alignment overflows")?
+                & !(PAGE_SIZE - 1);
             let num_of_pages = (addr - prev_addr) / PAGE_SIZE;
 
             // crate::println!("[set_brk] Expanding: prev_brk={:#x} -> brk={:#x}", prev_brk, brk);
@@ -2558,6 +2605,11 @@ impl Task {
                 } else {
                     // CLONE_VM: share the same address space via Arc<VirtualMemoryManager>
                     child.vm_manager = self.vm_manager.clone();
+                    child.page_allocations = self.page_allocations.clone();
+                    child.task_pages = self.task_pages.clone();
+                    child.brk = self.brk.clone();
+                    child.data_size = self.data_size.clone();
+                    child.brk_transaction = self.brk_transaction.clone();
                 }
             }
         }
@@ -2805,13 +2857,12 @@ impl Task {
         child.max_stack_size = self.max_stack_size;
         child.max_data_size = self.max_data_size;
         child.max_text_size = self.max_text_size;
-        // Program break must be shared when CLONE_VM is set, because the heap lives in the shared
-        // address space. If not shared, the child gets an independent copy of the current brk.
-        if flags.is_set(CloneFlagsDef::Vm) {
-            child.brk = self.brk.clone();
-        } else {
+        // A fork-style child owns a fresh VMM resource set initialized to the
+        // parent's current break. CLONE_VM already shared the complete set
+        // above, including backing-page ownership and the brk transaction lock.
+        if !flags.is_set(CloneFlagsDef::Vm) {
             let parent_brk = self.brk.load(Ordering::SeqCst);
-            child.brk = Arc::new(AtomicUsize::new(parent_brk));
+            child.brk.store(parent_brk, Ordering::SeqCst);
         }
 
         // POSIX job-control identity.  A fork/clone inherits SID, PGID, and
@@ -4007,6 +4058,11 @@ mod tests {
         assert_eq!(task.get_brk(), 0x1008);
         task.set_brk(0x1000).unwrap();
         assert_eq!(task.get_brk(), 0x1000);
+        assert_eq!(task.adjust_brk(0).unwrap(), (0x1000, 0x1000));
+        assert_eq!(task.adjust_brk(0x100).unwrap(), (0x1000, 0x1100));
+        assert_eq!(task.adjust_brk(-0x80).unwrap(), (0x1100, 0x1080));
+        assert!(task.set_brk(usize::MAX).is_err());
+        assert_eq!(task.get_brk(), 0x1080);
     }
 
     #[test_case]
@@ -4597,6 +4653,22 @@ mod tests {
             !Arc::ptr_eq(&child_task.brk, &parent_task.brk),
             "Child should not share brk with parent unless CLONE_VM is set"
         );
+        assert!(
+            !Arc::ptr_eq(&child_task.brk_transaction, &parent_task.brk_transaction),
+            "Fork-style children must own an independent brk transaction lock"
+        );
+        assert!(
+            !Arc::ptr_eq(&child_task.data_size, &parent_task.data_size),
+            "Fork-style children must own independent data-size accounting"
+        );
+        assert!(
+            !Arc::ptr_eq(&child_task.page_allocations, &parent_task.page_allocations),
+            "Fork-style children must own independent contiguous backing"
+        );
+        assert!(
+            !Arc::ptr_eq(&child_task.task_pages, &parent_task.task_pages),
+            "Fork-style children must own independent non-contiguous backing"
+        );
 
         // Get child memory map count after cloning
         let child_memmap_count = child_task.vm_manager.memmap_len();
@@ -5120,23 +5192,54 @@ mod tests {
             Arc::ptr_eq(&child.brk, &parent.brk),
             "CLONE_VM tasks must share brk"
         );
+        assert!(
+            Arc::ptr_eq(&child.brk_transaction, &parent.brk_transaction),
+            "CLONE_VM tasks must serialize compound brk updates"
+        );
+        assert!(
+            Arc::ptr_eq(&child.data_size, &parent.data_size),
+            "CLONE_VM tasks must share data-size accounting"
+        );
+        assert!(
+            Arc::ptr_eq(&child.page_allocations, &parent.page_allocations),
+            "CLONE_VM tasks must share contiguous backing ownership"
+        );
+        assert!(
+            Arc::ptr_eq(&child.task_pages, &parent.task_pages),
+            "CLONE_VM tasks must share non-contiguous backing ownership"
+        );
 
         // Indirectly verify that both share the same ASID/address space
         assert_eq!(child.vm_manager.get_asid(), parent.vm_manager.get_asid());
         assert_eq!(child.vm_manager.memmap_len(), parent_len_before);
 
-        // Adding another page in the parent should be immediately visible to the child
-        parent
+        // A page allocated by the child belongs to the shared address space,
+        // and must remain owned after the child Task is reaped.
+        let child_mapping = child
             .allocate_data_pages(base_vaddr + PAGE_SIZE, 1)
             .unwrap();
+        let child_paddr = child_mapping.pmarea.start;
         assert_eq!(
             child.vm_manager.memmap_len(),
             parent.vm_manager.memmap_len()
         );
+        drop(child);
 
-        // Page allocations are per-task; child should not acquire new page allocations
-        // when sharing VM (physical memory isn't privately managed by the child)
-        assert!(child.page_allocations.read().len() <= parent.page_allocations.read().len());
+        assert!(
+            parent
+                .page_allocations
+                .read()
+                .iter()
+                .any(|allocation| allocation.as_paddr() == child_paddr),
+            "reaping a CLONE_VM worker must not free shared address-space backing"
+        );
+        assert!(
+            parent
+                .vm_manager
+                .search_memory_map(base_vaddr + PAGE_SIZE)
+                .is_some(),
+            "reaping a CLONE_VM worker must retain its shared mapping"
+        );
     }
 
     #[test_case]

@@ -36,12 +36,12 @@
 //!
 
 extern crate alloc;
-use crate::sync::IrqRwSpinLock;
+use crate::sync::{IrqRwSpinLock, Mutex};
 use alloc::collections::btree_map::Values;
 use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
-use core::ops::Bound;
+use core::{ops::Bound, sync::atomic::AtomicUsize};
 
-use crate::mem::page::ContiguousPages;
+use crate::mem::page::{ContiguousPages, TaskPages};
 use crate::object::capability::memory_mapping::AccessOp;
 use crate::{
     arch::vm::{free_virtual_address_space, get_root_pagetable, is_asid_used, mmu::PageTable},
@@ -52,7 +52,6 @@ use super::addr::{phys_to_virt, validate_direct_map_alias};
 use super::vmem::{MemoryArea, MemoryAttribute, VirtualMemoryMap, VirtualMemoryPermission};
 
 const WRITE_SITE_OWNER_TASK: u64 = 0x4f54;
-const WRITE_SITE_PRIVATE_PAGES: u64 = 0x5050;
 const WRITE_SITE_SET_ASID: u64 = 0x5341;
 const WRITE_SITE_CLONE_MEMMAP: u64 = 0x434d;
 const WRITE_SITE_ADD_MAP: u64 = 0x414d;
@@ -69,9 +68,29 @@ const WRITE_SITE_DROP: u64 = 0x4452;
 const WRITE_SITE_RETAG: u64 = 0x5254;
 const DEBUG_VM_MAPPING_EXTEND_LOGGING: bool = false;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct VirtualMemoryManager {
     inner: Arc<IrqRwSpinLock<InnerVmm>>, // shared, internally synchronized
+    // Physical backing, brk state, and data accounting belong to the address
+    // space, not to an individual Task. CLONE_VM tasks and non-Task VMM owners
+    // must keep these alive for exactly as long as they keep the shared
+    // mappings alive.
+    page_allocations: Arc<IrqRwSpinLock<Vec<ContiguousPages>>>,
+    task_pages: Arc<IrqRwSpinLock<Vec<TaskPages>>>,
+    brk: Arc<AtomicUsize>,
+    data_size: Arc<AtomicUsize>,
+    brk_transaction: Arc<Mutex<()>>,
+}
+
+impl core::fmt::Debug for VirtualMemoryManager {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        // Do not lock the backing registries while formatting. Some page
+        // owners are intentionally not Debug, and diagnostics may run while
+        // one of these locks is already held.
+        f.debug_struct("VirtualMemoryManager")
+            .field("address_space_owners", &Arc::strong_count(&self.inner))
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug)]
@@ -82,7 +101,6 @@ struct InnerVmm {
     page_tables: Vec<Arc<PageTable>>,
     last_search_cache: Option<(usize, usize, usize)>,
     owner_task_id: Option<usize>,
-    private_page_allocations: Vec<ContiguousPages>,
 }
 
 impl VirtualMemoryManager {
@@ -131,11 +149,35 @@ impl VirtualMemoryManager {
             page_tables: Vec::new(),
             last_search_cache: None,
             owner_task_id: None,
-            private_page_allocations: Vec::new(),
         };
         VirtualMemoryManager {
             inner: Arc::new(IrqRwSpinLock::new(inner)),
+            page_allocations: Arc::new(IrqRwSpinLock::new(Vec::new())),
+            task_pages: Arc::new(IrqRwSpinLock::new(Vec::new())),
+            brk: Arc::new(AtomicUsize::new(usize::MAX)),
+            data_size: Arc::new(AtomicUsize::new(0)),
+            brk_transaction: Arc::new(Mutex::new(())),
         }
+    }
+
+    pub(crate) fn page_allocations_handle(&self) -> Arc<IrqRwSpinLock<Vec<ContiguousPages>>> {
+        Arc::clone(&self.page_allocations)
+    }
+
+    pub(crate) fn task_pages_handle(&self) -> Arc<IrqRwSpinLock<Vec<TaskPages>>> {
+        Arc::clone(&self.task_pages)
+    }
+
+    pub(crate) fn brk_handle(&self) -> Arc<AtomicUsize> {
+        Arc::clone(&self.brk)
+    }
+
+    pub(crate) fn data_size_handle(&self) -> Arc<AtomicUsize> {
+        Arc::clone(&self.data_size)
+    }
+
+    pub(crate) fn brk_transaction_handle(&self) -> Arc<Mutex<()>> {
+        Arc::clone(&self.brk_transaction)
     }
 
     /// Check whether this manager is the only owner of its address space.
@@ -160,17 +202,7 @@ impl VirtualMemoryManager {
     }
 
     fn track_private_page_allocation(&self, alloc: ContiguousPages) {
-        let owner_task_id = self.inner.read().owner_task_id;
-        if let Some(owner_task_id) = owner_task_id {
-            if let Some(owner_task) = crate::sched::scheduler::get_task_by_id(owner_task_id) {
-                owner_task.page_allocations.write().push(alloc);
-                return;
-            }
-        }
-
-        let mut inner = self.inner.write();
-        self.record_inner_writer(WRITE_SITE_PRIVATE_PAGES);
-        inner.private_page_allocations.push(alloc);
+        self.page_allocations.write().push(alloc);
     }
 
     fn sync_executable_page_for_mapping(permissions: usize, paddr: usize) {

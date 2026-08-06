@@ -445,39 +445,12 @@ pub fn sys_kill(_abi: &mut LinuxAbi, _trapframe: &mut Trapframe) -> usize {
 pub fn sys_sbrk(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let increment = trapframe.get_arg(0) as isize; // Treat as signed increment
-    let current_brk = task.get_brk();
     trapframe.increment_pc_next(&task);
 
-    // Handle increment of 0 (query current brk)
-    if increment == 0 {
-        return current_brk;
-    }
-
-    let new_brk = if increment > 0 {
-        current_brk.checked_add(increment as usize)
-    } else {
-        // Handle negative increment (decrease brk)
-        current_brk.checked_sub((-increment) as usize)
-    };
-
-    let new_brk = match new_brk {
-        Some(brk) => brk,
-        None => {
-            // Overflow/underflow
-            use super::errno;
-            return errno::to_result(errno::ENOMEM);
-        }
-    };
-
-    match task.set_brk(new_brk) {
-        Ok(_) => {
-            let new_actual = task.get_brk();
-            // crate::println!("[brk] sbrk inc={} old={:#x} new={:#x}", increment, current_brk, new_actual);
-            new_actual
-        }
+    match task.adjust_brk(increment) {
+        Ok((old_brk, _new_brk)) => old_brk,
         Err(_) => {
             use super::errno;
-            // crate::println!("[brk] sbrk fail inc={} old={:#x}", increment, current_brk);
             errno::to_result(errno::ENOMEM)
         }
     }
