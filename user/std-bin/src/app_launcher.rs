@@ -43,6 +43,7 @@ const SEARCH_VISIBLE_ROWS: usize = 5;
 const SEARCH_LIST_HEIGHT: f32 = SEARCH_ROW_HEIGHT * SEARCH_VISIBLE_ROWS as f32;
 const SERVICE_RETRY_DELAY: Duration = Duration::from_millis(100);
 const CATALOG_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
+const CATALOG_REQUEST_TIMEOUT_MS: u64 = 3_000;
 
 #[derive(Clone, PartialEq, Eq)]
 struct ApplicationEntry {
@@ -583,12 +584,13 @@ fn filter_applications(applications: &[ApplicationEntry], query: &str) -> Vec<Ap
 
 fn load_applications() -> (Vec<ApplicationEntry>, String) {
     let result = SbusConnection::connect().and_then(|mut connection| {
-        connection.call_method(
+        connection.call_method_timeout(
             DESKTOP_STEMD_BUS_NAME,
             DESKTOP_STEMD_OBJECT_PATH,
             DESKTOP_STEMD_INTERFACE,
             DESKTOP_STEMD_LIST_APPLICATIONS_METHOD,
             Vec::new(),
+            CATALOG_REQUEST_TIMEOUT_MS,
         )
     });
 

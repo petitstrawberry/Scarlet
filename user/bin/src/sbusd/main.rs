@@ -7,6 +7,11 @@
 
 extern crate scarlet_std as std;
 
+mod pending;
+
+use pending::{
+    PendingCall, oldest_pending_id_for_destination, remove_pending_calls_for_disconnected_client,
+};
 use sbus::{DEFAULT_SOCKET_PATH, Message, ServiceInfo};
 use std::collections::BTreeMap;
 use std::io::{ErrorKind, Read, Write};
@@ -35,14 +40,6 @@ const CLIENT_POLL_DELAY_MS: u64 = 1;
 const CLIENT_WRITE_TIMEOUT_MS: u64 = 1_000;
 const MAX_MESSAGE_SIZE_BYTES: usize = 64 * 1024;
 const MAX_MESSAGE_PAYLOAD_BYTES: usize = MAX_MESSAGE_SIZE_BYTES - sbus::MessageHeader::SIZE;
-
-/// Pending method call information
-#[derive(Clone, Debug)]
-struct PendingCall {
-    caller_client_id: usize,
-    destination: String,
-    destination_client_id: usize,
-}
 
 /// Connected clients
 struct Client {
@@ -228,22 +225,7 @@ fn handle_client(client_id: usize, mut read_socket: Socket, write_socket: Arc<Mu
 
     let failed_calls = {
         let mut pending_calls = PENDING_CALLS.lock();
-        let to_remove: Vec<u64> = pending_calls
-            .iter()
-            .filter(|(_, pending)| {
-                pending.caller_client_id == client_id || pending.destination_client_id == client_id
-            })
-            .map(|(pending_id, _)| *pending_id)
-            .collect();
-        let mut failed = Vec::new();
-        for pending_id in to_remove {
-            if let Some(pending) = pending_calls.remove(&pending_id)
-                && pending.caller_client_id != client_id
-            {
-                failed.push(pending);
-            }
-        }
-        failed
+        remove_pending_calls_for_disconnected_client(&mut pending_calls, client_id)
     };
 
     notify_failed_calls(
@@ -560,16 +542,6 @@ fn take_pending_call(destination_client_id: usize) -> Option<PendingCall> {
     let mut pending_calls = PENDING_CALLS.lock();
     let pending_id = oldest_pending_id_for_destination(&pending_calls, destination_client_id)?;
     pending_calls.remove(&pending_id)
-}
-
-fn oldest_pending_id_for_destination(
-    pending_calls: &BTreeMap<u64, PendingCall>,
-    destination_client_id: usize,
-) -> Option<u64> {
-    pending_calls
-        .iter()
-        .find(|(_, pending)| pending.destination_client_id == destination_client_id)
-        .map(|(pending_id, _)| *pending_id)
 }
 
 fn quarantine_client(client_id: usize) -> Vec<PendingCall> {
