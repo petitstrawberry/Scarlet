@@ -989,6 +989,28 @@ impl Connection {
     ///
     /// The owned response envelope, including an optional transferred handle.
     pub fn wait_response(&self, mut token: RequestToken) -> Result<Response, Error> {
+        self.wait_response_until(&mut token, None)
+    }
+
+    /// Wait for a response for at most `timeout_ms` milliseconds.
+    ///
+    /// A timed-out request is cancelled, so a late reply cannot be mistaken for
+    /// the response to a subsequently issued request.
+    pub fn wait_response_timeout(
+        &self,
+        mut token: RequestToken,
+        timeout_ms: u64,
+    ) -> Result<Response, Error> {
+        let deadline_ns =
+            crate::os::monotonic_time_ns().saturating_add(timeout_ms.saturating_mul(1_000_000));
+        self.wait_response_until(&mut token, Some(deadline_ns))
+    }
+
+    fn wait_response_until(
+        &self,
+        token: &mut RequestToken,
+        deadline_ns: Option<u64>,
+    ) -> Result<Response, Error> {
         if !token
             .transport
             .as_ref()
@@ -997,18 +1019,19 @@ impl Connection {
             return Err(Error::InvalidRequest);
         }
         loop {
-            {
+            let progressed = {
                 let mut transport = mutex_lock(&self.transport);
                 if let Some(response) = transport.take_response(token.request_id) {
                     token.transport = None;
                     return response;
                 }
                 match transport.pump_once() {
-                    Ok(_) => {
+                    Ok(result) => {
                         if let Some(response) = transport.take_response(token.request_id) {
                             token.transport = None;
                             return response;
                         }
+                        result.progressed
                     }
                     Err(error) => {
                         if let Some(response) = transport.take_response(token.request_id) {
@@ -1019,14 +1042,37 @@ impl Connection {
                         return Err(error);
                     }
                 }
+            };
+            if deadline_ns.is_some_and(|deadline| crate::os::monotonic_time_ns() >= deadline) {
+                return Err(Error::TimedOut);
             }
-            crate::os::yield_now();
+            if progressed {
+                // Drain already available frames without imposing a 1 kHz
+                // parser ceiling; the awaited response may follow a burst of
+                // unsolicited events already queued on the socket.
+                crate::os::yield_now();
+            } else {
+                // The socket is non-blocking. Yielding alone can immediately
+                // reschedule this thread and turn an unresponsive SWS request
+                // into a full-core spin, so back off only when no I/O moved.
+                crate::os::sleep_briefly();
+            }
         }
     }
 
     fn request(&self, msg_type: u32, payload: &[u8]) -> Result<Response, Error> {
         let token = self.send_request(msg_type, payload)?;
         self.wait_response(token)
+    }
+
+    fn request_timeout(
+        &self,
+        msg_type: u32,
+        payload: &[u8],
+        timeout_ms: u64,
+    ) -> Result<Response, Error> {
+        let token = self.send_request(msg_type, payload)?;
+        self.wait_response_timeout(token, timeout_ms)
     }
 
     /// Send an unsolicited client message.
@@ -2652,6 +2698,17 @@ impl Connection {
     /// This is a synchronous request: it blocks until the server responds with WINDOW_LIST.
     pub fn get_window_list(&self) -> Result<Vec<WindowListEntry>, Error> {
         let response = self.request(protocol::client_msg::GET_WINDOW_LIST, &[])?;
+        Self::decode_window_list(response)
+    }
+
+    /// Get the list of all windows, failing if SWS does not reply in time.
+    pub fn get_window_list_timeout(&self, timeout_ms: u64) -> Result<Vec<WindowListEntry>, Error> {
+        let response =
+            self.request_timeout(protocol::client_msg::GET_WINDOW_LIST, &[], timeout_ms)?;
+        Self::decode_window_list(response)
+    }
+
+    fn decode_window_list(response: Response) -> Result<Vec<WindowListEntry>, Error> {
         match response.message() {
             ServerMessage::WindowList => {
                 let windows = protocol::parse_window_list_payload(response.payload())

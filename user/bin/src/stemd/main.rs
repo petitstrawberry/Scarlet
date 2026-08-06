@@ -40,6 +40,7 @@ use desktop::{
 use protocol::cmd;
 
 const ACTIVATION_TOKEN_ENV: &str = "SWS_ACTIVATION_TOKEN";
+const SWS_QUERY_TIMEOUT_MS: u64 = 1_000;
 
 fn application_environment(activation_token: Option<&str>) -> Vec<String> {
     let user = std::env::var("USER").unwrap_or(String::from("root"));
@@ -128,6 +129,11 @@ struct RunningService {
 // Global tracking for running applications
 // Thread-safe using Mutex (static, not mutable)
 static RUNNING_APPS: Mutex<Vec<RunningApp>> = Mutex::new(Vec::new());
+
+// Raw IPC and sbus can request activation concurrently. Keep the
+// check/focus/reap/launch sequence atomic so both paths cannot launch the
+// same single-instance application after observing the same stale state.
+static APP_ACTIVATION_LOCK: Mutex<()> = Mutex::new(());
 
 // Global tracking for running services
 static RUNNING_SERVICES: Mutex<Vec<RunningService>> = Mutex::new(Vec::new());
@@ -515,7 +521,7 @@ fn focus_window_by_app_id(app_id: &str) -> Result<(), &'static str> {
 
     // Get the list of windows
     println!("stemd: Calling get_window_list()...");
-    let windows = match conn.get_window_list() {
+    let windows = match conn.get_window_list_timeout(SWS_QUERY_TIMEOUT_MS) {
         Ok(w) => {
             println!("stemd: get_window_list() returned {} windows", w.len());
             w
@@ -580,6 +586,7 @@ fn focus_window_id(conn: &mut sws_client::Connection, window_id: u32) -> Result<
 /// Launch an application or focus an existing window
 /// If exec_path is empty, look up the app from the registry
 fn launch_or_focus(app_id: &str, exec_path: Option<&str>) -> Result<(), &'static str> {
+    let _activation_guard = APP_ACTIVATION_LOCK.lock();
     println!(
         "stemd: launch_or_focus called with app_id={}, exec_path={:?}",
         app_id, exec_path
@@ -720,7 +727,7 @@ fn get_focused_window_app_id() -> Option<String> {
     };
 
     // Get the list of windows
-    let windows = match conn.get_window_list() {
+    let windows = match conn.get_window_list_timeout(SWS_QUERY_TIMEOUT_MS) {
         Ok(w) => w,
         Err(_e) => {
             // Silent failure - don't log on every poll
@@ -1126,8 +1133,6 @@ fn ipc_thread() {
     loop {
         match server.accept() {
             Ok(client) => {
-                reap_children_nonblocking("ipc");
-
                 let stream = match client.as_stream() {
                     Ok(s) => s,
                     Err(_) => continue,
@@ -1312,8 +1317,6 @@ fn ipc_thread() {
                     }
                     _ => {}
                 }
-
-                reap_children_nonblocking("ipc");
             }
             Err(_) => {
                 thread::sleep(core::time::Duration::from_millis(100));
@@ -1536,6 +1539,8 @@ fn handle_sbus_message(
                             return Ok(());
                         }
                     };
+
+                    let _activation_guard = APP_ACTIVATION_LOCK.lock();
 
                     // Check if the app is already running
                     if let Some(running_app) = find_running_app(app_id) {
@@ -2008,6 +2013,9 @@ tty = "/dev/tty0"
     loop {
         let (pid, status) = waitpid(-1, 0);
         if pid < 0 {
+            // Do not turn a transient wait error (or a temporarily empty child
+            // set) into a PID 1 full-core retry loop.
+            thread::sleep(core::time::Duration::from_millis(10));
             continue;
         }
         if let Some(service) = remove_running_service_by_pid(pid) {

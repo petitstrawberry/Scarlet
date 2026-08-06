@@ -559,7 +559,13 @@ fn push_input_event_coalesced(events: &mut Vec<PendingInputEvent>, event: Pendin
 /// Wake pipe used by worker threads to interrupt the compositor event loop.
 static COMPOSITOR_WAKE_WRITE: Mutex<Option<Handle>> = Mutex::new(None);
 static COMPOSITOR_WAKE_PENDING: AtomicBool = AtomicBool::new(false);
-static CLIENT_WAKE_WRITES: Mutex<BTreeMap<usize, Handle>> = Mutex::new(BTreeMap::new());
+
+struct ClientWake {
+    write_handle: Handle,
+    pending: bool,
+}
+
+static CLIENT_WAKES: Mutex<BTreeMap<usize, ClientWake>> = Mutex::new(BTreeMap::new());
 static WINDOW_OWNERS: Mutex<BTreeMap<u32, usize>> = Mutex::new(BTreeMap::new());
 
 /// Whether the selected SWS compositor backend currently accepts shared SGFX images.
@@ -663,14 +669,39 @@ pub fn consume_compositor_wake() {
 }
 
 fn wake_client(client_id: usize) {
-    let wakes = CLIENT_WAKE_WRITES.lock();
-    let Some(handle) = wakes.get(&client_id) else {
+    let mut wakes = CLIENT_WAKES.lock();
+    let Some(wake) = wakes.get_mut(&client_id) else {
         return;
     };
-    let Ok(stream) = handle.as_stream() else {
+
+    // Coalesce wakeups until the client thread consumes the byte. Keeping this
+    // state under the same lock as the write handle establishes the invariant
+    // that `pending == false` means the pipe has no unread wake byte, so this
+    // blocking pipe write can never wait for buffer space.
+    if wake.pending {
         return;
+    }
+    wake.pending = true;
+
+    let wrote_wake = match wake.write_handle.as_stream() {
+        Ok(stream) => matches!(stream.write(&[1]), Ok(1)),
+        Err(_) => false,
     };
-    let _ = stream.write(&[1]);
+    if !wrote_wake {
+        wake.pending = false;
+    }
+}
+
+fn consume_client_wake(client_id: usize) {
+    // Producers enqueue their work before calling `wake_client`. If a producer
+    // observes `pending == true` while this byte is being consumed, its wake
+    // may be coalesced safely: the client loop immediately rescans every queue
+    // after this read. Clear only after a successful read so `pending == false`
+    // continues to imply that the pipe contains no unread wake byte.
+    let mut wakes = CLIENT_WAKES.lock();
+    if let Some(wake) = wakes.get_mut(&client_id) {
+        wake.pending = false;
+    }
 }
 
 fn wake_window_owner(window_id: u32) {
@@ -954,7 +985,13 @@ fn send_message_to_client_routed(
     payload: Vec<u8>,
 ) {
     let mut pending = PENDING_CLIENT_RESPONSES.lock();
-    let frames = pending.entry(client_id).or_insert_with(Vec::new);
+    // The client thread removes this entry before publishing disconnect.
+    // A response which completes after that point must be dropped; recreating
+    // the entry would leak an undeliverable queue and make broadcasts retain a
+    // dead client forever.
+    let Some(frames) = pending.get_mut(&client_id) else {
+        return;
+    };
     let should_wake = frames.is_empty();
     frames.push(PendingServerFrame {
         msg_type,
@@ -1939,7 +1976,13 @@ fn accept_thread_main(server_socket: Socket) {
 
                 let client_wake = match std::task::pipe() {
                     Ok((wake_read, wake_write)) => {
-                        CLIENT_WAKE_WRITES.lock().insert(client_id, wake_write);
+                        CLIENT_WAKES.lock().insert(
+                            client_id,
+                            ClientWake {
+                                write_handle: wake_write,
+                                pending: false,
+                            },
+                        );
                         Some(wake_read)
                     }
                     Err(_) => {
@@ -2263,7 +2306,9 @@ fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Ha
                         && let Ok(stream) = wake.as_stream()
                     {
                         let mut byte = [0u8; 1];
-                        let _ = stream.read(&mut byte);
+                        if matches!(stream.read(&mut byte), Ok(1)) {
+                            consume_client_wake(client_id);
+                        }
                     }
                     continue;
                 }
@@ -3442,7 +3487,7 @@ fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Ha
             client_id, client_id
         );
     }
-    CLIENT_WAKE_WRITES.lock().remove(&client_id);
+    CLIENT_WAKES.lock().remove(&client_id);
     cleanup_text_input_contexts_for_client(client_id);
     cleanup_input_methods_for_client(client_id);
 

@@ -180,3 +180,25 @@ pub fn yield_now() {
 pub fn yield_now() {
     scarlet_std::thread::yield_now();
 }
+
+#[cfg(feature = "std")]
+pub fn monotonic_time_ns() -> u64 {
+    scarlet_os::time::monotonic_time_ns()
+}
+
+#[cfg(not(feature = "std"))]
+pub fn monotonic_time_ns() -> u64 {
+    use scarlet_std::syscall::{Syscall, syscall0};
+
+    syscall0(Syscall::MonotonicTime) as u64
+}
+
+#[cfg(feature = "std")]
+pub fn sleep_briefly() {
+    std::thread::sleep(core::time::Duration::from_millis(1));
+}
+
+#[cfg(not(feature = "std"))]
+pub fn sleep_briefly() {
+    scarlet_std::thread::sleep(core::time::Duration::from_millis(1));
+}

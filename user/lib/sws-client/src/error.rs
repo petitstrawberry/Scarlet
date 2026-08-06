@@ -15,6 +15,8 @@ pub enum Error {
     SocketConfig,
     /// I/O operation would block (non-blocking mode)
     WouldBlock,
+    /// Timed out waiting for a server response
+    TimedOut,
     /// Connection closed by remote
     Disconnected,
     /// General I/O error
@@ -56,6 +58,7 @@ impl Error {
             Error::NotConnected => "not connected",
             Error::SocketConfig => "failed to configure socket",
             Error::WouldBlock => "operation would block",
+            Error::TimedOut => "timed out waiting for server response",
             Error::Disconnected => "connection closed",
             Error::IoError => "I/O error",
             Error::SendFailed => "failed to send message",
