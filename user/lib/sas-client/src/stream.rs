@@ -1,6 +1,6 @@
 //! Shared-memory ring buffer stream for SAS.
 
-use core::sync::atomic::{Ordering, compiler_fence};
+use core::sync::atomic::{Ordering, fence};
 
 use crate::os;
 use sas_protocol::{self as protocol, RING_HEADER_SIZE};
@@ -56,21 +56,27 @@ impl SasStream {
     pub fn read_frames(&self) -> u64 {
         let header = self.ring_addr as *const protocol::RingHeader;
         // SAFETY: `ring_addr` is a mapped SAS ring header.
-        unsafe { core::ptr::addr_of!((*header).read_frames).read_volatile() }
+        let frames = unsafe { core::ptr::addr_of!((*header).read_frames).read_volatile() };
+        fence(Ordering::Acquire);
+        frames
     }
 
     /// Total number of frames written since the last reset.
     pub fn write_frames(&self) -> u64 {
         let header = self.ring_addr as *const protocol::RingHeader;
         // SAFETY: `ring_addr` is a mapped SAS ring header.
-        unsafe { core::ptr::addr_of!((*header).write_frames).read_volatile() }
+        let frames = unsafe { core::ptr::addr_of!((*header).write_frames).read_volatile() };
+        fence(Ordering::Acquire);
+        frames
     }
 
     /// Ring status flags written by SAS.
     pub fn flags(&self) -> u32 {
         let header = self.ring_addr as *const protocol::RingHeader;
         // SAFETY: `ring_addr` is a mapped SAS ring header.
-        unsafe { core::ptr::addr_of!((*header).flags).read_volatile() }
+        let flags = unsafe { core::ptr::addr_of!((*header).flags).read_volatile() };
+        fence(Ordering::Acquire);
+        flags
     }
 
     /// Returns true if SAS closed this stream.
@@ -90,6 +96,7 @@ impl SasStream {
             unsafe { core::ptr::addr_of!((*header).buffer_frames).read_volatile() as usize };
         let read_frames = unsafe { core::ptr::addr_of!((*header).read_frames).read_volatile() };
         let write_frames = unsafe { core::ptr::addr_of!((*header).write_frames).read_volatile() };
+        fence(Ordering::Acquire);
         let queued = write_frames.saturating_sub(read_frames) as usize;
         buffer_frames.saturating_sub(queued)
     }
@@ -146,7 +153,7 @@ impl SasStream {
             }
         }
 
-        compiler_fence(Ordering::Release);
+        fence(Ordering::Release);
         // SAFETY: `ring_addr` is a mapped SAS ring header.
         unsafe {
             core::ptr::addr_of_mut!((*header).write_frames)
@@ -162,7 +169,26 @@ impl SasStream {
         // SAFETY: `ring_addr` is a mapped SAS ring header.
         let read_frames = unsafe { core::ptr::addr_of!((*header).read_frames).read_volatile() };
         let write_frames = unsafe { core::ptr::addr_of!((*header).write_frames).read_volatile() };
+        fence(Ordering::Acquire);
         read_frames >= write_frames
+    }
+
+    /// Mark the stream as draining without issuing a blocking control RPC.
+    ///
+    /// SAS observes this flag from the shared ring and consumes a final partial
+    /// period. Callers can poll [`Self::is_empty`] and remain free to cancel the
+    /// wait locally.
+    pub fn begin_drain(&mut self) {
+        let header = self.ring_addr as *mut protocol::RingHeader;
+        // Publish all preceding sample writes before making the draining state
+        // visible to SAS.
+        fence(Ordering::Release);
+        // SAFETY: `ring_addr` is a mapped SAS ring header.
+        unsafe {
+            let flags = core::ptr::addr_of!((*header).flags).read_volatile();
+            core::ptr::addr_of_mut!((*header).flags)
+                .write_volatile(flags | protocol::RING_FLAG_DRAINING);
+        }
     }
 
     /// Reset the ring buffer to empty state.
@@ -186,7 +212,7 @@ impl SasStream {
                 buffer_frames * frame_bytes,
             );
         }
-        compiler_fence(Ordering::Release);
+        fence(Ordering::Release);
     }
 
     /// Sample rate of the configured stream.

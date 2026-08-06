@@ -24,7 +24,7 @@ use crate::object::capability::{
     ControlOps, MemoryMappingInfo, MemoryMappingOps,
     selectable::{ReadyInterest, ReadySet, SelectWaitOutcome, Selectable},
 };
-use crate::sync::{IrqGuard, IrqSpinLock, Waker};
+use crate::sync::{IrqGuard, IrqSpinLock, Mutex, Waker};
 use crate::task::mytask;
 
 /// FourCC-like Scarlet frame stream magic.
@@ -574,6 +574,33 @@ impl VideoSchedulerState {
     }
 }
 
+struct VideoSchedulerLifecycle {
+    destroyed_streams: Vec<u32>,
+}
+
+impl VideoSchedulerLifecycle {
+    fn new() -> Self {
+        Self {
+            destroyed_streams: Vec::new(),
+        }
+    }
+
+    fn is_destroyed_stream(&self, stream_id: u32) -> bool {
+        self.destroyed_streams.contains(&stream_id)
+    }
+
+    fn mark_stream_active(&mut self, stream_id: u32) {
+        self.destroyed_streams
+            .retain(|destroyed| *destroyed != stream_id);
+    }
+
+    fn mark_stream_destroyed(&mut self, stream_id: u32) {
+        if !self.is_destroyed_stream(stream_id) {
+            self.destroyed_streams.push(stream_id);
+        }
+    }
+}
+
 fn max_inflight_from_capabilities(caps: VideoBackendCapabilities) -> usize {
     let requested = if caps.max_inflight_decodes == 0 {
         1
@@ -626,6 +653,8 @@ pub fn register_video_decode_device(backend: Arc<dyn VideoDecodeBackend>) -> Str
 
 struct ScarletVideoDevice {
     backend: Arc<dyn VideoDecodeBackend>,
+    /// Serializes task-context scheduler transitions with backend lifecycle calls.
+    scheduler_lifecycle: Mutex<VideoSchedulerLifecycle>,
     scheduler: IrqSpinLock<VideoSchedulerState>,
     completion_waker: Waker,
     max_inflight_decodes: usize,
@@ -639,6 +668,7 @@ impl ScarletVideoDevice {
         let max_inflight_decodes = max_inflight_from_capabilities(backend.capabilities());
         Self {
             backend,
+            scheduler_lifecycle: Mutex::new(VideoSchedulerLifecycle::new()),
             scheduler: IrqSpinLock::new(VideoSchedulerState::new(max_inflight_decodes)),
             completion_waker: Waker::new_interruptible("scarlet_video"),
             max_inflight_decodes,
@@ -770,8 +800,19 @@ impl ScarletVideoDevice {
         timestamp
     }
 
+    fn create_scheduled_session(&self, coded_format: u32) -> Result<u32, &'static str> {
+        let mut lifecycle = self.scheduler_lifecycle.lock();
+        let stream_id = self.backend.create_session(coded_format)?;
+        lifecycle.mark_stream_active(stream_id);
+        Ok(stream_id)
+    }
+
     fn enqueue_decode_job(&self, job: VideoQueuedJob) -> Result<(), &'static str> {
         let stream_id = job.stream_id();
+        let lifecycle = self.scheduler_lifecycle.lock();
+        if lifecycle.is_destroyed_stream(stream_id) {
+            return Err("scarlet-video: video session is destroyed");
+        }
         {
             let _irq_guard = IrqGuard::new();
             let mut scheduler = self.scheduler.lock();
@@ -784,12 +825,17 @@ impl ScarletVideoDevice {
             scheduler.queued.push_back(job);
         }
 
-        self.pump_scheduler();
+        self.pump_scheduler_locked();
         self.completion_waker.wake_all();
         Ok(())
     }
 
     fn pump_scheduler(&self) {
+        let _lifecycle = self.scheduler_lifecycle.lock();
+        self.pump_scheduler_locked();
+    }
+
+    fn pump_scheduler_locked(&self) {
         loop {
             let mut made_progress = false;
             let mut current_index = 0;
@@ -887,6 +933,8 @@ impl ScarletVideoDevice {
     }
 
     fn destroy_scheduled_stream(&self, stream_id: u32) -> Result<(), &'static str> {
+        let mut lifecycle = self.scheduler_lifecycle.lock();
+        lifecycle.mark_stream_destroyed(stream_id);
         {
             let _irq_guard = IrqGuard::new();
             let mut scheduler = self.scheduler.lock();
@@ -899,7 +947,7 @@ impl ScarletVideoDevice {
             scheduler.clear_current_stream(stream_id);
         }
         result?;
-        self.pump_scheduler();
+        self.pump_scheduler_locked();
         self.completion_waker.wake_all();
         Ok(())
     }
@@ -1038,7 +1086,7 @@ impl ScarletVideoDevice {
             info.padding
         };
         let stream_id = if info.stream_id == 0 {
-            self.backend.create_session(coded_format)?
+            self.create_scheduled_session(coded_format)?
         } else {
             info.stream_id
         };
@@ -1243,8 +1291,7 @@ struct ScarletVideoOpen {
 
 impl ScarletVideoOpen {
     fn new(device: Arc<ScarletVideoDevice>) -> Result<Self, &'static str> {
-        let backend = device.backend.clone();
-        let stream_id = match backend.create_session(SCARLET_VIDEO_FORMAT_H264) {
+        let stream_id = match device.create_scheduled_session(SCARLET_VIDEO_FORMAT_H264) {
             Ok(stream_id) => {
                 device.log_backend_state("open create_session ok", stream_id, None);
                 stream_id
@@ -1303,7 +1350,7 @@ impl ScarletVideoOpen {
             }
             Some(_) => Err("scarlet-video: stream id belongs to another open"),
             None if requested_stream_id == 0 => {
-                let new_stream_id = match self.device.backend.create_session(coded_format) {
+                let new_stream_id = match self.device.create_scheduled_session(coded_format) {
                     Ok(new_stream_id) => {
                         self.device.log_backend_state(
                             "create_session reopen ok",

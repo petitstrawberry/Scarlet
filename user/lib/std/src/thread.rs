@@ -243,6 +243,28 @@ pub struct JoinHandle {
 }
 
 impl JoinHandle {
+    /// Check whether the thread has finished without blocking.
+    ///
+    /// A successful `true` result also reaps the thread. After that, the
+    /// handle is detached and must not be passed to [`JoinHandle::join`].
+    /// A `false` result leaves the handle joinable so callers can poll again
+    /// or eventually perform a blocking join.
+    pub fn try_join(&mut self) -> Result<bool, &'static str> {
+        let Some(thread_id) = self.thread_id else {
+            return Err("Thread handle is detached");
+        };
+
+        let (pid, _status) = crate::task::waitpid(thread_id as i32, crate::task::WAIT_NOHANG);
+        if pid == 0 {
+            Ok(false)
+        } else if pid == thread_id as i32 {
+            self.thread_id = None;
+            Ok(true)
+        } else {
+            Err("Failed to join thread")
+        }
+    }
+
     /// Wait for the thread to finish.
     ///
     /// # Returns

@@ -260,20 +260,28 @@ impl FilerApp {
     }
 
     fn open_entry(&self, path: String) {
-        let result = SbusConnection::connect().and_then(|mut connection| {
-            connection.call_method(
-                DESKTOP_STEMD_BUS_NAME,
-                DESKTOP_STEMD_OBJECT_PATH,
-                DESKTOP_STEMD_INTERFACE,
-                DESKTOP_STEMD_OPEN_PATH_METHOD,
-                vec![Argument::String(path.clone())],
-            )
-        });
+        let opening_status = format!("Opening {path}");
+        self.status.set(opening_status.clone());
 
-        match result {
-            Ok(_) => self.status.set(format!("Opening {path}")),
-            Err(error) => self.status.set(format!("Cannot open {path}: {error:?}")),
-        }
+        let status = self.status.clone();
+        thread::spawn(move || {
+            let result = SbusConnection::connect().and_then(|mut connection| {
+                connection.call_method_timeout(
+                    DESKTOP_STEMD_BUS_NAME,
+                    DESKTOP_STEMD_OBJECT_PATH,
+                    DESKTOP_STEMD_INTERFACE,
+                    DESKTOP_STEMD_OPEN_PATH_METHOD,
+                    vec![Argument::String(path.clone())],
+                    3_000,
+                )
+            });
+
+            if let Err(error) = result
+                && status.get() == opening_status
+            {
+                status.set(format!("Cannot open {path}: {error:?}"));
+            }
+        });
     }
 
     fn create_folder(&self) {

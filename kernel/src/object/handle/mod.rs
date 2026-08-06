@@ -375,14 +375,21 @@ impl HandleTable {
 
     /// Close all handles (for process termination)
     pub fn close_all(&self) {
-        let mut inner = self.inner.write();
-        for i in 0..Self::MAX_HANDLES {
-            if let Some(_obj) = inner.handles[i].take() {
-                // obj is automatically dropped, calling its Drop implementation
-                inner.metadata[i] = None; // Clear metadata too
-                inner.free_handles.push(i as Handle);
+        // Some kernel objects perform synchronous teardown from `Drop`. Detach
+        // every object while holding the table lock, then run those destructors
+        // after the lock (and its IRQ/preemption guard) has been released.
+        let mut removed_objects = Vec::with_capacity(Self::MAX_HANDLES);
+        {
+            let mut inner = self.inner.write();
+            for i in 0..Self::MAX_HANDLES {
+                if let Some(obj) = inner.handles[i].take() {
+                    inner.metadata[i] = None; // Clear metadata too
+                    inner.free_handles.push(i as Handle);
+                    removed_objects.push(obj);
+                }
             }
         }
+        drop(removed_objects);
     }
 
     /// Check if a handle is valid

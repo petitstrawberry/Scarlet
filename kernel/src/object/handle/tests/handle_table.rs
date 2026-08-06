@@ -2,8 +2,26 @@
 
 use super::super::{AccessMode, Handle, HandleMetadata, HandleTable, HandleType, KernelObject};
 use super::mock::{MockFileObject, MockPipeObject};
+use crate::device::gpu::GpuObject;
 use crate::ipc::pipe::PipeObject;
 use alloc::{format, sync::Arc, vec::Vec};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+struct ReentrantDropGpuObject {
+    table: HandleTable,
+    dropped: Arc<AtomicBool>,
+    observed_open_count: Arc<AtomicUsize>,
+}
+
+impl GpuObject for ReentrantDropGpuObject {}
+
+impl Drop for ReentrantDropGpuObject {
+    fn drop(&mut self) {
+        self.observed_open_count
+            .store(self.table.open_count(), Ordering::SeqCst);
+        self.dropped.store(true, Ordering::SeqCst);
+    }
+}
 
 #[test_case]
 fn test_handle_table_creation() {
@@ -179,6 +197,25 @@ fn test_handle_table_close_all() {
     assert_eq!(table.open_count(), 0);
     assert_eq!(table.active_handles().len(), 0);
     assert_eq!(table.free_handles_len(), HandleTable::MAX_HANDLES);
+}
+
+#[test_case]
+fn test_handle_table_close_all_drops_objects_after_unlock() {
+    let table = HandleTable::new();
+    let dropped = Arc::new(AtomicBool::new(false));
+    let observed_open_count = Arc::new(AtomicUsize::new(usize::MAX));
+    let object: Arc<dyn GpuObject> = Arc::new(ReentrantDropGpuObject {
+        table: table.clone(),
+        dropped: Arc::clone(&dropped),
+        observed_open_count: Arc::clone(&observed_open_count),
+    });
+
+    table.insert(KernelObject::Gpu(object)).unwrap();
+    table.close_all();
+
+    assert!(dropped.load(Ordering::SeqCst));
+    assert_eq!(observed_open_count.load(Ordering::SeqCst), 0);
+    assert_eq!(table.open_count(), 0);
 }
 
 #[test_case]

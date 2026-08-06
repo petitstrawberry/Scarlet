@@ -56,6 +56,7 @@ use std::handle::capability::memory_mapping::{flags as mmap_flags, munmap, prot}
 use std::io::{ErrorKind, Read, SeekFrom};
 use std::socket::Socket;
 use std::sync::Mutex;
+use std::syscall::{Syscall, syscall0};
 use std::task::SCHED_UTIL_SCALE;
 use std::thread::JoinHandle;
 use std::{format, println, thread};
@@ -91,8 +92,12 @@ const DISPLAY_QUEUE_MAX_FRAMES: usize = 30;
 const DISPLAY_QUEUE_MAX_BYTES: usize = 96 * 1024 * 1024;
 const DECODE_TARGET_LEAD_FRAMES: usize = 10;
 const AUDIO_CLOCK_START_TIMEOUT_MS: u64 = 3_000;
+const AUDIO_CLOCK_STALL_TIMEOUT_MS: u64 = 3_000;
+const SAS_CONTROL_TIMEOUT_NS: u64 = 3_000_000_000;
 const LATE_VIDEO_DROP_THRESHOLD_US: u64 = 250_000;
 const SEEK_COALESCE_DELAY_MS: u64 = 35;
+const WORKER_SHUTDOWN_POLL_INTERVAL_MS: u64 = 10;
+const WORKER_SHUTDOWN_POLL_ATTEMPTS: usize = 50;
 const CONTROLS_MIN_WIDTH: u32 = 96;
 const CONTROLS_MIN_HEIGHT: u32 = 48;
 const CONTROLS_PANEL_HEIGHT: u32 = 34;
@@ -136,6 +141,10 @@ const SCARLET_VIDEO_FORMAT_AV1: u32 = 4103;
 const SCARLET_AV1_ACCESS_UNIT_MAGIC: &[u8; 4] = b"SVA1";
 const VIDEO_DECODE_UTIL_MIN: u32 = SCHED_UTIL_SCALE * 7 / 8;
 const VIDEO_DISPLAY_UTIL_MIN: u32 = SCHED_UTIL_SCALE * 3 / 4;
+
+fn monotonic_time_ns() -> u64 {
+    syscall0(Syscall::MonotonicTime) as u64
+}
 
 /// Sized to cover display-queue depth + reorder hold/batch so steady-state
 /// decode never allocates.
@@ -626,18 +635,9 @@ impl ControlsOverlay {
     }
 
     fn request_seek_to_us(&self, target_us: u64) {
-        let duration_us = self.media_duration_us();
-        let target_us = if duration_us == 0 {
-            target_us
-        } else {
-            target_us.min(duration_us.saturating_sub(1))
-        };
-        let previous_target = self.desired_position_us.swap(target_us, Ordering::AcqRel);
+        let target_us = self.clamp_seek_target_us(target_us);
+        self.desired_position_us.store(target_us, Ordering::Release);
         let was_finished = self.finished.swap(false, Ordering::AcqRel);
-        if previous_target == target_us && !was_finished {
-            self.show_for_mouse_activity();
-            return;
-        }
         self.seek_target_us.store(target_us, Ordering::Release);
         let pause_after_seek =
             !was_finished && (self.is_paused() || self.pause_after_seek.load(Ordering::Acquire));
@@ -647,6 +647,21 @@ impl ControlsOverlay {
         self.reset_fps_window();
         self.seek_epoch.fetch_add(1, Ordering::AcqRel);
         self.show_for_mouse_activity();
+    }
+
+    fn preview_seek_to_us(&self, target_us: u64) {
+        self.desired_position_us
+            .store(self.clamp_seek_target_us(target_us), Ordering::Release);
+        self.show_for_mouse_activity();
+    }
+
+    fn clamp_seek_target_us(&self, target_us: u64) -> u64 {
+        let duration_us = self.media_duration_us();
+        if duration_us == 0 {
+            target_us
+        } else {
+            target_us.min(duration_us.saturating_sub(1))
+        }
     }
 
     fn request_relative_seek_ms(&self, delta_ms: i64) {
@@ -737,7 +752,7 @@ impl ControlsOverlay {
         self.last_clock_us.store(clock_time_us, Ordering::Release);
         self.last_video_pts_us
             .store(presentation_time_us, Ordering::Release);
-        if self.is_video_ready_for_seek(self.current_seek_epoch()) {
+        if !self.is_scrubbing() && self.is_video_ready_for_seek(self.current_seek_epoch()) {
             self.desired_position_us
                 .store(presentation_time_us, Ordering::Release);
         }
@@ -978,10 +993,25 @@ impl VideoPlayerRuntime {
             self.playback.cancel_active();
         }
 
-        let workers = core::mem::take(&mut *self.workers.lock());
-        for worker in workers {
-            let _ = worker.join();
+        let mut workers = core::mem::take(&mut *self.workers.lock());
+        for _ in 0..WORKER_SHUTDOWN_POLL_ATTEMPTS {
+            let mut index = 0;
+            while index < workers.len() {
+                match workers[index].try_join() {
+                    Ok(true) | Err(_) => {
+                        workers.swap_remove(index);
+                    }
+                    Ok(false) => index += 1,
+                }
+            }
+            if workers.is_empty() {
+                return;
+            }
+            thread::sleep(Duration::from_millis(WORKER_SHUTDOWN_POLL_INTERVAL_MS));
         }
+        // Dropping a still-running JoinHandle detaches it. The process runtime
+        // will terminate any remaining workers when main returns, rather than
+        // wedging the UI thread and the parent shell indefinitely.
     }
 }
 
@@ -1070,6 +1100,7 @@ struct AudioClock {
     started: AtomicBool,
     finished: AtomicBool,
     unavailable: AtomicBool,
+    active_seek_epoch: AtomicU32,
     sample_rate: AtomicU64,
     base_frames: AtomicU64,
     read_frames: AtomicU64,
@@ -1083,6 +1114,7 @@ impl AudioClock {
             started: AtomicBool::new(false),
             finished: AtomicBool::new(false),
             unavailable: AtomicBool::new(false),
+            active_seek_epoch: AtomicU32::new(0),
             sample_rate: AtomicU64::new(48_000),
             base_frames: AtomicU64::new(0),
             read_frames: AtomicU64::new(0),
@@ -1094,11 +1126,17 @@ impl AudioClock {
         self.video_ready.store(true, Ordering::Release);
     }
 
-    fn mark_started(&self, sample_rate: u32) {
+    fn mark_started(&self, sample_rate: u32, seek_epoch: u32) {
         self.sample_rate
             .store(u64::from(sample_rate), Ordering::Release);
+        self.active_seek_epoch.store(seek_epoch, Ordering::Release);
+        self.unavailable.store(false, Ordering::Release);
         self.finished.store(false, Ordering::Release);
         self.started.store(true, Ordering::Release);
+    }
+
+    fn is_current_for_seek(&self, seek_epoch: u32) -> bool {
+        self.active_seek_epoch.load(Ordering::Acquire) == seek_epoch
     }
 
     fn mark_finished(&self) {
@@ -1174,6 +1212,7 @@ impl AudioClock {
         self.started.store(false, Ordering::Release);
         self.finished.store(false, Ordering::Release);
         self.video_ready.store(false, Ordering::Release);
+        self.active_seek_epoch.store(0, Ordering::Release);
         self.unavailable.store(false, Ordering::Release);
     }
 
@@ -1297,7 +1336,7 @@ fn request_video_picker(request_id: Arc<Mutex<Option<String>>>) {
     let mut last_error = None;
     for attempt in 0..FILE_PICKER_RETRY_ATTEMPTS {
         let result = SbusConnection::connect().and_then(|mut connection| {
-            connection.call_method(
+            connection.call_method_timeout(
                 DESKTOP_FILE_MANAGER_BUS_NAME,
                 DESKTOP_FILE_MANAGER_OBJECT_PATH,
                 DESKTOP_FILE_MANAGER_INTERFACE,
@@ -1309,6 +1348,7 @@ fn request_video_picker(request_id: Arc<Mutex<Option<String>>>) {
                     Argument::Boolean(false),
                     Argument::Boolean(false),
                 ],
+                3_000,
             )
         });
 
@@ -1337,12 +1377,13 @@ fn request_video_picker(request_id: Arc<Mutex<Option<String>>>) {
 
 fn ensure_files_service() -> Result<(), sbus_client::Error> {
     let mut connection = SbusConnection::connect()?;
-    let _ = connection.call_method(
+    let _ = connection.call_method_timeout(
         DESKTOP_STEMD_BUS_NAME,
         DESKTOP_STEMD_OBJECT_PATH,
         DESKTOP_STEMD_INTERFACE,
         DESKTOP_STEMD_LAUNCH_OR_FOCUS_METHOD,
         vec![Argument::String(String::from(DESKTOP_FILES_APP_ID))],
+        3_000,
     );
     Ok(())
 }
@@ -1782,9 +1823,22 @@ fn decode_loop_hardware(
             }
             wait_while_paused(controls, queue);
             let access_unit_bytes = access_unit.bytes(mp4_data, &mut access_unit_scratch)?;
-            let frame = decoder.decode_access_unit(access_unit.codec, access_unit_bytes)?;
+            let frame = decoder.decode_access_unit(
+                access_unit.codec,
+                access_unit_bytes,
+                controls,
+                seek_epoch,
+            )?;
             if queue.is_cancelled() {
                 return Ok(());
+            }
+            if controls.current_seek_epoch() != seek_epoch {
+                queue.clear();
+                seek_target_us = controls.current_seek_target_us();
+                seek_epoch = controls.current_seek_epoch();
+                loop_index = 0;
+                restart_for_seek = true;
+                break;
             }
             if !access_unit.should_display {
                 continue;
@@ -2062,9 +2116,20 @@ fn decode_loop_hardware_streaming_mp4(
                     access_unit.presentation_time_us
                 );
             }
-            let frame = decoder.decode_access_unit(access_unit.codec, access_unit_bytes)?;
+            let frame = decoder.decode_access_unit(
+                access_unit.codec,
+                access_unit_bytes,
+                controls,
+                active_seek_epoch,
+            )?;
             if queue.is_cancelled() {
                 return Ok(());
+            }
+            if controls.current_seek_epoch() != active_seek_epoch {
+                queue.clear();
+                seek_epoch = controls.current_seek_epoch();
+                seek_target_us = controls.current_seek_target_us();
+                break;
             }
             if !access_unit.should_display {
                 decoded += 1;
@@ -2397,9 +2462,20 @@ fn decode_loop_hardware_streaming_mp4_socket(
                     access_unit.presentation_time_us
                 );
             }
-            let frame = decoder.decode_access_unit(access_unit.codec, access_unit_bytes)?;
+            let frame = decoder.decode_access_unit(
+                access_unit.codec,
+                access_unit_bytes,
+                controls,
+                active_seek_epoch,
+            )?;
             if queue.is_cancelled() {
                 return Ok(());
+            }
+            if controls.current_seek_epoch() != active_seek_epoch {
+                queue.clear();
+                seek_epoch = controls.current_seek_epoch();
+                seek_target_us = controls.current_seek_target_us();
+                break;
             }
             if !access_unit.should_display {
                 decoded += 1;
@@ -2607,9 +2683,22 @@ fn replay_hardware_source_loops(
             }
             wait_while_paused(controls, queue);
             let access_unit_bytes = access_unit.bytes(Some(mp4_data), &mut access_unit_scratch)?;
-            let frame = decoder.decode_access_unit(access_unit.codec, access_unit_bytes)?;
+            let frame = decoder.decode_access_unit(
+                access_unit.codec,
+                access_unit_bytes,
+                controls,
+                seek_epoch,
+            )?;
             if queue.is_cancelled() {
                 return Ok(());
+            }
+            if controls.current_seek_epoch() != seek_epoch {
+                queue.clear();
+                seek_target_us = controls.current_seek_target_us();
+                seek_epoch = controls.current_seek_epoch();
+                loop_index = 0;
+                restart_for_seek = true;
+                break;
             }
             if !access_unit.should_display {
                 continue;
@@ -2735,6 +2824,16 @@ fn video_source_duration_us(source: &VideoSource) -> u64 {
         .max(FRAME_INTERVAL_MS * 1_000)
 }
 
+fn video_source_last_display_time_us(source: &VideoSource) -> u64 {
+    source
+        .access_units
+        .iter()
+        .filter(|unit| unit.should_display)
+        .map(|unit| unit.presentation_time_us)
+        .max()
+        .unwrap_or(0)
+}
+
 fn video_source_total_frames(source: &VideoSource) -> u32 {
     source
         .access_units
@@ -2772,7 +2871,11 @@ fn video_seek_plan(source: &VideoSource, target_us: u64) -> VideoSeekPlan {
             preview_index: None,
         };
     }
-    let publish_target_us = target_us.min(video_source_duration_us(source).saturating_sub(1));
+    // The UI duration includes one synthetic frame interval so the progress
+    // bar reaches its end. There is no frame in that synthetic tail, however,
+    // so seeking there must resolve to the final displayable PTS. Otherwise no
+    // frame can mark the seek ready and both video and audio wait indefinitely.
+    let publish_target_us = target_us.min(video_source_last_display_time_us(source));
     let mut decode_start_index = 0usize;
     for (index, access_unit) in source.access_units.iter().enumerate() {
         if access_unit.presentation_time_us <= publish_target_us && access_unit.is_keyframe {
@@ -5472,8 +5575,10 @@ impl HardwareVideoDecoder {
         &mut self,
         codec: VideoCodec,
         access_unit: &[u8],
+        controls: &ControlsOverlay,
+        seek_epoch: u32,
     ) -> Result<Option<ScarletVideoFrame>, String> {
-        if self.is_cancelled() {
+        if self.decode_interrupted(controls, seek_epoch) {
             return Ok(None);
         }
         if access_unit.is_empty() {
@@ -5487,7 +5592,7 @@ impl HardwareVideoDecoder {
         }
         if let Some(buffer) = &self.mapped {
             if access_unit.len() <= buffer.input_len {
-                return self.decode_access_unit_mapped(codec, access_unit);
+                return self.decode_access_unit_mapped(codec, access_unit, controls, seek_epoch);
             }
         }
         if !self.supports_stateful_codec(codec) {
@@ -5501,7 +5606,11 @@ impl HardwareVideoDecoder {
                 "hardware decoder mmap input overflow for non-H.264 access unit",
             ));
         }
-        self.decode_access_unit_stream(access_unit)
+        self.decode_access_unit_stream(access_unit, controls, seek_epoch)
+    }
+
+    fn decode_interrupted(&self, controls: &ControlsOverlay, seek_epoch: u32) -> bool {
+        self.is_cancelled() || controls.current_seek_epoch() != seek_epoch
     }
 
     fn supports_decode_codec(&self, codec: VideoCodec) -> bool {
@@ -5536,6 +5645,8 @@ impl HardwareVideoDecoder {
     fn decode_access_unit_stream(
         &mut self,
         access_unit: &[u8],
+        controls: &ControlsOverlay,
+        seek_epoch: u32,
     ) -> Result<Option<ScarletVideoFrame>, String> {
         let written = match self.device.write(access_unit) {
             Ok(written) => written,
@@ -5553,7 +5664,18 @@ impl HardwareVideoDecoder {
         }
 
         let mut header = [0u8; SCARLET_VIDEO_FRAME_HEADER_LEN];
-        read_exact_file(&mut self.device, &mut header, Some(&self.cancel))?;
+        if let Err(error) = read_exact_file(
+            &mut self.device,
+            &mut header,
+            Some(&self.cancel),
+            Some((controls, seek_epoch)),
+        ) {
+            return if self.decode_interrupted(controls, seek_epoch) {
+                Ok(None)
+            } else {
+                Err(error)
+            };
+        }
         if &header[0..4] != b"SVF1" {
             let text = core::str::from_utf8(&header).unwrap_or("");
             return Err(format!(
@@ -5571,7 +5693,18 @@ impl HardwareVideoDecoder {
         }
 
         let mut payload = acquire_payload_buffer(payload_len);
-        read_exact_file(&mut self.device, &mut payload, Some(&self.cancel))?;
+        if let Err(error) = read_exact_file(
+            &mut self.device,
+            &mut payload,
+            Some(&self.cancel),
+            Some((controls, seek_epoch)),
+        ) {
+            return if self.decode_interrupted(controls, seek_epoch) {
+                Ok(None)
+            } else {
+                Err(error)
+            };
+        }
         Ok(Some(ScarletVideoFrame {
             width,
             height,
@@ -5584,6 +5717,8 @@ impl HardwareVideoDecoder {
         &mut self,
         codec: VideoCodec,
         access_unit: &[u8],
+        controls: &ControlsOverlay,
+        seek_epoch: u32,
     ) -> Result<Option<ScarletVideoFrame>, String> {
         let buffer = self.ensure_mapped_session_format(codec)?;
         let input_ptr = buffer.ptr;
@@ -5657,7 +5792,7 @@ impl HardwareVideoDecoder {
 
         let mut empty_polls = 0usize;
         loop {
-            if self.is_cancelled() {
+            if self.decode_interrupted(controls, seek_epoch) {
                 return Ok(None);
             }
             let dequeue_result = if buffer.session_commands {
@@ -6259,7 +6394,12 @@ fn publish_hardware_seek_preview(
         return Ok(true);
     }
     let access_unit_bytes = access_unit.bytes(mp4_data, access_unit_scratch)?;
-    let Some(frame) = decoder.decode_access_unit(access_unit.codec, access_unit_bytes)? else {
+    let frame =
+        decoder.decode_access_unit(access_unit.codec, access_unit_bytes, controls, seek_epoch)?;
+    if controls.current_seek_epoch() != seek_epoch {
+        return Ok(false);
+    }
+    let Some(frame) = frame else {
         return Ok(true);
     };
     let frame = hardware_frame_to_bgra(frame)?;
@@ -6501,8 +6641,9 @@ fn start_audio_thread(
     thread::Builder::new()
         .name("video-audio")
         .spawn(move || {
-            let source = match materialize_audio_source(source) {
-                Ok(source) => source,
+            let source = match materialize_audio_source(source, &cancel) {
+                Ok(Some(source)) => source,
+                Ok(None) => return,
                 Err(err) => {
                     clock.mark_unavailable();
                     println!("[{}] audio: {}", APP_NAME, err);
@@ -6538,7 +6679,14 @@ fn start_audio_thread(
                 match play_audio_source_sas(
                     &source, &clock, &controls, start_us, seek_epoch, &cancel,
                 ) {
-                    Ok(AudioPlaybackStatus::Completed) => {}
+                    Ok(AudioPlaybackStatus::Completed) => {
+                        if controls.current_seek_epoch() != seek_epoch {
+                            seek_epoch = controls.current_seek_epoch();
+                            start_us = controls.current_seek_target_us();
+                            clock.reset_for_replay_audio();
+                            continue;
+                        }
+                    }
                     Ok(AudioPlaybackStatus::Interrupted) => {
                         seek_epoch = controls.current_seek_epoch();
                         start_us = controls.current_seek_target_us();
@@ -6582,23 +6730,32 @@ fn start_audio_thread(
         .expect("failed to spawn video audio thread")
 }
 
-fn materialize_audio_source(source: PlayerAudioSource) -> Result<PlayerAudioSource, String> {
+fn materialize_audio_source(
+    source: PlayerAudioSource,
+    cancel: &AtomicBool,
+) -> Result<Option<PlayerAudioSource>, String> {
     match source {
         PlayerAudioSource::StreamingMp4Aac {
             path,
             complete_path,
         } => {
             if let Some(complete_path) = complete_path {
-                wait_for_marker(&complete_path);
+                if !wait_for_marker(&complete_path, cancel) {
+                    return Ok(None);
+                }
             }
-            let data = read_file(&path)?;
-            Ok(PlayerAudioSource::Mp4Aac(Arc::new(data)))
+            let Some(data) = read_file_cancellable(&path, cancel)? else {
+                return Ok(None);
+            };
+            Ok(Some(PlayerAudioSource::Mp4Aac(Arc::new(data))))
         }
         PlayerAudioSource::StreamingMp4AacSocket { socket_path } => {
-            let data = read_socket_to_end(&socket_path)?;
-            Ok(PlayerAudioSource::Mp4Aac(Arc::new(data)))
+            let Some(data) = read_socket_to_end(&socket_path, cancel)? else {
+                return Ok(None);
+            };
+            Ok(Some(PlayerAudioSource::Mp4Aac(Arc::new(data))))
         }
-        source => Ok(source),
+        source => Ok(Some(source)),
     }
 }
 
@@ -6657,9 +6814,13 @@ fn play_audio_source_sas(
             complete_path,
         } => {
             if let Some(complete_path) = complete_path {
-                wait_for_marker(complete_path);
+                if !wait_for_marker(complete_path, cancel) {
+                    return Ok(AudioPlaybackStatus::Interrupted);
+                }
             }
-            let data = read_file(path)?;
+            let Some(data) = read_file_cancellable(path, cancel)? else {
+                return Ok(AudioPlaybackStatus::Interrupted);
+            };
             play_mp4_aac_sas(
                 Arc::new(data),
                 clock,
@@ -6670,7 +6831,9 @@ fn play_audio_source_sas(
             )
         }
         PlayerAudioSource::StreamingMp4AacSocket { socket_path } => {
-            let data = read_socket_to_end(socket_path)?;
+            let Some(data) = read_socket_to_end(socket_path, cancel)? else {
+                return Ok(AudioPlaybackStatus::Interrupted);
+            };
             play_mp4_aac_sas(
                 Arc::new(data),
                 clock,
@@ -6760,24 +6923,36 @@ fn play_sas_pcm_s16le(
     let start_offset = start_frame * frame_bytes;
     clock.set_start_position_us(start_us, sample_rate);
     if data.len() < frame_bytes {
-        clock.mark_started(sample_rate);
+        clock.mark_started(sample_rate, seek_epoch);
         clock.mark_finished();
         return Ok(AudioPlaybackStatus::Completed);
     }
 
-    let mut writer = SasPcmWriter::new(sample_rate, channels, frame_bytes, clock)?;
+    let Some(mut writer) = SasPcmWriter::new(
+        sample_rate,
+        channels,
+        frame_bytes,
+        clock,
+        controls,
+        seek_epoch,
+        cancel,
+    )?
+    else {
+        return Ok(AudioPlaybackStatus::Interrupted);
+    };
     if writer.write_bytes(&data[start_offset..], controls, clock, seek_epoch, cancel)? {
-        writer.close();
         return Ok(AudioPlaybackStatus::Interrupted);
     }
-    writer.drain_close(clock, cancel)?;
+    if writer.drain_close(clock, controls, seek_epoch, cancel)? {
+        return Ok(AudioPlaybackStatus::Interrupted);
+    }
     clock.advance_base_frames(total_data_frames.saturating_sub(start_frame) as u64);
     clock.mark_finished();
     Ok(AudioPlaybackStatus::Completed)
 }
 
 struct SasPcmWriter {
-    client: SasClient,
+    _client: SasClient,
     stream: SasStream,
     frame_bytes: usize,
 }
@@ -6788,7 +6963,10 @@ impl SasPcmWriter {
         channels: u16,
         frame_bytes: usize,
         clock: &AudioClock,
-    ) -> Result<Self, String> {
+        controls: &ControlsOverlay,
+        seek_epoch: u32,
+        cancel: &AtomicBool,
+    ) -> Result<Option<Self>, String> {
         let mut client =
             SasClient::connect().map_err(|_| String::from("failed to connect to SAS"))?;
 
@@ -6801,17 +6979,28 @@ impl SasPcmWriter {
             period_frames,
             buffer_frames,
         };
+        let configure_deadline_ns = monotonic_time_ns().saturating_add(SAS_CONTROL_TIMEOUT_NS);
         let stream = client
-            .configure(&config)
+            .configure_cancellable(&config, || {
+                cancel.load(Ordering::Acquire)
+                    || controls.current_seek_epoch() != seek_epoch
+                    || monotonic_time_ns() >= configure_deadline_ns
+            })
             .map_err(|_| String::from("failed to configure SAS stream"))?;
+        let Some(stream) = stream else {
+            if cancel.load(Ordering::Acquire) || controls.current_seek_epoch() != seek_epoch {
+                return Ok(None);
+            }
+            return Err(String::from("SAS configure timed out"));
+        };
 
-        clock.mark_started(sample_rate);
+        clock.mark_started(sample_rate, seek_epoch);
 
-        Ok(Self {
-            client,
+        Ok(Some(Self {
+            _client: client,
             stream,
             frame_bytes,
-        })
+        }))
     }
 
     fn write_bytes(
@@ -6876,31 +7065,36 @@ impl SasPcmWriter {
         Ok(false)
     }
 
-    fn drain_close(mut self, clock: &AudioClock, cancel: &AtomicBool) -> Result<(), String> {
+    /// Returns true when cancellation or a newer seek interrupted draining.
+    fn drain_close(
+        mut self,
+        clock: &AudioClock,
+        controls: &ControlsOverlay,
+        seek_epoch: u32,
+        cancel: &AtomicBool,
+    ) -> Result<bool, String> {
         if self.stream.is_closed() {
             return Err(String::from("SAS stream closed"));
         }
-        self.client
-            .drain()
-            .map_err(|_| String::from("SAS drain failed"))?;
+        self.stream.begin_drain();
+        let drain_deadline_ns = monotonic_time_ns().saturating_add(SAS_CONTROL_TIMEOUT_NS);
         while !self.stream.is_empty() {
-            if cancel.load(Ordering::Acquire) {
-                self.close();
-                return Ok(());
+            if cancel.load(Ordering::Acquire) || controls.current_seek_epoch() != seek_epoch {
+                // Dropping the writer closes the socket and unmaps the ring.
+                // Do not reset shared cursors while SAS may still consume it.
+                return Ok(true);
             }
             if self.stream.is_closed() {
                 return Err(String::from("SAS stream closed"));
             }
             clock.update_read_frames(self.stream.read_frames());
+            if monotonic_time_ns() >= drain_deadline_ns {
+                return Err(String::from("SAS drain timed out"));
+            }
             thread::sleep(Duration::from_millis(10));
         }
-        let _ = self.client.close();
-        Ok(())
-    }
-
-    fn close(mut self) {
-        self.stream.reset();
-        let _ = self.client.close();
+        clock.update_read_frames(self.stream.read_frames());
+        Ok(false)
     }
 }
 
@@ -6923,12 +7117,18 @@ fn play_aac_source_sas(
     let start_sample_us =
         start_sample_frame.saturating_mul(1_000_000) / u64::from(source.config.sample_rate).max(1);
     clock.set_start_position_us(start_sample_us, source.config.sample_rate);
-    let mut writer = SasPcmWriter::new(
+    let Some(mut writer) = SasPcmWriter::new(
         source.config.sample_rate,
         source.config.channels,
         frame_bytes,
         clock,
-    )?;
+        controls,
+        seek_epoch,
+        cancel,
+    )?
+    else {
+        return Ok(AudioPlaybackStatus::Interrupted);
+    };
     let mut decoder = create_aac_decoder(source)?;
     let mut samples = Vec::<i16>::new();
     let mut bytes = Vec::<u8>::new();
@@ -6936,7 +7136,6 @@ fn play_aac_source_sas(
     let mut written_frames = start_sample_frame;
     for range in source.samples.iter().skip(start_sample) {
         if cancel.load(Ordering::Acquire) || controls.current_seek_epoch() != seek_epoch {
-            writer.close();
             return Ok(AudioPlaybackStatus::Interrupted);
         }
         let sample_end = range
@@ -6967,11 +7166,12 @@ fn play_aac_source_sas(
         written_frames =
             written_frames.saturating_add((samples.len() / source.config.channels as usize) as u64);
         if writer.write_bytes(&bytes, controls, clock, seek_epoch, cancel)? {
-            writer.close();
             return Ok(AudioPlaybackStatus::Interrupted);
         }
     }
-    writer.drain_close(clock, cancel)?;
+    if writer.drain_close(clock, controls, seek_epoch, cancel)? {
+        return Ok(AudioPlaybackStatus::Interrupted);
+    }
     clock.advance_base_frames(written_frames.saturating_sub(start_sample_frame));
     clock.mark_finished();
     Ok(AudioPlaybackStatus::Completed)
@@ -7021,9 +7221,17 @@ fn pace_frame(
     }
     let mut sync_time_us = None;
     if let Some(clock) = clock {
-        if controls.is_video_ready_for_seek(seek_epoch) {
+        if !clock.is_current_for_seek(seek_epoch) {
+            // Audio teardown/reconfigure can lag behind a seek. Never pace a
+            // new video epoch against the previous epoch's frozen clock: a
+            // backward seek would drop the new scene and a forward seek could
+            // wait indefinitely. Use wall-clock pacing until audio catches up.
+            thread::sleep(Duration::from_millis(FRAME_INTERVAL_MS));
+        } else if controls.is_video_ready_for_seek(seek_epoch) {
             let mut logged_audio_wait = false;
             let mut audio_wait_ms = 0u64;
+            let mut last_audio_time_us = None;
+            let mut audio_stall_ms = 0u64;
             loop {
                 if queue.is_cancelled() || controls.current_seek_epoch() != seek_epoch {
                     return PaceDecision::Stale;
@@ -7059,6 +7267,18 @@ fn pace_frame(
                 }
                 if clock.is_finished() {
                     break;
+                }
+                if last_audio_time_us == Some(audio_time_us) {
+                    audio_stall_ms = audio_stall_ms.saturating_add(1);
+                    if audio_stall_ms >= AUDIO_CLOCK_STALL_TIMEOUT_MS {
+                        println!("[{}] audio clock stalled", APP_NAME);
+                        clock.mark_unavailable();
+                        thread::sleep(Duration::from_millis(FRAME_INTERVAL_MS));
+                        break;
+                    }
+                } else {
+                    last_audio_time_us = Some(audio_time_us);
+                    audio_stall_ms = 0;
                 }
                 thread::sleep(Duration::from_millis(1));
             }
@@ -7246,6 +7466,30 @@ fn connect_local_socket_blocking(path: &str) -> Result<Socket, String> {
     Err(format!("timed out connecting local socket: {path}"))
 }
 
+fn connect_local_socket_cancellable(
+    path: &str,
+    cancel: &AtomicBool,
+) -> Result<Option<Socket>, String> {
+    for _ in 0..400 {
+        if cancel.load(Ordering::Acquire) {
+            return Ok(None);
+        }
+        let socket = Socket::new().map_err(|_| format!("failed to create local socket: {path}"))?;
+        match socket.connect(path) {
+            Ok(()) => {
+                socket.set_nonblocking(true).map_err(|_| {
+                    format!("failed to set audio stream socket nonblocking: {path}")
+                })?;
+                return Ok(Some(socket));
+            }
+            Err(_) => {
+                thread::sleep(Duration::from_millis(10));
+            }
+        }
+    }
+    Err(format!("timed out connecting local socket: {path}"))
+}
+
 struct StreamSocketState {
     data: Vec<u8>,
     complete: bool,
@@ -7305,12 +7549,17 @@ fn read_stream_socket_into_state(
     Ok(())
 }
 
-fn read_socket_to_end(path: &str) -> Result<Vec<u8>, String> {
-    let mut socket = connect_local_socket_blocking(path)?;
+fn read_socket_to_end(path: &str, cancel: &AtomicBool) -> Result<Option<Vec<u8>>, String> {
+    let Some(mut socket) = connect_local_socket_cancellable(path, cancel)? else {
+        return Ok(None);
+    };
     let mut data = Vec::new();
     let mut buffer = [0u8; 32 * 1024];
 
     loop {
+        if cancel.load(Ordering::Acquire) {
+            return Ok(None);
+        }
         match socket.read(&mut buffer) {
             Ok(0) => break,
             Ok(read) => data.extend_from_slice(&buffer[..read]),
@@ -7322,7 +7571,7 @@ fn read_socket_to_end(path: &str) -> Result<Vec<u8>, String> {
         }
     }
 
-    Ok(data)
+    Ok(Some(data))
 }
 
 fn append_growing_file(path: &str, data: &mut Vec<u8>) -> Result<usize, String> {
@@ -7358,8 +7607,14 @@ fn marker_exists(path: &str) -> bool {
     File::open(path).is_ok()
 }
 
-fn wait_for_marker(path: &str) {
-    while !marker_exists(path) {
+fn wait_for_marker(path: &str, cancel: &AtomicBool) -> bool {
+    loop {
+        if cancel.load(Ordering::Acquire) {
+            return false;
+        }
+        if marker_exists(path) {
+            return true;
+        }
         thread::sleep(Duration::from_millis(STREAM_POLL_INTERVAL_MS));
     }
 }
@@ -7368,11 +7623,14 @@ fn read_exact_file(
     file: &mut File,
     out: &mut [u8],
     cancel: Option<&AtomicBool>,
+    seek: Option<(&ControlsOverlay, u32)>,
 ) -> Result<(), String> {
     let mut read = 0usize;
     let mut empty_reads = 0usize;
     while read < out.len() {
-        if cancel.is_some_and(|cancel| cancel.load(Ordering::Acquire)) {
+        if cancel.is_some_and(|cancel| cancel.load(Ordering::Acquire))
+            || seek.is_some_and(|(controls, epoch)| controls.current_seek_epoch() != epoch)
+        {
             return Err(String::from("hardware decoder read cancelled"));
         }
         let n = file
@@ -7719,7 +7977,7 @@ fn handle_canvas_event(
             controls.show_for_mouse_activity();
             if controls.is_scrubbing() {
                 let target_us = seek_target_from_track_x(controls, *x);
-                controls.request_seek_to_us(target_us);
+                controls.preview_seek_to_us(target_us);
                 paint_signal.notify();
                 return true;
             }
@@ -7737,7 +7995,7 @@ fn handle_canvas_event(
             if seekbar_hit_region_contains(controls, *x, *y) {
                 controls.set_scrubbing(true);
                 let target_us = seek_target_from_track_x(controls, *x);
-                controls.request_seek_to_us(target_us);
+                controls.preview_seek_to_us(target_us);
                 paint_signal.notify();
                 true
             } else {
@@ -8600,23 +8858,10 @@ pub extern "C" fn main() -> i32 {
         println!("[{}] hardware decoder {}", APP_NAME, VIDEO_DEVICE_PATH);
     }
     let video_is_mp4 = is_mp4_path(&video_path);
-    let video_is_webm = is_webm_path(&video_path);
-    let mp4_data = if !video_path.is_empty() && (video_is_mp4 || video_is_webm) && !args.streaming {
-        let container = if video_is_webm { "WebM" } else { "MP4" };
-        println!("[{}] loading {} {}", APP_NAME, container, video_path);
-        Some(Arc::new(read_file(&video_path).unwrap_or_else(|_| {
-            println!(
-                "[{}] Application error: failed to read video container",
-                APP_NAME
-            );
-            Vec::new()
-        })))
-    } else {
-        None
-    };
-    if matches!(mp4_data.as_ref().map(|data| data.is_empty()), Some(true)) {
-        return 1;
-    }
+    // Keep startup/window creation independent of media size and I/O health.
+    // PlaybackRequest::prepare performs this load on the cancellable playback
+    // worker and derives the embedded AAC source from the same bytes.
+    let mp4_data: Option<Arc<Vec<u8>>> = None;
     let audio_source = if let Some(socket_path) = args.audio_socket_path {
         println!("[{}] audio local socket {}", APP_NAME, socket_path);
         Some(PlayerAudioSource::StreamingMp4AacSocket { socket_path })
@@ -8675,11 +8920,18 @@ pub extern "C" fn main() -> i32 {
 }
 
 fn is_mp4_path(path: &str) -> bool {
-    path.ends_with(".mp4") || path.ends_with(".m4v") || path.ends_with(".m4a")
+    path_has_extension(path, "mp4")
+        || path_has_extension(path, "m4v")
+        || path_has_extension(path, "m4a")
 }
 
 fn is_webm_path(path: &str) -> bool {
-    path.ends_with(".webm")
+    path_has_extension(path, "webm")
+}
+
+fn path_has_extension(path: &str, extension: &str) -> bool {
+    path.rsplit_once('.')
+        .is_some_and(|(_, candidate)| candidate.eq_ignore_ascii_case(extension))
 }
 
 struct PlayerArgs {

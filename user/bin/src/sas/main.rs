@@ -21,7 +21,7 @@ use std::audio::{
 };
 use std::env;
 use std::handle::capability::memory_mapping::{flags as mmap_flags, munmap, prot};
-use std::io::{Read, Write};
+use std::io::{ErrorKind, Read, Write};
 use std::ipc::{SharedMemory, permissions};
 use std::println;
 use std::socket::Socket;
@@ -1072,7 +1072,10 @@ fn client_thread(client_id: usize, mut socket: Socket, state: Arc<Mutex<ServerSt
             protocol::MSG_CLOSE => {
                 mark_client_closed(client_id, &state);
                 println!("sas: client {} disconnected: close requested", client_id);
-                let _ = write_ok(&mut socket);
+                // MSG_CLOSE is intentionally one-way. The client closes its
+                // socket after sending it, so attempting an ACK here races the
+                // peer teardown and used to leave this thread retrying a
+                // permanent write error forever.
                 return;
             }
             _ => write_error(&mut socket, "unsupported SAS message"),
@@ -1141,17 +1144,22 @@ fn handle_set_output(
     let request = protocol::OutputRequest::from_payload(payload).ok_or("invalid SAS output")?;
     let preference = output_preference_from_request(&request)?;
 
-    {
+    let unchanged_control = {
         let guard = state.lock();
         if guard.pending_output.is_none()
             && !guard.output_switch_in_progress
             && output_state_matches_preference(&guard.output, &preference)
         {
-            return write_control_state(socket, guard.control_state());
+            Some(guard.control_state())
+        } else {
+            if guard.pending_output.is_some() || guard.output_switch_in_progress {
+                return Err("SAS output switch already pending");
+            }
+            None
         }
-        if guard.pending_output.is_some() || guard.output_switch_in_progress {
-            return Err("SAS output switch already pending");
-        }
+    };
+    if let Some(control) = unchanged_control {
+        return write_control_state(socket, control);
     }
 
     {
@@ -1291,6 +1299,10 @@ fn handle_configure(
         .ok_or("SAS stream ring size overflow")?;
     let shm = SharedMemory::create(ring_size, permissions::READ_WRITE)
         .map_err(|_| "failed to create SAS shared ring")?;
+    let send_handle = shm
+        .as_handle()
+        .duplicate()
+        .map_err(|_| "failed to duplicate SAS shared ring handle")?;
     let mapper = shm
         .as_handle()
         .as_memory_mapping()
@@ -1309,27 +1321,28 @@ fn handle_configure(
         init_ring_header(ring_addr, &config, buffer_frames as u32, frame_bytes as u32);
     }
 
-    let mut guard = state.lock();
-    let stream = guard
-        .clients
-        .get_mut(&client_id)
-        .ok_or("unknown SAS client")?;
-    stream.unmap_ring();
-    stream.shm = Some(shm);
-    stream.ring_addr = Some(ring_addr);
-    stream.ring_size = ring_size;
-    stream.buffer_frames = buffer_frames;
-    stream.frame_bytes = frame_bytes;
-    stream.rate = config.rate;
-    stream.channels = config.channels;
-    stream.resample_pos_num = 0;
-    stream.configured = true;
-    stream.closed = false;
+    {
+        let mut guard = state.lock();
+        let stream = guard
+            .clients
+            .get_mut(&client_id)
+            .ok_or("unknown SAS client")?;
+        stream.unmap_ring();
+        stream.shm = Some(shm);
+        stream.ring_addr = Some(ring_addr);
+        stream.ring_size = ring_size;
+        stream.buffer_frames = buffer_frames;
+        stream.frame_bytes = frame_bytes;
+        stream.rate = config.rate;
+        stream.channels = config.channels;
+        stream.resample_pos_num = 0;
+        stream.configured = true;
+        stream.closed = false;
+    }
 
-    let shm = stream.shm.as_ref().ok_or("SAS shared ring missing")?;
     write_ok(socket)?;
     socket
-        .send_handle(shm.as_handle())
+        .send_handle(&send_handle)
         .map_err(|_| "failed to send SAS shared ring handle")?;
     Ok(())
 }
@@ -1361,9 +1374,9 @@ fn handle_drain(client_id: usize, state: &Arc<Mutex<ServerState>>) -> Result<(),
 }
 
 fn mark_client_closed(client_id: usize, state: &Arc<Mutex<ServerState>>) {
-    let mut guard = state.lock();
-    if let Some(stream) = guard.clients.get_mut(&client_id) {
-        close_stream(stream);
+    let stream = state.lock().clients.remove(&client_id);
+    if let Some(mut stream) = stream {
+        close_stream(&mut stream);
     }
 }
 
@@ -1442,9 +1455,14 @@ fn read_exact(socket: &mut Socket, out: &mut [u8]) -> Result<(), &'static str> {
         match socket.read(&mut out[read..]) {
             Ok(0) => return Err("socket closed"),
             Ok(n) => read += n,
-            Err(_) => {
+            Err(error) if error.kind() == ErrorKind::WouldBlock => {
                 sleep(Duration::from_millis(1));
             }
+            Err(error) if error.kind() == ErrorKind::Interrupted => {}
+            Err(error) if error.kind() == ErrorKind::UnexpectedEof => {
+                return Err("socket closed");
+            }
+            Err(_) => return Err("socket read failed"),
         }
     }
     Ok(())
@@ -1476,9 +1494,14 @@ fn write_all(socket: &mut Socket, bytes: &[u8]) -> Result<(), &'static str> {
         match socket.write(&bytes[written..]) {
             Ok(0) => return Err("socket closed"),
             Ok(n) => written += n,
-            Err(_) => {
+            Err(error) if error.kind() == ErrorKind::WouldBlock => {
                 sleep(Duration::from_millis(1));
             }
+            Err(error) if error.kind() == ErrorKind::Interrupted => {}
+            Err(error) if error.kind() == ErrorKind::UnexpectedEof => {
+                return Err("socket closed");
+            }
+            Err(_) => return Err("socket write failed"),
         }
     }
     socket.flush().map_err(|_| "socket flush failed")
