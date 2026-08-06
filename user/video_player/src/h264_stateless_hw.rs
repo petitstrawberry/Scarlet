@@ -54,6 +54,16 @@ pub fn supported(caps: Option<ScarletVideoCapabilities>) -> bool {
 }
 
 #[cfg(feature = "h264-stateless-hw")]
+pub fn reset_for_discontinuity(context: &mut Context) {
+    context.request.reset_decode_state();
+}
+
+#[cfg(not(feature = "h264-stateless-hw"))]
+pub fn reset_for_discontinuity(context: &mut Context) {
+    let _ = context;
+}
+
+#[cfg(feature = "h264-stateless-hw")]
 pub fn submit(
     device: &mut File,
     context: &mut Context,

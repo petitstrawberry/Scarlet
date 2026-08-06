@@ -76,6 +76,10 @@ pub fn supported(caps: Option<ScarletVideoCapabilities>) -> bool {
     false
 }
 
+pub fn reset_for_discontinuity(context: &mut Context) {
+    *context = Context::default();
+}
+
 #[cfg(feature = "vp9-stateless-hw")]
 pub fn submit(
     device: &mut File,

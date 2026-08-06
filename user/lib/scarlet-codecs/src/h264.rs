@@ -591,6 +591,20 @@ enum H264MemoryManagementControl {
 }
 
 impl H264RequestContext {
+    /// Reset decode-order state after a stream discontinuity while retaining
+    /// parameter sets and the monotonically increasing request timestamp.
+    ///
+    /// A seek resumes at a random-access picture, so references, picture order
+    /// state, and per-slice prediction weights from the old position must not
+    /// leak into the new decode pass. SPS/PPS data is deliberately preserved:
+    /// raw Annex-B streams are not required to repeat parameter sets at every
+    /// IDR picture.
+    pub fn reset_decode_state(&mut self) {
+        self.pred_weights = ScarletVideoH264PredWeights::default();
+        self.dpb.clear();
+        self.poc = H264PocState::default();
+    }
+
     pub fn params_for_access_unit(
         &mut self,
         access_unit: &[u8],

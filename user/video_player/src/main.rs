@@ -1750,8 +1750,8 @@ fn start_controls_thread(
 fn decode_loop_hardware(
     path: &str,
     mp4_data: Option<&[u8]>,
-    frame_store: &VideoFrameStore,
-    paint_signal: &PaintSignal,
+    _frame_store: &VideoFrameStore,
+    _paint_signal: &PaintSignal,
     controls: &ControlsOverlay,
     clock: Option<&AudioClock>,
     queue: &DisplayQueue,
@@ -1772,43 +1772,21 @@ fn decode_loop_hardware(
     let mut loop_index = 0u64;
     let mut seek_epoch = controls.current_seek_epoch();
     let mut seek_target_us = 0u64;
+    let mut decoder = HardwareVideoDecoder::open(queue.cancel.clone())?;
+    let mut first_pass = true;
 
     loop {
         if queue.is_cancelled() {
             return Ok(());
         }
         let seek_plan = video_seek_plan(&source, seek_target_us);
+        if !first_pass {
+            decoder = restart_hardware_decoder_for_discontinuity(decoder, &source, &seek_plan)?;
+        }
+        first_pass = false;
         let mut reorder = FrameReorderBuffer::new_from(total_frames, seek_plan.publish_start_rank);
-        // A decoder owns codec reference frames/DPB and the kernel session.
-        // Recreate it for every pass so replay and seek never feed a fresh
-        // stream into stale decoder state.
-        let mut decoder = HardwareVideoDecoder::open(queue.cancel.clone())?;
         let loop_time_offset_us = video_loop_time_offset_us(clock, loop_duration_us, loop_index);
         let mut restart_for_seek = false;
-
-        if seek_epoch != 0 || seek_target_us != 0 {
-            if !publish_hardware_seek_preview(
-                &source,
-                mp4_data,
-                &seek_plan,
-                &mut decoder,
-                frame_store,
-                paint_signal,
-                controls,
-                &mut access_unit_scratch,
-                total_frames,
-                seek_epoch,
-            )? {
-                seek_target_us = controls.current_seek_target_us();
-                seek_epoch = controls.current_seek_epoch();
-                loop_index = 0;
-                continue;
-            }
-            // The preview may have submitted a later keyframe to the decoder.
-            // It must not become the first state of the actual playback pass.
-            drop(decoder);
-            decoder = HardwareVideoDecoder::open(queue.cancel.clone())?;
-        }
 
         for access_unit in &source.access_units[seek_plan.decode_start_index..] {
             if queue.is_cancelled() {
@@ -2037,11 +2015,7 @@ fn decode_loop_hardware_streaming_mp4(
                 thread::sleep(Duration::from_millis(STREAM_POLL_INTERVAL_MS));
                 continue;
             }
-            // Seeking starts decoding at a new keyframe.  Reusing the old
-            // hardware session would retain reference frames from the old
-            // position (and can also retain the previous file's state).
-            drop(decoder);
-            decoder = HardwareVideoDecoder::open(queue.cancel.clone())?;
+            decoder = restart_hardware_decoder_for_discontinuity(decoder, &source, &seek_plan)?;
             if let Some(clock) = clock {
                 clock.reset_for_replay();
             }
@@ -2057,8 +2031,7 @@ fn decode_loop_hardware_streaming_mp4(
         }
         if !controls.is_scrubbing() && active_preview_published {
             let seek_plan = video_seek_plan(&source, seek_target_us);
-            drop(decoder);
-            decoder = HardwareVideoDecoder::open(queue.cancel.clone())?;
+            decoder = restart_hardware_decoder_for_discontinuity(decoder, &source, &seek_plan)?;
             reorder = FrameReorderBuffer::new_from(
                 stream_total_frames(&source, seek_plan.decode_start_index, complete),
                 seek_plan.publish_start_rank,
@@ -2204,8 +2177,6 @@ fn decode_loop_hardware_streaming_mp4(
         }
         queue.clear();
     }
-    drop(decoder);
-
     if controls.is_loop_enabled() {
         let source = load_mp4_video_source_with_options(&data, false, true)?;
         if source
@@ -2225,6 +2196,7 @@ fn decode_loop_hardware_streaming_mp4(
         replay_hardware_source_loops(
             &source,
             &data,
+            decoder,
             frame_store,
             paint_signal,
             controls,
@@ -2262,6 +2234,7 @@ fn decode_loop_hardware_streaming_mp4(
         replay_hardware_source_loops(
             &source,
             &data,
+            decoder,
             frame_store,
             paint_signal,
             controls,
@@ -2386,8 +2359,7 @@ fn decode_loop_hardware_streaming_mp4_socket(
                 thread::sleep(Duration::from_millis(STREAM_POLL_INTERVAL_MS));
                 continue;
             }
-            drop(decoder);
-            decoder = HardwareVideoDecoder::open(queue.cancel.clone())?;
+            decoder = restart_hardware_decoder_for_discontinuity(decoder, &source, &seek_plan)?;
             if let Some(clock) = clock {
                 clock.reset_for_replay();
             }
@@ -2403,8 +2375,7 @@ fn decode_loop_hardware_streaming_mp4_socket(
         }
         if !controls.is_scrubbing() && active_preview_published {
             let seek_plan = video_seek_plan(&source, seek_target_us);
-            drop(decoder);
-            decoder = HardwareVideoDecoder::open(queue.cancel.clone())?;
+            decoder = restart_hardware_decoder_for_discontinuity(decoder, &source, &seek_plan)?;
             reorder = FrameReorderBuffer::new_from(
                 stream_total_frames(&source, seek_plan.decode_start_index, complete),
                 seek_plan.publish_start_rank,
@@ -2550,8 +2521,6 @@ fn decode_loop_hardware_streaming_mp4_socket(
         }
         queue.clear();
     }
-    drop(decoder);
-
     if controls.is_loop_enabled() {
         let source = load_mp4_video_source_with_options(&data, false, true)?;
         if source
@@ -2571,6 +2540,7 @@ fn decode_loop_hardware_streaming_mp4_socket(
         replay_hardware_source_loops(
             &source,
             &data,
+            decoder,
             frame_store,
             paint_signal,
             controls,
@@ -2608,6 +2578,7 @@ fn decode_loop_hardware_streaming_mp4_socket(
         replay_hardware_source_loops(
             &source,
             &data,
+            decoder,
             frame_store,
             paint_signal,
             controls,
@@ -2623,8 +2594,9 @@ fn decode_loop_hardware_streaming_mp4_socket(
 fn replay_hardware_source_loops(
     source: &VideoSource,
     mp4_data: &[u8],
-    frame_store: &VideoFrameStore,
-    paint_signal: &PaintSignal,
+    mut decoder: HardwareVideoDecoder,
+    _frame_store: &VideoFrameStore,
+    _paint_signal: &PaintSignal,
     controls: &ControlsOverlay,
     clock: Option<&AudioClock>,
     queue: &DisplayQueue,
@@ -2637,38 +2609,20 @@ fn replay_hardware_source_loops(
     let mut access_unit_scratch = Vec::new();
     let mut seek_epoch = controls.current_seek_epoch();
     let mut seek_target_us = 0u64;
+    let mut first_pass = false;
 
     loop {
         if queue.is_cancelled() {
             return Ok(());
         }
         let seek_plan = video_seek_plan(source, seek_target_us);
+        if !first_pass {
+            decoder = restart_hardware_decoder_for_discontinuity(decoder, source, &seek_plan)?;
+        }
+        first_pass = false;
         let mut reorder = FrameReorderBuffer::new_from(total_frames, seek_plan.publish_start_rank);
-        let mut decoder = HardwareVideoDecoder::open(queue.cancel.clone())?;
         let loop_time_offset_us = video_loop_time_offset_us(clock, loop_duration_us, loop_index);
         let mut restart_for_seek = false;
-
-        if seek_epoch != 0 || seek_target_us != 0 {
-            if !publish_hardware_seek_preview(
-                source,
-                Some(mp4_data),
-                &seek_plan,
-                &mut decoder,
-                frame_store,
-                paint_signal,
-                controls,
-                &mut access_unit_scratch,
-                total_frames,
-                seek_epoch,
-            )? {
-                seek_target_us = controls.current_seek_target_us();
-                seek_epoch = controls.current_seek_epoch();
-                loop_index = 0;
-                continue;
-            }
-            drop(decoder);
-            decoder = HardwareVideoDecoder::open(queue.cancel.clone())?;
-        }
 
         for access_unit in &source.access_units[seek_plan.decode_start_index..] {
             if queue.is_cancelled() {
@@ -2859,7 +2813,18 @@ struct VideoSeekPlan {
     decode_start_index: usize,
     publish_target_us: u64,
     publish_start_rank: usize,
-    preview_index: Option<usize>,
+}
+
+fn video_access_unit_is_random_access(access_unit: &VideoAccessUnit) -> bool {
+    match (&access_unit.payload, access_unit.codec) {
+        (VideoAccessUnitPayload::Owned(bytes), VideoCodec::H264) => {
+            h264_access_unit_is_keyframe(bytes)
+        }
+        (VideoAccessUnitPayload::Owned(bytes), VideoCodec::Hevc) => {
+            hevc_access_unit_is_keyframe(bytes)
+        }
+        _ => access_unit.is_keyframe,
+    }
 }
 
 fn video_seek_plan(source: &VideoSource, target_us: u64) -> VideoSeekPlan {
@@ -2868,7 +2833,6 @@ fn video_seek_plan(source: &VideoSource, target_us: u64) -> VideoSeekPlan {
             decode_start_index: 0,
             publish_target_us: 0,
             publish_start_rank: 0,
-            preview_index: None,
         };
     }
     // The UI duration includes one synthetic frame interval so the progress
@@ -2877,12 +2841,15 @@ fn video_seek_plan(source: &VideoSource, target_us: u64) -> VideoSeekPlan {
     // frame can mark the seek ready and both video and audio wait indefinitely.
     let publish_target_us = target_us.min(video_source_last_display_time_us(source));
     let mut decode_start_index = 0usize;
+    let mut decode_start_time_us = None;
     for (index, access_unit) in source.access_units.iter().enumerate() {
-        if access_unit.presentation_time_us <= publish_target_us && access_unit.is_keyframe {
+        if access_unit.presentation_time_us <= publish_target_us
+            && access_unit.is_keyframe
+            && decode_start_time_us
+                .is_none_or(|time_us| access_unit.presentation_time_us >= time_us)
+        {
             decode_start_index = index;
-        }
-        if access_unit.presentation_time_us > publish_target_us {
-            break;
+            decode_start_time_us = Some(access_unit.presentation_time_us);
         }
     }
     let publish_start_rank = source
@@ -2890,35 +2857,29 @@ fn video_seek_plan(source: &VideoSource, target_us: u64) -> VideoSeekPlan {
         .iter()
         .filter(|unit| unit.should_display && unit.presentation_time_us < publish_target_us)
         .count();
-    let preview_index = source
-        .access_units
-        .iter()
-        .enumerate()
-        .find(|(_, unit)| {
-            unit.should_display
-                && unit.is_keyframe
-                && unit.presentation_time_us >= publish_target_us
-        })
-        .map(|(index, _)| index)
-        .or_else(|| {
-            source
-                .access_units
-                .iter()
-                .enumerate()
-                .rev()
-                .find(|(_, unit)| unit.should_display && unit.is_keyframe)
-                .map(|(index, _)| index)
-        });
     VideoSeekPlan {
         decode_start_index,
         publish_target_us,
         publish_start_rank,
-        preview_index,
     }
 }
 
 fn video_should_publish_after_seek(access_unit: &VideoAccessUnit, publish_target_us: u64) -> bool {
     access_unit.presentation_time_us >= publish_target_us
+}
+
+fn restart_hardware_decoder_for_discontinuity(
+    decoder: HardwareVideoDecoder,
+    source: &VideoSource,
+    seek_plan: &VideoSeekPlan,
+) -> Result<HardwareVideoDecoder, String> {
+    let Some(access_unit) = source.access_units.get(seek_plan.decode_start_index) else {
+        return Ok(decoder);
+    };
+    decoder.restart_for_discontinuity(
+        access_unit.codec,
+        video_access_unit_is_random_access(access_unit),
+    )
 }
 
 fn consume_seek_request(controls: &ControlsOverlay, seek_epoch: &mut u32) -> Option<u64> {
@@ -3856,21 +3817,23 @@ fn load_mp4_video_source_with_options(
             VideoContainerFormat::RawH264 => unreachable!(),
             VideoContainerFormat::WebmVp9 => unreachable!(),
         };
-        let is_keyframe = if track.sync_samples.is_empty() {
-            match (&payload, codec) {
-                (VideoAccessUnitPayload::Owned(bytes), VideoCodec::H264) => {
-                    h264_access_unit_is_keyframe(bytes)
-                }
-                (VideoAccessUnitPayload::Owned(bytes), VideoCodec::Hevc) => {
-                    hevc_access_unit_is_keyframe(bytes)
-                }
-                (_, _) => index == 0,
+        // H.264/HEVC stateless seek must restart at an independently
+        // decodable access unit. MP4 `stss` may describe a recovery point that
+        // is not an IDR/IRAP picture, so validate the converted payload once
+        // while building the source index. Other codecs continue to use their
+        // container sync-sample metadata.
+        let is_keyframe = match (&payload, codec) {
+            (VideoAccessUnitPayload::Owned(bytes), VideoCodec::H264) => {
+                h264_access_unit_is_keyframe(bytes)
             }
-        } else {
-            track
+            (VideoAccessUnitPayload::Owned(bytes), VideoCodec::Hevc) => {
+                hevc_access_unit_is_keyframe(bytes)
+            }
+            (_, _) if track.sync_samples.is_empty() => index == 0,
+            (_, _) => track
                 .sync_samples
                 .binary_search(&((index + 1).min(u32::MAX as usize) as u32))
-                .is_ok()
+                .is_ok(),
         };
         access_units.push(VideoAccessUnit {
             payload,
@@ -5519,10 +5482,18 @@ struct HardwareVideoDecoder {
     device: File,
     mapped: Option<MappedVideoBuffer>,
     caps: Option<ScarletVideoCapabilities>,
+    last_decode_mode: Option<HardwareDecodeMode>,
     h264_stateless_context: h264_stateless_hw::Context,
     vp9_stateless_context: vp9_stateless_hw::Context,
     vp9_debug_submits: u32,
     cancel: Arc<AtomicBool>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum HardwareDecodeMode {
+    Stateful,
+    StatelessH264,
+    StatelessVp9,
 }
 
 impl HardwareVideoDecoder {
@@ -5560,6 +5531,7 @@ impl HardwareVideoDecoder {
             device,
             mapped,
             caps,
+            last_decode_mode: None,
             h264_stateless_context: h264_stateless_hw::Context::default(),
             vp9_stateless_context: vp9_stateless_hw::Context::default(),
             vp9_debug_submits: 0,
@@ -5569,6 +5541,41 @@ impl HardwareVideoDecoder {
 
     fn is_cancelled(&self) -> bool {
         self.cancel.load(Ordering::Acquire)
+    }
+
+    fn restart_for_discontinuity(
+        mut self,
+        codec: VideoCodec,
+        random_access: bool,
+    ) -> Result<Self, String> {
+        let reusable_h264 = self.last_decode_mode.is_none()
+            || self.last_decode_mode == Some(HardwareDecodeMode::StatelessH264);
+        if random_access
+            && codec == VideoCodec::H264
+            && reusable_h264
+            && self.supports_stateless_h264()
+        {
+            h264_stateless_hw::reset_for_discontinuity(&mut self.h264_stateless_context);
+            return Ok(self);
+        }
+        let reusable_vp9 = self.last_decode_mode.is_none()
+            || self.last_decode_mode == Some(HardwareDecodeMode::StatelessVp9);
+        if random_access
+            && codec == VideoCodec::Vp9
+            && reusable_vp9
+            && self.supports_stateless_vp9()
+        {
+            vp9_stateless_hw::reset_for_discontinuity(&mut self.vp9_stateless_context);
+            self.vp9_debug_submits = 0;
+            return Ok(self);
+        }
+
+        // Stateful decoders do not yet expose a flush/reset command. A fresh
+        // session remains necessary there, and for malformed sources whose
+        // chosen seek point is not independently decodable.
+        let cancel = self.cancel.clone();
+        drop(self);
+        Self::open(cancel)
     }
 
     fn decode_access_unit(
@@ -5606,6 +5613,7 @@ impl HardwareVideoDecoder {
                 "hardware decoder mmap input overflow for non-H.264 access unit",
             ));
         }
+        self.last_decode_mode = Some(HardwareDecodeMode::Stateful);
         self.decode_access_unit_stream(access_unit, controls, seek_epoch)
     }
 
@@ -5664,13 +5672,8 @@ impl HardwareVideoDecoder {
         }
 
         let mut header = [0u8; SCARLET_VIDEO_FRAME_HEADER_LEN];
-        if let Err(error) = read_exact_file(
-            &mut self.device,
-            &mut header,
-            Some(&self.cancel),
-            Some((controls, seek_epoch)),
-        ) {
-            return if self.decode_interrupted(controls, seek_epoch) {
+        if let Err(error) = read_exact_file(&mut self.device, &mut header, Some(&self.cancel)) {
+            return if self.is_cancelled() {
                 Ok(None)
             } else {
                 Err(error)
@@ -5693,17 +5696,16 @@ impl HardwareVideoDecoder {
         }
 
         let mut payload = acquire_payload_buffer(payload_len);
-        if let Err(error) = read_exact_file(
-            &mut self.device,
-            &mut payload,
-            Some(&self.cancel),
-            Some((controls, seek_epoch)),
-        ) {
-            return if self.decode_interrupted(controls, seek_epoch) {
+        if let Err(error) = read_exact_file(&mut self.device, &mut payload, Some(&self.cancel)) {
+            return if self.is_cancelled() {
                 Ok(None)
             } else {
                 Err(error)
             };
+        }
+        if controls.current_seek_epoch() != seek_epoch {
+            release_payload_buffer(payload);
+            return Ok(None);
         }
         Ok(Some(ScarletVideoFrame {
             width,
@@ -5742,6 +5744,7 @@ impl HardwareVideoDecoder {
         let mut should_display = true;
         let mut stateless_submitted = false;
         if codec == VideoCodec::H264 && self.supports_stateless_h264() {
+            self.last_decode_mode = Some(HardwareDecodeMode::StatelessH264);
             h264_stateless_hw::submit(
                 &mut self.device,
                 &mut self.h264_stateless_context,
@@ -5751,6 +5754,7 @@ impl HardwareVideoDecoder {
             stateless_submitted = true;
         }
         if !stateless_submitted && codec == VideoCodec::Vp9 && self.supports_stateless_vp9() {
+            self.last_decode_mode = Some(HardwareDecodeMode::StatelessVp9);
             should_display = vp9_stateless_hw::submit(
                 &mut self.device,
                 &mut self.vp9_stateless_context,
@@ -5761,6 +5765,7 @@ impl HardwareVideoDecoder {
             stateless_submitted = true;
         }
         if !stateless_submitted && buffer.session_commands {
+            self.last_decode_mode = Some(HardwareDecodeMode::Stateful);
             let submit = ScarletVideoSessionSubmit {
                 stream_id: buffer.stream_id,
                 input_len: access_unit.len() as u32,
@@ -5776,6 +5781,7 @@ impl HardwareVideoDecoder {
                     format!("hardware decoder mmap submit failed{status}")
                 })?;
         } else if !stateless_submitted {
+            self.last_decode_mode = Some(HardwareDecodeMode::Stateful);
             let submit = ScarletVideoSubmit {
                 input_len: access_unit.len() as u32,
                 coded_format: codec.coded_format(),
@@ -5792,7 +5798,10 @@ impl HardwareVideoDecoder {
 
         let mut empty_polls = 0usize;
         loop {
-            if self.decode_interrupted(controls, seek_epoch) {
+            // Once submitted, a request must be dequeued even if a seek makes
+            // its result stale. Leaving it pending would force session
+            // destruction (and an AVD firmware reset) before the next frame.
+            if self.is_cancelled() {
                 return Ok(None);
             }
             let dequeue_result = if buffer.session_commands {
@@ -5815,6 +5824,9 @@ impl HardwareVideoDecoder {
             };
             match dequeue_result {
                 Ok((1, frame)) => {
+                    if controls.current_seek_epoch() != seek_epoch {
+                        return Ok(None);
+                    }
                     if !should_display {
                         return Ok(None);
                     }
@@ -6369,50 +6381,6 @@ impl FrameReorderBuffer {
     fn set_total_frames(&mut self, total_frames: u32) {
         self.total_frames = total_frames.max(1);
     }
-}
-
-fn publish_hardware_seek_preview(
-    source: &VideoSource,
-    mp4_data: Option<&[u8]>,
-    seek_plan: &VideoSeekPlan,
-    decoder: &mut HardwareVideoDecoder,
-    frame_store: &VideoFrameStore,
-    paint_signal: &PaintSignal,
-    controls: &ControlsOverlay,
-    access_unit_scratch: &mut Vec<u8>,
-    total_frames: u32,
-    seek_epoch: u32,
-) -> Result<bool, String> {
-    let Some(preview_index) = seek_plan.preview_index else {
-        return Ok(true);
-    };
-    if controls.current_seek_epoch() != seek_epoch || controls.is_video_ready_for_seek(seek_epoch) {
-        return Ok(controls.current_seek_epoch() == seek_epoch);
-    }
-    let access_unit = &source.access_units[preview_index];
-    if access_unit.presentation_time_us < seek_plan.publish_target_us {
-        return Ok(true);
-    }
-    let access_unit_bytes = access_unit.bytes(mp4_data, access_unit_scratch)?;
-    let frame =
-        decoder.decode_access_unit(access_unit.codec, access_unit_bytes, controls, seek_epoch)?;
-    if controls.current_seek_epoch() != seek_epoch {
-        return Ok(false);
-    }
-    let Some(frame) = frame else {
-        return Ok(true);
-    };
-    let frame = hardware_frame_to_bgra(frame)?;
-    publish_seek_preview(
-        frame_store,
-        paint_signal,
-        controls,
-        frame,
-        access_unit.display_rank,
-        total_frames,
-        access_unit.presentation_time_us,
-        seek_epoch,
-    )
 }
 
 fn stream_total_frames(source: &VideoSource, decoded: usize, complete: bool) -> u32 {
@@ -7623,14 +7591,11 @@ fn read_exact_file(
     file: &mut File,
     out: &mut [u8],
     cancel: Option<&AtomicBool>,
-    seek: Option<(&ControlsOverlay, u32)>,
 ) -> Result<(), String> {
     let mut read = 0usize;
     let mut empty_reads = 0usize;
     while read < out.len() {
-        if cancel.is_some_and(|cancel| cancel.load(Ordering::Acquire))
-            || seek.is_some_and(|(controls, epoch)| controls.current_seek_epoch() != epoch)
-        {
+        if cancel.is_some_and(|cancel| cancel.load(Ordering::Acquire)) {
             return Err(String::from("hardware decoder read cancelled"));
         }
         let n = file
