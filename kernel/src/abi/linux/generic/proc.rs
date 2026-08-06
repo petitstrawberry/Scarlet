@@ -421,22 +421,7 @@ pub fn sys_pidfd_open(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 // }
 
 fn waitable_children_for_thread_group(task: &crate::task::Task) -> alloc::vec::Vec<usize> {
-    let thread_group_id = task.get_thread_group_id();
-    get_all_task_ids()
-        .into_iter()
-        .filter(|child_id| {
-            let Some(child) = get_task_by_id(*child_id) else {
-                return false;
-            };
-            let Some(parent_id) = child.get_parent_id() else {
-                return false;
-            };
-            let Some(parent) = get_task_by_id(parent_id) else {
-                return false;
-            };
-            parent.get_thread_group_id() == thread_group_id
-        })
-        .collect()
+    crate::task::get_waitable_process_children(task)
 }
 
 fn wait_owner_for_child(
@@ -1097,6 +1082,7 @@ pub fn sys_clone(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 
             let is_process_fork = !cflags.is_set(crate::task::CloneFlagsDef::Vm)
                 && !cflags.is_set(crate::task::CloneFlagsDef::Thread);
+            let is_process_child = !cflags.is_set(crate::task::CloneFlagsDef::Thread);
             if is_process_fork {
                 crate::sched::scheduler::apply_fork_child_diagnostic_affinity(
                     &mut child_task,
@@ -1127,7 +1113,11 @@ pub fn sys_clone(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
             // Establish parent-child ownership before enqueueing. The adoption
             // protocol rejects an exiting parent and retries init atomically.
             if let Some(child) = get_task_by_id(child_id) {
-                let _ = parent_task.adopt_registered_child(&child);
+                if is_process_child {
+                    let _ = parent_task.adopt_registered_process_child(&child);
+                } else {
+                    let _ = parent_task.adopt_registered_child(&child);
+                }
             }
 
             // Do not modify user pthread list; musl manages linkage. No safety-net writes.

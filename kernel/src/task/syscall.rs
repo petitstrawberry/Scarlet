@@ -35,7 +35,8 @@ use crate::sched::scheduler::{
 };
 use crate::task::{
     CloneFlags, CloneFlagsDef, SCHED_NICE_MAX, SCHED_NICE_MIN, SCHED_UTIL_SCALE,
-    TaskDeadlineParams, TaskState, WaitError, get_parent_waitpid_waker, get_waitpid_waker,
+    TaskDeadlineParams, TaskState, WaitError, get_parent_waitpid_waker,
+    get_thread_group_wait_owner, get_waitable_process_children, get_waitpid_waker,
 };
 
 const MAX_ARG_COUNT: usize = 256; // Maximum number of arguments for execve
@@ -378,6 +379,7 @@ pub fn sys_clone(trapframe: &mut Trapframe) -> usize {
     let tls_ptr = trapframe.get_arg(4); // Fifth argument: TLS pointer
     let is_process_fork =
         !clone_flags.is_set(CloneFlagsDef::Vm) && !clone_flags.is_set(CloneFlagsDef::Thread);
+    let is_process_child = !clone_flags.is_set(CloneFlagsDef::Thread);
 
     // if is_process_fork {
     //     crate::early_println!(
@@ -466,7 +468,11 @@ pub fn sys_clone(trapframe: &mut Trapframe) -> usize {
             // protocol rejects a parent that has already begun exit and retries
             // init without exposing a half-updated parent_id.
             if let Some(child) = get_task_by_id(child_id) {
-                let _ = parent_task.adopt_registered_child(&child);
+                if is_process_child {
+                    let _ = parent_task.adopt_registered_process_child(&child);
+                } else {
+                    let _ = parent_task.adopt_registered_child(&child);
+                }
             }
 
             // Get the child's namespace-local PID (after add_task has set the IDs)
@@ -807,8 +813,15 @@ pub fn sys_waitpid(trapframe: &mut Trapframe) -> usize {
     // Loop until a child exits or an error occurs
     loop {
         if pid == -1 {
-            // Wait for any child process
-            for child_pid in task.get_children().clone() {
+            // Wait for any process child owned by a thread in this process.
+            // Joinable thread children are reaped only by specific-PID joins.
+            for child_pid in get_waitable_process_children(&task) {
+                if task.get_namespace().resolve_local_id(child_pid).is_none() {
+                    continue;
+                }
+                let Some(wait_owner) = get_thread_group_wait_owner(&task, child_pid) else {
+                    continue;
+                };
                 if report_stopped
                     && let Some(child_task) = crate::sched::scheduler::get_task_by_id(child_pid)
                     && child_task.get_state() != TaskState::Zombie
@@ -832,7 +845,7 @@ pub fn sys_waitpid(trapframe: &mut Trapframe) -> usize {
                     continue;
                 }
 
-                match task.wait(child_pid) {
+                match wait_owner.wait(child_pid) {
                     Ok(status) => {
                         // Child has exited, return the status
                         if status_addr != 0
@@ -850,10 +863,14 @@ pub fn sys_waitpid(trapframe: &mut Trapframe) -> usize {
                         continue;
                     }
                     Err(error) => match error {
-                        WaitError::ChildNotExited(_) => continue,
-                        _ => {
-                            trapframe.increment_pc_next(&task);
-                            return usize::MAX;
+                        WaitError::ChildNotExited(_) | WaitError::NoSuchChild(_) => continue,
+                        WaitError::ChildTaskNotFound(_) => {
+                            // Another process thread may have reaped the child
+                            // after this wait-any snapshot. Prune a genuinely
+                            // stale id rather than surfacing a transient error
+                            // that can drive a userspace reaper into a spin.
+                            wait_owner.remove_child(child_pid);
+                            continue;
                         }
                     },
                 }
@@ -867,6 +884,9 @@ pub fn sys_waitpid(trapframe: &mut Trapframe) -> usize {
             }
 
             // Block until a child exits
+            // Child finalization wakes every parent-thread waker in the
+            // process, so wait on the caller's key rather than one particular
+            // child's current owner.
             let parent_waker = get_parent_waitpid_waker(task.get_id());
             parent_waker.wait_owned(task.get_id(), trapframe);
             // Continue the loop to re-check after waking up
@@ -887,8 +907,13 @@ pub fn sys_waitpid(trapframe: &mut Trapframe) -> usize {
             }
         };
 
+        let Some(wait_owner) = get_thread_group_wait_owner(&task, target_global) else {
+            trapframe.increment_pc_next(&task);
+            return usize::MAX;
+        };
+
         if report_stopped
-            && task.get_children().contains(&target_global)
+            && wait_owner.get_children().contains(&target_global)
             && let Some(child_task) = crate::sched::scheduler::get_task_by_id(target_global)
             && child_task.get_state() != TaskState::Zombie
             && child_task.take_process_control_stop_report()
@@ -908,7 +933,7 @@ pub fn sys_waitpid(trapframe: &mut Trapframe) -> usize {
             return pid as usize;
         }
 
-        match task.wait(target_global) {
+        match wait_owner.wait(target_global) {
             Ok(status) => {
                 // Child has exited, return the status
                 if status_addr != 0

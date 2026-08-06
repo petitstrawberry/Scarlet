@@ -313,6 +313,35 @@ pub fn get_parent_waitpid_waker(parent_id: usize) -> Arc<Waker> {
     )
 }
 
+/// Resolve the actual parent task which owns a child visible to this process.
+///
+/// Process children are normally attached to the thread-group leader, while
+/// joinable threads remain attached to the thread which spawned them. A
+/// specific `waitpid` from any sibling therefore has to resolve the real owner
+/// instead of assuming either the caller or leader owns every child.
+pub(crate) fn get_thread_group_wait_owner(caller: &Task, child_id: usize) -> Option<Arc<Task>> {
+    let child = get_task_by_id(child_id)?;
+    let parent = get_task_by_id(child.get_parent_id()?)?;
+    (parent.get_thread_group_id() == caller.get_thread_group_id()).then_some(parent)
+}
+
+/// List process children waitable by any thread in the caller's process.
+///
+/// Thread children are intentionally excluded from wait-any: their JoinHandle
+/// uses a specific PID and must not be consumed by an unrelated process reaper.
+pub(crate) fn get_waitable_process_children(caller: &Task) -> Vec<usize> {
+    get_all_task_ids()
+        .into_iter()
+        .filter(|child_id| {
+            let Some(child) = get_task_by_id(*child_id) else {
+                return false;
+            };
+            child.get_thread_group_id() == child.get_id()
+                && get_thread_group_wait_owner(caller, *child_id).is_some()
+        })
+        .collect()
+}
+
 /// Wake up any processes waiting for a specific task
 ///
 /// This function should be called when a task exits to wake up
@@ -2152,6 +2181,39 @@ impl Task {
         false
     }
 
+    /// Adopt a process child through this task's thread-group leader.
+    ///
+    /// A process may call `fork` from any of its threads, but process children
+    /// belong to the process-wide wait set. Keeping those children on the
+    /// thread-group leader makes them visible to the process reaper even when
+    /// the worker thread which issued `fork` exits or never calls `waitpid`.
+    pub(crate) fn adopt_registered_process_child(&self, child: &Task) -> bool {
+        if self.thread_group_id != self.id {
+            if let Some(leader) = get_task_by_id(self.thread_group_id)
+                && leader.try_adopt_child(child, None)
+            {
+                return true;
+            }
+
+            // A process can outlive its original leader. Keep a fork made by
+            // a surviving worker in that process's wait set instead of letting
+            // the leader's generic fallback immediately reparent it to init.
+            if self.try_adopt_child(child, None) {
+                return true;
+            }
+
+            if self.id != INIT_TASK_ID
+                && let Some(init) = get_task_by_id(INIT_TASK_ID)
+            {
+                return init.try_adopt_child(child, None);
+            }
+
+            return false;
+        }
+
+        self.adopt_registered_child(child)
+    }
+
     fn orphan_reaper(&self) -> Option<Arc<Task>> {
         if self.thread_group_id != self.id
             && let Some(leader) = get_task_by_id(self.thread_group_id)
@@ -2820,8 +2882,8 @@ impl Task {
         child.state.store(TaskState::Ready, Ordering::SeqCst);
 
         // NOTE: Parent-child relationship is established after registration,
-        // once the child has a valid ID. Callers must use
-        // `parent.adopt_registered_child(&child)` before enqueueing it.
+        // once the child has a valid ID. Callers must use the appropriate
+        // registered-child adoption helper before enqueueing it.
 
         // Set TGID: if CLONE_THREAD, share parent's TGID (join thread group)
         // Otherwise, child becomes a new thread group leader (TGID will be set to its own ID)
@@ -3118,24 +3180,39 @@ impl Task {
     /// # Returns
     /// The exit status of the child task, or an error if the child is not found or not in Zombie state
     pub fn wait(&self, child_id: usize) -> Result<i32, WaitError> {
-        if !self.children.read().contains(&child_id) {
+        // Take a stable task reference before the parent lock. A successful
+        // reap still requires membership under that lock, so another waiter
+        // cannot claim the same child through this Arc.
+        let child_task = get_task_by_id(child_id);
+        // Serialize membership validation, zombie claiming, and removal under
+        // one parent lock. Process-wide wait permits multiple sibling threads
+        // to reap concurrently; splitting these steps lets two waiters both
+        // observe the same Zombie child and clean it up twice.
+        let mut children = self.children.write();
+        let Some(child_index) = children.iter().position(|&id| id == child_id) else {
+            drop(children);
             crate::println!("[Task {}] wait: No such child task: {}", self.id, child_id);
             return Err(WaitError::NoSuchChild("No such child task".to_string()));
-        }
+        };
 
-        if let Some(child_task) = get_task_by_id(child_id) {
+        if let Some(child_task) = child_task {
             if child_task.get_state() == TaskState::Zombie {
                 let status = child_task.get_exit_status().unwrap_or(-1);
                 child_task.set_state(TaskState::Terminated);
-                self.remove_child(child_id);
+                children.remove(child_index);
+                drop(children);
                 crate::sched::scheduler::cleanup_zombie(child_id);
                 Ok(status)
             } else {
+                drop(children);
                 Err(WaitError::ChildNotExited(
                     "Child has not exited or is not a zombie".to_string(),
                 ))
             }
         } else {
+            // Do not leave an impossible child id in the process-wide wait set.
+            children.remove(child_index);
+            drop(children);
             Err(WaitError::ChildTaskNotFound(
                 "Child task not found".to_string(),
             ))
@@ -3683,8 +3760,8 @@ mod tests {
     use core::sync::atomic::{AtomicUsize, Ordering};
 
     use super::{
-        DeferredExitRequest, INIT_TASK_ID, Task, TaskType, clear_mock_current_task, mytask,
-        set_mock_current_task,
+        DeferredExitRequest, INIT_TASK_ID, Task, TaskType, clear_mock_current_task,
+        get_thread_group_wait_owner, get_waitable_process_children, mytask, set_mock_current_task,
     };
     use crate::object::capability::memory_mapping::{
         AccessOp, MemoryMappingInfo, MemoryMappingOps,
@@ -4240,6 +4317,159 @@ mod tests {
         let child_id = add_task(child, 0);
         let child = get_task_by_id(child_id).unwrap();
         assert_eq!(child.get_thread_group_id(), parent.get_thread_group_id());
+    }
+
+    #[test_case]
+    fn test_process_child_created_by_worker_is_waitable_by_group_leader() {
+        reset();
+
+        let mut init = super::new_user_task("Init".to_string(), 0);
+        init.init();
+        assert_eq!(add_task(init, 0), INIT_TASK_ID);
+
+        let mut leader = super::new_user_task("ProcessLeader".to_string(), 0);
+        leader.init();
+        let leader_id = add_task(leader, 0);
+        let leader = get_task_by_id(leader_id).unwrap();
+
+        let mut thread_flags = CloneFlags::default();
+        thread_flags.set(CloneFlagsDef::Thread);
+        let worker = leader.clone_task(thread_flags).unwrap();
+        let worker_id = add_task(worker, 0);
+        let worker = get_task_by_id(worker_id).unwrap();
+        assert!(leader.adopt_registered_child(&worker));
+
+        let child = worker.clone_task(CloneFlags::default()).unwrap();
+        let child_id = add_task(child, 0);
+        let child = get_task_by_id(child_id).unwrap();
+
+        assert!(worker.adopt_registered_process_child(&child));
+        assert_eq!(child.get_parent_id(), Some(leader_id));
+        assert_eq!(child.get_parent_thread_group_id(), Some(leader_id));
+        assert!(leader.get_children().contains(&child_id));
+        assert!(!worker.get_children().contains(&child_id));
+
+        child.set_exit_status(0);
+        child.set_state(TaskState::Zombie);
+        finalize_zombie(child_id, Some(leader_id));
+        match leader.wait(child_id) {
+            Ok(status) => assert_eq!(status, 0),
+            Err(error) => panic!("wait failed: {:?}", error),
+        }
+        assert!(get_task_by_id(child_id).is_none());
+    }
+
+    #[test_case]
+    fn test_vm_sharing_process_child_uses_group_wait_set() {
+        reset();
+
+        let mut init = super::new_user_task("Init".to_string(), 0);
+        init.init();
+        assert_eq!(add_task(init, 0), INIT_TASK_ID);
+
+        let mut leader = super::new_user_task("VmProcessLeader".to_string(), 0);
+        leader.init();
+        let leader_id = add_task(leader, 0);
+        let leader = get_task_by_id(leader_id).unwrap();
+
+        let mut thread_flags = CloneFlags::default();
+        thread_flags.set(CloneFlagsDef::Thread);
+        let worker = leader.clone_task(thread_flags).unwrap();
+        let worker_id = add_task(worker, 0);
+        let worker = get_task_by_id(worker_id).unwrap();
+        assert!(leader.adopt_registered_child(&worker));
+
+        let mut process_flags = CloneFlags::default();
+        process_flags.set(CloneFlagsDef::Vm);
+        let child = worker.clone_task(process_flags).unwrap();
+        let child_id = add_task(child, 0);
+        let child = get_task_by_id(child_id).unwrap();
+        assert_eq!(child.get_thread_group_id(), child_id);
+        assert!(worker.adopt_registered_process_child(&child));
+        assert_eq!(child.get_parent_id(), Some(leader_id));
+        assert!(get_waitable_process_children(&worker).contains(&child_id));
+    }
+
+    #[test_case]
+    fn test_worker_waitpid_uses_thread_group_leader_wait_set() {
+        reset();
+
+        let mut init = super::new_user_task("Init".to_string(), 0);
+        init.init();
+        assert_eq!(add_task(init, 0), INIT_TASK_ID);
+
+        let mut leader = super::new_user_task("WaitLeader".to_string(), 0);
+        leader.init();
+        let leader_id = add_task(leader, 0);
+        let leader = get_task_by_id(leader_id).unwrap();
+
+        let mut thread_flags = CloneFlags::default();
+        thread_flags.set(CloneFlagsDef::Thread);
+        let worker = leader.clone_task(thread_flags).unwrap();
+        let worker_id = add_task(worker, 0);
+        let worker = get_task_by_id(worker_id).unwrap();
+        assert!(leader.adopt_registered_child(&worker));
+
+        let mut child = super::new_user_task("WorkerProcessChild".to_string(), 0);
+        child.init();
+        let child_id = add_task(child, 0);
+        let child = get_task_by_id(child_id).unwrap();
+        assert!(worker.adopt_registered_process_child(&child));
+
+        let wait_owner = get_thread_group_wait_owner(&worker, child_id).unwrap();
+        assert_eq!(wait_owner.get_id(), leader_id);
+        assert!(wait_owner.get_children().contains(&child_id));
+        assert!(!worker.get_children().contains(&child_id));
+        assert!(get_waitable_process_children(&worker).contains(&child_id));
+
+        child.set_exit_status(23);
+        child.set_state(TaskState::Zombie);
+        finalize_zombie(child_id, Some(leader_id));
+        match wait_owner.wait(child_id) {
+            Ok(status) => assert_eq!(status, 23),
+            Err(error) => panic!("wait failed: {:?}", error),
+        }
+        assert!(get_task_by_id(child_id).is_none());
+    }
+
+    #[test_case]
+    fn test_thread_child_remains_joinable_by_specific_pid() {
+        reset();
+
+        let mut init = super::new_user_task("Init".to_string(), 0);
+        init.init();
+        assert_eq!(add_task(init, 0), INIT_TASK_ID);
+
+        let mut leader = super::new_user_task("ThreadJoinLeader".to_string(), 0);
+        leader.init();
+        let leader_id = add_task(leader, 0);
+        let leader = get_task_by_id(leader_id).unwrap();
+
+        let mut thread_flags = CloneFlags::default();
+        thread_flags.set(CloneFlagsDef::Thread);
+        let worker = leader.clone_task(thread_flags).unwrap();
+        let worker_id = add_task(worker, 0);
+        let worker = get_task_by_id(worker_id).unwrap();
+        assert!(leader.adopt_registered_child(&worker));
+
+        let thread_child = worker.clone_task(thread_flags).unwrap();
+        let thread_child_id = add_task(thread_child, 0);
+        let thread_child = get_task_by_id(thread_child_id).unwrap();
+        assert!(worker.adopt_registered_child(&thread_child));
+        assert_eq!(thread_child.get_parent_id(), Some(worker_id));
+
+        let wait_owner = get_thread_group_wait_owner(&leader, thread_child_id).unwrap();
+        assert_eq!(wait_owner.get_id(), worker_id);
+        assert!(!get_waitable_process_children(&leader).contains(&thread_child_id));
+
+        thread_child.set_exit_status(17);
+        thread_child.set_state(TaskState::Zombie);
+        finalize_zombie(thread_child_id, Some(worker_id));
+        match wait_owner.wait(thread_child_id) {
+            Ok(status) => assert_eq!(status, 17),
+            Err(error) => panic!("thread join failed: {:?}", error),
+        }
+        assert!(get_task_by_id(thread_child_id).is_none());
     }
 
     #[test_case]
