@@ -15,6 +15,12 @@ use sws_protocol::{self as protocol, ServerMessage};
 const HANDLE_RECORD_CAPACITY: usize = protocol::MessageHeader::SIZE + protocol::MAX_PAYLOAD_SIZE;
 const MAX_DISPATCH_FRAMES: usize = 64;
 const MAX_STREAM_WRITE_CHUNK: usize = 16 * 1024;
+// A non-blocking socket must not be allowed to monopolize the shared
+// transport mutex forever when the peer stops draining its receive buffer.
+// This is deliberately an operation deadline rather than a spin-count: the
+// latter varies wildly between QEMU and Apple Silicon.
+const WRITE_BACKPRESSURE_TIMEOUT_NS: u64 = 5_000_000_000;
+const DEFAULT_RESPONSE_TIMEOUT_MS: u64 = 5_000;
 
 /// Window list entry
 #[derive(Debug, Clone)]
@@ -430,8 +436,14 @@ impl TransportState {
 
     fn pump_write_backpressure(&mut self) -> Result<(), Error> {
         match self.pump_once() {
-            Ok(_) => {
-                crate::os::yield_now();
+            Ok(result) => {
+                if result.progressed {
+                    crate::os::yield_now();
+                } else {
+                    // Yielding alone can immediately select this same task
+                    // again, turning a full socket into a core-sized spin.
+                    crate::os::sleep_briefly();
+                }
                 Ok(())
             }
             Err(error) => Err(error),
@@ -439,6 +451,8 @@ impl TransportState {
     }
 
     fn write_all_pumping(&mut self, bytes: &[u8]) -> Result<(), Error> {
+        let deadline = crate::os::monotonic_time_ns()
+            .saturating_add(WRITE_BACKPRESSURE_TIMEOUT_NS);
         let mut written = 0usize;
         while written < bytes.len() {
             let chunk_end = written
@@ -447,7 +461,12 @@ impl TransportState {
             match socket_write(&mut self.socket, &bytes[written..chunk_end]) {
                 Ok(0) => return Err(Error::SendFailed),
                 Ok(count) => written += count,
-                Err(Error::WouldBlock) => self.pump_write_backpressure()?,
+                Err(Error::WouldBlock) => {
+                    if crate::os::monotonic_time_ns() >= deadline {
+                        return Err(Error::TimedOut);
+                    }
+                    self.pump_write_backpressure()?
+                }
                 Err(error) => return Err(error),
             }
         }
@@ -475,10 +494,17 @@ impl TransportState {
     }
 
     fn send_handle_record_pumping(&mut self, handle: &Handle, record: &[u8]) -> Result<(), Error> {
+        let deadline = crate::os::monotonic_time_ns()
+            .saturating_add(WRITE_BACKPRESSURE_TIMEOUT_NS);
         loop {
             match socket_send_handle_and_data(&self.socket, handle, record) {
                 Ok(()) => return Ok(()),
-                Err(Error::WouldBlock) => self.pump_write_backpressure()?,
+                Err(Error::WouldBlock) => {
+                    if crate::os::monotonic_time_ns() >= deadline {
+                        return Err(Error::TimedOut);
+                    }
+                    self.pump_write_backpressure()?
+                }
                 Err(error) => return Err(error),
             }
         }
@@ -988,8 +1014,8 @@ impl Connection {
     /// # Returns
     ///
     /// The owned response envelope, including an optional transferred handle.
-    pub fn wait_response(&self, mut token: RequestToken) -> Result<Response, Error> {
-        self.wait_response_until(&mut token, None)
+    pub fn wait_response(&self, token: RequestToken) -> Result<Response, Error> {
+        self.wait_response_timeout(token, DEFAULT_RESPONSE_TIMEOUT_MS)
     }
 
     /// Wait for a response for at most `timeout_ms` milliseconds.

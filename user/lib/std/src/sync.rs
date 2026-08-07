@@ -5,7 +5,7 @@
 use crate::syscall::{Syscall, syscall2};
 use core::cell::UnsafeCell;
 use core::ops::{Deref, DerefMut};
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 extern crate alloc;
 pub use alloc::sync::Arc;
@@ -94,8 +94,28 @@ impl<'a, T> Drop for MutexGuard<'a, T> {
 /// A synchronization primitive which can be written to only once.
 ///
 /// This is equivalent to `std::sync::OnceLock` but for no_std environments.
+const ONCE_UNINITIALIZED: u8 = 0;
+const ONCE_INITIALIZING: u8 = 1;
+const ONCE_READY: u8 = 2;
+
+struct OnceInitGuard<'a> {
+    state: &'a AtomicU8,
+    committed: bool,
+}
+
+impl Drop for OnceInitGuard<'_> {
+    fn drop(&mut self) {
+        if !self.committed {
+            // Allow a later caller to retry if the initializer unwinds before
+            // publishing a value.
+            self.state
+                .store(ONCE_UNINITIALIZED, Ordering::Release);
+        }
+    }
+}
+
 pub struct OnceLock<T> {
-    initialized: AtomicBool,
+    state: AtomicU8,
     data: UnsafeCell<Option<T>>,
 }
 
@@ -106,7 +126,7 @@ impl<T> OnceLock<T> {
     /// Creates a new `OnceLock`.
     pub const fn new() -> Self {
         Self {
-            initialized: AtomicBool::new(false),
+            state: AtomicU8::new(ONCE_UNINITIALIZED),
             data: UnsafeCell::new(None),
         }
     }
@@ -118,23 +138,52 @@ impl<T> OnceLock<T> {
     where
         F: FnOnce() -> T,
     {
-        if !self.initialized.load(Ordering::Acquire) {
-            // Try to initialize
-            let value = f();
-            unsafe {
-                // Check again before writing
-                if !self.initialized.load(Ordering::Acquire) {
-                    *self.data.get() = Some(value);
-                    self.initialized.store(true, Ordering::Release);
+        loop {
+            match self.state.load(Ordering::Acquire) {
+                ONCE_READY => {
+                    // SAFETY: ONCE_READY is published with Release after the
+                    // value has been written, so this acquire observes it.
+                    return unsafe { (*self.data.get()).as_ref().unwrap() };
                 }
+                ONCE_UNINITIALIZED => {
+                    if self
+                        .state
+                        .compare_exchange(
+                            ONCE_UNINITIALIZED,
+                            ONCE_INITIALIZING,
+                            Ordering::Acquire,
+                            Ordering::Acquire,
+                        )
+                        .is_err()
+                    {
+                        continue;
+                    }
+
+                    let mut init_guard = OnceInitGuard {
+                        state: &self.state,
+                        committed: false,
+                    };
+                    let value = f();
+                    // SAFETY: this CPU exclusively owns the INITIALIZING
+                    // state, so no other thread can access or write `data`.
+                    unsafe { *self.data.get() = Some(value) };
+                    self.state.store(ONCE_READY, Ordering::Release);
+                    init_guard.committed = true;
+                    return unsafe { (*self.data.get()).as_ref().unwrap() };
+                }
+                ONCE_INITIALIZING => {
+                    // Do not burn a core while another thread performs the
+                    // initializer (which may include filesystem or IPC I/O).
+                    let _ = syscall2(Syscall::Sleep, 1_000_000, 0);
+                }
+                _ => unreachable!("invalid OnceLock state"),
             }
         }
-        unsafe { &*self.data.get() }.as_ref().unwrap()
     }
 
     /// Gets the reference to the contained value if already initialized.
     pub fn get(&self) -> Option<&T> {
-        if self.initialized.load(Ordering::Acquire) {
+        if self.state.load(Ordering::Acquire) == ONCE_READY {
             unsafe { &*self.data.get() }.as_ref()
         } else {
             None
@@ -143,13 +192,34 @@ impl<T> OnceLock<T> {
 
     /// Sets the value if not already initialized.
     pub fn set(&self, value: T) -> Result<(), T> {
-        if self.initialized.load(Ordering::Acquire) {
-            return Err(value);
+        let mut value = Some(value);
+        loop {
+            match self.state.load(Ordering::Acquire) {
+                ONCE_READY => return Err(value.take().unwrap()),
+                ONCE_INITIALIZING => {
+                    let _ = syscall2(Syscall::Sleep, 1_000_000, 0);
+                }
+                ONCE_UNINITIALIZED => {
+                    if self
+                        .state
+                        .compare_exchange(
+                            ONCE_UNINITIALIZED,
+                            ONCE_INITIALIZING,
+                            Ordering::Acquire,
+                            Ordering::Acquire,
+                        )
+                        .is_err()
+                    {
+                        continue;
+                    }
+                    // SAFETY: this CPU exclusively owns the INITIALIZING
+                    // state after the successful CAS.
+                    unsafe { *self.data.get() = value.take() };
+                    self.state.store(ONCE_READY, Ordering::Release);
+                    return Ok(());
+                }
+                _ => unreachable!("invalid OnceLock state"),
+            }
         }
-        unsafe {
-            *self.data.get() = Some(value);
-            self.initialized.store(true, Ordering::Release);
-        }
-        Ok(())
     }
 }

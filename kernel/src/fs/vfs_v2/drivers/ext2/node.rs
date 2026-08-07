@@ -972,6 +972,11 @@ impl FileObject for Ext2FileObject {
                 *size_override = Some(new_end);
             }
         }
+        // `effective_size` reads `size_override` itself.  Do not call it
+        // while the guard above is alive: `IrqSpinLock` is not re-entrant,
+        // so that used to leave the CPU spinning forever with IRQs masked on
+        // every non-empty write.
+        drop(size_override);
         PageCacheManager::global().record_object_size(cache_id, self.effective_size(new_end));
 
         *self.dirty.lock() = true;

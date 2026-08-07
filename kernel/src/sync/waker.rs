@@ -161,13 +161,20 @@ impl Waker {
         // This closes the lost-wake window on SMP: if wake_one()/wake_all()
         // fired while the queue was empty (between the caller's condition check
         // and this wait() call), we return immediately instead of sleeping.
-        if self
-            .pending_wakes
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
-                if n > 0 { Some(n - 1) } else { None }
-            })
-            .is_ok()
-        {
+        // Serialize the pending-wake check with queue insertion and with the
+        // producer's empty-queue path.  Checking the atomic by itself leaves
+        // a window where wake_one() observes an empty queue, the waiter then
+        // enqueues, and the producer increments pending_wakes afterwards;
+        // that credit belongs to no waiter and can corrupt a later wait.
+        let consumed_pending = {
+            let _queue = self.wait_queue.lock();
+            self.pending_wakes
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
+                    if n > 0 { Some(n - 1) } else { None }
+                })
+                .is_ok()
+        };
+        if consumed_pending {
             return false;
         }
 
@@ -579,10 +586,20 @@ impl Waker {
     /// }
     /// ```
     pub fn wake_one(&self) -> bool {
-        while let Some(task_id) = {
-            let mut queue = self.wait_queue.lock();
-            queue.pop_front()
-        } {
+        loop {
+            let task_id = {
+                let mut queue = self.wait_queue.lock();
+                match queue.pop_front() {
+                    Some(task_id) => task_id,
+                    None => {
+                        // Keep this update under the queue lock so a waiter
+                        // cannot enqueue between the empty check and the
+                        // pending-wake increment.
+                        self.pending_wakes.fetch_add(1, Ordering::SeqCst);
+                        return false;
+                    }
+                }
+            };
             let woke = self.wake_waiting_task(task_id);
             if crate::sched::scheduler::DEBUG_SMP_TASK_FLOW {
                 crate::println!(
@@ -597,9 +614,6 @@ impl Waker {
                 return true;
             }
         }
-
-        self.pending_wakes.fetch_add(1, Ordering::SeqCst);
-        false
     }
 
     /// Wake up all waiting tasks
@@ -622,11 +636,15 @@ impl Waker {
         let task_ids = {
             let mut queue = self.wait_queue.lock();
             let ids: VecDeque<usize> = queue.drain(..).collect();
+            if ids.is_empty() {
+                // As in wake_one(), couple the empty check and credit update
+                // under the same queue lock.
+                self.pending_wakes.fetch_add(1, Ordering::SeqCst);
+            }
             ids
         };
 
         if task_ids.is_empty() {
-            self.pending_wakes.fetch_add(1, Ordering::SeqCst);
             return 0;
         }
 
@@ -645,10 +663,6 @@ impl Waker {
                     woke,
                 );
             }
-        }
-
-        if woken_count == 0 {
-            self.pending_wakes.fetch_add(1, Ordering::SeqCst);
         }
 
         woken_count
