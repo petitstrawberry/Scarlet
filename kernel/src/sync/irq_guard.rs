@@ -78,6 +78,14 @@ impl IrqGuard {
             _not_send: PhantomData,
         }
     }
+    /// Publish that the IRQ-protected lock has been acquired. Forwards to the
+    /// inner `PreemptGuard` so the diagnostic slot reports the `held` phase.
+    #[inline]
+    pub(crate) fn mark_acquired(&self) {
+        if let Some(preempt) = &self.preempt {
+            preempt.mark_acquired();
+        }
+    }
 }
 
 impl Drop for IrqGuard {
