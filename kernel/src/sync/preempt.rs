@@ -25,7 +25,7 @@ use core::marker::PhantomData;
 use core::panic::Location;
 #[cfg(feature = "sync-debug")]
 use core::sync::atomic::{AtomicPtr, AtomicU8, AtomicUsize};
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use crate::arch::try_get_cpuid;
 use crate::environment::MAX_NUM_CPUS;
@@ -86,10 +86,62 @@ const DEBUG_SLOT_WRITING: u8 = 1;
 const DEBUG_SLOT_ACTIVE: u8 = 2;
 
 #[cfg(feature = "sync-debug")]
+const DEBUG_PHASE_ACQUIRING: u8 = 1;
+#[cfg(feature = "sync-debug")]
+const DEBUG_PHASE_HELD: u8 = 2;
+#[cfg(feature = "sync-debug")]
+const DEBUG_PHASE_RELEASED: u8 = 3;
+
+#[cfg(feature = "sync-debug")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PreemptDebugPhase {
+    Acquiring,
+    Held,
+    Released,
+}
+
+#[cfg(feature = "sync-debug")]
+impl PreemptDebugPhase {
+    fn from_raw(raw: u8) -> Option<Self> {
+        match raw {
+            DEBUG_PHASE_ACQUIRING => Some(Self::Acquiring),
+            DEBUG_PHASE_HELD => Some(Self::Held),
+            DEBUG_PHASE_RELEASED => Some(Self::Released),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::Acquiring => "acquiring",
+            Self::Held => "held",
+            Self::Released => "released",
+        }
+    }
+}
+
+#[cfg(feature = "sync-debug")]
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct PreemptDebugSnapshot {
+    pub(crate) source: PreemptSourceKind,
+    pub(crate) phase: PreemptDebugPhase,
+    pub(crate) lock_address: usize,
+    pub(crate) task_id: usize,
+    pub(crate) spin_iterations: u64,
+    pub(crate) location: *const Location<'static>,
+}
+
+#[cfg(feature = "sync-debug")]
 struct PreemptDebugSlot {
     state: AtomicU8,
     source: AtomicU8,
     lock_address: AtomicUsize,
+    /// Snapshot of the acquiring task's id, captured at registration time.
+    task_id: AtomicUsize,
+    /// Lifecycle phase, written under the WRITING/ACTIVE sequence.
+    phase: AtomicU8,
+    /// Monotonic acquisition attempt counter published while spinning.
+    spin_iterations: AtomicU64,
     location: AtomicPtr<Location<'static>>,
 }
 
@@ -100,6 +152,9 @@ impl PreemptDebugSlot {
             state: AtomicU8::new(DEBUG_SLOT_EMPTY),
             source: AtomicU8::new(0),
             lock_address: AtomicUsize::new(0),
+            task_id: AtomicUsize::new(0),
+            phase: AtomicU8::new(0),
+            spin_iterations: AtomicU64::new(0),
             location: AtomicPtr::new(core::ptr::null_mut()),
         }
     }
@@ -135,6 +190,12 @@ fn register_preempt_source(
 
         slot.source.store(source as u8, Ordering::Relaxed);
         slot.lock_address.store(lock_address, Ordering::Relaxed);
+        slot.task_id.store(
+            crate::sched::scheduler::current_task_id(cpu).unwrap_or(0),
+            Ordering::Relaxed,
+        );
+        slot.phase.store(DEBUG_PHASE_ACQUIRING, Ordering::Relaxed);
+        slot.spin_iterations.store(0, Ordering::Relaxed);
         slot.location.store(
             location as *const Location<'static> as *mut Location<'static>,
             Ordering::Relaxed,
@@ -156,8 +217,66 @@ fn unregister_preempt_source(cpu: usize, slot_index: Option<u8>) {
     };
 
     let slot = &PREEMPT_DEBUG_SLOTS[cpu][slot_index as usize];
+    slot.phase.store(DEBUG_PHASE_RELEASED, Ordering::Relaxed);
     let previous = slot.state.swap(DEBUG_SLOT_EMPTY, Ordering::AcqRel);
     debug_assert_eq!(previous, DEBUG_SLOT_ACTIVE);
+}
+
+/// Publish a stable snapshot of one diagnostic slot, or `None` when the slot
+/// is empty or being republished.
+#[cfg(feature = "sync-debug")]
+fn snapshot_debug_slot(cpu: usize, slot_index: usize) -> Option<PreemptDebugSnapshot> {
+    if slot_index >= PREEMPT_DEBUG_SLOT_COUNT {
+        return None;
+    }
+    let slot = &PREEMPT_DEBUG_SLOTS[cpu][slot_index];
+    if slot.state.load(Ordering::Acquire) != DEBUG_SLOT_ACTIVE {
+        return None;
+    }
+    let source = PreemptSourceKind::from_raw(slot.source.load(Ordering::Relaxed))?;
+    let phase = PreemptDebugPhase::from_raw(slot.phase.load(Ordering::Relaxed))
+        .unwrap_or(PreemptDebugPhase::Acquiring);
+    Some(PreemptDebugSnapshot {
+        source,
+        phase,
+        lock_address: slot.lock_address.load(Ordering::Relaxed),
+        task_id: slot.task_id.load(Ordering::Relaxed),
+        spin_iterations: slot.spin_iterations.load(Ordering::Relaxed),
+        location: slot.location.load(Ordering::Relaxed),
+    })
+}
+
+/// Scan every active debug slot on a CPU and return a consistent snapshot of
+/// the live guards. The caller must own no guard whose publication is in
+/// flight (the snapshot only reads, never writes).
+#[cfg(feature = "sync-debug")]
+pub(crate) fn debug_active_snapshots(cpu: usize) -> alloc::vec::Vec<PreemptDebugSnapshot> {
+    let mut out = alloc::vec::Vec::new();
+    if cpu >= MAX_NUM_CPUS {
+        return out;
+    }
+    for index in 0..PREEMPT_DEBUG_SLOT_COUNT {
+        if let Some(snapshot) = snapshot_debug_slot(cpu, index) {
+            out.push(snapshot);
+        }
+    }
+    out
+}
+
+#[cfg(feature = "sync-debug")]
+fn format_location(location: *const Location<'static>) -> alloc::string::String {
+    if location.is_null() {
+        return alloc::string::String::from("<unknown>");
+    }
+    // SAFETY: `Location::caller()` returns a reference with static lifetime.
+    // The slot remains active while we read it, so the pointer stays valid.
+    let location = unsafe { &*location };
+    alloc::format!(
+        "{}:{}:{}",
+        location.file(),
+        location.line(),
+        location.column()
+    )
 }
 
 #[inline]
@@ -238,6 +357,79 @@ pub fn preempt_enable() {
     }
 }
 
+// Always-on lightweight spin-contention watchdog.
+//
+// Unlike the `sync-debug` slot machinery above, this counter is unconditional:
+// it costs one relaxed atomic add per spin iteration and one comparison. When
+// a lock on a given CPU spins past the report threshold it prints a one-line
+// report and resets, so a long-but-progressing wait does not flood the
+// console. The report includes the preempt count and, when `sync-debug` is
+// enabled, every active diagnostic slot (lock address, caller, phase) so the
+// stall can be attributed to a concrete owner.
+//
+// This intentionally does not panic: a transient burst under heavy USB
+// storage contention can legitimately spin for millions of iterations. The
+// goal is observability, not a hard timeout that could turn a slow device
+// into a kernel panic.
+
+const SPIN_CONTENTION_REPORT_THRESHOLD: u64 = 1 << 22;
+
+static SPIN_CONTENTION_COUNT: [AtomicU64; MAX_NUM_CPUS] =
+    [const { AtomicU64::new(0) }; MAX_NUM_CPUS];
+
+/// Note one busy-wait iteration in a lock's spin loop.
+///
+/// Lock implementations call this instead of `core::hint::spin_loop()` so that
+/// a stuck owner becomes observable without enabling `sync-debug`.
+#[inline(always)]
+pub fn note_spin_contention() {
+    let Some(cpu) = current_cpu() else {
+        core::hint::spin_loop();
+        return;
+    };
+    let count = SPIN_CONTENTION_COUNT[cpu].fetch_add(1, Ordering::Relaxed) + 1;
+    if count == SPIN_CONTENTION_REPORT_THRESHOLD {
+        report_spin_contention(cpu);
+        SPIN_CONTENTION_COUNT[cpu].store(0, Ordering::Relaxed);
+    }
+    core::hint::spin_loop();
+}
+
+#[cold]
+fn report_spin_contention(cpu: usize) {
+    let preempt = preempt_count();
+    crate::println!(
+        "[sync-watchdog] spin contention on cpu={} preempt_count={} (possible lock stall)",
+        cpu,
+        preempt,
+    );
+    #[cfg(feature = "sync-debug")]
+    for target_cpu in 0..MAX_NUM_CPUS {
+        let snapshots = debug_active_snapshots(target_cpu);
+        for snapshot in snapshots {
+            let location_str = format_location(snapshot.location);
+            crate::println!(
+                "[sync-watchdog]   owner_cpu={} kind={} phase={} lock={:#x} task={} spins={} at {}",
+                target_cpu,
+                snapshot.source.name(),
+                snapshot.phase.name(),
+                snapshot.lock_address,
+                snapshot.task_id,
+                snapshot.spin_iterations,
+                location_str,
+            );
+        }
+    }
+}
+
+/// Reset the always-on spin-contention counter for the current CPU.
+#[cfg(test)]
+pub(crate) fn reset_spin_contention_for_test() {
+    if let Some(cpu) = current_cpu() {
+        SPIN_CONTENTION_COUNT[cpu].store(0, Ordering::Relaxed);
+    }
+}
+
 /// RAII guard that disables preemption while alive.
 ///
 /// Dropping the guard restores the previous preempt state. The guard is
@@ -290,6 +482,18 @@ impl PreemptGuard {
             #[cfg(feature = "sync-debug")]
             debug_slot,
             _not_send: PhantomData,
+        }
+    }
+    /// Publish that atomic acquisition succeeded. After this the slot reports
+    /// the `held` phase, so a stall report distinguishes a live owner from a
+    /// waiter.
+    #[inline]
+    pub(crate) fn mark_acquired(&self) {
+        #[cfg(feature = "sync-debug")]
+        if let (Some(cpu), Some(slot_index)) = (self.cpu, self.debug_slot) {
+            PREEMPT_DEBUG_SLOTS[cpu][slot_index as usize]
+                .phase
+                .store(DEBUG_PHASE_HELD, Ordering::Relaxed);
         }
     }
 }

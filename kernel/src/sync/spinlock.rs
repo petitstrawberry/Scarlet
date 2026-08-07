@@ -17,7 +17,7 @@ use core::marker::PhantomData;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::sync::irq_guard::IrqGuard;
-use crate::sync::preempt::{PreemptGuard, PreemptSourceKind};
+use crate::sync::preempt::{PreemptGuard, PreemptSourceKind, note_spin_contention};
 
 /// Busy-wait mutual-exclusion lock that disables preemption while held.
 ///
@@ -120,7 +120,7 @@ impl<T> SpinLock<T> {
             .is_err()
         {
             while self.locked.load(Ordering::Relaxed) {
-                core::hint::spin_loop();
+                note_spin_contention();
             }
         }
     }
@@ -237,7 +237,7 @@ impl RawIrqSpinLock {
             .is_err()
         {
             while self.locked.load(Ordering::Relaxed) {
-                core::hint::spin_loop();
+                note_spin_contention();
             }
         }
     }
@@ -257,7 +257,7 @@ impl RawIrqSpinLock {
     #[inline]
     fn store_irq_guard(&self, irq_guard: IrqGuard) {
         while self.irq_guard_handoff.load(Ordering::Acquire) {
-            core::hint::spin_loop();
+            note_spin_contention();
         }
         // SAFETY: The caller owns `locked`, and the handoff flag is clear only
         // after the preceding owner has removed its token from this cell.
@@ -385,9 +385,10 @@ impl<T> IrqSpinLock<T> {
             .is_err()
         {
             while self.locked.load(Ordering::Relaxed) {
-                core::hint::spin_loop();
+                note_spin_contention();
             }
         }
+        irq_guard.mark_acquired();
         IrqSpinLockGuard {
             lock: self,
             irq_guard: Some(irq_guard),
@@ -411,6 +412,7 @@ impl<T> IrqSpinLock<T> {
             .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
             .is_ok()
         {
+            irq_guard.mark_acquired();
             Some(IrqSpinLockGuard {
                 lock: self,
                 irq_guard: Some(irq_guard),

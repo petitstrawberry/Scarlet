@@ -5,6 +5,7 @@
 //! runs the supplied closure; concurrent callers spin until initialization
 //! completes.
 
+use crate::sync::preempt::note_spin_contention;
 use core::cell::UnsafeCell;
 use core::mem::MaybeUninit;
 use core::sync::atomic::{AtomicU8, Ordering};
@@ -122,7 +123,7 @@ impl<T> Once<T> {
                 }
                 Err(_) => {
                     while self.state.load(Ordering::Acquire) != COMPLETE {
-                        core::hint::spin_loop();
+                        note_spin_contention();
                     }
                 }
             }

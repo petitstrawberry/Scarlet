@@ -13,7 +13,7 @@ use core::marker::PhantomData;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::sync::irq_guard::IrqGuard;
-use crate::sync::preempt::{PreemptGuard, PreemptSourceKind};
+use crate::sync::preempt::{PreemptGuard, PreemptSourceKind, note_spin_contention};
 
 const WRITER_BIT: usize = 1 << (usize::BITS - 1);
 const READER_MASK: usize = !WRITER_BIT;
@@ -219,7 +219,7 @@ impl<T> RwSpinLock<T> {
                     return;
                 }
             }
-            core::hint::spin_loop();
+            note_spin_contention();
         }
     }
 
@@ -252,7 +252,7 @@ impl<T> RwSpinLock<T> {
             {
                 return;
             }
-            core::hint::spin_loop();
+            note_spin_contention();
         }
     }
 
@@ -527,7 +527,7 @@ impl<T> IrqRwSpinLock<T> {
                     return;
                 }
             }
-            core::hint::spin_loop();
+            note_spin_contention();
         }
     }
 
@@ -560,7 +560,7 @@ impl<T> IrqRwSpinLock<T> {
             {
                 return;
             }
-            core::hint::spin_loop();
+            note_spin_contention();
         }
     }
 
