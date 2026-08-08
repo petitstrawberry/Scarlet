@@ -68,6 +68,8 @@ enum PickerUiEvent {
         accepted: bool,
         path: String,
     },
+    /// The file manager service disappeared while a picker was open.
+    ServiceGone,
 }
 
 const PRESET_COLORS: &[PresetColor] = &[
@@ -287,6 +289,17 @@ fn start_picker_response_listener() {
                     || interface != DESKTOP_FILE_MANAGER_INTERFACE
                     || signal != DESKTOP_FILE_MANAGER_RESPONSE_SIGNAL
                 {
+                    // sbusd broadcasts this when a registered service
+                    // disconnects. If the file manager vanished while a
+                    // picker is open, the response signal will never arrive
+                    // — abort the wait so the UI is not stuck forever.
+                    if sender == "org.scarlet.sbus" && signal == "ServiceUnregistered" {
+                        if let Some(Argument::String(name)) = args.first() {
+                            if name == DESKTOP_FILE_MANAGER_BUS_NAME {
+                                PICKER_UI_EVENTS.lock().push(PickerUiEvent::ServiceGone);
+                            }
+                        }
+                    }
                     continue;
                 }
 
@@ -710,6 +723,11 @@ impl SettingsApp {
                 PickerUiEvent::OpenFailed(error) => {
                     PICKER_REQUEST_IN_FLIGHT.store(false, AtomicOrdering::Release);
                     println!("[settings] failed to open file picker: {error}");
+                }
+                PickerUiEvent::ServiceGone => {
+                    PICKER_REQUEST_IN_FLIGHT.store(false, AtomicOrdering::Release);
+                    self.picker_request_id.set(None);
+                    println!("[settings] file manager service gone, cancelling picker");
                 }
                 PickerUiEvent::Response {
                     request_id,

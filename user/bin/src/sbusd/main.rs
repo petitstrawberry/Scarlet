@@ -12,9 +12,10 @@ mod pending;
 use pending::{
     PendingCall, oldest_pending_id_for_destination, remove_pending_calls_for_disconnected_client,
 };
-use sbus::{DEFAULT_SOCKET_PATH, Message, ServiceInfo};
+use sbus::{Argument, DEFAULT_SOCKET_PATH, Message, ServiceInfo};
 use std::collections::BTreeMap;
 use std::io::{ErrorKind, Read, Write};
+use std::poll::{POLLERR, POLLHUP, POLLIN, POLLNVAL, POLLOUT, PollHandle, poll};
 use std::println;
 use std::socket::{ShutdownHow, Socket};
 use std::string::{String, ToString};
@@ -36,10 +37,25 @@ static CLIENTS: Mutex<BTreeMap<usize, Arc<Mutex<Socket>>>> = Mutex::new(BTreeMap
 static PENDING_CALLS: Mutex<BTreeMap<u64, PendingCall>> = Mutex::new(BTreeMap::new());
 static NEXT_PENDING_ID: Mutex<u64> = Mutex::new(1);
 
-const CLIENT_POLL_DELAY_MS: u64 = 1;
 const CLIENT_WRITE_TIMEOUT_MS: u64 = 1_000;
 const MAX_MESSAGE_SIZE_BYTES: usize = 64 * 1024;
 const MAX_MESSAGE_PAYLOAD_BYTES: usize = MAX_MESSAGE_SIZE_BYTES - sbus::MessageHeader::SIZE;
+
+// When a service disconnects, sbusd broadcasts this signal so callers waiting
+// on that service can abort instead of hanging forever.
+const SBUS_SELF_BUS_NAME: &str = "org.scarlet.sbus";
+const SBUS_SELF_OBJECT_PATH: &str = "/org/scarlet/sbus";
+const SBUS_SELF_INTERFACE: &str = "org.scarlet.sbus";
+const SBUS_SERVICE_UNREGISTERED_SIGNAL: &str = "ServiceUnregistered";
+
+/// How long `poll` blocks waiting for a client socket to become readable.
+/// Long enough that an idle handler thread sleeps instead of spinning, short
+/// enough to stay responsive. This replaces the previous 1 ms busy-poll.
+const CLIENT_READ_POLL_TIMEOUT_NS: i64 = 250_000_000;
+/// Total deadline for a single `write_all` call when the peer stops draining.
+const CLIENT_WRITE_TIMEOUT_NS: u64 = CLIENT_WRITE_TIMEOUT_MS * 1_000_000;
+/// Slice size for write-backoff polling so the total timeout is still enforced.
+const CLIENT_WRITE_POLL_SLICE_NS: u64 = 100_000_000;
 
 /// Connected clients
 struct Client {
@@ -142,8 +158,33 @@ fn handle_client(client_id: usize, mut read_socket: Socket, write_socket: Arc<Mu
 
     let mut buffer = [0u8; 4096];
     let mut read_buffer = Vec::new();
+    let raw_read_handle = read_socket.as_raw() as u32;
 
     'client: loop {
+        // Block until the socket is readable instead of busy-polling. A
+        // duplicated read handle that never returns EOF (a known risk with
+        // the handle-table duplication path) previously turned the 1 ms sleep
+        // into a full-core spin. `poll` sleeps in the kernel until there is
+        // genuine work, eliminating that failure mode entirely.
+        let mut poll_handles = [PollHandle::new(raw_read_handle, POLLIN)];
+        match poll(&mut poll_handles, CLIENT_READ_POLL_TIMEOUT_NS) {
+            Ok(0) => continue,
+            Ok(_) => {
+                let revents = poll_handles[0].revents;
+                if revents & POLLNVAL != 0 {
+                    println!("[Client {}] Poll returned POLLNVAL", client_id);
+                    break;
+                }
+                // POLLIN, POLLHUP, and POLLERR may all coexist with pending
+                // data. Attempt a read in every case and let the read result
+                // decide whether the connection is truly gone.
+            }
+            Err(code) => {
+                println!("[Client {}] Poll error: {}", client_id, code);
+                break;
+            }
+        }
+
         let read_result = read_socket.read(&mut buffer);
 
         match read_result {
@@ -189,7 +230,10 @@ fn handle_client(client_id: usize, mut read_socket: Socket, write_socket: Arc<Mu
                 }
             }
             Err(e) if e.kind() == ErrorKind::WouldBlock => {
-                thread::sleep(core::time::Duration::from_millis(CLIENT_POLL_DELAY_MS));
+                // Spurious wakeup after poll reported readability. Just loop
+                // back to poll instead of sleeping — the kernel will block
+                // until real data arrives.
+                continue;
             }
             Err(e) => {
                 println!("[Client {}] Read error: {:?}", client_id, e);
@@ -212,7 +256,7 @@ fn handle_client(client_id: usize, mut read_socket: Socket, write_socket: Arc<Mu
         }
         to_remove
     };
-    for bus_name in removed_services {
+    for bus_name in &removed_services {
         println!("[Client {}] Unregistering service: {}", client_id, bus_name);
     }
 
@@ -222,6 +266,12 @@ fn handle_client(client_id: usize, mut read_socket: Socket, write_socket: Arc<Mu
         clients.remove(&client_id);
     }
     println!("[Client {}] Removed from client registry", client_id);
+
+    // Broadcast ServiceUnregistered for each removed service so callers
+    // waiting on them can abort their wait instead of hanging forever.
+    for bus_name in &removed_services {
+        broadcast_service_unregistered(bus_name);
+    }
 
     let failed_calls = {
         let mut pending_calls = PENDING_CALLS.lock();
@@ -517,6 +567,44 @@ fn get_client_socket(client_id: usize) -> Option<Arc<Mutex<Socket>>> {
     clients.get(&client_id).cloned()
 }
 
+/// Broadcast a ServiceUnregistered signal to every connected client.
+///
+/// Callers that are blocked waiting on a reply from the vanished service can
+/// observe this signal and abort their wait, preventing an indefinite hang
+/// when the service process crashes mid-operation (e.g. Files crashing while
+/// its picker window is open).
+fn broadcast_service_unregistered(bus_name: &str) {
+    let mut args = Vec::new();
+    args.push(Argument::String(String::from(bus_name)));
+    let signal = Message::Signal {
+        sender: String::from(SBUS_SELF_BUS_NAME),
+        path: String::from(SBUS_SELF_OBJECT_PATH),
+        interface: String::from(SBUS_SELF_INTERFACE),
+        signal: String::from(SBUS_SERVICE_UNREGISTERED_SIGNAL),
+        args,
+    };
+    let Ok(bytes) = signal.to_bytes() else {
+        return;
+    };
+
+    let destinations: Vec<(usize, Arc<Mutex<Socket>>)> = {
+        let clients = CLIENTS.lock();
+        clients
+            .iter()
+            .map(|(id, sock)| (*id, sock.clone()))
+            .collect()
+    };
+    for (destination_id, destination_socket) in destinations {
+        let mut sock = destination_socket.lock();
+        if let Err(error) = write_all(&mut sock, &bytes) {
+            println!(
+                "sbusd: Failed to broadcast ServiceUnregistered({}) to client {}: {}",
+                bus_name, destination_id, error
+            );
+        }
+    }
+}
+
 fn register_pending_call(pending: PendingCall) -> u64 {
     let pending_id = {
         let mut next_pending_id = NEXT_PENDING_ID.lock();
@@ -562,11 +650,15 @@ fn quarantine_client(client_id: usize) -> Vec<PendingCall> {
         }
         to_remove
     };
-    for bus_name in removed_services {
+    for bus_name in &removed_services {
         println!(
             "sbusd: Quarantined service {} after client {} write failure",
             bus_name, client_id
         );
+    }
+
+    for bus_name in &removed_services {
+        broadcast_service_unregistered(bus_name);
     }
 
     let mut pending_calls = PENDING_CALLS.lock();
@@ -629,7 +721,8 @@ fn send_message(socket: &Arc<Mutex<Socket>>, msg: &Message) -> Result<(), &'stat
 /// Write all bytes to socket
 fn write_all(socket: &mut Socket, bytes: &[u8]) -> Result<(), &'static str> {
     let mut written = 0;
-    let mut waited_ms = 0u64;
+    let mut waited_ns = 0u64;
+    let raw_handle = socket.as_raw() as u32;
     while written < bytes.len() {
         match socket.write(&bytes[written..]) {
             Ok(0) => {
@@ -639,22 +732,35 @@ fn write_all(socket: &mut Socket, bytes: &[u8]) -> Result<(), &'static str> {
             }
             Ok(n) => {
                 written += n;
+                waited_ns = 0;
                 println!("[write_all] Wrote {} bytes (total: {})", n, written);
             }
             Err(e) => {
                 if e.kind() == ErrorKind::WouldBlock {
-                    if waited_ms >= CLIENT_WRITE_TIMEOUT_MS {
+                    if waited_ns >= CLIENT_WRITE_TIMEOUT_NS {
                         println!(
                             "[write_all] Timed out after {}ms (wrote {} of {} bytes)",
-                            waited_ms,
+                            waited_ns / 1_000_000,
                             written,
                             bytes.len()
                         );
                         let _ = socket.shutdown(ShutdownHow::Both);
                         return Err("Failed to send: timed out");
                     }
-                    thread::sleep(core::time::Duration::from_millis(CLIENT_POLL_DELAY_MS));
-                    waited_ms = waited_ms.saturating_add(CLIENT_POLL_DELAY_MS);
+                    // Block in the kernel until the peer's receive buffer has
+                    // room, instead of busy-sleeping in 1 ms slices. Poll in
+                    // bounded slices so the overall write deadline is still
+                    // enforced.
+                    let remaining_ns = CLIENT_WRITE_TIMEOUT_NS.saturating_sub(waited_ns);
+                    let slice_ns = remaining_ns.min(CLIENT_WRITE_POLL_SLICE_NS) as i64;
+                    let mut poll_handles = [PollHandle::new(raw_handle, POLLOUT)];
+                    let _ = poll(&mut poll_handles, slice_ns);
+                    if poll_handles[0].revents & (POLLERR | POLLHUP | POLLNVAL) != 0 {
+                        // The peer went away or the handle is invalid. Fall
+                        // through to the next write attempt so the error path
+                        // (Ok(0) or a hard Err) can shut things down cleanly.
+                    }
+                    waited_ns = waited_ns.saturating_add(slice_ns as u64);
                 } else {
                     println!("[write_all] Write error: {:?}", e);
                     let _ = socket.shutdown(ShutdownHow::Both);
