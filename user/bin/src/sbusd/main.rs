@@ -718,11 +718,19 @@ fn send_message(socket: &Arc<Mutex<Socket>>, msg: &Message) -> Result<(), &'stat
     Ok(())
 }
 
-/// Write all bytes to socket
+/// Read the monotonic clock used for write-stall deadlines.
+fn monotonic_time_ns() -> u64 {
+    use std::syscall::{Syscall, syscall0};
+
+    syscall0(Syscall::MonotonicTime) as u64
+}
+
+/// Write all bytes to socket.
 fn write_all(socket: &mut Socket, bytes: &[u8]) -> Result<(), &'static str> {
     let mut written = 0;
-    let mut waited_ns = 0u64;
     let raw_handle = socket.as_raw() as u32;
+    let mut stall_deadline_ns = monotonic_time_ns().saturating_add(CLIENT_WRITE_TIMEOUT_NS);
+
     while written < bytes.len() {
         match socket.write(&bytes[written..]) {
             Ok(0) => {
@@ -732,40 +740,42 @@ fn write_all(socket: &mut Socket, bytes: &[u8]) -> Result<(), &'static str> {
             }
             Ok(n) => {
                 written += n;
-                waited_ns = 0;
+                stall_deadline_ns = monotonic_time_ns().saturating_add(CLIENT_WRITE_TIMEOUT_NS);
                 println!("[write_all] Wrote {} bytes (total: {})", n, written);
             }
-            Err(e) => {
-                if e.kind() == ErrorKind::WouldBlock {
-                    if waited_ns >= CLIENT_WRITE_TIMEOUT_NS {
-                        println!(
-                            "[write_all] Timed out after {}ms (wrote {} of {} bytes)",
-                            waited_ns / 1_000_000,
-                            written,
-                            bytes.len()
-                        );
-                        let _ = socket.shutdown(ShutdownHow::Both);
-                        return Err("Failed to send: timed out");
-                    }
-                    // Block in the kernel until the peer's receive buffer has
-                    // room, instead of busy-sleeping in 1 ms slices. Poll in
-                    // bounded slices so the overall write deadline is still
-                    // enforced.
-                    let remaining_ns = CLIENT_WRITE_TIMEOUT_NS.saturating_sub(waited_ns);
-                    let slice_ns = remaining_ns.min(CLIENT_WRITE_POLL_SLICE_NS) as i64;
-                    let mut poll_handles = [PollHandle::new(raw_handle, POLLOUT)];
-                    let _ = poll(&mut poll_handles, slice_ns);
-                    if poll_handles[0].revents & (POLLERR | POLLHUP | POLLNVAL) != 0 {
-                        // The peer went away or the handle is invalid. Fall
-                        // through to the next write attempt so the error path
-                        // (Ok(0) or a hard Err) can shut things down cleanly.
-                    }
-                    waited_ns = waited_ns.saturating_add(slice_ns as u64);
-                } else {
-                    println!("[write_all] Write error: {:?}", e);
+            Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                let now_ns = monotonic_time_ns();
+                if now_ns >= stall_deadline_ns {
+                    println!(
+                        "[write_all] Timed out after {}ms (wrote {} of {} bytes)",
+                        CLIENT_WRITE_TIMEOUT_MS,
+                        written,
+                        bytes.len()
+                    );
                     let _ = socket.shutdown(ShutdownHow::Both);
-                    return Err("Failed to send");
+                    return Err("Failed to send: timed out");
                 }
+
+                // A readiness wait may return spuriously. Derive the
+                // timeout from the monotonic deadline instead of adding
+                // the requested poll slice to a synthetic elapsed counter.
+                let remaining_ns = stall_deadline_ns.saturating_sub(now_ns);
+                let slice_ns = remaining_ns.min(CLIENT_WRITE_POLL_SLICE_NS) as i64;
+                let mut poll_handles = [PollHandle::new(raw_handle, POLLOUT)];
+                if let Err(code) = poll(&mut poll_handles, slice_ns) {
+                    println!("[write_all] Poll error while waiting to write: {}", code);
+                    let _ = socket.shutdown(ShutdownHow::Both);
+                    return Err("Failed to wait for writable socket");
+                }
+                if poll_handles[0].revents & (POLLERR | POLLHUP | POLLNVAL) != 0 {
+                    // Retry once so the socket operation reports the
+                    // precise disconnect/broken-pipe condition.
+                }
+            }
+            Err(e) => {
+                println!("[write_all] Write error: {:?}", e);
+                let _ = socket.shutdown(ShutdownHow::Both);
+                return Err("Failed to send");
             }
         }
     }

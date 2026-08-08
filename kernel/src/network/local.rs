@@ -305,6 +305,9 @@ pub struct LocalSocket {
     /// Waker for blocking recv_handle() operations
     handle_waker: Waker,
 
+    /// Waker for writers blocked on peer receive-buffer capacity.
+    write_waker: Waker,
+
     /// Nonblocking I/O flag
     nonblocking: IrqRwSpinLock<bool>,
 }
@@ -312,6 +315,17 @@ pub struct LocalSocket {
 impl LocalSocket {
     pub(crate) fn init_self_weak(this: &Arc<Self>) {
         *this.self_weak.write() = Arc::downgrade(this);
+    }
+
+    fn upgrade_peer(&self) -> Option<Arc<Self>> {
+        let peer = self.peer_socket.read();
+        peer.as_ref().and_then(Weak::upgrade)
+    }
+
+    fn wake_peer_writer(&self) {
+        if let Some(peer) = self.upgrade_peer() {
+            peer.write_waker.wake_all();
+        }
     }
 
     /// Safely downcast a SocketObject to LocalSocket using Any trait
@@ -348,6 +362,7 @@ impl LocalSocket {
             accept_waker: Waker::new_interruptible("socket_accept"),
             read_waker: Waker::new_interruptible("socket_read"),
             handle_waker: Waker::new_interruptible("socket_handle"),
+            write_waker: Waker::new_interruptible("socket_write"),
             self_weak: IrqRwSpinLock::new(Weak::new()),
             nonblocking: IrqRwSpinLock::new(false),
         }
@@ -377,23 +392,24 @@ impl LocalSocket {
             return Err(IpcError::InvalidState);
         }
 
-        // Get peer socket reference
-        let peer_weak = self.peer_socket.read();
-        let peer_weak_ref = peer_weak.as_ref().ok_or(IpcError::PeerClosed)?;
-        let peer = peer_weak_ref.upgrade().ok_or(IpcError::PeerClosed)?;
+        let peer = self.upgrade_peer().ok_or(IpcError::PeerClosed)?;
 
         let peer_buffer = peer.read_buffer.read();
         if *peer_buffer.closed.read() {
             return Err(IpcError::PeerClosed);
         }
         let mut peer_queue = peer_buffer.queue.write();
+        let became_readable = peer_queue.is_empty();
         peer_queue.push_handle(object, metadata)?;
         drop(peer_queue);
         drop(peer_buffer);
 
-        // A handle is readable state for recvmsg/select as well as recv_handle.
-        peer.handle_waker.wake_one();
-        peer.read_waker.wake_one();
+        // Readiness is level-triggered by the queue state. Wake only on the
+        // empty-to-nonempty edge so stale Waker credits cannot accumulate.
+        if became_readable {
+            peer.handle_waker.wake_one();
+            peer.read_waker.wake_one();
+        }
 
         Ok(())
     }
@@ -434,23 +450,23 @@ impl LocalSocket {
             return Err(IpcError::InvalidState);
         }
 
-        // Get peer socket reference
-        let peer_weak = self.peer_socket.read();
-        let peer_weak_ref = peer_weak.as_ref().ok_or(IpcError::PeerClosed)?;
-        let peer = peer_weak_ref.upgrade().ok_or(IpcError::PeerClosed)?;
+        let peer = self.upgrade_peer().ok_or(IpcError::PeerClosed)?;
 
         let peer_buffer = peer.read_buffer.read();
         if *peer_buffer.closed.read() {
             return Err(IpcError::PeerClosed);
         }
         let mut peer_queue = peer_buffer.queue.write();
+        let became_readable = peer_queue.is_empty();
         peer_queue.push_handle_data(object, metadata, data)?;
         drop(peer_queue);
         drop(peer_buffer);
 
-        // Wake the peer after BOTH handle and data are available
-        peer.handle_waker.wake_one();
-        peer.read_waker.wake_one();
+        // Wake after the complete record becomes the first readable item.
+        if became_readable {
+            peer.handle_waker.wake_one();
+            peer.read_waker.wake_one();
+        }
 
         Ok(())
     }
@@ -590,6 +606,7 @@ impl LocalSocket {
             accept_waker: Waker::new_interruptible("socket_accept"),
             read_waker: Waker::new_interruptible("socket_read"),
             handle_waker: Waker::new_interruptible("socket_handle"),
+            write_waker: Waker::new_interruptible("socket_write"),
             self_weak: IrqRwSpinLock::new(Weak::new()),
             nonblocking: IrqRwSpinLock::new(false),
         });
@@ -610,6 +627,7 @@ impl LocalSocket {
             accept_waker: Waker::new_interruptible("socket_accept"),
             read_waker: Waker::new_interruptible("socket_read"),
             handle_waker: Waker::new_interruptible("socket_handle"),
+            write_waker: Waker::new_interruptible("socket_write"),
             self_weak: IrqRwSpinLock::new(Weak::new()),
             nonblocking: IrqRwSpinLock::new(false),
         });
@@ -697,27 +715,38 @@ impl StreamOps for LocalSocket {
         }
 
         loop {
-            {
+            let (bytes_to_read, blocked_by_ordered_segment, freed_full_buffer) = {
                 let read_buf_arc = self.read_buffer.read();
                 let mut queue = read_buf_arc.queue.write();
+                let was_full = queue.stream_bytes == MAX_STREAM_BUFFER_SIZE;
+                let bytes_to_read = queue.read_bytes(buffer);
+                let blocked_by_ordered_segment = bytes_to_read.is_none() && !queue.is_empty();
+                let freed_full_buffer =
+                    was_full && matches!(bytes_to_read, Some(bytes) if bytes > 0);
+                (bytes_to_read, blocked_by_ordered_segment, freed_full_buffer)
+            };
 
-                if let Some(bytes_to_read) = queue.read_bytes(buffer) {
-                    return Ok(bytes_to_read);
+            if let Some(bytes_to_read) = bytes_to_read {
+                // Writers wait only while the byte queue is full. Wake them on
+                // the full-to-not-full transition, not after every read, so the
+                // Waker cannot collect stale readiness credits.
+                if freed_full_buffer {
+                    self.wake_peer_writer();
                 }
+                return Ok(bytes_to_read);
+            }
 
-                // A different segment type is next. Returning WouldBlock even
-                // for a blocking socket lets a protocol dispatcher select the
-                // matching receive operation without skipping causal order.
-                if !queue.is_empty() {
-                    return Err(StreamError::WouldBlock);
-                }
-            } // Release locks before checking nonblocking/EOF
+            // A different ordered segment is first. Let the protocol
+            // dispatcher select recv_handle/recv_handle_and_data instead.
+            if blocked_by_ordered_segment {
+                return Err(StreamError::WouldBlock);
+            }
 
             {
                 let read_buf_arc = self.read_buffer.read();
 
-                // Check EOF before honoring non-blocking mode. A disconnected peer is
-                // a completed read condition, not WouldBlock.
+                // EOF is a completed read condition, including on a
+                // non-blocking socket.
                 let my_state = *self.state.read();
                 if my_state == SocketState::Closed {
                     return Ok(0);
@@ -736,70 +765,81 @@ impl StreamOps for LocalSocket {
                     }
                 }
 
-                // Check if this read buffer has been closed by peer's shutdown/drop.
                 if *read_buf_arc.closed.read() {
                     return Ok(0);
                 }
             }
 
-            // Check nonblocking mode before blocking.
             if *self.nonblocking.read() {
                 return Err(StreamError::WouldBlock);
             }
 
-            {
-                let read_buf_arc = self.read_buffer.read();
-
-                // Register this task as waiting to read
-                if let Some(task) = mytask() {
-                    drop(read_buf_arc);
-
-                    // Block the task
-                    self.read_waker.wait(task.get_id(), task.get_trapframe());
-                } else {
-                    return Err(StreamError::WouldBlock);
-                }
-            } // Release lock
-            // When woken, loop back to check for data or shutdown
+            if let Some(task) = mytask() {
+                self.read_waker.wait(task.get_id(), task.get_trapframe());
+            } else {
+                return Err(StreamError::WouldBlock);
+            }
         }
     }
 
     fn write(&self, data: &[u8]) -> Result<usize, StreamError> {
+        use crate::task::mytask;
+
         if data.is_empty() {
             return Ok(0);
         }
 
-        if *self.state.read() == SocketState::Closed {
-            return Err(StreamError::Closed);
-        }
-
-        let peer_buffer = self.peer_read_buffer.read();
-        match peer_buffer.as_ref() {
-            Some(peer_sock_buffer) => {
-                if *peer_sock_buffer.closed.read() {
-                    return Err(StreamError::Closed);
-                }
-
-                let mut peer_queue = peer_sock_buffer.queue.write();
-                peer_queue.push_bytes(data)?;
-                let bytes_written = data.len();
-
-                drop(peer_queue); // Release queue lock
-
-                // Wake tasks waiting on read/select/poll.
-                if let Some(peer_weak) = self.peer_socket.read().as_ref() {
-                    if let Some(peer) = peer_weak.upgrade() {
-                        peer.read_waker.wake_one();
-                    }
-                }
-
-                drop(peer_buffer); // Release peer_buffer lock
-
-                Ok(bytes_written)
+        loop {
+            if *self.state.read() == SocketState::Closed {
+                return Err(StreamError::Closed);
             }
-            None => {
-                // crate::println!("[LocalSocket] write: peer buffer is None (closed)");
-                Err(StreamError::Closed)
+
+            let peer = self.upgrade_peer().ok_or(StreamError::Closed)?;
+            let peer_buffer = self
+                .peer_read_buffer
+                .read()
+                .as_ref()
+                .cloned()
+                .ok_or(StreamError::Closed)?;
+            if *peer_buffer.closed.read() {
+                return Err(StreamError::Closed);
+            }
+
+            let (bytes_written, became_readable) = {
+                let mut peer_queue = peer_buffer.queue.write();
+                let available = MAX_STREAM_BUFFER_SIZE.saturating_sub(peer_queue.stream_bytes);
+                if available == 0 {
+                    (0, false)
+                } else {
+                    let bytes_written = available.min(data.len());
+                    let became_readable = peer_queue.is_empty();
+                    peer_queue.push_bytes(&data[..bytes_written])?;
+                    (bytes_written, became_readable)
+                }
+            };
+
+            if bytes_written > 0 {
+                // Queue state carries level readiness. Only publish the
+                // empty-to-nonempty transition to avoid stale wake credits.
+                if became_readable {
+                    peer.read_waker.wake_one();
+                }
+                return Ok(bytes_written);
+            }
+
+            // Do not retain an Arc to the peer while sleeping. The last
+            // peer handle must be able to run Drop and wake this writer.
+            drop(peer_buffer);
+            drop(peer);
+
+            if *self.nonblocking.read() {
+                return Err(StreamError::WouldBlock);
+            }
+
+            if let Some(task) = mytask() {
+                self.write_waker.wait(task.get_id(), task.get_trapframe());
+            } else {
+                return Err(StreamError::WouldBlock);
             }
         }
     }
@@ -836,23 +876,39 @@ impl Drop for LocalSocket {
             NetworkManager::get_manager().unregister_named_socket(path);
         }
 
-        if let Some(peer_buf) = self.peer_read_buffer.read().as_ref() {
-            *peer_buf.closed.write() = true;
+        // Publish closure before waking either endpoint.
+        *self.state.write() = SocketState::Closed;
+
+        // Never acquire locks inside the peer while retaining one of this
+        // endpoint's peer-reference locks. Concurrent endpoint teardown on
+        // different CPUs otherwise forms A.peer_socket -> B.peer_socket and
+        // B.peer_socket -> A.peer_socket lock inversion.
+        let own_read_buffer = self.read_buffer.read().clone();
+        let peer_read_buffer = self.peer_read_buffer.write().take();
+        let peer = self
+            .peer_socket
+            .write()
+            .take()
+            .and_then(|peer| peer.upgrade());
+
+        // The peer writes into our read buffer, while we write into the
+        // peer read buffer. Closing both shared buffers communicates EOF
+        // and broken-pipe state without mutating the peer's link fields.
+        *own_read_buffer.closed.write() = true;
+        if let Some(peer_read_buffer) = peer_read_buffer.as_ref() {
+            *peer_read_buffer.closed.write() = true;
         }
 
-        if let Some(peer_weak) = self.peer_socket.read().as_ref()
-            && let Some(peer) = peer_weak.upgrade()
-        {
-            *peer.peer_read_buffer.write() = None;
-            *peer.peer_socket.write() = None;
+        if let Some(peer) = peer {
             peer.read_waker.wake_all();
             peer.handle_waker.wake_all();
+            peer.write_waker.wake_all();
         }
 
         self.accept_waker.wake_all();
         self.read_waker.wake_all();
         self.handle_waker.wake_all();
-        *self.state.write() = SocketState::Closed;
+        self.write_waker.wake_all();
 
         NetworkManager::get_manager().remove_socket_by_ptr(self as *const Self as usize);
     }
@@ -963,6 +1019,7 @@ impl SocketControl for LocalSocket {
             accept_waker: Waker::new_interruptible("socket_accept"),
             read_waker: Waker::new_interruptible("socket_read"),
             handle_waker: Waker::new_interruptible("socket_handle"),
+            write_waker: Waker::new_interruptible("socket_write"),
             self_weak: IrqRwSpinLock::new(Weak::new()),
             nonblocking: IrqRwSpinLock::new(false),
         });
@@ -1017,66 +1074,51 @@ impl SocketControl for LocalSocket {
     }
 
     fn shutdown(&self, how: ShutdownHow) -> Result<(), SocketError> {
-        let mut state = self.state.write();
-        if *state != SocketState::Connected {
+        if *self.state.read() != SocketState::Connected {
             return Err(SocketError::NotConnected);
         }
 
-        // crate::println!("[LocalSocket] shutdown({:?}) called", how);
-
         match how {
             ShutdownHow::Read => {
-                *self.read_buffer.read().closed.write() = true;
+                let read_buffer = self.read_buffer.read().clone();
+                *read_buffer.closed.write() = true;
                 self.read_waker.wake_all();
                 self.handle_waker.wake_all();
+                if let Some(peer) = self.upgrade_peer() {
+                    peer.write_waker.wake_all();
+                }
                 Ok(())
             }
             ShutdownHow::Write => {
-                // Mark peer's read buffer as closed so they detect EOF, while
-                // keeping our read side open for the peer's response.
-                if let Some(peer_buf) = self.peer_read_buffer.read().as_ref() {
-                    // crate::println!("[LocalSocket] shutdown: marking peer_read_buffer as closed");
-                    *peer_buf.closed.write() = true;
+                let peer_read_buffer = self.peer_read_buffer.read().as_ref().cloned();
+                if let Some(peer_read_buffer) = peer_read_buffer {
+                    *peer_read_buffer.closed.write() = true;
                 }
-
-                // Wake up peer's read_waker so it can detect the shutdown
-                if let Some(peer_weak) = self.peer_socket.read().as_ref() {
-                    if let Some(peer) = peer_weak.upgrade() {
-                        // crate::println!("[LocalSocket] shutdown: waking peer's read_waker");
-                        peer.read_waker.wake_one();
-                        // Also wake any tasks waiting for handle transfer
-                        peer.handle_waker.wake_all();
-                    } else {
-                        // crate::println!("[LocalSocket] shutdown: peer already dropped");
-                    }
-                } else {
-                    // No direct peer reference - wake via waker
-                    // crate::println!(
-                    //     "[LocalSocket] shutdown: no peer_socket, waking via read_waker"
-                    // );
-                    self.read_waker.wake_all(); // Wake any waiting readers
-                    self.handle_waker.wake_all(); // Wake any waiting handle receivers
+                if let Some(peer) = self.upgrade_peer() {
+                    peer.read_waker.wake_all();
+                    peer.handle_waker.wake_all();
                 }
-
+                self.write_waker.wake_all();
                 Ok(())
             }
             ShutdownHow::Both => {
-                *state = SocketState::Closed;
-                *self.read_buffer.read().closed.write() = true;
+                *self.state.write() = SocketState::Closed;
 
-                if let Some(peer_buf) = self.peer_read_buffer.read().as_ref() {
-                    *peer_buf.closed.write() = true;
+                let read_buffer = self.read_buffer.read().clone();
+                *read_buffer.closed.write() = true;
+                let peer_read_buffer = self.peer_read_buffer.read().as_ref().cloned();
+                if let Some(peer_read_buffer) = peer_read_buffer {
+                    *peer_read_buffer.closed.write() = true;
                 }
 
-                if let Some(peer_weak) = self.peer_socket.read().as_ref()
-                    && let Some(peer) = peer_weak.upgrade()
-                {
-                    peer.read_waker.wake_one();
+                if let Some(peer) = self.upgrade_peer() {
+                    peer.read_waker.wake_all();
                     peer.handle_waker.wake_all();
+                    peer.write_waker.wake_all();
                 }
                 self.read_waker.wake_all();
                 self.handle_waker.wake_all();
-
+                self.write_waker.wake_all();
                 Ok(())
             }
         }
@@ -1232,15 +1274,17 @@ impl Selectable for LocalSocket {
                 }
             }
             SocketState::Connected if interest.write => {
-                let write_closed = match self.peer_read_buffer.read().as_ref() {
-                    Some(peer_buffer) => *peer_buffer.closed.read(),
-                    None => true,
-                };
-                return if write_closed {
-                    SelectWaitOutcome::TimedOut
+                if min_wait_ticks > 0 {
+                    self.write_waker.wait_with_min_timeout(
+                        task_id,
+                        trapframe,
+                        timeout_ticks,
+                        min_wait_ticks,
+                    )
                 } else {
-                    SelectWaitOutcome::Ready
-                };
+                    self.write_waker
+                        .wait_with_timeout(task_id, trapframe, timeout_ticks)
+                }
             }
             _ => true,
         };
@@ -1422,6 +1466,32 @@ mod tests {
         let mut buffer = [0u8; 8];
         let read = sock2.read(&mut buffer).unwrap();
         assert_eq!(read, 0, "non-blocking peer read should observe EOF");
+    }
+
+    #[test_case]
+    fn test_nonblocking_write_backpressure_recovers_after_peer_read() {
+        let (writer, reader) =
+            LocalSocket::create_connected_pair("server".to_string(), "client".to_string());
+        writer.set_nonblocking(true);
+
+        let payload = alloc::vec![0x5a; MAX_STREAM_BUFFER_SIZE + 1];
+        assert_eq!(writer.write(&payload).unwrap(), MAX_STREAM_BUFFER_SIZE);
+        assert!(matches!(
+            writer.write(&payload[MAX_STREAM_BUFFER_SIZE..]),
+            Err(StreamError::WouldBlock)
+        ));
+        assert!(
+            !writer.current_ready(ReadyInterest::write()).write,
+            "a full peer buffer must not report POLLOUT"
+        );
+
+        let mut byte = [0u8; 1];
+        assert_eq!(reader.read(&mut byte).unwrap(), 1);
+        assert!(
+            writer.current_ready(ReadyInterest::write()).write,
+            "peer consumption must restore POLLOUT"
+        );
+        assert_eq!(writer.write(&payload[..1]).unwrap(), 1);
     }
 
     #[test_case]
