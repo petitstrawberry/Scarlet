@@ -698,7 +698,7 @@ pub fn setup_trampoline_for_user(_manager: &VirtualMemoryManager) {}
 /// This is the counterpart to [`RootPageTableGuard::unmap_all_no_flush`]:
 /// batched page-table rebuild callers (e.g. `exec`) clear the old address
 /// space without flushing, install fresh mappings, then call this once to
- /// publish the entire set of changes to all PEs.
+/// publish the entire set of changes to all PEs.
 pub fn flush_all_tlb() {
     mmu::invalidate_stage1_translations_inner_shareable();
 }

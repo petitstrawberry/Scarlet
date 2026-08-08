@@ -10,8 +10,8 @@ use hashbrown::HashMap;
 use crate::arch::{self, interrupt::enable_external_interrupts};
 use crate::device::manager::DeviceManager;
 use crate::device::platform::resource::PlatformDeviceResource;
-use crate::sync::{IrqSpinLock, Lazy, Once};
 use crate::sync::IrqRwSpinLock;
+use crate::sync::{IrqSpinLock, Lazy, Once};
 
 pub mod controllers;
 pub mod msi;

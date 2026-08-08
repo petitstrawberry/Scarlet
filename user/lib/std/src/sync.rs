@@ -108,8 +108,7 @@ impl Drop for OnceInitGuard<'_> {
         if !self.committed {
             // Allow a later caller to retry if the initializer unwinds before
             // publishing a value.
-            self.state
-                .store(ONCE_UNINITIALIZED, Ordering::Release);
+            self.state.store(ONCE_UNINITIALIZED, Ordering::Release);
         }
     }
 }
