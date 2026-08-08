@@ -167,23 +167,3 @@ dependencies = [
  "log",
  "num-traits",
 ]
-
-[[patch.unused]]
-name = "sgfx"
-version = "0.16.0"
-
-[[patch.unused]]
-name = "sws-client"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "sws-protocol"
-version = "0.16.0"
-
-[[patch.unused]]
-name = "scarlet-ui"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "scarlet-ui-macros"
-version = "0.1.0"
