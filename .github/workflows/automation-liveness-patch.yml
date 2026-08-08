@@ -1,0 +1,741 @@
+name: Apply picker and SWS liveness fix
+
+on:
+  push:
+    branches:
+      - automation/fix-picker-sws-liveness-20260808
+    paths:
+      - .github/workflows/automation-liveness-patch.yml
+  pull_request:
+    branches:
+      - dev
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: automation/fix-picker-sws-liveness-20260808
+          fetch-depth: 0
+
+      - name: Apply source changes
+        shell: bash
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+
+          def replace_once(path: str, old: str, new: str) -> None:
+              target = Path(path)
+              text = target.read_text()
+              count = text.count(old)
+              if count != 1:
+                  raise RuntimeError(f"{path}: expected one match, found {count}\n--- old ---\n{old}")
+              target.write_text(text.replace(old, new, 1))
+
+          video = "user/video_player/src/main.rs"
+          replace_once(
+              video,
+              '''const FILE_PICKER_RETRY_DELAY_MS: u64 = 100;
+const FILE_PICKER_RETRY_ATTEMPTS: usize = 20;''',
+              '''const FILE_PICKER_RETRY_DELAY_MS: u64 = 100;
+const FILE_PICKER_METHOD_TIMEOUT_MS: u64 = 1_000;
+const FILE_PICKER_RETRY_ATTEMPTS: usize = 5;''',
+          )
+          replace_once(
+              video,
+              '''impl Drop for VideoPlayerRuntime {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
+
+#[derive(Clone)]
+struct VideoPlayerApp {''',
+              '''impl Drop for VideoPlayerRuntime {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum PickerRequestState {
+    Idle,
+    Opening,
+    Waiting(String),
+}
+
+impl PickerRequestState {
+    fn begin_open(&mut self) -> bool {
+        if !matches!(&*self, Self::Idle) {
+            return false;
+        }
+        *self = Self::Opening;
+        true
+    }
+
+    fn set_waiting(&mut self, request_id: String) -> bool {
+        if !matches!(&*self, Self::Opening) {
+            return false;
+        }
+        *self = Self::Waiting(request_id);
+        true
+    }
+
+    fn complete(&mut self, response_id: &str) -> bool {
+        let matches_request = match self {
+            Self::Waiting(request_id) => request_id == response_id,
+            Self::Idle | Self::Opening => false,
+        };
+        if matches_request {
+            *self = Self::Idle;
+        }
+        matches_request
+    }
+
+    fn reset(&mut self) {
+        *self = Self::Idle;
+    }
+}
+
+#[derive(Clone)]
+struct VideoPlayerApp {''',
+          )
+          replace_once(
+              video,
+              '''    picker_request_id: Arc<Mutex<Option<String>>>,''',
+              '''    picker_request: Arc<Mutex<PickerRequestState>>,''',
+          )
+          replace_once(
+              video,
+              '''            picker_request_id: Arc::new(Mutex::new(None)),''',
+              '''            picker_request: Arc::new(Mutex::new(PickerRequestState::Idle)),''',
+          )
+          replace_once(
+              video,
+              '''        let picker_request_id = self.picker_request_id.clone();''',
+              '''        let picker_request = self.picker_request.clone();
+        let picker_runtime = self.runtime.clone();''',
+          )
+          replace_once(
+              video,
+              '''                            .on_activate(Arc::new(move || {
+                                request_video_picker(picker_request_id.clone());
+                            })),''',
+              '''                            .on_activate(Arc::new(move || {
+                                if let Some(worker) = start_video_picker_request(
+                                    picker_request.clone(),
+                                    picker_runtime.shutdown.clone(),
+                                ) {
+                                    picker_runtime.add_worker(worker);
+                                }
+                            })),''',
+          )
+          replace_once(
+              video,
+              '''            self.picker_request_id.clone(),''',
+              '''            self.picker_request.clone(),''',
+          )
+          replace_once(
+              video,
+              '''fn request_video_picker(request_id: Arc<Mutex<Option<String>>>) {
+    let mut last_error = None;
+    for attempt in 0..FILE_PICKER_RETRY_ATTEMPTS {
+        let result = SbusConnection::connect().and_then(|mut connection| {
+            connection.call_method_timeout(
+                DESKTOP_FILE_MANAGER_BUS_NAME,
+                DESKTOP_FILE_MANAGER_OBJECT_PATH,
+                DESKTOP_FILE_MANAGER_INTERFACE,
+                DESKTOP_FILE_MANAGER_OPEN_FILE_METHOD,
+                vec![
+                    Argument::String(String::from("Open Video")),
+                    Argument::String(home_path()),
+                    Argument::String(String::from("video/*")),
+                    Argument::Boolean(false),
+                    Argument::Boolean(false),
+                ],
+                3_000,
+            )
+        });
+
+        match result {
+            Ok(arguments) => match arguments.first() {
+                Some(Argument::String(id)) => {
+                    *request_id.lock() = Some(id.clone());
+                    return;
+                }
+                _ => {
+                    println!("[{}] Files returned no picker request id", APP_NAME);
+                    return;
+                }
+            },
+            Err(error) => {
+                last_error = Some(error);
+                if attempt == 0 {
+                    let _ = ensure_files_service();
+                }
+                thread::sleep(Duration::from_millis(FILE_PICKER_RETRY_DELAY_MS));
+            }
+        }
+    }
+    println!("[{}] cannot open video picker: {:?}", APP_NAME, last_error);
+}''',
+              '''fn start_video_picker_request(
+    request: Arc<Mutex<PickerRequestState>>,
+    shutdown: Arc<AtomicBool>,
+) -> Option<JoinHandle> {
+    if !request.lock().begin_open() {
+        return None;
+    }
+
+    Some(
+        thread::Builder::new()
+            .name("video-picker-open")
+            .spawn(move || request_video_picker(request, shutdown))
+            .expect("failed to spawn video picker request thread"),
+    )
+}
+
+fn request_video_picker(request: Arc<Mutex<PickerRequestState>>, shutdown: Arc<AtomicBool>) {
+    let mut last_error = None;
+    for attempt in 0..FILE_PICKER_RETRY_ATTEMPTS {
+        if shutdown.load(Ordering::Acquire) {
+            request.lock().reset();
+            return;
+        }
+
+        let result = SbusConnection::connect().and_then(|mut connection| {
+            connection.call_method_timeout(
+                DESKTOP_FILE_MANAGER_BUS_NAME,
+                DESKTOP_FILE_MANAGER_OBJECT_PATH,
+                DESKTOP_FILE_MANAGER_INTERFACE,
+                DESKTOP_FILE_MANAGER_OPEN_FILE_METHOD,
+                vec![
+                    Argument::String(String::from("Open Video")),
+                    Argument::String(home_path()),
+                    Argument::String(String::from("video/*")),
+                    Argument::Boolean(false),
+                    Argument::Boolean(false),
+                ],
+                FILE_PICKER_METHOD_TIMEOUT_MS,
+            )
+        });
+
+        match result {
+            Ok(arguments) => match arguments.first() {
+                Some(Argument::String(id)) => {
+                    let _ = request.lock().set_waiting(id.clone());
+                    return;
+                }
+                _ => {
+                    last_error = Some(sbus_client::Error::ProtocolError(
+                        "Files returned no picker request id",
+                    ));
+                    break;
+                }
+            },
+            // This is the only retry-safe failure. The method was not delivered,
+            // so retrying cannot create a duplicate standalone picker process.
+            Err(sbus_client::Error::ServiceNotFound) => {
+                last_error = Some(sbus_client::Error::ServiceNotFound);
+                if attempt == 0
+                    && let Err(error) = ensure_files_service()
+                {
+                    last_error = Some(error);
+                }
+            }
+            // Timeout and I/O failures are ambiguous: Files may already have
+            // accepted the request and only its reply was delayed. Do not retry.
+            Err(error) => {
+                last_error = Some(error);
+                break;
+            }
+        }
+
+        if attempt + 1 < FILE_PICKER_RETRY_ATTEMPTS {
+            thread::sleep(Duration::from_millis(FILE_PICKER_RETRY_DELAY_MS));
+        }
+    }
+
+    request.lock().reset();
+    println!("[{}] cannot open video picker: {:?}", APP_NAME, last_error);
+}''',
+          )
+          replace_once(
+              video,
+              '''        vec![Argument::String(String::from(DESKTOP_FILES_APP_ID))],
+        3_000,
+    );''',
+              '''        vec![Argument::String(String::from(DESKTOP_FILES_APP_ID))],
+        FILE_PICKER_METHOD_TIMEOUT_MS,
+    );''',
+          )
+          replace_once(
+              video,
+              '''fn start_picker_listener(
+    request_id: Arc<Mutex<Option<String>>>,
+    playback: Arc<PlaybackController>,
+    hardware_decode: bool,
+    loop_playback: bool,
+    window_title: Arc<Mutex<String>>,
+    title_signal: Arc<PaintSignal>,
+    shutdown: Arc<AtomicBool>,
+) -> JoinHandle {
+    thread::Builder::new()
+        .name("video-picker")
+        .spawn(move || {
+            loop {
+                if shutdown.load(Ordering::Acquire) {
+                    return;
+                }
+                let Ok(mut connection) = SbusConnection::connect() else {
+                    thread::sleep(Duration::from_millis(FILE_PICKER_RETRY_DELAY_MS));
+                    continue;
+                };
+
+                loop {
+                    let message = match connection.receive_message_timeout(100) {
+                        Ok(Some(message)) => message,
+                        Ok(None) => {
+                            if shutdown.load(Ordering::Acquire) {
+                                return;
+                            }
+                            continue;
+                        }
+                        Err(_) => break,
+                    };
+                    let Message::Signal {
+                        sender,
+                        path,
+                        interface,
+                        signal,
+                        args,
+                    } = message
+                    else {
+                        continue;
+                    };
+                    if sender != DESKTOP_FILE_MANAGER_BUS_NAME
+                        || path != DESKTOP_FILE_MANAGER_OBJECT_PATH
+                        || interface != DESKTOP_FILE_MANAGER_INTERFACE
+                        || signal != DESKTOP_FILE_MANAGER_RESPONSE_SIGNAL
+                    {
+                        continue;
+                    }
+
+                    let Some(Argument::String(response_id)) = args.first() else {
+                        continue;
+                    };
+                    let matches_request =
+                        request_id.lock().as_deref() == Some(response_id.as_str());
+                    if !matches_request {
+                        continue;
+                    }
+                    request_id.lock().take();
+
+                    if !matches!(args.get(1), Some(Argument::Boolean(true))) {
+                        continue;
+                    }
+                    let Some(Argument::String(path)) = args.get(2) else {
+                        continue;
+                    };
+                    *window_title.lock() = video_window_title(None, path);
+                    title_signal.notify();
+                    playback.request_path(path.clone(), hardware_decode, loop_playback);
+                }
+                thread::sleep(Duration::from_millis(FILE_PICKER_RETRY_DELAY_MS));
+            }
+        })
+        .expect("failed to spawn video picker thread")
+}''',
+              '''fn start_picker_listener(
+    request: Arc<Mutex<PickerRequestState>>,
+    playback: Arc<PlaybackController>,
+    hardware_decode: bool,
+    loop_playback: bool,
+    window_title: Arc<Mutex<String>>,
+    title_signal: Arc<PaintSignal>,
+    shutdown: Arc<AtomicBool>,
+) -> JoinHandle {
+    thread::Builder::new()
+        .name("video-picker")
+        .spawn(move || {
+            loop {
+                if shutdown.load(Ordering::Acquire) {
+                    request.lock().reset();
+                    return;
+                }
+                let Ok(mut connection) = SbusConnection::connect() else {
+                    thread::sleep(Duration::from_millis(FILE_PICKER_RETRY_DELAY_MS));
+                    continue;
+                };
+
+                loop {
+                    let message = match connection.receive_message_timeout(100) {
+                        Ok(Some(message)) => message,
+                        Ok(None) => {
+                            if shutdown.load(Ordering::Acquire) {
+                                request.lock().reset();
+                                return;
+                            }
+                            continue;
+                        }
+                        Err(_) => break,
+                    };
+                    let Message::Signal {
+                        sender,
+                        path,
+                        interface,
+                        signal,
+                        args,
+                    } = message
+                    else {
+                        continue;
+                    };
+
+                    if sender == "org.scarlet.sbus" && signal == "ServiceUnregistered" {
+                        if let Some(Argument::String(name)) = args.first()
+                            && name == DESKTOP_FILE_MANAGER_BUS_NAME
+                        {
+                            request.lock().reset();
+                        }
+                        continue;
+                    }
+
+                    if sender != DESKTOP_FILE_MANAGER_BUS_NAME
+                        || path != DESKTOP_FILE_MANAGER_OBJECT_PATH
+                        || interface != DESKTOP_FILE_MANAGER_INTERFACE
+                        || signal != DESKTOP_FILE_MANAGER_RESPONSE_SIGNAL
+                    {
+                        continue;
+                    }
+
+                    let Some(Argument::String(response_id)) = args.first() else {
+                        continue;
+                    };
+                    if !request.lock().complete(response_id) {
+                        continue;
+                    }
+
+                    if !matches!(args.get(1), Some(Argument::Boolean(true))) {
+                        continue;
+                    }
+                    let Some(Argument::String(path)) = args.get(2) else {
+                        continue;
+                    };
+                    *window_title.lock() = video_window_title(None, path);
+                    title_signal.notify();
+                    playback.request_path(path.clone(), hardware_decode, loop_playback);
+                }
+                thread::sleep(Duration::from_millis(FILE_PICKER_RETRY_DELAY_MS));
+            }
+        })
+        .expect("failed to spawn video picker thread")
+}''',
+          )
+
+          ipc = "user/bin/src/sws/ipc.rs"
+          replace_once(
+              ipc,
+              '''fn damage_area(width: u32, height: u32) -> u64 {
+    u64::from(width).saturating_mul(u64::from(height))
+}
+
+fn should_merge_damage(
+    ax: i32,
+    ay: i32,
+    aw: u32,
+    ah: u32,
+    bx: i32,
+    by: i32,
+    bw: u32,
+    bh: u32,
+) -> bool {
+    let (_, _, union_w, union_h) = merge_damage(ax, ay, aw, ah, bx, by, bw, bh);
+    let separate_area = damage_area(aw, ah).saturating_add(damage_area(bw, bh));
+    let union_area = damage_area(union_w, union_h);
+    union_area <= separate_area.saturating_mul(2)
+}
+
+''',
+              '''''',
+          )
+          replace_once(
+              ipc,
+              '''/// Add an event to the global queue
+pub fn push_ipc_event(event: IpcEvent) {
+    let mut queue = EVENT_QUEUE.lock();
+    if let IpcEvent::ExtensionUpdateBuffer {
+        external_client_id,
+        window_id,
+        damage_x,
+        damage_y,
+        damage_width,
+        damage_height,
+    } = event
+    {
+        for existing in queue.iter_mut().rev() {
+            if let IpcEvent::ExtensionUpdateBuffer {
+                window_id: existing_window,
+                damage_x: existing_x,
+                damage_y: existing_y,
+                damage_width: existing_w,
+                damage_height: existing_h,
+                ..
+            } = existing
+            {
+                if *existing_window == window_id {
+                    if !should_merge_damage(
+                        *existing_x,
+                        *existing_y,
+                        *existing_w,
+                        *existing_h,
+                        damage_x,
+                        damage_y,
+                        damage_width,
+                        damage_height,
+                    ) {
+                        continue;
+                    }
+                    let (nx, ny, nw, nh) = merge_damage(
+                        *existing_x,
+                        *existing_y,
+                        *existing_w,
+                        *existing_h,
+                        damage_x,
+                        damage_y,
+                        damage_width,
+                        damage_height,
+                    );
+                    *existing_x = nx;
+                    *existing_y = ny;
+                    *existing_w = nw;
+                    *existing_h = nh;
+                    return;
+                }
+            }
+        }
+        let should_wake = queue.is_empty();
+        queue.push(IpcEvent::ExtensionUpdateBuffer {
+            external_client_id,
+            window_id,
+            damage_x,
+            damage_y,
+            damage_width,
+            damage_height,
+        });
+        drop(queue);
+        if should_wake {
+            wake_compositor();
+        }
+        return;
+    }
+    let should_wake = queue.is_empty();
+    queue.push(event);
+    drop(queue);
+    if should_wake {
+        wake_compositor();
+    }
+}''',
+              '''fn merge_tail_damage_event(queue: &mut Vec<IpcEvent>, event: &IpcEvent) -> bool {
+    let Some(existing) = queue.last_mut() else {
+        return false;
+    };
+
+    match (existing, event) {
+        (
+            IpcEvent::BufferUpdated {
+                window_id: existing_window,
+                damage_x: existing_x,
+                damage_y: existing_y,
+                damage_width: existing_width,
+                damage_height: existing_height,
+            },
+            IpcEvent::BufferUpdated {
+                window_id,
+                damage_x,
+                damage_y,
+                damage_width,
+                damage_height,
+            },
+        ) if existing_window == window_id => {
+            let (x, y, width, height) = merge_damage(
+                *existing_x,
+                *existing_y,
+                *existing_width,
+                *existing_height,
+                *damage_x,
+                *damage_y,
+                *damage_width,
+                *damage_height,
+            );
+            *existing_x = x;
+            *existing_y = y;
+            *existing_width = width;
+            *existing_height = height;
+            true
+        }
+        (
+            IpcEvent::ExtensionUpdateBuffer {
+                external_client_id: existing_client,
+                window_id: existing_window,
+                damage_x: existing_x,
+                damage_y: existing_y,
+                damage_width: existing_width,
+                damage_height: existing_height,
+            },
+            IpcEvent::ExtensionUpdateBuffer {
+                external_client_id,
+                window_id,
+                damage_x,
+                damage_y,
+                damage_width,
+                damage_height,
+            },
+        ) if existing_client == external_client_id && existing_window == window_id => {
+            let (x, y, width, height) = merge_damage(
+                *existing_x,
+                *existing_y,
+                *existing_width,
+                *existing_height,
+                *damage_x,
+                *damage_y,
+                *damage_width,
+                *damage_height,
+            );
+            *existing_x = x;
+            *existing_y = y;
+            *existing_width = width;
+            *existing_height = height;
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Add an event to the global queue.
+///
+/// Consecutive damage notifications for the same backing are unioned at the
+/// queue tail. Tail-only coalescing preserves resize, attach, destroy, and
+/// other ordering barriers while preventing a presenting client from growing
+/// the compositor queue without bound.
+pub fn push_ipc_event(event: IpcEvent) {
+    let mut queue = EVENT_QUEUE.lock();
+    if merge_tail_damage_event(&mut queue, &event) {
+        return;
+    }
+
+    let should_wake = queue.is_empty();
+    queue.push(event);
+    drop(queue);
+    if should_wake {
+        wake_compositor();
+    }
+}''',
+          )
+
+          ipc_path = Path(ipc)
+          ipc_text = ipc_path.read_text()
+          test_marker = "mod damage_queue_tests"
+          if test_marker in ipc_text:
+              raise RuntimeError("damage queue tests already present")
+          ipc_path.write_text(
+              ipc_text
+              + '''
+
+#[cfg(test)]
+mod damage_queue_tests {
+    use super::*;
+
+    fn native_damage(window_id: u32, x: i32, y: i32, width: u32, height: u32) -> IpcEvent {
+        IpcEvent::BufferUpdated {
+            window_id,
+            damage_x: x,
+            damage_y: y,
+            damage_width: width,
+            damage_height: height,
+        }
+    }
+
+    #[test]
+    fn coalesces_consecutive_native_damage() {
+        let mut queue = Vec::new();
+        queue.push(native_damage(7, 10, 20, 30, 40));
+        let next = native_damage(7, 25, 30, 50, 20);
+        assert!(merge_tail_damage_event(&mut queue, &next));
+        assert!(queue.len() == 1);
+
+        match &queue[0] {
+            IpcEvent::BufferUpdated {
+                damage_x,
+                damage_y,
+                damage_width,
+                damage_height,
+                ..
+            } => {
+                assert!(*damage_x == 10);
+                assert!(*damage_y == 20);
+                assert!(*damage_width == 65);
+                assert!(*damage_height == 40);
+            }
+            _ => panic!("unexpected event"),
+        }
+    }
+
+    #[test]
+    fn does_not_cross_an_ordering_barrier() {
+        let mut queue = Vec::new();
+        queue.push(native_damage(7, 0, 0, 10, 10));
+        queue.push(IpcEvent::SetWindowOpacity {
+            window_id: 7,
+            opacity: 255,
+        });
+        let next = native_damage(7, 10, 10, 10, 10);
+        assert!(!merge_tail_damage_event(&mut queue, &next));
+        assert!(queue.len() == 2);
+    }
+
+    #[test]
+    fn extension_damage_keeps_client_identity() {
+        let mut queue = Vec::new();
+        queue.push(IpcEvent::ExtensionUpdateBuffer {
+            external_client_id: 1,
+            window_id: 9,
+            damage_x: 0,
+            damage_y: 0,
+            damage_width: 10,
+            damage_height: 10,
+        });
+        let next = IpcEvent::ExtensionUpdateBuffer {
+            external_client_id: 2,
+            window_id: 9,
+            damage_x: 5,
+            damage_y: 5,
+            damage_width: 10,
+            damage_height: 10,
+        };
+        assert!(!merge_tail_damage_event(&mut queue, &next));
+    }
+}
+'''
+          )
+          PY
+
+      - name: Format
+        run: cargo fmt --all
+
+      - name: Check patch
+        run: git diff --check
+
+      - name: Commit patch
+        shell: bash
+        run: |
+          rm .github/workflows/automation-liveness-patch.yml
+          git config user.name "OpenAI Codex"
+          git config user.email "codex@openai.com"
+          git add -A
+          git diff --cached --check
+          git commit -m "fix: make picker and SWS queues failure-bounded"
+          git push origin HEAD:automation/fix-picker-sws-liveness-20260808
