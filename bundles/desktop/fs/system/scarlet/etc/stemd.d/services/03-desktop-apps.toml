@@ -5,7 +5,6 @@
 exec = "/bin/files --service"
 order = 03
 depends = ["sws"]
-tty = "/dev/tty0"
 
 [service.desktop-launcher]
 exec = "/bin/launcher"
