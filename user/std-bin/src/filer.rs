@@ -76,6 +76,18 @@ struct PickerRequest {
     suggested_name: String,
 }
 
+impl PickerRequest {
+    fn same_invocation(&self, other: &Self) -> bool {
+        self.title == other.title
+            && self.initial_folder == other.initial_folder
+            && self.filter == other.filter
+            && self.allow_multiple == other.allow_multiple
+            && self.select_directories == other.select_directories
+            && self.save_mode == other.save_mode
+            && self.suggested_name == other.suggested_name
+    }
+}
+
 enum FilerUiRequest {
     ShowMain,
 }
@@ -94,6 +106,11 @@ struct DirectoryReadResult {
     result: std::result::Result<Vec<FileEntry>, String>,
 }
 
+struct PickerChild {
+    request: PickerRequest,
+    child: std::process::Child,
+}
+
 static NEXT_FILER_INSTANCE_ID: Mutex<u64> = Mutex::new(1);
 static NEXT_PICKER_REQUEST_ID: Mutex<u32> = Mutex::new(1);
 static PENDING_UI_REQUESTS: Mutex<Vec<FilerUiRequest>> = Mutex::new(Vec::new());
@@ -104,8 +121,10 @@ static PICKER_WINDOW_CLOSING: AtomicBool = AtomicBool::new(false);
 
 /// Picker child processes spawned via `launch_picker_process`. The background
 /// reaper thread polls them with `try_wait` so the UI thread never blocks and
-/// exited children are reaped without becoming zombies.
-static PICKER_CHILDREN: Mutex<Vec<std::process::Child>> = Mutex::new(Vec::new());
+/// exited children are reaped without becoming zombies. Keeping the request
+/// beside the child also makes retried sbus calls idempotent while that picker
+/// remains alive.
+static PICKER_CHILDREN: Mutex<Vec<PickerChild>> = Mutex::new(Vec::new());
 
 fn mutex_lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex
@@ -881,7 +900,10 @@ fn text_width(text: &str) -> f32 {
 
 #[cfg(test)]
 mod layout_tests {
-    use super::{FILE_NAME_MAX_WIDTH, FileEntry, FileKind, FilerApp, file_name_label, text_width};
+    use super::{
+        FILE_NAME_MAX_WIDTH, FileEntry, FileKind, FilerApp, PickerRequest, file_name_label,
+        text_width,
+    };
     use scarlet_ui::{
         Application, Color, Event, MouseButton, MouseEvent, NavigationLink, NavigationView,
         RenderingPipeline, Scene, SceneBuilder, Size, Text, View, Window,
@@ -898,6 +920,26 @@ mod layout_tests {
                 .iter()
                 .all(|line| text_width(line) <= FILE_NAME_MAX_WIDTH)
         );
+    }
+
+    #[test]
+    fn picker_invocation_identity_ignores_generated_request_id() {
+        let first = PickerRequest {
+            id: String::from("request-1"),
+            title: String::from("Open Video"),
+            initial_folder: String::from("/home/user"),
+            filter: String::from("video/*"),
+            allow_multiple: false,
+            select_directories: false,
+            save_mode: false,
+            suggested_name: String::new(),
+        };
+        let mut retry = first.clone();
+        retry.id = String::from("request-2");
+        assert!(first.same_invocation(&retry));
+
+        retry.filter = String::from("image/*");
+        assert!(!first.same_invocation(&retry));
     }
 
     #[test]
@@ -1297,6 +1339,27 @@ fn next_filer_instance_id() -> u64 {
     instance_id
 }
 
+fn reap_picker_children_locked(children: &mut Vec<PickerChild>) {
+    let mut index = 0;
+    while index < children.len() {
+        match children[index].child.try_wait() {
+            Ok(Some(_)) | Err(_) => {
+                children.swap_remove(index);
+            }
+            Ok(None) => index += 1,
+        }
+    }
+}
+
+fn active_picker_request_id(request: &PickerRequest) -> Option<String> {
+    let mut children = mutex_lock(&PICKER_CHILDREN);
+    reap_picker_children_locked(&mut children);
+    children
+        .iter()
+        .find(|active| active.request.same_invocation(request))
+        .map(|active| active.request.id.clone())
+}
+
 fn run_picker_service() {
     loop {
         let Ok(mut connection) = SbusConnection::connect() else {
@@ -1354,9 +1417,8 @@ fn run_picker_service() {
                 continue;
             };
 
-            let request_id = next_picker_request_id();
-            let request = PickerRequest {
-                id: request_id.clone(),
+            let mut request = PickerRequest {
+                id: String::new(),
                 title: argument_string(&args, 0).unwrap_or_else(|| String::from("Open File")),
                 initial_folder: argument_string(&args, 1).unwrap_or_else(home_path),
                 filter: argument_string(&args, if save_mode { 3 } else { 2 }).unwrap_or_default(),
@@ -1377,8 +1439,15 @@ fn run_picker_service() {
                     String::new()
                 },
             };
+
+            if let Some(request_id) = active_picker_request_id(&request) {
+                let _ = connection.send_method_return(0, vec![Argument::String(request_id)]);
+                continue;
+            }
+
+            request.id = next_picker_request_id();
             if connection
-                .send_method_return(0, vec![Argument::String(request_id)])
+                .send_method_return(0, vec![Argument::String(request.id.clone())])
                 .is_ok()
             {
                 launch_picker_process(&request);
@@ -1449,7 +1518,10 @@ fn launch_picker_process(request: &PickerRequest) {
     command.args(&argv_strings[1..]);
     match command.spawn() {
         Ok(child) => {
-            mutex_lock(&PICKER_CHILDREN).push(child);
+            mutex_lock(&PICKER_CHILDREN).push(PickerChild {
+                request: request.clone(),
+                child,
+            });
         }
         Err(error) => {
             eprintln!("[filer] failed to spawn picker process: {error}");
@@ -1461,17 +1533,7 @@ fn launch_picker_process(request: &PickerRequest) {
 /// the UI thread. Uses `try_wait` (non-blocking) so it never stalls.
 fn picker_reaper() {
     loop {
-        let mut still_alive = Vec::new();
-        for mut child in mutex_lock(&PICKER_CHILDREN).drain(..) {
-            match child.try_wait() {
-                Ok(Some(_status)) => { /* child exited, drop handle */ }
-                Ok(None) => still_alive.push(child),
-                Err(_) => { /* error — drop handle to avoid leak */ }
-            }
-        }
-        if !still_alive.is_empty() {
-            mutex_lock(&PICKER_CHILDREN).extend(still_alive);
-        }
+        reap_picker_children_locked(&mut mutex_lock(&PICKER_CHILDREN));
         thread::sleep(Duration::from_millis(500));
     }
 }
