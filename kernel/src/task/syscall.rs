@@ -2080,6 +2080,7 @@ pub fn sys_get_task_info_list(trapframe: &mut Trapframe) -> usize {
             sched_weight: target.sched_weight(),
             sched_vruntime: target.sched_vruntime(),
             sched_deadline: target.sched_deadline(),
+            last_user_pc: target.last_user_pc.load(Ordering::Relaxed) as usize,
         };
 
         let info_bytes = unsafe {
