@@ -1,0 +1,57 @@
+name: Validate IPC liveness fix
+
+on:
+  pull_request:
+    branches:
+      - dev
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    if: github.head_ref == 'automation/fix-local-socket-smp-teardown-20260808'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+
+      - uses: cachix/install-nix-action@v31
+        with:
+          github_access_token: ${{ secrets.GITHUB_TOKEN }}
+          extra_nix_config: |
+            accept-flake-config = true
+            extra-substituters = https://scarlet-rust-toolchain.cachix.org
+            extra-trusted-public-keys = scarlet-rust-toolchain.cachix.org-1:p+coBExi0nNTIvWF/oM9H9/1/GhwFtqGZ2Vs+4pYl6o=
+
+      - name: Check formatting
+        run: nix develop .#default --command cargo make fmt-check
+
+      - name: Build aarch64 kernel
+        run: nix develop .#default --command cargo make build-aarch64
+
+      - name: Run aarch64 kernel tests
+        run: nix develop .#default --command cargo make test-aarch64
+        timeout-minutes: 12
+
+      - name: Remove one-shot validation workflow
+        run: |
+          rm .github/workflows/validate-ipc-fix.yml
+          git config user.name "OpenAI"
+          git config user.email "openai@users.noreply.github.com"
+          git add .github/workflows/validate-ipc-fix.yml
+          git commit -m "chore: remove one-shot IPC validation workflow"
+          git push origin HEAD:${GITHUB_HEAD_REF}
