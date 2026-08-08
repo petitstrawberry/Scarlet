@@ -31,6 +31,7 @@ use alloc::{
     vec,
     vec::Vec,
 };
+use core::sync::atomic::{AtomicU64, Ordering};
 use core::{any::Any, mem};
 use hashbrown::HashMap;
 
@@ -300,12 +301,12 @@ pub struct Ext2FileSystem {
     /// Next file ID generator
     next_file_id: IrqSpinLock<u64>,
     /// LRU cached inodes
-    inode_cache: IrqSpinLock<InodeLruCache>,
+    inode_cache: IrqRwSpinLock<InodeLruCache>,
     /// LRU cached blocks
-    block_cache: IrqSpinLock<BlockLruCache>,
+    block_cache: IrqRwSpinLock<BlockLruCache>,
     /// Per-inode locks to serialize directory-mutating operations on the same inode,
     /// preventing concurrent read-modify-write races on directory blocks
-    inode_locks: IrqSpinLock<BTreeMap<u32, Arc<IrqSpinLock<()>>>>,
+    inode_locks: IrqRwSpinLock<BTreeMap<u32, Arc<IrqSpinLock<()>>>>,
     /// Global lock to serialize block allocation operations
     allocation_lock: IrqSpinLock<()>,
 }
@@ -315,9 +316,7 @@ pub struct Ext2FileSystem {
 struct InodeLruNode {
     inode_num: u32,
     inode: Ext2Inode,
-    access_count: u64,
-    prev: Option<NodeId>,
-    next: Option<NodeId>,
+    access_count: AtomicU64,
 }
 
 /// O(1) LRU cache implementation for inodes using HashMap + doubly-linked list
@@ -326,19 +325,10 @@ struct InodeLruCache {
     map: HashMap<u32, NodeId>,
     /// Storage for all nodes
     nodes: HashMap<NodeId, InodeLruNode>,
-    /// Head of doubly-linked list (most recently used)
-    head: Option<NodeId>,
-    /// Tail of doubly-linked list (least recently used)  
-    tail: Option<NodeId>,
     /// Next available node ID
     next_id: NodeId,
     /// Maximum cache size
     max_size: usize,
-    /// Cache statistics
-    hits: u64,
-    misses: u64,
-    /// Access counter for approximate LRU
-    access_counter: u64,
 }
 
 impl InodeLruCache {
@@ -346,47 +336,63 @@ impl InodeLruCache {
         Self {
             map: HashMap::new(),
             nodes: HashMap::new(),
-            head: None,
-            tail: None,
             next_id: 0,
             max_size,
-            hits: 0,
-            misses: 0,
-            access_counter: 0,
         }
     }
 
     /// O(1) get operation with LRU update
-    fn get(&mut self, inode_num: u32) -> Option<Ext2Inode> {
+    /// O(1) get with atomic access-count bump (no list mutation).
+    /// Safe to call through a shared (`&self`) reference.
+    fn get(&self, inode_num: u32) -> Option<Ext2Inode> {
         if let Some(&node_id) = self.map.get(&inode_num) {
-            self.hits += 1;
-            // Move to head (most recently used) - O(1)
-            self.move_to_head(node_id);
-            // Return copy of inode
-            self.nodes.get(&node_id).map(|node| node.inode.clone())
-        } else {
-            self.misses += 1;
+            if let Some(node) = self.nodes.get(&node_id) {
+                node.access_count.fetch_add(1, Ordering::Relaxed);
+                return Some(node.inode.clone());
+            }
             None
+        } else {
+            None
+        }
+    }
+
+    /// O(n) eviction of the node with the lowest access count.
+    /// Called only on insert when the cache is full.
+    fn evict_lru(&mut self) {
+        if let Some((&lru_id, _)) = self
+            .nodes
+            .iter()
+            .min_by_key(|(_, node)| node.access_count.load(Ordering::Relaxed))
+        {
+            if let Some(node) = self.nodes.remove(&lru_id) {
+                self.map.remove(&node.inode_num);
+            }
+        }
+    }
+
+    /// Remove and insert with access-count-based eviction.
+    fn remove(&mut self, inode_num: u32) {
+        if let Some(&node_id) = self.map.get(&inode_num) {
+            self.nodes.remove(&node_id);
+            // Return copy of inode
+            self.map.remove(&inode_num);
         }
     }
 
     /// O(1) insert operation with LRU eviction
     fn insert(&mut self, inode_num: u32, inode: Ext2Inode) {
-        self.access_counter += 1;
-
         // If already exists, update and move to head - O(1)
         if let Some(&node_id) = self.map.get(&inode_num) {
             if let Some(node) = self.nodes.get_mut(&node_id) {
                 node.inode = inode;
-                node.access_count = self.access_counter;
+                node.access_count.fetch_add(1, Ordering::Relaxed);
             }
-            self.move_to_head(node_id);
             return;
         }
 
         // If cache is full, remove LRU (tail) item - O(1)
         if self.nodes.len() >= self.max_size {
-            self.remove_tail();
+            self.evict_lru();
         }
 
         // Create new node and add to head - O(1)
@@ -396,110 +402,11 @@ impl InodeLruCache {
         let new_node = InodeLruNode {
             inode_num,
             inode,
-            access_count: self.access_counter,
-            prev: None,
-            next: self.head,
+            access_count: AtomicU64::new(1),
         };
 
         self.nodes.insert(new_node_id, new_node);
         self.map.insert(inode_num, new_node_id);
-
-        // Update existing head's prev pointer
-        if let Some(old_head) = self.head {
-            if let Some(old_head_node) = self.nodes.get_mut(&old_head) {
-                old_head_node.prev = Some(new_node_id);
-            }
-        }
-
-        // Update head/tail pointers
-        self.head = Some(new_node_id);
-        if self.tail.is_none() {
-            self.tail = Some(new_node_id);
-        }
-    }
-
-    /// O(1) remove operation
-    fn remove(&mut self, inode_num: u32) {
-        if let Some(&node_id) = self.map.get(&inode_num) {
-            self.remove_node(node_id);
-            self.map.remove(&inode_num);
-        }
-    }
-
-    /// O(1) move node to head of LRU list
-    fn move_to_head(&mut self, node_id: NodeId) {
-        // If already head, nothing to do
-        if self.head == Some(node_id) {
-            return;
-        }
-
-        // Remove from current position
-        self.remove_node_from_list(node_id);
-
-        // Add to head
-        if let Some(node) = self.nodes.get_mut(&node_id) {
-            node.prev = None;
-            node.next = self.head;
-        }
-
-        // Update old head's prev pointer
-        if let Some(old_head) = self.head {
-            if let Some(old_head_node) = self.nodes.get_mut(&old_head) {
-                old_head_node.prev = Some(node_id);
-            }
-        }
-
-        self.head = Some(node_id);
-
-        // If this was the only node, it's also the tail
-        if self.tail.is_none() {
-            self.tail = Some(node_id);
-        }
-    }
-
-    /// O(1) remove tail (LRU) node
-    fn remove_tail(&mut self) {
-        if let Some(tail_id) = self.tail {
-            if let Some(tail_node) = self.nodes.get(&tail_id) {
-                let inode_num = tail_node.inode_num;
-                self.map.remove(&inode_num);
-            }
-            self.remove_node(tail_id);
-        }
-    }
-
-    /// O(1) remove node completely
-    fn remove_node(&mut self, node_id: NodeId) {
-        self.remove_node_from_list(node_id);
-        self.nodes.remove(&node_id);
-    }
-
-    /// O(1) remove node from doubly-linked list (but keep in nodes map)
-    fn remove_node_from_list(&mut self, node_id: NodeId) {
-        if let Some(node) = self.nodes.get(&node_id) {
-            let prev_id = node.prev;
-            let next_id = node.next;
-
-            // Update prev node's next pointer
-            if let Some(prev_id) = prev_id {
-                if let Some(prev_node) = self.nodes.get_mut(&prev_id) {
-                    prev_node.next = next_id;
-                }
-            } else {
-                // This was the head
-                self.head = next_id;
-            }
-
-            // Update next node's prev pointer
-            if let Some(next_id) = next_id {
-                if let Some(next_node) = self.nodes.get_mut(&next_id) {
-                    next_node.prev = prev_id;
-                }
-            } else {
-                // This was the tail
-                self.tail = prev_id;
-            }
-        }
     }
 
     fn len(&self) -> usize {
@@ -508,24 +415,15 @@ impl InodeLruCache {
 
     /// Get cache statistics for debugging and performance analysis
     fn get_stats(&self) -> (u64, u64, usize) {
-        (self.hits, self.misses, self.nodes.len())
+        (0, 0, self.nodes.len())
     }
 
     /// Print cache statistics
     fn print_stats(&self, cache_name: &str) {
-        let total = self.hits + self.misses;
-        let hit_rate = if total > 0 {
-            (self.hits * 100) / total
-        } else {
-            0
-        };
         crate::println!(
-            "[ext2] {} Cache Stats: hits={}, misses={}, size={}, hit_rate={}%",
+            "[ext2] {} Cache Stats: size={}",
             cache_name,
-            self.hits,
-            self.misses,
             self.nodes.len(),
-            hit_rate
         );
     }
 }
@@ -538,8 +436,7 @@ type NodeId = u32;
 struct LruNode {
     block_num: u64,
     data: Vec<u8>,
-    prev: Option<NodeId>,
-    next: Option<NodeId>,
+    access_count: AtomicU64,
 }
 
 /// O(1) LRU cache implementation using HashMap + doubly-linked list
@@ -549,17 +446,10 @@ struct BlockLruCache {
     map: HashMap<u64, NodeId>,
     /// Storage for all nodes
     nodes: HashMap<NodeId, LruNode>,
-    /// Head of doubly-linked list (most recently used)
-    head: Option<NodeId>,
-    /// Tail of doubly-linked list (least recently used)  
-    tail: Option<NodeId>,
     /// Next available node ID
     next_id: NodeId,
     /// Maximum cache size
     max_size: usize,
-    /// Cache statistics
-    hits: u64,
-    misses: u64,
 }
 
 impl BlockLruCache {
@@ -567,86 +457,45 @@ impl BlockLruCache {
         Self {
             map: HashMap::new(),
             nodes: HashMap::new(),
-            head: None,
-            tail: None,
             next_id: 0,
             max_size,
-            hits: 0,
-            misses: 0,
         }
     }
 
-    fn get(&mut self, block_num: u64) -> Option<Vec<u8>> {
+    /// O(1) get with atomic access-count bump (no list mutation).
+    /// Safe to call through a shared (`&self`) reference.
+    fn get(&self, block_num: u64) -> Option<Vec<u8>> {
         if let Some(&node_id) = self.map.get(&block_num) {
-            self.hits += 1;
-            // Move to head (most recently used)
-            self.move_to_head(node_id);
-            // Return cloned data
-            self.nodes.get(&node_id).map(|node| node.data.clone())
+            if let Some(node) = self.nodes.get(&node_id) {
+                node.access_count.fetch_add(1, Ordering::Relaxed);
+                return Some(node.data.clone());
+            }
+            None
         } else {
-            self.misses += 1;
             None
         }
     }
 
-    /// Move node to head of LRU list (O(1))
-    fn move_to_head(&mut self, node_id: NodeId) {
-        if Some(node_id) == self.head {
-            return; // Already at head
-        }
-
-        // Remove from current position
-        self.remove_from_list(node_id);
-
-        // Add to head
-        self.add_to_head(node_id);
-    }
-
-    /// Remove node from doubly-linked list (O(1))
-    fn remove_from_list(&mut self, node_id: NodeId) {
-        if let Some(node) = self.nodes.get(&node_id) {
-            let prev = node.prev;
-            let next = node.next;
-
-            // Update prev node's next pointer
-            if let Some(prev_id) = prev {
-                if let Some(prev_node) = self.nodes.get_mut(&prev_id) {
-                    prev_node.next = next;
-                }
-            } else {
-                // This was the head
-                self.head = next;
-            }
-
-            // Update next node's prev pointer
-            if let Some(next_id) = next {
-                if let Some(next_node) = self.nodes.get_mut(&next_id) {
-                    next_node.prev = prev;
-                }
-            } else {
-                // This was the tail
-                self.tail = prev;
+    /// O(n) eviction of the node with the lowest access count.
+    /// Called only on insert when the cache is full.
+    fn evict_lru(&mut self) {
+        if let Some((&lru_id, _)) = self
+            .nodes
+            .iter()
+            .min_by_key(|(_, node)| node.access_count.load(Ordering::Relaxed))
+        {
+            if let Some(node) = self.nodes.remove(&lru_id) {
+                self.map.remove(&node.block_num);
             }
         }
     }
 
-    /// Add node to head of list (O(1))
-    fn add_to_head(&mut self, node_id: NodeId) {
-        if let Some(node) = self.nodes.get_mut(&node_id) {
-            node.prev = None;
-            node.next = self.head;
+    fn remove(&mut self, block_num: u64) {
+        if let Some(&node_id) = self.map.get(&block_num) {
+            self.nodes.remove(&node_id);
+            // Return cloned data
+            self.map.remove(&block_num);
         }
-
-        if let Some(old_head) = self.head {
-            if let Some(old_head_node) = self.nodes.get_mut(&old_head) {
-                old_head_node.prev = Some(node_id);
-            }
-        } else {
-            // List was empty
-            self.tail = Some(node_id);
-        }
-
-        self.head = Some(node_id);
     }
 
     fn insert(&mut self, block_num: u64, block_data: Vec<u8>) {
@@ -654,21 +503,14 @@ impl BlockLruCache {
         if let Some(&existing_id) = self.map.get(&block_num) {
             if let Some(existing_node) = self.nodes.get_mut(&existing_id) {
                 existing_node.data = block_data;
+                existing_node.access_count.fetch_add(1, Ordering::Relaxed);
             }
-            self.move_to_head(existing_id);
             return;
         }
 
         // If cache is full, remove LRU (tail) item
         if self.nodes.len() >= self.max_size {
-            if let Some(tail_id) = self.tail {
-                if let Some(tail_node) = self.nodes.get(&tail_id) {
-                    let tail_block_num = tail_node.block_num;
-                    self.map.remove(&tail_block_num);
-                }
-                self.remove_from_list(tail_id);
-                self.nodes.remove(&tail_id);
-            }
+            self.evict_lru();
         }
 
         // Create new node
@@ -678,24 +520,12 @@ impl BlockLruCache {
         let new_node = LruNode {
             block_num,
             data: block_data,
-            prev: None,
-            next: None,
+            access_count: AtomicU64::new(1),
         };
 
         // Insert into data structures
         self.nodes.insert(node_id, new_node);
         self.map.insert(block_num, node_id);
-
-        // Add to head of list
-        self.add_to_head(node_id);
-    }
-
-    fn remove(&mut self, block_num: u64) {
-        if let Some(&node_id) = self.map.get(&block_num) {
-            self.map.remove(&block_num);
-            self.remove_from_list(node_id);
-            self.nodes.remove(&node_id);
-        }
     }
 
     fn len(&self) -> usize {
@@ -704,24 +534,15 @@ impl BlockLruCache {
 
     /// Get cache statistics for debugging and performance analysis
     fn get_stats(&self) -> (u64, u64, usize) {
-        (self.hits, self.misses, self.nodes.len())
+        (0, 0, self.nodes.len())
     }
 
     /// Print cache statistics
     fn print_stats(&self, cache_name: &str) {
-        let total = self.hits + self.misses;
-        let hit_rate = if total > 0 {
-            (self.hits * 100) / total
-        } else {
-            0
-        };
         crate::println!(
-            "[ext2] {} Cache Stats: hits={}, misses={}, size={}, hit_rate={}%",
+            "[ext2] {} Cache Stats: size={}",
             cache_name,
-            self.hits,
-            self.misses,
             self.nodes.len(),
-            hit_rate
         );
     }
 }
@@ -781,9 +602,9 @@ impl Ext2FileSystem {
             root: IrqRwSpinLock::new(Arc::new(root)),
             name: "ext2".to_string(),
             next_file_id: IrqSpinLock::new(2), // Start from 2, root is 1
-            inode_cache: IrqSpinLock::new(InodeLruCache::new(8192)),
-            block_cache: IrqSpinLock::new(BlockLruCache::new(8192)),
-            inode_locks: IrqSpinLock::new(BTreeMap::new()),
+            inode_cache: IrqRwSpinLock::new(InodeLruCache::new(8192)),
+            block_cache: IrqRwSpinLock::new(BlockLruCache::new(8192)),
+            inode_locks: IrqRwSpinLock::new(BTreeMap::new()),
             allocation_lock: IrqSpinLock::new(()),
         });
 
@@ -831,7 +652,7 @@ impl Ext2FileSystem {
     }
 
     fn get_inode_lock(&self, inode_num: u32) -> Arc<IrqSpinLock<()>> {
-        let mut locks = self.inode_locks.lock();
+        let mut locks = self.inode_locks.write();
         locks
             .entry(inode_num)
             .or_insert_with(|| Arc::new(IrqSpinLock::new(())))
@@ -854,7 +675,7 @@ impl Ext2FileSystem {
         profile_scope!("ext2::read_inode");
         // Check cache first
         {
-            let mut cache = self.inode_cache.lock();
+            let cache = self.inode_cache.read();
             if let Some(inode) = cache.get(inode_num) {
                 return Ok(inode);
             }
@@ -953,7 +774,7 @@ impl Ext2FileSystem {
 
         // Cache the inode with LRU eviction
         {
-            let mut cache = self.inode_cache.lock();
+            let mut cache = self.inode_cache.write();
             cache.insert(inode_num, inode);
         }
 
@@ -963,7 +784,7 @@ impl Ext2FileSystem {
             INODE_CALL_COUNT += 1;
             // Print inode cache stats periodically (every 50th call)
             if INODE_CALL_COUNT % 50 == 0 {
-                let cache = self.inode_cache.lock();
+                let cache = self.inode_cache.read();
                 cache.print_stats("Inode");
             }
         }
@@ -1590,9 +1411,9 @@ impl Ext2FileSystem {
                 Ok(_) => {
                     // Invalidate block cache and update inode cache
                     // Do this AFTER successful write to ensure consistency
-                    let mut cache = self.block_cache.lock();
+                    let mut cache = self.block_cache.write();
                     cache.remove(target_block.into());
-                    let mut inode_cache = self.inode_cache.lock();
+                    let mut inode_cache = self.inode_cache.write();
                     inode_cache.insert(inode_number, inode.clone());
                     Ok(())
                 }
@@ -1900,7 +1721,7 @@ impl Ext2FileSystem {
                 // );
 
                 {
-                    let mut cache = self.block_cache.lock();
+                    let mut cache = self.block_cache.write();
                     cache.remove(bitmap_block as u64);
                     cache.remove(bgd_block);
                 }
@@ -2127,7 +1948,7 @@ impl Ext2FileSystem {
                 }
 
                 {
-                    let mut cache = self.block_cache.lock();
+                    let mut cache = self.block_cache.write();
                     cache.remove(bgd.get_block_bitmap() as u64);
                     cache.remove(bgd_block);
                 }
@@ -2475,7 +2296,7 @@ impl Ext2FileSystem {
                     if let Some(result) = results.first() {
                         match &result.result {
                             Ok(_) => {
-                                self.block_cache.lock().remove(bgd.inode_bitmap as u64);
+                                self.block_cache.write().remove(bgd.inode_bitmap as u64);
 
                                 // Update group descriptor to reflect one less free inode
                                 let mut bgd = Ext2BlockGroupDescriptor::from_bytes(&bgd_data)?;
@@ -2946,7 +2767,7 @@ impl Ext2FileSystem {
             }
 
             // Invalidate cached inode bitmap block so subsequent reads see updated bitmap
-            self.block_cache.lock().remove(inode_bitmap_block as u64);
+            self.block_cache.write().remove(inode_bitmap_block as u64);
 
             // Update block group descriptor statistics
             bgd.set_free_inodes_count(bgd.get_free_inodes_count() + 1);
@@ -2986,7 +2807,7 @@ impl Ext2FileSystem {
             }
 
             // Invalidate cached BGD block
-            self.block_cache.lock().remove(bgd_block as u64);
+            self.block_cache.write().remove(bgd_block as u64);
 
             self.clear_inode_on_disk(inode_number)?;
 
@@ -2995,7 +2816,7 @@ impl Ext2FileSystem {
 
             // Remove from inode cache if present
             {
-                let mut cache = self.inode_cache.lock();
+                let mut cache = self.inode_cache.write();
                 cache.remove(inode_number);
             }
 
@@ -3194,7 +3015,7 @@ impl Ext2FileSystem {
 
         // Update inode cache with LRU eviction
         {
-            let mut cache = self.inode_cache.lock();
+            let mut cache = self.inode_cache.write();
             cache.insert(inode_num, inode);
         }
 
@@ -3461,7 +3282,7 @@ impl Ext2FileSystem {
         }
 
         // Invalidate cached block bitmap so subsequent reads see updated bitmap
-        self.block_cache.lock().remove(block_bitmap_block as u64);
+        self.block_cache.write().remove(block_bitmap_block as u64);
 
         // Update block group descriptor
         bgd.set_free_blocks_count(bgd.get_free_blocks_count() + 1);
@@ -3501,7 +3322,7 @@ impl Ext2FileSystem {
         }
 
         // Invalidate cached BGD block
-        self.block_cache.lock().remove(bgd_block);
+        self.block_cache.write().remove(bgd_block);
 
         Ok(())
     }
@@ -4232,7 +4053,7 @@ impl Ext2FileSystem {
         // Fast path: if only one block, try cache-only first
         if block_nums.len() == 1 {
             let block_num = block_nums[0];
-            let mut cache = self.block_cache.lock();
+            let cache = self.block_cache.read();
             if let Some(data) = cache.get(block_num) {
                 return Ok(vec![data]);
             }
@@ -4242,7 +4063,7 @@ impl Ext2FileSystem {
         // Slower path: multiple blocks or cache miss
         let mut results = Vec::with_capacity(block_nums.len());
         let mut missing_blocks = Vec::new();
-        let mut cache = self.block_cache.lock();
+        let cache = self.block_cache.read();
 
         // Check cache for existing blocks, maintain order
         for &block_num in block_nums {
@@ -4314,7 +4135,7 @@ impl Ext2FileSystem {
             }
 
             // Process results and update cache
-            let mut cache = self.block_cache.lock();
+            let mut cache = self.block_cache.write();
             let mut missing_data = HashMap::new();
 
             for (result_idx, result) in read_results.iter().enumerate() {
@@ -4391,7 +4212,7 @@ impl Ext2FileSystem {
             CALL_COUNT += 1;
             // Print cache stats periodically (every 100th call)
             if CALL_COUNT % 100 == 0 {
-                let cache = self.block_cache.lock();
+                let cache = self.block_cache.read();
                 cache.print_stats("Block");
             }
         }
@@ -4483,7 +4304,7 @@ impl Ext2FileSystem {
         }
 
         // Check for any write errors and update cache
-        let mut cache = self.block_cache.lock();
+        let mut cache = self.block_cache.write();
         for (result_idx, result) in write_results.iter().enumerate() {
             if result.result.is_err() {
                 return Err(FileSystemError::new(
@@ -4560,8 +4381,8 @@ impl Ext2FileSystem {
 
     /// Print cache statistics for debugging
     pub fn print_cache_stats(&self) {
-        let inode_cache = self.inode_cache.lock();
-        let block_cache = self.block_cache.lock();
+        let inode_cache = self.inode_cache.read();
+        let block_cache = self.block_cache.read();
 
         // inode_cache.print_stats("Inode");
         // block_cache.print_stats("Block");
