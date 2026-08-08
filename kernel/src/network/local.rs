@@ -1247,7 +1247,8 @@ impl Selectable for LocalSocket {
 
         if timeout_ticks.is_some() && !woke {
             let after = self.current_ready(interest);
-            if (interest.read && !after.read) && (interest.write && !after.write) {
+            let any_ready = (interest.read && after.read) || (interest.write && after.write);
+            if !any_ready {
                 return SelectWaitOutcome::TimedOut;
             }
         }
