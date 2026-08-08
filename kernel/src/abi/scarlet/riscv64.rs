@@ -828,10 +828,13 @@ impl AbiModule for ScarletAbi {
                             .get(0)
                             .map_or("Unnamed Task".to_string(), |s| s.to_string());
 
-                        // Clear old page table entries
+                        // Clear old page table entries without flushing the TLB.
+                        // New mappings are installed immediately after; a single
+                        // TLB shootdown is issued once all mappings are in place,
+                        // converting N TLB shootdowns into one at the end.
                         let mut root_page_table =
                             vm::get_root_pagetable(task.vm_manager.get_asid()).unwrap();
-                        root_page_table.unmap_all();
+                        root_page_table.unmap_all_no_flush();
                         drop(root_page_table);
 
                         // Setup the new memory environment
@@ -910,6 +913,10 @@ impl AbiModule for ScarletAbi {
                         // a1 (reg[11]) = argv pointer
                         task.vcpu.lock().iregs.reg[10] = argv.len(); // argc
                         task.vcpu.lock().iregs.reg[11] = argv_ptr; // argv array pointer
+
+                        // Publish all deferred page-table changes with one TLB
+                        // shootdown before switching to the new context.
+                        crate::arch::vm::flush_all_tlb(task.vm_manager.get_asid());
 
                         // Switch to the new task
                         let pc_before_switch = task.vcpu.lock().get_pc();

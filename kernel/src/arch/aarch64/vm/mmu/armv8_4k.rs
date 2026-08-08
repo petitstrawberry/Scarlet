@@ -1128,6 +1128,20 @@ impl PageTable {
 
     /// Unmap all entries (like RISC-V's unmap_all())
     pub(in crate::arch::aarch64::vm) fn unmap_all(&mut self, asid: u16) {
+        self.unmap_all_no_flush();
+        crate::breadcrumb::drop(crate::breadcrumb::PT_TLBI_BEGIN, 0, asid as u64);
+        invalidate_stage1_translations_inner_shareable();
+        crate::breadcrumb::drop(crate::breadcrumb::PT_TLBI_DONE, 0, asid as u64);
+    }
+
+    /// Clear all root-level entries without issuing a broadcast TLB invalidation.
+    ///
+    /// Callers that batch multiple page-table mutations (e.g. `exec`, which
+    /// clears the old address space then installs fresh mappings) can use this
+    /// variant and issue a single broadcast TLBI once all mutations are
+    /// complete. The caller **must** perform a TLBI before the affected address
+    /// space becomes visible to any PE.
+    pub(in crate::arch::aarch64::vm) fn unmap_all_no_flush(&mut self) {
         for entry in &mut self.entries {
             entry.clear_all();
         }
@@ -1135,9 +1149,6 @@ impl PageTable {
             self as *const PageTable as usize,
             crate::environment::PAGE_SIZE,
         );
-        crate::breadcrumb::drop(crate::breadcrumb::PT_TLBI_BEGIN, 0, asid as u64);
-        invalidate_stage1_translations_inner_shareable();
-        crate::breadcrumb::drop(crate::breadcrumb::PT_TLBI_DONE, 0, asid as u64);
     }
 }
 

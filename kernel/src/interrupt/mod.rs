@@ -11,6 +11,7 @@ use crate::arch::{self, interrupt::enable_external_interrupts};
 use crate::device::manager::DeviceManager;
 use crate::device::platform::resource::PlatformDeviceResource;
 use crate::sync::{IrqSpinLock, Lazy, Once};
+use crate::sync::IrqRwSpinLock;
 
 pub mod controllers;
 pub mod msi;
@@ -239,7 +240,11 @@ struct IrqDesc {
 }
 
 pub struct InterruptManager {
-    controllers: Once<IrqSpinLock<controllers::InterruptControllers>>,
+    /// Controller registry. Runtime interrupt paths (timer ticks, external
+    /// IRQ claim/EOI, IPI) take read locks so they can proceed concurrently
+    /// across CPUs; only boot-time registration and per-CPU init take write
+    /// locks.
+    controllers: Once<IrqRwSpinLock<controllers::InterruptControllers>>,
     irq_descs: Lazy<IrqSpinLock<HashMap<Virq, IrqDesc>>>,
     external_handlers: Lazy<IrqSpinLock<HashMap<InterruptId, ExternalInterruptHandler>>>,
     enabled_external_interrupts: Lazy<IrqSpinLock<HashMap<InterruptId, CpuId>>>,
@@ -263,9 +268,9 @@ impl InterruptManager {
         INTERRUPT_MANAGER.call_once(Self::new)
     }
 
-    fn controllers(&self) -> &IrqSpinLock<controllers::InterruptControllers> {
+    fn controllers(&self) -> &IrqRwSpinLock<controllers::InterruptControllers> {
         self.controllers
-            .call_once(|| IrqSpinLock::new(controllers::InterruptControllers::new()))
+            .call_once(|| IrqRwSpinLock::new(controllers::InterruptControllers::new()))
     }
 
     pub fn init_controllers(&self) {
@@ -278,7 +283,7 @@ impl InterruptManager {
             .map(|(interrupt_id, cpu_id)| (self.irq_desc_or_legacy(*interrupt_id), *cpu_id))
             .collect();
 
-        let mut controllers = self.controllers().lock();
+        let mut controllers = self.controllers().write();
         match controllers.init_external_controller() {
             Ok(()) => {}
             Err(e) => {
@@ -311,7 +316,7 @@ impl InterruptManager {
         disable_interrupts();
         crate::early_println!("[interrupt] CPU {}: interrupts disabled", cpu_id);
 
-        let mut controllers = self.controllers().lock();
+        let mut controllers = self.controllers().write();
         crate::early_println!("[interrupt] CPU {}: controller registry locked", cpu_id);
 
         if let Some(controller) = controllers.timer_controller_mut_for_cpu(cpu_id) {
@@ -369,7 +374,7 @@ impl InterruptManager {
         resource: &PlatformDeviceResource,
     ) -> InterruptResult<InterruptId> {
         let mapping = {
-            let controllers = self.controllers().lock();
+            let controllers = self.controllers().read();
             if let Some(controller) = controllers.external_controller() {
                 controller.map_irq_resource(resource)?
             } else {
@@ -401,7 +406,7 @@ impl InterruptManager {
     }
 
     fn finish_pending_irq(&self, irq: &controllers::PendingIrq) -> InterruptResult<()> {
-        let controllers = self.controllers().lock();
+        let controllers = self.controllers().read();
         if let Some(controller) = controllers.external_controller() {
             controller.eoi_irq(irq)
         } else {
@@ -434,7 +439,7 @@ impl InterruptManager {
     fn handle_pending_irq(&self, pending: controllers::PendingIrq) -> InterruptResult<()> {
         self.register_irq_mapping(pending.mapping);
         {
-            let controllers = self.controllers().lock();
+            let controllers = self.controllers().read();
             if let Some(controller) = controllers.external_controller() {
                 controller.ack_irq(&pending)?;
             } else {
@@ -536,7 +541,7 @@ impl InterruptManager {
         cpu_id: CpuId,
     ) -> InterruptResult<Option<controllers::PendingIrq>> {
         let pending = {
-            let controllers = self.controllers().lock();
+            let controllers = self.controllers().read();
             if let Some(controller) = controllers.external_controller() {
                 controller.claim_pending_irq(cpu_id)?
             } else {
@@ -574,7 +579,7 @@ impl InterruptManager {
         cpu_id: CpuId,
         interrupt_type: controllers::LocalInterruptType,
     ) -> InterruptResult<()> {
-        let controllers = self.controllers().lock();
+        let controllers = self.controllers().read();
         match interrupt_type {
             controllers::LocalInterruptType::Timer => controllers
                 .timer_controller_for_cpu(cpu_id)
@@ -593,7 +598,7 @@ impl InterruptManager {
         cpu_id: CpuId,
         interrupt_type: controllers::LocalInterruptType,
     ) -> InterruptResult<()> {
-        let controllers = self.controllers().lock();
+        let controllers = self.controllers().read();
         match interrupt_type {
             controllers::LocalInterruptType::Timer => controllers
                 .timer_controller_for_cpu(cpu_id)
@@ -608,7 +613,7 @@ impl InterruptManager {
     }
 
     pub fn send_software_interrupt(&self, target_cpu: CpuId) -> InterruptResult<()> {
-        let controllers = self.controllers().lock();
+        let controllers = self.controllers().read();
         if let Some(controller) = controllers.software_interrupt_controller_for_cpu(target_cpu) {
             controller.send_software_interrupt(target_cpu)
         } else {
@@ -617,7 +622,7 @@ impl InterruptManager {
     }
 
     pub fn set_timer(&self, cpu_id: CpuId, time: u64) -> InterruptResult<()> {
-        let controllers = self.controllers().lock();
+        let controllers = self.controllers().read();
         if let Some(controller) = controllers.timer_controller_for_cpu(cpu_id) {
             controller.set_timer(cpu_id, time)
         } else {
@@ -626,7 +631,7 @@ impl InterruptManager {
     }
 
     pub fn get_time(&self, cpu_id: CpuId) -> InterruptResult<u64> {
-        let controllers = self.controllers().lock();
+        let controllers = self.controllers().read();
         if let Some(controller) = controllers.timer_controller_for_cpu(cpu_id) {
             Ok(controller.get_time())
         } else {
@@ -635,7 +640,7 @@ impl InterruptManager {
     }
 
     pub fn get_timer_frequency_hz(&self, cpu_id: CpuId) -> InterruptResult<u64> {
-        let controllers = self.controllers().lock();
+        let controllers = self.controllers().read();
         if let Some(controller) = controllers.timer_controller_for_cpu(cpu_id) {
             Ok(controller.get_timer_frequency_hz())
         } else {
@@ -648,7 +653,7 @@ impl InterruptManager {
         cpu_id: CpuId,
         interrupt_type: controllers::LocalInterruptType,
     ) -> bool {
-        let controllers = self.controllers().lock();
+        let controllers = self.controllers().read();
         match interrupt_type {
             controllers::LocalInterruptType::Timer => controllers
                 .timer_controller_for_cpu(cpu_id)
@@ -667,7 +672,7 @@ impl InterruptManager {
         controller: alloc::boxed::Box<dyn controllers::TimerController>,
         cpu_ids: &[CpuId],
     ) -> InterruptResult<usize> {
-        let mut controllers = self.controllers().lock();
+        let mut controllers = self.controllers().write();
         Ok(controllers.register_timer_controller(controller, cpu_ids))
     }
 
@@ -676,7 +681,7 @@ impl InterruptManager {
         controller: alloc::boxed::Box<dyn controllers::TimerController>,
         cpu_range: core::ops::Range<CpuId>,
     ) -> InterruptResult<usize> {
-        let mut controllers = self.controllers().lock();
+        let mut controllers = self.controllers().write();
         Ok(controllers.register_timer_controller_for_range(controller, cpu_range))
     }
 
@@ -685,7 +690,7 @@ impl InterruptManager {
         controller: alloc::boxed::Box<dyn controllers::TimerController>,
         cpu_id: CpuId,
     ) -> InterruptResult<usize> {
-        let mut controllers = self.controllers().lock();
+        let mut controllers = self.controllers().write();
         Ok(controllers.register_timer_controller_for_cpu(controller, cpu_id))
     }
 
@@ -694,7 +699,7 @@ impl InterruptManager {
         controller: alloc::boxed::Box<dyn controllers::SoftwareInterruptController>,
         cpu_range: core::ops::Range<CpuId>,
     ) -> InterruptResult<usize> {
-        let mut controllers = self.controllers().lock();
+        let mut controllers = self.controllers().write();
         Ok(controllers.register_software_interrupt_controller_for_range(controller, cpu_range))
     }
 
@@ -702,7 +707,7 @@ impl InterruptManager {
         &self,
         controller: alloc::boxed::Box<dyn controllers::ExternalInterruptController>,
     ) -> InterruptResult<()> {
-        let mut controllers = self.controllers().lock();
+        let mut controllers = self.controllers().write();
         if controllers.has_external_controller() {
             return Err(InterruptError::HardwareError);
         }
@@ -844,7 +849,7 @@ impl InterruptManager {
         cpu_id: CpuId,
     ) -> InterruptResult<()> {
         let desc = self.irq_desc_or_legacy(interrupt_id);
-        let controllers = self.controllers().lock();
+        let controllers = self.controllers().read();
         if let Some(controller) = controllers.external_controller() {
             controller.enable_interrupt(desc.mapping.hwirq, cpu_id)?;
             self.enabled_external_interrupts
@@ -929,7 +934,7 @@ impl InterruptManager {
         cpu_id: CpuId,
     ) -> InterruptResult<()> {
         let desc = self.irq_desc_or_legacy(interrupt_id);
-        let controllers = self.controllers().lock();
+        let controllers = self.controllers().read();
         if let Some(controller) = controllers.external_controller() {
             controller.disable_interrupt(desc.mapping.hwirq, cpu_id)?;
             self.enabled_external_interrupts
@@ -942,11 +947,11 @@ impl InterruptManager {
     }
 
     pub fn has_local_controller(&self) -> bool {
-        self.controllers().lock().has_local_controller()
+        self.controllers().read().has_local_controller()
     }
 
     pub fn has_external_controller(&self) -> bool {
-        self.controllers().lock().has_external_controller()
+        self.controllers().read().has_external_controller()
     }
 
     pub fn send_ipi(
@@ -955,7 +960,7 @@ impl InterruptManager {
         ipi_type: controllers::LocalInterruptType,
     ) -> InterruptResult<()> {
         let result = {
-            let controllers = self.controllers().lock();
+            let controllers = self.controllers().read();
             if let Some(controller) = controllers.external_controller() {
                 controller.send_ipi(target_cpu_id, ipi_type)
             } else {
@@ -982,7 +987,7 @@ impl InterruptManager {
     /// not own the source, or an interrupt error on failure.
     pub fn claim_fast_interrupt(&self, cpu_id: CpuId) -> InterruptResult<InterruptClaim> {
         let result = {
-            let controllers = self.controllers().lock();
+            let controllers = self.controllers().read();
             if let Some(controller) = controllers.external_controller() {
                 controller.claim_fast_interrupt(cpu_id)
             } else {

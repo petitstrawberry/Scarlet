@@ -252,6 +252,16 @@ impl RootPageTableGuard {
         self.table_mut().unmap_all(asid);
     }
 
+    /// Clear all root-level entries without flushing the TLB.
+    ///
+    /// Intended for batched page-table rebuilds (e.g. `exec`) where the caller
+    /// will issue a single broadcast TLBI after all new mappings are installed.
+    /// The caller **must** call [`flush_all_tlb`] or equivalent before the
+    /// address space becomes visible to any PE.
+    pub(crate) fn unmap_all_no_flush(&mut self) {
+        self.table_mut().unmap_all_no_flush();
+    }
+
     #[cfg(test)]
     pub(crate) fn walk_to_level(
         &mut self,
@@ -681,6 +691,17 @@ pub fn setup_trampoline_for_kernel(manager: &VirtualMemoryManager) {
 /// AArch64: trampoline/high-VA live in the fixed TTBR1 kernel mapping.
 /// Per-task TTBR0 page tables should not pre-map the trampoline.
 pub fn setup_trampoline_for_user(_manager: &VirtualMemoryManager) {}
+
+/// Issue a single inner-shareable broadcast TLB invalidation for the current
+/// EL1 stage-1 translations.
+///
+/// This is the counterpart to [`RootPageTableGuard::unmap_all_no_flush`]:
+/// batched page-table rebuild callers (e.g. `exec`) clear the old address
+/// space without flushing, install fresh mappings, then call this once to
+ /// publish the entire set of changes to all PEs.
+pub fn flush_all_tlb() {
+    mmu::invalidate_stage1_translations_inner_shareable();
+}
 
 pub fn register_trampoline_for_ap() {
     let trampoline_start =

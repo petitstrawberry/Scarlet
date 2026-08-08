@@ -241,7 +241,7 @@ impl AbiModule for LinuxRiscv64Abi {
 
                         let mut root_page_table =
                             arch::vm::get_root_pagetable(task.vm_manager.get_asid()).unwrap();
-                        root_page_table.unmap_all();
+                        root_page_table.unmap_all_no_flush();
                         drop(root_page_table);
                         arch::vm::setup_trampoline_for_user(&task.vm_manager);
                         let (_, stack_top) = setup_user_stack(task);
@@ -352,6 +352,7 @@ impl AbiModule for LinuxRiscv64Abi {
                         trapframe.regs = task.vcpu.lock().iregs;
                         trapframe.set_pc(load_result.entry_point);
 
+                        arch::vm::flush_all_tlb(task.vm_manager.get_asid());
                         task.vcpu.lock().switch(trapframe);
                         Ok(())
                     }

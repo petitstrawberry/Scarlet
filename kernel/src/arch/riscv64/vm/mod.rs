@@ -196,6 +196,14 @@ impl RootPageTableGuard {
         self.table_mut().unmap_all(asid);
     }
 
+    /// Clear all root-level entries without issuing a TLB shootdown.
+    ///
+    /// Intended for batched page-table rebuilds (e.g. `exec`). The caller
+    /// **must** call [`flush_all_tlb`] before the address space becomes visible.
+    pub(crate) fn unmap_all_no_flush(&mut self) {
+        self.table_mut().unmap_all_no_flush();
+    }
+
     #[cfg(test)]
     pub(crate) fn walk_to_level(
         &mut self,
@@ -483,6 +491,15 @@ pub fn setup_trampoline_for_kernel(manager: &VirtualMemoryManager) {
 
 pub fn setup_trampoline_for_user(manager: &VirtualMemoryManager) {
     setup_trampoline_at_end(manager, TRAMPOLINE_VA_END);
+}
+
+/// Issue a synchronous TLB shootdown for the given ASID across all harts.
+///
+/// This is the counterpart to [`RootPageTableGuard::unmap_all_no_flush`]:
+/// batched page-table rebuild callers clear the old address space without
+/// flushing, install fresh mappings, then call this once.
+pub fn flush_all_tlb(asid: u16) {
+    synchronize_tlb(asid);
 }
 
 pub fn register_trampoline_for_ap() {

@@ -667,11 +667,20 @@ impl PageTable {
     }
 
     pub(in crate::arch::riscv64::vm) fn unmap_all(&mut self, asid: u16) {
+        self.unmap_all_no_flush();
+        synchronize_tlb(asid);
+    }
+
+    /// Clear all root-level entries without issuing a TLB shootdown.
+    ///
+    /// Intended for batched page-table rebuilds (e.g. `exec`). The caller
+    /// **must** call [`synchronize_tlb`] or equivalent before the affected
+    /// address space becomes visible to any hart.
+    pub(in crate::arch::riscv64::vm) fn unmap_all_no_flush(&mut self) {
         for i in 0..512 {
             let entry = &mut self.entries[i];
             entry.clear_all();
         }
-        synchronize_tlb(asid);
     }
 }
 
