@@ -307,8 +307,8 @@ fn launcher_button(
         .text_color(palette.text())
         .font_size(14.0)
         .padding(8.0)
-        .frame(width, 46.0)
         .on_click(on_click)
+        .frame(width, 46.0)
 }
 
 impl View for SgfxShowcaseApp {
