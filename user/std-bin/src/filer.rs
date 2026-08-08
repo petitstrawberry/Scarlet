@@ -48,6 +48,13 @@ const FILE_NAME_MAX_WIDTH: f32 = 132.0;
 const SERVICE_RETRY_DELAY: Duration = Duration::from_millis(100);
 const DOUBLE_CLICK_INTERVAL: Duration = Duration::from_millis(500);
 
+/// Path to the files binary, used to re-exec in standalone picker mode.
+const FILES_BINARY_PATH: &str = "/bin/files";
+/// Set when the process was launched with `--picker`. In that mode the picker
+/// window opens at launch, the response signal is sent synchronously on
+/// completion, and the process exits when the picker window closes.
+static STANDALONE_PICKER: AtomicBool = AtomicBool::new(false);
+
 #[derive(Clone)]
 struct FileEntry {
     name: String,
@@ -94,6 +101,11 @@ static PENDING_DIRECTORY_READS: Mutex<Vec<DirectoryReadResult>> = Mutex::new(Vec
 static PENDING_PICKER_REQUESTS: Mutex<Vec<PickerRequest>> = Mutex::new(Vec::new());
 static PENDING_PICKER_READS: Mutex<Vec<PickerReadResult>> = Mutex::new(Vec::new());
 static PICKER_WINDOW_CLOSING: AtomicBool = AtomicBool::new(false);
+
+/// Picker child processes spawned via `launch_picker_process`. The background
+/// reaper thread polls them with `try_wait` so the UI thread never blocks and
+/// exited children are reaped without becoming zombies.
+static PICKER_CHILDREN: Mutex<Vec<std::process::Child>> = Mutex::new(Vec::new());
 
 fn mutex_lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex
@@ -350,7 +362,7 @@ impl FilerApp {
             .set(String::from("Cannot choose a name for the new folder"));
     }
 
-    fn begin_picker(&self, request: PickerRequest) {
+    fn configure_picker(&self, request: PickerRequest) {
         let initial_folder = if request.initial_folder.is_empty() {
             home_path()
         } else {
@@ -366,8 +378,12 @@ impl FilerApp {
         self.picker_current_path.set(initial_folder);
         self.picker_entries.set(Vec::new());
         self.picker_status.set(status);
-        open_window(PICKER_WINDOW_KEY);
         self.refresh_picker();
+    }
+
+    fn begin_picker(&self, request: PickerRequest) {
+        self.configure_picker(request);
+        open_window(PICKER_WINDOW_KEY);
     }
 
     fn process_pending_ui_work(&self) {
@@ -484,24 +500,16 @@ impl FilerApp {
             dismiss_window(PICKER_WINDOW_KEY);
         }
 
-        thread::spawn(move || {
-            match SbusConnection::connect().and_then(|mut connection| {
-                connection.emit_signal(
-                    DESKTOP_FILE_MANAGER_BUS_NAME,
-                    DESKTOP_FILE_MANAGER_OBJECT_PATH,
-                    DESKTOP_FILE_MANAGER_INTERFACE,
-                    DESKTOP_FILE_MANAGER_RESPONSE_SIGNAL,
-                    vec![
-                        Argument::String(request_id),
-                        Argument::Boolean(success),
-                        Argument::String(path),
-                    ],
-                )
-            }) {
-                Ok(()) => {}
-                Err(error) => eprintln!("[filer] failed to send picker response: {error:?}"),
-            }
-        });
+        if STANDALONE_PICKER.load(AtomicOrdering::Acquire) {
+            // In standalone picker mode the process exits as soon as the
+            // window closes. Send the response synchronously so the signal
+            // is guaranteed to reach sbusd before exit.
+            send_picker_response(request_id, success, path);
+        } else {
+            thread::spawn(move || {
+                send_picker_response(request_id, success, path);
+            });
+        }
     }
 
     fn file_cell(
@@ -815,17 +823,18 @@ impl Application for FilerApp {
             .get()
             .map(|request| request.title)
             .unwrap_or_else(|| String::from("Open File"));
+        let picker_open_at_launch = STANDALONE_PICKER.load(AtomicOrdering::Acquire);
         let picker_window = Window::new(picker_title, picker.picker_page())
             .scene_key(PICKER_WINDOW_KEY)
             .app_id(APP_ID)
             .size(Size::new(960.0, 640.0))
-            .open_at_launch(false);
+            .open_at_launch(picker_open_at_launch);
 
         (main_window, picker_window)
     }
 
     fn exit_when_all_windows_closed(&self) -> bool {
-        false
+        STANDALONE_PICKER.load(AtomicOrdering::Acquire)
     }
 }
 
@@ -1372,17 +1381,179 @@ fn run_picker_service() {
                 .send_method_return(0, vec![Argument::String(request_id)])
                 .is_ok()
             {
-                mutex_lock(&PENDING_PICKER_REQUESTS).push(request);
+                launch_picker_process(&request);
             }
         }
     }
 }
 
 fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|a| a == "--picker") {
+        println!("[filer] starting in standalone picker mode");
+        run_standalone_picker(&args);
+        return;
+    }
+
     println!("[filer] starting");
     thread::spawn(run_picker_service);
+    thread::spawn(picker_reaper);
     let mut app = FilerApp::new();
     if let Err(error) = app.run() {
         eprintln!("[filer] error: {error}");
     }
+}
+
+/// Run as a standalone picker process. The request parameters were passed as
+/// command-line arguments by the parent Files process. The picker window opens
+/// immediately; when the user confirms or cancels, the response signal is sent
+/// synchronously and the process exits.
+fn run_standalone_picker(args: &[String]) {
+    STANDALONE_PICKER.store(true, AtomicOrdering::Release);
+    let request = parse_picker_args(args);
+    let mut app = FilerApp::new();
+    app.configure_picker(request);
+    if let Err(error) = app.run() {
+        eprintln!("[filer] picker error: {error}");
+    }
+}
+
+/// Send the picker response signal via sbus. In standalone mode this is called
+/// synchronously; in normal mode it runs on a spawned thread.
+fn send_picker_response(request_id: String, success: bool, path: String) {
+    match SbusConnection::connect().and_then(|mut connection| {
+        connection.emit_signal(
+            DESKTOP_FILE_MANAGER_BUS_NAME,
+            DESKTOP_FILE_MANAGER_OBJECT_PATH,
+            DESKTOP_FILE_MANAGER_INTERFACE,
+            DESKTOP_FILE_MANAGER_RESPONSE_SIGNAL,
+            vec![
+                Argument::String(request_id),
+                Argument::Boolean(success),
+                Argument::String(path),
+            ],
+        )
+    }) {
+        Ok(()) => {}
+        Err(error) => eprintln!("[filer] failed to send picker response: {error:?}"),
+    }
+}
+
+/// Fork and exec a standalone picker child process with the request encoded as
+/// command-line arguments. This isolates the picker UI from the Files main
+/// process so a crash in either one cannot take down the other.
+fn launch_picker_process(request: &PickerRequest) {
+    // Build argv for the standalone picker child.
+    let argv_strings = build_picker_argv(request);
+    let mut command = std::process::Command::new(FILES_BINARY_PATH);
+    command.args(&argv_strings[1..]);
+    match command.spawn() {
+        Ok(child) => {
+            mutex_lock(&PICKER_CHILDREN).push(child);
+        }
+        Err(error) => {
+            eprintln!("[filer] failed to spawn picker process: {error}");
+        }
+    }
+}
+
+/// Background thread that reaps exited picker child processes without blocking
+/// the UI thread. Uses `try_wait` (non-blocking) so it never stalls.
+fn picker_reaper() {
+    loop {
+        let mut still_alive = Vec::new();
+        for mut child in mutex_lock(&PICKER_CHILDREN).drain(..) {
+            match child.try_wait() {
+                Ok(Some(_status)) => { /* child exited, drop handle */ }
+                Ok(None) => still_alive.push(child),
+                Err(_) => { /* error — drop handle to avoid leak */ }
+            }
+        }
+        if !still_alive.is_empty() {
+            mutex_lock(&PICKER_CHILDREN).extend(still_alive);
+        }
+        thread::sleep(Duration::from_millis(500));
+    }
+}
+
+/// Parse `--picker` command-line arguments into a PickerRequest.
+fn parse_picker_args(args: &[String]) -> PickerRequest {
+    let mut request = PickerRequest {
+        id: String::new(),
+        title: String::from("Open File"),
+        initial_folder: String::new(),
+        filter: String::new(),
+        allow_multiple: false,
+        select_directories: false,
+        save_mode: false,
+        suggested_name: String::new(),
+    };
+
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--picker" => {}
+            "--request-id" => {
+                if let Some(val) = args.get(i + 1) {
+                    request.id = val.clone();
+                    i += 1;
+                }
+            }
+            "--title" => {
+                if let Some(val) = args.get(i + 1) {
+                    request.title = val.clone();
+                    i += 1;
+                }
+            }
+            "--folder" => {
+                if let Some(val) = args.get(i + 1) {
+                    request.initial_folder = val.clone();
+                    i += 1;
+                }
+            }
+            "--filter" => {
+                if let Some(val) = args.get(i + 1) {
+                    request.filter = val.clone();
+                    i += 1;
+                }
+            }
+            "--save" => {
+                request.save_mode = true;
+            }
+            "--suggested-name" => {
+                if let Some(val) = args.get(i + 1) {
+                    request.suggested_name = val.clone();
+                    i += 1;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+
+    request
+}
+
+/// Build the argv vector for launching a standalone picker child process.
+fn build_picker_argv(request: &PickerRequest) -> Vec<String> {
+    let mut argv = vec![
+        String::from("files"),
+        String::from("--picker"),
+        String::from("--request-id"),
+        request.id.clone(),
+        String::from("--title"),
+        request.title.clone(),
+        String::from("--folder"),
+        request.initial_folder.clone(),
+        String::from("--filter"),
+        request.filter.clone(),
+    ];
+    if request.save_mode {
+        argv.push(String::from("--save"));
+        if !request.suggested_name.is_empty() {
+            argv.push(String::from("--suggested-name"));
+            argv.push(request.suggested_name.clone());
+        }
+    }
+    argv
 }
