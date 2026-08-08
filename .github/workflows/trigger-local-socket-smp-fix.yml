@@ -33,6 +33,7 @@ jobs:
           exec(compile(script, '<staged-local-socket-fix>', 'exec'))
           BOOT
 
+          rustup component add rustfmt --toolchain nightly-2025-12-31-x86_64-unknown-linux-gnu
           rustfmt --edition 2024 kernel/src/network/local.rs user/bin/src/sbusd/main.rs
 
           rm .github/workflows/apply-local-socket-smp-fix.yml
