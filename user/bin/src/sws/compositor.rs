@@ -750,12 +750,13 @@ impl Compositor {
             for _ in 0..10 {
                 if let Ok(mut connection) = SbusConnection::connect()
                     && connection
-                        .call_method(
+                        .call_method_timeout(
                             DESKTOP_LAUNCHER_BUS_NAME,
                             DESKTOP_LAUNCHER_OBJECT_PATH,
                             DESKTOP_LAUNCHER_INTERFACE,
                             DESKTOP_LAUNCHER_SHOW_METHOD,
                             Vec::new(),
+                            1_000,
                         )
                         .is_ok()
                 {

@@ -542,7 +542,7 @@ fn handle_message(
                 }
 
                 let mut destination_socket = destination_socket.lock();
-                if let Err(error) = write_all(&mut destination_socket, &bytes) {
+                if let Err(error) = write_all_best_effort(&mut destination_socket, &bytes) {
                     println!(
                         "sbusd: Failed to broadcast signal to client {}: {}",
                         destination_id, error
@@ -596,7 +596,7 @@ fn broadcast_service_unregistered(bus_name: &str) {
     };
     for (destination_id, destination_socket) in destinations {
         let mut sock = destination_socket.lock();
-        if let Err(error) = write_all(&mut sock, &bytes) {
+        if let Err(error) = write_all_best_effort(&mut sock, &bytes) {
             println!(
                 "sbusd: Failed to broadcast ServiceUnregistered({}) to client {}: {}",
                 bus_name, destination_id, error
@@ -727,6 +727,24 @@ fn monotonic_time_ns() -> u64 {
 
 /// Write all bytes to socket.
 fn write_all(socket: &mut Socket, bytes: &[u8]) -> Result<(), &'static str> {
+    write_all_inner(socket, bytes, true)
+}
+
+/// Write all bytes to socket without tearing the connection down on failure.
+///
+/// Used for broadcasts: a slow peer (e.g. an application still loading from
+/// disk at startup) must not lose its sbus connection just because it could
+/// not drain its socket within the write timeout. The message is dropped, but
+/// the connection stays usable.
+fn write_all_best_effort(socket: &mut Socket, bytes: &[u8]) -> Result<(), &'static str> {
+    write_all_inner(socket, bytes, false)
+}
+
+fn write_all_inner(
+    socket: &mut Socket,
+    bytes: &[u8],
+    teardown_on_failure: bool,
+) -> Result<(), &'static str> {
     let mut written = 0;
     let raw_handle = socket.as_raw() as u32;
     let mut stall_deadline_ns = monotonic_time_ns().saturating_add(CLIENT_WRITE_TIMEOUT_NS);
@@ -735,7 +753,9 @@ fn write_all(socket: &mut Socket, bytes: &[u8]) -> Result<(), &'static str> {
         match socket.write(&bytes[written..]) {
             Ok(0) => {
                 println!("[write_all] Write returned 0 (disconnected)");
-                let _ = socket.shutdown(ShutdownHow::Both);
+                if teardown_on_failure {
+                    let _ = socket.shutdown(ShutdownHow::Both);
+                }
                 return Err("Failed to send: disconnected");
             }
             Ok(n) => {
@@ -752,7 +772,9 @@ fn write_all(socket: &mut Socket, bytes: &[u8]) -> Result<(), &'static str> {
                         written,
                         bytes.len()
                     );
-                    let _ = socket.shutdown(ShutdownHow::Both);
+                    if teardown_on_failure {
+                        let _ = socket.shutdown(ShutdownHow::Both);
+                    }
                     return Err("Failed to send: timed out");
                 }
 
@@ -764,7 +786,9 @@ fn write_all(socket: &mut Socket, bytes: &[u8]) -> Result<(), &'static str> {
                 let mut poll_handles = [PollHandle::new(raw_handle, POLLOUT)];
                 if let Err(code) = poll(&mut poll_handles, slice_ns) {
                     println!("[write_all] Poll error while waiting to write: {}", code);
-                    let _ = socket.shutdown(ShutdownHow::Both);
+                    if teardown_on_failure {
+                        let _ = socket.shutdown(ShutdownHow::Both);
+                    }
                     return Err("Failed to wait for writable socket");
                 }
                 if poll_handles[0].revents & (POLLERR | POLLHUP | POLLNVAL) != 0 {
@@ -774,7 +798,9 @@ fn write_all(socket: &mut Socket, bytes: &[u8]) -> Result<(), &'static str> {
             }
             Err(e) => {
                 println!("[write_all] Write error: {:?}", e);
-                let _ = socket.shutdown(ShutdownHow::Both);
+                if teardown_on_failure {
+                    let _ = socket.shutdown(ShutdownHow::Both);
+                }
                 return Err("Failed to send");
             }
         }

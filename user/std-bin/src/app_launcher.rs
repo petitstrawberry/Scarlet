@@ -108,7 +108,7 @@ impl LauncherApp {
             };
 
         match SbusConnection::connect().and_then(|mut connection| {
-            connection.call_method(
+            connection.call_method_timeout(
                 DESKTOP_STEMD_BUS_NAME,
                 DESKTOP_STEMD_OBJECT_PATH,
                 DESKTOP_STEMD_INTERFACE,
@@ -117,6 +117,7 @@ impl LauncherApp {
                     Argument::String(application.app_id.clone()),
                     Argument::String(activation_token.clone()),
                 ],
+                3_000,
             )
         }) {
             Ok(_) => dismiss_window("main"),
@@ -433,7 +434,7 @@ fn show_file_manager(source_window_id: u32) -> bool {
 
     if SbusConnection::connect()
         .and_then(|mut connection| {
-            connection.call_method(
+            connection.call_method_timeout(
                 DESKTOP_STEMD_BUS_NAME,
                 DESKTOP_STEMD_OBJECT_PATH,
                 DESKTOP_STEMD_INTERFACE,
@@ -442,6 +443,7 @@ fn show_file_manager(source_window_id: u32) -> bool {
                     Argument::String(String::from(FILE_MANAGER_APP_ID)),
                     Argument::String(activation_token.clone()),
                 ],
+                3_000,
             )
         })
         .is_err()
@@ -463,12 +465,13 @@ fn request_file_manager_window() -> bool {
         return false;
     };
     connection
-        .call_method(
+        .call_method_timeout(
             DESKTOP_FILE_MANAGER_BUS_NAME,
             DESKTOP_FILE_MANAGER_OBJECT_PATH,
             DESKTOP_FILE_MANAGER_INTERFACE,
             DESKTOP_FILE_MANAGER_SHOW_METHOD,
             Vec::new(),
+            1_000,
         )
         .is_ok()
 }

@@ -317,12 +317,13 @@ fn request_file_manager_window() -> bool {
         return false;
     };
     connection
-        .call_method(
+        .call_method_timeout(
             DESKTOP_FILE_MANAGER_BUS_NAME,
             DESKTOP_FILE_MANAGER_OBJECT_PATH,
             DESKTOP_FILE_MANAGER_INTERFACE,
             DESKTOP_FILE_MANAGER_SHOW_METHOD,
             Vec::new(),
+            1_000,
         )
         .is_ok()
 }
@@ -331,12 +332,13 @@ fn show_launcher() {
     for _ in 0..5 {
         if let Ok(mut connection) = SbusConnection::connect()
             && connection
-                .call_method(
+                .call_method_timeout(
                     DESKTOP_LAUNCHER_BUS_NAME,
                     DESKTOP_LAUNCHER_OBJECT_PATH,
                     DESKTOP_LAUNCHER_INTERFACE,
                     DESKTOP_LAUNCHER_SHOW_METHOD,
                     Vec::new(),
+                    1_000,
                 )
                 .is_ok()
         {

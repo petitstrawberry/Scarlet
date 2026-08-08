@@ -169,12 +169,13 @@ impl NotepadApp {
         let mut last_error = None;
         for attempt in 0..PICKER_RETRY_ATTEMPTS {
             let result = SbusConnection::connect().and_then(|mut connection| {
-                connection.call_method(
+                connection.call_method_timeout(
                     DESKTOP_FILE_MANAGER_BUS_NAME,
                     DESKTOP_FILE_MANAGER_OBJECT_PATH,
                     DESKTOP_FILE_MANAGER_INTERFACE,
                     method,
                     args.clone(),
+                    2_000,
                 )
             });
 
@@ -393,12 +394,13 @@ fn start_picker_listener(app: &NotepadApp) {
 
 fn ensure_files_service() -> core::result::Result<(), sbus_client::Error> {
     let mut connection = SbusConnection::connect()?;
-    let _ = connection.call_method(
+    let _ = connection.call_method_timeout(
         DESKTOP_STEMD_BUS_NAME,
         DESKTOP_STEMD_OBJECT_PATH,
         DESKTOP_STEMD_INTERFACE,
         DESKTOP_STEMD_LAUNCH_OR_FOCUS_METHOD,
         vec![Argument::String(String::from(FILES_APP_ID))],
+        3_000,
     );
     Ok(())
 }

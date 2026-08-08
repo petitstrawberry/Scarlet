@@ -1129,199 +1129,183 @@ fn ipc_thread() {
 
     println!("stemd: IPC socket listening at {}", socket_path);
 
-    // Accept connections
+    // Accept connections. Each connection is handled on its own thread so one
+    // slow command (registry lookup, SWS round-trip, fork) cannot block every
+    // other stemd client.
     loop {
         match server.accept() {
             Ok(client) => {
-                let stream = match client.as_stream() {
-                    Ok(s) => s,
-                    Err(_) => continue,
-                };
-
-                // Read command (larger buffer for binary commands)
-                let mut buffer = [0u8; 1024];
-                match stream.read(&mut buffer) {
-                    Ok(mut n) if n > 0 => {
-                        // Check if this is a binary launch command.
-                        if buffer[0] == cmd::LAUNCH_OR_FOCUS || buffer[0] == cmd::LAUNCH {
-                            // Parse launch command.
-                            // Format: cmd(1) + app_id_len(4) + app_id + exec_path_len(4) + exec_path
-                            if read_until(&stream, &mut buffer, &mut n, 9) {
-                                let app_id_len = u32::from_le_bytes([
-                                    buffer[1], buffer[2], buffer[3], buffer[4],
-                                ]) as usize;
-
-                                let exec_path_offset = 5 + app_id_len;
-                                if read_until(&stream, &mut buffer, &mut n, exec_path_offset + 4) {
-                                    let exec_path_len = u32::from_le_bytes([
-                                        buffer[exec_path_offset],
-                                        buffer[exec_path_offset + 1],
-                                        buffer[exec_path_offset + 2],
-                                        buffer[exec_path_offset + 3],
-                                    ])
-                                        as usize;
-
-                                    let total_len = exec_path_offset + 4 + exec_path_len;
-                                    if read_until(&stream, &mut buffer, &mut n, total_len) {
-                                        let app_id =
-                                            core::str::from_utf8(&buffer[5..5 + app_id_len]);
-                                        let exec_path = core::str::from_utf8(
-                                            &buffer[exec_path_offset + 4
-                                                ..exec_path_offset + 4 + exec_path_len],
-                                        );
-
-                                        match (app_id, exec_path) {
-                                            (Ok(app_id), Ok(exec_path)) => {
-                                                let launch_only = buffer[0] == cmd::LAUNCH;
-                                                println!(
-                                                    "stemd: {} app_id={} exec={}",
-                                                    if launch_only {
-                                                        "LAUNCH"
-                                                    } else {
-                                                        "LAUNCH_OR_FOCUS"
-                                                    },
-                                                    app_id,
-                                                    exec_path
-                                                );
-
-                                                let exec_path_arg = if exec_path.is_empty() {
-                                                    None
-                                                } else {
-                                                    Some(exec_path)
-                                                };
-
-                                                let response = if launch_only {
-                                                    match launch_app_by_id(app_id, None) {
-                                                        Ok(_) => "OK: Launched\n".as_bytes(),
-                                                        Err(_) => {
-                                                            "ERROR: Failed to launch\n".as_bytes()
-                                                        }
-                                                    }
-                                                } else {
-                                                    match launch_or_focus(app_id, exec_path_arg) {
-                                                        Ok(()) => {
-                                                            "OK: Launched or focused\n".as_bytes()
-                                                        }
-                                                        Err(e) => {
-                                                            // Build error message as byte array directly
-                                                            let error_prefix = "ERROR: ";
-                                                            let error_suffix = "\n";
-                                                            let mut error_msg = Vec::new();
-                                                            error_msg.extend_from_slice(
-                                                                error_prefix.as_bytes(),
-                                                            );
-                                                            error_msg
-                                                                .extend_from_slice(e.as_bytes());
-                                                            error_msg.extend_from_slice(
-                                                                error_suffix.as_bytes(),
-                                                            );
-                                                            // Note: This is a temporary solution - the Vec will be dropped
-                                                            // but we're returning a slice. For IPC, we should handle this differently.
-                                                            // For now, use a static error message.
-                                                            "ERROR: Failed to launch or focus\n"
-                                                                .as_bytes()
-                                                        }
-                                                    }
-                                                };
-
-                                                let _ = stream.write(response);
-                                            }
-                                            _ => {
-                                                let error_msg =
-                                                    "ERROR: Invalid UTF-8 in parameters\n";
-                                                let _ = stream.write(error_msg.as_bytes());
-                                            }
-                                        }
-                                    } else {
-                                        let error_msg = "ERROR: Incomplete command\n";
-                                        let _ = stream.write(error_msg.as_bytes());
-                                    }
-                                } else {
-                                    let error_msg = "ERROR: Incomplete command\n";
-                                    let _ = stream.write(error_msg.as_bytes());
-                                }
-                            } else {
-                                let error_msg = "ERROR: Malformed LAUNCH_OR_FOCUS command\n";
-                                let _ = stream.write(error_msg.as_bytes());
-                            }
-                        } else if buffer[0] == cmd::SERVICE_READY {
-                            if read_until(&stream, &mut buffer, &mut n, 5) {
-                                let service_name_len = u32::from_le_bytes([
-                                    buffer[1], buffer[2], buffer[3], buffer[4],
-                                ]) as usize;
-                                let end = 5 + service_name_len;
-                                if read_until(&stream, &mut buffer, &mut n, end) {
-                                    match core::str::from_utf8(&buffer[5..end]) {
-                                        Ok(service_name) => {
-                                            println!(
-                                                "stemd: SERVICE_READY received for '{}'",
-                                                service_name
-                                            );
-                                            mark_service_ready(service_name);
-                                            let _ = stream
-                                                .write("OK: Service marked ready\n".as_bytes());
-                                        }
-                                        Err(_) => {
-                                            let _ = stream.write(
-                                                "ERROR: Invalid UTF-8 in service name\n".as_bytes(),
-                                            );
-                                        }
-                                    }
-                                } else {
-                                    let _ = stream.write(
-                                        "ERROR: Incomplete SERVICE_READY command\n".as_bytes(),
-                                    );
-                                }
-                            } else {
-                                let _ = stream
-                                    .write("ERROR: Malformed SERVICE_READY command\n".as_bytes());
-                            }
-                        } else if buffer[0] == cmd::SHUTDOWN {
-                            println!("stemd: Received SHUTDOWN command");
-
-                            let response = "OK: Shutting down\n";
-                            let _ = stream.write(response.as_bytes());
-
-                            // Shutdown must be called from main thread (PID 1)
-                            // to pass kernel authorization check
-                            handle_shutdown();
-                        } else {
-                            // Try to parse command as UTF-8 text
-                            match core::str::from_utf8(&buffer[..n]) {
-                                Ok(cmd) => {
-                                    println!("stemd: Received command: {}", cmd.trim());
-
-                                    // Process command (simplified)
-                                    let response = match cmd.trim() {
-                                        "status" => "stemd is running\n",
-                                        "help" => {
-                                            "Commands: status, help, launch_or_focus, shutdown\n"
-                                        }
-                                        "shutdown" => {
-                                            // Handle text-based shutdown command too
-                                            let _ = thread::spawn(handle_shutdown);
-                                            "OK: Shutting down\n"
-                                        }
-                                        _ => "Unknown command\n",
-                                    };
-
-                                    let _ = stream.write(response.as_bytes());
-                                }
-                                Err(_) => {
-                                    let error_msg = "Error: Invalid UTF-8 in command\n";
-                                    let _ = stream.write(error_msg.as_bytes());
-                                    println!("stemd: Received invalid UTF-8 command");
-                                }
-                            }
-                        }
-                    }
-                    _ => {}
-                }
+                let _ = thread::spawn(move || handle_ipc_client(client));
             }
             Err(_) => {
                 thread::sleep(core::time::Duration::from_millis(100));
             }
         }
+    }
+}
+
+/// Handle a single stemd IPC connection (one command per connection).
+fn handle_ipc_client(client: Socket) {
+    let stream = match client.as_stream() {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+
+    // Read command (larger buffer for binary commands)
+    let mut buffer = [0u8; 1024];
+    match stream.read(&mut buffer) {
+        Ok(mut n) if n > 0 => {
+            // Check if this is a binary launch command.
+            if buffer[0] == cmd::LAUNCH_OR_FOCUS || buffer[0] == cmd::LAUNCH {
+                // Parse launch command.
+                // Format: cmd(1) + app_id_len(4) + app_id + exec_path_len(4) + exec_path
+                if read_until(&stream, &mut buffer, &mut n, 9) {
+                    let app_id_len =
+                        u32::from_le_bytes([buffer[1], buffer[2], buffer[3], buffer[4]]) as usize;
+
+                    let exec_path_offset = 5 + app_id_len;
+                    if read_until(&stream, &mut buffer, &mut n, exec_path_offset + 4) {
+                        let exec_path_len = u32::from_le_bytes([
+                            buffer[exec_path_offset],
+                            buffer[exec_path_offset + 1],
+                            buffer[exec_path_offset + 2],
+                            buffer[exec_path_offset + 3],
+                        ]) as usize;
+
+                        let total_len = exec_path_offset + 4 + exec_path_len;
+                        if read_until(&stream, &mut buffer, &mut n, total_len) {
+                            let app_id = core::str::from_utf8(&buffer[5..5 + app_id_len]);
+                            let exec_path = core::str::from_utf8(
+                                &buffer[exec_path_offset + 4..exec_path_offset + 4 + exec_path_len],
+                            );
+
+                            match (app_id, exec_path) {
+                                (Ok(app_id), Ok(exec_path)) => {
+                                    let launch_only = buffer[0] == cmd::LAUNCH;
+                                    println!(
+                                        "stemd: {} app_id={} exec={}",
+                                        if launch_only {
+                                            "LAUNCH"
+                                        } else {
+                                            "LAUNCH_OR_FOCUS"
+                                        },
+                                        app_id,
+                                        exec_path
+                                    );
+
+                                    let exec_path_arg = if exec_path.is_empty() {
+                                        None
+                                    } else {
+                                        Some(exec_path)
+                                    };
+
+                                    let response = if launch_only {
+                                        match launch_app_by_id(app_id, None) {
+                                            Ok(_) => "OK: Launched\n".as_bytes(),
+                                            Err(_) => "ERROR: Failed to launch\n".as_bytes(),
+                                        }
+                                    } else {
+                                        match launch_or_focus(app_id, exec_path_arg) {
+                                            Ok(()) => "OK: Launched or focused\n".as_bytes(),
+                                            Err(e) => {
+                                                // Build error message as byte array directly
+                                                let error_prefix = "ERROR: ";
+                                                let error_suffix = "\n";
+                                                let mut error_msg = Vec::new();
+                                                error_msg
+                                                    .extend_from_slice(error_prefix.as_bytes());
+                                                error_msg.extend_from_slice(e.as_bytes());
+                                                error_msg
+                                                    .extend_from_slice(error_suffix.as_bytes());
+                                                // Note: This is a temporary solution - the Vec will be dropped
+                                                // but we're returning a slice. For IPC, we should handle this differently.
+                                                // For now, use a static error message.
+                                                "ERROR: Failed to launch or focus\n".as_bytes()
+                                            }
+                                        }
+                                    };
+
+                                    let _ = stream.write(response);
+                                }
+                                _ => {
+                                    let error_msg = "ERROR: Invalid UTF-8 in parameters\n";
+                                    let _ = stream.write(error_msg.as_bytes());
+                                }
+                            }
+                        } else {
+                            let error_msg = "ERROR: Incomplete command\n";
+                            let _ = stream.write(error_msg.as_bytes());
+                        }
+                    } else {
+                        let error_msg = "ERROR: Incomplete command\n";
+                        let _ = stream.write(error_msg.as_bytes());
+                    }
+                } else {
+                    let error_msg = "ERROR: Malformed LAUNCH_OR_FOCUS command\n";
+                    let _ = stream.write(error_msg.as_bytes());
+                }
+            } else if buffer[0] == cmd::SERVICE_READY {
+                if read_until(&stream, &mut buffer, &mut n, 5) {
+                    let service_name_len =
+                        u32::from_le_bytes([buffer[1], buffer[2], buffer[3], buffer[4]]) as usize;
+                    let end = 5 + service_name_len;
+                    if read_until(&stream, &mut buffer, &mut n, end) {
+                        match core::str::from_utf8(&buffer[5..end]) {
+                            Ok(service_name) => {
+                                println!("stemd: SERVICE_READY received for '{}'", service_name);
+                                mark_service_ready(service_name);
+                                let _ = stream.write("OK: Service marked ready\n".as_bytes());
+                            }
+                            Err(_) => {
+                                let _ = stream
+                                    .write("ERROR: Invalid UTF-8 in service name\n".as_bytes());
+                            }
+                        }
+                    } else {
+                        let _ =
+                            stream.write("ERROR: Incomplete SERVICE_READY command\n".as_bytes());
+                    }
+                } else {
+                    let _ = stream.write("ERROR: Malformed SERVICE_READY command\n".as_bytes());
+                }
+            } else if buffer[0] == cmd::SHUTDOWN {
+                println!("stemd: Received SHUTDOWN command");
+
+                let response = "OK: Shutting down\n";
+                let _ = stream.write(response.as_bytes());
+
+                // Shutdown must be called from main thread (PID 1)
+                // to pass kernel authorization check
+                handle_shutdown();
+            } else {
+                // Try to parse command as UTF-8 text
+                match core::str::from_utf8(&buffer[..n]) {
+                    Ok(cmd) => {
+                        println!("stemd: Received command: {}", cmd.trim());
+
+                        // Process command (simplified)
+                        let response = match cmd.trim() {
+                            "status" => "stemd is running\n",
+                            "help" => "Commands: status, help, launch_or_focus, shutdown\n",
+                            "shutdown" => {
+                                // Handle text-based shutdown command too
+                                let _ = thread::spawn(handle_shutdown);
+                                "OK: Shutting down\n"
+                            }
+                            _ => "Unknown command\n",
+                        };
+
+                        let _ = stream.write(response.as_bytes());
+                    }
+                    Err(_) => {
+                        let error_msg = "Error: Invalid UTF-8 in command\n";
+                        let _ = stream.write(error_msg.as_bytes());
+                        println!("stemd: Received invalid UTF-8 command");
+                    }
+                }
+            }
+        }
+        _ => {}
     }
 }
 
