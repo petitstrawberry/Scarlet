@@ -3,4 +3,5 @@
 
 [service.sbusd]
 exec = "/bin/sbusd"
+tty = "/dev/tty0"
 depends = []
