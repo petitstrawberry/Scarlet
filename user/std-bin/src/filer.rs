@@ -7,7 +7,7 @@
 
 mod file_icons;
 
-use core::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
 use std::cmp::Ordering;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -22,7 +22,8 @@ use scarlet_desktop_config::{
     DESKTOP_FILE_MANAGER_OBJECT_PATH, DESKTOP_FILE_MANAGER_OPEN_FILE_METHOD,
     DESKTOP_FILE_MANAGER_RESPONSE_SIGNAL, DESKTOP_FILE_MANAGER_SAVE_FILE_METHOD,
     DESKTOP_FILE_MANAGER_SHOW_METHOD, DESKTOP_FILES_APP_ID, DESKTOP_STEMD_BUS_NAME,
-    DESKTOP_STEMD_INTERFACE, DESKTOP_STEMD_OBJECT_PATH, DESKTOP_STEMD_OPEN_PATH_METHOD,
+    DESKTOP_STEMD_INTERFACE, DESKTOP_STEMD_LAUNCH_OR_FOCUS_METHOD, DESKTOP_STEMD_OBJECT_PATH,
+    DESKTOP_STEMD_OPEN_PATH_METHOD,
 };
 use scarlet_ui::prelude::*;
 use scarlet_ui::{
@@ -88,10 +89,6 @@ impl PickerRequest {
     }
 }
 
-enum FilerUiRequest {
-    ShowMain,
-}
-
 struct PickerReadResult {
     request_id: String,
     generation: u32,
@@ -113,11 +110,11 @@ struct PickerChild {
 
 static NEXT_FILER_INSTANCE_ID: Mutex<u64> = Mutex::new(1);
 static NEXT_PICKER_REQUEST_ID: Mutex<u32> = Mutex::new(1);
-static PENDING_UI_REQUESTS: Mutex<Vec<FilerUiRequest>> = Mutex::new(Vec::new());
 static PENDING_DIRECTORY_READS: Mutex<Vec<DirectoryReadResult>> = Mutex::new(Vec::new());
 static PENDING_PICKER_REQUESTS: Mutex<Vec<PickerRequest>> = Mutex::new(Vec::new());
 static PENDING_PICKER_READS: Mutex<Vec<PickerReadResult>> = Mutex::new(Vec::new());
 static PICKER_WINDOW_CLOSING: AtomicBool = AtomicBool::new(false);
+static IDLE_TICK_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Picker child processes spawned via `launch_picker_process`. The background
 /// reaper thread polls them with `try_wait` so the UI thread never blocks and
@@ -155,6 +152,7 @@ struct FilerApp {
 
 impl FilerApp {
     fn new() -> Self {
+        println!("[filer-dbg] FilerApp::new enter");
         let current_path = initial_path();
         let app = Self::default();
         app.directory_read_instance.set(next_filer_instance_id());
@@ -163,7 +161,9 @@ impl FilerApp {
         app.picker_current_path.set(current_path);
         app.picker_entries.set(Vec::new());
         app.picker_status.set(String::from("Ready"));
+        println!("[filer-dbg] FilerApp::new before refresh");
         app.refresh();
+        println!("[filer-dbg] FilerApp::new after refresh");
         app
     }
 
@@ -177,6 +177,7 @@ impl FilerApp {
         self.hovered.set(None);
         self.last_click.set(None);
         self.status.set(format!("Loading {path}"));
+        println!("[filer-dbg] refresh: spawning directory read for {path}");
 
         thread::spawn(move || {
             let result = read_entries(&path, None).map_err(|error| error.to_string());
@@ -406,13 +407,6 @@ impl FilerApp {
     }
 
     fn process_pending_ui_work(&self) {
-        let requests: Vec<_> = mutex_lock(&PENDING_UI_REQUESTS).drain(..).collect();
-        for request in requests {
-            match request {
-                FilerUiRequest::ShowMain => open_window("main"),
-            }
-        }
-
         let directory_reads: Vec<_> = mutex_lock(&PENDING_DIRECTORY_READS).drain(..).collect();
         for read in directory_reads {
             let is_current = self.directory_read_instance.get() == read.instance_id
@@ -770,6 +764,10 @@ impl FilerApp {
 
 impl Application for FilerApp {
     fn on_idle(&mut self) {
+        let tick = IDLE_TICK_COUNTER.fetch_add(1, AtomicOrdering::Relaxed);
+        if tick % 250 == 0 {
+            println!("[filer-dbg] idle tick {tick}");
+        }
         self.process_pending_ui_work();
     }
 
@@ -835,7 +833,7 @@ impl Application for FilerApp {
         .app_id(APP_ID)
         .size(Size::new(960.0, 640.0))
         .scene_key("main")
-        .open_at_launch(false);
+        .open_at_launch(!STANDALONE_PICKER.load(AtomicOrdering::Acquire));
 
         let picker_title = self
             .picker_request
@@ -853,7 +851,7 @@ impl Application for FilerApp {
     }
 
     fn exit_when_all_windows_closed(&self) -> bool {
-        STANDALONE_PICKER.load(AtomicOrdering::Acquire)
+        true
     }
 }
 
@@ -1400,8 +1398,22 @@ fn run_picker_service() {
                 continue;
             }
             if method == DESKTOP_FILE_MANAGER_SHOW_METHOD {
-                mutex_lock(&PENDING_UI_REQUESTS).push(FilerUiRequest::ShowMain);
                 let _ = connection.send_method_return(0, Vec::new());
+                // The resident service owns no UI thread. The main Files
+                // window is a normal application, so a Show request asks
+                // stemd to launch or focus it.
+                thread::spawn(|| {
+                    let _ = SbusConnection::connect().and_then(|mut connection| {
+                        connection.call_method_timeout(
+                            DESKTOP_STEMD_BUS_NAME,
+                            DESKTOP_STEMD_OBJECT_PATH,
+                            DESKTOP_STEMD_INTERFACE,
+                            DESKTOP_STEMD_LAUNCH_OR_FOCUS_METHOD,
+                            vec![Argument::String(String::from(DESKTOP_FILES_APP_ID))],
+                            3_000,
+                        )
+                    });
+                });
                 continue;
             }
             let save_mode = if method == DESKTOP_FILE_MANAGER_OPEN_FILE_METHOD {
@@ -1464,13 +1476,38 @@ fn main() {
         return;
     }
 
-    println!("[filer] starting");
+    if args.iter().any(|a| a == "--service") {
+        println!("[filer] starting in service mode");
+        run_file_manager_service_forever();
+        return;
+    }
+
+    // Default (no mode flag) and `--main` run the normal application with the
+    // main window open at launch. The FileManager sbus service is a separate
+    // process (`/bin/files --service`) so a wedged UI can never take the
+    // service down with it, and vice versa.
+    println!("[filer] starting in main window mode");
+    run_main_window();
+}
+
+/// Resident FileManager sbus service. Serves OpenFile/SaveFile (spawning
+/// standalone picker children) and Show (delegating to stemd). Runs no UI.
+fn run_file_manager_service_forever() {
     thread::spawn(run_picker_service);
     thread::spawn(picker_reaper);
+    loop {
+        thread::sleep(Duration::from_secs(3600));
+    }
+}
+
+/// Normal application entry: open the main window and exit when it closes.
+fn run_main_window() {
     let mut app = FilerApp::new();
+    println!("[filer-dbg] main: entering app.run");
     if let Err(error) = app.run() {
         eprintln!("[filer] error: {error}");
     }
+    println!("[filer-dbg] main: app.run returned");
 }
 
 /// Run as a standalone picker process. The request parameters were passed as

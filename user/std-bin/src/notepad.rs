@@ -19,15 +19,12 @@ use scarlet_desktop_config::{
     DESKTOP_FILE_MANAGER_BUS_NAME, DESKTOP_FILE_MANAGER_INTERFACE,
     DESKTOP_FILE_MANAGER_OBJECT_PATH, DESKTOP_FILE_MANAGER_OPEN_FILE_METHOD,
     DESKTOP_FILE_MANAGER_RESPONSE_SIGNAL, DESKTOP_FILE_MANAGER_SAVE_FILE_METHOD,
-    DESKTOP_FILES_APP_ID, DESKTOP_STEMD_BUS_NAME, DESKTOP_STEMD_INTERFACE,
-    DESKTOP_STEMD_LAUNCH_OR_FOCUS_METHOD, DESKTOP_STEMD_OBJECT_PATH,
 };
 use scarlet_ui::prelude::*;
 use scarlet_ui::{KeyCode, MenuBarModel, MenuEntry, MenuItemModel, hstack, vstack};
 use scarlet_ui_macros::View;
 
 const APP_ID: &str = "org.scarlet-os.desktop.notepad";
-const FILES_APP_ID: &str = DESKTOP_FILES_APP_ID;
 const SERVICE_RETRY_DELAY: Duration = Duration::from_millis(100);
 const PICKER_RETRY_ATTEMPTS: usize = 20;
 
@@ -167,7 +164,7 @@ impl NotepadApp {
     fn request_picker(&self, action: PickerAction, method: &str, args: Vec<Argument>) {
         self.picker_action.set(Some(action));
         let mut last_error = None;
-        for attempt in 0..PICKER_RETRY_ATTEMPTS {
+        for _attempt in 0..PICKER_RETRY_ATTEMPTS {
             let result = SbusConnection::connect().and_then(|mut connection| {
                 connection.call_method_timeout(
                     DESKTOP_FILE_MANAGER_BUS_NAME,
@@ -195,9 +192,6 @@ impl NotepadApp {
                 },
                 Err(error) => {
                     last_error = Some(error);
-                    if attempt == 0 {
-                        let _ = ensure_files_service();
-                    }
                     thread::sleep(SERVICE_RETRY_DELAY);
                 }
             }
@@ -390,19 +384,6 @@ fn start_picker_listener(app: &NotepadApp) {
             thread::sleep(SERVICE_RETRY_DELAY);
         }
     });
-}
-
-fn ensure_files_service() -> core::result::Result<(), sbus_client::Error> {
-    let mut connection = SbusConnection::connect()?;
-    let _ = connection.call_method_timeout(
-        DESKTOP_STEMD_BUS_NAME,
-        DESKTOP_STEMD_OBJECT_PATH,
-        DESKTOP_STEMD_INTERFACE,
-        DESKTOP_STEMD_LAUNCH_OR_FOCUS_METHOD,
-        vec![Argument::String(String::from(FILES_APP_ID))],
-        3_000,
-    );
-    Ok(())
 }
 
 fn home_path() -> PathBuf {

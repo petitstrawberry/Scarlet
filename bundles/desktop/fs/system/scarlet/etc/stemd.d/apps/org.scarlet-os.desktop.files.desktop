@@ -1,6 +1,6 @@
 [Desktop Entry]
 Name=Files
-Exec=/bin/files
+Exec=/bin/files --main
 Icon=folder
 Type=Application
 Terminal=false

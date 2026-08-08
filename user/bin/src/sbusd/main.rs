@@ -298,6 +298,29 @@ fn handle_message(
         Message::RegisterService { bus_name } => {
             println!("[Client {}] Registering service: {}", client_id, bus_name);
 
+            let name_taken_by_other = {
+                let services = SERVICES.lock();
+                services
+                    .get(bus_name)
+                    .is_some_and(|existing| existing.client_id != client_id)
+            };
+            if name_taken_by_other {
+                println!(
+                    "sbusd: Rejecting duplicate registration of {} by client {}",
+                    bus_name, client_id
+                );
+                let mut message = String::from("Service '");
+                message.push_str(bus_name);
+                message.push_str("' is already registered");
+                let reply = Message::MethodError {
+                    serial: 0,
+                    error_name: "org.scarlet.sbus.NameTaken".to_string(),
+                    message,
+                };
+                send_message(socket, &reply)?;
+                return Ok(());
+            }
+
             // TODO: Get actual PID
             let service_info = ServiceInfo {
                 bus_name: bus_name.clone(),

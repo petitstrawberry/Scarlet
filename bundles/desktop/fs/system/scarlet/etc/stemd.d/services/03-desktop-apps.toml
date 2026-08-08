@@ -2,7 +2,7 @@
 # They start after SWS, but keep their normal windows hidden until requested.
 
 [service.desktop-files]
-exec = "/bin/files"
+exec = "/bin/files --service"
 order = 03
 depends = ["sws"]
 tty = "/dev/tty0"
