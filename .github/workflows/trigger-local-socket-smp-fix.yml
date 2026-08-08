@@ -1,0 +1,44 @@
+name: Trigger local socket SMP fix
+
+on:
+  pull_request:
+    branches:
+      - dev
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.head_ref == 'automation/fix-local-socket-smp-teardown-20260808'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+
+      - name: Execute staged patch
+        shell: bash
+        run: |
+          python3 <<'BOOT'
+          from pathlib import Path
+          import textwrap
+
+          workflow = Path('.github/workflows/apply-local-socket-smp-fix.yml').read_text()
+          start_marker = "          python3 <<'PY'\n"
+          end_marker = "\n          PY\n"
+          start = workflow.index(start_marker) + len(start_marker)
+          end = workflow.index(end_marker, start)
+          script = textwrap.dedent(workflow[start:end])
+          exec(compile(script, '<staged-local-socket-fix>', 'exec'))
+          BOOT
+
+          rustfmt --edition 2024 kernel/src/network/local.rs user/bin/src/sbusd/main.rs
+
+          rm .github/workflows/apply-local-socket-smp-fix.yml
+          rm .github/workflows/trigger-local-socket-smp-fix.yml
+          git config user.name "OpenAI"
+          git config user.email "openai@users.noreply.github.com"
+          git add kernel/src/network/local.rs user/bin/src/sbusd/main.rs .github/workflows
+          git commit -m "fix(ipc): make local socket teardown and POLLOUT SMP-safe"
+          git push origin HEAD:${GITHUB_HEAD_REF}
