@@ -48,9 +48,10 @@ pub struct Waker {
     block_type: BlockedType,
     /// Human-readable name for debugging purposes
     name: &'static str,
-    /// Pending wake count: incremented by wake_one()/wake_all() when the queue
-    /// is empty (i.e. the wake arrived before the waiter enqueued itself).
-    /// Consumed by wait() so the task does not sleep on an already-fired wake.
+    /// Pre-wait notification latch. A wake on an empty queue records one
+    /// pending notification so the next waiter cannot miss the condition change.
+    /// Repeated wakes are coalesced: resource multiplicity lives in the
+    /// protected producer state, not in this synchronization primitive.
     pending_wakes: AtomicUsize,
 }
 
@@ -164,15 +165,11 @@ impl Waker {
         // Serialize the pending-wake check with queue insertion and with the
         // producer's empty-queue path.  Checking the atomic by itself leaves
         // a window where wake_one() observes an empty queue, the waiter then
-        // enqueues, and the producer increments pending_wakes afterwards;
-        // that credit belongs to no waiter and can corrupt a later wait.
+        // enqueues, and the producer sets the pending-wake latch afterwards;
+        // that latch belongs to no waiter and can corrupt a later wait.
         let consumed_pending = {
             let _queue = self.wait_queue.lock();
-            self.pending_wakes
-                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
-                    if n > 0 { Some(n - 1) } else { None }
-                })
-                .is_ok()
+            self.pending_wakes.swap(0, Ordering::SeqCst) != 0
         };
         if consumed_pending {
             return false;
@@ -213,11 +210,7 @@ impl Waker {
             let mut queue = self.wait_queue.lock();
             queue.push_back(task_id);
 
-            self.pending_wakes
-                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
-                    if n > 0 { Some(n - 1) } else { None }
-                })
-                .is_ok()
+            self.pending_wakes.swap(0, Ordering::SeqCst) != 0
         };
 
         let terminated_while_enqueuing = get_task_by_id(task_id).is_some_and(|task| {
@@ -594,8 +587,8 @@ impl Waker {
                     None => {
                         // Keep this update under the queue lock so a waiter
                         // cannot enqueue between the empty check and the
-                        // pending-wake increment.
-                        self.pending_wakes.fetch_add(1, Ordering::SeqCst);
+                        // pending-wake latch publication.
+                        self.pending_wakes.store(1, Ordering::SeqCst);
                         return false;
                     }
                 }
@@ -633,39 +626,47 @@ impl Waker {
     /// println!("Woke up {} tasks", woken_count);
     /// ```
     pub fn wake_all(&self) -> usize {
-        let task_ids = {
-            let mut queue = self.wait_queue.lock();
-            let ids: VecDeque<usize> = queue.drain(..).collect();
-            if ids.is_empty() {
-                // As in wake_one(), couple the empty check and credit update
-                // under the same queue lock.
-                self.pending_wakes.fetch_add(1, Ordering::SeqCst);
-            }
-            ids
-        };
-
-        if task_ids.is_empty() {
-            return 0;
-        }
-
         let mut woken_count = 0;
-        for task_id in task_ids {
-            let woke = self.wake_waiting_task(task_id);
-            if woke {
-                woken_count += 1;
-            }
-            if crate::sched::scheduler::DEBUG_SMP_TASK_FLOW {
-                crate::println!(
-                    "[SMPDBG waker-wake-all] waker={} cpu={} task={} woke={}",
-                    self.name,
-                    crate::arch::get_cpu().get_cpuid(),
-                    task_id,
-                    woke,
-                );
-            }
-        }
 
-        woken_count
+        loop {
+            let task_ids = {
+                let mut queue = self.wait_queue.lock();
+                let ids: VecDeque<usize> = queue.drain(..).collect();
+                if ids.is_empty() {
+                    if woken_count == 0 {
+                        // A condition notification is a latch, not a
+                        // semaphore permit. Repeated empty-queue wakes
+                        // must not make future waits spin through history.
+                        self.pending_wakes.store(1, Ordering::SeqCst);
+                    }
+                    return woken_count;
+                }
+                ids
+            };
+
+            for task_id in task_ids {
+                let woke = self.wake_waiting_task(task_id);
+                if woke {
+                    woken_count += 1;
+                }
+                if crate::sched::scheduler::DEBUG_SMP_TASK_FLOW {
+                    crate::println!(
+                        "[SMPDBG waker-wake-all] waker={} cpu={} task={} woke={}",
+                        self.name,
+                        crate::arch::get_cpu().get_cpuid(),
+                        task_id,
+                        woke,
+                    );
+                }
+            }
+
+            if woken_count > 0 {
+                return woken_count;
+            }
+
+            // Every drained entry was stale. Recheck atomically with
+            // queue insertion before publishing the pending latch.
+        }
     }
 
     /// Get the blocking type of this waker
@@ -869,6 +870,20 @@ mod tests {
         let waker = Waker::new_interruptible("empty_test");
         assert_eq!(waker.wake_one(), false);
         assert_eq!(waker.wake_all(), 0);
+    }
+
+    #[test_case]
+    fn test_empty_queue_wakes_coalesce_into_one_latch() {
+        let waker = Waker::new_interruptible("coalesced-pending");
+
+        assert!(!waker.wake_one());
+        assert!(!waker.wake_one());
+        assert_eq!(waker.wake_all(), 0);
+        assert_eq!(
+            waker.pending_wake_count_for_test(),
+            1,
+            "past readiness notifications must not accumulate"
+        );
     }
 
     #[test_case]
