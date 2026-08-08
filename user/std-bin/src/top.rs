@@ -5,7 +5,7 @@ use std::process::ExitCode;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use scarlet_sys::{syscall0, syscall1, syscall2, Syscall};
+use scarlet_sys::{Syscall, syscall0, syscall1, syscall2};
 
 const SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
 const TASK_NAME_CAP: usize = 64;
@@ -73,7 +73,6 @@ struct RawTaskInfo {
     sched_weight: u32,
     sched_vruntime: u64,
     sched_deadline: u64,
-    last_user_pc: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -94,7 +93,6 @@ struct TaskInfo {
     sched_weight: u32,
     sched_vruntime: u64,
     sched_deadline: u64,
-    last_user_pc: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -161,7 +159,6 @@ impl RawTaskInfo {
             sched_weight: self.sched_weight,
             sched_vruntime: self.sched_vruntime,
             sched_deadline: self.sched_deadline,
-            last_user_pc: self.last_user_pc,
         }
     }
 }
@@ -349,7 +346,6 @@ fn task_info() -> Vec<TaskInfo> {
             sched_weight: 0,
             sched_vruntime: 0,
             sched_deadline: 0,
-            last_user_pc: 0,
         };
         total
     ];
@@ -503,11 +499,6 @@ fn print_table(samples: &[TaskSample]) {
             time = widths.time,
             command = widths.command,
         );
-        if task.last_user_pc != 0 && task.task_type == TaskType::User {
-            // Show the last user-space program counter so busy loops can be
-            // located via `objdump --disassemble` on the offending binary.
-            println!("    upc=0x{:016x}", task.last_user_pc);
-        }
     }
 }
 

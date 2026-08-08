@@ -216,10 +216,6 @@ pub struct TaskInfo {
     pub sched_vruntime: u64,
     /// Current EEVDF virtual deadline.
     pub sched_deadline: u64,
-    /// Last user-space PC observed by the kernel on syscall entry.
-    /// 0 if the task has never trapped since creation. Useful for locating
-    /// user-space busy loops via top/ps.
-    pub last_user_pc: usize,
 }
 
 impl TaskInfo {
@@ -857,13 +853,6 @@ pub struct Task {
     /// Used as a CAS claim token to prevent double-scheduling on SMP.
     pub running_cpu: atomic::AtomicUsize,
 
-    /// Last user-space program counter observed by the kernel.
-    ///
-    /// Updated (Relaxed) on every syscall entry. Diagnostic tools such as
-    /// `top` read this to locate user-space busy loops without the overhead
-    /// of walking foreign task stacks from another CPU.
-    pub last_user_pc: AtomicU64,
-
     // === Already protected fields ===
     /// Task-local event queue with priority ordering
     pub event_queue: IrqSpinLock<crate::ipc::event::TaskEventQueue>,
@@ -1090,7 +1079,6 @@ impl Task {
             scheduler_affinity_kind: AtomicU8::new(SCHED_AFFINITY_KIND_ANY),
             last_cpu: atomic::AtomicUsize::new(0),
             running_cpu: atomic::AtomicUsize::new(usize::MAX),
-            last_user_pc: AtomicU64::new(0),
             // Already protected
             event_queue: IrqSpinLock::new(crate::ipc::event::TaskEventQueue::new()),
             events_enabled: IrqSpinLock::new(true),

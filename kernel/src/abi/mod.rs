@@ -590,11 +590,6 @@ pub fn syscall_dispatcher(trapframe: &mut Trapframe) -> Result<usize, &'static s
 
     // 2. Get mutable reference to current task
     let task = mytask().unwrap();
-    // Record the user-space PC so diagnostic tools (top/ps) can locate busy
-    // loops without walking foreign stacks. Relaxed ordering is sufficient
-    // since this is best-effort sampling data.
-    task.last_user_pc
-        .store(pc as u64, core::sync::atomic::Ordering::Relaxed);
     crate::breadcrumb::drop(
         crate::breadcrumb::SYSCALL_TASK_DONE,
         task.get_id() as u64,
