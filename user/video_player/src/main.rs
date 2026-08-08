@@ -1305,15 +1305,23 @@ impl Application for VideoPlayerApp {
             shutdown.clone(),
         ));
         self.runtime.add_worker(start_playback_supervisor(
-            PlaybackRequest {
-                path: self.path.clone(),
-                mp4_data: self.mp4_data.clone(),
-                audio_source: self.audio_source.clone(),
-                hardware_decode: self.hardware_decode,
-                streaming: self.streaming,
-                loop_playback: self.loop_playback,
-                stream_complete_path: self.stream_complete_path.clone(),
-                stream_socket_path: self.stream_socket_path.clone(),
+            // Only pass an initial request when a video path was actually
+            // provided. Launching without a file (e.g. from the launcher)
+            // must not open the hardware decoder — the supervisor idles
+            // until the picker delivers a path.
+            if self.path.is_empty() {
+                None
+            } else {
+                Some(PlaybackRequest {
+                    path: self.path.clone(),
+                    mp4_data: self.mp4_data.clone(),
+                    audio_source: self.audio_source.clone(),
+                    hardware_decode: self.hardware_decode,
+                    streaming: self.streaming,
+                    loop_playback: self.loop_playback,
+                    stream_complete_path: self.stream_complete_path.clone(),
+                    stream_socket_path: self.stream_socket_path.clone(),
+                })
             },
             self.playback.clone(),
             self.frame_store.clone(),
@@ -1469,7 +1477,7 @@ fn home_path() -> String {
 }
 
 fn start_playback_supervisor(
-    initial_request: PlaybackRequest,
+    initial_request: Option<PlaybackRequest>,
     playback: Arc<PlaybackController>,
     frame_store: Arc<VideoFrameStore>,
     paint_signal: Arc<PaintSignal>,
@@ -1479,7 +1487,7 @@ fn start_playback_supervisor(
     thread::Builder::new()
         .name("video-playback")
         .spawn(move || {
-            let mut initial_request = Some(initial_request);
+            let mut initial_request = initial_request;
             loop {
                 if shutdown.load(Ordering::Acquire) {
                     return;
