@@ -52,6 +52,22 @@ macro_rules! println {
     ($fmt:expr, $($arg:tt)*) => ($crate::print!(concat!($fmt, "\n"), $($arg)*));
 }
 
+/// Print a formatted message through the emergency (lock-free, direct UART)
+/// path. Use this from panic handlers and fatal diagnostics where the normal
+/// print path may be deadlocked.
+#[macro_export]
+macro_rules! emergency_print {
+    ($($arg:tt)*) => ($crate::log::emergency_print(format_args!($($arg)*)));
+}
+
+/// Print a formatted message with a trailing newline through the emergency
+/// (lock-free, direct UART) path.
+#[macro_export]
+macro_rules! emergency_println {
+    ($fmt:expr) => ($crate::emergency_print!(concat!($fmt, "\n")));
+    ($fmt:expr, $($arg:tt)*) => ($crate::emergency_print!(concat!($fmt, "\n"), $($arg)*));
+}
+
 pub fn _print(args: fmt::Arguments) {
     let _guard = crate::log::PrintGuard::acquire();
 

@@ -172,6 +172,35 @@ impl MemoryMappingOps for Uart {
     }
 }
 
+// =============================================================================
+// Emergency console registration
+// =============================================================================
+
+use core::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+
+static EMERGENCY_UART_BASE: AtomicUsize = AtomicUsize::new(0);
+
+fn emergency_putc(byte: u8) {
+    let base = EMERGENCY_UART_BASE.load(AtomicOrdering::Acquire);
+    if base == 0 {
+        return;
+    }
+    for _ in 0..EMERGENCY_TX_RETRY_LIMIT {
+        let lsr = unsafe { crate::arch::mmio::read8(base + LSR_OFFSET) };
+        if lsr & LSR_THRE != 0 {
+            unsafe { crate::arch::mmio::write8(base + THR_OFFSET, byte) };
+            return;
+        }
+        core::hint::spin_loop();
+    }
+}
+
+const EMERGENCY_TX_RETRY_LIMIT: usize = 256;
+
+// =============================================================================
+// Emergency console
+// =============================================================================
+
 static UART_CAPS: [crate::device::DeviceCapability; 1] = [crate::device::DeviceCapability::Serial];
 
 impl Device for Uart {
@@ -377,6 +406,10 @@ fn uart_probe(device_info: &PlatformDeviceInfo) -> Result<(), &'static str> {
     // Register the UART device with the device manager
     let device_id = DeviceManager::get_manager().register_device(uart);
     crate::early_println!("UART device registered with ID: {}", device_id);
+
+    // Publish the UART base address for the emergency console and register it.
+    EMERGENCY_UART_BASE.store(base_addr, AtomicOrdering::Release);
+    crate::log::register_emergency_putc(emergency_putc);
 
     Ok(())
 }
