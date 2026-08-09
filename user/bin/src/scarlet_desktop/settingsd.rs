@@ -75,7 +75,7 @@ fn write_background_config(
 
     let mut file = fs::File::create(DESKTOP_BACKGROUND_CONFIG_PATH)
         .map_err(|_| "failed to create desktop background config")?;
-    file.write(content.as_bytes())
+    file.write_all(content.as_bytes())
         .map_err(|_| "failed to write desktop background config")?;
     Ok(())
 }

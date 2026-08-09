@@ -34,6 +34,15 @@ pub const KCTX_SWITCH_TO: u64 = 0x4b53; // 'KS' about to switch_to
 pub const KCTX_RESUME: u64 = 0x4b52; // 'KR' resumed after switch_to
 pub const TIMER_TICK: u64 = 0x5454; // 'TT' timer FIQ serviced
 pub const TIMER_SW_TIMERS: u64 = 0x5453; // 'TS' check_software_timers
+pub const TIMER_PROGRAM: u64 = 0x5450; // 'TP' local timer programming entered (aux2=deadline ns, 0=stop)
+pub const TIMER_PROGRAM_DONE: u64 = 0x5452; // 'TR' local timer programming completed
+pub const TIMER_CALLBACK_ENTER: u64 = 0x5443; // 'TC' software timer callback entered (aux=timer id, aux2=context)
+pub const TIMER_CALLBACK_DONE: u64 = 0x544f; // 'TO' software timer callback returned (aux=timer id, aux2=context)
+pub const WAKER_PREPARE: u64 = 0x5750; // 'WP' wait preparation entered (aux=task id, aux2=pending latch)
+pub const WAKER_WAKE: u64 = 0x5757; // 'WW' event wake entered scheduler (aux=task id)
+pub const WAKER_TIMEOUT: u64 = 0x5754; // 'WT' timeout callback entered (aux=task id, aux2=won)
+pub const SLEEP_ARM: u64 = 0x534c; // 'SL' task sleep timer armed (aux=task id, aux2=deadline ns)
+pub const SLEEP_RESUME: u64 = 0x5352; // 'SR' task sleep wait resumed (aux=task id, aux2=current time ns)
 pub const CLONE_ENTER: u64 = 0x434c; // 'CL' clone_task entered
 pub const CLONE_KSTACK_DONE: u64 = 0x434b; // 'CK' child kstack window mapped
 pub const CLONE_RETURN: u64 = 0x4352; // 'CR' clone_task returning
@@ -137,6 +146,10 @@ static STALL_LAST_AUX2: [AtomicU64; STALL_SAMPLE_SLOTS] =
 static STALL_STALE_SAMPLES: [AtomicU64; STALL_SAMPLE_SLOTS] =
     [const { AtomicU64::new(0) }; STALL_SAMPLE_SLOTS];
 
+// Keep independently-written CPU slots off the same cache line. Apple Silicon
+// uses 128-byte cache lines, while the extra alignment is harmless on systems
+// with 64-byte lines and avoids diagnostic false sharing under IPC wake load.
+#[repr(align(128))]
 struct BreadcrumbSlot {
     sequence: AtomicU64,
     phase: AtomicU64,

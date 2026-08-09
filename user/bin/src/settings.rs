@@ -757,6 +757,7 @@ impl SettingsApp {
                     if accepted && !path.is_empty() {
                         self.background_image.set(Some(path.clone()));
                         self.background_image_label.set(path);
+                        self.save_config();
                     }
                 }
             }

@@ -68,6 +68,49 @@ pub struct RawTaskDebugInfoV1 {
 
 const _: [(); 64] = [(); core::mem::size_of::<RawTaskDebugInfoV1>()];
 
+/// Version of the per-CPU debug snapshot ABI implemented by Scarlet.
+pub const CPU_DEBUG_INFO_VERSION_V1: u16 = 1;
+/// The snapshot contains a namespace-visible current task ID.
+pub const CPU_DEBUG_FLAG_CURRENT_TASK_VALID: u16 = 1 << 0;
+/// The CPU's published current task is its idle task.
+pub const CPU_DEBUG_FLAG_IDLE: u16 = 1 << 1;
+/// The CPU has a deferred reschedule request pending.
+pub const CPU_DEBUG_FLAG_PENDING_RESCHEDULE: u16 = 1 << 2;
+/// The CPU's local hardware timer has a programmed deadline.
+pub const CPU_DEBUG_FLAG_TIMER_ARMED: u16 = 1 << 3;
+
+/// Raw v1 lock-free per-CPU snapshot returned by `GetCpuDebugInfo`.
+///
+/// This interface is available only in kernels built with `sync-debug`.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RawCpuDebugInfoV1 {
+    /// Size of this entry in bytes.
+    pub size: u32,
+    /// ABI version, currently [`CPU_DEBUG_INFO_VERSION_V1`].
+    pub version: u16,
+    /// Combination of `CPU_DEBUG_FLAG_*` values.
+    pub flags: u16,
+    /// Logical CPU ID represented by this snapshot.
+    pub cpu_id: u32,
+    /// Reserved for future use.
+    pub reserved: u32,
+    /// Namespace-local current task ID, or zero when unavailable.
+    pub current_task_id: usize,
+    /// Number of local timer interrupts observed by this CPU.
+    pub timer_irq_count: u64,
+    /// Last lock-free kernel execution breadcrumb phase.
+    pub breadcrumb_phase: u64,
+    /// First context value associated with `breadcrumb_phase`.
+    pub breadcrumb_aux: u64,
+    /// Second context value associated with `breadcrumb_phase`.
+    pub breadcrumb_aux2: u64,
+    /// Last requested local timer deadline, or zero when stopped.
+    pub timer_deadline_ns: u64,
+}
+
+const _: [(); 64] = [(); core::mem::size_of::<RawCpuDebugInfoV1>()];
+
 /// Scheduler utilization scale used by Scarlet Native util-clamp syscalls.
 ///
 /// A task with `util_min == SCHED_UTIL_SCALE` requires a CPU with full
@@ -711,6 +754,7 @@ pub enum Syscall {
     NetworkListInterfaces = 914,
 
     // Debug/profiler operations
+    GetCpuDebugInfo = 997,
     GetTaskDebugInfo = 998,
     ProfilerDump = 999,
 

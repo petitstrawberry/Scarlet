@@ -6,11 +6,13 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use scarlet_sys::{
-    RawTaskDebugInfoV1, Syscall, TASK_DEBUG_FLAG_DEADLINE, TASK_DEBUG_FLAG_DEADLINE_THROTTLED,
+    CPU_DEBUG_FLAG_CURRENT_TASK_VALID, CPU_DEBUG_FLAG_IDLE, CPU_DEBUG_FLAG_PENDING_RESCHEDULE,
+    CPU_DEBUG_FLAG_TIMER_ARMED, CPU_DEBUG_INFO_VERSION_V1, RawCpuDebugInfoV1, RawTaskDebugInfoV1,
+    Syscall, TASK_DEBUG_FLAG_DEADLINE, TASK_DEBUG_FLAG_DEADLINE_THROTTLED,
     TASK_DEBUG_FLAG_DEADLINE_UNAVAILABLE, TASK_DEBUG_FLAG_PC_PRIVILEGED, TASK_DEBUG_FLAG_PC_VALID,
     TASK_DEBUG_FLAG_SOFTWARE_TIMER_ARMED, TASK_DEBUG_FLAG_SYSCALL_ACTIVE,
     TASK_DEBUG_FLAG_SYSCALL_VALID, TASK_DEBUG_INFO_VERSION_V1, syscall0, syscall1, syscall2,
-    syscall4,
+    syscall3, syscall4,
 };
 
 const SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
@@ -209,6 +211,17 @@ fn main() -> ExitCode {
         check_instant();
         return ExitCode::SUCCESS;
     }
+    if let Some(index) = args.iter().position(|arg| arg == "--debug-cpu") {
+        let Some(value) = args.get(index + 1) else {
+            println!("top: --debug-cpu requires a logical CPU ID");
+            return ExitCode::from(2);
+        };
+        let Ok(cpu_id) = value.parse::<usize>() else {
+            println!("top: invalid logical CPU ID: {value}");
+            return ExitCode::from(2);
+        };
+        return print_cpu_debug(cpu_id);
+    }
     if let Some(index) = args
         .iter()
         .position(|arg| matches!(arg.as_str(), "--debug" | "--debug-pid"))
@@ -371,7 +384,7 @@ fn print_task_debug(pid: usize) -> ExitCode {
         "SYSCALL_PC",
         "TIME_NS"
     );
-    for entry in entries {
+    for entry in &entries {
         let state = TaskState::from_u8(entry.state);
         let pc_valid = entry.flags & TASK_DEBUG_FLAG_PC_VALID != 0;
         let syscall_valid = entry.flags & TASK_DEBUG_FLAG_SYSCALL_VALID != 0;
@@ -445,7 +458,122 @@ fn print_task_debug(pid: usize) -> ExitCode {
             command,
         );
     }
+
+    let mut cpu_ids = Vec::new();
+    for entry in &entries {
+        if entry.cpu_id != u32::MAX && !cpu_ids.contains(&entry.cpu_id) {
+            cpu_ids.push(entry.cpu_id);
+        }
+    }
+    cpu_ids.sort_unstable();
+    for cpu_id in cpu_ids {
+        println!();
+        let _ = print_cpu_debug_snapshot(cpu_id as usize);
+    }
     ExitCode::SUCCESS
+}
+
+fn print_cpu_debug(cpu_id: usize) -> ExitCode {
+    if print_cpu_debug_snapshot(cpu_id) {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
+    }
+}
+
+fn print_cpu_debug_snapshot(cpu_id: usize) -> bool {
+    let entry_size = core::mem::size_of::<RawCpuDebugInfoV1>();
+    let mut entry = RawCpuDebugInfoV1::default();
+    let result = syscall3(
+        Syscall::GetCpuDebugInfo,
+        cpu_id,
+        &mut entry as *mut RawCpuDebugInfoV1 as usize,
+        entry_size,
+    );
+    if result == usize::MAX {
+        println!(
+            "top: CPU{cpu_id} debug information is unavailable (invalid CPU or missing kernel sync-debug feature)"
+        );
+        return false;
+    }
+    if entry.size as usize != entry_size || entry.version != CPU_DEBUG_INFO_VERSION_V1 {
+        println!("top: kernel returned an incompatible CPU debug ABI");
+        return false;
+    }
+
+    let current = if entry.flags & CPU_DEBUG_FLAG_CURRENT_TASK_VALID != 0 {
+        entry.current_task_id.to_string()
+    } else {
+        String::from("-")
+    };
+    let idle = if entry.flags & CPU_DEBUG_FLAG_IDLE != 0 {
+        "yes"
+    } else {
+        "no"
+    };
+    let reschedule = if entry.flags & CPU_DEBUG_FLAG_PENDING_RESCHEDULE != 0 {
+        "yes"
+    } else {
+        "no"
+    };
+    let timer_deadline = if entry.flags & CPU_DEBUG_FLAG_TIMER_ARMED != 0 {
+        entry.timer_deadline_ns.to_string()
+    } else {
+        String::from("stopped")
+    };
+    let now_ns = monotonic_time_ns();
+    println!("CPU debug snapshot for CPU{}:", entry.cpu_id);
+    println!(
+        "  timer_irq={} timer_deadline={} now={} current={} idle={} resched={}",
+        entry.timer_irq_count, timer_deadline, now_ns, current, idle, reschedule
+    );
+    println!(
+        "  breadcrumb={:#x} ({}) aux={:#x} aux2={:#x}",
+        entry.breadcrumb_phase,
+        breadcrumb_name(entry.breadcrumb_phase),
+        entry.breadcrumb_aux,
+        entry.breadcrumb_aux2,
+    );
+    true
+}
+
+fn breadcrumb_name(phase: u64) -> &'static str {
+    match phase {
+        0x0000 => "none",
+        0x5355 => "switch-to-user",
+        0x5554 => "user-trap-enter",
+        0x5343 => "schedule-enter",
+        0x504e => "pick-next-enter",
+        0x5047 => "pick-guard-done",
+        0x5052 => "pick-release-done",
+        0x504f => "pick-old-done",
+        0x5051 => "pick-queue-done",
+        0x5053 => "pick-steal-begin",
+        0x5044 => "pick-steal-done",
+        0x4b45 => "kernel-context-enter",
+        0x4b53 => "kernel-context-switch-to",
+        0x4b52 => "kernel-context-resume",
+        0x5454 => "timer-tick",
+        0x5453 => "timer-software-timers",
+        0x5450 => "timer-program",
+        0x5452 => "timer-program-done",
+        0x5443 => "timer-callback-enter",
+        0x544f => "timer-callback-done",
+        0x5750 => "waker-prepare",
+        0x5757 => "waker-wake",
+        0x5754 => "waker-timeout",
+        0x534c => "sleep-arm",
+        0x5352 => "sleep-resume",
+        0x5359 => "syscall-enter",
+        0x5354 => "syscall-task-done",
+        0x534f => "syscall-abi-done",
+        0x5358 => "syscall-exit",
+        0x4951 => "kernel-irq-enter",
+        0x4651 => "kernel-fiq-enter",
+        0x4653 => "fast-claim-done",
+        0x4259 => "publication-in-progress",
+        _ => "unknown",
+    }
 }
 
 fn format_syscall(number: u64) -> String {
@@ -470,6 +598,7 @@ fn format_syscall(number: u64) -> String {
         900 => "socket",
         903 => "connect",
         904 => "accept",
+        997 => "cpu_debug",
         998 => "task_debug",
         _ => return number.to_string(),
     };

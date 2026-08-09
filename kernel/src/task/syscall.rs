@@ -2310,6 +2310,110 @@ pub fn sys_get_task_debug_info(trapframe: &mut Trapframe) -> usize {
     }
 }
 
+/// Return a lock-free diagnostic snapshot for one logical CPU.
+///
+/// This syscall is available only with the `sync-debug` kernel feature. It
+/// samples atomic scheduler, timer, and breadcrumb state without taking locks,
+/// allowing a surviving CPU to inspect another CPU that has stopped making
+/// progress.
+///
+/// # Arguments
+///
+/// * `trapframe.get_arg(0)` - Logical CPU ID to inspect.
+/// * `trapframe.get_arg(1)` - Pointer to a `CpuDebugInfo` output entry.
+/// * `trapframe.get_arg(2)` - Expected size of the `CpuDebugInfo` entry.
+///
+/// # Returns
+///
+/// Zero on success, or `usize::MAX` when unavailable or invalid.
+pub fn sys_get_cpu_debug_info(trapframe: &mut Trapframe) -> usize {
+    let caller = mytask().unwrap();
+    let cpu_id = trapframe.get_arg(0);
+    let buf_ptr = trapframe.get_arg(1);
+    let entry_size = trapframe.get_arg(2);
+    trapframe.increment_pc_next(&caller);
+
+    #[cfg(not(feature = "sync-debug"))]
+    {
+        let _ = (cpu_id, buf_ptr, entry_size);
+        usize::MAX
+    }
+
+    #[cfg(feature = "sync-debug")]
+    {
+        use crate::task::{
+            CPU_DEBUG_FLAG_CURRENT_TASK_VALID, CPU_DEBUG_FLAG_IDLE,
+            CPU_DEBUG_FLAG_PENDING_RESCHEDULE, CPU_DEBUG_FLAG_TIMER_ARMED,
+            CPU_DEBUG_INFO_VERSION_V1, CpuDebugInfo,
+        };
+
+        if buf_ptr == 0 || entry_size != core::mem::size_of::<CpuDebugInfo>() {
+            return usize::MAX;
+        }
+        let Ok(cpu_id_u32) = u32::try_from(cpu_id) else {
+            return usize::MAX;
+        };
+        let Some(timer_irq_count) = crate::timer::timer_irq_count(cpu_id) else {
+            return usize::MAX;
+        };
+        let Some(timer_deadline_ns) = crate::timer::timer_programmed_deadline_ns(cpu_id) else {
+            return usize::MAX;
+        };
+        let Some(breadcrumb) = crate::breadcrumb::snapshot(cpu_id) else {
+            return usize::MAX;
+        };
+        let Some(scheduler) = crate::sched::scheduler::diagnostic_snapshot(cpu_id) else {
+            return usize::MAX;
+        };
+
+        let current_task_id = if scheduler.current_task_id == 0 {
+            0
+        } else {
+            caller
+                .get_namespace()
+                .resolve_local_id(scheduler.current_task_id)
+                .unwrap_or(0)
+        };
+        let mut flags = 0u16;
+        if current_task_id != 0 {
+            flags |= CPU_DEBUG_FLAG_CURRENT_TASK_VALID;
+        }
+        if scheduler.is_idle {
+            flags |= CPU_DEBUG_FLAG_IDLE;
+        }
+        if scheduler.pending_reschedule {
+            flags |= CPU_DEBUG_FLAG_PENDING_RESCHEDULE;
+        }
+        if timer_deadline_ns != 0 {
+            flags |= CPU_DEBUG_FLAG_TIMER_ARMED;
+        }
+
+        let info = CpuDebugInfo {
+            size: core::mem::size_of::<CpuDebugInfo>() as u32,
+            version: CPU_DEBUG_INFO_VERSION_V1,
+            flags,
+            cpu_id: cpu_id_u32,
+            reserved: 0,
+            current_task_id,
+            timer_irq_count,
+            breadcrumb_phase: breadcrumb.phase,
+            breadcrumb_aux: breadcrumb.aux,
+            breadcrumb_aux2: breadcrumb.aux2,
+            timer_deadline_ns,
+        };
+        let bytes = unsafe {
+            core::slice::from_raw_parts(
+                &info as *const CpuDebugInfo as *const u8,
+                core::mem::size_of::<CpuDebugInfo>(),
+            )
+        };
+        if copy_to_user(&caller, buf_ptr, bytes).is_err() {
+            return usize::MAX;
+        }
+        0
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::process_control_for_signal;

@@ -143,6 +143,8 @@ impl KernelTimer {
 }
 
 static TIMER_IRQ_COUNTS: [AtomicU64; MAX_NUM_CPUS] = [const { AtomicU64::new(0) }; MAX_NUM_CPUS];
+static TIMER_PROGRAMMED_DEADLINES_NS: [AtomicU64; MAX_NUM_CPUS] =
+    [const { AtomicU64::new(0) }; MAX_NUM_CPUS];
 
 /// Return a CPU's local timer IRQ count without taking a lock.
 ///
@@ -156,6 +158,21 @@ static TIMER_IRQ_COUNTS: [AtomicU64; MAX_NUM_CPUS] = [const { AtomicU64::new(0) 
 #[inline(always)]
 pub fn timer_irq_count(cpu_id: usize) -> Option<u64> {
     (cpu_id < MAX_NUM_CPUS).then(|| TIMER_IRQ_COUNTS[cpu_id].load(Ordering::Relaxed))
+}
+
+/// Return the last local hardware-timer deadline requested for a CPU.
+///
+/// # Arguments
+///
+/// * `cpu_id` - Logical CPU whose timer program state should be sampled.
+///
+/// # Returns
+///
+/// The requested absolute monotonic deadline in nanoseconds, zero when the
+/// timer was stopped, or `None` when `cpu_id` is outside the supported range.
+#[inline(always)]
+pub fn timer_programmed_deadline_ns(cpu_id: usize) -> Option<u64> {
+    (cpu_id < MAX_NUM_CPUS).then(|| TIMER_PROGRAMMED_DEADLINES_NS[cpu_id].load(Ordering::Acquire))
 }
 
 /// A stable reference to a software timer.
@@ -600,11 +617,23 @@ pub fn reprogram_local_timer() {
     let cpu_id = local_cpu_id();
     match local_timer_program(peek_local_deadline()) {
         LocalTimerProgram::Deadline(deadline_ns) => {
+            TIMER_PROGRAMMED_DEADLINES_NS[cpu_id].store(deadline_ns, Ordering::Release);
+            crate::breadcrumb::drop(crate::breadcrumb::TIMER_PROGRAM, cpu_id as u64, deadline_ns);
             let timer = get_kernel_timer();
             timer.set_deadline_ns(cpu_id, deadline_ns);
             timer.start(cpu_id);
+            crate::breadcrumb::drop(
+                crate::breadcrumb::TIMER_PROGRAM_DONE,
+                cpu_id as u64,
+                deadline_ns,
+            );
         }
-        LocalTimerProgram::Stop => get_kernel_timer().stop(cpu_id),
+        LocalTimerProgram::Stop => {
+            TIMER_PROGRAMMED_DEADLINES_NS[cpu_id].store(0, Ordering::Release);
+            crate::breadcrumb::drop(crate::breadcrumb::TIMER_PROGRAM, cpu_id as u64, 0);
+            get_kernel_timer().stop(cpu_id);
+            crate::breadcrumb::drop(crate::breadcrumb::TIMER_PROGRAM_DONE, cpu_id as u64, 0);
+        }
     }
 }
 
@@ -627,7 +656,19 @@ fn drain_local_due_timers() {
         };
 
         if let Some(handler) = timer.handler.upgrade() {
+            #[cfg(feature = "sync-debug")]
+            crate::breadcrumb::drop(
+                crate::breadcrumb::TIMER_CALLBACK_ENTER,
+                timer.id,
+                timer.context as u64,
+            );
             handler.on_timer_expired(timer.context);
+            #[cfg(feature = "sync-debug")]
+            crate::breadcrumb::drop(
+                crate::breadcrumb::TIMER_CALLBACK_DONE,
+                timer.id,
+                timer.context as u64,
+            );
         }
 
         timer_queues()[cpu_id].lock().finish(&timer);

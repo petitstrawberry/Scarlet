@@ -378,28 +378,9 @@ impl File {
     /// # Returns
     /// File instance or error
     pub fn create<P: AsRef<str>>(path: P) -> Result<Self> {
-        use crate::ffi::str_to_cstr_bytes;
-        use crate::syscall::{Syscall, syscall2};
-
-        // Convert path to null-terminated C string
-        let path_bytes = str_to_cstr_bytes(path.as_ref())
-            .map_err(|_| Error::new(ErrorKind::InvalidInput, "path contains null byte"))?;
-
-        // Use VfsCreateFile syscall to create the file
-        let result = syscall2(
-            Syscall::VfsCreateFile,
-            path_bytes.as_ptr() as usize,
-            0, // mode (unused for now)
-        );
-
-        if result == usize::MAX {
-            return Err(Error::new(ErrorKind::Other, "Failed to create file"));
-        }
-
-        // Open the created file for writing
-        let handle = Handle::open(path.as_ref(), 0x1) // O_WRONLY
-            .map_err(|_| Error::new(ErrorKind::Other, "Failed to open created file"))?;
-        File::from_handle(handle)
+        let mut options = OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        options.open(path)
     }
 
     /// Open a file with specific flags (low-level interface)

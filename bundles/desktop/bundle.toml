@@ -130,13 +130,6 @@ to = "/system/scarlet/bin/ui-sgfx-showcase"
 kind = "cargo"
 source = "../../user/bin"
 package = "user-bin"
-bin = "pdfview"
-to = "/system/scarlet/bin/pdfview"
-
-[[layers]]
-kind = "cargo"
-source = "../../user/bin"
-package = "user-bin"
 bin = "settings"
 to = "/system/scarlet/bin/settings"
 

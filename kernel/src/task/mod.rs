@@ -280,6 +280,51 @@ pub struct TaskDebugInfo {
 
 const _: [(); 64] = [(); core::mem::size_of::<TaskDebugInfo>()];
 
+/// Version of the per-CPU debug snapshot ABI implemented by the kernel.
+pub const CPU_DEBUG_INFO_VERSION_V1: u16 = 1;
+/// The snapshot contains a namespace-visible current task ID.
+pub const CPU_DEBUG_FLAG_CURRENT_TASK_VALID: u16 = 1 << 0;
+/// The CPU's published current task is its idle task.
+pub const CPU_DEBUG_FLAG_IDLE: u16 = 1 << 1;
+/// The CPU has a deferred reschedule request pending.
+pub const CPU_DEBUG_FLAG_PENDING_RESCHEDULE: u16 = 1 << 2;
+/// The CPU's local hardware timer has a programmed deadline.
+pub const CPU_DEBUG_FLAG_TIMER_ARMED: u16 = 1 << 3;
+
+/// Fixed-layout lock-free diagnostic snapshot returned by `GetCpuDebugInfo`.
+///
+/// The debug syscall is available only when the kernel is built with the
+/// `sync-debug` feature. All sampled fields are atomic so a surviving CPU can
+/// inspect a stalled CPU without acquiring scheduler or timer locks.
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub struct CpuDebugInfo {
+    /// Size of this entry in bytes.
+    pub size: u32,
+    /// ABI version, currently [`CPU_DEBUG_INFO_VERSION_V1`].
+    pub version: u16,
+    /// Combination of `CPU_DEBUG_FLAG_*` values.
+    pub flags: u16,
+    /// Logical CPU ID represented by this snapshot.
+    pub cpu_id: u32,
+    /// Reserved for future use.
+    pub reserved: u32,
+    /// Namespace-local current task ID, or zero when unavailable.
+    pub current_task_id: usize,
+    /// Number of local timer interrupts observed by this CPU.
+    pub timer_irq_count: u64,
+    /// Last lock-free kernel execution breadcrumb phase.
+    pub breadcrumb_phase: u64,
+    /// First context value associated with `breadcrumb_phase`.
+    pub breadcrumb_aux: u64,
+    /// Second context value associated with `breadcrumb_phase`.
+    pub breadcrumb_aux2: u64,
+    /// Last requested local timer deadline, or zero when stopped.
+    pub timer_deadline_ns: u64,
+}
+
+const _: [(); 64] = [(); core::mem::size_of::<CpuDebugInfo>()];
+
 /// Snapshot of system-wide CPU usage exposed to user space.
 ///
 /// All time fields are cumulative nanoseconds since scheduler accounting
@@ -3602,12 +3647,24 @@ impl Task {
             // Keep a strong reference visible to the callback before arming
             // it. A wake that races the first wait is retained by
             // Waker::pending_wakes.
+            #[cfg(feature = "sync-debug")]
+            crate::breadcrumb::drop(
+                crate::breadcrumb::SLEEP_ARM,
+                self.id as u64,
+                wake_deadline_ns,
+            );
             let timer_handle = add_timer(wake_deadline_ns, precision, &handler_ref, 0);
             *handler.timer_handle.lock() = Some(timer_handle);
             self.register_software_timer(timer_handle, handler_ref.clone());
             drop(handler_ref);
             drop(handler);
             sleep_waker.wait_owned(self.get_id(), trapframe);
+            #[cfg(feature = "sync-debug")]
+            crate::breadcrumb::drop(
+                crate::breadcrumb::SLEEP_RESUME,
+                self.id as u64,
+                get_time_ns(),
+            );
             self.finish_software_timer(timer_handle);
 
             // Interruptible task events and wake-before-schedule races may
@@ -3656,6 +3713,7 @@ impl Task {
             .store(timers.len(), Ordering::Release);
     }
 
+    #[cfg(test)]
     pub(crate) fn has_software_timer(&self, timer_handle: crate::timer::TimerHandle) -> bool {
         self.software_timers
             .lock()
