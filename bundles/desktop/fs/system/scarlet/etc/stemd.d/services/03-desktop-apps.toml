@@ -1,5 +1,5 @@
-# Desktop applications that provide a resident SBUS endpoint.
-# They start after SWS, but keep their normal windows hidden until requested.
+# Resident SBUS endpoints for desktop applications. Their normal windows run
+# in separate application processes launched or focused through stemd.
 
 [service.desktop-files]
 exec = "/bin/files --service"
@@ -7,6 +7,6 @@ order = 03
 depends = ["sws"]
 
 [service.desktop-launcher]
-exec = "/bin/launcher"
+exec = "/bin/launcher --service"
 order = 03
 depends = ["sws"]

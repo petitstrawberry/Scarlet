@@ -1,9 +1,8 @@
-//! Resident Scarlet Desktop application launcher.
+//! Scarlet Desktop application launcher and resident launch service.
 //!
-//! The launcher process is started with the desktop session and keeps its
-//! catalog and icon cache warm while no window is shown.  The desktop shell
-//! asks it to show the window through sbus, so opening the launcher does not
-//! fork a new application or repeat catalog initialization.
+//! The same binary has separate service and main-window modes. The resident
+//! service owns the sbus endpoint but no UI runner; normal launcher windows are
+//! ordinary application processes managed by stemd.
 
 use std::process::ExitCode;
 use std::string::String;
@@ -24,7 +23,7 @@ use scarlet_desktop_config::{
 use scarlet_ui::prelude::*;
 use scarlet_ui::{
     Alignment, Color, ColorPalette, GridView, Icon, IconSize, IconView, KeyCode, PlatformWindow,
-    Spacer, Window, WindowPlacement, dismiss_window, hstack, vstack,
+    Spacer, Window, WindowPlacement, hstack, vstack,
 };
 use scarlet_ui_macros::View;
 use sws_client::Connection as SwsConnection;
@@ -66,6 +65,7 @@ struct LauncherApp {
     status: State<String>,
     window_id: State<u32>,
     focus_ready: State<bool>,
+    hide_requested: State<bool>,
 }
 
 impl LauncherApp {
@@ -88,7 +88,7 @@ impl LauncherApp {
     fn launch_application(&self, application: ApplicationEntry) {
         if application.app_id == FILE_MANAGER_APP_ID {
             if show_file_manager(self.window_id.get()) {
-                dismiss_window("main");
+                self.request_hide();
             } else {
                 self.status.set(String::from("Could not open Files"));
             }
@@ -120,11 +120,15 @@ impl LauncherApp {
                 3_000,
             )
         }) {
-            Ok(_) => dismiss_window("main"),
+            Ok(_) => self.request_hide(),
             Err(error) => self
                 .status
                 .set(format!("Could not launch {}: {error:?}", application.name)),
         }
+    }
+
+    fn request_hide(&self) {
+        self.hide_requested.set(true);
     }
 
     fn move_selection(&self, keycode: KeyCode) {
@@ -173,7 +177,7 @@ impl LauncherApp {
                     true
                 }
                 KeyCode::Escape => {
-                    dismiss_window("main");
+                    self.request_hide();
                     true
                 }
                 _ => false,
@@ -338,7 +342,10 @@ impl LauncherApp {
             .border_color(palette.background_tertiary().with_opacity(0.7))
             .focused_border_color(palette.primary().with_opacity(0.8))
             .on_submit(move || submit_app.launch_selected())
-            .on_cancel(|| dismiss_window("main"))
+            .on_cancel({
+                let cancel_app = self.clone();
+                move || cancel_app.request_hide()
+            })
             .on_empty(move || empty_app.search_focused.set(false))
             .frame(560.0, 46.0);
         let grid = GridView::new(
@@ -503,7 +510,14 @@ impl Application for LauncherApp {
             self.focus_ready.set(true);
         } else if self.focus_ready.get() {
             self.focus_ready.set(false);
-            dismiss_window("main");
+            self.request_hide();
+        }
+    }
+
+    fn on_window_sync(&mut self, _ctx: &WindowContext, window: &mut dyn PlatformWindow) {
+        if self.hide_requested.get() {
+            self.hide_requested.set(false);
+            let _ = window.minimize();
         }
     }
 
@@ -522,7 +536,7 @@ impl Application for LauncherApp {
             .window_type(window_types::ALWAYS_ON_TOP)
             .placement(WindowPlacement::Centered)
             .scene_key("main")
-            .open_at_launch(false)
+            .open_at_launch(true)
     }
 
     fn exit_when_all_windows_closed(&self) -> bool {
@@ -635,7 +649,7 @@ fn load_applications() -> (Vec<ApplicationEntry>, String) {
     (applications, status)
 }
 
-fn run_launcher_service(app: LauncherApp) {
+fn run_launcher_service() {
     loop {
         let Ok(mut connection) = SbusConnection::connect() else {
             thread::sleep(SERVICE_RETRY_DELAY);
@@ -680,14 +694,22 @@ fn run_launcher_service(app: LauncherApp) {
                 continue;
             }
 
-            // Every invocation starts with a clean query and selection while
-            // reusing the resident process and its warmed application catalog.
-            app.query.set(String::new());
-            app.search_focused.set(false);
-            app.selected.set(None);
-            app.hovered.set(None);
-            open_window("main");
             let _ = connection.send_method_return(0, Vec::new());
+
+            // The resident service deliberately owns no UI runner. Ask stemd
+            // to launch a new main-window process or focus the existing one.
+            thread::spawn(|| {
+                let _ = SbusConnection::connect().and_then(|mut connection| {
+                    connection.call_method_timeout(
+                        DESKTOP_STEMD_BUS_NAME,
+                        DESKTOP_STEMD_OBJECT_PATH,
+                        DESKTOP_STEMD_INTERFACE,
+                        DESKTOP_STEMD_LAUNCH_OR_FOCUS_METHOD,
+                        vec![Argument::String(String::from(APP_ID))],
+                        3_000,
+                    )
+                });
+            });
         }
     }
 }
@@ -710,10 +732,15 @@ fn icon_for_desktop_name(name: &str) -> Icon {
 }
 
 fn main() -> ExitCode {
-    println!("[launcher] starting resident launcher");
+    let args = std::env::args().collect::<Vec<_>>();
+    if args.iter().any(|arg| arg == "--service") {
+        println!("[launcher] starting in service mode");
+        run_launcher_service();
+        return ExitCode::SUCCESS;
+    }
+
+    println!("[launcher] starting in main window mode");
     let mut app = LauncherApp::new();
-    let service_app = app.clone();
-    thread::spawn(move || run_launcher_service(service_app));
     match app.run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
