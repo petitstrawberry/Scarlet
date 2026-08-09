@@ -728,6 +728,26 @@ impl Waker {
         self.wait_queue.lock().contains(&task_id)
     }
 
+    /// Remove every queued occurrence of one task without waking it.
+    ///
+    /// This is used by task teardown after the task can no longer resume. It
+    /// must not be used as a normal cancellation mechanism because it does not
+    /// repair the task's scheduler state.
+    ///
+    /// # Arguments
+    ///
+    /// * `task_id` - Task being permanently removed.
+    ///
+    /// # Returns
+    ///
+    /// `true` when at least one queue entry was removed.
+    pub(crate) fn remove_terminated_task(&self, task_id: usize) -> bool {
+        let mut queue = self.wait_queue.lock();
+        let previous_len = queue.len();
+        queue.retain(|queued_id| *queued_id != task_id);
+        queue.len() != previous_len
+    }
+
     /// Get detailed statistics about this waker
     ///
     /// This method provides detailed information about the current state

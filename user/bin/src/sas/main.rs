@@ -1391,24 +1391,31 @@ fn handle_configure(
         init_ring_header(ring_addr, &config, buffer_frames as u32, frame_bytes as u32);
     }
 
-    {
+    let mut replacement = ClientStream::new();
+    replacement.shm = Some(shm);
+    replacement.ring_addr = Some(ring_addr);
+    replacement.ring_size = ring_size;
+    replacement.buffer_frames = buffer_frames;
+    replacement.frame_bytes = frame_bytes;
+    replacement.rate = config.rate;
+    replacement.channels = config.channels;
+    replacement.resample_pos_num = 0;
+    replacement.configured = true;
+    replacement.closed = false;
+
+    let old_stream = {
         let mut guard = state.lock();
         let stream = guard
             .clients
             .get_mut(&client_id)
             .ok_or("unknown SAS client")?;
-        stream.unmap_ring();
-        stream.shm = Some(shm);
-        stream.ring_addr = Some(ring_addr);
-        stream.ring_size = ring_size;
-        stream.buffer_frames = buffer_frames;
-        stream.frame_bytes = frame_bytes;
-        stream.rate = config.rate;
-        stream.channels = config.channels;
-        stream.resample_pos_num = 0;
-        stream.configured = true;
-        stream.closed = false;
-    }
+        replacement.gain = stream.gain;
+        core::mem::replace(stream, replacement)
+    };
+    // Unmapping the previous ring and closing its handle can enter the kernel
+    // and block. Keep that work outside ServerState so the real-time audio
+    // thread never waits for VM teardown while trying to mix a period.
+    drop(old_stream);
 
     write_ok(socket)?;
     socket

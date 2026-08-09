@@ -4954,7 +4954,7 @@ fn sample_current_task_cpu_hog(cpu_id: usize) {
         "user"
     };
     crate::emergency_println!(
-        "[task-cpu-watchdog] task={} tgid={} cpu={} type={:?} state={:?} usage={}.{}% pc={:#x} mode={} start_pc={:#x} start_mode={} same_pc={} runtime_ns={} window_ns={}",
+        "[task-cpu-watchdog] task={} tgid={} cpu={} type={:?} state={:?} usage={}.{}% pc={:#x} mode={} start_pc={:#x} start_mode={} same_pc={} syscall_active={} syscall_valid={} syscall={} syscall_pc={:#x} runtime_ns={} window_ns={}",
         task_id,
         task.get_thread_group_id(),
         cpu_id,
@@ -4968,6 +4968,10 @@ fn sample_current_task_cpu_hog(cpu_id: usize) {
         start_mode,
         sample.current_pc == sample.start_pc
             && sample.current_pc_privileged == sample.start_pc_privileged,
+        sample.syscall_active,
+        sample.last_syscall_number != u64::MAX,
+        sample.last_syscall_number,
+        sample.last_syscall_pc,
         sample.runtime_ns,
         sample.window_ns,
     );

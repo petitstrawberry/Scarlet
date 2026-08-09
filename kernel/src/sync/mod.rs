@@ -8,6 +8,7 @@
 //! longer re-exported.
 
 pub mod cpu_local;
+pub mod futex;
 pub mod irq_guard;
 pub mod lazy;
 pub mod mutex;

@@ -590,6 +590,7 @@ pub fn syscall_dispatcher(trapframe: &mut Trapframe) -> Result<usize, &'static s
 
     // 2. Get mutable reference to current task
     let task = mytask().unwrap();
+    task.record_syscall_entry(syscall_number, pc);
     crate::breadcrumb::drop(
         crate::breadcrumb::SYSCALL_TASK_DONE,
         task.get_id() as u64,
@@ -607,6 +608,7 @@ pub fn syscall_dispatcher(trapframe: &mut Trapframe) -> Result<usize, &'static s
         syscall_number as u64,
     );
     task.process_deferred_exit_request();
+    task.record_syscall_exit();
     crate::breadcrumb::drop(crate::breadcrumb::SYSCALL_EXIT, syscall_number as u64, 0);
     res
 }

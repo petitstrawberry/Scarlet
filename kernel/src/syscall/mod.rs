@@ -111,6 +111,7 @@ use crate::object::handle::syscall::{
     sys_handle_set_role,
 };
 use crate::random::sys_get_random;
+use crate::sync::futex::{sys_futex_wait, sys_futex_wake};
 use crate::task::syscall::{
     sys_brk, sys_clone, sys_create_namespace, sys_create_session, sys_execve, sys_execve_abi,
     sys_exit, sys_exit_group, sys_get_cpu_usage_info, sys_get_process_group_id,
@@ -222,6 +223,8 @@ syscall_table! {
     SetSchedulerAttr = 46 => sys_set_scheduler_attr,
     GetSchedulerAttr = 47 => sys_get_scheduler_attr,
     GetSchedulerState = 48 => sys_get_scheduler_state,
+    FutexWait = 49 => sys_futex_wait,
+    FutexWake = 50 => sys_futex_wake,
 
     // ABI Zone Management
     RegisterAbiZone = 90 => sys_register_abi_zone,

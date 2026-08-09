@@ -552,6 +552,8 @@ pub enum Syscall {
     SetSchedulerAttr = 46,
     GetSchedulerAttr = 47,
     GetSchedulerState = 48,
+    FutexWait = 49,
+    FutexWake = 50,
 
     // Process information
     GetTaskInfoCount = 24,

@@ -689,6 +689,12 @@ pub(crate) struct TaskCpuHogSnapshot {
     pub current_pc: u64,
     /// Whether `current_pc` was sampled from privileged execution.
     pub current_pc_privileged: bool,
+    /// Most recent system-call number entered by this task.
+    pub last_syscall_number: u64,
+    /// User instruction address that entered `last_syscall_number`.
+    pub last_syscall_pc: u64,
+    /// Whether the task was still inside that system call when sampled.
+    pub syscall_active: bool,
 }
 
 pub struct Task {
@@ -793,6 +799,12 @@ pub struct Task {
     last_observed_pc: AtomicU64,
     /// Whether `last_observed_pc` was sampled from privileged execution.
     last_observed_pc_privileged: AtomicBool,
+    /// Most recent system-call number entered by this task.
+    last_syscall_number: AtomicU64,
+    /// User instruction address that entered `last_syscall_number`.
+    last_syscall_pc: AtomicU64,
+    /// Whether this task is currently executing its system-call dispatcher.
+    syscall_active: AtomicBool,
     /// Start of the current CPU-hog diagnostic wall-clock window.
     cpu_hog_window_start_ns: AtomicU64,
     /// Cumulative task CPU time at the start of the diagnostic window.
@@ -872,8 +884,6 @@ pub struct Task {
     clear_child_tid: IrqSpinLock<Option<usize>>,
     /// Handle table for kernel objects (already thread-safe internally)
     pub handle_table: HandleTable,
-    /// Waker for sleep operations (already thread-safe internally)
-    pub sleep_waker: Waker,
     /// Kernel stack window base (slot_index, base_vaddr)
     pub kernel_stack_window_base: IrqSpinLock<Option<(usize, usize)>>,
     /// CPUs on which this task may run. Each set bit is one scheduler CPU.
@@ -1079,6 +1089,9 @@ impl Task {
             cpu_run_start_ns: AtomicU64::new(0),
             last_observed_pc: AtomicU64::new(0),
             last_observed_pc_privileged: AtomicBool::new(false),
+            last_syscall_number: AtomicU64::new(u64::MAX),
+            last_syscall_pc: AtomicU64::new(0),
+            syscall_active: AtomicBool::new(false),
             cpu_hog_window_start_ns: AtomicU64::new(0),
             cpu_hog_window_start_runtime_ns: AtomicU64::new(0),
             cpu_hog_window_start_pc: AtomicU64::new(0),
@@ -1112,7 +1125,6 @@ impl Task {
             deferred_exit_request: IrqSpinLock::new(None),
             clear_child_tid: IrqSpinLock::new(None),
             handle_table: HandleTable::new(),
-            sleep_waker: Waker::new_interruptible("task_sleep_waker"),
             kernel_stack_window_base: IrqSpinLock::new(None),
             cpu_affinity_mask: AtomicUsize::new(usize::MAX),
             scheduler_affinity_kind: AtomicU8::new(SCHED_AFFINITY_KIND_ANY),
@@ -1585,6 +1597,28 @@ impl Task {
             .store(privileged, Ordering::Relaxed);
     }
 
+    /// Record entry into a system call for CPU-hog diagnostics.
+    ///
+    /// This retains the originating userspace PC even when a later timer
+    /// interrupt samples the task while it is executing inside the kernel.
+    ///
+    /// # Arguments
+    ///
+    /// * `syscall_number` - ABI-specific system-call number.
+    /// * `user_pc` - User instruction address that entered the kernel.
+    pub(crate) fn record_syscall_entry(&self, syscall_number: usize, user_pc: usize) {
+        self.last_syscall_pc
+            .store(user_pc as u64, Ordering::Relaxed);
+        self.last_syscall_number
+            .store(syscall_number as u64, Ordering::Release);
+        self.syscall_active.store(true, Ordering::Release);
+    }
+
+    /// Mark completion of the current system call for diagnostics.
+    pub(crate) fn record_syscall_exit(&self) {
+        self.syscall_active.store(false, Ordering::Release);
+    }
+
     /// Complete a CPU-hog sampling window when enough wall time has elapsed.
     ///
     /// # Arguments
@@ -1599,6 +1633,9 @@ impl Task {
         let runtime_ns = self.cpu_time_snapshot_ns(now_ns);
         let current_pc = self.last_observed_pc.load(Ordering::Relaxed);
         let current_pc_privileged = self.last_observed_pc_privileged.load(Ordering::Relaxed);
+        let last_syscall_number = self.last_syscall_number.load(Ordering::Acquire);
+        let last_syscall_pc = self.last_syscall_pc.load(Ordering::Relaxed);
+        let syscall_active = self.syscall_active.load(Ordering::Acquire);
         let window_start_ns = self.cpu_hog_window_start_ns.load(Ordering::Acquire);
 
         if window_start_ns == 0 {
@@ -1644,6 +1681,9 @@ impl Task {
             start_pc_privileged,
             current_pc,
             current_pc_privileged,
+            last_syscall_number,
+            last_syscall_pc,
+            syscall_active,
         })
     }
 
@@ -2308,6 +2348,7 @@ impl Task {
             self.exiting.store(true, Ordering::Release);
         }
         self.cancel_software_timers();
+        crate::sync::futex::remove_task_waiter(self.id, self.thread_group_id);
         release_task_deadline(self);
     }
 
@@ -3013,7 +3054,7 @@ impl Task {
         child
             .sched_util_min
             .store(self.sched_util_min(), Ordering::SeqCst);
-        // Note: software_timers, sleep_waker, event_queue are NOT copied
+        // Note: software_timers and event_queue are NOT copied
         // as they are task-specific runtime state that should start fresh
 
         // Set the same entry point
@@ -3423,6 +3464,7 @@ impl Task {
         struct SleepWakerHandler {
             task_id: usize,
             timer_handle: IrqSpinLock<Option<crate::timer::TimerHandle>>,
+            waker: Arc<Waker>,
         }
 
         impl TimerHandler for SleepWakerHandler {
@@ -3433,15 +3475,21 @@ impl Task {
                     }
                     // Memory barrier to ensure state change is visible
                     core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
-                    task.sleep_waker.wake_all();
+                    self.waker.wake_all();
                 }
             }
         }
 
         let wake_deadline_ns = get_time_ns().saturating_add(duration_ns);
+        // A sleep notification belongs to exactly one timer instance. Reusing
+        // a task-wide Waker allows a late callback or interrupted sleep to
+        // leave a pending notification that makes a later, unrelated sleep
+        // return immediately.
+        let sleep_waker = Arc::new(Waker::new_interruptible("task_sleep_waker"));
         let handler = Arc::new(SleepWakerHandler {
             task_id: self.id,
             timer_handle: IrqSpinLock::new(None),
+            waker: sleep_waker.clone(),
         });
         let handler_ref: Arc<dyn crate::timer::TimerHandler> = handler.clone();
 
@@ -3452,7 +3500,7 @@ impl Task {
         self.register_software_timer(timer_handle, handler_ref.clone());
         drop(handler_ref);
         drop(handler);
-        self.sleep_waker.wait(self.get_id(), trapframe);
+        sleep_waker.wait_owned(self.get_id(), trapframe);
         self.finish_software_timer(timer_handle);
     }
 
@@ -4220,6 +4268,7 @@ mod tests {
         let task = Task::new("CpuHog".to_string(), 1, TaskType::User);
 
         task.record_observed_pc(0x1000, false);
+        task.record_syscall_entry(20, 0x0ffc);
         assert!(task.sample_cpu_hog(1).is_none());
 
         task.cpu_time_ns.store(995 * MS, Ordering::SeqCst);
@@ -4234,8 +4283,12 @@ mod tests {
         assert_eq!(sample.current_pc, 0x1010);
         assert!(!sample.start_pc_privileged);
         assert!(!sample.current_pc_privileged);
+        assert_eq!(sample.last_syscall_number, 20);
+        assert_eq!(sample.last_syscall_pc, 0x0ffc);
+        assert!(sample.syscall_active);
 
         task.cpu_time_ns.store(1_495 * MS, Ordering::SeqCst);
+        task.record_syscall_exit();
         task.record_observed_pc(0xffff_ffff_8000_1000, true);
         assert!(task.sample_cpu_hog(2_000 * MS + 1).is_none());
     }

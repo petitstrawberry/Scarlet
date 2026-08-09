@@ -2,10 +2,10 @@
 //!
 //! This module provides minimal synchronization primitives for multi-threaded applications.
 
-use crate::syscall::{Syscall, syscall2};
+use crate::syscall::{Syscall, syscall1, syscall2, syscall3};
 use core::cell::UnsafeCell;
 use core::ops::{Deref, DerefMut};
-use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use core::sync::atomic::{AtomicU32, Ordering};
 
 extern crate alloc;
 pub use alloc::sync::Arc;
@@ -18,9 +18,31 @@ mod export {
 
 pub use export::*;
 
-/// Simple spin-lock based Mutex
+const MUTEX_UNLOCKED: u32 = 0;
+const MUTEX_LOCKED: u32 = 1;
+const MUTEX_CONTENDED: u32 = 2;
+
+fn futex_wait(word: &AtomicU32, expected: u32) {
+    let result = syscall3(
+        Syscall::FutexWait,
+        word as *const AtomicU32 as usize,
+        expected as usize,
+        usize::MAX,
+    );
+    if result == usize::MAX {
+        // Keep mixed old-kernel/new-userland images from turning lock
+        // contention into a tight syscall loop.
+        let _ = syscall1(Syscall::Sleep, 10_000_000);
+    }
+}
+
+fn futex_wake(word: &AtomicU32, count: usize) {
+    let _ = syscall2(Syscall::FutexWake, word as *const AtomicU32 as usize, count);
+}
+
+/// Process-private sleeping mutex.
 pub struct Mutex<T> {
-    locked: AtomicBool,
+    state: AtomicU32,
     data: UnsafeCell<T>,
 }
 
@@ -31,22 +53,29 @@ impl<T> Mutex<T> {
     /// Create a new mutex
     pub const fn new(data: T) -> Self {
         Mutex {
-            locked: AtomicBool::new(false),
+            state: AtomicU32::new(MUTEX_UNLOCKED),
             data: UnsafeCell::new(data),
         }
     }
 
     /// Lock the mutex and return a guard
     pub fn lock(&self) -> MutexGuard<'_, T> {
-        // Spin until we acquire the lock
-        while self
-            .locked
-            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+        if self
+            .state
+            .compare_exchange(
+                MUTEX_UNLOCKED,
+                MUTEX_LOCKED,
+                Ordering::Acquire,
+                Ordering::Relaxed,
+            )
             .is_err()
         {
-            // Yield to other threads while spinning
-            // Sleep for 1ms to avoid busy waiting
-            let _ = syscall2(Syscall::Sleep, 1_000_000, 0); // 1ms in nanoseconds
+            loop {
+                if self.state.swap(MUTEX_CONTENDED, Ordering::Acquire) == MUTEX_UNLOCKED {
+                    break;
+                }
+                futex_wait(&self.state, MUTEX_CONTENDED);
+            }
         }
 
         MutexGuard { mutex: self }
@@ -55,8 +84,13 @@ impl<T> Mutex<T> {
     /// Try to lock the mutex without blocking
     pub fn try_lock(&self) -> Option<MutexGuard<'_, T>> {
         if self
-            .locked
-            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .state
+            .compare_exchange(
+                MUTEX_UNLOCKED,
+                MUTEX_LOCKED,
+                Ordering::Acquire,
+                Ordering::Relaxed,
+            )
             .is_ok()
         {
             Some(MutexGuard { mutex: self })
@@ -87,19 +121,21 @@ impl<'a, T> DerefMut for MutexGuard<'a, T> {
 
 impl<'a, T> Drop for MutexGuard<'a, T> {
     fn drop(&mut self) {
-        self.mutex.locked.store(false, Ordering::Release);
+        if self.mutex.state.swap(MUTEX_UNLOCKED, Ordering::Release) == MUTEX_CONTENDED {
+            futex_wake(&self.mutex.state, 1);
+        }
     }
 }
 
 /// A synchronization primitive which can be written to only once.
 ///
 /// This is equivalent to `std::sync::OnceLock` but for no_std environments.
-const ONCE_UNINITIALIZED: u8 = 0;
-const ONCE_INITIALIZING: u8 = 1;
-const ONCE_READY: u8 = 2;
+const ONCE_UNINITIALIZED: u32 = 0;
+const ONCE_INITIALIZING: u32 = 1;
+const ONCE_READY: u32 = 2;
 
 struct OnceInitGuard<'a> {
-    state: &'a AtomicU8,
+    state: &'a AtomicU32,
     committed: bool,
 }
 
@@ -109,12 +145,13 @@ impl Drop for OnceInitGuard<'_> {
             // Allow a later caller to retry if the initializer unwinds before
             // publishing a value.
             self.state.store(ONCE_UNINITIALIZED, Ordering::Release);
+            futex_wake(self.state, usize::MAX);
         }
     }
 }
 
 pub struct OnceLock<T> {
-    state: AtomicU8,
+    state: AtomicU32,
     data: UnsafeCell<Option<T>>,
 }
 
@@ -125,7 +162,7 @@ impl<T> OnceLock<T> {
     /// Creates a new `OnceLock`.
     pub const fn new() -> Self {
         Self {
-            state: AtomicU8::new(ONCE_UNINITIALIZED),
+            state: AtomicU32::new(ONCE_UNINITIALIZED),
             data: UnsafeCell::new(None),
         }
     }
@@ -167,13 +204,12 @@ impl<T> OnceLock<T> {
                     // state, so no other thread can access or write `data`.
                     unsafe { *self.data.get() = Some(value) };
                     self.state.store(ONCE_READY, Ordering::Release);
+                    futex_wake(&self.state, usize::MAX);
                     init_guard.committed = true;
                     return unsafe { (*self.data.get()).as_ref().unwrap() };
                 }
                 ONCE_INITIALIZING => {
-                    // Do not burn a core while another thread performs the
-                    // initializer (which may include filesystem or IPC I/O).
-                    let _ = syscall2(Syscall::Sleep, 1_000_000, 0);
+                    futex_wait(&self.state, ONCE_INITIALIZING);
                 }
                 _ => unreachable!("invalid OnceLock state"),
             }
@@ -196,7 +232,7 @@ impl<T> OnceLock<T> {
             match self.state.load(Ordering::Acquire) {
                 ONCE_READY => return Err(value.take().unwrap()),
                 ONCE_INITIALIZING => {
-                    let _ = syscall2(Syscall::Sleep, 1_000_000, 0);
+                    futex_wait(&self.state, ONCE_INITIALIZING);
                 }
                 ONCE_UNINITIALIZED => {
                     if self
@@ -215,6 +251,7 @@ impl<T> OnceLock<T> {
                     // state after the successful CAS.
                     unsafe { *self.data.get() = value.take() };
                     self.state.store(ONCE_READY, Ordering::Release);
+                    futex_wake(&self.state, usize::MAX);
                     return Ok(());
                 }
                 _ => unreachable!("invalid OnceLock state"),

@@ -6,11 +6,103 @@
 
 use core::alloc::Layout;
 use core::cell::UnsafeCell;
-use scarlet_sys::{Syscall, syscall1};
+use core::sync::atomic::{AtomicU32, Ordering};
+use scarlet_sys::{Syscall, syscall1, syscall2, syscall3};
 use talc::{OomHandler, Span, Talc, Talck};
 
 /// Minimum extension size (4 KiB).
 const MIN_EXTEND_SIZE: usize = 4096;
+const MUTEX_UNLOCKED: u32 = 0;
+const MUTEX_LOCKED: u32 = 1;
+const MUTEX_CONTENDED: u32 = 2;
+
+/// Allocation-free process-private mutex used by the global allocator.
+///
+/// The futex syscall never enters the userspace allocator, so a contended
+/// allocation can block without recursively allocating or burning a CPU.
+pub struct FutexRawMutex {
+    state: AtomicU32,
+}
+
+impl FutexRawMutex {
+    const fn new() -> Self {
+        Self {
+            state: AtomicU32::new(MUTEX_UNLOCKED),
+        }
+    }
+
+    fn wait(&self) {
+        let result = syscall3(
+            Syscall::FutexWait,
+            &self.state as *const AtomicU32 as usize,
+            MUTEX_CONTENDED as usize,
+            usize::MAX,
+        );
+        if result == usize::MAX {
+            let _ = syscall1(Syscall::Sleep, 10_000_000);
+        }
+    }
+
+    fn wake_one(&self) {
+        let _ = syscall2(
+            Syscall::FutexWake,
+            &self.state as *const AtomicU32 as usize,
+            1,
+        );
+    }
+}
+
+// SAFETY: State transitions use the standard three-state futex mutex
+// protocol. Only the caller that changes UNLOCKED to LOCKED/CONTENDED enters
+// the critical section, and release publishes all protected allocator state.
+unsafe impl lock_api::RawMutex for FutexRawMutex {
+    type GuardMarker = lock_api::GuardSend;
+
+    const INIT: Self = Self::new();
+
+    fn lock(&self) {
+        if self
+            .state
+            .compare_exchange(
+                MUTEX_UNLOCKED,
+                MUTEX_LOCKED,
+                Ordering::Acquire,
+                Ordering::Relaxed,
+            )
+            .is_ok()
+        {
+            return;
+        }
+
+        loop {
+            if self.state.swap(MUTEX_CONTENDED, Ordering::Acquire) == MUTEX_UNLOCKED {
+                return;
+            }
+            self.wait();
+        }
+    }
+
+    fn try_lock(&self) -> bool {
+        self.state
+            .compare_exchange(
+                MUTEX_UNLOCKED,
+                MUTEX_LOCKED,
+                Ordering::Acquire,
+                Ordering::Relaxed,
+            )
+            .is_ok()
+    }
+
+    unsafe fn unlock(&self) {
+        if self.state.swap(MUTEX_UNLOCKED, Ordering::Release) == MUTEX_CONTENDED {
+            self.wake_one();
+        }
+    }
+
+    fn is_locked(&self) -> bool {
+        self.state.load(Ordering::Relaxed) != MUTEX_UNLOCKED
+    }
+}
 
 /// Custom OOM handler that claims heap regions using the sbrk syscall.
 pub struct SbrkOomHandler;
@@ -64,7 +156,7 @@ impl OomHandler for SbrkOomHandler {
 }
 
 /// The global allocator type.
-pub type GlobalAllocator = Talck<spin::Mutex<()>, SbrkOomHandler>;
+pub type GlobalAllocator = Talck<FutexRawMutex, SbrkOomHandler>;
 
 /// The global allocator instance.
 ///
@@ -73,10 +165,10 @@ pub type GlobalAllocator = Talck<spin::Mutex<()>, SbrkOomHandler>;
 #[global_allocator]
 pub static ALLOCATOR: GlobalAllocator = {
     let talc = Talc::new(SbrkOomHandler::new());
-    talc.lock::<spin::Mutex<()>>()
+    talc.lock::<FutexRawMutex>()
 };
 
-type AllocatorForkGuard = lock_api::MutexGuard<'static, spin::Mutex<()>, Talc<SbrkOomHandler>>;
+type AllocatorForkGuard = lock_api::MutexGuard<'static, FutexRawMutex, Talc<SbrkOomHandler>>;
 
 struct ForkGuardSlot(UnsafeCell<Option<AllocatorForkGuard>>);
 
