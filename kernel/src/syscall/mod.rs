@@ -116,11 +116,12 @@ use crate::task::syscall::{
     sys_brk, sys_clone, sys_create_namespace, sys_create_session, sys_execve, sys_execve_abi,
     sys_exit, sys_exit_group, sys_get_cpu_usage_info, sys_get_process_group_id,
     sys_get_scheduler_attr, sys_get_scheduler_state, sys_get_session_id, sys_get_task_cpu_affinity,
-    sys_get_task_deadline, sys_get_task_info_count, sys_get_task_info_list, sys_get_task_nice,
-    sys_get_task_util_min, sys_get_tls, sys_getchar, sys_getpid, sys_getppid, sys_monotonic_time,
-    sys_putchar, sys_register_abi_zone, sys_sbrk, sys_set_process_group, sys_set_scheduler_attr,
-    sys_set_task_cpu_affinity, sys_set_task_deadline, sys_set_task_nice, sys_set_task_util_min,
-    sys_set_tid_address, sys_set_tls, sys_shutdown, sys_sleep, sys_system_time, sys_thread_detach,
+    sys_get_task_deadline, sys_get_task_debug_info, sys_get_task_info_count,
+    sys_get_task_info_list, sys_get_task_nice, sys_get_task_util_min, sys_get_tls, sys_getchar,
+    sys_getpid, sys_getppid, sys_kill, sys_monotonic_time, sys_putchar, sys_register_abi_zone,
+    sys_sbrk, sys_set_process_group, sys_set_scheduler_attr, sys_set_task_cpu_affinity,
+    sys_set_task_deadline, sys_set_task_nice, sys_set_task_util_min, sys_set_tid_address,
+    sys_set_tls, sys_shutdown, sys_sleep, sys_system_time, sys_thread_detach,
     sys_thread_exit_cleanup, sys_unregister_abi_zone, sys_waitpid, sys_yield,
 };
 
@@ -178,10 +179,7 @@ syscall_table! {
     Execve = 3 => sys_execve,
     ExecveABI = 4 => sys_execve_abi,
     Waitpid = 5 => sys_waitpid,
-    Kill = 6 => |_: &mut Trapframe| {
-        // Kill syscall is not implemented yet
-        usize::MAX // -1
-    },
+    Kill = 6 => sys_kill,
     Getpid = 7 => sys_getpid,
     Getppid = 8 => sys_getppid,
     Brk = 12 => sys_brk,
@@ -329,6 +327,7 @@ syscall_table! {
     Shutdown = 1000 => sys_shutdown,          // Shutdown the system gracefully
 
     // === Debug/Profiler Operations ===
+    GetTaskDebugInfo = 998 => sys_get_task_debug_info, // Per-thread PC/syscall snapshot
     ProfilerDump = 999 => sys_profiler_dump, // Dump profiler statistics (debug only)
 
     // === Hypervisor Operations (Scarlet Native) ===

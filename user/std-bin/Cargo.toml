@@ -69,6 +69,10 @@ name = "top"
 path = "src/top.rs"
 
 [[bin]]
+name = "kill"
+path = "src/kill.rs"
+
+[[bin]]
 name = "sched_bench"
 path = "src/sched_bench.rs"
 

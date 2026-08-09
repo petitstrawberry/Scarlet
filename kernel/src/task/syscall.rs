@@ -998,6 +998,77 @@ pub fn sys_getppid(trapframe: &mut Trapframe) -> usize {
     }
 }
 
+fn process_control_for_signal(signal: usize) -> Option<crate::ipc::event::ProcessControlType> {
+    use crate::ipc::event::ProcessControlType;
+
+    match signal {
+        1 => Some(ProcessControlType::Hangup),
+        2 => Some(ProcessControlType::Interrupt),
+        3 => Some(ProcessControlType::Quit),
+        9 => Some(ProcessControlType::Kill),
+        15 => Some(ProcessControlType::Terminate),
+        18 => Some(ProcessControlType::Continue),
+        19 => Some(ProcessControlType::Stop),
+        20 => Some(ProcessControlType::TerminalStop),
+        21 => Some(ProcessControlType::TerminalInput),
+        22 => Some(ProcessControlType::TerminalOutput),
+        28 => Some(ProcessControlType::WindowChange),
+        _ => None,
+    }
+}
+
+/// Send a process-control signal to a namespace-local task.
+///
+/// Signal delivery targets one thread, while fatal Scarlet and Linux ABI
+/// handlers terminate its complete thread group. Signal zero performs only
+/// existence validation. PID 1 and kernel tasks are deliberately protected.
+///
+/// # Arguments
+///
+/// * `trapframe.get_arg(0)` - Positive namespace-local PID or TID.
+/// * `trapframe.get_arg(1)` - Signal number.
+///
+/// # Returns
+///
+/// Zero when the target exists and the signal was queued, or `usize::MAX` for
+/// an invalid target, protected task, unsupported signal, or delivery failure.
+pub fn sys_kill(trapframe: &mut Trapframe) -> usize {
+    use crate::ipc::event::{Event, EventManager, EventPriority};
+
+    let caller = mytask().unwrap();
+    let local_pid = trapframe.get_arg(0);
+    let signal = trapframe.get_arg(1);
+    trapframe.increment_pc_next(&caller);
+
+    if local_pid == 0 {
+        return usize::MAX;
+    }
+    let Some(global_id) = caller.get_namespace().resolve_global_id(local_pid) else {
+        return usize::MAX;
+    };
+    let Some(target) = get_task_by_id(global_id) else {
+        return usize::MAX;
+    };
+    if global_id == 1 || target.task_type != super::TaskType::User {
+        return usize::MAX;
+    }
+    if signal == 0 {
+        return 0;
+    }
+    let Some(control) = process_control_for_signal(signal) else {
+        return usize::MAX;
+    };
+    let Ok(event_target) = u32::try_from(global_id) else {
+        return usize::MAX;
+    };
+
+    let event = Event::direct_process_control(event_target, control, EventPriority::Critical, true);
+    match EventManager::get_manager().send_event(event) {
+        Ok(()) => 0,
+        Err(_) => usize::MAX,
+    }
+}
+
 /// Create a new session for the current task.
 ///
 /// # Arguments
@@ -2096,4 +2167,152 @@ pub fn sys_get_task_info_list(trapframe: &mut Trapframe) -> usize {
     }
 
     written
+}
+
+/// Return lock-free execution diagnostics for every thread in a process.
+///
+/// The selector may name either a process leader or one of its threads. The
+/// returned entries cover all members of the selected thread group visible in
+/// the caller's task namespace. This syscall is available only with the
+/// `sync-debug` kernel feature.
+///
+/// # Arguments
+///
+/// * `trapframe.get_arg(0)` - Namespace-local PID or TID selector.
+/// * `trapframe.get_arg(1)` - Pointer to a `TaskDebugInfo` output array.
+/// * `trapframe.get_arg(2)` - Number of entries available in the array.
+/// * `trapframe.get_arg(3)` - Expected size of one `TaskDebugInfo` entry.
+///
+/// # Returns
+///
+/// With a zero capacity, the required entry count. Otherwise, the number of
+/// entries written. Returns `usize::MAX` when unavailable or invalid.
+pub fn sys_get_task_debug_info(trapframe: &mut Trapframe) -> usize {
+    let caller = mytask().unwrap();
+    let selector = trapframe.get_arg(0);
+    let buf_ptr = trapframe.get_arg(1);
+    let capacity = trapframe.get_arg(2);
+    let entry_size = trapframe.get_arg(3);
+    trapframe.increment_pc_next(&caller);
+
+    #[cfg(not(feature = "sync-debug"))]
+    {
+        let _ = (selector, buf_ptr, capacity, entry_size);
+        usize::MAX
+    }
+
+    #[cfg(feature = "sync-debug")]
+    {
+        use crate::task::{
+            TASK_DEBUG_FLAG_PC_PRIVILEGED, TASK_DEBUG_FLAG_PC_VALID,
+            TASK_DEBUG_FLAG_SYSCALL_ACTIVE, TASK_DEBUG_FLAG_SYSCALL_VALID,
+            TASK_DEBUG_INFO_VERSION_V1, TaskDebugInfo, TaskType,
+        };
+        use core::sync::atomic::Ordering;
+
+        if selector == 0 || entry_size != core::mem::size_of::<TaskDebugInfo>() {
+            return usize::MAX;
+        }
+        let namespace = caller.get_namespace();
+        let Some(selected_global_id) = namespace.resolve_global_id(selector) else {
+            return usize::MAX;
+        };
+        let Some(selected) = get_task_by_id(selected_global_id) else {
+            return usize::MAX;
+        };
+        let target_tgid = selected.get_thread_group_id();
+        let local_tgid = namespace.resolve_local_id(target_tgid).unwrap_or(0);
+
+        let targets: Vec<_> = get_all_task_ids()
+            .into_iter()
+            .filter_map(|global_id| {
+                let local_pid = namespace.resolve_local_id(global_id)?;
+                let target = get_task_by_id(global_id)?;
+                (target.get_thread_group_id() == target_tgid).then_some((target, local_pid))
+            })
+            .collect();
+        if capacity == 0 {
+            return targets.len();
+        }
+        if buf_ptr == 0 {
+            return usize::MAX;
+        }
+
+        let now_ns = crate::time::current_time_ns();
+        let mut written = 0usize;
+        for (target, local_pid) in targets.into_iter().take(capacity) {
+            let execution = target.execution_debug_snapshot();
+            let mut flags = 0u32;
+            if execution.observed_pc != 0 {
+                flags |= TASK_DEBUG_FLAG_PC_VALID;
+            }
+            if execution.observed_pc_privileged {
+                flags |= TASK_DEBUG_FLAG_PC_PRIVILEGED;
+            }
+            if execution.syscall_number != u64::MAX {
+                flags |= TASK_DEBUG_FLAG_SYSCALL_VALID;
+            }
+            if execution.syscall_active {
+                flags |= TASK_DEBUG_FLAG_SYSCALL_ACTIVE;
+            }
+
+            let info = TaskDebugInfo {
+                size: core::mem::size_of::<TaskDebugInfo>() as u32,
+                version: TASK_DEBUG_INFO_VERSION_V1,
+                state: target.state.load(Ordering::Acquire).to_u8(),
+                task_type: match target.task_type {
+                    TaskType::Kernel => 0,
+                    TaskType::User => 1,
+                },
+                flags,
+                cpu_id: u32::try_from(target.last_cpu.load(Ordering::Relaxed)).unwrap_or(u32::MAX),
+                pid: local_pid,
+                tgid: local_tgid,
+                observed_pc: execution.observed_pc,
+                syscall_number: execution.syscall_number,
+                syscall_pc: execution.syscall_pc,
+                cpu_time_ns: target.cpu_time_snapshot_ns(now_ns),
+            };
+            let Some(offset) = written.checked_mul(entry_size) else {
+                return usize::MAX;
+            };
+            let Some(destination) = buf_ptr.checked_add(offset) else {
+                return usize::MAX;
+            };
+            let bytes = unsafe {
+                core::slice::from_raw_parts(
+                    &info as *const TaskDebugInfo as *const u8,
+                    core::mem::size_of::<TaskDebugInfo>(),
+                )
+            };
+            if copy_to_user(&caller, destination, bytes).is_err() {
+                return usize::MAX;
+            }
+            written += 1;
+        }
+        written
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::process_control_for_signal;
+    use crate::ipc::event::ProcessControlType;
+
+    #[test_case]
+    fn native_kill_signal_mapping_covers_force_and_job_control() {
+        assert_eq!(
+            process_control_for_signal(9),
+            Some(ProcessControlType::Kill)
+        );
+        assert_eq!(
+            process_control_for_signal(15),
+            Some(ProcessControlType::Terminate)
+        );
+        assert_eq!(
+            process_control_for_signal(19),
+            Some(ProcessControlType::Stop)
+        );
+        assert_eq!(process_control_for_signal(99), None);
+    }
 }

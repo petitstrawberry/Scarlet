@@ -70,6 +70,13 @@ to = "/system/scarlet/bin/top"
 
 [[layers]]
 kind = "cargo"
+source = "../../user/std-bin"
+package = "scarlet-std-bin"
+bin = "kill"
+to = "/system/scarlet/bin/kill"
+
+[[layers]]
+kind = "cargo"
 source = "../../user/bin"
 package = "user-bin"
 bin = "scpm"

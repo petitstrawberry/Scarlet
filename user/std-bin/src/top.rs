@@ -5,7 +5,11 @@ use std::process::ExitCode;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use scarlet_sys::{Syscall, syscall0, syscall1, syscall2};
+use scarlet_sys::{
+    RawTaskDebugInfoV1, Syscall, TASK_DEBUG_FLAG_PC_PRIVILEGED, TASK_DEBUG_FLAG_PC_VALID,
+    TASK_DEBUG_FLAG_SYSCALL_ACTIVE, TASK_DEBUG_FLAG_SYSCALL_VALID, TASK_DEBUG_INFO_VERSION_V1,
+    syscall0, syscall1, syscall2, syscall4,
+};
 
 const SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
 const TASK_NAME_CAP: usize = 64;
@@ -203,6 +207,20 @@ fn main() -> ExitCode {
         check_instant();
         return ExitCode::SUCCESS;
     }
+    if let Some(index) = args
+        .iter()
+        .position(|arg| matches!(arg.as_str(), "--debug" | "--debug-pid"))
+    {
+        let Some(value) = args.get(index + 1) else {
+            println!("top: --debug-pid requires a PID or TID");
+            return ExitCode::from(2);
+        };
+        let Ok(pid) = value.parse::<usize>() else {
+            println!("top: invalid PID or TID: {value}");
+            return ExitCode::from(2);
+        };
+        return print_task_debug(pid);
+    }
 
     let mut sort_key = SortKey::PercentCpu;
     let show_idle = args.iter().any(|arg| arg == "--idle");
@@ -297,6 +315,138 @@ fn main() -> ExitCode {
     print_table(&sorted);
 
     ExitCode::SUCCESS
+}
+
+fn print_task_debug(pid: usize) -> ExitCode {
+    let entry_size = core::mem::size_of::<RawTaskDebugInfoV1>();
+    let required = syscall4(Syscall::GetTaskDebugInfo, pid, 0, 0, entry_size);
+    if required == usize::MAX {
+        println!(
+            "top: task debug information is unavailable (missing PID or kernel sync-debug feature)"
+        );
+        return ExitCode::from(1);
+    }
+    if required == 0 {
+        println!("top: no threads found for PID or TID {pid}");
+        return ExitCode::from(1);
+    }
+
+    let mut entries = vec![RawTaskDebugInfoV1::default(); required];
+    let written = syscall4(
+        Syscall::GetTaskDebugInfo,
+        pid,
+        entries.as_mut_ptr() as usize,
+        entries.len(),
+        entry_size,
+    );
+    if written == usize::MAX {
+        println!("top: failed to read task debug information for {pid}");
+        return ExitCode::from(1);
+    }
+    entries.truncate(written.min(entries.len()));
+    entries.sort_by_key(|entry| entry.pid);
+    if entries.iter().any(|entry| {
+        entry.size as usize != entry_size || entry.version != TASK_DEBUG_INFO_VERSION_V1
+    }) {
+        println!("top: kernel returned an incompatible task debug ABI");
+        return ExitCode::from(1);
+    }
+
+    let tasks = task_info();
+    println!("Task debug snapshot for PID/TID {pid}:");
+    println!(
+        "{:>5} {:>5} {:>4} {:>5} {:>6} {:>18} {:>8} {:>6} {:>18} {:>12} COMMAND",
+        "PID",
+        "TGID",
+        "STAT",
+        "CPU",
+        "MODE",
+        "LAST_PC",
+        "SYSCALL",
+        "ACTIVE",
+        "SYSCALL_PC",
+        "TIME_NS"
+    );
+    for entry in entries {
+        let state = TaskState::from_u8(entry.state);
+        let pc_valid = entry.flags & TASK_DEBUG_FLAG_PC_VALID != 0;
+        let syscall_valid = entry.flags & TASK_DEBUG_FLAG_SYSCALL_VALID != 0;
+        let mode = if !pc_valid {
+            "-"
+        } else if entry.flags & TASK_DEBUG_FLAG_PC_PRIVILEGED != 0 {
+            "kernel"
+        } else {
+            "user"
+        };
+        let pc = if pc_valid {
+            format!("{:#x}", entry.observed_pc)
+        } else {
+            String::from("-")
+        };
+        let syscall = if syscall_valid {
+            format_syscall(entry.syscall_number)
+        } else {
+            String::from("-")
+        };
+        let active = if !syscall_valid {
+            "-"
+        } else if entry.flags & TASK_DEBUG_FLAG_SYSCALL_ACTIVE != 0 {
+            "yes"
+        } else {
+            "no"
+        };
+        let syscall_pc = if syscall_valid {
+            format!("{:#x}", entry.syscall_pc)
+        } else {
+            String::from("-")
+        };
+        let cpu = if entry.cpu_id == u32::MAX {
+            String::from("-")
+        } else {
+            format!("CPU{}", entry.cpu_id)
+        };
+        let command = tasks
+            .iter()
+            .find(|task| task.pid == entry.pid)
+            .map(|task| task.name.as_str())
+            .unwrap_or("<exited>");
+        println!(
+            "{:>5} {:>5} {:>4} {:>5} {:>6} {:>18} {:>8} {:>6} {:>18} {:>12} {}",
+            entry.pid,
+            entry.tgid,
+            format_stat(state),
+            cpu,
+            mode,
+            pc,
+            syscall,
+            active,
+            syscall_pc,
+            entry.cpu_time_ns,
+            command,
+        );
+    }
+    ExitCode::SUCCESS
+}
+
+fn format_syscall(number: u64) -> String {
+    let name = match number {
+        5 => "waitpid",
+        6 => "kill",
+        20 => "sleep",
+        21 => "yield",
+        49 => "futex_wait",
+        50 => "futex_wake",
+        200 => "read",
+        201 => "write",
+        202 => "poll",
+        400 => "open",
+        900 => "socket",
+        903 => "connect",
+        904 => "accept",
+        998 => "task_debug",
+        _ => return number.to_string(),
+    };
+    format!("{number}:{name}")
 }
 
 fn check_instant() {

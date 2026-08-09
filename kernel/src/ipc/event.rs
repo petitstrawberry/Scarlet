@@ -1190,9 +1190,13 @@ impl EventManager {
     /// Deliver event to a specific task
     #[cfg(not(test))]
     pub fn deliver_to_task(&self, task_id: u32, event: Event) -> Result<(), EventError> {
+        let is_force_kill = matches!(
+            event.content,
+            EventContent::ProcessControl(ProcessControlType::Kill)
+        );
         // Check if the event matches any of the task's filters
         let task_filters = self.task_filters.lock();
-        if let Some(filters) = task_filters.get(&task_id) {
+        if !is_force_kill && let Some(filters) = task_filters.get(&task_id) {
             // If task has filters, check if event matches any of them
             if !filters.is_empty() {
                 let matches = filters.iter().any(|(_, filter)| filter.matches(&event));
@@ -1207,10 +1211,15 @@ impl EventManager {
 
         // Get the task and deliver event to its local queue
         if let Some(task) = crate::sched::scheduler::get_task_by_id(task_id as usize) {
+            // Kill is unmaskable. Re-enable event dispatch before queueing it
+            // so a task cannot make itself immune with disable_events().
+            if is_force_kill {
+                task.enable_events();
+            }
             // Enforce buffer size from the target task's config
             let cfg = self.get_task_config_or_default(task_id);
             let mut queue = task.event_queue.lock();
-            if queue.would_exceed_capacity(cfg.buffer_size, &event) {
+            if !is_force_kill && queue.would_exceed_capacity(cfg.buffer_size, &event) {
                 return Err(EventError::BufferFull);
             }
             // Enqueue the event since it passed filtering and buffer check

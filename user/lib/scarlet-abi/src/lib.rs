@@ -15,6 +15,51 @@ pub type Pid = u32;
 /// Raw thread identifier exposed by Scarlet Native thread syscalls.
 pub type Tid = u32;
 
+/// Version of the task-debug snapshot ABI implemented by Scarlet.
+pub const TASK_DEBUG_INFO_VERSION_V1: u16 = 1;
+/// The snapshot contains a valid last-observed instruction address.
+pub const TASK_DEBUG_FLAG_PC_VALID: u32 = 1 << 0;
+/// The last-observed instruction address was sampled in privileged mode.
+pub const TASK_DEBUG_FLAG_PC_PRIVILEGED: u32 = 1 << 1;
+/// The snapshot contains information about an entered system call.
+pub const TASK_DEBUG_FLAG_SYSCALL_VALID: u32 = 1 << 2;
+/// The task has not yet returned from the reported system call.
+pub const TASK_DEBUG_FLAG_SYSCALL_ACTIVE: u32 = 1 << 3;
+
+/// Raw v1 task execution snapshot returned by `GetTaskDebugInfo`.
+///
+/// This interface is available only in kernels built with `sync-debug`.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RawTaskDebugInfoV1 {
+    /// Size of this entry in bytes.
+    pub size: u32,
+    /// ABI version, currently [`TASK_DEBUG_INFO_VERSION_V1`].
+    pub version: u16,
+    /// Task-state discriminant.
+    pub state: u8,
+    /// Task type: 0 = kernel, 1 = user.
+    pub task_type: u8,
+    /// Combination of `TASK_DEBUG_FLAG_*` values.
+    pub flags: u32,
+    /// Last scheduler CPU, or `u32::MAX` when unknown.
+    pub cpu_id: u32,
+    /// Namespace-local thread ID.
+    pub pid: usize,
+    /// Namespace-local thread-group ID.
+    pub tgid: usize,
+    /// Most recent timer-sampled instruction address.
+    pub observed_pc: u64,
+    /// Most recently entered system-call number, or `u64::MAX`.
+    pub syscall_number: u64,
+    /// User instruction address from which the system call was entered.
+    pub syscall_pc: u64,
+    /// Cumulative task CPU time in nanoseconds.
+    pub cpu_time_ns: u64,
+}
+
+const _: [(); 64] = [(); core::mem::size_of::<RawTaskDebugInfoV1>()];
+
 /// Scheduler utilization scale used by Scarlet Native util-clamp syscalls.
 ///
 /// A task with `util_min == SCHED_UTIL_SCALE` requires a CPU with full
@@ -658,6 +703,7 @@ pub enum Syscall {
     NetworkListInterfaces = 914,
 
     // Debug/profiler operations
+    GetTaskDebugInfo = 998,
     ProfilerDump = 999,
 
     // System control operations

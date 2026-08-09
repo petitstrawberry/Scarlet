@@ -225,6 +225,53 @@ impl TaskInfo {
     pub const NAME_CAP: usize = 63;
 }
 
+/// Version of the task-debug snapshot ABI implemented by the kernel.
+pub const TASK_DEBUG_INFO_VERSION_V1: u16 = 1;
+/// The snapshot contains a valid last-observed instruction address.
+pub const TASK_DEBUG_FLAG_PC_VALID: u32 = 1 << 0;
+/// The last-observed instruction address was sampled in privileged mode.
+pub const TASK_DEBUG_FLAG_PC_PRIVILEGED: u32 = 1 << 1;
+/// The snapshot contains information about a system call entered by the task.
+pub const TASK_DEBUG_FLAG_SYSCALL_VALID: u32 = 1 << 2;
+/// The task has not yet returned from the reported system call.
+pub const TASK_DEBUG_FLAG_SYSCALL_ACTIVE: u32 = 1 << 3;
+
+/// Fixed-layout diagnostic snapshot returned by `GetTaskDebugInfo`.
+///
+/// The debug syscall is available only when the kernel is built with the
+/// `sync-debug` feature. Its caller supplies the expected entry size, allowing
+/// future versions to reject incompatible user-space layouts safely.
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub struct TaskDebugInfo {
+    /// Size of this entry in bytes.
+    pub size: u32,
+    /// ABI version, currently [`TASK_DEBUG_INFO_VERSION_V1`].
+    pub version: u16,
+    /// Task state encoded with [`TaskState::to_u8`].
+    pub state: u8,
+    /// Task type: 0 = kernel, 1 = user.
+    pub task_type: u8,
+    /// Combination of `TASK_DEBUG_FLAG_*` values.
+    pub flags: u32,
+    /// Last scheduler CPU, or `u32::MAX` when unknown.
+    pub cpu_id: u32,
+    /// Namespace-local thread ID.
+    pub pid: usize,
+    /// Namespace-local thread-group ID.
+    pub tgid: usize,
+    /// Most recent instruction address sampled by a timer interrupt.
+    pub observed_pc: u64,
+    /// Most recent system-call number, or `u64::MAX` when unavailable.
+    pub syscall_number: u64,
+    /// User instruction address from which `syscall_number` was entered.
+    pub syscall_pc: u64,
+    /// Cumulative task CPU time in nanoseconds.
+    pub cpu_time_ns: u64,
+}
+
+const _: [(); 64] = [(); core::mem::size_of::<TaskDebugInfo>()];
+
 /// Snapshot of system-wide CPU usage exposed to user space.
 ///
 /// All time fields are cumulative nanoseconds since scheduler accounting
@@ -694,6 +741,21 @@ pub(crate) struct TaskCpuHogSnapshot {
     /// User instruction address that entered `last_syscall_number`.
     pub last_syscall_pc: u64,
     /// Whether the task was still inside that system call when sampled.
+    pub syscall_active: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// Lock-free task execution state used by the task-debug syscall.
+pub(crate) struct TaskExecutionDebugSnapshot {
+    /// Most recently sampled instruction address.
+    pub observed_pc: u64,
+    /// Whether `observed_pc` was sampled from privileged execution.
+    pub observed_pc_privileged: bool,
+    /// Most recently entered system-call number.
+    pub syscall_number: u64,
+    /// User instruction address that entered `syscall_number`.
+    pub syscall_pc: u64,
+    /// Whether the task is still executing that system call.
     pub syscall_active: bool,
 }
 
@@ -1617,6 +1679,23 @@ impl Task {
     /// Mark completion of the current system call for diagnostics.
     pub(crate) fn record_syscall_exit(&self) {
         self.syscall_active.store(false, Ordering::Release);
+    }
+
+    /// Read the task's lock-free execution diagnostics.
+    ///
+    /// # Returns
+    ///
+    /// The most recent timer PC sample and system-call state. A zero PC or a
+    /// `u64::MAX` system-call number indicates that no corresponding sample has
+    /// been recorded yet.
+    pub(crate) fn execution_debug_snapshot(&self) -> TaskExecutionDebugSnapshot {
+        TaskExecutionDebugSnapshot {
+            observed_pc: self.last_observed_pc.load(Ordering::Relaxed),
+            observed_pc_privileged: self.last_observed_pc_privileged.load(Ordering::Relaxed),
+            syscall_number: self.last_syscall_number.load(Ordering::Acquire),
+            syscall_pc: self.last_syscall_pc.load(Ordering::Relaxed),
+            syscall_active: self.syscall_active.load(Ordering::Acquire),
+        }
     }
 
     /// Complete a CPU-hog sampling window when enough wall time has elapsed.
@@ -4286,6 +4365,16 @@ mod tests {
         assert_eq!(sample.last_syscall_number, 20);
         assert_eq!(sample.last_syscall_pc, 0x0ffc);
         assert!(sample.syscall_active);
+        assert_eq!(
+            task.execution_debug_snapshot(),
+            super::TaskExecutionDebugSnapshot {
+                observed_pc: 0x1010,
+                observed_pc_privileged: false,
+                syscall_number: 20,
+                syscall_pc: 0x0ffc,
+                syscall_active: true,
+            }
+        );
 
         task.cpu_time_ns.store(1_495 * MS, Ordering::SeqCst);
         task.record_syscall_exit();
