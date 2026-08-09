@@ -5,7 +5,7 @@ hash = "sha256:daed6f34389b6687e31b600dc79818ac8e04d08da959dcc4e7460be23673766c"
 layers = []
 
 [sections.disk]
-hash = "sha256:37f2de7eddc223d9ef1fee202ceab67c81a048bb1c06ffe49445ce78d88a79f4"
+hash = "sha256:d38674af91cf8e5d02da338f8662fb6dc9cede4929e67bda4beaa3c6b5e15025"
 layers = []
 
 [sections.initramfs]
@@ -246,7 +246,7 @@ type = "path"
 path = "../../user/bin"
 
 [sections.rootfs]
-hash = "sha256:c33ef017e2bffd023009d4694837d7fe1092f35a428a1c929a98b706741dbecb"
+hash = "sha256:974d7a33640835e3d0b14df002f6715f1171719e42b1b8a2e116d96e7ff1b6e0"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
@@ -891,6 +891,20 @@ hash = "sha256:af3a4bb460952ae0f5c3102e2de601c8c7afc7db200cdd267b448cfb4c4371ba"
 type = "git"
 url = "https://github.com/petitstrawberry/carmine"
 rev = "2686a761610b261b325d00d984bfb6bbd9cfbccf"
+
+[[sections.rootfs.layers]]
+kind = "cargo"
+git = "https://github.com/petitstrawberry/vellum"
+resolved_rev = "61ff02d05368eec49848b0c107f500b9a3560e79"
+package = "vellum"
+bin = "vellum"
+to = "/system/scarlet/bin/vellum"
+hash = "sha256:2a54665aa516a7fb5382a204742ebdedc06f660ed06a257320e4b45aa9ce5837"
+
+[sections.rootfs.layers.source]
+type = "git"
+url = "https://github.com/petitstrawberry/vellum"
+rev = "61ff02d05368eec49848b0c107f500b9a3560e79"
 
 [[sections.rootfs.layers]]
 kind = "archive"
