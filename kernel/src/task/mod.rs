@@ -68,6 +68,8 @@ pub const SCHED_UTIL_SCALE: u32 = 1024;
 const SCHED_UTIL_DECAY_INTERVAL_NS: u64 = 10_000_000;
 const SCHED_UTIL_DECAY_NUM: u32 = 7;
 const SCHED_UTIL_DECAY_DEN: u32 = 8;
+const TASK_CPU_HOG_WINDOW_NS: u64 = 1_000_000_000;
+const TASK_CPU_HOG_THRESHOLD_PER_MILLE: u32 = 990;
 
 /// Load weight for a task at nice 0 (CFS/EEVDF proportional-share base unit).
 ///
@@ -670,6 +672,25 @@ impl TaskDeadlineState {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// Lock-free task CPU-hog observation completed by the periodic watchdog.
+pub(crate) struct TaskCpuHogSnapshot {
+    /// Task CPU consumption in permille of the elapsed wall-clock window.
+    pub usage_per_mille: u32,
+    /// Elapsed wall-clock time covered by this sample.
+    pub window_ns: u64,
+    /// Task CPU runtime consumed during this sample.
+    pub runtime_ns: u64,
+    /// Instruction address observed at the beginning of this sample.
+    pub start_pc: u64,
+    /// Whether `start_pc` was sampled from privileged execution.
+    pub start_pc_privileged: bool,
+    /// Most recently observed instruction address.
+    pub current_pc: u64,
+    /// Whether `current_pc` was sampled from privileged execution.
+    pub current_pc_privileged: bool,
+}
+
 pub struct Task {
     // === Read-only fields (set at creation) ===
     id: usize,
@@ -768,6 +789,18 @@ pub struct Task {
     pub cpu_time_ns: AtomicU64,
     /// Monotonic timestamp at which the current CPU run began.
     cpu_run_start_ns: AtomicU64,
+    /// Most recent instruction address sampled while this task was running.
+    last_observed_pc: AtomicU64,
+    /// Whether `last_observed_pc` was sampled from privileged execution.
+    last_observed_pc_privileged: AtomicBool,
+    /// Start of the current CPU-hog diagnostic wall-clock window.
+    cpu_hog_window_start_ns: AtomicU64,
+    /// Cumulative task CPU time at the start of the diagnostic window.
+    cpu_hog_window_start_runtime_ns: AtomicU64,
+    /// Sampled instruction address at the start of the diagnostic window.
+    cpu_hog_window_start_pc: AtomicU64,
+    /// Privilege mode associated with `cpu_hog_window_start_pc`.
+    cpu_hog_window_start_pc_privileged: AtomicBool,
     /// Stack size in bytes
     pub stack_size: AtomicUsize,
     /// Data segment size in bytes
@@ -1044,6 +1077,12 @@ impl Task {
             sched_exec_start_ns: AtomicU64::new(0),
             cpu_time_ns: AtomicU64::new(0),
             cpu_run_start_ns: AtomicU64::new(0),
+            last_observed_pc: AtomicU64::new(0),
+            last_observed_pc_privileged: AtomicBool::new(false),
+            cpu_hog_window_start_ns: AtomicU64::new(0),
+            cpu_hog_window_start_runtime_ns: AtomicU64::new(0),
+            cpu_hog_window_start_pc: AtomicU64::new(0),
+            cpu_hog_window_start_pc_privileged: AtomicBool::new(false),
             stack_size: AtomicUsize::new(0),
             data_size: vm_manager.data_size_handle(),
             text_size: AtomicUsize::new(0),
@@ -1528,6 +1567,84 @@ impl Task {
         self.cpu_time_ns
             .load(Ordering::SeqCst)
             .saturating_add(self.current_cpu_delta_ns(now_ns))
+    }
+
+    /// Record the most recent instruction address observed for this task.
+    ///
+    /// This is lock-free because it is called from local timer-interrupt
+    /// context, including when the interrupted kernel path may already hold
+    /// unrelated scheduler or task-pool locks.
+    ///
+    /// # Arguments
+    ///
+    /// * `pc` - Saved instruction address from the interrupt trapframe.
+    /// * `privileged` - Whether the interrupted context was privileged.
+    pub(crate) fn record_observed_pc(&self, pc: u64, privileged: bool) {
+        self.last_observed_pc.store(pc, Ordering::Relaxed);
+        self.last_observed_pc_privileged
+            .store(privileged, Ordering::Relaxed);
+    }
+
+    /// Complete a CPU-hog sampling window when enough wall time has elapsed.
+    ///
+    /// # Arguments
+    ///
+    /// * `now_ns` - Current monotonic timestamp in nanoseconds.
+    ///
+    /// # Returns
+    ///
+    /// A diagnostic snapshot when this task consumed at least 99 percent of
+    /// one sampling window, or `None` otherwise.
+    pub(crate) fn sample_cpu_hog(&self, now_ns: u64) -> Option<TaskCpuHogSnapshot> {
+        let runtime_ns = self.cpu_time_snapshot_ns(now_ns);
+        let current_pc = self.last_observed_pc.load(Ordering::Relaxed);
+        let current_pc_privileged = self.last_observed_pc_privileged.load(Ordering::Relaxed);
+        let window_start_ns = self.cpu_hog_window_start_ns.load(Ordering::Acquire);
+
+        if window_start_ns == 0 {
+            self.cpu_hog_window_start_runtime_ns
+                .store(runtime_ns, Ordering::Relaxed);
+            self.cpu_hog_window_start_pc
+                .store(current_pc, Ordering::Relaxed);
+            self.cpu_hog_window_start_pc_privileged
+                .store(current_pc_privileged, Ordering::Relaxed);
+            self.cpu_hog_window_start_ns
+                .store(now_ns, Ordering::Release);
+            return None;
+        }
+
+        let window_ns = now_ns.saturating_sub(window_start_ns);
+        if window_ns < TASK_CPU_HOG_WINDOW_NS {
+            return None;
+        }
+
+        let window_start_runtime_ns = self.cpu_hog_window_start_runtime_ns.load(Ordering::Relaxed);
+        let start_pc = self.cpu_hog_window_start_pc.load(Ordering::Relaxed);
+        let start_pc_privileged = self
+            .cpu_hog_window_start_pc_privileged
+            .load(Ordering::Relaxed);
+        let consumed_runtime_ns = runtime_ns.saturating_sub(window_start_runtime_ns);
+        let usage_per_mille =
+            ((consumed_runtime_ns as u128 * 1_000) / window_ns as u128).min(1_000) as u32;
+
+        self.cpu_hog_window_start_runtime_ns
+            .store(runtime_ns, Ordering::Relaxed);
+        self.cpu_hog_window_start_pc
+            .store(current_pc, Ordering::Relaxed);
+        self.cpu_hog_window_start_pc_privileged
+            .store(current_pc_privileged, Ordering::Relaxed);
+        self.cpu_hog_window_start_ns
+            .store(now_ns, Ordering::Release);
+
+        (usage_per_mille >= TASK_CPU_HOG_THRESHOLD_PER_MILLE).then_some(TaskCpuHogSnapshot {
+            usage_per_mille,
+            window_ns,
+            runtime_ns: consumed_runtime_ns,
+            start_pc,
+            start_pc_privileged,
+            current_pc,
+            current_pc_privileged,
+        })
     }
 
     /// Return the current uncommitted running interval for this task.
@@ -4095,6 +4212,32 @@ mod tests {
             "sustained util={}",
             util
         );
+    }
+
+    #[test_case]
+    fn test_cpu_hog_sampling_reports_only_near_full_runtime_windows() {
+        const MS: u64 = 1_000_000;
+        let task = Task::new("CpuHog".to_string(), 1, TaskType::User);
+
+        task.record_observed_pc(0x1000, false);
+        assert!(task.sample_cpu_hog(1).is_none());
+
+        task.cpu_time_ns.store(995 * MS, Ordering::SeqCst);
+        task.record_observed_pc(0x1010, false);
+        let sample = task
+            .sample_cpu_hog(1_000 * MS + 1)
+            .expect("99.5 percent runtime must trigger the CPU-hog diagnostic");
+        assert_eq!(sample.usage_per_mille, 995);
+        assert_eq!(sample.runtime_ns, 995 * MS);
+        assert_eq!(sample.window_ns, 1_000 * MS);
+        assert_eq!(sample.start_pc, 0x1000);
+        assert_eq!(sample.current_pc, 0x1010);
+        assert!(!sample.start_pc_privileged);
+        assert!(!sample.current_pc_privileged);
+
+        task.cpu_time_ns.store(1_495 * MS, Ordering::SeqCst);
+        task.record_observed_pc(0xffff_ffff_8000_1000, true);
+        assert!(task.sample_cpu_hog(2_000 * MS + 1).is_none());
     }
 
     #[test_case]

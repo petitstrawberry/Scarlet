@@ -31,7 +31,9 @@
 
 extern crate alloc;
 
-use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{
+    AtomicBool, AtomicPtr, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering,
+};
 
 use alloc::{
     collections::{BTreeMap, BTreeSet, vec_deque::VecDeque},
@@ -61,8 +63,8 @@ use crate::{
         new_kernel_task, wake_parent_waiters, wake_task_waiters,
     },
     timer::{
-        SCHEDULER_ACCOUNTING_QUANTUM_NS, TimerHandle, TimerHandler, add_scheduler_timer, add_timer,
-        cancel_timer, get_time_ns,
+        SCHEDULER_ACCOUNTING_QUANTUM_NS, TimerHandle, TimerHandler, TimerPrecision,
+        add_scheduler_timer, add_timer, cancel_timer, get_time_ns,
     },
 };
 
@@ -86,9 +88,13 @@ static DEADLINE_TIMER_HANDLER: Once<Arc<DeadlineTimerHandler>> = Once::new();
 static DEADLINE_CALLBACK_TOKENS: AtomicUsize = AtomicUsize::new(1);
 static DEADLINE_CALLBACK_CONTEXTS: Once<IrqSpinLock<BTreeMap<usize, DeadlineCallbackContext>>> =
     Once::new();
+static TASK_CPU_WATCHDOG_HANDLER: Once<Arc<TaskCpuWatchdogTimerHandler>> = Once::new();
+static TASK_CPU_WATCHDOG_STARTED: [AtomicBool; MAX_NUM_CPUS] =
+    [const { AtomicBool::new(false) }; MAX_NUM_CPUS];
 
 const DEADLINE_BANDWIDTH_SCALE: u32 = 1_000_000;
 const DEADLINE_BANDWIDTH_CAP: u32 = 900_000;
+const TASK_CPU_WATCHDOG_INTERVAL_NS: u64 = 250_000_000;
 
 /// Stable result of a native scheduler-control request.
 #[repr(usize)]
@@ -321,6 +327,48 @@ fn slice_timer_handler() -> Arc<dyn TimerHandler> {
     SLICE_TIMER_HANDLER
         .call_once(|| Arc::new(SliceTimerHandler))
         .clone()
+}
+
+struct TaskCpuWatchdogTimerHandler;
+
+impl TimerHandler for TaskCpuWatchdogTimerHandler {
+    fn on_timer_expired(self: Arc<Self>, context: usize) {
+        let cpu_id = context;
+        if cpu_id >= MAX_NUM_CPUS || get_cpu().get_cpuid() != cpu_id {
+            return;
+        }
+
+        sample_current_task_cpu_hog(cpu_id);
+        arm_task_cpu_watchdog(cpu_id);
+    }
+}
+
+fn task_cpu_watchdog_handler() -> Arc<dyn TimerHandler> {
+    TASK_CPU_WATCHDOG_HANDLER
+        .call_once(|| Arc::new(TaskCpuWatchdogTimerHandler))
+        .clone()
+}
+
+fn arm_task_cpu_watchdog(cpu_id: usize) {
+    if cpu_id >= MAX_NUM_CPUS || get_cpu().get_cpuid() != cpu_id {
+        return;
+    }
+
+    let deadline_ns = get_time_ns().saturating_add(TASK_CPU_WATCHDOG_INTERVAL_NS);
+    let handler = task_cpu_watchdog_handler();
+    let _ = add_timer(deadline_ns, TimerPrecision::Exact, &handler, cpu_id);
+}
+
+fn start_task_cpu_watchdog(cpu_id: usize) {
+    if cpu_id >= MAX_NUM_CPUS || get_cpu().get_cpuid() != cpu_id {
+        return;
+    }
+    if TASK_CPU_WATCHDOG_STARTED[cpu_id]
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok()
+    {
+        arm_task_cpu_watchdog(cpu_id);
+    }
 }
 static FORK_TRACE_TASKS: Once<IrqSpinLock<BTreeSet<usize>>> = Once::new();
 static FORK_TRACE_PICKED_TASKS: Once<IrqSpinLock<BTreeSet<usize>>> = Once::new();
@@ -728,6 +776,8 @@ crate::late_initcall!(start_task_reaper_worker);
 
 static CURRENT_TASK_IDS: [AtomicUsize; MAX_NUM_CPUS] =
     [const { AtomicUsize::new(0) }; MAX_NUM_CPUS];
+static CURRENT_TASK_PTRS: [AtomicPtr<Task>; MAX_NUM_CPUS] =
+    [const { AtomicPtr::new(core::ptr::null_mut()) }; MAX_NUM_CPUS];
 static SCHEDULER_READY: [AtomicBool; MAX_NUM_CPUS] =
     [const { AtomicBool::new(false) }; MAX_NUM_CPUS];
 static BOOT_CPU_ID: AtomicUsize = AtomicUsize::new(0);
@@ -4076,6 +4126,11 @@ fn pick_fair(cpu_id: usize) -> Option<usize> {
 #[inline]
 fn set_current_task_id(cpu_id: usize, task_id: Option<usize>) {
     assert_valid_cpu_id(cpu_id);
+    let task_ptr = task_id
+        .and_then(TaskPool::get_task)
+        .map(|task| Arc::as_ptr(&task) as *mut Task)
+        .unwrap_or(core::ptr::null_mut());
+    CURRENT_TASK_PTRS[cpu_id].store(task_ptr, Ordering::Release);
     CURRENT_TASK_IDS[cpu_id].store(encode_task_id(task_id), Ordering::SeqCst);
 }
 
@@ -4775,6 +4830,7 @@ pub fn start_scheduler() -> Option<usize> {
     //     next_task_id
     // );
     set_scheduler_ready(cpu_id, true);
+    start_task_cpu_watchdog(cpu_id);
     next_task_id
 }
 
@@ -4840,6 +4896,81 @@ pub fn current_task(cpu_id: usize) -> Option<CurrentTaskRef> {
     // and must be dropped before returning to the caller.
     drop(task);
     current_task
+}
+
+fn local_current_task_for_diagnostics(cpu_id: usize) -> Option<&'static Task> {
+    if cpu_id >= MAX_NUM_CPUS || get_cpu().get_cpuid() != cpu_id {
+        return None;
+    }
+    let task_ptr = CURRENT_TASK_PTRS[cpu_id].load(Ordering::Acquire);
+    if task_ptr.is_null() {
+        return None;
+    }
+
+    // SAFETY: Only the local CPU consumes this pointer. `set_current_task_id`
+    // publishes a pointer owned by TaskPool, and a task cannot be retired while
+    // its `running_cpu` token names this CPU. Local interrupts cannot race a
+    // local context switch, so the pointer remains valid for this observation.
+    let task = unsafe { &*task_ptr };
+    (task.running_cpu.load(Ordering::Relaxed) == cpu_id).then_some(task)
+}
+
+/// Record the interrupted instruction address of the current local task.
+///
+/// This path is lock-free so it remains safe when a timer interrupts kernel
+/// code that already holds TaskPool or scheduler locks.
+///
+/// # Arguments
+///
+/// * `cpu_id` - Logical CPU that took the interrupt.
+/// * `pc` - Saved instruction address from the architecture trapframe.
+/// * `privileged` - Whether the interrupted context was privileged.
+pub fn record_current_task_pc(cpu_id: usize, pc: u64, privileged: bool) {
+    if let Some(task) = local_current_task_for_diagnostics(cpu_id) {
+        task.record_observed_pc(pc, privileged);
+    }
+}
+
+fn sample_current_task_cpu_hog(cpu_id: usize) {
+    let Some(task) = local_current_task_for_diagnostics(cpu_id) else {
+        return;
+    };
+    let task_id = task.get_id();
+    if task_id == IDLE_TASK_IDS[cpu_id].load(Ordering::Relaxed) {
+        return;
+    }
+    let Some(sample) = task.sample_cpu_hog(get_time_ns()) else {
+        return;
+    };
+
+    let start_mode = if sample.start_pc_privileged {
+        "kernel"
+    } else {
+        "user"
+    };
+    let current_mode = if sample.current_pc_privileged {
+        "kernel"
+    } else {
+        "user"
+    };
+    crate::emergency_println!(
+        "[task-cpu-watchdog] task={} tgid={} cpu={} type={:?} state={:?} usage={}.{}% pc={:#x} mode={} start_pc={:#x} start_mode={} same_pc={} runtime_ns={} window_ns={}",
+        task_id,
+        task.get_thread_group_id(),
+        cpu_id,
+        task.task_type,
+        task.state.load(Ordering::Relaxed),
+        sample.usage_per_mille / 10,
+        sample.usage_per_mille % 10,
+        sample.current_pc,
+        current_mode,
+        sample.start_pc,
+        start_mode,
+        sample.current_pc == sample.start_pc
+            && sample.current_pc_privileged == sample.start_pc_privileged,
+        sample.runtime_ns,
+        sample.window_ns,
+    );
 }
 
 pub fn current_task_id(cpu_id: usize) -> Option<usize> {
@@ -5287,6 +5418,7 @@ pub fn reset() {
         DEADLINE_ADMISSION[cpu_id].store(0, Ordering::SeqCst);
         set_current_task_id(cpu_id, None);
         set_scheduler_ready(cpu_id, false);
+        TASK_CPU_WATCHDOG_STARTED[cpu_id].store(false, Ordering::SeqCst);
         SCHEDULE_PREV_TASK[cpu_id].store(0, Ordering::SeqCst);
         IDLE_TASK_IDS[cpu_id].store(0, Ordering::SeqCst);
         PENDING_IDLE_TO_USER_TRAP_TASK[cpu_id].store(0, Ordering::SeqCst);

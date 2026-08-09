@@ -23,6 +23,12 @@ fn can_schedule_from_interrupt(spsr: u64, current_is_idle: bool) -> bool {
     !crate::arch::is_privileged_return_mode(spsr) || current_is_idle
 }
 
+#[inline]
+fn handle_observed_local_timer_irq(cpu_id: usize, trapframe: &Trapframe, from_kernel: bool) {
+    crate::sched::scheduler::record_current_task_pc(cpu_id, trapframe.elr, from_kernel);
+    crate::timer::handle_local_timer_irq();
+}
+
 fn report_timer_fiq_irq_liveness(cpu_id: usize, trapframe: &Trapframe) {
     let count = TIMER_FIQ_COUNTS[cpu_id].fetch_add(1, Ordering::Relaxed) + 1;
     if count > 3 && !count.is_multiple_of(IRQ_LIVENESS_INTERVAL) {
@@ -131,7 +137,7 @@ pub fn arch_irq_handler(trapframe: &mut Trapframe, trap_kind: usize) {
                 if DEBUG_IRQ_LIVENESS_LOGGING {
                     report_timer_fiq_irq_liveness(cpu_id as usize, trapframe);
                 }
-                crate::timer::handle_local_timer_irq();
+                handle_observed_local_timer_irq(cpu_id as usize, trapframe, from_kernel);
             }
 
             match claim {
@@ -189,7 +195,7 @@ pub fn arch_irq_handler(trapframe: &mut Trapframe, trap_kind: usize) {
             if DEBUG_IRQ_LIVENESS_LOGGING {
                 report_timer_fiq_irq_liveness(cpu_id as usize, trapframe);
             }
-            crate::timer::handle_local_timer_irq();
+            handle_observed_local_timer_irq(cpu_id as usize, trapframe, from_kernel);
             crate::sched::scheduler::handle_timer_reschedule(
                 cpu_id as usize,
                 trapframe,
@@ -220,7 +226,7 @@ pub fn arch_irq_handler(trapframe: &mut Trapframe, trap_kind: usize) {
                     crate::sched::scheduler::defer_reschedule(cpu_id as usize);
                 }
             } else if interrupt_id == crate::drivers::pic::arm_generic_timer::timer_ppi_irq() {
-                crate::timer::handle_local_timer_irq();
+                handle_observed_local_timer_irq(cpu_id as usize, trapframe, from_kernel);
                 ran_scheduler = crate::sched::scheduler::handle_timer_reschedule(
                     cpu_id as usize,
                     trapframe,
@@ -230,7 +236,7 @@ pub fn arch_irq_handler(trapframe: &mut Trapframe, trap_kind: usize) {
         }
         Ok(None) => {
             if crate::arch::interrupt::is_arch_timer_pending() {
-                crate::timer::handle_local_timer_irq();
+                handle_observed_local_timer_irq(cpu_id as usize, trapframe, from_kernel);
                 ran_scheduler = crate::sched::scheduler::handle_timer_reschedule(
                     cpu_id as usize,
                     trapframe,

@@ -62,9 +62,11 @@ fn handle_timer_interrupt(trapframe: &mut Trapframe, from_kernel: bool) {
         }
     }
 
+    let cpu_id = get_cpu().get_cpuid();
+    crate::sched::scheduler::record_current_task_pc(cpu_id, trapframe.epc, from_kernel);
     crate::timer::handle_local_timer_irq();
     crate::sched::scheduler::handle_timer_reschedule(
-        get_cpu().get_cpuid(),
+        cpu_id,
         trapframe,
         can_schedule_from_interrupt(from_kernel),
     );
