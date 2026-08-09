@@ -889,7 +889,12 @@ impl Compositor {
         }
     }
 
-    /// Initialize display (clear screen and draw cursor)
+    /// Initialize display state for the first compositor frame.
+    ///
+    /// The first present is intentionally deferred to [`Self::run`]. Display
+    /// drivers may wait for a page-flip completion, so presenting here would
+    /// make the service readiness notification depend on display hardware
+    /// latency.
     pub fn init_display(&mut self) -> Result<(), &'static str> {
         println!("[Compositor] Initializing display...");
 
@@ -897,11 +902,13 @@ impl Compositor {
 
         self.dump_memory_layout("after init_display (empty)");
 
-        // Initial full composite
+        // Let the main loop perform the first composite after SWS has reported
+        // readiness. In particular, Apple DCP can spend its full reply timeout
+        // waiting for the initial swap completion. stemd must not interpret
+        // that transient display delay as a failure to start the service.
         self.full_redraw_needed = true;
-        self.composite_and_present()?;
 
-        println!("[Compositor] Display initialized");
+        println!("[Compositor] Display initialized; first present deferred");
 
         Ok(())
     }
