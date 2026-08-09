@@ -235,6 +235,14 @@ pub const TASK_DEBUG_FLAG_PC_PRIVILEGED: u32 = 1 << 1;
 pub const TASK_DEBUG_FLAG_SYSCALL_VALID: u32 = 1 << 2;
 /// The task has not yet returned from the reported system call.
 pub const TASK_DEBUG_FLAG_SYSCALL_ACTIVE: u32 = 1 << 3;
+/// The task is configured for periodic deadline scheduling.
+pub const TASK_DEBUG_FLAG_DEADLINE: u32 = 1 << 4;
+/// The deadline task has exhausted its current runtime budget.
+pub const TASK_DEBUG_FLAG_DEADLINE_THROTTLED: u32 = 1 << 5;
+/// At least one task-owned software timer is currently registered.
+pub const TASK_DEBUG_FLAG_SOFTWARE_TIMER_ARMED: u32 = 1 << 6;
+/// Deadline state could not be sampled without waiting for its lock.
+pub const TASK_DEBUG_FLAG_DEADLINE_UNAVAILABLE: u32 = 1 << 7;
 
 /// Fixed-layout diagnostic snapshot returned by `GetTaskDebugInfo`.
 ///
@@ -926,6 +934,8 @@ pub struct Task {
     /// Pending task-owned timer callbacks and handles, cancelled together when
     /// the task wakes or is dropped.
     software_timers: IrqSpinLock<Vec<SoftwareTimerRegistration>>,
+    /// Lock-free mirror of `software_timers.len()` for diagnostics.
+    software_timer_count: AtomicUsize,
     /// Periodic deadline reservation state.
     pub(crate) deadline: IrqSpinLock<TaskDeadlineState>,
 
@@ -1174,6 +1184,7 @@ impl Task {
             task_pages: vm_manager.task_pages_handle(),
             vfs: IrqRwSpinLock::new(None),
             software_timers: IrqSpinLock::new(Vec::new()),
+            software_timer_count: AtomicUsize::new(0),
             deadline: IrqSpinLock::new(TaskDeadlineState::new()),
             // IRQ spin lock fields
             vcpu: IrqSpinLock::new(Vcpu::new(match task_type {
@@ -1330,6 +1341,17 @@ impl Task {
             budget_overruns: state.budget_overruns,
             admission_units: state.admission_units,
         })
+    }
+
+    /// Try to sample deadline enablement and throttling without spinning.
+    ///
+    /// # Returns
+    ///
+    /// `Some((enabled, throttled))` when the deadline lock was immediately
+    /// available, or `None` when diagnostic code must not wait for it.
+    pub(crate) fn try_deadline_debug_state(&self) -> Option<(bool, bool)> {
+        let state = self.deadline.try_lock()?;
+        Some((state.params.is_some(), state.throttled))
     }
 
     /// Return whether this task may execute on a scheduler CPU.
@@ -3560,27 +3582,39 @@ impl Task {
         }
 
         let wake_deadline_ns = get_time_ns().saturating_add(duration_ns);
-        // A sleep notification belongs to exactly one timer instance. Reusing
-        // a task-wide Waker allows a late callback or interrupted sleep to
-        // leave a pending notification that makes a later, unrelated sleep
-        // return immediately.
-        let sleep_waker = Arc::new(Waker::new_interruptible("task_sleep_waker"));
-        let handler = Arc::new(SleepWakerHandler {
-            task_id: self.id,
-            timer_handle: IrqSpinLock::new(None),
-            waker: sleep_waker.clone(),
-        });
-        let handler_ref: Arc<dyn crate::timer::TimerHandler> = handler.clone();
+        loop {
+            if get_time_ns() >= wake_deadline_ns {
+                return;
+            }
 
-        // Keep a strong reference visible to the callback before arming it. A
-        // wake that races the first wait is retained by Waker::pending_wakes.
-        let timer_handle = add_timer(wake_deadline_ns, precision, &handler_ref, 0);
-        *handler.timer_handle.lock() = Some(timer_handle);
-        self.register_software_timer(timer_handle, handler_ref.clone());
-        drop(handler_ref);
-        drop(handler);
-        sleep_waker.wait_owned(self.get_id(), trapframe);
-        self.finish_software_timer(timer_handle);
+            // A sleep notification belongs to exactly one timer instance.
+            // Reusing a task-wide Waker allows a late callback or interrupted
+            // sleep to leave a pending notification that makes a later,
+            // unrelated sleep return immediately.
+            let sleep_waker = Arc::new(Waker::new_interruptible("task_sleep_waker"));
+            let handler = Arc::new(SleepWakerHandler {
+                task_id: self.id,
+                timer_handle: IrqSpinLock::new(None),
+                waker: sleep_waker.clone(),
+            });
+            let handler_ref: Arc<dyn crate::timer::TimerHandler> = handler.clone();
+
+            // Keep a strong reference visible to the callback before arming
+            // it. A wake that races the first wait is retained by
+            // Waker::pending_wakes.
+            let timer_handle = add_timer(wake_deadline_ns, precision, &handler_ref, 0);
+            *handler.timer_handle.lock() = Some(timer_handle);
+            self.register_software_timer(timer_handle, handler_ref.clone());
+            drop(handler_ref);
+            drop(handler);
+            sleep_waker.wait_owned(self.get_id(), trapframe);
+            self.finish_software_timer(timer_handle);
+
+            // Interruptible task events and wake-before-schedule races may
+            // resume this task without the sleep timer having expired. Native
+            // Sleep has no EINTR/remaining-time result, so it must not report
+            // success before the requested monotonic deadline.
+        }
     }
 
     // VFS Helper Methods
@@ -3613,10 +3647,13 @@ impl Task {
         timer_handle: crate::timer::TimerHandle,
         timer: Arc<dyn TimerHandler>,
     ) {
-        self.software_timers.lock().push(SoftwareTimerRegistration {
+        let mut timers = self.software_timers.lock();
+        timers.push(SoftwareTimerRegistration {
             handle: timer_handle,
             handler: timer,
         });
+        self.software_timer_count
+            .store(timers.len(), Ordering::Release);
     }
 
     pub(crate) fn has_software_timer(&self, timer_handle: crate::timer::TimerHandle) -> bool {
@@ -3624,6 +3661,15 @@ impl Task {
             .lock()
             .iter()
             .any(|registration| registration.handle == timer_handle)
+    }
+
+    /// Return whether this task currently owns any registered software timer.
+    ///
+    /// # Returns
+    ///
+    /// `true` when at least one timer is pending or running.
+    pub(crate) fn has_software_timers(&self) -> bool {
+        self.software_timer_count.load(Ordering::Acquire) != 0
     }
 
     /// Complete cleanup for a task-owned timer from its callback or caller.
@@ -3643,7 +3689,10 @@ impl Task {
             let position = timers
                 .iter()
                 .position(|registration| registration.handle == timer_handle);
-            position.map(|position| timers.swap_remove(position))
+            let registration = position.map(|position| timers.swap_remove(position));
+            self.software_timer_count
+                .store(timers.len(), Ordering::Release);
+            registration
         };
 
         let Some(registration) = registration else {
@@ -3655,7 +3704,12 @@ impl Task {
     }
 
     fn cancel_software_timers(&self) {
-        let timers = core::mem::take(&mut *self.software_timers.lock());
+        let timers = {
+            let mut registrations = self.software_timers.lock();
+            let timers = core::mem::take(&mut *registrations);
+            self.software_timer_count.store(0, Ordering::Release);
+            timers
+        };
         for registration in timers {
             let _ = crate::timer::cancel_timer(registration.handle);
             drop(registration.handler);

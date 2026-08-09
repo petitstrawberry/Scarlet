@@ -8,7 +8,8 @@ extern crate alloc;
 
 use crate::arch::Trapframe;
 use crate::sched::scheduler::{
-    get_task_by_id, remove_from_ready_queues, schedule, unmark_blocked, wake_task, wake_task_on,
+    current_task_id, get_task_by_id, remove_from_ready_queues, schedule, unmark_blocked, wake_task,
+    wake_task_on,
 };
 use crate::sync::IrqSpinLock;
 use crate::task::{BlockedType, TaskState};
@@ -286,21 +287,50 @@ impl Waker {
         let task = get_task_by_id(task_id)
             .unwrap_or_else(|| panic!("[WAKER] Task ID {} not found in scheduler", task_id));
         let blocked_state = TaskState::Blocked(self.block_type);
-        if let Err(actual) = task.state.compare_exchange(
-            TaskState::Running,
-            blocked_state,
-            Ordering::SeqCst,
-            Ordering::SeqCst,
-        ) {
-            drop(task);
-            match actual {
+        let local_cpu = crate::arch::get_cpu().get_cpuid();
+        let mut state = task.state.load(Ordering::SeqCst);
+        loop {
+            match state {
+                TaskState::Running => match task.state.compare_exchange(
+                    TaskState::Running,
+                    blocked_state,
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                ) {
+                    Ok(_) => break,
+                    Err(actual) => state = actual,
+                },
+                TaskState::Ready
+                    if current_task_id(local_cpu) == Some(task_id)
+                        && task.running_cpu.load(Ordering::SeqCst) == local_cpu =>
+                {
+                    // A task that is physically executing on this CPU cannot
+                    // also be a runnable queue candidate. This can occur when
+                    // a wake wins immediately before a previous schedule and
+                    // the caller reaches another wait before scheduler state
+                    // normalization. Remove any stale queue entry before
+                    // blocking so wait loops cannot degrade into a userspace
+                    // CPU spin.
+                    remove_from_ready_queues(task_id);
+                    match task.state.compare_exchange(
+                        TaskState::Ready,
+                        blocked_state,
+                        Ordering::SeqCst,
+                        Ordering::SeqCst,
+                    ) {
+                        Ok(_) => break,
+                        Err(actual) => state = actual,
+                    }
+                }
                 TaskState::Zombie | TaskState::Terminated | TaskState::Ready => {
+                    drop(task);
                     return true;
                 }
-                TaskState::NotInitialized | TaskState::Running | TaskState::Blocked(_) => {
+                TaskState::NotInitialized | TaskState::Blocked(_) => {
+                    drop(task);
                     panic!(
                         "[WAKER] Task {} cannot enter wait from state {:?}",
-                        task_id, actual
+                        task_id, state
                     );
                 }
             }
@@ -1098,6 +1128,37 @@ mod tests {
         assert_eq!(task.get_state(), TaskState::Running);
         assert_eq!(waker.waiting_count(), 0);
 
+        set_current_task_for_test(local_cpu, None);
+        task.running_cpu.store(usize::MAX, Ordering::SeqCst);
+        drop(task);
+        reset();
+    }
+
+    #[test_case]
+    fn test_prepare_wait_repairs_locally_owned_ready_task() {
+        reset();
+        let local_cpu = crate::arch::get_cpu().get_cpuid();
+        register_online_cpu(local_cpu);
+        let waker = Waker::new_interruptible("ready-current");
+        let task_id = add_task(
+            Task::new("ready-current-waiter".to_string(), 1, TaskType::Kernel),
+            local_cpu,
+        );
+        let task = get_task_by_id(task_id).expect("ready current task must be registered");
+        task.running_cpu.store(local_cpu, Ordering::SeqCst);
+        set_current_task_for_test(local_cpu, Some(task_id));
+
+        assert_eq!(task.get_state(), TaskState::Ready);
+        assert!(has_ready_tasks(local_cpu));
+        assert!(waker.prepare_wait(task_id));
+        assert_eq!(
+            task.get_state(),
+            TaskState::Blocked(BlockedType::Interruptible)
+        );
+        assert!(!has_ready_tasks(local_cpu));
+        assert_eq!(waker.waiting_count(), 1);
+
+        assert!(waker.cancel_prepared_wait(task_id));
         set_current_task_for_test(local_cpu, None);
         task.running_cpu.store(usize::MAX, Ordering::SeqCst);
         drop(task);

@@ -2204,7 +2204,9 @@ pub fn sys_get_task_debug_info(trapframe: &mut Trapframe) -> usize {
     #[cfg(feature = "sync-debug")]
     {
         use crate::task::{
-            TASK_DEBUG_FLAG_PC_PRIVILEGED, TASK_DEBUG_FLAG_PC_VALID,
+            TASK_DEBUG_FLAG_DEADLINE, TASK_DEBUG_FLAG_DEADLINE_THROTTLED,
+            TASK_DEBUG_FLAG_DEADLINE_UNAVAILABLE, TASK_DEBUG_FLAG_PC_PRIVILEGED,
+            TASK_DEBUG_FLAG_PC_VALID, TASK_DEBUG_FLAG_SOFTWARE_TIMER_ARMED,
             TASK_DEBUG_FLAG_SYSCALL_ACTIVE, TASK_DEBUG_FLAG_SYSCALL_VALID,
             TASK_DEBUG_INFO_VERSION_V1, TaskDebugInfo, TaskType,
         };
@@ -2254,6 +2256,20 @@ pub fn sys_get_task_debug_info(trapframe: &mut Trapframe) -> usize {
             }
             if execution.syscall_active {
                 flags |= TASK_DEBUG_FLAG_SYSCALL_ACTIVE;
+            }
+            match target.try_deadline_debug_state() {
+                Some((enabled, throttled)) => {
+                    if enabled {
+                        flags |= TASK_DEBUG_FLAG_DEADLINE;
+                    }
+                    if throttled {
+                        flags |= TASK_DEBUG_FLAG_DEADLINE_THROTTLED;
+                    }
+                }
+                None => flags |= TASK_DEBUG_FLAG_DEADLINE_UNAVAILABLE,
+            }
+            if target.has_software_timers() {
+                flags |= TASK_DEBUG_FLAG_SOFTWARE_TIMER_ARMED;
             }
 
             let info = TaskDebugInfo {

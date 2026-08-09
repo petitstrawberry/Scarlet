@@ -6,9 +6,11 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use scarlet_sys::{
-    RawTaskDebugInfoV1, Syscall, TASK_DEBUG_FLAG_PC_PRIVILEGED, TASK_DEBUG_FLAG_PC_VALID,
-    TASK_DEBUG_FLAG_SYSCALL_ACTIVE, TASK_DEBUG_FLAG_SYSCALL_VALID, TASK_DEBUG_INFO_VERSION_V1,
-    syscall0, syscall1, syscall2, syscall4,
+    RawTaskDebugInfoV1, Syscall, TASK_DEBUG_FLAG_DEADLINE, TASK_DEBUG_FLAG_DEADLINE_THROTTLED,
+    TASK_DEBUG_FLAG_DEADLINE_UNAVAILABLE, TASK_DEBUG_FLAG_PC_PRIVILEGED, TASK_DEBUG_FLAG_PC_VALID,
+    TASK_DEBUG_FLAG_SOFTWARE_TIMER_ARMED, TASK_DEBUG_FLAG_SYSCALL_ACTIVE,
+    TASK_DEBUG_FLAG_SYSCALL_VALID, TASK_DEBUG_INFO_VERSION_V1, syscall0, syscall1, syscall2,
+    syscall4,
 };
 
 const SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
@@ -355,11 +357,13 @@ fn print_task_debug(pid: usize) -> ExitCode {
     let tasks = task_info();
     println!("Task debug snapshot for PID/TID {pid}:");
     println!(
-        "{:>5} {:>5} {:>4} {:>5} {:>6} {:>18} {:>8} {:>6} {:>18} {:>12} COMMAND",
+        "{:>5} {:>5} {:>4} {:>5} {:>6} {:>6} {:>5} {:>18} {:>8} {:>6} {:>18} {:>12} COMMAND",
         "PID",
         "TGID",
         "STAT",
         "CPU",
+        "SCHED",
+        "TIMER",
         "MODE",
         "LAST_PC",
         "SYSCALL",
@@ -405,17 +409,33 @@ fn print_task_debug(pid: usize) -> ExitCode {
         } else {
             format!("CPU{}", entry.cpu_id)
         };
+        let scheduler = if entry.flags & TASK_DEBUG_FLAG_DEADLINE_UNAVAILABLE != 0 {
+            "?"
+        } else if entry.flags & TASK_DEBUG_FLAG_DEADLINE == 0 {
+            "fair"
+        } else if entry.flags & TASK_DEBUG_FLAG_DEADLINE_THROTTLED != 0 {
+            "dl/thr"
+        } else {
+            "dl"
+        };
+        let timer = if entry.flags & TASK_DEBUG_FLAG_SOFTWARE_TIMER_ARMED != 0 {
+            "yes"
+        } else {
+            "no"
+        };
         let command = tasks
             .iter()
             .find(|task| task.pid == entry.pid)
             .map(|task| task.name.as_str())
             .unwrap_or("<exited>");
         println!(
-            "{:>5} {:>5} {:>4} {:>5} {:>6} {:>18} {:>8} {:>6} {:>18} {:>12} {}",
+            "{:>5} {:>5} {:>4} {:>5} {:>6} {:>6} {:>5} {:>18} {:>8} {:>6} {:>18} {:>12} {}",
             entry.pid,
             entry.tgid,
             format_stat(state),
             cpu,
+            scheduler,
+            timer,
             mode,
             pc,
             syscall,

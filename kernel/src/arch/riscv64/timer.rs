@@ -67,6 +67,7 @@ impl Stimer {
     }
 
     pub fn start(&mut self) {
+        let was_running = self.running;
         self.running = true;
         let cpu_id = get_cpu().get_cpuid() as u32;
         if crate::interrupt::InterruptManager::global()
@@ -76,18 +77,20 @@ impl Stimer {
             panic!("Failed to set timer for CPU {}", cpu_id);
         }
 
-        let mut sie: usize;
-        unsafe {
-            asm!(
-                "csrr {0}, sie",
-                out(reg) sie,
-            );
-            /* Enable timer interrupt */
-            sie |= 1 << 5;
-            asm!(
-                "csrw sie, {0}",
-                in(reg) sie,
-            );
+        if !was_running {
+            let mut sie: usize;
+            unsafe {
+                asm!(
+                    "csrr {0}, sie",
+                    out(reg) sie,
+                );
+                /* Enable timer interrupt */
+                sie |= 1 << 5;
+                asm!(
+                    "csrw sie, {0}",
+                    in(reg) sie,
+                );
+            }
         }
     }
 

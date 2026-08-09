@@ -25,6 +25,14 @@ pub const TASK_DEBUG_FLAG_PC_PRIVILEGED: u32 = 1 << 1;
 pub const TASK_DEBUG_FLAG_SYSCALL_VALID: u32 = 1 << 2;
 /// The task has not yet returned from the reported system call.
 pub const TASK_DEBUG_FLAG_SYSCALL_ACTIVE: u32 = 1 << 3;
+/// The task is configured for periodic deadline scheduling.
+pub const TASK_DEBUG_FLAG_DEADLINE: u32 = 1 << 4;
+/// The deadline task has exhausted its current runtime budget.
+pub const TASK_DEBUG_FLAG_DEADLINE_THROTTLED: u32 = 1 << 5;
+/// At least one task-owned software timer is currently registered.
+pub const TASK_DEBUG_FLAG_SOFTWARE_TIMER_ARMED: u32 = 1 << 6;
+/// Deadline state could not be sampled without waiting for its lock.
+pub const TASK_DEBUG_FLAG_DEADLINE_UNAVAILABLE: u32 = 1 << 7;
 
 /// Raw v1 task execution snapshot returned by `GetTaskDebugInfo`.
 ///

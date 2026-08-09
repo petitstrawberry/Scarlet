@@ -11,6 +11,7 @@ use alloc::collections::{BTreeMap, BinaryHeap};
 use alloc::sync::{Arc, Weak};
 use core::cell::UnsafeCell;
 use core::cmp::Ordering as CmpOrdering;
+use core::marker::PhantomData;
 use core::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 
 use crate::arch::timer::ArchTimer;
@@ -31,7 +32,7 @@ pub const SCHEDULER_ACCOUNTING_QUANTUM_NS: u64 = 10 * NANOSECONDS_PER_MILLISECON
 /// Software timers retain absolute-nanosecond deadlines and FIFO ordering for
 /// equal deadlines. This lower bound only prevents a newly armed past or
 /// near-future deadline from retriggering the same hardware IRQ immediately.
-pub const SOFTWARE_TIMER_MIN_INTERVAL_NS: u64 = SCHEDULER_ACCOUNTING_QUANTUM_NS;
+pub const SOFTWARE_TIMER_MIN_INTERVAL_NS: u64 = NANOSECONDS_PER_MICROSECOND;
 /// Minimum delay for scheduler-owned exact timers.
 ///
 /// Scheduler budget enforcement must support intervals below the general
@@ -51,6 +52,42 @@ pub struct KernelTimer {
 unsafe impl Sync for KernelTimer {}
 
 static KERNEL_TIMER: Once<KernelTimer> = Once::new();
+
+/// Minimal CPU-local interrupt mask for timer state access.
+///
+/// This bypasses `IrqGuard` deliberately: monotonic time is used by lock and
+/// scheduler diagnostics, so routing it through the regular preemption
+/// bookkeeping would recurse. Saving and restoring the architecture mask is
+/// nest-safe in both task and timer-interrupt context.
+struct LocalTimerInterruptMask {
+    saved: usize,
+    cpu_id: Option<usize>,
+    _not_send: PhantomData<*mut ()>,
+}
+
+impl LocalTimerInterruptMask {
+    #[inline(always)]
+    fn new() -> Self {
+        let saved = crate::arch::interrupt::save_and_disable_interrupts();
+        let cpu_id = crate::arch::try_get_cpuid();
+        Self {
+            saved,
+            cpu_id,
+            _not_send: PhantomData,
+        }
+    }
+}
+
+impl Drop for LocalTimerInterruptMask {
+    #[inline(always)]
+    fn drop(&mut self) {
+        debug_assert!(
+            self.cpu_id.is_none() || self.cpu_id == crate::arch::try_get_cpuid(),
+            "local timer interrupt mask crossed CPUs"
+        );
+        crate::arch::interrupt::restore_interrupts(self.saved);
+    }
+}
 
 pub fn get_kernel_timer() -> &'static KernelTimer {
     KERNEL_TIMER.call_once(KernelTimer::new)
@@ -94,7 +131,9 @@ impl KernelTimer {
     }
 
     pub fn get_time_ns(&self, cpu_id: usize) -> u64 {
-        // SAFETY: Reading a CPU-local architected counter is safe on its owner CPU.
+        let _interrupt_mask = LocalTimerInterruptMask::new();
+        // SAFETY: Runtime mutation of this per-CPU timer is serialized by the
+        // same local interrupt mask in `reprogram_local_timer`.
         unsafe { (*self.core_local_timer[cpu_id].get()).get_time_ns() }
     }
 
@@ -557,6 +596,7 @@ pub const fn local_timer_program(next_deadline_ns: Option<u64>) -> LocalTimerPro
 
 /// Program or stop the current CPU's hardware timer from its queue head.
 pub fn reprogram_local_timer() {
+    let _interrupt_mask = LocalTimerInterruptMask::new();
     let cpu_id = local_cpu_id();
     match local_timer_program(peek_local_deadline()) {
         LocalTimerProgram::Deadline(deadline_ns) => {
@@ -751,6 +791,17 @@ mod tests {
 
         assert_eq!(soft_deadline_ns, 1_000 + SOFTWARE_TIMER_MIN_INTERVAL_NS);
         assert_eq!(hard_deadline_ns, soft_deadline_ns);
+    }
+
+    #[test_case]
+    fn sub_quantum_sleep_deadline_is_not_inflated_to_scheduler_quantum() {
+        let deadline_ns = ms_to_ns(5);
+
+        assert!(deadline_ns < SCHEDULER_ACCOUNTING_QUANTUM_NS);
+        assert_eq!(
+            software_timer_deadlines(0, deadline_ns, TimerPrecision::Exact),
+            (deadline_ns, deadline_ns)
+        );
     }
 
     #[test_case]
