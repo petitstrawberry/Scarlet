@@ -921,13 +921,17 @@ impl PlaybackController {
     }
 
     fn request_path(&self, path: String, hardware_decode: bool, loop_playback: bool) {
-        let mut state = self.state.lock();
-        println!("[{}] queued video replacement {}", APP_NAME, path);
-        state.pending = Some(PlaybackRequest::from_path(
+        self.request(PlaybackRequest::from_path(
             path,
             hardware_decode,
             loop_playback,
         ));
+    }
+
+    fn request(&self, request: PlaybackRequest) {
+        let mut state = self.state.lock();
+        println!("[{}] queued video replacement {}", APP_NAME, request.path);
+        state.pending = Some(request);
         if let Some(active) = state.active.as_ref() {
             active.cancel.store(true, Ordering::Release);
         }
@@ -1023,15 +1027,10 @@ impl Drop for VideoPlayerRuntime {
 
 #[derive(Clone)]
 struct VideoPlayerApp {
-    path: String,
     window_title: Arc<Mutex<String>>,
-    mp4_data: Option<Arc<Vec<u8>>>,
-    audio_source: Option<PlayerAudioSource>,
+    initial_request: Option<PlaybackRequest>,
     hardware_decode: bool,
-    streaming: bool,
     loop_playback: bool,
-    stream_complete_path: Option<String>,
-    stream_socket_path: Option<String>,
     frame_store: Arc<VideoFrameStore>,
     controls: Arc<ControlsOverlay>,
     paint_signal: Arc<PaintSignal>,
@@ -1074,16 +1073,25 @@ impl VideoPlayerApp {
     ) -> Self {
         let playback = Arc::new(PlaybackController::new());
         let runtime = VideoPlayerRuntime::new(playback.clone());
+        let initial_request = if path.is_empty() {
+            None
+        } else {
+            Some(PlaybackRequest {
+                path,
+                mp4_data,
+                audio_source,
+                hardware_decode,
+                streaming,
+                loop_playback,
+                stream_complete_path,
+                stream_socket_path,
+            })
+        };
         Self {
-            path,
             window_title: Arc::new(Mutex::new(window_title.clone())),
-            mp4_data,
-            audio_source,
+            initial_request,
             hardware_decode,
-            streaming,
             loop_playback,
-            stream_complete_path,
-            stream_socket_path,
             frame_store: Arc::new(VideoFrameStore::new()),
             controls: Arc::new(ControlsOverlay::new(loop_playback)),
             paint_signal: Arc::new(PaintSignal::new(InvalidationKind::Paint)),
@@ -1305,30 +1313,22 @@ impl Application for VideoPlayerApp {
             shutdown.clone(),
         ));
         self.runtime.add_worker(start_playback_supervisor(
-            // Only pass an initial request when a video path was actually
-            // provided. Launching without a file (e.g. from the launcher)
-            // must not open the hardware decoder — the supervisor idles
-            // until the picker delivers a path.
-            if self.path.is_empty() {
-                None
-            } else {
-                Some(PlaybackRequest {
-                    path: self.path.clone(),
-                    mp4_data: self.mp4_data.clone(),
-                    audio_source: self.audio_source.clone(),
-                    hardware_decode: self.hardware_decode,
-                    streaming: self.streaming,
-                    loop_playback: self.loop_playback,
-                    stream_complete_path: self.stream_complete_path.clone(),
-                    stream_socket_path: self.stream_socket_path.clone(),
-                })
-            },
+            None,
             self.playback.clone(),
             self.frame_store.clone(),
             self.paint_signal.clone(),
             self.controls.clone(),
             shutdown,
         ));
+    }
+
+    fn on_idle(&mut self) {
+        // ScarletUI calls `init()` before creating the first SWS window. Keep
+        // cold media I/O and decoder/audio startup out of that phase so a
+        // direct file launch follows the same ordering as a picker response.
+        if let Some(request) = self.initial_request.take() {
+            self.playback.request(request);
+        }
     }
 
     fn on_shutdown(&mut self) {
