@@ -130,9 +130,7 @@ pub fn sys_futex_wait(trapframe: &mut Trapframe) -> usize {
         waiter.wait_owned(task_id, trapframe);
         true
     } else {
-        let woken = waiter.wait_with_timeout(task_id, trapframe, Some(timeout_ns as u64));
-        drop(waiter);
-        woken
+        waiter.wait_with_timeout_owned(task_id, trapframe, timeout_ns as u64)
     };
     remove_unused_waiter(key);
     if woken { 0 } else { FUTEX_TIMED_OUT }
