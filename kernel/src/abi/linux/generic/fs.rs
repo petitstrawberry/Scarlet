@@ -3954,6 +3954,7 @@ pub fn sys_pselect6(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let mut out_except: u64 = 0;
     let mut any_ready = false;
     let mut first_selectable_fd: Option<usize> = None;
+    let mut selectable_count = 0usize;
 
     for fd in 0..max_fds {
         let bit = 1u64 << fd;
@@ -3966,10 +3967,12 @@ pub fn sys_pselect6(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 
         // Resolve handle → KernelObject
         let Some(handle) = abi.get_handle(fd) else {
-            continue;
+            trapframe.increment_pc_next(&task);
+            return errno::to_result(errno::EBADF);
         };
         let Some(kobj) = task.handle_table.get(handle) else {
-            continue;
+            trapframe.increment_pc_next(&task);
+            return errno::to_result(errno::EBADF);
         };
 
         // Use generic Selectable if available; otherwise default policy
@@ -3978,6 +3981,7 @@ pub fn sys_pselect6(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
             if first_selectable_fd.is_none() {
                 first_selectable_fd = Some(fd);
             }
+            selectable_count += 1;
 
             let interest = ReadyInterest {
                 read: want_read,
@@ -3994,7 +3998,8 @@ pub fn sys_pselect6(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                 any_ready = true;
             }
             if rs.except {
-                out_except |= bit; /* any_ready unchanged */
+                out_except |= bit;
+                any_ready = true;
             }
         } else {
             // Default: treat as immediately ready (non-selectable path)
@@ -4010,73 +4015,133 @@ pub fn sys_pselect6(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         }
     }
 
-    // If nothing is ready and a non-zero timeout is provided, wait on the
-    // first selectable descriptor then re-evaluate every requested descriptor.
+    fn reevaluate_pselect_fds(
+        abi: &LinuxAbi,
+        task: &crate::task::Task,
+        max_fds: usize,
+        in_read: u64,
+        in_write: u64,
+        in_except: u64,
+    ) -> (u64, u64, u64, bool) {
+        let mut out_read = 0u64;
+        let mut out_write = 0u64;
+        let mut out_except = 0u64;
+
+        for fd in 0..max_fds {
+            let bit = 1u64 << fd;
+            let want_read = (in_read & bit) != 0;
+            let want_write = (in_write & bit) != 0;
+            let want_except = (in_except & bit) != 0;
+            if !(want_read || want_write || want_except) {
+                continue;
+            }
+            let Some(handle) = abi.get_handle(fd) else {
+                continue;
+            };
+            let Some(kobj) = task.handle_table.get(handle) else {
+                continue;
+            };
+
+            if let Some(sel) = kobj.as_selectable() {
+                let ready = sel.current_ready(ReadyInterest {
+                    read: want_read,
+                    write: want_write,
+                    except: want_except,
+                });
+                if ready.read {
+                    out_read |= bit;
+                }
+                if ready.write {
+                    out_write |= bit;
+                }
+                if ready.except {
+                    out_except |= bit;
+                }
+            } else {
+                if want_read {
+                    out_read |= bit;
+                }
+                if want_write {
+                    out_write |= bit;
+                }
+            }
+        }
+
+        let any_ready = (out_read | out_write | out_except) != 0;
+        (out_read, out_write, out_except, any_ready)
+    }
+
+    // If nothing is ready and a non-zero timeout is provided, wait then
+    // re-evaluate every requested descriptor. A single selectable can use its
+    // Waker directly; multiple selectables require periodic level rechecks.
     if !any_ready {
         let zero_poll = matches!(timeout_ns, Some(t) if t == 0);
         if !zero_poll {
-            // Best-effort: wait on the first selectable fd's primary interest
-            if let Some(fd_wait) = first_selectable_fd {
+            if selectable_count > 1 {
+                use crate::object::capability::selectable::multi_readiness_recheck_delay;
+                use crate::timer::{TimerPrecision, get_time_ns};
+
+                let deadline =
+                    timeout_ns.map(|duration_ns| get_time_ns().saturating_add(duration_ns));
+                loop {
+                    let Some(recheck_delay_ns) =
+                        multi_readiness_recheck_delay(deadline, get_time_ns())
+                    else {
+                        break;
+                    };
+                    task.sleep_with_precision(trapframe, recheck_delay_ns, TimerPrecision::Exact);
+
+                    (out_read, out_write, out_except, any_ready) =
+                        reevaluate_pselect_fds(abi, &task, max_fds, in_read, in_write, in_except);
+                    if any_ready {
+                        break;
+                    }
+                }
+            } else if let Some(fd_wait) = first_selectable_fd {
+                use crate::timer::get_time_ns;
+
                 let bit = 1u64 << fd_wait;
                 let want_read = (in_read & bit) != 0;
                 let want_write = (in_write & bit) != 0;
                 let want_except = (in_except & bit) != 0;
-                if let Some(handlew) = abi.get_handle(fd_wait) {
-                    if let Some(kobjw) = task.handle_table.get(handlew) {
-                        if let Some(sel) = kobjw.as_selectable() {
-                            let _ = sel.wait_until_ready(
-                                ReadyInterest {
-                                    read: want_read,
-                                    write: want_write,
-                                    except: want_except,
-                                },
-                                trapframe,
-                                timeout_ns,
-                                0,
-                            );
-                            // After wake or timeout, recompute readiness for all fds properly
-                            out_read = 0;
-                            out_write = 0;
-                            out_except = 0;
-                            for fd2 in 0..max_fds {
-                                let bit2 = 1u64 << fd2;
-                                let want_r = (in_read & bit2) != 0;
-                                let want_w = (in_write & bit2) != 0;
-                                let want_x = (in_except & bit2) != 0;
-                                if !(want_r || want_w || want_x) {
-                                    continue;
-                                }
-                                if let Some(handle2) = abi.get_handle(fd2) {
-                                    if let Some(kobj2) = task.handle_table.get(handle2) {
-                                        if let Some(sel2) = kobj2.as_selectable() {
-                                            let rs2: ReadySet = sel2.current_ready(ReadyInterest {
-                                                read: want_r,
-                                                write: want_w,
-                                                except: want_x,
-                                            });
-                                            if rs2.read {
-                                                out_read |= bit2;
-                                            }
-                                            if rs2.write {
-                                                out_write |= bit2;
-                                            }
-                                            if rs2.except {
-                                                out_except |= bit2;
-                                            }
-                                        } else {
-                                            if want_r {
-                                                out_read |= bit2;
-                                            }
-                                            if want_w {
-                                                out_write |= bit2;
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
+                let deadline =
+                    timeout_ns.map(|duration_ns| get_time_ns().saturating_add(duration_ns));
+                loop {
+                    let remaining_ns =
+                        deadline.map(|deadline| deadline.saturating_sub(get_time_ns()));
+                    if matches!(remaining_ns, Some(0)) {
+                        break;
+                    }
+
+                    if let Some(handle) = abi.get_handle(fd_wait)
+                        && let Some(kobj) = task.handle_table.get(handle)
+                        && let Some(sel) = kobj.as_selectable()
+                    {
+                        let _ = sel.wait_until_ready(
+                            ReadyInterest {
+                                read: want_read,
+                                write: want_write,
+                                except: want_except,
+                            },
+                            trapframe,
+                            remaining_ns,
+                            0,
+                        );
+                    }
+
+                    (out_read, out_write, out_except, any_ready) =
+                        reevaluate_pselect_fds(abi, &task, max_fds, in_read, in_write, in_except);
+                    if any_ready || deadline.is_some_and(|deadline| get_time_ns() >= deadline) {
+                        break;
                     }
                 }
+            } else {
+                let duration_ns = timeout_ns.unwrap_or(u64::MAX);
+                task.sleep_with_precision(
+                    trapframe,
+                    duration_ns,
+                    crate::timer::TimerPrecision::Exact,
+                );
             }
         }
     }
@@ -4152,6 +4217,17 @@ pub fn sys_ppoll(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         };
     }
 
+    if nfds == 0 {
+        if !matches!(timeout_ns, Some(0)) {
+            task.sleep_with_precision(
+                trapframe,
+                timeout_ns.unwrap_or(u64::MAX),
+                crate::timer::TimerPrecision::Exact,
+            );
+        }
+        return 0;
+    }
+
     if fds_ptr == 0 {
         return usize::MAX;
     }
@@ -4172,9 +4248,10 @@ pub fn sys_ppoll(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     fn eval_pfd(pfd: &mut PollFd, abi_ref: &LinuxAbi, task_ref: &crate::task::Task) -> EvalResult {
         pfd.revents = 0;
         if pfd.fd < 0 {
-            pfd.revents |= POLLNVAL;
             return EvalResult {
-                ready: true,
+                // Linux poll ignores negative descriptors. Callers commonly
+                // use -1 to disable an entry without compacting the array.
+                ready: false,
                 selectable: false,
             };
         }
@@ -4201,7 +4278,7 @@ pub fn sys_ppoll(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         let mut selectable = false;
 
         if let Some(sel) = kobj.as_selectable() {
-            selectable = true;
+            selectable = want_read || want_write || want_except;
             let rs: ReadySet = sel.current_ready(ReadyInterest {
                 read: want_read,
                 write: want_write,
@@ -4356,6 +4433,13 @@ pub fn sys_ppoll(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                         break;
                     }
                 }
+            } else {
+                let duration_ns = timeout_ns.unwrap_or(u64::MAX);
+                task.sleep_with_precision(
+                    trapframe,
+                    duration_ns,
+                    crate::timer::TimerPrecision::Exact,
+                );
             }
         }
     }

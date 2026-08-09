@@ -52,6 +52,10 @@ const SBUS_SERVICE_UNREGISTERED_SIGNAL: &str = "ServiceUnregistered";
 /// Long enough that an idle handler thread sleeps instead of spinning, short
 /// enough to stay responsive. This replaces the previous 1 ms busy-poll.
 const CLIENT_READ_POLL_TIMEOUT_NS: i64 = 250_000_000;
+/// Delay after `poll` reports readability but a non-blocking read cannot progress.
+const CLIENT_SPURIOUS_READ_BACKOFF_MS: u64 = 10;
+/// Consecutive false readiness reports tolerated before dropping a broken client.
+const MAX_CONSECUTIVE_SPURIOUS_READS: usize = 16;
 /// Total deadline for a single `write_all` call when the peer stops draining.
 const CLIENT_WRITE_TIMEOUT_NS: u64 = CLIENT_WRITE_TIMEOUT_MS * 1_000_000;
 /// Slice size for write-backoff polling so the total timeout is still enforced.
@@ -139,10 +143,17 @@ fn main() -> i32 {
                     clients.insert(client_id, write_socket.clone());
                 }
 
-                // Spawn client handler thread
-                thread::spawn(move || {
-                    handle_client(client_id, client_socket, write_socket);
-                });
+                // A transient task-allocation failure must reject only this
+                // connection, not panic and terminate the system bus daemon.
+                if thread::Builder::new()
+                    .spawn(move || {
+                        handle_client(client_id, client_socket, write_socket);
+                    })
+                    .is_err()
+                {
+                    CLIENTS.lock().remove(&client_id);
+                    println!("sbusd: Failed to start handler for client {}", client_id);
+                }
             }
             Err(e) => {
                 println!("sbusd: Accept failed: {:?}", e);
@@ -159,6 +170,7 @@ fn handle_client(client_id: usize, mut read_socket: Socket, write_socket: Arc<Mu
     let mut buffer = [0u8; 4096];
     let mut read_buffer = Vec::new();
     let raw_read_handle = read_socket.as_raw() as u32;
+    let mut consecutive_spurious_reads = 0usize;
 
     'client: loop {
         // Block until the socket is readable instead of busy-polling. A
@@ -167,7 +179,7 @@ fn handle_client(client_id: usize, mut read_socket: Socket, write_socket: Arc<Mu
         // into a full-core spin. `poll` sleeps in the kernel until there is
         // genuine work, eliminating that failure mode entirely.
         let mut poll_handles = [PollHandle::new(raw_read_handle, POLLIN)];
-        match poll(&mut poll_handles, CLIENT_READ_POLL_TIMEOUT_NS) {
+        let revents = match poll(&mut poll_handles, CLIENT_READ_POLL_TIMEOUT_NS) {
             Ok(0) => continue,
             Ok(_) => {
                 let revents = poll_handles[0].revents;
@@ -178,12 +190,20 @@ fn handle_client(client_id: usize, mut read_socket: Socket, write_socket: Arc<Mu
                 // POLLIN, POLLHUP, and POLLERR may all coexist with pending
                 // data. Attempt a read in every case and let the read result
                 // decide whether the connection is truly gone.
+                if revents & POLLIN == 0 && revents & (POLLHUP | POLLERR) != 0 {
+                    println!(
+                        "[Client {}] Poll reported terminal socket event: {:#x}",
+                        client_id, revents
+                    );
+                    break;
+                }
+                revents
             }
             Err(code) => {
                 println!("[Client {}] Poll error: {}", client_id, code);
                 break;
             }
-        }
+        };
 
         let read_result = read_socket.read(&mut buffer);
 
@@ -193,6 +213,7 @@ fn handle_client(client_id: usize, mut read_socket: Socket, write_socket: Arc<Mu
                 break;
             }
             Ok(n) => {
+                consecutive_spurious_reads = 0;
                 read_buffer.extend_from_slice(&buffer[..n]);
 
                 while read_buffer.len() >= sbus::MessageHeader::SIZE {
@@ -230,9 +251,29 @@ fn handle_client(client_id: usize, mut read_socket: Socket, write_socket: Arc<Mu
                 }
             }
             Err(e) if e.kind() == ErrorKind::WouldBlock => {
-                // Spurious wakeup after poll reported readability. Just loop
-                // back to poll instead of sleeping — the kernel will block
-                // until real data arrives.
+                if revents & (POLLHUP | POLLERR) != 0 {
+                    println!(
+                        "[Client {}] Closing after terminal poll event returned WouldBlock: {:#x}",
+                        client_id, revents
+                    );
+                    break;
+                }
+
+                // A selectable implementation must not repeatedly report
+                // POLLIN while a read would block. Bound this failure mode so
+                // one malformed or stale socket cannot consume a whole CPU.
+                consecutive_spurious_reads = consecutive_spurious_reads.saturating_add(1);
+                if consecutive_spurious_reads >= MAX_CONSECUTIVE_SPURIOUS_READS {
+                    println!(
+                        "[Client {}] Closing after {} consecutive false POLLIN wakeups",
+                        client_id, consecutive_spurious_reads
+                    );
+                    let _ = read_socket.shutdown(ShutdownHow::Both);
+                    break;
+                }
+                thread::sleep(core::time::Duration::from_millis(
+                    CLIENT_SPURIOUS_READ_BACKOFF_MS,
+                ));
                 continue;
             }
             Err(e) => {

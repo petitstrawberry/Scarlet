@@ -1,6 +1,6 @@
 use crate::arch::Trapframe;
 use crate::library::std::usercopy::{copy_from_user, copy_to_user};
-use crate::object::capability::selectable::{ReadyInterest, Selectable};
+use crate::object::capability::selectable::ReadyInterest;
 use crate::task::mytask;
 
 pub const POLLIN: u16 = 0x0001;
@@ -38,7 +38,7 @@ fn eval_poll_handle(pfd: &mut PollHandle, task: &crate::task::Task) -> (bool, bo
     let mut selectable = false;
 
     if let Some(sel) = kobj.as_selectable() {
-        selectable = true;
+        selectable = want_read || want_write || want_except;
         let rs = sel.current_ready(ReadyInterest {
             read: want_read,
             write: want_write,
@@ -105,6 +105,14 @@ pub fn sys_poll(trapframe: &mut Trapframe) -> usize {
     if nfds == 0 {
         if options.min_timeout_ns > 0 {
             return usize::MAX;
+        }
+        if options.timeout_ns != 0 {
+            let duration_ns = if options.timeout_ns < 0 {
+                u64::MAX
+            } else {
+                options.timeout_ns as u64
+            };
+            task.sleep_with_precision(trapframe, duration_ns, crate::timer::TimerPrecision::Exact);
         }
         return 0;
     }
@@ -176,12 +184,27 @@ pub fn sys_poll(trapframe: &mut Trapframe) -> usize {
                     }
                 }
             } else if let Some(wait_idx) = first_selectable_idx {
-                let pfd = &fds[wait_idx];
-                if let Some(kobj) = task.handle_table.get(pfd.handle) {
-                    if let Some(sel) = kobj.as_selectable() {
+                use crate::timer::get_time_ns;
+
+                let deadline =
+                    timeout_ns.map(|duration_ns| get_time_ns().saturating_add(duration_ns));
+                loop {
+                    let remaining_ns =
+                        deadline.map(|deadline| deadline.saturating_sub(get_time_ns()));
+                    if matches!(remaining_ns, Some(0)) {
+                        break;
+                    }
+
+                    let pfd = &fds[wait_idx];
+                    if let Some(kobj) = task.handle_table.get(pfd.handle)
+                        && let Some(sel) = kobj.as_selectable()
+                    {
                         let want_read = (pfd.events & POLLIN) != 0;
                         let want_write = (pfd.events & POLLOUT) != 0;
                         let want_except = (pfd.events & POLLPRI) != 0;
+                        let wait_min_ns = remaining_ns
+                            .map(|remaining_ns| min_wait_ns.min(remaining_ns))
+                            .unwrap_or(min_wait_ns);
                         let _ = sel.wait_until_ready(
                             ReadyInterest {
                                 read: want_read,
@@ -189,14 +212,25 @@ pub fn sys_poll(trapframe: &mut Trapframe) -> usize {
                                 except: want_except,
                             },
                             trapframe,
-                            timeout_ns,
-                            min_wait_ns,
+                            remaining_ns,
+                            wait_min_ns,
                         );
                     }
-                }
 
-                for pfd in fds.iter_mut() {
-                    let _ = eval_poll_handle(pfd, &task);
+                    // Selectable waits may wake spuriously or consume a stale
+                    // pre-wait notification. Do not report a timeout to
+                    // userspace until the requested deadline has actually
+                    // elapsed; re-evaluate level readiness and wait again.
+                    any_ready = false;
+                    for pfd in fds.iter_mut() {
+                        let (ready, _) = eval_poll_handle(pfd, &task);
+                        if ready {
+                            any_ready = true;
+                        }
+                    }
+                    if any_ready || deadline.is_some_and(|deadline| get_time_ns() >= deadline) {
+                        break;
+                    }
                 }
             }
         }
