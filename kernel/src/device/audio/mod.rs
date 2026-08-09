@@ -11,9 +11,9 @@ use alloc::string::String;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::any::Any;
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use crate::sync::IrqSpinLock;
+use crate::sync::{IrqSpinLock, Once, Waker};
 
 use crate::device::char::CharDevice;
 use crate::device::{DefaultDeviceOpen, Device, DeviceCapability, DeviceType};
@@ -29,6 +29,10 @@ use crate::sync::IrqGuard;
 use crate::task::mytask;
 
 static AUDIO_DEVICE_COUNTER: AtomicUsize = AtomicUsize::new(0);
+static AUDIO_COMPLETION_DEVICES: Once<IrqSpinLock<Vec<Weak<AudioCharDevice>>>> = Once::new();
+static AUDIO_COMPLETION_WORKER_PENDING: AtomicBool = AtomicBool::new(false);
+static AUDIO_COMPLETION_WORKER_STARTED: AtomicBool = AtomicBool::new(false);
+static AUDIO_COMPLETION_WORKER_WAKER: Waker = Waker::new_uninterruptible("audio-completion-worker");
 
 /// Native audio control command namespace.
 pub mod commands {
@@ -668,6 +672,7 @@ pub struct AudioCharDevice {
     info: AudioDeviceInfo,
     ring: IrqSpinLock<Option<AudioPcmRing>>,
     opened: IrqSpinLock<bool>,
+    completion_pending: AtomicBool,
 }
 
 impl AudioCharDevice {
@@ -700,6 +705,7 @@ impl AudioCharDevice {
             info,
             ring: IrqSpinLock::new(None),
             opened: IrqSpinLock::new(false),
+            completion_pending: AtomicBool::new(false),
         }
     }
 
@@ -707,7 +713,8 @@ impl AudioCharDevice {
         let weak: Weak<Self> = Arc::downgrade(this);
         this.backend.set_completion_callback(Some(Arc::new(move || {
             if let Some(device) = weak.upgrade() {
-                device.handle_backend_completion();
+                device.completion_pending.store(true, Ordering::Release);
+                queue_audio_completion_worker();
             }
         })));
     }
@@ -923,6 +930,71 @@ impl AudioCharDevice {
     }
 }
 
+fn audio_completion_devices() -> &'static IrqSpinLock<Vec<Weak<AudioCharDevice>>> {
+    AUDIO_COMPLETION_DEVICES.call_once(|| IrqSpinLock::new(Vec::new()))
+}
+
+fn queue_audio_completion_worker() {
+    if !AUDIO_COMPLETION_WORKER_PENDING.swap(true, Ordering::AcqRel) {
+        AUDIO_COMPLETION_WORKER_WAKER.wake_one();
+    }
+}
+
+fn process_deferred_audio_completions() -> bool {
+    if !AUDIO_COMPLETION_WORKER_PENDING.swap(false, Ordering::AcqRel) {
+        return false;
+    }
+
+    let devices = {
+        let mut registered = audio_completion_devices().lock();
+        let mut live = Vec::with_capacity(registered.len());
+        registered.retain(|weak| {
+            if let Some(device) = weak.upgrade() {
+                live.push(device);
+                true
+            } else {
+                false
+            }
+        });
+        live
+    };
+
+    for device in devices {
+        if device.completion_pending.swap(false, Ordering::AcqRel) {
+            device.handle_backend_completion();
+        }
+    }
+    true
+}
+
+fn audio_completion_worker_entry() {
+    loop {
+        while process_deferred_audio_completions() {}
+
+        let Some(task) = mytask() else {
+            crate::arch::instruction::idle();
+        };
+        AUDIO_COMPLETION_WORKER_WAKER.wait(task.get_id(), task.get_trapframe());
+    }
+}
+
+fn start_audio_completion_worker() {
+    if AUDIO_COMPLETION_WORKER_STARTED
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return;
+    }
+
+    let task = crate::task::new_kernel_task(
+        String::from("audio-completion-worker"),
+        1,
+        audio_completion_worker_entry,
+    );
+    task.init();
+    crate::sched::scheduler::add_task(task, 0);
+}
+
 /// Register a playback backend as a native Scarlet audio device.
 ///
 /// # Arguments
@@ -953,6 +1025,10 @@ pub fn register_playback_device_with_info(
     let id = AUDIO_DEVICE_COUNTER.fetch_add(1, Ordering::SeqCst);
     let name = alloc::format!("audio{}", id);
     let audio_char = Arc::new(AudioCharDevice::new_with_info(backend, info));
+    audio_completion_devices()
+        .lock()
+        .push(Arc::downgrade(&audio_char));
+    start_audio_completion_worker();
     AudioCharDevice::install_completion_callback(&audio_char);
     let audio_char: Arc<dyn Device> = audio_char;
     crate::device::manager::DeviceManager::get_manager()

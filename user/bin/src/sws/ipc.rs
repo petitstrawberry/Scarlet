@@ -1896,9 +1896,11 @@ impl IpcServer {
 
         // Move socket to accept thread
         // HandleTable is cloned but Arc<SocketObject> is shared
-        thread::spawn(move || {
-            accept_thread_main(server_socket);
-        });
+        thread::Builder::new()
+            .spawn(move || {
+                accept_thread_main(server_socket);
+            })
+            .map_err(|_| "Failed to start SWS accept thread")?;
 
         self.accept_thread_started = true;
         println!("[IpcServer] Accept thread started");
@@ -1994,10 +1996,21 @@ fn accept_thread_main(server_socket: Socket) {
                     }
                 };
 
-                // Spawn client handler thread
-                thread::spawn(move || {
-                    client_thread_main(client_id, client_socket, client_wake);
-                });
+                // A transient thread-allocation failure must reject only this
+                // connection, not panic the process that owns the desktop.
+                if thread::Builder::new()
+                    .spawn(move || {
+                        client_thread_main(client_id, client_socket, client_wake);
+                    })
+                    .is_err()
+                {
+                    PENDING_CLIENT_RESPONSES.lock().remove(&client_id);
+                    CLIENT_WAKES.lock().remove(&client_id);
+                    println!(
+                        "[AcceptThread] Failed to start handler for client {}",
+                        client_id
+                    );
+                }
             }
             Err(std::socket::SocketError::WouldBlock) => {
                 thread::sleep(core::time::Duration::from_millis(10));
@@ -2279,7 +2292,14 @@ fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Ha
                         ],
                     };
                     super::trace::ipc_poll();
-                    let ready = poll(&mut handles, CLIENT_POLL_TIMEOUT_NS).unwrap_or(0);
+                    let ready = match poll(&mut handles, CLIENT_POLL_TIMEOUT_NS) {
+                        Ok(ready) => ready,
+                        Err(error) => {
+                            println!("[ClientThread {}] poll failed: {:?}", client_id, error);
+                            thread::sleep(core::time::Duration::from_millis(10));
+                            continue;
+                        }
+                    };
                     if ready > 0 {
                         super::trace::ipc_poll_ready();
                     }

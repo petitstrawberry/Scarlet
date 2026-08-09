@@ -145,6 +145,8 @@ const MAX_PENDING_DAMAGE_RECTS: usize = 8;
 const DAMAGE_MERGE_AREA_FACTOR: u64 = 2;
 const FRAME_BATCH_INTERVAL_NS: u64 = 16_666_667;
 const RUNTIME_ERROR_RETRY_DELAY_MS: u64 = 100;
+const COMPOSITOR_IDLE_RECHECK_NS: i64 = 250_000_000;
+const COMPOSITOR_WAKE_ERROR_DELAY_MS: u64 = 10;
 const DEFAULT_OUTPUT_SCALE_MILLI: u32 = 2000;
 
 type DamageRect = (i32, i32, u32, u32);
@@ -747,7 +749,7 @@ impl Compositor {
     }
 
     fn request_launcher_show() {
-        thread::spawn(|| {
+        let _ = thread::Builder::new().spawn(|| {
             for _ in 0..10 {
                 if let Ok(mut connection) = SbusConnection::connect()
                     && connection
@@ -2481,14 +2483,34 @@ impl Compositor {
     }
 
     fn wait_for_event_signal(&mut self) {
-        let Ok(stream) = self.wake_read.as_stream() else {
-            return;
+        let mut handles = [PollHandle::new(self.wake_read.as_raw() as u32, POLLIN)];
+        let ready = match poll(&mut handles, COMPOSITOR_IDLE_RECHECK_NS) {
+            Ok(ready) => ready,
+            Err(_) => {
+                super::ipc::consume_compositor_wake();
+                thread::sleep(Duration::from_millis(COMPOSITOR_WAKE_ERROR_DELAY_MS));
+                return;
+            }
         };
-
-        let mut buf = [0u8; 1];
-        if stream.read(&mut buf).is_ok() {
+        if ready == 0 {
+            // A timeout is also a repair point for a stale coalescing flag.
+            // Any byte racing this reset remains readable on the next poll.
             super::ipc::consume_compositor_wake();
+            return;
         }
+        if (handles[0].revents & POLLIN) == 0 {
+            super::ipc::consume_compositor_wake();
+            thread::sleep(Duration::from_millis(COMPOSITOR_WAKE_ERROR_DELAY_MS));
+            return;
+        }
+
+        if let Ok(stream) = self.wake_read.as_stream() {
+            let mut buf = [0u8; 1];
+            let _ = stream.read(&mut buf);
+        }
+        // Once poll reported the byte as readable, let a producer publish a
+        // fresh wake even if the subsequent read raced an endpoint failure.
+        super::ipc::consume_compositor_wake();
     }
 
     fn consume_event_signal_if_ready(&mut self) {
@@ -2505,9 +2527,8 @@ impl Compositor {
         };
 
         let mut buf = [0u8; 1];
-        if stream.read(&mut buf).is_ok() {
-            super::ipc::consume_compositor_wake();
-        }
+        let _ = stream.read(&mut buf);
+        super::ipc::consume_compositor_wake();
     }
 
     fn process_pending_events(&mut self) -> Result<bool, &'static str> {

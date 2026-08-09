@@ -122,12 +122,13 @@ pub(crate) fn start_watchdog() {
     }
 
     println!("[SWS_TRACE] watchdog enabled; interval=2s");
-    thread::spawn(|| {
-        let mut previous = Snapshot::load();
-        loop {
-            thread::sleep(Duration::from_secs(2));
-            let current = Snapshot::load();
-            println!(
+    if thread::Builder::new()
+        .spawn(|| {
+            let mut previous = Snapshot::load();
+            loop {
+                thread::sleep(Duration::from_secs(2));
+                let current = Snapshot::load();
+                println!(
                 "[SWS_TRACE] stage={} gpu_window={} comp(loop={},present={}) ipc(loop={},poll={}/{},socket={},wake={},fatal={},spurious={},frame={},flush={}) wake(call={},coalesced={}) input(loop={},event={},empty={}) keyboard(loop={},event={},short={})",
                 stage_name(COMPOSITOR_STAGE.load(Ordering::Acquire)),
                 GPU_WINDOW_ID.load(Ordering::Acquire),
@@ -166,10 +167,14 @@ pub(crate) fn start_watchdog() {
                 current
                     .keyboard_short_reads
                     .wrapping_sub(previous.keyboard_short_reads),
-            );
-            previous = current;
-        }
-    });
+                );
+                previous = current;
+            }
+        })
+        .is_err()
+    {
+        println!("[SWS_TRACE] failed to start watchdog thread");
+    }
 }
 
 #[inline]

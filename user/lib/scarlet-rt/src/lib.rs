@@ -47,8 +47,12 @@ impl Write for RuntimeConsole {
 /// * `code` - Process exit status.
 pub fn exit(code: i32) -> ! {
     let _ = syscall1(Syscall::ExitGroup, code as usize);
+
+    // ExitGroup must not return. If a mismatched or broken kernel does return,
+    // stay quiescent instead of turning a failed process teardown into a
+    // permanent 100% CPU task.
     loop {
-        core::hint::spin_loop();
+        let _ = syscall1(Syscall::Sleep, 1_000_000_000);
     }
 }
 
@@ -56,16 +60,12 @@ pub fn exit(code: i32) -> ! {
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
     let _ = writeln!(RuntimeConsole, "Panic occurred: {info:?}");
-    loop {
-        core::hint::spin_loop();
-    }
+    exit(101)
 }
 
 #[cfg(feature = "panic")]
 #[alloc_error_handler]
 fn alloc_error_handler(layout: core::alloc::Layout) -> ! {
     let _ = writeln!(RuntimeConsole, "Allocation failed: {layout:?}");
-    loop {
-        core::hint::spin_loop();
-    }
+    exit(102)
 }

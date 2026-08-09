@@ -261,13 +261,17 @@ impl InputManager {
         println!("[InputManager] Starting input thread...");
         set_screen_size(screen_width, screen_height);
 
-        thread::spawn(move || {
-            input_thread_main();
-        });
+        thread::Builder::new()
+            .spawn(move || {
+                input_thread_main();
+            })
+            .map_err(|_| "Failed to start pointer input thread")?;
 
-        thread::spawn(move || {
-            keyboard_thread_main();
-        });
+        thread::Builder::new()
+            .spawn(move || {
+                keyboard_thread_main();
+            })
+            .map_err(|_| "Failed to start keyboard input thread")?;
 
         println!("[InputManager] Input thread started");
         Ok(())
@@ -309,7 +313,13 @@ fn input_thread_main() {
 
                 thread::sleep(core::time::Duration::from_millis(16));
             }
-            Ok(None) => super::trace::input_empty(),
+            Ok(None) => {
+                // A disconnected or temporarily incomplete input device may
+                // return a short read immediately. Do not turn that condition
+                // into an unbounded userspace polling loop.
+                super::trace::input_empty();
+                thread::sleep(core::time::Duration::from_millis(10));
+            }
             Err(e) => {
                 println!("[InputThread] Error reading event: {}", e);
                 break;
@@ -428,6 +438,7 @@ fn keyboard_thread_main() {
             Ok(bytes_read) => {
                 if bytes_read != InputEvent::SIZE {
                     super::trace::keyboard_short_read();
+                    thread::sleep(core::time::Duration::from_millis(10));
                     continue;
                 }
 
