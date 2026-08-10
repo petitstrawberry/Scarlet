@@ -17,7 +17,7 @@ use core::f32;
 
 use scarlet_std::format;
 use scarlet_std::println;
-use scarlet_ui::{MenuBarModel, MenuEntry, MenuItemModel, PlatformWindow, SWSPlatformWindow};
+use scarlet_ui::{MenuBarModel, MenuEntry, MenuItemModel, PlatformWindow};
 use scarlet_ui::{hstack, prelude::*, vstack};
 use scarlet_ui_macros::View;
 
@@ -158,17 +158,7 @@ impl Application for DemoApp {
         if desired == self.fullscreen_request_sent.get() {
             return;
         }
-        let Some(window) = window.as_any_mut().downcast_mut::<SWSPlatformWindow>() else {
-            return;
-        };
-
-        let surface_id = window.surface_id();
-        let result = if desired {
-            window.connection().set_fullscreen(surface_id)
-        } else {
-            window.connection().unset_fullscreen(surface_id)
-        };
-        match result {
+        match window.set_fullscreen(desired) {
             Ok(()) => self.fullscreen_request_sent.set(desired),
             Err(error) => {
                 println!("[ui_demo] Failed to change fullscreen state: {:?}", error);

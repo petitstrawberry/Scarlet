@@ -125,6 +125,7 @@ pub trait PlatformWindow: Any {
     fn close(&mut self) -> Result<()>;
     fn minimize(&mut self) -> Result<()>;
     fn maximize(&mut self) -> Result<()>;
+    fn set_fullscreen(&mut self, fullscreen: bool) -> Result<()>;
     fn restore(&mut self) -> Result<()>;
     fn request_move(&mut self) -> Result<()>;
 
@@ -156,30 +157,20 @@ SWS handles:
 - SWS text-input protocol
 - SWS-specific window IDs (`surface_id`)
 
-Scarlet-specific applications may downcast `dyn PlatformWindow` to
-`SWSPlatformWindow` inside lifecycle hooks when they intentionally need direct
-SWS capabilities.
-
-For example, an application can synchronize a fullscreen state from
-`on_window_sync` without adding SWS-only methods to the platform-neutral trait:
+Fullscreen is exposed by the backend-neutral `PlatformWindow` trait. An
+application can synchronize declarative state from `on_window_sync` without
+depending on `SWSPlatformWindow` or a surface ID:
 
 ```rust
-let Some(window) = window.as_any_mut().downcast_mut::<SWSPlatformWindow>() else {
-    return;
-};
-let surface_id = window.surface_id();
-let result = if fullscreen {
-    window.connection().set_fullscreen(surface_id)
-} else {
-    window.connection().unset_fullscreen(surface_id)
-};
-let _ = result;
+let _ = window.set_fullscreen(fullscreen);
 ```
 
-SWS controls output occupancy and stacking. ScarletUI decorations are
-client-side, so an application that enters fullscreen should also render its
-`Window` with `.decorated(false)`. The bundled `ui-demo` does both from its
-“Enter Fullscreen” button.
+`set_fullscreen(bool)` and `maximize()`/`restore()` are intentionally separate:
+fullscreen is a desired presentation state, while maximize and restore are
+window operations. SWS controls output occupancy and stacking. ScarletUI
+decorations are client-side, so an application that enters fullscreen should
+also render its `Window` with `.decorated(false)`. The bundled `ui-demo` does
+both from its “Enter Fullscreen” button.
 
 ### Winit
 

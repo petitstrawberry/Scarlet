@@ -1262,6 +1262,7 @@ pub trait PlatformWindow: Any {
     fn close(&mut self) -> Result<()>;
     fn minimize(&mut self) -> Result<()>;
     fn maximize(&mut self) -> Result<()>;
+    fn set_fullscreen(&mut self, fullscreen: bool) -> Result<()>;
     fn restore(&mut self) -> Result<()>;
     fn request_move(&mut self) -> Result<()>;
 

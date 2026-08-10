@@ -5,7 +5,7 @@ hash = "sha256:c96ca4fd8cb0b1a0140463a5a2730424103976c2c2d45e048baf101bcb501e14"
 layers = []
 
 [sections.disk]
-hash = "sha256:368133a8ff27502a9023eb3611cc42381b0ee77afefe0d0f796ae1d8700cc224"
+hash = "sha256:f86ee5b384a7cb492a0f6559de0a9f14614aef0de7a316dd469f21f2272f2233"
 layers = []
 
 [sections.initramfs]
@@ -246,7 +246,7 @@ type = "path"
 path = "../../user/bin"
 
 [sections.rootfs]
-hash = "sha256:60177b04b4650c0dbe3616b7ffd851c3583771b647dad97484eee135a7c6ba83"
+hash = "sha256:4c409c34c7080514d1d91c250643b32c87d088520169a226458fcc0734de3fd6"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
@@ -498,7 +498,7 @@ kind = "cargo"
 package = "user-bin"
 bin = "desktop-background"
 to = "/system/scarlet/bin/desktop-background"
-hash = "sha256:04841da445d5a65da5d6d28b39d8b833201df7b4bfd472854a2b20f931475e34"
+hash = "sha256:419d4337fbc14fe3be57a9a44c1c775c588e3f81bb8d058d5b0ba36d13303dad"
 
 [sections.rootfs.layers.source]
 type = "path"
@@ -520,7 +520,7 @@ kind = "cargo"
 package = "scarlet-std-bin"
 bin = "files"
 to = "/system/scarlet/bin/files"
-hash = "sha256:593b606bd8f015e9e9b4afc504107c07619b813977ca112768d39794237b50b4"
+hash = "sha256:cf5512b561a837321af9ff9879bbe47b48b566a887cacf7f1ac5d0c7bb993007"
 
 [sections.rootfs.layers.source]
 type = "path"
@@ -531,7 +531,7 @@ kind = "cargo"
 package = "scarlet-std-bin"
 bin = "launcher"
 to = "/system/scarlet/bin/launcher"
-hash = "sha256:136b5feca76cce4b0f8e209c32e3b6dac65b709522a4dddad286160112f5deed"
+hash = "sha256:629b125a7fdf82a1cbdb4c1b72baf61f72a3ba328161cbd373e4c48f37a7d043"
 
 [sections.rootfs.layers.source]
 type = "path"
@@ -542,7 +542,7 @@ kind = "cargo"
 package = "scarlet-std-bin"
 bin = "notepad"
 to = "/system/scarlet/bin/notepad"
-hash = "sha256:aeea1abd223539499c7fa75de000cd41ac0462d70aed27c3c347e7540bc9ab8f"
+hash = "sha256:63b04f04fcc2d8f10a952e7267d555798883727e6c9ebf85354ec7e735b711ab"
 
 [sections.rootfs.layers.source]
 type = "path"
@@ -553,7 +553,7 @@ kind = "cargo"
 package = "user-bin"
 bin = "taskbar"
 to = "/system/scarlet/bin/taskbar"
-hash = "sha256:060829c245161cfac8d0bb8c8e30c4f9899d99536ba4884a99d1735a72cf974a"
+hash = "sha256:ca03f171b677ddc4d5c07404bd1a7ae5ceb1972cb5f7bd1a186f5201cae6a9f5"
 
 [sections.rootfs.layers.source]
 type = "path"
@@ -564,7 +564,7 @@ kind = "cargo"
 package = "user-bin"
 bin = "terminal"
 to = "/system/scarlet/bin/terminal"
-hash = "sha256:91a9b52a05bdff2246491d4eafcdf3561364ba836e4963745cb2a2c731f3ec43"
+hash = "sha256:7c93e0aa6172b925b04a4fee3f5e278fe65a2f93ac99948c25ecc40b883e81a5"
 
 [sections.rootfs.layers.source]
 type = "path"
@@ -618,7 +618,7 @@ kind = "cargo"
 package = "user-bin"
 bin = "ui-demo"
 to = "/system/scarlet/bin/ui-demo"
-hash = "sha256:9d11290b83bf508895acfabeb6210b0dc5415f646dfff558445a0843b6b19f13"
+hash = "sha256:c80debd0390ef9adf4f148a498918fc771f3b8b565529c9a85d672e10641eb81"
 
 [sections.rootfs.layers.source]
 type = "path"
@@ -629,7 +629,7 @@ kind = "cargo"
 package = "user-bin"
 bin = "ui-benchmark"
 to = "/system/scarlet/bin/ui-benchmark"
-hash = "sha256:40072dd5101d58c717e594f96672a25127e42fdfc13147ffaa3e72dca4165a88"
+hash = "sha256:df617628029ef3c7c08733406ab492819397b347ddf6b56f7650653329b68d80"
 
 [sections.rootfs.layers.source]
 type = "path"
@@ -654,7 +654,7 @@ rev = "1e6ae33cc3f2dad72f2aa33d384ea734ba39f6ab"
 kind = "cargo"
 bin = "ui-sgfx-showcase"
 to = "/system/scarlet/bin/ui-sgfx-showcase"
-hash = "sha256:2d4fe8d5d2a1f97cbd2078c66cd9cd91701d748826eb5488fa2b45843e82ce8f"
+hash = "sha256:2ef176df16ff3c93c70dd4a7f6d1d6705c482fb58b3d36e95adcc85663160662"
 
 [sections.rootfs.layers.source]
 type = "path"
@@ -665,7 +665,7 @@ kind = "cargo"
 package = "user-bin"
 bin = "settings"
 to = "/system/scarlet/bin/settings"
-hash = "sha256:45735b57806b272e927687124f8ac5a614ef05ca1f2365b81aefe67bf425e750"
+hash = "sha256:6deb5539aafcf893820bc9717c68327f6cec5ac251d905e1dee1b4eb5232b942"
 
 [sections.rootfs.layers.source]
 type = "path"
@@ -675,7 +675,7 @@ path = "../../user/bin"
 kind = "cargo"
 bin = "task_manager"
 to = "/system/scarlet/bin/task_manager"
-hash = "sha256:37637f988f9afeae835cb3ef54e52baaa12cb86a770a9b8aba7ad043214a2640"
+hash = "sha256:e2401e6e163c28ff1072f36fb3e8aa1c829c5e901b5115aa1fe4caa641f9de3d"
 
 [sections.rootfs.layers.source]
 type = "path"
@@ -686,7 +686,7 @@ kind = "cargo"
 package = "user-bin"
 bin = "scarlet_skk"
 to = "/system/scarlet/bin/scarlet_skk"
-hash = "sha256:9fa0674c0a846b905c641ef564970cde69ac4321f97c0ef7466aa6befac50e43"
+hash = "sha256:ae93f8363cba656e5d554be78a75121018d7670d15452c8dba9a48e3222e9187"
 
 [sections.rootfs.layers.source]
 type = "path"
@@ -799,7 +799,7 @@ path = "../../user/std-bin"
 kind = "cargo"
 bin = "clock"
 to = "/system/scarlet/bin/clock"
-hash = "sha256:ac5d1d9da112b10ea6dd8fbf4a66de7590a3a8f6f08fc61ae5f989d5a9b25bbd"
+hash = "sha256:bfe759a06e3ec0d0c61e7d596b1ea40ed7e23a970b25d0a92a89e0bbb751760c"
 
 [sections.rootfs.layers.source]
 type = "path"
@@ -850,7 +850,7 @@ kind = "cargo"
 package = "user-bin"
 bin = "scarlet_mozc"
 to = "/system/scarlet/bin/scarlet_mozc"
-hash = "sha256:2ff7639bc8f2438145be17ae85fec1796fffea4fbc65807de632cbda787819cf"
+hash = "sha256:540f3d4e5a9547507c9660ffbc40d1bad248b84961001e20df037d08f7d4d161"
 
 [sections.rootfs.layers.source]
 type = "path"
@@ -931,7 +931,7 @@ features = [
 ]
 default-features = false
 to = "/system/scarlet/bin/video_player"
-hash = "sha256:4b760229ae273dbff6afd4c9cbdada703a3e685074f3fe045078f803a01847e0"
+hash = "sha256:4af85872dbc76cb70ed9d9b32ff655b923aa695564704f16d758a87f1c0abf42"
 
 [sections.rootfs.layers.source]
 type = "path"

@@ -128,8 +128,9 @@ These are separate presentation states:
   both state transitions. Clients should resize and redraw after receiving it.
 
 The bundled ScarletUI `ui-demo` provides an interactive integration path: its
-“Enter Fullscreen” button calls these APIs through `SWSPlatformWindow` and
-removes client-side decorations until fullscreen is left.
+“Enter Fullscreen” button calls the backend-neutral
+`PlatformWindow::set_fullscreen(bool)` API and removes client-side decorations
+until fullscreen is left.
 
 ## Notes / current limitations
 
