@@ -7,6 +7,79 @@ use super::{Color, Error, Result, TextureFormat, Transform};
 /// Maximum attributes accepted by one portable vertex-buffer layout.
 pub const MAX_VERTEX_ATTRIBUTES: usize = 16;
 
+/// Comparison applied between an incoming fragment depth and stored depth.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompareFunction {
+    /// Never pass the comparison.
+    Never,
+    /// Pass when the incoming value is less than the stored value.
+    Less,
+    /// Pass when both values are equal.
+    Equal,
+    /// Pass when the incoming value is less than or equal to the stored value.
+    LessEqual,
+    /// Pass when the incoming value is greater than the stored value.
+    Greater,
+    /// Pass when the values are not equal.
+    NotEqual,
+    /// Pass when the incoming value is greater than or equal to the stored value.
+    GreaterEqual,
+    /// Always pass the comparison.
+    Always,
+}
+
+/// Portable depth-test and depth-write pipeline state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DepthState {
+    format: TextureFormat,
+    compare: CompareFunction,
+    write_enabled: bool,
+}
+
+impl DepthState {
+    /// Construct depth-test and depth-write state.
+    ///
+    /// # Arguments
+    ///
+    /// * `format` - Required render-pass depth attachment format.
+    /// * `compare` - Comparison applied to incoming fragment depth.
+    /// * `write_enabled` - Whether passing fragments update stored depth.
+    ///
+    /// # Returns
+    /// The requested portable depth state.
+    pub const fn new(format: TextureFormat, compare: CompareFunction, write_enabled: bool) -> Self {
+        Self {
+            format,
+            compare,
+            write_enabled,
+        }
+    }
+
+    /// Return the required depth attachment format.
+    ///
+    /// # Returns
+    /// The configured depth texture format.
+    pub const fn format(self) -> TextureFormat {
+        self.format
+    }
+
+    /// Return the depth comparison function.
+    ///
+    /// # Returns
+    /// The configured comparison.
+    pub const fn compare(self) -> CompareFunction {
+        self.compare
+    }
+
+    /// Return whether passing fragments write depth.
+    ///
+    /// # Returns
+    /// `true` when depth writes are enabled.
+    pub const fn write_enabled(self) -> bool {
+        self.write_enabled
+    }
+}
+
 /// Format of one vertex attribute.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VertexFormat {
@@ -435,6 +508,7 @@ pub struct RenderPipelineDesc {
     fragment: FragmentProgram,
     blend: BlendState,
     raster: RasterState,
+    depth: Option<DepthState>,
 }
 
 impl RenderPipelineDesc {
@@ -497,7 +571,41 @@ impl RenderPipelineDesc {
             fragment,
             blend,
             raster,
+            depth: None,
         })
+    }
+
+    /// Configure depth testing for this pipeline.
+    ///
+    /// # Arguments
+    ///
+    /// * `depth` - Depth attachment format, comparison, and write state.
+    ///
+    /// # Returns
+    /// The updated pipeline descriptor, or [`Error::InvalidDescriptor`] when
+    /// the requested format is not a depth format.
+    pub fn with_depth_state(mut self, depth: DepthState) -> Result<Self> {
+        if depth.format() != TextureFormat::Depth32Float {
+            return Err(Error::InvalidDescriptor);
+        }
+        self.depth = Some(depth);
+        Ok(self)
+    }
+
+    /// Configure depth testing through the depth-stencil pipeline slot.
+    ///
+    /// Scarlet currently exposes depth without stencil; this discoverable
+    /// alias leaves room for stencil state in a future compatible API.
+    ///
+    /// # Arguments
+    ///
+    /// * `depth` - Depth attachment format, comparison, and write state.
+    ///
+    /// # Returns
+    /// The updated pipeline descriptor, or [`Error::InvalidDescriptor`] when
+    /// the requested format is not a depth format.
+    pub fn with_depth_stencil(self, depth: DepthState) -> Result<Self> {
+        self.with_depth_state(depth)
     }
     /// Return the required color attachment format.
     ///
@@ -540,5 +648,13 @@ impl RenderPipelineDesc {
     /// The configured raster state.
     pub const fn raster(&self) -> RasterState {
         self.raster
+    }
+
+    /// Return optional depth-test and depth-write state.
+    ///
+    /// # Returns
+    /// The configured depth state, or `None` when depth testing is disabled.
+    pub const fn depth_state(&self) -> Option<DepthState> {
+        self.depth
     }
 }

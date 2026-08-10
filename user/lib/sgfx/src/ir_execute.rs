@@ -3,16 +3,18 @@
 use alloc::{rc::Rc, vec::Vec};
 
 use crate::driver::{
-    self, IrAddressMode, IrBlendComponent, IrBlendFactor, IrBlendOp, IrBlendState, IrCullMode,
-    IrDraw, IrFilterMode, IrFragmentProgram, IrFrontFace, IrPipelineState, IrRect, IrSamplerState,
-    IrSubmission, IrTextureFormat, IrTextureUpload, IrUniforms, IrVertex, MAX_IR_VERTICES,
+    self, IrAddressMode, IrBlendComponent, IrBlendFactor, IrBlendOp, IrBlendState,
+    IrCompareFunction, IrCullMode, IrDepthState, IrDraw, IrFilterMode, IrFragmentProgram,
+    IrFrontFace, IrPipelineState, IrRect, IrSamplerState, IrSubmission, IrTextureFormat,
+    IrTextureUpload, IrUniforms, IrVertex, MAX_IR_VERTICES,
 };
 use crate::ir::{
     self, AddressMode, BlendComponent, BlendFactor, BlendOp, BlendState, BufferRef, BufferUsage,
-    Command, CommandBuffer, DrawUniforms, FilterMode, FragmentProgram, IndexFormat, LoadOp,
-    MAX_BUFFERS, MAX_TEXTURES, PrimitiveTopology, RenderPipelineRef, ResourceTable, SamplerDesc,
-    SamplerRef, TextureDesc, TextureFormat, TextureId, TextureRef, TextureSampleMode, TextureUsage,
-    TextureWrite, VertexAttribute, VertexFormat,
+    Command, CommandBuffer, CompareFunction, DepthLoadOp, DrawUniforms, FilterMode,
+    FragmentProgram, IndexFormat, LoadOp, MAX_BUFFERS, MAX_TEXTURES, PrimitiveTopology,
+    RenderPipelineRef, ResourceTable, SamplerDesc, SamplerRef, TextureDesc, TextureFormat,
+    TextureId, TextureRef, TextureSampleMode, TextureUsage, TextureWrite, VertexAttribute,
+    VertexFormat,
 };
 use crate::{Context, HandleError, Image, Queue};
 
@@ -377,6 +379,7 @@ enum ExecutionTarget {
 struct ActivePass<'r> {
     attachment: TextureRef<'r>,
     target: ExecutionTarget,
+    depth_attachment: Option<TextureRef<'r>>,
     submission: IrSubmission,
     pipeline: Option<RenderPipelineRef<'r>>,
     vertex_buffer: Option<(BufferRef<'r>, u64)>,
@@ -608,14 +611,27 @@ impl ExecutionPlan {
                     if !desc.area().is_within(descriptor.extent()) {
                         return Err(IrSubmitError::InvalidIr(ir::Error::OutOfBounds));
                     }
+                    let depth_attachment = desc.depth_attachment();
+                    let depth_spec = if let Some(depth) = depth_attachment {
+                        let depth_descriptor = resources.resources().texture(depth.target())?;
+                        Some(texture_spec(depth.target(), depth_descriptor))
+                    } else {
+                        None
+                    };
                     active = Some(ActivePass {
                         attachment: desc.target(),
                         target,
+                        depth_attachment: depth_attachment.map(|depth| depth.target()),
                         submission: IrSubmission {
                             clear_color: match desc.load() {
                                 LoadOp::Clear(color) => Some(color.components()),
                                 LoadOp::Load | LoadOp::DontCare => None,
                             },
+                            depth_attachment: depth_spec,
+                            clear_depth: depth_attachment.and_then(|depth| match depth.load() {
+                                DepthLoadOp::Clear(value) => Some(value),
+                                DepthLoadOp::Load | DepthLoadOp::DontCare => None,
+                            }),
                             render_area: IrRect {
                                 x: desc.area().x(),
                                 y: desc.area().y(),
@@ -677,10 +693,10 @@ impl ExecutionPlan {
                 }
                 Command::SetScissor(value) => {
                     let pass = active_pass_mut(&mut active)?;
-                    if let Some(rectangle) = value {
-                        if !rect_within(*rectangle, pass.submission.render_area) {
-                            return Err(IrSubmitError::InvalidIr(ir::Error::OutOfBounds));
-                        }
+                    if let Some(rectangle) = value
+                        && !rect_within(*rectangle, pass.submission.render_area)
+                    {
+                        return Err(IrSubmitError::InvalidIr(ir::Error::OutOfBounds));
                     }
                     pass.scissor = *value;
                 }
@@ -796,7 +812,7 @@ fn decode_indexed_draw_vertices(
     index_count: u32,
     base_vertex: i32,
 ) -> Result<DecodedDraw, IrSubmitError> {
-    if index_count == 0 || index_count % 3 != 0 {
+    if index_count == 0 || !index_count.is_multiple_of(3) {
         return Err(IrSubmitError::InvalidVertexData);
     }
     let (info, vertex_buffer, vertex_offset, uniforms, texture, sampler) =
@@ -870,6 +886,7 @@ fn decode_indexed_draw_vertices(
     })
 }
 
+#[allow(clippy::type_complexity)]
 fn draw_state<'r>(
     resources: &IrResources,
     pass: &ActivePass<'r>,
@@ -888,6 +905,9 @@ fn draw_state<'r>(
         .pipeline
         .ok_or(IrSubmitError::InvalidIr(ir::Error::PipelineNotSet))?;
     let info = pipeline_info(resources.resources(), pipeline)?;
+    if info.state.depth.is_some() != pass.depth_attachment.is_some() {
+        return Err(IrSubmitError::InvalidIr(ir::Error::InvalidDescriptor));
+    }
     let (buffer, offset) = pass
         .vertex_buffer
         .ok_or(IrSubmitError::InvalidIr(ir::Error::VertexBufferNotSet))?;
@@ -962,7 +982,7 @@ fn pipeline_info(
     resources: &ResourceTable,
     reference: RenderPipelineRef<'_>,
 ) -> Result<PipelineInfo, IrSubmitError> {
-    let (target, topology, fragment, blend, raster, stride, position, secondary) = resources
+    let (target, topology, fragment, blend, raster, depth, stride, position, secondary) = resources
         .with_pipeline(reference, |descriptor| {
             let layout = descriptor.vertex_buffer();
             let position = layout
@@ -981,6 +1001,7 @@ fn pipeline_info(
                 descriptor.fragment(),
                 descriptor.blend(),
                 descriptor.raster(),
+                descriptor.depth_state(),
                 layout.stride(),
                 position,
                 secondary,
@@ -1037,6 +1058,19 @@ fn pipeline_info(
                 ir::FrontFace::Clockwise => IrFrontFace::Clockwise,
                 ir::FrontFace::CounterClockwise => IrFrontFace::CounterClockwise,
             },
+            depth: depth.map(|depth| IrDepthState {
+                compare: match depth.compare() {
+                    CompareFunction::Never => IrCompareFunction::Never,
+                    CompareFunction::Less => IrCompareFunction::Less,
+                    CompareFunction::Equal => IrCompareFunction::Equal,
+                    CompareFunction::LessEqual => IrCompareFunction::LessEqual,
+                    CompareFunction::Greater => IrCompareFunction::Greater,
+                    CompareFunction::NotEqual => IrCompareFunction::NotEqual,
+                    CompareFunction::GreaterEqual => IrCompareFunction::GreaterEqual,
+                    CompareFunction::Always => IrCompareFunction::Always,
+                },
+                write_enabled: depth.write_enabled(),
+            }),
         },
         stride,
         position,
@@ -1113,7 +1147,7 @@ fn decode_vertices(
 ) -> Result<Vec<IrVertex>, IrSubmitError> {
     let count = usize::try_from(vertex_count).map_err(|_| IrSubmitError::InvalidVertexData)?;
     let first = usize::try_from(first_vertex).map_err(|_| IrSubmitError::InvalidVertexData)?;
-    if vertex_count == 0 || vertex_count % 3 != 0 {
+    if vertex_count == 0 || !vertex_count.is_multiple_of(3) {
         return Err(IrSubmitError::InvalidVertexData);
     }
     let mut vertices = Vec::new();
@@ -1308,6 +1342,11 @@ fn convert_texture_upload(
     texture: driver::IrTextureSpec,
     write: TextureWrite<'_>,
 ) -> Result<IrTextureUpload, IrSubmitError> {
+    if matches!(texture.format, IrTextureFormat::Depth32Float) {
+        return Err(IrSubmitError::Unsupported(
+            UnsupportedIrFeature::TextureUpload,
+        ));
+    }
     let destination = write.destination();
     let tight = usize::try_from(destination.width())
         .ok()
@@ -1315,6 +1354,7 @@ fn convert_texture_upload(
             width.checked_mul(match texture.format {
                 IrTextureFormat::R8 => 1,
                 IrTextureFormat::Bgra8 | IrTextureFormat::Rgba8 => 4,
+                IrTextureFormat::Depth32Float => unreachable!(),
             })
         })
         .ok_or(IrSubmitError::InvalidVertexData)?;
@@ -1362,6 +1402,7 @@ fn convert_texture_upload(
                     pixels.extend_from_slice(&[0, 0, 0, *value]);
                 }
             }
+            IrTextureFormat::Depth32Float => unreachable!(),
         }
     }
     Ok(IrTextureUpload {
@@ -1467,6 +1508,7 @@ fn texture_spec(texture: TextureRef<'_>, descriptor: TextureDesc) -> driver::IrT
             TextureFormat::Bgra8Unorm => IrTextureFormat::Bgra8,
             TextureFormat::Rgba8Unorm => IrTextureFormat::Rgba8,
             TextureFormat::R8Unorm => IrTextureFormat::R8,
+            TextureFormat::Depth32Float => IrTextureFormat::Depth32Float,
         },
     }
 }

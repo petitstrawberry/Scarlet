@@ -421,6 +421,7 @@ impl GpuCompositor {
         cursor: &Cursor,
         background: [u8; 4],
         resize_outline: Option<(i32, i32, u32, u32)>,
+        cursor_visible: bool,
     ) -> Result<Vec<SgfxCommitToken>, &'static str> {
         super::trace::set_compositor_stage(super::trace::STAGE_GPU_SYNC_WINDOWS);
         for window in windows {
@@ -526,14 +527,16 @@ impl GpuCompositor {
                 self.target.height(),
             )?;
         }
-        if let Some((destination, source)) = clipped_rect(
-            cursor.x,
-            cursor.y,
-            self.cursor_width,
-            self.cursor_height,
-            self.target.width(),
-            self.target.height(),
-        ) {
+        if cursor_visible
+            && let Some((destination, source)) = clipped_rect(
+                cursor.x,
+                cursor.y,
+                self.cursor_width,
+                self.cursor_height,
+                self.target.width(),
+                self.target.height(),
+            )
+        {
             composition
                 .draw_textured_rect(
                     &self.cursor_texture,

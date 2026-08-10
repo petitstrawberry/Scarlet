@@ -20,28 +20,29 @@ pub use abi::{
     GPU_CONTEXT_TRANSFER_IMPORTED_IMAGE_BGRA, GPU_CONTEXT_UPLOAD_IMAGE_BGRA, GPU_CREATE_BUFFER,
     GPU_CREATE_CONTEXT, GPU_CREATE_IMAGE, GPU_CREATE_IMPORTED_IMAGE_BGRA, GPU_CREATE_QUEUE,
     GPU_CREATE_TIMELINE, GPU_DIALECT_INFO_BYTES, GPU_IMAGE_FORMAT_BGRA8_UNORM,
-    GPU_IMAGE_QUERY_INFO, GPU_IMAGE_USAGE_PRESENTABLE, GPU_IMAGE_USAGE_RENDER_TARGET,
-    GPU_IMAGE_USAGE_SAMPLED, GPU_IMAGE_USAGE_TRANSFER_DST, GPU_IMAGE_USAGE_VALID,
-    GPU_MAX_IMAGE_UPLOAD_SIZE, GPU_MAX_OPAQUE_COMMAND_SIZE, GPU_QUERY_DIALECT, GPU_QUERY_INFO,
-    GPU_QUEUE_QUERY, GPU_QUEUE_SUBMIT, GPU_QUEUE_SUBMIT_FLAG_SIGNAL_TIMELINE,
-    GPU_QUEUE_SUBMIT_FLAGS_VALID, GPU_RESULT_INVALID_ABI, GPU_RESULT_INVALID_ARGUMENT,
-    GPU_RESULT_INVALID_STATE, GPU_RESULT_OUT_OF_RESOURCES, GPU_RESULT_SUCCESS,
-    GPU_RESULT_UNSUPPORTED, GPU_TIMELINE_CREATE_POINT, GPU_TIMELINE_FAIL, GPU_TIMELINE_QUERY,
-    GPU_TIMELINE_SIGNAL, GpuBufferInfo, GpuContextAttachBuffer, GpuContextAttachImage,
-    GpuContextDetachImage, GpuContextInfo, GpuContextTransferImportedImageBgra,
-    GpuContextUploadImageBgra, GpuCreateBuffer, GpuCreateContext, GpuCreateImage,
-    GpuCreateImportedImageBgra, GpuCreateQueue, GpuCreateTimeline, GpuImageInfo, GpuQueryDialect,
-    GpuQueryInfo, GpuQueueInfo, GpuQueueSubmit, GpuTimelineCreatePoint, GpuTimelineFail,
-    GpuTimelineInfo, GpuTimelineSignal,
+    GPU_IMAGE_FORMAT_DEPTH32_FLOAT, GPU_IMAGE_QUERY_INFO, GPU_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT,
+    GPU_IMAGE_USAGE_PRESENTABLE, GPU_IMAGE_USAGE_RENDER_TARGET, GPU_IMAGE_USAGE_SAMPLED,
+    GPU_IMAGE_USAGE_TRANSFER_DST, GPU_IMAGE_USAGE_VALID, GPU_MAX_IMAGE_UPLOAD_SIZE,
+    GPU_MAX_OPAQUE_COMMAND_SIZE, GPU_QUERY_DIALECT, GPU_QUERY_INFO, GPU_QUEUE_QUERY,
+    GPU_QUEUE_SUBMIT, GPU_QUEUE_SUBMIT_FLAG_SIGNAL_TIMELINE, GPU_QUEUE_SUBMIT_FLAGS_VALID,
+    GPU_RESULT_INVALID_ABI, GPU_RESULT_INVALID_ARGUMENT, GPU_RESULT_INVALID_STATE,
+    GPU_RESULT_OUT_OF_RESOURCES, GPU_RESULT_SUCCESS, GPU_RESULT_UNSUPPORTED,
+    GPU_TIMELINE_CREATE_POINT, GPU_TIMELINE_FAIL, GPU_TIMELINE_QUERY, GPU_TIMELINE_SIGNAL,
+    GpuBufferInfo, GpuContextAttachBuffer, GpuContextAttachImage, GpuContextDetachImage,
+    GpuContextInfo, GpuContextTransferImportedImageBgra, GpuContextUploadImageBgra,
+    GpuCreateBuffer, GpuCreateContext, GpuCreateImage, GpuCreateImportedImageBgra, GpuCreateQueue,
+    GpuCreateTimeline, GpuImageInfo, GpuQueryDialect, GpuQueryInfo, GpuQueueInfo, GpuQueueSubmit,
+    GpuTimelineCreatePoint, GpuTimelineFail, GpuTimelineInfo, GpuTimelineSignal,
 };
 pub use backend::{
-    GPU_EXECUTION_SUPPORT_ADDRESS_SPACE, GPU_EXECUTION_SUPPORT_IMAGE_UPLOAD,
-    GPU_EXECUTION_SUPPORT_MEMORY, GPU_EXECUTION_SUPPORT_NONE, GPU_EXECUTION_SUPPORT_PRESENTATION,
-    GPU_EXECUTION_SUPPORT_QUEUE, GPU_EXECUTION_SUPPORT_TIMELINE, GpuBackend, GpuBackendBuffer,
-    GpuBackendBufferInfo, GpuBackendContext, GpuBackendContextInfo, GpuBackendDialectDescriptor,
-    GpuBackendDialectInfo, GpuBackendImage, GpuBackendImageInfo, GpuBackendInfo, GpuBackendQueue,
-    GpuBackendQueueInfo, GpuBufferCreateInfo, GpuDeviceInfo, GpuDeviceState, GpuImageBackingInfo,
-    GpuImageCreateInfo, GpuImageUploadInfo,
+    GPU_EXECUTION_SUPPORT_ADDRESS_SPACE, GPU_EXECUTION_SUPPORT_DEPTH,
+    GPU_EXECUTION_SUPPORT_IMAGE_UPLOAD, GPU_EXECUTION_SUPPORT_MEMORY, GPU_EXECUTION_SUPPORT_NONE,
+    GPU_EXECUTION_SUPPORT_PRESENTATION, GPU_EXECUTION_SUPPORT_QUEUE,
+    GPU_EXECUTION_SUPPORT_TIMELINE, GpuBackend, GpuBackendBuffer, GpuBackendBufferInfo,
+    GpuBackendContext, GpuBackendContextInfo, GpuBackendDialectDescriptor, GpuBackendDialectInfo,
+    GpuBackendImage, GpuBackendImageInfo, GpuBackendInfo, GpuBackendQueue, GpuBackendQueueInfo,
+    GpuBufferCreateInfo, GpuDeviceInfo, GpuDeviceState, GpuImageBackingInfo, GpuImageCreateInfo,
+    GpuImageUploadInfo,
 };
 pub use connection::GpuConnection;
 pub use execution::{GpuContext, GpuQueue};
@@ -64,13 +65,14 @@ mod tests {
 
     use super::{
         GPU_ABI_VERSION, GPU_BUFFER_FLAG_CPU_VISIBLE, GPU_EXECUTION_SUPPORT_MEMORY,
-        GPU_EXECUTION_SUPPORT_TIMELINE, GPU_IMAGE_FORMAT_BGRA8_UNORM, GPU_IMAGE_USAGE_PRESENTABLE,
-        GPU_IMAGE_USAGE_RENDER_TARGET, GPU_IMAGE_USAGE_SAMPLED, GPU_IMAGE_USAGE_TRANSFER_DST,
-        GPU_RESULT_INVALID_ABI, GPU_RESULT_INVALID_ARGUMENT, GPU_RESULT_SUCCESS, GpuBackend,
-        GpuBackendBuffer, GpuBackendBufferInfo, GpuBackendImageInfo, GpuBackendInfo, GpuBuffer,
-        GpuBufferCreateInfo, GpuConnection, GpuContextUploadImageBgra, GpuControlDevice,
-        GpuDeviceInfo, GpuDeviceState, GpuImageCreateInfo, GpuObject, GpuQueryInfo, GpuTimeline,
-        GpuTimelinePoint,
+        GPU_EXECUTION_SUPPORT_TIMELINE, GPU_IMAGE_FORMAT_BGRA8_UNORM,
+        GPU_IMAGE_FORMAT_DEPTH32_FLOAT, GPU_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT,
+        GPU_IMAGE_USAGE_PRESENTABLE, GPU_IMAGE_USAGE_RENDER_TARGET, GPU_IMAGE_USAGE_SAMPLED,
+        GPU_IMAGE_USAGE_TRANSFER_DST, GPU_RESULT_INVALID_ABI, GPU_RESULT_INVALID_ARGUMENT,
+        GPU_RESULT_SUCCESS, GpuBackend, GpuBackendBuffer, GpuBackendBufferInfo,
+        GpuBackendImageInfo, GpuBackendInfo, GpuBuffer, GpuBufferCreateInfo, GpuConnection,
+        GpuContextUploadImageBgra, GpuControlDevice, GpuDeviceInfo, GpuDeviceState,
+        GpuImageCreateInfo, GpuObject, GpuQueryInfo, GpuTimeline, GpuTimelinePoint,
     };
     use crate::device::Device;
     use crate::object::KernelObject;
@@ -266,6 +268,22 @@ mod tests {
         ));
         assert!(!super::resource::image_create_is_valid(
             GpuImageCreateInfo::new(valid.format, valid.usage, 0, valid.height,)
+        ));
+        assert!(super::resource::image_create_is_valid(
+            GpuImageCreateInfo::new(
+                GPU_IMAGE_FORMAT_DEPTH32_FLOAT,
+                GPU_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT,
+                valid.width,
+                valid.height,
+            )
+        ));
+        assert!(!super::resource::image_create_is_valid(
+            GpuImageCreateInfo::new(
+                GPU_IMAGE_FORMAT_DEPTH32_FLOAT,
+                GPU_IMAGE_USAGE_RENDER_TARGET,
+                valid.width,
+                valid.height,
+            )
         ));
     }
 

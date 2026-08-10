@@ -13,9 +13,11 @@ use crate::{
     device::{
         Device, DeviceType,
         gpu::{
-            GPU_DIALECT_INFO_BYTES, GPU_EXECUTION_SUPPORT_IMAGE_UPLOAD,
-            GPU_EXECUTION_SUPPORT_MEMORY, GPU_EXECUTION_SUPPORT_PRESENTATION,
-            GPU_EXECUTION_SUPPORT_QUEUE, GPU_EXECUTION_SUPPORT_TIMELINE,
+            GPU_DIALECT_INFO_BYTES, GPU_EXECUTION_SUPPORT_DEPTH,
+            GPU_EXECUTION_SUPPORT_IMAGE_UPLOAD, GPU_EXECUTION_SUPPORT_MEMORY,
+            GPU_EXECUTION_SUPPORT_PRESENTATION, GPU_EXECUTION_SUPPORT_QUEUE,
+            GPU_EXECUTION_SUPPORT_TIMELINE, GPU_IMAGE_FORMAT_BGRA8_UNORM,
+            GPU_IMAGE_FORMAT_DEPTH32_FLOAT, GPU_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT,
             GPU_IMAGE_USAGE_PRESENTABLE, GPU_IMAGE_USAGE_RENDER_TARGET, GPU_IMAGE_USAGE_SAMPLED,
             GPU_IMAGE_USAGE_TRANSFER_DST, GPU_MAX_OPAQUE_COMMAND_SIZE, GpuBackend,
             GpuBackendBuffer, GpuBackendBufferInfo, GpuBackendContext, GpuBackendContextInfo,
@@ -82,6 +84,7 @@ const VIRTIO_GPU_CONTROL_MAX_SPINS: u64 = 10_000_000;
 
 // VirtIO GPU Formats
 const VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM: u32 = 1;
+const VIRGL_FORMAT_Z32_FLOAT: u32 = 18;
 const VIRTIO_GPU_FORMAT_B8G8R8X8_UNORM: u32 = 2;
 const VIRTIO_GPU_FORMAT_A8R8G8B8_UNORM: u32 = 3;
 const VIRTIO_GPU_FORMAT_X8R8G8B8_UNORM: u32 = 4;
@@ -94,6 +97,7 @@ const VIRTIO_GPU_FORMAT_R8G8B8X8_UNORM: u32 = 134;
 const PIPE_BUFFER: u32 = 0;
 const PIPE_TEXTURE_2D: u32 = 2;
 const PIPE_BIND_RENDER_TARGET: u32 = 1 << 1;
+const PIPE_BIND_DEPTH_STENCIL: u32 = 1 << 0;
 const PIPE_BIND_SAMPLER_VIEW: u32 = 1 << 3;
 const PIPE_BIND_VERTEX_BUFFER: u32 = 1 << 4;
 const PIPE_BIND_SCANOUT: u32 = 1 << 19;
@@ -306,6 +310,9 @@ fn virgl_image_bind(usage: u32) -> u32 {
     let mut bind = 0;
     if usage & GPU_IMAGE_USAGE_RENDER_TARGET != 0 {
         bind |= PIPE_BIND_RENDER_TARGET;
+    }
+    if usage & GPU_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT != 0 {
+        bind |= PIPE_BIND_DEPTH_STENCIL;
     }
     if usage & GPU_IMAGE_USAGE_SAMPLED != 0 {
         bind |= PIPE_BIND_SAMPLER_VIEW;
@@ -746,6 +753,7 @@ impl VirtioGpuDeviceCore {
                     | GPU_EXECUTION_SUPPORT_TIMELINE
                     | if acceleration_usable {
                         GPU_EXECUTION_SUPPORT_IMAGE_UPLOAD
+                            | GPU_EXECUTION_SUPPORT_DEPTH
                             | GPU_EXECUTION_SUPPORT_QUEUE
                             | GPU_EXECUTION_SUPPORT_PRESENTATION
                     } else {
@@ -2033,7 +2041,11 @@ impl GpuBackend for VirtioGpuBackend {
         let resource_id = core.create_acceleration_resource(VirtioGpuAccelerationResource3d {
             resource_id: 0,
             target: PIPE_TEXTURE_2D,
-            format: VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM,
+            format: match create.format {
+                GPU_IMAGE_FORMAT_BGRA8_UNORM => VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM,
+                GPU_IMAGE_FORMAT_DEPTH32_FLOAT => VIRGL_FORMAT_Z32_FLOAT,
+                _ => return Err("VirtIO GPU image format is unsupported"),
+            },
             bind: virgl_image_bind(create.usage),
             width: create.width,
             height: create.height,
@@ -2203,6 +2215,10 @@ mod tests {
                     | GPU_IMAGE_USAGE_SAMPLED,
             ),
             PIPE_BIND_RENDER_TARGET | PIPE_BIND_SCANOUT | PIPE_BIND_SAMPLER_VIEW
+        );
+        assert_eq!(
+            virgl_image_bind(GPU_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT),
+            PIPE_BIND_DEPTH_STENCIL
         );
     }
 

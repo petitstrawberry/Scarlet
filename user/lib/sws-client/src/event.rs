@@ -110,6 +110,11 @@ pub enum Event {
     ///
     /// `state_flags` is a bitset of constants from [`crate::window_state`].
     SurfaceStateChanged { surface_id: u32, state_flags: u32 },
+    /// Compositor-confirmed pointer lock state.
+    ///
+    /// A `locked: false` event can be caused by an explicit request or by the
+    /// compositor releasing capture after focus/visibility/lifetime changes.
+    PointerLockChanged { window_id: u32, locked: bool },
     /// Display size changed.
     ScreenSizeChanged { width: u32, height: u32 },
     /// Output scale changed.

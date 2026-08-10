@@ -60,6 +60,17 @@ pub struct Capabilities {
     pub compositor_backend: u32,
 }
 
+impl Capabilities {
+    /// Whether the server supports explicit pointer lock and relative motion.
+    ///
+    /// # Returns
+    ///
+    /// `true` when [`Connection::set_pointer_lock`] may be requested.
+    pub const fn supports_pointer_lock(self) -> bool {
+        self.capabilities & protocol::capabilities::POINTER_LOCK != 0
+    }
+}
+
 /// Stable identity for one registered shared SGFX buffer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SgfxBufferIdentity {
@@ -842,6 +853,7 @@ impl TransportState {
             | Event::SurfaceStateChanged { surface_id, .. }
             | Event::SurfaceDestroyed { surface_id } => Some(*surface_id),
             Event::MenuItemActivated { window_id, .. }
+            | Event::PointerLockChanged { window_id, .. }
             | Event::SgfxFrameRejected { window_id, .. }
             | Event::SgfxBufferReleased { window_id, .. } => Some(*window_id),
             Event::ScreenSizeChanged { .. }
@@ -2018,6 +2030,31 @@ impl Connection {
             .map_err(|_| Error::SendFailed)
     }
 
+    /// Capture or release raw relative pointer motion for a surface.
+    ///
+    /// Lock requests are accepted by SWS only while the surface is visible,
+    /// not minimized, keyboard-focused, and owned by this connection. The
+    /// authoritative result is delivered as [`Event::PointerLockChanged`].
+    /// While locked, motion arrives through [`Event::Input`] as `EV_REL`
+    /// `REL_X`/`REL_Y` followed by `EV_SYN`.
+    ///
+    /// # Arguments
+    ///
+    /// * `surface_id` - Surface that should capture or release the pointer.
+    /// * `locked` - `true` to request capture, `false` to release it.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` after the request is sent, or a connection/surface error.
+    pub fn set_pointer_lock(&self, surface_id: u32, locked: bool) -> Result<(), Error> {
+        if !mutex_lock(&self.surfaces).contains_key(&surface_id) {
+            return Err(Error::SurfaceNotFound);
+        }
+        let payload = protocol::payload_set_pointer_lock(surface_id, locked);
+        self.send_message(protocol::client_msg::SET_POINTER_LOCK, &payload)
+            .map_err(|_| Error::SendFailed)
+    }
+
     /// Focus and raise a window to the top of the Z-order.
     ///
     /// This only works for surfaces created by this client connection.
@@ -2481,6 +2518,10 @@ impl TransportState {
                 });
                 true
             }
+            ServerMessage::PointerLockChanged { window_id, locked } => {
+                self.push_event(pointer_lock_event(window_id, locked));
+                true
+            }
             ServerMessage::ScreenSizeChanged { width, height } => {
                 self.push_event(Event::ScreenSizeChanged { width, height });
                 true
@@ -2561,6 +2602,39 @@ impl TransportState {
             }
             _ => false,
         }
+    }
+}
+
+fn pointer_lock_event(window_id: u32, locked: bool) -> Event {
+    Event::PointerLockChanged { window_id, locked }
+}
+
+#[cfg(test)]
+mod pointer_lock_tests {
+    use super::*;
+
+    #[test]
+    fn converts_pointer_lock_server_event() {
+        assert_eq!(
+            pointer_lock_event(27, true),
+            Event::PointerLockChanged {
+                window_id: 27,
+                locked: true,
+            }
+        );
+    }
+
+    #[test]
+    fn capability_reports_pointer_lock_support() {
+        let mut capabilities = Capabilities {
+            protocol_version: protocol::SWS_PROTOCOL_VERSION,
+            capabilities: 0,
+            compositor_epoch: 1,
+            compositor_backend: protocol::compositor_backends::CPU,
+        };
+        assert!(!capabilities.supports_pointer_lock());
+        capabilities.capabilities |= protocol::capabilities::POINTER_LOCK;
+        assert!(capabilities.supports_pointer_lock());
     }
 }
 

@@ -11,13 +11,14 @@ pub(crate) mod resource;
 mod types;
 
 pub use command::{
-    Command, CommandBuffer, CommandEncoder, LoadOp, MAX_COMMANDS, RenderPassDesc,
-    RenderPassEncoder, StoreOp,
+    Command, CommandBuffer, CommandEncoder, DepthAttachment, DepthLoadOp, LoadOp, MAX_COMMANDS,
+    RenderPassDesc, RenderPassEncoder, StoreOp,
 };
 pub use pipeline::{
-    BlendComponent, BlendFactor, BlendOp, BlendState, CullMode, DrawUniforms, FragmentProgram,
-    FrontFace, IndexFormat, MAX_VERTEX_ATTRIBUTES, PrimitiveTopology, RasterState,
-    RenderPipelineDesc, TextureSampleMode, VertexAttribute, VertexBufferLayout, VertexFormat,
+    BlendComponent, BlendFactor, BlendOp, BlendState, CompareFunction, CullMode, DepthState,
+    DrawUniforms, FragmentProgram, FrontFace, IndexFormat, MAX_VERTEX_ATTRIBUTES,
+    PrimitiveTopology, RasterState, RenderPipelineDesc, TextureSampleMode, VertexAttribute,
+    VertexBufferLayout, VertexFormat,
 };
 pub use resource::{
     AddressMode, BufferDesc, BufferId, BufferRef, BufferUsage, FilterMode, MAX_BUFFERS,
