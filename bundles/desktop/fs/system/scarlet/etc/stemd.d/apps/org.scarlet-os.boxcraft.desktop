@@ -1,0 +1,7 @@
+[Desktop Entry]
+Name=Boxcraft
+Comment=Explore and edit a voxel world
+Exec=/bin/boxcraft
+Icon=apps
+Type=Application
+Terminal=false
