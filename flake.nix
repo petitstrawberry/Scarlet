@@ -286,6 +286,14 @@
               cp -R subprojects/packagefiles/berkeley-testfloat-3/. subprojects/berkeley-testfloat-3/
               rm -f subprojects/berkeley-testfloat-3.wrap
             '';
+            # nixpkgs creates qemu-kvm for the host architecture, but this
+            # build intentionally omits x86_64-softmmu. Remove the resulting
+            # dangling compatibility link on x86_64 Linux.
+            postInstall = (_prevAttrs.postInstall or "") + ''
+              if [ ! -e "$out/bin/qemu-system-${pkgs.stdenv.hostPlatform.qemuArch}" ]; then
+                rm -f "$out/bin/qemu-kvm"
+              fi
+            '';
           });
 
           devPackages = [
