@@ -113,6 +113,24 @@ Related:
     - Recommended usage: mark dialogs/popups as transient so the compositor can keep them
         stacked above their parent and move them together during interactive drags.
 
+## Maximize and fullscreen
+
+These are separate presentation states:
+
+- `maximize_window(surface_id)` uses the compositor workarea and leaves shell UI
+  visible. `restore_window(surface_id)` leaves maximized/minimized state.
+- `set_fullscreen(surface_id)` occupies the complete primary output and covers
+  shell UI. `unset_fullscreen(surface_id)` leaves only fullscreen state.
+- `Event::SurfaceStateChanged` reports compositor-confirmed flags from
+  `sws_client::window_state`. `MAXIMIZED` and `FULLSCREEN` may both be set; in
+  that case unsetting fullscreen returns to maximized state.
+- `Event::SurfaceConfigure` supplies the authoritative physical buffer size for
+  both state transitions. Clients should resize and redraw after receiving it.
+
+The bundled ScarletUI `ui-demo` provides an interactive integration path: its
+“Enter Fullscreen” button calls these APIs through `SWSPlatformWindow` and
+removes client-side decorations until fullscreen is left.
+
 ## Notes / current limitations
 
 - The client socket is configured to non-blocking mode once at connection time.

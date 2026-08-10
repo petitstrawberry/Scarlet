@@ -445,6 +445,111 @@ impl WaylandBridge {
             .and_then(|(_, wl_surface_id)| self.surface_to_window.get(&wl_surface_id).copied())
     }
 
+    fn xdg_toplevel_state_bytes(maximized: bool, fullscreen: bool) -> Vec<u8> {
+        let mut states = Vec::new();
+        if fullscreen {
+            states.extend_from_slice(&xdg_shell::xdg_toplevel_state::FULLSCREEN.to_ne_bytes());
+        } else if maximized {
+            states.extend_from_slice(&xdg_shell::xdg_toplevel_state::MAXIMIZED.to_ne_bytes());
+        }
+        states
+    }
+
+    fn update_xdg_window_state(&mut self, window_id: u32, state_flags: u32) {
+        let Some(wl_surface_id) = self.surface_id_for_window(window_id) else {
+            return;
+        };
+        let Some(xdg_surface) = self
+            .xdg_shell_manager
+            .get_xdg_surface_by_wl_surface_mut(wl_surface_id)
+        else {
+            return;
+        };
+        let Some(toplevel) = xdg_surface.toplevel.as_mut() else {
+            return;
+        };
+
+        toplevel.fullscreen = (state_flags & protocol_sws::window_state::FULLSCREEN) != 0;
+        toplevel.maximized = (state_flags & protocol_sws::window_state::MAXIMIZED) != 0;
+    }
+
+    fn queue_xdg_window_configure(&mut self, window_id: u32, width: u32, height: u32) {
+        let Some(wl_surface_id) = self.surface_id_for_window(window_id) else {
+            return;
+        };
+        let Some((xdg_surface_id, toplevel_id, maximized, fullscreen)) = self
+            .xdg_shell_manager
+            .get_xdg_surface_ids_by_wl_surface(wl_surface_id)
+            .and_then(|(xdg_surface_id, toplevel_id)| {
+                let toplevel_id = toplevel_id?;
+                let toplevel = self
+                    .xdg_shell_manager
+                    .get_xdg_surface(xdg_surface_id)?
+                    .toplevel
+                    .as_ref()?;
+                Some((
+                    xdg_surface_id,
+                    toplevel_id,
+                    toplevel.maximized,
+                    toplevel.fullscreen,
+                ))
+            })
+        else {
+            return;
+        };
+
+        let scale = self
+            .surface_manager
+            .get_surface(wl_surface_id)
+            .map(|surface| surface.buffer_scale.max(1) as u32)
+            .unwrap_or(1);
+        let logical_width = width.div_ceil(scale).max(1);
+        let logical_height = height.div_ceil(scale).max(1);
+        let serial = self.allocate_serial();
+        if let Some(xdg_surface) = self.xdg_shell_manager.get_xdg_surface_mut(xdg_surface_id) {
+            xdg_surface.last_configure_serial = Some(serial);
+        }
+
+        let mut toplevel_configure =
+            WaylandMessage::new(toplevel_id, xdg_shell::xdg_toplevel_event::CONFIGURE);
+        toplevel_configure.add_arg(WaylandArg::Int(logical_width as i32));
+        toplevel_configure.add_arg(WaylandArg::Int(logical_height as i32));
+        toplevel_configure.add_arg(WaylandArg::Array(Self::xdg_toplevel_state_bytes(
+            maximized, fullscreen,
+        )));
+
+        let mut surface_configure =
+            WaylandMessage::new(xdg_surface_id, xdg_shell::xdg_surface_event::CONFIGURE);
+        surface_configure.add_arg(WaylandArg::Uint(serial));
+        let mut messages = Vec::new();
+        messages.push(toplevel_configure);
+        messages.push(surface_configure);
+        self.queue_input_messages(messages);
+    }
+
+    fn apply_xdg_toplevel_state_to_sws(&mut self, wl_surface_id: u32, window_id: u32) {
+        let Some((maximized, fullscreen)) = self
+            .xdg_shell_manager
+            .get_xdg_surface_ids_by_wl_surface(wl_surface_id)
+            .and_then(|(xdg_surface_id, _)| {
+                self.xdg_shell_manager
+                    .get_xdg_surface(xdg_surface_id)?
+                    .toplevel
+                    .as_ref()
+                    .map(|toplevel| (toplevel.maximized, toplevel.fullscreen))
+            })
+        else {
+            return;
+        };
+
+        if maximized {
+            let _ = self.send_maximize_window(window_id);
+        }
+        if fullscreen {
+            let _ = self.send_set_fullscreen(window_id);
+        }
+    }
+
     fn queue_input_messages(&self, messages: Vec<WaylandMessage>) {
         if messages.is_empty() {
             return;
@@ -764,6 +869,19 @@ impl WaylandBridge {
             }
             protocol_sws::ServerMessage::OutputScaleChanged { scale_milli } => {
                 self.output_scale = ((scale_milli + 500) / 1000).max(1) as i32;
+            }
+            protocol_sws::ServerMessage::WindowStateChanged {
+                window_id,
+                state_flags,
+            } => {
+                self.update_xdg_window_state(window_id, state_flags);
+            }
+            protocol_sws::ServerMessage::WindowConfigure {
+                window_id,
+                width,
+                height,
+            } => {
+                self.queue_xdg_window_configure(window_id, width, height);
             }
             _ => {}
         }
@@ -1092,6 +1210,7 @@ impl WaylandBridge {
             {
                 surface.last_attached_buffer = Some(buffer_id);
             }
+            self.apply_xdg_toplevel_state_to_sws(wl_surface_id, window_id);
         }
 
         Ok(())
@@ -1197,6 +1316,7 @@ impl WaylandBridge {
             {
                 surface.last_attached_buffer = Some(buffer_id);
             }
+            self.apply_xdg_toplevel_state_to_sws(wl_surface_id, window_id);
         }
 
         Ok(())
@@ -1552,6 +1672,38 @@ impl WaylandBridge {
             .write(&msg_bytes)
             .map_err(|_| "Failed to send RESTORE_WINDOW")?;
 
+        Ok(())
+    }
+
+    fn send_set_fullscreen(&mut self, window_id: u32) -> Result<(), &'static str> {
+        let sws_conn = self.sws_connection.as_mut().ok_or("Not connected to SWS")?;
+        let payload = protocol_sws::payload_set_fullscreen(window_id);
+        let header = protocol_sws::MessageHeader::new(
+            protocol_sws::client_msg::SET_FULLSCREEN,
+            payload.len() as u32,
+        );
+        let mut msg_bytes = Vec::new();
+        msg_bytes.extend_from_slice(&header.to_le_bytes());
+        msg_bytes.extend_from_slice(&payload);
+        sws_conn
+            .write(&msg_bytes)
+            .map_err(|_| "Failed to send SET_FULLSCREEN")?;
+        Ok(())
+    }
+
+    fn send_unset_fullscreen(&mut self, window_id: u32) -> Result<(), &'static str> {
+        let sws_conn = self.sws_connection.as_mut().ok_or("Not connected to SWS")?;
+        let payload = protocol_sws::payload_unset_fullscreen(window_id);
+        let header = protocol_sws::MessageHeader::new(
+            protocol_sws::client_msg::UNSET_FULLSCREEN,
+            payload.len() as u32,
+        );
+        let mut msg_bytes = Vec::new();
+        msg_bytes.extend_from_slice(&header.to_le_bytes());
+        msg_bytes.extend_from_slice(&payload);
+        sws_conn
+            .write(&msg_bytes)
+            .map_err(|_| "Failed to send UNSET_FULLSCREEN")?;
         Ok(())
     }
 
@@ -2436,6 +2588,12 @@ impl WaylandBridge {
                 }
 
                 if let Some((xdg_surface_id, toplevel_id, serial)) = configure_state {
+                    let (maximized, fullscreen) = self
+                        .xdg_shell_manager
+                        .get_xdg_surface(xdg_surface_id)
+                        .and_then(|surface| surface.toplevel.as_ref())
+                        .map(|toplevel| (toplevel.maximized, toplevel.fullscreen))
+                        .unwrap_or((false, false));
                     if let Some(xdg_surface) =
                         self.xdg_shell_manager.get_xdg_surface_mut(xdg_surface_id)
                     {
@@ -2446,7 +2604,9 @@ impl WaylandBridge {
                         WaylandMessage::new(toplevel_id, xdg_shell::xdg_toplevel_event::CONFIGURE);
                     toplevel_configure.add_arg(WaylandArg::Int(0));
                     toplevel_configure.add_arg(WaylandArg::Int(0));
-                    toplevel_configure.add_arg(WaylandArg::Array(Vec::new()));
+                    toplevel_configure.add_arg(WaylandArg::Array(Self::xdg_toplevel_state_bytes(
+                        maximized, fullscreen,
+                    )));
 
                     let mut surface_configure = WaylandMessage::new(
                         xdg_surface_id,
@@ -2910,24 +3070,76 @@ impl WaylandBridge {
             }
             xdg_shell::xdg_toplevel_request::SET_MAXIMIZED => {
                 bridge_log!("[Bridge] xdg_toplevel.set_maximized");
-                if let Some(window_id) = self.window_id_for_toplevel(xdg_toplevel_id) {
+                let wl_surface_id = self
+                    .xdg_shell_manager
+                    .get_toplevel_mut(xdg_toplevel_id)
+                    .map(|(toplevel, wl_surface_id)| {
+                        toplevel.maximized = true;
+                        wl_surface_id
+                    });
+                if let Some(window_id) = wl_surface_id
+                    .and_then(|surface_id| self.surface_to_window.get(&surface_id).copied())
+                {
                     let _ = self.send_maximize_window(window_id);
                 }
                 Ok(Vec::new())
             }
             xdg_shell::xdg_toplevel_request::UNSET_MAXIMIZED => {
                 bridge_log!("[Bridge] xdg_toplevel.unset_maximized");
-                if let Some(window_id) = self.window_id_for_toplevel(xdg_toplevel_id) {
+                let wl_surface_id = self
+                    .xdg_shell_manager
+                    .get_toplevel_mut(xdg_toplevel_id)
+                    .map(|(toplevel, wl_surface_id)| {
+                        toplevel.maximized = false;
+                        wl_surface_id
+                    });
+                if let Some(window_id) = wl_surface_id
+                    .and_then(|surface_id| self.surface_to_window.get(&surface_id).copied())
+                {
                     let _ = self.send_restore_window(window_id);
                 }
                 Ok(Vec::new())
             }
             xdg_shell::xdg_toplevel_request::SET_FULLSCREEN => {
                 bridge_log!("[Bridge] xdg_toplevel.set_fullscreen");
+                let wl_surface_id = self
+                    .xdg_shell_manager
+                    .get_toplevel_mut(xdg_toplevel_id)
+                    .map(|(toplevel, wl_surface_id)| {
+                        toplevel.fullscreen = true;
+                        wl_surface_id
+                    });
+                if let Some(window_id) = wl_surface_id
+                    .and_then(|surface_id| self.surface_to_window.get(&surface_id).copied())
+                {
+                    let _ = self.send_set_fullscreen(window_id);
+                }
                 Ok(Vec::new())
             }
             xdg_shell::xdg_toplevel_request::UNSET_FULLSCREEN => {
                 bridge_log!("[Bridge] xdg_toplevel.unset_fullscreen");
+                let state = self
+                    .xdg_shell_manager
+                    .get_toplevel_mut(xdg_toplevel_id)
+                    .map(|(toplevel, wl_surface_id)| {
+                        toplevel.fullscreen = false;
+                        (wl_surface_id, toplevel.maximized)
+                    });
+                if let Some((window_id, restore_maximized)) =
+                    state.and_then(|(surface_id, maximized)| {
+                        self.surface_to_window
+                            .get(&surface_id)
+                            .copied()
+                            .map(|window_id| (window_id, maximized))
+                    })
+                {
+                    let _ = self.send_unset_fullscreen(window_id);
+                    if restore_maximized {
+                        let _ = self.send_maximize_window(window_id);
+                    } else {
+                        let _ = self.send_restore_window(window_id);
+                    }
+                }
                 Ok(Vec::new())
             }
             xdg_shell::xdg_toplevel_request::SET_MINIMIZED => {

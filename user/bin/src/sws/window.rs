@@ -127,6 +127,10 @@ pub struct Window {
     pub maximized: bool,
     /// Saved position and size before maximize (for restore)
     pub saved_geometry: Option<(i32, i32, u32, u32)>,
+    /// Whether the window currently occupies the complete output.
+    pub fullscreen: bool,
+    /// Geometry to restore when leaving fullscreen.
+    pub fullscreen_restore_geometry: Option<(i32, i32, u32, u32)>,
     /// Window opacity (0.0 = fully transparent, 1.0 = fully opaque)
     pub opacity: f32,
     /// Whether the window can be resized by the user via interactive resize
@@ -438,6 +442,8 @@ impl Window {
             minimized: false,
             maximized: false,
             saved_geometry: None,
+            fullscreen: false,
+            fullscreen_restore_geometry: None,
             opacity: 1.0,
             resizable: true, // Default to resizable
             active_on_focus: true,
@@ -478,6 +484,8 @@ impl Window {
             minimized: false,
             maximized: false,
             saved_geometry: None,
+            fullscreen: false,
+            fullscreen_restore_geometry: None,
             opacity: 1.0,
             resizable: true, // Default to resizable
             active_on_focus: true,
@@ -544,6 +552,8 @@ impl Window {
             minimized: false,
             maximized: false,
             saved_geometry: None,
+            fullscreen: false,
+            fullscreen_restore_geometry: None,
             opacity: 1.0,
             resizable: true, // Default to resizable
             active_on_focus: true,
@@ -573,6 +583,28 @@ impl Window {
             && x < self.x + self.width as i32
             && y >= self.y
             && y < self.y + self.height as i32
+    }
+
+    /// Return compositor-visible presentation-state flags.
+    ///
+    /// Fullscreen and maximized are independent flags. Both are reported while
+    /// a maximized window temporarily occupies the complete output.
+    ///
+    /// # Returns
+    ///
+    /// A bitset from [`sws_protocol::window_state`].
+    pub fn state_flags(&self) -> u32 {
+        let mut flags = 0;
+        if self.minimized {
+            flags |= sws_protocol::window_state::MINIMIZED;
+        }
+        if self.fullscreen {
+            flags |= sws_protocol::window_state::FULLSCREEN;
+        }
+        if self.maximized {
+            flags |= sws_protocol::window_state::MAXIMIZED;
+        }
+        flags
     }
 
     /// Move window to new position
@@ -629,6 +661,7 @@ impl WindowManager {
         );
         let window = Window::new_with_buffer(id, x, y, width, height);
         self.windows.push(window);
+        self.rebuild_z_order();
 
         // Focus the new window
         self.focus_window(id);
@@ -655,6 +688,7 @@ impl WindowManager {
         );
         let window = Window::new_with_buffer(id, x, y, width, height);
         self.windows.push(window);
+        self.rebuild_z_order();
 
         // Focus the new window
         self.focus_window(id);
@@ -682,12 +716,31 @@ impl WindowManager {
         );
         let window = Window::new_with_shm(id, x, y, width, height)?;
         self.windows.push(window);
+        self.rebuild_z_order();
 
         Ok(id)
     }
 
     /// Create window from IPC event with pre-mapped SHM
     /// This takes ownership of the SharedMemory object passed from the IPC thread
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - SWS window identifier assigned by the IPC layer.
+    /// * `x` - Initial output-relative X coordinate.
+    /// * `y` - Initial output-relative Y coordinate.
+    /// * `width` - Initial width in physical pixels.
+    /// * `height` - Initial height in physical pixels.
+    /// * `shm` - Shared-memory object containing the initial backing buffer.
+    /// * `shm_mapped_addr` - Optional server mapping of `shm`.
+    /// * `shm_size` - Mapped shared-memory length in bytes.
+    /// * `owner_client_id` - IPC connection authorized to manage the window.
+    /// * `extension_id` - Registered extension that represents the external client.
+    /// * `external_client_id` - Extension-local client or surface identifier.
+    ///
+    /// # Returns
+    ///
+    /// The inserted window identifier, or an error when creation fails.
     pub fn create_extension_window(
         &mut self,
         id: WindowId,
@@ -698,6 +751,7 @@ impl WindowManager {
         shm: SharedMemory,
         shm_mapped_addr: Option<usize>,
         shm_size: usize,
+        owner_client_id: usize,
         extension_id: u32,
         external_client_id: u32,
     ) -> Result<WindowId, &'static str> {
@@ -712,7 +766,7 @@ impl WindowManager {
 
         let window = Window {
             id,
-            owner_client_id: Some(extension_id as usize),
+            owner_client_id: Some(owner_client_id),
             app_id: None,
             parent: None,
             transient_flags: 0,
@@ -735,6 +789,8 @@ impl WindowManager {
             minimized: false,
             maximized: false,
             saved_geometry: None,
+            fullscreen: false,
+            fullscreen_restore_geometry: None,
             opacity: 1.0,
             resizable: true,
             active_on_focus: true,
@@ -743,6 +799,7 @@ impl WindowManager {
             extension_owner: Some((extension_id, external_client_id)),
         };
         self.windows.push(window);
+        self.rebuild_z_order();
 
         Ok(id)
     }
@@ -794,6 +851,8 @@ impl WindowManager {
             minimized: false,
             maximized: false,
             saved_geometry: None,
+            fullscreen: false,
+            fullscreen_restore_geometry: None,
             opacity: 1.0,
             resizable: true, // Default to resizable
             active_on_focus: true,
@@ -802,6 +861,7 @@ impl WindowManager {
             extension_owner: None,
         };
         self.windows.push(window);
+        self.rebuild_z_order();
 
         Ok(id)
     }
@@ -859,6 +919,7 @@ impl WindowManager {
         );
         let window = Window::new(id, x, y, width, height);
         self.windows.push(window);
+        self.rebuild_z_order();
 
         // Focus the new window
         self.focus_window(id);
@@ -886,9 +947,26 @@ impl WindowManager {
             .map(|w| w.id)
     }
 
-    /// Focus a window
-    /// If the window is hidden/minimized, it will be shown before focusing
+    /// Focus a window.
+    ///
+    /// If the window is hidden/minimized, it will be shown before focusing.
+    /// While fullscreen is active, only that window and its transient
+    /// descendants may take focus.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - Window that should receive keyboard focus.
     pub fn focus_window(&mut self, id: WindowId) {
+        if let Some(fullscreen_id) = self.fullscreen_window_id()
+            && !self.is_in_fullscreen_group(id)
+        {
+            println!(
+                "[WindowManager] Window #{} cannot take focus from fullscreen window #{}",
+                id, fullscreen_id
+            );
+            return;
+        }
+
         println!("[WindowManager] Focusing window #{}", id);
         // Unfocus all windows
         for window in &mut self.windows {
@@ -928,17 +1006,40 @@ impl WindowManager {
         }
     }
 
-    /// Check if a window should accept focus
+    /// Check whether a window may accept focus under the current policy.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - Window identifier to inspect.
+    ///
+    /// # Returns
+    ///
+    /// `true` when the role is focusable and fullscreen focus confinement, if
+    /// active, permits the window.
     pub fn window_accepts_focus(&self, id: WindowId) -> bool {
-        if let Some(window) = self.get_window(id) {
-            Self::window_type_accepts_focus(window.window_type)
-        } else {
-            false
+        let Some(window) = self.get_window(id) else {
+            return false;
+        };
+        if !Self::window_type_accepts_focus(window.window_type) {
+            return false;
         }
+        self.fullscreen_window_id().is_none() || self.is_in_fullscreen_group(id)
     }
 
-    /// Raise window to top (bring to front in Z-order)
+    /// Raise a window and its transient group to the top.
+    ///
+    /// While fullscreen is active, this delegates to the layer-aware raise
+    /// policy so unrelated windows cannot escape above fullscreen.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - Window or transient group member to raise.
     pub fn raise_to_top(&mut self, id: WindowId) {
+        if self.fullscreen_window_id().is_some() {
+            self.raise_to_top_with_type(id);
+            return;
+        }
+
         let root = self.top_level_ancestor(id);
         println!(
             "[WindowManager] Raising window #{} (root #{}) to top",
@@ -1019,7 +1120,15 @@ impl WindowManager {
 
     /// Set (or clear) a window parent.
     ///
-    /// Returns `false` if the relationship would create a cycle or references missing windows.
+    /// # Arguments
+    ///
+    /// * `window_id` - Child window whose relationship should change.
+    /// * `parent_id` - Parent window, or `None` to clear the relationship.
+    ///
+    /// # Returns
+    ///
+    /// `false` if the relationship would create a cycle or references missing
+    /// windows; otherwise `true`.
     pub fn set_window_parent(&mut self, window_id: WindowId, parent_id: Option<WindowId>) -> bool {
         if self.get_window(window_id).is_none() {
             return false;
@@ -1053,15 +1162,27 @@ impl WindowManager {
             } else {
                 w.transient_flags = 0;
             }
+            self.rebuild_z_order();
             true
         } else {
             false
         }
     }
 
+    /// Set transient stacking and movement policy flags.
+    ///
+    /// # Arguments
+    ///
+    /// * `window_id` - Transient window to update.
+    /// * `flags` - Bitset from [`sws_protocol::transient_flags`].
+    ///
+    /// # Returns
+    ///
+    /// `true` when the window exists and was updated.
     pub fn set_window_transient_flags(&mut self, window_id: WindowId, flags: u32) -> bool {
         if let Some(w) = self.get_window_mut(window_id) {
             w.transient_flags = flags;
+            self.rebuild_z_order();
             true
         } else {
             false
@@ -1243,9 +1364,26 @@ impl WindowManager {
         }
     }
 
-    /// Maximize a window to screen dimensions
+    /// Maximize a window to compositor-selected workarea dimensions.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - Window to maximize.
+    /// * `screen_width` - Selected maximized width in physical pixels.
+    /// * `screen_height` - Selected maximized height in physical pixels.
+    ///
+    /// # Returns
+    ///
+    /// `true` when the state changed to maximized.
     pub fn maximize_window(&mut self, id: WindowId, screen_width: u32, screen_height: u32) -> bool {
         if let Some(w) = self.get_window_mut(id) {
+            if w.fullscreen {
+                println!(
+                    "[WindowManager] Ignoring maximize for fullscreen window #{}",
+                    id
+                );
+                return false;
+            }
             // Policy: windows with an explicit max size are not maximizable.
             // (max_* != 0 means "set")
             if w.size_limits.max_width != 0 || w.size_limits.max_height != 0 {
@@ -1276,7 +1414,140 @@ impl WindowManager {
         }
     }
 
-    /// Restore a window from minimized or maximized state
+    /// Make a window occupy the complete output.
+    ///
+    /// The current geometry is saved independently from maximize state. If the
+    /// window was maximized before entering fullscreen, leaving fullscreen
+    /// restores the maximized geometry and keeps the normal restore geometry.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - Window to place in fullscreen.
+    /// * `screen_width` - Output width in physical pixels.
+    /// * `screen_height` - Output height in physical pixels.
+    ///
+    /// # Returns
+    ///
+    /// `true` when fullscreen was entered. Returns `false` for an unknown,
+    /// minimized, already-fullscreen window, or while another window owns the
+    /// single output's fullscreen state.
+    pub fn set_fullscreen_window(
+        &mut self,
+        id: WindowId,
+        screen_width: u32,
+        screen_height: u32,
+    ) -> bool {
+        if self
+            .windows
+            .iter()
+            .any(|window| window.fullscreen && window.id != id)
+        {
+            return false;
+        }
+
+        let Some(window) = self.get_window_mut(id) else {
+            return false;
+        };
+        if window.fullscreen || window.minimized {
+            return false;
+        }
+
+        window.fullscreen_restore_geometry =
+            Some((window.x, window.y, window.width, window.height));
+        window.x = 0;
+        window.y = 0;
+        window.width = screen_width.max(1);
+        window.height = screen_height.max(1);
+        window.fullscreen = true;
+        println!(
+            "[WindowManager] Window #{} entered fullscreen at {}x{}",
+            id, window.width, window.height
+        );
+
+        self.rebuild_z_order();
+        true
+    }
+
+    /// Leave fullscreen and restore the preceding geometry.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - Fullscreen window to restore.
+    ///
+    /// # Returns
+    ///
+    /// `true` when fullscreen was left, or `false` when the window is unknown
+    /// or not fullscreen.
+    pub fn unset_fullscreen_window(&mut self, id: WindowId) -> bool {
+        let Some(window) = self.get_window_mut(id) else {
+            return false;
+        };
+        if !window.fullscreen {
+            return false;
+        }
+
+        let Some((x, y, width, height)) = window.fullscreen_restore_geometry.take() else {
+            return false;
+        };
+        window.x = x;
+        window.y = y;
+        window.width = width.max(1);
+        window.height = height.max(1);
+        window.fullscreen = false;
+        println!("[WindowManager] Window #{} left fullscreen", id);
+
+        self.rebuild_z_order();
+        true
+    }
+
+    /// Check whether a window is currently fullscreen.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - Window identifier to inspect.
+    ///
+    /// # Returns
+    ///
+    /// `true` only when the window exists and owns fullscreen state.
+    pub fn is_fullscreen(&self, id: WindowId) -> bool {
+        self.get_window(id)
+            .map(|window| window.fullscreen)
+            .unwrap_or(false)
+    }
+
+    /// Check whether a window belongs to the active fullscreen transient group.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - Window identifier to inspect.
+    ///
+    /// # Returns
+    ///
+    /// `true` for the fullscreen window and each of its transient descendants.
+    pub fn is_in_fullscreen_group(&self, id: WindowId) -> bool {
+        self.fullscreen_window_id()
+            .is_some_and(|fullscreen_id| self.top_level_ancestor(id) == fullscreen_id)
+    }
+
+    fn fullscreen_window_id(&self) -> Option<WindowId> {
+        self.windows
+            .iter()
+            .find(|window| window.fullscreen)
+            .map(|window| window.id)
+    }
+
+    /// Restore a window from minimized or maximized state.
+    ///
+    /// Fullscreen is independent and must be left with
+    /// [`Self::unset_fullscreen_window`].
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - Window to restore.
+    ///
+    /// # Returns
+    ///
+    /// `true` when minimized or maximized state changed.
     pub fn restore_window(&mut self, id: WindowId) -> bool {
         if let Some(w) = self.get_window_mut(id) {
             if w.minimized {
@@ -1284,6 +1555,9 @@ impl WindowManager {
                 w.visible = true;
                 println!("[WindowManager] Window #{} restored from minimized", id);
                 return true;
+            }
+            if w.fullscreen {
+                return false;
             }
             if w.maximized {
                 if let Some((x, y, width, height)) = w.saved_geometry {
@@ -1308,7 +1582,16 @@ impl WindowManager {
         self.get_window(id).map(|w| w.minimized).unwrap_or(false)
     }
 
-    /// Set window type for Z-order management
+    /// Set a window role used for Z-order management.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - Window to update.
+    /// * `window_type` - New desktop, normal, shell, overlay, or IME role.
+    ///
+    /// # Returns
+    ///
+    /// `true` when the window exists and was updated.
     pub fn set_window_type(&mut self, id: WindowId, window_type: WindowType) -> bool {
         if let Some(w) = self.get_window_mut(id) {
             w.window_type = window_type;
@@ -1341,8 +1624,8 @@ impl WindowManager {
                 id, window_type, w.resizable, w.raise_on_focus
             );
 
-            // Rebuild Z-order to maintain proper layering: Desktop < Normal < Taskbar < AlwaysOnTop
-            self.rebuild_z_order_for_type_change(id, window_type);
+            // Rebuild Z-order to maintain type and fullscreen layers.
+            self.rebuild_z_order();
 
             true
         } else {
@@ -1350,18 +1633,34 @@ impl WindowManager {
         }
     }
 
-    /// Internal helper: rebuild Z-order after window type change
-    /// This ensures windows are in the correct layer: Desktop < Normal < Taskbar < AlwaysOnTop
-    fn rebuild_z_order_for_type_change(&mut self, _id: WindowId, _new_type: WindowType) {
+    /// Rebuild type and fullscreen layers while preserving order within each layer.
+    fn rebuild_z_order(&mut self) {
+        let fullscreen_id = self
+            .windows
+            .iter()
+            .find(|window| window.fullscreen)
+            .map(|window| window.id);
+        let mut fullscreen_group_ids = Vec::new();
+        if let Some(id) = fullscreen_id {
+            fullscreen_group_ids.push(id);
+            self.collect_descendants_for_raise(id, &mut fullscreen_group_ids);
+        }
+
         let old = core::mem::take(&mut self.windows);
         let mut desktop: Vec<Window> = Vec::new();
         let mut normal: Vec<Window> = Vec::new();
         let mut taskbar: Vec<Window> = Vec::new();
         let mut always_on_top: Vec<Window> = Vec::new();
+        let mut fullscreen: Vec<Window> = Vec::new();
         let mut ime_popup: Vec<Window> = Vec::new();
 
-        // Sort windows into layers by type
+        // Fullscreen is a presentation state rather than a window role. It
+        // covers shell and always-on-top surfaces but remains below IME UI.
         for w in old {
+            if fullscreen_group_ids.iter().any(|id| *id == w.id) {
+                fullscreen.push(w);
+                continue;
+            }
             match w.window_type {
                 WindowType::Desktop => desktop.push(w),
                 WindowType::Normal => normal.push(w),
@@ -1371,14 +1670,22 @@ impl WindowManager {
             }
         }
 
-        // Reconstruct in proper Z-order: desktop -> normal -> taskbar -> always_on_top -> ime_popup
+        if let Some(id) = fullscreen_id
+            && let Some(position) = fullscreen.iter().position(|window| window.id == id)
+        {
+            let root = fullscreen.remove(position);
+            fullscreen.insert(0, root);
+        }
+
+        // Reconstruct bottom-to-top layer order.
         self.windows = desktop;
         self.windows.extend(normal);
         self.windows.extend(taskbar);
         self.windows.extend(always_on_top);
+        self.windows.extend(fullscreen);
         self.windows.extend(ime_popup);
 
-        println!("[WindowManager] Z-order rebuilt after type change");
+        println!("[WindowManager] Z-order rebuilt");
         print!("[WindowManager] Current Z-order (bottom to top): ");
         for w in &self.windows {
             print!("#{}({:?}) ", w.id, w.window_type);
@@ -1431,13 +1738,36 @@ impl WindowManager {
         }
     }
 
-    /// Raise window to top, respecting window types
-    /// Desktop < Normal < Taskbar < AlwaysOnTop
+    /// Raise a window while respecting role and fullscreen layers.
+    ///
+    /// The base order is Desktop < Normal < Taskbar < AlwaysOnTop < Fullscreen
+    /// < ImePopup. Fullscreen transient descendants remain with their parent.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - Window or transient group member to raise.
     pub fn raise_to_top_with_type(&mut self, id: WindowId) {
         let (window_type, raise_on_focus) = match self.get_window(id) {
             Some(w) => (w.window_type, w.raise_on_focus),
             None => return,
         };
+
+        if let Some(fullscreen_id) = self
+            .windows
+            .iter()
+            .find(|window| window.fullscreen)
+            .map(|window| window.id)
+        {
+            if self.top_level_ancestor(id) == fullscreen_id {
+                self.rebuild_z_order();
+            } else {
+                println!(
+                    "[WindowManager] Window #{} cannot raise above fullscreen window #{}",
+                    id, fullscreen_id
+                );
+            }
+            return;
+        }
 
         // If raise_on_focus is false, don't raise the window (e.g., Desktop backgrounds)
         if !raise_on_focus {
@@ -1628,5 +1958,96 @@ impl WindowManager {
             ));
         }
         result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::vec::Vec;
+
+    use super::WindowManager;
+
+    #[test]
+    fn fullscreen_round_trip_restores_normal_geometry() {
+        let mut manager = WindowManager::new();
+        let id = manager.create_window_no_buffer(25, 30, 640, 480);
+
+        assert!(manager.set_fullscreen_window(id, 1920, 1080));
+        let fullscreen = manager.get_window(id).unwrap();
+        assert_eq!(
+            (
+                fullscreen.x,
+                fullscreen.y,
+                fullscreen.width,
+                fullscreen.height
+            ),
+            (0, 0, 1920, 1080)
+        );
+        assert_eq!(
+            fullscreen.state_flags(),
+            sws_protocol::window_state::FULLSCREEN
+        );
+
+        assert!(manager.unset_fullscreen_window(id));
+        let restored = manager.get_window(id).unwrap();
+        assert_eq!(
+            (restored.x, restored.y, restored.width, restored.height),
+            (25, 30, 640, 480)
+        );
+        assert_eq!(restored.state_flags(), 0);
+    }
+
+    #[test]
+    fn fullscreen_round_trip_preserves_maximized_restore_chain() {
+        let mut manager = WindowManager::new();
+        let id = manager.create_window_no_buffer(25, 30, 640, 480);
+
+        assert!(manager.maximize_window(id, 1000, 700));
+        manager.set_window_position(id, 10, 20);
+        assert!(manager.set_fullscreen_window(id, 1920, 1080));
+        assert_eq!(
+            manager.get_window(id).unwrap().state_flags(),
+            sws_protocol::window_state::MAXIMIZED | sws_protocol::window_state::FULLSCREEN
+        );
+
+        assert!(manager.unset_fullscreen_window(id));
+        let maximized = manager.get_window(id).unwrap();
+        assert_eq!(
+            (maximized.x, maximized.y, maximized.width, maximized.height),
+            (10, 20, 1000, 700)
+        );
+        assert!(maximized.maximized);
+
+        assert!(manager.restore_window(id));
+        let restored = manager.get_window(id).unwrap();
+        assert_eq!(
+            (restored.x, restored.y, restored.width, restored.height),
+            (25, 30, 640, 480)
+        );
+    }
+
+    #[test]
+    fn fullscreen_is_exclusive_and_keeps_transients_above_parent() {
+        let mut manager = WindowManager::new();
+        let fullscreen_id = manager.create_window_no_buffer(0, 0, 640, 480);
+        let other_id = manager.create_window_no_buffer(50, 50, 320, 240);
+
+        assert!(manager.set_fullscreen_window(fullscreen_id, 1920, 1080));
+        manager.focus_window(fullscreen_id);
+        assert!(!manager.set_fullscreen_window(other_id, 1920, 1080));
+
+        let transient_id = manager.create_window_no_buffer(100, 100, 200, 100);
+        assert!(manager.set_window_parent(transient_id, Some(fullscreen_id)));
+        let order: Vec<u32> = manager
+            .get_windows()
+            .iter()
+            .map(|window| window.id)
+            .collect();
+        assert_eq!(order[order.len() - 2..], [fullscreen_id, transient_id]);
+
+        manager.focus_window(other_id);
+        assert_eq!(manager.get_focused_window_id(), Some(fullscreen_id));
+        manager.focus_window(transient_id);
+        assert_eq!(manager.get_focused_window_id(), Some(transient_id));
     }
 }

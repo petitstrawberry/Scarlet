@@ -17,7 +17,7 @@ use core::f32;
 
 use scarlet_std::format;
 use scarlet_std::println;
-use scarlet_ui::{MenuBarModel, MenuEntry, MenuItemModel};
+use scarlet_ui::{MenuBarModel, MenuEntry, MenuItemModel, PlatformWindow, SWSPlatformWindow};
 use scarlet_ui::{hstack, prelude::*, vstack};
 use scarlet_ui_macros::View;
 
@@ -27,6 +27,8 @@ struct DemoApp {
     counter: State<i32>,
     slider_value: State<f32>,
     input_text: State<String>,
+    fullscreen: State<bool>,
+    fullscreen_request_sent: State<bool>,
 }
 
 impl DemoApp {
@@ -43,6 +45,13 @@ impl Application for DemoApp {
                 .font_size(40.0),
             Text::new("ScarletUIの世界からこんにちは!")
                 .font_size(24.0),
+            Button::new(if self.fullscreen.get() { "Exit Fullscreen" } else { "Enter Fullscreen" })
+                .on_click({
+                    let fullscreen = self.fullscreen.clone();
+                    move || {
+                        fullscreen.set(!fullscreen.get());
+                    }
+                }),
             vstack! {
                 Text::new("TextField")
                     .font_size(18.0),
@@ -140,7 +149,32 @@ impl Application for DemoApp {
                 println!("[ui_demo] Menu: Help");
             })),
         ]))
+        .decorated(!self.fullscreen.get())
         .size(Size::new(480.0, 480.0)))
+    }
+
+    fn on_window_sync(&mut self, _ctx: &WindowContext, window: &mut dyn PlatformWindow) {
+        let desired = self.fullscreen.get();
+        if desired == self.fullscreen_request_sent.get() {
+            return;
+        }
+        let Some(window) = window.as_any_mut().downcast_mut::<SWSPlatformWindow>() else {
+            return;
+        };
+
+        let surface_id = window.surface_id();
+        let result = if desired {
+            window.connection().set_fullscreen(surface_id)
+        } else {
+            window.connection().unset_fullscreen(surface_id)
+        };
+        match result {
+            Ok(()) => self.fullscreen_request_sent.set(desired),
+            Err(error) => {
+                println!("[ui_demo] Failed to change fullscreen state: {:?}", error);
+                self.fullscreen.set(self.fullscreen_request_sent.get());
+            }
+        }
     }
 
     fn debug_logging(&self) -> bool {

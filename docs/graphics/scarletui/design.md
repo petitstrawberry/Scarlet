@@ -150,6 +150,7 @@ SWS handles:
 - surface creation and destruction
 - shared-memory buffer presentation
 - SWS input events
+- independent maximized and fullscreen presentation states
 - Scarlet window types
 - menu titles and menu callbacks
 - SWS text-input protocol
@@ -158,6 +159,27 @@ SWS handles:
 Scarlet-specific applications may downcast `dyn PlatformWindow` to
 `SWSPlatformWindow` inside lifecycle hooks when they intentionally need direct
 SWS capabilities.
+
+For example, an application can synchronize a fullscreen state from
+`on_window_sync` without adding SWS-only methods to the platform-neutral trait:
+
+```rust
+let Some(window) = window.as_any_mut().downcast_mut::<SWSPlatformWindow>() else {
+    return;
+};
+let surface_id = window.surface_id();
+let result = if fullscreen {
+    window.connection().set_fullscreen(surface_id)
+} else {
+    window.connection().unset_fullscreen(surface_id)
+};
+let _ = result;
+```
+
+SWS controls output occupancy and stacking. ScarletUI decorations are
+client-side, so an application that enters fullscreen should also render its
+`Window` with `.decorated(false)`. The bundled `ui-demo` does both from its
+“Enter Fullscreen” button.
 
 ### Winit
 

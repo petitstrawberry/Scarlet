@@ -17,6 +17,7 @@ use scarlet_desktop_config::{
 use scarlet_os::time::monotonic_time_ns;
 use std::env;
 use std::handle::Handle;
+use std::handle::capability::memory_mapping::munmap;
 use std::poll::{POLLIN, PollHandle, poll};
 use std::println;
 use std::string::String;
@@ -963,15 +964,32 @@ impl Compositor {
             payload.to_vec(),
         );
 
-        let windows: Vec<(u32, super::window::WindowType, u32)> = self
+        let windows: Vec<(u32, super::window::WindowType, u32, bool)> = self
             .window_manager
             .get_windows()
             .iter()
-            .map(|w| (w.id, w.window_type, w.height))
+            .map(|w| (w.id, w.window_type, w.height, w.fullscreen))
             .collect();
         let mut taskbar_height = 0;
 
-        for (window_id, window_type, height) in windows {
+        for (window_id, window_type, height, fullscreen) in windows {
+            if fullscreen {
+                println!(
+                    "[Compositor] Configuring fullscreen window #{} to {}x{}",
+                    window_id, new_width, new_height
+                );
+                self.window_manager.set_window_position(window_id, 0, 0);
+                self.window_manager
+                    .resize_window_in_place(window_id, new_width, new_height);
+                let payload =
+                    sws_protocol::payload_window_configure(window_id, new_width, new_height);
+                super::ipc::send_message_to_window(
+                    window_id,
+                    sws_protocol::server_msg::WINDOW_CONFIGURE,
+                    payload.to_vec(),
+                );
+                continue;
+            }
             match window_type {
                 super::window::WindowType::Desktop => {
                     println!(
@@ -3028,7 +3046,10 @@ impl Compositor {
                                 let near_right = wx >= window.width as i32 - RESIZE_GRIP_PX;
                                 let near_bottom = wy >= window.height as i32 - RESIZE_GRIP_PX;
                                 // Only allow resize if window is marked as resizable
-                                if (near_right || near_bottom) && window.resizable {
+                                if (near_right || near_bottom)
+                                    && window.resizable
+                                    && !window.fullscreen
+                                {
                                     self.move_drag = None;
                                     self.resize_drag = Some(ResizeDragState {
                                         window_id: win_id,
@@ -3507,6 +3528,47 @@ impl Compositor {
         self.window_manager
             .get_window(window_id)
             .is_some_and(|window| window.owner_client_id == Some(client_id))
+    }
+
+    fn send_window_state_changed(&self, window_id: u32) {
+        let Some(window) = self.window_manager.get_window(window_id) else {
+            return;
+        };
+        let payload = sws_protocol::payload_window_state_changed(window_id, window.state_flags());
+        super::ipc::send_message_to_window(
+            window_id,
+            sws_protocol::server_msg::WINDOW_STATE_CHANGED,
+            payload.to_vec(),
+        );
+    }
+
+    fn send_current_window_configure(&self, window_id: u32) {
+        let Some(window) = self.window_manager.get_window(window_id) else {
+            return;
+        };
+        let payload =
+            sws_protocol::payload_window_configure(window_id, window.width, window.height);
+        super::ipc::send_message_to_window(
+            window_id,
+            sws_protocol::server_msg::WINDOW_CONFIGURE,
+            payload.to_vec(),
+        );
+    }
+
+    fn maximized_geometry(&self, window_id: u32) -> Option<(i32, i32, u32, u32)> {
+        let window = self.window_manager.get_window(window_id)?;
+        if window.window_type == super::window::WindowType::Normal
+            && let Some((work_x, work_y, work_width, work_height)) = self.workarea
+        {
+            let padding = 10i32;
+            return Some((
+                work_x + padding,
+                work_y + padding,
+                work_width.saturating_sub(padding as u32 * 2).max(1),
+                work_height.saturating_sub(padding as u32 * 2).max(1),
+            ));
+        }
+        Some((0, 0, self.screen_width.max(1), self.screen_height.max(1)))
     }
 
     fn prune_expired_activation_tokens(&mut self, now_ns: u64) {
@@ -4154,6 +4216,13 @@ impl Compositor {
             }
             IpcEvent::RequestMove { window_id } => {
                 sws_debug!("[Compositor] Window #{} requested move", window_id);
+                if self.window_manager.is_fullscreen(window_id) {
+                    sws_debug!(
+                        "[Compositor] Ignoring move request for fullscreen window #{}",
+                        window_id
+                    );
+                    return Ok(false);
+                }
                 sws_debug!(
                     "[Compositor] RequestMove state: left_down={} last_left_down={:?} cursor=({}, {})",
                     self.left_button_down,
@@ -4199,6 +4268,13 @@ impl Compositor {
                 });
             }
             IpcEvent::MoveWindow { window_id, x, y } => {
+                if self.window_manager.is_fullscreen(window_id) {
+                    println!(
+                        "[Compositor] Ignoring explicit move for fullscreen window #{}",
+                        window_id
+                    );
+                    return Ok(false);
+                }
                 println!(
                     "[Compositor] Moving window #{} to ({}, {})",
                     window_id, x, y
@@ -4282,6 +4358,31 @@ impl Compositor {
                     "[Compositor] Resizing window #{} to {}x{} (shm_mapped=0x{:x?})",
                     window_id, width, height, shm_mapped_addr
                 );
+                if let Some(window) = self.window_manager.get_window(window_id)
+                    && window.fullscreen
+                    && (width != window.width || height != window.height)
+                {
+                    println!(
+                        "[Compositor] Rejecting {}x{} backing for fullscreen window #{}; expected {}x{}",
+                        width, height, window_id, window.width, window.height
+                    );
+                    if let Some(address) = shm_mapped_addr
+                        && shm_size != 0
+                    {
+                        let _ = munmap(address, shm_size);
+                    }
+                    let payload = sws_protocol::payload_window_configure(
+                        window_id,
+                        window.width,
+                        window.height,
+                    );
+                    super::ipc::send_message_to_window(
+                        window_id,
+                        sws_protocol::server_msg::WINDOW_CONFIGURE,
+                        payload.to_vec(),
+                    );
+                    return Ok(false);
+                }
                 let old_rect = self
                     .window_manager
                     .get_window(window_id)
@@ -4311,9 +4412,28 @@ impl Compositor {
                     .window_manager
                     .get_window(window_id)
                     .map(|w| (w.x, w.y, w.width, w.height));
+                let left_fullscreen = self.window_manager.is_fullscreen(window_id);
+                if left_fullscreen {
+                    self.window_manager.unset_fullscreen_window(window_id);
+                }
                 if self.window_manager.minimize_window(window_id) {
                     if let Some(r) = old_rect {
                         self.add_pending_damage(r);
+                    }
+                    self.send_window_state_changed(window_id);
+                    if left_fullscreen
+                        && let Some((width, height)) = self
+                            .window_manager
+                            .get_window(window_id)
+                            .map(|window| (window.width, window.height))
+                    {
+                        let payload =
+                            sws_protocol::payload_window_configure(window_id, width, height);
+                        super::ipc::send_message_to_window(
+                            window_id,
+                            sws_protocol::server_msg::WINDOW_CONFIGURE,
+                            payload.to_vec(),
+                        );
                     }
                     self.full_redraw_needed = true;
                 }
@@ -4325,48 +4445,22 @@ impl Compositor {
                     .get_window(window_id)
                     .map(|w| (w.x, w.y, w.width, w.height));
 
-                // Use workarea for Normal windows only
-                let (max_w, max_h, max_x, max_y) = if let Some(window) =
-                    self.window_manager.get_window(window_id)
-                {
-                    if window.window_type == super::window::WindowType::Normal {
-                        match self.workarea {
-                            Some((wx, wy, ww, wh)) => {
-                                // Maximize within workarea
-                                let padding = 10i32;
-                                let max_w = ww.saturating_sub(padding as u32 * 2).max(1);
-                                let max_h = wh.saturating_sub(padding as u32 * 2).max(1);
-                                let max_x = wx + padding;
-                                let max_y = wy + padding;
-                                println!(
-                                    "[Compositor] Maximizing Normal window #{} within workarea: ({}, {}) {}x{}",
-                                    window_id, max_x, max_y, max_w, max_h
-                                );
-                                (max_w, max_h, Some(max_x), Some(max_y))
-                            }
-                            None => (self.screen_width, self.screen_height, None, None),
-                        }
-                    } else {
-                        (self.screen_width, self.screen_height, None, None)
-                    }
-                } else {
-                    (self.screen_width, self.screen_height, None, None)
+                let Some((max_x, max_y, max_w, max_h)) = self.maximized_geometry(window_id) else {
+                    return Ok(false);
                 };
+                println!(
+                    "[Compositor] Maximizing window #{} to ({}, {}) {}x{}",
+                    window_id, max_x, max_y, max_w, max_h
+                );
 
                 if self.window_manager.maximize_window(window_id, max_w, max_h) {
-                    // Set position for Normal windows within workarea
-                    if let (Some(max_x), Some(max_y)) = (max_x, max_y) {
-                        if let Some(window) = self.window_manager.get_window(window_id) {
-                            if window.window_type == super::window::WindowType::Normal {
-                                self.window_manager
-                                    .set_window_position(window_id, max_x, max_y);
-                            }
-                        }
-                    }
+                    self.window_manager
+                        .set_window_position(window_id, max_x, max_y);
 
                     if let Some(r) = old_rect {
                         self.add_pending_damage(r);
                     }
+                    self.send_window_state_changed(window_id);
                     if let Some(w) = self.window_manager.get_window(window_id) {
                         let (x, y, width, height) = (w.x, w.y, w.width, w.height);
                         self.add_pending_damage((x, y, width, height));
@@ -4393,6 +4487,7 @@ impl Compositor {
                     if let Some(r) = old_rect {
                         self.add_pending_damage(r);
                     }
+                    self.send_window_state_changed(window_id);
                     if let Some(w) = self.window_manager.get_window(window_id) {
                         let (x, y, width, height) = (w.x, w.y, w.width, w.height);
                         self.add_pending_damage((x, y, width, height));
@@ -4415,7 +4510,168 @@ impl Compositor {
                     self.full_redraw_needed = true;
                 }
             }
+            IpcEvent::SetFullscreen {
+                client_id,
+                window_id,
+            } => {
+                if !self.client_owns_window(client_id, window_id) {
+                    super::ipc::send_message_to_client(
+                        client_id,
+                        sws_protocol::server_msg::ERROR,
+                        sws_protocol::payload_error(sws_protocol::error_codes::WINDOW_NOT_OWNED)
+                            .to_vec(),
+                    );
+                    return Ok(false);
+                }
+                if self.window_manager.is_fullscreen(window_id) {
+                    self.send_window_state_changed(window_id);
+                    return Ok(false);
+                }
+                if self
+                    .window_manager
+                    .get_windows()
+                    .iter()
+                    .any(|window| window.fullscreen && window.id != window_id)
+                {
+                    self.send_window_state_changed(window_id);
+                    self.send_current_window_configure(window_id);
+                    super::ipc::send_message_to_client(
+                        client_id,
+                        sws_protocol::server_msg::ERROR,
+                        sws_protocol::payload_error(sws_protocol::error_codes::FULLSCREEN_OCCUPIED)
+                            .to_vec(),
+                    );
+                    return Ok(false);
+                }
+                if self.window_manager.is_minimized(window_id) {
+                    self.window_manager.restore_window(window_id);
+                }
+
+                let old_rect = self
+                    .window_manager
+                    .get_window(window_id)
+                    .map(|window| (window.x, window.y, window.width, window.height));
+                if !self.window_manager.set_fullscreen_window(
+                    window_id,
+                    self.screen_width,
+                    self.screen_height,
+                ) {
+                    self.send_window_state_changed(window_id);
+                    self.send_current_window_configure(window_id);
+                    super::ipc::send_message_to_client(
+                        client_id,
+                        sws_protocol::server_msg::ERROR,
+                        sws_protocol::payload_error(sws_protocol::error_codes::FULLSCREEN_OCCUPIED)
+                            .to_vec(),
+                    );
+                    return Ok(false);
+                }
+
+                if self
+                    .move_drag
+                    .is_some_and(|state| state.window_id == window_id)
+                {
+                    self.move_drag = None;
+                }
+                if self
+                    .resize_drag
+                    .is_some_and(|state| state.window_id == window_id)
+                {
+                    self.resize_drag = None;
+                    self.resize_outline = None;
+                }
+                self.window_manager.focus_window(window_id);
+                self.window_manager.raise_to_top_with_type(window_id);
+                self.broadcast_focus_change(window_id);
+
+                if let Some(rect) = old_rect {
+                    self.add_pending_damage(rect);
+                }
+                self.send_window_state_changed(window_id);
+                if let Some((x, y, width, height)) = self
+                    .window_manager
+                    .get_window(window_id)
+                    .map(|window| (window.x, window.y, window.width, window.height))
+                {
+                    let rect = (x, y, width, height);
+                    self.add_pending_damage(rect);
+                    let payload = sws_protocol::payload_window_configure(window_id, width, height);
+                    super::ipc::send_message_to_window(
+                        window_id,
+                        sws_protocol::server_msg::WINDOW_CONFIGURE,
+                        payload.to_vec(),
+                    );
+                }
+                self.full_redraw_needed = true;
+            }
+            IpcEvent::UnsetFullscreen {
+                client_id,
+                window_id,
+            } => {
+                if !self.client_owns_window(client_id, window_id) {
+                    super::ipc::send_message_to_client(
+                        client_id,
+                        sws_protocol::server_msg::ERROR,
+                        sws_protocol::payload_error(sws_protocol::error_codes::WINDOW_NOT_OWNED)
+                            .to_vec(),
+                    );
+                    return Ok(false);
+                }
+
+                let old_rect = self
+                    .window_manager
+                    .get_window(window_id)
+                    .map(|window| (window.x, window.y, window.width, window.height));
+                let restore_maximized = self
+                    .window_manager
+                    .get_window(window_id)
+                    .is_some_and(|window| window.maximized);
+                if !self.window_manager.unset_fullscreen_window(window_id) {
+                    return Ok(false);
+                }
+
+                if restore_maximized
+                    && let Some((x, y, width, height)) = self.maximized_geometry(window_id)
+                {
+                    self.window_manager.set_window_position(window_id, x, y);
+                    self.window_manager
+                        .resize_window_in_place(window_id, width, height);
+                }
+                if let Some(rect) = old_rect {
+                    self.add_pending_damage(rect);
+                }
+                self.send_window_state_changed(window_id);
+                if let Some((x, y, width, height)) = self
+                    .window_manager
+                    .get_window(window_id)
+                    .map(|window| (window.x, window.y, window.width, window.height))
+                {
+                    let rect = (x, y, width, height);
+                    self.add_pending_damage(rect);
+                    let payload = sws_protocol::payload_window_configure(window_id, width, height);
+                    super::ipc::send_message_to_window(
+                        window_id,
+                        sws_protocol::server_msg::WINDOW_CONFIGURE,
+                        payload.to_vec(),
+                    );
+                }
+                self.full_redraw_needed = true;
+            }
             IpcEvent::FocusWindow { window_id } => {
+                if let Some(fullscreen_id) = self
+                    .window_manager
+                    .get_windows()
+                    .iter()
+                    .find(|window| window.fullscreen)
+                    .map(|window| window.id)
+                    && !self.window_manager.is_in_fullscreen_group(window_id)
+                {
+                    println!(
+                        "[Compositor] Ignoring focus request for window #{} while #{} is fullscreen",
+                        window_id, fullscreen_id
+                    );
+                    return Ok(false);
+                }
                 println!("[Compositor] Focusing window #{}", window_id);
                 // Restore if minimized
                 if self.window_manager.is_minimized(window_id) {
@@ -4427,6 +4683,7 @@ impl Compositor {
                         if let Some(r) = old_rect {
                             self.add_pending_damage(r);
                         }
+                        self.send_window_state_changed(window_id);
                     }
                 }
 
@@ -4520,6 +4777,7 @@ impl Compositor {
                 // Extension is now registered and can create windows
             }
             IpcEvent::ExtensionCreateWindow {
+                client_id,
                 extension_id,
                 external_client_id,
                 window_id,
@@ -4545,6 +4803,7 @@ impl Compositor {
                         shm_handle,
                         shm_mapped_addr,
                         shm_size,
+                        client_id,
                         extension_id,
                         external_client_id,
                     ) {

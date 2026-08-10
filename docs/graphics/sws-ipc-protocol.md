@@ -253,6 +253,9 @@ Semantics:
 
 - Hide the window from display but keep it in the window list.
 - The window's `visible` flag is set to false.
+- If the window is fullscreen, SWS first leaves fullscreen and restores its
+  preceding geometry. Minimizing therefore releases the output for another
+  fullscreen window.
 - The window can be restored with `RESTORE_WINDOW`.
 
 #### `MAXIMIZE_WINDOW` (type = 18)
@@ -265,7 +268,8 @@ Payload (4 bytes):
 
 Semantics:
 
-- Expand the window to fill the entire screen.
+- Expand a normal application window to the compositor workarea. Shell surfaces
+  such as the taskbar remain visible; this is not fullscreen.
 - The compositor saves the current position and size for restoration.
 - The window can be restored with `RESTORE_WINDOW`.
 - Windows that specify explicit maximum size limits (i.e. `max_width` or `max_height` is non-zero) are **not** maximized; clients SHOULD NOT send `MAXIMIZE_WINDOW` for such windows and MUST be prepared for the request to be ignored.
@@ -281,6 +285,7 @@ Payload (4 bytes):
 Semantics:
 
 - Restore a minimized window (makes it visible) or a maximized window (restores saved geometry).
+- Fullscreen has its own state and is left only with `UNSET_FULLSCREEN`.
 - If the window is neither minimized nor maximized, this message has no effect.
 
 #### `SET_WINDOW_TYPE` (type = 20)
@@ -302,6 +307,9 @@ Semantics:
 	- `DESKTOP = 3`: Desktop background window
 	- `IME_POPUP = 4`: Input-method-owned popup surface
 - Default Z-order grouping (bottom to top): Desktop → Normal → Taskbar → AlwaysOnTop → ImePopup.
+- A fullscreen window is promoted above Taskbar and AlwaysOnTop windows while it
+  remains below IME popup UI. Transient descendants of the fullscreen window
+  remain above their parent.
 - The effective Z-order is dynamically adjusted by the window server when windows are raised (see `raise_to_top_with_type` in the implementation); depending on which type is raised, windows of other types may end up above or below it.
 - Within each type, windows generally maintain relative order, except when explicitly changed by focus and raise operations.
 
@@ -320,6 +328,44 @@ Semantics:
 - The compositor applies alpha blending: `output = (src × alpha + dst × (255 - alpha)) / 255`
 - Windows with `opacity = 255` skip blending for performance.
 - The effective alpha is `pixel_alpha × (opacity / 255)`.
+
+#### `SET_FULLSCREEN` (type = 40)
+
+Payload (4 bytes):
+
+| Offset | Size | Field       | Type |
+|--------|------|-------------|------|
+| 0      | 4    | `window_id` | u32  |
+
+Semantics:
+
+- Make the window occupy the complete primary output at `(0, 0)`, including the
+  area normally reserved for desktop shell surfaces.
+- Fullscreen is independent from maximize. If a maximized window enters
+  fullscreen, both state flags remain set internally and leaving fullscreen
+  returns it to its maximized workarea geometry. A later `RESTORE_WINDOW`
+  returns it to its original normal geometry.
+- SWS currently permits one fullscreen owner on its single primary output.
+  Another window's request fails with `FULLSCREEN_OCCUPIED` (error code 107).
+- SWS ignores interactive/programmatic move and interactive resize operations
+  while the window is fullscreen. It sends `WINDOW_CONFIGURE` with the output
+  size so the client can replace its backing buffer.
+- The requesting connection must own `window_id`.
+
+#### `UNSET_FULLSCREEN` (type = 41)
+
+Payload (4 bytes):
+
+| Offset | Size | Field       | Type |
+|--------|------|-------------|------|
+| 0      | 4    | `window_id` | u32  |
+
+Semantics:
+
+- Leave fullscreen without changing the underlying maximize state.
+- Restore the geometry that preceded fullscreen. If that state was maximized,
+  SWS recomputes the current workarea geometry before configuring the client.
+- The requesting connection must own `window_id`.
 
 #### `REGISTER_EXTENSION` (type = 100)
 
@@ -698,8 +744,36 @@ Semantics:
 
 - Broadcast asynchronously to connected clients when the compositor display size changes.
 - This is a notification, not a response to `GET_SCREEN_SIZE`.
-- Clients that own full-screen or screen-edge surfaces, such as desktop and taskbar clients, should update their local layout and may also receive `WINDOW_CONFIGURE` for affected windows.
+- Clients that own fullscreen or screen-edge surfaces, such as desktop and taskbar clients, should update their local layout and may also receive `WINDOW_CONFIGURE` for affected windows.
 - Clients with synchronous request/response code must tolerate this message arriving between a request and its expected response.
+
+#### `WINDOW_STATE_CHANGED` (type = 32)
+
+Payload (8 bytes):
+
+| Offset | Size | Field         | Type |
+|--------|------|---------------|------|
+| 0      | 4    | `window_id`   | u32  |
+| 4      | 4    | `state_flags` | u32  |
+
+`state_flags` is a bitset:
+
+| Bit | Constant | Meaning |
+|-----|----------|---------|
+| `0x01` | `MINIMIZED` | The window is hidden by minimization. |
+| `0x02` | `MAXIMIZED` | The underlying presentation state is maximized to the workarea. |
+| `0x04` | `FULLSCREEN` | The window occupies the complete output. |
+
+Semantics:
+
+- Sent after SWS accepts a minimize, maximize, restore, enter-fullscreen, or
+  leave-fullscreen transition.
+- `MAXIMIZED | FULLSCREEN` is valid and means that leaving fullscreen returns
+  the window to maximized state.
+- For geometry-changing transitions, SWS sends this state event before the
+  corresponding `WINDOW_CONFIGURE`. Clients should treat the state and geometry
+  as compositor-authoritative and resize their backing buffer in response to
+  the configure event.
 
 #### `EXTENSION_REGISTERED` (type = 100)
 

@@ -2705,6 +2705,26 @@ fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Ha
                 );
                 push_ipc_event(IpcEvent::RestoreWindow { window_id });
             }
+            Ok(ClientMessageRef::SetFullscreen { window_id }) => {
+                println!(
+                    "[ClientThread {}] SetFullscreen: window_id={}",
+                    client_id, window_id
+                );
+                push_ipc_event(IpcEvent::SetFullscreen {
+                    client_id,
+                    window_id,
+                });
+            }
+            Ok(ClientMessageRef::UnsetFullscreen { window_id }) => {
+                println!(
+                    "[ClientThread {}] UnsetFullscreen: window_id={}",
+                    client_id, window_id
+                );
+                push_ipc_event(IpcEvent::UnsetFullscreen {
+                    client_id,
+                    window_id,
+                });
+            }
             Ok(ClientMessageRef::FocusWindow { window_id }) => {
                 println!(
                     "[ClientThread {}] FocusWindow: window_id={}",
@@ -2840,6 +2860,7 @@ fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Ha
                         managed_windows.push(window_id);
 
                         push_ipc_event(IpcEvent::ExtensionCreateWindow {
+                            client_id,
                             extension_id,
                             external_client_id,
                             window_id,
@@ -3657,6 +3678,18 @@ pub enum IpcEvent {
         window_id: u32,
     },
 
+    /// Enter fullscreen on the primary output.
+    SetFullscreen {
+        client_id: usize,
+        window_id: u32,
+    },
+
+    /// Leave fullscreen and restore the preceding window state.
+    UnsetFullscreen {
+        client_id: usize,
+        window_id: u32,
+    },
+
     /// Focus and raise a window
     FocusWindow {
         window_id: u32,
@@ -3696,6 +3729,7 @@ pub enum IpcEvent {
 
     /// Extension created a window for external client
     ExtensionCreateWindow {
+        client_id: usize,
         extension_id: u32,
         external_client_id: u32,
         window_id: u32,

@@ -451,8 +451,7 @@ impl TransportState {
     }
 
     fn write_all_pumping(&mut self, bytes: &[u8]) -> Result<(), Error> {
-        let deadline = crate::os::monotonic_time_ns()
-            .saturating_add(WRITE_BACKPRESSURE_TIMEOUT_NS);
+        let deadline = crate::os::monotonic_time_ns().saturating_add(WRITE_BACKPRESSURE_TIMEOUT_NS);
         let mut written = 0usize;
         while written < bytes.len() {
             let chunk_end = written
@@ -494,8 +493,7 @@ impl TransportState {
     }
 
     fn send_handle_record_pumping(&mut self, handle: &Handle, record: &[u8]) -> Result<(), Error> {
-        let deadline = crate::os::monotonic_time_ns()
-            .saturating_add(WRITE_BACKPRESSURE_TIMEOUT_NS);
+        let deadline = crate::os::monotonic_time_ns().saturating_add(WRITE_BACKPRESSURE_TIMEOUT_NS);
         loop {
             match socket_send_handle_and_data(&self.socket, handle, record) {
                 Ok(()) => return Ok(()),
@@ -840,9 +838,9 @@ impl TransportState {
             }
             Event::ImeActivate(state) | Event::ImeContextState(state) => Some(state.window_id),
             Event::ImeKeyEvent { window_id, .. } => Some(*window_id),
-            Event::SurfaceConfigure { surface_id, .. } | Event::SurfaceDestroyed { surface_id } => {
-                Some(*surface_id)
-            }
+            Event::SurfaceConfigure { surface_id, .. }
+            | Event::SurfaceStateChanged { surface_id, .. }
+            | Event::SurfaceDestroyed { surface_id } => Some(*surface_id),
             Event::MenuItemActivated { window_id, .. }
             | Event::SgfxFrameRejected { window_id, .. }
             | Event::SgfxBufferReleased { window_id, .. } => Some(*window_id),
@@ -1959,8 +1957,9 @@ impl Connection {
             .map_err(|_| Error::SendFailed)
     }
 
-    /// Maximize a window.
+    /// Maximize a window within the compositor workarea.
     ///
+    /// This leaves shell UI visible and is distinct from [`Self::set_fullscreen`].
     /// The server may respond with `WINDOW_CONFIGURE` to request a buffer resize.
     pub fn maximize_window(&self, surface_id: u32) -> Result<(), Error> {
         if !mutex_lock(&self.surfaces).contains_key(&surface_id) {
@@ -1972,12 +1971,50 @@ impl Connection {
     }
 
     /// Restore a window from minimized or maximized state.
+    ///
+    /// This does not leave fullscreen; use [`Self::unset_fullscreen`] for that.
     pub fn restore_window(&self, surface_id: u32) -> Result<(), Error> {
         if !mutex_lock(&self.surfaces).contains_key(&surface_id) {
             return Err(Error::SurfaceNotFound);
         }
         let payload = protocol::payload_restore_window(surface_id);
         self.send_message(protocol::client_msg::RESTORE_WINDOW, &payload)
+            .map_err(|_| Error::SendFailed)
+    }
+
+    /// Enter fullscreen on the compositor's primary output.
+    ///
+    /// # Arguments
+    ///
+    /// * `surface_id` - Surface that should occupy the complete output.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` after the request is sent, or a connection/surface error.
+    pub fn set_fullscreen(&self, surface_id: u32) -> Result<(), Error> {
+        if !mutex_lock(&self.surfaces).contains_key(&surface_id) {
+            return Err(Error::SurfaceNotFound);
+        }
+        let payload = protocol::payload_set_fullscreen(surface_id);
+        self.send_message(protocol::client_msg::SET_FULLSCREEN, &payload)
+            .map_err(|_| Error::SendFailed)
+    }
+
+    /// Leave fullscreen and restore the preceding window state.
+    ///
+    /// # Arguments
+    ///
+    /// * `surface_id` - Surface that should leave fullscreen.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` after the request is sent, or a connection/surface error.
+    pub fn unset_fullscreen(&self, surface_id: u32) -> Result<(), Error> {
+        if !mutex_lock(&self.surfaces).contains_key(&surface_id) {
+            return Err(Error::SurfaceNotFound);
+        }
+        let payload = protocol::payload_unset_fullscreen(surface_id);
+        self.send_message(protocol::client_msg::UNSET_FULLSCREEN, &payload)
             .map_err(|_| Error::SendFailed)
     }
 
@@ -2431,6 +2468,16 @@ impl TransportState {
                     surface_id: window_id,
                     width,
                     height,
+                });
+                true
+            }
+            ServerMessage::WindowStateChanged {
+                window_id,
+                state_flags,
+            } => {
+                self.push_event(Event::SurfaceStateChanged {
+                    surface_id: window_id,
+                    state_flags,
                 });
                 true
             }

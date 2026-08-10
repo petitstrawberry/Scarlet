@@ -185,6 +185,9 @@ impl EventLoop {
             SwsEvent::OutputScaleChanged { .. } => {
                 // slint-scarlet keeps its existing physical-size behavior for now.
             }
+            SwsEvent::SurfaceStateChanged { .. } => {
+                // SurfaceConfigure carries the corresponding physical resize.
+            }
             SwsEvent::MenuItemActivated { .. } => {
                 // Menu item activated - not used in slint apps
             }

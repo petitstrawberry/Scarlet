@@ -106,6 +106,10 @@ pub enum Event {
         width: u32,
         height: u32,
     },
+    /// Compositor-confirmed presentation state for a surface.
+    ///
+    /// `state_flags` is a bitset of constants from [`crate::window_state`].
+    SurfaceStateChanged { surface_id: u32, state_flags: u32 },
     /// Display size changed.
     ScreenSizeChanged { width: u32, height: u32 },
     /// Output scale changed.

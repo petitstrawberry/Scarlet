@@ -63,6 +63,8 @@ pub mod error_codes {
     pub const SGFX_IMPORT_FAILED: u32 = 105;
     /// The requested activation did not originate from the focused window.
     pub const ACTIVATION_DENIED: u32 = 106;
+    /// Another window already owns fullscreen state on the requested output.
+    pub const FULLSCREEN_OCCUPIED: u32 = 107;
 }
 
 /// Message type IDs (client -> server).
@@ -112,6 +114,10 @@ pub mod client_msg {
 
     // Application activation (38-39)
     pub const REQUEST_ACTIVATION_TOKEN: u32 = 38;
+
+    // Fullscreen window state (40-41)
+    pub const SET_FULLSCREEN: u32 = 40;
+    pub const UNSET_FULLSCREEN: u32 = 41;
 
     // Text input client API messages (200-219)
     pub const TEXT_INPUT_CREATE: u32 = 200;
@@ -171,6 +177,7 @@ pub mod server_msg {
     pub const SGFX_BACKEND_LOST: u32 = 29;
     pub const SGFX_BUFFER_DESTROYED: u32 = 30;
     pub const ACTIVATION_TOKEN: u32 = 31;
+    pub const WINDOW_STATE_CHANGED: u32 = 32;
 
     // Text input client events (200-219)
     pub const TEXT_INPUT_CREATED: u32 = 200;
@@ -324,6 +331,16 @@ pub mod window_types {
     pub const DESKTOP: u32 = 3;
     /// Input-method-owned popup surface anchored to the active text input.
     pub const IME_POPUP: u32 = 4;
+}
+
+/// Window presentation-state flags reported by `WINDOW_STATE_CHANGED`.
+pub mod window_state {
+    /// The window is minimized and is not currently visible.
+    pub const MINIMIZED: u32 = 1 << 0;
+    /// The window occupies the compositor workarea.
+    pub const MAXIMIZED: u32 = 1 << 1;
+    /// The window occupies the complete output and covers shell surfaces.
+    pub const FULLSCREEN: u32 = 1 << 2;
 }
 
 /// Initial placement hints understood by the SWS window manager.
@@ -774,6 +791,16 @@ pub enum ClientMessageRef<'a> {
         window_id: u32,
     },
 
+    /// Enter output-filling fullscreen state.
+    SetFullscreen {
+        window_id: u32,
+    },
+
+    /// Leave fullscreen and restore the preceding window state.
+    UnsetFullscreen {
+        window_id: u32,
+    },
+
     /// Set window type for Z-order management
     /// Type: 0 = Normal, 1 = AlwaysOnTop, 2 = Taskbar, 3 = Desktop
     SetWindowType {
@@ -1037,6 +1064,11 @@ pub enum ServerMessage {
         window_id: u32,
         width: u32,
         height: u32,
+    },
+    /// Compositor-confirmed window presentation state.
+    WindowStateChanged {
+        window_id: u32,
+        state_flags: u32,
     },
     InputEvent {
         window_id: u32,
@@ -1581,6 +1613,20 @@ pub fn parse_client_message<'a>(
             }
             let window_id = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
             Ok(ClientMessageRef::RestoreWindow { window_id })
+        }
+        client_msg::SET_FULLSCREEN => {
+            if payload.len() != 4 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            let window_id = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+            Ok(ClientMessageRef::SetFullscreen { window_id })
+        }
+        client_msg::UNSET_FULLSCREEN => {
+            if payload.len() != 4 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            let window_id = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+            Ok(ClientMessageRef::UnsetFullscreen { window_id })
         }
         client_msg::SET_WINDOW_TYPE => {
             if payload.len() != 8 {
@@ -2227,6 +2273,17 @@ pub fn parse_server_message(msg_type: u32, payload: &[u8]) -> Result<ServerMessa
                 window_id,
                 width,
                 height,
+            })
+        }
+        server_msg::WINDOW_STATE_CHANGED => {
+            if payload.len() != 8 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            let window_id = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+            let state_flags = u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]);
+            Ok(ServerMessage::WindowStateChanged {
+                window_id,
+                state_flags,
             })
         }
         server_msg::INPUT_EVENT => {
@@ -3224,6 +3281,23 @@ pub fn payload_window_configure(window_id: u32, width: u32, height: u32) -> [u8;
     payload
 }
 
+/// Build payload for server->client `WINDOW_STATE_CHANGED`.
+///
+/// # Arguments
+///
+/// * `window_id` - Window whose state changed.
+/// * `state_flags` - Bitset from [`window_state`].
+///
+/// # Returns
+///
+/// The serialized window identifier and presentation-state flags.
+pub fn payload_window_state_changed(window_id: u32, state_flags: u32) -> [u8; 8] {
+    let mut payload = [0u8; 8];
+    payload[0..4].copy_from_slice(&window_id.to_le_bytes());
+    payload[4..8].copy_from_slice(&state_flags.to_le_bytes());
+    payload
+}
+
 /// Build payload for server->client `WINDOW_DESTROYED`.
 pub fn payload_window_destroyed(window_id: u32) -> [u8; 4] {
     window_id.to_le_bytes()
@@ -3622,6 +3696,32 @@ pub fn payload_maximize_window(window_id: u32) -> [u8; 4] {
 
 /// Build payload for client->server `RESTORE_WINDOW`.
 pub fn payload_restore_window(window_id: u32) -> [u8; 4] {
+    window_id.to_le_bytes()
+}
+
+/// Build payload for client->server `SET_FULLSCREEN`.
+///
+/// # Arguments
+///
+/// * `window_id` - Window that should enter fullscreen.
+///
+/// # Returns
+///
+/// The serialized window identifier.
+pub fn payload_set_fullscreen(window_id: u32) -> [u8; 4] {
+    window_id.to_le_bytes()
+}
+
+/// Build payload for client->server `UNSET_FULLSCREEN`.
+///
+/// # Arguments
+///
+/// * `window_id` - Window that should leave fullscreen.
+///
+/// # Returns
+///
+/// The serialized window identifier.
+pub fn payload_unset_fullscreen(window_id: u32) -> [u8; 4] {
     window_id.to_le_bytes()
 }
 
@@ -4219,8 +4319,9 @@ mod tests {
         ClientMessageRef, ServerMessage, WindowPlacement, client_msg, parse_client_message,
         parse_server_message, payload_activation_token, payload_create_window_with_placement,
         payload_create_window_with_placement_and_activation_token,
-        payload_create_window_with_position, payload_request_activation_token, server_msg,
-        window_placement,
+        payload_create_window_with_position, payload_request_activation_token,
+        payload_set_fullscreen, payload_unset_fullscreen, payload_window_state_changed, server_msg,
+        window_placement, window_state,
     };
 
     #[test]
@@ -4344,5 +4445,33 @@ mod tests {
         };
 
         assert_eq!(&token[..token_len as usize], b"sws-token");
+    }
+
+    #[test]
+    fn fullscreen_requests_preserve_window_id() {
+        let set_payload = payload_set_fullscreen(42);
+        assert_eq!(
+            parse_client_message(client_msg::SET_FULLSCREEN, &set_payload).unwrap(),
+            ClientMessageRef::SetFullscreen { window_id: 42 }
+        );
+
+        let unset_payload = payload_unset_fullscreen(42);
+        assert_eq!(
+            parse_client_message(client_msg::UNSET_FULLSCREEN, &unset_payload).unwrap(),
+            ClientMessageRef::UnsetFullscreen { window_id: 42 }
+        );
+    }
+
+    #[test]
+    fn window_state_changed_preserves_flags() {
+        let flags = window_state::MAXIMIZED | window_state::FULLSCREEN;
+        let payload = payload_window_state_changed(77, flags);
+        assert_eq!(
+            parse_server_message(server_msg::WINDOW_STATE_CHANGED, &payload).unwrap(),
+            ServerMessage::WindowStateChanged {
+                window_id: 77,
+                state_flags: flags,
+            }
+        );
     }
 }

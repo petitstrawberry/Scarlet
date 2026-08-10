@@ -51,7 +51,19 @@ user/bin/src/wayland_bridge/
 |-----------|--------|-------|
 | `xdg_wm_base` | Implemented | Window manager base |
 | `xdg_surface` | Implemented | Surface wrapper |
-| `xdg_toplevel` | Implemented | Application windows (configure, close) |
+| `xdg_toplevel` | Implemented | Application windows, maximize, fullscreen, minimize, configure, close |
+
+## XDG toplevel states
+
+The bridge maps `xdg_toplevel.set_maximized` to SWS workarea maximization and
+`xdg_toplevel.set_fullscreen` to SWS output fullscreen. They remain independent:
+leaving fullscreen restores the preceding maximized or normal state.
+
+SWS state notifications are translated into the state array carried by
+`xdg_toplevel.configure`, followed by `xdg_surface.configure`. Configure sizes
+are converted from SWS physical pixels to Wayland logical dimensions using the
+surface buffer scale. The optional `wl_output` argument to `set_fullscreen` is
+currently treated as the primary SWS output because SWS exposes one output.
 
 ## Buffer Flow
 
