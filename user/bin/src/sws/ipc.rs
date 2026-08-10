@@ -1,6 +1,9 @@
 //! IPC Server module - handles client connections and messages
 
 use super::config;
+use super::pointer_lock::{
+    InputRoute, enqueue_routed_event, take_extension_events, take_window_events,
+};
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 use std::collections::BTreeMap;
 use std::env;
@@ -586,11 +589,11 @@ pub fn set_sgfx_shared_images_available(available: bool) {
 }
 
 fn sws_capabilities() -> u64 {
+    let mut capabilities = protocol::capabilities::POINTER_LOCK;
     if SGFX_SHARED_IMAGES_AVAILABLE.load(Ordering::Acquire) {
-        protocol::capabilities::SGFX_SHARED_IMAGE
-    } else {
-        0
+        capabilities |= protocol::capabilities::SGFX_SHARED_IMAGE;
     }
+    capabilities
 }
 
 fn compositor_epoch() -> u32 {
@@ -912,6 +915,46 @@ pub fn send_extension_input_event(
             value,
         },
     );
+    drop(pending);
+    wake_window_owner(window_id);
+}
+
+/// Queue locked input through the normal or extension consumer boundary.
+///
+/// # Arguments
+///
+/// * `route` - Destination queue selected from the target window metadata.
+/// * `time` - Input timestamp.
+/// * `type_` - Linux input event type.
+/// * `code` - Linux input event code.
+/// * `value` - Linux input event value.
+pub fn send_pointer_lock_input_event(
+    route: InputRoute,
+    time: u64,
+    type_: u16,
+    code: u16,
+    value: i32,
+) {
+    let window_id = match route {
+        InputRoute::Window { window_id } | InputRoute::Extension { window_id, .. } => window_id,
+    };
+    let mut normal = PENDING_INPUT_EVENTS.lock();
+    let mut extension = PENDING_EXTENSION_INPUT_EVENTS.lock();
+    enqueue_routed_event(
+        &mut normal,
+        &mut extension,
+        route,
+        PendingInputEvent {
+            time,
+            type_,
+            code,
+            value,
+        },
+        push_input_event_coalesced,
+    );
+    drop(extension);
+    drop(normal);
+    wake_window_owner(window_id);
 }
 
 /// Get and clear pending extension input events for a specific extension client
@@ -921,15 +964,7 @@ pub fn pop_extension_input_events(
 ) -> Vec<PendingInputEvent> {
     let mut pending = PENDING_EXTENSION_INPUT_EVENTS.lock();
 
-    if let Some(events) = pending.get_mut(&(extension_id, external_client_id)) {
-        if events.is_empty() {
-            Vec::new()
-        } else {
-            core::mem::take(events)
-        }
-    } else {
-        Vec::new()
-    }
+    take_extension_events(&mut pending, extension_id, external_client_id)
 }
 
 fn cleanup_extension_input_events(extension_id: u32, external_client_id: u32) {
@@ -1809,16 +1844,7 @@ fn pop_pending_server_frames(window_id: u32) -> Vec<PendingServerFrame> {
 /// Get pending input events for a window (called by client thread, O(log n) lookup)
 fn pop_pending_input_events(window_id: u32) -> Vec<PendingInputEvent> {
     let mut pending = PENDING_INPUT_EVENTS.lock();
-
-    if let Some(events) = pending.get_mut(&window_id) {
-        if events.is_empty() {
-            Vec::new() // Already empty, no reallocation needed
-        } else {
-            core::mem::take(events)
-        }
-    } else {
-        Vec::new()
-    }
+    take_window_events(&mut pending, window_id)
 }
 
 /// Pop pending server responses for a specific client (by client_id)
@@ -2723,6 +2749,27 @@ fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Ha
                 push_ipc_event(IpcEvent::UnsetFullscreen {
                     client_id,
                     window_id,
+                });
+            }
+            Ok(ClientMessageRef::SetPointerLock { window_id, locked }) => {
+                if !managed_windows.contains(&window_id) {
+                    let _ = write_frame(
+                        &mut stream_writer,
+                        protocol::server_msg::POINTER_LOCK_CHANGED,
+                        &protocol::payload_pointer_lock_changed(window_id, false),
+                    );
+                    let _ = write_protocol_error(
+                        &mut stream_writer,
+                        request_id,
+                        protocol::error_codes::POINTER_LOCK_NOT_OWNED,
+                    );
+                    continue;
+                }
+                push_ipc_event(IpcEvent::SetPointerLock {
+                    client_id,
+                    request_id,
+                    window_id,
+                    locked,
                 });
             }
             Ok(ClientMessageRef::FocusWindow { window_id }) => {
@@ -3688,6 +3735,14 @@ pub enum IpcEvent {
     UnsetFullscreen {
         client_id: usize,
         window_id: u32,
+    },
+
+    /// Capture or release raw relative pointer motion for an owned window.
+    SetPointerLock {
+        client_id: usize,
+        request_id: u8,
+        window_id: u32,
+        locked: bool,
     },
 
     /// Focus and raise a window

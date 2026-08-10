@@ -84,6 +84,8 @@ pub const GPU_QUEUE_SUBMIT_FLAGS_VALID: u32 = GPU_QUEUE_SUBMIT_FLAG_SIGNAL_TIMEL
 
 /// Generic BGRA8 normalized unsigned image format.
 pub const GPU_IMAGE_FORMAT_BGRA8_UNORM: u32 = 1;
+/// Generic 32-bit floating-point depth image format.
+pub const GPU_IMAGE_FORMAT_DEPTH32_FLOAT: u32 = 2;
 /// Image usage permitting the image to be bound as a render target.
 pub const GPU_IMAGE_USAGE_RENDER_TARGET: u32 = 1 << 0;
 /// Image usage permitting the image to be selected for display scanout.
@@ -92,11 +94,14 @@ pub const GPU_IMAGE_USAGE_PRESENTABLE: u32 = 1 << 1;
 pub const GPU_IMAGE_USAGE_SAMPLED: u32 = 1 << 2;
 /// Image usage permitting BGRA pixel transfers into the image.
 pub const GPU_IMAGE_USAGE_TRANSFER_DST: u32 = 1 << 3;
+/// Image usage permitting binding as a depth-stencil attachment.
+pub const GPU_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT: u32 = 1 << 4;
 /// All currently defined GPU image usage flags.
 pub const GPU_IMAGE_USAGE_VALID: u32 = GPU_IMAGE_USAGE_RENDER_TARGET
     | GPU_IMAGE_USAGE_PRESENTABLE
     | GPU_IMAGE_USAGE_SAMPLED
-    | GPU_IMAGE_USAGE_TRANSFER_DST;
+    | GPU_IMAGE_USAGE_TRANSFER_DST
+    | GPU_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT;
 
 /// Fixed-width request and response for [`GPU_CREATE_IMAGE`].
 #[repr(C)]

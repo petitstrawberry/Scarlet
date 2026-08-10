@@ -5,6 +5,10 @@ use super::cursor::Cursor;
 use super::gpu_compositor::{GpuCompositor, SgfxBufferError, SgfxBufferIdentity, SgfxCommitToken};
 use super::input::{CompositorInputEvent, InputManager, key_codes};
 use super::ipc::{IpcEvent, IpcServer, send_message_to_client, send_response_to_client};
+use super::pointer_lock::{
+    CorrelatedReply, PointerInteractionState, PointerLockDenial, PointerLockState, captured_window,
+    confirmed_lock_state, correlated_reply, cursor_visible, input_route, validate_request,
+};
 use super::window::WindowManager;
 use core::sync::atomic::{AtomicU8, Ordering};
 use core::time::Duration;
@@ -501,6 +505,8 @@ pub struct Compositor {
     /// Window currently owning pointer hover while no implicit button grab is active.
     pointer_focus_window_id: Option<u32>,
     pointer_grab_window_id: Option<u32>,
+    /// Explicit client-owned pointer capture, independent of implicit button grabs.
+    pointer_lock: Option<PointerLockState>,
     move_drag: Option<MoveDragState>,
     resize_drag: Option<ResizeDragState>,
     resize_outline: Option<(i32, i32, u32, u32)>,
@@ -703,6 +709,7 @@ impl Compositor {
             last_left_down_cursor: None,
             pointer_focus_window_id: None,
             pointer_grab_window_id: None,
+            pointer_lock: None,
             move_drag: None,
             resize_drag: None,
             resize_outline: None,
@@ -1597,6 +1604,7 @@ impl Compositor {
             &self.cursor,
             self.bg_color,
             self.resize_outline,
+            cursor_visible(self.pointer_lock),
         );
         match result {
             Ok(releases) => {
@@ -2200,16 +2208,18 @@ impl Compositor {
                 );
             }
 
-            // Layer 3: Draw cursor
-            let cursor = &self.cursor;
-            cursor.draw_to_buffer_direct_clipped(
-                backbuffer,
-                screen_width,
-                screen_height,
-                bytes_per_pixel,
-                stride,
-                clip,
-            );
+            // Layer 3: Draw cursor unless an application owns pointer lock.
+            if cursor_visible(self.pointer_lock) {
+                let cursor = &self.cursor;
+                cursor.draw_to_buffer_direct_clipped(
+                    backbuffer,
+                    screen_width,
+                    screen_height,
+                    bytes_per_pixel,
+                    stride,
+                    clip,
+                );
+            }
         }
 
         // Validate composition against expected pixels before presenting.
@@ -2273,6 +2283,12 @@ impl Compositor {
 
     /// Broadcast focus change event to all connected clients
     fn broadcast_focus_change(&mut self, window_id: u32) {
+        if self
+            .pointer_lock
+            .is_some_and(|state| state.window_id != window_id)
+        {
+            self.release_pointer_lock();
+        }
         // Only broadcast if the focused window actually changed
         if self.last_focused_window_id == Some(window_id) {
             println!(
@@ -2507,6 +2523,178 @@ impl Compositor {
         }
     }
 
+    fn cursor_rect(&self) -> (i32, i32, u32, u32) {
+        (
+            self.cursor.x,
+            self.cursor.y,
+            self.cursor.width,
+            self.cursor.height,
+        )
+    }
+
+    fn send_pointer_lock_changed(&self, state: PointerLockState, locked: bool) {
+        super::ipc::send_message_to_client(
+            state.client_id,
+            sws_protocol::server_msg::POINTER_LOCK_CHANGED,
+            sws_protocol::payload_pointer_lock_changed(state.window_id, locked).to_vec(),
+        );
+    }
+
+    /// Release explicit capture and damage the cursor layer for redisplay.
+    fn release_pointer_lock(&mut self) -> bool {
+        let Some(state) = self.pointer_lock.take() else {
+            return false;
+        };
+        self.add_pending_damage(self.cursor_rect());
+        self.send_pointer_lock_changed(state, false);
+        true
+    }
+
+    fn pointer_lock_is_valid(&self, state: PointerLockState) -> bool {
+        self.window_manager
+            .get_window(state.window_id)
+            .is_some_and(|window| {
+                !state.must_release(
+                    window.owner_client_id,
+                    window.visible,
+                    window.minimized,
+                    window.focused,
+                    self.window_manager.get_focused_window_id() == Some(state.window_id),
+                )
+            })
+    }
+
+    fn release_invalid_pointer_lock(&mut self) -> bool {
+        let Some(state) = self.pointer_lock else {
+            return false;
+        };
+        if !self.pointer_lock_is_valid(state) {
+            return self.release_pointer_lock();
+        }
+        if let Some((x, y, width, height)) = self
+            .window_manager
+            .get_window(state.window_id)
+            .map(|window| (window.x, window.y, window.width, window.height))
+        {
+            let max_x = x.saturating_add(width.saturating_sub(1) as i32);
+            let max_y = y.saturating_add(height.saturating_sub(1) as i32);
+            self.cursor.set_position(
+                self.cursor.x.clamp(x, max_x),
+                self.cursor.y.clamp(y, max_y),
+                self.screen_width,
+                self.screen_height,
+            );
+        }
+        false
+    }
+
+    fn set_pointer_lock(
+        &mut self,
+        client_id: usize,
+        window_id: u32,
+        locked: bool,
+    ) -> Result<bool, u32> {
+        if !locked {
+            if self
+                .pointer_lock
+                .is_some_and(|state| state.client_id == client_id && state.window_id == window_id)
+            {
+                return Ok(self.release_pointer_lock());
+            }
+            return Ok(false);
+        }
+
+        let Some(window) = self.window_manager.get_window(window_id) else {
+            return Err(sws_protocol::error_codes::POINTER_LOCK_NOT_OWNED);
+        };
+        let mut interaction = PointerInteractionState {
+            focused_window_id: self.window_manager.get_focused_window_id(),
+            implicit_grab_window_id: self.pointer_grab_window_id,
+            locked_window_id: self.pointer_lock.map(|state| state.window_id),
+        };
+        let interaction_allows_lock = interaction.request_lock(window_id);
+        validate_request(
+            window.owner_client_id,
+            client_id,
+            window.visible,
+            window.minimized,
+            window.focused,
+            self.window_manager.get_focused_window_id() == Some(window_id),
+            !interaction_allows_lock || self.move_drag.is_some() || self.resize_drag.is_some(),
+        )
+        .map_err(|denial| match denial {
+            PointerLockDenial::NotOwned => sws_protocol::error_codes::POINTER_LOCK_NOT_OWNED,
+            PointerLockDenial::Denied => sws_protocol::error_codes::POINTER_LOCK_DENIED,
+        })?;
+        if let Some(existing) = self.pointer_lock {
+            if existing.client_id == client_id && existing.window_id == window_id {
+                return Ok(false);
+            }
+            return Err(sws_protocol::error_codes::POINTER_LOCK_DENIED);
+        }
+
+        let cursor_rect = self.cursor_rect();
+        let max_x = window
+            .x
+            .saturating_add(window.width.saturating_sub(1) as i32);
+        let max_y = window
+            .y
+            .saturating_add(window.height.saturating_sub(1) as i32);
+        let locked_x = self.cursor.x.clamp(window.x, max_x);
+        let locked_y = self.cursor.y.clamp(window.y, max_y);
+        self.add_pending_damage(cursor_rect);
+        self.cursor
+            .set_position(locked_x, locked_y, self.screen_width, self.screen_height);
+        if self.pointer_grab_window_id != interaction.implicit_grab_window_id {
+            self.pointer_grab_window_id = interaction.implicit_grab_window_id;
+            self.last_left_down_cursor = None;
+        }
+        self.pointer_focus_window_id = Some(window_id);
+        let state = PointerLockState::new(client_id, window_id);
+        self.pointer_lock = Some(state);
+        self.send_pointer_lock_changed(state, true);
+        Ok(true)
+    }
+
+    fn send_locked_relative_motion(&self, window_id: u32, dx: i32, dy: i32) {
+        self.send_locked_input_event(
+            window_id,
+            0,
+            super::input::event_types::EV_REL,
+            super::input::rel_codes::REL_X,
+            dx,
+        );
+        self.send_locked_input_event(
+            window_id,
+            0,
+            super::input::event_types::EV_REL,
+            super::input::rel_codes::REL_Y,
+            dy,
+        );
+        self.send_locked_input_event(window_id, 0, super::input::event_types::EV_SYN, 0, 0);
+    }
+
+    fn send_locked_input_event(
+        &self,
+        window_id: u32,
+        time: u64,
+        type_: u16,
+        code: u16,
+        value: i32,
+    ) {
+        let extension_owner = self
+            .window_manager
+            .get_window(window_id)
+            .and_then(|window| window.extension_owner);
+        super::ipc::send_pointer_lock_input_event(
+            input_route(window_id, extension_owner),
+            time,
+            type_,
+            code,
+            value,
+        );
+    }
+
     fn wait_for_event_signal(&mut self) {
         let mut handles = [PollHandle::new(self.wake_read.as_raw() as u32, POLLIN)];
         let ready = match poll(&mut handles, COMPOSITOR_IDLE_RECHECK_NS) {
@@ -2726,6 +2914,11 @@ impl Compositor {
     fn handle_input_event(&mut self, event: CompositorInputEvent) -> Result<bool, &'static str> {
         match event {
             CompositorInputEvent::MouseMove { dx, dy } => {
+                self.release_invalid_pointer_lock();
+                if let Some(window_id) = captured_window(self.pointer_lock) {
+                    self.send_locked_relative_motion(window_id, dx, dy);
+                    return Ok(true);
+                }
                 self.cursor
                     .update_position(dx, dy, self.screen_width, self.screen_height);
 
@@ -2818,6 +3011,15 @@ impl Compositor {
                 Ok(true)
             }
             CompositorInputEvent::MouseAbsolute { x, y } => {
+                self.release_invalid_pointer_lock();
+                if let Some(state) = self.pointer_lock.as_mut() {
+                    let delta = state.absolute_delta(x, y);
+                    let window_id = state.window_id;
+                    if let Some((dx, dy)) = delta {
+                        self.send_locked_relative_motion(window_id, dx, dy);
+                    }
+                    return Ok(true);
+                }
                 self.cursor
                     .set_position(x, y, self.screen_width, self.screen_height);
 
@@ -2899,10 +3101,11 @@ impl Compositor {
                 let hi_dy = dy.saturating_mul(120);
                 let hi_dx = dx.saturating_mul(120);
 
-                if let Some(win_id) = self
-                    .window_manager
-                    .window_at_point(self.cursor.x, self.cursor.y)
-                {
+                let lock_target = captured_window(self.pointer_lock);
+                if let Some(win_id) = lock_target.or_else(|| {
+                    self.window_manager
+                        .window_at_point(self.cursor.x, self.cursor.y)
+                }) {
                     if let Some(window) = self.window_manager.get_window(win_id) {
                         if self.cursor_position_in_window(window).is_some()
                             || window.extension_owner.is_some()
@@ -2965,6 +3168,27 @@ impl Compositor {
                 Ok(true)
             }
             CompositorInputEvent::MouseButton { button, pressed } => {
+                self.release_invalid_pointer_lock();
+                if let Some(state) = self.pointer_lock {
+                    if button == key_codes::BTN_LEFT {
+                        self.left_button_down = pressed;
+                    }
+                    self.send_locked_input_event(
+                        state.window_id,
+                        0,
+                        super::input::event_types::EV_KEY,
+                        button,
+                        if pressed { 1 } else { 0 },
+                    );
+                    self.send_locked_input_event(
+                        state.window_id,
+                        0,
+                        super::input::event_types::EV_SYN,
+                        0,
+                        0,
+                    );
+                    return Ok(true);
+                }
                 let mut grab_target = None;
 
                 if button == key_codes::BTN_LEFT {
@@ -3019,11 +3243,18 @@ impl Compositor {
                         .window_manager
                         .window_at_point(self.cursor.x, self.cursor.y);
                     if let Some(win_id) = win_id_opt {
-                        self.pointer_grab_window_id = Some(win_id);
+                        let accepts_focus = self.window_manager.window_accepts_focus(win_id);
+                        let mut interaction = PointerInteractionState {
+                            focused_window_id: self.window_manager.get_focused_window_id(),
+                            implicit_grab_window_id: self.pointer_grab_window_id,
+                            locked_window_id: self.pointer_lock.map(|state| state.window_id),
+                        };
+                        interaction.button_pressed(win_id, accepts_focus);
+                        self.pointer_grab_window_id = interaction.implicit_grab_window_id;
                         self.update_pointer_focus(Some(win_id));
                         // Only change focus if the window accepts focus
                         // Taskbar and Desktop windows are global UI elements that don't steal focus
-                        if self.window_manager.window_accepts_focus(win_id) {
+                        if accepts_focus {
                             self.window_manager.set_focus(win_id);
 
                             // Broadcast focus change event to all clients
@@ -3255,6 +3486,12 @@ impl Compositor {
     }
 
     fn clear_interaction_state_for_removed_windows(&mut self, window_ids: &[u32]) {
+        if self
+            .pointer_lock
+            .is_some_and(|state| Self::window_id_in(window_ids, state.window_id))
+        {
+            self.release_pointer_lock();
+        }
         if let Some(window_id) = self.pointer_focus_window_id
             && Self::window_id_in(window_ids, window_id)
         {
@@ -4408,6 +4645,12 @@ impl Compositor {
             }
             IpcEvent::MinimizeWindow { window_id } => {
                 println!("[Compositor] Minimizing window #{}", window_id);
+                if self
+                    .pointer_lock
+                    .is_some_and(|state| state.window_id == window_id)
+                {
+                    self.release_pointer_lock();
+                }
                 let old_rect = self
                     .window_manager
                     .get_window(window_id)
@@ -4657,6 +4900,56 @@ impl Compositor {
                 }
                 self.full_redraw_needed = true;
             }
+            IpcEvent::SetPointerLock {
+                client_id,
+                request_id,
+                window_id,
+                locked,
+            } => match self.set_pointer_lock(client_id, window_id, locked) {
+                Ok(changed) => {
+                    if !changed {
+                        self.send_pointer_lock_changed(
+                            PointerLockState::new(client_id, window_id),
+                            locked,
+                        );
+                    }
+                    if let CorrelatedReply::State { request_id, locked } =
+                        correlated_reply(request_id, locked, true)
+                    {
+                        send_response_to_client(
+                            client_id,
+                            sws_protocol::server_msg::POINTER_LOCK_CHANGED,
+                            request_id,
+                            sws_protocol::payload_pointer_lock_changed(window_id, locked).to_vec(),
+                        );
+                    }
+                }
+                Err(code) => {
+                    let denial = if code == sws_protocol::error_codes::POINTER_LOCK_NOT_OWNED {
+                        PointerLockDenial::NotOwned
+                    } else {
+                        PointerLockDenial::Denied
+                    };
+                    self.send_pointer_lock_changed(
+                        PointerLockState::new(client_id, window_id),
+                        confirmed_lock_state(locked, &Err(denial)),
+                    );
+                    match correlated_reply(request_id, locked, false) {
+                        CorrelatedReply::None => super::ipc::send_message_to_client(
+                            client_id,
+                            sws_protocol::server_msg::ERROR,
+                            sws_protocol::payload_error(code).to_vec(),
+                        ),
+                        CorrelatedReply::Error { request_id } => send_response_to_client(
+                            client_id,
+                            sws_protocol::server_msg::ERROR,
+                            request_id,
+                            sws_protocol::payload_error(code).to_vec(),
+                        ),
+                        CorrelatedReply::State { .. } => {}
+                    }
+                }
+            },
             IpcEvent::FocusWindow { window_id } => {
                 if let Some(fullscreen_id) = self
                     .window_manager
@@ -5168,6 +5461,7 @@ impl Compositor {
                 }
             }
         }
+        self.release_invalid_pointer_lock();
         Ok(false)
     }
 }

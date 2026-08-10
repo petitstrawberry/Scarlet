@@ -407,6 +407,26 @@ pub(crate) enum IrFrontFace {
     CounterClockwise,
 }
 
+/// Portable depth comparison used by the IR executor.
+#[derive(Clone, Copy)]
+pub(crate) enum IrCompareFunction {
+    Never,
+    Less,
+    Equal,
+    LessEqual,
+    Greater,
+    NotEqual,
+    GreaterEqual,
+    Always,
+}
+
+/// Portable depth-test state used by the IR executor.
+#[derive(Clone, Copy)]
+pub(crate) struct IrDepthState {
+    pub(crate) compare: IrCompareFunction,
+    pub(crate) write_enabled: bool,
+}
+
 /// Persistent pipeline slot and its immutable portable state.
 #[derive(Clone, Copy)]
 pub(crate) struct IrPipelineState {
@@ -415,6 +435,7 @@ pub(crate) struct IrPipelineState {
     pub(crate) blend: IrBlendState,
     pub(crate) cull_mode: IrCullMode,
     pub(crate) front_face: IrFrontFace,
+    pub(crate) depth: Option<IrDepthState>,
 }
 
 /// Portable sampler filtering mode.
@@ -485,6 +506,7 @@ pub(crate) enum IrTextureFormat {
     Bgra8,
     Rgba8,
     R8,
+    Depth32Float,
 }
 
 /// One validated texture copy request without backend identifiers.
@@ -499,6 +521,8 @@ pub(crate) struct IrTextureCopy {
 /// Complete backend-neutral render submission for one mapped presentation target.
 pub(crate) struct IrSubmission {
     pub(crate) clear_color: Option<[f32; 4]>,
+    pub(crate) depth_attachment: Option<IrTextureSpec>,
+    pub(crate) clear_depth: Option<f32>,
     pub(crate) render_area: IrRect,
     pub(crate) vertices: Vec<IrVertex>,
     pub(crate) draws: Vec<IrDraw>,

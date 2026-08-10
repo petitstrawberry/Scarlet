@@ -37,6 +37,8 @@ pub const SGFX_MAX_DAMAGE_RECTS: usize = 16;
 pub mod capabilities {
     /// Shared SGFX images may be registered and committed without CPU copies.
     pub const SGFX_SHARED_IMAGE: u64 = 1 << 0;
+    /// Focused windows may capture raw relative pointer motion.
+    pub const POINTER_LOCK: u64 = 1 << 1;
 }
 
 /// SWS compositor backend identifiers reported by capability negotiation.
@@ -65,6 +67,10 @@ pub mod error_codes {
     pub const ACTIVATION_DENIED: u32 = 106;
     /// Another window already owns fullscreen state on the requested output.
     pub const FULLSCREEN_OCCUPIED: u32 = 107;
+    /// Pointer lock was requested for a window not owned by the connection.
+    pub const POINTER_LOCK_NOT_OWNED: u32 = 108;
+    /// Pointer lock requires a visible, non-minimized, keyboard-focused window.
+    pub const POINTER_LOCK_DENIED: u32 = 109;
 }
 
 /// Message type IDs (client -> server).
@@ -118,6 +124,8 @@ pub mod client_msg {
     // Fullscreen window state (40-41)
     pub const SET_FULLSCREEN: u32 = 40;
     pub const UNSET_FULLSCREEN: u32 = 41;
+    /// Capture or release raw relative pointer motion for an owned window.
+    pub const SET_POINTER_LOCK: u32 = 42;
 
     // Text input client API messages (200-219)
     pub const TEXT_INPUT_CREATE: u32 = 200;
@@ -178,6 +186,8 @@ pub mod server_msg {
     pub const SGFX_BUFFER_DESTROYED: u32 = 30;
     pub const ACTIVATION_TOKEN: u32 = 31;
     pub const WINDOW_STATE_CHANGED: u32 = 32;
+    /// Pointer lock state changed, including compositor-forced release.
+    pub const POINTER_LOCK_CHANGED: u32 = 33;
 
     // Text input client events (200-219)
     pub const TEXT_INPUT_CREATED: u32 = 200;
@@ -801,6 +811,12 @@ pub enum ClientMessageRef<'a> {
         window_id: u32,
     },
 
+    /// Capture or release raw relative pointer motion.
+    SetPointerLock {
+        window_id: u32,
+        locked: bool,
+    },
+
     /// Set window type for Z-order management
     /// Type: 0 = Normal, 1 = AlwaysOnTop, 2 = Taskbar, 3 = Desktop
     SetWindowType {
@@ -1069,6 +1085,11 @@ pub enum ServerMessage {
     WindowStateChanged {
         window_id: u32,
         state_flags: u32,
+    },
+    /// Compositor-confirmed pointer lock state.
+    PointerLockChanged {
+        window_id: u32,
+        locked: bool,
     },
     InputEvent {
         window_id: u32,
@@ -1627,6 +1648,18 @@ pub fn parse_client_message<'a>(
             }
             let window_id = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
             Ok(ClientMessageRef::UnsetFullscreen { window_id })
+        }
+        client_msg::SET_POINTER_LOCK => {
+            if payload.len() != 8 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            let window_id = read_u32(payload, 0)?;
+            let locked = match read_u32(payload, 4)? {
+                0 => false,
+                1 => true,
+                _ => return Err(ProtocolError::MalformedPayload),
+            };
+            Ok(ClientMessageRef::SetPointerLock { window_id, locked })
         }
         client_msg::SET_WINDOW_TYPE => {
             if payload.len() != 8 {
@@ -2285,6 +2318,18 @@ pub fn parse_server_message(msg_type: u32, payload: &[u8]) -> Result<ServerMessa
                 window_id,
                 state_flags,
             })
+        }
+        server_msg::POINTER_LOCK_CHANGED => {
+            if payload.len() != 8 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            let window_id = read_u32(payload, 0)?;
+            let locked = match read_u32(payload, 4)? {
+                0 => false,
+                1 => true,
+                _ => return Err(ProtocolError::MalformedPayload),
+            };
+            Ok(ServerMessage::PointerLockChanged { window_id, locked })
         }
         server_msg::INPUT_EVENT => {
             if payload.len() != 20 {
@@ -3725,6 +3770,37 @@ pub fn payload_unset_fullscreen(window_id: u32) -> [u8; 4] {
     window_id.to_le_bytes()
 }
 
+/// Build payload for client->server `SET_POINTER_LOCK`.
+///
+/// # Arguments
+///
+/// * `window_id` - Window that should capture or release pointer motion.
+/// * `locked` - `true` to capture the pointer, `false` to release it.
+///
+/// # Returns
+///
+/// The fixed-width pointer lock request payload.
+pub fn payload_set_pointer_lock(window_id: u32, locked: bool) -> [u8; 8] {
+    let mut payload = [0u8; 8];
+    payload[0..4].copy_from_slice(&window_id.to_le_bytes());
+    payload[4..8].copy_from_slice(&(locked as u32).to_le_bytes());
+    payload
+}
+
+/// Build payload for server->client `POINTER_LOCK_CHANGED`.
+///
+/// # Arguments
+///
+/// * `window_id` - Window whose pointer lock state changed.
+/// * `locked` - Current compositor-confirmed lock state.
+///
+/// # Returns
+///
+/// The fixed-width pointer lock event payload.
+pub fn payload_pointer_lock_changed(window_id: u32, locked: bool) -> [u8; 8] {
+    payload_set_pointer_lock(window_id, locked)
+}
+
 /// Build payload for client->server `SET_WINDOW_TYPE`.
 pub fn payload_set_window_type(window_id: u32, window_type: u32) -> [u8; 8] {
     let mut payload = [0u8; 8];
@@ -4316,12 +4392,14 @@ pub fn payload_set_window_has_alpha_content(window_id: u32, has_alpha: bool) -> 
 #[cfg(all(test, feature = "std"))]
 mod tests {
     use super::{
-        ClientMessageRef, ServerMessage, WindowPlacement, client_msg, parse_client_message,
-        parse_server_message, payload_activation_token, payload_create_window_with_placement,
+        ClientMessageRef, MessageHeader, ProtocolError, ServerMessage, WindowPlacement, client_msg,
+        encode_routed_frame, error_codes, parse_client_message, parse_server_message,
+        payload_activation_token, payload_create_window_with_placement,
         payload_create_window_with_placement_and_activation_token,
-        payload_create_window_with_position, payload_request_activation_token,
-        payload_set_fullscreen, payload_unset_fullscreen, payload_window_state_changed, server_msg,
-        window_placement, window_state,
+        payload_create_window_with_position, payload_error, payload_pointer_lock_changed,
+        payload_request_activation_token, payload_set_fullscreen, payload_set_pointer_lock,
+        payload_unset_fullscreen, payload_window_state_changed, server_msg, window_placement,
+        window_state,
     };
 
     #[test]
@@ -4473,5 +4551,83 @@ mod tests {
                 state_flags: flags,
             }
         );
+    }
+
+    #[test]
+    fn pointer_lock_request_and_event_round_trip() {
+        for locked in [false, true] {
+            let request = payload_set_pointer_lock(91, locked);
+            assert_eq!(
+                parse_client_message(client_msg::SET_POINTER_LOCK, &request).unwrap(),
+                ClientMessageRef::SetPointerLock {
+                    window_id: 91,
+                    locked,
+                }
+            );
+
+            let event = payload_pointer_lock_changed(91, locked);
+            assert_eq!(
+                parse_server_message(server_msg::POINTER_LOCK_CHANGED, &event).unwrap(),
+                ServerMessage::PointerLockChanged {
+                    window_id: 91,
+                    locked,
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn pointer_lock_rejects_malformed_payloads() {
+        assert_eq!(
+            parse_client_message(client_msg::SET_POINTER_LOCK, &[0; 7]),
+            Err(ProtocolError::MalformedPayload)
+        );
+        let mut invalid_bool = payload_set_pointer_lock(91, false);
+        invalid_bool[4..8].copy_from_slice(&2u32.to_le_bytes());
+        assert_eq!(
+            parse_client_message(client_msg::SET_POINTER_LOCK, &invalid_bool),
+            Err(ProtocolError::MalformedPayload)
+        );
+        assert_eq!(
+            parse_server_message(server_msg::POINTER_LOCK_CHANGED, &invalid_bool),
+            Err(ProtocolError::MalformedPayload)
+        );
+    }
+
+    #[test]
+    fn pointer_lock_correlated_frames_preserve_response_header() {
+        let cases = [
+            (
+                server_msg::POINTER_LOCK_CHANGED,
+                7,
+                payload_pointer_lock_changed(91, true).to_vec(),
+            ),
+            (
+                server_msg::POINTER_LOCK_CHANGED,
+                8,
+                payload_pointer_lock_changed(91, true).to_vec(),
+            ),
+            (
+                server_msg::ERROR,
+                9,
+                payload_error(error_codes::POINTER_LOCK_DENIED).to_vec(),
+            ),
+        ];
+
+        for (msg_type, request_id, payload) in cases {
+            let frame = encode_routed_frame(
+                msg_type,
+                MessageHeader::FLAG_IS_RESPONSE,
+                request_id,
+                &payload,
+            );
+            let header =
+                MessageHeader::from_le_bytes(frame[..MessageHeader::SIZE].try_into().unwrap());
+            assert!(header.is_response());
+            assert_eq!(header.request_id, request_id);
+            assert_eq!(header.msg_type_u32(), msg_type);
+            assert_eq!(&frame[MessageHeader::SIZE..], payload.as_slice());
+            parse_server_message(msg_type, &frame[MessageHeader::SIZE..]).unwrap();
+        }
     }
 }

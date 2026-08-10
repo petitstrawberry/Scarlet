@@ -5,11 +5,13 @@ use core::cell::Cell;
 
 use framebuffer::DisplaySurface;
 use gpu_raw::{
-    GPU_DEVICE_STATE_READY, GPU_EXECUTION_SUPPORT_IMAGE_UPLOAD, GPU_EXECUTION_SUPPORT_PRESENTATION,
-    GPU_EXECUTION_SUPPORT_QUEUE, GPU_IMAGE_USAGE_PRESENTABLE, GPU_IMAGE_USAGE_RENDER_TARGET,
-    GPU_IMAGE_USAGE_SAMPLED, GPU_IMAGE_USAGE_TRANSFER_DST, GPU_RESULT_SUCCESS, Gpu as RawGpu,
-    GpuBuffer as RawBuffer, GpuContext as RawContext, GpuDialect as RawDialect,
-    GpuImage as RawImage, GpuImageBgraRect, GpuQueue as RawQueue,
+    GPU_DEVICE_STATE_READY, GPU_EXECUTION_SUPPORT_DEPTH, GPU_EXECUTION_SUPPORT_IMAGE_UPLOAD,
+    GPU_EXECUTION_SUPPORT_PRESENTATION, GPU_EXECUTION_SUPPORT_QUEUE, GPU_IMAGE_FORMAT_BGRA8_UNORM,
+    GPU_IMAGE_FORMAT_DEPTH32_FLOAT, GPU_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT,
+    GPU_IMAGE_USAGE_PRESENTABLE, GPU_IMAGE_USAGE_RENDER_TARGET, GPU_IMAGE_USAGE_SAMPLED,
+    GPU_IMAGE_USAGE_TRANSFER_DST, GPU_RESULT_SUCCESS, Gpu as RawGpu, GpuBuffer as RawBuffer,
+    GpuContext as RawContext, GpuDialect as RawDialect, GpuImage as RawImage, GpuImageBgraRect,
+    GpuQueue as RawQueue,
 };
 #[cfg(feature = "std")]
 use scarlet_os::handle::{Handle, HandleError, HandleResult};
@@ -22,9 +24,9 @@ use std::{
 };
 
 use crate::driver::{
-    IrAddressMode, IrBlendFactor, IrBlendOp, IrBlendState, IrCullMode, IrDraw, IrFilterMode,
-    IrFragmentProgram, IrFrontFace, IrPipelineState, IrSamplerState, IrSubmission, IrTextureCopy,
-    IrTextureSpec, IrTextureUpload, IrVertex, MAX_IR_VERTICES,
+    IrAddressMode, IrBlendFactor, IrBlendOp, IrBlendState, IrCompareFunction, IrCullMode, IrDraw,
+    IrFilterMode, IrFragmentProgram, IrFrontFace, IrPipelineState, IrSamplerState, IrSubmission,
+    IrTextureCopy, IrTextureFormat, IrTextureSpec, IrTextureUpload, IrVertex, MAX_IR_VERTICES,
 };
 use crate::{
     Capabilities, Color, CullMode, FrontFace, MAX_COMPOSITION_OPERATIONS, PipelineDesc,
@@ -49,6 +51,7 @@ const VIRGL_CCMD_CLEAR_SURFACE: u32 = 62;
 
 const VIRGL_OBJECT_BLEND: u32 = 1;
 const VIRGL_OBJECT_RASTERIZER: u32 = 2;
+const VIRGL_OBJECT_DSA: u32 = 3;
 const VIRGL_OBJECT_SHADER: u32 = 4;
 const VIRGL_OBJECT_VERTEX_ELEMENTS: u32 = 5;
 const VIRGL_OBJECT_SAMPLER_VIEW: u32 = 6;
@@ -56,6 +59,7 @@ const VIRGL_OBJECT_SAMPLER_STATE: u32 = 7;
 const VIRGL_OBJECT_SURFACE: u32 = 8;
 
 const VIRGL_FORMAT_B8G8R8A8_UNORM: u32 = 1;
+const VIRGL_FORMAT_Z32_FLOAT: u32 = 18;
 const VIRGL_FORMAT_R32G32B32A32_FLOAT: u32 = 31;
 const VIRGL_FORMAT_R32G32B32_FLOAT: u32 = 30;
 const VIRGL_FORMAT_R32G32_FLOAT: u32 = 29;
@@ -64,6 +68,7 @@ const PIPE_SHADER_FRAGMENT: u32 = 1;
 const VIRGL_SHADER_TOKEN_COUNT_HINT: u32 = 300;
 const PIPE_PRIM_TRIANGLES: u32 = 4;
 const PIPE_CLEAR_COLOR0: u32 = 1 << 2;
+const PIPE_CLEAR_DEPTH: u32 = 1 << 0;
 
 const SURFACE_HANDLE: u32 = 1;
 const VERTEX_SHADER_HANDLE: u32 = 2;
@@ -282,6 +287,7 @@ impl Device {
             rendering: info.execution_support & GPU_EXECUTION_SUPPORT_QUEUE != 0,
             presentation: info.execution_support & GPU_EXECUTION_SUPPORT_PRESENTATION != 0,
             image_upload: info.execution_support & GPU_EXECUTION_SUPPORT_IMAGE_UPLOAD != 0,
+            depth: info.execution_support & GPU_EXECUTION_SUPPORT_DEPTH != 0,
         };
         if !capabilities.supports_rendering() {
             return Err(HandleError::Unsupported);
@@ -486,13 +492,23 @@ impl Context {
         if spec.copy_destination {
             usage |= GPU_IMAGE_USAGE_TRANSFER_DST;
         }
+        if matches!(spec.format, IrTextureFormat::Depth32Float) {
+            usage = GPU_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT;
+        }
         if usage == 0 {
             return Err(HandleError::InvalidParameter);
         }
-        let raw = self
-            .device
-            .raw
-            .create_image_with_usage(spec.width, spec.height, usage)?;
+        let format = if matches!(spec.format, IrTextureFormat::Depth32Float) {
+            GPU_IMAGE_FORMAT_DEPTH32_FLOAT
+        } else {
+            GPU_IMAGE_FORMAT_BGRA8_UNORM
+        };
+        let raw = self.device.raw.create_image_with_format_and_usage(
+            format,
+            spec.width,
+            spec.height,
+            usage,
+        )?;
         let resource_id = resource_id_from_token(self.raw.attach_image(&raw)?)?;
         Ok(Texture {
             raw,
@@ -721,6 +737,7 @@ struct IrSampler {
 struct IrPipeline {
     blend_handle: u32,
     rasterizer_handle: u32,
+    dsa_handle: u32,
     state: IrPipelineState,
     initialized: Cell<bool>,
 }
@@ -747,6 +764,11 @@ struct IrPassTarget {
     width: u32,
     height: u32,
     orientation: FramebufferOrientation,
+}
+
+struct IrPassDepthTarget {
+    surface_handle: u32,
+    surface_initialized: bool,
 }
 
 impl IrTexture {
@@ -1002,6 +1024,28 @@ impl Queue {
             return Err(HandleError::InvalidParameter);
         }
 
+        let depth_target = if let Some(spec) = submission.depth_attachment {
+            if !matches!(spec.format, IrTextureFormat::Depth32Float)
+                || spec.width != target.width
+                || spec.height != target.height
+                || submission
+                    .clear_depth
+                    .is_some_and(|depth| !depth.is_finite() || !(0.0..=1.0).contains(&depth))
+            {
+                return Err(HandleError::InvalidParameter);
+            }
+            let texture = ir_texture(context, resources, spec)?;
+            Some(IrPassDepthTarget {
+                surface_handle: texture.surface_handle(),
+                surface_initialized: texture.surface_initialized(),
+            })
+        } else {
+            if submission.clear_depth.is_some() {
+                return Err(HandleError::InvalidParameter);
+            }
+            None
+        };
+
         let mut commands = Vec::new();
         commands
             .try_reserve(16 * 1024)
@@ -1015,11 +1059,24 @@ impl Queue {
         if !target.surface_initialized {
             push_surface(&mut commands, target.surface_handle, target.resource_id);
         }
+        if let (Some(depth_spec), Some(depth_target)) =
+            (submission.depth_attachment, depth_target.as_ref())
+            && !depth_target.surface_initialized
+        {
+            let texture = resources
+                .textures
+                .get(depth_spec.slot)
+                .and_then(Option::as_ref)
+                .ok_or(HandleError::InvalidParameter)?;
+            push_depth_surface(
+                &mut commands,
+                depth_target.surface_handle,
+                texture.resource_id(),
+            );
+        }
         for upload in &submission.texture_uploads {
             let texture = ir_texture(context, resources, IrTextureSpec { ..upload.texture })?;
-            let view_is_pending = initialized_views
-                .iter()
-                .any(|slot| *slot == upload.texture.slot);
+            let view_is_pending = initialized_views.contains(&upload.texture.slot);
             if !texture.sampler_view_initialized() && !view_is_pending {
                 push_sampler_view(
                     &mut commands,
@@ -1038,18 +1095,14 @@ impl Queue {
                 submission.vertices.len(),
             )?;
             let pipeline = ir_pipeline(context, resources, draw.pipeline)?;
-            let pipeline_is_pending = initialized_pipelines
-                .iter()
-                .any(|slot| *slot == draw.pipeline.slot);
+            let pipeline_is_pending = initialized_pipelines.contains(&draw.pipeline.slot);
             if !pipeline.initialized.get() && !pipeline_is_pending {
                 push_ir_pipeline(&mut commands, pipeline);
                 initialized_pipelines.push(draw.pipeline.slot);
             }
             if let (Some(texture_spec), Some(sampler)) = (draw.texture, draw.sampler) {
                 let texture = ir_texture(context, resources, texture_spec)?;
-                let view_is_pending = initialized_views
-                    .iter()
-                    .any(|pending| *pending == texture_spec.slot);
+                let view_is_pending = initialized_views.contains(&texture_spec.slot);
                 if !texture.sampler_view_initialized() && !view_is_pending {
                     push_sampler_view(
                         &mut commands,
@@ -1059,9 +1112,7 @@ impl Queue {
                     initialized_views.push(texture_spec.slot);
                 }
                 let sampler = ir_sampler(context, resources, sampler)?;
-                let sampler_is_pending = initialized_samplers
-                    .iter()
-                    .any(|slot| *slot == sampler.state.slot);
+                let sampler_is_pending = initialized_samplers.contains(&sampler.state.slot);
                 if !sampler.initialized.get() && !sampler_is_pending {
                     push_ir_sampler(&mut commands, sampler);
                     initialized_samplers.push(sampler.state.slot);
@@ -1072,6 +1123,9 @@ impl Queue {
         push_ir_bind_pass_state(
             &mut commands,
             target.surface_handle,
+            depth_target
+                .as_ref()
+                .map_or(0, |depth| depth.surface_handle),
             resources.vertex_resource_id,
             target.width,
             target.height,
@@ -1083,19 +1137,33 @@ impl Queue {
             &mut commands,
             ir_rect_to_pixel_rect(submission.render_area)?,
         )?;
-        if let Some(clear_color) = submission.clear_color {
-            if submission.render_area.x == 0
-                && submission.render_area.y == 0
-                && submission.render_area.width == target.width
-                && submission.render_area.height == target.height
-            {
-                push_ir_clear(&mut commands, clear_color);
-            } else {
+        let full_area = submission.render_area.x == 0
+            && submission.render_area.y == 0
+            && submission.render_area.width == target.width
+            && submission.render_area.height == target.height;
+        if full_area && (submission.clear_color.is_some() || submission.clear_depth.is_some()) {
+            push_ir_clear(
+                &mut commands,
+                submission.clear_color,
+                submission.clear_depth,
+            );
+        } else {
+            if let Some(clear_color) = submission.clear_color {
                 push_ir_clear_surface(
                     &mut commands,
                     target.surface_handle,
                     submission.render_area,
                     clear_color,
+                )?;
+            }
+            if let (Some(clear_depth), Some(depth_target)) =
+                (submission.clear_depth, depth_target.as_ref())
+            {
+                push_ir_clear_depth_surface(
+                    &mut commands,
+                    depth_target.surface_handle,
+                    submission.render_area,
+                    clear_depth,
                 )?;
             }
         }
@@ -1116,6 +1184,7 @@ impl Queue {
                 VIRGL_OBJECT_RASTERIZER,
                 pipeline.rasterizer_handle,
             );
+            push_bind_object(&mut commands, VIRGL_OBJECT_DSA, pipeline.dsa_handle);
             push_fragment_shader(
                 &mut commands,
                 ir_fragment_shader_handle(resources, draw.pipeline.fragment),
@@ -1182,6 +1251,11 @@ impl Queue {
                 texture.set_sampler_view_initialized();
             }
         }
+        if let Some(depth) = submission.depth_attachment
+            && let Some(Some(texture)) = resources.textures.get(depth.slot)
+        {
+            texture.set_surface_initialized();
+        }
         Ok(())
     }
 
@@ -1200,7 +1274,7 @@ impl Queue {
             || viewport.height() == 0
             || vertices.is_empty()
             || vertices.len() > pipeline.max_vertices
-            || vertices.len() % 3 != 0
+            || !vertices.len().is_multiple_of(3)
         {
             return Err(HandleError::InvalidParameter);
         }
@@ -1572,6 +1646,7 @@ fn ir_pipeline<'resources>(
         *pipeline_slot = Some(IrPipeline {
             blend_handle: context.allocate_object_handle()?,
             rasterizer_handle: context.allocate_object_handle()?,
+            dsa_handle: context.allocate_object_handle()?,
             state,
             initialized: Cell::new(false),
         });
@@ -1599,6 +1674,15 @@ fn ir_pipeline_states_equal(left: IrPipelineState, right: IrPipelineState) -> bo
         && ir_blend_states_equal(left.blend, right.blend)
         && ir_cull_modes_equal(left.cull_mode, right.cull_mode)
         && ir_front_faces_equal(left.front_face, right.front_face)
+        && match (left.depth, right.depth) {
+            (None, None) => true,
+            (Some(left), Some(right)) => {
+                left.write_enabled == right.write_enabled
+                    && core::mem::discriminant(&left.compare)
+                        == core::mem::discriminant(&right.compare)
+            }
+            _ => false,
+        }
 }
 
 fn ir_fragment_programs_equal(left: IrFragmentProgram, right: IrFragmentProgram) -> bool {
@@ -1679,7 +1763,7 @@ fn validate_ir_draw(
         .checked_add(draw.vertex_count)
         .ok_or(HandleError::InvalidParameter)?;
     if draw.vertex_count == 0
-        || draw.vertex_count % 3 != 0
+        || !draw.vertex_count.is_multiple_of(3)
         || end > vertices_len
         || !ir_rect_is_within(draw.scissor, target_width, target_height)
         || !draw
@@ -1858,6 +1942,18 @@ fn push_surface(commands: &mut Vec<u8>, handle: u32, resource_id: u32) {
     push_dword(commands, handle);
     push_dword(commands, resource_id);
     push_dword(commands, VIRGL_FORMAT_B8G8R8A8_UNORM);
+    push_dword(commands, 0);
+    push_dword(commands, 0);
+}
+
+fn push_depth_surface(commands: &mut Vec<u8>, handle: u32, resource_id: u32) {
+    push_dword(
+        commands,
+        command_header(VIRGL_CCMD_CREATE_OBJECT, VIRGL_OBJECT_SURFACE, 5),
+    );
+    push_dword(commands, handle);
+    push_dword(commands, resource_id);
+    push_dword(commands, VIRGL_FORMAT_Z32_FLOAT);
     push_dword(commands, 0);
     push_dword(commands, 0);
 }
@@ -2207,6 +2303,22 @@ fn push_ir_pipeline(commands: &mut Vec<u8>, pipeline: &IrPipeline) {
     push_float(commands, 0.0);
     push_float(commands, 0.0);
     push_float(commands, 0.0);
+    push_ir_dsa(commands, pipeline.dsa_handle, pipeline.state.depth);
+}
+
+fn push_ir_dsa(commands: &mut Vec<u8>, handle: u32, depth: Option<crate::driver::IrDepthState>) {
+    push_dword(
+        commands,
+        command_header(VIRGL_CCMD_CREATE_OBJECT, VIRGL_OBJECT_DSA, 5),
+    );
+    push_dword(commands, handle);
+    let flags = depth.map_or(0, |depth| {
+        1 | (u32::from(depth.write_enabled) << 1) | (ir_compare_function(depth.compare) << 2)
+    });
+    push_dword(commands, flags);
+    push_dword(commands, 0);
+    push_dword(commands, 0);
+    push_float(commands, 0.0);
 }
 
 fn push_ir_sampler(commands: &mut Vec<u8>, sampler: &IrSampler) {
@@ -2233,9 +2345,11 @@ fn push_ir_sampler(commands: &mut Vec<u8>, sampler: &IrSampler) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn push_ir_bind_pass_state(
     commands: &mut Vec<u8>,
     surface_handle: u32,
+    depth_surface_handle: u32,
     vertex_resource_id: u32,
     width: u32,
     height: u32,
@@ -2256,7 +2370,7 @@ fn push_ir_bind_pass_state(
         command_header(VIRGL_CCMD_SET_FRAMEBUFFER_STATE, 0, 3),
     );
     push_dword(commands, 1);
-    push_dword(commands, 0);
+    push_dword(commands, depth_surface_handle);
     push_dword(commands, surface_handle);
     push_dword(
         commands,
@@ -2268,16 +2382,44 @@ fn push_ir_bind_pass_state(
     push_viewport(commands, Viewport::new(width, height), orientation);
 }
 
-fn push_ir_clear(commands: &mut Vec<u8>, color: [f32; 4]) {
+fn push_ir_clear(commands: &mut Vec<u8>, color: Option<[f32; 4]>, depth: Option<f32>) {
     push_dword(commands, command_header(VIRGL_CCMD_CLEAR, 0, 8));
-    push_dword(commands, PIPE_CLEAR_COLOR0);
-    for component in color {
+    push_dword(
+        commands,
+        if color.is_some() {
+            PIPE_CLEAR_COLOR0
+        } else {
+            0
+        } | if depth.is_some() { PIPE_CLEAR_DEPTH } else { 0 },
+    );
+    for component in color.unwrap_or([0.0; 4]) {
         push_float(commands, component);
     }
-    let depth = 1.0f64.to_bits();
+    let depth = f64::from(depth.unwrap_or(1.0)).to_bits();
     push_dword(commands, depth as u32);
     push_dword(commands, (depth >> 32) as u32);
     push_dword(commands, 0);
+}
+
+fn push_ir_clear_depth_surface(
+    commands: &mut Vec<u8>,
+    surface_handle: u32,
+    area: crate::driver::IrRect,
+    depth: f32,
+) -> HandleResult<()> {
+    push_dword(commands, command_header(VIRGL_CCMD_CLEAR_SURFACE, 0, 10));
+    push_dword(commands, PIPE_CLEAR_DEPTH << 1);
+    push_dword(commands, surface_handle);
+    let depth = f64::from(depth).to_bits();
+    push_dword(commands, depth as u32);
+    push_dword(commands, (depth >> 32) as u32);
+    push_dword(commands, 0);
+    push_dword(commands, 0);
+    push_dword(commands, area.x);
+    push_dword(commands, area.y);
+    push_dword(commands, area.width);
+    push_dword(commands, area.height);
+    Ok(())
 }
 
 fn push_ir_clear_surface(
@@ -2369,6 +2511,19 @@ fn ir_blend_op(operation: IrBlendOp) -> u32 {
         IrBlendOp::Add => PIPE_BLEND_ADD,
         IrBlendOp::Subtract => PIPE_BLEND_SUBTRACT,
         IrBlendOp::ReverseSubtract => PIPE_BLEND_REVERSE_SUBTRACT,
+    }
+}
+
+fn ir_compare_function(compare: IrCompareFunction) -> u32 {
+    match compare {
+        IrCompareFunction::Never => 0,
+        IrCompareFunction::Less => 1,
+        IrCompareFunction::Equal => 2,
+        IrCompareFunction::LessEqual => 3,
+        IrCompareFunction::Greater => 4,
+        IrCompareFunction::NotEqual => 5,
+        IrCompareFunction::GreaterEqual => 6,
+        IrCompareFunction::Always => 7,
     }
 }
 
@@ -2539,10 +2694,7 @@ fn push_inline_write(commands: &mut Vec<u8>, resource_id: u32, vertices: &[Verte
     push_dword(commands, 0);
     push_dword(commands, 0);
     push_dword(commands, 0);
-    push_dword(
-        commands,
-        (vertices.len() * core::mem::size_of::<VertexClip4Color3>()) as u32,
-    );
+    push_dword(commands, core::mem::size_of_val(vertices) as u32);
     push_dword(commands, 1);
     push_dword(commands, 1);
     for vertex in vertices {
@@ -2720,4 +2872,120 @@ fn rasterizer_flags(cull_mode: CullMode, front_face: FrontFace) -> u32 {
         0
     };
     VIRGL_RASTERIZER_DEPTH_CLIP | cull_face | front_ccw
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::driver::IrDepthState;
+
+    fn dwords(bytes: &[u8]) -> Vec<u32> {
+        bytes
+            .chunks_exact(4)
+            .map(|word| u32::from_le_bytes(word.try_into().expect("four-byte command word")))
+            .collect()
+    }
+
+    #[test]
+    fn ir_color_only_packets_keep_depth_unbound_and_disabled() {
+        let mut commands = Vec::new();
+        push_ir_bind_pass_state(
+            &mut commands,
+            11,
+            0,
+            12,
+            640,
+            480,
+            FramebufferOrientation::UPPER_LEFT,
+            13,
+            14,
+        );
+        push_ir_dsa(&mut commands, 15, None);
+        push_ir_clear(&mut commands, Some([0.1, 0.2, 0.3, 1.0]), None);
+        let words = dwords(&commands);
+        let framebuffer = words
+            .windows(4)
+            .find(|packet| packet[0] == command_header(VIRGL_CCMD_SET_FRAMEBUFFER_STATE, 0, 3))
+            .expect("framebuffer packet");
+        assert_eq!(
+            framebuffer,
+            [
+                command_header(VIRGL_CCMD_SET_FRAMEBUFFER_STATE, 0, 3),
+                1,
+                0,
+                11
+            ]
+        );
+        let dsa = words
+            .windows(6)
+            .find(|packet| {
+                packet[0] == command_header(VIRGL_CCMD_CREATE_OBJECT, VIRGL_OBJECT_DSA, 5)
+            })
+            .expect("DSA packet");
+        assert_eq!(dsa[2], 0);
+        let clear = words
+            .windows(9)
+            .find(|packet| packet[0] == command_header(VIRGL_CCMD_CLEAR, 0, 8))
+            .expect("clear packet");
+        assert_eq!(clear[1], PIPE_CLEAR_COLOR0);
+    }
+
+    #[test]
+    fn ir_depth_packets_create_bind_test_write_and_clear_z32() {
+        let mut commands = Vec::new();
+        push_depth_surface(&mut commands, 21, 22);
+        push_ir_bind_pass_state(
+            &mut commands,
+            11,
+            21,
+            12,
+            640,
+            480,
+            FramebufferOrientation::UPPER_LEFT,
+            13,
+            14,
+        );
+        push_ir_dsa(
+            &mut commands,
+            15,
+            Some(IrDepthState {
+                compare: IrCompareFunction::Less,
+                write_enabled: true,
+            }),
+        );
+        push_ir_clear(&mut commands, Some([0.0; 4]), Some(1.0));
+        let words = dwords(&commands);
+        assert_eq!(
+            &words[..6],
+            &[
+                command_header(VIRGL_CCMD_CREATE_OBJECT, VIRGL_OBJECT_SURFACE, 5),
+                21,
+                22,
+                VIRGL_FORMAT_Z32_FLOAT,
+                0,
+                0,
+            ]
+        );
+        let framebuffer = words
+            .windows(4)
+            .find(|packet| packet[0] == command_header(VIRGL_CCMD_SET_FRAMEBUFFER_STATE, 0, 3))
+            .expect("framebuffer packet");
+        assert_eq!(framebuffer[2], 21);
+        let dsa = words
+            .windows(6)
+            .find(|packet| {
+                packet[0] == command_header(VIRGL_CCMD_CREATE_OBJECT, VIRGL_OBJECT_DSA, 5)
+            })
+            .expect("DSA packet");
+        assert_eq!(dsa[2], 1 | (1 << 1) | (1 << 2));
+        let clear = words
+            .windows(9)
+            .find(|packet| packet[0] == command_header(VIRGL_CCMD_CLEAR, 0, 8))
+            .expect("clear packet");
+        assert_eq!(clear[1], PIPE_CLEAR_COLOR0 | PIPE_CLEAR_DEPTH);
+        assert_eq!(
+            u64::from(clear[6]) | (u64::from(clear[7]) << 32),
+            1.0f64.to_bits()
+        );
+    }
 }

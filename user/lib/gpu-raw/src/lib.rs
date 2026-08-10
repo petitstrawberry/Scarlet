@@ -107,6 +107,8 @@ pub const GPU_BUFFER_FLAGS_VALID: u32 = GPU_BUFFER_FLAG_CPU_VISIBLE;
 
 /// Generic BGRA8 normalized unsigned image format.
 pub const GPU_IMAGE_FORMAT_BGRA8_UNORM: u32 = 1;
+/// Generic 32-bit floating-point depth image format.
+pub const GPU_IMAGE_FORMAT_DEPTH32_FLOAT: u32 = 2;
 /// Image usage permitting the image to be bound as a render target.
 pub const GPU_IMAGE_USAGE_RENDER_TARGET: u32 = 1 << 0;
 /// Image usage permitting the image to be selected for display scanout.
@@ -115,11 +117,14 @@ pub const GPU_IMAGE_USAGE_PRESENTABLE: u32 = 1 << 1;
 pub const GPU_IMAGE_USAGE_SAMPLED: u32 = 1 << 2;
 /// Image usage permitting BGRA pixel transfers into the image.
 pub const GPU_IMAGE_USAGE_TRANSFER_DST: u32 = 1 << 3;
+/// Image usage permitting binding as a depth-stencil attachment.
+pub const GPU_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT: u32 = 1 << 4;
 /// All currently defined GPU image usage flags.
 pub const GPU_IMAGE_USAGE_VALID: u32 = GPU_IMAGE_USAGE_RENDER_TARGET
     | GPU_IMAGE_USAGE_PRESENTABLE
     | GPU_IMAGE_USAGE_SAMPLED
-    | GPU_IMAGE_USAGE_TRANSFER_DST;
+    | GPU_IMAGE_USAGE_TRANSFER_DST
+    | GPU_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT;
 
 /// The GPU backend is not available for control.
 pub const GPU_DEVICE_STATE_UNAVAILABLE: u32 = 0;
@@ -142,6 +147,8 @@ pub const GPU_EXECUTION_SUPPORT_TIMELINE: u32 = 1 << 3;
 pub const GPU_EXECUTION_SUPPORT_PRESENTATION: u32 = 1 << 4;
 /// Generic image upload operations are available.
 pub const GPU_EXECUTION_SUPPORT_IMAGE_UPLOAD: u32 = 1 << 5;
+/// Generic depth attachment and depth-test operations are available.
+pub const GPU_EXECUTION_SUPPORT_DEPTH: u32 = 1 << 6;
 
 /// Fixed byte capacity of an opaque backend or dialect identifier.
 pub const GPU_BACKEND_ID_BYTES: usize = 32;
@@ -1344,6 +1351,30 @@ impl Gpu {
         usage: u32,
     ) -> HandleResult<GpuImage> {
         let mut request = GpuCreateImage::new_with_usage(width, height, usage);
+        self.create_image_request(&mut request)
+    }
+
+    /// Create a GPU image with an explicit generic format and usage flags.
+    ///
+    /// # Arguments
+    ///
+    /// * `format` - A `GPU_IMAGE_FORMAT_*` value.
+    /// * `width` - Requested non-zero image width in pixels.
+    /// * `height` - Requested non-zero image height in pixels.
+    /// * `usage` - `GPU_IMAGE_USAGE_*` flags for the image.
+    ///
+    /// # Returns
+    ///
+    /// An owning image capability wrapper or a handle error.
+    pub fn create_image_with_format_and_usage(
+        &self,
+        format: u32,
+        width: u32,
+        height: u32,
+        usage: u32,
+    ) -> HandleResult<GpuImage> {
+        let mut request = GpuCreateImage::new_with_usage(width, height, usage);
+        request.format = format;
         self.create_image_request(&mut request)
     }
 

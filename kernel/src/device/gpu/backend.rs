@@ -26,6 +26,8 @@ pub const GPU_EXECUTION_SUPPORT_TIMELINE: u32 = 1 << 3;
 pub const GPU_EXECUTION_SUPPORT_PRESENTATION: u32 = 1 << 4;
 /// Generic image upload operations are available.
 pub const GPU_EXECUTION_SUPPORT_IMAGE_UPLOAD: u32 = 1 << 5;
+/// Generic depth attachment and depth-test operations are available.
+pub const GPU_EXECUTION_SUPPORT_DEPTH: u32 = 1 << 6;
 
 /// Stable state of a GPU device.
 #[repr(u32)]

@@ -29,6 +29,8 @@ pub enum TextureFormat {
     Rgba8Unorm,
     /// One eight-bit normalized red channel.
     R8Unorm,
+    /// One 32-bit floating-point depth component.
+    Depth32Float,
 }
 
 impl TextureFormat {
@@ -39,7 +41,7 @@ impl TextureFormat {
     /// The portable byte size for this format.
     pub const fn bytes_per_pixel(self) -> u32 {
         match self {
-            Self::Bgra8Unorm | Self::Rgba8Unorm => 4,
+            Self::Bgra8Unorm | Self::Rgba8Unorm | Self::Depth32Float => 4,
             Self::R8Unorm => 1,
         }
     }
@@ -52,7 +54,7 @@ pub struct TextureUsage(u8);
 impl TextureUsage {
     /// Allow shader sampling.
     pub const SAMPLED: Self = Self(1 << 0);
-    /// Allow use as a render-pass color attachment.
+    /// Allow use as a render-pass color or depth attachment.
     pub const RENDER_ATTACHMENT: Self = Self(1 << 1);
     /// Allow use as a texture copy source.
     pub const COPY_SRC: Self = Self(1 << 2);
@@ -128,9 +130,13 @@ impl TextureDesc {
     ///
     /// # Returns
     ///
-    /// A descriptor, or [`Error::InvalidDescriptor`] for empty usage.
+    /// A descriptor, or [`Error::InvalidDescriptor`] for empty usage or a
+    /// depth format carrying anything except `RENDER_ATTACHMENT` usage.
     pub const fn new(format: TextureFormat, extent: Extent2D, usage: TextureUsage) -> Result<Self> {
-        if usage.0 == 0 {
+        if usage.0 == 0
+            || (matches!(format, TextureFormat::Depth32Float)
+                && usage.0 != TextureUsage::RENDER_ATTACHMENT.0)
+        {
             Err(Error::InvalidDescriptor)
         } else {
             Ok(Self {

@@ -4,7 +4,8 @@ use alloc::vec::Vec;
 
 use super::{
     BufferRef, BufferUsage, Color, DrawUniforms, Error, FragmentProgram, IndexFormat, PixelRect,
-    RenderPipelineRef, ResourceTable, Result, SamplerRef, TextureRef, TextureUsage, TextureWrite,
+    RenderPipelineRef, ResourceTable, Result, SamplerRef, TextureFormat, TextureRef, TextureUsage,
+    TextureWrite,
 };
 
 /// Maximum commands retained by one logical command buffer.
@@ -30,6 +31,51 @@ pub enum StoreOp {
     DontCare,
 }
 
+/// Depth attachment initialization operation for a render pass.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum DepthLoadOp {
+    /// Preserve the attachment contents in the render area.
+    Load,
+    /// Clear the render area to the finite depth value before drawing.
+    Clear(f32),
+    /// Permit a backend to discard prior attachment contents.
+    DontCare,
+}
+
+/// Validated depth attachment configuration for one render pass.
+#[derive(Clone, Copy)]
+pub struct DepthAttachment<'r> {
+    pub(crate) target: TextureRef<'r>,
+    pub(crate) load: DepthLoadOp,
+    pub(crate) store: StoreOp,
+}
+
+impl<'r> DepthAttachment<'r> {
+    /// Return the depth attachment reference.
+    ///
+    /// # Returns
+    /// The lifetime-branded depth texture reference.
+    pub const fn target(self) -> TextureRef<'r> {
+        self.target
+    }
+
+    /// Return the depth attachment initialization operation.
+    ///
+    /// # Returns
+    /// The configured depth load operation.
+    pub const fn load(self) -> DepthLoadOp {
+        self.load
+    }
+
+    /// Return the depth attachment finalization operation.
+    ///
+    /// # Returns
+    /// The configured store operation.
+    pub const fn store(self) -> StoreOp {
+        self.store
+    }
+}
+
 /// Validated configuration for one logical color render pass.
 #[derive(Clone, Copy)]
 pub struct RenderPassDesc<'r> {
@@ -37,6 +83,7 @@ pub struct RenderPassDesc<'r> {
     pub(crate) area: PixelRect,
     pub(crate) load: LoadOp,
     pub(crate) store: StoreOp,
+    pub(crate) depth: Option<DepthAttachment<'r>>,
 }
 
 impl<'r> RenderPassDesc<'r> {
@@ -60,6 +107,9 @@ impl<'r> RenderPassDesc<'r> {
         store: StoreOp,
     ) -> Result<Self> {
         let texture = resources.texture(target)?;
+        if texture.format() == TextureFormat::Depth32Float {
+            return Err(Error::InvalidDescriptor);
+        }
         if !texture.usage().contains(TextureUsage::RENDER_ATTACHMENT) {
             return Err(Error::InvalidUsage);
         }
@@ -71,7 +121,50 @@ impl<'r> RenderPassDesc<'r> {
             area,
             load,
             store,
+            depth: None,
         })
+    }
+
+    /// Add a validated depth attachment to this color render pass.
+    ///
+    /// # Arguments
+    ///
+    /// * `resources` - Table that owns `target` and the color attachment.
+    /// * `target` - `Depth32Float` `RENDER_ATTACHMENT` texture.
+    /// * `load` - Depth attachment initialization operation.
+    /// * `store` - Depth attachment finalization operation.
+    ///
+    /// # Returns
+    /// The updated descriptor, or an error for table mismatch, format, usage,
+    /// bounds, or a non-finite/out-of-range clear value.
+    pub fn with_depth_attachment(
+        mut self,
+        resources: &'r ResourceTable,
+        target: TextureRef<'r>,
+        load: DepthLoadOp,
+        store: StoreOp,
+    ) -> Result<Self> {
+        let texture = resources.texture(target)?;
+        let color_texture = resources.texture(self.target)?;
+        if texture.format() != TextureFormat::Depth32Float {
+            return Err(Error::InvalidDescriptor);
+        }
+        if !texture.usage().contains(TextureUsage::RENDER_ATTACHMENT) {
+            return Err(Error::InvalidUsage);
+        }
+        if texture.extent() != color_texture.extent() || !self.area.is_within(texture.extent()) {
+            return Err(Error::OutOfBounds);
+        }
+        if matches!(load, DepthLoadOp::Clear(value) if !value.is_finite() || !(0.0..=1.0).contains(&value))
+        {
+            return Err(Error::InvalidDescriptor);
+        }
+        self.depth = Some(DepthAttachment {
+            target,
+            load,
+            store,
+        });
+        Ok(self)
     }
 
     /// Return the color attachment reference.
@@ -104,6 +197,14 @@ impl<'r> RenderPassDesc<'r> {
     /// The configured store operation.
     pub const fn store(self) -> StoreOp {
         self.store
+    }
+
+    /// Return the optional depth attachment configuration.
+    ///
+    /// # Returns
+    /// The depth attachment when depth testing is available for this pass.
+    pub const fn depth_attachment(self) -> Option<DepthAttachment<'r>> {
+        self.depth
     }
 }
 
@@ -522,7 +623,7 @@ impl<'encoder, 'r, 'data> RenderPassEncoder<'encoder, 'r, 'data> {
         if offset > desc.size() {
             return Err(Error::OutOfBounds);
         }
-        if offset % format.byte_size() != 0 {
+        if !offset.is_multiple_of(format.byte_size()) {
             return Err(Error::InvalidValue);
         }
         self.encoder.push(Command::SetIndexBuffer {
@@ -591,14 +692,13 @@ impl<'encoder, 'r, 'data> RenderPassEncoder<'encoder, 'r, 'data> {
     /// # Returns
     /// Success, or [`Error::OutOfBounds`] for a scissor outside the render area. `None` never permits drawing outside that area.
     pub fn set_scissor(&mut self, scissor: Option<PixelRect>) -> Result<()> {
-        if let Some(scissor) = scissor {
-            if scissor.x() < self.area.x()
+        if let Some(scissor) = scissor
+            && (scissor.x() < self.area.x()
                 || scissor.y() < self.area.y()
                 || scissor.x() + scissor.width() > self.area.x() + self.area.width()
-                || scissor.y() + scissor.height() > self.area.y() + self.area.height()
-            {
-                return Err(Error::OutOfBounds);
-            }
+                || scissor.y() + scissor.height() > self.area.y() + self.area.height())
+        {
+            return Err(Error::OutOfBounds);
         }
         self.encoder.push(Command::SetScissor(scissor))
     }
@@ -692,7 +792,7 @@ impl<'encoder, 'r, 'data> RenderPassEncoder<'encoder, 'r, 'data> {
     }
 
     fn validate_draw(&self, count: u32) -> Result<()> {
-        if count == 0 || count % 3 != 0 {
+        if count == 0 || !count.is_multiple_of(3) {
             return Err(Error::InvalidValue);
         }
         let pipeline = self.pipeline.ok_or(Error::PipelineNotSet)?;

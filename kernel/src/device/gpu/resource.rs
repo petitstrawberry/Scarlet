@@ -106,14 +106,21 @@ pub trait GpuObject: Send + Sync {
 ///
 /// # Returns
 ///
-/// `true` only for a non-empty BGRA8 image with one or more known usage bits.
+/// `true` for a non-empty BGRA8 image with known color usages, or a
+/// `Depth32Float` image used exclusively as a depth-stencil attachment.
 pub(crate) const fn image_create_is_valid(create: GpuImageCreateInfo) -> bool {
-    create.format == GPU_IMAGE_FORMAT_BGRA8_UNORM
+    (create.format == GPU_IMAGE_FORMAT_BGRA8_UNORM
+        || create.format == super::GPU_IMAGE_FORMAT_DEPTH32_FLOAT)
         && create.usage != 0
         && create.usage & !GPU_IMAGE_USAGE_VALID == 0
         && create.width != 0
         && create.height != 0
         && create.width <= u32::MAX / 4
+        && if create.format == super::GPU_IMAGE_FORMAT_DEPTH32_FLOAT {
+            create.usage == super::GPU_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT
+        } else {
+            create.usage & super::GPU_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT == 0
+        }
 }
 
 /// Return whether a generic image descriptor is valid for imported SHM backing.

@@ -40,6 +40,7 @@ pub struct Capabilities {
     rendering: bool,
     presentation: bool,
     image_upload: bool,
+    depth: bool,
 }
 
 impl Capabilities {
@@ -68,6 +69,15 @@ impl Capabilities {
     /// `true` when sampled texture upload and composition are available.
     pub const fn supports_image_upload(&self) -> bool {
         self.image_upload
+    }
+
+    /// Return whether depth attachments and depth testing are available.
+    ///
+    /// # Returns
+    ///
+    /// `true` when `Depth32Float` render attachments can be used.
+    pub const fn supports_depth(&self) -> bool {
+        self.depth
     }
 }
 

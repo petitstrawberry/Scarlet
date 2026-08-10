@@ -13,6 +13,7 @@ mod cursor;
 mod gpu_compositor;
 mod input;
 mod ipc;
+mod pointer_lock;
 mod trace;
 mod window;
 
