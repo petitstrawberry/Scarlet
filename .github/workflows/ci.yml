@@ -19,7 +19,7 @@ jobs:
         ref: fix/aarch64-lock-stall-watchdog
 
     - name: Format sync watchdog diagnostics
-      run: rustfmt --edition 2024 kernel/src/sync/preempt.rs
+      run: rustfmt +stable --edition 2024 kernel/src/sync/preempt.rs
 
     - name: Commit formatting repair
       run: |
