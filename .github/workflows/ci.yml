@@ -18,45 +18,8 @@ jobs:
       with:
         ref: fix/aarch64-lock-stall-watchdog
 
-    - name: Apply rustfmt-equivalent changes
-      run: |
-        python3 - <<'PY'
-        from pathlib import Path
-
-        path = Path("kernel/src/sync/preempt.rs")
-        text = path.read_text()
-        replacements = {
-            """            slot.acquired_at_ns
-                .store(acquired_at_ns, Ordering::Relaxed);
-            slot.acquisition_pc
-                .store(acquisition_pc, Ordering::Relaxed);
-            slot.acquisition_lr
-                .store(acquisition_lr, Ordering::Relaxed);
-        """: """            slot.acquired_at_ns.store(acquired_at_ns, Ordering::Relaxed);
-            slot.acquisition_pc.store(acquisition_pc, Ordering::Relaxed);
-            slot.acquisition_lr.store(acquisition_lr, Ordering::Relaxed);
-        """,
-            """            let held_ns = if snapshot.phase == PreemptDebugPhase::Held
-                && snapshot.acquired_at_ns != 0
-            {
-                now_ns.saturating_sub(snapshot.acquired_at_ns)
-            } else {
-                0
-            };
-        """: """            let held_ns =
-                if snapshot.phase == PreemptDebugPhase::Held && snapshot.acquired_at_ns != 0 {
-                    now_ns.saturating_sub(snapshot.acquired_at_ns)
-                } else {
-                    0
-                };
-        """,
-        }
-        for old, new in replacements.items():
-            if old not in text:
-                raise SystemExit("expected unformatted block not found")
-            text = text.replace(old, new, 1)
-        path.write_text(text)
-        PY
+    - name: Format sync watchdog diagnostics
+      run: rustfmt --edition 2024 kernel/src/sync/preempt.rs
 
     - name: Commit formatting repair
       run: |
