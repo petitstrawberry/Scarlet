@@ -788,7 +788,8 @@ static DEADLINE_QUEUES: [IrqSpinLock<DeadlineQueue>; MAX_NUM_CPUS] =
 static DEADLINE_ADMISSION: [AtomicU32; MAX_NUM_CPUS] = [const { AtomicU32::new(0) }; MAX_NUM_CPUS];
 static ZOMBIE_QUEUE: IrqSpinLock<VecDeque<usize>> = IrqSpinLock::new(VecDeque::new());
 static BLOCKED_QUEUE: IrqSpinLock<VecDeque<usize>> = IrqSpinLock::new(VecDeque::new());
-static ONLINE_CPUS: IrqSpinLock<alloc::vec::Vec<usize>> = IrqSpinLock::new(alloc::vec::Vec::new());
+const _: () = assert!(MAX_NUM_CPUS <= u64::BITS as usize);
+static ONLINE_CPU_MASK: AtomicU64 = AtomicU64::new(0);
 static IDLE_TASK_IDS: [AtomicUsize; MAX_NUM_CPUS] = [const { AtomicUsize::new(0) }; MAX_NUM_CPUS];
 static PENDING_IDLE_TO_USER_TRAP_TASK: [AtomicUsize; MAX_NUM_CPUS] =
     [const { AtomicUsize::new(0) }; MAX_NUM_CPUS];
@@ -2263,9 +2264,9 @@ pub fn refresh_current_task_slice(cpu_id: usize) {
 ///
 /// This function returns no value.
 pub fn register_online_cpu(cpu_id: usize) {
-    let mut cpus = ONLINE_CPUS.lock();
-    if !cpus.contains(&cpu_id) {
-        cpus.push(cpu_id);
+    debug_assert!(cpu_id < MAX_NUM_CPUS);
+    if cpu_id < MAX_NUM_CPUS {
+        ONLINE_CPU_MASK.fetch_or(cpu_mask_bit(cpu_id), Ordering::Release);
     }
 }
 
@@ -2284,9 +2285,24 @@ fn cpu_mask_bit(cpu_id: usize) -> u64 {
 /// A CPU mask with bit `n` set when scheduler CPU `n` is online. CPU IDs that
 /// do not fit in a 64-bit mask are omitted.
 pub fn online_cpu_mask() -> u64 {
-    let cpus = ONLINE_CPUS.lock();
-    cpus.iter()
-        .fold(0u64, |mask, &cpu_id| mask | cpu_mask_bit(cpu_id))
+    ONLINE_CPU_MASK.load(Ordering::Acquire)
+}
+
+#[inline]
+fn online_cpu_ids_from_mask(mask: u64) -> impl Iterator<Item = usize> {
+    (0..MAX_NUM_CPUS).filter(move |&cpu_id| mask & cpu_mask_bit(cpu_id) != 0)
+}
+
+#[inline]
+fn online_cpu_ids() -> impl Iterator<Item = usize> {
+    online_cpu_ids_from_mask(online_cpu_mask())
+}
+
+#[inline]
+fn online_cpu_id_at(mask: u64, index: usize) -> usize {
+    online_cpu_ids_from_mask(mask)
+        .nth(index)
+        .expect("online CPU index must be within the snapshot")
 }
 
 fn sanitize_cpu_capacity(core_class: CpuCoreClass, capacity: u32) -> u32 {
@@ -2396,10 +2412,9 @@ fn cpu_topology_domain_mask(domain_id: u32) -> u64 {
 /// A CPU mask containing online CPUs in the requested domain. CPU IDs that do
 /// not fit in a 64-bit mask are omitted.
 pub fn cpu_topology_domain_online_mask(domain_id: u32) -> u64 {
-    let cpus = ONLINE_CPUS.lock();
-    cpus.iter()
-        .filter(|&&cpu_id| cpu_topology_domain(cpu_id) == Some(domain_id))
-        .fold(0u64, |mask, &cpu_id| mask | cpu_mask_bit(cpu_id))
+    online_cpu_ids()
+        .filter(|&cpu_id| cpu_topology_domain(cpu_id) == Some(domain_id))
+        .fold(0u64, |mask, cpu_id| mask | cpu_mask_bit(cpu_id))
 }
 
 /// Return scheduler topology information for a CPU.
@@ -2578,8 +2593,9 @@ fn select_target_cpu_at(task: Option<&Task>, now_ns: u64) -> usize {
         return boot_cpu;
     }
 
-    let cpus = ONLINE_CPUS.lock();
-    if cpus.is_empty() {
+    let online_mask = online_cpu_mask();
+    let online_count = online_mask.count_ones() as usize;
+    if online_count == 0 {
         return 0;
     }
 
@@ -2591,8 +2607,8 @@ fn select_target_cpu_at(task: Option<&Task>, now_ns: u64) -> usize {
     let mut fallback: Option<(usize, u64)> = None;
     let mut best: Option<(usize, u64)> = None;
 
-    for offset in 0..cpus.len() {
-        let cpu_id = cpus[(start + offset) % cpus.len()];
+    for offset in 0..online_count {
+        let cpu_id = online_cpu_id_at(online_mask, (start + offset) % online_count);
         if task.is_some_and(|task| !task.cpu_allowed(cpu_id)) {
             continue;
         }
@@ -2733,8 +2749,9 @@ fn remove_ready_task_from_cpu(cpu_id: usize, task_id: usize) -> bool {
 }
 
 fn steal_ready_task_for_cpu(target_cpu: usize, now_ns: u64) -> Option<usize> {
-    let cpus = ONLINE_CPUS.lock();
-    if cpus.len() <= 1 || !cpus.contains(&target_cpu) {
+    let online_mask = online_cpu_mask();
+    let online_count = online_mask.count_ones() as usize;
+    if online_count <= 1 || online_mask & cpu_mask_bit(target_cpu) == 0 {
         return None;
     }
 
@@ -2742,12 +2759,12 @@ fn steal_ready_task_for_cpu(target_cpu: usize, now_ns: u64) -> Option<usize> {
     let mut scanned = 0usize;
     let mut best: Option<(usize, usize, u64)> = None;
 
-    for offset in 0..cpus.len() {
+    for offset in 0..online_count {
         if scanned >= SCHED_STEAL_SCAN_LIMIT {
             break;
         }
 
-        let victim_cpu = cpus[(start + offset) % cpus.len()];
+        let victim_cpu = online_cpu_id_at(online_mask, (start + offset) % online_count);
         if victim_cpu == target_cpu {
             continue;
         }
@@ -2768,8 +2785,6 @@ fn steal_ready_task_for_cpu(target_cpu: usize, now_ns: u64) -> Option<usize> {
             best = Some((victim_cpu, task_id, weight));
         }
     }
-    drop(cpus);
-
     let (victim_cpu, task_id, _) = best?;
     if !remove_ready_task_from_cpu(victim_cpu, task_id) {
         return None;
@@ -2858,12 +2873,11 @@ fn normalize_wake_cpu_for_task(task: &Task, requested_cpu: usize, now_ns: u64) -
 }
 
 fn select_lower_capacity_cpu(task: &Task, current_cpu: usize, min_capacity: u32) -> Option<usize> {
-    let cpus = ONLINE_CPUS.lock();
     let current_capacity = cpu_capacity(current_cpu);
     let preference = task.core_preference();
     let mut best: Option<(usize, u64)> = None;
 
-    for &cpu_id in cpus.iter() {
+    for cpu_id in online_cpu_ids() {
         if cpu_id == current_cpu {
             continue;
         }
@@ -2910,8 +2924,7 @@ fn select_lateral_balance_cpu(
     now_ns: u64,
     required_capacity: u32,
 ) -> Option<usize> {
-    let cpus = ONLINE_CPUS.lock();
-    if cpus.len() <= 1 {
+    if num_online_cpus() <= 1 {
         return None;
     }
 
@@ -2919,7 +2932,7 @@ fn select_lateral_balance_cpu(
     let current_after = cpu_load_score_without_task(current_cpu, task);
     let mut best: Option<(usize, u64)> = None;
 
-    for &cpu_id in cpus.iter() {
+    for cpu_id in online_cpu_ids() {
         if cpu_id == current_cpu {
             continue;
         }
@@ -3072,14 +3085,13 @@ fn notify_remote_ready_task(target_cpu: usize, task_id: usize, label: &'static s
 }
 
 pub fn for_each_online_cpu<F: FnMut(usize)>(mut f: F) {
-    let cpus = ONLINE_CPUS.lock();
-    for &cpu_id in cpus.iter() {
+    for cpu_id in online_cpu_ids() {
         f(cpu_id);
     }
 }
 
 pub fn num_online_cpus() -> usize {
-    ONLINE_CPUS.lock().len()
+    online_cpu_mask().count_ones() as usize
 }
 
 /// Reconcile a runnable task after its allowed CPU mask changes.
@@ -3170,7 +3182,7 @@ pub fn select_cpu() -> usize {
 ///
 /// `true` if the CPU is registered as online.
 pub fn is_cpu_online(cpu_id: usize) -> bool {
-    ONLINE_CPUS.lock().contains(&cpu_id)
+    cpu_id < MAX_NUM_CPUS && online_cpu_mask() & cpu_mask_bit(cpu_id) != 0
 }
 
 #[inline]
@@ -5450,7 +5462,7 @@ pub fn reset() {
     SCHED_WORK_STEALS.store(0, Ordering::SeqCst);
     TOTAL_BUSY_CPU_TIME_NS.store(0, Ordering::SeqCst);
     TOTAL_IDLE_CPU_TIME_NS.store(0, Ordering::SeqCst);
-    ONLINE_CPUS.lock().clear();
+    ONLINE_CPU_MASK.store(0, Ordering::SeqCst);
     ZOMBIE_QUEUE.lock().clear();
     BLOCKED_QUEUE.lock().clear();
     fork_trace_tasks().lock().clear();
@@ -6094,6 +6106,24 @@ mod tests {
         assert_eq!(cpu_topology_domain_online_mask(0xa), 0b101);
         assert_eq!(cpu_topology_domain_online_mask(0xd), 0b010);
         assert_eq!(online_cpu_mask(), 0b111);
+    }
+
+    #[test_case]
+    fn test_online_cpu_mask_registration_is_idempotent() {
+        reset();
+        register_online_cpu(3);
+        register_online_cpu(1);
+        register_online_cpu(3);
+
+        assert_eq!(online_cpu_mask(), 0b1010);
+        assert_eq!(num_online_cpus(), 2);
+        assert!(is_cpu_online(1));
+        assert!(is_cpu_online(3));
+        assert!(!is_cpu_online(0));
+        assert!(!is_cpu_online(MAX_NUM_CPUS));
+
+        let online_cpus: Vec<_> = online_cpu_ids().collect();
+        assert_eq!(online_cpus.as_slice(), &[1, 3]);
     }
 
     #[test_case]
