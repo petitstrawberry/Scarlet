@@ -67,6 +67,23 @@ const WRITE_SITE_COALESCE: u64 = 0x434f;
 const WRITE_SITE_DROP: u64 = 0x4452;
 const WRITE_SITE_RETAG: u64 = 0x5254;
 const DEBUG_VM_MAPPING_EXTEND_LOGGING: bool = false;
+// Keep the low 4 GiB available to executable images and upward-growing brk
+// heaps. Scarlet only targets 64-bit architectures, so anonymous mappings do
+// not need to compete with the heap at the legacy 1 GiB boundary.
+const DEFAULT_USER_MMAP_BASE: usize = 0x1_0000_0000;
+// AArch64 with 48-bit VAs and RISC-V Sv48 share this lower canonical limit.
+// Keep automatic mappings in the lower half even though RISC-V also exposes a
+// high canonical user-stack region.
+const USER_LOWER_CANONICAL_END: usize = 0x0000_8000_0000_0000;
+
+fn checked_align_up(value: usize, alignment: usize) -> Option<usize> {
+    if !alignment.is_power_of_two() {
+        return None;
+    }
+    value
+        .checked_add(alignment - 1)
+        .map(|aligned| aligned & !(alignment - 1))
+}
 
 #[derive(Clone)]
 pub struct VirtualMemoryManager {
@@ -145,7 +162,7 @@ impl VirtualMemoryManager {
         let inner = InnerVmm {
             memmap: BTreeMap::new(),
             asid: 0,
-            mmap_base: 0x40000000, // 1 GB base address for mmap (Default)
+            mmap_base: DEFAULT_USER_MMAP_BASE,
             page_tables: Vec::new(),
             last_search_cache: None,
             owner_task_id: None,
@@ -1399,41 +1416,40 @@ impl VirtualMemoryManager {
     /// # Returns
     /// A suitable virtual address for the new mapping, or None if no space available
     pub fn find_unmapped_area(&self, size: usize, alignment: usize) -> Option<usize> {
-        let aligned_size = (size + alignment - 1) & !(alignment - 1);
+        let aligned_size = checked_align_up(size, alignment)?;
+        if aligned_size == 0 {
+            return None;
+        }
+
         let g = self.inner.read();
-        let mut search_addr = (g.mmap_base + alignment - 1) & !(alignment - 1);
+        let mut search_addr = checked_align_up(g.mmap_base, alignment)?;
 
         // If there is a mapping that starts before (or at) search_addr but still covers it,
         // we must skip past it. This prevents returning an address inside an existing map.
         if let Some((_, prev_map)) = g.memmap.range(..=search_addr).next_back() {
             if prev_map.vmarea.end >= search_addr {
-                search_addr = prev_map.vmarea.end + 1;
-                search_addr = (search_addr + alignment - 1) & !(alignment - 1);
+                search_addr = checked_align_up(prev_map.vmarea.end.checked_add(1)?, alignment)?;
             }
         }
 
         // Simple first-fit algorithm from the adjusted search address
         for (_start, memory_map) in g.memmap.range(search_addr..) {
             // Check if there's enough space before this memory map
-            if search_addr + aligned_size <= memory_map.vmarea.start {
+            if search_addr.checked_add(aligned_size)? <= memory_map.vmarea.start {
                 return Some(search_addr);
             }
 
             // Move search point past this memory map
             if memory_map.vmarea.end >= search_addr {
-                search_addr = memory_map.vmarea.end + 1;
-                search_addr = (search_addr + alignment - 1) & !(alignment - 1);
+                search_addr = checked_align_up(memory_map.vmarea.end.checked_add(1)?, alignment)?;
             }
         }
         drop(g);
-        // Check if there's space after the last memory map
-        // For simplicity, we assume a reasonable upper limit for the address space
-        const MAX_USER_ADDR: usize = 0x80000000; // 2GB limit for user space
-        if search_addr + aligned_size <= MAX_USER_ADDR {
-            Some(search_addr)
-        } else {
-            None
-        }
+
+        search_addr
+            .checked_add(aligned_size)
+            .filter(|end| *end <= USER_LOWER_CANONICAL_END)
+            .map(|_| search_addr)
     }
 
     /// Add a memory map at a fixed address, handling overlapping mappings by splitting them
@@ -1906,7 +1922,7 @@ mod tests {
         let manager = VirtualMemoryManager::new();
 
         // Test mmap_base functionality
-        assert_eq!(manager.get_mmap_base(), 0x40000000);
+        assert_eq!(manager.get_mmap_base(), 0x1_0000_0000);
         manager.set_mmap_base(0x50000000);
         assert_eq!(manager.get_mmap_base(), 0x50000000);
 
@@ -1996,6 +2012,28 @@ mod tests {
         // Test memory map coalescing (should fail due to non-adjacent physical addresses)
         let coalesced = manager.coalesce_memory_maps();
         assert_eq!(coalesced, 0); // No coalescing possible due to gap
+    }
+
+    #[test_case]
+    fn test_find_unmapped_area_supports_64_bit_user_addresses() {
+        let manager = VirtualMemoryManager::new();
+
+        assert_eq!(
+            manager.find_unmapped_area(PAGE_SIZE, PAGE_SIZE),
+            Some(0x1_0000_0000)
+        );
+
+        manager.set_mmap_base(0x2_0000_0000);
+        assert_eq!(
+            manager.find_unmapped_area(PAGE_SIZE, PAGE_SIZE),
+            Some(0x2_0000_0000)
+        );
+        assert!(manager.find_unmapped_area(0, PAGE_SIZE).is_none());
+        assert!(manager.find_unmapped_area(PAGE_SIZE, 0).is_none());
+        assert!(manager.find_unmapped_area(PAGE_SIZE, 3).is_none());
+
+        manager.set_mmap_base(usize::MAX - PAGE_SIZE + 1);
+        assert!(manager.find_unmapped_area(PAGE_SIZE, PAGE_SIZE).is_none());
     }
 
     #[test_case]

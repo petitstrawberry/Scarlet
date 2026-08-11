@@ -10,6 +10,7 @@ mod file_icons;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
 use std::cmp::Ordering;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::thread;
@@ -46,6 +47,8 @@ const FILE_PREVIEW_HEIGHT: f32 = 78.0;
 const FILE_NAME_FONT_SIZE: f32 = 13.0;
 const FILE_NAME_HEIGHT: f32 = 32.0;
 const FILE_NAME_MAX_WIDTH: f32 = 132.0;
+const JPEG_PREVIEW_MAX_PIXELS: usize = 1024 * 1024;
+const JPEG_HEADER_READ_LIMIT: usize = 64 * 1024;
 const SERVICE_RETRY_DELAY: Duration = Duration::from_millis(100);
 const DOUBLE_CLICK_INTERVAL: Duration = Duration::from_millis(500);
 
@@ -63,6 +66,7 @@ struct FileEntry {
     is_directory: bool,
     size: u64,
     kind: FileKind,
+    jpeg_preview_safe: bool,
 }
 
 #[derive(Clone)]
@@ -551,7 +555,7 @@ impl FilerApp {
             Color::CLEAR
         };
         let preview =
-            if entry.kind == FileKind::Image && !entry.is_directory && is_jpeg(&entry.name) {
+            if entry.kind == FileKind::Image && !entry.is_directory && entry.jpeg_preview_safe {
                 Either::A(
                     Image::from_path(entry.path.clone())
                         .fit_mode(ImageFit::Cover)
@@ -900,12 +904,69 @@ fn text_width(text: &str) -> f32 {
 mod layout_tests {
     use super::{
         FILE_NAME_MAX_WIDTH, FileEntry, FileKind, FilerApp, PickerRequest, file_name_label,
-        text_width,
+        jpeg_dimensions, jpeg_header_is_previewable, text_width,
     };
     use scarlet_ui::{
         Application, Color, Event, MouseButton, MouseEvent, NavigationLink, NavigationView,
         RenderingPipeline, Scene, SceneBuilder, Size, Text, View, Window,
     };
+
+    fn jpeg_header(width: u16, height: u16) -> Vec<u8> {
+        let [width_high, width_low] = width.to_be_bytes();
+        let [height_high, height_low] = height.to_be_bytes();
+        vec![
+            0xff,
+            0xd8,
+            0xff,
+            0xe0,
+            0x00,
+            0x04,
+            0x00,
+            0x00,
+            0xff,
+            0xc0,
+            0x00,
+            0x11,
+            0x08,
+            height_high,
+            height_low,
+            width_high,
+            width_low,
+            0x03,
+            0x01,
+            0x11,
+            0x00,
+            0x02,
+            0x11,
+            0x00,
+            0x03,
+            0x11,
+            0x00,
+            0xff,
+            0xd9,
+        ]
+    }
+
+    #[test]
+    fn jpeg_preview_rejects_full_resolution_wallpaper() {
+        let wallpaper = jpeg_header(3840, 2160);
+        assert_eq!(jpeg_dimensions(&wallpaper), Some((3840, 2160)));
+        assert!(!jpeg_header_is_previewable(&wallpaper));
+
+        let bounded = jpeg_header(1024, 1024);
+        assert_eq!(jpeg_dimensions(&bounded), Some((1024, 1024)));
+        assert!(jpeg_header_is_previewable(&bounded));
+    }
+
+    #[test]
+    fn jpeg_preview_rejects_missing_or_truncated_dimensions() {
+        assert!(!jpeg_header_is_previewable(&[]));
+        assert!(!jpeg_header_is_previewable(&[0xff, 0xd8, 0xff, 0xc0]));
+
+        let zero_width = jpeg_header(0, 480);
+        assert_eq!(jpeg_dimensions(&zero_width), None);
+        assert!(!jpeg_header_is_previewable(&zero_width));
+    }
 
     #[test]
     fn long_file_names_use_two_lines() {
@@ -963,6 +1024,7 @@ mod layout_tests {
                     is_directory: true,
                     size: 0,
                     kind: FileKind::Folder,
+                    jpeg_preview_safe: false,
                 })
                 .collect(),
         );
@@ -1004,6 +1066,7 @@ mod layout_tests {
                     is_directory: true,
                     size: 0,
                     kind: FileKind::Folder,
+                    jpeg_preview_safe: false,
                 })
                 .collect(),
         );
@@ -1062,6 +1125,7 @@ mod layout_tests {
                     is_directory: true,
                     size: 0,
                     kind: FileKind::Folder,
+                    jpeg_preview_safe: false,
                 })
                 .collect(),
         );
@@ -1108,6 +1172,7 @@ mod layout_tests {
                     is_directory: true,
                     size: 0,
                     kind: FileKind::Folder,
+                    jpeg_preview_safe: false,
                 })
                 .collect(),
         );
@@ -1135,6 +1200,7 @@ mod layout_tests {
                     is_directory: true,
                     size: 0,
                     kind: FileKind::Folder,
+                    jpeg_preview_safe: false,
                 })
                 .collect(),
         );
@@ -1163,6 +1229,7 @@ mod layout_tests {
                     is_directory: true,
                     size: 0,
                     kind: FileKind::Folder,
+                    jpeg_preview_safe: false,
                 })
                 .collect(),
         );
@@ -1227,16 +1294,20 @@ fn read_entries(path: &str, picker: Option<&PickerRequest>) -> std::io::Result<V
         }
         let size = entry.metadata().map(|metadata| metadata.len()).unwrap_or(0);
         let path = entry.path().to_string_lossy().into_owned();
+        let kind = if is_directory {
+            FileKind::Folder
+        } else {
+            FileKind::from_path(&name)
+        };
+        let jpeg_preview_safe =
+            kind == FileKind::Image && is_jpeg(&name) && jpeg_preview_is_safe(&path);
         entries.push(FileEntry {
-            kind: if is_directory {
-                FileKind::Folder
-            } else {
-                FileKind::from_path(&name)
-            },
+            kind,
             name,
             path,
             is_directory,
             size,
+            jpeg_preview_safe,
         });
     }
 
@@ -1248,6 +1319,97 @@ fn read_entries(path: &str, picker: Option<&PickerRequest>) -> std::io::Result<V
         },
     );
     Ok(entries)
+}
+
+fn jpeg_preview_is_safe(path: &str) -> bool {
+    let Ok(mut file) = fs::File::open(path) else {
+        return false;
+    };
+    let mut header = Vec::with_capacity(JPEG_HEADER_READ_LIMIT);
+    let mut chunk = [0u8; 4096];
+
+    while header.len() < JPEG_HEADER_READ_LIMIT {
+        let remaining = JPEG_HEADER_READ_LIMIT - header.len();
+        let read_limit = remaining.min(chunk.len());
+        let Ok(read) = file.read(&mut chunk[..read_limit]) else {
+            return false;
+        };
+        if read == 0 {
+            break;
+        }
+        header.extend_from_slice(&chunk[..read]);
+    }
+
+    jpeg_header_is_previewable(&header)
+}
+
+fn jpeg_header_is_previewable(bytes: &[u8]) -> bool {
+    jpeg_dimensions(bytes)
+        .and_then(|(width, height)| width.checked_mul(height))
+        .is_some_and(|pixels| pixels <= JPEG_PREVIEW_MAX_PIXELS)
+}
+
+fn jpeg_dimensions(bytes: &[u8]) -> Option<(usize, usize)> {
+    if !bytes.starts_with(&[0xff, 0xd8]) {
+        return None;
+    }
+
+    let mut cursor = 2usize;
+    while cursor < bytes.len() {
+        while cursor < bytes.len() && bytes[cursor] != 0xff {
+            cursor += 1;
+        }
+        while cursor < bytes.len() && bytes[cursor] == 0xff {
+            cursor += 1;
+        }
+        let marker = *bytes.get(cursor)?;
+        cursor += 1;
+
+        if marker == 0x00 {
+            continue;
+        }
+        if marker == 0xd9 || marker == 0xda {
+            return None;
+        }
+        if marker == 0xd8 || marker == 0x01 || (0xd0..=0xd7).contains(&marker) {
+            continue;
+        }
+
+        let length = usize::from(u16::from_be_bytes([
+            *bytes.get(cursor)?,
+            *bytes.get(cursor + 1)?,
+        ]));
+        if length < 2 {
+            return None;
+        }
+        let segment_end = cursor.checked_add(length)?;
+        if segment_end > bytes.len() {
+            return None;
+        }
+
+        let is_start_of_frame = matches!(
+            marker,
+            0xc0..=0xc3 | 0xc5..=0xc7 | 0xc9..=0xcb | 0xcd..=0xcf
+        );
+        if is_start_of_frame {
+            if length < 8 {
+                return None;
+            }
+            let height = usize::from(u16::from_be_bytes([
+                *bytes.get(cursor + 3)?,
+                *bytes.get(cursor + 4)?,
+            ]));
+            let width = usize::from(u16::from_be_bytes([
+                *bytes.get(cursor + 5)?,
+                *bytes.get(cursor + 6)?,
+            ]));
+            return (width > 0 && height > 0).then_some((width, height));
+        }
+
+        cursor = segment_end;
+    }
+
+    None
 }
 
 fn matches_filter(name: &str, filter: &str) -> bool {
