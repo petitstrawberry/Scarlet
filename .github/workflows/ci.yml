@@ -10,26 +10,6 @@ permissions:
   contents: write
 
 jobs:
-  temporary-format-repair:
-    if: github.actor != 'github-actions[bot]'
-    runs-on: ubuntu-latest
-    steps:
-    - uses: actions/checkout@v4
-      with:
-        ref: fix/aarch64-lock-stall-watchdog
-
-    - name: Format sync watchdog diagnostics
-      run: rustfmt +stable --edition 2024 kernel/src/sync/preempt.rs
-
-    - name: Commit formatting repair
-      run: |
-        test -n "$(git status --porcelain -- kernel/src/sync/preempt.rs)"
-        git config user.name github-actions[bot]
-        git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-        git add kernel/src/sync/preempt.rs
-        git commit -m "Format sync watchdog diagnostics"
-        git push origin HEAD:fix/aarch64-lock-stall-watchdog
-
   nix-cache:
     runs-on: ubuntu-latest
     env:
