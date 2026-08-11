@@ -1435,8 +1435,9 @@ impl VirtualMemoryManager {
         // Simple first-fit algorithm from the adjusted search address
         for (_start, memory_map) in g.memmap.range(search_addr..) {
             // Check if there's enough space before this memory map
-            if search_addr.checked_add(aligned_size)? <= memory_map.vmarea.start {
-                return Some(search_addr);
+            let candidate_end = search_addr.checked_add(aligned_size)?;
+            if candidate_end <= memory_map.vmarea.start {
+                return (candidate_end <= USER_LOWER_CANONICAL_END).then_some(search_addr);
             }
 
             // Move search point past this memory map
