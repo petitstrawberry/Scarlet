@@ -428,19 +428,32 @@ mod tests {
     #[test_case]
     fn gpu_child_objects_survive_connection_drop() {
         let backend: Arc<dyn GpuBackend> = Arc::new(TestBackend);
+        let backend_lifetime = Arc::downgrade(&backend);
         let connection = GpuConnection::new(Arc::clone(&backend));
         let buffer = GpuBuffer::new(Arc::clone(&backend), 4096, GPU_BUFFER_FLAG_CPU_VISIBLE)
             .expect("GPU buffer allocation should succeed");
+        let backend_buffer = buffer.backend_buffer();
+        let backend_buffer_lifetime = Arc::downgrade(&backend_buffer);
+        drop(backend_buffer);
         let timeline = Arc::new(GpuTimeline::new(Arc::clone(&backend), 0));
         let point = GpuTimelinePoint::new(Arc::clone(&timeline), 1);
 
         drop(connection);
-        assert!(Arc::strong_count(&backend) >= 3);
+        drop(backend);
+        assert!(backend_lifetime.upgrade().is_some());
+        assert!(backend_buffer_lifetime.upgrade().is_some());
+        assert_eq!(buffer.backend_info().command_resource_token, 1);
         assert!(buffer.get_mapping_info(0, 4096).is_ok());
         timeline
             .signal(1)
             .expect("timeline should signal after root close");
         assert!(point.current_ready(ReadyInterest::read()).read);
+
+        drop(buffer);
+        assert!(backend_buffer_lifetime.upgrade().is_none());
+        drop(point);
+        drop(timeline);
+        assert!(backend_lifetime.upgrade().is_none());
     }
 
     #[test_case]
