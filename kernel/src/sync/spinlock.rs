@@ -61,6 +61,7 @@ impl<T> SpinLock<T> {
             self as *const Self as usize,
         );
         self.acquire();
+        preempt.mark_acquired();
         SpinLockGuard {
             lock: self,
             _preempt: preempt,
@@ -85,6 +86,7 @@ impl<T> SpinLock<T> {
             .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
             .is_ok()
         {
+            preempt.mark_acquired();
             Some(SpinLockGuard {
                 lock: self,
                 _preempt: preempt,
@@ -259,6 +261,7 @@ impl RawIrqSpinLock {
         while self.irq_guard_handoff.load(Ordering::Acquire) {
             note_spin_contention();
         }
+        irq_guard.mark_acquired();
         // SAFETY: The caller owns `locked`, and the handoff flag is clear only
         // after the preceding owner has removed its token from this cell.
         unsafe {
