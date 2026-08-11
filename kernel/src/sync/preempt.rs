@@ -693,12 +693,9 @@ impl PreemptGuard {
             let (acquisition_pc, acquisition_lr) =
                 crate::arch::instruction::capture_execution_site();
             let slot = &PREEMPT_DEBUG_SLOTS[cpu][slot_index as usize];
-            slot.acquired_at_ns
-                .store(acquired_at_ns, Ordering::Relaxed);
-            slot.acquisition_pc
-                .store(acquisition_pc, Ordering::Relaxed);
-            slot.acquisition_lr
-                .store(acquisition_lr, Ordering::Relaxed);
+            slot.acquired_at_ns.store(acquired_at_ns, Ordering::Relaxed);
+            slot.acquisition_pc.store(acquisition_pc, Ordering::Relaxed);
+            slot.acquisition_lr.store(acquisition_lr, Ordering::Relaxed);
             slot.phase.store(DEBUG_PHASE_HELD, Ordering::Release);
         }
     }
@@ -763,13 +760,12 @@ pub fn dump_active_preempt_guards() {
                 continue;
             };
             tracked = tracked.saturating_add(1);
-            let held_ns = if snapshot.phase == PreemptDebugPhase::Held
-                && snapshot.acquired_at_ns != 0
-            {
-                now_ns.saturating_sub(snapshot.acquired_at_ns)
-            } else {
-                0
-            };
+            let held_ns =
+                if snapshot.phase == PreemptDebugPhase::Held && snapshot.acquired_at_ns != 0 {
+                    now_ns.saturating_sub(snapshot.acquired_at_ns)
+                } else {
+                    0
+                };
             if snapshot.location.is_null() {
                 crate::emergency_println!(
                     "[sync-debug]   slot={} kind={} phase={} lock={:#x} task={} spins={} held_ns={} acquire_pc={:#x} acquire_lr={:#x} at <unknown>",
