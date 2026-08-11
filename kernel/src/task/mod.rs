@@ -60,6 +60,10 @@ use core::sync::atomic::{
 
 const INIT_TASK_ID: usize = 1;
 const LOG_EXIT_GROUP_SIBLINGS: bool = false;
+// Keep process heaps virtually contiguous without requiring one equally large
+// physically contiguous PMM allocation. Large image/video buffers otherwise
+// fail after modest physical fragmentation even when plenty of pages remain.
+const BRK_PHYSICAL_CHUNK_PAGES: usize = 256;
 // Copy private page allocations eagerly to isolate fork COW ownership and
 // parent page-table invalidation from the Apple SMP hang.
 const DIAGNOSTIC_DISABLE_FORK_COW: bool = false;
@@ -2198,20 +2202,48 @@ impl Task {
                     None => {
                         // crate::println!("[set_brk] No existing mapping, allocating {} pages at {:#x}",
                         //     num_of_pages, prev_addr);
-                        match self.allocate_data_pages(prev_addr, num_of_pages) {
-                            Ok(_) => {
-                                // crate::println!("[set_brk] Successfully allocated {} pages", num_of_pages);
-                            }
-                            Err(_e) => {
-                                // crate::println!("[set_brk] Failed to allocate pages: {}", e);
-                                return Err("Failed to allocate pages");
-                            }
-                        }
+                        self.allocate_brk_pages(prev_addr, num_of_pages)?;
                     }
                 }
             }
         }
         self.brk.store(brk, Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn allocate_brk_pages(&self, vaddr: usize, num_of_pages: usize) -> Result<(), &'static str> {
+        let mut allocated_pages = 0usize;
+
+        while allocated_pages < num_of_pages {
+            let remaining_pages = num_of_pages - allocated_pages;
+            let mut chunk_pages = remaining_pages.min(BRK_PHYSICAL_CHUNK_PAGES);
+
+            loop {
+                let offset = allocated_pages
+                    .checked_mul(PAGE_SIZE)
+                    .ok_or("Program break allocation offset overflows")?;
+                let chunk_vaddr = vaddr
+                    .checked_add(offset)
+                    .ok_or("Program break allocation address overflows")?;
+
+                match self.allocate_data_pages(chunk_vaddr, chunk_pages) {
+                    Ok(_) => {
+                        allocated_pages += chunk_pages;
+                        break;
+                    }
+                    Err(_) if chunk_pages > 1 => {
+                        chunk_pages /= 2;
+                    }
+                    Err(error) => {
+                        if allocated_pages > 0 {
+                            self.free_data_pages(vaddr, allocated_pages);
+                        }
+                        return Err(error);
+                    }
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -4419,6 +4451,34 @@ mod tests {
         assert_eq!(task.adjust_brk(-0x80).unwrap(), (0x1100, 0x1080));
         assert!(task.set_brk(usize::MAX).is_err());
         assert_eq!(task.get_brk(), 0x1080);
+    }
+
+    #[test_case]
+    fn test_large_brk_growth_uses_bounded_physical_chunks() {
+        reset();
+        let mut task = super::new_user_task("ChunkedBrk".to_string(), 0);
+        task.init();
+        let initial_allocations = task.page_allocations.read().len();
+        let page_count = super::BRK_PHYSICAL_CHUNK_PAGES + 1;
+
+        task.set_brk(page_count * crate::environment::PAGE_SIZE)
+            .unwrap();
+
+        let allocations = task.page_allocations.read();
+        let heap_allocations = &allocations[initial_allocations..];
+        assert!(heap_allocations.len() >= 2);
+        assert_eq!(
+            heap_allocations
+                .iter()
+                .map(|allocation| allocation.len())
+                .sum::<usize>(),
+            page_count
+        );
+        assert!(
+            heap_allocations
+                .iter()
+                .all(|allocation| allocation.len() <= super::BRK_PHYSICAL_CHUNK_PAGES)
+        );
     }
 
     #[test_case]

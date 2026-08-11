@@ -6,7 +6,7 @@
 //! The driver supports basic framebuffer operations and display management
 //! according to the VirtIO GPU specification.
 
-use crate::sync::{IrqRwSpinLock, IrqSpinLock};
+use crate::sync::{IrqRwSpinLock, IrqSpinLock, Mutex};
 use alloc::{sync::Arc, vec::Vec};
 
 use crate::{
@@ -80,7 +80,15 @@ const VIRTIO_GPU_CONFIG_NUM_CAPSETS_OFFSET: usize = 12;
 const VIRTIO_GPU_CONTROL_QUEUE_SIZE: usize = 64;
 const VIRTIO_GPU_CURSOR_QUEUE_SIZE: usize = 16;
 const VIRTIO_GPU_CONTROL_TIMEOUT_NS: u64 = 2_000_000_000;
-const VIRTIO_GPU_CONTROL_MAX_SPINS: u64 = 10_000_000;
+const VIRTIO_GPU_CONTROL_STALLED_CLOCK_MAX_POLLS: u64 = 10_000_000;
+
+fn control_queue_wait_timed_out(started_ns: u64, now_ns: u64) -> bool {
+    now_ns.saturating_sub(started_ns) >= VIRTIO_GPU_CONTROL_TIMEOUT_NS
+}
+
+fn control_queue_wait_clock_is_available(now_ns: u64) -> bool {
+    now_ns != 0
+}
 
 // VirtIO GPU Formats
 const VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM: u32 = 1;
@@ -411,6 +419,7 @@ fn validate_execution_response(
 pub struct VirtioGpuDeviceCore {
     base_addr: usize,
     pci_transport: Option<VirtioPciTransport>,
+    control_queue_submission: Mutex<()>,
     virtqueues: IrqSpinLock<[VirtQueue<'static>; 2]>, // Control queue (0) and Cursor queue (1)
     display_info: IrqRwSpinLock<Option<VirtioGpuRespDisplayInfo>>,
     framebuffer_addr: IrqRwSpinLock<Option<usize>>,
@@ -460,6 +469,7 @@ impl VirtioGpuDeviceCore {
         let mut device = Self {
             base_addr,
             pci_transport,
+            control_queue_submission: Mutex::new(()),
             virtqueues: IrqSpinLock::new([
                 VirtQueue::new(VIRTIO_GPU_CONTROL_QUEUE_SIZE),
                 VirtQueue::new(VIRTIO_GPU_CURSOR_QUEUE_SIZE),
@@ -582,6 +592,7 @@ impl VirtioGpuDeviceCore {
         if cmd_buffer.is_empty() || resp_buffer.is_empty() {
             return Err("VirtIO GPU control buffers must not be empty");
         }
+        let _submission_guard = self.control_queue_submission.lock();
         if *self.control_queue_failed.read() {
             return Err("VirtIO GPU control queue is unavailable after a timeout");
         }
@@ -604,64 +615,91 @@ impl VirtioGpuDeviceCore {
             core::ptr::write_bytes(resp_dma.as_ptr() as *mut u8, 0, resp_buffer.len());
         }
 
-        let mut virtqueues = self.virtqueues.lock();
-        let control_queue = &mut virtqueues[0]; // Control queue is index 0
+        let wait_started_ns = crate::timer::get_time_ns();
+        if !control_queue_wait_clock_is_available(wait_started_ns) {
+            return Err("VirtIO GPU control queue timer is unavailable");
+        }
 
-        // Allocate descriptors
-        let cmd_desc = control_queue
-            .alloc_desc()
-            .ok_or("Failed to allocate command descriptor")?;
-        let resp_desc = match control_queue.alloc_desc() {
-            Some(desc) => desc,
-            None => {
-                // Free the already allocated cmd_desc before returning error
-                control_queue.free_desc(cmd_desc);
-                return Err("Failed to allocate response descriptor");
+        let (cmd_desc, resp_desc) = {
+            let mut virtqueues = self.virtqueues.lock();
+            let control_queue = &mut virtqueues[0]; // Control queue is index 0
+
+            // Allocate descriptors
+            let cmd_desc = control_queue
+                .alloc_desc()
+                .ok_or("Failed to allocate command descriptor")?;
+            let resp_desc = match control_queue.alloc_desc() {
+                Some(desc) => desc,
+                None => {
+                    // Free the already allocated cmd_desc before returning error
+                    control_queue.free_desc(cmd_desc);
+                    return Err("Failed to allocate response descriptor");
+                }
+            };
+
+            // Set up command descriptor (device readable)
+            let cmd_desc_ptr =
+                &mut control_queue.desc[cmd_desc] as *mut crate::drivers::virtio::queue::Descriptor;
+            unsafe {
+                core::ptr::write_volatile(&mut (*cmd_desc_ptr).addr, cmd_dma.as_paddr() as u64);
+                core::ptr::write_volatile(&mut (*cmd_desc_ptr).len, cmd_buffer.len() as u32);
+                core::ptr::write_volatile(&mut (*cmd_desc_ptr).flags, DescriptorFlag::Next as u16);
+                core::ptr::write_volatile(&mut (*cmd_desc_ptr).next, resp_desc as u16);
             }
+
+            // Set up response descriptor (device writable)
+            let resp_desc_ptr = &mut control_queue.desc[resp_desc]
+                as *mut crate::drivers::virtio::queue::Descriptor;
+            unsafe {
+                core::ptr::write_volatile(&mut (*resp_desc_ptr).addr, resp_dma.as_paddr() as u64);
+                core::ptr::write_volatile(&mut (*resp_desc_ptr).len, resp_buffer.len() as u32);
+                core::ptr::write_volatile(
+                    &mut (*resp_desc_ptr).flags,
+                    DescriptorFlag::Write as u16,
+                );
+            }
+
+            // Submit the request to the queue
+            if let Err(error) = control_queue.push(cmd_desc) {
+                control_queue.free_desc(resp_desc);
+                control_queue.free_desc(cmd_desc);
+                return Err(error);
+            }
+
+            // Notify while the queue state is stable. The lock is released
+            // immediately afterwards so interrupts and scheduling remain
+            // available while the device processes the request.
+            self.notify(0);
+            (cmd_desc, resp_desc)
         };
-
-        // Set up command descriptor (device readable)
-        let cmd_desc_ptr =
-            &mut control_queue.desc[cmd_desc] as *mut crate::drivers::virtio::queue::Descriptor;
-        unsafe {
-            core::ptr::write_volatile(&mut (*cmd_desc_ptr).addr, cmd_dma.as_paddr() as u64);
-            core::ptr::write_volatile(&mut (*cmd_desc_ptr).len, cmd_buffer.len() as u32);
-            core::ptr::write_volatile(&mut (*cmd_desc_ptr).flags, DescriptorFlag::Next as u16);
-            core::ptr::write_volatile(&mut (*cmd_desc_ptr).next, resp_desc as u16);
-        }
-
-        // Set up response descriptor (device writable)
-        let resp_desc_ptr =
-            &mut control_queue.desc[resp_desc] as *mut crate::drivers::virtio::queue::Descriptor;
-        unsafe {
-            core::ptr::write_volatile(&mut (*resp_desc_ptr).addr, resp_dma.as_paddr() as u64);
-            core::ptr::write_volatile(&mut (*resp_desc_ptr).len, resp_buffer.len() as u32);
-            core::ptr::write_volatile(&mut (*resp_desc_ptr).flags, DescriptorFlag::Write as u16);
-        }
-
-        // Submit the request to the queue
-        if let Err(e) = control_queue.push(cmd_desc) {
-            // Free descriptors if push fails
-            control_queue.free_desc(resp_desc);
-            control_queue.free_desc(cmd_desc);
-            return Err(e);
-        }
-
-        // Notify the device
-        self.notify(0); // Notify control queue
 
         // Wait for the device-owned used index through VirtQueue's volatile
         // accessor. A second plain dereference of used.idx used to follow this
         // loop; that is not a valid way to observe DMA updates and could spin
         // forever even after the device completed the request.
-        let wait_started_ns = crate::timer::get_time_ns();
-        let mut wait_spins = 0u64;
-        while control_queue.is_busy() {
-            wait_spins = wait_spins.saturating_add(1);
-            let timed_out = crate::timer::get_time_ns().saturating_sub(wait_started_ns)
-                >= VIRTIO_GPU_CONTROL_TIMEOUT_NS;
-            if timed_out || wait_spins >= VIRTIO_GPU_CONTROL_MAX_SPINS {
+        let mut last_clock_ns = wait_started_ns;
+        let mut stalled_clock_polls = 0u64;
+        loop {
+            if !self.virtqueues.lock()[0].is_busy() {
+                break;
+            }
+
+            let now_ns = crate::timer::get_time_ns();
+            if now_ns > last_clock_ns {
+                last_clock_ns = now_ns;
+                stalled_clock_polls = 0;
+            } else {
+                stalled_clock_polls = stalled_clock_polls.saturating_add(1);
+            }
+            if control_queue_wait_timed_out(wait_started_ns, now_ns)
+                || stalled_clock_polls >= VIRTIO_GPU_CONTROL_STALLED_CLOCK_MAX_POLLS
+            {
                 *self.control_queue_failed.write() = true;
+                crate::early_println!(
+                    "[virtio-gpu] control queue timed out after {} ns (stalled_clock_polls={})",
+                    now_ns.saturating_sub(wait_started_ns),
+                    stalled_clock_polls
+                );
 
                 // The device may still own both descriptors. Keep their DMA
                 // allocations alive and leave the descriptors reserved rather
@@ -675,20 +713,20 @@ impl VirtioGpuDeviceCore {
             core::hint::spin_loop();
         }
 
-        // Process response
-        let _resp_idx = match control_queue.pop() {
-            Some(idx) => idx,
-            None => {
+        {
+            let mut virtqueues = self.virtqueues.lock();
+            let control_queue = &mut virtqueues[0];
+            if control_queue.pop().is_none() {
                 // Free descriptors even if pop fails (device may have processed them)
                 control_queue.free_desc(resp_desc);
                 control_queue.free_desc(cmd_desc);
                 return Err("No response from device");
             }
-        };
 
-        // Free descriptors (responsibility of driver, not VirtQueue)
-        control_queue.free_desc(resp_desc);
-        control_queue.free_desc(cmd_desc);
+            // Free descriptors (responsibility of driver, not VirtQueue)
+            control_queue.free_desc(resp_desc);
+            control_queue.free_desc(cmd_desc);
+        }
 
         // SAFETY: the response PMM allocation covers `resp_buffer.len()` bytes
         // and the device has completed writing before this copy executes.
@@ -1283,9 +1321,12 @@ impl VirtioGpuDeviceCore {
 
     /// Set up framebuffer
     fn setup_framebuffer(&self) -> Result<(), &'static str> {
-        let display_info = self.display_info.read();
-        let display_info = display_info.as_ref().ok_or("No display info available")?;
-        let primary_display = &display_info.pmodes[0];
+        let primary_display = self
+            .display_info
+            .read()
+            .as_ref()
+            .ok_or("No display info available")?
+            .pmodes[0];
         if primary_display.enabled == 0 {
             return Err("Primary display not enabled");
         }
@@ -1458,9 +1499,12 @@ impl VirtioGpuDeviceCore {
     }
 
     fn present_framebuffer_region(&self, region: DisplayRegion) -> Result<(), &'static str> {
-        let display_info = self.display_info.read();
-        let display_info = display_info.as_ref().ok_or("Device not initialized")?;
-        let primary = display_info.pmodes[0];
+        let primary = self
+            .display_info
+            .read()
+            .as_ref()
+            .ok_or("Device not initialized")?
+            .pmodes[0];
         if primary.enabled == 0 {
             return Err("Primary display not enabled");
         }
@@ -1576,7 +1620,7 @@ impl VirtioDevice for VirtioGpuDeviceCore {
 }
 
 pub struct VirtioGpuDevice {
-    core: Arc<IrqSpinLock<VirtioGpuDeviceCore>>,
+    core: Arc<VirtioGpuDeviceCore>,
 }
 
 impl VirtioGpuDevice {
@@ -1591,7 +1635,7 @@ impl VirtioGpuDevice {
     /// A new instance of `VirtioGpuDevice`
     pub fn new(base_addr: usize) -> Self {
         Self {
-            core: Arc::new(IrqSpinLock::new(VirtioGpuDeviceCore::new(base_addr))),
+            core: Arc::new(VirtioGpuDeviceCore::new(base_addr)),
         }
     }
 
@@ -1606,7 +1650,7 @@ impl VirtioGpuDevice {
     /// A new instance of `VirtioGpuDevice`.
     pub fn new_pci(transport: VirtioPciTransport) -> Self {
         Self {
-            core: Arc::new(IrqSpinLock::new(VirtioGpuDeviceCore::new_pci(transport))),
+            core: Arc::new(VirtioGpuDeviceCore::new_pci(transport)),
         }
     }
 }
@@ -1676,7 +1720,7 @@ impl Selectable for VirtioGpuDevice {
 
 /// VirtIO acceleration adapter for the backend-neutral GPU control interface.
 pub struct VirtioGpuBackend {
-    core: Arc<IrqSpinLock<VirtioGpuDeviceCore>>,
+    core: Arc<VirtioGpuDeviceCore>,
 }
 
 impl VirtioGpuBackend {
@@ -1727,15 +1771,15 @@ impl VirtioGpuBackend {
 
 /// Real VirtIO execution context retained by a backend-neutral GPU context.
 struct VirtioGpuBackendContext {
-    core: Arc<IrqSpinLock<VirtioGpuDeviceCore>>,
+    core: Arc<VirtioGpuDeviceCore>,
     context_id: u32,
     info: GpuBackendContextInfo,
-    attached_resources: IrqSpinLock<Vec<u32>>,
+    attached_resources: Mutex<Vec<u32>>,
 }
 
 /// Real VirtIO image resource using generic kernel-owned backing when required.
 struct VirtioGpuBackendImage {
-    core: Arc<IrqSpinLock<VirtioGpuDeviceCore>>,
+    core: Arc<VirtioGpuDeviceCore>,
     resource_id: u32,
     create: GpuImageCreateInfo,
     allocation_size: u64,
@@ -1745,7 +1789,7 @@ struct VirtioGpuBackendImage {
 
 /// Real VirtIO buffer resource backed by a generic GPU buffer allocation.
 struct VirtioGpuBackendBuffer {
-    core: Arc<IrqSpinLock<VirtioGpuDeviceCore>>,
+    core: Arc<VirtioGpuDeviceCore>,
     resource_id: u32,
     allocation_size: u64,
     backend_cookie: u64,
@@ -1753,7 +1797,7 @@ struct VirtioGpuBackendBuffer {
 
 impl Drop for VirtioGpuBackendImage {
     fn drop(&mut self) {
-        let core = self.core.lock();
+        let core = &self.core;
         if self.has_attached_backing {
             let _ = core.detach_backing_from_resource(self.resource_id);
         }
@@ -1786,7 +1830,7 @@ impl GpuBackendImage for VirtioGpuBackendImage {
 
 impl Drop for VirtioGpuBackendBuffer {
     fn drop(&mut self) {
-        let core = self.core.lock();
+        let core = &self.core;
         let _ = core.detach_backing_from_resource(self.resource_id);
         let _ = core.unref_acceleration_resource(self.resource_id);
     }
@@ -1804,7 +1848,7 @@ impl GpuBackendBuffer for VirtioGpuBackendBuffer {
 
 impl Drop for VirtioGpuBackendContext {
     fn drop(&mut self) {
-        let core = self.core.lock();
+        let core = &self.core;
         let mut attached_resources = self.attached_resources.lock();
         for resource_id in attached_resources.drain(..) {
             let _ = core.detach_acceleration_resource(self.context_id, resource_id);
@@ -1822,7 +1866,7 @@ impl VirtioGpuBackendContext {
         let info = image.query_info();
         let resource_id = u32::try_from(info.command_resource_token)
             .map_err(|_| "VirtIO GPU image token does not fit a resource ID")?;
-        let core = self.core.lock();
+        let core = &self.core;
         if resource_id == 0 || image.backend_cookie() != core.backend_cookie() {
             return Err("GPU image belongs to a different VirtIO GPU device");
         }
@@ -1869,7 +1913,7 @@ impl GpuBackendContext for VirtioGpuBackendContext {
         let info = image.query_info();
         let resource_id = u32::try_from(info.command_resource_token)
             .map_err(|_| "VirtIO GPU image token does not fit a resource ID")?;
-        let core = self.core.lock();
+        let core = &self.core;
         if resource_id == 0 || image.backend_cookie() != core.backend_cookie() {
             return Err("GPU image belongs to a different VirtIO GPU device");
         }
@@ -1893,7 +1937,7 @@ impl GpuBackendContext for VirtioGpuBackendContext {
         let info = image.query_info();
         let resource_id = u32::try_from(info.command_resource_token)
             .map_err(|_| "VirtIO GPU image token does not fit a resource ID")?;
-        let core = self.core.lock();
+        let core = &self.core;
         if resource_id == 0 || image.backend_cookie() != core.backend_cookie() {
             return Err("GPU image belongs to a different VirtIO GPU device");
         }
@@ -1927,10 +1971,10 @@ impl GpuBackendContext for VirtioGpuBackendContext {
         let info = buffer.query_info();
         let resource_id = u32::try_from(info.command_resource_token)
             .map_err(|_| "VirtIO GPU buffer token does not fit a resource ID")?;
-        if resource_id == 0 || buffer.backend_cookie() != self.core.lock().backend_cookie() {
+        if resource_id == 0 || buffer.backend_cookie() != self.core.backend_cookie() {
             return Err("GPU buffer belongs to a different VirtIO GPU device");
         }
-        let core = self.core.lock();
+        let core = &self.core;
         core.attach_acceleration_resource(self.context_id, resource_id)?;
         let mut attached_resources = self.attached_resources.lock();
         if attached_resources.try_reserve(1).is_err() {
@@ -1945,7 +1989,7 @@ impl GpuBackendContext for VirtioGpuBackendContext {
         let info = buffer.query_info();
         let resource_id = u32::try_from(info.command_resource_token)
             .map_err(|_| "VirtIO GPU buffer token does not fit a resource ID")?;
-        let core = self.core.lock();
+        let core = &self.core;
         if resource_id == 0 || buffer.backend_cookie() != core.backend_cookie() {
             return Err("GPU buffer belongs to a different VirtIO GPU device");
         }
@@ -1963,7 +2007,7 @@ impl GpuBackendContext for VirtioGpuBackendContext {
 
 /// Real VirtIO execution queue retained by a backend-neutral GPU queue.
 struct VirtioGpuBackendQueue {
-    core: Arc<IrqSpinLock<VirtioGpuDeviceCore>>,
+    core: Arc<VirtioGpuDeviceCore>,
     context_id: u32,
 }
 
@@ -1973,7 +2017,7 @@ impl GpuBackendQueue for VirtioGpuBackendQueue {
     }
 
     fn submit(&self, commands: &[u8]) -> Result<(), &'static str> {
-        let core = self.core.lock();
+        let core = &self.core;
         core.require_virgl()?;
         let fence_id = core.next_acceleration_fence_id()?;
         core.submit_acceleration_commands(self.context_id, commands, Some(fence_id))
@@ -1982,19 +2026,19 @@ impl GpuBackendQueue for VirtioGpuBackendQueue {
 
 impl GpuBackend for VirtioGpuBackend {
     fn query_info(&self) -> GpuBackendInfo {
-        self.core.lock().gpu_backend_info()
+        self.core.gpu_backend_info()
     }
 
     fn query_dialect(&self, index: u32) -> Result<GpuBackendDialectInfo, &'static str> {
-        let core = self.core.lock();
-        Self::query_dialect_info(&core, index)
+        let core = &self.core;
+        Self::query_dialect_info(core, index)
     }
 
     fn create_context(
         &self,
         dialect: GpuBackendDialectDescriptor,
     ) -> Result<Arc<dyn GpuBackendContext>, &'static str> {
-        let core = self.core.lock();
+        let core = &self.core;
         core.require_virgl()?;
         let effective_index = if core.context_init_supported() {
             dialect.index
@@ -2020,7 +2064,7 @@ impl GpuBackend for VirtioGpuBackend {
             core: Arc::clone(&self.core),
             context_id,
             info: GpuBackendContextInfo::new(effective_index, effective_token),
-            attached_resources: IrqSpinLock::new(Vec::new()),
+            attached_resources: Mutex::new(Vec::new()),
         }))
     }
 
@@ -2036,7 +2080,7 @@ impl GpuBackend for VirtioGpuBackend {
             .map_err(|_| "VirtIO GPU image backing does not fit kernel address size")?;
         let has_attached_backing =
             create.usage & (GPU_IMAGE_USAGE_PRESENTABLE | GPU_IMAGE_USAGE_TRANSFER_DST) != 0;
-        let core = self.core.lock();
+        let core = &self.core;
         core.require_virgl()?;
         let resource_id = core.create_acceleration_resource(VirtioGpuAccelerationResource3d {
             resource_id: 0,
@@ -2081,7 +2125,7 @@ impl GpuBackend for VirtioGpuBackend {
         }
         let backing_size = usize::try_from(create.allocation_size)
             .map_err(|_| "VirtIO GPU buffer allocation does not fit kernel address size")?;
-        let core = self.core.lock();
+        let core = &self.core;
         core.require_virgl()?;
         let resource_id = core.create_acceleration_resource(VirtioGpuAccelerationResource3d {
             resource_id: 0,
@@ -2117,15 +2161,15 @@ impl GraphicsDevice for VirtioGpuDevice {
     }
 
     fn get_framebuffer_config(&self) -> Result<FramebufferConfig, &'static str> {
-        self.core.lock().get_framebuffer_config()
+        self.core.get_framebuffer_config()
     }
 
     fn get_framebuffer_address(&self) -> Result<usize, &'static str> {
-        self.core.lock().get_framebuffer_address()
+        self.core.get_framebuffer_address()
     }
 
     fn get_framebuffer_info(&self) -> Result<(FramebufferConfig, usize), &'static str> {
-        let core = self.core.lock();
+        let core = &self.core;
         let _ = core.poll_display_resize();
         let config = core.get_framebuffer_config()?;
         let physical_addr = core.get_framebuffer_address()?;
@@ -2138,7 +2182,7 @@ impl GraphicsDevice for VirtioGpuDevice {
         physical_addr: usize,
         region: DisplayRegion,
     ) -> Result<(), &'static str> {
-        let core = self.core.lock();
+        let core = &self.core;
         let current_config = core.get_framebuffer_config()?;
         let current_physical_addr = core.get_framebuffer_address()?;
         if current_physical_addr != physical_addr {
@@ -2162,14 +2206,12 @@ impl GraphicsDevice for VirtioGpuDevice {
         resource: GpuDisplayResource,
         region: DisplayRegion,
     ) -> Result<(), &'static str> {
-        self.core
-            .lock()
-            .present_gpu_resource_region(resource, region)
+        self.core.present_gpu_resource_region(resource, region)
     }
 
     fn init_graphics(&self) -> Result<(), &'static str> {
         {
-            let core = self.core.lock();
+            let core = &self.core;
             let mut initialized = core.initialized.lock();
             if *initialized {
                 crate::early_println!("[virtio-gpu] init_graphics: already initialized");
@@ -2181,12 +2223,12 @@ impl GraphicsDevice for VirtioGpuDevice {
         crate::early_println!("[virtio-gpu] init_graphics: get_display_info");
 
         // Get display information
-        self.core.lock().get_display_info_internal()?;
+        self.core.get_display_info_internal()?;
 
         crate::early_println!("[virtio-gpu] init_graphics: setup_framebuffer");
 
         // Set up framebuffer
-        self.core.lock().setup_framebuffer()?;
+        self.core.setup_framebuffer()?;
 
         crate::early_println!("[virtio-gpu] init_graphics: done");
         Ok(())
@@ -2196,6 +2238,21 @@ impl GraphicsDevice for VirtioGpuDevice {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test_case]
+    fn test_control_queue_timeout_uses_elapsed_time() {
+        let started_ns = 1_000_000_000;
+        assert!(!control_queue_wait_clock_is_available(0));
+        assert!(control_queue_wait_clock_is_available(started_ns));
+        assert!(!control_queue_wait_timed_out(
+            started_ns,
+            started_ns + VIRTIO_GPU_CONTROL_TIMEOUT_NS - 1
+        ));
+        assert!(control_queue_wait_timed_out(
+            started_ns,
+            started_ns + VIRTIO_GPU_CONTROL_TIMEOUT_NS
+        ));
+    }
 
     #[test_case]
     fn virtio_gpu_cursor_queue_fits_qemu_limit() {
@@ -2237,11 +2294,11 @@ mod tests {
         let vaddr = map_gpu();
         let device = VirtioGpuDevice::new(vaddr);
         // The stored base address is the virtual (ioremap'd) address, not the physical one.
-        assert_eq!(device.core.lock().get_base_addr(), vaddr);
-        assert_eq!(device.core.lock().get_virtqueue_count(), 2);
+        assert_eq!(device.core.get_base_addr(), vaddr);
+        assert_eq!(device.core.get_virtqueue_count(), 2);
         assert_eq!(device.device_type(), DeviceType::Graphics);
         assert_eq!(device.name(), "virtio-gpu");
-        assert_eq!(device.core.lock().get_display_name(), "virtio-gpu");
+        assert_eq!(device.core.get_display_name(), "virtio-gpu");
         crate::vm::iounmap(vaddr);
     }
 
@@ -2249,9 +2306,9 @@ mod tests {
     fn test_virtio_gpu_resource_id_generation() {
         let vaddr = map_gpu();
         let device = VirtioGpuDevice::new(vaddr);
-        assert_eq!(device.core.lock().next_resource_id(), 1);
-        assert_eq!(device.core.lock().next_resource_id(), 2);
-        assert_eq!(device.core.lock().next_resource_id(), 3);
+        assert_eq!(device.core.next_resource_id(), 1);
+        assert_eq!(device.core.next_resource_id(), 2);
+        assert_eq!(device.core.next_resource_id(), 3);
         crate::vm::iounmap(vaddr);
     }
 
