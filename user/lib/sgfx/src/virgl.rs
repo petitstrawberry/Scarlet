@@ -737,7 +737,7 @@ struct IrSampler {
 struct IrPipeline {
     blend_handle: u32,
     rasterizer_handle: u32,
-    dsa_handle: u32,
+    dsa_handle: Option<u32>,
     state: IrPipelineState,
     initialized: Cell<bool>,
 }
@@ -1184,7 +1184,9 @@ impl Queue {
                 VIRGL_OBJECT_RASTERIZER,
                 pipeline.rasterizer_handle,
             );
-            push_bind_object(&mut commands, VIRGL_OBJECT_DSA, pipeline.dsa_handle);
+            if let Some(dsa_handle) = pipeline.dsa_handle {
+                push_bind_object(&mut commands, VIRGL_OBJECT_DSA, dsa_handle);
+            }
             push_fragment_shader(
                 &mut commands,
                 ir_fragment_shader_handle(resources, draw.pipeline.fragment),
@@ -1646,7 +1648,11 @@ fn ir_pipeline<'resources>(
         *pipeline_slot = Some(IrPipeline {
             blend_handle: context.allocate_object_handle()?,
             rasterizer_handle: context.allocate_object_handle()?,
-            dsa_handle: context.allocate_object_handle()?,
+            dsa_handle: if state.depth.is_some() {
+                Some(context.allocate_object_handle()?)
+            } else {
+                None
+            },
             state,
             initialized: Cell::new(false),
         });
@@ -2303,18 +2309,19 @@ fn push_ir_pipeline(commands: &mut Vec<u8>, pipeline: &IrPipeline) {
     push_float(commands, 0.0);
     push_float(commands, 0.0);
     push_float(commands, 0.0);
-    push_ir_dsa(commands, pipeline.dsa_handle, pipeline.state.depth);
+    if let (Some(handle), Some(depth)) = (pipeline.dsa_handle, pipeline.state.depth) {
+        push_ir_dsa(commands, handle, depth);
+    }
 }
 
-fn push_ir_dsa(commands: &mut Vec<u8>, handle: u32, depth: Option<crate::driver::IrDepthState>) {
+fn push_ir_dsa(commands: &mut Vec<u8>, handle: u32, depth: crate::driver::IrDepthState) {
     push_dword(
         commands,
         command_header(VIRGL_CCMD_CREATE_OBJECT, VIRGL_OBJECT_DSA, 5),
     );
     push_dword(commands, handle);
-    let flags = depth.map_or(0, |depth| {
-        1 | (u32::from(depth.write_enabled) << 1) | (ir_compare_function(depth.compare) << 2)
-    });
+    let flags =
+        1 | (u32::from(depth.write_enabled) << 1) | (ir_compare_function(depth.compare) << 2);
     push_dword(commands, flags);
     push_dword(commands, 0);
     push_dword(commands, 0);
@@ -2900,7 +2907,6 @@ mod tests {
             13,
             14,
         );
-        push_ir_dsa(&mut commands, 15, None);
         push_ir_clear(&mut commands, Some([0.1, 0.2, 0.3, 1.0]), None);
         let words = dwords(&commands);
         let framebuffer = words
@@ -2916,13 +2922,9 @@ mod tests {
                 11
             ]
         );
-        let dsa = words
-            .windows(6)
-            .find(|packet| {
-                packet[0] == command_header(VIRGL_CCMD_CREATE_OBJECT, VIRGL_OBJECT_DSA, 5)
-            })
-            .expect("DSA packet");
-        assert_eq!(dsa[2], 0);
+        assert!(!words.windows(6).any(|packet| {
+            packet[0] == command_header(VIRGL_CCMD_CREATE_OBJECT, VIRGL_OBJECT_DSA, 5)
+        }));
         let clear = words
             .windows(9)
             .find(|packet| packet[0] == command_header(VIRGL_CCMD_CLEAR, 0, 8))
@@ -2948,10 +2950,10 @@ mod tests {
         push_ir_dsa(
             &mut commands,
             15,
-            Some(IrDepthState {
+            IrDepthState {
                 compare: IrCompareFunction::Less,
                 write_enabled: true,
-            }),
+            },
         );
         push_ir_clear(&mut commands, Some([0.0; 4]), Some(1.0));
         let words = dwords(&commands);
