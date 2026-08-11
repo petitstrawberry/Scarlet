@@ -1957,6 +1957,7 @@ dependencies = [
  "symphonia-codec-aac",
  "symphonia-core",
  "url",
+ "zune-jpeg",
 ]
 
 [[package]]

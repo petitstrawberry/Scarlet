@@ -23,6 +23,7 @@ rust_h264 = { git = "https://github.com/petitstrawberry/rust_h264.git", rev = "a
 symphonia-core = { git = "https://github.com/petitstrawberry/Symphonia.git", rev = "71f92f0bc0fdd9d4f2a77129a543ee6c99611009", default-features = false, optional = true }
 symphonia-codec-aac = { git = "https://github.com/petitstrawberry/Symphonia.git", rev = "71f92f0bc0fdd9d4f2a77129a543ee6c99611009", default-features = false, optional = true }
 url = "2.5"
+zune-jpeg = { version = "0.5.8", default-features = false }
 ratatui = { version = "0.29", default-features = false }
 regex = "1"
 svgtypes = "0.15"

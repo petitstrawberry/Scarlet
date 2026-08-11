@@ -9,6 +9,7 @@ mod file_icons;
 
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
 use std::cmp::Ordering;
+use std::collections::VecDeque;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -28,11 +29,15 @@ use scarlet_desktop_config::{
 };
 use scarlet_ui::prelude::*;
 use scarlet_ui::{
-    Alignment, Button, Color, ColorPalette, Divider, GridView, HeaderBar, Icon, IconSize, IconView,
-    Image, ImageFit, NavigationLink, Spacer, dismiss_window, hstack, measure_text_sized,
-    navigation, open_window, vstack,
+    Alignment, BitmapImage, Button, Color, ColorPalette, Divider, GridView, HeaderBar, Icon,
+    IconSize, IconView, Image, ImageFit, NavigationLink, Spacer, dismiss_window, hstack,
+    measure_text_sized, navigation, open_window, vstack,
 };
 use scarlet_ui_macros::View;
+use zune_jpeg::JpegDecoder;
+use zune_jpeg::zune_core::bytestream::ZCursor;
+use zune_jpeg::zune_core::colorspace::ColorSpace;
+use zune_jpeg::zune_core::options::DecoderOptions;
 
 use file_icons::{FileKind, icon_for_entry};
 
@@ -42,13 +47,16 @@ const ROOT_PATH: &str = "/";
 const GRID_COLUMNS: usize = 5;
 const GRID_ROW_HEIGHT: f32 = 146.0;
 const FILE_CELL_WIDTH: f32 = 146.0;
-const FILE_PREVIEW_WIDTH: f32 = 96.0;
-const FILE_PREVIEW_HEIGHT: f32 = 78.0;
+const THUMBNAIL_WIDTH: usize = 96;
+const THUMBNAIL_HEIGHT: usize = 78;
+const FILE_PREVIEW_WIDTH: f32 = THUMBNAIL_WIDTH as f32;
+const FILE_PREVIEW_HEIGHT: f32 = THUMBNAIL_HEIGHT as f32;
 const FILE_NAME_FONT_SIZE: f32 = 13.0;
 const FILE_NAME_HEIGHT: f32 = 32.0;
 const FILE_NAME_MAX_WIDTH: f32 = 132.0;
-const JPEG_PREVIEW_MAX_PIXELS: usize = 1024 * 1024;
-const JPEG_HEADER_READ_LIMIT: usize = 64 * 1024;
+const JPEG_THUMBNAIL_SOURCE_MAX_PIXELS: usize = 16 * 1024 * 1024;
+const JPEG_THUMBNAIL_FILE_MAX_BYTES: u64 = 32 * 1024 * 1024;
+const THUMBNAIL_WORKER_IDLE_DELAY: Duration = Duration::from_millis(25);
 const SERVICE_RETRY_DELAY: Duration = Duration::from_millis(100);
 const DOUBLE_CLICK_INTERVAL: Duration = Duration::from_millis(500);
 
@@ -66,7 +74,7 @@ struct FileEntry {
     is_directory: bool,
     size: u64,
     kind: FileKind,
-    jpeg_preview_safe: bool,
+    thumbnail: Option<BitmapImage>,
 }
 
 #[derive(Clone)]
@@ -107,6 +115,32 @@ struct DirectoryReadResult {
     result: std::result::Result<Vec<FileEntry>, String>,
 }
 
+#[derive(Clone)]
+enum ThumbnailContext {
+    Main {
+        instance_id: u64,
+        generation: u32,
+        directory: String,
+    },
+    Picker {
+        request_id: String,
+        generation: u32,
+        directory: String,
+    },
+}
+
+struct ThumbnailJob {
+    context: ThumbnailContext,
+    path: String,
+    file_size: u64,
+}
+
+struct ThumbnailResult {
+    context: ThumbnailContext,
+    path: String,
+    thumbnail: Option<BitmapImage>,
+}
+
 struct PickerChild {
     request: PickerRequest,
     child: std::process::Child,
@@ -117,6 +151,9 @@ static NEXT_PICKER_REQUEST_ID: Mutex<u32> = Mutex::new(1);
 static PENDING_DIRECTORY_READS: Mutex<Vec<DirectoryReadResult>> = Mutex::new(Vec::new());
 static PENDING_PICKER_REQUESTS: Mutex<Vec<PickerRequest>> = Mutex::new(Vec::new());
 static PENDING_PICKER_READS: Mutex<Vec<PickerReadResult>> = Mutex::new(Vec::new());
+static PENDING_THUMBNAIL_JOBS: Mutex<VecDeque<ThumbnailJob>> = Mutex::new(VecDeque::new());
+static PENDING_THUMBNAIL_RESULTS: Mutex<Vec<ThumbnailResult>> = Mutex::new(Vec::new());
+static THUMBNAIL_WORKER_STARTED: AtomicBool = AtomicBool::new(false);
 static PICKER_WINDOW_CLOSING: AtomicBool = AtomicBool::new(false);
 static IDLE_TICK_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -131,6 +168,241 @@ fn mutex_lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn thumbnail_context_has_same_owner(left: &ThumbnailContext, right: &ThumbnailContext) -> bool {
+    match (left, right) {
+        (
+            ThumbnailContext::Main {
+                instance_id: left, ..
+            },
+            ThumbnailContext::Main {
+                instance_id: right, ..
+            },
+        ) => left == right,
+        (
+            ThumbnailContext::Picker {
+                request_id: left, ..
+            },
+            ThumbnailContext::Picker {
+                request_id: right, ..
+            },
+        ) => left == right,
+        _ => false,
+    }
+}
+
+fn cancel_main_thumbnail_jobs(instance_id: u64) {
+    mutex_lock(&PENDING_THUMBNAIL_JOBS).retain(|job| {
+        !matches!(
+            &job.context,
+            ThumbnailContext::Main {
+                instance_id: queued_instance,
+                ..
+            } if *queued_instance == instance_id
+        )
+    });
+}
+
+fn cancel_picker_thumbnail_jobs(request_id: &str) {
+    mutex_lock(&PENDING_THUMBNAIL_JOBS).retain(|job| {
+        !matches!(
+            &job.context,
+            ThumbnailContext::Picker {
+                request_id: queued_request,
+                ..
+            } if queued_request == request_id
+        )
+    });
+}
+
+fn enqueue_thumbnail_jobs(context: ThumbnailContext, entries: &[FileEntry]) {
+    let jobs: Vec<_> = entries
+        .iter()
+        .filter(|entry| {
+            !entry.is_directory && entry.kind == FileKind::Image && is_jpeg(&entry.name)
+        })
+        .map(|entry| ThumbnailJob {
+            context: context.clone(),
+            path: entry.path.clone(),
+            file_size: entry.size,
+        })
+        .collect();
+    if jobs.is_empty() {
+        return;
+    }
+
+    ensure_thumbnail_worker();
+    let mut pending = mutex_lock(&PENDING_THUMBNAIL_JOBS);
+    pending.retain(|job| !thumbnail_context_has_same_owner(&job.context, &context));
+    pending.extend(jobs);
+}
+
+fn ensure_thumbnail_worker() {
+    if THUMBNAIL_WORKER_STARTED
+        .compare_exchange(false, true, AtomicOrdering::AcqRel, AtomicOrdering::Acquire)
+        .is_err()
+    {
+        return;
+    }
+
+    thread::spawn(|| {
+        loop {
+            let job = mutex_lock(&PENDING_THUMBNAIL_JOBS).pop_front();
+            let Some(job) = job else {
+                thread::sleep(THUMBNAIL_WORKER_IDLE_DELAY);
+                continue;
+            };
+
+            let thumbnail = generate_jpeg_thumbnail(&job.path, job.file_size);
+            mutex_lock(&PENDING_THUMBNAIL_RESULTS).push(ThumbnailResult {
+                context: job.context,
+                path: job.path,
+                thumbnail,
+            });
+        }
+    });
+}
+
+fn read_thumbnail_source(path: &str, file_size: u64) -> Option<Vec<u8>> {
+    if file_size > JPEG_THUMBNAIL_FILE_MAX_BYTES {
+        return None;
+    }
+
+    let capacity = usize::try_from(file_size)
+        .ok()?
+        .min(JPEG_THUMBNAIL_FILE_MAX_BYTES as usize);
+    let mut file = fs::File::open(path).ok()?;
+    let mut bytes = Vec::with_capacity(capacity);
+    let mut chunk = [0u8; 4096];
+
+    loop {
+        let remaining = (JPEG_THUMBNAIL_FILE_MAX_BYTES as usize).checked_sub(bytes.len())?;
+        if remaining == 0 {
+            return (file.read(&mut chunk[..1]).ok()? == 0).then_some(bytes);
+        }
+        let read_limit = remaining.min(chunk.len());
+        let read = file.read(&mut chunk[..read_limit]).ok()?;
+        if read == 0 {
+            return Some(bytes);
+        }
+        bytes.extend_from_slice(&chunk[..read]);
+    }
+}
+
+fn generate_jpeg_thumbnail(path: &str, file_size: u64) -> Option<BitmapImage> {
+    let bytes = read_thumbnail_source(path, file_size)?;
+    let options = DecoderOptions::default().jpeg_set_out_colorspace(ColorSpace::RGB);
+    let mut decoder = JpegDecoder::new_with_options(ZCursor::new(&bytes), options);
+    decoder.decode_headers().ok()?;
+    let (source_width, source_height) = decoder.dimensions()?;
+    if !thumbnail_source_dimensions_are_safe(source_width, source_height) {
+        return None;
+    }
+
+    let rgb = decoder.decode().ok()?;
+    let pixels = resize_rgb_to_cover_thumbnail(
+        &rgb,
+        source_width,
+        source_height,
+        THUMBNAIL_WIDTH,
+        THUMBNAIL_HEIGHT,
+    )?;
+    Some(BitmapImage::from_bgra(
+        pixels,
+        THUMBNAIL_WIDTH as u32,
+        THUMBNAIL_HEIGHT as u32,
+    ))
+}
+
+fn thumbnail_source_dimensions_are_safe(width: usize, height: usize) -> bool {
+    width > 0
+        && height > 0
+        && width
+            .checked_mul(height)
+            .is_some_and(|pixels| pixels <= JPEG_THUMBNAIL_SOURCE_MAX_PIXELS)
+}
+
+fn resize_rgb_to_cover_thumbnail(
+    rgb: &[u8],
+    source_width: usize,
+    source_height: usize,
+    target_width: usize,
+    target_height: usize,
+) -> Option<Vec<u32>> {
+    if source_width == 0 || source_height == 0 || target_width == 0 || target_height == 0 {
+        return None;
+    }
+    let source_pixels = source_width.checked_mul(source_height)?;
+    if rgb.len() != source_pixels.checked_mul(3)? {
+        return None;
+    }
+
+    let source_width_u64 = source_width as u64;
+    let source_height_u64 = source_height as u64;
+    let target_width_u64 = target_width as u64;
+    let target_height_u64 = target_height as u64;
+    let source_is_wider = source_width_u64.checked_mul(target_height_u64)?
+        > source_height_u64.checked_mul(target_width_u64)?;
+    let (crop_width, crop_height) = if source_is_wider {
+        (
+            source_height_u64
+                .checked_mul(target_width_u64)?
+                .checked_div(target_height_u64)?
+                .clamp(1, source_width_u64),
+            source_height_u64,
+        )
+    } else {
+        (
+            source_width_u64,
+            source_width_u64
+                .checked_mul(target_height_u64)?
+                .checked_div(target_width_u64)?
+                .clamp(1, source_height_u64),
+        )
+    };
+    let crop_x = (source_width_u64 - crop_width) / 2;
+    let crop_y = (source_height_u64 - crop_height) / 2;
+
+    let mut pixels = Vec::with_capacity(target_width.checked_mul(target_height)?);
+    for target_y in 0..target_height_u64 {
+        let source_y_start = crop_y + target_y * crop_height / target_height_u64;
+        let source_y_end = (crop_y + (target_y + 1) * crop_height / target_height_u64)
+            .max(source_y_start + 1)
+            .min(crop_y + crop_height);
+
+        for target_x in 0..target_width_u64 {
+            let source_x_start = crop_x + target_x * crop_width / target_width_u64;
+            let source_x_end = (crop_x + (target_x + 1) * crop_width / target_width_u64)
+                .max(source_x_start + 1)
+                .min(crop_x + crop_width);
+            let mut red = 0u64;
+            let mut green = 0u64;
+            let mut blue = 0u64;
+            let mut samples = 0u64;
+
+            for source_y in source_y_start..source_y_end {
+                for source_x in source_x_start..source_x_end {
+                    let pixel_index =
+                        usize::try_from((source_y * source_width_u64 + source_x).checked_mul(3)?)
+                            .ok()?;
+                    red += u64::from(*rgb.get(pixel_index)?);
+                    green += u64::from(*rgb.get(pixel_index + 1)?);
+                    blue += u64::from(*rgb.get(pixel_index + 2)?);
+                    samples += 1;
+                }
+            }
+
+            pixels.push(
+                0xff00_0000
+                    | ((red / samples) as u32) << 16
+                    | ((green / samples) as u32) << 8
+                    | (blue / samples) as u32,
+            );
+        }
+    }
+
+    Some(pixels)
 }
 
 #[derive(View, Clone)]
@@ -175,6 +447,7 @@ impl FilerApp {
         let path = self.current_path.get();
         let generation = self.directory_read_generation.get().wrapping_add(1);
         let instance_id = self.directory_read_instance.get();
+        cancel_main_thumbnail_jobs(instance_id);
         self.directory_read_generation.set(generation);
         self.entries.set(Vec::new());
         self.selected.set(None);
@@ -215,6 +488,7 @@ impl FilerApp {
         let Some(request) = self.picker_request.get() else {
             return;
         };
+        cancel_picker_thumbnail_jobs(&request.id);
         let generation = self.picker_read_generation.get().wrapping_add(1);
         self.picker_read_generation.set(generation);
         self.picker_entries.set(Vec::new());
@@ -422,6 +696,14 @@ impl FilerApp {
 
             match read.result {
                 Ok(entries) => {
+                    enqueue_thumbnail_jobs(
+                        ThumbnailContext::Main {
+                            instance_id: read.instance_id,
+                            generation: read.generation,
+                            directory: read.path.clone(),
+                        },
+                        &entries,
+                    );
                     self.entries.set(entries);
                     self.status.set(String::from("Ready"));
                 }
@@ -467,12 +749,74 @@ impl FilerApp {
 
             match read.result {
                 Ok(entries) => {
+                    enqueue_thumbnail_jobs(
+                        ThumbnailContext::Picker {
+                            request_id: read.request_id.clone(),
+                            generation: read.generation,
+                            directory: read.path.clone(),
+                        },
+                        &entries,
+                    );
                     self.picker_entries.set(entries);
                     self.picker_status.set(String::from("Ready"));
                 }
                 Err(error) => self
                     .picker_status
                     .set(format!("Cannot open {}: {error}", read.path)),
+            }
+        }
+
+        let thumbnails: Vec<_> = mutex_lock(&PENDING_THUMBNAIL_RESULTS).drain(..).collect();
+        for result in thumbnails {
+            let Some(thumbnail) = result.thumbnail else {
+                continue;
+            };
+
+            match result.context {
+                ThumbnailContext::Main {
+                    instance_id,
+                    generation,
+                    directory,
+                } => {
+                    let is_current = self.directory_read_instance.get() == instance_id
+                        && self.directory_read_generation.get() == generation
+                        && self.current_path.get() == directory;
+                    if !is_current {
+                        continue;
+                    }
+
+                    let mut entries = self.entries.get();
+                    let Some(entry) = entries.iter_mut().find(|entry| entry.path == result.path)
+                    else {
+                        continue;
+                    };
+                    entry.thumbnail = Some(thumbnail);
+                    self.entries.set(entries);
+                }
+                ThumbnailContext::Picker {
+                    request_id,
+                    generation,
+                    directory,
+                } => {
+                    let is_current = self
+                        .picker_request
+                        .get()
+                        .as_ref()
+                        .is_some_and(|request| request.id == request_id)
+                        && self.picker_read_generation.get() == generation
+                        && self.picker_current_path.get() == directory;
+                    if !is_current {
+                        continue;
+                    }
+
+                    let mut entries = self.picker_entries.get();
+                    let Some(entry) = entries.iter_mut().find(|entry| entry.path == result.path)
+                    else {
+                        continue;
+                    };
+                    entry.thumbnail = Some(thumbnail);
+                    self.picker_entries.set(entries);
+                }
             }
         }
     }
@@ -510,6 +854,7 @@ impl FilerApp {
         let success = accepted && !path.is_empty();
 
         let request_id = request.id;
+        cancel_picker_thumbnail_jobs(&request_id);
         self.picker_request.set(None);
         self.picker_file_name.set(String::new());
         PICKER_WINDOW_CLOSING.store(true, AtomicOrdering::Release);
@@ -554,19 +899,18 @@ impl FilerApp {
         } else {
             Color::CLEAR
         };
-        let preview =
-            if entry.kind == FileKind::Image && !entry.is_directory && entry.jpeg_preview_safe {
-                Either::A(
-                    Image::from_path(entry.path.clone())
-                        .fit_mode(ImageFit::Cover)
-                        .frame(FILE_PREVIEW_WIDTH, FILE_PREVIEW_HEIGHT),
-                )
-            } else {
-                Either::B(
-                    icon_for_entry(&entry.name, entry.is_directory)
-                        .frame(FILE_PREVIEW_WIDTH, FILE_PREVIEW_HEIGHT),
-                )
-            };
+        let preview = if let Some(thumbnail) = entry.thumbnail.clone() {
+            Either::A(
+                Image::from_bitmap(thumbnail)
+                    .fit_mode(ImageFit::Cover)
+                    .frame(FILE_PREVIEW_WIDTH, FILE_PREVIEW_HEIGHT),
+            )
+        } else {
+            Either::B(
+                icon_for_entry(&entry.name, entry.is_directory)
+                    .frame(FILE_PREVIEW_WIDTH, FILE_PREVIEW_HEIGHT),
+            )
+        };
         let detail = if entry.is_directory {
             String::from("Folder")
         } else {
@@ -904,68 +1248,48 @@ fn text_width(text: &str) -> f32 {
 mod layout_tests {
     use super::{
         FILE_NAME_MAX_WIDTH, FileEntry, FileKind, FilerApp, PickerRequest, file_name_label,
-        jpeg_dimensions, jpeg_header_is_previewable, text_width,
+        resize_rgb_to_cover_thumbnail, text_width, thumbnail_source_dimensions_are_safe,
     };
     use scarlet_ui::{
         Application, Color, Event, MouseButton, MouseEvent, NavigationLink, NavigationView,
         RenderingPipeline, Scene, SceneBuilder, Size, Text, View, Window,
     };
 
-    fn jpeg_header(width: u16, height: u16) -> Vec<u8> {
-        let [width_high, width_low] = width.to_be_bytes();
-        let [height_high, height_low] = height.to_be_bytes();
-        vec![
-            0xff,
-            0xd8,
-            0xff,
-            0xe0,
-            0x00,
-            0x04,
-            0x00,
-            0x00,
-            0xff,
-            0xc0,
-            0x00,
-            0x11,
-            0x08,
-            height_high,
-            height_low,
-            width_high,
-            width_low,
-            0x03,
-            0x01,
-            0x11,
-            0x00,
-            0x02,
-            0x11,
-            0x00,
-            0x03,
-            0x11,
-            0x00,
-            0xff,
-            0xd9,
-        ]
+    #[test]
+    fn jpeg_thumbnail_source_dimensions_are_bounded() {
+        assert!(thumbnail_source_dimensions_are_safe(3840, 2160));
+        assert!(!thumbnail_source_dimensions_are_safe(5000, 5000));
+        assert!(!thumbnail_source_dimensions_are_safe(0, 480));
+        assert!(!thumbnail_source_dimensions_are_safe(usize::MAX, 2));
     }
 
     #[test]
-    fn jpeg_preview_rejects_full_resolution_wallpaper() {
-        let wallpaper = jpeg_header(3840, 2160);
-        assert_eq!(jpeg_dimensions(&wallpaper), Some((3840, 2160)));
-        assert!(!jpeg_header_is_previewable(&wallpaper));
+    fn thumbnail_center_crops_rgb_pixels() {
+        #[rustfmt::skip]
+        let rgb = [
+            255, 0, 0,  0, 255, 0,  0, 0, 255,  255, 255, 255,
+            255, 0, 0,  0, 255, 0,  0, 0, 255,  255, 255, 255,
+        ];
 
-        let bounded = jpeg_header(1024, 1024);
-        assert_eq!(jpeg_dimensions(&bounded), Some((1024, 1024)));
-        assert!(jpeg_header_is_previewable(&bounded));
+        let thumbnail = resize_rgb_to_cover_thumbnail(&rgb, 4, 2, 2, 2).unwrap();
+
+        assert_eq!(
+            thumbnail,
+            vec![0xff00_ff00, 0xff00_00ff, 0xff00_ff00, 0xff00_00ff]
+        );
     }
 
     #[test]
-    fn jpeg_preview_rejects_missing_or_truncated_dimensions() {
-        assert!(!jpeg_header_is_previewable(&[]));
-        assert!(!jpeg_header_is_previewable(&[0xff, 0xd8, 0xff, 0xc0]));
+    fn thumbnail_box_filters_each_source_region() {
+        #[rustfmt::skip]
+        let rgb = [
+            200, 0, 0,  100, 0, 0,  0, 200, 0,  0, 100, 0,
+            200, 0, 0,  100, 0, 0,  0, 200, 0,  0, 100, 0,
+        ];
 
-        let zero_width = jpeg_header(0, 480);
-        assert_eq!(jpeg_dimensions(&zero_width), None);
-        assert!(!jpeg_header_is_previewable(&zero_width));
+        let thumbnail = resize_rgb_to_cover_thumbnail(&rgb, 4, 2, 2, 1).unwrap();
+
+        assert_eq!(thumbnail, vec![0xff96_0000, 0xff00_9600]);
     }
 
     #[test]
@@ -1024,7 +1348,7 @@ mod layout_tests {
                     is_directory: true,
                     size: 0,
                     kind: FileKind::Folder,
-                    jpeg_preview_safe: false,
+                    thumbnail: None,
                 })
                 .collect(),
         );
@@ -1066,7 +1390,7 @@ mod layout_tests {
                     is_directory: true,
                     size: 0,
                     kind: FileKind::Folder,
-                    jpeg_preview_safe: false,
+                    thumbnail: None,
                 })
                 .collect(),
         );
@@ -1125,7 +1449,7 @@ mod layout_tests {
                     is_directory: true,
                     size: 0,
                     kind: FileKind::Folder,
-                    jpeg_preview_safe: false,
+                    thumbnail: None,
                 })
                 .collect(),
         );
@@ -1172,7 +1496,7 @@ mod layout_tests {
                     is_directory: true,
                     size: 0,
                     kind: FileKind::Folder,
-                    jpeg_preview_safe: false,
+                    thumbnail: None,
                 })
                 .collect(),
         );
@@ -1200,7 +1524,7 @@ mod layout_tests {
                     is_directory: true,
                     size: 0,
                     kind: FileKind::Folder,
-                    jpeg_preview_safe: false,
+                    thumbnail: None,
                 })
                 .collect(),
         );
@@ -1229,7 +1553,7 @@ mod layout_tests {
                     is_directory: true,
                     size: 0,
                     kind: FileKind::Folder,
-                    jpeg_preview_safe: false,
+                    thumbnail: None,
                 })
                 .collect(),
         );
@@ -1299,15 +1623,13 @@ fn read_entries(path: &str, picker: Option<&PickerRequest>) -> std::io::Result<V
         } else {
             FileKind::from_path(&name)
         };
-        let jpeg_preview_safe =
-            kind == FileKind::Image && is_jpeg(&name) && jpeg_preview_is_safe(&path);
         entries.push(FileEntry {
             kind,
             name,
             path,
             is_directory,
             size,
-            jpeg_preview_safe,
+            thumbnail: None,
         });
     }
 
@@ -1319,97 +1641,6 @@ fn read_entries(path: &str, picker: Option<&PickerRequest>) -> std::io::Result<V
         },
     );
     Ok(entries)
-}
-
-fn jpeg_preview_is_safe(path: &str) -> bool {
-    let Ok(mut file) = fs::File::open(path) else {
-        return false;
-    };
-    let mut header = Vec::with_capacity(JPEG_HEADER_READ_LIMIT);
-    let mut chunk = [0u8; 4096];
-
-    while header.len() < JPEG_HEADER_READ_LIMIT {
-        let remaining = JPEG_HEADER_READ_LIMIT - header.len();
-        let read_limit = remaining.min(chunk.len());
-        let Ok(read) = file.read(&mut chunk[..read_limit]) else {
-            return false;
-        };
-        if read == 0 {
-            break;
-        }
-        header.extend_from_slice(&chunk[..read]);
-    }
-
-    jpeg_header_is_previewable(&header)
-}
-
-fn jpeg_header_is_previewable(bytes: &[u8]) -> bool {
-    jpeg_dimensions(bytes)
-        .and_then(|(width, height)| width.checked_mul(height))
-        .is_some_and(|pixels| pixels <= JPEG_PREVIEW_MAX_PIXELS)
-}
-
-fn jpeg_dimensions(bytes: &[u8]) -> Option<(usize, usize)> {
-    if !bytes.starts_with(&[0xff, 0xd8]) {
-        return None;
-    }
-
-    let mut cursor = 2usize;
-    while cursor < bytes.len() {
-        while cursor < bytes.len() && bytes[cursor] != 0xff {
-            cursor += 1;
-        }
-        while cursor < bytes.len() && bytes[cursor] == 0xff {
-            cursor += 1;
-        }
-        let marker = *bytes.get(cursor)?;
-        cursor += 1;
-
-        if marker == 0x00 {
-            continue;
-        }
-        if marker == 0xd9 || marker == 0xda {
-            return None;
-        }
-        if marker == 0xd8 || marker == 0x01 || (0xd0..=0xd7).contains(&marker) {
-            continue;
-        }
-
-        let length = usize::from(u16::from_be_bytes([
-            *bytes.get(cursor)?,
-            *bytes.get(cursor + 1)?,
-        ]));
-        if length < 2 {
-            return None;
-        }
-        let segment_end = cursor.checked_add(length)?;
-        if segment_end > bytes.len() {
-            return None;
-        }
-
-        let is_start_of_frame = matches!(
-            marker,
-            0xc0..=0xc3 | 0xc5..=0xc7 | 0xc9..=0xcb | 0xcd..=0xcf
-        );
-        if is_start_of_frame {
-            if length < 8 {
-                return None;
-            }
-            let height = usize::from(u16::from_be_bytes([
-                *bytes.get(cursor + 3)?,
-                *bytes.get(cursor + 4)?,
-            ]));
-            let width = usize::from(u16::from_be_bytes([
-                *bytes.get(cursor + 5)?,
-                *bytes.get(cursor + 6)?,
-            ]));
-            return (width > 0 && height > 0).then_some((width, height));
-        }
-
-        cursor = segment_end;
-    }
-
-    None
 }
 
 fn matches_filter(name: &str, filter: &str) -> bool {
