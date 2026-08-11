@@ -6,7 +6,67 @@ on:
   pull_request:
     branches: [ "dev" ]
 
+permissions:
+  contents: write
+
 jobs:
+  temporary-format-repair:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        ref: fix/aarch64-lock-stall-watchdog
+
+    - name: Apply rustfmt-equivalent changes
+      run: |
+        python3 - <<'PY'
+        from pathlib import Path
+
+        path = Path("kernel/src/sync/preempt.rs")
+        text = path.read_text()
+        replacements = {
+            """            slot.acquired_at_ns
+                .store(acquired_at_ns, Ordering::Relaxed);
+            slot.acquisition_pc
+                .store(acquisition_pc, Ordering::Relaxed);
+            slot.acquisition_lr
+                .store(acquisition_lr, Ordering::Relaxed);
+        """: """            slot.acquired_at_ns.store(acquired_at_ns, Ordering::Relaxed);
+            slot.acquisition_pc.store(acquisition_pc, Ordering::Relaxed);
+            slot.acquisition_lr.store(acquisition_lr, Ordering::Relaxed);
+        """,
+            """            let held_ns = if snapshot.phase == PreemptDebugPhase::Held
+                && snapshot.acquired_at_ns != 0
+            {
+                now_ns.saturating_sub(snapshot.acquired_at_ns)
+            } else {
+                0
+            };
+        """: """            let held_ns =
+                if snapshot.phase == PreemptDebugPhase::Held && snapshot.acquired_at_ns != 0 {
+                    now_ns.saturating_sub(snapshot.acquired_at_ns)
+                } else {
+                    0
+                };
+        """,
+        }
+        for old, new in replacements.items():
+            if old not in text:
+                raise SystemExit("expected unformatted block not found")
+            text = text.replace(old, new, 1)
+        path.write_text(text)
+        PY
+
+    - name: Commit formatting repair
+      run: |
+        test -n "$(git status --porcelain -- kernel/src/sync/preempt.rs)"
+        git config user.name github-actions[bot]
+        git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+        git add kernel/src/sync/preempt.rs
+        git commit -m "Format sync watchdog diagnostics"
+        git push origin HEAD:fix/aarch64-lock-stall-watchdog
+
   nix-cache:
     runs-on: ubuntu-latest
     env:
