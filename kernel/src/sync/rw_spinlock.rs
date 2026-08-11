@@ -97,6 +97,7 @@ impl<T> RwSpinLock<T> {
             self as *const Self as usize,
         );
         self.acquire_read();
+        preempt.mark_acquired();
         RwSpinLockReadGuard {
             lock: self,
             _preempt: preempt,
@@ -118,6 +119,7 @@ impl<T> RwSpinLock<T> {
             self as *const Self as usize,
         );
         if self.try_acquire_read() {
+            preempt.mark_acquired();
             Some(RwSpinLockReadGuard {
                 lock: self,
                 _preempt: preempt,
@@ -146,6 +148,7 @@ impl<T> RwSpinLock<T> {
             self as *const Self as usize,
         );
         self.acquire_write();
+        preempt.mark_acquired();
         RwSpinLockWriteGuard {
             lock: self,
             _preempt: preempt,
@@ -171,6 +174,7 @@ impl<T> RwSpinLock<T> {
             .compare_exchange(0, WRITER_BIT, Ordering::Acquire, Ordering::Relaxed)
             .is_ok()
         {
+            preempt.mark_acquired();
             Some(RwSpinLockWriteGuard {
                 lock: self,
                 _preempt: preempt,
@@ -403,6 +407,7 @@ impl<T> IrqRwSpinLock<T> {
             self as *const Self as usize,
         );
         self.acquire_read();
+        irq_guard.mark_acquired();
         IrqRwSpinLockReadGuard {
             lock: self,
             irq_guard: Some(irq_guard),
@@ -425,6 +430,7 @@ impl<T> IrqRwSpinLock<T> {
             self as *const Self as usize,
         );
         if self.try_acquire_read() {
+            irq_guard.mark_acquired();
             Some(IrqRwSpinLockReadGuard {
                 lock: self,
                 irq_guard: Some(irq_guard),
@@ -453,6 +459,7 @@ impl<T> IrqRwSpinLock<T> {
             self as *const Self as usize,
         );
         self.acquire_write();
+        irq_guard.mark_acquired();
         IrqRwSpinLockWriteGuard {
             lock: self,
             irq_guard: Some(irq_guard),
@@ -479,6 +486,7 @@ impl<T> IrqRwSpinLock<T> {
             .compare_exchange(0, WRITER_BIT, Ordering::Acquire, Ordering::Relaxed)
             .is_ok()
         {
+            irq_guard.mark_acquired();
             Some(IrqRwSpinLockWriteGuard {
                 lock: self,
                 irq_guard: Some(irq_guard),
