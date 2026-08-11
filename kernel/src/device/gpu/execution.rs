@@ -600,8 +600,7 @@ impl GpuQueue {
             .and_then(KernelObject::as_gpu)
             .and_then(GpuObject::as_timeline);
 
-        if let Err(error) = self.backend_queue.submit(&commands) {
-            crate::early_println!("[gpu] queue submission failed: {}", error);
+        if self.backend_queue.submit(&commands).is_err() {
             if let Some(timeline) = timeline {
                 timeline.fail();
                 let (value, failed) = timeline.state();
