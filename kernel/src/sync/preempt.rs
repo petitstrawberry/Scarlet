@@ -532,19 +532,19 @@ impl Drop for PreemptGuard {
 /// Print every live preemption guard on the current CPU.
 ///
 /// With `sync-debug` disabled this compiles to a no-op. The diagnostic path
-/// does not allocate and tolerates guards being dropped out of acquisition
-/// order.
+/// does not allocate or acquire the print lock, and tolerates guards being
+/// dropped out of acquisition order.
 #[inline]
 pub fn dump_active_preempt_guards() {
     #[cfg(feature = "sync-debug")]
     {
         let Some(cpu) = current_cpu() else {
-            crate::early_println!("[sync-debug] per-CPU state is not initialized");
+            crate::emergency_println!("[sync-debug] per-CPU state is not initialized");
             return;
         };
         let count = PREEMPT_COUNT[cpu].load(Ordering::Relaxed);
         let untracked = PREEMPT_DEBUG_UNTRACKED[cpu].load(Ordering::Relaxed);
-        crate::early_println!(
+        crate::emergency_println!(
             "[sync-debug] cpu={} preempt_count={} active guard(s):",
             cpu,
             count
@@ -560,7 +560,7 @@ pub fn dump_active_preempt_guards() {
             let lock_address = slot.lock_address.load(Ordering::Relaxed);
             let location_ptr = slot.location.load(Ordering::Relaxed);
             let Some(source) = source else {
-                crate::early_println!(
+                crate::emergency_println!(
                     "[sync-debug]   slot={} kind=<invalid> lock={:#x}",
                     index,
                     lock_address
@@ -580,7 +580,7 @@ pub fn dump_active_preempt_guards() {
             // SAFETY: `Location::caller()` returns a reference with static
             // lifetime. A slot remains active until its owning guard drops.
             let location = unsafe { &*location_ptr };
-            crate::early_println!(
+            crate::emergency_println!(
                 "[sync-debug]   slot={} kind={} lock={:#x} at {}:{}:{}",
                 index,
                 source.name(),
@@ -592,7 +592,7 @@ pub fn dump_active_preempt_guards() {
         }
 
         if untracked != 0 || count != tracked.saturating_add(untracked) {
-            crate::early_println!(
+            crate::emergency_println!(
                 "[sync-debug]   tracked={} untracked={} count_delta={}",
                 tracked,
                 untracked,

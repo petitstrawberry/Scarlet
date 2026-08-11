@@ -352,7 +352,13 @@ fn find_pci_ecam(fdt: &fdt::Fdt<'_>) -> Option<(usize, usize)> {
 fn panic(info: &core::panic::PanicInfo) -> ! {
     use arch::instruction::idle;
 
-    crate::emergency_println!("[Scarlet Kernel] panic: {}", info);
+    crate::emergency_println!(
+        "[Scarlet Kernel] panic: cpu={:?} preempt_count={} {}",
+        crate::arch::try_get_cpuid(),
+        crate::sync::preempt_count(),
+        info,
+    );
+    crate::sync::dump_active_preempt_guards();
 
     // if let Some(task) = get_scheduler().get_current_task(get_cpu().get_cpuid()) {
     //     task.exit(1); // Exit the task with error code 1
