@@ -46,8 +46,8 @@ pub(crate) enum PreemptSourceKind {
     IrqRwSpinLockWrite = 8,
 }
 
-#[cfg(feature = "sync-debug")]
 impl PreemptSourceKind {
+    #[cfg(feature = "sync-debug")]
     fn from_raw(raw: u8) -> Option<Self> {
         match raw {
             1 => Some(Self::Explicit),
@@ -62,6 +62,7 @@ impl PreemptSourceKind {
         }
     }
 
+    #[cfg(feature = "sync-debug")]
     fn name(self) -> &'static str {
         match self {
             Self::Explicit => "PreemptGuard",
@@ -128,6 +129,9 @@ pub(crate) struct PreemptDebugSnapshot {
     pub(crate) lock_address: usize,
     pub(crate) task_id: usize,
     pub(crate) spin_iterations: u64,
+    pub(crate) acquired_at_ns: u64,
+    pub(crate) acquisition_pc: usize,
+    pub(crate) acquisition_lr: usize,
     pub(crate) location: *const Location<'static>,
 }
 
@@ -140,8 +144,14 @@ struct PreemptDebugSlot {
     task_id: AtomicUsize,
     /// Lifecycle phase, written under the WRITING/ACTIVE sequence.
     phase: AtomicU8,
-    /// Monotonic acquisition attempt counter published while spinning.
+    /// Acquisition-attempt iterations sampled when the watchdog fires.
     spin_iterations: AtomicU64,
+    /// Monotonic time at which acquisition completed.
+    acquired_at_ns: AtomicU64,
+    /// Instruction address sampled when acquisition completed.
+    acquisition_pc: AtomicUsize,
+    /// Link/return address sampled when acquisition completed.
+    acquisition_lr: AtomicUsize,
     location: AtomicPtr<Location<'static>>,
 }
 
@@ -155,6 +165,9 @@ impl PreemptDebugSlot {
             task_id: AtomicUsize::new(0),
             phase: AtomicU8::new(0),
             spin_iterations: AtomicU64::new(0),
+            acquired_at_ns: AtomicU64::new(0),
+            acquisition_pc: AtomicUsize::new(0),
+            acquisition_lr: AtomicUsize::new(0),
             location: AtomicPtr::new(core::ptr::null_mut()),
         }
     }
@@ -196,6 +209,9 @@ fn register_preempt_source(
         );
         slot.phase.store(DEBUG_PHASE_ACQUIRING, Ordering::Relaxed);
         slot.spin_iterations.store(0, Ordering::Relaxed);
+        slot.acquired_at_ns.store(0, Ordering::Relaxed);
+        slot.acquisition_pc.store(0, Ordering::Relaxed);
+        slot.acquisition_lr.store(0, Ordering::Relaxed);
         slot.location.store(
             location as *const Location<'static> as *mut Location<'static>,
             Ordering::Relaxed,
@@ -226,7 +242,7 @@ fn unregister_preempt_source(cpu: usize, slot_index: Option<u8>) {
 /// is empty or being republished.
 #[cfg(feature = "sync-debug")]
 fn snapshot_debug_slot(cpu: usize, slot_index: usize) -> Option<PreemptDebugSnapshot> {
-    if slot_index >= PREEMPT_DEBUG_SLOT_COUNT {
+    if cpu >= MAX_NUM_CPUS || slot_index >= PREEMPT_DEBUG_SLOT_COUNT {
         return None;
     }
     let slot = &PREEMPT_DEBUG_SLOTS[cpu][slot_index];
@@ -234,49 +250,24 @@ fn snapshot_debug_slot(cpu: usize, slot_index: usize) -> Option<PreemptDebugSnap
         return None;
     }
     let source = PreemptSourceKind::from_raw(slot.source.load(Ordering::Relaxed))?;
-    let phase = PreemptDebugPhase::from_raw(slot.phase.load(Ordering::Relaxed))
+    let phase = PreemptDebugPhase::from_raw(slot.phase.load(Ordering::Acquire))
         .unwrap_or(PreemptDebugPhase::Acquiring);
-    Some(PreemptDebugSnapshot {
+    let snapshot = PreemptDebugSnapshot {
         source,
         phase,
         lock_address: slot.lock_address.load(Ordering::Relaxed),
         task_id: slot.task_id.load(Ordering::Relaxed),
         spin_iterations: slot.spin_iterations.load(Ordering::Relaxed),
+        acquired_at_ns: slot.acquired_at_ns.load(Ordering::Relaxed),
+        acquisition_pc: slot.acquisition_pc.load(Ordering::Relaxed),
+        acquisition_lr: slot.acquisition_lr.load(Ordering::Relaxed),
         location: slot.location.load(Ordering::Relaxed),
-    })
-}
-
-/// Scan every active debug slot on a CPU and return a consistent snapshot of
-/// the live guards. The caller must own no guard whose publication is in
-/// flight (the snapshot only reads, never writes).
-#[cfg(feature = "sync-debug")]
-pub(crate) fn debug_active_snapshots(cpu: usize) -> alloc::vec::Vec<PreemptDebugSnapshot> {
-    let mut out = alloc::vec::Vec::new();
-    if cpu >= MAX_NUM_CPUS {
-        return out;
+    };
+    if slot.state.load(Ordering::Acquire) == DEBUG_SLOT_ACTIVE {
+        Some(snapshot)
+    } else {
+        None
     }
-    for index in 0..PREEMPT_DEBUG_SLOT_COUNT {
-        if let Some(snapshot) = snapshot_debug_slot(cpu, index) {
-            out.push(snapshot);
-        }
-    }
-    out
-}
-
-#[cfg(feature = "sync-debug")]
-fn format_location(location: *const Location<'static>) -> alloc::string::String {
-    if location.is_null() {
-        return alloc::string::String::from("<unknown>");
-    }
-    // SAFETY: `Location::caller()` returns a reference with static lifetime.
-    // The slot remains active while we read it, so the pointer stays valid.
-    let location = unsafe { &*location };
-    alloc::format!(
-        "{}:{}:{}",
-        location.file(),
-        location.line(),
-        location.column()
-    )
 }
 
 #[inline]
@@ -359,13 +350,12 @@ pub fn preempt_enable() {
 
 // Always-on lightweight spin-contention watchdog.
 //
-// Unlike the `sync-debug` slot machinery above, this counter is unconditional:
-// it costs one relaxed atomic add per spin iteration and one comparison. When
-// a lock on a given CPU spins past the report threshold it prints a one-line
-// report and resets, so a long-but-progressing wait does not flood the
-// console. The report includes the preempt count and, when `sync-debug` is
-// enabled, every active diagnostic slot (lock address, caller, phase) so the
-// stall can be attributed to a concrete owner.
+// The counter is CPU-local and is reset when a tracked lock acquisition starts
+// or completes. With `sync-debug`, a threshold report looks up the current
+// CPU's `acquiring` slot and then reports only `held` slots for the exact same
+// lock address. The report path uses no heap allocation and bypasses the normal
+// print lock, so it remains safe while the allocator or print infrastructure is
+// the contended resource.
 //
 // This intentionally does not panic: a transient burst under heavy USB
 // storage contention can legitimately spin for millions of iterations. The
@@ -389,35 +379,234 @@ pub fn note_spin_contention() {
     };
     let count = SPIN_CONTENTION_COUNT[cpu].fetch_add(1, Ordering::Relaxed) + 1;
     if count == SPIN_CONTENTION_REPORT_THRESHOLD {
-        report_spin_contention(cpu);
+        report_spin_contention(cpu, count);
         SPIN_CONTENTION_COUNT[cpu].store(0, Ordering::Relaxed);
     }
     core::hint::spin_loop();
 }
 
-#[cold]
-fn report_spin_contention(cpu: usize) {
-    let preempt = preempt_count();
-    crate::println!(
-        "[sync-watchdog] spin contention on cpu={} preempt_count={} (possible lock stall)",
+#[cfg(feature = "sync-debug")]
+fn emergency_print_waiter(cpu: usize, snapshot: PreemptDebugSnapshot, spin_count: u64) {
+    if snapshot.location.is_null() {
+        crate::emergency_println!(
+            "[sync-watchdog] waiter_cpu={} kind={} lock={:#x} task={} spins={} at <unknown>",
+            cpu,
+            snapshot.source.name(),
+            snapshot.lock_address,
+            snapshot.task_id,
+            spin_count,
+        );
+        return;
+    }
+
+    // SAFETY: `Location::caller()` returns a reference with static lifetime.
+    let location = unsafe { &*snapshot.location };
+    crate::emergency_println!(
+        "[sync-watchdog] waiter_cpu={} kind={} lock={:#x} task={} spins={} at {}:{}:{}",
         cpu,
-        preempt,
+        snapshot.source.name(),
+        snapshot.lock_address,
+        snapshot.task_id,
+        spin_count,
+        location.file(),
+        location.line(),
+        location.column(),
     );
-    #[cfg(feature = "sync-debug")]
+}
+
+#[cfg(feature = "sync-debug")]
+fn emergency_print_holder(cpu: usize, snapshot: PreemptDebugSnapshot, now_ns: u64) {
+    let held_ns = if snapshot.acquired_at_ns == 0 {
+        0
+    } else {
+        now_ns.saturating_sub(snapshot.acquired_at_ns)
+    };
+    if snapshot.location.is_null() {
+        crate::emergency_println!(
+            "[sync-watchdog]   owner_cpu={} kind={} lock={:#x} task={} held_ns={} acquire_pc={:#x} acquire_lr={:#x} at <unknown>",
+            cpu,
+            snapshot.source.name(),
+            snapshot.lock_address,
+            snapshot.task_id,
+            held_ns,
+            snapshot.acquisition_pc,
+            snapshot.acquisition_lr,
+        );
+        return;
+    }
+
+    // SAFETY: `Location::caller()` returns a reference with static lifetime.
+    let location = unsafe { &*snapshot.location };
+    crate::emergency_println!(
+        "[sync-watchdog]   owner_cpu={} kind={} lock={:#x} task={} held_ns={} acquire_pc={:#x} acquire_lr={:#x} at {}:{}:{}",
+        cpu,
+        snapshot.source.name(),
+        snapshot.lock_address,
+        snapshot.task_id,
+        held_ns,
+        snapshot.acquisition_pc,
+        snapshot.acquisition_lr,
+        location.file(),
+        location.line(),
+        location.column(),
+    );
+}
+
+#[cfg(feature = "sync-debug")]
+fn emergency_print_peer_waiter(cpu: usize, snapshot: PreemptDebugSnapshot) {
+    if snapshot.location.is_null() {
+        crate::emergency_println!(
+            "[sync-watchdog]   peer_waiter_cpu={} kind={} lock={:#x} task={} spins={} at <unknown>",
+            cpu,
+            snapshot.source.name(),
+            snapshot.lock_address,
+            snapshot.task_id,
+            snapshot.spin_iterations,
+        );
+        return;
+    }
+
+    // SAFETY: `Location::caller()` returns a reference with static lifetime.
+    let location = unsafe { &*snapshot.location };
+    crate::emergency_println!(
+        "[sync-watchdog]   peer_waiter_cpu={} kind={} lock={:#x} task={} spins={} at {}:{}:{}",
+        cpu,
+        snapshot.source.name(),
+        snapshot.lock_address,
+        snapshot.task_id,
+        snapshot.spin_iterations,
+        location.file(),
+        location.line(),
+        location.column(),
+    );
+}
+
+#[cfg(feature = "sync-debug")]
+fn report_tracked_lock_contention(
+    waiter_cpu: usize,
+    waiter_slot_index: usize,
+    waiter: PreemptDebugSnapshot,
+    spin_count: u64,
+) {
+    emergency_print_waiter(waiter_cpu, waiter, spin_count);
+
+    let now_ns = crate::timer::get_time_ns();
+    let mut holder_count = 0usize;
+    let mut peer_waiter_count = 0usize;
     for target_cpu in 0..MAX_NUM_CPUS {
-        let snapshots = debug_active_snapshots(target_cpu);
-        for snapshot in snapshots {
-            let location_str = format_location(snapshot.location);
-            crate::println!(
-                "[sync-watchdog]   owner_cpu={} kind={} phase={} lock={:#x} task={} spins={} at {}",
-                target_cpu,
-                snapshot.source.name(),
-                snapshot.phase.name(),
-                snapshot.lock_address,
-                snapshot.task_id,
-                snapshot.spin_iterations,
-                location_str,
+        for slot_index in 0..PREEMPT_DEBUG_SLOT_COUNT {
+            let Some(snapshot) = snapshot_debug_slot(target_cpu, slot_index) else {
+                continue;
+            };
+            if snapshot.lock_address != waiter.lock_address {
+                continue;
+            }
+            match snapshot.phase {
+                PreemptDebugPhase::Held => {
+                    holder_count += 1;
+                    emergency_print_holder(target_cpu, snapshot, now_ns);
+                }
+                PreemptDebugPhase::Acquiring
+                    if target_cpu != waiter_cpu || slot_index != waiter_slot_index =>
+                {
+                    peer_waiter_count += 1;
+                    emergency_print_peer_waiter(target_cpu, snapshot);
+                }
+                PreemptDebugPhase::Acquiring | PreemptDebugPhase::Released => {}
+            }
+        }
+    }
+
+    if holder_count == 0 {
+        crate::emergency_println!(
+            "[sync-watchdog]   owner unavailable for lock={:#x} (untracked, released during snapshot, or in handoff)",
+            waiter.lock_address,
+        );
+    }
+    if peer_waiter_count != 0 {
+        crate::emergency_println!(
+            "[sync-watchdog]   matching peer waiters={}",
+            peer_waiter_count,
+        );
+    }
+}
+
+#[cfg(feature = "sync-debug")]
+fn emergency_print_active_slot(cpu: usize, snapshot: PreemptDebugSnapshot) {
+    if snapshot.location.is_null() {
+        crate::emergency_println!(
+            "[sync-watchdog]   active_cpu={} kind={} phase={} lock={:#x} task={} spins={} at <unknown>",
+            cpu,
+            snapshot.source.name(),
+            snapshot.phase.name(),
+            snapshot.lock_address,
+            snapshot.task_id,
+            snapshot.spin_iterations,
+        );
+        return;
+    }
+
+    // SAFETY: `Location::caller()` returns a reference with static lifetime.
+    let location = unsafe { &*snapshot.location };
+    crate::emergency_println!(
+        "[sync-watchdog]   active_cpu={} kind={} phase={} lock={:#x} task={} spins={} at {}:{}:{}",
+        cpu,
+        snapshot.source.name(),
+        snapshot.phase.name(),
+        snapshot.lock_address,
+        snapshot.task_id,
+        snapshot.spin_iterations,
+        location.file(),
+        location.line(),
+        location.column(),
+    );
+}
+
+#[cold]
+fn report_spin_contention(cpu: usize, spin_count: u64) {
+    crate::emergency_println!(
+        "[sync-watchdog] spin contention on cpu={} preempt_count={} spins={} (possible lock stall)",
+        cpu,
+        preempt_count(),
+        spin_count,
+    );
+
+    #[cfg(feature = "sync-debug")]
+    {
+        let mut tracked_waiters = 0usize;
+        for slot_index in 0..PREEMPT_DEBUG_SLOT_COUNT {
+            let slot = &PREEMPT_DEBUG_SLOTS[cpu][slot_index];
+            let Some(mut waiter) = snapshot_debug_slot(cpu, slot_index) else {
+                continue;
+            };
+            if waiter.phase != PreemptDebugPhase::Acquiring || waiter.lock_address == 0 {
+                continue;
+            }
+            slot.spin_iterations.store(spin_count, Ordering::Relaxed);
+            waiter.spin_iterations = spin_count;
+            tracked_waiters += 1;
+            report_tracked_lock_contention(cpu, slot_index, waiter, spin_count);
+        }
+
+        if tracked_waiters == 0 {
+            crate::emergency_println!(
+                "[sync-watchdog] no tracked lock waiter on reporting CPU; active slots are diagnostic context, not owners"
             );
+            for target_cpu in 0..MAX_NUM_CPUS {
+                for slot_index in 0..PREEMPT_DEBUG_SLOT_COUNT {
+                    if let Some(snapshot) = snapshot_debug_slot(target_cpu, slot_index) {
+                        emergency_print_active_slot(target_cpu, snapshot);
+                    }
+                }
+                let untracked = PREEMPT_DEBUG_UNTRACKED[target_cpu].load(Ordering::Relaxed);
+                if untracked != 0 {
+                    crate::emergency_println!(
+                        "[sync-watchdog]   active_cpu={} untracked_guard_count={}",
+                        target_cpu,
+                        untracked,
+                    );
+                }
+            }
         }
     }
 }
@@ -460,7 +649,9 @@ impl PreemptGuard {
     #[inline]
     #[cfg_attr(feature = "sync-debug", track_caller)]
     pub fn new() -> Self {
-        Self::new_with_source(PreemptSourceKind::Explicit, 0)
+        let guard = Self::new_with_source(PreemptSourceKind::Explicit, 0);
+        guard.mark_acquired();
+        guard
     }
 
     #[inline]
@@ -469,6 +660,9 @@ impl PreemptGuard {
         let cpu = current_cpu();
         if let Some(cpu) = cpu {
             increment_preempt_count(cpu);
+            if lock_address != 0 {
+                SPIN_CONTENTION_COUNT[cpu].store(0, Ordering::Relaxed);
+            }
         }
         #[cfg(feature = "sync-debug")]
         let caller = Location::caller();
@@ -484,16 +678,28 @@ impl PreemptGuard {
             _not_send: PhantomData,
         }
     }
+
     /// Publish that atomic acquisition succeeded. After this the slot reports
     /// the `held` phase, so a stall report distinguishes a live owner from a
     /// waiter.
     #[inline]
     pub(crate) fn mark_acquired(&self) {
+        if let Some(cpu) = self.cpu {
+            SPIN_CONTENTION_COUNT[cpu].store(0, Ordering::Relaxed);
+        }
         #[cfg(feature = "sync-debug")]
         if let (Some(cpu), Some(slot_index)) = (self.cpu, self.debug_slot) {
-            PREEMPT_DEBUG_SLOTS[cpu][slot_index as usize]
-                .phase
-                .store(DEBUG_PHASE_HELD, Ordering::Relaxed);
+            let acquired_at_ns = crate::timer::get_time_ns();
+            let (acquisition_pc, acquisition_lr) =
+                crate::arch::instruction::capture_execution_site();
+            let slot = &PREEMPT_DEBUG_SLOTS[cpu][slot_index as usize];
+            slot.acquired_at_ns
+                .store(acquired_at_ns, Ordering::Relaxed);
+            slot.acquisition_pc
+                .store(acquisition_pc, Ordering::Relaxed);
+            slot.acquisition_lr
+                .store(acquisition_lr, Ordering::Relaxed);
+            slot.phase.store(DEBUG_PHASE_HELD, Ordering::Release);
         }
     }
 }
@@ -544,6 +750,7 @@ pub fn dump_active_preempt_guards() {
         };
         let count = PREEMPT_COUNT[cpu].load(Ordering::Relaxed);
         let untracked = PREEMPT_DEBUG_UNTRACKED[cpu].load(Ordering::Relaxed);
+        let now_ns = crate::timer::get_time_ns();
         crate::emergency_println!(
             "[sync-debug] cpu={} preempt_count={} active guard(s):",
             cpu,
@@ -551,43 +758,51 @@ pub fn dump_active_preempt_guards() {
         );
 
         let mut tracked = 0u32;
-        for (index, slot) in PREEMPT_DEBUG_SLOTS[cpu].iter().enumerate() {
-            if slot.state.load(Ordering::Acquire) != DEBUG_SLOT_ACTIVE {
-                continue;
-            }
-            tracked = tracked.saturating_add(1);
-            let source = PreemptSourceKind::from_raw(slot.source.load(Ordering::Relaxed));
-            let lock_address = slot.lock_address.load(Ordering::Relaxed);
-            let location_ptr = slot.location.load(Ordering::Relaxed);
-            let Some(source) = source else {
-                crate::emergency_println!(
-                    "[sync-debug]   slot={} kind=<invalid> lock={:#x}",
-                    index,
-                    lock_address
-                );
+        for slot_index in 0..PREEMPT_DEBUG_SLOT_COUNT {
+            let Some(snapshot) = snapshot_debug_slot(cpu, slot_index) else {
                 continue;
             };
-            if location_ptr.is_null() {
-                crate::early_println!(
-                    "[sync-debug]   slot={} kind={} lock={:#x} at <unknown>",
-                    index,
-                    source.name(),
-                    lock_address
+            tracked = tracked.saturating_add(1);
+            let held_ns = if snapshot.phase == PreemptDebugPhase::Held
+                && snapshot.acquired_at_ns != 0
+            {
+                now_ns.saturating_sub(snapshot.acquired_at_ns)
+            } else {
+                0
+            };
+            if snapshot.location.is_null() {
+                crate::emergency_println!(
+                    "[sync-debug]   slot={} kind={} phase={} lock={:#x} task={} spins={} held_ns={} acquire_pc={:#x} acquire_lr={:#x} at <unknown>",
+                    slot_index,
+                    snapshot.source.name(),
+                    snapshot.phase.name(),
+                    snapshot.lock_address,
+                    snapshot.task_id,
+                    snapshot.spin_iterations,
+                    held_ns,
+                    snapshot.acquisition_pc,
+                    snapshot.acquisition_lr,
                 );
                 continue;
             }
 
             // SAFETY: `Location::caller()` returns a reference with static
-            // lifetime. A slot remains active until its owning guard drops.
-            let location = unsafe { &*location_ptr };
+            // lifetime.
+            let location = unsafe { &*snapshot.location };
             crate::emergency_println!(
-                "[sync-debug]   slot={} kind={} lock={:#x} at {}:{}:{}",
-                index,
-                source.name(),
-                lock_address,
+                "[sync-debug]   slot={} kind={} phase={} lock={:#x} task={} spins={} held_ns={} acquire_pc={:#x} acquire_lr={:#x} at {}:{}:{}",
+                slot_index,
+                snapshot.source.name(),
+                snapshot.phase.name(),
+                snapshot.lock_address,
+                snapshot.task_id,
+                snapshot.spin_iterations,
+                held_ns,
+                snapshot.acquisition_pc,
+                snapshot.acquisition_lr,
                 location.file(),
                 location.line(),
-                location.column()
+                location.column(),
             );
         }
 
@@ -625,6 +840,7 @@ impl PreemptGuard {
                 );
             }
             PREEMPT_COUNT[cpu].store(0, Ordering::Relaxed);
+            SPIN_CONTENTION_COUNT[cpu].store(0, Ordering::Relaxed);
         }
     }
 }
@@ -692,5 +908,28 @@ mod tests {
         preempt_enable();
         preempt_enable();
         assert_eq!(preempt_count(), 0);
+    }
+
+    #[cfg(feature = "sync-debug")]
+    #[test_case]
+    fn test_lock_debug_slot_transitions_from_acquiring_to_held() {
+        PreemptGuard::reset_count_for_test();
+        let cpu = current_cpu().expect("test CPU identity must be initialized");
+        let guard = PreemptGuard::new_with_source(PreemptSourceKind::SpinLock, 0x1234);
+        let slot_index = guard
+            .debug_slot
+            .expect("sync-debug test must obtain a diagnostic slot");
+
+        let acquiring = snapshot_debug_slot(cpu, slot_index as usize).unwrap();
+        assert_eq!(acquiring.phase, PreemptDebugPhase::Acquiring);
+        assert_eq!(acquiring.lock_address, 0x1234);
+
+        guard.mark_acquired();
+        let held = snapshot_debug_slot(cpu, slot_index as usize).unwrap();
+        assert_eq!(held.phase, PreemptDebugPhase::Held);
+        assert_ne!(held.acquisition_pc, 0);
+
+        drop(guard);
+        assert!(snapshot_debug_slot(cpu, slot_index as usize).is_none());
     }
 }
