@@ -5,7 +5,7 @@ hash = "sha256:62e1cc4d986f84ea5366a7046b0042332a9a9c811788baf0b12666fbbc010da3"
 layers = []
 
 [sections.disk]
-hash = "sha256:1f578331258e0cf51bbbc492c52b6ab1c3e67f3b226309b78a814e1d0644e4d4"
+hash = "sha256:84ba9e976e895418a65dcf2f6af34cd1d91f9868d6bcddea80bd792f44a0b578"
 layers = []
 
 [sections.initramfs]
@@ -246,7 +246,7 @@ type = "path"
 path = "../../user/bin"
 
 [sections.rootfs]
-hash = "sha256:0117142afd2a78487dff27d36a4e104834f18b2e4055c928797216ff091c0b49"
+hash = "sha256:87112e3f4bb6fbcf849ddb0755d97e3092a8c6d7ad89a78b4d865c14c9cf1a6f"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
@@ -899,16 +899,16 @@ rev = "c2755acf5f6aa301700449c30c2f4f7b02c5dbd5"
 [[sections.rootfs.layers]]
 kind = "cargo"
 git = "https://github.com/petitstrawberry/boxcraft"
-resolved_rev = "e8d842522599b950ab15bdfa5a854509871a3f66"
+resolved_rev = "bb785123f687a54722625e2aad792b53b2c92fd9"
 package = "boxcraft"
 bin = "boxcraft"
 to = "/system/scarlet/bin/boxcraft"
-hash = "sha256:496e98890d4220080b6a200e6a1eb7ab7456e574bb2a2d6aaaf40d85ed14bfbe"
+hash = "sha256:9c7defb98fe1375eb528626efd3112ee0356ee2e957891a7899a74bcee242ef7"
 
 [sections.rootfs.layers.source]
 type = "git"
 url = "https://github.com/petitstrawberry/boxcraft"
-rev = "e8d842522599b950ab15bdfa5a854509871a3f66"
+rev = "bb785123f687a54722625e2aad792b53b2c92fd9"
 
 [[sections.rootfs.layers]]
 kind = "archive"
