@@ -1441,10 +1441,9 @@ mod tests {
         let local_cpu = crate::arch::get_cpu().get_cpuid();
         register_online_cpu(local_cpu);
         let waker = Waker::new_interruptible("ready-current");
-        let task_id = add_task(
-            Task::new("ready-current-waiter".to_string(), 1, TaskType::Kernel),
-            local_cpu,
-        );
+        let task = Task::new("ready-current-waiter".to_string(), 1, TaskType::Kernel);
+        task.init();
+        let task_id = add_task(task, local_cpu);
         let task = get_task_by_id(task_id).expect("ready current task must be registered");
         task.running_cpu.store(local_cpu, Ordering::SeqCst);
         set_current_task_for_test(local_cpu, Some(task_id));
