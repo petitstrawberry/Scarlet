@@ -6,6 +6,9 @@ on:
   pull_request:
     branches: [ "dev" ]
 
+permissions:
+  contents: write
+
 jobs:
   nix-cache:
     runs-on: ubuntu-latest

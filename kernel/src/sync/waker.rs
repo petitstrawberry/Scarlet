@@ -1210,7 +1210,7 @@ pub struct WakerStats {
     pub block_type: BlockedType,
     /// Number of tasks currently waiting
     pub waiting_count: usize,
-    /// List of task IDs currently waiting
+    /// List of task IDs currently waiting in the queue
     pub waiting_task_ids: VecDeque<usize>,
 }
 

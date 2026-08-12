@@ -44,7 +44,9 @@ impl IrqGuard {
     #[inline]
     #[cfg_attr(feature = "sync-debug", track_caller)]
     pub fn new() -> Self {
-        Self::new_with_source(PreemptSourceKind::IrqGuard, 0)
+        let guard = Self::new_with_source(PreemptSourceKind::IrqGuard, 0);
+        guard.mark_acquired();
+        guard
     }
 
     #[inline]

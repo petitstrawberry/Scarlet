@@ -11,6 +11,31 @@ pub fn idle() -> ! {
     }
 }
 
+/// Capture an instruction address and return address for lock diagnostics.
+///
+/// # Returns
+///
+/// A pair containing an address in the inlined acquisition path and the
+/// current `ra` register value.
+#[inline(always)]
+pub fn capture_execution_site() -> (usize, usize) {
+    let pc: usize;
+    let lr: usize;
+    // SAFETY: The assembly only copies `ra` and materializes the current code
+    // address into caller-saved temporary registers. It does not access memory
+    // or alter control flow.
+    unsafe {
+        asm!(
+            "mv t1, ra",
+            "auipc t0, 0",
+            out("t0") pc,
+            out("t1") lr,
+            options(nomem, nostack),
+        );
+    }
+    (pc, lr)
+}
+
 /// RISC-V environment call (ecall) with proper register preservation
 /// using clobber_abi to handle register preservation automatically
 #[inline(never)]
