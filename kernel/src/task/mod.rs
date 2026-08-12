@@ -4203,7 +4203,9 @@ mod tests {
     use crate::object::capability::memory_mapping::{
         AccessOp, MemoryMappingInfo, MemoryMappingOps,
     };
-    use crate::sched::scheduler::{add_task, finalize_zombie, get_task_by_id, reset};
+    use crate::sched::scheduler::{
+        add_task, finalize_zombie, get_task_by_id, register_online_cpu, reset,
+    };
     use crate::task::{CloneFlags, CloneFlagsDef, TaskDeadlineParams, TaskState};
     use crate::timer::{TimerHandle, TimerHandler};
     use crate::vm::addr::{phys_to_virt, virt_to_phys};
@@ -4892,6 +4894,7 @@ mod tests {
     #[test_case]
     fn test_vm_sharing_process_child_uses_group_wait_set() {
         reset();
+        register_online_cpu(0);
 
         let mut init = super::new_user_task("Init".to_string(), 0);
         init.init();
@@ -4923,6 +4926,7 @@ mod tests {
     #[test_case]
     fn test_worker_waitpid_uses_thread_group_leader_wait_set() {
         reset();
+        register_online_cpu(0);
 
         let mut init = super::new_user_task("Init".to_string(), 0);
         init.init();
@@ -4965,6 +4969,7 @@ mod tests {
     #[test_case]
     fn test_thread_child_remains_joinable_by_specific_pid() {
         reset();
+        register_online_cpu(0);
 
         let mut init = super::new_user_task("Init".to_string(), 0);
         init.init();
@@ -5005,6 +5010,7 @@ mod tests {
     #[test_case]
     fn test_exit_group_from_non_leader_makes_leader_waitable() {
         reset();
+        register_online_cpu(0);
 
         let mut parent = super::new_user_task("WaitParent".to_string(), 0);
         parent.init();
