@@ -311,7 +311,7 @@ pub struct CpuDebugInfo {
     pub flags: u16,
     /// Logical CPU ID represented by this snapshot.
     pub cpu_id: u32,
-    /// Reserved for future use.
+    /// Low 32 bits of the breadcrumb commit sequence.
     pub reserved: u32,
     /// Namespace-local current task ID, or zero when unavailable.
     pub current_task_id: usize,
@@ -4157,6 +4157,12 @@ pub fn task_initial_kernel_entrypoint() -> ! {
                     entry as usize,
                 );
             }
+            // The low-level kernel context switch runs with CPU-global
+            // interrupts masked. A newly-created kernel task has no suspended
+            // schedule() frame that could restore its own prior state, so its
+            // normal execution contract begins with interrupts enabled here,
+            // after deferred scheduler cleanup is complete.
+            crate::arch::interrupt::enable_interrupts();
             entry();
             current_task.exit(0);
             loop {

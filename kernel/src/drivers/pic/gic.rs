@@ -320,6 +320,23 @@ impl ExternalInterruptController for Gic {
         Ok(())
     }
 
+    fn mask_irq(&self, irq: &PendingIrq) -> InterruptResult<()> {
+        self.disable_interrupt(irq.mapping.hwirq, irq.cpu_id)
+    }
+
+    fn unmask_irq(&self, irq: &PendingIrq) -> InterruptResult<()> {
+        self.validate_interrupt_id(irq.mapping.hwirq)?;
+        self.validate_cpu_id(irq.cpu_id)?;
+
+        let enable_addr = self.enable_addr(irq.mapping.hwirq);
+        let bit = 1u32 << (irq.mapping.hwirq % 32);
+        // SAFETY: `enable_addr` selects the validated interrupt's distributor
+        // ISENABLER register, which is mapped for the lifetime of this GIC.
+        unsafe { mmio::write32(enable_addr, bit) }
+
+        Ok(())
+    }
+
     fn set_priority(
         &mut self,
         interrupt_id: InterruptId,

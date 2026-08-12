@@ -111,6 +111,11 @@ pub fn arch_irq_handler(trapframe: &mut Trapframe, trap_kind: usize) {
         crate::sched::scheduler::current_task_is_idle(cpu_id as usize),
     ) && crate::sched::scheduler::may_schedule_from_interrupt(cpu_id as usize);
     let mut ran_scheduler = false;
+    crate::breadcrumb::drop(
+        crate::breadcrumb::IRQ_ROUTE_READY,
+        ((trap_kind as u64) << 32) | u64::from(cpu_id),
+        u64::from(can_schedule) | (u64::from(from_kernel) << 1),
+    );
 
     if trap_kind == 2 {
         let timer_pending_before = crate::arch::interrupt::is_arch_timer_pending();
@@ -205,8 +210,22 @@ pub fn arch_irq_handler(trapframe: &mut Trapframe, trap_kind: usize) {
         }
     }
 
+    crate::breadcrumb::drop(
+        crate::breadcrumb::IRQ_CONTROLLER_WAIT,
+        cpu_id as u64,
+        trap_kind as u64,
+    );
     let claimed = crate::interrupt::InterruptManager::global()
         .claim_and_handle_pending_external_interrupt(cpu_id);
+    crate::breadcrumb::drop(
+        crate::breadcrumb::IRQ_HANDLE_DONE,
+        cpu_id as u64,
+        match &claimed {
+            Ok(Some(pending)) => u64::from(pending.mapping.virq),
+            Ok(None) => u64::MAX,
+            Err(_) => u64::MAX - 1,
+        },
+    );
 
     match claimed {
         Ok(Some(pending)) => {

@@ -444,6 +444,38 @@ pub trait ExternalInterruptController: Send + Sync {
         Ok(())
     }
 
+    /// Mask one delivered interrupt without changing the interrupt core's
+    /// administrative enable state.
+    ///
+    /// This is the raw controller operation used by interrupt flow handling.
+    /// Device drivers must use the interrupt manager's enable/disable APIs
+    /// instead of calling this method directly.
+    ///
+    /// # Arguments
+    ///
+    /// * `irq` - Pending interrupt whose controller line should be masked.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` when the controller line is masked.
+    fn mask_irq(&self, irq: &PendingIrq) -> InterruptResult<()>;
+
+    /// Unmask one delivered interrupt without changing the interrupt core's
+    /// administrative enable state.
+    ///
+    /// This is the raw controller operation used after all temporary mask
+    /// reasons have been removed. Device drivers must use the interrupt
+    /// manager's enable/disable APIs instead of calling this method directly.
+    ///
+    /// # Arguments
+    ///
+    /// * `irq` - Pending interrupt whose controller line should be unmasked.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` when the controller line is unmasked.
+    fn unmask_irq(&self, irq: &PendingIrq) -> InterruptResult<()>;
+
     /// Finish interrupt handling at the controller.
     ///
     /// # Arguments

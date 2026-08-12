@@ -145,6 +145,203 @@ impl KernelTimer {
 static TIMER_IRQ_COUNTS: [AtomicU64; MAX_NUM_CPUS] = [const { AtomicU64::new(0) }; MAX_NUM_CPUS];
 static TIMER_PROGRAMMED_DEADLINES_NS: [AtomicU64; MAX_NUM_CPUS] =
     [const { AtomicU64::new(0) }; MAX_NUM_CPUS];
+static TIMER_PROGRAMMED_IDS: [AtomicU64; MAX_NUM_CPUS] =
+    [const { AtomicU64::new(0) }; MAX_NUM_CPUS];
+static TIMER_STALL_LAST_SAMPLE_NS: [AtomicU64; MAX_NUM_CPUS] =
+    [const { AtomicU64::new(0) }; MAX_NUM_CPUS];
+
+const TIMER_QUEUE_SNAPSHOT_RETRY_LIMIT: usize = 4;
+const TIMER_STALL_SAMPLE_INTERVAL_NS: u64 = 1_000_000_000;
+
+/// Lock-free diagnostic view of one CPU's software-timer queue.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct TimerQueueDiagnosticSnapshot {
+    /// Even publication sequence for this snapshot.
+    pub sequence: u64,
+    /// Live queue-head timer ID, or zero when the queue is empty.
+    pub head_id: u64,
+    /// Queue-head soft deadline in monotonic nanoseconds.
+    pub head_soft_deadline_ns: u64,
+    /// Queue-head hard deadline in monotonic nanoseconds.
+    pub head_hard_deadline_ns: u64,
+    /// Opaque queue-head callback context.
+    pub head_context: u64,
+    /// Number of live entries indexed by timer ID.
+    pub live_entries: u64,
+    /// Number of nodes retained in the deadline heap.
+    pub heap_nodes: u64,
+    /// Number of cancelled nodes awaiting heap compaction.
+    pub stale_heap_nodes: u64,
+}
+
+/// Combined lock-free timer state used by cross-CPU stall diagnostics.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct TimerDiagnosticSnapshot {
+    /// Timer ID whose hard deadline was last programmed, or zero when stopped.
+    pub programmed_id: u64,
+    /// Last requested hardware deadline in monotonic nanoseconds.
+    pub programmed_deadline_ns: u64,
+    /// Latest logical queue snapshot.
+    pub queue: TimerQueueDiagnosticSnapshot,
+    /// Latest architected timer registers published by the target CPU.
+    pub arch: ArchTimerDiagnosticSnapshot,
+}
+
+/// Lock-free architected-timer state published at a critical execution boundary.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct ArchTimerDiagnosticSnapshot {
+    /// Selected timer control register.
+    pub control: u64,
+    /// Selected timer counter register.
+    pub counter: u64,
+    /// Selected absolute compare register.
+    pub compare: u64,
+    /// Return SPSR observed with the timer registers.
+    pub return_spsr: u64,
+    /// Return PC observed with the timer registers.
+    pub return_pc: u64,
+}
+
+// Keep frequently written CPU-local slots on separate Apple Silicon cache lines.
+#[repr(align(128))]
+struct TimerQueueDiagnosticSlot {
+    sequence: AtomicU64,
+    head_id: AtomicU64,
+    head_soft_deadline_ns: AtomicU64,
+    head_hard_deadline_ns: AtomicU64,
+    head_context: AtomicU64,
+    live_entries: AtomicU64,
+    heap_nodes: AtomicU64,
+    stale_heap_nodes: AtomicU64,
+}
+
+impl TimerQueueDiagnosticSlot {
+    const fn new() -> Self {
+        Self {
+            sequence: AtomicU64::new(0),
+            head_id: AtomicU64::new(0),
+            head_soft_deadline_ns: AtomicU64::new(0),
+            head_hard_deadline_ns: AtomicU64::new(0),
+            head_context: AtomicU64::new(0),
+            live_entries: AtomicU64::new(0),
+            heap_nodes: AtomicU64::new(0),
+            stale_heap_nodes: AtomicU64::new(0),
+        }
+    }
+
+    #[inline(always)]
+    fn publish(&self, snapshot: TimerQueueDiagnosticSnapshot) {
+        // Queue mutation is serialized by the owner queue lock, including
+        // remote cancellation, so only one publisher can own an odd sequence.
+        let odd_sequence = self.sequence.load(Ordering::Relaxed).wrapping_add(1);
+        self.sequence.store(odd_sequence, Ordering::SeqCst);
+        self.head_id.store(snapshot.head_id, Ordering::SeqCst);
+        self.head_soft_deadline_ns
+            .store(snapshot.head_soft_deadline_ns, Ordering::SeqCst);
+        self.head_hard_deadline_ns
+            .store(snapshot.head_hard_deadline_ns, Ordering::SeqCst);
+        self.head_context
+            .store(snapshot.head_context, Ordering::SeqCst);
+        self.live_entries
+            .store(snapshot.live_entries, Ordering::SeqCst);
+        self.heap_nodes.store(snapshot.heap_nodes, Ordering::SeqCst);
+        self.stale_heap_nodes
+            .store(snapshot.stale_heap_nodes, Ordering::SeqCst);
+        self.sequence
+            .store(odd_sequence.wrapping_add(1), Ordering::SeqCst);
+    }
+
+    #[inline(always)]
+    fn snapshot(&self) -> TimerQueueDiagnosticSnapshot {
+        for _ in 0..TIMER_QUEUE_SNAPSHOT_RETRY_LIMIT {
+            let sequence_before = self.sequence.load(Ordering::SeqCst);
+            if sequence_before & 1 != 0 {
+                continue;
+            }
+            let snapshot = TimerQueueDiagnosticSnapshot {
+                sequence: sequence_before,
+                head_id: self.head_id.load(Ordering::SeqCst),
+                head_soft_deadline_ns: self.head_soft_deadline_ns.load(Ordering::SeqCst),
+                head_hard_deadline_ns: self.head_hard_deadline_ns.load(Ordering::SeqCst),
+                head_context: self.head_context.load(Ordering::SeqCst),
+                live_entries: self.live_entries.load(Ordering::SeqCst),
+                heap_nodes: self.heap_nodes.load(Ordering::SeqCst),
+                stale_heap_nodes: self.stale_heap_nodes.load(Ordering::SeqCst),
+            };
+            if sequence_before == self.sequence.load(Ordering::SeqCst) {
+                return snapshot;
+            }
+        }
+        TimerQueueDiagnosticSnapshot {
+            sequence: u64::MAX,
+            ..TimerQueueDiagnosticSnapshot::default()
+        }
+    }
+}
+
+static TIMER_QUEUE_DIAGNOSTICS: [TimerQueueDiagnosticSlot; MAX_NUM_CPUS] =
+    [const { TimerQueueDiagnosticSlot::new() }; MAX_NUM_CPUS];
+
+#[repr(align(128))]
+struct ArchTimerDiagnosticSlot {
+    sequence: AtomicU64,
+    control: AtomicU64,
+    counter: AtomicU64,
+    compare: AtomicU64,
+    return_spsr: AtomicU64,
+    return_pc: AtomicU64,
+}
+
+impl ArchTimerDiagnosticSlot {
+    const fn new() -> Self {
+        Self {
+            sequence: AtomicU64::new(0),
+            control: AtomicU64::new(0),
+            counter: AtomicU64::new(0),
+            compare: AtomicU64::new(0),
+            return_spsr: AtomicU64::new(0),
+            return_pc: AtomicU64::new(0),
+        }
+    }
+
+    #[inline(always)]
+    fn publish(&self, snapshot: ArchTimerDiagnosticSnapshot) {
+        let odd_sequence = self.sequence.load(Ordering::Relaxed).wrapping_add(1);
+        self.sequence.store(odd_sequence, Ordering::SeqCst);
+        self.control.store(snapshot.control, Ordering::SeqCst);
+        self.counter.store(snapshot.counter, Ordering::SeqCst);
+        self.compare.store(snapshot.compare, Ordering::SeqCst);
+        self.return_spsr
+            .store(snapshot.return_spsr, Ordering::SeqCst);
+        self.return_pc.store(snapshot.return_pc, Ordering::SeqCst);
+        self.sequence
+            .store(odd_sequence.wrapping_add(1), Ordering::SeqCst);
+    }
+
+    #[inline(always)]
+    fn snapshot(&self) -> ArchTimerDiagnosticSnapshot {
+        for _ in 0..TIMER_QUEUE_SNAPSHOT_RETRY_LIMIT {
+            let sequence_before = self.sequence.load(Ordering::SeqCst);
+            if sequence_before & 1 != 0 {
+                continue;
+            }
+            let snapshot = ArchTimerDiagnosticSnapshot {
+                control: self.control.load(Ordering::SeqCst),
+                counter: self.counter.load(Ordering::SeqCst),
+                compare: self.compare.load(Ordering::SeqCst),
+                return_spsr: self.return_spsr.load(Ordering::SeqCst),
+                return_pc: self.return_pc.load(Ordering::SeqCst),
+            };
+            if sequence_before == self.sequence.load(Ordering::SeqCst) {
+                return snapshot;
+            }
+        }
+        ArchTimerDiagnosticSnapshot::default()
+    }
+}
+
+static ARCH_TIMER_DIAGNOSTICS: [ArchTimerDiagnosticSlot; MAX_NUM_CPUS] =
+    [const { ArchTimerDiagnosticSlot::new() }; MAX_NUM_CPUS];
 
 /// Return a CPU's local timer IRQ count without taking a lock.
 ///
@@ -173,6 +370,56 @@ pub fn timer_irq_count(cpu_id: usize) -> Option<u64> {
 #[inline(always)]
 pub fn timer_programmed_deadline_ns(cpu_id: usize) -> Option<u64> {
     (cpu_id < MAX_NUM_CPUS).then(|| TIMER_PROGRAMMED_DEADLINES_NS[cpu_id].load(Ordering::Acquire))
+}
+
+/// Return the last published timer-program and logical queue state without locking.
+///
+/// # Arguments
+///
+/// * `cpu_id` - Logical CPU whose timer state should be sampled.
+///
+/// # Returns
+///
+/// A combined diagnostic snapshot, or `None` for an invalid CPU ID.
+#[inline(always)]
+pub(crate) fn timer_diagnostic_snapshot(cpu_id: usize) -> Option<TimerDiagnosticSnapshot> {
+    (cpu_id < MAX_NUM_CPUS).then(|| TimerDiagnosticSnapshot {
+        programmed_id: TIMER_PROGRAMMED_IDS[cpu_id].load(Ordering::Acquire),
+        programmed_deadline_ns: TIMER_PROGRAMMED_DEADLINES_NS[cpu_id].load(Ordering::Acquire),
+        queue: TIMER_QUEUE_DIAGNOSTICS[cpu_id].snapshot(),
+        arch: ARCH_TIMER_DIAGNOSTICS[cpu_id].snapshot(),
+    })
+}
+
+/// Publish the current CPU's architected timer registers for cross-CPU diagnostics.
+///
+/// # Arguments
+///
+/// * `cpu_id` - Logical CPU publishing its own register state.
+/// * `snapshot` - Timer registers and associated return state.
+pub(crate) fn publish_arch_timer_diagnostic(cpu_id: usize, snapshot: ArchTimerDiagnosticSnapshot) {
+    if cpu_id < MAX_NUM_CPUS {
+        ARCH_TIMER_DIAGNOSTICS[cpu_id].publish(snapshot);
+    }
+}
+
+fn should_sample_timer_stalls(cpu_id: usize, now_ns: u64) -> bool {
+    let last_sample = &TIMER_STALL_LAST_SAMPLE_NS[cpu_id];
+    let mut observed = last_sample.load(Ordering::Relaxed);
+    loop {
+        if observed != 0 && now_ns.saturating_sub(observed) < TIMER_STALL_SAMPLE_INTERVAL_NS {
+            return false;
+        }
+        match last_sample.compare_exchange_weak(
+            observed,
+            now_ns.max(1),
+            Ordering::AcqRel,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => return true,
+            Err(actual) => observed = actual,
+        }
+    }
 }
 
 /// A stable reference to a software timer.
@@ -439,6 +686,21 @@ impl TimerQueue {
         timer.complete();
         self.entries.remove(&timer.id);
     }
+
+    fn diagnostic_snapshot(&mut self) -> TimerQueueDiagnosticSnapshot {
+        self.discard_non_pending_head();
+        let head = self.heap.peek().map(|queued| &queued.0);
+        TimerQueueDiagnosticSnapshot {
+            sequence: 0,
+            head_id: head.map_or(0, |timer| timer.id),
+            head_soft_deadline_ns: head.map_or(0, |timer| timer.soft_deadline_ns),
+            head_hard_deadline_ns: head.map_or(0, |timer| timer.hard_deadline_ns),
+            head_context: head.map_or(0, |timer| timer.context as u64),
+            live_entries: self.entries.len() as u64,
+            heap_nodes: self.heap.len() as u64,
+            stale_heap_nodes: self.stale_heap_nodes as u64,
+        }
+    }
 }
 
 static TIMER_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -447,6 +709,12 @@ static SOFTWARE_TIMER_QUEUES: Once<[IrqSpinLock<TimerQueue>; MAX_NUM_CPUS]> = On
 fn timer_queues() -> &'static [IrqSpinLock<TimerQueue>; MAX_NUM_CPUS] {
     SOFTWARE_TIMER_QUEUES
         .call_once(|| core::array::from_fn(|_| IrqSpinLock::new(TimerQueue::new())))
+}
+
+#[inline(always)]
+fn publish_queue_diagnostic(cpu_id: usize, queue: &mut TimerQueue) {
+    let snapshot = queue.diagnostic_snapshot();
+    TIMER_QUEUE_DIAGNOSTICS[cpu_id].publish(snapshot);
 }
 
 fn local_cpu_id() -> usize {
@@ -524,6 +792,7 @@ pub fn add_timer(
     {
         let mut queue = timer_queues()[owner_cpu].lock();
         queue.add(id, soft_deadline_ns, precision, handler, context);
+        publish_queue_diagnostic(owner_cpu, &mut queue);
     }
     // This is deliberately local: add_timer owns the new entry on the current
     // CPU and must never program a remote CPU's local hardware comparator.
@@ -563,6 +832,7 @@ pub(crate) fn add_scheduler_timer(
             handler,
             context,
         );
+        publish_queue_diagnostic(owner_cpu, &mut queue);
     }
     reprogram_local_timer();
     TimerHandle { owner_cpu, id }
@@ -583,7 +853,12 @@ pub fn cancel_timer(handle: TimerHandle) -> bool {
     if handle.owner_cpu >= MAX_NUM_CPUS {
         return false;
     }
-    let cancelled = timer_queues()[handle.owner_cpu].lock().cancel(handle.id);
+    let cancelled = {
+        let mut queue = timer_queues()[handle.owner_cpu].lock();
+        let cancelled = queue.cancel(handle.id);
+        publish_queue_diagnostic(handle.owner_cpu, &mut queue);
+        cancelled
+    };
     if cancelled && handle.owner_cpu == local_cpu_id() {
         reprogram_local_timer();
     }
@@ -593,7 +868,10 @@ pub fn cancel_timer(handle: TimerHandle) -> bool {
 /// Inspect the earliest live hard deadline owned by the current CPU.
 pub fn peek_local_deadline() -> Option<u64> {
     let cpu_id = local_cpu_id();
-    timer_queues()[cpu_id].lock().earliest_live_hard_deadline()
+    let mut queue = timer_queues()[cpu_id].lock();
+    let deadline = queue.earliest_live_hard_deadline();
+    publish_queue_diagnostic(cpu_id, &mut queue);
+    deadline
 }
 
 /// Hardware timer policy for a local queue head.
@@ -617,6 +895,8 @@ pub fn reprogram_local_timer() {
     let cpu_id = local_cpu_id();
     match local_timer_program(peek_local_deadline()) {
         LocalTimerProgram::Deadline(deadline_ns) => {
+            let programmed_id = TIMER_QUEUE_DIAGNOSTICS[cpu_id].snapshot().head_id;
+            TIMER_PROGRAMMED_IDS[cpu_id].store(programmed_id, Ordering::Release);
             TIMER_PROGRAMMED_DEADLINES_NS[cpu_id].store(deadline_ns, Ordering::Release);
             crate::breadcrumb::drop(crate::breadcrumb::TIMER_PROGRAM, cpu_id as u64, deadline_ns);
             let timer = get_kernel_timer();
@@ -629,6 +909,7 @@ pub fn reprogram_local_timer() {
             );
         }
         LocalTimerProgram::Stop => {
+            TIMER_PROGRAMMED_IDS[cpu_id].store(0, Ordering::Release);
             TIMER_PROGRAMMED_DEADLINES_NS[cpu_id].store(0, Ordering::Release);
             crate::breadcrumb::drop(crate::breadcrumb::TIMER_PROGRAM, cpu_id as u64, 0);
             get_kernel_timer().stop(cpu_id);
@@ -650,7 +931,12 @@ fn drain_local_due_timers() {
     let cpu_id = local_cpu_id();
     for _ in 0..MAX_DUE_CALLBACKS_PER_IRQ {
         let now_ns = get_time_ns();
-        let timer = { timer_queues()[cpu_id].lock().claim_due(now_ns) };
+        let timer = {
+            let mut queue = timer_queues()[cpu_id].lock();
+            let timer = queue.claim_due(now_ns);
+            publish_queue_diagnostic(cpu_id, &mut queue);
+            timer
+        };
         let Some(timer) = timer else {
             return;
         };
@@ -671,7 +957,11 @@ fn drain_local_due_timers() {
             );
         }
 
-        timer_queues()[cpu_id].lock().finish(&timer);
+        {
+            let mut queue = timer_queues()[cpu_id].lock();
+            queue.finish(&timer);
+            publish_queue_diagnostic(cpu_id, &mut queue);
+        }
     }
 }
 
@@ -683,8 +973,15 @@ pub fn handle_local_timer_irq() {
     let cpu_id = local_cpu_id();
     let irq_count = TIMER_IRQ_COUNTS[cpu_id].fetch_add(1, Ordering::Relaxed) + 1;
     if DEBUG_TIMER_STALL_LOGGING && (irq_count <= 3 || irq_count % TIMER_HEARTBEAT_IRQS == 0) {
-        crate::early_println!("[timer] irq heartbeat cpu={} count={}", cpu_id, irq_count);
-        crate::breadcrumb::sample_timer_stalls(cpu_id, timer_irq_count);
+        crate::emergency_println!("[timer] irq heartbeat cpu={} count={}", cpu_id, irq_count);
+        crate::breadcrumb::sample_timer_stalls(cpu_id, timer_irq_count, get_time_ns());
+    }
+    #[cfg(feature = "sync-debug")]
+    {
+        let now_ns = get_time_ns();
+        if should_sample_timer_stalls(cpu_id, now_ns) {
+            crate::breadcrumb::sample_timer_stalls(cpu_id, timer_irq_count, now_ns);
+        }
     }
     crate::breadcrumb::drop(crate::breadcrumb::TIMER_TICK, irq_count, 0);
     crate::breadcrumb::drop(crate::breadcrumb::TIMER_SW_TIMERS, irq_count, 0);

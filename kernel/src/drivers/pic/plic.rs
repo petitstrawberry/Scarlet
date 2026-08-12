@@ -255,6 +255,14 @@ impl ExternalInterruptController for Plic {
         Ok(())
     }
 
+    fn mask_irq(&self, irq: &PendingIrq) -> InterruptResult<()> {
+        self.disable_interrupt(irq.mapping.hwirq, irq.cpu_id)
+    }
+
+    fn unmask_irq(&self, irq: &PendingIrq) -> InterruptResult<()> {
+        self.enable_interrupt(irq.mapping.hwirq, irq.cpu_id)
+    }
+
     /// Set priority for a specific interrupt
     fn set_priority(
         &mut self,
