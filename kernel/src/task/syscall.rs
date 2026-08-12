@@ -2393,7 +2393,7 @@ pub fn sys_get_cpu_debug_info(trapframe: &mut Trapframe) -> usize {
             version: CPU_DEBUG_INFO_VERSION_V1,
             flags,
             cpu_id: cpu_id_u32,
-            reserved: 0,
+            reserved: breadcrumb.sequence as u32,
             current_task_id,
             timer_irq_count,
             breadcrumb_phase: breadcrumb.phase,

@@ -168,4 +168,18 @@ pub trait InterruptCapableDevice: Send + Sync {
         self.handle_interrupt()?;
         Ok(crate::interrupt::InterruptClaim::Handled)
     }
+
+    /// Accept a completion token after returning a deferred interrupt claim.
+    ///
+    /// # Arguments
+    ///
+    /// * `completion` - Single-use token to complete after deferred device
+    ///   processing has quiesced the interrupt source.
+    ///
+    /// # Returns
+    ///
+    /// This callback returns no value. Ownership of `completion` transfers to
+    /// the deferred worker.
+    fn deferred_interrupt_ready(&self, _completion: crate::interrupt::DeferredInterruptCompletion) {
+    }
 }

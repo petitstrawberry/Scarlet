@@ -40,6 +40,75 @@ fn read_counter_frequency_hz() -> u64 {
     value
 }
 
+#[inline(always)]
+fn read_timer_control() -> u64 {
+    let value: u64;
+    // SAFETY: Scarlet reads the CPU-local control register for the same timer
+    // bank selected by `set_timer`; this operation has no side effects.
+    unsafe {
+        if crate::arch::aarch64::is_vhe_enabled() {
+            asm!(
+                "mrs {value}, cntp_ctl_el0",
+                value = out(reg) value,
+                options(nomem, nostack, preserves_flags)
+            );
+        } else {
+            asm!(
+                "mrs {value}, cntv_ctl_el0",
+                value = out(reg) value,
+                options(nomem, nostack, preserves_flags)
+            );
+        }
+    }
+    value
+}
+
+#[inline(always)]
+fn read_timer_compare() -> u64 {
+    let value: u64;
+    // SAFETY: Scarlet reads the CPU-local compare register for the same timer
+    // bank selected by `set_timer`; this operation has no side effects.
+    unsafe {
+        if crate::arch::aarch64::is_vhe_enabled() {
+            asm!(
+                "mrs {value}, cntp_cval_el0",
+                value = out(reg) value,
+                options(nomem, nostack, preserves_flags)
+            );
+        } else {
+            asm!(
+                "mrs {value}, cntv_cval_el0",
+                value = out(reg) value,
+                options(nomem, nostack, preserves_flags)
+            );
+        }
+    }
+    value
+}
+
+/// Capture the selected CPU-local timer registers at a user-return boundary.
+///
+/// # Arguments
+///
+/// * `return_spsr` - PSTATE value that the upcoming `eret` will restore.
+/// * `return_pc` - Instruction address that the upcoming `eret` will resume.
+///
+/// # Returns
+///
+/// A side-effect-free timer-register snapshot suitable for lock-free publication.
+pub(crate) fn diagnostic_snapshot(
+    return_spsr: u64,
+    return_pc: u64,
+) -> crate::timer::ArchTimerDiagnosticSnapshot {
+    crate::timer::ArchTimerDiagnosticSnapshot {
+        control: read_timer_control(),
+        counter: read_counter(),
+        compare: read_timer_compare(),
+        return_spsr,
+        return_pc,
+    }
+}
+
 pub fn timer_init() {
     // Local controller registration happens via early initcall.
 }

@@ -93,7 +93,7 @@ pub struct RawCpuDebugInfoV1 {
     pub flags: u16,
     /// Logical CPU ID represented by this snapshot.
     pub cpu_id: u32,
-    /// Reserved for future use.
+    /// Low 32 bits of the breadcrumb commit sequence.
     pub reserved: u32,
     /// Namespace-local current task ID, or zero when unavailable.
     pub current_task_id: usize,

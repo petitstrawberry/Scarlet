@@ -91,10 +91,13 @@ static DEADLINE_CALLBACK_CONTEXTS: Once<IrqSpinLock<BTreeMap<usize, DeadlineCall
 static TASK_CPU_WATCHDOG_HANDLER: Once<Arc<TaskCpuWatchdogTimerHandler>> = Once::new();
 static TASK_CPU_WATCHDOG_STARTED: [AtomicBool; MAX_NUM_CPUS] =
     [const { AtomicBool::new(false) }; MAX_NUM_CPUS];
+static DEADLINE_SLICE_LAST_LOG_NS: [AtomicU64; MAX_NUM_CPUS] =
+    [const { AtomicU64::new(0) }; MAX_NUM_CPUS];
 
 const DEADLINE_BANDWIDTH_SCALE: u32 = 1_000_000;
 const DEADLINE_BANDWIDTH_CAP: u32 = 900_000;
 const TASK_CPU_WATCHDOG_INTERVAL_NS: u64 = 250_000_000;
+const DEADLINE_SLICE_LOG_INTERVAL_NS: u64 = 1_000_000_000;
 
 /// Stable result of a native scheduler-control request.
 #[repr(usize)]
@@ -283,6 +286,144 @@ struct SliceState {
     need_resched: bool,
 }
 
+const SLICE_DIAGNOSTIC_NONE: u64 = 0;
+const SLICE_DIAGNOSTIC_INVALIDATED: u64 = 1;
+const SLICE_DIAGNOSTIC_ARM_PREPARE: u64 = 2;
+const SLICE_DIAGNOSTIC_ARMED: u64 = 3;
+const SLICE_DIAGNOSTIC_ARM_RACED: u64 = 4;
+const SLICE_DIAGNOSTIC_EXPIRED: u64 = 5;
+const SLICE_DIAGNOSTIC_STALE_EXPIRE: u64 = 6;
+const SLICE_DIAGNOSTIC_RESCHEDULE_TAKEN: u64 = 7;
+const SLICE_DIAGNOSTIC_CANCELLED: u64 = 8;
+const SLICE_DIAGNOSTIC_CANCEL_MISSED: u64 = 9;
+const SLICE_DIAGNOSTIC_FLAG_DEADLINE: u64 = 1 << 0;
+const SLICE_DIAGNOSTIC_FLAG_THROTTLED: u64 = 1 << 1;
+
+/// Lock-free view of the last scheduler-slice operation on one CPU.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct SliceDiagnosticSnapshot {
+    /// Last completed slice operation.
+    pub action: u64,
+    /// Task owning the slice, or zero when no task is associated.
+    pub task_id: u64,
+    /// Slice callback token.
+    pub token: u64,
+    /// Software-timer handle ID, or zero before timer insertion.
+    pub handle_id: u64,
+    /// Slice-state generation.
+    pub generation: u64,
+    /// Requested wall-clock duration for the slice.
+    pub duration_ns: u64,
+    /// Absolute softtimer deadline used for the slice.
+    pub timer_deadline_ns: u64,
+    /// Fair scheduler virtual runtime sampled while arming.
+    pub fair_vruntime_ns: u64,
+    /// Fair scheduler virtual deadline sampled while arming.
+    pub fair_vdeadline_ns: u64,
+    /// Deadline-class runtime remaining while arming.
+    pub deadline_remaining_ns: u64,
+    /// Deadline-class absolute deadline while arming.
+    pub deadline_absolute_ns: u64,
+    /// Combination of `SLICE_DIAGNOSTIC_FLAG_*` values.
+    pub flags: u64,
+}
+
+#[repr(align(128))]
+struct SliceDiagnosticSlot {
+    sequence: AtomicU64,
+    action: AtomicU64,
+    task_id: AtomicU64,
+    token: AtomicU64,
+    handle_id: AtomicU64,
+    generation: AtomicU64,
+    duration_ns: AtomicU64,
+    timer_deadline_ns: AtomicU64,
+    fair_vruntime_ns: AtomicU64,
+    fair_vdeadline_ns: AtomicU64,
+    deadline_remaining_ns: AtomicU64,
+    deadline_absolute_ns: AtomicU64,
+    flags: AtomicU64,
+}
+
+impl SliceDiagnosticSlot {
+    const fn new() -> Self {
+        Self {
+            sequence: AtomicU64::new(0),
+            action: AtomicU64::new(SLICE_DIAGNOSTIC_NONE),
+            task_id: AtomicU64::new(0),
+            token: AtomicU64::new(0),
+            handle_id: AtomicU64::new(0),
+            generation: AtomicU64::new(0),
+            duration_ns: AtomicU64::new(0),
+            timer_deadline_ns: AtomicU64::new(0),
+            fair_vruntime_ns: AtomicU64::new(0),
+            fair_vdeadline_ns: AtomicU64::new(0),
+            deadline_remaining_ns: AtomicU64::new(0),
+            deadline_absolute_ns: AtomicU64::new(0),
+            flags: AtomicU64::new(0),
+        }
+    }
+
+    #[inline(always)]
+    fn publish(&self, snapshot: SliceDiagnosticSnapshot) {
+        // Every writer holds this CPU's `SliceState` lock, so one odd/even
+        // publication cannot overlap another publication for the same CPU.
+        let odd_sequence = self.sequence.load(Ordering::Relaxed).wrapping_add(1);
+        self.sequence.store(odd_sequence, Ordering::SeqCst);
+        self.action.store(snapshot.action, Ordering::SeqCst);
+        self.task_id.store(snapshot.task_id, Ordering::SeqCst);
+        self.token.store(snapshot.token, Ordering::SeqCst);
+        self.handle_id.store(snapshot.handle_id, Ordering::SeqCst);
+        self.generation.store(snapshot.generation, Ordering::SeqCst);
+        self.duration_ns
+            .store(snapshot.duration_ns, Ordering::SeqCst);
+        self.timer_deadline_ns
+            .store(snapshot.timer_deadline_ns, Ordering::SeqCst);
+        self.fair_vruntime_ns
+            .store(snapshot.fair_vruntime_ns, Ordering::SeqCst);
+        self.fair_vdeadline_ns
+            .store(snapshot.fair_vdeadline_ns, Ordering::SeqCst);
+        self.deadline_remaining_ns
+            .store(snapshot.deadline_remaining_ns, Ordering::SeqCst);
+        self.deadline_absolute_ns
+            .store(snapshot.deadline_absolute_ns, Ordering::SeqCst);
+        self.flags.store(snapshot.flags, Ordering::SeqCst);
+        self.sequence
+            .store(odd_sequence.wrapping_add(1), Ordering::SeqCst);
+    }
+
+    #[inline(always)]
+    fn snapshot(&self) -> SliceDiagnosticSnapshot {
+        for _ in 0..4 {
+            let sequence_before = self.sequence.load(Ordering::SeqCst);
+            if sequence_before & 1 != 0 {
+                continue;
+            }
+            let snapshot = SliceDiagnosticSnapshot {
+                action: self.action.load(Ordering::SeqCst),
+                task_id: self.task_id.load(Ordering::SeqCst),
+                token: self.token.load(Ordering::SeqCst),
+                handle_id: self.handle_id.load(Ordering::SeqCst),
+                generation: self.generation.load(Ordering::SeqCst),
+                duration_ns: self.duration_ns.load(Ordering::SeqCst),
+                timer_deadline_ns: self.timer_deadline_ns.load(Ordering::SeqCst),
+                fair_vruntime_ns: self.fair_vruntime_ns.load(Ordering::SeqCst),
+                fair_vdeadline_ns: self.fair_vdeadline_ns.load(Ordering::SeqCst),
+                deadline_remaining_ns: self.deadline_remaining_ns.load(Ordering::SeqCst),
+                deadline_absolute_ns: self.deadline_absolute_ns.load(Ordering::SeqCst),
+                flags: self.flags.load(Ordering::SeqCst),
+            };
+            if sequence_before == self.sequence.load(Ordering::SeqCst) {
+                return snapshot;
+            }
+        }
+        SliceDiagnosticSnapshot::default()
+    }
+}
+
+static SLICE_DIAGNOSTICS: [SliceDiagnosticSlot; MAX_NUM_CPUS] =
+    [const { SliceDiagnosticSlot::new() }; MAX_NUM_CPUS];
+
 impl SliceState {
     fn new() -> Self {
         Self {
@@ -304,14 +445,26 @@ impl TimerHandler for SliceTimerHandler {
             return;
         };
         let mut state = slice_states()[context.cpu_id].lock();
-        if state.generation == context.generation
+        let matched = state.generation == context.generation
             && state.task_id == Some(context.task_id)
             && state.task_generation == Some(context.task_generation)
-            && state.active.is_some_and(|active| active.token == token)
-        {
+            && state.active.is_some_and(|active| active.token == token);
+        if matched {
             state.active = None;
             state.need_resched = true;
         }
+        publish_slice_action(
+            context.cpu_id,
+            &state,
+            if matched {
+                SLICE_DIAGNOSTIC_EXPIRED
+            } else {
+                SLICE_DIAGNOSTIC_STALE_EXPIRE
+            },
+            Some(context.task_id),
+            token,
+            0,
+        );
     }
 }
 
@@ -327,6 +480,80 @@ fn slice_timer_handler() -> Arc<dyn TimerHandler> {
     SLICE_TIMER_HANDLER
         .call_once(|| Arc::new(SliceTimerHandler))
         .clone()
+}
+
+#[inline(always)]
+fn publish_slice_action(
+    cpu_id: usize,
+    state: &SliceState,
+    action: u64,
+    task_id: Option<usize>,
+    token: u64,
+    handle_id: u64,
+) {
+    let mut snapshot = SLICE_DIAGNOSTICS[cpu_id].snapshot();
+    snapshot.action = action;
+    snapshot.task_id = task_id.unwrap_or(0) as u64;
+    snapshot.token = token;
+    snapshot.handle_id = handle_id;
+    snapshot.generation = state.generation;
+    SLICE_DIAGNOSTICS[cpu_id].publish(snapshot);
+}
+
+fn should_log_deadline_slice_anomaly(cpu_id: usize, now_ns: u64) -> bool {
+    let last_log = &DEADLINE_SLICE_LAST_LOG_NS[cpu_id];
+    let mut observed = last_log.load(Ordering::Relaxed);
+    loop {
+        if observed != 0 && now_ns.saturating_sub(observed) < DEADLINE_SLICE_LOG_INTERVAL_NS {
+            return false;
+        }
+        match last_log.compare_exchange_weak(
+            observed,
+            now_ns.max(1),
+            Ordering::AcqRel,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => return true,
+            Err(actual) => observed = actual,
+        }
+    }
+}
+
+/// Return the last lock-free scheduler-slice operation for one CPU.
+///
+/// # Arguments
+///
+/// * `cpu_id` - Scheduler CPU whose slice state should be sampled.
+///
+/// # Returns
+///
+/// The latest completed operation, or `None` for an invalid CPU ID.
+pub(crate) fn slice_diagnostic_snapshot(cpu_id: usize) -> Option<SliceDiagnosticSnapshot> {
+    (cpu_id < MAX_NUM_CPUS).then(|| SLICE_DIAGNOSTICS[cpu_id].snapshot())
+}
+
+/// Return a compact label for a scheduler-slice diagnostic action.
+///
+/// # Arguments
+///
+/// * `action` - Raw action value from [`SliceDiagnosticSnapshot`].
+///
+/// # Returns
+///
+/// A stable human-readable label for kernel diagnostic output.
+pub(crate) const fn slice_diagnostic_action_name(action: u64) -> &'static str {
+    match action {
+        SLICE_DIAGNOSTIC_INVALIDATED => "invalidate",
+        SLICE_DIAGNOSTIC_ARM_PREPARE => "arm-prepare",
+        SLICE_DIAGNOSTIC_ARMED => "armed",
+        SLICE_DIAGNOSTIC_ARM_RACED => "arm-raced",
+        SLICE_DIAGNOSTIC_EXPIRED => "expired",
+        SLICE_DIAGNOSTIC_STALE_EXPIRE => "stale-expire",
+        SLICE_DIAGNOSTIC_RESCHEDULE_TAKEN => "resched-taken",
+        SLICE_DIAGNOSTIC_CANCELLED => "cancelled",
+        SLICE_DIAGNOSTIC_CANCEL_MISSED => "cancel-missed",
+        _ => "none",
+    }
 }
 
 struct TaskCpuWatchdogTimerHandler;
@@ -2071,18 +2298,43 @@ fn reject_disallowed_claim(task: &Task, cpu_id: usize, now_ns: u64) -> bool {
 }
 
 fn invalidate_local_slice(cpu_id: usize) {
-    let active = {
+    let (active, task_id) = {
         let mut state = slice_states()[cpu_id].lock();
+        let task_id = state.task_id;
         state.generation = state.generation.wrapping_add(1);
         state.need_resched = false;
         state.task_id = None;
         state.task_generation = None;
-        state.active.take()
+        let active = state.active.take();
+        publish_slice_action(
+            cpu_id,
+            &state,
+            SLICE_DIAGNOSTIC_INVALIDATED,
+            task_id,
+            active.map_or(0, |active| active.token),
+            active
+                .and_then(|active| active.handle)
+                .map_or(0, |handle| handle.id),
+        );
+        (active, task_id)
     };
     if let Some(active) = active {
         slice_callback_contexts().lock().remove(&active.token);
         if let Some(handle) = active.handle {
-            let _ = cancel_timer(handle);
+            let cancelled = cancel_timer(handle);
+            let state = slice_states()[cpu_id].lock();
+            publish_slice_action(
+                cpu_id,
+                &state,
+                if cancelled {
+                    SLICE_DIAGNOSTIC_CANCELLED
+                } else {
+                    SLICE_DIAGNOSTIC_CANCEL_MISSED
+                },
+                task_id,
+                active.token,
+                handle.id,
+            );
         }
     }
 }
@@ -2098,24 +2350,30 @@ fn arm_local_slice(cpu_id: usize, task_id: usize) {
     let Some(task_generation) = get_task_pool().task_generation(task_id) else {
         return;
     };
-    let deadline_remaining_ns = task
-        .deadline_snapshot()
-        .map(|snapshot| snapshot.remaining_ns);
-    let duration_ns = if let Some(remaining_ns) = deadline_remaining_ns {
-        remaining_ns.max(1)
+    let now_ns = get_time_ns();
+    let deadline = task.deadline_snapshot();
+    let fair_vruntime_ns = task.sched_vruntime.load(Ordering::SeqCst);
+    let fair_vdeadline_ns = task.sched_deadline.load(Ordering::SeqCst);
+    let fair_slice_ns = task.sched_slice_ns.load(Ordering::SeqCst);
+    let duration_ns = if let Some(snapshot) = deadline {
+        snapshot.remaining_ns.max(1)
     } else {
-        let fair_slice_ns = task.sched_slice_ns.load(Ordering::SeqCst);
         if fair_slice_ns == 0 {
             task.time_slice_duration_ns.load(Ordering::SeqCst)
         } else {
             fair_slice_remaining_ns(
-                task.sched_vruntime.load(Ordering::SeqCst),
-                task.sched_deadline.load(Ordering::SeqCst),
+                fair_vruntime_ns,
+                fair_vdeadline_ns,
                 fair_slice_ns,
                 task.sched_weight(),
             )
         }
     };
+    let deadline_anomaly = deadline.is_some_and(|snapshot| {
+        snapshot.throttled || snapshot.remaining_ns == 0 || snapshot.absolute_deadline_ns <= now_ns
+    });
+    let fair_anomaly = deadline.is_none()
+        && (duration_ns == 0 || (fair_slice_ns != 0 && fair_vdeadline_ns <= fair_vruntime_ns));
     drop(task);
     let token = SLICE_CALLBACK_TOKENS.fetch_add(1, Ordering::Relaxed);
     let generation = {
@@ -2128,8 +2386,56 @@ fn arm_local_slice(cpu_id: usize, task_id: usize) {
             handle: None,
             token,
         });
+        let mut diagnostic = SliceDiagnosticSnapshot {
+            action: SLICE_DIAGNOSTIC_ARM_PREPARE,
+            task_id: task_id as u64,
+            token,
+            handle_id: 0,
+            generation: state.generation,
+            duration_ns,
+            timer_deadline_ns: now_ns.saturating_add(duration_ns),
+            fair_vruntime_ns,
+            fair_vdeadline_ns,
+            deadline_remaining_ns: deadline.map_or(0, |snapshot| snapshot.remaining_ns),
+            deadline_absolute_ns: deadline.map_or(0, |snapshot| snapshot.absolute_deadline_ns),
+            flags: deadline.map_or(0, |snapshot| {
+                SLICE_DIAGNOSTIC_FLAG_DEADLINE
+                    | if snapshot.throttled {
+                        SLICE_DIAGNOSTIC_FLAG_THROTTLED
+                    } else {
+                        0
+                    }
+            }),
+        };
+        diagnostic.generation = state.generation;
+        SLICE_DIAGNOSTICS[cpu_id].publish(diagnostic);
         state.generation
     };
+    if (deadline_anomaly || fair_anomaly) && should_log_deadline_slice_anomaly(cpu_id, now_ns) {
+        let timer = crate::timer::timer_diagnostic_snapshot(cpu_id).unwrap_or_default();
+        crate::emergency_println!(
+            "[sched-timer-anomaly] cpu={} task={} class={} throttled={} remaining={} abs={} now={} duration={} vruntime={} vdeadline={} fair_slice={} queue_head={} queue_hard={} programmed_id={} programmed_deadline={}",
+            cpu_id,
+            task_id,
+            if deadline.is_some() {
+                "deadline"
+            } else {
+                "fair"
+            },
+            deadline.is_some_and(|snapshot| snapshot.throttled),
+            deadline.map_or(0, |snapshot| snapshot.remaining_ns),
+            deadline.map_or(0, |snapshot| snapshot.absolute_deadline_ns),
+            now_ns,
+            duration_ns,
+            fair_vruntime_ns,
+            fair_vdeadline_ns,
+            fair_slice_ns,
+            timer.queue.head_id,
+            timer.queue.head_hard_deadline_ns,
+            timer.programmed_id,
+            timer.programmed_deadline_ns,
+        );
+    }
     slice_callback_contexts().lock().insert(
         token,
         SliceCallbackContext {
@@ -2141,7 +2447,7 @@ fn arm_local_slice(cpu_id: usize, task_id: usize) {
     );
     let handler = slice_timer_handler();
     let deadline_ns = get_time_ns().saturating_add(duration_ns);
-    let handle = if deadline_remaining_ns.is_some() {
+    let handle = if deadline.is_some() {
         add_scheduler_timer(deadline_ns, &handler, token as usize)
     } else {
         add_timer(
@@ -2161,8 +2467,24 @@ fn arm_local_slice(cpu_id: usize, task_id: usize) {
                 handle: Some(handle),
                 token,
             });
+            publish_slice_action(
+                cpu_id,
+                &state,
+                SLICE_DIAGNOSTIC_ARMED,
+                Some(task_id),
+                token,
+                handle.id,
+            );
             true
         } else {
+            publish_slice_action(
+                cpu_id,
+                &state,
+                SLICE_DIAGNOSTIC_ARM_RACED,
+                Some(task_id),
+                token,
+                handle.id,
+            );
             false
         }
     };
@@ -2186,6 +2508,20 @@ fn take_local_slice_reschedule(cpu_id: usize) -> bool {
     let mut state = slice_states()[cpu_id].lock();
     let requested = state.need_resched;
     state.need_resched = false;
+    if requested {
+        let task_id = state.task_id;
+        let active = state.active;
+        publish_slice_action(
+            cpu_id,
+            &state,
+            SLICE_DIAGNOSTIC_RESCHEDULE_TAKEN,
+            task_id,
+            active.map_or(0, |active| active.token),
+            active
+                .and_then(|active| active.handle)
+                .map_or(0, |handle| handle.id),
+        );
+    }
     requested
 }
 
@@ -4675,6 +5011,11 @@ pub fn schedule(trapframe: &mut Trapframe) {
             preempt_count
         );
     }
+    // Kernel contexts do not save the CPU-global interrupt mask. Preserve the
+    // calling task's state on its own suspended stack and keep interrupts
+    // masked throughout scheduler bookkeeping and the low-level switch. When
+    // this task resumes, it restores the state it had before calling schedule.
+    let saved_interrupt_state = crate::arch::interrupt::save_and_disable_interrupts();
     crate::breadcrumb::drop(
         crate::breadcrumb::SCHED_ENTER,
         get_cpu().get_cpuid() as u64,
@@ -4727,6 +5068,7 @@ pub fn schedule(trapframe: &mut Trapframe) {
         }
     }
 
+    crate::arch::interrupt::restore_interrupts(saved_interrupt_state);
     process_pending_events_before_user_return(trapframe);
 }
 

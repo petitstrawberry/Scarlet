@@ -18,7 +18,30 @@ use crate::environment::MAX_NUM_CPUS;
 pub const NONE: u64 = 0x0000;
 pub const FORK_RETURN: u64 = 0x4652; // 'FR' sys_clone returned to parent
 pub const SWITCH_TO_USER: u64 = 0x5355; // 'SU' about to eret to userspace
+pub const USER_RETURN_READY: u64 = 0x5552; // 'UR' user-return state and timer registers published
 pub const USER_TRAP_ENTER: u64 = 0x5554; // 'UT' entered user-trap handler
+pub const USER_TRAP_VECTOR_READY: u64 = 0x5556; // 'UV' kernel VBAR installed for a user trap
+pub const USER_IRQ_DISPATCH: u64 = 0x5544; // 'UD' user IRQ/FIQ dispatch about to begin
+pub const IRQ_ROUTE_READY: u64 = 0x4952; // 'IR' interrupt route and scheduling policy sampled
+pub const IRQ_CONTROLLER_WAIT: u64 = 0x4957; // 'IW' about to acquire the controller registry
+pub const IRQ_CONTROLLER_READY: u64 = 0x4943; // 'IC' controller registry acquired
+pub const IRQ_CLAIM_DONE: u64 = 0x494e; // 'IN' external-controller claim completed
+pub const IRQ_HANDLE_ENTER: u64 = 0x4845; // 'HE' generic pending-IRQ handling entered
+pub const IRQ_HANDLE_DONE: u64 = 0x4844; // 'HD' generic pending-IRQ handling completed
+pub const IRQ_SOURCE_LOOKUP: u64 = 0x4853; // 'HS' generic IRQ source lookup entered
+pub const IRQ_SOURCE_CALL: u64 = 0x4843; // 'HC' source/legacy handler callback entered
+pub const IRQ_SOURCE_DONE: u64 = 0x4852; // 'HR' source/legacy handler callback returned
+pub const IRQ_EOI_ENTER: u64 = 0x484f; // 'HO' controller EOI/unmask entered
+pub const IRQ_EOI_DONE: u64 = 0x4858; // 'HX' controller EOI/unmask completed
+pub const IRQ_DISPATCH_DONE: u64 = 0x494f; // 'IO' architecture interrupt dispatch completed
+pub const XHCI_IRQ_STATUS: u64 = 0x5849; // 'XI' xHCI interrupt status sampled
+pub const XHCI_IRQ_ACK_DONE: u64 = 0x584a; // 'XJ' xHCI status and interrupter acknowledged
+pub const XHCI_IRQ_DRAIN: u64 = 0x584e; // 'XN' xHCI event-ring drain entered
+pub const XHCI_IRQ_DRAIN_DONE: u64 = 0x584b; // 'XK' xHCI event-ring drain completed
+pub const XHCI_IRQ_PORT: u64 = 0x5850; // 'XP' xHCI port-change handling entered
+pub const XHCI_IRQ_DONE: u64 = 0x5851; // 'XQ' xHCI interrupt handling completed
+pub const XHCI_PORT_WORK: u64 = 0x5857; // 'XW' deferred xHCI port work entered
+pub const XHCI_PORT_WORK_DONE: u64 = 0x5859; // 'XY' deferred xHCI port work completed
 pub const DATA_FAULT_ENTER: u64 = 0x4446; // 'DF' COW/data fault handler entered
 pub const DATA_FAULT_DONE: u64 = 0x4444; // 'DD' fault resolved
 pub const SCHED_ENTER: u64 = 0x5343; // 'SC' schedule() entered
@@ -137,6 +160,8 @@ static STALL_SAMPLE_INITIALIZED: [AtomicBool; STALL_SAMPLE_SLOTS] =
     [const { AtomicBool::new(false) }; STALL_SAMPLE_SLOTS];
 static STALL_LAST_TIMER_COUNT: [AtomicU64; STALL_SAMPLE_SLOTS] =
     [const { AtomicU64::new(0) }; STALL_SAMPLE_SLOTS];
+static STALL_LAST_SEQUENCE: [AtomicU64; STALL_SAMPLE_SLOTS] =
+    [const { AtomicU64::new(0) }; STALL_SAMPLE_SLOTS];
 static STALL_LAST_PHASE: [AtomicU64; STALL_SAMPLE_SLOTS] =
     [const { AtomicU64::new(0) }; STALL_SAMPLE_SLOTS];
 static STALL_LAST_AUX: [AtomicU64; STALL_SAMPLE_SLOTS] =
@@ -145,6 +170,9 @@ static STALL_LAST_AUX2: [AtomicU64; STALL_SAMPLE_SLOTS] =
     [const { AtomicU64::new(0) }; STALL_SAMPLE_SLOTS];
 static STALL_STALE_SAMPLES: [AtomicU64; STALL_SAMPLE_SLOTS] =
     [const { AtomicU64::new(0) }; STALL_SAMPLE_SLOTS];
+static STALL_LAST_REPORT_NS: [AtomicU64; MAX_NUM_CPUS] =
+    [const { AtomicU64::new(0) }; MAX_NUM_CPUS];
+const STALL_REPORT_RATE_LIMIT_NS: u64 = 1_000_000_000;
 
 // Keep independently-written CPU slots off the same cache line. Apple Silicon
 // uses 128-byte cache lines, while the extra alignment is harmless on systems
@@ -182,6 +210,7 @@ impl BreadcrumbSlot {
     fn snapshot(&self) -> BreadcrumbSnapshot {
         self.snapshot_with_probe(|| {})
             .unwrap_or_else(|| BreadcrumbSnapshot {
+                sequence: self.sequence.load(Ordering::SeqCst),
                 phase: PUBLICATION_IN_PROGRESS,
                 aux: self.sequence.load(Ordering::SeqCst),
                 aux2: 0,
@@ -202,7 +231,12 @@ impl BreadcrumbSlot {
             let aux2 = self.aux2.load(Ordering::SeqCst);
             let sequence_after = self.sequence.load(Ordering::SeqCst);
             if sequence_before == sequence_after {
-                return Some(BreadcrumbSnapshot { phase, aux, aux2 });
+                return Some(BreadcrumbSnapshot {
+                    sequence: sequence_after,
+                    phase,
+                    aux,
+                    aux2,
+                });
             }
         }
 
@@ -216,6 +250,8 @@ static BREADCRUMBS: [BreadcrumbSlot; MAX_NUM_CPUS] =
 /// Lock-free breadcrumb state sampled from one CPU.
 #[derive(Clone, Copy, Debug)]
 pub struct BreadcrumbSnapshot {
+    /// Even commit sequence for this record; changes on every publication.
+    pub sequence: u64,
     /// Execution phase from one committed generation, or an in-progress marker.
     pub phase: u64,
     /// First numeric context field recorded with the phase.
@@ -256,10 +292,15 @@ pub fn snapshot(cpu_id: usize) -> Option<BreadcrumbSnapshot> {
 ///
 /// * `observer_cpu` - CPU collecting the diagnostic sample.
 /// * `timer_irq_count` - Lock-free local timer IRQ counter accessor.
+/// * `now_ns` - Observer's monotonic timestamp used for report rate limiting.
 ///
 /// This diagnostic boundary keeps the timer core independent from scheduler
 /// diagnostics while retaining the combined SMP liveness report.
-pub fn sample_timer_stalls(observer_cpu: usize, timer_irq_count: fn(usize) -> Option<u64>) {
+pub fn sample_timer_stalls(
+    observer_cpu: usize,
+    timer_irq_count: fn(usize) -> Option<u64>,
+    now_ns: u64,
+) {
     if observer_cpu >= MAX_NUM_CPUS {
         return;
     }
@@ -285,11 +326,13 @@ pub fn sample_timer_stalls(observer_cpu: usize, timer_irq_count: fn(usize) -> Op
         let slot = observer_cpu * MAX_NUM_CPUS + target_cpu;
         let changed = !STALL_SAMPLE_INITIALIZED[slot].swap(true, Ordering::Relaxed)
             || STALL_LAST_TIMER_COUNT[slot].load(Ordering::Relaxed) != timer_count
+            || STALL_LAST_SEQUENCE[slot].load(Ordering::Relaxed) != breadcrumb.sequence
             || STALL_LAST_PHASE[slot].load(Ordering::Relaxed) != breadcrumb.phase
             || STALL_LAST_AUX[slot].load(Ordering::Relaxed) != breadcrumb.aux
             || STALL_LAST_AUX2[slot].load(Ordering::Relaxed) != breadcrumb.aux2;
         if changed {
             STALL_LAST_TIMER_COUNT[slot].store(timer_count, Ordering::Relaxed);
+            STALL_LAST_SEQUENCE[slot].store(breadcrumb.sequence, Ordering::Relaxed);
             STALL_LAST_PHASE[slot].store(breadcrumb.phase, Ordering::Relaxed);
             STALL_LAST_AUX[slot].store(breadcrumb.aux, Ordering::Relaxed);
             STALL_LAST_AUX2[slot].store(breadcrumb.aux2, Ordering::Relaxed);
@@ -304,18 +347,68 @@ pub fn sample_timer_stalls(observer_cpu: usize, timer_irq_count: fn(usize) -> Op
         let should_report = stale_samples == STALL_REPORT_AFTER_SAMPLES
             || (stale_samples > STALL_REPORT_AFTER_SAMPLES
                 && (stale_samples - STALL_REPORT_AFTER_SAMPLES) % STALL_REPEAT_SAMPLES == 0);
-        if should_report {
-            crate::early_println!(
-                "[timer] stall observer={} cpu={} count={} phase={:#06x} aux={:#x} aux2={:#x} task={} idle={} pending_reschedule={}",
+        let report_slot = &STALL_LAST_REPORT_NS[target_cpu];
+        let last_report_ns = report_slot.load(Ordering::Relaxed);
+        let rate_limited = last_report_ns != 0
+            && now_ns.saturating_sub(last_report_ns) < STALL_REPORT_RATE_LIMIT_NS;
+        if should_report
+            && !rate_limited
+            && report_slot
+                .compare_exchange(
+                    last_report_ns,
+                    now_ns.max(1),
+                    Ordering::AcqRel,
+                    Ordering::Relaxed,
+                )
+                .is_ok()
+        {
+            let timer = crate::timer::timer_diagnostic_snapshot(target_cpu).unwrap_or_default();
+            let slice =
+                crate::sched::scheduler::slice_diagnostic_snapshot(target_cpu).unwrap_or_default();
+            crate::emergency_println!(
+                "[timer-stall] observer={} cpu={} count={} now={} phase={:#06x} phase_seq={} aux={:#x} aux2={:#x} task={} idle={} resched={} programmed_id={} programmed_deadline={} queue_seq={} head_id={} head_context={} head_soft={} head_hard={} live={} heap={} stale={}",
                 observer_cpu,
                 target_cpu,
                 timer_count,
+                now_ns,
                 breadcrumb.phase,
+                breadcrumb.sequence,
                 breadcrumb.aux,
                 breadcrumb.aux2,
                 scheduler.current_task_id,
                 scheduler.is_idle,
                 scheduler.pending_reschedule,
+                timer.programmed_id,
+                timer.programmed_deadline_ns,
+                timer.queue.sequence,
+                timer.queue.head_id,
+                timer.queue.head_context,
+                timer.queue.head_soft_deadline_ns,
+                timer.queue.head_hard_deadline_ns,
+                timer.queue.live_entries,
+                timer.queue.heap_nodes,
+                timer.queue.stale_heap_nodes,
+            );
+            crate::emergency_println!(
+                "[timer-stall] cpu={} slice_action={} slice_task={} token={} handle={} generation={} duration={} slice_deadline={} vruntime={} vdeadline={} dl_remaining={} dl_absolute={} dl_flags={:#x} timer_ctl={:#x} timer_counter={} timer_compare={} return_spsr={:#x} return_pc={:#x}",
+                target_cpu,
+                crate::sched::scheduler::slice_diagnostic_action_name(slice.action),
+                slice.task_id,
+                slice.token,
+                slice.handle_id,
+                slice.generation,
+                slice.duration_ns,
+                slice.timer_deadline_ns,
+                slice.fair_vruntime_ns,
+                slice.fair_vdeadline_ns,
+                slice.deadline_remaining_ns,
+                slice.deadline_absolute_ns,
+                slice.flags,
+                timer.arch.control,
+                timer.arch.counter,
+                timer.arch.compare,
+                timer.arch.return_spsr,
+                timer.arch.return_pc,
             );
         }
     }

@@ -259,9 +259,10 @@ pub extern "C" fn _switch_to_user(_trapframe: &mut Trapframe) -> ! {
 
 #[unsafe(export_name = "arch_switch_to_user")]
 pub fn arch_switch_to_user(trapframe: &mut Trapframe) -> ! {
+    let cpu_id = crate::arch::get_cpu().get_cpuid();
     crate::breadcrumb::drop(
         crate::breadcrumb::SWITCH_TO_USER,
-        crate::sched::scheduler::current_task_id(crate::arch::get_cpu().get_cpuid())
+        crate::sched::scheduler::current_task_id(cpu_id)
             .map(|t| t as u64)
             .unwrap_or(0),
         trapframe.elr,
@@ -292,6 +293,16 @@ pub fn arch_switch_to_user(trapframe: &mut Trapframe) -> ! {
         set_trapvector(trampoline_base);
     }
 
+    crate::timer::publish_arch_timer_diagnostic(
+        cpu_id,
+        crate::arch::timer::diagnostic_snapshot(trapframe.spsr, trapframe.elr),
+    );
+    crate::breadcrumb::drop(
+        crate::breadcrumb::USER_RETURN_READY,
+        trapframe.elr,
+        trapframe.spsr,
+    );
+
     unsafe {
         asm!(
             "mov x0, {tf_addr}",
@@ -315,6 +326,11 @@ pub extern "C" fn arch_user_trap_handler(trapframe: &mut Trapframe, trap_kind: u
     // any exceptions/IRQs that occur while in kernel mode are handled by the
     // simple kernel trap routine.
     set_trapvector(get_kernel_trapvector_paddr());
+    crate::breadcrumb::drop(
+        crate::breadcrumb::USER_TRAP_VECTOR_READY,
+        trap_kind as u64,
+        trapframe.elr,
+    );
 
     let cpu_id = get_cpu().get_cpuid();
     let first_traced_user_trap = if crate::sched::scheduler::DEBUG_FORK_TRACE_LOGGING {
@@ -343,7 +359,17 @@ pub extern "C" fn arch_user_trap_handler(trapframe: &mut Trapframe, trap_kind: u
 
     // trap_kind is now passed in x1 (argument 2), so no need to read from memory!
     if trap_kind == 1 || trap_kind == 2 {
+        crate::breadcrumb::drop(
+            crate::breadcrumb::USER_IRQ_DISPATCH,
+            trap_kind as u64,
+            trapframe.elr,
+        );
         arch_irq_handler(trapframe, trap_kind);
+        crate::breadcrumb::drop(
+            crate::breadcrumb::IRQ_DISPATCH_DONE,
+            trap_kind as u64,
+            trapframe.elr,
+        );
     } else {
         arch_exception_handler(trapframe, trap_kind);
     }

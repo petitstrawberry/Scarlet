@@ -352,6 +352,14 @@ impl ExternalInterruptController for GicV3 {
         Ok(())
     }
 
+    fn mask_irq(&self, irq: &PendingIrq) -> InterruptResult<()> {
+        self.disable_interrupt(irq.mapping.hwirq, irq.cpu_id)
+    }
+
+    fn unmask_irq(&self, irq: &PendingIrq) -> InterruptResult<()> {
+        self.enable_interrupt(irq.mapping.hwirq, irq.cpu_id)
+    }
+
     fn set_priority(
         &mut self,
         interrupt_id: InterruptId,

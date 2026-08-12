@@ -119,16 +119,83 @@ pub type LocalInterruptHandler =
 pub enum InterruptClaim {
     /// The source owned and cleared this interrupt.
     Handled,
+    /// The source owned the interrupt and will finish processing it
+    /// asynchronously.
+    ///
+    /// The interrupt core keeps the delivered line masked and supplies a
+    /// [`DeferredInterruptCompletion`] after controller EOI has completed.
+    Deferred,
     /// The source cleared a scheduler reschedule interrupt.
     Reschedule,
     /// The source did not assert this shared interrupt line.
     NotMine,
 }
 
+/// One completion owed by a deferred interrupt source.
+///
+/// The interrupt core creates this token only after it has recorded the
+/// oneshot state, masked the controller line, and completed the CPU-local EOI.
+/// A deferred worker calls [`Self::complete`] after its device-side work has
+/// quiesced the interrupt source. The final token for a shared IRQ permits the
+/// core to unmask the controller line if it is still administratively enabled.
+#[must_use = "deferred interrupt completion must be completed by the deferred worker"]
+#[derive(Debug)]
+pub struct DeferredInterruptCompletion {
+    interrupt_id: InterruptId,
+    completed: bool,
+}
+
+impl DeferredInterruptCompletion {
+    fn new(interrupt_id: InterruptId) -> Self {
+        Self {
+            interrupt_id,
+            completed: false,
+        }
+    }
+
+    /// Return the virtual IRQ associated with this completion.
+    ///
+    /// # Returns
+    ///
+    /// Virtual IRQ whose deferred delivery this token represents.
+    pub fn interrupt_id(&self) -> InterruptId {
+        self.interrupt_id
+    }
+
+    /// Complete this source's deferred interrupt work.
+    ///
+    /// The token remains incomplete when the controller operation fails, so a
+    /// worker may retry without accidentally consuming another source's
+    /// completion on a shared IRQ.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` when the completion was recorded and any required final
+    /// unmask succeeded.
+    pub fn complete(&mut self) -> InterruptResult<()> {
+        if self.completed {
+            return Err(InterruptError::InvalidOperation);
+        }
+        InterruptManager::global().complete_deferred_interrupt(self.interrupt_id)?;
+        self.completed = true;
+        Ok(())
+    }
+
+    /// Check whether this token has already completed.
+    ///
+    /// # Returns
+    ///
+    /// `true` after [`Self::complete`] succeeds.
+    pub fn is_completed(&self) -> bool {
+        self.completed
+    }
+}
+
 const BREADCRUMB_STATUS_OK: u64 = 1;
 const BREADCRUMB_STATUS_HANDLED: u64 = 1;
 const BREADCRUMB_STATUS_RESCHEDULE: u64 = 2;
 const BREADCRUMB_STATUS_NOT_MINE: u64 = 3;
+const BREADCRUMB_STATUS_DEFERRED: u64 = 4;
 
 fn breadcrumb_error_status(error: InterruptError) -> u64 {
     match error {
@@ -154,6 +221,7 @@ fn send_ipi_breadcrumb_status(result: &InterruptResult<()>) -> u64 {
 fn fast_claim_breadcrumb_status(result: &InterruptResult<InterruptClaim>) -> u64 {
     match result {
         Ok(InterruptClaim::Handled) => BREADCRUMB_STATUS_HANDLED,
+        Ok(InterruptClaim::Deferred) => BREADCRUMB_STATUS_DEFERRED,
         Ok(InterruptClaim::Reschedule) => BREADCRUMB_STATUS_RESCHEDULE,
         Ok(InterruptClaim::NotMine) => BREADCRUMB_STATUS_NOT_MINE,
         Err(error) => breadcrumb_error_status(*error),
@@ -167,7 +235,16 @@ impl InterruptClaim {
     ///
     /// `true` when the interrupt source claimed and cleared the interrupt.
     pub const fn is_handled(self) -> bool {
-        matches!(self, Self::Handled | Self::Reschedule)
+        matches!(self, Self::Handled | Self::Deferred | Self::Reschedule)
+    }
+
+    /// Check whether controller completion was deferred to a worker.
+    ///
+    /// # Returns
+    ///
+    /// `true` when the interrupt core must leave the controller line masked.
+    pub const fn is_deferred(self) -> bool {
+        matches!(self, Self::Deferred)
     }
 }
 
@@ -188,6 +265,23 @@ pub trait InterruptSource: Send + Sync {
     /// `Handled` when this source owned the interrupt and cleared its device-side
     /// cause, or `NotMine` when another source on the shared line asserted it.
     fn claim_interrupt(&self) -> InterruptResult<InterruptClaim>;
+
+    /// Accept a completion token after returning [`InterruptClaim::Deferred`].
+    ///
+    /// The interrupt core invokes this only after the controller line is
+    /// masked and EOI has completed. Implementations should enqueue the token
+    /// for their deferred worker and wake that worker without doing lengthy
+    /// device processing in this callback.
+    ///
+    /// # Arguments
+    ///
+    /// * `completion` - Single-use completion owed by this source.
+    ///
+    /// # Returns
+    ///
+    /// This callback returns no value. Ownership of `completion` transfers to
+    /// the deferred worker.
+    fn deferred_interrupt_ready(&self, _completion: DeferredInterruptCompletion) {}
 }
 
 /// Interrupt source whose device-side assertion can be masked independently.
@@ -232,11 +326,31 @@ impl InterruptSource for InterruptDeviceSource {
     fn claim_interrupt(&self) -> InterruptResult<InterruptClaim> {
         self.device.claim_interrupt()
     }
+
+    fn deferred_interrupt_ready(&self, completion: DeferredInterruptCompletion) {
+        self.device.deferred_interrupt_ready(completion);
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct IrqDesc {
     mapping: controllers::IrqMapping,
+    enabled_cpu: Option<CpuId>,
+    needs_enable: bool,
+    deliveries_in_progress: usize,
+    deferred_completions: usize,
+}
+
+impl IrqDesc {
+    fn new(mapping: controllers::IrqMapping) -> Self {
+        Self {
+            mapping,
+            enabled_cpu: None,
+            needs_enable: false,
+            deliveries_in_progress: 0,
+            deferred_completions: 0,
+        }
+    }
 }
 
 pub struct InterruptManager {
@@ -247,7 +361,6 @@ pub struct InterruptManager {
     controllers: Once<IrqRwSpinLock<controllers::InterruptControllers>>,
     irq_descs: Lazy<IrqSpinLock<HashMap<Virq, IrqDesc>>>,
     external_handlers: Lazy<IrqSpinLock<HashMap<InterruptId, ExternalInterruptHandler>>>,
-    enabled_external_interrupts: Lazy<IrqSpinLock<HashMap<InterruptId, CpuId>>>,
     interrupt_sources: Lazy<IrqSpinLock<HashMap<InterruptId, Arc<[Arc<dyn InterruptSource>]>>>>,
     unhandled_external_interrupts: Lazy<IrqSpinLock<HashMap<InterruptId, usize>>>,
 }
@@ -258,7 +371,6 @@ impl InterruptManager {
             controllers: Once::new(),
             irq_descs: Lazy::new(|| IrqSpinLock::new(HashMap::new())),
             external_handlers: Lazy::new(|| IrqSpinLock::new(HashMap::new())),
-            enabled_external_interrupts: Lazy::new(|| IrqSpinLock::new(HashMap::new())),
             interrupt_sources: Lazy::new(|| IrqSpinLock::new(HashMap::new())),
             unhandled_external_interrupts: Lazy::new(|| IrqSpinLock::new(HashMap::new())),
         }
@@ -277,10 +389,18 @@ impl InterruptManager {
         crate::early_println!("[interrupt] init: external controller...");
 
         let enabled_external_interrupts: Vec<_> = self
-            .enabled_external_interrupts
+            .irq_descs
             .lock()
-            .iter()
-            .map(|(interrupt_id, cpu_id)| (self.irq_desc_or_legacy(*interrupt_id), *cpu_id))
+            .values()
+            .filter_map(|desc| {
+                (desc.deferred_completions == 0)
+                    .then_some(desc.enabled_cpu)
+                    .flatten()
+                    .map(|cpu_id| controllers::PendingIrq {
+                        mapping: desc.mapping,
+                        cpu_id,
+                    })
+            })
             .collect();
 
         let mut controllers = self.controllers().write();
@@ -292,12 +412,12 @@ impl InterruptManager {
         }
         if let Some(controller) = controllers.external_controller() {
             let reenable_count = enabled_external_interrupts.len();
-            for (desc, cpu_id) in enabled_external_interrupts {
-                if let Err(e) = controller.enable_interrupt(desc.mapping.hwirq, cpu_id) {
+            for pending in enabled_external_interrupts {
+                if let Err(e) = controller.enable_interrupt(pending.mapping.hwirq, pending.cpu_id) {
                     crate::early_println!(
                         "[interrupt] failed to re-enable IRQ {} for CPU {} after controller init: {}",
-                        desc.mapping.virq,
-                        cpu_id,
+                        pending.mapping.virq,
+                        pending.cpu_id,
                         e
                     );
                 }
@@ -388,7 +508,9 @@ impl InterruptManager {
 
     fn register_irq_mapping(&self, mapping: controllers::IrqMapping) {
         let mut descs = self.irq_descs.lock();
-        descs.entry(mapping.virq).or_insert(IrqDesc { mapping });
+        descs
+            .entry(mapping.virq)
+            .or_insert_with(|| IrqDesc::new(mapping));
     }
 
     fn irq_desc_or_legacy(&self, interrupt_id: InterruptId) -> IrqDesc {
@@ -400,18 +522,139 @@ impl InterruptManager {
         }
 
         let mapping = controllers::IrqMapping::legacy(interrupt_id, controllers::IrqFlow::Level);
-        let desc = IrqDesc { mapping };
+        let desc = IrqDesc::new(mapping);
         self.irq_descs.lock().entry(interrupt_id).or_insert(desc);
         desc
     }
 
-    fn finish_pending_irq(&self, irq: &controllers::PendingIrq) -> InterruptResult<()> {
+    fn begin_irq_delivery(&self, pending: controllers::PendingIrq) {
+        let mut descs = self.irq_descs.lock();
+        let desc = descs
+            .entry(pending.mapping.virq)
+            .or_insert_with(|| IrqDesc::new(pending.mapping));
+        desc.mapping = pending.mapping;
+        desc.deliveries_in_progress = desc
+            .deliveries_in_progress
+            .checked_add(1)
+            .expect("IRQ delivery nesting overflow");
+    }
+
+    fn begin_deferred_interrupt(
+        &self,
+        pending: controllers::PendingIrq,
+    ) -> InterruptResult<DeferredInterruptCompletion> {
+        let mut descs = self.irq_descs.lock();
+        let desc = descs
+            .get_mut(&pending.mapping.virq)
+            .ok_or(InterruptError::InvalidInterruptId)?;
+
+        let next_count = desc
+            .deferred_completions
+            .checked_add(1)
+            .ok_or(InterruptError::InvalidOperation)?;
+        if desc.deferred_completions == 0 {
+            let controllers = self.controllers().read();
+            let controller = controllers
+                .external_controller()
+                .ok_or(InterruptError::ControllerNotFound)?;
+            controller.mask_irq(&pending)?;
+        }
+        desc.deferred_completions = next_count;
+        Ok(DeferredInterruptCompletion::new(pending.mapping.virq))
+    }
+
+    fn finish_irq_delivery(&self, pending: controllers::PendingIrq) -> InterruptResult<()> {
+        self.finish_pending_irq(&pending)?;
+
+        let mut descs = self.irq_descs.lock();
+        let desc = descs
+            .get_mut(&pending.mapping.virq)
+            .ok_or(InterruptError::InvalidInterruptId)?;
+        desc.deliveries_in_progress = desc
+            .deliveries_in_progress
+            .checked_sub(1)
+            .ok_or(InterruptError::InvalidOperation)?;
+        if desc.deliveries_in_progress != 0 || desc.deferred_completions != 0 {
+            return Ok(());
+        }
+
+        let Some(cpu_id) = desc.enabled_cpu else {
+            return Ok(());
+        };
+        let unmask = controllers::PendingIrq {
+            mapping: desc.mapping,
+            cpu_id,
+        };
         let controllers = self.controllers().read();
-        if let Some(controller) = controllers.external_controller() {
+        let controller = controllers
+            .external_controller()
+            .ok_or(InterruptError::ControllerNotFound)?;
+        if desc.needs_enable {
+            controller.enable_interrupt(unmask.mapping.hwirq, unmask.cpu_id)?;
+            desc.needs_enable = false;
+            Ok(())
+        } else {
+            controller.unmask_irq(&unmask)
+        }
+    }
+
+    fn complete_deferred_interrupt(&self, interrupt_id: InterruptId) -> InterruptResult<()> {
+        let mut descs = self.irq_descs.lock();
+        let desc = descs
+            .get_mut(&interrupt_id)
+            .ok_or(InterruptError::InvalidInterruptId)?;
+        if desc.deferred_completions == 0 {
+            return Err(InterruptError::InvalidOperation);
+        }
+        if desc.deferred_completions > 1 {
+            desc.deferred_completions -= 1;
+            return Ok(());
+        }
+
+        if desc.deliveries_in_progress != 0 {
+            desc.deferred_completions = 0;
+            return Ok(());
+        }
+        let Some(cpu_id) = desc.enabled_cpu else {
+            desc.deferred_completions = 0;
+            return Ok(());
+        };
+        let pending = controllers::PendingIrq {
+            mapping: desc.mapping,
+            cpu_id,
+        };
+        let controllers = self.controllers().read();
+        let controller = controllers
+            .external_controller()
+            .ok_or(InterruptError::ControllerNotFound)?;
+        if desc.needs_enable {
+            controller.enable_interrupt(pending.mapping.hwirq, pending.cpu_id)?;
+            desc.needs_enable = false;
+        } else {
+            controller.unmask_irq(&pending)?;
+        }
+        desc.deferred_completions = 0;
+        Ok(())
+    }
+
+    fn finish_pending_irq(&self, irq: &controllers::PendingIrq) -> InterruptResult<()> {
+        crate::breadcrumb::drop(
+            crate::breadcrumb::IRQ_EOI_ENTER,
+            u64::from(irq.mapping.virq),
+            u64::from(irq.mapping.hwirq),
+        );
+        let controllers = self.controllers().read();
+        let result = if let Some(controller) = controllers.external_controller() {
             controller.eoi_irq(irq)
         } else {
             Err(InterruptError::ControllerNotFound)
-        }
+        };
+        crate::breadcrumb::drop(
+            crate::breadcrumb::IRQ_EOI_DONE,
+            u64::from(irq.mapping.virq),
+            u64::from(irq.mapping.hwirq),
+        );
+        result
     }
 
     fn record_unhandled_external_interrupt(&self, interrupt_id: InterruptId) -> usize {
@@ -437,6 +680,11 @@ impl InterruptManager {
     }
 
     fn handle_pending_irq(&self, pending: controllers::PendingIrq) -> InterruptResult<()> {
+        crate::breadcrumb::drop(
+            crate::breadcrumb::IRQ_SOURCE_LOOKUP,
+            u64::from(pending.mapping.virq),
+            u64::from(pending.mapping.hwirq),
+        );
         self.register_irq_mapping(pending.mapping);
         {
             let controllers = self.controllers().read();
@@ -446,6 +694,7 @@ impl InterruptManager {
                 return Err(InterruptError::ControllerNotFound);
             }
         }
+        self.begin_irq_delivery(pending);
 
         let interrupt_id = pending.mapping.virq;
         let sources = {
@@ -455,16 +704,43 @@ impl InterruptManager {
 
         if let Some(sources) = sources {
             let mut handled = false;
+            let mut deferred = Vec::new();
             let mut first_error = None;
             for source in sources.iter() {
-                match source.claim_interrupt() {
-                    Ok(claim) => handled |= claim.is_handled(),
+                crate::breadcrumb::drop(
+                    crate::breadcrumb::IRQ_SOURCE_CALL,
+                    u64::from(interrupt_id),
+                    u64::from(pending.mapping.hwirq),
+                );
+                let claim_result = {
+                    let _callback_guard = crate::sync::PreemptGuard::new();
+                    source.claim_interrupt()
+                };
+                match claim_result {
+                    Ok(claim) => {
+                        handled |= claim.is_handled();
+                        if claim.is_deferred() {
+                            match self.begin_deferred_interrupt(pending) {
+                                Ok(completion) => deferred.push((source.clone(), completion)),
+                                Err(error) => {
+                                    if first_error.is_none() {
+                                        first_error = Some(error);
+                                    }
+                                }
+                            }
+                        }
+                    }
                     Err(error) => {
                         if first_error.is_none() {
                             first_error = Some(error);
                         }
                     }
                 }
+                crate::breadcrumb::drop(
+                    crate::breadcrumb::IRQ_SOURCE_DONE,
+                    u64::from(interrupt_id),
+                    u64::from(pending.mapping.hwirq),
+                );
             }
 
             if handled {
@@ -480,12 +756,15 @@ impl InterruptManager {
                 }
             }
 
-            let finish_result = self.finish_pending_irq(&pending);
+            self.finish_irq_delivery(pending)?;
+            for (source, completion) in deferred {
+                let _callback_guard = crate::sync::PreemptGuard::new();
+                source.deferred_interrupt_ready(completion);
+            }
             if let Some(error) = first_error {
-                finish_result?;
                 Err(error)
             } else {
-                finish_result
+                Ok(())
             }
         } else {
             let handler = {
@@ -494,8 +773,21 @@ impl InterruptManager {
             };
 
             if let Some(handler_fn) = handler {
-                let mut handle = InterruptHandle::new_pending(pending);
-                let claim = handler_fn(&mut handle)?;
+                let mut handle = InterruptHandle::new_pending(pending, true);
+                crate::breadcrumb::drop(
+                    crate::breadcrumb::IRQ_SOURCE_CALL,
+                    u64::from(interrupt_id),
+                    u64::from(pending.mapping.hwirq),
+                );
+                let claim = {
+                    let _callback_guard = crate::sync::PreemptGuard::new();
+                    handler_fn(&mut handle)?
+                };
+                crate::breadcrumb::drop(
+                    crate::breadcrumb::IRQ_SOURCE_DONE,
+                    u64::from(interrupt_id),
+                    u64::from(pending.mapping.hwirq),
+                );
                 if claim.is_handled() {
                     self.clear_unhandled_external_interrupt_count(interrupt_id);
                 } else {
@@ -508,9 +800,13 @@ impl InterruptManager {
                         );
                     }
                 }
+                if claim.is_deferred() {
+                    let _ = handle.complete();
+                    return Err(InterruptError::InvalidOperation);
+                }
                 Ok(())
             } else {
-                self.finish_pending_irq(&pending)
+                self.finish_irq_delivery(pending)
             }
         }
     }
@@ -542,14 +838,27 @@ impl InterruptManager {
     ) -> InterruptResult<Option<controllers::PendingIrq>> {
         let pending = {
             let controllers = self.controllers().read();
+            crate::breadcrumb::drop(crate::breadcrumb::IRQ_CONTROLLER_READY, cpu_id as u64, 0);
             if let Some(controller) = controllers.external_controller() {
                 controller.claim_pending_irq(cpu_id)?
             } else {
                 return Err(InterruptError::ControllerNotFound);
             }
         };
+        crate::breadcrumb::drop(
+            crate::breadcrumb::IRQ_CLAIM_DONE,
+            cpu_id as u64,
+            pending
+                .map(|pending| u64::from(pending.mapping.virq))
+                .unwrap_or(u64::MAX),
+        );
 
         if let Some(pending) = pending {
+            crate::breadcrumb::drop(
+                crate::breadcrumb::IRQ_HANDLE_ENTER,
+                u64::from(pending.mapping.virq),
+                u64::from(pending.mapping.hwirq),
+            );
             self.handle_pending_irq(pending)?;
             Ok(Some(pending))
         } else {
@@ -831,6 +1140,21 @@ impl InterruptManager {
         Ok(interrupt_id)
     }
 
+    /// Issue only the controller's CPU-interface EOI for a legacy unmanaged IRQ.
+    ///
+    /// This compatibility API does not release a deferred/oneshot hold and
+    /// does not change the interrupt core's administrative enable state.
+    /// Deferred sources must complete the [`DeferredInterruptCompletion`]
+    /// supplied through [`InterruptSource::deferred_interrupt_ready`] instead.
+    ///
+    /// # Arguments
+    ///
+    /// * `cpu_id` - CPU that received the legacy interrupt.
+    /// * `interrupt_id` - Virtual IRQ to finish at the controller.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` when the controller EOI operation succeeds.
     pub fn complete_external_interrupt(
         &self,
         cpu_id: CpuId,
@@ -848,15 +1172,31 @@ impl InterruptManager {
         interrupt_id: InterruptId,
         cpu_id: CpuId,
     ) -> InterruptResult<()> {
-        let desc = self.irq_desc_or_legacy(interrupt_id);
+        self.irq_desc_or_legacy(interrupt_id);
+        let mut descs = self.irq_descs.lock();
+        let desc = descs
+            .get_mut(&interrupt_id)
+            .ok_or(InterruptError::InvalidInterruptId)?;
+        let previous_cpu = desc.enabled_cpu;
+        let previous_needs_enable = desc.needs_enable;
+        desc.enabled_cpu = Some(cpu_id);
+        desc.needs_enable = true;
+
+        if desc.deliveries_in_progress != 0 || desc.deferred_completions != 0 {
+            return Ok(());
+        }
         let controllers = self.controllers().read();
         if let Some(controller) = controllers.external_controller() {
-            controller.enable_interrupt(desc.mapping.hwirq, cpu_id)?;
-            self.enabled_external_interrupts
-                .lock()
-                .insert(interrupt_id, cpu_id);
+            if let Err(error) = controller.enable_interrupt(desc.mapping.hwirq, cpu_id) {
+                desc.enabled_cpu = previous_cpu;
+                desc.needs_enable = previous_needs_enable;
+                return Err(error);
+            }
+            desc.needs_enable = false;
             Ok(())
         } else {
+            desc.enabled_cpu = previous_cpu;
+            desc.needs_enable = previous_needs_enable;
             Err(InterruptError::ControllerNotFound)
         }
     }
@@ -933,15 +1273,31 @@ impl InterruptManager {
         interrupt_id: InterruptId,
         cpu_id: CpuId,
     ) -> InterruptResult<()> {
-        let desc = self.irq_desc_or_legacy(interrupt_id);
+        self.irq_desc_or_legacy(interrupt_id);
+        let mut descs = self.irq_descs.lock();
+        let desc = descs
+            .get_mut(&interrupt_id)
+            .ok_or(InterruptError::InvalidInterruptId)?;
+        let previous_cpu = desc.enabled_cpu;
+        let previous_needs_enable = desc.needs_enable;
+        let mask_cpu = previous_cpu.unwrap_or(cpu_id);
+        desc.enabled_cpu = None;
+        desc.needs_enable = false;
+        let pending = controllers::PendingIrq {
+            mapping: desc.mapping,
+            cpu_id: mask_cpu,
+        };
         let controllers = self.controllers().read();
         if let Some(controller) = controllers.external_controller() {
-            controller.disable_interrupt(desc.mapping.hwirq, cpu_id)?;
-            self.enabled_external_interrupts
-                .lock()
-                .remove(&interrupt_id);
+            if let Err(error) = controller.mask_irq(&pending) {
+                desc.enabled_cpu = previous_cpu;
+                desc.needs_enable = previous_needs_enable;
+                return Err(error);
+            }
             Ok(())
         } else {
+            desc.enabled_cpu = previous_cpu;
+            desc.needs_enable = previous_needs_enable;
             Err(InterruptError::ControllerNotFound)
         }
     }
@@ -1010,22 +1366,27 @@ impl InterruptManager {
 pub struct InterruptHandle {
     pending: controllers::PendingIrq,
     completed: bool,
+    managed_delivery: bool,
 }
 
 impl InterruptHandle {
     /// Create a new interrupt handle
     pub fn new(interrupt_id: InterruptId, cpu_id: CpuId) -> Self {
         let desc = InterruptManager::global().irq_desc_or_legacy(interrupt_id);
-        Self::new_pending(controllers::PendingIrq {
-            mapping: desc.mapping,
-            cpu_id,
-        })
+        Self::new_pending(
+            controllers::PendingIrq {
+                mapping: desc.mapping,
+                cpu_id,
+            },
+            false,
+        )
     }
 
-    fn new_pending(pending: controllers::PendingIrq) -> Self {
+    fn new_pending(pending: controllers::PendingIrq, managed_delivery: bool) -> Self {
         Self {
             pending,
             completed: false,
+            managed_delivery,
         }
     }
 
@@ -1057,7 +1418,11 @@ impl InterruptHandle {
             return Err(InterruptError::InvalidOperation);
         }
 
-        InterruptManager::global().finish_pending_irq(&self.pending)?;
+        if self.managed_delivery {
+            InterruptManager::global().finish_irq_delivery(self.pending)?;
+        } else {
+            InterruptManager::global().finish_pending_irq(&self.pending)?;
+        }
         self.completed = true;
         Ok(())
     }
@@ -1217,6 +1582,16 @@ mod tests {
             Ok(())
         }
 
+        fn mask_irq(&self, _irq: &controllers::PendingIrq) -> InterruptResult<()> {
+            self.events.lock().push("controller-mask");
+            Ok(())
+        }
+
+        fn unmask_irq(&self, _irq: &controllers::PendingIrq) -> InterruptResult<()> {
+            self.events.lock().push("controller-unmask");
+            Ok(())
+        }
+
         fn set_priority(
             &mut self,
             _interrupt_id: InterruptId,
@@ -1299,6 +1674,10 @@ mod tests {
         fn claim_interrupt(&self) -> InterruptResult<InterruptClaim> {
             self.events.lock().push(self.event_name);
             Ok(self.claim)
+        }
+
+        fn deferred_interrupt_ready(&self, _completion: DeferredInterruptCompletion) {
+            self.events.lock().push("source-deferred-ready");
         }
     }
 
@@ -1490,6 +1869,107 @@ mod tests {
             ["controller-ack", "source-a", "controller-eoi"]
         );
         assert_eq!(manager.unhandled_external_interrupt_count(43), 1);
+    }
+
+    #[test_case]
+    fn test_deferred_interrupt_leaves_controller_line_masked() {
+        let events = Arc::new(IrqSpinLock::new(Vec::new()));
+        let manager = InterruptManager::new();
+        manager
+            .register_external_controller(Box::new(FakeExternalController::new(events.clone())))
+            .expect("fake external controller should register");
+        manager
+            .register_interrupt_source(
+                45,
+                Arc::new(FakeInterruptSource::new(
+                    45,
+                    InterruptClaim::Deferred,
+                    "source-deferred",
+                    events.clone(),
+                )),
+            )
+            .expect("deferred source should register");
+
+        manager
+            .handle_external_interrupt(45, 0)
+            .expect("deferred IRQ should dispatch");
+
+        assert_eq!(
+            events.lock().as_slice(),
+            [
+                "controller-ack",
+                "source-deferred",
+                "controller-mask",
+                "controller-eoi",
+                "source-deferred-ready"
+            ]
+        );
+        assert_eq!(manager.unhandled_external_interrupt_count(45), 0);
+    }
+
+    #[test_case]
+    fn test_deferred_completion_unmasks_only_while_administratively_enabled() {
+        let events = Arc::new(IrqSpinLock::new(Vec::new()));
+        let manager = InterruptManager::new();
+        manager
+            .register_external_controller(Box::new(FakeExternalController::new(events.clone())))
+            .expect("fake external controller should register");
+        manager
+            .register_interrupt_source(
+                46,
+                Arc::new(FakeInterruptSource::new(
+                    46,
+                    InterruptClaim::Deferred,
+                    "source-deferred",
+                    events.clone(),
+                )),
+            )
+            .expect("deferred source should register");
+        manager
+            .enable_external_interrupt(46, 0)
+            .expect("IRQ should enable");
+        manager
+            .handle_external_interrupt(46, 0)
+            .expect("deferred IRQ should dispatch");
+        manager
+            .complete_deferred_interrupt(46)
+            .expect("deferred completion should unmask an enabled IRQ");
+
+        assert_eq!(
+            events.lock().as_slice(),
+            [
+                "controller-enable",
+                "controller-ack",
+                "source-deferred",
+                "controller-mask",
+                "controller-eoi",
+                "source-deferred-ready",
+                "controller-unmask"
+            ]
+        );
+
+        events.lock().clear();
+        manager
+            .handle_external_interrupt(46, 0)
+            .expect("second deferred IRQ should dispatch");
+        manager
+            .disable_external_interrupt(46, 0)
+            .expect("administrative disable should mask the IRQ");
+        manager
+            .complete_deferred_interrupt(46)
+            .expect("completion should consume the deferred hold");
+
+        assert_eq!(
+            events.lock().as_slice(),
+            [
+                "controller-ack",
+                "source-deferred",
+                "controller-mask",
+                "controller-eoi",
+                "source-deferred-ready",
+                "controller-mask"
+            ]
+        );
     }
 
     #[test_case]

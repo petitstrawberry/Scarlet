@@ -41,7 +41,9 @@ use crate::drivers::usb::xhci::context::{
 use crate::drivers::usb::xhci::registers::{RegisterSpace, capability, operational};
 use crate::drivers::usb::xhci::ring::{DmaTrbRing, EventRing};
 use crate::drivers::usb::xhci::trb::{Trb, TrbType};
-use crate::interrupt::{InterruptClaim, InterruptId, InterruptManager};
+use crate::interrupt::{
+    DeferredInterruptCompletion, InterruptClaim, InterruptId, InterruptManager,
+};
 use crate::mem::page::ContiguousPages;
 use crate::object::capability::{ControlOps, MemoryMappingInfo, MemoryMappingOps, Selectable};
 use crate::sync::{IrqSpinLock, IrqSpinLockGuard, Once};
@@ -50,13 +52,13 @@ use crate::vm;
 use crate::{print, println};
 use alloc::boxed::Box;
 use alloc::collections::VecDeque;
-use alloc::string::ToString;
-use alloc::sync::Arc;
+use alloc::string::{String, ToString};
+use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::any::Any;
 use core::mem::size_of;
 use core::ptr::{read_unaligned, read_volatile, write_volatile};
-use core::sync::atomic::{AtomicUsize, Ordering, fence};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering, fence};
 
 const COMMAND_RING_TRBS: usize = 256;
 const EVENT_RING_TRBS: usize = 256;
@@ -592,6 +594,13 @@ pub struct XhciController {
     devices: IrqSpinLock<Vec<UsbDevice>>,
     slot_runtime: IrqSpinLock<Vec<SlotRuntime>>,
     interrupt_id: IrqSpinLock<Option<InterruptId>>,
+    interrupt_work_pending: AtomicBool,
+    port_change_pending: AtomicBool,
+    deferred_interrupt_mode: AtomicBool,
+    deferred_interrupt_completions: IrqSpinLock<VecDeque<DeferredInterruptCompletion>>,
+    deferred_interrupt_cause_seen: AtomicBool,
+    deferred_spurious_count: AtomicU64,
+    deferred_spurious_last_report_ns: AtomicU64,
 }
 
 impl XhciController {
@@ -677,6 +686,20 @@ impl XhciController {
             devices: IrqSpinLock::new(Vec::new()),
             slot_runtime: IrqSpinLock::new(Vec::new()),
             interrupt_id: IrqSpinLock::new(None),
+            interrupt_work_pending: AtomicBool::new(false),
+            port_change_pending: AtomicBool::new(false),
+            deferred_interrupt_mode: AtomicBool::new(false),
+            // A deferred xHCI line remains controller-masked until its token
+            // completes, so one slot is normally sufficient. Reserve for the
+            // maximum possible cross-CPU delivery burst so the IRQ callback
+            // never reallocates while queuing a completion after controller
+            // EOI.
+            deferred_interrupt_completions: IrqSpinLock::new(VecDeque::with_capacity(
+                crate::environment::MAX_NUM_CPUS,
+            )),
+            deferred_interrupt_cause_seen: AtomicBool::new(false),
+            deferred_spurious_count: AtomicU64::new(0),
+            deferred_spurious_last_report_ns: AtomicU64::new(0),
         })
     }
 
@@ -1400,8 +1423,14 @@ impl XhciController {
                     if XHCI_VERBOSE_TRACE {
                         Self::log_event("Event while waiting command", event);
                     }
-                    if event.trb_type() == TrbType::TransferEvent as u8 {
-                        self.queue_pending_event(event);
+                    match event.trb_type() {
+                        value if value == TrbType::TransferEvent as u8 => {
+                            self.queue_pending_event(event);
+                        }
+                        value if value == TrbType::PortStatusChangeEvent as u8 => {
+                            self.queue_interrupt_work(true);
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -1768,7 +1797,7 @@ impl XhciController {
                         if XHCI_VERBOSE_TRACE {
                             Self::log_event("Event while waiting", event);
                         }
-                        self.handle_port_change_detected();
+                        self.queue_interrupt_work(true);
                     }
                     value if value == TrbType::CommandCompletionEvent as u8 => {
                         self.queue_pending_event(event);
@@ -3548,8 +3577,14 @@ impl XhciController {
         true
     }
 
-    fn process_interrupt_events(&self) {
-        while let Some(event) = self.poll_event() {
+    fn process_interrupt_events(&self) -> (usize, bool) {
+        let mut processed = 0usize;
+        let mut port_change = false;
+        while processed < EVENT_RING_TRBS {
+            let Some(event) = self.poll_event() else {
+                break;
+            };
+            processed += 1;
             match event.trb_type() {
                 value if value == TrbType::TransferEvent as u8 => {
                     if !self.handle_transfer_event(event) {
@@ -3557,13 +3592,223 @@ impl XhciController {
                     }
                 }
                 value if value == TrbType::PortStatusChangeEvent as u8 => {
-                    self.handle_port_change_detected();
+                    port_change = true;
                 }
                 value if value == TrbType::CommandCompletionEvent as u8 => {
                     self.queue_pending_event(event);
                 }
                 _ => {}
             }
+        }
+        (processed, port_change)
+    }
+
+    fn queue_interrupt_work(&self, port_change: bool) {
+        if port_change {
+            self.port_change_pending.store(true, Ordering::Release);
+        }
+        if !self.interrupt_work_pending.swap(true, Ordering::AcqRel) {
+            XHCI_WORKER_WAKER.wake_one();
+        }
+    }
+
+    fn process_deferred_interrupt_work(&self) -> bool {
+        if !self.interrupt_work_pending.swap(false, Ordering::AcqRel) {
+            return false;
+        }
+
+        let deferred_mode = self.deferred_interrupt_mode.load(Ordering::Acquire);
+        self.mask_primary_interrupter();
+        let status = self.operational.read_usbsts();
+        let pending = status & (USBSTS_EVENT_INTERRUPT | USBSTS_PORT_CHANGE_DETECT);
+        crate::breadcrumb::drop(
+            crate::breadcrumb::XHCI_IRQ_STATUS,
+            self.mmio_base as u64,
+            status as u64,
+        );
+        if pending != 0 {
+            self.deferred_interrupt_cause_seen
+                .store(true, Ordering::Release);
+            if (pending & USBSTS_PORT_CHANGE_DETECT) != 0 {
+                self.port_change_pending.store(true, Ordering::Release);
+            }
+            self.acknowledge_interrupt_status(pending);
+            crate::breadcrumb::drop(
+                crate::breadcrumb::XHCI_IRQ_ACK_DONE,
+                self.mmio_base as u64,
+                pending as u64,
+            );
+        }
+
+        crate::breadcrumb::drop(crate::breadcrumb::XHCI_IRQ_DRAIN, self.mmio_base as u64, 0);
+        let (processed, event_port_change) = self.process_interrupt_events();
+        if processed != 0 {
+            self.deferred_interrupt_cause_seen
+                .store(true, Ordering::Release);
+        }
+        crate::breadcrumb::drop(
+            crate::breadcrumb::XHCI_IRQ_DRAIN_DONE,
+            self.mmio_base as u64,
+            processed as u64,
+        );
+        if event_port_change {
+            self.port_change_pending.store(true, Ordering::Release);
+        }
+
+        self.process_pending_port_change(processed);
+
+        if processed == EVENT_RING_TRBS {
+            self.interrupt_work_pending.store(true, Ordering::Release);
+            return true;
+        }
+
+        if !deferred_mode {
+            self.deferred_interrupt_cause_seen
+                .store(false, Ordering::Release);
+            self.enable_primary_interrupter();
+        } else {
+            let completion_count = self.deferred_interrupt_completions.lock().len();
+            if completion_count == 0 {
+                // A recovery poll may process the event before the controller
+                // dispatch reaches `deferred_interrupt_ready`. Re-enable the
+                // device source now; a later token is safely completed by a
+                // no-cause worker pass while the core owns the line mask.
+                self.deferred_interrupt_cause_seen
+                    .store(false, Ordering::Release);
+                self.enable_primary_interrupter();
+            } else {
+                let cause_seen = self
+                    .deferred_interrupt_cause_seen
+                    .swap(false, Ordering::AcqRel);
+                // Restore the device source first. The controller line remains
+                // core-masked until every completion below succeeds, so a new
+                // event can become pending without re-entering this worker.
+                self.enable_primary_interrupter();
+                if !self.complete_deferred_interrupts(completion_count) {
+                    return true;
+                }
+                if !cause_seen {
+                    self.report_deferred_interrupt_without_cause();
+                }
+                self.deferred_spurious_count.store(0, Ordering::Relaxed);
+            }
+        }
+        true
+    }
+
+    fn process_pending_port_change(&self, processed: usize) {
+        if !self.port_change_pending.swap(false, Ordering::AcqRel) {
+            return;
+        }
+        crate::breadcrumb::drop(crate::breadcrumb::XHCI_PORT_WORK, self.mmio_base as u64, 0);
+        self.handle_port_change_detected();
+        crate::breadcrumb::drop(
+            crate::breadcrumb::XHCI_PORT_WORK_DONE,
+            self.mmio_base as u64,
+            processed as u64,
+        );
+    }
+
+    fn complete_deferred_interrupts(&self, completion_count: usize) -> bool {
+        for _ in 0..completion_count {
+            let Some(mut completion) = self.deferred_interrupt_completions.lock().pop_front()
+            else {
+                return true;
+            };
+            if let Err(error) = completion.complete() {
+                let interrupt_id = completion.interrupt_id();
+                self.deferred_interrupt_completions
+                    .lock()
+                    .push_front(completion);
+                self.report_deferred_completion_failure(interrupt_id, error);
+                return false;
+            }
+        }
+        true
+    }
+
+    fn report_deferred_interrupt_without_cause(&self) {
+        let Some(count) = self.take_deferred_diagnostic_report_slot() else {
+            return;
+        };
+        crate::emergency_println!(
+            "[xHCI] deferred IRQ observed no xHCI cause: irq={:?} mmio={:#x} count={}",
+            *self.interrupt_id.lock(),
+            self.mmio_base,
+            count,
+        );
+    }
+
+    fn report_deferred_completion_failure(
+        &self,
+        interrupt_id: InterruptId,
+        error: crate::interrupt::InterruptError,
+    ) {
+        let Some(count) = self.take_deferred_diagnostic_report_slot() else {
+            return;
+        };
+        crate::emergency_println!(
+            "[xHCI] deferred IRQ completion failed: irq={} mmio={:#x} error={} count={}",
+            interrupt_id,
+            self.mmio_base,
+            error,
+            count,
+        );
+    }
+
+    fn take_deferred_diagnostic_report_slot(&self) -> Option<u64> {
+        let count = self
+            .deferred_spurious_count
+            .fetch_add(1, Ordering::Relaxed)
+            .saturating_add(1);
+        let now_ns = get_time_ns();
+        let last_report_ns = self
+            .deferred_spurious_last_report_ns
+            .load(Ordering::Relaxed);
+        if (count == 1 || count.is_power_of_two())
+            && (last_report_ns == 0 || now_ns.saturating_sub(last_report_ns) >= 1_000_000_000)
+            && self
+                .deferred_spurious_last_report_ns
+                .compare_exchange(
+                    last_report_ns,
+                    now_ns.max(1),
+                    Ordering::AcqRel,
+                    Ordering::Relaxed,
+                )
+                .is_ok()
+        {
+            Some(count)
+        } else {
+            None
+        }
+    }
+
+    fn mask_primary_interrupter(&self) {
+        // SAFETY: `runtime_base` refers to this live xHCI controller's mapped
+        // runtime register window. Writing IMAN.IP clears the sampled pending
+        // state while IMAN.IE=0 prevents new delivery during the worker drain.
+        unsafe {
+            write_volatile(
+                (self.regs.runtime_base + registers::runtime::IR0_IMAN) as *mut u32,
+                1,
+            );
+        }
+    }
+
+    fn acknowledge_interrupt_status(&self, pending: u32) {
+        self.operational.write_usbsts(pending);
+    }
+
+    fn enable_primary_interrupter(&self) {
+        // SAFETY: Same mapped runtime-register invariant as
+        // `mask_primary_interrupter`. IMAN.IP is W1C, so leave it zero here:
+        // an event that arrived during draining remains pending when IE is
+        // restored and triggers another worker pass.
+        unsafe {
+            write_volatile(
+                (self.regs.runtime_base + registers::runtime::IR0_IMAN) as *mut u32,
+                1 << 1,
+            );
         }
     }
 
@@ -4302,24 +4547,70 @@ fn determine_bar_size(
 
 impl UsbHostController for XhciController {
     fn poll_events(&self) {
-        let status = self.operational.read_usbsts();
-        let pending = status & (USBSTS_EVENT_INTERRUPT | USBSTS_PORT_CHANGE_DETECT);
-        if pending != 0 {
-            let port_change = (pending & USBSTS_PORT_CHANGE_DETECT) != 0;
-            self.operational.write_usbsts(pending);
-            self.process_interrupt_events();
-            if port_change {
-                self.handle_port_change_detected();
-            }
-        }
+        self.queue_interrupt_work(false);
     }
 }
 
 /// xHCI driver instance container
 static NEXT_USB_HOST_ID: AtomicUsize = AtomicUsize::new(1);
 static XHCI_POLL_HANDLER: Once<Arc<XhciPollHandler>> = Once::new();
+static XHCI_WORKER_STARTED: AtomicBool = AtomicBool::new(false);
+static XHCI_WORKER_WAKER: crate::sync::Waker =
+    crate::sync::Waker::new_uninterruptible("xhci-worker");
+static XHCI_WORKER_CONTROLLERS: Once<IrqSpinLock<Vec<Weak<XhciController>>>> = Once::new();
 
 struct XhciPollHandler;
+
+fn xhci_worker_controllers() -> &'static IrqSpinLock<Vec<Weak<XhciController>>> {
+    XHCI_WORKER_CONTROLLERS.call_once(|| IrqSpinLock::new(Vec::new()))
+}
+
+fn xhci_worker_entry() {
+    loop {
+        let controllers = {
+            let mut registered = xhci_worker_controllers().lock();
+            let mut live = Vec::with_capacity(registered.len());
+            registered.retain(|weak| {
+                if let Some(controller) = weak.upgrade() {
+                    live.push(controller);
+                    true
+                } else {
+                    false
+                }
+            });
+            live
+        };
+
+        let mut processed = false;
+        for controller in controllers {
+            processed |= controller.process_deferred_interrupt_work();
+        }
+        if processed {
+            continue;
+        }
+
+        let Some(task) = crate::task::mytask() else {
+            crate::arch::instruction::idle();
+        };
+        XHCI_WORKER_WAKER.wait(task.get_id(), task.get_trapframe());
+    }
+}
+
+fn register_xhci_worker_controller(controller: &Arc<XhciController>) {
+    xhci_worker_controllers()
+        .lock()
+        .push(Arc::downgrade(controller));
+    if XHCI_WORKER_STARTED
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return;
+    }
+
+    let task = crate::task::new_kernel_task(String::from("xhci-worker"), 1, xhci_worker_entry);
+    task.init();
+    crate::sched::scheduler::add_task(task, crate::arch::get_cpu().get_cpuid());
+}
 
 fn xhci_poll_handler() -> Arc<dyn TimerHandler> {
     XHCI_POLL_HANDLER
@@ -4349,27 +4640,52 @@ impl InterruptCapableDevice for XhciController {
     }
 
     fn claim_interrupt(&self) -> crate::interrupt::InterruptResult<InterruptClaim> {
+        if self.deferred_interrupt_mode.load(Ordering::Acquire) {
+            crate::breadcrumb::drop(crate::breadcrumb::XHCI_IRQ_DONE, self.mmio_base as u64, 0);
+            return Ok(InterruptClaim::Deferred);
+        }
+
         let status = self.operational.read_usbsts();
         let pending = status & (USBSTS_EVENT_INTERRUPT | USBSTS_PORT_CHANGE_DETECT);
+        crate::breadcrumb::drop(
+            crate::breadcrumb::XHCI_IRQ_STATUS,
+            self.mmio_base as u64,
+            status as u64,
+        );
         if pending == 0 {
             return Ok(InterruptClaim::NotMine);
         }
 
         let port_change = (pending & USBSTS_PORT_CHANGE_DETECT) != 0;
-        self.operational.write_usbsts(pending);
+        self.mask_primary_interrupter();
+        self.acknowledge_interrupt_status(pending);
+        crate::breadcrumb::drop(
+            crate::breadcrumb::XHCI_IRQ_ACK_DONE,
+            self.mmio_base as u64,
+            pending as u64,
+        );
 
-        unsafe {
-            write_volatile(
-                (self.regs.runtime_base + registers::runtime::IR0_IMAN) as *mut u32,
-                (1 << 1) | 1, // keep IE, clear IP
+        if port_change {
+            crate::breadcrumb::drop(
+                crate::breadcrumb::XHCI_IRQ_PORT,
+                self.mmio_base as u64,
+                status as u64,
             );
         }
-
-        self.process_interrupt_events();
-        if port_change {
-            self.handle_port_change_detected();
-        }
+        self.queue_interrupt_work(port_change);
+        crate::breadcrumb::drop(
+            crate::breadcrumb::XHCI_IRQ_DONE,
+            self.mmio_base as u64,
+            pending as u64,
+        );
         Ok(InterruptClaim::Handled)
+    }
+
+    fn deferred_interrupt_ready(&self, completion: DeferredInterruptCompletion) {
+        self.deferred_interrupt_completions
+            .lock()
+            .push_back(completion);
+        self.queue_interrupt_work(false);
     }
 }
 
@@ -4392,6 +4708,7 @@ fn initialize_xhci_controller(
         Err(error) => println!("[xHCI] Enumeration deferred: {}", error),
     }
     controller.attach_mass_storage_devices();
+    register_xhci_worker_controller(&controller);
 
     Ok(controller)
 }
@@ -4431,13 +4748,16 @@ pub fn bind_xhci_mmio(
     let controller = initialize_xhci_controller(mmio_vaddr, dma_context)?;
 
     if let Some(interrupt_id) = interrupt {
+        controller
+            .deferred_interrupt_mode
+            .store(true, Ordering::Release);
         InterruptManager::global()
             .register_interrupt_device(interrupt_id, controller.clone())
             .map_err(|_| "Failed to register xHCI interrupt device")?;
+        controller.enable_interrupts(interrupt_id)?;
         InterruptManager::global()
             .enable_external_interrupt(interrupt_id, crate::arch::get_cpu().get_cpuid() as u32)
             .map_err(|_| "Failed to enable xHCI interrupt")?;
-        controller.enable_interrupts(interrupt_id)?;
         println!("[xHCI] Registered IRQ {}", interrupt_id);
     } else {
         println!("[xHCI] No interrupt provided for platform controller");
