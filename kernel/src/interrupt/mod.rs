@@ -712,7 +712,11 @@ impl InterruptManager {
                     u64::from(interrupt_id),
                     u64::from(pending.mapping.hwirq),
                 );
-                match source.claim_interrupt() {
+                let claim_result = {
+                    let _callback_guard = crate::sync::PreemptGuard::new();
+                    source.claim_interrupt()
+                };
+                match claim_result {
                     Ok(claim) => {
                         handled |= claim.is_handled();
                         if claim.is_deferred() {
@@ -754,6 +758,7 @@ impl InterruptManager {
 
             self.finish_irq_delivery(pending)?;
             for (source, completion) in deferred {
+                let _callback_guard = crate::sync::PreemptGuard::new();
                 source.deferred_interrupt_ready(completion);
             }
             if let Some(error) = first_error {
@@ -774,7 +779,10 @@ impl InterruptManager {
                     u64::from(interrupt_id),
                     u64::from(pending.mapping.hwirq),
                 );
-                let claim = handler_fn(&mut handle)?;
+                let claim = {
+                    let _callback_guard = crate::sync::PreemptGuard::new();
+                    handler_fn(&mut handle)?
+                };
                 crate::breadcrumb::drop(
                     crate::breadcrumb::IRQ_SOURCE_DONE,
                     u64::from(interrupt_id),

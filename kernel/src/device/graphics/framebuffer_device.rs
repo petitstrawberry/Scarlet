@@ -15,9 +15,17 @@
 
 extern crate alloc;
 
-use crate::sync::{IrqRwSpinLock, IrqSpinLock};
-use alloc::{collections::BTreeMap, sync::Arc, vec, vec::Vec};
-use core::any::Any;
+use alloc::{
+    collections::BTreeMap,
+    string::String,
+    sync::{Arc, Weak},
+    vec,
+    vec::Vec,
+};
+use core::{
+    any::Any,
+    sync::atomic::{AtomicBool, Ordering},
+};
 
 use crate::device::{
     Device, DeviceType,
@@ -32,6 +40,7 @@ use crate::object::capability::memory_mapping::{
 use crate::object::capability::selectable::Selectable;
 use crate::object::capability::{ControlOps, MemoryMappingOps};
 use crate::sched::scheduler::get_task_by_id;
+use crate::sync::{IrqRwSpinLock, IrqSpinLock, Once, Waker};
 use crate::timer::{TimerHandler, add_timer, get_time_ns, ms_to_ns};
 use crate::vm::addr::phys_to_virt;
 use crate::vm::vmem::MemoryAttribute;
@@ -250,8 +259,73 @@ struct FbCompatFlushHandler {
     fb_resource: Arc<FramebufferResource>,
     mappings: Arc<IrqRwSpinLock<BTreeMap<(usize, usize), FramebufferMapping>>>,
     dirty_state: Arc<IrqSpinLock<FbCompatDirtyState>>,
+    flush_pending: AtomicBool,
     #[cfg(test)]
     device_manager_addr: Option<usize>,
+}
+
+static FB_COMPAT_FLUSH_WORKER_STARTED: AtomicBool = AtomicBool::new(false);
+static FB_COMPAT_FLUSH_WORKER_WAKER: Waker = Waker::new_uninterruptible("fb-compat-flush");
+static FB_COMPAT_FLUSH_HANDLERS: Once<IrqSpinLock<Vec<Weak<FbCompatFlushHandler>>>> = Once::new();
+
+fn fb_compat_flush_handlers() -> &'static IrqSpinLock<Vec<Weak<FbCompatFlushHandler>>> {
+    FB_COMPAT_FLUSH_HANDLERS.call_once(|| IrqSpinLock::new(Vec::new()))
+}
+
+fn process_deferred_fb_compat_flushes() -> bool {
+    let handlers = {
+        let mut registered = fb_compat_flush_handlers().lock();
+        let mut live = Vec::with_capacity(registered.len());
+        registered.retain(|weak| {
+            if let Some(handler) = weak.upgrade() {
+                live.push(handler);
+                true
+            } else {
+                false
+            }
+        });
+        live
+    };
+
+    let mut processed = false;
+    for handler in handlers {
+        if handler.flush_pending.swap(false, Ordering::AcqRel) {
+            processed = true;
+            handler.process_deferred_flush();
+        }
+    }
+    processed
+}
+
+fn fb_compat_flush_worker_entry() {
+    loop {
+        while process_deferred_fb_compat_flushes() {}
+
+        let Some(task) = crate::task::mytask() else {
+            crate::arch::instruction::idle();
+        };
+        FB_COMPAT_FLUSH_WORKER_WAKER.wait(task.get_id(), task.get_trapframe());
+    }
+}
+
+fn register_fb_compat_flush_handler(handler: &Arc<FbCompatFlushHandler>) {
+    fb_compat_flush_handlers()
+        .lock()
+        .push(Arc::downgrade(handler));
+    if FB_COMPAT_FLUSH_WORKER_STARTED
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return;
+    }
+
+    let task = crate::task::new_kernel_task(
+        String::from("fb-compat-flush"),
+        1,
+        fb_compat_flush_worker_entry,
+    );
+    task.init();
+    crate::sched::scheduler::add_task(task, crate::arch::get_cpu().get_cpuid());
 }
 
 /// Framebuffer character device implementation
@@ -302,9 +376,12 @@ impl FramebufferCharDevice {
             fb_resource: Arc::clone(&fb_resource),
             mappings: Arc::clone(&mappings),
             dirty_state: Arc::clone(&dirty_state),
+            flush_pending: AtomicBool::new(false),
             #[cfg(test)]
             device_manager_addr: None,
         });
+        #[cfg(not(test))]
+        register_fb_compat_flush_handler(&flush_handler);
 
         Self {
             fb_resource,
@@ -332,6 +409,7 @@ impl FramebufferCharDevice {
             fb_resource: Arc::clone(&fb_resource),
             mappings: Arc::clone(&mappings),
             dirty_state: Arc::clone(&dirty_state),
+            flush_pending: AtomicBool::new(false),
             device_manager_addr: Some(device_manager_addr),
         });
 
@@ -441,6 +519,9 @@ impl FramebufferCharDevice {
         state.dirty = false;
         state.timer_armed = false;
         state.generation = state.generation.wrapping_add(1);
+        self.flush_handler
+            .flush_pending
+            .store(false, Ordering::Release);
     }
 
     fn mapping_for_fault(
@@ -582,6 +663,15 @@ impl FbCompatFlushHandler {
 
         Ok(())
     }
+
+    fn process_deferred_flush(&self) {
+        if let Ok(info) = self.current_framebuffer_info() {
+            if info.physical_addr != 0 {
+                let _ = self.trigger_display_update(DisplayRegion::full(&info.config));
+                FramebufferCharDevice::write_protect_mappings(&self.mappings, &info);
+            }
+        }
+    }
 }
 
 impl TimerHandler for FbCompatFlushHandler {
@@ -594,6 +684,7 @@ impl TimerHandler for FbCompatFlushHandler {
                 state.timer_armed = false;
                 if state.dirty {
                     state.dirty = false;
+                    self.flush_pending.store(true, Ordering::Release);
                     true
                 } else {
                     false
@@ -605,12 +696,7 @@ impl TimerHandler for FbCompatFlushHandler {
             return;
         }
 
-        if let Ok(info) = self.current_framebuffer_info() {
-            if info.physical_addr != 0 {
-                let _ = self.trigger_display_update(DisplayRegion::full(&info.config));
-                FramebufferCharDevice::write_protect_mappings(&self.mappings, &info);
-            }
-        }
+        FB_COMPAT_FLUSH_WORKER_WAKER.wake_one();
     }
 }
 
@@ -1261,10 +1347,13 @@ impl FramebufferCharDevice {
         // are visible to the display controller.
         // TODO: Implement actual cache flushing logic
 
+        // Invalidate any delayed flush before starting the synchronous one.
+        // A write that races after this point will arm a fresh generation.
+        self.disarm_legacy_dirty_timer();
+
         // Trigger display controller update if needed
         // For some hardware, writing to framebuffer memory doesn't immediately update the display
         self.trigger_display_update(DisplayRegion::full(&info.config))?;
-        self.disarm_legacy_dirty_timer();
         Self::write_protect_mappings(&self.mappings, &info);
 
         Ok(0) // Success

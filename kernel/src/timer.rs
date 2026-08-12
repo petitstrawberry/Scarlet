@@ -948,6 +948,7 @@ fn drain_local_due_timers() {
                 timer.id,
                 timer.context as u64,
             );
+            let _callback_guard = crate::sync::PreemptGuard::new();
             handler.on_timer_expired(timer.context);
             #[cfg(feature = "sync-debug")]
             crate::breadcrumb::drop(
