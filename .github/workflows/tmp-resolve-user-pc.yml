@@ -6,7 +6,7 @@ on:
       - tmp/resolve-user-pc-272bd4-20260812
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   resolve:
@@ -26,6 +26,8 @@ jobs:
           swap-storage: true
 
       - uses: actions/checkout@v4
+        with:
+          ref: tmp/resolve-user-pc-272bd4-20260812
 
       - uses: cachix/install-nix-action@v31
         with:
@@ -40,17 +42,15 @@ jobs:
         with:
           name: ${{ env.CACHIX_CACHE_NAME }}
 
-      - name: Build AArch64 userspace debug binaries
-        run: nix develop .#default --command cargo make build-userbin-debug-aarch64
-
-      - name: Build AArch64 userspace release binaries
-        run: nix develop .#default --command cargo make build-userbin-release-aarch64
-
-      - name: Resolve 0x272bd0 and 0x272bd4 in every AArch64 ELF
+      - name: Build AArch64 userspace binaries
         run: |
-          nix develop .#default --command python3 - <<'PY'
+          nix develop .#default --command cargo make build-userbin-debug-aarch64
+          nix develop .#default --command cargo make build-userbin-release-aarch64
+
+      - name: Resolve sampled userspace PC
+        run: |
+          nix develop .#default --command python3 - <<'PY' > tmp-pc-resolution.txt
           import os
-          import re
           import subprocess
 
           addresses = (0x272BD0, 0x272BD4)
@@ -69,18 +69,17 @@ jobs:
               header = run(["llvm-readelf", "-h", path])
               return "ELF" in header and "AArch64" in header
 
-          def executable_range_contains(path, address):
-              sections = run(["llvm-objdump", "-h", path])
-              for line in sections.splitlines():
+          def text_contains(path, address):
+              for line in run(["llvm-objdump", "-h", path]).splitlines():
                   fields = line.split()
-                  if len(fields) < 5 or not fields[0].isdigit():
+                  if len(fields) < 5 or not fields[0].isdigit() or "TEXT" not in line:
                       continue
                   try:
                       size = int(fields[2], 16)
                       vma = int(fields[3], 16)
                   except ValueError:
                       continue
-                  if "TEXT" in line and vma <= address < vma + size:
+                  if vma <= address < vma + size:
                       return True
               return False
 
@@ -92,50 +91,53 @@ jobs:
               for directory, _, filenames in os.walk(root):
                   for filename in filenames:
                       path = os.path.join(directory, filename)
-                      try:
-                          stat = os.stat(path)
-                      except OSError:
-                          continue
-                      if stat.st_size < 4096 or path in seen:
+                      if path in seen:
                           continue
                       seen.add(path)
-                      if not is_aarch64_elf(path):
+                      try:
+                          if os.path.getsize(path) < 4096 or not is_aarch64_elf(path):
+                              continue
+                      except OSError:
                           continue
-                      if any(executable_range_contains(path, address) for address in addresses):
+                      if any(text_contains(path, address) for address in addresses):
                           candidates.append(path)
 
-          print("=== PC_RESOLUTION_BEGIN ===")
           print(f"candidate_count={len(candidates)}")
           for path in sorted(candidates):
-              print(f"\n=== CANDIDATE {path} ===")
-              print("-- build/profile hints --")
-              print(path)
-              print("-- addr2line --")
-              print(run(["llvm-addr2line", "-afiC", "-e", path, *[hex(a) for a in addresses]]).rstrip())
-
+              print(f"\n=== {path} ===")
+              print("addr2line:")
+              print(run(["llvm-addr2line", "-afiC", "-e", path, *map(hex, addresses)]).rstrip())
+              print("nearest symbols:")
               symbols = []
               for line in run(["llvm-nm", "-n", "-C", "--defined-only", path]).splitlines():
                   fields = line.split(maxsplit=2)
                   if len(fields) < 2:
                       continue
                   try:
-                      address = int(fields[0], 16)
+                      value = int(fields[0], 16)
                   except ValueError:
                       continue
-                  symbols.append((address, line))
+                  symbols.append((value, line))
               for target in addresses:
-                  before = [entry for entry in symbols if entry[0] <= target]
-                  after = [entry for entry in symbols if entry[0] > target]
-                  print(f"-- nearest symbols for {target:#x} --")
-                  for _, line in before[-4:]:
+                  print(f"target={target:#x}")
+                  before = [item for item in symbols if item[0] <= target]
+                  after = [item for item in symbols if item[0] > target]
+                  for _, line in before[-6:]:
                       print(line)
-                  for _, line in after[:4]:
+                  for _, line in after[:6]:
                       print(line)
-
-              print("-- disassembly --")
+              print("disassembly:")
               print(run([
                   "llvm-objdump", "-d", "-C", "--no-show-raw-insn",
-                  "--start-address=0x272b80", "--stop-address=0x272c40", path,
+                  "--start-address=0x272b80", "--stop-address=0x272c50", path,
               ]).rstrip())
-          print("=== PC_RESOLUTION_END ===")
           PY
+
+      - name: Publish result and remove temporary workflow
+        run: |
+          rm .github/workflows/tmp-resolve-user-pc.yml
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add -A .github/workflows/tmp-resolve-user-pc.yml tmp-pc-resolution.txt
+          git commit -m "Record temporary userspace PC resolution"
+          git push origin HEAD:tmp/resolve-user-pc-272bd4-20260812
