@@ -1,0 +1,141 @@
+name: Temporary userspace PC resolver
+
+on:
+  push:
+    branches:
+      - tmp/resolve-user-pc-272bd4-20260812
+
+permissions:
+  contents: read
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    env:
+      CACHIX_CACHE_NAME: ${{ vars.CACHIX_CACHE_NAME }}
+    steps:
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+
+      - uses: actions/checkout@v4
+
+      - uses: cachix/install-nix-action@v31
+        with:
+          github_access_token: ${{ secrets.GITHUB_TOKEN }}
+          extra_nix_config: |
+            accept-flake-config = true
+            extra-substituters = https://scarlet-rust-toolchain.cachix.org
+            extra-trusted-public-keys = scarlet-rust-toolchain.cachix.org-1:p+coBExi0nNTIvWF/oM9H9/1/GhwFtqGZ2Vs+4pYl6o=
+
+      - uses: cachix/cachix-action@v17
+        if: env.CACHIX_CACHE_NAME != ''
+        with:
+          name: ${{ env.CACHIX_CACHE_NAME }}
+
+      - name: Build AArch64 userspace debug binaries
+        run: nix develop .#default --command cargo make build-userbin-debug-aarch64
+
+      - name: Build AArch64 userspace release binaries
+        run: nix develop .#default --command cargo make build-userbin-release-aarch64
+
+      - name: Resolve 0x272bd0 and 0x272bd4 in every AArch64 ELF
+        run: |
+          nix develop .#default --command python3 - <<'PY'
+          import os
+          import re
+          import subprocess
+
+          addresses = (0x272BD0, 0x272BD4)
+          roots = ("user", "dist", "projects")
+
+          def run(args):
+              return subprocess.run(
+                  args,
+                  text=True,
+                  stdout=subprocess.PIPE,
+                  stderr=subprocess.STDOUT,
+                  check=False,
+              ).stdout
+
+          def is_aarch64_elf(path):
+              header = run(["llvm-readelf", "-h", path])
+              return "ELF" in header and "AArch64" in header
+
+          def executable_range_contains(path, address):
+              sections = run(["llvm-objdump", "-h", path])
+              for line in sections.splitlines():
+                  fields = line.split()
+                  if len(fields) < 5 or not fields[0].isdigit():
+                      continue
+                  try:
+                      size = int(fields[2], 16)
+                      vma = int(fields[3], 16)
+                  except ValueError:
+                      continue
+                  if "TEXT" in line and vma <= address < vma + size:
+                      return True
+              return False
+
+          candidates = []
+          seen = set()
+          for root in roots:
+              if not os.path.isdir(root):
+                  continue
+              for directory, _, filenames in os.walk(root):
+                  for filename in filenames:
+                      path = os.path.join(directory, filename)
+                      try:
+                          stat = os.stat(path)
+                      except OSError:
+                          continue
+                      if stat.st_size < 4096 or path in seen:
+                          continue
+                      seen.add(path)
+                      if not is_aarch64_elf(path):
+                          continue
+                      if any(executable_range_contains(path, address) for address in addresses):
+                          candidates.append(path)
+
+          print("=== PC_RESOLUTION_BEGIN ===")
+          print(f"candidate_count={len(candidates)}")
+          for path in sorted(candidates):
+              print(f"\n=== CANDIDATE {path} ===")
+              print("-- build/profile hints --")
+              print(path)
+              print("-- addr2line --")
+              print(run(["llvm-addr2line", "-afiC", "-e", path, *[hex(a) for a in addresses]]).rstrip())
+
+              symbols = []
+              for line in run(["llvm-nm", "-n", "-C", "--defined-only", path]).splitlines():
+                  fields = line.split(maxsplit=2)
+                  if len(fields) < 2:
+                      continue
+                  try:
+                      address = int(fields[0], 16)
+                  except ValueError:
+                      continue
+                  symbols.append((address, line))
+              for target in addresses:
+                  before = [entry for entry in symbols if entry[0] <= target]
+                  after = [entry for entry in symbols if entry[0] > target]
+                  print(f"-- nearest symbols for {target:#x} --")
+                  for _, line in before[-4:]:
+                      print(line)
+                  for _, line in after[:4]:
+                      print(line)
+
+              print("-- disassembly --")
+              print(run([
+                  "llvm-objdump", "-d", "-C", "--no-show-raw-insn",
+                  "--start-address=0x272b80", "--stop-address=0x272c40", path,
+              ]).rstrip())
+          print("=== PC_RESOLUTION_END ===")
+          PY
