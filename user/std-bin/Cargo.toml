@@ -122,6 +122,10 @@ name = "tcp_server"
 path = "src/tcp_server.rs"
 
 [[bin]]
+name = "nc"
+path = "src/nc.rs"
+
+[[bin]]
 name = "udp_client"
 path = "src/udp_client.rs"
 
