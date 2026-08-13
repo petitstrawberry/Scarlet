@@ -341,8 +341,8 @@ impl EthernetLayer {
         context.set("eth_src_mac", &header.src_mac);
         context.set("eth_dst_mac", &header.dest_mac);
 
-        let protocols = self.protocols.read();
-        if let Some(handler) = protocols.get(&header.ether_type) {
+        let handler = self.protocols.read().get(&header.ether_type).cloned();
+        if let Some(handler) = handler {
             handler.receive(payload, Some(&context))
         } else {
             Ok(())
@@ -502,12 +502,14 @@ impl NetworkLayer for EthernetLayer {
 
             let payload = &frame[ETHERNET_HEADER_SIZE..];
 
-            let mut stats = self.stats.write();
-            stats.packets_received += 1;
-            stats.bytes_received += frame.len() as u64;
+            {
+                let mut stats = self.stats.write();
+                stats.packets_received += 1;
+                stats.bytes_received += frame.len() as u64;
+            }
 
-            let protocols = self.protocols.read();
-            if let Some(handler) = protocols.get(&header.ether_type) {
+            let handler = self.protocols.read().get(&header.ether_type).cloned();
+            if let Some(handler) = handler {
                 handler.receive(payload, None)
             } else {
                 Ok(())

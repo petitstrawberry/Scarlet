@@ -48,20 +48,20 @@
         "type": "github"
       }
     },
-    "qemu-cocoa-virgl": {
+    "qemu-scarlet": {
       "flake": false,
       "locked": {
-        "lastModified": 1785229455,
-        "narHash": "sha256-8Yyr03AhLC6MM0vNCrLI4I1IPyoZykiFQNafQNjKEfE=",
-        "ref": "cocoa-virgl",
-        "rev": "228e2ddd99b0171009d85f9ff343b93ee5d64605",
-        "revCount": 131582,
+        "lastModified": 1786627824,
+        "narHash": "sha256-oGjf8D1uboa6ivd+Xc8RthSFG5nnmxTHt38Opymz0wg=",
+        "ref": "scarlet",
+        "rev": "c8ca009e8fe6ce5d92bc88563006bdacc9a13b92",
+        "revCount": 131587,
         "submodules": true,
         "type": "git",
         "url": "https://gitlab.com/petitstrawberry/qemu.git"
       },
       "original": {
-        "ref": "cocoa-virgl",
+        "ref": "scarlet",
         "submodules": true,
         "type": "git",
         "url": "https://gitlab.com/petitstrawberry/qemu.git"
@@ -71,7 +71,7 @@
       "inputs": {
         "macvdmtool-src": "macvdmtool-src",
         "nixpkgs": "nixpkgs",
-        "qemu-cocoa-virgl": "qemu-cocoa-virgl",
+        "qemu-scarlet": "qemu-scarlet",
         "scarlet-rust-toolchain": "scarlet-rust-toolchain",
         "scarlet-sdk": "scarlet-sdk"
       }

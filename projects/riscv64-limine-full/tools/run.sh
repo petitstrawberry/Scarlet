@@ -69,6 +69,7 @@ QEMU_MACHINE="${SCARLET_QEMU_MACHINE_RV64:-virt,acpi=off}"
 QEMU_DISPLAY="${SCARLET_QEMU_DISPLAY:-vnc=:0}"
 QEMU_GPU="${SCARLET_QEMU_GPU:-virtio-gpu-pci}"
 QEMU_NET="${SCARLET_QEMU_NET:-1}"
+QEMU_USB_NCM="${SCARLET_QEMU_USB_NCM:-0}"
 QEMU_INPUT="${SCARLET_QEMU_INPUT:-1}"
 if [ -n "${SCARLET_QEMU_ROOTFS_TRANSPORT:-}" ]; then
     QEMU_ROOTFS_TRANSPORT="$SCARLET_QEMU_ROOTFS_TRANSPORT"
@@ -263,7 +264,13 @@ if [ "$QEMU_NET" = "1" ] || [ "$QEMU_NET" = "true" ]; then
             fi
         done
     fi
-    QEMU_NET_ARGS=(-netdev "$QEMU_NETDEV" -device virtio-net-pci,netdev=net0,bus=pcie.0)
+    QEMU_NET_ARGS=(-netdev "$QEMU_NETDEV")
+    if [ "$QEMU_USB_NCM" != "1" ] && [ "$QEMU_USB_NCM" != "true" ]; then
+        QEMU_NET_ARGS+=(-device virtio-net-pci,netdev=net0,bus=pcie.0)
+    fi
+elif [ "$QEMU_USB_NCM" = "1" ] || [ "$QEMU_USB_NCM" = "true" ]; then
+    echo "Error: SCARLET_QEMU_USB_NCM requires SCARLET_QEMU_NET=1"
+    exit 1
 fi
 
 QEMU_INPUT_ARGS=()
@@ -306,6 +313,7 @@ ensure_qemu_usb_storage_image() {
     fi
 }
 
+QEMU_XHCI_ARGS=()
 QEMU_USB_STORAGE_ARGS=()
 if [ "$QEMU_USB_STORAGE" = "1" ] || [ "$QEMU_USB_STORAGE" = "true" ]; then
     if ! qemu-system-riscv64 -device help 2>/dev/null | grep -q 'qemu-xhci'; then
@@ -314,11 +322,31 @@ if [ "$QEMU_USB_STORAGE" = "1" ] || [ "$QEMU_USB_STORAGE" = "true" ]; then
     fi
     ensure_qemu_usb_storage_image "$QEMU_USB_STORAGE_IMAGE" "$QEMU_USB_STORAGE_SIZE"
     echo "Enabling QEMU USB storage: $QEMU_USB_STORAGE_IMAGE"
+    QEMU_XHCI_ARGS=(-device qemu-xhci,id=xhci,bus=pcie.0)
     QEMU_USB_STORAGE_ARGS=(
-        -device qemu-xhci,id=xhci,bus=pcie.0
         -drive id=usb_storage0,file="$QEMU_USB_STORAGE_IMAGE",format=raw,if=none
         -device usb-storage,bus=xhci.0,drive=usb_storage0,removable=on
     )
+fi
+
+QEMU_USB_NCM_ARGS=()
+if [ "$QEMU_USB_NCM" = "1" ] || [ "$QEMU_USB_NCM" = "true" ]; then
+    if ! qemu-system-riscv64 -device help 2>/dev/null | grep -q 'usb-ncm'; then
+        echo "Error: qemu-system-riscv64 does not provide usb-ncm"
+        exit 1
+    fi
+    USB_NCM_MAC="${SCARLET_QEMU_USB_NCM_MAC:-52:54:00:12:34:57}"
+    USB_NCM_PCAP="${SCARLET_QEMU_USB_NCM_PCAP-$PROJECT_DIR/.scarlet/usb-ncm-riscv64.pcap}"
+    USB_NCM_DEVICE="usb-ncm,id=ncm0,bus=xhci.0,netdev=net0,mac=$USB_NCM_MAC"
+    if [ -n "$USB_NCM_PCAP" ]; then
+        USB_NCM_DEVICE="$USB_NCM_DEVICE,pcap=$USB_NCM_PCAP"
+        echo "QEMU CDC-NCM USB capture: $USB_NCM_PCAP"
+    fi
+    echo "Using QEMU CDC-NCM network device (MAC $USB_NCM_MAC)"
+    if [ ${#QEMU_XHCI_ARGS[@]} -eq 0 ]; then
+        QEMU_XHCI_ARGS=(-device qemu-xhci,id=xhci,bus=pcie.0)
+    fi
+    QEMU_USB_NCM_ARGS=(-device "$USB_NCM_DEVICE")
 fi
 
 QEMU_MEMORY_ARGS=(-m "$QEMU_MEMORY")
@@ -416,7 +444,9 @@ QEMU_CMD=(qemu-system-riscv64
     "${QEMU_GPU_ARGS[@]}" \
     "${QEMU_NET_ARGS[@]}" \
     "${QEMU_AUDIO_ARGS[@]}" \
+    "${QEMU_XHCI_ARGS[@]}" \
     "${QEMU_USB_STORAGE_ARGS[@]}" \
+    "${QEMU_USB_NCM_ARGS[@]}" \
     "${QEMU_VHOST_USER_VIDEO_ARGS[@]}" \
     "${QEMU_INPUT_ARGS[@]}" \
     -device virtio-rng-device,bus=virtio-mmio-bus.5 \

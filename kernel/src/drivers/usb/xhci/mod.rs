@@ -25,6 +25,10 @@ use crate::device::pci::driver::{PciDeviceDriver, PciDeviceId};
 use crate::device::pci::intx::PciIntxInterruptSource;
 use crate::device::usb::UsbHostController;
 use crate::driver_initcall;
+use crate::drivers::usb::cdc_ncm::{
+    CdcNcmDevice, CdcNcmInterfaceConfig, CdcNcmParameters, CdcNcmTransport, ntb_input_size_payload,
+    parse_configuration as parse_cdc_ncm_configuration, parse_mac_address, validate_mac_address,
+};
 use crate::drivers::usb::core::descriptor::{
     ConfigurationDescriptor, DescriptorHeader, DeviceDescriptor, EndpointDescriptor,
     InterfaceDescriptor,
@@ -46,7 +50,7 @@ use crate::interrupt::{
 };
 use crate::mem::page::ContiguousPages;
 use crate::object::capability::{ControlOps, MemoryMappingInfo, MemoryMappingOps, Selectable};
-use crate::sync::{IrqSpinLock, IrqSpinLockGuard, Once};
+use crate::sync::{IrqSpinLock, IrqSpinLockGuard, Mutex, Once};
 use crate::timer::{TimerHandler, add_timer, get_time_ns, ms_to_ns};
 use crate::vm;
 use crate::{print, println};
@@ -77,12 +81,20 @@ const USB_REQ_SET_FEATURE: u8 = 0x03;
 const USB_REQ_SET_CONFIGURATION: u8 = 0x09;
 const USB_REQ_SET_INTERFACE: u8 = 0x0b;
 const USB_REQ_SET_PROTOCOL: u8 = 0x0b;
+const USB_CDC_GET_NTB_PARAMETERS: u8 = 0x80;
+const USB_CDC_GET_NET_ADDRESS: u8 = 0x81;
+const USB_CDC_SET_NTB_FORMAT: u8 = 0x84;
+const USB_CDC_SET_NTB_INPUT_SIZE: u8 = 0x86;
+const USB_CDC_SET_MAX_DATAGRAM_SIZE: u8 = 0x88;
+const USB_CDC_SET_CRC_MODE: u8 = 0x8a;
+const USB_CDC_SET_ETHERNET_PACKET_FILTER: u8 = 0x43;
 const USB_REQ_BULK_ONLY_MASS_STORAGE_RESET: u8 = 0xff;
 const USB_FEATURE_ENDPOINT_HALT: u16 = 0;
 const USB_DT_DEVICE: u8 = 1;
 const USB_DT_CONFIGURATION: u8 = 2;
 const USB_DT_INTERFACE: u8 = 4;
 const USB_DT_ENDPOINT: u8 = 5;
+const USB_DT_STRING: u8 = 3;
 const USB_DT_HUB: u8 = 0x29;
 const USB_DT_SS_HUB: u8 = 0x2a;
 const USB_DT_SS_HUB_SIZE: usize = 12;
@@ -94,6 +106,15 @@ const USB_MSC_SUBCLASS_SCSI: u8 = 0x06;
 const USB_MSC_PROTOCOL_BULK_ONLY: u8 = 0x50;
 const USB_ENDPOINT_XFER_INT: u8 = 3;
 const USB_ENDPOINT_XFER_BULK: u8 = 2;
+const USB_CDC_NCM_NCAP_MAX_DATAGRAM_SIZE: u8 = 1 << 3;
+const USB_CDC_NCM_NCAP_CRC_MODE: u8 = 1 << 4;
+const USB_CDC_NCM_NCAP_NET_ADDRESS: u8 = 1 << 1;
+const USB_CDC_NCM_NCAP_ETH_FILTER: u8 = 1 << 0;
+const USB_CDC_NCM_NCAP_NTB_INPUT_SIZE: u8 = 1 << 5;
+const USB_CDC_NCM_MAX_RX_DATAGRAMS: u16 = 64;
+const USB_CDC_NCM_NTB32_SUPPORTED: u16 = 1 << 1;
+const USB_CDC_NCM_NTB16_FORMAT: u16 = 0;
+const USB_CDC_NCM_CRC_NOT_APPENDED: u16 = 0;
 const EP0_DCI: u8 = 1;
 const HCC_PARAMS1_AC64: u32 = 1 << 0;
 const HCC_PARAMS1_CONTEXT_SIZE_64: u32 = 1 << 2;
@@ -307,6 +328,26 @@ struct MassStorageRuntime {
     input_context: ContiguousPages,
     bulk_in: BulkEndpointRuntime,
     bulk_out: BulkEndpointRuntime,
+}
+
+struct CdcNcmRuntime {
+    _ring_mappings: [DmaMapping; 3],
+    notification: InterruptEndpointRuntime,
+    bulk_in: BulkEndpointRuntime,
+    bulk_out: BulkEndpointRuntime,
+    rx_buffer: ContiguousPages,
+    rx_buffer_mapping: DmaMapping,
+    rx_transfer_size: usize,
+    device: Arc<CdcNcmDevice>,
+    device_id: Option<usize>,
+}
+
+struct InterruptEndpointRuntime {
+    dci: u8,
+    max_packet_size: u16,
+    ring: DmaTrbRing,
+    buffer: ContiguousPages,
+    buffer_mapping: DmaMapping,
 }
 
 #[repr(C, packed)]
@@ -547,6 +588,7 @@ struct SlotRuntime {
     interrupt_endpoint_address: Option<u8>,
     interrupt_max_packet_size: Option<u16>,
     storage: Option<MassStorageRuntime>,
+    cdc_ncm: Option<CdcNcmRuntime>,
     hid: Option<HidDeviceState>,
     hub: Option<HubRuntime>,
 }
@@ -601,6 +643,7 @@ pub struct XhciController {
     deferred_interrupt_cause_seen: AtomicBool,
     deferred_spurious_count: AtomicU64,
     deferred_spurious_last_report_ns: AtomicU64,
+    self_weak: Once<Weak<XhciController>>,
 }
 
 impl XhciController {
@@ -700,6 +743,7 @@ impl XhciController {
             deferred_interrupt_cause_seen: AtomicBool::new(false),
             deferred_spurious_count: AtomicU64::new(0),
             deferred_spurious_last_report_ns: AtomicU64::new(0),
+            self_weak: Once::new(),
         })
     }
 
@@ -878,6 +922,17 @@ impl XhciController {
         let len = pages.len() * crate::environment::PAGE_SIZE;
         self.dma_context
             .map_phys_owned(pages.as_paddr(), len, flags)
+            .map_err(|_| "xHCI: failed to map DMA buffer")
+    }
+
+    fn dma_map_owned_phys(
+        &self,
+        paddr: usize,
+        len: usize,
+        flags: IommuMapFlags,
+    ) -> Result<DmaMapping, &'static str> {
+        self.dma_context
+            .map_phys_owned(paddr, len, flags)
             .map_err(|_| "xHCI: failed to map DMA buffer")
     }
 
@@ -1279,6 +1334,39 @@ impl XhciController {
         });
     }
 
+    fn process_pending_async_transfer_events(&self) -> usize {
+        let async_endpoints: Vec<(u8, u8)> = {
+            let slots = self.slot_runtime.lock();
+            let mut endpoints = Vec::new();
+            for slot in slots.iter() {
+                let slot_id = slot.usb_device.slot_id();
+                if let Some(endpoint_id) = slot.interrupt_dci {
+                    endpoints.push((slot_id, endpoint_id));
+                }
+                if let Some(ncm) = slot.cdc_ncm.as_ref() {
+                    endpoints.push((slot_id, ncm.bulk_in.dci));
+                    endpoints.push((slot_id, ncm.notification.dci));
+                }
+            }
+            endpoints
+        };
+
+        let mut processed = 0;
+        while processed < XHCI_PENDING_EVENT_LIMIT {
+            let Some(event) = self.take_pending_event(|event| {
+                event.trb_type() == TrbType::TransferEvent as u8
+                    && async_endpoints
+                        .iter()
+                        .any(|endpoint| *endpoint == (event.slot_id(), event.endpoint_id()))
+            }) else {
+                break;
+            };
+            self.handle_transfer_event(event);
+            processed += 1;
+        }
+        processed
+    }
+
     fn log_command_timeout_state(&self) {
         println!(
             "[xHCI] Command timeout regs: USBCMD={:#x} USBSTS={:#x} CRCR={:#x} DCBAAP={:#x} CONFIG={:#x}",
@@ -1426,6 +1514,7 @@ impl XhciController {
                     match event.trb_type() {
                         value if value == TrbType::TransferEvent as u8 => {
                             self.queue_pending_event(event);
+                            self.queue_interrupt_work(false);
                         }
                         value if value == TrbType::PortStatusChangeEvent as u8 => {
                             self.queue_interrupt_work(true);
@@ -1655,6 +1744,7 @@ impl XhciController {
             interrupt_endpoint_address: None,
             interrupt_max_packet_size: None,
             storage: None,
+            cdc_ncm: None,
             hid: None,
             hub: None,
         })
@@ -1698,7 +1788,11 @@ impl XhciController {
             data.is_some()
         );
         let direction_in = (request_type & 0x80) != 0;
-        let transfer_type = if data.is_some() { 3 } else { 0 };
+        let transfer_type = if data.is_some() {
+            if direction_in { 3 } else { 2 }
+        } else {
+            0
+        };
         let required_trbs = if data.is_some() { 3 } else { 2 };
         let _data_dma_mapping;
         slot.ep0_ring
@@ -1786,11 +1880,12 @@ impl XhciController {
                             }
                             Self::log_event("Transfer event", event);
                             return Err("xHCI transfer event failed");
-                        } else if XHCI_VERBOSE_TRACE {
-                            Self::log_event("Event while waiting", event);
-                            self.queue_pending_event(event);
                         } else {
+                            if XHCI_VERBOSE_TRACE {
+                                Self::log_event("Event while waiting", event);
+                            }
                             self.queue_pending_event(event);
+                            self.queue_interrupt_work(false);
                         }
                     }
                     value if value == TrbType::PortStatusChangeEvent as u8 => {
@@ -1866,10 +1961,6 @@ impl XhciController {
         else {
             return;
         };
-        let Some(storage) = slot.storage.as_ref() else {
-            return;
-        };
-
         sync_pages_after_device_write(&slot.device_context);
         let context = DeviceContextBuffer::new(slot.device_context.as_vaddr(), self.context_size);
         if let Ok(endpoint) = context.endpoint(endpoint_id) {
@@ -1886,13 +1977,35 @@ impl XhciController {
             );
         }
 
-        let (label, endpoint, ring) = if storage.bulk_in.dci == endpoint_id {
-            ("bulk-in", &storage.bulk_in, &storage.bulk_in.ring)
-        } else if storage.bulk_out.dci == endpoint_id {
-            ("bulk-out", &storage.bulk_out, &storage.bulk_out.ring)
-        } else {
+        let endpoint_and_label = slot
+            .storage
+            .as_ref()
+            .and_then(|storage| {
+                if storage.bulk_in.dci == endpoint_id {
+                    Some(("storage bulk-in", &storage.bulk_in))
+                } else if storage.bulk_out.dci == endpoint_id {
+                    Some(("storage bulk-out", &storage.bulk_out))
+                } else {
+                    None
+                }
+            })
+            .or_else(|| {
+                slot.cdc_ncm.as_ref().and_then(|ncm| {
+                    if ncm.notification.dci == endpoint_id {
+                        None
+                    } else if ncm.bulk_in.dci == endpoint_id {
+                        Some(("ncm bulk-in", &ncm.bulk_in))
+                    } else if ncm.bulk_out.dci == endpoint_id {
+                        Some(("ncm bulk-out", &ncm.bulk_out))
+                    } else {
+                        None
+                    }
+                })
+            });
+        let Some((label, endpoint)) = endpoint_and_label else {
             return;
         };
+        let ring = &endpoint.ring;
         println!(
             "[xHCI] {} ring slot={} ep_addr={:#x} dci={} max_packet={} paddr={:#x} dma={:#x} producer={} cycle={}",
             label,
@@ -2055,8 +2168,6 @@ impl XhciController {
             let control = &mut *input.control_mut();
             control.add_slot_context();
             control.add_endpoint(interrupt_dci);
-            control.configuration_value = boot.configuration_value as u32;
-            control.alternate_settings = boot.interface_number as u32;
 
             let slots = self.slot_runtime.lock();
             let slot = slots
@@ -2242,8 +2353,6 @@ impl XhciController {
             control.add_slot_context();
             control.add_endpoint(bulk_in_dci);
             control.add_endpoint(bulk_out_dci);
-            control.configuration_value = storage.configuration_value as u32;
-            control.alternate_settings = storage.interface_number as u32;
 
             let slots = self.slot_runtime.lock();
             let slot = slots
@@ -2341,6 +2450,542 @@ impl XhciController {
         Ok(true)
     }
 
+    fn find_cdc_ncm_configuration(
+        &self,
+        slot: &SlotRuntime,
+        num_configurations: u8,
+    ) -> Result<Option<CdcNcmInterfaceConfig>, &'static str> {
+        for descriptor_index in 0..num_configurations {
+            let blob = self.fetch_configuration_blob_at(slot, descriptor_index)?;
+            // SAFETY: `blob` owns `len * PAGE_SIZE` contiguous, direct-mapped
+            // bytes for the lifetime of the slice.
+            let bytes = unsafe {
+                core::slice::from_raw_parts(
+                    blob.as_vaddr() as *const u8,
+                    blob.len() * crate::environment::PAGE_SIZE,
+                )
+            };
+            if let Ok(configuration) = parse_cdc_ncm_configuration(bytes) {
+                return Ok(Some(configuration));
+            }
+        }
+        Ok(None)
+    }
+
+    fn read_cdc_ncm_parameters(
+        &self,
+        slot: &SlotRuntime,
+        control_interface: u8,
+    ) -> Result<CdcNcmParameters, &'static str> {
+        let bytes = self.control_transfer_bytes_in(
+            slot,
+            0xa1,
+            USB_CDC_GET_NTB_PARAMETERS,
+            0,
+            u16::from(control_interface),
+            28,
+        )?;
+        CdcNcmParameters::parse(&bytes)
+    }
+
+    fn read_cdc_ncm_mac_address(
+        &self,
+        slot: &SlotRuntime,
+        configuration: CdcNcmInterfaceConfig,
+    ) -> Result<crate::device::network::MacAddress, &'static str> {
+        if configuration.network_capabilities & USB_CDC_NCM_NCAP_NET_ADDRESS != 0 {
+            if let Ok(bytes) = self.control_transfer_bytes_in(
+                slot,
+                0xa1,
+                USB_CDC_GET_NET_ADDRESS,
+                0,
+                u16::from(configuration.control_interface),
+                6,
+            ) {
+                if bytes.len() == 6 {
+                    let mut address = [0u8; 6];
+                    address.copy_from_slice(&bytes);
+                    if let Ok(mac) = validate_mac_address(address) {
+                        return Ok(mac);
+                    }
+                }
+            }
+        }
+
+        let value = self.get_usb_string(slot, configuration.mac_string_index)?;
+        parse_mac_address(&value)
+    }
+
+    fn control_transfer_bytes_in(
+        &self,
+        slot: &SlotRuntime,
+        request_type: u8,
+        request: u8,
+        value: u16,
+        index: u16,
+        length: u16,
+    ) -> Result<Vec<u8>, &'static str> {
+        let pages = usize::from(length)
+            .max(1)
+            .div_ceil(crate::environment::PAGE_SIZE);
+        let mut buffer = self
+            .dma_alloc_pages(pages)
+            .ok_or("Failed to allocate USB control response")?;
+        // SAFETY: `buffer` owns exactly `pages * PAGE_SIZE` writable bytes.
+        unsafe {
+            core::ptr::write_bytes(
+                buffer.as_vaddr() as *mut u8,
+                0,
+                pages * crate::environment::PAGE_SIZE,
+            );
+        }
+        let event = self.control_transfer(
+            slot,
+            request_type,
+            request,
+            value,
+            index,
+            Some(&mut buffer),
+            length,
+        )?;
+        let actual = usize::from(length).saturating_sub(event.transfer_length() as usize);
+        // SAFETY: `actual` cannot exceed the requested `length`, which is no
+        // greater than the allocated buffer capacity.
+        let bytes = unsafe { core::slice::from_raw_parts(buffer.as_vaddr() as *const u8, actual) };
+        Ok(bytes.to_vec())
+    }
+
+    fn control_transfer_bytes_out(
+        &self,
+        slot: &SlotRuntime,
+        request_type: u8,
+        request: u8,
+        value: u16,
+        index: u16,
+        bytes: &[u8],
+    ) -> Result<(), &'static str> {
+        if bytes.len() > u16::MAX as usize {
+            return Err("USB control request payload is too large");
+        }
+        let pages = bytes.len().max(1).div_ceil(crate::environment::PAGE_SIZE);
+        let mut buffer = self
+            .dma_alloc_pages(pages)
+            .ok_or("Failed to allocate USB control request")?;
+        // SAFETY: `buffer` owns `pages * PAGE_SIZE` writable bytes, and
+        // `pages` was calculated to contain every byte copied from `bytes`.
+        unsafe {
+            core::ptr::write_bytes(
+                buffer.as_vaddr() as *mut u8,
+                0,
+                pages * crate::environment::PAGE_SIZE,
+            );
+            core::ptr::copy_nonoverlapping(
+                bytes.as_ptr(),
+                buffer.as_vaddr() as *mut u8,
+                bytes.len(),
+            );
+        }
+        self.control_transfer(
+            slot,
+            request_type,
+            request,
+            value,
+            index,
+            Some(&mut buffer),
+            bytes.len() as u16,
+        )?;
+        Ok(())
+    }
+
+    fn get_usb_string(&self, slot: &SlotRuntime, string_index: u8) -> Result<String, &'static str> {
+        if string_index == 0 {
+            return Err("USB string descriptor index is zero");
+        }
+        let languages = self.control_transfer_bytes_in(
+            slot,
+            0x80,
+            USB_REQ_GET_DESCRIPTOR,
+            (USB_DT_STRING as u16) << 8,
+            0,
+            255,
+        )?;
+        if languages.len() < 4 || languages[1] != USB_DT_STRING {
+            return Err("USB device has no supported string language");
+        }
+        let language = u16::from_le_bytes([languages[2], languages[3]]);
+        let descriptor = self.control_transfer_bytes_in(
+            slot,
+            0x80,
+            USB_REQ_GET_DESCRIPTOR,
+            ((USB_DT_STRING as u16) << 8) | u16::from(string_index),
+            language,
+            255,
+        )?;
+        if descriptor.len() < 2 || descriptor[1] != USB_DT_STRING {
+            return Err("Invalid USB string descriptor");
+        }
+        let descriptor_length = usize::from(descriptor[0]);
+        if descriptor_length < 2
+            || descriptor_length > descriptor.len()
+            || descriptor_length & 1 != 0
+        {
+            return Err("Malformed USB string descriptor");
+        }
+
+        let mut value = String::new();
+        for unit in descriptor[2..descriptor_length].chunks_exact(2) {
+            if unit[1] != 0 || !unit[0].is_ascii() {
+                return Err("USB MAC string contains non-ASCII characters");
+            }
+            value.push(unit[0] as char);
+        }
+        Ok(value)
+    }
+
+    fn configure_cdc_ncm_slot(&self, slot_id: u8) -> Result<bool, &'static str> {
+        {
+            let slots = self.slot_runtime.lock();
+            let slot = slots
+                .iter()
+                .find(|slot| slot.usb_device.slot_id() == slot_id)
+                .ok_or("Unknown slot for CDC-NCM setup")?;
+            if slot.cdc_ncm.is_some() {
+                return Ok(true);
+            }
+        }
+
+        let (configuration, parameters, mac_address) = {
+            let slots = self.slot_runtime.lock();
+            let slot = slots
+                .iter()
+                .find(|slot| slot.usb_device.slot_id() == slot_id)
+                .ok_or("Unknown slot for CDC-NCM descriptor fetch")?;
+            let descriptor = self.get_device_descriptor(slot)?;
+            let Some(configuration) =
+                self.find_cdc_ncm_configuration(slot, descriptor.num_configurations)?
+            else {
+                return Ok(false);
+            };
+
+            self.control_transfer(
+                slot,
+                0x00,
+                USB_REQ_SET_CONFIGURATION,
+                u16::from(configuration.configuration_value),
+                0,
+                None,
+                0,
+            )?;
+            if configuration.data_alternate_setting != 0 {
+                self.control_transfer(
+                    slot,
+                    0x01,
+                    USB_REQ_SET_INTERFACE,
+                    0,
+                    u16::from(configuration.data_interface),
+                    None,
+                    0,
+                )?;
+            }
+
+            let parameters = self.read_cdc_ncm_parameters(slot, configuration.control_interface)?;
+            if parameters.formats_supported & USB_CDC_NCM_NTB32_SUPPORTED != 0 {
+                self.control_transfer(
+                    slot,
+                    0x21,
+                    USB_CDC_SET_NTB_FORMAT,
+                    USB_CDC_NCM_NTB16_FORMAT,
+                    u16::from(configuration.control_interface),
+                    None,
+                    0,
+                )?;
+            }
+            if configuration.network_capabilities & USB_CDC_NCM_NCAP_CRC_MODE != 0 {
+                self.control_transfer(
+                    slot,
+                    0x21,
+                    USB_CDC_SET_CRC_MODE,
+                    USB_CDC_NCM_CRC_NOT_APPENDED,
+                    u16::from(configuration.control_interface),
+                    None,
+                    0,
+                )?;
+            }
+            let receive_size = parameters.receive_size() as u32;
+            let receive_size_bytes = ntb_input_size_payload(
+                receive_size,
+                (configuration.network_capabilities & USB_CDC_NCM_NCAP_NTB_INPUT_SIZE != 0)
+                    .then_some(USB_CDC_NCM_MAX_RX_DATAGRAMS),
+            );
+            self.control_transfer_bytes_out(
+                slot,
+                0x21,
+                USB_CDC_SET_NTB_INPUT_SIZE,
+                0,
+                u16::from(configuration.control_interface),
+                &receive_size_bytes,
+            )?;
+            if configuration.network_capabilities & USB_CDC_NCM_NCAP_MAX_DATAGRAM_SIZE != 0 {
+                self.control_transfer_bytes_out(
+                    slot,
+                    0x21,
+                    USB_CDC_SET_MAX_DATAGRAM_SIZE,
+                    0,
+                    u16::from(configuration.control_interface),
+                    &configuration.max_segment_size.to_le_bytes(),
+                )?;
+            }
+            let mac_address = self.read_cdc_ncm_mac_address(slot, configuration)?;
+            (configuration, parameters, mac_address)
+        };
+
+        println!(
+            "[usb-ncm] Slot {} cfg={} control_if={} data_if={}/alt{} bulk_in={:#x}/{} bulk_out={:#x}/{} rx_ntb={} mac={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+            slot_id,
+            configuration.configuration_value,
+            configuration.control_interface,
+            configuration.data_interface,
+            configuration.data_alternate_setting,
+            configuration.bulk_in_endpoint,
+            configuration.bulk_in_max_packet_size,
+            configuration.bulk_out_endpoint,
+            configuration.bulk_out_max_packet_size,
+            parameters.receive_size(),
+            mac_address.as_bytes()[0],
+            mac_address.as_bytes()[1],
+            mac_address.as_bytes()[2],
+            mac_address.as_bytes()[3],
+            mac_address.as_bytes()[4],
+            mac_address.as_bytes()[5],
+        );
+
+        let bulk_in_dci = Self::endpoint_dci(configuration.bulk_in_endpoint);
+        let bulk_out_dci = Self::endpoint_dci(configuration.bulk_out_endpoint);
+        let notification_dci = Self::endpoint_dci(configuration.notification_endpoint);
+        let max_dci = bulk_in_dci.max(bulk_out_dci).max(notification_dci);
+        let notification_ring = DmaTrbRing::new_linked_aligned(64, self.dma_alignment())
+            .ok_or("Failed to allocate CDC-NCM notification ring")?;
+        let bulk_in_ring = DmaTrbRing::new_linked_aligned(64, self.dma_alignment())
+            .ok_or("Failed to allocate CDC-NCM bulk IN ring")?;
+        let bulk_out_ring = DmaTrbRing::new_linked_aligned(64, self.dma_alignment())
+            .ok_or("Failed to allocate CDC-NCM bulk OUT ring")?;
+        let notification_ring_mapping = self.dma_map_owned_phys(
+            notification_ring.physical_address(),
+            notification_ring.dma_len(),
+            dma_rw_flags(),
+        )?;
+        notification_ring.set_dma_address(
+            usize::try_from(notification_ring_mapping.dma_addr())
+                .map_err(|_| "xHCI: notification ring DMA address does not fit usize")?,
+        )?;
+        let bulk_in_ring_mapping = self.dma_map_owned_phys(
+            bulk_in_ring.physical_address(),
+            bulk_in_ring.dma_len(),
+            dma_rw_flags(),
+        )?;
+        bulk_in_ring.set_dma_address(
+            usize::try_from(bulk_in_ring_mapping.dma_addr())
+                .map_err(|_| "xHCI: bulk IN ring DMA address does not fit usize")?,
+        )?;
+        let bulk_out_ring_mapping = self.dma_map_owned_phys(
+            bulk_out_ring.physical_address(),
+            bulk_out_ring.dma_len(),
+            dma_rw_flags(),
+        )?;
+        bulk_out_ring.set_dma_address(
+            usize::try_from(bulk_out_ring_mapping.dma_addr())
+                .map_err(|_| "xHCI: bulk OUT ring DMA address does not fit usize")?,
+        )?;
+
+        let input_pages = self
+            .dma_alloc_pages(
+                full_input_context_bytes(self.context_size).div_ceil(crate::environment::PAGE_SIZE),
+            )
+            .ok_or("Failed to allocate CDC-NCM endpoint context")?;
+        let input_dma_mapping =
+            self.dma_map_owned_pages(&input_pages, IommuMapFlags::READ | IommuMapFlags::COHERENT)?;
+        // SAFETY: `input_pages` owns the complete xHCI input-context region.
+        // Context pointers below stay within that allocation, and all copied
+        // contexts originate from the controller's live device context.
+        unsafe {
+            core::ptr::write_bytes(
+                input_pages.as_vaddr() as *mut u8,
+                0,
+                input_pages.len() * crate::environment::PAGE_SIZE,
+            );
+            let input = InputContextBuffer::new(input_pages.as_vaddr(), self.context_size);
+            let control = &mut *input.control_mut();
+            control.add_slot_context();
+            control.add_endpoint(notification_dci);
+            control.add_endpoint(bulk_in_dci);
+            control.add_endpoint(bulk_out_dci);
+
+            let slots = self.slot_runtime.lock();
+            let slot = slots
+                .iter()
+                .find(|slot| slot.usb_device.slot_id() == slot_id)
+                .ok_or("Unknown slot for CDC-NCM endpoint config")?;
+            sync_pages_after_device_write(&slot.device_context);
+            let existing =
+                DeviceContextBuffer::new(slot.device_context.as_vaddr(), self.context_size);
+            let mut slot_context = core::ptr::read(existing.slot());
+            slot_context.set_context_entries(max_dci);
+            core::ptr::write(input.slot_mut(), slot_context);
+
+            let xhci_interval =
+                Self::xhci_interval(slot.usb_device.speed(), configuration.notification_interval);
+            let (_, notification_context) = InputContext::interrupt_endpoint_context(
+                notification_dci,
+                configuration.notification_max_packet_size,
+                xhci_interval,
+                notification_ring.dma_address() as u64,
+                true,
+            );
+            let (_, bulk_in_context) = InputContext::bulk_endpoint_context(
+                bulk_in_dci,
+                configuration.bulk_in_max_packet_size,
+                bulk_in_ring.dma_address() as u64,
+                true,
+            );
+            let (_, bulk_out_context) = InputContext::bulk_endpoint_context(
+                bulk_out_dci,
+                configuration.bulk_out_max_packet_size,
+                bulk_out_ring.dma_address() as u64,
+                false,
+            );
+            core::ptr::write(input.endpoint_mut(notification_dci)?, notification_context);
+            core::ptr::write(input.endpoint_mut(bulk_in_dci)?, bulk_in_context);
+            core::ptr::write(input.endpoint_mut(bulk_out_dci)?, bulk_out_context);
+        }
+        sync_pages_for_device(&input_pages);
+        notification_ring.sync_for_device();
+        bulk_in_ring.sync_for_device();
+        bulk_out_ring.sync_for_device();
+
+        let event = self.send_command(Trb::configure_endpoint_command(
+            input_dma_mapping.dma_addr(),
+            slot_id,
+            false,
+        ))?;
+        if event.slot_id() != slot_id {
+            return Err("CDC-NCM Configure Endpoint completion slot mismatch");
+        }
+        {
+            let slots = self.slot_runtime.lock();
+            let slot = slots
+                .iter()
+                .find(|slot| slot.usb_device.slot_id() == slot_id)
+                .ok_or("Unknown slot for CDC-NCM alternate setting")?;
+            self.control_transfer(
+                slot,
+                0x01,
+                USB_REQ_SET_INTERFACE,
+                u16::from(configuration.data_alternate_setting),
+                u16::from(configuration.data_interface),
+                None,
+                0,
+            )?;
+        }
+
+        let controller = self
+            .self_weak
+            .get()
+            .cloned()
+            .ok_or("xHCI controller self reference is unavailable")?;
+        let interface_name = next_usb_network_device_name();
+        let transport = Arc::new(XhciCdcNcmTransport {
+            controller,
+            slot_id,
+            control_interface: configuration.control_interface,
+            bulk_out_endpoint: configuration.bulk_out_endpoint,
+            filter_supported: configuration.network_capabilities & USB_CDC_NCM_NCAP_ETH_FILTER != 0,
+            operation_lock: Mutex::new(()),
+        });
+        let transport_trait: Arc<dyn CdcNcmTransport> = transport;
+        let device = Arc::new(CdcNcmDevice::new(
+            transport_trait,
+            mac_address,
+            usize::from(configuration.max_segment_size),
+            parameters,
+            usize::from(configuration.bulk_out_max_packet_size),
+            interface_name.clone(),
+        )?);
+
+        let rx_transfer_size = parameters.receive_size();
+        let rx_pages = rx_transfer_size.div_ceil(crate::environment::PAGE_SIZE);
+        let rx_buffer = self
+            .dma_alloc_pages(rx_pages)
+            .ok_or("Failed to allocate CDC-NCM receive buffer")?;
+        let rx_buffer_mapping =
+            self.dma_map_owned_pages(&rx_buffer, IommuMapFlags::WRITE | IommuMapFlags::COHERENT)?;
+        let notification_pages = usize::from(configuration.notification_max_packet_size)
+            .div_ceil(crate::environment::PAGE_SIZE);
+        let notification_buffer = self
+            .dma_alloc_pages(notification_pages)
+            .ok_or("Failed to allocate CDC-NCM notification buffer")?;
+        let notification_buffer_mapping = self.dma_map_owned_pages(
+            &notification_buffer,
+            IommuMapFlags::WRITE | IommuMapFlags::COHERENT,
+        )?;
+        {
+            let mut slots = self.slot_runtime.lock();
+            let slot = slots
+                .iter_mut()
+                .find(|slot| slot.usb_device.slot_id() == slot_id)
+                .ok_or("Unknown slot for CDC-NCM runtime update")?;
+            slot.usb_device.set_state(UsbDeviceState::Configured);
+            slot.cdc_ncm = Some(CdcNcmRuntime {
+                _ring_mappings: [
+                    notification_ring_mapping,
+                    bulk_in_ring_mapping,
+                    bulk_out_ring_mapping,
+                ],
+                notification: InterruptEndpointRuntime {
+                    dci: notification_dci,
+                    max_packet_size: configuration.notification_max_packet_size,
+                    ring: notification_ring,
+                    buffer: notification_buffer,
+                    buffer_mapping: notification_buffer_mapping,
+                },
+                bulk_in: BulkEndpointRuntime {
+                    endpoint_address: configuration.bulk_in_endpoint,
+                    dci: bulk_in_dci,
+                    max_packet_size: configuration.bulk_in_max_packet_size,
+                    ring: bulk_in_ring,
+                },
+                bulk_out: BulkEndpointRuntime {
+                    endpoint_address: configuration.bulk_out_endpoint,
+                    dci: bulk_out_dci,
+                    max_packet_size: configuration.bulk_out_max_packet_size,
+                    ring: bulk_out_ring,
+                },
+                rx_buffer,
+                rx_buffer_mapping,
+                rx_transfer_size,
+                device: device.clone(),
+                device_id: None,
+            });
+        }
+
+        self.submit_cdc_ncm_notification(slot_id)?;
+        self.submit_cdc_ncm_rx(slot_id)?;
+        device.register_interface()?;
+        let registered: Arc<dyn Device> = device;
+        let device_id = DeviceManager::get_manager()
+            .register_device_with_name(interface_name.clone(), registered);
+        {
+            let mut slots = self.slot_runtime.lock();
+            let runtime = slots
+                .iter_mut()
+                .find(|slot| slot.usb_device.slot_id() == slot_id)
+                .and_then(|slot| slot.cdc_ncm.as_mut())
+                .ok_or("CDC-NCM runtime disappeared during registration")?;
+            runtime.device_id = Some(device_id);
+        }
+        println!("[usb-ncm] Registered interface {}", interface_name);
+        Ok(true)
+    }
+
     fn configure_known_classes(&self, slot_id: u8) {
         match self.configure_boot_hid_slot(slot_id) {
             Ok(true) => {
@@ -2355,6 +3000,12 @@ impl XhciController {
             Ok(true) => println!("[xHCI] Slot {} hub configured", slot_id),
             Ok(false) => {}
             Err(error) => println!("[xHCI] Slot {} hub setup failed: {}", slot_id, error),
+        }
+
+        match self.configure_cdc_ncm_slot(slot_id) {
+            Ok(true) => println!("[xHCI] Slot {} CDC-NCM configured", slot_id),
+            Ok(false) => {}
+            Err(error) => println!("[xHCI] Slot {} CDC-NCM setup failed: {}", slot_id, error),
         }
     }
 
@@ -2863,6 +3514,14 @@ impl XhciController {
         &self,
         slot: &SlotRuntime,
     ) -> Result<ContiguousPages, &'static str> {
+        self.fetch_configuration_blob_at(slot, 0)
+    }
+
+    fn fetch_configuration_blob_at(
+        &self,
+        slot: &SlotRuntime,
+        descriptor_index: u8,
+    ) -> Result<ContiguousPages, &'static str> {
         let mut header_buffer = self
             .dma_alloc_pages(1)
             .ok_or("Failed to allocate config header buffer")?;
@@ -2877,19 +3536,28 @@ impl XhciController {
             slot,
             0x80,
             USB_REQ_GET_DESCRIPTOR,
-            (USB_DT_CONFIGURATION as u16) << 8,
+            ((USB_DT_CONFIGURATION as u16) << 8) | u16::from(descriptor_index),
             0,
             Some(&mut header_buffer),
             ConfigurationDescriptor::encoded_size() as u16,
         )?;
         let header =
             unsafe { read_unaligned(header_buffer.as_vaddr() as *const ConfigurationDescriptor) };
-        self.get_configuration_blob(slot, header.total_length)
+        self.get_configuration_blob_at(slot, descriptor_index, header.total_length)
     }
 
     fn get_configuration_blob(
         &self,
         slot: &SlotRuntime,
+        total_length: u16,
+    ) -> Result<ContiguousPages, &'static str> {
+        self.get_configuration_blob_at(slot, 0, total_length)
+    }
+
+    fn get_configuration_blob_at(
+        &self,
+        slot: &SlotRuntime,
+        descriptor_index: u8,
         total_length: u16,
     ) -> Result<ContiguousPages, &'static str> {
         let minimum = ConfigurationDescriptor::encoded_size() as u16;
@@ -2915,7 +3583,7 @@ impl XhciController {
             slot,
             0x80,
             USB_REQ_GET_DESCRIPTOR,
-            (USB_DT_CONFIGURATION as u16) << 8,
+            ((USB_DT_CONFIGURATION as u16) << 8) | u16::from(descriptor_index),
             0,
             Some(&mut buffer),
             total_length,
@@ -3323,6 +3991,7 @@ impl XhciController {
             self.log_port_status(port_id, portsc);
             self.clear_port_change_bits(port_id, portsc);
             if !status.connected {
+                self.remove_disconnected_root_port(port_id);
                 continue;
             }
             if self
@@ -3348,6 +4017,75 @@ impl XhciController {
             discovered += 1;
         }
         Ok(discovered)
+    }
+
+    fn remove_disconnected_root_port(&self, port_id: u8) {
+        let mut slots_to_disable: Vec<(u8, u8)> = self
+            .slot_runtime
+            .lock()
+            .iter()
+            .filter(|slot| slot.usb_device.port_id() == port_id)
+            .map(|slot| (slot.route_depth, slot.usb_device.slot_id()))
+            .collect();
+        slots_to_disable.sort_unstable_by(|left, right| right.cmp(left));
+        if slots_to_disable.is_empty() {
+            return;
+        }
+
+        {
+            let slots = self.slot_runtime.lock();
+            for (_, slot_id) in &slots_to_disable {
+                if let Some(ncm) = slots
+                    .iter()
+                    .find(|slot| slot.usb_device.slot_id() == *slot_id)
+                    .and_then(|slot| slot.cdc_ncm.as_ref())
+                {
+                    ncm.device.disconnect();
+                }
+            }
+        }
+
+        for (_, slot_id) in slots_to_disable {
+            if let Err(error) = self.send_command(Trb::disable_slot_command(slot_id)) {
+                println!(
+                    "[xHCI] Failed to disable disconnected slot {}: {}",
+                    slot_id, error
+                );
+                continue;
+            }
+
+            self.pending_events
+                .lock()
+                .retain(|event| event.slot_id() != slot_id);
+            let runtime = {
+                let mut slots = self.slot_runtime.lock();
+                slots
+                    .iter()
+                    .position(|slot| slot.usb_device.slot_id() == slot_id)
+                    .map(|index| slots.remove(index))
+            };
+            self.devices
+                .lock()
+                .retain(|device| device.slot_id() != slot_id);
+
+            if let Some(runtime) = runtime
+                && let Some(ncm) = runtime.cdc_ncm
+            {
+                let name = ncm.device.registered_interface_name();
+                crate::network::get_network_manager().unregister_interface(name);
+                if let Some(layer) = crate::network::get_network_manager().get_layer("ethernet")
+                    && let Some(ethernet) = layer
+                        .as_any()
+                        .downcast_ref::<crate::network::ethernet::EthernetLayer>()
+                {
+                    ethernet.unregister_interface(name);
+                }
+                if let Some(device_id) = ncm.device_id {
+                    DeviceManager::get_manager().unregister_device(device_id);
+                }
+                println!("[usb-ncm] Unregistered disconnected interface {}", name);
+            }
+        }
     }
 
     pub fn devices(&self) -> Vec<UsbDevice> {
@@ -3390,29 +4128,38 @@ impl XhciController {
                 .iter()
                 .find(|slot| slot.usb_device.slot_id() == slot_id)
                 .ok_or("Unknown slot for bulk transfer")?;
-            let storage = slot
+            let endpoint = slot
                 .storage
                 .as_ref()
-                .ok_or("Mass storage endpoints not configured")?;
-            let _context_paddr = storage.input_context.as_paddr();
+                .and_then(|storage| {
+                    let _context_paddr = storage.input_context.as_paddr();
+                    if storage.bulk_in.endpoint_address == endpoint_address {
+                        Some(&storage.bulk_in)
+                    } else if storage.bulk_out.endpoint_address == endpoint_address {
+                        Some(&storage.bulk_out)
+                    } else {
+                        None
+                    }
+                })
+                .or_else(|| {
+                    slot.cdc_ncm.as_ref().and_then(|ncm| {
+                        if ncm.bulk_in.endpoint_address == endpoint_address {
+                            Some(&ncm.bulk_in)
+                        } else if ncm.bulk_out.endpoint_address == endpoint_address {
+                            Some(&ncm.bulk_out)
+                        } else {
+                            None
+                        }
+                    })
+                })
+                .ok_or("Bulk endpoint not configured for slot")?;
+            if endpoint.dci != dci {
+                return Err("Bulk endpoint DCI mismatch");
+            }
+            let _max_packet_size = endpoint.max_packet_size;
+            let ring = &endpoint.ring;
 
-            let ring = if storage.bulk_in.endpoint_address == endpoint_address {
-                if storage.bulk_in.dci != dci {
-                    return Err("Bulk IN endpoint DCI mismatch");
-                }
-                let _max_packet_size = storage.bulk_in.max_packet_size;
-                &storage.bulk_in.ring
-            } else if storage.bulk_out.endpoint_address == endpoint_address {
-                if storage.bulk_out.dci != dci {
-                    return Err("Bulk OUT endpoint DCI mismatch");
-                }
-                let _max_packet_size = storage.bulk_out.max_packet_size;
-                &storage.bulk_out.ring
-            } else {
-                return Err("Bulk endpoint not configured for slot");
-            };
-
-            direction_in = storage.bulk_in.endpoint_address == endpoint_address;
+            direction_in = endpoint_address & 0x80 != 0;
             let flags = if direction_in {
                 IommuMapFlags::WRITE | IommuMapFlags::COHERENT
             } else {
@@ -3484,6 +4231,53 @@ impl XhciController {
         }
     }
 
+    fn submit_cdc_ncm_rx(&self, slot_id: u8) -> Result<(), &'static str> {
+        let dci;
+        {
+            let slots = self.slot_runtime.lock();
+            let slot = slots
+                .iter()
+                .find(|slot| slot.usb_device.slot_id() == slot_id)
+                .ok_or("Unknown slot for CDC-NCM receive")?;
+            let ncm = slot
+                .cdc_ncm
+                .as_ref()
+                .ok_or("CDC-NCM runtime is not configured")?;
+            dci = ncm.bulk_in.dci;
+            sync_pages_before_device_write(&ncm.rx_buffer);
+            ncm.bulk_in.ring.enqueue(Trb::normal_transfer_in(
+                ncm.rx_buffer_mapping.dma_addr(),
+                ncm.rx_transfer_size as u32,
+            ))?;
+        }
+        self.ring_endpoint_doorbell(slot_id, dci);
+        Ok(())
+    }
+
+    fn submit_cdc_ncm_notification(&self, slot_id: u8) -> Result<(), &'static str> {
+        let dci;
+        {
+            let slots = self.slot_runtime.lock();
+            let slot = slots
+                .iter()
+                .find(|slot| slot.usb_device.slot_id() == slot_id)
+                .ok_or("Unknown slot for CDC-NCM notification")?;
+            let ncm = slot
+                .cdc_ncm
+                .as_ref()
+                .ok_or("CDC-NCM runtime is not configured")?;
+            let notification = &ncm.notification;
+            dci = notification.dci;
+            sync_pages_before_device_write(&notification.buffer);
+            notification.ring.enqueue(Trb::normal_transfer_in(
+                notification.buffer_mapping.dma_addr(),
+                u32::from(notification.max_packet_size),
+            ))?;
+        }
+        self.ring_endpoint_doorbell(slot_id, dci);
+        Ok(())
+    }
+
     fn slot_runtime_mut(&self, slot_id: u8) -> Option<IrqSpinLockGuard<'_, Vec<SlotRuntime>>> {
         let guard = self.slot_runtime.lock();
         if guard
@@ -3538,6 +4332,90 @@ impl XhciController {
         else {
             return false;
         };
+
+        if let Some(ncm) = slot.cdc_ncm.as_ref()
+            && ncm.notification.dci == endpoint_id
+        {
+            if !ncm.device.is_attached() {
+                return true;
+            }
+            if !Self::transfer_successful(event) {
+                let device = ncm.device.clone();
+                drop(slots);
+                device.handle_receive_error("xHCI CDC-NCM notification transfer failed");
+                return true;
+            }
+
+            let actual = usize::from(ncm.notification.max_packet_size)
+                .saturating_sub(event.transfer_length() as usize);
+            sync_pages_after_device_write(&ncm.notification.buffer);
+            // SAFETY: `actual` is bounded by the configured maximum packet
+            // size, and the notification DMA allocation contains that range.
+            let notification = unsafe {
+                core::slice::from_raw_parts(ncm.notification.buffer.as_vaddr() as *const u8, actual)
+                    .to_vec()
+            };
+            let device = ncm.device.clone();
+            sync_pages_before_device_write(&ncm.notification.buffer);
+            let resubmit = ncm.notification.ring.enqueue(Trb::normal_transfer_in(
+                ncm.notification.buffer_mapping.dma_addr(),
+                u32::from(ncm.notification.max_packet_size),
+            ));
+            let dci = ncm.notification.dci;
+            drop(slots);
+
+            if let Err(error) = resubmit {
+                device.handle_receive_error(error);
+            } else {
+                self.ring_endpoint_doorbell(slot_id, dci);
+            }
+            device.handle_notification(&notification);
+            return true;
+        }
+
+        if let Some(ncm) = slot.cdc_ncm.as_ref()
+            && ncm.bulk_in.dci == endpoint_id
+        {
+            if !ncm.device.is_attached() {
+                return true;
+            }
+            if !Self::transfer_successful(event) {
+                let device = ncm.device.clone();
+                drop(slots);
+                device.handle_receive_error("xHCI CDC-NCM bulk IN transfer failed");
+                return true;
+            }
+
+            let actual = ncm
+                .rx_transfer_size
+                .saturating_sub(event.transfer_length() as usize);
+            sync_pages_after_device_write(&ncm.rx_buffer);
+            // SAFETY: `actual` is bounded by `rx_transfer_size`, and the DMA
+            // buffer was allocated to contain that complete transfer.
+            let bytes = unsafe {
+                core::slice::from_raw_parts(ncm.rx_buffer.as_vaddr() as *const u8, actual).to_vec()
+            };
+            let device = ncm.device.clone();
+            sync_pages_before_device_write(&ncm.rx_buffer);
+            let resubmit = ncm.bulk_in.ring.enqueue(Trb::normal_transfer_in(
+                ncm.rx_buffer_mapping.dma_addr(),
+                ncm.rx_transfer_size as u32,
+            ));
+            let dci = ncm.bulk_in.dci;
+            drop(slots);
+
+            if let Err(error) = resubmit {
+                device.handle_receive_error(error);
+            } else {
+                self.ring_endpoint_doorbell(slot_id, dci);
+            }
+            if actual == 0 {
+                device.handle_receive_error("CDC-NCM bulk IN completed without data");
+            } else {
+                device.handle_received_ntb(&bytes);
+            }
+            return true;
+        }
 
         if slot.interrupt_dci != Some(endpoint_id) {
             return false;
@@ -3617,6 +4495,7 @@ impl XhciController {
             return false;
         }
 
+        let pending_async = self.process_pending_async_transfer_events();
         let deferred_mode = self.deferred_interrupt_mode.load(Ordering::Acquire);
         self.mask_primary_interrupter();
         let status = self.operational.read_usbsts();
@@ -3642,14 +4521,14 @@ impl XhciController {
 
         crate::breadcrumb::drop(crate::breadcrumb::XHCI_IRQ_DRAIN, self.mmio_base as u64, 0);
         let (processed, event_port_change) = self.process_interrupt_events();
-        if processed != 0 {
+        if processed != 0 || pending_async != 0 {
             self.deferred_interrupt_cause_seen
                 .store(true, Ordering::Release);
         }
         crate::breadcrumb::drop(
             crate::breadcrumb::XHCI_IRQ_DRAIN_DONE,
             self.mmio_base as u64,
-            processed as u64,
+            (processed + pending_async) as u64,
         );
         if event_port_change {
             self.port_change_pending.store(true, Ordering::Release);
@@ -3841,9 +4720,81 @@ impl XhciController {
 }
 
 static USB_BLOCK_COUNTER: AtomicUsize = AtomicUsize::new(0);
+static USB_NETWORK_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 fn next_usb_block_device_name() -> alloc::string::String {
     alloc::format!("usbblk{}", USB_BLOCK_COUNTER.fetch_add(1, Ordering::SeqCst))
+}
+
+fn next_usb_network_device_name() -> alloc::string::String {
+    alloc::format!(
+        "usbnet{}",
+        USB_NETWORK_COUNTER.fetch_add(1, Ordering::SeqCst)
+    )
+}
+
+struct XhciCdcNcmTransport {
+    controller: Weak<XhciController>,
+    slot_id: u8,
+    control_interface: u8,
+    bulk_out_endpoint: u8,
+    filter_supported: bool,
+    operation_lock: Mutex<()>,
+}
+
+impl CdcNcmTransport for XhciCdcNcmTransport {
+    fn send_ntb(&self, ntb: &[u8]) -> Result<(), &'static str> {
+        let _operation = self.operation_lock.lock();
+        let controller = self
+            .controller
+            .upgrade()
+            .ok_or("xHCI controller is no longer available")?;
+        let pages = ntb.len().div_ceil(crate::environment::PAGE_SIZE);
+        let mut buffer = controller
+            .dma_alloc_pages(pages)
+            .ok_or("Failed to allocate CDC-NCM transmit buffer")?;
+        // SAFETY: `pages` was rounded up from `ntb.len()`, so the owned DMA
+        // allocation contains the full non-overlapping source slice.
+        unsafe {
+            core::ptr::copy_nonoverlapping(ntb.as_ptr(), buffer.as_vaddr() as *mut u8, ntb.len());
+        }
+        let transferred = controller.bulk_transfer(
+            self.slot_id,
+            self.bulk_out_endpoint,
+            &mut buffer,
+            ntb.len(),
+        )?;
+        if transferred != ntb.len() {
+            return Err("Short CDC-NCM bulk OUT transfer");
+        }
+        Ok(())
+    }
+
+    fn set_packet_filter(&self, filter: u16) -> Result<(), &'static str> {
+        if !self.filter_supported {
+            return Ok(());
+        }
+        let _operation = self.operation_lock.lock();
+        let controller = self
+            .controller
+            .upgrade()
+            .ok_or("xHCI controller is no longer available")?;
+        let slots = controller.slot_runtime.lock();
+        let slot = slots
+            .iter()
+            .find(|slot| slot.usb_device.slot_id() == self.slot_id)
+            .ok_or("Unknown slot for CDC-NCM packet filter")?;
+        controller.control_transfer(
+            slot,
+            0x21,
+            USB_CDC_SET_ETHERNET_PACKET_FILTER,
+            filter,
+            u16::from(self.control_interface),
+            None,
+            0,
+        )?;
+        Ok(())
+    }
 }
 
 struct UsbMassStorageBlockDevice {
@@ -4699,6 +5650,9 @@ fn initialize_xhci_controller(
         mmio_vaddr,
         dma_context,
     )?);
+    controller
+        .self_weak
+        .get_or_init(|| Arc::downgrade(&controller));
 
     controller.init()?;
     controller.start()?;

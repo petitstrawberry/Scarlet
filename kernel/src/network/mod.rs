@@ -235,6 +235,28 @@ impl NetworkManager {
         self.interfaces.read().get(name).cloned()
     }
 
+    /// Remove a registered network interface.
+    ///
+    /// If the removed interface was the default, the lexicographically first
+    /// remaining interface becomes the new default.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - Interface name to remove.
+    ///
+    /// # Returns
+    ///
+    /// The removed interface, or `None` when `name` was not registered.
+    pub fn unregister_interface(&self, name: &str) -> Option<Arc<dyn NetworkInterface>> {
+        let mut default = self.default_interface.write();
+        let mut interfaces = self.interfaces.write();
+        let removed = interfaces.remove(name);
+        if default.as_deref() == Some(name) {
+            *default = interfaces.keys().next().cloned();
+        }
+        removed
+    }
+
     pub fn get_default_interface(&self) -> Option<Arc<dyn NetworkInterface>> {
         self.default_interface
             .read()
@@ -365,7 +387,7 @@ impl NetworkManager {
         self.network_config.read().default_gateway
     }
 
-    pub fn handle_received_packet(&self, _interface_name: &str, packet: &DevicePacket) {
+    pub fn handle_received_packet(&self, interface_name: &str, packet: &DevicePacket) {
         if packet.len < 14 {
             return;
         }
@@ -377,13 +399,13 @@ impl NetworkManager {
         //     eth_type
         // );
         match eth_type {
-            0x0806 => self.handle_arp_packet(packet),
+            0x0806 => self.handle_arp_packet(interface_name, packet),
             0x0800 => self.handle_ipv4_packet(packet),
             _ => {}
         }
     }
 
-    fn handle_arp_packet(&self, packet: &DevicePacket) {
+    fn handle_arp_packet(&self, interface_name: &str, packet: &DevicePacket) {
         if packet.len < 14 + 28 {
             return;
         }
@@ -394,7 +416,7 @@ impl NetworkManager {
                 .as_any()
                 .downcast_ref::<crate::network::arp::ArpLayer>()
             {
-                let _ = arp.receive_packet(arp_data);
+                let _ = arp.receive_packet_on_interface(arp_data, Some(interface_name));
             }
         }
     }

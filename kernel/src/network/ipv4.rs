@@ -328,8 +328,20 @@ impl Ipv4Layer {
         table.retain(|r| r.destination != destination || r.netmask != netmask);
     }
 
-    /// Set default gateway
+    /// Set the default gateway, replacing any previously installed default.
+    ///
+    /// # Arguments
+    ///
+    /// * `gateway` - Next-hop IPv4 address.
+    /// * `interface` - Interface used to reach the gateway.
+    ///
+    /// # Returns
+    ///
+    /// This method does not return a value.
     pub fn set_default_gateway(&self, gateway: Ipv4Address, interface: &str) {
+        self.routing_table
+            .write()
+            .retain(|route| !route.destination.is_any() || !route.netmask.is_any());
         self.add_route(RouteEntry {
             destination: Ipv4Address::new(0, 0, 0, 0),
             netmask: Ipv4Address::new(0, 0, 0, 0),
@@ -346,10 +358,14 @@ impl Ipv4Layer {
         &self,
         dest: Ipv4Address,
     ) -> Option<(String, Ipv4Address, Option<Ipv4Address>)> {
-        let table = self.routing_table.read();
+        let routes = self.routing_table.read().clone();
 
-        // Find matching route
-        for route in table.iter() {
+        // Prefer explicit routes. An implicit connected route is checked
+        // separately below, before the catch-all default route.
+        for route in routes
+            .iter()
+            .filter(|route| !route.destination.is_any() || !route.netmask.is_any())
+        {
             if self.ip_matches_route(dest, route) {
                 if let Some(src_ip) = self.get_primary_ip(&route.interface) {
                     return Some((route.interface.clone(), src_ip, route.gateway));
@@ -366,8 +382,20 @@ impl Ipv4Layer {
                 }
             }
         }
+        drop(addrs);
+
+        // A default route must not hide an implicit directly connected route.
+        for route in routes
+            .iter()
+            .filter(|route| route.destination.is_any() && route.netmask.is_any())
+        {
+            if let Some(src_ip) = self.get_primary_ip(&route.interface) {
+                return Some((route.interface.clone(), src_ip, route.gateway));
+            }
+        }
 
         // Last resort: use any available primary IP
+        let addrs = self.addresses.read();
         for (iface, ips) in addrs.iter() {
             if let Some(primary) = ips.iter().find(|a| a.is_primary) {
                 return Some((iface.clone(), primary.address, None));
@@ -590,13 +618,15 @@ impl NetworkLayer for Ipv4Layer {
         );
 
         // Update statistics
-        let mut stats = self.stats.write();
-        stats.packets_received += 1;
-        stats.bytes_received += total_length as u64;
+        {
+            let mut stats = self.stats.write();
+            stats.packets_received += 1;
+            stats.bytes_received += total_length as u64;
+        }
 
         // Route to protocol handler based on protocol field
-        let protocols = self.protocols.read();
-        if let Some(handler) = protocols.get(&header.protocol) {
+        let handler = self.protocols.read().get(&header.protocol).cloned();
+        if let Some(handler) = handler {
             let mut proto_context = LayerContext::new();
             proto_context.set("ip_src", &header.source_ip);
             proto_context.set("ip_dst", &header.dest_ip);
@@ -852,6 +882,49 @@ mod tests {
         assert_eq!(iface, "eth0");
         assert_eq!(src_ip, Ipv4Address::new(192, 168, 1, 100));
         assert_eq!(gw, Some(Ipv4Address::new(192, 168, 1, 1)));
+    }
+
+    #[test_case]
+    fn usb_ncm_regression_connected_subnet_precedes_default() {
+        let ip_layer = Ipv4Layer::new();
+        ip_layer.set_default_gateway(Ipv4Address::new(10, 0, 2, 254), "usbnet0");
+        ip_layer.add_address(
+            "usbnet0",
+            Ipv4AddressInfo {
+                address: Ipv4Address::new(10, 0, 2, 2),
+                netmask: Ipv4Address::new(255, 255, 255, 0),
+                broadcast: Some(Ipv4Address::new(10, 0, 2, 255)),
+                is_primary: true,
+            },
+        );
+
+        let (interface, source, gateway) = ip_layer
+            .select_source(Ipv4Address::new(10, 0, 2, 1))
+            .expect("connected destination should be routable");
+        assert_eq!(interface, "usbnet0");
+        assert_eq!(source, Ipv4Address::new(10, 0, 2, 2));
+        assert_eq!(gateway, None);
+    }
+
+    #[test_case]
+    fn usb_ncm_regression_gateway_update_replaces_old_route() {
+        let ip_layer = Ipv4Layer::new();
+        ip_layer.add_address(
+            "usbnet0",
+            Ipv4AddressInfo {
+                address: Ipv4Address::new(10, 0, 2, 2),
+                netmask: Ipv4Address::new(255, 255, 255, 0),
+                broadcast: Some(Ipv4Address::new(10, 0, 2, 255)),
+                is_primary: true,
+            },
+        );
+        ip_layer.set_default_gateway(Ipv4Address::new(10, 0, 2, 2), "usbnet0");
+        ip_layer.set_default_gateway(Ipv4Address::new(10, 0, 2, 1), "usbnet0");
+
+        let (_, _, gateway) = ip_layer
+            .select_source(Ipv4Address::new(203, 0, 113, 1))
+            .expect("default route should remain installed");
+        assert_eq!(gateway, Some(Ipv4Address::new(10, 0, 2, 1)));
     }
 
     #[test_case]

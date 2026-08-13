@@ -223,6 +223,27 @@ if [ "${SCARLET_VHOST_USER_VIDEO:-0}" = "1" ] || [ "${SCARLET_VHOST_USER_VIDEO:-
     )
 fi
 
+QEMU_USB_ARGS=()
+QEMU_NETWORK_ARGS=(
+    -netdev user,id=net0
+    -device virtio-net-pci,netdev=net0,bus=pcie.0
+)
+if [ "${SCARLET_QEMU_USB_NCM:-0}" = "1" ] || [ "${SCARLET_QEMU_USB_NCM:-}" = "true" ]; then
+    USB_NCM_MAC="${SCARLET_QEMU_USB_NCM_MAC:-52:54:00:12:34:57}"
+    USB_NCM_PCAP="${SCARLET_QEMU_USB_NCM_PCAP-$RUN_DIR/usb-ncm-aarch64.pcap}"
+    USB_NCM_DEVICE="usb-ncm,id=ncm0,bus=xhci.0,netdev=net0,mac=$USB_NCM_MAC"
+    if [ -n "$USB_NCM_PCAP" ]; then
+        USB_NCM_DEVICE="$USB_NCM_DEVICE,pcap=$USB_NCM_PCAP"
+        echo "QEMU CDC-NCM USB capture: $USB_NCM_PCAP"
+    fi
+    echo "Using QEMU CDC-NCM network device (MAC $USB_NCM_MAC)"
+    QEMU_USB_ARGS=(
+        -device qemu-xhci,id=xhci,bus=pcie.0
+        -device "$USB_NCM_DEVICE"
+    )
+    QEMU_NETWORK_ARGS=(-netdev user,id=net0)
+fi
+
 qemu-system-aarch64 \
     -machine virt,gic-version=3,acpi=off \
     -cpu cortex-a57 \
@@ -240,11 +261,11 @@ qemu-system-aarch64 \
     -display vnc=:0 \
     "${QEMU_GPU_ARGS[@]}" \
     "${QEMU_VHOST_USER_VIDEO_ARGS[@]}" \
-    -netdev user,id=net0 \
-    -device virtio-net-pci,netdev=net0,bus=pcie.0 \
+    "${QEMU_NETWORK_ARGS[@]}" \
     -device virtio-keyboard-device,bus=virtio-mmio-bus.4 \
     -device virtio-mouse-device,bus=virtio-mmio-bus.5 \
     -device virtio-rng-device,bus=virtio-mmio-bus.6 \
+    "${QEMU_USB_ARGS[@]}" \
     $QEMU_DEBUG_ARGS \
     $DEBUG_FLAGS | tee "$TEMP_OUTPUT"
 

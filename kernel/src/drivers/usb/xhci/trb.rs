@@ -11,6 +11,7 @@ pub enum TrbType {
     Link = 6,
     NoOp = 8,
     EnableSlotCommand = 9,
+    DisableSlotCommand = 10,
     AddressDeviceCommand = 11,
     ConfigureEndpointCommand = 12,
     ResetEndpointCommand = 14,
@@ -95,6 +96,21 @@ impl Trb {
     /// Builds an Enable Slot command TRB.
     pub const fn enable_slot_command() -> Self {
         Self::new(TrbType::EnableSlotCommand)
+    }
+
+    /// Builds a Disable Slot command TRB.
+    ///
+    /// # Arguments
+    ///
+    /// * `slot_id` - xHCI slot ID to release.
+    ///
+    /// # Returns
+    ///
+    /// Encoded Disable Slot command TRB.
+    pub fn disable_slot_command(slot_id: u8) -> Self {
+        let mut trb = Self::new(TrbType::DisableSlotCommand);
+        trb.set_slot_id(slot_id);
+        trb
     }
 
     /// Builds an Address Device command TRB.

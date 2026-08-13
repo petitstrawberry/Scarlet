@@ -19,8 +19,8 @@
       url = "github:AsahiLinux/macvdmtool";
       flake = false;
     };
-    qemu-cocoa-virgl = {
-      url = "git+https://gitlab.com/petitstrawberry/qemu.git?ref=cocoa-virgl&submodules=1";
+    qemu-scarlet = {
+      url = "git+https://gitlab.com/petitstrawberry/qemu.git?ref=scarlet&submodules=1";
       flake = false;
     };
   };
@@ -32,7 +32,7 @@
       scarlet-rust-toolchain,
       scarlet-sdk,
       macvdmtool-src,
-      qemu-cocoa-virgl,
+      qemu-scarlet,
     }:
     let
       supportedSystems = [
@@ -246,8 +246,8 @@
           };
 
           qemu = pkgs.qemu.overrideAttrs (_finalAttrs: _prevAttrs: {
-            version = "11.0.91-cocoa-virgl";
-            src = qemu-cocoa-virgl;
+            version = "11.0.91-scarlet";
+            src = qemu-scarlet;
             configureFlags = (_prevAttrs.configureFlags or [ ]) ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [
               "--enable-cocoa"
               "--enable-hvf"
@@ -267,9 +267,6 @@
               pkgs.apple-sdk_15
             ];
             nativeBuildInputs = (_prevAttrs.nativeBuildInputs or [ ]) ++ [ pkgs.git ];
-            patches = (_prevAttrs.patches or [ ]) ++ [
-              ./nix/patches/qemu-10-cocoa-retina-toggle.patch
-            ];
             postPatch = (_prevAttrs.postPatch or "") + ''
               ${pkgs.gnutar}/bin/tar -xf ${keycodemapdb} -C subprojects
               rm -rf subprojects/keycodemapdb

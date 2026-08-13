@@ -414,9 +414,11 @@ impl IcmpLayer {
         );
 
         // Update statistics
-        let mut stats = self.stats.write();
-        stats.packets_received += 1;
-        stats.bytes_received += packet.len() as u64;
+        {
+            let mut stats = self.stats.write();
+            stats.packets_received += 1;
+            stats.bytes_received += packet.len() as u64;
+        }
 
         match header.message_type {
             message_type::ECHO_REQUEST => {

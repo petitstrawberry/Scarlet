@@ -499,12 +499,15 @@ impl ArpLayer {
 
             // If we had queued packets for this sender, flush them now
             let pending_key = (iface.clone(), u32::from_be_bytes(sender_ip.0));
-            let mut pending = self.pending.write();
-            if let Some(pending_entry) = pending.remove(&pending_key) {
-                let mut queue = pending_entry.packet_queue.lock();
+            let pending_entry = self.pending.write().remove(&pending_key);
+            if let Some(pending_entry) = pending_entry {
+                let queued_packets = {
+                    let mut queue = pending_entry.packet_queue.lock();
+                    core::mem::take(&mut *queue)
+                };
                 if let Some(eth_layer) = get_network_manager().get_layer("ethernet") {
                     if let Some(src_mac) = local_mac {
-                        for packet_bytes in queue.drain(..) {
+                        for packet_bytes in queued_packets {
                             let mut eth_context = LayerContext::new();
                             eth_context.set("eth_dst_mac", &arp_packet.sender_mac);
                             eth_context.set("eth_src_mac", &src_mac);
@@ -514,7 +517,6 @@ impl ArpLayer {
                     }
                 }
             }
-            drop(pending);
 
             // Check if target IP is one of our local IPs on this interface
             let is_for_us = local_ip.map(|ip| ip == target_ip).unwrap_or(false);
@@ -560,9 +562,9 @@ impl ArpLayer {
             if !is_from_us {
                 // Check if we have a pending request for this IP on this interface
                 let pending_key = (iface.clone(), u32::from_be_bytes(sender_ip.0));
-                let mut pending = self.pending.write();
+                let pending_entry = self.pending.write().remove(&pending_key);
 
-                if let Some(pending_entry) = pending.remove(&pending_key) {
+                if let Some(pending_entry) = pending_entry {
                     // Update cache with resolved MAC
                     self.add_entry_on_interface(&iface, sender_ip, arp_packet.sender_mac);
 
@@ -583,8 +585,11 @@ impl ArpLayer {
                     );
 
                     // Send queued packets
-                    let mut queue = pending_entry.packet_queue.lock();
-                    let queued_count = queue.len();
+                    let queued_packets = {
+                        let mut queue = pending_entry.packet_queue.lock();
+                        core::mem::take(&mut *queue)
+                    };
+                    let queued_count = queued_packets.len();
                     if queued_count > 0 {
                         early_println!(
                             "[ARP] Flushing {} queued packet(s) to {:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
@@ -599,7 +604,7 @@ impl ArpLayer {
                     }
                     if let Some(eth_layer) = get_network_manager().get_layer("ethernet") {
                         if let Some(src_mac) = local_mac {
-                            for packet_bytes in queue.drain(..) {
+                            for packet_bytes in queued_packets {
                                 let mut eth_context = LayerContext::new();
                                 eth_context.set("eth_dst_mac", &arp_packet.sender_mac);
                                 eth_context.set("eth_src_mac", &src_mac);
@@ -632,8 +637,6 @@ impl ArpLayer {
                     );
                     self.add_entry_on_interface(&iface, sender_ip, arp_packet.sender_mac);
                 }
-
-                drop(pending);
 
                 let mut stats = self.stats.write();
                 stats.packets_received += 1;
@@ -728,9 +731,11 @@ impl NetworkLayer for ArpLayer {
     }
 
     fn receive(&self, packet: &[u8], _context: Option<&LayerContext>) -> Result<(), SocketError> {
-        let mut stats = self.stats.write();
-        stats.packets_received += 1;
-        stats.bytes_received += packet.len() as u64;
+        {
+            let mut stats = self.stats.write();
+            stats.packets_received += 1;
+            stats.bytes_received += packet.len() as u64;
+        }
 
         self.receive_packet(packet)
     }
