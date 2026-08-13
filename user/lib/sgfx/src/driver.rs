@@ -3,6 +3,7 @@
 use alloc::{rc::Rc, vec::Vec};
 
 use framebuffer::DisplaySurface;
+use gpu_raw::Gpu as RawGpu;
 #[cfg(feature = "std")]
 use scarlet_os::handle::{Handle, HandleError, HandleResult};
 #[cfg(not(feature = "std"))]
@@ -16,14 +17,44 @@ use scarlet_os::ipc::SharedMemory;
 #[cfg(not(feature = "std"))]
 use std::ipc::SharedMemory;
 
+const VIRTIO_GPU_BACKEND_ID: &[u8] = b"virtio-gpu";
+const APPLE_AGX_BACKEND_ID: &[u8] = b"apple-agx";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BackendKind {
+    Virgl,
+    AppleAgx,
+    Unknown,
+}
+
+fn classify_backend_id(backend_id: &[u8]) -> BackendKind {
+    if backend_id == VIRTIO_GPU_BACKEND_ID {
+        BackendKind::Virgl
+    } else if backend_id == APPLE_AGX_BACKEND_ID {
+        BackendKind::AppleAgx
+    } else {
+        BackendKind::Unknown
+    }
+}
+
 pub(crate) enum Device {
     Virgl(Rc<virgl::Device>),
 }
 
 impl Device {
     pub(crate) fn open(path: &str) -> HandleResult<Self> {
-        let backend = Rc::new(virgl::Device::open(path)?);
-        Ok(Self::Virgl(backend))
+        // Queue command bytes are backend-defined. Probe the stable backend ID
+        // before selecting a lowerer so a non-VirGL device never receives
+        // VirGL command streams merely because it exposes generic queues.
+        let probe = RawGpu::open(path)?;
+        let info = probe.query_info()?;
+        match classify_backend_id(info.backend_id_bytes()) {
+            BackendKind::Virgl => {
+                let backend = Rc::new(virgl::Device::open(path)?);
+                Ok(Self::Virgl(backend))
+            }
+            BackendKind::AppleAgx | BackendKind::Unknown => Err(HandleError::Unsupported),
+        }
     }
 
     pub(crate) fn capabilities(&self) -> Capabilities {
@@ -564,4 +595,29 @@ impl Image {
 
 pub(crate) enum Pipeline {
     Virgl(virgl::Pipeline),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BackendKind, classify_backend_id};
+
+    #[test]
+    fn selects_virgl_for_exact_virtio_backend_id() {
+        assert_eq!(classify_backend_id(b"virtio-gpu"), BackendKind::Virgl);
+        assert_eq!(
+            classify_backend_id(b"virtio-gpu-extra"),
+            BackendKind::Unknown
+        );
+    }
+
+    #[test]
+    fn reserves_apple_agx_without_falling_back_to_virgl() {
+        assert_eq!(classify_backend_id(b"apple-agx"), BackendKind::AppleAgx);
+    }
+
+    #[test]
+    fn rejects_unknown_and_empty_backend_ids() {
+        assert_eq!(classify_backend_id(b""), BackendKind::Unknown);
+        assert_eq!(classify_backend_id(b"software"), BackendKind::Unknown);
+    }
 }
