@@ -84,12 +84,28 @@ impl ArpPacket {
     }
 
     /// Create an ARP reply
-    pub fn reply(sender_mac: [u8; 6], sender_ip: [u8; 4], target_mac: [u8; 6]) -> Self {
+    ///
+    /// # Arguments
+    ///
+    /// * `sender_mac` - Hardware address being advertised by the reply.
+    /// * `sender_ip` - Protocol address being advertised by the reply.
+    /// * `target_mac` - Hardware address of the host that sent the request.
+    /// * `target_ip` - Protocol address of the host that sent the request.
+    ///
+    /// # Returns
+    ///
+    /// An ARP reply addressed to the requesting host.
+    pub fn reply(
+        sender_mac: [u8; 6],
+        sender_ip: [u8; 4],
+        target_mac: [u8; 6],
+        target_ip: [u8; 4],
+    ) -> Self {
         let mut packet = Self::new(operation::REPLY);
         packet.sender_mac = sender_mac;
         packet.sender_ip = sender_ip;
         packet.target_mac = target_mac;
-        packet.target_ip = sender_ip; // Target IP = sender IP in reply
+        packet.target_ip = target_ip;
         packet
     }
 
@@ -524,7 +540,12 @@ impl ArpLayer {
             if is_for_us {
                 if let (Some(my_mac), Some(my_ip)) = (local_mac, local_ip) {
                     // Request is for us - send reply
-                    let reply = ArpPacket::reply(my_mac, my_ip.0, arp_packet.sender_mac);
+                    let reply = ArpPacket::reply(
+                        my_mac,
+                        my_ip.0,
+                        arp_packet.sender_mac,
+                        arp_packet.sender_ip,
+                    );
 
                     let sender_ip_bytes = sender_ip.0;
                     early_println!(
@@ -776,13 +797,17 @@ mod tests {
     fn test_arp_packet_reply() {
         let sender_mac = [0x00, 0x11, 0x22, 0x33, 0x44, 0x55];
         let sender_ip = [192, 168, 1, 1];
+        let target_mac = [0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb];
+        let target_ip = [192, 168, 1, 100];
 
-        let packet = ArpPacket::reply(sender_mac, sender_ip, sender_mac);
+        let packet = ArpPacket::reply(sender_mac, sender_ip, target_mac, target_ip);
 
         assert!(!packet.is_request());
         assert!(packet.is_reply());
         assert_eq!(packet.sender_mac, sender_mac);
-        assert_eq!(packet.target_mac, sender_mac);
+        assert_eq!(packet.sender_ip, sender_ip);
+        assert_eq!(packet.target_mac, target_mac);
+        assert_eq!(packet.target_ip, target_ip);
         let operation_value = unsafe { core::ptr::addr_of!(packet.operation).read_unaligned() };
         assert_eq!(operation_value, operation::REPLY);
     }
@@ -791,9 +816,10 @@ mod tests {
     fn test_arp_packet_serialization() {
         let sender_mac = [0x00, 0x11, 0x22, 0x33, 0x44, 0x55];
         let sender_ip = [192, 168, 1, 1];
+        let target_mac = [0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb];
         let target_ip = [192, 168, 1, 2];
 
-        let packet = ArpPacket::reply(sender_mac, sender_ip, sender_mac);
+        let packet = ArpPacket::reply(sender_mac, sender_ip, target_mac, target_ip);
         let bytes = packet.to_bytes();
 
         assert_eq!(bytes.len(), 28);
@@ -804,16 +830,18 @@ mod tests {
         assert_eq!(&bytes[6..8], operation::REPLY.to_be_bytes()); // operation
         assert_eq!(&bytes[8..14], &sender_mac); // sender_mac
         assert_eq!(&bytes[14..18], &sender_ip); // sender_ip
-        assert_eq!(&bytes[18..24], &sender_mac); // target_mac
-        assert_eq!(&bytes[24..28], &sender_ip); // target_ip
+        assert_eq!(&bytes[18..24], &target_mac); // target_mac
+        assert_eq!(&bytes[24..28], &target_ip); // target_ip
     }
 
     #[test_case]
     fn test_arp_packet_parsing() {
         let sender_mac = [0x00, 0x11, 0x22, 0x33, 0x44, 0x55];
         let sender_ip = [192, 168, 1, 1];
+        let target_mac = [0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb];
+        let target_ip = [192, 168, 1, 100];
 
-        let original = ArpPacket::reply(sender_mac, sender_ip, sender_mac);
+        let original = ArpPacket::reply(sender_mac, sender_ip, target_mac, target_ip);
         let bytes = original.to_bytes();
 
         let parsed = ArpPacket::from_bytes(&bytes).unwrap();
