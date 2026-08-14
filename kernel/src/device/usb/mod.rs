@@ -1,13 +1,5 @@
 /// USB host controller provider registered by bus-specific host drivers.
-pub trait UsbHostController: Send + Sync {
-    /// Poll and handle pending host-controller events.
-    ///
-    /// # Returns
-    ///
-    /// This method reports errors internally because it is used from generic
-    /// host polling paths that cannot act on controller-specific failures.
-    fn poll_events(&self);
-}
+pub trait UsbHostController: Send + Sync {}
 
 /// USB data role reported by a Type-C port controller.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

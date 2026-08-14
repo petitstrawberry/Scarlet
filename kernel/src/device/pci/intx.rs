@@ -9,7 +9,8 @@ use super::config::{self, PciConfig};
 use super::device::PciDeviceInfo;
 use crate::device::events::InterruptCapableDevice;
 use crate::interrupt::{
-    InterruptClaim, InterruptId, InterruptResult, InterruptSource, MaskableInterruptSource,
+    DeferredInterruptCompletion, InterruptClaim, InterruptId, InterruptResult, InterruptSource,
+    MaskableInterruptSource,
 };
 
 /// Maskable interrupt source for a PCI legacy INTx function.
@@ -84,6 +85,10 @@ impl InterruptSource for PciIntxInterruptSource {
 
     fn claim_interrupt(&self) -> InterruptResult<InterruptClaim> {
         self.handler.claim_interrupt()
+    }
+
+    fn deferred_interrupt_ready(&self, completion: DeferredInterruptCompletion) {
+        self.handler.deferred_interrupt_ready(completion);
     }
 }
 

@@ -19,6 +19,7 @@ use crate::device::block::{
 use crate::device::events::InterruptCapableDevice;
 use crate::device::iommu::{DmaContext, DmaMapping, IommuMapFlags};
 use crate::device::manager::{DeviceManager, DriverPriority};
+use crate::device::network::MacAddress;
 use crate::device::pci::config::{self, PciConfig};
 use crate::device::pci::device::PciDeviceInfo;
 use crate::device::pci::driver::{PciDeviceDriver, PciDeviceId};
@@ -51,7 +52,7 @@ use crate::interrupt::{
 use crate::mem::page::ContiguousPages;
 use crate::object::capability::{ControlOps, MemoryMappingInfo, MemoryMappingOps, Selectable};
 use crate::sync::{IrqSpinLock, IrqSpinLockGuard, Mutex, Once};
-use crate::timer::{TimerHandler, add_timer, get_time_ns, ms_to_ns};
+use crate::timer::get_time_ns;
 use crate::vm;
 use crate::{print, println};
 use alloc::boxed::Box;
@@ -73,6 +74,8 @@ const USBSTS_HOST_SYSTEM_ERROR: u32 = 1 << 2;
 const USBSTS_PORT_CHANGE_DETECT: u32 = 1 << 4;
 const USBSTS_WRITE_1_TO_CLEAR: u32 =
     USBSTS_HOST_SYSTEM_ERROR | USBSTS_EVENT_INTERRUPT | USBSTS_PORT_CHANGE_DETECT;
+const IMAN_INTERRUPT_PENDING: u32 = 1 << 0;
+const IMAN_INTERRUPT_ENABLE: u32 = 1 << 1;
 const ERDP_EVENT_HANDLER_BUSY: u64 = 1 << 3;
 const USB_REQ_GET_DESCRIPTOR: u8 = 0x06;
 const USB_REQ_GET_STATUS: u8 = 0x00;
@@ -124,10 +127,24 @@ const XHCI_TRANSFER_TIMEOUT_US: u64 = 5_000_000;
 const XHCI_PENDING_EVENT_LIMIT: usize = 64;
 const XHCI_CDC_NCM_TX_QUEUE_LIMIT: usize = 256;
 const XHCI_CDC_NCM_TX_WORK_BUDGET: usize = 32;
+const XHCI_CDC_NCM_RX_TRANSFER_DEPTH: usize = 8;
+const XHCI_CDC_NCM_TX_TRANSFER_DEPTH: usize = 8;
 const XHCI_VERBOSE_TRACE: bool = false;
 const XHCI_TRACE_BUFFER_POISON_LEN: usize = 512;
 const USB_STORAGE_CBW_SIGNATURE: u32 = 0x4342_5355;
 const USB_STORAGE_CSW_SIGNATURE: u32 = 0x5342_5355;
+
+const fn iman_write_value(interrupt_enabled: bool, clear_pending: bool) -> u32 {
+    (if interrupt_enabled {
+        IMAN_INTERRUPT_ENABLE
+    } else {
+        0
+    }) | (if clear_pending {
+        IMAN_INTERRUPT_PENDING
+    } else {
+        0
+    })
+}
 const USB_STORAGE_CBW_LEN: usize = 31;
 const USB_STORAGE_CSW_LEN: usize = 13;
 const USB_STORAGE_RECOVERY_DELAY_US: u64 = 6_000_000;
@@ -337,10 +354,19 @@ struct QueuedCdcNcmTx {
     frame_len: usize,
 }
 
-struct InFlightCdcNcmTx {
+struct CdcNcmDmaBuffer {
     // Keep the DMA mapping before its backing pages so it is unmapped first.
-    _buffer_mapping: DmaMapping,
-    _buffer: ContiguousPages,
+    mapping: DmaMapping,
+    pages: ContiguousPages,
+}
+
+struct InFlightCdcNcmRx {
+    buffer: CdcNcmDmaBuffer,
+    trb_dma: usize,
+}
+
+struct InFlightCdcNcmTx {
+    buffer: CdcNcmDmaBuffer,
     transfer_len: usize,
     frame_len: usize,
     trb_dma: usize,
@@ -351,12 +377,14 @@ struct CdcNcmRuntime {
     notification: InterruptEndpointRuntime,
     bulk_in: BulkEndpointRuntime,
     bulk_out: BulkEndpointRuntime,
-    rx_buffer: ContiguousPages,
-    rx_buffer_mapping: DmaMapping,
+    rx_available: Vec<CdcNcmDmaBuffer>,
+    rx_in_flight: VecDeque<InFlightCdcNcmRx>,
     rx_transfer_size: usize,
+    tx_available: Vec<CdcNcmDmaBuffer>,
+    tx_transfer_size: usize,
     tx_queue: VecDeque<QueuedCdcNcmTx>,
-    tx_preparing: bool,
-    tx_in_flight: Option<InFlightCdcNcmTx>,
+    tx_preparing: usize,
+    tx_in_flight: VecDeque<InFlightCdcNcmTx>,
     device: Arc<CdcNcmDevice>,
     device_id: Option<usize>,
 }
@@ -663,6 +691,96 @@ pub struct XhciController {
     deferred_spurious_count: AtomicU64,
     deferred_spurious_last_report_ns: AtomicU64,
     self_weak: Once<Weak<XhciController>>,
+}
+
+fn prefer_cdc_ncm_descriptor_mac<F>(
+    descriptor_mac: Result<MacAddress, &'static str>,
+    fallback: F,
+) -> Result<MacAddress, &'static str>
+where
+    F: FnOnce() -> Result<MacAddress, &'static str>,
+{
+    match descriptor_mac {
+        Ok(mac) => Ok(mac),
+        Err(descriptor_error) => match fallback() {
+            Ok(mac) => Ok(mac),
+            Err(_) => Err(descriptor_error),
+        },
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TransferTdEventDisposition {
+    Unrelated,
+    IntermediateShortPacket,
+    Complete,
+    Failed,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TransferTdCompletion {
+    event: Trb,
+    short_packet_event: Option<Trb>,
+}
+
+impl TransferTdCompletion {
+    fn remaining_length(self) -> usize {
+        self.short_packet_event
+            .unwrap_or(self.event)
+            .transfer_length() as usize
+    }
+}
+
+fn transfer_event_trb_dma(event: Trb) -> usize {
+    event.trb_pointer() as usize & !(size_of::<Trb>() - 1)
+}
+
+fn transfer_event_points_into_td(
+    event: Trb,
+    slot_id: u8,
+    endpoint_id: u8,
+    td_start_dma: usize,
+    td_completion_dma: usize,
+) -> bool {
+    if event.trb_type() != TrbType::TransferEvent as u8
+        || event.slot_id() != slot_id
+        || event.endpoint_id() != endpoint_id
+        || td_start_dma > td_completion_dma
+    {
+        return false;
+    }
+
+    let event_dma = transfer_event_trb_dma(event);
+    event_dma >= td_start_dma
+        && event_dma <= td_completion_dma
+        && (event_dma - td_start_dma).is_multiple_of(size_of::<Trb>())
+}
+
+fn classify_transfer_td_event(
+    event: Trb,
+    slot_id: u8,
+    endpoint_id: u8,
+    td_start_dma: usize,
+    td_completion_dma: usize,
+) -> TransferTdEventDisposition {
+    if !transfer_event_points_into_td(event, slot_id, endpoint_id, td_start_dma, td_completion_dma)
+    {
+        return TransferTdEventDisposition::Unrelated;
+    }
+
+    let is_short_packet = event.completion_code() == TRANSFER_EVENT_SHORT_PACKET
+        || (event.completion_code() == COMMAND_COMPLETION_SUCCESS && event.transfer_length() != 0);
+    if transfer_event_trb_dma(event) == td_completion_dma {
+        if event.completion_code() == COMMAND_COMPLETION_SUCCESS || is_short_packet {
+            TransferTdEventDisposition::Complete
+        } else {
+            TransferTdEventDisposition::Failed
+        }
+    } else if is_short_packet {
+        TransferTdEventDisposition::IntermediateShortPacket
+    } else {
+        TransferTdEventDisposition::Failed
+    }
 }
 
 impl XhciController {
@@ -1164,7 +1282,7 @@ impl XhciController {
             );
             write_volatile(
                 (self.regs.runtime_base + registers::runtime::IR0_IMAN) as *mut u32,
-                (1 << 1) | 1, // IE = bit 1, IP(W1C) = bit 0
+                iman_write_value(true, true),
             );
         }
         println!(
@@ -1184,17 +1302,27 @@ impl XhciController {
         let usbcmd = self.operational.read_usbcmd();
         self.operational.write_usbcmd(usbcmd | (1 << 2)); // INTE = bit 2
 
-        let pending = self.operational.read_usbsts();
-        if pending & (USBSTS_EVENT_INTERRUPT | USBSTS_PORT_CHANGE_DETECT) != 0 {
-            self.operational
-                .write_usbsts(pending & (USBSTS_EVENT_INTERRUPT | USBSTS_PORT_CHANGE_DETECT));
+        let pending =
+            self.operational.read_usbsts() & (USBSTS_EVENT_INTERRUPT | USBSTS_PORT_CHANGE_DETECT);
+        let interrupter_pending =
+            self.read_runtime_u32(registers::runtime::IR0_IMAN) & IMAN_INTERRUPT_PENDING != 0;
+        if pending != 0 {
+            self.operational.write_usbsts(pending);
         }
 
         unsafe {
             write_volatile(
                 (self.regs.runtime_base + registers::runtime::IR0_IMAN) as *mut u32,
-                (1 << 1) | 1, // IE = bit 1, clear IP = bit 0
+                iman_write_value(true, true),
             );
+        }
+
+        // Transfers are submitted during device enumeration, before the IRQ
+        // source is registered. If one completed in that window, clearing the
+        // sampled W1C status above must be paired with an event-ring drain;
+        // otherwise no later interrupt is guaranteed to wake the worker.
+        if pending != 0 || interrupter_pending {
+            self.queue_interrupt_work((pending & USBSTS_PORT_CHANGE_DETECT) != 0);
         }
 
         Ok(())
@@ -1336,11 +1464,21 @@ impl XhciController {
         self.take_pending_event(|event| event.trb_type() == TrbType::CommandCompletionEvent as u8)
     }
 
-    fn take_pending_transfer_event(&self, slot_id: u8, endpoint_id: u8) -> Option<Trb> {
+    fn take_pending_transfer_event_for_td(
+        &self,
+        slot_id: u8,
+        endpoint_id: u8,
+        td_start_dma: usize,
+        td_completion_dma: usize,
+    ) -> Option<Trb> {
         self.take_pending_event(|event| {
-            event.trb_type() == TrbType::TransferEvent as u8
-                && event.slot_id() == slot_id
-                && event.endpoint_id() == endpoint_id
+            transfer_event_points_into_td(
+                *event,
+                slot_id,
+                endpoint_id,
+                td_start_dma,
+                td_completion_dma,
+            )
         })
     }
 
@@ -1417,9 +1555,7 @@ impl XhciController {
             if ncm.bulk_out.endpoint_address != endpoint_address {
                 return Err("CDC-NCM bulk OUT endpoint mismatch");
             }
-            let outstanding = ncm.tx_queue.len()
-                + usize::from(ncm.tx_preparing)
-                + usize::from(ncm.tx_in_flight.is_some());
+            let outstanding = ncm.tx_queue.len() + ncm.tx_preparing + ncm.tx_in_flight.len();
             if outstanding >= XHCI_CDC_NCM_TX_QUEUE_LIMIT {
                 return Err("CDC-NCM transmit queue is full");
             }
@@ -1430,30 +1566,40 @@ impl XhciController {
         Ok(())
     }
 
-    fn take_pending_cdc_ncm_tx(&self) -> Option<(u8, u8, Arc<CdcNcmDevice>, QueuedCdcNcmTx)> {
+    fn take_pending_cdc_ncm_tx(
+        &self,
+    ) -> Option<(u8, u8, Arc<CdcNcmDevice>, QueuedCdcNcmTx, CdcNcmDmaBuffer)> {
         let mut slots = self.slot_runtime.lock();
         for slot in slots.iter_mut() {
             let Some(ncm) = slot.cdc_ncm.as_mut() else {
                 continue;
             };
-            if !ncm.device.is_attached() || ncm.tx_preparing || ncm.tx_in_flight.is_some() {
+            if !ncm.device.is_attached()
+                || ncm.tx_in_flight.len() + ncm.tx_preparing >= XHCI_CDC_NCM_TX_TRANSFER_DEPTH
+                || ncm.tx_available.is_empty()
+            {
                 continue;
             }
             let Some(request) = ncm.tx_queue.pop_front() else {
                 continue;
             };
-            ncm.tx_preparing = true;
+            let buffer = ncm
+                .tx_available
+                .pop()
+                .expect("CDC-NCM transmit buffer disappeared while preparing it");
+            ncm.tx_preparing += 1;
             return Some((
                 slot.usb_device.slot_id(),
                 ncm.bulk_out.dci,
                 ncm.device.clone(),
                 request,
+                buffer,
             ));
         }
         None
     }
 
-    fn clear_cdc_ncm_tx_preparing(&self, slot_id: u8, dci: u8) {
+    fn restore_cdc_ncm_tx_buffer(&self, slot_id: u8, dci: u8, buffer: CdcNcmDmaBuffer) {
         let mut slots = self.slot_runtime.lock();
         if let Some(ncm) = slots
             .iter_mut()
@@ -1461,44 +1607,37 @@ impl XhciController {
             .and_then(|slot| slot.cdc_ncm.as_mut())
             && ncm.bulk_out.dci == dci
         {
-            ncm.tx_preparing = false;
+            ncm.tx_preparing = ncm.tx_preparing.saturating_sub(1);
+            ncm.tx_available.push(buffer);
         }
     }
 
     fn process_pending_cdc_ncm_tx(&self) -> usize {
         let mut processed = 0usize;
+        let mut doorbells = [(0u8, 0u8); XHCI_CDC_NCM_TX_WORK_BUDGET];
+        let mut doorbell_count = 0usize;
         while processed < XHCI_CDC_NCM_TX_WORK_BUDGET {
-            let Some((slot_id, dci, device, request)) = self.take_pending_cdc_ncm_tx() else {
+            let Some((slot_id, dci, device, request, buffer)) = self.take_pending_cdc_ncm_tx()
+            else {
                 break;
             };
             processed += 1;
 
-            let pages = request.ntb.len().div_ceil(crate::environment::PAGE_SIZE);
-            let Some(buffer) = self.dma_alloc_pages(pages) else {
-                self.clear_cdc_ncm_tx_preparing(slot_id, dci);
-                device.handle_transmit_error("Failed to allocate CDC-NCM transmit buffer");
+            if request.ntb.len() > buffer.pages.len() * crate::environment::PAGE_SIZE {
+                self.restore_cdc_ncm_tx_buffer(slot_id, dci, buffer);
+                device.handle_transmit_error("CDC-NCM transmit request exceeds its DMA buffer");
                 continue;
-            };
+            }
             // SAFETY: The DMA allocation was rounded up from the NTB length,
             // so it contains the complete non-overlapping source slice.
             unsafe {
                 core::ptr::copy_nonoverlapping(
                     request.ntb.as_ptr(),
-                    buffer.as_vaddr() as *mut u8,
+                    buffer.pages.as_vaddr() as *mut u8,
                     request.ntb.len(),
                 );
             }
-            sync_pages_for_device(&buffer);
-            let buffer_mapping = match self
-                .dma_map_owned_pages(&buffer, IommuMapFlags::READ | IommuMapFlags::COHERENT)
-            {
-                Ok(mapping) => mapping,
-                Err(error) => {
-                    self.clear_cdc_ncm_tx_preparing(slot_id, dci);
-                    device.handle_transmit_error(error);
-                    continue;
-                }
-            };
+            sync_pages_for_device(&buffer.pages);
 
             let submit_result = {
                 let mut slots = self.slot_runtime.lock();
@@ -1509,31 +1648,39 @@ impl XhciController {
                     .ok_or("CDC-NCM runtime disappeared before transmit submission");
                 match ncm {
                     Ok(ncm) => {
-                        ncm.tx_preparing = false;
+                        ncm.tx_preparing = ncm.tx_preparing.saturating_sub(1);
                         if !ncm.device.is_attached() {
+                            ncm.tx_available.push(buffer);
                             Err("CDC-NCM device disconnected before transmit submission")
                         } else if ncm.bulk_out.dci != dci {
+                            ncm.tx_available.push(buffer);
                             Err("CDC-NCM bulk OUT DCI changed before transmit submission")
-                        } else if ncm.tx_in_flight.is_some() {
-                            Err("CDC-NCM transmit request is already in flight")
+                        } else if request.ntb.len() > ncm.tx_transfer_size {
+                            ncm.tx_available.push(buffer);
+                            Err("CDC-NCM transmit request exceeds the negotiated NTB size")
+                        } else if ncm.tx_in_flight.len() >= XHCI_CDC_NCM_TX_TRANSFER_DEPTH {
+                            ncm.tx_available.push(buffer);
+                            Err("CDC-NCM transmit pipeline is full")
                         } else {
                             match ncm.bulk_out.ring.enqueue(Trb::normal_transfer(
-                                buffer_mapping.dma_addr(),
+                                buffer.mapping.dma_addr(),
                                 request.ntb.len() as u32,
                             )) {
                                 Ok(trb_index) => {
                                     let trb_dma = ncm.bulk_out.ring.dma_address()
                                         + trb_index * size_of::<Trb>();
-                                    ncm.tx_in_flight = Some(InFlightCdcNcmTx {
-                                        _buffer_mapping: buffer_mapping,
-                                        _buffer: buffer,
+                                    ncm.tx_in_flight.push_back(InFlightCdcNcmTx {
+                                        buffer,
                                         transfer_len: request.ntb.len(),
                                         frame_len: request.frame_len,
                                         trb_dma,
                                     });
                                     Ok(())
                                 }
-                                Err(error) => Err(error),
+                                Err(error) => {
+                                    ncm.tx_available.push(buffer);
+                                    Err(error)
+                                }
                             }
                         }
                     }
@@ -1545,6 +1692,13 @@ impl XhciController {
                 device.handle_transmit_error(error);
                 continue;
             }
+            if !doorbells[..doorbell_count].contains(&(slot_id, dci)) {
+                doorbells[doorbell_count] = (slot_id, dci);
+                doorbell_count += 1;
+            }
+        }
+
+        for &(slot_id, dci) in &doorbells[..doorbell_count] {
             self.ring_endpoint_doorbell(slot_id, dci);
         }
 
@@ -1564,7 +1718,7 @@ impl XhciController {
             "[xHCI] CDC-NCM packet filter: slot={} interface={} filter={:#x}",
             slot_id, control_interface, filter
         );
-        {
+        let (td_start_dma, td_completion_dma) = {
             let slots = self.slot_runtime.lock();
             let slot = slots
                 .iter()
@@ -1572,7 +1726,7 @@ impl XhciController {
                 .ok_or("Unknown slot for CDC-NCM packet filter")?;
             slot.ep0_ring
                 .ensure_contiguous_space(2, Trb::no_op_transfer())?;
-            slot.ep0_ring.enqueue(Trb::setup_stage(
+            let setup_trb_index = slot.ep0_ring.enqueue(Trb::setup_stage(
                 0x21,
                 USB_CDC_SET_ETHERNET_PACKET_FILTER,
                 filter,
@@ -1580,11 +1734,23 @@ impl XhciController {
                 0,
                 0,
             ))?;
-            slot.ep0_ring.enqueue(Trb::status_stage(true, true))?;
-        }
+            let status_trb_index = slot.ep0_ring.enqueue(Trb::status_stage(true, true))?;
+            let ring_dma = slot.ep0_ring.dma_address();
+            (
+                ring_dma + setup_trb_index * size_of::<Trb>(),
+                ring_dma + status_trb_index * size_of::<Trb>(),
+            )
+        };
 
         self.ring_endpoint_doorbell(slot_id, EP0_DCI);
-        self.wait_for_transfer_event(slot_id, EP0_DCI)?;
+        let deadline = crate::time::current_time() + XHCI_TRANSFER_TIMEOUT_US;
+        self.wait_for_transfer_event_until(
+            slot_id,
+            EP0_DCI,
+            td_start_dma,
+            td_completion_dma,
+            deadline,
+        )?;
         Ok(())
     }
 
@@ -1997,7 +2163,7 @@ impl XhciController {
         index: u16,
         mut data: Option<&mut ContiguousPages>,
         length: u16,
-    ) -> Result<Trb, &'static str> {
+    ) -> Result<usize, &'static str> {
         println!(
             "[xHCI] EP0 control transfer: slot={} req_type={:#x} req={:#x} value={:#x} index={:#x} length={} data={}",
             slot.usb_device.slot_id(),
@@ -2018,7 +2184,7 @@ impl XhciController {
         let _data_dma_mapping;
         slot.ep0_ring
             .ensure_contiguous_space(required_trbs, Trb::no_op_transfer())?;
-        slot.ep0_ring.enqueue(Trb::setup_stage(
+        let setup_trb_index = slot.ep0_ring.enqueue(Trb::setup_stage(
             request_type,
             request,
             value,
@@ -2026,6 +2192,7 @@ impl XhciController {
             length,
             transfer_type,
         ))?;
+        let status_trb_index;
         if let Some(buffer) = data.as_mut() {
             let flags = if direction_in {
                 IommuMapFlags::WRITE | IommuMapFlags::COHERENT
@@ -2043,70 +2210,76 @@ impl XhciController {
                 length as u32,
                 direction_in,
             ))?;
-            slot.ep0_ring
+            status_trb_index = slot
+                .ep0_ring
                 .enqueue(Trb::status_stage(!direction_in, true))?;
             _data_dma_mapping = Some(mapping);
         } else {
-            slot.ep0_ring.enqueue(Trb::status_stage(true, true))?;
+            status_trb_index = slot.ep0_ring.enqueue(Trb::status_stage(true, true))?;
             _data_dma_mapping = None;
         }
 
+        let ring_dma = slot.ep0_ring.dma_address();
+        let td_start_dma = ring_dma + setup_trb_index * size_of::<Trb>();
+        let td_completion_dma = ring_dma + status_trb_index * size_of::<Trb>();
         self.ring_endpoint_doorbell(slot.usb_device.slot_id(), EP0_DCI);
-        let event = self.wait_for_transfer_event(slot.usb_device.slot_id(), EP0_DCI)?;
+        let deadline = crate::time::current_time() + XHCI_TRANSFER_TIMEOUT_US;
+        let completion = self.wait_for_transfer_event_until(
+            slot.usb_device.slot_id(),
+            EP0_DCI,
+            td_start_dma,
+            td_completion_dma,
+            deadline,
+        );
         if direction_in {
-            if let Some(buffer) = data {
+            if let Some(buffer) = data.as_mut() {
                 sync_pages_after_device_write(buffer);
             }
         }
-        Ok(event)
-    }
-
-    fn wait_for_transfer_event(&self, slot_id: u8, endpoint_id: u8) -> Result<Trb, &'static str> {
-        let deadline = crate::time::current_time() + XHCI_TRANSFER_TIMEOUT_US;
-        self.wait_for_transfer_event_until(slot_id, endpoint_id, deadline)
+        let completion = completion?;
+        Ok(usize::from(length).saturating_sub(completion.remaining_length()))
     }
 
     fn wait_for_transfer_event_until(
         &self,
         slot_id: u8,
         endpoint_id: u8,
+        td_start_dma: usize,
+        td_completion_dma: usize,
         deadline: u64,
-    ) -> Result<Trb, &'static str> {
+    ) -> Result<TransferTdCompletion, &'static str> {
         if crate::time::current_time() >= deadline {
             self.log_transfer_timeout_state(slot_id, endpoint_id);
             return Err("Timeout waiting for transfer event");
         }
 
+        let mut short_packet_event = None;
         while crate::time::current_time() < deadline {
-            if let Some(event) = self.take_pending_transfer_event(slot_id, endpoint_id) {
-                if Self::transfer_successful(event) {
-                    if XHCI_VERBOSE_TRACE {
-                        Self::log_event("Transfer event", event);
-                    }
-                    return Ok(event);
-                }
-                Self::log_event("Transfer event", event);
-                return Err("xHCI transfer event failed");
-            }
-
-            if let Some(event) = self.poll_event() {
+            let event = if let Some(event) = self.take_pending_transfer_event_for_td(
+                slot_id,
+                endpoint_id,
+                td_start_dma,
+                td_completion_dma,
+            ) {
+                Some(event)
+            } else if let Some(event) = self.poll_event() {
                 match event.trb_type() {
                     value if value == TrbType::TransferEvent as u8 => {
-                        if event.slot_id() == slot_id && event.endpoint_id() == endpoint_id {
-                            if Self::transfer_successful(event) {
-                                if XHCI_VERBOSE_TRACE {
-                                    Self::log_event("Transfer event", event);
-                                }
-                                return Ok(event);
-                            }
-                            Self::log_event("Transfer event", event);
-                            return Err("xHCI transfer event failed");
+                        if transfer_event_points_into_td(
+                            event,
+                            slot_id,
+                            endpoint_id,
+                            td_start_dma,
+                            td_completion_dma,
+                        ) {
+                            Some(event)
                         } else {
                             if XHCI_VERBOSE_TRACE {
                                 Self::log_event("Event while waiting", event);
                             }
                             self.queue_pending_event(event);
                             self.queue_interrupt_work(false);
+                            None
                         }
                     }
                     value if value == TrbType::PortStatusChangeEvent as u8 => {
@@ -2114,14 +2287,55 @@ impl XhciController {
                             Self::log_event("Event while waiting", event);
                         }
                         self.queue_interrupt_work(true);
+                        None
                     }
                     value if value == TrbType::CommandCompletionEvent as u8 => {
                         self.queue_pending_event(event);
+                        None
                     }
                     _ if XHCI_VERBOSE_TRACE => {
                         Self::log_event("Event while waiting", event);
+                        None
                     }
-                    _ => {}
+                    _ => None,
+                }
+            } else {
+                None
+            };
+
+            let Some(event) = event else {
+                core::hint::spin_loop();
+                continue;
+            };
+            match classify_transfer_td_event(
+                event,
+                slot_id,
+                endpoint_id,
+                td_start_dma,
+                td_completion_dma,
+            ) {
+                TransferTdEventDisposition::IntermediateShortPacket => {
+                    if XHCI_VERBOSE_TRACE {
+                        Self::log_event("Intermediate short transfer event", event);
+                    }
+                    short_packet_event = Some(event);
+                }
+                TransferTdEventDisposition::Complete => {
+                    if XHCI_VERBOSE_TRACE {
+                        Self::log_event("Transfer TD completion event", event);
+                    }
+                    return Ok(TransferTdCompletion {
+                        event,
+                        short_packet_event,
+                    });
+                }
+                TransferTdEventDisposition::Failed => {
+                    Self::log_event("Transfer TD failed", event);
+                    return Err("xHCI transfer event failed");
+                }
+                TransferTdEventDisposition::Unrelated => {
+                    self.queue_pending_event(event);
+                    self.queue_interrupt_work(false);
                 }
             }
             core::hint::spin_loop();
@@ -2713,28 +2927,32 @@ impl XhciController {
         &self,
         slot: &SlotRuntime,
         configuration: CdcNcmInterfaceConfig,
-    ) -> Result<crate::device::network::MacAddress, &'static str> {
-        if configuration.network_capabilities & USB_CDC_NCM_NCAP_NET_ADDRESS != 0 {
-            if let Ok(bytes) = self.control_transfer_bytes_in(
+    ) -> Result<MacAddress, &'static str> {
+        let descriptor_mac = self
+            .get_usb_string(slot, configuration.mac_string_index)
+            .and_then(|value| parse_mac_address(&value));
+
+        prefer_cdc_ncm_descriptor_mac(descriptor_mac, || {
+            if configuration.network_capabilities & USB_CDC_NCM_NCAP_NET_ADDRESS == 0 {
+                return Err("CDC-NCM device does not support GET_NET_ADDRESS");
+            }
+
+            let bytes = self.control_transfer_bytes_in(
                 slot,
                 0xa1,
                 USB_CDC_GET_NET_ADDRESS,
                 0,
                 u16::from(configuration.control_interface),
                 6,
-            ) {
-                if bytes.len() == 6 {
-                    let mut address = [0u8; 6];
-                    address.copy_from_slice(&bytes);
-                    if let Ok(mac) = validate_mac_address(address) {
-                        return Ok(mac);
-                    }
-                }
+            )?;
+            if bytes.len() != 6 {
+                return Err("CDC-NCM GET_NET_ADDRESS response has an invalid length");
             }
-        }
 
-        let value = self.get_usb_string(slot, configuration.mac_string_index)?;
-        parse_mac_address(&value)
+            let mut address = [0u8; 6];
+            address.copy_from_slice(&bytes);
+            validate_mac_address(address)
+        })
     }
 
     fn control_transfer_bytes_in(
@@ -2760,7 +2978,7 @@ impl XhciController {
                 pages * crate::environment::PAGE_SIZE,
             );
         }
-        let event = self.control_transfer(
+        let actual = self.control_transfer(
             slot,
             request_type,
             request,
@@ -2769,7 +2987,6 @@ impl XhciController {
             Some(&mut buffer),
             length,
         )?;
-        let actual = usize::from(length).saturating_sub(event.transfer_length() as usize);
         // SAFETY: `actual` cannot exceed the requested `length`, which is no
         // greater than the allocated buffer capacity.
         let bytes = unsafe { core::slice::from_raw_parts(buffer.as_vaddr() as *const u8, actual) };
@@ -2961,7 +3178,7 @@ impl XhciController {
         };
 
         println!(
-            "[usb-ncm] Slot {} cfg={} control_if={} data_if={}/alt{} bulk_in={:#x}/{} bulk_out={:#x}/{} rx_ntb={} mac={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+            "[usb-ncm] Slot {} cfg={} control_if={} data_if={}/alt{} bulk_in={:#x}/{} bulk_out={:#x}/{} rx_ntb={} rx_depth={} tx_ntb={} tx_depth={} mac={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
             slot_id,
             configuration.configuration_value,
             configuration.control_interface,
@@ -2972,6 +3189,9 @@ impl XhciController {
             configuration.bulk_out_endpoint,
             configuration.bulk_out_max_packet_size,
             parameters.receive_size(),
+            XHCI_CDC_NCM_RX_TRANSFER_DEPTH,
+            parameters.transmit_size(),
+            XHCI_CDC_NCM_TX_TRANSFER_DEPTH,
             mac_address.as_bytes()[0],
             mac_address.as_bytes()[1],
             mac_address.as_bytes()[2],
@@ -3134,11 +3354,26 @@ impl XhciController {
 
         let rx_transfer_size = parameters.receive_size();
         let rx_pages = rx_transfer_size.div_ceil(crate::environment::PAGE_SIZE);
-        let rx_buffer = self
-            .dma_alloc_pages(rx_pages)
-            .ok_or("Failed to allocate CDC-NCM receive buffer")?;
-        let rx_buffer_mapping =
-            self.dma_map_owned_pages(&rx_buffer, IommuMapFlags::WRITE | IommuMapFlags::COHERENT)?;
+        let mut rx_available = Vec::with_capacity(XHCI_CDC_NCM_RX_TRANSFER_DEPTH);
+        for _ in 0..XHCI_CDC_NCM_RX_TRANSFER_DEPTH {
+            let pages = self
+                .dma_alloc_pages(rx_pages)
+                .ok_or("Failed to allocate CDC-NCM receive buffer pool")?;
+            let mapping =
+                self.dma_map_owned_pages(&pages, IommuMapFlags::WRITE | IommuMapFlags::COHERENT)?;
+            rx_available.push(CdcNcmDmaBuffer { mapping, pages });
+        }
+        let tx_transfer_size = parameters.transmit_size();
+        let tx_pages = tx_transfer_size.div_ceil(crate::environment::PAGE_SIZE);
+        let mut tx_available = Vec::with_capacity(XHCI_CDC_NCM_TX_TRANSFER_DEPTH);
+        for _ in 0..XHCI_CDC_NCM_TX_TRANSFER_DEPTH {
+            let pages = self
+                .dma_alloc_pages(tx_pages)
+                .ok_or("Failed to allocate CDC-NCM transmit buffer pool")?;
+            let mapping =
+                self.dma_map_owned_pages(&pages, IommuMapFlags::READ | IommuMapFlags::COHERENT)?;
+            tx_available.push(CdcNcmDmaBuffer { mapping, pages });
+        }
         let notification_pages = usize::from(configuration.notification_max_packet_size)
             .div_ceil(crate::environment::PAGE_SIZE);
         let notification_buffer = self
@@ -3180,12 +3415,14 @@ impl XhciController {
                     max_packet_size: configuration.bulk_out_max_packet_size,
                     ring: bulk_out_ring,
                 },
-                rx_buffer,
-                rx_buffer_mapping,
+                rx_available,
+                rx_in_flight: VecDeque::with_capacity(XHCI_CDC_NCM_RX_TRANSFER_DEPTH),
                 rx_transfer_size,
+                tx_available,
+                tx_transfer_size,
                 tx_queue: VecDeque::with_capacity(XHCI_CDC_NCM_TX_QUEUE_LIMIT),
-                tx_preparing: false,
-                tx_in_flight: None,
+                tx_preparing: 0,
+                tx_in_flight: VecDeque::with_capacity(XHCI_CDC_NCM_TX_TRANSFER_DEPTH),
                 device: device.clone(),
                 device_id: None,
             });
@@ -4346,6 +4583,7 @@ impl XhciController {
         let dci = Self::endpoint_dci(endpoint_address);
         let direction_in;
         let dma_mapping;
+        let trb_dma;
         {
             let slots = self.slot_runtime.lock();
             let slot = slots
@@ -4402,6 +4640,7 @@ impl XhciController {
                 Trb::normal_transfer(dma_mapping.dma_addr(), length as u32)
             };
             let trb_index = ring.enqueue(trb)?;
+            trb_dma = ring.dma_address() + trb_index * size_of::<Trb>();
             if XHCI_VERBOSE_TRACE {
                 println!(
                     "[xHCI] Bulk submit: slot={} ep_addr={:#x} dci={} dir={} len={} buffer_dma={:#x} ring_dma={:#x} trb_index={}",
@@ -4418,20 +4657,21 @@ impl XhciController {
         }
 
         self.ring_endpoint_doorbell(slot_id, dci);
-        let event = match self.wait_for_transfer_event_until(slot_id, dci, deadline) {
-            Ok(event) => event,
-            Err(error) => {
-                if direction_in {
-                    sync_pages_after_device_write(buffer);
-                    Self::log_buffer_prefix("Bulk IN timeout buffer", buffer, length);
+        let completion =
+            match self.wait_for_transfer_event_until(slot_id, dci, trb_dma, trb_dma, deadline) {
+                Ok(completion) => completion,
+                Err(error) => {
+                    if direction_in {
+                        sync_pages_after_device_write(buffer);
+                        Self::log_buffer_prefix("Bulk IN timeout buffer", buffer, length);
+                    }
+                    return Err(error);
                 }
-                return Err(error);
-            }
-        };
+            };
         if direction_in {
             sync_pages_after_device_write(buffer);
         }
-        Ok(length.saturating_sub(event.transfer_length() as usize))
+        Ok(length.saturating_sub(completion.remaining_length()))
     }
 
     fn attach_mass_storage_devices(self: &Arc<Self>) {
@@ -4456,26 +4696,47 @@ impl XhciController {
     }
 
     fn submit_cdc_ncm_rx(&self, slot_id: u8) -> Result<(), &'static str> {
-        let dci;
-        {
-            let slots = self.slot_runtime.lock();
+        let (dci, submitted, first_error) = {
+            let mut slots = self.slot_runtime.lock();
             let slot = slots
-                .iter()
+                .iter_mut()
                 .find(|slot| slot.usb_device.slot_id() == slot_id)
                 .ok_or("Unknown slot for CDC-NCM receive")?;
             let ncm = slot
                 .cdc_ncm
-                .as_ref()
+                .as_mut()
                 .ok_or("CDC-NCM runtime is not configured")?;
-            dci = ncm.bulk_in.dci;
-            sync_pages_before_device_write(&ncm.rx_buffer);
-            ncm.bulk_in.ring.enqueue(Trb::normal_transfer_in(
-                ncm.rx_buffer_mapping.dma_addr(),
-                ncm.rx_transfer_size as u32,
-            ))?;
+            let dci = ncm.bulk_in.dci;
+            let mut submitted = 0usize;
+            let mut first_error = None;
+            while ncm.rx_in_flight.len() < XHCI_CDC_NCM_RX_TRANSFER_DEPTH {
+                let Some(buffer) = ncm.rx_available.pop() else {
+                    break;
+                };
+                sync_pages_before_device_write(&buffer.pages);
+                match ncm.bulk_in.ring.enqueue(Trb::normal_transfer_in(
+                    buffer.mapping.dma_addr(),
+                    ncm.rx_transfer_size as u32,
+                )) {
+                    Ok(trb_index) => {
+                        let trb_dma = ncm.bulk_in.ring.dma_address() + trb_index * size_of::<Trb>();
+                        ncm.rx_in_flight
+                            .push_back(InFlightCdcNcmRx { buffer, trb_dma });
+                        submitted += 1;
+                    }
+                    Err(error) => {
+                        ncm.rx_available.push(buffer);
+                        first_error = Some(error);
+                        break;
+                    }
+                }
+            }
+            (dci, submitted, first_error)
+        };
+        if submitted != 0 {
+            self.ring_endpoint_doorbell(slot_id, dci);
         }
-        self.ring_endpoint_doorbell(slot_id, dci);
-        Ok(())
+        first_error.map_or(Ok(()), Err)
     }
 
     fn submit_cdc_ncm_notification(&self, slot_id: u8) -> Result<(), &'static str> {
@@ -4561,7 +4822,7 @@ impl XhciController {
             && ncm.bulk_out.dci == endpoint_id
         {
             let device = ncm.device.clone();
-            let Some(in_flight) = ncm.tx_in_flight.as_ref() else {
+            if ncm.tx_in_flight.is_empty() {
                 drop(slots);
                 println!(
                     "[xHCI] Unexpected CDC-NCM bulk OUT completion: slot={} dci={} trb={:#x}",
@@ -4570,9 +4831,18 @@ impl XhciController {
                     event.trb_pointer()
                 );
                 return true;
-            };
-            if (event.trb_pointer() as usize & !0xf) != (in_flight.trb_dma & !0xf) {
-                let expected = in_flight.trb_dma;
+            }
+            let completed_trb_dma = event.trb_pointer() as usize & !0xf;
+            let Some(completed_index) = ncm
+                .tx_in_flight
+                .iter()
+                .position(|in_flight| (in_flight.trb_dma & !0xf) == completed_trb_dma)
+            else {
+                let expected = ncm
+                    .tx_in_flight
+                    .front()
+                    .map(|in_flight| in_flight.trb_dma)
+                    .unwrap_or(0);
                 drop(slots);
                 println!(
                     "[xHCI] Stale CDC-NCM bulk OUT completion: slot={} dci={} trb={:#x} expected={:#x}",
@@ -4582,20 +4852,19 @@ impl XhciController {
                     expected
                 );
                 return true;
-            }
+            };
 
             let completed = ncm
                 .tx_in_flight
-                .take()
+                .remove(completed_index)
                 .expect("CDC-NCM transmit request disappeared while completing it");
             let has_queued = !ncm.tx_queue.is_empty();
             let successful = Self::transfer_successful(event) && event.transfer_length() == 0;
             let frame_len = completed.frame_len;
             let transfer_len = completed.transfer_len;
+            ncm.tx_available.push(completed.buffer);
             drop(slots);
 
-            // The event proves that xHCI no longer owns the request buffer.
-            drop(completed);
             if successful {
                 device.handle_transmit_complete(frame_len);
             } else if Self::transfer_successful(event) {
@@ -4658,46 +4927,92 @@ impl XhciController {
             return true;
         }
 
-        if let Some(ncm) = slot.cdc_ncm.as_ref()
+        if let Some(ncm) = slot.cdc_ncm.as_mut()
             && ncm.bulk_in.dci == endpoint_id
         {
-            if !ncm.device.is_attached() {
-                return true;
-            }
-            if !Self::transfer_successful(event) {
-                let device = ncm.device.clone();
-                drop(slots);
-                device.handle_receive_error("xHCI CDC-NCM bulk IN transfer failed");
-                return true;
-            }
-
-            let actual = ncm
-                .rx_transfer_size
-                .saturating_sub(event.transfer_length() as usize);
-            sync_pages_after_device_write(&ncm.rx_buffer);
-            // SAFETY: `actual` is bounded by `rx_transfer_size`, and the DMA
-            // buffer was allocated to contain that complete transfer.
-            let bytes = unsafe {
-                core::slice::from_raw_parts(ncm.rx_buffer.as_vaddr() as *const u8, actual).to_vec()
-            };
             let device = ncm.device.clone();
-            sync_pages_before_device_write(&ncm.rx_buffer);
-            let resubmit = ncm.bulk_in.ring.enqueue(Trb::normal_transfer_in(
-                ncm.rx_buffer_mapping.dma_addr(),
-                ncm.rx_transfer_size as u32,
-            ));
+            let completed_trb_dma = event.trb_pointer() as usize & !0xf;
+            let Some(completed_index) = ncm
+                .rx_in_flight
+                .iter()
+                .position(|in_flight| (in_flight.trb_dma & !0xf) == completed_trb_dma)
+            else {
+                let expected = ncm
+                    .rx_in_flight
+                    .front()
+                    .map(|in_flight| in_flight.trb_dma)
+                    .unwrap_or(0);
+                drop(slots);
+                println!(
+                    "[xHCI] Stale CDC-NCM bulk IN completion: slot={} dci={} trb={:#x} expected={:#x}",
+                    slot_id,
+                    endpoint_id,
+                    event.trb_pointer(),
+                    expected
+                );
+                return true;
+            };
+            let mut completed = ncm
+                .rx_in_flight
+                .remove(completed_index)
+                .expect("CDC-NCM receive request disappeared while completing it");
+
+            let successful = Self::transfer_successful(event);
+            let actual = if successful {
+                ncm.rx_transfer_size
+                    .saturating_sub(event.transfer_length() as usize)
+            } else {
+                0
+            };
+            let bytes = if actual != 0 {
+                sync_pages_after_device_write(&completed.buffer.pages);
+                // SAFETY: `actual` is bounded by `rx_transfer_size`, and this
+                // completed DMA buffer owns that complete transfer range.
+                Some(unsafe {
+                    core::slice::from_raw_parts(
+                        completed.buffer.pages.as_vaddr() as *const u8,
+                        actual,
+                    )
+                    .to_vec()
+                })
+            } else {
+                None
+            };
             let dci = ncm.bulk_in.dci;
+            let resubmit = if device.is_attached() {
+                sync_pages_before_device_write(&completed.buffer.pages);
+                match ncm.bulk_in.ring.enqueue(Trb::normal_transfer_in(
+                    completed.buffer.mapping.dma_addr(),
+                    ncm.rx_transfer_size as u32,
+                )) {
+                    Ok(trb_index) => {
+                        completed.trb_dma =
+                            ncm.bulk_in.ring.dma_address() + trb_index * size_of::<Trb>();
+                        ncm.rx_in_flight.push_back(completed);
+                        Ok(true)
+                    }
+                    Err(error) => {
+                        ncm.rx_available.push(completed.buffer);
+                        Err(error)
+                    }
+                }
+            } else {
+                ncm.rx_available.push(completed.buffer);
+                Ok(false)
+            };
             drop(slots);
 
-            if let Err(error) = resubmit {
-                device.handle_receive_error(error);
-            } else {
-                self.ring_endpoint_doorbell(slot_id, dci);
+            match resubmit {
+                Ok(true) => self.ring_endpoint_doorbell(slot_id, dci),
+                Ok(false) => {}
+                Err(error) => device.handle_receive_error(error),
             }
-            if actual == 0 {
-                device.handle_receive_error("CDC-NCM bulk IN completed without data");
-            } else {
+            if !successful {
+                device.handle_receive_error("xHCI CDC-NCM bulk IN transfer failed");
+            } else if let Some(bytes) = bytes {
                 device.handle_received_ntb(&bytes);
+            } else {
+                device.handle_receive_error("CDC-NCM bulk IN completed without data");
             }
             return true;
         }
@@ -4750,7 +5065,10 @@ impl XhciController {
             processed += 1;
             match event.trb_type() {
                 value if value == TrbType::TransferEvent as u8 => {
-                    if !self.handle_transfer_event(event) {
+                    // EP0 completions belong to synchronous control TD waiters.
+                    // Queue them without taking `slot_runtime`: callers often
+                    // hold that lock while waiting for the control transfer.
+                    if event.endpoint_id() == EP0_DCI || !self.handle_transfer_event(event) {
                         self.queue_pending_event(event);
                     }
                 }
@@ -4819,17 +5137,16 @@ impl XhciController {
             self.port_change_pending.store(true, Ordering::Release);
         }
 
-        self.process_pending_port_change(processed);
-
         if processed == EVENT_RING_TRBS {
             self.interrupt_work_pending.store(true, Ordering::Release);
             return true;
         }
 
-        // Submission is bounded work: enqueue one TRB per ready NCM endpoint
-        // and return. Completion is consumed on a later Transfer Event; this
-        // worker never waits for the device and therefore cannot head-of-line
-        // block unrelated xHCI work when a function stops responding.
+        // Submission is bounded work: enqueue a limited batch of ready NCM
+        // transfers and return. Completion is consumed on a later Transfer
+        // Event; this worker never waits for the device and therefore cannot
+        // head-of-line block unrelated xHCI work when a function stops
+        // responding.
         let _submitted_tx = self.process_pending_cdc_ncm_tx();
 
         if !deferred_mode {
@@ -4839,10 +5156,8 @@ impl XhciController {
         } else {
             let completion_count = self.deferred_interrupt_completions.lock().len();
             if completion_count == 0 {
-                // A recovery poll may process the event before the controller
-                // dispatch reaches `deferred_interrupt_ready`. Re-enable the
-                // device source now; a later token is safely completed by a
-                // no-cause worker pass while the core owns the line mask.
+                // Startup work may be queued before the external source is
+                // registered and therefore has no core completion token.
                 self.deferred_interrupt_cause_seen
                     .store(false, Ordering::Release);
                 self.enable_primary_interrupter();
@@ -4863,6 +5178,11 @@ impl XhciController {
                 self.deferred_spurious_count.store(0, Ordering::Relaxed);
             }
         }
+
+        // Port enumeration can wait for reset and transfer completions. The
+        // device source and core line must be restored before entering that
+        // lengthy path so unrelated endpoint events continue to make progress.
+        self.process_pending_port_change(processed);
         true
     }
 
@@ -4891,6 +5211,7 @@ impl XhciController {
                     .lock()
                     .push_front(completion);
                 self.report_deferred_completion_failure(interrupt_id, error);
+                self.queue_interrupt_work(false);
                 return false;
             }
         }
@@ -4960,9 +5281,24 @@ impl XhciController {
         unsafe {
             write_volatile(
                 (self.regs.runtime_base + registers::runtime::IR0_IMAN) as *mut u32,
-                1,
+                iman_write_value(false, true),
             );
         }
+    }
+
+    fn disable_primary_interrupter(&self) {
+        // IMAN.IP is W1C. Leave it zero so the worker can still observe and
+        // acknowledge the pending cause after this bounded hard-IRQ step has
+        // synchronously lowered the level-triggered INTx signal.
+        unsafe {
+            write_volatile(
+                (self.regs.runtime_base + registers::runtime::IR0_IMAN) as *mut u32,
+                iman_write_value(false, false),
+            );
+        }
+        // Flush a potentially posted MMIO write before the interrupt core EOIs
+        // the level-triggered controller delivery.
+        let _ = self.read_runtime_u32(registers::runtime::IR0_IMAN);
     }
 
     fn acknowledge_interrupt_status(&self, pending: u32) {
@@ -4977,7 +5313,7 @@ impl XhciController {
         unsafe {
             write_volatile(
                 (self.regs.runtime_base + registers::runtime::IR0_IMAN) as *mut u32,
-                1 << 1,
+                iman_write_value(true, false),
             );
         }
     }
@@ -5754,21 +6090,14 @@ fn determine_bar_size(
     }
 }
 
-impl UsbHostController for XhciController {
-    fn poll_events(&self) {
-        self.queue_interrupt_work(false);
-    }
-}
+impl UsbHostController for XhciController {}
 
 /// xHCI driver instance container
 static NEXT_USB_HOST_ID: AtomicUsize = AtomicUsize::new(1);
-static XHCI_POLL_HANDLER: Once<Arc<XhciPollHandler>> = Once::new();
 static XHCI_WORKER_STARTED: AtomicBool = AtomicBool::new(false);
 static XHCI_WORKER_WAKER: crate::sync::Waker =
     crate::sync::Waker::new_uninterruptible("xhci-worker");
 static XHCI_WORKER_CONTROLLERS: Once<IrqSpinLock<Vec<Weak<XhciController>>>> = Once::new();
-
-struct XhciPollHandler;
 
 fn xhci_worker_controllers() -> &'static IrqSpinLock<Vec<Weak<XhciController>>> {
     XHCI_WORKER_CONTROLLERS.call_once(|| IrqSpinLock::new(Vec::new()))
@@ -5795,6 +6124,16 @@ fn xhci_worker_entry() {
             processed |= controller.process_deferred_interrupt_work();
         }
         if processed {
+            // A level-triggered controller can immediately assert another
+            // interrupt after its deferred token is completed. Yield between
+            // bounded event-ring passes so a continuously busy endpoint cannot
+            // monopolize the CPU that also runs its protocol and user tasks.
+            // `process_deferred_interrupt_work` has returned with every xHCI
+            // lock released, so this is a safe scheduling point.
+            let Some(task) = crate::task::mytask() else {
+                crate::arch::instruction::idle();
+            };
+            crate::sched::scheduler::schedule(task.get_trapframe());
             continue;
         }
 
@@ -5821,23 +6160,6 @@ fn register_xhci_worker_controller(controller: &Arc<XhciController>) {
     crate::sched::scheduler::add_task(task, crate::arch::get_cpu().get_cpuid());
 }
 
-fn xhci_poll_handler() -> Arc<dyn TimerHandler> {
-    XHCI_POLL_HANDLER
-        .call_once(|| Arc::new(XhciPollHandler))
-        .clone()
-}
-
-impl TimerHandler for XhciPollHandler {
-    fn on_timer_expired(self: Arc<Self>, _context: usize) {
-        DeviceManager::get_manager().for_each_usb_host(|ctrl| {
-            ctrl.poll_events();
-        });
-        let handler: Arc<dyn TimerHandler> = self.clone();
-        let expires = crate::timer::get_time_ns().saturating_add(crate::timer::ms_to_ns(500));
-        crate::timer::add_timer(expires, crate::timer::TimerPrecision::Coarse, &handler, 0);
-    }
-}
-
 impl InterruptCapableDevice for XhciController {
     fn handle_interrupt(&self) -> crate::interrupt::InterruptResult<()> {
         let _ = self.claim_interrupt()?;
@@ -5849,11 +6171,6 @@ impl InterruptCapableDevice for XhciController {
     }
 
     fn claim_interrupt(&self) -> crate::interrupt::InterruptResult<InterruptClaim> {
-        if self.deferred_interrupt_mode.load(Ordering::Acquire) {
-            crate::breadcrumb::drop(crate::breadcrumb::XHCI_IRQ_DONE, self.mmio_base as u64, 0);
-            return Ok(InterruptClaim::Deferred);
-        }
-
         let status = self.operational.read_usbsts();
         let pending = status & (USBSTS_EVENT_INTERRUPT | USBSTS_PORT_CHANGE_DETECT);
         crate::breadcrumb::drop(
@@ -5866,21 +6183,30 @@ impl InterruptCapableDevice for XhciController {
         }
 
         let port_change = (pending & USBSTS_PORT_CHANGE_DETECT) != 0;
-        self.mask_primary_interrupter();
-        self.acknowledge_interrupt_status(pending);
-        crate::breadcrumb::drop(
-            crate::breadcrumb::XHCI_IRQ_ACK_DONE,
-            self.mmio_base as u64,
-            pending as u64,
-        );
-
+        // INTx is level-triggered. Disable delivery before the core EOIs the
+        // GIC interrupt, but preserve IMAN.IP and USBSTS for the worker. This
+        // lowers the device line without losing the cause that must be drained.
+        self.disable_primary_interrupter();
         if port_change {
+            self.port_change_pending.store(true, Ordering::Release);
             crate::breadcrumb::drop(
                 crate::breadcrumb::XHCI_IRQ_PORT,
                 self.mmio_base as u64,
                 status as u64,
             );
         }
+
+        if self.deferred_interrupt_mode.load(Ordering::Acquire) {
+            self.deferred_interrupt_cause_seen
+                .store(true, Ordering::Release);
+            crate::breadcrumb::drop(
+                crate::breadcrumb::XHCI_IRQ_DONE,
+                self.mmio_base as u64,
+                pending as u64,
+            );
+            return Ok(InterruptClaim::Deferred);
+        }
+
         self.queue_interrupt_work(port_change);
         crate::breadcrumb::drop(
             crate::breadcrumb::XHCI_IRQ_DONE,
@@ -5930,14 +6256,6 @@ fn register_xhci_host(controller: Arc<XhciController>) {
     let host: Arc<dyn UsbHostController> = controller.clone();
     DeviceManager::get_manager().register_usb_host(host_id, host);
 
-    let poll_handler = xhci_poll_handler();
-    add_timer(
-        get_time_ns().saturating_add(ms_to_ns(1000)),
-        crate::timer::TimerPrecision::Coarse,
-        &poll_handler,
-        0,
-    );
-
     println!("[xHCI] Platform controller registered successfully");
 }
 
@@ -5946,7 +6264,8 @@ fn register_xhci_host(controller: Arc<XhciController>) {
 /// # Arguments
 ///
 /// * `mmio_vaddr` - Kernel virtual address of the xHCI MMIO register block.
-/// * `interrupt` - Optional platform interrupt ID for the controller.
+/// * `interrupt` - Platform interrupt ID for the controller. `None` is rejected
+///   because asynchronous xHCI completions require an interrupt source.
 /// * `dma_context` - DMA mapping context for xHCI-owned rings and contexts.
 ///
 /// # Returns
@@ -5957,23 +6276,20 @@ pub fn bind_xhci_mmio(
     interrupt: Option<InterruptId>,
     dma_context: DmaContext,
 ) -> Result<(), &'static str> {
+    let interrupt_id = interrupt.ok_or("xHCI requires an interrupt source")?;
     let controller = initialize_xhci_controller(mmio_vaddr, dma_context)?;
 
-    if let Some(interrupt_id) = interrupt {
-        controller
-            .deferred_interrupt_mode
-            .store(true, Ordering::Release);
-        InterruptManager::global()
-            .register_interrupt_device(interrupt_id, controller.clone())
-            .map_err(|_| "Failed to register xHCI interrupt device")?;
-        controller.enable_interrupts(interrupt_id)?;
-        InterruptManager::global()
-            .enable_external_interrupt(interrupt_id, crate::arch::get_cpu().get_cpuid() as u32)
-            .map_err(|_| "Failed to enable xHCI interrupt")?;
-        println!("[xHCI] Registered IRQ {}", interrupt_id);
-    } else {
-        println!("[xHCI] No interrupt provided for platform controller");
-    }
+    controller
+        .deferred_interrupt_mode
+        .store(true, Ordering::Release);
+    InterruptManager::global()
+        .register_interrupt_device(interrupt_id, controller.clone())
+        .map_err(|_| "Failed to register xHCI interrupt device")?;
+    controller.enable_interrupts(interrupt_id)?;
+    InterruptManager::global()
+        .enable_external_interrupt(interrupt_id, crate::arch::get_cpu().get_cpuid() as u32)
+        .map_err(|_| "Failed to enable xHCI interrupt")?;
+    println!("[xHCI] Registered IRQ {}", interrupt_id);
 
     register_xhci_host(controller);
     Ok(())
@@ -6047,32 +6363,27 @@ fn probe_xhci(device: &PciDeviceInfo) -> Result<(), &'static str> {
             "[xHCI] Registered IRQ {} (pin {})",
             interrupt_line, interrupt_pin
         );
-        Some(interrupt_line)
+        interrupt_line
     } else {
-        println!("[xHCI] No usable legacy IRQ routing for controller");
-        None
+        return Err("xHCI requires usable PCI interrupt routing");
     };
 
     let controller = initialize_xhci_controller(mmio_vaddr, DmaContext::direct())?;
 
-    if let Some(interrupt_id) = interrupt_id {
-        // PCI INTx uses the same oneshot worker contract as platform xHCI:
-        // the interrupt core keeps the shared controller line masked until
-        // the deferred completion token is returned by the xHCI worker.
-        controller
-            .deferred_interrupt_mode
-            .store(true, Ordering::Release);
-        controller.enable_interrupts(interrupt_id)?;
-        let source = PciIntxInterruptSource::new(device, controller.clone())
-            .ok_or("Failed to create xHCI INTx source")?;
-        let source: Arc<dyn crate::interrupt::MaskableInterruptSource> = Arc::new(source);
-        InterruptManager::global()
-            .register_and_enable_interrupt_source(source, crate::arch::get_cpu().get_cpuid() as u32)
-            .map_err(|_| "Failed to register xHCI interrupt device")?;
-        println!("[xHCI] Registered IRQ {}", interrupt_id);
-    } else {
-        println!("[xHCI] No usable legacy IRQ routing for controller");
-    }
+    controller.enable_interrupts(interrupt_id)?;
+    let source = PciIntxInterruptSource::new(device, controller.clone())
+        .ok_or("Failed to create xHCI INTx source")?;
+    let source: Arc<dyn crate::interrupt::MaskableInterruptSource> = Arc::new(source);
+    InterruptManager::global()
+        .register_and_enable_interrupt_source(source, crate::arch::get_cpu().get_cpuid() as u32)
+        .map_err(|_| "Failed to register xHCI interrupt device")?;
+    // Registration clears stale source state by invoking the handler without
+    // a deferred completion token. Switch to oneshot/deferred delivery only
+    // after that lifecycle step has completed.
+    controller
+        .deferred_interrupt_mode
+        .store(true, Ordering::Release);
+    println!("[xHCI] Registered IRQ {}", interrupt_id);
 
     register_xhci_host(controller);
     Ok(())
@@ -6119,6 +6430,90 @@ mod tests {
         )
     }
 
+    fn transfer_event_for_test(
+        slot_id: u8,
+        endpoint_id: u8,
+        trb_dma: usize,
+        completion_code: u8,
+        remaining: u32,
+    ) -> Trb {
+        Trb {
+            parameter: trb_dma as u64,
+            status: (remaining & 0x00ff_ffff) | (u32::from(completion_code) << 24),
+            control: ((TrbType::TransferEvent as u32) << 10)
+                | (u32::from(endpoint_id) << 16)
+                | (u32::from(slot_id) << 24),
+        }
+    }
+
+    #[test_case]
+    fn cdc_ncm_mac_prefers_descriptor_string_without_calling_fallback() {
+        let descriptor_mac = MacAddress::new([0x02, 0x11, 0x22, 0x33, 0x44, 0x55]);
+        let stale_control_response = MacAddress::new([0x1c, 0x00, 0x01, 0x00, 0x00, 0x80]);
+        let mut fallback_called = false;
+
+        let selected = prefer_cdc_ncm_descriptor_mac(Ok(descriptor_mac), || {
+            fallback_called = true;
+            Ok(stale_control_response)
+        })
+        .unwrap();
+
+        assert_eq!(selected, descriptor_mac);
+        assert!(!fallback_called);
+    }
+
+    #[test_case]
+    fn cdc_ncm_mac_uses_control_request_as_descriptor_fallback() {
+        let control_mac = MacAddress::new([0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0xee]);
+
+        let selected =
+            prefer_cdc_ncm_descriptor_mac(Err("CDC Ethernet MAC string is unavailable"), || {
+                Ok(control_mac)
+            })
+            .unwrap();
+
+        assert_eq!(selected, control_mac);
+    }
+
+    #[test_case]
+    fn control_td_waits_past_data_short_packet_for_status_completion() {
+        let setup_dma = 0x1000;
+        let data_dma = 0x1010;
+        let status_dma = 0x1020;
+        let short_event =
+            transfer_event_for_test(3, EP0_DCI, data_dma, TRANSFER_EVENT_SHORT_PACKET, 251);
+        let status_event =
+            transfer_event_for_test(3, EP0_DCI, status_dma, COMMAND_COMPLETION_SUCCESS, 0);
+
+        assert_eq!(
+            classify_transfer_td_event(short_event, 3, EP0_DCI, setup_dma, status_dma),
+            TransferTdEventDisposition::IntermediateShortPacket
+        );
+        assert_eq!(
+            classify_transfer_td_event(status_event, 3, EP0_DCI, setup_dma, status_dma),
+            TransferTdEventDisposition::Complete
+        );
+        assert_eq!(
+            TransferTdCompletion {
+                event: status_event,
+                short_packet_event: Some(short_event),
+            }
+            .remaining_length(),
+            251
+        );
+    }
+
+    #[test_case]
+    fn control_td_rejects_another_requests_status_event() {
+        let stale_status_event =
+            transfer_event_for_test(3, EP0_DCI, 0x0ff0, COMMAND_COMPLETION_SUCCESS, 0);
+
+        assert_eq!(
+            classify_transfer_td_event(stale_status_event, 3, EP0_DCI, 0x1000, 0x1020),
+            TransferTdEventDisposition::Unrelated
+        );
+    }
+
     #[test_case]
     fn test_xhci_pci_class_match() {
         let device = sample_xhci_device();
@@ -6156,6 +6551,13 @@ mod tests {
     fn test_pci_bar_struct_size() {
         // Verify PciBar size
         assert!(size_of::<PciBar>() <= 32);
+    }
+
+    #[test_case]
+    fn iman_disable_preserves_pending_status_for_worker() {
+        assert_eq!(iman_write_value(false, false), 0);
+        assert_eq!(iman_write_value(false, true), IMAN_INTERRUPT_PENDING);
+        assert_eq!(iman_write_value(true, false), IMAN_INTERRUPT_ENABLE);
     }
 
     #[test_case]

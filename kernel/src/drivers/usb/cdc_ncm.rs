@@ -165,6 +165,22 @@ impl CdcNcmParameters {
             .min(NCM_DEFAULT_NTB_SIZE)
             .clamp(NCM_MIN_NTB_SIZE, NCM_MAX_NTB16_SIZE)
     }
+
+    /// Select the conservative transmit NTB size used by Scarlet.
+    ///
+    /// # Returns
+    ///
+    /// Maximum NTB16 transfer length accepted by the device and Scarlet.
+    pub(crate) fn transmit_size(self) -> usize {
+        let reported_max_size = if self.ntb_out_max_size == 0 {
+            NCM_DEFAULT_NTB_SIZE
+        } else {
+            self.ntb_out_max_size as usize
+        };
+        reported_max_size
+            .min(NCM_DEFAULT_NTB_SIZE)
+            .min(NCM_MAX_NTB16_SIZE)
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -439,14 +455,7 @@ impl Ntb16TxConfig {
         max_segment_size: usize,
         output_max_packet_size: usize,
     ) -> Result<Self, &'static str> {
-        let reported_max_size = if parameters.ntb_out_max_size == 0 {
-            NCM_DEFAULT_NTB_SIZE
-        } else {
-            parameters.ntb_out_max_size as usize
-        };
-        let max_size = reported_max_size
-            .min(NCM_DEFAULT_NTB_SIZE)
-            .min(NCM_MAX_NTB16_SIZE);
+        let max_size = parameters.transmit_size();
         if max_size < NCM_MIN_NTB_SIZE || output_max_packet_size == 0 {
             return Err("CDC-NCM transmit parameters are unusable");
         }
@@ -1131,6 +1140,18 @@ mod tests {
             ntb_input_size_payload(16_384, Some(64)),
             [0x00, 0x40, 0x00, 0x00, 0x40, 0x00, 0x00, 0x00]
         );
+    }
+
+    #[test_case]
+    fn selects_conservative_ntb_transfer_sizes() {
+        let mut values = parameters();
+        assert_eq!(values.receive_size(), NCM_DEFAULT_NTB_SIZE);
+        assert_eq!(values.transmit_size(), NCM_DEFAULT_NTB_SIZE);
+
+        values.ntb_out_max_size = 4_096;
+        assert_eq!(values.transmit_size(), 4_096);
+        values.ntb_out_max_size = 0;
+        assert_eq!(values.transmit_size(), NCM_DEFAULT_NTB_SIZE);
     }
 
     #[test_case]
