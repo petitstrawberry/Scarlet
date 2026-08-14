@@ -84,6 +84,7 @@ const VIRTIO_NET_S_ANNOUNCE: u16 = 2; // Gratuitous packets should be sent
 // Default MTU if not specified
 const DEFAULT_MTU: usize = 1500;
 const RX_WORKER_QUEUE_LIMIT: usize = 256;
+const RX_WORKER_BUDGET: usize = 64;
 
 struct QueuedRxPacket {
     interface_name: String,
@@ -121,23 +122,33 @@ fn ensure_rx_worker_started() {
 
 fn virtio_net_rx_worker_entry() {
     loop {
-        drain_queued_rx_packets();
+        let processed = drain_queued_rx_packets(RX_WORKER_BUDGET);
 
         let Some(task) = crate::task::mytask() else {
             crate::arch::instruction::idle();
-            continue;
         };
 
-        RX_PACKET_WAKER.wait(task.get_id(), task.get_trapframe());
+        if processed == RX_WORKER_BUDGET {
+            // The queue guard is released before this scheduling point. Bound
+            // each pass so sustained ingress cannot starve the socket reader.
+            crate::sched::scheduler::schedule(task.get_trapframe());
+        } else {
+            RX_PACKET_WAKER.wait(task.get_id(), task.get_trapframe());
+        }
     }
 }
 
-fn drain_queued_rx_packets() {
+fn drain_queued_rx_packets(budget: usize) -> usize {
     let manager = crate::network::get_network_manager();
-
-    while let Some(queued) = pop_queued_rx_packet() {
+    let mut processed = 0usize;
+    while processed < budget {
+        let Some(queued) = pop_queued_rx_packet() else {
+            break;
+        };
         manager.handle_received_packet(&queued.interface_name, &queued.packet);
+        processed += 1;
     }
+    processed
 }
 
 fn pop_queued_rx_packet() -> Option<QueuedRxPacket> {

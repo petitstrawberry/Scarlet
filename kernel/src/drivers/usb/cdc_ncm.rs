@@ -47,6 +47,7 @@ const NCM_MIN_NTB_SIZE: usize = 2_048;
 const NCM_DEFAULT_NTB_SIZE: usize = 16_384;
 const NCM_MAX_NTB16_SIZE: usize = u16::MAX as usize;
 const NCM_RX_QUEUE_LIMIT: usize = 256;
+const NCM_RX_WORK_BUDGET: usize = 64;
 const NCM_MAX_DATAGRAMS_PER_NTB: usize = 64;
 
 const CDC_PACKET_TYPE_ALL_MULTICAST: u16 = 1 << 1;
@@ -648,22 +649,30 @@ fn ensure_rx_worker_started() {
 
 fn cdc_ncm_rx_worker_entry() {
     loop {
-        drain_queued_rx_packets(&RX_PACKET_QUEUE, |queued| {
+        let processed = drain_queued_rx_packets(&RX_PACKET_QUEUE, NCM_RX_WORK_BUDGET, |queued| {
             get_network_manager().handle_received_packet(&queued.interface_name, &queued.packet);
         });
 
         let Some(task) = crate::task::mytask() else {
             crate::arch::instruction::idle();
         };
-        RX_PACKET_WAKER.wait(task.get_id(), task.get_trapframe());
+        if processed == NCM_RX_WORK_BUDGET {
+            // All queue locks are released by the bounded drain. Give the
+            // consumer and unrelated tasks a chance to run under sustained RX.
+            crate::sched::scheduler::schedule(task.get_trapframe());
+        } else {
+            RX_PACKET_WAKER.wait(task.get_id(), task.get_trapframe());
+        }
     }
 }
 
 fn drain_queued_rx_packets(
     queue: &IrqSpinLock<VecDeque<QueuedRxPacket>>,
+    budget: usize,
     mut handle: impl FnMut(QueuedRxPacket),
-) {
-    loop {
+) -> usize {
+    let mut processed = 0usize;
+    while processed < budget {
         // Keep the guard in this inner scope. A lock temporary used directly
         // as a `while let` scrutinee lives through the loop body, which would
         // retain this IRQ spinlock while the network stack (and synchronous
@@ -676,7 +685,9 @@ fn drain_queued_rx_packets(
             break;
         };
         handle(queued);
+        processed += 1;
     }
+    processed
 }
 
 fn enqueue_rx_packets(interface_name: &str, packets: Vec<DevicePacket>) -> usize {
@@ -1183,13 +1194,29 @@ mod tests {
         });
 
         let mut dispatched = false;
-        drain_queued_rx_packets(&queue, |_| {
+        let processed = drain_queued_rx_packets(&queue, 1, |_| {
             dispatched = true;
             assert!(
                 queue.try_lock().is_some(),
                 "CDC-NCM RX queue lock leaked into packet dispatch"
             );
         });
+        assert_eq!(processed, 1);
         assert!(dispatched);
+    }
+
+    #[test_case]
+    fn usb_ncm_rx_worker_bounds_each_dispatch_batch() {
+        let queue = IrqSpinLock::new(VecDeque::new());
+        for _ in 0..2 {
+            queue.lock().push_back(QueuedRxPacket {
+                interface_name: String::from("usbnet-test"),
+                packet: DevicePacket::with_data(vec![0; ETHERNET_HEADER_LENGTH]),
+            });
+        }
+
+        let processed = drain_queued_rx_packets(&queue, 1, |_| {});
+        assert_eq!(processed, 1);
+        assert_eq!(queue.lock().len(), 1);
     }
 }
