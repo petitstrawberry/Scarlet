@@ -122,6 +122,8 @@ const USB_BULK_MAX_TRANSFER: usize = 64 * 1024;
 const XHCI_COMMAND_TIMEOUT_US: u64 = 5_000_000;
 const XHCI_TRANSFER_TIMEOUT_US: u64 = 5_000_000;
 const XHCI_PENDING_EVENT_LIMIT: usize = 64;
+const XHCI_CDC_NCM_TX_QUEUE_LIMIT: usize = 256;
+const XHCI_CDC_NCM_TX_WORK_BUDGET: usize = 32;
 const XHCI_VERBOSE_TRACE: bool = false;
 const XHCI_TRACE_BUFFER_POISON_LEN: usize = 512;
 const USB_STORAGE_CBW_SIGNATURE: u32 = 0x4342_5355;
@@ -330,6 +332,20 @@ struct MassStorageRuntime {
     bulk_out: BulkEndpointRuntime,
 }
 
+struct QueuedCdcNcmTx {
+    ntb: Vec<u8>,
+    frame_len: usize,
+}
+
+struct InFlightCdcNcmTx {
+    // Keep the DMA mapping before its backing pages so it is unmapped first.
+    _buffer_mapping: DmaMapping,
+    _buffer: ContiguousPages,
+    transfer_len: usize,
+    frame_len: usize,
+    trb_dma: usize,
+}
+
 struct CdcNcmRuntime {
     _ring_mappings: [DmaMapping; 3],
     notification: InterruptEndpointRuntime,
@@ -338,6 +354,9 @@ struct CdcNcmRuntime {
     rx_buffer: ContiguousPages,
     rx_buffer_mapping: DmaMapping,
     rx_transfer_size: usize,
+    tx_queue: VecDeque<QueuedCdcNcmTx>,
+    tx_preparing: bool,
+    tx_in_flight: Option<InFlightCdcNcmTx>,
     device: Arc<CdcNcmDevice>,
     device_id: Option<usize>,
 }
@@ -1345,6 +1364,7 @@ impl XhciController {
                 }
                 if let Some(ncm) = slot.cdc_ncm.as_ref() {
                     endpoints.push((slot_id, ncm.bulk_in.dci));
+                    endpoints.push((slot_id, ncm.bulk_out.dci));
                     endpoints.push((slot_id, ncm.notification.dci));
                 }
             }
@@ -1365,6 +1385,207 @@ impl XhciController {
             processed += 1;
         }
         processed
+    }
+
+    fn enqueue_cdc_ncm_tx(
+        &self,
+        slot_id: u8,
+        endpoint_address: u8,
+        ntb: Vec<u8>,
+        frame_len: usize,
+    ) -> Result<(), &'static str> {
+        if ntb.is_empty() {
+            return Err("CDC-NCM transmit NTB is empty");
+        }
+        if ntb.len() > USB_BULK_MAX_TRANSFER {
+            return Err("CDC-NCM transmit NTB is too large");
+        }
+
+        {
+            let mut slots = self.slot_runtime.lock();
+            let slot = slots
+                .iter_mut()
+                .find(|slot| slot.usb_device.slot_id() == slot_id)
+                .ok_or("Unknown slot for CDC-NCM transmit")?;
+            let ncm = slot
+                .cdc_ncm
+                .as_mut()
+                .ok_or("CDC-NCM runtime is not configured")?;
+            if !ncm.device.is_attached() {
+                return Err("CDC-NCM device is disconnected");
+            }
+            if ncm.bulk_out.endpoint_address != endpoint_address {
+                return Err("CDC-NCM bulk OUT endpoint mismatch");
+            }
+            let outstanding = ncm.tx_queue.len()
+                + usize::from(ncm.tx_preparing)
+                + usize::from(ncm.tx_in_flight.is_some());
+            if outstanding >= XHCI_CDC_NCM_TX_QUEUE_LIMIT {
+                return Err("CDC-NCM transmit queue is full");
+            }
+            ncm.tx_queue.push_back(QueuedCdcNcmTx { ntb, frame_len });
+        }
+
+        self.queue_interrupt_work(false);
+        Ok(())
+    }
+
+    fn take_pending_cdc_ncm_tx(&self) -> Option<(u8, u8, Arc<CdcNcmDevice>, QueuedCdcNcmTx)> {
+        let mut slots = self.slot_runtime.lock();
+        for slot in slots.iter_mut() {
+            let Some(ncm) = slot.cdc_ncm.as_mut() else {
+                continue;
+            };
+            if !ncm.device.is_attached() || ncm.tx_preparing || ncm.tx_in_flight.is_some() {
+                continue;
+            }
+            let Some(request) = ncm.tx_queue.pop_front() else {
+                continue;
+            };
+            ncm.tx_preparing = true;
+            return Some((
+                slot.usb_device.slot_id(),
+                ncm.bulk_out.dci,
+                ncm.device.clone(),
+                request,
+            ));
+        }
+        None
+    }
+
+    fn clear_cdc_ncm_tx_preparing(&self, slot_id: u8, dci: u8) {
+        let mut slots = self.slot_runtime.lock();
+        if let Some(ncm) = slots
+            .iter_mut()
+            .find(|slot| slot.usb_device.slot_id() == slot_id)
+            .and_then(|slot| slot.cdc_ncm.as_mut())
+            && ncm.bulk_out.dci == dci
+        {
+            ncm.tx_preparing = false;
+        }
+    }
+
+    fn process_pending_cdc_ncm_tx(&self) -> usize {
+        let mut processed = 0usize;
+        while processed < XHCI_CDC_NCM_TX_WORK_BUDGET {
+            let Some((slot_id, dci, device, request)) = self.take_pending_cdc_ncm_tx() else {
+                break;
+            };
+            processed += 1;
+
+            let pages = request.ntb.len().div_ceil(crate::environment::PAGE_SIZE);
+            let Some(buffer) = self.dma_alloc_pages(pages) else {
+                self.clear_cdc_ncm_tx_preparing(slot_id, dci);
+                device.handle_transmit_error("Failed to allocate CDC-NCM transmit buffer");
+                continue;
+            };
+            // SAFETY: The DMA allocation was rounded up from the NTB length,
+            // so it contains the complete non-overlapping source slice.
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    request.ntb.as_ptr(),
+                    buffer.as_vaddr() as *mut u8,
+                    request.ntb.len(),
+                );
+            }
+            sync_pages_for_device(&buffer);
+            let buffer_mapping = match self
+                .dma_map_owned_pages(&buffer, IommuMapFlags::READ | IommuMapFlags::COHERENT)
+            {
+                Ok(mapping) => mapping,
+                Err(error) => {
+                    self.clear_cdc_ncm_tx_preparing(slot_id, dci);
+                    device.handle_transmit_error(error);
+                    continue;
+                }
+            };
+
+            let submit_result = {
+                let mut slots = self.slot_runtime.lock();
+                let ncm = slots
+                    .iter_mut()
+                    .find(|slot| slot.usb_device.slot_id() == slot_id)
+                    .and_then(|slot| slot.cdc_ncm.as_mut())
+                    .ok_or("CDC-NCM runtime disappeared before transmit submission");
+                match ncm {
+                    Ok(ncm) => {
+                        ncm.tx_preparing = false;
+                        if !ncm.device.is_attached() {
+                            Err("CDC-NCM device disconnected before transmit submission")
+                        } else if ncm.bulk_out.dci != dci {
+                            Err("CDC-NCM bulk OUT DCI changed before transmit submission")
+                        } else if ncm.tx_in_flight.is_some() {
+                            Err("CDC-NCM transmit request is already in flight")
+                        } else {
+                            match ncm.bulk_out.ring.enqueue(Trb::normal_transfer(
+                                buffer_mapping.dma_addr(),
+                                request.ntb.len() as u32,
+                            )) {
+                                Ok(trb_index) => {
+                                    let trb_dma = ncm.bulk_out.ring.dma_address()
+                                        + trb_index * size_of::<Trb>();
+                                    ncm.tx_in_flight = Some(InFlightCdcNcmTx {
+                                        _buffer_mapping: buffer_mapping,
+                                        _buffer: buffer,
+                                        transfer_len: request.ntb.len(),
+                                        frame_len: request.frame_len,
+                                        trb_dma,
+                                    });
+                                    Ok(())
+                                }
+                                Err(error) => Err(error),
+                            }
+                        }
+                    }
+                    Err(error) => Err(error),
+                }
+            };
+
+            if let Err(error) = submit_result {
+                device.handle_transmit_error(error);
+                continue;
+            }
+            self.ring_endpoint_doorbell(slot_id, dci);
+        }
+
+        if processed == XHCI_CDC_NCM_TX_WORK_BUDGET {
+            self.queue_interrupt_work(false);
+        }
+        processed
+    }
+
+    fn set_cdc_ncm_packet_filter(
+        &self,
+        slot_id: u8,
+        control_interface: u8,
+        filter: u16,
+    ) -> Result<(), &'static str> {
+        println!(
+            "[xHCI] CDC-NCM packet filter: slot={} interface={} filter={:#x}",
+            slot_id, control_interface, filter
+        );
+        {
+            let slots = self.slot_runtime.lock();
+            let slot = slots
+                .iter()
+                .find(|slot| slot.usb_device.slot_id() == slot_id)
+                .ok_or("Unknown slot for CDC-NCM packet filter")?;
+            slot.ep0_ring
+                .ensure_contiguous_space(2, Trb::no_op_transfer())?;
+            slot.ep0_ring.enqueue(Trb::setup_stage(
+                0x21,
+                USB_CDC_SET_ETHERNET_PACKET_FILTER,
+                filter,
+                u16::from(control_interface),
+                0,
+                0,
+            ))?;
+            slot.ep0_ring.enqueue(Trb::status_stage(true, true))?;
+        }
+
+        self.ring_endpoint_doorbell(slot_id, EP0_DCI);
+        self.wait_for_transfer_event(slot_id, EP0_DCI)?;
+        Ok(())
     }
 
     fn log_command_timeout_state(&self) {
@@ -2962,6 +3183,9 @@ impl XhciController {
                 rx_buffer,
                 rx_buffer_mapping,
                 rx_transfer_size,
+                tx_queue: VecDeque::with_capacity(XHCI_CDC_NCM_TX_QUEUE_LIMIT),
+                tx_preparing: false,
+                tx_in_flight: None,
                 device: device.clone(),
                 device_id: None,
             });
@@ -4333,6 +4557,67 @@ impl XhciController {
             return false;
         };
 
+        if let Some(ncm) = slot.cdc_ncm.as_mut()
+            && ncm.bulk_out.dci == endpoint_id
+        {
+            let device = ncm.device.clone();
+            let Some(in_flight) = ncm.tx_in_flight.as_ref() else {
+                drop(slots);
+                println!(
+                    "[xHCI] Unexpected CDC-NCM bulk OUT completion: slot={} dci={} trb={:#x}",
+                    slot_id,
+                    endpoint_id,
+                    event.trb_pointer()
+                );
+                return true;
+            };
+            if (event.trb_pointer() as usize & !0xf) != (in_flight.trb_dma & !0xf) {
+                let expected = in_flight.trb_dma;
+                drop(slots);
+                println!(
+                    "[xHCI] Stale CDC-NCM bulk OUT completion: slot={} dci={} trb={:#x} expected={:#x}",
+                    slot_id,
+                    endpoint_id,
+                    event.trb_pointer(),
+                    expected
+                );
+                return true;
+            }
+
+            let completed = ncm
+                .tx_in_flight
+                .take()
+                .expect("CDC-NCM transmit request disappeared while completing it");
+            let has_queued = !ncm.tx_queue.is_empty();
+            let successful = Self::transfer_successful(event) && event.transfer_length() == 0;
+            let frame_len = completed.frame_len;
+            let transfer_len = completed.transfer_len;
+            drop(slots);
+
+            // The event proves that xHCI no longer owns the request buffer.
+            drop(completed);
+            if successful {
+                device.handle_transmit_complete(frame_len);
+            } else if Self::transfer_successful(event) {
+                device.handle_transmit_error("Short CDC-NCM bulk OUT transfer");
+            } else {
+                device.handle_transmit_error("xHCI CDC-NCM bulk OUT transfer failed");
+            }
+            if XHCI_VERBOSE_TRACE {
+                println!(
+                    "[xHCI] CDC-NCM bulk OUT complete: slot={} dci={} len={} residual={}",
+                    slot_id,
+                    endpoint_id,
+                    transfer_len,
+                    event.transfer_length()
+                );
+            }
+            if has_queued {
+                self.queue_interrupt_work(false);
+            }
+            return true;
+        }
+
         if let Some(ncm) = slot.cdc_ncm.as_ref()
             && ncm.notification.dci == endpoint_id
         {
@@ -4541,6 +4826,12 @@ impl XhciController {
             return true;
         }
 
+        // Submission is bounded work: enqueue one TRB per ready NCM endpoint
+        // and return. Completion is consumed on a later Transfer Event; this
+        // worker never waits for the device and therefore cannot head-of-line
+        // block unrelated xHCI work when a function stops responding.
+        let _submitted_tx = self.process_pending_cdc_ncm_tx();
+
         if !deferred_mode {
             self.deferred_interrupt_cause_seen
                 .store(false, Ordering::Release);
@@ -4743,31 +5034,12 @@ struct XhciCdcNcmTransport {
 }
 
 impl CdcNcmTransport for XhciCdcNcmTransport {
-    fn send_ntb(&self, ntb: &[u8]) -> Result<(), &'static str> {
-        let _operation = self.operation_lock.lock();
+    fn enqueue_ntb(&self, ntb: Vec<u8>, frame_len: usize) -> Result<(), &'static str> {
         let controller = self
             .controller
             .upgrade()
             .ok_or("xHCI controller is no longer available")?;
-        let pages = ntb.len().div_ceil(crate::environment::PAGE_SIZE);
-        let mut buffer = controller
-            .dma_alloc_pages(pages)
-            .ok_or("Failed to allocate CDC-NCM transmit buffer")?;
-        // SAFETY: `pages` was rounded up from `ntb.len()`, so the owned DMA
-        // allocation contains the full non-overlapping source slice.
-        unsafe {
-            core::ptr::copy_nonoverlapping(ntb.as_ptr(), buffer.as_vaddr() as *mut u8, ntb.len());
-        }
-        let transferred = controller.bulk_transfer(
-            self.slot_id,
-            self.bulk_out_endpoint,
-            &mut buffer,
-            ntb.len(),
-        )?;
-        if transferred != ntb.len() {
-            return Err("Short CDC-NCM bulk OUT transfer");
-        }
-        Ok(())
+        controller.enqueue_cdc_ncm_tx(self.slot_id, self.bulk_out_endpoint, ntb, frame_len)
     }
 
     fn set_packet_filter(&self, filter: u16) -> Result<(), &'static str> {
@@ -4779,21 +5051,7 @@ impl CdcNcmTransport for XhciCdcNcmTransport {
             .controller
             .upgrade()
             .ok_or("xHCI controller is no longer available")?;
-        let slots = controller.slot_runtime.lock();
-        let slot = slots
-            .iter()
-            .find(|slot| slot.usb_device.slot_id() == self.slot_id)
-            .ok_or("Unknown slot for CDC-NCM packet filter")?;
-        controller.control_transfer(
-            slot,
-            0x21,
-            USB_CDC_SET_ETHERNET_PACKET_FILTER,
-            filter,
-            u16::from(self.control_interface),
-            None,
-            0,
-        )?;
-        Ok(())
+        controller.set_cdc_ncm_packet_filter(self.slot_id, self.control_interface, filter)
     }
 }
 

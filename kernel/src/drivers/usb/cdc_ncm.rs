@@ -59,16 +59,19 @@ const DEFAULT_PACKET_FILTER: u16 =
 
 /// Host-controller operations required by a CDC-NCM network device.
 pub trait CdcNcmTransport: Send + Sync {
-    /// Send one complete Network Transfer Block over the bulk OUT endpoint.
+    /// Queue one complete Network Transfer Block for the bulk OUT endpoint.
     ///
     /// # Arguments
     ///
-    /// * `ntb` - Complete NTB16 payload to transfer.
+    /// * `ntb` - Owned complete NTB16 payload to transfer.
+    /// * `frame_len` - Length of the Ethernet frame carried by the NTB.
     ///
     /// # Returns
     ///
-    /// `Ok(())` after the host controller reports the whole transfer complete.
-    fn send_ntb(&self, ntb: &[u8]) -> Result<(), &'static str>;
+    /// `Ok(())` once the host controller accepts the request. Completion is
+    /// reported asynchronously through [`CdcNcmDevice::handle_transmit_complete`]
+    /// or [`CdcNcmDevice::handle_transmit_error`].
+    fn enqueue_ntb(&self, ntb: Vec<u8>, frame_len: usize) -> Result<(), &'static str>;
 
     /// Program the CDC Ethernet packet filter on the control interface.
     ///
@@ -824,6 +827,31 @@ impl CdcNcmDevice {
         crate::println!("[usb-ncm] Receive transfer failed: {}", error);
     }
 
+    /// Account for a completed host-controller transmit request.
+    ///
+    /// # Arguments
+    ///
+    /// * `frame_len` - Length of the Ethernet frame carried by the completed NTB.
+    pub(crate) fn handle_transmit_complete(&self, frame_len: usize) {
+        let mut stats = self.stats.lock();
+        stats.tx_packets += 1;
+        stats.tx_bytes += frame_len as u64;
+    }
+
+    /// Account for an asynchronous host-controller transmit failure.
+    ///
+    /// # Arguments
+    ///
+    /// * `error` - Static diagnostic supplied by the host-controller driver.
+    pub(crate) fn handle_transmit_error(&self, error: &'static str) {
+        self.stats.lock().tx_errors += 1;
+        crate::println!(
+            "[usb-ncm] Transmit failed on {}: {}",
+            self.interface_name,
+            error
+        );
+    }
+
     /// Process a CDC class notification received from the control interface.
     ///
     /// # Arguments
@@ -976,13 +1004,11 @@ impl NetworkDevice for CdcNcmDevice {
             sequence
         };
         let ntb = build_ntb16(packet.as_slice(), sequence, self.tx_config)?;
-        let result = self.transport.send_ntb(&ntb);
-        let mut stats = self.stats.lock();
-        if result.is_ok() {
-            stats.tx_packets += 1;
-            stats.tx_bytes += packet.len as u64;
-        } else {
+        let result = self.transport.enqueue_ntb(ntb, packet.len);
+        if result.is_err() {
+            let mut stats = self.stats.lock();
             stats.tx_errors += 1;
+            stats.dropped += 1;
         }
         result
     }

@@ -278,9 +278,11 @@ impl SocketObject for UdpSocket {
                 let addr = inet.addr;
                 let port = inet.port;
                 // Queue the datagram for sending
-                let mut buffer = self.send_buffer.lock();
                 let datagram = data.to_vec();
-                buffer.push(datagram.clone());
+                {
+                    let mut buffer = self.send_buffer.lock();
+                    buffer.push(datagram.clone());
+                }
 
                 // Update state
                 *self.remote_addr.write() = Some(address.clone());
