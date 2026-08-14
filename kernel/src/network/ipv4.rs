@@ -23,6 +23,8 @@ use crate::network::protocol_stack::{
 };
 use crate::network::socket::SocketError;
 
+const LOG_IPV4_PACKET_TRACE: bool = false;
+
 /// IPv4 address
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Ipv4Address(pub [u8; 4]);
@@ -513,20 +515,22 @@ impl NetworkLayer for Ipv4Layer {
         // Create IP packet: header + payload
         ip_packet.extend_from_slice(packet);
 
-        early_println!(
-            "[IPv4] Send: {} bytes (src: {}.{}.{}.{}, dst: {}.{}.{}.{}, proto: {}, iface: {})",
-            ip_packet.len(),
-            src_ip_bytes[0],
-            src_ip_bytes[1],
-            src_ip_bytes[2],
-            src_ip_bytes[3],
-            dest_ip_bytes[0],
-            dest_ip_bytes[1],
-            dest_ip_bytes[2],
-            dest_ip_bytes[3],
-            protocol,
-            interface_name
-        );
+        if LOG_IPV4_PACKET_TRACE {
+            early_println!(
+                "[IPv4] Send: {} bytes (src: {}.{}.{}.{}, dst: {}.{}.{}.{}, proto: {}, iface: {})",
+                ip_packet.len(),
+                src_ip_bytes[0],
+                src_ip_bytes[1],
+                src_ip_bytes[2],
+                src_ip_bytes[3],
+                dest_ip_bytes[0],
+                dest_ip_bytes[1],
+                dest_ip_bytes[2],
+                dest_ip_bytes[3],
+                protocol,
+                interface_name
+            );
+        }
 
         // Prepare context for Ethernet layer
         let mut eth_context = context.clone();
@@ -573,19 +577,21 @@ impl NetworkLayer for Ipv4Layer {
             return Err(SocketError::InvalidPacket);
         }
 
-        early_println!(
-            "[IPv4] RX: total_len={} src={}.{}.{}.{} dst={}.{}.{}.{} proto={}",
-            total_length,
-            header.source_ip[0],
-            header.source_ip[1],
-            header.source_ip[2],
-            header.source_ip[3],
-            header.dest_ip[0],
-            header.dest_ip[1],
-            header.dest_ip[2],
-            header.dest_ip[3],
-            header.protocol
-        );
+        if LOG_IPV4_PACKET_TRACE {
+            early_println!(
+                "[IPv4] RX: total_len={} src={}.{}.{}.{} dst={}.{}.{}.{} proto={}",
+                total_length,
+                header.source_ip[0],
+                header.source_ip[1],
+                header.source_ip[2],
+                header.source_ip[3],
+                header.dest_ip[0],
+                header.dest_ip[1],
+                header.dest_ip[2],
+                header.dest_ip[3],
+                header.protocol
+            );
+        }
 
         // Verify checksum (header.checksum is already in host order)
         let calculated_checksum = checksum_from_bytes(&packet[..header_len]);
@@ -603,19 +609,21 @@ impl NetworkLayer for Ipv4Layer {
 
         let payload = &packet[header_len..total_length];
 
-        early_println!(
-            "[IPv4] Recv: {} bytes (src: {}.{}.{}.{}, dst: {}.{}.{}.{}, proto: {})",
-            packet.len(),
-            header.source_ip[0],
-            header.source_ip[1],
-            header.source_ip[2],
-            header.source_ip[3],
-            header.dest_ip[0],
-            header.dest_ip[1],
-            header.dest_ip[2],
-            header.dest_ip[3],
-            header.protocol
-        );
+        if LOG_IPV4_PACKET_TRACE {
+            early_println!(
+                "[IPv4] Recv: {} bytes (src: {}.{}.{}.{}, dst: {}.{}.{}.{}, proto: {})",
+                packet.len(),
+                header.source_ip[0],
+                header.source_ip[1],
+                header.source_ip[2],
+                header.source_ip[3],
+                header.dest_ip[0],
+                header.dest_ip[1],
+                header.dest_ip[2],
+                header.dest_ip[3],
+                header.protocol
+            );
+        }
 
         // Update statistics
         {

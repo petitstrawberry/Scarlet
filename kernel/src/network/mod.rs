@@ -71,6 +71,8 @@ use crate::network::arp::ArpCacheEntry;
 use crate::network::ipv4::Ipv4Address;
 use crate::object::KernelObject;
 
+const LOG_IPV4_PACKET_TRACE: bool = false;
+
 /// Unique socket identifier
 pub type SocketId = usize;
 
@@ -432,19 +434,21 @@ impl NetworkManager {
             None => return,
         };
 
-        early_println!(
-            "[IPv4] Recv frame: ip_len={} src={}.{}.{}.{} dst={}.{}.{}.{} proto={}",
-            ip_bytes.len(),
-            header.source_ip[0],
-            header.source_ip[1],
-            header.source_ip[2],
-            header.source_ip[3],
-            header.dest_ip[0],
-            header.dest_ip[1],
-            header.dest_ip[2],
-            header.dest_ip[3],
-            header.protocol
-        );
+        if LOG_IPV4_PACKET_TRACE {
+            early_println!(
+                "[IPv4] Recv frame: ip_len={} src={}.{}.{}.{} dst={}.{}.{}.{} proto={}",
+                ip_bytes.len(),
+                header.source_ip[0],
+                header.source_ip[1],
+                header.source_ip[2],
+                header.source_ip[3],
+                header.dest_ip[0],
+                header.dest_ip[1],
+                header.dest_ip[2],
+                header.dest_ip[3],
+                header.protocol
+            );
+        }
 
         let header_len = header.header_length();
         let total_length = usize::from(header.total_length);

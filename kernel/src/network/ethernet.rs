@@ -25,6 +25,8 @@ use crate::network::NetworkInterface;
 use crate::network::protocol_stack::{LayerContext, NetworkLayer, NetworkLayerStats};
 use crate::network::socket::SocketError;
 
+const LOG_ETHERNET_PACKET_TRACE: bool = false;
+
 /// Ethernet frame header (14 bytes)
 #[derive(Debug, Clone, Copy)]
 #[repr(C)]
@@ -321,12 +323,14 @@ impl EthernetLayer {
         let header = EthernetHeader::from_bytes(&frame[..ETHERNET_HEADER_SIZE])
             .ok_or(SocketError::InvalidPacket)?;
 
-        early_println!(
-            "[Ethernet] RX on {}: {} bytes (type=0x{:04X})",
-            interface,
-            frame.len(),
-            header.ether_type
-        );
+        if LOG_ETHERNET_PACKET_TRACE {
+            early_println!(
+                "[Ethernet] RX on {}: {} bytes (type=0x{:04X})",
+                interface,
+                frame.len(),
+                header.ether_type
+            );
+        }
 
         let payload = &frame[ETHERNET_HEADER_SIZE..];
 
@@ -445,24 +449,28 @@ impl NetworkLayer for EthernetLayer {
 
         // Send through device
         if let Some(device) = self.get_device(&interface_name) {
-            early_println!(
-                "[Ethernet] Sending {} bytes via {} to {:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X} (type=0x{:04X})",
-                frame_len,
-                interface_name,
-                dest_mac[0],
-                dest_mac[1],
-                dest_mac[2],
-                dest_mac[3],
-                dest_mac[4],
-                dest_mac[5],
-                ether_type
-            );
+            if LOG_ETHERNET_PACKET_TRACE {
+                early_println!(
+                    "[Ethernet] Sending {} bytes via {} to {:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X} (type=0x{:04X})",
+                    frame_len,
+                    interface_name,
+                    dest_mac[0],
+                    dest_mac[1],
+                    dest_mac[2],
+                    dest_mac[3],
+                    dest_mac[4],
+                    dest_mac[5],
+                    ether_type
+                );
+            }
             let pkt = DevicePacket::with_data(frame);
             device.send(pkt).map_err(|e| {
                 early_println!("[Ethernet] Send failed: {}", e);
                 SocketError::Other("send failed".into())
             })?;
-            early_println!("[Ethernet] Send succeeded");
+            if LOG_ETHERNET_PACKET_TRACE {
+                early_println!("[Ethernet] Send succeeded");
+            }
         } else {
             early_println!("[Ethernet] No device for interface {}", interface_name);
             return Err(SocketError::NoRoute);
@@ -494,11 +502,13 @@ impl NetworkLayer for EthernetLayer {
             let header = EthernetHeader::from_bytes(&frame[..ETHERNET_HEADER_SIZE])
                 .ok_or(SocketError::InvalidPacket)?;
 
-            early_println!(
-                "[Ethernet] RX: {} bytes (type=0x{:04X})",
-                frame.len(),
-                header.ether_type
-            );
+            if LOG_ETHERNET_PACKET_TRACE {
+                early_println!(
+                    "[Ethernet] RX: {} bytes (type=0x{:04X})",
+                    frame.len(),
+                    header.ether_type
+                );
+            }
 
             let payload = &frame[ETHERNET_HEADER_SIZE..];
 
