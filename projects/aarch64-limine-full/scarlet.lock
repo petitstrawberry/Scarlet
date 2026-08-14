@@ -870,16 +870,16 @@ path = "../../user/bin"
 [[sections.rootfs.layers]]
 kind = "cargo"
 git = "https://github.com/petitstrawberry/carmine"
-resolved_rev = "2686a761610b261b325d00d984bfb6bbd9cfbccf"
+resolved_rev = "3f6b90db673cb07094507eddd1a069d8a2b76626"
 package = "carmine"
 bin = "carmine"
 to = "/system/scarlet/bin/carmine"
-hash = "sha256:af3a4bb460952ae0f5c3102e2de601c8c7afc7db200cdd267b448cfb4c4371ba"
+hash = "sha256:6ae5c46881e48f487dbbe42a5c974810a572348885269106afac1a96adb22ac4"
 
 [sections.rootfs.layers.source]
 type = "git"
 url = "https://github.com/petitstrawberry/carmine"
-rev = "2686a761610b261b325d00d984bfb6bbd9cfbccf"
+rev = "3f6b90db673cb07094507eddd1a069d8a2b76626"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
