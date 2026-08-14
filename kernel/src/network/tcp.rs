@@ -3,7 +3,7 @@
 //! This module provides a full TCP implementation with 3-way handshake,
 //! flow control, and retransmission.
 
-use crate::sync::{IrqRwSpinLock, IrqSpinLock};
+use crate::sync::{IrqRwSpinLock, IrqSpinLock, WaitResult};
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::string::String;
 use alloc::sync::{Arc, Weak};
@@ -335,6 +335,7 @@ impl TcpSocket {
     const INITIAL_RTO_NS: u64 = crate::timer::ms_to_ns(1_000);
     const MIN_RTO_NS: u64 = crate::timer::ms_to_ns(10);
     const MAX_RTO_NS: u64 = crate::timer::ms_to_ns(120_000);
+    const MAX_SEGMENT_TRANSMISSIONS: u16 = 12;
 
     /// Safely downcast a SocketObject to TcpSocket using Any trait
     ///
@@ -384,7 +385,9 @@ impl TcpSocket {
                 }
             }
 
-            waker.wait(task_id, trapframe);
+            if waker.wait_result(task_id, trapframe) == WaitResult::Interrupted {
+                return Err(SocketError::Interrupted);
+            }
         }
     }
 
@@ -1212,6 +1215,9 @@ impl TcpSocket {
         header.ack_number = self.recv_ack.load(Ordering::SeqCst);
         header.set_flags(first_seg.flags);
 
+        // An ACK after retransmission cannot identify which transmission it
+        // acknowledges, so Karn's algorithm excludes it from RTT sampling.
+        self.timing_rtt.store(0, Ordering::SeqCst);
         self.send_segment(dest_ip, header, &first_seg.data, false, true);
 
         let rearm_seq = {
@@ -1541,8 +1547,14 @@ impl TcpSocket {
                             })
                             .clone()
                     };
-                    if !waker.wait_with_timeout(task_id, trapframe, self.write_timeout_ns()) {
-                        return Err(SocketError::WouldBlock);
+                    match waker.wait_with_timeout_result(
+                        task_id,
+                        trapframe,
+                        self.write_timeout_ns(),
+                    ) {
+                        WaitResult::Woken => {}
+                        WaitResult::TimedOut => return Err(SocketError::WouldBlock),
+                        WaitResult::Interrupted => return Err(SocketError::Interrupted),
                     }
                     continue;
                 }
@@ -1587,8 +1599,10 @@ impl TcpSocket {
                         continue;
                     }
                 }
-                if !waker.wait_with_timeout(task_id, trapframe, self.write_timeout_ns()) {
-                    return Err(SocketError::WouldBlock);
+                match waker.wait_with_timeout_result(task_id, trapframe, self.write_timeout_ns()) {
+                    WaitResult::Woken => {}
+                    WaitResult::TimedOut => return Err(SocketError::WouldBlock),
+                    WaitResult::Interrupted => return Err(SocketError::Interrupted),
                 }
             }
         }
@@ -1699,8 +1713,10 @@ impl TcpSocket {
                 if !self.recv_buffer.lock().is_empty() {
                     continue;
                 }
-                if !waker.wait_with_timeout(task_id, trapframe, self.read_timeout_ns()) {
-                    return Err(SocketError::WouldBlock);
+                match waker.wait_with_timeout_result(task_id, trapframe, self.read_timeout_ns()) {
+                    WaitResult::Woken => {}
+                    WaitResult::TimedOut => return Err(SocketError::WouldBlock),
+                    WaitResult::Interrupted => return Err(SocketError::Interrupted),
                 }
             }
         }
@@ -1803,22 +1819,14 @@ impl TcpSocket {
 
     /// Exponential backoff for retransmission
     fn backoff_rto(&self) {
+        let current_rto = self.rto_ns.load(Ordering::SeqCst);
+        self.rto_ns.store(
+            backed_off_retransmission_timeout_ns(current_rto),
+            Ordering::SeqCst,
+        );
         let count = self.retrans_count.load(Ordering::SeqCst);
-        if count < 6 {
-            // Double RTO (exponential backoff), max 64x
-            let backoff = 1u32 << count.min(6);
-            let base_rto = self.rto_ns.load(Ordering::SeqCst);
-            let new_rto = base_rto
-                .saturating_mul(backoff as u64)
-                .min(Self::MAX_RTO_NS);
-            self.rto_ns.store(new_rto, Ordering::SeqCst);
-            self.retrans_count.store(count + 1, Ordering::SeqCst);
-        }
-    }
-
-    /// Check if maximum retransmissions exceeded
-    fn max_retransmissions_exceeded(&self) -> bool {
-        self.retrans_count.load(Ordering::SeqCst) >= 12 // Max 12 retransmissions
+        self.retrans_count
+            .store(count.saturating_add(1), Ordering::SeqCst);
     }
 
     /// Handle retransmission timeout
@@ -1839,7 +1847,7 @@ impl TcpSocket {
                 return;
             }
 
-            if seg.tx_count >= 12 {
+            if seg.tx_count >= Self::MAX_SEGMENT_TRANSMISSIONS {
                 self.set_state(TcpState::Closed);
                 if let Some(waker) = self.send_waker.lock().as_ref() {
                     waker.wake_all();
@@ -1866,6 +1874,8 @@ impl TcpSocket {
             (seg, dest_ip, header)
         };
 
+        // Do not use an ACK for a retransmitted segment as an RTT sample.
+        self.timing_rtt.store(0, Ordering::SeqCst);
         self.send_segment(retransmit.1, retransmit.2, &retransmit.0.data, false, true);
 
         let rearm_seq = {
@@ -2014,6 +2024,11 @@ fn retransmission_request_matches_head(requested_seq: u32, head_seq: Option<u32>
 #[inline]
 fn retransmission_deadline_ns(last_tx_time: u64, rto_ns: u64) -> u64 {
     last_tx_time.saturating_add(rto_ns)
+}
+
+#[inline]
+fn backed_off_retransmission_timeout_ns(current_rto_ns: u64) -> u64 {
+    current_rto_ns.saturating_mul(2).min(TcpSocket::MAX_RTO_NS)
 }
 
 /// Check if a sequence number is acknowledged by an ACK number
@@ -2269,7 +2284,11 @@ impl SocketControl for TcpSocket {
                                 TcpState::SynSent => {}
                                 _ => return Err(SocketError::InvalidOperation),
                             }
-                            waker.wait(task.get_id(), task.get_trapframe());
+                            if waker.wait_result(task.get_id(), task.get_trapframe())
+                                == WaitResult::Interrupted
+                            {
+                                return Err(SocketError::Interrupted);
+                            }
                         }
                         _ => return Err(SocketError::InvalidOperation),
                     }
@@ -2372,6 +2391,7 @@ impl crate::object::capability::StreamOps for TcpSocket {
         if Selectable::is_nonblocking(self) {
             return self.recv_data(buffer).map_err(|err| match err {
                 SocketError::WouldBlock => crate::object::capability::StreamError::WouldBlock,
+                SocketError::Interrupted => crate::object::capability::StreamError::Interrupted,
                 SocketError::NotConnected => crate::object::capability::StreamError::BrokenPipe,
                 _ => crate::object::capability::StreamError::Other("tcp recv error".into()),
             });
@@ -2389,6 +2409,7 @@ impl crate::object::capability::StreamOps for TcpSocket {
         self.recv_blocking(buffer, task.get_id(), task.get_trapframe())
             .map_err(|err| match err {
                 SocketError::WouldBlock => crate::object::capability::StreamError::WouldBlock,
+                SocketError::Interrupted => crate::object::capability::StreamError::Interrupted,
                 SocketError::NotConnected => crate::object::capability::StreamError::BrokenPipe,
                 _ => crate::object::capability::StreamError::Other("tcp recv error".into()),
             })
@@ -2400,6 +2421,7 @@ impl crate::object::capability::StreamOps for TcpSocket {
         if Selectable::is_nonblocking(self) {
             return self.send_data(data).map_err(|err| match err {
                 SocketError::WouldBlock => crate::object::capability::StreamError::WouldBlock,
+                SocketError::Interrupted => crate::object::capability::StreamError::Interrupted,
                 SocketError::NotConnected => crate::object::capability::StreamError::BrokenPipe,
                 _ => crate::object::capability::StreamError::Other("tcp send error".into()),
             });
@@ -2417,6 +2439,7 @@ impl crate::object::capability::StreamOps for TcpSocket {
         self.send_blocking(data, task.get_id(), task.get_trapframe())
             .map_err(|err| match err {
                 SocketError::WouldBlock => crate::object::capability::StreamError::WouldBlock,
+                SocketError::Interrupted => crate::object::capability::StreamError::Interrupted,
                 SocketError::NotConnected => crate::object::capability::StreamError::BrokenPipe,
                 _ => crate::object::capability::StreamError::Other("tcp send error".into()),
             })
@@ -2881,6 +2904,17 @@ mod tests {
         assert_eq!(TcpSocket::INITIAL_RTO_NS, crate::timer::ms_to_ns(1_000));
         assert_eq!(TcpSocket::MIN_RTO_NS, crate::timer::ms_to_ns(10));
         assert_eq!(TcpSocket::MAX_RTO_NS, crate::timer::ms_to_ns(120_000));
+    }
+
+    #[test_case]
+    fn retransmission_timeout_backoff_doubles_once_per_timeout() {
+        let mut rto_ns = TcpSocket::INITIAL_RTO_NS;
+        for expected_ms in [
+            2_000, 4_000, 8_000, 16_000, 32_000, 64_000, 120_000, 120_000,
+        ] {
+            rto_ns = backed_off_retransmission_timeout_ns(rto_ns);
+            assert_eq!(rto_ns, crate::timer::ms_to_ns(expected_ms));
+        }
     }
 
     #[test_case]

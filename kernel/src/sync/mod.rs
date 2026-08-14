@@ -32,4 +32,4 @@ pub use rw_spinlock::{
     RwSpinLockReadGuard, RwSpinLockWriteGuard,
 };
 pub use spinlock::{IrqSpinLock, IrqSpinLockGuard, RawIrqSpinLock, SpinLock, SpinLockGuard};
-pub use waker::Waker;
+pub use waker::{WaitResult, Waker};

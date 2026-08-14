@@ -5069,7 +5069,6 @@ pub fn schedule(trapframe: &mut Trapframe) {
     }
 
     crate::arch::interrupt::restore_interrupts(saved_interrupt_state);
-    process_pending_events_before_user_return(trapframe);
 }
 
 /// Enter userspace for a task already claimed by this CPU.

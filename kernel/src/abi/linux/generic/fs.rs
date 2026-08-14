@@ -1133,7 +1133,7 @@ pub fn sys_read(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                             usize::MAX
                         }
                     }
-                    _ => usize::MAX,
+                    error => errno::to_result(stream_error_to_errno(error)),
                 }
             }
         }
@@ -1162,6 +1162,13 @@ pub fn sys_read(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                     } else {
                         break;
                     }
+                }
+                Err(StreamError::Interrupted) => {
+                    if total_read == 0 {
+                        trapframe.increment_pc_next(&task);
+                        return errno::to_result(errno::EINTR);
+                    }
+                    break;
                 }
                 Err(_) => {
                     if total_read == 0 {
@@ -1245,7 +1252,7 @@ pub fn sys_write(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                     usize::MAX
                 }
             }
-            Err(_) => usize::MAX,
+            Err(error) => errno::to_result(stream_error_to_errno(error)),
         }
     } else {
         // Multi-page path: copy from userspace page-by-page into kernel buffer
@@ -1269,6 +1276,12 @@ pub fn sys_write(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                 Err(StreamError::WouldBlock) => {
                     if nonblocking && total_written == 0 {
                         return errno::to_result(errno::EAGAIN);
+                    }
+                    break;
+                }
+                Err(StreamError::Interrupted) => {
+                    if total_written == 0 {
+                        return errno::to_result(errno::EINTR);
                     }
                     break;
                 }

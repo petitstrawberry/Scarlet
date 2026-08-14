@@ -549,6 +549,18 @@ impl TaskEventQueue {
         })
     }
 
+    /// Return whether any process-control event is queued for this task.
+    ///
+    /// Interruptible wait registration checks this while holding the event
+    /// queue lock so delivery cannot race a running task into a missed sleep.
+    pub(crate) fn has_pending_process_control(&self) -> bool {
+        self.events.values().any(|queue| {
+            queue
+                .iter()
+                .any(|event| matches!(event.content, EventContent::ProcessControl(_)))
+        })
+    }
+
     /// Add event to queue, returning whether this was the first event (0->1 transition).
     pub fn enqueue(&mut self, event: Event) -> bool {
         let was_empty = self.total_count == 0;
@@ -2120,6 +2132,21 @@ mod tests {
             queue.dequeue().unwrap().content,
             EventContent::ProcessControl(ProcessControlType::Continue)
         ));
+    }
+
+    #[test_case]
+    fn test_task_event_queue_reports_pending_process_control() {
+        let mut queue = TaskEventQueue::new();
+        assert!(!queue.has_pending_process_control());
+
+        queue.enqueue(process_control_event(
+            ProcessControlType::Interrupt,
+            EventPriority::High,
+        ));
+        assert!(queue.has_pending_process_control());
+
+        let _ = queue.dequeue();
+        assert!(!queue.has_pending_process_control());
     }
 
     #[test_case]

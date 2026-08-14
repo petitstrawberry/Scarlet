@@ -259,6 +259,12 @@ pub extern "C" fn _switch_to_user(_trapframe: &mut Trapframe) -> ! {
 
 #[unsafe(export_name = "arch_switch_to_user")]
 pub fn arch_switch_to_user(trapframe: &mut Trapframe) -> ! {
+    // This is the actual EL0 return boundary. `schedule()` can resume in the
+    // middle of a blocking operation with owned values still on its stack, so
+    // fatal events must not be consumed until those kernel frames unwind.
+    if !crate::arch::is_privileged_return_mode(trapframe.spsr) {
+        crate::sched::scheduler::process_pending_events_before_user_return(trapframe);
+    }
     let cpu_id = crate::arch::get_cpu().get_cpuid();
     crate::breadcrumb::drop(
         crate::breadcrumb::SWITCH_TO_USER,

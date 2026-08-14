@@ -115,10 +115,9 @@ impl WaitOutcome {
 
     /// Settle a resumed wait and wait out any producer's final wake attempt.
     ///
-    /// `true` means the wait ended for a reason other than its timeout. A
-    /// direct interruptible wake is deliberately reported like an event, which
-    /// preserves the previous API while cancelling this exact registration.
-    fn finish_after_resume(&self) -> bool {
+    /// The result distinguishes an event-source wake, timeout, and a direct
+    /// interruptible scheduler wake while cancelling this exact registration.
+    fn finish_after_resume(&self) -> WaitResult {
         loop {
             match self.state.load(Ordering::Acquire) {
                 WAIT_OUTCOME_PENDING => {
@@ -132,8 +131,9 @@ impl WaitOutcome {
                 WAIT_OUTCOME_EVENT_WAKE_IN_PROGRESS | WAIT_OUTCOME_TIMEOUT_WAKE_IN_PROGRESS => {
                     core::hint::spin_loop();
                 }
-                WAIT_OUTCOME_EVENT_WAKE_COMPLETE | WAIT_OUTCOME_INTERRUPTED => return true,
-                WAIT_OUTCOME_TIMEOUT_WAKE_COMPLETE => return false,
+                WAIT_OUTCOME_EVENT_WAKE_COMPLETE => return WaitResult::Woken,
+                WAIT_OUTCOME_TIMEOUT_WAKE_COMPLETE => return WaitResult::TimedOut,
+                WAIT_OUTCOME_INTERRUPTED => return WaitResult::Interrupted,
                 _ => unreachable!("invalid wait outcome state"),
             }
         }
@@ -165,6 +165,23 @@ impl WaitQueueEntry {
 
     fn matches_registration(&self, task_id: usize, outcome: &Arc<WaitOutcome>) -> bool {
         self.task_id == task_id && Arc::ptr_eq(&self.outcome, outcome)
+    }
+}
+
+/// Result of blocking on a [`Waker`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WaitResult {
+    /// The registered event source woke the task.
+    Woken,
+    /// The requested timeout elapsed before the event source woke the task.
+    TimedOut,
+    /// An interruptible scheduler wake, such as signal delivery, resumed the task.
+    Interrupted,
+}
+
+impl WaitResult {
+    fn legacy_woken(self) -> bool {
+        !matches!(self, Self::TimedOut)
     }
 }
 
@@ -299,6 +316,20 @@ impl Waker {
     /// 1. Set task state to Blocked BEFORE adding to queue
     /// 2. This ensures wake_task() can safely operate even if called immediately
     pub fn wait(&self, task_id: usize, trapframe: &mut Trapframe) {
+        let _ = self.wait_result(task_id, trapframe);
+    }
+
+    /// Block the current task and report why it resumed.
+    ///
+    /// # Arguments
+    ///
+    /// * `task_id` - ID of the current task to block.
+    /// * `trapframe` - Current task's saved execution state.
+    ///
+    /// # Returns
+    ///
+    /// The event, timeout, or interruption which ended the wait.
+    pub fn wait_result(&self, task_id: usize, trapframe: &mut Trapframe) -> WaitResult {
         let outcome = Arc::new(WaitOutcome::new());
         let mut should_schedule = self.prepare_wait_registration(task_id, outcome.clone());
         if !outcome.is_pending() && self.cancel_prepared_wait_registration(task_id, Some(&outcome))
@@ -308,8 +339,9 @@ impl Waker {
         if should_schedule {
             schedule(trapframe);
         }
-        let _ = outcome.finish_after_resume();
+        let result = outcome.finish_after_resume();
         let _ = self.remove_wait_registration(task_id, &outcome);
+        result
     }
 
     /// Block using an owned waker handle without retaining it on a suspended stack.
@@ -421,7 +453,7 @@ impl Waker {
             if let Some(task) = crate::sched::scheduler::get_task_by_id(task_id) {
                 let _ = task.finish_software_timer(timer_handle);
             }
-            return outcome.finish_after_resume();
+            return outcome.finish_after_resume().legacy_woken();
         }
 
         let mut should_schedule = self.prepare_wait_registration(task_id, outcome.clone());
@@ -435,7 +467,7 @@ impl Waker {
             schedule(trapframe);
         }
 
-        let event_won = outcome.finish_after_resume();
+        let event_won = outcome.finish_after_resume().legacy_woken();
         if let Some(task) = crate::sched::scheduler::get_task_by_id(task_id) {
             let _ = task.finish_software_timer(timer_handle);
         }
@@ -495,6 +527,20 @@ impl Waker {
 
         let task = get_task_by_id(task_id)
             .unwrap_or_else(|| panic!("[WAKER] Task ID {} not found in scheduler", task_id));
+        // Process-control delivery decides whether to wake an interruptible
+        // task while holding this same queue lock. Keep it across the state
+        // transition and wait-queue insertion so a signal can neither slip in
+        // before Blocked is published nor leave an unwakeable waiter behind.
+        let pending_events =
+            matches!(self.block_type, BlockedType::Interruptible).then(|| task.event_queue.lock());
+        if pending_events
+            .as_ref()
+            .is_some_and(|queue| queue.has_pending_process_control())
+        {
+            drop(pending_events);
+            drop(task);
+            return false;
+        }
         let blocked_state = TaskState::Blocked(self.block_type);
         let local_cpu = crate::arch::get_cpu().get_cpuid();
         let mut state = task.state.load(Ordering::SeqCst);
@@ -532,10 +578,12 @@ impl Waker {
                     }
                 }
                 TaskState::Zombie | TaskState::Terminated | TaskState::Ready => {
+                    drop(pending_events);
                     drop(task);
                     return true;
                 }
                 TaskState::NotInitialized | TaskState::Blocked(_) => {
+                    drop(pending_events);
                     drop(task);
                     panic!(
                         "[WAKER] Task {} cannot enter wait from state {:?}",
@@ -544,7 +592,6 @@ impl Waker {
                 }
             }
         }
-        drop(task);
 
         crate::sched::scheduler::mark_blocked(task_id);
 
@@ -568,6 +615,8 @@ impl Waker {
                 false
             }
         };
+        drop(pending_events);
+        drop(task);
 
         let terminated_while_enqueuing = get_task_by_id(task_id).is_some_and(|task| {
             matches!(task.get_state(), TaskState::Zombie | TaskState::Terminated)
@@ -679,7 +728,28 @@ impl Waker {
         trapframe: &mut Trapframe,
         timeout_ns: Option<u64>,
     ) -> bool {
-        self.wait_with_timeout_precision(
+        self.wait_with_timeout_result(task_id, trapframe, timeout_ns)
+            .legacy_woken()
+    }
+
+    /// Block the task until an event, timeout, or interruptible wake occurs.
+    ///
+    /// # Arguments
+    ///
+    /// * `task_id` - Task to block and wake.
+    /// * `trapframe` - Current task trapframe.
+    /// * `timeout_ns` - Optional relative timeout in nanoseconds.
+    ///
+    /// # Returns
+    ///
+    /// The event, timeout, or interruption which ended the wait.
+    pub fn wait_with_timeout_result(
+        &self,
+        task_id: usize,
+        trapframe: &mut Trapframe,
+        timeout_ns: Option<u64>,
+    ) -> WaitResult {
+        self.wait_with_timeout_precision_result(
             task_id,
             trapframe,
             timeout_ns,
@@ -706,8 +776,19 @@ impl Waker {
         timeout_ns: Option<u64>,
         precision: crate::timer::TimerPrecision,
     ) -> bool {
+        self.wait_with_timeout_precision_result(task_id, trapframe, timeout_ns, precision)
+            .legacy_woken()
+    }
+
+    fn wait_with_timeout_precision_result(
+        &self,
+        task_id: usize,
+        trapframe: &mut Trapframe,
+        timeout_ns: Option<u64>,
+        precision: crate::timer::TimerPrecision,
+    ) -> WaitResult {
         if matches!(timeout_ns, Some(0)) {
-            return false;
+            return WaitResult::TimedOut;
         }
 
         if let Some(duration_ns) = timeout_ns {
@@ -744,7 +825,7 @@ impl Waker {
             let outcome = Arc::new(WaitOutcome::new());
             let timer_handle = {
                 let Some(task) = crate::sched::scheduler::get_task_by_id(task_id) else {
-                    return false;
+                    return WaitResult::TimedOut;
                 };
                 let handler = Arc::new(TimeoutWake {
                     task_id,
@@ -783,15 +864,14 @@ impl Waker {
                 schedule(trapframe);
             }
 
-            let event_won = outcome.finish_after_resume();
+            let result = outcome.finish_after_resume();
             let _ = self.remove_wait_registration(task_id, &outcome);
             if let Some(task) = crate::sched::scheduler::get_task_by_id(task_id) {
                 let _ = task.finish_software_timer(timer_handle);
             }
-            event_won
+            result
         } else {
-            self.wait(task_id, trapframe);
-            true
+            self.wait_result(task_id, trapframe)
         }
     }
 
@@ -1250,22 +1330,22 @@ mod tests {
         assert!(event_first.try_begin_event_wake());
         assert!(!event_first.try_timeout());
         event_first.complete_event_wake();
-        assert!(event_first.finish_after_resume());
+        assert_eq!(event_first.finish_after_resume(), WaitResult::Woken);
 
         let timeout_first = WaitOutcome::new();
         assert!(timeout_first.try_timeout());
         assert!(!timeout_first.try_begin_event_wake());
         timeout_first.complete_timeout_wake();
-        assert!(!timeout_first.finish_after_resume());
+        assert_eq!(timeout_first.finish_after_resume(), WaitResult::TimedOut);
         assert!(!timeout_first.try_begin_event_wake());
 
         let interrupted = WaitOutcome::new();
-        assert!(interrupted.finish_after_resume());
+        assert_eq!(interrupted.finish_after_resume(), WaitResult::Interrupted);
         assert!(!interrupted.try_begin_event_wake());
 
         let coalesced = WaitOutcome::new();
         assert!(coalesced.claim_coalesced_event());
-        assert!(coalesced.finish_after_resume());
+        assert_eq!(coalesced.finish_after_resume(), WaitResult::Woken);
     }
 
     #[test_case]
@@ -1330,7 +1410,7 @@ mod tests {
         let timed_out = Arc::new(WaitOutcome::new());
         assert!(timed_out.try_timeout());
         let interrupted = Arc::new(WaitOutcome::new());
-        assert!(interrupted.finish_after_resume());
+        assert_eq!(interrupted.finish_after_resume(), WaitResult::Interrupted);
         waker.wait_queue.lock().extend([
             WaitQueueEntry::new(usize::MAX, timed_out),
             WaitQueueEntry::new(usize::MAX - 1, interrupted),
@@ -1370,6 +1450,41 @@ mod tests {
 
         assert_eq!(waker.wake_all(), 0);
         assert_eq!(waker.pending_wake_count_for_test(), 1);
+    }
+
+    #[test_case]
+    fn test_pending_process_control_interrupts_wait_registration() {
+        reset();
+        let local_cpu = crate::arch::get_cpu().get_cpuid();
+        register_online_cpu(local_cpu);
+        let waker = Waker::new_interruptible("pending-process-control");
+        let task_id = add_task(
+            Task::new("signal-before-wait".to_string(), 1, TaskType::Kernel),
+            local_cpu,
+        );
+        let task = get_task_by_id(task_id).expect("signal waiter must be registered");
+        task.set_state(TaskState::Running);
+        task.running_cpu.store(local_cpu, Ordering::SeqCst);
+        set_current_task_for_test(local_cpu, Some(task_id));
+        remove_from_ready_queues(task_id);
+        task.event_queue
+            .lock()
+            .enqueue(crate::ipc::event::Event::immediate_process_control(
+                task_id as u32,
+                crate::ipc::event::ProcessControlType::Interrupt,
+            ));
+
+        let outcome = Arc::new(WaitOutcome::new());
+        assert!(!waker.prepare_wait_registration(task_id, outcome.clone()));
+        assert_eq!(outcome.finish_after_resume(), WaitResult::Interrupted);
+        assert_eq!(task.get_state(), TaskState::Running);
+        assert_eq!(waker.waiting_count(), 0);
+
+        let _ = task.event_queue.lock().dequeue();
+        set_current_task_for_test(local_cpu, None);
+        task.running_cpu.store(usize::MAX, Ordering::SeqCst);
+        drop(task);
+        reset();
     }
 
     #[test_case]

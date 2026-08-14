@@ -456,6 +456,11 @@ pub extern "C" fn arch_user_trap_handler(addr: usize) {
     {
         crate::sched::scheduler::schedule(trapframe);
     }
+
+    // The Rust trap handler is the final task-context frame before `sret`.
+    // Do not consume events from `schedule()` itself: it may resume inside a
+    // blocking operation while owned values are still live on its stack.
+    crate::sched::scheduler::process_pending_events_before_user_return(trapframe);
 }
 
 /// Switch to user space using the trampoline mechanism
@@ -470,6 +475,9 @@ pub extern "C" fn arch_user_trap_handler(addr: usize) {
 /// It will jump to the user trap exit handler, which will then return to user space.
 #[unsafe(export_name = "arch_switch_to_user")]
 pub fn arch_switch_to_user(trapframe: &mut Trapframe) -> ! {
+    // First entry and explicit task switches bypass the returning trap handler
+    // above, but still pass through this true userspace boundary.
+    crate::sched::scheduler::process_pending_events_before_user_return(trapframe);
     let addr = trapframe as *mut Trapframe as usize;
 
     // Configure the upcoming user return. This affects sstatus.SPIE, not the current kernel SIE.

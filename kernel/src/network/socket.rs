@@ -295,6 +295,8 @@ pub enum SocketError {
     NoConnections,
     /// Operation would block
     WouldBlock,
+    /// Operation was interrupted by asynchronous task event delivery
+    Interrupted,
     /// Invalid argument
     InvalidArgument,
     /// Not supported
