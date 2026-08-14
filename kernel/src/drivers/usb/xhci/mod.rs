@@ -6056,6 +6056,12 @@ fn probe_xhci(device: &PciDeviceInfo) -> Result<(), &'static str> {
     let controller = initialize_xhci_controller(mmio_vaddr, DmaContext::direct())?;
 
     if let Some(interrupt_id) = interrupt_id {
+        // PCI INTx uses the same oneshot worker contract as platform xHCI:
+        // the interrupt core keeps the shared controller line masked until
+        // the deferred completion token is returned by the xHCI worker.
+        controller
+            .deferred_interrupt_mode
+            .store(true, Ordering::Release);
         controller.enable_interrupts(interrupt_id)?;
         let source = PciIntxInterruptSource::new(device, controller.clone())
             .ok_or("Failed to create xHCI INTx source")?;
