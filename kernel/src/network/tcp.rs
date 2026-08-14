@@ -35,6 +35,50 @@ pub enum TcpState {
     TimeWait,
 }
 
+const fn tcp_receive_side_open(state: TcpState) -> bool {
+    matches!(
+        state,
+        TcpState::Established | TcpState::FinWait1 | TcpState::FinWait2
+    )
+}
+
+const fn tcp_receive_side_eof(state: TcpState) -> bool {
+    matches!(
+        state,
+        TcpState::CloseWait
+            | TcpState::Closing
+            | TcpState::LastAck
+            | TcpState::TimeWait
+            | TcpState::Closed
+    )
+}
+
+const fn tcp_send_side_open(state: TcpState) -> bool {
+    matches!(state, TcpState::Established | TcpState::CloseWait)
+}
+
+const fn tcp_connection_present(state: TcpState) -> bool {
+    matches!(
+        state,
+        TcpState::Established
+            | TcpState::FinWait1
+            | TcpState::FinWait2
+            | TcpState::CloseWait
+            | TcpState::Closing
+            | TcpState::LastAck
+    )
+}
+
+const fn state_after_peer_fin(state: TcpState, local_fin_acknowledged: bool) -> TcpState {
+    match state {
+        TcpState::Established => TcpState::CloseWait,
+        TcpState::FinWait1 if local_fin_acknowledged => TcpState::TimeWait,
+        TcpState::FinWait1 => TcpState::Closing,
+        TcpState::FinWait2 => TcpState::TimeWait,
+        _ => state,
+    }
+}
+
 /// TCP flags
 pub mod tcp_flags {
     pub const FIN: u8 = 0x01;
@@ -774,11 +818,16 @@ impl TcpSocket {
                     }
                 }
             }
-            TcpState::Established => {
+            state if tcp_receive_side_open(state) => {
                 if data.is_empty() {
                     self.handle_control_segment(src_ip, header);
                 } else {
                     self.handle_data_segment(src_ip, header, data);
+                }
+            }
+            TcpState::CloseWait | TcpState::Closing | TcpState::LastAck => {
+                if data.is_empty() {
+                    self.handle_control_segment(src_ip, header);
                 }
             }
             _ => {}
@@ -1011,6 +1060,7 @@ impl TcpSocket {
                 self.update_send_window(header.ack_number);
                 self.stop_rtt_measurement(header.ack_number);
                 self.remove_acked_segments(header.ack_number);
+                self.handle_close_ack(header.ack_number);
             }
             return;
         }
@@ -1123,6 +1173,7 @@ impl TcpSocket {
             self.update_send_window(header.ack_number);
             self.stop_rtt_measurement(header.ack_number);
             self.remove_acked_segments(header.ack_number);
+            self.handle_close_ack(header.ack_number);
         }
     }
 
@@ -1132,23 +1183,16 @@ impl TcpSocket {
         let ack_seq = header.seq_number.wrapping_add(1);
         self.recv_seq.store(ack_seq, Ordering::SeqCst);
         self.recv_ack.store(ack_seq, Ordering::SeqCst);
-        match current_state {
-            TcpState::Established => {
-                self.send_ack(src_ip, header.src_port, ack_seq);
-                self.set_state(TcpState::CloseWait);
-                if let Some(waker) = self.recv_waker.lock().as_ref() {
-                    waker.wake_all();
-                }
-            }
-            TcpState::FinWait1 => {
-                if header.flags() & (tcp_flags::FIN | tcp_flags::ACK)
-                    == (tcp_flags::FIN | tcp_flags::ACK)
-                {
-                    self.send_ack(src_ip, header.src_port, ack_seq);
-                    self.set_state(TcpState::TimeWait);
-                }
-            }
-            _ => {}
+        self.send_ack(src_ip, header.src_port, ack_seq);
+
+        let local_fin_acknowledged = (header.flags() & tcp_flags::ACK) != 0
+            && is_seq_acknowledged(self.send_seq.load(Ordering::SeqCst), header.ack_number);
+        let next_state = state_after_peer_fin(current_state, local_fin_acknowledged);
+        if next_state != current_state {
+            self.set_state(next_state);
+        }
+        if let Some(waker) = self.recv_waker.lock().as_ref() {
+            waker.wake_all();
         }
     }
 
@@ -1289,10 +1333,7 @@ impl TcpSocket {
     }
 
     fn send_window_update_ack(&self) {
-        if !matches!(
-            self.get_state(),
-            TcpState::Established | TcpState::CloseWait
-        ) {
+        if !tcp_receive_side_open(self.get_state()) {
             return;
         }
         let dest_ip = match self.remote_ip.lock().clone() {
@@ -1464,7 +1505,7 @@ impl TcpSocket {
 
     /// Send data through socket
     pub fn send_data(&self, data: &[u8]) -> Result<usize, SocketError> {
-        if self.get_state() != TcpState::Established {
+        if !tcp_send_side_open(self.get_state()) {
             return Err(SocketError::NotConnected);
         }
 
@@ -1514,7 +1555,7 @@ impl TcpSocket {
         task_id: usize,
         trapframe: &mut crate::arch::Trapframe,
     ) -> Result<usize, SocketError> {
-        if self.get_state() != TcpState::Established {
+        if !tcp_send_side_open(self.get_state()) {
             return Err(SocketError::NotConnected);
         }
 
@@ -1630,8 +1671,8 @@ impl TcpSocket {
         }
 
         match self.get_state() {
-            TcpState::Established => Err(SocketError::WouldBlock),
-            TcpState::CloseWait | TcpState::Closed | TcpState::TimeWait => Ok(0),
+            state if tcp_receive_side_open(state) => Err(SocketError::WouldBlock),
+            state if tcp_receive_side_eof(state) => Ok(0),
             _ => Err(SocketError::NotConnected),
         }
     }
@@ -1640,8 +1681,12 @@ impl TcpSocket {
         self.recv_seq.store(fin_ack, Ordering::SeqCst);
         self.recv_ack.store(fin_ack, Ordering::SeqCst);
         self.send_ack(src_ip, header.src_port, fin_ack);
-        if self.get_state() == TcpState::Established {
-            self.set_state(TcpState::CloseWait);
+        let current_state = self.get_state();
+        let local_fin_acknowledged = (header.flags() & tcp_flags::ACK) != 0
+            && is_seq_acknowledged(self.send_seq.load(Ordering::SeqCst), header.ack_number);
+        let next_state = state_after_peer_fin(current_state, local_fin_acknowledged);
+        if next_state != current_state {
+            self.set_state(next_state);
         }
         if let Some(waker) = self.recv_waker.lock().as_ref() {
             waker.wake_all();
@@ -1677,13 +1722,10 @@ impl TcpSocket {
             }
 
             let state = self.get_state();
-            if state == TcpState::Closed
-                || state == TcpState::TimeWait
-                || state == TcpState::CloseWait
-            {
+            if tcp_receive_side_eof(state) {
                 return Ok(0);
             }
-            if state != TcpState::Established {
+            if !tcp_receive_side_open(state) {
                 return Err(SocketError::NotConnected);
             }
 
@@ -1701,13 +1743,10 @@ impl TcpSocket {
                         .clone()
                 };
                 let state = self.get_state();
-                if state == TcpState::Closed
-                    || state == TcpState::TimeWait
-                    || state == TcpState::CloseWait
-                {
+                if tcp_receive_side_eof(state) {
                     return Ok(0);
                 }
-                if state != TcpState::Established {
+                if !tcp_receive_side_open(state) {
                     return Err(SocketError::NotConnected);
                 }
                 if !self.recv_buffer.lock().is_empty() {
@@ -2345,7 +2384,9 @@ impl SocketControl for TcpSocket {
         match how {
             crate::network::socket::ShutdownHow::Write
             | crate::network::socket::ShutdownHow::Both => {
-                self.send_fin();
+                if tcp_send_side_open(self.get_state()) {
+                    self.send_fin();
+                }
             }
             _ => {}
         }
@@ -2353,14 +2394,14 @@ impl SocketControl for TcpSocket {
     }
 
     fn is_connected(&self) -> bool {
-        self.get_state() == TcpState::Established
+        tcp_connection_present(self.get_state())
     }
 
     fn state(&self) -> SocketState {
         match self.get_state() {
             TcpState::Closed => SocketState::Unconnected,
             TcpState::Listen => SocketState::Listening,
-            TcpState::Established => SocketState::Connected,
+            state if tcp_connection_present(state) => SocketState::Connected,
             _ => SocketState::Unconnected,
         }
     }
@@ -2458,15 +2499,13 @@ impl crate::object::capability::Selectable for TcpSocket {
             let has_data = !recv_buf.is_empty();
             drop(recv_buf);
             let state = self.get_state();
-            ready.read = has_data
-                || state == TcpState::Closed
-                || state == TcpState::TimeWait
-                || state == TcpState::CloseWait;
+            ready.read = has_data || tcp_receive_side_eof(state);
         }
 
         if interest.write {
             let send_buf = self.send_buffer.lock();
-            ready.write = send_buf.len() < MAX_SEND_BUFFER_SIZE;
+            ready.write =
+                tcp_send_side_open(self.get_state()) && send_buf.len() < MAX_SEND_BUFFER_SIZE;
         }
 
         ready
@@ -2868,6 +2907,72 @@ mod tests {
 
         socket.set_state(TcpState::Established);
         assert_eq!(socket.get_state(), TcpState::Established);
+    }
+
+    #[test_case]
+    fn local_write_half_close_keeps_the_receive_side_open() {
+        for state in [
+            TcpState::Established,
+            TcpState::FinWait1,
+            TcpState::FinWait2,
+        ] {
+            assert!(tcp_receive_side_open(state));
+        }
+        assert!(!tcp_send_side_open(TcpState::FinWait1));
+        assert!(!tcp_send_side_open(TcpState::FinWait2));
+        assert!(tcp_connection_present(TcpState::FinWait1));
+        assert!(tcp_connection_present(TcpState::FinWait2));
+    }
+
+    #[test_case]
+    fn peer_write_half_close_keeps_the_send_side_open() {
+        assert!(tcp_receive_side_eof(TcpState::CloseWait));
+        assert!(tcp_send_side_open(TcpState::CloseWait));
+        assert!(tcp_connection_present(TcpState::CloseWait));
+    }
+
+    #[test_case]
+    fn peer_fin_advances_active_close_states() {
+        assert_eq!(
+            state_after_peer_fin(TcpState::Established, false),
+            TcpState::CloseWait
+        );
+        assert_eq!(
+            state_after_peer_fin(TcpState::FinWait1, false),
+            TcpState::Closing
+        );
+        assert_eq!(
+            state_after_peer_fin(TcpState::FinWait1, true),
+            TcpState::TimeWait
+        );
+        assert_eq!(
+            state_after_peer_fin(TcpState::FinWait2, true),
+            TcpState::TimeWait
+        );
+    }
+
+    #[test_case]
+    fn fin_wait_receive_without_data_would_block_instead_of_disconnect() {
+        let tcp_layer = TcpLayer::new();
+        let socket = TcpSocket::new(Arc::downgrade(&tcp_layer));
+        let mut buffer = [0u8; 1];
+
+        socket.set_state(TcpState::FinWait1);
+        assert_eq!(socket.recv_data(&mut buffer), Err(SocketError::WouldBlock));
+        socket.set_state(TcpState::FinWait2);
+        assert_eq!(socket.recv_data(&mut buffer), Err(SocketError::WouldBlock));
+    }
+
+    #[test_case]
+    fn acknowledging_local_fin_advances_to_fin_wait_2() {
+        let tcp_layer = TcpLayer::new();
+        let socket = TcpSocket::new(Arc::downgrade(&tcp_layer));
+
+        socket.set_state(TcpState::FinWait1);
+        socket.send_seq.store(1001, Ordering::SeqCst);
+        socket.handle_close_ack(1001);
+
+        assert_eq!(socket.get_state(), TcpState::FinWait2);
     }
 
     #[test_case]
