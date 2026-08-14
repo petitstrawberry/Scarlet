@@ -2,12 +2,15 @@ use scarlet_os::socket::Socket;
 use std::fs;
 use std::net::{Ipv4Addr, SocketAddrV4, UdpSocket};
 use std::process::ExitCode;
+use std::thread;
+use std::time::Duration;
 
 const SOCKET_PATH: &str = "/tmp/resolverd.sock";
 const RESOLV_CONF: &str = "/etc/resolv.conf";
 const FALLBACK_DNS: Ipv4Addr = Ipv4Addr::new(8, 8, 8, 8);
 const DNS_PORT: u16 = 53;
 const MAX_DNS_PACKET: usize = 512;
+const DNS_TIMEOUT: Duration = Duration::from_secs(5);
 
 fn main() -> ExitCode {
     println!("[resolverd] starting");
@@ -40,8 +43,15 @@ fn main() -> ExitCode {
             }
         };
 
-        if let Err(err) = handle_client(client) {
-            println!("[resolverd] request failed: {err}");
+        let spawn_result = thread::Builder::new()
+            .name(String::from("resolver-request"))
+            .spawn(move || {
+                if let Err(err) = handle_client(client) {
+                    println!("[resolverd] request failed: {err}");
+                }
+            });
+        if let Err(err) = spawn_result {
+            println!("[resolverd] failed to start request worker: {err}");
         }
     }
 }
@@ -103,6 +113,9 @@ fn lookup_a(host: &str) -> Result<Vec<Ipv4Addr>, String> {
     let query = build_query(host)?;
     let socket = UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0))
         .map_err(|err| format!("udp bind failed: {err}"))?;
+    socket
+        .set_read_timeout(Some(DNS_TIMEOUT))
+        .map_err(|err| format!("failed to set DNS timeout: {err}"))?;
     let dns_addr = SocketAddrV4::new(nameserver, DNS_PORT);
 
     socket
