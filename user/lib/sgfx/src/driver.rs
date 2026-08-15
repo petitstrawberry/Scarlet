@@ -361,13 +361,16 @@ impl Image {
 }
 
 /// Maximum canonical vertices accepted in one persistent IR submission.
-pub(crate) const MAX_IR_VERTICES: usize = 1_920;
+// Keep the expanded 40-byte canonical vertex stream below VirGL's 64 KiB
+// opaque command limit after the inline write and draw state are included.
+pub(crate) const MAX_IR_VERTICES: usize = 1_440;
 
 /// Canonical vertex representation shared by portable IR lowering and drivers.
 #[derive(Clone, Copy)]
 pub(crate) struct IrVertex {
     pub(crate) position: [f32; 4],
     pub(crate) secondary: [f32; 4],
+    pub(crate) tertiary: [f32; 2],
 }
 
 /// Backend-neutral rectangle used by the private IR execution plan.
@@ -387,6 +390,9 @@ pub(crate) enum IrFragmentProgram {
     TextureRgba,
     TextureRgbIgnoreAlpha,
     TextureAlphaMask,
+    TextureVertexColorRgba,
+    TextureVertexColorRgbIgnoreAlpha,
+    TextureVertexColorAlphaMask,
 }
 
 /// Portable blend factor carried without backend protocol constants.

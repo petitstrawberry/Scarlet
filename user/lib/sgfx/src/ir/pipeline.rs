@@ -250,6 +250,11 @@ pub enum FragmentProgram {
     VertexColor,
     /// Sample one texture using the specified alpha interpretation.
     Texture(TextureSampleMode),
+    /// Sample one texture and modulate it by interpolated vertex color.
+    ///
+    /// Location `1` supplies the color and location `2` supplies the texture
+    /// coordinates. The draw uniform color is applied after both values.
+    TextureVertexColor(TextureSampleMode),
 }
 
 /// Alpha interpretation for a sampled texture fragment program.
@@ -528,7 +533,8 @@ impl RenderPipelineDesc {
     /// portable vertex conventions are absent. Location `0` is position and
     /// must use `Float32x2`, `Float32x3`, or `Float32x4`. `VertexColor`
     /// requires location `1` as `Float32x3`, `Float32x4`, or `Unorm8x4`; `Texture` requires
-    /// location `1` as `Float32x2` texture coordinates.
+    /// location `1` as `Float32x2` texture coordinates; `TextureVertexColor` requires
+    /// location `1` as color and location `2` as `Float32x2` texture coordinates.
     pub fn new(
         target_format: TextureFormat,
         topology: PrimitiveTopology,
@@ -553,6 +559,11 @@ impl RenderPipelineDesc {
             .iter()
             .find(|attribute| attribute.location() == 1)
             .map(|attribute| attribute.format());
+        let location_two = vertex_buffer
+            .attributes()
+            .iter()
+            .find(|attribute| attribute.location() == 2)
+            .map(|attribute| attribute.format());
         let fragment_attributes_are_valid = match fragment {
             FragmentProgram::Solid => true,
             FragmentProgram::VertexColor => matches!(
@@ -560,6 +571,14 @@ impl RenderPipelineDesc {
                 Some(VertexFormat::Float32x3 | VertexFormat::Float32x4 | VertexFormat::Unorm8x4)
             ),
             FragmentProgram::Texture(_) => matches!(location_one, Some(VertexFormat::Float32x2)),
+            FragmentProgram::TextureVertexColor(_) => {
+                matches!(
+                    location_one,
+                    Some(
+                        VertexFormat::Float32x3 | VertexFormat::Float32x4 | VertexFormat::Unorm8x4
+                    )
+                ) && matches!(location_two, Some(VertexFormat::Float32x2))
+            }
         };
         if !fragment_attributes_are_valid {
             return Err(Error::InvalidDescriptor);

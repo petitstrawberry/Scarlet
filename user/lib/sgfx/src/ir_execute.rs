@@ -396,6 +396,7 @@ struct PipelineInfo {
     stride: u32,
     position: VertexAttribute,
     secondary: Option<VertexAttribute>,
+    tertiary: Option<VertexAttribute>,
 }
 
 impl Queue {
@@ -982,8 +983,8 @@ fn pipeline_info(
     resources: &ResourceTable,
     reference: RenderPipelineRef<'_>,
 ) -> Result<PipelineInfo, IrSubmitError> {
-    let (target, topology, fragment, blend, raster, depth, stride, position, secondary) = resources
-        .with_pipeline(reference, |descriptor| {
+    let (target, topology, fragment, blend, raster, depth, stride, position, secondary, tertiary) =
+        resources.with_pipeline(reference, |descriptor| {
             let layout = descriptor.vertex_buffer();
             let position = layout
                 .attributes()
@@ -995,6 +996,11 @@ fn pipeline_info(
                 .iter()
                 .find(|attribute| attribute.location() == 1)
                 .copied();
+            let tertiary = layout
+                .attributes()
+                .iter()
+                .find(|attribute| attribute.location() == 2)
+                .copied();
             (
                 descriptor.target_format(),
                 descriptor.topology(),
@@ -1005,6 +1011,7 @@ fn pipeline_info(
                 layout.stride(),
                 position,
                 secondary,
+                tertiary,
             )
         })?;
     if target != TextureFormat::Bgra8Unorm {
@@ -1038,6 +1045,15 @@ fn pipeline_info(
             secondary.map(VertexAttribute::format),
             Some(VertexFormat::Float32x2)
         ),
+        FragmentProgram::TextureVertexColor(_) => {
+            matches!(
+                secondary.map(VertexAttribute::format),
+                Some(VertexFormat::Float32x3 | VertexFormat::Float32x4 | VertexFormat::Unorm8x4)
+            ) && matches!(
+                tertiary.map(VertexAttribute::format),
+                Some(VertexFormat::Float32x2)
+            )
+        }
     };
     if !secondary_valid {
         return Err(IrSubmitError::Unsupported(
@@ -1075,6 +1091,7 @@ fn pipeline_info(
         stride,
         position,
         secondary,
+        tertiary,
     })
 }
 
@@ -1089,6 +1106,9 @@ fn texture_binding(
         IrFragmentProgram::TextureRgba
             | IrFragmentProgram::TextureRgbIgnoreAlpha
             | IrFragmentProgram::TextureAlphaMask
+            | IrFragmentProgram::TextureVertexColorRgba
+            | IrFragmentProgram::TextureVertexColorRgbIgnoreAlpha
+            | IrFragmentProgram::TextureVertexColorAlphaMask
     ) {
         return Ok((None, None));
     }
@@ -1099,7 +1119,10 @@ fn texture_binding(
         return Err(IrSubmitError::InvalidIr(ir::Error::InvalidUsage));
     }
     if descriptor.format() == TextureFormat::R8Unorm
-        && !matches!(pipeline.state.fragment, IrFragmentProgram::TextureAlphaMask)
+        && !matches!(
+            pipeline.state.fragment,
+            IrFragmentProgram::TextureAlphaMask | IrFragmentProgram::TextureVertexColorAlphaMask
+        )
     {
         return Err(IrSubmitError::Unsupported(
             UnsupportedIrFeature::FragmentProgram,
@@ -1202,9 +1225,16 @@ fn decode_vertex(
         .ok_or(IrSubmitError::InvalidVertexData)?;
     let position = decode_position(record, pipeline.position)?;
     let secondary = decode_secondary(record, pipeline.secondary, pipeline.state.fragment)?;
+    let tertiary = decode_tertiary(
+        record,
+        pipeline.tertiary,
+        pipeline.secondary,
+        pipeline.state.fragment,
+    )?;
     Ok(IrVertex {
         position,
         secondary,
+        tertiary,
     })
 }
 
@@ -1292,7 +1322,69 @@ fn decode_secondary(
             }
             Ok([uv[0], uv[1], 0.0, 1.0])
         }
+        IrFragmentProgram::TextureVertexColorRgba
+        | IrFragmentProgram::TextureVertexColorRgbIgnoreAlpha
+        | IrFragmentProgram::TextureVertexColorAlphaMask => {
+            let color = match attribute.format() {
+                VertexFormat::Float32x3 => [
+                    read_f32(record, offset)?,
+                    read_f32(record, offset + 4)?,
+                    read_f32(record, offset + 8)?,
+                    1.0,
+                ],
+                VertexFormat::Float32x4 => [
+                    read_f32(record, offset)?,
+                    read_f32(record, offset + 4)?,
+                    read_f32(record, offset + 8)?,
+                    read_f32(record, offset + 12)?,
+                ],
+                VertexFormat::Unorm8x4 => [
+                    read_u8(record, offset)? as f32 / 255.0,
+                    read_u8(record, offset + 1)? as f32 / 255.0,
+                    read_u8(record, offset + 2)? as f32 / 255.0,
+                    read_u8(record, offset + 3)? as f32 / 255.0,
+                ],
+                VertexFormat::Float32x2 => return Err(IrSubmitError::InvalidVertexData),
+            };
+            if !color
+                .iter()
+                .all(|value| value.is_finite() && (0.0..=1.0).contains(value))
+            {
+                return Err(IrSubmitError::InvalidVertexData);
+            }
+            Ok(color)
+        }
     }
+}
+
+fn decode_tertiary(
+    record: &[u8],
+    attribute: Option<VertexAttribute>,
+    texture_attribute: Option<VertexAttribute>,
+    fragment: IrFragmentProgram,
+) -> Result<[f32; 2], IrSubmitError> {
+    let attribute = match fragment {
+        IrFragmentProgram::TextureRgba
+        | IrFragmentProgram::TextureRgbIgnoreAlpha
+        | IrFragmentProgram::TextureAlphaMask => texture_attribute,
+        IrFragmentProgram::TextureVertexColorRgba
+        | IrFragmentProgram::TextureVertexColorRgbIgnoreAlpha
+        | IrFragmentProgram::TextureVertexColorAlphaMask => attribute,
+        IrFragmentProgram::Solid | IrFragmentProgram::VertexColor => None,
+    };
+    let Some(attribute) = attribute else {
+        return Ok([0.0; 2]);
+    };
+    if attribute.format() != VertexFormat::Float32x2 {
+        return Err(IrSubmitError::InvalidVertexData);
+    }
+    let offset =
+        usize::try_from(attribute.offset()).map_err(|_| IrSubmitError::InvalidVertexData)?;
+    let uv = [read_f32(record, offset)?, read_f32(record, offset + 4)?];
+    if !uv.iter().all(|value| value.is_finite()) {
+        return Err(IrSubmitError::InvalidVertexData);
+    }
+    Ok(uv)
 }
 
 fn read_f32(bytes: &[u8], offset: usize) -> Result<f32, IrSubmitError> {
@@ -1434,6 +1526,15 @@ fn fragment_program(fragment: FragmentProgram) -> IrFragmentProgram {
         }
         FragmentProgram::Texture(TextureSampleMode::AlphaMask) => {
             IrFragmentProgram::TextureAlphaMask
+        }
+        FragmentProgram::TextureVertexColor(TextureSampleMode::Rgba) => {
+            IrFragmentProgram::TextureVertexColorRgba
+        }
+        FragmentProgram::TextureVertexColor(TextureSampleMode::RgbIgnoreAlpha) => {
+            IrFragmentProgram::TextureVertexColorRgbIgnoreAlpha
+        }
+        FragmentProgram::TextureVertexColor(TextureSampleMode::AlphaMask) => {
+            IrFragmentProgram::TextureVertexColorAlphaMask
         }
     }
 }

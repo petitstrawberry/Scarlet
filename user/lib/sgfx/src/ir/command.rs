@@ -801,8 +801,10 @@ impl<'encoder, 'r, 'data> RenderPassEncoder<'encoder, 'r, 'data> {
             .resources
             .with_pipeline(pipeline, |descriptor| descriptor.fragment())?;
         self.uniforms.ok_or(Error::UniformsNotSet)?;
-        if matches!(fragment, FragmentProgram::Texture(_))
-            && (self.texture.is_none() || self.sampler.is_none())
+        if matches!(
+            fragment,
+            FragmentProgram::Texture(_) | FragmentProgram::TextureVertexColor(_)
+        ) && (self.texture.is_none() || self.sampler.is_none())
         {
             return Err(Error::TextureBindingNotSet);
         }

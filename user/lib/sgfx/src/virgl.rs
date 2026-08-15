@@ -114,7 +114,7 @@ const PIPE_SWIZZLE_X: u32 = 0;
 const PIPE_SWIZZLE_Y: u32 = 1;
 const PIPE_SWIZZLE_Z: u32 = 2;
 const PIPE_SWIZZLE_W: u32 = 3;
-const IR_VERTEX_BUFFER_BYTES: usize = MAX_IR_VERTICES * 8 * core::mem::size_of::<f32>();
+const IR_VERTEX_BUFFER_BYTES: usize = MAX_IR_VERTICES * 10 * core::mem::size_of::<f32>();
 const IR_TEXTURE_SLOTS: usize = 1_024;
 const IR_SAMPLER_SLOTS: usize = 256;
 const IR_PIPELINE_SLOTS: usize = 256;
@@ -203,6 +203,7 @@ DCL OUT[0], COLOR\n\
 const IR_VERTEX_SHADER: &str = "VERT\n\
 DCL IN[0]\n\
 DCL IN[1]\n\
+DCL IN[2]\n\
 DCL CONST[0..3]\n\
 DCL OUT[0], POSITION\n\
 DCL OUT[1], COLOR\n\
@@ -213,7 +214,7 @@ DCL TEMP[0]\n\
   2: MAD TEMP[0], CONST[2], IN[0].zzzz, TEMP[0]\n\
   3: MAD OUT[0], CONST[3], IN[0].wwww, TEMP[0]\n\
   4: MOV OUT[1], IN[1]\n\
-  5: MOV OUT[2], IN[1]\n\
+  5: MOV OUT[2], IN[2]\n\
   6: END\n";
 
 const IR_SOLID_FRAGMENT_SHADER: &str = "FRAG\n\
@@ -268,6 +269,50 @@ DCL TEMP[0]\n\
   1: MOV OUT[0].xyz, CONST[0].xyzx\n\
   2: MUL OUT[0].w, TEMP[0].wwww, CONST[0].wwww\n\
   3: END\n";
+
+const IR_TEXTURE_VERTEX_COLOR_RGBA_FRAGMENT_SHADER: &str = "FRAG\n\
+PROPERTY FS_COLOR0_WRITES_ALL_CBUFS 1\n\
+DCL IN[0], GENERIC[0], PERSPECTIVE\n\
+DCL IN[1], COLOR, PERSPECTIVE\n\
+DCL CONST[0]\n\
+DCL SAMP[0]\n\
+DCL SVIEW[0], 2D, FLOAT\n\
+DCL OUT[0], COLOR\n\
+DCL TEMP[0]\n\
+  0: TEX TEMP[0], IN[0], SAMP[0], 2D\n\
+  1: MUL TEMP[0], TEMP[0], IN[1]\n\
+  2: MUL OUT[0], TEMP[0], CONST[0]\n\
+  3: END\n";
+
+const IR_TEXTURE_VERTEX_COLOR_RGB_IGNORE_ALPHA_FRAGMENT_SHADER: &str = "FRAG\n\
+PROPERTY FS_COLOR0_WRITES_ALL_CBUFS 1\n\
+DCL IN[0], GENERIC[0], PERSPECTIVE\n\
+DCL IN[1], COLOR, PERSPECTIVE\n\
+DCL CONST[0]\n\
+DCL SAMP[0]\n\
+DCL SVIEW[0], 2D, FLOAT\n\
+DCL OUT[0], COLOR\n\
+DCL TEMP[0]\n\
+  0: TEX TEMP[0], IN[0], SAMP[0], 2D\n\
+  1: MUL TEMP[0].xyz, TEMP[0].xyzx, IN[1].xyzx\n\
+  2: MUL OUT[0].xyz, TEMP[0].xyzx, CONST[0].xyzx\n\
+  3: MOV OUT[0].w, CONST[0].wwww\n\
+  4: END\n";
+
+const IR_TEXTURE_VERTEX_COLOR_ALPHA_MASK_FRAGMENT_SHADER: &str = "FRAG\n\
+PROPERTY FS_COLOR0_WRITES_ALL_CBUFS 1\n\
+DCL IN[0], GENERIC[0], PERSPECTIVE\n\
+DCL IN[1], COLOR, PERSPECTIVE\n\
+DCL CONST[0]\n\
+DCL SAMP[0]\n\
+DCL SVIEW[0], 2D, FLOAT\n\
+DCL OUT[0], COLOR\n\
+DCL TEMP[0]\n\
+  0: TEX TEMP[0], IN[0], SAMP[0], 2D\n\
+  1: MOV OUT[0].xyz, CONST[0].xyzx\n\
+  2: MUL TEMP[0].w, TEMP[0].wwww, IN[1].wwww\n\
+  3: MUL OUT[0].w, TEMP[0].wwww, CONST[0].wwww\n\
+  4: END\n";
 
 pub(crate) struct Device {
     raw: RawGpu,
@@ -624,6 +669,11 @@ impl Context {
             texture_rgba_fragment_shader_handle: self.allocate_object_handle()?,
             texture_rgb_ignore_alpha_fragment_shader_handle: self.allocate_object_handle()?,
             texture_alpha_mask_fragment_shader_handle: self.allocate_object_handle()?,
+            texture_vertex_color_rgba_fragment_shader_handle: self.allocate_object_handle()?,
+            texture_vertex_color_rgb_ignore_alpha_fragment_shader_handle: self
+                .allocate_object_handle()?,
+            texture_vertex_color_alpha_mask_fragment_shader_handle: self
+                .allocate_object_handle()?,
             vertex_elements_handle: self.allocate_object_handle()?,
             initialized: Cell::new(false),
         })
@@ -724,6 +774,9 @@ pub(crate) struct IrResources {
     texture_rgba_fragment_shader_handle: u32,
     texture_rgb_ignore_alpha_fragment_shader_handle: u32,
     texture_alpha_mask_fragment_shader_handle: u32,
+    texture_vertex_color_rgba_fragment_shader_handle: u32,
+    texture_vertex_color_rgb_ignore_alpha_fragment_shader_handle: u32,
+    texture_vertex_color_alpha_mask_fragment_shader_handle: u32,
     vertex_elements_handle: u32,
     initialized: Cell<bool>,
 }
@@ -1785,7 +1838,10 @@ fn validate_ir_draw(
     match draw.pipeline.fragment {
         IrFragmentProgram::TextureRgba
         | IrFragmentProgram::TextureRgbIgnoreAlpha
-        | IrFragmentProgram::TextureAlphaMask => {
+        | IrFragmentProgram::TextureAlphaMask
+        | IrFragmentProgram::TextureVertexColorRgba
+        | IrFragmentProgram::TextureVertexColorRgbIgnoreAlpha
+        | IrFragmentProgram::TextureVertexColorAlphaMask => {
             let Some(texture) = draw.texture else {
                 return Err(HandleError::InvalidParameter);
             };
@@ -2254,9 +2310,27 @@ fn push_ir_setup(commands: &mut Vec<u8>, resources: &IrResources) {
         PIPE_SHADER_FRAGMENT,
         IR_TEXTURE_ALPHA_MASK_FRAGMENT_SHADER,
     );
+    push_shader(
+        commands,
+        resources.texture_vertex_color_rgba_fragment_shader_handle,
+        PIPE_SHADER_FRAGMENT,
+        IR_TEXTURE_VERTEX_COLOR_RGBA_FRAGMENT_SHADER,
+    );
+    push_shader(
+        commands,
+        resources.texture_vertex_color_rgb_ignore_alpha_fragment_shader_handle,
+        PIPE_SHADER_FRAGMENT,
+        IR_TEXTURE_VERTEX_COLOR_RGB_IGNORE_ALPHA_FRAGMENT_SHADER,
+    );
+    push_shader(
+        commands,
+        resources.texture_vertex_color_alpha_mask_fragment_shader_handle,
+        PIPE_SHADER_FRAGMENT,
+        IR_TEXTURE_VERTEX_COLOR_ALPHA_MASK_FRAGMENT_SHADER,
+    );
     push_dword(
         commands,
-        command_header(VIRGL_CCMD_CREATE_OBJECT, VIRGL_OBJECT_VERTEX_ELEMENTS, 9),
+        command_header(VIRGL_CCMD_CREATE_OBJECT, VIRGL_OBJECT_VERTEX_ELEMENTS, 13),
     );
     push_dword(commands, resources.vertex_elements_handle);
     push_dword(commands, 0);
@@ -2267,6 +2341,10 @@ fn push_ir_setup(commands: &mut Vec<u8>, resources: &IrResources) {
     push_dword(commands, 0);
     push_dword(commands, 0);
     push_dword(commands, VIRGL_FORMAT_R32G32B32A32_FLOAT);
+    push_dword(commands, 32);
+    push_dword(commands, 0);
+    push_dword(commands, 0);
+    push_dword(commands, VIRGL_FORMAT_R32G32_FLOAT);
 }
 
 fn push_ir_pipeline(commands: &mut Vec<u8>, pipeline: &IrPipeline) {
@@ -2383,7 +2461,7 @@ fn push_ir_bind_pass_state(
         commands,
         command_header(VIRGL_CCMD_SET_VERTEX_BUFFERS, 0, 3),
     );
-    push_dword(commands, 32);
+    push_dword(commands, 40);
     push_dword(commands, 0);
     push_dword(commands, vertex_resource_id);
     push_viewport(commands, Viewport::new(width, height), orientation);
@@ -2460,12 +2538,12 @@ fn push_ir_inline_write(
 ) -> HandleResult<()> {
     let components = vertices
         .len()
-        .checked_mul(8)
+        .checked_mul(10)
         .ok_or(HandleError::InvalidParameter)?;
     let components = u32::try_from(components).map_err(|_| HandleError::InvalidParameter)?;
     let byte_len = vertices
         .len()
-        .checked_mul(32)
+        .checked_mul(40)
         .and_then(|length| u32::try_from(length).ok())
         .ok_or(HandleError::InvalidParameter)?;
     push_dword(
@@ -2486,6 +2564,9 @@ fn push_ir_inline_write(
         for component in vertex.secondary {
             push_float(commands, component);
         }
+        for component in vertex.tertiary {
+            push_float(commands, component);
+        }
     }
     Ok(())
 }
@@ -2499,6 +2580,15 @@ fn ir_fragment_shader_handle(resources: &IrResources, fragment: IrFragmentProgra
             resources.texture_rgb_ignore_alpha_fragment_shader_handle
         }
         IrFragmentProgram::TextureAlphaMask => resources.texture_alpha_mask_fragment_shader_handle,
+        IrFragmentProgram::TextureVertexColorRgba => {
+            resources.texture_vertex_color_rgba_fragment_shader_handle
+        }
+        IrFragmentProgram::TextureVertexColorRgbIgnoreAlpha => {
+            resources.texture_vertex_color_rgb_ignore_alpha_fragment_shader_handle
+        }
+        IrFragmentProgram::TextureVertexColorAlphaMask => {
+            resources.texture_vertex_color_alpha_mask_fragment_shader_handle
+        }
     }
 }
 
