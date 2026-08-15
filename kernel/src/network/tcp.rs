@@ -93,6 +93,10 @@ pub mod tcp_flags {
 const MAX_SEND_BUFFER_SIZE: usize = 65536; // 64KB
 const MAX_RECV_BUFFER_SIZE: usize = 128 * 1024; // Two advertised receive windows
 const MAX_UNACKED_SEGMENTS: usize = 256; // Limit unacked segment list
+const IPV4_HEADER_SIZE: usize = 20;
+const TCP_HEADER_SIZE: usize = 20;
+const TCP_MAX_SEGMENT_DATA: usize =
+    crate::network::ethernet::ETHERNET_MTU - IPV4_HEADER_SIZE - TCP_HEADER_SIZE;
 const WINDOW_UPDATE_THRESHOLD: u16 = 8192;
 const LOG_TCP_HTTPS: bool = false;
 const MAX_SOCKET_TIMEOUT_MS: usize = i32::MAX as usize;
@@ -310,6 +314,8 @@ pub struct TcpSocket {
     /// Data buffers
     send_buffer: IrqSpinLock<VecDeque<u8>>,
     recv_buffer: IrqSpinLock<VecDeque<u8>>,
+    /// Serializes payload writes so sequence numbers and rollback stay ordered.
+    transmit_lock: IrqSpinLock<()>,
 
     /// Reference to TCP layer
     tcp_layer: Weak<TcpLayer>,
@@ -451,6 +457,7 @@ impl TcpSocket {
             recv_window: AtomicU16::new(65535),
             send_buffer: IrqSpinLock::new(VecDeque::new()),
             recv_buffer: IrqSpinLock::new(VecDeque::new()),
+            transmit_lock: IrqSpinLock::new(()),
             tcp_layer,
             self_weak: weak.clone(),
             pending_accept: IrqSpinLock::new(VecDeque::new()),
@@ -856,7 +863,7 @@ impl TcpSocket {
         syn_ack.seq_number = initial_seq;
         syn_ack.ack_number = next_recv;
         syn_ack.set_flags(tcp_flags::SYN | tcp_flags::ACK);
-        self.send_segment(src_ip, syn_ack, &[], false, false);
+        let _ = self.send_segment(src_ip, syn_ack, &[], false, false);
     }
 
     /// Handle received SYN-ACK (move to ESTABLISHED)
@@ -1262,7 +1269,7 @@ impl TcpSocket {
         // An ACK after retransmission cannot identify which transmission it
         // acknowledges, so Karn's algorithm excludes it from RTT sampling.
         self.timing_rtt.store(0, Ordering::SeqCst);
-        self.send_segment(dest_ip, header, &first_seg.data, false, true);
+        let _ = self.send_segment(dest_ip, header, &first_seg.data, false, true);
 
         let rearm_seq = {
             let mut unacked = self.unacked_segments.lock();
@@ -1295,7 +1302,7 @@ impl TcpSocket {
         header.set_flags(tcp_flags::SYN);
 
         self.set_state(TcpState::SynSent);
-        self.send_segment(dest_ip, header, &[], true, false);
+        let _ = self.send_segment(dest_ip, header, &[], true, false);
     }
 
     /// Send SYN-ACK packet
@@ -1307,7 +1314,7 @@ impl TcpSocket {
         header.ack_number = ack_seq;
         header.set_flags(tcp_flags::SYN | tcp_flags::ACK);
 
-        self.send_segment(dest_ip, header, &[], false, false);
+        let _ = self.send_segment(dest_ip, header, &[], false, false);
         self.set_state(TcpState::SynReceived);
     }
 
@@ -1321,7 +1328,7 @@ impl TcpSocket {
         header.ack_number = ack_seq;
         header.set_flags(tcp_flags::ACK);
 
-        self.send_segment(dest_ip, header, &[], false, false);
+        let _ = self.send_segment(dest_ip, header, &[], false, false);
     }
 
     fn update_recv_window_after_drain(&self, buffered_len: usize) -> bool {
@@ -1363,7 +1370,7 @@ impl TcpSocket {
         header.ack_number = recv_seq;
         header.set_flags(tcp_flags::FIN | tcp_flags::ACK);
 
-        self.send_segment(dest_ip, header, &[], true, false);
+        let _ = self.send_segment(dest_ip, header, &[], true, false);
         if current_state == TcpState::CloseWait {
             self.set_state(TcpState::LastAck);
         } else {
@@ -1384,7 +1391,7 @@ impl TcpSocket {
         header.ack_number = recv_seq;
         header.set_flags(tcp_flags::FIN | tcp_flags::ACK);
 
-        self.send_segment(dest_ip, header, &[], true, false);
+        let _ = self.send_segment(dest_ip, header, &[], true, false);
     }
 
     /// Send TCP segment through IP layer
@@ -1395,7 +1402,7 @@ impl TcpSocket {
         data: &[u8],
         update_seq: bool,
         is_retransmit: bool,
-    ) {
+    ) -> Result<(), SocketError> {
         self.ensure_local_ip();
         let mut local_ip = self
             .local_ip
@@ -1454,7 +1461,7 @@ impl TcpSocket {
             if let Some(tcp_layer) = self.tcp_layer.upgrade() {
                 let _ = tcp_layer.receive_packet(local_ip, dest_ip, &segment);
             }
-            return;
+            return Ok(());
         }
 
         // Create IP context
@@ -1464,43 +1471,80 @@ impl TcpSocket {
         ip_context.set("ip_protocol", &[6]); // TCP protocol
 
         // Send through IP layer
-        if let Some(ip_layer) = get_network_manager().get_layer("ip") {
-            let sent_or_queued = matches!(
-                ip_layer.send(&segment, &ip_context, &[]),
-                Ok(()) | Err(SocketError::WouldBlock)
-            );
-            if sent_or_queued {
-                self.bytes_sent
-                    .fetch_add(segment.len() as u64, Ordering::SeqCst);
+        let ip_layer = get_network_manager()
+            .get_layer("ip")
+            .ok_or(SocketError::NoRoute)?;
+        match ip_layer.send(&segment, &ip_context, &[]) {
+            Ok(()) | Err(SocketError::WouldBlock) => {}
+            Err(err) => return Err(err),
+        }
 
-                if update_seq {
-                    let mut advance = data.len() as u32;
-                    let flags = header.flags();
-                    if (flags & tcp_flags::SYN) != 0 {
-                        advance = advance.wrapping_add(1);
-                    }
-                    if (flags & tcp_flags::FIN) != 0 {
-                        advance = advance.wrapping_add(1);
-                    }
-                    if advance != 0 {
-                        self.send_seq.fetch_add(advance, Ordering::SeqCst);
-                    }
-                }
+        self.bytes_sent
+            .fetch_add(segment.len() as u64, Ordering::SeqCst);
 
-                // Track segment for retransmission (only for new transmissions with data or SYN/FIN)
-                if !is_retransmit {
-                    let flags = header.flags();
-                    let has_data = !data.is_empty();
-                    let is_syn = (flags & tcp_flags::SYN) != 0;
-                    let is_fin = (flags & tcp_flags::FIN) != 0;
-
-                    if has_data || is_syn || is_fin {
-                        let seq = header.seq_number;
-                        self.add_unacked_segment(seq, data.to_vec(), flags);
-                    }
-                }
+        if update_seq {
+            let mut advance = data.len() as u32;
+            let flags = header.flags();
+            if (flags & tcp_flags::SYN) != 0 {
+                advance = advance.wrapping_add(1);
+            }
+            if (flags & tcp_flags::FIN) != 0 {
+                advance = advance.wrapping_add(1);
+            }
+            if advance != 0 {
+                self.send_seq.fetch_add(advance, Ordering::SeqCst);
             }
         }
+
+        // Track segment for retransmission (only for new transmissions with data or SYN/FIN)
+        if !is_retransmit {
+            let flags = header.flags();
+            let has_data = !data.is_empty();
+            let is_syn = (flags & tcp_flags::SYN) != 0;
+            let is_fin = (flags & tcp_flags::FIN) != 0;
+
+            if has_data || is_syn || is_fin {
+                let seq = header.seq_number;
+                self.add_unacked_segment(seq, data.to_vec(), flags);
+            }
+        }
+
+        Ok(())
+    }
+
+    fn send_payload_segments(
+        &self,
+        dest_ip: Ipv4Address,
+        dest_port: u16,
+        data: &[u8],
+    ) -> Result<usize, SocketError> {
+        let local_port = self.local_port.load(Ordering::SeqCst);
+        let mut sent = 0;
+
+        for chunk in data.chunks(TCP_MAX_SEGMENT_DATA) {
+            let mut header = TcpHeader::new(local_port, dest_port);
+            header.seq_number = self.send_seq.load(Ordering::SeqCst);
+            header.ack_number = self.recv_ack.load(Ordering::SeqCst);
+            let is_last = sent + chunk.len() == data.len();
+            header.set_flags(tcp_flags::ACK | if is_last { tcp_flags::PSH } else { 0 });
+
+            match self.send_segment(dest_ip, header, chunk, true, false) {
+                Ok(()) => sent += chunk.len(),
+                Err(err) if sent == 0 => return Err(err),
+                Err(_) => return Ok(sent),
+            }
+        }
+
+        Ok(sent)
+    }
+
+    fn remove_unsent_buffer_tail(&self, unsent: usize) {
+        if unsent == 0 {
+            return;
+        }
+        let mut send_buf = self.send_buffer.lock();
+        let retained = send_buf.len().saturating_sub(unsent);
+        send_buf.truncate(retained);
     }
 
     /// Send data through socket
@@ -1512,6 +1556,9 @@ impl TcpSocket {
         if let Some(len) = self.deliver_loopback_data(data)? {
             return Ok(len);
         }
+        if data.is_empty() {
+            return Ok(0);
+        }
 
         let dest_ip = self
             .remote_ip
@@ -1519,6 +1566,8 @@ impl TcpSocket {
             .clone()
             .ok_or(SocketError::NotConnected)?;
         let dest_port = self.remote_port.load(Ordering::SeqCst);
+
+        let _transmit_guard = self.transmit_lock.lock();
 
         // Check buffer size limit
         let mut send_buf = self.send_buffer.lock();
@@ -1528,24 +1577,15 @@ impl TcpSocket {
         send_buf.extend(data);
         drop(send_buf);
 
-        // Create TCP header
-        let local_port = self.local_port.load(Ordering::SeqCst);
-        let local_ip = self
-            .local_ip
-            .lock()
-            .clone()
-            .unwrap_or(Ipv4Address::new(0, 0, 0, 0));
-
-        let send_seq = self.send_seq.load(Ordering::SeqCst);
-
-        let mut header = TcpHeader::new(local_port, dest_port);
-        header.seq_number = send_seq;
-        header.ack_number = self.recv_ack.load(Ordering::SeqCst);
-        header.set_flags(tcp_flags::ACK | tcp_flags::PSH);
-
-        self.send_segment(dest_ip, header, data, true, false);
-
-        Ok(data.len())
+        let sent = match self.send_payload_segments(dest_ip, dest_port, data) {
+            Ok(sent) => sent,
+            Err(err) => {
+                self.remove_unsent_buffer_tail(data.len());
+                return Err(err);
+            }
+        };
+        self.remove_unsent_buffer_tail(data.len() - sent);
+        Ok(sent)
     }
 
     /// Blocking send - waits for buffer space
@@ -1558,6 +1598,9 @@ impl TcpSocket {
         if !tcp_send_side_open(self.get_state()) {
             return Err(SocketError::NotConnected);
         }
+        if data.is_empty() {
+            return Ok(0);
+        }
 
         let dest_ip = self
             .remote_ip
@@ -1565,13 +1608,6 @@ impl TcpSocket {
             .clone()
             .ok_or(SocketError::NotConnected)?;
         let dest_port = self.remote_port.load(Ordering::SeqCst);
-        let local_port = self.local_port.load(Ordering::SeqCst);
-        let local_ip = self
-            .local_ip
-            .lock()
-            .clone()
-            .unwrap_or(Ipv4Address::new(0, 0, 0, 0));
-
         let nonblocking = !self.blocking_mode.load(Ordering::SeqCst);
 
         loop {
@@ -1603,21 +1639,21 @@ impl TcpSocket {
             }
 
             {
+                let _transmit_guard = self.transmit_lock.lock();
                 let mut send_buf = self.send_buffer.lock();
                 if send_buf.len() + data.len() <= MAX_SEND_BUFFER_SIZE {
                     send_buf.extend(data);
                     drop(send_buf);
 
-                    let send_seq = self.send_seq.load(Ordering::SeqCst);
-
-                    let mut header = TcpHeader::new(local_port, dest_port);
-                    header.seq_number = send_seq;
-                    header.ack_number = self.recv_ack.load(Ordering::SeqCst);
-                    header.set_flags(tcp_flags::ACK | tcp_flags::PSH);
-
-                    self.send_segment(dest_ip, header, data, true, false);
-
-                    return Ok(data.len());
+                    let sent = match self.send_payload_segments(dest_ip, dest_port, data) {
+                        Ok(sent) => sent,
+                        Err(err) => {
+                            self.remove_unsent_buffer_tail(data.len());
+                            return Err(err);
+                        }
+                    };
+                    self.remove_unsent_buffer_tail(data.len() - sent);
+                    return Ok(sent);
                 }
             }
 
@@ -1915,7 +1951,7 @@ impl TcpSocket {
 
         // Do not use an ACK for a retransmitted segment as an RTT sample.
         self.timing_rtt.store(0, Ordering::SeqCst);
-        self.send_segment(retransmit.1, retransmit.2, &retransmit.0.data, false, true);
+        let _ = self.send_segment(retransmit.1, retransmit.2, &retransmit.0.data, false, true);
 
         let rearm_seq = {
             let mut unacked = self.unacked_segments.lock();
@@ -2890,6 +2926,24 @@ mod tests {
         assert_eq!(tcp_flags::RST, 0x04);
         assert_eq!(tcp_flags::ACK, 0x10);
         assert_eq!(tcp_flags::PSH, 0x08);
+    }
+
+    #[test_case]
+    fn tcp_payload_segments_fit_the_ethernet_mtu() {
+        assert_eq!(TCP_MAX_SEGMENT_DATA, 1460);
+        assert_eq!(
+            TCP_MAX_SEGMENT_DATA + TCP_HEADER_SIZE + IPV4_HEADER_SIZE,
+            crate::network::ethernet::ETHERNET_MTU
+        );
+    }
+
+    #[test_case]
+    fn player_api_request_is_split_at_the_tcp_mss() {
+        let chunk_lengths: Vec<usize> = [0u8; 2117]
+            .chunks(TCP_MAX_SEGMENT_DATA)
+            .map(<[u8]>::len)
+            .collect();
+        assert_eq!(chunk_lengths, [1460, 657]);
     }
 
     #[test_case]
