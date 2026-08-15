@@ -1186,10 +1186,8 @@ impl Queue {
             resources.vertex_shader_handle,
             resources.vertex_elements_handle,
         );
-        push_ir_scissor(
-            &mut commands,
-            ir_rect_to_pixel_rect(submission.render_area)?,
-        )?;
+        let pass_scissor = ir_rect_to_pixel_rect(submission.render_area)?;
+        push_ir_scissor(&mut commands, pass_scissor)?;
         let full_area = submission.render_area.x == 0
             && submission.render_area.y == 0
             && submission.render_area.width == target.width
@@ -1225,28 +1223,63 @@ impl Queue {
             resources.vertex_resource_id,
             &submission.vertices,
         )?;
+
+        // VirGL keeps graphics state bound until a later command changes it.
+        // Re-emitting the complete state for every draw used to make a pass
+        // exceed the queue's 64 KiB opaque-command limit even when the vertex
+        // payload itself fit below MAX_IR_VERTICES. Keep a small submission-
+        // local state cache so repeated draws only carry the state that really
+        // changed. The cache is reset for every submission because the setup
+        // commands above establish the state needed by a fresh command stream.
+        let mut bound_blend = None;
+        let mut bound_rasterizer = None;
+        let mut bound_dsa = None;
+        let mut bound_fragment_shader = None;
+        let mut bound_sampler_view = None;
+        let mut bound_sampler_state = None;
+        let mut bound_scissor = Some((
+            pass_scissor.x(),
+            pass_scissor.y(),
+            pass_scissor.width(),
+            pass_scissor.height(),
+        ));
         for draw in &submission.draws {
             let pipeline = resources
                 .pipelines
                 .get(draw.pipeline.slot)
                 .and_then(Option::as_ref)
                 .ok_or(HandleError::InvalidParameter)?;
-            push_bind_object(&mut commands, VIRGL_OBJECT_BLEND, pipeline.blend_handle);
-            push_bind_object(
-                &mut commands,
-                VIRGL_OBJECT_RASTERIZER,
-                pipeline.rasterizer_handle,
-            );
-            if let Some(dsa_handle) = pipeline.dsa_handle {
-                push_bind_object(&mut commands, VIRGL_OBJECT_DSA, dsa_handle);
+            if bound_blend != Some(pipeline.blend_handle) {
+                push_bind_object(&mut commands, VIRGL_OBJECT_BLEND, pipeline.blend_handle);
+                bound_blend = Some(pipeline.blend_handle);
             }
-            push_fragment_shader(
-                &mut commands,
-                ir_fragment_shader_handle(resources, draw.pipeline.fragment),
-            );
+            if bound_rasterizer != Some(pipeline.rasterizer_handle) {
+                push_bind_object(
+                    &mut commands,
+                    VIRGL_OBJECT_RASTERIZER,
+                    pipeline.rasterizer_handle,
+                );
+                bound_rasterizer = Some(pipeline.rasterizer_handle);
+            }
+            if let Some(dsa_handle) = pipeline.dsa_handle {
+                if bound_dsa != Some(dsa_handle) {
+                    push_bind_object(&mut commands, VIRGL_OBJECT_DSA, dsa_handle);
+                    bound_dsa = Some(dsa_handle);
+                }
+            }
+            let fragment_shader = ir_fragment_shader_handle(resources, draw.pipeline.fragment);
+            if bound_fragment_shader != Some(fragment_shader) {
+                push_fragment_shader(&mut commands, fragment_shader);
+                bound_fragment_shader = Some(fragment_shader);
+            }
             push_constant_buffer(&mut commands, PIPE_SHADER_VERTEX, &draw.uniforms.transform)?;
             push_constant_buffer(&mut commands, PIPE_SHADER_FRAGMENT, &draw.uniforms.color)?;
-            push_ir_scissor(&mut commands, ir_rect_to_pixel_rect(draw.scissor)?)?;
+            let scissor = ir_rect_to_pixel_rect(draw.scissor)?;
+            let scissor_key = (scissor.x(), scissor.y(), scissor.width(), scissor.height());
+            if bound_scissor != Some(scissor_key) {
+                push_ir_scissor(&mut commands, scissor)?;
+                bound_scissor = Some(scissor_key);
+            }
             if let (Some(texture_spec), Some(sampler)) = (draw.texture, draw.sampler) {
                 let texture = resources
                     .textures
@@ -1258,8 +1291,15 @@ impl Queue {
                     .get(sampler.slot)
                     .and_then(Option::as_ref)
                     .ok_or(HandleError::InvalidParameter)?;
-                push_sampler_view_binding(&mut commands, texture.sampler_view_handle());
-                push_sampler_state_binding(&mut commands, sampler.handle);
+                let sampler_view = texture.sampler_view_handle();
+                if bound_sampler_view != Some(sampler_view) {
+                    push_sampler_view_binding(&mut commands, sampler_view);
+                    bound_sampler_view = Some(sampler_view);
+                }
+                if bound_sampler_state != Some(sampler.handle) {
+                    push_sampler_state_binding(&mut commands, sampler.handle);
+                    bound_sampler_state = Some(sampler.handle);
+                }
             }
             push_draw(&mut commands, draw.start_vertex, draw.vertex_count)?;
         }
