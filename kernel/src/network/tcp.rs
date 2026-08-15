@@ -95,8 +95,13 @@ const MAX_RECV_BUFFER_SIZE: usize = 128 * 1024; // Two advertised receive window
 const MAX_UNACKED_SEGMENTS: usize = 256; // Limit unacked segment list
 const IPV4_HEADER_SIZE: usize = 20;
 const TCP_HEADER_SIZE: usize = 20;
-const TCP_MAX_SEGMENT_DATA: usize =
+const TCP_LOCAL_MSS: usize =
     crate::network::ethernet::ETHERNET_MTU - IPV4_HEADER_SIZE - TCP_HEADER_SIZE;
+const TCP_IPV4_DEFAULT_MSS: u16 = 536;
+const TCP_OPTION_END: u8 = 0;
+const TCP_OPTION_NOP: u8 = 1;
+const TCP_OPTION_MSS: u8 = 2;
+const TCP_OPTION_MSS_LENGTH: u8 = 4;
 const WINDOW_UPDATE_THRESHOLD: u16 = 8192;
 const LOG_TCP_HTTPS: bool = false;
 const MAX_SOCKET_TIMEOUT_MS: usize = i32::MAX as usize;
@@ -153,10 +158,28 @@ impl TcpHeader {
         ((self.data_offset_flags >> 12) as usize) * 4
     }
 
+    fn set_data_offset(&mut self, header_length: usize) {
+        debug_assert!(header_length >= TCP_HEADER_SIZE);
+        debug_assert!(header_length.is_multiple_of(4));
+        debug_assert!(header_length / 4 <= 0x0f);
+        self.data_offset_flags =
+            (self.data_offset_flags & 0x0fff) | (((header_length / 4) as u16) << 12);
+    }
+
     /// Calculate TCP checksum
     pub fn calculate_checksum(&self, src_ip: [u8; 4], dst_ip: [u8; 4], data: &[u8]) -> u16 {
-        let tcp_len = (self.data_offset() + data.len()) as u16;
-        let mut pseudo = Vec::with_capacity(12 + 20 + data.len());
+        self.calculate_checksum_with_options(src_ip, dst_ip, &[], data)
+    }
+
+    fn calculate_checksum_with_options(
+        &self,
+        src_ip: [u8; 4],
+        dst_ip: [u8; 4],
+        options: &[u8],
+        data: &[u8],
+    ) -> u16 {
+        let tcp_len = (TCP_HEADER_SIZE + options.len() + data.len()) as u16;
+        let mut pseudo = Vec::with_capacity(12 + TCP_HEADER_SIZE + options.len() + data.len());
         pseudo.extend_from_slice(&src_ip);
         pseudo.extend_from_slice(&dst_ip);
         pseudo.push(0);
@@ -166,6 +189,7 @@ impl TcpHeader {
         let mut header = *self;
         header.checksum = 0;
         pseudo.extend_from_slice(&header.to_bytes());
+        pseudo.extend_from_slice(options);
         pseudo.extend_from_slice(data);
 
         let mut sum: u32 = 0;
@@ -218,6 +242,39 @@ impl TcpHeader {
     }
 }
 
+fn tcp_mss_option(mss: u16) -> [u8; TCP_OPTION_MSS_LENGTH as usize] {
+    let [high, low] = mss.to_be_bytes();
+    [TCP_OPTION_MSS, TCP_OPTION_MSS_LENGTH, high, low]
+}
+
+fn parse_tcp_mss_option(options: &[u8]) -> Option<u16> {
+    let mut offset = 0usize;
+    while offset < options.len() {
+        match options[offset] {
+            TCP_OPTION_END => return None,
+            TCP_OPTION_NOP => {
+                offset += 1;
+            }
+            kind => {
+                let length = usize::from(*options.get(offset + 1)?);
+                if length < 2 || offset + length > options.len() {
+                    return None;
+                }
+                if kind == TCP_OPTION_MSS && length == usize::from(TCP_OPTION_MSS_LENGTH) {
+                    let mss = u16::from_be_bytes([options[offset + 2], options[offset + 3]]);
+                    return (mss != 0).then_some(mss);
+                }
+                offset += length;
+            }
+        }
+    }
+    None
+}
+
+fn effective_tcp_mss(peer_mss: u16) -> usize {
+    usize::from(peer_mss).clamp(1, TCP_LOCAL_MSS)
+}
+
 /// Unacknowledged TCP segment for retransmission tracking
 #[derive(Clone)]
 struct UnackedSegment {
@@ -225,6 +282,8 @@ struct UnackedSegment {
     seq: u32,
     /// Data to retransmit
     data: Vec<u8>,
+    /// TCP options that must be repeated when retransmitting this segment.
+    options: Vec<u8>,
     /// Flags (SYN, FIN, PSH, etc.)
     flags: u8,
     /// Transmission count
@@ -310,6 +369,8 @@ pub struct TcpSocket {
     /// Window size
     send_window: AtomicU16,
     recv_window: AtomicU16,
+    /// Maximum TCP payload accepted by the peer for this connection.
+    peer_mss: AtomicU16,
 
     /// Data buffers
     send_buffer: IrqSpinLock<VecDeque<u8>>,
@@ -455,6 +516,7 @@ impl TcpSocket {
             recv_ack: AtomicU32::new(0),
             send_window: AtomicU16::new(65535),
             recv_window: AtomicU16::new(65535),
+            peer_mss: AtomicU16::new(TCP_IPV4_DEFAULT_MSS),
             send_buffer: IrqSpinLock::new(VecDeque::new()),
             recv_buffer: IrqSpinLock::new(VecDeque::new()),
             transmit_lock: IrqSpinLock::new(()),
@@ -728,8 +790,32 @@ impl TcpSocket {
         *self.state.lock() = new_state;
     }
 
+    fn set_peer_mss(&self, advertised_mss: Option<u16>) {
+        self.peer_mss.store(
+            advertised_mss.unwrap_or(TCP_IPV4_DEFAULT_MSS),
+            Ordering::SeqCst,
+        );
+    }
+
+    fn effective_peer_mss(&self) -> usize {
+        effective_tcp_mss(self.peer_mss.load(Ordering::SeqCst))
+    }
+
     /// Process incoming TCP segment
-    pub fn process_segment(&self, src_ip: Ipv4Address, header: TcpHeader, data: &[u8]) {
+    ///
+    /// # Arguments
+    ///
+    /// * `src_ip` - IPv4 source address of the segment.
+    /// * `header` - Parsed fixed TCP header.
+    /// * `data` - TCP application payload after any options.
+    /// * `advertised_mss` - MSS option carried by a SYN, when present.
+    pub fn process_segment(
+        &self,
+        src_ip: Ipv4Address,
+        header: TcpHeader,
+        data: &[u8],
+        advertised_mss: Option<u16>,
+    ) {
         let current_state = self.get_state();
         let src_port = header.src_port;
         let dst_port = header.dst_port;
@@ -781,7 +867,7 @@ impl TcpSocket {
 
                     child.local_port.store(local_port, Ordering::SeqCst);
                     *child.accept_listener.lock() = self.self_weak.clone();
-                    child.handle_syn_received(src_ip, header);
+                    child.handle_syn_received(src_ip, header, advertised_mss);
                     tcp_layer.register_port(local_port, child.self_weak.clone());
                     self.pending_syn.lock().push_back(Arc::clone(&child));
                 }
@@ -791,7 +877,7 @@ impl TcpSocket {
                     == (tcp_flags::SYN | tcp_flags::ACK)
                 {
                     // Received SYN-ACK, move to ESTABLISHED
-                    self.handle_syn_ack_received(src_ip, header);
+                    self.handle_syn_ack_received(src_ip, header, advertised_mss);
                 } else if header.flags() & tcp_flags::RST != 0 {
                     // Received RST, abort connection
                     self.handle_rst();
@@ -842,7 +928,12 @@ impl TcpSocket {
     }
 
     /// Handle incoming SYN (SYN-RECEIVED state)
-    fn handle_syn_received(&self, src_ip: Ipv4Address, header: TcpHeader) {
+    fn handle_syn_received(
+        &self,
+        src_ip: Ipv4Address,
+        header: TcpHeader,
+        advertised_mss: Option<u16>,
+    ) {
         // Store remote address
         *self.remote_ip.lock() = Some(src_ip);
         self.remote_port.store(header.src_port, Ordering::SeqCst);
@@ -854,6 +945,7 @@ impl TcpSocket {
             .store(initial_seq.wrapping_add(1), Ordering::SeqCst);
         self.recv_seq.store(next_recv, Ordering::SeqCst);
         self.recv_ack.store(next_recv, Ordering::SeqCst);
+        self.set_peer_mss(advertised_mss);
         self.set_state(TcpState::SynReceived);
 
         // Send SYN-ACK
@@ -863,17 +955,24 @@ impl TcpSocket {
         syn_ack.seq_number = initial_seq;
         syn_ack.ack_number = next_recv;
         syn_ack.set_flags(tcp_flags::SYN | tcp_flags::ACK);
-        let _ = self.send_segment(src_ip, syn_ack, &[], false, false);
+        let options = tcp_mss_option(TCP_LOCAL_MSS as u16);
+        let _ = self.send_segment_with_options(src_ip, syn_ack, &options, &[], false, false);
     }
 
     /// Handle received SYN-ACK (move to ESTABLISHED)
-    fn handle_syn_ack_received(&self, src_ip: Ipv4Address, header: TcpHeader) {
+    fn handle_syn_ack_received(
+        &self,
+        src_ip: Ipv4Address,
+        header: TcpHeader,
+        advertised_mss: Option<u16>,
+    ) {
         *self.remote_ip.lock() = Some(src_ip);
         self.remote_port.store(header.src_port, Ordering::SeqCst);
 
         let next_recv = header.seq_number.wrapping_add(1);
         self.recv_seq.store(next_recv, Ordering::SeqCst);
         self.recv_ack.store(next_recv, Ordering::SeqCst);
+        self.set_peer_mss(advertised_mss);
 
         // Advance our sequence number past the SYN we sent
         let acked = header.ack_number;
@@ -916,6 +1015,7 @@ impl TcpSocket {
         // Reset window sizes
         self.send_window.store(65535, Ordering::SeqCst);
         self.recv_window.store(65535, Ordering::SeqCst);
+        self.peer_mss.store(TCP_IPV4_DEFAULT_MSS, Ordering::SeqCst);
 
         // Reset RTO state
         self.srtt_ns.store(0, Ordering::SeqCst);
@@ -1269,7 +1369,14 @@ impl TcpSocket {
         // An ACK after retransmission cannot identify which transmission it
         // acknowledges, so Karn's algorithm excludes it from RTT sampling.
         self.timing_rtt.store(0, Ordering::SeqCst);
-        let _ = self.send_segment(dest_ip, header, &first_seg.data, false, true);
+        let _ = self.send_segment_with_options(
+            dest_ip,
+            header,
+            &first_seg.options,
+            &first_seg.data,
+            false,
+            true,
+        );
 
         let rearm_seq = {
             let mut unacked = self.unacked_segments.lock();
@@ -1302,7 +1409,8 @@ impl TcpSocket {
         header.set_flags(tcp_flags::SYN);
 
         self.set_state(TcpState::SynSent);
-        let _ = self.send_segment(dest_ip, header, &[], true, false);
+        let options = tcp_mss_option(TCP_LOCAL_MSS as u16);
+        let _ = self.send_segment_with_options(dest_ip, header, &options, &[], true, false);
     }
 
     /// Send SYN-ACK packet
@@ -1314,7 +1422,8 @@ impl TcpSocket {
         header.ack_number = ack_seq;
         header.set_flags(tcp_flags::SYN | tcp_flags::ACK);
 
-        let _ = self.send_segment(dest_ip, header, &[], false, false);
+        let options = tcp_mss_option(TCP_LOCAL_MSS as u16);
+        let _ = self.send_segment_with_options(dest_ip, header, &options, &[], false, false);
         self.set_state(TcpState::SynReceived);
     }
 
@@ -1398,11 +1507,26 @@ impl TcpSocket {
     fn send_segment(
         &self,
         dest_ip: Ipv4Address,
-        mut header: TcpHeader,
+        header: TcpHeader,
         data: &[u8],
         update_seq: bool,
         is_retransmit: bool,
     ) -> Result<(), SocketError> {
+        self.send_segment_with_options(dest_ip, header, &[], data, update_seq, is_retransmit)
+    }
+
+    fn send_segment_with_options(
+        &self,
+        dest_ip: Ipv4Address,
+        mut header: TcpHeader,
+        options: &[u8],
+        data: &[u8],
+        update_seq: bool,
+        is_retransmit: bool,
+    ) -> Result<(), SocketError> {
+        if !options.len().is_multiple_of(4) || TCP_HEADER_SIZE + options.len() > 60 {
+            return Err(SocketError::InvalidArgument);
+        }
         self.ensure_local_ip();
         let mut local_ip = self
             .local_ip
@@ -1414,11 +1538,13 @@ impl TcpSocket {
             *self.local_ip.lock() = Some(local_ip);
         }
 
+        header.set_data_offset(TCP_HEADER_SIZE + options.len());
         let total_len = header.data_offset() + data.len();
         header.window_size = self.recv_window.load(Ordering::SeqCst);
 
         // Calculate checksum
-        header.checksum = header.calculate_checksum(local_ip.0, dest_ip.0, data);
+        header.checksum =
+            header.calculate_checksum_with_options(local_ip.0, dest_ip.0, options, data);
 
         // Serialize header
         let header_bytes = header.to_bytes();
@@ -1426,6 +1552,7 @@ impl TcpSocket {
         // Combine header and data
         let mut segment = Vec::with_capacity(total_len);
         segment.extend_from_slice(&header_bytes);
+        segment.extend_from_slice(options);
         segment.extend_from_slice(data);
 
         if dest_ip.0[0] == 127 {
@@ -1454,7 +1581,7 @@ impl TcpSocket {
 
                 if has_data || is_syn || is_fin {
                     let seq = header.seq_number;
-                    self.add_unacked_segment(seq, data.to_vec(), flags);
+                    self.add_unacked_segment(seq, options.to_vec(), data.to_vec(), flags);
                 }
             }
 
@@ -1505,7 +1632,7 @@ impl TcpSocket {
 
             if has_data || is_syn || is_fin {
                 let seq = header.seq_number;
-                self.add_unacked_segment(seq, data.to_vec(), flags);
+                self.add_unacked_segment(seq, options.to_vec(), data.to_vec(), flags);
             }
         }
 
@@ -1520,8 +1647,9 @@ impl TcpSocket {
     ) -> Result<usize, SocketError> {
         let local_port = self.local_port.load(Ordering::SeqCst);
         let mut sent = 0;
+        let peer_mss = self.effective_peer_mss();
 
-        for chunk in data.chunks(TCP_MAX_SEGMENT_DATA) {
+        for chunk in data.chunks(peer_mss) {
             let mut header = TcpHeader::new(local_port, dest_port);
             header.seq_number = self.send_seq.load(Ordering::SeqCst);
             header.ack_number = self.recv_ack.load(Ordering::SeqCst);
@@ -1951,7 +2079,14 @@ impl TcpSocket {
 
         // Do not use an ACK for a retransmitted segment as an RTT sample.
         self.timing_rtt.store(0, Ordering::SeqCst);
-        let _ = self.send_segment(retransmit.1, retransmit.2, &retransmit.0.data, false, true);
+        let _ = self.send_segment_with_options(
+            retransmit.1,
+            retransmit.2,
+            &retransmit.0.options,
+            &retransmit.0.data,
+            false,
+            true,
+        );
 
         let rearm_seq = {
             let mut unacked = self.unacked_segments.lock();
@@ -2029,7 +2164,7 @@ impl TcpSocket {
     }
 
     /// Add segment to unacked list and schedule retransmission
-    fn add_unacked_segment(&self, seq: u32, data: Vec<u8>, flags: u8) {
+    fn add_unacked_segment(&self, seq: u32, options: Vec<u8>, data: Vec<u8>, flags: u8) {
         // Check unacked segment limit to prevent memory exhaustion
         let mut unacked = self.unacked_segments.lock();
         let previous_head = unacked.front().map(|segment| segment.seq);
@@ -2041,6 +2176,7 @@ impl TcpSocket {
         let segment = UnackedSegment {
             seq,
             data,
+            options,
             flags,
             tx_count: 1,
             last_tx_time: crate::timer::get_time_ns(),
@@ -2798,8 +2934,21 @@ impl TcpLayer {
         None
     }
 
-    /// Process incoming TCP segment
-    pub fn receive_segment(&self, src_ip: Ipv4Address, header: TcpHeader, data: &[u8]) {
+    /// Process an incoming TCP segment.
+    ///
+    /// # Arguments
+    ///
+    /// * `src_ip` - IPv4 source address of the segment.
+    /// * `header` - Parsed fixed TCP header.
+    /// * `data` - TCP application payload after any options.
+    /// * `advertised_mss` - MSS option carried by a SYN, when present.
+    pub fn receive_segment(
+        &self,
+        src_ip: Ipv4Address,
+        header: TcpHeader,
+        data: &[u8],
+        advertised_mss: Option<u16>,
+    ) {
         let mut stats = self.stats.write();
         stats.packets_received += 1;
         stats.bytes_received += (header.data_offset() + data.len()) as u64;
@@ -2808,7 +2957,7 @@ impl TcpLayer {
         let dst_port = unsafe { core::ptr::addr_of!(header.dst_port).read_unaligned() };
 
         if let Some(socket) = self.find_socket(dst_port, src_ip, src_port) {
-            socket.process_segment(src_ip, header, data);
+            socket.process_segment(src_ip, header, data, advertised_mss);
         } else if should_log_tcp_https(src_port, dst_port) {
             let seq = header.seq_number;
             let ack = header.ack_number;
@@ -2895,9 +3044,14 @@ impl TcpLayer {
             return Err(SocketError::InvalidPacket);
         }
 
+        let advertised_mss = if header.flags() & tcp_flags::SYN != 0 {
+            parse_tcp_mss_option(&packet[TCP_HEADER_SIZE..data_offset])
+        } else {
+            None
+        };
         let data = &packet[data_offset..];
 
-        self.receive_segment(src_ip, header, data);
+        self.receive_segment(src_ip, header, data, advertised_mss);
 
         Ok(())
     }
@@ -2930,20 +3084,66 @@ mod tests {
 
     #[test_case]
     fn tcp_payload_segments_fit_the_ethernet_mtu() {
-        assert_eq!(TCP_MAX_SEGMENT_DATA, 1460);
+        assert_eq!(TCP_LOCAL_MSS, 1460);
         assert_eq!(
-            TCP_MAX_SEGMENT_DATA + TCP_HEADER_SIZE + IPV4_HEADER_SIZE,
+            TCP_LOCAL_MSS + TCP_HEADER_SIZE + IPV4_HEADER_SIZE,
             crate::network::ethernet::ETHERNET_MTU
         );
     }
 
     #[test_case]
-    fn player_api_request_is_split_at_the_tcp_mss() {
+    fn player_api_request_uses_the_negotiated_tcp_mss() {
         let chunk_lengths: Vec<usize> = [0u8; 2117]
-            .chunks(TCP_MAX_SEGMENT_DATA)
+            .chunks(effective_tcp_mss(1400))
             .map(<[u8]>::len)
             .collect();
-        assert_eq!(chunk_lengths, [1460, 657]);
+        assert_eq!(chunk_lengths, [1400, 717]);
+    }
+
+    #[test_case]
+    fn tcp_mss_option_round_trips_with_other_options() {
+        let mss = tcp_mss_option(1400);
+        assert_eq!(mss, [TCP_OPTION_MSS, TCP_OPTION_MSS_LENGTH, 0x05, 0x78]);
+        assert_eq!(parse_tcp_mss_option(&mss), Some(1400));
+        assert_eq!(
+            parse_tcp_mss_option(&[TCP_OPTION_NOP, TCP_OPTION_NOP, 2, 4, 0x05, 0x78, 0, 0]),
+            Some(1400)
+        );
+    }
+
+    #[test_case]
+    fn malformed_or_zero_tcp_mss_options_are_ignored() {
+        assert_eq!(parse_tcp_mss_option(&[TCP_OPTION_MSS, 3, 0x05]), None);
+        assert_eq!(
+            parse_tcp_mss_option(&[TCP_OPTION_MSS, TCP_OPTION_MSS_LENGTH, 0, 0]),
+            None
+        );
+    }
+
+    #[test_case]
+    fn tcp_mss_option_is_part_of_the_header_and_checksum() {
+        let local_ip = [192, 0, 2, 1];
+        let remote_ip = [192, 0, 2, 2];
+        let options = tcp_mss_option(1400);
+        let mut header = TcpHeader::new(49152, 443);
+        header.seq_number = 1000;
+        header.set_flags(tcp_flags::SYN);
+        header.set_data_offset(TCP_HEADER_SIZE + options.len());
+        header.checksum =
+            header.calculate_checksum_with_options(local_ip, remote_ip, &options, &[]);
+
+        // SAFETY: `header.checksum` is initialized and `read_unaligned` handles the packed field.
+        let checksum = unsafe { core::ptr::addr_of!(header.checksum).read_unaligned() };
+        assert_eq!(header.data_offset(), 24);
+        assert_ne!(checksum, 0);
+        assert_eq!(parse_tcp_mss_option(&options), Some(1400));
+    }
+
+    #[test_case]
+    fn absent_and_oversized_peer_mss_values_are_bounded() {
+        assert_eq!(effective_tcp_mss(TCP_IPV4_DEFAULT_MSS), 536);
+        assert_eq!(effective_tcp_mss(1400), 1400);
+        assert_eq!(effective_tcp_mss(u16::MAX), TCP_LOCAL_MSS);
     }
 
     #[test_case]
