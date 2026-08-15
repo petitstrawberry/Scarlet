@@ -5304,21 +5304,6 @@ impl XhciController {
         }
     }
 
-    fn disable_primary_interrupter(&self) {
-        // IMAN.IP is W1C. Leave it zero so the worker can still observe and
-        // acknowledge the pending cause after this bounded hard-IRQ step has
-        // synchronously lowered the level-triggered INTx signal.
-        unsafe {
-            write_volatile(
-                (self.regs.runtime_base + registers::runtime::IR0_IMAN) as *mut u32,
-                iman_write_value(false, false),
-            );
-        }
-        // Flush a potentially posted MMIO write before the interrupt core EOIs
-        // the level-triggered controller delivery.
-        let _ = self.read_runtime_u32(registers::runtime::IR0_IMAN);
-    }
-
     fn acknowledge_interrupt_status(&self, pending: u32) {
         self.operational.write_usbsts(pending);
     }
@@ -6189,6 +6174,15 @@ impl InterruptCapableDevice for XhciController {
     }
 
     fn claim_interrupt(&self) -> crate::interrupt::InterruptResult<InterruptClaim> {
+        // Deferred xHCI delivery is owned by the interrupt core: it masks the
+        // external line, completes controller EOI, and only then hands a token
+        // to the worker. Keep this hard-IRQ path free of xHCI MMIO so platform
+        // controllers do not inherit PCI INTx acknowledgement assumptions.
+        if self.deferred_interrupt_mode.load(Ordering::Acquire) {
+            crate::breadcrumb::drop(crate::breadcrumb::XHCI_IRQ_DONE, self.mmio_base as u64, 0);
+            return Ok(InterruptClaim::Deferred);
+        }
+
         let status = self.operational.read_usbsts();
         let pending = status & (USBSTS_EVENT_INTERRUPT | USBSTS_PORT_CHANGE_DETECT);
         crate::breadcrumb::drop(
@@ -6201,28 +6195,19 @@ impl InterruptCapableDevice for XhciController {
         }
 
         let port_change = (pending & USBSTS_PORT_CHANGE_DETECT) != 0;
-        // INTx is level-triggered. Disable delivery before the core EOIs the
-        // GIC interrupt, but preserve IMAN.IP and USBSTS for the worker. This
-        // lowers the device line without losing the cause that must be drained.
-        self.disable_primary_interrupter();
+        self.mask_primary_interrupter();
+        self.acknowledge_interrupt_status(pending);
+        crate::breadcrumb::drop(
+            crate::breadcrumb::XHCI_IRQ_ACK_DONE,
+            self.mmio_base as u64,
+            pending as u64,
+        );
         if port_change {
-            self.port_change_pending.store(true, Ordering::Release);
             crate::breadcrumb::drop(
                 crate::breadcrumb::XHCI_IRQ_PORT,
                 self.mmio_base as u64,
                 status as u64,
             );
-        }
-
-        if self.deferred_interrupt_mode.load(Ordering::Acquire) {
-            self.deferred_interrupt_cause_seen
-                .store(true, Ordering::Release);
-            crate::breadcrumb::drop(
-                crate::breadcrumb::XHCI_IRQ_DONE,
-                self.mmio_base as u64,
-                pending as u64,
-            );
-            return Ok(InterruptClaim::Deferred);
         }
 
         self.queue_interrupt_work(port_change);
