@@ -1224,16 +1224,13 @@ impl Queue {
             &submission.vertices,
         )?;
 
-        // VirGL keeps graphics state bound until a later command changes it.
         // Re-emitting the complete state for every draw used to make a pass
         // exceed the queue's 64 KiB opaque-command limit even when the vertex
-        // payload itself fit below MAX_IR_VERTICES. Keep a small submission-
-        // local state cache so repeated draws only carry the state that really
-        // changed. The cache is reset for every submission because the setup
-        // commands above establish the state needed by a fresh command stream.
+        // payload itself fit below MAX_IR_VERTICES. Cache state that is purely
+        // binding data, but reassert rasterizer and DSA state for every draw:
+        // these affect face visibility and depth writes and must not be allowed
+        // to leak across the backend's draw setup.
         let mut bound_blend = None;
-        let mut bound_rasterizer = None;
-        let mut bound_dsa = None;
         let mut bound_fragment_shader = None;
         let mut bound_sampler_view = None;
         let mut bound_sampler_state = None;
@@ -1253,19 +1250,13 @@ impl Queue {
                 push_bind_object(&mut commands, VIRGL_OBJECT_BLEND, pipeline.blend_handle);
                 bound_blend = Some(pipeline.blend_handle);
             }
-            if bound_rasterizer != Some(pipeline.rasterizer_handle) {
-                push_bind_object(
-                    &mut commands,
-                    VIRGL_OBJECT_RASTERIZER,
-                    pipeline.rasterizer_handle,
-                );
-                bound_rasterizer = Some(pipeline.rasterizer_handle);
-            }
+            push_bind_object(
+                &mut commands,
+                VIRGL_OBJECT_RASTERIZER,
+                pipeline.rasterizer_handle,
+            );
             if let Some(dsa_handle) = pipeline.dsa_handle {
-                if bound_dsa != Some(dsa_handle) {
-                    push_bind_object(&mut commands, VIRGL_OBJECT_DSA, dsa_handle);
-                    bound_dsa = Some(dsa_handle);
-                }
+                push_bind_object(&mut commands, VIRGL_OBJECT_DSA, dsa_handle);
             }
             let fragment_shader = ir_fragment_shader_handle(resources, draw.pipeline.fragment);
             if bound_fragment_shader != Some(fragment_shader) {
