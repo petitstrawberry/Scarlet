@@ -4868,8 +4868,26 @@ impl XhciController {
             if successful {
                 device.handle_transmit_complete(frame_len);
             } else if Self::transfer_successful(event) {
+                println!(
+                    "[xHCI] Short CDC-NCM bulk OUT: slot={} dci={} code={} len={} residual={} trb={:#x}",
+                    slot_id,
+                    endpoint_id,
+                    event.completion_code(),
+                    transfer_len,
+                    event.transfer_length(),
+                    event.trb_pointer()
+                );
                 device.handle_transmit_error("Short CDC-NCM bulk OUT transfer");
             } else {
+                println!(
+                    "[xHCI] Failed CDC-NCM bulk OUT: slot={} dci={} code={} len={} residual={} trb={:#x}",
+                    slot_id,
+                    endpoint_id,
+                    event.completion_code(),
+                    transfer_len,
+                    event.transfer_length(),
+                    event.trb_pointer()
+                );
                 device.handle_transmit_error("xHCI CDC-NCM bulk OUT transfer failed");
             }
             if XHCI_VERBOSE_TRACE {
