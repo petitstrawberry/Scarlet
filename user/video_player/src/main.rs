@@ -1952,7 +1952,7 @@ fn decode_loop_hardware_streaming_mp4(
         }
         append_growing_file(path, &mut data)?;
         let complete = complete_path.map(marker_exists).unwrap_or(false);
-        let source = match load_mp4_video_source_with_options(&data, false, true) {
+        let source = match load_mp4_video_source_with_options(&data, true, true) {
             Ok(source) => source,
             Err(err) if complete => return Err(err),
             Err(_) => {
@@ -2186,7 +2186,7 @@ fn decode_loop_hardware_streaming_mp4(
         queue.clear();
     }
     if controls.is_loop_enabled() {
-        let source = load_mp4_video_source_with_options(&data, false, true)?;
+        let source = load_mp4_video_source_with_options(&data, true, true)?;
         if source
             .access_units
             .iter()
@@ -2229,7 +2229,7 @@ fn decode_loop_hardware_streaming_mp4(
             clock.reset_for_replay();
         }
         queue.clear();
-        let source = load_mp4_video_source_with_options(&data, false, true)?;
+        let source = load_mp4_video_source_with_options(&data, true, true)?;
         if source
             .access_units
             .iter()
@@ -2270,7 +2270,7 @@ fn decode_loop_hardware_streaming_mp4_socket(
     let mut reorder = FrameReorderBuffer::new(u32::MAX);
     let mut access_unit_scratch = Vec::new();
     let mut decoded = 0usize;
-    let mut complete = false;
+    let mut complete: bool;
     let mut announced = false;
     let mut last_log_len = 0usize;
     let mut last_log_samples = 0usize;
@@ -2286,17 +2286,17 @@ fn decode_loop_hardware_streaming_mp4_socket(
             return Ok(());
         }
         {
-            let state = socket_state.lock();
+            let mut state = socket_state.lock();
             if let Some(error) = state.error.as_ref() {
                 return Err(error.clone());
             }
-            if state.data.len() != data.len() || state.complete != complete {
-                data = state.data.clone();
-                complete = state.complete;
+            if !state.pending.is_empty() {
+                data.append(&mut state.pending);
             }
+            complete = state.complete;
         }
 
-        let source = match load_mp4_video_source_with_options(&data, false, true) {
+        let source = match load_mp4_video_source_with_options(&data, true, true) {
             Ok(source) => source,
             Err(err) if complete => return Err(err),
             Err(_) => {
@@ -2530,7 +2530,7 @@ fn decode_loop_hardware_streaming_mp4_socket(
         queue.clear();
     }
     if controls.is_loop_enabled() {
-        let source = load_mp4_video_source_with_options(&data, false, true)?;
+        let source = load_mp4_video_source_with_options(&data, true, true)?;
         if source
             .access_units
             .iter()
@@ -2573,7 +2573,7 @@ fn decode_loop_hardware_streaming_mp4_socket(
             clock.reset_for_replay();
         }
         queue.clear();
-        let source = load_mp4_video_source_with_options(&data, false, true)?;
+        let source = load_mp4_video_source_with_options(&data, true, true)?;
         if source
             .access_units
             .iter()
@@ -2904,6 +2904,16 @@ fn consume_seek_request(controls: &ControlsOverlay, seek_epoch: &mut u32) -> Opt
 
 enum VideoAccessUnitPayload {
     Owned(Vec<u8>),
+    Mp4H264Sample {
+        offset: usize,
+        size: usize,
+        config: Arc<AvcConfig>,
+    },
+    Mp4HevcSample {
+        offset: usize,
+        size: usize,
+        config: Arc<HvccConfig>,
+    },
     Mp4Av1Sample {
         offset: usize,
         size: usize,
@@ -2923,6 +2933,38 @@ impl VideoAccessUnit {
     ) -> Result<&'a [u8], String> {
         match &self.payload {
             VideoAccessUnitPayload::Owned(bytes) => Ok(bytes),
+            VideoAccessUnitPayload::Mp4H264Sample {
+                offset,
+                size,
+                config,
+            } => {
+                let data =
+                    mp4_data.ok_or_else(|| String::from("MP4 backing data is unavailable"))?;
+                let end = offset
+                    .checked_add(*size)
+                    .ok_or_else(|| String::from("MP4 H.264 sample offset overflow"))?;
+                let sample = data
+                    .get(*offset..end)
+                    .ok_or_else(|| String::from("MP4 H.264 sample points outside file"))?;
+                avc_sample_to_annex_b_into(config, sample, scratch)?;
+                Ok(scratch)
+            }
+            VideoAccessUnitPayload::Mp4HevcSample {
+                offset,
+                size,
+                config,
+            } => {
+                let data =
+                    mp4_data.ok_or_else(|| String::from("MP4 backing data is unavailable"))?;
+                let end = offset
+                    .checked_add(*size)
+                    .ok_or_else(|| String::from("MP4 HEVC sample offset overflow"))?;
+                let sample = data
+                    .get(*offset..end)
+                    .ok_or_else(|| String::from("MP4 HEVC sample points outside file"))?;
+                hevc_sample_to_annex_b_into(config, sample, scratch)?;
+                Ok(scratch)
+            }
             VideoAccessUnitPayload::Mp4Av1Sample {
                 offset,
                 size,
@@ -3766,6 +3808,8 @@ fn load_mp4_video_source_with_options(
         return Err(String::from("MP4 has no supported video codec"));
     };
     let sample_layout = mp4_sample_layout(data, &track)?;
+    let shared_avcc = track.avcc.as_ref().cloned().map(Arc::new);
+    let shared_hvcc = track.hvcc.as_ref().cloned().map(Arc::new);
 
     let mut access_units = Vec::new();
     for (index, media_sample) in sample_layout.samples.iter().enumerate() {
@@ -3782,24 +3826,34 @@ fn load_mp4_video_source_with_options(
         };
         let (payload, codec) = match video_format {
             VideoContainerFormat::Mp4H264 => {
-                let avcc = track
-                    .avcc
+                let avcc = shared_avcc
                     .as_ref()
                     .ok_or_else(|| String::from("MP4 H.264 track has no avcC configuration"))?;
-                (
-                    VideoAccessUnitPayload::Owned(avc_sample_to_annex_b(avcc, sample)?),
-                    VideoCodec::H264,
-                )
+                let payload = if can_reference_mp4_data {
+                    VideoAccessUnitPayload::Mp4H264Sample {
+                        offset,
+                        size,
+                        config: avcc.clone(),
+                    }
+                } else {
+                    VideoAccessUnitPayload::Owned(avc_sample_to_annex_b(avcc, sample)?)
+                };
+                (payload, VideoCodec::H264)
             }
             VideoContainerFormat::Mp4Hevc => {
-                let hvcc = track
-                    .hvcc
+                let hvcc = shared_hvcc
                     .as_ref()
                     .ok_or_else(|| String::from("MP4 HEVC track has no hvcC configuration"))?;
-                (
-                    VideoAccessUnitPayload::Owned(hevc_sample_to_annex_b(hvcc, sample)?),
-                    VideoCodec::Hevc,
-                )
+                let payload = if can_reference_mp4_data {
+                    VideoAccessUnitPayload::Mp4HevcSample {
+                        offset,
+                        size,
+                        config: hvcc.clone(),
+                    }
+                } else {
+                    VideoAccessUnitPayload::Owned(hevc_sample_to_annex_b(hvcc, sample)?)
+                };
+                (payload, VideoCodec::Hevc)
             }
             VideoContainerFormat::Mp4Av1 => {
                 let av1 = track
@@ -3827,18 +3881,24 @@ fn load_mp4_video_source_with_options(
         };
         // H.264/HEVC stateless seek must restart at an independently
         // decodable access unit. MP4 `stss` may describe a recovery point that
-        // is not an IDR/IRAP picture, so validate the converted payload once
-        // while building the source index. Other codecs continue to use their
-        // container sync-sample metadata.
-        let is_keyframe = match (&payload, codec) {
-            (VideoAccessUnitPayload::Owned(bytes), VideoCodec::H264) => {
-                h264_access_unit_is_keyframe(bytes)
-            }
-            (VideoAccessUnitPayload::Owned(bytes), VideoCodec::Hevc) => {
-                hevc_access_unit_is_keyframe(bytes)
-            }
-            (_, _) if track.sync_samples.is_empty() => index == 0,
-            (_, _) => track
+        // is not an IDR/IRAP picture, so inspect the length-prefixed sample
+        // once while building the source index. Other codecs continue to use
+        // their container sync-sample metadata.
+        let is_keyframe = match codec {
+            VideoCodec::H264 => avc_sample_is_keyframe(
+                shared_avcc
+                    .as_ref()
+                    .ok_or_else(|| String::from("MP4 H.264 track has no avcC configuration"))?,
+                sample,
+            )?,
+            VideoCodec::Hevc => hevc_sample_is_keyframe(
+                shared_hvcc
+                    .as_ref()
+                    .ok_or_else(|| String::from("MP4 HEVC track has no hvcC configuration"))?,
+                sample,
+            )?,
+            _ if track.sync_samples.is_empty() => index == 0,
+            _ => track
                 .sync_samples
                 .binary_search(&((index + 1).min(u32::MAX as usize) as u32))
                 .is_ok(),
@@ -5276,8 +5336,18 @@ fn mp4_display_timing(track: &Mp4Track) -> Result<(Vec<usize>, Vec<u64>), String
 
 fn avc_sample_to_annex_b(config: &AvcConfig, sample: &[u8]) -> Result<Vec<u8>, String> {
     let mut out = Vec::new();
+    avc_sample_to_annex_b_into(config, sample, &mut out)?;
+    Ok(out)
+}
+
+fn avc_sample_to_annex_b_into(
+    config: &AvcConfig,
+    sample: &[u8],
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
+    out.clear();
     for parameter_set in &config.parameter_sets {
-        append_annex_b_nal(&mut out, parameter_set);
+        append_annex_b_nal(out, parameter_set);
     }
 
     let mut offset = 0usize;
@@ -5290,16 +5360,26 @@ fn avc_sample_to_annex_b(config: &AvcConfig, sample: &[u8]) -> Result<Vec<u8>, S
         let nal = sample
             .get(offset..end)
             .ok_or_else(|| String::from("MP4 AVC sample NAL is truncated"))?;
-        append_annex_b_nal(&mut out, nal);
+        append_annex_b_nal(out, nal);
         offset = end;
     }
-    Ok(out)
+    Ok(())
 }
 
 fn hevc_sample_to_annex_b(config: &HvccConfig, sample: &[u8]) -> Result<Vec<u8>, String> {
     let mut out = Vec::new();
+    hevc_sample_to_annex_b_into(config, sample, &mut out)?;
+    Ok(out)
+}
+
+fn hevc_sample_to_annex_b_into(
+    config: &HvccConfig,
+    sample: &[u8],
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
+    out.clear();
     for parameter_set in &config.parameter_sets {
-        append_annex_b_nal(&mut out, parameter_set);
+        append_annex_b_nal(out, parameter_set);
     }
 
     let mut offset = 0usize;
@@ -5312,10 +5392,51 @@ fn hevc_sample_to_annex_b(config: &HvccConfig, sample: &[u8]) -> Result<Vec<u8>,
         let nal = sample
             .get(offset..end)
             .ok_or_else(|| String::from("MP4 HEVC sample NAL is truncated"))?;
-        append_annex_b_nal(&mut out, nal);
+        append_annex_b_nal(out, nal);
         offset = end;
     }
-    Ok(out)
+    Ok(())
+}
+
+fn avc_sample_is_keyframe(config: &AvcConfig, sample: &[u8]) -> Result<bool, String> {
+    let mut offset = 0usize;
+    while offset < sample.len() {
+        let nal_len = read_nal_length(sample, offset, config.nal_length_size)?;
+        offset += config.nal_length_size;
+        let end = offset
+            .checked_add(nal_len)
+            .ok_or_else(|| String::from("MP4 AVC NAL length overflow"))?;
+        let nal = sample
+            .get(offset..end)
+            .ok_or_else(|| String::from("MP4 AVC sample NAL is truncated"))?;
+        if nal.first().is_some_and(|byte| byte & 0x1f == 5) {
+            return Ok(true);
+        }
+        offset = end;
+    }
+    Ok(false)
+}
+
+fn hevc_sample_is_keyframe(config: &HvccConfig, sample: &[u8]) -> Result<bool, String> {
+    let mut offset = 0usize;
+    while offset < sample.len() {
+        let nal_len = read_nal_length(sample, offset, config.nal_length_size)?;
+        offset += config.nal_length_size;
+        let end = offset
+            .checked_add(nal_len)
+            .ok_or_else(|| String::from("MP4 HEVC NAL length overflow"))?;
+        let nal = sample
+            .get(offset..end)
+            .ok_or_else(|| String::from("MP4 HEVC sample NAL is truncated"))?;
+        if nal
+            .first()
+            .is_some_and(|byte| (16..=21).contains(&((byte >> 1) & 0x3f)))
+        {
+            return Ok(true);
+        }
+        offset = end;
+    }
+    Ok(false)
 }
 
 fn av1_sample_to_scarlet(config: &Av1Config, sample: &[u8]) -> Result<Vec<u8>, String> {
@@ -7467,14 +7588,17 @@ fn connect_local_socket_cancellable(
 }
 
 struct StreamSocketState {
-    data: Vec<u8>,
+    // Keep only bytes that the decode thread has not moved into its retained
+    // MP4 backing buffer. Mirroring the complete stream here makes every
+    // update require another stream-sized allocation.
+    pending: Vec<u8>,
     complete: bool,
     error: Option<String>,
 }
 
 fn start_stream_socket_reader(path: String) -> Arc<Mutex<StreamSocketState>> {
     let state = Arc::new(Mutex::new(StreamSocketState {
-        data: Vec::new(),
+        pending: Vec::new(),
         complete: false,
         error: None,
     }));
@@ -7508,7 +7632,7 @@ fn read_stream_socket_into_state(
             }
             Ok(read) => {
                 let mut state = state.lock();
-                state.data.extend_from_slice(&buffer[..read]);
+                state.pending.extend_from_slice(&buffer[..read]);
             }
             Err(err) if err.kind() == ErrorKind::WouldBlock => {
                 thread::sleep(Duration::from_millis(STREAM_POLL_INTERVAL_MS));
