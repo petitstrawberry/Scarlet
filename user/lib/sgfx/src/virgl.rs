@@ -24,9 +24,10 @@ use std::{
 };
 
 use crate::driver::{
-    IrAddressMode, IrBlendFactor, IrBlendOp, IrBlendState, IrCompareFunction, IrCullMode, IrDraw,
-    IrFilterMode, IrFragmentProgram, IrFrontFace, IrPipelineState, IrSamplerState, IrSubmission,
-    IrTextureCopy, IrTextureFormat, IrTextureSpec, IrTextureUpload, IrVertex, MAX_IR_VERTICES,
+    IrAddressMode, IrBlendFactor, IrBlendOp, IrBlendState, IrBufferSpec, IrCompareFunction,
+    IrCullMode, IrDraw, IrFilterMode, IrFragmentProgram, IrFrontFace, IrPipelineState,
+    IrSamplerState, IrSubmission, IrTextureCopy, IrTextureFormat, IrTextureSpec, IrTextureUpload,
+    IrVertex, MAX_IR_VERTICES,
 };
 use crate::{
     Capabilities, Color, CullMode, FrontFace, MAX_COMPOSITION_OPERATIONS, PipelineDesc,
@@ -115,6 +116,7 @@ const PIPE_SWIZZLE_Y: u32 = 1;
 const PIPE_SWIZZLE_Z: u32 = 2;
 const PIPE_SWIZZLE_W: u32 = 3;
 const IR_VERTEX_BUFFER_BYTES: usize = MAX_IR_VERTICES * 10 * core::mem::size_of::<f32>();
+const IR_BUFFER_SLOTS: usize = 1_024;
 const IR_TEXTURE_SLOTS: usize = 1_024;
 const IR_SAMPLER_SLOTS: usize = 256;
 const IR_PIPELINE_SLOTS: usize = 256;
@@ -659,6 +661,7 @@ impl Context {
             context_handle: self.handle_id(),
             vertex_buffer,
             vertex_resource_id,
+            buffers: empty_slots(IR_BUFFER_SLOTS)?,
             textures: empty_slots(IR_TEXTURE_SLOTS)?,
             texture_specs: empty_slots(IR_TEXTURE_SLOTS)?,
             samplers: empty_slots(IR_SAMPLER_SLOTS)?,
@@ -764,6 +767,7 @@ pub(crate) struct IrResources {
     context_handle: i32,
     vertex_buffer: RawBuffer,
     vertex_resource_id: u32,
+    buffers: Vec<Option<IrBuffer>>,
     textures: Vec<Option<IrTexture>>,
     texture_specs: Vec<Option<IrTextureSpec>>,
     samplers: Vec<Option<IrSampler>>,
@@ -779,6 +783,13 @@ pub(crate) struct IrResources {
     texture_vertex_color_alpha_mask_fragment_shader_handle: u32,
     vertex_elements_handle: u32,
     initialized: Cell<bool>,
+}
+
+struct IrBuffer {
+    _raw: RawBuffer,
+    resource_id: u32,
+    size: u64,
+    uploaded_revision: Option<u64>,
 }
 
 struct IrSampler {
@@ -923,6 +934,61 @@ struct CompositionQuad {
 impl Queue {
     pub(crate) fn context_id(&self) -> i32 {
         self.context_handle
+    }
+
+    pub(crate) fn prepare_ir_buffer(
+        &self,
+        context: &Context,
+        resources: &mut IrResources,
+        spec: IrBufferSpec,
+        bytes: &[u8],
+    ) -> HandleResult<()> {
+        if self.context_handle != context.handle_id()
+            || resources.context_handle != context.handle_id()
+            || spec.size == 0
+            || spec.size > u64::from(u32::MAX)
+            || bytes.is_empty()
+            || !bytes.len().is_multiple_of(core::mem::size_of::<u32>())
+            || u64::try_from(bytes.len()).map_or(true, |length| length > spec.size)
+        {
+            return Err(HandleError::InvalidParameter);
+        }
+        let (resource_id, uploaded_revision) = {
+            let buffer = ir_buffer(context, resources, spec)?;
+            (buffer.resource_id, buffer.uploaded_revision)
+        };
+        if uploaded_revision == Some(spec.revision) {
+            return Ok(());
+        }
+
+        const INLINE_WRITE_FIXED_BYTES: usize = 12 * core::mem::size_of::<u32>();
+        let max_payload = (self.raw.max_opaque_command_size() as usize)
+            .checked_sub(INLINE_WRITE_FIXED_BYTES)
+            .map(|bytes| bytes & !(core::mem::size_of::<u32>() - 1))
+            .filter(|bytes| *bytes > 0)
+            .ok_or(HandleError::InvalidParameter)?;
+        let mut offset = 0usize;
+        while offset < bytes.len() {
+            let end = offset.saturating_add(max_payload).min(bytes.len());
+            let chunk = bytes
+                .get(offset..end)
+                .ok_or(HandleError::InvalidParameter)?;
+            let mut commands = Vec::new();
+            commands
+                .try_reserve_exact(INLINE_WRITE_FIXED_BYTES.saturating_add(chunk.len()))
+                .map_err(|_| HandleError::OutOfResources)?;
+            push_ir_buffer_inline_write(
+                &mut commands,
+                resource_id,
+                u32::try_from(offset).map_err(|_| HandleError::InvalidParameter)?,
+                chunk,
+            )?;
+            self.raw.submit(&commands)?;
+            offset = end;
+        }
+        let buffer = ir_buffer(context, resources, spec)?;
+        buffer.uploaded_revision = Some(spec.revision);
+        Ok(())
     }
 
     pub(crate) fn upload_ir_texture(
@@ -1218,11 +1284,13 @@ impl Queue {
                 )?;
             }
         }
-        push_ir_inline_write(
-            &mut commands,
-            resources.vertex_resource_id,
-            &submission.vertices,
-        )?;
+        if !submission.vertices.is_empty() {
+            push_ir_inline_write(
+                &mut commands,
+                resources.vertex_resource_id,
+                &submission.vertices,
+            )?;
+        }
 
         // Re-emitting the complete state for every draw used to make a pass
         // exceed the queue's 64 KiB opaque-command limit even when the vertex
@@ -1234,6 +1302,7 @@ impl Queue {
         let mut bound_fragment_shader = None;
         let mut bound_sampler_view = None;
         let mut bound_sampler_state = None;
+        let mut bound_vertex_buffer = Some((resources.vertex_resource_id, 0));
         let mut bound_scissor = Some((
             pass_scissor.x(),
             pass_scissor.y(),
@@ -1246,6 +1315,24 @@ impl Queue {
                 .get(draw.pipeline.slot)
                 .and_then(Option::as_ref)
                 .ok_or(HandleError::InvalidParameter)?;
+            let vertex_buffer = if let Some(binding) = draw.vertex_buffer {
+                let buffer = resources
+                    .buffers
+                    .get(binding.buffer.slot)
+                    .and_then(Option::as_ref)
+                    .filter(|buffer| {
+                        buffer.size == binding.buffer.size
+                            && buffer.uploaded_revision == Some(binding.buffer.revision)
+                    })
+                    .ok_or(HandleError::InvalidParameter)?;
+                (buffer.resource_id, binding.offset)
+            } else {
+                (resources.vertex_resource_id, 0)
+            };
+            if bound_vertex_buffer != Some(vertex_buffer) {
+                push_ir_vertex_buffer(&mut commands, vertex_buffer.0, vertex_buffer.1);
+                bound_vertex_buffer = Some(vertex_buffer);
+            }
             if bound_blend != Some(pipeline.blend_handle) {
                 push_bind_object(&mut commands, VIRGL_OBJECT_BLEND, pipeline.blend_handle);
                 bound_blend = Some(pipeline.blend_handle);
@@ -1665,6 +1752,35 @@ fn empty_slots<T>(count: usize) -> HandleResult<Vec<Option<T>>> {
     Ok(slots)
 }
 
+fn ir_buffer<'resources>(
+    context: &Context,
+    resources: &'resources mut IrResources,
+    spec: IrBufferSpec,
+) -> HandleResult<&'resources mut IrBuffer> {
+    if spec.slot >= resources.buffers.len() || spec.size == 0 || spec.size > u64::from(u32::MAX) {
+        return Err(HandleError::InvalidParameter);
+    }
+    let slot = resources
+        .buffers
+        .get_mut(spec.slot)
+        .ok_or(HandleError::InvalidParameter)?;
+    if slot.is_none() {
+        let raw = context.device.raw.create_buffer(spec.size, 0)?;
+        let resource_id = resource_id_from_token(context.raw.attach_buffer(&raw)?)?;
+        *slot = Some(IrBuffer {
+            _raw: raw,
+            resource_id,
+            size: spec.size,
+            uploaded_revision: None,
+        });
+    }
+    let buffer = slot.as_mut().ok_or(HandleError::InvalidParameter)?;
+    if buffer.size != spec.size {
+        return Err(HandleError::InvalidParameter);
+    }
+    Ok(buffer)
+}
+
 fn ir_texture<'resources>(
     context: &Context,
     resources: &'resources mut IrResources,
@@ -1852,9 +1968,28 @@ fn validate_ir_draw(
         .start_vertex
         .checked_add(draw.vertex_count)
         .ok_or(HandleError::InvalidParameter)?;
+    let vertex_range_valid = match draw.vertex_buffer {
+        None => end <= vertices_len,
+        Some(binding) => {
+            let byte_end = end
+                .checked_mul(40)
+                .and_then(|bytes| bytes.checked_add(binding.offset as usize))
+                .and_then(|bytes| u64::try_from(bytes).ok());
+            binding.buffer.slot < resources.buffers.len()
+                && byte_end.is_some_and(|end| end <= binding.buffer.size)
+                && resources
+                    .buffers
+                    .get(binding.buffer.slot)
+                    .and_then(Option::as_ref)
+                    .is_some_and(|buffer| {
+                        buffer.size == binding.buffer.size
+                            && buffer.uploaded_revision == Some(binding.buffer.revision)
+                    })
+        }
+    };
     if draw.vertex_count == 0
         || !draw.vertex_count.is_multiple_of(3)
-        || end > vertices_len
+        || !vertex_range_valid
         || !ir_rect_is_within(draw.scissor, target_width, target_height)
         || !draw
             .uniforms
@@ -2498,6 +2633,16 @@ fn push_ir_bind_pass_state(
     push_viewport(commands, Viewport::new(width, height), orientation);
 }
 
+fn push_ir_vertex_buffer(commands: &mut Vec<u8>, resource_id: u32, offset: u32) {
+    push_dword(
+        commands,
+        command_header(VIRGL_CCMD_SET_VERTEX_BUFFERS, 0, 3),
+    );
+    push_dword(commands, 40);
+    push_dword(commands, offset);
+    push_dword(commands, resource_id);
+}
+
 fn push_ir_clear(commands: &mut Vec<u8>, color: Option<[f32; 4]>, depth: Option<f32>) {
     push_dword(commands, command_header(VIRGL_CCMD_CLEAR, 0, 8));
     push_dword(
@@ -2599,6 +2744,42 @@ fn push_ir_inline_write(
             push_float(commands, component);
         }
     }
+    Ok(())
+}
+
+fn push_ir_buffer_inline_write(
+    commands: &mut Vec<u8>,
+    resource_id: u32,
+    offset: u32,
+    bytes: &[u8],
+) -> HandleResult<()> {
+    if resource_id == 0
+        || bytes.is_empty()
+        || !bytes.len().is_multiple_of(core::mem::size_of::<u32>())
+    {
+        return Err(HandleError::InvalidParameter);
+    }
+    let components = u32::try_from(bytes.len() / core::mem::size_of::<u32>())
+        .map_err(|_| HandleError::InvalidParameter)?;
+    let byte_len = u32::try_from(bytes.len()).map_err(|_| HandleError::InvalidParameter)?;
+    push_dword(
+        commands,
+        command_header(VIRGL_CCMD_RESOURCE_INLINE_WRITE, 0, 11 + components),
+    );
+    push_dword(commands, resource_id);
+    // level, usage, stride, layer_stride
+    for _ in 0..4 {
+        push_dword(commands, 0);
+    }
+    // PIPE_BUFFER transfers use box.x as the byte offset and box.width as the
+    // byte count. The remaining two origins and dimensions stay 0/1.
+    push_dword(commands, offset);
+    push_dword(commands, 0);
+    push_dword(commands, 0);
+    push_dword(commands, byte_len);
+    push_dword(commands, 1);
+    push_dword(commands, 1);
+    commands.extend_from_slice(bytes);
     Ok(())
 }
 
@@ -3109,6 +3290,34 @@ mod tests {
         assert_eq!(
             u64::from(clear[6]) | (u64::from(clear[7]) << 32),
             1.0f64.to_bits()
+        );
+    }
+
+    #[test]
+    fn persistent_buffer_upload_encodes_byte_offset_and_payload() {
+        let mut commands = Vec::new();
+        let payload = [0x11_u8, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88];
+        push_ir_buffer_inline_write(&mut commands, 17, 4_096, &payload).unwrap();
+        let words = dwords(&commands);
+
+        assert_eq!(
+            words,
+            [
+                command_header(VIRGL_CCMD_RESOURCE_INLINE_WRITE, 0, 13),
+                17,
+                0,
+                0,
+                0,
+                0,
+                4_096,
+                0,
+                0,
+                8,
+                1,
+                1,
+                0x4433_2211,
+                0x8877_6655,
+            ]
         );
     }
 }

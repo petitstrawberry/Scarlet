@@ -268,6 +268,20 @@ impl Queue {
         }
     }
 
+    pub(crate) fn prepare_ir_buffer(
+        &self,
+        context: &Context,
+        resources: &mut IrResources,
+        buffer: IrBufferSpec,
+        bytes: &[u8],
+    ) -> HandleResult<()> {
+        match (self, context, resources) {
+            (Self::Virgl(queue), Context::Virgl(context), IrResources::Virgl(resources)) => {
+                queue.prepare_ir_buffer(context, resources, buffer, bytes)
+            }
+        }
+    }
+
     pub(crate) fn copy_ir_texture(
         &self,
         context: &Context,
@@ -371,6 +385,21 @@ pub(crate) struct IrVertex {
     pub(crate) position: [f32; 4],
     pub(crate) secondary: [f32; 4],
     pub(crate) tertiary: [f32; 2],
+}
+
+/// Persistent canonical vertex-buffer requirements for one logical IR slot.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) struct IrBufferSpec {
+    pub(crate) slot: usize,
+    pub(crate) size: u64,
+    pub(crate) revision: u64,
+}
+
+/// One draw's binding into a persistent canonical vertex buffer.
+#[derive(Clone, Copy)]
+pub(crate) struct IrVertexBufferBinding {
+    pub(crate) buffer: IrBufferSpec,
+    pub(crate) offset: u32,
 }
 
 /// Backend-neutral rectangle used by the private IR execution plan.
@@ -511,6 +540,7 @@ pub(crate) struct IrUniforms {
 pub(crate) struct IrDraw {
     pub(crate) start_vertex: usize,
     pub(crate) vertex_count: usize,
+    pub(crate) vertex_buffer: Option<IrVertexBufferBinding>,
     pub(crate) pipeline: IrPipelineState,
     pub(crate) texture: Option<IrTextureSpec>,
     pub(crate) sampler: Option<IrSamplerState>,

@@ -3,10 +3,10 @@
 use alloc::{rc::Rc, vec::Vec};
 
 use crate::driver::{
-    self, IrAddressMode, IrBlendComponent, IrBlendFactor, IrBlendOp, IrBlendState,
+    self, IrAddressMode, IrBlendComponent, IrBlendFactor, IrBlendOp, IrBlendState, IrBufferSpec,
     IrCompareFunction, IrCullMode, IrDepthState, IrDraw, IrFilterMode, IrFragmentProgram,
     IrFrontFace, IrPipelineState, IrRect, IrSamplerState, IrSubmission, IrTextureFormat,
-    IrTextureUpload, IrUniforms, IrVertex, MAX_IR_VERTICES,
+    IrTextureUpload, IrUniforms, IrVertex, IrVertexBufferBinding, MAX_IR_VERTICES,
 };
 use crate::ir::{
     self, AddressMode, BlendComponent, BlendFactor, BlendOp, BlendState, BufferRef, BufferUsage,
@@ -123,6 +123,8 @@ pub struct IrResources {
     backend: driver::IrResources,
     images: Vec<ImageMapping>,
     buffer_shadows: Vec<Option<Vec<u8>>>,
+    buffer_revisions: Vec<u64>,
+    canonical_buffer_revisions: Vec<Option<u64>>,
 }
 
 struct ImageMapping {
@@ -144,8 +146,18 @@ impl IrResources {
         buffer_shadows
             .try_reserve_exact(MAX_BUFFERS)
             .map_err(|_| IrSubmitError::OutOfMemory)?;
+        let mut buffer_revisions = Vec::new();
+        buffer_revisions
+            .try_reserve_exact(MAX_BUFFERS)
+            .map_err(|_| IrSubmitError::OutOfMemory)?;
+        let mut canonical_buffer_revisions = Vec::new();
+        canonical_buffer_revisions
+            .try_reserve_exact(MAX_BUFFERS)
+            .map_err(|_| IrSubmitError::OutOfMemory)?;
         for _ in 0..MAX_BUFFERS {
             buffer_shadows.push(None);
+            buffer_revisions.push(0);
+            canonical_buffer_revisions.push(None);
         }
         Ok(Self {
             resources,
@@ -153,6 +165,8 @@ impl IrResources {
             backend: context.create_ir_resources()?,
             images,
             buffer_shadows,
+            buffer_revisions,
+            canonical_buffer_revisions,
         })
     }
 
@@ -242,10 +256,32 @@ impl IrResources {
             .and_then(Option::as_deref))
     }
 
+    fn buffer_revision(&self, slot: usize) -> Result<u64, IrSubmitError> {
+        self.buffer_revisions
+            .get(slot)
+            .copied()
+            .ok_or(IrSubmitError::InvalidVertexData)
+    }
+
+    fn canonical_buffer_revision(&self, slot: usize) -> Option<u64> {
+        self.canonical_buffer_revisions.get(slot).copied().flatten()
+    }
+
     fn commit_buffer_updates(&mut self, updates: Vec<BufferShadowUpdate>) {
         for update in updates {
             if let Some(slot) = self.buffer_shadows.get_mut(update.slot) {
                 *slot = Some(update.bytes);
+            }
+            if let Some(revision) = self.buffer_revisions.get_mut(update.slot) {
+                *revision = update.revision;
+            }
+        }
+    }
+
+    fn commit_canonical_validations(&mut self, validations: Vec<(usize, u64)>) {
+        for (slot, revision) in validations {
+            if let Some(validated) = self.canonical_buffer_revisions.get_mut(slot) {
+                *validated = Some(revision);
             }
         }
     }
@@ -253,11 +289,13 @@ impl IrResources {
 
 struct BufferShadowUpdate {
     slot: usize,
+    revision: u64,
     bytes: Vec<u8>,
 }
 
 struct PendingBuffers {
     updates: Vec<BufferShadowUpdate>,
+    canonical_validations: Vec<(usize, u64)>,
 }
 
 enum BufferBytes<'pending, 'resource> {
@@ -278,6 +316,7 @@ impl PendingBuffers {
     fn new() -> Self {
         Self {
             updates: Vec::new(),
+            canonical_validations: Vec::new(),
         }
     }
 
@@ -313,10 +352,18 @@ impl PendingBuffers {
             } else {
                 Vec::new()
             };
+            let revision = resources
+                .buffer_revision(slot)?
+                .checked_add(1)
+                .ok_or(IrSubmitError::OutOfMemory)?;
             self.updates
                 .try_reserve(1)
                 .map_err(|_| IrSubmitError::OutOfMemory)?;
-            self.updates.push(BufferShadowUpdate { slot, bytes });
+            self.updates.push(BufferShadowUpdate {
+                slot,
+                revision,
+                bytes,
+            });
             &mut self
                 .updates
                 .last_mut()
@@ -353,11 +400,49 @@ impl PendingBuffers {
             .map(BufferBytes::Persistent)
             .ok_or(IrSubmitError::InvalidVertexData)
     }
+
+    fn revision(
+        &self,
+        resources: &IrResources,
+        buffer: BufferRef<'_>,
+    ) -> Result<u64, IrSubmitError> {
+        self.updates
+            .iter()
+            .find(|update| update.slot == buffer.index)
+            .map(|update| update.revision)
+            .map(Ok)
+            .unwrap_or_else(|| resources.buffer_revision(buffer.index))
+    }
+
+    fn canonical_needs_validation(
+        &self,
+        resources: &IrResources,
+        slot: usize,
+        revision: u64,
+    ) -> bool {
+        resources.canonical_buffer_revision(slot) != Some(revision)
+            && !self.canonical_validations.contains(&(slot, revision))
+    }
+
+    fn mark_canonical_validated(
+        &mut self,
+        slot: usize,
+        revision: u64,
+    ) -> Result<(), IrSubmitError> {
+        if !self.canonical_validations.contains(&(slot, revision)) {
+            self.canonical_validations
+                .try_reserve(1)
+                .map_err(|_| IrSubmitError::OutOfMemory)?;
+            self.canonical_validations.push((slot, revision));
+        }
+        Ok(())
+    }
 }
 
 struct ExecutionPlan {
     events: Vec<ExecutionEvent>,
     buffer_updates: Vec<BufferShadowUpdate>,
+    canonical_validations: Vec<(usize, u64)>,
 }
 
 enum ExecutionEvent {
@@ -436,7 +521,55 @@ impl Queue {
         }
         let plan = ExecutionPlan::from_commands(resources, commands)?;
         register_mapped_images(context, resources)?;
+        let mut prepared_buffers = Vec::new();
         for event in &plan.events {
+            let ExecutionEvent::Pass(pass) = event else {
+                continue;
+            };
+            for draw in &pass.submission.draws {
+                let Some(binding) = draw.vertex_buffer else {
+                    continue;
+                };
+                if prepared_buffers.contains(&binding.buffer.slot) {
+                    continue;
+                }
+                let bytes = plan
+                    .buffer_updates
+                    .iter()
+                    .find(|update| update.slot == binding.buffer.slot)
+                    .map(|update| update.bytes.as_slice())
+                    .or_else(|| {
+                        resources
+                            .buffer_shadows
+                            .get(binding.buffer.slot)
+                            .and_then(Option::as_deref)
+                    })
+                    .ok_or(IrSubmitError::InvalidVertexData)?;
+                self.backend.prepare_ir_buffer(
+                    &context.backend,
+                    &mut resources.backend,
+                    binding.buffer,
+                    bytes,
+                )?;
+                prepared_buffers
+                    .try_reserve(1)
+                    .map_err(|_| IrSubmitError::OutOfMemory)?;
+                prepared_buffers.push(binding.buffer.slot);
+            }
+        }
+        // Buffer uploads are already visible to the backend at this point.
+        // Commit their CPU revisions before executing later events so a pass
+        // failure cannot leave the backend and shadow cache claiming the same
+        // revision for different bytes on a retry. Texture uploads likewise
+        // are not rolled back when a later event fails.
+        let ExecutionPlan {
+            events,
+            buffer_updates,
+            canonical_validations,
+        } = plan;
+        resources.commit_buffer_updates(buffer_updates);
+        resources.commit_canonical_validations(canonical_validations);
+        for event in &events {
             match event {
                 ExecutionEvent::Upload(texture, upload) => self.backend.upload_ir_texture(
                     &context.backend,
@@ -465,7 +598,6 @@ impl Queue {
             }
             .map_err(IrSubmitError::Backend)?;
         }
-        resources.commit_buffer_updates(plan.buffer_updates);
         Ok(())
     }
 }
@@ -708,7 +840,7 @@ impl ExecutionPlan {
                     let pass = active_pass_mut(&mut active)?;
                     let decoded = decode_draw_vertices(
                         resources,
-                        &pending_buffers,
+                        &mut pending_buffers,
                         pass,
                         *first_vertex,
                         *vertex_count,
@@ -746,17 +878,27 @@ impl ExecutionPlan {
         Ok(Self {
             events,
             buffer_updates: pending_buffers.updates,
+            canonical_validations: pending_buffers.canonical_validations,
         })
     }
 }
 
 struct DecodedDraw {
-    vertices: Vec<IrVertex>,
+    vertices: DecodedVertices,
     pipeline: IrPipelineState,
     texture: Option<driver::IrTextureSpec>,
     sampler: Option<IrSamplerState>,
     uniforms: IrUniforms,
     scissor: IrRect,
+}
+
+enum DecodedVertices {
+    Inline(Vec<IrVertex>),
+    Persistent {
+        binding: IrVertexBufferBinding,
+        first_vertex: usize,
+        vertex_count: usize,
+    },
 }
 
 fn active_pass_mut<'pass, 'r>(
@@ -779,22 +921,64 @@ fn area_within_image(area: ir::PixelRect, image: &Image) -> bool {
 
 fn decode_draw_vertices(
     resources: &IrResources,
-    pending_buffers: &PendingBuffers,
+    pending_buffers: &mut PendingBuffers,
     pass: &ActivePass<'_>,
     first_vertex: u32,
     vertex_count: u32,
 ) -> Result<DecodedDraw, IrSubmitError> {
     let (info, buffer, offset, uniforms, texture, sampler) = draw_state(resources, pass)?;
-    let bytes = pending_buffers.bytes(resources, buffer)?;
-    let vertices = decode_vertices(
-        resources.resources(),
-        bytes.as_slice(),
-        buffer,
-        offset,
-        first_vertex,
-        vertex_count,
-        info,
-    )?;
+    let descriptor = resources.resources().buffer(buffer)?;
+    let persistent_supported = is_canonical_persistent_layout(info)
+        && descriptor.size() <= u64::from(u32::MAX)
+        && offset <= u64::from(u32::MAX);
+    let vertices = if persistent_supported {
+        let revision = pending_buffers.revision(resources, buffer)?;
+        let needs_validation =
+            pending_buffers.canonical_needs_validation(resources, buffer.index, revision);
+        {
+            let bytes = pending_buffers.bytes(resources, buffer)?;
+            validate_canonical_vertex_range(
+                resources.resources(),
+                bytes.as_slice(),
+                buffer,
+                offset,
+                first_vertex,
+                vertex_count,
+            )?;
+            if needs_validation {
+                validate_canonical_buffer(bytes.as_slice())?;
+            }
+        }
+        if needs_validation {
+            pending_buffers.mark_canonical_validated(buffer.index, revision)?;
+        }
+        let offset = u32::try_from(offset).map_err(|_| IrSubmitError::InvalidVertexData)?;
+        DecodedVertices::Persistent {
+            binding: IrVertexBufferBinding {
+                buffer: IrBufferSpec {
+                    slot: buffer.index,
+                    size: descriptor.size(),
+                    revision,
+                },
+                offset,
+            },
+            first_vertex: usize::try_from(first_vertex)
+                .map_err(|_| IrSubmitError::InvalidVertexData)?,
+            vertex_count: usize::try_from(vertex_count)
+                .map_err(|_| IrSubmitError::InvalidVertexData)?,
+        }
+    } else {
+        let bytes = pending_buffers.bytes(resources, buffer)?;
+        DecodedVertices::Inline(decode_vertices(
+            resources.resources(),
+            bytes.as_slice(),
+            buffer,
+            offset,
+            first_vertex,
+            vertex_count,
+            info,
+        )?)
+    };
     Ok(DecodedDraw {
         vertices,
         pipeline: info.state,
@@ -803,6 +987,77 @@ fn decode_draw_vertices(
         uniforms,
         scissor: pass_scissor(pass),
     })
+}
+
+fn is_canonical_persistent_layout(info: PipelineInfo) -> bool {
+    info.stride == 40
+        && info.position == VertexAttribute::new(0, VertexFormat::Float32x4, 0)
+        && info.secondary == Some(VertexAttribute::new(1, VertexFormat::Float32x4, 16))
+        && info.tertiary == Some(VertexAttribute::new(2, VertexFormat::Float32x2, 32))
+        && matches!(
+            info.state.fragment,
+            IrFragmentProgram::VertexColor
+                | IrFragmentProgram::TextureVertexColorRgba
+                | IrFragmentProgram::TextureVertexColorRgbIgnoreAlpha
+                | IrFragmentProgram::TextureVertexColorAlphaMask
+        )
+}
+
+fn validate_canonical_vertex_range(
+    resources: &ResourceTable,
+    bytes: &[u8],
+    buffer: BufferRef<'_>,
+    vertex_offset: u64,
+    first_vertex: u32,
+    vertex_count: u32,
+) -> Result<(), IrSubmitError> {
+    let descriptor = resources.buffer(buffer)?;
+    if !descriptor.usage().contains(BufferUsage::VERTEX)
+        || vertex_count == 0
+        || !vertex_count.is_multiple_of(3)
+    {
+        return Err(IrSubmitError::InvalidVertexData);
+    }
+    let start = usize::try_from(vertex_offset)
+        .ok()
+        .and_then(|offset| {
+            usize::try_from(first_vertex)
+                .ok()
+                .and_then(|first| first.checked_mul(40))
+                .and_then(|first| offset.checked_add(first))
+        })
+        .ok_or(IrSubmitError::InvalidVertexData)?;
+    let byte_count = usize::try_from(vertex_count)
+        .ok()
+        .and_then(|count| count.checked_mul(40))
+        .ok_or(IrSubmitError::InvalidVertexData)?;
+    let end = start
+        .checked_add(byte_count)
+        .ok_or(IrSubmitError::InvalidVertexData)?;
+    bytes
+        .get(start..end)
+        .ok_or(IrSubmitError::InvalidVertexData)?;
+    Ok(())
+}
+
+fn validate_canonical_buffer(bytes: &[u8]) -> Result<(), IrSubmitError> {
+    if bytes.is_empty() || !bytes.len().is_multiple_of(40) {
+        return Err(IrSubmitError::InvalidVertexData);
+    }
+    for record in bytes.chunks_exact(40) {
+        for offset in [0, 4, 8, 12, 32, 36] {
+            if !read_f32(record, offset)?.is_finite() {
+                return Err(IrSubmitError::InvalidVertexData);
+            }
+        }
+        for offset in [16, 20, 24, 28] {
+            let component = read_f32(record, offset)?;
+            if !component.is_finite() || !(0.0..=1.0).contains(&component) {
+                return Err(IrSubmitError::InvalidVertexData);
+            }
+        }
+    }
+    Ok(())
 }
 
 fn decode_indexed_draw_vertices(
@@ -878,7 +1133,7 @@ fn decode_indexed_draw_vertices(
         return Err(IrSubmitError::InvalidVertexData);
     }
     Ok(DecodedDraw {
-        vertices,
+        vertices: DecodedVertices::Inline(vertices),
         pipeline: info.state,
         texture,
         sampler,
@@ -946,30 +1201,41 @@ fn pass_scissor(pass: &ActivePass<'_>) -> IrRect {
 }
 
 fn append_draw(pass: &mut ActivePass<'_>, draw: DecodedDraw) -> Result<(), IrSubmitError> {
-    let start_vertex = pass.submission.vertices.len();
-    let new_len =
-        start_vertex
-            .checked_add(draw.vertices.len())
-            .ok_or(IrSubmitError::Unsupported(
-                UnsupportedIrFeature::CommandStream,
-            ))?;
-    if new_len > MAX_IR_VERTICES {
-        return Err(IrSubmitError::Unsupported(
-            UnsupportedIrFeature::CommandStream,
-        ));
-    }
-    pass.submission
-        .vertices
-        .try_reserve(draw.vertices.len())
-        .map_err(|_| IrSubmitError::OutOfMemory)?;
-    pass.submission.vertices.extend(draw.vertices);
+    let (start_vertex, vertex_count, vertex_buffer) = match draw.vertices {
+        DecodedVertices::Inline(vertices) => {
+            let start_vertex = pass.submission.vertices.len();
+            let new_len =
+                start_vertex
+                    .checked_add(vertices.len())
+                    .ok_or(IrSubmitError::Unsupported(
+                        UnsupportedIrFeature::CommandStream,
+                    ))?;
+            if new_len > MAX_IR_VERTICES {
+                return Err(IrSubmitError::Unsupported(
+                    UnsupportedIrFeature::CommandStream,
+                ));
+            }
+            pass.submission
+                .vertices
+                .try_reserve(vertices.len())
+                .map_err(|_| IrSubmitError::OutOfMemory)?;
+            pass.submission.vertices.extend(vertices);
+            (start_vertex, new_len - start_vertex, None)
+        }
+        DecodedVertices::Persistent {
+            binding,
+            first_vertex,
+            vertex_count,
+        } => (first_vertex, vertex_count, Some(binding)),
+    };
     pass.submission
         .draws
         .try_reserve(1)
         .map_err(|_| IrSubmitError::OutOfMemory)?;
     pass.submission.draws.push(IrDraw {
         start_vertex,
-        vertex_count: new_len - start_vertex,
+        vertex_count,
+        vertex_buffer,
         pipeline: draw.pipeline,
         texture: draw.texture,
         sampler: draw.sampler,
