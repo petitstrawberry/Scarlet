@@ -142,7 +142,7 @@ impl KernelMemoryLayout {
         KernelMemoryPhase::from_u8(self.phase.load(Ordering::Acquire))
     }
 
-    fn init_from_limine(
+    fn init_from_boot(
         &self,
         hhdm_offset: usize,
         kernel_phys_base: usize,
@@ -353,11 +353,36 @@ fn layout() -> &'static KernelMemoryLayout {
     &KERNEL_MEMORY_LAYOUT
 }
 
-/// Initialize address translation from Limine bootloader information.
+/// Initialize address translation from boot-protocol information.
 ///
-/// This must be called early in the boot process (e.g., in `limine_entry`)
+/// This must be called early in the boot process
 /// before any address translation is performed. It records the HHDM offset
 /// and kernel image layout provided by the bootloader.
+///
+/// # Arguments
+///
+/// * `hhdm_offset` - The HHDM (Higher Half Direct Map) offset from physical addresses
+/// * `kernel_phys_base` - Physical base address of the kernel image
+/// * `kernel_virt_base` - Virtual base address of the kernel image
+/// * `kernel_image_size` - Size of the kernel image in bytes
+pub fn init_boot_addressing(
+    hhdm_offset: usize,
+    kernel_phys_base: usize,
+    kernel_virt_base: usize,
+    kernel_image_size: usize,
+) {
+    layout().init_from_boot(
+        hhdm_offset,
+        kernel_phys_base,
+        kernel_virt_base,
+        kernel_image_size,
+    );
+}
+
+/// Initialize address translation from Limine bootloader information.
+///
+/// This compatibility wrapper preserves the existing Limine entry while the
+/// underlying memory-layout contract remains boot-protocol independent.
 ///
 /// # Arguments
 ///
@@ -371,7 +396,7 @@ pub fn init_limine_addressing(
     kernel_virt_base: usize,
     kernel_image_size: usize,
 ) {
-    layout().init_from_limine(
+    init_boot_addressing(
         hhdm_offset,
         kernel_phys_base,
         kernel_virt_base,
@@ -381,7 +406,7 @@ pub fn init_limine_addressing(
 
 /// Check if address translation is initialized and ready to use.
 ///
-/// Returns `true` after `init_limine_addressing()` has been called,
+/// Returns `true` after `init_boot_addressing()` has been called,
 /// indicating that address translation functions can be safely used.
 #[inline(always)]
 pub fn address_translation_ready() -> bool {

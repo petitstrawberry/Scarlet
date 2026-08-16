@@ -13,7 +13,7 @@ fdt = "0.1.5"
 talc = "4.4"
 hashbrown = "0.16.0"
 lock_api = "0.4"
-limine = "0.6"
+limine = { version = "0.6", optional = true }
 font8x8 = { version = "0.3", default-features = false, features = ["unicode"] }
 
 [features]
@@ -24,4 +24,5 @@ network = []
 user-fpu = []
 user-vector = []
 hypervisor = []
-limine = []
+limine = ["dep:limine"]
+linux-boot = []

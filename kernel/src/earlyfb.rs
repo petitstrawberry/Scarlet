@@ -1,5 +1,6 @@
 use crate::sync::IrqSpinLock;
 use font8x8::{BASIC_FONTS, UnicodeFonts};
+#[cfg(feature = "limine")]
 use limine::framebuffer::{FRAMEBUFFER_RGB, Framebuffer};
 
 const FONT_WIDTH: usize = 8;
@@ -49,6 +50,7 @@ impl FramebufferConsole {
         }
     }
 
+    #[cfg(feature = "limine")]
     fn init(&mut self, framebuffer: &Framebuffer) {
         if framebuffer.memory_model != FRAMEBUFFER_RGB {
             return;
@@ -189,6 +191,7 @@ pub fn console_lock_addr() -> usize {
     &EARLY_CONSOLE as *const _ as usize
 }
 
+#[cfg(feature = "limine")]
 pub fn init(framebuffer: &Framebuffer) {
     let mut console = EARLY_CONSOLE.lock();
     if console.initialized {

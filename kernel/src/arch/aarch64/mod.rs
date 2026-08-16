@@ -9,7 +9,16 @@ use crate::mem::KERNEL_STACK;
 use crate::task::Task;
 
 pub mod boot;
+#[cfg(feature = "limine")]
 pub use boot::limine::{is_hv_available, is_vhe_enabled};
+#[cfg(not(feature = "limine"))]
+pub const fn is_hv_available() -> bool {
+    false
+}
+#[cfg(not(feature = "limine"))]
+pub const fn is_vhe_enabled() -> bool {
+    false
+}
 pub mod context;
 pub mod earlycon;
 pub mod fpu;

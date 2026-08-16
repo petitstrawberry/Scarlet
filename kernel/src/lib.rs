@@ -855,11 +855,14 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
     // counter at the seed instant, anchor that instant to the boot RTC value,
     // and let the wall clock advance by the monotonic counter delta from there.
     // RTC drivers remain a fallback for non-EFI boots (first-wins).
-    if let Some(epoch_ns) = crate::boot::limine::date_at_boot_ns() {
-        let mono = crate::time::current_time_ns();
-        match crate::time::initialize_wall_clock_from_rtc_sample(epoch_ns, mono, mono) {
-            Ok(()) => println!("[boot] wall clock seeded from Limine Date at Boot"),
-            Err(e) => println!("[boot] Date at Boot wall clock seed failed: {}", e),
+    #[cfg(feature = "limine")]
+    {
+        if let Some(epoch_ns) = crate::boot::limine::date_at_boot_ns() {
+            let mono = crate::time::current_time_ns();
+            match crate::time::initialize_wall_clock_from_rtc_sample(epoch_ns, mono, mono) {
+                Ok(()) => println!("[boot] wall clock seeded from Limine Date at Boot"),
+                Err(e) => println!("[boot] Date at Boot wall clock seed failed: {}", e),
+            }
         }
     }
 

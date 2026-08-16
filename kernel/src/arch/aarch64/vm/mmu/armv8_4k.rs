@@ -44,6 +44,58 @@ const DEBUG_DEVICE_FAULT_VA: usize = 0xffff_0008_3afd_b000;
 const MAX_PAGING_LEVEL: usize = 3;
 const MAX_BLOCK_LEVEL: usize = 2;
 
+/// Activates an allocator-independent page table during early boot.
+///
+/// The supplied table must map the currently executing code and stack at
+/// their current virtual addresses. Both TTBR0 and TTBR1 use the table so a
+/// single root can carry the temporary identity map and Scarlet HHDM.
+///
+/// # Safety
+///
+/// `root_paddr` must be a page-aligned physical address of a complete,
+/// cache-clean AArch64 4 KiB translation table. Its mappings must remain valid
+/// until Scarlet installs the allocator-backed boot page table.
+pub(crate) unsafe fn activate_early_boot_page_table(root_paddr: usize) {
+    assert_eq!(
+        root_paddr & (PAGE_SIZE - 1),
+        0,
+        "early boot page-table root must be page aligned"
+    );
+    let root = root_paddr as u64;
+
+    // SAFETY: The caller guarantees that the root table maps the active
+    // instruction stream and stack. Exceptions remain masked throughout the
+    // translation-regime transition.
+    unsafe {
+        asm!(
+            "msr mair_el1, {mair}",
+            "msr tcr_el1, {tcr}",
+            "isb",
+            "dsb sy",
+            "msr ttbr1_el1, {root}",
+            "msr ttbr0_el1, {root}",
+            "isb",
+            "tlbi vmalle1",
+            "dsb sy",
+            "ic iallu",
+            "dsb sy",
+            "isb",
+            "mrs {tmp}, sctlr_el1",
+            "bic {tmp}, {tmp}, {sctlr_clear}",
+            "orr {tmp}, {tmp}, {sctlr_enable}",
+            "msr sctlr_el1, {tmp}",
+            "isb",
+            mair = in(reg) SCARLET_MAIR_EL1,
+            tcr = in(reg) SCARLET_TCR_EL1,
+            root = in(reg) root,
+            sctlr_clear = in(reg) SCTLR_EL1_DISABLE_MASK,
+            sctlr_enable = in(reg) SCTLR_EL1_ENABLE_MASK,
+            tmp = lateout(reg) _,
+            options(nostack),
+        );
+    }
+}
+
 /// Attributes carried while installing a mapping.
 ///
 /// Keeping the attributes bundled makes the level-specific mapping path explicit.

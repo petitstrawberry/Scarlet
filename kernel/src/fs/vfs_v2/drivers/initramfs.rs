@@ -35,9 +35,7 @@ pub fn relocate_initramfs(usable_area: &mut MemoryArea) -> Result<MemoryArea, &'
     }
 
     let page_size = crate::environment::PAGE_SIZE;
-    let raw_ptr = usable_area.start as *mut u8;
-    let aligned_ptr = ((raw_ptr as usize + page_size - 1) & !(page_size - 1)) as *mut u8;
-    let aligned_addr = aligned_ptr as usize;
+    let aligned_addr = (usable_area.start + page_size - 1) & !(page_size - 1);
 
     // Validate destination memory bounds
     if aligned_addr + size > usable_area.end {
@@ -52,8 +50,8 @@ pub fn relocate_initramfs(usable_area: &mut MemoryArea) -> Result<MemoryArea, &'
 
     // Use a safer approach: copy in smaller chunks to avoid stack issues
     let chunk_size = 4096; // 4KB chunks
-    let mut src_addr = original_area.start as *const u8;
-    let mut dst_addr = aligned_ptr;
+    let mut src_addr = crate::vm::addr::phys_to_virt(original_area.start) as *const u8;
+    let mut dst_addr = crate::vm::addr::phys_to_virt(aligned_addr) as *mut u8;
     let mut remaining = size;
 
     unsafe {
