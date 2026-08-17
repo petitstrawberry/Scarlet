@@ -10,18 +10,11 @@
 //!  48: trap_kind (8) - UNUSED in this optimized asm (passed via register)
 
 use core::arch::{asm, naked_asm};
-#[cfg(feature = "sync-debug")]
-use core::sync::atomic::{AtomicUsize, Ordering};
 
 use super::exception::arch_exception_handler;
 use super::interrupt::arch_irq_handler;
 use crate::arch::{Trapframe, get_cpu, get_kernel_trapvector_paddr, set_trapvector};
 use crate::vm::get_trampoline_trap_vector;
-
-#[cfg(feature = "sync-debug")]
-static USER_SYNC_TRAP_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
-#[cfg(feature = "sync-debug")]
-const USER_SYNC_TRAP_TRACE_LIMIT: usize = 16;
 
 #[unsafe(export_name = "aarch64_first_switch_to_user_naked")]
 #[unsafe(naked)]
@@ -346,26 +339,6 @@ pub extern "C" fn arch_user_trap_handler(trapframe: &mut Trapframe, trap_kind: u
     );
 
     let cpu_id = get_cpu().get_cpuid();
-    #[cfg(feature = "sync-debug")]
-    let traced_sync_sequence = if trap_kind == 0 {
-        let sequence = USER_SYNC_TRAP_SEQUENCE.fetch_add(1, Ordering::Relaxed) + 1;
-        if sequence <= USER_SYNC_TRAP_TRACE_LIMIT {
-            crate::early_println!(
-                "[aarch64] user sync trap #{} begin: cpu={} vhe={} esr={:#x} elr={:#x} far={:#x}",
-                sequence,
-                cpu_id,
-                crate::arch::aarch64::is_vhe_enabled(),
-                trapframe.esr_el1,
-                trapframe.elr,
-                trapframe.far_el1,
-            );
-            Some(sequence)
-        } else {
-            None
-        }
-    } else {
-        None
-    };
     let first_traced_user_trap = if crate::sched::scheduler::DEBUG_FORK_TRACE_LOGGING {
         crate::sched::scheduler::current_task_id(cpu_id).filter(|&task_id| {
             crate::sched::scheduler::take_fork_trace_first_user_trap(cpu_id, task_id)
@@ -405,18 +378,6 @@ pub extern "C" fn arch_user_trap_handler(trapframe: &mut Trapframe, trap_kind: u
         );
     } else {
         arch_exception_handler(trapframe, trap_kind);
-    }
-
-    #[cfg(feature = "sync-debug")]
-    if let Some(sequence) = traced_sync_sequence {
-        crate::early_println!(
-            "[aarch64] user sync trap #{} handled: cpu={} current={:?} elr={:#x} user_ttbr={:#x}",
-            sequence,
-            cpu_id,
-            crate::sched::scheduler::current_task_id(cpu_id),
-            trapframe.elr,
-            get_cpu().get_ttbr0(),
-        );
     }
 
     if let Some(task_id) = first_traced_user_trap {
