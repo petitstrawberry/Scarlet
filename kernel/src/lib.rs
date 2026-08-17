@@ -669,6 +669,10 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
     early_println!("[Scarlet Kernel] Building Scarlet boot page table...");
     // crate::earlyfb::deactivate();
     switch_to_boot_page_table(direct_map_regions, boot_info.initramfs_paddr, heap_paddr);
+    #[cfg(target_arch = "aarch64")]
+    if crate::arch::aarch64::earlycon::activate_after_boot_page_table_switch() {
+        early_println!("[earlycon] Qualcomm GENI UART active after page-table handoff");
+    }
 
     // Fix PMM metadata pointers immediately after page table switch
     // Must be done before any operation that might touch PMM data structures

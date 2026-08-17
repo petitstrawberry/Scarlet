@@ -11,9 +11,10 @@ use crate::boot::limine::{
     runtime_direct_map_regions, select_usable_region,
 };
 use crate::device::fdt::{FdtManager, init_fdt, relocate_fdt};
-use crate::environment::STACK_SIZE;
+use crate::environment::{PAGE_SIZE, STACK_SIZE};
 use crate::mem::{KERNEL_STACK, init_bss};
 use crate::vm::addr::{init_bootloader_direct_map_bound, init_limine_addressing, phys_to_virt};
+use crate::vm::vmem::{MemoryArea, MemoryAttribute};
 use crate::{BootInfo, DeviceSource, early_println, start_ap, start_kernel, wait_for_ap_release};
 
 static mut EARLY_BOOTINFO: MaybeUninit<BootInfo> = MaybeUninit::uninit();
@@ -633,8 +634,20 @@ extern "C" fn limine_entry_after_el_drop(_arg0: usize, inherited_sctlr: u64) -> 
     init_bootloader_direct_map_bound(bootloader_hhdm_bound.start, bootloader_hhdm_bound.end);
     let hhdm_offset = hhdm.offset as usize;
     let framebuffer_paddr = framebuffer_area(FRAMEBUFFER_REQUEST.response());
-    let direct_map_regions = runtime_direct_map_regions(memmap.entries(), framebuffer_paddr)
+    let early_qcom_geni_paddr = FdtManager::get_manager()
+        .get_fdt()
+        .and_then(qcom_geni_debug_uart_paddr);
+    let mut direct_map_regions = runtime_direct_map_regions(memmap.entries(), framebuffer_paddr)
         .unwrap_or_else(|error| panic!("failed to build runtime direct map: {}", error));
+    if let Some(paddr) = early_qcom_geni_paddr {
+        let end = paddr
+            .checked_add(PAGE_SIZE - 1)
+            .expect("Qualcomm GENI early UART range overflows");
+        direct_map_regions
+            .insert(MemoryArea::new(paddr, end), MemoryAttribute::Device)
+            .unwrap_or_else(|error| panic!("failed to map Qualcomm GENI early UART: {}", error));
+        crate::arch::aarch64::earlycon::prepare_limine_qcom_geni(paddr);
+    }
     let relocated_fdt = relocate_fdt(phys_to_virt(usable_region.start) as *mut u8);
     let relocated_fdt_paddr = usable_region.start;
     let reserved_bytes = relocated_fdt.size();
@@ -691,6 +704,32 @@ extern "C" fn limine_entry_after_el_drop(_arg0: usize, inherited_sctlr: u64) -> 
     }
 }
 
+fn qcom_geni_debug_uart_paddr(fdt: &fdt::Fdt<'_>) -> Option<usize> {
+    fdt.chosen()
+        .stdout()
+        .filter(is_qcom_geni_debug_uart)
+        .and_then(|node| node.reg())
+        .and_then(|mut regions| regions.next())
+        .map(|region| region.starting_address as usize)
+        .or_else(|| {
+            fdt.all_nodes()
+                .find(is_qcom_geni_debug_uart)
+                .and_then(|node| node.reg())
+                .and_then(|mut regions| regions.next())
+                .map(|region| region.starting_address as usize)
+        })
+}
+
+fn is_qcom_geni_debug_uart(node: &fdt::node::FdtNode<'_, '_>) -> bool {
+    node.compatible()
+        .map(|compatible| has_qcom_geni_debug_compatible(compatible.all()))
+        .unwrap_or(false)
+}
+
+fn has_qcom_geni_debug_compatible<'a>(mut values: impl Iterator<Item = &'a str>) -> bool {
+    values.any(|value| value == "qcom,geni-debug-uart")
+}
+
 #[cfg(test)]
 mod el_drop_tests {
     use super::*;
@@ -730,6 +769,17 @@ mod el_drop_tests {
         assert!(physical_timer_mask < hcr_drop);
         assert!(virtual_timer_mask < hcr_drop);
     }
+
+    #[test_case]
+    fn qcom_geni_early_console_requires_debug_uart_compatible() {
+        assert!(has_qcom_geni_debug_compatible(
+            ["qcom,geni-se", "qcom,geni-debug-uart"].into_iter()
+        ));
+        assert!(!has_qcom_geni_debug_compatible(
+            ["qcom,geni-se", "qcom,geni-uart"].into_iter()
+        ));
+    }
+
     #[test_case]
     fn mpidr_matching_ignores_non_affinity_bits() {
         let affinity = (0x12_u64 << 32) | (0x34 << 16) | (0x56 << 8) | 0x78;
