@@ -12,10 +12,15 @@
 //! - Frequency: CNTFRQ_EL0
 
 use core::arch::asm;
+use core::sync::atomic::{AtomicU32, Ordering};
 
+use crate::device::manager::{DeviceManager, DriverPriority, probe_defer};
+use crate::device::platform::{
+    PlatformDeviceDriver, PlatformDeviceInfo, resource::PlatformDeviceResourceType,
+};
 use crate::environment::MAX_NUM_CPUS;
 use crate::interrupt::controllers::TimerController;
-use crate::interrupt::{CpuId, InterruptResult};
+use crate::interrupt::{CpuId, InterruptError, InterruptResult};
 
 /// CNTV_CTL_EL0 bit definitions
 const CNTV_CTL_ENABLE: u64 = 1 << 0;
@@ -29,11 +34,18 @@ const fn timer_control_is_firing(control: u64) -> bool {
     control & CNTV_CTL_STATE_MASK == CNTV_CTL_FIRING
 }
 
-/// Timer PPI number.
-///
-/// EL1: Virtual Timer PPI 27.
-/// EL2 VHE: EL2 Physical Timer (CNTHP) PPI 26, reserving the virtual timer for guests.
+const TIMER_PPI_UNCONFIGURED: u32 = u32::MAX;
+static TIMER_PPI_IRQ: AtomicU32 = AtomicU32::new(TIMER_PPI_UNCONFIGURED);
+
+/// Timer PPI number selected from firmware, with architectural defaults for
+/// platforms that do not describe the generic timer in a device tree.
 pub fn timer_ppi_irq() -> u32 {
+    let configured = TIMER_PPI_IRQ.load(Ordering::Acquire);
+    if configured != TIMER_PPI_UNCONFIGURED {
+        return configured;
+    }
+
+    // Standard GIC wiring: virtual timer PPI 27, EL2 physical timer PPI 26.
     if crate::arch::aarch64::is_vhe_enabled() {
         26
     } else {
@@ -190,11 +202,70 @@ mod tests {
     }
 }
 
-fn register_local_timer_controller() {
+fn register_arm_generic_timer() {
     // Register for all CPUs that Scarlet is configured to support.
     let controller = alloc::boxed::Box::new(ArmGenericTimer::new());
     let _ = crate::interrupt::InterruptManager::global()
         .register_timer_controller_for_range(controller, 0..(MAX_NUM_CPUS as CpuId));
+
+    DeviceManager::get_manager().register_driver(
+        alloc::boxed::Box::new(PlatformDeviceDriver::new(
+            "arm-generic-timer",
+            platform_timer_probe,
+            platform_timer_remove,
+            alloc::vec!["arm,armv8-timer", "arm,armv7-timer"],
+        )),
+        DriverPriority::Critical,
+    );
 }
 
-crate::early_initcall!(register_local_timer_controller);
+crate::early_initcall!(register_arm_generic_timer);
+
+fn platform_timer_probe(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
+    let irq_resources: alloc::vec::Vec<_> = device
+        .get_resources()
+        .iter()
+        .filter(|resource| resource.res_type == PlatformDeviceResourceType::IRQ)
+        .collect();
+
+    let irq_name = if crate::arch::aarch64::is_vhe_enabled() {
+        "hyp-phys"
+    } else {
+        "virt"
+    };
+    let fallback_index = if crate::arch::aarch64::is_vhe_enabled() {
+        3
+    } else {
+        2
+    };
+    let irq_index = device
+        .property("interrupt-names")
+        .and_then(|property| property.as_string_list())
+        .and_then(|names| names.iter().position(|name| *name == irq_name))
+        .unwrap_or(fallback_index);
+    let irq_resource = irq_resources
+        .get(irq_index)
+        .ok_or("ARM generic timer: selected IRQ is missing")?;
+
+    let interrupt_id = match crate::interrupt::resolve_platform_irq(irq_resource) {
+        Ok(interrupt_id) => interrupt_id,
+        Err(InterruptError::ControllerNotFound) => return probe_defer(),
+        Err(_) => return Err("ARM generic timer: failed to resolve timer IRQ"),
+    };
+
+    TIMER_PPI_IRQ.store(interrupt_id, Ordering::Release);
+    crate::arch::interrupt::configure_timer_interrupt_route(
+        crate::arch::interrupt::TimerInterruptRoute::ExternalControllerIrq,
+        Some(interrupt_id),
+    );
+    crate::early_println!(
+        "[interrupt] ARM generic timer: using {} PPI {} from firmware",
+        irq_name,
+        interrupt_id
+    );
+    Ok(())
+}
+
+fn platform_timer_remove(_device: &PlatformDeviceInfo) -> Result<(), &'static str> {
+    Ok(())
+}
