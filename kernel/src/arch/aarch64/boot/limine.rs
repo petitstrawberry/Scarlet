@@ -319,7 +319,7 @@ fn bootstrap_aps() {
     );
 
     for (cpu_id, cpu) in mp_resp.cpus().iter().copied().enumerate() {
-        if cpu.mpidr == bsp_mpidr {
+        if mpidr_affinity(cpu.mpidr) == mpidr_affinity(bsp_mpidr) {
             continue;
         }
         early_println!(
@@ -470,7 +470,7 @@ fn cpu_logical_id_from_fdt(cpu: &fdt::node::FdtNode, fallback_cpu_id: usize) -> 
 
     if let Some(mp_resp) = MP_REQUEST.response() {
         for (cpu_id, cpu) in mp_resp.cpus().iter().copied().enumerate() {
-            if cpu.mpidr == mpidr {
+            if mpidr_affinity(cpu.mpidr) == mpidr_affinity(mpidr) {
                 return cpu_id;
             }
         }
@@ -602,7 +602,7 @@ extern "C" fn limine_entry_after_el_drop(_arg0: usize, inherited_sctlr: u64) -> 
         executable.virtual_base as usize,
         kernel_end - kernel_start,
     );
-    let cpu_id = logical_cpu_id_from_mpidr(current_mpidr());
+    let cpu_id = bsp_logical_cpu_id();
     crate::arch::aarch64::init_arch(cpu_id);
     crate::arch::aarch64::early_console_init();
 
@@ -730,18 +730,68 @@ mod el_drop_tests {
         assert!(physical_timer_mask < hcr_drop);
         assert!(virtual_timer_mask < hcr_drop);
     }
+    #[test_case]
+    fn mpidr_matching_ignores_non_affinity_bits() {
+        let affinity = (0x12_u64 << 32) | (0x34 << 16) | (0x56 << 8) | 0x78;
+        let register_value = affinity | (1 << 31) | (1 << 30) | (1 << 24) | (0xab << 40);
+
+        assert_eq!(mpidr_affinity(register_value), affinity);
+        assert_eq!(mpidr_affinity(register_value), mpidr_affinity(affinity));
+    }
+
+    #[test_case]
+    fn bsp_uses_the_limine_cpu_array_index() {
+        let mpidrs = [0x000, 0x100, 0x200, 0x300, 0x400, 0x500, 0x600, 0x700];
+
+        assert_eq!(logical_cpu_id_in_mpidrs(0x700, mpidrs), Some(7));
+        assert_eq!(logical_cpu_id_in_mpidrs(0x8000_0700, mpidrs), Some(7));
+    }
+}
+
+fn bsp_logical_cpu_id() -> usize {
+    if let Some(mp_resp) = MP_REQUEST.response()
+        && let Some(cpu_id) = logical_cpu_id_in_mpidrs(
+            mp_resp.bsp_mpidr,
+            mp_resp.cpus().iter().copied().map(|cpu| cpu.mpidr),
+        )
+    {
+        return cpu_id;
+    }
+
+    // A response without its declared BSP in the CPU array is malformed, but
+    // retain the register-based path for old bootloaders that omit MP data.
+    logical_cpu_id_from_mpidr(current_mpidr())
 }
 
 fn logical_cpu_id_from_mpidr(mpidr: u64) -> usize {
-    if let Some(mp_resp) = MP_REQUEST.response() {
-        for (cpu_id, cpu) in mp_resp.cpus().iter().copied().enumerate() {
-            if cpu.mpidr == mpidr {
-                return cpu_id;
-            }
-        }
+    if let Some(mp_resp) = MP_REQUEST.response()
+        && let Some(cpu_id) =
+            logical_cpu_id_in_mpidrs(mpidr, mp_resp.cpus().iter().copied().map(|cpu| cpu.mpidr))
+    {
+        return cpu_id;
     }
 
-    (mpidr & 0xff) as usize
+    (mpidr_affinity(mpidr) & 0xff) as usize
+}
+
+fn logical_cpu_id_in_mpidrs(mpidr: u64, mpidrs: impl IntoIterator<Item = u64>) -> Option<usize> {
+    let affinity = mpidr_affinity(mpidr);
+    mpidrs
+        .into_iter()
+        .position(|candidate| mpidr_affinity(candidate) == affinity)
+}
+
+/// Return only the affinity fields that identify a processing element.
+///
+/// `MPIDR_EL1` also exposes non-affinity state such as the architecturally
+/// fixed RES1 bit and the U/MT bits. Firmware interfaces are not required to
+/// preserve those bits in exactly the form read back from the register, so a
+/// raw comparison can fail even when both values name the same CPU. Limine's
+/// CPU-array index is Scarlet's logical CPU ID; compare Aff3:Aff0 only so the
+/// BSP cannot fall back to an ID already assigned to an AP.
+const fn mpidr_affinity(mpidr: u64) -> u64 {
+    // Aff3 is [39:32], while Aff2:Aff0 occupy [23:0].
+    mpidr & 0x0000_00ff_00ff_ffff
 }
 
 #[inline(always)]
