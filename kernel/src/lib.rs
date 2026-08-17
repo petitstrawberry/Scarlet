@@ -669,6 +669,8 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
     early_println!("[Scarlet Kernel] Building Scarlet boot page table...");
     // crate::earlyfb::deactivate();
     switch_to_boot_page_table(direct_map_regions, boot_info.initramfs_paddr, heap_paddr);
+    #[cfg(all(target_arch = "aarch64", feature = "limine"))]
+    crate::arch::aarch64::boot::limine::log_smp_mapping_after_console_handoff();
 
     // Fix PMM metadata pointers immediately after page table switch
     // Must be done before any operation that might touch PMM data structures

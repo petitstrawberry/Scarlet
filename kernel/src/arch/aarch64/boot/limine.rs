@@ -1,6 +1,6 @@
 use core::arch::{asm, naked_asm};
 use core::mem::MaybeUninit;
-use core::sync::atomic::compiler_fence;
+use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering, compiler_fence};
 
 use limine::mp::MpInfo;
 
@@ -11,7 +11,7 @@ use crate::boot::limine::{
     runtime_direct_map_regions, select_usable_region,
 };
 use crate::device::fdt::{FdtManager, init_fdt, relocate_fdt};
-use crate::environment::STACK_SIZE;
+use crate::environment::{MAX_NUM_CPUS, STACK_SIZE};
 use crate::mem::{KERNEL_STACK, init_bss};
 use crate::vm::addr::{init_bootloader_direct_map_bound, init_limine_addressing, phys_to_virt};
 use crate::{BootInfo, DeviceSource, early_println, start_ap, start_kernel, wait_for_ap_release};
@@ -20,6 +20,15 @@ static mut EARLY_BOOTINFO: MaybeUninit<BootInfo> = MaybeUninit::uninit();
 
 static mut VHE_ENABLED: bool = false;
 static mut HV_AVAILABLE: bool = false;
+
+const SMP_DIAGNOSTIC_UNSET: usize = usize::MAX;
+const SMP_DIAGNOSTIC_MPIDR_UNSET: u64 = u64::MAX;
+static SMP_DIAGNOSTIC_CURRENT_MPIDR: AtomicU64 = AtomicU64::new(SMP_DIAGNOSTIC_MPIDR_UNSET);
+static SMP_DIAGNOSTIC_BSP_MPIDR: AtomicU64 = AtomicU64::new(SMP_DIAGNOSTIC_MPIDR_UNSET);
+static SMP_DIAGNOSTIC_CPU_COUNT: AtomicUsize = AtomicUsize::new(0);
+static SMP_DIAGNOSTIC_BSP_INDEX: AtomicUsize = AtomicUsize::new(SMP_DIAGNOSTIC_UNSET);
+static SMP_DIAGNOSTIC_MPIDRS: [AtomicU64; MAX_NUM_CPUS] =
+    [const { AtomicU64::new(SMP_DIAGNOSTIC_MPIDR_UNSET) }; MAX_NUM_CPUS];
 
 const HCR_EL2_FMO: u64 = 1 << 3;
 const HCR_EL2_IMO: u64 = 1 << 4;
@@ -749,18 +758,61 @@ mod el_drop_tests {
 }
 
 fn bsp_logical_cpu_id() -> usize {
-    if let Some(mp_resp) = MP_REQUEST.response()
-        && let Some(cpu_id) = logical_cpu_id_in_mpidrs(
-            mp_resp.bsp_mpidr,
-            mp_resp.cpus().iter().copied().map(|cpu| cpu.mpidr),
-        )
-    {
-        return cpu_id;
+    let current_mpidr = current_mpidr();
+    SMP_DIAGNOSTIC_CURRENT_MPIDR.store(current_mpidr, Ordering::Relaxed);
+
+    if let Some(mp_resp) = MP_REQUEST.response() {
+        let cpus = mp_resp.cpus();
+        SMP_DIAGNOSTIC_BSP_MPIDR.store(mp_resp.bsp_mpidr, Ordering::Relaxed);
+        SMP_DIAGNOSTIC_CPU_COUNT.store(cpus.len(), Ordering::Relaxed);
+        for (slot, cpu) in SMP_DIAGNOSTIC_MPIDRS.iter().zip(cpus.iter().copied()) {
+            slot.store(cpu.mpidr, Ordering::Relaxed);
+        }
+
+        if let Some(cpu_id) =
+            logical_cpu_id_in_mpidrs(mp_resp.bsp_mpidr, cpus.iter().copied().map(|cpu| cpu.mpidr))
+        {
+            SMP_DIAGNOSTIC_BSP_INDEX.store(cpu_id, Ordering::Release);
+            return cpu_id;
+        }
     }
 
     // A response without its declared BSP in the CPU array is malformed, but
     // retain the register-based path for old bootloaders that omit MP data.
-    logical_cpu_id_from_mpidr(current_mpidr())
+    let cpu_id = logical_cpu_id_from_mpidr(current_mpidr);
+    SMP_DIAGNOSTIC_BSP_INDEX.store(cpu_id, Ordering::Release);
+    cpu_id
+}
+
+/// Replay the pre-handoff Limine CPU mapping after the UART mapping is live.
+///
+/// The Limine response is not safe to dereference after Scarlet replaces the
+/// boot page table, so the entry path snapshots the values into atomics first.
+/// The fixed marker distinguishes this diagnostic kernel from older ESPs.
+pub(crate) fn log_smp_mapping_after_console_handoff() {
+    let current_mpidr = SMP_DIAGNOSTIC_CURRENT_MPIDR.load(Ordering::Acquire);
+    let bsp_mpidr = SMP_DIAGNOSTIC_BSP_MPIDR.load(Ordering::Acquire);
+    let cpu_count = SMP_DIAGNOSTIC_CPU_COUNT.load(Ordering::Acquire);
+    let bsp_index = SMP_DIAGNOSTIC_BSP_INDEX.load(Ordering::Acquire);
+
+    early_println!(
+        "[aarch64:smp-map-v3] current_mpidr={:#x} limine_bsp_mpidr={:#x} bsp_index={} cpu_count={}",
+        current_mpidr,
+        bsp_mpidr,
+        bsp_index,
+        cpu_count,
+    );
+    for (cpu_id, mpidr) in SMP_DIAGNOSTIC_MPIDRS
+        .iter()
+        .take(cpu_count.min(MAX_NUM_CPUS))
+        .enumerate()
+    {
+        early_println!(
+            "[aarch64:smp-map-v3] cpu[{}].mpidr={:#x}",
+            cpu_id,
+            mpidr.load(Ordering::Acquire),
+        );
+    }
 }
 
 fn logical_cpu_id_from_mpidr(mpidr: u64) -> usize {
