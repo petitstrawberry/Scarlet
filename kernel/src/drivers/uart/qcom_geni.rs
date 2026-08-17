@@ -29,6 +29,9 @@ use crate::{
 const GENI_STATUS: usize = 0x040;
 const GENI_STATUS_M_CMD_ACTIVE: u32 = 1 << 0;
 const GENI_UART_TX_TRANS_LEN: usize = 0x270;
+const GENI_UART_RX_STALE_CNT: usize = 0x294;
+const GENI_UART_RX_STALE_CHAR_TIMES: u32 = 16;
+const GENI_UART_BITS_PER_CHAR: u32 = 10;
 
 const GENI_M_CMD0: usize = 0x600;
 const GENI_M_CMD0_UART_START_TX: u32 = 1 << 27;
@@ -52,7 +55,12 @@ const GENI_RX_FIFO: usize = 0x780;
 const GENI_RX_FIFO_STATUS: usize = 0x804;
 const GENI_RX_FIFO_STATUS_WC_MASK: u32 = 0x01ff_ffff;
 const GENI_TX_FIFO_WATERMARK: usize = 0x80c;
+const GENI_RX_FIFO_WATERMARK: usize = 0x810;
+const GENI_HW_PARAM_0: usize = 0xe24;
+const GENI_HW_PARAM_0_TX_FIFO_DEPTH_MASK: u32 = 0x003f_0000;
+const GENI_HW_PARAM_0_TX_FIFO_DEPTH_SHIFT: u32 = 16;
 const GENI_TX_WATERMARK: u32 = 2;
+const GENI_DEFAULT_TX_FIFO_DEPTH_WORDS: usize = 16;
 
 fn reg_read_at(base: usize, offset: usize) -> u32 {
     // SAFETY: callers provide a Device-typed mapping of the GENI register
@@ -97,6 +105,7 @@ pub(crate) fn early_write_byte(base: usize, byte: u8) {
 
 struct QcomGeniUart {
     base: usize,
+    tx_fifo_depth_words: usize,
     interrupt_id: IrqRwSpinLock<Option<InterruptId>>,
     rx_buffer: IrqSpinLock<VecDeque<u8>>,
     event_emitter: IrqSpinLock<DeviceEventEmitter>,
@@ -105,8 +114,18 @@ struct QcomGeniUart {
 
 impl QcomGeniUart {
     fn new(base: usize) -> Self {
+        let hw_fifo_depth_words = ((reg_read_at(base, GENI_HW_PARAM_0)
+            & GENI_HW_PARAM_0_TX_FIFO_DEPTH_MASK)
+            >> GENI_HW_PARAM_0_TX_FIFO_DEPTH_SHIFT) as usize;
+        let tx_fifo_depth_words = if hw_fifo_depth_words > GENI_TX_WATERMARK as usize {
+            hw_fifo_depth_words
+        } else {
+            GENI_DEFAULT_TX_FIFO_DEPTH_WORDS
+        };
+
         Self {
             base,
+            tx_fifo_depth_words,
             interrupt_id: IrqRwSpinLock::new(None),
             rx_buffer: IrqSpinLock::new(VecDeque::new()),
             event_emitter: IrqSpinLock::new(DeviceEventEmitter::new()),
@@ -125,6 +144,13 @@ impl QcomGeniUart {
     fn enable_interrupts(&self, interrupt_id: InterruptId) -> Result<(), &'static str> {
         self.interrupt_id.write().replace(interrupt_id);
 
+        // Do not inherit an arbitrary firmware threshold: interactive input
+        // must raise an interrupt as soon as one FIFO word is available.
+        self.reg_write(GENI_RX_FIFO_WATERMARK, 1);
+        self.reg_write(
+            GENI_UART_RX_STALE_CNT,
+            GENI_UART_BITS_PER_CHAR * GENI_UART_RX_STALE_CHAR_TIMES,
+        );
         self.reg_write(
             GENI_S_IRQ_EN,
             GENI_S_IRQ_RX_FIFO_WATERMARK | GENI_S_IRQ_RX_FIFO_LAST,
@@ -145,6 +171,31 @@ impl QcomGeniUart {
 
     fn write_byte_internal(&self, byte: u8) {
         early_write_byte(self.base, byte);
+    }
+
+    fn write_chunk_internal(&self, chunk: &[u8]) {
+        debug_assert!(!chunk.is_empty());
+        debug_assert!(chunk.len() <= self.tx_fifo_capacity_bytes());
+
+        self.reg_write(GENI_TX_FIFO_WATERMARK, GENI_TX_WATERMARK);
+        self.reg_write(GENI_UART_TX_TRANS_LEN, chunk.len() as u32);
+        self.reg_write(GENI_M_CMD0, GENI_M_CMD0_UART_START_TX);
+
+        wait_for_at(self.base, GENI_M_IRQ_STATUS, GENI_M_IRQ_TX_FIFO_WATERMARK);
+        // Keep the firmware-established one-byte-per-FIFO-write packing.
+        // Repacking four characters into one word requires programming the
+        // GENI packing vectors first and is not safe across firmware handoff.
+        for &byte in chunk {
+            self.reg_write(GENI_TX_FIFO, byte as u32);
+        }
+        self.reg_write(GENI_M_IRQ_CLEAR, GENI_M_IRQ_TX_FIFO_WATERMARK);
+
+        wait_for_at(self.base, GENI_M_IRQ_STATUS, GENI_M_IRQ_CMD_DONE);
+        self.reg_write(GENI_M_IRQ_CLEAR, GENI_M_IRQ_CMD_DONE);
+    }
+
+    fn tx_fifo_capacity_bytes(&self) -> usize {
+        self.tx_fifo_depth_words
     }
 
     fn read_byte_internal(&self) -> Option<u8> {
@@ -229,8 +280,8 @@ impl CharDevice for QcomGeniUart {
         }
 
         let _lock = self.tx_lock.lock();
-        for &byte in buffer {
-            self.write_byte_internal(byte);
+        for chunk in buffer.chunks(self.tx_fifo_capacity_bytes()) {
+            self.write_chunk_internal(chunk);
         }
 
         Ok(buffer.len())
