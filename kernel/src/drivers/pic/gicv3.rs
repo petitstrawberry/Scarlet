@@ -24,6 +24,7 @@ use crate::{
 
 use alloc::{boxed::Box, vec};
 use core::arch::asm;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 /// Maximum number of interrupts supported by this implementation.
 const MAX_INTERRUPTS: InterruptId = 1020;
@@ -33,6 +34,12 @@ const MAX_CPUS: CpuId = 8;
 
 /// SGI used by the scheduler to request a reschedule on another CPU.
 const RESCHEDULE_SGI: u32 = 0;
+
+/// Sentinel used until a logical CPU publishes its architectural affinity.
+const INVALID_MPIDR_AFFINITY: u64 = u64::MAX;
+
+/// MPIDR affinity fields (Aff3 and Aff2:Aff0), excluding U/MT and RES0 bits.
+const MPIDR_AFFINITY_MASK: u64 = 0xFF00_FFFF_FF;
 
 // Distributor register offsets (GICD)
 const GICD_CTLR: usize = 0x0000;
@@ -128,8 +135,43 @@ fn write_icc_igrpen1_el1(v: u64) {
 #[inline]
 fn write_icc_sgi1r_el1(v: u64) {
     unsafe {
-        asm!("msr ICC_SGI1R_EL1, {0}", "isb", in(reg) v, options(nostack));
+        asm!(
+            "dsb ishst",
+            "msr ICC_SGI1R_EL1, {0}",
+            "isb",
+            in(reg) v,
+            options(nostack)
+        );
     }
+}
+
+#[inline]
+fn current_mpidr_affinity() -> u64 {
+    let mpidr: u64;
+    unsafe {
+        asm!("mrs {0}, MPIDR_EL1", out(reg) mpidr, options(nostack));
+    }
+    mpidr & MPIDR_AFFINITY_MASK
+}
+
+#[inline]
+fn sgi1r_for_affinity(intid: u64, affinity: u64) -> InterruptResult<u64> {
+    let aff0 = affinity & 0xff;
+    let aff1 = (affinity >> 8) & 0xff;
+    let aff2 = (affinity >> 16) & 0xff;
+    let aff3 = (affinity >> 32) & 0xff;
+
+    // ICC_SGI1R_EL1.TargetList addresses Aff0[3:0]. Range Selector support
+    // for Aff0 >= 16 is optional and Scarlet does not negotiate it yet.
+    if aff0 >= 16 {
+        return Err(InterruptError::InvalidCpuId);
+    }
+
+    Ok((aff3 << 48)
+        | (aff2 << 32)
+        | (intid << 24)
+        | (aff1 << 16)
+        | (1u64 << aff0))
 }
 
 #[inline]
@@ -148,6 +190,7 @@ pub struct GicV3 {
     redist_base_addr: usize,
     max_interrupts: InterruptId,
     max_cpus: CpuId,
+    cpu_mpidr_affinity: [AtomicU64; MAX_CPUS as usize],
 }
 
 impl GicV3 {
@@ -162,6 +205,8 @@ impl GicV3 {
             redist_base_addr,
             max_interrupts: max_interrupts.min(MAX_INTERRUPTS),
             max_cpus: max_cpus.min(MAX_CPUS),
+            cpu_mpidr_affinity: [const { AtomicU64::new(INVALID_MPIDR_AFFINITY) };
+                MAX_CPUS as usize],
         }
     }
 
@@ -494,6 +539,9 @@ impl ExternalInterruptController for GicV3 {
     }
 
     fn init_for_cpu(&mut self, cpu_id: CpuId) -> InterruptResult<()> {
+        self.validate_cpu_id(cpu_id)?;
+        self.cpu_mpidr_affinity[cpu_id as usize]
+            .store(current_mpidr_affinity(), Ordering::Release);
         self.init_redistributor(cpu_id);
         self.init_cpu_interface_sysregs();
         Ok(())
@@ -518,15 +566,17 @@ impl ExternalInterruptController for GicV3 {
             return Err(InterruptError::InvalidInterruptId);
         }
 
-        // ICC_SGI1R_EL1 fields used here:
-        //   [55:48] Aff3, [47:44] RS, [40] IRM, [39:32] Aff2,
-        //   [27:24] INTID, [23:16] Aff1, [15:0] TargetList.
-        // QEMU virt uses a flat affinity layout, so Aff1/2/3=0 and a
-        // 1-bit TargetList mask for CPU IDs < 8 is sufficient here.
-        let target_mask = 1u64
-            .checked_shl(target_cpu_id)
-            .ok_or(InterruptError::InvalidCpuId)?;
-        let sgi1r = (intid << 24) | target_mask;
+        let affinity = self.cpu_mpidr_affinity[target_cpu_id as usize].load(Ordering::Acquire);
+        if affinity == INVALID_MPIDR_AFFINITY {
+            return Err(InterruptError::InvalidCpuId);
+        }
+
+        // ICC_SGI1R_EL1 targets architectural affinity, not Scarlet's
+        // scheduler CPU number. In particular, SC7180 identifies its CPUs as
+        // Aff1=0..7, Aff0=0, whereas QEMU's flat topology uses Aff1=0,
+        // Aff0=0..N. Record each CPU's MPIDR during per-CPU initialization and
+        // encode the target from that affinity.
+        let sgi1r = sgi1r_for_affinity(intid, affinity)?;
         write_icc_sgi1r_el1(sgi1r);
 
         Ok(())
