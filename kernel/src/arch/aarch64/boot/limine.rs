@@ -1,6 +1,6 @@
 use core::arch::{asm, naked_asm};
 use core::mem::MaybeUninit;
-use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering, compiler_fence};
+use core::sync::atomic::compiler_fence;
 
 use limine::mp::MpInfo;
 
@@ -11,7 +11,7 @@ use crate::boot::limine::{
     runtime_direct_map_regions, select_usable_region,
 };
 use crate::device::fdt::{FdtManager, init_fdt, relocate_fdt};
-use crate::environment::{MAX_NUM_CPUS, STACK_SIZE};
+use crate::environment::STACK_SIZE;
 use crate::mem::{KERNEL_STACK, init_bss};
 use crate::vm::addr::{init_bootloader_direct_map_bound, init_limine_addressing, phys_to_virt};
 use crate::{BootInfo, DeviceSource, early_println, start_ap, start_kernel, wait_for_ap_release};
@@ -20,17 +20,6 @@ static mut EARLY_BOOTINFO: MaybeUninit<BootInfo> = MaybeUninit::uninit();
 
 static mut VHE_ENABLED: bool = false;
 static mut HV_AVAILABLE: bool = false;
-
-const SMP_DIAGNOSTIC_UNSET: usize = usize::MAX;
-const SMP_DIAGNOSTIC_MPIDR_UNSET: u64 = u64::MAX;
-static SMP_DIAGNOSTIC_CURRENT_MPIDR: AtomicU64 = AtomicU64::new(SMP_DIAGNOSTIC_MPIDR_UNSET);
-static SMP_DIAGNOSTIC_BSP_MPIDR: AtomicU64 = AtomicU64::new(SMP_DIAGNOSTIC_MPIDR_UNSET);
-static SMP_DIAGNOSTIC_CPU_COUNT: AtomicUsize = AtomicUsize::new(0);
-static SMP_DIAGNOSTIC_BSP_INDEX: AtomicUsize = AtomicUsize::new(SMP_DIAGNOSTIC_UNSET);
-static SMP_DIAGNOSTIC_MPIDRS: [AtomicU64; MAX_NUM_CPUS] =
-    [const { AtomicU64::new(SMP_DIAGNOSTIC_MPIDR_UNSET) }; MAX_NUM_CPUS];
-static SMP_DIAGNOSTIC_LOGICAL_IDS: [AtomicUsize; MAX_NUM_CPUS] =
-    [const { AtomicUsize::new(SMP_DIAGNOSTIC_UNSET) }; MAX_NUM_CPUS];
 
 const HCR_EL2_FMO: u64 = 1 << 3;
 const HCR_EL2_IMO: u64 = 1 << 4;
@@ -313,7 +302,7 @@ fn start_secondary_cpus() {
     crate::release_aps();
 }
 
-fn bootstrap_aps(bsp_cpu_id: usize) {
+fn bootstrap_aps() {
     let mp_resp = match MP_REQUEST.response() {
         Some(resp) => resp,
         None => {
@@ -329,42 +318,9 @@ fn bootstrap_aps(bsp_cpu_id: usize) {
         mp_resp.cpus().len()
     );
 
-    let fdt = FdtManager::get_manager().get_fdt();
-    let mut assigned = [false; MAX_NUM_CPUS];
-    if bsp_cpu_id < MAX_NUM_CPUS {
-        assigned[bsp_cpu_id] = true;
-    }
-
-    for (response_index, cpu) in mp_resp.cpus().iter().copied().enumerate() {
+    for (cpu_id, cpu) in mp_resp.cpus().iter().copied().enumerate() {
         if mpidr_affinity(cpu.mpidr) == mpidr_affinity(bsp_mpidr) {
             continue;
-        }
-
-        let cpu_id = fdt
-            .and_then(|fdt| logical_cpu_id_in_fdt(fdt, cpu.mpidr))
-            .or_else(|| {
-                (response_index < MAX_NUM_CPUS && !assigned[response_index])
-                    .then_some(response_index)
-            })
-            .or_else(|| assigned.iter().position(|is_assigned| !*is_assigned));
-        let Some(cpu_id) = cpu_id else {
-            early_println!(
-                "[aarch64] Skipping AP mpidr={:#x}: no unique logical CPU ID",
-                cpu.mpidr
-            );
-            continue;
-        };
-        if assigned[cpu_id] {
-            early_println!(
-                "[aarch64] Skipping AP mpidr={:#x}: logical CPU {} is already assigned",
-                cpu.mpidr,
-                cpu_id
-            );
-            continue;
-        }
-        assigned[cpu_id] = true;
-        if response_index < MAX_NUM_CPUS {
-            SMP_DIAGNOSTIC_LOGICAL_IDS[response_index].store(cpu_id, Ordering::Release);
         }
         early_println!(
             "[aarch64] Bootstrapping CPU {} mpidr={:#x}...",
@@ -402,7 +358,7 @@ fn register_cpu_topology_from_fdt() {
             continue;
         }
 
-        let cpu_id = fallback_cpu_id;
+        let cpu_id = cpu_logical_id_from_fdt(&cpu, fallback_cpu_id);
         fallback_cpu_id += 1;
 
         let raw_capacity = cpu_capacity_dmips_mhz(&cpu);
@@ -507,14 +463,20 @@ fn classify_cpu_node(
     CpuCoreClass::Balanced
 }
 
-fn logical_cpu_id_in_fdt(fdt: &fdt::Fdt<'_>, mpidr: u64) -> Option<usize> {
-    let cpus = fdt.find_node("/cpus")?;
-    cpus.children()
-        .filter(is_enabled_cpu_node)
-        .enumerate()
-        .find_map(|(cpu_id, cpu)| {
-            (mpidr_affinity(cpu_reg(&cpu)?) == mpidr_affinity(mpidr)).then_some(cpu_id)
-        })
+fn cpu_logical_id_from_fdt(cpu: &fdt::node::FdtNode, fallback_cpu_id: usize) -> usize {
+    let Some(mpidr) = cpu_reg(cpu) else {
+        return fallback_cpu_id;
+    };
+
+    if let Some(mp_resp) = MP_REQUEST.response() {
+        for (cpu_id, cpu) in mp_resp.cpus().iter().copied().enumerate() {
+            if mpidr_affinity(cpu.mpidr) == mpidr_affinity(mpidr) {
+                return cpu_id;
+            }
+        }
+    }
+
+    fallback_cpu_id
 }
 
 fn cpu_reg(cpu: &fdt::node::FdtNode) -> Option<u64> {
@@ -640,12 +602,7 @@ extern "C" fn limine_entry_after_el_drop(_arg0: usize, inherited_sctlr: u64) -> 
         executable.virtual_base as usize,
         kernel_end - kernel_start,
     );
-    let dtb_ptr = dtb.dtb_ptr as usize;
-    // SAFETY: Limine supplied this pointer through a successful DTB response,
-    // and its mappings remain live until Scarlet installs its boot page table.
-    let early_fdt = unsafe { fdt::Fdt::from_ptr(dtb_ptr as *const u8) }
-        .unwrap_or_else(|error| panic!("Limine FDT parse failed: {:?}", error));
-    let cpu_id = bsp_logical_cpu_id(&early_fdt);
+    let cpu_id = bsp_logical_cpu_id();
     crate::arch::aarch64::init_arch(cpu_id);
     crate::arch::aarch64::early_console_init();
 
@@ -668,6 +625,7 @@ extern "C" fn limine_entry_after_el_drop(_arg0: usize, inherited_sctlr: u64) -> 
         );
     }
 
+    let dtb_ptr = dtb.dtb_ptr as usize;
     init_fdt(dtb_ptr);
 
     let usable_region = select_usable_region(memmap.entries());
@@ -692,7 +650,7 @@ extern "C" fn limine_entry_after_el_drop(_arg0: usize, inherited_sctlr: u64) -> 
     // after the page-table switch in start_kernel.
     crate::boot::limine::capture_date_at_boot();
 
-    bootstrap_aps(cpu_id);
+    bootstrap_aps();
     register_cpu_topology_from_fdt();
 
     let bootinfo = BootInfo::new(
@@ -790,73 +748,25 @@ mod el_drop_tests {
     }
 }
 
-fn bsp_logical_cpu_id(fdt: &fdt::Fdt<'_>) -> usize {
-    let current_mpidr = current_mpidr();
-    SMP_DIAGNOSTIC_CURRENT_MPIDR.store(current_mpidr, Ordering::Relaxed);
-
+fn bsp_logical_cpu_id() -> usize {
     if let Some(mp_resp) = MP_REQUEST.response() {
-        let cpus = mp_resp.cpus();
-        SMP_DIAGNOSTIC_BSP_MPIDR.store(mp_resp.bsp_mpidr, Ordering::Relaxed);
-        SMP_DIAGNOSTIC_CPU_COUNT.store(cpus.len(), Ordering::Relaxed);
-        for (slot, cpu) in SMP_DIAGNOSTIC_MPIDRS.iter().zip(cpus.iter().copied()) {
-            slot.store(cpu.mpidr, Ordering::Relaxed);
-        }
-
-        if let Some(cpu_id) = logical_cpu_id_in_fdt(fdt, mp_resp.bsp_mpidr) {
-            SMP_DIAGNOSTIC_BSP_INDEX.store(cpu_id, Ordering::Release);
-            return cpu_id;
-        }
+        return logical_cpu_id_in_mpidrs(
+            mp_resp.bsp_mpidr,
+            mp_resp.cpus().iter().copied().map(|cpu| cpu.mpidr),
+        )
+        .unwrap_or_else(|| {
+            panic!(
+                "Limine MP response omitted BSP mpidr={:#x}",
+                mp_resp.bsp_mpidr
+            )
+        });
     }
 
-    // A response without its declared BSP in the CPU array is malformed, but
-    // retain the register-based path for old bootloaders that omit MP data.
-    let cpu_id = logical_cpu_id_in_fdt(fdt, current_mpidr)
-        .unwrap_or_else(|| logical_cpu_id_from_mpidr(current_mpidr));
-    SMP_DIAGNOSTIC_BSP_INDEX.store(cpu_id, Ordering::Release);
-    cpu_id
-}
-
-/// Replay the pre-handoff Limine CPU mapping after the UART mapping is live.
-///
-/// The Limine response is not safe to dereference after Scarlet replaces the
-/// boot page table, so the entry path snapshots the values into atomics first.
-/// The fixed marker distinguishes this diagnostic kernel from older ESPs.
-pub(crate) fn log_smp_mapping_after_console_handoff() {
-    let current_mpidr = SMP_DIAGNOSTIC_CURRENT_MPIDR.load(Ordering::Acquire);
-    let bsp_mpidr = SMP_DIAGNOSTIC_BSP_MPIDR.load(Ordering::Acquire);
-    let cpu_count = SMP_DIAGNOSTIC_CPU_COUNT.load(Ordering::Acquire);
-    let bsp_index = SMP_DIAGNOSTIC_BSP_INDEX.load(Ordering::Acquire);
-
-    early_println!(
-        "[aarch64:smp-map-v4] current_mpidr={:#x} limine_bsp_mpidr={:#x} bsp_index={} cpu_count={}",
-        current_mpidr,
-        bsp_mpidr,
-        bsp_index,
-        cpu_count,
-    );
-    for (response_index, mpidr) in SMP_DIAGNOSTIC_MPIDRS
-        .iter()
-        .take(cpu_count.min(MAX_NUM_CPUS))
-        .enumerate()
-    {
-        let logical_id = SMP_DIAGNOSTIC_LOGICAL_IDS[response_index].load(Ordering::Acquire);
-        early_println!(
-            "[aarch64:smp-map-v4] limine_cpu[{}].mpidr={:#x} logical_id={}",
-            response_index,
-            mpidr.load(Ordering::Acquire),
-            logical_id,
-        );
-    }
+    // Keep a register-based fallback for bootloaders that provide no MP data.
+    logical_cpu_id_from_mpidr(current_mpidr())
 }
 
 fn logical_cpu_id_from_mpidr(mpidr: u64) -> usize {
-    if let Some(mp_resp) = MP_REQUEST.response()
-        && let Some(cpu_id) =
-            logical_cpu_id_in_mpidrs(mpidr, mp_resp.cpus().iter().copied().map(|cpu| cpu.mpidr))
-    {
-        return cpu_id;
-    }
-
     (mpidr_affinity(mpidr) & 0xff) as usize
 }
 
@@ -870,11 +780,8 @@ fn logical_cpu_id_in_mpidrs(mpidr: u64, mpidrs: impl IntoIterator<Item = u64>) -
 /// Return only the affinity fields that identify a processing element.
 ///
 /// `MPIDR_EL1` also exposes non-affinity state such as the architecturally
-/// fixed RES1 bit and the U/MT bits. Firmware interfaces are not required to
-/// preserve those bits in exactly the form read back from the register, so a
-/// raw comparison can fail even when both values name the same CPU. Limine's
-/// CPU-array index is Scarlet's logical CPU ID; compare Aff3:Aff0 only so the
-/// BSP cannot fall back to an ID already assigned to an AP.
+/// fixed RES1 bit and the U/MT bits. Compare only Aff3:Aff0 when matching the
+/// live register, Limine response, and firmware topology descriptions.
 const fn mpidr_affinity(mpidr: u64) -> u64 {
     // Aff3 is [39:32], while Aff2:Aff0 occupy [23:0].
     mpidr & 0x0000_00ff_00ff_ffff
