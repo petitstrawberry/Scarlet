@@ -24,9 +24,12 @@ static mut HV_AVAILABLE: bool = false;
 const HCR_EL2_FMO: u64 = 1 << 3;
 const HCR_EL2_IMO: u64 = 1 << 4;
 const HCR_EL2_AMO: u64 = 1 << 5;
+const HCR_EL2_TGE: u64 = 1 << 27;
 const HCR_EL2_RW: u64 = 1 << 31;
 const HCR_EL2_E2H: u64 = 1 << 34;
 const HCR_EL2_HOST_INTERRUPT_ROUTING: u64 = HCR_EL2_FMO | HCR_EL2_IMO | HCR_EL2_AMO;
+const HCR_EL2_VHE_HOST_REQUIRED: u64 =
+    HCR_EL2_RW | HCR_EL2_TGE | HCR_EL2_E2H | HCR_EL2_HOST_INTERRUPT_ROUTING;
 const CPTR_EL2_VHE_FPEN_FULL: u64 = 0b11 << 20;
 #[allow(dead_code)]
 const SCTLR_M: u64 = 1;
@@ -45,8 +48,16 @@ pub fn is_hv_available() -> bool {
     unsafe { HV_AVAILABLE }
 }
 
-const fn should_drop_el2_to_el1(el: u64, hcr_el2: u64, _hypervisor_enabled: bool) -> bool {
+const fn should_drop_el2_to_el1(el: u64, hcr_el2: u64) -> bool {
     el == 2 && hcr_el2 & HCR_EL2_E2H == 0
+}
+
+const fn vhe_host_hcr(hcr_el2: u64) -> Option<u64> {
+    if hcr_el2 & HCR_EL2_E2H == 0 {
+        None
+    } else {
+        Some(hcr_el2 | HCR_EL2_VHE_HOST_REQUIRED)
+    }
 }
 
 fn maybe_drop_el2_to_el1(continuation: usize, arg0: usize) {
@@ -58,7 +69,7 @@ fn maybe_drop_el2_to_el1(continuation: usize, arg0: usize) {
     unsafe {
         asm!("mrs {}, hcr_el2", out(reg) hcr_el2, options(nostack));
     }
-    if !should_drop_el2_to_el1(2, hcr_el2, cfg!(feature = "hypervisor")) {
+    if !should_drop_el2_to_el1(2, hcr_el2) {
         return;
     }
 
@@ -281,7 +292,7 @@ pub extern "C" fn secondary_cpu_entry(cpu_id: usize) -> ! {
 
 extern "C" fn secondary_cpu_entry_after_el_drop(cpu_id: usize, inherited_sctlr: u64) -> ! {
     prepare_el1_runtime();
-    let _ = configure_vhe_host_interrupt_routing();
+    let _ = configure_vhe_host_control();
     // log_el1_memory_state("handoff", cpu_id, inherited_sctlr);
     wait_for_ap_release();
     start_ap(cpu_id)
@@ -513,26 +524,27 @@ fn detect_el() -> (u64, bool) {
 }
 
 #[inline(always)]
-fn configure_vhe_host_interrupt_routing() -> Option<(u64, u64)> {
+fn configure_vhe_host_control() -> Option<(u64, u64)> {
     if current_el() != 2 {
         return None;
     }
 
     let old_hcr: u64;
-    // SAFETY: CurrentEL is EL2. The read confirms that VHE is enabled before
-    // updating only the architected physical exception routing bits, and the
-    // ISB makes the new routing effective before exceptions are unmasked.
+    // SAFETY: CurrentEL is EL2, so HCR_EL2 is accessible.
     unsafe {
         asm!("mrs {0}, hcr_el2", out(reg) old_hcr, options(nostack));
     }
-    if old_hcr & HCR_EL2_E2H == 0 {
-        return None;
-    }
-
-    let new_hcr = old_hcr | HCR_EL2_HOST_INTERRUPT_ROUTING;
+    // A VHE kernel and its EL0 processes are one host. TGE selects the EL2&0
+    // translation regime for EL0 and routes its exceptions to EL2; RW keeps
+    // that lower level in AArch64 state. E2H alone is not a complete host
+    // configuration.
+    let new_hcr = vhe_host_hcr(old_hcr)?;
     // SAFETY: The CPU is still at EL2 and exceptions are masked during boot.
+    // The barriers make the translation/exception-routing change complete
+    // before any lower-EL execution can begin.
     unsafe {
         asm!(
+            "dsb sy",
             "msr hcr_el2, {0}",
             "isb",
             in(reg) new_hcr,
@@ -566,7 +578,7 @@ extern "C" fn limine_entry_after_el_drop(_arg0: usize, inherited_sctlr: u64) -> 
         HV_AVAILABLE = vhe;
     }
 
-    let hcr_transition = configure_vhe_host_interrupt_routing();
+    let hcr_transition = configure_vhe_host_control();
 
     prepare_el1_runtime();
 
@@ -596,7 +608,7 @@ extern "C" fn limine_entry_after_el_drop(_arg0: usize, inherited_sctlr: u64) -> 
 
     if let Some((old_hcr, new_hcr)) = hcr_transition {
         early_println!(
-            "[aarch64] BSP: HCR_EL2 host interrupt routing {:#x} -> {:#x}",
+            "[aarch64] BSP: HCR_EL2 VHE host control {:#x} -> {:#x}",
             old_hcr,
             new_hcr
         );
@@ -684,12 +696,22 @@ mod el_drop_tests {
     use super::*;
 
     #[test_case]
-    fn el2_vhe_remains_at_el2_without_hypervisor_feature() {
-        assert!(!should_drop_el2_to_el1(2, HCR_EL2_E2H, false));
-        assert!(should_drop_el2_to_el1(2, 0, false));
-        assert!(should_drop_el2_to_el1(2, 0, true));
-        assert!(!should_drop_el2_to_el1(2, HCR_EL2_E2H, true));
-        assert!(!should_drop_el2_to_el1(1, HCR_EL2_E2H, false));
+    fn el2_vhe_stays_at_el2_and_non_vhe_drops() {
+        assert!(!should_drop_el2_to_el1(2, HCR_EL2_E2H));
+        assert!(should_drop_el2_to_el1(2, 0));
+        assert!(!should_drop_el2_to_el1(1, HCR_EL2_E2H));
+    }
+
+    #[test_case]
+    fn vhe_host_control_includes_el0_translation_and_exception_routing() {
+        assert_eq!(vhe_host_hcr(HCR_EL2_RW), None);
+        let hcr = vhe_host_hcr(HCR_EL2_E2H).expect("E2H must select VHE host mode");
+        assert_eq!(hcr & HCR_EL2_TGE, HCR_EL2_TGE);
+        assert_eq!(hcr & HCR_EL2_RW, HCR_EL2_RW);
+        assert_eq!(
+            hcr & HCR_EL2_HOST_INTERRUPT_ROUTING,
+            HCR_EL2_HOST_INTERRUPT_ROUTING
+        );
     }
 
     #[test_case]
