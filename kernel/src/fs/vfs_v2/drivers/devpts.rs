@@ -556,9 +556,9 @@ impl Drop for DevPtsFileObject {
 impl StreamOps for DevPtsFileObject {
     fn read(&self, buffer: &mut [u8]) -> Result<usize, StreamError> {
         let count = match &self.endpoint {
-            DevPtsEndpoint::Master(master) => master.read(buffer),
-            DevPtsEndpoint::Slave(slave) => slave.read(buffer),
-        };
+            DevPtsEndpoint::Master(master) => master.try_read(buffer),
+            DevPtsEndpoint::Slave(slave) => slave.try_read(buffer),
+        }?;
         *self.position.write() += count as u64;
         Ok(count)
     }

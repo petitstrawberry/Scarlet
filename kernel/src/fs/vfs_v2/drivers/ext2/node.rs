@@ -1539,8 +1539,8 @@ impl StreamOps for Ext2CharDeviceFileObject {
         if let Some(char_device) = device.as_char_device() {
             #[cfg(test)]
             crate::println!("[ext2] CharDevice: Successfully cast to CharDevice");
-            // Use the CharDevice read method
-            Ok(char_device.read(buffer))
+            // Use the fallible CharDevice read path so interrupted waits reach the ABI.
+            char_device.try_read(buffer)
         } else {
             #[cfg(test)]
             crate::println!("[ext2] CharDevice: Device is not a CharDevice");

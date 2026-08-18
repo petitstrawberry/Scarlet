@@ -13,8 +13,8 @@ use crate::late_initcall;
 use crate::object::capability::selectable::{
     ReadyInterest, ReadySet, SelectWaitOutcome, Selectable,
 };
-use crate::object::capability::{ControlOps, MemoryMappingOps};
-use crate::sync::waker::Waker;
+use crate::object::capability::{ControlOps, MemoryMappingOps, StreamError};
+use crate::sync::waker::{WaitResult, Waker};
 use crate::sync::{IrqRwSpinLock, IrqSpinLock};
 use crate::task::mytask;
 use crate::timer::{TimerHandler, add_timer, cancel_timer, get_time_ns};
@@ -525,7 +525,10 @@ impl TtyDevice {
                 return;
             }
             if let Some(task) = mytask() {
-                self.input_waker.wait(task.get_id(), trapframe);
+                if self.input_waker.wait_result(task.get_id(), trapframe) == WaitResult::Interrupted
+                {
+                    return;
+                }
             } else {
                 // No task context; abort wait
                 return;
@@ -573,7 +576,7 @@ impl TtyDevice {
         let timer_id = add_timer(deadline, crate::timer::TimerPrecision::Normal, &handler, 0);
 
         if let Some(task) = mytask() {
-            self.input_waker.wait(task.get_id(), trapframe);
+            let _ = self.input_waker.wait_result(task.get_id(), trapframe);
         }
 
         // After wake: cancel timer if still queued and decide reason
@@ -1427,16 +1430,16 @@ impl Device for TtyDevice {
     }
 }
 
-impl CharDevice for TtyDevice {
-    fn read(&self, buffer: &mut [u8]) -> usize {
+impl TtyDevice {
+    fn read_interruptible(&self, buffer: &mut [u8]) -> Result<usize, StreamError> {
         if buffer.is_empty() {
-            return 0;
+            return Ok(0);
         }
         if self.is_current_process_group_background() {
             self.send_process_control_to_current_group(
                 crate::ipc::event::ProcessControlType::TerminalInput,
             );
-            return 0;
+            return Ok(0);
         }
 
         // Fast path: non-blocking immediate return if policy requires 0 and no data
@@ -1488,7 +1491,7 @@ impl CharDevice for TtyDevice {
                     )
                 };
                 if has_newline {
-                    return copy_out(buffer, true);
+                    return Ok(copy_out(buffer, true));
                 }
                 if has_eof {
                     self.canonical_eof_ready.store(false, Ordering::Relaxed);
@@ -1502,17 +1505,23 @@ impl CharDevice for TtyDevice {
                             break;
                         }
                     }
-                    return bytes;
+                    return Ok(bytes);
                 }
                 // Wait for more input
                 if self.nonblocking.load(Ordering::Relaxed) {
-                    return 0; // non-blocking: no data yet
+                    return Ok(0); // non-blocking: no data yet
                 }
                 if let Some(task) = mytask() {
-                    self.input_waker.wait(task.get_id(), task.get_trapframe());
+                    if self
+                        .input_waker
+                        .wait_result(task.get_id(), task.get_trapframe())
+                        == WaitResult::Interrupted
+                    {
+                        return Err(StreamError::Interrupted);
+                    }
                 } else {
                     // No task context; return nothing
-                    return 0;
+                    return Ok(0);
                 }
             }
         }
@@ -1532,13 +1541,13 @@ impl CharDevice for TtyDevice {
                             drop(guard);
                             buffer[0] = b0;
                             buffer[1] = b1;
-                            return 2;
+                            return Ok(2);
                         }
                     }
                 }
                 drop(guard);
             }
-            return copy_out(buffer, false);
+            return Ok(copy_out(buffer, false));
         }
 
         loop {
@@ -1553,13 +1562,19 @@ impl CharDevice for TtyDevice {
                 };
                 if need_pair && !have_pair {
                     if self.nonblocking.load(Ordering::Relaxed) {
-                        return 0;
+                        return Ok(0);
                     }
                     if let Some(task) = mytask() {
-                        self.input_waker.wait(task.get_id(), task.get_trapframe());
+                        if self
+                            .input_waker
+                            .wait_result(task.get_id(), task.get_trapframe())
+                            == WaitResult::Interrupted
+                        {
+                            return Err(StreamError::Interrupted);
+                        }
                         continue;
                     } else {
-                        return 0;
+                        return Ok(0);
                     }
                 }
             }
@@ -1577,24 +1592,45 @@ impl CharDevice for TtyDevice {
                             drop(guard);
                             buffer[0] = b0;
                             buffer[1] = b1;
-                            return 2;
+                            return Ok(2);
                         }
                     }
                     drop(guard);
                 }
-                return copy_out(buffer, false);
+                return Ok(copy_out(buffer, false));
             }
             // Not enough yet; block until new input arrives
             if self.nonblocking.load(Ordering::Relaxed) {
-                return 0;
+                return Ok(0);
             }
             if let Some(task) = mytask() {
-                self.input_waker.wait(task.get_id(), task.get_trapframe());
+                if self
+                    .input_waker
+                    .wait_result(task.get_id(), task.get_trapframe())
+                    == WaitResult::Interrupted
+                {
+                    return Err(StreamError::Interrupted);
+                }
             } else {
-                return 0;
+                return Ok(0);
             }
         }
     }
+}
+
+impl CharDevice for TtyDevice {
+    fn read(&self, buffer: &mut [u8]) -> usize {
+        self.read_interruptible(buffer).unwrap_or(0)
+    }
+
+    fn try_read(&self, buffer: &mut [u8]) -> Result<usize, StreamError> {
+        self.read_interruptible(buffer)
+    }
+
+    fn try_read_at(&self, _position: u64, buffer: &mut [u8]) -> Result<usize, StreamError> {
+        self.read_interruptible(buffer)
+    }
+
     fn read_byte(&self) -> Option<u8> {
         if self.is_current_process_group_background() {
             self.send_process_control_to_current_group(
@@ -1615,7 +1651,13 @@ impl CharDevice for TtyDevice {
             if let Some(task) = mytask() {
                 // Wait for input to become available
                 // This will return when the task is woken up by input_waker.wake_all()
-                self.input_waker.wait(task.get_id(), task.get_trapframe());
+                if self
+                    .input_waker
+                    .wait_result(task.get_id(), task.get_trapframe())
+                    == WaitResult::Interrupted
+                {
+                    return None;
+                }
 
                 // Continue the loop to re-check if data is available
                 continue;
@@ -1790,6 +1832,12 @@ impl ControlOps for TtyDevice {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sched::scheduler::{
+        add_task, get_task_by_id, register_online_cpu, remove_from_ready_queues, reset,
+        set_current_task_for_test,
+    };
+    use crate::task::{Task, TaskState, TaskType};
+    use alloc::string::ToString;
 
     fn test_tty() -> TtyDevice {
         let tty = TtyDevice::new("test_tty", 0);
@@ -1873,5 +1921,40 @@ mod tests {
         assert_eq!(tty.read(&mut buffer), 2);
         assert_eq!(buffer[0], chars.interrupt);
         assert_eq!(buffer[1], b'\n');
+    }
+
+    #[test_case]
+    fn test_tty_read_propagates_pending_process_control() {
+        reset();
+        let local_cpu = crate::arch::get_cpu().get_cpuid();
+        register_online_cpu(local_cpu);
+        let task = Task::new("tty-interrupted-reader".to_string(), 1, TaskType::Kernel);
+        task.init();
+        let task_id = add_task(task, local_cpu);
+        let task = get_task_by_id(task_id).expect("TTY reader must be registered");
+        task.set_state(TaskState::Running);
+        task.running_cpu.store(local_cpu, Ordering::SeqCst);
+        set_current_task_for_test(local_cpu, Some(task_id));
+        remove_from_ready_queues(task_id);
+        task.event_queue
+            .lock()
+            .enqueue(crate::ipc::event::Event::immediate_process_control(
+                task_id as u32,
+                crate::ipc::event::ProcessControlType::WindowChange,
+            ));
+
+        let tty = test_tty();
+        tty.set_canonical(false);
+        let mut buffer = [0u8; 1];
+        assert!(matches!(
+            tty.try_read(&mut buffer),
+            Err(StreamError::Interrupted)
+        ));
+        assert_eq!(task.get_state(), TaskState::Running);
+
+        set_current_task_for_test(local_cpu, None);
+        task.running_cpu.store(usize::MAX, Ordering::SeqCst);
+        drop(task);
+        reset();
     }
 }

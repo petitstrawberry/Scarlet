@@ -30,10 +30,10 @@ use crate::{
         },
     },
     object::capability::{
-        ControlOps, MemoryMappingOps,
+        ControlOps, MemoryMappingOps, StreamError,
         selectable::{ReadyInterest, ReadySet, SelectWaitOutcome, Selectable},
     },
-    sync::waker::Waker,
+    sync::waker::{WaitResult, Waker},
 };
 
 struct PtyCore {
@@ -301,24 +301,33 @@ impl CharDevice for PtyMasterDevice {
     }
 
     fn read(&self, buffer: &mut [u8]) -> usize {
+        self.try_read(buffer).unwrap_or(0)
+    }
+
+    fn try_read(&self, buffer: &mut [u8]) -> Result<usize, StreamError> {
         if buffer.is_empty() {
-            return 0;
+            return Ok(0);
         }
 
         loop {
             let count = self.core.pop_master_input(buffer);
             if count != 0 {
-                return count;
+                return Ok(count);
             }
             if !self.core.has_slave_open() {
-                return 0;
+                return Ok(0);
             }
             if let Some(task) = crate::task::mytask() {
-                self.core
+                if self
+                    .core
                     .master_waker
-                    .wait(task.get_id(), task.get_trapframe());
+                    .wait_result(task.get_id(), task.get_trapframe())
+                    == WaitResult::Interrupted
+                {
+                    return Err(StreamError::Interrupted);
+                }
             } else {
-                return 0;
+                return Ok(0);
             }
         }
     }

@@ -4,7 +4,7 @@ use super::Device;
 use crate::object::capability::selectable::{
     ReadyInterest, ReadySet, SelectWaitOutcome, Selectable,
 };
-use crate::object::capability::{ControlOps, MemoryMappingOps};
+use crate::object::capability::{ControlOps, MemoryMappingOps, StreamError};
 
 extern crate alloc;
 
@@ -105,6 +105,23 @@ pub trait CharDevice: Device {
         bytes_read
     }
 
+    /// Read multiple bytes while preserving structured stream errors.
+    ///
+    /// The default implementation delegates to [`CharDevice::read`]. Blocking
+    /// devices should override this method when an asynchronous event can
+    /// interrupt their wait.
+    ///
+    /// # Arguments
+    ///
+    /// * `buffer` - The buffer to read data into.
+    ///
+    /// # Returns
+    ///
+    /// The number of bytes read, or the stream error which ended the operation.
+    fn try_read(&self, buffer: &mut [u8]) -> Result<usize, StreamError> {
+        Ok(self.read(buffer))
+    }
+
     /// Write multiple bytes to the device
     ///
     /// Implementors MUST ensure the whole buffer is written without
@@ -142,6 +159,24 @@ pub trait CharDevice: Device {
     fn read_at(&self, _position: u64, buffer: &mut [u8]) -> Result<usize, &'static str> {
         // Default: use sequential read for stream devices
         Ok(self.read(buffer))
+    }
+
+    /// Read from a position while preserving structured stream errors.
+    ///
+    /// The default implementation delegates to [`CharDevice::read_at`] and
+    /// converts its legacy string error into [`StreamError::Other`].
+    ///
+    /// # Arguments
+    ///
+    /// * `position` - Byte offset to read from.
+    /// * `buffer` - The buffer to read data into.
+    ///
+    /// # Returns
+    ///
+    /// The number of bytes read, or the stream error which ended the operation.
+    fn try_read_at(&self, position: u64, buffer: &mut [u8]) -> Result<usize, StreamError> {
+        self.read_at(position, buffer)
+            .map_err(|error| StreamError::Other(error.into()))
     }
 
     /// Write data to a specific position in the device

@@ -582,7 +582,7 @@ impl DevFileObject {
     }
 
     /// Read from the underlying device at current position
-    fn read_device(&self, buffer: &mut [u8]) -> Result<usize, FileSystemError> {
+    fn read_device(&self, buffer: &mut [u8]) -> Result<usize, StreamError> {
         if let Some(ref device_open) = self.device_open {
             let device_open_ref = device_open.as_ref();
             let position = *self.position.read();
@@ -591,22 +591,20 @@ impl DevFileObject {
                 DeviceType::Char => {
                     if let Some(char_device) = device_open_ref.as_char_device() {
                         // Use read_at for position-based read
-                        match char_device.read_at(position, buffer) {
+                        match char_device.try_read_at(position, buffer) {
                             Ok(bytes_read) => {
                                 // Update position after successful read
                                 *self.position.write() += bytes_read as u64;
                                 Ok(bytes_read)
                             }
-                            Err(e) => Err(FileSystemError::new(
-                                FileSystemErrorKind::IoError,
-                                format!("Character device read failed: {}", e),
-                            )),
+                            Err(error) => Err(error),
                         }
                     } else {
                         return Err(FileSystemError::new(
                             FileSystemErrorKind::DeviceError,
                             "Device does not support character operations",
-                        ));
+                        )
+                        .into());
                     }
                 }
                 DeviceType::Block => {
@@ -659,7 +657,8 @@ impl DevFileObject {
                                     return Err(FileSystemError::new(
                                         FileSystemErrorKind::IoError,
                                         format!("Block device read failed: {}", e),
-                                    ));
+                                    )
+                                    .into());
                                 }
                             }
                         }
@@ -668,21 +667,24 @@ impl DevFileObject {
                         return Err(FileSystemError::new(
                             FileSystemErrorKind::DeviceError,
                             "Device does not support block operations",
-                        ));
+                        )
+                        .into());
                     }
                 }
                 _ => {
                     return Err(FileSystemError::new(
                         FileSystemErrorKind::DeviceError,
                         "Unsupported device type",
-                    ));
+                    )
+                    .into());
                 }
             }
         } else {
             Err(FileSystemError::new(
                 FileSystemErrorKind::DeviceError,
                 "No device guard available",
-            ))
+            )
+            .into())
         }
     }
 
@@ -820,7 +822,7 @@ impl DevFileObject {
 
 impl StreamOps for DevFileObject {
     fn read(&self, buffer: &mut [u8]) -> Result<usize, StreamError> {
-        self.read_device(buffer).map_err(StreamError::from)
+        self.read_device(buffer)
     }
 
     fn write(&self, buffer: &[u8]) -> Result<usize, StreamError> {
