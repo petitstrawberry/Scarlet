@@ -31,6 +31,8 @@ use crate::{
 const REGISTER_WINDOW_SIZE: usize = 0x10_0000;
 
 const GLOBAL_CONTROL: usize = 0x000;
+const GLOBAL_CONTROL_CLIENT_POWER_DOWN: u32 = 1;
+const GLOBAL_CONTROL_UNMATCHED_STREAM_FAULT: u32 = 1 << 10;
 const ID_REGISTER_0: usize = 0x020;
 const ID_REGISTER_1: usize = 0x024;
 const GLOBAL_FAULT_STATUS: usize = 0x048;
@@ -62,6 +64,7 @@ const CONTEXT_ATTRIBUTE_UNUSED_VMID: u32 = 0xff;
 const CONTEXT_ATTRIBUTE_64BIT: u32 = 1;
 
 const CONTEXT_CONTROL: usize = 0x000;
+const CONTEXT_CONTROL_MMU_ENABLE: u32 = 1;
 const CONTEXT_TTBR0: usize = 0x020;
 const CONTEXT_TTBR1: usize = 0x028;
 const CONTEXT_TCR: usize = 0x030;
@@ -96,7 +99,7 @@ impl RegisterWindow {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum IdentityRouting {
-    FirmwarePassthrough,
+    FirmwareUnmatchedBypass,
     DirectBypass,
     DisabledContext,
 }
@@ -104,7 +107,7 @@ enum IdentityRouting {
 impl IdentityRouting {
     const fn label(self) -> &'static str {
         match self {
-            Self::FirmwarePassthrough => "firmware-passthrough",
+            Self::FirmwareUnmatchedBypass => "firmware-unmatched-bypass",
             Self::DirectBypass => "s2cr-bypass",
             Self::DisabledContext => "disabled-context",
         }
@@ -223,7 +226,7 @@ impl SmmuHardware {
         })
     }
 
-    fn log_firmware_stream(&self, stream_id: u32) {
+    fn validate_firmware_identity_route(&self, stream_id: u32) -> Result<(), IommuError> {
         let global_control = self.registers.read(GLOBAL_CONTROL);
         let global_fault = self.registers.read(GLOBAL_FAULT_STATUS);
         let Some(group) = self.matching_stream_group(stream_id) else {
@@ -233,7 +236,7 @@ impl SmmuHardware {
                 global_control,
                 global_fault,
             );
-            return;
+            return Ok(());
         };
 
         let stream_match = self.registers.read(STREAM_MATCH_BASE + group * 4);
@@ -248,7 +251,11 @@ impl SmmuHardware {
                 global_control,
                 global_fault,
             );
-            return;
+            return if stream_context & STREAM_CONTEXT_TYPE_MASK == STREAM_CONTEXT_BYPASS {
+                Ok(())
+            } else {
+                Err(IommuError::AttachFailed)
+            };
         }
 
         let context = (stream_context & STREAM_CONTEXT_BANK) as usize;
@@ -261,8 +268,9 @@ impl SmmuHardware {
                 stream_match,
                 stream_context,
             );
-            return;
+            return Err(IommuError::AttachFailed);
         }
+        let context_control = self.context_read(context, CONTEXT_CONTROL);
         early_println!(
             "[arm-smmu-v2] SID {:#x} firmware route: SMR {} smr={:#010x} s2cr={:#010x} CB {} cbar={:#010x} sctlr={:#010x} fsr={:#010x} scr0={:#010x} gfsr={:#010x}",
             stream_id,
@@ -271,11 +279,41 @@ impl SmmuHardware {
             stream_context,
             context,
             self.global_page_1_read(CONTEXT_ATTRIBUTE_BASE + context * 4),
-            self.context_read(context, CONTEXT_CONTROL),
+            context_control,
             self.context_read(context, CONTEXT_FAULT_STATUS),
             global_control,
             global_fault,
         );
+        if context_control & CONTEXT_CONTROL_MMU_ENABLE == 0 {
+            Ok(())
+        } else {
+            Err(IommuError::AttachFailed)
+        }
+    }
+
+    fn enable_firmware_unmatched_bypass(&self, stream_id: u32) -> Result<(), IommuError> {
+        let _guard = self.lock.lock();
+        self.validate_firmware_identity_route(stream_id)?;
+
+        let inherited = self.registers.read(GLOBAL_CONTROL);
+        let requested =
+            inherited & !(GLOBAL_CONTROL_CLIENT_POWER_DOWN | GLOBAL_CONTROL_UNMATCHED_STREAM_FAULT);
+        if requested != inherited {
+            self.registers.write(GLOBAL_CONTROL, requested);
+            arch::io_wmb();
+        }
+        let current = self.registers.read(GLOBAL_CONTROL);
+        if current & (GLOBAL_CONTROL_CLIENT_POWER_DOWN | GLOBAL_CONTROL_UNMATCHED_STREAM_FAULT) != 0
+        {
+            return Err(IommuError::AttachFailed);
+        }
+        early_println!(
+            "[arm-smmu-v2] SID {:#x} identity DMA enabled through unmatched bypass: scr0 {:#010x} -> {:#010x}",
+            stream_id,
+            inherited,
+            current,
+        );
+        Ok(())
     }
 
     fn attach_stream(&self, context: Option<usize>, stream_id: u32) -> Result<(), IommuError> {
@@ -283,9 +321,8 @@ impl SmmuHardware {
             return Err(IommuError::InvalidSpec);
         }
 
-        if self.identity_routing == IdentityRouting::FirmwarePassthrough {
-            self.log_firmware_stream(stream_id);
-            return Ok(());
+        if self.identity_routing == IdentityRouting::FirmwareUnmatchedBypass {
+            return self.enable_firmware_unmatched_bypass(stream_id);
         }
 
         let _guard = self.lock.lock();
@@ -301,7 +338,7 @@ impl SmmuHardware {
         }
 
         let route = match (self.identity_routing, context) {
-            (IdentityRouting::FirmwarePassthrough, None) => return Ok(()),
+            (IdentityRouting::FirmwareUnmatchedBypass, None) => return Ok(()),
             (IdentityRouting::DirectBypass, None) => STREAM_CONTEXT_BYPASS,
             (IdentityRouting::DisabledContext, Some(context)) => {
                 STREAM_CONTEXT_TRANSLATE | (context as u32 & STREAM_CONTEXT_BANK)
@@ -393,7 +430,7 @@ impl IommuController for ArmSmmuV2 {
             return Err(IommuError::NotSupported);
         }
         let context = match self.hardware.identity_routing {
-            IdentityRouting::FirmwarePassthrough | IdentityRouting::DirectBypass => None,
+            IdentityRouting::FirmwareUnmatchedBypass | IdentityRouting::DirectBypass => None,
             IdentityRouting::DisabledContext => Some(self.hardware.allocate_disabled_context()?),
         };
         Ok(Arc::new(IdentityDomain {
@@ -489,10 +526,10 @@ fn probe(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
 
     let is_sc7180 = device.compatible().contains(&"qcom,sc7180-smmu-500");
     let identity_routing = if is_sc7180 && current_exception_level() >= 2 {
-        // At EL2 the SC7180 alternate-firmware path already owns the physical
-        // address space. Preserve its SMMU passthrough instead of touching
-        // hypervisor-guarded stream routing registers.
-        IdentityRouting::FirmwarePassthrough
+        // At EL2, avoid hypervisor-guarded S2CR writes. Enable the client
+        // interface lazily and use the architectural unmatched-stream bypass
+        // for streams without inherited firmware routing.
+        IdentityRouting::FirmwareUnmatchedBypass
     } else if is_sc7180 {
         // Some Qualcomm firmware environments turn a direct BYPASS S2CR write
         // into FAULT. Route through a stage-1 context with SCTLR.M left clear,
