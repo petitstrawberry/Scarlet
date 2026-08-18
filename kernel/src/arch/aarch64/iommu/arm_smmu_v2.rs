@@ -30,6 +30,7 @@ use crate::{
 
 const REGISTER_WINDOW_SIZE: usize = 0x10_0000;
 
+const GLOBAL_CONTROL: usize = 0x000;
 const ID_REGISTER_0: usize = 0x020;
 const ID_REGISTER_1: usize = 0x024;
 const GLOBAL_FAULT_STATUS: usize = 0x048;
@@ -222,16 +223,68 @@ impl SmmuHardware {
         })
     }
 
+    fn log_firmware_stream(&self, stream_id: u32) {
+        let global_control = self.registers.read(GLOBAL_CONTROL);
+        let global_fault = self.registers.read(GLOBAL_FAULT_STATUS);
+        let Some(group) = self.matching_stream_group(stream_id) else {
+            early_println!(
+                "[arm-smmu-v2] SID {:#x} has no firmware SMR: scr0={:#010x} gfsr={:#010x}",
+                stream_id,
+                global_control,
+                global_fault,
+            );
+            return;
+        };
+
+        let stream_match = self.registers.read(STREAM_MATCH_BASE + group * 4);
+        let stream_context = self.registers.read(STREAM_CONTEXT_BASE + group * 4);
+        if stream_context & STREAM_CONTEXT_TYPE_MASK != STREAM_CONTEXT_TRANSLATE {
+            early_println!(
+                "[arm-smmu-v2] SID {:#x} firmware route: SMR {} smr={:#010x} s2cr={:#010x} scr0={:#010x} gfsr={:#010x}",
+                stream_id,
+                group,
+                stream_match,
+                stream_context,
+                global_control,
+                global_fault,
+            );
+            return;
+        }
+
+        let context = (stream_context & STREAM_CONTEXT_BANK) as usize;
+        if context >= self.context_bank_count {
+            early_println!(
+                "[arm-smmu-v2] SID {:#x} firmware route has invalid context {}: SMR {} smr={:#010x} s2cr={:#010x}",
+                stream_id,
+                context,
+                group,
+                stream_match,
+                stream_context,
+            );
+            return;
+        }
+        early_println!(
+            "[arm-smmu-v2] SID {:#x} firmware route: SMR {} smr={:#010x} s2cr={:#010x} CB {} cbar={:#010x} sctlr={:#010x} fsr={:#010x} scr0={:#010x} gfsr={:#010x}",
+            stream_id,
+            group,
+            stream_match,
+            stream_context,
+            context,
+            self.global_page_1_read(CONTEXT_ATTRIBUTE_BASE + context * 4),
+            self.context_read(context, CONTEXT_CONTROL),
+            self.context_read(context, CONTEXT_FAULT_STATUS),
+            global_control,
+            global_fault,
+        );
+    }
+
     fn attach_stream(&self, context: Option<usize>, stream_id: u32) -> Result<(), IommuError> {
         if stream_id > STREAM_MATCH_ID {
             return Err(IommuError::InvalidSpec);
         }
 
         if self.identity_routing == IdentityRouting::FirmwarePassthrough {
-            early_println!(
-                "[arm-smmu-v2] preserving firmware passthrough for SID {:#x}",
-                stream_id,
-            );
+            self.log_firmware_stream(stream_id);
             return Ok(());
         }
 
