@@ -46,6 +46,10 @@ impl NetworkInterface for EthernetNetworkInterface {
         *self.ip_address.lock() = Some(ip);
     }
 
+    fn clear_ip_address(&self) {
+        *self.ip_address.lock() = None;
+    }
+
     fn send(&self, packet: DevicePacket) -> Result<(), &'static str> {
         self.device.send_packet(packet)
     }

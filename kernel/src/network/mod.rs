@@ -106,19 +106,75 @@ impl Default for NetworkConfig {
         Self {
             default_gateway: None,
             gateway_mac: None,
-            subnet_mask: Ipv4Address::new(255, 255, 255, 0),
+            subnet_mask: Ipv4Address::new(0, 0, 0, 0),
         }
     }
 }
 
 /// Network interface trait
 pub trait NetworkInterface: Send + Sync {
+    /// Get the stable interface name.
+    ///
+    /// # Returns
+    ///
+    /// The interface name used by routing and configuration APIs.
     fn name(&self) -> &str;
+
+    /// Get the interface MAC address.
+    ///
+    /// # Returns
+    ///
+    /// The current link-layer address.
     fn mac_address(&self) -> MacAddress;
+
+    /// Get the configured primary IPv4 address.
+    ///
+    /// # Returns
+    ///
+    /// The primary address, or `None` while the interface is unconfigured.
     fn ip_address(&self) -> Option<Ipv4Address>;
+
+    /// Set the interface's primary IPv4 address cache.
+    ///
+    /// # Arguments
+    ///
+    /// * `ip` - Primary IPv4 address to cache on the interface.
+    ///
+    /// # Returns
+    ///
+    /// This method does not return a value.
     fn set_ip_address(&self, ip: Ipv4Address);
+
+    /// Clear the interface's primary IPv4 address cache.
+    ///
+    /// # Returns
+    ///
+    /// This method does not return a value.
+    fn clear_ip_address(&self);
+
+    /// Send a link-layer packet.
+    ///
+    /// # Arguments
+    ///
+    /// * `packet` - Complete device packet to transmit.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` after submission, or a driver error.
     fn send(&self, packet: DevicePacket) -> Result<(), &'static str>;
+
+    /// Poll the interface for received packets.
+    ///
+    /// # Returns
+    ///
+    /// All currently available packets, or a driver error.
     fn poll(&self) -> Result<Vec<DevicePacket>, &'static str>;
+
+    /// Read interface statistics.
+    ///
+    /// # Returns
+    ///
+    /// A snapshot of packet, byte, drop, and error counters.
     fn stats(&self) -> InterfaceStats;
 }
 
@@ -210,6 +266,16 @@ impl NetworkManager {
     // Interface Management
     // ===================================================================
 
+    /// Register an interface with the network and protocol managers.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - Stable interface name.
+    /// * `interface` - Interface implementation to register.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` after registration, or an error if registration fails.
     pub fn register_interface(
         &self,
         name: &str,
@@ -225,10 +291,7 @@ impl NetworkManager {
             .write()
             .insert(String::from(name), interface);
 
-        // Configure protocol layers when first interface is registered
-        if self.interfaces.read().len() == 1 {
-            self.configure_protocol_layers_with_interface(interface_clone);
-        }
+        self.configure_protocol_layers_with_interface(interface_clone);
 
         Ok(())
     }
@@ -256,6 +319,17 @@ impl NetworkManager {
         if default.as_deref() == Some(name) {
             *default = interfaces.keys().next().cloned();
         }
+        drop(interfaces);
+        drop(default);
+
+        if removed.is_some()
+            && let Some(ip_layer) = self.get_layer("ip")
+            && let Some(ipv4) = ip_layer
+                .as_any()
+                .downcast_ref::<crate::network::ipv4::Ipv4Layer>()
+        {
+            ipv4.remove_interface(name);
+        }
         removed
     }
 
@@ -266,8 +340,39 @@ impl NetworkManager {
             .and_then(|name| self.get_interface(name))
     }
 
+    /// Select the interface preferred by otherwise-unbound sockets.
+    ///
+    /// Unknown interface names are ignored.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - Registered interface name to select.
+    ///
+    /// # Returns
+    ///
+    /// This method does not return a value.
     pub fn set_default_interface(&self, name: &str) {
+        if self.get_interface(name).is_none() {
+            return;
+        }
+
         *self.default_interface.write() = Some(String::from(name));
+        if let Some(ethernet_layer) = self.get_layer("ethernet")
+            && let Some(ethernet) = ethernet_layer
+                .as_any()
+                .downcast_ref::<crate::network::ethernet::EthernetLayer>()
+        {
+            ethernet.set_default_interface(name);
+        }
+    }
+
+    /// Get the name of the default network interface.
+    ///
+    /// # Returns
+    ///
+    /// The default interface name, or `None` if no interface is registered.
+    pub fn default_interface_name(&self) -> Option<String> {
+        self.default_interface.read().clone()
     }
 
     pub fn list_interfaces(&self) -> Vec<String> {
@@ -385,6 +490,47 @@ impl NetworkManager {
         }
     }
 
+    /// Set or clear the default gateway for one interface.
+    ///
+    /// # Arguments
+    ///
+    /// * `interface` - Interface that owns the default route.
+    /// * `gateway` - Gateway to install, or `None` to remove the route.
+    /// * `metric` - Route metric; lower values are preferred.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` if the interface and IPv4 layer exist, otherwise an error.
+    pub fn set_default_gateway_for_interface(
+        &self,
+        interface: &str,
+        gateway: Option<Ipv4Address>,
+        metric: u32,
+    ) -> Result<(), &'static str> {
+        if self.get_interface(interface).is_none() {
+            return Err("Network interface not found");
+        }
+
+        let ip_layer = self.get_layer("ip").ok_or("IPv4 layer not initialized")?;
+        let ipv4 = ip_layer
+            .as_any()
+            .downcast_ref::<crate::network::ipv4::Ipv4Layer>()
+            .ok_or("IPv4 layer type mismatch")?;
+
+        if let Some(gateway) = gateway {
+            ipv4.set_default_gateway_for_interface(gateway, interface, metric);
+        } else {
+            ipv4.clear_default_gateway_for_interface(interface);
+        }
+
+        if self.default_interface_name().as_deref() == Some(interface) {
+            let mut config = self.network_config.write();
+            config.default_gateway = gateway;
+            config.gateway_mac = None;
+        }
+        Ok(())
+    }
+
     pub fn get_default_gateway(&self) -> Option<Ipv4Address> {
         self.network_config.read().default_gateway
     }
@@ -402,7 +548,7 @@ impl NetworkManager {
         // );
         match eth_type {
             0x0806 => self.handle_arp_packet(interface_name, packet),
-            0x0800 => self.handle_ipv4_packet(packet),
+            0x0800 => self.handle_ipv4_packet(interface_name, packet),
             _ => {}
         }
     }
@@ -423,7 +569,7 @@ impl NetworkManager {
         }
     }
 
-    fn handle_ipv4_packet(&self, packet: &DevicePacket) {
+    fn handle_ipv4_packet(&self, interface_name: &str, packet: &DevicePacket) {
         if packet.len < 14 + 20 {
             return;
         }
@@ -482,7 +628,14 @@ impl NetworkManager {
                         crate::network::ipv4::protocol::UDP => handler
                             .as_any()
                             .downcast_ref::<crate::network::udp::UdpLayer>()
-                            .map(|udp| udp.receive_packet(src_ip, dst_ip, payload)),
+                            .map(|udp| {
+                                udp.receive_packet_on_interface(
+                                    src_ip,
+                                    dst_ip,
+                                    payload,
+                                    Some(interface_name),
+                                )
+                            }),
                         _ => Some(handler.receive(payload, None)),
                     };
                 }

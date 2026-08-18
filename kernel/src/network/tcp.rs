@@ -658,6 +658,23 @@ impl TcpSocket {
         }
     }
 
+    fn ensure_local_ip_for_destination(&self, destination: Ipv4Address) {
+        let mut local_ip = self.local_ip.lock();
+        if local_ip.as_ref().is_some_and(|ip| !ip.is_any()) {
+            return;
+        }
+
+        let manager = get_network_manager();
+        if let Some(ip_layer) = manager.get_layer("ip")
+            && let Some(ipv4) = ip_layer
+                .as_any()
+                .downcast_ref::<crate::network::ipv4::Ipv4Layer>()
+            && let Some((_, address, _)) = ipv4.select_source(destination)
+        {
+            *local_ip = Some(address);
+        }
+    }
+
     fn register_local_port(&self, port: u16) -> Result<(), SocketError> {
         let tcp_layer = self
             .tcp_layer
@@ -806,12 +823,14 @@ impl TcpSocket {
     /// # Arguments
     ///
     /// * `src_ip` - IPv4 source address of the segment.
+    /// * `dst_ip` - Local IPv4 destination address of the segment.
     /// * `header` - Parsed fixed TCP header.
     /// * `data` - TCP application payload after any options.
     /// * `advertised_mss` - MSS option carried by a SYN, when present.
     pub fn process_segment(
         &self,
         src_ip: Ipv4Address,
+        dst_ip: Ipv4Address,
         header: TcpHeader,
         data: &[u8],
         advertised_mss: Option<u16>,
@@ -859,8 +878,15 @@ impl TcpSocket {
                         return;
                     }
 
-                    if let Some(local_ip) = self.local_ip.lock().clone() {
+                    if let Some(local_ip) = self
+                        .local_ip
+                        .lock()
+                        .clone()
+                        .filter(|address| !address.is_any())
+                    {
                         *child.local_ip.lock() = Some(local_ip);
+                    } else if !dst_ip.is_any() {
+                        *child.local_ip.lock() = Some(dst_ip);
                     } else {
                         child.ensure_local_ip();
                     }
@@ -1527,7 +1553,7 @@ impl TcpSocket {
         if !options.len().is_multiple_of(4) || TCP_HEADER_SIZE + options.len() > 60 {
             return Err(SocketError::InvalidArgument);
         }
-        self.ensure_local_ip();
+        self.ensure_local_ip_for_destination(dest_ip);
         let mut local_ip = self
             .local_ip
             .lock()
@@ -1596,6 +1622,15 @@ impl TcpSocket {
         ip_context.set("ip_dst", &dest_ip.0);
         ip_context.set("ip_src", &local_ip.0);
         ip_context.set("ip_protocol", &[6]); // TCP protocol
+        let ip_layer = get_network_manager().get_layer("ip");
+        if let Some(ipv4) = ip_layer.as_ref().and_then(|layer| {
+            layer
+                .as_any()
+                .downcast_ref::<crate::network::ipv4::Ipv4Layer>()
+        }) && let Some(interface) = ipv4.interface_for_address(local_ip)
+        {
+            ip_context.set("interface", interface.as_bytes());
+        }
 
         // Send through IP layer
         let ip_layer = get_network_manager()
@@ -2459,7 +2494,7 @@ impl SocketControl for TcpSocket {
                         *local_ip = Some(Ipv4Address::new(127, 0, 0, 1));
                     }
                 } else {
-                    self.ensure_local_ip();
+                    self.ensure_local_ip_for_destination(addr);
                 }
 
                 if self.try_loopback_connect(addr, port)? {
@@ -2939,12 +2974,14 @@ impl TcpLayer {
     /// # Arguments
     ///
     /// * `src_ip` - IPv4 source address of the segment.
+    /// * `dst_ip` - Local IPv4 destination address of the segment.
     /// * `header` - Parsed fixed TCP header.
     /// * `data` - TCP application payload after any options.
     /// * `advertised_mss` - MSS option carried by a SYN, when present.
     pub fn receive_segment(
         &self,
         src_ip: Ipv4Address,
+        dst_ip: Ipv4Address,
         header: TcpHeader,
         data: &[u8],
         advertised_mss: Option<u16>,
@@ -2957,7 +2994,7 @@ impl TcpLayer {
         let dst_port = unsafe { core::ptr::addr_of!(header.dst_port).read_unaligned() };
 
         if let Some(socket) = self.find_socket(dst_port, src_ip, src_port) {
-            socket.process_segment(src_ip, header, data, advertised_mss);
+            socket.process_segment(src_ip, dst_ip, header, data, advertised_mss);
         } else if should_log_tcp_https(src_port, dst_port) {
             let seq = header.seq_number;
             let ack = header.ack_number;
@@ -3030,7 +3067,7 @@ impl TcpLayer {
     pub fn receive_packet(
         &self,
         src_ip: Ipv4Address,
-        _dst_ip: Ipv4Address,
+        dst_ip: Ipv4Address,
         packet: &[u8],
     ) -> Result<(), SocketError> {
         if packet.len() < 20 {
@@ -3051,7 +3088,7 @@ impl TcpLayer {
         };
         let data = &packet[data_offset..];
 
-        self.receive_segment(src_ip, header, data, advertised_mss);
+        self.receive_segment(src_ip, dst_ip, header, data, advertised_mss);
 
         Ok(())
     }

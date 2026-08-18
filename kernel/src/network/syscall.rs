@@ -114,6 +114,39 @@ struct NetworkStatus {
     interfaces_ptr: usize,
 }
 
+const NETWORK_CONFIGURE_HAS_GATEWAY: u32 = 1 << 0;
+const NETWORK_CONFIGURE_MAKE_DEFAULT: u32 = 1 << 1;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct NetworkConfigureIpv4Request {
+    iface_ptr: usize,
+    iface_len: usize,
+    address: [u8; 4],
+    netmask: [u8; 4],
+    gateway: [u8; 4],
+    flags: u32,
+    metric: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct NetworkInterfaceInfoV2 {
+    name: [u8; 32],
+    ip_address: [u8; 4],
+    netmask: [u8; 4],
+    gateway: [u8; 4],
+    mac_address: [u8; 6],
+    ip_set: u8,
+    gateway_set: u8,
+    is_default: u8,
+    reserved: [u8; 3],
+    metric: u32,
+}
+
+const _: [(); 40] = [(); core::mem::size_of::<NetworkConfigureIpv4Request>()];
+const _: [(); 60] = [(); core::mem::size_of::<NetworkInterfaceInfoV2>()];
+
 fn read_user_string(ptr: usize, len: usize) -> Option<String> {
     let task = mytask()?;
     if len == 0 {
@@ -247,7 +280,7 @@ pub fn sys_network_list_interfaces(tf: &mut Trapframe) -> usize {
 
             let mut name_buf = [0u8; 32];
             let name_bytes = name.as_bytes();
-            let copy_len = name_bytes.len().min(32);
+            let copy_len = name_bytes.len().min(name_buf.len() - 1);
             name_buf[..copy_len].copy_from_slice(&name_bytes[..copy_len]);
 
             interfaces.push(NetworkInterfaceInfo {
@@ -287,6 +320,184 @@ pub fn sys_network_list_interfaces(tf: &mut Trapframe) -> usize {
     }
 
     0
+}
+
+/// Configure an interface's IPv4 address, netmask, and default route.
+///
+/// # Arguments
+///
+/// The first trapframe argument points to a [`NetworkConfigureIpv4Request`]
+/// in user memory.
+///
+/// # Returns
+///
+/// Zero on success, or `usize::MAX` if validation or configuration fails.
+pub fn sys_network_configure_ipv4(tf: &mut Trapframe) -> usize {
+    let task = match mytask() {
+        Some(task) => task,
+        None => return usize::MAX,
+    };
+    tf.increment_pc_next(&task);
+
+    let request_ptr = tf.get_arg(0);
+    let mut request_bytes = [0u8; core::mem::size_of::<NetworkConfigureIpv4Request>()];
+    if copy_from_user(&task, request_ptr, &mut request_bytes).is_err() {
+        return usize::MAX;
+    }
+    // SAFETY: `request_bytes` has exactly the size of the fixed-layout request,
+    // and `read_unaligned` does not require the byte array to share its alignment.
+    let request = unsafe {
+        core::ptr::read_unaligned(request_bytes.as_ptr() as *const NetworkConfigureIpv4Request)
+    };
+    if request.flags & !(NETWORK_CONFIGURE_HAS_GATEWAY | NETWORK_CONFIGURE_MAKE_DEFAULT) != 0 {
+        return usize::MAX;
+    }
+    let interface = match read_user_string(request.iface_ptr, request.iface_len) {
+        Some(interface) => interface,
+        None => return usize::MAX,
+    };
+
+    let address = Ipv4Address::from_bytes(request.address);
+    if address.is_any() || address.is_broadcast() {
+        return usize::MAX;
+    }
+    let netmask = Ipv4Address::from_bytes(request.netmask);
+    let gateway = if request.flags & NETWORK_CONFIGURE_HAS_GATEWAY != 0 {
+        let gateway = Ipv4Address::from_bytes(request.gateway);
+        if gateway.is_any() || gateway.is_broadcast() {
+            return usize::MAX;
+        }
+        Some(gateway)
+    } else {
+        None
+    };
+
+    match crate::network::config::configure_interface_ipv4(
+        &interface,
+        address,
+        netmask,
+        gateway,
+        request.metric,
+        request.flags & NETWORK_CONFIGURE_MAKE_DEFAULT != 0,
+    ) {
+        Ok(()) => 0,
+        Err(_) => usize::MAX,
+    }
+}
+
+/// List interface-local IPv4 configuration records.
+///
+/// # Arguments
+///
+/// * Trapframe argument 0 - User pointer to an array of
+///   [`NetworkInterfaceInfoV2`] records.
+/// * Trapframe argument 1 - Maximum number of records in the array.
+///
+/// # Returns
+///
+/// The number of records written, or `usize::MAX` on failure.
+pub fn sys_network_list_interfaces_v2(tf: &mut Trapframe) -> usize {
+    let task = match mytask() {
+        Some(task) => task,
+        None => return usize::MAX,
+    };
+    tf.increment_pc_next(&task);
+
+    let interfaces_ptr = tf.get_arg(0);
+    let max_interfaces = tf.get_arg(1);
+    if interfaces_ptr == 0 || max_interfaces == 0 {
+        return usize::MAX;
+    }
+
+    let manager = crate::network::get_network_manager();
+    let default_interface = manager.default_interface_name();
+    let ip_layer = manager.get_layer("ip");
+    let ipv4 = ip_layer.as_ref().and_then(|layer| {
+        layer
+            .as_any()
+            .downcast_ref::<crate::network::ipv4::Ipv4Layer>()
+    });
+
+    let mut records = Vec::new();
+    for name in manager.list_interfaces() {
+        if records.len() >= max_interfaces {
+            break;
+        }
+        let Some(interface) = manager.get_interface(&name) else {
+            continue;
+        };
+
+        let address_info = ipv4.and_then(|layer| layer.get_primary_address_info(&name));
+        let route = ipv4.and_then(|layer| layer.get_default_route(&name));
+        let address = address_info
+            .as_ref()
+            .map_or_else(|| interface.ip_address(), |info| Some(info.address));
+        let gateway = route.as_ref().and_then(|entry| entry.gateway);
+        let mut name_buffer = [0u8; 32];
+        let copy_len = name.len().min(name_buffer.len() - 1);
+        name_buffer[..copy_len].copy_from_slice(&name.as_bytes()[..copy_len]);
+
+        records.push(NetworkInterfaceInfoV2 {
+            name: name_buffer,
+            ip_address: address.map_or([0; 4], |value| value.as_bytes()),
+            netmask: address_info.map_or([0; 4], |info| info.netmask.as_bytes()),
+            gateway: gateway.map_or([0; 4], |value| value.as_bytes()),
+            mac_address: *interface.mac_address().as_bytes(),
+            ip_set: u8::from(address.is_some()),
+            gateway_set: u8::from(gateway.is_some()),
+            is_default: u8::from(default_interface.as_deref() == Some(name.as_str())),
+            reserved: [0; 3],
+            metric: route.map_or(0, |entry| entry.metric),
+        });
+    }
+
+    let item_size = core::mem::size_of::<NetworkInterfaceInfoV2>();
+    for (index, record) in records.iter().enumerate() {
+        // SAFETY: `record` is alive for the duration of this copy and the slice
+        // covers exactly its fixed-layout representation.
+        let record_bytes = unsafe {
+            core::slice::from_raw_parts(
+                (record as *const NetworkInterfaceInfoV2).cast::<u8>(),
+                item_size,
+            )
+        };
+        let Some(destination) = interfaces_ptr.checked_add(index.saturating_mul(item_size)) else {
+            return usize::MAX;
+        };
+        if copy_to_user(&task, destination, record_bytes).is_err() {
+            return usize::MAX;
+        }
+    }
+
+    records.len()
+}
+
+/// Clear all IPv4 configuration from one interface.
+///
+/// # Arguments
+///
+/// * Trapframe argument 0 - User pointer to the interface name.
+/// * Trapframe argument 1 - Interface name length.
+///
+/// # Returns
+///
+/// Zero on success, or `usize::MAX` when the name is invalid or the interface
+/// cannot be cleared.
+pub fn sys_network_clear_ipv4(tf: &mut Trapframe) -> usize {
+    let task = match mytask() {
+        Some(task) => task,
+        None => return usize::MAX,
+    };
+    tf.increment_pc_next(&task);
+
+    let interface = match read_user_string(tf.get_arg(0), tf.get_arg(1)) {
+        Some(interface) => interface,
+        None => return usize::MAX,
+    };
+    match crate::network::config::clear_interface_ipv4(&interface) {
+        Ok(()) => 0,
+        Err(_) => usize::MAX,
+    }
 }
 
 /// System call: Create a new socket
@@ -541,6 +752,54 @@ pub fn sys_socket_bind(tf: &mut Trapframe) -> usize {
     }
 
     0
+}
+
+/// Bind an IPv4 datagram socket to a registered network interface.
+///
+/// # Arguments
+///
+/// * Trapframe argument 0 - Socket handle.
+/// * Trapframe argument 1 - User pointer to the interface name.
+/// * Trapframe argument 2 - Interface name length.
+///
+/// # Returns
+///
+/// Zero on success, or `usize::MAX` if the handle, name, interface, or socket
+/// type is invalid.
+pub fn sys_socket_bind_interface(tf: &mut Trapframe) -> usize {
+    let task = match mytask() {
+        Some(task) => task,
+        None => return usize::MAX,
+    };
+    tf.increment_pc_next(&task);
+
+    let handle_id = tf.get_arg(0) as u32;
+    let interface = match read_user_string(tf.get_arg(1), tf.get_arg(2)) {
+        Some(interface) => interface,
+        None => return usize::MAX,
+    };
+    if crate::network::get_network_manager()
+        .get_interface(&interface)
+        .is_none()
+    {
+        return usize::MAX;
+    }
+
+    let socket = match task.handle_table.get_arc_clone(handle_id) {
+        Some(KernelObject::Socket(socket)) => socket,
+        _ => return usize::MAX,
+    };
+    let Some(udp) = socket
+        .as_any()
+        .downcast_ref::<crate::network::udp::UdpSocket>()
+    else {
+        return usize::MAX;
+    };
+
+    match udp.bind_interface(&interface) {
+        Ok(()) => 0,
+        Err(_) => usize::MAX,
+    }
 }
 
 /// System call: Listen for connections

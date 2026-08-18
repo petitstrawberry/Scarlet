@@ -95,12 +95,14 @@ use crate::ipc::syscall::{
 };
 use crate::lsm::syscall::{sys_lsm_list, sys_lsm_load, sys_lsm_unload};
 use crate::network::syscall::{
-    sys_network_list_interfaces, sys_network_set_gateway, sys_network_set_ipv4,
+    sys_network_clear_ipv4, sys_network_configure_ipv4, sys_network_list_interfaces,
+    sys_network_list_interfaces_v2, sys_network_set_gateway, sys_network_set_ipv4,
     sys_network_set_netmask,
 };
 use crate::network::syscall::{
-    sys_socket_accept, sys_socket_bind, sys_socket_connect, sys_socket_create, sys_socket_listen,
-    sys_socket_recvfrom, sys_socket_sendto, sys_socket_shutdown, sys_socketpair,
+    sys_socket_accept, sys_socket_bind, sys_socket_bind_interface, sys_socket_connect,
+    sys_socket_create, sys_socket_listen, sys_socket_recvfrom, sys_socket_sendto,
+    sys_socket_shutdown, sys_socketpair,
 };
 use crate::object::capability::file::{sys_file_metadata, sys_file_seek, sys_file_truncate};
 use crate::object::capability::memory_mapping::{sys_memory_map, sys_memory_unmap};
@@ -314,12 +316,16 @@ syscall_table! {
     // === Datagram Operations (UDP/Local datagram) ===
     SocketRecvFrom = 907 => sys_socket_recvfrom, // Receive datagram with sender address
     SocketSendTo = 908 => sys_socket_sendto,     // Send datagram to specified address
+    SocketBindInterface = 909 => sys_socket_bind_interface, // Select an outgoing interface
 
     // === Network Configuration ===
     NetworkSetIpv4 = 910 => sys_network_set_ipv4,       // Set interface IPv4 address
     NetworkSetGateway = 911 => sys_network_set_gateway, // Set default gateway
     NetworkSetNetmask = 913 => sys_network_set_netmask, // Set subnet mask
     NetworkListInterfaces = 914 => sys_network_list_interfaces, // List network interfaces
+    NetworkConfigureIpv4 = 915 => sys_network_configure_ipv4, // Configure one interface
+    NetworkListInterfacesV2 = 916 => sys_network_list_interfaces_v2, // List per-interface configuration
+    NetworkClearIpv4 = 917 => sys_network_clear_ipv4, // Clear one interface's IPv4 configuration
 
     // === Task Event Operations ===
 

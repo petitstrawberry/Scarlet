@@ -1,11 +1,12 @@
-# Network Configuration for netcfgd
-# This directory contains TOML files that define network interface configurations
-# Files are read in alphabetical order
+# Default network configuration. Files in this directory are read in lexical
+# order, and later exact interface entries override this wildcard.
 
-# QEMU user-networking default configuration:
+[network]
+dhcp_timeout_ms = 1500
+dhcp_attempts = 3
 
 [[interface]]
-name = "veth0"
-address = "10.0.2.15"
-netmask = "255.255.255.0"
-gateway = "10.0.2.2"
+name = "*"
+method = "dhcp"
+metric = 100
+required = false

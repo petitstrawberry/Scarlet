@@ -5,6 +5,9 @@
 # Example configuration for a static IP:
 # [[interface]]
 # name = "eth0"
-# address = "192.168.1.100"
-# netmask = "255.255.255.0"
+# method = "static"
+# address = "192.168.1.100/24"
 # gateway = "192.168.1.1"
+# dns = ["192.168.1.1", "1.1.1.1"]
+# metric = 50
+# default = true

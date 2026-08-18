@@ -162,6 +162,34 @@ impl Socket {
         sock.bind_inet(&addr).map_err(|_| SocketError::AlreadyBound)
     }
 
+    /// Bind outgoing IPv4 datagrams to a network interface.
+    ///
+    /// # Arguments
+    ///
+    /// * `interface` - Registered network interface name.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` when the datagram socket is bound to the interface, or an error
+    /// if the interface does not exist or the socket does not support this
+    /// operation.
+    pub fn bind_interface(&self, interface: &str) -> Result<()> {
+        if interface.is_empty() {
+            return Err(SocketError::InvalidAddress);
+        }
+        let result = syscall3(
+            Syscall::SocketBindInterface,
+            self.handle.as_raw() as usize,
+            interface.as_ptr() as usize,
+            interface.len(),
+        );
+        if result == usize::MAX {
+            Err(SocketError::InvalidAddress)
+        } else {
+            Ok(())
+        }
+    }
+
     /// Connect socket to an IPv4 address
     ///
     /// # Arguments

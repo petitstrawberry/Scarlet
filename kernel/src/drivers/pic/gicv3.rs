@@ -167,11 +167,7 @@ fn sgi1r_for_affinity(intid: u64, affinity: u64) -> InterruptResult<u64> {
         return Err(InterruptError::InvalidCpuId);
     }
 
-    Ok((aff3 << 48)
-        | (aff2 << 32)
-        | (intid << 24)
-        | (aff1 << 16)
-        | (1u64 << aff0))
+    Ok((aff3 << 48) | (aff2 << 32) | (intid << 24) | (aff1 << 16) | (1u64 << aff0))
 }
 
 #[inline]
@@ -540,8 +536,7 @@ impl ExternalInterruptController for GicV3 {
 
     fn init_for_cpu(&mut self, cpu_id: CpuId) -> InterruptResult<()> {
         self.validate_cpu_id(cpu_id)?;
-        self.cpu_mpidr_affinity[cpu_id as usize]
-            .store(current_mpidr_affinity(), Ordering::Release);
+        self.cpu_mpidr_affinity[cpu_id as usize].store(current_mpidr_affinity(), Ordering::Release);
         self.init_redistributor(cpu_id);
         self.init_cpu_interface_sysregs();
         Ok(())

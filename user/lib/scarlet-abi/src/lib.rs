@@ -746,12 +746,16 @@ pub enum Syscall {
     // Datagram operations
     SocketRecvFrom = 907,
     SocketSendTo = 908,
+    SocketBindInterface = 909,
 
     // Network configuration
     NetworkSetIpv4 = 910,
     NetworkSetGateway = 911,
     NetworkSetNetmask = 913,
     NetworkListInterfaces = 914,
+    NetworkConfigureIpv4 = 915,
+    NetworkListInterfacesV2 = 916,
+    NetworkClearIpv4 = 917,
 
     // Debug/profiler operations
     GetCpuDebugInfo = 997,

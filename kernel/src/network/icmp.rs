@@ -323,6 +323,18 @@ impl IcmpLayer {
         data: &[u8],
         next_layers: &[Arc<dyn NetworkLayer>],
     ) -> Result<(), SocketError> {
+        self.send_ping_reply_from(None, dest_ip, identifier, sequence, data, next_layers)
+    }
+
+    fn send_ping_reply_from(
+        &self,
+        source_ip: Option<Ipv4Address>,
+        dest_ip: Ipv4Address,
+        identifier: u16,
+        sequence: u16,
+        data: &[u8],
+        next_layers: &[Arc<dyn NetworkLayer>],
+    ) -> Result<(), SocketError> {
         // Build ICMP Echo Reply header
         let echo = IcmpEcho::new(identifier, sequence);
         let mut header = IcmpHeader::new(message_type::ECHO_REPLY, code::NO_CODE);
@@ -341,6 +353,9 @@ impl IcmpLayer {
         let mut ip_context = LayerContext::new();
         ip_context.set("ip_dst", &dest_ip.0);
         ip_context.set("ip_protocol", &[1]); // ICMP protocol
+        if let Some(source_ip) = source_ip {
+            ip_context.set("ip_src", &source_ip.0);
+        }
 
         let dest_ip_bytes = dest_ip.0;
         early_println!(
@@ -435,11 +450,14 @@ impl IcmpLayer {
                 );
 
                 if let Some(ip_layer) = get_network_manager().get_layer("ip") {
-                    let mut ctx = LayerContext::new();
-                    ctx.set("ip_dst", &src_ip.0);
-                    ctx.set("ip_src", &dst_ip.0);
-                    ctx.set("ip_protocol", &[1]);
-                    let _ = self.send_ping_reply(src_ip, identifier, sequence, data, &[ip_layer]);
+                    let _ = self.send_ping_reply_from(
+                        Some(dst_ip),
+                        src_ip,
+                        identifier,
+                        sequence,
+                        data,
+                        &[ip_layer],
+                    );
                 }
             }
             message_type::ECHO_REPLY => {
@@ -575,12 +593,8 @@ impl SocketObject for IcmpSocket {
                 .as_any()
                 .downcast_ref::<crate::network::ipv4::Ipv4Layer>()
             {
-                // Check if we have a configured IP on any interface
-                let has_ip = get_network_manager()
-                    .get_default_interface()
-                    .and_then(|iface| ipv4.get_primary_ip(iface.name()))
-                    .map(|ip| ip.0 != [0, 0, 0, 0])
-                    .unwrap_or(false);
+                // Route selection also chooses the correct source interface.
+                let has_ip = ipv4.select_source(dest_ip).is_some();
                 if !has_ip {
                     early_println!("[ICMP] send blocked: local IP unset");
                     return Err(SocketError::NotConnected);

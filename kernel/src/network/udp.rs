@@ -22,22 +22,52 @@ use crate::sched::scheduler::current_task_id;
 
 const MAX_SOCKET_TIMEOUT_MS: usize = i32::MAX as usize;
 
-/// Helper function to get local IP address bytes from the default interface
-fn get_local_ip_bytes() -> [u8; 4] {
+/// Select a source address and interface for a UDP destination.
+fn select_local_endpoint(
+    bound_interface: Option<&str>,
+    bound_address: Option<[u8; 4]>,
+    destination: [u8; 4],
+) -> ([u8; 4], Option<String>) {
     let manager = get_network_manager();
-    if let Some(default_iface) = manager.get_default_interface() {
-        if let Some(ip_layer) = manager.get_layer("ip") {
-            if let Some(ipv4_layer) = ip_layer
-                .as_any()
-                .downcast_ref::<crate::network::ipv4::Ipv4Layer>()
-            {
-                if let Some(addr) = ipv4_layer.get_primary_ip(default_iface.name()) {
-                    return addr.as_bytes();
-                }
-            }
-        }
+    let ip_layer = manager.get_layer("ip");
+    let ipv4 = ip_layer.as_ref().and_then(|layer| {
+        layer
+            .as_any()
+            .downcast_ref::<crate::network::ipv4::Ipv4Layer>()
+    });
+
+    if let Some(interface) = bound_interface {
+        let address = match bound_address {
+            Some(address) if address != [0; 4] => address,
+            _ => ipv4
+                .and_then(|layer| layer.get_primary_ip(interface))
+                .map_or([0; 4], |address| address.as_bytes()),
+        };
+        return (address, Some(interface.into()));
     }
-    [0u8; 4]
+
+    if let Some(address) = bound_address
+        && address != [0; 4]
+    {
+        let interface =
+            ipv4.and_then(|layer| layer.interface_for_address(Ipv4Address::from_bytes(address)));
+        return (address, interface);
+    }
+
+    if let Some((interface, address, _)) =
+        ipv4.and_then(|layer| layer.select_source(Ipv4Address::from_bytes(destination)))
+    {
+        return (address.as_bytes(), Some(interface));
+    }
+
+    if let Some(interface) = manager.get_default_interface() {
+        let address = ipv4
+            .and_then(|layer| layer.get_primary_ip(interface.name()))
+            .map_or([0; 4], |address| address.as_bytes());
+        return (address, Some(interface.name().into()));
+    }
+
+    ([0; 4], None)
 }
 
 /// UDP header (8 bytes)
@@ -143,6 +173,8 @@ pub struct UdpSocket {
     local_addr: IrqRwSpinLock<Option<SocketAddress>>,
     /// Remote address (for connected sockets)
     remote_addr: IrqRwSpinLock<Option<SocketAddress>>,
+    /// Interface selected for outgoing datagrams
+    bound_interface: IrqRwSpinLock<Option<String>>,
     /// Send buffer
     send_buffer: IrqSpinLock<Vec<Vec<u8>>>,
     /// Receive buffer
@@ -171,6 +203,7 @@ impl UdpSocket {
         Arc::new_cyclic(|weak| Self {
             local_addr: IrqRwSpinLock::new(None),
             remote_addr: IrqRwSpinLock::new(None),
+            bound_interface: IrqRwSpinLock::new(None),
             send_buffer: IrqSpinLock::new(Vec::new()),
             recv_buffer: IrqSpinLock::new(Vec::new()),
             state: IrqRwSpinLock::new(SocketState::Unconnected),
@@ -190,6 +223,33 @@ impl UdpSocket {
         // Wake up any waiting reader
         if let Some(waker) = self.recv_waker.lock().as_ref() {
             waker.wake_one();
+        }
+    }
+
+    /// Bind outgoing datagrams to a network interface.
+    ///
+    /// # Arguments
+    ///
+    /// * `interface` - Registered interface name to use for transmission.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` if the interface exists, otherwise
+    /// [`SocketError::AddressNotAvailable`].
+    pub fn bind_interface(&self, interface: &str) -> Result<(), SocketError> {
+        if get_network_manager().get_interface(interface).is_none() {
+            return Err(SocketError::AddressNotAvailable);
+        }
+        *self.bound_interface.write() = Some(interface.into());
+        Ok(())
+    }
+
+    fn accepts_interface(&self, interface: Option<&str>) -> bool {
+        let bound = self.bound_interface.read();
+        match (bound.as_deref(), interface) {
+            (Some(expected), Some(actual)) => expected == actual,
+            (Some(_), None) => false,
+            (None, _) => true,
         }
     }
 
@@ -752,26 +812,22 @@ impl UdpLayer {
         dest_port: u16,
         data: Vec<u8>,
     ) -> Result<(), SocketError> {
-        let (src_ip_bytes, src_port) = match socket.local_addr.read().clone() {
-            Some(SocketAddress::Inet(inet)) => {
-                if inet.addr == [0, 0, 0, 0] {
-                    let ip = get_local_ip_bytes();
-                    (ip, inet.port)
-                } else {
-                    (inet.addr, inet.port)
-                }
-            }
+        let bound_interface = socket.bound_interface.read().clone();
+        let (bound_address, src_port) = match socket.local_addr.read().clone() {
+            Some(SocketAddress::Inet(inet)) => (Some(inet.addr), inet.port),
             _ => {
-                // Get local IP from IPv4 layer if not bound
-                let ip = get_local_ip_bytes();
                 // Allocate ephemeral port for unbound socket
                 let port = self.allocate_port();
                 self.register_port(port, socket.self_weak.clone())?;
-                *socket.local_addr.write() =
-                    Some(SocketAddress::Inet(Inet4SocketAddress::new(ip, port)));
-                (ip, port)
+                *socket.local_addr.write() = Some(SocketAddress::Inet(Inet4SocketAddress::new(
+                    [0, 0, 0, 0],
+                    port,
+                )));
+                (None, port)
             }
         };
+        let (src_ip_bytes, selected_interface) =
+            select_local_endpoint(bound_interface.as_deref(), bound_address, dest_ip);
 
         let total_length = (8 + data.len()) as u16;
 
@@ -808,6 +864,9 @@ impl UdpLayer {
         ip_context.set("ip_src", &src_ip_bytes);
         ip_context.set("ip_dst", &dest_ip);
         ip_context.set("ip_protocol", &[17]);
+        if let Some(interface) = selected_interface.as_deref() {
+            ip_context.set("interface", interface.as_bytes());
+        }
 
         early_println!(
             "[UDP] Send: {} bytes (src port: {}, dst: {}.{}.{}.{})",
@@ -833,7 +892,18 @@ impl UdpLayer {
         Ok(())
     }
 
-    /// Receive a UDP datagram
+    /// Receive a UDP datagram when its incoming interface is unknown.
+    ///
+    /// # Arguments
+    ///
+    /// * `src_ip` - Source IPv4 address.
+    /// * `src_port` - Source UDP port.
+    /// * `dst_port` - Destination UDP port.
+    /// * `data` - Datagram payload.
+    ///
+    /// # Returns
+    ///
+    /// This method does not return a value.
     pub fn receive_datagram(
         &self,
         src_ip: Ipv4Address,
@@ -841,11 +911,37 @@ impl UdpLayer {
         dst_port: u16,
         data: Vec<u8>,
     ) {
+        self.receive_datagram_on_interface(src_ip, src_port, dst_port, data, None);
+    }
+
+    /// Receive a UDP datagram on a known network interface.
+    ///
+    /// # Arguments
+    ///
+    /// * `src_ip` - Source IPv4 address.
+    /// * `src_port` - Source UDP port.
+    /// * `dst_port` - Destination UDP port.
+    /// * `data` - Datagram payload.
+    /// * `interface` - Interface on which the datagram arrived, when known.
+    ///
+    /// # Returns
+    ///
+    /// This method does not return a value.
+    pub fn receive_datagram_on_interface(
+        &self,
+        src_ip: Ipv4Address,
+        src_port: u16,
+        dst_port: u16,
+        data: Vec<u8>,
+        interface: Option<&str>,
+    ) {
         let mut stats = self.stats.write();
         stats.packets_received += 1;
         stats.bytes_received += (8 + data.len()) as u64;
 
-        if let Some(socket) = self.find_socket(dst_port) {
+        if let Some(socket) = self.find_socket(dst_port)
+            && socket.accepts_interface(interface)
+        {
             socket.deliver_datagram(data);
             let mut remote_lock = socket.remote_addr.write();
             if remote_lock.is_none() {
@@ -875,6 +971,7 @@ impl NetworkLayer for UdpLayer {
     fn receive(&self, packet: &[u8], context: Option<&LayerContext>) -> Result<(), SocketError> {
         let mut src_ip = Ipv4Address::new(0, 0, 0, 0);
         let mut dst_ip = Ipv4Address::new(0, 0, 0, 0);
+        let mut interface = None;
         if let Some(ctx) = context {
             if let Some(raw) = ctx.get("ip_src") {
                 if raw.len() >= 4 {
@@ -886,8 +983,11 @@ impl NetworkLayer for UdpLayer {
                     dst_ip = Ipv4Address::new(raw[0], raw[1], raw[2], raw[3]);
                 }
             }
+            interface = ctx
+                .get("interface")
+                .and_then(|raw| core::str::from_utf8(raw).ok());
         }
-        self.receive_packet(src_ip, dst_ip, packet)
+        self.receive_packet_on_interface(src_ip, dst_ip, packet, interface)
     }
 
     fn name(&self) -> &'static str {
@@ -904,12 +1004,45 @@ impl NetworkLayer for UdpLayer {
 }
 
 impl UdpLayer {
-    /// Receive a UDP datagram
+    /// Receive a UDP packet when its incoming interface is unknown.
+    ///
+    /// # Arguments
+    ///
+    /// * `src_ip` - Source IPv4 address.
+    /// * `dst_ip` - Destination IPv4 address.
+    /// * `packet` - Complete UDP packet, including its header.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` after validation and dispatch, or a socket error if malformed.
     pub fn receive_packet(
         &self,
         src_ip: Ipv4Address,
         _dst_ip: Ipv4Address,
         packet: &[u8],
+    ) -> Result<(), SocketError> {
+        self.receive_packet_on_interface(src_ip, _dst_ip, packet, None)
+    }
+
+    /// Receive and dispatch a UDP packet from a known network interface.
+    ///
+    /// # Arguments
+    ///
+    /// * `src_ip` - Source IPv4 address.
+    /// * `dst_ip` - Destination IPv4 address.
+    /// * `packet` - Complete UDP packet, including its header.
+    /// * `interface` - Interface on which the packet arrived, when known.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` after the packet is validated and dispatched, or a socket error
+    /// if the packet is malformed.
+    pub fn receive_packet_on_interface(
+        &self,
+        src_ip: Ipv4Address,
+        _dst_ip: Ipv4Address,
+        packet: &[u8],
+        interface: Option<&str>,
     ) -> Result<(), SocketError> {
         if packet.len() < 8 {
             return Err(SocketError::InvalidPacket);
@@ -926,7 +1059,13 @@ impl UdpLayer {
         let data = &packet[8..data_offset];
 
         // Receive the datagram
-        self.receive_datagram(src_ip, header.src_port, header.dst_port, data.to_vec());
+        self.receive_datagram_on_interface(
+            src_ip,
+            header.src_port,
+            header.dst_port,
+            data.to_vec(),
+            interface,
+        );
 
         Ok(())
     }

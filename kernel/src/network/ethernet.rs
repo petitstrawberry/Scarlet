@@ -247,7 +247,11 @@ impl EthernetLayer {
         }
 
         // 2. Check if destination IP is broadcast
-        if let Some(dst_ip_bytes) = context.get("dst_ip") {
+        if let Some(dst_ip_bytes) = context
+            .get("dst_ip")
+            .or_else(|| context.get("ip_dst"))
+            .or_else(|| context.get("next_hop"))
+        {
             if dst_ip_bytes.len() >= 4 {
                 // Broadcast IP (255.255.255.255) → Broadcast MAC
                 if dst_ip_bytes[0] == 255
@@ -619,5 +623,14 @@ mod tests {
         let eth_layer = EthernetLayer::new();
         // Initially no default
         assert!(eth_layer.get_default_interface().is_none());
+    }
+
+    #[test_case]
+    fn ipv4_limited_broadcast_uses_ethernet_broadcast() {
+        let eth_layer = EthernetLayer::new();
+        let mut context = LayerContext::new();
+        context.set("ip_dst", &[255, 255, 255, 255]);
+
+        assert_eq!(eth_layer.resolve_dest_mac(&context, "eth0"), Ok([0xff; 6]));
     }
 }
