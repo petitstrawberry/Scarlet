@@ -26,6 +26,7 @@ pub mod fpu;
 pub mod hv;
 pub mod instruction;
 pub mod interrupt;
+pub(crate) mod iommu;
 pub mod kernel;
 pub mod lsm;
 pub mod mmio;
