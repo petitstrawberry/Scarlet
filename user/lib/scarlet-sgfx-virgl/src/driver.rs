@@ -17,7 +17,6 @@ use scarlet_os::ipc::SharedMemory;
 #[cfg(not(feature = "std"))]
 use std::ipc::SharedMemory;
 
-const VIRTIO_GPU_BACKEND_ID: &[u8] = b"virtio-gpu";
 const APPLE_AGX_BACKEND_ID: &[u8] = b"apple-agx";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,7 +27,7 @@ enum BackendKind {
 }
 
 fn classify_backend_id(backend_id: &[u8]) -> BackendKind {
-    if backend_id == VIRTIO_GPU_BACKEND_ID {
+    if sgfx_backend_virgl::matches_backend_id(backend_id) {
         BackendKind::Virgl
     } else if backend_id == APPLE_AGX_BACKEND_ID {
         BackendKind::AppleAgx

@@ -1921,6 +1921,7 @@ dependencies = [
  "gpu-raw",
  "scarlet-os",
  "scarlet-std",
+ "sgfx-backend-virgl",
  "sgfx-core",
 ]
 
@@ -2154,6 +2155,13 @@ name = "sgfx"
 version = "0.16.0"
 dependencies = [
  "scarlet-sgfx-virgl",
+]
+
+[[package]]
+name = "sgfx-backend-virgl"
+version = "0.16.0"
+dependencies = [
+ "sgfx-core",
 ]
 
 [[package]]

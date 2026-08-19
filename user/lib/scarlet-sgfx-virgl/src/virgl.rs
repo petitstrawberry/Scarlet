@@ -17,6 +17,7 @@ use gpu_raw::{
 use scarlet_os::handle::{Handle, HandleError, HandleResult};
 #[cfg(feature = "std")]
 use scarlet_os::ipc::SharedMemory;
+use sgfx_backend_virgl::CommandTransport;
 #[cfg(not(feature = "std"))]
 use std::{
     handle::{Handle, HandleError, HandleResult},
@@ -62,7 +63,6 @@ const VIRGL_OBJECT_SURFACE: u32 = 8;
 const VIRGL_FORMAT_B8G8R8A8_UNORM: u32 = 1;
 const VIRGL_FORMAT_Z32_FLOAT: u32 = 18;
 const VIRGL_FORMAT_R32G32B32A32_FLOAT: u32 = 31;
-const VIRGL_FORMAT_R32G32B32_FLOAT: u32 = 30;
 const VIRGL_FORMAT_R32G32_FLOAT: u32 = 29;
 const PIPE_SHADER_VERTEX: u32 = 0;
 const PIPE_SHADER_FRAGMENT: u32 = 1;
@@ -140,22 +140,6 @@ impl FramebufferOrientation {
         }
     }
 }
-
-const VERTEX_SHADER: &str = "VERT\n\
-DCL IN[0]\n\
-DCL IN[1]\n\
-DCL OUT[0], POSITION\n\
-DCL OUT[1], COLOR\n\
-  0: MOV OUT[0], IN[0]\n\
-  1: MOV OUT[1], IN[1]\n\
-  2: END\n";
-
-const FRAGMENT_SHADER: &str = "FRAG\n\
-PROPERTY FS_COLOR0_WRITES_ALL_CBUFS 1\n\
-DCL IN[0], COLOR, PERSPECTIVE\n\
-DCL OUT[0], COLOR\n\
-  0: MOV OUT[0], IN[0]\n\
-   1: END\n";
 
 const COMPOSITION_VERTEX_SHADER: &str = "VERT\n\
 DCL IN[0]\n\
@@ -747,6 +731,22 @@ pub(crate) struct Queue {
     composition_initialized: Cell<bool>,
 }
 
+struct ScarletCommandTransport<'queue> {
+    queue: &'queue RawQueue,
+}
+
+impl CommandTransport for ScarletCommandTransport<'_> {
+    type Error = HandleError;
+
+    fn max_command_size(&self) -> usize {
+        self.queue.max_opaque_command_size() as usize
+    }
+
+    fn submit(&self, commands: &[u8]) -> HandleResult<()> {
+        self.queue.submit(commands).map(|_| ())
+    }
+}
+
 pub(crate) enum CompositionOperation<'a> {
     Textured {
         texture: &'a Texture,
@@ -932,6 +932,18 @@ struct CompositionQuad {
 }
 
 impl Queue {
+    fn command_transport(&self) -> ScarletCommandTransport<'_> {
+        ScarletCommandTransport { queue: &self.raw }
+    }
+
+    fn max_command_size(&self) -> usize {
+        self.command_transport().max_command_size()
+    }
+
+    fn submit_commands(&self, commands: &[u8]) -> HandleResult<()> {
+        self.command_transport().submit(commands)
+    }
+
     pub(crate) fn context_id(&self) -> i32 {
         self.context_handle
     }
@@ -962,7 +974,8 @@ impl Queue {
         }
 
         const INLINE_WRITE_FIXED_BYTES: usize = 12 * core::mem::size_of::<u32>();
-        let max_payload = (self.raw.max_opaque_command_size() as usize)
+        let max_payload = self
+            .max_command_size()
             .checked_sub(INLINE_WRITE_FIXED_BYTES)
             .map(|bytes| bytes & !(core::mem::size_of::<u32>() - 1))
             .filter(|bytes| *bytes > 0)
@@ -983,7 +996,7 @@ impl Queue {
                 u32::try_from(offset).map_err(|_| HandleError::InvalidParameter)?,
                 chunk,
             )?;
-            self.raw.submit(&commands)?;
+            self.submit_commands(&commands)?;
             offset = end;
         }
         let buffer = ir_buffer(context, resources, spec)?;
@@ -1056,7 +1069,7 @@ impl Queue {
             source_id,
             copy.source_rect,
         );
-        self.raw.submit(&commands).map(|_| ())
+        self.submit_commands(&commands)
     }
 
     pub(crate) fn submit_ir_internal(
@@ -1381,7 +1394,7 @@ impl Queue {
             }
             push_draw(&mut commands, draw.start_vertex, draw.vertex_count)?;
         }
-        if commands.len() > self.raw.max_opaque_command_size() as usize {
+        if commands.len() > self.max_command_size() {
             return Err(HandleError::InvalidParameter);
         }
 
@@ -1405,7 +1418,7 @@ impl Queue {
                 ir_rect_to_pixel_rect(upload.destination)?,
             )?;
         }
-        self.raw.submit(&commands)?;
+        self.submit_commands(&commands)?;
         if !resources.initialized.get() {
             resources.initialized.set(true);
         }
@@ -1454,11 +1467,19 @@ impl Queue {
 
         let needs_setup = !pipeline.initialized.get();
         let mut commands = if needs_setup {
-            build_setup_commands(
+            sgfx_backend_virgl::build_vertex_color_setup(
                 pipeline.target_resource_id,
                 pipeline.vertex_resource_id,
-                pipeline.cull_mode,
-                pipeline.front_face,
+                core::mem::size_of::<VertexClip4Color3>() as u32,
+                match pipeline.cull_mode {
+                    CullMode::None => crate::ir::CullMode::None,
+                    CullMode::Front => crate::ir::CullMode::Front,
+                    CullMode::Back => crate::ir::CullMode::Back,
+                },
+                match pipeline.front_face {
+                    FrontFace::Clockwise => crate::ir::FrontFace::Clockwise,
+                    FrontFace::CounterClockwise => crate::ir::FrontFace::CounterClockwise,
+                },
             )
         } else {
             Vec::with_capacity(2048)
@@ -1467,7 +1488,7 @@ impl Queue {
         push_viewport(&mut commands, viewport, image.orientation);
         push_inline_write(&mut commands, pipeline.vertex_resource_id, vertices);
         push_clear_and_draw(&mut commands, clear_color, vertices.len());
-        self.raw.submit(&commands)?;
+        self.submit_commands(&commands)?;
         if needs_setup {
             pipeline.initialized.set(true);
         }
@@ -1586,7 +1607,7 @@ impl Queue {
         }
 
         let command_capacity = composition_command_capacity(vertices.len(), draws.len())?;
-        if command_capacity > self.raw.max_opaque_command_size() as usize {
+        if command_capacity > self.max_command_size() {
             return Err(HandleError::InvalidParameter);
         }
         let mut commands = Vec::new();
@@ -1662,10 +1683,10 @@ impl Queue {
             }
             push_draw(&mut commands, draw.start_vertex, 6)?;
         }
-        if commands.len() > self.raw.max_opaque_command_size() as usize {
+        if commands.len() > self.max_command_size() {
             return Err(HandleError::InvalidParameter);
         }
-        self.raw.submit(&commands)?;
+        self.submit_commands(&commands)?;
         if needs_setup {
             self.composition_initialized.set(true);
         }
@@ -3055,132 +3076,6 @@ fn push_clear_and_draw(commands: &mut Vec<u8>, clear_color: Color, vertex_count:
     push_dword(commands, 0);
     push_dword(commands, u32::MAX);
     push_dword(commands, 0);
-}
-
-fn build_setup_commands(
-    image_resource_id: u32,
-    vertex_resource_id: u32,
-    cull_mode: CullMode,
-    front_face: FrontFace,
-) -> Vec<u8> {
-    let mut commands = Vec::with_capacity(2048);
-    push_dword(
-        &mut commands,
-        command_header(VIRGL_CCMD_CREATE_OBJECT, VIRGL_OBJECT_SURFACE, 5),
-    );
-    push_dword(&mut commands, SURFACE_HANDLE);
-    push_dword(&mut commands, image_resource_id);
-    push_dword(&mut commands, VIRGL_FORMAT_B8G8R8A8_UNORM);
-    push_dword(&mut commands, 0);
-    push_dword(&mut commands, 0);
-
-    push_dword(
-        &mut commands,
-        command_header(VIRGL_CCMD_CREATE_OBJECT, VIRGL_OBJECT_BLEND, 11),
-    );
-    push_dword(&mut commands, BLEND_HANDLE);
-    push_dword(&mut commands, 0);
-    push_dword(&mut commands, 0);
-    push_dword(&mut commands, 0xf << 27);
-    for _ in 0..7 {
-        push_dword(&mut commands, 0);
-    }
-    push_dword(
-        &mut commands,
-        command_header(VIRGL_CCMD_BIND_OBJECT, VIRGL_OBJECT_BLEND, 1),
-    );
-    push_dword(&mut commands, BLEND_HANDLE);
-
-    push_dword(
-        &mut commands,
-        command_header(VIRGL_CCMD_CREATE_OBJECT, VIRGL_OBJECT_RASTERIZER, 9),
-    );
-    push_dword(&mut commands, RASTERIZER_HANDLE);
-    push_dword(&mut commands, rasterizer_flags(cull_mode, front_face));
-    push_float(&mut commands, 1.0);
-    push_dword(&mut commands, 0);
-    push_dword(&mut commands, 0);
-    push_float(&mut commands, 1.0);
-    push_float(&mut commands, 0.0);
-    push_float(&mut commands, 0.0);
-    push_float(&mut commands, 0.0);
-    push_dword(
-        &mut commands,
-        command_header(VIRGL_CCMD_BIND_OBJECT, VIRGL_OBJECT_RASTERIZER, 1),
-    );
-    push_dword(&mut commands, RASTERIZER_HANDLE);
-
-    push_shader(
-        &mut commands,
-        VERTEX_SHADER_HANDLE,
-        PIPE_SHADER_VERTEX,
-        VERTEX_SHADER,
-    );
-    push_dword(&mut commands, command_header(VIRGL_CCMD_BIND_SHADER, 0, 2));
-    push_dword(&mut commands, VERTEX_SHADER_HANDLE);
-    push_dword(&mut commands, PIPE_SHADER_VERTEX);
-    push_shader(
-        &mut commands,
-        FRAGMENT_SHADER_HANDLE,
-        PIPE_SHADER_FRAGMENT,
-        FRAGMENT_SHADER,
-    );
-    push_dword(&mut commands, command_header(VIRGL_CCMD_BIND_SHADER, 0, 2));
-    push_dword(&mut commands, FRAGMENT_SHADER_HANDLE);
-    push_dword(&mut commands, PIPE_SHADER_FRAGMENT);
-
-    push_dword(
-        &mut commands,
-        command_header(VIRGL_CCMD_CREATE_OBJECT, VIRGL_OBJECT_VERTEX_ELEMENTS, 9),
-    );
-    push_dword(&mut commands, VERTEX_ELEMENTS_HANDLE);
-    push_dword(&mut commands, 0);
-    push_dword(&mut commands, 0);
-    push_dword(&mut commands, 0);
-    push_dword(&mut commands, VIRGL_FORMAT_R32G32B32A32_FLOAT);
-    push_dword(&mut commands, 16);
-    push_dword(&mut commands, 0);
-    push_dword(&mut commands, 0);
-    push_dword(&mut commands, VIRGL_FORMAT_R32G32B32_FLOAT);
-    push_dword(
-        &mut commands,
-        command_header(VIRGL_CCMD_BIND_OBJECT, VIRGL_OBJECT_VERTEX_ELEMENTS, 1),
-    );
-    push_dword(&mut commands, VERTEX_ELEMENTS_HANDLE);
-
-    push_dword(
-        &mut commands,
-        command_header(VIRGL_CCMD_SET_FRAMEBUFFER_STATE, 0, 3),
-    );
-    push_dword(&mut commands, 1);
-    push_dword(&mut commands, 0);
-    push_dword(&mut commands, SURFACE_HANDLE);
-
-    push_dword(
-        &mut commands,
-        command_header(VIRGL_CCMD_SET_VERTEX_BUFFERS, 0, 3),
-    );
-    push_dword(
-        &mut commands,
-        core::mem::size_of::<VertexClip4Color3>() as u32,
-    );
-    push_dword(&mut commands, 0);
-    push_dword(&mut commands, vertex_resource_id);
-    commands
-}
-
-fn rasterizer_flags(cull_mode: CullMode, front_face: FrontFace) -> u32 {
-    let cull_face = match cull_mode {
-        CullMode::None => 0,
-        CullMode::Front => 1,
-        CullMode::Back => 2,
-    } << VIRGL_RASTERIZER_CULL_FACE_SHIFT;
-    let front_ccw = if matches!(front_face, FrontFace::CounterClockwise) {
-        VIRGL_RASTERIZER_FRONT_CCW
-    } else {
-        0
-    };
-    VIRGL_RASTERIZER_DEPTH_CLIP | cull_face | front_ccw
 }
 
 #[cfg(test)]
