@@ -177,12 +177,13 @@ path = "src/sas/main.rs"
 scarlet-std = { path = "../lib/std", features = ["alloc_debug"] }
 scpm = { path = "../lib/scpm" }
 framebuffer = { path = "../lib/framebuffer" }
-sgfx = { path = "../lib/sgfx-compat" }
+sgfx = { path = "../lib/sgfx-frontend", default-features = false, features = ["backend-scarlet-virgl", "legacy-scarlet-std"] }
+sgfx_compat = { package = "sgfx-compat-scarlet", path = "../lib/sgfx-compat" }
 sws-protocol = { path = "../lib/sws-protocol" }
 sws-client = { path = "../lib/sws-client" }
 scarlet-os = { path = "../lib/scarlet-os" }
-scarlet-ui = { git = "https://github.com/petitstrawberry/scarlet-ui", package = "scarlet-ui", default-features = false, features = ["legacy-scarlet-std", "platform-sws"] }
-scarlet-ui-macros = { git = "https://github.com/petitstrawberry/scarlet-ui", package = "scarlet-ui-macros" }
+scarlet-ui = { git = "https://github.com/petitstrawberry/scarlet-ui", branch = "feature/sgfx-frontend-selection", package = "scarlet-ui", default-features = false, features = ["legacy-scarlet-std", "platform-sws"] }
+scarlet-ui-macros = { git = "https://github.com/petitstrawberry/scarlet-ui", branch = "feature/sgfx-frontend-selection", package = "scarlet-ui-macros" }
 scarlet-desktop-config = { path = "../lib/scarlet-desktop-config" }
 sbus = { path = "../lib/sbus" }
 sbus-client = { path = "../lib/sbus-client" }

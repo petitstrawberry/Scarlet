@@ -1,0 +1,35 @@
+[package]
+name = "sgfx"
+version = "0.16.0"
+edition = "2024"
+
+[features]
+default = ["std", "backend-wgpu", "backend-scarlet-virgl"]
+std = ["sgfx-backend-scarlet-virgl?/std"]
+legacy-scarlet-std = [
+    "dep:scarlet-std",
+    "sgfx-backend-scarlet-virgl?/scarlet-std",
+]
+# Compatibility alias for consumers that previously selected Scarlet's
+# no_std support directly on the `sgfx` package.
+scarlet-std = ["legacy-scarlet-std"]
+backend-wgpu = ["dep:raw-window-handle", "dep:sgfx-backend-wgpu"]
+backend-scarlet-virgl = ["dep:sgfx-backend-scarlet-virgl"]
+
+[dependencies]
+sgfx-core = { path = "../sgfx", default-features = false }
+
+[target.'cfg(not(target_os = "scarlet"))'.dependencies]
+raw-window-handle = { version = "0.6", optional = true }
+sgfx-backend-wgpu = { path = "../sgfx-backend-wgpu", optional = true }
+
+[target.'cfg(target_os = "scarlet")'.dependencies]
+scarlet-std = { path = "../std", optional = true }
+sgfx-backend-scarlet-virgl = { path = "../sgfx-backend-scarlet-virgl", default-features = false, optional = true }
+
+[lib]
+name = "sgfx"
+path = "src/lib.rs"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("scarlet"))'] }

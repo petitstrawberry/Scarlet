@@ -1,9 +1,8 @@
-//! Scarlet composition facade for SGFX applications and platform integrations.
+//! Legacy compatibility facade for existing Scarlet SGFX applications.
 //!
-//! This environment-level crate selects and reexports the complete Scarlet
-//! execution backend, allowing consumers such as `platform-sws` to own SGFX
-//! sessions without naming a VirGL implementation dependency. Cross-platform
-//! renderers should depend only on `sgfx-core` and its backend contract.
+//! New applications and platform composition roots should use the
+//! cross-platform `sgfx` frontend. This crate temporarily preserves the former
+//! Scarlet/VirGL immediate-mode surface while remaining explicitly legacy.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 

@@ -3,6 +3,12 @@
 version = 4
 
 [[package]]
+name = "allocator-api2"
+version = "0.2.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
+
+[[package]]
 name = "android_system_properties"
 version = "0.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -299,11 +305,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "gpu-raw"
+version = "0.16.0"
+dependencies = [
+ "scarlet-os",
+ "scarlet-std",
+]
+
+[[package]]
 name = "hashbrown"
 version = "0.15.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9229cfe53dfd69f0609a49f65461bd93001ea1ef889cd5529dd176593f5338a1"
 dependencies = [
+ "allocator-api2",
+ "equivalent",
  "foldhash",
 ]
 
@@ -633,6 +649,48 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 
 [[package]]
+name = "scarlet-abi"
+version = "0.16.0"
+
+[[package]]
+name = "scarlet-os"
+version = "0.16.0"
+dependencies = [
+ "scarlet-abi",
+ "scarlet-rt",
+ "scarlet-sys",
+]
+
+[[package]]
+name = "scarlet-rt"
+version = "0.16.0"
+dependencies = [
+ "lock_api",
+ "scarlet-sys",
+ "spin",
+ "talc",
+]
+
+[[package]]
+name = "scarlet-std"
+version = "0.16.0"
+dependencies = [
+ "hashbrown 0.15.5",
+ "scarlet-abi",
+ "scarlet-os",
+ "scarlet-rt",
+ "scarlet-sys",
+ "spin",
+]
+
+[[package]]
+name = "scarlet-sys"
+version = "0.16.0"
+dependencies = [
+ "scarlet-abi",
+]
+
+[[package]]
 name = "scopeguard"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -659,6 +717,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "sgfx"
+version = "0.16.0"
+dependencies = [
+ "raw-window-handle",
+ "scarlet-std",
+ "sgfx-backend-scarlet-virgl",
+ "sgfx-backend-wgpu",
+ "sgfx-core",
+]
+
+[[package]]
+name = "sgfx-backend-scarlet-virgl"
+version = "0.16.0"
+dependencies = [
+ "gpu-raw",
+ "scarlet-os",
+ "scarlet-std",
+ "sgfx-codegen-virgl",
+ "sgfx-core",
+]
+
+[[package]]
 name = "sgfx-backend-wgpu"
 version = "0.16.0"
 dependencies = [
@@ -667,6 +747,13 @@ dependencies = [
  "raw-window-handle",
  "sgfx-core",
  "wgpu",
+]
+
+[[package]]
+name = "sgfx-codegen-virgl"
+version = "0.16.0"
+dependencies = [
+ "sgfx-core",
 ]
 
 [[package]]
@@ -693,6 +780,15 @@ name = "smallvec"
 version = "1.15.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ed6a63f02c8539c91a8685a86f4099661ba3da017932f6ebbea6de3f0fa7c90"
+
+[[package]]
+name = "spin"
+version = "0.10.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "023a211cb3138dbc438680b32560ad89f699977624c9f8dbb95a47d5b4c07dd3"
+dependencies = [
+ "lock_api",
+]
 
 [[package]]
 name = "spirv"
@@ -751,6 +847,15 @@ dependencies = [
  "proc-macro2",
  "quote",
  "unicode-ident",
+]
+
+[[package]]
+name = "talc"
+version = "4.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a3ae828aa394de34c7de08f522d1b86bd1c182c668d27da69caadda00590f26d"
+dependencies = [
+ "lock_api",
 ]
 
 [[package]]

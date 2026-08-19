@@ -5,12 +5,21 @@
 
 extern crate scarlet_std as std;
 
-use sgfx::Device;
+use sgfx::Instance;
 use std::println;
 
 #[unsafe(no_mangle)]
 fn main() -> i32 {
-    let device = match Device::open("/dev/gpu0") {
+    let instance = match Instance::new() {
+        Ok(instance) => instance,
+        Err(error) => {
+            println!("failed to select an SGFX backend: {}", error);
+            return 1;
+        }
+    };
+    println!("SGFX backend: {}", instance.backend());
+
+    let device = match instance.open_device("/dev/gpu0") {
         Ok(device) => device,
         Err(error) => {
             println!("failed to open /dev/gpu0: {:?}", error);
@@ -30,13 +39,8 @@ fn main() -> i32 {
             return 1;
         }
     };
-    match context.create_queue() {
-        Ok(_) => println!("  graphics queue: available"),
-        Err(error) => {
-            println!("failed to create graphics queue: {:?}", error);
-            return 1;
-        }
-    }
+    let _ = context;
+    println!("  graphics context: available");
 
     0
 }
