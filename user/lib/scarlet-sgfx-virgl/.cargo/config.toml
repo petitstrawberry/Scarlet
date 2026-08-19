@@ -1,3 +1,4 @@
+# Default target for Scarlet transport adapter development.
 [build]
 target = "../../targets/riscv64gc-unknown-scarlet-elf.json"
 

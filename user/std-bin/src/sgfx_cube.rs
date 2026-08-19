@@ -7,7 +7,8 @@ use std::vec::Vec;
 
 use framebuffer::DisplaySurface;
 use sgfx::{
-    Color, CullMode, Device, FrontFace, PipelineDesc, RenderPass, VertexClip4Color3, Viewport,
+    Color, CullMode, Device, FrontFace, PipelineDesc, RenderPass, SgfxImagePresentExt,
+    VertexClip4Color3, Viewport,
 };
 const FACE_COUNT: usize = 6;
 const VERTICES_PER_FACE: usize = 4;

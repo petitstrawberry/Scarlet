@@ -1,8 +1,7 @@
-//! Private backend selection and dispatch for the application facade.
+//! Scarlet transport selection and dispatch for the application facade.
 
 use alloc::{rc::Rc, vec::Vec};
 
-use framebuffer::DisplaySurface;
 use gpu_raw::Gpu as RawGpu;
 #[cfg(feature = "std")]
 use scarlet_os::handle::{Handle, HandleError, HandleResult};
@@ -17,7 +16,6 @@ use scarlet_os::ipc::SharedMemory;
 #[cfg(not(feature = "std"))]
 use std::ipc::SharedMemory;
 
-const VIRTIO_GPU_BACKEND_ID: &[u8] = b"virtio-gpu";
 const APPLE_AGX_BACKEND_ID: &[u8] = b"apple-agx";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,7 +26,7 @@ enum BackendKind {
 }
 
 fn classify_backend_id(backend_id: &[u8]) -> BackendKind {
-    if backend_id == VIRTIO_GPU_BACKEND_ID {
+    if sgfx_backend_virgl::matches_backend_id(backend_id) {
         BackendKind::Virgl
     } else if backend_id == APPLE_AGX_BACKEND_ID {
         BackendKind::AppleAgx
@@ -619,14 +617,6 @@ pub(crate) enum CompositionOperation<'a> {
         color: Color,
         clip: Option<PixelRect>,
     },
-}
-
-impl Image {
-    pub(crate) fn present(&self, display: &DisplaySurface) -> HandleResult<()> {
-        match self {
-            Self::Virgl(image) => image.present(display),
-        }
-    }
 }
 
 pub(crate) enum Pipeline {

@@ -6,7 +6,7 @@ use std::time::Duration;
 use std::vec::Vec;
 
 use framebuffer::DisplaySurface;
-use sgfx::{Color, CompositionPass, Device, PixelRect, SourceAlpha};
+use sgfx::{Color, CompositionPass, Device, PixelRect, SgfxImagePresentExt, SourceAlpha};
 
 const MAX_TEXTURE_SIZE: u32 = 256;
 const MARGIN: u32 = 16;

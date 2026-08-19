@@ -1914,6 +1914,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "scarlet-sgfx-virgl"
+version = "0.16.0"
+dependencies = [
+ "gpu-raw",
+ "scarlet-os",
+ "scarlet-std",
+ "sgfx-backend-virgl",
+ "sgfx-core",
+]
+
+[[package]]
 name = "scarlet-std"
 version = "0.16.0"
 dependencies = [
@@ -2143,10 +2154,19 @@ name = "sgfx"
 version = "0.16.0"
 dependencies = [
  "framebuffer",
- "gpu-raw",
- "scarlet-os",
- "scarlet-std",
+ "scarlet-sgfx-virgl",
 ]
+
+[[package]]
+name = "sgfx-backend-virgl"
+version = "0.16.0"
+dependencies = [
+ "sgfx-core",
+]
+
+[[package]]
+name = "sgfx-core"
+version = "0.16.0"
 
 [[package]]
 name = "shlex"
@@ -3257,3 +3277,7 @@ checksum = "27bc9d5b815bc103f142aa054f561d9187d191692ec7c2d1e2b4737f8dbd7296"
 dependencies = [
  "zune-core",
 ]
+
+[[patch.unused]]
+name = "sgfx-backend-wgpu"
+version = "0.16.0"

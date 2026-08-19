@@ -1,25 +1,14 @@
 [package]
-name = "sgfx"
+name = "sgfx-core"
 version = "0.16.0"
 edition = "2024"
 
 [features]
-default = ["scarlet-std"]
-std = ["dep:scarlet-os", "framebuffer/std", "gpu-raw/std"]
-scarlet-std = ["dep:scarlet-std", "framebuffer/scarlet-std", "gpu-raw/scarlet-std"]
-wgpu = ["std", "dep:bytemuck", "dep:wgpu"]
+default = []
+std = []
 
 [dependencies]
-scarlet-os = { path = "../scarlet-os", default-features = false, features = ["std"], optional = true }
-scarlet-std = { path = "../std", optional = true }
-framebuffer = { path = "../framebuffer", default-features = false }
-gpu-raw = { path = "../gpu-raw", default-features = false }
-bytemuck = { version = "1", features = ["derive"], optional = true }
-wgpu = { version = "24", optional = true }
-
-[dev-dependencies]
-pollster = "0.4"
 
 [lib]
-name = "sgfx"
+name = "sgfx_core"
 path = "src/lib.rs"

@@ -227,7 +227,16 @@ impl PixelRect {
         self.x + self.width <= extent.width && self.y + self.height <= extent.height
     }
 
-    pub(crate) const fn same_extent(self, other: Self) -> bool {
+    /// Return whether another rectangle has the same width and height.
+    ///
+    /// # Arguments
+    ///
+    /// * `other` - Rectangle whose extent should be compared.
+    ///
+    /// # Returns
+    ///
+    /// `true` when both extents are equal, regardless of their origins.
+    pub const fn same_extent(self, other: Self) -> bool {
         self.width == other.width && self.height == other.height
     }
 }

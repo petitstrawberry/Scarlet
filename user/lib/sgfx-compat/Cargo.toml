@@ -1,0 +1,17 @@
+[package]
+name = "sgfx"
+version = "0.16.0"
+edition = "2024"
+
+[features]
+default = ["scarlet-std"]
+std = ["framebuffer/std", "scarlet-sgfx-virgl/std"]
+scarlet-std = ["framebuffer/scarlet-std", "scarlet-sgfx-virgl/scarlet-std"]
+
+[dependencies]
+framebuffer = { path = "../framebuffer", default-features = false }
+scarlet-sgfx-virgl = { path = "../scarlet-sgfx-virgl", default-features = false }
+
+[lib]
+name = "sgfx"
+path = "src/lib.rs"

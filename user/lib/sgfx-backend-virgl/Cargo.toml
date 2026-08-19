@@ -1,0 +1,11 @@
+[package]
+name = "sgfx-backend-virgl"
+version = "0.16.0"
+edition = "2024"
+
+[dependencies]
+sgfx-core = { path = "../sgfx", default-features = false }
+
+[lib]
+name = "sgfx_backend_virgl"
+path = "src/lib.rs"

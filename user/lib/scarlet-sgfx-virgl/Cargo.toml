@@ -1,0 +1,20 @@
+[package]
+name = "scarlet-sgfx-virgl"
+version = "0.16.0"
+edition = "2024"
+
+[features]
+default = ["scarlet-std"]
+std = ["dep:scarlet-os", "gpu-raw/std"]
+scarlet-std = ["dep:scarlet-std", "gpu-raw/scarlet-std"]
+
+[dependencies]
+scarlet-os = { path = "../scarlet-os", default-features = false, features = ["std"], optional = true }
+scarlet-std = { path = "../std", optional = true }
+gpu-raw = { path = "../gpu-raw", default-features = false }
+sgfx-core = { path = "../sgfx", default-features = false }
+sgfx-backend-virgl = { path = "../sgfx-backend-virgl" }
+
+[lib]
+name = "scarlet_sgfx_virgl"
+path = "src/lib.rs"

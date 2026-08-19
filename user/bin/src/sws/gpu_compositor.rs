@@ -6,7 +6,8 @@ use super::cursor::Cursor;
 use super::window::{Window, WindowId};
 use framebuffer::DisplaySurface;
 use sgfx::{
-    Color, CompositionPass, Context, Device, Image, PixelRect, Queue, SourceAlpha, Texture,
+    Color, CompositionPass, Context, Device, Image, PixelRect, Queue, SgfxImagePresentExt,
+    SourceAlpha, Texture,
 };
 use std::handle::Handle;
 use std::vec::Vec;
