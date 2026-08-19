@@ -1,4 +1,4 @@
-//! Scarlet transport selection and dispatch for the application facade.
+//! Private Scarlet/VirGL resource and queue dispatch.
 
 use alloc::{rc::Rc, vec::Vec};
 
@@ -16,43 +16,21 @@ use scarlet_os::ipc::SharedMemory;
 #[cfg(not(feature = "std"))]
 use std::ipc::SharedMemory;
 
-const APPLE_AGX_BACKEND_ID: &[u8] = b"apple-agx";
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum BackendKind {
-    Virgl,
-    AppleAgx,
-    Unknown,
-}
-
-fn classify_backend_id(backend_id: &[u8]) -> BackendKind {
-    if crate::matches_backend_id(backend_id) {
-        BackendKind::Virgl
-    } else if backend_id == APPLE_AGX_BACKEND_ID {
-        BackendKind::AppleAgx
-    } else {
-        BackendKind::Unknown
-    }
-}
-
 pub(crate) enum Device {
     Virgl(Rc<virgl::Device>),
 }
 
 impl Device {
     pub(crate) fn open(path: &str) -> HandleResult<Self> {
-        // Queue command bytes are backend-defined. Probe the stable backend ID
-        // before selecting a lowerer so a non-VirGL device never receives
-        // VirGL command streams merely because it exposes generic queues.
+        // A complete backend validates only its own execution contract. The
+        // SGFX environment facade owns composition between different backends.
         let probe = RawGpu::open(path)?;
         let info = probe.query_info()?;
-        match classify_backend_id(info.backend_id_bytes()) {
-            BackendKind::Virgl => {
-                let backend = Rc::new(virgl::Device::open(path)?);
-                Ok(Self::Virgl(backend))
-            }
-            BackendKind::AppleAgx | BackendKind::Unknown => Err(HandleError::Unsupported),
+        if !crate::matches_backend_id(info.backend_id_bytes()) {
+            return Err(HandleError::Unsupported);
         }
+        let backend = Rc::new(virgl::Device::open(path)?);
+        Ok(Self::Virgl(backend))
     }
 
     pub(crate) fn capabilities(&self) -> Capabilities {
@@ -627,25 +605,14 @@ pub(crate) enum Pipeline {
 
 #[cfg(test)]
 mod tests {
-    use super::{BackendKind, classify_backend_id};
+    use crate::matches_backend_id;
 
     #[test]
-    fn selects_virgl_for_exact_virtio_backend_id() {
-        assert_eq!(classify_backend_id(b"virtio-gpu"), BackendKind::Virgl);
-        assert_eq!(
-            classify_backend_id(b"virtio-gpu-extra"),
-            BackendKind::Unknown
-        );
-    }
-
-    #[test]
-    fn reserves_apple_agx_without_falling_back_to_virgl() {
-        assert_eq!(classify_backend_id(b"apple-agx"), BackendKind::AppleAgx);
-    }
-
-    #[test]
-    fn rejects_unknown_and_empty_backend_ids() {
-        assert_eq!(classify_backend_id(b""), BackendKind::Unknown);
-        assert_eq!(classify_backend_id(b"software"), BackendKind::Unknown);
+    fn matches_only_the_exact_virtio_gpu_backend_id() {
+        assert!(matches_backend_id(b"virtio-gpu"));
+        assert!(!matches_backend_id(b"virtio-gpu-extra"));
+        assert!(!matches_backend_id(b"apple-agx"));
+        assert!(!matches_backend_id(b""));
+        assert!(!matches_backend_id(b"software"));
     }
 }
