@@ -21,7 +21,7 @@ vp9-stateless-hw = ["dep:scarlet-codecs", "scarlet-codecs/vp9"]
 [dependencies]
 scarlet-std = { path = "../lib/std", features = ["alloc_debug"] }
 scarlet-codecs = { path = "../lib/scarlet-codecs", default-features = false, optional = true }
-scarlet-ui = { git = "https://github.com/petitstrawberry/scarlet-ui", branch = "feature/sgfx-frontend-selection", package = "scarlet-ui", default-features = false, features = ["legacy-scarlet-std", "platform-sws"] }
+scarlet-ui = { git = "https://github.com/petitstrawberry/scarlet-ui", package = "scarlet-ui", default-features = false, features = ["legacy-scarlet-std", "platform-sws"] }
 sas-client = { path = "../lib/sas-client", default-features = false, features = ["legacy-scarlet-std"] }
 sbus = { path = "../lib/sbus" }
 sbus-client = { path = "../lib/sbus-client", default-features = false, features = ["legacy-scarlet-std"] }
