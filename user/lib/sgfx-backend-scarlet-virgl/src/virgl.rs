@@ -308,7 +308,10 @@ impl Device {
     pub(crate) fn open(path: &str) -> HandleResult<Self> {
         let raw = RawGpu::open(path)?;
         let info = raw.query_info()?;
-        if info.result != GPU_RESULT_SUCCESS || info.device_state != GPU_DEVICE_STATE_READY {
+        if info.result != GPU_RESULT_SUCCESS
+            || info.device_state != GPU_DEVICE_STATE_READY
+            || !crate::matches_backend_id(info.backend_id_bytes())
+        {
             return Err(HandleError::Unsupported);
         }
 

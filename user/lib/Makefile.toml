@@ -7,11 +7,11 @@ skip_core_tasks = true
 
 [tasks.fmt]
 description = "Format all user library code"
-dependencies = ["fmt-scarlet-abi", "fmt-scarlet-sys", "fmt-scarlet-rt", "fmt-scarlet-os", "fmt-scarlet-codecs", "fmt-std", "fmt-framebuffer", "fmt-gpu-raw", "fmt-sgfx", "fmt-sws-protocol", "fmt-scarlet-desktop-config", "fmt-scpm"]
+dependencies = ["fmt-scarlet-abi", "fmt-scarlet-sys", "fmt-scarlet-rt", "fmt-scarlet-os", "fmt-scarlet-codecs", "fmt-std", "fmt-framebuffer", "fmt-gpu-raw", "fmt-sgfx", "fmt-sgfx-frontend", "fmt-sws-protocol", "fmt-scarlet-desktop-config", "fmt-scpm"]
 
 [tasks.fmt-check]
 description = "Check formatting for all user library code"
-dependencies = ["fmt-scarlet-abi-check", "fmt-scarlet-sys-check", "fmt-scarlet-rt-check", "fmt-scarlet-os-check", "fmt-scarlet-codecs-check", "fmt-std-check", "fmt-framebuffer-check", "fmt-gpu-raw-check", "fmt-sgfx-check", "fmt-sws-protocol-check", "fmt-scpm-check"]
+dependencies = ["fmt-scarlet-abi-check", "fmt-scarlet-sys-check", "fmt-scarlet-rt-check", "fmt-scarlet-os-check", "fmt-scarlet-codecs-check", "fmt-std-check", "fmt-framebuffer-check", "fmt-gpu-raw-check", "fmt-sgfx-check", "fmt-sgfx-frontend-check", "fmt-sws-protocol-check", "fmt-scpm-check"]
 
 [tasks.fmt-scarlet-abi-check]
 description = "Check formatting for Scarlet ABI code"
@@ -58,6 +58,12 @@ args = ["fmt", "--", "--check"]
 [tasks.fmt-sgfx-check]
 description = "Check formatting for user library sgfx code"
 cwd = "sgfx"
+command = "cargo"
+args = ["fmt", "--", "--check"]
+
+[tasks.fmt-sgfx-frontend-check]
+description = "Check formatting for the cross-platform SGFX frontend"
+cwd = "sgfx-frontend"
 command = "cargo"
 args = ["fmt", "--", "--check"]
 
@@ -121,6 +127,12 @@ cwd = "sgfx"
 command = "cargo"
 args = ["fmt"]
 
+[tasks.fmt-sgfx-frontend]
+description = "Format the cross-platform SGFX frontend"
+cwd = "sgfx-frontend"
+command = "cargo"
+args = ["fmt"]
+
 [tasks.fmt-gpu-raw]
 description = "Format user library gpu raw transport code"
 cwd = "gpu-raw"
@@ -167,6 +179,7 @@ script = [
     "cd ../framebuffer && cargo build --target ../../targets/riscv64gc-unknown-scarlet-elf.json",
     "cd ../gpu-raw && cargo build --target ../../targets/riscv64gc-unknown-scarlet-elf.json",
     "cd ../sgfx-backend-scarlet-virgl && cargo build --target ../../targets/riscv64gc-unknown-scarlet-elf.json",
+    "cd ../sgfx-frontend && cargo build --no-default-features --features backend-scarlet-virgl,legacy-scarlet-std --target ../../targets/riscv64gc-unknown-scarlet-elf.json",
     "cd ../sws-protocol && cargo build --target ../../targets/riscv64gc-unknown-scarlet-elf.json",
     "cd ../scarlet-desktop-config && cargo build --target ../../targets/riscv64gc-unknown-scarlet-elf.json",
     "cd ../scpm && cargo build --target ../../targets/riscv64gc-unknown-scarlet-elf.json"
@@ -184,6 +197,7 @@ script = [
     "cd ../framebuffer && cargo build --release --target ../../targets/riscv64gc-unknown-scarlet-elf.json",
     "cd ../gpu-raw && cargo build --release --target ../../targets/riscv64gc-unknown-scarlet-elf.json",
     "cd ../sgfx-backend-scarlet-virgl && cargo build --release --target ../../targets/riscv64gc-unknown-scarlet-elf.json",
+    "cd ../sgfx-frontend && cargo build --release --no-default-features --features backend-scarlet-virgl,legacy-scarlet-std --target ../../targets/riscv64gc-unknown-scarlet-elf.json",
     "cd ../sws-protocol && cargo build --release --target ../../targets/riscv64gc-unknown-scarlet-elf.json",
     "cd ../scarlet-desktop-config && cargo build --release --target ../../targets/riscv64gc-unknown-scarlet-elf.json",
     "cd ../scpm && cargo build --release --target ../../targets/riscv64gc-unknown-scarlet-elf.json"
@@ -201,6 +215,7 @@ script = [
     "cd ../framebuffer && cargo build --target ../../targets/aarch64-unknown-scarlet-elf.json",
     "cd ../gpu-raw && cargo build --target ../../targets/aarch64-unknown-scarlet-elf.json",
     "cd ../sgfx-backend-scarlet-virgl && cargo build --target ../../targets/aarch64-unknown-scarlet-elf.json",
+    "cd ../sgfx-frontend && cargo build --no-default-features --features backend-scarlet-virgl,legacy-scarlet-std --target ../../targets/aarch64-unknown-scarlet-elf.json",
     "cd ../sws-protocol && cargo build --target ../../targets/aarch64-unknown-scarlet-elf.json",
     "cd ../scarlet-desktop-config && cargo build --target ../../targets/aarch64-unknown-scarlet-elf.json",
     "cd ../scpm && cargo build --target ../../targets/aarch64-unknown-scarlet-elf.json"
@@ -218,6 +233,7 @@ script = [
     "cd ../framebuffer && cargo build --release --target ../../targets/aarch64-unknown-scarlet-elf.json",
     "cd ../gpu-raw && cargo build --release --target ../../targets/aarch64-unknown-scarlet-elf.json",
     "cd ../sgfx-backend-scarlet-virgl && cargo build --release --target ../../targets/aarch64-unknown-scarlet-elf.json",
+    "cd ../sgfx-frontend && cargo build --release --no-default-features --features backend-scarlet-virgl,legacy-scarlet-std --target ../../targets/aarch64-unknown-scarlet-elf.json",
     "cd ../sws-protocol && cargo build --release --target ../../targets/aarch64-unknown-scarlet-elf.json",
     "cd ../scarlet-desktop-config && cargo build --release --target ../../targets/aarch64-unknown-scarlet-elf.json",
     "cd ../scpm && cargo build --release --target ../../targets/aarch64-unknown-scarlet-elf.json"
@@ -235,6 +251,7 @@ script = [
     "cd ../framebuffer && cargo clean",
     "cd ../gpu-raw && cargo clean",
     "cd ../sgfx && cargo clean",
+    "cd ../sgfx-frontend && cargo clean",
     "cd ../sws-protocol && cargo clean",
     "cd ../sws-client && cargo clean",
     "cd ../sas-protocol && cargo clean",
@@ -253,6 +270,7 @@ script = [
     "cd std && cargo test",
     "cd ../framebuffer && cargo test",
     "cd ../sgfx && cargo test",
+    "cd ../sgfx-frontend && cargo test",
     "cd ../sws-protocol && cargo test",
     "cd ../scarlet-desktop-config && cargo test",
     "cd ../scpm && cargo test"
@@ -269,6 +287,7 @@ script = [
     "cd ../framebuffer && cargo doc --no-deps",
     "cd ../gpu-raw && cargo doc --no-deps",
     "cd ../sgfx && cargo doc --no-deps",
+    "cd ../sgfx-frontend && cargo doc --no-deps",
     "cd ../sws-protocol && cargo doc --no-deps",
     "cd ../scarlet-desktop-config && cargo doc --no-deps",
     "cd ../scpm && cargo doc --no-deps"
@@ -276,7 +295,7 @@ script = [
 
 [tasks.clippy]
 description = "Run clippy for all user libraries"
-dependencies = ["clippy-scarlet-abi", "clippy-scarlet-sys", "clippy-scarlet-rt", "clippy-scarlet-os", "clippy-std", "clippy-framebuffer", "clippy-gpu-raw", "clippy-sgfx", "clippy-sws-protocol", "clippy-scarlet-desktop-config", "clippy-scpm"]
+dependencies = ["clippy-scarlet-abi", "clippy-scarlet-sys", "clippy-scarlet-rt", "clippy-scarlet-os", "clippy-std", "clippy-framebuffer", "clippy-gpu-raw", "clippy-sgfx", "clippy-sgfx-frontend", "clippy-sws-protocol", "clippy-scarlet-desktop-config", "clippy-scpm"]
 
 [tasks.clippy-scarlet-abi]
 description = "Run clippy for Scarlet ABI code"
@@ -317,6 +336,12 @@ args = ["clippy", "--", "-D", "warnings"]
 [tasks.clippy-sgfx]
 description = "Run clippy for user library sgfx code"
 cwd = "sgfx"
+command = "cargo"
+args = ["clippy", "--", "-D", "warnings"]
+
+[tasks.clippy-sgfx-frontend]
+description = "Run clippy for the cross-platform SGFX frontend"
+cwd = "sgfx-frontend"
 command = "cargo"
 args = ["clippy", "--", "-D", "warnings"]
 

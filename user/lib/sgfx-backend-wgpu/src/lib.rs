@@ -13,6 +13,7 @@ use alloc::{borrow::Cow, format, rc::Rc, string::String, sync::Arc, vec::Vec};
 use core::fmt;
 
 use bytemuck::{Pod, Zeroable};
+use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
 use wgpu as raw;
 
 use sgfx_core::ir::{
@@ -41,6 +42,14 @@ pub enum Error {
     Unsupported(UnsupportedFeature),
     /// The command stream or persistent backend state is inconsistent.
     InvalidState,
+    /// Native window handles could not be bound to a WGPU surface.
+    SurfaceCreation,
+    /// No WGPU adapter can present to the requested surface.
+    AdapterUnavailable,
+    /// The selected WGPU adapter could not create a device and queue.
+    DeviceRequest,
+    /// A configured surface frame could not be acquired for presentation.
+    SurfaceAcquire,
 }
 
 impl From<ir::Error> for Error {
@@ -60,6 +69,10 @@ impl fmt::Display for Error {
                 write!(formatter, "unsupported SGFX feature: {feature:?}")
             }
             Self::InvalidState => formatter.write_str("invalid WGPU backend state"),
+            Self::SurfaceCreation => formatter.write_str("WGPU surface creation failed"),
+            Self::AdapterUnavailable => formatter.write_str("no compatible WGPU adapter"),
+            Self::DeviceRequest => formatter.write_str("WGPU device creation failed"),
+            Self::SurfaceAcquire => formatter.write_str("WGPU surface acquisition failed"),
         }
     }
 }
@@ -338,6 +351,213 @@ impl MappedTargetSession {
     /// The WGPU queue owned by this session's context.
     pub fn raw_queue(&self) -> &raw::Queue {
         self.context.raw_queue()
+    }
+}
+
+/// WGPU window surface, device, and presentation state owned by the backend.
+pub struct WindowContext {
+    surface: raw::Surface<'static>,
+    config: raw::SurfaceConfiguration,
+    context: Context,
+    sampler: raw::Sampler,
+    blit_pipeline: raw::RenderPipeline,
+    // Fields drop in declaration order. Retain the instance until the surface
+    // and every resource created from its adapter have been released.
+    _instance: raw::Instance,
+}
+
+impl WindowContext {
+    /// Create a complete WGPU execution context for native window handles.
+    ///
+    /// # Arguments
+    ///
+    /// * `raw_display_handle` - Display handle retained by the platform.
+    /// * `raw_window_handle` - Window handle retained by the platform.
+    /// * `width` - Initial physical surface width.
+    /// * `height` - Initial physical surface height.
+    ///
+    /// # Returns
+    ///
+    /// A surface-compatible WGPU context, or an initialization error.
+    ///
+    /// # Safety
+    ///
+    /// Both raw handles must remain valid until the returned context is
+    /// dropped. Callers must drop SGFX rendering state before the native
+    /// window and display objects.
+    pub unsafe fn new(
+        raw_display_handle: RawDisplayHandle,
+        raw_window_handle: RawWindowHandle,
+        width: u32,
+        height: u32,
+    ) -> Result<Self> {
+        let instance = raw::Instance::new(&raw::InstanceDescriptor::default());
+        // SAFETY: the caller guarantees that both native handles outlive the
+        // returned context and its surface.
+        let surface = unsafe {
+            instance.create_surface_unsafe(raw::SurfaceTargetUnsafe::RawHandle {
+                raw_display_handle,
+                raw_window_handle,
+            })
+        }
+        .map_err(|_| Error::SurfaceCreation)?;
+        let adapter = pollster::block_on(instance.request_adapter(&raw::RequestAdapterOptions {
+            power_preference: raw::PowerPreference::HighPerformance,
+            force_fallback_adapter: false,
+            compatible_surface: Some(&surface),
+        }))
+        .ok_or(Error::AdapterUnavailable)?;
+        let (device, queue) = pollster::block_on(async {
+            adapter
+                .request_device(&raw::DeviceDescriptor::default(), None)
+                .await
+        })
+        .map_err(|_| Error::DeviceRequest)?;
+        device.on_uncaptured_error(Box::new(|error| {
+            eprintln!("[SGFX/WGPU] uncaptured error: {error}");
+        }));
+        let capabilities = surface.get_capabilities(&adapter);
+        let format = select_surface_format(&capabilities.formats).ok_or(Error::SurfaceCreation)?;
+        let alpha_mode = capabilities
+            .alpha_modes
+            .first()
+            .copied()
+            .ok_or(Error::SurfaceCreation)?;
+        let config = raw::SurfaceConfiguration {
+            usage: raw::TextureUsages::RENDER_ATTACHMENT,
+            format,
+            width: width.max(1),
+            height: height.max(1),
+            present_mode: raw::PresentMode::AutoVsync,
+            desired_maximum_frame_latency: 2,
+            alpha_mode,
+            view_formats: Vec::new(),
+        };
+        let device = Device::new(device, queue);
+        let context = device.create_context();
+        surface.configure(context.raw_device(), &config);
+        let sampler = context
+            .raw_device()
+            .create_sampler(&raw::SamplerDescriptor {
+                label: Some("sgfx WGPU presentation sampler"),
+                address_mode_u: raw::AddressMode::ClampToEdge,
+                address_mode_v: raw::AddressMode::ClampToEdge,
+                address_mode_w: raw::AddressMode::ClampToEdge,
+                mag_filter: raw::FilterMode::Nearest,
+                min_filter: raw::FilterMode::Nearest,
+                mipmap_filter: raw::FilterMode::Nearest,
+                ..Default::default()
+            });
+        let blit_pipeline = create_blit_pipeline(context.raw_device(), config.format);
+        Ok(Self {
+            surface,
+            config,
+            context,
+            sampler,
+            blit_pipeline,
+            _instance: instance,
+        })
+    }
+
+    /// Create mapped physical targets through this surface-compatible device.
+    ///
+    /// # Arguments
+    ///
+    /// * `resources` - Logical SGFX resource table.
+    /// * `targets` - Presentation texture identities to materialize.
+    ///
+    /// # Returns
+    ///
+    /// A mapped session sharing the window context's WGPU device.
+    pub fn create_mapped_target_session(
+        &self,
+        resources: Rc<ResourceTable>,
+        targets: &[TextureId],
+    ) -> Result<MappedTargetSession> {
+        self.context
+            .create_mapped_target_session(resources, targets)
+    }
+
+    /// Reconfigure the native surface after a physical resize.
+    ///
+    /// # Arguments
+    ///
+    /// * `width` - New physical width.
+    /// * `height` - New physical height.
+    pub fn resize(&mut self, width: u32, height: u32) {
+        self.config.width = width.max(1);
+        self.config.height = height.max(1);
+        self.surface
+            .configure(self.context.raw_device(), &self.config);
+    }
+
+    /// Present one mapped SGFX target to the native window surface.
+    ///
+    /// # Arguments
+    ///
+    /// * `session` - Session owning the target image.
+    /// * `target` - Logical target texture to present.
+    ///
+    /// # Returns
+    ///
+    /// Success after the surface frame is submitted and presented.
+    pub fn present(&mut self, session: &MappedTargetSession, target: TextureId) -> Result<()> {
+        let image = session.image(target)?;
+        let frame = self
+            .surface
+            .get_current_texture()
+            .map_err(|_| Error::SurfaceAcquire)?;
+        let view = frame
+            .texture
+            .create_view(&raw::TextureViewDescriptor::default());
+        let bind_group = self
+            .context
+            .raw_device()
+            .create_bind_group(&raw::BindGroupDescriptor {
+                label: Some("sgfx WGPU presentation bind group"),
+                layout: &self.blit_pipeline.get_bind_group_layout(0),
+                entries: &[
+                    raw::BindGroupEntry {
+                        binding: 0,
+                        resource: raw::BindingResource::TextureView(image.raw_view()),
+                    },
+                    raw::BindGroupEntry {
+                        binding: 1,
+                        resource: raw::BindingResource::Sampler(&self.sampler),
+                    },
+                ],
+            });
+        let mut encoder =
+            self.context
+                .raw_device()
+                .create_command_encoder(&raw::CommandEncoderDescriptor {
+                    label: Some("sgfx WGPU presentation encoder"),
+                });
+        {
+            let mut pass = encoder.begin_render_pass(&raw::RenderPassDescriptor {
+                label: Some("sgfx WGPU presentation pass"),
+                color_attachments: &[Some(raw::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: raw::Operations {
+                        load: raw::LoadOp::Clear(raw::Color::BLACK),
+                        store: raw::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            pass.set_pipeline(&self.blit_pipeline);
+            pass.set_bind_group(0, &bind_group, &[]);
+            pass.draw(0..3, 0..1);
+        }
+        self.context
+            .raw_queue()
+            .submit(core::iter::once(encoder.finish()));
+        frame.present();
+        let _ = self.context.raw_device().poll(raw::Maintain::Poll);
+        Ok(())
     }
 }
 
@@ -1273,6 +1493,85 @@ fn raw_format(format: TextureFormat) -> Option<raw::TextureFormat> {
     }
 }
 
+fn select_surface_format(formats: &[raw::TextureFormat]) -> Option<raw::TextureFormat> {
+    formats
+        .iter()
+        .copied()
+        .find(|format| {
+            matches!(
+                format,
+                raw::TextureFormat::Bgra8Unorm | raw::TextureFormat::Rgba8Unorm
+            )
+        })
+        .or_else(|| formats.iter().copied().find(|format| !format.is_srgb()))
+        .or_else(|| formats.first().copied())
+}
+
+fn create_blit_pipeline(device: &raw::Device, format: raw::TextureFormat) -> raw::RenderPipeline {
+    let shader = device.create_shader_module(raw::ShaderModuleDescriptor {
+        label: Some("sgfx WGPU presentation shader"),
+        source: raw::ShaderSource::Wgsl(BLIT_SHADER.into()),
+    });
+    device.create_render_pipeline(&raw::RenderPipelineDescriptor {
+        label: Some("sgfx WGPU presentation pipeline"),
+        layout: None,
+        vertex: raw::VertexState {
+            module: &shader,
+            entry_point: Some("vs_main"),
+            compilation_options: Default::default(),
+            buffers: &[],
+        },
+        fragment: Some(raw::FragmentState {
+            module: &shader,
+            entry_point: Some("fs_main"),
+            compilation_options: Default::default(),
+            targets: &[Some(raw::ColorTargetState {
+                format,
+                blend: Some(raw::BlendState::REPLACE),
+                write_mask: raw::ColorWrites::ALL,
+            })],
+        }),
+        primitive: raw::PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: raw::MultisampleState::default(),
+        multiview: None,
+        cache: None,
+    })
+}
+
+const BLIT_SHADER: &str = r#"
+struct VertexOut {
+    @builtin(position) position: vec4f,
+    @location(0) uv: vec2f,
+};
+
+@vertex
+fn vs_main(@builtin(vertex_index) vid: u32) -> VertexOut {
+    var positions = array<vec2f, 3>(
+        vec2f(-1.0, -1.0),
+        vec2f( 3.0, -1.0),
+        vec2f(-1.0,  3.0),
+    );
+    var uvs = array<vec2f, 3>(
+        vec2f(0.0, 1.0),
+        vec2f(2.0, 1.0),
+        vec2f(0.0, -1.0),
+    );
+    var out: VertexOut;
+    out.position = vec4f(positions[vid], 0.0, 1.0);
+    out.uv = uvs[vid];
+    return out;
+}
+
+@group(0) @binding(0) var t_frame: texture_2d<f32>;
+@group(0) @binding(1) var s_frame: sampler;
+
+@fragment
+fn fs_main(in: VertexOut) -> @location(0) vec4f {
+    return textureSample(t_frame, s_frame, in.uv);
+}
+"#;
+
 #[cfg(test)]
 fn logical_format(format: raw::TextureFormat) -> Option<TextureFormat> {
     match format {
@@ -1828,6 +2127,25 @@ mod tests {
         FilterMode, PixelRect, PrimitiveTopology, RasterState, RenderPassDesc, SamplerDesc,
         StoreOp, TextureWrite, Transform, VertexBufferLayout,
     };
+
+    #[test]
+    fn surface_prefers_display_ready_unorm() {
+        assert_eq!(
+            select_surface_format(&[
+                raw::TextureFormat::Bgra8UnormSrgb,
+                raw::TextureFormat::Bgra8Unorm,
+            ]),
+            Some(raw::TextureFormat::Bgra8Unorm)
+        );
+    }
+
+    #[test]
+    fn surface_uses_srgb_when_it_is_the_only_choice() {
+        assert_eq!(
+            select_surface_format(&[raw::TextureFormat::Bgra8UnormSrgb]),
+            Some(raw::TextureFormat::Bgra8UnormSrgb)
+        );
+    }
 
     fn pipeline(fragment: FragmentProgram) -> RenderPipelineDesc {
         RenderPipelineDesc::new(

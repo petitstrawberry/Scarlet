@@ -5,7 +5,7 @@ use core::mem;
 use super::cursor::Cursor;
 use super::window::{Window, WindowId};
 use framebuffer::DisplaySurface;
-use sgfx::{
+use sgfx_compat::{
     Color, CompositionPass, Context, Device, Image, PixelRect, Queue, SgfxImagePresentExt,
     SourceAlpha, Texture,
 };

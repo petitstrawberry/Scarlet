@@ -1,5 +1,5 @@
 [package]
-name = "sgfx"
+name = "sgfx-compat-scarlet"
 version = "0.16.0"
 edition = "2024"
 
@@ -13,5 +13,5 @@ framebuffer = { path = "../framebuffer", default-features = false }
 sgfx-backend-scarlet-virgl = { path = "../sgfx-backend-scarlet-virgl", default-features = false }
 
 [lib]
-name = "sgfx"
+name = "sgfx_compat_scarlet"
 path = "src/lib.rs"

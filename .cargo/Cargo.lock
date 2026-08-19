@@ -1914,17 +1914,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "sgfx-backend-scarlet-virgl"
-version = "0.16.0"
-dependencies = [
- "gpu-raw",
- "scarlet-os",
- "scarlet-std",
- "sgfx-codegen-virgl",
- "sgfx-core",
-]
-
-[[package]]
 name = "scarlet-std"
 version = "0.16.0"
 dependencies = [
@@ -1962,7 +1951,7 @@ dependencies = [
  "scarlet-ui-macros",
  "serde",
  "serde_json",
- "sgfx",
+ "sgfx-compat-scarlet",
  "svgtypes",
  "sws-client",
  "sws-protocol",
@@ -2153,8 +2142,20 @@ dependencies = [
 name = "sgfx"
 version = "0.16.0"
 dependencies = [
- "framebuffer",
+ "scarlet-std",
  "sgfx-backend-scarlet-virgl",
+ "sgfx-core",
+]
+
+[[package]]
+name = "sgfx-backend-scarlet-virgl"
+version = "0.16.0"
+dependencies = [
+ "gpu-raw",
+ "scarlet-os",
+ "scarlet-std",
+ "sgfx-codegen-virgl",
+ "sgfx-core",
 ]
 
 [[package]]
@@ -2162,6 +2163,14 @@ name = "sgfx-codegen-virgl"
 version = "0.16.0"
 dependencies = [
  "sgfx-core",
+]
+
+[[package]]
+name = "sgfx-compat-scarlet"
+version = "0.16.0"
+dependencies = [
+ "framebuffer",
+ "sgfx-backend-scarlet-virgl",
 ]
 
 [[package]]
@@ -2673,6 +2682,7 @@ dependencies = [
  "serde",
  "serde-json-core",
  "sgfx",
+ "sgfx-compat-scarlet",
  "sws-client",
  "sws-protocol",
  "vm-fdt",

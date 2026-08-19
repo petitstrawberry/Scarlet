@@ -105,14 +105,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
-name = "sgfx"
-version = "0.16.0"
-dependencies = [
- "framebuffer",
- "sgfx-backend-scarlet-virgl",
-]
-
-[[package]]
 name = "sgfx-backend-scarlet-virgl"
 version = "0.16.0"
 dependencies = [
@@ -128,6 +120,14 @@ name = "sgfx-codegen-virgl"
 version = "0.16.0"
 dependencies = [
  "sgfx-core",
+]
+
+[[package]]
+name = "sgfx-compat-scarlet"
+version = "0.16.0"
+dependencies = [
+ "framebuffer",
+ "sgfx-backend-scarlet-virgl",
 ]
 
 [[package]]

@@ -2,7 +2,6 @@
 
 use alloc::{rc::Rc, vec::Vec};
 
-use gpu_raw::Gpu as RawGpu;
 #[cfg(feature = "std")]
 use scarlet_os::handle::{Handle, HandleError, HandleResult};
 #[cfg(not(feature = "std"))]
@@ -22,13 +21,6 @@ pub(crate) enum Device {
 
 impl Device {
     pub(crate) fn open(path: &str) -> HandleResult<Self> {
-        // A complete backend validates only its own execution contract. The
-        // SGFX environment facade owns composition between different backends.
-        let probe = RawGpu::open(path)?;
-        let info = probe.query_info()?;
-        if !crate::matches_backend_id(info.backend_id_bytes()) {
-            return Err(HandleError::Unsupported);
-        }
         let backend = Rc::new(virgl::Device::open(path)?);
         Ok(Self::Virgl(backend))
     }
