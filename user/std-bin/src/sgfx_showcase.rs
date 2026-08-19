@@ -7,7 +7,6 @@ use std::time::Duration;
 use std::vec::Vec;
 
 use framebuffer::DisplaySurface;
-use sgfx::{Device, SgfxImagePresentExt};
 use sgfx::ir::{
     AddressMode, BlendState, BufferDesc, BufferUsage, Color, CommandEncoder, DrawUniforms, Error,
     Extent2D, FilterMode, FragmentProgram, IndexFormat, LoadOp, PixelRect, PrimitiveTopology,
@@ -15,6 +14,7 @@ use sgfx::ir::{
     TextureDesc, TextureFormat, TextureSampleMode, TextureUsage, TextureWrite, Transform,
     VertexAttribute, VertexBufferLayout, VertexFormat,
 };
+use sgfx::{Device, SgfxImagePresentExt};
 
 const COLOR_VERTEX_STRIDE: usize = 32;
 const TEXTURE_VERTEX_STRIDE: usize = 24;
