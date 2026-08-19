@@ -18,7 +18,7 @@ libm = "0.2"
 lyon_path = "1.0"
 lyon_tessellation = "1.0"
 scarlet-sys = { path = "../lib/scarlet-sys" }
-scarlet-ui-macros = { git = "https://github.com/petitstrawberry/scarlet-ui", package = "scarlet-ui-macros" }
+scarlet-ui-macros = { git = "https://github.com/petitstrawberry/scarlet-ui", branch = "feature/sgfx-frontend-selection", package = "scarlet-ui-macros" }
 rust_h264 = { git = "https://github.com/petitstrawberry/rust_h264.git", rev = "a559fe2545fd88def12146dcc06286475b53ead3", default-features = false, features = ["portable-simd"] }
 symphonia-core = { git = "https://github.com/petitstrawberry/Symphonia.git", rev = "71f92f0bc0fdd9d4f2a77129a543ee6c99611009", default-features = false, optional = true }
 symphonia-codec-aac = { git = "https://github.com/petitstrawberry/Symphonia.git", rev = "71f92f0bc0fdd9d4f2a77129a543ee6c99611009", default-features = false, optional = true }
@@ -38,12 +38,12 @@ sws-client = { path = "../lib/sws-client", default-features = false, features = 
 
 [target.'cfg(target_os = "scarlet")'.dependencies]
 scarlet-os = { path = "../lib/scarlet-os", default-features = false, features = ["std"] }
-scarlet-ui = { git = "https://github.com/petitstrawberry/scarlet-ui", package = "scarlet-ui", default-features = false, features = ["std", "platform-sws"] }
+scarlet-ui = { git = "https://github.com/petitstrawberry/scarlet-ui", branch = "feature/sgfx-frontend-selection", package = "scarlet-ui", default-features = false, features = ["std", "platform-sws"] }
 sas-protocol = { path = "../lib/sas-protocol", default-features = false, features = ["std"] }
 sas-client = { path = "../lib/sas-client", default-features = false, features = ["std"] }
 
 [target.'cfg(not(target_os = "scarlet"))'.dependencies]
-scarlet-ui = { git = "https://github.com/petitstrawberry/scarlet-ui", package = "scarlet-ui", default-features = false, features = ["std", "platform-winit"] }
+scarlet-ui = { git = "https://github.com/petitstrawberry/scarlet-ui", branch = "feature/sgfx-frontend-selection", package = "scarlet-ui", default-features = false, features = ["std", "platform-winit"] }
 
 [[bin]]
 name = "hello"
