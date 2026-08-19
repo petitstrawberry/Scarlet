@@ -2276,7 +2276,7 @@ dependencies = [
 [[package]]
 name = "scarlet-ui"
 version = "0.1.0"
-source = "git+https://github.com/petitstrawberry/scarlet-ui?branch=feature%2Fsgfx-frontend-selection#c25eaa4baf5aa932f684ac0740b3f2dedb1a3e40"
+source = "git+https://github.com/petitstrawberry/scarlet-ui#41a81dce0db0e3620e226052ee7f7917bcf68c7a"
 dependencies = [
  "scarlet-ui-core",
  "scarlet-ui-platform-sws",
@@ -2286,7 +2286,7 @@ dependencies = [
 [[package]]
 name = "scarlet-ui-core"
 version = "0.1.0"
-source = "git+https://github.com/petitstrawberry/scarlet-ui?branch=feature%2Fsgfx-frontend-selection#c25eaa4baf5aa932f684ac0740b3f2dedb1a3e40"
+source = "git+https://github.com/petitstrawberry/scarlet-ui#41a81dce0db0e3620e226052ee7f7917bcf68c7a"
 dependencies = [
  "ab_glyph",
  "bitflags 2.13.1",
@@ -2302,7 +2302,7 @@ dependencies = [
 [[package]]
 name = "scarlet-ui-icons-tabler"
 version = "0.1.0"
-source = "git+https://github.com/petitstrawberry/scarlet-ui?branch=feature%2Fsgfx-frontend-selection#c25eaa4baf5aa932f684ac0740b3f2dedb1a3e40"
+source = "git+https://github.com/petitstrawberry/scarlet-ui#41a81dce0db0e3620e226052ee7f7917bcf68c7a"
 dependencies = [
  "svgtypes",
 ]
@@ -2310,7 +2310,7 @@ dependencies = [
 [[package]]
 name = "scarlet-ui-macros"
 version = "0.1.0"
-source = "git+https://github.com/petitstrawberry/scarlet-ui?branch=feature%2Fsgfx-frontend-selection#c25eaa4baf5aa932f684ac0740b3f2dedb1a3e40"
+source = "git+https://github.com/petitstrawberry/scarlet-ui#41a81dce0db0e3620e226052ee7f7917bcf68c7a"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2320,7 +2320,7 @@ dependencies = [
 [[package]]
 name = "scarlet-ui-platform-sws"
 version = "0.1.0"
-source = "git+https://github.com/petitstrawberry/scarlet-ui?branch=feature%2Fsgfx-frontend-selection#c25eaa4baf5aa932f684ac0740b3f2dedb1a3e40"
+source = "git+https://github.com/petitstrawberry/scarlet-ui#41a81dce0db0e3620e226052ee7f7917bcf68c7a"
 dependencies = [
  "scarlet-std",
  "scarlet-ui-core",
@@ -2333,7 +2333,7 @@ dependencies = [
 [[package]]
 name = "scarlet-ui-platform-winit"
 version = "0.1.0"
-source = "git+https://github.com/petitstrawberry/scarlet-ui?branch=feature%2Fsgfx-frontend-selection#c25eaa4baf5aa932f684ac0740b3f2dedb1a3e40"
+source = "git+https://github.com/petitstrawberry/scarlet-ui#41a81dce0db0e3620e226052ee7f7917bcf68c7a"
 dependencies = [
  "raw-window-handle",
  "scarlet-ui-core",
@@ -2346,7 +2346,7 @@ dependencies = [
 [[package]]
 name = "scarlet-ui-renderer-sgfx"
 version = "0.1.0"
-source = "git+https://github.com/petitstrawberry/scarlet-ui?branch=feature%2Fsgfx-frontend-selection#c25eaa4baf5aa932f684ac0740b3f2dedb1a3e40"
+source = "git+https://github.com/petitstrawberry/scarlet-ui#41a81dce0db0e3620e226052ee7f7917bcf68c7a"
 dependencies = [
  "libm",
  "scarlet-ui-core",
