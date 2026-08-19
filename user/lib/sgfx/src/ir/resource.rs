@@ -575,7 +575,17 @@ impl ResourceTable {
         }
         Ok(())
     }
-    pub(crate) fn texture(&self, reference: TextureRef<'_>) -> Result<TextureDesc> {
+    /// Return the validated descriptor for a texture reference.
+    ///
+    /// # Arguments
+    ///
+    /// * `reference` - Texture reference branded by this resource table.
+    ///
+    /// # Returns
+    ///
+    /// The texture descriptor, or an error when the reference belongs to a
+    /// different table or no longer identifies a defined resource.
+    pub fn texture(&self, reference: TextureRef<'_>) -> Result<TextureDesc> {
         if !core::ptr::eq(reference.owner, self) {
             return Err(Error::ResourceTableMismatch);
         }
@@ -585,7 +595,17 @@ impl ResourceTable {
             .copied()
             .ok_or(Error::InvalidDescriptor)
     }
-    pub(crate) fn buffer(&self, reference: BufferRef<'_>) -> Result<BufferDesc> {
+    /// Return the validated descriptor for a buffer reference.
+    ///
+    /// # Arguments
+    ///
+    /// * `reference` - Buffer reference branded by this resource table.
+    ///
+    /// # Returns
+    ///
+    /// The buffer descriptor, or an error when the reference belongs to a
+    /// different table or no longer identifies a defined resource.
+    pub fn buffer(&self, reference: BufferRef<'_>) -> Result<BufferDesc> {
         if !core::ptr::eq(reference.owner, self) {
             return Err(Error::ResourceTableMismatch);
         }
@@ -595,7 +615,17 @@ impl ResourceTable {
             .copied()
             .ok_or(Error::InvalidDescriptor)
     }
-    pub(crate) fn sampler(&self, reference: SamplerRef<'_>) -> Result<SamplerDesc> {
+    /// Return the validated descriptor for a sampler reference.
+    ///
+    /// # Arguments
+    ///
+    /// * `reference` - Sampler reference branded by this resource table.
+    ///
+    /// # Returns
+    ///
+    /// The sampler descriptor, or an error when the reference belongs to a
+    /// different table or no longer identifies a defined resource.
+    pub fn sampler(&self, reference: SamplerRef<'_>) -> Result<SamplerDesc> {
         if !core::ptr::eq(reference.owner, self) {
             return Err(Error::ResourceTableMismatch);
         }
@@ -619,6 +649,20 @@ impl ResourceTable {
             .get(reference.index)
             .ok_or(Error::InvalidDescriptor)?;
         Ok(access(descriptor))
+    }
+
+    /// Return a cloned render-pipeline descriptor for a backend lowerer.
+    ///
+    /// # Arguments
+    ///
+    /// * `reference` - Render-pipeline reference branded by this resource table.
+    ///
+    /// # Returns
+    ///
+    /// The owned pipeline descriptor, or an error when the reference belongs
+    /// to another table or no longer identifies a defined resource.
+    pub fn render_pipeline(&self, reference: RenderPipelineRef<'_>) -> Result<RenderPipelineDesc> {
+        self.with_pipeline(reference, Clone::clone)
     }
     pub(crate) fn same_texture(&self, left: TextureRef<'_>, right: TextureRef<'_>) -> Result<bool> {
         self.texture(left)?;

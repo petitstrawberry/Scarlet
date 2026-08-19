@@ -28,6 +28,10 @@ use std::{
 /// Supported command subsets can be lowered through [`Queue::submit_ir`].
 pub mod ir;
 
+/// WGPU execution backend for native desktop targets.
+#[cfg(feature = "wgpu")]
+pub mod wgpu;
+
 mod driver;
 mod ir_execute;
 mod virgl;
