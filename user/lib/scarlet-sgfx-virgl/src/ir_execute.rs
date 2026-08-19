@@ -1,4 +1,4 @@
-//! Ordered lowering of portable logical IR to the active backend.
+//! Ordered lowering of portable logical IR to the Scarlet VirGL adapter.
 
 use alloc::{rc::Rc, vec::Vec};
 
@@ -237,7 +237,7 @@ impl IrResources {
     }
 
     fn mapped_image(&self, texture: TextureRef<'_>) -> Result<Rc<Image>, IrSubmitError> {
-        if !core::ptr::eq(texture.owner, self.resources.as_ref()) {
+        if !texture.belongs_to(self.resources.as_ref()) {
             return Err(IrSubmitError::ResourceTableMismatch);
         }
         self.resources.texture(texture)?;
@@ -252,7 +252,7 @@ impl IrResources {
         self.resources.buffer(buffer)?;
         Ok(self
             .buffer_shadows
-            .get(buffer.index)
+            .get(buffer.slot())
             .and_then(Option::as_deref))
     }
 
@@ -342,7 +342,7 @@ impl PendingBuffers {
         let write_end = start
             .checked_add(data.len())
             .ok_or(IrSubmitError::InvalidVertexData)?;
-        let slot = buffer.index;
+        let slot = buffer.slot();
         let bytes = if let Some(update) = self.updates.iter_mut().find(|update| update.slot == slot)
         {
             &mut update.bytes
@@ -391,7 +391,7 @@ impl PendingBuffers {
         if let Some(update) = self
             .updates
             .iter()
-            .find(|update| update.slot == buffer.index)
+            .find(|update| update.slot == buffer.slot())
         {
             return Ok(BufferBytes::Pending(&update.bytes));
         }
@@ -408,10 +408,10 @@ impl PendingBuffers {
     ) -> Result<u64, IrSubmitError> {
         self.updates
             .iter()
-            .find(|update| update.slot == buffer.index)
+            .find(|update| update.slot == buffer.slot())
             .map(|update| update.revision)
             .map(Ok)
-            .unwrap_or_else(|| resources.buffer_revision(buffer.index))
+            .unwrap_or_else(|| resources.buffer_revision(buffer.slot()))
     }
 
     fn canonical_needs_validation(
@@ -934,7 +934,7 @@ fn decode_draw_vertices(
     let vertices = if persistent_supported {
         let revision = pending_buffers.revision(resources, buffer)?;
         let needs_validation =
-            pending_buffers.canonical_needs_validation(resources, buffer.index, revision);
+            pending_buffers.canonical_needs_validation(resources, buffer.slot(), revision);
         {
             let bytes = pending_buffers.bytes(resources, buffer)?;
             validate_canonical_vertex_range(
@@ -950,13 +950,13 @@ fn decode_draw_vertices(
             }
         }
         if needs_validation {
-            pending_buffers.mark_canonical_validated(buffer.index, revision)?;
+            pending_buffers.mark_canonical_validated(buffer.slot(), revision)?;
         }
         let offset = u32::try_from(offset).map_err(|_| IrSubmitError::InvalidVertexData)?;
         DecodedVertices::Persistent {
             binding: IrVertexBufferBinding {
                 buffer: IrBufferSpec {
-                    slot: buffer.index,
+                    slot: buffer.slot(),
                     size: descriptor.size(),
                     revision,
                 },
@@ -1249,37 +1249,38 @@ fn pipeline_info(
     resources: &ResourceTable,
     reference: RenderPipelineRef<'_>,
 ) -> Result<PipelineInfo, IrSubmitError> {
-    let (target, topology, fragment, blend, raster, depth, stride, position, secondary, tertiary) =
-        resources.with_pipeline(reference, |descriptor| {
-            let layout = descriptor.vertex_buffer();
-            let position = layout
-                .attributes()
-                .iter()
-                .find(|attribute| attribute.location() == 0)
-                .copied();
-            let secondary = layout
-                .attributes()
-                .iter()
-                .find(|attribute| attribute.location() == 1)
-                .copied();
-            let tertiary = layout
-                .attributes()
-                .iter()
-                .find(|attribute| attribute.location() == 2)
-                .copied();
-            (
-                descriptor.target_format(),
-                descriptor.topology(),
-                descriptor.fragment(),
-                descriptor.blend(),
-                descriptor.raster(),
-                descriptor.depth_state(),
-                layout.stride(),
-                position,
-                secondary,
-                tertiary,
-            )
-        })?;
+    let (target, topology, fragment, blend, raster, depth, stride, position, secondary, tertiary) = {
+        let descriptor = resources.render_pipeline(reference)?;
+        let layout = descriptor.vertex_buffer();
+        let position = layout
+            .attributes()
+            .iter()
+            .find(|attribute| attribute.location() == 0)
+            .copied();
+        let secondary = layout
+            .attributes()
+            .iter()
+            .find(|attribute| attribute.location() == 1)
+            .copied();
+        let tertiary = layout
+            .attributes()
+            .iter()
+            .find(|attribute| attribute.location() == 2)
+            .copied();
+        let result = (
+            descriptor.target_format(),
+            descriptor.topology(),
+            descriptor.fragment(),
+            descriptor.blend(),
+            descriptor.raster(),
+            descriptor.depth_state(),
+            layout.stride(),
+            position,
+            secondary,
+            tertiary,
+        );
+        result
+    };
     if target != TextureFormat::Bgra8Unorm {
         return Err(IrSubmitError::Unsupported(
             UnsupportedIrFeature::PipelineTargetFormat,
@@ -1328,7 +1329,7 @@ fn pipeline_info(
     }
     Ok(PipelineInfo {
         state: IrPipelineState {
-            slot: reference.index,
+            slot: reference.slot(),
             fragment: fragment_program(fragment),
             blend: blend_state(blend),
             cull_mode: match raster.cull_mode() {
@@ -1397,7 +1398,7 @@ fn texture_binding(
     let sampler_descriptor = resources.sampler(sampler)?;
     Ok((
         Some(texture_spec(texture, descriptor)),
-        Some(sampler_state(sampler_descriptor, sampler.index)),
+        Some(sampler_state(sampler_descriptor, sampler.slot())),
     ))
 }
 
@@ -1864,7 +1865,7 @@ fn texture_spec(texture: TextureRef<'_>, descriptor: TextureDesc) -> driver::IrT
     let extent = descriptor.extent();
     let usage = descriptor.usage();
     driver::IrTextureSpec {
-        slot: texture.index,
+        slot: texture.slot(),
         width: extent.width(),
         height: extent.height(),
         sampled: usage.contains(TextureUsage::SAMPLED),

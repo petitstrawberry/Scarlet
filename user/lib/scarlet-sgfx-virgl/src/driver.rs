@@ -1,4 +1,4 @@
-//! Private backend selection and dispatch for the application facade.
+//! Scarlet transport selection and dispatch for the application facade.
 
 use alloc::{rc::Rc, vec::Vec};
 

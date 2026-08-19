@@ -1,4 +1,4 @@
-//! Private command backend for the built-in vertex-color pipeline.
+//! VirGL execution through Scarlet's GPU transport.
 
 use alloc::{rc::Rc, vec::Vec};
 use core::cell::Cell;

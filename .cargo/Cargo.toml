@@ -18,6 +18,8 @@ scarlet-os = { path = "../user/lib/scarlet-os" }
 scarlet-rt = { path = "../user/lib/scarlet-rt" }
 scarlet-std = { path = "../user/lib/std" }
 scarlet-sys = { path = "../user/lib/scarlet-sys" }
-sgfx = { path = "../user/lib/sgfx" }
+sgfx = { path = "../user/lib/sgfx-compat" }
+sgfx-core = { path = "../user/lib/sgfx" }
+sgfx-backend-wgpu = { path = "../user/lib/sgfx-backend-wgpu" }
 sws-client = { path = "../user/lib/sws-client" }
 sws-protocol = { path = "../user/lib/sws-protocol" }

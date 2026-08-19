@@ -731,6 +731,28 @@ pub struct RenderPipelineId {
 }
 
 impl TextureRef<'_> {
+    /// Return the backend resource slot assigned by the owning table.
+    ///
+    /// # Returns
+    ///
+    /// A stable slot for the lifetime of the resource table.
+    pub const fn slot(self) -> usize {
+        self.index
+    }
+
+    /// Return whether this reference belongs to `resources`.
+    ///
+    /// # Arguments
+    ///
+    /// * `resources` - Resource table to compare with this branded reference.
+    ///
+    /// # Returns
+    ///
+    /// `true` when the reference was created by `resources`.
+    pub fn belongs_to(self, resources: &ResourceTable) -> bool {
+        core::ptr::eq(self.owner, resources)
+    }
+
     /// Return an owned identity that may outlive this table borrow.
     ///
     /// # Returns
@@ -746,6 +768,15 @@ impl TextureRef<'_> {
 }
 
 impl BufferRef<'_> {
+    /// Return the backend resource slot assigned by the owning table.
+    ///
+    /// # Returns
+    ///
+    /// A stable slot for the lifetime of the resource table.
+    pub const fn slot(self) -> usize {
+        self.index
+    }
+
     /// Return an owned identity that may outlive this table borrow.
     ///
     /// # Returns
@@ -761,6 +792,15 @@ impl BufferRef<'_> {
 }
 
 impl SamplerRef<'_> {
+    /// Return the backend resource slot assigned by the owning table.
+    ///
+    /// # Returns
+    ///
+    /// A stable slot for the lifetime of the resource table.
+    pub const fn slot(self) -> usize {
+        self.index
+    }
+
     /// Return an owned identity that may outlive this table borrow.
     ///
     /// # Returns
@@ -776,6 +816,15 @@ impl SamplerRef<'_> {
 }
 
 impl RenderPipelineRef<'_> {
+    /// Return the backend resource slot assigned by the owning table.
+    ///
+    /// # Returns
+    ///
+    /// A stable slot for the lifetime of the resource table.
+    pub const fn slot(self) -> usize {
+        self.index
+    }
+
     /// Return an owned identity that may outlive this table borrow.
     ///
     /// # Returns

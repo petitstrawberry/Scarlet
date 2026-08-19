@@ -7,13 +7,15 @@
 //! A persistent resource cache can rebind that logical presentation texture to
 //! each newly acquired WGPU surface frame.
 
+extern crate alloc;
+
 use alloc::{borrow::Cow, format, rc::Rc, string::String, sync::Arc, vec::Vec};
 use core::fmt;
 
 use bytemuck::{Pod, Zeroable};
 use wgpu as raw;
 
-use crate::ir::{
+use sgfx_core::ir::{
     self, AddressMode, BlendComponent, BlendFactor, BlendOp, BufferId, BufferRef, BufferUsage,
     Command, CommandBuffer, CompareFunction, DepthLoadOp, DrawUniforms, FilterMode,
     FragmentProgram, IndexFormat, LoadOp, RenderPassDesc, RenderPipelineDesc, RenderPipelineId,
@@ -39,8 +41,6 @@ pub enum Error {
     Unsupported(UnsupportedFeature),
     /// The command stream or persistent backend state is inconsistent.
     InvalidState,
-    /// Acquiring a WGPU surface frame failed.
-    Surface(raw::SurfaceError),
 }
 
 impl From<ir::Error> for Error {
@@ -60,9 +60,6 @@ impl fmt::Display for Error {
                 write!(formatter, "unsupported SGFX feature: {feature:?}")
             }
             Self::InvalidState => formatter.write_str("invalid WGPU backend state"),
-            Self::Surface(error) => {
-                write!(formatter, "failed to acquire WGPU surface frame: {error}")
-            }
         }
     }
 }
@@ -209,46 +206,6 @@ impl Context {
         }))
     }
 
-    /// Acquire the current WGPU surface frame as an SGFX image.
-    ///
-    /// The returned frame must be presented after all commands targeting its
-    /// image have been submitted. WGPU surface acquisition and presentation
-    /// remain platform responsibilities and are deliberately outside the
-    /// portable SGFX IR.
-    ///
-    /// # Arguments
-    ///
-    /// * `surface` - Configured WGPU surface to acquire from.
-    ///
-    /// # Returns
-    ///
-    /// An acquired surface frame or the WGPU surface error.
-    pub fn acquire_surface_frame<'surface>(
-        &self,
-        surface: &raw::Surface<'surface>,
-    ) -> Result<SurfaceFrame> {
-        let frame = surface.get_current_texture().map_err(Error::Surface)?;
-        let format = logical_format(frame.texture.format())
-            .ok_or(Error::Unsupported(UnsupportedFeature::SurfaceFormat))?;
-        let gpu = Arc::new(GpuTexture {
-            view: frame
-                .texture
-                .create_view(&raw::TextureViewDescriptor::default()),
-            texture: frame.texture.clone(),
-            format: frame.texture.format(),
-            logical_format: format,
-            width: frame.texture.width(),
-            height: frame.texture.height(),
-        });
-        Ok(SurfaceFrame {
-            frame,
-            image: Arc::new(Image {
-                device_identity: Arc::clone(&self.device.identity),
-                gpu,
-            }),
-        })
-    }
-
     /// Create a persistent logical-resource cache for this context.
     ///
     /// # Arguments
@@ -334,30 +291,6 @@ impl Image {
     /// The WGPU texture view used by SGFX render passes.
     pub fn raw_view(&self) -> &raw::TextureView {
         &self.gpu.view
-    }
-}
-
-/// Acquired WGPU surface frame and its SGFX image view.
-pub struct SurfaceFrame {
-    frame: raw::SurfaceTexture,
-    image: Arc<Image>,
-}
-
-impl SurfaceFrame {
-    /// Borrow the acquired image for resource mapping.
-    ///
-    /// # Returns
-    ///
-    /// The WGPU-backed image associated with this surface frame.
-    pub fn image(&self) -> Arc<Image> {
-        Arc::clone(&self.image)
-    }
-
-    /// Present the acquired surface frame.
-    ///
-    /// Consumes the frame so it cannot be presented twice.
-    pub fn present(self) {
-        self.frame.present();
     }
 }
 
@@ -1208,6 +1141,7 @@ fn raw_format(format: TextureFormat) -> Option<raw::TextureFormat> {
     }
 }
 
+#[cfg(test)]
 fn logical_format(format: raw::TextureFormat) -> Option<TextureFormat> {
     match format {
         raw::TextureFormat::Bgra8Unorm | raw::TextureFormat::Bgra8UnormSrgb => {
@@ -1757,7 +1691,7 @@ mod tests {
     use alloc::vec;
 
     use super::*;
-    use crate::ir::{
+    use sgfx_core::ir::{
         AddressMode, BlendState, BufferDesc, Color, CommandEncoder, DrawUniforms, Extent2D,
         FilterMode, PixelRect, PrimitiveTopology, RasterState, RenderPassDesc, SamplerDesc,
         StoreOp, TextureWrite, Transform, VertexBufferLayout,
