@@ -659,18 +659,18 @@ dependencies = [
 ]
 
 [[package]]
-name = "sgfx"
-version = "0.16.0"
-
-[[package]]
 name = "sgfx-backend-wgpu"
 version = "0.16.0"
 dependencies = [
  "bytemuck",
  "pollster",
- "sgfx",
+ "sgfx-core",
  "wgpu",
 ]
+
+[[package]]
+name = "sgfx-core"
+version = "0.16.0"
 
 [[package]]
 name = "slab"
