@@ -12,15 +12,13 @@ extern crate scarlet_std as std;
 
 use alloc::{rc::Rc, vec::Vec};
 #[cfg(feature = "std")]
-use scarlet_os::{
-    handle::{Handle, HandleError, HandleResult},
-    ipc::SharedMemory,
-};
+pub use scarlet_os::handle::{Handle, HandleError, HandleResult};
+#[cfg(feature = "std")]
+use scarlet_os::ipc::SharedMemory;
 #[cfg(not(feature = "std"))]
-use std::{
-    handle::{Handle, HandleError, HandleResult},
-    ipc::SharedMemory,
-};
+pub use std::handle::{Handle, HandleError, HandleResult};
+#[cfg(not(feature = "std"))]
+use std::ipc::SharedMemory;
 
 /// Backend-neutral logical graphics intermediate representation.
 ///
@@ -489,19 +487,6 @@ impl Image {
     /// The GPU image capability backing this render target.
     pub fn shared_handle(&self) -> &Handle {
         self.backend.shared_handle()
-    }
-
-    /// Present this image through a Scarlet display surface.
-    ///
-    /// # Arguments
-    ///
-    /// * `display` - Destination display surface.
-    ///
-    /// # Returns
-    ///
-    /// Success or a handle error.
-    pub fn present(&self, display: &framebuffer::DisplaySurface) -> HandleResult<()> {
-        self.backend.present(display)
     }
 }
 

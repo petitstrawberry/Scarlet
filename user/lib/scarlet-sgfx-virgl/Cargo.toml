@@ -5,13 +5,12 @@ edition = "2024"
 
 [features]
 default = ["scarlet-std"]
-std = ["dep:scarlet-os", "framebuffer/std", "gpu-raw/std"]
-scarlet-std = ["dep:scarlet-std", "framebuffer/scarlet-std", "gpu-raw/scarlet-std"]
+std = ["dep:scarlet-os", "gpu-raw/std"]
+scarlet-std = ["dep:scarlet-std", "gpu-raw/scarlet-std"]
 
 [dependencies]
 scarlet-os = { path = "../scarlet-os", default-features = false, features = ["std"], optional = true }
 scarlet-std = { path = "../std", optional = true }
-framebuffer = { path = "../framebuffer", default-features = false }
 gpu-raw = { path = "../gpu-raw", default-features = false }
 sgfx-core = { path = "../sgfx", default-features = false }
 sgfx-backend-virgl = { path = "../sgfx-backend-virgl" }

@@ -21,6 +21,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d9c4f5dac5e15c24eb999c26181a6ca40b39fe946cbe4c263c7209467bc83af2"
 
 [[package]]
+name = "framebuffer"
+version = "0.16.0"
+dependencies = [
+ "scarlet-os",
+ "scarlet-std",
+]
+
+[[package]]
 name = "gpu-raw"
 version = "0.16.0"
 dependencies = [
@@ -106,6 +114,14 @@ name = "scopeguard"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
+
+[[package]]
+name = "sgfx"
+version = "0.16.0"
+dependencies = [
+ "framebuffer",
+ "scarlet-sgfx-virgl",
+]
 
 [[package]]
 name = "sgfx-backend-virgl"

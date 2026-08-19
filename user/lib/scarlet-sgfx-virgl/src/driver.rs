@@ -2,7 +2,6 @@
 
 use alloc::{rc::Rc, vec::Vec};
 
-use framebuffer::DisplaySurface;
 use gpu_raw::Gpu as RawGpu;
 #[cfg(feature = "std")]
 use scarlet_os::handle::{Handle, HandleError, HandleResult};
@@ -618,14 +617,6 @@ pub(crate) enum CompositionOperation<'a> {
         color: Color,
         clip: Option<PixelRect>,
     },
-}
-
-impl Image {
-    pub(crate) fn present(&self, display: &DisplaySurface) -> HandleResult<()> {
-        match self {
-            Self::Virgl(image) => image.present(display),
-        }
-    }
 }
 
 pub(crate) enum Pipeline {

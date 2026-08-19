@@ -7,7 +7,7 @@ use std::time::Duration;
 use std::vec::Vec;
 
 use framebuffer::DisplaySurface;
-use sgfx::Device;
+use sgfx::{Device, SgfxImagePresentExt};
 use sgfx::ir::{
     AddressMode, BlendState, BufferDesc, BufferUsage, Color, CommandEncoder, DrawUniforms, Error,
     Extent2D, FilterMode, FragmentProgram, IndexFormat, LoadOp, PixelRect, PrimitiveTopology,

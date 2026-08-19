@@ -3,7 +3,6 @@
 use alloc::{rc::Rc, vec::Vec};
 use core::cell::Cell;
 
-use framebuffer::DisplaySurface;
 use gpu_raw::{
     GPU_DEVICE_STATE_READY, GPU_EXECUTION_SUPPORT_DEPTH, GPU_EXECUTION_SUPPORT_IMAGE_UPLOAD,
     GPU_EXECUTION_SUPPORT_PRESENTATION, GPU_EXECUTION_SUPPORT_QUEUE, GPU_IMAGE_FORMAT_BGRA8_UNORM,
@@ -1734,10 +1733,6 @@ impl Drop for Queue {
 impl Image {
     pub(crate) fn context_id(&self) -> i32 {
         self.context_handle
-    }
-
-    pub(crate) fn present(&self, display: &DisplaySurface) -> HandleResult<()> {
-        display.present_image(self.raw.as_handle(), None)
     }
 
     pub(crate) fn shared_handle(&self) -> &Handle {

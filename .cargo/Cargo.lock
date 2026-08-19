@@ -1917,7 +1917,6 @@ dependencies = [
 name = "scarlet-sgfx-virgl"
 version = "0.16.0"
 dependencies = [
- "framebuffer",
  "gpu-raw",
  "scarlet-os",
  "scarlet-std",
@@ -2154,6 +2153,7 @@ dependencies = [
 name = "sgfx"
 version = "0.16.0"
 dependencies = [
+ "framebuffer",
  "scarlet-sgfx-virgl",
 ]
 
