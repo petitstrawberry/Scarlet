@@ -1,12 +1,13 @@
-//! Compatibility facade for existing Scarlet SGFX applications.
+//! Scarlet composition facade for SGFX applications and platform integrations.
 //!
-//! New cross-platform consumers should depend on `sgfx-core` plus an explicit
-//! backend. This facade preserves the former `sgfx` package while Scarlet
-//! applications migrate to explicit platform composition.
+//! This environment-level crate selects and reexports the complete Scarlet
+//! execution backend, allowing consumers such as `platform-sws` to own SGFX
+//! sessions without naming a VirGL implementation dependency. Cross-platform
+//! renderers should depend only on `sgfx-core` and its backend contract.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
-pub use scarlet_sgfx_virgl::*;
+pub use sgfx_backend_scarlet_virgl::*;
 
 /// Compatibility presentation extension for direct Scarlet framebuffer apps.
 ///

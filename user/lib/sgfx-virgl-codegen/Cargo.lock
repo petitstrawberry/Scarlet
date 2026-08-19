@@ -3,12 +3,12 @@
 version = 4
 
 [[package]]
-name = "sgfx-backend-virgl"
+name = "sgfx-core"
+version = "0.16.0"
+
+[[package]]
+name = "sgfx-virgl-codegen"
 version = "0.16.0"
 dependencies = [
  "sgfx-core",
 ]
-
-[[package]]
-name = "sgfx-core"
-version = "0.16.0"

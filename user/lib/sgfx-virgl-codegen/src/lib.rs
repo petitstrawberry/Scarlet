@@ -1,8 +1,8 @@
 //! Platform-neutral VirGL command lowering for SGFX.
 //!
-//! This crate owns VirGL dialect knowledge only. It does not open devices,
-//! allocate operating-system resources, or present images. A platform adapter
-//! transports the returned command bytes to its GPU service.
+//! This crate owns shared VirGL dialect encoding only. Its helpers return
+//! command bytes; it never opens devices, allocates operating-system resources,
+//! selects a transport, synchronizes, submits commands, or presents images.
 
 #![no_std]
 
@@ -10,50 +10,6 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 use sgfx_core::ir::{CullMode, FrontFace};
-
-/// Stable backend identifier advertised by VirtIO GPU VirGL transports.
-pub const BACKEND_ID: &[u8] = b"virtio-gpu";
-
-/// Return whether a transport backend identifier selects VirGL.
-///
-/// # Arguments
-///
-/// * `backend_id` - Exact backend identifier reported by a transport.
-///
-/// # Returns
-///
-/// `true` only for the stable VirtIO GPU backend identifier.
-pub fn matches_backend_id(backend_id: &[u8]) -> bool {
-    backend_id == BACKEND_ID
-}
-
-/// Platform transport for completed VirGL command streams.
-///
-/// Implementations own queue handles, synchronization, and operating-system
-/// error mapping. The VirGL backend owns only the bytes submitted through this
-/// contract.
-pub trait CommandTransport {
-    /// Error returned by the platform queue implementation.
-    type Error;
-
-    /// Return the maximum opaque command size accepted by the queue.
-    ///
-    /// # Returns
-    ///
-    /// Maximum command stream length in bytes.
-    fn max_command_size(&self) -> usize;
-
-    /// Submit one complete VirGL command stream.
-    ///
-    /// # Arguments
-    ///
-    /// * `commands` - Aligned VirGL command bytes produced by this backend.
-    ///
-    /// # Returns
-    ///
-    /// Success after backend completion, or a platform transport error.
-    fn submit(&self, commands: &[u8]) -> core::result::Result<(), Self::Error>;
-}
 
 /// Encode the immutable state for the compatibility vertex-color pipeline.
 ///
@@ -276,13 +232,6 @@ mod tests {
             .chunks_exact(4)
             .map(|bytes| u32::from_ne_bytes(bytes.try_into().expect("dword")))
             .collect()
-    }
-
-    #[test]
-    fn backend_id_match_is_exact() {
-        assert!(matches_backend_id(b"virtio-gpu"));
-        assert!(!matches_backend_id(b"virtio-gpu\0"));
-        assert!(!matches_backend_id(b"apple-agx"));
     }
 
     #[test]

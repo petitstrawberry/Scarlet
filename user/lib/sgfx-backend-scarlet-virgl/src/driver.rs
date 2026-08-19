@@ -26,7 +26,7 @@ enum BackendKind {
 }
 
 fn classify_backend_id(backend_id: &[u8]) -> BackendKind {
-    if sgfx_backend_virgl::matches_backend_id(backend_id) {
+    if crate::matches_backend_id(backend_id) {
         BackendKind::Virgl
     } else if backend_id == APPLE_AGX_BACKEND_ID {
         BackendKind::AppleAgx
@@ -535,6 +535,7 @@ pub(crate) struct IrUniforms {
 }
 
 /// One private non-indexed draw in an ordered IR submission.
+#[derive(Clone)]
 pub(crate) struct IrDraw {
     pub(crate) start_vertex: usize,
     pub(crate) vertex_count: usize,
@@ -547,6 +548,7 @@ pub(crate) struct IrDraw {
 }
 
 /// Converted BGRA texture upload retained until all stream validation succeeds.
+#[derive(Clone)]
 pub(crate) struct IrTextureUpload {
     pub(crate) texture: IrTextureSpec,
     pub(crate) destination: IrRect,

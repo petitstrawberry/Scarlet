@@ -3,5 +3,5 @@
 version = 4
 
 [[package]]
-name = "sgfx"
+name = "sgfx-core"
 version = "0.16.0"

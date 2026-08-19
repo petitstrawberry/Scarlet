@@ -72,17 +72,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "scarlet-sgfx-virgl"
-version = "0.16.0"
-dependencies = [
- "gpu-raw",
- "scarlet-os",
- "scarlet-std",
- "sgfx-backend-virgl",
- "sgfx-core",
-]
-
-[[package]]
 name = "scarlet-std"
 version = "0.16.0"
 dependencies = [
@@ -108,15 +97,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
-name = "sgfx-backend-virgl"
+name = "sgfx-backend-scarlet-virgl"
 version = "0.16.0"
 dependencies = [
+ "gpu-raw",
+ "scarlet-os",
+ "scarlet-std",
  "sgfx-core",
+ "sgfx-virgl-codegen",
 ]
 
 [[package]]
 name = "sgfx-core"
 version = "0.16.0"
+
+[[package]]
+name = "sgfx-virgl-codegen"
+version = "0.16.0"
+dependencies = [
+ "sgfx-core",
+]
 
 [[package]]
 name = "spin"

@@ -238,6 +238,107 @@ impl Context {
             context: self.clone(),
         }
     }
+
+    /// Create and map all physical images for a set of logical presentation targets.
+    ///
+    /// # Arguments
+    ///
+    /// * `resources` - Logical resource table retained by the session.
+    /// * `targets` - `PRESENT` texture identities to materialize and map.
+    ///
+    /// # Returns
+    ///
+    /// A session owning its context, queue, resource cache, and images, or a
+    /// descriptor, allocation, or mapping error.
+    pub fn create_mapped_target_session(
+        &self,
+        resources: Rc<ResourceTable>,
+        targets: &[TextureId],
+    ) -> Result<MappedTargetSession> {
+        let mut cache = self.create_resources(Rc::clone(&resources));
+        let mut images = Vec::new();
+        images
+            .try_reserve_exact(targets.len())
+            .map_err(|_| Error::InvalidState)?;
+        for &target in targets {
+            if images.iter().any(|(candidate, _)| *candidate == target) {
+                return Err(Error::InvalidState);
+            }
+            let reference = resources.texture_ref(target)?;
+            let descriptor = resources.texture(reference)?;
+            let required = TextureUsage::RENDER_ATTACHMENT | TextureUsage::PRESENT;
+            if !descriptor.usage().contains(required) {
+                return Err(Error::InvalidState);
+            }
+            let image = self.create_image(
+                descriptor.extent().width(),
+                descriptor.extent().height(),
+                descriptor.format(),
+            )?;
+            cache.map_image(target, Arc::clone(&image))?;
+            images.push((target, image));
+        }
+        Ok(MappedTargetSession {
+            context: self.clone(),
+            queue: self.create_queue(),
+            resources: cache,
+            images,
+        })
+    }
+}
+
+/// WGPU execution session owning mapped presentation targets and backend state.
+pub struct MappedTargetSession {
+    context: Context,
+    queue: Queue,
+    resources: Resources,
+    images: Vec<(TextureId, Arc<Image>)>,
+}
+
+impl MappedTargetSession {
+    /// Borrow the physical image mapped to a logical target.
+    ///
+    /// # Arguments
+    ///
+    /// * `target` - Logical presentation texture identity.
+    ///
+    /// # Returns
+    ///
+    /// The mapped image or [`Error::ImageNotMapped`].
+    pub fn image(&self, target: TextureId) -> Result<&Image> {
+        self.images
+            .iter()
+            .find(|(candidate, _)| *candidate == target)
+            .map(|(_, image)| image.as_ref())
+            .ok_or(Error::ImageNotMapped)
+    }
+
+    /// Bind the session's queue and resources for command execution.
+    ///
+    /// # Returns
+    ///
+    /// A backend-owned SGFX command executor.
+    pub fn executor(&mut self) -> Executor<'_> {
+        self.queue.executor(&mut self.resources)
+    }
+
+    /// Borrow the underlying WGPU device for platform presentation work.
+    ///
+    /// # Returns
+    ///
+    /// The WGPU device owned by this session's context.
+    pub fn raw_device(&self) -> &raw::Device {
+        self.context.raw_device()
+    }
+
+    /// Borrow the underlying WGPU queue for platform presentation work.
+    ///
+    /// # Returns
+    ///
+    /// The WGPU queue owned by this session's context.
+    pub fn raw_queue(&self) -> &raw::Queue {
+        self.context.raw_queue()
+    }
 }
 
 /// WGPU-backed SGFX image.
@@ -522,6 +623,23 @@ pub struct Queue {
 }
 
 impl Queue {
+    /// Bind this queue to a persistent resource cache for command execution.
+    ///
+    /// # Arguments
+    ///
+    /// * `resources` - Persistent cache created by this queue's context.
+    ///
+    /// # Returns
+    ///
+    /// A backend-owned executor implementing
+    /// [`sgfx_core::backend::CommandExecutor`].
+    pub fn executor<'a>(&'a self, resources: &'a mut Resources) -> Executor<'a> {
+        Executor {
+            queue: self,
+            resources,
+        }
+    }
+
     /// Submit one validated SGFX command buffer.
     ///
     /// Upload commands are expected before the first texture copy or render
@@ -1009,6 +1127,20 @@ impl Queue {
                 layout: &pipeline.bind_group_layout,
                 entries: &entries,
             }))
+    }
+}
+
+/// WGPU command executor bound to a queue and persistent resource cache.
+pub struct Executor<'a> {
+    queue: &'a Queue,
+    resources: &'a mut Resources,
+}
+
+impl sgfx_core::backend::CommandExecutor for Executor<'_> {
+    type Error = Error;
+
+    fn execute<'r, 'data>(&mut self, commands: &CommandBuffer<'r, 'data>) -> Result<()> {
+        self.queue.submit(self.resources, commands)
     }
 }
 
