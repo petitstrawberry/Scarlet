@@ -3086,6 +3086,25 @@ mod tests {
     }
 
     #[test]
+    fn ir_ccw_back_culling_uses_the_upper_left_viewport_contract() {
+        let flags = ir_rasterizer_flags(IrCullMode::Back, IrFrontFace::CounterClockwise);
+        assert_eq!(
+            flags & (3 << VIRGL_RASTERIZER_CULL_FACE_SHIFT),
+            2 << VIRGL_RASTERIZER_CULL_FACE_SHIFT
+        );
+        assert_ne!(flags & VIRGL_RASTERIZER_FRONT_CCW, 0);
+
+        let mut commands = Vec::new();
+        push_viewport(
+            &mut commands,
+            Viewport::new(640, 480),
+            FramebufferOrientation::UPPER_LEFT,
+        );
+        let words = dwords(&commands);
+        assert_eq!(f32::from_bits(words[3]), -240.0);
+    }
+
+    #[test]
     fn ir_color_only_packets_keep_depth_unbound_and_disabled() {
         let mut commands = Vec::new();
         push_ir_bind_pass_state(

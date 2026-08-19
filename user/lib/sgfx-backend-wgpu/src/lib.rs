@@ -1764,7 +1764,7 @@ mod tests {
     }
 
     #[test]
-    fn headless_scissor_limits_the_drawn_pixels() {
+    fn headless_ccw_front_face_survives_back_culling_and_scissor() {
         let instance = raw::Instance::new(&raw::InstanceDescriptor::default());
         let adapter = pollster::block_on(instance.request_adapter(&raw::RequestAdapterOptions {
             power_preference: raw::PowerPreference::HighPerformance,
@@ -1794,12 +1794,12 @@ mod tests {
             )
             .expect("target resource");
         let vertices: [[f32; 8]; 6] = [
-            [-1.0, -1.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0],
-            [1.0, -1.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0],
-            [1.0, 1.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0],
-            [-1.0, -1.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0],
-            [1.0, 1.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0],
-            [-1.0, 1.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0],
+            [-0.9, -0.8, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0],
+            [-0.1, -0.8, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0],
+            [-0.5, 0.8, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0],
+            [0.1, -0.8, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0],
+            [0.5, 0.8, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0],
+            [0.9, -0.8, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0],
         ];
         let vertex_buffer = resources
             .define_buffer(
@@ -1825,7 +1825,7 @@ mod tests {
                     .expect("vertex layout"),
                     FragmentProgram::VertexColor,
                     BlendState::SOURCE_OVER_STRAIGHT_ALPHA,
-                    RasterState::new(ir::CullMode::None, ir::FrontFace::CounterClockwise),
+                    RasterState::new(ir::CullMode::Back, ir::FrontFace::CounterClockwise),
                 )
                 .expect("pipeline descriptor"),
             )
@@ -1920,8 +1920,9 @@ mod tests {
                 bytes[start + 3],
             ]
         };
-        assert_eq!(pixel(8, 4), [0, 0, 255, 255]);
-        assert_eq!(pixel(8, 12), [255, 255, 255, 255]);
+        assert_eq!(pixel(4, 4), [0, 0, 255, 255]);
+        assert_eq!(pixel(12, 4), [255, 255, 255, 255]);
+        assert_eq!(pixel(4, 12), [255, 255, 255, 255]);
     }
 
     #[test]
