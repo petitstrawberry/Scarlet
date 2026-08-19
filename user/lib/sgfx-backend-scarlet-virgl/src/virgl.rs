@@ -16,7 +16,6 @@ use gpu_raw::{
 use scarlet_os::handle::{Handle, HandleError, HandleResult};
 #[cfg(feature = "std")]
 use scarlet_os::ipc::SharedMemory;
-use sgfx_backend_virgl::CommandTransport;
 #[cfg(not(feature = "std"))]
 use std::{
     handle::{Handle, HandleError, HandleResult},
@@ -730,22 +729,6 @@ pub(crate) struct Queue {
     composition_initialized: Cell<bool>,
 }
 
-struct ScarletCommandTransport<'queue> {
-    queue: &'queue RawQueue,
-}
-
-impl CommandTransport for ScarletCommandTransport<'_> {
-    type Error = HandleError;
-
-    fn max_command_size(&self) -> usize {
-        self.queue.max_opaque_command_size() as usize
-    }
-
-    fn submit(&self, commands: &[u8]) -> HandleResult<()> {
-        self.queue.submit(commands).map(|_| ())
-    }
-}
-
 pub(crate) enum CompositionOperation<'a> {
     Textured {
         texture: &'a Texture,
@@ -931,16 +914,12 @@ struct CompositionQuad {
 }
 
 impl Queue {
-    fn command_transport(&self) -> ScarletCommandTransport<'_> {
-        ScarletCommandTransport { queue: &self.raw }
-    }
-
     fn max_command_size(&self) -> usize {
-        self.command_transport().max_command_size()
+        self.raw.max_opaque_command_size() as usize
     }
 
     fn submit_commands(&self, commands: &[u8]) -> HandleResult<()> {
-        self.command_transport().submit(commands)
+        self.raw.submit(commands).map(|_| ())
     }
 
     pub(crate) fn context_id(&self) -> i32 {
@@ -1466,7 +1445,7 @@ impl Queue {
 
         let needs_setup = !pipeline.initialized.get();
         let mut commands = if needs_setup {
-            sgfx_backend_virgl::build_vertex_color_setup(
+            sgfx_virgl_codegen::build_vertex_color_setup(
                 pipeline.target_resource_id,
                 pipeline.vertex_resource_id,
                 core::mem::size_of::<VertexClip4Color3>() as u32,

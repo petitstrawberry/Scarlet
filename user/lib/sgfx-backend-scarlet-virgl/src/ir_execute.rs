@@ -67,8 +67,6 @@ pub enum UnsupportedIrFeature {
     VertexBuffer,
     /// Draw uniforms are unsupported.
     DrawUniforms,
-    /// The backend command stream would exceed its fixed 64 KiB transport limit.
-    CommandStream,
 }
 
 /// Failure while mapping or submitting a logical IR command buffer.
@@ -456,6 +454,7 @@ struct ExecutionPass {
     submission: IrSubmission,
 }
 
+#[derive(Clone)]
 enum ExecutionTarget {
     Mapped(Rc<Image>),
     Internal(driver::IrTextureSpec),
@@ -487,11 +486,10 @@ struct PipelineInfo {
 impl Queue {
     /// Validate, lower, and synchronously submit one logical IR command buffer.
     ///
-    /// The supported subset contains any number of `WriteBuffer` and
-    /// `WriteTexture` commands before one or more mapped presentation render
-    /// passes. Each pass may contain ordered indexed and non-indexed triangle
-    /// draws. Texture copies and internally allocated offscreen targets remain
-    /// unsupported.
+    /// The supported subset contains buffer and texture uploads, compatible
+    /// texture copies, and one or more render passes targeting either mapped
+    /// presentation images or backend-materialized offscreen textures. Each
+    /// pass may contain ordered indexed and non-indexed triangle draws.
     ///
     /// # Arguments
     ///
@@ -520,6 +518,7 @@ impl Queue {
             return Err(IrSubmitError::ContextMismatch);
         }
         let plan = ExecutionPlan::from_commands(resources, commands)?;
+        plan.validate_transport_chunks()?;
         register_mapped_images(context, resources)?;
         let mut prepared_buffers = Vec::new();
         for event in &plan.events {
@@ -636,6 +635,36 @@ fn register_mapped_images(
 }
 
 impl ExecutionPlan {
+    fn validate_transport_chunks(&self) -> Result<(), IrSubmitError> {
+        for event in &self.events {
+            let ExecutionEvent::Pass(pass) = event else {
+                continue;
+            };
+            let submission = &pass.submission;
+            if submission.draws.is_empty()
+                || submission.vertices.len() > MAX_IR_VERTICES
+                || submission.draws.len() > MAX_IR_DRAWS_PER_SUBMISSION
+                || !chunk_fits_transport(submission.vertices.len(), submission.draws.len())
+            {
+                return Err(IrSubmitError::InvalidVertexData);
+            }
+            for draw in &submission.draws {
+                if draw.vertex_count == 0 || !draw.vertex_count.is_multiple_of(3) {
+                    return Err(IrSubmitError::InvalidVertexData);
+                }
+                if draw.vertex_buffer.is_none()
+                    && draw
+                        .start_vertex
+                        .checked_add(draw.vertex_count)
+                        .is_none_or(|end| end > submission.vertices.len())
+                {
+                    return Err(IrSubmitError::InvalidVertexData);
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn from_commands<'r, 'data>(
         resources: &IrResources,
         commands: &CommandBuffer<'r, 'data>,
@@ -794,13 +823,14 @@ impl ExecutionPlan {
                             UnsupportedIrFeature::CommandSequence,
                         ));
                     }
-                    events
-                        .try_reserve(1)
-                        .map_err(|_| IrSubmitError::OutOfMemory)?;
-                    events.push(ExecutionEvent::Pass(ExecutionPass {
+                    let chunks = split_pass(ExecutionPass {
                         target: pass.target,
                         submission: pass.submission,
-                    }));
+                    })?;
+                    events
+                        .try_reserve(chunks.len())
+                        .map_err(|_| IrSubmitError::OutOfMemory)?;
+                    events.extend(chunks.into_iter().map(ExecutionEvent::Pass));
                 }
                 Command::SetPipeline(reference) => {
                     active_pass_mut(&mut active)?.pipeline = Some(*reference)
@@ -1204,17 +1234,9 @@ fn append_draw(pass: &mut ActivePass<'_>, draw: DecodedDraw) -> Result<(), IrSub
     let (start_vertex, vertex_count, vertex_buffer) = match draw.vertices {
         DecodedVertices::Inline(vertices) => {
             let start_vertex = pass.submission.vertices.len();
-            let new_len =
-                start_vertex
-                    .checked_add(vertices.len())
-                    .ok_or(IrSubmitError::Unsupported(
-                        UnsupportedIrFeature::CommandStream,
-                    ))?;
-            if new_len > MAX_IR_VERTICES {
-                return Err(IrSubmitError::Unsupported(
-                    UnsupportedIrFeature::CommandStream,
-                ));
-            }
+            let new_len = start_vertex
+                .checked_add(vertices.len())
+                .ok_or(IrSubmitError::OutOfMemory)?;
             pass.submission
                 .vertices
                 .try_reserve(vertices.len())
@@ -1241,6 +1263,209 @@ fn append_draw(pass: &mut ActivePass<'_>, draw: DecodedDraw) -> Result<(), IrSub
         sampler: draw.sampler,
         uniforms: draw.uniforms,
         scissor: draw.scissor,
+    });
+    Ok(())
+}
+
+const IR_COMMAND_TRANSPORT_BYTES: usize = 64 * 1024;
+const IR_COMMAND_FIXED_BUDGET: usize = 6 * 1024;
+const IR_DRAW_COMMAND_BUDGET: usize = 256;
+const IR_INLINE_VERTEX_BYTES: usize = 10 * core::mem::size_of::<f32>();
+
+// This draw-count guard complements the byte budget and bounds planner work
+// for persistent buffers, whose vertices do not occupy the command stream.
+const MAX_IR_DRAWS_PER_SUBMISSION: usize = 64;
+
+fn chunk_fits_transport(vertex_count: usize, draw_count: usize) -> bool {
+    vertex_count
+        .checked_mul(IR_INLINE_VERTEX_BYTES)
+        .and_then(|bytes| bytes.checked_add(IR_COMMAND_FIXED_BUDGET))
+        .and_then(|bytes| {
+            draw_count
+                .checked_mul(IR_DRAW_COMMAND_BUDGET)
+                .and_then(|draw_bytes| bytes.checked_add(draw_bytes))
+        })
+        .is_some_and(|bytes| bytes <= IR_COMMAND_TRANSPORT_BYTES)
+}
+
+fn inline_vertex_capacity(vertex_count: usize, draw_count: usize) -> usize {
+    let draw_bytes = match draw_count.checked_mul(IR_DRAW_COMMAND_BUDGET) {
+        Some(bytes) => bytes,
+        None => return 0,
+    };
+    let used = match vertex_count
+        .checked_mul(IR_INLINE_VERTEX_BYTES)
+        .and_then(|bytes| bytes.checked_add(IR_COMMAND_FIXED_BUDGET))
+        .and_then(|bytes| bytes.checked_add(draw_bytes))
+    {
+        Some(bytes) => bytes,
+        None => return 0,
+    };
+    let transport_capacity = IR_COMMAND_TRANSPORT_BYTES
+        .saturating_sub(used)
+        .checked_div(IR_INLINE_VERTEX_BYTES)
+        .unwrap_or(0);
+    transport_capacity.min(MAX_IR_VERTICES.saturating_sub(vertex_count))
+}
+
+fn split_pass(pass: ExecutionPass) -> Result<Vec<ExecutionPass>, IrSubmitError> {
+    let IrSubmission {
+        clear_color,
+        depth_attachment,
+        clear_depth,
+        render_area,
+        vertices,
+        draws,
+        texture_uploads,
+    } = pass.submission;
+    let mut chunks = Vec::new();
+    let mut chunk_vertices = Vec::new();
+    let mut chunk_draws = Vec::new();
+    let mut first_chunk = true;
+
+    for draw in draws {
+        if draw.vertex_buffer.is_none() {
+            let end = draw
+                .start_vertex
+                .checked_add(draw.vertex_count)
+                .ok_or(IrSubmitError::InvalidVertexData)?;
+            if end > vertices.len() || !draw.vertex_count.is_multiple_of(3) {
+                return Err(IrSubmitError::InvalidVertexData);
+            }
+            let mut source_start = draw.start_vertex;
+            while source_start < end {
+                let mut capacity = inline_vertex_capacity(
+                    chunk_vertices.len(),
+                    chunk_draws.len().saturating_add(1),
+                );
+                capacity -= capacity % 3;
+                if chunk_draws.len() >= MAX_IR_DRAWS_PER_SUBMISSION || capacity == 0 {
+                    push_pass_chunk(
+                        &mut chunks,
+                        &pass.target,
+                        clear_color,
+                        depth_attachment,
+                        clear_depth,
+                        render_area,
+                        core::mem::take(&mut chunk_vertices),
+                        core::mem::take(&mut chunk_draws),
+                        if first_chunk {
+                            texture_uploads.clone()
+                        } else {
+                            Vec::new()
+                        },
+                        first_chunk,
+                    )?;
+                    first_chunk = false;
+                    continue;
+                }
+                let count = (end - source_start).min(capacity);
+                let mut segment = draw.clone();
+                segment.start_vertex = chunk_vertices.len();
+                segment.vertex_count = count;
+                chunk_vertices
+                    .try_reserve_exact(count)
+                    .map_err(|_| IrSubmitError::OutOfMemory)?;
+                chunk_vertices.extend_from_slice(&vertices[source_start..source_start + count]);
+                chunk_draws
+                    .try_reserve(1)
+                    .map_err(|_| IrSubmitError::OutOfMemory)?;
+                chunk_draws.push(segment);
+                source_start += count;
+                if source_start < end {
+                    push_pass_chunk(
+                        &mut chunks,
+                        &pass.target,
+                        clear_color,
+                        depth_attachment,
+                        clear_depth,
+                        render_area,
+                        core::mem::take(&mut chunk_vertices),
+                        core::mem::take(&mut chunk_draws),
+                        if first_chunk {
+                            texture_uploads.clone()
+                        } else {
+                            Vec::new()
+                        },
+                        first_chunk,
+                    )?;
+                    first_chunk = false;
+                }
+            }
+        } else {
+            if chunk_draws.len() >= MAX_IR_DRAWS_PER_SUBMISSION
+                || !chunk_fits_transport(chunk_vertices.len(), chunk_draws.len() + 1)
+            {
+                push_pass_chunk(
+                    &mut chunks,
+                    &pass.target,
+                    clear_color,
+                    depth_attachment,
+                    clear_depth,
+                    render_area,
+                    core::mem::take(&mut chunk_vertices),
+                    core::mem::take(&mut chunk_draws),
+                    if first_chunk {
+                        texture_uploads.clone()
+                    } else {
+                        Vec::new()
+                    },
+                    first_chunk,
+                )?;
+                first_chunk = false;
+            }
+            chunk_draws
+                .try_reserve(1)
+                .map_err(|_| IrSubmitError::OutOfMemory)?;
+            chunk_draws.push(draw);
+        }
+    }
+    push_pass_chunk(
+        &mut chunks,
+        &pass.target,
+        clear_color,
+        depth_attachment,
+        clear_depth,
+        render_area,
+        chunk_vertices,
+        chunk_draws,
+        if first_chunk {
+            texture_uploads
+        } else {
+            Vec::new()
+        },
+        first_chunk,
+    )?;
+    Ok(chunks)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_pass_chunk(
+    chunks: &mut Vec<ExecutionPass>,
+    target: &ExecutionTarget,
+    clear_color: Option<[f32; 4]>,
+    depth_attachment: Option<driver::IrTextureSpec>,
+    clear_depth: Option<f32>,
+    render_area: IrRect,
+    vertices: Vec<IrVertex>,
+    draws: Vec<IrDraw>,
+    texture_uploads: Vec<IrTextureUpload>,
+    first: bool,
+) -> Result<(), IrSubmitError> {
+    chunks
+        .try_reserve(1)
+        .map_err(|_| IrSubmitError::OutOfMemory)?;
+    chunks.push(ExecutionPass {
+        target: target.clone(),
+        submission: IrSubmission {
+            clear_color: first.then_some(clear_color).flatten(),
+            depth_attachment,
+            clear_depth: first.then_some(clear_depth).flatten(),
+            render_area,
+            vertices,
+            draws,
+            texture_uploads,
+        },
     });
     Ok(())
 }
@@ -1883,4 +2108,147 @@ fn texture_spec(texture: TextureRef<'_>, descriptor: TextureDesc) -> driver::IrT
 
 fn materializable_texture(spec: driver::IrTextureSpec) -> bool {
     spec.sampled || spec.render_attachment || spec.copy_destination || spec.present
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::driver::{
+        IrBlendComponent, IrBlendFactor, IrBlendOp, IrBlendState, IrCullMode, IrFragmentProgram,
+        IrFrontFace,
+    };
+
+    fn target() -> driver::IrTextureSpec {
+        driver::IrTextureSpec {
+            slot: 0,
+            width: 64,
+            height: 64,
+            sampled: false,
+            render_attachment: true,
+            copy_destination: false,
+            present: false,
+            format: IrTextureFormat::Bgra8,
+        }
+    }
+
+    fn draw(start_vertex: usize, vertex_count: usize, order: usize) -> IrDraw {
+        let blend_component = IrBlendComponent {
+            source_factor: IrBlendFactor::One,
+            destination_factor: IrBlendFactor::Zero,
+            operation: IrBlendOp::Add,
+        };
+        IrDraw {
+            start_vertex,
+            vertex_count,
+            vertex_buffer: None,
+            pipeline: IrPipelineState {
+                slot: 0,
+                fragment: IrFragmentProgram::VertexColor,
+                blend: IrBlendState {
+                    color: blend_component,
+                    alpha: blend_component,
+                },
+                cull_mode: IrCullMode::None,
+                front_face: IrFrontFace::CounterClockwise,
+                depth: None,
+            },
+            texture: None,
+            sampler: None,
+            uniforms: IrUniforms {
+                transform: [0.0; 16],
+                color: [order as f32, 0.0, 0.0, 0.0],
+            },
+            scissor: IrRect {
+                x: 0,
+                y: 0,
+                width: 64,
+                height: 64,
+            },
+        }
+    }
+
+    fn execution_pass(vertices: Vec<IrVertex>, draws: Vec<IrDraw>) -> ExecutionPass {
+        ExecutionPass {
+            target: ExecutionTarget::Internal(target()),
+            submission: IrSubmission {
+                clear_color: Some([0.1, 0.2, 0.3, 1.0]),
+                depth_attachment: None,
+                clear_depth: None,
+                render_area: IrRect {
+                    x: 0,
+                    y: 0,
+                    width: 64,
+                    height: 64,
+                },
+                vertices,
+                draws,
+                texture_uploads: Vec::new(),
+            },
+        }
+    }
+
+    #[test]
+    fn oversized_inline_pass_is_split_in_order_without_repeating_clear() {
+        let vertex = IrVertex {
+            position: [0.0; 4],
+            secondary: [0.0; 4],
+            tertiary: [0.0; 2],
+        };
+        let vertex_count = MAX_IR_VERTICES + 6;
+        let vertices = vec![vertex; vertex_count];
+        let draws = vec![draw(0, vertex_count, 7)];
+        let chunks = split_pass(execution_pass(vertices, draws)).expect("split pass");
+
+        assert!(chunks.len() > 1);
+        assert!(chunks[0].submission.clear_color.is_some());
+        assert!(
+            chunks[1..]
+                .iter()
+                .all(|chunk| chunk.submission.clear_color.is_none())
+        );
+        assert!(chunks.iter().all(|chunk| {
+            chunk.submission.vertices.len() <= MAX_IR_VERTICES
+                && chunk.submission.draws.len() <= MAX_IR_DRAWS_PER_SUBMISSION
+                && chunk_fits_transport(
+                    chunk.submission.vertices.len(),
+                    chunk.submission.draws.len(),
+                )
+        }));
+        let planned_vertices: usize = chunks
+            .iter()
+            .flat_map(|chunk| chunk.submission.draws.iter())
+            .map(|draw| {
+                assert_eq!(draw.uniforms.color[0], 7.0);
+                assert!(draw.vertex_count.is_multiple_of(3));
+                draw.vertex_count
+            })
+            .sum();
+        assert_eq!(planned_vertices, vertex_count);
+    }
+
+    #[test]
+    fn persistent_draws_are_chunked_without_inline_vertices() {
+        let draw_count = MAX_IR_DRAWS_PER_SUBMISSION + 5;
+        let mut draws: Vec<_> = (0..draw_count).map(|index| draw(0, 3, index)).collect();
+        for draw in &mut draws {
+            draw.vertex_buffer = Some(IrVertexBufferBinding {
+                buffer: IrBufferSpec {
+                    slot: 1,
+                    size: 120,
+                    revision: 1,
+                },
+                offset: 0,
+            });
+        }
+        let chunks = split_pass(execution_pass(Vec::new(), draws)).expect("split pass");
+
+        assert_eq!(chunks.len(), 2);
+        assert!(
+            chunks
+                .iter()
+                .all(|chunk| chunk.submission.vertices.is_empty()
+                    && chunk.submission.draws.len() <= MAX_IR_DRAWS_PER_SUBMISSION
+                    && chunk_fits_transport(0, chunk.submission.draws.len()))
+        );
+    }
 }

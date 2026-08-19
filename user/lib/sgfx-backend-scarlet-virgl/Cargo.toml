@@ -1,5 +1,5 @@
 [package]
-name = "scarlet-sgfx-virgl"
+name = "sgfx-backend-scarlet-virgl"
 version = "0.16.0"
 edition = "2024"
 
@@ -13,8 +13,8 @@ scarlet-os = { path = "../scarlet-os", default-features = false, features = ["st
 scarlet-std = { path = "../std", optional = true }
 gpu-raw = { path = "../gpu-raw", default-features = false }
 sgfx-core = { path = "../sgfx", default-features = false }
-sgfx-backend-virgl = { path = "../sgfx-backend-virgl" }
+sgfx-virgl-codegen = { path = "../sgfx-virgl-codegen" }
 
 [lib]
-name = "scarlet_sgfx_virgl"
+name = "sgfx_backend_scarlet_virgl"
 path = "src/lib.rs"

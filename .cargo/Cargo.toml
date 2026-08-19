@@ -20,7 +20,8 @@ scarlet-std = { path = "../user/lib/std" }
 scarlet-sys = { path = "../user/lib/scarlet-sys" }
 sgfx = { path = "../user/lib/sgfx-compat" }
 sgfx-core = { path = "../user/lib/sgfx" }
-sgfx-backend-virgl = { path = "../user/lib/sgfx-backend-virgl" }
+sgfx-virgl-codegen = { path = "../user/lib/sgfx-virgl-codegen" }
+sgfx-backend-scarlet-virgl = { path = "../user/lib/sgfx-backend-scarlet-virgl" }
 sgfx-backend-wgpu = { path = "../user/lib/sgfx-backend-wgpu" }
 sws-client = { path = "../user/lib/sws-client" }
 sws-protocol = { path = "../user/lib/sws-protocol" }

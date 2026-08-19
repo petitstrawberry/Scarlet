@@ -1,8 +1,10 @@
-//! Scarlet OS adapter for the SGFX VirGL backend.
+//! Complete Scarlet GPU ABI and VirGL execution backend for SGFX.
 //!
-//! This crate provides the small rendering API used by applications. The
-//! selected driver backend and its command transport remain private so future
-//! backends can preserve this application interface.
+//! This crate owns Scarlet device selection, contexts, queues, physical
+//! resources, logical-resource materialization, IR validation and lowering,
+//! transport budgeting, synchronization, and command submission. Applications
+//! can use mapped-target sessions so none of that execution policy leaks into
+//! platform or renderer code.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
@@ -19,6 +21,22 @@ use scarlet_os::ipc::SharedMemory;
 pub use std::handle::{Handle, HandleError, HandleResult};
 #[cfg(not(feature = "std"))]
 use std::ipc::SharedMemory;
+
+/// Stable backend identifier advertised by Scarlet's VirtIO GPU transport.
+pub const BACKEND_ID: &[u8] = b"virtio-gpu";
+
+/// Return whether a Scarlet GPU backend identifier selects VirGL execution.
+///
+/// # Arguments
+///
+/// * `backend_id` - Exact backend identifier reported by the GPU service.
+///
+/// # Returns
+///
+/// `true` only for Scarlet's stable VirtIO GPU backend identifier.
+pub fn matches_backend_id(backend_id: &[u8]) -> bool {
+    backend_id == BACKEND_ID
+}
 
 /// Backend-neutral logical graphics intermediate representation.
 ///
@@ -116,14 +134,14 @@ impl Device {
     /// A context that owns render targets, pipelines, and queues.
     pub fn create_context(&self) -> HandleResult<Context> {
         Ok(Context {
-            backend: self.backend.create_context()?,
+            backend: Rc::new(self.backend.create_context()?),
         })
     }
 }
 
 /// Rendering context that owns application graphics objects.
 pub struct Context {
-    backend: driver::Context,
+    backend: Rc<driver::Context>,
 }
 
 impl Context {
@@ -146,6 +164,58 @@ impl Context {
         resources: Rc<ir::ResourceTable>,
     ) -> Result<IrResources, IrSubmitError> {
         IrResources::new(resources, &self.backend)
+    }
+
+    /// Create and map all physical images for logical presentation targets.
+    ///
+    /// # Arguments
+    ///
+    /// * `resources` - Logical resource table retained by the session.
+    /// * `targets` - `PRESENT` texture identities to materialize and map.
+    ///
+    /// # Returns
+    ///
+    /// A session owning its context, queue, resource cache, and images, or a
+    /// logical-resource, allocation, mapping, or device error.
+    pub fn create_mapped_target_session(
+        &self,
+        resources: Rc<ir::ResourceTable>,
+        targets: &[ir::TextureId],
+    ) -> Result<MappedTargetSession, IrSubmitError> {
+        let mut cache = self.create_ir_resources(Rc::clone(&resources))?;
+        let queue = self.create_queue()?;
+        let mut images = Vec::new();
+        images
+            .try_reserve_exact(targets.len())
+            .map_err(|_| IrSubmitError::OutOfMemory)?;
+        for &target in targets {
+            if images.iter().any(|(candidate, _)| *candidate == target) {
+                return Err(IrSubmitError::TextureAlreadyMapped);
+            }
+            let reference = resources.texture_ref(target)?;
+            let descriptor = resources.texture(reference)?;
+            let required = ir::TextureUsage::RENDER_ATTACHMENT | ir::TextureUsage::PRESENT;
+            if !descriptor.usage().contains(required) {
+                return Err(IrSubmitError::Unsupported(
+                    UnsupportedIrFeature::TargetUsage,
+                ));
+            }
+            let image =
+                Rc::new(self.create_shared_image(
+                    descriptor.extent().width(),
+                    descriptor.extent().height(),
+                )?);
+            cache.map_image(target, Rc::clone(&image))?;
+            images.push((target, image));
+        }
+        Ok(MappedTargetSession {
+            context: Context {
+                backend: Rc::clone(&self.backend),
+            },
+            queue,
+            resources: cache,
+            images,
+        })
     }
 
     /// Create a presentation-capable render-target image.
@@ -376,12 +446,73 @@ impl Context {
     }
 }
 
+/// Scarlet execution session owning mapped presentation targets and backend state.
+pub struct MappedTargetSession {
+    // Drop mapped image owners and the cache's retained owners before the
+    // queue and context handles they depend on.
+    images: Vec<(ir::TextureId, Rc<Image>)>,
+    resources: IrResources,
+    queue: Queue,
+    context: Context,
+}
+
+impl MappedTargetSession {
+    /// Borrow the physical image mapped to a logical target.
+    ///
+    /// # Arguments
+    ///
+    /// * `target` - Logical presentation texture identity.
+    ///
+    /// # Returns
+    ///
+    /// The mapped image or [`IrSubmitError::ImageNotMapped`].
+    pub fn image(&self, target: ir::TextureId) -> Result<&Image, IrSubmitError> {
+        self.images
+            .iter()
+            .find(|(candidate, _)| *candidate == target)
+            .map(|(_, image)| image.as_ref())
+            .ok_or(IrSubmitError::ImageNotMapped)
+    }
+
+    /// Bind all session state for portable command execution.
+    ///
+    /// # Returns
+    ///
+    /// A backend-owned SGFX command executor.
+    pub fn executor(&mut self) -> Executor<'_> {
+        self.queue.executor(&self.context, &mut self.resources)
+    }
+}
+
 /// Queue that submits complete application render passes.
 pub struct Queue {
     backend: driver::Queue,
 }
 
 impl Queue {
+    /// Bind this queue to its context and persistent IR resource cache.
+    ///
+    /// # Arguments
+    ///
+    /// * `context` - Context that created this queue and resource cache.
+    /// * `resources` - Persistent IR resources used by submitted commands.
+    ///
+    /// # Returns
+    ///
+    /// A Scarlet/VirGL executor implementing
+    /// [`sgfx_core::backend::CommandExecutor`].
+    pub fn executor<'a>(
+        &'a self,
+        context: &'a Context,
+        resources: &'a mut IrResources,
+    ) -> Executor<'a> {
+        Executor {
+            queue: self,
+            context,
+            resources,
+        }
+    }
+
     /// Submit a render pass and wait for its rendering work to complete.
     ///
     /// # Arguments
@@ -420,6 +551,24 @@ impl Queue {
             composition.clear_color,
             &composition.operations,
         )
+    }
+}
+
+/// Scarlet/VirGL command executor bound to all backend submission state.
+pub struct Executor<'a> {
+    queue: &'a Queue,
+    context: &'a Context,
+    resources: &'a mut IrResources,
+}
+
+impl sgfx_core::backend::CommandExecutor for Executor<'_> {
+    type Error = IrSubmitError;
+
+    fn execute<'r, 'data>(
+        &mut self,
+        commands: &ir::CommandBuffer<'r, 'data>,
+    ) -> Result<(), Self::Error> {
+        self.queue.submit_ir(self.context, self.resources, commands)
     }
 }
 
