@@ -1,4 +1,4 @@
-//! Platform-neutral VirGL command lowering for SGFX.
+//! Platform-neutral VirGL command code generation for SGFX.
 //!
 //! This crate owns shared VirGL dialect encoding only. Its helpers return
 //! command bytes; it never opens devices, allocates operating-system resources,

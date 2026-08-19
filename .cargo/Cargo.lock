@@ -1920,7 +1920,7 @@ dependencies = [
  "gpu-raw",
  "scarlet-os",
  "scarlet-std",
- "sgfx-virgl-codegen",
+ "sgfx-codegen-virgl",
  "sgfx-core",
 ]
 
@@ -2158,7 +2158,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "sgfx-virgl-codegen"
+name = "sgfx-codegen-virgl"
 version = "0.16.0"
 dependencies = [
  "sgfx-core",

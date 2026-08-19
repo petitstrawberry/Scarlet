@@ -119,20 +119,20 @@ dependencies = [
  "gpu-raw",
  "scarlet-os",
  "scarlet-std",
+ "sgfx-codegen-virgl",
  "sgfx-core",
- "sgfx-virgl-codegen",
+]
+
+[[package]]
+name = "sgfx-codegen-virgl"
+version = "0.16.0"
+dependencies = [
+ "sgfx-core",
 ]
 
 [[package]]
 name = "sgfx-core"
 version = "0.16.0"
-
-[[package]]
-name = "sgfx-virgl-codegen"
-version = "0.16.0"
-dependencies = [
- "sgfx-core",
-]
 
 [[package]]
 name = "spin"

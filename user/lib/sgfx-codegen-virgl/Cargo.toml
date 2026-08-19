@@ -1,5 +1,5 @@
 [package]
-name = "sgfx-virgl-codegen"
+name = "sgfx-codegen-virgl"
 version = "0.16.0"
 edition = "2024"
 
@@ -7,5 +7,5 @@ edition = "2024"
 sgfx-core = { path = "../sgfx", default-features = false }
 
 [lib]
-name = "sgfx_virgl_codegen"
+name = "sgfx_codegen_virgl"
 path = "src/lib.rs"

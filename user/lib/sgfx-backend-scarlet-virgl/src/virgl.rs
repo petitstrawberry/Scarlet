@@ -1445,7 +1445,7 @@ impl Queue {
 
         let needs_setup = !pipeline.initialized.get();
         let mut commands = if needs_setup {
-            sgfx_virgl_codegen::build_vertex_color_setup(
+            sgfx_codegen_virgl::build_vertex_color_setup(
                 pipeline.target_resource_id,
                 pipeline.vertex_resource_id,
                 core::mem::size_of::<VertexClip4Color3>() as u32,

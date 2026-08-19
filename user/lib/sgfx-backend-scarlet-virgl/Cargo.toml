@@ -13,7 +13,7 @@ scarlet-os = { path = "../scarlet-os", default-features = false, features = ["st
 scarlet-std = { path = "../std", optional = true }
 gpu-raw = { path = "../gpu-raw", default-features = false }
 sgfx-core = { path = "../sgfx", default-features = false }
-sgfx-virgl-codegen = { path = "../sgfx-virgl-codegen" }
+sgfx-codegen-virgl = { path = "../sgfx-codegen-virgl" }
 
 [lib]
 name = "sgfx_backend_scarlet_virgl"
