@@ -68,7 +68,13 @@ use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering, fence};
 const COMMAND_RING_TRBS: usize = 256;
 const EVENT_RING_TRBS: usize = 256;
 const COMMAND_COMPLETION_SUCCESS: u8 = 1;
+const TRANSFER_EVENT_DATA_BUFFER_ERROR: u8 = 2;
+const TRANSFER_EVENT_BABBLE_DETECTED_ERROR: u8 = 3;
+const TRANSFER_EVENT_USB_TRANSACTION_ERROR: u8 = 4;
+const TRANSFER_EVENT_TRB_ERROR: u8 = 5;
+const TRANSFER_EVENT_STALL_ERROR: u8 = 6;
 const TRANSFER_EVENT_SHORT_PACKET: u8 = 13;
+const EP0_RECOVERY_FAILED: &str = "xHCI EP0 recovery failed";
 const USBSTS_EVENT_INTERRUPT: u32 = 1 << 3;
 const USBSTS_HOST_SYSTEM_ERROR: u32 = 1 << 2;
 const USBSTS_PORT_CHANGE_DETECT: u32 = 1 << 4;
@@ -627,6 +633,9 @@ struct SlotRuntime {
     device_context: ContiguousPages,
     ep0_input_context: ContiguousPages,
     ep0_ring: DmaTrbRing,
+    ep0_usable: AtomicBool,
+    ep0_mps_negotiated: AtomicBool,
+    ep0_max_packet_size: AtomicUsize,
     interrupt_input_context: Option<ContiguousPages>,
     interrupt_ring: Option<DmaTrbRing>,
     interrupt_buffer: Option<ContiguousPages>,
@@ -678,6 +687,7 @@ pub struct XhciController {
     dcbaa: IrqSpinLock<Option<ContiguousPages>>,
     scratchpads: IrqSpinLock<Option<ScratchpadBuffers>>,
     cmd_ring: IrqSpinLock<Option<DmaTrbRing>>,
+    command_in_flight: AtomicBool,
     event_ring: IrqSpinLock<Option<EventRing>>,
     pending_events: IrqSpinLock<Vec<Trb>>,
     devices: IrqSpinLock<Vec<UsbDevice>>,
@@ -717,6 +727,23 @@ enum TransferTdEventDisposition {
     Failed,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FailedTransferEndpointState {
+    Halted,
+    Unknown,
+}
+
+fn failed_transfer_endpoint_state(completion_code: u8) -> FailedTransferEndpointState {
+    match completion_code {
+        TRANSFER_EVENT_DATA_BUFFER_ERROR
+        | TRANSFER_EVENT_BABBLE_DETECTED_ERROR
+        | TRANSFER_EVENT_USB_TRANSACTION_ERROR
+        | TRANSFER_EVENT_TRB_ERROR
+        | TRANSFER_EVENT_STALL_ERROR => FailedTransferEndpointState::Halted,
+        _ => FailedTransferEndpointState::Unknown,
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 struct TransferTdCompletion {
     event: Trb,
@@ -733,6 +760,15 @@ impl TransferTdCompletion {
 
 fn transfer_event_trb_dma(event: Trb) -> usize {
     event.trb_pointer() as usize & !(size_of::<Trb>() - 1)
+}
+
+fn command_completion_matches(event: Trb, command_trb_dma: usize) -> bool {
+    event.trb_type() == TrbType::CommandCompletionEvent as u8
+        && transfer_event_trb_dma(event) == command_trb_dma
+}
+
+fn transfer_ring_dequeue_pointer(dma_addr: usize, producer_index: usize, cycle: bool) -> u64 {
+    (dma_addr + producer_index * size_of::<Trb>()) as u64 | u64::from(cycle)
 }
 
 fn transfer_event_points_into_td(
@@ -861,6 +897,7 @@ impl XhciController {
             dcbaa: IrqSpinLock::new(None),
             scratchpads: IrqSpinLock::new(None),
             cmd_ring: IrqSpinLock::new(None),
+            command_in_flight: AtomicBool::new(false),
             event_ring: IrqSpinLock::new(None),
             pending_events: IrqSpinLock::new(Vec::new()),
             devices: IrqSpinLock::new(Vec::new()),
@@ -1460,8 +1497,8 @@ impl XhciController {
         Some(pending.remove(index))
     }
 
-    fn take_pending_command_completion(&self) -> Option<Trb> {
-        self.take_pending_event(|event| event.trb_type() == TrbType::CommandCompletionEvent as u8)
+    fn take_pending_command_completion(&self, command_trb_dma: usize) -> Option<Trb> {
+        self.take_pending_event(|event| command_completion_matches(*event, command_trb_dma))
     }
 
     fn take_pending_transfer_event_for_td(
@@ -1718,7 +1755,7 @@ impl XhciController {
             "[xHCI] CDC-NCM packet filter: slot={} interface={} filter={:#x}",
             slot_id, control_interface, filter
         );
-        let (td_start_dma, td_completion_dma) = {
+        let (td_start_dma, td_completion_dma, recovery_dequeue_pointer) = {
             let slots = self.slot_runtime.lock();
             let slot = slots
                 .iter()
@@ -1739,18 +1776,35 @@ impl XhciController {
             (
                 ring_dma + setup_trb_index * size_of::<Trb>(),
                 ring_dma + status_trb_index * size_of::<Trb>(),
+                transfer_ring_dequeue_pointer(
+                    ring_dma,
+                    slot.ep0_ring.current_producer_index(),
+                    slot.ep0_ring.cycle_state(),
+                ),
             )
         };
 
         self.ring_endpoint_doorbell(slot_id, EP0_DCI);
         let deadline = crate::time::current_time() + XHCI_TRANSFER_TIMEOUT_US;
-        self.wait_for_transfer_event_until(
+        let completion = self.wait_for_transfer_event_until(
             slot_id,
             EP0_DCI,
             td_start_dma,
             td_completion_dma,
+            recovery_dequeue_pointer,
             deadline,
-        )?;
+        );
+        if matches!(completion, Err(EP0_RECOVERY_FAILED)) {
+            if let Some(slot) = self
+                .slot_runtime
+                .lock()
+                .iter()
+                .find(|slot| slot.usb_device.slot_id() == slot_id)
+            {
+                slot.ep0_usable.store(false, Ordering::Release);
+            }
+        }
+        completion?;
         Ok(())
     }
 
@@ -1827,6 +1881,19 @@ impl XhciController {
     }
 
     fn send_command(&self, trb: Trb) -> Result<Trb, &'static str> {
+        while self
+            .command_in_flight
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            core::hint::spin_loop();
+        }
+        let result = self.send_command_serialized(trb);
+        self.command_in_flight.store(false, Ordering::Release);
+        result
+    }
+
+    fn send_command_serialized(&self, trb: Trb) -> Result<Trb, &'static str> {
         if XHCI_VERBOSE_TRACE {
             println!(
                 "[xHCI] Sending command type={} slot={} param={:#x} control={:#x}",
@@ -1836,13 +1903,14 @@ impl XhciController {
                 trb.control
             );
         }
-        {
+        let command_trb_dma = {
             let cmd_ring_guard = self.cmd_ring.lock();
             let cmd_ring = cmd_ring_guard
                 .as_ref()
                 .ok_or("Command ring not initialized")?;
-            cmd_ring.enqueue(trb)?;
-        }
+            let index = cmd_ring.enqueue(trb)?;
+            cmd_ring.dma_address() + index * size_of::<Trb>()
+        };
 
         if XHCI_VERBOSE_TRACE {
             println!(
@@ -1861,13 +1929,13 @@ impl XhciController {
                 self.operational.read_crcr()
             );
         }
-        self.poll_command_completion()
+        self.poll_command_completion(command_trb_dma)
     }
 
-    fn poll_command_completion(&self) -> Result<Trb, &'static str> {
+    fn poll_command_completion(&self, command_trb_dma: usize) -> Result<Trb, &'static str> {
         let deadline = crate::time::current_time() + XHCI_COMMAND_TIMEOUT_US;
         while crate::time::current_time() < deadline {
-            if let Some(event) = self.take_pending_command_completion() {
+            if let Some(event) = self.take_pending_command_completion(command_trb_dma) {
                 if event.completion_code() == COMMAND_COMPLETION_SUCCESS {
                     if XHCI_VERBOSE_TRACE {
                         Self::log_event("Command completion event", event);
@@ -1885,7 +1953,7 @@ impl XhciController {
             let event = event_ring.dequeue();
             self.write_event_ring_dequeue_pointer(event_ring);
             if let Some(event) = event {
-                if event.trb_type() == TrbType::CommandCompletionEvent as u8 {
+                if command_completion_matches(event, command_trb_dma) {
                     if event.completion_code() == COMMAND_COMPLETION_SUCCESS {
                         if XHCI_VERBOSE_TRACE {
                             Self::log_event("Command completion event", event);
@@ -1894,6 +1962,8 @@ impl XhciController {
                     }
                     Self::log_event("Command completion event", event);
                     return Err("xHCI command completion failed");
+                } else if event.trb_type() == TrbType::CommandCompletionEvent as u8 {
+                    self.queue_pending_event(event);
                 } else {
                     if XHCI_VERBOSE_TRACE {
                         Self::log_event("Event while waiting command", event);
@@ -2123,6 +2193,13 @@ impl XhciController {
             device_context,
             ep0_input_context: input_pages,
             ep0_ring,
+            ep0_usable: AtomicBool::new(true),
+            ep0_mps_negotiated: AtomicBool::new(false),
+            ep0_max_packet_size: AtomicUsize::new(match speed {
+                UsbSpeed::Low | UsbSpeed::Full => 8,
+                UsbSpeed::High => 64,
+                UsbSpeed::Super | UsbSpeed::SuperPlus => 512,
+            }),
             interrupt_input_context: None,
             interrupt_ring: None,
             interrupt_buffer: None,
@@ -2147,6 +2224,100 @@ impl XhciController {
         }
     }
 
+    fn recover_timed_out_endpoint(
+        &self,
+        slot_id: u8,
+        endpoint_id: u8,
+        dequeue_pointer: u64,
+    ) -> Result<(), &'static str> {
+        self.send_command(Trb::stop_endpoint_command(slot_id, endpoint_id, false))?;
+        self.drain_pending_transfer_events(slot_id, endpoint_id);
+        self.send_command(Trb::set_tr_dequeue_pointer_command(
+            dequeue_pointer,
+            slot_id,
+            endpoint_id,
+        ))?;
+        println!(
+            "[xHCI] Recovered timed-out endpoint: slot={} dci={} dequeue={:#x}",
+            slot_id, endpoint_id, dequeue_pointer
+        );
+        Ok(())
+    }
+
+    fn recover_failed_ep0(
+        &self,
+        slot_id: u8,
+        completion_code: u8,
+        dequeue_pointer: u64,
+    ) -> Result<(), &'static str> {
+        let endpoint_state = failed_transfer_endpoint_state(completion_code);
+        println!(
+            "[xHCI] Recovering failed EP0: slot={} completion_code={} state={:?} dequeue={:#x}",
+            slot_id, completion_code, endpoint_state, dequeue_pointer
+        );
+        // A matching failed Transfer Event is terminal for the TD, so its DMA
+        // mapping may be released.  Reset Endpoint (TSP=0) is still required
+        // before advancing the dequeue pointer because the failure may have
+        // halted EP0; unknown failures are treated conservatively the same way.
+        self.send_command(Trb::reset_endpoint_command(slot_id, EP0_DCI, false))?;
+        self.drain_pending_transfer_events(slot_id, EP0_DCI);
+        self.send_command(Trb::set_tr_dequeue_pointer_command(
+            dequeue_pointer,
+            slot_id,
+            EP0_DCI,
+        ))?;
+        println!(
+            "[xHCI] Recovered failed EP0: slot={} completion_code={} dequeue={:#x}",
+            slot_id, completion_code, dequeue_pointer
+        );
+        Ok(())
+    }
+
+    fn update_ep0_max_packet_size(
+        &self,
+        slot: &SlotRuntime,
+        max_packet_size: u16,
+    ) -> Result<(), &'static str> {
+        let input_dma_mapping = self.dma_map_owned_pages(
+            &slot.ep0_input_context,
+            IommuMapFlags::READ | IommuMapFlags::COHERENT,
+        )?;
+        unsafe {
+            core::ptr::write_bytes(
+                slot.ep0_input_context.as_vaddr() as *mut u8,
+                0,
+                slot.ep0_input_context.len() * crate::environment::PAGE_SIZE,
+            );
+            let input =
+                InputContextBuffer::new(slot.ep0_input_context.as_vaddr(), self.context_size);
+            // Evaluate Context for EP0 changes only uses Add Context flag A1.
+            (*input.control_mut()).add_endpoint(EP0_DCI);
+
+            sync_pages_after_device_write(&slot.device_context);
+            let device =
+                DeviceContextBuffer::new(slot.device_context.as_vaddr(), self.context_size);
+            let mut endpoint0 = read_volatile(device.endpoint(EP0_DCI)?);
+            endpoint0.set_max_packet_size(max_packet_size);
+            write_volatile(input.endpoint_mut(EP0_DCI)?, endpoint0);
+        }
+        sync_pages_for_device(&slot.ep0_input_context);
+        let event = self.send_command(Trb::evaluate_context_command(
+            input_dma_mapping.dma_addr(),
+            slot.usb_device.slot_id(),
+        ))?;
+        if event.slot_id() != slot.usb_device.slot_id() {
+            return Err("Evaluate Context completion slot mismatch");
+        }
+        slot.ep0_max_packet_size
+            .store(max_packet_size as usize, Ordering::Release);
+        println!(
+            "[xHCI] Updated EP0 max packet size: slot={} max_packet={}",
+            slot.usb_device.slot_id(),
+            max_packet_size
+        );
+        Ok(())
+    }
+
     fn transfer_successful(event: Trb) -> bool {
         matches!(
             event.completion_code(),
@@ -2164,6 +2335,9 @@ impl XhciController {
         mut data: Option<&mut ContiguousPages>,
         length: u16,
     ) -> Result<usize, &'static str> {
+        if !slot.ep0_usable.load(Ordering::Acquire) {
+            return Err(EP0_RECOVERY_FAILED);
+        }
         println!(
             "[xHCI] EP0 control transfer: slot={} req_type={:#x} req={:#x} value={:#x} index={:#x} length={} data={}",
             slot.usb_device.slot_id(),
@@ -2222,6 +2396,11 @@ impl XhciController {
         let ring_dma = slot.ep0_ring.dma_address();
         let td_start_dma = ring_dma + setup_trb_index * size_of::<Trb>();
         let td_completion_dma = ring_dma + status_trb_index * size_of::<Trb>();
+        let recovery_dequeue_pointer = transfer_ring_dequeue_pointer(
+            ring_dma,
+            slot.ep0_ring.current_producer_index(),
+            slot.ep0_ring.cycle_state(),
+        );
         self.ring_endpoint_doorbell(slot.usb_device.slot_id(), EP0_DCI);
         let deadline = crate::time::current_time() + XHCI_TRANSFER_TIMEOUT_US;
         let completion = self.wait_for_transfer_event_until(
@@ -2229,14 +2408,51 @@ impl XhciController {
             EP0_DCI,
             td_start_dma,
             td_completion_dma,
+            recovery_dequeue_pointer,
             deadline,
         );
+        let completion = match completion {
+            Ok(completion) => completion,
+            Err(error) if error == "Timeout waiting for transfer event" => {
+                println!(
+                    "[xHCI] EP0 transfer failed; stopping endpoint before releasing DMA: slot={} error={}",
+                    slot.usb_device.slot_id(),
+                    error
+                );
+                if let Err(recovery_error) = self.recover_timed_out_endpoint(
+                    slot.usb_device.slot_id(),
+                    EP0_DCI,
+                    recovery_dequeue_pointer,
+                ) {
+                    panic!(
+                        "xHCI: cannot safely release timed-out EP0 DMA buffer: {}",
+                        recovery_error
+                    );
+                }
+                if direction_in {
+                    if let Some(buffer) = data.as_mut() {
+                        sync_pages_after_device_write(buffer);
+                    }
+                }
+                return Err(error);
+            }
+            Err(error) => {
+                if error == EP0_RECOVERY_FAILED {
+                    slot.ep0_usable.store(false, Ordering::Release);
+                }
+                if direction_in {
+                    if let Some(buffer) = data.as_mut() {
+                        sync_pages_after_device_write(buffer);
+                    }
+                }
+                return Err(error);
+            }
+        };
         if direction_in {
             if let Some(buffer) = data.as_mut() {
                 sync_pages_after_device_write(buffer);
             }
         }
-        let completion = completion?;
         Ok(usize::from(length).saturating_sub(completion.remaining_length()))
     }
 
@@ -2246,6 +2462,7 @@ impl XhciController {
         endpoint_id: u8,
         td_start_dma: usize,
         td_completion_dma: usize,
+        recovery_dequeue_pointer: u64,
         deadline: u64,
     ) -> Result<TransferTdCompletion, &'static str> {
         if crate::time::current_time() >= deadline {
@@ -2331,6 +2548,21 @@ impl XhciController {
                 }
                 TransferTdEventDisposition::Failed => {
                     Self::log_event("Transfer TD failed", event);
+                    if endpoint_id == EP0_DCI {
+                        if let Err(recovery_error) = self.recover_failed_ep0(
+                            slot_id,
+                            event.completion_code(),
+                            recovery_dequeue_pointer,
+                        ) {
+                            println!(
+                                "[xHCI] EP0 recovery failed: slot={} completion_code={} error={}",
+                                slot_id,
+                                event.completion_code(),
+                                recovery_error
+                            );
+                            return Err(EP0_RECOVERY_FAILED);
+                        }
+                    }
                     return Err("xHCI transfer event failed");
                 }
                 TransferTdEventDisposition::Unrelated => {
@@ -2385,7 +2617,13 @@ impl XhciController {
                 }
             }
         }
-        self.log_bulk_endpoint_timeout_state(slot_id, endpoint_id);
+        // EP0 waits hold `slot_runtime` so the control transfer's TRB/DMA
+        // storage cannot be changed while it is in flight.  The bulk endpoint
+        // diagnostic below also locks `slot_runtime`; calling it here for EP0
+        // would therefore recursively acquire the same IrqSpinLock on timeout.
+        if endpoint_id != EP0_DCI {
+            self.log_bulk_endpoint_timeout_state(slot_id, endpoint_id);
+        }
     }
 
     fn log_bulk_endpoint_timeout_state(&self, slot_id: u8, endpoint_id: u8) {
@@ -3448,19 +3686,51 @@ impl XhciController {
     }
 
     fn configure_known_classes(&self, slot_id: u8) {
+        let ep0_usable = self
+            .slot_runtime
+            .lock()
+            .iter()
+            .find(|slot| slot.usb_device.slot_id() == slot_id)
+            .map(|slot| slot.ep0_usable.load(Ordering::Acquire))
+            .unwrap_or(false);
+        if !ep0_usable {
+            println!(
+                "[xHCI] Slot {} class probing skipped because EP0 is unusable",
+                slot_id
+            );
+            return;
+        }
         match self.configure_boot_hid_slot(slot_id) {
             Ok(true) => {
                 println!("[xHCI] Slot {} boot HID configured", slot_id);
                 return;
             }
             Ok(false) => println!("[xHCI] Slot {} is not a boot HID device", slot_id),
-            Err(error) => println!("[xHCI] Slot {} HID setup failed: {}", slot_id, error),
+            Err(error) => {
+                println!("[xHCI] Slot {} HID setup failed: {}", slot_id, error);
+                if error == EP0_RECOVERY_FAILED {
+                    println!(
+                        "[xHCI] Slot {} class probing stopped because EP0 recovery failed",
+                        slot_id
+                    );
+                    return;
+                }
+            }
         }
 
         match self.configure_hub_slot(slot_id) {
             Ok(true) => println!("[xHCI] Slot {} hub configured", slot_id),
             Ok(false) => {}
-            Err(error) => println!("[xHCI] Slot {} hub setup failed: {}", slot_id, error),
+            Err(error) => {
+                println!("[xHCI] Slot {} hub setup failed: {}", slot_id, error);
+                if error == EP0_RECOVERY_FAILED {
+                    println!(
+                        "[xHCI] Slot {} class probing stopped because EP0 recovery failed",
+                        slot_id
+                    );
+                    return;
+                }
+            }
         }
 
         match self.configure_cdc_ncm_slot(slot_id) {
@@ -3957,6 +4227,63 @@ impl XhciController {
                 crate::environment::PAGE_SIZE,
             )
         };
+        if matches!(slot.usb_device.speed(), UsbSpeed::Low | UsbSpeed::Full)
+            && !slot.ep0_mps_negotiated.load(Ordering::Acquire)
+        {
+            // Full-speed devices may use 8, 16, 32, or 64-byte EP0 packets.
+            // Request only the descriptor prefix while the Address Device
+            // context still carries the safe 8-byte default, then update A1
+            // with Evaluate Context before requesting all 18 bytes.
+            self.control_transfer(
+                slot,
+                0x80,
+                USB_REQ_GET_DESCRIPTOR,
+                (USB_DT_DEVICE as u16) << 8,
+                0,
+                Some(&mut buffer),
+                8,
+            )?;
+            let descriptor_length = unsafe { read_volatile(buffer.as_vaddr() as *const u8) };
+            let descriptor_type = unsafe { read_volatile((buffer.as_vaddr() + 1) as *const u8) };
+            let reported_max_packet =
+                unsafe { read_volatile((buffer.as_vaddr() + 7) as *const u8) };
+            let valid_descriptor = descriptor_length as usize == DeviceDescriptor::encoded_size()
+                && descriptor_type == USB_DT_DEVICE;
+            let valid_max_packet = valid_descriptor
+                && match slot.usb_device.speed() {
+                    UsbSpeed::Low => reported_max_packet == 8,
+                    UsbSpeed::Full => matches!(reported_max_packet, 8 | 16 | 32 | 64),
+                    _ => true,
+                };
+            if !valid_max_packet {
+                println!(
+                    "[xHCI] Invalid initial device descriptor: slot={} speed={:?} length={} type={} max_packet={}",
+                    slot.usb_device.slot_id(),
+                    slot.usb_device.speed(),
+                    descriptor_length,
+                    descriptor_type,
+                    reported_max_packet
+                );
+                slot.ep0_usable.store(false, Ordering::Release);
+                return Err(EP0_RECOVERY_FAILED);
+            }
+            if usize::from(reported_max_packet) != slot.ep0_max_packet_size.load(Ordering::Acquire)
+            {
+                if let Err(error) =
+                    self.update_ep0_max_packet_size(slot, u16::from(reported_max_packet))
+                {
+                    println!(
+                        "[xHCI] EP0 max packet Evaluate Context failed: slot={} error={}",
+                        slot.usb_device.slot_id(),
+                        error
+                    );
+                    slot.ep0_usable.store(false, Ordering::Release);
+                    return Err(EP0_RECOVERY_FAILED);
+                }
+            }
+            slot.ep0_mps_negotiated.store(true, Ordering::Release);
+        }
+
         self.control_transfer(
             slot,
             0x80,
@@ -4584,6 +4911,7 @@ impl XhciController {
         let direction_in;
         let dma_mapping;
         let trb_dma;
+        let recovery_dequeue_pointer;
         {
             let slots = self.slot_runtime.lock();
             let slot = slots
@@ -4641,6 +4969,11 @@ impl XhciController {
             };
             let trb_index = ring.enqueue(trb)?;
             trb_dma = ring.dma_address() + trb_index * size_of::<Trb>();
+            recovery_dequeue_pointer = transfer_ring_dequeue_pointer(
+                ring.dma_address(),
+                ring.current_producer_index(),
+                ring.cycle_state(),
+            );
             if XHCI_VERBOSE_TRACE {
                 println!(
                     "[xHCI] Bulk submit: slot={} ep_addr={:#x} dci={} dir={} len={} buffer_dma={:#x} ring_dma={:#x} trb_index={}",
@@ -4657,17 +4990,41 @@ impl XhciController {
         }
 
         self.ring_endpoint_doorbell(slot_id, dci);
-        let completion =
-            match self.wait_for_transfer_event_until(slot_id, dci, trb_dma, trb_dma, deadline) {
-                Ok(completion) => completion,
-                Err(error) => {
-                    if direction_in {
-                        sync_pages_after_device_write(buffer);
-                        Self::log_buffer_prefix("Bulk IN timeout buffer", buffer, length);
-                    }
-                    return Err(error);
+        let completion = match self.wait_for_transfer_event_until(
+            slot_id,
+            dci,
+            trb_dma,
+            trb_dma,
+            recovery_dequeue_pointer,
+            deadline,
+        ) {
+            Ok(completion) => completion,
+            Err(error) if error == "Timeout waiting for transfer event" => {
+                println!(
+                    "[xHCI] Bulk transfer timed out; stopping endpoint before releasing DMA: slot={} dci={}",
+                    slot_id, dci
+                );
+                if let Err(recovery_error) =
+                    self.recover_timed_out_endpoint(slot_id, dci, recovery_dequeue_pointer)
+                {
+                    panic!(
+                        "xHCI: cannot safely release timed-out bulk DMA buffer: {}",
+                        recovery_error
+                    );
                 }
-            };
+                if direction_in {
+                    sync_pages_after_device_write(buffer);
+                    Self::log_buffer_prefix("Bulk IN timeout buffer", buffer, length);
+                }
+                return Err(error);
+            }
+            Err(error) => {
+                if direction_in {
+                    sync_pages_after_device_write(buffer);
+                }
+                return Err(error);
+            }
+        };
         if direction_in {
             sync_pages_after_device_write(buffer);
         }
@@ -6449,6 +6806,14 @@ mod tests {
         }
     }
 
+    fn command_completion_for_test(command_trb_dma: usize) -> Trb {
+        Trb {
+            parameter: command_trb_dma as u64,
+            status: u32::from(COMMAND_COMPLETION_SUCCESS) << 24,
+            control: (TrbType::CommandCompletionEvent as u32) << 10,
+        }
+    }
+
     #[test_case]
     fn cdc_ncm_mac_prefers_descriptor_string_without_calling_fallback() {
         let descriptor_mac = MacAddress::new([0x02, 0x11, 0x22, 0x33, 0x44, 0x55]);
@@ -6515,6 +6880,43 @@ mod tests {
             classify_transfer_td_event(stale_status_event, 3, EP0_DCI, 0x1000, 0x1020),
             TransferTdEventDisposition::Unrelated
         );
+    }
+
+    #[test_case]
+    fn timed_out_endpoint_recovery_skips_to_the_producer_cycle() {
+        assert_eq!(transfer_ring_dequeue_pointer(0x8000, 3, true), 0x8031);
+        assert_eq!(transfer_ring_dequeue_pointer(0x8000, 4, false), 0x8040);
+    }
+
+    #[test_case]
+    fn failed_transfer_endpoint_state_classifies_halting_and_unknown_codes() {
+        assert_eq!(
+            failed_transfer_endpoint_state(TRANSFER_EVENT_BABBLE_DETECTED_ERROR),
+            FailedTransferEndpointState::Halted
+        );
+        assert_eq!(
+            failed_transfer_endpoint_state(TRANSFER_EVENT_USB_TRANSACTION_ERROR),
+            FailedTransferEndpointState::Halted
+        );
+        assert_eq!(
+            failed_transfer_endpoint_state(TRANSFER_EVENT_STALL_ERROR),
+            FailedTransferEndpointState::Halted
+        );
+        assert_eq!(
+            failed_transfer_endpoint_state(0xff),
+            FailedTransferEndpointState::Unknown
+        );
+    }
+
+    #[test_case]
+    fn command_completion_matches_only_its_submitted_trb() {
+        let completion = command_completion_for_test(0x9030);
+        assert!(command_completion_matches(completion, 0x9030));
+        assert!(!command_completion_matches(completion, 0x9020));
+        assert!(!command_completion_matches(
+            transfer_event_for_test(1, EP0_DCI, 0x9030, COMMAND_COMPLETION_SUCCESS, 0),
+            0x9030
+        ));
     }
 
     #[test_case]

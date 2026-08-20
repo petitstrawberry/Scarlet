@@ -14,6 +14,7 @@ pub enum TrbType {
     DisableSlotCommand = 10,
     AddressDeviceCommand = 11,
     ConfigureEndpointCommand = 12,
+    EvaluateContextCommand = 13,
     ResetEndpointCommand = 14,
     StopEndpointCommand = 15,
     SetTrDequeuePointerCommand = 16,
@@ -135,6 +136,23 @@ impl Trb {
         if deconfigure {
             trb.control |= 1 << 9;
         }
+        trb.set_slot_id(slot_id);
+        trb
+    }
+
+    /// Builds an Evaluate Context command TRB.
+    ///
+    /// # Arguments
+    ///
+    /// * `input_context_ptr` - DMA address of the input context.
+    /// * `slot_id` - xHCI slot ID whose context is updated.
+    ///
+    /// # Returns
+    ///
+    /// Encoded Evaluate Context command TRB.
+    pub fn evaluate_context_command(input_context_ptr: u64, slot_id: u8) -> Self {
+        let mut trb = Self::new(TrbType::EvaluateContextCommand);
+        trb.parameter = input_context_ptr;
         trb.set_slot_id(slot_id);
         trb
     }
@@ -344,5 +362,14 @@ mod tests {
         assert_eq!(set_deq.parameter, 0x1001);
         assert_eq!(set_deq.slot_id(), 4);
         assert_eq!(set_deq.endpoint_id(), 6);
+    }
+
+    #[test_case]
+    fn test_evaluate_context_command_encoding() {
+        let evaluate = Trb::evaluate_context_command(0x4000, 7);
+
+        assert_eq!(evaluate.trb_type(), TrbType::EvaluateContextCommand as u8);
+        assert_eq!(evaluate.parameter, 0x4000);
+        assert_eq!(evaluate.slot_id(), 7);
     }
 }
