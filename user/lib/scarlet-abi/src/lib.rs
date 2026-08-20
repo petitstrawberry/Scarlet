@@ -573,7 +573,7 @@ pub const FILE_PERMISSION_WRITE: u32 = 1 << 1;
 /// Raw execute permission bit used in [`RawFileMetadata::permissions`].
 pub const FILE_PERMISSION_EXECUTE: u32 = 1 << 2;
 
-/// Scarlet-private socket control opcode for setting non-blocking mode.
+/// Scarlet-private control opcode for setting non-blocking mode.
 pub const SCTL_SOCKET_SET_NONBLOCK: u32 = 0x5353_0007;
 /// Scarlet-private socket control opcode for querying non-blocking mode.
 pub const SCTL_SOCKET_GET_NONBLOCK: u32 = 0x5353_000B;

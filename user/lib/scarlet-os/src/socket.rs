@@ -614,6 +614,54 @@ impl Socket {
     }
 }
 
+#[cfg(feature = "std")]
+fn stream_error_to_io(error: crate::handle::capability::StreamError) -> std::io::Error {
+    use crate::handle::capability::StreamError;
+    use std::io::{Error, ErrorKind};
+
+    let kind = match error {
+        StreamError::WouldBlock => ErrorKind::WouldBlock,
+        StreamError::EndOfStream => ErrorKind::UnexpectedEof,
+        StreamError::PermissionDenied => ErrorKind::PermissionDenied,
+        StreamError::InvalidParameter => ErrorKind::InvalidInput,
+        StreamError::Unsupported => ErrorKind::Unsupported,
+        StreamError::InvalidHandle | StreamError::IoError | StreamError::SystemError(_) => {
+            ErrorKind::Other
+        }
+    };
+    Error::new(kind, "Scarlet socket stream operation failed")
+}
+
+#[cfg(feature = "std")]
+impl std::io::Read for Socket {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        let stream = self.as_stream().map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "invalid Scarlet socket handle",
+            )
+        })?;
+        stream.read(buffer).map_err(stream_error_to_io)
+    }
+}
+
+#[cfg(feature = "std")]
+impl std::io::Write for Socket {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        let stream = self.as_stream().map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "invalid Scarlet socket handle",
+            )
+        })?;
+        stream.write(buffer).map_err(stream_error_to_io)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 /// Datagram operations trait for UDP and Local datagram sockets
 ///
 /// This trait provides operations for connectionless datagram sockets,

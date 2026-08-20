@@ -178,6 +178,10 @@ name = "shutdown"
 path = "src/shutdown.rs"
 
 [[bin]]
+name = "sws"
+path = "src/sws/main.rs"
+
+[[bin]]
 name = "lsm_list"
 path = "src/lsm_list.rs"
 

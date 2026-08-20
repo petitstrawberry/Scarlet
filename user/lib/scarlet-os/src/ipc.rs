@@ -5,7 +5,56 @@
 
 use crate::handle::Handle;
 use crate::handle::RawHandle;
-use scarlet_sys::{Syscall, syscall2};
+use scarlet_sys::{Syscall, syscall1, syscall2};
+
+/// Errors returned while creating a native pipe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PipeError {
+    /// The kernel rejected pipe creation.
+    SyscallFailed,
+    /// A returned endpoint could not be adopted as a valid handle.
+    InvalidHandle,
+}
+
+/// Result type for native pipe creation.
+pub type PipeResult<T> = core::result::Result<T, PipeError>;
+
+/// Create a unidirectional native pipe.
+///
+/// # Returns
+///
+/// An owning `(read_end, write_end)` handle pair, or a pipe creation error.
+pub fn pipe() -> PipeResult<(Handle, Handle)> {
+    let mut pipe_handles = [0u32; 2];
+    let result = syscall2(Syscall::Pipe, pipe_handles.as_mut_ptr() as usize, 0);
+    if result == usize::MAX {
+        return Err(PipeError::SyscallFailed);
+    }
+
+    // SAFETY: a successful `Pipe` syscall returns two newly owned endpoints;
+    // this call transfers exclusive ownership of the read endpoint.
+    let read_handle = match unsafe { Handle::from_raw(pipe_handles[0] as RawHandle) } {
+        Ok(handle) => handle,
+        Err(_) => {
+            // `from_raw` consumed the read endpoint. The write endpoint has not
+            // been adopted yet, so close it explicitly before returning.
+            let _ = syscall1(Syscall::HandleClose, pipe_handles[1] as usize);
+            return Err(PipeError::InvalidHandle);
+        }
+    };
+    // SAFETY: the write endpoint is still exclusively owned here and has not
+    // previously been adopted or closed.
+    let write_handle = match unsafe { Handle::from_raw(pipe_handles[1] as RawHandle) } {
+        Ok(handle) => handle,
+        Err(_) => {
+            // `from_raw` consumed the write endpoint; dropping `read_handle`
+            // closes the remaining endpoint exactly once.
+            return Err(PipeError::InvalidHandle);
+        }
+    };
+
+    Ok((read_handle, write_handle))
+}
 
 /// Shared memory error type
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

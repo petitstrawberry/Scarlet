@@ -73,8 +73,8 @@ to = "/system/scarlet/bin/terminal"
 
 [[layers]]
 kind = "cargo"
-source = "../../user/bin"
-package = "user-bin"
+source = "../../user/std-bin"
+package = "scarlet-std-bin"
 bin = "sws"
 to = "/system/scarlet/bin/sws"
 

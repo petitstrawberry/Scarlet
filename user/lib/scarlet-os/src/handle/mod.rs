@@ -30,7 +30,7 @@ pub mod introspection;
 use crate::ffi::str_to_cstr_bytes;
 use capability::{FileObject, MemoryMappingOps, SharedMemoryObject, SocketObject, StreamOps};
 use introspection::{KernelObjectInfo, KernelObjectType};
-use scarlet_sys::{Syscall, syscall1, syscall2, syscall3};
+use scarlet_sys::{SCTL_SOCKET_SET_NONBLOCK, Syscall, syscall1, syscall2, syscall3};
 
 /// Result type for handle operations
 pub type HandleResult<T> = Result<T, HandleError>;
@@ -283,6 +283,20 @@ impl Handle {
             arg,
         );
         HandleError::from_syscall_result(result)
+    }
+
+    /// Set non-blocking mode for a selectable handle.
+    ///
+    /// # Arguments
+    ///
+    /// * `enabled` - Whether subsequent stream operations should be non-blocking.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` when the kernel accepts the mode change, or a handle error.
+    pub fn set_nonblocking(&self, enabled: bool) -> HandleResult<()> {
+        self.control(SCTL_SOCKET_SET_NONBLOCK, usize::from(enabled))
+            .map(|_| ())
     }
 }
 
