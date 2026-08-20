@@ -20,6 +20,9 @@ pub mod hypervisor;
 /// Scarlet IPC and shared-memory APIs.
 pub mod ipc;
 
+/// Scarlet Native network configuration APIs.
+pub mod network;
+
 /// Poll/select-style readiness APIs for Scarlet handles.
 pub mod poll;
 

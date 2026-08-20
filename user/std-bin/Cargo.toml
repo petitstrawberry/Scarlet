@@ -158,6 +158,26 @@ name = "h264_probe"
 path = "src/h264_probe.rs"
 
 [[bin]]
+name = "fb_test"
+path = "src/fb_test.rs"
+
+[[bin]]
+name = "event_demo"
+path = "src/event_demo.rs"
+
+[[bin]]
+name = "ping"
+path = "src/ping.rs"
+
+[[bin]]
+name = "netcfg"
+path = "src/netcfg.rs"
+
+[[bin]]
+name = "shutdown"
+path = "src/shutdown.rs"
+
+[[bin]]
 name = "lsm_list"
 path = "src/lsm_list.rs"
 

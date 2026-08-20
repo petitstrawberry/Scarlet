@@ -30,15 +30,13 @@ to = "/system/scarlet/bin/nc"
 
 [[layers]]
 kind = "cargo"
-source = "../../user/bin"
-package = "user-bin"
+source = "../../user/std-bin"
 bin = "ping"
 to = "/system/scarlet/bin/ping"
 
 [[layers]]
 kind = "cargo"
-source = "../../user/bin"
-package = "user-bin"
+source = "../../user/std-bin"
 bin = "netcfg"
 to = "/system/scarlet/bin/netcfg"
 
@@ -56,7 +54,6 @@ to = "/system/scarlet/bin/date"
 
 [[layers]]
 kind = "cargo"
-source = "../../user/bin"
-package = "user-bin"
+source = "../../user/std-bin"
 bin = "fb_test"
 to = "/system/scarlet/bin/fb_test"
