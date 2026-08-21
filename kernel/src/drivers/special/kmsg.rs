@@ -9,7 +9,9 @@ use crate::{
     object::capability::{
         ControlOps, MemoryMappingOps,
         selectable::{ReadyInterest, ReadySet, SelectWaitOutcome, Selectable},
+        stream::StreamError,
     },
+    sync::waker::WaitResult,
     task::mytask,
 };
 
@@ -33,7 +35,14 @@ impl Selectable for KmsgDevice {
     ) -> SelectWaitOutcome {
         if interest.read && crate::log::is_empty() {
             if let Some(task) = mytask() {
-                crate::log::READER_WAKER.wait(task.get_id(), trapframe);
+                if crate::log::READER_WAKER.wait_result(task.get_id(), trapframe)
+                    == WaitResult::Interrupted
+                {
+                    // SelectWaitOutcome has no separate interrupted state;
+                    // return to userspace so the pending process-control event
+                    // can be dispatched instead of re-entering this wait.
+                    return SelectWaitOutcome::TimedOut;
+                }
             }
         }
         SelectWaitOutcome::Ready
@@ -66,7 +75,11 @@ impl CharDevice for KmsgDevice {
     fn read_byte(&self) -> Option<u8> {
         while crate::log::is_empty() {
             if let Some(task) = mytask() {
-                crate::log::READER_WAKER.wait(task.get_id(), task.get_trapframe());
+                if crate::log::READER_WAKER.wait_result(task.get_id(), task.get_trapframe())
+                    == WaitResult::Interrupted
+                {
+                    return None;
+                }
             } else {
                 return None;
             }
@@ -99,7 +112,31 @@ impl CharDevice for KmsgDevice {
         let pos = position as usize;
         while pos >= crate::log::head() {
             if let Some(task) = mytask() {
-                crate::log::READER_WAKER.wait(task.get_id(), task.get_trapframe());
+                if crate::log::READER_WAKER.wait_result(task.get_id(), task.get_trapframe())
+                    == WaitResult::Interrupted
+                {
+                    return Err("kmsg read interrupted");
+                }
+            } else {
+                return Ok(0);
+            }
+        }
+        Ok(crate::log::read_at(pos, buffer))
+    }
+
+    fn try_read_at(&self, position: u64, buffer: &mut [u8]) -> Result<usize, StreamError> {
+        if buffer.is_empty() {
+            return Ok(0);
+        }
+
+        let pos = position as usize;
+        while pos >= crate::log::head() {
+            if let Some(task) = mytask() {
+                if crate::log::READER_WAKER.wait_result(task.get_id(), task.get_trapframe())
+                    == WaitResult::Interrupted
+                {
+                    return Err(StreamError::Interrupted);
+                }
             } else {
                 return Ok(0);
             }

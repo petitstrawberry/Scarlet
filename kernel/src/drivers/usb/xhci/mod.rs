@@ -75,6 +75,7 @@ const TRANSFER_EVENT_TRB_ERROR: u8 = 5;
 const TRANSFER_EVENT_STALL_ERROR: u8 = 6;
 const TRANSFER_EVENT_SHORT_PACKET: u8 = 13;
 const EP0_RECOVERY_FAILED: &str = "xHCI EP0 recovery failed";
+const TRANSFER_ENDPOINT_RECOVERY_FAILED: &str = "xHCI transfer endpoint recovery failed";
 const USBSTS_EVENT_INTERRUPT: u32 = 1 << 3;
 const USBSTS_HOST_SYSTEM_ERROR: u32 = 1 << 2;
 const USBSTS_PORT_CHANGE_DETECT: u32 = 1 << 4;
@@ -2230,7 +2231,19 @@ impl XhciController {
         endpoint_id: u8,
         dequeue_pointer: u64,
     ) -> Result<(), &'static str> {
-        self.send_command(Trb::stop_endpoint_command(slot_id, endpoint_id, false))?;
+        if let Err(stop_error) =
+            self.send_command(Trb::stop_endpoint_command(slot_id, endpoint_id, false))
+        {
+            // Stop Endpoint is invalid once an unobserved transfer error has
+            // already moved the endpoint to Halted. Reset Endpoint is the xHCI
+            // recovery command for that state; if this also fails, the caller
+            // must retain the DMA mapping and fail closed.
+            println!(
+                "[xHCI] Stop Endpoint failed during timeout recovery; trying Reset Endpoint: slot={} dci={} error={}",
+                slot_id, endpoint_id, stop_error
+            );
+            self.send_command(Trb::reset_endpoint_command(slot_id, endpoint_id, false))?;
+        }
         self.drain_pending_transfer_events(slot_id, endpoint_id);
         self.send_command(Trb::set_tr_dequeue_pointer_command(
             dequeue_pointer,
@@ -2244,31 +2257,33 @@ impl XhciController {
         Ok(())
     }
 
-    fn recover_failed_ep0(
+    fn recover_failed_endpoint(
         &self,
         slot_id: u8,
+        endpoint_id: u8,
         completion_code: u8,
         dequeue_pointer: u64,
     ) -> Result<(), &'static str> {
         let endpoint_state = failed_transfer_endpoint_state(completion_code);
         println!(
-            "[xHCI] Recovering failed EP0: slot={} completion_code={} state={:?} dequeue={:#x}",
-            slot_id, completion_code, endpoint_state, dequeue_pointer
+            "[xHCI] Recovering failed endpoint: slot={} dci={} completion_code={} state={:?} dequeue={:#x}",
+            slot_id, endpoint_id, completion_code, endpoint_state, dequeue_pointer
         );
         // A matching failed Transfer Event is terminal for the TD, so its DMA
         // mapping may be released.  Reset Endpoint (TSP=0) is still required
-        // before advancing the dequeue pointer because the failure may have
-        // halted EP0; unknown failures are treated conservatively the same way.
-        self.send_command(Trb::reset_endpoint_command(slot_id, EP0_DCI, false))?;
-        self.drain_pending_transfer_events(slot_id, EP0_DCI);
+        // before advancing the dequeue pointer because these failures halt the
+        // xHC endpoint. Unknown EP0 failures are treated conservatively the
+        // same way by the caller.
+        self.send_command(Trb::reset_endpoint_command(slot_id, endpoint_id, false))?;
+        self.drain_pending_transfer_events(slot_id, endpoint_id);
         self.send_command(Trb::set_tr_dequeue_pointer_command(
             dequeue_pointer,
             slot_id,
-            EP0_DCI,
+            endpoint_id,
         ))?;
         println!(
-            "[xHCI] Recovered failed EP0: slot={} completion_code={} dequeue={:#x}",
-            slot_id, completion_code, dequeue_pointer
+            "[xHCI] Recovered failed endpoint: slot={} dci={} completion_code={} dequeue={:#x}",
+            slot_id, endpoint_id, completion_code, dequeue_pointer
         );
         Ok(())
     }
@@ -2548,20 +2563,28 @@ impl XhciController {
                 }
                 TransferTdEventDisposition::Failed => {
                     Self::log_event("Transfer TD failed", event);
-                    if endpoint_id == EP0_DCI {
-                        if let Err(recovery_error) = self.recover_failed_ep0(
+                    let endpoint_state = failed_transfer_endpoint_state(event.completion_code());
+                    if (endpoint_id == EP0_DCI
+                        || endpoint_state == FailedTransferEndpointState::Halted)
+                        && let Err(recovery_error) = self.recover_failed_endpoint(
                             slot_id,
+                            endpoint_id,
                             event.completion_code(),
                             recovery_dequeue_pointer,
-                        ) {
-                            println!(
-                                "[xHCI] EP0 recovery failed: slot={} completion_code={} error={}",
-                                slot_id,
-                                event.completion_code(),
-                                recovery_error
-                            );
-                            return Err(EP0_RECOVERY_FAILED);
-                        }
+                        )
+                    {
+                        println!(
+                            "[xHCI] Failed endpoint recovery: slot={} dci={} completion_code={} error={}",
+                            slot_id,
+                            endpoint_id,
+                            event.completion_code(),
+                            recovery_error
+                        );
+                        return Err(if endpoint_id == EP0_DCI {
+                            EP0_RECOVERY_FAILED
+                        } else {
+                            TRANSFER_ENDPOINT_RECOVERY_FAILED
+                        });
                     }
                     return Err("xHCI transfer event failed");
                 }
