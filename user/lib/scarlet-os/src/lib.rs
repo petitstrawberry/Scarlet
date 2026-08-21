@@ -26,6 +26,9 @@ pub mod network;
 /// Poll/select-style readiness APIs for Scarlet handles.
 pub mod poll;
 
+/// Scarlet Native process-control APIs not exposed by portable Rust `std`.
+pub mod process;
+
 /// Scarlet Native socket APIs.
 pub mod socket;
 

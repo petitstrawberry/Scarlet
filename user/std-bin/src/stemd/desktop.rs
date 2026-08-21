@@ -15,8 +15,8 @@
 //! ```
 
 use std::format;
-use std::fs::File;
-use std::fs::list_directory;
+use std::fs::{self, File};
+use std::io::Read;
 use std::println;
 use std::string::{String, ToString};
 use std::sync::Mutex;
@@ -134,7 +134,7 @@ static APP_REGISTRY: Mutex<Vec<DesktopEntry>> = Mutex::new(Vec::new());
 
 /// Add an application to the registry
 pub fn register_app(entry: DesktopEntry) {
-    let mut registry = APP_REGISTRY.lock();
+    let mut registry = APP_REGISTRY.lock().expect("stemd mutex poisoned");
     // Remove existing entry with same app_id
     registry.retain(|e| e.app_id != entry.app_id);
     registry.push(entry);
@@ -143,7 +143,7 @@ pub fn register_app(entry: DesktopEntry) {
 /// Look up an application by app_id
 pub fn lookup_app(app_id: &str) -> Option<DesktopEntry> {
     println!("stemd: lookup_app called for app_id={}", app_id);
-    let registry = APP_REGISTRY.lock();
+    let registry = APP_REGISTRY.lock().expect("stemd mutex poisoned");
     let result = registry.iter().find(|e| e.app_id == app_id).cloned();
     println!(
         "stemd: lookup_app returning {:?}",
@@ -154,7 +154,7 @@ pub fn lookup_app(app_id: &str) -> Option<DesktopEntry> {
 
 /// Return a snapshot of all applications registered from desktop entries.
 pub fn list_apps() -> Vec<DesktopEntry> {
-    APP_REGISTRY.lock().clone()
+    APP_REGISTRY.lock().expect("stemd mutex poisoned").clone()
 }
 
 /// Look up the first registered application advertising a MIME type.
@@ -171,7 +171,7 @@ pub fn lookup_app_for_mime(mime_type: &str) -> Option<DesktopEntry> {
 }
 
 fn lookup_registered_app_for_mime(mime_type: &str) -> Option<DesktopEntry> {
-    let registry = APP_REGISTRY.lock();
+    let registry = APP_REGISTRY.lock().expect("stemd mutex poisoned");
     let wildcard = mime_type
         .split_once('/')
         .map(|(kind, _)| format!("{kind}/*"));
@@ -216,7 +216,7 @@ fn default_app_id_for_mime(mime_type: &str) -> Option<String> {
 }
 
 fn mimeapps_paths() -> Vec<String> {
-    let config_home = std::env::var("XDG_CONFIG_HOME").unwrap_or_else(|| {
+    let config_home = std::env::var("XDG_CONFIG_HOME").unwrap_or_else(|_| {
         let home = std::env::var("HOME").unwrap_or(String::from("/root"));
         format!("{home}/.config")
     });
@@ -426,16 +426,21 @@ fn split_exec_words(exec: &str) -> Result<Vec<String>, &'static str> {
 
 /// Load all .desktop files from a directory
 pub fn load_desktop_files(dir_path: &str) -> Result<usize, &'static str> {
-    let entries = list_directory(dir_path).map_err(|_| "Failed to list directory")?;
+    let entries = fs::read_dir(dir_path).map_err(|_| "Failed to list directory")?;
     let mut count = 0;
 
     for entry in entries {
-        if entry.name == "." || entry.name == ".." {
+        let entry = entry.map_err(|_| "Failed to read directory entry")?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name == "." || name == ".." {
             continue;
         }
 
-        if entry.is_file() && entry.name.ends_with(".desktop") {
-            let file_path = format!("{}/{}", dir_path, entry.name);
+        let file_type = entry
+            .file_type()
+            .map_err(|_| "Failed to query directory entry")?;
+        if file_type.is_file() && name.ends_with(".desktop") {
+            let file_path = format!("{}/{}", dir_path, name);
 
             match File::open(&file_path) {
                 Ok(mut file) => {
@@ -455,7 +460,7 @@ pub fn load_desktop_files(dir_path: &str) -> Result<usize, &'static str> {
                     }
 
                     let parser = DesktopParser::new(content);
-                    if let Some(entry) = parser.parse(&entry.name) {
+                    if let Some(entry) = parser.parse(&name) {
                         println!("stemd: Loaded app: {} ({})", entry.name, entry.app_id);
                         register_app(entry);
                         count += 1;

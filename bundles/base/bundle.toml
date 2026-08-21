@@ -29,8 +29,8 @@ to = "/system/scarlet/bin/login"
 
 [[layers]]
 kind = "cargo"
-source = "../../user/bin"
-package = "user-bin"
+source = "../../user/std-bin"
+package = "scarlet-std-bin"
 bin = "stemd"
 to = "/system/scarlet/bin/stemd"
 

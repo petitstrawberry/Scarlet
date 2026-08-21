@@ -7,23 +7,20 @@
 //! - Provides an IPC interface via LocalSocket for control commands
 //! - Supports .desktop files for application definitions
 
-#![no_std]
-#![no_main]
-
-extern crate scarlet_std as std;
-
 use core::sync::atomic::fence;
 use sbus_client as sbus;
 use scarlet_desktop_config::DESKTOP_STEMD_LIST_APPLICATIONS_METHOD;
+use scarlet_os::handle::capability::StreamOps;
+use scarlet_os::process::{ShutdownType, WAIT_NOHANG, shutdown, waitpid};
+use scarlet_os::socket::Socket;
 use std::{
     format,
-    fs::File,
-    handle::Handle,
+    fs::{self, File, OpenOptions},
+    io::Read,
     println,
-    socket::Socket,
+    process::{Command, Stdio},
     string::{String, ToString},
     sync::Mutex,
-    task::{WAIT_NOHANG, exit, fork, waitpid},
     thread, vec,
     vec::Vec,
 };
@@ -57,44 +54,43 @@ fn application_environment(activation_token: Option<&str>) -> Vec<String> {
     environment
 }
 
-fn try_attach_stdio_to_path(path: &str) {
-    // Best-effort: rebind stdio handles (0/1/2) to the given path.
-    // Follow the same approach as `sh`: close 0/1/2 then `duplicate()` so that
-    // the duplicated handles get assigned to 0,1,2.
-
-    let Ok(h) = Handle::open(path, 2) else {
+fn configure_command_stdio(command: &mut Command, path: &str) {
+    let Ok(stdin) = OpenOptions::new().read(true).write(true).open(path) else {
+        return;
+    };
+    let Ok(stdout) = stdin.try_clone() else {
+        return;
+    };
+    let Ok(stderr) = stdin.try_clone() else {
         return;
     };
 
-    // Rebind each stdio FD independently to respect the kernel handle allocator's LIFO behavior.
-    // This mirrors `sh`: close FD N, then duplicate the target handle and expect it to become FD N.
-    for fd in 0..3 {
-        if let Ok(old) = unsafe { Handle::from_raw(fd) } {
-            let _ = old.close();
-        }
-        match h.duplicate() {
-            Ok(new_h) => {
-                if new_h.as_raw() == fd {
-                    core::mem::forget(new_h);
-                } else {
-                    // If we didn't get the expected FD, leave things alone (best effort).
-                    let _ = new_h.close();
-                }
-            }
-            Err(_) => break,
-        }
+    command.stdin(Stdio::from(stdin));
+    command.stdout(Stdio::from(stdout));
+    command.stderr(Stdio::from(stderr));
+}
+
+fn spawn_command(
+    argv: &[String],
+    activation_token: Option<&str>,
+    stdio_path: Option<&str>,
+) -> Result<i32, &'static str> {
+    let program = argv.first().ok_or("Invalid empty command")?;
+    let mut command = Command::new(program);
+    command.args(&argv[1..]);
+    command.env_clear();
+    for assignment in application_environment(activation_token) {
+        let (key, value) = assignment
+            .split_once('=')
+            .ok_or("Invalid application environment")?;
+        command.env(key, value);
     }
+    configure_command_stdio(&mut command, stdio_path.unwrap_or("/dev/null"));
 
-    // Close the original handle to avoid leaking it.
-    let _ = h.close();
-}
-
-fn try_attach_stdio_to_tty(tty_path: &str) {
-    try_attach_stdio_to_path(tty_path);
-}
-
-fn try_attach_stdio_to_null() {
-    try_attach_stdio_to_path("/dev/null");
+    command
+        .spawn()
+        .map(|child| child.id() as i32)
+        .map_err(|_| "Failed to spawn process")
 }
 
 /// Service configuration
@@ -340,7 +336,7 @@ impl ConfigParser {
 
 /// Add a running app to the tracking list
 fn add_running_app(app_id: String, pid: i32, exec_path: String) {
-    let mut apps = RUNNING_APPS.lock();
+    let mut apps = RUNNING_APPS.lock().expect("stemd mutex poisoned");
     apps.push(RunningApp {
         app_id,
         pid,
@@ -350,7 +346,7 @@ fn add_running_app(app_id: String, pid: i32, exec_path: String) {
 
 /// Remove a running app from the tracking list by PID
 fn remove_running_app_by_pid(pid: i32) -> bool {
-    let mut apps = RUNNING_APPS.lock();
+    let mut apps = RUNNING_APPS.lock().expect("stemd mutex poisoned");
     if let Some(pos) = apps.iter().position(|app| app.pid == pid) {
         apps.remove(pos);
         return true;
@@ -360,12 +356,12 @@ fn remove_running_app_by_pid(pid: i32) -> bool {
 
 /// Find a running app by app_id
 fn find_running_app(app_id: &str) -> Option<RunningApp> {
-    let apps = RUNNING_APPS.lock();
+    let apps = RUNNING_APPS.lock().expect("stemd mutex poisoned");
     apps.iter().find(|app| app.app_id == app_id).cloned()
 }
 
 fn add_running_service(name: String, pid: i32, exec_path: String) {
-    let mut services = RUNNING_SERVICES.lock();
+    let mut services = RUNNING_SERVICES.lock().expect("stemd mutex poisoned");
     services.push(RunningService {
         name,
         pid,
@@ -374,7 +370,7 @@ fn add_running_service(name: String, pid: i32, exec_path: String) {
 }
 
 fn remove_running_service_by_pid(pid: i32) -> Option<RunningService> {
-    let mut services = RUNNING_SERVICES.lock();
+    let mut services = RUNNING_SERVICES.lock().expect("stemd mutex poisoned");
     let removed = services
         .iter()
         .position(|service| service.pid == pid)
@@ -386,24 +382,24 @@ fn remove_running_service_by_pid(pid: i32) -> Option<RunningService> {
 }
 
 fn mark_service_ready(service_name: &str) {
-    let mut ready = READY_SERVICES.lock();
+    let mut ready = READY_SERVICES.lock().expect("stemd mutex poisoned");
     if !ready.iter().any(|name| name == service_name) {
         ready.push(service_name.to_string());
     }
 }
 
 fn clear_service_ready(service_name: &str) {
-    let mut ready = READY_SERVICES.lock();
+    let mut ready = READY_SERVICES.lock().expect("stemd mutex poisoned");
     ready.retain(|name| name != service_name);
 }
 
 fn is_service_ready(service_name: &str) -> bool {
-    let ready = READY_SERVICES.lock();
+    let ready = READY_SERVICES.lock().expect("stemd mutex poisoned");
     ready.iter().any(|name| name == service_name)
 }
 
 fn is_running_service_pid(pid: i32) -> bool {
-    let services = RUNNING_SERVICES.lock();
+    let services = RUNNING_SERVICES.lock().expect("stemd mutex poisoned");
     services.iter().any(|service| service.pid == pid)
 }
 
@@ -586,7 +582,7 @@ fn focus_window_id(conn: &mut sws_client::Connection, window_id: u32) -> Result<
 /// Launch an application or focus an existing window
 /// If exec_path is empty, look up the app from the registry
 fn launch_or_focus(app_id: &str, exec_path: Option<&str>) -> Result<(), &'static str> {
-    let _activation_guard = APP_ACTIVATION_LOCK.lock();
+    let _activation_guard = APP_ACTIVATION_LOCK.lock().expect("stemd mutex poisoned");
     println!(
         "stemd: launch_or_focus called with app_id={}, exec_path={:?}",
         app_id, exec_path
@@ -670,48 +666,20 @@ fn launch_or_focus(app_id: &str, exec_path: Option<&str>) -> Result<(), &'static
     // App is not running, launch it
     println!("stemd: Launching app '{}' with exec: {}", app_id, exec_path);
 
-    let pid = fork();
-    match pid {
-        0 => {
-            // Child process
-            try_attach_stdio_to_null();
+    let argv: Vec<String> = exec_path.split_whitespace().map(String::from).collect();
+    let pid = spawn_command(&argv, None, None).map_err(|error| {
+        println!("stemd: Failed to launch app '{}': {}", app_id, error);
+        error
+    })?;
 
-            fence(core::sync::atomic::Ordering::SeqCst);
-
-            // Parse the exec command
-            let parts: Vec<&str> = exec_path.split_whitespace().collect();
-            if parts.is_empty() {
-                println!("stemd: Invalid exec command");
-                exit(-1);
-            }
-
-            let path = parts[0];
-            let argv: Vec<&str> = parts.to_vec();
-
-            let environment = application_environment(None);
-            let environment: Vec<&str> = environment.iter().map(|value| value.as_str()).collect();
-            if std::task::execve(path, &argv, &environment) != 0 {
-                println!("stemd: Failed to execve {}", path);
-                exit(-1);
-            }
-            unreachable!();
-        }
-        -1 => {
-            println!("stemd: Failed to fork for app: {}", app_id);
-            Err("Fork failed")
-        }
-        pid => {
-            // Parent process - track the launched app
-            add_running_app(app_id.to_string(), pid, exec_path.to_string());
-            println!("stemd: App '{}' launched with PID: {}", app_id, pid);
-            Ok(())
-        }
-    }
+    add_running_app(app_id.to_string(), pid, exec_path.to_string());
+    println!("stemd: App '{}' launched with PID: {}", app_id, pid);
+    Ok(())
 }
 
 /// Get a list of all running applications
 fn get_running_apps_list() -> Vec<RunningApp> {
-    let apps = RUNNING_APPS.lock();
+    let apps = RUNNING_APPS.lock().expect("stemd mutex poisoned");
     apps.clone()
 }
 
@@ -842,42 +810,17 @@ fn launch_desktop_entry(
     activation_token: Option<&str>,
 ) -> Result<i32, &'static str> {
     let argv_strings = expand_exec(&entry.exec, files)?;
-    let path = argv_strings
-        .first()
-        .ok_or("Invalid desktop Exec command")?
-        .clone();
-    let argv: Vec<&str> = argv_strings.iter().map(|value| value.as_str()).collect();
     let app_id = entry.app_id.clone();
     let exec_path = entry.exec.clone();
 
-    // Fork and execute
-    let pid = fork();
-    match pid {
-        0 => {
-            // Child process
-            try_attach_stdio_to_null();
+    let pid = spawn_command(&argv_strings, activation_token, None).map_err(|error| {
+        println!("stemd: Failed to launch app '{}': {}", app_id, error);
+        error
+    })?;
 
-            fence(core::sync::atomic::Ordering::SeqCst);
-
-            let environment = application_environment(activation_token);
-            let environment: Vec<&str> = environment.iter().map(|value| value.as_str()).collect();
-            if std::task::execve(&path, &argv, &environment) != 0 {
-                println!("stemd: Failed to execve {}", path);
-                exit(-1);
-            }
-            unreachable!();
-        }
-        -1 => {
-            println!("stemd: Failed to fork for app: {}", app_id);
-            Err("Fork failed")
-        }
-        pid => {
-            // Parent process - track the launched app
-            add_running_app(app_id.clone(), pid, exec_path);
-            println!("stemd: App '{}' launched with PID: {}", app_id, pid);
-            Ok(pid)
-        }
-    }
+    add_running_app(app_id.clone(), pid, exec_path);
+    println!("stemd: App '{}' launched with PID: {}", app_id, pid);
+    Ok(pid)
 }
 
 /// Resolve and open a local path using its registered default application.
@@ -892,57 +835,25 @@ fn open_path(path: &str) -> Result<i32, &'static str> {
     launch_desktop_entry(&entry, &files, None)
 }
 
-/// Launch a service by forking and executing
+/// Launch a service as a child process.
 fn launch_service(service: &Service) -> Result<i32, &'static str> {
     println!("stemd: Launching service: {}", service.name);
 
-    let pid = fork();
+    let argv: Vec<String> = service.exec.split_whitespace().map(String::from).collect();
+    let pid = spawn_command(&argv, None, service.tty.as_deref()).map_err(|error| {
+        println!(
+            "stemd: Failed to launch service '{}': {}",
+            service.name, error
+        );
+        error
+    })?;
 
-    match pid {
-        0 => {
-            // Child process: execute the service
-            // println!("stemd: Executing: {}", service.exec);
-
-            if let Some(tty) = &service.tty {
-                try_attach_stdio_to_tty(tty);
-            } else {
-                try_attach_stdio_to_null();
-            }
-
-            fence(core::sync::atomic::Ordering::SeqCst);
-
-            // Parse the exec command (simple split by spaces)
-            let parts: Vec<&str> = service.exec.split_whitespace().collect();
-            if parts.is_empty() {
-                println!("stemd: Invalid exec command");
-                exit(-1);
-            }
-
-            let path = parts[0];
-            let argv: Vec<&str> = parts.to_vec();
-            let environment = application_environment(None);
-            let envp: Vec<&str> = environment.iter().map(|value| value.as_str()).collect();
-
-            if std::task::execve(path, &argv, &envp) != 0 {
-                println!("stemd: Failed to execve {}", path);
-                exit(-1);
-            }
-            unreachable!();
-        }
-        -1 => {
-            println!("stemd: Failed to fork for service: {}", service.name);
-            Err("Fork failed")
-        }
-        pid => {
-            // println!("stemd: Service {} started with PID: {}", service.name, pid);
-            add_running_service(service.name.clone(), pid, service.exec.clone());
-            println!(
-                "stemd: Service '{}' launched with PID={} exec={}",
-                service.name, pid, service.exec
-            );
-            Ok(pid)
-        }
-    }
+    add_running_service(service.name.clone(), pid, service.exec.clone());
+    println!(
+        "stemd: Service '{}' launched with PID={} exec={}",
+        service.name, pid, service.exec
+    );
+    Ok(pid)
 }
 
 /// Topological sort for dependency resolution
@@ -1065,7 +976,6 @@ fn resolve_dependencies(services: &[Service]) -> Vec<Service> {
 }
 
 fn handle_shutdown() {
-    use std::task::{ShutdownType, shutdown};
     println!("stemd: Initiating system shutdown...");
 
     // TODO: Implement proper shutdown sequence:
@@ -1083,7 +993,7 @@ fn handle_shutdown() {
 }
 
 fn read_until(
-    stream: &std::handle::capability::StreamOps<'_>,
+    stream: &StreamOps<'_>,
     buffer: &mut [u8],
     filled: &mut usize,
     target: usize,
@@ -1335,61 +1245,52 @@ fn read_config(path: &str) -> Result<String, &'static str> {
 
 /// Read all configuration files from a directory
 fn read_config_dir(dir_path: &str) -> Result<String, &'static str> {
-    use std::fs::list_directory;
-
     let mut combined_content = String::new();
 
-    // Try to list directory entries
-    match list_directory(dir_path) {
-        Ok(entries) => {
-            println!("stemd: Reading configuration from directory: {}", dir_path);
+    let entries = fs::read_dir(dir_path).map_err(|_| "Failed to read configuration directory")?;
+    println!("stemd: Reading configuration from directory: {}", dir_path);
 
-            // Filter and sort .toml files
-            let mut toml_files = Vec::new();
-            for entry in entries {
-                if entry.name == "." || entry.name == ".." {
-                    continue;
-                }
-
-                // Only process .toml files
-                if entry.is_file() && entry.name.ends_with(".toml") {
-                    toml_files.push(entry.name);
-                }
-            }
-
-            // Sort files for consistent ordering
-            toml_files.sort();
-
-            if toml_files.is_empty() {
-                println!("stemd: No .toml files found in {}", dir_path);
-                return Err("No configuration files found in directory");
-            }
-
-            // Read each file and combine content
-            for filename in toml_files {
-                use std::format;
-                let file_path = format!("{}/{}", dir_path, filename);
-                println!("stemd:   Loading {}", file_path);
-
-                match read_config(&file_path) {
-                    Ok(content) => {
-                        combined_content.push_str(&content);
-                        combined_content.push('\n'); // Add newline between files
-                    }
-                    Err(e) => {
-                        println!("stemd:   Warning: Failed to read {}: {}", file_path, e);
-                        // Continue with other files
-                    }
-                }
-            }
-
-            if combined_content.is_empty() {
-                return Err("All configuration files failed to load");
-            }
-
-            Ok(combined_content)
+    let mut toml_files = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|_| "Failed to read configuration directory entry")?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name == "." || name == ".." {
+            continue;
         }
-        Err(_) => Err("Failed to read configuration directory"),
+
+        let file_type = entry
+            .file_type()
+            .map_err(|_| "Failed to query configuration directory entry")?;
+        if file_type.is_file() && name.ends_with(".toml") {
+            toml_files.push(name);
+        }
+    }
+
+    toml_files.sort();
+    if toml_files.is_empty() {
+        println!("stemd: No .toml files found in {}", dir_path);
+        return Err("No configuration files found in directory");
+    }
+
+    for filename in toml_files {
+        let file_path = format!("{}/{}", dir_path, filename);
+        println!("stemd:   Loading {}", file_path);
+
+        match read_config(&file_path) {
+            Ok(content) => {
+                combined_content.push_str(&content);
+                combined_content.push('\n');
+            }
+            Err(error) => {
+                println!("stemd:   Warning: Failed to read {}: {}", file_path, error);
+            }
+        }
+    }
+
+    if combined_content.is_empty() {
+        Err("All configuration files failed to load")
+    } else {
+        Ok(combined_content)
     }
 }
 
@@ -1399,7 +1300,7 @@ fn sbus_handler_thread() {
 
     loop {
         // Get the sbus connection
-        let mut conn_guard = SBUS_CONNECTION.lock();
+        let mut conn_guard = SBUS_CONNECTION.lock().expect("stemd mutex poisoned");
         let conn_result = match conn_guard.as_mut() {
             Some(conn) => conn.receive_message(),
             None => {
@@ -1524,7 +1425,8 @@ fn handle_sbus_message(
                         }
                     };
 
-                    let _activation_guard = APP_ACTIVATION_LOCK.lock();
+                    let _activation_guard =
+                        APP_ACTIVATION_LOCK.lock().expect("stemd mutex poisoned");
 
                     // Check if the app is already running
                     if let Some(running_app) = find_running_app(app_id) {
@@ -1768,10 +1670,9 @@ fn handle_sbus_message(
     }
 }
 
-#[unsafe(no_mangle)]
-fn main() -> i32 {
+fn main() {
     println!("stemd: Stem Daemon starting...");
-    println!("stemd: PID={}", std::task::getpid());
+    println!("stemd: PID={}", std::process::id());
 
     // Read configuration.
     // Note: current filesystem layout copies userland under `/system/scarlet`,
@@ -1894,7 +1795,8 @@ tty = "/dev/tty0"
 
                         // Store the connection globally for method handling
                         {
-                            let mut sbus_conn = SBUS_CONNECTION.lock();
+                            let mut sbus_conn =
+                                SBUS_CONNECTION.lock().expect("stemd mutex poisoned");
                             *sbus_conn = Some(conn);
                         }
 
