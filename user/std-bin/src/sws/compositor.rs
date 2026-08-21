@@ -2,6 +2,7 @@
 
 use super::config;
 use super::cursor::Cursor;
+use super::cursor_theme::CursorTheme;
 use super::gpu_compositor::{GpuCompositor, SgfxBufferError, SgfxBufferIdentity, SgfxCommitToken};
 use super::input::{CompositorInputEvent, InputManager, key_codes};
 use super::ipc::{IpcEvent, IpcServer, send_message_to_client, send_response_to_client};
@@ -153,6 +154,7 @@ const RUNTIME_ERROR_RETRY_DELAY_MS: u64 = 100;
 const COMPOSITOR_IDLE_RECHECK_NS: i64 = 250_000_000;
 const COMPOSITOR_WAKE_ERROR_DELAY_MS: u64 = 10;
 const DEFAULT_OUTPUT_SCALE_MILLI: u32 = 2000;
+const DEFAULT_CURSOR_THEME_PATH: &str = "/share/cursors/default";
 
 type DamageRect = (i32, i32, u32, u32);
 type PresentDamage = Option<Vec<DamageRect>>;
@@ -160,8 +162,14 @@ type PresentDamage = Option<Vec<DamageRect>>;
 #[derive(Debug, Clone)]
 struct SwsConfig {
     output_scale_milli: u32,
+    cursor: CursorConfig,
     ime_toggle_bindings: Vec<KeyBinding>,
     preferred_input_method_name: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct CursorConfig {
+    theme_path: String,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -181,6 +189,7 @@ struct KeyModifiers {
 fn load_sws_config() -> SwsConfig {
     let mut config = SwsConfig {
         output_scale_milli: DEFAULT_OUTPUT_SCALE_MILLI,
+        cursor: default_cursor_config(),
         ime_toggle_bindings: default_ime_toggle_bindings(),
         preferred_input_method_name: None,
     };
@@ -208,12 +217,56 @@ fn load_sws_config() -> SwsConfig {
                 }
             }
 
+            config.cursor = parse_cursor_config(&content);
             config.preferred_input_method_name = config::parse_active_input_method(&content);
         }
         Err(_) => {}
     }
 
     config
+}
+
+fn default_cursor_config() -> CursorConfig {
+    CursorConfig {
+        theme_path: String::from(DEFAULT_CURSOR_THEME_PATH),
+    }
+}
+
+fn parse_cursor_config(content: &str) -> CursorConfig {
+    let mut cursor = default_cursor_config();
+    let mut accepts_cursor = false;
+
+    for raw_line in content.lines() {
+        let line = strip_toml_comment(raw_line).trim();
+        if line.is_empty() {
+            continue;
+        }
+
+        if line.starts_with('[') && line.ends_with(']') {
+            accepts_cursor = line[1..line.len() - 1].trim() == "cursor";
+            continue;
+        }
+        if !accepts_cursor {
+            continue;
+        }
+
+        let Some(eq_pos) = line.find('=') else {
+            continue;
+        };
+        let key = line[..eq_pos].trim();
+        let value = line[eq_pos + 1..].trim();
+        match key {
+            "theme" => {
+                let theme_path = trim_toml_string(value);
+                if !theme_path.is_empty() {
+                    cursor.theme_path = String::from(theme_path);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    cursor
 }
 
 fn default_ime_toggle_bindings() -> Vec<KeyBinding> {
@@ -479,6 +532,58 @@ fn normalize_scale_milli(scale_milli: u32) -> u32 {
     scale_milli.clamp(250, 8000)
 }
 
+fn cursor_render_scale_milli(output_scale_milli: u32, image_scale_milli: u32) -> u32 {
+    let numerator = u64::from(output_scale_milli).saturating_mul(1000);
+    let denominator = u64::from(image_scale_milli.max(1));
+    ((numerator.saturating_add(denominator / 2)) / denominator)
+        .max(1)
+        .min(u64::from(u32::MAX)) as u32
+}
+
+fn load_cursor_theme(theme_path: &str, output_scale_milli: u32) -> Result<Cursor, &'static str> {
+    let theme = CursorTheme::load(theme_path)?;
+    let render_scale_milli =
+        cursor_render_scale_milli(output_scale_milli, theme.image_scale_milli());
+    let arrow = theme
+        .image(sws_protocol::CursorIcon::Arrow)
+        .ok_or("Cursor theme does not contain an arrow image")?;
+    let mut cursor = Cursor::from_png_file(
+        &arrow.image_path,
+        render_scale_milli,
+        arrow.hotspot_x,
+        arrow.hotspot_y,
+    )?;
+    let mut loaded = 1;
+    for image in theme.images() {
+        if image.icon == sws_protocol::CursorIcon::Arrow {
+            continue;
+        }
+        match cursor.load_png_icon(
+            image.icon,
+            &image.image_path,
+            render_scale_milli,
+            image.hotspot_x,
+            image.hotspot_y,
+        ) {
+            Ok(()) => loaded += 1,
+            Err(error) => println!(
+                "[Compositor] Cursor theme image {} unavailable: {}",
+                image.image_path, error
+            ),
+        }
+    }
+    println!(
+        "[Compositor] Cursor theme: {} from {} ({} of {} images loaded; asset scale {}.{:03})",
+        theme.name(),
+        theme_path,
+        loaded,
+        theme.images().len(),
+        theme.image_scale_milli() / 1000,
+        theme.image_scale_milli() % 1000
+    );
+    Ok(cursor)
+}
+
 /// Compositor - the main window server with proper layer compositing
 pub struct Compositor {
     display: DisplaySurface,
@@ -552,6 +657,7 @@ struct MoveDragState {
 #[derive(Debug, Clone, Copy)]
 struct ResizeDragState {
     window_id: u32,
+    icon: sws_protocol::CursorIcon,
     grab_cursor_x: i32,
     grab_cursor_y: i32,
     start_width: u32,
@@ -647,8 +753,20 @@ impl Compositor {
         // Initialize window manager
         let window_manager = WindowManager::new();
 
-        // Initialize cursor at center
-        let mut cursor = Cursor::new(output_scale_milli);
+        // Initialize the configured theme at the center of the output. Keep a
+        // built-in arrow available so a damaged manifest or image cannot prevent
+        // the window server from starting.
+        let mut cursor = match load_cursor_theme(&sws_config.cursor.theme_path, output_scale_milli)
+        {
+            Ok(cursor) => cursor,
+            Err(error) => {
+                println!(
+                    "[Compositor] Failed to load cursor theme {}: {}; using built-in cursor",
+                    sws_config.cursor.theme_path, error
+                );
+                Cursor::fallback(output_scale_milli)
+            }
+        };
         cursor.x = (screen_width / 2) as i32;
         cursor.y = (screen_height / 2) as i32;
         // Keep prev position consistent to avoid an oversized first dirty region.
@@ -1682,8 +1800,7 @@ impl Compositor {
 
             // Cursor is an overlay; expected_pixel_at_with_source does not account for it.
             // Skip samples that fall within the cursor bounding box to avoid false mismatches.
-            let cx0 = self.cursor.x;
-            let cy0 = self.cursor.y;
+            let (cx0, cy0) = self.cursor.draw_position();
             let cx1 = cx0.saturating_add(self.cursor.width as i32);
             let cy1 = cy0.saturating_add(self.cursor.height as i32);
             let xi = x as i32;
@@ -2524,15 +2641,53 @@ impl Compositor {
         {
             self.send_mouse_position_to_window(target_id, window);
         }
+        self.refresh_cursor_icon();
+    }
+
+    fn desired_cursor_icon(&self) -> sws_protocol::CursorIcon {
+        if let Some(state) = self.resize_drag {
+            return state.icon;
+        }
+        if self.move_drag.is_some() {
+            return sws_protocol::CursorIcon::Move;
+        }
+
+        let target_id = self.pointer_grab_window_id.or_else(|| {
+            self.window_manager
+                .window_at_point(self.cursor.x, self.cursor.y)
+        });
+        let Some(window) = target_id.and_then(|id| self.window_manager.get_window(id)) else {
+            return sws_protocol::CursorIcon::Arrow;
+        };
+
+        if window.resizable && !window.fullscreen {
+            let local_x = self.cursor.x.saturating_sub(window.x);
+            let local_y = self.cursor.y.saturating_sub(window.y);
+            let inside = local_x >= 0
+                && local_y >= 0
+                && local_x < window.width as i32
+                && local_y < window.height as i32;
+            let near_right = inside && local_x >= window.width as i32 - RESIZE_GRIP_PX;
+            let near_bottom = inside && local_y >= window.height as i32 - RESIZE_GRIP_PX;
+            match (near_right, near_bottom) {
+                (true, true) => return sws_protocol::CursorIcon::ResizeNwse,
+                (true, false) => return sws_protocol::CursorIcon::ResizeEw,
+                (false, true) => return sws_protocol::CursorIcon::ResizeNs,
+                (false, false) => {}
+            }
+        }
+
+        window.cursor_icon
+    }
+
+    fn refresh_cursor_icon(&mut self) -> bool {
+        let icon = self.desired_cursor_icon();
+        self.cursor.set_icon(icon)
     }
 
     fn cursor_rect(&self) -> (i32, i32, u32, u32) {
-        (
-            self.cursor.x,
-            self.cursor.y,
-            self.cursor.width,
-            self.cursor.height,
-        )
+        let (x, y) = self.cursor.draw_position();
+        (x, y, self.cursor.width, self.cursor.height)
     }
 
     fn send_pointer_lock_changed(&self, state: PointerLockState, locked: bool) {
@@ -2924,6 +3079,7 @@ impl Compositor {
                 }
                 self.cursor
                     .update_position(dx, dy, self.screen_width, self.screen_height);
+                self.refresh_cursor_icon();
 
                 if self.left_button_down {
                     if let Some(mut state) = self.resize_drag {
@@ -3025,6 +3181,7 @@ impl Compositor {
                 }
                 self.cursor
                     .set_position(x, y, self.screen_width, self.screen_height);
+                self.refresh_cursor_icon();
 
                 if self.left_button_down {
                     if let Some(mut state) = self.resize_drag {
@@ -3284,9 +3441,16 @@ impl Compositor {
                                     && window.resizable
                                     && !window.fullscreen
                                 {
+                                    let icon = match (near_right, near_bottom) {
+                                        (true, true) => sws_protocol::CursorIcon::ResizeNwse,
+                                        (true, false) => sws_protocol::CursorIcon::ResizeEw,
+                                        (false, true) => sws_protocol::CursorIcon::ResizeNs,
+                                        (false, false) => sws_protocol::CursorIcon::Arrow,
+                                    };
                                     self.move_drag = None;
                                     self.resize_drag = Some(ResizeDragState {
                                         window_id: win_id,
+                                        icon,
                                         grab_cursor_x: self.cursor.x,
                                         grab_cursor_y: self.cursor.y,
                                         start_width: window.width,
@@ -3296,6 +3460,7 @@ impl Compositor {
                                     });
                                     self.resize_outline =
                                         Some((window.x, window.y, window.width, window.height));
+                                    self.refresh_cursor_icon();
                                     return Ok(true);
                                 }
                             }
@@ -4506,6 +4671,7 @@ impl Compositor {
                     start_window_x,
                     start_window_y,
                 });
+                self.refresh_cursor_icon();
             }
             IpcEvent::MoveWindow { window_id, x, y } => {
                 if self.window_manager.is_fullscreen(window_id) {
@@ -4953,6 +5119,12 @@ impl Compositor {
                     }
                 }
             },
+            IpcEvent::SetCursorIcon { window_id, icon } => {
+                if let Some(window) = self.window_manager.get_window_mut(window_id) {
+                    window.cursor_icon = icon;
+                    self.refresh_cursor_icon();
+                }
+            }
             IpcEvent::FocusWindow { window_id } => {
                 if let Some(fullscreen_id) = self
                     .window_manager

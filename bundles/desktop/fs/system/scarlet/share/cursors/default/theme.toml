@@ -1,0 +1,58 @@
+[theme]
+name = "Scarlet Default"
+image_scale = 2.0
+
+[arrow]
+image = "arrow.png"
+hotspot_x = 6
+hotspot_y = 3
+
+[pointer]
+image = "pointer.png"
+hotspot_x = 13
+hotspot_y = 4
+
+[text]
+image = "text.png"
+hotspot_x = 21
+hotspot_y = 28
+
+[crosshair]
+image = "crosshair.png"
+hotspot_x = 21
+hotspot_y = 28
+
+[move]
+image = "move.png"
+hotspot_x = 21
+hotspot_y = 28
+
+[resize_ns]
+image = "resize_ns.png"
+hotspot_x = 21
+hotspot_y = 28
+
+[resize_ew]
+image = "resize_ew.png"
+hotspot_x = 21
+hotspot_y = 28
+
+[resize_nesw]
+image = "resize_nesw.png"
+hotspot_x = 21
+hotspot_y = 28
+
+[resize_nwse]
+image = "resize_nwse.png"
+hotspot_x = 21
+hotspot_y = 28
+
+[wait]
+image = "wait.png"
+hotspot_x = 21
+hotspot_y = 28
+
+[not_allowed]
+image = "not_allowed.png"
+hotspot_x = 21
+hotspot_y = 28

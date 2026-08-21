@@ -18,7 +18,13 @@ Client-side reference implementations:
 ## Configuration
 
 SWS reads `/etc/sws/config.toml` at startup. The current implementation accepts
-`[output] scale` / `scale_milli` and common SWS-level `[keybindings]`.
+`[output] scale` / `scale_milli`, `[cursor] theme`, and common SWS-level
+`[keybindings]`.
+
+`cursor.theme` names a directory containing `theme.toml` and its PNG images.
+The manifest owns `image_scale` plus each cursor state's `image`, `hotspot_x`,
+and `hotspot_y`. A state may instead use `alias = "other_state"`; aliases inherit
+both image and hotspot, may refer forward, and must not form cycles.
 
 `keybindings.ime_toggle` is a compositor shortcut that emits `IME_TRIGGER` to
 the active IME for the focused text-input context. It is not an IME-specific
@@ -366,6 +372,38 @@ Semantics:
 - Restore the geometry that preceded fullscreen. If that state was maximized,
   SWS recomputes the current workarea geometry before configuring the client.
 - The requesting connection must own `window_id`.
+
+#### `SET_POINTER_LOCK` (type = 42)
+
+Payload (8 bytes):
+
+| Offset | Size | Field       | Type |
+|--------|------|-------------|------|
+| 0      | 4    | `window_id` | u32  |
+| 4      | 4    | `locked`    | u32  |
+
+`locked` is exactly `0` or `1`. The requesting connection must own the window.
+SWS hides the cursor while lock is active and reports the authoritative state
+with `POINTER_LOCK_CHANGED`.
+
+#### `SET_CURSOR_ICON` (type = 43, protocol version 3)
+
+Payload (8 bytes):
+
+| Offset | Size | Field       | Type |
+|--------|------|-------------|------|
+| 0      | 4    | `window_id` | u32  |
+| 4      | 4    | `icon`      | u32  |
+
+The requesting connection must own the window. The selected icon remains the
+window's hover cursor until replaced. Compositor-owned interactions such as
+interactive move and resize temporarily override it.
+
+Stable icon values are: `Arrow = 0`, `Pointer = 1`, `Text = 2`, `Crosshair = 3`,
+`Move = 4`, `ResizeNs = 5`, `ResizeEw = 6`, `ResizeNesw = 7`,
+`ResizeNwse = 8`, `Wait = 9`, and `NotAllowed = 10`. Unknown values are a
+malformed payload. Clients should confirm the `CURSOR_ICONS` capability bit
+before using this request with an older server.
 
 #### `REGISTER_EXTENSION` (type = 100)
 
@@ -904,7 +942,8 @@ SWS withholds a key event from the application while it is pending IME arbitrati
 
 The Extension API allows specialized bridge servers (like the Wayland bridge) to create and manage windows on behalf of external clients.
 
-- The protocol currently has no explicit version field.
+- The frame header has no version field. `GET_CAPABILITIES` reports the current
+  protocol version; version 3 adds compositor-provided cursor icons.
 - The current wire format is the request-routed 8-byte header described above:
   `msg_type: u16`, `flags: u8`, `request_id: u8`, `payload_size: u32`.
 - The older `msg_type: u32`, `payload_size: u32` header is not supported.

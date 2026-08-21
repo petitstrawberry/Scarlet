@@ -1,7 +1,6 @@
 //! Connection management for SWS client
 
-use crate::TransientFlags;
-use crate::WindowSizeLimits;
+use crate::{CursorIcon, TransientFlags, WindowSizeLimits};
 use crate::error::Error;
 use crate::event::{Event, ImeContextState, InputEvent};
 use crate::os::{Arc, BTreeMap, Handle, Mutex, SharedMemory, Socket, String, Vec, mutex_lock};
@@ -68,6 +67,15 @@ impl Capabilities {
     /// `true` when [`Connection::set_pointer_lock`] may be requested.
     pub const fn supports_pointer_lock(self) -> bool {
         self.capabilities & protocol::capabilities::POINTER_LOCK != 0
+    }
+
+    /// Whether the server supports compositor-provided cursor icons.
+    ///
+    /// # Returns
+    ///
+    /// `true` when [`Connection::set_cursor_icon`] may be requested.
+    pub const fn supports_cursor_icons(self) -> bool {
+        self.capabilities & protocol::capabilities::CURSOR_ICONS != 0
     }
 }
 
@@ -2055,6 +2063,29 @@ impl Connection {
             .map_err(|_| Error::SendFailed)
     }
 
+    /// Select the cursor shown while the pointer is over a surface.
+    ///
+    /// The selection remains associated with the surface until replaced. SWS
+    /// may temporarily override it for compositor-owned interactions such as
+    /// interactive window resizing.
+    ///
+    /// # Arguments
+    ///
+    /// * `surface_id` - Surface whose hover cursor should change.
+    /// * `icon` - Compositor-provided cursor icon to display.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` after the request is sent, or a connection/surface error.
+    pub fn set_cursor_icon(&self, surface_id: u32, icon: CursorIcon) -> Result<(), Error> {
+        if !mutex_lock(&self.surfaces).contains_key(&surface_id) {
+            return Err(Error::SurfaceNotFound);
+        }
+        let payload = protocol::payload_set_cursor_icon(surface_id, icon);
+        self.send_message(protocol::client_msg::SET_CURSOR_ICON, &payload)
+            .map_err(|_| Error::SendFailed)
+    }
+
     /// Focus and raise a window to the top of the Z-order.
     ///
     /// This only works for surfaces created by this client connection.
@@ -2635,6 +2666,19 @@ mod pointer_lock_tests {
         assert!(!capabilities.supports_pointer_lock());
         capabilities.capabilities |= protocol::capabilities::POINTER_LOCK;
         assert!(capabilities.supports_pointer_lock());
+    }
+
+    #[test]
+    fn capability_reports_cursor_icon_support() {
+        let mut capabilities = Capabilities {
+            protocol_version: protocol::SWS_PROTOCOL_VERSION,
+            capabilities: 0,
+            compositor_epoch: 1,
+            compositor_backend: protocol::compositor_backends::CPU,
+        };
+        assert!(!capabilities.supports_cursor_icons());
+        capabilities.capabilities |= protocol::capabilities::CURSOR_ICONS;
+        assert!(capabilities.supports_cursor_icons());
     }
 }
 

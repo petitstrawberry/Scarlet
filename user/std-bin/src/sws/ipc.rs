@@ -591,7 +591,8 @@ pub fn set_sgfx_shared_images_available(available: bool) {
 }
 
 fn sws_capabilities() -> u64 {
-    let mut capabilities = protocol::capabilities::POINTER_LOCK;
+    let mut capabilities =
+        protocol::capabilities::POINTER_LOCK | protocol::capabilities::CURSOR_ICONS;
     if SGFX_SHARED_IMAGES_AVAILABLE.load(Ordering::Acquire) {
         capabilities |= protocol::capabilities::SGFX_SHARED_IMAGE;
     }
@@ -2865,6 +2866,17 @@ fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Ha
                     locked,
                 });
             }
+            Ok(ClientMessageRef::SetCursorIcon { window_id, icon }) => {
+                if !managed_windows.contains(&window_id) {
+                    let _ = write_protocol_error(
+                        &mut stream_writer,
+                        request_id,
+                        protocol::error_codes::WINDOW_NOT_OWNED,
+                    );
+                    continue;
+                }
+                push_ipc_event(IpcEvent::SetCursorIcon { window_id, icon });
+            }
             Ok(ClientMessageRef::FocusWindow { window_id }) => {
                 println!(
                     "[ClientThread {}] FocusWindow: window_id={}",
@@ -3840,6 +3852,12 @@ pub enum IpcEvent {
         request_id: u8,
         window_id: u32,
         locked: bool,
+    },
+
+    /// Select the cursor shown while the pointer is over a window.
+    SetCursorIcon {
+        window_id: u32,
+        icon: protocol::CursorIcon,
     },
 
     /// Focus and raise a window

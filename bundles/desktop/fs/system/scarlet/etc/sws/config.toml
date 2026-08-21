@@ -1,6 +1,9 @@
 [output]
 scale = 2.0
 
+[cursor]
+theme = "/share/cursors/default"
+
 [input_method]
 # Stable service name; SWS restores it when the IME registers.
 active = "scarlet-mozc"

@@ -5,6 +5,7 @@
 mod compositor;
 mod config;
 mod cursor;
+mod cursor_theme;
 mod gpu_compositor;
 mod input;
 mod ipc;

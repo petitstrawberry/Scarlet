@@ -78,6 +78,7 @@ pub(super) struct GpuCompositor {
     cursor_texture: Texture,
     cursor_width: u32,
     cursor_height: u32,
+    cursor_texture_generation: u64,
     textures: Vec<CachedWindowTexture>,
     shared_textures: Vec<SharedWindowTexture>,
     shared_windows: Vec<SharedWindowState>,
@@ -111,7 +112,7 @@ impl GpuCompositor {
         context
             .upload_texture_bgra(
                 &cursor_texture,
-                &cursor_pixels,
+                cursor_pixels,
                 cursor.width.saturating_mul(4),
                 PixelRect::new(0, 0, cursor.width, cursor.height),
             )
@@ -124,6 +125,7 @@ impl GpuCompositor {
             cursor_texture,
             cursor_width: cursor.width,
             cursor_height: cursor.height,
+            cursor_texture_generation: cursor.texture_generation(),
             textures: Vec::new(),
             shared_textures: Vec::new(),
             shared_windows: Vec::new(),
@@ -323,6 +325,42 @@ impl GpuCompositor {
         Ok(())
     }
 
+    fn sync_cursor_texture(&mut self, cursor: &Cursor) -> Result<(), &'static str> {
+        if self.cursor_texture_generation == cursor.texture_generation()
+            && self.cursor_width == cursor.width
+            && self.cursor_height == cursor.height
+        {
+            return Ok(());
+        }
+
+        let texture = self
+            ._context
+            .create_sampled_bgra_texture(cursor.width, cursor.height)
+            .map_err(|_| "Failed to create replacement GPU cursor texture")?;
+        if self
+            ._context
+            .upload_texture_bgra(
+                &texture,
+                cursor.bgra_pixels(),
+                cursor.width.saturating_mul(4),
+                PixelRect::new(0, 0, cursor.width, cursor.height),
+            )
+            .is_err()
+        {
+            let _ = self._context.release_texture(texture);
+            return Err("Failed to upload replacement GPU cursor texture");
+        }
+
+        let previous = mem::replace(&mut self.cursor_texture, texture);
+        self._context
+            .release_texture(previous)
+            .map_err(|_| "Failed to release previous GPU cursor texture")?;
+        self.cursor_width = cursor.width;
+        self.cursor_height = cursor.height;
+        self.cursor_texture_generation = cursor.texture_generation();
+        Ok(())
+    }
+
     /// Mark a local window rectangle for texture upload before the next frame.
     pub(super) fn mark_window_damage(
         &mut self,
@@ -425,6 +463,7 @@ impl GpuCompositor {
         cursor_visible: bool,
     ) -> Result<Vec<SgfxCommitToken>, &'static str> {
         super::trace::set_compositor_stage(super::trace::STAGE_GPU_SYNC_WINDOWS);
+        self.sync_cursor_texture(cursor)?;
         for window in windows {
             super::trace::set_gpu_window(window.id);
             // Window geometry is updated before a resize client installs its
@@ -528,10 +567,11 @@ impl GpuCompositor {
                 self.target.height(),
             )?;
         }
+        let (cursor_x, cursor_y) = cursor.draw_position();
         if cursor_visible
             && let Some((destination, source)) = clipped_rect(
-                cursor.x,
-                cursor.y,
+                cursor_x,
+                cursor_y,
                 self.cursor_width,
                 self.cursor_height,
                 self.target.width(),

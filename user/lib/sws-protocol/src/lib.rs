@@ -28,7 +28,7 @@ use std::vec::Vec;
 pub const MAX_PAYLOAD_SIZE: usize = 1024 * 1024; // 1 MiB
 
 /// Current SWS capability-negotiation protocol version.
-pub const SWS_PROTOCOL_VERSION: u32 = 2;
+pub const SWS_PROTOCOL_VERSION: u32 = 3;
 
 /// Maximum damage rectangles carried by one shared SGFX frame commit.
 pub const SGFX_MAX_DAMAGE_RECTS: usize = 16;
@@ -39,6 +39,91 @@ pub mod capabilities {
     pub const SGFX_SHARED_IMAGE: u64 = 1 << 0;
     /// Focused windows may capture raw relative pointer motion.
     pub const POINTER_LOCK: u64 = 1 << 1;
+    /// Windows may select a compositor-provided cursor icon.
+    pub const CURSOR_ICONS: u64 = 1 << 2;
+}
+
+/// Compositor-provided mouse cursor icons.
+///
+/// The numeric discriminants are stable wire values used by `SET_CURSOR_ICON`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[repr(u32)]
+pub enum CursorIcon {
+    /// Standard arrow pointer.
+    #[default]
+    Arrow = 0,
+    /// Link or other directly actionable content.
+    Pointer = 1,
+    /// Text selection and insertion.
+    Text = 2,
+    /// Precise point selection.
+    Crosshair = 3,
+    /// Movable content or an active window move.
+    Move = 4,
+    /// Vertical resize.
+    ResizeNs = 5,
+    /// Horizontal resize.
+    ResizeEw = 6,
+    /// Bottom-left to top-right diagonal resize.
+    ResizeNesw = 7,
+    /// Top-left to bottom-right diagonal resize.
+    ResizeNwse = 8,
+    /// Operation in progress.
+    Wait = 9,
+    /// Operation is not allowed at the current location.
+    NotAllowed = 10,
+}
+
+impl CursorIcon {
+    /// All standard cursor icons in wire-value order.
+    pub const ALL: [Self; 11] = [
+        Self::Arrow,
+        Self::Pointer,
+        Self::Text,
+        Self::Crosshair,
+        Self::Move,
+        Self::ResizeNs,
+        Self::ResizeEw,
+        Self::ResizeNesw,
+        Self::ResizeNwse,
+        Self::Wait,
+        Self::NotAllowed,
+    ];
+
+    /// Decode a stable protocol value.
+    ///
+    /// # Arguments
+    ///
+    /// * `value` - Raw `u32` received from the wire.
+    ///
+    /// # Returns
+    ///
+    /// The corresponding cursor icon, or `None` for an unknown value.
+    pub const fn from_raw(value: u32) -> Option<Self> {
+        match value {
+            0 => Some(Self::Arrow),
+            1 => Some(Self::Pointer),
+            2 => Some(Self::Text),
+            3 => Some(Self::Crosshair),
+            4 => Some(Self::Move),
+            5 => Some(Self::ResizeNs),
+            6 => Some(Self::ResizeEw),
+            7 => Some(Self::ResizeNesw),
+            8 => Some(Self::ResizeNwse),
+            9 => Some(Self::Wait),
+            10 => Some(Self::NotAllowed),
+            _ => None,
+        }
+    }
+
+    /// Return the stable protocol value.
+    ///
+    /// # Returns
+    ///
+    /// The `u32` value serialized by `SET_CURSOR_ICON`.
+    pub const fn as_raw(self) -> u32 {
+        self as u32
+    }
 }
 
 /// SWS compositor backend identifiers reported by capability negotiation.
@@ -126,6 +211,8 @@ pub mod client_msg {
     pub const UNSET_FULLSCREEN: u32 = 41;
     /// Capture or release raw relative pointer motion for an owned window.
     pub const SET_POINTER_LOCK: u32 = 42;
+    /// Select a compositor-provided cursor for an owned window.
+    pub const SET_CURSOR_ICON: u32 = 43;
 
     // Text input client API messages (200-219)
     pub const TEXT_INPUT_CREATE: u32 = 200;
@@ -815,6 +902,12 @@ pub enum ClientMessageRef<'a> {
     SetPointerLock {
         window_id: u32,
         locked: bool,
+    },
+
+    /// Select the cursor shown while the pointer is over an owned window.
+    SetCursorIcon {
+        window_id: u32,
+        icon: CursorIcon,
     },
 
     /// Set window type for Z-order management
@@ -1660,6 +1753,15 @@ pub fn parse_client_message<'a>(
                 _ => return Err(ProtocolError::MalformedPayload),
             };
             Ok(ClientMessageRef::SetPointerLock { window_id, locked })
+        }
+        client_msg::SET_CURSOR_ICON => {
+            if payload.len() != 8 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            let window_id = read_u32(payload, 0)?;
+            let icon = CursorIcon::from_raw(read_u32(payload, 4)?)
+                .ok_or(ProtocolError::MalformedPayload)?;
+            Ok(ClientMessageRef::SetCursorIcon { window_id, icon })
         }
         client_msg::SET_WINDOW_TYPE => {
             if payload.len() != 8 {
@@ -3787,6 +3889,23 @@ pub fn payload_set_pointer_lock(window_id: u32, locked: bool) -> [u8; 8] {
     payload
 }
 
+/// Build payload for client->server `SET_CURSOR_ICON`.
+///
+/// # Arguments
+///
+/// * `window_id` - Window whose hover cursor should change.
+/// * `icon` - Compositor-provided cursor icon to select.
+///
+/// # Returns
+///
+/// The fixed-width cursor selection request payload.
+pub fn payload_set_cursor_icon(window_id: u32, icon: CursorIcon) -> [u8; 8] {
+    let mut payload = [0u8; 8];
+    payload[0..4].copy_from_slice(&window_id.to_le_bytes());
+    payload[4..8].copy_from_slice(&icon.as_raw().to_le_bytes());
+    payload
+}
+
 /// Build payload for server->client `POINTER_LOCK_CHANGED`.
 ///
 /// # Arguments
@@ -4392,14 +4511,15 @@ pub fn payload_set_window_has_alpha_content(window_id: u32, has_alpha: bool) -> 
 #[cfg(all(test, feature = "std"))]
 mod tests {
     use super::{
-        ClientMessageRef, MessageHeader, ProtocolError, ServerMessage, WindowPlacement, client_msg,
-        encode_routed_frame, error_codes, parse_client_message, parse_server_message,
+        ClientMessageRef, CursorIcon, MessageHeader, ProtocolError, ServerMessage,
+        WindowPlacement, client_msg, encode_routed_frame, error_codes, parse_client_message,
+        parse_server_message,
         payload_activation_token, payload_create_window_with_placement,
         payload_create_window_with_placement_and_activation_token,
         payload_create_window_with_position, payload_error, payload_pointer_lock_changed,
-        payload_request_activation_token, payload_set_fullscreen, payload_set_pointer_lock,
-        payload_unset_fullscreen, payload_window_state_changed, server_msg, window_placement,
-        window_state,
+        payload_request_activation_token, payload_set_cursor_icon, payload_set_fullscreen,
+        payload_set_pointer_lock, payload_unset_fullscreen, payload_window_state_changed,
+        server_msg, window_placement, window_state,
     };
 
     #[test]
@@ -4590,6 +4710,30 @@ mod tests {
         );
         assert_eq!(
             parse_server_message(server_msg::POINTER_LOCK_CHANGED, &invalid_bool),
+            Err(ProtocolError::MalformedPayload)
+        );
+    }
+
+    #[test]
+    fn cursor_icon_request_round_trips_all_icons() {
+        for icon in CursorIcon::ALL {
+            let payload = payload_set_cursor_icon(73, icon);
+            assert_eq!(
+                parse_client_message(client_msg::SET_CURSOR_ICON, &payload).unwrap(),
+                ClientMessageRef::SetCursorIcon {
+                    window_id: 73,
+                    icon,
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn cursor_icon_rejects_unknown_wire_values() {
+        let mut payload = payload_set_cursor_icon(73, CursorIcon::Arrow);
+        payload[4..8].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert_eq!(
+            parse_client_message(client_msg::SET_CURSOR_ICON, &payload),
             Err(ProtocolError::MalformedPayload)
         );
     }
