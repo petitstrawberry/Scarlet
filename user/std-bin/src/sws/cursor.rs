@@ -1,6 +1,6 @@
 //! Mouse cursor image loading, scaling, and composition.
 
-use png::{BitDepth, ColorType, Decoder, Limits, OutputInfo, Transformations};
+use png::{BitDepth, BlendOp, ColorType, Decoder, DisposeOp, Limits, OutputInfo, Transformations};
 use std::fs::File;
 use std::io::BufReader;
 use std::vec;
@@ -11,6 +11,10 @@ const FALLBACK_CURSOR_HEIGHT: usize = 24;
 const CURSOR_DAMAGE_PADDING: i32 = 2;
 const MAX_CURSOR_SOURCE_DIMENSION: u32 = 256;
 const MAX_CURSOR_DECODE_BYTES: usize = 4 * 1024 * 1024;
+const MAX_CURSOR_TOTAL_FRAME_BYTES: usize = 16 * 1024 * 1024;
+const MAX_CURSOR_ANIMATION_FRAMES: u32 = 64;
+const MIN_CURSOR_FRAME_DURATION_NS: u64 = 1_000_000;
+const MAX_CURSOR_FRAME_DURATION_NS: u64 = 10_000_000_000;
 
 /// Cursor color used by the built-in fallback image (white, BGRA).
 const FALLBACK_CURSOR_COLOR: [u8; 4] = [255, 255, 255, 255];
@@ -53,13 +57,27 @@ struct CursorPixels {
     bgra: Vec<u8>,
 }
 
+struct DecodedCursorFrame {
+    pixels: CursorPixels,
+    duration_ns: u64,
+}
+
+struct DecodedCursorImage {
+    frames: Vec<DecodedCursorFrame>,
+}
+
+struct CursorFrame {
+    bgra: Vec<u8>,
+    duration_ns: u64,
+}
+
 struct CursorImage {
     icon: sws_protocol::CursorIcon,
     width: u32,
     height: u32,
     hotspot_x: u32,
     hotspot_y: u32,
-    bgra: Vec<u8>,
+    frames: Vec<CursorFrame>,
 }
 
 fn scale_milli_or_default(scale_milli: u32) -> u32 {
@@ -90,7 +108,7 @@ fn fallback_cursor_pixels() -> CursorPixels {
     }
 }
 
-fn decode_png_file(path: &str) -> Result<CursorPixels, &'static str> {
+fn decode_png_file(path: &str) -> Result<DecodedCursorImage, &'static str> {
     let file = File::open(path).map_err(|_| "Failed to open cursor PNG")?;
     let mut decoder = Decoder::new(BufReader::new(file));
     decoder.set_limits(Limits {
@@ -101,14 +119,22 @@ fn decode_png_file(path: &str) -> Result<CursorPixels, &'static str> {
     let mut reader = decoder
         .read_info()
         .map_err(|_| "Failed to read cursor PNG header")?;
-    let source_info = reader.info();
-    if source_info.width == 0 || source_info.height == 0 {
+    let source_width = reader.info().width;
+    let source_height = reader.info().height;
+    if source_width == 0 || source_height == 0 {
         return Err("Cursor PNG has empty dimensions");
     }
-    if source_info.width > MAX_CURSOR_SOURCE_DIMENSION
-        || source_info.height > MAX_CURSOR_SOURCE_DIMENSION
-    {
+    if source_width > MAX_CURSOR_SOURCE_DIMENSION || source_height > MAX_CURSOR_SOURCE_DIMENSION {
         return Err("Cursor PNG dimensions exceed 256x256");
+    }
+    let frame_count = reader
+        .info()
+        .animation_control
+        .as_ref()
+        .map(|control| control.num_frames)
+        .unwrap_or(1);
+    if frame_count == 0 || frame_count > MAX_CURSOR_ANIMATION_FRAMES {
+        return Err("Cursor PNG animation frame count is invalid");
     }
     let output_buffer_size = reader
         .output_buffer_size()
@@ -117,16 +143,60 @@ fn decode_png_file(path: &str) -> Result<CursorPixels, &'static str> {
         return Err("Cursor PNG output exceeds decode limit");
     }
     let mut decoded = vec![0; output_buffer_size];
-    let info = reader
-        .next_frame(&mut decoded)
-        .map_err(|_| "Failed to decode cursor PNG")?;
+    let mut frames = Vec::new();
+    let mut total_frame_bytes = 0usize;
+    for _ in 0..frame_count {
+        decoded.fill(0);
+        let info = reader
+            .next_frame(&mut decoded)
+            .map_err(|_| "Failed to decode cursor PNG frame")?;
+        if info.bit_depth != BitDepth::Eight {
+            return Err("Cursor PNG did not normalize to 8-bit color");
+        }
 
-    if info.bit_depth != BitDepth::Eight {
-        return Err("Cursor PNG did not normalize to 8-bit color");
+        let duration_ns = if frame_count > 1 {
+            let control = reader
+                .info()
+                .frame_control
+                .as_ref()
+                .ok_or("Animated cursor PNG frame is missing control data")?;
+            if control.width != source_width
+                || control.height != source_height
+                || control.x_offset != 0
+                || control.y_offset != 0
+                || control.dispose_op != DisposeOp::None
+                || control.blend_op != BlendOp::Source
+            {
+                return Err("Animated cursor PNG must use full source frames");
+            }
+            frame_duration_ns(control.delay_num, control.delay_den)
+        } else {
+            0
+        };
+        let pixels = decoded_frame_to_bgra(&decoded[..info.buffer_size()], info)?;
+        total_frame_bytes = total_frame_bytes
+            .checked_add(pixels.bgra.len())
+            .ok_or("Cursor PNG animation size overflow")?;
+        if total_frame_bytes > MAX_CURSOR_TOTAL_FRAME_BYTES {
+            return Err("Cursor PNG animation exceeds decode limit");
+        }
+        frames.push(DecodedCursorFrame {
+            pixels,
+            duration_ns,
+        });
     }
 
-    decoded.truncate(info.buffer_size());
-    decoded_frame_to_bgra(&decoded, info)
+    Ok(DecodedCursorImage { frames })
+}
+
+fn frame_duration_ns(delay_num: u16, delay_den: u16) -> u64 {
+    let numerator = u64::from(delay_num.max(1));
+    let denominator = u64::from(if delay_den == 0 { 100 } else { delay_den });
+    numerator
+        .saturating_mul(1_000_000_000)
+        .checked_div(denominator)
+        .unwrap_or(MIN_CURSOR_FRAME_DURATION_NS)
+        .clamp(MIN_CURSOR_FRAME_DURATION_NS, MAX_CURSOR_FRAME_DURATION_NS)
 }
 
 fn decoded_frame_to_bgra(decoded: &[u8], info: OutputInfo) -> Result<CursorPixels, &'static str> {
@@ -260,6 +330,8 @@ pub struct Cursor {
     hotspot_y: u32,
     images: Vec<CursorImage>,
     active_index: usize,
+    active_frame_index: usize,
+    next_animation_deadline_ns: Option<u64>,
     texture_generation: u64,
     needs_redraw: bool,
 }
@@ -283,8 +355,8 @@ impl Cursor {
         hotspot_x: u32,
         hotspot_y: u32,
     ) -> Result<Self, &'static str> {
-        let source = decode_png_file(path)?;
-        Self::from_source(source, scale_milli, hotspot_x, hotspot_y)
+        let decoded = decode_png_file(path)?;
+        Self::from_decoded(decoded, scale_milli, hotspot_x, hotspot_y)
     }
 
     /// Create the built-in cursor used when the configured image cannot load.
@@ -307,9 +379,28 @@ impl Cursor {
         hotspot_x: u32,
         hotspot_y: u32,
     ) -> Result<Self, &'static str> {
-        let image = Self::scaled_image_from_source(
+        Self::from_decoded(
+            DecodedCursorImage {
+                frames: vec![DecodedCursorFrame {
+                    pixels: source,
+                    duration_ns: 0,
+                }],
+            },
+            scale_milli,
+            hotspot_x,
+            hotspot_y,
+        )
+    }
+
+    fn from_decoded(
+        decoded: DecodedCursorImage,
+        scale_milli: u32,
+        hotspot_x: u32,
+        hotspot_y: u32,
+    ) -> Result<Self, &'static str> {
+        let image = Self::scaled_image_from_decoded(
             sws_protocol::CursorIcon::Arrow,
-            source,
+            decoded,
             scale_milli,
             hotspot_x,
             hotspot_y,
@@ -332,11 +423,14 @@ impl Cursor {
             hotspot_y,
             images: vec![image],
             active_index: 0,
+            active_frame_index: 0,
+            next_animation_deadline_ns: None,
             texture_generation: 1,
             needs_redraw: true,
         })
     }
 
+    #[cfg(test)]
     fn scaled_image_from_source(
         icon: sws_protocol::CursorIcon,
         source: CursorPixels,
@@ -344,22 +438,58 @@ impl Cursor {
         hotspot_x: u32,
         hotspot_y: u32,
     ) -> Result<CursorImage, &'static str> {
-        let expected_len = (source.width as usize)
-            .checked_mul(source.height as usize)
+        Self::scaled_image_from_decoded(
+            icon,
+            DecodedCursorImage {
+                frames: vec![DecodedCursorFrame {
+                    pixels: source,
+                    duration_ns: 0,
+                }],
+            },
+            scale_milli,
+            hotspot_x,
+            hotspot_y,
+        )
+    }
+
+    fn scaled_image_from_decoded(
+        icon: sws_protocol::CursorIcon,
+        decoded: DecodedCursorImage,
+        scale_milli: u32,
+        hotspot_x: u32,
+        hotspot_y: u32,
+    ) -> Result<CursorImage, &'static str> {
+        let first = decoded.frames.first().ok_or("Cursor image has no frames")?;
+        let source_width = first.pixels.width;
+        let source_height = first.pixels.height;
+        let expected_len = (source_width as usize)
+            .checked_mul(source_height as usize)
             .and_then(|pixels| pixels.checked_mul(4))
             .ok_or("Cursor image dimensions overflow")?;
-        if source.width == 0 || source.height == 0 || source.bgra.len() != expected_len {
+        if source_width == 0 || source_height == 0 {
             return Err("Cursor image buffer is invalid");
         }
-        if hotspot_x >= source.width || hotspot_y >= source.height {
+        if hotspot_x >= source_width || hotspot_y >= source_height {
             return Err("Cursor hotspot is outside the source image");
         }
 
-        let width = scaled_len(source.width, scale_milli);
-        let height = scaled_len(source.height, scale_milli);
-        let hotspot_x = scaled_hotspot(hotspot_x, source.width, width);
-        let hotspot_y = scaled_hotspot(hotspot_y, source.height, height);
-        let bgra = scale_bgra_nearest(&source, width, height)?;
+        let width = scaled_len(source_width, scale_milli);
+        let height = scaled_len(source_height, scale_milli);
+        let hotspot_x = scaled_hotspot(hotspot_x, source_width, width);
+        let hotspot_y = scaled_hotspot(hotspot_y, source_height, height);
+        let mut frames = Vec::new();
+        for frame in decoded.frames {
+            if frame.pixels.width != source_width
+                || frame.pixels.height != source_height
+                || frame.pixels.bgra.len() != expected_len
+            {
+                return Err("Cursor animation frames have inconsistent dimensions");
+            }
+            frames.push(CursorFrame {
+                bgra: scale_bgra_nearest(&frame.pixels, width, height)?,
+                duration_ns: frame.duration_ns,
+            });
+        }
 
         Ok(CursorImage {
             icon,
@@ -367,7 +497,7 @@ impl Cursor {
             height,
             hotspot_x,
             hotspot_y,
-            bgra,
+            frames,
         })
     }
 
@@ -392,9 +522,9 @@ impl Cursor {
         hotspot_x: u32,
         hotspot_y: u32,
     ) -> Result<(), &'static str> {
-        let source = decode_png_file(path)?;
+        let decoded = decode_png_file(path)?;
         let image =
-            Self::scaled_image_from_source(icon, source, scale_milli, hotspot_x, hotspot_y)?;
+            Self::scaled_image_from_decoded(icon, decoded, scale_milli, hotspot_x, hotspot_y)?;
         if let Some(index) = self.images.iter().position(|entry| entry.icon == icon) {
             self.images[index] = image;
         } else {
@@ -431,6 +561,8 @@ impl Cursor {
 
         let image = &self.images[next_index];
         self.active_index = next_index;
+        self.active_frame_index = 0;
+        self.next_animation_deadline_ns = None;
         self.width = image.width;
         self.height = image.height;
         self.hotspot_x = image.hotspot_x;
@@ -457,6 +589,102 @@ impl Cursor {
     /// A non-zero value that changes whenever the active image changes.
     pub fn texture_generation(&self) -> u64 {
         self.texture_generation
+    }
+
+    /// Return the number of frames in the active cursor image.
+    ///
+    /// # Returns
+    ///
+    /// The active image's non-zero frame count.
+    pub fn frame_count(&self) -> usize {
+        self.images[self.active_index].frames.len()
+    }
+
+    /// Return the displayed frame index in the active cursor image.
+    ///
+    /// # Returns
+    ///
+    /// A zero-based index smaller than [`Self::frame_count`].
+    pub fn active_frame_index(&self) -> usize {
+        self.active_frame_index
+    }
+
+    /// Return one frame from the active cursor image as straight-alpha BGRA pixels.
+    ///
+    /// # Arguments
+    ///
+    /// * `index` - Zero-based frame index in the active image.
+    ///
+    /// # Returns
+    ///
+    /// The tightly packed frame pixels, or `None` when `index` is out of range.
+    pub fn frame_bgra_pixels(&self, index: usize) -> Option<&[u8]> {
+        self.images[self.active_index]
+            .frames
+            .get(index)
+            .map(|frame| frame.bgra.as_slice())
+    }
+
+    /// Advance the active APNG animation to the frame due at `now_ns`.
+    ///
+    /// # Arguments
+    ///
+    /// * `now_ns` - Current monotonic time in nanoseconds.
+    ///
+    /// # Returns
+    ///
+    /// `true` when the displayed frame changed and must be recomposed.
+    pub fn advance_animation(&mut self, now_ns: u64) -> bool {
+        let frames = &self.images[self.active_index].frames;
+        if frames.len() <= 1 {
+            self.next_animation_deadline_ns = None;
+            return false;
+        }
+
+        let Some(mut deadline) = self.next_animation_deadline_ns else {
+            self.next_animation_deadline_ns =
+                Some(now_ns.saturating_add(frames[self.active_frame_index].duration_ns));
+            return false;
+        };
+        if now_ns < deadline {
+            return false;
+        }
+
+        let cycle_duration = frames.iter().fold(0u64, |duration, frame| {
+            duration.saturating_add(frame.duration_ns)
+        });
+        if cycle_duration != 0 {
+            let complete_cycles = now_ns.saturating_sub(deadline) / cycle_duration;
+            deadline = deadline.saturating_add(complete_cycles.saturating_mul(cycle_duration));
+        }
+
+        let mut changed = false;
+        let mut steps = 0usize;
+        while now_ns >= deadline && steps < frames.len() {
+            self.active_frame_index = (self.active_frame_index + 1) % frames.len();
+            deadline = deadline.saturating_add(frames[self.active_frame_index].duration_ns);
+            changed = true;
+            steps += 1;
+        }
+        if deadline <= now_ns {
+            deadline = now_ns.saturating_add(frames[self.active_frame_index].duration_ns);
+        }
+        self.next_animation_deadline_ns = Some(deadline);
+
+        if changed {
+            self.needs_redraw = true;
+        }
+        changed
+    }
+
+    /// Return the next active animation deadline.
+    ///
+    /// # Returns
+    ///
+    /// The monotonic nanosecond timestamp for the next frame, or `None` for a
+    /// static cursor or an animation that has not yet been scheduled.
+    pub fn next_animation_deadline_ns(&self) -> Option<u64> {
+        self.next_animation_deadline_ns
     }
 
     /// Set the pointer hotspot position directly.
@@ -631,7 +859,7 @@ impl Cursor {
     ///
     /// A tightly packed BGRA slice with `width * height * 4` bytes.
     pub fn bgra_pixels(&self) -> &[u8] {
-        &self.images[self.active_index].bgra
+        &self.images[self.active_index].frames[self.active_frame_index].bgra
     }
 
     /// Return damage covering both the previous and current cursor images.
@@ -670,7 +898,9 @@ impl Cursor {
 
 #[cfg(test)]
 mod tests {
-    use super::{Cursor, CursorPixels, blend_straight_bgra};
+    use super::{
+        Cursor, CursorPixels, DecodedCursorFrame, DecodedCursorImage, blend_straight_bgra,
+    };
     use std::vec;
     use sws_protocol::CursorIcon;
 
@@ -726,5 +956,50 @@ mod tests {
         assert_eq!(cursor.hotspot(), (2, 3));
         assert_ne!(cursor.texture_generation(), generation);
         assert!(!cursor.set_icon(CursorIcon::Pointer));
+    }
+
+    #[test]
+    fn animation_uses_per_frame_deadlines() {
+        let mut cursor = Cursor::from_decoded(
+            DecodedCursorImage {
+                frames: vec![
+                    DecodedCursorFrame {
+                        pixels: CursorPixels {
+                            width: 1,
+                            height: 1,
+                            bgra: vec![1, 1, 1, 255],
+                        },
+                        duration_ns: 10,
+                    },
+                    DecodedCursorFrame {
+                        pixels: CursorPixels {
+                            width: 1,
+                            height: 1,
+                            bgra: vec![2, 2, 2, 255],
+                        },
+                        duration_ns: 20,
+                    },
+                ],
+            },
+            1000,
+            0,
+            0,
+        )
+        .expect("valid animation");
+
+        let image_generation = cursor.texture_generation();
+        assert_eq!(cursor.frame_count(), 2);
+        assert_eq!(cursor.active_frame_index(), 0);
+        assert_eq!(cursor.frame_bgra_pixels(0).expect("first frame")[0], 1);
+        assert!(cursor.frame_bgra_pixels(2).is_none());
+
+        assert!(!cursor.advance_animation(100));
+        assert_eq!(cursor.next_animation_deadline_ns(), Some(110));
+        assert!(!cursor.advance_animation(109));
+        assert!(cursor.advance_animation(110));
+        assert_eq!(cursor.active_frame_index(), 1);
+        assert_eq!(cursor.bgra_pixels()[0], 2);
+        assert_eq!(cursor.texture_generation(), image_generation);
+        assert_eq!(cursor.next_animation_deadline_ns(), Some(130));
     }
 }

@@ -281,7 +281,7 @@ impl Queue {
     pub(crate) fn submit_composition(
         &self,
         image: &Image,
-        clear_color: Color,
+        clear_color: Option<Color>,
         operations: &[CompositionOperation<'_>],
     ) -> HandleResult<()> {
         match (self, image) {

@@ -19,12 +19,15 @@ Client-side reference implementations:
 
 SWS reads `/etc/sws/config.toml` at startup. The current implementation accepts
 `[output] scale` / `scale_milli`, `[cursor] theme`, and common SWS-level
-`[keybindings]`.
+`[keybindings]`. `SET_CURSOR_THEME` may validate, persist, and activate a new
+cursor theme without restarting SWS.
 
 `cursor.theme` names a directory containing `theme.toml` and its PNG images.
 The manifest owns `image_scale` plus each cursor state's `image`, `hotspot_x`,
 and `hotspot_y`. A state may instead use `alias = "other_state"`; aliases inherit
-both image and hotspot, may refer forward, and must not form cycles.
+both image and hotspot, may refer forward, and must not form cycles. Static PNG
+and full-frame APNG images are supported; APNG frame timing is advanced by the
+compositor while the cursor is visible.
 
 `keybindings.ime_toggle` is a compositor shortcut that emits `IME_TRIGGER` to
 the active IME for the focused text-input context. It is not an IME-specific
@@ -401,9 +404,29 @@ interactive move and resize temporarily override it.
 
 Stable icon values are: `Arrow = 0`, `Pointer = 1`, `Text = 2`, `Crosshair = 3`,
 `Move = 4`, `ResizeNs = 5`, `ResizeEw = 6`, `ResizeNesw = 7`,
-`ResizeNwse = 8`, `Wait = 9`, and `NotAllowed = 10`. Unknown values are a
-malformed payload. Clients should confirm the `CURSOR_ICONS` capability bit
-before using this request with an older server.
+`ResizeNwse = 8`, `Wait = 9`, `NotAllowed = 10`, `Help = 11`, and
+`Progress = 12`. Unknown values are a malformed payload. Clients should confirm
+the `CURSOR_ICONS` capability bit before using this request with an older server.
+
+#### `SET_CURSOR_THEME` (type = 44, protocol version 3)
+
+Payload (variable, maximum path length 512 bytes):
+
+| Offset | Size | Field            | Type  |
+|--------|------|------------------|-------|
+| 0      | 4    | `theme_path_len` | u32   |
+| 4      | N    | `theme_path`     | bytes |
+
+The path must be non-empty UTF-8 and name one direct child of
+`/share/cursors`. SWS loads and validates the theme before changing the active
+cursor. It then updates only `[cursor].theme` in `/etc/sws/config.toml`, keeping
+all unrelated settings intact, and activates the theme immediately. The current
+pointer position and per-window cursor icon are preserved.
+
+Success is a correlated empty `CURSOR_THEME_CHANGED` response. Invalid paths or
+theme contents return `INVALID_CURSOR_THEME`; a configuration write failure
+returns `CURSOR_THEME_PERSIST_FAILED`. Clients should confirm the
+`CURSOR_THEMES` capability bit before using this request with an older server.
 
 #### `REGISTER_EXTENSION` (type = 100)
 
@@ -813,6 +836,14 @@ Semantics:
   as compositor-authoritative and resize their backing buffer in response to
   the configure event.
 
+#### `CURSOR_THEME_CHANGED` (type = 34, protocol version 3)
+
+Payload: empty.
+
+This is a correlated response to `SET_CURSOR_THEME`. It is sent only after the
+new theme has loaded, its selection has been persisted, and the compositor has
+scheduled the replacement cursor for redraw.
+
 #### `EXTENSION_REGISTERED` (type = 100)
 
 **Extension API**: This message is part of the SWS Extension API.
@@ -943,7 +974,8 @@ SWS withholds a key event from the application while it is pending IME arbitrati
 The Extension API allows specialized bridge servers (like the Wayland bridge) to create and manage windows on behalf of external clients.
 
 - The frame header has no version field. `GET_CAPABILITIES` reports the current
-  protocol version; version 3 adds compositor-provided cursor icons.
+  protocol version; version 3 adds compositor-provided cursor icons and live
+  cursor-theme selection.
 - The current wire format is the request-routed 8-byte header described above:
   `msg_type: u16`, `flags: u8`, `request_id: u8`, `payload_size: u32`.
 - The older `msg_type: u32`, `payload_size: u32` header is not supported.

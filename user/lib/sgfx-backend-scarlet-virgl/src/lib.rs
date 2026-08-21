@@ -536,11 +536,11 @@ impl Queue {
         )
     }
 
-    /// Submit a complete ordered 2D composition pass synchronously.
+    /// Submit an ordered 2D composition pass synchronously.
     ///
     /// # Arguments
     ///
-    /// * `composition` - Render target, clear color, and ordered composition operations.
+    /// * `composition` - Render target, load behavior, and ordered composition operations.
     ///
     /// # Returns
     ///
@@ -894,7 +894,7 @@ pub const MAX_COMPOSITION_OPERATIONS: usize = 96;
 /// Ordered 2D composition of sampled textures and solid overlays into one image.
 pub struct CompositionPass<'a> {
     image: &'a Image,
-    clear_color: Color,
+    clear_color: Option<Color>,
     operations: Vec<driver::CompositionOperation<'a>>,
     operation_capacity: usize,
 }
@@ -912,6 +912,28 @@ impl<'a> CompositionPass<'a> {
     /// An empty composition pass, or a handle error for an invalid clear color.
     pub fn new(image: &'a Image, clear_color: Color) -> HandleResult<Self> {
         Self::with_operation_capacity(image, clear_color, MAX_COMPOSITION_OPERATIONS)
+    }
+
+    /// Begin a composition pass that preserves existing render-target pixels.
+    ///
+    /// The caller must overwrite every damaged pixel before presentation. This
+    /// mode is intended for clipped incremental composition into an image that
+    /// has already received a complete composition pass.
+    ///
+    /// # Arguments
+    ///
+    /// * `image` - Previously initialized render target to update.
+    ///
+    /// # Returns
+    ///
+    /// An empty composition pass that does not clear the target.
+    pub fn preserving(image: &'a Image) -> Self {
+        Self {
+            image,
+            clear_color: None,
+            operations: Vec::new(),
+            operation_capacity: MAX_COMPOSITION_OPERATIONS,
+        }
     }
 
     /// Begin a composition pass with a bounded operation capacity.
@@ -939,7 +961,7 @@ impl<'a> CompositionPass<'a> {
         }
         Ok(Self {
             image,
-            clear_color,
+            clear_color: Some(clear_color),
             operations: Vec::new(),
             operation_capacity,
         })

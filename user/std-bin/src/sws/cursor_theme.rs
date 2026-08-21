@@ -324,6 +324,8 @@ fn cursor_icon_for_section(section: &str) -> Option<CursorIcon> {
         "resize_nwse" => Some(CursorIcon::ResizeNwse),
         "wait" => Some(CursorIcon::Wait),
         "not_allowed" => Some(CursorIcon::NotAllowed),
+        "help" => Some(CursorIcon::Help),
+        "progress" => Some(CursorIcon::Progress),
         _ => None,
     }
 }

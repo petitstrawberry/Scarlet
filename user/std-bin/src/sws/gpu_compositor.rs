@@ -4,7 +4,7 @@ use core::mem;
 
 use super::cursor::Cursor;
 use super::window::{Window, WindowId};
-use framebuffer::DisplaySurface;
+use framebuffer::{DisplayPresentRegion, DisplaySurface};
 use scarlet_os::handle::Handle;
 use sgfx::{
     Color, CompositionPass, Context, Device, Image, PixelRect, Queue, SgfxImagePresentExt,
@@ -75,7 +75,7 @@ pub(super) struct GpuCompositor {
     _context: Context,
     queue: Queue,
     target: Image,
-    cursor_texture: Texture,
+    cursor_textures: Vec<Texture>,
     cursor_width: u32,
     cursor_height: u32,
     cursor_texture_generation: u64,
@@ -105,24 +105,13 @@ impl GpuCompositor {
         let target = context
             .create_image(width, height)
             .map_err(|_| "Failed to create GPU render target")?;
-        let cursor_texture = context
-            .create_sampled_bgra_texture(cursor.width, cursor.height)
-            .map_err(|_| "Failed to create GPU cursor texture")?;
-        let cursor_pixels = cursor.bgra_pixels();
-        context
-            .upload_texture_bgra(
-                &cursor_texture,
-                cursor_pixels,
-                cursor.width.saturating_mul(4),
-                PixelRect::new(0, 0, cursor.width, cursor.height),
-            )
-            .map_err(|_| "Failed to upload GPU cursor texture")?;
+        let cursor_textures = create_cursor_textures(&context, cursor)?;
 
         Ok(Self {
             _context: context,
             queue,
             target,
-            cursor_texture,
+            cursor_textures,
             cursor_width: cursor.width,
             cursor_height: cursor.height,
             cursor_texture_generation: cursor.texture_generation(),
@@ -325,40 +314,31 @@ impl GpuCompositor {
         Ok(())
     }
 
-    fn sync_cursor_texture(&mut self, cursor: &Cursor) -> Result<(), &'static str> {
+    fn sync_cursor_textures(&mut self, cursor: &Cursor) -> Result<(), &'static str> {
+        // Animation advances only the selected frame index. Rebuild this cache
+        // when the semantic cursor image changes, never on each animation tick.
         if self.cursor_texture_generation == cursor.texture_generation()
             && self.cursor_width == cursor.width
             && self.cursor_height == cursor.height
+            && self.cursor_textures.len() == cursor.frame_count()
         {
             return Ok(());
         }
 
-        let texture = self
-            ._context
-            .create_sampled_bgra_texture(cursor.width, cursor.height)
-            .map_err(|_| "Failed to create replacement GPU cursor texture")?;
-        if self
-            ._context
-            .upload_texture_bgra(
-                &texture,
-                cursor.bgra_pixels(),
-                cursor.width.saturating_mul(4),
-                PixelRect::new(0, 0, cursor.width, cursor.height),
-            )
-            .is_err()
-        {
-            let _ = self._context.release_texture(texture);
-            return Err("Failed to upload replacement GPU cursor texture");
-        }
-
-        let previous = mem::replace(&mut self.cursor_texture, texture);
-        self._context
-            .release_texture(previous)
-            .map_err(|_| "Failed to release previous GPU cursor texture")?;
+        let textures = create_cursor_textures(&self._context, cursor)?;
+        let previous = mem::replace(&mut self.cursor_textures, textures);
         self.cursor_width = cursor.width;
         self.cursor_height = cursor.height;
         self.cursor_texture_generation = cursor.texture_generation();
-        Ok(())
+        release_cursor_textures(&self._context, previous)
+    }
+
+    /// Force the next composition to rebuild the active cursor frame textures.
+    ///
+    /// This is required when a complete theme replacement starts its cursor
+    /// generation counter from the same value as the preceding theme.
+    pub(super) fn invalidate_cursor_texture(&mut self) {
+        self.cursor_texture_generation = 0;
     }
 
     /// Mark a local window rectangle for texture upload before the next frame.
@@ -461,9 +441,10 @@ impl GpuCompositor {
         background: [u8; 4],
         resize_outline: Option<(i32, i32, u32, u32)>,
         cursor_visible: bool,
+        damage: Option<DamageRect>,
     ) -> Result<Vec<SgfxCommitToken>, &'static str> {
         super::trace::set_compositor_stage(super::trace::STAGE_GPU_SYNC_WINDOWS);
-        self.sync_cursor_texture(cursor)?;
+        self.sync_cursor_textures(cursor)?;
         for window in windows {
             super::trace::set_gpu_window(window.id);
             // Window geometry is updated before a resize client installs its
@@ -482,8 +463,18 @@ impl GpuCompositor {
         super::trace::set_gpu_window(0);
         super::trace::set_compositor_stage(super::trace::STAGE_GPU_ENCODE);
         let clear_color = bgra_color(background);
-        let mut composition = CompositionPass::new(&self.target, clear_color)
-            .map_err(|_| "Failed to begin GPU composition")?;
+        let damage_clip = damage.map(|(x, y, width, height)| PixelRect::new(x, y, width, height));
+        let mut composition = match damage_clip {
+            Some(clip) => {
+                let mut composition = CompositionPass::preserving(&self.target);
+                composition
+                    .draw_solid_rect(clip, clear_color, None)
+                    .map_err(|_| "Failed to clear GPU composition damage")?;
+                composition
+            }
+            None => CompositionPass::new(&self.target, clear_color)
+                .map_err(|_| "Failed to begin GPU composition")?,
+        };
         for window in windows {
             if !window.visible {
                 continue;
@@ -522,6 +513,9 @@ impl GpuCompositor {
                 ) else {
                     continue;
                 };
+                if damage_clip.is_some_and(|clip| !pixel_rects_intersect(destination, clip)) {
+                    continue;
+                }
                 let source_alpha = if window.has_alpha_content {
                     SourceAlpha::Respect
                 } else {
@@ -534,7 +528,7 @@ impl GpuCompositor {
                         source,
                         window.opacity,
                         source_alpha,
-                        None,
+                        damage_clip,
                     )
                     .map_err(|_| "Failed to compose GPU window texture")?;
             } else {
@@ -548,13 +542,16 @@ impl GpuCompositor {
                 ) else {
                     continue;
                 };
+                if damage_clip.is_some_and(|clip| !pixel_rects_intersect(destination, clip)) {
+                    continue;
+                }
                 let color = if window.focused {
                     bgra_color([150, 150, 200, 255])
                 } else {
                     bgra_color([180, 180, 180, 255])
                 };
                 composition
-                    .draw_solid_rect(destination, color, None)
+                    .draw_solid_rect(destination, color, damage_clip)
                     .map_err(|_| "Failed to compose GPU window placeholder")?;
             }
         }
@@ -565,6 +562,7 @@ impl GpuCompositor {
                 outline,
                 self.target.width(),
                 self.target.height(),
+                damage_clip,
             )?;
         }
         let (cursor_x, cursor_y) = cursor.draw_position();
@@ -577,15 +575,20 @@ impl GpuCompositor {
                 self.target.width(),
                 self.target.height(),
             )
+            && damage_clip.is_none_or(|clip| pixel_rects_intersect(destination, clip))
         {
+            let cursor_texture = self
+                .cursor_textures
+                .get(cursor.active_frame_index())
+                .ok_or("GPU cursor frame texture is missing")?;
             composition
                 .draw_textured_rect(
-                    &self.cursor_texture,
+                    cursor_texture,
                     destination,
                     source,
                     1.0,
                     SourceAlpha::Respect,
-                    None,
+                    damage_clip,
                 )
                 .map_err(|_| "Failed to compose GPU cursor")?;
         }
@@ -595,9 +598,24 @@ impl GpuCompositor {
             .submit_composition(&composition)
             .map_err(|_| "Failed to submit GPU composition")?;
         super::trace::set_compositor_stage(super::trace::STAGE_GPU_PRESENT);
-        self.target
-            .present(display)
-            .map_err(|_| "Failed to present GPU composition")?;
+        match damage {
+            Some((x, y, width, height)) => self
+                .target
+                .present_region(
+                    display,
+                    DisplayPresentRegion {
+                        x,
+                        y,
+                        width,
+                        height,
+                    },
+                )
+                .map_err(|_| "Failed to present GPU composition damage")?,
+            None => self
+                .target
+                .present(display)
+                .map_err(|_| "Failed to present GPU composition")?,
+        }
         super::trace::set_compositor_stage(super::trace::STAGE_GPU_COLLECT_RELEASES);
         Ok(self.take_presented_releases())
     }
@@ -745,6 +763,61 @@ impl GpuCompositor {
     }
 }
 
+fn create_cursor_textures(
+    context: &Context,
+    cursor: &Cursor,
+) -> Result<Vec<Texture>, &'static str> {
+    let frame_count = cursor.frame_count();
+    if frame_count == 0 {
+        return Err("Cursor image has no GPU-uploadable frames");
+    }
+
+    let mut textures = Vec::new();
+    textures
+        .try_reserve_exact(frame_count)
+        .map_err(|_| "Failed to reserve GPU cursor frame textures")?;
+    for frame_index in 0..frame_count {
+        let Some(pixels) = cursor.frame_bgra_pixels(frame_index) else {
+            let _ = release_cursor_textures(context, textures);
+            return Err("Cursor frame pixels are missing");
+        };
+        let texture = match context.create_sampled_bgra_texture(cursor.width, cursor.height) {
+            Ok(texture) => texture,
+            Err(_) => {
+                let _ = release_cursor_textures(context, textures);
+                return Err("Failed to create GPU cursor frame texture");
+            }
+        };
+        if context
+            .upload_texture_bgra(
+                &texture,
+                pixels,
+                cursor.width.saturating_mul(4),
+                PixelRect::new(0, 0, cursor.width, cursor.height),
+            )
+            .is_err()
+        {
+            let _ = context.release_texture(texture);
+            let _ = release_cursor_textures(context, textures);
+            return Err("Failed to upload GPU cursor frame texture");
+        }
+        textures.push(texture);
+    }
+    Ok(textures)
+}
+
+fn release_cursor_textures(context: &Context, textures: Vec<Texture>) -> Result<(), &'static str> {
+    let mut release_failed = false;
+    for texture in textures {
+        release_failed |= context.release_texture(texture).is_err();
+    }
+    if release_failed {
+        Err("Failed to release previous GPU cursor frame textures")
+    } else {
+        Ok(())
+    }
+}
+
 fn bgra_color(color: [u8; 4]) -> Color {
     Color::rgba(
         color[2] as f32 / 255.0,
@@ -779,11 +852,20 @@ fn clipped_rect(
     ))
 }
 
+fn pixel_rects_intersect(a: PixelRect, b: PixelRect) -> bool {
+    let a_right = a.x().saturating_add(a.width());
+    let a_bottom = a.y().saturating_add(a.height());
+    let b_right = b.x().saturating_add(b.width());
+    let b_bottom = b.y().saturating_add(b.height());
+    a.x() < b_right && b.x() < a_right && a.y() < b_bottom && b.y() < a_bottom
+}
+
 fn append_outline(
     composition: &mut CompositionPass<'_>,
     rect: (i32, i32, u32, u32),
     target_width: u32,
     target_height: u32,
+    clip: Option<PixelRect>,
 ) -> Result<(), &'static str> {
     append_outline_ring(
         composition,
@@ -791,6 +873,7 @@ fn append_outline(
         bgra_color([0, 0, 0, 255]),
         target_width,
         target_height,
+        clip,
     )?;
     if rect.2 > 2 && rect.3 > 2 {
         append_outline_ring(
@@ -799,6 +882,7 @@ fn append_outline(
             bgra_color([255, 255, 255, 255]),
             target_width,
             target_height,
+            clip,
         )?;
     }
     Ok(())
@@ -810,6 +894,7 @@ fn append_outline_ring(
     color: Color,
     target_width: u32,
     target_height: u32,
+    clip: Option<PixelRect>,
 ) -> Result<(), &'static str> {
     let (x, y, width, height) = rect;
     let edges = [
@@ -822,8 +907,11 @@ fn append_outline_ring(
         if let Some((destination, _)) =
             clipped_rect(x, y, width, height, target_width, target_height)
         {
+            if clip.is_some_and(|clip| !pixel_rects_intersect(destination, clip)) {
+                continue;
+            }
             composition
-                .draw_solid_rect(destination, color, None)
+                .draw_solid_rect(destination, color, clip)
                 .map_err(|_| "Failed to compose GPU resize outline")?;
         }
     }

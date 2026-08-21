@@ -1479,11 +1479,11 @@ impl Queue {
     pub(crate) fn submit_composition(
         &self,
         image: &Image,
-        clear_color: Color,
+        clear_color: Option<Color>,
         operations: &[CompositionOperation<'_>],
     ) -> HandleResult<()> {
         if image.context_handle != self.context_handle
-            || !clear_color.is_finite_unit()
+            || clear_color.is_some_and(|color| !color.is_finite_unit())
             || operations.len() > MAX_COMPOSITION_OPERATIONS
         {
             return Err(HandleError::InvalidParameter);
@@ -1617,7 +1617,9 @@ impl Queue {
             Viewport::new(image_width(image), image_height(image)),
             image.orientation,
         );
-        push_clear(&mut commands, clear_color);
+        if let Some(clear_color) = clear_color {
+            push_clear(&mut commands, clear_color);
+        }
         if !vertices.is_empty() {
             push_composition_inline_write(
                 &mut commands,

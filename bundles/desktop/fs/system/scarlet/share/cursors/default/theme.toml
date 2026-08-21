@@ -56,3 +56,9 @@ hotspot_y = 28
 image = "not_allowed.png"
 hotspot_x = 21
 hotspot_y = 28
+
+[help]
+alias = "arrow"
+
+[progress]
+alias = "wait"

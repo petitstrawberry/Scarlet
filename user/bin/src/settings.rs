@@ -32,6 +32,7 @@ use scarlet_ui::{
 use scarlet_ui_macros::View;
 use std::format;
 use std::fs;
+use std::io::Write;
 use std::println;
 use std::string::String;
 use std::sync::Mutex;
@@ -39,7 +40,7 @@ use std::thread;
 use std::time::Duration;
 use std::vec;
 use std::vec::Vec;
-use sws_client::{Connection, InputMethodInfo};
+use sws_client::{Connection, Error as SwsError, InputMethodInfo};
 
 // Preset colors - Apple system-style palette
 #[derive(Clone, Copy, Debug)]
@@ -52,6 +53,10 @@ const DEFAULT_BG_PREVIEW: [u8; 3] = [40, 40, 50];
 const DEFAULT_STYLE: BackgroundStyle = BackgroundStyle::GradientLines;
 const SWS_CONFIG_DIR: &str = "/etc/sws";
 const SWS_CONFIG_PATH: &str = "/etc/sws/config.toml";
+const SWS_CONFIG_TEMP_PATH: &str = "/tmp/sws-config.settings.tmp";
+const CURSOR_THEME_ROOT: &str = "/share/cursors";
+const DEFAULT_CURSOR_THEME_PATH: &str = "/share/cursors/default";
+const MAX_SETTINGS_TEXT_BYTES: usize = 64 * 1024;
 
 static AUDIO_SAS_CLIENT: Mutex<Option<SasClient>> = Mutex::new(None);
 static PICKER_REQUEST_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
@@ -59,6 +64,12 @@ static PICKER_UI_EVENTS: Mutex<Vec<PickerUiEvent>> = Mutex::new(Vec::new());
 
 const SBUS_METHOD_TIMEOUT_MS: u64 = 1_000;
 const PICKER_REQUEST_ATTEMPTS: usize = 5;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CursorThemeInfo {
+    name: String,
+    path: String,
+}
 
 enum PickerUiEvent {
     Opened(String),
@@ -490,25 +501,241 @@ fn audio_output_labels(outputs: &[OutputInfo]) -> Vec<String> {
     outputs.iter().map(output_label_from_info).collect()
 }
 
+fn read_limited_text(path: &str) -> core::result::Result<String, &'static str> {
+    let mut file = fs::File::open(path).map_err(|_| "failed to open text file")?;
+    let mut content = String::new();
+    let mut buffer = [0u8; 1024];
+
+    loop {
+        let bytes = file
+            .read(&mut buffer)
+            .map_err(|_| "failed to read text file")?;
+        if bytes == 0 {
+            break;
+        }
+        if content.len().saturating_add(bytes) > MAX_SETTINGS_TEXT_BYTES {
+            return Err("text file exceeds settings limit");
+        }
+        let chunk =
+            core::str::from_utf8(&buffer[..bytes]).map_err(|_| "text file is not valid UTF-8")?;
+        content.push_str(chunk);
+    }
+
+    Ok(content)
+}
+
+fn strip_toml_comment(line: &str) -> &str {
+    let mut in_string = false;
+    let mut escaped = false;
+    for (index, character) in line.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match character {
+            '\\' if in_string => escaped = true,
+            '"' => in_string = !in_string,
+            '#' if !in_string => return &line[..index],
+            _ => {}
+        }
+    }
+    line
+}
+
+fn toml_section_name(line: &str) -> Option<&str> {
+    if line.len() >= 2 && line.starts_with('[') && line.ends_with(']') {
+        Some(line[1..line.len() - 1].trim())
+    } else {
+        None
+    }
+}
+
+fn toml_assignment_key(line: &str) -> Option<&str> {
+    let equals = line.find('=')?;
+    Some(line[..equals].trim())
+}
+
+fn trim_toml_string(value: &str) -> &str {
+    let value = value.trim();
+    if value.len() >= 2 && value.starts_with('"') && value.ends_with('"') {
+        value[1..value.len() - 1].trim()
+    } else {
+        value
+    }
+}
+
+fn parse_toml_string_setting(content: &str, section: &str, key: &str) -> Option<String> {
+    let mut in_section = false;
+    for raw_line in content.lines() {
+        let line = strip_toml_comment(raw_line).trim();
+        if let Some(line_section) = toml_section_name(line) {
+            in_section = line_section == section;
+            continue;
+        }
+        if !in_section || toml_assignment_key(line) != Some(key) {
+            continue;
+        }
+        let equals = line.find('=')?;
+        let value = trim_toml_string(&line[equals + 1..]);
+        if !value.is_empty() {
+            return Some(String::from(value));
+        }
+    }
+    None
+}
+
+fn update_toml_assignment(content: &str, section: &str, key: &str, value: &str) -> String {
+    let assignment = format!("{} = {}", key, value);
+    let mut output = String::new();
+    let mut in_target_section = false;
+    let mut saw_target_section = false;
+    let mut wrote_assignment = false;
+
+    for raw_line in content.lines() {
+        let logical_line = strip_toml_comment(raw_line).trim();
+        if let Some(line_section) = toml_section_name(logical_line) {
+            if in_target_section && !wrote_assignment {
+                output.push_str(&assignment);
+                output.push('\n');
+                wrote_assignment = true;
+            }
+            in_target_section = line_section == section;
+            saw_target_section |= in_target_section;
+        }
+
+        if in_target_section && toml_assignment_key(logical_line) == Some(key) {
+            if !wrote_assignment {
+                output.push_str(&assignment);
+                output.push('\n');
+                wrote_assignment = true;
+            }
+            continue;
+        }
+
+        output.push_str(raw_line);
+        output.push('\n');
+    }
+
+    if in_target_section && !wrote_assignment {
+        output.push_str(&assignment);
+        output.push('\n');
+        wrote_assignment = true;
+    }
+
+    if !saw_target_section {
+        if !output.is_empty() && !output.ends_with("\n\n") {
+            output.push('\n');
+        }
+        output.push('[');
+        output.push_str(section);
+        output.push_str("]\n");
+        output.push_str(&assignment);
+        output.push('\n');
+        wrote_assignment = true;
+    }
+
+    debug_assert!(wrote_assignment);
+    output
+}
+
+fn persist_sws_assignment(
+    section: &str,
+    key: &str,
+    value: &str,
+) -> core::result::Result<(), &'static str> {
+    let content = read_limited_text(SWS_CONFIG_PATH).unwrap_or_default();
+    let updated = update_toml_assignment(&content, section, key, value);
+    let _ = fs::create_directory(SWS_CONFIG_DIR);
+    let mut file = fs::File::create(SWS_CONFIG_TEMP_PATH)
+        .map_err(|_| "failed to create temporary SWS config")?;
+    if file.write_all(updated.as_bytes()).is_err() || file.flush().is_err() {
+        let _ = fs::remove_file(SWS_CONFIG_TEMP_PATH);
+        return Err("failed to write temporary SWS config");
+    }
+    drop(file);
+    if fs::rename(SWS_CONFIG_TEMP_PATH, SWS_CONFIG_PATH).is_err() {
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        let mut final_file = match options.open(SWS_CONFIG_PATH) {
+            Ok(file) => file,
+            Err(_) => {
+                let _ = fs::remove_file(SWS_CONFIG_TEMP_PATH);
+                return Err("failed to open final SWS config");
+            }
+        };
+        if final_file.write_all(updated.as_bytes()).is_err() || final_file.flush().is_err() {
+            let _ = fs::remove_file(SWS_CONFIG_TEMP_PATH);
+            return Err("failed to replace SWS config");
+        }
+        drop(final_file);
+        let _ = fs::remove_file(SWS_CONFIG_TEMP_PATH);
+    }
+    Ok(())
+}
+
 fn save_output_scale_config(scale_milli: u32) {
-    let config_content = match scale_milli {
-        1000 => "[output]\nscale = 1.0\n",
-        _ => "[output]\nscale = 2.0\n",
+    let value = if scale_milli == 1000 { "1.0" } else { "2.0" };
+    match persist_sws_assignment("output", "scale", value) {
+        Ok(()) => println!("[settings] Saved output scale: {}", scale_milli),
+        Err(error) => println!("[settings] SWS config error: {}", error),
+    }
+}
+
+fn cursor_theme_name(content: &str, fallback: &str) -> String {
+    parse_toml_string_setting(content, "theme", "name").unwrap_or_else(|| String::from(fallback))
+}
+
+fn enumerate_cursor_themes() -> Vec<CursorThemeInfo> {
+    let mut themes = Vec::new();
+    let Ok(entries) = fs::list_directory(CURSOR_THEME_ROOT) else {
+        return themes;
     };
 
-    let _ = fs::create_directory(SWS_CONFIG_DIR);
+    for entry in entries {
+        if !entry.is_directory() || entry.name.starts_with('.') {
+            continue;
+        }
+        let path = format!("{}/{}", CURSOR_THEME_ROOT, entry.name);
+        let manifest_path = format!("{}/theme.toml", path);
+        let Ok(manifest) = read_limited_text(&manifest_path) else {
+            continue;
+        };
+        themes.push(CursorThemeInfo {
+            name: cursor_theme_name(&manifest, &entry.name),
+            path,
+        });
+    }
 
-    match fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(SWS_CONFIG_PATH)
-    {
-        Ok(mut file) => match file.write(config_content.as_bytes()) {
-            Ok(_) => println!("[settings] Saved output scale: {}", scale_milli),
-            Err(e) => println!("[settings] Write SWS config error: {:?}", e),
-        },
-        Err(e) => println!("[settings] Create SWS config error: {:?}", e),
+    themes.sort_by(|left, right| left.name.cmp(&right.name));
+    themes
+}
+
+fn current_cursor_theme_path() -> String {
+    read_limited_text(SWS_CONFIG_PATH)
+        .ok()
+        .and_then(|content| parse_toml_string_setting(&content, "cursor", "theme"))
+        .unwrap_or_else(|| String::from(DEFAULT_CURSOR_THEME_PATH))
+}
+
+fn load_cursor_theme_choices() -> (Vec<CursorThemeInfo>, usize) {
+    let themes = enumerate_cursor_themes();
+    let current_path = current_cursor_theme_path();
+    let selected = themes
+        .iter()
+        .position(|theme| theme.path == current_path)
+        .unwrap_or(0);
+    (themes, selected)
+}
+
+fn cursor_theme_error_message(error: SwsError) -> &'static str {
+    match error {
+        SwsError::ServerError(sws_protocol::error_codes::INVALID_CURSOR_THEME) => {
+            "theme is invalid or unreadable"
+        }
+        SwsError::ServerError(sws_protocol::error_codes::CURSOR_THEME_PERSIST_FAILED) => {
+            "could not save the SWS configuration"
+        }
+        _ => error.as_str(),
     }
 }
 
@@ -606,6 +833,9 @@ struct SettingsApp {
     audio_muted: State<bool>,
     audio_status: State<String>,
     navigation_title: State<String>,
+    cursor_themes: State<Vec<CursorThemeInfo>>,
+    cursor_theme_index: State<usize>,
+    cursor_theme_status: State<String>,
 }
 
 impl SettingsApp {
@@ -641,6 +871,11 @@ impl SettingsApp {
             .unwrap_or(0);
         let (audio_outputs, audio_output_index, audio_volume, audio_muted, audio_status) =
             load_audio_controls();
+        let (cursor_themes, cursor_theme_index) = load_cursor_theme_choices();
+        let cursor_theme_status = cursor_themes
+            .get(cursor_theme_index)
+            .map(|theme| format!("Active: {}", theme.name))
+            .unwrap_or_else(|| String::from("No cursor themes installed"));
         let app = Self {
             background_style: State::new(StateId::new(0), style),
             background_image: State::new(StateId::new(1), background_image),
@@ -661,6 +896,9 @@ impl SettingsApp {
             audio_muted: State::new(StateId::new(16), audio_muted),
             audio_status: State::new(StateId::new(17), audio_status),
             navigation_title: State::new(StateId::new(18), String::from("Appearance")),
+            cursor_themes: State::new(StateId::new(19), cursor_themes),
+            cursor_theme_index: State::new(StateId::new(20), cursor_theme_index),
+            cursor_theme_status: State::new(StateId::new(21), cursor_theme_status),
         };
         start_picker_response_listener();
         start_background_autosave(&app);
@@ -848,6 +1086,50 @@ impl SettingsApp {
             Err(error) => self
                 .audio_status
                 .set(format!("Failed to switch output: {}", error.as_str())),
+        }
+    }
+
+    fn refresh_cursor_themes(&self) {
+        let (themes, selected) = load_cursor_theme_choices();
+        let status = themes
+            .get(selected)
+            .map(|theme| format!("Active: {}", theme.name))
+            .unwrap_or_else(|| String::from("No cursor themes installed"));
+        self.cursor_themes.set(themes);
+        self.cursor_theme_index.set(selected);
+        self.cursor_theme_status.set(status);
+    }
+
+    fn select_cursor_theme(&self, index: usize) {
+        let themes = self.cursor_themes.get();
+        let Some(theme) = themes.get(index) else {
+            self.cursor_theme_status
+                .set(format!("Invalid cursor theme index: {}", index));
+            return;
+        };
+        let name = theme.name.clone();
+        let path = theme.path.clone();
+
+        match Connection::connect_default()
+            .and_then(|connection| connection.set_cursor_theme(&path))
+        {
+            Ok(()) => {
+                self.cursor_theme_index.set(index);
+                self.cursor_theme_status.set(format!("Active: {}", name));
+                println!("[settings] Cursor theme set to {} ({})", name, path);
+            }
+            Err(error) => {
+                self.refresh_cursor_themes();
+                self.cursor_theme_status.set(format!(
+                    "Failed to apply {}: {}",
+                    name,
+                    cursor_theme_error_message(error)
+                ));
+                println!(
+                    "[settings] Failed to set cursor theme {} ({}): {:?}",
+                    name, path, error
+                );
+            }
         }
     }
 }
@@ -1221,6 +1503,45 @@ fn display_page() -> impl View {
     .frame(f32::INFINITY, f32::INFINITY)
 }
 
+fn cursor_page(app: SettingsApp) -> impl View {
+    let themes = app.cursor_themes.get();
+    let labels = themes
+        .iter()
+        .map(|theme| theme.name.clone())
+        .collect::<Vec<_>>();
+    let selected = app.cursor_theme_index.clone();
+    let status = app.cursor_theme_status.get();
+    let select_app = app.clone();
+    let refresh_app = app.clone();
+
+    vstack! {
+        vstack! {
+            Text::new("Cursor Theme").font_size(14.0),
+            hstack! {
+                Text::new("Theme").font_size(13.0).frame_width(100.0),
+                Select::new(labels, selected)
+                    .width(380.0)
+                    .placeholder("No installed cursor themes")
+                    .on_change(move |index| {
+                        select_app.select_cursor_theme(index);
+                    }),
+                Spacer::new().frame_width(8.0),
+                Button::new("Refresh").on_click(move || {
+                    refresh_app.refresh_cursor_themes();
+                }),
+            }
+            .padding(10.0),
+            Text::new(status).font_size(12.0),
+            Text::new("Themes are discovered from /share/cursors and applied immediately.")
+                .font_size(11.0)
+                .color(ColorPalette::default().text_secondary()),
+        }
+        .padding(10.0),
+    }
+    .padding(10.0)
+    .frame(f32::INFINITY, f32::INFINITY)
+}
+
 fn audio_page(app: SettingsApp) -> impl View {
     let outputs = app.audio_outputs.get();
     let labels = audio_output_labels(&outputs);
@@ -1383,6 +1704,7 @@ impl Application for SettingsApp {
         let app = self.clone();
         let audio_app = self.clone();
         let input_app = self.clone();
+        let cursor_app = self.clone();
         let navigation_title = self.navigation_title.clone();
         let tz_regions = self.timezone_regions.get();
         let tz_region_idx = self.timezone_region_index.clone();
@@ -1463,6 +1785,10 @@ impl Application for SettingsApp {
                     NavigationLink::new("Display", display_page).on_select({
                         let title = navigation_title.clone();
                         move || title.set(String::from("Display"))
+                    }),
+                    NavigationLink::new("Mouse & Cursor", move || cursor_page(cursor_app.clone())).on_select({
+                        let title = navigation_title.clone();
+                        move || title.set(String::from("Mouse & Cursor"))
                     }),
                     NavigationLink::new("Audio", move || audio_page(audio_app.clone())).on_select({
                         let title = navigation_title.clone();

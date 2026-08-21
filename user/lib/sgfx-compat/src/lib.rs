@@ -23,10 +23,34 @@ pub trait SgfxImagePresentExt {
     ///
     /// Success after presentation, or a Scarlet handle error.
     fn present(&self, display: &framebuffer::DisplaySurface) -> HandleResult<()>;
+
+    /// Present one modified SGFX image region through a Scarlet display surface.
+    ///
+    /// # Arguments
+    ///
+    /// * `display` - Destination Scarlet display surface.
+    /// * `region` - Non-empty image region modified since the preceding present.
+    ///
+    /// # Returns
+    ///
+    /// Success after the regional presentation, or a Scarlet handle error.
+    fn present_region(
+        &self,
+        display: &framebuffer::DisplaySurface,
+        region: framebuffer::DisplayPresentRegion,
+    ) -> HandleResult<()>;
 }
 
 impl SgfxImagePresentExt for Image {
     fn present(&self, display: &framebuffer::DisplaySurface) -> HandleResult<()> {
         display.present_image(self.shared_handle(), None)
+    }
+
+    fn present_region(
+        &self,
+        display: &framebuffer::DisplaySurface,
+        region: framebuffer::DisplayPresentRegion,
+    ) -> HandleResult<()> {
+        display.present_image(self.shared_handle(), Some(region))
     }
 }

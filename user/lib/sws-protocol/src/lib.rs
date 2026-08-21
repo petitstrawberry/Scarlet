@@ -41,6 +41,8 @@ pub mod capabilities {
     pub const POINTER_LOCK: u64 = 1 << 1;
     /// Windows may select a compositor-provided cursor icon.
     pub const CURSOR_ICONS: u64 = 1 << 2;
+    /// System settings may replace the active filesystem-backed cursor theme.
+    pub const CURSOR_THEMES: u64 = 1 << 3;
 }
 
 /// Compositor-provided mouse cursor icons.
@@ -72,11 +74,15 @@ pub enum CursorIcon {
     Wait = 9,
     /// Operation is not allowed at the current location.
     NotAllowed = 10,
+    /// Context-sensitive help is available.
+    Help = 11,
+    /// Work continues in the background while interaction remains available.
+    Progress = 12,
 }
 
 impl CursorIcon {
     /// All standard cursor icons in wire-value order.
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 13] = [
         Self::Arrow,
         Self::Pointer,
         Self::Text,
@@ -88,6 +94,8 @@ impl CursorIcon {
         Self::ResizeNwse,
         Self::Wait,
         Self::NotAllowed,
+        Self::Help,
+        Self::Progress,
     ];
 
     /// Decode a stable protocol value.
@@ -112,6 +120,8 @@ impl CursorIcon {
             8 => Some(Self::ResizeNwse),
             9 => Some(Self::Wait),
             10 => Some(Self::NotAllowed),
+            11 => Some(Self::Help),
+            12 => Some(Self::Progress),
             _ => None,
         }
     }
@@ -156,6 +166,10 @@ pub mod error_codes {
     pub const POINTER_LOCK_NOT_OWNED: u32 = 108;
     /// Pointer lock requires a visible, non-minimized, keyboard-focused window.
     pub const POINTER_LOCK_DENIED: u32 = 109;
+    /// The requested cursor theme path or theme contents are invalid.
+    pub const INVALID_CURSOR_THEME: u32 = 110;
+    /// SWS loaded the cursor theme but could not persist the selection.
+    pub const CURSOR_THEME_PERSIST_FAILED: u32 = 111;
 }
 
 /// Message type IDs (client -> server).
@@ -213,6 +227,8 @@ pub mod client_msg {
     pub const SET_POINTER_LOCK: u32 = 42;
     /// Select a compositor-provided cursor for an owned window.
     pub const SET_CURSOR_ICON: u32 = 43;
+    /// Validate, persist, and activate an installed cursor theme.
+    pub const SET_CURSOR_THEME: u32 = 44;
 
     // Text input client API messages (200-219)
     pub const TEXT_INPUT_CREATE: u32 = 200;
@@ -275,6 +291,8 @@ pub mod server_msg {
     pub const WINDOW_STATE_CHANGED: u32 = 32;
     /// Pointer lock state changed, including compositor-forced release.
     pub const POINTER_LOCK_CHANGED: u32 = 33;
+    /// Confirmation that the active cursor theme changed.
+    pub const CURSOR_THEME_CHANGED: u32 = 34;
 
     // Text input client events (200-219)
     pub const TEXT_INPUT_CREATED: u32 = 200;
@@ -298,6 +316,9 @@ pub mod server_msg {
 
 /// Maximum UTF-8 bytes carried by one text-input message.
 pub const TEXT_INPUT_MAX_BYTES: usize = 1024;
+
+/// Maximum UTF-8 bytes in one installed cursor theme path.
+pub const CURSOR_THEME_PATH_MAX_BYTES: usize = 512;
 
 /// Maximum bytes used for binary preedit span payloads.
 pub const TEXT_INPUT_PREEDIT_SPANS_MAX_BYTES: usize = 512;
@@ -910,6 +931,12 @@ pub enum ClientMessageRef<'a> {
         icon: CursorIcon,
     },
 
+    /// Replace the global cursor theme with one installed below
+    /// `/share/cursors`.
+    SetCursorTheme {
+        theme_path: &'a [u8],
+    },
+
     /// Set window type for Z-order management
     /// Type: 0 = Normal, 1 = AlwaysOnTop, 2 = Taskbar, 3 = Desktop
     SetWindowType {
@@ -1184,6 +1211,8 @@ pub enum ServerMessage {
         window_id: u32,
         locked: bool,
     },
+    /// The requested global cursor theme was loaded and persisted.
+    CursorThemeChanged,
     InputEvent {
         window_id: u32,
         time: u64,
@@ -1762,6 +1791,13 @@ pub fn parse_client_message<'a>(
             let icon = CursorIcon::from_raw(read_u32(payload, 4)?)
                 .ok_or(ProtocolError::MalformedPayload)?;
             Ok(ClientMessageRef::SetCursorIcon { window_id, icon })
+        }
+        client_msg::SET_CURSOR_THEME => {
+            let theme_path = read_len_prefixed_bytes(payload, 0, CURSOR_THEME_PATH_MAX_BYTES)?;
+            if theme_path.is_empty() {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            Ok(ClientMessageRef::SetCursorTheme { theme_path })
         }
         client_msg::SET_WINDOW_TYPE => {
             if payload.len() != 8 {
@@ -2432,6 +2468,12 @@ pub fn parse_server_message(msg_type: u32, payload: &[u8]) -> Result<ServerMessa
                 _ => return Err(ProtocolError::MalformedPayload),
             };
             Ok(ServerMessage::PointerLockChanged { window_id, locked })
+        }
+        server_msg::CURSOR_THEME_CHANGED => {
+            if !payload.is_empty() {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            Ok(ServerMessage::CursorThemeChanged)
         }
         server_msg::INPUT_EVENT => {
             if payload.len() != 20 {
@@ -3906,6 +3948,22 @@ pub fn payload_set_cursor_icon(window_id: u32, icon: CursorIcon) -> [u8; 8] {
     payload
 }
 
+/// Build payload for client->server `SET_CURSOR_THEME`.
+///
+/// # Arguments
+///
+/// * `theme_path` - UTF-8 path to an installed theme below `/share/cursors`.
+///
+/// # Returns
+///
+/// A length-prefixed cursor theme path.
+pub fn payload_set_cursor_theme(theme_path: &[u8]) -> Vec<u8> {
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&(theme_path.len() as u32).to_le_bytes());
+    payload.extend_from_slice(theme_path);
+    payload
+}
+
 /// Build payload for server->client `POINTER_LOCK_CHANGED`.
 ///
 /// # Arguments
@@ -4511,15 +4569,15 @@ pub fn payload_set_window_has_alpha_content(window_id: u32, has_alpha: bool) -> 
 #[cfg(all(test, feature = "std"))]
 mod tests {
     use super::{
-        ClientMessageRef, CursorIcon, MessageHeader, ProtocolError, ServerMessage,
-        WindowPlacement, client_msg, encode_routed_frame, error_codes, parse_client_message,
-        parse_server_message,
-        payload_activation_token, payload_create_window_with_placement,
+        CURSOR_THEME_PATH_MAX_BYTES, ClientMessageRef, CursorIcon, MessageHeader, ProtocolError,
+        ServerMessage, WindowPlacement, client_msg, encode_routed_frame, error_codes,
+        parse_client_message, parse_server_message, payload_activation_token,
+        payload_create_window_with_placement,
         payload_create_window_with_placement_and_activation_token,
         payload_create_window_with_position, payload_error, payload_pointer_lock_changed,
-        payload_request_activation_token, payload_set_cursor_icon, payload_set_fullscreen,
-        payload_set_pointer_lock, payload_unset_fullscreen, payload_window_state_changed,
-        server_msg, window_placement, window_state,
+        payload_request_activation_token, payload_set_cursor_icon, payload_set_cursor_theme,
+        payload_set_fullscreen, payload_set_pointer_lock, payload_unset_fullscreen,
+        payload_window_state_changed, server_msg, window_placement, window_state,
     };
 
     #[test]
@@ -4734,6 +4792,41 @@ mod tests {
         payload[4..8].copy_from_slice(&u32::MAX.to_le_bytes());
         assert_eq!(
             parse_client_message(client_msg::SET_CURSOR_ICON, &payload),
+            Err(ProtocolError::MalformedPayload)
+        );
+    }
+
+    #[test]
+    fn cursor_theme_request_and_response_round_trip() {
+        let path = b"/share/cursors/default";
+        let payload = payload_set_cursor_theme(path);
+        assert_eq!(
+            parse_client_message(client_msg::SET_CURSOR_THEME, &payload).unwrap(),
+            ClientMessageRef::SetCursorTheme { theme_path: path }
+        );
+        assert_eq!(
+            parse_server_message(server_msg::CURSOR_THEME_CHANGED, &[]).unwrap(),
+            ServerMessage::CursorThemeChanged
+        );
+    }
+
+    #[test]
+    fn cursor_theme_rejects_empty_or_oversized_paths() {
+        assert_eq!(
+            parse_client_message(client_msg::SET_CURSOR_THEME, &payload_set_cursor_theme(b"")),
+            Err(ProtocolError::MalformedPayload)
+        );
+
+        let oversized = vec![b'a'; CURSOR_THEME_PATH_MAX_BYTES + 1];
+        assert_eq!(
+            parse_client_message(
+                client_msg::SET_CURSOR_THEME,
+                &payload_set_cursor_theme(&oversized)
+            ),
+            Err(ProtocolError::MalformedPayload)
+        );
+        assert_eq!(
+            parse_server_message(server_msg::CURSOR_THEME_CHANGED, &[0]),
             Err(ProtocolError::MalformedPayload)
         );
     }

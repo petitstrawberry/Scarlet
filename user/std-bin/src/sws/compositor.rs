@@ -155,6 +155,7 @@ const COMPOSITOR_IDLE_RECHECK_NS: i64 = 250_000_000;
 const COMPOSITOR_WAKE_ERROR_DELAY_MS: u64 = 10;
 const DEFAULT_OUTPUT_SCALE_MILLI: u32 = 2000;
 const DEFAULT_CURSOR_THEME_PATH: &str = "/share/cursors/default";
+const INSTALLED_CURSOR_THEME_ROOT: &str = "/share/cursors/";
 
 type DamageRect = (i32, i32, u32, u32);
 type PresentDamage = Option<Vec<DamageRect>>;
@@ -582,6 +583,17 @@ fn load_cursor_theme(theme_path: &str, output_scale_milli: u32) -> Result<Cursor
         theme.image_scale_milli() % 1000
     );
     Ok(cursor)
+}
+
+fn is_installed_cursor_theme_path(theme_path: &str) -> bool {
+    let Some(theme_name) = theme_path.strip_prefix(INSTALLED_CURSOR_THEME_ROOT) else {
+        return false;
+    };
+    !theme_name.is_empty()
+        && theme_name != "."
+        && theme_name != ".."
+        && !theme_name.contains('/')
+        && !theme_name.contains('\0')
 }
 
 /// Compositor - the main window server with proper layer compositing
@@ -1708,11 +1720,23 @@ impl Compositor {
         self.disable_gpu_after_runtime_failure("SWS_BACKEND=sgfx window release failed")
     }
 
-    /// Compose and present the whole scene through the optional GPU path.
+    fn gpu_present_damage(&self) -> Option<(u32, u32, u32, u32)> {
+        let Some(rects) = self.pending_present_damage() else {
+            return None;
+        };
+        let mut rects = rects.into_iter();
+        let first = rects.next()?;
+        let union = rects.fold(first, Self::union_damage_rect);
+        self.clamp_rect_to_screen(union)
+            .map(|(x, y, width, height)| (x as u32, y as u32, width, height))
+    }
+
+    /// Compose and present the damaged scene through the optional GPU path.
     ///
     /// In `auto` mode a GPU error triggers a full CPU redraw during this same
     /// frame. The strict `sgfx` mode instead propagates a fatal error.
     fn composite_and_present_gpu(&mut self) -> Result<bool, &'static str> {
+        let damage = self.gpu_present_damage();
         let Some(gpu_compositor) = self.gpu_compositor.as_mut() else {
             return Ok(false);
         };
@@ -1723,6 +1747,7 @@ impl Compositor {
             self.bg_color,
             self.resize_outline,
             cursor_visible(self.pointer_lock),
+            damage,
         );
         match result {
             Ok(releases) => {
@@ -2685,6 +2710,40 @@ impl Compositor {
         self.cursor.set_icon(icon)
     }
 
+    fn activate_cursor_theme(&mut self, theme_path: &str) -> Result<(), u32> {
+        if !is_installed_cursor_theme_path(theme_path) {
+            return Err(sws_protocol::error_codes::INVALID_CURSOR_THEME);
+        }
+
+        let mut cursor =
+            load_cursor_theme(theme_path, self.output_scale_milli).map_err(|error| {
+                println!(
+                    "[Compositor] Rejecting cursor theme {}: {}",
+                    theme_path, error
+                );
+                sws_protocol::error_codes::INVALID_CURSOR_THEME
+            })?;
+        config::persist_cursor_theme(theme_path).map_err(|error| {
+            println!(
+                "[Compositor] Failed to persist cursor theme {}: {}",
+                theme_path, error
+            );
+            sws_protocol::error_codes::CURSOR_THEME_PERSIST_FAILED
+        })?;
+
+        cursor.x = self.cursor.x;
+        cursor.y = self.cursor.y;
+        cursor.mark_drawn();
+        self.cursor = cursor;
+        self.refresh_cursor_icon();
+        if let Some(gpu_compositor) = self.gpu_compositor.as_mut() {
+            gpu_compositor.invalidate_cursor_texture();
+        }
+        self.full_redraw_needed = true;
+        println!("[Compositor] Activated cursor theme: {}", theme_path);
+        Ok(())
+    }
+
     fn cursor_rect(&self) -> (i32, i32, u32, u32) {
         let (x, y) = self.cursor.draw_position();
         (x, y, self.cursor.width, self.cursor.height)
@@ -2853,9 +2912,21 @@ impl Compositor {
         );
     }
 
+    fn cursor_wait_timeout_ns(&self) -> i64 {
+        if !cursor_visible(self.pointer_lock) {
+            return COMPOSITOR_IDLE_RECHECK_NS;
+        }
+        let Some(deadline) = self.cursor.next_animation_deadline_ns() else {
+            return COMPOSITOR_IDLE_RECHECK_NS;
+        };
+        deadline
+            .saturating_sub(monotonic_time_ns())
+            .min(COMPOSITOR_IDLE_RECHECK_NS as u64) as i64
+    }
+
     fn wait_for_event_signal(&mut self) {
         let mut handles = [PollHandle::new(self.wake_read.as_raw() as u32, POLLIN)];
-        let ready = match poll(&mut handles, COMPOSITOR_IDLE_RECHECK_NS) {
+        let ready = match poll(&mut handles, self.cursor_wait_timeout_ns()) {
             Ok(ready) => ready,
             Err(_) => {
                 super::ipc::consume_compositor_wake();
@@ -2903,7 +2974,8 @@ impl Compositor {
     }
 
     fn process_pending_events(&mut self) -> Result<bool, &'static str> {
-        let mut needs_redraw = false;
+        let mut needs_redraw =
+            cursor_visible(self.pointer_lock) && self.cursor.advance_animation(monotonic_time_ns());
 
         if self.check_display_resize()? {
             needs_redraw = true;
@@ -2928,6 +3000,10 @@ impl Compositor {
                     needs_redraw = true;
                 }
             }
+        }
+
+        if cursor_visible(self.pointer_lock) {
+            needs_redraw |= self.cursor.advance_animation(monotonic_time_ns());
         }
 
         Ok(needs_redraw)
@@ -5126,6 +5202,24 @@ impl Compositor {
                     self.refresh_cursor_icon();
                 }
             }
+            IpcEvent::SetCursorTheme {
+                client_id,
+                request_id,
+                theme_path,
+            } => match self.activate_cursor_theme(&theme_path) {
+                Ok(()) => send_response_to_client(
+                    client_id,
+                    sws_protocol::server_msg::CURSOR_THEME_CHANGED,
+                    request_id,
+                    Vec::new(),
+                ),
+                Err(code) => send_response_to_client(
+                    client_id,
+                    sws_protocol::server_msg::ERROR,
+                    request_id,
+                    sws_protocol::payload_error(code).to_vec(),
+                ),
+            },
             IpcEvent::FocusWindow { window_id } => {
                 if let Some(fullscreen_id) = self
                     .window_manager

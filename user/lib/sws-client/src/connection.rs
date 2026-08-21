@@ -77,6 +77,15 @@ impl Capabilities {
     pub const fn supports_cursor_icons(self) -> bool {
         self.capabilities & protocol::capabilities::CURSOR_ICONS != 0
     }
+
+    /// Whether the server supports live filesystem-backed cursor themes.
+    ///
+    /// # Returns
+    ///
+    /// `true` when [`Connection::set_cursor_theme`] may be requested.
+    pub const fn supports_cursor_themes(self) -> bool {
+        self.capabilities & protocol::capabilities::CURSOR_THEMES != 0
+    }
 }
 
 /// Stable identity for one registered shared SGFX buffer.
@@ -2086,6 +2095,34 @@ impl Connection {
             .map_err(|_| Error::SendFailed)
     }
 
+    /// Validate, persist, and immediately activate an installed cursor theme.
+    ///
+    /// SWS accepts only theme directories below `/share/cursors`. The active
+    /// per-window cursor icon is preserved across the theme replacement.
+    ///
+    /// # Arguments
+    ///
+    /// * `theme_path` - Absolute UTF-8 path to the installed theme directory.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` after SWS has loaded and persisted the theme, or an error when
+    /// the path, theme contents, connection, or configuration write is invalid.
+    pub fn set_cursor_theme(&self, theme_path: &str) -> Result<(), Error> {
+        if theme_path.is_empty()
+            || theme_path.len() > protocol::CURSOR_THEME_PATH_MAX_BYTES
+        {
+            return Err(Error::InvalidRequest);
+        }
+        let payload = protocol::payload_set_cursor_theme(theme_path.as_bytes());
+        let response = self.request(protocol::client_msg::SET_CURSOR_THEME, &payload)?;
+        match response.message() {
+            ServerMessage::CursorThemeChanged => Ok(()),
+            ServerMessage::Error { code } => Err(Error::ServerError(code)),
+            _ => Err(Error::InvalidResponse),
+        }
+    }
+
     /// Focus and raise a window to the top of the Z-order.
     ///
     /// This only works for surfaces created by this client connection.
@@ -2679,6 +2716,19 @@ mod pointer_lock_tests {
         assert!(!capabilities.supports_cursor_icons());
         capabilities.capabilities |= protocol::capabilities::CURSOR_ICONS;
         assert!(capabilities.supports_cursor_icons());
+    }
+
+    #[test]
+    fn capability_reports_cursor_theme_support() {
+        let mut capabilities = Capabilities {
+            protocol_version: protocol::SWS_PROTOCOL_VERSION,
+            capabilities: 0,
+            compositor_epoch: 1,
+            compositor_backend: protocol::compositor_backends::CPU,
+        };
+        assert!(!capabilities.supports_cursor_themes());
+        capabilities.capabilities |= protocol::capabilities::CURSOR_THEMES;
+        assert!(capabilities.supports_cursor_themes());
     }
 }
 

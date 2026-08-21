@@ -6,8 +6,9 @@ bundled images are 42 x 56 pixel 2x assets, producing a 21 x 28 logical cursor
 at the default output scale.
 
 The theme currently provides `arrow`, `pointer`, `text`, `crosshair`, `move`,
-four resize directions, `wait`, and `not_allowed`. A theme may reuse a complete
-image definition, including its hotspot, without duplicating files:
+four resize directions, `wait`, and `not_allowed`; `help` aliases `arrow`, and
+`progress` aliases `wait`. A theme may reuse a complete image definition,
+including its hotspot, without duplicating files:
 
 ```toml
 [crosshair]
@@ -16,6 +17,8 @@ alias = "arrow"
 
 Aliases may refer forward or chain through other aliases. SWS rejects missing
 targets and cycles. A normal filesystem symlink can also be used as an image.
+PNG files may be animated APNGs when each animation frame covers the complete
+source canvas.
 
 `arrow.svg` keeps the source polygon coordinates from SVG Repo's CC0 `Mouse
 Arrow` (ID 168135); only its presentation and canvas are adapted. Its left edge

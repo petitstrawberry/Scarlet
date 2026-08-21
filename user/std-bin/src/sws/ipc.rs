@@ -591,8 +591,9 @@ pub fn set_sgfx_shared_images_available(available: bool) {
 }
 
 fn sws_capabilities() -> u64 {
-    let mut capabilities =
-        protocol::capabilities::POINTER_LOCK | protocol::capabilities::CURSOR_ICONS;
+    let mut capabilities = protocol::capabilities::POINTER_LOCK
+        | protocol::capabilities::CURSOR_ICONS
+        | protocol::capabilities::CURSOR_THEMES;
     if SGFX_SHARED_IMAGES_AVAILABLE.load(Ordering::Acquire) {
         capabilities |= protocol::capabilities::SGFX_SHARED_IMAGE;
     }
@@ -2877,6 +2878,21 @@ fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Ha
                 }
                 push_ipc_event(IpcEvent::SetCursorIcon { window_id, icon });
             }
+            Ok(ClientMessageRef::SetCursorTheme { theme_path }) => {
+                let Ok(theme_path) = core::str::from_utf8(theme_path) else {
+                    let _ = write_protocol_error(
+                        &mut stream_writer,
+                        request_id,
+                        protocol::error_codes::INVALID_CURSOR_THEME,
+                    );
+                    continue;
+                };
+                push_ipc_event(IpcEvent::SetCursorTheme {
+                    client_id,
+                    request_id,
+                    theme_path: String::from(theme_path),
+                });
+            }
             Ok(ClientMessageRef::FocusWindow { window_id }) => {
                 println!(
                     "[ClientThread {}] FocusWindow: window_id={}",
@@ -3858,6 +3874,13 @@ pub enum IpcEvent {
     SetCursorIcon {
         window_id: u32,
         icon: protocol::CursorIcon,
+    },
+
+    /// Validate, persist, and activate a global cursor theme.
+    SetCursorTheme {
+        client_id: usize,
+        request_id: u8,
+        theme_path: String,
     },
 
     /// Focus and raise a window
