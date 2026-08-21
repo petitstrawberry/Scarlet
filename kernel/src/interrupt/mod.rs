@@ -404,7 +404,9 @@ impl InterruptManager {
             .collect();
 
         let mut controllers = self.controllers().write();
-        match controllers.init_external_controller() {
+        match controllers
+            .init_external_controller(controllers::InterruptControllerInitMode::ColdBootReset)
+        {
             Ok(()) => {}
             Err(e) => {
                 crate::early_println!("Failed to initialize external controller: {}", e);
@@ -441,7 +443,10 @@ impl InterruptManager {
 
         if let Some(controller) = controllers.timer_controller_mut_for_cpu(cpu_id) {
             crate::early_println!("[interrupt] CPU {}: timer controller init begin", cpu_id);
-            if let Err(e) = controller.init(cpu_id) {
+            if let Err(e) = controller.init(
+                cpu_id,
+                controllers::InterruptControllerInitMode::ColdBootReset,
+            ) {
                 crate::early_println!(
                     "[interrupt] AP {}: failed to init timer controller: {}",
                     cpu_id,
@@ -456,7 +461,10 @@ impl InterruptManager {
                 "[interrupt] CPU {}: software interrupt controller init begin",
                 cpu_id
             );
-            if let Err(e) = controller.init(cpu_id) {
+            if let Err(e) = controller.init(
+                cpu_id,
+                controllers::InterruptControllerInitMode::ColdBootReset,
+            ) {
                 crate::early_println!(
                     "[interrupt] AP {}: failed to init software interrupt controller: {}",
                     cpu_id,
@@ -474,7 +482,10 @@ impl InterruptManager {
                 "[interrupt] CPU {}: external controller per-CPU init begin",
                 cpu_id
             );
-            if let Err(e) = controller.init_for_cpu(cpu_id) {
+            if let Err(e) = controller.init_for_cpu(
+                cpu_id,
+                controllers::InterruptControllerInitMode::ColdBootReset,
+            ) {
                 crate::early_println!(
                     "[interrupt] AP {}: failed to init external controller: {}",
                     cpu_id,
@@ -1560,7 +1571,7 @@ mod tests {
     }
 
     impl controllers::ExternalInterruptController for FakeExternalController {
-        fn init(&mut self) -> InterruptResult<()> {
+        fn init(&mut self, _mode: controllers::InterruptControllerInitMode) -> InterruptResult<()> {
             Ok(())
         }
 

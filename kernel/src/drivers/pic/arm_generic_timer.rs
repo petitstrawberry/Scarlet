@@ -143,7 +143,11 @@ impl ArmGenericTimer {
 }
 
 impl TimerController for ArmGenericTimer {
-    fn init(&mut self, _cpu_id: CpuId) -> InterruptResult<()> {
+    fn init(
+        &mut self,
+        _cpu_id: CpuId,
+        _mode: crate::interrupt::controllers::InterruptControllerInitMode,
+    ) -> InterruptResult<()> {
         // Make sure the timer interrupt is masked until explicitly enabled.
         Self::disable_timer_interrupt();
         Ok(())

@@ -32,6 +32,20 @@ pub enum IrqFlow {
     Msi,
 }
 
+/// Lifecycle operation requested by the interrupt core.
+///
+/// Cold boot transfers interrupt-controller ownership to Scarlet. Controllers
+/// must discard firmware runtime state and establish a deterministic baseline:
+/// owned sources are masked, inactive where the hardware exposes active state,
+/// and assigned controller-defined default priorities and routing. A future
+/// suspend/resume path must restore state explicitly saved by Scarlet rather
+/// than treating firmware state as an initialization input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InterruptControllerInitMode {
+    /// Destructively normalize the controller into Scarlet-owned cold state.
+    ColdBootReset,
+}
+
 /// Mapping from a controller-local interrupt source to a kernel virtual IRQ.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IrqMapping {
@@ -87,7 +101,7 @@ pub trait TimerController: Send + Sync {
     ///
     /// `Ok(())` on success, or an interrupt error when the CPU is invalid or
     /// the hardware cannot be initialized.
-    fn init(&mut self, cpu_id: CpuId) -> InterruptResult<()>;
+    fn init(&mut self, cpu_id: CpuId, mode: InterruptControllerInitMode) -> InterruptResult<()>;
 
     /// Enable timer interrupts for a CPU.
     ///
@@ -175,7 +189,7 @@ pub trait SoftwareInterruptController: Send + Sync {
     /// # Returns
     ///
     /// `Ok(())` on success, or an interrupt error on failure.
-    fn init(&mut self, cpu_id: CpuId) -> InterruptResult<()>;
+    fn init(&mut self, cpu_id: CpuId, mode: InterruptControllerInitMode) -> InterruptResult<()>;
 
     /// Enable software interrupts for a CPU.
     ///
@@ -238,12 +252,13 @@ pub trait SoftwareInterruptController: Send + Sync {
 /// External interrupt controllers manage interrupts from external devices
 /// and can route them to different CPUs with priority support.
 pub trait ExternalInterruptController: Send + Sync {
-    /// Initialize the external interrupt controller.
+    /// Initialize the external interrupt controller under an explicit
+    /// lifecycle policy.
     ///
     /// # Returns
     ///
     /// `Ok(())` on success, or an interrupt error when initialization fails.
-    fn init(&mut self) -> InterruptResult<()>;
+    fn init(&mut self, mode: InterruptControllerInitMode) -> InterruptResult<()>;
 
     /// Enable a hardware interrupt for a CPU.
     ///
@@ -528,7 +543,11 @@ pub trait ExternalInterruptController: Send + Sync {
     /// # Returns
     ///
     /// `Ok(())` on success, or an interrupt error on failure.
-    fn init_for_cpu(&mut self, _cpu_id: CpuId) -> InterruptResult<()> {
+    fn init_for_cpu(
+        &mut self,
+        _cpu_id: CpuId,
+        _mode: InterruptControllerInitMode,
+    ) -> InterruptResult<()> {
         Ok(())
     }
 }
@@ -715,10 +734,13 @@ impl InterruptControllers {
     }
 
     /// Initialize all local controllers for their respective CPUs
-    pub fn init_local_controllers(&mut self) -> InterruptResult<()> {
+    pub fn init_local_controllers(
+        &mut self,
+        mode: InterruptControllerInitMode,
+    ) -> InterruptResult<()> {
         for (cpu_id, &controller_index) in &self.cpu_to_timer_controller {
             if let Some(controller) = self.timer_controllers.get_mut(controller_index) {
-                controller.init(*cpu_id)?;
+                controller.init(*cpu_id, mode)?;
             } else {
                 return Err(InterruptError::ControllerNotFound);
             }
@@ -728,7 +750,7 @@ impl InterruptControllers {
                 .software_interrupt_controllers
                 .get_mut(controller_index)
             {
-                controller.init(*cpu_id)?;
+                controller.init(*cpu_id, mode)?;
             } else {
                 return Err(InterruptError::ControllerNotFound);
             }
@@ -737,12 +759,15 @@ impl InterruptControllers {
     }
 
     /// Initialize the external controller
-    pub fn init_external_controller(&mut self) -> InterruptResult<()> {
+    pub fn init_external_controller(
+        &mut self,
+        mode: InterruptControllerInitMode,
+    ) -> InterruptResult<()> {
         if let Some(controller) = self.external_controller.as_mut() {
             crate::early_println!(
                 "[interrupt] init_external_controller: calling controller.init()"
             );
-            controller.init()?;
+            controller.init(mode)?;
             crate::early_println!(
                 "[interrupt] init_external_controller: controller.init() returned"
             );

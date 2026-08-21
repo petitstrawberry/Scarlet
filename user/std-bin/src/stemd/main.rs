@@ -7,7 +7,7 @@
 //! - Provides an IPC interface via LocalSocket for control commands
 //! - Supports .desktop files for application definitions
 
-use core::sync::atomic::fence;
+use core::sync::atomic::{AtomicBool, Ordering, fence};
 use sbus_client as sbus;
 use scarlet_desktop_config::DESKTOP_STEMD_LIST_APPLICATIONS_METHOD;
 use scarlet_os::handle::capability::StreamOps;
@@ -134,6 +134,9 @@ static APP_ACTIVATION_LOCK: Mutex<()> = Mutex::new(());
 // Global tracking for running services
 static RUNNING_SERVICES: Mutex<Vec<RunningService>> = Mutex::new(Vec::new());
 static READY_SERVICES: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+const STEMD_IPC_SOCKET_PATH: &str = "/tmp/stemd.sock";
+static IPC_ACCEPT_LOOP_STARTED: AtomicBool = AtomicBool::new(false);
 
 // Global sbus connection for receiving method calls
 // Wrapped in Option to handle initialization
@@ -371,14 +374,10 @@ fn add_running_service(name: String, pid: i32, exec_path: String) {
 
 fn remove_running_service_by_pid(pid: i32) -> Option<RunningService> {
     let mut services = RUNNING_SERVICES.lock().expect("stemd mutex poisoned");
-    let removed = services
+    services
         .iter()
         .position(|service| service.pid == pid)
-        .map(|pos| services.remove(pos));
-    if let Some(service) = removed.as_ref() {
-        clear_service_ready(&service.name);
-    }
-    removed
+        .map(|pos| services.remove(pos))
 }
 
 fn mark_service_ready(service_name: &str) {
@@ -1012,32 +1011,34 @@ fn read_until(
     true
 }
 
-/// IPC thread: accept commands via socket
-fn ipc_thread() {
-    println!("stemd: IPC thread started");
-
-    let socket_path = "/tmp/stemd.sock";
-
-    // Create and bind socket
+/// Create the stemd IPC listener before any readiness-reporting service starts.
+fn prepare_ipc_server() -> Option<Socket> {
     let server = match Socket::new() {
         Ok(s) => s,
         Err(e) => {
             println!("stemd: Failed to create IPC socket: {:?}", e);
-            return;
+            return None;
         }
     };
 
-    if let Err(e) = server.bind(socket_path) {
+    if let Err(e) = server.bind(STEMD_IPC_SOCKET_PATH) {
         println!("stemd: Failed to bind IPC socket: {:?}", e);
-        return;
+        return None;
     }
 
     if let Err(e) = server.listen(5) {
         println!("stemd: Failed to listen on IPC socket: {:?}", e);
-        return;
+        return None;
     }
 
-    println!("stemd: IPC socket listening at {}", socket_path);
+    println!("stemd: IPC socket listening at {}", STEMD_IPC_SOCKET_PATH);
+    Some(server)
+}
+
+/// IPC thread: accept commands from an already-listening socket.
+fn ipc_thread(server: Socket) {
+    IPC_ACCEPT_LOOP_STARTED.store(true, Ordering::Release);
+    println!("stemd: IPC thread started");
 
     // Accept connections. Each connection is handled on its own thread so one
     // slow command (registry lookup, SWS round-trip, fork) cannot block every
@@ -1162,8 +1163,11 @@ fn handle_ipc_client(client: Socket) {
                     if read_until(&stream, &mut buffer, &mut n, end) {
                         match core::str::from_utf8(&buffer[5..end]) {
                             Ok(service_name) => {
-                                println!("stemd: SERVICE_READY received for '{}'", service_name);
                                 mark_service_ready(service_name);
+                                // Publish the readiness latch before logging or
+                                // acknowledging it. A one-shot service is free
+                                // to exit as soon as it receives the reply.
+                                println!("stemd: SERVICE_READY received for '{}'", service_name);
                                 let _ = stream.write("OK: Service marked ready\n".as_bytes());
                             }
                             Err(_) => {
@@ -1748,9 +1752,20 @@ tty = "/dev/tty0"
         );
     }
 
-    // Spawn IPC thread before launching services so they can report readiness.
-    println!("stemd: Starting IPC thread");
-    let _ipc_handle = thread::spawn(ipc_thread);
+    // Establish the listener synchronously. `thread::spawn()` only makes the
+    // accept task runnable; it does not guarantee that the task has run before
+    // a child attempts its SERVICE_READY connection.
+    println!("stemd: Starting IPC service");
+    let Some(ipc_server) = prepare_ipc_server() else {
+        println!("stemd: Cannot launch services without the IPC listener");
+        return;
+    };
+    IPC_ACCEPT_LOOP_STARTED.store(false, Ordering::Release);
+    let _ipc_handle = thread::spawn(move || ipc_thread(ipc_server));
+    while !IPC_ACCEPT_LOOP_STARTED.load(Ordering::Acquire) {
+        thread::yield_now();
+    }
+    println!("stemd: IPC service ready");
 
     // Resolve dependencies and get launch order
     let launch_order = resolve_dependencies(&services);
@@ -1777,12 +1792,14 @@ tty = "/dev/tty0"
     }
 
     // Phase 2: Register with sbus (now that sbusd should be running)
-    println!("stemd: Registering with sbus...");
     let mut registered = false;
     for attempt in 0..20 {
         // Give CPU time to sbusd to start up
         for _ in 0..10 {
             std::thread::yield_now();
+        }
+        if attempt == 0 {
+            println!("stemd: Registering with sbus...");
         }
 
         match sbus::Connection::connect() {

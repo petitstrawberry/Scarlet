@@ -7,13 +7,13 @@ use crate::{
     device::{
         manager::{DeviceManager, DriverPriority},
         platform::{
-            resource::PlatformDeviceResourceType, PlatformDeviceDriver, PlatformDeviceInfo,
+            PlatformDeviceDriver, PlatformDeviceInfo, resource::PlatformDeviceResourceType,
         },
     },
     driver_initcall,
     interrupt::{
-        controllers::{SoftwareInterruptController, TimerController},
         CpuId, InterruptError, InterruptResult,
+        controllers::{SoftwareInterruptController, TimerController},
     },
 };
 use alloc::{boxed::Box, vec};
@@ -87,7 +87,11 @@ impl Clint {
 
 impl TimerController for Clint {
     /// Initialize the CLINT for a specific CPU
-    fn init(&mut self, cpu_id: CpuId) -> InterruptResult<()> {
+    fn init(
+        &mut self,
+        cpu_id: CpuId,
+        _mode: crate::interrupt::controllers::InterruptControllerInitMode,
+    ) -> InterruptResult<()> {
         self.validate_cpu_id(cpu_id)?;
         self.set_timer(cpu_id, u64::MAX)?;
         Ok(())
@@ -143,7 +147,11 @@ impl TimerController for Clint {
 
 impl SoftwareInterruptController for Clint {
     /// Initialize software interrupt state for a specific CPU
-    fn init(&mut self, cpu_id: CpuId) -> InterruptResult<()> {
+    fn init(
+        &mut self,
+        cpu_id: CpuId,
+        _mode: crate::interrupt::controllers::InterruptControllerInitMode,
+    ) -> InterruptResult<()> {
         self.clear_software_interrupt(cpu_id)
     }
 
@@ -243,9 +251,10 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
     ));
 
     // Register with InterruptManager instead of DeviceManager
-    match crate::interrupt::InterruptManager::global()
-        .register_timer_controller_for_range(timer_controller, 0..(crate::environment::MAX_NUM_CPUS as CpuId))
-    {
+    match crate::interrupt::InterruptManager::global().register_timer_controller_for_range(
+        timer_controller,
+        0..(crate::environment::MAX_NUM_CPUS as CpuId),
+    ) {
         Ok(_) => {
             crate::early_println!(
                 "[interrupt] CLINT registered at base address: {:#x}",
@@ -258,11 +267,16 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         }
     }
     match crate::interrupt::InterruptManager::global()
-        .register_software_interrupt_controller_for_range(software_controller, 0..(crate::environment::MAX_NUM_CPUS as CpuId))
-    {
+        .register_software_interrupt_controller_for_range(
+            software_controller,
+            0..(crate::environment::MAX_NUM_CPUS as CpuId),
+        ) {
         Ok(_) => {}
         Err(e) => {
-            crate::early_println!("[interrupt] Failed to register CLINT software interrupt: {}", e);
+            crate::early_println!(
+                "[interrupt] Failed to register CLINT software interrupt: {}",
+                e
+            );
             return Err("Failed to register CLINT software interrupt");
         }
     }
@@ -293,13 +307,21 @@ mod tests {
 
     #[test_case]
     fn test_clint_creation() {
-        let clint = Clint::new(0x200_0000, crate::environment::MAX_NUM_CPUS as CpuId, 10_000_000);
+        let clint = Clint::new(
+            0x200_0000,
+            crate::environment::MAX_NUM_CPUS as CpuId,
+            10_000_000,
+        );
         assert_eq!(clint.max_cpus, crate::environment::MAX_NUM_CPUS as CpuId);
     }
 
     #[test_case]
     fn test_address_calculation() {
-        let clint = Clint::new(0x200_0000, crate::environment::MAX_NUM_CPUS as CpuId, 10_000_000);
+        let clint = Clint::new(
+            0x200_0000,
+            crate::environment::MAX_NUM_CPUS as CpuId,
+            10_000_000,
+        );
 
         assert_eq!(clint.msip_addr(0), 0x200_0000);
         assert_eq!(clint.msip_addr(1), 0x200_0004);
@@ -314,7 +336,11 @@ mod tests {
 
     #[test_case]
     fn test_different_base_address() {
-        let clint = Clint::new(0x300_0000, crate::environment::MAX_NUM_CPUS as CpuId, 10_000_000);
+        let clint = Clint::new(
+            0x300_0000,
+            crate::environment::MAX_NUM_CPUS as CpuId,
+            10_000_000,
+        );
 
         assert_eq!(clint.msip_addr(0), 0x300_0000);
         assert_eq!(clint.msip_addr(1), 0x300_0004);
@@ -327,12 +353,24 @@ mod tests {
 
     #[test_case]
     fn test_validation() {
-        let clint = Clint::new(0x200_0000, crate::environment::MAX_NUM_CPUS as CpuId, 10_000_000);
+        let clint = Clint::new(
+            0x200_0000,
+            crate::environment::MAX_NUM_CPUS as CpuId,
+            10_000_000,
+        );
 
         assert!(clint.validate_cpu_id(0).is_ok());
-        assert!(clint.validate_cpu_id(crate::environment::MAX_NUM_CPUS as CpuId - 1).is_ok());
+        assert!(
+            clint
+                .validate_cpu_id(crate::environment::MAX_NUM_CPUS as CpuId - 1)
+                .is_ok()
+        );
 
-        assert!(clint.validate_cpu_id(crate::environment::MAX_NUM_CPUS as CpuId).is_err());
+        assert!(
+            clint
+                .validate_cpu_id(crate::environment::MAX_NUM_CPUS as CpuId)
+                .is_err()
+        );
         assert!(clint.validate_cpu_id(100).is_err());
     }
 }

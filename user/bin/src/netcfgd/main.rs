@@ -21,7 +21,7 @@ use scarlet_os::time::monotonic_time_ns;
 use std::{
     env, format,
     fs::OpenOptions,
-    io::Write,
+    io::{Read, Write},
     network::{
         Ipv4Address, clear_interface_ipv4, configure_interface_ipv4, list_interface_configs,
     },
@@ -557,7 +557,15 @@ fn notify_service_ready() {
             payload.extend_from_slice(&(service_name.len() as u32).to_le_bytes());
             payload.extend_from_slice(service_name);
             if stream.write_all(&payload).is_ok() {
-                return;
+                // netcfgd is a one-shot service when it has no managed DHCP
+                // leases. Do not exit until stemd has latched the notification;
+                // otherwise PID 1 can reap us before its IPC worker records it.
+                let mut response = [0u8; 32];
+                if let Ok(length) = stream.read(&mut response)
+                    && response[..length].starts_with(b"OK:")
+                {
+                    return;
+                }
             }
         }
         thread::sleep(Duration::from_millis(READY_NOTIFY_DELAY_MS));

@@ -24,7 +24,11 @@ impl SbiIpi {
 
 impl SoftwareInterruptController for SbiIpi {
     /// Initialize software interrupt state for a CPU.
-    fn init(&mut self, cpu_id: CpuId) -> InterruptResult<()> {
+    fn init(
+        &mut self,
+        cpu_id: CpuId,
+        _mode: crate::interrupt::controllers::InterruptControllerInitMode,
+    ) -> InterruptResult<()> {
         self.clear_software_interrupt(cpu_id)
     }
 

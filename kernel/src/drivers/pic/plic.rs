@@ -15,7 +15,10 @@ use crate::{
     early_initcall,
     interrupt::{
         CpuId, InterruptError, InterruptId, InterruptResult, Priority,
-        controllers::{ExternalInterruptController, IrqFlow, IrqMapping, PendingIrq},
+        controllers::{
+            ExternalInterruptController, InterruptControllerInitMode, IrqFlow, IrqMapping,
+            PendingIrq,
+        },
     },
 };
 use alloc::{boxed::Box, vec, vec::Vec};
@@ -166,7 +169,8 @@ impl Plic {
 
 impl ExternalInterruptController for Plic {
     /// Initialize the PLIC
-    fn init(&mut self) -> InterruptResult<()> {
+    fn init(&mut self, mode: InterruptControllerInitMode) -> InterruptResult<()> {
+        debug_assert_eq!(mode, InterruptControllerInitMode::ColdBootReset);
         crate::early_println!(
             "[PLIC] init: max_cpus={}, max_interrupts={}, s_mode_contexts={:?}",
             self.max_cpus,
@@ -174,7 +178,9 @@ impl ExternalInterruptController for Plic {
             self.s_mode_contexts
         );
 
-        // Set all interrupt priorities to 1 (lowest non-zero priority)
+        // Linux assigns every PLIC source priority 1 and separately clears all
+        // enables in each owned hart context. Priority 0 is the mask state used
+        // by the per-IRQ runtime path, not the controller's cold baseline.
         for interrupt_id in 1..=self.max_interrupts {
             self.set_priority(interrupt_id, 1)?;
         }
@@ -182,10 +188,15 @@ impl ExternalInterruptController for Plic {
         Ok(())
     }
 
-    fn init_for_cpu(&mut self, cpu_id: CpuId) -> InterruptResult<()> {
+    fn init_for_cpu(
+        &mut self,
+        cpu_id: CpuId,
+        mode: InterruptControllerInitMode,
+    ) -> InterruptResult<()> {
+        debug_assert_eq!(mode, InterruptControllerInitMode::ColdBootReset);
         self.validate_cpu_id(cpu_id)?;
 
-        let word_count = ((self.max_interrupts as usize) + 31) / 32;
+        let word_count = (self.max_interrupts as usize + 1).div_ceil(32);
         let context_id = self.context_id_for_cpu(cpu_id);
         let context_offset = context_id * PLIC_ENABLE_CONTEXT_STRIDE;
 

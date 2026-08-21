@@ -27,7 +27,11 @@ impl SstcTimer {
 
 impl TimerController for SstcTimer {
     /// Initialize the Sstc timer for a specific CPU
-    fn init(&mut self, cpu_id: CpuId) -> InterruptResult<()> {
+    fn init(
+        &mut self,
+        cpu_id: CpuId,
+        _mode: crate::interrupt::controllers::InterruptControllerInitMode,
+    ) -> InterruptResult<()> {
         self.validate_cpu_id(cpu_id)?;
         self.set_timer(cpu_id, u64::MAX)?;
         Ok(())

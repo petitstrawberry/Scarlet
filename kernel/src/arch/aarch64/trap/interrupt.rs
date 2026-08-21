@@ -1,6 +1,8 @@
 //! AArch64 interrupt trap handling
 
 use core::arch::asm;
+#[cfg(feature = "sync-debug")]
+use core::sync::atomic::AtomicU32;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::arch::{Trapframe, get_cpu};
@@ -10,9 +12,132 @@ const IRQ_PENDING_BIT: u64 = 1 << 7;
 const IRQ_LIVENESS_INTERVAL: u64 = 500;
 const DEBUG_IRQ_LIVENESS_LOGGING: bool = false;
 
+#[cfg(feature = "sync-debug")]
+const IRQ_STORM_TRACKED_IRQS: usize = 1024;
+#[cfg(feature = "sync-debug")]
+const IRQ_STORM_SAMPLE_EVENTS: u64 = 256;
+#[cfg(feature = "sync-debug")]
+const IRQ_STORM_MIN_WINDOW_NS: u64 = 100_000_000;
+#[cfg(feature = "sync-debug")]
+const IRQ_STORM_RATE_THRESHOLD: u64 = 2_000;
+#[cfg(feature = "sync-debug")]
+const IRQ_STORM_REPORT_INTERVAL_NS: u64 = 1_000_000_000;
+
 static TIMER_FIQ_COUNTS: [AtomicU64; MAX_NUM_CPUS] = [const { AtomicU64::new(0) }; MAX_NUM_CPUS];
 static POST_CLAIM_TIMER_COUNTS: [AtomicU64; MAX_NUM_CPUS] =
     [const { AtomicU64::new(0) }; MAX_NUM_CPUS];
+
+#[cfg(feature = "sync-debug")]
+static IRQ_STORM_WINDOW_START_NS: [AtomicU64; MAX_NUM_CPUS] =
+    [const { AtomicU64::new(0) }; MAX_NUM_CPUS];
+#[cfg(feature = "sync-debug")]
+static IRQ_STORM_WINDOW_TOTALS: [AtomicU64; MAX_NUM_CPUS] =
+    [const { AtomicU64::new(0) }; MAX_NUM_CPUS];
+#[cfg(feature = "sync-debug")]
+static IRQ_STORM_LAST_REPORT_NS: [AtomicU64; MAX_NUM_CPUS] =
+    [const { AtomicU64::new(0) }; MAX_NUM_CPUS];
+#[cfg(feature = "sync-debug")]
+static IRQ_STORM_COUNTS: [AtomicU32; MAX_NUM_CPUS * IRQ_STORM_TRACKED_IRQS] =
+    [const { AtomicU32::new(0) }; MAX_NUM_CPUS * IRQ_STORM_TRACKED_IRQS];
+
+#[cfg(feature = "sync-debug")]
+fn irq_rate_per_second(events: u64, elapsed_ns: u64) -> u64 {
+    if elapsed_ns == 0 {
+        return u64::MAX;
+    }
+    ((u128::from(events) * 1_000_000_000u128) / u128::from(elapsed_ns)).min(u128::from(u64::MAX))
+        as u64
+}
+
+#[cfg(feature = "sync-debug")]
+fn record_external_irq_rate(cpu_id: usize, interrupt_id: u32) {
+    if cpu_id >= MAX_NUM_CPUS {
+        return;
+    }
+
+    // The architected timer is a deliberately high-rate PPI, not an external
+    // device interrupt storm. Keep it out of this detector so normal scheduler
+    // ticks cannot hide a genuinely stuck SPI. SGIs remain visible because an
+    // IPI storm is independently actionable.
+    if interrupt_id == crate::drivers::pic::arm_generic_timer::timer_ppi_irq() {
+        return;
+    }
+
+    if let Ok(interrupt_index) = usize::try_from(interrupt_id)
+        && interrupt_index < IRQ_STORM_TRACKED_IRQS
+    {
+        let index = cpu_id * IRQ_STORM_TRACKED_IRQS + interrupt_index;
+        IRQ_STORM_COUNTS[index].fetch_add(1, Ordering::Relaxed);
+    }
+
+    let total = IRQ_STORM_WINDOW_TOTALS[cpu_id].fetch_add(1, Ordering::Relaxed) + 1;
+    if total == 1 {
+        IRQ_STORM_WINDOW_START_NS[cpu_id]
+            .store(crate::timer::get_time_ns().max(1), Ordering::Relaxed);
+        return;
+    }
+    if !total.is_multiple_of(IRQ_STORM_SAMPLE_EVENTS) {
+        return;
+    }
+
+    let now_ns = crate::timer::get_time_ns();
+    let start_ns = IRQ_STORM_WINDOW_START_NS[cpu_id].load(Ordering::Relaxed);
+    let elapsed_ns = now_ns.saturating_sub(start_ns);
+    if start_ns == 0 || elapsed_ns < IRQ_STORM_MIN_WINDOW_NS {
+        return;
+    }
+
+    let observed_total = IRQ_STORM_WINDOW_TOTALS[cpu_id].swap(0, Ordering::Relaxed);
+    IRQ_STORM_WINDOW_START_NS[cpu_id].store(now_ns.max(1), Ordering::Relaxed);
+
+    let mut busiest_irq = u32::MAX;
+    let mut busiest_count = 0u32;
+    let first = cpu_id * IRQ_STORM_TRACKED_IRQS;
+    for (offset, count) in IRQ_STORM_COUNTS[first..first + IRQ_STORM_TRACKED_IRQS]
+        .iter()
+        .enumerate()
+    {
+        let observed = count.swap(0, Ordering::Relaxed);
+        if observed > busiest_count {
+            busiest_count = observed;
+            busiest_irq = offset as u32;
+        }
+    }
+
+    let total_rate = irq_rate_per_second(observed_total, elapsed_ns);
+    let busiest_rate = irq_rate_per_second(u64::from(busiest_count), elapsed_ns);
+    if busiest_rate < IRQ_STORM_RATE_THRESHOLD {
+        return;
+    }
+
+    let last_report_ns = IRQ_STORM_LAST_REPORT_NS[cpu_id].load(Ordering::Relaxed);
+    if last_report_ns != 0 && now_ns.saturating_sub(last_report_ns) < IRQ_STORM_REPORT_INTERVAL_NS {
+        return;
+    }
+    if IRQ_STORM_LAST_REPORT_NS[cpu_id]
+        .compare_exchange(
+            last_report_ns,
+            now_ns.max(1),
+            Ordering::AcqRel,
+            Ordering::Relaxed,
+        )
+        .is_err()
+    {
+        return;
+    }
+
+    crate::emergency_println!(
+        "[irq-storm] cpu={} source_rate={}/s total_rate={}/s window_us={} total={} busiest_irq={} busiest_count={} current_irq={}",
+        cpu_id,
+        busiest_rate,
+        total_rate,
+        elapsed_ns / 1_000,
+        observed_total,
+        busiest_irq,
+        busiest_count,
+        interrupt_id
+    );
+}
 
 #[inline]
 const fn fast_timer_pending(timer_pending_before: bool, timer_pending_after: bool) -> bool {
@@ -217,6 +342,10 @@ pub fn arch_irq_handler(trapframe: &mut Trapframe, trap_kind: usize) {
     );
     let claimed = crate::interrupt::InterruptManager::global()
         .claim_and_handle_pending_external_interrupt(cpu_id);
+    #[cfg(feature = "sync-debug")]
+    if let Ok(Some(pending)) = &claimed {
+        record_external_irq_rate(cpu_id as usize, pending.mapping.hwirq);
+    }
     crate::breadcrumb::drop(
         crate::breadcrumb::IRQ_HANDLE_DONE,
         cpu_id as u64,
