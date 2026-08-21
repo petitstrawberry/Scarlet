@@ -1,10 +1,16 @@
-//! Simple ping client for INET
+//! Continuous ping client for INET; runs until Ctrl-C.
 
 #![no_std]
 #![no_main]
 
 extern crate scarlet_std as std;
 
+use core::sync::atomic::{AtomicBool, Ordering};
+
+use scarlet_os::ipc::{
+    EventInfo, event_types, process_control, register_event_handler, unregister_event_handler,
+};
+use scarlet_os::time::monotonic_time_ns;
 use std::env;
 use std::format;
 use std::println;
@@ -12,6 +18,23 @@ use std::socket::{Inet4SocketAddress, Socket, SocketDomain, SocketProtocol, Sock
 
 const RESOLVERD_SOCKET_PATH: &str = "/tmp/resolverd.sock";
 const MAX_RESOLVER_RESPONSE: usize = 512;
+const PING_INTERVAL_NS: u64 = 1_000_000_000;
+const PING_TIMEOUT_NS: u64 = 1_000_000_000;
+const POLL_INTERVAL_MS: u64 = 10;
+
+static INTERRUPTED: AtomicBool = AtomicBool::new(false);
+
+extern "C" fn interrupt_handler(event_info: &EventInfo) {
+    if event_info.content_type == event_types::PROCESS_CONTROL
+        && event_info.content_data[0] == process_control::INTERRUPT as u64
+    {
+        INTERRUPTED.store(true, Ordering::Relaxed);
+    }
+}
+
+fn interrupted() -> bool {
+    INTERRUPTED.load(Ordering::Relaxed)
+}
 
 #[unsafe(no_mangle)]
 pub extern "C" fn main(_argc: isize, _argv: *const *const u8) -> isize {
@@ -30,6 +53,12 @@ pub extern "C" fn main(_argc: isize, _argv: *const *const u8) -> isize {
         }
     };
 
+    INTERRUPTED.store(false, Ordering::Relaxed);
+    if register_event_handler(event_types::PROCESS_CONTROL, interrupt_handler, false).is_err() {
+        println!("[ping] failed to register Ctrl-C handler");
+        return 1;
+    }
+
     let socket = match Socket::new_with_domain(
         SocketDomain::Inet4,
         SocketType::Datagram,
@@ -38,6 +67,7 @@ pub extern "C" fn main(_argc: isize, _argv: *const *const u8) -> isize {
         Ok(sock) => sock,
         Err(_) => {
             println!("[ping] socket create failed");
+            let _ = unregister_event_handler(event_types::PROCESS_CONTROL);
             return 1;
         }
     };
@@ -47,55 +77,138 @@ pub extern "C" fn main(_argc: isize, _argv: *const *const u8) -> isize {
 
     if socket.connect_inet(dest).is_err() {
         println!("[ping] connect failed");
-        return 1;
-    }
-
-    if let Ok(stream) = socket.as_stream() {
-        if stream.write(payload).is_err() {
-            println!("[ping] send failed (check netcfg)");
-            return 1;
-        }
-    } else {
-        println!("[ping] send failed (no stream)");
+        let _ = unregister_event_handler(event_types::PROCESS_CONTROL);
         return 1;
     }
 
     let mut buf = [0u8; 64];
     if socket.set_nonblocking(true).is_err() {
         println!("[ping] recv failed");
+        let _ = unregister_event_handler(event_types::PROCESS_CONTROL);
         return 1;
     }
 
-    let mut n = 0usize;
-    let mut got_reply = false;
-    for _ in 0..200 {
-        if let Ok(stream) = socket.as_stream() {
-            match stream.read(&mut buf) {
-                Ok(read) => {
-                    n = read;
-                    got_reply = true;
-                    break;
-                }
-                Err(_) => {
-                    // WouldBlock or no data yet
+    let mut transmitted = 0u64;
+    let mut received = 0u64;
+    let mut min_rtt_ns = u64::MAX;
+    let mut max_rtt_ns = 0u64;
+    let mut total_rtt_ns = 0u64;
+    let mut next_probe_ns = monotonic_time_ns();
+
+    while !interrupted() {
+        wait_until(next_probe_ns);
+        if interrupted() {
+            break;
+        }
+
+        let sequence = transmitted.saturating_add(1);
+        let sent_at_ns = monotonic_time_ns();
+        let sent = if let Ok(stream) = socket.as_stream() {
+            stream.write(payload).is_ok()
+        } else {
+            false
+        };
+        if !sent {
+            println!("[ping] send failed (check netcfg)");
+            break;
+        }
+        transmitted = sequence;
+
+        let timeout_deadline_ns = sent_at_ns.saturating_add(PING_TIMEOUT_NS);
+        let mut got_reply = false;
+        while !interrupted() && monotonic_time_ns() < timeout_deadline_ns {
+            if let Ok(stream) = socket.as_stream() {
+                match stream.read(&mut buf) {
+                    Ok(read) if read == payload.len() && &buf[..read] == payload => {
+                        let rtt_ns = monotonic_time_ns().saturating_sub(sent_at_ns);
+                        let rtt_ms = rtt_ns / 1_000_000;
+                        let rtt_us = (rtt_ns % 1_000_000) / 1_000;
+                        println!(
+                            "[ping] reply {} bytes, seq={}, rtt {}.{:03} ms",
+                            read, sequence, rtt_ms, rtt_us
+                        );
+                        received = received.saturating_add(1);
+                        min_rtt_ns = min_rtt_ns.min(rtt_ns);
+                        max_rtt_ns = max_rtt_ns.max(rtt_ns);
+                        total_rtt_ns = total_rtt_ns.saturating_add(rtt_ns);
+                        got_reply = true;
+                        break;
+                    }
+                    Ok(_) | Err(_) => {
+                        // Ignore unrelated packets and WouldBlock until timeout.
+                    }
                 }
             }
+
+            std::thread::sleep(core::time::Duration::from_millis(POLL_INTERVAL_MS));
         }
-        std::thread::sleep(core::time::Duration::from_millis(10));
+
+        if interrupted() {
+            break;
+        }
+        if !got_reply {
+            println!("[ping] timeout, seq={}", sequence);
+        }
+        next_probe_ns = sent_at_ns.saturating_add(PING_INTERVAL_NS);
     }
 
-    if !got_reply {
-        println!("[ping] timeout");
-        return 1;
-    }
+    let _ = unregister_event_handler(event_types::PROCESS_CONTROL);
+    print_summary(
+        destination,
+        transmitted,
+        received,
+        min_rtt_ns,
+        max_rtt_ns,
+        total_rtt_ns,
+    );
+    std::task::exit(if received > 0 { 0 } else { 1 });
+}
 
-    if n == payload.len() && &buf[..n] == payload {
-        println!("[ping] reply {} bytes", n);
-        return 0;
+fn wait_until(deadline_ns: u64) {
+    while !interrupted() {
+        let remaining_ns = deadline_ns.saturating_sub(monotonic_time_ns());
+        if remaining_ns == 0 {
+            return;
+        }
+        let sleep_ms = (remaining_ns / 1_000_000).clamp(1, POLL_INTERVAL_MS);
+        std::thread::sleep(core::time::Duration::from_millis(sleep_ms));
     }
+}
 
-    println!("[ping] invalid reply (payload mismatch)");
-    1
+fn print_summary(
+    destination: &str,
+    transmitted: u64,
+    received: u64,
+    min_rtt_ns: u64,
+    max_rtt_ns: u64,
+    total_rtt_ns: u64,
+) {
+    println!("\n--- {} ping statistics ---", destination);
+    let lost = transmitted.saturating_sub(received);
+    let loss_percent = if transmitted == 0 {
+        0
+    } else {
+        lost.saturating_mul(100) / transmitted
+    };
+    println!(
+        "{} packets transmitted, {} packets received, {}% packet loss",
+        transmitted, received, loss_percent
+    );
+
+    if received > 0 {
+        let average_rtt_ns = total_rtt_ns / received;
+        let (min_ms, min_us) = split_rtt_ms(min_rtt_ns);
+        let (average_ms, average_us) = split_rtt_ms(average_rtt_ns);
+        let (max_ms, max_us) = split_rtt_ms(max_rtt_ns);
+        println!(
+            "rtt min/avg/max = {}.{:03}/{}.{:03}/{}.{:03} ms",
+            min_ms, min_us, average_ms, average_us, max_ms, max_us
+        );
+    }
+}
+
+fn split_rtt_ms(rtt_ns: u64) -> (u64, u64) {
+    (rtt_ns / 1_000_000, (rtt_ns % 1_000_000) / 1_000)
 }
 
 fn parse_ipv4(value: &str) -> Option<[u8; 4]> {
