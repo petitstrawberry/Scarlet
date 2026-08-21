@@ -3772,6 +3772,7 @@ impl Compositor {
             self.broadcast_empty_active_app_changed();
         }
 
+        self.refresh_cursor_icon();
         self.full_redraw_needed = true;
         Ok(true)
     }
@@ -5636,6 +5637,7 @@ impl Compositor {
                 }
             }
         }
+        self.refresh_cursor_icon();
         self.release_invalid_pointer_lock();
         Ok(false)
     }
