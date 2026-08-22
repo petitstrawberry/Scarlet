@@ -417,50 +417,76 @@ impl StreamOps for Ext2FileObject {
             }
         }
 
-        let mut position_guard = self.position.lock();
-        let current_pos = *position_guard as usize;
-        if current_pos >= file_size {
+        if buffer.is_empty() {
             return Ok(0);
         }
 
-        let bytes_available = file_size - current_pos;
-        let bytes_to_read = core::cmp::min(buffer.len(), bytes_available);
-        if bytes_to_read == 0 {
-            return Ok(0);
-        }
-
-        let mut bytes_read = 0usize;
-        let mut buf_offset = 0usize;
-        let mut pos = current_pos;
-
-        while bytes_read < bytes_to_read {
-            let page_index = (pos / PAGE_SIZE) as PageIndex;
-            let page_offset = pos % PAGE_SIZE;
-            let remaining_in_page = PAGE_SIZE - page_offset;
-            let bytes_in_page = core::cmp::min(bytes_to_read - bytes_read, remaining_in_page);
-
-            let pinned = PageCacheManager::global()
-                .pin_or_load(cache_id, page_index, |paddr| {
-                    ext2_fs
-                        .read_page_content(self.inode_number, page_index, paddr)
-                        .map_err(|_| "Failed to load page")
-                })
-                .map_err(|_| StreamError::IoError)?;
-
-            unsafe {
-                let page_ptr = phys_to_virt(pinned.paddr()) as *const u8;
-                let src = page_ptr.add(page_offset);
-                let dst = buffer.as_mut_ptr().add(buf_offset);
-                core::ptr::copy_nonoverlapping(src, dst, bytes_in_page);
+        loop {
+            // Snapshot the shared file position without retaining an IRQ-off
+            // guard across page-cache or block-device I/O.
+            let current_pos =
+                usize::try_from(*self.position.lock()).map_err(|_| StreamError::InvalidArgument)?;
+            if current_pos >= file_size {
+                return Ok(0);
             }
 
-            bytes_read += bytes_in_page;
-            buf_offset += bytes_in_page;
-            pos += bytes_in_page;
-        }
+            let bytes_to_read = core::cmp::min(buffer.len(), file_size - current_pos);
+            let end_pos = current_pos
+                .checked_add(bytes_to_read)
+                .ok_or(StreamError::InvalidArgument)?;
+            let first_page = (current_pos / PAGE_SIZE) as PageIndex;
+            let last_page = ((end_pos - 1) / PAGE_SIZE) as PageIndex;
+            let page_count = usize::try_from(last_page - first_page + 1)
+                .map_err(|_| StreamError::InvalidArgument)?;
+            let mut pinned_pages = Vec::with_capacity(page_count);
 
-        *position_guard += bytes_read as u64;
-        Ok(bytes_read)
+            for page_index in first_page..=last_page {
+                let pinned = PageCacheManager::global()
+                    .pin_or_load(cache_id, page_index, |paddr| {
+                        ext2_fs
+                            .read_page_content(self.inode_number, page_index, paddr)
+                            .map_err(|_| "Failed to load page")
+                    })
+                    .map_err(|_| StreamError::IoError)?;
+                pinned_pages.push(pinned);
+            }
+
+            // Reserve exactly the range whose pages were loaded. If another
+            // thread advanced this shared file description meanwhile, discard
+            // these pins and retry from the new position.
+            let reserved = {
+                let mut position = self.position.lock();
+                if usize::try_from(*position).ok() != Some(current_pos) {
+                    false
+                } else {
+                    *position = u64::try_from(end_pos).map_err(|_| StreamError::InvalidArgument)?;
+                    true
+                }
+            };
+            if !reserved {
+                continue;
+            }
+
+            let mut copied = 0usize;
+            let mut pos = current_pos;
+            while copied < bytes_to_read {
+                let page_index = (pos / PAGE_SIZE) as PageIndex;
+                let page_offset = pos % PAGE_SIZE;
+                let bytes_in_page = core::cmp::min(bytes_to_read - copied, PAGE_SIZE - page_offset);
+                let pinned = &pinned_pages[(page_index - first_page) as usize];
+
+                unsafe {
+                    let src = (phys_to_virt(pinned.paddr()) as *const u8).add(page_offset);
+                    let dst = buffer.as_mut_ptr().add(copied);
+                    core::ptr::copy_nonoverlapping(src, dst, bytes_in_page);
+                }
+
+                copied += bytes_in_page;
+                pos += bytes_in_page;
+            }
+
+            return Ok(bytes_to_read);
+        }
     }
 
     fn write(&self, buffer: &[u8]) -> Result<usize, StreamError> {
@@ -477,48 +503,72 @@ impl StreamOps for Ext2FileObject {
             .downcast_ref::<Ext2FileSystem>()
             .ok_or(StreamError::NotSupported)?;
 
-        let mut position_guard = self.position.lock();
-        let mut pos = *position_guard as usize;
         let bytes_to_write = buffer.len();
         if bytes_to_write == 0 {
             return Ok(0);
         }
 
         let cache_id = self.cache_id();
-        let mut written = 0usize;
-        let mut buf_offset = 0usize;
-        while written < bytes_to_write {
-            let page_index = (pos / PAGE_SIZE) as PageIndex;
-            let page_off = pos % PAGE_SIZE;
-            let remain_in_page = PAGE_SIZE - page_off;
-            let chunk = core::cmp::min(bytes_to_write - written, remain_in_page);
+        let end_pos = loop {
+            let current_pos =
+                usize::try_from(*self.position.lock()).map_err(|_| StreamError::InvalidArgument)?;
+            let end_pos = current_pos
+                .checked_add(bytes_to_write)
+                .ok_or(StreamError::InvalidArgument)?;
+            let first_page = (current_pos / PAGE_SIZE) as PageIndex;
+            let last_page = ((end_pos - 1) / PAGE_SIZE) as PageIndex;
+            let page_count = usize::try_from(last_page - first_page + 1)
+                .map_err(|_| StreamError::InvalidArgument)?;
+            let mut pinned_pages = Vec::with_capacity(page_count);
 
-            let pinned = PageCacheManager::global()
-                .pin_or_load(cache_id, page_index, |paddr| {
-                    ext2_fs
-                        .read_page_content(self.inode_number, page_index, paddr)
-                        .map_err(|_| "Failed to load page")
-                })
-                .map_err(|_| StreamError::IoError)?;
-
-            unsafe {
-                let dst = (phys_to_virt(pinned.paddr()) as *mut u8).add(page_off);
-                let src = buffer.as_ptr().add(buf_offset);
-                core::ptr::copy_nonoverlapping(src, dst, chunk);
+            for page_index in first_page..=last_page {
+                let pinned = PageCacheManager::global()
+                    .pin_or_load(cache_id, page_index, |paddr| {
+                        ext2_fs
+                            .read_page_content(self.inode_number, page_index, paddr)
+                            .map_err(|_| "Failed to load page")
+                    })
+                    .map_err(|_| StreamError::IoError)?;
+                pinned_pages.push(pinned);
             }
 
-            pinned.mark_dirty();
+            let reserved = {
+                let mut position = self.position.lock();
+                if usize::try_from(*position).ok() != Some(current_pos) {
+                    false
+                } else {
+                    *position = u64::try_from(end_pos).map_err(|_| StreamError::InvalidArgument)?;
+                    true
+                }
+            };
+            if !reserved {
+                continue;
+            }
+
+            let mut written = 0usize;
+            let mut pos = current_pos;
+            while written < bytes_to_write {
+                let page_index = (pos / PAGE_SIZE) as PageIndex;
+                let page_offset = pos % PAGE_SIZE;
+                let chunk = core::cmp::min(bytes_to_write - written, PAGE_SIZE - page_offset);
+                let pinned = &pinned_pages[(page_index - first_page) as usize];
+
+                unsafe {
+                    let dst = (phys_to_virt(pinned.paddr()) as *mut u8).add(page_offset);
+                    let src = buffer.as_ptr().add(written);
+                    core::ptr::copy_nonoverlapping(src, dst, chunk);
+                }
+
+                pinned.mark_dirty();
+                written += chunk;
+                pos += chunk;
+            }
             *self.dirty.lock() = true;
-
-            written += chunk;
-            buf_offset += chunk;
-            pos += chunk;
-        }
-
-        *position_guard = (*position_guard as usize + written) as u64;
+            break end_pos;
+        };
 
         let mut override_size = self.size_override.lock();
-        let new_end = pos;
+        let new_end = end_pos;
         match *override_size {
             Some(cur) => {
                 if new_end > cur {
@@ -543,7 +593,7 @@ impl StreamOps for Ext2FileObject {
             .size as usize;
         PageCacheManager::global().record_object_size(cache_id, self.effective_size(inode_size));
 
-        Ok(written)
+        Ok(bytes_to_write)
     }
 }
 

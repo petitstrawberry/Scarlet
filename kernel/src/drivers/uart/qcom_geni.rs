@@ -6,6 +6,7 @@
 
 use alloc::{boxed::Box, collections::VecDeque, sync::Arc, vec};
 use core::any::Any;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::sync::{IrqRwSpinLock, IrqSpinLock};
 use crate::{
@@ -61,6 +62,14 @@ const GENI_HW_PARAM_0_TX_FIFO_DEPTH_MASK: u32 = 0x003f_0000;
 const GENI_HW_PARAM_0_TX_FIFO_DEPTH_SHIFT: u32 = 16;
 const GENI_TX_WATERMARK: u32 = 2;
 const GENI_DEFAULT_TX_FIFO_DEPTH_WORDS: usize = 16;
+const GENI_TX_TIMEOUT_US: u64 = 100_000;
+const GENI_EMERGENCY_TX_TIMEOUT_US: u64 = 10_000;
+
+// The early console and the runtime TTY address the same GENI command engine
+// through different mappings. The hardware has only one master command slot
+// and one W1C completion register, so every TX path must share this owner.
+static GENI_TX_LOCK: IrqSpinLock<()> = IrqSpinLock::new(());
+static GENI_TX_POISONED: AtomicBool = AtomicBool::new(false);
 
 fn reg_read_at(base: usize, offset: usize) -> u32 {
     // SAFETY: callers provide a Device-typed mapping of the GENI register
@@ -74,33 +83,157 @@ fn reg_write_at(base: usize, offset: usize, value: u32) {
     unsafe { crate::arch::mmio::write32(base + offset, value) }
 }
 
-fn wait_for_at(base: usize, offset: usize, mask: u32) {
-    while reg_read_at(base, offset) & mask == 0 {
+fn wait_for_set_at(base: usize, offset: usize, mask: u32, timeout_us: u64) -> bool {
+    let deadline = crate::time::current_time().saturating_add(timeout_us);
+    loop {
+        if reg_read_at(base, offset) & mask != 0 {
+            return true;
+        }
+        if crate::time::current_time() >= deadline {
+            return false;
+        }
         core::hint::spin_loop();
     }
 }
 
+fn wait_for_clear_at(base: usize, offset: usize, mask: u32, timeout_us: u64) -> bool {
+    let deadline = crate::time::current_time().saturating_add(timeout_us);
+    loop {
+        if reg_read_at(base, offset) & mask == 0 {
+            return true;
+        }
+        if crate::time::current_time() >= deadline {
+            return false;
+        }
+        core::hint::spin_loop();
+    }
+}
+
+fn prepare_tx_locked(
+    base: usize,
+    timeout_us: u64,
+    wait_for_existing_command: bool,
+) -> Result<(), &'static str> {
+    let command_active = reg_read_at(base, GENI_STATUS) & GENI_STATUS_M_CMD_ACTIVE != 0;
+
+    if GENI_TX_POISONED.load(Ordering::Acquire) {
+        if command_active {
+            return Err("qcom-geni: TX engine is still active after a timeout");
+        }
+
+        // A timed-out command completed without software ownership. Discard
+        // its stale TX indications before allowing a new transaction.
+        reg_write_at(
+            base,
+            GENI_M_IRQ_CLEAR,
+            GENI_M_IRQ_TX_FIFO_WATERMARK | GENI_M_IRQ_CMD_DONE,
+        );
+        GENI_TX_POISONED.store(false, Ordering::Release);
+        return Ok(());
+    }
+
+    if command_active
+        && (!wait_for_existing_command
+            || !wait_for_clear_at(base, GENI_STATUS, GENI_STATUS_M_CMD_ACTIVE, timeout_us))
+    {
+        GENI_TX_POISONED.store(true, Ordering::Release);
+        return Err("qcom-geni: TX engine busy timeout");
+    }
+
+    // Do not let a firmware or earlier completed transaction satisfy the new
+    // command's waits. This is safe only while holding GENI_TX_LOCK.
+    reg_write_at(
+        base,
+        GENI_M_IRQ_CLEAR,
+        GENI_M_IRQ_TX_FIFO_WATERMARK | GENI_M_IRQ_CMD_DONE,
+    );
+    Ok(())
+}
+
+fn write_chunk_locked(
+    base: usize,
+    chunk: &[u8],
+    timeout_us: u64,
+    wait_for_existing_command: bool,
+) -> Result<(), &'static str> {
+    debug_assert!(!chunk.is_empty());
+    prepare_tx_locked(base, timeout_us, wait_for_existing_command)?;
+
+    reg_write_at(base, GENI_TX_FIFO_WATERMARK, GENI_TX_WATERMARK);
+    reg_write_at(base, GENI_UART_TX_TRANS_LEN, chunk.len() as u32);
+    reg_write_at(base, GENI_M_CMD0, GENI_M_CMD0_UART_START_TX);
+
+    if !wait_for_set_at(
+        base,
+        GENI_M_IRQ_STATUS,
+        GENI_M_IRQ_TX_FIFO_WATERMARK,
+        timeout_us,
+    ) {
+        GENI_TX_POISONED.store(true, Ordering::Release);
+        return Err("qcom-geni: TX FIFO watermark timeout");
+    }
+
+    // Keep the firmware-established one-byte-per-FIFO-write packing.
+    // Repacking four characters into one word requires programming the GENI
+    // packing vectors first and is not safe across firmware handoff.
+    for &byte in chunk {
+        reg_write_at(base, GENI_TX_FIFO, byte as u32);
+    }
+    reg_write_at(base, GENI_M_IRQ_CLEAR, GENI_M_IRQ_TX_FIFO_WATERMARK);
+
+    if !wait_for_set_at(base, GENI_M_IRQ_STATUS, GENI_M_IRQ_CMD_DONE, timeout_us) {
+        GENI_TX_POISONED.store(true, Ordering::Release);
+        return Err("qcom-geni: TX command completion timeout");
+    }
+
+    reg_write_at(base, GENI_M_IRQ_CLEAR, GENI_M_IRQ_CMD_DONE);
+    GENI_TX_POISONED.store(false, Ordering::Release);
+    Ok(())
+}
+
 /// Emit one byte with the firmware-configured GENI polling protocol.
 ///
-/// This lock-free primitive is shared by the early/emergency console and the
-/// runtime character device. Callers that require non-interleaved output must
-/// provide their own serialization.
+/// This path shares hardware ownership with the runtime character device and
+/// returns instead of spinning forever if the firmware-owned engine stalls.
 ///
 /// # Arguments
 ///
 /// * `base` - Device-typed virtual base of the GENI serial engine.
 /// * `byte` - Byte to transmit.
-pub(crate) fn early_write_byte(base: usize, byte: u8) {
-    reg_write_at(base, GENI_TX_FIFO_WATERMARK, GENI_TX_WATERMARK);
-    reg_write_at(base, GENI_UART_TX_TRANS_LEN, 1);
-    reg_write_at(base, GENI_M_CMD0, GENI_M_CMD0_UART_START_TX);
+///
+/// # Returns
+///
+/// `true` if the byte completed, or `false` if the engine was unavailable or
+/// timed out.
+pub(crate) fn early_write_byte(base: usize, byte: u8) -> bool {
+    let _owner = GENI_TX_LOCK.lock();
+    write_chunk_locked(base, core::slice::from_ref(&byte), GENI_TX_TIMEOUT_US, true).is_ok()
+}
 
-    wait_for_at(base, GENI_M_IRQ_STATUS, GENI_M_IRQ_TX_FIFO_WATERMARK);
-    reg_write_at(base, GENI_TX_FIFO, byte as u32);
-    reg_write_at(base, GENI_M_IRQ_CLEAR, GENI_M_IRQ_TX_FIFO_WATERMARK);
-
-    wait_for_at(base, GENI_M_IRQ_STATUS, GENI_M_IRQ_CMD_DONE);
-    reg_write_at(base, GENI_M_IRQ_CLEAR, GENI_M_IRQ_CMD_DONE);
+/// Attempt one emergency byte without waiting for another GENI owner.
+///
+/// Emergency diagnostics must never disturb an in-flight normal transaction:
+/// if the owner or hardware engine is busy, the byte is deliberately dropped.
+///
+/// # Arguments
+///
+/// * `base` - Device-typed virtual base of the GENI serial engine.
+/// * `byte` - Byte to transmit.
+///
+/// # Returns
+///
+/// `true` if the byte completed, or `false` if it was dropped or timed out.
+pub(crate) fn try_emergency_write_byte(base: usize, byte: u8) -> bool {
+    let Some(_owner) = GENI_TX_LOCK.try_lock() else {
+        return false;
+    };
+    write_chunk_locked(
+        base,
+        core::slice::from_ref(&byte),
+        GENI_EMERGENCY_TX_TIMEOUT_US,
+        false,
+    )
+    .is_ok()
 }
 
 struct QcomGeniUart {
@@ -109,7 +242,6 @@ struct QcomGeniUart {
     interrupt_id: IrqRwSpinLock<Option<InterruptId>>,
     rx_buffer: IrqSpinLock<VecDeque<u8>>,
     event_emitter: IrqSpinLock<DeviceEventEmitter>,
-    tx_lock: IrqSpinLock<()>,
 }
 
 impl QcomGeniUart {
@@ -129,15 +261,17 @@ impl QcomGeniUart {
             interrupt_id: IrqRwSpinLock::new(None),
             rx_buffer: IrqSpinLock::new(VecDeque::new()),
             event_emitter: IrqSpinLock::new(DeviceEventEmitter::new()),
-            tx_lock: IrqSpinLock::new(()),
         }
     }
 
-    fn init(&self) {
+    fn init(&self) -> Result<(), &'static str> {
+        let _owner = GENI_TX_LOCK.lock();
+        prepare_tx_locked(self.base, GENI_TX_TIMEOUT_US, true)?;
         self.reg_write(GENI_M_IRQ_EN, 0);
         self.reg_write(GENI_S_IRQ_EN, 0);
         self.reg_write(GENI_M_IRQ_CLEAR, self.reg_read(GENI_M_IRQ_STATUS));
         self.reg_write(GENI_S_IRQ_CLEAR, self.reg_read(GENI_S_IRQ_STATUS));
+        Ok(())
     }
 
     /// Enable UART-side interrupts after the controller line has been registered.
@@ -169,29 +303,10 @@ impl QcomGeniUart {
         reg_read_at(self.base, offset)
     }
 
-    fn write_byte_internal(&self, byte: u8) {
-        early_write_byte(self.base, byte);
-    }
-
-    fn write_chunk_internal(&self, chunk: &[u8]) {
+    fn write_chunk_internal(&self, chunk: &[u8]) -> Result<(), &'static str> {
         debug_assert!(!chunk.is_empty());
         debug_assert!(chunk.len() <= self.tx_fifo_capacity_bytes());
-
-        self.reg_write(GENI_TX_FIFO_WATERMARK, GENI_TX_WATERMARK);
-        self.reg_write(GENI_UART_TX_TRANS_LEN, chunk.len() as u32);
-        self.reg_write(GENI_M_CMD0, GENI_M_CMD0_UART_START_TX);
-
-        wait_for_at(self.base, GENI_M_IRQ_STATUS, GENI_M_IRQ_TX_FIFO_WATERMARK);
-        // Keep the firmware-established one-byte-per-FIFO-write packing.
-        // Repacking four characters into one word requires programming the
-        // GENI packing vectors first and is not safe across firmware handoff.
-        for &byte in chunk {
-            self.reg_write(GENI_TX_FIFO, byte as u32);
-        }
-        self.reg_write(GENI_M_IRQ_CLEAR, GENI_M_IRQ_TX_FIFO_WATERMARK);
-
-        wait_for_at(self.base, GENI_M_IRQ_STATUS, GENI_M_IRQ_CMD_DONE);
-        self.reg_write(GENI_M_IRQ_CLEAR, GENI_M_IRQ_CMD_DONE);
+        write_chunk_locked(self.base, chunk, GENI_TX_TIMEOUT_US, true)
     }
 
     fn tx_fifo_capacity_bytes(&self) -> usize {
@@ -269,9 +384,8 @@ impl CharDevice for QcomGeniUart {
     }
 
     fn write_byte(&self, byte: u8) -> Result<(), &'static str> {
-        let _lock = self.tx_lock.lock();
-        self.write_byte_internal(byte);
-        Ok(())
+        let _owner = GENI_TX_LOCK.lock();
+        self.write_chunk_internal(core::slice::from_ref(&byte))
     }
 
     fn write(&self, buffer: &[u8]) -> Result<usize, &'static str> {
@@ -279,9 +393,9 @@ impl CharDevice for QcomGeniUart {
             return Ok(0);
         }
 
-        let _lock = self.tx_lock.lock();
+        let _owner = GENI_TX_LOCK.lock();
         for chunk in buffer.chunks(self.tx_fifo_capacity_bytes()) {
-            self.write_chunk_internal(chunk);
+            self.write_chunk_internal(chunk)?;
         }
 
         Ok(buffer.len())
@@ -379,7 +493,7 @@ fn qcom_geni_probe(device_info: &PlatformDeviceInfo) -> Result<(), &'static str>
     })?;
 
     let uart = Arc::new(QcomGeniUart::new(base));
-    uart.init();
+    uart.init()?;
 
     if let Some(irq_resource) = device_info
         .get_resources()
@@ -414,3 +528,14 @@ fn qcom_geni_remove(_device_info: &PlatformDeviceInfo) -> Result<(), &'static st
 
 #[cfg(target_arch = "aarch64")]
 driver_initcall!(register_qcom_geni_uart);
+
+#[cfg(test)]
+mod tests {
+    use super::{GENI_TX_LOCK, try_emergency_write_byte};
+
+    #[test_case]
+    fn emergency_output_drops_without_touching_a_busy_engine() {
+        let _owner = GENI_TX_LOCK.lock();
+        assert!(!try_emergency_write_byte(0, b'x'));
+    }
+}

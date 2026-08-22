@@ -53,7 +53,7 @@ fn try_uart_putc(c: u8) -> bool {
             }
         }
         EarlyUartKind::QcomGeni => {
-            crate::drivers::uart::qcom_geni::early_write_byte(uart, c);
+            return crate::drivers::uart::qcom_geni::early_write_byte(uart, c);
         }
     }
 
@@ -61,7 +61,21 @@ fn try_uart_putc(c: u8) -> bool {
 }
 
 fn emergency_uart_putc(c: u8) {
-    let _ = try_uart_putc(c);
+    let kind = EarlyUartKind::from_raw(EARLY_UART_KIND.load(Ordering::Acquire));
+    let uart = EARLY_UART_VADDR.load(Ordering::Relaxed);
+    if kind == EarlyUartKind::None || uart == 0 {
+        return;
+    }
+
+    match kind {
+        EarlyUartKind::None => {}
+        EarlyUartKind::Pl011 => {
+            let _ = try_uart_putc(c);
+        }
+        EarlyUartKind::QcomGeni => {
+            let _ = crate::drivers::uart::qcom_geni::try_emergency_write_byte(uart, c);
+        }
+    }
 }
 
 /// Write one byte to the active early UART or framebuffer fallback.

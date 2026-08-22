@@ -3014,9 +3014,12 @@ fn select_enqueue_cpu_for_task(task: &Task, requested_cpu: usize, now_ns: u64) -
     }
 }
 
-fn task_can_run_on_cpu(task: &Task, cpu_id: usize, now_ns: u64) -> bool {
+fn task_can_run_on_cpu(task: &Task, cpu_id: usize, _now_ns: u64) -> bool {
     if let Some(snapshot) = task.deadline_snapshot() {
         return snapshot.cpu_id == cpu_id && is_cpu_online(cpu_id);
+    }
+    if !is_cpu_online(cpu_id) {
+        return false;
     }
     if diagnostic_run_task_on_bsp(task) && cpu_id != BOOT_CPU_ID.load(Ordering::Acquire) {
         return false;
@@ -3025,7 +3028,15 @@ fn task_can_run_on_cpu(task: &Task, cpu_id: usize, now_ns: u64) -> bool {
         return false;
     }
 
-    cpu_capacity(cpu_id) >= task_min_cpu_capacity_at(Some(task), now_ns)
+    // CPU capacity is a placement preference, not a runnability constraint.
+    // `select_target_cpu_at` already prefers a CPU that satisfies the task's
+    // current utilization clamp. If no allowed online CPU can satisfy it, the
+    // selector deliberately returns its least-loaded fallback. Rejecting that
+    // same fallback here creates a permanent enqueue -> reject -> re-enqueue
+    // loop on heterogeneous systems. Linux likewise lets affinity-valid tasks
+    // run on a lower-capacity CPU when no better CPU is available, then uses
+    // balancing to promote them when possible.
+    true
 }
 
 fn steal_candidate_from_cpu(

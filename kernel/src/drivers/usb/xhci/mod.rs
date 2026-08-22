@@ -51,7 +51,7 @@ use crate::interrupt::{
 };
 use crate::mem::page::ContiguousPages;
 use crate::object::capability::{ControlOps, MemoryMappingInfo, MemoryMappingOps, Selectable};
-use crate::sync::{IrqSpinLock, IrqSpinLockGuard, Mutex, Once};
+use crate::sync::{IrqSpinLock, Mutex, Once};
 use crate::timer::get_time_ns;
 use crate::vm;
 use crate::{print, println};
@@ -131,7 +131,7 @@ const HCC_PARAMS1_CONTEXT_SIZE_64: u32 = 1 << 2;
 const USB_BULK_MAX_TRANSFER: usize = 64 * 1024;
 const XHCI_COMMAND_TIMEOUT_US: u64 = 5_000_000;
 const XHCI_TRANSFER_TIMEOUT_US: u64 = 5_000_000;
-const XHCI_PENDING_EVENT_LIMIT: usize = 64;
+const XHCI_PENDING_EVENT_WORK_BUDGET: usize = 64;
 const XHCI_CDC_NCM_TX_QUEUE_LIMIT: usize = 256;
 const XHCI_CDC_NCM_TX_WORK_BUDGET: usize = 32;
 const XHCI_CDC_NCM_RX_TRANSFER_DEPTH: usize = 8;
@@ -631,12 +631,7 @@ struct SlotRuntime {
     usb_device: UsbDevice,
     route_string: u32,
     route_depth: u8,
-    device_context: ContiguousPages,
-    ep0_input_context: ContiguousPages,
-    ep0_ring: DmaTrbRing,
-    ep0_usable: AtomicBool,
-    ep0_mps_negotiated: AtomicBool,
-    ep0_max_packet_size: AtomicUsize,
+    ep0: Arc<Ep0Runtime>,
     interrupt_input_context: Option<ContiguousPages>,
     interrupt_ring: Option<DmaTrbRing>,
     interrupt_buffer: Option<ContiguousPages>,
@@ -644,10 +639,39 @@ struct SlotRuntime {
     interrupt_dci: Option<u8>,
     interrupt_endpoint_address: Option<u8>,
     interrupt_max_packet_size: Option<u16>,
+    interrupt_trb_dma: Option<usize>,
     storage: Option<MassStorageRuntime>,
     cdc_ncm: Option<CdcNcmRuntime>,
     hid: Option<HidDeviceState>,
     hub: Option<HubRuntime>,
+}
+
+/// Stable EP0 resources which may outlive a short slot-registry lock scope.
+///
+/// Published slot entries retain one `Arc`, while synchronous control transfers
+/// clone it before waiting. This keeps the transfer ring and DMA allocations
+/// alive without holding an IRQ-disabling registry lock or manufacturing an
+/// aliased reference into the mutable slot registry.
+struct Ep0Runtime {
+    slot_id: u8,
+    speed: UsbSpeed,
+    device_context: ContiguousPages,
+    input_context: ContiguousPages,
+    ring: DmaTrbRing,
+    ep0_in_flight: AtomicBool,
+    ep0_usable: AtomicBool,
+    ep0_mps_negotiated: AtomicBool,
+    ep0_max_packet_size: AtomicUsize,
+}
+
+struct Ep0TransferGuard<'a> {
+    in_flight: &'a AtomicBool,
+}
+
+impl Drop for Ep0TransferGuard<'_> {
+    fn drop(&mut self) {
+        self.in_flight.store(false, Ordering::Release);
+    }
 }
 
 struct ScratchpadBuffers {
@@ -1482,11 +1506,11 @@ impl XhciController {
     }
 
     fn queue_pending_event(&self, event: Trb) {
-        let mut pending = self.pending_events.lock();
-        if pending.len() >= XHCI_PENDING_EVENT_LIMIT {
-            pending.remove(0);
-        }
-        pending.push(event);
+        // A queued command or transfer completion is ownership evidence for a
+        // DMA operation. Silently evicting an older entry can manufacture a
+        // timeout and force recovery even though hardware completed normally.
+        // Limit each drain pass instead of discarding completion events.
+        self.pending_events.lock().push(event);
     }
 
     fn take_pending_event<F>(&self, mut predicate: F) -> Option<Trb>
@@ -1548,7 +1572,7 @@ impl XhciController {
         };
 
         let mut processed = 0;
-        while processed < XHCI_PENDING_EVENT_LIMIT {
+        while processed < XHCI_PENDING_EVENT_WORK_BUDGET {
             let Some(event) = self.take_pending_event(|event| {
                 event.trb_type() == TrbType::TransferEvent as u8
                     && async_endpoints
@@ -1756,56 +1780,18 @@ impl XhciController {
             "[xHCI] CDC-NCM packet filter: slot={} interface={} filter={:#x}",
             slot_id, control_interface, filter
         );
-        let (td_start_dma, td_completion_dma, recovery_dequeue_pointer) = {
-            let slots = self.slot_runtime.lock();
-            let slot = slots
-                .iter()
-                .find(|slot| slot.usb_device.slot_id() == slot_id)
-                .ok_or("Unknown slot for CDC-NCM packet filter")?;
-            slot.ep0_ring
-                .ensure_contiguous_space(2, Trb::no_op_transfer())?;
-            let setup_trb_index = slot.ep0_ring.enqueue(Trb::setup_stage(
-                0x21,
-                USB_CDC_SET_ETHERNET_PACKET_FILTER,
-                filter,
-                u16::from(control_interface),
-                0,
-                0,
-            ))?;
-            let status_trb_index = slot.ep0_ring.enqueue(Trb::status_stage(true, true))?;
-            let ring_dma = slot.ep0_ring.dma_address();
-            (
-                ring_dma + setup_trb_index * size_of::<Trb>(),
-                ring_dma + status_trb_index * size_of::<Trb>(),
-                transfer_ring_dequeue_pointer(
-                    ring_dma,
-                    slot.ep0_ring.current_producer_index(),
-                    slot.ep0_ring.cycle_state(),
-                ),
-            )
-        };
-
-        self.ring_endpoint_doorbell(slot_id, EP0_DCI);
-        let deadline = crate::time::current_time() + XHCI_TRANSFER_TIMEOUT_US;
-        let completion = self.wait_for_transfer_event_until(
-            slot_id,
-            EP0_DCI,
-            td_start_dma,
-            td_completion_dma,
-            recovery_dequeue_pointer,
-            deadline,
-        );
-        if matches!(completion, Err(EP0_RECOVERY_FAILED)) {
-            if let Some(slot) = self
-                .slot_runtime
-                .lock()
-                .iter()
-                .find(|slot| slot.usb_device.slot_id() == slot_id)
-            {
-                slot.ep0_usable.store(false, Ordering::Release);
-            }
-        }
-        completion?;
+        let ep0 = self
+            .ep0_runtime(slot_id)
+            .ok_or("Unknown slot for CDC-NCM packet filter")?;
+        self.control_transfer(
+            &ep0,
+            0x21,
+            USB_CDC_SET_ETHERNET_PACKET_FILTER,
+            filter,
+            u16::from(control_interface),
+            None,
+            0,
+        )?;
         Ok(())
     }
 
@@ -2191,15 +2177,20 @@ impl XhciController {
             usb_device,
             route_string,
             route_depth,
-            device_context,
-            ep0_input_context: input_pages,
-            ep0_ring,
-            ep0_usable: AtomicBool::new(true),
-            ep0_mps_negotiated: AtomicBool::new(false),
-            ep0_max_packet_size: AtomicUsize::new(match speed {
-                UsbSpeed::Low | UsbSpeed::Full => 8,
-                UsbSpeed::High => 64,
-                UsbSpeed::Super | UsbSpeed::SuperPlus => 512,
+            ep0: Arc::new(Ep0Runtime {
+                slot_id,
+                speed,
+                device_context,
+                input_context: input_pages,
+                ring: ep0_ring,
+                ep0_in_flight: AtomicBool::new(false),
+                ep0_usable: AtomicBool::new(true),
+                ep0_mps_negotiated: AtomicBool::new(false),
+                ep0_max_packet_size: AtomicUsize::new(match speed {
+                    UsbSpeed::Low | UsbSpeed::Full => 8,
+                    UsbSpeed::High => 64,
+                    UsbSpeed::Super | UsbSpeed::SuperPlus => 512,
+                }),
             }),
             interrupt_input_context: None,
             interrupt_ring: None,
@@ -2208,6 +2199,7 @@ impl XhciController {
             interrupt_dci: None,
             interrupt_endpoint_address: None,
             interrupt_max_packet_size: None,
+            interrupt_trb_dma: None,
             storage: None,
             cdc_ncm: None,
             hid: None,
@@ -2290,21 +2282,20 @@ impl XhciController {
 
     fn update_ep0_max_packet_size(
         &self,
-        slot: &SlotRuntime,
+        slot: &Ep0Runtime,
         max_packet_size: u16,
     ) -> Result<(), &'static str> {
         let input_dma_mapping = self.dma_map_owned_pages(
-            &slot.ep0_input_context,
+            &slot.input_context,
             IommuMapFlags::READ | IommuMapFlags::COHERENT,
         )?;
         unsafe {
             core::ptr::write_bytes(
-                slot.ep0_input_context.as_vaddr() as *mut u8,
+                slot.input_context.as_vaddr() as *mut u8,
                 0,
-                slot.ep0_input_context.len() * crate::environment::PAGE_SIZE,
+                slot.input_context.len() * crate::environment::PAGE_SIZE,
             );
-            let input =
-                InputContextBuffer::new(slot.ep0_input_context.as_vaddr(), self.context_size);
+            let input = InputContextBuffer::new(slot.input_context.as_vaddr(), self.context_size);
             // Evaluate Context for EP0 changes only uses Add Context flag A1.
             (*input.control_mut()).add_endpoint(EP0_DCI);
 
@@ -2315,20 +2306,19 @@ impl XhciController {
             endpoint0.set_max_packet_size(max_packet_size);
             write_volatile(input.endpoint_mut(EP0_DCI)?, endpoint0);
         }
-        sync_pages_for_device(&slot.ep0_input_context);
+        sync_pages_for_device(&slot.input_context);
         let event = self.send_command(Trb::evaluate_context_command(
             input_dma_mapping.dma_addr(),
-            slot.usb_device.slot_id(),
+            slot.slot_id,
         ))?;
-        if event.slot_id() != slot.usb_device.slot_id() {
+        if event.slot_id() != slot.slot_id {
             return Err("Evaluate Context completion slot mismatch");
         }
         slot.ep0_max_packet_size
             .store(max_packet_size as usize, Ordering::Release);
         println!(
             "[xHCI] Updated EP0 max packet size: slot={} max_packet={}",
-            slot.usb_device.slot_id(),
-            max_packet_size
+            slot.slot_id, max_packet_size
         );
         Ok(())
     }
@@ -2342,7 +2332,7 @@ impl XhciController {
 
     fn control_transfer(
         &self,
-        slot: &SlotRuntime,
+        slot: &Ep0Runtime,
         request_type: u8,
         request: u8,
         value: u16,
@@ -2350,12 +2340,25 @@ impl XhciController {
         mut data: Option<&mut ContiguousPages>,
         length: u16,
     ) -> Result<usize, &'static str> {
+        while slot
+            .ep0_in_flight
+            .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            while slot.ep0_in_flight.load(Ordering::Relaxed) {
+                core::hint::spin_loop();
+            }
+        }
+        let _ep0_guard = Ep0TransferGuard {
+            in_flight: &slot.ep0_in_flight,
+        };
+
         if !slot.ep0_usable.load(Ordering::Acquire) {
             return Err(EP0_RECOVERY_FAILED);
         }
         println!(
             "[xHCI] EP0 control transfer: slot={} req_type={:#x} req={:#x} value={:#x} index={:#x} length={} data={}",
-            slot.usb_device.slot_id(),
+            slot.slot_id,
             request_type,
             request,
             value,
@@ -2371,9 +2374,9 @@ impl XhciController {
         };
         let required_trbs = if data.is_some() { 3 } else { 2 };
         let _data_dma_mapping;
-        slot.ep0_ring
+        slot.ring
             .ensure_contiguous_space(required_trbs, Trb::no_op_transfer())?;
-        let setup_trb_index = slot.ep0_ring.enqueue(Trb::setup_stage(
+        let setup_trb_index = slot.ring.enqueue(Trb::setup_stage(
             request_type,
             request,
             value,
@@ -2394,32 +2397,30 @@ impl XhciController {
                 sync_pages_for_device(buffer);
             }
             let mapping = self.dma_map_owned_pages(buffer, flags)?;
-            slot.ep0_ring.enqueue(Trb::data_stage(
+            slot.ring.enqueue(Trb::data_stage(
                 mapping.dma_addr(),
                 length as u32,
                 direction_in,
             ))?;
-            status_trb_index = slot
-                .ep0_ring
-                .enqueue(Trb::status_stage(!direction_in, true))?;
+            status_trb_index = slot.ring.enqueue(Trb::status_stage(!direction_in, true))?;
             _data_dma_mapping = Some(mapping);
         } else {
-            status_trb_index = slot.ep0_ring.enqueue(Trb::status_stage(true, true))?;
+            status_trb_index = slot.ring.enqueue(Trb::status_stage(true, true))?;
             _data_dma_mapping = None;
         }
 
-        let ring_dma = slot.ep0_ring.dma_address();
+        let ring_dma = slot.ring.dma_address();
         let td_start_dma = ring_dma + setup_trb_index * size_of::<Trb>();
         let td_completion_dma = ring_dma + status_trb_index * size_of::<Trb>();
         let recovery_dequeue_pointer = transfer_ring_dequeue_pointer(
             ring_dma,
-            slot.ep0_ring.current_producer_index(),
-            slot.ep0_ring.cycle_state(),
+            slot.ring.current_producer_index(),
+            slot.ring.cycle_state(),
         );
-        self.ring_endpoint_doorbell(slot.usb_device.slot_id(), EP0_DCI);
+        self.ring_endpoint_doorbell(slot.slot_id, EP0_DCI);
         let deadline = crate::time::current_time() + XHCI_TRANSFER_TIMEOUT_US;
         let completion = self.wait_for_transfer_event_until(
-            slot.usb_device.slot_id(),
+            slot.slot_id,
             EP0_DCI,
             td_start_dma,
             td_completion_dma,
@@ -2431,14 +2432,11 @@ impl XhciController {
             Err(error) if error == "Timeout waiting for transfer event" => {
                 println!(
                     "[xHCI] EP0 transfer failed; stopping endpoint before releasing DMA: slot={} error={}",
-                    slot.usb_device.slot_id(),
-                    error
+                    slot.slot_id, error
                 );
-                if let Err(recovery_error) = self.recover_timed_out_endpoint(
-                    slot.usb_device.slot_id(),
-                    EP0_DCI,
-                    recovery_dequeue_pointer,
-                ) {
+                if let Err(recovery_error) =
+                    self.recover_timed_out_endpoint(slot.slot_id, EP0_DCI, recovery_dequeue_pointer)
+                {
                     panic!(
                         "xHCI: cannot safely release timed-out EP0 DMA buffer: {}",
                         recovery_error
@@ -2640,10 +2638,8 @@ impl XhciController {
                 }
             }
         }
-        // EP0 waits hold `slot_runtime` so the control transfer's TRB/DMA
-        // storage cannot be changed while it is in flight.  The bulk endpoint
-        // diagnostic below also locks `slot_runtime`; calling it here for EP0
-        // would therefore recursively acquire the same IrqSpinLock on timeout.
+        // The endpoint-specific dump below only knows the storage and CDC-NCM
+        // bulk runtimes; EP0 state is already covered by the generic dump.
         if endpoint_id != EP0_DCI {
             self.log_bulk_endpoint_timeout_state(slot_id, endpoint_id);
         }
@@ -2657,8 +2653,9 @@ impl XhciController {
         else {
             return;
         };
-        sync_pages_after_device_write(&slot.device_context);
-        let context = DeviceContextBuffer::new(slot.device_context.as_vaddr(), self.context_size);
+        sync_pages_after_device_write(&slot.ep0.device_context);
+        let context =
+            DeviceContextBuffer::new(slot.ep0.device_context.as_vaddr(), self.context_size);
         if let Ok(endpoint) = context.endpoint(endpoint_id) {
             let endpoint = unsafe { read_volatile(endpoint) };
             println!(
@@ -2731,11 +2728,14 @@ impl XhciController {
     }
 
     fn submit_interrupt_in_transfer(&self, slot_id: u8) -> Result<(), &'static str> {
-        let slots = self.slot_runtime.lock();
+        let mut slots = self.slot_runtime.lock();
         let slot = slots
-            .iter()
+            .iter_mut()
             .find(|slot| slot.usb_device.slot_id() == slot_id)
             .ok_or("Unknown slot for interrupt transfer")?;
+        if slot.interrupt_trb_dma.is_some() {
+            return Err("Interrupt transfer is already in flight");
+        }
         let ring = slot
             .interrupt_ring
             .as_ref()
@@ -2754,10 +2754,12 @@ impl XhciController {
             .ok_or("Interrupt packet size not configured")?;
 
         sync_pages_before_device_write(buffer);
-        ring.enqueue(Trb::normal_transfer_in(
+        let trb_index = ring.enqueue(Trb::normal_transfer_in(
             buffer_mapping.dma_addr(),
             max_packet as u32,
         ))?;
+        slot.interrupt_trb_dma = Some(ring.dma_address() + trb_index * size_of::<Trb>());
+        drop(slots);
         self.ring_endpoint_doorbell(slot_id, dci);
         Ok(())
     }
@@ -2765,19 +2767,15 @@ impl XhciController {
     fn configure_boot_hid_slot(&self, slot_id: u8) -> Result<bool, &'static str> {
         println!("[xHCI] Configuring boot HID for slot {}", slot_id);
         let descriptor = {
-            let slots = self.slot_runtime.lock();
-            let slot = slots
-                .iter()
-                .find(|slot| slot.usb_device.slot_id() == slot_id)
+            let slot = self
+                .ep0_runtime(slot_id)
                 .ok_or("Unknown slot for descriptor fetch")?;
-            self.get_device_descriptor(slot)?
+            self.get_device_descriptor(&slot)?
         };
 
         let config_blob = {
-            let slots = self.slot_runtime.lock();
-            let slot = slots
-                .iter()
-                .find(|slot| slot.usb_device.slot_id() == slot_id)
+            let slot = self
+                .ep0_runtime(slot_id)
                 .ok_or("Unknown slot for config fetch")?;
 
             let mut header_buffer = self
@@ -2791,7 +2789,7 @@ impl XhciController {
                 )
             };
             self.control_transfer(
-                slot,
+                &slot,
                 0x80,
                 USB_REQ_GET_DESCRIPTOR,
                 (USB_DT_CONFIGURATION as u16) << 8,
@@ -2802,7 +2800,7 @@ impl XhciController {
             let header = unsafe {
                 read_unaligned(header_buffer.as_vaddr() as *const ConfigurationDescriptor)
             };
-            self.get_configuration_blob(slot, header.total_length)?
+            self.get_configuration_blob(&slot, header.total_length)?
         };
 
         let boot = match self.parse_boot_interface(&config_blob) {
@@ -2870,10 +2868,10 @@ impl XhciController {
                 .iter()
                 .find(|slot| slot.usb_device.slot_id() == slot_id)
                 .ok_or("Unknown slot for endpoint config")?;
-            sync_pages_after_device_write(&slot.device_context);
+            sync_pages_after_device_write(&slot.ep0.device_context);
             let device_speed = slot.usb_device.speed();
             let existing_ctx =
-                DeviceContextBuffer::new(slot.device_context.as_vaddr(), self.context_size);
+                DeviceContextBuffer::new(slot.ep0.device_context.as_vaddr(), self.context_size);
             let mut slot_ctx = core::ptr::read(existing_ctx.slot());
             slot_ctx.set_context_entries(interrupt_dci);
             core::ptr::write(input.slot_mut(), slot_ctx);
@@ -2900,13 +2898,11 @@ impl XhciController {
         }
 
         {
-            let slots = self.slot_runtime.lock();
-            let slot = slots
-                .iter()
-                .find(|slot| slot.usb_device.slot_id() == slot_id)
+            let slot = self
+                .ep0_runtime(slot_id)
                 .ok_or("Unknown slot for set configuration")?;
             self.control_transfer(
-                slot,
+                &slot,
                 0x00,
                 USB_REQ_SET_CONFIGURATION,
                 boot.configuration_value as u16,
@@ -2915,7 +2911,7 @@ impl XhciController {
                 0,
             )?;
             self.control_transfer(
-                slot,
+                &slot,
                 0x21,
                 USB_REQ_SET_PROTOCOL,
                 0,
@@ -2964,10 +2960,8 @@ impl XhciController {
         }
 
         let config_blob = {
-            let slots = self.slot_runtime.lock();
-            let slot = slots
-                .iter()
-                .find(|slot| slot.usb_device.slot_id() == slot_id)
+            let slot = self
+                .ep0_runtime(slot_id)
                 .ok_or("Unknown slot for storage config fetch")?;
 
             let mut header_buffer = self
@@ -2981,7 +2975,7 @@ impl XhciController {
                 )
             };
             self.control_transfer(
-                slot,
+                &slot,
                 0x80,
                 USB_REQ_GET_DESCRIPTOR,
                 (USB_DT_CONFIGURATION as u16) << 8,
@@ -2992,7 +2986,7 @@ impl XhciController {
             let header = unsafe {
                 read_unaligned(header_buffer.as_vaddr() as *const ConfigurationDescriptor)
             };
-            self.get_configuration_blob(slot, header.total_length)?
+            self.get_configuration_blob(&slot, header.total_length)?
         };
 
         let storage = match self.parse_mass_storage_interface(&config_blob) {
@@ -3055,9 +3049,9 @@ impl XhciController {
                 .iter()
                 .find(|slot| slot.usb_device.slot_id() == slot_id)
                 .ok_or("Unknown slot for mass storage endpoint config")?;
-            sync_pages_after_device_write(&slot.device_context);
+            sync_pages_after_device_write(&slot.ep0.device_context);
             let existing_ctx =
-                DeviceContextBuffer::new(slot.device_context.as_vaddr(), self.context_size);
+                DeviceContextBuffer::new(slot.ep0.device_context.as_vaddr(), self.context_size);
             let mut slot_ctx = core::ptr::read(existing_ctx.slot());
             slot_ctx.set_context_entries(max_dci);
             core::ptr::write(input.slot_mut(), slot_ctx);
@@ -3091,13 +3085,11 @@ impl XhciController {
         }
 
         {
-            let slots = self.slot_runtime.lock();
-            let slot = slots
-                .iter()
-                .find(|slot| slot.usb_device.slot_id() == slot_id)
+            let slot = self
+                .ep0_runtime(slot_id)
                 .ok_or("Unknown slot for mass storage set configuration")?;
             self.control_transfer(
-                slot,
+                &slot,
                 0x00,
                 USB_REQ_SET_CONFIGURATION,
                 storage.configuration_value as u16,
@@ -3148,7 +3140,7 @@ impl XhciController {
 
     fn find_cdc_ncm_configuration(
         &self,
-        slot: &SlotRuntime,
+        slot: &Ep0Runtime,
         num_configurations: u8,
     ) -> Result<Option<CdcNcmInterfaceConfig>, &'static str> {
         for descriptor_index in 0..num_configurations {
@@ -3170,7 +3162,7 @@ impl XhciController {
 
     fn read_cdc_ncm_parameters(
         &self,
-        slot: &SlotRuntime,
+        slot: &Ep0Runtime,
         control_interface: u8,
     ) -> Result<CdcNcmParameters, &'static str> {
         let bytes = self.control_transfer_bytes_in(
@@ -3186,7 +3178,7 @@ impl XhciController {
 
     fn read_cdc_ncm_mac_address(
         &self,
-        slot: &SlotRuntime,
+        slot: &Ep0Runtime,
         configuration: CdcNcmInterfaceConfig,
     ) -> Result<MacAddress, &'static str> {
         let descriptor_mac = self
@@ -3218,7 +3210,7 @@ impl XhciController {
 
     fn control_transfer_bytes_in(
         &self,
-        slot: &SlotRuntime,
+        slot: &Ep0Runtime,
         request_type: u8,
         request: u8,
         value: u16,
@@ -3256,7 +3248,7 @@ impl XhciController {
 
     fn control_transfer_bytes_out(
         &self,
-        slot: &SlotRuntime,
+        slot: &Ep0Runtime,
         request_type: u8,
         request: u8,
         value: u16,
@@ -3296,7 +3288,7 @@ impl XhciController {
         Ok(())
     }
 
-    fn get_usb_string(&self, slot: &SlotRuntime, string_index: u8) -> Result<String, &'static str> {
+    fn get_usb_string(&self, slot: &Ep0Runtime, string_index: u8) -> Result<String, &'static str> {
         if string_index == 0 {
             return Err("USB string descriptor index is zero");
         }
@@ -3354,20 +3346,18 @@ impl XhciController {
         }
 
         let (configuration, parameters, mac_address) = {
-            let slots = self.slot_runtime.lock();
-            let slot = slots
-                .iter()
-                .find(|slot| slot.usb_device.slot_id() == slot_id)
+            let slot = self
+                .ep0_runtime(slot_id)
                 .ok_or("Unknown slot for CDC-NCM descriptor fetch")?;
-            let descriptor = self.get_device_descriptor(slot)?;
+            let descriptor = self.get_device_descriptor(&slot)?;
             let Some(configuration) =
-                self.find_cdc_ncm_configuration(slot, descriptor.num_configurations)?
+                self.find_cdc_ncm_configuration(&slot, descriptor.num_configurations)?
             else {
                 return Ok(false);
             };
 
             self.control_transfer(
-                slot,
+                &slot,
                 0x00,
                 USB_REQ_SET_CONFIGURATION,
                 u16::from(configuration.configuration_value),
@@ -3377,7 +3367,7 @@ impl XhciController {
             )?;
             if configuration.data_alternate_setting != 0 {
                 self.control_transfer(
-                    slot,
+                    &slot,
                     0x01,
                     USB_REQ_SET_INTERFACE,
                     0,
@@ -3387,10 +3377,11 @@ impl XhciController {
                 )?;
             }
 
-            let parameters = self.read_cdc_ncm_parameters(slot, configuration.control_interface)?;
+            let parameters =
+                self.read_cdc_ncm_parameters(&slot, configuration.control_interface)?;
             if parameters.formats_supported & USB_CDC_NCM_NTB32_SUPPORTED != 0 {
                 self.control_transfer(
-                    slot,
+                    &slot,
                     0x21,
                     USB_CDC_SET_NTB_FORMAT,
                     USB_CDC_NCM_NTB16_FORMAT,
@@ -3401,7 +3392,7 @@ impl XhciController {
             }
             if configuration.network_capabilities & USB_CDC_NCM_NCAP_CRC_MODE != 0 {
                 self.control_transfer(
-                    slot,
+                    &slot,
                     0x21,
                     USB_CDC_SET_CRC_MODE,
                     USB_CDC_NCM_CRC_NOT_APPENDED,
@@ -3417,7 +3408,7 @@ impl XhciController {
                     .then_some(USB_CDC_NCM_MAX_RX_DATAGRAMS),
             );
             self.control_transfer_bytes_out(
-                slot,
+                &slot,
                 0x21,
                 USB_CDC_SET_NTB_INPUT_SIZE,
                 0,
@@ -3426,7 +3417,7 @@ impl XhciController {
             )?;
             if configuration.network_capabilities & USB_CDC_NCM_NCAP_MAX_DATAGRAM_SIZE != 0 {
                 self.control_transfer_bytes_out(
-                    slot,
+                    &slot,
                     0x21,
                     USB_CDC_SET_MAX_DATAGRAM_SIZE,
                     0,
@@ -3434,7 +3425,7 @@ impl XhciController {
                     &configuration.max_segment_size.to_le_bytes(),
                 )?;
             }
-            let mac_address = self.read_cdc_ncm_mac_address(slot, configuration)?;
+            let mac_address = self.read_cdc_ncm_mac_address(&slot, configuration)?;
             (configuration, parameters, mac_address)
         };
 
@@ -3527,9 +3518,9 @@ impl XhciController {
                 .iter()
                 .find(|slot| slot.usb_device.slot_id() == slot_id)
                 .ok_or("Unknown slot for CDC-NCM endpoint config")?;
-            sync_pages_after_device_write(&slot.device_context);
+            sync_pages_after_device_write(&slot.ep0.device_context);
             let existing =
-                DeviceContextBuffer::new(slot.device_context.as_vaddr(), self.context_size);
+                DeviceContextBuffer::new(slot.ep0.device_context.as_vaddr(), self.context_size);
             let mut slot_context = core::ptr::read(existing.slot());
             slot_context.set_context_entries(max_dci);
             core::ptr::write(input.slot_mut(), slot_context);
@@ -3573,13 +3564,11 @@ impl XhciController {
             return Err("CDC-NCM Configure Endpoint completion slot mismatch");
         }
         {
-            let slots = self.slot_runtime.lock();
-            let slot = slots
-                .iter()
-                .find(|slot| slot.usb_device.slot_id() == slot_id)
+            let slot = self
+                .ep0_runtime(slot_id)
                 .ok_or("Unknown slot for CDC-NCM alternate setting")?;
             self.control_transfer(
-                slot,
+                &slot,
                 0x01,
                 USB_REQ_SET_INTERFACE,
                 u16::from(configuration.data_alternate_setting),
@@ -3714,7 +3703,7 @@ impl XhciController {
             .lock()
             .iter()
             .find(|slot| slot.usb_device.slot_id() == slot_id)
-            .map(|slot| slot.ep0_usable.load(Ordering::Acquire))
+            .map(|slot| slot.ep0.ep0_usable.load(Ordering::Acquire))
             .unwrap_or(false);
         if !ep0_usable {
             println!(
@@ -3776,20 +3765,16 @@ impl XhciController {
         }
 
         let descriptor = {
-            let slots = self.slot_runtime.lock();
-            let slot = slots
-                .iter()
-                .find(|slot| slot.usb_device.slot_id() == slot_id)
+            let ep0 = self
+                .ep0_runtime(slot_id)
                 .ok_or("Unknown slot for hub descriptor fetch")?;
-            self.get_device_descriptor(slot)?
+            self.get_device_descriptor(&ep0)?
         };
         let config_blob = {
-            let slots = self.slot_runtime.lock();
-            let slot = slots
-                .iter()
-                .find(|slot| slot.usb_device.slot_id() == slot_id)
+            let ep0 = self
+                .ep0_runtime(slot_id)
                 .ok_or("Unknown slot for hub config fetch")?;
-            self.fetch_configuration_blob(slot)?
+            self.fetch_configuration_blob(&ep0)?
         };
 
         let device_class = descriptor.device_class;
@@ -3818,13 +3803,11 @@ impl XhciController {
             || hub_interface.protocol == USB_HUB_PROTOCOL_SUPERSPEED;
 
         {
-            let slots = self.slot_runtime.lock();
-            let slot = slots
-                .iter()
-                .find(|slot| slot.usb_device.slot_id() == slot_id)
+            let ep0 = self
+                .ep0_runtime(slot_id)
                 .ok_or("Unknown slot for hub set configuration")?;
             self.control_transfer(
-                slot,
+                &ep0,
                 0x00,
                 USB_REQ_SET_CONFIGURATION,
                 hub_interface.configuration_value as u16,
@@ -3834,7 +3817,7 @@ impl XhciController {
             )?;
             if hub_interface.alternate_setting != 0 {
                 self.control_transfer(
-                    slot,
+                    &ep0,
                     0x01,
                     USB_REQ_SET_INTERFACE,
                     hub_interface.alternate_setting as u16,
@@ -3849,12 +3832,10 @@ impl XhciController {
         }
 
         let hub_descriptor = {
-            let slots = self.slot_runtime.lock();
-            let slot = slots
-                .iter()
-                .find(|slot| slot.usb_device.slot_id() == slot_id)
+            let ep0 = self
+                .ep0_runtime(slot_id)
                 .ok_or("Unknown slot for hub descriptor fetch")?;
-            self.get_hub_descriptor(slot, is_superspeed_hub)?
+            self.get_hub_descriptor(&ep0, is_superspeed_hub)?
         };
         let num_ports = hub_descriptor.num_ports;
         if num_ports == 0 {
@@ -3936,9 +3917,9 @@ impl XhciController {
                 .iter()
                 .find(|slot| slot.usb_device.slot_id() == slot_id)
                 .ok_or("Unknown slot for hub context config")?;
-            sync_pages_after_device_write(&slot.device_context);
+            sync_pages_after_device_write(&slot.ep0.device_context);
             let existing_ctx =
-                DeviceContextBuffer::new(slot.device_context.as_vaddr(), self.context_size);
+                DeviceContextBuffer::new(slot.ep0.device_context.as_vaddr(), self.context_size);
             let mut slot_ctx = core::ptr::read(existing_ctx.slot());
             slot_ctx.set_hub(true);
             slot_ctx.set_multi_tt(multi_tt);
@@ -3961,12 +3942,8 @@ impl XhciController {
     }
 
     fn set_hub_depth(&self, slot_id: u8, depth: u8) -> Result<(), &'static str> {
-        let slots = self.slot_runtime.lock();
-        let slot = slots
-            .iter()
-            .find(|slot| slot.usb_device.slot_id() == slot_id)
-            .ok_or("Unknown hub slot")?;
-        self.control_transfer(slot, 0x20, USB_HUB_REQ_SET_DEPTH, depth as u16, 0, None, 0)?;
+        let ep0 = self.ep0_runtime(slot_id).ok_or("Unknown hub slot")?;
+        self.control_transfer(&ep0, 0x20, USB_HUB_REQ_SET_DEPTH, depth as u16, 0, None, 0)?;
         Ok(())
     }
 
@@ -4143,13 +4120,9 @@ impl XhciController {
         port: u8,
         feature: u16,
     ) -> Result<(), &'static str> {
-        let slots = self.slot_runtime.lock();
-        let slot = slots
-            .iter()
-            .find(|slot| slot.usb_device.slot_id() == slot_id)
-            .ok_or("Unknown hub slot")?;
+        let ep0 = self.ep0_runtime(slot_id).ok_or("Unknown hub slot")?;
         self.control_transfer(
-            slot,
+            &ep0,
             0x23,
             USB_REQ_SET_FEATURE,
             feature,
@@ -4166,13 +4139,9 @@ impl XhciController {
         port: u8,
         feature: u16,
     ) -> Result<(), &'static str> {
-        let slots = self.slot_runtime.lock();
-        let slot = slots
-            .iter()
-            .find(|slot| slot.usb_device.slot_id() == slot_id)
-            .ok_or("Unknown hub slot")?;
+        let ep0 = self.ep0_runtime(slot_id).ok_or("Unknown hub slot")?;
         self.control_transfer(
-            slot,
+            &ep0,
             0x23,
             USB_REQ_CLEAR_FEATURE,
             feature,
@@ -4194,22 +4163,16 @@ impl XhciController {
                 crate::environment::PAGE_SIZE,
             )
         };
-        {
-            let slots = self.slot_runtime.lock();
-            let slot = slots
-                .iter()
-                .find(|slot| slot.usb_device.slot_id() == slot_id)
-                .ok_or("Unknown hub slot")?;
-            self.control_transfer(
-                slot,
-                0xa3,
-                USB_REQ_GET_STATUS,
-                0,
-                port as u16,
-                Some(&mut buffer),
-                4,
-            )?;
-        }
+        let ep0 = self.ep0_runtime(slot_id).ok_or("Unknown hub slot")?;
+        self.control_transfer(
+            &ep0,
+            0xa3,
+            USB_REQ_GET_STATUS,
+            0,
+            port as u16,
+            Some(&mut buffer),
+            4,
+        )?;
 
         let bytes = unsafe { core::slice::from_raw_parts(buffer.as_vaddr() as *const u8, 4) };
         Ok(HubPortStatus {
@@ -4239,7 +4202,7 @@ impl XhciController {
         );
     }
 
-    fn get_device_descriptor(&self, slot: &SlotRuntime) -> Result<DeviceDescriptor, &'static str> {
+    fn get_device_descriptor(&self, slot: &Ep0Runtime) -> Result<DeviceDescriptor, &'static str> {
         let mut buffer = self
             .dma_alloc_pages(1)
             .ok_or("Failed to allocate device descriptor buffer")?;
@@ -4250,7 +4213,7 @@ impl XhciController {
                 crate::environment::PAGE_SIZE,
             )
         };
-        if matches!(slot.usb_device.speed(), UsbSpeed::Low | UsbSpeed::Full)
+        if matches!(slot.speed, UsbSpeed::Low | UsbSpeed::Full)
             && !slot.ep0_mps_negotiated.load(Ordering::Acquire)
         {
             // Full-speed devices may use 8, 16, 32, or 64-byte EP0 packets.
@@ -4273,7 +4236,7 @@ impl XhciController {
             let valid_descriptor = descriptor_length as usize == DeviceDescriptor::encoded_size()
                 && descriptor_type == USB_DT_DEVICE;
             let valid_max_packet = valid_descriptor
-                && match slot.usb_device.speed() {
+                && match slot.speed {
                     UsbSpeed::Low => reported_max_packet == 8,
                     UsbSpeed::Full => matches!(reported_max_packet, 8 | 16 | 32 | 64),
                     _ => true,
@@ -4281,8 +4244,8 @@ impl XhciController {
             if !valid_max_packet {
                 println!(
                     "[xHCI] Invalid initial device descriptor: slot={} speed={:?} length={} type={} max_packet={}",
-                    slot.usb_device.slot_id(),
-                    slot.usb_device.speed(),
+                    slot.slot_id,
+                    slot.speed,
                     descriptor_length,
                     descriptor_type,
                     reported_max_packet
@@ -4297,8 +4260,7 @@ impl XhciController {
                 {
                     println!(
                         "[xHCI] EP0 max packet Evaluate Context failed: slot={} error={}",
-                        slot.usb_device.slot_id(),
-                        error
+                        slot.slot_id, error
                     );
                     slot.ep0_usable.store(false, Ordering::Release);
                     return Err(EP0_RECOVERY_FAILED);
@@ -4317,20 +4279,17 @@ impl XhciController {
             DeviceDescriptor::encoded_size() as u16,
         )?;
         let descriptor = unsafe { read_unaligned(buffer.as_vaddr() as *const DeviceDescriptor) };
-        self.log_device_descriptor(slot.usb_device.slot_id(), &descriptor);
+        self.log_device_descriptor(slot.slot_id, &descriptor);
         Ok(descriptor)
     }
 
-    fn fetch_configuration_blob(
-        &self,
-        slot: &SlotRuntime,
-    ) -> Result<ContiguousPages, &'static str> {
+    fn fetch_configuration_blob(&self, slot: &Ep0Runtime) -> Result<ContiguousPages, &'static str> {
         self.fetch_configuration_blob_at(slot, 0)
     }
 
     fn fetch_configuration_blob_at(
         &self,
-        slot: &SlotRuntime,
+        slot: &Ep0Runtime,
         descriptor_index: u8,
     ) -> Result<ContiguousPages, &'static str> {
         let mut header_buffer = self
@@ -4359,7 +4318,7 @@ impl XhciController {
 
     fn get_configuration_blob(
         &self,
-        slot: &SlotRuntime,
+        slot: &Ep0Runtime,
         total_length: u16,
     ) -> Result<ContiguousPages, &'static str> {
         self.get_configuration_blob_at(slot, 0, total_length)
@@ -4367,7 +4326,7 @@ impl XhciController {
 
     fn get_configuration_blob_at(
         &self,
-        slot: &SlotRuntime,
+        slot: &Ep0Runtime,
         descriptor_index: u8,
         total_length: u16,
     ) -> Result<ContiguousPages, &'static str> {
@@ -4399,13 +4358,13 @@ impl XhciController {
             Some(&mut buffer),
             total_length,
         )?;
-        self.log_configuration_blob(slot.usb_device.slot_id(), &buffer, total_length);
+        self.log_configuration_blob(slot.slot_id, &buffer, total_length);
         Ok(buffer)
     }
 
     fn get_hub_descriptor(
         &self,
-        slot: &SlotRuntime,
+        slot: &Ep0Runtime,
         is_superspeed: bool,
     ) -> Result<HubDescriptor, &'static str> {
         let mut buffer = self
@@ -4446,7 +4405,7 @@ impl XhciController {
         let controller_current = descriptor.controller_current;
         println!(
             "[xHCI] Slot {} hub descriptor: len={} type={:#04x} ports={} characteristics={:#06x} pgood={} current={}",
-            slot.usb_device.slot_id(),
+            slot.slot_id,
             length,
             descriptor_type,
             num_ports,
@@ -4929,6 +4888,13 @@ impl XhciController {
         if length > USB_BULK_MAX_TRANSFER {
             return Err("USB bulk transfer too large");
         }
+        let buffer_capacity = buffer
+            .len()
+            .checked_mul(crate::environment::PAGE_SIZE)
+            .ok_or("USB bulk DMA buffer size overflow")?;
+        if length > buffer_capacity {
+            return Err("USB bulk transfer exceeds its DMA buffer");
+        }
 
         let dci = Self::endpoint_dci(endpoint_address);
         let direction_in;
@@ -5143,16 +5109,12 @@ impl XhciController {
         Ok(())
     }
 
-    fn slot_runtime_mut(&self, slot_id: u8) -> Option<IrqSpinLockGuard<'_, Vec<SlotRuntime>>> {
-        let guard = self.slot_runtime.lock();
-        if guard
+    fn ep0_runtime(&self, slot_id: u8) -> Option<Arc<Ep0Runtime>> {
+        self.slot_runtime
+            .lock()
             .iter()
-            .any(|slot| slot.usb_device.slot_id() == slot_id)
-        {
-            Some(guard)
-        } else {
-            None
-        }
+            .find(|slot| slot.usb_device.slot_id() == slot_id)
+            .map(|slot| slot.ep0.clone())
     }
 
     pub fn attach_boot_keyboard(&self, slot_id: u8) -> Result<(), &'static str> {
@@ -5419,32 +5381,75 @@ impl XhciController {
             return false;
         }
 
+        let completed_trb_dma = event.trb_pointer() as usize & !0xf;
+        let Some(expected_trb_dma) = slot.interrupt_trb_dma else {
+            drop(slots);
+            println!(
+                "[xHCI] Unexpected HID completion without an in-flight transfer: slot={} dci={} trb={:#x}",
+                slot_id,
+                endpoint_id,
+                event.trb_pointer()
+            );
+            return true;
+        };
+        if (expected_trb_dma & !0xf) != completed_trb_dma {
+            drop(slots);
+            println!(
+                "[xHCI] Stale HID completion: slot={} dci={} trb={:#x} expected={:#x}",
+                slot_id,
+                endpoint_id,
+                event.trb_pointer(),
+                expected_trb_dma
+            );
+            return true;
+        }
+        slot.interrupt_trb_dma = None;
+
         let Some(buffer) = slot.interrupt_buffer.as_ref() else {
             return true;
         };
+        let successful = Self::transfer_successful(event);
+        let actual = slot
+            .interrupt_max_packet_size
+            .map(usize::from)
+            .unwrap_or(0)
+            .saturating_sub(event.transfer_length() as usize);
+        if successful {
+            sync_pages_after_device_write(buffer);
+        }
 
-        match slot.hid.as_mut() {
-            Some(HidDeviceState::Keyboard(keyboard)) => {
-                if KeyboardBootReport::encoded_size()
-                    <= buffer.len() * crate::environment::PAGE_SIZE
+        match (successful, slot.hid.as_mut()) {
+            (true, Some(HidDeviceState::Keyboard(keyboard))) => {
+                if KeyboardBootReport::encoded_size() <= actual
+                    && actual <= buffer.len() * crate::environment::PAGE_SIZE
                 {
                     let report =
                         unsafe { read_volatile(buffer.as_vaddr() as *const KeyboardBootReport) };
                     keyboard.handle_report(report);
                 }
             }
-            Some(HidDeviceState::Mouse(mouse)) => {
-                if MouseBootReport::encoded_size() <= buffer.len() * crate::environment::PAGE_SIZE {
+            (true, Some(HidDeviceState::Mouse(mouse))) => {
+                if MouseBootReport::encoded_size() <= actual
+                    && actual <= buffer.len() * crate::environment::PAGE_SIZE
+                {
                     let report =
                         unsafe { read_volatile(buffer.as_vaddr() as *const MouseBootReport) };
                     mouse.handle_report(report);
                 }
             }
-            None => {}
+            _ => {}
         }
 
         drop(slots);
-        if let Err(error) = self.submit_interrupt_in_transfer(slot_id) {
+        if !successful {
+            println!(
+                "[xHCI] HID interrupt transfer failed: slot={} dci={} code={} trb={:#x}",
+                slot_id,
+                endpoint_id,
+                event.completion_code(),
+                event.trb_pointer()
+            );
+        } else if let Err(error) = self.submit_interrupt_in_transfer(slot_id) {
             println!(
                 "[xHCI] Failed to resubmit interrupt transfer for slot {}: {}",
                 slot_id, error
@@ -5464,8 +5469,8 @@ impl XhciController {
             match event.trb_type() {
                 value if value == TrbType::TransferEvent as u8 => {
                     // EP0 completions belong to synchronous control TD waiters.
-                    // Queue them without taking `slot_runtime`: callers often
-                    // hold that lock while waiting for the control transfer.
+                    // Queue them for the exact TD waiter; the stable EP0 owner
+                    // lets that waiter run without retaining `slot_runtime`.
                     if event.endpoint_id() == EP0_DCI || !self.handle_transfer_event(event) {
                         self.queue_pending_event(event);
                     }
@@ -5783,8 +5788,18 @@ struct UsbMassStorageBlockDevice {
     sector_size: IrqSpinLock<usize>,
     sector_count: IrqSpinLock<usize>,
     request_queue: IrqSpinLock<VecDeque<Box<BlockIORequest>>>,
-    command_lock: IrqSpinLock<()>,
+    command_in_flight: AtomicBool,
     next_tag: AtomicUsize,
+}
+
+struct UsbStorageCommandGuard<'a> {
+    in_flight: &'a AtomicBool,
+}
+
+impl Drop for UsbStorageCommandGuard<'_> {
+    fn drop(&mut self) {
+        self.in_flight.store(false, Ordering::Release);
+    }
 }
 
 impl UsbMassStorageBlockDevice {
@@ -5804,8 +5819,27 @@ impl UsbMassStorageBlockDevice {
             sector_size: IrqSpinLock::new(512),
             sector_count: IrqSpinLock::new(0),
             request_queue: IrqSpinLock::new(VecDeque::new()),
-            command_lock: IrqSpinLock::new(()),
+            command_in_flight: AtomicBool::new(false),
             next_tag: AtomicUsize::new(1),
+        }
+    }
+
+    fn acquire_command(&self) -> UsbStorageCommandGuard<'_> {
+        // BOT permits one command at a time. Do not use an IRQ-disabling lock
+        // for that protocol serialization: a command includes DMA completion
+        // waits and recovery delays, and masking local IRQs for that lifetime
+        // can prevent the xHCI completion path and scheduler from progressing.
+        while self
+            .command_in_flight
+            .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            while self.command_in_flight.load(Ordering::Relaxed) {
+                core::hint::spin_loop();
+            }
+        }
+        UsbStorageCommandGuard {
+            in_flight: &self.command_in_flight,
         }
     }
 
@@ -5904,6 +5938,7 @@ impl UsbMassStorageBlockDevice {
                 | "Short USB BOT CSW transfer"
                 | "Invalid USB BOT CSW signature"
                 | "USB BOT CSW tag mismatch"
+                | "USB BOT CSW reported residual data"
                 | "USB storage SCSI command failed"
         )
     }
@@ -5927,50 +5962,40 @@ impl UsbMassStorageBlockDevice {
             XhciController::endpoint_dci(self.bulk_out_endpoint),
         );
 
-        {
-            let slots = self.controller.slot_runtime.lock();
-            let slot = slots
-                .iter()
-                .find(|slot| slot.usb_device.slot_id() == self.slot_id)
-                .ok_or("Unknown slot for BOT recovery")?;
-            self.controller.control_transfer(
-                slot,
-                0x21,
-                USB_REQ_BULK_ONLY_MASS_STORAGE_RESET,
-                0,
-                self.interface_number as u16,
-                None,
-                0,
-            )?;
-        }
+        let ep0 = self
+            .controller
+            .ep0_runtime(self.slot_id)
+            .ok_or("Unknown slot for BOT recovery")?;
+        self.controller.control_transfer(
+            &ep0,
+            0x21,
+            USB_REQ_BULK_ONLY_MASS_STORAGE_RESET,
+            0,
+            self.interface_number as u16,
+            None,
+            0,
+        )?;
 
         crate::time::udelay(USB_STORAGE_RECOVERY_DELAY_US);
 
-        {
-            let slots = self.controller.slot_runtime.lock();
-            let slot = slots
-                .iter()
-                .find(|slot| slot.usb_device.slot_id() == self.slot_id)
-                .ok_or("Unknown slot for BOT recovery")?;
-            self.controller.control_transfer(
-                slot,
-                0x02,
-                USB_REQ_CLEAR_FEATURE,
-                USB_FEATURE_ENDPOINT_HALT,
-                self.bulk_in_endpoint as u16,
-                None,
-                0,
-            )?;
-            self.controller.control_transfer(
-                slot,
-                0x02,
-                USB_REQ_CLEAR_FEATURE,
-                USB_FEATURE_ENDPOINT_HALT,
-                self.bulk_out_endpoint as u16,
-                None,
-                0,
-            )?;
-        }
+        self.controller.control_transfer(
+            &ep0,
+            0x02,
+            USB_REQ_CLEAR_FEATURE,
+            USB_FEATURE_ENDPOINT_HALT,
+            self.bulk_in_endpoint as u16,
+            None,
+            0,
+        )?;
+        self.controller.control_transfer(
+            &ep0,
+            0x02,
+            USB_REQ_CLEAR_FEATURE,
+            USB_FEATURE_ENDPOINT_HALT,
+            self.bulk_out_endpoint as u16,
+            None,
+            0,
+        )?;
 
         println!("[usb-storage] BOT recovery complete");
         Ok(())
@@ -5986,6 +6011,8 @@ impl UsbMassStorageBlockDevice {
             .as_ref()
             .map(|(_, len, direction_in)| (*len, *direction_in))
             .unwrap_or((0, false));
+        let data_len_u32 =
+            u32::try_from(data_len).map_err(|_| "USB BOT data stage is too large")?;
         let command_deadline = crate::time::current_time() + XHCI_TRANSFER_TIMEOUT_US;
 
         let mut cbw = self
@@ -5998,7 +6025,7 @@ impl UsbMassStorageBlockDevice {
                 core::slice::from_raw_parts_mut(cbw.as_vaddr() as *mut u8, USB_STORAGE_CBW_LEN);
             bytes[0..4].copy_from_slice(&USB_STORAGE_CBW_SIGNATURE.to_le_bytes());
             bytes[4..8].copy_from_slice(&tag.to_le_bytes());
-            bytes[8..12].copy_from_slice(&(data_len as u32).to_le_bytes());
+            bytes[8..12].copy_from_slice(&data_len_u32.to_le_bytes());
             bytes[12] = if direction_in { 0x80 } else { 0x00 };
             bytes[13] = 0;
             bytes[14] = command.len() as u8;
@@ -6124,6 +6151,15 @@ impl UsbMassStorageBlockDevice {
             self.log_scsi_failure(tag, command, "csw-tag", "USB BOT CSW tag mismatch");
             return Err("USB BOT CSW tag mismatch");
         }
+        if residue != 0 {
+            self.log_scsi_failure(
+                tag,
+                command,
+                "csw-residue",
+                "USB BOT CSW reported residual data",
+            );
+            return Err("USB BOT CSW reported residual data");
+        }
         if status != 0 {
             println!(
                 "[usb-storage] SCSI command status failed tag={} opcode={}({:#x}) status={} residue={}",
@@ -6144,11 +6180,11 @@ impl UsbMassStorageBlockDevice {
         command: &[u8],
         mut data_stage: Option<(&mut ContiguousPages, usize, bool)>,
     ) -> Result<(), &'static str> {
-        if command.len() > 16 {
-            return Err("SCSI command too large for BOT CBW");
+        if command.is_empty() || command.len() > 16 {
+            return Err("Invalid SCSI command size for BOT CBW");
         }
 
-        let _command_guard = self.command_lock.lock();
+        let _command_guard = self.acquire_command();
         let mut recovered = false;
 
         loop {
@@ -6328,7 +6364,9 @@ impl BlockDevice for UsbMassStorageBlockDevice {
     }
 
     fn get_disk_size(&self) -> usize {
-        *self.sector_count.lock() * *self.sector_size.lock()
+        let sector_count = *self.sector_count.lock();
+        let sector_size = *self.sector_size.lock();
+        sector_count.saturating_mul(sector_size)
     }
 
     fn get_sector_size(&self) -> usize {

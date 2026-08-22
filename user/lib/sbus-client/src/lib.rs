@@ -28,6 +28,8 @@ pub use sbus::{Argument, Message, MessageHeader};
 
 /// Largest sbus frame accepted by this client, including the fixed header.
 const MAX_FRAME_SIZE: usize = 16 * 1024 * 1024;
+/// Default upper bound for service-registration acknowledgments.
+const DEFAULT_REGISTRATION_TIMEOUT_MS: u64 = 5_000;
 
 #[cfg(feature = "std")]
 fn monotonic_time_ns() -> u64 {
@@ -102,8 +104,37 @@ impl Connection {
         })
     }
 
-    /// Register a service
+    /// Register a service with the default bounded acknowledgment wait.
+    ///
+    /// # Arguments
+    ///
+    /// * `bus_name` - Bus name to register.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` after sbusd acknowledges the registration, or
+    /// [`Error::TimedOut`] if it does not respond before the default deadline.
     pub fn register_service(&mut self, bus_name: &str) -> Result<(), Error> {
+        self.register_service_timeout(bus_name, DEFAULT_REGISTRATION_TIMEOUT_MS)
+    }
+
+    /// Register a service with a caller-provided acknowledgment deadline.
+    ///
+    /// # Arguments
+    ///
+    /// * `bus_name` - Bus name to register.
+    /// * `timeout_ms` - Maximum time to wait for sbusd's response.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` after acknowledgment, or [`Error::TimedOut`] when the deadline
+    /// expires. A timed-out connection is poisoned because the late response
+    /// can no longer be associated safely with a later request.
+    pub fn register_service_timeout(
+        &mut self,
+        bus_name: &str,
+        timeout_ms: u64,
+    ) -> Result<(), Error> {
         self.ensure_usable()?;
         let msg = Message::RegisterService {
             bus_name: bus_name.to_string(),
@@ -117,7 +148,17 @@ impl Connection {
         // A service becomes visible before sbusd sends this acknowledgment, so
         // asynchronous traffic may race ahead of it. Preserve that traffic for
         // receive_message() and wait specifically for the method response.
-        let response = self.wait_for_method_response()?;
+        let response = match self.wait_for_method_response_timeout(timeout_ms) {
+            Ok(Some(response)) => response,
+            Ok(None) => {
+                self.poisoned = true;
+                return Err(Error::TimedOut);
+            }
+            Err(error) => {
+                self.poisoned = true;
+                return Err(error);
+            }
+        };
         Self::parse_method_response(response).map(|_| ())
     }
 

@@ -38,6 +38,8 @@ use protocol::cmd;
 
 const ACTIVATION_TOKEN_ENV: &str = "SWS_ACTIVATION_TOKEN";
 const SWS_QUERY_TIMEOUT_MS: u64 = 1_000;
+const SBUS_REGISTRATION_ATTEMPTS: usize = 20;
+const SBUS_REGISTRATION_TIMEOUT_MS: u64 = 1_000;
 
 fn application_environment(activation_token: Option<&str>) -> Vec<String> {
     let user = std::env::var("USER").unwrap_or(String::from("root"));
@@ -54,20 +56,23 @@ fn application_environment(activation_token: Option<&str>) -> Vec<String> {
     environment
 }
 
-fn configure_command_stdio(command: &mut Command, path: &str) {
-    let Ok(stdin) = OpenOptions::new().read(true).write(true).open(path) else {
-        return;
-    };
-    let Ok(stdout) = stdin.try_clone() else {
-        return;
-    };
-    let Ok(stderr) = stdin.try_clone() else {
-        return;
-    };
+fn configure_command_stdio(command: &mut Command, path: &str) -> Result<(), &'static str> {
+    let stdin = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .map_err(|_| "Failed to open service stdio device")?;
+    let stdout = stdin
+        .try_clone()
+        .map_err(|_| "Failed to clone service stdout")?;
+    let stderr = stdin
+        .try_clone()
+        .map_err(|_| "Failed to clone service stderr")?;
 
     command.stdin(Stdio::from(stdin));
     command.stdout(Stdio::from(stdout));
     command.stderr(Stdio::from(stderr));
+    Ok(())
 }
 
 fn spawn_command(
@@ -85,7 +90,7 @@ fn spawn_command(
             .ok_or("Invalid application environment")?;
         command.env(key, value);
     }
-    configure_command_stdio(&mut command, stdio_path.unwrap_or("/dev/null"));
+    configure_command_stdio(&mut command, stdio_path.unwrap_or("/dev/null"))?;
 
     command
         .spawn()
@@ -409,6 +414,7 @@ fn wait_for_service_ready(service: &Service, pid: i32) -> Result<(), &'static st
 
     let mut waited_ms = 0u32;
     let sleep_ms = 50u32;
+    let mut observed_exit = false;
 
     while waited_ms < service.ready_timeout_ms {
         reap_children_nonblocking("wait-ready");
@@ -422,15 +428,35 @@ fn wait_for_service_ready(service: &Service, pid: i32) -> Result<(), &'static st
         }
 
         if !is_running_service_pid(pid) {
-            println!(
-                "stemd: Service '{}' exited before reporting ready",
-                service.name
-            );
-            return Err("Service exited before ready");
+            // A one-shot service may send SERVICE_READY and exit before its
+            // IPC handler runs. Keep accepting that already-sent notification
+            // until the configured readiness deadline instead of racing the
+            // child reaper.
+            observed_exit = true;
         }
 
         thread::sleep(core::time::Duration::from_millis(sleep_ms as u64));
         waited_ms = waited_ms.saturating_add(sleep_ms);
+    }
+
+    // Close the boundary race with a notification processed during the final
+    // sleep interval before deciding whether this was an exit or a timeout.
+    reap_children_nonblocking("wait-ready-final");
+    if is_service_ready(&service.name) {
+        println!(
+            "stemd: Service '{}' reported ready after {} ms",
+            service.name, waited_ms
+        );
+        return Ok(());
+    }
+    observed_exit |= !is_running_service_pid(pid);
+
+    if observed_exit {
+        println!(
+            "stemd: Service '{}' exited without a readiness notification before the {} ms deadline",
+            service.name, service.ready_timeout_ms
+        );
+        return Err("Service exited before ready");
     }
 
     println!(
@@ -1793,7 +1819,7 @@ tty = "/dev/tty0"
 
     // Phase 2: Register with sbus (now that sbusd should be running)
     let mut registered = false;
-    for attempt in 0..20 {
+    for attempt in 0..SBUS_REGISTRATION_ATTEMPTS {
         // Give CPU time to sbusd to start up
         for _ in 0..10 {
             std::thread::yield_now();
@@ -1804,7 +1830,9 @@ tty = "/dev/tty0"
 
         match sbus::Connection::connect() {
             Ok(mut conn) => {
-                match conn.register_service("org.scarlet-os.stemd") {
+                match conn
+                    .register_service_timeout("org.scarlet-os.stemd", SBUS_REGISTRATION_TIMEOUT_MS)
+                {
                     Ok(_) => {
                         println!(
                             "stemd: Successfully registered with sbus as org.scarlet-os.stemd"
@@ -1840,7 +1868,10 @@ tty = "/dev/tty0"
     }
 
     if !registered {
-        println!("stemd: Could not register with sbus after 10 attempts");
+        println!(
+            "stemd: Could not register with sbus after {} attempts",
+            SBUS_REGISTRATION_ATTEMPTS
+        );
         println!("stemd: Continuing without sbus registration");
     }
 

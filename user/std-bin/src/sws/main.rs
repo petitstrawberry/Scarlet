@@ -26,6 +26,7 @@ use std::process::ExitCode;
 const STEMD_SERVICE_READY_CMD: u8 = 0x06;
 const STEMD_NOTIFY_RETRIES: usize = 100;
 const STEMD_NOTIFY_DELAY_MS: u64 = 50;
+const SBUS_REGISTRATION_TIMEOUT_MS: u64 = 1_000;
 const SWS_COMPOSITOR_UTIL_MIN: u32 = SCHED_UTIL_SCALE * 7 / 8;
 
 fn notify_service_ready(service_name: &str) {
@@ -72,21 +73,31 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    // Register with sbus
+    // Sbus integration is optional, so its acknowledgment wait must remain
+    // well inside stemd's service-readiness deadline. Keep a successful
+    // connection alive for the compositor lifetime; dropping it immediately
+    // would unregister the service again.
     println!("Registering with sbus...");
-    match sbus::Connection::connect() {
+    let _sbus_connection = match sbus::Connection::connect() {
         Ok(mut conn) => {
-            if let Err(e) = conn.register_service("org.scarlet-os.sws") {
-                println!("Failed to register with sbus: {:?}", e);
-            } else {
-                println!("Successfully registered with sbus as org.scarlet-os.sws");
+            match conn.register_service_timeout("org.scarlet-os.sws", SBUS_REGISTRATION_TIMEOUT_MS)
+            {
+                Ok(()) => {
+                    println!("Successfully registered with sbus as org.scarlet-os.sws");
+                    Some(conn)
+                }
+                Err(e) => {
+                    println!("Failed to register with sbus: {:?}", e);
+                    None
+                }
             }
         }
         Err(e) => {
             println!("Failed to connect to sbus: {:?}", e);
             println!("Continuing without sbus registration");
+            None
         }
-    }
+    };
 
     println!("Compositor ready. Starting main loop...");
     notify_service_ready("sws");

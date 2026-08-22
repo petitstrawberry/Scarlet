@@ -1175,7 +1175,12 @@ impl Ext2FileSystem {
 
         let inode = self.read_inode(inode_num)?;
         let file_size = inode.size as u64;
-        let page_offset = page_index * PAGE_SIZE as u64;
+        let page_offset = page_index.checked_mul(PAGE_SIZE as u64).ok_or_else(|| {
+            FileSystemError::new(
+                FileSystemErrorKind::InvalidData,
+                "Page offset overflow while reading ext2 file",
+            )
+        })?;
 
         // Clear the page first
         unsafe {
@@ -1188,7 +1193,8 @@ impl Ext2FileSystem {
         }
 
         // Calculate how many bytes to read from this page
-        let bytes_in_page = if page_offset + PAGE_SIZE as u64 > file_size {
+        let page_end = page_offset.saturating_add(PAGE_SIZE as u64);
+        let bytes_in_page = if page_end > file_size {
             (file_size - page_offset) as usize
         } else {
             PAGE_SIZE
@@ -1196,8 +1202,16 @@ impl Ext2FileSystem {
 
         // Calculate block range for this page
         let start_block = page_offset / self.block_size as u64;
-        let end_block = (page_offset + bytes_in_page as u64 + self.block_size as u64 - 1)
-            / self.block_size as u64;
+        let end_offset = page_offset
+            .checked_add(bytes_in_page as u64)
+            .and_then(|end| end.checked_add(self.block_size as u64 - 1))
+            .ok_or_else(|| {
+                FileSystemError::new(
+                    FileSystemErrorKind::InvalidData,
+                    "Block range overflow while reading ext2 page",
+                )
+            })?;
+        let end_block = end_offset / self.block_size as u64;
         let num_blocks = end_block - start_block;
 
         if num_blocks == 0 {
@@ -4098,14 +4112,34 @@ impl Ext2FileSystem {
 
                 // Count consecutive blocks
                 while i + count < missing_blocks.len()
-                    && missing_blocks[i + count] == start_block + count as u64
+                    && start_block
+                        .checked_add(count as u64)
+                        .is_some_and(|next| missing_blocks[i + count] == next)
                 {
                     count += 1;
                 }
 
                 let start_sector = self.block_to_sector(start_block);
-                let num_sectors = count * self.sectors_per_block() as usize;
-                let buffer_size = count * self.block_size as usize;
+                let sectors_per_block =
+                    usize::try_from(self.sectors_per_block()).map_err(|_| {
+                        FileSystemError::new(
+                            FileSystemErrorKind::DeviceError,
+                            "Sector count does not fit the platform address size",
+                        )
+                    })?;
+                let block_size = self.block_size as usize;
+                let num_sectors = count.checked_mul(sectors_per_block).ok_or_else(|| {
+                    FileSystemError::new(
+                        FileSystemErrorKind::DeviceError,
+                        "Block request sector count overflow",
+                    )
+                })?;
+                let buffer_size = count.checked_mul(block_size).ok_or_else(|| {
+                    FileSystemError::new(
+                        FileSystemErrorKind::DeviceError,
+                        "Block request byte count overflow",
+                    )
+                })?;
 
                 let request = Box::new(crate::device::block::request::BlockIORequest {
                     request_type: crate::device::block::request::BlockIORequestType::Read,
@@ -4149,41 +4183,45 @@ impl Ext2FileSystem {
                 let (start_block, count) = request_ranges[result_idx];
                 let data = &result.request.buffer;
 
-                // Validate buffer size matches expectations
-                let expected_size = count * self.block_size as usize;
+                // A successful block request must return exactly the requested
+                // bytes. Padding a short transfer fabricates filesystem data
+                // and then makes that corruption persistent in the cache.
+                let expected_size =
+                    count.checked_mul(self.block_size as usize).ok_or_else(|| {
+                        FileSystemError::new(
+                            FileSystemErrorKind::DeviceError,
+                            "Block result byte count overflow",
+                        )
+                    })?;
                 if data.len() != expected_size {
-                    // Try to handle gracefully - truncate or pad buffer to expected size
-                    let mut corrected_data = data.clone();
-                    if data.len() > expected_size {
-                        corrected_data.truncate(expected_size);
-                    } else {
-                        corrected_data.resize(expected_size, 0);
-                    }
-
-                    // Process with corrected data
-                    for j in 0..count {
-                        let current_block = start_block + j as u64;
-                        let offset = j * self.block_size as usize;
-                        let end_offset = offset + self.block_size as usize;
-
-                        if end_offset <= corrected_data.len() {
-                            let block_data = corrected_data[offset..end_offset].to_vec();
-                            missing_data.insert(current_block, block_data.clone());
-                            cache.insert(current_block, block_data);
-                        } else {
-                            return Err(FileSystemError::new(
-                                FileSystemErrorKind::DeviceError,
-                                "Buffer corruption detected",
-                            ));
-                        }
-                    }
-                    continue; // Skip normal processing for this result
+                    return Err(FileSystemError::new(
+                        FileSystemErrorKind::DeviceError,
+                        "Block device returned an incorrect byte count",
+                    ));
                 }
 
                 for j in 0..count {
-                    let current_block = start_block + j as u64;
-                    let offset = j * self.block_size as usize;
-                    let end_offset = offset + self.block_size as usize;
+                    let current_block = start_block.checked_add(j as u64).ok_or_else(|| {
+                        FileSystemError::new(
+                            FileSystemErrorKind::DeviceError,
+                            "Block number overflow while filling cache",
+                        )
+                    })?;
+                    let offset = j.checked_mul(self.block_size as usize).ok_or_else(|| {
+                        FileSystemError::new(
+                            FileSystemErrorKind::DeviceError,
+                            "Block buffer offset overflow",
+                        )
+                    })?;
+                    let end_offset =
+                        offset
+                            .checked_add(self.block_size as usize)
+                            .ok_or_else(|| {
+                                FileSystemError::new(
+                                    FileSystemErrorKind::DeviceError,
+                                    "Block buffer end offset overflow",
+                                )
+                            })?;
 
                     let block_data = data[offset..end_offset].to_vec();
                     missing_data.insert(current_block, block_data.clone());
@@ -4234,16 +4272,20 @@ impl Ext2FileSystem {
             blocks.len()
         );
 
-        // Debug: Check for invalid block numbers
-        for (block_num, _) in blocks.iter() {
-            if *block_num > (1u64 << 32) {
-                // Check for very large values that could be negative casts
-                crate::println!(
-                    "[ext2] ERROR: Invalid block number detected: {} (0x{:x})",
-                    block_num,
-                    block_num
-                );
-                panic!("Invalid block number: {} (0x{:x})", block_num, block_num);
+        // Validate every write before constructing a device request. Filesystem
+        // metadata must never turn into a kernel panic or a short block write.
+        for (block_num, data) in blocks.iter() {
+            if *block_num >= (1u64 << 32) {
+                return Err(FileSystemError::new(
+                    FileSystemErrorKind::DeviceError,
+                    "Invalid block number in write request",
+                ));
+            }
+            if data.len() != self.block_size as usize {
+                return Err(FileSystemError::new(
+                    FileSystemErrorKind::DeviceError,
+                    "Write buffer does not contain exactly one filesystem block",
+                ));
             }
         }
 
@@ -4262,14 +4304,27 @@ impl Ext2FileSystem {
 
             // Count consecutive blocks and combine their data
             while i + count < sorted_blocks.len()
-                && *sorted_blocks[i + count].0 == start_block + count as u64
+                && start_block
+                    .checked_add(count as u64)
+                    .is_some_and(|next| *sorted_blocks[i + count].0 == next)
             {
                 data_to_write.extend_from_slice(sorted_blocks[i + count].1);
                 count += 1;
             }
 
             let start_sector = self.block_to_sector(start_block);
-            let num_sectors = count * self.sectors_per_block() as usize;
+            let sectors_per_block = usize::try_from(self.sectors_per_block()).map_err(|_| {
+                FileSystemError::new(
+                    FileSystemErrorKind::DeviceError,
+                    "Sector count does not fit the platform address size",
+                )
+            })?;
+            let num_sectors = count.checked_mul(sectors_per_block).ok_or_else(|| {
+                FileSystemError::new(
+                    FileSystemErrorKind::DeviceError,
+                    "Block write sector count overflow",
+                )
+            })?;
 
             let request = Box::new(crate::device::block::request::BlockIORequest {
                 request_type: crate::device::block::request::BlockIORequestType::Write,
@@ -4318,7 +4373,12 @@ impl Ext2FileSystem {
             // Invalidate cache for successfully written blocks (write-through cache)
             // No need to update cache with written data since it's already on disk
             for j in 0..count {
-                let current_block = start_block + j as u64;
+                let current_block = start_block.checked_add(j as u64).ok_or_else(|| {
+                    FileSystemError::new(
+                        FileSystemErrorKind::DeviceError,
+                        "Block number overflow while invalidating cache",
+                    )
+                })?;
                 cache.remove(current_block);
             }
         }
@@ -4333,29 +4393,13 @@ impl Ext2FileSystem {
 
     /// Convert ext2 block number to starting sector index
     fn block_to_sector(&self, block_num: u64) -> usize {
-        // Validate block number range
-        if block_num > (1u64 << 32) {
-            crate::println!(
-                "[ext2] ERROR: block_to_sector called with invalid block_num: {} (0x{:x})",
-                block_num,
-                block_num
-            );
-            panic!(
-                "block_to_sector: invalid block_num: {} (0x{:x})",
-                block_num, block_num
-            );
+        if block_num >= (1u64 << 32) {
+            return usize::MAX;
         }
-
-        // Check for reasonable upper bound (e.g., filesystem shouldn't have more than 2^30 blocks)
-        if block_num > (1u64 << 30) {
-            #[cfg(test)]
-            crate::println!(
-                "[ext2] WARNING: block_to_sector called with very large block_num: {}",
-                block_num
-            );
-        }
-
-        (block_num * self.sectors_per_block()) as usize
+        block_num
+            .checked_mul(self.sectors_per_block())
+            .and_then(|sector| usize::try_from(sector).ok())
+            .unwrap_or(usize::MAX)
     }
 
     /// Read one filesystem block with LRU cache
