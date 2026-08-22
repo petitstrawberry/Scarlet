@@ -24,7 +24,10 @@ use crate::device::pci::config::{self, PciConfig};
 use crate::device::pci::device::PciDeviceInfo;
 use crate::device::pci::driver::{PciDeviceDriver, PciDeviceId};
 use crate::device::pci::intx::PciIntxInterruptSource;
-use crate::device::usb::UsbHostController;
+use crate::device::usb::{
+    UsbDeviceIdentity, UsbDeviceLocation, UsbHostController, UsbInterruptInDriver,
+    UsbInterruptInEndpointInfo, UsbInterruptInHandler,
+};
 use crate::driver_initcall;
 use crate::drivers::usb::cdc_ncm::{
     CdcNcmDevice, CdcNcmInterfaceConfig, CdcNcmParameters, CdcNcmTransport, ntb_input_size_payload,
@@ -63,7 +66,7 @@ use alloc::vec::Vec;
 use core::any::Any;
 use core::mem::size_of;
 use core::ptr::{read_unaligned, read_volatile, write_volatile};
-use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering, fence};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering, fence};
 
 const COMMAND_RING_TRBS: usize = 256;
 const EVENT_RING_TRBS: usize = 256;
@@ -108,7 +111,6 @@ const USB_DT_STRING: u8 = 3;
 const USB_DT_HUB: u8 = 0x29;
 const USB_DT_SS_HUB: u8 = 0x2a;
 const USB_DT_SS_HUB_SIZE: usize = 12;
-const USB_CLASS_HID: u8 = 3;
 const USB_CLASS_HUB: u8 = 0x09;
 const USB_HUB_PROTOCOL_SUPERSPEED: u8 = 3;
 const USB_CLASS_MASS_STORAGE: u8 = 0x08;
@@ -335,6 +337,9 @@ struct HubInterfaceConfig {
     interface_number: u8,
     alternate_setting: u8,
     protocol: u8,
+    endpoint_address: u8,
+    max_packet_size: u16,
+    interval: u8,
 }
 
 #[derive(Clone, Copy)]
@@ -627,6 +632,26 @@ enum HidDeviceState {
     Mouse(HidMouseDevice),
 }
 
+struct UsbInterruptInRuntime {
+    _input_context: ContiguousPages,
+    ring: DmaTrbRing,
+    buffer: Arc<ContiguousPages>,
+    buffer_mapping: DmaMapping,
+    dci: u8,
+    endpoint_address: u8,
+    max_packet_size: u16,
+    trb_dma: Option<usize>,
+    driver_name: &'static str,
+    handler: Arc<dyn UsbInterruptInHandler>,
+}
+
+struct RetainedHidDevice {
+    root_port_id: u8,
+    route_string: u32,
+    state: HidDeviceState,
+    device_id: usize,
+}
+
 struct SlotRuntime {
     usb_device: UsbDevice,
     route_string: u32,
@@ -643,6 +668,8 @@ struct SlotRuntime {
     storage: Option<MassStorageRuntime>,
     cdc_ncm: Option<CdcNcmRuntime>,
     hid: Option<HidDeviceState>,
+    hid_device_id: Option<usize>,
+    usb_interrupt_in: Vec<UsbInterruptInRuntime>,
     hub: Option<HubRuntime>,
 }
 
@@ -700,6 +727,7 @@ impl ScratchpadBuffers {
 /// xHCI Controller instance
 pub struct XhciController {
     mmio_base: usize,
+    host_id: AtomicU32,
     dma_context: DmaContext,
     regs: RegisterSpace,
     caps: XhciCapabilities,
@@ -717,6 +745,7 @@ pub struct XhciController {
     pending_events: IrqSpinLock<Vec<Trb>>,
     devices: IrqSpinLock<Vec<UsbDevice>>,
     slot_runtime: IrqSpinLock<Vec<SlotRuntime>>,
+    retained_hid_devices: IrqSpinLock<Vec<RetainedHidDevice>>,
     interrupt_id: IrqSpinLock<Option<InterruptId>>,
     interrupt_work_pending: AtomicBool,
     port_change_pending: AtomicBool,
@@ -910,6 +939,7 @@ impl XhciController {
 
         Ok(Self {
             mmio_base,
+            host_id: AtomicU32::new(0),
             dma_context,
             regs,
             caps,
@@ -927,6 +957,7 @@ impl XhciController {
             pending_events: IrqSpinLock::new(Vec::new()),
             devices: IrqSpinLock::new(Vec::new()),
             slot_runtime: IrqSpinLock::new(Vec::new()),
+            retained_hid_devices: IrqSpinLock::new(Vec::new()),
             interrupt_id: IrqSpinLock::new(None),
             interrupt_work_pending: AtomicBool::new(false),
             port_change_pending: AtomicBool::new(false),
@@ -1561,6 +1592,9 @@ impl XhciController {
                 let slot_id = slot.usb_device.slot_id();
                 if let Some(endpoint_id) = slot.interrupt_dci {
                     endpoints.push((slot_id, endpoint_id));
+                }
+                for runtime in &slot.usb_interrupt_in {
+                    endpoints.push((slot_id, runtime.dci));
                 }
                 if let Some(ncm) = slot.cdc_ncm.as_ref() {
                     endpoints.push((slot_id, ncm.bulk_in.dci));
@@ -2203,6 +2237,8 @@ impl XhciController {
             storage: None,
             cdc_ncm: None,
             hid: None,
+            hid_device_id: None,
+            usb_interrupt_in: Vec::new(),
             hub: None,
         })
     }
@@ -2764,8 +2800,41 @@ impl XhciController {
         Ok(())
     }
 
-    fn configure_boot_hid_slot(&self, slot_id: u8) -> Result<bool, &'static str> {
-        println!("[xHCI] Configuring boot HID for slot {}", slot_id);
+    fn submit_registered_interrupt_in_transfer(
+        &self,
+        slot_id: u8,
+        endpoint_id: u8,
+    ) -> Result<(), &'static str> {
+        let mut slots = self.slot_runtime.lock();
+        let slot = slots
+            .iter_mut()
+            .find(|slot| slot.usb_device.slot_id() == slot_id)
+            .ok_or("Unknown slot for registered USB interrupt transfer")?;
+        let runtime = slot
+            .usb_interrupt_in
+            .iter_mut()
+            .find(|runtime| runtime.dci == endpoint_id)
+            .ok_or("Registered USB interrupt endpoint is not configured")?;
+        if runtime.trb_dma.is_some() {
+            return Err("Registered USB interrupt transfer is already in flight");
+        }
+
+        sync_pages_before_device_write(runtime.buffer.as_ref());
+        let trb_index = runtime.ring.enqueue(Trb::normal_transfer_in(
+            runtime.buffer_mapping.dma_addr(),
+            u32::from(runtime.max_packet_size),
+        ))?;
+        runtime.trb_dma = Some(runtime.ring.dma_address() + trb_index * size_of::<Trb>());
+        let dci = runtime.dci;
+        drop(slots);
+        self.ring_endpoint_doorbell(slot_id, dci);
+        Ok(())
+    }
+
+    fn get_device_and_configuration_blob(
+        &self,
+        slot_id: u8,
+    ) -> Result<(DeviceDescriptor, ContiguousPages), &'static str> {
         let descriptor = {
             let slot = self
                 .ep0_runtime(slot_id)
@@ -2773,35 +2842,44 @@ impl XhciController {
             self.get_device_descriptor(&slot)?
         };
 
-        let config_blob = {
-            let slot = self
-                .ep0_runtime(slot_id)
-                .ok_or("Unknown slot for config fetch")?;
+        Ok((descriptor, self.get_configuration_blob_for_slot(slot_id)?))
+    }
 
-            let mut header_buffer = self
-                .dma_alloc_pages(1)
-                .ok_or("Failed to allocate config header buffer")?;
-            unsafe {
-                core::ptr::write_bytes(
-                    header_buffer.as_vaddr() as *mut u8,
-                    0,
-                    crate::environment::PAGE_SIZE,
-                )
-            };
-            self.control_transfer(
-                &slot,
-                0x80,
-                USB_REQ_GET_DESCRIPTOR,
-                (USB_DT_CONFIGURATION as u16) << 8,
+    fn get_configuration_blob_for_slot(
+        &self,
+        slot_id: u8,
+    ) -> Result<ContiguousPages, &'static str> {
+        let slot = self
+            .ep0_runtime(slot_id)
+            .ok_or("Unknown slot for config fetch")?;
+
+        let mut header_buffer = self
+            .dma_alloc_pages(1)
+            .ok_or("Failed to allocate config header buffer")?;
+        unsafe {
+            core::ptr::write_bytes(
+                header_buffer.as_vaddr() as *mut u8,
                 0,
-                Some(&mut header_buffer),
-                ConfigurationDescriptor::encoded_size() as u16,
-            )?;
-            let header = unsafe {
-                read_unaligned(header_buffer.as_vaddr() as *const ConfigurationDescriptor)
-            };
-            self.get_configuration_blob(&slot, header.total_length)?
+                crate::environment::PAGE_SIZE,
+            )
         };
+        self.control_transfer(
+            &slot,
+            0x80,
+            USB_REQ_GET_DESCRIPTOR,
+            (USB_DT_CONFIGURATION as u16) << 8,
+            0,
+            Some(&mut header_buffer),
+            ConfigurationDescriptor::encoded_size() as u16,
+        )?;
+        let header =
+            unsafe { read_unaligned(header_buffer.as_vaddr() as *const ConfigurationDescriptor) };
+        self.get_configuration_blob(&slot, header.total_length)
+    }
+
+    fn configure_boot_hid_slot(&self, slot_id: u8) -> Result<bool, &'static str> {
+        println!("[xHCI] Configuring boot HID for slot {}", slot_id);
+        let (_descriptor, config_blob) = self.get_device_and_configuration_blob(slot_id)?;
 
         let boot = match self.parse_boot_interface(&config_blob) {
             Ok(boot) => boot,
@@ -2819,7 +2897,6 @@ impl XhciController {
             boot.interface_number
         );
 
-        let _ = descriptor;
         let interrupt_dci = Self::interrupt_dci(boot.endpoint_address);
         let interrupt_ring = DmaTrbRing::new_linked_aligned(64, self.dma_alignment())
             .ok_or("Failed to allocate interrupt ring")?;
@@ -2945,6 +3022,251 @@ impl XhciController {
         self.submit_interrupt_in_transfer(slot_id)?;
 
         Ok(true)
+    }
+
+    fn configure_registered_interrupt_in_interfaces(
+        &self,
+        slot_id: u8,
+    ) -> Result<usize, &'static str> {
+        let drivers = DeviceManager::get_manager().usb_interrupt_in_drivers();
+        if drivers.is_empty() {
+            return Ok(0);
+        }
+
+        let (descriptor, config_blob) = self.get_device_and_configuration_blob(slot_id)?;
+        let device = UsbDeviceIdentity {
+            vendor_id: descriptor.vendor_id,
+            product_id: descriptor.product_id,
+            device_class: descriptor.device_class,
+            device_subclass: descriptor.device_subclass,
+            device_protocol: descriptor.device_protocol,
+        };
+        let endpoints = self.parse_registered_interrupt_in_endpoints(&config_blob)?;
+        let (root_port_id, route_string) = self
+            .slot_topology(slot_id)
+            .ok_or("Unknown slot for registered USB interface topology")?;
+        let location = UsbDeviceLocation {
+            host_id: self.host_id.load(Ordering::Acquire),
+            root_port_id,
+            route_string,
+        };
+        let mut configured = 0usize;
+
+        for endpoint in endpoints {
+            let already_configured =
+                self.slot_runtime
+                    .lock()
+                    .iter()
+                    .find(|slot| slot.usb_device.slot_id() == slot_id)
+                    .is_some_and(|slot| {
+                        slot.interrupt_endpoint_address == Some(endpoint.endpoint_address)
+                            || slot.usb_interrupt_in.iter().any(|runtime| {
+                                runtime.endpoint_address == endpoint.endpoint_address
+                            })
+                    });
+            if already_configured {
+                continue;
+            }
+
+            let Some(driver) = drivers
+                .iter()
+                .find(|driver| driver.matches(&device, &endpoint))
+                .cloned()
+            else {
+                continue;
+            };
+
+            self.configure_registered_interrupt_in_endpoint(
+                slot_id, &device, location, endpoint, driver,
+            )?;
+            configured += 1;
+        }
+
+        Ok(configured)
+    }
+
+    fn configure_registered_interrupt_in_endpoint(
+        &self,
+        slot_id: u8,
+        device: &UsbDeviceIdentity,
+        location: UsbDeviceLocation,
+        endpoint: UsbInterruptInEndpointInfo,
+        driver: Arc<dyn UsbInterruptInDriver>,
+    ) -> Result<(), &'static str> {
+        let driver_name = driver.name();
+        println!(
+            "[xHCI] Slot {} driver {} claimed interrupt-IN ep={:#x} max_packet={} interval={} cfg={} if={}",
+            slot_id,
+            driver_name,
+            endpoint.endpoint_address,
+            endpoint.max_packet_size,
+            endpoint.interval,
+            endpoint.configuration_value,
+            endpoint.interface_number,
+        );
+
+        let interrupt_dci = Self::interrupt_dci(endpoint.endpoint_address);
+        let interrupt_ring = DmaTrbRing::new_linked_aligned(64, self.dma_alignment())
+            .ok_or("Failed to allocate registered USB interrupt ring")?;
+        let interrupt_ring_dma_addr = self.dma_map_phys(
+            interrupt_ring.physical_address(),
+            interrupt_ring.dma_len(),
+            dma_rw_flags(),
+        )?;
+        interrupt_ring.set_dma_address(interrupt_ring_dma_addr)?;
+        let interrupt_buffer = Arc::new(
+            self.dma_alloc_pages(
+                usize::from(endpoint.max_packet_size)
+                    .div_ceil(crate::environment::PAGE_SIZE)
+                    .max(1),
+            )
+            .ok_or("Failed to allocate registered USB interrupt buffer")?,
+        );
+        let interrupt_buffer_mapping = self.dma_map_owned_pages(
+            interrupt_buffer.as_ref(),
+            IommuMapFlags::WRITE | IommuMapFlags::COHERENT,
+        )?;
+        let input_pages = self
+            .dma_alloc_pages(
+                full_input_context_bytes(self.context_size).div_ceil(crate::environment::PAGE_SIZE),
+            )
+            .ok_or("Failed to allocate registered USB endpoint context")?;
+        let input_dma_mapping =
+            self.dma_map_owned_pages(&input_pages, IommuMapFlags::READ | IommuMapFlags::COHERENT)?;
+
+        unsafe {
+            core::ptr::write_bytes(
+                input_pages.as_vaddr() as *mut u8,
+                0,
+                input_pages.len() * crate::environment::PAGE_SIZE,
+            );
+            let input = InputContextBuffer::new(input_pages.as_vaddr(), self.context_size);
+            let control = &mut *input.control_mut();
+            control.add_slot_context();
+            control.add_endpoint(interrupt_dci);
+
+            let slots = self.slot_runtime.lock();
+            let slot = slots
+                .iter()
+                .find(|slot| slot.usb_device.slot_id() == slot_id)
+                .ok_or("Unknown slot for registered USB endpoint config")?;
+            sync_pages_after_device_write(&slot.ep0.device_context);
+            let existing_ctx =
+                DeviceContextBuffer::new(slot.ep0.device_context.as_vaddr(), self.context_size);
+            let mut slot_ctx = core::ptr::read(existing_ctx.slot());
+            let existing_max_dci = slot
+                .interrupt_dci
+                .into_iter()
+                .chain(slot.usb_interrupt_in.iter().map(|runtime| runtime.dci))
+                .max()
+                .unwrap_or(EP0_DCI);
+            slot_ctx.set_context_entries(existing_max_dci.max(interrupt_dci));
+            core::ptr::write(input.slot_mut(), slot_ctx);
+            let interval = Self::xhci_interval(slot.usb_device.speed(), endpoint.interval);
+            let (_, endpoint_ctx) = InputContext::interrupt_endpoint_context(
+                interrupt_dci,
+                endpoint.max_packet_size,
+                interval,
+                interrupt_ring.dma_address() as u64,
+                true,
+            );
+            core::ptr::write(input.endpoint_mut(interrupt_dci)?, endpoint_ctx);
+        }
+        sync_pages_for_device(&input_pages);
+        interrupt_ring.sync_for_device();
+
+        let event = self.send_command(Trb::configure_endpoint_command(
+            input_dma_mapping.dma_addr(),
+            slot_id,
+            false,
+        ))?;
+        if event.slot_id() != slot_id {
+            return Err("Registered USB Configure Endpoint slot mismatch");
+        }
+
+        let needs_configuration = self
+            .slot_runtime
+            .lock()
+            .iter()
+            .find(|slot| slot.usb_device.slot_id() == slot_id)
+            .map_or(true, |slot| {
+                slot.usb_device.state() != UsbDeviceState::Configured
+            });
+        if needs_configuration {
+            let slot = self
+                .ep0_runtime(slot_id)
+                .ok_or("Unknown slot for registered USB configuration")?;
+            self.control_transfer(
+                &slot,
+                0x00,
+                USB_REQ_SET_CONFIGURATION,
+                u16::from(endpoint.configuration_value),
+                0,
+                None,
+                0,
+            )?;
+        }
+        if endpoint.alternate_setting != 0 {
+            let slot = self
+                .ep0_runtime(slot_id)
+                .ok_or("Unknown slot for registered USB alternate setting")?;
+            self.control_transfer(
+                &slot,
+                0x01,
+                USB_REQ_SET_INTERFACE,
+                u16::from(endpoint.alternate_setting),
+                u16::from(endpoint.interface_number),
+                None,
+                0,
+            )?;
+        }
+
+        let handler = driver.bind(device, &endpoint, location)?;
+        {
+            let mut slots = self.slot_runtime.lock();
+            let Some(slot) = slots
+                .iter_mut()
+                .find(|slot| slot.usb_device.slot_id() == slot_id)
+            else {
+                drop(slots);
+                handler.disconnected();
+                return Err("Unknown slot for registered USB runtime update");
+            };
+            slot.usb_device.set_state(UsbDeviceState::Configured);
+            slot.usb_interrupt_in.push(UsbInterruptInRuntime {
+                _input_context: input_pages,
+                ring: interrupt_ring,
+                buffer: interrupt_buffer,
+                buffer_mapping: interrupt_buffer_mapping,
+                dci: interrupt_dci,
+                endpoint_address: endpoint.endpoint_address,
+                max_packet_size: endpoint.max_packet_size,
+                trb_dma: None,
+                driver_name,
+                handler,
+            });
+        }
+
+        if let Err(error) = self.submit_registered_interrupt_in_transfer(slot_id, interrupt_dci) {
+            let runtime = {
+                let mut slots = self.slot_runtime.lock();
+                slots
+                    .iter_mut()
+                    .find(|slot| slot.usb_device.slot_id() == slot_id)
+                    .and_then(|slot| {
+                        slot.usb_interrupt_in
+                            .iter()
+                            .position(|runtime| runtime.dci == interrupt_dci)
+                            .map(|index| slot.usb_interrupt_in.remove(index))
+                    })
+            };
+            if let Some(runtime) = runtime {
+                runtime.handler.disconnected();
+            }
+            return Err(error);
+        }
+
+        Ok(())
     }
 
     fn configure_mass_storage_slot(self: &Arc<Self>, slot_id: u8) -> Result<bool, &'static str> {
@@ -3712,12 +4034,15 @@ impl XhciController {
             );
             return;
         }
-        match self.configure_boot_hid_slot(slot_id) {
+        let boot_hid_configured = match self.configure_boot_hid_slot(slot_id) {
             Ok(true) => {
                 println!("[xHCI] Slot {} boot HID configured", slot_id);
-                return;
+                true
             }
-            Ok(false) => println!("[xHCI] Slot {} is not a boot HID device", slot_id),
+            Ok(false) => {
+                println!("[xHCI] Slot {} is not a boot HID device", slot_id);
+                false
+            }
             Err(error) => {
                 println!("[xHCI] Slot {} HID setup failed: {}", slot_id, error);
                 if error == EP0_RECOVERY_FAILED {
@@ -3727,7 +4052,39 @@ impl XhciController {
                     );
                     return;
                 }
+                false
             }
+        };
+
+        let registered_interrupt_in_configured =
+            match self.configure_registered_interrupt_in_interfaces(slot_id) {
+                Ok(count) => {
+                    if count != 0 {
+                        println!(
+                            "[xHCI] Slot {} configured {} registered interrupt-IN interface(s)",
+                            slot_id, count
+                        );
+                    }
+                    count != 0
+                }
+                Err(error) => {
+                    println!(
+                        "[xHCI] Slot {} registered interrupt-IN setup failed: {}",
+                        slot_id, error
+                    );
+                    if error == EP0_RECOVERY_FAILED {
+                        println!(
+                            "[xHCI] Slot {} class probing stopped because EP0 recovery failed",
+                            slot_id
+                        );
+                        return;
+                    }
+                    false
+                }
+            };
+
+        if boot_hid_configured || registered_interrupt_in_configured {
+            return;
         }
 
         match self.configure_hub_slot(slot_id) {
@@ -3846,7 +4203,7 @@ impl XhciController {
             (hub_descriptor.power_on_to_power_good as u64 * 2_000).max(USB_HUB_POWER_RECOVERY_US);
 
         println!(
-            "[xHCI] Slot {} hub: ports={} superspeed={} multi_tt={} power_good_us={} cfg={} if={} alt={}",
+            "[xHCI] Slot {} hub: ports={} superspeed={} multi_tt={} power_good_us={} cfg={} if={} alt={} ep={:#x}/{} interval={}",
             slot_id,
             num_ports,
             is_superspeed_hub,
@@ -3854,10 +4211,14 @@ impl XhciController {
             power_good_time_us,
             hub_interface.configuration_value,
             hub_interface.interface_number,
-            hub_interface.alternate_setting
+            hub_interface.alternate_setting,
+            hub_interface.endpoint_address,
+            hub_interface.max_packet_size,
+            hub_interface.interval
         );
 
         self.configure_hub_context(slot_id, num_ports, multi_tt)?;
+        self.configure_hub_interrupt_endpoint(slot_id, hub_interface)?;
 
         {
             let mut slots = self.slot_runtime.lock();
@@ -3876,6 +4237,7 @@ impl XhciController {
             });
         }
 
+        self.submit_interrupt_in_transfer(slot_id)?;
         self.power_hub_ports(slot_id)?;
         let discovered = self.enumerate_hub_ports(slot_id)?;
         if discovered != 0 {
@@ -3886,6 +4248,102 @@ impl XhciController {
         }
 
         Ok(true)
+    }
+
+    fn configure_hub_interrupt_endpoint(
+        &self,
+        slot_id: u8,
+        interface: HubInterfaceConfig,
+    ) -> Result<(), &'static str> {
+        let interrupt_dci = Self::interrupt_dci(interface.endpoint_address);
+        if interrupt_dci <= EP0_DCI {
+            return Err("Hub interrupt endpoint address is invalid");
+        }
+
+        let interrupt_ring = DmaTrbRing::new_linked_aligned(64, self.dma_alignment())
+            .ok_or("Failed to allocate hub interrupt ring")?;
+        let interrupt_ring_dma_addr = self.dma_map_phys(
+            interrupt_ring.physical_address(),
+            interrupt_ring.dma_len(),
+            dma_rw_flags(),
+        )?;
+        interrupt_ring.set_dma_address(interrupt_ring_dma_addr)?;
+        let interrupt_buffer = self
+            .dma_alloc_pages(
+                usize::from(interface.max_packet_size)
+                    .div_ceil(crate::environment::PAGE_SIZE)
+                    .max(1),
+            )
+            .ok_or("Failed to allocate hub interrupt buffer")?;
+        let interrupt_buffer_mapping = self.dma_map_owned_pages(
+            &interrupt_buffer,
+            IommuMapFlags::WRITE | IommuMapFlags::COHERENT,
+        )?;
+        let input_pages = self
+            .dma_alloc_pages(
+                full_input_context_bytes(self.context_size).div_ceil(crate::environment::PAGE_SIZE),
+            )
+            .ok_or("Failed to allocate hub endpoint config context")?;
+        let input_dma_mapping =
+            self.dma_map_owned_pages(&input_pages, IommuMapFlags::READ | IommuMapFlags::COHERENT)?;
+
+        unsafe {
+            core::ptr::write_bytes(
+                input_pages.as_vaddr() as *mut u8,
+                0,
+                input_pages.len() * crate::environment::PAGE_SIZE,
+            );
+            let input = InputContextBuffer::new(input_pages.as_vaddr(), self.context_size);
+            let control = &mut *input.control_mut();
+            control.add_slot_context();
+            control.add_endpoint(interrupt_dci);
+
+            let slots = self.slot_runtime.lock();
+            let slot = slots
+                .iter()
+                .find(|slot| slot.usb_device.slot_id() == slot_id)
+                .ok_or("Unknown slot for hub endpoint config")?;
+            sync_pages_after_device_write(&slot.ep0.device_context);
+            let existing_ctx =
+                DeviceContextBuffer::new(slot.ep0.device_context.as_vaddr(), self.context_size);
+            let mut slot_ctx = core::ptr::read(existing_ctx.slot());
+            slot_ctx.set_context_entries(interrupt_dci);
+            core::ptr::write(input.slot_mut(), slot_ctx);
+            let interval = Self::xhci_interval(slot.usb_device.speed(), interface.interval);
+            let (_, endpoint_ctx) = InputContext::interrupt_endpoint_context(
+                interrupt_dci,
+                interface.max_packet_size,
+                interval,
+                interrupt_ring.dma_address() as u64,
+                true,
+            );
+            core::ptr::write(input.endpoint_mut(interrupt_dci)?, endpoint_ctx);
+        }
+        sync_pages_for_device(&input_pages);
+        interrupt_ring.sync_for_device();
+
+        let event = self.send_command(Trb::configure_endpoint_command(
+            input_dma_mapping.dma_addr(),
+            slot_id,
+            false,
+        ))?;
+        if event.slot_id() != slot_id {
+            return Err("Hub Configure Endpoint completion slot mismatch");
+        }
+
+        let mut slots = self.slot_runtime.lock();
+        let slot = slots
+            .iter_mut()
+            .find(|slot| slot.usb_device.slot_id() == slot_id)
+            .ok_or("Unknown slot for hub interrupt runtime update")?;
+        slot.interrupt_input_context = Some(input_pages);
+        slot.interrupt_ring = Some(interrupt_ring);
+        slot.interrupt_buffer = Some(interrupt_buffer);
+        slot.interrupt_buffer_mapping = Some(interrupt_buffer_mapping);
+        slot.interrupt_dci = Some(interrupt_dci);
+        slot.interrupt_endpoint_address = Some(interface.endpoint_address);
+        slot.interrupt_max_packet_size = Some(interface.max_packet_size);
+        Ok(())
     }
 
     fn configure_hub_context(
@@ -3985,6 +4443,7 @@ impl XhciController {
             self.log_hub_port_status(slot_id, port, status, hub.is_superspeed);
             self.clear_hub_port_changes(slot_id, port, status, hub.is_superspeed)?;
             if !status.connected() {
+                self.remove_disconnected_hub_port(root_port_id, hub.route_string, hub.depth, port);
                 continue;
             }
             if hub.depth >= USB_HUB_ROUTE_DEPTH_MAX || port > 15 {
@@ -3995,6 +4454,22 @@ impl XhciController {
                 continue;
             }
 
+            // xHCI Route String contains only downstream hub-port nibbles; the root
+            // hub port is carried separately in the Slot Context Root Hub Port Number.
+            let child_route = hub.route_string | ((port as u32) << (hub.depth as u32 * 4));
+            let child_depth = hub.depth + 1;
+            let child_exists = self.slot_runtime.lock().iter().any(|slot| {
+                slot.usb_device.port_id() == root_port_id
+                    && slot.route_string == child_route
+                    && slot.route_depth == child_depth
+            });
+            if child_exists && status.enabled() && !status.connection_changed() {
+                continue;
+            }
+            if child_exists {
+                self.remove_disconnected_hub_port(root_port_id, hub.route_string, hub.depth, port);
+            }
+
             let status = self.reset_hub_port(slot_id, port)?;
             self.log_hub_port_status(slot_id, port, status, hub.is_superspeed);
             if !status.enabled() {
@@ -4002,18 +4477,6 @@ impl XhciController {
                     "[xHCI] Slot {} hub port {} reset did not enable port",
                     slot_id, port
                 );
-                continue;
-            }
-
-            // xHCI Route String contains only downstream hub-port nibbles; the root
-            // hub port is carried separately in the Slot Context Root Hub Port Number.
-            let child_route = hub.route_string | ((port as u32) << (hub.depth as u32 * 4));
-            let child_depth = hub.depth + 1;
-            if self.slot_runtime.lock().iter().any(|slot| {
-                slot.usb_device.port_id() == root_port_id
-                    && slot.route_string == child_route
-                    && slot.route_depth == child_depth
-            }) {
                 continue;
             }
 
@@ -4536,6 +4999,7 @@ impl XhciController {
         let base = blob.as_vaddr();
         let mut offset = 0usize;
         let mut current_config = 0u8;
+        let mut current_interface: Option<(u8, u8, u8)> = None;
         let mut selected: Option<HubInterfaceConfig> = None;
 
         while offset + size_of::<DescriptorHeader>() <= total {
@@ -4558,18 +5022,36 @@ impl XhciController {
                 {
                     let interface =
                         unsafe { read_unaligned((base + offset) as *const InterfaceDescriptor) };
-                    if interface.interface_class == USB_CLASS_HUB {
-                        let candidate = HubInterfaceConfig {
-                            configuration_value: current_config,
-                            interface_number: interface.interface_number,
-                            alternate_setting: interface.alternate_setting,
-                            protocol: interface.interface_protocol,
-                        };
-                        if selected
-                            .map(|current| candidate.protocol > current.protocol)
-                            .unwrap_or(true)
+                    current_interface = (interface.interface_class == USB_CLASS_HUB).then_some((
+                        interface.interface_number,
+                        interface.alternate_setting,
+                        interface.interface_protocol,
+                    ));
+                }
+                USB_DT_ENDPOINT if header.length as usize >= EndpointDescriptor::encoded_size() => {
+                    if let Some((interface_number, alternate_setting, protocol)) = current_interface
+                    {
+                        let endpoint =
+                            unsafe { read_unaligned((base + offset) as *const EndpointDescriptor) };
+                        if endpoint.attributes & 0x3 == USB_ENDPOINT_XFER_INT
+                            && endpoint.endpoint_address & 0x80 != 0
+                            && endpoint.max_packet_size != 0
                         {
-                            selected = Some(candidate);
+                            let candidate = HubInterfaceConfig {
+                                configuration_value: current_config,
+                                interface_number,
+                                alternate_setting,
+                                protocol,
+                                endpoint_address: endpoint.endpoint_address,
+                                max_packet_size: endpoint.max_packet_size,
+                                interval: endpoint.interval,
+                            };
+                            if selected
+                                .map(|current| candidate.protocol > current.protocol)
+                                .unwrap_or(true)
+                            {
+                                selected = Some(candidate);
+                            }
                         }
                     }
                 }
@@ -4579,7 +5061,7 @@ impl XhciController {
             offset += header.length as usize;
         }
 
-        selected.ok_or("No USB hub interface found")
+        selected.ok_or("No USB hub interrupt interface found")
     }
 
     fn parse_boot_interface(
@@ -4643,6 +5125,83 @@ impl XhciController {
         }
 
         Err("No HID boot interface found")
+    }
+
+    fn parse_registered_interrupt_in_endpoints(
+        &self,
+        blob: &ContiguousPages,
+    ) -> Result<Vec<UsbInterruptInEndpointInfo>, &'static str> {
+        let total = blob.len() * crate::environment::PAGE_SIZE;
+        let base = blob.as_vaddr();
+        let mut offset = 0usize;
+        let mut current_config = 0u8;
+        let mut current_interface: Option<(u8, u8, u8, u8, u8)> = None;
+        let mut endpoints = Vec::new();
+
+        while offset + size_of::<DescriptorHeader>() <= total {
+            let header = unsafe { read_unaligned((base + offset) as *const DescriptorHeader) };
+            if header.length == 0 || offset + header.length as usize > total {
+                break;
+            }
+
+            match header.descriptor_type {
+                USB_DT_CONFIGURATION
+                    if header.length as usize >= ConfigurationDescriptor::encoded_size() =>
+                {
+                    let config = unsafe {
+                        read_unaligned((base + offset) as *const ConfigurationDescriptor)
+                    };
+                    current_config = config.configuration_value;
+                }
+                USB_DT_INTERFACE
+                    if header.length as usize >= InterfaceDescriptor::encoded_size() =>
+                {
+                    let interface =
+                        unsafe { read_unaligned((base + offset) as *const InterfaceDescriptor) };
+                    current_interface = Some((
+                        interface.interface_number,
+                        interface.alternate_setting,
+                        interface.interface_class,
+                        interface.interface_subclass,
+                        interface.interface_protocol,
+                    ));
+                }
+                USB_DT_ENDPOINT if header.length as usize >= EndpointDescriptor::encoded_size() => {
+                    if let Some((
+                        interface_number,
+                        alternate_setting,
+                        interface_class,
+                        interface_subclass,
+                        interface_protocol,
+                    )) = current_interface
+                    {
+                        let endpoint =
+                            unsafe { read_unaligned((base + offset) as *const EndpointDescriptor) };
+                        if endpoint.attributes & 0x3 == USB_ENDPOINT_XFER_INT
+                            && endpoint.endpoint_address & 0x80 != 0
+                            && endpoint.max_packet_size != 0
+                        {
+                            endpoints.push(UsbInterruptInEndpointInfo {
+                                configuration_value: current_config,
+                                interface_number,
+                                alternate_setting,
+                                interface_class,
+                                interface_subclass,
+                                interface_protocol,
+                                endpoint_address: endpoint.endpoint_address,
+                                max_packet_size: endpoint.max_packet_size,
+                                interval: endpoint.interval,
+                            });
+                        }
+                    }
+                }
+                _ => {}
+            }
+
+            offset += header.length as usize;
+        }
+
+        Ok(endpoints)
     }
 
     fn parse_mass_storage_interface(
@@ -4790,13 +5349,45 @@ impl XhciController {
     }
 
     fn remove_disconnected_root_port(&self, port_id: u8) {
-        let mut slots_to_disable: Vec<(u8, u8)> = self
+        let slots_to_disable: Vec<(u8, u8)> = self
             .slot_runtime
             .lock()
             .iter()
             .filter(|slot| slot.usb_device.port_id() == port_id)
             .map(|slot| (slot.route_depth, slot.usb_device.slot_id()))
             .collect();
+        self.disable_and_remove_slots(slots_to_disable);
+    }
+
+    fn remove_disconnected_hub_port(
+        &self,
+        root_port_id: u8,
+        hub_route: u32,
+        hub_depth: u8,
+        port: u8,
+    ) {
+        if port == 0 || port > 15 || hub_depth >= USB_HUB_ROUTE_DEPTH_MAX {
+            return;
+        }
+        let child_depth = hub_depth + 1;
+        let child_route = hub_route | (u32::from(port) << (u32::from(hub_depth) * 4));
+        let prefix_bits = u32::from(child_depth) * 4;
+        let prefix_mask = (1u32 << prefix_bits) - 1;
+        let slots_to_disable = self
+            .slot_runtime
+            .lock()
+            .iter()
+            .filter(|slot| {
+                slot.usb_device.port_id() == root_port_id
+                    && slot.route_depth >= child_depth
+                    && slot.route_string & prefix_mask == child_route
+            })
+            .map(|slot| (slot.route_depth, slot.usb_device.slot_id()))
+            .collect();
+        self.disable_and_remove_slots(slots_to_disable);
+    }
+
+    fn disable_and_remove_slots(&self, mut slots_to_disable: Vec<(u8, u8)>) {
         slots_to_disable.sort_unstable_by(|left, right| right.cmp(left));
         if slots_to_disable.is_empty() {
             return;
@@ -4838,22 +5429,51 @@ impl XhciController {
                 .lock()
                 .retain(|device| device.slot_id() != slot_id);
 
-            if let Some(runtime) = runtime
-                && let Some(ncm) = runtime.cdc_ncm
-            {
-                let name = ncm.device.registered_interface_name();
-                crate::network::get_network_manager().unregister_interface(name);
-                if let Some(layer) = crate::network::get_network_manager().get_layer("ethernet")
-                    && let Some(ethernet) = layer
-                        .as_any()
-                        .downcast_ref::<crate::network::ethernet::EthernetLayer>()
+            if let Some(mut runtime) = runtime {
+                let root_port_id = runtime.usb_device.port_id();
+                let route_string = runtime.route_string;
+                if let Some(hid) = runtime.hid.as_mut() {
+                    match hid {
+                        HidDeviceState::Keyboard(keyboard) => {
+                            keyboard.handle_report(KeyboardBootReport::default());
+                        }
+                        HidDeviceState::Mouse(mouse) => {
+                            mouse.handle_report(MouseBootReport::default());
+                        }
+                    }
+                }
+                if let (Some(hid), Some(device_id)) =
+                    (runtime.hid.take(), runtime.hid_device_id.take())
                 {
-                    ethernet.unregister_interface(name);
+                    self.retained_hid_devices.lock().push(RetainedHidDevice {
+                        root_port_id,
+                        route_string,
+                        state: hid,
+                        device_id,
+                    });
                 }
-                if let Some(device_id) = ncm.device_id {
-                    DeviceManager::get_manager().unregister_device(device_id);
+
+                for interface in runtime.usb_interrupt_in.drain(..) {
+                    interface.handler.disconnected();
                 }
-                println!("[usb-ncm] Unregistered disconnected interface {}", name);
+
+                if let Some(ncm) = runtime.cdc_ncm.take() {
+                    let name = ncm.device.registered_interface_name();
+                    crate::network::get_network_manager().unregister_interface(name);
+                    if let Some(layer) = crate::network::get_network_manager().get_layer("ethernet")
+                        && let Some(ethernet) = layer
+                            .as_any()
+                            .downcast_ref::<crate::network::ethernet::EthernetLayer>(
+                        )
+                    {
+                        ethernet.unregister_interface(name);
+                    }
+                    if let Some(device_id) = ncm.device_id {
+                        DeviceManager::get_manager().unregister_device(device_id);
+                    }
+                    println!("[usb-ncm] Unregistered disconnected interface {}", name);
+                }
+                println!("[xHCI] Removed disconnected slot {}", slot_id);
             }
         }
     }
@@ -5117,35 +5737,127 @@ impl XhciController {
             .map(|slot| slot.ep0.clone())
     }
 
+    fn slot_topology(&self, slot_id: u8) -> Option<(u8, u32)> {
+        self.slot_runtime
+            .lock()
+            .iter()
+            .find(|slot| slot.usb_device.slot_id() == slot_id)
+            .map(|slot| (slot.usb_device.port_id(), slot.route_string))
+    }
+
+    fn take_retained_hid(
+        &self,
+        slot_id: u8,
+        protocol: HidBootProtocol,
+    ) -> Option<(HidDeviceState, usize)> {
+        let (root_port_id, route_string) = self.slot_topology(slot_id)?;
+        let mut retained = self.retained_hid_devices.lock();
+        let index = retained.iter().position(|device| {
+            device.root_port_id == root_port_id
+                && device.route_string == route_string
+                && matches!(
+                    (&device.state, protocol),
+                    (HidDeviceState::Keyboard(_), HidBootProtocol::Keyboard)
+                        | (HidDeviceState::Mouse(_), HidBootProtocol::Mouse)
+                )
+        })?;
+        let retained = retained.remove(index);
+        Some((retained.state, retained.device_id))
+    }
+
     pub fn attach_boot_keyboard(&self, slot_id: u8) -> Result<(), &'static str> {
+        let (root_port_id, route_string) = self
+            .slot_topology(slot_id)
+            .ok_or("Unknown slot for keyboard topology")?;
+        let retained = self.take_retained_hid(slot_id, HidBootProtocol::Keyboard);
+        let (keyboard, device_id, newly_registered) = match retained {
+            Some((HidDeviceState::Keyboard(keyboard), device_id)) => {
+                println!(
+                    "[xHCI] Reusing {} for reconnected keyboard",
+                    keyboard.event_device().get_name()
+                );
+                (keyboard, device_id, false)
+            }
+            Some(_) => unreachable!("retained HID protocol mismatch"),
+            None => {
+                let keyboard = HidKeyboardDevice::new();
+                let event_device = keyboard.event_device();
+                let name = event_device.get_name().to_string();
+                let as_device: Arc<dyn Device> = event_device;
+                let device_id =
+                    DeviceManager::get_manager().register_device_with_name(name, as_device);
+                (keyboard, device_id, true)
+            }
+        };
+
         let mut slots = self.slot_runtime.lock();
-        let slot = slots
+        let Some(slot) = slots
             .iter_mut()
             .find(|slot| slot.usb_device.slot_id() == slot_id)
-            .ok_or("Unknown slot for keyboard attach")?;
-
-        let keyboard = HidKeyboardDevice::new();
-        let event_device = keyboard.event_device();
-        let name = event_device.get_name().to_string();
-        let as_device: Arc<dyn Device> = event_device.clone();
-        DeviceManager::get_manager().register_device_with_name(name, as_device);
+        else {
+            drop(slots);
+            if newly_registered {
+                DeviceManager::get_manager().unregister_device(device_id);
+            } else {
+                self.retained_hid_devices.lock().push(RetainedHidDevice {
+                    root_port_id,
+                    route_string,
+                    state: HidDeviceState::Keyboard(keyboard),
+                    device_id,
+                });
+            }
+            return Err("Unknown slot for keyboard attach");
+        };
         slot.hid = Some(HidDeviceState::Keyboard(keyboard));
+        slot.hid_device_id = Some(device_id);
         Ok(())
     }
 
     pub fn attach_boot_mouse(&self, slot_id: u8) -> Result<(), &'static str> {
+        let (root_port_id, route_string) = self
+            .slot_topology(slot_id)
+            .ok_or("Unknown slot for mouse topology")?;
+        let retained = self.take_retained_hid(slot_id, HidBootProtocol::Mouse);
+        let (mouse, device_id, newly_registered) = match retained {
+            Some((HidDeviceState::Mouse(mouse), device_id)) => {
+                println!(
+                    "[xHCI] Reusing {} for reconnected mouse",
+                    mouse.event_device().get_name()
+                );
+                (mouse, device_id, false)
+            }
+            Some(_) => unreachable!("retained HID protocol mismatch"),
+            None => {
+                let mouse = HidMouseDevice::new();
+                let event_device = mouse.event_device();
+                let name = event_device.get_name().to_string();
+                let as_device: Arc<dyn Device> = event_device;
+                let device_id =
+                    DeviceManager::get_manager().register_device_with_name(name, as_device);
+                (mouse, device_id, true)
+            }
+        };
+
         let mut slots = self.slot_runtime.lock();
-        let slot = slots
+        let Some(slot) = slots
             .iter_mut()
             .find(|slot| slot.usb_device.slot_id() == slot_id)
-            .ok_or("Unknown slot for mouse attach")?;
-
-        let mouse = HidMouseDevice::new();
-        let event_device = mouse.event_device();
-        let name = event_device.get_name().to_string();
-        let as_device: Arc<dyn Device> = event_device.clone();
-        DeviceManager::get_manager().register_device_with_name(name, as_device);
+        else {
+            drop(slots);
+            if newly_registered {
+                DeviceManager::get_manager().unregister_device(device_id);
+            } else {
+                self.retained_hid_devices.lock().push(RetainedHidDevice {
+                    root_port_id,
+                    route_string,
+                    state: HidDeviceState::Mouse(mouse),
+                    device_id,
+                });
+            }
+            return Err("Unknown slot for mouse attach");
+        };
         slot.hid = Some(HidDeviceState::Mouse(mouse));
+        slot.hid_device_id = Some(device_id);
         Ok(())
     }
 
@@ -5377,6 +6089,104 @@ impl XhciController {
             return true;
         }
 
+        if let Some(runtime_index) = slot
+            .usb_interrupt_in
+            .iter()
+            .position(|runtime| runtime.dci == endpoint_id)
+        {
+            let runtime = &mut slot.usb_interrupt_in[runtime_index];
+            let completed_trb_dma = event.trb_pointer() as usize & !0xf;
+            let Some(expected_trb_dma) = runtime.trb_dma else {
+                let driver_name = runtime.driver_name;
+                drop(slots);
+                println!(
+                    "[xHCI] Unexpected {} completion without an in-flight transfer: slot={} dci={} trb={:#x}",
+                    driver_name,
+                    slot_id,
+                    endpoint_id,
+                    event.trb_pointer()
+                );
+                return true;
+            };
+            if (expected_trb_dma & !0xf) != completed_trb_dma {
+                let driver_name = runtime.driver_name;
+                drop(slots);
+                println!(
+                    "[xHCI] Stale {} completion: slot={} dci={} trb={:#x} expected={:#x}",
+                    driver_name,
+                    slot_id,
+                    endpoint_id,
+                    event.trb_pointer(),
+                    expected_trb_dma
+                );
+                return true;
+            }
+            runtime.trb_dma = None;
+
+            let successful = Self::transfer_successful(event);
+            let residual = event.transfer_length() as usize;
+            let actual = usize::from(runtime.max_packet_size).checked_sub(residual);
+            let report_len = if successful {
+                sync_pages_after_device_write(runtime.buffer.as_ref());
+                actual.filter(|actual| {
+                    *actual <= runtime.buffer.len() * crate::environment::PAGE_SIZE
+                })
+            } else {
+                None
+            };
+            let buffer = runtime.buffer.clone();
+            let driver_name = runtime.driver_name;
+            let handler = runtime.handler.clone();
+            drop(slots);
+
+            if !successful {
+                println!(
+                    "[xHCI] {} interrupt transfer failed: slot={} dci={} code={} trb={:#x}",
+                    driver_name,
+                    slot_id,
+                    endpoint_id,
+                    event.completion_code(),
+                    event.trb_pointer()
+                );
+                // A detached keyboard base first reports a failed child TD;
+                // let hub status processing remove and later re-enumerate it.
+                self.port_change_pending.store(true, Ordering::Release);
+            } else {
+                match report_len {
+                    Some(report_len) => {
+                        // SAFETY: `report_len` was checked against the complete
+                        // DMA allocation retained by `buffer` for this call.
+                        let report = unsafe {
+                            core::slice::from_raw_parts(buffer.as_vaddr() as *const u8, report_len)
+                        };
+                        if let Err(error) = handler.handle_report(report) {
+                            println!(
+                                "[xHCI] {} rejected interrupt report: slot={} dci={} error={}",
+                                driver_name, slot_id, endpoint_id, error
+                            );
+                        }
+                    }
+                    None => println!(
+                        "[xHCI] Ignored malformed {} report: slot={} dci={} actual={} residual={}",
+                        driver_name,
+                        slot_id,
+                        endpoint_id,
+                        actual.unwrap_or(0),
+                        residual
+                    ),
+                }
+                if let Err(error) =
+                    self.submit_registered_interrupt_in_transfer(slot_id, endpoint_id)
+                {
+                    println!(
+                        "[xHCI] Failed to resubmit {} transfer for slot {}: {}",
+                        driver_name, slot_id, error
+                    );
+                }
+            }
+            return true;
+        }
+
         if slot.interrupt_dci != Some(endpoint_id) {
             return false;
         }
@@ -5409,6 +6219,7 @@ impl XhciController {
             return true;
         };
         let successful = Self::transfer_successful(event);
+        let is_hub_interrupt = slot.hub.is_some();
         let actual = slot
             .interrupt_max_packet_size
             .map(usize::from)
@@ -5443,17 +6254,28 @@ impl XhciController {
         drop(slots);
         if !successful {
             println!(
-                "[xHCI] HID interrupt transfer failed: slot={} dci={} code={} trb={:#x}",
+                "[xHCI] {} interrupt transfer failed: slot={} dci={} code={} trb={:#x}",
+                if is_hub_interrupt { "hub" } else { "HID" },
                 slot_id,
                 endpoint_id,
                 event.completion_code(),
                 event.trb_pointer()
             );
-        } else if let Err(error) = self.submit_interrupt_in_transfer(slot_id) {
-            println!(
-                "[xHCI] Failed to resubmit interrupt transfer for slot {}: {}",
-                slot_id, error
-            );
+            // A downstream disconnect commonly completes the child's active
+            // interrupt TD with USB Transaction Error before the hub's status
+            // bitmap is consumed. Scan hubs in the worker either way so the
+            // dead slot is disabled instead of remaining permanently present.
+            self.port_change_pending.store(true, Ordering::Release);
+        } else {
+            if is_hub_interrupt {
+                self.port_change_pending.store(true, Ordering::Release);
+            }
+            if let Err(error) = self.submit_interrupt_in_transfer(slot_id) {
+                println!(
+                    "[xHCI] Failed to resubmit interrupt transfer for slot {}: {}",
+                    slot_id, error
+                );
+            }
         }
         true
     }
@@ -5715,6 +6537,35 @@ impl XhciController {
                 }
             }
             Err(error) => println!("[xHCI] Port change enumeration failed: {}", error),
+        }
+
+        let hub_slots: Vec<u8> = self
+            .slot_runtime
+            .lock()
+            .iter()
+            .filter(|slot| slot.hub.is_some())
+            .map(|slot| slot.usb_device.slot_id())
+            .collect();
+        for slot_id in hub_slots {
+            if !self
+                .slot_runtime
+                .lock()
+                .iter()
+                .any(|slot| slot.usb_device.slot_id() == slot_id && slot.hub.is_some())
+            {
+                continue;
+            }
+            match self.enumerate_hub_ports(slot_id) {
+                Ok(count) if count != 0 => println!(
+                    "[xHCI] Hub slot {} change enumerated {} device(s)",
+                    slot_id, count
+                ),
+                Ok(_) => {}
+                Err(error) => println!(
+                    "[xHCI] Hub slot {} change enumeration failed: {}",
+                    slot_id, error
+                ),
+            }
         }
     }
 
@@ -6655,6 +7506,8 @@ fn initialize_xhci_controller(
         mmio_vaddr,
         dma_context,
     )?);
+    let host_id = NEXT_USB_HOST_ID.fetch_add(1, Ordering::SeqCst) as u32;
+    controller.host_id.store(host_id, Ordering::Release);
     controller
         .self_weak
         .get_or_init(|| Arc::downgrade(&controller));
@@ -6673,7 +7526,7 @@ fn initialize_xhci_controller(
 }
 
 fn register_xhci_host(controller: Arc<XhciController>) {
-    let host_id = NEXT_USB_HOST_ID.fetch_add(1, Ordering::SeqCst) as u32;
+    let host_id = controller.host_id.load(Ordering::Acquire);
     let host: Arc<dyn UsbHostController> = controller.clone();
     DeviceManager::get_manager().register_usb_host(host_id, host);
 

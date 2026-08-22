@@ -72,10 +72,11 @@ use super::iommu::{
 use super::mailbox::{MailboxChannel, MailboxClient, MailboxController, MailboxError, MailboxSpec};
 use super::nvmem::{NvmemCell, NvmemError, NvmemProvider};
 use super::phy::{PhyError, PhyHandle, PhyProvider};
+use super::pinctrl::{PinctrlBias, PinctrlController, PinctrlError, PinctrlState};
 use super::remoteproc::{RemoteProcessor, RemoteprocService, RemoteprocServiceId};
 use super::reset::{ResetController, ResetHandle};
 use super::spi::SpiBus;
-use super::usb::{TypecPort, UsbHostController};
+use super::usb::{TypecPort, UsbHostController, UsbInterruptInDriver};
 use super::watchdog::Watchdog;
 use crate::DeviceSource;
 
@@ -220,8 +221,10 @@ pub struct DeviceManager {
     spi_buses: IrqSpinLock<BTreeMap<u32, Arc<dyn SpiBus>>>,
     i2c_buses: IrqSpinLock<BTreeMap<u32, Arc<dyn I2cBus>>>,
     usb_hosts: IrqSpinLock<BTreeMap<u32, Arc<dyn UsbHostController>>>,
+    usb_interrupt_in_drivers: IrqSpinLock<Vec<Arc<dyn UsbInterruptInDriver>>>,
     typec_ports: IrqSpinLock<BTreeMap<u32, Arc<dyn TypecPort>>>,
     gpio_controllers: IrqSpinLock<BTreeMap<u32, Arc<dyn GpioController>>>,
+    pinctrl_controllers: IrqSpinLock<BTreeMap<u32, Arc<dyn PinctrlController>>>,
     audio_codecs: IrqSpinLock<BTreeMap<u32, Arc<dyn AudioCodec>>>,
     audio_dai_providers: IrqSpinLock<BTreeMap<u32, Arc<dyn AudioDaiProvider>>>,
     clk_providers: IrqSpinLock<BTreeMap<u32, Arc<dyn ClkProvider>>>,
@@ -252,8 +255,10 @@ impl DeviceManager {
             spi_buses: IrqSpinLock::new(BTreeMap::new()),
             i2c_buses: IrqSpinLock::new(BTreeMap::new()),
             usb_hosts: IrqSpinLock::new(BTreeMap::new()),
+            usb_interrupt_in_drivers: IrqSpinLock::new(Vec::new()),
             typec_ports: IrqSpinLock::new(BTreeMap::new()),
             gpio_controllers: IrqSpinLock::new(BTreeMap::new()),
+            pinctrl_controllers: IrqSpinLock::new(BTreeMap::new()),
             audio_codecs: IrqSpinLock::new(BTreeMap::new()),
             audio_dai_providers: IrqSpinLock::new(BTreeMap::new()),
             clk_providers: IrqSpinLock::new(BTreeMap::new()),
@@ -298,6 +303,21 @@ impl DeviceManager {
             cells.push(u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
         }
         Some(cells)
+    }
+
+    fn read_string_list(bytes: &[u8]) -> Option<Vec<&str>> {
+        if bytes.is_empty() {
+            return Some(Vec::new());
+        }
+
+        let mut strings = Vec::new();
+        for bytes in bytes.split(|byte| *byte == 0) {
+            if bytes.is_empty() {
+                continue;
+            }
+            strings.push(core::str::from_utf8(bytes).ok()?);
+        }
+        Some(strings)
     }
 
     fn get_clock_cells_for_phandle(&self, phandle: u32) -> Option<usize> {
@@ -1357,6 +1377,25 @@ impl DeviceManager {
         self.usb_hosts.lock().get(&id).cloned()
     }
 
+    /// Register an external USB interrupt-IN interface driver.
+    ///
+    /// # Arguments
+    ///
+    /// * `driver` - Driver that matches descriptors and binds report handlers.
+    pub fn register_usb_interrupt_in_driver(&self, driver: Arc<dyn UsbInterruptInDriver>) {
+        self.usb_interrupt_in_drivers.lock().push(driver);
+    }
+
+    /// Snapshot all registered USB interrupt-IN interface drivers.
+    ///
+    /// # Returns
+    ///
+    /// Driver references in registration order. The registry lock is released
+    /// before any driver callback is invoked.
+    pub fn usb_interrupt_in_drivers(&self) -> Vec<Arc<dyn UsbInterruptInDriver>> {
+        self.usb_interrupt_in_drivers.lock().clone()
+    }
+
     /// Register a Type-C port provider for an endpoint phandle.
     ///
     /// # Arguments
@@ -1432,6 +1471,33 @@ impl DeviceManager {
 
     pub fn get_gpio_controller(&self, phandle: u32) -> Option<Arc<dyn GpioController>> {
         self.gpio_controllers.lock().get(&phandle).cloned()
+    }
+
+    /// Register a pin-controller provider by firmware phandle.
+    ///
+    /// # Arguments
+    ///
+    /// * `phandle` - Firmware phandle identifying the controller node.
+    /// * `controller` - Provider that interprets and applies pinctrl states.
+    pub fn register_pinctrl_controller(
+        &self,
+        phandle: u32,
+        controller: Arc<dyn PinctrlController>,
+    ) {
+        self.pinctrl_controllers.lock().insert(phandle, controller);
+    }
+
+    /// Look up a pin-controller provider by firmware phandle.
+    ///
+    /// # Arguments
+    ///
+    /// * `phandle` - Firmware phandle identifying the controller node.
+    ///
+    /// # Returns
+    ///
+    /// Registered provider, or `None` when it has not probed yet.
+    pub fn get_pinctrl_controller(&self, phandle: u32) -> Option<Arc<dyn PinctrlController>> {
+        self.pinctrl_controllers.lock().get(&phandle).cloned()
     }
 
     /// Register an audio codec by firmware phandle.
@@ -2331,6 +2397,35 @@ impl DeviceManager {
     }
 
     fn apply_pinctrl_default(&self, device: &PlatformDeviceInfo) -> Result<(), &'static str> {
+        self.apply_pinctrl_default_inner(device, false)
+    }
+
+    /// Apply a provider's own default pinctrl state after registration.
+    ///
+    /// Provider devices may reference states owned by themselves. Their normal
+    /// pre-probe pinctrl pass skips those self-references to avoid a circular
+    /// dependency; the provider calls this method once it is registered.
+    ///
+    /// # Arguments
+    ///
+    /// * `device` - Registered pin-controller platform device.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` after all supported states are applied, or an error for a
+    /// malformed/invalid state.
+    pub fn apply_registered_pinctrl_default(
+        &self,
+        device: &PlatformDeviceInfo,
+    ) -> Result<(), &'static str> {
+        self.apply_pinctrl_default_inner(device, true)
+    }
+
+    fn apply_pinctrl_default_inner(
+        &self,
+        device: &PlatformDeviceInfo,
+        apply_self_states: bool,
+    ) -> Result<(), &'static str> {
         let Some(pinctrl) = device.property("pinctrl-0") else {
             return Ok(());
         };
@@ -2348,29 +2443,106 @@ impl DeviceManager {
             let (state_node, controller_phandle) =
                 Self::find_node_and_parent_by_phandle(fdt, state_phandle)
                     .ok_or("pinctrl: state node not found")?;
-            let Some(pinmux) = state_node.property("pinmux") else {
-                continue;
-            };
-
             let controller_phandle = controller_phandle.ok_or("pinctrl: state has no parent")?;
-            let controller = self
-                .get_gpio_controller(controller_phandle)
-                .ok_or(PROBE_DEFER)?;
-            let muxes = Self::read_be_u32_cells(pinmux.value).ok_or("pinctrl: malformed pinmux")?;
+            let device_phandle = device
+                .property("phandle")
+                .or_else(|| device.property("linux,phandle"))
+                .and_then(|property| property.as_usize())
+                .and_then(|phandle| u32::try_from(phandle).ok());
+            let is_self_state = device_phandle == Some(controller_phandle);
 
-            for mux in &muxes {
-                let pin = mux & 0xffff;
-                let func = ((mux >> 16) & 0xff) as u8;
-                controller.set_function(pin, func);
+            if let Some(pinmux) = state_node.property("pinmux") {
+                let Some(controller) = self.get_gpio_controller(controller_phandle) else {
+                    if is_self_state && !apply_self_states {
+                        continue;
+                    }
+                    return Err(PROBE_DEFER);
+                };
+                let muxes =
+                    Self::read_be_u32_cells(pinmux.value).ok_or("pinctrl: malformed pinmux")?;
+
+                for mux in &muxes {
+                    let pin = mux & 0xffff;
+                    let func = ((mux >> 16) & 0xff) as u8;
+                    controller.set_function(pin, func);
+                }
+
+                early_println!(
+                    "[pinctrl] applied device={} state phandle={:#x} controller={:#x} pins={}",
+                    device.name(),
+                    state_phandle,
+                    controller_phandle,
+                    muxes.len()
+                );
+                continue;
             }
 
-            early_println!(
-                "[pinctrl] applied device={} state phandle={:#x} controller={:#x} pins={}",
-                device.name(),
-                state_phandle,
-                controller_phandle,
-                muxes.len()
-            );
+            let Some(pins) = state_node
+                .property("pins")
+                .or_else(|| state_node.property("groups"))
+            else {
+                continue;
+            };
+            let function = state_node
+                .property("function")
+                .and_then(|property| property.as_str());
+            let pin_names =
+                Self::read_string_list(pins.value).ok_or("pinctrl: malformed pins list")?;
+            let drive_strength = state_node
+                .property("drive-strength")
+                .and_then(|property| Self::read_be_u32(property.value));
+            let bias = if state_node.property("bias-pull-up").is_some() {
+                Some(PinctrlBias::PullUp)
+            } else if state_node.property("bias-pull-down").is_some() {
+                Some(PinctrlBias::PullDown)
+            } else if state_node.property("bias-disable").is_some() {
+                Some(PinctrlBias::Disable)
+            } else {
+                None
+            };
+            let output_high = state_node.property("output-high").is_some();
+            let output_low = state_node.property("output-low").is_some();
+            if output_high && output_low {
+                return Err("pinctrl: conflicting output state");
+            }
+            let state = PinctrlState {
+                pins: pin_names,
+                function,
+                bias,
+                drive_strength_ma: drive_strength,
+                output: if output_high {
+                    Some(true)
+                } else if output_low {
+                    Some(false)
+                } else {
+                    None
+                },
+                input_enable: state_node.property("input-enable").is_some(),
+            };
+            let Some(controller) = self.get_pinctrl_controller(controller_phandle) else {
+                if is_self_state && !apply_self_states {
+                    continue;
+                }
+                return Err(PROBE_DEFER);
+            };
+
+            match controller.apply_state(&state) {
+                Ok(applied) => early_println!(
+                    "[pinctrl] applied device={} state phandle={:#x} controller={:#x} function={} pins={}",
+                    device.name(),
+                    state_phandle,
+                    controller_phandle,
+                    function.unwrap_or("<unchanged>"),
+                    applied
+                ),
+                Err(PinctrlError::Unsupported) => early_println!(
+                    "[pinctrl] provider {:#x} does not support state {} for {}; preserving firmware state",
+                    controller_phandle,
+                    state_node.name,
+                    device.name()
+                ),
+                Err(PinctrlError::Invalid) => return Err("pinctrl: provider rejected state"),
+            }
         }
 
         Ok(())

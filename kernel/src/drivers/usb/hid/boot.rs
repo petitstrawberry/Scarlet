@@ -72,8 +72,14 @@ impl HidKeyboardDevice {
 
     pub fn handle_report(&mut self, report: KeyboardBootReport) {
         for modifier in [
+            (0x01, key_codes::KEY_LEFTCTRL),
             (0x02, key_codes::KEY_LEFTSHIFT),
+            (0x04, key_codes::KEY_LEFTALT),
+            (0x08, key_codes::KEY_LEFTMETA),
+            (0x10, key_codes::KEY_RIGHTCTRL),
             (0x20, key_codes::KEY_RIGHTSHIFT),
+            (0x40, key_codes::KEY_RIGHTALT),
+            (0x80, key_codes::KEY_RIGHTMETA),
         ] {
             let was_pressed = (self.last_report.modifiers & modifier.0) != 0;
             let is_pressed = (report.modifiers & modifier.0) != 0;
@@ -84,6 +90,16 @@ impl HidKeyboardDevice {
                     if is_pressed { KEY_PRESS } else { KEY_RELEASE },
                 );
             }
+        }
+
+        // ErrorRollOver, POSTFail, and ErrorUndefined occupy usages 1..=3.
+        // They describe the entire six-key array, not individual keys. Keep
+        // the last known key state until the keyboard sends a valid report so
+        // a rollover cannot synthesize releases for every held key.
+        if report.keys.iter().any(|key| (1..=3).contains(key)) {
+            self.event_device.push_event(EV_SYN, SYN_REPORT, 0);
+            self.last_report.modifiers = report.modifiers;
+            return;
         }
 
         for old_key in self.last_report.keys {
@@ -208,6 +224,7 @@ fn translate_boot_key(boot_code: u8) -> Option<u16> {
         0x2f => Some(key_codes::KEY_LEFTBRACE),
         0x30 => Some(key_codes::KEY_RIGHTBRACE),
         0x31 => Some(key_codes::KEY_BACKSLASH),
+        0x32 => Some(key_codes::KEY_102ND),
         0x33 => Some(key_codes::KEY_SEMICOLON),
         0x34 => Some(key_codes::KEY_APOSTROPHE),
         0x35 => Some(key_codes::KEY_GRAVE),
@@ -227,6 +244,40 @@ fn translate_boot_key(boot_code: u8) -> Option<u16> {
         0x43 => Some(key_codes::KEY_F10),
         0x44 => Some(key_codes::KEY_F11),
         0x45 => Some(key_codes::KEY_F12),
+        0x46 => Some(key_codes::KEY_SYSRQ),
+        0x47 => Some(key_codes::KEY_SCROLLLOCK),
+        0x48 => Some(key_codes::KEY_PAUSE),
+        0x49 => Some(key_codes::KEY_INSERT),
+        0x4a => Some(key_codes::KEY_HOME),
+        0x4b => Some(key_codes::KEY_PAGEUP),
+        0x4c => Some(key_codes::KEY_DELETE),
+        0x4d => Some(key_codes::KEY_END),
+        0x4e => Some(key_codes::KEY_PAGEDOWN),
+        0x4f => Some(key_codes::KEY_RIGHT),
+        0x50 => Some(key_codes::KEY_LEFT),
+        0x51 => Some(key_codes::KEY_DOWN),
+        0x52 => Some(key_codes::KEY_UP),
+        0x53 => Some(key_codes::KEY_NUMLOCK),
+        0x54 => Some(key_codes::KEY_KPSLASH),
+        0x55 => Some(key_codes::KEY_KPASTERISK),
+        0x56 => Some(key_codes::KEY_KPMINUS),
+        0x57 => Some(key_codes::KEY_KPPLUS),
+        0x58 => Some(key_codes::KEY_KPENTER),
+        0x59 => Some(key_codes::KEY_KP1),
+        0x5a => Some(key_codes::KEY_KP2),
+        0x5b => Some(key_codes::KEY_KP3),
+        0x5c => Some(key_codes::KEY_KP4),
+        0x5d => Some(key_codes::KEY_KP5),
+        0x5e => Some(key_codes::KEY_KP6),
+        0x5f => Some(key_codes::KEY_KP7),
+        0x60 => Some(key_codes::KEY_KP8),
+        0x61 => Some(key_codes::KEY_KP9),
+        0x62 => Some(key_codes::KEY_KP0),
+        0x63 => Some(key_codes::KEY_KPDOT),
+        0x64 => Some(key_codes::KEY_102ND),
+        0x65 => Some(key_codes::KEY_COMPOSE),
+        0x66 => Some(key_codes::KEY_POWER),
+        0x67 => Some(key_codes::KEY_KPEQUAL),
         _ => None,
     }
 }
@@ -259,6 +310,9 @@ mod tests {
         assert_eq!(translate_boot_key(0x29), Some(key_codes::KEY_ESC));
         assert_eq!(translate_boot_key(0x2d), Some(key_codes::KEY_MINUS));
         assert_eq!(translate_boot_key(0x35), Some(key_codes::KEY_GRAVE));
+        assert_eq!(translate_boot_key(0x4c), Some(key_codes::KEY_DELETE));
+        assert_eq!(translate_boot_key(0x52), Some(key_codes::KEY_UP));
+        assert_eq!(translate_boot_key(0x58), Some(key_codes::KEY_KPENTER));
         assert_eq!(translate_boot_key(0xff), None);
     }
 

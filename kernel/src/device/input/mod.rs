@@ -151,6 +151,8 @@ pub mod key_codes {
     pub const KEY_DOT: u16 = 52;
     pub const KEY_SLASH: u16 = 53;
     pub const KEY_RIGHTSHIFT: u16 = 54;
+    pub const KEY_KPASTERISK: u16 = 55;
+    pub const KEY_LEFTALT: u16 = 56;
     pub const KEY_SPACE: u16 = 57;
     pub const KEY_CAPSLOCK: u16 = 58;
     pub const KEY_F1: u16 = 59;
@@ -163,13 +165,45 @@ pub mod key_codes {
     pub const KEY_F8: u16 = 66;
     pub const KEY_F9: u16 = 67;
     pub const KEY_F10: u16 = 68;
+    pub const KEY_NUMLOCK: u16 = 69;
+    pub const KEY_SCROLLLOCK: u16 = 70;
+    pub const KEY_KP7: u16 = 71;
+    pub const KEY_KP8: u16 = 72;
+    pub const KEY_KP9: u16 = 73;
+    pub const KEY_KPMINUS: u16 = 74;
+    pub const KEY_KP4: u16 = 75;
+    pub const KEY_KP5: u16 = 76;
+    pub const KEY_KP6: u16 = 77;
+    pub const KEY_KPPLUS: u16 = 78;
+    pub const KEY_KP1: u16 = 79;
+    pub const KEY_KP2: u16 = 80;
+    pub const KEY_KP3: u16 = 81;
+    pub const KEY_KP0: u16 = 82;
+    pub const KEY_KPDOT: u16 = 83;
+    pub const KEY_102ND: u16 = 86;
     pub const KEY_F11: u16 = 87;
     pub const KEY_F12: u16 = 88;
+    pub const KEY_KPENTER: u16 = 96;
     pub const KEY_RIGHTCTRL: u16 = 97;
+    pub const KEY_KPSLASH: u16 = 98;
+    pub const KEY_SYSRQ: u16 = 99;
     pub const KEY_RIGHTALT: u16 = 100;
-    pub const KEY_RIGHTMETA: u16 = 126;
-    pub const KEY_LEFTALT: u16 = 56;
+    pub const KEY_HOME: u16 = 102;
+    pub const KEY_UP: u16 = 103;
+    pub const KEY_PAGEUP: u16 = 104;
+    pub const KEY_LEFT: u16 = 105;
+    pub const KEY_RIGHT: u16 = 106;
+    pub const KEY_END: u16 = 107;
+    pub const KEY_DOWN: u16 = 108;
+    pub const KEY_PAGEDOWN: u16 = 109;
+    pub const KEY_INSERT: u16 = 110;
+    pub const KEY_DELETE: u16 = 111;
+    pub const KEY_POWER: u16 = 116;
+    pub const KEY_KPEQUAL: u16 = 117;
+    pub const KEY_PAUSE: u16 = 119;
     pub const KEY_LEFTMETA: u16 = 125;
+    pub const KEY_RIGHTMETA: u16 = 126;
+    pub const KEY_COMPOSE: u16 = 127;
 }
 
 /// Key/button state values
