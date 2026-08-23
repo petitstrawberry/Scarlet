@@ -3,6 +3,7 @@
 use super::config;
 use super::cursor::Cursor;
 use super::cursor_theme::CursorTheme;
+use super::damage::{DamageRect, PresentDamage, WindowGeometrySnapshot, changed_geometry_damage};
 use super::gpu_compositor::{GpuCompositor, SgfxBufferError, SgfxBufferIdentity, SgfxCommitToken};
 use super::input::{CompositorInputEvent, InputManager, key_codes};
 use super::ipc::{IpcEvent, IpcServer, send_message_to_client, send_response_to_client};
@@ -156,9 +157,6 @@ const COMPOSITOR_WAKE_ERROR_DELAY_MS: u64 = 10;
 const DEFAULT_OUTPUT_SCALE_MILLI: u32 = 2000;
 const DEFAULT_CURSOR_THEME_PATH: &str = "/share/cursors/default";
 const INSTALLED_CURSOR_THEME_ROOT: &str = "/share/cursors/";
-
-type DamageRect = (i32, i32, u32, u32);
-type PresentDamage = Option<Vec<DamageRect>>;
 
 #[derive(Debug, Clone)]
 struct SwsConfig {
@@ -1464,6 +1462,116 @@ impl Compositor {
         Self::push_damage_rect(&mut self.pending_damage, (sx0, sy0, w, h));
     }
 
+    fn window_order(&self) -> Vec<u32> {
+        self.window_manager
+            .get_windows()
+            .iter()
+            .map(|window| window.id)
+            .collect()
+    }
+
+    fn top_level_window_id(&self, mut window_id: u32) -> u32 {
+        for _ in 0..32 {
+            let parent = self
+                .window_manager
+                .get_window(window_id)
+                .and_then(|window| window.parent);
+            match parent {
+                Some(parent_id) if parent_id != window_id => window_id = parent_id,
+                _ => break,
+            }
+        }
+        window_id
+    }
+
+    fn visible_window_group_rects(&self, window_id: u32) -> Vec<DamageRect> {
+        let root_id = self.top_level_window_id(window_id);
+        self.window_manager
+            .get_windows()
+            .iter()
+            .filter(|window| window.visible && self.top_level_window_id(window.id) == root_id)
+            .map(|window| (window.x, window.y, window.width, window.height))
+            .collect()
+    }
+
+    fn window_follows_move(&self, mut window_id: u32, ancestor_id: u32) -> bool {
+        if window_id == ancestor_id {
+            return true;
+        }
+
+        for _ in 0..32 {
+            let Some(window) = self.window_manager.get_window(window_id) else {
+                return false;
+            };
+            if window.transient_flags & sws_protocol::transient_flags::FOLLOW_PARENT_MOVE == 0 {
+                return false;
+            }
+            let Some(parent_id) = window.parent else {
+                return false;
+            };
+            if parent_id == ancestor_id {
+                return true;
+            }
+            window_id = parent_id;
+        }
+
+        false
+    }
+
+    fn visible_move_group_geometry(&self, window_id: u32) -> Vec<WindowGeometrySnapshot> {
+        self.window_manager
+            .get_windows()
+            .iter()
+            .filter(|window| window.visible && self.window_follows_move(window.id, window_id))
+            .map(|window| (window.id, (window.x, window.y, window.width, window.height)))
+            .collect()
+    }
+
+    fn damage_window(&mut self, window_id: u32) {
+        let rect = self
+            .window_manager
+            .get_window(window_id)
+            .filter(|window| window.visible)
+            .map(|window| (window.x, window.y, window.width, window.height));
+        if let Some(rect) = rect {
+            self.add_pending_damage(rect);
+        }
+    }
+
+    fn damage_geometry_changes(
+        &mut self,
+        before: &[WindowGeometrySnapshot],
+        after: &[WindowGeometrySnapshot],
+    ) {
+        for rect in changed_geometry_damage(before, after) {
+            self.add_pending_damage(rect);
+        }
+    }
+
+    fn raise_window_with_damage(&mut self, window_id: u32) {
+        let old_order = self.window_order();
+        self.window_manager.raise_to_top_with_type(window_id);
+        if self.window_order() == old_order {
+            return;
+        }
+
+        for rect in self.visible_window_group_rects(window_id) {
+            self.add_pending_damage(rect);
+        }
+    }
+
+    fn set_window_position_with_damage(&mut self, window_id: u32, x: i32, y: i32) {
+        if self.window_manager.get_window(window_id).is_none() {
+            return;
+        }
+
+        let before = self.visible_move_group_geometry(window_id);
+        self.window_manager.set_window_position(window_id, x, y);
+        let after = self.visible_move_group_geometry(window_id);
+        self.damage_geometry_changes(&before, &after);
+        self.position_all_ime_popup_windows();
+    }
+
     /// Mark a window's entire area as damaged and request full redraw
     #[allow(dead_code)]
     fn mark_window_damage(&mut self, window_id: u32) {
@@ -2401,8 +2509,11 @@ impl Compositor {
             // Only change focus if the window accepts focus
             // Taskbar and Desktop windows are global UI elements that don't steal focus
             if self.window_manager.window_accepts_focus(win_id) {
-                // Raise window to top (with type-based Z-order) before focusing
-                self.window_manager.raise_to_top_with_type(win_id);
+                let previous_focus = self.window_manager.get_focused_window_id();
+
+                // Raise window to top (with type-based Z-order) before focusing.
+                // Only the raised transient group can change visually.
+                self.raise_window_with_damage(win_id);
 
                 // Set focus
                 self.window_manager.set_focus(win_id);
@@ -2410,16 +2521,21 @@ impl Compositor {
                 // Broadcast focus change event to all clients
                 self.broadcast_focus_change(win_id);
 
-                // Need full redraw when Z-order changes
-                self.full_redraw_needed = true;
+                // Focus styling, when compositor-provided, is confined to the
+                // previously and newly focused windows.
+                if previous_focus != Some(win_id) {
+                    if let Some(previous_focus) = previous_focus {
+                        self.damage_window(previous_focus);
+                    }
+                    self.damage_window(win_id);
+                }
             } else {
                 println!(
                     "[Compositor] Window #{} does not accept focus (global UI element)",
                     win_id
                 );
                 // Still raise to top to maintain proper Z-order for that window type
-                self.window_manager.raise_to_top_with_type(win_id);
-                self.full_redraw_needed = true;
+                self.raise_window_with_damage(win_id);
             }
         }
 
@@ -2973,13 +3089,12 @@ impl Compositor {
         super::ipc::consume_compositor_wake();
     }
 
-    fn process_pending_events(&mut self) -> Result<bool, &'static str> {
-        let mut needs_redraw =
-            cursor_visible(self.pointer_lock) && self.cursor.advance_animation(monotonic_time_ns());
-
-        if self.check_display_resize()? {
-            needs_redraw = true;
+    fn process_pending_events(&mut self) -> Result<(), &'static str> {
+        if cursor_visible(self.pointer_lock) {
+            self.cursor.advance_animation(monotonic_time_ns());
         }
+
+        self.check_display_resize()?;
 
         // Process IPC events from global queue (non-blocking)
         let ipc_events = self.ipc_server.process_messages()?;
@@ -2987,36 +3102,29 @@ impl Compositor {
         //     println!("[Compositor] Processing {} IPC events", ipc_events.len());
         // }
         for event in ipc_events {
-            if self.handle_ipc_event(event)? {
-                needs_redraw = true;
-            }
+            self.handle_ipc_event(event)?;
         }
 
         // Process input events from global queue (non-blocking)
         let input_events = super::input::pop_all_input_events();
         if !input_events.is_empty() {
             for event in input_events {
-                if self.handle_input_event(event)? {
-                    needs_redraw = true;
-                }
+                self.handle_input_event(event)?;
             }
         }
 
         if cursor_visible(self.pointer_lock) {
-            needs_redraw |= self.cursor.advance_animation(monotonic_time_ns());
+            self.cursor.advance_animation(monotonic_time_ns());
         }
 
-        Ok(needs_redraw)
+        Ok(())
     }
 
-    fn has_pending_redraw(&self, needs_redraw: bool) -> bool {
-        needs_redraw
-            || self.full_redraw_needed
-            || !self.pending_damage.is_empty()
-            || self.cursor.needs_redraw()
+    fn has_pending_redraw(&self) -> bool {
+        self.full_redraw_needed || !self.pending_damage.is_empty() || self.cursor.needs_redraw()
     }
 
-    fn wait_for_frame_batch(&mut self) -> Result<bool, &'static str> {
+    fn wait_for_frame_batch(&mut self) -> Result<(), &'static str> {
         // Synchronous DCP presentation already waits for the next completed
         // page flip. Sleeping for another frame here would double-pace the
         // compositor and reduce interactive updates to roughly 30 Hz.
@@ -3092,14 +3200,14 @@ impl Compositor {
     fn run_iteration(&mut self) -> Result<(), &'static str> {
         super::trace::compositor_loop();
         super::trace::set_compositor_stage(super::trace::STAGE_PROCESS_EVENTS);
-        let mut needs_redraw = self.process_pending_events()?;
+        self.process_pending_events()?;
         super::trace::set_compositor_stage(super::trace::STAGE_ACTIVE);
         if self.backend == SwsBackend::Sgfx && self.gpu_compositor.is_none() {
             return Err("SWS_BACKEND=sgfx compositor is unavailable");
         }
 
         // Re-composite and present if needed
-        if self.has_pending_redraw(needs_redraw) {
+        if self.has_pending_redraw() {
             if self.gpu_compositor.is_some() {
                 super::trace::set_compositor_stage(super::trace::STAGE_FRAME_BATCH);
                 self.wait_for_frame_batch()?;
@@ -3112,11 +3220,11 @@ impl Compositor {
                 super::trace::set_compositor_stage(super::trace::STAGE_CPU_COMPOSITE);
                 let mut present_damage = self.composite_pending_to_display()?;
                 super::trace::set_compositor_stage(super::trace::STAGE_FRAME_BATCH);
-                needs_redraw |= self.wait_for_frame_batch()?;
+                self.wait_for_frame_batch()?;
                 if self.full_redraw_needed {
                     sws_debug!("[Compositor] Full redraw triggered");
                 }
-                if self.has_pending_redraw(needs_redraw) {
+                if self.has_pending_redraw() {
                     super::trace::set_compositor_stage(super::trace::STAGE_CPU_COMPOSITE);
                     let next_damage = self.composite_pending_to_display()?;
                     Self::merge_present_damage(&mut present_damage, next_damage);
@@ -3196,10 +3304,6 @@ impl Compositor {
                 // If a window move is in progress, update the window position before
                 // converting cursor coordinates into window-local space.
                 if let Some(state) = self.move_drag {
-                    let old_rect = self
-                        .window_manager
-                        .get_window(state.window_id)
-                        .map(|w| (w.x, w.y, w.width, w.height));
                     let new_x = state.start_window_x + (self.cursor.x - state.grab_cursor_x);
                     let new_y = state.start_window_y + (self.cursor.y - state.grab_cursor_y);
                     sws_debug!(
@@ -3214,18 +3318,7 @@ impl Compositor {
                         new_x,
                         new_y
                     );
-                    self.window_manager
-                        .set_window_position(state.window_id, new_x, new_y);
-                    if self.position_all_ime_popup_windows() {
-                        self.full_redraw_needed = true;
-                    }
-
-                    if let Some(r) = old_rect {
-                        self.add_pending_damage(r);
-                    }
-                    if let Some(w) = self.window_manager.get_window(state.window_id) {
-                        self.add_pending_damage((w.x, w.y, w.width, w.height));
-                    }
+                    self.set_window_position_with_damage(state.window_id, new_x, new_y);
 
                     // While moving a window, the compositor "grabs" the pointer.
                     // Avoid routing mouse moves to the currently focused client.
@@ -3295,24 +3388,9 @@ impl Compositor {
                 }
 
                 if let Some(state) = self.move_drag {
-                    let old_rect = self
-                        .window_manager
-                        .get_window(state.window_id)
-                        .map(|w| (w.x, w.y, w.width, w.height));
                     let new_x = state.start_window_x + (self.cursor.x - state.grab_cursor_x);
                     let new_y = state.start_window_y + (self.cursor.y - state.grab_cursor_y);
-                    self.window_manager
-                        .set_window_position(state.window_id, new_x, new_y);
-                    if self.position_all_ime_popup_windows() {
-                        self.full_redraw_needed = true;
-                    }
-
-                    if let Some(r) = old_rect {
-                        self.add_pending_damage(r);
-                    }
-                    if let Some(w) = self.window_manager.get_window(state.window_id) {
-                        self.add_pending_damage((w.x, w.y, w.width, w.height));
-                    }
+                    self.set_window_position_with_damage(state.window_id, new_x, new_y);
 
                     // While moving a window, the compositor "grabs" the pointer.
                     // Avoid routing mouse moves to the currently focused client.
@@ -3488,24 +3566,10 @@ impl Compositor {
                         interaction.button_pressed(win_id, accepts_focus);
                         self.pointer_grab_window_id = interaction.implicit_grab_window_id;
                         self.update_pointer_focus(Some(win_id));
-                        // Only change focus if the window accepts focus
-                        // Taskbar and Desktop windows are global UI elements that don't steal focus
-                        if accepts_focus {
-                            self.window_manager.set_focus(win_id);
 
-                            // Broadcast focus change event to all clients
-                            self.broadcast_focus_change(win_id);
-
-                            self.full_redraw_needed = true;
-                        } else {
-                            println!(
-                                "[Compositor] Window #{} does not accept focus (global UI element)",
-                                win_id
-                            );
-                            // Still raise to top to maintain proper Z-order for that window type
-                            self.window_manager.raise_to_top_with_type(win_id);
-                            self.full_redraw_needed = true;
-                        }
+                        // Apply focus and stacking before an edge press can
+                        // return early into interactive resize mode.
+                        self.handle_click()?;
 
                         // Start interactive resize if we're near the bottom/right edge.
                         if let Some(window) = self.window_manager.get_window(win_id) {
@@ -3536,6 +3600,9 @@ impl Compositor {
                                     });
                                     self.resize_outline =
                                         Some((window.x, window.y, window.width, window.height));
+                                    if let Some(outline) = self.resize_outline {
+                                        self.add_pending_damage(outline);
+                                    }
                                     self.refresh_cursor_icon();
                                     return Ok(true);
                                 }
@@ -3545,9 +3612,6 @@ impl Compositor {
                         self.pointer_grab_window_id = None;
                         self.update_pointer_focus(None);
                     }
-
-                    // Normal click behavior (focus/raise).
-                    self.handle_click()?;
                 }
 
                 // Route button event to the window under the cursor (even if it can't take focus).
@@ -4739,7 +4803,7 @@ impl Compositor {
                 );
 
                 // Bring the window to front for the drag (focus is handled by click routing).
-                self.window_manager.raise_to_top_with_type(window_id);
+                self.raise_window_with_damage(window_id);
 
                 self.move_drag = Some(MoveDragState {
                     window_id,
@@ -4762,17 +4826,7 @@ impl Compositor {
                     "[Compositor] Moving window #{} to ({}, {})",
                     window_id, x, y
                 );
-                let old_rect = self
-                    .window_manager
-                    .get_window(window_id)
-                    .map(|w| (w.x, w.y, w.width, w.height));
-                self.window_manager.set_window_position(window_id, x, y);
-                if let Some(r) = old_rect {
-                    self.add_pending_damage(r);
-                }
-                if let Some(w) = self.window_manager.get_window(window_id) {
-                    self.add_pending_damage((w.x, w.y, w.width, w.height));
-                }
+                self.set_window_position_with_damage(window_id, x, y);
             }
             IpcEvent::SetWindowParent {
                 window_id,

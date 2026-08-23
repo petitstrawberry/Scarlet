@@ -6,6 +6,7 @@ mod compositor;
 mod config;
 mod cursor;
 mod cursor_theme;
+mod damage;
 mod gpu_compositor;
 mod input;
 mod ipc;
