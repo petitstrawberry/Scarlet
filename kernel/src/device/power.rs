@@ -225,11 +225,19 @@ impl PowerManager {
                 Some(provider) => provider,
                 None => {
                     crate::early_println!(
-                        "[power] domain phandle={:#x} not found for {}; deferring",
+                        "[power] domain phandle={:#x} not found for {}",
                         phandle,
                         device.name()
                     );
-                    return crate::device::manager::probe_defer();
+                    // Keep the pre-provider behavior for platforms that rely on
+                    // firmware/boot-loader power handoff.  DeviceManager treats
+                    // ordinary power errors as non-fatal and lets the concrete
+                    // driver validate the inherited hardware state.  Returning
+                    // PROBE_DEFER here would make every consumer wait forever
+                    // when its firmware power controller is not implemented in
+                    // Scarlet (for example SC7180 RPMhPD), regressing devices
+                    // that worked before multi-cell provider support was added.
+                    return Err("power: domain not found");
                 }
             };
             let argument_count = provider.power_domain_cells();
@@ -403,13 +411,13 @@ mod tests {
     }
 
     #[test_case]
-    fn test_enable_device_domains_defers_for_unregistered_provider() {
+    fn test_enable_device_domains_preserves_firmware_handoff_for_unregistered_provider() {
         PowerManager::clear_for_test();
         PowerManager::init();
 
         assert_eq!(
             PowerManager::enable_device_domains(&test_device(&[0x40, 0])).unwrap_err(),
-            crate::device::manager::PROBE_DEFER
+            "power: domain not found"
         );
     }
 
