@@ -1,10 +1,17 @@
 //! Scarlet device and mapped-target integration for the SGFX frontend.
 
 use alloc::rc::Rc;
+use gpu_raw::Gpu;
 use sgfx_core::backend::CommandExecutor;
 
-use crate::{BackendKind, Error, Instance, Result, ir};
+use crate::{BackendKind, BackendPreference, Error, Instance, Result, ir};
 
+#[cfg(all(
+    not(feature = "backend-scarlet-virgl"),
+    feature = "backend-scarlet-adreno"
+))]
+pub use sgfx_backend_scarlet_adreno::Handle;
+#[cfg(feature = "backend-scarlet-virgl")]
 pub use sgfx_backend_scarlet_virgl::Handle;
 
 /// Backend-neutral Scarlet rendering capabilities.
@@ -55,8 +62,13 @@ impl Capabilities {
 }
 
 /// Scarlet graphics device selected by the SGFX frontend.
-pub struct Device {
-    backend: sgfx_backend_scarlet_virgl::Device,
+pub enum Device {
+    /// VirGL execution through Scarlet's VirtIO GPU ABI.
+    #[cfg(feature = "backend-scarlet-virgl")]
+    Virgl(sgfx_backend_scarlet_virgl::Device),
+    /// Native Qualcomm Adreno execution through Scarlet's GPU ABI.
+    #[cfg(feature = "backend-scarlet-adreno")]
+    Adreno(sgfx_backend_scarlet_adreno::Device),
 }
 
 impl Device {
@@ -79,7 +91,12 @@ impl Device {
     ///
     /// The stable Scarlet backend identity.
     pub const fn backend(&self) -> BackendKind {
-        BackendKind::ScarletVirgl
+        match self {
+            #[cfg(feature = "backend-scarlet-virgl")]
+            Self::Virgl(_) => BackendKind::ScarletVirgl,
+            #[cfg(feature = "backend-scarlet-adreno")]
+            Self::Adreno(_) => BackendKind::ScarletAdreno,
+        }
     }
 
     /// Return portable capabilities for the selected Scarlet backend.
@@ -88,12 +105,27 @@ impl Device {
     ///
     /// Backend-neutral rendering capabilities.
     pub fn capabilities(&self) -> Capabilities {
-        let capabilities = self.backend.capabilities();
-        Capabilities {
-            rendering: capabilities.supports_rendering(),
-            presentation: capabilities.supports_presentation(),
-            image_upload: capabilities.supports_image_upload(),
-            depth: capabilities.supports_depth(),
+        match self {
+            #[cfg(feature = "backend-scarlet-virgl")]
+            Self::Virgl(device) => {
+                let capabilities = device.capabilities();
+                Capabilities {
+                    rendering: capabilities.supports_rendering(),
+                    presentation: capabilities.supports_presentation(),
+                    image_upload: capabilities.supports_image_upload(),
+                    depth: capabilities.supports_depth(),
+                }
+            }
+            #[cfg(feature = "backend-scarlet-adreno")]
+            Self::Adreno(device) => {
+                let capabilities = device.capabilities();
+                Capabilities {
+                    rendering: capabilities.supports_rendering(),
+                    presentation: capabilities.supports_presentation(),
+                    image_upload: capabilities.supports_image_upload(),
+                    depth: capabilities.supports_depth(),
+                }
+            }
         }
     }
 
@@ -103,15 +135,26 @@ impl Device {
     ///
     /// A frontend context or device error.
     pub fn create_context(&self) -> Result<Context> {
-        self.backend
-            .create_context()
-            .map(|backend| Context { backend })
-            .map_err(Error::ScarletVirglHandle)
+        match self {
+            #[cfg(feature = "backend-scarlet-virgl")]
+            Self::Virgl(device) => device
+                .create_context()
+                .map(Context::Virgl)
+                .map_err(Error::ScarletVirglHandle),
+            #[cfg(feature = "backend-scarlet-adreno")]
+            Self::Adreno(device) => device
+                .create_context()
+                .map(Context::Adreno)
+                .map_err(Error::ScarletAdrenoHandle),
+        }
     }
 }
 
 impl Instance {
     /// Open a Scarlet graphics device through the selected backend.
+    ///
+    /// Automatic selection opens the GPU once, queries its backend identifier,
+    /// and moves that same connection into the matching compiled backend.
     ///
     /// # Arguments
     ///
@@ -121,18 +164,80 @@ impl Instance {
     ///
     /// A frontend device or backend error.
     pub fn open_device(&self, path: &str) -> Result<Device> {
-        match self.backend() {
-            BackendKind::ScarletVirgl => sgfx_backend_scarlet_virgl::Device::open(path)
-                .map(|backend| Device { backend })
-                .map_err(Error::ScarletVirglHandle),
-            backend => Err(Error::BackendUnavailable(backend)),
+        let gpu = Gpu::open(path).map_err(|_| Error::ScarletGpu)?;
+        let info = gpu.query_info().map_err(|_| Error::ScarletGpu)?;
+        match self.preference() {
+            BackendPreference::Auto => open_auto(gpu, info),
+            BackendPreference::ScarletVirgl => open_virgl(gpu, info),
+            BackendPreference::ScarletAdreno => open_adreno(gpu, info),
+            BackendPreference::Wgpu => Err(Error::BackendUnavailable(BackendKind::Wgpu)),
+            BackendPreference::Metal => Err(Error::BackendUnavailable(BackendKind::Metal)),
         }
     }
 }
 
+fn open_auto(gpu: Gpu, info: gpu_raw::GpuQueryInfo) -> Result<Device> {
+    match select_auto_backend(&info)? {
+        BackendKind::ScarletVirgl => open_virgl(gpu, info),
+        BackendKind::ScarletAdreno => open_adreno(gpu, info),
+        BackendKind::Wgpu | BackendKind::Metal => Err(Error::ScarletBackendUnsupported),
+    }
+}
+
+fn select_auto_backend(info: &gpu_raw::GpuQueryInfo) -> Result<BackendKind> {
+    #[cfg(feature = "backend-scarlet-virgl")]
+    if sgfx_backend_scarlet_virgl::Device::supports(&info) {
+        return Ok(BackendKind::ScarletVirgl);
+    }
+    #[cfg(feature = "backend-scarlet-adreno")]
+    if sgfx_backend_scarlet_adreno::Device::supports(&info) {
+        return Ok(BackendKind::ScarletAdreno);
+    }
+    Err(Error::ScarletBackendUnsupported)
+}
+
+fn open_virgl(gpu: Gpu, info: gpu_raw::GpuQueryInfo) -> Result<Device> {
+    #[cfg(feature = "backend-scarlet-virgl")]
+    {
+        if !sgfx_backend_scarlet_virgl::Device::supports(&info) {
+            return Err(Error::BackendDeviceMismatch(BackendKind::ScarletVirgl));
+        }
+        return sgfx_backend_scarlet_virgl::Device::from_gpu(gpu, info)
+            .map(Device::Virgl)
+            .map_err(Error::ScarletVirglHandle);
+    }
+    #[cfg(not(feature = "backend-scarlet-virgl"))]
+    {
+        let _ = (gpu, info);
+        Err(Error::BackendUnavailable(BackendKind::ScarletVirgl))
+    }
+}
+
+fn open_adreno(gpu: Gpu, info: gpu_raw::GpuQueryInfo) -> Result<Device> {
+    #[cfg(feature = "backend-scarlet-adreno")]
+    {
+        if !sgfx_backend_scarlet_adreno::Device::supports(&info) {
+            return Err(Error::BackendDeviceMismatch(BackendKind::ScarletAdreno));
+        }
+        return sgfx_backend_scarlet_adreno::Device::from_gpu(gpu, info)
+            .map(Device::Adreno)
+            .map_err(Error::ScarletAdrenoHandle);
+    }
+    #[cfg(not(feature = "backend-scarlet-adreno"))]
+    {
+        let _ = (gpu, info);
+        Err(Error::BackendUnavailable(BackendKind::ScarletAdreno))
+    }
+}
+
 /// Scarlet context selected by the SGFX frontend.
-pub struct Context {
-    backend: sgfx_backend_scarlet_virgl::Context,
+pub enum Context {
+    /// A VirGL rendering context.
+    #[cfg(feature = "backend-scarlet-virgl")]
+    Virgl(sgfx_backend_scarlet_virgl::Context),
+    /// A native Adreno rendering context.
+    #[cfg(feature = "backend-scarlet-adreno")]
+    Adreno(sgfx_backend_scarlet_adreno::Context),
 }
 
 impl Context {
@@ -151,16 +256,29 @@ impl Context {
         resources: Rc<ir::ResourceTable>,
         targets: &[ir::TextureId],
     ) -> Result<MappedTargetSession> {
-        self.backend
-            .create_mapped_target_session(resources, targets)
-            .map(|backend| MappedTargetSession { backend })
-            .map_err(Error::ScarletVirglIr)
+        match self {
+            #[cfg(feature = "backend-scarlet-virgl")]
+            Self::Virgl(context) => context
+                .create_mapped_target_session(resources, targets)
+                .map(MappedTargetSession::Virgl)
+                .map_err(Error::ScarletVirglIr),
+            #[cfg(feature = "backend-scarlet-adreno")]
+            Self::Adreno(context) => context
+                .create_mapped_target_session(resources, targets)
+                .map(MappedTargetSession::Adreno)
+                .map_err(Error::ScarletAdrenoIr),
+        }
     }
 }
 
 /// Scarlet mapped-target session selected by the SGFX frontend.
-pub struct MappedTargetSession {
-    backend: sgfx_backend_scarlet_virgl::MappedTargetSession,
+pub enum MappedTargetSession {
+    /// A VirGL mapped-target session.
+    #[cfg(feature = "backend-scarlet-virgl")]
+    Virgl(sgfx_backend_scarlet_virgl::MappedTargetSession),
+    /// A native Adreno mapped-target session.
+    #[cfg(feature = "backend-scarlet-adreno")]
+    Adreno(sgfx_backend_scarlet_adreno::MappedTargetSession),
 }
 
 impl MappedTargetSession {
@@ -174,28 +292,49 @@ impl MappedTargetSession {
     ///
     /// A borrowed image view or mapping error.
     pub fn image(&self, target: ir::TextureId) -> Result<ImageRef<'_>> {
-        self.backend
-            .image(target)
-            .map(|backend| ImageRef { backend })
-            .map_err(Error::ScarletVirglIr)
+        match self {
+            #[cfg(feature = "backend-scarlet-virgl")]
+            Self::Virgl(session) => session
+                .image(target)
+                .map(|image| ImageRef {
+                    backend: Image::Virgl(image),
+                })
+                .map_err(Error::ScarletVirglIr),
+            #[cfg(feature = "backend-scarlet-adreno")]
+            Self::Adreno(session) => session
+                .image(target)
+                .map(|image| ImageRef {
+                    backend: Image::Adreno(image),
+                })
+                .map_err(Error::ScarletAdrenoIr),
+        }
     }
 
     /// Bind the selected backend queue and resources for command execution.
     ///
     /// # Returns
     ///
-    /// A frontend executor delegating complete command buffers to VirGL.
+    /// A frontend executor delegating complete command buffers to its backend.
     pub fn executor(&mut self) -> Executor<'_> {
-        Executor {
-            backend: self.backend.executor(),
+        match self {
+            #[cfg(feature = "backend-scarlet-virgl")]
+            Self::Virgl(session) => Executor::Virgl(session.executor()),
+            #[cfg(feature = "backend-scarlet-adreno")]
+            Self::Adreno(session) => Executor::Adreno(session.executor()),
         }
     }
 }
 
+enum Image<'a> {
+    #[cfg(feature = "backend-scarlet-virgl")]
+    Virgl(&'a sgfx_backend_scarlet_virgl::Image),
+    #[cfg(feature = "backend-scarlet-adreno")]
+    Adreno(&'a sgfx_backend_scarlet_adreno::Image),
+}
+
 /// Borrowed Scarlet presentation image exposed by the SGFX frontend.
-#[derive(Clone, Copy)]
 pub struct ImageRef<'a> {
-    backend: &'a sgfx_backend_scarlet_virgl::Image,
+    backend: Image<'a>,
 }
 
 impl ImageRef<'_> {
@@ -205,7 +344,12 @@ impl ImageRef<'_> {
     ///
     /// Physical image width.
     pub fn width(&self) -> u32 {
-        self.backend.width()
+        match &self.backend {
+            #[cfg(feature = "backend-scarlet-virgl")]
+            Image::Virgl(image) => image.width(),
+            #[cfg(feature = "backend-scarlet-adreno")]
+            Image::Adreno(image) => image.width(),
+        }
     }
 
     /// Return the image height in pixels.
@@ -214,7 +358,12 @@ impl ImageRef<'_> {
     ///
     /// Physical image height.
     pub fn height(&self) -> u32 {
-        self.backend.height()
+        match &self.backend {
+            #[cfg(feature = "backend-scarlet-virgl")]
+            Image::Virgl(image) => image.height(),
+            #[cfg(feature = "backend-scarlet-adreno")]
+            Image::Adreno(image) => image.height(),
+        }
     }
 
     /// Borrow the Scarlet shared-image capability.
@@ -223,21 +372,76 @@ impl ImageRef<'_> {
     ///
     /// Handle retained by the selected backend session.
     pub fn shared_handle(&self) -> &Handle {
-        self.backend.shared_handle()
+        match &self.backend {
+            #[cfg(feature = "backend-scarlet-virgl")]
+            Image::Virgl(image) => image.shared_handle(),
+            #[cfg(feature = "backend-scarlet-adreno")]
+            Image::Adreno(image) => image.shared_handle(),
+        }
     }
 }
 
 /// Scarlet command executor selected by the SGFX frontend.
-pub struct Executor<'a> {
-    backend: sgfx_backend_scarlet_virgl::Executor<'a>,
+pub enum Executor<'a> {
+    /// A VirGL command executor.
+    #[cfg(feature = "backend-scarlet-virgl")]
+    Virgl(sgfx_backend_scarlet_virgl::Executor<'a>),
+    /// A native Adreno command executor.
+    #[cfg(feature = "backend-scarlet-adreno")]
+    Adreno(sgfx_backend_scarlet_adreno::Executor<'a>),
 }
 
 impl CommandExecutor for Executor<'_> {
     type Error = Error;
 
     fn execute<'r, 'data>(&mut self, commands: &ir::CommandBuffer<'r, 'data>) -> Result<()> {
-        self.backend
-            .execute(commands)
-            .map_err(Error::ScarletVirglIr)
+        match self {
+            #[cfg(feature = "backend-scarlet-virgl")]
+            Self::Virgl(executor) => executor.execute(commands).map_err(Error::ScarletVirglIr),
+            #[cfg(feature = "backend-scarlet-adreno")]
+            Self::Adreno(executor) => executor.execute(commands).map_err(Error::ScarletAdrenoIr),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use gpu_raw::{
+        GPU_DEVICE_STATE_READY, GPU_EXECUTION_SUPPORT_MEMORY, GPU_EXECUTION_SUPPORT_QUEUE,
+        GPU_RESULT_SUCCESS, GpuQueryInfo,
+    };
+
+    use super::select_auto_backend;
+    use crate::BackendKind;
+
+    fn ready_info(backend_id: &[u8]) -> GpuQueryInfo {
+        let mut info = GpuQueryInfo::new();
+        info.result = GPU_RESULT_SUCCESS;
+        info.device_state = GPU_DEVICE_STATE_READY;
+        info.execution_support = GPU_EXECUTION_SUPPORT_QUEUE | GPU_EXECUTION_SUPPORT_MEMORY;
+        info.max_opaque_command_size = 64 * 1024;
+        info.backend_id_len = backend_id.len() as u32;
+        info.backend_id[..backend_id.len()].copy_from_slice(backend_id);
+        info
+    }
+
+    #[cfg(feature = "backend-scarlet-virgl")]
+    #[test]
+    fn auto_selects_virgl_for_the_virtio_gpu_id() {
+        let info = ready_info(sgfx_backend_scarlet_virgl::BACKEND_ID);
+        assert_eq!(
+            select_auto_backend(&info).unwrap(),
+            BackendKind::ScarletVirgl
+        );
+    }
+
+    #[cfg(feature = "backend-scarlet-adreno")]
+    #[test]
+    fn auto_selects_adreno_for_the_qcom_adreno_id() {
+        let info = ready_info(sgfx_backend_scarlet_adreno::BACKEND_ID);
+        assert_eq!(
+            select_auto_backend(&info).unwrap(),
+            BackendKind::ScarletAdreno
+        );
     }
 }

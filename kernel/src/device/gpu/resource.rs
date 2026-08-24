@@ -5,12 +5,13 @@ use alloc::{string::String, sync::Arc};
 use super::connection::{read_user_value, write_user_value};
 use super::{
     GPU_ABI_VERSION, GPU_BUFFER_QUERY_INFO, GPU_IMAGE_FORMAT_BGRA8_UNORM, GPU_IMAGE_QUERY_INFO,
-    GPU_IMAGE_USAGE_TRANSFER_DST, GPU_IMAGE_USAGE_VALID, GPU_MAX_IMAGE_UPLOAD_SIZE,
-    GPU_RESULT_INVALID_ABI, GPU_TIMELINE_CREATE_POINT, GPU_TIMELINE_FAIL, GPU_TIMELINE_QUERY,
-    GPU_TIMELINE_SIGNAL, GpuBackend, GpuBackendBuffer, GpuBackendImage, GpuBufferCreateInfo,
-    GpuBufferInfo, GpuContextUploadImageBgra, GpuImageBackingInfo, GpuImageCreateInfo,
-    GpuImageInfo, GpuImageUploadInfo, GpuTimelineCreatePoint, GpuTimelineFail, GpuTimelineInfo,
-    GpuTimelineSignal,
+    GPU_IMAGE_QUERY_LAYOUT, GPU_IMAGE_USAGE_TRANSFER_DST, GPU_IMAGE_USAGE_VALID,
+    GPU_MAX_IMAGE_UPLOAD_SIZE, GPU_RESULT_INVALID_ABI, GPU_TIMELINE_CREATE_POINT,
+    GPU_TIMELINE_FAIL, GPU_TIMELINE_QUERY, GPU_TIMELINE_SIGNAL, GpuBackend, GpuBackendBuffer,
+    GpuBackendImage, GpuBackendImageLayout, GpuBufferCreateInfo, GpuBufferInfo,
+    GpuContextUploadImageBgra, GpuImageBackingInfo, GpuImageCreateInfo, GpuImageInfo,
+    GpuImageLayout, GpuImagePlaneLayout, GpuImageUploadInfo, GpuTimelineCreatePoint,
+    GpuTimelineFail, GpuTimelineInfo, GpuTimelineSignal,
 };
 use crate::environment::PAGE_SIZE;
 use crate::ipc::shared_memory::{SharedMemoryObject, SharedMemoryPin};
@@ -285,10 +286,19 @@ pub(crate) struct GpuImageUploadLayout {
     transfer: GpuImageUploadInfo,
 }
 
+#[cfg(test)]
+impl GpuImageUploadLayout {
+    /// Return the backend-neutral transfer metadata derived from this layout.
+    pub(crate) const fn transfer(&self) -> GpuImageUploadInfo {
+        self.transfer
+    }
+}
+
 /// Validate a BGRA upload request and derive its kernel-backing layout.
 pub(crate) fn image_upload_layout(
     request: &GpuContextUploadImageBgra,
     image: super::GpuBackendImageInfo,
+    layout: GpuBackendImageLayout,
 ) -> Result<GpuImageUploadLayout, &'static str> {
     if request.source_ptr == 0
         || request.source_length == 0
@@ -296,8 +306,29 @@ pub(crate) fn image_upload_layout(
         || request.height == 0
         || image.format != GPU_IMAGE_FORMAT_BGRA8_UNORM
         || image.usage & GPU_IMAGE_USAGE_TRANSFER_DST == 0
+        || layout.modifier != super::GPU_IMAGE_MODIFIER_LINEAR
+        || layout.plane_count != 1
     {
         return Err("GPU image upload request is invalid");
+    }
+    let plane = layout.planes[0];
+    if plane.block_width != 1 || plane.block_height != 1 || plane.bytes_per_block != 4 {
+        return Err("GPU image upload layout is unsupported");
+    }
+    let image_row_bytes = image
+        .width
+        .checked_mul(4)
+        .ok_or("GPU image row width overflows")?;
+    let image_layer_bytes = u64::from(image.height)
+        .checked_sub(1)
+        .and_then(|rows| rows.checked_mul(u64::from(plane.row_pitch)))
+        .and_then(|offset| offset.checked_add(u64::from(image_row_bytes)))
+        .ok_or("GPU image layer size overflows")?;
+    if plane.row_pitch < image_row_bytes
+        || u64::from(plane.array_pitch) < image_layer_bytes
+        || plane.size < image_layer_bytes
+    {
+        return Err("GPU image upload layout is too small for the image extent");
     }
 
     let row_bytes = request
@@ -342,10 +373,8 @@ pub(crate) fn image_upload_layout(
         return Err("GPU image upload exceeds the maximum copy size");
     }
 
-    let destination_stride = usize::try_from(image.width)
-        .map_err(|_| "GPU image width does not fit kernel address size")?
-        .checked_mul(4)
-        .ok_or("GPU image backing stride overflows")?;
+    let destination_stride = usize::try_from(plane.row_pitch)
+        .map_err(|_| "GPU image backing stride does not fit kernel address size")?;
     let destination_offset = usize::try_from(request.dst_y)
         .map_err(|_| "GPU image upload y coordinate does not fit kernel address size")?
         .checked_mul(destination_stride)
@@ -355,6 +384,7 @@ pub(crate) fn image_upload_layout(
                 .and_then(|x| x.checked_mul(4))
                 .and_then(|x_offset| offset.checked_add(x_offset))
         })
+        .and_then(|offset| usize::try_from(plane.offset).ok()?.checked_add(offset))
         .ok_or("GPU image upload destination offset overflows")?;
     let destination_end = height
         .checked_sub(1)
@@ -364,20 +394,17 @@ pub(crate) fn image_upload_layout(
         .ok_or("GPU image upload destination range overflows")?;
     let allocation_size = usize::try_from(image.allocation_size)
         .map_err(|_| "GPU image backing size does not fit kernel address size")?;
-    if destination_end > allocation_size {
+    let plane_end = plane
+        .offset
+        .checked_add(plane.size)
+        .and_then(|end| usize::try_from(end).ok())
+        .ok_or("GPU image upload plane range overflows")?;
+    if destination_end > allocation_size || destination_end > plane_end {
         return Err("GPU image upload exceeds image backing");
     }
     let backing_stride = u32::try_from(destination_stride)
         .map_err(|_| "GPU image backing stride does not fit the backend ABI")?;
-    let backing_layer_stride = u32::try_from(
-        destination_stride
-            .checked_mul(
-                usize::try_from(image.height)
-                    .map_err(|_| "GPU image height does not fit kernel address size")?,
-            )
-            .ok_or("GPU image backing layer stride overflows")?,
-    )
-    .map_err(|_| "GPU image backing layer stride does not fit the backend ABI")?;
+    let backing_layer_stride = plane.array_pitch;
     let backing_offset = u64::try_from(destination_offset)
         .map_err(|_| "GPU image backing offset does not fit the backend ABI")?;
 
@@ -406,15 +433,15 @@ struct GpuPrivateImageBacking {
 }
 
 impl GpuPrivateImageBacking {
-    fn new(create: GpuImageCreateInfo) -> Result<Self, &'static str> {
-        let image_size = usize::try_from(create.width)
-            .map_err(|_| "GPU image width does not fit kernel address size")?
-            .checked_mul(
-                usize::try_from(create.height)
-                    .map_err(|_| "GPU image height does not fit kernel address size")?,
-            )
-            .and_then(|pixels| pixels.checked_mul(4))
-            .ok_or("GPU image backing size overflows")?;
+    fn new(layout: GpuBackendImageLayout) -> Result<Self, &'static str> {
+        if !layout.is_valid() {
+            return Err("GPU backend image layout is invalid");
+        }
+        let image_size = usize::try_from(layout.total_size)
+            .map_err(|_| "GPU image layout size does not fit kernel address size")?;
+        if layout.alignment > PAGE_SIZE as u64 {
+            return Err("GPU image backing alignment exceeds the generic allocator");
+        }
         let allocation_size = image_size
             .checked_add(PAGE_SIZE - 1)
             .ok_or("GPU image backing size overflows page alignment")?
@@ -460,8 +487,8 @@ pub(crate) enum GpuImageBacking {
 }
 
 impl GpuImageBacking {
-    fn private(create: GpuImageCreateInfo) -> Result<Self, &'static str> {
-        Ok(Self::Private(GpuPrivateImageBacking::new(create)?))
+    fn private(layout: GpuBackendImageLayout) -> Result<Self, &'static str> {
+        Ok(Self::Private(GpuPrivateImageBacking::new(layout)?))
     }
 
     fn imported(
@@ -576,6 +603,7 @@ impl GpuImageBacking {
 pub struct GpuImage {
     backend_image: Arc<dyn GpuBackendImage>,
     backing: Arc<GpuImageBacking>,
+    layout: GpuBackendImageLayout,
     upload_lock: IrqSpinLock<()>,
 }
 
@@ -598,9 +626,16 @@ impl GpuImage {
         if !image_create_is_valid(create) {
             return Err("GPU image descriptor is invalid");
         }
-        let backing = Arc::new(GpuImageBacking::private(create)?);
+        let layout = backend.plan_image(create)?;
+        if !layout.is_valid() {
+            return Err("GPU backend returned an invalid image layout");
+        }
+        let backing = Arc::new(GpuImageBacking::private(layout)?);
         let backing_info = backing.info()?;
-        let backend_image = backend.create_image(create, backing_info)?;
+        if backing_info.allocation_size < layout.total_size {
+            return Err("GPU image backing is smaller than the backend layout");
+        }
+        let backend_image = backend.create_image_with_layout(create, layout, backing_info)?;
         let info = backend_image.query_info();
         if info.format != create.format
             || info.usage != create.usage
@@ -614,6 +649,7 @@ impl GpuImage {
         Ok(Self {
             backend_image,
             backing,
+            layout,
             upload_lock: IrqSpinLock::new(()),
         })
     }
@@ -639,6 +675,10 @@ impl GpuImage {
         shm_offset: u64,
         source_stride: u32,
     ) -> Result<Self, &'static str> {
+        let layout = backend.plan_image(create)?;
+        if !layout.is_valid() {
+            return Err("GPU backend returned an invalid imported image layout");
+        }
         let backing = Arc::new(GpuImageBacking::imported(
             create,
             shared_memory,
@@ -646,7 +686,10 @@ impl GpuImage {
             source_stride,
         )?);
         let backing_info = backing.info()?;
-        let backend_image = backend.create_image(create, backing_info)?;
+        if backing_info.allocation_size < layout.total_size {
+            return Err("Imported GPU image backing is smaller than the backend layout");
+        }
+        let backend_image = backend.create_image_with_layout(create, layout, backing_info)?;
         let info = backend_image.query_info();
         if info.format != create.format
             || info.usage != create.usage
@@ -660,6 +703,7 @@ impl GpuImage {
         Ok(Self {
             backend_image,
             backing,
+            layout,
             upload_lock: IrqSpinLock::new(()),
         })
     }
@@ -671,6 +715,14 @@ impl GpuImage {
     /// The image format, usage, extent, command token, and allocation size.
     pub fn query_info(&self) -> super::GpuBackendImageInfo {
         self.backend_image.query_info()
+    }
+    /// Return the immutable backend-selected image layout.
+    ///
+    /// # Returns
+    ///
+    /// Exact modifier, allocation, and plane metadata fixed at image creation.
+    pub const fn layout(&self) -> GpuBackendImageLayout {
+        self.layout
     }
 
     /// Clone the backend image for a context lifetime reference.
@@ -764,9 +816,63 @@ impl GpuImage {
     ///
     /// An internal descriptor accepted by the graphics display bridge.
     pub(crate) fn display_resource(&self) -> Option<crate::device::graphics::GpuDisplayResource> {
-        self.backend_image.display_resource()
+        if let Some(resource) = self.backend_image.display_resource() {
+            return Some(resource);
+        }
+        let layout = self.backend_image.linear_display_info()?;
+        let image = self.backend_image.query_info();
+        let backing = self.backing.info().ok()?;
+        let offset = usize::try_from(layout.offset).ok()?;
+        let physical_addr = backing.paddr.checked_add(offset)?;
+        let allocation_size = backing.allocation_size.checked_sub(layout.offset)?;
+        let owner: Arc<dyn crate::device::graphics::GpuDisplayBackingOwner> = self.backing.clone();
+        crate::device::graphics::GpuDisplayResource::new_linear(
+            physical_addr,
+            allocation_size,
+            image.width,
+            image.height,
+            layout.stride,
+            layout.format,
+            owner,
+        )
+        .ok()
     }
 
+    fn fill_query_layout(&self, response: &mut GpuImageLayout) {
+        response.clear_response();
+        if response.abi_version != GPU_ABI_VERSION {
+            response.result = GPU_RESULT_INVALID_ABI;
+            return;
+        }
+        let layout = self.layout;
+        response.modifier = layout.modifier;
+        response.total_size = layout.total_size;
+        response.alignment = layout.alignment;
+        response.plane_count = layout.plane_count;
+        for (destination, source) in response
+            .planes
+            .iter_mut()
+            .zip(layout.planes.iter())
+            .take(layout.plane_count as usize)
+        {
+            *destination = GpuImagePlaneLayout {
+                offset: source.offset,
+                size: source.size,
+                row_pitch: source.row_pitch,
+                array_pitch: source.array_pitch,
+                block_width: source.block_width,
+                block_height: source.block_height,
+                bytes_per_block: source.bytes_per_block,
+                reserved: 0,
+            };
+        }
+    }
+    fn handle_query_layout(&self, arg: usize) -> Result<i32, &'static str> {
+        let mut response: GpuImageLayout = read_user_value(arg)?;
+        self.fill_query_layout(&mut response);
+        write_user_value(arg, &response)?;
+        Ok(0)
+    }
     fn fill_query_info(&self, info: &mut GpuImageInfo) {
         info.clear_response();
         if info.abi_version != GPU_ABI_VERSION {
@@ -794,6 +900,7 @@ impl ControlOps for GpuImage {
     fn control(&self, command: u32, arg: usize) -> Result<i32, &'static str> {
         match command {
             GPU_IMAGE_QUERY_INFO => self.handle_query_info(arg),
+            GPU_IMAGE_QUERY_LAYOUT => self.handle_query_layout(arg),
             _ => Err("Unsupported GPU image control command"),
         }
     }

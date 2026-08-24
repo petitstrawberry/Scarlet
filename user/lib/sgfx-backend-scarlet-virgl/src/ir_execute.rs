@@ -641,7 +641,7 @@ impl ExecutionPlan {
                 continue;
             };
             let submission = &pass.submission;
-            if submission.draws.is_empty()
+            if submission.draws.is_empty() && !submission_has_clear(submission)
                 || submission.vertices.len() > MAX_IR_VERTICES
                 || submission.draws.len() > MAX_IR_DRAWS_PER_SUBMISSION
                 || !chunk_fits_transport(submission.vertices.len(), submission.draws.len())
@@ -818,7 +818,7 @@ impl ExecutionPlan {
                     let pass = active.take().ok_or(IrSubmitError::Unsupported(
                         UnsupportedIrFeature::CommandSequence,
                     ))?;
-                    if pass.submission.draws.is_empty() {
+                    if pass.submission.draws.is_empty() && !submission_has_clear(&pass.submission) {
                         return Err(IrSubmitError::Unsupported(
                             UnsupportedIrFeature::CommandSequence,
                         ));
@@ -911,6 +911,11 @@ impl ExecutionPlan {
             canonical_validations: pending_buffers.canonical_validations,
         })
     }
+}
+
+/// Return whether a draw-free pass still changes an attachment.
+fn submission_has_clear(submission: &IrSubmission) -> bool {
+    submission.clear_color.is_some() || submission.clear_depth.is_some()
 }
 
 struct DecodedDraw {
@@ -2185,6 +2190,71 @@ mod tests {
                 texture_uploads: Vec::new(),
             },
         }
+    }
+
+    fn depth_target() -> driver::IrTextureSpec {
+        driver::IrTextureSpec {
+            slot: 1,
+            width: 64,
+            height: 64,
+            sampled: false,
+            render_attachment: true,
+            copy_destination: false,
+            present: false,
+            format: IrTextureFormat::Depth32Float,
+        }
+    }
+
+    fn plan_with_pass(pass: ExecutionPass) -> ExecutionPlan {
+        ExecutionPlan {
+            events: vec![ExecutionEvent::Pass(pass)],
+            buffer_updates: Vec::new(),
+            canonical_validations: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn clear_only_color_pass_is_lowered_and_transport_valid() {
+        let chunks = split_pass(execution_pass(Vec::new(), Vec::new())).expect("split pass");
+
+        assert_eq!(chunks.len(), 1);
+        assert!(chunks[0].submission.draws.is_empty());
+        assert!(chunks[0].submission.clear_color.is_some());
+        assert!(
+            plan_with_pass(chunks.into_iter().next().expect("clear pass"))
+                .validate_transport_chunks()
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn clear_only_depth_pass_is_lowered_and_transport_valid() {
+        let mut pass = execution_pass(Vec::new(), Vec::new());
+        pass.submission.clear_color = None;
+        pass.submission.depth_attachment = Some(depth_target());
+        pass.submission.clear_depth = Some(1.0);
+        let chunks = split_pass(pass).expect("split pass");
+
+        assert_eq!(chunks.len(), 1);
+        assert!(chunks[0].submission.draws.is_empty());
+        assert!(chunks[0].submission.clear_depth.is_some());
+        assert!(
+            plan_with_pass(chunks.into_iter().next().expect("clear pass"))
+                .validate_transport_chunks()
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn empty_pass_without_a_clear_remains_rejected() {
+        let mut pass = execution_pass(Vec::new(), Vec::new());
+        pass.submission.clear_color = None;
+        let plan = plan_with_pass(pass);
+
+        assert!(matches!(
+            plan.validate_transport_chunks(),
+            Err(IrSubmitError::InvalidVertexData)
+        ));
     }
 
     #[test]

@@ -6,10 +6,15 @@ use std::time::Duration;
 use std::vec::Vec;
 
 use framebuffer::DisplaySurface;
-use sgfx::{
-    Color, CullMode, Device, FrontFace, PipelineDesc, RenderPass, SgfxImagePresentExt,
-    VertexClip4Color3, Viewport,
+use sgfx::ir::{
+    BlendState, BufferDesc, BufferUsage, Color, CommandEncoder, DrawUniforms, FragmentProgram,
+    LoadOp, PixelRect, PrimitiveTopology, RasterState, RenderPassDesc, RenderPipelineDesc, StoreOp,
+    TextureFormat, Transform, VertexAttribute, VertexBufferLayout, VertexFormat,
 };
+
+mod sgfx_ir_support;
+
+use sgfx_ir_support::MappedTarget;
 const FACE_COUNT: usize = 6;
 const VERTICES_PER_FACE: usize = 4;
 const VERTEX_COUNT: usize = FACE_COUNT * 6;
@@ -179,7 +184,7 @@ impl Matrix {
     }
 }
 
-fn build_vertices(frame: usize, width: u32, height: u32) -> Vec<VertexClip4Color3> {
+fn build_vertices(frame: usize, width: u32, height: u32) -> Vec<u8> {
     let mut model_view = Matrix::identity();
     model_view.translate(0.0, 0.0, -8.0);
     model_view.rotate(45.0 + 0.25 * frame as f32, [1.0, 0.0, 0.0]);
@@ -190,14 +195,17 @@ fn build_vertices(frame: usize, width: u32, height: u32) -> Vec<VertexClip4Color
     let projection = Matrix::frustum(-2.8, 2.8, -2.8 * aspect, 2.8 * aspect, 6.0, 10.0);
     let model_view_projection = Matrix::multiply(model_view, projection);
 
-    let mut vertices = Vec::with_capacity(VERTEX_COUNT);
+    let mut vertices = Vec::with_capacity(VERTEX_COUNT * 28);
     for face in 0..FACE_COUNT {
         let base = face * VERTICES_PER_FACE;
         for index in [base, base + 1, base + 2, base + 2, base + 1, base + 3] {
-            vertices.push(VertexClip4Color3::new(
-                model_view_projection.clip_position(KMSCUBE_POSITIONS[index]),
-                KMSCUBE_COLORS[index],
-            ));
+            for component in model_view_projection
+                .clip_position(KMSCUBE_POSITIONS[index])
+                .into_iter()
+                .chain(KMSCUBE_COLORS[index])
+            {
+                vertices.extend_from_slice(&component.to_le_bytes());
+            }
         }
     }
     vertices
@@ -218,70 +226,112 @@ fn main() -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    let device = match Device::open("/dev/gpu0") {
-        Ok(device) => device,
+    let mut target = match MappedTarget::open(display_info.width, display_info.height) {
+        Ok(target) => target,
         Err(error) => {
-            println!("sgfx_cube: failed to open GPU: {:?}", error);
+            println!("sgfx_cube: failed to create mapped target: {:?}", error);
             return ExitCode::from(1);
         }
     };
-    let capabilities = device.capabilities();
-    if !capabilities.supports_rendering() || !capabilities.supports_presentation() {
-        println!("sgfx_cube: rendering or presentation is unsupported");
-        return ExitCode::from(1);
-    }
-    let context = match device.create_context() {
-        Ok(context) => context,
+    let resources = std::rc::Rc::clone(&target.resources);
+    let vertex_buffer = match BufferDesc::new(
+        (VERTEX_COUNT * 28) as u64,
+        BufferUsage::VERTEX | BufferUsage::COPY_DST,
+    )
+    .and_then(|desc| resources.define_buffer(desc))
+    {
+        Ok(buffer) => buffer.id(),
         Err(error) => {
-            println!("sgfx_cube: failed to create context: {:?}", error);
+            println!("sgfx_cube: failed to define vertex buffer: {:?}", error);
             return ExitCode::from(1);
         }
     };
-    let image = match context.create_image(display_info.width, display_info.height) {
-        Ok(image) => image,
-        Err(error) => {
-            println!("sgfx_cube: failed to create render target: {:?}", error);
-            return ExitCode::from(1);
-        }
-    };
-    let pipeline = match context.create_pipeline(
-        &image,
-        PipelineDesc::clip_space_vertex_color(VERTEX_COUNT)
-            .with_cull_mode(CullMode::Back)
-            .with_front_face(FrontFace::CounterClockwise),
+    let layout = match VertexBufferLayout::new(
+        28,
+        vec![
+            VertexAttribute::new(0, VertexFormat::Float32x4, 0),
+            VertexAttribute::new(1, VertexFormat::Float32x3, 16),
+        ],
     ) {
+        Ok(layout) => layout,
+        Err(error) => {
+            println!("sgfx_cube: failed to define vertex layout: {:?}", error);
+            return ExitCode::from(1);
+        }
+    };
+    let pipeline = match RenderPipelineDesc::new(
+        TextureFormat::Bgra8Unorm,
+        PrimitiveTopology::TriangleList,
+        layout,
+        FragmentProgram::VertexColor,
+        BlendState::REPLACE,
+        RasterState::new(
+            sgfx::ir::CullMode::Back,
+            sgfx::ir::FrontFace::CounterClockwise,
+        ),
+    )
+    .and_then(|desc| resources.define_render_pipeline(desc))
+    {
         Ok(pipeline) => pipeline,
         Err(error) => {
             println!("sgfx_cube: failed to create pipeline: {:?}", error);
             return ExitCode::from(1);
         }
     };
-    let queue = match context.create_queue() {
-        Ok(queue) => queue,
-        Err(error) => {
-            println!("sgfx_cube: failed to create queue: {:?}", error);
-            return ExitCode::from(1);
-        }
-    };
-    let viewport = Viewport::new(image.width(), image.height());
-    let clear_color = Color::rgba(0.45, 0.45, 0.45, 1.0);
+    let clear_color = Color::rgba(0.45, 0.45, 0.45, 1.0).expect("valid clear color");
 
     println!(
         "sgfx_cube: rendering {}x{} rotating cube",
-        image.width(),
-        image.height()
+        target.width, target.height
     );
 
     let mut frame = 0usize;
     loop {
-        let vertices = build_vertices(frame, image.width(), image.height());
-        let mut render_pass = RenderPass::new(&image, viewport, clear_color);
-        render_pass.draw_clip_space_vertex_color(&pipeline, &vertices);
-        if let Err(error) = queue.submit(&render_pass) {
+        let vertices = build_vertices(frame, target.width, target.height);
+        let mut encoder = CommandEncoder::new(resources.as_ref());
+        if let Err(error) = encoder.write_buffer(
+            resources
+                .buffer_ref(vertex_buffer)
+                .expect("defined vertex buffer"),
+            0,
+            &vertices,
+        ) {
+            println!("sgfx_cube: vertex upload failed: {:?}", error);
+            return ExitCode::from(1);
+        }
+        let area = PixelRect::new(0, 0, target.width, target.height).expect("non-empty target");
+        let desc = RenderPassDesc::new(
+            resources.as_ref(),
+            resources
+                .texture_ref(target.texture)
+                .expect("mapped target"),
+            area,
+            LoadOp::Clear(clear_color),
+            StoreOp::Store,
+        )
+        .expect("valid cube render pass");
+        let mut pass = encoder.begin_render_pass(desc).expect("valid cube pass");
+        pass.set_pipeline(pipeline).expect("defined cube pipeline");
+        pass.set_vertex_buffer(
+            resources
+                .buffer_ref(vertex_buffer)
+                .expect("defined vertex buffer"),
+            0,
+        )
+        .expect("valid cube vertex binding");
+        pass.set_uniforms(DrawUniforms::new(
+            Transform::identity(),
+            Color::rgba(1.0, 1.0, 1.0, 1.0).expect("valid white"),
+        ))
+        .expect("valid cube uniforms");
+        pass.draw(VERTEX_COUNT as u32, 0).expect("valid cube draw");
+        pass.end().expect("valid cube pass end");
+        let commands = encoder.finish().expect("valid cube commands");
+        if let Err(error) = target.execute(&commands) {
             println!("sgfx_cube: draw failed: {:?}", error);
             return ExitCode::from(1);
         }
-        if let Err(error) = image.present(&display) {
+        if let Err(error) = target.present(&display, None) {
             println!("sgfx_cube: image present failed: {:?}", error);
             return ExitCode::from(1);
         }

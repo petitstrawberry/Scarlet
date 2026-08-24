@@ -1,6 +1,7 @@
 //! Private Scarlet/VirGL resource and queue dispatch.
 
 use alloc::{rc::Rc, vec::Vec};
+use gpu_raw::{Gpu, GpuQueryInfo};
 
 #[cfg(feature = "std")]
 use scarlet_os::handle::{Handle, HandleError, HandleResult};
@@ -22,6 +23,15 @@ pub(crate) enum Device {
 impl Device {
     pub(crate) fn open(path: &str) -> HandleResult<Self> {
         let backend = Rc::new(virgl::Device::open(path)?);
+        Ok(Self::Virgl(backend))
+    }
+
+    pub(crate) fn supports(info: &GpuQueryInfo) -> bool {
+        virgl::Device::supports(info)
+    }
+
+    pub(crate) fn from_gpu(gpu: Gpu, info: GpuQueryInfo) -> HandleResult<Self> {
+        let backend = Rc::new(virgl::Device::from_gpu(gpu, info)?);
         Ok(Self::Virgl(backend))
     }
 
@@ -597,7 +607,12 @@ pub(crate) enum Pipeline {
 
 #[cfg(test)]
 mod tests {
-    use crate::matches_backend_id;
+    use gpu_raw::{
+        GPU_DEVICE_STATE_READY, GPU_EXECUTION_SUPPORT_QUEUE, GPU_RESULT_SUCCESS, GpuQueryInfo,
+    };
+
+    use super::Device;
+    use crate::{BACKEND_ID, matches_backend_id};
 
     #[test]
     fn matches_only_the_exact_virtio_gpu_backend_id() {
@@ -606,5 +621,19 @@ mod tests {
         assert!(!matches_backend_id(b"apple-agx"));
         assert!(!matches_backend_id(b""));
         assert!(!matches_backend_id(b"software"));
+    }
+
+    #[test]
+    fn supports_requires_a_ready_exact_match_with_queue_execution() {
+        let mut info = GpuQueryInfo::new();
+        info.result = GPU_RESULT_SUCCESS;
+        info.device_state = GPU_DEVICE_STATE_READY;
+        info.execution_support = GPU_EXECUTION_SUPPORT_QUEUE;
+        info.backend_id_len = BACKEND_ID.len() as u32;
+        info.backend_id[..BACKEND_ID.len()].copy_from_slice(BACKEND_ID);
+        assert!(Device::supports(&info));
+
+        info.execution_support = 0;
+        assert!(!Device::supports(&info));
     }
 }

@@ -1793,10 +1793,11 @@ impl Compositor {
         }
     }
 
-    /// Release one compositor-owned upload texture before CPU backing changes.
+    /// Retire one compositor-owned upload texture before CPU backing changes.
     ///
-    /// Shared SGFX registrations are generation-tracked client resources and
-    /// must survive resize until their replacement commit releases them.
+    /// The modern SGFX resource table is append-only, so the GPU compositor
+    /// rebuilds its private session on the next frame instead of leaking the
+    /// retired logical texture slot.
     fn release_gpu_window_texture(&mut self, window_id: u32) -> Result<(), &'static str> {
         let release_failed = match self.gpu_compositor.as_mut() {
             Some(gpu_compositor) => gpu_compositor.remove_window_texture(window_id).is_err(),
@@ -1806,13 +1807,13 @@ impl Compositor {
             return Ok(());
         }
         println!(
-            "[Compositor] GPU texture release failed for window {}; disabling GPU composition",
+            "[Compositor] GPU texture retirement failed for window {}; disabling GPU composition",
             window_id
         );
-        self.disable_gpu_after_runtime_failure("SWS_BACKEND=sgfx texture release failed")
+        self.disable_gpu_after_runtime_failure("SWS_BACKEND=sgfx texture retirement failed")
     }
 
-    /// Release every GPU resource owned by a window that is being closed.
+    /// Retire every GPU resource owned by a window that is being closed.
     fn release_gpu_window(&mut self, window_id: u32) -> Result<(), &'static str> {
         let release_failed = match self.gpu_compositor.as_mut() {
             Some(gpu_compositor) => gpu_compositor.remove_window(window_id).is_err(),

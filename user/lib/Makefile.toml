@@ -178,8 +178,7 @@ script = [
     "cd ../std && cargo build --target ../../targets/riscv64gc-unknown-scarlet-elf.json",
     "cd ../framebuffer && cargo build --target ../../targets/riscv64gc-unknown-scarlet-elf.json",
     "cd ../gpu-raw && cargo build --target ../../targets/riscv64gc-unknown-scarlet-elf.json",
-    "cd ../sgfx-backend-scarlet-virgl && cargo build --target ../../targets/riscv64gc-unknown-scarlet-elf.json",
-    "cd ../sgfx-frontend && cargo build -Zbuild-std=core,compiler_builtins,alloc -Zbuild-std-features=compiler-builtins-mem --no-default-features --features backend-scarlet-virgl,legacy-scarlet-std --target ../../targets/riscv64gc-unknown-scarlet-elf.json",
+    "cd ../sgfx-frontend && cargo build -Zbuild-std=core,compiler_builtins,alloc -Zbuild-std-features=compiler-builtins-mem --no-default-features --features legacy-scarlet-std --target ../../targets/riscv64gc-unknown-scarlet-elf.json",
     "cd ../sws-protocol && cargo build --target ../../targets/riscv64gc-unknown-scarlet-elf.json",
     "cd ../scarlet-desktop-config && cargo build --target ../../targets/riscv64gc-unknown-scarlet-elf.json",
     "cd ../scpm && cargo build --target ../../targets/riscv64gc-unknown-scarlet-elf.json"
@@ -196,8 +195,7 @@ script = [
     "cd ../std && cargo build --release --target ../../targets/riscv64gc-unknown-scarlet-elf.json",
     "cd ../framebuffer && cargo build --release --target ../../targets/riscv64gc-unknown-scarlet-elf.json",
     "cd ../gpu-raw && cargo build --release --target ../../targets/riscv64gc-unknown-scarlet-elf.json",
-    "cd ../sgfx-backend-scarlet-virgl && cargo build --release --target ../../targets/riscv64gc-unknown-scarlet-elf.json",
-    "cd ../sgfx-frontend && cargo build -Zbuild-std=core,compiler_builtins,alloc -Zbuild-std-features=compiler-builtins-mem --release --no-default-features --features backend-scarlet-virgl,legacy-scarlet-std --target ../../targets/riscv64gc-unknown-scarlet-elf.json",
+    "cd ../sgfx-frontend && cargo build -Zbuild-std=core,compiler_builtins,alloc -Zbuild-std-features=compiler-builtins-mem --release --no-default-features --features legacy-scarlet-std --target ../../targets/riscv64gc-unknown-scarlet-elf.json",
     "cd ../sws-protocol && cargo build --release --target ../../targets/riscv64gc-unknown-scarlet-elf.json",
     "cd ../scarlet-desktop-config && cargo build --release --target ../../targets/riscv64gc-unknown-scarlet-elf.json",
     "cd ../scpm && cargo build --release --target ../../targets/riscv64gc-unknown-scarlet-elf.json"
@@ -214,8 +212,7 @@ script = [
     "cd ../std && cargo build --target ../../targets/aarch64-unknown-scarlet-elf.json",
     "cd ../framebuffer && cargo build --target ../../targets/aarch64-unknown-scarlet-elf.json",
     "cd ../gpu-raw && cargo build --target ../../targets/aarch64-unknown-scarlet-elf.json",
-    "cd ../sgfx-backend-scarlet-virgl && cargo build --target ../../targets/aarch64-unknown-scarlet-elf.json",
-    "cd ../sgfx-frontend && cargo build -Zbuild-std=core,compiler_builtins,alloc -Zbuild-std-features=compiler-builtins-mem --no-default-features --features backend-scarlet-virgl,legacy-scarlet-std --target ../../targets/aarch64-unknown-scarlet-elf.json",
+    "cd ../sgfx-frontend && cargo build -Zbuild-std=core,compiler_builtins,alloc -Zbuild-std-features=compiler-builtins-mem --no-default-features --features legacy-scarlet-std --target ../../targets/aarch64-unknown-scarlet-elf.json",
     "cd ../sws-protocol && cargo build --target ../../targets/aarch64-unknown-scarlet-elf.json",
     "cd ../scarlet-desktop-config && cargo build --target ../../targets/aarch64-unknown-scarlet-elf.json",
     "cd ../scpm && cargo build --target ../../targets/aarch64-unknown-scarlet-elf.json"
@@ -232,8 +229,7 @@ script = [
     "cd ../std && cargo build --release --target ../../targets/aarch64-unknown-scarlet-elf.json",
     "cd ../framebuffer && cargo build --release --target ../../targets/aarch64-unknown-scarlet-elf.json",
     "cd ../gpu-raw && cargo build --release --target ../../targets/aarch64-unknown-scarlet-elf.json",
-    "cd ../sgfx-backend-scarlet-virgl && cargo build --release --target ../../targets/aarch64-unknown-scarlet-elf.json",
-    "cd ../sgfx-frontend && cargo build -Zbuild-std=core,compiler_builtins,alloc -Zbuild-std-features=compiler-builtins-mem --release --no-default-features --features backend-scarlet-virgl,legacy-scarlet-std --target ../../targets/aarch64-unknown-scarlet-elf.json",
+    "cd ../sgfx-frontend && cargo build -Zbuild-std=core,compiler_builtins,alloc -Zbuild-std-features=compiler-builtins-mem --release --no-default-features --features legacy-scarlet-std --target ../../targets/aarch64-unknown-scarlet-elf.json",
     "cd ../sws-protocol && cargo build --release --target ../../targets/aarch64-unknown-scarlet-elf.json",
     "cd ../scarlet-desktop-config && cargo build --release --target ../../targets/aarch64-unknown-scarlet-elf.json",
     "cd ../scpm && cargo build --release --target ../../targets/aarch64-unknown-scarlet-elf.json"

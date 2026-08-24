@@ -11,6 +11,8 @@ mod gpu_compositor;
 mod input;
 mod ipc;
 mod pointer_lock;
+#[path = "../sgfx_ir_support.rs"]
+mod sgfx_ir_support;
 mod trace;
 mod window;
 

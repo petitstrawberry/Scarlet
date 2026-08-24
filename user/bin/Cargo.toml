@@ -169,8 +169,7 @@ path = "src/sas/main.rs"
 scarlet-std = { path = "../lib/std", features = ["alloc_debug"] }
 scpm = { path = "../lib/scpm" }
 framebuffer = { path = "../lib/framebuffer" }
-sgfx = { path = "../lib/sgfx-frontend", default-features = false, features = ["backend-scarlet-virgl", "legacy-scarlet-std"] }
-sgfx_compat = { package = "sgfx-compat-scarlet", path = "../lib/sgfx-compat" }
+sgfx = { path = "../lib/sgfx-frontend", default-features = false, features = ["legacy-scarlet-std"] }
 sws-protocol = { path = "../lib/sws-protocol" }
 sws-client = { path = "../lib/sws-client" }
 scarlet-os = { path = "../lib/scarlet-os" }

@@ -47,6 +47,10 @@ pub const GPU_CONTEXT_DETACH_IMAGE: u32 = 0x4763;
 pub const GPU_CREATE_IMPORTED_IMAGE_BGRA: u32 = 0x4764;
 /// Control command that transfers one imported BGRA damage rectangle.
 pub const GPU_CONTEXT_TRANSFER_IMPORTED_IMAGE_BGRA: u32 = 0x4765;
+/// Control command that queries immutable image plane and modifier layout.
+pub const GPU_IMAGE_QUERY_LAYOUT: u32 = 0x4766;
+/// Control command that detaches a GPU buffer from an execution context.
+pub const GPU_CONTEXT_DETACH_BUFFER: u32 = 0x4767;
 
 /// Query completed successfully.
 pub const GPU_RESULT_SUCCESS: u32 = 0;
@@ -86,6 +90,10 @@ pub const GPU_QUEUE_SUBMIT_FLAGS_VALID: u32 = GPU_QUEUE_SUBMIT_FLAG_SIGNAL_TIMEL
 pub const GPU_IMAGE_FORMAT_BGRA8_UNORM: u32 = 1;
 /// Generic 32-bit floating-point depth image format.
 pub const GPU_IMAGE_FORMAT_DEPTH32_FLOAT: u32 = 2;
+/// Maximum number of image planes returned by the generic layout ABI.
+pub const GPU_IMAGE_MAX_PLANES: usize = 4;
+/// Modifier value for an uncompressed linear image.
+pub const GPU_IMAGE_MODIFIER_LINEAR: u64 = 0;
 /// Image usage permitting the image to be bound as a render target.
 pub const GPU_IMAGE_USAGE_RENDER_TARGET: u32 = 1 << 0;
 /// Image usage permitting the image to be selected for display scanout.
@@ -237,6 +245,97 @@ impl GpuImageInfo {
 }
 
 impl Default for GpuImageInfo {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Fixed-width layout of one image plane.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GpuImagePlaneLayout {
+    /// Byte offset of the first plane element in the backing allocation.
+    pub offset: u64,
+    /// Number of bytes occupied by the plane.
+    pub size: u64,
+    /// Number of bytes between adjacent block rows.
+    pub row_pitch: u32,
+    /// Number of bytes between adjacent array layers.
+    pub array_pitch: u32,
+    /// Width of one stored block in pixels.
+    pub block_width: u16,
+    /// Height of one stored block in pixels.
+    pub block_height: u16,
+    /// Number of bytes in one stored block.
+    pub bytes_per_block: u16,
+    /// Reserved for ABI-compatible future use. Always zero.
+    pub reserved: u16,
+}
+
+impl GpuImagePlaneLayout {
+    /// A zeroed unused plane entry.
+    pub const EMPTY: Self = Self {
+        offset: 0,
+        size: 0,
+        row_pitch: 0,
+        array_pitch: 0,
+        block_width: 0,
+        block_height: 0,
+        bytes_per_block: 0,
+        reserved: 0,
+    };
+}
+
+/// Fixed-width response for [`GPU_IMAGE_QUERY_LAYOUT`].
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GpuImageLayout {
+    /// ABI version supplied by userspace and echoed by the kernel.
+    pub abi_version: u32,
+    /// Explicit `GPU_RESULT_*` result code.
+    pub result: u32,
+    /// Backend-neutral or backend-specific immutable memory modifier.
+    pub modifier: u64,
+    /// Exact bytes required by all initialized image planes.
+    pub total_size: u64,
+    /// Required physical backing alignment in bytes.
+    pub alignment: u64,
+    /// Number of initialized entries in `planes`.
+    pub plane_count: u32,
+    /// Reserved for ABI-compatible future use. Always zero.
+    pub reserved: u32,
+    /// Fixed-capacity plane layout table.
+    pub planes: [GpuImagePlaneLayout; GPU_IMAGE_MAX_PLANES],
+}
+
+impl GpuImageLayout {
+    /// Create a zeroed image layout query for the current ABI version.
+    pub const fn new() -> Self {
+        Self {
+            abi_version: GPU_ABI_VERSION,
+            result: GPU_RESULT_SUCCESS,
+            modifier: 0,
+            total_size: 0,
+            alignment: 0,
+            plane_count: 0,
+            reserved: 0,
+            planes: [GpuImagePlaneLayout::EMPTY; GPU_IMAGE_MAX_PLANES],
+        }
+    }
+
+    /// Clear response fields while preserving the ABI version.
+    pub(crate) fn clear_response(&mut self) {
+        self.result = GPU_RESULT_SUCCESS;
+        self.modifier = 0;
+        self.total_size = 0;
+        self.alignment = 0;
+        self.plane_count = 0;
+        self.reserved = 0;
+        self.planes = [GpuImagePlaneLayout::EMPTY; GPU_IMAGE_MAX_PLANES];
+    }
+}
+
+impl Default for GpuImageLayout {
     fn default() -> Self {
         Self::new()
     }
@@ -513,6 +612,48 @@ impl GpuContextAttachBuffer {
     pub(crate) fn clear_response(&mut self) {
         self.result = GPU_RESULT_SUCCESS;
         self.command_resource_token = 0;
+    }
+}
+
+/// Fixed-width request and response for [`GPU_CONTEXT_DETACH_BUFFER`].
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct GpuContextDetachBuffer {
+    /// ABI version supplied by userspace and echoed by the kernel.
+    pub abi_version: u32,
+    /// Explicit `GPU_RESULT_*` result code.
+    pub result: u32,
+    /// Existing attached GPU buffer child handle to detach.
+    pub buffer_handle: u32,
+    /// Reserved detachment flags. Must be zero.
+    pub flags: u32,
+    /// Reserved for ABI-compatible future use. Must be zero.
+    pub reserved: u64,
+}
+
+impl GpuContextDetachBuffer {
+    /// Create a buffer detachment request for the current ABI version.
+    ///
+    /// # Arguments
+    ///
+    /// * `buffer_handle` - Existing attached buffer capability handle.
+    ///
+    /// # Returns
+    ///
+    /// A zeroed buffer detachment request.
+    pub const fn new(buffer_handle: u32) -> Self {
+        Self {
+            abi_version: GPU_ABI_VERSION,
+            result: GPU_RESULT_SUCCESS,
+            buffer_handle,
+            flags: 0,
+            reserved: 0,
+        }
+    }
+
+    /// Clear response fields while preserving request fields.
+    pub(crate) fn clear_response(&mut self) {
+        self.result = GPU_RESULT_SUCCESS;
     }
 }
 

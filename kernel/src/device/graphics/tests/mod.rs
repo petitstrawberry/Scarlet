@@ -10,6 +10,39 @@ fn test_pixel_format_bytes_per_pixel() {
     assert_eq!(PixelFormat::RGB888.bytes_per_pixel(), 3);
     assert_eq!(PixelFormat::RGB565.bytes_per_pixel(), 2);
 }
+#[test_case]
+fn linear_gpu_display_resource_validates_layout_and_retains_owner() {
+    let owner = alloc::sync::Arc::new(());
+    let weak = alloc::sync::Arc::downgrade(&owner);
+    let owner: alloc::sync::Arc<dyn GpuDisplayBackingOwner> = owner;
+    let resource =
+        GpuDisplayResource::new_linear(0x1000, 4096, 16, 8, 64, PixelFormat::BGRA8888, owner)
+            .expect("valid linear display layout should succeed");
+    let backing = resource
+        .linear_backing()
+        .expect("linear resource should expose its backing");
+    assert_eq!(backing.physical_addr(), 0x1000);
+    assert_eq!(backing.stride(), 64);
+    assert_eq!(resource.width(), 16);
+    assert_eq!(resource.height(), 8);
+    drop(backing);
+    assert!(weak.upgrade().is_some());
+    drop(resource);
+    assert!(weak.upgrade().is_none());
+
+    assert!(
+        GpuDisplayResource::new_linear(
+            0x1000,
+            4096,
+            16,
+            8,
+            63,
+            PixelFormat::BGRA8888,
+            alloc::sync::Arc::new(()),
+        )
+        .is_err()
+    );
+}
 
 #[test_case]
 fn test_framebuffer_config() {

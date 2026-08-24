@@ -98,12 +98,96 @@ impl FramebufferConfig {
 }
 
 /// GPU resource that can be presented through the display pipeline.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct GpuDisplayResource {
     resource_id: u32,
     width: u32,
     height: u32,
     backend_cookie: u64,
+    linear_backing: Option<GpuLinearDisplayBacking>,
+}
+
+/// Linear framebuffer backing exported by a GPU image for cross-device scanout.
+#[derive(Clone)]
+pub struct GpuLinearDisplayBacking {
+    physical_addr: usize,
+    allocation_size: u64,
+    stride: u32,
+    format: PixelFormat,
+    // A display controller may continue fetching after the synchronous
+    // present call returns. Keep the producer's allocation alive until the
+    // controller replaces this scanout resource.
+    _owner: Arc<dyn GpuDisplayBackingOwner>,
+}
+
+/// Opaque lifetime owner for cross-device GPU scanout memory.
+///
+/// Display drivers retain this object while hardware may still fetch from the
+/// corresponding physical allocation. It intentionally exposes no device- or
+/// architecture-specific operations.
+pub trait GpuDisplayBackingOwner: Send + Sync {}
+
+impl<T: Send + Sync> GpuDisplayBackingOwner for T {}
+
+impl core::fmt::Debug for GpuLinearDisplayBacking {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("GpuLinearDisplayBacking")
+            .field("physical_addr", &self.physical_addr)
+            .field("allocation_size", &self.allocation_size)
+            .field("stride", &self.stride)
+            .field("format", &self.format)
+            .finish_non_exhaustive()
+    }
+}
+
+impl PartialEq for GpuLinearDisplayBacking {
+    fn eq(&self, other: &Self) -> bool {
+        self.physical_addr == other.physical_addr
+            && self.allocation_size == other.allocation_size
+            && self.stride == other.stride
+            && self.format == other.format
+    }
+}
+
+impl Eq for GpuLinearDisplayBacking {}
+
+impl GpuLinearDisplayBacking {
+    /// Return the first physical byte of the linear image.
+    ///
+    /// # Returns
+    ///
+    /// Stable physical address retained by the presenting GPU image.
+    pub const fn physical_addr(&self) -> usize {
+        self.physical_addr
+    }
+
+    /// Return the allocated byte length of the backing.
+    ///
+    /// # Returns
+    ///
+    /// Page-rounded allocation size in bytes.
+    pub const fn allocation_size(&self) -> u64 {
+        self.allocation_size
+    }
+
+    /// Return the number of bytes between adjacent rows.
+    ///
+    /// # Returns
+    ///
+    /// Linear row stride in bytes.
+    pub const fn stride(&self) -> u32 {
+        self.stride
+    }
+
+    /// Return the framebuffer pixel format.
+    ///
+    /// # Returns
+    ///
+    /// Pixel format consumed by the display engine.
+    pub const fn format(&self) -> PixelFormat {
+        self.format
+    }
 }
 
 impl GpuDisplayResource {
@@ -130,7 +214,71 @@ impl GpuDisplayResource {
             width,
             height,
             backend_cookie,
+            linear_backing: None,
         }
+    }
+
+    /// Create a displayable linear GPU image descriptor.
+    ///
+    /// This constructor is the generic boundary used when a GPU producer and
+    /// display controller are separate devices. It carries no GPU register or
+    /// command-stream details.
+    ///
+    /// # Arguments
+    ///
+    /// * `physical_addr` - Stable physical address of pixel `(0, 0)`.
+    /// * `allocation_size` - Allocated backing size in bytes.
+    /// * `width` - Image width in pixels.
+    /// * `height` - Image height in pixels.
+    /// * `stride` - Number of bytes between adjacent rows.
+    /// * `format` - Linear framebuffer pixel format.
+    /// * `owner` - Strong lifetime owner retained while display hardware may fetch.
+    ///
+    /// # Returns
+    ///
+    /// A validated cross-device display descriptor, or an error for an invalid
+    /// or undersized layout.
+    pub fn new_linear(
+        physical_addr: usize,
+        allocation_size: u64,
+        width: u32,
+        height: u32,
+        stride: u32,
+        format: PixelFormat,
+        owner: Arc<dyn GpuDisplayBackingOwner>,
+    ) -> Result<Self, &'static str> {
+        let row_bytes = u64::from(width)
+            .checked_mul(format.bytes_per_pixel() as u64)
+            .ok_or("GPU display row size overflows")?;
+        let required = u64::from(stride)
+            .checked_mul(u64::from(height))
+            .ok_or("GPU display backing size overflows")?;
+        let required_usize = usize::try_from(required)
+            .map_err(|_| "GPU display backing size does not fit the kernel address size")?;
+        if physical_addr == 0
+            || width == 0
+            || height == 0
+            || u64::from(stride) < row_bytes
+            || allocation_size < required
+            || physical_addr
+                .checked_add(required_usize.saturating_sub(1))
+                .is_none()
+        {
+            return Err("GPU linear display backing is invalid");
+        }
+        Ok(Self {
+            resource_id: 0,
+            width,
+            height,
+            backend_cookie: 0,
+            linear_backing: Some(GpuLinearDisplayBacking {
+                physical_addr,
+                allocation_size,
+                stride,
+                format,
+                _owner: owner,
+            }),
+        })
     }
 
     /// Return the backend resource identifier.
@@ -139,18 +287,28 @@ impl GpuDisplayResource {
     }
 
     /// Return the resource width in pixels.
-    pub(crate) const fn width(&self) -> u32 {
+    pub const fn width(&self) -> u32 {
         self.width
     }
 
     /// Return the resource height in pixels.
-    pub(crate) const fn height(&self) -> u32 {
+    pub const fn height(&self) -> u32 {
         self.height
     }
 
     /// Return the opaque identity of the graphics backend that owns this resource.
     pub(crate) const fn backend_cookie(&self) -> u64 {
         self.backend_cookie
+    }
+
+    /// Return linear physical backing when this is a cross-device resource.
+    ///
+    /// # Returns
+    ///
+    /// Linear backing metadata, or `None` for backend-private resources such as
+    /// VirtIO resource identifiers.
+    pub fn linear_backing(&self) -> Option<GpuLinearDisplayBacking> {
+        self.linear_backing.clone()
     }
 
     /// Get the full resource region.
@@ -336,7 +494,8 @@ pub trait GraphicsDevice: Device {
     ///
     /// Success or an error describing why presentation failed.
     fn present_gpu_resource(&self, resource: GpuDisplayResource) -> Result<(), &'static str> {
-        self.present_gpu_resource_region(resource, resource.full_region())
+        let region = resource.full_region();
+        self.present_gpu_resource_region(resource, region)
     }
 
     /// Initialize the graphics device (idempotent)

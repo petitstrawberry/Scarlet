@@ -83,6 +83,10 @@ pub mod commands {
     pub const GPU_CREATE_IMPORTED_IMAGE_BGRA: u32 = 0x4764;
     /// Transfer one rectangle from fixed imported image backing.
     pub const GPU_CONTEXT_TRANSFER_IMPORTED_IMAGE_BGRA: u32 = 0x4765;
+    /// Query immutable image plane and modifier layout.
+    pub const GPU_IMAGE_QUERY_LAYOUT: u32 = 0x4766;
+    /// Detach a GPU buffer from an execution context.
+    pub const GPU_CONTEXT_DETACH_BUFFER: u32 = 0x4767;
 }
 
 /// ABI version accepted by [`GpuQueryInfo`].
@@ -109,6 +113,10 @@ pub const GPU_BUFFER_FLAGS_VALID: u32 = GPU_BUFFER_FLAG_CPU_VISIBLE;
 pub const GPU_IMAGE_FORMAT_BGRA8_UNORM: u32 = 1;
 /// Generic 32-bit floating-point depth image format.
 pub const GPU_IMAGE_FORMAT_DEPTH32_FLOAT: u32 = 2;
+/// Maximum number of image planes returned by the generic layout ABI.
+pub const GPU_IMAGE_MAX_PLANES: usize = 4;
+/// Modifier value for an uncompressed linear image.
+pub const GPU_IMAGE_MODIFIER_LINEAR: u64 = 0;
 /// Image usage permitting the image to be bound as a render target.
 pub const GPU_IMAGE_USAGE_RENDER_TARGET: u32 = 1 << 0;
 /// Image usage permitting the image to be selected for display scanout.
@@ -284,6 +292,86 @@ impl Default for GpuImageInfo {
     }
 }
 
+/// Fixed-width layout of one image plane.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GpuImagePlaneLayout {
+    /// Byte offset of the first plane element in the backing allocation.
+    pub offset: u64,
+    /// Number of bytes occupied by the plane.
+    pub size: u64,
+    /// Number of bytes between adjacent block rows.
+    pub row_pitch: u32,
+    /// Number of bytes between adjacent array layers.
+    pub array_pitch: u32,
+    /// Width of one stored block in pixels.
+    pub block_width: u16,
+    /// Height of one stored block in pixels.
+    pub block_height: u16,
+    /// Number of bytes in one stored block.
+    pub bytes_per_block: u16,
+    /// Reserved for ABI-compatible future use. Always zero.
+    pub reserved: u16,
+}
+
+impl GpuImagePlaneLayout {
+    /// A zeroed unused plane entry.
+    pub const EMPTY: Self = Self {
+        offset: 0,
+        size: 0,
+        row_pitch: 0,
+        array_pitch: 0,
+        block_width: 0,
+        block_height: 0,
+        bytes_per_block: 0,
+        reserved: 0,
+    };
+}
+
+/// Fixed-width response for [`commands::GPU_IMAGE_QUERY_LAYOUT`].
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GpuImageLayout {
+    /// ABI version supplied by userspace and echoed by the kernel.
+    pub abi_version: u32,
+    /// Explicit `GPU_RESULT_*` result code.
+    pub result: u32,
+    /// Backend-neutral or backend-specific immutable memory modifier.
+    pub modifier: u64,
+    /// Exact bytes required by all initialized image planes.
+    pub total_size: u64,
+    /// Required physical backing alignment in bytes.
+    pub alignment: u64,
+    /// Number of initialized entries in `planes`.
+    pub plane_count: u32,
+    /// Reserved for ABI-compatible future use. Always zero.
+    pub reserved: u32,
+    /// Fixed-capacity plane layout table.
+    pub planes: [GpuImagePlaneLayout; GPU_IMAGE_MAX_PLANES],
+}
+
+impl GpuImageLayout {
+    /// Create a zeroed image layout query for the current ABI version.
+    pub const fn new() -> Self {
+        Self {
+            abi_version: GPU_ABI_VERSION,
+            result: GPU_RESULT_SUCCESS,
+            modifier: 0,
+            total_size: 0,
+            alignment: 0,
+            plane_count: 0,
+            reserved: 0,
+            planes: [GpuImagePlaneLayout::EMPTY; GPU_IMAGE_MAX_PLANES],
+        }
+    }
+}
+
+impl Default for GpuImageLayout {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Fixed-width request and response for [`commands::GPU_CONTEXT_ATTACH_IMAGE`].
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
@@ -395,6 +483,43 @@ impl GpuContextDetachImage {
             abi_version: GPU_ABI_VERSION,
             result: GPU_RESULT_SUCCESS,
             image_handle,
+            flags: 0,
+            reserved: 0,
+        }
+    }
+}
+
+/// Fixed-width request and response for [`commands::GPU_CONTEXT_DETACH_BUFFER`].
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct GpuContextDetachBuffer {
+    /// ABI version supplied by userspace and echoed by the kernel.
+    pub abi_version: u32,
+    /// Explicit `GPU_RESULT_*` result code.
+    pub result: u32,
+    /// Existing attached GPU buffer child handle to detach.
+    pub buffer_handle: u32,
+    /// Reserved detachment flags. Must be zero.
+    pub flags: u32,
+    /// Reserved for ABI-compatible future use. Must be zero.
+    pub reserved: u64,
+}
+
+impl GpuContextDetachBuffer {
+    /// Create a buffer detachment request for the current ABI version.
+    ///
+    /// # Arguments
+    ///
+    /// * `buffer_handle` - Existing attached buffer capability handle.
+    ///
+    /// # Returns
+    ///
+    /// A zeroed buffer detachment request.
+    pub const fn new(buffer_handle: u32) -> Self {
+        Self {
+            abi_version: GPU_ABI_VERSION,
+            result: GPU_RESULT_SUCCESS,
+            buffer_handle,
             flags: 0,
             reserved: 0,
         }
@@ -1564,7 +1689,8 @@ impl GpuContext {
     ///
     /// # Returns
     ///
-    /// The opaque command resource token authorized for this context.
+    /// A non-zero opaque attachment token authorized only for this context. It
+    /// is distinct from the image's backend resource identity token.
     pub fn attach_image(&self, image: &GpuImage) -> HandleResult<u64> {
         let image_handle =
             u32::try_from(image.handle.as_raw()).map_err(|_| HandleError::InvalidHandle)?;
@@ -1574,7 +1700,7 @@ impl GpuContext {
             &mut request as *mut _ as usize,
         )?;
         result_to_handle_error(request.result)?;
-        if request.command_resource_token != image.command_resource_token {
+        if request.command_resource_token == 0 {
             return Err(HandleError::SystemError(-1));
         }
         Ok(request.command_resource_token)
@@ -1608,7 +1734,8 @@ impl GpuContext {
     ///
     /// # Returns
     ///
-    /// The opaque command resource token authorized for this context.
+    /// A non-zero opaque attachment token authorized only for this context. It
+    /// is distinct from the buffer's backend resource identity token.
     pub fn attach_buffer(&self, buffer: &GpuBuffer) -> HandleResult<u64> {
         let buffer_handle =
             u32::try_from(buffer.handle.as_raw()).map_err(|_| HandleError::InvalidHandle)?;
@@ -1618,10 +1745,30 @@ impl GpuContext {
             &mut request as *mut _ as usize,
         )?;
         result_to_handle_error(request.result)?;
-        if request.command_resource_token != buffer.command_resource_token {
+        if request.command_resource_token == 0 {
             return Err(HandleError::SystemError(-1));
         }
         Ok(request.command_resource_token)
+    }
+
+    /// Detach a buffer so the context releases its retained backing reference.
+    ///
+    /// # Arguments
+    ///
+    /// * `buffer` - Buffer capability previously attached with [`GpuContext::attach_buffer`].
+    ///
+    /// # Returns
+    ///
+    /// Success after the backend detached the buffer, or a handle error.
+    pub fn detach_buffer(&self, buffer: &GpuBuffer) -> HandleResult<()> {
+        let buffer_handle =
+            u32::try_from(buffer.handle.as_raw()).map_err(|_| HandleError::InvalidHandle)?;
+        let mut request = GpuContextDetachBuffer::new(buffer_handle);
+        self.handle.control(
+            commands::GPU_CONTEXT_DETACH_BUFFER,
+            &mut request as *mut _ as usize,
+        )?;
+        result_to_handle_error(request.result)
     }
 
     /// Upload a strided BGRA source rectangle into an image attached to this context.
@@ -1877,6 +2024,29 @@ impl GpuImage {
             .control(commands::GPU_IMAGE_QUERY_INFO, &mut info as *mut _ as usize)?;
         result_to_handle_error(info.result)?;
         Ok(info)
+    }
+    /// Query the immutable modifier, allocation, and plane layout.
+    ///
+    /// # Returns
+    ///
+    /// The backend-selected image layout fixed at creation time.
+    pub fn query_layout(&self) -> HandleResult<GpuImageLayout> {
+        let mut layout = GpuImageLayout::new();
+        self.handle.control(
+            commands::GPU_IMAGE_QUERY_LAYOUT,
+            &mut layout as *mut _ as usize,
+        )?;
+        result_to_handle_error(layout.result)?;
+        if layout.reserved != 0
+            || layout.plane_count == 0
+            || layout.plane_count as usize > GPU_IMAGE_MAX_PLANES
+            || layout.planes[..layout.plane_count as usize]
+                .iter()
+                .any(|plane| plane.reserved != 0)
+        {
+            return Err(HandleError::InvalidParameter);
+        }
+        Ok(layout)
     }
 
     /// Return the opaque backend command resource token.
@@ -2160,11 +2330,14 @@ const _: [(); 24] = [(); core::mem::size_of::<GpuQueueInfo>()];
 const _: [(); 56] = [(); core::mem::size_of::<GpuQueueSubmit>()];
 const _: [(); 48] = [(); core::mem::size_of::<GpuCreateImage>()];
 const _: [(); 40] = [(); core::mem::size_of::<GpuImageInfo>()];
+const _: [(); 32] = [(); core::mem::size_of::<GpuImagePlaneLayout>()];
+const _: [(); 168] = [(); core::mem::size_of::<GpuImageLayout>()];
 const _: [(); 32] = [(); core::mem::size_of::<GpuContextAttachImage>()];
 const _: [(); 24] = [(); core::mem::size_of::<GpuContextDetachImage>()];
 const _: [(); 64] = [(); core::mem::size_of::<GpuCreateImportedImageBgra>()];
 const _: [(); 48] = [(); core::mem::size_of::<GpuCreateBuffer>()];
 const _: [(); 40] = [(); core::mem::size_of::<GpuBufferInfo>()];
 const _: [(); 32] = [(); core::mem::size_of::<GpuContextAttachBuffer>()];
+const _: [(); 24] = [(); core::mem::size_of::<GpuContextDetachBuffer>()];
 const _: [(); 64] = [(); core::mem::size_of::<GpuContextUploadImageBgra>()];
 const _: [(); 40] = [(); core::mem::size_of::<GpuContextTransferImportedImageBgra>()];

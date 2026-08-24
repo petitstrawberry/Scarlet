@@ -13,6 +13,7 @@ extern crate alloc;
 extern crate scarlet_std as std;
 
 use alloc::{rc::Rc, vec::Vec};
+use gpu_raw::{Gpu, GpuQueryInfo};
 #[cfg(feature = "std")]
 pub use scarlet_os::handle::{Handle, HandleError, HandleResult};
 #[cfg(feature = "std")]
@@ -103,6 +104,35 @@ pub struct Device {
 }
 
 impl Device {
+    /// Return whether already-queried GPU information selects this backend.
+    ///
+    /// # Arguments
+    ///
+    /// * `info` - Information returned by a Scarlet GPU control connection.
+    ///
+    /// # Returns
+    ///
+    /// `true` only when this compiled backend can adopt the connection.
+    pub fn supports(info: &GpuQueryInfo) -> bool {
+        driver::Device::supports(info)
+    }
+
+    /// Adopt an already-opened Scarlet GPU connection.
+    ///
+    /// # Arguments
+    ///
+    /// * `gpu` - Owning connection used to obtain `info`.
+    /// * `info` - Query result returned from that same connection.
+    ///
+    /// # Returns
+    ///
+    /// A compatible VirGL device or a handle error.
+    pub fn from_gpu(gpu: Gpu, info: GpuQueryInfo) -> HandleResult<Self> {
+        Ok(Self {
+            backend: Rc::new(driver::Device::from_gpu(gpu, info)?),
+        })
+    }
+
     /// Open a graphics device and select a compatible private backend.
     ///
     /// # Arguments

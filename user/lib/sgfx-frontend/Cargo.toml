@@ -4,17 +4,35 @@ version = "0.16.0"
 edition = "2024"
 
 [features]
-default = ["std", "backend-wgpu", "backend-scarlet-virgl"]
-std = ["sgfx-backend-scarlet-virgl?/std"]
+default = [
+    "std",
+    "backend-wgpu",
+    "backend-scarlet-virgl",
+    "backend-scarlet-adreno",
+]
+std = [
+    "backend-wgpu",
+    "backend-scarlet-virgl",
+    "backend-scarlet-adreno",
+    "gpu-raw?/std",
+    "sgfx-backend-scarlet-adreno?/std",
+    "sgfx-backend-scarlet-virgl?/std",
+]
 legacy-scarlet-std = [
+    "backend-wgpu",
+    "backend-scarlet-virgl",
+    "backend-scarlet-adreno",
     "dep:scarlet-std",
+    "gpu-raw?/scarlet-std",
+    "sgfx-backend-scarlet-adreno?/scarlet-std",
     "sgfx-backend-scarlet-virgl?/scarlet-std",
 ]
 # Compatibility alias for consumers that previously selected Scarlet's
 # no_std support directly on the `sgfx` package.
 scarlet-std = ["legacy-scarlet-std"]
 backend-wgpu = ["dep:raw-window-handle", "dep:sgfx-backend-wgpu"]
-backend-scarlet-virgl = ["dep:sgfx-backend-scarlet-virgl"]
+backend-scarlet-virgl = ["dep:gpu-raw", "dep:sgfx-backend-scarlet-virgl"]
+backend-scarlet-adreno = ["dep:gpu-raw", "dep:sgfx-backend-scarlet-adreno"]
 
 [dependencies]
 sgfx-core = { path = "../sgfx", default-features = false }
@@ -25,6 +43,8 @@ sgfx-backend-wgpu = { path = "../sgfx-backend-wgpu", optional = true }
 
 [target.'cfg(target_os = "scarlet")'.dependencies]
 scarlet-std = { path = "../std", optional = true }
+gpu-raw = { path = "../gpu-raw", default-features = false, optional = true }
+sgfx-backend-scarlet-adreno = { git = "https://github.com/petitstrawberry/scarlet-project-chromebook.git", package = "sgfx-backend-scarlet-adreno", default-features = false, optional = true }
 sgfx-backend-scarlet-virgl = { path = "../sgfx-backend-scarlet-virgl", default-features = false, optional = true }
 
 [lib]

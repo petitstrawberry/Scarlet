@@ -10,7 +10,7 @@ use gpu_raw::{
     GPU_IMAGE_USAGE_PRESENTABLE, GPU_IMAGE_USAGE_RENDER_TARGET, GPU_IMAGE_USAGE_SAMPLED,
     GPU_IMAGE_USAGE_TRANSFER_DST, GPU_RESULT_SUCCESS, Gpu as RawGpu, GpuBuffer as RawBuffer,
     GpuContext as RawContext, GpuDialect as RawDialect, GpuImage as RawImage, GpuImageBgraRect,
-    GpuQueue as RawQueue,
+    GpuQueryInfo, GpuQueue as RawQueue,
 };
 #[cfg(feature = "std")]
 use scarlet_os::handle::{Handle, HandleError, HandleResult};
@@ -305,32 +305,57 @@ pub(crate) struct Device {
 }
 
 impl Device {
-    pub(crate) fn open(path: &str) -> HandleResult<Self> {
-        let raw = RawGpu::open(path)?;
-        let info = raw.query_info()?;
-        if info.result != GPU_RESULT_SUCCESS
-            || info.device_state != GPU_DEVICE_STATE_READY
-            || !crate::matches_backend_id(info.backend_id_bytes())
-        {
+    /// Return whether already-queried GPU information selects VirGL execution.
+    ///
+    /// # Arguments
+    ///
+    /// * `info` - Information returned from the same [`RawGpu`] connection.
+    ///
+    /// # Returns
+    ///
+    /// `true` only when the ready GPU reports Scarlet's VirtIO GPU backend and
+    /// supports queue execution.
+    pub(crate) fn supports(info: &GpuQueryInfo) -> bool {
+        info.result == GPU_RESULT_SUCCESS
+            && info.device_state == GPU_DEVICE_STATE_READY
+            && crate::matches_backend_id(info.backend_id_bytes())
+            && info.execution_support & GPU_EXECUTION_SUPPORT_QUEUE != 0
+    }
+
+    /// Adopt an already-opened compatible GPU connection.
+    ///
+    /// # Arguments
+    ///
+    /// * `raw` - Owning GPU connection used to retrieve `info`.
+    /// * `info` - GPU information returned by `raw`.
+    ///
+    /// # Returns
+    ///
+    /// A VirGL device, or [`HandleError::Unsupported`] when the GPU is not a
+    /// compatible Scarlet VirtIO GPU device.
+    pub(crate) fn from_gpu(raw: RawGpu, info: GpuQueryInfo) -> HandleResult<Self> {
+        if !Self::supports(&info) {
             return Err(HandleError::Unsupported);
         }
 
         let capabilities = Capabilities {
-            rendering: info.execution_support & GPU_EXECUTION_SUPPORT_QUEUE != 0,
+            rendering: true,
             presentation: info.execution_support & GPU_EXECUTION_SUPPORT_PRESENTATION != 0,
             image_upload: info.execution_support & GPU_EXECUTION_SUPPORT_IMAGE_UPLOAD != 0,
             depth: info.execution_support & GPU_EXECUTION_SUPPORT_DEPTH != 0,
         };
-        if !capabilities.supports_rendering() {
-            return Err(HandleError::Unsupported);
-        }
-
         let dialect = raw.query_dialect(0)?;
         Ok(Self {
             raw,
             dialect,
             capabilities,
         })
+    }
+
+    pub(crate) fn open(path: &str) -> HandleResult<Self> {
+        let raw = RawGpu::open(path)?;
+        let info = raw.query_info()?;
+        Self::from_gpu(raw, info)
     }
 
     pub(crate) const fn capabilities(&self) -> Capabilities {
@@ -1128,7 +1153,9 @@ impl Queue {
         if self.context_handle != context.handle_id()
             || resources.context_handle != context.handle_id()
             || submission.vertices.len() > MAX_IR_VERTICES
-            || submission.draws.is_empty()
+            || (submission.draws.is_empty()
+                && submission.clear_color.is_none()
+                && submission.clear_depth.is_none())
             || !ir_rect_is_within(submission.render_area, target.width, target.height)
             || submission
                 .clear_color

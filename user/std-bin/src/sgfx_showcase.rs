@@ -10,11 +10,14 @@ use framebuffer::DisplaySurface;
 use sgfx::ir::{
     AddressMode, BlendState, BufferDesc, BufferUsage, Color, CommandEncoder, DrawUniforms, Error,
     Extent2D, FilterMode, FragmentProgram, IndexFormat, LoadOp, PixelRect, PrimitiveTopology,
-    RasterState, RenderPassDesc, RenderPipelineDesc, ResourceTable, SamplerDesc, StoreOp,
-    TextureDesc, TextureFormat, TextureSampleMode, TextureUsage, TextureWrite, Transform,
-    VertexAttribute, VertexBufferLayout, VertexFormat,
+    RasterState, RenderPassDesc, RenderPipelineDesc, SamplerDesc, StoreOp, TextureDesc,
+    TextureFormat, TextureSampleMode, TextureUsage, TextureWrite, Transform, VertexAttribute,
+    VertexBufferLayout, VertexFormat,
 };
-use sgfx::{Device, SgfxImagePresentExt};
+
+mod sgfx_ir_support;
+
+use sgfx_ir_support::MappedTarget;
 
 const COLOR_VERTEX_STRIDE: usize = 32;
 const TEXTURE_VERTEX_STRIDE: usize = 24;
@@ -195,35 +198,20 @@ fn main() -> ExitCode {
         "failed to open primary display"
     );
     let display_info = attempt!(display.get_info(), "failed to query display");
-    let device = attempt!(Device::open("/dev/gpu0"), "failed to open GPU");
-    let capabilities = device.capabilities();
-    if !capabilities.supports_rendering()
-        || !capabilities.supports_presentation()
-        || !capabilities.supports_image_upload()
-    {
-        println!("sgfx_showcase: required GPU capabilities are unavailable");
-        return ExitCode::from(1);
-    }
-    let context = attempt!(device.create_context(), "failed to create context");
-    let image = Rc::new(attempt!(
-        context.create_image(display_info.width, display_info.height),
-        "failed to create presentation image"
-    ));
-    let queue = attempt!(context.create_queue(), "failed to create queue");
-
-    let offscreen_width = image.width().min(640).max(1);
-    let offscreen_height = image.height().min(400).max(1);
-    let screen_extent = attempt!(
-        Extent2D::new(image.width(), image.height()),
-        "invalid screen extent"
+    let mut target = attempt!(
+        MappedTarget::open(display_info.width, display_info.height),
+        "failed to create mapped SGFX target"
     );
+
+    let offscreen_width = target.width.min(640).max(1);
+    let offscreen_height = target.height.min(400).max(1);
     let offscreen_extent = attempt!(
         Extent2D::new(offscreen_width, offscreen_height),
         "invalid offscreen extent"
     );
     let mask_extent = attempt!(Extent2D::new(MASK_SIZE, MASK_SIZE), "invalid mask extent");
     let screen_area = attempt!(
-        PixelRect::new(0, 0, image.width(), image.height()),
+        PixelRect::new(0, 0, target.width, target.height),
         "invalid screen area"
     );
     let offscreen_area = attempt!(
@@ -252,17 +240,10 @@ fn main() -> ExitCode {
         "index buffer is too large"
     );
 
-    let resources = Rc::new(ResourceTable::new());
+    let resources = Rc::clone(&target.resources);
     let screen = attempt!(
-        resources.define_texture(attempt!(
-            TextureDesc::new(
-                TextureFormat::Bgra8Unorm,
-                screen_extent,
-                TextureUsage::RENDER_ATTACHMENT | TextureUsage::PRESENT,
-            ),
-            "invalid screen descriptor"
-        )),
-        "failed to define screen texture"
+        resources.texture_ref(target.texture),
+        "invalid screen texture"
     );
     let offscreen = attempt!(
         resources.define_texture(attempt!(
@@ -425,18 +406,9 @@ fn main() -> ExitCode {
         "failed to define sampler"
     );
 
-    let mut ir_resources = attempt!(
-        context.create_ir_resources(Rc::clone(&resources)),
-        "failed to create IR resource cache"
-    );
-    if let Err(error) = ir_resources.map_image(screen.id(), Rc::clone(&image)) {
-        return fail("failed to map presentation image", error);
-    }
-
     println!(
         "sgfx_showcase: animated {}x{} multi-pass IR scene",
-        image.width(),
-        image.height()
+        target.width, target.height
     );
     let white = attempt!(Color::rgba(1.0, 1.0, 1.0, 1.0), "invalid white color");
     let mut first_frame = true;
@@ -561,7 +533,7 @@ fn main() -> ExitCode {
                 return fail("failed to bind sampler", error);
             }
             if let Err(error) = pass.set_scissor(Some(attempt!(
-                inset_rect(image.width(), image.height()),
+                inset_rect(target.width, target.height),
                 "invalid screen scissor"
             ))) {
                 return fail("failed to set screen scissor", error);
@@ -636,10 +608,10 @@ fn main() -> ExitCode {
         }
 
         let commands = attempt!(encoder.finish(), "failed to finish IR commands");
-        if let Err(error) = queue.submit_ir(&context, &mut ir_resources, &commands) {
+        if let Err(error) = target.execute(&commands) {
             return fail("IR submission failed", error);
         }
-        if let Err(error) = image.present(&display) {
+        if let Err(error) = target.present(&display, None) {
             return fail("image present failed", error);
         }
         first_frame = false;

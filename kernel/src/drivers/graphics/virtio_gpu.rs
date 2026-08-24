@@ -23,8 +23,8 @@ use crate::{
             GpuBackendBuffer, GpuBackendBufferInfo, GpuBackendContext, GpuBackendContextInfo,
             GpuBackendDialectDescriptor, GpuBackendDialectInfo, GpuBackendImage,
             GpuBackendImageInfo, GpuBackendInfo, GpuBackendQueue, GpuBackendQueueInfo,
-            GpuBufferCreateInfo, GpuDeviceInfo, GpuDeviceState, GpuImageBackingInfo,
-            GpuImageCreateInfo, GpuImageUploadInfo,
+            GpuBackendSubmitError, GpuBufferCreateInfo, GpuDeviceInfo, GpuDeviceState,
+            GpuImageBackingInfo, GpuImageCreateInfo, GpuImageUploadInfo,
         },
         graphics::{
             FramebufferConfig, GpuDisplayResource, GraphicsDevice, PixelFormat,
@@ -72,6 +72,10 @@ const VIRTIO_GPU_RESP_OK_NODATA: u32 = 0x1100;
 const VIRTIO_GPU_RESP_OK_DISPLAY_INFO: u32 = 0x1101;
 const VIRTIO_GPU_RESP_OK_CAPSET_INFO: u32 = 0x1102;
 const VIRTIO_GPU_RESP_OK_CAPSET: u32 = 0x1103;
+// VirtIO GPU error responses occupy this protocol-defined range. They report
+// a rejected control command, not a transport failure.
+const VIRTIO_GPU_RESP_ERR_UNSPEC: u32 = 0x1200;
+const VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER: u32 = 0x1205;
 
 // VirtIO GPU command flags
 const VIRTIO_GPU_FLAG_FENCE: u32 = 1;
@@ -405,6 +409,42 @@ fn validate_execution_response(
         return Err("VirtIO GPU execution command returned an unexpected fence response");
     }
     Ok(())
+}
+
+/// Validate a response to an opaque VirGL command submission.
+///
+/// A VirtIO GPU error response is a rejection of this command stream. It must
+/// remain local to the submit so callers can reuse their queue and timeline.
+/// A malformed success response is not evidence of device loss either, so it
+/// is surfaced as temporarily unavailable rather than poisoning a timeline.
+fn validate_submit_response(
+    response: VirtioGpuCtrlHdr,
+    expected_fence_id: Option<u64>,
+) -> Result<(), GpuBackendSubmitError> {
+    if (VIRTIO_GPU_RESP_ERR_UNSPEC..=VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER)
+        .contains(&response.hdr_type)
+    {
+        return Err(GpuBackendSubmitError::Rejected(
+            "VirtIO GPU rejected the execution command stream",
+        ));
+    }
+    validate_execution_response(response, expected_fence_id)
+        .map_err(GpuBackendSubmitError::Unavailable)
+}
+
+/// Classify a synchronous control-queue transport failure during submission.
+///
+/// Only a timeout (or the permanent state left by one) proves that the device
+/// can no longer safely serve the queue. Allocation and descriptor pressure
+/// are retryable per-submit failures.
+fn classify_submit_transport_error(error: &'static str) -> GpuBackendSubmitError {
+    match error {
+        "VirtIO GPU control queue timed out"
+        | "VirtIO GPU control queue is unavailable after a timeout" => {
+            GpuBackendSubmitError::DeviceLost(error)
+        }
+        _ => GpuBackendSubmitError::Unavailable(error),
+    }
 }
 
 /// VirtIO GPU Device Core
@@ -1070,10 +1110,13 @@ impl VirtioGpuDeviceCore {
         context_id: u32,
         commands: &[u8],
         fence_id: Option<u64>,
-    ) -> Result<(), &'static str> {
-        self.require_virgl()?;
+    ) -> Result<(), GpuBackendSubmitError> {
+        self.require_virgl()
+            .map_err(GpuBackendSubmitError::Unavailable)?;
         if commands.is_empty() {
-            return Err("Cannot submit an empty GPU command stream");
+            return Err(GpuBackendSubmitError::Rejected(
+                "Cannot submit an empty GPU command stream",
+            ));
         }
 
         let header = VirtioGpuCmdSubmit3d {
@@ -1098,13 +1141,14 @@ impl VirtioGpuDeviceCore {
         cmd_buffer.extend_from_slice(commands);
 
         let mut resp_buffer = [0u8; core::mem::size_of::<VirtioGpuCtrlHdr>()];
-        self.send_control_bytes_with_resp_buffer(&cmd_buffer, &mut resp_buffer)?;
+        self.send_control_bytes_with_resp_buffer(&cmd_buffer, &mut resp_buffer)
+            .map_err(classify_submit_transport_error)?;
         // SAFETY: `resp_buffer` contains exactly one VirtIO GPU control header
         // written by the synchronous control queue response path and may be
         // unaligned because it is byte storage.
         let response =
             unsafe { core::ptr::read_unaligned(resp_buffer.as_ptr() as *const VirtioGpuCtrlHdr) };
-        validate_execution_response(response, fence_id)
+        validate_submit_response(response, fence_id)
     }
 
     /// Get display information from the device
@@ -1972,10 +2016,11 @@ impl GpuBackendQueue for VirtioGpuBackendQueue {
         GpuBackendQueueInfo::new(GPU_MAX_OPAQUE_COMMAND_SIZE)
     }
 
-    fn submit(&self, commands: &[u8]) -> Result<(), &'static str> {
+    fn submit(&self, commands: &[u8]) -> Result<(), GpuBackendSubmitError> {
         let core = self.core.lock();
-        core.require_virgl()?;
-        let fence_id = core.next_acceleration_fence_id()?;
+        let fence_id = core
+            .next_acceleration_fence_id()
+            .map_err(GpuBackendSubmitError::Unavailable)?;
         core.submit_acceleration_commands(self.context_id, commands, Some(fence_id))
     }
 }
@@ -2219,6 +2264,27 @@ mod tests {
         assert_eq!(
             virgl_image_bind(GPU_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT),
             PIPE_BIND_DEPTH_STENCIL
+        );
+    }
+
+    #[test_case]
+    fn virgl_submit_rejection_is_not_device_loss() {
+        let response = VirtioGpuCtrlHdr {
+            hdr_type: VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER,
+            flags: 0,
+            fence_id: 0,
+            ctx_id: 0,
+            padding: 0,
+        };
+        assert_eq!(
+            validate_submit_response(response, None),
+            Err(GpuBackendSubmitError::Rejected(
+                "VirtIO GPU rejected the execution command stream",
+            ))
+        );
+        assert_eq!(
+            classify_submit_transport_error("VirtIO GPU control queue timed out"),
+            GpuBackendSubmitError::DeviceLost("VirtIO GPU control queue timed out")
         );
     }
 

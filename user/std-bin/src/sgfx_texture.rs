@@ -6,7 +6,13 @@ use std::time::Duration;
 use std::vec::Vec;
 
 use framebuffer::DisplaySurface;
-use sgfx::{Color, CompositionPass, Device, PixelRect, SgfxImagePresentExt, SourceAlpha};
+use sgfx::ir::{Color, LoadOp, PixelRect};
+
+mod sgfx_ir_support;
+
+use sgfx_ir_support::{
+    MappedTarget, Quad, QuadRenderer, SampledRect, define_bgra_texture, upload_bgra,
+};
 
 const MAX_TEXTURE_SIZE: u32 = 256;
 const MARGIN: u32 = 16;
@@ -62,56 +68,41 @@ fn main() -> ExitCode {
         return ExitCode::from(1);
     }
 
-    let device = match Device::open("/dev/gpu0") {
-        Ok(device) => device,
-        Err(error) => return fail("failed to open GPU", error),
+    let mut target = match MappedTarget::open(display_info.width, display_info.height) {
+        Ok(target) => target,
+        Err(error) => return fail("failed to create mapped SGFX target", error),
     };
-    let capabilities = device.capabilities();
-    if !capabilities.supports_rendering()
-        || !capabilities.supports_presentation()
-        || !capabilities.supports_image_upload()
-    {
-        println!("sgfx_texture: texture composition is unsupported");
-        return ExitCode::from(1);
-    }
-
-    let context = match device.create_context() {
-        Ok(context) => context,
-        Err(error) => return fail("failed to create context", error),
-    };
-    let image = match context.create_image(display_info.width, display_info.height) {
-        Ok(image) => image,
-        Err(error) => return fail("failed to create render target", error),
-    };
-    let available_width = (image.width() - MARGIN * 3) / 2;
-    let available_height = image.height() - MARGIN * 2;
+    let available_width = (target.width - MARGIN * 3) / 2;
+    let available_height = target.height - MARGIN * 2;
     let texture_size = MAX_TEXTURE_SIZE.min(available_width).min(available_height);
     if texture_size == 0 {
         println!("sgfx_texture: no room for texture panels");
         return ExitCode::from(1);
     }
-    let texture = match context.create_sampled_bgra_texture(texture_size, texture_size) {
+    let texture = match define_bgra_texture(target.resources.as_ref(), texture_size, texture_size) {
         Ok(texture) => texture,
         Err(error) => return fail("failed to create sampled texture", error),
     };
     let initial_pixels = checkerboard_bgra(texture_size);
-    if let Err(error) = context.upload_texture_bgra(
-        &texture,
-        &initial_pixels,
+    if let Err(error) = upload_bgra(
+        &mut target,
+        texture,
+        PixelRect::new(0, 0, texture_size, texture_size).expect("valid texture extent"),
         texture_size * 4,
-        PixelRect::new(0, 0, texture_size, texture_size),
+        &initial_pixels,
     ) {
         return fail("failed to upload initial texture", error);
     }
-    let queue = match context.create_queue() {
-        Ok(queue) => queue,
-        Err(error) => return fail("failed to create queue", error),
+    let renderer = match QuadRenderer::define(target.resources.as_ref(), 4) {
+        Ok(renderer) => renderer,
+        Err(error) => return fail("failed to define quad renderer", error),
     };
 
-    let top = (image.height() - texture_size) / 2;
-    let left_panel = PixelRect::new(MARGIN, top, texture_size, texture_size);
-    let right_panel = PixelRect::new(MARGIN * 2 + texture_size, top, texture_size, texture_size);
-    let source = PixelRect::new(0, 0, texture_size, texture_size);
+    let top = (target.height - texture_size) / 2;
+    let left_panel = PixelRect::new(MARGIN, top, texture_size, texture_size).expect("valid panel");
+    let right_panel = PixelRect::new(MARGIN * 2 + texture_size, top, texture_size, texture_size)
+        .expect("valid panel");
+    let source = PixelRect::new(0, 0, texture_size, texture_size).expect("valid source");
     let patch_size = 32.min(texture_size);
     let patch_x = (texture_size - patch_size) / 2;
     let patch_y = (texture_size - patch_size) / 2;
@@ -124,54 +115,56 @@ fn main() -> ExitCode {
     let mut frame = 0u32;
     loop {
         let patch = animated_patch_bgra(patch_size, frame);
-        if let Err(error) = context.upload_texture_bgra(
-            &texture,
-            &patch,
+        if let Err(error) = upload_bgra(
+            &mut target,
+            texture,
+            PixelRect::new(patch_x, patch_y, patch_size, patch_size).expect("valid patch"),
             patch_size * 4,
-            PixelRect::new(patch_x, patch_y, patch_size, patch_size),
+            &patch,
         ) {
             return fail("failed to upload texture damage", error);
         }
 
-        let mut composition = match CompositionPass::new(&image, Color::rgba(0.08, 0.1, 0.14, 1.0))
-        {
-            Ok(composition) => composition,
-            Err(error) => return fail("failed to begin composition", error),
+        let white = Color::rgba(1.0, 1.0, 1.0, 1.0).expect("valid white");
+        let ignored_alpha = Color::rgba(1.0, 1.0, 1.0, 0.8).expect("valid tint");
+        let left_texture = SampledRect {
+            texture,
+            texture_width: texture_size,
+            texture_height: texture_size,
+            destination: left_panel,
+            source,
+            tint: white,
+            ignore_source_alpha: false,
+            clip: None,
         };
-        if let Err(error) =
-            composition.draw_solid_rect(left_panel, Color::rgba(0.15, 0.25, 0.85, 1.0), None)
-        {
-            return fail("failed to draw left panel", error);
-        }
-        if let Err(error) = composition.draw_textured_rect(
-            &texture,
-            left_panel,
-            source,
-            1.0,
-            SourceAlpha::Respect,
-            None,
+        let right_texture = SampledRect {
+            destination: right_panel,
+            tint: ignored_alpha,
+            ignore_source_alpha: true,
+            ..left_texture
+        };
+        let operations = [
+            Quad::Solid {
+                destination: left_panel,
+                color: Color::rgba(0.15, 0.25, 0.85, 1.0).expect("valid color"),
+                clip: None,
+            },
+            Quad::Sampled(left_texture),
+            Quad::Solid {
+                destination: right_panel,
+                color: Color::rgba(0.15, 0.75, 0.25, 1.0).expect("valid color"),
+                clip: None,
+            },
+            Quad::Sampled(right_texture),
+        ];
+        if let Err(error) = renderer.submit(
+            &mut target,
+            LoadOp::Clear(Color::rgba(0.08, 0.1, 0.14, 1.0).expect("valid clear color")),
+            &operations,
         ) {
-            return fail("failed to draw alpha texture", error);
-        }
-        if let Err(error) =
-            composition.draw_solid_rect(right_panel, Color::rgba(0.15, 0.75, 0.25, 1.0), None)
-        {
-            return fail("failed to draw right panel", error);
-        }
-        if let Err(error) = composition.draw_textured_rect(
-            &texture,
-            right_panel,
-            source,
-            0.8,
-            SourceAlpha::Ignore,
-            None,
-        ) {
-            return fail("failed to draw opaque texture", error);
-        }
-        if let Err(error) = queue.submit_composition(&composition) {
             return fail("composition submit failed", error);
         }
-        if let Err(error) = image.present(&display) {
+        if let Err(error) = target.present(&display, None) {
             return fail("image present failed", error);
         }
 

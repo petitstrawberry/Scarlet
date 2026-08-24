@@ -3,7 +3,7 @@
 use alloc::sync::Arc;
 
 use super::{GPU_BACKEND_ID_BYTES, GPU_BACKEND_INFO_BYTES};
-use crate::device::graphics::GpuDisplayResource;
+use crate::device::graphics::{GpuDisplayResource, PixelFormat};
 
 /// The device is not usable for GPU control.
 pub const GPU_DEVICE_STATE_UNAVAILABLE: u32 = 0;
@@ -349,6 +349,162 @@ pub struct GpuImageCreateInfo {
     pub height: u32,
 }
 
+/// Maximum image planes represented by the generic GPU layout model.
+pub const GPU_BACKEND_IMAGE_MAX_PLANES: usize = 4;
+/// Generic modifier value for an uncompressed linear image.
+pub const GPU_IMAGE_MODIFIER_LINEAR: u64 = 0;
+
+/// Immutable layout of one backend image plane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GpuBackendImagePlaneLayout {
+    /// Byte offset of the first plane element in the backing allocation.
+    pub offset: u64,
+    /// Number of bytes occupied by this plane.
+    pub size: u64,
+    /// Number of bytes between adjacent block rows.
+    pub row_pitch: u32,
+    /// Number of bytes between adjacent array layers.
+    pub array_pitch: u32,
+    /// Width of one stored block in pixels.
+    pub block_width: u16,
+    /// Height of one stored block in pixels.
+    pub block_height: u16,
+    /// Number of bytes in one stored block.
+    pub bytes_per_block: u16,
+}
+
+impl GpuBackendImagePlaneLayout {
+    /// Empty plane value used for unused entries in the fixed-capacity array.
+    pub const EMPTY: Self = Self {
+        offset: 0,
+        size: 0,
+        row_pitch: 0,
+        array_pitch: 0,
+        block_width: 0,
+        block_height: 0,
+        bytes_per_block: 0,
+    };
+}
+
+/// Immutable backend-selected image layout and allocation requirements.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GpuBackendImageLayout {
+    /// Backend-neutral or backend-specific memory modifier.
+    pub modifier: u64,
+    /// Exact bytes required by all image planes.
+    pub total_size: u64,
+    /// Required physical backing alignment in bytes.
+    pub alignment: u64,
+    /// Number of initialized entries in `planes`.
+    pub plane_count: u32,
+    /// Fixed-capacity plane layouts.
+    pub planes: [GpuBackendImagePlaneLayout; GPU_BACKEND_IMAGE_MAX_PLANES],
+}
+
+impl GpuBackendImageLayout {
+    /// Build the default one-plane, tightly packed 32-bit image layout.
+    ///
+    /// # Arguments
+    ///
+    /// * `create` - Validated generic image descriptor.
+    ///
+    /// # Returns
+    ///
+    /// A linear layout, or an error when its size cannot be represented.
+    pub fn tight_32bpp(create: GpuImageCreateInfo) -> Result<Self, &'static str> {
+        let row_pitch = create
+            .width
+            .checked_mul(4)
+            .ok_or("GPU image row pitch overflows")?;
+        Self::linear_32bpp(create, row_pitch, 1)
+    }
+
+    /// Build a one-plane linear 32-bit layout with backend-selected pitch.
+    ///
+    /// # Arguments
+    ///
+    /// * `create` - Validated generic image descriptor.
+    /// * `row_pitch` - Number of bytes between adjacent rows.
+    /// * `alignment` - Required physical backing alignment.
+    ///
+    /// # Returns
+    ///
+    /// A validated linear layout, or an error for invalid pitch/alignment/size.
+    pub fn linear_32bpp(
+        create: GpuImageCreateInfo,
+        row_pitch: u32,
+        alignment: u64,
+    ) -> Result<Self, &'static str> {
+        let row_bytes = create
+            .width
+            .checked_mul(4)
+            .ok_or("GPU image row size overflows")?;
+        if create.width == 0
+            || create.height == 0
+            || row_pitch < row_bytes
+            || alignment == 0
+            || !alignment.is_power_of_two()
+        {
+            return Err("GPU image linear layout is invalid");
+        }
+        let size = u64::from(row_pitch)
+            .checked_mul(u64::from(create.height))
+            .ok_or("GPU image layout size overflows")?;
+        let array_pitch =
+            u32::try_from(size).map_err(|_| "GPU image layer pitch exceeds the backend ABI")?;
+        let mut planes = [GpuBackendImagePlaneLayout::EMPTY; GPU_BACKEND_IMAGE_MAX_PLANES];
+        planes[0] = GpuBackendImagePlaneLayout {
+            offset: 0,
+            size,
+            row_pitch,
+            array_pitch,
+            block_width: 1,
+            block_height: 1,
+            bytes_per_block: 4,
+        };
+        Ok(Self {
+            modifier: GPU_IMAGE_MODIFIER_LINEAR,
+            total_size: size,
+            alignment,
+            plane_count: 1,
+            planes,
+        })
+    }
+
+    /// Validate structural bounds required by generic allocation and upload.
+    ///
+    /// # Returns
+    ///
+    /// `true` when initialized planes are non-overflowing and fit `total_size`.
+    pub fn is_valid(&self) -> bool {
+        if self.total_size == 0
+            || self.alignment == 0
+            || !self.alignment.is_power_of_two()
+            || self.plane_count == 0
+            || self.plane_count as usize > GPU_BACKEND_IMAGE_MAX_PLANES
+        {
+            return false;
+        }
+        for plane in &self.planes[..self.plane_count as usize] {
+            if plane.size == 0
+                || plane.row_pitch == 0
+                || plane.array_pitch == 0
+                || plane.block_width == 0
+                || plane.block_height == 0
+                || plane.bytes_per_block == 0
+                || plane
+                    .offset
+                    .checked_add(plane.size)
+                    .is_none_or(|end| end > self.total_size)
+            {
+                return false;
+            }
+        }
+        self.planes[self.plane_count as usize..]
+            .iter()
+            .all(|plane| *plane == GpuBackendImagePlaneLayout::EMPTY)
+    }
+}
 /// Backend-neutral physical backing for a GPU image resource.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GpuImageBackingInfo {
@@ -502,6 +658,42 @@ impl GpuBackendImageInfo {
     }
 }
 
+/// Linear scanout layout exported by a backend image.
+///
+/// The generic [`crate::device::gpu::GpuImage`] combines this layout with its
+/// real backing allocation and supplies the strong lifetime owner required by
+/// the display subsystem. Backends must not fabricate an owner or physical
+/// address in this descriptor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GpuBackendLinearDisplayInfo {
+    /// Byte offset of pixel `(0, 0)` within the image backing.
+    pub offset: u64,
+    /// Number of bytes between adjacent rows.
+    pub stride: u32,
+    /// Pixel format consumed by the display controller.
+    pub format: PixelFormat,
+}
+
+impl GpuBackendLinearDisplayInfo {
+    /// Build a linear display layout descriptor.
+    ///
+    /// # Arguments
+    ///
+    /// * `offset` - Byte offset of pixel `(0, 0)` in the backing allocation.
+    /// * `stride` - Number of bytes between adjacent rows.
+    /// * `format` - Display-controller pixel format.
+    ///
+    /// # Returns
+    ///
+    /// A backend-neutral linear layout descriptor.
+    pub const fn new(offset: u64, stride: u32, format: PixelFormat) -> Self {
+        Self {
+            offset,
+            stride,
+            format,
+        }
+    }
+}
 /// Backend image retained by a [`crate::device::gpu::GpuImage`].
 pub trait GpuBackendImage: Send + Sync {
     /// Query immutable backend-neutral image information.
@@ -525,6 +717,17 @@ pub trait GpuBackendImage: Send + Sync {
     /// An internal display descriptor, or `None` when the image cannot be
     /// presented by the display subsystem.
     fn display_resource(&self) -> Option<GpuDisplayResource>;
+
+    /// Return a linear scanout layout backed by this image's generic allocation.
+    ///
+    /// # Returns
+    ///
+    /// The layout needed to construct a cross-device display resource, or
+    /// `None` when the image is not linear or is not presentable. The generic
+    /// image object supplies the physical address and lifetime owner.
+    fn linear_display_info(&self) -> Option<GpuBackendLinearDisplayInfo> {
+        None
+    }
 }
 
 /// Backend execution context retained by a [`crate::device::gpu::GpuContext`].
@@ -551,8 +754,9 @@ pub trait GpuBackendContext: Send + Sync {
     ///
     /// # Returns
     ///
-    /// An opaque command resource token authorized for this context, or an
-    /// error when the image does not belong to this backend or cannot attach.
+    /// A non-zero opaque attachment token authorized only for this context, or
+    /// an error when the image does not belong to this backend or cannot attach.
+    /// This token is not required to equal the image resource identity token.
     fn attach_image(&self, _image: &dyn GpuBackendImage) -> Result<u64, &'static str> {
         Err("GPU backend context does not support image attachment")
     }
@@ -616,7 +820,8 @@ pub trait GpuBackendContext: Send + Sync {
     ///
     /// # Returns
     ///
-    /// An opaque command resource token authorized for this context.
+    /// A non-zero opaque attachment token authorized only for this context.
+    /// This token is not required to equal the buffer resource identity token.
     fn attach_buffer(&self, _buffer: &dyn GpuBackendBuffer) -> Result<u64, &'static str> {
         Err("GPU backend context does not support buffer attachment")
     }
@@ -633,6 +838,22 @@ pub trait GpuBackendContext: Send + Sync {
     fn detach_buffer(&self, _buffer: &dyn GpuBackendBuffer) -> Result<(), &'static str> {
         Err("GPU backend context does not support buffer detachment")
     }
+}
+
+/// Classified failure from a backend queue submission.
+///
+/// Rejected command bytes are a per-submit error and must not poison the queue
+/// or a timeline. Only a confirmed hardware fault, timeout, or reset should be
+/// reported as [`Self::DeviceLost`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GpuBackendSubmitError {
+    /// The copied backend command payload is invalid or unauthorized.
+    Rejected(&'static str),
+    /// The backend cannot execute this submit in its current state, but has not
+    /// confirmed that the device was lost.
+    Unavailable(&'static str),
+    /// A hardware timeout, fault, or reset made the device unusable.
+    DeviceLost(&'static str),
 }
 
 /// Backend execution queue retained by a [`crate::device::gpu::GpuQueue`].
@@ -654,7 +875,7 @@ pub trait GpuBackendQueue: Send + Sync {
     ///
     /// Nothing after the backend has completed the submitted work, or an error
     /// if the backend rejected or failed the submission.
-    fn submit(&self, commands: &[u8]) -> Result<(), &'static str>;
+    fn submit(&self, commands: &[u8]) -> Result<(), GpuBackendSubmitError>;
 }
 
 /// A backend that provides GPU information and optional execution capabilities.
@@ -695,6 +916,44 @@ pub trait GpuBackend: Send + Sync {
         _dialect: GpuBackendDialectDescriptor,
     ) -> Result<Arc<dyn GpuBackendContext>, &'static str> {
         Err("GPU backend does not support execution contexts")
+    }
+
+    /// Plan immutable image layout before the generic backing is allocated.
+    ///
+    /// # Arguments
+    ///
+    /// * `create` - Validated backend-neutral image creation parameters.
+    ///
+    /// # Returns
+    ///
+    /// Exact allocation and plane layout requirements. The default preserves
+    /// the existing tightly packed 32-bit layout for backends such as VirtIO.
+    fn plan_image(
+        &self,
+        create: GpuImageCreateInfo,
+    ) -> Result<GpuBackendImageLayout, &'static str> {
+        GpuBackendImageLayout::tight_32bpp(create)
+    }
+
+    /// Create a backend image using the exact pre-allocation layout plan.
+    ///
+    /// # Arguments
+    ///
+    /// * `create` - Validated backend-neutral image creation parameters.
+    /// * `layout` - Immutable layout returned by [`Self::plan_image`].
+    /// * `backing` - Stable contiguous backing owned by the generic capability.
+    ///
+    /// # Returns
+    ///
+    /// A real backend image. Existing backends may inherit the compatibility
+    /// implementation; native backends should verify and retain `layout`.
+    fn create_image_with_layout(
+        &self,
+        create: GpuImageCreateInfo,
+        _layout: GpuBackendImageLayout,
+        backing: GpuImageBackingInfo,
+    ) -> Result<Arc<dyn GpuBackendImage>, &'static str> {
+        self.create_image(create, backing)
     }
 
     /// Create a backend-owned image with generic usage and kernel-owned backing.

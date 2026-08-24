@@ -22,12 +22,18 @@ pub use sgfx_core::{backend, ir};
 
 #[cfg(all(not(target_os = "scarlet"), feature = "backend-wgpu"))]
 mod host;
-#[cfg(all(target_os = "scarlet", feature = "backend-scarlet-virgl"))]
+#[cfg(all(
+    target_os = "scarlet",
+    any(feature = "backend-scarlet-virgl", feature = "backend-scarlet-adreno")
+))]
 mod scarlet;
 
 #[cfg(all(not(target_os = "scarlet"), feature = "backend-wgpu"))]
 pub use host::{Executor, MappedTargetSession, WindowContext};
-#[cfg(all(target_os = "scarlet", feature = "backend-scarlet-virgl"))]
+#[cfg(all(
+    target_os = "scarlet",
+    any(feature = "backend-scarlet-virgl", feature = "backend-scarlet-adreno")
+))]
 pub use scarlet::{Capabilities, Context, Device, Executor, Handle, ImageRef, MappedTargetSession};
 
 /// Environment variable used to override automatic SGFX backend selection.
@@ -42,8 +48,8 @@ pub enum BackendKind {
     Metal,
     /// SGFX VirGL execution through the Scarlet GPU ABI.
     ScarletVirgl,
-    /// SGFX AGX execution through the Scarlet GPU ABI.
-    ScarletAgx,
+    /// SGFX native Qualcomm Adreno execution through the Scarlet GPU ABI.
+    ScarletAdreno,
 }
 
 impl BackendKind {
@@ -57,7 +63,7 @@ impl BackendKind {
             Self::Wgpu => "wgpu",
             Self::Metal => "metal",
             Self::ScarletVirgl => "scarlet-virgl",
-            Self::ScarletAgx => "scarlet-agx",
+            Self::ScarletAdreno => "scarlet-adreno",
         }
     }
 }
@@ -80,8 +86,8 @@ pub enum BackendPreference {
     Metal,
     /// Require Scarlet/VirGL execution.
     ScarletVirgl,
-    /// Require Scarlet/AGX execution.
-    ScarletAgx,
+    /// Require native Scarlet/Adreno execution.
+    ScarletAdreno,
 }
 
 impl BackendPreference {
@@ -100,7 +106,7 @@ impl BackendPreference {
             "wgpu" => Ok(Self::Wgpu),
             "metal" => Ok(Self::Metal),
             "scarlet-virgl" | "virgl" => Ok(Self::ScarletVirgl),
-            "scarlet-agx" | "agx" => Ok(Self::ScarletAgx),
+            "scarlet-adreno" | "adreno" => Ok(Self::ScarletAdreno),
             _ => Err(Error::InvalidBackendPreference),
         }
     }
@@ -135,6 +141,30 @@ pub enum Error {
     /// A Scarlet/VirGL IR materialization or execution operation failed.
     #[cfg(all(target_os = "scarlet", feature = "backend-scarlet-virgl"))]
     ScarletVirglIr(sgfx_backend_scarlet_virgl::IrSubmitError),
+    /// A Scarlet GPU control connection could not be opened or queried.
+    #[cfg(all(
+        target_os = "scarlet",
+        any(feature = "backend-scarlet-virgl", feature = "backend-scarlet-adreno")
+    ))]
+    ScarletGpu,
+    /// The opened Scarlet GPU does not match an explicitly requested backend.
+    #[cfg(all(
+        target_os = "scarlet",
+        any(feature = "backend-scarlet-virgl", feature = "backend-scarlet-adreno")
+    ))]
+    BackendDeviceMismatch(BackendKind),
+    /// No compiled Scarlet backend supports the opened GPU.
+    #[cfg(all(
+        target_os = "scarlet",
+        any(feature = "backend-scarlet-virgl", feature = "backend-scarlet-adreno")
+    ))]
+    ScarletBackendUnsupported,
+    /// A Scarlet/Adreno device or context operation failed.
+    #[cfg(all(target_os = "scarlet", feature = "backend-scarlet-adreno"))]
+    ScarletAdrenoHandle(sgfx_backend_scarlet_adreno::HandleError),
+    /// A Scarlet/Adreno IR materialization or execution operation failed.
+    #[cfg(all(target_os = "scarlet", feature = "backend-scarlet-adreno"))]
+    ScarletAdrenoIr(sgfx_backend_scarlet_adreno::IrSubmitError),
 }
 
 impl fmt::Display for Error {
@@ -156,6 +186,36 @@ impl fmt::Display for Error {
             Self::ScarletVirglIr(error) => {
                 write!(formatter, "SGFX Scarlet/VirGL execution failed: {error:?}")
             }
+            #[cfg(all(
+                target_os = "scarlet",
+                any(feature = "backend-scarlet-virgl", feature = "backend-scarlet-adreno")
+            ))]
+            Self::ScarletGpu => formatter.write_str("SGFX Scarlet GPU control operation failed"),
+            #[cfg(all(
+                target_os = "scarlet",
+                any(feature = "backend-scarlet-virgl", feature = "backend-scarlet-adreno")
+            ))]
+            Self::BackendDeviceMismatch(backend) => {
+                write!(
+                    formatter,
+                    "opened Scarlet GPU does not support SGFX backend {backend}"
+                )
+            }
+            #[cfg(all(
+                target_os = "scarlet",
+                any(feature = "backend-scarlet-virgl", feature = "backend-scarlet-adreno")
+            ))]
+            Self::ScarletBackendUnsupported => {
+                formatter.write_str("no compiled SGFX Scarlet backend supports the opened GPU")
+            }
+            #[cfg(all(target_os = "scarlet", feature = "backend-scarlet-adreno"))]
+            Self::ScarletAdrenoHandle(error) => {
+                write!(formatter, "SGFX Scarlet/Adreno device failed: {error:?}")
+            }
+            #[cfg(all(target_os = "scarlet", feature = "backend-scarlet-adreno"))]
+            Self::ScarletAdrenoIr(error) => {
+                write!(formatter, "SGFX Scarlet/Adreno execution failed: {error:?}")
+            }
         }
     }
 }
@@ -163,13 +223,14 @@ impl fmt::Display for Error {
 /// Result returned by the SGFX frontend.
 pub type Result<T> = core::result::Result<T, Error>;
 
-/// Selected SGFX execution environment.
+/// Configured SGFX execution environment.
 pub struct Instance {
     backend: BackendKind,
+    preference: BackendPreference,
 }
 
 impl Instance {
-    /// Select an SGFX backend using [`BACKEND_ENV`] and target defaults.
+    /// Configure an SGFX backend using [`BACKEND_ENV`] and target defaults.
     ///
     /// # Returns
     ///
@@ -178,7 +239,7 @@ impl Instance {
         Self::with_preference(BackendPreference::from_environment()?)
     }
 
-    /// Select an SGFX backend from an explicit preference.
+    /// Configure an SGFX backend from an explicit preference.
     ///
     /// # Arguments
     ///
@@ -190,16 +251,30 @@ impl Instance {
     pub fn with_preference(preference: BackendPreference) -> Result<Self> {
         Ok(Self {
             backend: resolve_backend(preference)?,
+            preference,
         })
     }
 
-    /// Return the selected complete backend.
+    /// Return the configured backend's default identity.
     ///
     /// # Returns
     ///
-    /// The stable selected backend identity.
+    /// The stable configured backend identity. With [`BackendPreference::Auto`]
+    /// on Scarlet, this is the compiled default used before opening a GPU; use
+    /// [`Device::backend`] after [`Device::open`] or [`Instance::open_device`]
+    /// to obtain the backend actually selected from the GPU's identifier.
     pub const fn backend(&self) -> BackendKind {
         self.backend
+    }
+
+    /// Return the unresolved preference used when opening a device.
+    ///
+    /// # Returns
+    ///
+    /// The requested preference. In particular, [`BackendPreference::Auto`]
+    /// remains unresolved until a Scarlet GPU has been opened and queried.
+    pub const fn preference(&self) -> BackendPreference {
+        self.preference
     }
 }
 
@@ -209,7 +284,7 @@ fn resolve_backend(preference: BackendPreference) -> Result<BackendKind> {
         BackendPreference::Wgpu => require_backend(BackendKind::Wgpu),
         BackendPreference::Metal => require_backend(BackendKind::Metal),
         BackendPreference::ScarletVirgl => require_backend(BackendKind::ScarletVirgl),
-        BackendPreference::ScarletAgx => require_backend(BackendKind::ScarletAgx),
+        BackendPreference::ScarletAdreno => require_backend(BackendKind::ScarletAdreno),
     }
 }
 
@@ -217,6 +292,14 @@ fn default_backend() -> Result<BackendKind> {
     #[cfg(all(target_os = "scarlet", feature = "backend-scarlet-virgl"))]
     {
         return Ok(BackendKind::ScarletVirgl);
+    }
+    #[cfg(all(
+        target_os = "scarlet",
+        not(feature = "backend-scarlet-virgl"),
+        feature = "backend-scarlet-adreno"
+    ))]
+    {
+        return Ok(BackendKind::ScarletAdreno);
     }
     #[cfg(all(not(target_os = "scarlet"), feature = "backend-wgpu"))]
     {
@@ -227,7 +310,13 @@ fn default_backend() -> Result<BackendKind> {
 }
 
 const fn default_backend_kind() -> BackendKind {
-    if cfg!(target_os = "scarlet") {
+    if cfg!(all(
+        target_os = "scarlet",
+        not(feature = "backend-scarlet-virgl"),
+        feature = "backend-scarlet-adreno"
+    )) {
+        BackendKind::ScarletAdreno
+    } else if cfg!(target_os = "scarlet") {
         BackendKind::ScarletVirgl
     } else {
         BackendKind::Wgpu
@@ -242,7 +331,10 @@ fn require_backend(backend: BackendKind) -> Result<BackendKind> {
             target_os = "scarlet",
             feature = "backend-scarlet-virgl"
         )),
-        BackendKind::ScarletAgx => false,
+        BackendKind::ScarletAdreno => cfg!(all(
+            target_os = "scarlet",
+            feature = "backend-scarlet-adreno"
+        )),
     };
     if available {
         Ok(backend)
@@ -286,6 +378,10 @@ mod tests {
         assert_eq!(
             BackendPreference::parse("virgl").unwrap(),
             BackendPreference::ScarletVirgl
+        );
+        assert_eq!(
+            BackendPreference::parse("adreno").unwrap(),
+            BackendPreference::ScarletAdreno
         );
         assert!(matches!(
             BackendPreference::parse("unknown"),

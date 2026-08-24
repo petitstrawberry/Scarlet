@@ -4,15 +4,16 @@ use alloc::{sync::Arc, vec::Vec};
 
 use super::connection::{read_user_value, write_user_value};
 use super::{
-    GPU_ABI_VERSION, GPU_CONTEXT_ATTACH_IMAGE, GPU_CONTEXT_DETACH_IMAGE, GPU_CONTEXT_QUERY,
-    GPU_CONTEXT_TRANSFER_IMPORTED_IMAGE_BGRA, GPU_CONTEXT_UPLOAD_IMAGE_BGRA, GPU_CREATE_QUEUE,
-    GPU_MAX_OPAQUE_COMMAND_SIZE, GPU_QUEUE_QUERY, GPU_QUEUE_SUBMIT,
+    GPU_ABI_VERSION, GPU_CONTEXT_ATTACH_IMAGE, GPU_CONTEXT_DETACH_BUFFER, GPU_CONTEXT_DETACH_IMAGE,
+    GPU_CONTEXT_QUERY, GPU_CONTEXT_TRANSFER_IMPORTED_IMAGE_BGRA, GPU_CONTEXT_UPLOAD_IMAGE_BGRA,
+    GPU_CREATE_QUEUE, GPU_MAX_OPAQUE_COMMAND_SIZE, GPU_QUEUE_QUERY, GPU_QUEUE_SUBMIT,
     GPU_QUEUE_SUBMIT_FLAG_SIGNAL_TIMELINE, GPU_QUEUE_SUBMIT_FLAGS_VALID, GPU_RESULT_INVALID_ABI,
     GPU_RESULT_INVALID_ARGUMENT, GPU_RESULT_INVALID_STATE, GPU_RESULT_OUT_OF_RESOURCES,
     GpuBackendBuffer, GpuBackendContext, GpuBackendContextInfo, GpuBackendImage, GpuBackendQueue,
     GpuBackendQueueInfo, GpuBuffer, GpuContextAttachBuffer, GpuContextAttachImage,
-    GpuContextDetachImage, GpuContextInfo, GpuContextTransferImportedImageBgra,
-    GpuContextUploadImageBgra, GpuCreateQueue, GpuImage, GpuObject, GpuQueueInfo, GpuQueueSubmit,
+    GpuContextDetachBuffer, GpuContextDetachImage, GpuContextInfo,
+    GpuContextTransferImportedImageBgra, GpuContextUploadImageBgra, GpuCreateQueue, GpuImage,
+    GpuObject, GpuQueueInfo, GpuQueueSubmit,
 };
 use crate::library::std::usercopy::copy_from_user;
 use crate::object::KernelObject;
@@ -96,7 +97,8 @@ impl GpuContext {
     ///
     /// # Returns
     ///
-    /// The opaque command resource token authorized for this context.
+    /// A non-zero opaque attachment token authorized only for this context. It
+    /// is distinct from the image's backend resource identity token.
     pub fn attach_image(&self, image: &GpuImage) -> Result<u64, &'static str> {
         let backend_image = image.backend_image();
         let mut attached_images = self.attached_images.lock();
@@ -110,7 +112,7 @@ impl GpuContext {
             .try_reserve(1)
             .map_err(|_| "Failed to retain GPU image for context lifetime")?;
         let token = self.backend_context.attach_image(backend_image.as_ref())?;
-        if token == 0 || token != backend_image.query_info().command_resource_token {
+        if token == 0 {
             let _ = self.backend_context.detach_image(backend_image.as_ref());
             return Err("GPU backend returned an invalid image attachment token");
         }
@@ -151,11 +153,11 @@ impl GpuContext {
     ///
     /// # Returns
     ///
-    /// The opaque command resource token authorized for this context.
+    /// A non-zero opaque attachment token authorized only for this context. It
+    /// is distinct from the buffer's backend resource identity token.
     pub fn attach_buffer(&self, buffer: &GpuBuffer) -> Result<u64, &'static str> {
         let backend_buffer = buffer.backend_buffer();
         let backing = buffer.backing();
-        let backend_info = backend_buffer.query_info();
         let mut attached_buffers = self.attached_buffers.lock();
         attached_buffers
             .try_reserve(1)
@@ -163,7 +165,7 @@ impl GpuContext {
         let token = self
             .backend_context
             .attach_buffer(backend_buffer.as_ref())?;
-        if token == 0 || token != backend_info.command_resource_token {
+        if token == 0 {
             let _ = self.backend_context.detach_buffer(backend_buffer.as_ref());
             return Err("GPU backend returned an invalid buffer attachment token");
         }
@@ -172,6 +174,30 @@ impl GpuContext {
             _backing: backing,
         });
         Ok(token)
+    }
+
+    /// Detach a buffer and release the context's retained backing reference.
+    ///
+    /// # Arguments
+    ///
+    /// * `buffer` - Buffer capability currently attached to this context.
+    ///
+    /// # Returns
+    ///
+    /// Nothing after the backend detached one matching buffer attachment and the
+    /// context released its retained buffer/backing pair. A backend failure
+    /// leaves the attachment retained so a caller may retry the detachment.
+    pub fn detach_buffer(&self, buffer: &GpuBuffer) -> Result<(), &'static str> {
+        let backend_buffer = buffer.backend_buffer();
+        let mut attached_buffers = self.attached_buffers.lock();
+        let index = attached_buffers
+            .iter()
+            .position(|attached| Arc::ptr_eq(&attached._backend_buffer, &backend_buffer))
+            .ok_or("GPU buffer is not attached to this context")?;
+        self.backend_context
+            .detach_buffer(backend_buffer.as_ref())?;
+        attached_buffers.swap_remove(index);
+        Ok(())
     }
 
     fn fill_query_info(&self, info: &mut GpuContextInfo) {
@@ -349,6 +375,40 @@ impl GpuContext {
         Ok(0)
     }
 
+    fn handle_detach_buffer(&self, arg: usize) -> Result<i32, &'static str> {
+        let mut request: GpuContextDetachBuffer = read_user_value(arg)?;
+        let reserved = request.reserved;
+        request.clear_response();
+        if request.abi_version != GPU_ABI_VERSION {
+            request.result = GPU_RESULT_INVALID_ABI;
+            write_user_value(arg, &request)?;
+            return Ok(0);
+        }
+        if request.flags != 0 || reserved != 0 || request.buffer_handle == 0 {
+            request.result = GPU_RESULT_INVALID_ARGUMENT;
+            write_user_value(arg, &request)?;
+            return Ok(0);
+        }
+        let task = crate::task::mytask().ok_or("No current task for GPU buffer detachment")?;
+        let buffer_owner = match task.handle_table.get_arc_clone(request.buffer_handle) {
+            Some(object) if object.as_gpu().and_then(GpuObject::as_buffer).is_some() => object,
+            _ => {
+                request.result = GPU_RESULT_INVALID_ARGUMENT;
+                write_user_value(arg, &request)?;
+                return Ok(0);
+            }
+        };
+        let buffer = buffer_owner
+            .as_gpu()
+            .and_then(GpuObject::as_buffer)
+            .ok_or("GPU buffer handle changed while detaching")?;
+        if self.detach_buffer(buffer).is_err() {
+            request.result = GPU_RESULT_INVALID_STATE;
+        }
+        write_user_value(arg, &request)?;
+        Ok(0)
+    }
+
     fn image_is_attached(&self, image: &GpuImage) -> bool {
         let backend_image = image.backend_image();
         self.attached_images
@@ -385,7 +445,11 @@ impl GpuContext {
             .as_gpu()
             .and_then(GpuObject::as_image)
             .ok_or("GPU image handle changed while uploading")?;
-        let layout = match super::resource::image_upload_layout(&request, image.query_info()) {
+        let layout = match super::resource::image_upload_layout(
+            &request,
+            image.query_info(),
+            image.layout(),
+        ) {
             Ok(layout) => layout,
             Err(_) => {
                 request.result = GPU_RESULT_INVALID_ARGUMENT;
@@ -481,6 +545,7 @@ impl ControlOps for GpuContext {
             GPU_CONTEXT_ATTACH_IMAGE => self.handle_attach_image(arg),
             GPU_CONTEXT_DETACH_IMAGE => self.handle_detach_image(arg),
             super::GPU_CONTEXT_ATTACH_BUFFER => self.handle_attach_buffer(arg),
+            GPU_CONTEXT_DETACH_BUFFER => self.handle_detach_buffer(arg),
             GPU_CONTEXT_UPLOAD_IMAGE_BGRA => self.handle_upload_image_bgra(arg),
             GPU_CONTEXT_TRANSFER_IMPORTED_IMAGE_BGRA => {
                 self.handle_transfer_imported_image_bgra(arg)
@@ -600,14 +665,22 @@ impl GpuQueue {
             .and_then(KernelObject::as_gpu)
             .and_then(GpuObject::as_timeline);
 
-        if self.backend_queue.submit(&commands).is_err() {
+        if let Err(error) = self.backend_queue.submit(&commands) {
+            request.result = match error {
+                super::GpuBackendSubmitError::Rejected(_) => GPU_RESULT_INVALID_ARGUMENT,
+                super::GpuBackendSubmitError::Unavailable(_) => GPU_RESULT_INVALID_STATE,
+                super::GpuBackendSubmitError::DeviceLost(_) => {
+                    if let Some(timeline) = timeline {
+                        timeline.fail();
+                    }
+                    GPU_RESULT_INVALID_STATE
+                }
+            };
             if let Some(timeline) = timeline {
-                timeline.fail();
                 let (value, failed) = timeline.state();
                 request.completed_value = value;
                 request.timeline_failed = u32::from(failed);
             }
-            request.result = GPU_RESULT_INVALID_STATE;
             write_user_value(arg, &request)?;
             return Ok(0);
         }
@@ -697,10 +770,11 @@ mod tests {
 
     use super::{GpuContext, bounded_command_limit, command_size_is_valid};
     use crate::device::gpu::{
-        GPU_EXECUTION_SUPPORT_NONE, GPU_MAX_OPAQUE_COMMAND_SIZE, GpuBackend, GpuBackendContext,
-        GpuBackendContextInfo, GpuBackendDialectDescriptor, GpuBackendImage, GpuBackendImageInfo,
-        GpuBackendInfo, GpuBackendQueue, GpuBackendQueueInfo, GpuDeviceInfo, GpuDeviceState,
-        GpuImage, GpuImageCreateInfo, GpuObject,
+        GPU_EXECUTION_SUPPORT_NONE, GPU_MAX_OPAQUE_COMMAND_SIZE, GpuBackend, GpuBackendBuffer,
+        GpuBackendBufferInfo, GpuBackendContext, GpuBackendContextInfo,
+        GpuBackendDialectDescriptor, GpuBackendImage, GpuBackendImageInfo, GpuBackendInfo,
+        GpuBackendQueue, GpuBackendQueueInfo, GpuBuffer, GpuBufferCreateInfo, GpuDeviceInfo,
+        GpuDeviceState, GpuImage, GpuImageCreateInfo, GpuObject,
     };
     use crate::device::graphics::GpuDisplayResource;
     use crate::sync::IrqSpinLock;
@@ -720,6 +794,7 @@ mod tests {
 
     struct TestContext {
         drops: Arc<IrqSpinLock<u32>>,
+        buffer_detaches: Arc<IrqSpinLock<u32>>,
     }
 
     impl Drop for TestContext {
@@ -738,7 +813,18 @@ mod tests {
         }
 
         fn attach_image(&self, image: &dyn GpuBackendImage) -> Result<u64, &'static str> {
-            Ok(image.query_info().command_resource_token)
+            let _ = image;
+            Ok(19)
+        }
+
+        fn attach_buffer(&self, buffer: &dyn GpuBackendBuffer) -> Result<u64, &'static str> {
+            let _ = buffer;
+            Ok(21)
+        }
+
+        fn detach_buffer(&self, _buffer: &dyn GpuBackendBuffer) -> Result<(), &'static str> {
+            *self.buffer_detaches.lock() += 1;
+            Ok(())
         }
     }
 
@@ -751,6 +837,15 @@ mod tests {
     }
 
     struct TestImageBackend {
+        drops: Arc<IrqSpinLock<u32>>,
+    }
+
+    struct TestBuffer {
+        drops: Arc<IrqSpinLock<u32>>,
+        allocation_size: u64,
+    }
+
+    struct TestBufferBackend {
         drops: Arc<IrqSpinLock<u32>>,
     }
 
@@ -783,6 +878,43 @@ mod tests {
         }
     }
 
+    impl Drop for TestBuffer {
+        fn drop(&mut self) {
+            *self.drops.lock() += 1;
+        }
+    }
+
+    impl GpuBackend for TestBufferBackend {
+        fn query_info(&self) -> GpuBackendInfo {
+            GpuBackendInfo::new(
+                GpuDeviceInfo::new(GpuDeviceState::Ready, GPU_EXECUTION_SUPPORT_NONE, 0),
+                0,
+                b"test-buffer",
+                &[],
+            )
+        }
+
+        fn create_buffer(
+            &self,
+            create: GpuBufferCreateInfo,
+        ) -> Result<Arc<dyn GpuBackendBuffer>, &'static str> {
+            Ok(Arc::new(TestBuffer {
+                drops: Arc::clone(&self.drops),
+                allocation_size: create.allocation_size,
+            }))
+        }
+    }
+
+    impl GpuBackendBuffer for TestBuffer {
+        fn query_info(&self) -> GpuBackendBufferInfo {
+            GpuBackendBufferInfo::new(11, self.allocation_size)
+        }
+
+        fn backend_cookie(&self) -> u64 {
+            2
+        }
+    }
+
     impl GpuBackendImage for TestImage {
         fn query_info(&self) -> GpuBackendImageInfo {
             GpuBackendImageInfo::new(self.create, 9, self.allocation_size)
@@ -802,9 +934,11 @@ mod tests {
             GpuBackendQueueInfo::new(GPU_MAX_OPAQUE_COMMAND_SIZE)
         }
 
-        fn submit(&self, commands: &[u8]) -> Result<(), &'static str> {
+        fn submit(&self, commands: &[u8]) -> Result<(), crate::device::gpu::GpuBackendSubmitError> {
             if commands.is_empty() {
-                return Err("empty test commands");
+                return Err(crate::device::gpu::GpuBackendSubmitError::Rejected(
+                    "empty test commands",
+                ));
             }
             Ok(())
         }
@@ -845,6 +979,7 @@ mod tests {
         let drops = Arc::new(IrqSpinLock::new(0));
         let backend_context: Arc<dyn GpuBackendContext> = Arc::new(TestContext {
             drops: Arc::clone(&drops),
+            buffer_detaches: Arc::new(IrqSpinLock::new(0)),
         });
         let context = GpuContext::new(backend_context);
         let queue = context
@@ -869,17 +1004,48 @@ mod tests {
             .expect("test image metadata should be valid");
         let backend_context: Arc<dyn GpuBackendContext> = Arc::new(TestContext {
             drops: Arc::new(IrqSpinLock::new(0)),
+            buffer_detaches: Arc::new(IrqSpinLock::new(0)),
         });
         let context = GpuContext::new(backend_context);
         let queue = context
             .create_queue()
             .expect("test context should create a queue");
-        assert_eq!(context.attach_image(&image), Ok(9));
+        assert_eq!(context.attach_image(&image), Ok(19));
 
         drop(image);
         drop(context);
         assert_eq!(*drops.lock(), 0);
         drop(queue);
         assert_eq!(*drops.lock(), 1);
+    }
+
+    #[test_case]
+    fn attached_buffer_detaches_and_releases_its_context_lifetime_reference() {
+        let drops = Arc::new(IrqSpinLock::new(0));
+        let backend: Arc<dyn GpuBackend> = Arc::new(TestBufferBackend {
+            drops: Arc::clone(&drops),
+        });
+        let buffer =
+            GpuBuffer::new(backend, 4096, 0).expect("test buffer metadata should be valid");
+        let buffer_detaches = Arc::new(IrqSpinLock::new(0));
+        let backend_context: Arc<dyn GpuBackendContext> = Arc::new(TestContext {
+            drops: Arc::new(IrqSpinLock::new(0)),
+            buffer_detaches: Arc::clone(&buffer_detaches),
+        });
+        let context = GpuContext::new(backend_context);
+        let queue = context
+            .create_queue()
+            .expect("test context should create a queue");
+
+        assert_eq!(context.attach_buffer(&buffer), Ok(21));
+        assert_eq!(context.detach_buffer(&buffer), Ok(()));
+        assert_eq!(*buffer_detaches.lock(), 1);
+        assert!(context.detach_buffer(&buffer).is_err());
+        assert_eq!(*buffer_detaches.lock(), 1);
+
+        drop(buffer);
+        assert_eq!(*drops.lock(), 1);
+        drop(context);
+        drop(queue);
     }
 }

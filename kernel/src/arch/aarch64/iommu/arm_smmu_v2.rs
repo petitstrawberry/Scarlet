@@ -12,11 +12,12 @@ use crate::{
     arch::{self, mmio},
     device::{
         DeviceInfo,
+        clk::ClkHandle,
         iommu::{
             IommuController, IommuDomain, IommuDomainConfig, IommuDomainType, IommuError,
             IommuMapFlags, IommuSpec, IommuStreamId, Iova, PhysAddr,
         },
-        manager::{DeviceManager, DriverPriority},
+        manager::{DeviceManager, DriverPriority, probe_defer},
         platform::{
             PlatformDeviceDriver, PlatformDeviceInfo, resource::PlatformDeviceResourceType,
         },
@@ -31,7 +32,7 @@ use crate::{
     },
 };
 
-const REGISTER_WINDOW_SIZE: usize = 0x10_0000;
+const MINIMUM_REGISTER_WINDOW_SIZE: usize = 0x1000;
 
 const GLOBAL_CONTROL: usize = 0x000;
 const GLOBAL_CONTROL_CLIENT_POWER_DOWN: u32 = 1;
@@ -129,8 +130,8 @@ impl RegisterWindow {
     }
 
     fn read(self, offset: usize) -> u32 {
-        // SAFETY: the constructor receives an ioremap'd SMMU register window,
-        // and all offsets in this driver are bounded by REGISTER_WINDOW_SIZE.
+        // SAFETY: probe validates the ID-derived global, stream, and context
+        // register extents against the complete ioremap'd firmware resource.
         unsafe { mmio::read32(self.base + offset) }
     }
 
@@ -179,9 +180,32 @@ struct SmmuHardware {
     dma_output_address_limit: u64,
     table_address_limit: u64,
     identity_routing: IdentityRouting,
+    _clocks: EnabledClocks,
+    _mmio: MmioMapping,
     lock: IrqSpinLock<()>,
     allocated_contexts: IrqSpinLock<Vec<bool>>,
     claimed_streams: IrqSpinLock<BTreeMap<u32, usize>>,
+}
+
+struct EnabledClocks(Vec<ClkHandle>);
+
+impl Drop for EnabledClocks {
+    fn drop(&mut self) {
+        for clock in self.0.iter().rev() {
+            clock.disable_unprepare();
+        }
+    }
+}
+
+/// Owns an ioremap allocation for the lifetime of the controller.
+struct MmioMapping {
+    base: usize,
+}
+
+impl Drop for MmioMapping {
+    fn drop(&mut self) {
+        vm::iounmap(self.base);
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -1387,6 +1411,32 @@ fn current_exception_level() -> u64 {
 }
 
 fn probe(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
+    let manager = DeviceManager::get_manager();
+    let phandle = read_phandle(device)?;
+    let mut enabled_clocks = EnabledClocks(Vec::new());
+    if let Some(property) = device.property("clock-names") {
+        let names = property
+            .as_string_list()
+            .ok_or("arm-smmu-v2: malformed clock-names")?;
+        for name in names {
+            let clock = match manager.resolve_clk(device, name) {
+                Ok(clock) => clock,
+                Err("clk: provider not found") | Err("clk: clock not found") => {
+                    return probe_defer();
+                }
+                Err(error) => return Err(error),
+            };
+            if let Err(error) = clock.prepare_enable() {
+                return match error {
+                    crate::device::clk::ClkError::ProviderNotFound
+                    | crate::device::clk::ClkError::ClockNotFound => probe_defer(),
+                    _ => Err("arm-smmu-v2: failed to enable required clock"),
+                };
+            }
+            enabled_clocks.0.push(clock);
+        }
+    }
+
     let resource = device
         .get_resources()
         .iter()
@@ -1397,16 +1447,24 @@ fn probe(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         .checked_sub(resource.start)
         .and_then(|size| size.checked_add(1))
         .ok_or("arm-smmu-v2: invalid register resource")?;
-    if resource_size < REGISTER_WINDOW_SIZE {
+    if resource_size < MINIMUM_REGISTER_WINDOW_SIZE {
         return Err("arm-smmu-v2: register resource is too small");
     }
 
-    let base = vm::ioremap(resource.start, REGISTER_WINDOW_SIZE)
-        .map_err(|_| "arm-smmu-v2: ioremap failed")?;
+    let mapping = MmioMapping {
+        base: vm::ioremap(resource.start, resource_size)
+            .map_err(|_| "arm-smmu-v2: ioremap failed")?,
+    };
+    let base = mapping.base;
     let registers = RegisterWindow::new(base);
     let id0 = registers.read(ID_REGISTER_0);
     let id1 = registers.read(ID_REGISTER_1);
     let id2 = registers.read(ID_REGISTER_2);
+    if (id0 == 0 && id1 == 0 && id2 == 0) || (id0 == u32::MAX && id1 == u32::MAX && id2 == u32::MAX)
+    {
+        early_println!("[arm-smmu-v2] controller is not powered yet, deferring");
+        return probe_defer();
+    }
     let register_page_shift = if id1 & ID1_LARGE_REGISTER_PAGE != 0 {
         16
     } else {
@@ -1416,6 +1474,30 @@ fn probe(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
     let stream_group_count = (id0 & ID0_STREAM_GROUP_COUNT) as usize;
     let stage1_context_start = ((id1 & ID1_STAGE2_CONTEXT_BANK_COUNT) >> 16) as usize;
     let context_bank_count = (id1 & ID1_CONTEXT_BANK_COUNT) as usize;
+    let page_size = 1usize << register_page_shift;
+    let stream_register_end = STREAM_CONTEXT_BASE
+        .checked_add(stream_group_count.saturating_sub(1).saturating_mul(4))
+        .and_then(|offset| offset.checked_add(core::mem::size_of::<u32>()))
+        .ok_or("arm-smmu-v2: stream register range overflows")?;
+    let context_attribute_end = page_size
+        .checked_add(CONTEXT_ATTRIBUTE_2_BASE)
+        .and_then(|offset| {
+            offset.checked_add(context_bank_count.saturating_sub(1).saturating_mul(4))
+        })
+        .and_then(|offset| offset.checked_add(core::mem::size_of::<u32>()))
+        .ok_or("arm-smmu-v2: context attribute range overflows")?;
+    let context_register_end = context_page_base
+        .checked_add(context_bank_count.saturating_sub(1))
+        .and_then(|page| page.checked_mul(page_size))
+        .and_then(|offset| offset.checked_add(CONTEXT_TLB_STATUS))
+        .and_then(|offset| offset.checked_add(core::mem::size_of::<u32>()))
+        .ok_or("arm-smmu-v2: context register range overflows")?;
+    let required_register_size = stream_register_end
+        .max(context_attribute_end)
+        .max(context_register_end);
+    if required_register_size > resource_size {
+        return Err("arm-smmu-v2: ID registers describe a window larger than firmware resource");
+    }
     let supports_stage1 = id0 & ID0_STAGE1_TRANSLATION != 0;
     let supports_4k = id2 & ID2_4K_PAGE_TABLE != 0;
     let virtual_address_size = (id2 & ID2_VIRTUAL_ADDRESS_SIZE) >> 8;
@@ -1475,14 +1557,14 @@ fn probe(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         dma_output_address_limit: address_limit(dma_output_address_bits),
         table_address_limit: address_limit(table_address_bits),
         identity_routing,
+        _clocks: enabled_clocks,
+        _mmio: mapping,
         lock: IrqSpinLock::new(()),
         allocated_contexts: IrqSpinLock::new(vec![false; context_bank_count]),
         claimed_streams: IrqSpinLock::new(BTreeMap::new()),
     });
     let controller = Arc::new(ArmSmmuV2 { hardware });
-    let phandle = read_phandle(device)?;
-    DeviceManager::get_manager()
-        .register_iommu_controller(phandle, controller as Arc<dyn IommuController>);
+    manager.register_iommu_controller(phandle, controller as Arc<dyn IommuController>);
 
     early_println!(
         "[arm-smmu-v2] registered phandle={:#x} paddr={:#x} page={} SMRs={} CBs={} S1-CBs={} DMA={} identity={} gfsr={:#010x}",
@@ -1508,7 +1590,7 @@ fn register_driver() {
         "arm-smmu-v2",
         probe,
         remove,
-        vec!["arm,mmu-500", "qcom,sc7180-smmu-500"],
+        vec!["arm,mmu-500", "qcom,sc7180-smmu-500", "qcom,smmu-v2"],
     );
     DeviceManager::get_manager().register_driver(Box::new(driver), DriverPriority::Critical);
 }
