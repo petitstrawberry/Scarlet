@@ -1,18 +1,15 @@
 //! Virtio device driver interface module.
 //!
 
-use core::{
-    result::Result,
-    sync::atomic::{AtomicUsize, Ordering},
-};
+use core::{result::Result, sync::atomic::AtomicUsize};
 
-use alloc::{boxed::Box, format, sync::Arc, vec};
+use alloc::{boxed::Box, sync::Arc, vec};
 
 use crate::{
     arch::io_mb,
     device::{
         Device,
-        gpu::{GpuBackend, GpuControlDevice},
+        gpu::{GpuBackend, register_gpu_control_device},
         manager::{DeviceManager, DriverPriority},
         platform::{
             PlatformDeviceDriver, PlatformDeviceInfo, resource::PlatformDeviceResourceType,
@@ -32,8 +29,7 @@ use crate::{
     early_println,
 };
 
-// Static counters for device naming
-static GPU_COUNTER: AtomicUsize = AtomicUsize::new(0);
+// Static counter for input device naming.
 static INPUT_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 /// Register enum for Virtio devices
@@ -1187,21 +1183,18 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
             DeviceManager::get_manager().register_device_with_name(name, dev);
         }
         VirtioDeviceType::GPU => {
-            let id = GPU_COUNTER.fetch_add(1, Ordering::SeqCst);
-            let gpu_name = format!("gpu{}", id);
-            crate::early_println!(
-                "[Virtio] Detected Virtio GPU Device at {:#x}, registering as {}",
-                base_addr,
-                gpu_name
-            );
             let dev = Arc::new(VirtioGpuDevice::new(base_addr));
             let graphics_dev: Arc<dyn Device> = dev.clone();
             DeviceManager::get_manager().register_device(graphics_dev);
 
             let gpu_backend: Arc<dyn GpuBackend> =
                 Arc::new(crate::drivers::graphics::virtio_gpu::VirtioGpuBackend::from_device(&dev));
-            let gpu_control: Arc<dyn Device> = Arc::new(GpuControlDevice::new(gpu_backend));
-            DeviceManager::get_manager().register_device_with_name(gpu_name, gpu_control);
+            let (_, gpu_name) = register_gpu_control_device(gpu_backend)?;
+            crate::early_println!(
+                "[Virtio] Detected Virtio GPU Device at {:#x}, registered as {}",
+                base_addr,
+                gpu_name
+            );
         }
         VirtioDeviceType::Input => {
             crate::early_println!("[Virtio] Detected Virtio Input Device at {:#x}", base_addr);

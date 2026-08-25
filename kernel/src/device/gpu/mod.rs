@@ -52,7 +52,7 @@ pub use backend::{
 };
 pub use connection::GpuConnection;
 pub use execution::{GpuContext, GpuQueue};
-pub use object::GpuControlDevice;
+pub use object::{GpuControlDevice, register_gpu_control_device};
 pub use resource::{GpuBuffer, GpuImage, GpuObject, GpuTimeline, GpuTimelinePoint};
 
 fn child_handle_metadata(

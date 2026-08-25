@@ -17,8 +17,6 @@ fn main() -> i32 {
             return 1;
         }
     };
-    println!("SGFX backend: {}", instance.backend());
-
     let device = match instance.open_device("/dev/gpu0") {
         Ok(device) => device,
         Err(error) => {
@@ -26,6 +24,7 @@ fn main() -> i32 {
             return 1;
         }
     };
+    println!("SGFX backend: {}", device.backend());
 
     let capabilities = device.capabilities();
     println!("GPU capabilities:");

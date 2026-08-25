@@ -26,7 +26,7 @@ use crate::object::capability::selectable::{
     ReadyInterest, ReadySet, SelectWaitOutcome, Selectable,
 };
 use crate::sched::scheduler::current_task_id;
-use crate::sync::{IrqSpinLock, waker::Waker};
+use crate::sync::{IrqSpinLock, Mutex, waker::Waker};
 use crate::vm::addr::{phys_to_virt, virt_to_phys};
 
 /// GPU capability object with explicitly optional kernel-object capabilities.
@@ -604,7 +604,7 @@ pub struct GpuImage {
     backend_image: Arc<dyn GpuBackendImage>,
     backing: Arc<GpuImageBacking>,
     layout: GpuBackendImageLayout,
-    upload_lock: IrqSpinLock<()>,
+    upload_lock: Mutex<()>,
 }
 
 impl GpuImage {
@@ -650,7 +650,7 @@ impl GpuImage {
             backend_image,
             backing,
             layout,
-            upload_lock: IrqSpinLock::new(()),
+            upload_lock: Mutex::new(()),
         })
     }
 
@@ -704,7 +704,7 @@ impl GpuImage {
             backend_image,
             backing,
             layout,
-            upload_lock: IrqSpinLock::new(()),
+            upload_lock: Mutex::new(()),
         })
     }
 

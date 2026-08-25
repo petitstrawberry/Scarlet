@@ -178,6 +178,45 @@ impl PowerManager {
             })
     }
 
+    /// Report whether a firmware power-domain provider is registered.
+    ///
+    /// # Arguments
+    ///
+    /// * `phandle` - Firmware phandle identifying the provider node.
+    ///
+    /// # Returns
+    ///
+    /// `true` when a provider is available for the phandle.
+    pub fn has_provider(phandle: u32) -> bool {
+        POWER_MANAGER
+            .lock()
+            .as_ref()
+            .is_some_and(|manager| manager.get_provider(phandle).is_some())
+    }
+
+    /// Resolve a firmware power-domain specifier through a registered provider.
+    ///
+    /// # Arguments
+    ///
+    /// * `phandle` - Firmware phandle identifying the provider node.
+    /// * `specifier` - Argument cells following the provider phandle.
+    ///
+    /// # Returns
+    ///
+    /// The selected power domain, or an error when the provider/specifier is
+    /// unavailable or invalid.
+    pub fn resolve_domain(
+        phandle: u32,
+        specifier: &[u32],
+    ) -> Result<Arc<dyn PowerDomain>, &'static str> {
+        let provider = POWER_MANAGER
+            .lock()
+            .as_ref()
+            .and_then(|manager| manager.get_provider(phandle))
+            .ok_or("power: domain provider not found")?;
+        provider.get_domain(specifier)
+    }
+
     /// Enable all power domains referenced by a platform device.
     ///
     /// Each entry is decoded using the provider's declared
@@ -234,9 +273,10 @@ impl PowerManager {
                     // ordinary power errors as non-fatal and lets the concrete
                     // driver validate the inherited hardware state.  Returning
                     // PROBE_DEFER here would make every consumer wait forever
-                    // when its firmware power controller is not implemented in
-                    // Scarlet (for example SC7180 RPMhPD), regressing devices
-                    // that worked before multi-cell provider support was added.
+                    // when the selected BSP omits a firmware power controller,
+                    // regressing devices that worked before multi-cell provider
+                    // support was added. Drivers that cannot safely use handoff
+                    // must explicitly require their provider before MMIO access.
                     return Err("power: domain not found");
                 }
             };
@@ -403,6 +443,12 @@ mod tests {
             }),
         );
 
+        assert!(PowerManager::has_provider(0x30));
+        assert!(!PowerManager::has_provider(0x31));
+        assert_eq!(
+            PowerManager::resolve_domain(0x30, &[1]).unwrap().label(),
+            "provider-second"
+        );
         PowerManager::enable_device_domains(&test_device(&[0x30, 1])).unwrap();
 
         assert!(!first.is_enabled());

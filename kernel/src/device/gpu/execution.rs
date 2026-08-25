@@ -27,8 +27,8 @@ use crate::object::handle::AccessMode;
 /// a real backend context while one of its child queues remains usable.
 pub struct GpuContext {
     backend_context: Arc<dyn GpuBackendContext>,
-    attached_images: Arc<crate::sync::IrqSpinLock<Vec<GpuAttachedImage>>>,
-    attached_buffers: Arc<crate::sync::IrqSpinLock<Vec<GpuAttachedBuffer>>>,
+    attached_images: Arc<crate::sync::Mutex<Vec<GpuAttachedImage>>>,
+    attached_buffers: Arc<crate::sync::Mutex<Vec<GpuAttachedBuffer>>>,
 }
 
 /// Backend buffer and page backing retained by a context and its child queues.
@@ -56,8 +56,8 @@ impl GpuContext {
     pub fn new(backend_context: Arc<dyn GpuBackendContext>) -> Self {
         Self {
             backend_context,
-            attached_images: Arc::new(crate::sync::IrqSpinLock::new(Vec::new())),
-            attached_buffers: Arc::new(crate::sync::IrqSpinLock::new(Vec::new())),
+            attached_images: Arc::new(crate::sync::Mutex::new(Vec::new())),
+            attached_buffers: Arc::new(crate::sync::Mutex::new(Vec::new())),
         }
     }
 
@@ -568,8 +568,8 @@ impl GpuObject for GpuContext {
 /// Kernel-owned GPU execution queue child capability.
 pub struct GpuQueue {
     _backend_context: Arc<dyn GpuBackendContext>,
-    _attached_images: Arc<crate::sync::IrqSpinLock<Vec<GpuAttachedImage>>>,
-    _attached_buffers: Arc<crate::sync::IrqSpinLock<Vec<GpuAttachedBuffer>>>,
+    _attached_images: Arc<crate::sync::Mutex<Vec<GpuAttachedImage>>>,
+    _attached_buffers: Arc<crate::sync::Mutex<Vec<GpuAttachedBuffer>>>,
     backend_queue: Arc<dyn GpuBackendQueue>,
 }
 
@@ -813,16 +813,19 @@ mod tests {
         }
 
         fn attach_image(&self, image: &dyn GpuBackendImage) -> Result<u64, &'static str> {
+            assert!(crate::sync::preemptible());
             let _ = image;
             Ok(19)
         }
 
         fn attach_buffer(&self, buffer: &dyn GpuBackendBuffer) -> Result<u64, &'static str> {
+            assert!(crate::sync::preemptible());
             let _ = buffer;
             Ok(21)
         }
 
         fn detach_buffer(&self, _buffer: &dyn GpuBackendBuffer) -> Result<(), &'static str> {
+            assert!(crate::sync::preemptible());
             *self.buffer_detaches.lock() += 1;
             Ok(())
         }

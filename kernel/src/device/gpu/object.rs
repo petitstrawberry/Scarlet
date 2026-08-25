@@ -1,10 +1,11 @@
 //! Registered GPU control device object.
 
-use alloc::sync::Arc;
+use alloc::{format, string::String, sync::Arc};
 use core::any::Any;
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 use super::{GpuBackend, GpuConnection};
-use crate::device::{Device, DeviceType, char::CharDevice};
+use crate::device::{Device, DeviceType, char::CharDevice, manager::DeviceManager};
 use crate::object::capability::selectable::{ReadyInterest, ReadySet, SelectWaitOutcome};
 use crate::object::capability::{ControlOps, MemoryMappingInfo, MemoryMappingOps, Selectable};
 
@@ -14,6 +15,32 @@ use crate::object::capability::{ControlOps, MemoryMappingInfo, MemoryMappingOps,
 /// itself expose a GPU child handle or a memory mapping capability.
 pub struct GpuControlDevice {
     backend: Arc<dyn GpuBackend>,
+}
+
+static NEXT_GPU_CONTROL_INDEX: AtomicUsize = AtomicUsize::new(0);
+
+/// Register a backend under the global `/dev/gpuN` namespace.
+///
+/// # Arguments
+///
+/// * `backend` - Backend exposed by the new GPU control device.
+///
+/// # Returns
+///
+/// The registered device ID and devfs name, or an error if the global GPU
+/// index space is exhausted.
+pub fn register_gpu_control_device(
+    backend: Arc<dyn GpuBackend>,
+) -> Result<(usize, String), &'static str> {
+    let index = NEXT_GPU_CONTROL_INDEX
+        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
+            current.checked_add(1)
+        })
+        .map_err(|_| "GPU control device index space exhausted")?;
+    let name = format!("gpu{}", index);
+    let device: Arc<dyn Device> = Arc::new(GpuControlDevice::new(backend));
+    let device_id = DeviceManager::get_manager().register_device_with_name(name.clone(), device);
+    Ok((device_id, name))
 }
 
 impl GpuControlDevice {

@@ -96,7 +96,10 @@ const CONTEXT_CONTROL_ASID_PRIVATE: u32 = 1 << 12;
 const CONTEXT_CONTROL_ACCESS_FLAG_ENABLE: u32 = 1 << 2;
 const CONTEXT_CONTROL_TRE: u32 = 1 << 1;
 
-const TCR_T0SZ_32BIT: u32 = 32;
+const MIN_DMA_IOVA_BITS: u32 = 32;
+// The local 4 KiB page-table implementation starts at level 1.  It therefore
+// covers at most bits 38:0; wider apertures require a level-0 table.
+const MAX_THREE_LEVEL_IOVA_BITS: u32 = 39;
 const TCR_INNER_SHAREABLE: u32 = 3 << 12;
 const TCR_OUTER_WBWA: u32 = 1 << 10;
 const TCR_INNER_WBWA: u32 = 1 << 8;
@@ -176,6 +179,7 @@ struct SmmuHardware {
     stage1_context_start: usize,
     context_bank_count: usize,
     dma_supported: bool,
+    dma_iova_address_bits: u32,
     dma_output_address_size: u32,
     dma_output_address_limit: u64,
     table_address_limit: u64,
@@ -446,7 +450,15 @@ impl SmmuHardware {
         Ok(lease)
     }
 
-    fn configure_dma_context(&self, lease: &ContextLease, root: usize) -> Result<(), IommuError> {
+    fn configure_dma_context(
+        &self,
+        lease: &ContextLease,
+        root: usize,
+        iova_address_bits: u32,
+    ) -> Result<(), IommuError> {
+        if !(MIN_DMA_IOVA_BITS..=self.dma_iova_address_bits).contains(&iova_address_bits) {
+            return Err(IommuError::MapFailed);
+        }
         let _guard = self.lock.lock();
         let context = lease.index;
         let global_control = self.registers.read(GLOBAL_CONTROL);
@@ -485,7 +497,7 @@ impl SmmuHardware {
                 | TCR_INNER_SHAREABLE
                 | TCR_OUTER_WBWA
                 | TCR_INNER_WBWA
-                | TCR_T0SZ_32BIT,
+                | (u64::BITS - iova_address_bits),
         );
         self.context_write64(
             context,
@@ -1083,6 +1095,7 @@ struct DmaDomain {
     context: ContextLease,
     iova_base: Iova,
     iova_size: u64,
+    iova_address_limit: u64,
     output_address_limit: u64,
     tables: IrqSpinLock<Option<DmaPageTables>>,
     streams: IrqSpinLock<BTreeMap<IommuStreamId, StreamRoute>>,
@@ -1090,7 +1103,13 @@ struct DmaDomain {
 
 impl DmaDomain {
     fn validate_range(&self, iova: Iova, len: usize) -> Result<(), IommuError> {
-        validate_dma_range(self.iova_base, self.iova_size, iova, len)
+        validate_dma_range(
+            self.iova_base,
+            self.iova_size,
+            self.iova_address_limit,
+            iova,
+            len,
+        )
     }
 }
 
@@ -1260,20 +1279,38 @@ impl Drop for DmaDomain {
 fn validate_dma_range(
     aperture_base: Iova,
     aperture_size: u64,
+    iova_address_limit: u64,
     iova: Iova,
     len: usize,
 ) -> Result<(), IommuError> {
-    if len == 0 || iova & (PAGE_SIZE as u64 - 1) != 0 || len & (PAGE_SIZE - 1) != 0 {
+    if aperture_size == 0
+        || aperture_base & (PAGE_SIZE as u64 - 1) != 0
+        || aperture_size & (PAGE_SIZE as u64 - 1) != 0
+        || len == 0
+        || iova & (PAGE_SIZE as u64 - 1) != 0
+        || len & (PAGE_SIZE - 1) != 0
+    {
         return Err(IommuError::MapFailed);
     }
     let aperture_end = aperture_base
         .checked_add(aperture_size)
         .ok_or(IommuError::MapFailed)?;
     let end = iova.checked_add(len as u64).ok_or(IommuError::MapFailed)?;
-    if aperture_end > 1u64 << 32 || iova < aperture_base || end > aperture_end {
+    if aperture_end > iova_address_limit || iova < aperture_base || end > aperture_end {
         return Err(IommuError::MapFailed);
     }
     Ok(())
+}
+
+fn required_iova_address_bits(aperture_base: Iova, aperture_size: u64) -> Result<u32, IommuError> {
+    if aperture_size == 0 {
+        return Err(IommuError::MapFailed);
+    }
+    let aperture_end = aperture_base
+        .checked_add(aperture_size)
+        .ok_or(IommuError::MapFailed)?;
+    let maximum_iova = aperture_end.checked_sub(1).ok_or(IommuError::MapFailed)?;
+    Ok((u64::BITS - maximum_iova.leading_zeros()).max(MIN_DMA_IOVA_BITS))
 }
 
 fn dma_permissions_valid(flags: IommuMapFlags) -> bool {
@@ -1301,15 +1338,29 @@ impl IommuController for ArmSmmuV2 {
             if !self.hardware.dma_supported {
                 return Err(IommuError::NotSupported);
             }
+            let iova_address_bits = required_iova_address_bits(config.iova_base, config.iova_size)?;
+            if iova_address_bits > self.hardware.dma_iova_address_bits {
+                early_println!(
+                    "[arm-smmu-v2] domain alloc failed stage=iova-width: requested={}b supported={}b",
+                    iova_address_bits,
+                    self.hardware.dma_iova_address_bits,
+                );
+                return Err(IommuError::MapFailed);
+            }
+            let iova_address_limit = address_limit(iova_address_bits);
             validate_dma_range(
                 config.iova_base,
                 config.iova_size,
+                iova_address_limit,
                 config.iova_base,
                 PAGE_SIZE,
             )?;
             let tables = DmaPageTables::new(self.hardware.table_address_limit)?;
             let context = self.hardware.reserve_context()?;
-            if let Err(error) = self.hardware.configure_dma_context(&context, tables.root) {
+            if let Err(error) =
+                self.hardware
+                    .configure_dma_context(&context, tables.root, iova_address_bits)
+            {
                 early_println!(
                     "[arm-smmu-v2] domain alloc failed stage=context-config CB {} root={:#x}: {:?}",
                     context.index,
@@ -1329,15 +1380,17 @@ impl IommuController for ArmSmmuV2 {
                 return Err(error);
             }
             early_println!(
-                "[arm-smmu-v2] domain alloc complete type=DMA CB {} root={:#x}",
+                "[arm-smmu-v2] domain alloc complete type=DMA CB {} root={:#x} iova={}b",
                 context.index,
                 tables.root,
+                iova_address_bits,
             );
             return Ok(Arc::new(DmaDomain {
                 hardware: Arc::clone(&self.hardware),
                 context,
                 iova_base: config.iova_base,
                 iova_size: config.iova_size,
+                iova_address_limit,
                 output_address_limit: self.hardware.dma_output_address_limit,
                 tables: IrqSpinLock::new(Some(tables)),
                 streams: IrqSpinLock::new(BTreeMap::new()),
@@ -1506,19 +1559,21 @@ fn probe(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
     let virtual_address_bits = id_size_to_bits(virtual_address_size);
     let table_address_bits = id_size_to_bits(table_address_size);
     let dma_output_address_bits = id_size_to_bits(dma_output_address_size);
+    let dma_iova_address_bits = virtual_address_bits.min(MAX_THREE_LEVEL_IOVA_BITS);
     let dma_supported = supports_stage1
         && supports_4k
-        && virtual_address_bits >= 32
+        && dma_iova_address_bits >= MIN_DMA_IOVA_BITS
         && stage1_context_start < context_bank_count;
 
     early_println!(
-        "[arm-smmu-v2] capabilities: id0={:#010x} id1={:#010x} id2={:#010x} S1={} 4K={} VA={}b IPA={}b PA={}b NUMS2CB={} NUMCB={} DMA={}",
+        "[arm-smmu-v2] capabilities: id0={:#010x} id1={:#010x} id2={:#010x} S1={} 4K={} VA={}b DMA-VA={}b IPA={}b PA={}b NUMS2CB={} NUMCB={} DMA={}",
         id0,
         id1,
         id2,
         supports_stage1,
         supports_4k,
         virtual_address_bits,
+        dma_iova_address_bits,
         dma_output_address_bits,
         table_address_bits,
         stage1_context_start,
@@ -1553,6 +1608,7 @@ fn probe(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         stage1_context_start,
         context_bank_count,
         dma_supported,
+        dma_iova_address_bits,
         dma_output_address_size: normalized_address_size(dma_output_address_size),
         dma_output_address_limit: address_limit(dma_output_address_bits),
         table_address_limit: address_limit(table_address_bits),
@@ -1601,7 +1657,7 @@ driver_initcall!(register_driver);
 mod tests {
     use super::{
         CONTEXT_CONTROL_MMU_ENABLE, context_bank_is_available, dma_permissions_valid,
-        expand_stream_mask, validate_dma_range,
+        expand_stream_mask, required_iova_address_bits, validate_dma_range,
     };
     use crate::{
         device::iommu::{IommuError, IommuMapFlags},
@@ -1617,19 +1673,34 @@ mod tests {
     }
 
     #[test_case]
-    fn validates_32bit_dma_aperture_and_alignment() {
+    fn validates_programmed_dma_aperture_and_alignment() {
         assert_eq!(
-            validate_dma_range(0, 1u64 << 32, 0x54000, PAGE_SIZE),
+            validate_dma_range(0, 1u64 << 32, 1u64 << 32, 0x54000, PAGE_SIZE),
             Ok(())
         );
         assert_eq!(
-            validate_dma_range(0, 1u64 << 32, 0x54001, PAGE_SIZE),
+            validate_dma_range(0, 1u64 << 32, 1u64 << 32, 0x54001, PAGE_SIZE),
             Err(IommuError::MapFailed)
         );
         assert_eq!(
-            validate_dma_range(0, 1u64 << 32, 1u64 << 32, PAGE_SIZE),
+            validate_dma_range(0, 1u64 << 32, 1u64 << 32, 1u64 << 32, PAGE_SIZE,),
             Err(IommuError::MapFailed)
         );
+        assert_eq!(
+            validate_dma_range(1u64 << 32, 1u64 << 32, 1u64 << 33, 1u64 << 32, PAGE_SIZE,),
+            Ok(())
+        );
+        assert_eq!(
+            validate_dma_range(1u64 << 32, 1u64 << 32, 1u64 << 32, 1u64 << 32, PAGE_SIZE,),
+            Err(IommuError::MapFailed)
+        );
+    }
+
+    #[test_case]
+    fn derives_gpu_iova_width_from_aperture_end() {
+        assert_eq!(required_iova_address_bits(0, 1u64 << 32), Ok(32));
+        assert_eq!(required_iova_address_bits(1u64 << 32, 1u64 << 32), Ok(33));
+        assert_eq!(required_iova_address_bits(0, 0), Err(IommuError::MapFailed));
     }
 
     #[test_case]

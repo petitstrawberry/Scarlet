@@ -6,13 +6,11 @@
 extern crate alloc;
 
 use alloc::boxed::Box;
-use alloc::format;
 use alloc::sync::Arc;
 use alloc::vec;
-use core::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::device::Device;
-use crate::device::gpu::{GpuBackend, GpuControlDevice};
+use crate::device::gpu::{GpuBackend, register_gpu_control_device};
 use crate::device::manager::{DeviceManager, DriverPriority};
 use crate::device::pci::config::{self, PciConfig, capability, command, status, vendor};
 use crate::device::pci::device::PciDeviceInfo;
@@ -60,7 +58,6 @@ const VIRTIO_PCI_MODERN_GPU_DEVICE_ID: u16 = 0x1050;
 const VIRTIO_PCI_MODERN_SOUND_DEVICE_ID: u16 = 0x1059;
 const VIRTIO_PCI_MODERN_VIDEO_DECODER_DEVICE_ID: u16 = 0x105f;
 
-static GPU_COUNTER: AtomicUsize = AtomicUsize::new(0);
 /// Mapped register blocks for a VirtIO PCI function.
 #[derive(Debug, Clone, Copy)]
 pub struct VirtioPciTransport {
@@ -424,16 +421,13 @@ fn probe_virtio_pci(device: &PciDeviceInfo) -> Result<(), &'static str> {
             Ok(())
         }
         VIRTIO_PCI_TRANSITIONAL_GPU_DEVICE_ID | VIRTIO_PCI_MODERN_GPU_DEVICE_ID => {
-            let id = GPU_COUNTER.fetch_add(1, Ordering::SeqCst);
-            let gpu_name = format!("gpu{}", id);
             let dev = Arc::new(VirtioGpuDevice::new_pci(transport));
             let graphics_dev: Arc<dyn Device> = dev.clone();
             DeviceManager::get_manager().register_device(graphics_dev);
 
             let gpu_backend: Arc<dyn GpuBackend> =
                 Arc::new(crate::drivers::graphics::virtio_gpu::VirtioGpuBackend::from_device(&dev));
-            let gpu_control: Arc<dyn Device> = Arc::new(GpuControlDevice::new(gpu_backend));
-            DeviceManager::get_manager().register_device_with_name(gpu_name.clone(), gpu_control);
+            let (_, gpu_name) = register_gpu_control_device(gpu_backend)?;
             println!("[virtio-pci] Registered GPU device {}", gpu_name);
             Ok(())
         }

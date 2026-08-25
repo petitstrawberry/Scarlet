@@ -323,6 +323,20 @@ impl DeviceManager {
     fn get_clock_cells_for_phandle(&self, phandle: u32) -> Option<usize> {
         self.get_clk_provider_by_phandle(phandle)
             .map(|provider| provider.clock_cells())
+            .or_else(|| {
+                #[cfg(test)]
+                let fdt = {
+                    // Unit tests may parse synthetic properties before the boot FDT
+                    // singleton is initialized.
+                    unsafe { crate::device::fdt::FdtManager::get_mut_manager() }.get_fdt()?
+                };
+
+                #[cfg(not(test))]
+                let fdt = crate::device::fdt::FdtManager::get_manager().get_fdt()?;
+
+                let node = Self::find_node_by_phandle(fdt, phandle)?;
+                Self::get_u32_prop(&node, "#clock-cells").map(|cells| cells as usize)
+            })
     }
 
     fn get_dma_cells_for_phandle(&self, phandle: u32) -> Option<usize> {
