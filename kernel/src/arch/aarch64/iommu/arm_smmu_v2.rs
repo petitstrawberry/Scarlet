@@ -976,6 +976,7 @@ impl DmaPageTables {
             free_raw_pages(page, 1);
             return Err(IommuError::DomainAllocationFailed);
         }
+        #[cfg(debug_assertions)]
         early_println!(
             "[arm-smmu-v2] domain alloc stage=table ready: vaddr={:#x} paddr={:#x} limit={:#x}",
             page as usize,
