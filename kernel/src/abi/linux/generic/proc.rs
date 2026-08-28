@@ -1,4 +1,4 @@
-use alloc::{sync::Arc, vec::Vec};
+use alloc::{string::String, sync::Arc, vec::Vec};
 
 use crate::{
     abi::linux::generic::{LinuxAbi, errno},
@@ -536,41 +536,67 @@ pub fn sys_gettid(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     task.get_id()
 }
 
-/// Linux prctl system call (syscall 167)
+const PR_SET_NAME: i32 = 15;
+const PR_GET_NAME: i32 = 16;
+const TASK_COMM_LEN: usize = 16;
+
+fn prctl_task_name(bytes: &[u8; TASK_COMM_LEN]) -> String {
+    let length = bytes
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(TASK_COMM_LEN)
+        .min(TASK_COMM_LEN - 1);
+    String::from_utf8_lossy(&bytes[..length]).into_owned()
+}
+
+/// Linux prctl system call (syscall 167).
 ///
-/// Operations on a process or thread. This is a stub implementation
-/// that returns success for common operations.
+/// Implements thread-name access and accepts other operations as compatibility
+/// no-ops until their behavior is needed.
 ///
-/// Arguments:
-///   - arg0: option (PR_* operation)
-///   - arg1-arg4: operation-specific arguments
+/// # Arguments
 ///
-/// Returns:
-/// - 0 on success
-/// - usize::MAX (Linux -1) for unsupported operations
+/// * `_abi` - Linux ABI state (unused by the supported operations).
+/// * `trapframe` - Register state containing the `prctl` option and arguments.
+///
+/// # Returns
+///
+/// Zero on success or a negative Linux errno encoded as `usize`.
 pub fn sys_prctl(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
-    let task = mytask().unwrap();
+    let task = match mytask() {
+        Some(task) => task,
+        None => return errno::to_result(errno::EIO),
+    };
     let option = trapframe.get_arg(0) as i32;
-    let _arg2 = trapframe.get_arg(1);
+    let arg2 = trapframe.get_arg(1);
     let _arg3 = trapframe.get_arg(2);
     let _arg4 = trapframe.get_arg(3);
     let _arg5 = trapframe.get_arg(4);
 
     trapframe.increment_pc_next(&task);
 
-    crate::println!(
-        "[stub] sys_prctl: option={}, arg2={:#x}, arg3={:#x}, arg4={:#x}, arg5={:#x}",
-        option,
-        _arg2,
-        _arg3,
-        _arg4,
-        _arg5
-    );
-
-    // Common PR_* operations (from include/uapi/linux/prctl.h)
-    // For now, just return success for all operations
-    // Specific operations can be implemented as needed
-    0
+    match option {
+        PR_SET_NAME => {
+            let mut name = [0u8; TASK_COMM_LEN];
+            if copy_from_user(&task, arg2, &mut name).is_err() {
+                return errno::to_result(errno::EFAULT);
+            }
+            *task.name.write() = prctl_task_name(&name);
+            0
+        }
+        PR_GET_NAME => {
+            let mut name = [0u8; TASK_COMM_LEN];
+            let task_name = task.name.read();
+            let copied = task_name.as_bytes().len().min(TASK_COMM_LEN - 1);
+            name[..copied].copy_from_slice(&task_name.as_bytes()[..copied]);
+            if copy_to_user(&task, arg2, &name).is_err() {
+                errno::to_result(errno::EFAULT)
+            } else {
+                0
+            }
+        }
+        _ => 0,
+    }
 }
 
 pub fn sys_setpgid(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
@@ -1664,5 +1690,16 @@ mod tests {
 
         assert!(!is_linux_scheduler_target(&kernel_task));
         assert!(is_linux_scheduler_target(&user_task));
+    }
+
+    #[test_case]
+    fn prctl_task_name_stops_at_nul_and_linux_limit() {
+        let mut nul_terminated = [b'x'; TASK_COMM_LEN];
+        nul_terminated[..5].copy_from_slice(b"hello");
+        nul_terminated[5] = 0;
+        assert_eq!(prctl_task_name(&nul_terminated), "hello");
+
+        let full = [b'a'; TASK_COMM_LEN];
+        assert_eq!(prctl_task_name(&full), "aaaaaaaaaaaaaaa");
     }
 }

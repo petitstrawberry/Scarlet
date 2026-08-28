@@ -13,6 +13,7 @@ extern crate scarlet_ui_macros;
 
 use alloc::collections::BTreeMap;
 use alloc::vec;
+use core::sync::atomic::{AtomicU8, Ordering};
 use core::time::Duration;
 use sas_client::SasClient;
 use sas_protocol::{CONTROL_FLAG_MUTED, MASTER_VOLUME_UNITY_Q16};
@@ -45,6 +46,31 @@ use sws_protocol::window_types;
 
 const SWS_CONNECT_RETRIES: usize = 100;
 const SWS_RETRY_DELAY_MS: u64 = 50;
+
+fn is_taskbar_debug_enabled() -> bool {
+    static LOG_CACHE: AtomicU8 = AtomicU8::new(u8::MAX);
+    let cached = LOG_CACHE.load(Ordering::Relaxed);
+    if cached != u8::MAX {
+        return cached != 0;
+    }
+    let enabled = match std::env::var("SWS_LOG") {
+        Some(value) => matches!(
+            value.as_str(),
+            "debug" | "DEBUG" | "3" | "trace" | "TRACE" | "4"
+        ),
+        None => false,
+    };
+    LOG_CACHE.store(enabled as u8, Ordering::Relaxed);
+    enabled
+}
+
+macro_rules! taskbar_debug {
+    ($($arg:tt)*) => {
+        if is_taskbar_debug_enabled() {
+            std::println!($($arg)*);
+        }
+    };
+}
 
 type SwsScreenConnection = (sws::Connection, u32, u32, u32);
 
@@ -136,6 +162,32 @@ impl TaskBarApp {
             audio_muted: State::new(StateId::new(11), false),
             audio_output_label: State::new(StateId::new(12), String::from("Audio")),
         }
+    }
+
+    fn resolve_menu_titles(&mut self, window_id: u32, menu_titles: &str) -> (String, bool) {
+        if menu_titles.is_empty() {
+            return (
+                self.menu_titles_cache
+                    .get()
+                    .get(&window_id)
+                    .cloned()
+                    .unwrap_or_default(),
+                false,
+            );
+        }
+
+        let owned = menu_titles.to_string();
+        let changed = self
+            .menu_titles_cache
+            .get()
+            .get(&window_id)
+            .is_none_or(|cached| cached != &owned);
+        if changed {
+            self.menu_titles_cache.update(|cache| {
+                cache.insert(window_id, owned.clone());
+            });
+        }
+        (owned, changed)
     }
 }
 
@@ -738,45 +790,25 @@ impl PopupMenuRenderer {
 
 impl Application for TaskBarApp {
     fn on_focus_changed(&mut self, window_id: u32, app_name: &str, menu_titles: &str) {
-        println!(
+        taskbar_debug!(
             "[TaskBar] on_focus_changed: window_id={}, app_name={}, menu_titles={}",
-            window_id, app_name, menu_titles
+            window_id,
+            app_name,
+            menu_titles
         );
-        let resolved_menu_titles = if menu_titles.is_empty() {
-            self.menu_titles_cache
-                .get()
-                .get(&window_id)
-                .cloned()
-                .unwrap_or_default()
-        } else {
-            let owned = menu_titles.to_string();
-            self.menu_titles_cache.update(|cache| {
-                cache.insert(window_id, owned.clone());
-            });
-            owned
-        };
-        self.update_menu_for_app(window_id, app_name, &resolved_menu_titles);
+        let (resolved_menu_titles, menu_changed) = self.resolve_menu_titles(window_id, menu_titles);
+        self.update_menu_for_app(window_id, app_name, &resolved_menu_titles, menu_changed);
     }
 
     fn on_active_app_changed(&mut self, window_id: u32, app_name: &str, menu_titles: &str) {
-        println!(
+        taskbar_debug!(
             "[TaskBar] on_active_app_changed: window_id={}, app_name={}, menu_titles={}",
-            window_id, app_name, menu_titles
+            window_id,
+            app_name,
+            menu_titles
         );
-        let resolved_menu_titles = if menu_titles.is_empty() {
-            self.menu_titles_cache
-                .get()
-                .get(&window_id)
-                .cloned()
-                .unwrap_or_default()
-        } else {
-            let owned = menu_titles.to_string();
-            self.menu_titles_cache.update(|cache| {
-                cache.insert(window_id, owned.clone());
-            });
-            owned
-        };
-        self.update_menu_for_app(window_id, app_name, &resolved_menu_titles);
+        let (resolved_menu_titles, menu_changed) = self.resolve_menu_titles(window_id, menu_titles);
+        self.update_menu_for_app(window_id, app_name, &resolved_menu_titles, menu_changed);
     }
 
     fn on_window_resize(&mut self, _ctx: &WindowContext, width: u32, height: u32) {
@@ -1203,24 +1235,35 @@ impl TaskBarApp {
         });
     }
 
-    fn update_menu_for_app(&mut self, window_id: u32, app_name: &str, menu_titles: &str) {
-        println!(
+    fn update_menu_for_app(
+        &mut self,
+        window_id: u32,
+        app_name: &str,
+        menu_titles: &str,
+        menu_changed: bool,
+    ) {
+        taskbar_debug!(
             "[TaskBar] update_menu_for_app: window_id={}, app_name={}, menu_titles={}",
-            window_id, app_name, menu_titles
+            window_id,
+            app_name,
+            menu_titles
         );
 
         if self.popup_surface_id.get() == Some(window_id) {
-            println!("[TaskBar] Skipping popup surface {}", window_id);
+            taskbar_debug!("[TaskBar] Skipping popup surface {}", window_id);
             return;
         }
 
         if app_name == "TaskBar" || app_name == "Menu" {
-            println!("[TaskBar] Skipping menu update for {}", app_name);
+            taskbar_debug!("[TaskBar] Skipping menu update for {}", app_name);
             return;
         }
 
         if app_name.is_empty() {
-            println!("[TaskBar] No active application, showing default menu");
+            if self.active_window_id.get() == 0 {
+                return;
+            }
+            taskbar_debug!("[TaskBar] No active application, showing default menu");
             self.active_window_id.set(0);
             self.open_menu_index.set(None);
             let tree = MenuTree {
@@ -1231,8 +1274,16 @@ impl TaskBarApp {
             return;
         }
 
+        // A focus transition broadcasts both FOCUS_CHANGED and, when the
+        // active application changes, ACTIVE_APP_CHANGED. The payloads are
+        // intentionally equivalent for TaskBar, so rebuilding the full menu
+        // tree twice only adds latency and an avoidable redraw.
+        if self.active_window_id.get() == window_id && !menu_changed {
+            return;
+        }
+
         let tree = build_menu_tree(app_name, menu_titles);
-        println!("[TaskBar] Built menu tree with {} items", tree.items.len());
+        taskbar_debug!("[TaskBar] Built menu tree with {} items", tree.items.len());
         self.menu_bar.set(menu_bar_from_tree(&tree));
         self.menu_tree.set(tree);
         self.active_window_id.set(window_id);

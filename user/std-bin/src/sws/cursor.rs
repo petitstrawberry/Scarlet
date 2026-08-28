@@ -332,7 +332,6 @@ pub struct Cursor {
     active_index: usize,
     active_frame_index: usize,
     next_animation_deadline_ns: Option<u64>,
-    texture_generation: u64,
     needs_redraw: bool,
 }
 
@@ -425,7 +424,6 @@ impl Cursor {
             active_index: 0,
             active_frame_index: 0,
             next_animation_deadline_ns: None,
-            texture_generation: 1,
             needs_redraw: true,
         })
     }
@@ -567,7 +565,6 @@ impl Cursor {
         self.height = image.height;
         self.hotspot_x = image.hotspot_x;
         self.hotspot_y = image.hotspot_y;
-        self.texture_generation = self.texture_generation.wrapping_add(1).max(1);
         self.needs_redraw = true;
         true
     }
@@ -582,22 +579,39 @@ impl Cursor {
         self.images[self.active_index].icon
     }
 
-    /// Return the active image generation for GPU texture synchronization.
-    ///
-    /// # Returns
-    ///
-    /// A non-zero value that changes whenever the active image changes.
-    pub fn texture_generation(&self) -> u64 {
-        self.texture_generation
+    /// Return the number of images loaded for the active cursor theme.
+    pub(super) fn image_count(&self) -> usize {
+        self.images.len()
     }
 
-    /// Return the number of frames in the active cursor image.
-    ///
-    /// # Returns
-    ///
-    /// The active image's non-zero frame count.
-    pub fn frame_count(&self) -> usize {
-        self.images[self.active_index].frames.len()
+    /// Return the image selected by the current cursor icon.
+    pub(super) fn active_image_index(&self) -> usize {
+        self.active_index
+    }
+
+    /// Return one theme image's scaled extent.
+    pub(super) fn image_extent(&self, image_index: usize) -> Option<(u32, u32)> {
+        self.images
+            .get(image_index)
+            .map(|image| (image.width, image.height))
+    }
+
+    /// Return the number of animation frames in one theme image.
+    pub(super) fn image_frame_count(&self, image_index: usize) -> Option<usize> {
+        self.images.get(image_index).map(|image| image.frames.len())
+    }
+
+    /// Return one frame from an arbitrary theme image as straight-alpha BGRA.
+    pub(super) fn image_frame_bgra_pixels(
+        &self,
+        image_index: usize,
+        frame_index: usize,
+    ) -> Option<&[u8]> {
+        self.images
+            .get(image_index)?
+            .frames
+            .get(frame_index)
+            .map(|frame| frame.bgra.as_slice())
     }
 
     /// Return the displayed frame index in the active cursor image.
@@ -607,22 +621,6 @@ impl Cursor {
     /// A zero-based index smaller than [`Self::frame_count`].
     pub fn active_frame_index(&self) -> usize {
         self.active_frame_index
-    }
-
-    /// Return one frame from the active cursor image as straight-alpha BGRA pixels.
-    ///
-    /// # Arguments
-    ///
-    /// * `index` - Zero-based frame index in the active image.
-    ///
-    /// # Returns
-    ///
-    /// The tightly packed frame pixels, or `None` when `index` is out of range.
-    pub fn frame_bgra_pixels(&self, index: usize) -> Option<&[u8]> {
-        self.images[self.active_index]
-            .frames
-            .get(index)
-            .map(|frame| frame.bgra.as_slice())
     }
 
     /// Advance the active APNG animation to the frame due at `now_ns`.
@@ -928,7 +926,7 @@ mod tests {
     }
 
     #[test]
-    fn switching_icons_updates_geometry_and_texture_generation() {
+    fn switching_icons_updates_geometry_and_active_image() {
         let source = CursorPixels {
             width: 2,
             height: 2,
@@ -949,12 +947,15 @@ mod tests {
         .expect("valid pointer");
         cursor.images.push(pointer);
 
-        let generation = cursor.texture_generation();
+        assert_eq!(cursor.image_count(), 2);
+        assert_eq!(cursor.active_image_index(), 0);
+        assert_eq!(cursor.image_extent(1), Some((4, 6)));
+        assert_eq!(cursor.image_frame_count(1), Some(1));
         assert!(cursor.set_icon(CursorIcon::Pointer));
         assert_eq!(cursor.icon(), CursorIcon::Pointer);
+        assert_eq!(cursor.active_image_index(), 1);
         assert_eq!((cursor.width, cursor.height), (4, 6));
         assert_eq!(cursor.hotspot(), (2, 3));
-        assert_ne!(cursor.texture_generation(), generation);
         assert!(!cursor.set_icon(CursorIcon::Pointer));
     }
 
@@ -987,11 +988,13 @@ mod tests {
         )
         .expect("valid animation");
 
-        let image_generation = cursor.texture_generation();
-        assert_eq!(cursor.frame_count(), 2);
+        assert_eq!(cursor.image_frame_count(0), Some(2));
         assert_eq!(cursor.active_frame_index(), 0);
-        assert_eq!(cursor.frame_bgra_pixels(0).expect("first frame")[0], 1);
-        assert!(cursor.frame_bgra_pixels(2).is_none());
+        assert_eq!(
+            cursor.image_frame_bgra_pixels(0, 0).expect("first frame")[0],
+            1
+        );
+        assert!(cursor.image_frame_bgra_pixels(0, 2).is_none());
 
         assert!(!cursor.advance_animation(100));
         assert_eq!(cursor.next_animation_deadline_ns(), Some(110));
@@ -999,7 +1002,6 @@ mod tests {
         assert!(cursor.advance_animation(110));
         assert_eq!(cursor.active_frame_index(), 1);
         assert_eq!(cursor.bgra_pixels()[0], 2);
-        assert_eq!(cursor.texture_generation(), image_generation);
         assert_eq!(cursor.next_animation_deadline_ns(), Some(130));
     }
 }

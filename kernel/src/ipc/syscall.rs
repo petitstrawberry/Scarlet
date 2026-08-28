@@ -14,7 +14,7 @@ use crate::{
     library::std::string::parse_c_string_from_userspace,
     library::std::usercopy::{copy_from_user, copy_to_user},
     object::KernelObject,
-    object::capability::EventSubscriber,
+    object::capability::{EventSubscriber, Selectable},
     task::mytask,
 };
 use alloc::{string::ToString, sync::Arc, vec};
@@ -525,13 +525,13 @@ pub fn sys_shared_memory_create(trapframe: &mut Trapframe) -> usize {
 
 /// sys_shared_memory_resize - Resize a shared memory object
 ///
-/// Arguments:
-/// - handle: Handle to the shared memory object
-/// - size: New size in bytes (will be page-aligned in kernel)
+/// # Arguments
 ///
-/// Returns:
-/// - 0 on success
-/// - usize::MAX on error
+/// * `trapframe` - Register state containing the shared-memory handle and new size.
+///
+/// # Returns
+///
+/// Zero on success or `usize::MAX` on error.
 pub fn sys_shared_memory_resize(trapframe: &mut Trapframe) -> usize {
     let task = match mytask() {
         Some(task) => task,
@@ -541,14 +541,18 @@ pub fn sys_shared_memory_resize(trapframe: &mut Trapframe) -> usize {
     let handle = trapframe.get_arg(0) as u32;
     let size = trapframe.get_arg(1);
 
-    crate::println!("[sys_shared_memory_resize] handle={} size={}", handle, size);
+    if super::shared_memory::LOG_SHARED_MEMORY_RESIZE {
+        crate::println!("[sys_shared_memory_resize] handle={} size={}", handle, size);
+    }
 
     trapframe.increment_pc_next(&task);
 
     let kernel_obj = match task.handle_table.get(handle) {
         Some(obj) => obj,
         None => {
-            crate::println!("[sys_shared_memory_resize] handle not found");
+            if super::shared_memory::LOG_SHARED_MEMORY_RESIZE {
+                crate::println!("[sys_shared_memory_resize] handle not found");
+            }
             return usize::MAX;
         }
     };
@@ -556,20 +560,26 @@ pub fn sys_shared_memory_resize(trapframe: &mut Trapframe) -> usize {
     let shared_memory = match kernel_obj.as_shared_memory() {
         Some(obj) => obj,
         None => {
-            crate::println!("[sys_shared_memory_resize] not a shared memory object");
+            if super::shared_memory::LOG_SHARED_MEMORY_RESIZE {
+                crate::println!("[sys_shared_memory_resize] not a shared memory object");
+            }
             return usize::MAX;
         }
     };
 
     if let Err(e) = shared_memory.resize(size) {
-        crate::println!("[sys_shared_memory_resize] resize failed: {}", e);
+        if super::shared_memory::LOG_SHARED_MEMORY_RESIZE {
+            crate::println!("[sys_shared_memory_resize] resize failed: {}", e);
+        }
         return usize::MAX;
     }
 
-    crate::println!(
-        "[sys_shared_memory_resize] SUCCESS new_size={}",
-        shared_memory.size()
-    );
+    if super::shared_memory::LOG_SHARED_MEMORY_RESIZE {
+        crate::println!(
+            "[sys_shared_memory_resize] SUCCESS new_size={}",
+            shared_memory.size()
+        );
+    }
     0
 }
 
@@ -639,6 +649,7 @@ pub fn sys_socket_send_handle(trapframe: &mut Trapframe) -> usize {
 ///
 /// Returns:
 /// - Handle to the received kernel object on success
+/// - `-EAGAIN` if the socket is non-blocking and no handle is first in order
 /// - usize::MAX on error (no handle available or other error)
 pub fn sys_socket_recv_handle(trapframe: &mut Trapframe) -> usize {
     let task = match mytask() {
@@ -669,7 +680,12 @@ pub fn sys_socket_recv_handle(trapframe: &mut Trapframe) -> usize {
         None => return usize::MAX, // Not a LocalSocket
     };
 
-    let (object, metadata) = match local_socket.recv_handle_blocking(task.get_id(), trapframe) {
+    let received = if local_socket.is_nonblocking() {
+        local_socket.recv_handle()
+    } else {
+        local_socket.recv_handle_blocking(task.get_id(), trapframe)
+    };
+    let (object, metadata) = match received {
         Ok(entry) => entry,
         Err(error) => return socket_ipc_error_result(error),
     };

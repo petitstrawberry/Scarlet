@@ -19,12 +19,12 @@ use crate::{
             GPU_EXECUTION_SUPPORT_TIMELINE, GPU_IMAGE_FORMAT_BGRA8_UNORM,
             GPU_IMAGE_FORMAT_DEPTH32_FLOAT, GPU_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT,
             GPU_IMAGE_USAGE_PRESENTABLE, GPU_IMAGE_USAGE_RENDER_TARGET, GPU_IMAGE_USAGE_SAMPLED,
-            GPU_IMAGE_USAGE_TRANSFER_DST, GPU_MAX_OPAQUE_COMMAND_SIZE, GpuBackend,
-            GpuBackendBuffer, GpuBackendBufferInfo, GpuBackendContext, GpuBackendContextInfo,
-            GpuBackendDialectDescriptor, GpuBackendDialectInfo, GpuBackendImage,
-            GpuBackendImageInfo, GpuBackendInfo, GpuBackendQueue, GpuBackendQueueInfo,
-            GpuBackendSubmitError, GpuBufferCreateInfo, GpuDeviceInfo, GpuDeviceState,
-            GpuImageBackingInfo, GpuImageCreateInfo, GpuImageUploadInfo,
+            GPU_IMAGE_USAGE_TRANSFER_DST, GpuBackend, GpuBackendBuffer, GpuBackendBufferInfo,
+            GpuBackendContext, GpuBackendContextInfo, GpuBackendDialectDescriptor,
+            GpuBackendDialectInfo, GpuBackendImage, GpuBackendImageInfo, GpuBackendInfo,
+            GpuBackendQueue, GpuBackendQueueInfo, GpuBackendSubmitError, GpuBufferCreateInfo,
+            GpuDeviceInfo, GpuDeviceState, GpuImageBackingInfo, GpuImageCreateInfo,
+            GpuImageUploadInfo,
         },
         graphics::{
             FramebufferConfig, GpuDisplayResource, GraphicsDevice, PixelFormat,
@@ -85,6 +85,9 @@ const VIRTIO_GPU_CONTROL_QUEUE_SIZE: usize = 64;
 const VIRTIO_GPU_CURSOR_QUEUE_SIZE: usize = 16;
 const VIRTIO_GPU_CONTROL_TIMEOUT_NS: u64 = 2_000_000_000;
 const VIRTIO_GPU_CONTROL_MAX_SPINS: u64 = 10_000_000;
+// Preserve the established VirGL/QEMU transport budget independently of the
+// generic GPU ABI's larger absolute bound.
+const VIRTIO_GPU_MAX_OPAQUE_COMMAND_SIZE: u32 = 64 * 1024;
 
 // VirtIO GPU Formats
 const VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM: u32 = 1;
@@ -800,7 +803,7 @@ impl VirtioGpuDeviceCore {
                         0
                     },
                 if acceleration_usable {
-                    GPU_MAX_OPAQUE_COMMAND_SIZE
+                    VIRTIO_GPU_MAX_OPAQUE_COMMAND_SIZE
                 } else {
                     0
                 },
@@ -2013,7 +2016,7 @@ struct VirtioGpuBackendQueue {
 
 impl GpuBackendQueue for VirtioGpuBackendQueue {
     fn query_info(&self) -> GpuBackendQueueInfo {
-        GpuBackendQueueInfo::new(GPU_MAX_OPAQUE_COMMAND_SIZE)
+        GpuBackendQueueInfo::new(VIRTIO_GPU_MAX_OPAQUE_COMMAND_SIZE)
     }
 
     fn submit(&self, commands: &[u8]) -> Result<(), GpuBackendSubmitError> {

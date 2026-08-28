@@ -77,7 +77,9 @@ pub const GPU_BACKEND_INFO_BYTES: usize = 64;
 /// Fixed byte capacity of opaque backend-defined dialect information.
 pub const GPU_DIALECT_INFO_BYTES: usize = 256;
 /// Maximum command stream length accepted by the generic queue ABI.
-pub const GPU_MAX_OPAQUE_COMMAND_SIZE: u32 = 64 * 1024;
+/// Absolute ABI bound for one backend-defined queue payload. Individual GPU
+/// backends advertise and enforce their own (possibly smaller) queue limit.
+pub const GPU_MAX_OPAQUE_COMMAND_SIZE: u32 = 256 * 1024;
 /// Maximum BGRA pixel payload accepted by one image upload request.
 pub const GPU_MAX_IMAGE_UPLOAD_SIZE: u32 = 64 * 1024 * 1024;
 

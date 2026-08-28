@@ -5,6 +5,7 @@ use std::vec::Vec;
 use std::{error, fmt};
 
 use framebuffer::{DisplayPresentRegion, DisplaySurface};
+use scarlet_os::handle::Handle;
 use sgfx::backend::CommandExecutor;
 use sgfx::ir::{
     self, AddressMode, BlendState, BufferDesc, BufferId, BufferUsage, CommandEncoder, DrawUniforms,
@@ -51,12 +52,31 @@ impl fmt::Display for Error {
 impl error::Error for Error {}
 
 /// One directly selected frontend context with a mapped presentation target.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ReusableImport {
+    texture: TextureId,
+    width: u32,
+    height: u32,
+}
+
+fn take_reusable_import(
+    imports: &mut Vec<ReusableImport>,
+    width: u32,
+    height: u32,
+) -> Option<ReusableImport> {
+    let index = imports
+        .iter()
+        .position(|entry| entry.width == width && entry.height == height)?;
+    Some(imports.swap_remove(index))
+}
+
 pub(crate) struct MappedTarget {
     pub(crate) resources: Rc<ResourceTable>,
     pub(crate) texture: TextureId,
     pub(crate) width: u32,
     pub(crate) height: u32,
     session: MappedTargetSession,
+    reusable_imports: Vec<ReusableImport>,
 }
 
 impl MappedTarget {
@@ -92,6 +112,7 @@ impl MappedTarget {
             width,
             height,
             session,
+            reusable_imports: Vec::new(),
         })
     }
 
@@ -100,6 +121,48 @@ impl MappedTarget {
         commands: &ir::CommandBuffer<'_, '_>,
     ) -> Result<(), sgfx::Error> {
         self.session.executor().execute(commands)
+    }
+
+    pub(crate) fn import_shared_bgra_texture(
+        &mut self,
+        width: u32,
+        height: u32,
+        handle: Handle,
+    ) -> Result<TextureId, Error> {
+        if let Some(reusable) = take_reusable_import(&mut self.reusable_imports, width, height) {
+            if let Err(error) = self
+                .session
+                .import_shared_bgra_texture(reusable.texture, handle)
+            {
+                self.reusable_imports.push(reusable);
+                return Err(error.into());
+            }
+            return Ok(reusable.texture);
+        }
+        let texture = self
+            .resources
+            .define_texture(TextureDesc::new(
+                TextureFormat::Bgra8Unorm,
+                Extent2D::new(width, height)?,
+                TextureUsage::SAMPLED,
+            )?)?
+            .id();
+        self.session.import_shared_bgra_texture(texture, handle)?;
+        Ok(texture)
+    }
+
+    pub(crate) fn release_imported_texture(&mut self, texture: TextureId) -> Result<(), Error> {
+        let reference = self.resources.texture_ref(texture)?;
+        let descriptor = self.resources.texture(reference)?;
+        let width = descriptor.extent().width();
+        let height = descriptor.extent().height();
+        self.session.release_imported_texture(texture)?;
+        self.reusable_imports.push(ReusableImport {
+            texture,
+            width,
+            height,
+        });
+        Ok(())
     }
 
     pub(crate) fn present(
@@ -213,6 +276,19 @@ impl QuadRenderer {
         load: LoadOp,
         operations: &[Quad],
     ) -> Result<(), &'static str> {
+        let area = PixelRect::new(0, 0, target.width, target.height)
+            .map_err(|_| "Invalid SGFX target area")?;
+        self.submit_region(target, area, load, operations)
+    }
+
+    /// Submit quads while limiting render-target work to one damaged region.
+    pub(crate) fn submit_region(
+        &self,
+        target: &mut MappedTarget,
+        area: PixelRect,
+        load: LoadOp,
+        operations: &[Quad],
+    ) -> Result<(), &'static str> {
         if operations.len() > self.capacity {
             return Err("SGFX composition operation capacity exceeded");
         }
@@ -265,8 +341,6 @@ impl QuadRenderer {
                 )
                 .map_err(|_| "Failed to upload SGFX composition vertices")?;
         }
-        let area = PixelRect::new(0, 0, target.width, target.height)
-            .map_err(|_| "Invalid SGFX target area")?;
         let descriptor = RenderPassDesc::new(
             resources.as_ref(),
             resources
@@ -424,7 +498,8 @@ fn append_quad(
 
 #[cfg(test)]
 mod tests {
-    use super::supports_mapped_target;
+    use super::{ReusableImport, supports_mapped_target, take_reusable_import};
+    use sgfx::ir::{Extent2D, ResourceTable, TextureDesc, TextureFormat, TextureUsage};
 
     #[test]
     fn mapped_target_requires_all_composition_capabilities() {
@@ -432,5 +507,53 @@ mod tests {
         assert!(!supports_mapped_target(false, true, true));
         assert!(!supports_mapped_target(true, false, true));
         assert!(!supports_mapped_target(true, true, false));
+    }
+
+    #[test]
+    fn released_import_slots_are_reused_only_for_an_exact_extent() {
+        let resources = ResourceTable::new();
+        let small = resources
+            .define_texture(
+                TextureDesc::new(
+                    TextureFormat::Bgra8Unorm,
+                    Extent2D::new(64, 64).unwrap(),
+                    TextureUsage::SAMPLED,
+                )
+                .unwrap(),
+            )
+            .unwrap()
+            .id();
+        let wide = resources
+            .define_texture(
+                TextureDesc::new(
+                    TextureFormat::Bgra8Unorm,
+                    Extent2D::new(128, 64).unwrap(),
+                    TextureUsage::SAMPLED,
+                )
+                .unwrap(),
+            )
+            .unwrap()
+            .id();
+        let mut imports = vec![
+            ReusableImport {
+                texture: small,
+                width: 64,
+                height: 64,
+            },
+            ReusableImport {
+                texture: wide,
+                width: 128,
+                height: 64,
+            },
+        ];
+
+        assert!(take_reusable_import(&mut imports, 32, 32).is_none());
+        assert_eq!(imports.len(), 2);
+        assert_eq!(
+            take_reusable_import(&mut imports, 64, 64).unwrap().texture,
+            small
+        );
+        assert_eq!(imports.len(), 1);
+        assert_eq!(imports[0].texture, wide);
     }
 }

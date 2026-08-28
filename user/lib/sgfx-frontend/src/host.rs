@@ -94,15 +94,46 @@ impl Instance {
         width: u32,
         height: u32,
     ) -> Result<WindowContext> {
+        // SAFETY: forwarded unchanged from this method's contract.
+        unsafe {
+            self.create_window_context_with_transparency(
+                raw_display_handle,
+                raw_window_handle,
+                width,
+                height,
+                false,
+            )
+        }
+    }
+
+    /// Create a host presentation context with an explicit alpha requirement.
+    ///
+    /// When `transparent` is true, the selected backend must preserve the
+    /// alpha channel presented to the platform compositor.
+    ///
+    /// # Safety
+    ///
+    /// Both raw handles must remain valid until the returned context is
+    /// dropped. The platform must therefore drop its SGFX renderer before the
+    /// native window and display objects.
+    pub unsafe fn create_window_context_with_transparency(
+        &self,
+        raw_display_handle: RawDisplayHandle,
+        raw_window_handle: RawWindowHandle,
+        width: u32,
+        height: u32,
+        transparent: bool,
+    ) -> Result<WindowContext> {
         match self.backend() {
             BackendKind::Wgpu => {
                 // SAFETY: the caller upholds the raw-handle lifetime contract.
                 unsafe {
-                    sgfx_backend_wgpu::WindowContext::new(
+                    sgfx_backend_wgpu::WindowContext::new_with_transparency(
                         raw_display_handle,
                         raw_window_handle,
                         width,
                         height,
+                        transparent,
                     )
                 }
                 .map(|backend| WindowContext { backend })

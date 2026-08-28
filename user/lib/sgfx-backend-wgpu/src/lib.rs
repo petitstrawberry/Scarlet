@@ -391,6 +391,30 @@ impl WindowContext {
         width: u32,
         height: u32,
     ) -> Result<Self> {
+        // SAFETY: forwarded unchanged from this constructor's contract.
+        unsafe {
+            Self::new_with_transparency(raw_display_handle, raw_window_handle, width, height, false)
+        }
+    }
+
+    /// Create a complete WGPU execution context for native window handles.
+    ///
+    /// `transparent` requests a compositor mode that preserves the presented
+    /// image's alpha channel. The backend keeps straight-alpha presentation
+    /// when supported and premultiplies only when the surface requires it.
+    ///
+    /// # Safety
+    ///
+    /// Both raw handles must remain valid until the returned context is
+    /// dropped. Callers must drop SGFX rendering state before the native
+    /// window and display objects.
+    pub unsafe fn new_with_transparency(
+        raw_display_handle: RawDisplayHandle,
+        raw_window_handle: RawWindowHandle,
+        width: u32,
+        height: u32,
+        transparent: bool,
+    ) -> Result<Self> {
         let instance = raw::Instance::new(&raw::InstanceDescriptor::default());
         // SAFETY: the caller guarantees that both native handles outlive the
         // returned context and its surface.
@@ -418,10 +442,7 @@ impl WindowContext {
         }));
         let capabilities = surface.get_capabilities(&adapter);
         let format = select_surface_format(&capabilities.formats).ok_or(Error::SurfaceCreation)?;
-        let alpha_mode = capabilities
-            .alpha_modes
-            .first()
-            .copied()
+        let alpha_mode = select_surface_alpha_mode(&capabilities.alpha_modes, transparent)
             .ok_or(Error::SurfaceCreation)?;
         let config = raw::SurfaceConfiguration {
             usage: raw::TextureUsages::RENDER_ATTACHMENT,
@@ -448,7 +469,11 @@ impl WindowContext {
                 mipmap_filter: raw::FilterMode::Nearest,
                 ..Default::default()
             });
-        let blit_pipeline = create_blit_pipeline(context.raw_device(), config.format);
+        let blit_pipeline = create_blit_pipeline(
+            context.raw_device(),
+            config.format,
+            alpha_mode == raw::CompositeAlphaMode::PreMultiplied,
+        );
         Ok(Self {
             surface,
             config,
@@ -1507,10 +1532,43 @@ fn select_surface_format(formats: &[raw::TextureFormat]) -> Option<raw::TextureF
         .or_else(|| formats.first().copied())
 }
 
-fn create_blit_pipeline(device: &raw::Device, format: raw::TextureFormat) -> raw::RenderPipeline {
+fn select_surface_alpha_mode(
+    modes: &[raw::CompositeAlphaMode],
+    transparent: bool,
+) -> Option<raw::CompositeAlphaMode> {
+    if transparent {
+        modes
+            .iter()
+            .copied()
+            .find(|mode| *mode == raw::CompositeAlphaMode::PostMultiplied)
+            .or_else(|| {
+                modes
+                    .iter()
+                    .copied()
+                    .find(|mode| *mode == raw::CompositeAlphaMode::PreMultiplied)
+            })
+    } else {
+        modes
+            .iter()
+            .copied()
+            .find(|mode| *mode == raw::CompositeAlphaMode::Opaque)
+            .or_else(|| modes.first().copied())
+    }
+}
+
+fn create_blit_pipeline(
+    device: &raw::Device,
+    format: raw::TextureFormat,
+    premultiply_alpha: bool,
+) -> raw::RenderPipeline {
+    let shader_source = if premultiply_alpha {
+        BLIT_PREMULTIPLIED_SHADER
+    } else {
+        BLIT_SHADER
+    };
     let shader = device.create_shader_module(raw::ShaderModuleDescriptor {
         label: Some("sgfx WGPU presentation shader"),
-        source: raw::ShaderSource::Wgsl(BLIT_SHADER.into()),
+        source: raw::ShaderSource::Wgsl(shader_source.into()),
     });
     device.create_render_pipeline(&raw::RenderPipelineDescriptor {
         label: Some("sgfx WGPU presentation pipeline"),
@@ -1569,6 +1627,40 @@ fn vs_main(@builtin(vertex_index) vid: u32) -> VertexOut {
 @fragment
 fn fs_main(in: VertexOut) -> @location(0) vec4f {
     return textureSample(t_frame, s_frame, in.uv);
+}
+"#;
+
+const BLIT_PREMULTIPLIED_SHADER: &str = r#"
+struct VertexOut {
+    @builtin(position) position: vec4f,
+    @location(0) uv: vec2f,
+};
+
+@vertex
+fn vs_main(@builtin(vertex_index) vid: u32) -> VertexOut {
+    var positions = array<vec2f, 3>(
+        vec2f(-1.0, -1.0),
+        vec2f( 3.0, -1.0),
+        vec2f(-1.0,  3.0),
+    );
+    var uvs = array<vec2f, 3>(
+        vec2f(0.0, 1.0),
+        vec2f(2.0, 1.0),
+        vec2f(0.0, -1.0),
+    );
+    var out: VertexOut;
+    out.position = vec4f(positions[vid], 0.0, 1.0);
+    out.uv = uvs[vid];
+    return out;
+}
+
+@group(0) @binding(0) var t_frame: texture_2d<f32>;
+@group(0) @binding(1) var s_frame: sampler;
+
+@fragment
+fn fs_main(in: VertexOut) -> @location(0) vec4f {
+    let color = textureSample(t_frame, s_frame, in.uv);
+    return vec4f(color.rgb * color.a, color.a);
 }
 "#;
 
@@ -2144,6 +2236,57 @@ mod tests {
         assert_eq!(
             select_surface_format(&[raw::TextureFormat::Bgra8UnormSrgb]),
             Some(raw::TextureFormat::Bgra8UnormSrgb)
+        );
+    }
+
+    #[test]
+    fn transparent_surface_prefers_straight_alpha_compositing() {
+        assert_eq!(
+            select_surface_alpha_mode(
+                &[
+                    raw::CompositeAlphaMode::Opaque,
+                    raw::CompositeAlphaMode::PreMultiplied,
+                    raw::CompositeAlphaMode::PostMultiplied,
+                ],
+                true,
+            ),
+            Some(raw::CompositeAlphaMode::PostMultiplied)
+        );
+    }
+
+    #[test]
+    fn transparent_surface_uses_premultiplied_when_required() {
+        assert_eq!(
+            select_surface_alpha_mode(
+                &[
+                    raw::CompositeAlphaMode::Opaque,
+                    raw::CompositeAlphaMode::PreMultiplied,
+                ],
+                true,
+            ),
+            Some(raw::CompositeAlphaMode::PreMultiplied)
+        );
+    }
+
+    #[test]
+    fn transparent_surface_rejects_opaque_only_compositing() {
+        assert_eq!(
+            select_surface_alpha_mode(&[raw::CompositeAlphaMode::Opaque], true),
+            None
+        );
+    }
+
+    #[test]
+    fn opaque_surface_keeps_opaque_compositing() {
+        assert_eq!(
+            select_surface_alpha_mode(
+                &[
+                    raw::CompositeAlphaMode::PostMultiplied,
+                    raw::CompositeAlphaMode::Opaque,
+                ],
+                false,
+            ),
+            Some(raw::CompositeAlphaMode::Opaque)
         );
     }
 

@@ -47,6 +47,15 @@ gpu-raw = { path = "../gpu-raw", default-features = false, optional = true }
 sgfx-backend-scarlet-adreno = { git = "https://github.com/petitstrawberry/scarlet-project-chromebook.git", package = "sgfx-backend-scarlet-adreno", default-features = false, optional = true }
 sgfx-backend-scarlet-virgl = { path = "../sgfx-backend-scarlet-virgl", default-features = false, optional = true }
 
+[patch."https://github.com/petitstrawberry/Scarlet"]
+scarlet-abi = { path = "../scarlet-abi" }
+scarlet-os = { path = "../scarlet-os" }
+scarlet-rt = { path = "../scarlet-rt" }
+scarlet-std = { path = "../std" }
+scarlet-sys = { path = "../scarlet-sys" }
+gpu-raw = { path = "../gpu-raw" }
+sgfx-core = { path = "../sgfx" }
+
 [lib]
 name = "sgfx"
 path = "src/lib.rs"

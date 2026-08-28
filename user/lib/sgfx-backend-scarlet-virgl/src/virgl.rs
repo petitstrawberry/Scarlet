@@ -730,6 +730,78 @@ impl Context {
         Ok(())
     }
 
+    pub(crate) fn map_ir_texture(
+        &self,
+        resources: &mut IrResources,
+        texture: IrTextureSpec,
+        image: &Texture,
+    ) -> HandleResult<()> {
+        if resources.context_handle != self.handle_id()
+            || image.context_handle != self.handle_id()
+            || texture.slot >= resources.textures.len()
+            || texture.width != image.width
+            || texture.height != image.height
+            || !texture.sampled
+            || texture.present
+            || texture.format != IrTextureFormat::Bgra8
+        {
+            return Err(HandleError::InvalidParameter);
+        }
+        let slot = resources
+            .textures
+            .get_mut(texture.slot)
+            .ok_or(HandleError::InvalidParameter)?;
+        if slot.is_some() {
+            return Err(HandleError::InvalidParameter);
+        }
+        *slot = Some(IrTexture::Mapped(MappedIrTexture {
+            resource_id: image.resource_id,
+            width: image.width,
+            height: image.height,
+            // The imported Texture may also be used by the legacy composition
+            // path.  Give the IR resource table its own sampler-view object so
+            // the two paths cannot CREATE the same VirGL object id while
+            // tracking initialization in separate Cells.
+            sampler_view_handle: self.allocate_object_handle()?,
+            sampler_view_initialized: Cell::new(false),
+            surface_handle: image.ir_surface_handle,
+            surface_initialized: Cell::new(image.ir_surface_initialized.get()),
+        }));
+        if let Some(spec) = resources.texture_specs.get_mut(texture.slot) {
+            *spec = Some(texture);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn unmap_ir_texture(
+        &self,
+        resources: &mut IrResources,
+        texture: IrTextureSpec,
+        image: &Texture,
+    ) -> HandleResult<()> {
+        if resources.context_handle != self.handle_id()
+            || image.context_handle != self.handle_id()
+            || texture.slot >= resources.textures.len()
+        {
+            return Err(HandleError::InvalidParameter);
+        }
+        let slot = resources
+            .textures
+            .get_mut(texture.slot)
+            .ok_or(HandleError::InvalidParameter)?;
+        let Some(IrTexture::Mapped(mapped)) = slot.as_ref() else {
+            return Err(HandleError::InvalidParameter);
+        };
+        if mapped.resource_id != image.resource_id {
+            return Err(HandleError::InvalidParameter);
+        }
+        *slot = None;
+        if let Some(spec) = resources.texture_specs.get_mut(texture.slot) {
+            *spec = None;
+        }
+        Ok(())
+    }
+
     pub(crate) fn context_id(&self) -> i32 {
         self.handle_id()
     }

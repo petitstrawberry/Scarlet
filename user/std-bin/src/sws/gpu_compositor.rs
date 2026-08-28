@@ -47,15 +47,37 @@ struct CachedWindowTexture {
     pending_damage: Option<DamageRect>,
 }
 
+struct SharedWindowTexture {
+    identity: SgfxBufferIdentity,
+    width: u32,
+    height: u32,
+    texture: TextureId,
+    handle: Handle,
+}
+
+struct SharedWindowState {
+    window_id: WindowId,
+    latest_generation: u32,
+    compositor_epoch: u32,
+    presented: Option<SgfxCommitToken>,
+    pending: Option<SgfxCommitToken>,
+    retire_after_present: Option<SgfxCommitToken>,
+}
+
+struct CursorTextureSet {
+    width: u32,
+    height: u32,
+    frames: Vec<TextureId>,
+}
+
 /// GPU resources and texture cache used by the internal SWS compositor.
 pub(super) struct GpuCompositor {
     target: MappedTarget,
     quad_renderer: QuadRenderer,
-    cursor_textures: Vec<TextureId>,
-    cursor_width: u32,
-    cursor_height: u32,
-    cursor_texture_generation: u64,
+    cursor_images: Vec<CursorTextureSet>,
     textures: Vec<CachedWindowTexture>,
+    shared_textures: Vec<SharedWindowTexture>,
+    shared_windows: Vec<SharedWindowState>,
     rebuild_pending: bool,
     rebuild_extent: Option<(u32, u32)>,
     force_full_repaint: bool,
@@ -68,16 +90,18 @@ impl GpuCompositor {
             MappedTarget::open(width, height).map_err(|_| "Failed to create mapped GPU target")?;
         let quad_renderer = QuadRenderer::define(target.resources.as_ref(), 96)
             .map_err(|_| "Failed to define GPU composition resources")?;
-        let cursor_textures = create_cursor_textures(&mut target, cursor)?;
+        // Upload the complete theme once. Pointer-shape changes are common
+        // during hover and resize, and must only select another texture rather
+        // than rebuilding the GPU context and every live window resource.
+        let cursor_images = create_cursor_images(&mut target, cursor)?;
 
         Ok(Self {
             target,
             quad_renderer,
-            cursor_textures,
-            cursor_width: cursor.width,
-            cursor_height: cursor.height,
-            cursor_texture_generation: cursor.texture_generation(),
+            cursor_images,
             textures: Vec::new(),
+            shared_textures: Vec::new(),
+            shared_windows: Vec::new(),
             rebuild_pending: false,
             rebuild_extent: None,
             force_full_repaint: false,
@@ -95,8 +119,58 @@ impl GpuCompositor {
         if width == 0 || height == 0 {
             return Err(SgfxBufferError::InvalidBuffer);
         }
-        let _ = (identity, handle);
-        Err(SgfxBufferError::ImportFailed)
+        if self
+            .shared_textures
+            .iter()
+            .any(|entry| entry.identity == identity)
+        {
+            return Err(SgfxBufferError::InvalidBuffer);
+        }
+
+        let state_index = self
+            .shared_windows
+            .iter()
+            .position(|state| state.window_id == identity.window_id);
+        if let Some(index) = state_index {
+            let state = &self.shared_windows[index];
+            if identity.compositor_epoch != state.compositor_epoch
+                || identity.generation < state.latest_generation
+            {
+                return Err(SgfxBufferError::StaleGeneration);
+            }
+        }
+
+        // Keep the received capability as the durable owner. The mapped
+        // session consumes a duplicate so target/session rebuilds can reimport
+        // every still-registered client image without changing its identity.
+        let imported_handle = handle
+            .duplicate()
+            .map_err(|_| SgfxBufferError::ImportFailed)?;
+        let texture = self
+            .target
+            .import_shared_bgra_texture(width, height, imported_handle)
+            .map_err(|_| SgfxBufferError::ImportFailed)?;
+        match state_index {
+            Some(index) => {
+                self.shared_windows[index].latest_generation = identity.generation;
+            }
+            None => self.shared_windows.push(SharedWindowState {
+                window_id: identity.window_id,
+                latest_generation: identity.generation,
+                compositor_epoch: identity.compositor_epoch,
+                presented: None,
+                pending: None,
+                retire_after_present: None,
+            }),
+        }
+        self.shared_textures.push(SharedWindowTexture {
+            identity,
+            width,
+            height,
+            texture,
+            handle,
+        });
+        Ok(())
     }
 
     /// Atomically publish a registered buffer and bounded damage list.
@@ -106,8 +180,74 @@ impl GpuCompositor {
         commit_serial: u64,
         damage_rects: &[sws_protocol::SgfxDamageRect],
     ) -> Result<Vec<DamageRect>, SgfxBufferError> {
-        let _ = (identity, commit_serial, damage_rects);
-        Err(SgfxBufferError::InvalidBuffer)
+        if commit_serial == 0 {
+            return Err(SgfxBufferError::InvalidBuffer);
+        }
+        let texture = self
+            .shared_textures
+            .iter()
+            .find(|entry| entry.identity == identity)
+            .ok_or(SgfxBufferError::InvalidBuffer)?;
+        let state = self
+            .shared_windows
+            .iter_mut()
+            .find(|state| state.window_id == identity.window_id)
+            .ok_or(SgfxBufferError::InvalidBuffer)?;
+        if identity.compositor_epoch != state.compositor_epoch
+            || identity.generation != state.latest_generation
+        {
+            return Err(SgfxBufferError::StaleGeneration);
+        }
+        if state
+            .presented
+            .is_some_and(|commit| commit.identity == identity)
+            || state
+                .pending
+                .is_some_and(|commit| commit.identity == identity)
+            || state
+                .retire_after_present
+                .is_some_and(|commit| commit.identity == identity)
+        {
+            return Err(SgfxBufferError::BufferBusy);
+        }
+
+        let mut clipped_damage = Vec::new();
+        for rect in damage_rects {
+            let left = i64::from(rect.x).max(0).min(i64::from(texture.width));
+            let top = i64::from(rect.y).max(0).min(i64::from(texture.height));
+            let right = i64::from(rect.x)
+                .saturating_add(i64::from(rect.width))
+                .max(0)
+                .min(i64::from(texture.width));
+            let bottom = i64::from(rect.y)
+                .saturating_add(i64::from(rect.height))
+                .max(0)
+                .min(i64::from(texture.height));
+            if right > left && bottom > top {
+                clipped_damage.push((
+                    left as u32,
+                    top as u32,
+                    (right - left) as u32,
+                    (bottom - top) as u32,
+                ));
+            }
+        }
+        if clipped_damage.is_empty() {
+            return Err(SgfxBufferError::InvalidBuffer);
+        }
+        let commit = SgfxCommitToken {
+            identity,
+            commit_serial,
+        };
+        if state.pending.is_some() {
+            if state.retire_after_present.is_some() {
+                return Err(SgfxBufferError::BufferBusy);
+            }
+            state.retire_after_present = state.pending.replace(commit);
+        } else {
+            state.pending = Some(commit);
+        }
+        Ok(clipped_damage)
     }
 
     /// Remove a registered shared buffer that is not retained by SWS.
@@ -115,8 +255,35 @@ impl GpuCompositor {
         &mut self,
         identity: SgfxBufferIdentity,
     ) -> Result<(), SgfxBufferError> {
-        let _ = identity;
-        Err(SgfxBufferError::InvalidBuffer)
+        if let Some(state) = self
+            .shared_windows
+            .iter()
+            .find(|state| state.window_id == identity.window_id)
+            && (state
+                .presented
+                .is_some_and(|commit| commit.identity == identity)
+                || state
+                    .pending
+                    .is_some_and(|commit| commit.identity == identity)
+                || state
+                    .retire_after_present
+                    .is_some_and(|commit| commit.identity == identity))
+        {
+            return Err(SgfxBufferError::BufferBusy);
+        }
+        let index = self
+            .shared_textures
+            .iter()
+            .position(|entry| entry.identity == identity)
+            .ok_or(SgfxBufferError::InvalidBuffer)?;
+        self.target
+            .release_imported_texture(self.shared_textures[index].texture)
+            .map_err(|_| SgfxBufferError::Unavailable)?;
+        self.shared_textures.remove(index);
+        // MappedTarget retains the now-unmapped logical texture slot. A later
+        // buffer with the same extent reimports into that slot without
+        // rebuilding the output target, GPU context, or all live windows.
+        Ok(())
     }
 
     /// Rebuild private composition resources before the next output frame.
@@ -212,6 +379,19 @@ impl GpuCompositor {
     /// Retire all GPU resources after the window itself is closed.
     pub(super) fn remove_window(&mut self, window_id: WindowId) -> Result<(), &'static str> {
         self.remove_window_texture(window_id)?;
+        while let Some(index) = self
+            .shared_textures
+            .iter()
+            .position(|entry| entry.identity.window_id == window_id)
+        {
+            let texture = self.shared_textures[index].texture;
+            self.target
+                .release_imported_texture(texture)
+                .map_err(|_| "Failed to detach shared SGFX window texture")?;
+            self.shared_textures.remove(index);
+        }
+        self.shared_windows
+            .retain(|state| state.window_id != window_id);
         Ok(())
     }
 
@@ -236,7 +416,8 @@ impl GpuCompositor {
             // and cause a fresh private resource table. Each active window is
             // therefore re-uploaded into that replacement table here.
             let has_current_backing = window.pixels().is_ok();
-            if window.visible && has_current_backing {
+            if window.visible && !self.has_committed_shared_buffer(window.id) && has_current_backing
+            {
                 self.sync_window_texture(window)?;
             }
         }
@@ -249,13 +430,6 @@ impl GpuCompositor {
             .transpose()
             .map_err(|_| "Invalid GPU composition damage")?;
         let mut operations = Vec::new();
-        if let Some(clip) = damage_clip {
-            operations.push(Quad::Solid {
-                destination: clip,
-                color: clear_color,
-                clip: None,
-            });
-        }
         for window in windows {
             if !window.visible {
                 continue;
@@ -266,16 +440,27 @@ impl GpuCompositor {
                 .iter()
                 .any(|entry| entry.window_id == window.id);
             let has_current_backing = window.pixels().is_ok();
-            if has_cached_texture || has_current_backing {
-                let texture = self
-                    .textures
-                    .iter()
-                    .find(|entry| entry.window_id == window.id)
-                    .ok_or("GPU window texture cache is missing")?;
+            if self.has_committed_shared_buffer(window.id)
+                || has_cached_texture
+                || has_current_backing
+            {
+                let (texture, texture_width, texture_height) =
+                    match self.committed_shared_texture(window.id) {
+                        Some(texture) => texture,
+                        None => {
+                            let texture = self
+                                .textures
+                                .iter()
+                                .find(|entry| entry.window_id == window.id)
+                                .ok_or("GPU window texture cache is missing")?;
+                            (texture.texture, texture.width, texture.height)
+                        }
+                    };
                 // A geometry change can temporarily precede its next CPU
-                // upload. Keep sampling the private cache within its extent.
-                let content_width = window.width.min(texture.width);
-                let content_height = window.height.min(texture.height);
+                // upload or shared generation. Keep sampling the current cache
+                // without extending beyond the registered image extent.
+                let content_width = window.width.min(texture_width);
+                let content_height = window.height.min(texture_height);
                 let Some((destination, source)) = clipped_rect(
                     window.x,
                     window.y,
@@ -290,9 +475,9 @@ impl GpuCompositor {
                     continue;
                 }
                 operations.push(Quad::Sampled(SampledRect {
-                    texture: texture.texture,
-                    texture_width: texture.width,
-                    texture_height: texture.height,
+                    texture,
+                    texture_width,
+                    texture_height,
                     destination,
                     source,
                     tint: Color::rgba(1.0, 1.0, 1.0, window.opacity)
@@ -336,26 +521,34 @@ impl GpuCompositor {
                 damage_clip,
             )?;
         }
+        let (cursor_texture, cursor_width, cursor_height) = {
+            let cursor_image = self
+                .cursor_images
+                .get(cursor.active_image_index())
+                .ok_or("GPU cursor image is missing")?;
+            let texture = cursor_image
+                .frames
+                .get(cursor.active_frame_index())
+                .copied()
+                .ok_or("GPU cursor frame texture is missing")?;
+            (texture, cursor_image.width, cursor_image.height)
+        };
         let (cursor_x, cursor_y) = cursor.draw_position();
         if cursor_visible
             && let Some((destination, source)) = clipped_rect(
                 cursor_x,
                 cursor_y,
-                self.cursor_width,
-                self.cursor_height,
+                cursor_width,
+                cursor_height,
                 self.target.width,
                 self.target.height,
             )
             && damage_clip.is_none_or(|clip| pixel_rects_intersect(destination, clip))
         {
-            let cursor_texture = self
-                .cursor_textures
-                .get(cursor.active_frame_index())
-                .ok_or("GPU cursor frame texture is missing")?;
             operations.push(Quad::Sampled(SampledRect {
-                texture: *cursor_texture,
-                texture_width: self.cursor_width,
-                texture_height: self.cursor_height,
+                texture: cursor_texture,
+                texture_width: cursor_width,
+                texture_height: cursor_height,
                 destination,
                 source,
                 tint: Color::rgba(1.0, 1.0, 1.0, 1.0).map_err(|_| "Invalid cursor tint")?,
@@ -365,13 +558,16 @@ impl GpuCompositor {
         }
 
         super::trace::set_compositor_stage(super::trace::STAGE_GPU_SUBMIT);
-        let load = if damage_clip.is_some() {
-            LoadOp::Load
-        } else {
-            LoadOp::Clear(clear_color)
-        };
-        self.quad_renderer
-            .submit(&mut self.target, load, &operations)?;
+        let render_area = damage_clip.unwrap_or(
+            PixelRect::new(0, 0, self.target.width, self.target.height)
+                .map_err(|_| "Invalid GPU composition target area")?,
+        );
+        self.quad_renderer.submit_region(
+            &mut self.target,
+            render_area,
+            LoadOp::Clear(clear_color),
+            &operations,
+        )?;
         super::trace::set_compositor_stage(super::trace::STAGE_GPU_PRESENT);
         let region = damage.map(|(x, y, width, height)| DisplayPresentRegion {
             x,
@@ -382,7 +578,41 @@ impl GpuCompositor {
         self.target.present(display, region)?;
         self.force_full_repaint = false;
         super::trace::set_compositor_stage(super::trace::STAGE_GPU_COLLECT_RELEASES);
-        Ok(Vec::new())
+        Ok(self.take_presented_releases())
+    }
+
+    pub(super) fn has_committed_shared_buffer(&self, window_id: WindowId) -> bool {
+        self.shared_windows.iter().any(|state| {
+            state.window_id == window_id && (state.pending.is_some() || state.presented.is_some())
+        })
+    }
+
+    fn committed_shared_texture(&self, window_id: WindowId) -> Option<(TextureId, u32, u32)> {
+        let state = self
+            .shared_windows
+            .iter()
+            .find(|state| state.window_id == window_id)?;
+        let identity = state.pending.or(state.presented)?.identity;
+        self.shared_textures
+            .iter()
+            .find(|entry| entry.identity == identity)
+            .map(|entry| (entry.texture, entry.width, entry.height))
+    }
+
+    fn take_presented_releases(&mut self) -> Vec<SgfxCommitToken> {
+        let mut releases = Vec::new();
+        for state in &mut self.shared_windows {
+            let Some(pending) = state.pending.take() else {
+                continue;
+            };
+            if let Some(previous) = state.presented.replace(pending) {
+                releases.push(previous);
+            }
+            if let Some(superseded) = state.retire_after_present.take() {
+                releases.push(superseded);
+            }
+        }
+        releases
     }
 
     fn sync_window_texture(&mut self, window: &Window) -> Result<(), &'static str> {
@@ -446,10 +676,11 @@ impl GpuCompositor {
         cursor: &Cursor,
         windows: &[Window],
     ) -> Result<(), &'static str> {
-        let cursor_changed = self.cursor_texture_generation != cursor.texture_generation()
-            || self.cursor_width != cursor.width
-            || self.cursor_height != cursor.height
-            || self.cursor_textures.len() != cursor.frame_count();
+        let cursor_layout_changed = self.cursor_images.len() != cursor.image_count()
+            || self.cursor_images.iter().enumerate().any(|(index, image)| {
+                cursor.image_extent(index) != Some((image.width, image.height))
+                    || cursor.image_frame_count(index) != Some(image.frames.len())
+            });
         let texture_extent_changed = self.textures.iter().any(|texture| {
             windows
                 .iter()
@@ -460,7 +691,7 @@ impl GpuCompositor {
                     })
                 })
         });
-        if !self.rebuild_pending && !cursor_changed && !texture_extent_changed {
+        if !self.rebuild_pending && !cursor_layout_changed && !texture_extent_changed {
             return Ok(());
         }
 
@@ -471,7 +702,21 @@ impl GpuCompositor {
             MappedTarget::open(width, height).map_err(|_| "Failed to rebuild mapped GPU target")?;
         let quad_renderer = QuadRenderer::define(target.resources.as_ref(), 96)
             .map_err(|_| "Failed to redefine GPU composition resources")?;
-        let cursor_textures = create_cursor_textures(&mut target, cursor)?;
+        let cursor_images = create_cursor_images(&mut target, cursor)?;
+        let mut shared_texture_ids = Vec::new();
+        shared_texture_ids
+            .try_reserve_exact(self.shared_textures.len())
+            .map_err(|_| "Failed to reserve rebuilt shared texture mappings")?;
+        for shared in &self.shared_textures {
+            let handle = shared
+                .handle
+                .duplicate()
+                .map_err(|_| "Failed to duplicate shared SGFX image")?;
+            let texture = target
+                .import_shared_bgra_texture(shared.width, shared.height, handle)
+                .map_err(|_| "Failed to reimport shared SGFX image")?;
+            shared_texture_ids.push(texture);
+        }
 
         // A replacement session owns a fresh table, so no retired cursor or
         // window texture can consume another logical resource slot. The same
@@ -479,11 +724,11 @@ impl GpuCompositor {
         // entire target before presenting it.
         self.target = target;
         self.quad_renderer = quad_renderer;
-        self.cursor_textures = cursor_textures;
-        self.cursor_width = cursor.width;
-        self.cursor_height = cursor.height;
-        self.cursor_texture_generation = cursor.texture_generation();
+        self.cursor_images = cursor_images;
         self.textures.clear();
+        for (shared, texture) in self.shared_textures.iter_mut().zip(shared_texture_ids) {
+            shared.texture = texture;
+        }
         self.rebuild_pending = false;
         self.rebuild_extent = None;
         self.force_full_repaint = true;
@@ -491,37 +736,52 @@ impl GpuCompositor {
     }
 }
 
-fn create_cursor_textures(
+fn create_cursor_images(
     target: &mut MappedTarget,
     cursor: &Cursor,
-) -> Result<Vec<TextureId>, &'static str> {
-    let frame_count = cursor.frame_count();
-    if frame_count == 0 {
-        return Err("Cursor image has no GPU-uploadable frames");
+) -> Result<Vec<CursorTextureSet>, &'static str> {
+    let image_count = cursor.image_count();
+    if image_count == 0 {
+        return Err("Cursor theme has no GPU-uploadable images");
     }
 
-    let mut textures = Vec::new();
-    textures
-        .try_reserve_exact(frame_count)
-        .map_err(|_| "Failed to reserve GPU cursor frame textures")?;
-    for frame_index in 0..frame_count {
-        let Some(pixels) = cursor.frame_bgra_pixels(frame_index) else {
-            return Err("Cursor frame pixels are missing");
-        };
-        let texture = define_bgra_texture(target.resources.as_ref(), cursor.width, cursor.height)
-            .map_err(|_| "Failed to define GPU cursor frame texture")?;
-        let area = PixelRect::new(0, 0, cursor.width, cursor.height)
-            .map_err(|_| "Invalid GPU cursor frame extent")?;
-        upload_bgra(
-            target,
-            texture,
-            area,
-            cursor.width.saturating_mul(4),
-            pixels,
-        )?;
-        textures.push(texture);
+    let mut images = Vec::new();
+    images
+        .try_reserve_exact(image_count)
+        .map_err(|_| "Failed to reserve GPU cursor images")?;
+    for image_index in 0..image_count {
+        let (width, height) = cursor
+            .image_extent(image_index)
+            .ok_or("Cursor image extent is missing")?;
+        let frame_count = cursor
+            .image_frame_count(image_index)
+            .ok_or("Cursor image frame metadata is missing")?;
+        if frame_count == 0 {
+            return Err("Cursor image has no GPU-uploadable frames");
+        }
+
+        let mut frames = Vec::new();
+        frames
+            .try_reserve_exact(frame_count)
+            .map_err(|_| "Failed to reserve GPU cursor frame textures")?;
+        for frame_index in 0..frame_count {
+            let pixels = cursor
+                .image_frame_bgra_pixels(image_index, frame_index)
+                .ok_or("Cursor frame pixels are missing")?;
+            let texture = define_bgra_texture(target.resources.as_ref(), width, height)
+                .map_err(|_| "Failed to define GPU cursor frame texture")?;
+            let area = PixelRect::new(0, 0, width, height)
+                .map_err(|_| "Invalid GPU cursor frame extent")?;
+            upload_bgra(target, texture, area, width.saturating_mul(4), pixels)?;
+            frames.push(texture);
+        }
+        images.push(CursorTextureSet {
+            width,
+            height,
+            frames,
+        });
     }
-    Ok(textures)
+    Ok(images)
 }
 
 fn bgra_color(color: [u8; 4]) -> Color {

@@ -3,6 +3,24 @@
 version = 4
 
 [[package]]
+name = "adreno-a6xx-pm4"
+version = "0.1.0"
+source = "git+https://github.com/petitstrawberry/scarlet-project-chromebook.git#dde179b50c666af6ed55ff885e9ffdb5bed50737"
+
+[[package]]
+name = "adreno-a6xx-shader-pack"
+version = "0.1.0"
+source = "git+https://github.com/petitstrawberry/scarlet-project-chromebook.git#dde179b50c666af6ed55ff885e9ffdb5bed50737"
+
+[[package]]
+name = "adreno-a6xx-submit-wire"
+version = "0.1.0"
+source = "git+https://github.com/petitstrawberry/scarlet-project-chromebook.git#dde179b50c666af6ed55ff885e9ffdb5bed50737"
+dependencies = [
+ "adreno-a6xx-shader-pack",
+]
+
+[[package]]
 name = "allocator-api2"
 version = "0.2.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -720,10 +738,25 @@ dependencies = [
 name = "sgfx"
 version = "0.16.0"
 dependencies = [
+ "gpu-raw",
  "raw-window-handle",
  "scarlet-std",
+ "sgfx-backend-scarlet-adreno",
  "sgfx-backend-scarlet-virgl",
  "sgfx-backend-wgpu",
+ "sgfx-core",
+]
+
+[[package]]
+name = "sgfx-backend-scarlet-adreno"
+version = "0.1.0"
+source = "git+https://github.com/petitstrawberry/scarlet-project-chromebook.git#dde179b50c666af6ed55ff885e9ffdb5bed50737"
+dependencies = [
+ "adreno-a6xx-submit-wire",
+ "gpu-raw",
+ "scarlet-os",
+ "scarlet-std",
+ "sgfx-codegen-adreno-a6xx",
  "sgfx-core",
 ]
 
@@ -747,6 +780,16 @@ dependencies = [
  "raw-window-handle",
  "sgfx-core",
  "wgpu",
+]
+
+[[package]]
+name = "sgfx-codegen-adreno-a6xx"
+version = "0.1.0"
+source = "git+https://github.com/petitstrawberry/scarlet-project-chromebook.git#dde179b50c666af6ed55ff885e9ffdb5bed50737"
+dependencies = [
+ "adreno-a6xx-pm4",
+ "adreno-a6xx-shader-pack",
+ "sgfx-core",
 ]
 
 [[package]]

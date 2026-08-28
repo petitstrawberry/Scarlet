@@ -393,9 +393,9 @@ pub(crate) fn close_kernel_object_for_linux(object: &crate::object::KernelObject
                     let mut name = alloc::string::String::new();
                     name.push('\0');
                     name.push_str(addr.path());
-                    manager.unregister_named_socket(&name);
+                    manager.unregister_named_socket(&name, socket.as_ref());
                 } else {
-                    manager.unregister_named_socket(addr.path());
+                    manager.unregister_named_socket(addr.path(), socket.as_ref());
                 }
             }
         }
@@ -427,6 +427,8 @@ syscall_table! {
     MkdirAt = 34 => fs::sys_mkdirat,
     UnlinkAt = 35 => fs::sys_unlinkat,
     Mount = 40 => fs::sys_mount,
+    Statfs = 43 => fs::sys_statfs,
+    Fstatfs = 44 => fs::sys_fstatfs,
     Ftruncate = 46 => fs::sys_ftruncate,
     Fallocate = 47 => fs::sys_fallocate,
     LinkAt = 37 => fs::sys_linkat,

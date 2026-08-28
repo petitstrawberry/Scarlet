@@ -292,6 +292,80 @@ pub struct LinuxStat {
     pub __unused5: u32,     // Reserved
 }
 
+/// Linux `statfs` structure for the 64-bit asm-generic ABI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(C)]
+struct LinuxStatFs {
+    f_type: i64,
+    f_bsize: i64,
+    f_blocks: i64,
+    f_bfree: i64,
+    f_bavail: i64,
+    f_files: i64,
+    f_ffree: i64,
+    f_fsid: [i32; 2],
+    f_namelen: i64,
+    f_frsize: i64,
+    f_flags: i64,
+    f_spare: [i64; 4],
+}
+
+impl LinuxStatFs {
+    fn from_identity(name: &str, filesystem_id: u64, read_only: bool) -> Self {
+        // FileSystemOperations does not expose capacity counters yet. Report a
+        // stable compatibility capacity so Linux applications can perform
+        // space checks without treating every Scarlet mount as inaccessible.
+        const BLOCK_SIZE: i64 = 4096;
+        const TOTAL_BLOCKS: i64 = 256 * 1024;
+        const FREE_BLOCKS: i64 = 192 * 1024;
+        const TOTAL_FILES: i64 = 1024 * 1024;
+        const FREE_FILES: i64 = TOTAL_FILES - 4096;
+        const ST_RDONLY: i64 = 1;
+
+        let filesystem_type = match name {
+            "ext2" => 0xef53,
+            "fat32" => 0x4d44,
+            "tmpfs_v2" | "devfs" => 0x0102_1994,
+            "devpts" => 0x1cd1,
+            name if name.contains("overlay") => 0x794c_7630,
+            _ => 0x5343_524c,
+        };
+
+        Self {
+            f_type: filesystem_type,
+            f_bsize: BLOCK_SIZE,
+            f_blocks: TOTAL_BLOCKS,
+            f_bfree: FREE_BLOCKS,
+            f_bavail: FREE_BLOCKS,
+            f_files: TOTAL_FILES,
+            f_ffree: FREE_FILES,
+            f_fsid: [
+                filesystem_id as u32 as i32,
+                (filesystem_id >> 32) as u32 as i32,
+            ],
+            f_namelen: 255,
+            f_frsize: BLOCK_SIZE,
+            f_flags: if read_only { ST_RDONLY } else { 0 },
+            f_spare: [0; 4],
+        }
+    }
+
+    fn for_filesystem(
+        filesystem: Option<&dyn crate::fs::vfs_v2::core::FileSystemOperations>,
+    ) -> Self {
+        match filesystem {
+            Some(filesystem) => Self::from_identity(
+                filesystem.name(),
+                filesystem.fs_id().get(),
+                filesystem.is_read_only(),
+            ),
+            None => Self::from_identity("anonymous", 0, false),
+        }
+    }
+}
+
+const _: [(); 120] = [(); core::mem::size_of::<LinuxStatFs>()];
+
 /// Linux statx timestamp structure
 #[derive(Debug, Clone, Copy, Default)]
 #[repr(C)]
@@ -3460,6 +3534,122 @@ pub fn sys_mkdirat(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     }
 }
 
+fn write_linux_statfs(
+    task: &crate::task::Task,
+    userspace_address: usize,
+    statistics: &LinuxStatFs,
+) -> Result<(), usize> {
+    if userspace_address == 0 {
+        return Err(errno::EFAULT);
+    }
+    // SAFETY: `LinuxStatFs` is a fully initialized `repr(C)` plain-data value;
+    // the resulting bytes are copied out before `statistics` can be dropped.
+    let bytes = unsafe {
+        core::slice::from_raw_parts(
+            statistics as *const LinuxStatFs as *const u8,
+            core::mem::size_of::<LinuxStatFs>(),
+        )
+    };
+    if copy_to_user_pagewise(userspace_address, bytes, &task.vm_manager) == bytes.len() {
+        Ok(())
+    } else {
+        Err(errno::EFAULT)
+    }
+}
+
+fn linux_statfs_for_entry(entry: &crate::fs::vfs_v2::core::VfsEntry) -> LinuxStatFs {
+    let node = entry.node();
+    let filesystem = node
+        .filesystem()
+        .and_then(|filesystem| filesystem.upgrade());
+    LinuxStatFs::for_filesystem(filesystem.as_deref())
+}
+
+/// Linux `statfs` implementation for Scarlet VFS paths.
+///
+/// # Arguments
+///
+/// * `trapframe.arg0` - Pointer to the pathname.
+/// * `trapframe.arg1` - Pointer to a 64-bit asm-generic `statfs` structure.
+///
+/// # Returns
+///
+/// Zero on success or a negative Linux errno encoded as `usize`.
+pub fn sys_statfs(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
+    let task = match mytask() {
+        Some(task) => task,
+        None => return errno::to_result(errno::EIO),
+    };
+    let path_address = trapframe.get_arg(0);
+    let output_address = trapframe.get_arg(1);
+    trapframe.increment_pc_next(&task);
+
+    let path = match parse_c_string_from_userspace(&task, path_address, MAX_PATH_LENGTH) {
+        Ok(path) if !path.is_empty() => remap_shm_path(&path),
+        Ok(_) => return errno::to_result(errno::ENOENT),
+        Err(_) => return errno::to_result(errno::EFAULT),
+    };
+    let vfs = match task.vfs.read().clone() {
+        Some(vfs) => vfs,
+        None => return errno::to_result(errno::EIO),
+    };
+    let (entry, _) = match vfs.resolve_path(&path) {
+        Ok(resolved) => resolved,
+        Err(error) => return errno::to_result(errno::from_fs_error(&error)),
+    };
+    let statistics = linux_statfs_for_entry(entry.as_ref());
+    match write_linux_statfs(&task, output_address, &statistics) {
+        Ok(()) => 0,
+        Err(error) => errno::to_result(error),
+    }
+}
+
+/// Linux `fstatfs` implementation for an open file descriptor.
+///
+/// # Arguments
+///
+/// * `abi` - Linux descriptor table used to resolve the file descriptor.
+/// * `trapframe.arg0` - File descriptor.
+/// * `trapframe.arg1` - Pointer to a 64-bit asm-generic `statfs` structure.
+///
+/// # Returns
+///
+/// Zero on success or a negative Linux errno encoded as `usize`.
+pub fn sys_fstatfs(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
+    let task = match mytask() {
+        Some(task) => task,
+        None => return errno::to_result(errno::EIO),
+    };
+    let fd = trapframe.get_arg(0) as i32;
+    let output_address = trapframe.get_arg(1);
+    trapframe.increment_pc_next(&task);
+
+    if fd < 0 {
+        return errno::to_result(errno::EBADF);
+    }
+    let handle = match abi.get_handle(fd as usize) {
+        Some(handle) => handle,
+        None => return errno::to_result(errno::EBADF),
+    };
+    let object = match task.handle_table.get(handle) {
+        Some(object) => object,
+        None => return errno::to_result(errno::EBADF),
+    };
+
+    let statistics = object
+        .as_file()
+        .and_then(|file| {
+            file.as_any()
+                .downcast_ref::<crate::fs::vfs_v2::core::VfsFileObject>()
+        })
+        .map(|file| linux_statfs_for_entry(file.get_vfs_entry().as_ref()))
+        .unwrap_or_else(|| LinuxStatFs::for_filesystem(None));
+    match write_linux_statfs(&task, output_address, &statistics) {
+        Ok(()) => 0,
+        Err(error) => errno::to_result(error),
+    }
+}
+
 /// Linux sys_newfstat implementation for Scarlet VFS v2
 ///
 /// Gets file status information from a file descriptor.
@@ -5099,8 +5289,22 @@ pub fn sys_eventfd2(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{LinuxTimespec, linux_timespec_timeout_ns};
+    use super::{LinuxStatFs, LinuxTimespec, linux_timespec_timeout_ns};
     use crate::abi::linux::generic::errno;
+
+    #[test_case]
+    fn statfs_matches_asm_generic_64_layout() {
+        assert_eq!(core::mem::size_of::<LinuxStatFs>(), 120);
+
+        let statistics = LinuxStatFs::from_identity("ext2", 0x1122_3344_5566_7788, true);
+        assert_eq!(statistics.f_type, 0xef53);
+        assert_eq!(statistics.f_bsize, 4096);
+        assert_eq!(statistics.f_frsize, 4096);
+        assert_eq!(statistics.f_fsid, [0x5566_7788, 0x1122_3344]);
+        assert_eq!(statistics.f_flags & 1, 1);
+        assert!(statistics.f_blocks > statistics.f_bavail);
+        assert!(statistics.f_files > statistics.f_ffree);
+    }
 
     #[test_case]
     fn timespec_timeout_rejects_invalid_fields() {

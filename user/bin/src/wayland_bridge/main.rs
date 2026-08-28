@@ -48,6 +48,19 @@ const MAX_PENDING_DAMAGE_RECTS: usize = 8;
 const DAMAGE_MERGE_AREA_FACTOR: u64 = 2;
 const MAX_WAYLAND_RECORD_SIZE: usize = 1024 * 1024 + MessageHeader::SIZE;
 
+fn take_message_handle<T>(
+    interface: Option<&str>,
+    opcode: u16,
+    pending_handles: &mut Vec<T>,
+) -> Option<T> {
+    let expects_handle = interface == Some("wl_shm") && opcode == shm::shm_request::CREATE_POOL;
+    if expects_handle && !pending_handles.is_empty() {
+        Some(pending_handles.remove(0))
+    } else {
+        None
+    }
+}
+
 /// Log level for the Wayland bridge
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum LogLevel {
@@ -1884,7 +1897,7 @@ impl WaylandBridge {
         let mut buffer: Vec<u8> = Vec::new();
         let mut record_buffer = Vec::new();
         record_buffer.resize(MAX_WAYLAND_RECORD_SIZE, 0);
-        let mut received_handles: Vec<(usize, Handle)> = Vec::new();
+        let mut received_handles: Vec<Handle> = Vec::new();
         let mut idle_backoff_ms = 1u64;
 
         loop {
@@ -1893,7 +1906,7 @@ impl WaylandBridge {
                 match client.recv_handle_and_data(&mut record_buffer) {
                     Ok((handle, bytes_read)) => {
                         got_data = true;
-                        received_handles.push((buffer.len(), handle));
+                        received_handles.push(handle);
                         buffer.extend_from_slice(&record_buffer[..bytes_read]);
                         continue;
                     }
@@ -1904,6 +1917,19 @@ impl WaylandBridge {
                     Err(std::socket::SocketError::WouldBlock) => {}
                     Err(_) => {
                         bridge_log!("[Bridge] Error receiving handle-and-data record");
+                        return Ok(());
+                    }
+                }
+
+                match client.recv_handle() {
+                    Ok(handle) => {
+                        got_data = true;
+                        received_handles.push(handle);
+                        continue;
+                    }
+                    Err(std::socket::SocketError::WouldBlock) => {}
+                    Err(_) => {
+                        bridge_log!("[Bridge] Error receiving handle");
                         return Ok(());
                     }
                 }
@@ -1968,20 +1994,16 @@ impl WaylandBridge {
                         );
                     }
 
-                    let attached_handle = match received_handles.first() {
-                        Some((handle_offset, _)) if *handle_offset < offset => {
-                            return Err(
-                                "Handle record does not start at a Wayland message boundary",
-                            );
-                        }
-                        Some((handle_offset, _)) if *handle_offset == offset => {
-                            Some(received_handles.remove(0).1)
-                        }
-                        Some((handle_offset, _)) if *handle_offset < offset + msg_size => {
-                            return Err("Handle record starts inside a Wayland message");
-                        }
-                        _ => None,
-                    };
+                    // SCM_RIGHTS handles are ordered independently from the byte
+                    // stream. libwayland may batch requests before wl_shm.create_pool
+                    // in the same sendmsg(), so consume a handle only when the
+                    // protocol signature for the current request requires one.
+                    let interface = self
+                        .objects
+                        .get(&header.object_id)
+                        .map(|name| name.as_str());
+                    let attached_handle =
+                        take_message_handle(interface, header.opcode(), &mut received_handles);
 
                     // Handle the message
                     let responses = self.handle_message(
@@ -2029,9 +2051,6 @@ impl WaylandBridge {
 
                 if offset > 0 {
                     buffer.drain(0..offset);
-                    for (handle_offset, _) in received_handles.iter_mut() {
-                        *handle_offset = handle_offset.saturating_sub(offset);
-                    }
                 }
             }
 
@@ -2117,7 +2136,9 @@ impl WaylandBridge {
             }
         };
 
-        if interface.as_str() != "wl_shm" && attached_handle.is_some() {
+        if attached_handle.is_some()
+            && (interface.as_str() != "wl_shm" || opcode != shm::shm_request::CREATE_POOL)
+        {
             return Err("Unexpected handle attached to Wayland message");
         }
 
@@ -2772,7 +2793,8 @@ impl WaylandBridge {
             shm::shm_request::CREATE_POOL => {
                 bridge_log!("[Bridge] wl_shm.create_pool");
                 // Payload: new_id (u32) + size (i32) = 8 bytes
-                // SCM_RIGHTS arrives in the same ordered socket record as this message.
+                // SCM_RIGHTS descriptors are matched to FD-bearing requests in
+                // protocol order, even when one sendmsg batches several requests.
                 if payload.len() < 8 {
                     return Err("Invalid wl_shm.create_pool payload");
                 }
@@ -3211,7 +3233,7 @@ impl WaylandBridge {
                     let mut keymap_msg =
                         WaylandMessage::new(keyboard_id, input::keyboard_event::KEYMAP);
                     keymap_msg.add_arg(WaylandArg::Uint(1)); // XKB_V1 format
-                    keymap_msg.add_arg(WaylandArg::FdPlaceholder); // FD placeholder
+                    keymap_msg.add_arg(WaylandArg::FdPlaceholder); // SCM_RIGHTS only; no wire bytes
                     keymap_msg.add_arg(WaylandArg::Uint(size)); // size
 
                     let mut msgs = Vec::new();
@@ -3721,5 +3743,41 @@ fn main() -> i32 {
                 thread::sleep(Duration::from_millis(100));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{shm, take_message_handle};
+
+    #[test]
+    fn batched_handle_waits_for_wl_shm_create_pool() {
+        let mut handles = std::vec![41u32];
+
+        assert_eq!(
+            take_message_handle(Some("xdg_surface"), 4, &mut handles),
+            None
+        );
+        assert_eq!(handles.len(), 1);
+        assert_eq!(
+            take_message_handle(Some("wl_shm"), shm::shm_request::CREATE_POOL, &mut handles,),
+            Some(41)
+        );
+        assert!(handles.is_empty());
+    }
+
+    #[test]
+    fn multiple_handles_are_consumed_in_ancillary_order() {
+        let mut handles = std::vec![7u32, 9u32];
+
+        assert_eq!(
+            take_message_handle(Some("wl_shm"), shm::shm_request::CREATE_POOL, &mut handles,),
+            Some(7)
+        );
+        assert_eq!(
+            take_message_handle(Some("wl_shm"), shm::shm_request::CREATE_POOL, &mut handles,),
+            Some(9)
+        );
+        assert!(handles.is_empty());
     }
 }

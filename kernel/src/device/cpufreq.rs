@@ -16,6 +16,9 @@ const MAX_CPUFREQ_POLICIES: usize = 8;
 pub const MAX_CPUFREQ_OPPS: usize = 32;
 
 const INVALID_PERFORMANCE_DOMAIN: u32 = 0;
+const COMPOSITE_PERFORMANCE_DOMAIN_FLAG: u32 = 1 << 31;
+const COMPOSITE_PERFORMANCE_DOMAIN_PROVIDER_MAX: u32 = (1 << 23) - 1;
+const COMPOSITE_PERFORMANCE_DOMAIN_SELECTOR_MAX: u32 = (1 << 8) - 1;
 const CPUFREQ_UP_RATE_LIMIT_NS: u64 = 10_000_000;
 const CPUFREQ_DOWN_RATE_LIMIT_NS: u64 = 100_000_000;
 const SCHEDUTIL_HEADROOM_NUM: u64 = 5;
@@ -74,7 +77,12 @@ impl CpuFrequencyGovernor {
 /// platform can report every field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CpuFrequencyInfo {
-    /// Firmware phandle of the performance domain shared by this CPU.
+    /// Opaque performance-domain identifier shared by this CPU.
+    ///
+    /// A single-cell firmware binding normally uses its provider phandle
+    /// directly. Providers with an additional selector use
+    /// [`compose_performance_domain_id`] so independent policies remain
+    /// distinguishable.
     pub performance_domain: u32,
     /// Raw platform-specific frequency/status register value.
     pub raw_status: u32,
@@ -93,7 +101,7 @@ pub struct CpuFrequencyInfo {
 /// CPU frequency policy snapshot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CpuFrequencyPolicyInfo {
-    /// Firmware performance-domain phandle.
+    /// Opaque performance-domain identifier.
     pub domain: u32,
     /// Bit mask of logical CPUs that share this policy.
     pub cpus_mask: u64,
@@ -117,7 +125,7 @@ pub struct CpuFrequencyPolicyInfo {
 pub struct CpuFrequencyPolicyRegistration<'a> {
     /// Backend name that owns this policy.
     pub backend_name: &'static str,
-    /// Firmware performance-domain phandle.
+    /// Opaque performance-domain identifier.
     pub domain: u32,
     /// Available operating points.
     pub opps: &'a [CpuFrequencyOpp],
@@ -236,18 +244,44 @@ static CPUFREQ_FIRST_WORKER_REQUEST: AtomicBool = AtomicBool::new(true);
 static CPUFREQ_WORKER_WAKER: crate::sync::Waker =
     crate::sync::Waker::new_uninterruptible("cpufreq-worker");
 
+/// Compose a stable policy identifier from a firmware provider and selector.
+///
+/// Device-tree bindings such as Qualcomm's `qcom,freq-domain` identify a
+/// policy with both a provider phandle and a provider-local index. The high
+/// marker bit keeps composed identifiers separate from ordinary DT phandles.
+///
+/// # Arguments
+///
+/// * `provider` - Non-zero firmware provider phandle.
+/// * `selector` - Provider-local domain selector.
+///
+/// # Returns
+///
+/// A non-zero opaque domain identifier, or `None` when either component does
+/// not fit the lossless encoding.
+pub const fn compose_performance_domain_id(provider: u32, selector: u32) -> Option<u32> {
+    if provider == 0
+        || provider > COMPOSITE_PERFORMANCE_DOMAIN_PROVIDER_MAX
+        || selector > COMPOSITE_PERFORMANCE_DOMAIN_SELECTOR_MAX
+    {
+        return None;
+    }
+
+    Some(COMPOSITE_PERFORMANCE_DOMAIN_FLAG | (provider << 8) | selector)
+}
+
 /// Register the firmware performance domain associated with a CPU.
 ///
 /// # Arguments
 ///
 /// * `cpu_id` - Logical CPU ID used by the scheduler.
-/// * `phandle` - Firmware phandle from a CPU node's `performance-domains`.
-pub fn register_cpu_performance_domain(cpu_id: usize, phandle: u32) {
-    if cpu_id >= MAX_NUM_CPUS || phandle == INVALID_PERFORMANCE_DOMAIN {
+/// * `domain` - Opaque domain identifier derived from firmware.
+pub fn register_cpu_performance_domain(cpu_id: usize, domain: u32) {
+    if cpu_id >= MAX_NUM_CPUS || domain == INVALID_PERFORMANCE_DOMAIN {
         return;
     }
 
-    CPU_PERF_DOMAINS[cpu_id].store(phandle, Ordering::SeqCst);
+    CPU_PERF_DOMAINS[cpu_id].store(domain, Ordering::SeqCst);
     update_policy_cpu_masks();
 }
 
@@ -259,7 +293,7 @@ pub fn register_cpu_performance_domain(cpu_id: usize, phandle: u32) {
 ///
 /// # Returns
 ///
-/// The registered performance-domain phandle, or `None` if unavailable.
+/// The registered performance-domain identifier, or `None` if unavailable.
 pub fn cpu_performance_domain(cpu_id: usize) -> Option<u32> {
     if cpu_id >= MAX_NUM_CPUS {
         return None;
@@ -390,7 +424,7 @@ pub fn cpu_frequency_policy_info(cpu_id: usize) -> Option<CpuFrequencyPolicyInfo
 ///
 /// # Arguments
 ///
-/// * `domain` - Firmware performance-domain phandle.
+/// * `domain` - Opaque performance-domain identifier.
 ///
 /// # Returns
 ///
@@ -407,7 +441,7 @@ pub fn cpu_frequency_policy_info_by_domain(domain: u32) -> Option<CpuFrequencyPo
 ///
 /// # Arguments
 ///
-/// * `domain` - Firmware performance-domain phandle.
+/// * `domain` - Opaque performance-domain identifier.
 /// * `governor` - Governor to attach.
 ///
 /// # Returns
@@ -434,7 +468,7 @@ pub fn set_domain_governor(
 ///
 /// # Arguments
 ///
-/// * `domain` - Firmware performance-domain phandle.
+/// * `domain` - Opaque performance-domain identifier.
 /// * `target_freq_khz` - Requested frequency in kHz.
 ///
 /// # Returns
@@ -831,6 +865,15 @@ mod tests {
             opp: CpuFrequencyOpp { pstate, freq_khz },
             generation: 0,
         }
+    }
+
+    #[test_case]
+    fn composite_domain_ids_preserve_provider_and_selector() {
+        assert_eq!(compose_performance_domain_id(2, 0), Some(0x8000_0200));
+        assert_eq!(compose_performance_domain_id(2, 1), Some(0x8000_0201));
+        assert_eq!(compose_performance_domain_id(0, 0), None);
+        assert_eq!(compose_performance_domain_id(1 << 23, 0), None);
+        assert_eq!(compose_performance_domain_id(2, 1 << 8), None);
     }
 
     #[test_case]

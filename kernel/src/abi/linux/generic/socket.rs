@@ -7,7 +7,8 @@ use crate::{
     arch::Trapframe,
     library::std::usercopy::{copy_from_user, copy_to_user},
     network::{
-        NetworkManager, SocketDomain, SocketError, SocketProtocol, SocketType, local::LocalSocket,
+        NetworkManager, SocketDomain, SocketError, SocketProtocol, SocketType,
+        local::{LocalSocket, MAX_HANDLE_QUEUE_SIZE},
     },
     object::KernelObject,
     object::capability::selectable::Selectable,
@@ -1203,7 +1204,7 @@ pub fn sys_sendmsg(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 
     let iovecs = unsafe { core::slice::from_raw_parts(iovec_addr, iovcnt) };
 
-    let mut attached_handle = None;
+    let mut attached_handles = Vec::new();
     if msg.msg_control != 0 && msg.msg_controllen as usize >= size_of::<LinuxCmsghdr>() {
         let socket = match kernel_obj.as_socket() {
             Some(socket) => socket,
@@ -1211,50 +1212,60 @@ pub fn sys_sendmsg(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         };
 
         if LocalSocket::from_socket_object(socket).is_some() {
-            let cmsg_addr = match task.vm_manager.translate_to_kva(msg.msg_control as usize) {
-                Some(addr) => addr as *const LinuxCmsghdr,
-                None => {
-                    crate::early_println!(
-                        "[linux socket] sendmsg bad cmsg ptr {:x}",
-                        msg.msg_control
-                    );
+            let mut cmsg_bytes = [0u8; size_of::<LinuxCmsghdr>()];
+            if copy_from_user(&task, msg.msg_control as usize, &mut cmsg_bytes).is_err() {
+                return errno::to_result(errno::EFAULT);
+            }
+            // SAFETY: `cmsg_bytes` contains exactly one copied header. An
+            // unaligned read avoids imposing alignment on the byte array.
+            let cmsg =
+                unsafe { core::ptr::read_unaligned(cmsg_bytes.as_ptr() as *const LinuxCmsghdr) };
+            if cmsg.cmsg_level == SOL_SOCKET && cmsg.cmsg_type == SCM_RIGHTS {
+                if cmsg.cmsg_len > msg.msg_controllen as usize
+                    || cmsg.cmsg_len < size_of::<LinuxCmsghdr>() + size_of::<i32>()
+                {
+                    return errno::to_result(errno::EINVAL);
+                }
+                let data_len = cmsg.cmsg_len.saturating_sub(size_of::<LinuxCmsghdr>());
+                if data_len == 0 || !data_len.is_multiple_of(size_of::<i32>()) {
+                    return errno::to_result(errno::EINVAL);
+                }
+                let fd_count = data_len / size_of::<i32>();
+                if fd_count > MAX_HANDLE_QUEUE_SIZE {
+                    return errno::to_result(errno::EMSGSIZE);
+                }
+
+                let data_addr =
+                    match (msg.msg_control as usize).checked_add(size_of::<LinuxCmsghdr>()) {
+                        Some(address) => address,
+                        None => return errno::to_result(errno::EFAULT),
+                    };
+                let mut fd_data = alloc::vec![0; data_len];
+                if copy_from_user(&task, data_addr, &mut fd_data).is_err() {
                     return errno::to_result(errno::EFAULT);
                 }
-            };
 
-            if !cmsg_addr.is_null() {
-                let cmsg = unsafe { *cmsg_addr };
-                if cmsg.cmsg_level == SOL_SOCKET && cmsg.cmsg_type == SCM_RIGHTS {
-                    if cmsg.cmsg_len > msg.msg_controllen as usize
-                        || cmsg.cmsg_len < size_of::<LinuxCmsghdr>() + size_of::<i32>()
-                    {
-                        return errno::to_result(errno::EINVAL);
-                    }
-                    let data_len = cmsg.cmsg_len.saturating_sub(size_of::<LinuxCmsghdr>());
-                    let fd_count = data_len / size_of::<i32>();
-                    if fd_count != 1 {
-                        return errno::to_result(errno::EINVAL);
-                    }
-                    let data_ptr = unsafe { cmsg_addr.add(1) } as *const i32;
-
-                    let fd = unsafe { *data_ptr };
+                for fd_bytes in fd_data.chunks_exact(size_of::<i32>()) {
+                    let fd =
+                        i32::from_ne_bytes([fd_bytes[0], fd_bytes[1], fd_bytes[2], fd_bytes[3]]);
                     if fd < 0 {
                         return errno::to_result(errno::EBADF);
                     }
                     let send_handle = match abi.get_handle(fd as usize) {
-                        Some(h) => h,
+                        Some(handle) => handle,
                         None => {
                             crate::early_println!("[linux socket] sendmsg bad fd in cmsg {}", fd);
                             return errno::to_result(errno::EBADF);
                         }
                     };
-                    attached_handle = match task.handle_table.clone_for_dup(send_handle) {
-                        Some(entry) => Some(entry),
+                    let entry = match task.handle_table.clone_for_dup(send_handle) {
+                        Some(entry) => entry,
                         None => {
                             crate::early_println!("[linux socket] sendmsg clone_for_dup failed");
                             return errno::to_result(errno::EBADF);
                         }
                     };
+                    attached_handles.push(entry);
                 }
             }
         }
@@ -1293,7 +1304,7 @@ pub fn sys_sendmsg(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         None
     };
 
-    if let Some((object, metadata)) = attached_handle {
+    if !attached_handles.is_empty() {
         let total_len = match iovecs
             .iter()
             .try_fold(0usize, |total, iovec| total.checked_add(iovec.iov_len))
@@ -1326,7 +1337,7 @@ pub fn sys_sendmsg(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
             Some(socket) => socket,
             None => return errno::to_result(errno::EOPNOTSUPP),
         };
-        return match local_socket.send_handle_and_data(object, metadata, &record_data) {
+        return match local_socket.send_handles_and_data(attached_handles, &record_data) {
             Ok(()) => record_data.len(),
             Err(IpcError::ChannelFull) => errno::to_result(errno::EAGAIN),
             Err(IpcError::BufferTooSmall { .. }) => errno::to_result(errno::EMSGSIZE),

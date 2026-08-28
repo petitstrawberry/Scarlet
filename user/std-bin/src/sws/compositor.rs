@@ -31,7 +31,7 @@ use std::thread;
 use std::vec::Vec;
 use sws_protocol;
 
-fn is_sws_debug_enabled() -> bool {
+pub(super) fn is_sws_debug_enabled() -> bool {
     static LOG_CACHE: AtomicU8 = AtomicU8::new(u8::MAX);
     let cached = LOG_CACHE.load(Ordering::Relaxed);
     if cached != u8::MAX {
@@ -136,10 +136,6 @@ fn selected_sws_backend() -> Result<SwsBackend, &'static str> {
 
 // NOTE: The compositor intentionally opens the modern display surface endpoint,
 // not the legacy framebuffer node. The endpoint may internally use mmap.
-
-// Debug: dump VRAM mmap range and window buffer ranges.
-// This helps confirm whether corruption is caused by virtual-address overlap.
-const LOG_MEMORY_LAYOUT: bool = true;
 
 // Debug: validate that compositor output in VRAM matches what we expect
 // from window buffers (helps catch stride/offset/blit bugs).
@@ -1175,7 +1171,7 @@ impl Compositor {
     }
 
     fn dump_memory_layout(&self, reason: &str) {
-        if !LOG_MEMORY_LAYOUT {
+        if !is_sws_debug_enabled() {
             return;
         }
 
@@ -1535,6 +1531,20 @@ impl Compositor {
             .map(|window| (window.x, window.y, window.width, window.height));
         if let Some(rect) = rect {
             self.add_pending_damage(rect);
+        }
+    }
+
+    fn damage_compositor_focus_style(&mut self, window_id: u32) {
+        let uses_compositor_placeholder = self
+            .window_manager
+            .get_window(window_id)
+            .is_some_and(|window| window.visible && window.pixels().is_err())
+            && !self
+                .gpu_compositor
+                .as_ref()
+                .is_some_and(|gpu| gpu.has_committed_shared_buffer(window_id));
+        if uses_compositor_placeholder {
+            self.damage_window(window_id);
         }
     }
 
@@ -2505,7 +2515,7 @@ impl Compositor {
 
         // Find topmost window at click position
         if let Some(win_id) = self.window_manager.window_at_point(click_x, click_y) {
-            println!("[Compositor] Clicked on window #{}", win_id);
+            sws_debug!("[Compositor] Clicked on window #{}", win_id);
 
             // Only change focus if the window accepts focus
             // Taskbar and Desktop windows are global UI elements that don't steal focus
@@ -2522,16 +2532,17 @@ impl Compositor {
                 // Broadcast focus change event to all clients
                 self.broadcast_focus_change(win_id);
 
-                // Focus styling, when compositor-provided, is confined to the
-                // previously and newly focused windows.
+                // Client-backed windows draw their own titlebar/focus state
+                // and will submit precise damage after FOCUS_CHANGED. Only a
+                // compositor placeholder changes pixels immediately here.
                 if previous_focus != Some(win_id) {
                     if let Some(previous_focus) = previous_focus {
-                        self.damage_window(previous_focus);
+                        self.damage_compositor_focus_style(previous_focus);
                     }
-                    self.damage_window(win_id);
+                    self.damage_compositor_focus_style(win_id);
                 }
             } else {
-                println!(
+                sws_debug!(
                     "[Compositor] Window #{} does not accept focus (global UI element)",
                     win_id
                 );
@@ -2553,7 +2564,7 @@ impl Compositor {
         }
         // Only broadcast if the focused window actually changed
         if self.last_focused_window_id == Some(window_id) {
-            println!(
+            sws_debug!(
                 "[Compositor] Window #{} already focused, skipping FOCUS_CHANGED broadcast",
                 window_id
             );
@@ -2582,7 +2593,7 @@ impl Compositor {
                 menu_titles_bytes,
             );
 
-            println!(
+            sws_debug!(
                 "[Compositor] ABOUT TO broadcast focus change: window_id={}, app_id_len={}, app_name_len={}, title_len={}, menu_titles_len={}, app_name={}, menu_titles={}",
                 window_id,
                 app_id_bytes.len(),
@@ -2598,7 +2609,7 @@ impl Compositor {
                 payload,
             );
 
-            println!(
+            sws_debug!(
                 "[Compositor] Broadcast focus change: window_id={}, app_id_len={}, app_name_len={}, title_len={}, menu_titles_len={}",
                 window_id,
                 app_id_bytes.len(),
@@ -2608,9 +2619,10 @@ impl Compositor {
             );
 
             // For active-app windows only, check if app_id changed and broadcast ACTIVE_APP_CHANGED.
-            println!(
+            sws_debug!(
                 "[Compositor] Checking active-on-focus: window_id={}, active_on_focus={}",
-                window_id, window.active_on_focus
+                window_id,
+                window.active_on_focus
             );
             if window.active_on_focus {
                 let app_id_changed = match &self.active_app_id {
@@ -2619,7 +2631,7 @@ impl Compositor {
                 };
 
                 if app_id_changed {
-                    println!(
+                    sws_debug!(
                         "[Compositor] Active app changed: {:?} -> {:?}, broadcasting ACTIVE_APP_CHANGED",
                         self.active_app_id
                             .as_ref()
@@ -2643,7 +2655,7 @@ impl Compositor {
                         active_app_payload,
                     );
                 } else {
-                    println!(
+                    sws_debug!(
                         "[Compositor] Active app unchanged ({}), skipping ACTIVE_APP_CHANGED",
                         core::str::from_utf8(app_id_bytes).unwrap_or("")
                     );
@@ -5290,7 +5302,7 @@ impl Compositor {
                     );
                     return Ok(false);
                 }
-                println!("[Compositor] Focusing window #{}", window_id);
+                sws_debug!("[Compositor] Focusing window #{}", window_id);
                 // Restore if minimized
                 if self.window_manager.is_minimized(window_id) {
                     let old_rect = self
@@ -5305,25 +5317,17 @@ impl Compositor {
                     }
                 }
 
-                // Get the currently focused window before changing focus
-                let old_focused_rect = self
-                    .window_manager
-                    .get_focused_window_id()
-                    .and_then(|id| self.window_manager.get_window(id))
-                    .map(|w| (w.x, w.y, w.width, w.height));
+                let previous_focus = self.window_manager.get_focused_window_id();
 
                 // Focus and raise the window
                 self.window_manager.focus_window(window_id);
-                self.window_manager.raise_to_top_with_type(window_id);
+                self.raise_window_with_damage(window_id);
 
-                // Mark old focused window area as dirty (to redraw titlebar without focus)
-                if let Some(r) = old_focused_rect {
-                    self.add_pending_damage(r);
-                }
-
-                // Mark newly focused window area as dirty (to redraw titlebar with focus)
-                if let Some(w) = self.window_manager.get_window(window_id) {
-                    self.add_pending_damage((w.x, w.y, w.width, w.height));
+                if previous_focus != Some(window_id) {
+                    if let Some(previous_focus) = previous_focus {
+                        self.damage_compositor_focus_style(previous_focus);
+                    }
+                    self.damage_compositor_focus_style(window_id);
                 }
 
                 // Broadcast focus change event to all clients

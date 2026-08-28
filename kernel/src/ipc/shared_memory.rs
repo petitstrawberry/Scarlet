@@ -14,7 +14,7 @@ use crate::object::capability::memory_mapping::{
 use crate::vm::addr::{phys_to_virt, virt_to_phys};
 use crate::vm::vmem::VirtualMemoryMap;
 
-const LOG_SHARED_MEMORY_RESIZE: bool = false;
+pub(super) const LOG_SHARED_MEMORY_RESIZE: bool = false;
 
 /// Kernel-only description of stable shared-memory backing.
 ///

@@ -727,8 +727,27 @@ impl NetworkManager {
         }
     }
 
-    pub fn unregister_named_socket(&self, name: &str) {
-        self.named_sockets.write().remove(name);
+    /// Unregister a named socket when the caller still owns the registration.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - Registry name to remove.
+    /// * `socket` - Socket requesting removal. A registration owned by another
+    ///   socket is left intact.
+    ///
+    /// # Returns
+    ///
+    /// This function returns no value. A missing or differently owned
+    /// registration is left unchanged.
+    pub fn unregister_named_socket(&self, name: &str, socket: &dyn SocketObject) {
+        let socket_ptr = socket as *const dyn SocketObject;
+        let mut sockets = self.named_sockets.write();
+        let owns_registration = sockets
+            .get(name)
+            .is_some_and(|registered| core::ptr::addr_eq(registered.as_ptr(), socket_ptr));
+        if owns_registration {
+            sockets.remove(name);
+        }
     }
 
     pub fn get_socket(&self, socket_id: SocketId) -> Option<Arc<dyn SocketObject>> {
@@ -840,4 +859,44 @@ static GLOBAL_NETWORK_MANAGER: Once<NetworkManager> = Once::new();
 /// Get the global network manager
 pub fn get_network_manager() -> &'static NetworkManager {
     NetworkManager::get_manager()
+}
+
+#[cfg(test)]
+mod tests {
+    use alloc::sync::Arc;
+
+    use super::*;
+    use crate::network::local::LocalSocket;
+
+    #[test_case]
+    fn unregister_named_socket_preserves_a_different_live_owner() {
+        let manager = NetworkManager::new();
+        let owner: Arc<dyn SocketObject> = Arc::new(LocalSocket::new(
+            SocketType::Stream,
+            SocketProtocol::Default,
+        ));
+        let duplicate: Arc<dyn SocketObject> = Arc::new(LocalSocket::new(
+            SocketType::Stream,
+            SocketProtocol::Default,
+        ));
+        let name = "/tmp/named-socket-owner-test";
+
+        manager
+            .register_named_socket(name, Arc::clone(&owner))
+            .unwrap();
+        assert_eq!(
+            manager.register_named_socket(name, Arc::clone(&duplicate)),
+            Err(SocketError::AddressInUse)
+        );
+
+        manager.unregister_named_socket(name, duplicate.as_ref());
+        let registered = manager.lookup_named_socket(name).unwrap();
+        assert!(Arc::ptr_eq(&registered, &owner));
+
+        manager.unregister_named_socket(name, owner.as_ref());
+        assert!(matches!(
+            manager.lookup_named_socket(name),
+            Err(SocketError::ConnectionRefused)
+        ));
+    }
 }

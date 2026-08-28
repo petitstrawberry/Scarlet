@@ -239,6 +239,7 @@ impl Context {
             images.push((target, image));
         }
         Ok(MappedTargetSession {
+            imported_textures: Vec::new(),
             context: Context {
                 backend: Rc::clone(&self.backend),
             },
@@ -480,6 +481,7 @@ impl Context {
 pub struct MappedTargetSession {
     // Drop mapped image owners and the cache's retained owners before the
     // queue and context handles they depend on.
+    imported_textures: Vec<(ir::TextureId, Texture)>,
     images: Vec<(ir::TextureId, Rc<Image>)>,
     resources: IrResources,
     queue: Queue,
@@ -487,6 +489,49 @@ pub struct MappedTargetSession {
 }
 
 impl MappedTargetSession {
+    /// Import a transferred shared BGRA image into a logical sampled texture.
+    pub fn import_shared_bgra_texture(
+        &mut self,
+        texture: ir::TextureId,
+        handle: Handle,
+    ) -> Result<(), IrSubmitError> {
+        if self
+            .imported_textures
+            .iter()
+            .any(|(candidate, _)| *candidate == texture)
+        {
+            return Err(IrSubmitError::TextureAlreadyMapped);
+        }
+        let imported = self.context.import_shared_bgra_texture(handle)?;
+        if let Err(error) = self
+            .resources
+            .map_texture(&self.context, texture, &imported)
+        {
+            let _ = self.context.release_texture(imported);
+            return Err(error);
+        }
+        self.imported_textures.push((texture, imported));
+        Ok(())
+    }
+
+    /// Detach and release a previously imported sampled texture.
+    pub fn release_imported_texture(
+        &mut self,
+        texture: ir::TextureId,
+    ) -> Result<(), IrSubmitError> {
+        let index = self
+            .imported_textures
+            .iter()
+            .position(|(candidate, _)| *candidate == texture)
+            .ok_or(IrSubmitError::ImageNotMapped)?;
+        let imported = &self.imported_textures[index].1;
+        self.resources
+            .unmap_texture(&self.context, texture, imported)?;
+        let (_, imported) = self.imported_textures.remove(index);
+        self.context.release_texture(imported)?;
+        Ok(())
+    }
+
     /// Borrow the physical image mapped to a logical target.
     ///
     /// # Arguments

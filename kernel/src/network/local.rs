@@ -64,7 +64,7 @@ const MAX_HANDLE_DATA_QUEUE_SIZE: usize = MAX_HANDLE_DATA_RECORD_SIZE;
 
 /// Maximum number of handles that can be queued for transfer
 /// This prevents unbounded memory growth from DoS attacks
-const MAX_HANDLE_QUEUE_SIZE: usize = 64;
+pub(crate) const MAX_HANDLE_QUEUE_SIZE: usize = 64;
 
 fn local_socket_registry_name(addr: &LocalSocketAddress) -> String {
     if addr.is_abstract() {
@@ -166,32 +166,40 @@ impl SocketQueue {
         Ok(())
     }
 
-    fn push_handle_data(
+    fn push_handles_data(
         &mut self,
-        object: KernelObject,
-        metadata: HandleMetadata,
+        mut handles: Vec<(KernelObject, HandleMetadata)>,
         data: &[u8],
     ) -> Result<(), crate::ipc::IpcError> {
         use crate::ipc::IpcError;
 
+        if handles.is_empty() {
+            return Err(IpcError::InvalidState);
+        }
         if data.len() > MAX_HANDLE_DATA_RECORD_SIZE {
             return Err(IpcError::BufferTooSmall {
                 required: data.len(),
             });
         }
-        if self.handles >= MAX_HANDLE_QUEUE_SIZE
+        let handle_count = handles.len();
+        if self.handles.saturating_add(handle_count) > MAX_HANDLE_QUEUE_SIZE
             || self.record_bytes.saturating_add(data.len()) > MAX_HANDLE_DATA_QUEUE_SIZE
         {
             return Err(IpcError::ChannelFull);
         }
 
+        let (last_object, last_metadata) = handles.pop().ok_or(IpcError::InvalidState)?;
+        for (object, metadata) in handles {
+            self.segments
+                .push_back(SocketSegment::Handle(object, metadata));
+        }
         self.segments.push_back(SocketSegment::HandleData {
-            object,
-            metadata,
+            object: last_object,
+            metadata: last_metadata,
             data: data.to_vec(),
         });
         self.record_bytes += data.len();
-        self.handles += 1;
+        self.handles += handle_count;
         Ok(())
     }
 
@@ -436,17 +444,43 @@ impl LocalSocket {
         metadata: HandleMetadata,
         data: &[u8],
     ) -> Result<(), crate::ipc::IpcError> {
+        let handles = alloc::vec![(object, metadata)];
+        self.send_handles_and_data(handles, data)
+    }
+
+    /// Send multiple ordered handles and one data record atomically.
+    ///
+    /// Earlier handles are queued as handle-only segments and the final handle
+    /// carries the data record. All capacity checks complete before any segment
+    /// is published, so receivers cannot observe a partial `SCM_RIGHTS` batch.
+    ///
+    /// # Arguments
+    ///
+    /// * `handles` - Duplicated kernel objects and their exact handle metadata,
+    ///   in ancillary-data order.
+    /// * `data` - Complete byte payload from the same send operation.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` when the complete batch is queued, or an IPC error without
+    /// queueing a partial batch.
+    pub(crate) fn send_handles_and_data(
+        &self,
+        handles: Vec<(KernelObject, HandleMetadata)>,
+        data: &[u8],
+    ) -> Result<(), crate::ipc::IpcError> {
         use crate::ipc::IpcError;
 
         localsocket_log!(
-            "[LocalSocket] send_handle_and_data: self={:p}, data_len={}",
+            "[LocalSocket] send_handles_and_data: self={:p}, handle_count={}, data_len={}",
             self as *const _,
+            handles.len(),
             data.len()
         );
 
         // Verify socket is connected
         if *self.state.read() != SocketState::Connected {
-            localsocket_log!("[LocalSocket] send_handle_and_data: not connected");
+            localsocket_log!("[LocalSocket] send_handles_and_data: not connected");
             return Err(IpcError::InvalidState);
         }
 
@@ -458,7 +492,7 @@ impl LocalSocket {
         }
         let mut peer_queue = peer_buffer.queue.write();
         let became_readable = peer_queue.is_empty();
-        peer_queue.push_handle_data(object, metadata, data)?;
+        peer_queue.push_handles_data(handles, data)?;
         drop(peer_queue);
         drop(peer_buffer);
 
@@ -873,7 +907,7 @@ impl Drop for LocalSocket {
             && let Some(path) = self.local_addr.read().as_ref()
             && !path.is_empty()
         {
-            NetworkManager::get_manager().unregister_named_socket(path);
+            NetworkManager::get_manager().unregister_named_socket(path, self);
         }
 
         // Publish closure before waking either endpoint.
@@ -1662,6 +1696,41 @@ mod tests {
             receiver.recv_handle_and_data(6),
             Err(IpcError::ChannelEmpty)
         ));
+    }
+
+    #[test_case]
+    fn test_multiple_handles_and_data_keep_ancillary_order() {
+        use crate::ipc::{IpcError, SharedMemory};
+        use alloc::sync::Arc;
+
+        let (sender, receiver) =
+            LocalSocket::create_connected_pair("server".to_string(), "client".to_string());
+        let mut handles = Vec::new();
+        for size in [4096, 8192, 12288] {
+            let shared_memory = match SharedMemory::new(size, 0x3) {
+                Ok(shared_memory) => shared_memory,
+                Err(_) => return,
+            };
+            handles.push((
+                KernelObject::from_shared_memory_object(Arc::new(shared_memory)),
+                HandleMetadata::default(),
+            ));
+        }
+
+        sender.send_handles_and_data(handles, b"batch").unwrap();
+
+        assert!(matches!(
+            receiver.recv_handle_and_data(5),
+            Err(IpcError::ChannelEmpty)
+        ));
+        let (first, _) = receiver.recv_handle().unwrap();
+        let (second, _) = receiver.recv_handle().unwrap();
+        assert_eq!(first.as_shared_memory().unwrap().size(), 4096);
+        assert_eq!(second.as_shared_memory().unwrap().size(), 8192);
+
+        let (third, _, data) = receiver.recv_handle_and_data(5).unwrap();
+        assert_eq!(third.as_shared_memory().unwrap().size(), 12288);
+        assert_eq!(data.as_slice(), b"batch");
     }
 
     #[test_case]

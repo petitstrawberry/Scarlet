@@ -7,6 +7,14 @@ use std::vec::Vec;
 use std::{print, println};
 use sws_protocol;
 
+macro_rules! window_debug {
+    ($($arg:tt)*) => {
+        if super::compositor::is_sws_debug_enabled() {
+            std::println!($($arg)*);
+        }
+    };
+}
+
 /// Window ID type
 pub type WindowId = u32;
 
@@ -974,7 +982,15 @@ impl WindowManager {
             return;
         }
 
-        println!("[WindowManager] Focusing window #{}", id);
+        if self.focused_window == Some(id)
+            && self
+                .get_window(id)
+                .is_some_and(|window| window.focused && window.visible && !window.minimized)
+        {
+            return;
+        }
+
+        window_debug!("[WindowManager] Focusing window #{}", id);
         // Unfocus all windows
         for window in &mut self.windows {
             window.focused = false;
@@ -1048,9 +1064,10 @@ impl WindowManager {
         }
 
         let root = self.top_level_ancestor(id);
-        println!(
+        window_debug!(
             "[WindowManager] Raising window #{} (root #{}) to top",
-            id, root
+            id,
+            root
         );
 
         // Raise the entire transient group (root + all descendants) together.
@@ -1081,11 +1098,13 @@ impl WindowManager {
         self.windows.extend(group);
 
         // Print current Z-order
-        print!("[WindowManager] Current Z-order (bottom to top): ");
-        for w in &self.windows {
-            print!("#{}({:?}) ", w.id, w.window_type);
+        if super::compositor::is_sws_debug_enabled() {
+            print!("[WindowManager] Current Z-order (bottom to top): ");
+            for w in &self.windows {
+                print!("#{}({:?}) ", w.id, w.window_type);
+            }
+            println!();
         }
-        println!();
     }
 
     /// Internal helper: return the top-level ancestor for a window (follows parent links).
@@ -1692,12 +1711,14 @@ impl WindowManager {
         self.windows.extend(fullscreen);
         self.windows.extend(ime_popup);
 
-        println!("[WindowManager] Z-order rebuilt");
-        print!("[WindowManager] Current Z-order (bottom to top): ");
-        for w in &self.windows {
-            print!("#{}({:?}) ", w.id, w.window_type);
+        if super::compositor::is_sws_debug_enabled() {
+            println!("[WindowManager] Z-order rebuilt");
+            print!("[WindowManager] Current Z-order (bottom to top): ");
+            for w in &self.windows {
+                print!("#{}({:?}) ", w.id, w.window_type);
+            }
+            println!();
         }
-        println!();
     }
 
     /// Set window opacity (0.0 = transparent, 1.0 = opaque)
@@ -1786,9 +1807,11 @@ impl WindowManager {
         }
 
         let root = self.top_level_ancestor(id);
-        println!(
+        window_debug!(
             "[WindowManager] Raising window #{} (root #{}) with type {:?} to top",
-            id, root, window_type
+            id,
+            root,
+            window_type
         );
 
         // Collect the transient group (root + descendants)
@@ -1877,11 +1900,13 @@ impl WindowManager {
         }
 
         // Print current Z-order
-        print!("[WindowManager] Current Z-order (bottom to top): ");
-        for w in &self.windows {
-            print!("#{}({:?}) ", w.id, w.window_type);
+        if super::compositor::is_sws_debug_enabled() {
+            print!("[WindowManager] Current Z-order (bottom to top): ");
+            for w in &self.windows {
+                print!("#{}({:?}) ", w.id, w.window_type);
+            }
+            println!();
         }
-        println!();
     }
 
     /// Set workarea for window positioning

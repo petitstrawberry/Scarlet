@@ -1069,12 +1069,14 @@ pub fn broadcast_message_to_all_clients(msg_type: u32, payload: Vec<u8>) {
     let client_ids: Vec<usize> = pending.keys().copied().collect();
     drop(pending);
 
-    println!(
-        "[IpcServer] Broadcasting message to {} clients (msg_type={}, payload_len={})",
-        client_ids.len(),
-        msg_type,
-        payload.len()
-    );
+    if is_sws_debug_enabled() {
+        println!(
+            "[IpcServer] Broadcasting message to {} clients (msg_type={}, payload_len={})",
+            client_ids.len(),
+            msg_type,
+            payload.len()
+        );
+    }
 
     for client_id in client_ids {
         // Clone the payload for each client
@@ -2048,7 +2050,9 @@ fn accept_thread_main(server_socket: Socket) {
     // If this falls inside the compositor backbuffer range, it indicates overlap risk.
     let stack_marker: u8 = 0;
     let sp_hint = (&stack_marker as *const u8) as usize;
-    println!("[AcceptThread] stack marker addr: 0x{:x}", sp_hint);
+    if is_sws_debug_enabled() {
+        println!("[AcceptThread] stack marker addr: 0x{:x}", sp_hint);
+    }
 
     let mut client_id_counter: usize = 0;
     let mut poll_count: u64 = 0;
@@ -2057,7 +2061,7 @@ fn accept_thread_main(server_socket: Socket) {
         // Kernel accept() currently returns WouldBlock when no connections are
         // pending, so we poll with a short sleep to avoid busy looping.
         poll_count = poll_count.wrapping_add(1);
-        if poll_count % 100 == 1 {
+        if is_sws_debug_enabled() && poll_count % 100 == 1 {
             println!(
                 "[AcceptThread] Polling accept() on handle {}...",
                 server_socket.as_raw()
@@ -2068,20 +2072,24 @@ fn accept_thread_main(server_socket: Socket) {
                 let client_id = client_id_counter;
                 client_id_counter += 1;
 
-                println!(
-                    "[AcceptThread] Accepted client {} (socket handle: {})",
-                    client_id,
-                    client_socket.as_raw()
-                );
+                if is_sws_debug_enabled() {
+                    println!(
+                        "[AcceptThread] Accepted client {} (socket handle: {})",
+                        client_id,
+                        client_socket.as_raw()
+                    );
+                }
 
                 // Register client for broadcast messages
                 {
                     let mut pending = PENDING_CLIENT_RESPONSES.lock().expect("SWS mutex poisoned");
                     pending.entry(client_id).or_insert_with(Vec::new);
-                    println!(
-                        "[AcceptThread] Registered client {} for broadcast messages",
-                        client_id
-                    );
+                    if is_sws_debug_enabled() {
+                        println!(
+                            "[AcceptThread] Registered client {} for broadcast messages",
+                            client_id
+                        );
+                    }
                 }
 
                 let client_wake = match scarlet_os::ipc::pipe() {
@@ -2142,11 +2150,13 @@ fn accept_thread_main(server_socket: Socket) {
 
 /// Client thread main function
 fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Handle>) {
-    println!(
-        "[ClientThread {}] Started (socket handle: {})",
-        client_id,
-        socket.as_raw()
-    );
+    if is_sws_debug_enabled() {
+        println!(
+            "[ClientThread {}] Started (socket handle: {})",
+            client_id,
+            socket.as_raw()
+        );
+    }
 
     // Enable non-blocking mode for event-driven I/O
     if let Err(e) = socket.set_nonblocking(true) {
@@ -2156,15 +2166,19 @@ fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Ha
         );
         return;
     }
-    println!("[ClientThread {}] Enabled non-blocking mode", client_id);
+    if is_sws_debug_enabled() {
+        println!("[ClientThread {}] Enabled non-blocking mode", client_id);
+    }
 
     // Evidence-only: log a stack address hint for this thread.
     let stack_marker: u8 = 0;
     let sp_hint = (&stack_marker as *const u8) as usize;
-    println!(
-        "[ClientThread {}] stack marker addr: 0x{:x}",
-        client_id, sp_hint
-    );
+    if is_sws_debug_enabled() {
+        println!(
+            "[ClientThread {}] stack marker addr: 0x{:x}",
+            client_id, sp_hint
+        );
+    }
 
     // Per-client window id generator (avoid collision between clients)
     let mut next_window_id: u32 = 100 + (client_id as u32 * 1000);
@@ -2182,7 +2196,9 @@ fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Ha
     let mut frame_reader = FrameReader::new();
     let mut atomic_frame = Vec::new();
     let mut stream_writer = ClientStreamWriter::new();
-    println!("[ClientThread {}] Entering main loop", client_id);
+    if is_sws_debug_enabled() {
+        println!("[ClientThread {}] Entering main loop", client_id);
+    }
 
     'main: loop {
         super::trace::ipc_client_loop();
@@ -2395,18 +2411,24 @@ fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Ha
                         } else {
                             0
                         };
-                    let mut handles = match wake_read.as_ref() {
-                        Some(wake) => [
-                            PollHandle::new(socket.as_raw() as u32, socket_interest),
-                            PollHandle::new(wake.as_raw() as u32, POLLIN),
-                        ],
-                        None => [
-                            PollHandle::new(socket.as_raw() as u32, socket_interest),
-                            PollHandle::new(socket.as_raw() as u32, 0),
-                        ],
-                    };
+                    // Scarlet's multi-object poll currently performs bounded
+                    // readiness scans. Polling both the socket and wake pipe
+                    // together therefore wakes every millisecond even while a
+                    // client is idle. With several desktop clients that turns
+                    // otherwise sleeping SWS threads into a material CPU load.
+                    //
+                    // Incoming client traffic is latency-sensitive, so block
+                    // on the socket directly. Server-to-client notifications
+                    // still use the wake pipe, which is sampled after this
+                    // short bounded wait. Its worst-case latency remains the
+                    // existing eight-millisecond client poll interval.
+                    let mut socket_handle =
+                        PollHandle::new(socket.as_raw() as u32, socket_interest);
                     super::trace::ipc_poll();
-                    let ready = match poll(&mut handles, CLIENT_POLL_TIMEOUT_NS) {
+                    let mut ready = match poll(
+                        core::slice::from_mut(&mut socket_handle),
+                        CLIENT_POLL_TIMEOUT_NS,
+                    ) {
                         Ok(ready) => ready,
                         Err(error) => {
                             println!("[ClientThread {}] poll failed: {:?}", client_id, error);
@@ -2414,11 +2436,26 @@ fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Ha
                             continue;
                         }
                     };
+                    let socket_revents = socket_handle.revents;
+                    let mut wake_revents = 0;
+                    if let Some(wake) = wake_read.as_ref() {
+                        let mut wake_handle = PollHandle::new(wake.as_raw() as u32, POLLIN);
+                        match poll(core::slice::from_mut(&mut wake_handle), 0) {
+                            Ok(wake_ready) => ready = ready.saturating_add(wake_ready),
+                            Err(error) => {
+                                println!(
+                                    "[ClientThread {}] wake poll failed: {:?}",
+                                    client_id, error
+                                );
+                                thread::sleep(core::time::Duration::from_millis(10));
+                                continue;
+                            }
+                        }
+                        wake_revents = wake_handle.revents;
+                    }
                     if ready > 0 {
                         super::trace::ipc_poll_ready();
                     }
-                    let socket_revents = handles[0].revents;
-                    let wake_revents = handles[1].revents;
                     let fatal_mask = POLLERR | POLLHUP | POLLNVAL;
                     super::trace::ipc_poll_result(ready, socket_revents, wake_revents, fatal_mask);
                     if (socket_revents & fatal_mask) != 0 {
@@ -2436,7 +2473,7 @@ fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Ha
                         break;
                     }
                     if let Some(wake) = wake_read.as_ref()
-                        && (handles[1].revents & POLLIN) != 0
+                        && (wake_revents & POLLIN) != 0
                         && let Ok(stream) = wake.as_stream()
                     {
                         let mut byte = [0u8; 1];

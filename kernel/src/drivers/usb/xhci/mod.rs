@@ -158,6 +158,7 @@ const USB_STORAGE_CBW_LEN: usize = 31;
 const USB_STORAGE_CSW_LEN: usize = 13;
 const USB_STORAGE_RECOVERY_DELAY_US: u64 = 6_000_000;
 const SCSI_TEST_UNIT_READY: u8 = 0x00;
+const SCSI_REQUEST_SENSE: u8 = 0x03;
 const SCSI_INQUIRY: u8 = 0x12;
 const SCSI_READ_CAPACITY_10: u8 = 0x25;
 const SCSI_READ_10: u8 = 0x28;
@@ -6704,7 +6705,28 @@ impl UsbMassStorageBlockDevice {
             Some((&mut inquiry, 36, true)),
         )?;
 
-        self.scsi_command(&[SCSI_TEST_UNIT_READY, 0, 0, 0, 0, 0], None)?;
+        let test_unit_ready = [SCSI_TEST_UNIT_READY, 0, 0, 0, 0, 0];
+        match self.scsi_command(&test_unit_ready, None) {
+            Ok(()) => {}
+            Err("USB storage SCSI command failed") => {
+                // Linux's file-backed mass-storage gadget reports a unit
+                // attention once after SET_CONFIGURATION.  A CHECK
+                // CONDITION from TEST UNIT READY is therefore a normal SCSI
+                // discovery step, not a BOT transport failure.  Requesting
+                // sense clears that condition; resetting the BOT endpoints
+                // here can strand xHCI's bulk ring before the retry.
+                let mut sense = self
+                    .controller
+                    .dma_alloc_pages(1)
+                    .ok_or("Failed to allocate REQUEST SENSE buffer")?;
+                self.scsi_command(
+                    &[SCSI_REQUEST_SENSE, 0, 0, 0, 18, 0],
+                    Some((&mut sense, 18, true)),
+                )?;
+                self.scsi_command(&test_unit_ready, None)?;
+            }
+            Err(error) => return Err(error),
+        }
 
         let mut capacity = self
             .controller
@@ -6735,6 +6757,7 @@ impl UsbMassStorageBlockDevice {
     fn scsi_opcode_name(opcode: u8) -> &'static str {
         match opcode {
             SCSI_TEST_UNIT_READY => "TEST_UNIT_READY",
+            SCSI_REQUEST_SENSE => "REQUEST_SENSE",
             SCSI_INQUIRY => "INQUIRY",
             SCSI_READ_CAPACITY_10 => "READ_CAPACITY_10",
             SCSI_READ_10 => "READ_10",
@@ -6790,7 +6813,6 @@ impl UsbMassStorageBlockDevice {
                 | "Invalid USB BOT CSW signature"
                 | "USB BOT CSW tag mismatch"
                 | "USB BOT CSW reported residual data"
-                | "USB storage SCSI command failed"
         )
     }
 

@@ -282,6 +282,38 @@ pub enum MappedTargetSession {
 }
 
 impl MappedTargetSession {
+    /// Import a transferred shared BGRA image into a logical sampled texture.
+    pub fn import_shared_bgra_texture(
+        &mut self,
+        texture: ir::TextureId,
+        handle: Handle,
+    ) -> Result<()> {
+        match self {
+            #[cfg(feature = "backend-scarlet-virgl")]
+            Self::Virgl(session) => session
+                .import_shared_bgra_texture(texture, handle)
+                .map_err(Error::ScarletVirglIr),
+            #[cfg(feature = "backend-scarlet-adreno")]
+            Self::Adreno(session) => session
+                .import_shared_bgra_texture(texture, handle)
+                .map_err(Error::ScarletAdrenoIr),
+        }
+    }
+
+    /// Detach and release a previously imported sampled texture.
+    pub fn release_imported_texture(&mut self, texture: ir::TextureId) -> Result<()> {
+        match self {
+            #[cfg(feature = "backend-scarlet-virgl")]
+            Self::Virgl(session) => session
+                .release_imported_texture(texture)
+                .map_err(Error::ScarletVirglIr),
+            #[cfg(feature = "backend-scarlet-adreno")]
+            Self::Adreno(session) => session
+                .release_imported_texture(texture)
+                .map_err(Error::ScarletAdrenoIr),
+        }
+    }
+
     /// Borrow a mapped presentation image without exposing its backend type.
     ///
     /// # Arguments

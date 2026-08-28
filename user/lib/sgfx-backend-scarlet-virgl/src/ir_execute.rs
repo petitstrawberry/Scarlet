@@ -16,7 +16,7 @@ use crate::ir::{
     TextureId, TextureRef, TextureSampleMode, TextureUsage, TextureWrite, VertexAttribute,
     VertexFormat,
 };
-use crate::{Context, HandleError, Image, Queue};
+use crate::{Context, HandleError, Image, Queue, Texture};
 
 /// An IR feature that the active backend facade cannot lower faithfully yet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -231,6 +231,50 @@ impl IrResources {
             image,
             backend_registered: false,
         });
+        Ok(())
+    }
+
+    pub(crate) fn map_texture(
+        &mut self,
+        context: &Context,
+        texture: TextureId,
+        image: &Texture,
+    ) -> Result<(), IrSubmitError> {
+        let texture_ref = self.resources.texture_ref(texture)?;
+        let descriptor = self.resources.texture(texture_ref)?;
+        if descriptor.format() != TextureFormat::Bgra8Unorm
+            || !descriptor.usage().contains(TextureUsage::SAMPLED)
+            || descriptor.usage().contains(TextureUsage::PRESENT)
+        {
+            return Err(IrSubmitError::Unsupported(
+                UnsupportedIrFeature::TargetUsage,
+            ));
+        }
+        let extent = descriptor.extent();
+        if extent.width() != image.width() || extent.height() != image.height() {
+            return Err(IrSubmitError::TargetExtentMismatch);
+        }
+        context.backend.map_ir_texture(
+            &mut self.backend,
+            texture_spec(texture_ref, descriptor),
+            &image.backend,
+        )?;
+        Ok(())
+    }
+
+    pub(crate) fn unmap_texture(
+        &mut self,
+        context: &Context,
+        texture: TextureId,
+        image: &Texture,
+    ) -> Result<(), IrSubmitError> {
+        let texture_ref = self.resources.texture_ref(texture)?;
+        let descriptor = self.resources.texture(texture_ref)?;
+        context.backend.unmap_ir_texture(
+            &mut self.backend,
+            texture_spec(texture_ref, descriptor),
+            &image.backend,
+        )?;
         Ok(())
     }
 

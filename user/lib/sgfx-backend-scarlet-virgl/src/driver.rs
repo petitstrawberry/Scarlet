@@ -78,6 +78,32 @@ impl Context {
         }
     }
 
+    pub(crate) fn map_ir_texture(
+        &self,
+        resources: &mut IrResources,
+        texture: IrTextureSpec,
+        image: &Texture,
+    ) -> HandleResult<()> {
+        match (self, resources, image) {
+            (Self::Virgl(context), IrResources::Virgl(resources), Texture::Virgl(image)) => {
+                context.map_ir_texture(resources, texture, image)
+            }
+        }
+    }
+
+    pub(crate) fn unmap_ir_texture(
+        &self,
+        resources: &mut IrResources,
+        texture: IrTextureSpec,
+        image: &Texture,
+    ) -> HandleResult<()> {
+        match (self, resources, image) {
+            (Self::Virgl(context), IrResources::Virgl(resources), Texture::Virgl(image)) => {
+                context.unmap_ir_texture(resources, texture, image)
+            }
+        }
+    }
+
     pub(crate) fn create_image(&self, width: u32, height: u32) -> HandleResult<Image> {
         match self {
             Self::Virgl(context) => Ok(Image::Virgl(context.create_image(width, height)?)),
