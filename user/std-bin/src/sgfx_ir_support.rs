@@ -75,12 +75,26 @@ pub(crate) struct MappedTarget {
     pub(crate) texture: TextureId,
     pub(crate) width: u32,
     pub(crate) height: u32,
+    spare_texture: Option<TextureId>,
+    current_initialized: bool,
+    spare_initialized: bool,
+    previous_damage: Option<PixelRect>,
+    pending_damage: Option<PixelRect>,
     session: MappedTargetSession,
     reusable_imports: Vec<ReusableImport>,
 }
 
 impl MappedTarget {
     pub(crate) fn open(width: u32, height: u32) -> Result<Self, Error> {
+        Self::open_with_target_count(width, height, 1)
+    }
+
+    /// Open a two-image presentation target for tear-free direct scanout.
+    pub(crate) fn open_swapchain(width: u32, height: u32) -> Result<Self, Error> {
+        Self::open_with_target_count(width, height, 2)
+    }
+
+    fn open_with_target_count(width: u32, height: u32, target_count: usize) -> Result<Self, Error> {
         let instance = Instance::new()?;
         let device = instance.open_device("/dev/gpu0")?;
         let capabilities = device.capabilities();
@@ -92,28 +106,90 @@ impl MappedTarget {
             return Err(Error::UnsupportedCapabilities);
         }
         let context = device.create_context()?;
-        Self::from_context(context, width, height)
+        Self::from_context(context, width, height, target_count)
     }
 
-    fn from_context(context: Context, width: u32, height: u32) -> Result<Self, Error> {
+    fn from_context(
+        context: Context,
+        width: u32,
+        height: u32,
+        target_count: usize,
+    ) -> Result<Self, Error> {
         let resources = Rc::new(ResourceTable::new());
         let extent = Extent2D::new(width, height)?;
-        let texture = resources
-            .define_texture(TextureDesc::new(
-                TextureFormat::Bgra8Unorm,
-                extent,
-                TextureUsage::RENDER_ATTACHMENT | TextureUsage::PRESENT,
-            )?)?
-            .id();
-        let session = context.create_mapped_target_session(Rc::clone(&resources), &[texture])?;
+        let define_target = || -> Result<TextureId, Error> {
+            Ok(resources
+                .define_texture(TextureDesc::new(
+                    TextureFormat::Bgra8Unorm,
+                    extent,
+                    TextureUsage::RENDER_ATTACHMENT | TextureUsage::PRESENT,
+                )?)?
+                .id())
+        };
+        let texture = define_target()?;
+        let spare_texture = match target_count {
+            1 => None,
+            2 => Some(define_target()?),
+            _ => return Err(ir::Error::InvalidValue.into()),
+        };
+        let mut targets = Vec::with_capacity(target_count);
+        targets.push(texture);
+        if let Some(spare) = spare_texture {
+            targets.push(spare);
+        }
+        let session = context.create_mapped_target_session(Rc::clone(&resources), &targets)?;
         Ok(Self {
             resources,
             texture,
             width,
             height,
+            spare_texture,
+            current_initialized: false,
+            spare_initialized: false,
+            previous_damage: None,
+            pending_damage: None,
             session,
             reusable_imports: Vec::new(),
         })
+    }
+
+    /// Expand logical damage by the age of the current swapchain image.
+    pub(crate) fn prepare_render_area(&mut self, requested: PixelRect) -> Result<PixelRect, Error> {
+        let full = PixelRect::new(0, 0, self.width, self.height)?;
+        if requested.x().saturating_add(requested.width()) > self.width
+            || requested.y().saturating_add(requested.height()) > self.height
+        {
+            return Err(ir::Error::InvalidValue.into());
+        }
+        self.pending_damage = Some(match self.pending_damage {
+            Some(pending) => union_pixel_rect(pending, requested)?,
+            None => requested,
+        });
+        if self.spare_texture.is_none() {
+            return Ok(requested);
+        }
+        if !self.current_initialized {
+            return Ok(full);
+        }
+        match self.previous_damage {
+            Some(previous) => union_pixel_rect(previous, requested).map_err(Into::into),
+            None => Ok(full),
+        }
+    }
+
+    fn finish_present(&mut self) -> Result<(), Error> {
+        let Some(mut spare) = self.spare_texture else {
+            self.pending_damage = None;
+            return Ok(());
+        };
+        let full = PixelRect::new(0, 0, self.width, self.height)?;
+        let logical_damage = self.pending_damage.take().unwrap_or(full);
+        self.current_initialized = true;
+        self.previous_damage = Some(logical_damage);
+        core::mem::swap(&mut self.texture, &mut spare);
+        self.spare_texture = Some(spare);
+        core::mem::swap(&mut self.current_initialized, &mut self.spare_initialized);
+        Ok(())
     }
 
     pub(crate) fn execute(
@@ -166,7 +242,7 @@ impl MappedTarget {
     }
 
     pub(crate) fn present(
-        &self,
+        &mut self,
         display: &DisplaySurface,
         region: Option<DisplayPresentRegion>,
     ) -> Result<(), &'static str> {
@@ -174,10 +250,40 @@ impl MappedTarget {
             .session
             .image(self.texture)
             .map_err(|_| "Failed to resolve mapped SGFX target")?;
-        display
-            .present_image(image.shared_handle(), region)
-            .map_err(|_| "Failed to present mapped SGFX target")
+        if self.spare_texture.is_some() {
+            display
+                .present_swapchain_image(image.shared_handle(), region)
+                .map_err(|_| "Failed to present mapped SGFX swapchain target")?;
+        } else {
+            display
+                .present_image(image.shared_handle(), region)
+                .map_err(|_| "Failed to present mapped SGFX target")?;
+        }
+        self.finish_present()
+            .map_err(|_| "Failed to advance mapped SGFX swapchain")
     }
+}
+
+fn union_pixel_rect(left: PixelRect, right: PixelRect) -> ir::Result<PixelRect> {
+    let x = left.x().min(right.x());
+    let y = left.y().min(right.y());
+    let right_edge = left
+        .x()
+        .checked_add(left.width())
+        .and_then(|edge| {
+            edge.max(right.x().checked_add(right.width())?)
+                .checked_sub(x)
+        })
+        .ok_or(ir::Error::Overflow)?;
+    let bottom_edge = left
+        .y()
+        .checked_add(left.height())
+        .and_then(|edge| {
+            edge.max(right.y().checked_add(right.height())?)
+                .checked_sub(y)
+        })
+        .ok_or(ir::Error::Overflow)?;
+    PixelRect::new(x, y, right_edge, bottom_edge)
 }
 
 const fn supports_mapped_target(rendering: bool, presentation: bool, image_upload: bool) -> bool {

@@ -86,8 +86,8 @@ pub(super) struct GpuCompositor {
 impl GpuCompositor {
     /// Create the optional GPU compositor after confirming required capabilities.
     pub(super) fn new(width: u32, height: u32, cursor: &Cursor) -> Result<Self, &'static str> {
-        let mut target =
-            MappedTarget::open(width, height).map_err(|_| "Failed to create mapped GPU target")?;
+        let mut target = MappedTarget::open_swapchain(width, height)
+            .map_err(|_| "Failed to create mapped GPU swapchain")?;
         let quad_renderer = QuadRenderer::define(target.resources.as_ref(), 96)
             .map_err(|_| "Failed to define GPU composition resources")?;
         // Upload the complete theme once. Pointer-shape changes are common
@@ -425,10 +425,17 @@ impl GpuCompositor {
         super::trace::set_gpu_window(0);
         super::trace::set_compositor_stage(super::trace::STAGE_GPU_ENCODE);
         let clear_color = bgra_color(background);
-        let damage_clip = damage
+        let requested_clip = damage
             .map(|(x, y, width, height)| PixelRect::new(x, y, width, height))
             .transpose()
             .map_err(|_| "Invalid GPU composition damage")?;
+        let full_area = PixelRect::new(0, 0, self.target.width, self.target.height)
+            .map_err(|_| "Invalid GPU composition target area")?;
+        let render_area = self
+            .target
+            .prepare_render_area(requested_clip.unwrap_or(full_area))
+            .map_err(|_| "Failed to prepare GPU swapchain damage")?;
+        let damage_clip = (render_area != full_area).then_some(render_area);
         let mut operations = Vec::new();
         for window in windows {
             if !window.visible {
@@ -558,10 +565,6 @@ impl GpuCompositor {
         }
 
         super::trace::set_compositor_stage(super::trace::STAGE_GPU_SUBMIT);
-        let render_area = damage_clip.unwrap_or(
-            PixelRect::new(0, 0, self.target.width, self.target.height)
-                .map_err(|_| "Invalid GPU composition target area")?,
-        );
         self.quad_renderer.submit_region(
             &mut self.target,
             render_area,
@@ -569,11 +572,11 @@ impl GpuCompositor {
             &operations,
         )?;
         super::trace::set_compositor_stage(super::trace::STAGE_GPU_PRESENT);
-        let region = damage.map(|(x, y, width, height)| DisplayPresentRegion {
-            x,
-            y,
-            width,
-            height,
+        let region = (render_area != full_area).then_some(DisplayPresentRegion {
+            x: render_area.x(),
+            y: render_area.y(),
+            width: render_area.width(),
+            height: render_area.height(),
         });
         self.target.present(display, region)?;
         self.force_full_repaint = false;
@@ -698,8 +701,8 @@ impl GpuCompositor {
         let (width, height) = self
             .rebuild_extent
             .unwrap_or((self.target.width, self.target.height));
-        let mut target =
-            MappedTarget::open(width, height).map_err(|_| "Failed to rebuild mapped GPU target")?;
+        let mut target = MappedTarget::open_swapchain(width, height)
+            .map_err(|_| "Failed to rebuild mapped GPU swapchain")?;
         let quad_renderer = QuadRenderer::define(target.resources.as_ref(), 96)
             .map_err(|_| "Failed to redefine GPU composition resources")?;
         let cursor_images = create_cursor_images(&mut target, cursor)?;
