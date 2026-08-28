@@ -10,7 +10,10 @@ use crate::sync::IrqRwSpinLock;
 use alloc::{collections::BTreeMap, sync::Arc, vec, vec::Vec};
 use core::any::Any;
 
-use super::{FramebufferConfig, PixelFormat, manager::FramebufferResource, output::DisplayRegion};
+use super::{
+    FramebufferConfig, GpuPresentOptions, PixelFormat, manager::FramebufferResource,
+    output::DisplayRegion,
+};
 use crate::device::{Device, DeviceType, char::CharDevice, manager::DeviceManager};
 use crate::library::std::usercopy::copy_from_user;
 use crate::object::capability::selectable::{ReadyInterest, SelectWaitOutcome, Selectable};
@@ -147,8 +150,11 @@ pub struct DisplayPresentImage {
 
 /// Present the full GPU image and require zero region fields.
 pub const DISPLAY_PRESENT_IMAGE_FLAG_FULL_FRAME: u32 = 1 << 0;
+/// The producer will not rewrite this image until another image is presented.
+pub const DISPLAY_PRESENT_IMAGE_FLAG_SWAPCHAIN_BUFFER: u32 = 1 << 1;
 /// All currently defined GPU image presentation flags.
-pub const DISPLAY_PRESENT_IMAGE_FLAGS_VALID: u32 = DISPLAY_PRESENT_IMAGE_FLAG_FULL_FRAME;
+pub const DISPLAY_PRESENT_IMAGE_FLAGS_VALID: u32 =
+    DISPLAY_PRESENT_IMAGE_FLAG_FULL_FRAME | DISPLAY_PRESENT_IMAGE_FLAG_SWAPCHAIN_BUFFER;
 
 #[derive(Debug, Clone)]
 struct DisplayBackingInfo {
@@ -505,7 +511,12 @@ impl DisplayCharDevice {
             .as_graphics_device()
             .ok_or("Display source device is not graphics-capable")?;
         // `image_owner` remains live until this synchronous presentation returns.
-        graphics.present_gpu_resource_region(resource, region)?;
+        let options = if request.flags & DISPLAY_PRESENT_IMAGE_FLAG_SWAPCHAIN_BUFFER != 0 {
+            GpuPresentOptions::swapchain_buffer()
+        } else {
+            GpuPresentOptions::default()
+        };
+        graphics.present_gpu_resource_region_with_options(resource, region, options)?;
         Ok(0)
     }
 

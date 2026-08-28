@@ -107,6 +107,31 @@ pub struct GpuDisplayResource {
     linear_backing: Option<GpuLinearDisplayBacking>,
 }
 
+/// Producer guarantees attached to one GPU-image presentation.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct GpuPresentOptions {
+    swapchain_buffer: bool,
+}
+
+impl GpuPresentOptions {
+    /// Describe a buffer that participates in a presentation swapchain.
+    ///
+    /// The producer promises not to write this image again after a successful
+    /// present until a different swapchain image has also been presented
+    /// successfully. A display driver may therefore retain and scan out the
+    /// image directly instead of copying it into a display-owned buffer.
+    pub const fn swapchain_buffer() -> Self {
+        Self {
+            swapchain_buffer: true,
+        }
+    }
+
+    /// Return whether the producer supplied the swapchain lifetime guarantee.
+    pub const fn is_swapchain_buffer(self) -> bool {
+        self.swapchain_buffer
+    }
+}
+
 /// Linear framebuffer backing exported by a GPU image for cross-device scanout.
 #[derive(Clone)]
 pub struct GpuLinearDisplayBacking {
@@ -482,6 +507,20 @@ pub trait GraphicsDevice: Device {
         _region: DisplayRegion,
     ) -> Result<(), &'static str> {
         Err("GPU resource presentation is not supported")
+    }
+
+    /// Present a GPU resource with explicit producer lifetime guarantees.
+    ///
+    /// Drivers that do not support direct cross-device scanout may ignore the
+    /// options and use their normal presentation path. The default preserves
+    /// the existing GPU presentation behavior.
+    fn present_gpu_resource_region_with_options(
+        &self,
+        resource: GpuDisplayResource,
+        region: DisplayRegion,
+        _options: GpuPresentOptions,
+    ) -> Result<(), &'static str> {
+        self.present_gpu_resource_region(resource, region)
     }
 
     /// Present a whole GPU resource through the display pipeline.

@@ -197,8 +197,11 @@ pub struct DisplayPresentImage {
 
 /// Present the full GPU image and require zero region fields.
 pub const DISPLAY_PRESENT_IMAGE_FLAG_FULL_FRAME: u32 = 1 << 0;
+/// The producer will not rewrite this image until another image is presented.
+pub const DISPLAY_PRESENT_IMAGE_FLAG_SWAPCHAIN_BUFFER: u32 = 1 << 1;
 /// All currently defined GPU image presentation flags.
-pub const DISPLAY_PRESENT_IMAGE_FLAGS_VALID: u32 = DISPLAY_PRESENT_IMAGE_FLAG_FULL_FRAME;
+pub const DISPLAY_PRESENT_IMAGE_FLAGS_VALID: u32 =
+    DISPLAY_PRESENT_IMAGE_FLAG_FULL_FRAME | DISPLAY_PRESENT_IMAGE_FLAG_SWAPCHAIN_BUFFER;
 
 /// Color bit field information
 #[repr(C)]
@@ -940,6 +943,33 @@ impl DisplaySurface {
         image: &Handle,
         region: Option<DisplayPresentRegion>,
     ) -> HandleResult<()> {
+        self.present_gpu_image_with_flags(image, region, 0)
+    }
+
+    /// Present one image from a producer-managed swapchain.
+    ///
+    /// After this call succeeds, the producer must not write `image` again
+    /// until a different swapchain image has been presented successfully.
+    /// This guarantee lets a capable display driver scan out the image
+    /// directly while drivers without that support retain their normal path.
+    pub fn present_swapchain_image(
+        &self,
+        image: &Handle,
+        region: Option<DisplayPresentRegion>,
+    ) -> HandleResult<()> {
+        self.present_gpu_image_with_flags(
+            image,
+            region,
+            DISPLAY_PRESENT_IMAGE_FLAG_SWAPCHAIN_BUFFER,
+        )
+    }
+
+    fn present_gpu_image_with_flags(
+        &self,
+        image: &Handle,
+        region: Option<DisplayPresentRegion>,
+        flags: u32,
+    ) -> HandleResult<()> {
         let image_handle = u32::try_from(image.as_raw()).map_err(|_| HandleError::InvalidHandle)?;
         let request = match region {
             Some(region) => {
@@ -948,6 +978,7 @@ impl DisplaySurface {
                 }
                 DisplayPresentImage {
                     image_handle,
+                    flags,
                     x: region.x,
                     y: region.y,
                     width: region.width,
@@ -957,7 +988,7 @@ impl DisplaySurface {
             }
             None => DisplayPresentImage {
                 image_handle,
-                flags: DISPLAY_PRESENT_IMAGE_FLAG_FULL_FRAME,
+                flags: flags | DISPLAY_PRESENT_IMAGE_FLAG_FULL_FRAME,
                 ..DisplayPresentImage::default()
             },
         };
