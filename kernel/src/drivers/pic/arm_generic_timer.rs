@@ -14,6 +14,7 @@
 use core::arch::asm;
 use core::sync::atomic::{AtomicU32, Ordering};
 
+use crate::arch::interrupt::TimerInterruptRoute;
 use crate::device::manager::{DeviceManager, DriverPriority, probe_defer};
 use crate::device::platform::{
     PlatformDeviceDriver, PlatformDeviceInfo, resource::PlatformDeviceResourceType,
@@ -32,6 +33,16 @@ const CNTV_CTL_FIRING: u64 = CNTV_CTL_ENABLE | CNTV_CTL_ISTATUS;
 #[inline]
 const fn timer_control_is_firing(control: u64) -> bool {
     control & CNTV_CTL_STATE_MASK == CNTV_CTL_FIRING
+}
+
+#[inline]
+const fn timer_irq_selection(vhe: bool) -> (&'static str, usize) {
+    if vhe { ("hyp-phys", 2) } else { ("virt", 1) }
+}
+
+#[inline]
+const fn needs_external_timer_irq(route: TimerInterruptRoute) -> bool {
+    !matches!(route, TimerInterruptRoute::FastInterrupt)
 }
 
 const TIMER_PPI_UNCONFIGURED: u32 = u32::MAX;
@@ -204,6 +215,23 @@ mod tests {
         ));
         assert!(!timer_control_is_firing(CNTV_CTL_ENABLE));
     }
+
+    #[test_case]
+    fn selects_architected_timer_interrupt_by_execution_mode() {
+        assert_eq!(timer_irq_selection(true), ("hyp-phys", 2));
+        assert_eq!(timer_irq_selection(false), ("virt", 1));
+    }
+
+    #[test_case]
+    fn preserves_preconfigured_fast_interrupt_route() {
+        assert!(!needs_external_timer_irq(
+            TimerInterruptRoute::FastInterrupt
+        ));
+        assert!(needs_external_timer_irq(
+            TimerInterruptRoute::ExternalControllerIrq
+        ));
+        assert!(needs_external_timer_irq(TimerInterruptRoute::Unknown));
+    }
 }
 
 fn register_arm_generic_timer() {
@@ -226,22 +254,25 @@ fn register_arm_generic_timer() {
 crate::early_initcall!(register_arm_generic_timer);
 
 fn platform_timer_probe(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
+    let configured_route = crate::arch::interrupt::timer_interrupt_route();
+    // A platform interrupt controller may declare that the architected timer
+    // bypasses its normal IRQ domain. In that case the firmware cells describe
+    // a fast-interrupt source, not an external line that this probe may remap.
+    if !needs_external_timer_irq(configured_route) {
+        crate::early_println!(
+            "[interrupt] ARM generic timer: preserving preconfigured {:?} route",
+            configured_route
+        );
+        return Ok(());
+    }
+
     let irq_resources: alloc::vec::Vec<_> = device
         .get_resources()
         .iter()
         .filter(|resource| resource.res_type == PlatformDeviceResourceType::IRQ)
         .collect();
 
-    let irq_name = if crate::arch::aarch64::is_vhe_enabled() {
-        "hyp-phys"
-    } else {
-        "virt"
-    };
-    let fallback_index = if crate::arch::aarch64::is_vhe_enabled() {
-        3
-    } else {
-        2
-    };
+    let (irq_name, fallback_index) = timer_irq_selection(crate::arch::aarch64::is_vhe_enabled());
     let irq_index = device
         .property("interrupt-names")
         .and_then(|property| property.as_string_list())
