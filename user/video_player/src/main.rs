@@ -27,6 +27,7 @@ use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::any::Any;
+use core::ops::Deref;
 use core::simd::cmp::SimdOrd;
 use core::simd::{
     Simd,
@@ -88,17 +89,13 @@ const STREAM_REORDER_HOLD_SAMPLES: usize = 8;
 const STREAM_DECODE_BATCH_SAMPLES: usize = 8;
 const STREAM_START_BUFFER_US: u64 = 1_000_000;
 const STREAM_START_BUFFER_SAMPLES: usize = 24;
-const DISPLAY_QUEUE_MAX_FRAMES: usize = 30;
-// Converted hardware frames are BGRA. Keep only a short presentation lead:
-// at 1080p each frame is about 7.9 MiB, so the old 96 MiB budget allowed a
-// single player to burst-allocate roughly twelve full-resolution frames.
-const DISPLAY_QUEUE_MAX_BYTES: usize = 32 * 1024 * 1024;
-// Retain at most two 1080p-sized buffers after they leave the queue. The
-// decoder reuses these in steady state instead of allocating every frame. A
-// single frame larger than this budget is retained on its own as well, so 4K
-// playback does not fall back to one allocation per frame.
-const BGRA_POOL_MAX_BYTES: usize = 16 * 1024 * 1024;
-const DECODE_TARGET_LEAD_FRAMES: usize = 10;
+const DISPLAY_QUEUE_MAX_FRAMES: usize = 4;
+// Hardware frames stay NV12 until presentation. Two 1080p frames occupy about
+// 5.9 MiB, so an 8 MiB byte bound provides a short scheduling cushion without
+// letting every player retain tens of MiB of converted BGRA frames.
+const DISPLAY_QUEUE_MAX_BYTES: usize = 8 * 1024 * 1024;
+const PAYLOAD_POOL_MAX_BYTES: usize = 8 * 1024 * 1024;
+const DECODE_TARGET_LEAD_FRAMES: usize = 2;
 const AUDIO_CLOCK_START_TIMEOUT_MS: u64 = 3_000;
 const AUDIO_CLOCK_STALL_TIMEOUT_MS: u64 = 3_000;
 const SAS_CONTROL_TIMEOUT_NS: u64 = 3_000_000_000;
@@ -113,6 +110,83 @@ const PLAY_BUTTON_SIZE: u32 = 22;
 const PLAY_BUTTON_LEFT_INSET: u32 = 10;
 const PLAY_BUTTON_TOP_INSET: u32 = 6;
 const LOOP_BUTTON_WIDTH: u32 = 24;
+
+/// Read-only media bytes backed either by a shared file mapping or by an
+/// owned buffer for genuinely streaming inputs.
+enum MediaBytes {
+    Mapped(MappedMediaFile),
+    Owned(Vec<u8>),
+}
+
+impl MediaBytes {
+    fn from_owned(data: Vec<u8>) -> Self {
+        Self::Owned(data)
+    }
+
+    fn as_slice(&self) -> &[u8] {
+        self
+    }
+}
+
+impl Deref for MediaBytes {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::Mapped(mapping) => mapping.as_slice(),
+            Self::Owned(data) => data.as_slice(),
+        }
+    }
+}
+
+/// Keeps a regular-file handle and its read-only shared mapping alive.
+///
+/// Scarlet's VFS resolves `MAP_SHARED` file faults through the global page
+/// cache. Multiple video-player processes therefore reference the same MP4
+/// pages instead of each allocating a complete private `Vec<u8>` copy.
+struct MappedMediaFile {
+    _file: File,
+    address: usize,
+    length: usize,
+}
+
+impl MappedMediaFile {
+    fn open(path: &str) -> Result<Self, String> {
+        let mut file = File::open(path).map_err(|_| format!("open failed: {path}"))?;
+        let file_length = file
+            .seek(SeekFrom::End(0))
+            .map_err(|_| format!("seek failed: {path}"))?;
+        let length = usize::try_from(file_length)
+            .map_err(|_| format!("file is too large to map: {path}"))?;
+        if length == 0 {
+            return Err(format!("cannot map empty file: {path}"));
+        }
+        let address = file
+            .as_handle()
+            .as_memory_mapping()
+            .map_err(|_| format!("file does not support mmap: {path}"))?
+            .mmap(0, length, prot::READ, mmap_flags::SHARED, 0)
+            .map_err(|_| format!("mmap failed: {path}"))?;
+        Ok(Self {
+            _file: file,
+            address,
+            length,
+        })
+    }
+
+    fn as_slice(&self) -> &[u8] {
+        // SAFETY: `address..address + length` is the read-only mapping created
+        // in `open`. The mapping remains live for `self` and is never exposed
+        // mutably.
+        unsafe { core::slice::from_raw_parts(self.address as *const u8, self.length) }
+    }
+}
+
+impl Drop for MappedMediaFile {
+    fn drop(&mut self) {
+        let _ = munmap(self.address, self.length);
+    }
+}
 const LOOP_BUTTON_HEIGHT: u32 = 22;
 const LOOP_BUTTON_LEFT_INSET: u32 = 38;
 const SEEK_TRACK_LEFT_INSET: u32 = 74;
@@ -142,6 +216,7 @@ const SCARLET_VIDEO_CAP_STATELESS_H264: u32 = 1 << 8;
 const SCARLET_VIDEO_CAP_STATELESS_VP9: u32 = 1 << 9;
 const SCARLET_VIDEO_CAP_MAPPED_BUFFERS: u32 = 1 << 16;
 const SCARLET_VIDEO_CAP_SESSIONS: u32 = 1 << 17;
+const SCARLET_VIDEO_CAP_VARIABLE_MAPPED_BUFFERS: u32 = 1 << 18;
 const SCARLET_VIDEO_FORMAT_H264: u32 = 4098;
 const SCARLET_VIDEO_FORMAT_HEVC: u32 = 4099;
 const SCARLET_VIDEO_FORMAT_VP9: u32 = 4102;
@@ -149,6 +224,10 @@ const SCARLET_VIDEO_FORMAT_AV1: u32 = 4103;
 const SCARLET_AV1_ACCESS_UNIT_MAGIC: &[u8; 4] = b"SVA1";
 const VIDEO_DECODE_UTIL_MIN: u32 = SCHED_UTIL_SCALE * 7 / 8;
 const VIDEO_DISPLAY_UTIL_MIN: u32 = SCHED_UTIL_SCALE * 3 / 4;
+const VIDEO_BUFFER_REQUEST_GRANULARITY: usize = 1024 * 1024;
+const VIDEO_BUFFER_MIN_INPUT: usize = VIDEO_BUFFER_REQUEST_GRANULARITY;
+const VIDEO_BUFFER_MIN_OUTPUT: usize = VIDEO_BUFFER_REQUEST_GRANULARITY;
+const VIDEO_HARDWARE_OUTPUT_OFFSET: usize = 4096;
 
 fn monotonic_time_ns() -> u64 {
     syscall0(Syscall::MonotonicTime) as u64
@@ -179,50 +258,14 @@ fn acquire_payload_buffer(len: usize) -> Vec<u8> {
 
 fn release_payload_buffer(buf: Vec<u8>) {
     let mut pool = PAYLOAD_POOL.lock();
-    if pool.len() < PAYLOAD_POOL_MAX_BUFFERS {
-        pool.push(buf);
-    }
-}
-
-/// Byte-bounded recycle pool for converted BGRA frame buffers.
-static BGRA_POOL: Mutex<Vec<Vec<u8>>> = Mutex::new(Vec::new());
-
-fn acquire_bgra_buffer(len: usize) -> Vec<u8> {
-    let mut pool = BGRA_POOL.lock();
-    while let Some(buf) = pool.pop() {
-        if buf.capacity() >= len {
-            drop(pool);
-            let mut buf = buf;
-            buf.resize(len, 0);
-            return buf;
-        }
-    }
-    drop(pool);
-    vec![0; len]
-}
-
-fn release_bgra_buffer(buf: Vec<u8>) {
-    let mut pool = BGRA_POOL.lock();
     let retained_bytes = pool.iter().fold(0usize, |total, retained| {
         total.saturating_add(retained.capacity())
     });
-    if pool.is_empty() || retained_bytes.saturating_add(buf.capacity()) <= BGRA_POOL_MAX_BYTES {
+    if pool.len() < PAYLOAD_POOL_MAX_BUFFERS
+        && (pool.is_empty()
+            || retained_bytes.saturating_add(buf.capacity()) <= PAYLOAD_POOL_MAX_BYTES)
+    {
         pool.push(buf);
-    }
-}
-
-struct BgraFrame {
-    pixels: Vec<u8>,
-    width: u32,
-    height: u32,
-}
-
-impl Drop for BgraFrame {
-    fn drop(&mut self) {
-        let pixels = core::mem::take(&mut self.pixels);
-        if !pixels.is_empty() {
-            release_bgra_buffer(pixels);
-        }
     }
 }
 
@@ -359,20 +402,6 @@ impl VideoFrameStore {
         data.current_frame = current_frame;
         data.total_frames = total_frames;
         Ok(())
-    }
-
-    fn swap_bgra(&self, mut bgra: BgraFrame, current_frame: u32, total_frames: u32) {
-        let mut data = self.data.lock();
-        let required_len = bgra.width as usize * bgra.height as usize * 4;
-        if data.pixels.len() == required_len {
-            core::mem::swap(&mut data.pixels, &mut bgra.pixels);
-        } else {
-            data.pixels = core::mem::take(&mut bgra.pixels);
-        }
-        data.width = bgra.width;
-        data.height = bgra.height;
-        data.current_frame = current_frame;
-        data.total_frames = total_frames;
     }
 
     fn mark_complete(&self) {
@@ -859,7 +888,7 @@ impl Listenable for PaintSignal {
 #[derive(Clone)]
 struct PlaybackRequest {
     path: String,
-    mp4_data: Option<Arc<Vec<u8>>>,
+    mp4_data: Option<Arc<MediaBytes>>,
     audio_source: Option<PlayerAudioSource>,
     hardware_decode: bool,
     streaming: bool,
@@ -888,12 +917,26 @@ impl PlaybackRequest {
         }
 
         if self.mp4_data.is_none() && (is_mp4_path(&self.path) || is_webm_path(&self.path)) {
-            match read_file_cancellable(&self.path, cancel) {
-                Ok(Some(data)) => self.mp4_data = Some(Arc::new(data)),
-                Ok(None) => return None,
+            if cancel.load(Ordering::Acquire) {
+                return None;
+            }
+            match MappedMediaFile::open(&self.path) {
+                Ok(mapping) => self.mp4_data = Some(Arc::new(MediaBytes::Mapped(mapping))),
                 Err(error) => {
-                    println!("[{}] failed to read selected video: {}", APP_NAME, error);
-                    self.mp4_data = Some(Arc::new(Vec::new()));
+                    println!(
+                        "[{}] failed to map selected video, falling back to read: {}",
+                        APP_NAME, error
+                    );
+                    match read_file_cancellable(&self.path, cancel) {
+                        Ok(Some(data)) => {
+                            self.mp4_data = Some(Arc::new(MediaBytes::from_owned(data)));
+                        }
+                        Ok(None) => return None,
+                        Err(error) => {
+                            println!("[{}] failed to read selected video: {}", APP_NAME, error);
+                            self.mp4_data = Some(Arc::new(MediaBytes::from_owned(Vec::new())));
+                        }
+                    }
                 }
             }
         }
@@ -1054,7 +1097,7 @@ struct VideoPlayerApp {
 #[derive(Clone)]
 enum PlayerAudioSource {
     Wav(String),
-    Mp4Aac(Arc<Vec<u8>>),
+    Mp4Aac(Arc<MediaBytes>),
     StreamingMp4Aac {
         path: String,
         complete_path: Option<String>,
@@ -1074,7 +1117,7 @@ impl VideoPlayerApp {
     fn new(
         path: String,
         window_title: String,
-        mp4_data: Option<Arc<Vec<u8>>>,
+        mp4_data: Option<Arc<MediaBytes>>,
         audio_source: Option<PlayerAudioSource>,
         hardware_decode: bool,
         streaming: bool,
@@ -1577,7 +1620,7 @@ fn start_playback_supervisor(
 
 fn start_decoder_thread(
     path: String,
-    mp4_data: Option<Arc<Vec<u8>>>,
+    mp4_data: Option<Arc<MediaBytes>>,
     frame_store: Arc<VideoFrameStore>,
     paint_signal: Arc<PaintSignal>,
     controls: Arc<ControlsOverlay>,
@@ -1621,7 +1664,7 @@ fn start_decoder_thread(
                 } else {
                     decode_loop_hardware(
                         &path,
-                        mp4_data.as_deref().map(Vec::as_slice),
+                        mp4_data.as_deref().map(MediaBytes::as_slice),
                         &frame_store,
                         &paint_signal,
                         &controls,
@@ -1632,7 +1675,7 @@ fn start_decoder_thread(
             } else {
                 h264_sw::decode_loop(
                     &path,
-                    mp4_data.as_deref().map(Vec::as_slice),
+                    mp4_data.as_deref().map(MediaBytes::as_slice),
                     &controls,
                     clock.as_deref(),
                     &display_queue,
@@ -1791,7 +1834,8 @@ fn decode_loop_hardware(
     let mut loop_index = 0u64;
     let mut seek_epoch = controls.current_seek_epoch();
     let mut seek_target_us = 0u64;
-    let mut decoder = HardwareVideoDecoder::open(queue.cancel.clone())?;
+    let mut decoder =
+        HardwareVideoDecoder::open(queue.cancel.clone(), source.hardware_buffer_request())?;
     let mut first_pass = true;
 
     loop {
@@ -1843,7 +1887,7 @@ fn decode_loop_hardware(
             let Some(frame) = frame else {
                 return Err(String::from("hardware decoder produced no frame"));
             };
-            let frame = hardware_frame_to_bgra(frame)?;
+            let frame = hardware_frame_to_owned(frame)?;
             let presentation_time_us = access_unit
                 .presentation_time_us
                 .saturating_add(loop_time_offset_us);
@@ -1943,7 +1987,8 @@ fn decode_loop_hardware_streaming_mp4(
     queue: &DisplayQueue,
 ) -> Result<(), String> {
     let mut data = Vec::new();
-    let mut decoder = HardwareVideoDecoder::open(queue.cancel.clone())?;
+    let mut decoder =
+        HardwareVideoDecoder::open(queue.cancel.clone(), HardwareBufferRequest::default())?;
     let mut reorder = FrameReorderBuffer::new(u32::MAX);
     let mut access_unit_scratch = Vec::new();
     let mut decoded = 0usize;
@@ -2138,7 +2183,7 @@ fn decode_loop_hardware_streaming_mp4(
                 decoded += 1;
                 continue;
             }
-            let frame = hardware_frame_to_bgra(frame)?;
+            let frame = hardware_frame_to_owned(frame)?;
             if controls.is_scrubbing() {
                 publish_seek_preview(
                     frame_store,
@@ -2277,7 +2322,8 @@ fn decode_loop_hardware_streaming_mp4_socket(
     let socket_state = start_stream_socket_reader(String::from(socket_path));
 
     let mut data = Vec::new();
-    let mut decoder = HardwareVideoDecoder::open(queue.cancel.clone())?;
+    let mut decoder =
+        HardwareVideoDecoder::open(queue.cancel.clone(), HardwareBufferRequest::default())?;
     let mut reorder = FrameReorderBuffer::new(u32::MAX);
     let mut access_unit_scratch = Vec::new();
     let mut decoded = 0usize;
@@ -2482,7 +2528,7 @@ fn decode_loop_hardware_streaming_mp4_socket(
                 decoded += 1;
                 continue;
             }
-            let frame = hardware_frame_to_bgra(frame)?;
+            let frame = hardware_frame_to_owned(frame)?;
             if controls.is_scrubbing() {
                 publish_seek_preview(
                     frame_store,
@@ -2679,7 +2725,7 @@ fn replay_hardware_source_loops(
             let Some(frame) = frame else {
                 return Err(String::from("hardware decoder produced no frame"));
             };
-            let frame = hardware_frame_to_bgra(frame)?;
+            let frame = hardware_frame_to_owned(frame)?;
             let presentation_time_us = access_unit
                 .presentation_time_us
                 .saturating_add(loop_time_offset_us);
@@ -2775,6 +2821,14 @@ struct VideoSource {
     format: VideoContainerFormat,
     access_units: Vec<VideoAccessUnit>,
     estimated_total_frames: Option<u32>,
+    coded_width: u32,
+    coded_height: u32,
+}
+
+#[derive(Clone, Copy, Default)]
+struct HardwareBufferRequest {
+    input_len: u32,
+    output_len: u32,
 }
 
 struct VideoAccessUnit {
@@ -2937,6 +2991,35 @@ enum VideoAccessUnitPayload {
 }
 
 impl VideoAccessUnit {
+    fn encoded_len_upper_bound(&self) -> Option<usize> {
+        match &self.payload {
+            VideoAccessUnitPayload::Owned(bytes) => Some(bytes.len()),
+            VideoAccessUnitPayload::Mp4H264Sample { size, config, .. } => {
+                let parameter_sets = config
+                    .parameter_sets
+                    .iter()
+                    .try_fold(0usize, |total, set| {
+                        total.checked_add(set.len().checked_add(4)?)
+                    })?;
+                size.checked_mul(4)?.checked_add(parameter_sets)
+            }
+            VideoAccessUnitPayload::Mp4HevcSample { size, config, .. } => {
+                let parameter_sets = config
+                    .parameter_sets
+                    .iter()
+                    .try_fold(0usize, |total, set| {
+                        total.checked_add(set.len().checked_add(4)?)
+                    })?;
+                size.checked_mul(4)?.checked_add(parameter_sets)
+            }
+            VideoAccessUnitPayload::Mp4Av1Sample { size, config, .. } => size
+                .checked_mul(2)?
+                .checked_add(config.config_record.len())?
+                .checked_add(64),
+            VideoAccessUnitPayload::WebmSample { size, .. } => Some(*size),
+        }
+    }
+
     fn bytes<'a>(
         &'a self,
         mp4_data: Option<&'a [u8]>,
@@ -3068,6 +3151,49 @@ impl VideoSource {
             VideoContainerFormat::WebmVp9 => "WebM/VP9",
         }
     }
+
+    fn hardware_buffer_request(&self) -> HardwareBufferRequest {
+        let input_len = self
+            .access_units
+            .iter()
+            .try_fold(0usize, |largest, unit| {
+                Some(largest.max(unit.encoded_len_upper_bound()?))
+            })
+            .and_then(|largest| rounded_buffer_request(largest, VIDEO_BUFFER_MIN_INPUT))
+            .unwrap_or(0);
+        let output_len =
+            nv12_output_buffer_request(self.coded_width, self.coded_height).unwrap_or(0);
+        HardwareBufferRequest {
+            input_len,
+            output_len,
+        }
+    }
+}
+
+fn rounded_buffer_request(required: usize, minimum: usize) -> Option<u32> {
+    let required = required.max(minimum);
+    let aligned = required.checked_add(VIDEO_BUFFER_REQUEST_GRANULARITY - 1)?
+        & !(VIDEO_BUFFER_REQUEST_GRANULARITY - 1);
+    u32::try_from(aligned).ok()
+}
+
+fn nv12_output_buffer_request(width: u32, height: u32) -> Option<u32> {
+    if width == 0 || height == 0 {
+        return None;
+    }
+    let width = width as usize;
+    let height = height as usize;
+    let stride = width.checked_add(127)? & !127;
+    let y_scanlines = height.checked_add(31)? & !31;
+    let uv_height = height.checked_add(1)? / 2;
+    let uv_scanlines = uv_height.checked_add(15)? & !15;
+    let linear_size = stride.checked_mul(y_scanlines.checked_add(uv_scanlines)?)?;
+    let hardware_size = VIDEO_HARDWARE_OUTPUT_OFFSET.checked_add(linear_size)?;
+    let tight_size = width
+        .checked_mul(height)?
+        .checked_add(width.checked_mul(uv_height)?)?
+        .checked_add(SCARLET_VIDEO_FRAME_HEADER_LEN)?;
+    rounded_buffer_request(hardware_size.max(tight_size), VIDEO_BUFFER_MIN_OUTPUT)
 }
 
 fn load_video_source(path: &str, mp4_data: Option<&[u8]>) -> Result<VideoSource, String> {
@@ -3090,6 +3216,8 @@ fn load_video_source(path: &str, mp4_data: Option<&[u8]>) -> Result<VideoSource,
     Ok(VideoSource {
         format: VideoContainerFormat::RawH264,
         estimated_total_frames: None,
+        coded_width: 0,
+        coded_height: 0,
         access_units: annex_b_access_units(&data)
             .into_iter()
             .enumerate()
@@ -3141,6 +3269,8 @@ struct Mp4Track {
     track_id: u32,
     is_video: bool,
     is_audio: bool,
+    coded_width: u32,
+    coded_height: u32,
     avcc: Option<AvcConfig>,
     hvcc: Option<HvccConfig>,
     av1: Option<Av1Config>,
@@ -3344,11 +3474,12 @@ fn load_webm_vp9_video_source(
     if access_units.is_empty() {
         return Err(String::from("WebM VP9 track has no video blocks"));
     }
-    let _coded_size_hint = (video_track.width, video_track.height);
     Ok(VideoSource {
         format: VideoContainerFormat::WebmVp9,
         access_units,
         estimated_total_frames: None,
+        coded_width: video_track.width,
+        coded_height: video_track.height,
     })
 }
 
@@ -3935,6 +4066,8 @@ fn load_mp4_video_source_with_options(
         format: video_format,
         access_units,
         estimated_total_frames,
+        coded_width: track.coded_width,
+        coded_height: track.coded_height,
     })
 }
 
@@ -3987,7 +4120,7 @@ fn mp4_estimated_total_frames(
 
 #[cfg_attr(not(feature = "mp4-aac"), allow(dead_code))]
 struct Mp4AacAudioSource {
-    data: Arc<Vec<u8>>,
+    data: Arc<MediaBytes>,
     config: AacConfig,
     samples: Vec<SampleRange>,
 }
@@ -4000,7 +4133,7 @@ struct SampleRange {
 }
 
 #[cfg_attr(not(feature = "mp4-aac"), allow(dead_code))]
-fn load_mp4_aac_audio_source(data: Arc<Vec<u8>>) -> Result<Mp4AacAudioSource, String> {
+fn load_mp4_aac_audio_source(data: Arc<MediaBytes>) -> Result<Mp4AacAudioSource, String> {
     let mut offset = 0usize;
     let mut audio_track = None;
     while let Some(mp4_box) = read_mp4_box(data.as_slice(), offset, data.len()) {
@@ -4464,6 +4597,14 @@ fn parse_avc_sample_entry(
     end: usize,
     track: &mut Mp4Track,
 ) -> Result<(), String> {
+    let entry = data
+        .get(start..end)
+        .ok_or_else(|| String::from("MP4 avc sample entry is truncated"))?;
+    if entry.len() < 78 {
+        return Err(String::from("MP4 avc sample entry is truncated"));
+    }
+    track.coded_width = read_u16_be(&entry[24..26]) as u32;
+    track.coded_height = read_u16_be(&entry[26..28]) as u32;
     let mut offset = start
         .checked_add(78)
         .ok_or_else(|| String::from("MP4 avc sample entry overflow"))?;
@@ -4483,6 +4624,14 @@ fn parse_hevc_sample_entry(
     end: usize,
     track: &mut Mp4Track,
 ) -> Result<(), String> {
+    let entry = data
+        .get(start..end)
+        .ok_or_else(|| String::from("MP4 HEVC sample entry is truncated"))?;
+    if entry.len() < 78 {
+        return Err(String::from("MP4 HEVC sample entry is truncated"));
+    }
+    track.coded_width = read_u16_be(&entry[24..26]) as u32;
+    track.coded_height = read_u16_be(&entry[26..28]) as u32;
     let mut offset = start
         .checked_add(78)
         .ok_or_else(|| String::from("MP4 HEVC sample entry overflow"))?;
@@ -4510,6 +4659,8 @@ fn parse_av1_sample_entry(
     }
     let width = read_u16_be(&entry[24..26]) as u32;
     let height = read_u16_be(&entry[26..28]) as u32;
+    track.coded_width = width;
+    track.coded_height = height;
     let mut offset = start
         .checked_add(78)
         .ok_or_else(|| String::from("MP4 av01 sample entry overflow"))?;
@@ -5622,6 +5773,7 @@ struct HardwareVideoDecoder {
     device: File,
     mapped: Option<MappedVideoBuffer>,
     caps: Option<ScarletVideoCapabilities>,
+    buffer_request: HardwareBufferRequest,
     last_decode_mode: Option<HardwareDecodeMode>,
     h264_stateless_context: h264_stateless_hw::Context,
     vp9_stateless_context: vp9_stateless_hw::Context,
@@ -5637,7 +5789,10 @@ enum HardwareDecodeMode {
 }
 
 impl HardwareVideoDecoder {
-    fn open(cancel: Arc<AtomicBool>) -> Result<Self, String> {
+    fn open(
+        cancel: Arc<AtomicBool>,
+        buffer_request: HardwareBufferRequest,
+    ) -> Result<Self, String> {
         if cancel.load(Ordering::Acquire) {
             return Err(String::from("hardware decoder open cancelled"));
         }
@@ -5660,7 +5815,7 @@ impl HardwareVideoDecoder {
                 caps.has_flag(SCARLET_VIDEO_CAP_STATELESS_VP9)
             );
         }
-        let mapped = Self::map_video_buffer(&device, caps);
+        let mapped = Self::map_video_buffer(&device, caps, buffer_request);
         if let Some(buffer) = &mapped {
             println!(
                 "[{}] hardware decoder mmap input={} output={}",
@@ -5671,6 +5826,7 @@ impl HardwareVideoDecoder {
             device,
             mapped,
             caps,
+            buffer_request,
             last_decode_mode: None,
             h264_stateless_context: h264_stateless_hw::Context::default(),
             vp9_stateless_context: vp9_stateless_hw::Context::default(),
@@ -5714,8 +5870,9 @@ impl HardwareVideoDecoder {
         // session remains necessary there, and for malformed sources whose
         // chosen seek point is not independently decodable.
         let cancel = self.cancel.clone();
+        let buffer_request = self.buffer_request;
         drop(self);
-        Self::open(cancel)
+        Self::open(cancel, buffer_request)
     }
 
     fn decode_access_unit(
@@ -6035,7 +6192,11 @@ impl HardwareVideoDecoder {
         let mut session_info = ScarletVideoSessionInfo {
             stream_id: 0,
             padding: coded_format,
-            buffer: ScarletVideoBufferInfo::default(),
+            buffer: ScarletVideoBufferInfo {
+                input_len: buffer.input_len as u32,
+                output_len: buffer.output_len as u32,
+                ..ScarletVideoBufferInfo::default()
+            },
         };
         self.device
             .as_handle()
@@ -6068,6 +6229,7 @@ impl HardwareVideoDecoder {
     fn map_video_buffer(
         device: &File,
         caps: Option<ScarletVideoCapabilities>,
+        buffer_request: HardwareBufferRequest,
     ) -> Option<MappedVideoBuffer> {
         if caps
             .map(|caps| caps.has_flag(SCARLET_VIDEO_CAP_MAPPED_BUFFERS))
@@ -6079,7 +6241,29 @@ impl HardwareVideoDecoder {
             .map(|caps| caps.has_flag(SCARLET_VIDEO_CAP_SESSIONS))
             .unwrap_or(true);
         let (stream_id, session_commands, info) = if use_session_commands {
-            let mut session_info = ScarletVideoSessionInfo::default();
+            let request = caps
+                .filter(|caps| caps.has_flag(SCARLET_VIDEO_CAP_VARIABLE_MAPPED_BUFFERS))
+                .map(|caps| HardwareBufferRequest {
+                    input_len: if buffer_request.input_len == 0 {
+                        0
+                    } else {
+                        buffer_request.input_len.min(caps.mapped_input_len)
+                    },
+                    output_len: if buffer_request.output_len == 0 {
+                        0
+                    } else {
+                        buffer_request.output_len.min(caps.mapped_output_len)
+                    },
+                })
+                .unwrap_or_default();
+            let mut session_info = ScarletVideoSessionInfo {
+                buffer: ScarletVideoBufferInfo {
+                    input_len: request.input_len,
+                    output_len: request.output_len,
+                    ..ScarletVideoBufferInfo::default()
+                },
+                ..ScarletVideoSessionInfo::default()
+            };
             if device
                 .as_handle()
                 .control(
@@ -6177,7 +6361,6 @@ enum DecodedVideoFrame {
     Software(h264_sw::DecodedFrame),
     #[allow(dead_code)]
     Hardware(ScarletVideoFrame),
-    Bgra(BgraFrame),
 }
 
 enum DisplayItem {
@@ -6209,7 +6392,6 @@ impl DisplayItem {
         let frame = match frame {
             DecodedVideoFrame::Software(frame) => DecodedVideoFrame::Software(frame),
             DecodedVideoFrame::Hardware(frame) => DecodedVideoFrame::Hardware(frame.into_owned()),
-            DecodedVideoFrame::Bgra(bgra) => DecodedVideoFrame::Bgra(bgra),
         };
         Self::Frame {
             frame,
@@ -6238,7 +6420,6 @@ impl DisplayItem {
                         frame.width as usize * frame.height as usize * 3 / 2
                     }
                 }
-                DecodedVideoFrame::Bgra(bgra) => bgra.pixels.len(),
             },
             Self::EndOfPass { .. } => 0,
         }
@@ -6856,13 +7037,17 @@ fn materialize_audio_source(
             let Some(data) = read_file_cancellable(&path, cancel)? else {
                 return Ok(None);
             };
-            Ok(Some(PlayerAudioSource::Mp4Aac(Arc::new(data))))
+            Ok(Some(PlayerAudioSource::Mp4Aac(Arc::new(
+                MediaBytes::from_owned(data),
+            ))))
         }
         PlayerAudioSource::StreamingMp4AacSocket { socket_path } => {
             let Some(data) = read_socket_to_end(&socket_path, cancel)? else {
                 return Ok(None);
             };
-            Ok(Some(PlayerAudioSource::Mp4Aac(Arc::new(data))))
+            Ok(Some(PlayerAudioSource::Mp4Aac(Arc::new(
+                MediaBytes::from_owned(data),
+            ))))
         }
         source => Ok(Some(source)),
     }
@@ -6931,7 +7116,7 @@ fn play_audio_source_sas(
                 return Ok(AudioPlaybackStatus::Interrupted);
             };
             play_mp4_aac_sas(
-                Arc::new(data),
+                Arc::new(MediaBytes::from_owned(data)),
                 clock,
                 controls,
                 start_us,
@@ -6944,7 +7129,7 @@ fn play_audio_source_sas(
                 return Ok(AudioPlaybackStatus::Interrupted);
             };
             play_mp4_aac_sas(
-                Arc::new(data),
+                Arc::new(MediaBytes::from_owned(data)),
                 clock,
                 controls,
                 start_us,
@@ -6982,7 +7167,7 @@ fn play_wav_sas(
 }
 
 fn play_mp4_aac_sas(
-    data: Arc<Vec<u8>>,
+    data: Arc<MediaBytes>,
     clock: &AudioClock,
     controls: &ControlsOverlay,
     start_us: u64,
@@ -7428,30 +7613,20 @@ fn publish_seek_preview(
     Ok(controls.current_seek_epoch() == seek_epoch)
 }
 
-fn hardware_frame_to_bgra(frame: ScarletVideoFrame) -> Result<DecodedVideoFrame, String> {
-    let width = frame.width;
-    let height = frame.height;
+fn hardware_frame_to_owned(frame: ScarletVideoFrame) -> Result<DecodedVideoFrame, String> {
     if frame.pixel_format != NV12_VIDEO_RANGE_PIXEL_FORMAT {
         return Err(format!(
             "hardware decoder returned unsupported pixel format 0x{:08x}",
             frame.pixel_format
         ));
     }
-    let required_nv12_len = width as usize * height as usize * 3 / 2;
-    let payload = frame.payload();
-    if payload.len() < required_nv12_len {
+    let required_nv12_len = frame.width as usize * frame.height as usize * 3 / 2;
+    if frame.payload().len() < required_nv12_len {
         return Err(String::from(
             "hardware decoder returned truncated NV12 frame",
         ));
     }
-    let bgra_len = width as usize * height as usize * 4;
-    let mut pixels = acquire_bgra_buffer(bgra_len);
-    nv12_to_bgra(width, height, payload, &mut pixels);
-    Ok(DecodedVideoFrame::Bgra(BgraFrame {
-        pixels,
-        width,
-        height,
-    }))
+    Ok(DecodedVideoFrame::Hardware(frame.into_owned()))
 }
 
 fn publish_frame(
@@ -7468,9 +7643,6 @@ fn publish_frame(
         }
         DecodedVideoFrame::Hardware(frame) => {
             frame_store.update_from_nv12(&frame, current_frame, total_frames)?;
-        }
-        DecodedVideoFrame::Bgra(bgra) => {
-            frame_store.swap_bgra(bgra, current_frame, total_frames);
         }
     }
     paint_signal.notify();
@@ -8970,7 +9142,7 @@ pub extern "C" fn main() -> i32 {
     // Keep startup/window creation independent of media size and I/O health.
     // PlaybackRequest::prepare performs this load on the cancellable playback
     // worker and derives the embedded AAC source from the same bytes.
-    let mp4_data: Option<Arc<Vec<u8>>> = None;
+    let mp4_data: Option<Arc<MediaBytes>> = None;
     let audio_source = if let Some(socket_path) = args.audio_socket_path {
         println!("[{}] audio local socket {}", APP_NAME, socket_path);
         Some(PlayerAudioSource::StreamingMp4AacSocket { socket_path })
@@ -8983,15 +9155,22 @@ pub extern "C" fn main() -> i32 {
                     complete_path: args.audio_complete_path,
                 })
             } else {
-                match read_file(&path) {
-                    Ok(data) => Some(PlayerAudioSource::Mp4Aac(Arc::new(data))),
-                    Err(_) => {
-                        println!(
-                            "[{}] Application error: failed to read audio file",
-                            APP_NAME
-                        );
-                        return 1;
-                    }
+                match MappedMediaFile::open(&path) {
+                    Ok(mapping) => Some(PlayerAudioSource::Mp4Aac(Arc::new(MediaBytes::Mapped(
+                        mapping,
+                    )))),
+                    Err(map_error) => match read_file(&path) {
+                        Ok(data) => Some(PlayerAudioSource::Mp4Aac(Arc::new(
+                            MediaBytes::from_owned(data),
+                        ))),
+                        Err(_) => {
+                            println!(
+                                "[{}] Application error: failed to map or read audio file: {}",
+                                APP_NAME, map_error
+                            );
+                            return 1;
+                        }
+                    },
                 }
             }
         } else {

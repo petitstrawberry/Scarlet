@@ -73,6 +73,8 @@ pub const SCARLET_VIDEO_CAP_STATELESS_VP9: u32 = 1 << 9;
 pub const SCARLET_VIDEO_CAP_MAPPED_BUFFERS: u32 = 1 << 16;
 /// Backend supports multiple mapped stream sessions.
 pub const SCARLET_VIDEO_CAP_SESSIONS: u32 = 1 << 17;
+/// Backend accepts per-session mapped-buffer capacities up to its advertised maxima.
+pub const SCARLET_VIDEO_CAP_VARIABLE_MAPPED_BUFFERS: u32 = 1 << 18;
 
 /// H.264 SPS has `separate_colour_plane_flag` set.
 pub const SCARLET_VIDEO_H264_SPS_FLAG_SEPARATE_COLOUR_PLANE: u32 = 1 << 0;
@@ -368,6 +370,16 @@ pub trait VideoDecodeBackend: Send + Sync {
     ///
     /// `true` when `SCARLET_VIDEO_SUBMIT_VP9_STATELESS` is supported.
     fn supports_stateless_vp9(&self) -> bool {
+        false
+    }
+
+    /// Return whether mapped session creation accepts smaller buffer capacities.
+    ///
+    /// # Returns
+    ///
+    /// `true` when `ScarletVideoSessionInfo::buffer` may request page-aligned
+    /// input and output capacities no larger than the advertised maxima.
+    fn supports_variable_mapped_buffers(&self) -> bool {
         false
     }
 
@@ -685,13 +697,31 @@ impl ScarletVideoDevice {
     }
 
     fn buffer_layout(&self) -> Result<VideoBufferLayout, &'static str> {
+        self.buffer_layout_for(0, 0)
+    }
+
+    fn buffer_layout_for(
+        &self,
+        requested_input_len: usize,
+        requested_output_len: usize,
+    ) -> Result<VideoBufferLayout, &'static str> {
         let caps = self.backend.capabilities();
         if caps.mapped_input_len == 0 || caps.mapped_output_len == 0 {
             return Err("scarlet-video: backend does not support mapped buffers");
         }
-        let input_len = caps.mapped_input_len as usize;
-        let output_len = caps.mapped_output_len as usize;
-        let output_offset = align_up(input_len, VIDEO_MAPPED_BUFFER_ALIGN);
+        let variable = self.backend.supports_variable_mapped_buffers();
+        let input_len = requested_buffer_len(
+            if variable { requested_input_len } else { 0 },
+            caps.mapped_input_len as usize,
+            "scarlet-video: requested input buffer exceeds backend capacity",
+        )?;
+        let output_len = requested_buffer_len(
+            if variable { requested_output_len } else { 0 },
+            caps.mapped_output_len as usize,
+            "scarlet-video: requested output buffer exceeds backend capacity",
+        )?;
+        let output_offset = checked_align_up(input_len, VIDEO_MAPPED_BUFFER_ALIGN)
+            .ok_or("scarlet-video: mapped input alignment overflows")?;
         let mmap_len = output_offset
             .checked_add(output_len)
             .ok_or("scarlet-video: mapped buffer length overflow")?;
@@ -699,7 +729,8 @@ impl ScarletVideoDevice {
             input_len,
             output_offset,
             output_len,
-            mmap_len: align_up(mmap_len, PAGE_SIZE),
+            mmap_len: checked_align_up(mmap_len, PAGE_SIZE)
+                .ok_or("scarlet-video: mapped buffer page alignment overflows")?,
         })
     }
 
@@ -721,6 +752,9 @@ impl ScarletVideoDevice {
         let mut flags = caps.user_flags();
         if self.backend.supports_stateless_vp9() {
             flags |= SCARLET_VIDEO_CAP_STATELESS_VP9;
+        }
+        if self.backend.supports_variable_mapped_buffers() {
+            flags |= SCARLET_VIDEO_CAP_VARIABLE_MAPPED_BUFFERS;
         }
         ScarletVideoCapabilities {
             version: SCARLET_VIDEO_CAPS_VERSION,
@@ -1292,6 +1326,7 @@ impl ScarletVideoDevice {
 
 struct ScarletVideoOpen {
     device: Arc<ScarletVideoDevice>,
+    buffer_layout: IrqSpinLock<Option<VideoBufferLayout>>,
     mapped_buffer: IrqSpinLock<Option<ContiguousPages>>,
     last_error: IrqSpinLock<Option<&'static str>>,
     next_timestamp: IrqSpinLock<u64>,
@@ -1313,6 +1348,7 @@ impl ScarletVideoOpen {
         };
         Ok(Self {
             device,
+            buffer_layout: IrqSpinLock::new(None),
             mapped_buffer: IrqSpinLock::new(None),
             last_error: IrqSpinLock::new(None),
             next_timestamp: IrqSpinLock::new(1),
@@ -1413,8 +1449,50 @@ impl ScarletVideoOpen {
         Ok(())
     }
 
-    fn buffer_info(&self) -> Result<ScarletVideoBufferInfo, &'static str> {
+    fn active_buffer_layout(&self) -> Result<VideoBufferLayout, &'static str> {
+        let mut selected = self.buffer_layout.lock();
+        if let Some(layout) = *selected {
+            return Ok(layout);
+        }
         let layout = self.device.buffer_layout()?;
+        *selected = Some(layout);
+        Ok(layout)
+    }
+
+    fn select_buffer_layout(
+        &self,
+        request: ScarletVideoBufferInfo,
+    ) -> Result<VideoBufferLayout, &'static str> {
+        let mut selected = self.buffer_layout.lock();
+        if let Some(current) = *selected
+            && request.input_len == 0
+            && request.output_len == 0
+        {
+            return Ok(current);
+        }
+
+        let requested = self
+            .device
+            .buffer_layout_for(request.input_len as usize, request.output_len as usize)?;
+        if let Some(current) = *selected {
+            if requested.input_len <= current.input_len
+                && requested.output_len <= current.output_len
+            {
+                return Ok(current);
+            }
+            if self.mapped_buffer.lock().is_some() {
+                return Err("scarlet-video: cannot grow an active mapped video buffer");
+            }
+        }
+        *selected = Some(requested);
+        Ok(requested)
+    }
+
+    fn buffer_info_for(
+        &self,
+        request: ScarletVideoBufferInfo,
+    ) -> Result<ScarletVideoBufferInfo, &'static str> {
+        let layout = self.select_buffer_layout(request)?;
         self.ensure_mapped_buffer(layout)?;
         Ok(ScarletVideoBufferInfo {
             mmap_offset: 0,
@@ -1424,6 +1502,10 @@ impl ScarletVideoOpen {
             output_offset: layout.output_offset as u64,
             output_len: layout.output_len as u32,
         })
+    }
+
+    fn buffer_info(&self) -> Result<ScarletVideoBufferInfo, &'static str> {
+        self.buffer_info_for(ScarletVideoBufferInfo::default())
     }
 
     fn ensure_mapped_buffer(&self, layout: VideoBufferLayout) -> Result<(), &'static str> {
@@ -1472,7 +1554,7 @@ impl ScarletVideoOpen {
         input_len: usize,
         timestamp: u64,
     ) -> Result<VideoBackendDecodeRequest, &'static str> {
-        let layout = self.device.buffer_layout()?;
+        let layout = self.active_buffer_layout()?;
         if input_len == 0 {
             return Err("scarlet-video: input is empty");
         }
@@ -1651,7 +1733,7 @@ impl CharDevice for ScarletVideoOpen {
     }
 
     fn write(&self, buffer: &[u8]) -> Result<usize, &'static str> {
-        let layout = self.device.buffer_layout()?;
+        let layout = self.active_buffer_layout()?;
         if buffer.len() > layout.input_len {
             return Err("scarlet-video: input exceeds mapped buffer");
         }
@@ -1710,10 +1792,11 @@ impl ControlOps for ScarletVideoOpen {
             SCARLET_VIDEO_GET_CAPS => self.device.handle_get_caps(arg),
             SCARLET_VIDEO_CREATE_SESSION => {
                 let mut info: ScarletVideoSessionInfo = read_user_value(arg)?;
+                let buffer_request = info.buffer;
                 let stream_id = self.create_or_query_session(info.stream_id, info.padding)?;
                 info.stream_id = stream_id;
                 info.padding = 0;
-                info.buffer = self.buffer_info()?;
+                info.buffer = self.buffer_info_for(buffer_request)?;
                 write_user_value(arg, &info)?;
                 Ok(0)
             }
@@ -1875,7 +1958,7 @@ impl MemoryMappingOps for ScarletVideoOpen {
         offset: usize,
         length: usize,
     ) -> Result<MemoryMappingInfo, &'static str> {
-        let layout = self.device.buffer_layout()?;
+        let layout = self.active_buffer_layout()?;
         if offset % PAGE_SIZE != 0 || length % PAGE_SIZE != 0 {
             return Err("scarlet-video: mmap offset and length must be page-aligned");
         }
@@ -2938,8 +3021,26 @@ fn write_user_value<T: Copy>(ptr: usize, value: &T) -> Result<(), &'static str> 
     copy_to_user(&task, ptr, bytes).map_err(|_| "scarlet-video: failed to copy to user")
 }
 
-fn align_up(value: usize, align: usize) -> usize {
-    (value + align - 1) & !(align - 1)
+fn requested_buffer_len(
+    requested: usize,
+    maximum: usize,
+    exceeds_error: &'static str,
+) -> Result<usize, &'static str> {
+    if requested == 0 {
+        return Ok(maximum);
+    }
+    let aligned = checked_align_up(requested, PAGE_SIZE)
+        .ok_or("scarlet-video: requested mapped buffer alignment overflows")?;
+    if aligned > maximum {
+        return Err(exceeds_error);
+    }
+    Ok(aligned)
+}
+
+fn checked_align_up(value: usize, align: usize) -> Option<usize> {
+    value
+        .checked_add(align - 1)
+        .map(|value| value & !(align - 1))
 }
 
 /// Apple AVD firmware-to-kernel mailbox ABI.
