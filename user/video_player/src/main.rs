@@ -89,13 +89,13 @@ const STREAM_REORDER_HOLD_SAMPLES: usize = 8;
 const STREAM_DECODE_BATCH_SAMPLES: usize = 8;
 const STREAM_START_BUFFER_US: u64 = 1_000_000;
 const STREAM_START_BUFFER_SAMPLES: usize = 24;
-const DISPLAY_QUEUE_MAX_FRAMES: usize = 4;
-// Hardware frames stay NV12 until presentation. Two 1080p frames occupy about
-// 5.9 MiB, so an 8 MiB byte bound provides a short scheduling cushion without
-// letting every player retain tens of MiB of converted BGRA frames.
-const DISPLAY_QUEUE_MAX_BYTES: usize = 8 * 1024 * 1024;
-const PAYLOAD_POOL_MAX_BYTES: usize = 8 * 1024 * 1024;
-const DECODE_TARGET_LEAD_FRAMES: usize = 2;
+const DISPLAY_QUEUE_MAX_FRAMES: usize = 2;
+// Keep only one full-HD NV12 frame queued ahead of presentation. The producer
+// may own one additional frame while it waits for the queue, so a 4 MiB byte
+// bound caps the steady-state payload working set at two 1080p frames.
+const DISPLAY_QUEUE_MAX_BYTES: usize = 4 * 1024 * 1024;
+const PAYLOAD_POOL_MAX_BYTES: usize = 4 * 1024 * 1024;
+const DECODE_TARGET_LEAD_FRAMES: usize = 1;
 const AUDIO_CLOCK_START_TIMEOUT_MS: u64 = 3_000;
 const AUDIO_CLOCK_STALL_TIMEOUT_MS: u64 = 3_000;
 const SAS_CONTROL_TIMEOUT_NS: u64 = 3_000_000_000;
@@ -222,8 +222,16 @@ const SCARLET_VIDEO_FORMAT_HEVC: u32 = 4099;
 const SCARLET_VIDEO_FORMAT_VP9: u32 = 4102;
 const SCARLET_VIDEO_FORMAT_AV1: u32 = 4103;
 const SCARLET_AV1_ACCESS_UNIT_MAGIC: &[u8; 4] = b"SVA1";
-const VIDEO_DECODE_UTIL_MIN: u32 = SCHED_UTIL_SCALE * 7 / 8;
-const VIDEO_DISPLAY_UTIL_MIN: u32 = SCHED_UTIL_SCALE * 3 / 4;
+// Software decode needs a large-core latency floor.  The hardware path only
+// copies/colour-converts completed frames, and pinning every decoder and
+// display thread to a 7/8 or 3/4 utilization floor packs all concurrent video
+// players onto CoachZ's two big cores while the six little cores sit idle.
+// Keep a modest frequency floor for hardware playback and let measured load
+// drive placement/frequency; retain the stronger clamps for software decode.
+const VIDEO_HARDWARE_DECODE_UTIL_MIN: u32 = SCHED_UTIL_SCALE / 4;
+const VIDEO_SOFTWARE_DECODE_UTIL_MIN: u32 = SCHED_UTIL_SCALE * 7 / 8;
+const VIDEO_HARDWARE_DISPLAY_UTIL_MIN: u32 = SCHED_UTIL_SCALE / 4;
+const VIDEO_SOFTWARE_DISPLAY_UTIL_MIN: u32 = SCHED_UTIL_SCALE * 3 / 4;
 const VIDEO_BUFFER_REQUEST_GRANULARITY: usize = 1024 * 1024;
 const VIDEO_BUFFER_MIN_INPUT: usize = VIDEO_BUFFER_REQUEST_GRANULARITY;
 const VIDEO_BUFFER_MIN_OUTPUT: usize = VIDEO_BUFFER_REQUEST_GRANULARITY;
@@ -233,27 +241,30 @@ fn monotonic_time_ns() -> u64 {
     syscall0(Syscall::MonotonicTime) as u64
 }
 
-/// Sized to cover display-queue depth + reorder hold/batch so steady-state
-/// decode never allocates.
-const PAYLOAD_POOL_MAX_BUFFERS: usize =
-    DISPLAY_QUEUE_MAX_FRAMES + STREAM_REORDER_HOLD_SAMPLES + STREAM_DECODE_BATCH_SAMPLES;
+/// One released full-resolution frame is enough for steady-state reuse because
+/// display backpressure admits only one queued frame.
+const PAYLOAD_POOL_MAX_BUFFERS: usize = 1;
 
 /// Recycle pool for decoded-frame payload buffers. Eliminates per-frame heap
-/// churn for the ~253 KB NV12 payloads at 30 fps.
+/// churn for the ~3 MiB full-HD NV12 payloads at 24-30 fps.
 static PAYLOAD_POOL: Mutex<Vec<Vec<u8>>> = Mutex::new(Vec::new());
 
-fn acquire_payload_buffer(len: usize) -> Vec<u8> {
+fn acquire_payload_buffer(len: usize) -> Result<Vec<u8>, String> {
     let mut pool = PAYLOAD_POOL.lock();
     while let Some(buf) = pool.pop() {
         if buf.capacity() >= len {
             drop(pool);
             let mut buf = buf;
             buf.resize(len, 0);
-            return buf;
+            return Ok(buf);
         }
     }
     drop(pool);
-    vec![0; len]
+    let mut buf = Vec::new();
+    buf.try_reserve_exact(len)
+        .map_err(|_| format!("decoded frame allocation failed: {} bytes", len))?;
+    buf.resize(len, 0);
+    Ok(buf)
 }
 
 fn release_payload_buffer(buf: Vec<u8>) {
@@ -394,6 +405,13 @@ impl VideoFrameStore {
         let mut data = self.data.lock();
         let required_len = width as usize * height as usize * 4;
         if data.pixels.len() != required_len {
+            let additional = required_len.saturating_sub(data.pixels.len());
+            data.pixels.try_reserve_exact(additional).map_err(|_| {
+                format!(
+                    "video frame-store allocation failed: {} bytes",
+                    required_len
+                )
+            })?;
             data.pixels.resize(required_len, 0);
         }
         nv12_to_bgra(width, height, payload, &mut data.pixels);
@@ -1578,6 +1596,7 @@ fn start_playback_supervisor(
                     controls.clone(),
                     video_clock.clone(),
                     display_queue.clone(),
+                    request.hardware_decode,
                 );
                 let audio_thread = request.audio_source.clone().map(|audio_source| {
                     start_audio_thread(
@@ -1631,9 +1650,14 @@ fn start_decoder_thread(
     stream_socket_path: Option<String>,
     display_queue: Arc<DisplayQueue>,
 ) -> JoinHandle {
+    let decode_util_min = if hardware_decode {
+        VIDEO_HARDWARE_DECODE_UTIL_MIN
+    } else {
+        VIDEO_SOFTWARE_DECODE_UTIL_MIN
+    };
     thread::Builder::new()
         .name("video-decode")
-        .util_min(VIDEO_DECODE_UTIL_MIN)
+        .util_min(decode_util_min)
         .spawn(move || {
             let result = if hardware_decode {
                 if streaming {
@@ -1701,10 +1725,16 @@ fn start_display_thread(
     controls: Arc<ControlsOverlay>,
     clock: Option<Arc<AudioClock>>,
     queue: Arc<DisplayQueue>,
+    hardware_decode: bool,
 ) -> JoinHandle {
+    let display_util_min = if hardware_decode {
+        VIDEO_HARDWARE_DISPLAY_UTIL_MIN
+    } else {
+        VIDEO_SOFTWARE_DISPLAY_UTIL_MIN
+    };
     thread::Builder::new()
         .name("video-display")
-        .util_min(VIDEO_DISPLAY_UTIL_MIN)
+        .util_min(display_util_min)
         .spawn(move || {
             loop {
                 if queue.is_cancelled() {
@@ -5724,14 +5754,14 @@ impl ScarletVideoFrame {
         }
     }
 
-    fn into_owned(mut self) -> Self {
+    fn try_into_owned(mut self) -> Result<Self, String> {
         if matches!(&self.payload, ScarletVideoPayload::Mapped { .. }) {
             let len = self.payload().len();
-            let mut buf = acquire_payload_buffer(len);
+            let mut buf = acquire_payload_buffer(len)?;
             buf[..len].copy_from_slice(self.payload());
             self.payload = ScarletVideoPayload::Owned(buf);
         }
-        self
+        Ok(self)
     }
 }
 
@@ -5992,7 +6022,7 @@ impl HardwareVideoDecoder {
             return Err(String::from("hardware decoder returned empty frame"));
         }
 
-        let mut payload = acquire_payload_buffer(payload_len);
+        let mut payload = acquire_payload_buffer(payload_len)?;
         if let Err(error) = read_exact_file(&mut self.device, &mut payload, Some(&self.cancel)) {
             return if self.is_cancelled() {
                 Ok(None)
@@ -6376,8 +6406,8 @@ enum DisplayItem {
     },
 }
 
-// SAFETY: `DisplayItem::frame` converts every hardware frame to an owned
-// payload before enqueueing, so display-thread items never carry mmap pointers
+// SAFETY: every hardware variant is constructed by
+// `hardware_frame_to_owned`, so display-thread items never carry mmap pointers
 // borrowed from the decoder thread's reusable hardware buffer.
 unsafe impl Send for DisplayItem {}
 
@@ -6389,10 +6419,6 @@ impl DisplayItem {
         total_frames: u32,
         seek_epoch: u32,
     ) -> Self {
-        let frame = match frame {
-            DecodedVideoFrame::Software(frame) => DecodedVideoFrame::Software(frame),
-            DecodedVideoFrame::Hardware(frame) => DecodedVideoFrame::Hardware(frame.into_owned()),
-        };
         Self::Frame {
             frame,
             presentation_time_us,
@@ -6631,6 +6657,9 @@ impl FrameReorderBuffer {
         {
             return Err(String::from("MP4 display order has duplicate frame rank"));
         }
+        self.pending
+            .try_reserve(1)
+            .map_err(|_| String::from("video reorder buffer allocation failed"))?;
         self.pending
             .push((display_rank, presentation_time_us, frame));
         Ok(())
@@ -7626,7 +7655,7 @@ fn hardware_frame_to_owned(frame: ScarletVideoFrame) -> Result<DecodedVideoFrame
             "hardware decoder returned truncated NV12 frame",
         ));
     }
-    Ok(DecodedVideoFrame::Hardware(frame.into_owned()))
+    Ok(DecodedVideoFrame::Hardware(frame.try_into_owned()?))
 }
 
 fn publish_frame(
