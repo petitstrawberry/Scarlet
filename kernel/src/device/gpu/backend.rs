@@ -3,7 +3,7 @@
 use alloc::sync::Arc;
 
 use super::{GPU_BACKEND_ID_BYTES, GPU_BACKEND_INFO_BYTES};
-use crate::device::graphics::{GpuDisplayResource, PixelFormat};
+use crate::device::graphics::{GpuBackingSegment, GpuDisplayResource, PixelFormat};
 
 /// The device is not usable for GPU control.
 pub const GPU_DEVICE_STATE_UNAVAILABLE: u32 = 0;
@@ -506,12 +506,13 @@ impl GpuBackendImageLayout {
     }
 }
 /// Backend-neutral physical backing for a GPU image resource.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GpuImageBackingInfo {
-    /// Physical address of the stable contiguous backing allocation.
+    /// Physical address of the first backing extent.
     pub paddr: usize,
     /// Page-rounded allocation size in bytes.
     pub allocation_size: u64,
+    physical_segments: Arc<[GpuBackingSegment]>,
 }
 
 impl GpuImageBackingInfo {
@@ -525,11 +526,46 @@ impl GpuImageBackingInfo {
     /// # Returns
     ///
     /// Backend-neutral image backing information.
-    pub const fn new(paddr: usize, allocation_size: u64) -> Self {
+    pub fn new(paddr: usize, allocation_size: u64) -> Self {
+        let segment_length = usize::try_from(allocation_size).unwrap_or(0);
         Self {
             paddr,
             allocation_size,
+            physical_segments: Arc::from([GpuBackingSegment::new(paddr, segment_length)]),
         }
+    }
+
+    /// Build image backing information from ordered physical extents.
+    ///
+    /// The extents are logically concatenated and retained by the generic
+    /// image owner for the complete backend resource lifetime.
+    pub fn new_segmented(
+        physical_segments: Arc<[GpuBackingSegment]>,
+        allocation_size: u64,
+    ) -> Self {
+        let paddr = physical_segments
+            .first()
+            .map(|segment| segment.physical_addr())
+            .unwrap_or(0);
+        Self {
+            paddr,
+            allocation_size,
+            physical_segments,
+        }
+    }
+
+    /// Return the ordered physical extents forming this logical allocation.
+    pub fn physical_segments(&self) -> &[GpuBackingSegment] {
+        &self.physical_segments
+    }
+
+    /// Return whether this backing is one physically contiguous extent.
+    pub fn is_physically_contiguous(&self) -> bool {
+        self.physical_segments.len() == 1
+            && self
+                .physical_segments
+                .first()
+                .is_some_and(|segment| segment.length() as u64 >= self.allocation_size)
     }
 }
 
@@ -916,6 +952,14 @@ pub trait GpuBackend: Send + Sync {
         _dialect: GpuBackendDialectDescriptor,
     ) -> Result<Arc<dyn GpuBackendContext>, &'static str> {
         Err("GPU backend does not support execution contexts")
+    }
+
+    /// Return whether image backing may contain multiple physical extents.
+    ///
+    /// Backends returning `true` must map the ordered extents into one logical
+    /// device address range before exposing the image to command execution.
+    fn supports_segmented_image_backing(&self) -> bool {
+        false
     }
 
     /// Plan immutable image layout before the generic backing is allocated.

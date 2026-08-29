@@ -1,6 +1,6 @@
 //! Kernel-owned GPU child capability objects.
 
-use alloc::{string::String, sync::Arc};
+use alloc::{string::String, sync::Arc, vec::Vec};
 
 use super::connection::{read_user_value, write_user_value};
 use super::{
@@ -13,10 +13,11 @@ use super::{
     GpuImageLayout, GpuImagePlaneLayout, GpuImageUploadInfo, GpuTimelineCreatePoint,
     GpuTimelineFail, GpuTimelineInfo, GpuTimelineSignal,
 };
+use crate::device::graphics::GpuBackingSegment;
 use crate::environment::PAGE_SIZE;
 use crate::ipc::shared_memory::{SharedMemoryObject, SharedMemoryPin};
 use crate::library::std::usercopy::copy_from_user;
-use crate::mem::page::{Page, allocate_raw_pages, free_raw_pages};
+use crate::mem::page::{ContiguousPages, Page, allocate_raw_pages, free_raw_pages};
 use crate::object::capability::ControlOps;
 use crate::object::capability::memory_mapping::{
     AccessKind, AccessOp, MemoryMappingInfo, MemoryMappingOps, ResolveFaultError,
@@ -428,12 +429,15 @@ pub(crate) fn image_upload_layout(
 
 /// Stable private page-backed allocation retained by a GPU image and its attachments.
 struct GpuPrivateImageBacking {
-    paddr: usize,
+    chunks: Vec<ContiguousPages>,
+    physical_segments: Arc<[GpuBackingSegment]>,
     allocation_size: usize,
 }
 
 impl GpuPrivateImageBacking {
-    fn new(layout: GpuBackendImageLayout) -> Result<Self, &'static str> {
+    const MAX_CHUNK_PAGES: usize = 512;
+
+    fn new(layout: GpuBackendImageLayout, allow_segmented: bool) -> Result<Self, &'static str> {
         if !layout.is_valid() {
             return Err("GPU backend image layout is invalid");
         }
@@ -447,30 +451,143 @@ impl GpuPrivateImageBacking {
             .ok_or("GPU image backing size overflows page alignment")?
             & !(PAGE_SIZE - 1);
         let page_count = allocation_size / PAGE_SIZE;
-        let pages = allocate_raw_pages(page_count);
-        if pages.is_null() {
-            return Err("Failed to allocate GPU image pages");
+        if let Some(pages) = ContiguousPages::new(page_count) {
+            return Self::from_chunks(alloc::vec![pages], allocation_size);
         }
-        // SAFETY: `pages` is a valid contiguous allocation of `allocation_size`
-        // bytes returned by `allocate_raw_pages`; zeroing initializes all backing
-        // bytes before the backend can attach the image resource.
-        unsafe {
-            core::ptr::write_bytes(pages as *mut u8, 0, allocation_size);
+        if !allow_segmented {
+            return Err("Failed to allocate contiguous GPU image pages");
+        }
+
+        let mut chunks = Vec::new();
+        chunks
+            .try_reserve(page_count.div_ceil(Self::MAX_CHUNK_PAGES))
+            .map_err(|_| "Failed to reserve segmented GPU image backing")?;
+        let mut remaining_pages = page_count;
+        while remaining_pages != 0 {
+            let mut chunk_pages = remaining_pages.min(Self::MAX_CHUNK_PAGES);
+            let chunk = loop {
+                if let Some(chunk) = ContiguousPages::new(chunk_pages) {
+                    break chunk;
+                }
+                if chunk_pages == 1 {
+                    return Err("Failed to allocate segmented GPU image pages");
+                }
+                chunk_pages = (chunk_pages / 2).max(1);
+            };
+            remaining_pages -= chunk.len();
+            chunks.push(chunk);
+        }
+        Self::from_chunks(chunks, allocation_size)
+    }
+
+    fn from_chunks(
+        chunks: Vec<ContiguousPages>,
+        allocation_size: usize,
+    ) -> Result<Self, &'static str> {
+        let mut physical_segments = Vec::new();
+        physical_segments
+            .try_reserve_exact(chunks.len())
+            .map_err(|_| "Failed to reserve GPU image segment metadata")?;
+        let mut total_size = 0usize;
+        for chunk in &chunks {
+            let length = chunk
+                .len()
+                .checked_mul(PAGE_SIZE)
+                .ok_or("GPU image segment length overflows")?;
+            // SAFETY: every chunk is an exclusive live allocation covering
+            // `length` bytes and is not visible to a backend yet.
+            unsafe {
+                core::ptr::write_bytes(chunk.as_vaddr() as *mut u8, 0, length);
+            }
+            total_size = total_size
+                .checked_add(length)
+                .ok_or("GPU image backing size overflows")?;
+            physical_segments.push(GpuBackingSegment::new(chunk.as_paddr(), length));
+        }
+        if total_size != allocation_size {
+            return Err("Segmented GPU image backing size is inconsistent");
         }
         Ok(Self {
-            paddr: virt_to_phys(pages as usize),
+            chunks,
+            physical_segments: Arc::from(physical_segments),
             allocation_size,
         })
     }
-}
 
-impl Drop for GpuPrivateImageBacking {
-    fn drop(&mut self) {
-        let page_count = self.allocation_size / PAGE_SIZE;
-        if page_count != 0 {
-            let pages = phys_to_virt(self.paddr) as *mut Page;
-            free_raw_pages(pages, page_count);
+    fn for_each_range(
+        &self,
+        offset: usize,
+        length: usize,
+        mut operation: impl FnMut(usize, usize) -> Result<(), &'static str>,
+    ) -> Result<(), &'static str> {
+        let end = offset
+            .checked_add(length)
+            .ok_or("GPU image backing range overflows")?;
+        if end > self.allocation_size {
+            return Err("GPU image backing range exceeds allocation");
         }
+        let mut logical_base = 0usize;
+        let mut cursor = offset;
+        let mut remaining = length;
+        for chunk in &self.chunks {
+            if remaining == 0 {
+                break;
+            }
+            let chunk_length = chunk
+                .len()
+                .checked_mul(PAGE_SIZE)
+                .ok_or("GPU image chunk length overflows")?;
+            let chunk_end = logical_base
+                .checked_add(chunk_length)
+                .ok_or("GPU image chunk range overflows")?;
+            if cursor < chunk_end {
+                let chunk_offset = cursor.saturating_sub(logical_base);
+                let part_length = remaining.min(chunk_length - chunk_offset);
+                let address = chunk
+                    .as_vaddr()
+                    .checked_add(chunk_offset)
+                    .ok_or("GPU image chunk address overflows")?;
+                operation(address, part_length)?;
+                cursor += part_length;
+                remaining -= part_length;
+            }
+            logical_base = chunk_end;
+        }
+        if remaining == 0 {
+            Ok(())
+        } else {
+            Err("GPU image backing range is incomplete")
+        }
+    }
+
+    fn copy_from_user(
+        &self,
+        task: &crate::task::Task,
+        source_address: usize,
+        destination_offset: usize,
+        length: usize,
+    ) -> Result<(), &'static str> {
+        let mut copied = 0usize;
+        self.for_each_range(destination_offset, length, |destination, part_length| {
+            let source = source_address
+                .checked_add(copied)
+                .ok_or("GPU image upload source address overflows")?;
+            // SAFETY: `for_each_range` supplies an exclusive live chunk range;
+            // the image upload mutex serializes writers to this backing.
+            let destination =
+                unsafe { core::slice::from_raw_parts_mut(destination as *mut u8, part_length) };
+            copy_from_user(task, source, destination)
+                .map_err(|_| "Failed to copy GPU image pixels from user")?;
+            copied += part_length;
+            Ok(())
+        })
+    }
+
+    fn clean_range(&self, offset: usize, length: usize) -> Result<(), &'static str> {
+        self.for_each_range(offset, length, |address, part_length| {
+            crate::arch::clean_dcache_to_poc_range(address, part_length);
+            Ok(())
+        })
     }
 }
 
@@ -487,8 +604,11 @@ pub(crate) enum GpuImageBacking {
 }
 
 impl GpuImageBacking {
-    fn private(layout: GpuBackendImageLayout) -> Result<Self, &'static str> {
-        Ok(Self::Private(GpuPrivateImageBacking::new(layout)?))
+    fn private(layout: GpuBackendImageLayout, allow_segmented: bool) -> Result<Self, &'static str> {
+        Ok(Self::Private(GpuPrivateImageBacking::new(
+            layout,
+            allow_segmented,
+        )?))
     }
 
     fn imported(
@@ -506,8 +626,8 @@ impl GpuImageBacking {
 
     fn info(&self) -> Result<GpuImageBackingInfo, &'static str> {
         match self {
-            Self::Private(backing) => Ok(GpuImageBackingInfo::new(
-                backing.paddr,
+            Self::Private(backing) => Ok(GpuImageBackingInfo::new_segmented(
+                Arc::clone(&backing.physical_segments),
                 u64::try_from(backing.allocation_size)
                     .map_err(|_| "GPU image backing size does not fit backend metadata")?,
             )),
@@ -523,11 +643,71 @@ impl GpuImageBacking {
         }
     }
 
-    fn private_paddr(&self) -> Result<usize, &'static str> {
+    fn private_backing(&self) -> Result<&GpuPrivateImageBacking, &'static str> {
         match self {
-            Self::Private(backing) => Ok(backing.paddr),
+            Self::Private(backing) => Ok(backing),
             Self::Imported(_) => Err("Imported GPU images cannot copy pixels from userspace"),
         }
+    }
+
+    fn physical_segments_for_range(
+        &self,
+        offset: usize,
+        length: usize,
+    ) -> Result<Arc<[GpuBackingSegment]>, &'static str> {
+        let (segments, allocation_size) = match self {
+            Self::Private(backing) => (
+                Arc::clone(&backing.physical_segments),
+                backing.allocation_size,
+            ),
+            Self::Imported(backing) => {
+                let backing = backing.pin.backing();
+                (
+                    Arc::from([GpuBackingSegment::new(backing.paddr(), backing.size())]),
+                    backing.size(),
+                )
+            }
+        };
+        let end = offset
+            .checked_add(length)
+            .ok_or("GPU image physical range overflows")?;
+        if end > allocation_size {
+            return Err("GPU image physical range exceeds backing");
+        }
+        if offset == 0 && length == allocation_size {
+            return Ok(segments);
+        }
+
+        let mut result = Vec::new();
+        let mut logical_base = 0usize;
+        let mut cursor = offset;
+        let mut remaining = length;
+        for segment in segments.iter().copied() {
+            if remaining == 0 {
+                break;
+            }
+            let segment_end = logical_base
+                .checked_add(segment.length())
+                .ok_or("GPU image physical segment range overflows")?;
+            if cursor < segment_end {
+                let segment_offset = cursor.saturating_sub(logical_base);
+                let part_length = remaining.min(segment.length() - segment_offset);
+                result.push(GpuBackingSegment::new(
+                    segment
+                        .physical_addr()
+                        .checked_add(segment_offset)
+                        .ok_or("GPU image physical segment address overflows")?,
+                    part_length,
+                ));
+                cursor += part_length;
+                remaining -= part_length;
+            }
+            logical_base = segment_end;
+        }
+        if remaining != 0 {
+            return Err("GPU image physical range is incomplete");
+        }
+        Ok(Arc::from(result))
     }
 
     fn imported_transfer_layout(
@@ -630,11 +810,15 @@ impl GpuImage {
         if !layout.is_valid() {
             return Err("GPU backend returned an invalid image layout");
         }
-        let backing = Arc::new(GpuImageBacking::private(layout)?);
+        let backing = Arc::new(GpuImageBacking::private(
+            layout,
+            backend.supports_segmented_image_backing(),
+        )?);
         let backing_info = backing.info()?;
         if backing_info.allocation_size < layout.total_size {
             return Err("GPU image backing is smaller than the backend layout");
         }
+        let backing_allocation_size = backing_info.allocation_size;
         let backend_image = backend.create_image_with_layout(create, layout, backing_info)?;
         let info = backend_image.query_info();
         if info.format != create.format
@@ -642,7 +826,7 @@ impl GpuImage {
             || info.width != create.width
             || info.height != create.height
             || info.command_resource_token == 0
-            || info.allocation_size != backing_info.allocation_size
+            || info.allocation_size != backing_allocation_size
         {
             return Err("GPU backend image metadata is invalid");
         }
@@ -689,6 +873,7 @@ impl GpuImage {
         if backing_info.allocation_size < layout.total_size {
             return Err("Imported GPU image backing is smaller than the backend layout");
         }
+        let backing_allocation_size = backing_info.allocation_size;
         let backend_image = backend.create_image_with_layout(create, layout, backing_info)?;
         let info = backend_image.query_info();
         if info.format != create.format
@@ -696,7 +881,7 @@ impl GpuImage {
             || info.width != create.width
             || info.height != create.height
             || info.command_resource_token == 0
-            || info.allocation_size != backing_info.allocation_size
+            || info.allocation_size != backing_allocation_size
         {
             return Err("GPU backend imported image metadata is invalid");
         }
@@ -750,7 +935,7 @@ impl GpuImage {
     {
         let _upload_guard = self.upload_lock.lock();
         let task = crate::task::mytask().ok_or("No current task for GPU image upload")?;
-        let backing_base = phys_to_virt(self.backing.private_paddr()?) as *mut u8;
+        let backing = self.backing.private_backing()?;
         for row in 0..layout.height {
             let source_offset = row
                 .checked_mul(layout.source_stride)
@@ -762,27 +947,19 @@ impl GpuImage {
                 .checked_mul(layout.destination_stride)
                 .and_then(|offset| offset.checked_add(layout.destination_offset))
                 .ok_or("GPU image upload destination row offset overflows")?;
-            // SAFETY: `image_upload_layout` proved that every destination row
-            // lies within this image's allocated kernel backing. The upload lock
-            // serializes writers while the synchronous user-copy fills the row.
-            let destination = unsafe {
-                core::slice::from_raw_parts_mut(
-                    backing_base.add(destination_offset),
-                    layout.source_row_bytes,
-                )
-            };
-            copy_from_user(&task, source_address, destination)
-                .map_err(|_| "Failed to copy GPU image pixels from user")?;
+            backing.copy_from_user(
+                &task,
+                source_address,
+                destination_offset,
+                layout.source_row_bytes,
+            )?;
         }
         for row in 0..layout.height {
             let destination_offset = row
                 .checked_mul(layout.destination_stride)
                 .and_then(|offset| offset.checked_add(layout.destination_offset))
                 .ok_or("GPU image upload destination row offset overflows")?;
-            let destination_address = (backing_base as usize)
-                .checked_add(destination_offset)
-                .ok_or("GPU image upload destination row address overflows")?;
-            crate::arch::clean_dcache_to_poc_range(destination_address, layout.source_row_bytes);
+            backing.clean_range(destination_offset, layout.source_row_bytes)?;
         }
         transfer(self.backend_image.as_ref(), layout.transfer)
     }
@@ -823,11 +1000,15 @@ impl GpuImage {
         let image = self.backend_image.query_info();
         let backing = self.backing.info().ok()?;
         let offset = usize::try_from(layout.offset).ok()?;
-        let physical_addr = backing.paddr.checked_add(offset)?;
         let allocation_size = backing.allocation_size.checked_sub(layout.offset)?;
+        let allocation_size_usize = usize::try_from(allocation_size).ok()?;
+        let physical_segments = self
+            .backing
+            .physical_segments_for_range(offset, allocation_size_usize)
+            .ok()?;
         let owner: Arc<dyn crate::device::graphics::GpuDisplayBackingOwner> = self.backing.clone();
-        crate::device::graphics::GpuDisplayResource::new_linear(
-            physical_addr,
+        crate::device::graphics::GpuDisplayResource::new_linear_segments(
+            physical_segments,
             allocation_size,
             image.width,
             image.height,

@@ -136,6 +136,7 @@ impl GpuPresentOptions {
 #[derive(Clone)]
 pub struct GpuLinearDisplayBacking {
     physical_addr: usize,
+    physical_segments: Arc<[GpuBackingSegment]>,
     allocation_size: u64,
     stride: u32,
     format: PixelFormat,
@@ -143,6 +144,38 @@ pub struct GpuLinearDisplayBacking {
     // present call returns. Keep the producer's allocation alive until the
     // controller replaces this scanout resource.
     _owner: Arc<dyn GpuDisplayBackingOwner>,
+}
+
+/// One physically contiguous extent of a logically linear GPU allocation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GpuBackingSegment {
+    physical_addr: usize,
+    length: usize,
+}
+
+impl GpuBackingSegment {
+    /// Describe one stable physical extent.
+    ///
+    /// # Arguments
+    ///
+    /// * `physical_addr` - Page-aligned physical base address.
+    /// * `length` - Non-zero extent length in bytes.
+    pub const fn new(physical_addr: usize, length: usize) -> Self {
+        Self {
+            physical_addr,
+            length,
+        }
+    }
+
+    /// Return the physical base address of this extent.
+    pub const fn physical_addr(self) -> usize {
+        self.physical_addr
+    }
+
+    /// Return the extent length in bytes.
+    pub const fn length(self) -> usize {
+        self.length
+    }
 }
 
 /// Opaque lifetime owner for cross-device GPU scanout memory.
@@ -159,6 +192,7 @@ impl core::fmt::Debug for GpuLinearDisplayBacking {
         formatter
             .debug_struct("GpuLinearDisplayBacking")
             .field("physical_addr", &self.physical_addr)
+            .field("physical_segments", &self.physical_segments)
             .field("allocation_size", &self.allocation_size)
             .field("stride", &self.stride)
             .field("format", &self.format)
@@ -169,6 +203,7 @@ impl core::fmt::Debug for GpuLinearDisplayBacking {
 impl PartialEq for GpuLinearDisplayBacking {
     fn eq(&self, other: &Self) -> bool {
         self.physical_addr == other.physical_addr
+            && self.physical_segments == other.physical_segments
             && self.allocation_size == other.allocation_size
             && self.stride == other.stride
             && self.format == other.format
@@ -185,6 +220,11 @@ impl GpuLinearDisplayBacking {
     /// Stable physical address retained by the presenting GPU image.
     pub const fn physical_addr(&self) -> usize {
         self.physical_addr
+    }
+
+    /// Return the ordered physical extents forming the linear allocation.
+    pub fn physical_segments(&self) -> &[GpuBackingSegment] {
+        &self.physical_segments
     }
 
     /// Return the allocated byte length of the backing.
@@ -272,22 +312,66 @@ impl GpuDisplayResource {
         format: PixelFormat,
         owner: Arc<dyn GpuDisplayBackingOwner>,
     ) -> Result<Self, &'static str> {
+        Self::new_linear_segments(
+            Arc::from([GpuBackingSegment::new(
+                physical_addr,
+                usize::try_from(allocation_size)
+                    .map_err(|_| "GPU display allocation does not fit kernel address size")?,
+            )]),
+            allocation_size,
+            width,
+            height,
+            stride,
+            format,
+            owner,
+        )
+    }
+
+    /// Create a displayable linear image backed by ordered physical extents.
+    ///
+    /// The extents are logically concatenated in slice order. The retained
+    /// owner keeps every extent stable until display hardware releases it.
+    pub fn new_linear_segments(
+        physical_segments: Arc<[GpuBackingSegment]>,
+        allocation_size: u64,
+        width: u32,
+        height: u32,
+        stride: u32,
+        format: PixelFormat,
+        owner: Arc<dyn GpuDisplayBackingOwner>,
+    ) -> Result<Self, &'static str> {
         let row_bytes = u64::from(width)
             .checked_mul(format.bytes_per_pixel() as u64)
             .ok_or("GPU display row size overflows")?;
         let required = u64::from(stride)
             .checked_mul(u64::from(height))
             .ok_or("GPU display backing size overflows")?;
-        let required_usize = usize::try_from(required)
+        let mut segment_bytes = 0usize;
+        for segment in physical_segments.iter().copied() {
+            if segment.physical_addr() == 0
+                || segment.length() == 0
+                || segment
+                    .physical_addr()
+                    .checked_add(segment.length() - 1)
+                    .is_none()
+            {
+                return Err("GPU linear display segment is invalid");
+            }
+            segment_bytes = segment_bytes
+                .checked_add(segment.length())
+                .ok_or("GPU linear display segment size overflows")?;
+        }
+        let allocation_size_usize = usize::try_from(allocation_size)
             .map_err(|_| "GPU display backing size does not fit the kernel address size")?;
-        if physical_addr == 0
-            || width == 0
+        let physical_addr = physical_segments
+            .first()
+            .map(|segment| segment.physical_addr())
+            .unwrap_or(0);
+        if width == 0
             || height == 0
             || u64::from(stride) < row_bytes
             || allocation_size < required
-            || physical_addr
-                .checked_add(required_usize.saturating_sub(1))
-                .is_none()
+            || segment_bytes < allocation_size_usize
         {
             return Err("GPU linear display backing is invalid");
         }
@@ -298,6 +382,7 @@ impl GpuDisplayResource {
             backend_cookie: 0,
             linear_backing: Some(GpuLinearDisplayBacking {
                 physical_addr,
+                physical_segments,
                 allocation_size,
                 stride,
                 format,

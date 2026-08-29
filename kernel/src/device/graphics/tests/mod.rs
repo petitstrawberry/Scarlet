@@ -22,6 +22,10 @@ fn linear_gpu_display_resource_validates_layout_and_retains_owner() {
         .linear_backing()
         .expect("linear resource should expose its backing");
     assert_eq!(backing.physical_addr(), 0x1000);
+    assert_eq!(
+        backing.physical_segments(),
+        &[GpuBackingSegment::new(0x1000, 4096)]
+    );
     assert_eq!(backing.stride(), 64);
     assert_eq!(resource.width(), 16);
     assert_eq!(resource.height(), 8);
@@ -42,6 +46,29 @@ fn linear_gpu_display_resource_validates_layout_and_retains_owner() {
         )
         .is_err()
     );
+}
+
+#[test_case]
+fn segmented_gpu_display_resource_preserves_logical_extent_order() {
+    let segments: alloc::sync::Arc<[GpuBackingSegment]> = alloc::sync::Arc::from([
+        GpuBackingSegment::new(0x1000, 4096),
+        GpuBackingSegment::new(0x9000, 4096),
+    ]);
+    let resource = GpuDisplayResource::new_linear_segments(
+        alloc::sync::Arc::clone(&segments),
+        8192,
+        16,
+        8,
+        64,
+        PixelFormat::BGRA8888,
+        alloc::sync::Arc::new(()),
+    )
+    .expect("segmented linear display layout should succeed");
+    let backing = resource
+        .linear_backing()
+        .expect("segmented resource should expose its backing");
+    assert_eq!(backing.physical_addr(), 0x1000);
+    assert_eq!(backing.physical_segments(), segments.as_ref());
 }
 
 #[test_case]

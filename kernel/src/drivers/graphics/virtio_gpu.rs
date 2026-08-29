@@ -2077,7 +2077,10 @@ impl GpuBackend for VirtioGpuBackend {
         create: GpuImageCreateInfo,
         backing: GpuImageBackingInfo,
     ) -> Result<Arc<dyn GpuBackendImage>, &'static str> {
-        if backing.paddr == 0 || backing.allocation_size == 0 {
+        if backing.paddr == 0
+            || backing.allocation_size == 0
+            || !backing.is_physically_contiguous()
+        {
             return Err("VirtIO GPU image backing is invalid");
         }
         let backing_size = usize::try_from(backing.allocation_size)
