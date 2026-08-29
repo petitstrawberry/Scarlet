@@ -89,7 +89,15 @@ const STREAM_DECODE_BATCH_SAMPLES: usize = 8;
 const STREAM_START_BUFFER_US: u64 = 1_000_000;
 const STREAM_START_BUFFER_SAMPLES: usize = 24;
 const DISPLAY_QUEUE_MAX_FRAMES: usize = 30;
-const DISPLAY_QUEUE_MAX_BYTES: usize = 96 * 1024 * 1024;
+// Converted hardware frames are BGRA. Keep only a short presentation lead:
+// at 1080p each frame is about 7.9 MiB, so the old 96 MiB budget allowed a
+// single player to burst-allocate roughly twelve full-resolution frames.
+const DISPLAY_QUEUE_MAX_BYTES: usize = 32 * 1024 * 1024;
+// Retain at most two 1080p-sized buffers after they leave the queue. The
+// decoder reuses these in steady state instead of allocating every frame. A
+// single frame larger than this budget is retained on its own as well, so 4K
+// playback does not fall back to one allocation per frame.
+const BGRA_POOL_MAX_BYTES: usize = 16 * 1024 * 1024;
 const DECODE_TARGET_LEAD_FRAMES: usize = 10;
 const AUDIO_CLOCK_START_TIMEOUT_MS: u64 = 3_000;
 const AUDIO_CLOCK_STALL_TIMEOUT_MS: u64 = 3_000;
@@ -176,7 +184,7 @@ fn release_payload_buffer(buf: Vec<u8>) {
     }
 }
 
-/// Recycle pool for converted BGRA frame buffers (~676 KB each at 480×360).
+/// Byte-bounded recycle pool for converted BGRA frame buffers.
 static BGRA_POOL: Mutex<Vec<Vec<u8>>> = Mutex::new(Vec::new());
 
 fn acquire_bgra_buffer(len: usize) -> Vec<u8> {
@@ -195,7 +203,10 @@ fn acquire_bgra_buffer(len: usize) -> Vec<u8> {
 
 fn release_bgra_buffer(buf: Vec<u8>) {
     let mut pool = BGRA_POOL.lock();
-    if pool.len() < DISPLAY_QUEUE_MAX_FRAMES {
+    let retained_bytes = pool.iter().fold(0usize, |total, retained| {
+        total.saturating_add(retained.capacity())
+    });
+    if pool.is_empty() || retained_bytes.saturating_add(buf.capacity()) <= BGRA_POOL_MAX_BYTES {
         pool.push(buf);
     }
 }
@@ -6369,7 +6380,8 @@ impl DisplayQueue {
 
     fn can_fit(inner: &DisplayQueueInner, item_bytes: usize) -> bool {
         inner.items.len() < DISPLAY_QUEUE_MAX_FRAMES
-            && inner.bytes.saturating_add(item_bytes) <= DISPLAY_QUEUE_MAX_BYTES
+            && (inner.items.is_empty()
+                || inner.bytes.saturating_add(item_bytes) <= DISPLAY_QUEUE_MAX_BYTES)
     }
 }
 
