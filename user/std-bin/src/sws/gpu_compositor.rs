@@ -13,6 +13,9 @@ use crate::sgfx_ir_support::{
 
 type DamageRect = (u32, u32, u32, u32);
 
+const MAX_RETIRED_WINDOW_TEXTURES: usize = 8;
+const MAX_RETIRED_WINDOW_TEXTURE_BYTES: u64 = 24 * 1024 * 1024;
+
 /// Complete identity of one client-owned shared SGFX buffer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct SgfxBufferIdentity {
@@ -375,6 +378,7 @@ impl GpuCompositor {
             texture.window_id = None;
             texture.pending_damage = None;
         }
+        self.schedule_retired_texture_rebuild();
         Ok(())
     }
 
@@ -644,7 +648,30 @@ impl GpuCompositor {
                 texture.pending_damage = None;
             }
         }
+        self.schedule_retired_texture_rebuild();
         releases
+    }
+
+    fn schedule_retired_texture_rebuild(&mut self) {
+        let mut count = 0usize;
+        let mut bytes = 0u64;
+        for texture in &self.textures {
+            if texture.window_id.is_some() {
+                continue;
+            }
+            count += 1;
+            bytes = bytes.saturating_add(
+                u64::from(texture.width)
+                    .saturating_mul(u64::from(texture.height))
+                    .saturating_mul(4),
+            );
+        }
+        if count > MAX_RETIRED_WINDOW_TEXTURES || bytes > MAX_RETIRED_WINDOW_TEXTURE_BYTES {
+            // MappedTarget's resource table is append-only. Rebuilding is the
+            // only way to release unmatched extents; schedule it while the
+            // cache is still small enough to allocate the replacement target.
+            self.rebuild_pending = true;
+        }
     }
 
     fn sync_window_texture(&mut self, window: &Window) -> Result<(), &'static str> {
