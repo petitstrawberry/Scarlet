@@ -72,6 +72,17 @@ const PROT_READ: usize = 0x1;
 const PROT_WRITE: usize = 0x2;
 const PROT_EXEC: usize = 0x4;
 
+fn physical_area_for_mapping(paddr: usize, length: usize) -> Option<MemoryArea> {
+    if paddr == 0 {
+        // A zero physical address is the sentinel used by owner-backed demand
+        // mappings. No PTE exists until the owner resolves a page fault.
+        return Some(MemoryArea { start: 0, end: 0 });
+    }
+
+    let end = paddr.checked_add(length)?.checked_sub(1)?;
+    Some(MemoryArea::new(paddr, end))
+}
+
 /// System call for memory mapping a KernelObject with MemoryMappingOps capability
 /// or creating anonymous mappings
 ///
@@ -223,7 +234,10 @@ pub fn sys_memory_map(trapframe: &mut Trapframe) -> usize {
         };
 
     let vmarea = MemoryArea::new(final_vaddr, final_vaddr + aligned_length - 1);
-    let pmarea = MemoryArea::new(mapping_info.paddr, mapping_info.paddr + aligned_length - 1);
+    let pmarea = match physical_area_for_mapping(mapping_info.paddr, aligned_length) {
+        Some(area) => area,
+        None => return usize::MAX,
+    };
 
     let final_permissions = mapping_info.permissions & {
         let mut perm = 0;
@@ -256,8 +270,10 @@ pub fn sys_memory_map(trapframe: &mut Trapframe) -> usize {
                 None => return usize::MAX,
             };
             let vmarea = MemoryArea::new(chosen_vaddr, chosen_vaddr + aligned_length - 1);
-            let pmarea =
-                MemoryArea::new(mapping_info.paddr, mapping_info.paddr + aligned_length - 1);
+            let pmarea = match physical_area_for_mapping(mapping_info.paddr, aligned_length) {
+                Some(area) => area,
+                None => return usize::MAX,
+            };
             let owner = task
                 .handle_table
                 .get_arc_clone(handle)
@@ -516,5 +532,31 @@ pub fn sys_memory_unmap(trapframe: &mut Trapframe) -> usize {
 // - Some object types (e.g., device MMIO) cannot be safely COW'ed; sys_memory_map must
 //   detect such objects via supports_mmap / get_mapping_info and either fall back to
 //   eager-copy, reject the mapping, or require special flags. Document these cases.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn owner_backed_mapping_uses_unresolved_physical_sentinel() {
+        assert_eq!(
+            physical_area_for_mapping(0, PAGE_SIZE * 4),
+            Some(MemoryArea { start: 0, end: 0 })
+        );
+    }
+
+    #[test]
+    fn physical_mapping_preserves_complete_range() {
+        assert_eq!(
+            physical_area_for_mapping(0x20_0000, PAGE_SIZE * 2),
+            Some(MemoryArea::new(0x20_0000, 0x20_1fff))
+        );
+    }
+
+    #[test]
+    fn physical_mapping_rejects_overflow() {
+        assert_eq!(physical_area_for_mapping(usize::MAX, PAGE_SIZE), None);
+    }
+}
 // - This change requires careful updates to trap handling and the Task-managed page
 //   bookkeeping; perform the work incrementally and add tests at each step.
