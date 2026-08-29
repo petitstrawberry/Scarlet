@@ -296,8 +296,37 @@ impl<'a> VirtQueue<'a> {
     ///
     /// Result<(), &'static str>: Ok if the push was successful, or an error message if it failed.
     pub fn push(&mut self, desc_idx: usize) -> Result<(), &'static str> {
-        if desc_idx >= self.desc.len() {
+        self.push_many(core::slice::from_ref(&desc_idx))
+    }
+
+    /// Publish several descriptor chains as one available-ring update.
+    ///
+    /// Devices cannot observe a prefix of the batch because the available
+    /// index is advanced only after every ring entry has been written. This is
+    /// useful for protocols that require multiple independently completed
+    /// chains to become visible together.
+    ///
+    /// # Arguments
+    ///
+    /// * `desc_indices` - Head descriptor indices in device processing order.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` after publishing the complete batch, or an error when any
+    /// descriptor index is outside this queue.
+    pub fn push_many(&mut self, desc_indices: &[usize]) -> Result<(), &'static str> {
+        let count = u16::try_from(desc_indices.len()).map_err(|_| "Descriptor batch too large")?;
+        if desc_indices.len() > self.avail.size {
+            return Err("Descriptor batch exceeds available ring");
+        }
+        if desc_indices
+            .iter()
+            .any(|desc_idx| *desc_idx >= self.desc.len())
+        {
             return Err("Invalid descriptor index");
+        }
+        if desc_indices.is_empty() {
+            return Ok(());
         }
 
         // Ensure all descriptor writes are visible before publishing the descriptor index.
@@ -305,18 +334,20 @@ impl<'a> VirtQueue<'a> {
         crate::arch::io_mb();
 
         let cur_idx = unsafe { core::ptr::read_volatile(self.avail.idx) };
-        let ring_ptr = &mut self.avail.ring[(cur_idx as usize) % self.avail.size] as *mut u16;
-
-        unsafe {
-            core::ptr::write_volatile(ring_ptr, desc_idx as u16);
+        for (offset, desc_idx) in desc_indices.iter().copied().enumerate() {
+            let ring_idx = cur_idx.wrapping_add(offset as u16) as usize % self.avail.size;
+            let ring_ptr = &mut self.avail.ring[ring_idx] as *mut u16;
+            // SAFETY: `ring_idx` is reduced modulo the live available ring,
+            // and every descriptor index was validated above.
+            unsafe {
+                core::ptr::write_volatile(ring_ptr, desc_idx as u16);
+            }
         }
 
-        // Ensure the ring entry is visible before updating idx.
+        // Ensure every ring entry is visible before updating idx.
         crate::arch::io_mb();
 
-        // *self.avail.idx = (*self.avail.idx).wrapping_add(1);
-
-        let new_idx = cur_idx.wrapping_add(1);
+        let new_idx = cur_idx.wrapping_add(count);
         unsafe {
             core::ptr::write_volatile(self.avail.idx, new_idx);
         }
@@ -780,6 +811,19 @@ mod tests {
 
         // 5. Verify no more buffers are available
         assert!(virtqueue.pop().is_none());
+    }
+
+    #[test_case]
+    fn test_push_many_publishes_one_ordered_batch() {
+        let mut virtqueue = VirtQueue::new(4);
+        virtqueue.init();
+        let first = virtqueue.alloc_desc().unwrap();
+        let second = virtqueue.alloc_desc().unwrap();
+
+        assert!(virtqueue.push_many(&[first, second]).is_ok());
+        assert_eq!(*virtqueue.avail.idx, 2);
+        assert_eq!(virtqueue.avail.ring[0], first as u16);
+        assert_eq!(virtqueue.avail.ring[1], second as u16);
     }
 
     #[test_case]

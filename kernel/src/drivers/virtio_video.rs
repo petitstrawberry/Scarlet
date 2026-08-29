@@ -604,10 +604,6 @@ impl VirtioVideoDevice {
         output_len: usize,
         output_offset: usize,
     ) -> Result<(), &'static str> {
-        if session.pending_decode.lock().is_some() {
-            return Err("VirtIO video decode already pending");
-        }
-
         let output_request = self.resource_queue_request(
             session.stream_id,
             VIRTIO_VIDEO_QUEUE_TYPE_OUTPUT,
@@ -626,13 +622,21 @@ impl VirtioVideoDevice {
             return Err("VirtIO video async command message too large");
         }
 
+        let mut virtqueues = self.virtqueues.lock();
+        let queue = &mut virtqueues[QUEUE_COMMAND];
+        let mut pending_guard = session.pending_decode.lock();
+        if pending_guard.is_some() {
+            return Err("VirtIO video decode already pending");
+        }
         let async_buffers = session.async_command_buffers.lock();
         let command_buffers = async_buffers
             .as_ref()
             .ok_or("VirtIO video async command buffers are not available")?;
 
         // SAFETY: request slices and the allocated command pages are valid,
-        // non-overlapping buffers.
+        // non-overlapping buffers. The queue/pending/buffer lock order matches
+        // completion handling, so the device cannot observe a partially
+        // initialized decode pair.
         unsafe {
             core::ptr::copy_nonoverlapping(
                 output_request.as_ptr(),
@@ -646,15 +650,13 @@ impl VirtioVideoDevice {
             );
         }
 
-        let mut virtqueues = self.virtqueues.lock();
-        let queue = &mut virtqueues[QUEUE_COMMAND];
-        let output_req_desc = self.queue_command_descriptors(
+        let output_req_desc = self.prepare_command_descriptors(
             queue,
             &command_buffers.output,
             output_request.len(),
             24,
         )?;
-        let input_req_desc = match self.queue_command_descriptors(
+        let input_req_desc = match self.prepare_command_descriptors(
             queue,
             &command_buffers.input,
             input_request.len(),
@@ -666,10 +668,7 @@ impl VirtioVideoDevice {
                 return Err(e);
             }
         };
-        drop(virtqueues);
-        drop(async_buffers);
-
-        *session.pending_decode.lock() = Some(PendingDecode {
+        *pending_guard = Some(PendingDecode {
             output_req_desc: Some(output_req_desc),
             input_req_desc,
             input_done: false,
@@ -678,11 +677,20 @@ impl VirtioVideoDevice {
             output_offset,
             timestamp,
         });
+        if let Err(error) = queue.push_many(&[output_req_desc, input_req_desc]) {
+            *pending_guard = None;
+            queue.free_desc_chain(input_req_desc);
+            queue.free_desc_chain(output_req_desc);
+            return Err(error);
+        }
+        drop(async_buffers);
+        drop(pending_guard);
+        drop(virtqueues);
         self.notify(QUEUE_COMMAND);
         Ok(())
     }
 
-    fn queue_command_descriptors(
+    fn prepare_command_descriptors(
         &self,
         queue: &mut VirtQueue<'static>,
         command_buffers: &CommandBuffers,
@@ -708,10 +716,6 @@ impl VirtioVideoDevice {
         queue.desc[resp_desc].flags = DescriptorFlag::Write as u16;
         queue.desc[resp_desc].next = 0;
 
-        if let Err(e) = queue.push(req_desc) {
-            queue.free_desc_chain(req_desc);
-            return Err(e);
-        }
         Ok(req_desc)
     }
 
