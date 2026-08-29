@@ -651,6 +651,88 @@ impl DmaContext {
         Ok(DmaMapping::new(self.clone(), dma_addr, mapped_len))
     }
 
+    /// Map discontiguous physical segments into one contiguous DMA address range.
+    ///
+    /// This is the scatter/gather counterpart to [`Self::map_phys_owned`]. Each
+    /// segment must be aligned to the strictest attached-IOMMU granule. A
+    /// translated context with an IOVA allocator is required unless the
+    /// supplied segments are already physically contiguous.
+    ///
+    /// # Arguments
+    ///
+    /// * `segments` - Physical base and byte length for each backing segment.
+    /// * `flags` - Mapping permissions and behavior flags.
+    ///
+    /// # Returns
+    ///
+    /// One owned mapping whose DMA address spans every segment in order.
+    pub fn map_phys_segments_owned(
+        &self,
+        segments: &[(PhysAddr, usize)],
+        flags: IommuMapFlags,
+    ) -> Result<DmaMapping, IommuError> {
+        let Some(&(first_paddr, _)) = segments.first() else {
+            return Err(IommuError::MapFailed);
+        };
+        let granule = self.mapping_granule();
+        let mut total_len = 0usize;
+        let mut expected_paddr = first_paddr;
+        let mut physically_contiguous = true;
+        for &(paddr, len) in segments {
+            if len == 0 || paddr % granule != 0 || len % granule != 0 {
+                return Err(IommuError::MapFailed);
+            }
+            if paddr != expected_paddr {
+                physically_contiguous = false;
+            }
+            total_len = total_len.checked_add(len).ok_or(IommuError::MapFailed)?;
+            expected_paddr = paddr.checked_add(len).ok_or(IommuError::MapFailed)?;
+        }
+
+        if self.iova_allocator.is_none() {
+            if physically_contiguous {
+                return self.map_phys_owned(first_paddr, total_len, flags);
+            }
+            return Err(IommuError::NotSupported);
+        }
+
+        let attachment = self.iommu.as_ref().ok_or(IommuError::NotSupported)?;
+        let iova = self.alloc_iova(first_paddr, total_len)?;
+
+        let map_segments = |target: &IommuAttachment| -> Result<(), IommuError> {
+            let mut offset = 0usize;
+            for &(paddr, len) in segments {
+                if let Err(error) = target.domain.map(iova + offset as u64, paddr, len, flags) {
+                    if offset != 0 {
+                        let _ = target.domain.unmap(iova, offset);
+                    }
+                    return Err(error);
+                }
+                offset += len;
+            }
+            Ok(())
+        };
+
+        if let Err(error) = map_segments(attachment) {
+            self.free_iova(iova, total_len);
+            return Err(error);
+        }
+        let mut mapped_additionals = 0usize;
+        for additional in &self.additional_iommus {
+            if let Err(error) = map_segments(additional) {
+                for mapped in self.additional_iommus.iter().take(mapped_additionals).rev() {
+                    let _ = mapped.domain.unmap(iova, total_len);
+                }
+                let _ = attachment.domain.unmap(iova, total_len);
+                self.free_iova(iova, total_len);
+                return Err(error);
+            }
+            mapped_additionals += 1;
+        }
+
+        Ok(DmaMapping::new(self.clone(), iova, total_len))
+    }
+
     /// Map physical memory at a caller-selected device address.
     ///
     /// This is intended for firmware ABI windows whose device address is fixed
@@ -791,7 +873,7 @@ mod tests {
     }
 
     struct TestDomain {
-        last_map: IrqSpinLock<Option<RecordedMap>>,
+        maps: IrqSpinLock<Vec<RecordedMap>>,
         last_unmap: IrqSpinLock<Option<(Iova, usize)>>,
         unmap_count: IrqSpinLock<usize>,
         page_size: usize,
@@ -804,7 +886,7 @@ mod tests {
 
         fn with_page_size(page_size: usize) -> Self {
             Self {
-                last_map: IrqSpinLock::new(None),
+                maps: IrqSpinLock::new(Vec::new()),
                 last_unmap: IrqSpinLock::new(None),
                 unmap_count: IrqSpinLock::new(0),
                 page_size,
@@ -812,7 +894,11 @@ mod tests {
         }
 
         fn last_map(&self) -> Option<RecordedMap> {
-            *self.last_map.lock()
+            self.maps.lock().last().copied()
+        }
+
+        fn maps(&self) -> Vec<RecordedMap> {
+            self.maps.lock().clone()
         }
 
         fn last_unmap(&self) -> Option<(Iova, usize)> {
@@ -842,7 +928,7 @@ mod tests {
             len: usize,
             flags: IommuMapFlags,
         ) -> Result<(), IommuError> {
-            *self.last_map.lock() = Some(RecordedMap {
+            self.maps.lock().push(RecordedMap {
                 iova,
                 paddr,
                 len,
@@ -1099,6 +1185,66 @@ mod tests {
 
         assert_eq!(domain.last_unmap(), Some((0x5000, 0x1000)));
         assert_eq!(domain.unmap_count(), 1);
+    }
+
+    #[test_case]
+    fn test_dma_context_maps_scatter_segments_to_contiguous_iova() {
+        let domain = Arc::new(TestDomain::new());
+        let controller = Arc::new(TestController {
+            domain: domain.clone(),
+        });
+        let context = DmaContext::from_iommu_attachments(
+            Some(IommuAttachment {
+                controller,
+                domain: domain.clone(),
+                streams: Vec::new(),
+            }),
+            Vec::new(),
+            allocated_iova_config(),
+        );
+        let flags = IommuMapFlags::READ | IommuMapFlags::WRITE;
+
+        {
+            let mapping = context
+                .map_phys_segments_owned(&[(0x10_0000, 0x2000), (0x30_0000, 0x1000)], flags)
+                .unwrap();
+            assert_eq!(mapping.dma_addr(), 0x4000_0000);
+            assert_eq!(mapping.len(), 0x3000);
+            assert_eq!(
+                domain.maps(),
+                alloc::vec![
+                    RecordedMap {
+                        iova: 0x4000_0000,
+                        paddr: 0x10_0000,
+                        len: 0x2000,
+                        flags,
+                    },
+                    RecordedMap {
+                        iova: 0x4000_2000,
+                        paddr: 0x30_0000,
+                        len: 0x1000,
+                        flags,
+                    },
+                ]
+            );
+        }
+
+        assert_eq!(domain.last_unmap(), Some((0x4000_0000, 0x3000)));
+        assert_eq!(domain.unmap_count(), 1);
+    }
+
+    #[test_case]
+    fn test_dma_context_rejects_scatter_without_iova_allocator() {
+        let context = DmaContext::direct();
+        assert_eq!(
+            context
+                .map_phys_segments_owned(
+                    &[(0x10_0000, 0x1000), (0x30_0000, 0x1000)],
+                    IommuMapFlags::READ,
+                )
+                .err(),
+            Some(IommuError::NotSupported)
+        );
     }
 
     #[test_case]
