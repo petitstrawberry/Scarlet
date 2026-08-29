@@ -24,7 +24,7 @@ use crate::object::capability::{
     ControlOps, MemoryMappingInfo, MemoryMappingOps,
     selectable::{ReadyInterest, ReadySet, SelectWaitOutcome, Selectable},
 };
-use crate::sync::{IrqGuard, IrqSpinLock, Mutex, Waker};
+use crate::sync::{IrqGuard, IrqSpinLock, Waker};
 use crate::task::mytask;
 
 /// FourCC-like Scarlet frame stream magic.
@@ -653,8 +653,14 @@ pub fn register_video_decode_device(backend: Arc<dyn VideoDecodeBackend>) -> Str
 
 struct ScarletVideoDevice {
     backend: Arc<dyn VideoDecodeBackend>,
-    /// Serializes task-context scheduler transitions with backend lifecycle calls.
-    scheduler_lifecycle: Mutex<VideoSchedulerLifecycle>,
+    /// Guards only the short scheduler lifecycle state transitions.
+    ///
+    /// Do not use a task-owned sleeping mutex here. A userspace task may be
+    /// retired while an ioctl is in flight; retaining such a mutex would then
+    /// strand close/reopen forever. The IRQ spin guard prevents retirement
+    /// during these bounded, non-sleeping updates and is always released
+    /// before calling a backend.
+    scheduler_lifecycle: IrqSpinLock<VideoSchedulerLifecycle>,
     scheduler: IrqSpinLock<VideoSchedulerState>,
     completion_waker: Waker,
     max_inflight_decodes: usize,
@@ -668,7 +674,7 @@ impl ScarletVideoDevice {
         let max_inflight_decodes = max_inflight_from_capabilities(backend.capabilities());
         Self {
             backend,
-            scheduler_lifecycle: Mutex::new(VideoSchedulerLifecycle::new()),
+            scheduler_lifecycle: IrqSpinLock::new(VideoSchedulerLifecycle::new()),
             scheduler: IrqSpinLock::new(VideoSchedulerState::new(max_inflight_decodes)),
             completion_waker: Waker::new_interruptible("scarlet_video"),
             max_inflight_decodes,
@@ -801,20 +807,23 @@ impl ScarletVideoDevice {
     }
 
     fn create_scheduled_session(&self, coded_format: u32) -> Result<u32, &'static str> {
-        let mut lifecycle = self.scheduler_lifecycle.lock();
         let stream_id = self.backend.create_session(coded_format)?;
-        lifecycle.mark_stream_active(stream_id);
+        self.scheduler_lifecycle
+            .lock()
+            .mark_stream_active(stream_id);
         Ok(stream_id)
     }
 
     fn enqueue_decode_job(&self, job: VideoQueuedJob) -> Result<(), &'static str> {
         let stream_id = job.stream_id();
-        let lifecycle = self.scheduler_lifecycle.lock();
-        if lifecycle.is_destroyed_stream(stream_id) {
-            return Err("scarlet-video: video session is destroyed");
-        }
         {
-            let _irq_guard = IrqGuard::new();
+            // Keep the lifecycle check and queue insertion atomic with
+            // respect to destroy. Both locks are spin-only and the lock order
+            // is shared with `destroy_scheduled_stream`.
+            let lifecycle = self.scheduler_lifecycle.lock();
+            if lifecycle.is_destroyed_stream(stream_id) {
+                return Err("scarlet-video: video session is destroyed");
+            }
             let mut scheduler = self.scheduler.lock();
             if scheduler.has_pending_stream(stream_id) {
                 return Err("scarlet-video: stream decode already pending");
@@ -825,17 +834,12 @@ impl ScarletVideoDevice {
             scheduler.queued.push_back(job);
         }
 
-        self.pump_scheduler_locked();
+        self.pump_scheduler();
         self.completion_waker.wake_all();
         Ok(())
     }
 
     fn pump_scheduler(&self) {
-        let _lifecycle = self.scheduler_lifecycle.lock();
-        self.pump_scheduler_locked();
-    }
-
-    fn pump_scheduler_locked(&self) {
         loop {
             let mut made_progress = false;
             let mut current_index = 0;
@@ -933,21 +937,27 @@ impl ScarletVideoDevice {
     }
 
     fn destroy_scheduled_stream(&self, stream_id: u32) -> Result<(), &'static str> {
-        let mut lifecycle = self.scheduler_lifecycle.lock();
-        lifecycle.mark_stream_destroyed(stream_id);
         {
-            let _irq_guard = IrqGuard::new();
+            // Publish destruction and remove every queued result as one
+            // bounded transition. No sleeping/backend work is allowed while
+            // either spin lock is held.
+            let mut lifecycle = self.scheduler_lifecycle.lock();
+            lifecycle.mark_stream_destroyed(stream_id);
             let mut scheduler = self.scheduler.lock();
             scheduler.remove_stream_queues(stream_id);
+            scheduler.clear_current_stream(stream_id);
         }
         let result = self.backend.destroy_session(stream_id);
         {
-            let _irq_guard = IrqGuard::new();
+            // A scheduler pump racing the backend teardown may have observed
+            // the old active session. Sweep once more after teardown so no
+            // stale completion/error survives into a later open.
             let mut scheduler = self.scheduler.lock();
+            scheduler.remove_stream_queues(stream_id);
             scheduler.clear_current_stream(stream_id);
         }
         result?;
-        self.pump_scheduler_locked();
+        self.pump_scheduler();
         self.completion_waker.wake_all();
         Ok(())
     }
