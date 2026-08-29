@@ -8,7 +8,7 @@ use sgfx::ir::{Color, LoadOp, PixelRect, TextureId};
 use std::vec::Vec;
 
 use crate::sgfx_ir_support::{
-    MappedTarget, Quad, QuadRenderer, SampledRect, define_bgra_texture, upload_bgra,
+    CopiedRect, MappedTarget, Quad, QuadRenderer, SampledRect, define_bgra_texture, upload_bgra,
 };
 
 type DamageRect = (u32, u32, u32, u32);
@@ -481,17 +481,26 @@ impl GpuCompositor {
                 if damage_clip.is_some_and(|clip| !pixel_rects_intersect(destination, clip)) {
                     continue;
                 }
-                operations.push(Quad::Sampled(SampledRect {
-                    texture,
-                    texture_width,
-                    texture_height,
-                    destination,
-                    source,
-                    tint: Color::rgba(1.0, 1.0, 1.0, window.opacity)
-                        .map_err(|_| "Invalid window opacity")?,
-                    ignore_source_alpha: !window.has_alpha_content,
-                    clip: damage_clip,
-                }));
+                if window.opacity == 1.0 && !window.has_alpha_content {
+                    operations.push(Quad::Copy(CopiedRect {
+                        texture,
+                        destination,
+                        source,
+                        clip: damage_clip,
+                    }));
+                } else {
+                    operations.push(Quad::Sampled(SampledRect {
+                        texture,
+                        texture_width,
+                        texture_height,
+                        destination,
+                        source,
+                        tint: Color::rgba(1.0, 1.0, 1.0, window.opacity)
+                            .map_err(|_| "Invalid window opacity")?,
+                        ignore_source_alpha: !window.has_alpha_content,
+                        clip: damage_clip,
+                    }));
+                }
             } else {
                 let Some((destination, _)) = clipped_rect(
                     window.x,

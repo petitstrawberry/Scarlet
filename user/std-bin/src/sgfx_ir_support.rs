@@ -122,7 +122,9 @@ impl MappedTarget {
                 .define_texture(TextureDesc::new(
                     TextureFormat::Bgra8Unorm,
                     extent,
-                    TextureUsage::RENDER_ATTACHMENT | TextureUsage::PRESENT,
+                    TextureUsage::RENDER_ATTACHMENT
+                        | TextureUsage::PRESENT
+                        | TextureUsage::COPY_DST,
                 )?)?
                 .id())
         };
@@ -220,7 +222,7 @@ impl MappedTarget {
             .define_texture(TextureDesc::new(
                 TextureFormat::Bgra8Unorm,
                 Extent2D::new(width, height)?,
-                TextureUsage::SAMPLED,
+                TextureUsage::SAMPLED | TextureUsage::COPY_SRC,
             )?)?
             .id();
         self.session.import_shared_bgra_texture(texture, handle)?;
@@ -302,6 +304,15 @@ pub(crate) struct SampledRect {
     pub(crate) clip: Option<PixelRect>,
 }
 
+/// One opaque, unscaled texture rectangle that can bypass the 3D sampler.
+#[derive(Clone, Copy)]
+pub(crate) struct CopiedRect {
+    pub(crate) texture: TextureId,
+    pub(crate) destination: PixelRect,
+    pub(crate) source: PixelRect,
+    pub(crate) clip: Option<PixelRect>,
+}
+
 #[derive(Clone, Copy)]
 pub(crate) enum Quad {
     Solid {
@@ -310,6 +321,7 @@ pub(crate) enum Quad {
         clip: Option<PixelRect>,
     },
     Sampled(SampledRect),
+    Copy(CopiedRect),
 }
 
 pub(crate) struct QuadRenderer {
@@ -423,6 +435,18 @@ impl QuadRenderer {
                     rect.texture_width,
                     rect.texture_height,
                 ),
+                Quad::Copy(_) => {
+                    // Keep one fixed vertex slot per operation so later draw
+                    // offsets remain stable across copy/render segmentation.
+                    vertices.resize(
+                        vertices
+                            .len()
+                            .checked_add(QUAD_VERTEX_COUNT * QUAD_VERTEX_STRIDE as usize)
+                            .ok_or("SGFX composition vertex size overflow")?,
+                        0,
+                    );
+                    continue;
+                }
             };
             append_quad(
                 &mut vertices,
@@ -447,80 +471,50 @@ impl QuadRenderer {
                 )
                 .map_err(|_| "Failed to upload SGFX composition vertices")?;
         }
-        let descriptor = RenderPassDesc::new(
-            resources.as_ref(),
-            resources
-                .texture_ref(target.texture)
-                .map_err(|_| "Invalid SGFX target texture")?,
-            area,
-            load,
-            StoreOp::Store,
-        )
-        .map_err(|_| "Invalid SGFX composition pass")?;
-        {
-            let mut pass = encoder
-                .begin_render_pass(descriptor)
-                .map_err(|_| "Failed to begin SGFX composition pass")?;
-            for (index, operation) in operations.iter().enumerate() {
-                let byte_offset = u64::try_from(index * QUAD_VERTEX_COUNT)
-                    .ok()
-                    .and_then(|vertex| vertex.checked_mul(u64::from(QUAD_VERTEX_STRIDE)))
-                    .ok_or("SGFX quad offset overflow")?;
-                pass.set_vertex_buffer(
-                    resources
-                        .buffer_ref(self.buffer)
-                        .map_err(|_| "Invalid quad buffer")?,
-                    byte_offset,
-                )
-                .map_err(|_| "Failed to bind SGFX composition vertices")?;
-                match operation {
-                    Quad::Solid { color, clip, .. } => {
-                        pass.set_pipeline(
-                            resources
-                                .render_pipeline_ref(self.solid_pipeline)
-                                .map_err(|_| "Invalid solid pipeline")?,
-                        )
-                        .map_err(|_| "Failed to bind solid pipeline")?;
-                        pass.set_uniforms(DrawUniforms::new(Transform::identity(), *color))
-                            .map_err(|_| "Failed to set solid uniforms")?;
-                        pass.set_scissor(*clip)
-                            .map_err(|_| "Failed to set solid scissor")?;
-                    }
-                    Quad::Sampled(rect) => {
-                        let pipeline = if rect.ignore_source_alpha {
-                            self.opaque_pipeline
-                        } else {
-                            self.rgba_pipeline
-                        };
-                        pass.set_pipeline(
-                            resources
-                                .render_pipeline_ref(pipeline)
-                                .map_err(|_| "Invalid texture pipeline")?,
-                        )
-                        .map_err(|_| "Failed to bind texture pipeline")?;
-                        pass.set_texture(
-                            resources
-                                .texture_ref(rect.texture)
-                                .map_err(|_| "Invalid sampled texture")?,
-                        )
-                        .map_err(|_| "Failed to bind sampled texture")?;
-                        pass.set_sampler(
-                            resources
-                                .sampler_ref(self.sampler)
-                                .map_err(|_| "Invalid composition sampler")?,
-                        )
-                        .map_err(|_| "Failed to bind composition sampler")?;
-                        pass.set_uniforms(DrawUniforms::new(Transform::identity(), rect.tint))
-                            .map_err(|_| "Failed to set texture uniforms")?;
-                        pass.set_scissor(rect.clip)
-                            .map_err(|_| "Failed to set texture scissor")?;
-                    }
-                }
-                pass.draw(QUAD_VERTEX_COUNT as u32, 0)
-                    .map_err(|_| "Failed to record SGFX quad")?;
+        let mut segment_start = 0usize;
+        let mut first_pass = true;
+        for (index, operation) in operations.iter().enumerate() {
+            let Quad::Copy(copy) = operation else {
+                continue;
+            };
+            if first_pass || segment_start < index {
+                self.record_pass(
+                    &mut encoder,
+                    resources.as_ref(),
+                    target.texture,
+                    area,
+                    if first_pass { load } else { LoadOp::Load },
+                    &operations[segment_start..index],
+                    segment_start,
+                )?;
+                first_pass = false;
             }
-            pass.end()
-                .map_err(|_| "Failed to end SGFX composition pass")?;
+            if let Some((source, destination)) = clipped_copy_rect(*copy, area)? {
+                encoder
+                    .copy_texture_to_texture(
+                        resources
+                            .texture_ref(copy.texture)
+                            .map_err(|_| "Invalid copy source texture")?,
+                        source,
+                        resources
+                            .texture_ref(target.texture)
+                            .map_err(|_| "Invalid SGFX target texture")?,
+                        destination,
+                    )
+                    .map_err(|_| "Failed to record SGFX composition copy")?;
+            }
+            segment_start = index + 1;
+        }
+        if first_pass || segment_start < operations.len() {
+            self.record_pass(
+                &mut encoder,
+                resources.as_ref(),
+                target.texture,
+                area,
+                if first_pass { load } else { LoadOp::Load },
+                &operations[segment_start..],
+                segment_start,
+            )?;
         }
         let commands = encoder
             .finish()
@@ -529,6 +523,163 @@ impl QuadRenderer {
             .execute(&commands)
             .map_err(|_| "Failed to execute SGFX composition")
     }
+
+    #[allow(clippy::too_many_arguments)]
+    fn record_pass<'r, 'data>(
+        &self,
+        encoder: &mut CommandEncoder<'r, 'data>,
+        resources: &'r ResourceTable,
+        target: TextureId,
+        area: PixelRect,
+        load: LoadOp,
+        operations: &[Quad],
+        base_index: usize,
+    ) -> Result<(), &'static str> {
+        let descriptor = RenderPassDesc::new(
+            resources,
+            resources
+                .texture_ref(target)
+                .map_err(|_| "Invalid SGFX target texture")?,
+            area,
+            load,
+            StoreOp::Store,
+        )
+        .map_err(|_| "Invalid SGFX composition pass")?;
+        let mut pass = encoder
+            .begin_render_pass(descriptor)
+            .map_err(|_| "Failed to begin SGFX composition pass")?;
+        for (local_index, operation) in operations.iter().enumerate() {
+            let index = base_index
+                .checked_add(local_index)
+                .ok_or("SGFX quad offset overflow")?;
+            let byte_offset = u64::try_from(index * QUAD_VERTEX_COUNT)
+                .ok()
+                .and_then(|vertex| vertex.checked_mul(u64::from(QUAD_VERTEX_STRIDE)))
+                .ok_or("SGFX quad offset overflow")?;
+            pass.set_vertex_buffer(
+                resources
+                    .buffer_ref(self.buffer)
+                    .map_err(|_| "Invalid quad buffer")?,
+                byte_offset,
+            )
+            .map_err(|_| "Failed to bind SGFX composition vertices")?;
+            match operation {
+                Quad::Solid { color, clip, .. } => {
+                    pass.set_pipeline(
+                        resources
+                            .render_pipeline_ref(self.solid_pipeline)
+                            .map_err(|_| "Invalid solid pipeline")?,
+                    )
+                    .map_err(|_| "Failed to bind solid pipeline")?;
+                    pass.set_uniforms(DrawUniforms::new(Transform::identity(), *color))
+                        .map_err(|_| "Failed to set solid uniforms")?;
+                    pass.set_scissor(*clip)
+                        .map_err(|_| "Failed to set solid scissor")?;
+                }
+                Quad::Sampled(rect) => {
+                    let pipeline = if rect.ignore_source_alpha {
+                        self.opaque_pipeline
+                    } else {
+                        self.rgba_pipeline
+                    };
+                    pass.set_pipeline(
+                        resources
+                            .render_pipeline_ref(pipeline)
+                            .map_err(|_| "Invalid texture pipeline")?,
+                    )
+                    .map_err(|_| "Failed to bind texture pipeline")?;
+                    pass.set_texture(
+                        resources
+                            .texture_ref(rect.texture)
+                            .map_err(|_| "Invalid sampled texture")?,
+                    )
+                    .map_err(|_| "Failed to bind sampled texture")?;
+                    pass.set_sampler(
+                        resources
+                            .sampler_ref(self.sampler)
+                            .map_err(|_| "Invalid composition sampler")?,
+                    )
+                    .map_err(|_| "Failed to bind composition sampler")?;
+                    pass.set_uniforms(DrawUniforms::new(Transform::identity(), rect.tint))
+                        .map_err(|_| "Failed to set texture uniforms")?;
+                    pass.set_scissor(rect.clip)
+                        .map_err(|_| "Failed to set texture scissor")?;
+                }
+                Quad::Copy(_) => return Err("SGFX copy leaked into a render segment"),
+            }
+            pass.draw(QUAD_VERTEX_COUNT as u32, 0)
+                .map_err(|_| "Failed to record SGFX quad")?;
+        }
+        pass.end()
+            .map_err(|_| "Failed to end SGFX composition pass")
+    }
+}
+
+fn clipped_copy_rect(
+    copy: CopiedRect,
+    render_area: PixelRect,
+) -> Result<Option<(PixelRect, PixelRect)>, &'static str> {
+    let Some(mut destination) = intersect_pixel_rect(copy.destination, render_area)? else {
+        return Ok(None);
+    };
+    if let Some(clip) = copy.clip {
+        let Some(clipped) = intersect_pixel_rect(destination, clip)? else {
+            return Ok(None);
+        };
+        destination = clipped;
+    }
+    let source_x = copy
+        .source
+        .x()
+        .checked_add(destination.x() - copy.destination.x())
+        .ok_or("SGFX composition copy source overflow")?;
+    let source_y = copy
+        .source
+        .y()
+        .checked_add(destination.y() - copy.destination.y())
+        .ok_or("SGFX composition copy source overflow")?;
+    let source = PixelRect::new(
+        source_x,
+        source_y,
+        destination.width(),
+        destination.height(),
+    )
+    .map_err(|_| "Invalid SGFX composition copy source")?;
+    Ok(Some((source, destination)))
+}
+
+fn intersect_pixel_rect(
+    left: PixelRect,
+    right: PixelRect,
+) -> Result<Option<PixelRect>, &'static str> {
+    let x = left.x().max(right.x());
+    let y = left.y().max(right.y());
+    let right_edge = left
+        .x()
+        .checked_add(left.width())
+        .and_then(|left_edge| {
+            right
+                .x()
+                .checked_add(right.width())
+                .map(|right_edge| left_edge.min(right_edge))
+        })
+        .ok_or("SGFX composition rectangle overflow")?;
+    let bottom_edge = left
+        .y()
+        .checked_add(left.height())
+        .and_then(|left_edge| {
+            right
+                .y()
+                .checked_add(right.height())
+                .map(|right_edge| left_edge.min(right_edge))
+        })
+        .ok_or("SGFX composition rectangle overflow")?;
+    if right_edge <= x || bottom_edge <= y {
+        return Ok(None);
+    }
+    PixelRect::new(x, y, right_edge - x, bottom_edge - y)
+        .map(Some)
+        .map_err(|_| "Invalid SGFX composition intersection")
 }
 
 pub(crate) fn define_bgra_texture(
@@ -540,7 +691,7 @@ pub(crate) fn define_bgra_texture(
         .define_texture(TextureDesc::new(
             TextureFormat::Bgra8Unorm,
             Extent2D::new(width, height)?,
-            TextureUsage::SAMPLED | TextureUsage::COPY_DST,
+            TextureUsage::SAMPLED | TextureUsage::COPY_SRC | TextureUsage::COPY_DST,
         )?)?
         .id())
 }
@@ -604,7 +755,9 @@ fn append_quad(
 
 #[cfg(test)]
 mod tests {
-    use super::{ReusableImport, supports_mapped_target, take_reusable_import};
+    use super::{
+        CopiedRect, ReusableImport, clipped_copy_rect, supports_mapped_target, take_reusable_import,
+    };
     use sgfx::ir::{Extent2D, ResourceTable, TextureDesc, TextureFormat, TextureUsage};
 
     #[test]
@@ -661,5 +814,65 @@ mod tests {
         );
         assert_eq!(imports.len(), 1);
         assert_eq!(imports[0].texture, wide);
+    }
+
+    #[test]
+    fn clipped_copy_preserves_the_source_destination_offset() {
+        let resources = ResourceTable::new();
+        let texture = resources
+            .define_texture(
+                TextureDesc::new(
+                    TextureFormat::Bgra8Unorm,
+                    Extent2D::new(128, 96).unwrap(),
+                    TextureUsage::SAMPLED | TextureUsage::COPY_SRC,
+                )
+                .unwrap(),
+            )
+            .unwrap()
+            .id();
+        let copy = CopiedRect {
+            texture,
+            destination: sgfx::ir::PixelRect::new(20, 30, 80, 60).unwrap(),
+            source: sgfx::ir::PixelRect::new(4, 6, 80, 60).unwrap(),
+            clip: Some(sgfx::ir::PixelRect::new(35, 40, 40, 30).unwrap()),
+        };
+        let (source, destination) =
+            clipped_copy_rect(copy, sgfx::ir::PixelRect::new(30, 35, 60, 45).unwrap())
+                .unwrap()
+                .unwrap();
+
+        assert_eq!(
+            destination,
+            sgfx::ir::PixelRect::new(35, 40, 40, 30).unwrap()
+        );
+        assert_eq!(source, sgfx::ir::PixelRect::new(19, 16, 40, 30).unwrap());
+    }
+
+    #[test]
+    fn copy_outside_render_area_is_skipped() {
+        let resources = ResourceTable::new();
+        let texture = resources
+            .define_texture(
+                TextureDesc::new(
+                    TextureFormat::Bgra8Unorm,
+                    Extent2D::new(16, 16).unwrap(),
+                    TextureUsage::SAMPLED | TextureUsage::COPY_SRC,
+                )
+                .unwrap(),
+            )
+            .unwrap()
+            .id();
+        let copy = CopiedRect {
+            texture,
+            destination: sgfx::ir::PixelRect::new(0, 0, 8, 8).unwrap(),
+            source: sgfx::ir::PixelRect::new(0, 0, 8, 8).unwrap(),
+            clip: None,
+        };
+
+        assert!(
+            clipped_copy_rect(copy, sgfx::ir::PixelRect::new(8, 8, 8, 8).unwrap())
+                .unwrap()
+                .is_none()
+        );
     }
 }
