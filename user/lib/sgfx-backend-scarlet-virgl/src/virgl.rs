@@ -293,7 +293,7 @@ DCL SVIEW[0], 2D, FLOAT\n\
 DCL OUT[0], COLOR\n\
 DCL TEMP[0]\n\
   0: TEX TEMP[0], IN[0], SAMP[0], 2D\n\
-  1: MOV OUT[0].xyz, CONST[0].xyzx\n\
+  1: MUL OUT[0].xyz, IN[1].xyzx, CONST[0].xyzx\n\
   2: MUL TEMP[0].w, TEMP[0].wwww, IN[1].wwww\n\
   3: MUL OUT[0].w, TEMP[0].wwww, CONST[0].wwww\n\
   4: END\n";
@@ -3166,6 +3166,14 @@ mod tests {
             .chunks_exact(4)
             .map(|word| u32::from_le_bytes(word.try_into().expect("four-byte command word")))
             .collect()
+    }
+
+    #[test]
+    fn vertex_colored_alpha_masks_preserve_vertex_rgb() {
+        assert!(
+            IR_TEXTURE_VERTEX_COLOR_ALPHA_MASK_FRAGMENT_SHADER
+                .contains("MUL OUT[0].xyz, IN[1].xyzx, CONST[0].xyzx")
+        );
     }
 
     #[test]
