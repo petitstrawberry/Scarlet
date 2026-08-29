@@ -36,11 +36,6 @@ const fn timer_control_is_firing(control: u64) -> bool {
 }
 
 #[inline]
-const fn timer_irq_selection(vhe: bool) -> (&'static str, usize) {
-    if vhe { ("hyp-phys", 2) } else { ("virt", 1) }
-}
-
-#[inline]
 const fn needs_external_timer_irq(route: TimerInterruptRoute) -> bool {
     !matches!(route, TimerInterruptRoute::FastInterrupt)
 }
@@ -217,12 +212,6 @@ mod tests {
     }
 
     #[test_case]
-    fn selects_architected_timer_interrupt_by_execution_mode() {
-        assert_eq!(timer_irq_selection(true), ("hyp-phys", 2));
-        assert_eq!(timer_irq_selection(false), ("virt", 1));
-    }
-
-    #[test_case]
     fn preserves_preconfigured_fast_interrupt_route() {
         assert!(!needs_external_timer_irq(
             TimerInterruptRoute::FastInterrupt
@@ -272,7 +261,16 @@ fn platform_timer_probe(device: &PlatformDeviceInfo) -> Result<(), &'static str>
         .filter(|resource| resource.res_type == PlatformDeviceResourceType::IRQ)
         .collect();
 
-    let (irq_name, fallback_index) = timer_irq_selection(crate::arch::aarch64::is_vhe_enabled());
+    let irq_name = if crate::arch::aarch64::is_vhe_enabled() {
+        "hyp-phys"
+    } else {
+        "virt"
+    };
+    let fallback_index = if crate::arch::aarch64::is_vhe_enabled() {
+        3
+    } else {
+        2
+    };
     let irq_index = device
         .property("interrupt-names")
         .and_then(|property| property.as_string_list())
