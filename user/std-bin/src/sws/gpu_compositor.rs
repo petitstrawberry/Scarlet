@@ -40,7 +40,7 @@ pub(super) enum SgfxBufferError {
 }
 
 struct CachedWindowTexture {
-    window_id: WindowId,
+    window_id: Option<WindowId>,
     width: u32,
     height: u32,
     texture: TextureId,
@@ -319,7 +319,7 @@ impl GpuCompositor {
         let Some(entry) = self
             .textures
             .iter_mut()
-            .find(|entry| entry.window_id == window_id)
+            .find(|entry| entry.window_id == Some(window_id))
         else {
             return;
         };
@@ -359,19 +359,21 @@ impl GpuCompositor {
 
     /// Retire a compositor-owned upload texture before CPU backing changes.
     ///
-    /// `ResourceTable` has no remove operation, so retirement must rebuild the
-    /// private table rather than dropping only the cache entry and leaking its
-    /// resource slot.
+    /// The logical resource table is append-only, so keep the already-mapped
+    /// texture as an unassigned cache slot. A later window with the same extent
+    /// can reuse it without rebuilding the full-screen swapchain or allocating
+    /// another physical image while the system is under memory pressure.
     pub(super) fn remove_window_texture(
         &mut self,
         window_id: WindowId,
     ) -> Result<(), &'static str> {
-        if self
+        if let Some(texture) = self
             .textures
-            .iter()
-            .any(|entry| entry.window_id == window_id)
+            .iter_mut()
+            .find(|entry| entry.window_id == Some(window_id))
         {
-            self.rebuild_pending = true;
+            texture.window_id = None;
+            texture.pending_damage = None;
         }
         Ok(())
     }
@@ -445,7 +447,7 @@ impl GpuCompositor {
             let has_cached_texture = self
                 .textures
                 .iter()
-                .any(|entry| entry.window_id == window.id);
+                .any(|entry| entry.window_id == Some(window.id));
             let has_current_backing = window.pixels().is_ok();
             if self.has_committed_shared_buffer(window.id)
                 || has_cached_texture
@@ -458,7 +460,7 @@ impl GpuCompositor {
                             let texture = self
                                 .textures
                                 .iter()
-                                .find(|entry| entry.window_id == window.id)
+                                .find(|entry| entry.window_id == Some(window.id))
                                 .ok_or("GPU window texture cache is missing")?;
                             (texture.texture, texture.width, texture.height)
                         }
@@ -624,6 +626,24 @@ impl GpuCompositor {
                 releases.push(superseded);
             }
         }
+        // Once a shared image has reached the display, the CPU-upload cache
+        // for that window is redundant. Keep its physical image as a reusable
+        // same-size slot instead of retaining one private copy per SGFX
+        // window. If the shared path is later removed, `sync_window_texture`
+        // transparently claims a compatible slot and uploads the SHM backing.
+        for texture in &mut self.textures {
+            let Some(window_id) = texture.window_id else {
+                continue;
+            };
+            if self
+                .shared_windows
+                .iter()
+                .any(|state| state.window_id == window_id && state.presented.is_some())
+            {
+                texture.window_id = None;
+                texture.pending_damage = None;
+            }
+        }
         releases
     }
 
@@ -636,7 +656,7 @@ impl GpuCompositor {
         let matching_index = self
             .textures
             .iter()
-            .position(|entry| entry.window_id == window.id);
+            .position(|entry| entry.window_id == Some(window.id));
         let texture_index = match matching_index {
             Some(index)
                 if self.textures[index].width == width && self.textures[index].height == height =>
@@ -667,14 +687,21 @@ impl GpuCompositor {
 
     fn create_window_texture(
         &mut self,
-        _window: &Window,
+        window: &Window,
         width: u32,
         height: u32,
     ) -> Result<usize, &'static str> {
+        if let Some(index) = self.textures.iter().position(|entry| {
+            entry.window_id.is_none() && entry.width == width && entry.height == height
+        }) {
+            self.textures[index].window_id = Some(window.id);
+            self.textures[index].pending_damage = Some((0, 0, width, height));
+            return Ok(index);
+        }
         let texture = define_bgra_texture(self.target.resources.as_ref(), width, height)
             .map_err(|_| "Failed to define private GPU window texture")?;
         self.textures.push(CachedWindowTexture {
-            window_id: _window.id,
+            window_id: Some(window.id),
             width,
             height,
             texture,
@@ -694,10 +721,13 @@ impl GpuCompositor {
                     || cursor.image_frame_count(index) != Some(image.frames.len())
             });
         let texture_extent_changed = self.textures.iter().any(|texture| {
+            let Some(window_id) = texture.window_id else {
+                return false;
+            };
             windows
                 .iter()
-                .find(|window| window.id == texture.window_id)
-                .is_none_or(|window| {
+                .find(|window| window.id == window_id)
+                .is_some_and(|window| {
                     window.pixels().ok().is_some_and(|pixels| {
                         pixels.width() != texture.width || pixels.height() != texture.height
                     })
