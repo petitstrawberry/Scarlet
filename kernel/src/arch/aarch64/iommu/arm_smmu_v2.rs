@@ -931,18 +931,37 @@ impl Drop for IdentityDomain {
     }
 }
 
+struct DmaTablePage {
+    paddr: usize,
+    dirty: bool,
+}
+
 struct DmaPageTables {
     root: usize,
-    pages: Vec<usize>,
+    pages: Vec<DmaTablePage>,
+    dirty_pages: Vec<usize>,
+    last_dirty: Option<usize>,
     table_address_limit: u64,
 }
 
 impl DmaPageTables {
     fn new(table_address_limit: u64) -> Result<Self, IommuError> {
         let root = Self::allocate_table(table_address_limit)?;
+        let mut pages = Vec::new();
+        let mut dirty_pages = Vec::new();
+        if pages.try_reserve_exact(1).is_err() || dirty_pages.try_reserve_exact(1).is_err() {
+            free_raw_pages(phys_to_virt(root) as *mut Page, 1);
+            return Err(IommuError::DomainAllocationFailed);
+        }
+        pages.push(DmaTablePage {
+            paddr: root,
+            dirty: false,
+        });
         Ok(Self {
             root,
-            pages: vec![root],
+            pages,
+            dirty_pages,
+            last_dirty: None,
             table_address_limit,
         })
     }
@@ -1004,6 +1023,55 @@ impl DmaPageTables {
         unsafe { Self::table_entry(table, index).write(value) }
     }
 
+    fn mark_dirty(&mut self, table: usize) {
+        if self.last_dirty == Some(table) {
+            return;
+        }
+        let index = self
+            .pages
+            .iter()
+            .position(|page| page.paddr == table)
+            .expect("SMMU translation table is not owned by its domain");
+        if !self.pages[index].dirty {
+            self.pages[index].dirty = true;
+            self.dirty_pages.push(index);
+        }
+        self.last_dirty = Some(table);
+    }
+
+    fn sync_dirty(&mut self) {
+        // Publish children before the parent descriptors that expose them to
+        // the SMMU walker. Table indices follow allocation order, so descending
+        // indices always visit descendants before their ancestors.
+        self.dirty_pages
+            .sort_unstable_by(|left, right| right.cmp(left));
+        for &index in &self.dirty_pages {
+            let page = &mut self.pages[index];
+            arch::clean_dcache_to_poc_range(phys_to_virt(page.paddr), PAGE_SIZE);
+            page.dirty = false;
+        }
+        self.dirty_pages.clear();
+        self.last_dirty = None;
+        arch::wmb();
+    }
+
+    fn reserve_table_metadata(&mut self) -> Result<(), IommuError> {
+        let table_count = self
+            .pages
+            .len()
+            .checked_add(1)
+            .ok_or(IommuError::DomainAllocationFailed)?;
+        self.pages
+            .try_reserve(1)
+            .map_err(|_| IommuError::DomainAllocationFailed)?;
+        if self.dirty_pages.capacity() < table_count {
+            self.dirty_pages
+                .try_reserve(table_count - self.dirty_pages.len())
+                .map_err(|_| IommuError::DomainAllocationFailed)?;
+        }
+        Ok(())
+    }
+
     fn next_table(&mut self, table: usize, index: usize) -> Result<usize, IommuError> {
         let entry = Self::read_entry(table, index);
         if entry & TABLE_VALID != 0 {
@@ -1012,10 +1080,14 @@ impl DmaPageTables {
             }
             return Ok((entry & TABLE_ADDRESS_MASK) as usize);
         }
+        self.reserve_table_metadata()?;
         let next = Self::allocate_table(self.table_address_limit)?;
-        self.pages.push(next);
+        self.pages.push(DmaTablePage {
+            paddr: next,
+            dirty: false,
+        });
         Self::write_entry(table, index, next as u64 | TABLE_VALID | TABLE_DESCRIPTOR);
-        arch::clean_dcache_to_poc_range(phys_to_virt(table), PAGE_SIZE);
+        self.mark_dirty(table);
         Ok(next)
     }
 
@@ -1028,7 +1100,7 @@ impl DmaPageTables {
         Ok((leaf, l3))
     }
 
-    fn lookup(&self, iova: Iova) -> Option<PhysAddr> {
+    fn existing_leaf_table(&self, iova: Iova) -> Option<(usize, usize)> {
         let mut table = self.root;
         for shift in [30, 21] {
             let entry = Self::read_entry(table, ((iova >> shift) & 0x1ff) as usize);
@@ -1037,7 +1109,12 @@ impl DmaPageTables {
             }
             table = (entry & TABLE_ADDRESS_MASK) as usize;
         }
-        let entry = Self::read_entry(table, ((iova >> 12) & 0x1ff) as usize);
+        Some((table, ((iova >> 12) & 0x1ff) as usize))
+    }
+
+    fn lookup(&self, iova: Iova) -> Option<PhysAddr> {
+        let (table, index) = self.existing_leaf_table(iova)?;
+        let entry = Self::read_entry(table, index);
         if entry & (TABLE_VALID | TABLE_DESCRIPTOR) != TABLE_VALID | TABLE_DESCRIPTOR {
             return None;
         }
@@ -1073,17 +1150,19 @@ impl DmaPageTables {
             descriptor |= PTE_PXN | PTE_UXN;
         }
         Self::write_entry(table, index, descriptor);
-        arch::clean_dcache_to_poc_range(phys_to_virt(table), PAGE_SIZE);
+        self.mark_dirty(table);
         Ok(())
     }
 
     fn unmap_page(&mut self, iova: Iova) -> Result<(), IommuError> {
-        let (table, index) = self.leaf_table(iova)?;
+        let (table, index) = self
+            .existing_leaf_table(iova)
+            .ok_or(IommuError::UnmapFailed)?;
         if Self::read_entry(table, index) & TABLE_VALID == 0 {
             return Err(IommuError::UnmapFailed);
         }
         Self::write_entry(table, index, 0);
-        arch::clean_dcache_to_poc_range(phys_to_virt(table), PAGE_SIZE);
+        self.mark_dirty(table);
         Ok(())
     }
 }
@@ -1091,7 +1170,7 @@ impl DmaPageTables {
 impl Drop for DmaPageTables {
     fn drop(&mut self) {
         for table in self.pages.drain(..) {
-            free_raw_pages(phys_to_virt(table) as *mut Page, 1);
+            free_raw_pages(phys_to_virt(table.paddr) as *mut Page, 1);
         }
     }
 }
@@ -1207,6 +1286,7 @@ impl IommuDomain for DmaDomain {
                 for rollback in (0..mapped).step_by(PAGE_SIZE) {
                     let _ = tables.unmap_page(iova + rollback as u64);
                 }
+                tables.sync_dirty();
                 let _ = self
                     .hardware
                     .invalidate_context(self.context.index, context_asid(self.context.index));
@@ -1214,6 +1294,7 @@ impl IommuDomain for DmaDomain {
             }
             mapped += PAGE_SIZE;
         }
+        tables.sync_dirty();
         self.hardware
             .invalidate_context(self.context.index, context_asid(self.context.index))
     }
@@ -1231,6 +1312,7 @@ impl IommuDomain for DmaDomain {
         for offset in (0..len).step_by(PAGE_SIZE) {
             tables.unmap_page(iova + offset as u64)?;
         }
+        tables.sync_dirty();
         self.hardware
             .invalidate_context(self.context.index, context_asid(self.context.index))
     }
