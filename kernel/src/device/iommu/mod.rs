@@ -56,6 +56,11 @@ impl IommuMapFlags {
     pub const EXECUTE: Self = Self(1 << 2);
     /// Mapping is cache coherent with the CPU.
     pub const COHERENT: Self = Self(1 << 3);
+    /// Mapping permissions apply only to privileged device transactions.
+    ///
+    /// Requesters that issue both supervisor and user transactions use this
+    /// for firmware or other supervisor-only address ranges.
+    pub const PRIVILEGED: Self = Self(1 << 4);
 
     /// Returns true when all bits in `other` are present.
     ///
@@ -101,6 +106,26 @@ pub struct IommuStreamId {
     pub id: u32,
     /// Optional substream identifier when supported by the controller.
     pub substream_id: Option<u32>,
+}
+
+/// Snapshot of an IOMMU domain's hardware fault registers.
+///
+/// Controllers without per-domain fault reporting may return no snapshot.
+/// The values are intentionally controller-neutral raw registers so device
+/// drivers can include them in failure diagnostics without depending on one
+/// IOMMU implementation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IommuFaultSnapshot {
+    /// Controller-wide fault status.
+    pub global_status: u32,
+    /// Domain or context-bank fault status.
+    pub context_status: u32,
+    /// Device-visible address associated with the fault.
+    pub fault_address: u64,
+    /// Primary implementation-defined fault syndrome.
+    pub syndrome0: u32,
+    /// Secondary implementation-defined fault syndrome.
+    pub syndrome1: u32,
 }
 
 /// Firmware IOMMU specifier for a device requester.
@@ -214,6 +239,16 @@ pub trait IommuDomain: Send + Sync {
     ///
     /// `Ok(())` when hardware-visible state is synchronized.
     fn flush(&self) -> Result<(), IommuError>;
+
+    /// Capture the current hardware fault state for this domain.
+    ///
+    /// # Returns
+    ///
+    /// A raw controller-neutral snapshot when the implementation exposes
+    /// fault registers, otherwise `None`.
+    fn fault_snapshot(&self) -> Option<IommuFaultSnapshot> {
+        None
+    }
 }
 
 /// IOMMU controller registered by firmware phandle.
@@ -556,6 +591,16 @@ impl DmaContext {
         granule
     }
 
+    /// Capture the primary IOMMU domain's current fault state.
+    ///
+    /// # Returns
+    ///
+    /// A hardware fault snapshot for translated DMA, or `None` for direct DMA
+    /// and controllers without diagnostic registers.
+    pub fn primary_iommu_fault_snapshot(&self) -> Option<IommuFaultSnapshot> {
+        self.iommu.as_ref()?.domain.fault_snapshot()
+    }
+
     /// Restore IOMMU stream programming after a device power-domain reset.
     ///
     /// Page tables and DMA mappings remain owned by their domains, but a reset
@@ -604,6 +649,59 @@ impl DmaContext {
     ) -> Result<DmaMapping, IommuError> {
         let (dma_addr, mapped_len) = self.map_phys_internal(paddr, len, flags)?;
         Ok(DmaMapping::new(self.clone(), dma_addr, mapped_len))
+    }
+
+    /// Map physical memory at a caller-selected device address.
+    ///
+    /// This is intended for firmware ABI windows whose device address is fixed
+    /// by hardware. Dynamically allocated DMA contexts reject the request so a
+    /// fixed range cannot overlap allocator-owned IOVA space.
+    ///
+    /// # Arguments
+    ///
+    /// * `dma_addr` - Exact device-visible address required by the hardware ABI.
+    /// * `paddr` - Physical address backing the mapping.
+    /// * `len` - Mapping length in bytes.
+    /// * `flags` - Mapping permissions and behavior flags.
+    ///
+    /// # Returns
+    ///
+    /// Owned mapping which removes the fixed mapping when dropped.
+    pub fn map_phys_at_owned(
+        &self,
+        dma_addr: DmaAddr,
+        paddr: PhysAddr,
+        len: usize,
+        flags: IommuMapFlags,
+    ) -> Result<DmaMapping, IommuError> {
+        if len == 0 {
+            return Err(IommuError::MapFailed);
+        }
+        if self.iova_allocator.is_some() {
+            return Err(IommuError::Busy);
+        }
+
+        if let Some(attachment) = &self.iommu {
+            attachment.domain.map(dma_addr, paddr, len, flags)?;
+            let mut mapped_additionals = 0usize;
+            for additional in &self.additional_iommus {
+                if let Err(error) = additional.domain.map(dma_addr, paddr, len, flags) {
+                    for mapped in self.additional_iommus.iter().take(mapped_additionals).rev() {
+                        let _ = mapped.domain.unmap(dma_addr, len);
+                    }
+                    let _ = attachment.domain.unmap(dma_addr, len);
+                    return Err(error);
+                }
+                mapped_additionals += 1;
+            }
+        } else {
+            let direct = (paddr as isize + self.direct_dma_offset) as DmaAddr;
+            if direct != dma_addr {
+                return Err(IommuError::NotSupported);
+            }
+        }
+
+        Ok(DmaMapping::new(self.clone(), dma_addr, len))
     }
 
     /// Unmap a DMA address previously returned by [`Self::map_phys`].
@@ -816,11 +914,13 @@ mod tests {
     fn test_iommu_map_flags_contains_and_bitor() {
         let mut flags = IommuMapFlags::READ | IommuMapFlags::WRITE;
         flags |= IommuMapFlags::COHERENT;
+        flags |= IommuMapFlags::PRIVILEGED;
         assert!(flags.contains(IommuMapFlags::READ));
         assert!(flags.contains(IommuMapFlags::WRITE));
         assert!(flags.contains(IommuMapFlags::COHERENT));
+        assert!(flags.contains(IommuMapFlags::PRIVILEGED));
         assert!(!flags.contains(IommuMapFlags::EXECUTE));
-        assert_eq!(flags.bits(), 0b1011);
+        assert_eq!(flags.bits(), 0b1_1011);
     }
 
     #[test_case]
@@ -999,6 +1099,80 @@ mod tests {
 
         assert_eq!(domain.last_unmap(), Some((0x5000, 0x1000)));
         assert_eq!(domain.unmap_count(), 1);
+    }
+
+    #[test_case]
+    fn test_dma_context_fixed_iova_mapping_uses_requested_address() {
+        let domain = Arc::new(TestDomain::new());
+        let controller = Arc::new(TestController {
+            domain: domain.clone(),
+        });
+        let context = DmaContext::from_iommu_attachments(
+            Some(IommuAttachment {
+                controller,
+                domain: domain.clone(),
+                streams: Vec::new(),
+            }),
+            Vec::new(),
+            identity_iova_config(),
+        );
+        let flags = IommuMapFlags::READ | IommuMapFlags::EXECUTE;
+
+        {
+            let mapping = context
+                .map_phys_at_owned(0, 0x8f60_0000, 0x500000, flags)
+                .unwrap();
+            assert_eq!(mapping.dma_addr(), 0);
+            assert_eq!(mapping.len(), 0x500000);
+            assert_eq!(
+                domain.last_map(),
+                Some(RecordedMap {
+                    iova: 0,
+                    paddr: 0x8f60_0000,
+                    len: 0x500000,
+                    flags,
+                })
+            );
+        }
+
+        assert_eq!(domain.last_unmap(), Some((0, 0x500000)));
+        assert_eq!(domain.unmap_count(), 1);
+    }
+
+    #[test_case]
+    fn test_dma_context_fixed_iova_rejects_allocator_context() {
+        let domain = Arc::new(TestDomain::new());
+        let controller = Arc::new(TestController {
+            domain: domain.clone(),
+        });
+        let context = DmaContext::from_iommu_attachments(
+            Some(IommuAttachment {
+                controller,
+                domain: domain.clone(),
+                streams: Vec::new(),
+            }),
+            Vec::new(),
+            allocated_iova_config(),
+        );
+
+        assert_eq!(
+            context
+                .map_phys_at_owned(0, 0x8f60_0000, 0x1000, IommuMapFlags::READ)
+                .err(),
+            Some(IommuError::Busy)
+        );
+        assert_eq!(domain.last_map(), None);
+    }
+
+    #[test_case]
+    fn test_dma_context_fixed_iova_rejects_direct_address_mismatch() {
+        let context = DmaContext::direct();
+        assert_eq!(
+            context
+                .map_phys_at_owned(0, 0x8f60_0000, 0x1000, IommuMapFlags::READ)
+                .err(),
+            Some(IommuError::NotSupported)
+        );
     }
 
     #[test_case]

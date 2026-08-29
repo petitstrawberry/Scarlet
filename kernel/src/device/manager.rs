@@ -2034,6 +2034,14 @@ impl DeviceManager {
             None => return Ok(Vec::new()),
         };
 
+        self.resolve_platform_iommu_attachments_from_bytes(iommus, config)
+    }
+
+    fn resolve_platform_iommu_attachments_from_bytes(
+        &self,
+        iommus: &[u8],
+        config: IommuDomainConfig,
+    ) -> Result<Vec<IommuAttachment>, &'static str> {
         let specs = self.parse_iommu_specs(iommus)?;
         if specs.is_empty() {
             return Ok(Vec::new());
@@ -2104,6 +2112,110 @@ impl DeviceManager {
         config: IommuDomainConfig,
     ) -> Result<DmaContext, &'static str> {
         let mut attachments = self.resolve_platform_iommu_attachments(device, config)?;
+        let primary = if attachments.is_empty() {
+            None
+        } else {
+            Some(attachments.remove(0))
+        };
+        Ok(DmaContext::from_iommu_attachments(
+            primary,
+            attachments,
+            config,
+        ))
+    }
+
+    /// Resolve one reserved-memory region referenced by a platform property.
+    ///
+    /// Firmware-specific node lookup remains inside the platform device manager;
+    /// device drivers receive an ordinary memory resource and do not need to
+    /// depend on an FDT parser.
+    ///
+    /// # Arguments
+    ///
+    /// * `device` - Platform device containing a phandle-list property such as
+    ///   `memory-region`.
+    /// * `property_name` - Property containing the reserved-memory phandles.
+    /// * `index` - Zero-based phandle index in the property.
+    ///
+    /// # Returns
+    ///
+    /// Physical memory resource described by the referenced node.
+    pub fn resolve_platform_memory_region(
+        &self,
+        device: &PlatformDeviceInfo,
+        property_name: &str,
+        index: usize,
+    ) -> Result<PlatformDeviceResource, &'static str> {
+        let phandles = device
+            .property(property_name)
+            .and_then(|property| Self::read_be_u32_cells(property.value()))
+            .ok_or("platform: malformed memory-region property")?;
+        let phandle = *phandles
+            .get(index)
+            .filter(|phandle| **phandle != 0)
+            .ok_or("platform: memory-region index out of range")?;
+        let fdt = crate::device::fdt::FdtManager::get_manager()
+            .get_fdt()
+            .ok_or("platform: firmware description unavailable")?;
+        let node = Self::find_node_by_phandle(fdt, phandle)
+            .ok_or("platform: memory-region phandle not found")?;
+        let region = node
+            .reg()
+            .and_then(|mut regions| regions.next())
+            .ok_or("platform: memory-region has no address")?;
+        let start = region.starting_address as usize;
+        let size = region
+            .size
+            .filter(|size| *size != 0)
+            .ok_or("platform: memory-region has no size")?;
+        let end = start
+            .checked_add(size - 1)
+            .ok_or("platform: memory-region range overflows")?;
+        Ok(PlatformDeviceResource {
+            res_type: PlatformDeviceResourceType::MEM,
+            start,
+            end,
+            irq_metadata: None,
+        })
+    }
+
+    /// Resolve a DMA context from a named child of a platform device.
+    ///
+    /// Some firmware bindings place a dedicated requester context below the
+    /// main hardware node. This helper keeps that hierarchy in the platform
+    /// layer while exposing the same provider-neutral [`DmaContext`] used for a
+    /// top-level device.
+    ///
+    /// # Arguments
+    ///
+    /// * `device` - Parent platform device.
+    /// * `child_name` - Child node name, without an optional unit address.
+    /// * `config` - IOMMU domain configuration for the child requester.
+    ///
+    /// # Returns
+    ///
+    /// DMA context attached to the child's `iommus` specifiers.
+    pub fn resolve_platform_child_dma_context(
+        &self,
+        device: &PlatformDeviceInfo,
+        child_name: &str,
+        config: IommuDomainConfig,
+    ) -> Result<DmaContext, &'static str> {
+        let fdt = crate::device::fdt::FdtManager::get_manager()
+            .get_fdt()
+            .ok_or("platform: firmware description unavailable")?;
+        let parent = self
+            .find_platform_device_node(fdt, device)
+            .ok_or("platform: device node not found")?;
+        let child = parent
+            .children()
+            .find(|node| node.name.split('@').next() == Some(child_name))
+            .ok_or("platform: child device not found")?;
+        let iommus = child
+            .property("iommus")
+            .ok_or("platform: child iommus property missing")?;
+        let mut attachments =
+            self.resolve_platform_iommu_attachments_from_bytes(iommus.value, config)?;
         let primary = if attachments.is_empty() {
             None
         } else {

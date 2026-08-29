@@ -15,7 +15,7 @@ use crate::{
         clk::ClkHandle,
         iommu::{
             IommuController, IommuDomain, IommuDomainConfig, IommuDomainType, IommuError,
-            IommuMapFlags, IommuSpec, IommuStreamId, Iova, PhysAddr,
+            IommuFaultSnapshot, IommuMapFlags, IommuSpec, IommuStreamId, Iova, PhysAddr,
         },
         manager::{DeviceManager, DriverPriority, probe_defer},
         platform::{
@@ -86,6 +86,9 @@ const CONTEXT_TCR: usize = 0x030;
 const CONTEXT_MAIR0: usize = 0x038;
 const CONTEXT_MAIR1: usize = 0x03c;
 const CONTEXT_FAULT_STATUS: usize = 0x058;
+const CONTEXT_FAULT_ADDRESS: usize = 0x060;
+const CONTEXT_FAULT_SYNDROME_0: usize = 0x068;
+const CONTEXT_FAULT_SYNDROME_1: usize = 0x06c;
 const CONTEXT_TLB_INVALIDATE_ASID: usize = 0x610;
 const CONTEXT_TLB_SYNC: usize = 0x7f0;
 const CONTEXT_TLB_STATUS: usize = 0x7f4;
@@ -1056,8 +1059,10 @@ impl DmaPageTables {
             | TABLE_DESCRIPTOR
             | PTE_ACCESS_FLAG
             | PTE_INNER_SHAREABLE
-            | PTE_UNPRIVILEGED
             | PTE_NOT_GLOBAL;
+        if !flags.contains(IommuMapFlags::PRIVILEGED) {
+            descriptor |= PTE_UNPRIVILEGED;
+        }
         if !flags.contains(IommuMapFlags::WRITE) {
             descriptor |= PTE_READ_ONLY;
         }
@@ -1244,6 +1249,24 @@ impl IommuDomain for DmaDomain {
     fn flush(&self) -> Result<(), IommuError> {
         self.hardware
             .invalidate_context(self.context.index, context_asid(self.context.index))
+    }
+
+    fn fault_snapshot(&self) -> Option<IommuFaultSnapshot> {
+        Some(IommuFaultSnapshot {
+            global_status: self.hardware.registers.read(GLOBAL_FAULT_STATUS),
+            context_status: self
+                .hardware
+                .context_read(self.context.index, CONTEXT_FAULT_STATUS),
+            fault_address: self
+                .hardware
+                .context_read64(self.context.index, CONTEXT_FAULT_ADDRESS),
+            syndrome0: self
+                .hardware
+                .context_read(self.context.index, CONTEXT_FAULT_SYNDROME_0),
+            syndrome1: self
+                .hardware
+                .context_read(self.context.index, CONTEXT_FAULT_SYNDROME_1),
+        })
     }
 }
 

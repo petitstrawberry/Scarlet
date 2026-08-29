@@ -645,30 +645,39 @@ pub fn alloc_contiguous_pages_aligned(pages: usize, align_pages: usize) -> Optio
     let effective_align_pages = if align_pages.is_power_of_two() {
         align_pages
     } else {
-        align_pages.next_power_of_two()
+        align_pages.checked_next_power_of_two()?
     };
 
-    let order = effective_align_pages.trailing_zeros() as usize;
-
-    let needed_order = order.max(pages.next_power_of_two().trailing_zeros() as usize);
-
-    let align_bytes = effective_align_pages * PAGE_SIZE;
-    let backing_order = if needed_order < MAX_ORDER {
-        needed_order + 1
-    } else {
-        needed_order
-    };
-
-    let backing_pages = 1usize << backing_order;
+    let backing_order = aligned_allocation_backing_order(pages, effective_align_pages)?;
+    let backing_pages = 1usize.checked_shl(backing_order as u32)?;
+    let align_bytes = effective_align_pages.checked_mul(PAGE_SIZE)?;
+    let allocation_bytes = pages.checked_mul(PAGE_SIZE)?;
+    let backing_bytes = backing_pages.checked_mul(PAGE_SIZE)?;
+    let requested_buddy_pages = pages.checked_next_power_of_two()?;
     let base_paddr = PMM.lock().alloc_from_order(backing_order)?;
-    let returned_paddr = align_up(base_paddr, align_bytes);
+    let returned_paddr = match base_paddr
+        .checked_add(align_bytes - 1)
+        .map(|addr| addr & !(align_bytes - 1))
+    {
+        Some(paddr) => paddr,
+        None => {
+            PMM.lock().free(base_paddr, backing_pages);
+            return None;
+        }
+    };
 
-    if returned_paddr + pages * PAGE_SIZE > base_paddr + backing_pages * PAGE_SIZE {
+    let allocation_end = returned_paddr.checked_add(allocation_bytes);
+    let backing_end = base_paddr.checked_add(backing_bytes);
+    let (Some(allocation_end), Some(backing_end)) = (allocation_end, backing_end) else {
+        PMM.lock().free(base_paddr, backing_pages);
+        return None;
+    };
+    if allocation_end > backing_end {
         PMM.lock().free(base_paddr, backing_pages);
         return None;
     }
 
-    if returned_paddr == base_paddr && backing_order == needed_order {
+    if returned_paddr == base_paddr && backing_pages == requested_buddy_pages {
         return Some(returned_paddr);
     }
 
@@ -682,6 +691,22 @@ pub fn alloc_contiguous_pages_aligned(pages: usize, align_pages: usize) -> Optio
     }
 
     Some(returned_paddr)
+}
+
+fn aligned_allocation_backing_order(pages: usize, align_pages: usize) -> Option<usize> {
+    if pages == 0 || align_pages == 0 || !align_pages.is_power_of_two() {
+        return None;
+    }
+
+    // A buddy block can begin up to `align_pages - 1` pages before the next
+    // absolute alignment boundary. Reserve only that worst-case prefix in
+    // addition to the requested range. The previous implementation always
+    // added a complete buddy order, turning a 72 MiB / 16 KiB-aligned request
+    // into a 256 MiB allocation even though a 128 MiB block is sufficient.
+    let span_pages = pages.checked_add(align_pages - 1)?;
+    let backing_pages = span_pages.checked_next_power_of_two()?;
+    let order = backing_pages.trailing_zeros() as usize;
+    (order <= MAX_ORDER).then_some(order)
 }
 
 /// Allocate individual pages (may be non-contiguous).
@@ -786,5 +811,14 @@ mod tests {
 
         let (_, free_after) = stats();
         assert_eq!(free_after, free_before);
+    }
+
+    #[test_case]
+    fn aligned_backing_order_reserves_only_required_padding() {
+        assert_eq!(aligned_allocation_backing_order(18_432, 4), Some(15));
+        assert_eq!(aligned_allocation_backing_order(6_144, 4), Some(13));
+        assert_eq!(aligned_allocation_backing_order(32_768, 4), Some(16));
+        assert_eq!(aligned_allocation_backing_order(0, 4), None);
+        assert_eq!(aligned_allocation_backing_order(1, 3), None);
     }
 }
