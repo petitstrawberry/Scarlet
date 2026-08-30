@@ -253,7 +253,7 @@ impl GrowingMappedFile {
         // Keep the spool on the persistent root filesystem when available.
         // `/tmp` is a small tmpfs on Scarlet and would turn a bounded-heap fix
         // into a bounded-disk failure for a long YouTube stream.
-        for directory in ["/data", "/tmp"] {
+        for directory in ["/tmp"] {
             for attempt in 0..STREAM_SPOOL_CREATE_ATTEMPTS {
                 let sequence = STREAM_SPOOL_COUNTER.fetch_add(1, Ordering::Relaxed);
                 let path = format!(
@@ -1092,10 +1092,15 @@ impl PlaybackRequest {
             return None;
         }
 
-        // Streaming decoders own a growing file-backed view. Mapping here
-        // would retain a second mapping of the same prefix (and is invalid
-        // for socket streams whose positional path is only a label).
-        if !self.streaming
+        // The hardware streaming decoder owns a growing file-backed view.
+        // Mapping here would retain a second mapping of the same prefix (and
+        // is invalid for socket streams whose positional path is only a
+        // label). Keep mapping for software streaming, which still consumes
+        // the regular `mp4_data` argument.
+        let hardware_streaming_source = self.hardware_decode
+            && self.streaming
+            && (self.stream_socket_path.is_some() || is_mp4_path(&self.path));
+        if !hardware_streaming_source
             && self.mp4_data.is_none()
             && (is_mp4_path(&self.path) || is_webm_path(&self.path))
         {
@@ -7977,6 +7982,8 @@ struct StreamSocketState {
 struct StreamSocketReader {
     state: Arc<Mutex<StreamSocketState>>,
     cancel: Arc<AtomicBool>,
+    spool_path: String,
+    writer: Arc<Mutex<Option<File>>>,
     thread: Option<JoinHandle>,
 }
 
@@ -7986,6 +7993,11 @@ impl Drop for StreamSocketReader {
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
+        // Unlink before dropping the ext2 writer. Its destructor attempts a
+        // final sync; an already-unlinked inode has no retained payload size,
+        // so teardown cannot allocate a second stream-sized buffer.
+        let _ = remove_file(&self.spool_path);
+        drop(self.writer.lock().take());
     }
 }
 
@@ -7995,10 +8007,14 @@ fn start_stream_socket_reader(path: String, spool_path: String) -> StreamSocketR
         error: None,
     }));
     let cancel = Arc::new(AtomicBool::new(false));
+    let writer = Arc::new(Mutex::new(None));
     let reader_state = state.clone();
     let reader_cancel = cancel.clone();
+    let reader_writer = writer.clone();
+    let reader_spool_path = spool_path.clone();
     let thread = thread::spawn(move || {
-        let result = read_stream_socket_into_file(&path, &spool_path, &reader_cancel);
+        let result =
+            read_stream_socket_into_file(&path, &reader_spool_path, &reader_cancel, &reader_writer);
         let mut state = reader_state.lock();
         match result {
             Ok(()) => state.complete = true,
@@ -8011,6 +8027,8 @@ fn start_stream_socket_reader(path: String, spool_path: String) -> StreamSocketR
     StreamSocketReader {
         state,
         cancel,
+        spool_path,
+        writer,
         thread: Some(thread),
     }
 }
@@ -8019,41 +8037,46 @@ fn read_stream_socket_into_file(
     path: &str,
     spool_path: &str,
     cancel: &AtomicBool,
+    writer: &Arc<Mutex<Option<File>>>,
 ) -> Result<(), String> {
     let mut options = OpenOptions::new();
     options.write(true).append(true);
     let mut spool = options
         .open(spool_path)
         .map_err(|_| format!("open stream spool failed: {spool_path}"))?;
-    let Some(mut socket) = connect_local_socket_cancellable(path, cancel)? else {
-        return Ok(());
-    };
-    let mut buffer = [0u8; 32 * 1024];
-
-    loop {
-        if cancel.load(Ordering::Acquire) {
+    let result = (|| {
+        let Some(mut socket) = connect_local_socket_cancellable(path, cancel)? else {
             return Ok(());
-        }
-        match socket.read(&mut buffer) {
-            Ok(0) => {
-                break;
-            }
-            Ok(read) => {
-                spool
-                    .write_all(&buffer[..read])
-                    .map_err(|_| format!("write stream spool failed: {spool_path}"))?;
-            }
-            Err(err) if err.kind() == ErrorKind::WouldBlock => {
-                thread::sleep(Duration::from_millis(STREAM_POLL_INTERVAL_MS));
-            }
-            Err(err) if err.kind() == ErrorKind::UnexpectedEof => {
-                break;
-            }
-            Err(err) => return Err(format!("stream socket read failed: {err}")),
-        }
-    }
+        };
+        let mut buffer = [0u8; 32 * 1024];
 
-    Ok(())
+        loop {
+            if cancel.load(Ordering::Acquire) {
+                return Ok(());
+            }
+            match socket.read(&mut buffer) {
+                Ok(0) => {
+                    break;
+                }
+                Ok(read) => {
+                    spool
+                        .write_all(&buffer[..read])
+                        .map_err(|_| format!("write stream spool failed: {spool_path}"))?;
+                }
+                Err(err) if err.kind() == ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(STREAM_POLL_INTERVAL_MS));
+                }
+                Err(err) if err.kind() == ErrorKind::UnexpectedEof => {
+                    break;
+                }
+                Err(err) => return Err(format!("stream socket read failed: {err}")),
+            }
+        }
+
+        Ok(())
+    })();
+    *writer.lock() = Some(spool);
+    result
 }
 
 fn read_socket_to_end(path: &str, cancel: &AtomicBool) -> Result<Option<Vec<u8>>, String> {
