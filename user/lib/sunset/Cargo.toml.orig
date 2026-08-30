@@ -1,0 +1,148 @@
+[package]
+name = "sunset"
+version = "0.4.0"
+edition = "2021"
+description = "A SSH library suitable for embedded and larger programs"
+repository = "https://github.com/mkj/sunset"
+categories = ["network-programming", "embedded", "no-std"]
+license = "0BSD"
+keywords = ["ssh"]
+rust-version = "1.87"
+
+[workspace]
+members = [
+    "demo/picow",
+    "demo/std", "fuzz",
+    "stdasync",
+    # workspace.dependencies paths are automatic
+]
+
+[workspace.dependencies]
+sunset = { path = ".", version = "0.4" }
+sunset-sshwire-derive = { version = "0.2", path = "sshwire-derive" }
+sunset-async = { path = "async", version = "0.4" }
+sunset-demo-common = { path = "demo/common" }
+
+portable-atomic = "1"
+arbitrary = { version = "1.4", features = ["derive_arbitrary"] }
+
+[dependencies]
+sunset-sshwire-derive = { workspace = true }
+
+snafu = { version = "0.8", default-features = false, features = ["rust_1_65"] }
+log = { version = "0.4" }
+heapless = "0.8"
+
+# allows avoiding utf8 for SSH identifier names
+ascii = { version = "1.0", default-features = false }
+
+arbitrary = { workspace = true, optional = true }
+
+getrandom = "0.2"
+rand_core = { version = "0.6", default-features = false, features = ["getrandom"]}
+
+ctr = { version = "0.9", features = ["zeroize"] }
+aes = { version = "0.8", features = ["zeroize"] }
+chacha20 = { version = "0.9", features = ["zeroize"] }
+sha2 = { version = "0.10", default-features = false }
+hmac = "0.12"
+poly1305 = "0.8"
+digest = "0.10"
+signature = { version = "2.0", default-features = false }
+zeroize = { version = "1", default-features = false, features = ["derive"] }
+cipher = { version = "0.4", features = ["zeroize"] }
+subtle = { version = "2.4", default-features = false }
+# ed25519/x25519
+ed25519-dalek = { version = "2.1", default-features = false, features = ["zeroize", "rand_core"] }
+x25519-dalek = { version = "2.0", default-features = false, features = ["zeroize"] }
+curve25519-dalek = { version = "4.1", default-features = false, features = ["zeroize"] }
+ml-kem = { version = "0.2.1", default-features = false, features = ["zeroize"], optional = true }
+# p521 = { version = "0.13.2", default-features = false, features = ["ecdh", "ecdsa"] }
+rsa = { version = "0.9", default-features = false, optional = true, features = ["sha2"] }
+# TODO: getrandom feature is a workaround for missing ssh-key dependency with rsa. fixed in pending 0.6
+ssh-key = { version = "0.6", default-features = false, optional = true, features = ["getrandom"] }
+
+embedded-io = { version = "0.6", optional = true }
+
+# for debug printing
+pretty-hex = { version = "0.4", default-features = false }
+
+[features]
+default = []
+std = ["snafu/std", "ssh-key/alloc", "larger", "mlkem"]
+backtrace = ["snafu/backtrace"]
+rsa = ["dep:rsa", "ssh-key/rsa"]
+mlkem = ["dep:ml-kem"]
+# allows conversion to/from OpenSSH key formats
+openssh-key = ["ssh-key"]
+# implements embedded_io::Error for sunset::Error
+embedded-io = ["dep:embedded-io"]
+# Arbitrary for fuzzing. std is required for derive(Arbitrary)
+arbitrary = ["dep:arbitrary", "std"]
+
+# Allocate larger buffers for things such as usernames.
+# See config.rs for details
+larger = []
+
+[dev-dependencies]
+# examples want std::error
+snafu = { version = "0.8", default-features = true }
+anyhow = { version = "1.0" }
+pretty-hex = "0.4"
+simplelog = { version = "0.12", features = ["test"] }
+
+# [patch.crates-io]
+# cyw43 = { path = "/home/matt/3rd/rs/embassy-stable-sunset/cyw43" }
+# embassy-time = { path = "/home/matt/3rd/rs/embassy-stable-sunset/embassy-time" }
+# embassy-time-driver = { path = "/home/matt/3rd/rs/embassy-stable-sunset/embassy-time-driver" }
+# embassy-time-queue-driver = { path = "/home/matt/3rd/rs/embassy-stable-sunset/embassy-time-queue-driver" }
+# embassy-sync = { path = "/home/matt/3rd/rs/embassy-stable-sunset/embassy-sync" }
+# embassy-net = { path = "/home/matt/3rd/rs/embassy-stable-sunset/embassy-net" }
+# embassy-net-driver = { path = "/home/matt/3rd/rs/embassy-stable-sunset/embassy-net-driver" }
+# embassy-net-driver-channel = { path = "/home/matt/3rd/rs/embassy-stable-sunset/embassy-net-driver-channel" }
+# embassy-executor = { path = "/home/matt/3rd/rs/embassy-stable-sunset/embassy-executor" }
+# embassy-executor-macros = { path = "/home/matt/3rd/rs/embassy-stable-sunset/embassy-executor-macros" }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(fuzzing)'] }
+
+# these are mostly applicable to picow, but can't hurt generally
+[profile.dev]
+debug = 2
+debug-assertions = true
+opt-level = 1
+overflow-checks = true
+
+[profile.release]
+codegen-units = 1
+debug = 2
+debug-assertions = false
+incremental = false
+lto = "fat"
+opt-level = 'z'
+overflow-checks = false
+panic = "abort"
+
+# do not optimize proc-macro crates = faster builds from scratch
+[profile.dev.build-override]
+codegen-units = 8
+debug = false
+debug-assertions = false
+opt-level = 0
+overflow-checks = false
+
+[profile.release.build-override]
+codegen-units = 8
+debug = false
+debug-assertions = false
+opt-level = 0
+overflow-checks = false
+
+# fuzzing wants optimisation wiith debug assertions
+[profile.fuzz]
+inherits = "release"
+debug-assertions = true
+lto = "fat"
+opt-level = 3
+overflow-checks = true
+panic = "abort"

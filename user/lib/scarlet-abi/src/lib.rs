@@ -15,6 +15,10 @@ pub type Pid = u32;
 /// Raw thread identifier exposed by Scarlet Native thread syscalls.
 pub type Tid = u32;
 
+/// Require `GetRandom` to use a registered entropy source instead of the
+/// non-cryptographic emergency fallback.
+pub const GET_RANDOM_FLAG_REQUIRE_ENTROPY: usize = 1 << 0;
+
 /// Version of the task-debug snapshot ABI implemented by Scarlet.
 pub const TASK_DEBUG_INFO_VERSION_V1: u16 = 1;
 /// The snapshot contains a valid last-observed instruction address.

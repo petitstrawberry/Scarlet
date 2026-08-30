@@ -90,6 +90,13 @@ to = "/system/scarlet/bin/netcfgd"
 
 [[layers]]
 kind = "cargo"
+source = "../../user/bin"
+package = "user-bin"
+bin = "sshd"
+to = "/system/scarlet/bin/sshd"
+
+[[layers]]
+kind = "cargo"
 source = "../../user/std-bin"
 bin = "resolverd"
 to = "/system/scarlet/bin/resolverd"

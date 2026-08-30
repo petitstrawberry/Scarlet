@@ -41,6 +41,9 @@ use crate::task::mytask;
 const RANDOM_POOL_SIZE: usize = 4096;
 const RANDOM_SYSCALL_CHUNK_SIZE: usize = 256;
 const FALLBACK_RANDOM_SEED: u64 = 0x4f1b_bcdc_b7a4_3413;
+// Kept in sync with scarlet_abi::GET_RANDOM_FLAG_REQUIRE_ENTROPY. The kernel
+// intentionally does not depend on user-space ABI crates.
+const GET_RANDOM_FLAG_REQUIRE_ENTROPY: usize = 1 << 0;
 
 static FALLBACK_RANDOM_STATE: AtomicU64 = AtomicU64::new(0);
 
@@ -262,7 +265,8 @@ fn fill_fallback_random(buffer: &mut [u8]) {
 ///
 /// * `trapframe.arg(0)` - User-space buffer pointer.
 /// * `trapframe.arg(1)` - Number of bytes to fill.
-/// * `trapframe.arg(2)` - Reserved flags, must be zero.
+/// * `trapframe.arg(2)` - Zero, or `GET_RANDOM_FLAG_REQUIRE_ENTROPY` to fail
+///   instead of using the non-cryptographic emergency fallback.
 ///
 /// # Returns
 ///
@@ -279,7 +283,7 @@ pub fn sys_get_random(trapframe: &mut crate::arch::Trapframe) -> usize {
 
     trapframe.increment_pc_next(&task);
 
-    if flags != 0 {
+    if flags & !GET_RANDOM_FLAG_REQUIRE_ENTROPY != 0 {
         return usize::MAX;
     }
     if buffer_len == 0 {
@@ -292,6 +296,9 @@ pub fn sys_get_random(trapframe: &mut crate::arch::Trapframe) -> usize {
         let chunk_len = core::cmp::min(chunk.len(), buffer_len - total_written);
         let bytes_read = RandomManager::get_random_bytes(&mut chunk[..chunk_len]);
         if bytes_read < chunk_len {
+            if flags & GET_RANDOM_FLAG_REQUIRE_ENTROPY != 0 {
+                return usize::MAX;
+            }
             fill_fallback_random(&mut chunk[bytes_read..chunk_len]);
         }
 

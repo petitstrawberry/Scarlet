@@ -161,6 +161,7 @@ impl PtyPair {
             number,
             core,
             slave: Arc::downgrade(&slave),
+            nonblocking: AtomicBool::new(false),
         });
 
         Self {
@@ -234,6 +235,7 @@ pub struct PtyMasterDevice {
     number: usize,
     core: Arc<PtyCore>,
     slave: Weak<TtyDevice>,
+    nonblocking: AtomicBool,
 }
 
 impl PtyMasterDevice {
@@ -317,6 +319,9 @@ impl CharDevice for PtyMasterDevice {
             if !self.core.has_slave_open() {
                 return Ok(0);
             }
+            if self.nonblocking.load(Ordering::Relaxed) {
+                return Err(StreamError::WouldBlock);
+            }
             if let Some(task) = crate::task::mytask() {
                 if self
                     .core
@@ -374,6 +379,14 @@ impl Selectable for PtyMasterDevice {
             }
         }
         SelectWaitOutcome::Ready
+    }
+
+    fn set_nonblocking(&self, enabled: bool) {
+        self.nonblocking.store(enabled, Ordering::Relaxed);
+    }
+
+    fn is_nonblocking(&self) -> bool {
+        self.nonblocking.load(Ordering::Relaxed)
     }
 }
 
@@ -441,6 +454,22 @@ mod tests {
         let mut buffer = [0u8; 5];
         assert_eq!(pair.master().read(&mut buffer), 5);
         assert_eq!(&buffer, b"out\r\n");
+    }
+
+    #[test_case]
+    fn test_pty_master_nonblocking_read_returns_would_block() {
+        let pair = PtyPair::new(6);
+        pair.open_slave_endpoint();
+        let master = pair.master();
+        master.set_nonblocking(true);
+
+        let mut buffer = [0u8; 1];
+        assert!(matches!(
+            master.try_read(&mut buffer),
+            Err(StreamError::WouldBlock)
+        ));
+
+        pair.close_slave_endpoint();
     }
 
     #[test_case]

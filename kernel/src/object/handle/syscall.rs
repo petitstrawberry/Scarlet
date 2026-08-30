@@ -201,6 +201,9 @@ pub fn encode_handle_type(handle_type: &HandleType) -> usize {
 /// - i32 value on success (command-specific)
 /// - usize::MAX on error
 pub fn sys_handle_control(trapframe: &mut Trapframe) -> usize {
+    const HCTL_SET_NONBLOCKING: u32 = 0x5353_0007;
+    const HCTL_GET_NONBLOCKING: u32 = 0x5353_000B;
+
     let task = match mytask() {
         Some(task) => task,
         None => return usize::MAX,
@@ -218,6 +221,26 @@ pub fn sys_handle_control(trapframe: &mut Trapframe) -> usize {
         Some(obj) => obj,
         None => return usize::MAX,
     };
+
+    // Non-blocking mode is a generic Selectable capability rather than a
+    // socket-specific operation. Keep the legacy command values so existing
+    // user-space callers continue to work for sockets, pipes, TTYs, and PTYs.
+    match command {
+        HCTL_SET_NONBLOCKING => {
+            let Some(selectable) = kernel_object.as_selectable() else {
+                return usize::MAX;
+            };
+            selectable.set_nonblocking(arg != 0);
+            return 0;
+        }
+        HCTL_GET_NONBLOCKING => {
+            let Some(selectable) = kernel_object.as_selectable() else {
+                return usize::MAX;
+            };
+            return usize::from(selectable.is_nonblocking());
+        }
+        _ => {}
+    }
 
     // Perform the control operation using the ControlOps capability
     let result = match kernel_object.as_control() {

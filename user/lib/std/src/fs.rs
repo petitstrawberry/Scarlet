@@ -28,8 +28,21 @@
 
 use crate::handle::Handle;
 use crate::handle::capability::SeekFrom as ScarletSeekFrom;
+use crate::handle::capability::StreamError;
 use crate::io::{Error, ErrorKind, Read, Result, Seek, SeekFrom, Write};
 use crate::string::String;
+
+fn stream_error_to_io(error: StreamError, message: &'static str) -> Error {
+    let kind = match error {
+        StreamError::WouldBlock => ErrorKind::WouldBlock,
+        StreamError::EndOfStream => ErrorKind::UnexpectedEof,
+        StreamError::PermissionDenied => ErrorKind::PermissionDenied,
+        StreamError::InvalidParameter => ErrorKind::InvalidInput,
+        StreamError::Unsupported => ErrorKind::Unsupported,
+        _ => ErrorKind::Other,
+    };
+    Error::new(kind, message)
+}
 
 /// Options and flags which can be used to configure how a file is opened
 ///
@@ -471,7 +484,7 @@ impl File {
 
         stream
             .read(buf)
-            .map_err(|_| Error::new(ErrorKind::Other, "Read operation failed"))
+            .map_err(|error| stream_error_to_io(error, "Read operation failed"))
     }
 
     /// Read directory entries from a directory file
@@ -536,7 +549,7 @@ impl File {
 
         stream
             .write(buf)
-            .map_err(|_| Error::new(ErrorKind::Other, "Write operation failed"))
+            .map_err(|error| stream_error_to_io(error, "Write operation failed"))
     }
 
     /// Write all data to the file
@@ -558,7 +571,7 @@ impl File {
 
         stream
             .write_all(buf)
-            .map_err(|_| Error::new(ErrorKind::Other, "Write all operation failed"))
+            .map_err(|error| stream_error_to_io(error, "Write all operation failed"))
     }
 
     /// Seek to a position in the file

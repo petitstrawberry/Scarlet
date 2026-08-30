@@ -160,6 +160,10 @@ name = "pty-smoke"
 path = "src/pty_smoke.rs"
 
 [[bin]]
+name = "sshd"
+path = "src/sshd/main.rs"
+
+[[bin]]
 name = "mplayer"
 path = "src/mplayer.rs"
 
@@ -178,6 +182,15 @@ scarlet-os = { path = "../lib/scarlet-os" }
 scarlet-ui = { git = "https://github.com/petitstrawberry/scarlet-ui", package = "scarlet-ui", default-features = false, features = ["legacy-scarlet-std", "platform-sws"] }
 scarlet-ui-macros = { git = "https://github.com/petitstrawberry/scarlet-ui", package = "scarlet-ui-macros" }
 scarlet-desktop-config = { path = "../lib/scarlet-desktop-config" }
+scarlet-sys = { path = "../lib/scarlet-sys" }
+sunset = { path = "../lib/sunset", default-features = false, features = ["larger", "mlkem", "openssh-key", "rsa"] }
+getrandom = { version = "0.2.16", default-features = false, features = ["custom"] }
+ssh-key = { version = "0.6.7", default-features = false, features = ["ed25519", "rsa"] }
+rand_core = { version = "0.6.4", default-features = false, features = ["getrandom"] }
+bcrypt = { version = "0.15.1", default-features = false }
+hmac = { version = "0.12.1", default-features = false }
+sha2 = { version = "0.10.9", default-features = false }
+subtle = { version = "2.6.1", default-features = false }
 sbus = { path = "../lib/sbus" }
 sbus-client = { path = "../lib/sbus-client" }
 sas-protocol = { path = "../lib/sas-protocol", default-features = false, features = ["legacy-scarlet-std"] }
