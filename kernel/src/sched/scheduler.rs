@@ -2351,12 +2351,19 @@ fn arm_local_slice(cpu_id: usize, task_id: usize) {
         return;
     };
     let now_ns = get_time_ns();
-    let deadline = task.deadline_snapshot();
+    let deadline = deadline_snapshot_for_slice(&task, now_ns);
+    if deadline.is_some_and(|snapshot| snapshot.throttled || snapshot.remaining_ns == 0) {
+        // A deadline task with no budget is parked until its replenishment
+        // timer fires. Arming a 1ns slice here would spin reschedules while
+        // the task remains ineligible.
+        defer_reschedule(cpu_id);
+        return;
+    }
     let fair_vruntime_ns = task.sched_vruntime.load(Ordering::SeqCst);
     let fair_vdeadline_ns = task.sched_deadline.load(Ordering::SeqCst);
     let fair_slice_ns = task.sched_slice_ns.load(Ordering::SeqCst);
     let duration_ns = if let Some(snapshot) = deadline {
-        snapshot.remaining_ns.max(1)
+        snapshot.remaining_ns
     } else {
         if fair_slice_ns == 0 {
             task.time_slice_duration_ns.load(Ordering::SeqCst)
@@ -2491,6 +2498,22 @@ fn arm_local_slice(cpu_id: usize, task_id: usize) {
     if !keep_handle {
         let _ = cancel_timer(handle);
     }
+}
+
+/// Return the deadline state that is valid at the final slice-arm boundary.
+///
+/// Runnable enqueue and deadline selection normally advance an expired period,
+/// but the period can end after selection and before the local timer is armed.
+/// Refreshing here prevents a task that wakes near its period boundary from
+/// running with a stale absolute deadline and preserves period catch-up/miss
+/// accounting through the normal replenishment path.
+fn deadline_snapshot_for_slice(task: &Task, now_ns: u64) -> Option<TaskDeadlineSnapshot> {
+    let mut snapshot = task.deadline_snapshot();
+    if snapshot.is_some_and(|snapshot| now_ns >= snapshot.next_replenishment_ns) {
+        let _ = advance_deadline_period(task, now_ns, None);
+        snapshot = task.deadline_snapshot();
+    }
+    snapshot
 }
 
 fn replace_local_slice(cpu_id: usize, next_task_id: Option<usize>) {
@@ -3978,6 +4001,71 @@ fn replenish_deadline_state(state: &mut TaskDeadlineState, now_ns: u64) -> bool 
     true
 }
 
+/// Return whether reusing a waking task's residual budget would exceed its
+/// admitted deadline density.
+///
+/// Scarlet currently accepts implicit-deadline reservations only, so the
+/// original CBS wakeup rule can start a fresh instance whenever the residual
+/// runtime over the residual deadline is greater than the configured density.
+fn deadline_wakeup_overflows(state: &TaskDeadlineState, now_ns: u64) -> bool {
+    let Some(params) = state.params else {
+        return false;
+    };
+    if state.throttled || state.remaining_ns == 0 {
+        return false;
+    }
+    if now_ns >= state.absolute_deadline_ns {
+        return true;
+    }
+
+    let remaining_window_ns = state.absolute_deadline_ns - now_ns;
+    (state.remaining_ns as u128) * (params.deadline_ns as u128)
+        > (remaining_window_ns as u128) * (params.runtime_ns as u128)
+}
+
+/// Apply the original CBS wakeup rule before a deadline task enters its queue.
+///
+/// This function never inserts the task itself. Keeping the state transition
+/// ahead of queue insertion ensures the queue key is built from the refreshed
+/// absolute deadline.
+fn prepare_deadline_wakeup(task: &Task, now_ns: u64) -> bool {
+    let (timer, token, refreshed) = {
+        let mut state = task.deadline.lock();
+        let Some(params) = state.params else {
+            return false;
+        };
+
+        let refreshed = if state.throttled || state.remaining_ns == 0 {
+            replenish_deadline_state(&mut state, now_ns)
+        } else if deadline_wakeup_overflows(&state, now_ns) {
+            if now_ns > state.absolute_deadline_ns {
+                let missed_periods =
+                    now_ns.saturating_sub(state.absolute_deadline_ns) / params.period_ns + 1;
+                state.deadline_misses = state.deadline_misses.saturating_add(missed_periods);
+            }
+            state.remaining_ns = params.runtime_ns;
+            state.absolute_deadline_ns = now_ns.saturating_add(params.deadline_ns);
+            state.next_replenishment_ns = now_ns.saturating_add(params.period_ns);
+            state.throttled = false;
+            true
+        } else {
+            false
+        };
+
+        if !refreshed {
+            return false;
+        }
+        (
+            state.replenishment_timer.take(),
+            state.replenishment_token.take(),
+            true,
+        )
+    };
+
+    cancel_replenishment(timer, token);
+    refreshed
+}
+
 fn consume_deadline_budget(state: &mut TaskDeadlineState, delta_ns: u64) -> bool {
     if state.params.is_none() || state.throttled || delta_ns == 0 {
         return state.throttled;
@@ -4514,7 +4602,12 @@ fn push_ready_task_with_mode(cpu_id: usize, task_id: usize, mode: PlaceMode) {
         return;
     };
     if task.deadline_enabled() {
-        let _ = advance_deadline_period(&task, get_time_ns(), None);
+        let now_ns = get_time_ns();
+        if mode == PlaceMode::New {
+            let _ = prepare_deadline_wakeup(&task, now_ns);
+        } else {
+            let _ = advance_deadline_period(&task, now_ns, None);
+        }
         let _ = enqueue_deadline(&task);
         return;
     }
@@ -6227,6 +6320,88 @@ mod tests {
         assert_eq!(state.next_replenishment_ns, 80);
         assert!(!state.throttled);
         assert_eq!(state.deadline_misses, 3);
+    }
+
+    #[test_case]
+    fn deadline_wakeup_cbs_resets_density_overflow_before_deadline() {
+        let task = crate::task::new_user_task("deadline-wakeup-overflow".to_string(), 0);
+        {
+            let mut state = task.deadline.lock();
+            state.params = Some(implicit_deadline_params(5, 20));
+            state.remaining_ns = 4;
+            state.absolute_deadline_ns = 20;
+            state.next_replenishment_ns = 20;
+            state.cpu_id = 0;
+        }
+
+        assert!(prepare_deadline_wakeup(&task, 10));
+        let snapshot = task.deadline_snapshot().unwrap();
+        assert_eq!(snapshot.remaining_ns, 5);
+        assert_eq!(snapshot.absolute_deadline_ns, 30);
+        assert_eq!(snapshot.next_replenishment_ns, 30);
+        assert_eq!(snapshot.deadline_misses, 0);
+    }
+
+    #[test_case]
+    fn deadline_wakeup_cbs_preserves_safe_residual_budget() {
+        let task = crate::task::new_user_task("deadline-wakeup-safe".to_string(), 0);
+        {
+            let mut state = task.deadline.lock();
+            state.params = Some(implicit_deadline_params(5, 20));
+            state.remaining_ns = 2;
+            state.absolute_deadline_ns = 20;
+            state.next_replenishment_ns = 20;
+            state.cpu_id = 0;
+        }
+
+        assert!(!prepare_deadline_wakeup(&task, 10));
+        let snapshot = task.deadline_snapshot().unwrap();
+        assert_eq!(snapshot.remaining_ns, 2);
+        assert_eq!(snapshot.absolute_deadline_ns, 20);
+        assert_eq!(snapshot.next_replenishment_ns, 20);
+        assert_eq!(snapshot.deadline_misses, 0);
+    }
+
+    #[test_case]
+    fn deadline_wakeup_cbs_restarts_after_missed_periods() {
+        let task = crate::task::new_user_task("deadline-wakeup-missed".to_string(), 0);
+        {
+            let mut state = task.deadline.lock();
+            state.params = Some(implicit_deadline_params(5, 20));
+            state.remaining_ns = 4;
+            state.absolute_deadline_ns = 20;
+            state.next_replenishment_ns = 20;
+            state.cpu_id = 0;
+        }
+
+        assert!(prepare_deadline_wakeup(&task, 65));
+        let snapshot = task.deadline_snapshot().unwrap();
+        assert_eq!(snapshot.remaining_ns, 5);
+        assert_eq!(snapshot.absolute_deadline_ns, 85);
+        assert_eq!(snapshot.next_replenishment_ns, 85);
+        assert_eq!(snapshot.deadline_misses, 3);
+    }
+
+    #[test_case]
+    fn deadline_slice_refreshes_period_expired_between_pick_and_arm() {
+        let task = crate::task::new_user_task("deadline-arm-boundary".to_string(), 0);
+        {
+            let mut state = task.deadline.lock();
+            state.params = Some(implicit_deadline_params(5, 20));
+            state.remaining_ns = 4;
+            state.absolute_deadline_ns = 20;
+            state.next_replenishment_ns = 20;
+            state.cpu_id = 0;
+            state.throttled = false;
+        }
+
+        let snapshot = deadline_snapshot_for_slice(&task, 21).unwrap();
+
+        assert_eq!(snapshot.remaining_ns, 5);
+        assert_eq!(snapshot.absolute_deadline_ns, 40);
+        assert_eq!(snapshot.next_replenishment_ns, 40);
+        assert_eq!(snapshot.deadline_misses, 1);
+        assert!(!snapshot.throttled);
     }
 
     #[test_case]
