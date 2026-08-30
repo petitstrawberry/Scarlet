@@ -1,37 +1,26 @@
 //! Input event handling module
 
-use core::sync::atomic::{AtomicU32, Ordering};
-use scarlet_os::handle::capability::StreamError;
-use scarlet_os::handle::{Handle, HandleResult};
+#[path = "key_repeat.rs"]
+mod key_repeat;
+
+pub(crate) use key_repeat::{
+    ConsumedKeys, HeldKeys, KeyRepeatState, KeyboardSource, forward_to_binary_key_protocol,
+    is_initial_press, is_physical_key_value, should_retry_keyboard_read,
+};
+
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::println;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::Duration;
 use std::vec::Vec;
 
-/// Scarlet input-device stream opened through the native handle API.
-struct InputDevice {
-    handle: Handle,
-}
+use scarlet_os::handle::capability::StreamError;
+use scarlet_os::input::{INPUT_CAP_DIRECT_TOUCH, InputDevice, InputDeviceKind};
 
-impl InputDevice {
-    /// Open an input device for reading.
-    fn open(path: &str) -> HandleResult<Self> {
-        Handle::open(path, 0).map(|handle| Self { handle })
-    }
-
-    /// Read bytes from the device stream.
-    fn read(&self, buffer: &mut [u8]) -> Result<usize, StreamError> {
-        self.handle
-            .as_stream()
-            .map_err(|_| StreamError::Unsupported)?
-            .read(buffer)
-    }
-
-    /// Change whether reads block while no input event is available.
-    fn set_nonblocking(&self, enabled: bool) -> HandleResult<()> {
-        self.handle.set_nonblocking(enabled)
-    }
-}
+const DEVICE_INDEX_LIMIT: u8 = 8;
+const DEVICE_SCAN_INTERVAL: Duration = Duration::from_secs(1);
+const SHORT_READ_DELAY: Duration = Duration::from_millis(10);
 
 /// Input event structure (16 bytes, matches kernel InputEvent)
 #[repr(C)]
@@ -48,7 +37,7 @@ impl InputEvent {
 }
 
 /// Processed input events for compositor
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CompositorInputEvent {
     MouseMove {
         dx: i32,
@@ -69,7 +58,17 @@ pub enum CompositorInputEvent {
     },
     Keyboard {
         code: u16,
-        pressed: bool,
+        /// Linux evdev key value: 0 release, 1 press, 2 repeat.
+        value: i32,
+        /// Producer identity used to scope held-key state and disconnects.
+        source: KeyboardSource,
+        /// True when value 2 came from SWS rather than the input device.
+        synthetic: bool,
+    },
+    /// The keyboard stream disconnected; release keys owned by that source.
+    KeyboardReset {
+        /// Only state owned by this producer is discarded.
+        source: KeyboardSource,
     },
 }
 
@@ -77,6 +76,7 @@ pub enum CompositorInputEvent {
 static INPUT_EVENT_QUEUE: Mutex<Vec<CompositorInputEvent>> = Mutex::new(Vec::new());
 static SCREEN_WIDTH: AtomicU32 = AtomicU32::new(1);
 static SCREEN_HEIGHT: AtomicU32 = AtomicU32::new(1);
+static INPUT_STARTED: AtomicBool = AtomicBool::new(false);
 
 /// Update the screen size used to scale absolute input devices.
 pub fn set_screen_size(width: u32, height: u32) {
@@ -149,6 +149,7 @@ pub mod abs_codes {
 #[allow(dead_code)]
 pub mod key_codes {
     pub const BTN_LEFT: u16 = 0x110;
+    pub const BTN_TOUCH: u16 = 0x14a;
     #[allow(dead_code)]
     pub const BTN_RIGHT: u16 = 0x111;
     #[allow(dead_code)]
@@ -192,340 +193,680 @@ pub mod key_codes {
     pub const KEY_DOT: u16 = 0x34;
     pub const KEY_SLASH: u16 = 0x35;
     pub const KEY_CAPSLOCK: u16 = 0x3a;
+    pub const KEY_NUMLOCK: u16 = 0x45;
+    pub const KEY_SCROLLLOCK: u16 = 0x46;
+    pub const KEY_FN: u16 = 0x1d0;
 }
 
-/// Input manager - handles input devices and event reading
-pub struct InputManager {
-    mouse_file: InputDevice,
-    /// Maximum value for tablet absolute coordinates (typically 32767)
-    tablet_max: i32,
-    /// Current accumulated position for absolute positioning
-    pub abs_x: Option<i32>,
-    pub abs_y: Option<i32>,
-    /// Accumulated horizontal wheel delta (from REL_HWHEEL)
+/// Input manager - starts one independent reader for every logical-seat device.
+pub struct InputManager;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AxisRange {
+    minimum: i32,
+    maximum: i32,
+}
+
+impl AxisRange {
+    fn normalize(self, value: i32, dimension: u32) -> i32 {
+        if dimension <= 1 || self.maximum <= self.minimum {
+            return 0;
+        }
+        let value = value.clamp(self.minimum, self.maximum);
+        let numerator =
+            (i64::from(value) - i64::from(self.minimum)).saturating_mul(i64::from(dimension - 1));
+        let denominator = i64::from(self.maximum) - i64::from(self.minimum);
+        (numerator / denominator) as i32
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PointerMetadata {
+    kind: InputDeviceKind,
+    direct_touch: bool,
+    x_axis: Option<AxisRange>,
+    y_axis: Option<AxisRange>,
+}
+
+impl PointerMetadata {
+    fn query(device: &InputDevice, expected_kind: InputDeviceKind) -> Self {
+        let kind = match device.kind() {
+            Ok(InputDeviceKind::Unknown) | Err(_) => expected_kind,
+            Ok(kind) => kind,
+        };
+        let x_axis = query_axis(device, abs_codes::ABS_X);
+        let y_axis = query_axis(device, abs_codes::ABS_Y);
+
+        // Old virtio-tablet kernels predate the metadata controls but have a
+        // stable 0..32767 ABI. No other device class receives guessed ranges.
+        let legacy_tablet =
+            kind == InputDeviceKind::Tablet && (x_axis.is_none() || y_axis.is_none());
+        let fallback = legacy_tablet.then_some(AxisRange {
+            minimum: 0,
+            maximum: 32767,
+        });
+        Self {
+            kind,
+            direct_touch: kind == InputDeviceKind::Touchscreen
+                || device
+                    .capabilities()
+                    .is_ok_and(|caps| caps & INPUT_CAP_DIRECT_TOUCH != 0),
+            x_axis: x_axis.or(fallback),
+            y_axis: y_axis.or(fallback),
+        }
+    }
+}
+
+fn query_axis(device: &InputDevice, code: u16) -> Option<AxisRange> {
+    let axis = device.absolute_axis(code).ok()?;
+    let minimum = axis.minimum;
+    let maximum = axis.maximum;
+    (minimum < maximum).then_some(AxisRange { minimum, maximum })
+}
+
+#[derive(Debug, Default)]
+struct PointerFrame {
+    rel_x: i32,
+    rel_y: i32,
     wheel_dx: i32,
-    /// Accumulated vertical wheel delta (from REL_WHEEL)
     wheel_dy: i32,
+    abs_x: Option<i32>,
+    abs_y: Option<i32>,
+    abs_dirty: bool,
+    buttons: Vec<(u16, bool)>,
+}
+
+impl PointerFrame {
+    fn consume(
+        &mut self,
+        metadata: PointerMetadata,
+        event: InputEvent,
+    ) -> Option<Vec<CompositorInputEvent>> {
+        match event.type_ {
+            event_types::EV_REL => match event.code {
+                rel_codes::REL_X => self.rel_x = self.rel_x.saturating_add(event.value),
+                rel_codes::REL_Y => self.rel_y = self.rel_y.saturating_add(event.value),
+                rel_codes::REL_WHEEL => self.wheel_dy = self.wheel_dy.saturating_add(event.value),
+                rel_codes::REL_HWHEEL => self.wheel_dx = self.wheel_dx.saturating_add(event.value),
+                _ => {}
+            },
+            event_types::EV_ABS => match event.code {
+                abs_codes::ABS_X => {
+                    self.abs_x = Some(event.value);
+                    self.abs_dirty = true;
+                }
+                abs_codes::ABS_Y => {
+                    self.abs_y = Some(event.value);
+                    self.abs_dirty = true;
+                }
+                _ => {}
+            },
+            event_types::EV_KEY => {
+                let code = if metadata.direct_touch && event.code == key_codes::BTN_TOUCH {
+                    key_codes::BTN_LEFT
+                } else {
+                    event.code
+                };
+                if event.value == 0 || event.value == 1 {
+                    self.buttons.push((code, event.value == 1));
+                }
+            }
+            event_types::EV_SYN if event.code == syn_codes::SYN_REPORT => {
+                return Some(self.commit(metadata));
+            }
+            _ => {}
+        }
+        None
+    }
+
+    fn commit(&mut self, metadata: PointerMetadata) -> Vec<CompositorInputEvent> {
+        let mut events = Vec::new();
+        if self.rel_x != 0 || self.rel_y != 0 {
+            events.push(CompositorInputEvent::MouseMove {
+                dx: self.rel_x,
+                dy: self.rel_y,
+            });
+        }
+        if self.abs_dirty
+            && let (Some(x), Some(y), Some(x_axis), Some(y_axis)) =
+                (self.abs_x, self.abs_y, metadata.x_axis, metadata.y_axis)
+        {
+            events.push(CompositorInputEvent::MouseAbsolute {
+                x: x_axis.normalize(x, SCREEN_WIDTH.load(Ordering::Relaxed)),
+                y: y_axis.normalize(y, SCREEN_HEIGHT.load(Ordering::Relaxed)),
+            });
+        }
+        if self.wheel_dx != 0 || self.wheel_dy != 0 {
+            events.push(CompositorInputEvent::MouseWheel {
+                dx: self.wheel_dx,
+                dy: self.wheel_dy,
+            });
+        }
+        events.extend(
+            self.buttons
+                .drain(..)
+                .map(|(button, pressed)| CompositorInputEvent::MouseButton { button, pressed }),
+        );
+        self.rel_x = 0;
+        self.rel_y = 0;
+        self.wheel_dx = 0;
+        self.wheel_dy = 0;
+        self.abs_dirty = false;
+        events
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PointerSource {
+    Local(u8),
+    Remote(usize),
+}
+
+#[derive(Debug, Default)]
+struct LogicalPointerButtons {
+    held: Vec<(PointerSource, u16)>,
+}
+
+impl LogicalPointerButtons {
+    fn update(&mut self, source: PointerSource, button: u16, pressed: bool) -> Option<bool> {
+        let was_held = self.held.iter().any(|(_, held)| *held == button);
+        if pressed {
+            if !self.held.contains(&(source, button)) {
+                self.held.push((source, button));
+            }
+        } else {
+            self.held.retain(|entry| *entry != (source, button));
+        }
+        let is_held = self.held.iter().any(|(_, held)| *held == button);
+        (was_held != is_held).then_some(is_held)
+    }
+
+    fn drain_source(&mut self, source: PointerSource) -> Vec<(u16, bool)> {
+        let mut affected = Vec::new();
+        for (_, button) in self
+            .held
+            .iter()
+            .filter(|(held_source, _)| *held_source == source)
+        {
+            if !affected.contains(button) {
+                affected.push(*button);
+            }
+        }
+        self.held.retain(|(held_source, _)| *held_source != source);
+        affected
+            .into_iter()
+            .filter(|button| !self.held.iter().any(|(_, held)| held == button))
+            .map(|button| (button, false))
+            .collect()
+    }
+}
+
+static POINTER_BUTTONS: Mutex<LogicalPointerButtons> =
+    Mutex::new(LogicalPointerButtons { held: Vec::new() });
+
+fn push_pointer_frame(source: PointerSource, events: Vec<CompositorInputEvent>) {
+    for event in events {
+        match event {
+            CompositorInputEvent::MouseButton { button, pressed } => {
+                push_pointer_button(source, button, pressed);
+            }
+            event => push_input_event(event),
+        }
+    }
+}
+
+pub(crate) fn push_pointer_button(source: PointerSource, button: u16, pressed: bool) {
+    let transition = POINTER_BUTTONS
+        .lock()
+        .expect("SWS pointer mutex poisoned")
+        .update(source, button, pressed);
+    if let Some(pressed) = transition {
+        push_input_event(CompositorInputEvent::MouseButton { button, pressed });
+    }
+}
+
+pub(crate) fn release_pointer_source(source: PointerSource) {
+    let releases = POINTER_BUTTONS
+        .lock()
+        .expect("SWS pointer mutex poisoned")
+        .drain_source(source);
+    for (button, pressed) in releases {
+        push_input_event(CompositorInputEvent::MouseButton { button, pressed });
+    }
 }
 
 impl InputManager {
-    /// Create a new input manager
-    pub fn new() -> Result<Self, &'static str> {
-        // Try to open tablet device first (absolute positioning), fallback to touchpad or mouse (relative)
-        let mouse_file = match InputDevice::open("/dev/tablet0") {
-            Ok(file) => {
-                println!("[InputManager] Opened tablet device (absolute positioning)");
-                file
-            }
-            Err(_) => {
-                // Try touchpad (behaves like a relative mouse)
-                match InputDevice::open("/dev/touchpad0") {
-                    Ok(file) => {
-                        println!("[InputManager] Opened touchpad device (relative positioning)");
-                        file
-                    }
-                    Err(_) => {
-                        println!(
-                            "[InputManager] Touchpad/tablet not found, trying mouse device..."
-                        );
-                        InputDevice::open("/dev/mouse0")
-                            .map_err(|_| "Failed to open mouse, tablet, or touchpad device")?
-                    }
-                }
-            }
-        };
-
-        Ok(Self {
-            mouse_file,
-            tablet_max: 32767, // Standard virtio-tablet range
-            abs_x: None,
-            abs_y: None,
-            wheel_dx: 0,
-            wheel_dy: 0,
-        })
-    }
-
-    /// Read a single input event (blocking)
-    pub fn read_event(&mut self) -> Result<Option<InputEvent>, &'static str> {
-        let mut buffer = [0u8; InputEvent::SIZE];
-
-        let bytes_read = self.mouse_file.read(&mut buffer).map_err(|e| {
-            println!("[InputManager] Read error: {:?}", e);
-            "Failed to read input event"
-        })?;
-
-        if bytes_read != InputEvent::SIZE {
-            return Ok(None);
-        }
-
-        // SAFETY: the kernel filled the complete fixed-size event record, every
-        // bit pattern is valid for its integer fields, and `read_unaligned`
-        // does not require the byte buffer to have `InputEvent` alignment.
-        let event = unsafe { core::ptr::read_unaligned(buffer.as_ptr() as *const InputEvent) };
-        Ok(Some(event))
-    }
-
-    /// Try to read a single input event without blocking.
-    /// Returns Ok(Some(event)) if available, Ok(None) if no event pending.
-    pub fn try_read_event(&mut self) -> Result<Option<InputEvent>, &'static str> {
-        let mut buffer = [0u8; InputEvent::SIZE];
-
-        let _ = self.mouse_file.set_nonblocking(true);
-        let result = self.mouse_file.read(&mut buffer);
-        let _ = self.mouse_file.set_nonblocking(false);
-
-        match result {
-            Ok(bytes_read) if bytes_read == InputEvent::SIZE => {
-                // SAFETY: the complete initialized record has integer-only
-                // fields, and unaligned reads are valid for this byte buffer.
-                let event =
-                    unsafe { core::ptr::read_unaligned(buffer.as_ptr() as *const InputEvent) };
-                Ok(Some(event))
-            }
-            _ => Ok(None),
-        }
-    }
-
-    /// Scale tablet coordinates to screen coordinates
-    pub fn scale_tablet_coord(&self, value: i32, screen_dimension: u32) -> i32 {
-        ((value as i64 * screen_dimension as i64) / self.tablet_max as i64) as i32
-    }
-
-    /// Start input processing thread
+    /// Start readers for all bounded native input-device classes.
     pub fn start_input_thread(screen_width: u32, screen_height: u32) -> Result<(), &'static str> {
-        println!("[InputManager] Starting input thread...");
         set_screen_size(screen_width, screen_height);
+        if !begin_input_start(&INPUT_STARTED) {
+            return Ok(());
+        }
+        println!("[InputManager] Starting logical-seat input readers...");
 
-        thread::Builder::new()
-            .spawn(move || {
-                input_thread_main();
-            })
-            .map_err(|_| "Failed to start pointer input thread")?;
-
-        thread::Builder::new()
-            .spawn(move || {
-                keyboard_thread_main();
-            })
-            .map_err(|_| "Failed to start keyboard input thread")?;
-
-        println!("[InputManager] Input thread started");
+        if thread::Builder::new()
+            .spawn(input_discovery_supervisor)
+            .is_err()
+        {
+            INPUT_STARTED.store(false, Ordering::Release);
+            return Err("Failed to start input discovery supervisor");
+        }
+        println!("[InputManager] Logical-seat input readers started");
         Ok(())
     }
 }
 
-/// Input thread main function
-fn input_thread_main() {
-    println!("[InputThread] Started");
+fn begin_input_start(started: &AtomicBool) -> bool {
+    started
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok()
+}
 
-    let mut attempts = 0usize;
-    let mut input_manager = loop {
-        match InputManager::new() {
-            Ok(mgr) => break mgr,
-            Err(e) => {
-                attempts += 1;
-                if attempts == 1 || attempts % 20 == 0 {
-                    println!(
-                        "[InputThread] Waiting for pointer device: {} (attempt {})",
-                        e, attempts
-                    );
-                }
-                thread::sleep(core::time::Duration::from_millis(250));
+fn input_discovery_supervisor() {
+    let active_paths = Arc::new(Mutex::new(Vec::<std::string::String>::new()));
+    loop {
+        for (class_index, (prefix, kind)) in [
+            ("mouse", InputDeviceKind::Mouse),
+            ("touchpad", InputDeviceKind::Touchpad),
+            ("trackpad", InputDeviceKind::Touchpad),
+            ("touchscreen", InputDeviceKind::Touchscreen),
+            ("tablet", InputDeviceKind::Tablet),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            for index in 0..DEVICE_INDEX_LIMIT {
+                let path = std::format!("/dev/{prefix}{index}");
+                let source = PointerSource::Local(class_index as u8 * DEVICE_INDEX_LIMIT + index);
+                try_spawn_pointer_reader(&active_paths, path, kind, source);
             }
         }
-    };
+        for index in 0..DEVICE_INDEX_LIMIT {
+            let path = std::format!("/dev/keyboard{index}");
+            try_spawn_keyboard_reader(&active_paths, path, index);
+        }
+        thread::sleep(DEVICE_SCAN_INTERVAL);
+    }
+}
 
+fn claim_device(
+    active_paths: &Arc<Mutex<Vec<std::string::String>>>,
+    path: &str,
+) -> Option<InputDevice> {
+    let mut active = active_paths.lock().expect("SWS input mutex poisoned");
+    if active.iter().any(|active_path| active_path == path) {
+        return None;
+    }
+    let device = InputDevice::open(path).ok()?;
+    active.push(path.into());
+    Some(device)
+}
+
+fn release_device(active_paths: &Mutex<Vec<std::string::String>>, path: &str) {
+    active_paths
+        .lock()
+        .expect("SWS input mutex poisoned")
+        .retain(|active_path| active_path != path);
+}
+
+fn try_spawn_pointer_reader(
+    active_paths: &Arc<Mutex<Vec<std::string::String>>>,
+    path: std::string::String,
+    expected_kind: InputDeviceKind,
+    source: PointerSource,
+) {
+    let Some(device) = claim_device(active_paths, &path) else {
+        return;
+    };
+    let reader_paths = Arc::clone(active_paths);
+    let cleanup_path = path.clone();
+    let failure_path = cleanup_path.clone();
+    if thread::Builder::new()
+        .spawn(move || {
+            pointer_device_reader(device, path, expected_kind, source);
+            release_device(&reader_paths, &cleanup_path);
+        })
+        .is_err()
+    {
+        release_device(active_paths, &failure_path);
+    }
+}
+
+fn pointer_device_reader(
+    device: InputDevice,
+    path: std::string::String,
+    expected_kind: InputDeviceKind,
+    source: PointerSource,
+) {
+    let metadata = PointerMetadata::query(&device, expected_kind);
+    println!("[InputThread] Opened {} as {:?}", path, metadata.kind);
+    let mut frame = PointerFrame::default();
     loop {
         super::trace::input_loop();
-        match input_manager.read_event() {
+        match read_input_event(&device) {
             Ok(Some(event)) => {
                 super::trace::input_event();
-                process_mouse_event(&mut input_manager, event);
-
-                while let Ok(Some(event)) = input_manager.try_read_event() {
-                    super::trace::input_event();
-                    process_mouse_event(&mut input_manager, event);
+                if let Some(events) = frame.consume(metadata, event) {
+                    push_pointer_frame(source, events);
                 }
-
-                thread::sleep(core::time::Duration::from_millis(16));
             }
             Ok(None) => {
-                // A disconnected or temporarily incomplete input device may
-                // return a short read immediately. Do not turn that condition
-                // into an unbounded userspace polling loop.
                 super::trace::input_empty();
-                thread::sleep(core::time::Duration::from_millis(10));
+                thread::sleep(SHORT_READ_DELAY);
             }
-            Err(e) => {
-                println!("[InputThread] Error reading event: {}", e);
+            Err(error) => {
+                println!("[InputThread] {} disconnected: {:?}", path, error);
                 break;
             }
         }
     }
-
-    println!("[InputThread] Exited");
+    release_pointer_source(source);
 }
 
-fn process_mouse_event(input_manager: &mut InputManager, event: InputEvent) {
-    match event.type_ {
-        event_types::EV_REL => match event.code {
-            rel_codes::REL_X => {
-                push_input_event(CompositorInputEvent::MouseMove {
-                    dx: event.value,
-                    dy: 0,
-                });
-            }
-            rel_codes::REL_Y => {
-                push_input_event(CompositorInputEvent::MouseMove {
-                    dx: 0,
-                    dy: event.value,
-                });
-            }
-            rel_codes::REL_WHEEL => {
-                input_manager.wheel_dy = input_manager.wheel_dy.saturating_add(event.value);
-            }
-            rel_codes::REL_HWHEEL => {
-                input_manager.wheel_dx = input_manager.wheel_dx.saturating_add(event.value);
-            }
-            _ => {}
-        },
-        event_types::EV_ABS => match event.code {
-            abs_codes::ABS_X => {
-                input_manager.abs_x = Some(event.value);
-                if let (Some(x), Some(y)) = (input_manager.abs_x, input_manager.abs_y) {
-                    let screen_width = SCREEN_WIDTH.load(Ordering::Relaxed);
-                    let screen_height = SCREEN_HEIGHT.load(Ordering::Relaxed);
-                    let screen_x = input_manager.scale_tablet_coord(x, screen_width);
-                    let screen_y = input_manager.scale_tablet_coord(y, screen_height);
-                    push_input_event(CompositorInputEvent::MouseAbsolute {
-                        x: screen_x,
-                        y: screen_y,
-                    });
-                }
-            }
-            abs_codes::ABS_Y => {
-                input_manager.abs_y = Some(event.value);
-                if let (Some(x), Some(y)) = (input_manager.abs_x, input_manager.abs_y) {
-                    let screen_width = SCREEN_WIDTH.load(Ordering::Relaxed);
-                    let screen_height = SCREEN_HEIGHT.load(Ordering::Relaxed);
-                    let screen_x = input_manager.scale_tablet_coord(x, screen_width);
-                    let screen_y = input_manager.scale_tablet_coord(y, screen_height);
-                    push_input_event(CompositorInputEvent::MouseAbsolute {
-                        x: screen_x,
-                        y: screen_y,
-                    });
-                }
-            }
-            _ => {}
-        },
-        event_types::EV_KEY => {
-            let pressed = event.value == 1;
-            push_input_event(CompositorInputEvent::MouseButton {
-                button: event.code,
-                pressed,
-            });
-        }
-        event_types::EV_SYN => match event.code {
-            syn_codes::SYN_REPORT => {
-                if input_manager.wheel_dx != 0 || input_manager.wheel_dy != 0 {
-                    push_input_event(CompositorInputEvent::MouseWheel {
-                        dx: input_manager.wheel_dx,
-                        dy: input_manager.wheel_dy,
-                    });
-                    input_manager.wheel_dx = 0;
-                    input_manager.wheel_dy = 0;
-                }
-            }
-            _ => {}
-        },
-        _ => {}
+fn try_spawn_keyboard_reader(
+    active_paths: &Arc<Mutex<Vec<std::string::String>>>,
+    path: std::string::String,
+    index: u8,
+) {
+    let Some(device) = claim_device(active_paths, &path) else {
+        return;
+    };
+    let reader_paths = Arc::clone(active_paths);
+    let cleanup_path = path.clone();
+    let failure_path = cleanup_path.clone();
+    if thread::Builder::new()
+        .spawn(move || {
+            keyboard_device_reader(device, path, index);
+            release_device(&reader_paths, &cleanup_path);
+        })
+        .is_err()
+    {
+        release_device(active_paths, &failure_path);
     }
 }
 
-/// Keyboard thread main function
-fn keyboard_thread_main() {
-    println!("[KeyboardThread] Started");
-
-    let mut attempts = 0usize;
-    let mut keyboard_file = loop {
-        match InputDevice::open("/dev/keyboard0") {
-            Ok(file) => {
-                println!("[KeyboardThread] Opened keyboard device");
-                break file;
-            }
-            Err(e) => {
-                attempts += 1;
-                if attempts == 1 || attempts % 20 == 0 {
-                    println!(
-                        "[KeyboardThread] Waiting for keyboard device: {:?} (attempt {})",
-                        e, attempts
-                    );
-                }
-                thread::sleep(core::time::Duration::from_millis(250));
-            }
-        }
-    };
-
+fn keyboard_device_reader(device: InputDevice, path: std::string::String, index: u8) {
+    let source = KeyboardSource::Local(index);
+    println!("[KeyboardThread] Opened {}", path);
     loop {
         super::trace::keyboard_loop();
-        let mut buffer = [0u8; InputEvent::SIZE];
-
-        match keyboard_file.read(&mut buffer) {
-            Ok(bytes_read) => {
-                if bytes_read != InputEvent::SIZE {
-                    super::trace::keyboard_short_read();
-                    thread::sleep(core::time::Duration::from_millis(10));
-                    continue;
-                }
-
+        match read_input_event(&device) {
+            Ok(Some(event)) => {
                 super::trace::keyboard_event();
-                // SAFETY: the complete initialized record has integer-only
-                // fields, and unaligned reads are valid for this byte buffer.
-                let event =
-                    unsafe { core::ptr::read_unaligned(buffer.as_ptr() as *const InputEvent) };
-
-                match event.type_ {
-                    event_types::EV_KEY => {
-                        let pressed = event.value == 1 || event.value == 2;
-                        push_input_event(CompositorInputEvent::Keyboard {
-                            code: event.code,
-                            pressed,
-                        });
-                    }
-                    _ => {}
+                if event.type_ == event_types::EV_KEY {
+                    push_input_event(CompositorInputEvent::Keyboard {
+                        code: event.code,
+                        value: event.value,
+                        source,
+                        synthetic: false,
+                    });
                 }
-
-                let _ = keyboard_file.set_nonblocking(true);
-                loop {
-                    let mut buf = [0u8; InputEvent::SIZE];
-                    match keyboard_file.read(&mut buf) {
-                        Ok(n) if n == InputEvent::SIZE => {
-                            super::trace::keyboard_event();
-                            // SAFETY: the complete initialized record has integer-only
-                            // fields, and unaligned reads are valid for this byte buffer.
-                            let ev = unsafe {
-                                core::ptr::read_unaligned(buf.as_ptr() as *const InputEvent)
-                            };
-                            if ev.type_ == event_types::EV_KEY {
-                                let pressed = ev.value == 1 || ev.value == 2;
-                                push_input_event(CompositorInputEvent::Keyboard {
-                                    code: ev.code,
-                                    pressed,
-                                });
-                            }
-                        }
-                        _ => break,
-                    }
-                }
-                let _ = keyboard_file.set_nonblocking(false);
-
-                thread::sleep(core::time::Duration::from_millis(16));
             }
-            Err(e) => {
-                println!("[KeyboardThread] Error reading event: {:?}", e);
+            Ok(None) => {
+                super::trace::keyboard_short_read();
+                thread::sleep(SHORT_READ_DELAY);
+            }
+            Err(error) => {
+                println!("[KeyboardThread] {} disconnected: {:?}", path, error);
                 break;
             }
         }
     }
+    push_input_event(CompositorInputEvent::KeyboardReset { source });
+}
 
-    println!("[KeyboardThread] Exited");
+fn read_input_event(device: &InputDevice) -> Result<Option<InputEvent>, StreamError> {
+    let mut buffer = [0u8; InputEvent::SIZE];
+    let bytes_read = device.read(&mut buffer)?;
+    if should_retry_keyboard_read(bytes_read, InputEvent::SIZE) {
+        return Ok(None);
+    }
+    // SAFETY: the kernel filled one complete integer-only record. Unaligned
+    // reads are valid for the byte-aligned buffer.
+    Ok(Some(unsafe {
+        core::ptr::read_unaligned(buffer.as_ptr() as *const InputEvent)
+    }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn event(type_: u16, code: u16, value: i32) -> InputEvent {
+        InputEvent {
+            time: 0,
+            type_,
+            code,
+            value,
+        }
+    }
+
+    fn metadata(kind: InputDeviceKind) -> PointerMetadata {
+        PointerMetadata {
+            kind,
+            direct_touch: kind == InputDeviceKind::Touchscreen,
+            x_axis: Some(AxisRange {
+                minimum: 100,
+                maximum: 1100,
+            }),
+            y_axis: Some(AxisRange {
+                minimum: -500,
+                maximum: 1500,
+            }),
+        }
+    }
+
+    #[test]
+    fn tablet_and_touchpad_keep_independent_frames() {
+        set_screen_size(1001, 2001);
+        let mut tablet = PointerFrame::default();
+        let mut touchpad = PointerFrame::default();
+        assert!(
+            tablet
+                .consume(
+                    metadata(InputDeviceKind::Tablet),
+                    event(event_types::EV_ABS, abs_codes::ABS_X, 600)
+                )
+                .is_none()
+        );
+        assert!(
+            touchpad
+                .consume(
+                    metadata(InputDeviceKind::Touchpad),
+                    event(event_types::EV_REL, rel_codes::REL_X, 7)
+                )
+                .is_none()
+        );
+        let touchpad_events = touchpad
+            .consume(
+                metadata(InputDeviceKind::Touchpad),
+                event(event_types::EV_SYN, syn_codes::SYN_REPORT, 0),
+            )
+            .unwrap();
+        assert_eq!(
+            touchpad_events,
+            std::vec![CompositorInputEvent::MouseMove { dx: 7, dy: 0 }]
+        );
+        assert!(
+            tablet
+                .consume(
+                    metadata(InputDeviceKind::Tablet),
+                    event(event_types::EV_ABS, abs_codes::ABS_Y, 500)
+                )
+                .is_none()
+        );
+        let tablet_events = tablet
+            .consume(
+                metadata(InputDeviceKind::Tablet),
+                event(event_types::EV_SYN, syn_codes::SYN_REPORT, 0),
+            )
+            .unwrap();
+        assert_eq!(
+            tablet_events,
+            std::vec![CompositorInputEvent::MouseAbsolute { x: 500, y: 1000 }]
+        );
+    }
+
+    #[test]
+    fn absolute_axes_scale_independently_with_nonzero_minimum() {
+        assert_eq!(
+            AxisRange {
+                minimum: 100,
+                maximum: 1100
+            }
+            .normalize(600, 1001),
+            500
+        );
+        assert_eq!(
+            AxisRange {
+                minimum: -500,
+                maximum: 1500
+            }
+            .normalize(500, 2001),
+            1000
+        );
+        assert_eq!(
+            AxisRange {
+                minimum: 100,
+                maximum: 1100
+            }
+            .normalize(-1, 1001),
+            0
+        );
+        assert_eq!(
+            AxisRange {
+                minimum: i32::MIN,
+                maximum: i32::MAX,
+            }
+            .normalize(0, 1001),
+            500
+        );
+    }
+
+    #[test]
+    fn touchscreen_motion_precedes_touch_as_left_button() {
+        set_screen_size(1001, 2001);
+        let mut frame = PointerFrame::default();
+        frame.consume(
+            metadata(InputDeviceKind::Touchscreen),
+            event(event_types::EV_ABS, abs_codes::ABS_X, 600),
+        );
+        frame.consume(
+            metadata(InputDeviceKind::Touchscreen),
+            event(event_types::EV_ABS, abs_codes::ABS_Y, 500),
+        );
+        frame.consume(
+            metadata(InputDeviceKind::Touchscreen),
+            event(event_types::EV_KEY, key_codes::BTN_TOUCH, 1),
+        );
+        let events = frame
+            .consume(
+                metadata(InputDeviceKind::Touchscreen),
+                event(event_types::EV_SYN, syn_codes::SYN_REPORT, 0),
+            )
+            .unwrap();
+        assert_eq!(
+            events,
+            std::vec![
+                CompositorInputEvent::MouseAbsolute { x: 500, y: 1000 },
+                CompositorInputEvent::MouseButton {
+                    button: key_codes::BTN_LEFT,
+                    pressed: true
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn pointer_buttons_are_or_aggregated_across_devices() {
+        let mouse = PointerSource::Local(0);
+        let touch = PointerSource::Local(24);
+        let mut buttons = LogicalPointerButtons::default();
+        assert_eq!(buttons.update(mouse, key_codes::BTN_LEFT, true), Some(true));
+        assert_eq!(buttons.update(touch, key_codes::BTN_LEFT, true), None);
+        assert_eq!(buttons.update(mouse, key_codes::BTN_LEFT, false), None);
+        assert_eq!(
+            buttons.update(touch, key_codes::BTN_LEFT, false),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn local_keyboard_sources_include_device_identity() {
+        assert_ne!(KeyboardSource::Local(0), KeyboardSource::Local(1));
+        let mut held = HeldKeys::default();
+        held.update(KeyboardSource::Local(0), key_codes::KEY_SPACE, 1);
+        held.update(KeyboardSource::Local(1), key_codes::KEY_SPACE, 1);
+        assert_eq!(
+            held.codes_for_source(KeyboardSource::Local(0)),
+            std::vec![key_codes::KEY_SPACE]
+        );
+        assert!(!held.update(KeyboardSource::Local(0), key_codes::KEY_SPACE, 0));
+        assert!(held.has_any(&[key_codes::KEY_SPACE]));
+    }
+
+    #[test]
+    fn retry_delays_are_nonzero_and_device_scan_is_bounded() {
+        assert!(DEVICE_SCAN_INTERVAL >= Duration::from_secs(1));
+        assert!(SHORT_READ_DELAY > Duration::ZERO);
+        assert_eq!((0..DEVICE_INDEX_LIMIT).count(), 8);
+    }
+
+    #[test]
+    fn local_and_remote_buttons_share_one_logical_or_state() {
+        let local = PointerSource::Local(0);
+        let remote = PointerSource::Remote(7);
+        let mut buttons = LogicalPointerButtons::default();
+
+        assert_eq!(buttons.update(local, key_codes::BTN_LEFT, true), Some(true));
+        assert_eq!(buttons.update(remote, key_codes::BTN_LEFT, false), None);
+        assert_eq!(buttons.update(remote, key_codes::BTN_LEFT, true), None);
+        assert_eq!(buttons.update(local, key_codes::BTN_LEFT, false), None);
+        assert_eq!(
+            buttons.update(remote, key_codes::BTN_LEFT, false),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn remote_disconnect_releases_only_its_logical_buttons() {
+        let local = PointerSource::Local(0);
+        let remote = PointerSource::Remote(7);
+        let mut buttons = LogicalPointerButtons::default();
+        buttons.update(remote, key_codes::BTN_LEFT, true);
+        assert_eq!(buttons.drain_source(PointerSource::Remote(99)), std::vec![]);
+        assert_eq!(
+            buttons.drain_source(remote),
+            std::vec![(key_codes::BTN_LEFT, false)]
+        );
+
+        buttons.update(local, key_codes::BTN_LEFT, true);
+        buttons.update(remote, key_codes::BTN_LEFT, true);
+        assert_eq!(buttons.drain_source(remote), std::vec![]);
+        assert_eq!(
+            buttons.update(local, key_codes::BTN_LEFT, false),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn non_owner_remote_disconnect_has_no_effect() {
+        let owner = PointerSource::Remote(7);
+        let mut buttons = LogicalPointerButtons::default();
+        assert_eq!(buttons.update(owner, key_codes::BTN_LEFT, true), Some(true));
+        assert_eq!(buttons.drain_source(PointerSource::Remote(99)), std::vec![]);
+        assert_eq!(
+            buttons.update(owner, key_codes::BTN_LEFT, false),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn input_start_claim_is_idempotent_and_resettable_after_failure() {
+        let started = AtomicBool::new(false);
+        assert!(begin_input_start(&started));
+        assert!(!begin_input_start(&started));
+        started.store(false, Ordering::Release);
+        assert!(begin_input_start(&started));
+    }
 }

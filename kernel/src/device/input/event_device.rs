@@ -8,13 +8,16 @@ extern crate alloc;
 use crate::sync::IrqSpinLock;
 use alloc::collections::VecDeque;
 use alloc::string::String;
+use alloc::vec::Vec;
 use core::any::Any;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 /// Static counters for device naming
 static KEYBOARD_COUNTER: AtomicUsize = AtomicUsize::new(0);
 static MOUSE_COUNTER: AtomicUsize = AtomicUsize::new(0);
+static TOUCHPAD_COUNTER: AtomicUsize = AtomicUsize::new(0);
 static TABLET_COUNTER: AtomicUsize = AtomicUsize::new(0);
+static TOUCHSCREEN_COUNTER: AtomicUsize = AtomicUsize::new(0);
 static INPUT_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 use crate::arch::Trapframe;
@@ -31,6 +34,139 @@ use super::InputEvent;
 /// Maximum number of events to buffer
 const EVENT_QUEUE_CAPACITY: usize = 64;
 
+/// Return the input device's [`InputDeviceKind`].
+pub const SCTL_INPUT_GET_KIND: u32 = 0x5353_0100;
+/// Return the input device's capability bit mask.
+pub const SCTL_INPUT_GET_CAPABILITIES: u32 = 0x5353_0101;
+/// Return the minimum value for the absolute axis passed in `arg`.
+pub const SCTL_INPUT_GET_ABS_MIN: u32 = 0x5353_0102;
+/// Return the maximum value for the absolute axis passed in `arg`.
+pub const SCTL_INPUT_GET_ABS_MAX: u32 = 0x5353_0103;
+
+/// Device produces key or button events.
+pub const INPUT_CAP_KEY: u32 = 1 << 0;
+/// Device produces relative-axis events.
+pub const INPUT_CAP_REL: u32 = 1 << 1;
+/// Device produces absolute-axis events.
+pub const INPUT_CAP_ABS: u32 = 1 << 2;
+/// Device represents direct touch rather than an indirect pointer surface.
+pub const INPUT_CAP_DIRECT_TOUCH: u32 = 1 << 3;
+
+/// Largest Linux-compatible absolute-axis code accepted by the metadata ABI.
+pub const ABS_MAX: u16 = 0x3f;
+
+/// Stable input device classes exposed through `SCTL_INPUT_GET_KIND`.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InputDeviceKind {
+    /// Device class is not declared.
+    Unknown = 0,
+    /// Keyboard device.
+    Keyboard = 1,
+    /// Relative mouse device.
+    Mouse = 2,
+    /// Indirect touchpad device.
+    Touchpad = 3,
+    /// Direct touchscreen device.
+    Touchscreen = 4,
+    /// Graphics tablet or stylus device.
+    Tablet = 5,
+}
+
+impl InputDeviceKind {
+    fn from_device_type(device_type: &str) -> Self {
+        match device_type {
+            "keyboard" => Self::Keyboard,
+            "mouse" => Self::Mouse,
+            "touchpad" | "trackpad" => Self::Touchpad,
+            "touchscreen" => Self::Touchscreen,
+            "tablet" => Self::Tablet,
+            _ => Self::Unknown,
+        }
+    }
+}
+
+/// Inclusive raw range for one `EV_ABS` axis.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AbsoluteAxisInfo {
+    /// Linux-compatible absolute-axis code.
+    pub code: u16,
+    /// Inclusive logical minimum emitted by the device.
+    pub minimum: i32,
+    /// Inclusive logical maximum emitted by the device.
+    pub maximum: i32,
+}
+
+/// Optional device classification and absolute-axis description.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InputDeviceMetadata {
+    kind: InputDeviceKind,
+    capabilities: u32,
+    absolute_axes: Vec<AbsoluteAxisInfo>,
+}
+
+impl InputDeviceMetadata {
+    /// Create empty metadata for a device class.
+    ///
+    /// # Arguments
+    ///
+    /// * `kind` - Logical input device class.
+    /// * `capabilities` - `INPUT_CAP_*` bit mask.
+    ///
+    /// # Returns
+    ///
+    /// Metadata with no absolute axes declared.
+    pub const fn new(kind: InputDeviceKind, capabilities: u32) -> Self {
+        Self {
+            kind,
+            capabilities,
+            absolute_axes: Vec::new(),
+        }
+    }
+
+    /// Add a validated absolute-axis range.
+    ///
+    /// # Arguments
+    ///
+    /// * `code` - Linux-compatible `ABS_*` axis code.
+    /// * `minimum` - Inclusive logical minimum.
+    /// * `maximum` - Inclusive logical maximum, greater than `minimum`.
+    ///
+    /// # Returns
+    ///
+    /// Updated metadata, or an error for an invalid or duplicate axis.
+    pub fn with_absolute_axis(
+        mut self,
+        code: u16,
+        minimum: i32,
+        maximum: i32,
+    ) -> Result<Self, &'static str> {
+        if code > ABS_MAX {
+            return Err("Absolute axis code is out of range");
+        }
+        if minimum >= maximum {
+            return Err("Absolute axis minimum must be less than maximum");
+        }
+        if self.absolute_axes.iter().any(|axis| axis.code == code) {
+            return Err("Absolute axis metadata is duplicated");
+        }
+        self.absolute_axes.push(AbsoluteAxisInfo {
+            code,
+            minimum,
+            maximum,
+        });
+        self.capabilities |= INPUT_CAP_ABS;
+        Ok(self)
+    }
+
+    fn axis(&self, code: u16) -> Option<AbsoluteAxisInfo> {
+        self.absolute_axes
+            .iter()
+            .copied()
+            .find(|axis| axis.code == code)
+    }
+}
+
 /// Event device for input handling
 ///
 /// This device provides a character device interface for reading input events.
@@ -39,6 +175,8 @@ const EVENT_QUEUE_CAPACITY: usize = 64;
 pub struct EventDevice {
     /// Device name (e.g., "input0")
     name: String,
+    /// Optional classification and axis metadata.
+    metadata: InputDeviceMetadata,
     /// Event queue (ring buffer)
     queue: IrqSpinLock<VecDeque<InputEvent>>,
     /// Waker for blocking reads
@@ -61,11 +199,30 @@ impl EventDevice {
     /// DeviceManager::get_manager().register_device(event_dev);
     /// ```
     pub fn new(device_type: &str) -> Self {
+        Self::new_with_metadata(
+            device_type,
+            InputDeviceMetadata::new(InputDeviceKind::from_device_type(device_type), 0),
+        )
+    }
+
+    /// Create an event device with queryable input metadata.
+    ///
+    /// # Arguments
+    ///
+    /// * `device_type` - Prefix used for the registered device name.
+    /// * `metadata` - Device class, capabilities, and absolute-axis ranges.
+    ///
+    /// # Returns
+    ///
+    /// A new event device carrying the supplied metadata.
+    pub fn new_with_metadata(device_type: &str, metadata: InputDeviceMetadata) -> Self {
         // Get incremented ID based on device type
         let id = match device_type {
             "keyboard" => KEYBOARD_COUNTER.fetch_add(1, Ordering::SeqCst),
             "mouse" => MOUSE_COUNTER.fetch_add(1, Ordering::SeqCst),
+            "touchpad" | "trackpad" => TOUCHPAD_COUNTER.fetch_add(1, Ordering::SeqCst),
             "tablet" => TABLET_COUNTER.fetch_add(1, Ordering::SeqCst),
+            "touchscreen" => TOUCHSCREEN_COUNTER.fetch_add(1, Ordering::SeqCst),
             _ => INPUT_COUNTER.fetch_add(1, Ordering::SeqCst),
         };
 
@@ -77,6 +234,7 @@ impl EventDevice {
 
         Self {
             name,
+            metadata,
             queue: IrqSpinLock::new(VecDeque::with_capacity(EVENT_QUEUE_CAPACITY)),
             waker: Waker::new_interruptible(waker_name),
             nonblocking: IrqSpinLock::new(false),
@@ -310,8 +468,35 @@ impl ControlOps for EventDevice {
                 self.set_nonblocking(arg != 0);
                 Ok(0)
             }
+            SCTL_INPUT_GET_KIND => Ok(i32::from(self.metadata.kind as u8)),
+            SCTL_INPUT_GET_CAPABILITIES => i32::try_from(self.metadata.capabilities)
+                .map_err(|_| "Input capability mask exceeds control return range"),
+            SCTL_INPUT_GET_ABS_MIN | SCTL_INPUT_GET_ABS_MAX => {
+                let code = u16::try_from(arg).map_err(|_| "Invalid absolute axis code")?;
+                if code > ABS_MAX {
+                    return Err("Invalid absolute axis code");
+                }
+                let axis = self
+                    .metadata
+                    .axis(code)
+                    .ok_or("Absolute axis is not supported")?;
+                if command == SCTL_INPUT_GET_ABS_MIN {
+                    Ok(axis.minimum)
+                } else {
+                    Ok(axis.maximum)
+                }
+            }
             _ => Err("Control operation not supported"),
         }
+    }
+
+    fn supported_control_commands(&self) -> Vec<(u32, &'static str)> {
+        alloc::vec![
+            (SCTL_INPUT_GET_KIND, "Get input device kind"),
+            (SCTL_INPUT_GET_CAPABILITIES, "Get input device capabilities",),
+            (SCTL_INPUT_GET_ABS_MIN, "Get absolute axis minimum"),
+            (SCTL_INPUT_GET_ABS_MAX, "Get absolute axis maximum"),
+        ]
     }
 }
 impl MemoryMappingOps for EventDevice {
@@ -329,7 +514,6 @@ mod tests {
     use super::*;
     use crate::device::input::event_types::*;
     use crate::device::input::rel_codes::*;
-    use alloc::string::ToString;
 
     #[test_case]
     fn test_event_device_creation() {
@@ -337,6 +521,69 @@ mod tests {
         // Device name should be "input" + counter (e.g., "input0", "input1", etc.)
         assert!(dev.name.starts_with("input"));
         assert!(!dev.has_events());
+    }
+
+    #[test_case]
+    fn test_default_metadata_preserves_device_kind_without_axes() {
+        let dev = EventDevice::new("tablet");
+        assert_eq!(
+            dev.control(SCTL_INPUT_GET_KIND, 0).unwrap(),
+            InputDeviceKind::Tablet as i32
+        );
+        assert_eq!(dev.control(SCTL_INPUT_GET_CAPABILITIES, 0).unwrap(), 0);
+        assert!(dev.control(SCTL_INPUT_GET_ABS_MIN, 0).is_err());
+
+        let touchpad = EventDevice::new("touchpad");
+        assert!(touchpad.name.starts_with("touchpad"));
+        assert_eq!(
+            touchpad.control(SCTL_INPUT_GET_KIND, 0).unwrap(),
+            InputDeviceKind::Touchpad as i32
+        );
+    }
+
+    #[test_case]
+    fn test_absolute_axis_metadata_control_queries() {
+        let metadata = InputDeviceMetadata::new(
+            InputDeviceKind::Touchscreen,
+            INPUT_CAP_KEY | INPUT_CAP_DIRECT_TOUCH,
+        )
+        .with_absolute_axis(0x00, 0, 4095)
+        .unwrap()
+        .with_absolute_axis(0x01, 0, 2047)
+        .unwrap();
+        let dev = EventDevice::new_with_metadata("touchscreen", metadata);
+
+        assert!(dev.name.starts_with("touchscreen"));
+        assert_eq!(
+            dev.control(SCTL_INPUT_GET_KIND, 0).unwrap(),
+            InputDeviceKind::Touchscreen as i32
+        );
+        assert_eq!(
+            dev.control(SCTL_INPUT_GET_CAPABILITIES, 0).unwrap(),
+            (INPUT_CAP_KEY | INPUT_CAP_ABS | INPUT_CAP_DIRECT_TOUCH) as i32
+        );
+        assert_eq!(dev.control(SCTL_INPUT_GET_ABS_MIN, 0x00).unwrap(), 0);
+        assert_eq!(dev.control(SCTL_INPUT_GET_ABS_MAX, 0x00).unwrap(), 4095);
+        assert_eq!(dev.control(SCTL_INPUT_GET_ABS_MAX, 0x01).unwrap(), 2047);
+        assert!(dev.control(SCTL_INPUT_GET_ABS_MAX, usize::MAX).is_err());
+        assert!(dev.control(SCTL_INPUT_GET_ABS_MAX, 0x18).is_err());
+    }
+
+    #[test_case]
+    fn test_absolute_axis_metadata_rejects_invalid_ranges() {
+        let metadata = InputDeviceMetadata::new(InputDeviceKind::Touchscreen, 0)
+            .with_absolute_axis(0x00, 10, 10);
+        assert!(metadata.is_err());
+
+        let metadata = InputDeviceMetadata::new(InputDeviceKind::Touchscreen, 0)
+            .with_absolute_axis(0x00, 0, 10)
+            .unwrap();
+        assert!(metadata.with_absolute_axis(0x00, 0, 20).is_err());
+        assert!(
+            InputDeviceMetadata::new(InputDeviceKind::Touchscreen, 0)
+                .with_absolute_axis(ABS_MAX + 1, 0, 10)
+                .is_err()
+        );
     }
 
     #[test_case]

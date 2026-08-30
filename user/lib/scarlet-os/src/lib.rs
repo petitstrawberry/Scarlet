@@ -17,6 +17,9 @@ pub mod handle;
 /// Hypervisor control APIs.
 pub mod hypervisor;
 
+/// Scarlet native input event device APIs.
+pub mod input;
+
 /// Scarlet IPC and shared-memory APIs.
 pub mod ipc;
 
@@ -39,5 +42,6 @@ pub mod scheduler;
 pub mod time;
 
 pub use handle::{Handle, RawHandle};
+pub use input::InputDevice;
 pub use ipc::SharedMemory;
 pub use socket::Socket;

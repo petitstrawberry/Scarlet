@@ -5,7 +5,10 @@ use super::cursor::Cursor;
 use super::cursor_theme::CursorTheme;
 use super::damage::{DamageRect, PresentDamage, WindowGeometrySnapshot, changed_geometry_damage};
 use super::gpu_compositor::{GpuCompositor, SgfxBufferError, SgfxBufferIdentity, SgfxCommitToken};
-use super::input::{CompositorInputEvent, InputManager, key_codes};
+use super::input::{
+    CompositorInputEvent, ConsumedKeys, HeldKeys, InputManager, KeyRepeatState, KeyboardSource,
+    forward_to_binary_key_protocol, is_initial_press, is_physical_key_value, key_codes,
+};
 use super::ipc::{IpcEvent, IpcServer, send_message_to_client, send_response_to_client};
 use super::pointer_lock::{
     CorrelatedReply, PointerInteractionState, PointerLockDenial, PointerLockState, captured_window,
@@ -630,17 +633,11 @@ pub struct Compositor {
     active_app_id: Option<Vec<u8>>,
     /// Track the last focused window ID to avoid redundant FOCUS_CHANGED broadcasts
     last_focused_window_id: Option<u32>,
-    left_control_down: bool,
-    right_control_down: bool,
-    left_shift_down: bool,
-    right_shift_down: bool,
-    left_alt_down: bool,
-    right_alt_down: bool,
-    left_meta_down: bool,
-    right_meta_down: bool,
-    launcher_shortcut_consuming: bool,
+    held_keys: HeldKeys,
+    launcher_shortcut_keys: ConsumedKeys,
     ime_toggle_bindings: Vec<KeyBinding>,
-    ime_trigger_key_down: Option<u16>,
+    ime_trigger_keys: ConsumedKeys,
+    key_repeat: KeyRepeatState,
     ime_popup_windows: Vec<ImePopupWindow>,
     next_activation_token_serial: u64,
     activation_tokens: Vec<ActivationRecord>,
@@ -853,44 +850,48 @@ impl Compositor {
             workarea: None,
             active_app_id: None,
             last_focused_window_id: None,
-            left_control_down: false,
-            right_control_down: false,
-            left_shift_down: false,
-            right_shift_down: false,
-            left_alt_down: false,
-            right_alt_down: false,
-            left_meta_down: false,
-            right_meta_down: false,
-            launcher_shortcut_consuming: false,
+            held_keys: HeldKeys::default(),
+            launcher_shortcut_keys: ConsumedKeys::default(),
             ime_toggle_bindings: sws_config.ime_toggle_bindings,
-            ime_trigger_key_down: None,
+            ime_trigger_keys: ConsumedKeys::default(),
+            key_repeat: KeyRepeatState::default(),
             ime_popup_windows: Vec::new(),
             next_activation_token_serial: 1,
             activation_tokens: Vec::new(),
         })
     }
 
-    fn update_modifier_key_state(&mut self, code: u16, pressed: bool) {
-        match code {
-            key_codes::KEY_LEFTCTRL => self.left_control_down = pressed,
-            key_codes::KEY_RIGHTCTRL => self.right_control_down = pressed,
-            key_codes::KEY_LEFTSHIFT => self.left_shift_down = pressed,
-            key_codes::KEY_RIGHTSHIFT => self.right_shift_down = pressed,
-            key_codes::KEY_LEFTALT => self.left_alt_down = pressed,
-            key_codes::KEY_RIGHTALT => self.right_alt_down = pressed,
-            key_codes::KEY_LEFTMETA => self.left_meta_down = pressed,
-            key_codes::KEY_RIGHTMETA => self.right_meta_down = pressed,
-            _ => {}
+    fn current_key_modifiers(&self) -> KeyModifiers {
+        KeyModifiers {
+            ctrl: self
+                .held_keys
+                .has_any(&[key_codes::KEY_LEFTCTRL, key_codes::KEY_RIGHTCTRL]),
+            shift: self
+                .held_keys
+                .has_any(&[key_codes::KEY_LEFTSHIFT, key_codes::KEY_RIGHTSHIFT]),
+            alt: self
+                .held_keys
+                .has_any(&[key_codes::KEY_LEFTALT, key_codes::KEY_RIGHTALT]),
+            meta: self
+                .held_keys
+                .has_any(&[key_codes::KEY_LEFTMETA, key_codes::KEY_RIGHTMETA]),
         }
     }
 
-    fn current_key_modifiers(&self) -> KeyModifiers {
-        KeyModifiers {
-            ctrl: self.left_control_down || self.right_control_down,
-            shift: self.left_shift_down || self.right_shift_down,
-            alt: self.left_alt_down || self.right_alt_down,
-            meta: self.left_meta_down || self.right_meta_down,
+    fn release_keyboard_source(&mut self, source: KeyboardSource) -> Result<(), &'static str> {
+        let held_codes = self.held_keys.codes_for_source(source);
+        for code in held_codes {
+            self.handle_input_event(CompositorInputEvent::Keyboard {
+                code,
+                value: 0,
+                source,
+                synthetic: false,
+            })?;
         }
+        self.key_repeat.cancel_source(source);
+        self.launcher_shortcut_keys.drain_source(source);
+        self.ime_trigger_keys.drain_source(source);
+        Ok(())
     }
 
     fn request_launcher_show() {
@@ -3055,21 +3056,23 @@ impl Compositor {
         );
     }
 
-    fn cursor_wait_timeout_ns(&self) -> i64 {
-        if !cursor_visible(self.pointer_lock) {
-            return COMPOSITOR_IDLE_RECHECK_NS;
+    fn event_wait_timeout_ns(&self) -> i64 {
+        let now = monotonic_time_ns();
+        let mut timeout = COMPOSITOR_IDLE_RECHECK_NS as u64;
+        if cursor_visible(self.pointer_lock)
+            && let Some(deadline) = self.cursor.next_animation_deadline_ns()
+        {
+            timeout = timeout.min(deadline.saturating_sub(now));
         }
-        let Some(deadline) = self.cursor.next_animation_deadline_ns() else {
-            return COMPOSITOR_IDLE_RECHECK_NS;
-        };
-        deadline
-            .saturating_sub(monotonic_time_ns())
-            .min(COMPOSITOR_IDLE_RECHECK_NS as u64) as i64
+        if let Some(deadline) = self.key_repeat.next_deadline_ns() {
+            timeout = timeout.min(deadline.saturating_sub(now));
+        }
+        timeout as i64
     }
 
     fn wait_for_event_signal(&mut self) {
         let mut handles = [PollHandle::new(self.wake_read.as_raw() as u32, POLLIN)];
-        let ready = match poll(&mut handles, self.cursor_wait_timeout_ns()) {
+        let ready = match poll(&mut handles, self.event_wait_timeout_ns()) {
             Ok(ready) => ready,
             Err(_) => {
                 super::ipc::consume_compositor_wake();
@@ -3170,13 +3173,17 @@ impl Compositor {
             }
             RemoteEvent::Input { client_id, message } => {
                 if self.capture_session.is_owner(client_id)
-                    && let Some(event) = super::remote::input::compositor_event(&message)
+                    && let Some(event) = super::remote::input::compositor_event(client_id, &message)
                 {
                     super::input::push_input_event(event);
                 }
             }
             RemoteEvent::Disconnected { client_id } => {
                 self.capture_session.disconnect(client_id);
+                super::input::release_pointer_source(super::input::PointerSource::Remote(
+                    client_id,
+                ));
+                self.release_keyboard_source(KeyboardSource::Remote(client_id))?;
             }
         }
         Ok(())
@@ -3211,6 +3218,17 @@ impl Compositor {
             for event in input_events {
                 self.handle_input_event(event)?;
             }
+        }
+
+        let focused_id = self.window_manager.get_focused_window_id();
+        self.key_repeat.cancel_if_focus_changed(focused_id);
+        if let Some((source, code)) = self.key_repeat.take_due(monotonic_time_ns(), focused_id) {
+            self.handle_input_event(CompositorInputEvent::Keyboard {
+                code,
+                value: 2,
+                source,
+                synthetic: true,
+            })?;
         }
 
         if cursor_visible(self.pointer_lock) {
@@ -3802,21 +3820,67 @@ impl Compositor {
 
                 Ok(true)
             }
-            CompositorInputEvent::Keyboard { code, pressed } => {
-                self.update_modifier_key_state(code, pressed);
-
+            CompositorInputEvent::Keyboard {
+                code,
+                value,
+                source,
+                synthetic,
+            } => {
+                // Every current SWS keyboard source explicitly delegates
+                // repeat timing to the compositor. Ignore raw value 2 so a
+                // late device repeat cannot cross a focus boundary.
+                if !synthetic && !is_physical_key_value(value) {
+                    return Ok(false);
+                }
+                let pressed = value != 0;
+                let focused_id = self.window_manager.get_focused_window_id();
+                if !synthetic {
+                    let logical_transition = self.held_keys.update(source, code, value);
+                    if !logical_transition {
+                        if self.launcher_shortcut_keys.contains_code(code) {
+                            self.launcher_shortcut_keys
+                                .update_duplicate(source, code, value);
+                            return Ok(false);
+                        }
+                        if self.ime_trigger_keys.contains_code(code) {
+                            self.ime_trigger_keys.update_duplicate(source, code, value);
+                            return Ok(false);
+                        }
+                        if value == 0
+                            && let Some(replacement) = self.held_keys.source_for_code(code)
+                        {
+                            self.key_repeat.transfer_source(source, replacement, code);
+                        }
+                        return Ok(false);
+                    }
+                    self.key_repeat.handle_key_event(
+                        code,
+                        value,
+                        source,
+                        focused_id,
+                        monotonic_time_ns(),
+                    );
+                }
                 // Super+Space is a desktop-global launcher shortcut. Consume
                 // the chord here before it reaches the focused application;
                 // the resident launcher process handles the actual window.
-                if self.launcher_shortcut_consuming {
-                    if code == key_codes::KEY_SPACE && !pressed {
-                        self.launcher_shortcut_consuming = false;
-                    }
+                if !pressed && self.launcher_shortcut_keys.release(source, code) {
                     return Ok(false);
                 }
-                if code == key_codes::KEY_SPACE && pressed && self.current_key_modifiers().meta {
-                    self.launcher_shortcut_consuming = true;
+                if code == key_codes::KEY_SPACE
+                    && is_initial_press(value)
+                    && self.current_key_modifiers().meta
+                {
+                    self.key_repeat.cancel_key(source, code);
+                    self.launcher_shortcut_keys.press(source, code);
                     Self::request_launcher_show();
+                    return Ok(false);
+                }
+
+                // A consumed IME trigger release must remain consumed even if
+                // focus or the focused window's extension route changed while
+                // the key was held.
+                if !pressed && self.ime_trigger_keys.release(source, code) {
                     return Ok(false);
                 }
 
@@ -3825,37 +3889,35 @@ impl Compositor {
                     if let Some(window) = self.window_manager.get_window(focused_id) {
                         // Check if this is an extension-owned window
                         if let Some((extension_id, external_client_id)) = window.extension_owner {
-                            super::ipc::send_extension_input_event(
-                                extension_id,
-                                external_client_id,
-                                focused_id,
-                                0,
-                                super::input::event_types::EV_KEY,
-                                code,
-                                if pressed { 1 } else { 0 },
-                            );
-                            super::ipc::send_extension_input_event(
-                                extension_id,
-                                external_client_id,
-                                focused_id,
-                                0,
-                                super::input::event_types::EV_SYN,
-                                0,
-                                0,
-                            );
-                        } else {
-                            if !pressed && self.ime_trigger_key_down == Some(code) {
-                                self.ime_trigger_key_down = None;
-                                return Ok(false);
+                            if forward_to_binary_key_protocol(synthetic) {
+                                super::ipc::send_extension_input_event(
+                                    extension_id,
+                                    external_client_id,
+                                    focused_id,
+                                    0,
+                                    super::input::event_types::EV_KEY,
+                                    code,
+                                    value,
+                                );
+                                super::ipc::send_extension_input_event(
+                                    extension_id,
+                                    external_client_id,
+                                    focused_id,
+                                    0,
+                                    super::input::event_types::EV_SYN,
+                                    0,
+                                    0,
+                                );
                             }
-                            if pressed && self.is_ime_toggle_key(code) {
+                        } else {
+                            if is_initial_press(value) && self.is_ime_toggle_key(code) {
                                 if super::ipc::send_input_method_trigger(focused_id, 0, code) {
-                                    self.ime_trigger_key_down = Some(code);
+                                    self.key_repeat.cancel_key(source, code);
+                                    self.ime_trigger_keys.press(source, code);
                                     return Ok(false);
                                 }
                             }
 
-                            let value = if pressed { 1 } else { 0 };
                             if !super::ipc::send_key_to_input_method(
                                 focused_id,
                                 0,
@@ -3882,6 +3944,10 @@ impl Compositor {
                     }
                 }
                 Ok(false) // Keyboard events don't trigger redraws
+            }
+            CompositorInputEvent::KeyboardReset { source } => {
+                self.release_keyboard_source(source)?;
+                Ok(false)
             }
         }
     }

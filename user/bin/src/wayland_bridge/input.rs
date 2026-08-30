@@ -120,4 +120,5 @@ pub mod keyboard_event {
     pub const LEAVE: u16 = 2;
     pub const KEY: u16 = 3;
     pub const MODIFIERS: u16 = 4;
+    pub const REPEAT_INFO: u16 = 5;
 }

@@ -138,6 +138,8 @@ const XHCI_CDC_NCM_TX_QUEUE_LIMIT: usize = 256;
 const XHCI_CDC_NCM_TX_WORK_BUDGET: usize = 32;
 const XHCI_CDC_NCM_RX_TRANSFER_DEPTH: usize = 8;
 const XHCI_CDC_NCM_TX_TRANSFER_DEPTH: usize = 8;
+const INTERRUPT_REPORT_REJECTION_DETAIL_LIMIT: u32 = 4;
+const INTERRUPT_REPORT_REJECTION_SUMMARY_INTERVAL: u32 = 256;
 const XHCI_VERBOSE_TRACE: bool = false;
 const XHCI_TRACE_BUFFER_POISON_LEN: usize = 512;
 const USB_STORAGE_CBW_SIGNATURE: u32 = 0x4342_5355;
@@ -644,6 +646,7 @@ struct UsbInterruptInRuntime {
     trb_dma: Option<usize>,
     driver_name: &'static str,
     handler: Arc<dyn UsbInterruptInHandler>,
+    rejection_diagnostics: Arc<IrqSpinLock<RejectedReportDiagnostics>>,
 }
 
 struct RetainedHidDevice {
@@ -840,6 +843,41 @@ fn configuration_request_needed(
 
 fn context_entries_after_endpoint_add(current: u8, added_dci: u8) -> u8 {
     current.max(added_dci)
+}
+
+fn interrupt_report_prefix(report: &[u8]) -> &[u8] {
+    &report[..report.len().min(8)]
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RejectedReportLog {
+    Detail,
+    Suppress,
+    Summary { suppressed: u32 },
+}
+
+#[derive(Default)]
+struct RejectedReportDiagnostics {
+    detailed: u32,
+    suppressed: u32,
+}
+
+impl RejectedReportDiagnostics {
+    fn record_rejection(&mut self) -> RejectedReportLog {
+        if self.detailed < INTERRUPT_REPORT_REJECTION_DETAIL_LIMIT {
+            self.detailed += 1;
+            return RejectedReportLog::Detail;
+        }
+
+        self.suppressed = self.suppressed.saturating_add(1);
+        if self.suppressed >= INTERRUPT_REPORT_REJECTION_SUMMARY_INTERVAL {
+            let suppressed = self.suppressed;
+            self.suppressed = 0;
+            RejectedReportLog::Summary { suppressed }
+        } else {
+            RejectedReportLog::Suppress
+        }
+    }
 }
 
 fn transfer_event_points_into_td(
@@ -3260,6 +3298,9 @@ impl XhciController {
                 trb_dma: None,
                 driver_name,
                 handler,
+                rejection_diagnostics: Arc::new(IrqSpinLock::new(
+                    RejectedReportDiagnostics::default(),
+                )),
             });
         }
 
@@ -6136,6 +6177,7 @@ impl XhciController {
             let buffer = runtime.buffer.clone();
             let driver_name = runtime.driver_name;
             let handler = runtime.handler.clone();
+            let rejection_diagnostics = runtime.rejection_diagnostics.clone();
             drop(slots);
 
             if !successful {
@@ -6159,20 +6201,54 @@ impl XhciController {
                             core::slice::from_raw_parts(buffer.as_vaddr() as *const u8, report_len)
                         };
                         if let Err(error) = handler.handle_report(report) {
-                            println!(
-                                "[xHCI] {} rejected interrupt report: slot={} dci={} error={}",
-                                driver_name, slot_id, endpoint_id, error
-                            );
+                            let log = rejection_diagnostics.lock().record_rejection();
+                            match log {
+                                RejectedReportLog::Detail => println!(
+                                    "[xHCI] {} rejected interrupt report: slot={} dci={} actual={} bytes={:02x?} error={}",
+                                    driver_name,
+                                    slot_id,
+                                    endpoint_id,
+                                    report.len(),
+                                    interrupt_report_prefix(report),
+                                    error
+                                ),
+                                RejectedReportLog::Summary { suppressed } => println!(
+                                    "[xHCI] {} suppressed {} rejected interrupt reports: slot={} dci={} latest_actual={} latest_bytes={:02x?} latest_error={}",
+                                    driver_name,
+                                    suppressed,
+                                    slot_id,
+                                    endpoint_id,
+                                    report.len(),
+                                    interrupt_report_prefix(report),
+                                    error
+                                ),
+                                RejectedReportLog::Suppress => {}
+                            }
                         }
                     }
-                    None => println!(
-                        "[xHCI] Ignored malformed {} report: slot={} dci={} actual={} residual={}",
-                        driver_name,
-                        slot_id,
-                        endpoint_id,
-                        actual.unwrap_or(0),
-                        residual
-                    ),
+                    None => {
+                        let log = rejection_diagnostics.lock().record_rejection();
+                        match log {
+                            RejectedReportLog::Detail => println!(
+                                "[xHCI] Ignored malformed {} report: slot={} dci={} actual={} residual={}",
+                                driver_name,
+                                slot_id,
+                                endpoint_id,
+                                actual.unwrap_or(0),
+                                residual
+                            ),
+                            RejectedReportLog::Summary { suppressed } => println!(
+                                "[xHCI] {} suppressed {} malformed interrupt reports: slot={} dci={} latest_actual={} latest_residual={}",
+                                driver_name,
+                                suppressed,
+                                slot_id,
+                                endpoint_id,
+                                actual.unwrap_or(0),
+                                residual
+                            ),
+                            RejectedReportLog::Suppress => {}
+                        }
+                    }
                 }
                 if let Err(error) =
                     self.submit_registered_interrupt_in_transfer(slot_id, endpoint_id)
@@ -7833,6 +7909,43 @@ mod tests {
     fn adding_composite_endpoints_never_shrinks_context_entries() {
         assert_eq!(context_entries_after_endpoint_add(7, 3), 7);
         assert_eq!(context_entries_after_endpoint_add(3, 7), 7);
+    }
+
+    #[test_case]
+    fn rejected_interrupt_report_diagnostic_prefix_is_bounded() {
+        assert_eq!(interrupt_report_prefix(&[1, 2, 3]), &[1, 2, 3]);
+        assert_eq!(
+            interrupt_report_prefix(&[0, 1, 2, 3, 4, 5, 6, 7, 8]),
+            &[0, 1, 2, 3, 4, 5, 6, 7]
+        );
+    }
+
+    #[test_case]
+    fn rejected_interrupt_report_diagnostics_limit_detail_and_summarize() {
+        let mut diagnostics = RejectedReportDiagnostics::default();
+        for _ in 0..INTERRUPT_REPORT_REJECTION_DETAIL_LIMIT {
+            assert_eq!(diagnostics.record_rejection(), RejectedReportLog::Detail);
+        }
+        for _ in 1..INTERRUPT_REPORT_REJECTION_SUMMARY_INTERVAL {
+            assert_eq!(diagnostics.record_rejection(), RejectedReportLog::Suppress);
+        }
+        assert_eq!(
+            diagnostics.record_rejection(),
+            RejectedReportLog::Summary {
+                suppressed: INTERRUPT_REPORT_REJECTION_SUMMARY_INTERVAL
+            }
+        );
+        assert_eq!(diagnostics.record_rejection(), RejectedReportLog::Suppress);
+    }
+
+    #[test_case]
+    fn five_hundred_rejected_interrupt_reports_emit_only_five_logs() {
+        let mut diagnostics = RejectedReportDiagnostics::default();
+        let emitted = (0..500)
+            .filter(|_| diagnostics.record_rejection() != RejectedReportLog::Suppress)
+            .count();
+
+        assert_eq!(emitted, 5);
     }
 
     #[test_case]

@@ -3223,6 +3223,8 @@ impl WaylandBridge {
                         u32::from_ne_bytes([payload[0], payload[1], payload[2], payload[3]]);
                     bridge_log!("[Bridge] Keyboard ID: {}", keyboard_id);
                     self.add_object(keyboard_id, String::from("wl_keyboard"));
+                    let keyboard_version = self.object_versions.get(&seat_id).copied().unwrap_or(1);
+                    self.object_versions.insert(keyboard_id, keyboard_version);
                     self.input_manager.create_keyboard(keyboard_id, seat_id);
 
                     // Store keyboard as focused
@@ -3238,6 +3240,17 @@ impl WaylandBridge {
 
                     let mut msgs = Vec::new();
                     msgs.push(keymap_msg);
+
+                    // wl_keyboard v4+ clients own key-repeat timing after the
+                    // compositor advertises repeat_info. SWS therefore sends
+                    // only the physical press/release pair to this bridge.
+                    if keyboard_version >= 4 {
+                        let mut repeat_info =
+                            WaylandMessage::new(keyboard_id, input::keyboard_event::REPEAT_INFO);
+                        repeat_info.add_arg(WaylandArg::Int(20));
+                        repeat_info.add_arg(WaylandArg::Int(500));
+                        msgs.push(repeat_info);
+                    }
 
                     // If there's a focused surface, send enter and modifiers events
                     if let Some(surface_id) = self.focused_surface {
