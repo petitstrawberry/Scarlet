@@ -18,7 +18,7 @@ use sbus_client as sbus;
 use scarlet_os::time::monotonic_time_ns;
 use std::audio::{
     AUDIO_DEVICE_KIND_HEADPHONES, AUDIO_DEVICE_KIND_SPEAKERS, AUDIO_PCM_FORMAT_S16LE, AudioDevice,
-    AudioDeviceInfo, AudioPcmCapabilities, AudioPcmParams,
+    AudioDeviceInfo, AudioPcmCapabilities, AudioPcmParams, AudioVolumeCurve,
 };
 use std::env;
 use std::handle::capability::memory_mapping::{flags as mmap_flags, munmap, prot};
@@ -95,7 +95,9 @@ impl Drop for ClientStream {
 struct ServerState {
     clients: BTreeMap<usize, ClientStream>,
     master_volume_q16: u32,
+    master_gain: f32,
     master_muted: bool,
+    volume_curve: Option<AudioVolumeCurve>,
     output: OutputState,
     pending_output: Option<OutputPreference>,
     output_switch_in_progress: bool,
@@ -103,16 +105,29 @@ struct ServerState {
 }
 
 impl ServerState {
-    fn new(output: OutputState) -> Self {
+    fn new(output: OutputState, volume_curve: Option<AudioVolumeCurve>) -> Self {
+        let master_volume_q16 = DEFAULT_MASTER_VOLUME_Q16;
         Self {
             clients: BTreeMap::new(),
-            master_volume_q16: DEFAULT_MASTER_VOLUME_Q16,
+            master_volume_q16,
+            master_gain: q16_to_gain(master_volume_q16, volume_curve.as_ref()),
             master_muted: false,
+            volume_curve,
             output,
             pending_output: None,
             output_switch_in_progress: false,
             output_switch_result: None,
         }
+    }
+
+    fn set_master_volume(&mut self, volume_q16: u32) {
+        self.master_volume_q16 = volume_q16;
+        self.master_gain = q16_to_gain(volume_q16, self.volume_curve.as_ref());
+    }
+
+    fn set_volume_curve(&mut self, volume_curve: Option<AudioVolumeCurve>) {
+        self.volume_curve = volume_curve;
+        self.master_gain = q16_to_gain(self.master_volume_q16, self.volume_curve.as_ref());
     }
 
     fn control_state(&self) -> protocol::ControlState {
@@ -134,6 +149,7 @@ impl ServerState {
 struct OutputDevice {
     audio: AudioDevice,
     info: AudioDeviceInfo,
+    volume_curve: Option<AudioVolumeCurve>,
     path: String,
     params: AudioPcmParams,
     ring: *mut u8,
@@ -242,12 +258,22 @@ enum OutputPreference {
 impl OutputDevice {
     fn open(preference: Option<&OutputPreference>) -> Result<Self, &'static str> {
         let output = select_audio_output(preference)?;
+        let volume_curve = output.audio.volume_curve().ok();
         println!(
             "sas: selected {} kind={} name={} description={}",
             output.path,
             output.info.kind,
             fixed_str(&output.info.name),
             fixed_str(&output.info.description)
+        );
+        println!(
+            "sas: {} volume curve={}",
+            output.path,
+            if volume_curve.is_some() {
+                "device-calibrated"
+            } else {
+                "linear"
+            }
         );
 
         let params = AudioPcmParams {
@@ -287,6 +313,7 @@ impl OutputDevice {
         Ok(Self {
             audio: output.audio,
             info: output.info,
+            volume_curve,
             path: output.path,
             params,
             ring,
@@ -597,8 +624,16 @@ impl MixerBackend for ScalarF32Mixer {
     }
 }
 
-fn q16_to_gain(volume_q16: u32) -> f32 {
-    volume_q16 as f32 / protocol::MASTER_VOLUME_UNITY_Q16 as f32
+fn q16_to_gain(volume_q16: u32, volume_curve: Option<&AudioVolumeCurve>) -> f32 {
+    if volume_q16 == 0 {
+        return 0.0;
+    }
+    let Some(volume_curve) = volume_curve else {
+        return volume_q16 as f32 / protocol::MASTER_VOLUME_UNITY_Q16 as f32;
+    };
+    let percent = q16_to_percent(volume_q16).min(100) as usize;
+    let db_centi = volume_curve.db_centi_at_percent[percent].min(0);
+    libm::powf(10.0, db_centi as f32 / 2_000.0)
 }
 
 fn q16_to_percent(volume_q16: u32) -> u32 {
@@ -645,7 +680,10 @@ fn main() -> i32 {
         Err(e) => println!("sas: continuing without sbus registration: {:?}", e),
     }
 
-    let state = Arc::new(Mutex::new(ServerState::new(output.output_state())));
+    let state = Arc::new(Mutex::new(ServerState::new(
+        output.output_state(),
+        output.volume_curve,
+    )));
     let audio_state = state.clone();
     thread::spawn(move || audio_thread(audio_state, output));
 
@@ -828,6 +866,7 @@ fn apply_pending_output(state: &Arc<Mutex<ServerState>>, output: &mut Option<Out
         let current_state = current.output_state();
         let mut guard = state.lock();
         guard.output = current_state.clone();
+        guard.set_volume_curve(current.volume_curve);
         guard.output_switch_in_progress = false;
         guard.output_switch_result = Some(Ok(current_state));
         return;
@@ -847,6 +886,7 @@ fn apply_pending_output(state: &Arc<Mutex<ServerState>>, output: &mut Option<Out
     match OutputDevice::open(Some(&preference)) {
         Ok(new_output) => {
             let new_state = new_output.output_state();
+            let new_volume_curve = new_output.volume_curve;
             println!(
                 "sas: switched output to {} kind={} name={} description={}",
                 new_state.path, new_state.kind, new_state.name, new_state.description
@@ -854,6 +894,7 @@ fn apply_pending_output(state: &Arc<Mutex<ServerState>>, output: &mut Option<Out
             *output = Some(new_output);
             let mut guard = state.lock();
             guard.output = new_state.clone();
+            guard.set_volume_curve(new_volume_curve);
             guard.output_switch_in_progress = false;
             guard.output_switch_result = Some(Ok(new_state));
         }
@@ -863,10 +904,12 @@ fn apply_pending_output(state: &Arc<Mutex<ServerState>>, output: &mut Option<Out
                 match OutputDevice::open(Some(restore_preference)) {
                     Ok(restored) => {
                         let restored_state = restored.output_state();
+                        let restored_volume_curve = restored.volume_curve;
                         println!("sas: restored output {}", restored_state.path);
                         *output = Some(restored);
                         let mut guard = state.lock();
                         guard.output = restored_state;
+                        guard.set_volume_curve(restored_volume_curve);
                         guard.output_switch_in_progress = false;
                         guard.output_switch_result = Some(Err(error));
                         return;
@@ -878,6 +921,7 @@ fn apply_pending_output(state: &Arc<Mutex<ServerState>>, output: &mut Option<Out
             }
             let mut guard = state.lock();
             guard.output = missing_output_state();
+            guard.set_volume_curve(None);
             guard.output_switch_in_progress = false;
             guard.output_switch_result = Some(Err(error));
         }
@@ -912,7 +956,7 @@ fn mix_period(
         master_gain = if guard.master_muted {
             0.0
         } else {
-            q16_to_gain(guard.master_volume_q16)
+            guard.master_gain
         };
         for (client_id, stream) in guard.clients.iter_mut() {
             if stream.closed {
@@ -1178,7 +1222,7 @@ fn handle_set_master_volume(
 
     let control = {
         let mut guard = state.lock();
-        guard.master_volume_q16 = volume.master_volume_q16;
+        guard.set_master_volume(volume.master_volume_q16);
         guard.control_state()
     };
     println!(

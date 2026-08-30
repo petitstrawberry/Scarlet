@@ -17,6 +17,7 @@ pub mod commands {
     pub const AUDIO_GET_STATUS: u32 = 0x4106;
     pub const AUDIO_RELEASE: u32 = 0x4107;
     pub const AUDIO_GET_INFO: u32 = 0x4108;
+    pub const AUDIO_GET_VOLUME_CURVE: u32 = 0x4109;
 }
 
 /// Unknown or unspecified audio output kind.
@@ -30,6 +31,8 @@ pub const AUDIO_DEVICE_KIND_HEADPHONES: u32 = 2;
 pub const AUDIO_DEVICE_NAME_LEN: usize = 32;
 /// Maximum bytes in an audio device description, including trailing zero padding.
 pub const AUDIO_DEVICE_DESCRIPTION_LEN: usize = 64;
+/// Number of integer percentage points in an output volume curve.
+pub const AUDIO_VOLUME_CURVE_POINTS: usize = 101;
 
 /// Signed 16-bit little-endian interleaved PCM.
 pub const AUDIO_PCM_FORMAT_S16LE: u32 = 1;
@@ -153,6 +156,24 @@ impl Default for AudioDeviceInfo {
     }
 }
 
+/// Output-specific attenuation at each integer volume percentage.
+///
+/// Values are signed hundredths of a decibel relative to full scale.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct AudioVolumeCurve {
+    /// Attenuation in hundredths of a decibel for percentages 0 through 100.
+    pub db_centi_at_percent: [i16; AUDIO_VOLUME_CURVE_POINTS],
+}
+
+impl Default for AudioVolumeCurve {
+    fn default() -> Self {
+        Self {
+            db_centi_at_percent: [0; AUDIO_VOLUME_CURVE_POINTS],
+        }
+    }
+}
+
 /// Open PCM playback on `/dev/audio0`.
 pub fn open_default() -> Result<AudioDevice> {
     AudioDevice::open("/dev/audio0")
@@ -196,6 +217,30 @@ impl AudioDevice {
             .control(commands::AUDIO_GET_INFO, &mut info as *mut _ as usize)
             .map_err(|_| Error::new(ErrorKind::Other, "AUDIO_GET_INFO failed"))?;
         Ok(info)
+    }
+
+    /// Query the output-specific software volume curve.
+    ///
+    /// # Returns
+    ///
+    /// The calibrated output curve reported by the device.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ErrorKind::Unsupported`] when the device has no calibrated
+    /// curve, or an I/O error when the query fails.
+    pub fn volume_curve(&self) -> Result<AudioVolumeCurve> {
+        let mut curve = AudioVolumeCurve::default();
+        self.file
+            .as_handle()
+            .control(
+                commands::AUDIO_GET_VOLUME_CURVE,
+                &mut curve as *mut _ as usize,
+            )
+            .map_err(|_| {
+                Error::new(ErrorKind::Unsupported, "AUDIO_GET_VOLUME_CURVE unsupported")
+            })?;
+        Ok(curve)
     }
 
     /// Configure the playback stream.

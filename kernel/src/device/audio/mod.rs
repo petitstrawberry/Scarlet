@@ -54,6 +54,8 @@ pub mod commands {
     pub const AUDIO_RELEASE: u32 = 0x4107;
     /// Query stable device identity and routing metadata.
     pub const AUDIO_GET_INFO: u32 = 0x4108;
+    /// Query the output-specific software volume curve.
+    pub const AUDIO_GET_VOLUME_CURVE: u32 = 0x4109;
 }
 
 /// Unknown or unspecified audio output kind.
@@ -67,6 +69,8 @@ pub const AUDIO_DEVICE_KIND_HEADPHONES: u32 = 2;
 pub const AUDIO_DEVICE_NAME_LEN: usize = 32;
 /// Maximum bytes in an audio device description, including trailing zero padding.
 pub const AUDIO_DEVICE_DESCRIPTION_LEN: usize = 64;
+/// Number of integer percentage points in an output volume curve.
+pub const AUDIO_VOLUME_CURVE_POINTS: usize = 101;
 
 /// Signed 16-bit little-endian interleaved PCM.
 pub const AUDIO_PCM_FORMAT_S16LE: u32 = 1;
@@ -307,6 +311,36 @@ impl AudioDeviceInfo {
     }
 }
 
+/// Output-specific attenuation at each integer volume percentage.
+///
+/// Values are signed hundredths of a decibel relative to full scale. The
+/// entry at index `n` applies to volume `n%`. Volume zero is still treated as
+/// mute by the audio server, matching ChromeOS output semantics.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct AudioVolumeCurve {
+    /// Attenuation in hundredths of a decibel for percentages 0 through 100.
+    pub db_centi_at_percent: [i16; AUDIO_VOLUME_CURVE_POINTS],
+}
+
+impl AudioVolumeCurve {
+    /// Create an output volume curve from 101 calibrated attenuation points.
+    ///
+    /// # Arguments
+    ///
+    /// * `db_centi_at_percent` - Attenuation in hundredths of a decibel for
+    ///   percentages 0 through 100.
+    ///
+    /// # Returns
+    ///
+    /// A curve suitable for returning from [`AudioPlaybackDevice::volume_curve`].
+    pub const fn new(db_centi_at_percent: [i16; AUDIO_VOLUME_CURVE_POINTS]) -> Self {
+        Self {
+            db_centi_at_percent,
+        }
+    }
+}
+
 /// Kernel PCM ring memory exposed to a playback backend.
 #[derive(Clone, Copy, Debug)]
 pub struct AudioPcmBuffer {
@@ -335,6 +369,19 @@ pub struct AudioPcmPeriod {
 pub trait AudioPlaybackDevice: Send + Sync {
     /// Return playback capabilities.
     fn capabilities(&self) -> AudioPcmCapabilities;
+
+    /// Return an output-specific software volume curve when one is known.
+    ///
+    /// Backends without calibrated output data use the audio server's legacy
+    /// linear attenuation path.
+    ///
+    /// # Returns
+    ///
+    /// The calibrated curve, or `None` when the output has no device-specific
+    /// calibration.
+    fn volume_curve(&self) -> Option<AudioVolumeCurve> {
+        None
+    }
 
     /// Configure and prepare the playback stream.
     ///
@@ -794,6 +841,15 @@ impl AudioCharDevice {
         Ok(0)
     }
 
+    fn handle_get_volume_curve(&self, arg: usize) -> Result<i32, &'static str> {
+        let curve = self
+            .backend
+            .volume_curve()
+            .ok_or("Audio output has no calibrated volume curve")?;
+        write_user_value(arg, &curve)?;
+        Ok(0)
+    }
+
     fn handle_set_params(&self, arg: usize) -> Result<i32, &'static str> {
         let params: AudioPcmParams = read_user_value(arg)?;
         params.validate()?;
@@ -1136,6 +1192,7 @@ impl ControlOps for AudioCharDevice {
         match command {
             AUDIO_GET_CAPS => self.handle_get_caps(arg),
             AUDIO_GET_INFO => self.handle_get_info(arg),
+            AUDIO_GET_VOLUME_CURVE => self.handle_get_volume_curve(arg),
             AUDIO_SET_PARAMS => self.handle_set_params(arg),
             AUDIO_GET_BUFFER => self.handle_get_buffer(arg),
             AUDIO_COMMIT_FRAMES => self.handle_commit_frames(arg),
@@ -1152,6 +1209,7 @@ impl ControlOps for AudioCharDevice {
         alloc::vec![
             (AUDIO_GET_CAPS, "Get audio playback capabilities"),
             (AUDIO_GET_INFO, "Get audio device identity"),
+            (AUDIO_GET_VOLUME_CURVE, "Get audio output volume curve"),
             (AUDIO_SET_PARAMS, "Set PCM playback parameters"),
             (AUDIO_GET_BUFFER, "Get mmap PCM ring buffer layout"),
             (AUDIO_COMMIT_FRAMES, "Commit mmap-written PCM frames"),
