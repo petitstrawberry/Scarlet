@@ -134,7 +134,7 @@ impl Device {
                     rendering: capabilities.supports_rendering(),
                     presentation: capabilities.supports_presentation(),
                     image_upload: capabilities.supports_image_upload(),
-                    image_readback: false,
+                    image_readback: capabilities.supports_image_readback(),
                     depth: capabilities.supports_depth(),
                 }
             }
@@ -380,7 +380,9 @@ impl MappedTargetSession {
                 .readback_bgra(target, destination, destination_stride, rect)
                 .map_err(Error::ScarletVirglIr),
             #[cfg(feature = "backend-scarlet-adreno")]
-            Self::Adreno(_) => Err(Error::BackendUnavailable(BackendKind::ScarletAdreno)),
+            Self::Adreno(session) => session
+                .readback_bgra(target, destination, destination_stride, rect)
+                .map_err(Error::ScarletAdrenoIr),
         }
     }
 
