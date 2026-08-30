@@ -5409,8 +5409,8 @@ fn sample_current_task_cpu_hog(cpu_id: usize) {
     let Some(task) = local_current_task_for_diagnostics(cpu_id) else {
         return;
     };
-    let task_id = task.get_id();
-    if task_id == IDLE_TASK_IDS[cpu_id].load(Ordering::Relaxed) {
+    let global_task_id = task.get_id();
+    if global_task_id == IDLE_TASK_IDS[cpu_id].load(Ordering::Relaxed) {
         return;
     }
     let Some(sample) = task.sample_cpu_hog(get_time_ns()) else {
@@ -5428,8 +5428,9 @@ fn sample_current_task_cpu_hog(cpu_id: usize) {
         "user"
     };
     crate::emergency_println!(
-        "[task-cpu-watchdog] task={} tgid={} cpu={} type={:?} state={:?} usage={}.{}% pc={:#x} mode={} start_pc={:#x} start_mode={} same_pc={} syscall_active={} syscall_valid={} syscall={} syscall_pc={:#x} runtime_ns={} window_ns={}",
-        task_id,
+        "[task-cpu-watchdog] global_task={} pid={} global_tgid={} cpu={} type={:?} state={:?} usage={}.{}% pc={:#x} mode={} start_pc={:#x} start_mode={} same_pc={} syscall_active={} last_syscall_valid={} last_syscall={} last_syscall_pc={:#x} runtime_ns={} window_ns={}",
+        global_task_id,
+        task.get_namespace_id(),
         task.get_thread_group_id(),
         cpu_id,
         task.task_type,

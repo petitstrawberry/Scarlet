@@ -107,7 +107,10 @@ impl RandomManager {
 
     /// Fill the internal pool with entropy from available sources
     fn fill_pool(&self) -> Result<usize, &'static str> {
-        let sources = self.sources.lock();
+        // Entropy reads may sleep or perform slow device I/O. Clone the Arc
+        // registry under the short IRQ-safe lock, then release it before
+        // calling providers.
+        let sources = self.sources.lock().clone();
 
         if sources.is_empty() {
             return Err("No entropy sources available");

@@ -169,6 +169,17 @@ enum ProbeOutcome {
     NoMatch,
 }
 
+enum DecodedPinctrlConfiguration<'a, 'b> {
+    Pinmux {
+        muxes: Vec<u32>,
+    },
+    State {
+        node: fdt::node::FdtNode<'b, 'a>,
+        state: PinctrlState<'a>,
+        apply: bool,
+    },
+}
+
 impl DriverPriority {
     /// Get all priority levels in order
     pub fn all() -> &'static [DriverPriority] {
@@ -2522,6 +2533,90 @@ impl DeviceManager {
         self.parse_phy_specs(phys.value()).map(|_| ())
     }
 
+    fn pinctrl_configuration_nodes<'a, 'b>(
+        state_node: fdt::node::FdtNode<'b, 'a>,
+    ) -> Vec<fdt::node::FdtNode<'b, 'a>> {
+        if state_node.property("pinmux").is_some()
+            || state_node.property("pins").is_some()
+            || state_node.property("groups").is_some()
+        {
+            let mut nodes = Vec::new();
+            nodes.push(state_node);
+            return nodes;
+        }
+
+        state_node
+            .children()
+            .filter(|child| {
+                child.property("pinmux").is_some()
+                    || child.property("pins").is_some()
+                    || child.property("groups").is_some()
+            })
+            .collect()
+    }
+
+    fn decode_pinctrl_configuration<'a, 'b>(
+        configuration_node: fdt::node::FdtNode<'b, 'a>,
+    ) -> Result<DecodedPinctrlConfiguration<'a, 'b>, &'static str> {
+        if let Some(pinmux) = configuration_node.property("pinmux") {
+            let muxes = Self::read_be_u32_cells(pinmux.value).ok_or("pinctrl: malformed pinmux")?;
+            return Ok(DecodedPinctrlConfiguration::Pinmux { muxes });
+        }
+
+        Self::decode_pinctrl_state(configuration_node).map(|state| {
+            DecodedPinctrlConfiguration::State {
+                node: configuration_node,
+                state,
+                apply: true,
+            }
+        })
+    }
+
+    fn decode_pinctrl_state<'a, 'b>(
+        state_node: fdt::node::FdtNode<'b, 'a>,
+    ) -> Result<PinctrlState<'a>, &'static str> {
+        let pins = state_node
+            .property("pins")
+            .or_else(|| state_node.property("groups"))
+            .ok_or("pinctrl: state has no pins or groups")?;
+        let function = state_node
+            .property("function")
+            .and_then(|property| property.as_str());
+        let pin_names = Self::read_string_list(pins.value).ok_or("pinctrl: malformed pins list")?;
+        let drive_strength = state_node
+            .property("drive-strength")
+            .and_then(|property| Self::read_be_u32(property.value));
+        let bias = if state_node.property("bias-pull-up").is_some() {
+            Some(PinctrlBias::PullUp)
+        } else if state_node.property("bias-pull-down").is_some() {
+            Some(PinctrlBias::PullDown)
+        } else if state_node.property("bias-disable").is_some() {
+            Some(PinctrlBias::Disable)
+        } else {
+            None
+        };
+        let output_high = state_node.property("output-high").is_some();
+        let output_low = state_node.property("output-low").is_some();
+        if output_high && output_low {
+            return Err("pinctrl: conflicting output state");
+        }
+
+        Ok(PinctrlState {
+            pins: pin_names,
+            function,
+            bias,
+            drive_strength_ma: drive_strength,
+            output: if output_high {
+                Some(true)
+            } else if output_low {
+                Some(false)
+            } else {
+                None
+            },
+            input_enable: state_node.property("input-enable").is_some(),
+        })
+    }
+
     fn apply_pinctrl_default(&self, device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         self.apply_pinctrl_default_inner(device, false)
     }
@@ -2565,6 +2660,20 @@ impl DeviceManager {
             .get_fdt()
             .ok_or("pinctrl: FDT unavailable")?;
 
+        self.apply_pinctrl_default_from_fdt(device, fdt, apply_self_states)
+    }
+
+    fn apply_pinctrl_default_from_fdt(
+        &self,
+        device: &PlatformDeviceInfo,
+        fdt: &fdt::Fdt<'_>,
+        apply_self_states: bool,
+    ) -> Result<(), &'static str> {
+        let pinctrl = device
+            .property("pinctrl-0")
+            .ok_or("pinctrl: state missing")?;
+        let states = Self::read_be_u32_cells(pinctrl.value()).ok_or("pinctrl: malformed state")?;
+
         for state_phandle in states {
             let (state_node, controller_phandle) =
                 Self::find_node_and_parent_by_phandle(fdt, state_phandle)
@@ -2576,6 +2685,14 @@ impl DeviceManager {
                 .and_then(|property| property.as_usize())
                 .and_then(|phandle| u32::try_from(phandle).ok());
             let is_self_state = device_phandle == Some(controller_phandle);
+            let configuration_nodes = Self::pinctrl_configuration_nodes(state_node);
+            let nested_state = state_node.property("pinmux").is_none()
+                && state_node.property("pins").is_none()
+                && state_node.property("groups").is_none();
+
+            if configuration_nodes.is_empty() {
+                continue;
+            }
 
             if let Some(pinmux) = state_node.property("pinmux") {
                 let Some(controller) = self.get_gpio_controller(controller_phandle) else {
@@ -2603,71 +2720,108 @@ impl DeviceManager {
                 continue;
             }
 
-            let Some(pins) = state_node
-                .property("pins")
-                .or_else(|| state_node.property("groups"))
-            else {
-                continue;
-            };
-            let function = state_node
-                .property("function")
-                .and_then(|property| property.as_str());
-            let pin_names =
-                Self::read_string_list(pins.value).ok_or("pinctrl: malformed pins list")?;
-            let drive_strength = state_node
-                .property("drive-strength")
-                .and_then(|property| Self::read_be_u32(property.value));
-            let bias = if state_node.property("bias-pull-up").is_some() {
-                Some(PinctrlBias::PullUp)
-            } else if state_node.property("bias-pull-down").is_some() {
-                Some(PinctrlBias::PullDown)
-            } else if state_node.property("bias-disable").is_some() {
-                Some(PinctrlBias::Disable)
-            } else {
-                None
-            };
-            let output_high = state_node.property("output-high").is_some();
-            let output_low = state_node.property("output-low").is_some();
-            if output_high && output_low {
-                return Err("pinctrl: conflicting output state");
-            }
-            let state = PinctrlState {
-                pins: pin_names,
-                function,
-                bias,
-                drive_strength_ma: drive_strength,
-                output: if output_high {
-                    Some(true)
-                } else if output_low {
-                    Some(false)
-                } else {
-                    None
-                },
-                input_enable: state_node.property("input-enable").is_some(),
-            };
-            let Some(controller) = self.get_pinctrl_controller(controller_phandle) else {
+            // Decode every child before touching hardware so malformed container
+            // states do not leave an earlier child partially applied.
+            let mut configurations = configuration_nodes
+                .into_iter()
+                .map(Self::decode_pinctrl_configuration)
+                .collect::<Result<Vec<_>, _>>()?;
+
+            let needs_gpio = configurations.iter().any(|configuration| {
+                matches!(configuration, DecodedPinctrlConfiguration::Pinmux { .. })
+            });
+            let needs_pinctrl = configurations.iter().any(|configuration| {
+                matches!(configuration, DecodedPinctrlConfiguration::State { .. })
+            });
+            let gpio_controller = needs_gpio
+                .then(|| self.get_gpio_controller(controller_phandle))
+                .flatten();
+            let pinctrl_controller = needs_pinctrl
+                .then(|| self.get_pinctrl_controller(controller_phandle))
+                .flatten();
+            if (needs_gpio && gpio_controller.is_none())
+                || (needs_pinctrl && pinctrl_controller.is_none())
+            {
                 if is_self_state && !apply_self_states {
                     continue;
                 }
                 return Err(PROBE_DEFER);
-            };
+            }
 
-            match controller.apply_state(&state) {
-                Ok(applied) => early_println!(
-                    "[pinctrl] applied device={} state phandle={:#x} controller={:#x} function={} pins={}",
-                    device.name(),
-                    state_phandle,
-                    controller_phandle,
-                    function.unwrap_or("<unchanged>"),
-                    applied
-                ),
-                Err(PinctrlError::Unsupported) => early_println!(
-                    "[pinctrl] provider {:#x} does not support state {} for {}; preserving firmware state",
-                    controller_phandle,
-                    state_node.name,
-                    device.name()
-                ),
-                Err(PinctrlError::Invalid) => return Err("pinctrl: provider rejected state"),
+            if nested_state && needs_pinctrl {
+                let Some(controller) = pinctrl_controller.as_ref() else {
+                    return Err(PROBE_DEFER);
+                };
+                for configuration in &mut configurations {
+                    let DecodedPinctrlConfiguration::State { node, state, apply } = configuration
+                    else {
+                        continue;
+                    };
+                    match controller.validate_state(state) {
+                        Ok(()) => {}
+                        Err(PinctrlError::Unsupported) => {
+                            *apply = false;
+                            early_println!(
+                                "[pinctrl] provider {:#x} does not support state {} for {}; preserving firmware state",
+                                controller_phandle,
+                                node.name,
+                                device.name()
+                            );
+                        }
+                        Err(PinctrlError::Invalid) => {
+                            return Err("pinctrl: provider rejected state");
+                        }
+                    }
+                }
+            }
+
+            for configuration in configurations {
+                match configuration {
+                    DecodedPinctrlConfiguration::Pinmux { muxes, .. } => {
+                        let Some(controller) = gpio_controller.as_ref() else {
+                            return Err(PROBE_DEFER);
+                        };
+                        for mux in &muxes {
+                            let pin = mux & 0xffff;
+                            let func = ((mux >> 16) & 0xff) as u8;
+                            controller.set_function(pin, func);
+                        }
+                        early_println!(
+                            "[pinctrl] applied device={} state phandle={:#x} controller={:#x} pins={}",
+                            device.name(),
+                            state_phandle,
+                            controller_phandle,
+                            muxes.len()
+                        );
+                    }
+                    DecodedPinctrlConfiguration::State { node, state, apply } => {
+                        if !apply {
+                            continue;
+                        }
+                        let Some(controller) = pinctrl_controller.as_ref() else {
+                            return Err(PROBE_DEFER);
+                        };
+                        match controller.apply_state(&state) {
+                            Ok(applied) => early_println!(
+                                "[pinctrl] applied device={} state phandle={:#x} controller={:#x} function={} pins={}",
+                                device.name(),
+                                state_phandle,
+                                controller_phandle,
+                                state.function.unwrap_or("<unchanged>"),
+                                applied
+                            ),
+                            Err(PinctrlError::Unsupported) => early_println!(
+                                "[pinctrl] provider {:#x} does not support state {} for {}; preserving firmware state",
+                                controller_phandle,
+                                node.name,
+                                device.name()
+                            ),
+                            Err(PinctrlError::Invalid) => {
+                                return Err("pinctrl: provider rejected state");
+                            }
+                        }
+                    }
+                }
             }
         }
 
@@ -3573,6 +3727,7 @@ mod tests {
         DmaBusWidth, DmaChannel, DmaController, DmaCyclicConfig, DmaDirection, DmaError,
         DmaPeripheralConfig, DmaSpec,
     };
+    use crate::device::gpio::{GpioIrqTrigger, GpioPull};
     use crate::device::iommu::{
         IommuDomain, IommuDomainType, IommuMapFlags, IommuStreamId, PhysAddr,
     };
@@ -3589,6 +3744,7 @@ mod tests {
     use crate::interrupt::msi::{
         MsiAllocation, MsiError, MsiMessage, MsiRequest, MsiRequestFlags, MsiVector,
     };
+    use alloc::string::String;
     use alloc::vec;
     use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
@@ -4219,6 +4375,269 @@ mod tests {
             properties,
             None,
         )
+    }
+
+    fn append_dtb_u32(bytes: &mut Vec<u8>, value: u32) {
+        bytes.extend_from_slice(&value.to_be_bytes());
+    }
+
+    fn align_dtb(bytes: &mut Vec<u8>) {
+        while !bytes.len().is_multiple_of(4) {
+            bytes.push(0);
+        }
+    }
+
+    fn begin_dtb_node(bytes: &mut Vec<u8>, name: &str) {
+        append_dtb_u32(bytes, 1);
+        bytes.extend_from_slice(name.as_bytes());
+        bytes.push(0);
+        align_dtb(bytes);
+    }
+
+    fn append_dtb_property(bytes: &mut Vec<u8>, name_offset: u32, value: &[u8]) {
+        append_dtb_u32(bytes, 3);
+        append_dtb_u32(bytes, value.len() as u32);
+        append_dtb_u32(bytes, name_offset);
+        bytes.extend_from_slice(value);
+        align_dtb(bytes);
+    }
+
+    fn end_dtb_node(bytes: &mut Vec<u8>) {
+        append_dtb_u32(bytes, 2);
+    }
+
+    fn nested_pinctrl_test_fdt() -> Vec<u8> {
+        const STRINGS: &[u8] =
+            b"phandle\0pins\0groups\0function\0bias-disable\0output-high\0input-enable\0drive-strength\0pinmux\0";
+        const PHANDLE: u32 = 0;
+        const PINS: u32 = 8;
+        const GROUPS: u32 = 13;
+        const FUNCTION: u32 = 20;
+        const BIAS_DISABLE: u32 = 29;
+        const OUTPUT_HIGH: u32 = 42;
+        const INPUT_ENABLE: u32 = 54;
+        const DRIVE_STRENGTH: u32 = 67;
+        const PINMUX: u32 = 82;
+
+        let mut structure = Vec::new();
+        begin_dtb_node(&mut structure, "");
+        begin_dtb_node(&mut structure, "pinctrl@0");
+        append_dtb_property(&mut structure, PHANDLE, &0x10u32.to_be_bytes());
+        begin_dtb_node(&mut structure, "sdc1-on-state");
+        append_dtb_property(&mut structure, PHANDLE, &0x20u32.to_be_bytes());
+
+        begin_dtb_node(&mut structure, "legacy-pinmux");
+        append_dtb_property(&mut structure, PINMUX, &0x0003_002au32.to_be_bytes());
+        end_dtb_node(&mut structure);
+
+        begin_dtb_node(&mut structure, "clk-pins");
+        append_dtb_property(&mut structure, PINS, b"gpio38\0");
+        append_dtb_property(&mut structure, FUNCTION, b"sdc1\0");
+        append_dtb_property(&mut structure, DRIVE_STRENGTH, &16u32.to_be_bytes());
+        end_dtb_node(&mut structure);
+
+        begin_dtb_node(&mut structure, "cmd-pins");
+        append_dtb_property(&mut structure, PINS, b"gpio39\0");
+        append_dtb_property(&mut structure, FUNCTION, b"sdc1\0");
+        append_dtb_property(&mut structure, BIAS_DISABLE, b"");
+        end_dtb_node(&mut structure);
+
+        begin_dtb_node(&mut structure, "data-pins");
+        append_dtb_property(&mut structure, GROUPS, b"sdc1_data\0");
+        append_dtb_property(&mut structure, OUTPUT_HIGH, b"");
+        end_dtb_node(&mut structure);
+
+        begin_dtb_node(&mut structure, "rclk-pins");
+        append_dtb_property(&mut structure, PINS, b"gpio40\0");
+        append_dtb_property(&mut structure, INPUT_ENABLE, b"");
+        end_dtb_node(&mut structure);
+
+        end_dtb_node(&mut structure);
+        end_dtb_node(&mut structure);
+        end_dtb_node(&mut structure);
+        append_dtb_u32(&mut structure, 9);
+
+        let structure_offset = 56u32;
+        let strings_offset = structure_offset + structure.len() as u32;
+        let total_size = strings_offset + STRINGS.len() as u32;
+        let mut dtb = Vec::new();
+        for header_field in [
+            0xd00dfeed,
+            total_size,
+            structure_offset,
+            strings_offset,
+            40,
+            17,
+            16,
+            0,
+            STRINGS.len() as u32,
+            structure.len() as u32,
+        ] {
+            append_dtb_u32(&mut dtb, header_field);
+        }
+        dtb.extend_from_slice(&[0; 16]);
+        dtb.extend_from_slice(&structure);
+        dtb.extend_from_slice(STRINGS);
+        dtb
+    }
+
+    struct RecordedPinctrlState {
+        pins: Vec<String>,
+        function: Option<String>,
+        bias: Option<PinctrlBias>,
+        drive_strength_ma: Option<u32>,
+        output: Option<bool>,
+        input_enable: bool,
+    }
+
+    struct TestPinctrlController {
+        states: IrqSpinLock<Vec<RecordedPinctrlState>>,
+        rejected_pin: Option<&'static str>,
+    }
+
+    impl TestPinctrlController {
+        fn new() -> Self {
+            Self {
+                states: IrqSpinLock::new(Vec::new()),
+                rejected_pin: None,
+            }
+        }
+
+        fn rejecting(pin: &'static str) -> Self {
+            Self {
+                states: IrqSpinLock::new(Vec::new()),
+                rejected_pin: Some(pin),
+            }
+        }
+    }
+
+    impl PinctrlController for TestPinctrlController {
+        fn validate_state(&self, state: &PinctrlState<'_>) -> Result<(), PinctrlError> {
+            if self
+                .rejected_pin
+                .is_some_and(|pin| state.pins.iter().any(|state_pin| *state_pin == pin))
+            {
+                return Err(PinctrlError::Invalid);
+            }
+            Ok(())
+        }
+
+        fn apply_state(&self, state: &PinctrlState<'_>) -> Result<usize, PinctrlError> {
+            self.states.lock().push(RecordedPinctrlState {
+                pins: state.pins.iter().map(|pin| String::from(*pin)).collect(),
+                function: state.function.map(String::from),
+                bias: state.bias,
+                drive_strength_ma: state.drive_strength_ma,
+                output: state.output,
+                input_enable: state.input_enable,
+            });
+            Ok(state.pins.len())
+        }
+    }
+
+    struct TestGpioController {
+        functions: IrqSpinLock<Vec<(u32, u8)>>,
+    }
+
+    impl TestGpioController {
+        fn new() -> Self {
+            Self {
+                functions: IrqSpinLock::new(Vec::new()),
+            }
+        }
+    }
+
+    impl GpioController for TestGpioController {
+        fn set_direction_output(&self, _pin: u32, _value: bool) {}
+
+        fn set_direction_input(&self, _pin: u32) {}
+
+        fn set_value(&self, _pin: u32, _value: bool) {}
+
+        fn get_value(&self, _pin: u32) -> bool {
+            false
+        }
+
+        fn set_pull(&self, _pin: u32, _pull: GpioPull) {}
+
+        fn set_function(&self, pin: u32, func: u8) {
+            self.functions.lock().push((pin, func));
+        }
+
+        fn enable_irq(&self, _pin: u32, _trigger: GpioIrqTrigger) {}
+
+        fn disable_irq(&self, _pin: u32) {}
+
+        fn ack_irq(&self, _pin: u32) {}
+
+        fn request_irq(
+            &self,
+            _pin: u32,
+            _trigger: GpioIrqTrigger,
+            _handler: Arc<dyn crate::device::events::InterruptCapableDevice>,
+        ) -> bool {
+            false
+        }
+
+        fn free_irq(&self, _pin: u32) {}
+    }
+
+    #[test_case]
+    fn test_apply_pinctrl_nested_state_applies_each_child_configuration() {
+        let manager = DeviceManager::new();
+        let controller = Arc::new(TestPinctrlController::new());
+        let gpio = Arc::new(TestGpioController::new());
+        manager.register_pinctrl_controller(0x10, controller.clone());
+        manager.register_gpio_controller(0x10, gpio.clone());
+        let device = clk_test_device(vec![PlatformDeviceProperty::new(
+            "pinctrl-0",
+            &be_cells(&[0x20]),
+        )]);
+        let dtb = nested_pinctrl_test_fdt();
+        let fdt = fdt::Fdt::new(&dtb).expect("nested pinctrl test FDT must parse");
+
+        assert!(
+            manager
+                .apply_pinctrl_default_from_fdt(&device, &fdt, false)
+                .is_ok()
+        );
+
+        let states = controller.states.lock();
+        assert_eq!(states.len(), 4);
+        assert_eq!(states[0].pins[0].as_str(), "gpio38");
+        assert_eq!(states[0].function.as_deref(), Some("sdc1"));
+        assert_eq!(states[0].drive_strength_ma, Some(16));
+        assert_eq!(states[1].pins[0].as_str(), "gpio39");
+        assert_eq!(states[1].bias, Some(PinctrlBias::Disable));
+        assert_eq!(states[2].pins[0].as_str(), "sdc1_data");
+        assert_eq!(states[2].output, Some(true));
+        assert_eq!(states[3].pins[0].as_str(), "gpio40");
+        assert!(states[3].input_enable);
+        assert_eq!(*gpio.functions.lock(), vec![(42, 3)]);
+    }
+
+    #[test_case]
+    fn test_apply_pinctrl_nested_state_preflights_before_gpio_writes() {
+        let manager = DeviceManager::new();
+        let controller = Arc::new(TestPinctrlController::rejecting("gpio40"));
+        let gpio = Arc::new(TestGpioController::new());
+        manager.register_pinctrl_controller(0x10, controller.clone());
+        manager.register_gpio_controller(0x10, gpio.clone());
+        let device = clk_test_device(vec![PlatformDeviceProperty::new(
+            "pinctrl-0",
+            &be_cells(&[0x20]),
+        )]);
+        let dtb = nested_pinctrl_test_fdt();
+        let fdt = fdt::Fdt::new(&dtb).expect("nested pinctrl test FDT must parse");
+
+        assert_eq!(
+            manager
+                .apply_pinctrl_default_from_fdt(&device, &fdt, false)
+                .unwrap_err(),
+            "pinctrl: provider rejected state"
+        );
+        assert!(controller.states.lock().is_empty());
+        assert!(gpio.functions.lock().is_empty());
     }
 
     struct TestMsiController;

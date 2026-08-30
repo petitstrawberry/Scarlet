@@ -68,6 +68,15 @@ impl SlotContext {
         self.route_string = (self.route_string & !(0x1F << 27)) | ((entries as u32) << 27);
     }
 
+    /// Return the highest valid device-context index for this slot.
+    ///
+    /// # Returns
+    ///
+    /// The xHCI Context Entries field from the slot context.
+    pub const fn context_entries(&self) -> u8 {
+        ((self.route_string >> 27) & 0x1f) as u8
+    }
+
     pub fn set_max_exit_latency(&mut self, latency: u16) {
         self.speed_flags = (self.speed_flags & !0xFFFF) | (latency as u32);
     }

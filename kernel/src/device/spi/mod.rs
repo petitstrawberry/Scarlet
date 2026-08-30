@@ -47,6 +47,21 @@ impl core::ops::BitOr for SpiTransferFlags {
     }
 }
 
+/// A bounded byte-wise read that stops when a masked value is observed.
+///
+/// This supports protocols such as TPM TIS, whose slave holds the bus in wait
+/// states after a request header and signals readiness without releasing chip
+/// select.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SpiReadUntil {
+    /// Bits inspected in each received byte.
+    pub mask: u8,
+    /// Masked value that terminates the read.
+    pub value: u8,
+    /// Maximum bytes clocked before returning [`SpiError::Timeout`].
+    pub max_bytes: usize,
+}
+
 /// A single SPI transfer segment (half-duplex: either read or write).
 #[derive(Debug, Clone)]
 pub struct SpiTransfer {
@@ -65,6 +80,8 @@ pub struct SpiTransfer {
     pub delay_before_us: u64,
     /// Delay in microseconds after this segment before the next segment or chip-select deassertion.
     pub delay_after_us: u64,
+    /// Optional bounded in-band readiness condition for a receive-only segment.
+    pub read_until: Option<SpiReadUntil>,
 }
 
 impl SpiTransfer {
@@ -77,6 +94,7 @@ impl SpiTransfer {
             speed_hz: 0,
             delay_before_us: 0,
             delay_after_us: 0,
+            read_until: None,
         }
     }
 
@@ -89,6 +107,7 @@ impl SpiTransfer {
             speed_hz: 0,
             delay_before_us: 0,
             delay_after_us: 0,
+            read_until: None,
         }
     }
 
@@ -104,6 +123,7 @@ impl SpiTransfer {
             speed_hz: 0,
             delay_before_us: 0,
             delay_after_us: 0,
+            read_until: None,
         }
     }
 
@@ -116,6 +136,24 @@ impl SpiTransfer {
             speed_hz,
             delay_before_us: 0,
             delay_after_us: 0,
+            read_until: None,
+        }
+    }
+
+    /// Create a receive-only segment that ends at an in-band readiness byte.
+    pub fn read_until(cs: u8, mask: u8, value: u8, max_bytes: usize) -> Self {
+        Self {
+            flags: SpiTransferFlags::READ,
+            data: Vec::new(),
+            cs,
+            speed_hz: 0,
+            delay_before_us: 0,
+            delay_after_us: 0,
+            read_until: Some(SpiReadUntil {
+                mask,
+                value: value & mask,
+                max_bytes,
+            }),
         }
     }
 }

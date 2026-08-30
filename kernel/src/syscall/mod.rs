@@ -88,9 +88,10 @@ use crate::fs::vfs_v2::syscall::{
 };
 use crate::ipc::syscall::{
     sys_event_channel_create, sys_event_handler_register, sys_event_handler_register_native,
-    sys_event_handler_unregister_native, sys_event_mask, sys_event_publish, sys_event_return,
-    sys_event_send_direct, sys_event_send_group, sys_event_subscribe, sys_event_unsubscribe,
-    sys_pipe, sys_shared_memory_create, sys_shared_memory_resize, sys_socket_recv_handle,
+    sys_event_handler_register_native_with_restorer, sys_event_handler_unregister_native,
+    sys_event_mask, sys_event_publish, sys_event_return, sys_event_send_direct,
+    sys_event_send_group, sys_event_subscribe, sys_event_unsubscribe, sys_pipe,
+    sys_shared_memory_create, sys_shared_memory_resize, sys_socket_recv_handle,
     sys_socket_recv_handle_and_data, sys_socket_send_handle, sys_socket_send_handle_and_data,
 };
 use crate::lsm::syscall::{sys_lsm_list, sys_lsm_load, sys_lsm_unload};
@@ -298,6 +299,7 @@ syscall_table! {
     EventHandlerUnregisterNative = 641 => sys_event_handler_unregister_native, // Unregister event handler (Scarlet Native)
     EventMask = 642 => sys_event_mask,                                       // Set event mask (Scarlet Native)
     EventReturn = 643 => sys_event_return,                                   // Return from event handler (Scarlet Native)
+    EventHandlerRegisterNativeWithRestorer = 644 => sys_event_handler_register_native_with_restorer, // Register handler with executable event-return restorer
 
 
     // === Memory Mapping Operations ===

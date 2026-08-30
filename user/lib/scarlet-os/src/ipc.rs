@@ -163,6 +163,45 @@ pub enum EventError {
 
 pub type EventResult<T> = core::result::Result<T, EventError>;
 
+#[cfg(target_arch = "riscv64")]
+core::arch::global_asm!(
+    ".section .text.scarlet_event_return,\"ax\",@progbits",
+    ".global __scarlet_event_return_trampoline",
+    ".type __scarlet_event_return_trampoline,@function",
+    "__scarlet_event_return_trampoline:",
+    "    addi a7, x0, 643",
+    "    ecall",
+    "    ebreak",
+    ".size __scarlet_event_return_trampoline, .-__scarlet_event_return_trampoline",
+);
+
+#[cfg(target_arch = "aarch64")]
+core::arch::global_asm!(
+    ".section .text.scarlet_event_return,\"ax\"",
+    ".global __scarlet_event_return_trampoline",
+    ".type __scarlet_event_return_trampoline,%function",
+    "__scarlet_event_return_trampoline:",
+    "    mov x8, #643",
+    "    svc #0",
+    "    brk #0",
+    ".size __scarlet_event_return_trampoline, .-__scarlet_event_return_trampoline",
+);
+
+#[cfg(any(target_arch = "riscv64", target_arch = "aarch64"))]
+unsafe extern "C" {
+    fn __scarlet_event_return_trampoline();
+}
+
+#[cfg(any(target_arch = "riscv64", target_arch = "aarch64"))]
+fn event_return_trampoline() -> usize {
+    __scarlet_event_return_trampoline as *const () as usize
+}
+
+#[cfg(not(any(target_arch = "riscv64", target_arch = "aarch64")))]
+fn event_return_trampoline() -> usize {
+    0
+}
+
 /// Event content types
 pub mod event_types {
     pub const PROCESS_CONTROL: u8 = 0;
@@ -342,19 +381,25 @@ pub fn register_event_handler(
     handler: EventHandler,
     synchronous: bool,
 ) -> EventResult<()> {
-    use scarlet_sys::{Syscall, syscall4};
+    use scarlet_sys::{Syscall, syscall5};
 
     // Validate content_type range (0-3)
     if content_type > 3 {
         return Err(EventError::InvalidEventType);
     }
 
-    let result = syscall4(
-        Syscall::EventHandlerRegister,
+    let restorer = event_return_trampoline();
+    if restorer == 0 {
+        return Err(EventError::SyscallFailed);
+    }
+
+    let result = syscall5(
+        Syscall::EventHandlerRegisterWithRestorer,
         content_type as usize,
         handler as usize,
         synchronous as usize,
         0, // is_default = false
+        restorer,
     );
 
     if result == usize::MAX {
@@ -366,14 +411,20 @@ pub fn register_event_handler(
 
 /// Register a default event handler for unhandled events
 pub fn register_default_handler(handler: EventHandler, synchronous: bool) -> EventResult<()> {
-    use scarlet_sys::{Syscall, syscall4};
+    use scarlet_sys::{Syscall, syscall5};
 
-    let result = syscall4(
-        Syscall::EventHandlerRegister,
+    let restorer = event_return_trampoline();
+    if restorer == 0 {
+        return Err(EventError::SyscallFailed);
+    }
+
+    let result = syscall5(
+        Syscall::EventHandlerRegisterWithRestorer,
         0, // content_type doesn't matter for default
         handler as usize,
         synchronous as usize,
         1, // is_default = true
+        restorer,
     );
 
     if result == usize::MAX {

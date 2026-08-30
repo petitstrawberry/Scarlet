@@ -13,8 +13,10 @@ pub mod pci;
 
 mod register {
     pub const BLOCK_SIZE: usize = 0x04;
+    pub const BLOCK_COUNT: usize = 0x06;
     pub const ARGUMENT: usize = 0x08;
     pub const TRANSFER_MODE: usize = 0x0c;
+    pub const COMMAND: usize = 0x0e;
     pub const RESPONSE_0: usize = 0x10;
     pub const BUFFER_DATA: usize = 0x20;
     pub const PRESENT_STATE: usize = 0x24;
@@ -28,6 +30,7 @@ mod register {
     pub const ERROR_STATUS_ENABLE: usize = 0x36;
     pub const NORMAL_SIGNAL_ENABLE: usize = 0x38;
     pub const ERROR_SIGNAL_ENABLE: usize = 0x3a;
+    pub const HOST_CONTROL2: usize = 0x3e;
     pub const CAPABILITIES: usize = 0x40;
     pub const HOST_VERSION: usize = 0xfe;
 }
@@ -35,6 +38,8 @@ mod register {
 mod present_state {
     pub const COMMAND_INHIBIT: u32 = 1 << 0;
     pub const DATA_INHIBIT: u32 = 1 << 1;
+    pub const BUFFER_WRITE_ENABLE: u32 = 1 << 10;
+    pub const BUFFER_READ_ENABLE: u32 = 1 << 11;
     pub const CARD_INSERTED: u32 = 1 << 16;
 }
 
@@ -77,7 +82,10 @@ mod software_reset {
 }
 
 const HOST_CONTROL_DATA_WIDTH_4: u8 = 1 << 1;
+const HOST_CONTROL_HIGH_SPEED_ENABLE: u8 = 1 << 2;
+const HOST_CONTROL_DMA_SELECT_MASK: u8 = 0x18;
 const HOST_CONTROL_DATA_WIDTH_8: u8 = 1 << 5;
+const HOST_CONTROL2_UHS_MODE_MASK: u16 = 0x0007;
 const POWER_ON: u8 = 1 << 0;
 const POWER_1V8: u8 = 0x0a;
 const POWER_3V0: u8 = 0x0c;
@@ -103,6 +111,15 @@ pub struct SdhciHostConfig {
     /// voltage and `POWER_ON`. This is for controllers that reject both a
     /// clear write and a voltage-only write during power-up.
     pub single_power_write: bool,
+
+    /// Preserve firmware-owned `POWER_CONTROL` during host reset.
+    ///
+    /// When `true`, reset validates the inherited `POWER_CONTROL` value before
+    /// and after a command/data-only reset, without writing it. The inherited
+    /// value must retain `POWER_ON` with a standard supported voltage, or reset
+    /// returns [`MmcError::Unsupported`]. This is for platforms whose firmware
+    /// owns an always-on card power supply.
+    pub preserve_power_control: bool,
 }
 
 /// Generic MMIO-backed SDHCI host.
@@ -112,6 +129,41 @@ pub struct SdhciHost {
     base_clock_hz: u32,
     specification_version: u8,
     config: SdhciHostConfig,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ResetPlan {
+    mask: u8,
+    write_power_control: bool,
+    normalize_host_timing: bool,
+}
+
+impl ResetPlan {
+    #[cfg(test)]
+    const fn power_control_write_count(self, single_power_write: bool) -> usize {
+        if !self.write_power_control {
+            0
+        } else if single_power_write {
+            1
+        } else {
+            3
+        }
+    }
+
+    const fn normalized_host_controls(
+        self,
+        host_control: u8,
+        host_control2: u16,
+    ) -> Option<(u8, u16)> {
+        if self.normalize_host_timing {
+            Some((
+                host_control & !(HOST_CONTROL_HIGH_SPEED_ENABLE | HOST_CONTROL_DMA_SELECT_MASK),
+                host_control2 & !HOST_CONTROL2_UHS_MODE_MASK,
+            ))
+        } else {
+            None
+        }
+    }
 }
 
 impl SdhciHost {
@@ -260,6 +312,15 @@ impl SdhciHost {
         self.config.single_power_write
     }
 
+    /// Return whether reset preserves the inherited power-control register.
+    ///
+    /// # Returns
+    ///
+    /// `true` when the platform enabled the `preserve_power_control` quirk.
+    pub const fn preserves_power_control(&self) -> bool {
+        self.config.preserve_power_control
+    }
+
     const fn normalize_base_clock_hz(base_clock_hz: u32) -> u32 {
         if base_clock_hz == 0 {
             DEFAULT_BASE_CLOCK_HZ
@@ -360,6 +421,27 @@ impl SdhciHost {
         Ok(())
     }
 
+    const fn is_supported_power_control(power_control: u8) -> bool {
+        power_control & POWER_ON != 0
+            && matches!(power_control & 0x0e, POWER_3V3 | POWER_3V0 | POWER_1V8)
+    }
+
+    const fn reset_plan(preserve_power_control: bool) -> ResetPlan {
+        if preserve_power_control {
+            ResetPlan {
+                mask: software_reset::COMMAND | software_reset::DATA,
+                write_power_control: false,
+                normalize_host_timing: true,
+            }
+        } else {
+            ResetPlan {
+                mask: software_reset::ALL,
+                write_power_control: true,
+                normalize_host_timing: false,
+            }
+        }
+    }
+
     fn power_control_writes(single_power_write: bool, voltage: u8) -> ([u8; 3], usize) {
         if single_power_write {
             ([voltage | POWER_ON, 0, 0], 1)
@@ -437,6 +519,9 @@ impl SdhciHost {
     fn read_pio(&self, buffer: &mut [u8], block_size: usize) -> MmcResult<()> {
         for block in buffer.chunks_exact_mut(block_size) {
             let status = self.wait_for_interrupt(interrupt::BUFFER_READ_READY, true)?;
+            self.wait_until(COMMAND_TIMEOUT_US, || {
+                self.read32(register::PRESENT_STATE) & present_state::BUFFER_READ_ENABLE != 0
+            })?;
             self.write32(
                 register::INTERRUPT_STATUS,
                 status & interrupt::BUFFER_READ_READY,
@@ -452,6 +537,9 @@ impl SdhciHost {
     fn write_pio(&self, buffer: &[u8], block_size: usize) -> MmcResult<()> {
         for block in buffer.chunks_exact(block_size) {
             let status = self.wait_for_interrupt(interrupt::BUFFER_WRITE_READY, true)?;
+            self.wait_until(COMMAND_TIMEOUT_US, || {
+                self.read32(register::PRESENT_STATE) & present_state::BUFFER_WRITE_ENABLE != 0
+            })?;
             self.write32(
                 register::INTERRUPT_STATUS,
                 status & interrupt::BUFFER_WRITE_READY,
@@ -489,9 +577,38 @@ impl SdhciHost {
 
 impl MmcHost for SdhciHost {
     fn reset(&mut self) -> MmcResult<()> {
-        self.reset_lines(software_reset::ALL)?;
-        self.write16(register::CLOCK_CONTROL, 0);
-        self.power_on()?;
+        let reset_plan = Self::reset_plan(self.preserves_power_control());
+        let inherited_power_control = if reset_plan.write_power_control {
+            None
+        } else {
+            let power_control = self.read8(register::POWER_CONTROL);
+            if !Self::is_supported_power_control(power_control) {
+                return Err(MmcError::Unsupported);
+            }
+            Some(power_control)
+        };
+
+        self.reset_lines(reset_plan.mask)?;
+        if let Some(inherited_power_control) = inherited_power_control {
+            if self.read8(register::POWER_CONTROL) != inherited_power_control {
+                return Err(MmcError::Unsupported);
+            }
+            self.write16(register::CLOCK_CONTROL, 0);
+            let host_control = self.read8(register::HOST_CONTROL);
+            let host_control2 = self.read16(register::HOST_CONTROL2);
+            if let Some((host_control, host_control2)) =
+                reset_plan.normalized_host_controls(host_control, host_control2)
+            {
+                // A command/data reset preserves firmware timing state. Use
+                // the registers' native widths and clear only legacy timing
+                // fields, preserving POWER_CONTROL and unrelated host state.
+                self.write8(register::HOST_CONTROL, host_control);
+                self.write16(register::HOST_CONTROL2, host_control2);
+            }
+        } else {
+            self.write16(register::CLOCK_CONTROL, 0);
+            self.power_on()?;
+        }
         self.write8(register::TIMEOUT_CONTROL, 0x0e);
         self.write32(register::INTERRUPT_STATUS, u32::MAX);
         self.write16(
@@ -589,6 +706,9 @@ impl MmcHost for SdhciHost {
 
         let mut mode = 0u16;
         if data_phase {
+            // Some SDHCI integrations, including Qualcomm's v5 controller,
+            // only latch the block count when the adjacent block-size/count
+            // register pair is written as one 32-bit value.
             self.write32(
                 register::BLOCK_SIZE,
                 (block_size as u32) | ((block_count as u32) << 16),
@@ -601,12 +721,13 @@ impl MmcHost for SdhciHost {
                 mode |= transfer_mode::MULTI_BLOCK;
             }
         }
+        // Program TRANSFER_MODE for every command, including command-only
+        // operations. Firmware may leave this register non-zero, and the
+        // controller samples it together with the subsequent COMMAND write.
+        self.write16(register::TRANSFER_MODE, mode);
         self.write32(register::ARGUMENT, command.argument());
         let encoded_command = Self::command_bits(command, data_phase);
-        self.write32(
-            register::TRANSFER_MODE,
-            u32::from(mode) | (u32::from(encoded_command) << 16),
-        );
+        self.write16(register::COMMAND, encoded_command);
 
         let status = self.wait_for_interrupt(interrupt::COMMAND_COMPLETE, false)?;
         self.write32(
@@ -698,5 +819,41 @@ mod tests {
             SdhciHost::power_control_writes(true, voltage),
             ([voltage | POWER_ON, 0, 0], 1)
         );
+    }
+
+    #[test_case]
+    fn preserve_power_control_uses_non_destructive_reset_plan() {
+        let plan = SdhciHost::reset_plan(true);
+        assert_eq!(plan.mask, software_reset::COMMAND | software_reset::DATA);
+        assert_eq!(plan.power_control_write_count(false), 0);
+        assert_eq!(plan.power_control_write_count(true), 0);
+
+        let default_plan = SdhciHost::reset_plan(false);
+        assert_eq!(default_plan.mask, software_reset::ALL);
+        assert_eq!(default_plan.power_control_write_count(false), 3);
+        assert_eq!(default_plan.power_control_write_count(true), 1);
+    }
+
+    #[test_case]
+    fn preserve_reset_normalizes_only_host_timing_fields() {
+        let plan = SdhciHost::reset_plan(true);
+        assert_eq!(plan.normalized_host_controls(0x24, 0x0004), Some((0x20, 0)));
+        assert_eq!(
+            plan.normalized_host_controls(0x3d, 0x000c),
+            Some((0x21, 0x0008))
+        );
+
+        let default_plan = SdhciHost::reset_plan(false);
+        assert_eq!(default_plan.normalized_host_controls(0x3d, 0x000c), None);
+    }
+
+    #[test_case]
+    fn preserved_power_control_requires_an_enabled_supported_voltage() {
+        assert!(SdhciHost::is_supported_power_control(POWER_1V8 | POWER_ON));
+        assert!(SdhciHost::is_supported_power_control(POWER_3V0 | POWER_ON));
+        assert!(SdhciHost::is_supported_power_control(POWER_3V3 | POWER_ON));
+        assert!(!SdhciHost::is_supported_power_control(POWER_1V8));
+        assert!(!SdhciHost::is_supported_power_control(POWER_ON));
+        assert!(!SdhciHost::is_supported_power_control(0));
     }
 }

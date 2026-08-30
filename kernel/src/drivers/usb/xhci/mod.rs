@@ -683,6 +683,7 @@ struct SlotRuntime {
 struct Ep0Runtime {
     slot_id: u8,
     speed: UsbSpeed,
+    selected_configuration: Mutex<Option<u8>>,
     device_context: ContiguousPages,
     input_context: ContiguousPages,
     ring: DmaTrbRing,
@@ -824,6 +825,21 @@ fn command_completion_matches(event: Trb, command_trb_dma: usize) -> bool {
 
 fn transfer_ring_dequeue_pointer(dma_addr: usize, producer_index: usize, cycle: bool) -> u64 {
     (dma_addr + producer_index * size_of::<Trb>()) as u64 | u64::from(cycle)
+}
+
+fn configuration_request_needed(
+    selected_configuration: Option<u8>,
+    requested_configuration: u8,
+) -> Result<bool, &'static str> {
+    match selected_configuration {
+        None => Ok(true),
+        Some(selected) if selected == requested_configuration => Ok(false),
+        Some(_) => Err("USB slot is already using a different configuration"),
+    }
+}
+
+fn context_entries_after_endpoint_add(current: u8, added_dci: u8) -> u8 {
+    current.max(added_dci)
 }
 
 fn transfer_event_points_into_td(
@@ -2215,6 +2231,7 @@ impl XhciController {
             ep0: Arc::new(Ep0Runtime {
                 slot_id,
                 speed,
+                selected_configuration: Mutex::new(None),
                 device_context,
                 input_context: input_pages,
                 ring: ep0_ring,
@@ -2252,6 +2269,33 @@ impl XhciController {
             write_volatile(doorbell, endpoint_id as u32);
             let _ = read_volatile(doorbell);
         }
+    }
+
+    fn ensure_slot_configuration(
+        &self,
+        slot_id: u8,
+        configuration: u8,
+    ) -> Result<(), &'static str> {
+        let ep0 = self
+            .ep0_runtime(slot_id)
+            .ok_or("Unknown slot for USB configuration")?;
+        let mut selected_configuration = ep0.selected_configuration.lock();
+        let needs_request = configuration_request_needed(*selected_configuration, configuration)?;
+        if !needs_request {
+            return Ok(());
+        }
+
+        self.control_transfer(
+            &ep0,
+            0x00,
+            USB_REQ_SET_CONFIGURATION,
+            u16::from(configuration),
+            0,
+            None,
+            0,
+        )?;
+        *selected_configuration = Some(configuration);
+        Ok(())
     }
 
     fn recover_timed_out_endpoint(
@@ -2951,7 +2995,10 @@ impl XhciController {
             let existing_ctx =
                 DeviceContextBuffer::new(slot.ep0.device_context.as_vaddr(), self.context_size);
             let mut slot_ctx = core::ptr::read(existing_ctx.slot());
-            slot_ctx.set_context_entries(interrupt_dci);
+            slot_ctx.set_context_entries(context_entries_after_endpoint_add(
+                slot_ctx.context_entries(),
+                interrupt_dci,
+            ));
             core::ptr::write(input.slot_mut(), slot_ctx);
             let xhci_interval = Self::xhci_interval(device_speed, boot.interval);
             let (_, ep_ctx) = InputContext::interrupt_endpoint_context(
@@ -2975,19 +3022,11 @@ impl XhciController {
             return Err("Configure Endpoint completion slot mismatch");
         }
 
+        self.ensure_slot_configuration(slot_id, boot.configuration_value)?;
         {
             let slot = self
                 .ep0_runtime(slot_id)
-                .ok_or("Unknown slot for set configuration")?;
-            self.control_transfer(
-                &slot,
-                0x00,
-                USB_REQ_SET_CONFIGURATION,
-                boot.configuration_value as u16,
-                0,
-                None,
-                0,
-            )?;
+                .ok_or("Unknown slot for boot protocol")?;
             self.control_transfer(
                 &slot,
                 0x21,
@@ -3155,13 +3194,10 @@ impl XhciController {
             let existing_ctx =
                 DeviceContextBuffer::new(slot.ep0.device_context.as_vaddr(), self.context_size);
             let mut slot_ctx = core::ptr::read(existing_ctx.slot());
-            let existing_max_dci = slot
-                .interrupt_dci
-                .into_iter()
-                .chain(slot.usb_interrupt_in.iter().map(|runtime| runtime.dci))
-                .max()
-                .unwrap_or(EP0_DCI);
-            slot_ctx.set_context_entries(existing_max_dci.max(interrupt_dci));
+            slot_ctx.set_context_entries(context_entries_after_endpoint_add(
+                slot_ctx.context_entries(),
+                interrupt_dci,
+            ));
             core::ptr::write(input.slot_mut(), slot_ctx);
             let interval = Self::xhci_interval(slot.usb_device.speed(), endpoint.interval);
             let (_, endpoint_ctx) = InputContext::interrupt_endpoint_context(
@@ -3185,28 +3221,7 @@ impl XhciController {
             return Err("Registered USB Configure Endpoint slot mismatch");
         }
 
-        let needs_configuration = self
-            .slot_runtime
-            .lock()
-            .iter()
-            .find(|slot| slot.usb_device.slot_id() == slot_id)
-            .map_or(true, |slot| {
-                slot.usb_device.state() != UsbDeviceState::Configured
-            });
-        if needs_configuration {
-            let slot = self
-                .ep0_runtime(slot_id)
-                .ok_or("Unknown slot for registered USB configuration")?;
-            self.control_transfer(
-                &slot,
-                0x00,
-                USB_REQ_SET_CONFIGURATION,
-                u16::from(endpoint.configuration_value),
-                0,
-                None,
-                0,
-            )?;
-        }
+        self.ensure_slot_configuration(slot_id, endpoint.configuration_value)?;
         if endpoint.alternate_setting != 0 {
             let slot = self
                 .ep0_runtime(slot_id)
@@ -3328,6 +3343,8 @@ impl XhciController {
             storage.bulk_out_max_packet_size
         );
 
+        self.ensure_slot_configuration(slot_id, storage.configuration_value)?;
+
         let bulk_in_dci = Self::endpoint_dci(storage.bulk_in_endpoint);
         let bulk_out_dci = Self::endpoint_dci(storage.bulk_out_endpoint);
         let max_dci = bulk_in_dci.max(bulk_out_dci);
@@ -3376,7 +3393,10 @@ impl XhciController {
             let existing_ctx =
                 DeviceContextBuffer::new(slot.ep0.device_context.as_vaddr(), self.context_size);
             let mut slot_ctx = core::ptr::read(existing_ctx.slot());
-            slot_ctx.set_context_entries(max_dci);
+            slot_ctx.set_context_entries(context_entries_after_endpoint_add(
+                slot_ctx.context_entries(),
+                max_dci,
+            ));
             core::ptr::write(input.slot_mut(), slot_ctx);
 
             let (_, bulk_in_ctx) = InputContext::bulk_endpoint_context(
@@ -3405,21 +3425,6 @@ impl XhciController {
         ))?;
         if event.slot_id() != slot_id {
             return Err("Configure Endpoint completion slot mismatch");
-        }
-
-        {
-            let slot = self
-                .ep0_runtime(slot_id)
-                .ok_or("Unknown slot for mass storage set configuration")?;
-            self.control_transfer(
-                &slot,
-                0x00,
-                USB_REQ_SET_CONFIGURATION,
-                storage.configuration_value as u16,
-                0,
-                None,
-                0,
-            )?;
         }
 
         {
@@ -3679,15 +3684,7 @@ impl XhciController {
                 return Ok(false);
             };
 
-            self.control_transfer(
-                &slot,
-                0x00,
-                USB_REQ_SET_CONFIGURATION,
-                u16::from(configuration.configuration_value),
-                0,
-                None,
-                0,
-            )?;
+            self.ensure_slot_configuration(slot_id, configuration.configuration_value)?;
             if configuration.data_alternate_setting != 0 {
                 self.control_transfer(
                     &slot,
@@ -3845,7 +3842,10 @@ impl XhciController {
             let existing =
                 DeviceContextBuffer::new(slot.ep0.device_context.as_vaddr(), self.context_size);
             let mut slot_context = core::ptr::read(existing.slot());
-            slot_context.set_context_entries(max_dci);
+            slot_context.set_context_entries(context_entries_after_endpoint_add(
+                slot_context.context_entries(),
+                max_dci,
+            ));
             core::ptr::write(input.slot_mut(), slot_context);
 
             let xhci_interval =
@@ -4160,19 +4160,11 @@ impl XhciController {
             || device_protocol == USB_HUB_PROTOCOL_SUPERSPEED
             || hub_interface.protocol == USB_HUB_PROTOCOL_SUPERSPEED;
 
+        self.ensure_slot_configuration(slot_id, hub_interface.configuration_value)?;
         {
             let ep0 = self
                 .ep0_runtime(slot_id)
-                .ok_or("Unknown slot for hub set configuration")?;
-            self.control_transfer(
-                &ep0,
-                0x00,
-                USB_REQ_SET_CONFIGURATION,
-                hub_interface.configuration_value as u16,
-                0,
-                None,
-                0,
-            )?;
+                .ok_or("Unknown slot for hub alternate setting")?;
             if hub_interface.alternate_setting != 0 {
                 self.control_transfer(
                     &ep0,
@@ -4308,7 +4300,10 @@ impl XhciController {
             let existing_ctx =
                 DeviceContextBuffer::new(slot.ep0.device_context.as_vaddr(), self.context_size);
             let mut slot_ctx = core::ptr::read(existing_ctx.slot());
-            slot_ctx.set_context_entries(interrupt_dci);
+            slot_ctx.set_context_entries(context_entries_after_endpoint_add(
+                slot_ctx.context_entries(),
+                interrupt_dci,
+            ));
             core::ptr::write(input.slot_mut(), slot_ctx);
             let interval = Self::xhci_interval(slot.usb_device.speed(), interface.interval);
             let (_, endpoint_ctx) = InputContext::interrupt_endpoint_context(
@@ -4383,7 +4378,10 @@ impl XhciController {
             slot_ctx.set_hub(true);
             slot_ctx.set_multi_tt(multi_tt);
             slot_ctx.set_num_ports(num_ports);
-            slot_ctx.set_context_entries(1);
+            slot_ctx.set_context_entries(context_entries_after_endpoint_add(
+                slot_ctx.context_entries(),
+                EP0_DCI,
+            ));
             core::ptr::write(input.slot_mut(), slot_ctx);
         }
         sync_pages_for_device(&input_pages);
@@ -7822,6 +7820,19 @@ mod tests {
     fn timed_out_endpoint_recovery_skips_to_the_producer_cycle() {
         assert_eq!(transfer_ring_dequeue_pointer(0x8000, 3, true), 0x8031);
         assert_eq!(transfer_ring_dequeue_pointer(0x8000, 4, false), 0x8040);
+    }
+
+    #[test_case]
+    fn selecting_the_active_usb_configuration_is_idempotent() {
+        assert_eq!(configuration_request_needed(None, 1), Ok(true));
+        assert_eq!(configuration_request_needed(Some(1), 1), Ok(false));
+        assert!(configuration_request_needed(Some(1), 2).is_err());
+    }
+
+    #[test_case]
+    fn adding_composite_endpoints_never_shrinks_context_entries() {
+        assert_eq!(context_entries_after_endpoint_add(7, 3), 7);
+        assert_eq!(context_entries_after_endpoint_add(3, 7), 7);
     }
 
     #[test_case]

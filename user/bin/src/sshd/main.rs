@@ -956,11 +956,14 @@ fn load_host_keys() -> Result<Vec<SignKey>, String> {
         println!("[sshd] loaded {}", RSA_HOST_KEY_PATH);
         keys.push(key);
     } else {
-        println!("[sshd] generating a new RSA host key");
-        keys.push(generate_host_key(
-            RSA_HOST_KEY_PATH,
-            Algorithm::Rsa { hash: None },
-        )?);
+        // RSA key generation is deliberately provisioned rather than done at
+        // daemon startup: generating it can delay the first accept by many
+        // seconds. The Ed25519 key generated above remains available; install
+        // this file when RSA host-key compatibility is required.
+        println!(
+            "[sshd] {} is not present; serving with Ed25519 only",
+            RSA_HOST_KEY_PATH
+        );
     }
 
     for key in &keys {

@@ -885,7 +885,6 @@ pub fn sys_event_handler_register_native(trapframe: &mut Trapframe) -> usize {
     let synchronous = trapframe.get_arg(2) != 0;
     let is_default = trapframe.get_arg(3) != 0;
 
-    // Validate content_type range (0-3) and non-null handler address
     if content_type > 3 || handler_addr == 0 {
         trapframe.increment_pc_next(&task);
         return usize::MAX;
@@ -893,17 +892,88 @@ pub fn sys_event_handler_register_native(trapframe: &mut Trapframe) -> usize {
 
     trapframe.increment_pc_next(&task);
 
-    // Use with_default_abi_mut to access ScarletAbi
     let result = task.with_default_abi_mut(|abi, _task| {
-        // Check if this is a ScarletAbi
         if let Some(scarlet_abi) = abi
             .as_any_mut()
             .downcast_mut::<crate::abi::scarlet::ScarletAbi>()
         {
             if is_default {
-                scarlet_abi.set_default_event_handler(handler_addr, synchronous);
+                scarlet_abi.set_default_event_handler(handler_addr, synchronous, None);
             } else {
-                scarlet_abi.register_event_handler(content_type, handler_addr, synchronous);
+                // Legacy registrations cannot name an executable restorer.
+                scarlet_abi.register_event_handler(content_type, handler_addr, synchronous, None);
+            }
+            Ok(())
+        } else {
+            Err("Not a Scarlet Native ABI")
+        }
+    });
+
+    match result {
+        Ok(()) => 0,
+        Err(_) => usize::MAX,
+    }
+}
+
+/// Register a user-space event handler with an executable event-return restorer.
+///
+/// Arguments:
+/// - content_type: u8 (0=ProcessControl, 1=Message, 2=Notification, 3=Custom)
+/// - handler_addr: usize (user-space function address)
+/// - synchronous: u32 (0=async, 1=sync)
+/// - is_default: u32 (0=specific handler, 1=default handler)
+/// - restorer_addr: usize (executable user-space `event_return` trampoline)
+///
+/// Returns:
+/// - 0 on success
+/// - usize::MAX on error
+pub fn sys_event_handler_register_native_with_restorer(trapframe: &mut Trapframe) -> usize {
+    let task = match mytask() {
+        Some(task) => task,
+        None => return usize::MAX,
+    };
+
+    let content_type = trapframe.get_arg(0) as u8;
+    let handler_addr = trapframe.get_arg(1);
+    let synchronous = trapframe.get_arg(2) != 0;
+    let is_default = trapframe.get_arg(3) != 0;
+    let restorer_addr = trapframe.get_arg(4);
+
+    if content_type > 3
+        || handler_addr == 0
+        || restorer_addr == 0
+        || task
+            .vm_manager
+            .translate_to_phys_with_access(
+                restorer_addr,
+                crate::object::capability::memory_mapping::AccessOp::Instruction,
+            )
+            .is_none()
+    {
+        trapframe.increment_pc_next(&task);
+        return usize::MAX;
+    }
+
+    trapframe.increment_pc_next(&task);
+
+    let result = task.with_default_abi_mut(|abi, _task| {
+        if let Some(scarlet_abi) = abi
+            .as_any_mut()
+            .downcast_mut::<crate::abi::scarlet::ScarletAbi>()
+        {
+            if is_default {
+                scarlet_abi.set_default_event_handler(
+                    handler_addr,
+                    synchronous,
+                    Some(restorer_addr),
+                );
+            } else {
+                scarlet_abi.register_event_handler(
+                    content_type,
+                    handler_addr,
+                    synchronous,
+                    Some(restorer_addr),
+                );
             }
             Ok(())
         } else {

@@ -201,9 +201,6 @@ pub fn encode_handle_type(handle_type: &HandleType) -> usize {
 /// - i32 value on success (command-specific)
 /// - usize::MAX on error
 pub fn sys_handle_control(trapframe: &mut Trapframe) -> usize {
-    const HCTL_SET_NONBLOCKING: u32 = 0x5353_0007;
-    const HCTL_GET_NONBLOCKING: u32 = 0x5353_000B;
-
     let task = match mytask() {
         Some(task) => task,
         None => return usize::MAX,
@@ -222,28 +219,53 @@ pub fn sys_handle_control(trapframe: &mut Trapframe) -> usize {
         None => return usize::MAX,
     };
 
+    sys_handle_control_for_object(&kernel_object, command, arg)
+}
+
+fn sys_handle_control_for_object(
+    kernel_object: &crate::object::KernelObject,
+    command: u32,
+    arg: usize,
+) -> usize {
+    sys_handle_control_for_capabilities(
+        kernel_object.as_selectable(),
+        kernel_object.as_control(),
+        command,
+        arg,
+    )
+}
+
+fn sys_handle_control_for_capabilities(
+    selectable: Option<&dyn crate::object::capability::Selectable>,
+    control_ops: Option<&dyn crate::object::capability::ControlOps>,
+    command: u32,
+    arg: usize,
+) -> usize {
+    const HCTL_SET_NONBLOCKING: u32 = 0x5353_0007;
+    const HCTL_GET_NONBLOCKING: u32 = 0x5353_000B;
+
     // Non-blocking mode is a generic Selectable capability rather than a
     // socket-specific operation. Keep the legacy command values so existing
     // user-space callers continue to work for sockets, pipes, TTYs, and PTYs.
+    // Sockets which implement the legacy control operation but are not
+    // Selectable must still reach their ControlOps implementation below.
     match command {
         HCTL_SET_NONBLOCKING => {
-            let Some(selectable) = kernel_object.as_selectable() else {
-                return usize::MAX;
-            };
-            selectable.set_nonblocking(arg != 0);
-            return 0;
+            if let Some(selectable) = selectable {
+                selectable.set_nonblocking(arg != 0);
+                return 0;
+            }
         }
         HCTL_GET_NONBLOCKING => {
-            let Some(selectable) = kernel_object.as_selectable() else {
-                return usize::MAX;
-            };
-            return usize::from(selectable.is_nonblocking());
+            if let Some(selectable) = selectable {
+                return usize::from(selectable.is_nonblocking());
+            }
         }
         _ => {}
     }
 
     // Perform the control operation using the ControlOps capability
-    let result = match kernel_object.as_control() {
+    let result = match control_ops {
         Some(control_ops) => control_ops.control(command, arg),
         None => Err("Control operations not supported on this object"),
     };
@@ -252,5 +274,149 @@ pub fn sys_handle_control(trapframe: &mut Trapframe) -> usize {
     match result {
         Ok(value) => value as usize,
         Err(_) => usize::MAX,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    use super::{sys_handle_control_for_capabilities, sys_handle_control_for_object};
+    use crate::network::icmp::IcmpLayer;
+    use crate::network::socket::socket_ctl;
+    use crate::object::KernelObject;
+    use crate::object::capability::selectable::{ReadyInterest, SelectWaitOutcome};
+    use crate::object::capability::{ControlOps, Selectable};
+
+    struct ControlOnlyNonblocking {
+        nonblocking: AtomicBool,
+    }
+
+    impl ControlOps for ControlOnlyNonblocking {
+        fn control(&self, command: u32, arg: usize) -> Result<i32, &'static str> {
+            match command {
+                socket_ctl::SCTL_SOCKET_SET_NONBLOCK => {
+                    self.nonblocking.store(arg != 0, Ordering::SeqCst);
+                    Ok(0)
+                }
+                socket_ctl::SCTL_SOCKET_GET_NONBLOCK => {
+                    Ok(self.nonblocking.load(Ordering::SeqCst) as i32)
+                }
+                _ => Err("unsupported control command"),
+            }
+        }
+    }
+
+    struct SelectableAndControl {
+        selectable_nonblocking: AtomicBool,
+        control_calls: AtomicUsize,
+    }
+
+    impl Selectable for SelectableAndControl {
+        fn wait_until_ready(
+            &self,
+            _interest: ReadyInterest,
+            _trapframe: &mut crate::arch::Trapframe,
+            _timeout_ns: Option<u64>,
+            _min_wait_ns: u64,
+        ) -> SelectWaitOutcome {
+            SelectWaitOutcome::Ready
+        }
+
+        fn set_nonblocking(&self, enabled: bool) {
+            self.selectable_nonblocking.store(enabled, Ordering::SeqCst);
+        }
+
+        fn is_nonblocking(&self) -> bool {
+            self.selectable_nonblocking.load(Ordering::SeqCst)
+        }
+    }
+
+    impl ControlOps for SelectableAndControl {
+        fn control(&self, _command: u32, _arg: usize) -> Result<i32, &'static str> {
+            self.control_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(99)
+        }
+    }
+
+    #[test_case]
+    fn nonblocking_control_falls_back_to_control_ops_without_selectable() {
+        let control_only = ControlOnlyNonblocking {
+            nonblocking: AtomicBool::new(false),
+        };
+
+        assert_eq!(
+            sys_handle_control_for_capabilities(
+                None,
+                Some(&control_only),
+                socket_ctl::SCTL_SOCKET_SET_NONBLOCK,
+                1,
+            ),
+            0
+        );
+        assert_eq!(
+            sys_handle_control_for_capabilities(
+                None,
+                Some(&control_only),
+                socket_ctl::SCTL_SOCKET_GET_NONBLOCK,
+                0,
+            ),
+            1
+        );
+    }
+
+    #[test_case]
+    fn nonblocking_control_prefers_selectable_over_control_ops() {
+        let selectable_and_control = SelectableAndControl {
+            selectable_nonblocking: AtomicBool::new(false),
+            control_calls: AtomicUsize::new(0),
+        };
+
+        assert_eq!(
+            sys_handle_control_for_capabilities(
+                Some(&selectable_and_control),
+                Some(&selectable_and_control),
+                socket_ctl::SCTL_SOCKET_SET_NONBLOCK,
+                1,
+            ),
+            0
+        );
+        assert_eq!(
+            sys_handle_control_for_capabilities(
+                Some(&selectable_and_control),
+                Some(&selectable_and_control),
+                socket_ctl::SCTL_SOCKET_GET_NONBLOCK,
+                0,
+            ),
+            1
+        );
+        assert_eq!(
+            selectable_and_control.control_calls.load(Ordering::SeqCst),
+            0
+        );
+    }
+
+    #[test_case]
+    fn icmp_nonblocking_control_falls_back_when_not_selectable() {
+        let icmp = IcmpLayer::new().create_socket();
+        let object = KernelObject::from_socket_object(icmp);
+
+        assert!(object.as_selectable().is_none());
+        assert_eq!(
+            sys_handle_control_for_object(&object, socket_ctl::SCTL_SOCKET_SET_NONBLOCK, 1),
+            0
+        );
+        assert_eq!(
+            sys_handle_control_for_object(&object, socket_ctl::SCTL_SOCKET_GET_NONBLOCK, 0),
+            1
+        );
+        assert_eq!(
+            sys_handle_control_for_object(&object, socket_ctl::SCTL_SOCKET_SET_NONBLOCK, 0),
+            0
+        );
+        assert_eq!(
+            sys_handle_control_for_object(&object, socket_ctl::SCTL_SOCKET_GET_NONBLOCK, 0),
+            0
+        );
     }
 }

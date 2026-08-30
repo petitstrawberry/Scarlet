@@ -304,16 +304,29 @@ fn initialize_emmc(host: &mut dyn MmcHost, bus_width: MmcBusWidth) -> MmcResult<
     )?;
 
     let mut ext_csd = [0u8; MMC_SECTOR_SIZE];
-    host.send_command(
+    let response = host.send_command(
         MmcCommand::new(CMD_SEND_EXT_CSD, 0, MmcResponseType::R1),
         Some(MmcData::Read(&mut ext_csd)),
     )?;
+    if response.word(0) & R1_STATUS_ERROR_MASK != 0 {
+        return Err(MmcError::Response);
+    }
     let sector_count = u32::from_le_bytes(
         ext_csd[EXT_CSD_SECTOR_COUNT..EXT_CSD_SECTOR_COUNT + 4]
             .try_into()
             .map_err(|_| MmcError::Response)?,
     ) as u64;
     if sector_count == 0 {
+        let nonzero_bytes = ext_csd.iter().filter(|&&byte| byte != 0).count();
+        crate::early_println!(
+            "[mmc] EXT_CSD has zero sector count: nonzero={} rev={:#04x} device={:#04x} first={:02x?} identity={:02x?} last={:02x?}",
+            nonzero_bytes,
+            ext_csd[EXT_CSD_REVISION],
+            ext_csd[EXT_CSD_DEVICE_TYPE],
+            &ext_csd[..16],
+            &ext_csd[176..224],
+            &ext_csd[496..],
+        );
         return Err(MmcError::Unsupported);
     }
 
@@ -466,13 +479,29 @@ mod tests {
     use alloc::sync::Arc;
     use alloc::vec;
 
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum HostEvent {
+        Reset,
+        SetClock(u32),
+        SetBusWidth(MmcBusWidth),
+        Command {
+            index: u8,
+            bus_width: MmcBusWidth,
+            clock_hz: u32,
+        },
+    }
+
     struct MockHost {
         commands: Arc<IrqSpinLock<Vec<MmcCommand>>>,
         bus_widths: Arc<IrqSpinLock<Vec<MmcBusWidth>>>,
+        events: Arc<IrqSpinLock<Vec<HostEvent>>>,
         storage: Arc<IrqSpinLock<Vec<u8>>>,
         sector_count: u32,
         present: Arc<AtomicBool>,
+        ext_csd_status: u32,
         switch_status: u32,
+        current_bus_width: MmcBusWidth,
+        current_clock_hz: u32,
     }
 
     impl MockHost {
@@ -480,6 +509,7 @@ mod tests {
             Self {
                 commands: Arc::new(IrqSpinLock::new(Vec::new())),
                 bus_widths: Arc::new(IrqSpinLock::new(Vec::new())),
+                events: Arc::new(IrqSpinLock::new(Vec::new())),
                 storage: Arc::new(IrqSpinLock::new(vec![
                     0;
                     sector_count as usize
@@ -487,22 +517,30 @@ mod tests {
                 ])),
                 sector_count,
                 present: Arc::new(AtomicBool::new(true)),
+                ext_csd_status: 0,
                 switch_status: 0,
+                current_bus_width: MmcBusWidth::One,
+                current_clock_hz: 0,
             }
         }
     }
 
     impl MmcHost for MockHost {
         fn reset(&mut self) -> MmcResult<()> {
+            self.events.lock().push(HostEvent::Reset);
             Ok(())
         }
 
-        fn set_clock(&mut self, _frequency_hz: u32) -> MmcResult<()> {
+        fn set_clock(&mut self, frequency_hz: u32) -> MmcResult<()> {
+            self.current_clock_hz = frequency_hz;
+            self.events.lock().push(HostEvent::SetClock(frequency_hz));
             Ok(())
         }
 
         fn set_bus_width(&mut self, width: MmcBusWidth) -> MmcResult<()> {
+            self.current_bus_width = width;
             self.bus_widths.lock().push(width);
+            self.events.lock().push(HostEvent::SetBusWidth(width));
             Ok(())
         }
 
@@ -520,6 +558,11 @@ mod tests {
             data: Option<MmcData<'_>>,
         ) -> MmcResult<crate::device::mmc::MmcResponse> {
             self.commands.lock().push(command);
+            self.events.lock().push(HostEvent::Command {
+                index: command.index(),
+                bus_width: self.current_bus_width,
+                clock_hz: self.current_clock_hz,
+            });
             if command.index() == CMD_SEND_OP_COND {
                 return Ok(crate::device::mmc::MmcResponse::new([
                     OCR_BUSY | OCR_SECTOR_MODE | OCR_VOLTAGE_WINDOW,
@@ -545,6 +588,12 @@ mod tests {
                 buffer[EXT_CSD_DEVICE_TYPE] = 1;
                 buffer[EXT_CSD_SECTOR_COUNT..EXT_CSD_SECTOR_COUNT + 4]
                     .copy_from_slice(&self.sector_count.to_le_bytes());
+                return Ok(crate::device::mmc::MmcResponse::new([
+                    self.ext_csd_status,
+                    0,
+                    0,
+                    0,
+                ]));
             } else if command.index() == CMD_READ_SINGLE_BLOCK {
                 let Some(MmcData::Read(buffer)) = data else {
                     return Err(MmcError::InvalidArgument);
@@ -593,6 +642,7 @@ mod tests {
         let host = MockHost::new(32);
         let commands = host.commands.clone();
         let bus_widths = host.bus_widths.clone();
+        let events = host.events.clone();
         let _device = EmmcBlockDevice::probe_with_bus_width(
             "mmcblk-test",
             Box::new(host),
@@ -614,6 +664,40 @@ mod tests {
             bus_widths.lock().as_slice(),
             &[MmcBusWidth::One, MmcBusWidth::Eight]
         );
+
+        let events = events.lock();
+        let ext_csd_position = events
+            .iter()
+            .position(|event| {
+                matches!(
+                    event,
+                    HostEvent::Command {
+                        index: CMD_SEND_EXT_CSD,
+                        bus_width: MmcBusWidth::One,
+                        clock_hz: IDENTIFICATION_CLOCK_HZ,
+                    }
+                )
+            })
+            .expect("CMD8 must run in one-bit identification mode");
+        let switch_position = events
+            .iter()
+            .position(|event| {
+                matches!(
+                    event,
+                    HostEvent::Command {
+                        index: CMD_SWITCH,
+                        bus_width: MmcBusWidth::One,
+                        clock_hz: IDENTIFICATION_CLOCK_HZ,
+                    }
+                )
+            })
+            .expect("CMD6 must run before changing the host width");
+        let eight_bit_position = events
+            .iter()
+            .position(|event| matches!(event, HostEvent::SetBusWidth(MmcBusWidth::Eight)))
+            .expect("host must enter eight-bit mode after CMD6");
+        assert!(ext_csd_position < switch_position);
+        assert!(switch_position < eight_bit_position);
     }
 
     #[test_case]
@@ -642,6 +726,30 @@ mod tests {
         );
 
         assert!(matches!(result, Err(MmcError::Response)));
+        assert_eq!(bus_widths.lock().as_slice(), &[MmcBusWidth::One]);
+    }
+
+    #[test_case]
+    fn rejected_ext_csd_status_stops_before_bus_width_switch() {
+        let mut host = MockHost::new(32);
+        host.ext_csd_status = 1 << 22;
+        let commands = host.commands.clone();
+        let bus_widths = host.bus_widths.clone();
+
+        let result = EmmcBlockDevice::probe_with_bus_width(
+            "mmcblk-test",
+            Box::new(host),
+            MmcBusWidth::Eight,
+        );
+
+        assert!(matches!(result, Err(MmcError::Response)));
+        let command_indices: Vec<u8> = commands
+            .lock()
+            .iter()
+            .map(|command| command.index())
+            .collect();
+        assert_eq!(command_indices.last(), Some(&CMD_SEND_EXT_CSD));
+        assert!(!command_indices.contains(&CMD_SWITCH));
         assert_eq!(bus_widths.lock().as_slice(), &[MmcBusWidth::One]);
     }
 

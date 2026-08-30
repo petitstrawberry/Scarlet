@@ -46,6 +46,9 @@ pub type EventHandler = usize;
 pub struct EventHandlerEntry {
     /// Handler function address in user space
     pub handler: EventHandler,
+    /// Executable user-space stub that invokes the event-return syscall.
+    /// `None` preserves the legacy stack-trampoline ABI.
+    pub restorer: Option<usize>,
     /// Whether this handler should be called synchronously
     pub synchronous: bool,
 }
@@ -218,11 +221,13 @@ impl ScarletAbi {
         content_type: u8,
         handler: EventHandler,
         synchronous: bool,
+        restorer: Option<usize>,
     ) {
         self.event_handlers.insert(
             content_type,
             EventHandlerEntry {
                 handler,
+                restorer,
                 synchronous,
             },
         );
@@ -234,9 +239,15 @@ impl ScarletAbi {
     }
 
     /// Set the default event handler for unhandled events
-    pub fn set_default_event_handler(&mut self, handler: EventHandler, synchronous: bool) {
+    pub fn set_default_event_handler(
+        &mut self,
+        handler: EventHandler,
+        synchronous: bool,
+        restorer: Option<usize>,
+    ) {
         self.default_event_handler = Some(EventHandlerEntry {
             handler,
+            restorer,
             synchronous,
         });
     }
@@ -433,8 +444,8 @@ impl ScarletAbi {
     ///
     /// Sets up the user stack with a signal frame that preserves the interrupted
     /// context, then modifies the trapframe to jump to the registered handler.
-    /// When the handler returns, it executes the `event_return` syscall
-    /// (embedded in the trampoline) which restores the original context.
+    /// New registrations return through a validated executable `event_return`
+    /// restorer. Legacy syscall-640 registrations retain the stack trampoline.
     ///
     /// # Signal frame layout on user stack (high to low):
     ///
@@ -445,7 +456,7 @@ impl ScarletAbi {
     /// |   saved regs[0..31]      |  (32 × 8 = 256 bytes)
     /// |   event content type (8) |
     /// |   event subtype    (8)   |
-    /// |   trampoline code  (8)   |  <- ecall for syscall 643 (event_return)
+    /// |   reserved         (8)   |
     /// +--------------------------+  <- new SP (16-byte aligned)
     /// ```
     ///
@@ -498,18 +509,22 @@ impl ScarletAbi {
         let frame_base = sp;
         let event_info_addr = frame_base + SIGNAL_FRAME_SIZE;
 
-        // Trampoline: addi a7, x0, 643 (0x28300893) + ecall (0x00000073)
-        let trampoline_instr_0: u32 = 0x28300893;
-        let trampoline_instr_1: u32 = 0x00000073;
+        if handler.restorer.is_none() {
+            // Legacy syscall-640 registrations did not supply a restorer and
+            // therefore retain their historical stack trampoline behavior.
+            let trampoline_instr_0: u32 = 0x28300893;
+            let trampoline_instr_1: u32 = 0x00000073;
+            unsafe {
+                let paddr = task
+                    .vm_manager
+                    .translate_to_kva(frame_base)
+                    .ok_or("Failed to translate signal frame address")?;
+                *(paddr as *mut u32) = trampoline_instr_0;
+                *((paddr as *mut u32).add(1)) = trampoline_instr_1;
+            }
+        }
 
         unsafe {
-            let paddr = task
-                .vm_manager
-                .translate_to_kva(frame_base)
-                .ok_or("Failed to translate signal frame address")?;
-            *(paddr as *mut u32) = trampoline_instr_0;
-            *((paddr as *mut u32).add(1)) = trampoline_instr_1;
-
             let paddr = task
                 .vm_manager
                 .translate_to_kva(frame_base + 8)
@@ -544,7 +559,7 @@ impl ScarletAbi {
         trapframe.regs.reg[10] = event_info_addr;
         trapframe.regs.reg[11] = subtype;
         trapframe.regs.reg[12] = frame_base + 24;
-        trapframe.regs.reg[1] = frame_base;
+        trapframe.regs.reg[1] = handler.restorer.unwrap_or(frame_base);
 
         Ok(EventProcessOutcome::UserHandlerArmed)
     }
@@ -557,7 +572,7 @@ impl ScarletAbi {
     ///
     /// # Signal frame layout (RISC-V)
     /// ```text
-    ///   [sp + 0]:   trampoline code (8 bytes)
+    ///   [sp + 0]:   reserved (8 bytes)
     ///   [sp + 8]:   event subtype   (8 bytes)
     ///   [sp + 16]:  content type    (8 bytes)
     ///   [sp + 24]:  saved regs[0..31] (256 bytes)
@@ -1423,3 +1438,39 @@ fn register_scarlet_abi() {
 }
 
 late_initcall!(register_scarlet_abi);
+
+#[cfg(test)]
+mod tests {
+    use super::ScarletAbi;
+
+    #[test_case]
+    fn event_handler_registration_preserves_executable_restorer() {
+        let mut abi = ScarletAbi::default();
+        let handler = 0x20_000usize;
+        let restorer = 0x30_000usize;
+
+        abi.register_event_handler(0, handler, false, Some(restorer));
+
+        let registered = abi
+            .event_handlers
+            .get(&0)
+            .expect("process-control handler must be registered");
+        assert_eq!(registered.handler, handler);
+        assert_eq!(registered.restorer, Some(restorer));
+    }
+
+    #[test_case]
+    fn legacy_event_handler_registration_has_no_executable_restorer() {
+        let mut abi = ScarletAbi::default();
+
+        abi.register_event_handler(0, 0x20_000, false, None);
+
+        assert_eq!(
+            abi.event_handlers
+                .get(&0)
+                .expect("legacy handler must be registered")
+                .restorer,
+            None
+        );
+    }
+}

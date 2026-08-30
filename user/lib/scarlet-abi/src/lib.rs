@@ -733,6 +733,8 @@ pub enum Syscall {
     EventHandlerUnregister = 641,
     EventMask = 642,
     EventReturn = 643,
+    /// Register a native event handler with an executable event-return restorer.
+    EventHandlerRegisterWithRestorer = 644,
 
     // Memory mapping operations
     MemoryMap = 700,

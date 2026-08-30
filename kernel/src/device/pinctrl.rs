@@ -46,6 +46,29 @@ pub enum PinctrlError {
 
 /// SoC-specific pin-controller provider.
 pub trait PinctrlController: Send + Sync {
+    /// Validate one decoded firmware pinctrl state without changing hardware.
+    ///
+    /// The device core uses this method to preflight every child of a nested
+    /// pinctrl container before applying any of them. Providers must return
+    /// `Ok(())` only when a subsequent [`Self::apply_state`] for the same
+    /// state is supported and will return `Ok`. This lets the device core
+    /// safely apply a validated nested container without an error from a later
+    /// child leaving an earlier child configured.
+    ///
+    /// # Arguments
+    ///
+    /// * `state` - Provider-neutral state whose names and settings are to be
+    ///   checked.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` when the state is safe to apply, or a provider error. The
+    /// default conservatively reports unsupported so existing providers cannot
+    /// cause a partially applied nested state until they implement validation.
+    fn validate_state(&self, _state: &PinctrlState<'_>) -> Result<(), PinctrlError> {
+        Err(PinctrlError::Unsupported)
+    }
+
     /// Apply one decoded firmware pinctrl state.
     ///
     /// # Arguments
@@ -56,5 +79,8 @@ pub trait PinctrlController: Send + Sync {
     /// # Returns
     ///
     /// Number of pins/groups configured, or a provider error.
+    ///
+    /// When [`Self::validate_state`] returned `Ok(())` for this state, this
+    /// method must also return `Ok` and may then program hardware.
     fn apply_state(&self, state: &PinctrlState<'_>) -> Result<usize, PinctrlError>;
 }
