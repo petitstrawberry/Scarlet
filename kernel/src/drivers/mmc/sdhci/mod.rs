@@ -91,12 +91,27 @@ const CLOCK_TIMEOUT_US: u64 = 100_000;
 const DEFAULT_BASE_CLOCK_HZ: u32 = 50_000_000;
 const MMC_BLOCK_SIZE: usize = 512;
 
+/// Platform-specific settings for a generic SDHCI host.
+///
+/// All settings default to the standard SDHCI behavior, so PCI callers do
+/// not need to provide this value.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SdhciHostConfig {
+    /// Avoid intermediate writes to `POWER_CONTROL` while enabling power.
+    ///
+    /// When `true`, power-on emits only one write containing the selected
+    /// voltage and `POWER_ON`. This is for controllers that reject both a
+    /// clear write and a voltage-only write during power-up.
+    pub single_power_write: bool,
+}
+
 /// Generic MMIO-backed SDHCI host.
-pub(crate) struct SdhciHost {
+pub struct SdhciHost {
     mmio_base: usize,
     non_removable: bool,
     base_clock_hz: u32,
     specification_version: u8,
+    config: SdhciHostConfig,
 }
 
 impl SdhciHost {
@@ -109,25 +124,153 @@ impl SdhciHost {
     ///
     /// # Returns
     ///
+    /// An initialized register accessor whose base clock is read from the
+    /// controller's standard `CAPABILITIES` register. The controller is not
+    /// reset until [`MmcHost::reset`] is called.
+    pub fn new(mmio_base: usize, non_removable: bool) -> Self {
+        Self::new_with_config(mmio_base, non_removable, SdhciHostConfig::default())
+    }
+
+    /// Create an SDHCI host with platform-specific settings.
+    ///
+    /// # Arguments
+    ///
+    /// * `mmio_base` - Virtual address of the SDHCI register aperture.
+    /// * `non_removable` - Whether the slot contains soldered eMMC.
+    /// * `config` - Generic controller settings selected by the platform.
+    ///
+    /// # Returns
+    ///
+    /// An initialized register accessor whose base clock is read from the
+    /// controller's standard `CAPABILITIES` register. The controller is not
+    /// reset until [`MmcHost::reset`] is called.
+    pub fn new_with_config(mmio_base: usize, non_removable: bool, config: SdhciHostConfig) -> Self {
+        let capabilities = Self::read32_at(mmio_base, register::CAPABILITIES);
+        let base_clock_hz = Self::base_clock_hz_from_capabilities(capabilities);
+
+        Self::new_with_base_clock_and_config(mmio_base, non_removable, base_clock_hz, config)
+    }
+
+    /// Create an SDHCI host with a platform-provided source clock.
+    ///
+    /// Use this constructor when the standard SDHCI `CAPABILITIES` base-clock
+    /// field is absent or unreliable. A zero `base_clock_hz` is treated as an
+    /// unknown clock and falls back to the same conservative default as
+    /// [`Self::new`].
+    ///
+    /// # Arguments
+    ///
+    /// * `mmio_base` - Virtual address of the SDHCI register aperture.
+    /// * `non_removable` - Whether the slot contains soldered eMMC.
+    /// * `base_clock_hz` - Source clock frequency supplied by the platform,
+    ///   in hertz; zero selects the default fallback clock.
+    ///
+    /// # Returns
+    ///
     /// An initialized register accessor. The controller is not reset until
     /// [`MmcHost::reset`] is called.
-    pub(crate) fn new(mmio_base: usize, non_removable: bool) -> Self {
-        let capabilities = Self::read32_at(mmio_base, register::CAPABILITIES);
-        let reported_base_clock_mhz = (capabilities >> 8) & 0xff;
-        let base_clock_hz = if reported_base_clock_mhz == 0 {
-            DEFAULT_BASE_CLOCK_HZ
-        } else {
-            reported_base_clock_mhz.saturating_mul(1_000_000)
-        };
+    pub fn new_with_base_clock(mmio_base: usize, non_removable: bool, base_clock_hz: u32) -> Self {
+        Self::new_with_base_clock_and_config(
+            mmio_base,
+            non_removable,
+            base_clock_hz,
+            SdhciHostConfig::default(),
+        )
+    }
+
+    /// Create an SDHCI host with a platform-provided source clock and settings.
+    ///
+    /// Use this constructor when the standard SDHCI `CAPABILITIES` base-clock
+    /// field is absent or unreliable and the controller requires generic
+    /// SDHCI quirk handling.
+    ///
+    /// # Arguments
+    ///
+    /// * `mmio_base` - Virtual address of the SDHCI register aperture.
+    /// * `non_removable` - Whether the slot contains soldered eMMC.
+    /// * `base_clock_hz` - Source clock frequency supplied by the platform,
+    ///   in hertz; zero selects the default fallback clock.
+    /// * `config` - Generic controller settings selected by the platform.
+    ///
+    /// # Returns
+    ///
+    /// An initialized register accessor. The controller is not reset until
+    /// [`MmcHost::reset`] is called.
+    pub fn new_with_base_clock_and_config(
+        mmio_base: usize,
+        non_removable: bool,
+        base_clock_hz: u32,
+        config: SdhciHostConfig,
+    ) -> Self {
         let specification_version =
             (Self::read16_at(mmio_base, register::HOST_VERSION) & 0xff) as u8;
 
         Self {
             mmio_base,
             non_removable,
-            base_clock_hz,
+            base_clock_hz: Self::normalize_base_clock_hz(base_clock_hz),
             specification_version,
+            config,
         }
+    }
+
+    /// Return the virtual base address of this controller's register aperture.
+    ///
+    /// # Returns
+    ///
+    /// The MMIO base address supplied when this host was constructed.
+    pub const fn mmio_base(&self) -> usize {
+        self.mmio_base
+    }
+
+    /// Return the source clock used to program the SDHCI divider.
+    ///
+    /// # Returns
+    ///
+    /// The configured source clock frequency in hertz. This is never zero.
+    pub const fn base_clock_hz(&self) -> u32 {
+        self.base_clock_hz
+    }
+
+    /// Return the SDHCI specification version reported by the controller.
+    ///
+    /// # Returns
+    ///
+    /// The low byte of the `HOST_VERSION` register.
+    pub const fn specification_version(&self) -> u8 {
+        self.specification_version
+    }
+
+    /// Return whether the controller's slot is configured as non-removable.
+    ///
+    /// # Returns
+    ///
+    /// `true` for soldered media such as eMMC, or `false` for a removable
+    /// slot.
+    pub const fn is_non_removable(&self) -> bool {
+        self.non_removable
+    }
+
+    /// Return whether power-up uses a single combined register write.
+    ///
+    /// # Returns
+    ///
+    /// `true` when the platform enabled the `single_power_write` quirk.
+    pub const fn single_power_write(&self) -> bool {
+        self.config.single_power_write
+    }
+
+    const fn normalize_base_clock_hz(base_clock_hz: u32) -> u32 {
+        if base_clock_hz == 0 {
+            DEFAULT_BASE_CLOCK_HZ
+        } else {
+            base_clock_hz
+        }
+    }
+
+    const fn base_clock_hz_from_capabilities(capabilities: u32) -> u32 {
+        let reported_base_clock_mhz = (capabilities >> 8) & 0xff;
+        Self::normalize_base_clock_hz(reported_base_clock_mhz.saturating_mul(1_000_000))
     }
 
     fn read8_at(base: usize, offset: usize) -> u8 {
@@ -210,10 +353,19 @@ impl SdhciHost {
             return Err(MmcError::Unsupported);
         };
 
-        self.write8(register::POWER_CONTROL, 0);
-        self.write8(register::POWER_CONTROL, voltage);
-        self.write8(register::POWER_CONTROL, voltage | POWER_ON);
+        let (writes, write_count) = Self::power_control_writes(self.single_power_write(), voltage);
+        for value in writes.iter().take(write_count) {
+            self.write8(register::POWER_CONTROL, *value);
+        }
         Ok(())
+    }
+
+    fn power_control_writes(single_power_write: bool, voltage: u8) -> ([u8; 3], usize) {
+        if single_power_write {
+            ([voltage | POWER_ON, 0, 0], 1)
+        } else {
+            ([0, voltage, voltage | POWER_ON], 3)
+        }
     }
 
     fn clock_divider(&self, frequency_hz: u32) -> u16 {
@@ -514,6 +666,37 @@ mod tests {
         assert_eq!(
             SdhciHost::command_bits(command, false),
             (1 << 8) | command_flag::RESPONSE_48
+        );
+    }
+
+    #[test_case]
+    fn base_clock_capability_uses_reported_frequency_or_fallback() {
+        assert_eq!(
+            SdhciHost::base_clock_hz_from_capabilities(0),
+            DEFAULT_BASE_CLOCK_HZ
+        );
+        assert_eq!(
+            SdhciHost::base_clock_hz_from_capabilities(200 << 8),
+            200_000_000
+        );
+    }
+
+    #[test_case]
+    fn explicit_zero_base_clock_uses_fallback() {
+        assert_eq!(SdhciHost::normalize_base_clock_hz(0), DEFAULT_BASE_CLOCK_HZ);
+        assert_eq!(SdhciHost::normalize_base_clock_hz(19_200_000), 19_200_000);
+    }
+
+    #[test_case]
+    fn single_power_write_avoids_intermediate_power_control_writes() {
+        let voltage = POWER_1V8;
+        assert_eq!(
+            SdhciHost::power_control_writes(false, voltage),
+            ([0, voltage, voltage | POWER_ON], 3)
+        );
+        assert_eq!(
+            SdhciHost::power_control_writes(true, voltage),
+            ([voltage | POWER_ON, 0, 0], 1)
         );
     }
 }

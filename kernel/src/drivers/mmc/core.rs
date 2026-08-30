@@ -20,6 +20,7 @@ const CMD_GO_IDLE_STATE: u8 = 0;
 const CMD_SEND_OP_COND: u8 = 1;
 const CMD_ALL_SEND_CID: u8 = 2;
 const CMD_SET_RELATIVE_ADDR: u8 = 3;
+const CMD_SWITCH: u8 = 6;
 const CMD_SELECT_CARD: u8 = 7;
 const CMD_SEND_EXT_CSD: u8 = 8;
 const CMD_SEND_CSD: u8 = 9;
@@ -38,10 +39,16 @@ const OCR_POLL_ATTEMPTS: usize = 1_000;
 const EXT_CSD_REVISION: usize = 192;
 const EXT_CSD_DEVICE_TYPE: usize = 196;
 const EXT_CSD_SECTOR_COUNT: usize = 212;
+const EXT_CSD_BUS_WIDTH: u8 = 183;
+const MMC_SWITCH_WRITE_BYTE: u32 = 3 << 24;
+const EXT_CSD_BUS_WIDTH_4: u8 = 1;
+const EXT_CSD_BUS_WIDTH_8: u8 = 2;
+const R1_STATUS_ERROR_MASK: u32 = 0xfff9_a000;
+const R1_SWITCH_ERROR: u32 = 1 << 7;
 
 /// Information discovered while identifying one eMMC device.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct EmmcCardInfo {
+pub struct EmmcCardInfo {
     sector_count: u64,
     high_capacity: bool,
     ext_csd_revision: u8,
@@ -60,8 +67,18 @@ impl EmmcCardInfo {
     /// # Returns
     ///
     /// Card capacity expressed in sectors.
-    pub(crate) const fn sector_count(self) -> u64 {
+    pub const fn sector_count(self) -> u64 {
         self.sector_count
+    }
+
+    /// Return whether the card uses sector rather than byte addressing.
+    ///
+    /// # Returns
+    ///
+    /// `true` when commands address 512-byte sectors directly, or `false`
+    /// when commands use byte addresses.
+    pub const fn is_high_capacity(self) -> bool {
+        self.high_capacity
     }
 
     /// Return the decoded EXT_CSD revision byte.
@@ -69,7 +86,7 @@ impl EmmcCardInfo {
     /// # Returns
     ///
     /// Raw `EXT_CSD_REV` value reported by the card.
-    pub(crate) const fn ext_csd_revision(self) -> u8 {
+    pub const fn ext_csd_revision(self) -> u8 {
         self.ext_csd_revision
     }
 
@@ -78,14 +95,14 @@ impl EmmcCardInfo {
     /// # Returns
     ///
     /// Raw `DEVICE_TYPE` value reported by the card.
-    pub(crate) const fn device_type(self) -> u8 {
+    pub const fn device_type(self) -> u8 {
         self.device_type
     }
 }
 
 /// Block-device adapter around one initialized eMMC card.
 #[allow(clippy::vec_box)]
-pub(crate) struct EmmcBlockDevice {
+pub struct EmmcBlockDevice {
     name: &'static str,
     host: Mutex<Box<dyn MmcHost>>,
     card: EmmcCardInfo,
@@ -106,8 +123,32 @@ impl EmmcBlockDevice {
     ///
     /// An initialized block device, or the card/transport error encountered
     /// during identification.
-    pub(crate) fn probe(name: &'static str, mut host: Box<dyn MmcHost>) -> MmcResult<Self> {
-        let card = initialize_emmc(host.as_mut())?;
+    pub fn probe(name: &'static str, host: Box<dyn MmcHost>) -> MmcResult<Self> {
+        Self::probe_with_bus_width(name, host, MmcBusWidth::One)
+    }
+
+    /// Identify an eMMC card and construct its block-device adapter at a bus width.
+    ///
+    /// The card and host are both configured for `bus_width` while still at
+    /// the legacy MMC clock. This supports only SDR one-, four-, and eight-bit
+    /// operation; it does not enable high-speed timing modes.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - Stable device name published through `DeviceManager`.
+    /// * `host` - Host controller connected to the eMMC card.
+    /// * `bus_width` - Data-bus width required by the board wiring.
+    ///
+    /// # Returns
+    ///
+    /// An initialized block device, or the card/transport error encountered
+    /// during identification or bus-width configuration.
+    pub fn probe_with_bus_width(
+        name: &'static str,
+        mut host: Box<dyn MmcHost>,
+        bus_width: MmcBusWidth,
+    ) -> MmcResult<Self> {
+        let card = initialize_emmc(host.as_mut(), bus_width)?;
         Ok(Self {
             name,
             host: Mutex::new(host),
@@ -124,7 +165,7 @@ impl EmmcBlockDevice {
     ///
     /// A value incremented when removal is first observed. Future removable
     /// media support uses this to invalidate stale partition endpoints.
-    pub(crate) fn media_generation(&self) -> u64 {
+    pub fn media_generation(&self) -> u64 {
         self.media_generation.load(Ordering::Acquire)
     }
 
@@ -133,7 +174,7 @@ impl EmmcBlockDevice {
     /// # Returns
     ///
     /// A copy of the immutable card metadata.
-    pub(crate) const fn card_info(&self) -> EmmcCardInfo {
+    pub const fn card_info(&self) -> EmmcCardInfo {
         self.card
     }
 
@@ -214,7 +255,7 @@ impl EmmcBlockDevice {
     }
 }
 
-fn initialize_emmc(host: &mut dyn MmcHost) -> MmcResult<EmmcCardInfo> {
+fn initialize_emmc(host: &mut dyn MmcHost, bus_width: MmcBusWidth) -> MmcResult<EmmcCardInfo> {
     if !host.card_present() {
         return Err(MmcError::NoMedia);
     }
@@ -276,6 +317,8 @@ fn initialize_emmc(host: &mut dyn MmcHost) -> MmcResult<EmmcCardInfo> {
         return Err(MmcError::Unsupported);
     }
 
+    configure_emmc_bus_width(host, bus_width)?;
+
     let high_capacity = negotiated_ocr & OCR_SECTOR_MODE != 0;
     if !high_capacity {
         host.send_command(
@@ -295,6 +338,28 @@ fn initialize_emmc(host: &mut dyn MmcHost) -> MmcResult<EmmcCardInfo> {
         ext_csd_revision: ext_csd[EXT_CSD_REVISION],
         device_type: ext_csd[EXT_CSD_DEVICE_TYPE],
     })
+}
+
+fn configure_emmc_bus_width(host: &mut dyn MmcHost, bus_width: MmcBusWidth) -> MmcResult<()> {
+    if let Some(argument) = bus_width_switch_argument(bus_width) {
+        let response = host.send_command(
+            MmcCommand::new(CMD_SWITCH, argument, MmcResponseType::R1b),
+            None,
+        )?;
+        if response.word(0) & (R1_STATUS_ERROR_MASK | R1_SWITCH_ERROR) != 0 {
+            return Err(MmcError::Response);
+        }
+    }
+    host.set_bus_width(bus_width)
+}
+
+const fn bus_width_switch_argument(bus_width: MmcBusWidth) -> Option<u32> {
+    let value = match bus_width {
+        MmcBusWidth::One => return None,
+        MmcBusWidth::Four => EXT_CSD_BUS_WIDTH_4,
+        MmcBusWidth::Eight => EXT_CSD_BUS_WIDTH_8,
+    };
+    Some(MMC_SWITCH_WRITE_BYTE | ((EXT_CSD_BUS_WIDTH as u32) << 16) | ((value as u32) << 8))
 }
 
 impl Device for EmmcBlockDevice {
@@ -402,16 +467,19 @@ mod tests {
     use alloc::vec;
 
     struct MockHost {
-        commands: Arc<IrqSpinLock<Vec<u8>>>,
+        commands: Arc<IrqSpinLock<Vec<MmcCommand>>>,
+        bus_widths: Arc<IrqSpinLock<Vec<MmcBusWidth>>>,
         storage: Arc<IrqSpinLock<Vec<u8>>>,
         sector_count: u32,
         present: Arc<AtomicBool>,
+        switch_status: u32,
     }
 
     impl MockHost {
         fn new(sector_count: u32) -> Self {
             Self {
                 commands: Arc::new(IrqSpinLock::new(Vec::new())),
+                bus_widths: Arc::new(IrqSpinLock::new(Vec::new())),
                 storage: Arc::new(IrqSpinLock::new(vec![
                     0;
                     sector_count as usize
@@ -419,6 +487,7 @@ mod tests {
                 ])),
                 sector_count,
                 present: Arc::new(AtomicBool::new(true)),
+                switch_status: 0,
             }
         }
     }
@@ -432,7 +501,8 @@ mod tests {
             Ok(())
         }
 
-        fn set_bus_width(&mut self, _width: MmcBusWidth) -> MmcResult<()> {
+        fn set_bus_width(&mut self, width: MmcBusWidth) -> MmcResult<()> {
+            self.bus_widths.lock().push(width);
             Ok(())
         }
 
@@ -449,10 +519,18 @@ mod tests {
             command: MmcCommand,
             data: Option<MmcData<'_>>,
         ) -> MmcResult<crate::device::mmc::MmcResponse> {
-            self.commands.lock().push(command.index());
+            self.commands.lock().push(command);
             if command.index() == CMD_SEND_OP_COND {
                 return Ok(crate::device::mmc::MmcResponse::new([
                     OCR_BUSY | OCR_SECTOR_MODE | OCR_VOLTAGE_WINDOW,
+                    0,
+                    0,
+                    0,
+                ]));
+            }
+            if command.index() == CMD_SWITCH {
+                return Ok(crate::device::mmc::MmcResponse::new([
+                    self.switch_status,
                     0,
                     0,
                     0,
@@ -491,8 +569,13 @@ mod tests {
         let device = EmmcBlockDevice::probe("mmcblk-test", Box::new(host)).unwrap();
 
         assert_eq!(device.get_disk_size(), 32 * MMC_SECTOR_SIZE);
+        let command_indices: Vec<u8> = commands
+            .lock()
+            .iter()
+            .map(|command| command.index())
+            .collect();
         assert_eq!(
-            commands.lock().as_slice(),
+            command_indices.as_slice(),
             &[
                 CMD_GO_IDLE_STATE,
                 CMD_SEND_OP_COND,
@@ -503,6 +586,63 @@ mod tests {
                 CMD_SEND_EXT_CSD,
             ]
         );
+    }
+
+    #[test_case]
+    fn probe_with_eight_bit_bus_switches_card_before_host_width() {
+        let host = MockHost::new(32);
+        let commands = host.commands.clone();
+        let bus_widths = host.bus_widths.clone();
+        let _device = EmmcBlockDevice::probe_with_bus_width(
+            "mmcblk-test",
+            Box::new(host),
+            MmcBusWidth::Eight,
+        )
+        .unwrap();
+
+        let commands = commands.lock();
+        let switch = commands.last().unwrap();
+        assert_eq!(switch.index(), CMD_SWITCH);
+        assert_eq!(switch.response(), MmcResponseType::R1b);
+        assert_eq!(
+            switch.argument(),
+            MMC_SWITCH_WRITE_BYTE
+                | (u32::from(EXT_CSD_BUS_WIDTH) << 16)
+                | (u32::from(EXT_CSD_BUS_WIDTH_8) << 8)
+        );
+        assert_eq!(
+            bus_widths.lock().as_slice(),
+            &[MmcBusWidth::One, MmcBusWidth::Eight]
+        );
+    }
+
+    #[test_case]
+    fn four_bit_bus_uses_ext_csd_bus_width_value() {
+        assert_eq!(
+            bus_width_switch_argument(MmcBusWidth::Four),
+            Some(
+                MMC_SWITCH_WRITE_BYTE
+                    | (u32::from(EXT_CSD_BUS_WIDTH) << 16)
+                    | (u32::from(EXT_CSD_BUS_WIDTH_4) << 8)
+            )
+        );
+        assert_eq!(bus_width_switch_argument(MmcBusWidth::One), None);
+    }
+
+    #[test_case]
+    fn rejected_bus_width_switch_keeps_the_host_in_one_bit_mode() {
+        let mut host = MockHost::new(32);
+        host.switch_status = R1_SWITCH_ERROR;
+        let bus_widths = host.bus_widths.clone();
+
+        let result = EmmcBlockDevice::probe_with_bus_width(
+            "mmcblk-test",
+            Box::new(host),
+            MmcBusWidth::Eight,
+        );
+
+        assert!(matches!(result, Err(MmcError::Response)));
+        assert_eq!(bus_widths.lock().as_slice(), &[MmcBusWidth::One]);
     }
 
     #[test_case]
