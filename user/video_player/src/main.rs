@@ -52,7 +52,7 @@ use scarlet_ui::{
     dismiss_window, graphics,
 };
 use std::audio::AUDIO_PCM_FORMAT_S16LE;
-use std::fs::{File, OpenOptions};
+use std::fs::{File, OpenOptions, remove_file};
 use std::handle::capability::memory_mapping::{flags as mmap_flags, munmap, prot};
 use std::io::{ErrorKind, Read, SeekFrom};
 use std::socket::Socket;
@@ -103,6 +103,8 @@ const LATE_VIDEO_DROP_THRESHOLD_US: u64 = 250_000;
 const SEEK_COALESCE_DELAY_MS: u64 = 35;
 const WORKER_SHUTDOWN_POLL_INTERVAL_MS: u64 = 10;
 const WORKER_SHUTDOWN_POLL_ATTEMPTS: usize = 50;
+const STREAM_SPOOL_CREATE_ATTEMPTS: usize = 16;
+const STREAM_MAPPING_GROWTH_BYTES: usize = 4 * 1024 * 1024;
 const CONTROLS_MIN_WIDTH: u32 = 96;
 const CONTROLS_MIN_HEIGHT: u32 = 48;
 const CONTROLS_PANEL_HEIGHT: u32 = 34;
@@ -112,7 +114,7 @@ const PLAY_BUTTON_TOP_INSET: u32 = 6;
 const LOOP_BUTTON_WIDTH: u32 = 24;
 
 /// Read-only media bytes backed either by a shared file mapping or by an
-/// owned buffer for genuinely streaming inputs.
+/// owned buffer when a mapping is unavailable.
 enum MediaBytes {
     Mapped(MappedMediaFile),
     Owned(Vec<u8>),
@@ -147,7 +149,8 @@ impl Deref for MediaBytes {
 struct MappedMediaFile {
     _file: File,
     address: usize,
-    length: usize,
+    map_length: usize,
+    visible_length: usize,
 }
 
 impl MappedMediaFile {
@@ -161,32 +164,187 @@ impl MappedMediaFile {
         if length == 0 {
             return Err(format!("cannot map empty file: {path}"));
         }
+        Self::map_file(path, file, length, length)
+    }
+
+    fn open_with_lengths(
+        path: &str,
+        visible_length: usize,
+        map_length: usize,
+    ) -> Result<Self, String> {
+        if visible_length == 0 || map_length < visible_length {
+            return Err(format!("invalid mapping length: {path}"));
+        }
+        let file = File::open(path).map_err(|_| format!("open failed: {path}"))?;
+        Self::map_file(path, file, visible_length, map_length)
+    }
+
+    fn map_file(
+        path: &str,
+        file: File,
+        visible_length: usize,
+        map_length: usize,
+    ) -> Result<Self, String> {
         let address = file
             .as_handle()
             .as_memory_mapping()
             .map_err(|_| format!("file does not support mmap: {path}"))?
-            .mmap(0, length, prot::READ, mmap_flags::SHARED, 0)
+            .mmap(0, map_length, prot::READ, mmap_flags::SHARED, 0)
             .map_err(|_| format!("mmap failed: {path}"))?;
         Ok(Self {
             _file: file,
             address,
-            length,
+            map_length,
+            visible_length,
         })
     }
 
     fn as_slice(&self) -> &[u8] {
-        // SAFETY: `address..address + length` is the read-only mapping created
-        // in `open`. The mapping remains live for `self` and is never exposed
-        // mutably.
-        unsafe { core::slice::from_raw_parts(self.address as *const u8, self.length) }
+        // SAFETY: `address..address + visible_length` is within the read-only
+        // mapping created in `open`/`open_with_lengths`. The mapping remains
+        // live for `self` and is never exposed mutably.
+        unsafe { core::slice::from_raw_parts(self.address as *const u8, self.visible_length) }
+    }
+
+    fn len(&self) -> usize {
+        self.visible_length
+    }
+
+    fn map_len(&self) -> usize {
+        self.map_length
+    }
+
+    fn set_visible_len(&mut self, length: usize) {
+        debug_assert!(length <= self.map_length);
+        self.visible_length = length;
     }
 }
 
 impl Drop for MappedMediaFile {
     fn drop(&mut self) {
-        let _ = munmap(self.address, self.length);
+        let _ = munmap(self.address, self.map_length);
     }
 }
+
+/// A file-backed byte view whose visible range is refreshed when the file grows.
+///
+/// Streaming MP4 samples keep absolute offsets into the container. This view
+/// therefore never discards a prefix: it keeps the complete file mapped and
+/// only replaces the mapping when its spare virtual range is exhausted,
+/// leaving every offset returned by the MP4 parser valid. The mapped pages are
+/// backed by the VFS page cache rather than an allocator-owned `Vec<u8>`.
+struct GrowingMappedFile {
+    path: String,
+    mapping: Option<MappedMediaFile>,
+    remove_on_drop: bool,
+}
+
+impl GrowingMappedFile {
+    fn open(path: &str) -> Self {
+        Self {
+            path: String::from(path),
+            mapping: None,
+            remove_on_drop: false,
+        }
+    }
+
+    fn create_spool() -> Result<Self, String> {
+        let process_id = std::task::getpid();
+        // Keep the spool on the persistent root filesystem when available.
+        // `/tmp` is a small tmpfs on Scarlet and would turn a bounded-heap fix
+        // into a bounded-disk failure for a long YouTube stream.
+        for directory in ["/data", "/tmp"] {
+            for attempt in 0..STREAM_SPOOL_CREATE_ATTEMPTS {
+                let sequence = STREAM_SPOOL_COUNTER.fetch_add(1, Ordering::Relaxed);
+                let path = format!(
+                    "{}/scarlet-video-spool-{}-{}-{}.mp4",
+                    directory, process_id, sequence, attempt
+                );
+                let mut options = OpenOptions::new();
+                options.read(true).write(true).create_new(true);
+                if options.open(&path).is_ok() {
+                    return Ok(Self {
+                        path,
+                        mapping: None,
+                        remove_on_drop: true,
+                    });
+                }
+            }
+        }
+        Err(String::from("failed to create MP4 stream spool"))
+    }
+
+    fn path(&self) -> &str {
+        &self.path
+    }
+
+    fn len(&self) -> usize {
+        self.mapping.as_ref().map_or(0, MappedMediaFile::len)
+    }
+
+    fn refresh(&mut self) -> Result<usize, String> {
+        let mut file = File::open(&self.path).map_err(|_| format!("open failed: {}", self.path))?;
+        let file_length = file
+            .seek(SeekFrom::End(0))
+            .map_err(|_| format!("seek failed: {}", self.path))?;
+        let length = usize::try_from(file_length)
+            .map_err(|_| format!("stream is too large to map: {}", self.path))?;
+
+        let mapped_length = self.mapping.as_ref().map_or(0, MappedMediaFile::len);
+        let mapping_capacity = self.mapping.as_ref().map_or(0, MappedMediaFile::map_len);
+        if length == 0 {
+            self.mapping = None;
+        } else if length >= mapped_length && length <= mapping_capacity {
+            if let Some(mapping) = self.mapping.as_mut() {
+                mapping.set_visible_len(length);
+            }
+        } else {
+            // Drop the size probe before opening the mapping so the decoder
+            // never retains an extra read handle per refresh. Leave spare
+            // virtual address space in the mapping so normal socket/file
+            // appends do not require a remap for every network packet.
+            drop(file);
+            let map_length = stream_mapping_capacity(length)
+                .ok_or_else(|| format!("stream mapping size overflow: {}", self.path))?;
+            self.mapping = None;
+            self.mapping = Some(
+                match MappedMediaFile::open_with_lengths(&self.path, length, map_length) {
+                    Ok(mapping) => mapping,
+                    Err(_) if map_length != length => {
+                        MappedMediaFile::open_with_lengths(&self.path, length, length)?
+                    }
+                    Err(error) => return Err(error),
+                },
+            );
+        }
+        Ok(length)
+    }
+
+    fn as_slice(&self) -> &[u8] {
+        self.mapping.as_ref().map_or(&[], MappedMediaFile::as_slice)
+    }
+}
+
+impl Drop for GrowingMappedFile {
+    fn drop(&mut self) {
+        if self.remove_on_drop {
+            // Release the mapping/handle before unlinking on filesystems that
+            // invalidate an inode immediately on remove (notably ext2).
+            self.mapping = None;
+            let _ = remove_file(&self.path);
+        }
+    }
+}
+
+static STREAM_SPOOL_COUNTER: AtomicU32 = AtomicU32::new(0);
+
+fn stream_mapping_capacity(length: usize) -> Option<usize> {
+    let growth = STREAM_MAPPING_GROWTH_BYTES;
+    length
+        .checked_add(growth - 1)
+        .map(|rounded| rounded & !(growth - 1))
+}
+
 const LOOP_BUTTON_HEIGHT: u32 = 22;
 const LOOP_BUTTON_LEFT_INSET: u32 = 38;
 const SEEK_TRACK_LEFT_INSET: u32 = 74;
@@ -934,7 +1092,13 @@ impl PlaybackRequest {
             return None;
         }
 
-        if self.mp4_data.is_none() && (is_mp4_path(&self.path) || is_webm_path(&self.path)) {
+        // Streaming decoders own a growing file-backed view. Mapping here
+        // would retain a second mapping of the same prefix (and is invalid
+        // for socket streams whose positional path is only a label).
+        if !self.streaming
+            && self.mp4_data.is_none()
+            && (is_mp4_path(&self.path) || is_webm_path(&self.path))
+        {
             if cancel.load(Ordering::Acquire) {
                 return None;
             }
@@ -2016,7 +2180,7 @@ fn decode_loop_hardware_streaming_mp4(
     clock: Option<&AudioClock>,
     queue: &DisplayQueue,
 ) -> Result<(), String> {
-    let mut data = Vec::new();
+    let mut data = GrowingMappedFile::open(path);
     let mut decoder =
         HardwareVideoDecoder::open(queue.cancel.clone(), HardwareBufferRequest::default())?;
     let mut reorder = FrameReorderBuffer::new(u32::MAX);
@@ -2036,9 +2200,9 @@ fn decode_loop_hardware_streaming_mp4(
         if queue.is_cancelled() {
             return Ok(());
         }
-        append_growing_file(path, &mut data)?;
+        data.refresh()?;
         let complete = complete_path.map(marker_exists).unwrap_or(false);
-        let source = match load_mp4_video_source_with_options(&data, true, true) {
+        let source = match load_mp4_video_source_with_options(data.as_slice(), true, true) {
             Ok(source) => source,
             Err(err) if complete => return Err(err),
             Err(_) => {
@@ -2173,7 +2337,8 @@ fn decode_loop_hardware_streaming_mp4(
                 thread::sleep(Duration::from_millis(STREAM_POLL_INTERVAL_MS));
                 break;
             }
-            let access_unit_bytes = access_unit.bytes(Some(&data), &mut access_unit_scratch)?;
+            let access_unit_bytes =
+                access_unit.bytes(Some(data.as_slice()), &mut access_unit_scratch)?;
             if !logged_first_decode {
                 println!(
                     "[{}] stream decoding first frame sample={} bytes={} pts_us={}",
@@ -2272,7 +2437,7 @@ fn decode_loop_hardware_streaming_mp4(
         queue.clear();
     }
     if controls.is_loop_enabled() {
-        let source = load_mp4_video_source_with_options(&data, true, true)?;
+        let source = load_mp4_video_source_with_options(data.as_slice(), true, true)?;
         if source
             .access_units
             .iter()
@@ -2289,7 +2454,7 @@ fn decode_loop_hardware_streaming_mp4(
         );
         replay_hardware_source_loops(
             &source,
-            &data,
+            data.as_slice(),
             decoder,
             frame_store,
             paint_signal,
@@ -2315,7 +2480,7 @@ fn decode_loop_hardware_streaming_mp4(
             clock.reset_for_replay();
         }
         queue.clear();
-        let source = load_mp4_video_source_with_options(&data, true, true)?;
+        let source = load_mp4_video_source_with_options(data.as_slice(), true, true)?;
         if source
             .access_units
             .iter()
@@ -2327,7 +2492,7 @@ fn decode_loop_hardware_streaming_mp4(
         }
         replay_hardware_source_loops(
             &source,
-            &data,
+            data.as_slice(),
             decoder,
             frame_store,
             paint_signal,
@@ -2349,9 +2514,12 @@ fn decode_loop_hardware_streaming_mp4_socket(
     clock: Option<&AudioClock>,
     queue: &DisplayQueue,
 ) -> Result<(), String> {
-    let socket_state = start_stream_socket_reader(String::from(socket_path));
-
-    let mut data = Vec::new();
+    // The reader writes directly into the file-backed spool. Keeping only
+    // completion/error state here avoids a socket-sized `pending` buffer in
+    // addition to the decoder's retained MP4 bytes.
+    let mut data = GrowingMappedFile::create_spool()?;
+    let socket_reader =
+        start_stream_socket_reader(String::from(socket_path), String::from(data.path()));
     let mut decoder =
         HardwareVideoDecoder::open(queue.cancel.clone(), HardwareBufferRequest::default())?;
     let mut reorder = FrameReorderBuffer::new(u32::MAX);
@@ -2373,17 +2541,16 @@ fn decode_loop_hardware_streaming_mp4_socket(
             return Ok(());
         }
         {
-            let mut state = socket_state.lock();
+            let state = socket_reader.state.lock();
             if let Some(error) = state.error.as_ref() {
                 return Err(error.clone());
-            }
-            if !state.pending.is_empty() {
-                data.append(&mut state.pending);
             }
             complete = state.complete;
         }
 
-        let source = match load_mp4_video_source_with_options(&data, true, true) {
+        data.refresh()?;
+
+        let source = match load_mp4_video_source_with_options(data.as_slice(), true, true) {
             Ok(source) => source,
             Err(err) if complete => return Err(err),
             Err(_) => {
@@ -2518,7 +2685,8 @@ fn decode_loop_hardware_streaming_mp4_socket(
                 thread::sleep(Duration::from_millis(STREAM_POLL_INTERVAL_MS));
                 break;
             }
-            let access_unit_bytes = access_unit.bytes(Some(&data), &mut access_unit_scratch)?;
+            let access_unit_bytes =
+                access_unit.bytes(Some(data.as_slice()), &mut access_unit_scratch)?;
             if !logged_first_decode {
                 println!(
                     "[{}] stream decoding first frame sample={} bytes={} pts_us={}",
@@ -2617,7 +2785,7 @@ fn decode_loop_hardware_streaming_mp4_socket(
         queue.clear();
     }
     if controls.is_loop_enabled() {
-        let source = load_mp4_video_source_with_options(&data, true, true)?;
+        let source = load_mp4_video_source_with_options(data.as_slice(), true, true)?;
         if source
             .access_units
             .iter()
@@ -2634,7 +2802,7 @@ fn decode_loop_hardware_streaming_mp4_socket(
         );
         replay_hardware_source_loops(
             &source,
-            &data,
+            data.as_slice(),
             decoder,
             frame_store,
             paint_signal,
@@ -2660,7 +2828,7 @@ fn decode_loop_hardware_streaming_mp4_socket(
             clock.reset_for_replay();
         }
         queue.clear();
-        let source = load_mp4_video_source_with_options(&data, true, true)?;
+        let source = load_mp4_video_source_with_options(data.as_slice(), true, true)?;
         if source
             .access_units
             .iter()
@@ -2672,7 +2840,7 @@ fn decode_loop_hardware_streaming_mp4_socket(
         }
         replay_hardware_source_loops(
             &source,
-            &data,
+            data.as_slice(),
             decoder,
             frame_store,
             paint_signal,
@@ -7063,12 +7231,26 @@ fn materialize_audio_source(
                     return Ok(None);
                 }
             }
-            let Some(data) = read_file_cancellable(&path, cancel)? else {
+            if cancel.load(Ordering::Acquire) {
                 return Ok(None);
-            };
-            Ok(Some(PlayerAudioSource::Mp4Aac(Arc::new(
-                MediaBytes::from_owned(data),
-            ))))
+            }
+            match MappedMediaFile::open(&path) {
+                Ok(mapping) => Ok(Some(PlayerAudioSource::Mp4Aac(Arc::new(
+                    MediaBytes::Mapped(mapping),
+                )))),
+                Err(map_error) => {
+                    println!(
+                        "[{}] failed to map streamed audio, falling back to read: {}",
+                        APP_NAME, map_error
+                    );
+                    let Some(data) = read_file_cancellable(&path, cancel)? else {
+                        return Ok(None);
+                    };
+                    Ok(Some(PlayerAudioSource::Mp4Aac(Arc::new(
+                        MediaBytes::from_owned(data),
+                    ))))
+                }
+            }
         }
         PlayerAudioSource::StreamingMp4AacSocket { socket_path } => {
             let Some(data) = read_socket_to_end(&socket_path, cancel)? else {
@@ -7763,19 +7945,6 @@ fn read_file_cancellable(path: &str, cancel: &AtomicBool) -> Result<Option<Vec<u
     Ok(Some(data))
 }
 
-fn connect_local_socket_blocking(path: &str) -> Result<Socket, String> {
-    for _ in 0..400 {
-        let socket = Socket::new().map_err(|_| format!("failed to create local socket: {path}"))?;
-        match socket.connect(path) {
-            Ok(()) => return Ok(socket),
-            Err(_) => {
-                thread::sleep(Duration::from_millis(10));
-            }
-        }
-    }
-    Err(format!("timed out connecting local socket: {path}"))
-}
-
 fn connect_local_socket_cancellable(
     path: &str,
     cancel: &AtomicBool,
@@ -7787,9 +7956,9 @@ fn connect_local_socket_cancellable(
         let socket = Socket::new().map_err(|_| format!("failed to create local socket: {path}"))?;
         match socket.connect(path) {
             Ok(()) => {
-                socket.set_nonblocking(true).map_err(|_| {
-                    format!("failed to set audio stream socket nonblocking: {path}")
-                })?;
+                socket
+                    .set_nonblocking(true)
+                    .map_err(|_| format!("failed to set stream socket nonblocking: {path}"))?;
                 return Ok(Some(socket));
             }
             Err(_) => {
@@ -7801,58 +7970,83 @@ fn connect_local_socket_cancellable(
 }
 
 struct StreamSocketState {
-    // Keep only bytes that the decode thread has not moved into its retained
-    // MP4 backing buffer. Mirroring the complete stream here makes every
-    // update require another stream-sized allocation.
-    pending: Vec<u8>,
     complete: bool,
     error: Option<String>,
 }
 
-fn start_stream_socket_reader(path: String) -> Arc<Mutex<StreamSocketState>> {
+struct StreamSocketReader {
+    state: Arc<Mutex<StreamSocketState>>,
+    cancel: Arc<AtomicBool>,
+    thread: Option<JoinHandle>,
+}
+
+impl Drop for StreamSocketReader {
+    fn drop(&mut self) {
+        self.cancel.store(true, Ordering::Release);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+fn start_stream_socket_reader(path: String, spool_path: String) -> StreamSocketReader {
     let state = Arc::new(Mutex::new(StreamSocketState {
-        pending: Vec::new(),
         complete: false,
         error: None,
     }));
+    let cancel = Arc::new(AtomicBool::new(false));
     let reader_state = state.clone();
-    thread::spawn(move || {
-        if let Err(error) = read_stream_socket_into_state(&path, &reader_state) {
-            let mut state = reader_state.lock();
-            state.error = Some(error);
-            state.complete = true;
+    let reader_cancel = cancel.clone();
+    let thread = thread::spawn(move || {
+        let result = read_stream_socket_into_file(&path, &spool_path, &reader_cancel);
+        let mut state = reader_state.lock();
+        match result {
+            Ok(()) => state.complete = true,
+            Err(error) => {
+                state.error = Some(error);
+                state.complete = true;
+            }
         }
     });
-    state
+    StreamSocketReader {
+        state,
+        cancel,
+        thread: Some(thread),
+    }
 }
 
-fn read_stream_socket_into_state(
+fn read_stream_socket_into_file(
     path: &str,
-    state: &Arc<Mutex<StreamSocketState>>,
+    spool_path: &str,
+    cancel: &AtomicBool,
 ) -> Result<(), String> {
-    let mut socket = connect_local_socket_blocking(path)?;
-    socket
-        .set_nonblocking(true)
-        .map_err(|_| format!("failed to set stream socket nonblocking: {path}"))?;
+    let mut options = OpenOptions::new();
+    options.write(true).append(true);
+    let mut spool = options
+        .open(spool_path)
+        .map_err(|_| format!("open stream spool failed: {spool_path}"))?;
+    let Some(mut socket) = connect_local_socket_cancellable(path, cancel)? else {
+        return Ok(());
+    };
     let mut buffer = [0u8; 32 * 1024];
 
     loop {
+        if cancel.load(Ordering::Acquire) {
+            return Ok(());
+        }
         match socket.read(&mut buffer) {
             Ok(0) => {
-                let mut state = state.lock();
-                state.complete = true;
                 break;
             }
             Ok(read) => {
-                let mut state = state.lock();
-                state.pending.extend_from_slice(&buffer[..read]);
+                spool
+                    .write_all(&buffer[..read])
+                    .map_err(|_| format!("write stream spool failed: {spool_path}"))?;
             }
             Err(err) if err.kind() == ErrorKind::WouldBlock => {
                 thread::sleep(Duration::from_millis(STREAM_POLL_INTERVAL_MS));
             }
             Err(err) if err.kind() == ErrorKind::UnexpectedEof => {
-                let mut state = state.lock();
-                state.complete = true;
                 break;
             }
             Err(err) => return Err(format!("stream socket read failed: {err}")),
@@ -7885,35 +8079,6 @@ fn read_socket_to_end(path: &str, cancel: &AtomicBool) -> Result<Option<Vec<u8>>
     }
 
     Ok(Some(data))
-}
-
-fn append_growing_file(path: &str, data: &mut Vec<u8>) -> Result<usize, String> {
-    let mut file = File::open(path).map_err(|_| format!("open failed: {path}"))?;
-    let available_len = file
-        .seek(SeekFrom::End(0))
-        .map_err(|_| format!("seek failed: {path}"))? as usize;
-    if available_len <= data.len() {
-        return Ok(0);
-    }
-    file.seek(SeekFrom::Start(data.len() as u64))
-        .map_err(|_| format!("seek failed: {path}"))?;
-    let before = data.len();
-    let mut buffer = [0u8; 16 * 1024];
-    let mut remaining = available_len - data.len();
-
-    while remaining > 0 {
-        let read_len = remaining.min(buffer.len());
-        let read = file
-            .read(&mut buffer[..read_len])
-            .map_err(|_| format!("read failed"))?;
-        if read == 0 {
-            break;
-        }
-        data.extend_from_slice(&buffer[..read]);
-        remaining -= read;
-    }
-
-    Ok(data.len().saturating_sub(before))
 }
 
 fn marker_exists(path: &str) -> bool {

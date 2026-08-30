@@ -2,10 +2,16 @@
 
 #[path = "key_repeat.rs"]
 mod key_repeat;
+#[path = "touch.rs"]
+mod touch;
 
 pub(crate) use key_repeat::{
     ConsumedKeys, HeldKeys, KeyRepeatState, KeyboardSource, forward_to_binary_key_protocol,
     is_initial_press, is_physical_key_value, should_retry_keyboard_read,
+};
+pub(crate) use touch::{
+    GestureEvent, GestureRecognizer, TOUCH_COORD_MAX, TouchContact, TouchFrame, TouchPolicyEvent,
+    TouchSurface,
 };
 
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -16,7 +22,9 @@ use std::time::Duration;
 use std::vec::Vec;
 
 use scarlet_os::handle::capability::StreamError;
-use scarlet_os::input::{INPUT_CAP_DIRECT_TOUCH, InputDevice, InputDeviceKind};
+use scarlet_os::input::{
+    INPUT_CAP_DIRECT_TOUCH, INPUT_CAP_INTERNAL, INPUT_CAP_MT, InputDevice, InputDeviceKind,
+};
 
 const DEVICE_INDEX_LIMIT: u8 = 8;
 const DEVICE_SCAN_INTERVAL: Duration = Duration::from_secs(1);
@@ -70,6 +78,13 @@ pub enum CompositorInputEvent {
         /// Only state owned by this producer is discarded.
         source: KeyboardSource,
     },
+    /// A normalized per-device multitouch snapshot for compositor-thread policy.
+    TouchFrame(TouchFrame),
+    /// Current convertible/lid posture reported by `/dev/switch0`.
+    PostureChanged {
+        tablet_mode: Option<bool>,
+        lid_closed: Option<bool>,
+    },
 }
 
 /// Global input event queue
@@ -119,11 +134,13 @@ pub mod event_types {
     pub const EV_KEY: u16 = 0x01;
     pub const EV_REL: u16 = 0x02;
     pub const EV_ABS: u16 = 0x03;
+    pub const EV_SW: u16 = 0x05;
 }
 
 /// Synchronization event codes
 pub mod syn_codes {
     pub const SYN_REPORT: u16 = 0;
+    pub const SYN_DROPPED: u16 = 3;
 }
 
 /// Relative axis codes
@@ -143,6 +160,18 @@ pub const WHEEL_PIXELS_PER_NOTCH: i32 = 10;
 pub mod abs_codes {
     pub const ABS_X: u16 = 0x00;
     pub const ABS_Y: u16 = 0x01;
+    pub const ABS_MT_SLOT: u16 = 0x2f;
+    pub const ABS_MT_TOUCH_MAJOR: u16 = 0x30;
+    pub const ABS_MT_POSITION_X: u16 = 0x35;
+    pub const ABS_MT_POSITION_Y: u16 = 0x36;
+    pub const ABS_MT_TRACKING_ID: u16 = 0x39;
+    pub const ABS_MT_PRESSURE: u16 = 0x3a;
+}
+
+/// Switch event codes.
+pub mod switch_codes {
+    pub const SW_LID: u16 = 0x00;
+    pub const SW_TABLET_MODE: u16 = 0x01;
 }
 
 /// Key codes
@@ -226,6 +255,10 @@ struct PointerMetadata {
     direct_touch: bool,
     x_axis: Option<AxisRange>,
     y_axis: Option<AxisRange>,
+    mt_x_axis: Option<AxisRange>,
+    mt_y_axis: Option<AxisRange>,
+    mt_slot_count: u16,
+    internal: bool,
 }
 
 impl PointerMetadata {
@@ -234,6 +267,7 @@ impl PointerMetadata {
             Ok(InputDeviceKind::Unknown) | Err(_) => expected_kind,
             Ok(kind) => kind,
         };
+        let capabilities = device.capabilities().unwrap_or(0);
         let x_axis = query_axis(device, abs_codes::ABS_X);
         let y_axis = query_axis(device, abs_codes::ABS_Y);
 
@@ -253,6 +287,28 @@ impl PointerMetadata {
                     .is_ok_and(|caps| caps & INPUT_CAP_DIRECT_TOUCH != 0),
             x_axis: x_axis.or(fallback),
             y_axis: y_axis.or(fallback),
+            mt_x_axis: query_axis(device, abs_codes::ABS_MT_POSITION_X),
+            mt_y_axis: query_axis(device, abs_codes::ABS_MT_POSITION_Y),
+            mt_slot_count: if capabilities & INPUT_CAP_MT != 0 {
+                device.multitouch_slot_count().unwrap_or(0)
+            } else {
+                0
+            },
+            internal: capabilities & INPUT_CAP_INTERNAL != 0,
+        }
+    }
+
+    fn multitouch(self) -> bool {
+        self.mt_slot_count > 0 && self.mt_x_axis.is_some() && self.mt_y_axis.is_some()
+    }
+
+    fn touch_surface(self) -> TouchSurface {
+        if self.direct_touch {
+            TouchSurface::Touchscreen
+        } else {
+            TouchSurface::Touchpad {
+                internal: self.internal,
+            }
         }
     }
 }
@@ -274,23 +330,25 @@ struct PointerFrame {
     abs_y: Option<i32>,
     abs_dirty: bool,
     buttons: Vec<(u16, bool)>,
+    legacy_touch: Option<bool>,
 }
 
 impl PointerFrame {
     fn consume(
         &mut self,
         metadata: PointerMetadata,
+        source: PointerSource,
         event: InputEvent,
     ) -> Option<Vec<CompositorInputEvent>> {
         match event.type_ {
-            event_types::EV_REL => match event.code {
+            event_types::EV_REL if !metadata.multitouch() => match event.code {
                 rel_codes::REL_X => self.rel_x = self.rel_x.saturating_add(event.value),
                 rel_codes::REL_Y => self.rel_y = self.rel_y.saturating_add(event.value),
                 rel_codes::REL_WHEEL => self.wheel_dy = self.wheel_dy.saturating_add(event.value),
                 rel_codes::REL_HWHEEL => self.wheel_dx = self.wheel_dx.saturating_add(event.value),
                 _ => {}
             },
-            event_types::EV_ABS => match event.code {
+            event_types::EV_ABS if !metadata.multitouch() => match event.code {
                 abs_codes::ABS_X => {
                     self.abs_x = Some(event.value);
                     self.abs_dirty = true;
@@ -302,6 +360,15 @@ impl PointerFrame {
                 _ => {}
             },
             event_types::EV_KEY => {
+                if metadata.multitouch() && event.code == key_codes::BTN_TOUCH {
+                    return None;
+                }
+                if metadata.direct_touch && event.code == key_codes::BTN_TOUCH {
+                    if event.value == 0 || event.value == 1 {
+                        self.legacy_touch = Some(event.value == 1);
+                    }
+                    return None;
+                }
                 let code = if metadata.direct_touch && event.code == key_codes::BTN_TOUCH {
                     key_codes::BTN_LEFT
                 } else {
@@ -312,14 +379,22 @@ impl PointerFrame {
                 }
             }
             event_types::EV_SYN if event.code == syn_codes::SYN_REPORT => {
-                return Some(self.commit(metadata));
+                return Some(self.commit(metadata, source));
             }
             _ => {}
         }
         None
     }
 
-    fn commit(&mut self, metadata: PointerMetadata) -> Vec<CompositorInputEvent> {
+    fn reset(&mut self) {
+        *self = Self::default();
+    }
+
+    fn commit(
+        &mut self,
+        metadata: PointerMetadata,
+        source: PointerSource,
+    ) -> Vec<CompositorInputEvent> {
         let mut events = Vec::new();
         if self.rel_x != 0 || self.rel_y != 0 {
             events.push(CompositorInputEvent::MouseMove {
@@ -327,7 +402,33 @@ impl PointerFrame {
                 dy: self.rel_y,
             });
         }
-        if self.abs_dirty
+        if metadata.direct_touch && !metadata.multitouch() {
+            if let (Some(x), Some(y), Some(x_axis), Some(y_axis), Some(pressed)) = (
+                self.abs_x,
+                self.abs_y,
+                metadata.x_axis,
+                metadata.y_axis,
+                self.legacy_touch,
+            ) {
+                events.push(CompositorInputEvent::TouchFrame(TouchFrame {
+                    source,
+                    time_ns: 0,
+                    surface: TouchSurface::Touchscreen,
+                    contacts: if pressed {
+                        std::vec![TouchContact {
+                            tracking_id: 0,
+                            x: x_axis.normalize(x, (touch::TOUCH_COORD_MAX + 1) as u32),
+                            y: y_axis.normalize(y, (touch::TOUCH_COORD_MAX + 1) as u32),
+                            pressure: None,
+                            touch_major: None,
+                        }]
+                    } else {
+                        Vec::new()
+                    },
+                    cancelled: false,
+                }));
+            }
+        } else if self.abs_dirty
             && let (Some(x), Some(y), Some(x_axis), Some(y_axis)) =
                 (self.abs_x, self.abs_y, metadata.x_axis, metadata.y_axis)
         {
@@ -485,6 +586,9 @@ fn input_discovery_supervisor() {
             let path = std::format!("/dev/keyboard{index}");
             try_spawn_keyboard_reader(&active_paths, path, index);
         }
+        for index in 0..DEVICE_INDEX_LIMIT {
+            try_spawn_switch_reader(&active_paths, std::format!("/dev/switch{index}"));
+        }
         thread::sleep(DEVICE_SCAN_INTERVAL);
     }
 }
@@ -541,12 +645,56 @@ fn pointer_device_reader(
     let metadata = PointerMetadata::query(&device, expected_kind);
     println!("[InputThread] Opened {} as {:?}", path, metadata.kind);
     let mut frame = PointerFrame::default();
+    let mut mt = match (metadata.mt_x_axis, metadata.mt_y_axis) {
+        (Some(x), Some(y)) if metadata.multitouch() => Some(touch::MtFrameAssembler::new(
+            source,
+            metadata.touch_surface(),
+            x.minimum,
+            x.maximum,
+            y.minimum,
+            y.maximum,
+            metadata.mt_slot_count,
+        )),
+        _ => None,
+    };
+    let mut mt_desynced = false;
+    let mut legacy_desynced = false;
     loop {
         super::trace::input_loop();
         match read_input_event(&device) {
             Ok(Some(event)) => {
                 super::trace::input_event();
-                if let Some(events) = frame.consume(metadata, event) {
+                if mt.is_none()
+                    && event.type_ == event_types::EV_SYN
+                    && event.code == syn_codes::SYN_DROPPED
+                {
+                    frame.reset();
+                    release_pointer_source(source);
+                    legacy_desynced = true;
+                    continue;
+                }
+                if legacy_desynced {
+                    if event.type_ == event_types::EV_SYN && event.code == syn_codes::SYN_REPORT {
+                        legacy_desynced = false;
+                    }
+                    continue;
+                }
+                if let Some(mt) = mt.as_mut() {
+                    if let Some(touch_frame) = consume_mt_event(mt, &mut mt_desynced, event) {
+                        if touch_frame.cancelled {
+                            frame.reset();
+                            release_pointer_source(source);
+                        }
+                        push_input_event(CompositorInputEvent::TouchFrame(touch_frame));
+                    }
+                    if mt_desynced
+                        || event.type_ == event_types::EV_SYN
+                            && event.code == syn_codes::SYN_DROPPED
+                    {
+                        continue;
+                    }
+                }
+                if let Some(events) = frame.consume(metadata, source, event) {
                     push_pointer_frame(source, events);
                 }
             }
@@ -560,7 +708,124 @@ fn pointer_device_reader(
             }
         }
     }
+    if let Some(mt) = mt.as_mut() {
+        push_input_event(CompositorInputEvent::TouchFrame(mt.cancel()));
+    }
     release_pointer_source(source);
+}
+
+fn consume_mt_event(
+    mt: &mut touch::MtFrameAssembler,
+    desynced: &mut bool,
+    event: InputEvent,
+) -> Option<TouchFrame> {
+    if event.type_ == event_types::EV_SYN && event.code == syn_codes::SYN_DROPPED {
+        *desynced = true;
+        return Some(mt.cancel());
+    }
+    if *desynced {
+        if event.type_ == event_types::EV_SYN && event.code == syn_codes::SYN_REPORT {
+            *desynced = false;
+        }
+        return None;
+    }
+    if event.type_ == event_types::EV_ABS {
+        match event.code {
+            abs_codes::ABS_MT_SLOT => mt.select_slot(event.value),
+            abs_codes::ABS_MT_TRACKING_ID => mt.tracking_id(event.value),
+            abs_codes::ABS_MT_POSITION_X => mt.position_x(event.value),
+            abs_codes::ABS_MT_POSITION_Y => mt.position_y(event.value),
+            abs_codes::ABS_MT_PRESSURE => mt.pressure(event.value),
+            abs_codes::ABS_MT_TOUCH_MAJOR => mt.touch_major(event.value),
+            _ => {}
+        }
+        None
+    } else if event.type_ == event_types::EV_SYN && event.code == syn_codes::SYN_REPORT {
+        Some(mt.commit(event.time))
+    } else {
+        None
+    }
+}
+
+fn try_spawn_switch_reader(
+    active_paths: &Arc<Mutex<Vec<std::string::String>>>,
+    path: std::string::String,
+) {
+    let Some(device) = claim_device(active_paths, &path) else {
+        return;
+    };
+    let reader_paths = Arc::clone(active_paths);
+    let cleanup_path = path.clone();
+    let failure_path = cleanup_path.clone();
+    if thread::Builder::new()
+        .spawn(move || {
+            switch_device_reader(device, path);
+            release_device(&reader_paths, &cleanup_path);
+        })
+        .is_err()
+    {
+        release_device(active_paths, &failure_path);
+    }
+}
+
+fn switch_device_reader(device: InputDevice, path: std::string::String) {
+    let mut tablet_mode = device.switch_state(switch_codes::SW_TABLET_MODE).ok();
+    let mut lid_closed = device.switch_state(switch_codes::SW_LID).ok();
+    push_input_event(CompositorInputEvent::PostureChanged {
+        tablet_mode,
+        lid_closed,
+    });
+    let mut dirty = false;
+    let mut desynced = false;
+    loop {
+        match read_input_event(&device) {
+            Ok(Some(event))
+                if event.type_ == event_types::EV_SYN && event.code == syn_codes::SYN_DROPPED =>
+            {
+                // EventDevice switch state is authoritative even if its event
+                // queue overflowed.  Resample it, then ignore the interrupted
+                // frame through the recovery SYN_REPORT boundary.
+                tablet_mode = device.switch_state(switch_codes::SW_TABLET_MODE).ok();
+                lid_closed = device.switch_state(switch_codes::SW_LID).ok();
+                push_input_event(CompositorInputEvent::PostureChanged {
+                    tablet_mode,
+                    lid_closed,
+                });
+                dirty = false;
+                desynced = true;
+            }
+            Ok(Some(event)) if desynced => {
+                if event.type_ == event_types::EV_SYN && event.code == syn_codes::SYN_REPORT {
+                    desynced = false;
+                }
+            }
+            Ok(Some(event)) if event.type_ == event_types::EV_SW => {
+                match event.code {
+                    switch_codes::SW_TABLET_MODE => tablet_mode = Some(event.value != 0),
+                    switch_codes::SW_LID => lid_closed = Some(event.value != 0),
+                    _ => continue,
+                }
+                dirty = true;
+            }
+            Ok(Some(event))
+                if event.type_ == event_types::EV_SYN
+                    && event.code == syn_codes::SYN_REPORT
+                    && dirty =>
+            {
+                push_input_event(CompositorInputEvent::PostureChanged {
+                    tablet_mode,
+                    lid_closed,
+                });
+                dirty = false;
+            }
+            Ok(Some(_)) => {}
+            Ok(None) => thread::sleep(SHORT_READ_DELAY),
+            Err(error) => {
+                println!("[InputThread] {} disconnected: {:?}", path, error);
+                break;
+            }
+        }
+    }
 }
 
 fn try_spawn_keyboard_reader(
@@ -588,18 +853,14 @@ fn try_spawn_keyboard_reader(
 fn keyboard_device_reader(device: InputDevice, path: std::string::String, index: u8) {
     let source = KeyboardSource::Local(index);
     println!("[KeyboardThread] Opened {}", path);
+    let mut desynced = false;
     loop {
         super::trace::keyboard_loop();
         match read_input_event(&device) {
             Ok(Some(event)) => {
                 super::trace::keyboard_event();
-                if event.type_ == event_types::EV_KEY {
-                    push_input_event(CompositorInputEvent::Keyboard {
-                        code: event.code,
-                        value: event.value,
-                        source,
-                        synthetic: false,
-                    });
+                if let Some(event) = consume_keyboard_event(source, &mut desynced, event) {
+                    push_input_event(event);
                 }
             }
             Ok(None) => {
@@ -613,6 +874,29 @@ fn keyboard_device_reader(device: InputDevice, path: std::string::String, index:
         }
     }
     push_input_event(CompositorInputEvent::KeyboardReset { source });
+}
+
+fn consume_keyboard_event(
+    source: KeyboardSource,
+    desynced: &mut bool,
+    event: InputEvent,
+) -> Option<CompositorInputEvent> {
+    if event.type_ == event_types::EV_SYN && event.code == syn_codes::SYN_DROPPED {
+        *desynced = true;
+        return Some(CompositorInputEvent::KeyboardReset { source });
+    }
+    if *desynced {
+        if event.type_ == event_types::EV_SYN && event.code == syn_codes::SYN_REPORT {
+            *desynced = false;
+        }
+        return None;
+    }
+    (event.type_ == event_types::EV_KEY).then_some(CompositorInputEvent::Keyboard {
+        code: event.code,
+        value: event.value,
+        source,
+        synthetic: false,
+    })
 }
 
 fn read_input_event(device: &InputDevice) -> Result<Option<InputEvent>, StreamError> {
@@ -653,6 +937,10 @@ mod tests {
                 minimum: -500,
                 maximum: 1500,
             }),
+            mt_x_axis: None,
+            mt_y_axis: None,
+            mt_slot_count: 0,
+            internal: false,
         }
     }
 
@@ -665,6 +953,7 @@ mod tests {
             tablet
                 .consume(
                     metadata(InputDeviceKind::Tablet),
+                    PointerSource::Local(0),
                     event(event_types::EV_ABS, abs_codes::ABS_X, 600)
                 )
                 .is_none()
@@ -673,6 +962,7 @@ mod tests {
             touchpad
                 .consume(
                     metadata(InputDeviceKind::Touchpad),
+                    PointerSource::Local(1),
                     event(event_types::EV_REL, rel_codes::REL_X, 7)
                 )
                 .is_none()
@@ -680,6 +970,7 @@ mod tests {
         let touchpad_events = touchpad
             .consume(
                 metadata(InputDeviceKind::Touchpad),
+                PointerSource::Local(1),
                 event(event_types::EV_SYN, syn_codes::SYN_REPORT, 0),
             )
             .unwrap();
@@ -691,6 +982,7 @@ mod tests {
             tablet
                 .consume(
                     metadata(InputDeviceKind::Tablet),
+                    PointerSource::Local(0),
                     event(event_types::EV_ABS, abs_codes::ABS_Y, 500)
                 )
                 .is_none()
@@ -698,6 +990,7 @@ mod tests {
         let tablet_events = tablet
             .consume(
                 metadata(InputDeviceKind::Tablet),
+                PointerSource::Local(0),
                 event(event_types::EV_SYN, syn_codes::SYN_REPORT, 0),
             )
             .unwrap();
@@ -744,36 +1037,46 @@ mod tests {
     }
 
     #[test]
-    fn touchscreen_motion_precedes_touch_as_left_button() {
+    fn legacy_touchscreen_uses_direct_touch_frame() {
         set_screen_size(1001, 2001);
         let mut frame = PointerFrame::default();
         frame.consume(
             metadata(InputDeviceKind::Touchscreen),
+            PointerSource::Local(24),
             event(event_types::EV_ABS, abs_codes::ABS_X, 600),
         );
         frame.consume(
             metadata(InputDeviceKind::Touchscreen),
+            PointerSource::Local(24),
             event(event_types::EV_ABS, abs_codes::ABS_Y, 500),
         );
         frame.consume(
             metadata(InputDeviceKind::Touchscreen),
+            PointerSource::Local(24),
             event(event_types::EV_KEY, key_codes::BTN_TOUCH, 1),
         );
         let events = frame
             .consume(
                 metadata(InputDeviceKind::Touchscreen),
+                PointerSource::Local(24),
                 event(event_types::EV_SYN, syn_codes::SYN_REPORT, 0),
             )
             .unwrap();
         assert_eq!(
             events,
-            std::vec![
-                CompositorInputEvent::MouseAbsolute { x: 500, y: 1000 },
-                CompositorInputEvent::MouseButton {
-                    button: key_codes::BTN_LEFT,
-                    pressed: true
-                }
-            ]
+            std::vec![CompositorInputEvent::TouchFrame(TouchFrame {
+                source: PointerSource::Local(24),
+                time_ns: 0,
+                surface: TouchSurface::Touchscreen,
+                contacts: std::vec![TouchContact {
+                    tracking_id: 0,
+                    x: 5000,
+                    y: 5000,
+                    pressure: None,
+                    touch_major: None,
+                }],
+                cancelled: false,
+            })]
         );
     }
 
@@ -868,5 +1171,112 @@ mod tests {
         assert!(!begin_input_start(&started));
         started.store(false, Ordering::Release);
         assert!(begin_input_start(&started));
+    }
+
+    #[test]
+    fn syn_dropped_cancels_mt_and_waits_for_clean_report() {
+        let mut mt = touch::MtFrameAssembler::new(
+            PointerSource::Local(8),
+            TouchSurface::Touchpad { internal: true },
+            0,
+            1000,
+            0,
+            1000,
+            2,
+        );
+        let mut desynced = false;
+        consume_mt_event(
+            &mut mt,
+            &mut desynced,
+            event(event_types::EV_ABS, abs_codes::ABS_MT_TRACKING_ID, 7),
+        );
+        consume_mt_event(
+            &mut mt,
+            &mut desynced,
+            event(event_types::EV_ABS, abs_codes::ABS_MT_POSITION_X, 500),
+        );
+        consume_mt_event(
+            &mut mt,
+            &mut desynced,
+            event(event_types::EV_ABS, abs_codes::ABS_MT_POSITION_Y, 500),
+        );
+        let cancel = consume_mt_event(
+            &mut mt,
+            &mut desynced,
+            event(event_types::EV_SYN, syn_codes::SYN_DROPPED, 0),
+        )
+        .expect("overflow must emit cancellation");
+        assert!(cancel.cancelled);
+        assert!(desynced);
+
+        assert!(
+            consume_mt_event(
+                &mut mt,
+                &mut desynced,
+                event(event_types::EV_ABS, abs_codes::ABS_MT_TRACKING_ID, 8),
+            )
+            .is_none()
+        );
+        assert!(
+            consume_mt_event(
+                &mut mt,
+                &mut desynced,
+                event(event_types::EV_SYN, syn_codes::SYN_REPORT, 0),
+            )
+            .is_none()
+        );
+        assert!(!desynced);
+        let clean = consume_mt_event(
+            &mut mt,
+            &mut desynced,
+            event(event_types::EV_SYN, syn_codes::SYN_REPORT, 0),
+        )
+        .expect("next complete frame must be accepted");
+        assert!(clean.contacts.is_empty());
+    }
+
+    #[test]
+    fn syn_dropped_resets_keyboard_and_rejects_interrupted_frame() {
+        let source = KeyboardSource::Local(3);
+        let mut desynced = false;
+        assert_eq!(
+            consume_keyboard_event(
+                source,
+                &mut desynced,
+                event(event_types::EV_KEY, key_codes::KEY_SPACE, 1),
+            ),
+            Some(CompositorInputEvent::Keyboard {
+                code: key_codes::KEY_SPACE,
+                value: 1,
+                source,
+                synthetic: false,
+            })
+        );
+        assert_eq!(
+            consume_keyboard_event(
+                source,
+                &mut desynced,
+                event(event_types::EV_SYN, syn_codes::SYN_DROPPED, 0),
+            ),
+            Some(CompositorInputEvent::KeyboardReset { source })
+        );
+        assert!(desynced);
+        assert_eq!(
+            consume_keyboard_event(
+                source,
+                &mut desynced,
+                event(event_types::EV_KEY, key_codes::KEY_SPACE, 0),
+            ),
+            None
+        );
+        assert_eq!(
+            consume_keyboard_event(
+                source,
+                &mut desynced,
+                event(event_types::EV_SYN, syn_codes::SYN_REPORT, 0),
+            ),
+            None
+        );
+        assert!(!desynced);
     }
 }

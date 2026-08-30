@@ -18,6 +18,7 @@ static MOUSE_COUNTER: AtomicUsize = AtomicUsize::new(0);
 static TOUCHPAD_COUNTER: AtomicUsize = AtomicUsize::new(0);
 static TABLET_COUNTER: AtomicUsize = AtomicUsize::new(0);
 static TOUCHSCREEN_COUNTER: AtomicUsize = AtomicUsize::new(0);
+static SWITCH_COUNTER: AtomicUsize = AtomicUsize::new(0);
 static INPUT_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 use crate::arch::Trapframe;
@@ -29,10 +30,29 @@ use crate::object::capability::selectable::{
 use crate::object::capability::{ControlOps, MemoryMappingOps};
 use crate::sync::Waker;
 
+use super::event_types::EV_SW;
+use super::switch_codes::SW_MAX;
+use super::syn_codes::{SYN_DROPPED, SYN_REPORT};
 use super::InputEvent;
 
 /// Maximum number of events to buffer
-const EVENT_QUEUE_CAPACITY: usize = 64;
+const EVENT_QUEUE_CAPACITY: usize = 256;
+
+/// Buffered events together with recovery state after an overflow.
+struct EventQueue {
+    events: VecDeque<InputEvent>,
+    /// Drop the remainder of the interrupted input frame before accepting a new one.
+    discard_until_syn_report: bool,
+}
+
+impl EventQueue {
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            events: VecDeque::with_capacity(capacity),
+            discard_until_syn_report: false,
+        }
+    }
+}
 
 /// Return the input device's [`InputDeviceKind`].
 pub const SCTL_INPUT_GET_KIND: u32 = 0x5353_0100;
@@ -42,6 +62,12 @@ pub const SCTL_INPUT_GET_CAPABILITIES: u32 = 0x5353_0101;
 pub const SCTL_INPUT_GET_ABS_MIN: u32 = 0x5353_0102;
 /// Return the maximum value for the absolute axis passed in `arg`.
 pub const SCTL_INPUT_GET_ABS_MAX: u32 = 0x5353_0103;
+/// Return the number of concurrently reportable multitouch contacts.
+pub const SCTL_INPUT_GET_MT_SLOT_COUNT: u32 = 0x5353_0104;
+/// Return the bit mask of supported `SW_*` switch codes.
+pub const SCTL_INPUT_GET_SWITCH_CAPABILITIES: u32 = 0x5353_0105;
+/// Return the current state of the `SW_*` switch code passed in `arg`.
+pub const SCTL_INPUT_GET_SWITCH_STATE: u32 = 0x5353_0106;
 
 /// Device produces key or button events.
 pub const INPUT_CAP_KEY: u32 = 1 << 0;
@@ -51,9 +77,20 @@ pub const INPUT_CAP_REL: u32 = 1 << 1;
 pub const INPUT_CAP_ABS: u32 = 1 << 2;
 /// Device represents direct touch rather than an indirect pointer surface.
 pub const INPUT_CAP_DIRECT_TOUCH: u32 = 1 << 3;
+/// Device reports multitouch slots and contact axes.
+pub const INPUT_CAP_MT: u32 = 1 << 4;
+/// Device reports `EV_SW` switch state changes.
+pub const INPUT_CAP_SWITCH: u32 = 1 << 5;
+/// Device is physically integrated into the system rather than externally attached.
+pub const INPUT_CAP_INTERNAL: u32 = 1 << 6;
 
 /// Largest Linux-compatible absolute-axis code accepted by the metadata ABI.
 pub const ABS_MAX: u16 = 0x3f;
+/// Largest multitouch slot table accepted from a kernel input driver.
+///
+/// Keeping this bounded prevents malformed metadata from forcing userspace to
+/// allocate an unreasonably large per-device slot array.
+pub const MAX_MT_SLOTS: usize = 64;
 
 /// Stable input device classes exposed through `SCTL_INPUT_GET_KIND`.
 #[repr(u8)]
@@ -71,6 +108,8 @@ pub enum InputDeviceKind {
     Touchscreen = 4,
     /// Graphics tablet or stylus device.
     Tablet = 5,
+    /// Posture, lid, or other switch device.
+    Switch = 6,
 }
 
 impl InputDeviceKind {
@@ -81,6 +120,7 @@ impl InputDeviceKind {
             "touchpad" | "trackpad" => Self::Touchpad,
             "touchscreen" => Self::Touchscreen,
             "tablet" => Self::Tablet,
+            "switch" => Self::Switch,
             _ => Self::Unknown,
         }
     }
@@ -97,12 +137,14 @@ pub struct AbsoluteAxisInfo {
     pub maximum: i32,
 }
 
-/// Optional device classification and absolute-axis description.
+/// Optional device classification, multitouch, switch, and absolute-axis description.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InputDeviceMetadata {
     kind: InputDeviceKind,
     capabilities: u32,
     absolute_axes: Vec<AbsoluteAxisInfo>,
+    multitouch_slot_count: Option<u16>,
+    switch_capabilities: u32,
 }
 
 impl InputDeviceMetadata {
@@ -121,6 +163,8 @@ impl InputDeviceMetadata {
             kind,
             capabilities,
             absolute_axes: Vec::new(),
+            multitouch_slot_count: None,
+            switch_capabilities: 0,
         }
     }
 
@@ -159,11 +203,60 @@ impl InputDeviceMetadata {
         Ok(self)
     }
 
+    /// Declare the number of concurrently reportable multitouch contacts.
+    ///
+    /// # Arguments
+    ///
+    /// * `slot_count` - Number of contacts addressable by `ABS_MT_SLOT`.
+    ///
+    /// # Returns
+    ///
+    /// Updated metadata, or an error when the count cannot be represented by
+    /// the control ABI.
+    pub fn with_multitouch_slots(mut self, slot_count: usize) -> Result<Self, &'static str> {
+        if slot_count == 0 || slot_count > MAX_MT_SLOTS {
+            return Err("Multitouch slot count is out of range");
+        }
+        if self.multitouch_slot_count.is_some() {
+            return Err("Multitouch slot metadata is duplicated");
+        }
+        self.multitouch_slot_count =
+            Some(u16::try_from(slot_count).map_err(|_| "Multitouch slot count is out of range")?);
+        self.capabilities |= INPUT_CAP_MT;
+        Ok(self)
+    }
+
+    /// Declare a supported posture or lid switch code.
+    ///
+    /// # Arguments
+    ///
+    /// * `code` - Linux-compatible `SW_*` switch code.
+    ///
+    /// # Returns
+    ///
+    /// Updated metadata, or an error for an invalid or duplicate switch code.
+    pub fn with_switch(mut self, code: u16) -> Result<Self, &'static str> {
+        if code > SW_MAX {
+            return Err("Switch code is out of range");
+        }
+        let bit = 1_u32 << u32::from(code);
+        if self.switch_capabilities & bit != 0 {
+            return Err("Switch capability metadata is duplicated");
+        }
+        self.switch_capabilities |= bit;
+        self.capabilities |= INPUT_CAP_SWITCH;
+        Ok(self)
+    }
+
     fn axis(&self, code: u16) -> Option<AbsoluteAxisInfo> {
         self.absolute_axes
             .iter()
             .copied()
             .find(|axis| axis.code == code)
+    }
+
+    fn supports_switch(&self, code: u16) -> bool {
+        code <= SW_MAX && self.switch_capabilities & (1_u32 << u32::from(code)) != 0
     }
 }
 
@@ -177,8 +270,10 @@ pub struct EventDevice {
     name: String,
     /// Optional classification and axis metadata.
     metadata: InputDeviceMetadata,
-    /// Event queue (ring buffer)
-    queue: IrqSpinLock<VecDeque<InputEvent>>,
+    /// Current state of declared Linux-compatible `SW_*` switch codes.
+    switch_state: IrqSpinLock<u32>,
+    /// Event queue and frame-recovery state.
+    queue: IrqSpinLock<EventQueue>,
     /// Waker for blocking reads
     waker: Waker,
     /// Non-blocking mode flag
@@ -223,6 +318,7 @@ impl EventDevice {
             "touchpad" | "trackpad" => TOUCHPAD_COUNTER.fetch_add(1, Ordering::SeqCst),
             "tablet" => TABLET_COUNTER.fetch_add(1, Ordering::SeqCst),
             "touchscreen" => TOUCHSCREEN_COUNTER.fetch_add(1, Ordering::SeqCst),
+            "switch" => SWITCH_COUNTER.fetch_add(1, Ordering::SeqCst),
             _ => INPUT_COUNTER.fetch_add(1, Ordering::SeqCst),
         };
 
@@ -235,7 +331,8 @@ impl EventDevice {
         Self {
             name,
             metadata,
-            queue: IrqSpinLock::new(VecDeque::with_capacity(EVENT_QUEUE_CAPACITY)),
+            switch_state: IrqSpinLock::new(0),
+            queue: IrqSpinLock::new(EventQueue::with_capacity(EVENT_QUEUE_CAPACITY)),
             waker: Waker::new_interruptible(waker_name),
             nonblocking: IrqSpinLock::new(false),
         }
@@ -253,8 +350,9 @@ impl EventDevice {
     /// Push an input event into the queue
     ///
     /// This method should be called from interrupt handlers or device drivers
-    /// when a new input event occurs. If the queue is full, the oldest event
-    /// is dropped to make room for the new one.
+    /// when a new input event occurs. If the queue is full, queued events and
+    /// the interrupted frame are discarded. Readers then receive
+    /// `SYN_DROPPED`, followed by `SYN_REPORT`, before the next complete frame.
     ///
     /// # Arguments
     ///
@@ -273,15 +371,36 @@ impl EventDevice {
     pub fn push_event(&self, type_: u16, code: u16, value: i32) {
         let event = InputEvent::new(type_, code, value);
 
+        if type_ == EV_SW && code <= SW_MAX {
+            let bit = 1_u32 << u32::from(code);
+            let mut switch_state = self.switch_state.lock();
+            if value == 0 {
+                *switch_state &= !bit;
+            } else {
+                *switch_state |= bit;
+            }
+        }
+
         {
             let mut q = self.queue.lock();
 
-            // If queue is full, drop the oldest event
-            if q.len() >= EVENT_QUEUE_CAPACITY {
-                q.pop_front();
+            if q.discard_until_syn_report {
+                if type_ == super::event_types::EV_SYN && code == SYN_REPORT {
+                    q.discard_until_syn_report = false;
+                }
+            } else if q.events.len() >= EVENT_QUEUE_CAPACITY {
+                // Do not expose a partial frame after overflow. The triggering
+                // event and the rest of its frame are discarded until its
+                // boundary, so the next accepted event begins a complete frame.
+                q.events.clear();
+                q.events
+                    .push_back(InputEvent::new(super::event_types::EV_SYN, SYN_DROPPED, 0));
+                q.events
+                    .push_back(InputEvent::new(super::event_types::EV_SYN, SYN_REPORT, 0));
+                q.discard_until_syn_report = true;
+            } else {
+                q.events.push_back(event);
             }
-
-            q.push_back(event);
         }
 
         // Wake up any waiting tasks
@@ -290,7 +409,7 @@ impl EventDevice {
 
     /// Check if there are events available to read
     fn has_events(&self) -> bool {
-        !self.queue.lock().is_empty()
+        !self.queue.lock().events.is_empty()
     }
 }
 
@@ -336,7 +455,7 @@ impl CharDevice for EventDevice {
         // Try to read one event
         {
             let mut q = self.queue.lock();
-            if let Some(event) = q.pop_front() {
+            if let Some(event) = q.events.pop_front() {
                 // Convert event structure to bytes
                 let bytes = unsafe {
                     core::slice::from_raw_parts(&event as *const _ as *const u8, event_size)
@@ -361,7 +480,7 @@ impl CharDevice for EventDevice {
 
             // After waking up, try to read again
             let mut q = self.queue.lock();
-            if let Some(event) = q.pop_front() {
+            if let Some(event) = q.events.pop_front() {
                 let bytes = unsafe {
                     core::slice::from_raw_parts(&event as *const _ as *const u8, event_size)
                 };
@@ -486,6 +605,21 @@ impl ControlOps for EventDevice {
                     Ok(axis.maximum)
                 }
             }
+            SCTL_INPUT_GET_MT_SLOT_COUNT => self
+                .metadata
+                .multitouch_slot_count
+                .map(i32::from)
+                .ok_or("Multitouch slot count is not declared"),
+            SCTL_INPUT_GET_SWITCH_CAPABILITIES => i32::try_from(self.metadata.switch_capabilities)
+                .map_err(|_| "Switch capability mask exceeds control return range"),
+            SCTL_INPUT_GET_SWITCH_STATE => {
+                let code = u16::try_from(arg).map_err(|_| "Invalid switch code")?;
+                if !self.metadata.supports_switch(code) {
+                    return Err("Switch is not supported");
+                }
+                let state = *self.switch_state.lock();
+                Ok(i32::from(state & (1_u32 << u32::from(code)) != 0))
+            }
             _ => Err("Control operation not supported"),
         }
     }
@@ -496,6 +630,12 @@ impl ControlOps for EventDevice {
             (SCTL_INPUT_GET_CAPABILITIES, "Get input device capabilities",),
             (SCTL_INPUT_GET_ABS_MIN, "Get absolute axis minimum"),
             (SCTL_INPUT_GET_ABS_MAX, "Get absolute axis maximum"),
+            (SCTL_INPUT_GET_MT_SLOT_COUNT, "Get multitouch slot count"),
+            (
+                SCTL_INPUT_GET_SWITCH_CAPABILITIES,
+                "Get switch capabilities"
+            ),
+            (SCTL_INPUT_GET_SWITCH_STATE, "Get switch state"),
         ]
     }
 }
@@ -512,8 +652,25 @@ impl MemoryMappingOps for EventDevice {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::device::input::abs_codes::*;
     use crate::device::input::event_types::*;
     use crate::device::input::rel_codes::*;
+    use crate::device::input::switch_codes::*;
+
+    #[test_case]
+    fn test_multitouch_and_switch_constants_match_linux() {
+        assert_eq!(EV_SW, 0x05);
+        assert_eq!(crate::device::input::syn_codes::SYN_MT_REPORT, 0x02);
+        assert_eq!(crate::device::input::syn_codes::SYN_DROPPED, 0x03);
+        assert_eq!(ABS_MT_SLOT, 0x2f);
+        assert_eq!(ABS_MT_TOUCH_MAJOR, 0x30);
+        assert_eq!(ABS_MT_POSITION_X, 0x35);
+        assert_eq!(ABS_MT_POSITION_Y, 0x36);
+        assert_eq!(ABS_MT_TRACKING_ID, 0x39);
+        assert_eq!(ABS_MT_PRESSURE, 0x3a);
+        assert_eq!(SW_LID, 0x00);
+        assert_eq!(SW_TABLET_MODE, 0x01);
+    }
 
     #[test_case]
     fn test_event_device_creation() {
@@ -579,11 +736,82 @@ mod tests {
             .with_absolute_axis(0x00, 0, 10)
             .unwrap();
         assert!(metadata.with_absolute_axis(0x00, 0, 20).is_err());
-        assert!(
-            InputDeviceMetadata::new(InputDeviceKind::Touchscreen, 0)
-                .with_absolute_axis(ABS_MAX + 1, 0, 10)
-                .is_err()
+        assert!(InputDeviceMetadata::new(InputDeviceKind::Touchscreen, 0)
+            .with_absolute_axis(ABS_MAX + 1, 0, 10)
+            .is_err());
+    }
+
+    #[test_case]
+    fn test_multitouch_slot_metadata_bounds_and_control() {
+        assert!(InputDeviceMetadata::new(InputDeviceKind::Touchscreen, 0)
+            .with_multitouch_slots(0)
+            .is_err());
+        assert!(InputDeviceMetadata::new(InputDeviceKind::Touchscreen, 0)
+            .with_multitouch_slots(MAX_MT_SLOTS + 1)
+            .is_err());
+
+        let metadata = InputDeviceMetadata::new(InputDeviceKind::Touchscreen, 0)
+            .with_multitouch_slots(MAX_MT_SLOTS)
+            .unwrap();
+        assert!(metadata.clone().with_multitouch_slots(5).is_err());
+        let dev = EventDevice::new_with_metadata("touchscreen", metadata);
+        assert_eq!(
+            dev.control(SCTL_INPUT_GET_MT_SLOT_COUNT, 0).unwrap(),
+            MAX_MT_SLOTS as i32
         );
+        assert_eq!(
+            dev.control(SCTL_INPUT_GET_CAPABILITIES, 0).unwrap(),
+            INPUT_CAP_MT as i32
+        );
+    }
+
+    #[test_case]
+    fn test_switch_metadata_controls_and_event_state() {
+        let metadata = InputDeviceMetadata::new(InputDeviceKind::Switch, INPUT_CAP_INTERNAL)
+            .with_switch(SW_LID)
+            .unwrap()
+            .with_switch(SW_TABLET_MODE)
+            .unwrap();
+        let dev = EventDevice::new_with_metadata("switch", metadata);
+
+        assert_eq!(
+            dev.control(SCTL_INPUT_GET_KIND, 0).unwrap(),
+            InputDeviceKind::Switch as i32
+        );
+        assert_eq!(
+            dev.control(SCTL_INPUT_GET_CAPABILITIES, 0).unwrap(),
+            (INPUT_CAP_INTERNAL | INPUT_CAP_SWITCH) as i32
+        );
+        assert_eq!(
+            dev.control(SCTL_INPUT_GET_SWITCH_CAPABILITIES, 0).unwrap(),
+            ((1 << SW_LID) | (1 << SW_TABLET_MODE)) as i32
+        );
+        assert_eq!(
+            dev.control(SCTL_INPUT_GET_SWITCH_STATE, SW_LID as usize)
+                .unwrap(),
+            0
+        );
+
+        dev.push_event(EV_SW, SW_LID, 1);
+        assert_eq!(
+            dev.control(SCTL_INPUT_GET_SWITCH_STATE, SW_LID as usize)
+                .unwrap(),
+            1
+        );
+        dev.push_event(EV_SW, SW_LID, 0);
+        assert_eq!(
+            dev.control(SCTL_INPUT_GET_SWITCH_STATE, SW_LID as usize)
+                .unwrap(),
+            0
+        );
+        assert!(dev
+            .control(SCTL_INPUT_GET_SWITCH_STATE, SW_MAX as usize + 1)
+            .is_err());
+        assert!(InputDeviceMetadata::new(InputDeviceKind::Switch, 0)
+            .with_switch(SW_LID)
+            .unwrap()
+            .with_switch(SW_LID)
+            .is_err());
     }
 
     #[test_case]
@@ -616,20 +844,43 @@ mod tests {
     fn test_queue_overflow() {
         let dev = EventDevice::new("input");
 
-        // Fill the queue beyond capacity
-        for i in 0..(EVENT_QUEUE_CAPACITY + 10) {
+        // Fill the queue, then begin a multitouch frame that overflows before
+        // it can be completed. The incomplete frame must never reach readers.
+        for i in 0..EVENT_QUEUE_CAPACITY {
             dev.push_event(EV_KEY, 0, i as i32);
         }
+        dev.push_event(super::super::event_types::EV_ABS, ABS_MT_SLOT, 0);
 
-        // Queue should be at capacity
-        assert_eq!(dev.queue.lock().len(), EVENT_QUEUE_CAPACITY);
+        let q = dev.queue.lock();
+        assert_eq!(q.events.len(), 2);
+        assert!(q.discard_until_syn_report);
+        drop(q);
 
-        // Read first event - should be event #10 (first 10 were dropped)
+        // End the discarded frame, then emit a complete next frame.
+        dev.push_event(super::super::event_types::EV_ABS, ABS_MT_TRACKING_ID, 7);
+        dev.push_event(EV_SYN, SYN_REPORT, 0);
+        dev.push_event(super::super::event_types::EV_ABS, ABS_MT_SLOT, 1);
+        dev.push_event(super::super::event_types::EV_ABS, ABS_MT_TRACKING_ID, 8);
+        dev.push_event(EV_SYN, SYN_REPORT, 0);
+
+        // The overflow marker and its empty boundary precede the complete
+        // post-overflow frame; no contact from the interrupted frame remains.
         let mut buffer = [0u8; InputEvent::size()];
-        dev.read_at(0, &mut buffer).unwrap();
-
-        let event = unsafe { core::ptr::read(buffer.as_ptr() as *const InputEvent) };
-
-        assert_eq!(event.value, 10);
+        let mut events = [InputEvent::default(); 5];
+        for event in &mut events {
+            dev.read_at(0, &mut buffer).unwrap();
+            *event = unsafe { core::ptr::read(buffer.as_ptr() as *const InputEvent) };
+        }
+        assert_eq!((events[0].type_, events[0].code), (EV_SYN, SYN_DROPPED));
+        assert_eq!((events[1].type_, events[1].code), (EV_SYN, SYN_REPORT));
+        assert_eq!(
+            (events[2].type_, events[2].code, events[2].value),
+            (super::super::event_types::EV_ABS, ABS_MT_SLOT, 1)
+        );
+        assert_eq!(
+            (events[3].type_, events[3].code, events[3].value),
+            (super::super::event_types::EV_ABS, ABS_MT_TRACKING_ID, 8)
+        );
+        assert_eq!((events[4].type_, events[4].code), (EV_SYN, SYN_REPORT));
     }
 }

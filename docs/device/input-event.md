@@ -49,6 +49,28 @@ pub struct InputEvent {
 - `EV_KEY` (0x01): Key/button press and release
 - `EV_REL` (0x02): Relative axis movement (e.g., mouse)
 - `EV_ABS` (0x03): Absolute axis position (e.g., touchscreen)
+- `EV_SW` (0x05): Posture and lid switch state changes
+
+### Multitouch and Switch ABI
+
+Linux-compatible type-B multitouch devices report `ABS_MT_SLOT` (0x2f),
+`ABS_MT_TRACKING_ID` (0x39), `ABS_MT_POSITION_X` (0x35),
+`ABS_MT_POSITION_Y` (0x36), and optional `ABS_MT_TOUCH_MAJOR` (0x30) or
+`ABS_MT_PRESSURE` (0x3a), followed by one `EV_SYN`/`SYN_REPORT` for the
+complete frame. `SYN_MT_REPORT` (0x02) remains available for legacy contact
+reports.
+
+`EV_SW` uses Linux switch codes including `SW_LID` (0) and
+`SW_TABLET_MODE` (1). A non-zero event value means the reported switch is
+active; zero means inactive.
+
+`EventDevice` exposes additive Scarlet controls:
+
+| Control | Meaning |
+| --- | --- |
+| `0x5353_0104` | Multitouch slot count |
+| `0x5353_0105` | Bit mask of supported switch codes |
+| `0x5353_0106` | Current state (0 or 1) for the switch code passed as the argument |
 
 ## Kernel Usage
 
@@ -208,8 +230,9 @@ fn scarlet_to_linux(scarlet_event: &InputEvent) -> LinuxInputEvent {
 
 ### Ring Buffer
 
-- デフォルト容量: 64イベント
-- オーバーフロー時: 古いイベントを自動的に破棄
+- デフォルト容量: 256イベント
+- オーバーフロー時: 部分フレームを公開しない。キューを破棄し、`EV_SYN`/`SYN_DROPPED` (3)、続いて空フレーム境界の`EV_SYN`/`SYN_REPORT`を送る。中断されたフレームの残りは次の`SYN_REPORT`まで破棄する
+- `SYN_DROPPED`を受け取った読取側は、保持しているキー、ボタン、またはマルチタッチslot状態を破棄し、直後の`SYN_REPORT`を空フレーム境界として扱う
 - スレッドセーフ: `Mutex`による保護
 
 ### Blocking Behavior

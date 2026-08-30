@@ -341,10 +341,7 @@ fn run_capture(state: &DesktopState) -> Result<(), &'static str> {
                 .map_err(|_| "Invalid SWS remote response")?
             {
                 ServerMessage::OutputChanged { width, height } => {
-                    println!(
-                        "[remote-desktop] SWS output changed: {}x{}",
-                        width, height
-                    );
+                    println!("[remote-desktop] SWS output changed: {}x{}", width, height);
                     state.resize(width, height)?;
                     let new_buffer = CaptureBuffer::new(next_buffer_id, width, height)?;
                     next_buffer_id = next_buffer_id.wrapping_add(1).max(1);

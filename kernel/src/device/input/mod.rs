@@ -57,6 +57,8 @@ pub mod event_types {
     pub const EV_ABS: u16 = 0x03;
     /// Miscellaneous events
     pub const EV_MSC: u16 = 0x04;
+    /// Switch state changes (for example, lid and tablet-mode switches)
+    pub const EV_SW: u16 = 0x05;
     /// LED state changes
     pub const EV_LED: u16 = 0x11;
     /// Sound events
@@ -67,6 +69,36 @@ pub mod event_types {
 pub mod syn_codes {
     /// Synchronization marker - separates event packets
     pub const SYN_REPORT: u16 = 0;
+    /// Synchronization marker - separates legacy multitouch contact reports
+    pub const SYN_MT_REPORT: u16 = 0x02;
+    /// Events were dropped; consumers must discard cached input state.
+    pub const SYN_DROPPED: u16 = 0x03;
+}
+
+/// Absolute-axis codes used by Linux-compatible multitouch devices.
+pub mod abs_codes {
+    /// Multitouch contact slot selector.
+    pub const ABS_MT_SLOT: u16 = 0x2f;
+    /// Multitouch contact major-axis size.
+    pub const ABS_MT_TOUCH_MAJOR: u16 = 0x30;
+    /// Multitouch contact X position.
+    pub const ABS_MT_POSITION_X: u16 = 0x35;
+    /// Multitouch contact Y position.
+    pub const ABS_MT_POSITION_Y: u16 = 0x36;
+    /// Multitouch contact tracking identifier.
+    pub const ABS_MT_TRACKING_ID: u16 = 0x39;
+    /// Multitouch contact pressure.
+    pub const ABS_MT_PRESSURE: u16 = 0x3a;
+}
+
+/// Switch codes used by Linux-compatible posture and lid devices.
+pub mod switch_codes {
+    /// Lid is closed.
+    pub const SW_LID: u16 = 0x00;
+    /// Device is in tablet mode.
+    pub const SW_TABLET_MODE: u16 = 0x01;
+    /// Largest Linux-compatible switch code accepted by the metadata ABI.
+    pub const SW_MAX: u16 = 0x10;
 }
 
 /// Relative axis codes

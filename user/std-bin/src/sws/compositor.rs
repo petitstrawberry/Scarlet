@@ -6,7 +6,8 @@ use super::cursor_theme::CursorTheme;
 use super::damage::{DamageRect, PresentDamage, WindowGeometrySnapshot, changed_geometry_damage};
 use super::gpu_compositor::{GpuCompositor, SgfxBufferError, SgfxBufferIdentity, SgfxCommitToken};
 use super::input::{
-    CompositorInputEvent, ConsumedKeys, HeldKeys, InputManager, KeyRepeatState, KeyboardSource,
+    CompositorInputEvent, ConsumedKeys, GestureEvent, GestureRecognizer, HeldKeys, InputManager,
+    KeyRepeatState, KeyboardSource, PointerSource, TOUCH_COORD_MAX, TouchFrame, TouchPolicyEvent,
     forward_to_binary_key_protocol, is_initial_press, is_physical_key_value, key_codes,
 };
 use super::ipc::{IpcEvent, IpcServer, send_message_to_client, send_response_to_client};
@@ -51,6 +52,35 @@ pub(super) fn is_sws_debug_enabled() -> bool {
     };
     LOG_CACHE.store(enabled as u8, Ordering::Relaxed);
     enabled
+}
+
+#[cfg(test)]
+mod touch_modality_tests {
+    use super::*;
+
+    #[test]
+    fn direct_touch_hides_cursor_without_changing_pointer_position() {
+        let pointer_position = (417, 233);
+        let mut modality = InputModality::default();
+        assert!(modality.direct_touch());
+        assert!(modality.cursor_hidden_by_touch);
+        assert_eq!(pointer_position, (417, 233));
+    }
+
+    #[test]
+    fn touchpad_or_mouse_motion_shows_cursor_again() {
+        let mut modality = InputModality {
+            cursor_hidden_by_touch: true,
+        };
+        assert!(modality.pointer_motion());
+        assert!(!modality.cursor_hidden_by_touch);
+    }
+
+    #[test]
+    fn normalized_direct_coordinates_hit_screen_edges() {
+        assert_eq!(normalized_touch_to_screen(0, 1920), 0);
+        assert_eq!(normalized_touch_to_screen(TOUCH_COORD_MAX, 1920), 1919);
+    }
 }
 
 macro_rules! sws_debug {
@@ -638,6 +668,11 @@ pub struct Compositor {
     ime_toggle_bindings: Vec<KeyBinding>,
     ime_trigger_keys: ConsumedKeys,
     key_repeat: KeyRepeatState,
+    gesture_recognizer: GestureRecognizer,
+    direct_touch_grabs: Vec<DirectTouchGrab>,
+    input_modality: InputModality,
+    tablet_mode: bool,
+    lid_closed: bool,
     ime_popup_windows: Vec<ImePopupWindow>,
     next_activation_token_serial: u64,
     activation_tokens: Vec<ActivationRecord>,
@@ -650,6 +685,37 @@ struct ImePopupWindow {
     offset_x: i32,
     offset_y: i32,
     visible: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DirectTouchGrab {
+    source: PointerSource,
+    tracking_id: i32,
+    window_id: u32,
+    legacy_primary: bool,
+    screen_x: i32,
+    screen_y: i32,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct InputModality {
+    cursor_hidden_by_touch: bool,
+}
+
+impl InputModality {
+    fn direct_touch(&mut self) -> bool {
+        core::mem::replace(&mut self.cursor_hidden_by_touch, true) != true
+    }
+
+    fn pointer_motion(&mut self) -> bool {
+        core::mem::replace(&mut self.cursor_hidden_by_touch, false)
+    }
+}
+
+fn normalized_touch_to_screen(value: i32, dimension: u32) -> i32 {
+    (i64::from(value.clamp(0, TOUCH_COORD_MAX))
+        .saturating_mul(i64::from(dimension.saturating_sub(1)))
+        / i64::from(TOUCH_COORD_MAX)) as i32
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -855,6 +921,11 @@ impl Compositor {
             ime_toggle_bindings: sws_config.ime_toggle_bindings,
             ime_trigger_keys: ConsumedKeys::default(),
             key_repeat: KeyRepeatState::default(),
+            gesture_recognizer: GestureRecognizer::new(screen_width, screen_height),
+            direct_touch_grabs: Vec::new(),
+            input_modality: InputModality::default(),
+            tablet_mode: false,
+            lid_closed: false,
             ime_popup_windows: Vec::new(),
             next_activation_token_serial: 1,
             activation_tokens: Vec::new(),
@@ -1880,7 +1951,7 @@ impl Compositor {
             &self.cursor,
             self.bg_color,
             self.resize_outline,
-            cursor_visible(self.pointer_lock),
+            cursor_visible(self.pointer_lock) && !self.input_modality.cursor_hidden_by_touch,
             damage,
         );
         match result {
@@ -2488,7 +2559,7 @@ impl Compositor {
             }
 
             // Layer 3: Draw cursor unless an application owns pointer lock.
-            if cursor_visible(self.pointer_lock) {
+            if cursor_visible(self.pointer_lock) && !self.input_modality.cursor_hidden_by_touch {
                 let cursor = &self.cursor;
                 cursor.draw_to_buffer_direct_clipped(
                     backbuffer,
@@ -2530,43 +2601,38 @@ impl Compositor {
 
         // Find topmost window at click position
         if let Some(win_id) = self.window_manager.window_at_point(click_x, click_y) {
-            sws_debug!("[Compositor] Clicked on window #{}", win_id);
-
-            // Only change focus if the window accepts focus
-            // Taskbar and Desktop windows are global UI elements that don't steal focus
-            if self.window_manager.window_accepts_focus(win_id) {
-                let previous_focus = self.window_manager.get_focused_window_id();
-
-                // Raise window to top (with type-based Z-order) before focusing.
-                // Only the raised transient group can change visually.
-                self.raise_window_with_damage(win_id);
-
-                // Set focus
-                self.window_manager.set_focus(win_id);
-
-                // Broadcast focus change event to all clients
-                self.broadcast_focus_change(win_id);
-
-                // Client-backed windows draw their own titlebar/focus state
-                // and will submit precise damage after FOCUS_CHANGED. Only a
-                // compositor placeholder changes pixels immediately here.
-                if previous_focus != Some(win_id) {
-                    if let Some(previous_focus) = previous_focus {
-                        self.damage_compositor_focus_style(previous_focus);
-                    }
-                    self.damage_compositor_focus_style(win_id);
-                }
-            } else {
-                sws_debug!(
-                    "[Compositor] Window #{} does not accept focus (global UI element)",
-                    win_id
-                );
-                // Still raise to top to maintain proper Z-order for that window type
-                self.raise_window_with_damage(win_id);
-            }
+            self.activate_window_from_input(win_id);
         }
 
         Ok(())
+    }
+
+    /// Focus/raise the window selected by an input hit-test.
+    ///
+    /// Mouse clicks and direct touchscreen contacts share activation policy,
+    /// but touchscreen input must not borrow the mouse cursor coordinates.
+    fn activate_window_from_input(&mut self, win_id: u32) {
+        sws_debug!("[Compositor] Input activated window #{}", win_id);
+
+        // Taskbar and Desktop windows are global UI elements that don't steal
+        // keyboard focus, but they still participate in their normal stacking
+        // policy when directly touched.
+        if !self.window_manager.window_accepts_focus(win_id) {
+            self.raise_window_with_damage(win_id);
+            return;
+        }
+
+        let previous_focus = self.window_manager.get_focused_window_id();
+        self.raise_window_with_damage(win_id);
+        self.window_manager.set_focus(win_id);
+        self.broadcast_focus_change(win_id);
+
+        if previous_focus != Some(win_id) {
+            if let Some(previous_focus) = previous_focus {
+                self.damage_compositor_focus_style(previous_focus);
+            }
+            self.damage_compositor_focus_style(win_id);
+        }
     }
 
     /// Broadcast focus change event to all connected clients
@@ -2778,6 +2844,146 @@ impl Compositor {
         let window_x = self.cursor.x - window.x;
         let window_y = self.cursor.y - window.y;
         self.send_mouse_position_to_window_coords(window_id, window, window_x, window_y);
+    }
+
+    fn set_cursor_hidden_by_touch(&mut self, hidden: bool) -> bool {
+        let changed = if hidden {
+            self.input_modality.direct_touch()
+        } else {
+            self.input_modality.pointer_motion()
+        };
+        if !changed {
+            return false;
+        }
+        self.add_pending_damage(self.cursor.get_dirty_region());
+        true
+    }
+
+    fn send_direct_legacy_event(&self, grab: DirectTouchGrab, pressed: Option<bool>) {
+        let Some(window) = self.window_manager.get_window(grab.window_id) else {
+            return;
+        };
+        let local_x = grab.screen_x - window.x;
+        let local_y = grab.screen_y - window.y;
+        let event_type = super::input::event_types::EV_ABS;
+        if let Some((extension_id, external_client_id)) = window.extension_owner {
+            let send = |type_, code, value| {
+                super::ipc::send_extension_input_event(
+                    extension_id,
+                    external_client_id,
+                    grab.window_id,
+                    0,
+                    type_,
+                    code,
+                    value,
+                );
+            };
+            send(event_type, super::input::abs_codes::ABS_X, local_x);
+            send(event_type, super::input::abs_codes::ABS_Y, local_y);
+            if let Some(pressed) = pressed {
+                send(
+                    super::input::event_types::EV_KEY,
+                    key_codes::BTN_LEFT,
+                    i32::from(pressed),
+                );
+            }
+            send(super::input::event_types::EV_SYN, 0, 0);
+        } else {
+            let send = |type_, code, value| {
+                super::ipc::send_input_to_window(grab.window_id, 0, type_, code, value);
+            };
+            send(event_type, super::input::abs_codes::ABS_X, local_x);
+            send(event_type, super::input::abs_codes::ABS_Y, local_y);
+            if let Some(pressed) = pressed {
+                send(
+                    super::input::event_types::EV_KEY,
+                    key_codes::BTN_LEFT,
+                    i32::from(pressed),
+                );
+            }
+            send(super::input::event_types::EV_SYN, 0, 0);
+        }
+    }
+
+    fn handle_direct_touch_frame(&mut self, frame: TouchFrame) -> bool {
+        // An empty/cancel frame can be generated during device discovery,
+        // disconnect, or SYN_DROPPED recovery.  It must not hide an otherwise
+        // active mouse cursor.  Once a real direct contact occurs, keep the
+        // cursor hidden until the next indirect pointer action.
+        let mut redraw = if !frame.cancelled && !frame.contacts.is_empty() {
+            self.set_cursor_hidden_by_touch(true)
+        } else {
+            false
+        };
+
+        let mut index = 0;
+        while index < self.direct_touch_grabs.len() {
+            let grab = self.direct_touch_grabs[index];
+            let ended = grab.source == frame.source
+                && (frame.cancelled
+                    || !frame
+                        .contacts
+                        .iter()
+                        .any(|contact| contact.tracking_id == grab.tracking_id));
+            if ended {
+                let grab = self.direct_touch_grabs.remove(index);
+                if grab.legacy_primary {
+                    self.send_direct_legacy_event(grab, Some(false));
+                }
+            } else {
+                index += 1;
+            }
+        }
+
+        if frame.cancelled {
+            return redraw;
+        }
+        for contact in frame.contacts {
+            let screen_x = normalized_touch_to_screen(contact.x, self.screen_width);
+            let screen_y = normalized_touch_to_screen(contact.y, self.screen_height);
+            if let Some(index) = self.direct_touch_grabs.iter().position(|grab| {
+                grab.source == frame.source && grab.tracking_id == contact.tracking_id
+            }) {
+                self.direct_touch_grabs[index].screen_x = screen_x;
+                self.direct_touch_grabs[index].screen_y = screen_y;
+                let grab = self.direct_touch_grabs[index];
+                if grab.legacy_primary {
+                    self.send_direct_legacy_event(grab, None);
+                }
+                continue;
+            }
+
+            let Some(window_id) = self.window_manager.window_at_point(screen_x, screen_y) else {
+                continue;
+            };
+            let legacy_primary = !self
+                .direct_touch_grabs
+                .iter()
+                .any(|grab| grab.source == frame.source);
+            if legacy_primary {
+                self.activate_window_from_input(window_id);
+                redraw = true;
+            }
+            let grab = DirectTouchGrab {
+                source: frame.source,
+                tracking_id: contact.tracking_id,
+                window_id,
+                legacy_primary,
+                screen_x,
+                screen_y,
+            };
+            self.direct_touch_grabs.push(grab);
+            if legacy_primary {
+                self.send_direct_legacy_event(grab, Some(true));
+            }
+        }
+        redraw
+    }
+
+    fn handle_gesture_event(&self, event: GestureEvent) {
+        // Pinch/swipe have no public SWS ABI yet. Keep them visible to debug
+        // builds without translating them into unrelated pointer packets.
+        sws_debug!("[Compositor] gesture: {:?}", event);
     }
 
     /// Update the surface that owns pointer hover.
@@ -3060,6 +3266,7 @@ impl Compositor {
         let now = monotonic_time_ns();
         let mut timeout = COMPOSITOR_IDLE_RECHECK_NS as u64;
         if cursor_visible(self.pointer_lock)
+            && !self.input_modality.cursor_hidden_by_touch
             && let Some(deadline) = self.cursor.next_animation_deadline_ns()
         {
             timeout = timeout.min(deadline.saturating_sub(now));
@@ -3190,7 +3397,7 @@ impl Compositor {
     }
 
     fn process_pending_events(&mut self) -> Result<(), &'static str> {
-        if cursor_visible(self.pointer_lock) {
+        if cursor_visible(self.pointer_lock) && !self.input_modality.cursor_hidden_by_touch {
             self.cursor.advance_animation(monotonic_time_ns());
         }
 
@@ -3231,7 +3438,7 @@ impl Compositor {
             })?;
         }
 
-        if cursor_visible(self.pointer_lock) {
+        if cursor_visible(self.pointer_lock) && !self.input_modality.cursor_hidden_by_touch {
             self.cursor.advance_animation(monotonic_time_ns());
         }
 
@@ -3386,6 +3593,7 @@ impl Compositor {
     fn handle_input_event(&mut self, event: CompositorInputEvent) -> Result<bool, &'static str> {
         match event {
             CompositorInputEvent::MouseMove { dx, dy } => {
+                self.set_cursor_hidden_by_touch(false);
                 self.release_invalid_pointer_lock();
                 if let Some(window_id) = captured_window(self.pointer_lock) {
                     self.send_locked_relative_motion(window_id, dx, dy);
@@ -3469,6 +3677,7 @@ impl Compositor {
                 Ok(true)
             }
             CompositorInputEvent::MouseAbsolute { x, y } => {
+                self.set_cursor_hidden_by_touch(false);
                 self.release_invalid_pointer_lock();
                 if let Some(state) = self.pointer_lock.as_mut() {
                     let delta = state.absolute_delta(x, y);
@@ -3540,6 +3749,7 @@ impl Compositor {
                 Ok(true)
             }
             CompositorInputEvent::MouseWheel { dx, dy } => {
+                self.set_cursor_hidden_by_touch(false);
                 let px_dy = dy.saturating_mul(super::input::WHEEL_PIXELS_PER_NOTCH);
                 let px_dx = dx.saturating_mul(super::input::WHEEL_PIXELS_PER_NOTCH);
                 let hi_dy = dy.saturating_mul(120);
@@ -3612,6 +3822,7 @@ impl Compositor {
                 Ok(true)
             }
             CompositorInputEvent::MouseButton { button, pressed } => {
+                self.set_cursor_hidden_by_touch(false);
                 self.release_invalid_pointer_lock();
                 if let Some(state) = self.pointer_lock {
                     if button == key_codes::BTN_LEFT {
@@ -3819,6 +4030,75 @@ impl Compositor {
                 }
 
                 Ok(true)
+            }
+            CompositorInputEvent::TouchFrame(frame) => {
+                let source = frame.source;
+                let mut redraw = false;
+                for policy_event in self.gesture_recognizer.process(frame) {
+                    match policy_event {
+                        TouchPolicyEvent::Pointer(CompositorInputEvent::MouseButton {
+                            button,
+                            pressed,
+                        }) => super::input::push_pointer_button(source, button, pressed),
+                        TouchPolicyEvent::Pointer(event) => {
+                            redraw |= self.handle_input_event(event)?;
+                        }
+                        TouchPolicyEvent::Gesture(event) => self.handle_gesture_event(event),
+                        TouchPolicyEvent::DirectTouch(frame) => {
+                            redraw |= self.handle_direct_touch_frame(frame);
+                        }
+                        TouchPolicyEvent::SourceButton {
+                            source,
+                            button,
+                            pressed,
+                        } => super::input::push_pointer_button(source, button, pressed),
+                        TouchPolicyEvent::ReleaseSource { source } => {
+                            super::input::release_pointer_source(source)
+                        }
+                    }
+                }
+                Ok(redraw)
+            }
+            CompositorInputEvent::PostureChanged {
+                tablet_mode,
+                lid_closed,
+            } => {
+                if let Some(lid_closed) = lid_closed {
+                    self.lid_closed = lid_closed;
+                }
+                if let Some(tablet_mode) = tablet_mode
+                    && self.tablet_mode != tablet_mode
+                {
+                    self.tablet_mode = tablet_mode;
+                    for policy_event in self.gesture_recognizer.set_tablet_mode(tablet_mode) {
+                        match policy_event {
+                            TouchPolicyEvent::Pointer(CompositorInputEvent::MouseButton {
+                                button,
+                                pressed,
+                            }) => super::input::push_pointer_button(
+                                PointerSource::Local(u8::MAX),
+                                button,
+                                pressed,
+                            ),
+                            TouchPolicyEvent::Pointer(event) => {
+                                let _ = self.handle_input_event(event)?;
+                            }
+                            TouchPolicyEvent::Gesture(event) => self.handle_gesture_event(event),
+                            TouchPolicyEvent::DirectTouch(frame) => {
+                                let _ = self.handle_direct_touch_frame(frame);
+                            }
+                            TouchPolicyEvent::SourceButton {
+                                source,
+                                button,
+                                pressed,
+                            } => super::input::push_pointer_button(source, button, pressed),
+                            TouchPolicyEvent::ReleaseSource { source } => {
+                                super::input::release_pointer_source(source)
+                            }
+                        }
+                    }
+                }
+                Ok(false)
             }
             CompositorInputEvent::Keyboard {
                 code,
