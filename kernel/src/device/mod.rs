@@ -20,6 +20,7 @@ pub mod input;
 pub mod iommu;
 pub mod mailbox;
 pub mod manager;
+pub mod mmc;
 pub mod network;
 pub mod nvmem;
 pub mod pci;

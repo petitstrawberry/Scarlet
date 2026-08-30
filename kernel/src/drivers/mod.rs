@@ -10,6 +10,7 @@ pub mod gpio;
 pub mod graphics;
 pub mod i2c;
 pub mod iommu;
+pub mod mmc;
 pub mod network;
 pub mod nvmem;
 pub mod pcie;

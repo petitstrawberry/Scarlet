@@ -78,6 +78,9 @@ QEMU_GPU="${SCARLET_QEMU_GPU:-virtio-gpu-pci}"
 QEMU_NET="${SCARLET_QEMU_NET:-1}"
 QEMU_USB_NCM="${SCARLET_QEMU_USB_NCM:-0}"
 QEMU_INPUT="${SCARLET_QEMU_INPUT:-1}"
+QEMU_EMMC="${SCARLET_QEMU_EMMC:-0}"
+QEMU_EMMC_IMAGE="${SCARLET_QEMU_EMMC_IMAGE:-$PROJECT_DIR/.scarlet/images/qemu-emmc.img}"
+QEMU_EMMC_SIZE="${SCARLET_QEMU_EMMC_SIZE:-4G}"
 QEMU_REMOTE_DESKTOP_HOST_PORT="${SCARLET_QEMU_REMOTE_DESKTOP_HOST_PORT:-5900}"
 QEMU_SSH_HOST_PORT="${SCARLET_QEMU_SSH_HOST_PORT:-2222}"
 if [ -z "${SCARLET_QEMU_REMOTE_DESKTOP_HOST_PORT:-}" ]; then
@@ -340,21 +343,41 @@ case "$QEMU_ROOTFS_TRANSPORT" in
         ;;
 esac
 
-ensure_qemu_usb_storage_image() {
+ensure_qemu_storage_image() {
     local image="$1"
     local size="$2"
+    local label="$3"
 
     if [ -f "$image" ]; then
         return 0
     fi
 
     mkdir -p "$(dirname "$image")"
-    echo "Creating QEMU USB storage image: $image ($size)"
+    echo "Creating QEMU $label image: $image ($size)"
     if ! truncate -s "$size" "$image"; then
-        echo "Error: failed to create QEMU USB storage image: $image"
+        echo "Error: failed to create QEMU $label image: $image"
         exit 1
     fi
 }
+
+QEMU_EMMC_ARGS=()
+if [ "$QEMU_EMMC" = "1" ] || [ "$QEMU_EMMC" = "true" ]; then
+    if ! qemu-system-aarch64 -device help 2>/dev/null | grep -q 'sdhci-pci'; then
+        echo "Error: qemu-system-aarch64 does not provide sdhci-pci"
+        exit 1
+    fi
+    if ! qemu-system-aarch64 -device help 2>/dev/null | grep -q 'name "emmc"'; then
+        echo "Error: qemu-system-aarch64 does not provide emmc"
+        exit 1
+    fi
+    ensure_qemu_storage_image "$QEMU_EMMC_IMAGE" "$QEMU_EMMC_SIZE" "eMMC"
+    echo "Enabling QEMU eMMC: $QEMU_EMMC_IMAGE"
+    QEMU_EMMC_ARGS=(
+        -drive id=emmc0,file="$QEMU_EMMC_IMAGE",format=raw,if=none
+        -device sdhci-pci,id=sdhci0,bus=pcie.0
+        -device emmc,drive=emmc0
+    )
+fi
 
 QEMU_XHCI_ARGS=()
 QEMU_USB_STORAGE_ARGS=()
@@ -363,7 +386,7 @@ if [ "$QEMU_USB_STORAGE" = "1" ] || [ "$QEMU_USB_STORAGE" = "true" ]; then
         echo "Error: qemu-system-aarch64 does not provide qemu-xhci"
         exit 1
     fi
-    ensure_qemu_usb_storage_image "$QEMU_USB_STORAGE_IMAGE" "$QEMU_USB_STORAGE_SIZE"
+    ensure_qemu_storage_image "$QEMU_USB_STORAGE_IMAGE" "$QEMU_USB_STORAGE_SIZE" "USB storage"
     echo "Enabling QEMU USB storage: $QEMU_USB_STORAGE_IMAGE"
     QEMU_XHCI_ARGS=(-device qemu-xhci,id=xhci,bus=pcie.0)
     QEMU_USB_STORAGE_ARGS=(
@@ -461,6 +484,7 @@ QEMU_CMD=(qemu-system-aarch64
     -drive id=boot,file="$BOOT_IMAGE",format=raw,if=none \
     -device virtio-blk-pci,drive=boot,bus=pcie.0 \
     "${QEMU_ROOTFS_ARGS[@]}" \
+    "${QEMU_EMMC_ARGS[@]}" \
     "${QEMU_GPU_ARGS[@]}" \
     "${QEMU_NET_ARGS[@]}" \
     "${QEMU_INPUT_ARGS[@]}" \

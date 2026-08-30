@@ -1,0 +1,519 @@
+//! Generic Secure Digital Host Controller Interface support.
+//!
+//! This module implements the standard SDHCI register interface using polling
+//! and programmed I/O. Bus discovery and platform quirks live in sibling
+//! modules so the command engine can be reused by both QEMU PCI SDHCI and the
+//! future Qualcomm SC7180 binding.
+
+use crate::device::mmc::{
+    MmcBusWidth, MmcCommand, MmcData, MmcError, MmcHost, MmcResponse, MmcResponseType, MmcResult,
+};
+
+pub mod pci;
+
+mod register {
+    pub const BLOCK_SIZE: usize = 0x04;
+    pub const ARGUMENT: usize = 0x08;
+    pub const TRANSFER_MODE: usize = 0x0c;
+    pub const RESPONSE_0: usize = 0x10;
+    pub const BUFFER_DATA: usize = 0x20;
+    pub const PRESENT_STATE: usize = 0x24;
+    pub const HOST_CONTROL: usize = 0x28;
+    pub const POWER_CONTROL: usize = 0x29;
+    pub const CLOCK_CONTROL: usize = 0x2c;
+    pub const TIMEOUT_CONTROL: usize = 0x2e;
+    pub const SOFTWARE_RESET: usize = 0x2f;
+    pub const INTERRUPT_STATUS: usize = 0x30;
+    pub const NORMAL_STATUS_ENABLE: usize = 0x34;
+    pub const ERROR_STATUS_ENABLE: usize = 0x36;
+    pub const NORMAL_SIGNAL_ENABLE: usize = 0x38;
+    pub const ERROR_SIGNAL_ENABLE: usize = 0x3a;
+    pub const CAPABILITIES: usize = 0x40;
+    pub const HOST_VERSION: usize = 0xfe;
+}
+
+mod present_state {
+    pub const COMMAND_INHIBIT: u32 = 1 << 0;
+    pub const DATA_INHIBIT: u32 = 1 << 1;
+    pub const CARD_INSERTED: u32 = 1 << 16;
+}
+
+mod transfer_mode {
+    pub const BLOCK_COUNT_ENABLE: u16 = 1 << 1;
+    pub const READ: u16 = 1 << 4;
+    pub const MULTI_BLOCK: u16 = 1 << 5;
+}
+
+mod command_flag {
+    pub const RESPONSE_136: u16 = 1 << 0;
+    pub const RESPONSE_48: u16 = 1 << 1;
+    pub const RESPONSE_48_BUSY: u16 = 3 << 0;
+    pub const CRC_CHECK: u16 = 1 << 3;
+    pub const INDEX_CHECK: u16 = 1 << 4;
+    pub const DATA_PRESENT: u16 = 1 << 5;
+}
+
+mod interrupt {
+    pub const COMMAND_COMPLETE: u32 = 1 << 0;
+    pub const TRANSFER_COMPLETE: u32 = 1 << 1;
+    pub const BUFFER_WRITE_READY: u32 = 1 << 4;
+    pub const BUFFER_READ_READY: u32 = 1 << 5;
+    pub const CARD_INSERTION: u32 = 1 << 6;
+    pub const CARD_REMOVAL: u32 = 1 << 7;
+    pub const ERROR: u32 = 1 << 15;
+    pub const ERROR_MASK: u32 = 0xffff_0000;
+}
+
+mod clock_control {
+    pub const INTERNAL_ENABLE: u16 = 1 << 0;
+    pub const INTERNAL_STABLE: u16 = 1 << 1;
+    pub const CARD_ENABLE: u16 = 1 << 2;
+}
+
+mod software_reset {
+    pub const ALL: u8 = 1 << 0;
+    pub const COMMAND: u8 = 1 << 1;
+    pub const DATA: u8 = 1 << 2;
+}
+
+const HOST_CONTROL_DATA_WIDTH_4: u8 = 1 << 1;
+const HOST_CONTROL_DATA_WIDTH_8: u8 = 1 << 5;
+const POWER_ON: u8 = 1 << 0;
+const POWER_1V8: u8 = 0x0a;
+const POWER_3V0: u8 = 0x0c;
+const POWER_3V3: u8 = 0x0e;
+const CAPABILITY_VOLTAGE_3V3: u32 = 1 << 24;
+const CAPABILITY_VOLTAGE_3V0: u32 = 1 << 25;
+const CAPABILITY_VOLTAGE_1V8: u32 = 1 << 26;
+const COMMAND_TIMEOUT_US: u64 = 1_000_000;
+const RESET_TIMEOUT_US: u64 = 100_000;
+const CLOCK_TIMEOUT_US: u64 = 100_000;
+const DEFAULT_BASE_CLOCK_HZ: u32 = 50_000_000;
+const MMC_BLOCK_SIZE: usize = 512;
+
+/// Generic MMIO-backed SDHCI host.
+pub(crate) struct SdhciHost {
+    mmio_base: usize,
+    non_removable: bool,
+    base_clock_hz: u32,
+    specification_version: u8,
+}
+
+impl SdhciHost {
+    /// Create an SDHCI host over an already mapped register aperture.
+    ///
+    /// # Arguments
+    ///
+    /// * `mmio_base` - Virtual address of the SDHCI register aperture.
+    /// * `non_removable` - Whether the slot contains soldered eMMC.
+    ///
+    /// # Returns
+    ///
+    /// An initialized register accessor. The controller is not reset until
+    /// [`MmcHost::reset`] is called.
+    pub(crate) fn new(mmio_base: usize, non_removable: bool) -> Self {
+        let capabilities = Self::read32_at(mmio_base, register::CAPABILITIES);
+        let reported_base_clock_mhz = (capabilities >> 8) & 0xff;
+        let base_clock_hz = if reported_base_clock_mhz == 0 {
+            DEFAULT_BASE_CLOCK_HZ
+        } else {
+            reported_base_clock_mhz.saturating_mul(1_000_000)
+        };
+        let specification_version =
+            (Self::read16_at(mmio_base, register::HOST_VERSION) & 0xff) as u8;
+
+        Self {
+            mmio_base,
+            non_removable,
+            base_clock_hz,
+            specification_version,
+        }
+    }
+
+    fn read8_at(base: usize, offset: usize) -> u8 {
+        // SAFETY: `base` is a mapped SDHCI aperture and every call uses a
+        // standard register offset within that aperture.
+        unsafe { crate::arch::mmio::read8(base + offset) }
+    }
+
+    fn read16_at(base: usize, offset: usize) -> u16 {
+        // SAFETY: `base` is a mapped SDHCI aperture and every call uses an
+        // aligned standard register offset within that aperture.
+        unsafe { crate::arch::mmio::read16(base + offset) }
+    }
+
+    fn read32_at(base: usize, offset: usize) -> u32 {
+        // SAFETY: `base` is a mapped SDHCI aperture and every call uses an
+        // aligned standard register offset within that aperture.
+        unsafe { crate::arch::mmio::read32(base + offset) }
+    }
+
+    fn read8(&self, offset: usize) -> u8 {
+        Self::read8_at(self.mmio_base, offset)
+    }
+
+    fn read16(&self, offset: usize) -> u16 {
+        Self::read16_at(self.mmio_base, offset)
+    }
+
+    fn read32(&self, offset: usize) -> u32 {
+        Self::read32_at(self.mmio_base, offset)
+    }
+
+    fn write8(&self, offset: usize, value: u8) {
+        // SAFETY: `mmio_base` is a mapped SDHCI aperture and every call uses a
+        // standard register offset within that aperture.
+        unsafe { crate::arch::mmio::write8(self.mmio_base + offset, value) }
+    }
+
+    fn write16(&self, offset: usize, value: u16) {
+        // SAFETY: `mmio_base` is a mapped SDHCI aperture and every call uses an
+        // aligned standard register offset within that aperture.
+        unsafe { crate::arch::mmio::write16(self.mmio_base + offset, value) }
+    }
+
+    fn write32(&self, offset: usize, value: u32) {
+        // SAFETY: `mmio_base` is a mapped SDHCI aperture and every call uses an
+        // aligned standard register offset within that aperture.
+        unsafe { crate::arch::mmio::write32(self.mmio_base + offset, value) }
+    }
+
+    fn wait_until(&self, timeout_us: u64, mut condition: impl FnMut() -> bool) -> MmcResult<()> {
+        let started = crate::time::current_time();
+        loop {
+            if condition() {
+                return Ok(());
+            }
+            if crate::time::current_time().wrapping_sub(started) >= timeout_us {
+                return Err(MmcError::Timeout);
+            }
+            core::hint::spin_loop();
+        }
+    }
+
+    fn reset_lines(&self, mask: u8) -> MmcResult<()> {
+        self.write8(register::SOFTWARE_RESET, mask);
+        self.wait_until(RESET_TIMEOUT_US, || {
+            self.read8(register::SOFTWARE_RESET) & mask == 0
+        })
+    }
+
+    fn power_on(&self) -> MmcResult<()> {
+        let capabilities = self.read32(register::CAPABILITIES);
+        let voltage = if capabilities & CAPABILITY_VOLTAGE_3V3 != 0 {
+            POWER_3V3
+        } else if capabilities & CAPABILITY_VOLTAGE_3V0 != 0 {
+            POWER_3V0
+        } else if capabilities & CAPABILITY_VOLTAGE_1V8 != 0 {
+            POWER_1V8
+        } else {
+            return Err(MmcError::Unsupported);
+        };
+
+        self.write8(register::POWER_CONTROL, 0);
+        self.write8(register::POWER_CONTROL, voltage);
+        self.write8(register::POWER_CONTROL, voltage | POWER_ON);
+        Ok(())
+    }
+
+    fn clock_divider(&self, frequency_hz: u32) -> u16 {
+        if frequency_hz == 0 || frequency_hz >= self.base_clock_hz {
+            return 0;
+        }
+
+        if self.specification_version >= 2 {
+            let denominator = u64::from(frequency_hz).saturating_mul(2);
+            let divider = u64::from(self.base_clock_hz)
+                .div_ceil(denominator)
+                .clamp(1, 0x3ff) as u16;
+            ((divider & 0xff) << 8) | ((divider & 0x300) >> 2)
+        } else {
+            let mut divisor = 2u32;
+            while divisor < 256 && self.base_clock_hz / divisor > frequency_hz {
+                divisor = divisor.saturating_mul(2);
+            }
+            (((divisor / 2).min(0xff) as u16) & 0xff) << 8
+        }
+    }
+
+    fn wait_for_inhibit(&self, include_data: bool) -> MmcResult<()> {
+        let mask = present_state::COMMAND_INHIBIT
+            | if include_data {
+                present_state::DATA_INHIBIT
+            } else {
+                0
+            };
+        self.wait_until(COMMAND_TIMEOUT_US, || {
+            self.read32(register::PRESENT_STATE) & mask == 0
+        })
+    }
+
+    fn wait_for_interrupt(&self, wanted: u32, data_phase: bool) -> MmcResult<u32> {
+        let started = crate::time::current_time();
+        loop {
+            let status = self.read32(register::INTERRUPT_STATUS);
+            if status & interrupt::ERROR != 0 || status & interrupt::ERROR_MASK != 0 {
+                self.write32(register::INTERRUPT_STATUS, status);
+                let reset = if data_phase {
+                    software_reset::COMMAND | software_reset::DATA
+                } else {
+                    software_reset::COMMAND
+                };
+                let _ = self.reset_lines(reset);
+                return Err(if data_phase {
+                    MmcError::Data
+                } else {
+                    MmcError::Command
+                });
+            }
+            if status & wanted != 0 {
+                return Ok(status);
+            }
+            if crate::time::current_time().wrapping_sub(started) >= COMMAND_TIMEOUT_US {
+                let reset = if data_phase {
+                    software_reset::COMMAND | software_reset::DATA
+                } else {
+                    software_reset::COMMAND
+                };
+                let _ = self.reset_lines(reset);
+                return Err(MmcError::Timeout);
+            }
+            core::hint::spin_loop();
+        }
+    }
+
+    fn read_pio(&self, buffer: &mut [u8], block_size: usize) -> MmcResult<()> {
+        for block in buffer.chunks_exact_mut(block_size) {
+            let status = self.wait_for_interrupt(interrupt::BUFFER_READ_READY, true)?;
+            self.write32(
+                register::INTERRUPT_STATUS,
+                status & interrupt::BUFFER_READ_READY,
+            );
+            for bytes in block.chunks_mut(4) {
+                let value = self.read32(register::BUFFER_DATA).to_le_bytes();
+                bytes.copy_from_slice(&value[..bytes.len()]);
+            }
+        }
+        Ok(())
+    }
+
+    fn write_pio(&self, buffer: &[u8], block_size: usize) -> MmcResult<()> {
+        for block in buffer.chunks_exact(block_size) {
+            let status = self.wait_for_interrupt(interrupt::BUFFER_WRITE_READY, true)?;
+            self.write32(
+                register::INTERRUPT_STATUS,
+                status & interrupt::BUFFER_WRITE_READY,
+            );
+            for bytes in block.chunks(4) {
+                let mut value = [0u8; 4];
+                value[..bytes.len()].copy_from_slice(bytes);
+                self.write32(register::BUFFER_DATA, u32::from_le_bytes(value));
+            }
+        }
+        Ok(())
+    }
+
+    fn command_bits(command: MmcCommand, has_data: bool) -> u16 {
+        let response = match command.response() {
+            MmcResponseType::None => 0,
+            MmcResponseType::R1 => {
+                command_flag::RESPONSE_48 | command_flag::CRC_CHECK | command_flag::INDEX_CHECK
+            }
+            MmcResponseType::R1b => {
+                command_flag::RESPONSE_48_BUSY | command_flag::CRC_CHECK | command_flag::INDEX_CHECK
+            }
+            MmcResponseType::R2 => command_flag::RESPONSE_136 | command_flag::CRC_CHECK,
+            MmcResponseType::R3 => command_flag::RESPONSE_48,
+        };
+        ((u16::from(command.index()) & 0x3f) << 8)
+            | response
+            | if has_data {
+                command_flag::DATA_PRESENT
+            } else {
+                0
+            }
+    }
+}
+
+impl MmcHost for SdhciHost {
+    fn reset(&mut self) -> MmcResult<()> {
+        self.reset_lines(software_reset::ALL)?;
+        self.write16(register::CLOCK_CONTROL, 0);
+        self.power_on()?;
+        self.write8(register::TIMEOUT_CONTROL, 0x0e);
+        self.write32(register::INTERRUPT_STATUS, u32::MAX);
+        self.write16(
+            register::NORMAL_STATUS_ENABLE,
+            (interrupt::COMMAND_COMPLETE
+                | interrupt::TRANSFER_COMPLETE
+                | interrupt::BUFFER_WRITE_READY
+                | interrupt::BUFFER_READ_READY
+                | interrupt::CARD_INSERTION
+                | interrupt::CARD_REMOVAL
+                | interrupt::ERROR) as u16,
+        );
+        self.write16(register::ERROR_STATUS_ENABLE, u16::MAX);
+        self.write16(register::NORMAL_SIGNAL_ENABLE, 0);
+        self.write16(register::ERROR_SIGNAL_ENABLE, 0);
+        self.set_bus_width(MmcBusWidth::One)
+    }
+
+    fn set_clock(&mut self, frequency_hz: u32) -> MmcResult<()> {
+        if frequency_hz == 0 {
+            self.write16(register::CLOCK_CONTROL, 0);
+            return Ok(());
+        }
+
+        let divider = self.clock_divider(frequency_hz);
+        self.write16(register::CLOCK_CONTROL, 0);
+        self.write16(
+            register::CLOCK_CONTROL,
+            divider | clock_control::INTERNAL_ENABLE,
+        );
+        self.wait_until(CLOCK_TIMEOUT_US, || {
+            self.read16(register::CLOCK_CONTROL) & clock_control::INTERNAL_STABLE != 0
+        })?;
+        self.write16(
+            register::CLOCK_CONTROL,
+            divider | clock_control::INTERNAL_ENABLE | clock_control::CARD_ENABLE,
+        );
+        Ok(())
+    }
+
+    fn set_bus_width(&mut self, width: MmcBusWidth) -> MmcResult<()> {
+        let mut control = self.read8(register::HOST_CONTROL);
+        control &= !(HOST_CONTROL_DATA_WIDTH_4 | HOST_CONTROL_DATA_WIDTH_8);
+        match width {
+            MmcBusWidth::One => {}
+            MmcBusWidth::Four => control |= HOST_CONTROL_DATA_WIDTH_4,
+            MmcBusWidth::Eight => control |= HOST_CONTROL_DATA_WIDTH_8,
+        }
+        self.write8(register::HOST_CONTROL, control);
+        Ok(())
+    }
+
+    fn card_present(&self) -> bool {
+        self.non_removable
+            || self.read32(register::PRESENT_STATE) & present_state::CARD_INSERTED != 0
+    }
+
+    fn is_removable(&self) -> bool {
+        !self.non_removable
+    }
+
+    fn send_command(
+        &mut self,
+        command: MmcCommand,
+        data: Option<MmcData<'_>>,
+    ) -> MmcResult<MmcResponse> {
+        if !self.card_present() {
+            return Err(MmcError::NoMedia);
+        }
+
+        let (data_len, is_read) = data
+            .as_ref()
+            .map(|data| (data.len(), data.is_read()))
+            .unwrap_or((0, false));
+        if data.as_ref().is_some_and(MmcData::is_empty) {
+            return Err(MmcError::InvalidArgument);
+        }
+
+        let (block_size, block_count) = if data_len == 0 {
+            (0usize, 0usize)
+        } else if data_len <= MMC_BLOCK_SIZE {
+            (data_len, 1)
+        } else if data_len.is_multiple_of(MMC_BLOCK_SIZE) {
+            (MMC_BLOCK_SIZE, data_len / MMC_BLOCK_SIZE)
+        } else {
+            return Err(MmcError::InvalidArgument);
+        };
+        if block_size > 0x0fff || block_count > u16::MAX as usize {
+            return Err(MmcError::InvalidArgument);
+        }
+
+        let data_phase = data_len != 0;
+        self.wait_for_inhibit(data_phase || matches!(command.response(), MmcResponseType::R1b))?;
+        self.write32(register::INTERRUPT_STATUS, u32::MAX);
+
+        let mut mode = 0u16;
+        if data_phase {
+            self.write32(
+                register::BLOCK_SIZE,
+                (block_size as u32) | ((block_count as u32) << 16),
+            );
+            mode |= transfer_mode::BLOCK_COUNT_ENABLE;
+            if is_read {
+                mode |= transfer_mode::READ;
+            }
+            if block_count > 1 {
+                mode |= transfer_mode::MULTI_BLOCK;
+            }
+        }
+        self.write32(register::ARGUMENT, command.argument());
+        let encoded_command = Self::command_bits(command, data_phase);
+        self.write32(
+            register::TRANSFER_MODE,
+            u32::from(mode) | (u32::from(encoded_command) << 16),
+        );
+
+        let status = self.wait_for_interrupt(interrupt::COMMAND_COMPLETE, false)?;
+        self.write32(
+            register::INTERRUPT_STATUS,
+            status & interrupt::COMMAND_COMPLETE,
+        );
+
+        let response = MmcResponse::new([
+            self.read32(register::RESPONSE_0),
+            self.read32(register::RESPONSE_0 + 4),
+            self.read32(register::RESPONSE_0 + 8),
+            self.read32(register::RESPONSE_0 + 12),
+        ]);
+
+        match data {
+            Some(MmcData::Read(buffer)) => self.read_pio(buffer, block_size)?,
+            Some(MmcData::Write(buffer)) => self.write_pio(buffer, block_size)?,
+            None => {}
+        }
+
+        if data_phase {
+            let status = self.wait_for_interrupt(interrupt::TRANSFER_COMPLETE, true)?;
+            self.write32(
+                register::INTERRUPT_STATUS,
+                status & interrupt::TRANSFER_COMPLETE,
+            );
+        } else if matches!(command.response(), MmcResponseType::R1b) {
+            self.wait_until(COMMAND_TIMEOUT_US, || {
+                self.read32(register::PRESENT_STATE) & present_state::DATA_INHIBIT == 0
+            })?;
+        }
+
+        Ok(response)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test_case]
+    fn command_encoding_matches_sdhci_response_flags() {
+        let command = MmcCommand::new(17, 42, MmcResponseType::R1);
+        assert_eq!(
+            SdhciHost::command_bits(command, true),
+            (17 << 8)
+                | command_flag::RESPONSE_48
+                | command_flag::CRC_CHECK
+                | command_flag::INDEX_CHECK
+                | command_flag::DATA_PRESENT
+        );
+    }
+
+    #[test_case]
+    fn command_encoding_omits_checks_for_ocr() {
+        let command = MmcCommand::new(1, 0, MmcResponseType::R3);
+        assert_eq!(
+            SdhciHost::command_bits(command, false),
+            (1 << 8) | command_flag::RESPONSE_48
+        );
+    }
+}
