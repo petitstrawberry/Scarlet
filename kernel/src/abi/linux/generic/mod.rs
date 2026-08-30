@@ -377,35 +377,10 @@ impl LinuxAbi {
     }
 }
 
-pub(crate) fn close_kernel_object_for_linux(object: &crate::object::KernelObject) {
-    #[cfg(feature = "network")]
-    if let crate::object::KernelObject::Socket(socket) = object {
-        use crate::network::{NetworkManager, ShutdownHow, SocketAddress, SocketState};
-
-        let manager = NetworkManager::get_manager();
-        let state = socket.state();
-
-        if matches!(state, SocketState::Bound | SocketState::Listening)
-            && let Ok(SocketAddress::Local(addr)) = socket.getsockname()
-        {
-            if !addr.path().is_empty() {
-                if addr.is_abstract() {
-                    let mut name = alloc::string::String::new();
-                    name.push('\0');
-                    name.push_str(addr.path());
-                    manager.unregister_named_socket(&name, socket.as_ref());
-                } else {
-                    manager.unregister_named_socket(addr.path(), socket.as_ref());
-                }
-            }
-        }
-
-        let _ = socket.shutdown(ShutdownHow::Both);
-
-        if let Some(socket_id) = manager.get_socket_id(socket) {
-            manager.remove_socket(socket_id);
-        }
-    }
+pub(crate) fn close_kernel_object_for_linux(_object: &crate::object::KernelObject) {
+    // Socket finalization is tied to KernelObject logical ownership rather
+    // than Linux descriptor-table scans. Dropping the removed object releases
+    // exactly one owning reference, including fork/dup and queued IPC rights.
 }
 
 syscall_table! {

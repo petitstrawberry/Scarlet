@@ -9,57 +9,57 @@ DEBUG_DIR = "../bin/dist/riscv64.debug"
 TARGET_SPEC = "../targets/riscv64gc-unknown-scarlet-elf.json"
 
 [tasks.fmt]
-description = "Format video_player"
+description = "Format video-player"
 command = "cargo"
 args = ["fmt"]
 
 [tasks.fmt-check]
-description = "Check video_player formatting"
+description = "Check video-player formatting"
 command = "cargo"
 args = ["fmt", "--", "--check"]
 
 [tasks.clippy]
-description = "Run clippy for video_player"
+description = "Run clippy for video-player"
 command = "cargo"
 args = ["clippy", "--", "-D", "warnings"]
 
 [tasks.clippy-fix]
-description = "Run clippy with auto-fix for video_player"
+description = "Run clippy with auto-fix for video-player"
 command = "cargo"
 args = ["clippy", "--fix", "--allow-dirty", "--allow-staged", "--", "-D", "warnings"]
 
 [tasks.build]
-description = "Build video_player for RISC-V in debug mode"
+description = "Build video-player for RISC-V in debug mode"
 dependencies = ["build-only-debug", "set-osabi-debug", "split-debug-symbols"]
 
 [tasks.build-release]
-description = "Build video_player for RISC-V in release mode"
+description = "Build video-player for RISC-V in release mode"
 dependencies = ["build-only-release", "set-osabi-release"]
 
 [tasks.build-aarch64]
-description = "Build video_player for AArch64 in debug mode"
+description = "Build video-player for AArch64 in debug mode"
 dependencies = ["build-only-debug-aarch64", "set-osabi-debug-aarch64", "split-debug-symbols-aarch64"]
 
 [tasks.build-release-aarch64]
-description = "Build video_player for AArch64 in release mode"
+description = "Build video-player for AArch64 in release mode"
 dependencies = ["build-only-release-aarch64", "set-osabi-release-aarch64"]
 
 [tasks.build-only-debug]
-description = "Build video_player for RISC-V without post-processing"
+description = "Build video-player for RISC-V without post-processing"
 script = [
     'mkdir -p "${DIST_DIR}"',
     'CC_riscv64gc_unknown_scarlet_elf="${PWD}/../../tools/riscv64-clang" cargo build --target "${TARGET_SPEC}" --out-dir "${DIST_DIR}"'
 ]
 
 [tasks.build-only-release]
-description = "Build video_player for RISC-V release without post-processing"
+description = "Build video-player for RISC-V release without post-processing"
 script = [
     'mkdir -p "${DIST_DIR}"',
     'CC_riscv64gc_unknown_scarlet_elf="${PWD}/../../tools/riscv64-clang" cargo build --release --target "${TARGET_SPEC}" --out-dir "${DIST_DIR}"'
 ]
 
 [tasks.build-only-debug-aarch64]
-description = "Build video_player for AArch64 without post-processing"
+description = "Build video-player for AArch64 without post-processing"
 env = { "DIST_DIR" = "../bin/dist/aarch64", "DEBUG_DIR" = "../bin/dist/aarch64.debug", "TARGET_SPEC" = "../targets/aarch64-unknown-scarlet-elf.json" }
 script = [
     'mkdir -p "${DIST_DIR}"',
@@ -67,7 +67,7 @@ script = [
 ]
 
 [tasks.build-only-release-aarch64]
-description = "Build video_player for AArch64 release without post-processing"
+description = "Build video-player for AArch64 release without post-processing"
 env = { "DIST_DIR" = "../bin/dist/aarch64", "DEBUG_DIR" = "../bin/dist/aarch64.debug", "TARGET_SPEC" = "../targets/aarch64-unknown-scarlet-elf.json" }
 script = [
     'mkdir -p "${DIST_DIR}"',
@@ -75,29 +75,29 @@ script = [
 ]
 
 [tasks.set-osabi-debug]
-description = "Set OSABI for video_player RISC-V debug"
+description = "Set OSABI for video-player RISC-V debug"
 dependencies = ["build-only-debug"]
-script = 'python3 ../bin/set_osabi.py "${DIST_DIR}/video_player" ${OSABI_VALUE}'
+script = 'python3 ../bin/set_osabi.py "${DIST_DIR}/video-player" ${OSABI_VALUE}'
 
 [tasks.set-osabi-release]
-description = "Set OSABI for video_player RISC-V release"
+description = "Set OSABI for video-player RISC-V release"
 dependencies = ["build-only-release"]
-script = 'python3 ../bin/set_osabi.py "${DIST_DIR}/video_player" ${OSABI_VALUE}'
+script = 'python3 ../bin/set_osabi.py "${DIST_DIR}/video-player" ${OSABI_VALUE}'
 
 [tasks.set-osabi-debug-aarch64]
-description = "Set OSABI for video_player AArch64 debug"
+description = "Set OSABI for video-player AArch64 debug"
 env = { "DIST_DIR" = "../bin/dist/aarch64" }
 dependencies = ["build-only-debug-aarch64"]
-script = 'python3 ../bin/set_osabi.py "${DIST_DIR}/video_player" ${OSABI_VALUE}'
+script = 'python3 ../bin/set_osabi.py "${DIST_DIR}/video-player" ${OSABI_VALUE}'
 
 [tasks.set-osabi-release-aarch64]
-description = "Set OSABI for video_player AArch64 release"
+description = "Set OSABI for video-player AArch64 release"
 env = { "DIST_DIR" = "../bin/dist/aarch64" }
 dependencies = ["build-only-release-aarch64"]
-script = 'python3 ../bin/set_osabi.py "${DIST_DIR}/video_player" ${OSABI_VALUE}'
+script = 'python3 ../bin/set_osabi.py "${DIST_DIR}/video-player" ${OSABI_VALUE}'
 
 [tasks.split-debug-symbols]
-description = "Split debug symbols for video_player RISC-V debug"
+description = "Split debug symbols for video-player RISC-V debug"
 env = { "DEBUG_DIR" = "../bin/dist/riscv64.debug", "DIST_DIR" = "../bin/dist/riscv64" }
 script = '''
 mkdir -p "${DEBUG_DIR}"
@@ -111,8 +111,8 @@ else
     echo "Error: objcopy not found for RISC-V"
     exit 1
 fi
-binary_path="${DIST_DIR}/video_player"
-debug_file="${DEBUG_DIR}/video_player.debug"
+binary_path="${DIST_DIR}/video-player"
+debug_file="${DEBUG_DIR}/video-player.debug"
 cp "${binary_path}" "${binary_path}.tmp" && mv "${binary_path}.tmp" "${binary_path}"
 "$OBJCOPY" --only-keep-debug "${binary_path}" "${debug_file}"
 "$OBJCOPY" --strip-debug --strip-unneeded "${binary_path}"
@@ -120,7 +120,7 @@ cp "${binary_path}" "${binary_path}.tmp" && mv "${binary_path}.tmp" "${binary_pa
 '''
 
 [tasks.split-debug-symbols-aarch64]
-description = "Split debug symbols for video_player AArch64 debug"
+description = "Split debug symbols for video-player AArch64 debug"
 env = { "DEBUG_DIR" = "../bin/dist/aarch64.debug", "DIST_DIR" = "../bin/dist/aarch64" }
 script = '''
 mkdir -p "${DEBUG_DIR}"
@@ -132,8 +132,8 @@ else
     echo "Warning: objcopy not found for AArch64, skipping debug symbol split"
     exit 0
 fi
-binary_path="${DIST_DIR}/video_player"
-debug_file="${DEBUG_DIR}/video_player.debug"
+binary_path="${DIST_DIR}/video-player"
+debug_file="${DEBUG_DIR}/video-player.debug"
 cp "${binary_path}" "${binary_path}.tmp" && mv "${binary_path}.tmp" "${binary_path}"
 "$OBJCOPY" --only-keep-debug "${binary_path}" "${debug_file}"
 "$OBJCOPY" --strip-debug --strip-unneeded "${binary_path}"

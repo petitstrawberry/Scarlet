@@ -20,6 +20,7 @@ pub struct Capabilities {
     rendering: bool,
     presentation: bool,
     image_upload: bool,
+    image_readback: bool,
     depth: bool,
 }
 
@@ -49,6 +50,15 @@ impl Capabilities {
     /// `true` when image upload is supported.
     pub const fn supports_image_upload(&self) -> bool {
         self.image_upload
+    }
+
+    /// Return whether rendered BGRA images can be read back synchronously.
+    ///
+    /// # Returns
+    ///
+    /// `true` when image-to-CPU transfer is available.
+    pub const fn supports_image_readback(&self) -> bool {
+        self.image_readback
     }
 
     /// Return whether depth attachments are available.
@@ -113,6 +123,7 @@ impl Device {
                     rendering: capabilities.supports_rendering(),
                     presentation: capabilities.supports_presentation(),
                     image_upload: capabilities.supports_image_upload(),
+                    image_readback: capabilities.supports_image_readback(),
                     depth: capabilities.supports_depth(),
                 }
             }
@@ -123,6 +134,7 @@ impl Device {
                     rendering: capabilities.supports_rendering(),
                     presentation: capabilities.supports_presentation(),
                     image_upload: capabilities.supports_image_upload(),
+                    image_readback: false,
                     depth: capabilities.supports_depth(),
                 }
             }
@@ -339,6 +351,36 @@ impl MappedTargetSession {
                     backend: Image::Adreno(image),
                 })
                 .map_err(Error::ScarletAdrenoIr),
+        }
+    }
+
+    /// Read one mapped presentation-target rectangle into a BGRA buffer.
+    ///
+    /// # Arguments
+    ///
+    /// * `target` - Logical presentation texture identity.
+    /// * `destination` - Complete writable BGRA destination buffer.
+    /// * `destination_stride` - Bytes between destination rows.
+    /// * `rect` - Source target rectangle written at identical destination coordinates.
+    ///
+    /// # Returns
+    ///
+    /// Success after synchronous readback, or an error when the selected
+    /// backend does not expose image-to-CPU transfer.
+    pub fn readback_bgra(
+        &self,
+        target: ir::TextureId,
+        destination: &mut [u8],
+        destination_stride: u32,
+        rect: ir::PixelRect,
+    ) -> Result<()> {
+        match self {
+            #[cfg(feature = "backend-scarlet-virgl")]
+            Self::Virgl(session) => session
+                .readback_bgra(target, destination, destination_stride, rect)
+                .map_err(Error::ScarletVirglIr),
+            #[cfg(feature = "backend-scarlet-adreno")]
+            Self::Adreno(_) => Err(Error::BackendUnavailable(BackendKind::ScarletAdreno)),
         }
     }
 

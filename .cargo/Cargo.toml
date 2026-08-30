@@ -26,3 +26,4 @@ sgfx-backend-scarlet-virgl = { path = "../user/lib/sgfx-backend-scarlet-virgl" }
 sgfx-backend-wgpu = { path = "../user/lib/sgfx-backend-wgpu" }
 sws-client = { path = "../user/lib/sws-client" }
 sws-protocol = { path = "../user/lib/sws-protocol" }
+sws-remote-protocol = { path = "../user/lib/sws-remote-protocol" }

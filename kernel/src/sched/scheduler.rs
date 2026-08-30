@@ -5116,6 +5116,15 @@ pub fn process_pending_events_before_user_return(trapframe: &mut Trapframe) {
         return;
     };
 
+    // A remote exit_group can mark this task dead while it is unwinding a
+    // blocking syscall on this CPU. Never return such a task to userspace: in
+    // particular, Rust's thread-exit shim treats a returned exit syscall as an
+    // impossible condition and executes __rust_abort.
+    if task_state_requires_exit_reschedule(current_task.get_state()) {
+        schedule(trapframe);
+        return;
+    }
+
     match current_task.process_pending_events() {
         Ok(EventProcessOutcome::NeedReschedule | EventProcessOutcome::Exited(_)) => {
             schedule(trapframe)
@@ -5127,6 +5136,14 @@ pub fn process_pending_events_before_user_return(trapframe: &mut Trapframe) {
         ) => {}
         Err(_) => {}
     }
+
+    if task_state_requires_exit_reschedule(current_task.get_state()) {
+        schedule(trapframe);
+    }
+}
+
+fn task_state_requires_exit_reschedule(state: TaskState) -> bool {
+    matches!(state, TaskState::Zombie | TaskState::Terminated)
 }
 
 /// Start the scheduler and return the first runnable task ID (if any).
@@ -5916,6 +5933,17 @@ mod tests {
             deadline_ns: period_ns,
             period_ns,
         }
+    }
+
+    #[test_case]
+    fn terminated_tasks_cannot_return_to_userspace() {
+        assert!(task_state_requires_exit_reschedule(TaskState::Zombie));
+        assert!(task_state_requires_exit_reschedule(TaskState::Terminated));
+        assert!(!task_state_requires_exit_reschedule(TaskState::Running));
+        assert!(!task_state_requires_exit_reschedule(TaskState::Ready));
+        assert!(!task_state_requires_exit_reschedule(TaskState::Blocked(
+            crate::task::BlockedType::Interruptible
+        )));
     }
 
     #[test_case]

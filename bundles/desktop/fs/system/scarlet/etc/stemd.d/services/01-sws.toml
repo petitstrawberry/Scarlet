@@ -9,5 +9,5 @@ ready_notify = true
 ready_timeout_ms = 5000
 
 [service.scarlet-desktop]
-exec = "/bin/scarlet_desktop"
+exec = "/bin/scarlet-desktop"
 depends = ["sws"]

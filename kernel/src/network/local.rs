@@ -599,6 +599,10 @@ impl LocalSocket {
                 }
             } // Release backlog lock
 
+            if *self.state.read() != SocketState::Listening {
+                return Err(SocketError::NotListening);
+            }
+
             // No connection available, block the task
             self.accept_waker.wait(task_id, trapframe);
 
@@ -899,8 +903,13 @@ impl StreamIpcOps for LocalSocket {
     }
 }
 
-impl Drop for LocalSocket {
-    fn drop(&mut self) {
+impl LocalSocket {
+    /// Apply idempotent endpoint-close side effects.
+    ///
+    /// This path is used both by `Drop` and by final handle-table cleanup. The
+    /// latter must not wait for transient `Arc` clones retained by an abandoned
+    /// blocking syscall stack.
+    fn close_internal(&self) {
         let state = *self.state.read();
 
         if matches!(state, SocketState::Bound | SocketState::Listening)
@@ -945,6 +954,12 @@ impl Drop for LocalSocket {
         self.write_waker.wake_all();
 
         NetworkManager::get_manager().remove_socket_by_ptr(self as *const Self as usize);
+    }
+}
+
+impl Drop for LocalSocket {
+    fn drop(&mut self) {
+        self.close_internal();
     }
 }
 
@@ -1188,6 +1203,10 @@ impl SocketControl for LocalSocket {
 }
 
 impl SocketObject for LocalSocket {
+    fn close_handle(&self) {
+        self.close_internal();
+    }
+
     fn socket_type(&self) -> SocketType {
         self.socket_type
     }

@@ -243,6 +243,60 @@ fn test_task_handle_table_clone_behavior() {
     }
 }
 
+#[cfg(feature = "network")]
+#[test_case]
+fn child_exit_preserves_parent_inherited_listener() {
+    use crate::network::local::LocalSocket;
+    use crate::network::{
+        LocalSocketAddress, NetworkManager, SocketAddress, SocketObject, SocketProtocol,
+        SocketState, SocketType,
+    };
+
+    reset();
+    let mut parent = new_user_task("socket-parent".to_string(), 1);
+    parent.init();
+    let parent_id = add_task(parent, 0);
+    let parent = get_task_by_id(parent_id).unwrap();
+
+    let path = "/inherited-listener-survives-child-exit";
+    let socket: Arc<dyn SocketObject> = Arc::new(LocalSocket::new(
+        SocketType::Stream,
+        SocketProtocol::Default,
+    ));
+    socket
+        .bind(&SocketAddress::Local(
+            LocalSocketAddress::from_path(path).unwrap(),
+        ))
+        .unwrap();
+    socket.listen(1).unwrap();
+    let manager = NetworkManager::get_manager();
+    manager.allocate_socket_id(Arc::clone(&socket)).unwrap();
+    manager
+        .register_named_socket(path, Arc::clone(&socket))
+        .unwrap();
+    parent
+        .handle_table
+        .insert(KernelObject::from_socket_object(Arc::clone(&socket)))
+        .unwrap();
+
+    let child_id = add_task(parent.clone_task(CloneFlags::new()).unwrap(), 0);
+    let child = get_task_by_id(child_id).unwrap();
+    child.handle_table.close_all();
+
+    assert!(Arc::ptr_eq(
+        &manager.lookup_named_socket(path).unwrap(),
+        &socket
+    ));
+    assert_eq!(socket.state(), SocketState::Listening);
+
+    parent.handle_table.close_all();
+    assert!(manager.lookup_named_socket(path).is_err());
+    assert_eq!(socket.state(), SocketState::Closed);
+    drop(child);
+    drop(parent);
+    reset();
+}
+
 #[test_case]
 fn test_task_handle_table_memory_efficiency() {
     // Reset scheduler state before test

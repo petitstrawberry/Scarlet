@@ -699,6 +699,15 @@ impl VfsManager {
         // but not the final component (like POSIX rm behavior)
         let options = PathResolutionOptions::no_follow();
         let (entry_to_remove, mount_point) = self.resolve_path_with_options(path, &options)?;
+        #[cfg(feature = "network")]
+        let socket_id = entry_to_remove
+            .node()
+            .metadata()
+            .ok()
+            .and_then(|metadata| match metadata.file_type {
+                FileType::Socket(info) => Some(info.socket_id),
+                _ => None,
+            });
 
         // Check if the entry is involved in any mount, which would make it busy
         if self
@@ -729,6 +738,11 @@ impl VfsManager {
 
         // Remove from parent cache
         let _ = parent_entry.remove_child(&filename);
+
+        #[cfg(feature = "network")]
+        if let Some(socket_id) = socket_id {
+            crate::network::NetworkManager::get_manager().unregister_socket_file(socket_id);
+        }
 
         Ok(())
     }

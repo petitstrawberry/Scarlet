@@ -2,7 +2,7 @@
 //!
 //! The actual conversion engine is the Linux `mozc_server` binary. This
 //! Scarlet-native launcher selects the Linux ABI explicitly and supplies the
-//! runtime environment used by `scarlet_mozc`.
+//! runtime environment used by `scarlet-mozc`.
 
 #![no_std]
 #![no_main]
@@ -58,7 +58,7 @@ fn main() -> i32 {
     );
 
     println!(
-        "mozc_server: failed to launch {} via {} (rc={})",
+        "mozc-server: failed to launch {} via {} (rc={})",
         SERVER_PATH, LINUX_ABI, result
     );
     127

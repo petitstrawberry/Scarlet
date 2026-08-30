@@ -42,14 +42,14 @@ path = "../../user/bin"
 
 [[sections.initramfs.layers]]
 kind = "cargo"
-package = "user-bin"
+package = "scarlet-std-bin"
 bin = "stemd"
 to = "/system/scarlet/bin/stemd"
-hash = "sha256:4e461181d0444f31c2914a8fd13d26502bc993e198ecf68c47445734344e9eee"
+hash = ""
 
 [sections.initramfs.layers.source]
 type = "path"
-path = "../../user/bin"
+path = "../../user/std-bin"
 
 [[sections.initramfs.layers]]
 kind = "cargo"
@@ -85,14 +85,13 @@ path = "../../user/bin"
 
 [[sections.initramfs.layers]]
 kind = "cargo"
-package = "user-bin"
 bin = "shutdown"
 to = "/system/scarlet/bin/shutdown"
-hash = "sha256:e6b6bb4a16cb80089f269b9e63096a447f1fa2b539839967cf8489535a251836"
+hash = ""
 
 [sections.initramfs.layers.source]
 type = "path"
-path = "../../user/bin"
+path = "../../user/std-bin"
 
 [[sections.initramfs.layers]]
 kind = "cargo"
@@ -100,6 +99,17 @@ package = "scarlet-std-bin"
 bin = "top"
 to = "/system/scarlet/bin/top"
 hash = "sha256:0a743666cb920da402652fb629db9789bb2285fe87934558a5c115c02062664f"
+
+[sections.initramfs.layers.source]
+type = "path"
+path = "../../user/std-bin"
+
+[[sections.initramfs.layers]]
+kind = "cargo"
+package = "scarlet-std-bin"
+bin = "kill"
+to = "/system/scarlet/bin/kill"
+hash = ""
 
 [sections.initramfs.layers.source]
 type = "path"
@@ -140,9 +150,9 @@ path = "../../user/std-bin"
 [[sections.initramfs.layers]]
 kind = "cargo"
 package = "user-bin"
-bin = "microvm_init"
+bin = "microvm-init"
 to = "/system/scarlet/bin/init"
-hash = "sha256:0e52cc7e6c580e907b6cd6a8104d85db739f777aa345711b7638c309fa0e0cfb"
+hash = ""
 
 [sections.initramfs.layers.source]
 type = "path"
@@ -186,14 +196,14 @@ path = "../../user/bin"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
-package = "user-bin"
+package = "scarlet-std-bin"
 bin = "stemd"
 to = "/system/scarlet/bin/stemd"
-hash = "sha256:4e461181d0444f31c2914a8fd13d26502bc993e198ecf68c47445734344e9eee"
+hash = ""
 
 [sections.rootfs.layers.source]
 type = "path"
-path = "../../user/bin"
+path = "../../user/std-bin"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
@@ -229,14 +239,13 @@ path = "../../user/bin"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
-package = "user-bin"
 bin = "shutdown"
 to = "/system/scarlet/bin/shutdown"
-hash = "sha256:e6b6bb4a16cb80089f269b9e63096a447f1fa2b539839967cf8489535a251836"
+hash = ""
 
 [sections.rootfs.layers.source]
 type = "path"
-path = "../../user/bin"
+path = "../../user/std-bin"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
@@ -244,6 +253,17 @@ package = "scarlet-std-bin"
 bin = "top"
 to = "/system/scarlet/bin/top"
 hash = "sha256:0a743666cb920da402652fb629db9789bb2285fe87934558a5c115c02062664f"
+
+[sections.rootfs.layers.source]
+type = "path"
+path = "../../user/std-bin"
+
+[[sections.rootfs.layers]]
+kind = "cargo"
+package = "scarlet-std-bin"
+bin = "kill"
+to = "/system/scarlet/bin/kill"
+hash = ""
 
 [sections.rootfs.layers.source]
 type = "path"
@@ -284,9 +304,9 @@ path = "../../user/std-bin"
 [[sections.rootfs.layers]]
 kind = "cargo"
 package = "user-bin"
-bin = "microvm_init"
+bin = "microvm-init"
 to = "/system/scarlet/bin/init"
-hash = "sha256:0e52cc7e6c580e907b6cd6a8104d85db739f777aa345711b7638c309fa0e0cfb"
+hash = ""
 
 [sections.rootfs.layers.source]
 type = "path"

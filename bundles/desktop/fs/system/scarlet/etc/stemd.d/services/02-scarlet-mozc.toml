@@ -1,11 +1,11 @@
 # Stem Daemon Configuration File
 
 [service.mozc-server]
-exec = "/bin/mozc_server"
+exec = "/bin/mozc-server"
 depends = ["sws"]
 order = 02
 
 [service.scarlet-mozc]
-exec = "/bin/scarlet_mozc"
+exec = "/bin/scarlet-mozc"
 depends = ["mozc-server"]
 order = 02

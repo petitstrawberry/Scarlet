@@ -4,7 +4,7 @@ This document defines repeatable scheduler workloads for validating placement,
 utilization tracking, EEVDF fairness, and responsiveness on both homogeneous
 and heterogeneous systems.
 
-The benchmark driver is `sched_bench` from `user/std-bin`.
+The benchmark driver is `sched-bench` from `user/std-bin`.
 
 ## Common Commands
 
@@ -17,13 +17,13 @@ cargo make build-userbin-std-debug-aarch64
 Run a mixed workload:
 
 ```sh
-sched_bench --scenario mixed --threads 8 --seconds 30
+sched-bench --scenario mixed --threads 8 --seconds 30
 ```
 
 Request full-capacity placement for worker threads:
 
 ```sh
-sched_bench --scenario cpu --threads 2 --seconds 30 --performance
+sched-bench --scenario cpu --threads 2 --seconds 30 --performance
 ```
 
 Observe task placement in another terminal:
@@ -67,7 +67,7 @@ QEMU usually reports balanced cores with equal capacity. Expected behavior:
 
 - `core class` is `balanced` for all CPUs.
 - `cpu capacity` is equal for all online CPUs.
-- `sched_bench --scenario mixed --threads 8 --seconds 30` spreads runnable work
+- `sched-bench --scenario mixed --threads 8 --seconds 30` spreads runnable work
   across idle CPUs.
 - `scheduler work steals` may increase when queues become uneven.
 - `scheduler promotions` and `scheduler demotions` should normally stay at 0
@@ -85,7 +85,7 @@ Regression signal:
 Run more CPU-bound workers than available CPUs:
 
 ```sh
-sched_bench --scenario cpu --threads 16 --seconds 60
+sched-bench --scenario cpu --threads 16 --seconds 60
 ```
 
 Expected behavior:
@@ -109,12 +109,12 @@ Apple Silicon exposes efficiency and performance classes when topology probing
 is available. Expected behavior:
 
 - E cores have lower `cpu capacity` than P cores.
-- `sched_bench --scenario cpu --threads 2 --seconds 30 --performance` gives
+- `sched-bench --scenario cpu --threads 2 --seconds 30 --performance` gives
   workers `MIN=1024`, `REQ=1024`, and should place them on P cores when P cores
   are online and available.
 - `scheduler promotions` can increase when a high-util worker starts on an E
   core and moves to a P core.
-- `sched_bench --scenario sleepy --threads 4 --seconds 30` should not force P
+- `sched-bench --scenario sleepy --threads 4 --seconds 30` should not force P
   cores to stay busy.
 
 Regression signal:
@@ -129,7 +129,7 @@ Regression signal:
 Run the desktop, then start a mixed load:
 
 ```sh
-sched_bench --scenario mixed --threads 8 --seconds 60
+sched-bench --scenario mixed --threads 8 --seconds 60
 ```
 
 While it runs:

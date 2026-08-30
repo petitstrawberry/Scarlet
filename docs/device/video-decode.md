@@ -12,14 +12,14 @@ The current API is intentionally small:
 - `write()` / `read()` provide a compatibility path for stateful backends that
   accept one coded access unit at a time.
 - `mmap()` plus `control()` commands provide the preferred zero-copy-ish path
-  used by `video_player`.
+  used by `video-player`.
 - Session-aware commands allow several independent task groups to own separate
   streams on the same device.
 - Stateless H.264 and VP9 submit use a Scarlet request split: userspace parses
   codec headers and manages codec reference state, while the kernel validates
   copied parameters and lowers them to the selected backend.
   `user/lib/scarlet-codecs` contains the userspace request builder used by
-  `video_player`; future stateless codecs should follow the same split.
+  `video-player`; future stateless codecs should follow the same split.
 
 This interface is not a stable userspace ABI yet. The structures below document
 the current state so that callers and future driver changes have a shared
@@ -203,11 +203,11 @@ tracks reference timestamps. The backend validates the AVD-supported subset and
 lowers the request to hardware commands. Apple AVD's VP9-specific direct submit
 sequence is tracked in [`apple-avd-vp9.md`](apple-avd-vp9.md).
 
-For Apple AVD VP9 bring-up, `video_player` can dump the userspace stateless
+For Apple AVD VP9 bring-up, `video-player` can dump the userspace stateless
 request before ioctl submission:
 
 ```bash
-video_player --hwdc --dump-vp9-stateless root/vp9-dump root/example.webm
+video-player --hwdc --dump-vp9-stateless root/vp9-dump root/example.webm
 ```
 
 The dump contains Scarlet's generic VP9 ABI structures, not Apple/macOS
@@ -247,7 +247,7 @@ as "not ready yet" and retry with their own timeout.
 
 ## Current Limitations
 
-- The ABI is duplicated in the kernel driver and `video_player`; it should move
+- The ABI is duplicated in the kernel driver and `video-player`; it should move
   to a shared userspace-visible header or crate before being treated as stable.
 - The mapped path has fixed buffer sizes and a fixed session limit.
 - The output path currently assumes a single-buffer NV12 frame.

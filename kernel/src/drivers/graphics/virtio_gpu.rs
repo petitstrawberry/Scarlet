@@ -14,12 +14,13 @@ use crate::{
         Device, DeviceType,
         gpu::{
             GPU_DIALECT_INFO_BYTES, GPU_EXECUTION_SUPPORT_DEPTH,
-            GPU_EXECUTION_SUPPORT_IMAGE_UPLOAD, GPU_EXECUTION_SUPPORT_MEMORY,
-            GPU_EXECUTION_SUPPORT_PRESENTATION, GPU_EXECUTION_SUPPORT_QUEUE,
-            GPU_EXECUTION_SUPPORT_TIMELINE, GPU_IMAGE_FORMAT_BGRA8_UNORM,
-            GPU_IMAGE_FORMAT_DEPTH32_FLOAT, GPU_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT,
-            GPU_IMAGE_USAGE_PRESENTABLE, GPU_IMAGE_USAGE_RENDER_TARGET, GPU_IMAGE_USAGE_SAMPLED,
-            GPU_IMAGE_USAGE_TRANSFER_DST, GpuBackend, GpuBackendBuffer, GpuBackendBufferInfo,
+            GPU_EXECUTION_SUPPORT_IMAGE_READBACK, GPU_EXECUTION_SUPPORT_IMAGE_UPLOAD,
+            GPU_EXECUTION_SUPPORT_MEMORY, GPU_EXECUTION_SUPPORT_PRESENTATION,
+            GPU_EXECUTION_SUPPORT_QUEUE, GPU_EXECUTION_SUPPORT_TIMELINE,
+            GPU_IMAGE_FORMAT_BGRA8_UNORM, GPU_IMAGE_FORMAT_DEPTH32_FLOAT,
+            GPU_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT, GPU_IMAGE_USAGE_PRESENTABLE,
+            GPU_IMAGE_USAGE_RENDER_TARGET, GPU_IMAGE_USAGE_SAMPLED, GPU_IMAGE_USAGE_TRANSFER_DST,
+            GPU_IMAGE_USAGE_TRANSFER_SRC, GpuBackend, GpuBackendBuffer, GpuBackendBufferInfo,
             GpuBackendContext, GpuBackendContextInfo, GpuBackendDialectDescriptor,
             GpuBackendDialectInfo, GpuBackendImage, GpuBackendImageInfo, GpuBackendInfo,
             GpuBackendQueue, GpuBackendQueueInfo, GpuBackendSubmitError, GpuBufferCreateInfo,
@@ -796,6 +797,7 @@ impl VirtioGpuDeviceCore {
                     | GPU_EXECUTION_SUPPORT_TIMELINE
                     | if acceleration_usable {
                         GPU_EXECUTION_SUPPORT_IMAGE_UPLOAD
+                            | GPU_EXECUTION_SUPPORT_IMAGE_READBACK
                             | GPU_EXECUTION_SUPPORT_DEPTH
                             | GPU_EXECUTION_SUPPORT_QUEUE
                             | GPU_EXECUTION_SUPPORT_PRESENTATION
@@ -1898,6 +1900,47 @@ impl VirtioGpuBackendContext {
             depth: 1,
         })
     }
+
+    fn transfer_image_from_host_bgra(
+        &self,
+        image: &dyn GpuBackendImage,
+        readback: GpuImageUploadInfo,
+    ) -> Result<(), &'static str> {
+        let info = image.query_info();
+        let resource_id = u32::try_from(info.command_resource_token)
+            .map_err(|_| "VirtIO GPU image token does not fit a resource ID")?;
+        let core = self.core.lock();
+        if resource_id == 0
+            || image.backend_cookie() != core.backend_cookie()
+            || info.usage & GPU_IMAGE_USAGE_TRANSFER_SRC == 0
+        {
+            return Err("GPU image cannot be read back from this VirtIO GPU device");
+        }
+        if !self
+            .attached_resources
+            .lock()
+            .iter()
+            .any(|&attached_resource_id| attached_resource_id == resource_id)
+        {
+            return Err("VirtIO GPU image is not attached to this context");
+        }
+        let fence_id = core.next_acceleration_fence_id()?;
+        core.transfer_acceleration_from_host(VirtioGpuAccelerationTransfer3d {
+            context_id: self.context_id,
+            resource_id,
+            fence_id: Some(fence_id),
+            offset: readback.backing_offset,
+            level: 0,
+            stride: readback.backing_stride,
+            layer_stride: readback.backing_layer_stride,
+            x: readback.dst_x,
+            y: readback.dst_y,
+            z: 0,
+            width: readback.width,
+            height: readback.height,
+            depth: 1,
+        })
+    }
 }
 
 impl GpuBackendContext for VirtioGpuBackendContext {
@@ -1968,6 +2011,14 @@ impl GpuBackendContext for VirtioGpuBackendContext {
         transfer: GpuImageUploadInfo,
     ) -> Result<(), &'static str> {
         self.transfer_image_bgra(image, transfer)
+    }
+
+    fn readback_image_bgra(
+        &self,
+        image: &dyn GpuBackendImage,
+        readback: GpuImageUploadInfo,
+    ) -> Result<(), &'static str> {
+        self.transfer_image_from_host_bgra(image, readback)
     }
 
     fn attach_buffer(&self, buffer: &dyn GpuBackendBuffer) -> Result<u64, &'static str> {
@@ -2077,16 +2128,17 @@ impl GpuBackend for VirtioGpuBackend {
         create: GpuImageCreateInfo,
         backing: GpuImageBackingInfo,
     ) -> Result<Arc<dyn GpuBackendImage>, &'static str> {
-        if backing.paddr == 0
-            || backing.allocation_size == 0
-            || !backing.is_physically_contiguous()
+        if backing.paddr == 0 || backing.allocation_size == 0 || !backing.is_physically_contiguous()
         {
             return Err("VirtIO GPU image backing is invalid");
         }
         let backing_size = usize::try_from(backing.allocation_size)
             .map_err(|_| "VirtIO GPU image backing does not fit kernel address size")?;
-        let has_attached_backing =
-            create.usage & (GPU_IMAGE_USAGE_PRESENTABLE | GPU_IMAGE_USAGE_TRANSFER_DST) != 0;
+        let has_attached_backing = create.usage
+            & (GPU_IMAGE_USAGE_PRESENTABLE
+                | GPU_IMAGE_USAGE_TRANSFER_DST
+                | GPU_IMAGE_USAGE_TRANSFER_SRC)
+            != 0;
         let core = self.core.lock();
         core.require_virgl()?;
         let resource_id = core.create_acceleration_resource(VirtioGpuAccelerationResource3d {

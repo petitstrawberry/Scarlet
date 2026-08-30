@@ -103,7 +103,7 @@ impl ScarletMozc {
                 self.close_candidate_popup(conn)?;
                 self.emit_status(conn, state.context_id)?;
                 println!(
-                    "[scarlet_mozc] activated context={} window={}",
+                    "[scarlet-mozc] activated context={} window={}",
                     state.context_id, state.window_id
                 );
             }
@@ -115,11 +115,11 @@ impl ScarletMozc {
                     self.grabbing = false;
                     self.reset_context();
                 }
-                println!("[scarlet_mozc] deactivated context={}", context_id);
+                println!("[scarlet-mozc] deactivated context={}", context_id);
             }
             Event::ImeReset { context_id, .. } => {
                 if self.active_context_id == Some(context_id) {
-                    println!("[scarlet_mozc] reset context={}", context_id);
+                    println!("[scarlet-mozc] reset context={}", context_id);
                     self.grabbing = false;
                     self.reset_context();
                     conn.ime_set_preedit(context_id, 0, 0, "", &[])?;
@@ -135,7 +135,7 @@ impl ScarletMozc {
                 ..
             } => {
                 println!(
-                    "[scarlet_mozc] trigger context={} serial={} trigger={} code={} grabbing={}",
+                    "[scarlet-mozc] trigger context={} serial={} trigger={} code={} grabbing={}",
                     context_id, serial, trigger_id, code, self.grabbing
                 );
                 if trigger_id == ime_trigger::TOGGLE {
@@ -152,7 +152,7 @@ impl ScarletMozc {
                 ..
             } => {
                 println!(
-                    "[scarlet_mozc] key-event context={} serial={} {}({}) type={} value={} grabbing={} preedit='{}'",
+                    "[scarlet-mozc] key-event context={} serial={} {}({}) type={} value={} grabbing={} preedit='{}'",
                     context_id,
                     key_serial,
                     key_name(code),
@@ -165,7 +165,7 @@ impl ScarletMozc {
                 let handled = self.handle_key(conn, context_id, type_, code, value, time)?;
                 conn.ime_key_handled(key_serial, handled)?;
                 println!(
-                    "[scarlet_mozc] key-handled serial={} handled={} preedit='{}'",
+                    "[scarlet-mozc] key-handled serial={} handled={} preedit='{}'",
                     key_serial, handled, self.preedit
                 );
             }
@@ -175,7 +175,7 @@ impl ScarletMozc {
                     .is_some_and(|popup| popup.window_id == surface_id)
                 {
                     println!(
-                        "[scarlet_mozc] candidate popup destroyed window={}",
+                        "[scarlet-mozc] candidate popup destroyed window={}",
                         surface_id
                     );
                     self.candidate_popup = None;
@@ -198,7 +198,7 @@ impl ScarletMozc {
             self.close_candidate_popup(conn)?;
             conn.ime_release_keyboard(context_id)?;
             self.emit_status(conn, context_id)?;
-            println!("[scarlet_mozc] released keyboard context={}", context_id);
+            println!("[scarlet-mozc] released keyboard context={}", context_id);
             return Ok(());
         }
 
@@ -207,10 +207,10 @@ impl ScarletMozc {
                 self.grabbing = true;
                 conn.ime_grab_keyboard(context_id)?;
                 self.emit_status(conn, context_id)?;
-                println!("[scarlet_mozc] grabbed keyboard context={}", context_id);
+                println!("[scarlet-mozc] grabbed keyboard context={}", context_id);
             }
             Err(err) => {
-                println!("[scarlet_mozc] cannot start Mozc session: {:?}", err);
+                println!("[scarlet-mozc] cannot start Mozc session: {:?}", err);
                 self.grabbing = false;
                 self.emit_status(conn, context_id)?;
             }
@@ -227,7 +227,7 @@ impl ScarletMozc {
             self.session_id = Some(session_id);
             self.active_mode = output.mode.unwrap_or(proto::COMPOSITION_HIRAGANA);
             println!(
-                "[scarlet_mozc] created Mozc session id={} mode={}",
+                "[scarlet-mozc] created Mozc session id={} mode={}",
                 session_id, self.active_mode
             );
             return Ok(());
@@ -260,12 +260,12 @@ impl ScarletMozc {
         }
 
         let Some(session_id) = self.session_id else {
-            println!("[scarlet_mozc] no Mozc session");
+            println!("[scarlet-mozc] no Mozc session");
             return Ok(false);
         };
 
         let Some(key) = self.translate_key(code, time) else {
-            println!("[scarlet_mozc] pass-through unsupported key {}", code);
+            println!("[scarlet-mozc] pass-through unsupported key {}", code);
             return Ok(false);
         };
 
@@ -276,7 +276,7 @@ impl ScarletMozc {
                     .consumed
                     .unwrap_or_else(|| output.has_visible_update());
                 println!(
-                    "[scarlet_mozc] output consumed={:?} handled={}",
+                    "[scarlet-mozc] output consumed={:?} handled={}",
                     output.consumed, handled
                 );
                 self.apply_output(conn, context_id, output)?;
@@ -286,7 +286,7 @@ impl ScarletMozc {
                 Ok(handled)
             }
             Err(err) => {
-                println!("[scarlet_mozc] Mozc SEND_KEY failed: {:?}", err);
+                println!("[scarlet-mozc] Mozc SEND_KEY failed: {:?}", err);
                 if !self.preedit.is_empty() {
                     self.eat_key(code);
                     return Ok(true);
@@ -316,7 +316,7 @@ impl ScarletMozc {
         let committed = output.result.as_ref().is_some_and(|text| !text.is_empty());
         if let Some(commit) = output.result.as_ref() {
             if !commit.is_empty() {
-                println!("[scarlet_mozc] commit '{}'", commit);
+                println!("[scarlet-mozc] commit '{}'", commit);
                 conn.ime_commit_text(context_id, commit)?;
             }
         }
@@ -327,7 +327,7 @@ impl ScarletMozc {
             let spans = preedit_spans(preedit);
             self.preedit = preedit.text.clone();
             println!(
-                "[scarlet_mozc] preedit '{}' cursor_byte={} anchor_byte={}",
+                "[scarlet-mozc] preedit '{}' cursor_byte={} anchor_byte={}",
                 self.preedit, cursor_byte, anchor_byte
             );
             conn.ime_set_preedit(
@@ -339,7 +339,7 @@ impl ScarletMozc {
             )?;
         } else if !self.preedit.is_empty() {
             self.preedit.clear();
-            println!("[scarlet_mozc] preedit ''");
+            println!("[scarlet-mozc] preedit ''");
             conn.ime_set_preedit(context_id, 0, 0, "", &[])?;
         }
         self.sync_candidate_popup(conn, context_id, output.candidate_source(), !committed)?;
@@ -352,7 +352,7 @@ impl ScarletMozc {
                 return Ok(popup.window_id);
             }
             println!(
-                "[scarlet_mozc] candidate popup surface missing window={}",
+                "[scarlet-mozc] candidate popup surface missing window={}",
                 popup.window_id
             );
             self.candidate_popup = None;
@@ -374,7 +374,7 @@ impl ScarletMozc {
             .build(conn)?;
         self.candidate_popup = Some(CandidatePopup { window_id });
         println!(
-            "[scarlet_mozc] created candidate popup window={}",
+            "[scarlet-mozc] created candidate popup window={}",
             window_id
         );
         Ok(window_id)
@@ -385,7 +385,7 @@ impl ScarletMozc {
             return;
         };
         println!(
-            "[scarlet_mozc] candidate popup discarded window={} reason={}",
+            "[scarlet-mozc] candidate popup discarded window={} reason={}",
             popup.window_id, reason
         );
         let _ = conn.destroy_surface(popup.window_id);
@@ -399,7 +399,7 @@ impl ScarletMozc {
         match conn.destroy_surface(popup.window_id) {
             Ok(()) | Err(Error::SurfaceNotFound) => {
                 println!(
-                    "[scarlet_mozc] candidate popup closed window={}",
+                    "[scarlet-mozc] candidate popup closed window={}",
                     popup.window_id
                 );
                 Ok(())
@@ -443,7 +443,7 @@ impl ScarletMozc {
         };
         self.candidate_popup = Some(CandidatePopup { window_id });
         println!(
-            "[scarlet_mozc] candidate popup shown context={} window={} focused={:?} size={}",
+            "[scarlet-mozc] candidate popup shown context={} window={} focused={:?} size={}",
             context_id, window_id, candidate_window.focused_index, candidate_window.size
         );
         Ok(())
@@ -459,14 +459,14 @@ impl ScarletMozc {
             let window_id = match self.ensure_candidate_popup(conn) {
                 Ok(window_id) => window_id,
                 Err(err) => {
-                    println!("[scarlet_mozc] candidate popup create failed: {:?}", err);
+                    println!("[scarlet-mozc] candidate popup create failed: {:?}", err);
                     self.candidate_popup = None;
                     return Ok(None);
                 }
             };
 
             if let Err(err) = draw_candidate_popup(conn, window_id, rows, self.scale_milli) {
-                println!("[scarlet_mozc] candidate popup draw failed: {:?}", err);
+                println!("[scarlet-mozc] candidate popup draw failed: {:?}", err);
                 self.discard_candidate_popup(conn, "draw-failed");
                 if attempt == 0 {
                     continue;
@@ -481,7 +481,7 @@ impl ScarletMozc {
                 CANDIDATE_POPUP_OFFSET_Y,
                 true,
             ) {
-                println!("[scarlet_mozc] candidate popup show failed: {:?}", err);
+                println!("[scarlet-mozc] candidate popup show failed: {:?}", err);
                 self.discard_candidate_popup(conn, "show-failed");
                 if attempt == 0 {
                     continue;
@@ -516,7 +516,7 @@ impl ScarletMozc {
         ) {
             Ok(()) => {
                 println!(
-                    "[scarlet_mozc] candidate popup kept visible context={} window={}",
+                    "[scarlet-mozc] candidate popup kept visible context={} window={}",
                     context_id, popup.window_id
                 );
                 Ok(())
@@ -526,7 +526,7 @@ impl ScarletMozc {
                 Ok(())
             }
             Err(err) => {
-                println!("[scarlet_mozc] candidate popup keep failed: {:?}", err);
+                println!("[scarlet-mozc] candidate popup keep failed: {:?}", err);
                 self.discard_candidate_popup(conn, "keep-failed");
                 Ok(())
             }
@@ -829,7 +829,7 @@ impl MozcIpc {
                 Err(_) => return Err(MozcError::Read),
             }
         }
-        println!("[scarlet_mozc] Mozc IPC response bytes={}", response.len());
+        println!("[scarlet-mozc] Mozc IPC response bytes={}", response.len());
         proto::decode_command_output(&response).ok_or(MozcError::InvalidResponse)
     }
 
@@ -839,7 +839,7 @@ impl MozcIpc {
         }
         let key = load_mozc_ipc_key(self.server_name)?;
         let name = format!("tmp/.mozc.{}.{}", key, self.server_name);
-        println!("[scarlet_mozc] Mozc abstract socket '{}'", name);
+        println!("[scarlet-mozc] Mozc abstract socket '{}'", name);
         self.cached_abstract_name = Some(name.clone());
         Ok(name)
     }
@@ -921,7 +921,7 @@ fn load_mozc_ipc_key(server_name: &str) -> core::result::Result<String, MozcErro
             }
             Err(err) => {
                 println!(
-                    "[scarlet_mozc] IPC key file not available '{}': {:?}",
+                    "[scarlet-mozc] IPC key file not available '{}': {:?}",
                     path, err
                 );
             }
@@ -942,23 +942,23 @@ fn load_mozc_ipc_key(server_name: &str) -> core::result::Result<String, MozcErro
         }
     }
     println!(
-        "[scarlet_mozc] IPC key file '{}' bytes={}",
+        "[scarlet-mozc] IPC key file '{}' bytes={}",
         loaded_path,
         data.len()
     );
     let decoded_key = proto::decode_ipc_key(&data);
     if let Some(key) = &decoded_key {
-        println!("[scarlet_mozc] decoded IPC key '{}'", key);
+        println!("[scarlet-mozc] decoded IPC key '{}'", key);
     }
     let key = match decoded_key {
         Some(key) if is_mozc_ipc_key(&key) => key,
         _ => {
             let key = proto::find_ascii_hex_key(&data).ok_or(MozcError::InvalidKeyFile)?;
-            println!("[scarlet_mozc] recovered IPC key '{}'", key);
+            println!("[scarlet-mozc] recovered IPC key '{}'", key);
             key
         }
     };
-    println!("[scarlet_mozc] loaded IPC key file '{}'", loaded_path);
+    println!("[scarlet-mozc] loaded IPC key file '{}'", loaded_path);
     Ok(key)
 }
 
@@ -1731,12 +1731,12 @@ mod proto {
 
 #[unsafe(no_mangle)]
 fn main() -> i32 {
-    println!("[scarlet_mozc] connecting to SWS...");
+    println!("[scarlet-mozc] connecting to SWS...");
 
     let mut conn = match Connection::connect_default() {
         Ok(conn) => conn,
         Err(err) => {
-            println!("[scarlet_mozc] failed to connect to SWS: {:?}", err);
+            println!("[scarlet-mozc] failed to connect to SWS: {:?}", err);
             return 1;
         }
     };
@@ -1749,12 +1749,12 @@ fn main() -> i32 {
     let ime_id = match conn.register_input_method(IME_NAME, capabilities) {
         Ok(ime_id) => ime_id,
         Err(err) => {
-            println!("[scarlet_mozc] failed to register IME: {:?}", err);
+            println!("[scarlet-mozc] failed to register IME: {:?}", err);
             return 1;
         }
     };
 
-    println!("[scarlet_mozc] registered {} as id={}", IME_NAME, ime_id);
+    println!("[scarlet-mozc] registered {} as id={}", IME_NAME, ime_id);
 
     let mut ime = ScarletMozc::new(scale_milli);
     loop {
@@ -1762,18 +1762,18 @@ fn main() -> i32 {
             Ok(_) => {
                 while let Some(event) = conn.poll_event() {
                     if let Err(err) = ime.handle_event(&mut conn, event) {
-                        println!("[scarlet_mozc] event handling failed: {:?}", err);
+                        println!("[scarlet-mozc] event handling failed: {:?}", err);
                         return 1;
                     }
                 }
             }
             Err(Error::WouldBlock) => {}
             Err(Error::Disconnected) => {
-                println!("[scarlet_mozc] disconnected from SWS");
+                println!("[scarlet-mozc] disconnected from SWS");
                 return 1;
             }
             Err(err) => {
-                println!("[scarlet_mozc] dispatch failed: {:?}", err);
+                println!("[scarlet-mozc] dispatch failed: {:?}", err);
                 return 1;
             }
         }

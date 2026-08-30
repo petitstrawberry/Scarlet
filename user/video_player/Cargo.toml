@@ -4,6 +4,10 @@ version = "0.16.0"
 edition = "2024"
 workspace = "../../.cargo"
 
+[[bin]]
+name = "video-player"
+path = "src/main.rs"
+
 [features]
 default = ["av1-stateful-hw", "h264-stateful-hw", "mp4-aac"]
 av1-stateful-hw = []

@@ -40,6 +40,7 @@ const ACTIVATION_TOKEN_ENV: &str = "SWS_ACTIVATION_TOKEN";
 const SWS_QUERY_TIMEOUT_MS: u64 = 1_000;
 const SBUS_REGISTRATION_ATTEMPTS: usize = 20;
 const SBUS_REGISTRATION_TIMEOUT_MS: u64 = 1_000;
+const SBUS_RECONNECT_DELAY_MS: u64 = 1_000;
 
 fn application_environment(activation_token: Option<&str>) -> Vec<String> {
     let user = std::env::var("USER").unwrap_or(String::from("root"));
@@ -1325,6 +1326,12 @@ fn read_config_dir(dir_path: &str) -> Result<String, &'static str> {
 }
 
 /// sbus handler thread: receive and process method calls from sbus
+fn reconnect_stemd_sbus() -> Result<sbus::Connection, sbus::Error> {
+    let mut connection = sbus::Connection::connect()?;
+    connection.register_service_timeout("org.scarlet-os.stemd", SBUS_REGISTRATION_TIMEOUT_MS)?;
+    Ok(connection)
+}
+
 fn sbus_handler_thread() {
     println!("stemd: sbus handler thread started");
 
@@ -1335,8 +1342,22 @@ fn sbus_handler_thread() {
             Some(conn) => conn.receive_message(),
             None => {
                 drop(conn_guard);
-                println!("stemd: sbus connection not available, waiting...");
-                std::thread::sleep(core::time::Duration::from_millis(100));
+                match reconnect_stemd_sbus() {
+                    Ok(connection) => {
+                        let mut connection_slot =
+                            SBUS_CONNECTION.lock().expect("stemd mutex poisoned");
+                        if connection_slot.is_none() {
+                            *connection_slot = Some(connection);
+                            println!("stemd: Reconnected and registered with sbus");
+                        }
+                    }
+                    Err(error) => {
+                        println!("stemd: Failed to reconnect to sbus: {:?}", error);
+                        std::thread::sleep(core::time::Duration::from_millis(
+                            SBUS_RECONNECT_DELAY_MS,
+                        ));
+                    }
+                }
                 continue;
             }
         };
@@ -1349,8 +1370,13 @@ fn sbus_handler_thread() {
                 }
             }
             Err(e) => {
-                println!("stemd: Error receiving message from sbus: {:?}", e);
-                std::thread::sleep(core::time::Duration::from_millis(100));
+                // A failed stream remains at EOF/error permanently. Remove it
+                // before retrying so the next iteration reconnects instead of
+                // polling and logging the same dead connection forever.
+                let _ = conn_guard.take();
+                drop(conn_guard);
+                println!("stemd: Lost sbus connection: {:?}; reconnecting", e);
+                std::thread::sleep(core::time::Duration::from_millis(SBUS_RECONNECT_DELAY_MS));
             }
         }
     }

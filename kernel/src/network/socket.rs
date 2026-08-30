@@ -353,6 +353,20 @@ pub trait SocketControl {
 ///
 /// Similar to how TtyDeviceEndpoint combines CharDevice + TtyControl.
 pub trait SocketObject: StreamIpcOps + SocketControl + Send + Sync {
+    /// Apply the side effects of closing the final owning handle.
+    ///
+    /// The default implementation performs a best-effort full shutdown.
+    /// Socket implementations with states that cannot be closed through
+    /// [`SocketControl::shutdown`] must override this method.
+    ///
+    /// # Returns
+    ///
+    /// This method returns no value. Closing an already-closed socket is
+    /// expected to be harmless.
+    fn close_handle(&self) {
+        let _ = self.shutdown(ShutdownHow::Both);
+    }
+
     /// Get socket type (Stream, Datagram, etc.)
     fn socket_type(&self) -> SocketType;
 

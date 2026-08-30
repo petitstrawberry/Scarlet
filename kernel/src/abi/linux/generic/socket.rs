@@ -392,7 +392,7 @@ pub fn sys_socket(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     }
 
     // Wrap in KernelObject
-    let kernel_obj = KernelObject::Socket(socket_obj);
+    let kernel_obj = KernelObject::from_socket_object(socket_obj);
 
     // Insert into handle table
     match task.handle_table.insert(kernel_obj) {
@@ -511,7 +511,7 @@ pub fn sys_bind(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                 }
 
                 if NetworkManager::get_manager()
-                    .register_named_socket(&registry_name, socket_arc.clone())
+                    .register_named_socket(&registry_name, Arc::clone(socket_arc.as_arc()))
                     .is_err()
                 {
                     crate::early_println!("[linux socket] register_named_socket failed");
@@ -528,13 +528,14 @@ pub fn sys_bind(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                 };
 
                 // Get the socket ID from NetworkManager
-                let socket_id = match NetworkManager::get_manager().get_socket_id(&socket_arc) {
-                    Some(id) => id,
-                    None => {
-                        crate::early_println!("[linux socket] get_socket_id failed {}", path);
-                        return usize::MAX;
-                    }
-                };
+                let socket_id =
+                    match NetworkManager::get_manager().get_socket_id(socket_arc.as_arc()) {
+                        Some(id) => id,
+                        None => {
+                            crate::early_println!("[linux socket] get_socket_id failed {}", path);
+                            return usize::MAX;
+                        }
+                    };
 
                 // Create socket file in VFS on a best-effort basis
                 // The socket has already been successfully bound, so VFS file creation
@@ -721,7 +722,7 @@ fn accept_with_flags(abi: &mut LinuxAbi, trapframe: &mut Trapframe, flags: i32) 
         }
     }
 
-    let kernel_obj = KernelObject::Socket(accepted_socket);
+    let kernel_obj = KernelObject::from_socket_object(accepted_socket);
     match task.handle_table.insert(kernel_obj) {
         Ok(handle) => match abi.allocate_fd(handle) {
             Ok(fd) => {
@@ -1966,14 +1967,14 @@ pub fn sys_socketpair(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     }
 
     // Add first socket to handle table
-    let kernel_obj1 = KernelObject::Socket(socket1);
+    let kernel_obj1 = KernelObject::from_socket_object(socket1);
     let handle1 = match task.handle_table.insert(kernel_obj1) {
         Ok(id) => id,
         Err(_) => return errno::to_result(errno::EMFILE),
     };
 
     // Add second socket to handle table
-    let kernel_obj2 = KernelObject::Socket(socket2);
+    let kernel_obj2 = KernelObject::from_socket_object(socket2);
     let handle2 = match task.handle_table.insert(kernel_obj2) {
         Ok(id) => id,
         Err(_) => {

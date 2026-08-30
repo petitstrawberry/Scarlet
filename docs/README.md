@@ -47,7 +47,7 @@ describes the repository at a high level; this page is the documentation map.
 - [Display presentation](device/display-present.md) - CPU-composited display
   presentation paths.
 - [Video decode device](device/video-decode.md) - `/dev/videoN` ABI used by
-  `video_player`.
+  `video-player`.
 - [USB subsystem](usb/README.md) - xHCI/USB host stack status and milestones.
 - [Audio system](audio/design.md) - kernel PCM transport, SAS, and playback
   model.

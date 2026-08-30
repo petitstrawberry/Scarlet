@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2024"
 workspace = "../../.cargo"
 
+# User-facing executable names use kebab-case. Rust source paths stay snake_case.
+
 [features]
 default = ["mp4-aac"]
 mp4-aac = ["dep:symphonia-core", "dep:symphonia-codec-aac"]
@@ -17,6 +19,7 @@ httparse = "1.9"
 libm = "0.2"
 lyon_path = "1.0"
 lyon_tessellation = "1.0"
+miniz_oxide = { version = "0.8", default-features = false, features = ["with-alloc"] }
 scarlet-sys = { path = "../lib/scarlet-sys" }
 scarlet-ui-macros = { git = "https://github.com/petitstrawberry/scarlet-ui", package = "scarlet-ui-macros" }
 rust_h264 = { git = "https://github.com/petitstrawberry/rust_h264.git", rev = "a559fe2545fd88def12146dcc06286475b53ead3", default-features = false, features = ["portable-simd"] }
@@ -36,6 +39,7 @@ sbus-client = { path = "../lib/sbus-client", default-features = false, features 
 scarlet-desktop-config = { path = "../lib/scarlet-desktop-config", default-features = false, features = ["std"] }
 sws-protocol = { path = "../lib/sws-protocol", default-features = false, features = ["std"] }
 sws-client = { path = "../lib/sws-client", default-features = false, features = ["std"] }
+sws-remote-protocol = { path = "../lib/sws-remote-protocol", default-features = false, features = ["std"] }
 
 [target.'cfg(target_os = "scarlet")'.dependencies]
 scarlet-os = { path = "../lib/scarlet-os", default-features = false, features = ["std"] }
@@ -75,11 +79,11 @@ name = "kill"
 path = "src/kill.rs"
 
 [[bin]]
-name = "sched_bench"
+name = "sched-bench"
 path = "src/sched_bench.rs"
 
 [[bin]]
-name = "task_manager"
+name = "task-manager"
 path = "src/task_manager.rs"
 
 [[bin]]
@@ -99,27 +103,27 @@ name = "date"
 path = "src/date.rs"
 
 [[bin]]
-name = "env_test"
+name = "env-test"
 path = "src/env_test.rs"
 
 [[bin]]
-name = "clap_demo"
+name = "clap-demo"
 path = "src/clap_demo.rs"
 
 [[bin]]
-name = "csv_demo"
+name = "csv-demo"
 path = "src/csv_demo.rs"
 
 [[bin]]
-name = "http_get_demo"
+name = "http-get-demo"
 path = "src/http_get_demo.rs"
 
 [[bin]]
-name = "tcp_client"
+name = "tcp-client"
 path = "src/tcp_client.rs"
 
 [[bin]]
-name = "tcp_server"
+name = "tcp-server"
 path = "src/tcp_server.rs"
 
 [[bin]]
@@ -127,11 +131,11 @@ name = "nc"
 path = "src/nc.rs"
 
 [[bin]]
-name = "udp_client"
+name = "udp-client"
 path = "src/udp_client.rs"
 
 [[bin]]
-name = "udp_server"
+name = "udp-server"
 path = "src/udp_server.rs"
 
 [[bin]]
@@ -143,7 +147,7 @@ name = "resolve"
 path = "src/resolve.rs"
 
 [[bin]]
-name = "ansi_banner"
+name = "ansi-banner"
 path = "src/ansi_banner.rs"
 
 [[bin]]
@@ -151,19 +155,19 @@ name = "httpd"
 path = "src/httpd.rs"
 
 [[bin]]
-name = "input_dump"
+name = "input-dump"
 path = "src/input_dump.rs"
 
 [[bin]]
-name = "h264_probe"
+name = "h264-probe"
 path = "src/h264_probe.rs"
 
 [[bin]]
-name = "fb_test"
+name = "fb-test"
 path = "src/fb_test.rs"
 
 [[bin]]
-name = "event_demo"
+name = "event-demo"
 path = "src/event_demo.rs"
 
 [[bin]]
@@ -187,43 +191,47 @@ name = "sws"
 path = "src/sws/main.rs"
 
 [[bin]]
-name = "lsm_list"
+name = "remote-desktop"
+path = "src/remote_desktop/main.rs"
+
+[[bin]]
+name = "lsm-list"
 path = "src/lsm_list.rs"
 
 [[bin]]
-name = "lsm_unload"
+name = "lsm-unload"
 path = "src/lsm_unload.rs"
 
 [[bin]]
-name = "lsm_load"
+name = "lsm-load"
 path = "src/lsm_load.rs"
 
 [[bin]]
-name = "socket_pair"
+name = "socket-pair"
 path = "src/socket_pair.rs"
 
 [[bin]]
-name = "socket_server"
+name = "socket-server"
 path = "src/socket_server.rs"
 
 [[bin]]
-name = "socket_client"
+name = "socket-client"
 path = "src/socket_client.rs"
 
 [[bin]]
-name = "ui_smoke"
+name = "ui-smoke"
 path = "src/ui_smoke.rs"
 
 [[bin]]
-name = "tui_demo"
+name = "tui-demo"
 path = "src/tui_demo.rs"
 
 [[bin]]
-name = "regex_demo"
+name = "regex-demo"
 path = "src/regex_demo.rs"
 
 [[bin]]
-name = "json_demo"
+name = "json-demo"
 path = "src/json_demo.rs"
 
 [[bin]]
@@ -231,15 +239,15 @@ name = "clock"
 path = "src/clock.rs"
 
 [[bin]]
-name = "sgfx_cube"
+name = "sgfx-cube"
 path = "src/sgfx_cube.rs"
 
 [[bin]]
-name = "sgfx_texture"
+name = "sgfx-texture"
 path = "src/sgfx_texture.rs"
 
 [[bin]]
-name = "sgfx_showcase"
+name = "sgfx-showcase"
 path = "src/sgfx_showcase.rs"
 
 [[bin]]
@@ -247,7 +255,7 @@ name = "ui-sgfx-showcase"
 path = "src/ui_sgfx_showcase.rs"
 
 [[bin]]
-name = "markdown_demo"
+name = "markdown-demo"
 path = "src/markdown_demo.rs"
 
 [[bin]]

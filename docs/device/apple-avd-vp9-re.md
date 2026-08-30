@@ -89,7 +89,7 @@ Scarlet can dump the userspace VP9 stateless request before it submits to
 `/dev/video0`:
 
 ```bash
-video_player --hwdc --dump-vp9-stateless root/vp9-dump root/eve-hanaarashi-mv-2160p-vp9-opus.webm
+video-player --hwdc --dump-vp9-stateless root/vp9-dump root/eve-hanaarashi-mv-2160p-vp9-opus.webm
 ```
 
 For each VP9 frame, this writes:

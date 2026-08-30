@@ -59,7 +59,7 @@ The bridge acts as a Wayland compositor from the client's perspective, but trans
 
 ```bash
 # Run the Wayland bridge server
-/bin/wayland_bridge
+/bin/wayland-bridge
 ```
 
 The bridge will listen on `/tmp/wayland-0` for Wayland client connections.

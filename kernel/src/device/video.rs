@@ -31,7 +31,7 @@ use crate::task::mytask;
 pub const SCARLET_VIDEO_FRAME_MAGIC: &[u8; 4] = b"SVF1";
 /// Length of the `SVF1` frame header in bytes.
 pub const SCARLET_VIDEO_FRAME_HEADER_LEN: usize = 20;
-/// NV12 video-range pixel format value expected by `video_player`.
+/// NV12 video-range pixel format value expected by `video-player`.
 pub const SCARLET_VIDEO_PIXEL_FORMAT_NV12: u32 = 0x3432_3076;
 
 /// Query the mapped buffer layout for the single-session path.

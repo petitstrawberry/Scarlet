@@ -92,7 +92,7 @@ fn connect_sws_with_retry() -> Result<Connection, ()> {
             && conn.get_screen_size().is_ok()
         {
             println!(
-                "[scarlet_desktop_background] connected to SWS after {} attempt(s)",
+                "[desktop-background] connected to SWS after {} attempt(s)",
                 attempt + 1
             );
             return Ok(conn);
@@ -199,10 +199,7 @@ fn draw_solid_background(conn: &mut Connection, surface_id: u32, color: Color) {
 
 fn draw_image_background(conn: &mut Connection, surface_id: u32, path: &str) -> bool {
     let Some(image) = BitmapImage::from_path(path) else {
-        println!(
-            "[scarlet_desktop_background] failed to decode image: {}",
-            path
-        );
+        println!("[desktop-background] failed to decode image: {}", path);
         return false;
     };
 
@@ -298,14 +295,14 @@ fn draw_background(conn: &mut Connection, surface_id: u32, state: &BackgroundSta
 
 #[unsafe(no_mangle)]
 pub extern "C" fn main() -> i32 {
-    println!("[scarlet_desktop_background] starting");
+    println!("[desktop-background] starting");
 
     thread::spawn(background_signal_listener);
 
     let mut conn = match connect_sws_with_retry() {
         Ok(c) => c,
         Err(()) => {
-            println!("[scarlet_desktop_background] Failed to connect to SWS after retries");
+            println!("[desktop-background] Failed to connect to SWS after retries");
             return 1;
         }
     };
@@ -329,7 +326,7 @@ pub extern "C" fn main() -> i32 {
     {
         Ok(id) => id,
         Err(_) => {
-            println!("[scarlet_desktop_background] Failed to create surface");
+            println!("[desktop-background] Failed to create surface");
             return 1;
         }
     };
@@ -353,7 +350,7 @@ pub extern "C" fn main() -> i32 {
                     }
                 }
                 Event::SurfaceDestroyed { surface_id: sid } if sid == surface_id => {
-                    println!("[scarlet_desktop_background] destroyed");
+                    println!("[desktop-background] destroyed");
                     return 0;
                 }
                 _ => {}

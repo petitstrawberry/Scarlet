@@ -44,7 +44,7 @@ impl Application for UiSmokeApp {
                         let counter = self.counter.clone();
                         move || {
                             counter.set(counter.get() + 1);
-                            println!("[ui_smoke] counter={}", counter.get());
+                            println!("[ui-smoke] counter={}", counter.get());
                         }
                     }),
             }
@@ -54,11 +54,11 @@ impl Application for UiSmokeApp {
         .menu_bar(MenuBarModel::new(vec![
             MenuItemModel::new("file", "File").children(vec![
                 MenuEntry::Item(MenuItemModel::new("quit", "Quit").on_activate(Arc::new(|| {
-                    println!("[ui_smoke] menu quit");
+                    println!("[ui-smoke] menu quit");
                 }))),
             ]),
             MenuItemModel::new("help", "Help").on_activate(Arc::new(|| {
-                println!("[ui_smoke] menu help");
+                println!("[ui-smoke] menu help");
             })),
         ]))
         .size(Size::new(640.0, 420.0)))
@@ -70,11 +70,11 @@ impl Application for UiSmokeApp {
 }
 
 fn main() {
-    println!("[ui_smoke] starting");
+    println!("[ui-smoke] starting");
 
     let mut app = UiSmokeApp::new();
     match app.run() {
-        Ok(()) => println!("[ui_smoke] exited"),
-        Err(error) => println!("[ui_smoke] error: {}", error),
+        Ok(()) => println!("[ui-smoke] exited"),
+        Err(error) => println!("[ui-smoke] error: {}", error),
     }
 }

@@ -19,8 +19,8 @@ to = "/"
 kind = "cargo"
 source = "../../user/bin"
 package = "user-bin"
-bin = "scarlet_desktop"
-to = "/system/scarlet/bin/scarlet_desktop"
+bin = "scarlet-desktop"
+to = "/system/scarlet/bin/scarlet-desktop"
 
 [[layers]]
 kind = "cargo"
@@ -118,7 +118,7 @@ source = { git = "https://github.com/petitstrawberry/scarlet-ui" }
 subdir = "examples/widget-factory"
 package = "scarlet-ui-widget-factory"
 bin = "scarlet-ui-widget-factory"
-to = "/system/scarlet/bin/widget_factory"
+to = "/system/scarlet/bin/widget-factory"
 
 [[layers]]
 kind = "cargo"
@@ -136,15 +136,15 @@ to = "/system/scarlet/bin/settings"
 [[layers]]
 kind = "cargo"
 source = "../../user/std-bin"
-bin = "task_manager"
-to = "/system/scarlet/bin/task_manager"
+bin = "task-manager"
+to = "/system/scarlet/bin/task-manager"
 
 [[layers]]
 kind = "cargo"
 source = "../../user/bin"
 package = "user-bin"
-bin = "scarlet_skk"
-to = "/system/scarlet/bin/scarlet_skk"
+bin = "scarlet-skk"
+to = "/system/scarlet/bin/scarlet-skk"
 
 [[layers]]
 kind = "script"
@@ -156,48 +156,48 @@ to = "/system/scarlet/share/skk/SKK-JISYO.L"
 kind = "cargo"
 source = "../../user/bin"
 package = "user-bin"
-bin = "wayland_bridge"
-to = "/system/scarlet/bin/wayland_bridge"
+bin = "wayland-bridge"
+to = "/system/scarlet/bin/wayland-bridge"
 
 [[layers]]
 kind = "cargo"
 source = "../../user/std-bin"
-bin = "ansi_banner"
-to = "/system/scarlet/bin/ansi_banner"
+bin = "ansi-banner"
+to = "/system/scarlet/bin/ansi-banner"
 
 [[layers]]
 kind = "cargo"
 source = "../../user/video_player"
 package = "video_player"
-bin = "video_player"
+bin = "video-player"
 default-features = false
 features = ["av1-stateful-hw", "h264-stateful-hw", "mp4-aac"]
-to = "/system/scarlet/bin/video_player"
+to = "/system/scarlet/bin/video-player"
 
 [[layers]]
 kind = "cargo"
 source = "../../user/bin"
 package = "user-bin"
-bin = "sgfx_probe"
-to = "/system/scarlet/bin/sgfx_probe"
+bin = "sgfx-probe"
+to = "/system/scarlet/bin/sgfx-probe"
 
 [[layers]]
 kind = "cargo"
 source = "../../user/std-bin"
-bin = "sgfx_cube"
-to = "/system/scarlet/bin/sgfx_cube"
+bin = "sgfx-cube"
+to = "/system/scarlet/bin/sgfx-cube"
 
 [[layers]]
 kind = "cargo"
 source = "../../user/std-bin"
-bin = "sgfx_texture"
-to = "/system/scarlet/bin/sgfx_texture"
+bin = "sgfx-texture"
+to = "/system/scarlet/bin/sgfx-texture"
 
 [[layers]]
 kind = "cargo"
 source = "../../user/std-bin"
-bin = "sgfx_showcase"
-to = "/system/scarlet/bin/sgfx_showcase"
+bin = "sgfx-showcase"
+to = "/system/scarlet/bin/sgfx-showcase"
 
 [[layers]]
 kind = "cargo"
@@ -215,8 +215,8 @@ to = "/system/scarlet/bin/ushv"
 [[layers]]
 kind = "cargo"
 source = "../../user/std-bin"
-bin = "lsm_list"
-to = "/system/scarlet/bin/lsm_list"
+bin = "lsm-list"
+to = "/system/scarlet/bin/lsm-list"
 
 [[layers]]
 kind = "cargo"
@@ -227,40 +227,40 @@ to = "/system/scarlet/bin/clock"
 [[layers]]
 kind = "cargo"
 source = "../../user/std-bin"
-bin = "lsm_load"
-to = "/system/scarlet/bin/lsm_load"
+bin = "lsm-load"
+to = "/system/scarlet/bin/lsm-load"
 
 [[layers]]
 kind = "cargo"
 source = "../../user/std-bin"
-bin = "lsm_unload"
-to = "/system/scarlet/bin/lsm_unload"
+bin = "lsm-unload"
+to = "/system/scarlet/bin/lsm-unload"
 
 [[layers]]
 kind = "cargo"
 source = "../../user/std-bin"
-bin = "input_dump"
-to = "/system/scarlet/bin/input_dump"
+bin = "input-dump"
+to = "/system/scarlet/bin/input-dump"
 
 [[layers]]
 kind = "cargo"
 source = "../../user/bin"
-bin = "mozc_server"
-to = "/system/scarlet/bin/mozc_server"
+bin = "mozc-server"
+to = "/system/scarlet/bin/mozc-server"
 
 [[layers]]
 kind = "cargo"
 source = "../../user/bin"
 package = "user-bin"
-bin = "scarlet_mozc"
-to = "/system/scarlet/bin/scarlet_mozc"
+bin = "scarlet-mozc"
+to = "/system/scarlet/bin/scarlet-mozc"
 
 [[layers]]
 kind = "cargo"
 source = "../../user/bin"
 package = "user-bin"
-bin = "dcp_flip_test"
-to = "/system/scarlet/bin/dcp_flip_test"
+bin = "dcp-flip-test"
+to = "/system/scarlet/bin/dcp-flip-test"
 
 [[layers]]
 kind = "cargo"
@@ -282,3 +282,9 @@ source = { git = "https://github.com/petitstrawberry/boxcraft" }
 package = "boxcraft"
 bin = "boxcraft"
 to = "/system/scarlet/bin/boxcraft"
+
+[[layers]]
+kind = "cargo"
+source = "../../user/std-bin"
+bin = "remote-desktop"
+to = "/system/scarlet/bin/remote-desktop"

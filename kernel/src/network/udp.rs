@@ -531,7 +531,7 @@ impl crate::object::capability::StreamOps for UdpSocket {
 
 impl crate::object::capability::CloneOps for UdpSocket {
     fn custom_clone(&self) -> crate::object::KernelObject {
-        crate::object::KernelObject::Socket(UdpSocket::new(self.udp_layer.clone()))
+        crate::object::KernelObject::from_socket_object(UdpSocket::new(self.udp_layer.clone()))
     }
 }
 

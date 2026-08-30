@@ -299,6 +299,37 @@ impl GpuCompositor {
         Ok(())
     }
 
+    /// Read damaged regions from the most recently presented SGFX target.
+    ///
+    /// # Arguments
+    ///
+    /// * `destination` - Complete writable BGRA capture buffer.
+    /// * `destination_stride` - Bytes between destination rows.
+    /// * `damage` - Output-space regions to transfer.
+    ///
+    /// # Returns
+    ///
+    /// Success after synchronous GPU readback of every region.
+    pub(super) fn capture_bgra(
+        &self,
+        destination: &mut [u8],
+        destination_stride: u32,
+        damage: &[sws_remote_protocol::Rect],
+    ) -> Result<(), &'static str> {
+        let mut regions = Vec::new();
+        regions
+            .try_reserve_exact(damage.len())
+            .map_err(|_| "Failed to reserve SGFX capture damage")?;
+        for rect in damage {
+            regions.push(
+                PixelRect::new(rect.x, rect.y, rect.width, rect.height)
+                    .map_err(|_| "Invalid SGFX capture damage")?,
+            );
+        }
+        self.target
+            .readback_bgra(destination, destination_stride, &regions)
+    }
+
     /// Force the next composition to rebuild its private resource table.
     ///
     /// This is required when a complete theme replacement starts its cursor

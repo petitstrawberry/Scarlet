@@ -27,7 +27,7 @@ const MASK_SIZE: u32 = 64;
 const FRAME_INTERVAL: Duration = Duration::from_millis(16);
 
 fn fail(message: &str, error: impl core::fmt::Debug) -> ExitCode {
-    println!("sgfx_showcase: {message}: {error:?}");
+    println!("sgfx-showcase: {message}: {error:?}");
     ExitCode::from(1)
 }
 
@@ -407,7 +407,7 @@ fn main() -> ExitCode {
     );
 
     println!(
-        "sgfx_showcase: animated {}x{} multi-pass IR scene",
+        "sgfx-showcase: animated {}x{} multi-pass IR scene",
         target.width, target.height
     );
     let white = attempt!(Color::rgba(1.0, 1.0, 1.0, 1.0), "invalid white color");

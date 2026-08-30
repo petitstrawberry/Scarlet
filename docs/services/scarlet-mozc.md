@@ -1,6 +1,6 @@
 # Scarlet Mozc
 
-`scarlet_mozc` is intended to be a Scarlet-native SWS input-method client that talks to a Linux `mozc_server` process running under Scarlet's Linux ABI.
+`scarlet-mozc` is intended to be a Scarlet-native SWS input-method client that talks to a Linux `mozc_server` process running under Scarlet's Linux ABI.
 
 The conversion engine must stay outside SWS. SWS continues to broker text-input state, key arbitration, preedit, commit, deletion, and IME-owned popup placement. The Mozc-specific client is responsible for converting SWS IME events into Mozc `Command` requests and translating Mozc responses back into SWS preedit, commit, status, and candidate UI updates.
 
@@ -14,7 +14,7 @@ The conversion engine must stay outside SWS. SWS continues to broker text-input 
 
 ## Native Client
 
-`scarlet_mozc` is a Scarlet-native SWS input-method service. It is intentionally separate from SWS and from `scarlet_skk`.
+`scarlet-mozc` is a Scarlet-native SWS input-method service. It is intentionally separate from SWS and from `scarlet-skk`.
 
 Current implemented path:
 
@@ -34,11 +34,11 @@ Current implemented path:
 To try it, start a Linux ABI `mozc_server` first, then run:
 
 ```sh
-mozc_server &
-scarlet_mozc
+mozc-server &
+scarlet-mozc
 ```
 
-The `mozc_server` command is a Scarlet-native launcher. On AArch64 it expects a
+The `mozc-server` command is a Scarlet-native launcher. On AArch64 it expects a
 musl-linked Linux server at
 `/scarlet/system/linux-aarch64/usr/lib/mozc/mozc_server`. Build it with the same
 Buildroot toolchain used by the Linux rootfs, then deploy the staged root
@@ -48,7 +48,7 @@ The launcher creates `/scarlet/system/scarlet/root/.config/mozc` and runs the
 Linux server with `HOME=/scarlet/system/scarlet/root`. Linux ABI processes see
 the native Scarlet tree at `/scarlet`, so Mozc writes its profile files,
 including `.session.ipc`, into the same native profile directory that
-`scarlet_mozc` reads.
+`scarlet-mozc` reads.
 
 ```sh
 ARCH=aarch64 \
@@ -107,7 +107,7 @@ Scarlet's local socket registry now preserves abstract socket names separately f
 
 ## Next Steps
 
-1. Exercise `scarlet_mozc` against the real server and fill ABI gaps surfaced by `mozc_server`.
+1. Exercise `scarlet-mozc` against the real server and fill ABI gaps surfaced by `mozc_server`.
 2. Refine Mozc candidate-popup behavior and placement across focused clients and window movement.
 3. Add session commands for explicit composition-mode switching and clean session deletion.
 4. Add stronger diagnostics around Mozc IPC/profile discovery failures.

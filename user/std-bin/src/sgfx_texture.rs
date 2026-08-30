@@ -50,7 +50,7 @@ fn animated_patch_bgra(size: u32, frame: u32) -> Vec<u8> {
 }
 
 fn fail(message: &str, error: impl core::fmt::Debug) -> ExitCode {
-    println!("sgfx_texture: {}: {:?}", message, error);
+    println!("sgfx-texture: {}: {:?}", message, error);
     ExitCode::from(1)
 }
 
@@ -64,7 +64,7 @@ fn main() -> ExitCode {
         Err(error) => return fail("failed to query display", error),
     };
     if display_info.width <= MARGIN * 3 || display_info.height <= MARGIN * 2 {
-        println!("sgfx_texture: display is too small");
+        println!("sgfx-texture: display is too small");
         return ExitCode::from(1);
     }
 
@@ -76,7 +76,7 @@ fn main() -> ExitCode {
     let available_height = target.height - MARGIN * 2;
     let texture_size = MAX_TEXTURE_SIZE.min(available_width).min(available_height);
     if texture_size == 0 {
-        println!("sgfx_texture: no room for texture panels");
+        println!("sgfx-texture: no room for texture panels");
         return ExitCode::from(1);
     }
     let texture = match define_bgra_texture(target.resources.as_ref(), texture_size, texture_size) {
@@ -108,7 +108,7 @@ fn main() -> ExitCode {
     let patch_y = (texture_size - patch_size) / 2;
 
     println!(
-        "sgfx_texture: {}x{} texture; left respects source alpha, right ignores it",
+        "sgfx-texture: {}x{} texture; left respects source alpha, right ignores it",
         texture_size, texture_size
     );
 

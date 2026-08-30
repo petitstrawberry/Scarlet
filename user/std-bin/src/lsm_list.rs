@@ -5,7 +5,7 @@ const ENTRY_SIZE: usize = 264;
 const MAX_MODULES: usize = 16;
 
 fn main() -> ExitCode {
-    println!("lsm_list: Rust std version");
+    println!("lsm-list: Rust std version");
 
     let mut buf = [0; ENTRY_SIZE * MAX_MODULES];
     let count = syscall2(Syscall::LsmList, buf.as_mut_ptr() as usize, buf.len());

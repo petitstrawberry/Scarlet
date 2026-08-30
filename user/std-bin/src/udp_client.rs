@@ -5,8 +5,8 @@ use std::process::ExitCode;
 fn main() -> ExitCode {
     let args = env::args().collect::<Vec<_>>();
     if args.len() != 3 && args.len() != 4 {
-        println!("Usage: udp_client <host> <port> [message]");
-        println!("Example: udp_client 10.0.2.15 18080");
+        println!("Usage: udp-client <host> <port> [message]");
+        println!("Example: udp-client 10.0.2.15 18080");
         return ExitCode::from(1);
     }
 

@@ -168,11 +168,11 @@ Child namespaces inherit from parent but allocate independent IDs.
 
 ## Demo Program
 
-The `container_demo` program demonstrates all isolation types:
+The `container-demo` program demonstrates all isolation types:
 
 ```bash
 # Run the demo
-$ container_demo
+$ container-demo
 
 ===========================================
   Scarlet Container Demo

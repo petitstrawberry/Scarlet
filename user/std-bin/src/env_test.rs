@@ -68,7 +68,7 @@ fn run_parent_test(args: &[String]) -> ExitCode {
     }
 
     println!("Spawning child process...");
-    let status = Command::new("/bin/env_test")
+    let status = Command::new("/bin/env-test")
         .arg(CHILD_MARKER)
         .arg("test_arg1")
         .arg("test arg with spaces")

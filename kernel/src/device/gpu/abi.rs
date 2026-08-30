@@ -51,6 +51,8 @@ pub const GPU_CONTEXT_TRANSFER_IMPORTED_IMAGE_BGRA: u32 = 0x4765;
 pub const GPU_IMAGE_QUERY_LAYOUT: u32 = 0x4766;
 /// Control command that detaches a GPU buffer from an execution context.
 pub const GPU_CONTEXT_DETACH_BUFFER: u32 = 0x4767;
+/// Control command that reads one attached BGRA image rectangle into userspace.
+pub const GPU_CONTEXT_READBACK_IMAGE_BGRA: u32 = 0x4768;
 
 /// Query completed successfully.
 pub const GPU_RESULT_SUCCESS: u32 = 0;
@@ -106,12 +108,15 @@ pub const GPU_IMAGE_USAGE_SAMPLED: u32 = 1 << 2;
 pub const GPU_IMAGE_USAGE_TRANSFER_DST: u32 = 1 << 3;
 /// Image usage permitting binding as a depth-stencil attachment.
 pub const GPU_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT: u32 = 1 << 4;
+/// Image usage permitting BGRA pixel transfers out of the image.
+pub const GPU_IMAGE_USAGE_TRANSFER_SRC: u32 = 1 << 5;
 /// All currently defined GPU image usage flags.
 pub const GPU_IMAGE_USAGE_VALID: u32 = GPU_IMAGE_USAGE_RENDER_TARGET
     | GPU_IMAGE_USAGE_PRESENTABLE
     | GPU_IMAGE_USAGE_SAMPLED
     | GPU_IMAGE_USAGE_TRANSFER_DST
-    | GPU_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT;
+    | GPU_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT
+    | GPU_IMAGE_USAGE_TRANSFER_SRC;
 
 /// Fixed-width request and response for [`GPU_CREATE_IMAGE`].
 #[repr(C)]
@@ -562,6 +567,92 @@ impl GpuContextTransferImportedImageBgra {
             width,
             height,
             reserved2: 0,
+        }
+    }
+
+    /// Clear response fields while preserving request fields.
+    pub(crate) fn clear_response(&mut self) {
+        self.result = GPU_RESULT_SUCCESS;
+    }
+}
+
+/// Fixed-width request and response for [`GPU_CONTEXT_READBACK_IMAGE_BGRA`].
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct GpuContextReadbackImageBgra {
+    /// ABI version supplied by userspace and echoed by the kernel.
+    pub abi_version: u32,
+    /// Explicit `GPU_RESULT_*` result code.
+    pub result: u32,
+    /// Existing GPU image child handle attached to this context.
+    pub image_handle: u32,
+    /// Reserved for ABI-compatible future use. Must be zero.
+    pub reserved: u32,
+    /// Userspace address of the complete destination BGRA buffer.
+    pub destination_ptr: u64,
+    /// Length of the complete destination userspace byte range.
+    pub destination_length: u64,
+    /// Number of bytes between destination rows.
+    pub destination_stride: u32,
+    /// Source image x coordinate in pixels.
+    pub src_x: u32,
+    /// Source image y coordinate in pixels.
+    pub src_y: u32,
+    /// Rectangle width in pixels.
+    pub width: u32,
+    /// Rectangle height in pixels.
+    pub height: u32,
+    /// Reserved for ABI-compatible future use. Must be zero.
+    pub reserved2: u32,
+    /// Reserved for ABI-compatible future use. Must be zero.
+    pub reserved3: u64,
+}
+
+impl GpuContextReadbackImageBgra {
+    /// Create a BGRA readback request for the current ABI version.
+    ///
+    /// The source rectangle is written at the same `(x, y)` coordinates in the
+    /// complete destination buffer.
+    ///
+    /// # Arguments
+    ///
+    /// * `image_handle` - Image capability attached to the context.
+    /// * `destination_ptr` - Userspace base address of the destination buffer.
+    /// * `destination_length` - Complete destination byte length.
+    /// * `destination_stride` - Bytes between destination rows.
+    /// * `src_x` - Source image x coordinate.
+    /// * `src_y` - Source image y coordinate.
+    /// * `width` - Non-zero rectangle width.
+    /// * `height` - Non-zero rectangle height.
+    ///
+    /// # Returns
+    ///
+    /// A readback request whose response fields are initialized for success.
+    #[allow(clippy::too_many_arguments)]
+    pub const fn new(
+        image_handle: u32,
+        destination_ptr: u64,
+        destination_length: u64,
+        destination_stride: u32,
+        src_x: u32,
+        src_y: u32,
+        width: u32,
+        height: u32,
+    ) -> Self {
+        Self {
+            abi_version: GPU_ABI_VERSION,
+            result: GPU_RESULT_SUCCESS,
+            image_handle,
+            reserved: 0,
+            destination_ptr,
+            destination_length,
+            destination_stride,
+            src_x,
+            src_y,
+            width,
+            height,
+            reserved2: 0,
+            reserved3: 0,
         }
     }
 

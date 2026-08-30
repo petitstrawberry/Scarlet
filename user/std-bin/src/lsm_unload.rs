@@ -6,11 +6,11 @@ const LSM_LIST_ENTRY_SIZE: usize = 264;
 const LSM_LIST_MAX_MODULES: usize = 128;
 
 fn main() -> ExitCode {
-    println!("lsm_unload: Rust std version");
+    println!("lsm-unload: Rust std version");
 
     let args = env::args().collect::<Vec<_>>();
     if args.len() < 2 {
-        println!("usage: lsm_unload <module_name>");
+        println!("usage: lsm-unload <module_name>");
         return ExitCode::from(1);
     }
 

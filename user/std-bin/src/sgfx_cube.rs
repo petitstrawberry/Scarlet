@@ -215,21 +215,21 @@ fn main() -> ExitCode {
     let display = match DisplaySurface::open_primary() {
         Ok(display) => display,
         Err(error) => {
-            println!("sgfx_cube: failed to open primary display: {:?}", error);
+            println!("sgfx-cube: failed to open primary display: {:?}", error);
             return ExitCode::from(1);
         }
     };
     let display_info = match display.get_info() {
         Ok(info) => info,
         Err(error) => {
-            println!("sgfx_cube: failed to query display: {:?}", error);
+            println!("sgfx-cube: failed to query display: {:?}", error);
             return ExitCode::from(1);
         }
     };
     let mut target = match MappedTarget::open(display_info.width, display_info.height) {
         Ok(target) => target,
         Err(error) => {
-            println!("sgfx_cube: failed to create mapped target: {:?}", error);
+            println!("sgfx-cube: failed to create mapped target: {:?}", error);
             return ExitCode::from(1);
         }
     };
@@ -242,7 +242,7 @@ fn main() -> ExitCode {
     {
         Ok(buffer) => buffer.id(),
         Err(error) => {
-            println!("sgfx_cube: failed to define vertex buffer: {:?}", error);
+            println!("sgfx-cube: failed to define vertex buffer: {:?}", error);
             return ExitCode::from(1);
         }
     };
@@ -255,7 +255,7 @@ fn main() -> ExitCode {
     ) {
         Ok(layout) => layout,
         Err(error) => {
-            println!("sgfx_cube: failed to define vertex layout: {:?}", error);
+            println!("sgfx-cube: failed to define vertex layout: {:?}", error);
             return ExitCode::from(1);
         }
     };
@@ -274,14 +274,14 @@ fn main() -> ExitCode {
     {
         Ok(pipeline) => pipeline,
         Err(error) => {
-            println!("sgfx_cube: failed to create pipeline: {:?}", error);
+            println!("sgfx-cube: failed to create pipeline: {:?}", error);
             return ExitCode::from(1);
         }
     };
     let clear_color = Color::rgba(0.45, 0.45, 0.45, 1.0).expect("valid clear color");
 
     println!(
-        "sgfx_cube: rendering {}x{} rotating cube",
+        "sgfx-cube: rendering {}x{} rotating cube",
         target.width, target.height
     );
 
@@ -296,7 +296,7 @@ fn main() -> ExitCode {
             0,
             &vertices,
         ) {
-            println!("sgfx_cube: vertex upload failed: {:?}", error);
+            println!("sgfx-cube: vertex upload failed: {:?}", error);
             return ExitCode::from(1);
         }
         let area = PixelRect::new(0, 0, target.width, target.height).expect("non-empty target");
@@ -328,11 +328,11 @@ fn main() -> ExitCode {
         pass.end().expect("valid cube pass end");
         let commands = encoder.finish().expect("valid cube commands");
         if let Err(error) = target.execute(&commands) {
-            println!("sgfx_cube: draw failed: {:?}", error);
+            println!("sgfx-cube: draw failed: {:?}", error);
             return ExitCode::from(1);
         }
         if let Err(error) = target.present(&display, None) {
-            println!("sgfx_cube: image present failed: {:?}", error);
+            println!("sgfx-cube: image present failed: {:?}", error);
             return ExitCode::from(1);
         }
         frame = frame.wrapping_add(1);

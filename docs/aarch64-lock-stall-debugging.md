@@ -3,7 +3,7 @@
 ## Scope
 
 This document records the investigation of the MacBook AArch64 incident in
-which `/bin/sas`, `/bin/files`, and `/bin/video_player` simultaneously consumed
+which `/bin/sas`, `/bin/files`, and `/bin/video-player` simultaneously consumed
 100% CPU while sampled inside kernel syscall 13 (`Sbrk`). It also defines the
 minimum evidence required for the next reproduction.
 
@@ -138,7 +138,7 @@ feature set. Confirm the actual MacBook project does the same.
 
 ### 2. Reproduce the shared-pressure workload
 
-Run the workload that previously started SAS, Files, and video_player together.
+Run the workload that previously started SAS, Files, and video-player together.
 Add controlled memory pressure that repeatedly grows and releases userspace
 heaps so the PMM and kernel heap encounter fragmentation. Keep serial or other
 emergency-console output available.

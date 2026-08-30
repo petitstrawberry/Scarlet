@@ -198,6 +198,9 @@ pub struct NetworkManager {
     /// Reverse mapping: socket pointer address -> socket ID for O(1) lookups
     socket_to_id: IrqRwSpinLock<BTreeMap<usize, SocketId>>,
 
+    /// Logical owning references carried by socket kernel objects.
+    socket_handle_references: IrqRwSpinLock<BTreeMap<usize, usize>>,
+
     /// Next socket ID counter
     next_socket_id: AtomicUsize,
 
@@ -224,6 +227,7 @@ impl NetworkManager {
             named_sockets: IrqRwSpinLock::new(BTreeMap::new()),
             connections: IrqRwSpinLock::new(BTreeMap::new()),
             socket_to_id: IrqRwSpinLock::new(BTreeMap::new()),
+            socket_handle_references: IrqRwSpinLock::new(BTreeMap::new()),
             next_socket_id: AtomicUsize::new(1),
             interfaces: IrqRwSpinLock::new(BTreeMap::new()),
             default_interface: IrqRwSpinLock::new(None),
@@ -662,7 +666,7 @@ impl NetworkManager {
             let socket = factory(socket_type, protocol)?;
             let socket_id = self.next_socket_id.fetch_add(1, Ordering::SeqCst);
             self.register_socket_with_id(socket_id, Arc::clone(&socket))?;
-            return Ok(KernelObject::Socket(socket));
+            return Ok(KernelObject::from_socket_object(socket));
         }
         drop(factories);
 
@@ -670,7 +674,7 @@ impl NetworkManager {
             let socket = stack.create_socket(socket_type, protocol)?;
             let socket_id = self.next_socket_id.fetch_add(1, Ordering::SeqCst);
             self.register_socket_with_id(socket_id, Arc::clone(&socket))?;
-            return Ok(KernelObject::Socket(socket));
+            return Ok(KernelObject::from_socket_object(socket));
         }
 
         Err(SocketError::NotSupported)
@@ -748,6 +752,122 @@ impl NetworkManager {
         if owns_registration {
             sockets.remove(name);
         }
+    }
+
+    /// Apply final handle-close side effects to a socket.
+    ///
+    /// This is separate from `Drop` because forced process exit can abandon an
+    /// in-flight syscall's socket clone on a sibling kernel stack.
+    ///
+    /// # Arguments
+    ///
+    /// * `socket` - Socket whose owning handle is being closed.
+    pub(crate) fn close_socket_handle(&self, socket: &Arc<dyn SocketObject>) {
+        self.unregister_bound_socket_handle(socket);
+        socket.close_handle();
+        if let Some(socket_id) = self.get_socket_id(socket) {
+            self.remove_socket(socket_id);
+        }
+    }
+
+    /// Retain one logical owning reference to a socket.
+    ///
+    /// Temporary kernel `Arc` clones are deliberately not registered here.
+    /// Owning references include handle-table slots, fork/dup copies, and
+    /// handles queued for IPC transfer.
+    ///
+    /// # Arguments
+    ///
+    /// * `socket` - Socket receiving a logical owning reference.
+    pub(crate) fn retain_socket_handle_reference(&self, socket: &Arc<dyn SocketObject>) {
+        let socket_ptr = Arc::as_ptr(socket) as *const () as usize;
+        let mut references = self.socket_handle_references.write();
+        let count = references.entry(socket_ptr).or_insert(0);
+        *count = count
+            .checked_add(1)
+            .expect("socket handle reference count overflow");
+    }
+
+    /// Release one logical owning reference and close the final socket owner.
+    ///
+    /// The count is removed before close side effects run, so socket teardown
+    /// never occurs while the reference-count lock is held.
+    ///
+    /// # Arguments
+    ///
+    /// * `socket` - Socket losing a logical owning reference.
+    pub(crate) fn release_socket_handle_reference(&self, socket: &Arc<dyn SocketObject>) {
+        let socket_ptr = Arc::as_ptr(socket) as *const () as usize;
+        let should_close = {
+            let mut references = self.socket_handle_references.write();
+            let Some(count) = references.get_mut(&socket_ptr) else {
+                debug_assert!(false, "untracked socket handle reference released");
+                return;
+            };
+            if *count > 1 {
+                *count -= 1;
+                false
+            } else {
+                references.remove(&socket_ptr);
+                true
+            }
+        };
+
+        if should_close {
+            self.close_socket_handle(socket);
+        }
+    }
+
+    /// Release the bound name owned by a socket during final handle close.
+    ///
+    /// Logical socket-reference tracking ensures this helper is reached only
+    /// after inherited, duplicated, and IPC-queued owners have been released.
+    ///
+    /// # Arguments
+    ///
+    /// * `socket` - Socket whose handle-table entry is being discarded.
+    pub(crate) fn unregister_bound_socket_handle(&self, socket: &Arc<dyn SocketObject>) {
+        let state = socket.state();
+        if matches!(state, SocketState::Bound | SocketState::Listening)
+            && let Ok(SocketAddress::Local(address)) = socket.getsockname()
+            && !address.path().is_empty()
+        {
+            let name = if address.is_abstract() {
+                let mut name = String::new();
+                name.push('\0');
+                name.push_str(address.path());
+                name
+            } else {
+                address.path().to_string()
+            };
+            self.unregister_named_socket(&name, socket.as_ref());
+        }
+    }
+
+    /// Unregister the named socket represented by a removed VFS socket file.
+    ///
+    /// The socket ID and object identity are both checked, so an unlink racing
+    /// with a new owner cannot remove the replacement registration.
+    ///
+    /// # Arguments
+    ///
+    /// * socket_id - Socket ID stored in the removed VFS node.
+    pub(crate) fn unregister_socket_file(&self, socket_id: SocketId) {
+        let Some(socket) = self.get_socket(socket_id) else {
+            return;
+        };
+        let Ok(SocketAddress::Local(address)) = socket.getsockname() else {
+            return;
+        };
+        let name = if address.is_abstract() {
+            let mut name = String::new();
+            name.push('\0');
+            name.push_str(address.path());
+            name
+        } else {
+            address.path().to_string()
+        };
+        self.unregister_named_socket(&name, socket.as_ref());
     }
 
     pub fn get_socket(&self, socket_id: SocketId) -> Option<Arc<dyn SocketObject>> {

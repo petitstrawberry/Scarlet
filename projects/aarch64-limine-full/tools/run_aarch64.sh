@@ -78,6 +78,17 @@ QEMU_GPU="${SCARLET_QEMU_GPU:-virtio-gpu-pci}"
 QEMU_NET="${SCARLET_QEMU_NET:-1}"
 QEMU_USB_NCM="${SCARLET_QEMU_USB_NCM:-0}"
 QEMU_INPUT="${SCARLET_QEMU_INPUT:-1}"
+QEMU_REMOTE_DESKTOP_HOST_PORT="${SCARLET_QEMU_REMOTE_DESKTOP_HOST_PORT:-5900}"
+if [ -z "${SCARLET_QEMU_REMOTE_DESKTOP_HOST_PORT:-}" ]; then
+    case "$QEMU_DISPLAY" in
+        vnc=*:0|vnc=*:0,*)
+            # QEMU's built-in VNC display already owns host TCP 5900.
+            QEMU_REMOTE_DESKTOP_HOST_PORT=5901
+            ;;
+        *)
+            ;;
+    esac
+fi
 if [ -n "${SCARLET_QEMU_ROOTFS_TRANSPORT:-}" ]; then
     QEMU_ROOTFS_TRANSPORT="$SCARLET_QEMU_ROOTFS_TRANSPORT"
 elif grep -Eq 'cmdline = ".*root=/dev/usbblk0' "$PROJECT_DIR/scarlet.toml"; then
@@ -280,7 +291,11 @@ fi
 QEMU_NET_ARGS=()
 if [ "$QEMU_NET" = "1" ] || [ "$QEMU_NET" = "true" ]; then
     QEMU_NETDEV="user,id=net0"
-    QEMU_HOSTFWD="${SCARLET_QEMU_HOSTFWD:-tcp::8080-:8080,udp::8080-:8080,udp::1234-:1234}"
+    QEMU_DEFAULT_HOSTFWD="tcp::8080-:8080,udp::8080-:8080,udp::1234-:1234,tcp::${QEMU_REMOTE_DESKTOP_HOST_PORT}-:5900"
+    QEMU_HOSTFWD="${SCARLET_QEMU_HOSTFWD:-$QEMU_DEFAULT_HOSTFWD}"
+    if [ -z "${SCARLET_QEMU_HOSTFWD:-}" ]; then
+        echo "Forwarding remote desktop: 127.0.0.1:${QEMU_REMOTE_DESKTOP_HOST_PORT} -> guest:5900"
+    fi
     if [ -n "$QEMU_HOSTFWD" ]; then
         IFS=',' read -ra QEMU_HOSTFWD_RULES <<< "$QEMU_HOSTFWD"
         for QEMU_HOSTFWD_RULE in "${QEMU_HOSTFWD_RULES[@]}"; do

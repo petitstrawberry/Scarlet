@@ -1956,6 +1956,7 @@ fn pop_pending_client_responses(client_id: usize) -> Vec<PendingServerFrame> {
 /// IPC Server - manages Socket VFS connections
 pub struct IpcServer {
     socket_path: &'static str,
+    server_socket: Option<Socket>,
     accept_thread_started: bool,
 }
 
@@ -1966,13 +1967,19 @@ impl IpcServer {
 
         Ok(Self {
             socket_path,
+            server_socket: None,
             accept_thread_started: false,
         })
     }
 
-    /// Start listening for connections in a separate thread
-    pub fn listen(&mut self) -> Result<(), &'static str> {
-        if self.accept_thread_started {
+    /// Bind and listen on the IPC socket without starting worker threads.
+    ///
+    /// # Returns
+    ///
+    /// Success after the server owns its socket address, or an error when the
+    /// address cannot be claimed.
+    pub fn bind(&mut self) -> Result<(), &'static str> {
+        if self.server_socket.is_some() || self.accept_thread_started {
             return Ok(());
         }
 
@@ -2003,6 +2010,27 @@ impl IpcServer {
 
         let server_handle = server_socket.as_raw();
         println!("[IpcServer] Socket listening (handle {})", server_handle);
+
+        self.server_socket = Some(server_socket);
+        Ok(())
+    }
+
+    /// Start accepting connections in a separate thread.
+    ///
+    /// The socket is bound first when bind has not been called.
+    ///
+    /// # Returns
+    ///
+    /// Success after the accept thread has started.
+    pub fn listen(&mut self) -> Result<(), &'static str> {
+        if self.accept_thread_started {
+            return Ok(());
+        }
+        self.bind()?;
+        let server_socket = self
+            .server_socket
+            .take()
+            .ok_or("SWS IPC socket was not bound")?;
 
         // Move socket to accept thread
         // HandleTable is cloned but Arc<SocketObject> is shared

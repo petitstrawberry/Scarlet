@@ -10,11 +10,11 @@ to = "/"
 kind = "cargo"
 source = "../../user/video_player"
 package = "video_player"
-bin = "video_player"
+bin = "video-player"
 default-features = false
 features = ["av1-stateful-hw", "h264-stateful-hw", "h264-stateless-hw", "mp4-aac"]
 replace = true
-to = "/system/scarlet/bin/video_player"
+to = "/system/scarlet/bin/video-player"
 
 [[layers]]
 kind = "cargo"

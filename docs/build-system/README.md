@@ -305,7 +305,7 @@ source = { git = "https://github.com/petitstrawberry/scarlet-ui" }
 subdir = "examples/widget-factory"
 package = "scarlet-ui-widget-factory"
 bin = "scarlet-ui-widget-factory"
-to = "/system/scarlet/bin/widget_factory"
+to = "/system/scarlet/bin/widget-factory"
 ```
 
 Cargo layers can also control Cargo feature selection for that one installed
@@ -316,10 +316,10 @@ binary:
 kind = "cargo"
 source = "../../user/video_player"
 package = "video_player"
-bin = "video_player"
+bin = "video-player"
 default-features = false
 features = ["av1-stateful-hw", "h264-stateful-hw", "mp4-aac"]
-to = "/system/scarlet/bin/video_player"
+to = "/system/scarlet/bin/video-player"
 ```
 
 | Field | Description |

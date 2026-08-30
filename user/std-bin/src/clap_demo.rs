@@ -11,7 +11,7 @@ enum OutputMode {
 }
 
 #[derive(Debug, Parser)]
-#[command(name = "clap_demo", version, about = "Exercise clap on Scarlet std")]
+#[command(name = "clap-demo", version, about = "Exercise clap on Scarlet std")]
 struct Cli {
     #[arg(short, long, default_value = "world")]
     name: String,

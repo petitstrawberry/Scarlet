@@ -2806,7 +2806,7 @@ impl crate::object::capability::Selectable for TcpSocket {
 
 impl crate::object::capability::CloneOps for TcpSocket {
     fn custom_clone(&self) -> crate::object::KernelObject {
-        crate::object::KernelObject::Socket(TcpSocket::new(self.tcp_layer.clone()))
+        crate::object::KernelObject::from_socket_object(TcpSocket::new(self.tcp_layer.clone()))
     }
 }
 

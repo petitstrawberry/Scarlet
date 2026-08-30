@@ -96,7 +96,7 @@ The bridge uses Scarlet's native handle transfer for passing file descriptors:
 
 ```bash
 # Start the bridge server
-/bin/wayland_bridge
+/bin/wayland-bridge
 
 # Connect Wayland clients
 export WAYLAND_DISPLAY=wayland-0

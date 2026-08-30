@@ -43,8 +43,9 @@ impl fmt::Display for Error {
         match self {
             Self::Frontend(error) => write!(formatter, "SGFX frontend failed: {error}"),
             Self::Ir(error) => write!(formatter, "SGFX IR validation failed: {error:?}"),
-            Self::UnsupportedCapabilities => formatter
-                .write_str("SGFX device lacks rendering, presentation, or image-upload capability"),
+            Self::UnsupportedCapabilities => {
+                formatter.write_str("SGFX device lacks required mapped-target capabilities")
+            }
         }
     }
 }
@@ -75,6 +76,7 @@ pub(crate) struct MappedTarget {
     pub(crate) texture: TextureId,
     pub(crate) width: u32,
     pub(crate) height: u32,
+    presented_texture: Option<TextureId>,
     spare_texture: Option<TextureId>,
     current_initialized: bool,
     spare_initialized: bool,
@@ -86,15 +88,20 @@ pub(crate) struct MappedTarget {
 
 impl MappedTarget {
     pub(crate) fn open(width: u32, height: u32) -> Result<Self, Error> {
-        Self::open_with_target_count(width, height, 1)
+        Self::open_with_target_count(width, height, 1, false)
     }
 
     /// Open a two-image presentation target for tear-free direct scanout.
     pub(crate) fn open_swapchain(width: u32, height: u32) -> Result<Self, Error> {
-        Self::open_with_target_count(width, height, 2)
+        Self::open_with_target_count(width, height, 2, true)
     }
 
-    fn open_with_target_count(width: u32, height: u32, target_count: usize) -> Result<Self, Error> {
+    fn open_with_target_count(
+        width: u32,
+        height: u32,
+        target_count: usize,
+        require_readback: bool,
+    ) -> Result<Self, Error> {
         let instance = Instance::new()?;
         let device = instance.open_device("/dev/gpu0")?;
         let capabilities = device.capabilities();
@@ -102,7 +109,8 @@ impl MappedTarget {
             capabilities.supports_rendering(),
             capabilities.supports_presentation(),
             capabilities.supports_image_upload(),
-        ) {
+        ) || (require_readback && !capabilities.supports_image_readback())
+        {
             return Err(Error::UnsupportedCapabilities);
         }
         let context = device.create_context()?;
@@ -124,6 +132,7 @@ impl MappedTarget {
                     extent,
                     TextureUsage::RENDER_ATTACHMENT
                         | TextureUsage::PRESENT
+                        | TextureUsage::COPY_SRC
                         | TextureUsage::COPY_DST,
                 )?)?
                 .id())
@@ -145,6 +154,7 @@ impl MappedTarget {
             texture,
             width,
             height,
+            presented_texture: None,
             spare_texture,
             current_initialized: false,
             spare_initialized: false,
@@ -248,9 +258,10 @@ impl MappedTarget {
         display: &DisplaySurface,
         region: Option<DisplayPresentRegion>,
     ) -> Result<(), &'static str> {
+        let presented_texture = self.texture;
         let image = self
             .session
-            .image(self.texture)
+            .image(presented_texture)
             .map_err(|_| "Failed to resolve mapped SGFX target")?;
         if self.spare_texture.is_some() {
             display
@@ -262,7 +273,27 @@ impl MappedTarget {
                 .map_err(|_| "Failed to present mapped SGFX target")?;
         }
         self.finish_present()
-            .map_err(|_| "Failed to advance mapped SGFX swapchain")
+            .map_err(|_| "Failed to advance mapped SGFX swapchain")?;
+        self.presented_texture = Some(presented_texture);
+        Ok(())
+    }
+
+    /// Read damaged regions from the most recently presented target.
+    pub(crate) fn readback_bgra(
+        &self,
+        destination: &mut [u8],
+        destination_stride: u32,
+        damage: &[PixelRect],
+    ) -> Result<(), &'static str> {
+        let texture = self
+            .presented_texture
+            .ok_or("SGFX target has not presented a capturable frame")?;
+        for rect in damage {
+            self.session
+                .readback_bgra(texture, destination, destination_stride, *rect)
+                .map_err(|_| "Failed to read back the SGFX presentation target")?;
+        }
+        Ok(())
     }
 }
 

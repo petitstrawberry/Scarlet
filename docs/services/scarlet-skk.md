@@ -1,6 +1,6 @@
 # Scarlet SKK
 
-`scarlet_skk` is an external SKK input method service for exercising the SWS text-input protocol. It keeps conversion logic outside SWS; SWS only brokers text-input state, trigger delivery, key arbitration, preedit, commit, deletion, and input-method-owned popup placement.
+`scarlet-skk` is an external SKK input method service for exercising the SWS text-input protocol. It keeps conversion logic outside SWS; SWS only brokers text-input state, trigger delivery, key arbitration, preedit, commit, deletion, and input-method-owned popup placement.
 
 ## Behavior
 
@@ -16,11 +16,11 @@
 - `Enter` commits.
 - `Esc` cancels or returns to midashi input.
 
-Candidate mode first shows only the inline `▼` preedit. After the user advances or moves candidates, `scarlet_skk` creates an `IME_POPUP` window, renders the visible SKK candidates itself, and asks SWS to anchor that window to the active text-input cursor rectangle with `IME_SET_POPUP_WINDOW`.
+Candidate mode first shows only the inline `▼` preedit. After the user advances or moves candidates, `scarlet-skk` creates an `IME_POPUP` window, renders the visible SKK candidates itself, and asks SWS to anchor that window to the active text-input cursor rectangle with `IME_SET_POPUP_WINDOW`.
 
 ## Dictionary
 
-`scarlet_skk` loads a UTF-8 SKK dictionary from these paths:
+`scarlet-skk` loads a UTF-8 SKK dictionary from these paths:
 
 - `/share/skk/SKK-JISYO.L`
 - `/usr/share/skk/SKK-JISYO.L`

@@ -18,11 +18,11 @@ const LSM_LIST_MAX_MODULES: usize = 128;
 const DEFAULT_MODULES_DIR: &str = "/scarlet/system/scarlet/modules";
 
 fn main() -> ExitCode {
-    println!("lsm_load: Rust std version");
+    println!("lsm-load: Rust std version");
 
     let args = env::args().collect::<Vec<_>>();
     if args.len() < 2 {
-        println!("usage: lsm_load <module.lsm>");
+        println!("usage: lsm-load <module.lsm>");
         return ExitCode::from(1);
     }
 

@@ -6,8 +6,8 @@ use std::process::ExitCode;
 fn main() -> ExitCode {
     let args = env::args().collect::<Vec<_>>();
     if args.len() != 2 {
-        println!("Usage: tcp_server <port>");
-        println!("Example: tcp_server 8080");
+        println!("Usage: tcp-server <port>");
+        println!("Example: tcp-server 8080");
         return ExitCode::from(1);
     }
 

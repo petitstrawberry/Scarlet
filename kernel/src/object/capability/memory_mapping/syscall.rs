@@ -537,7 +537,7 @@ pub fn sys_memory_unmap(trapframe: &mut Trapframe) -> usize {
 mod tests {
     use super::*;
 
-    #[test]
+    #[test_case]
     fn owner_backed_mapping_uses_unresolved_physical_sentinel() {
         assert_eq!(
             physical_area_for_mapping(0, PAGE_SIZE * 4),
@@ -545,7 +545,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[test_case]
     fn physical_mapping_preserves_complete_range() {
         assert_eq!(
             physical_area_for_mapping(0x20_0000, PAGE_SIZE * 2),
@@ -553,7 +553,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[test_case]
     fn physical_mapping_rejects_overflow() {
         assert_eq!(physical_area_for_mapping(usize::MAX, PAGE_SIZE), None);
     }

@@ -12,13 +12,13 @@ return NV12 frames through the Scarlet video decode device contract at
 The first working path is:
 
 ```text
-video_player
+video-player
   -> /dev/video0
   -> Apple AVD video backend
   -> AVD low-level MMIO + DART driver
   -> Rust Cortex-M3 firmware
   -> NV12 frame
-  -> video_player NV12-to-BGRA conversion
+  -> video-player NV12-to-BGRA conversion
 ```
 
 SWS remains BGRA-only for the initial implementation. Native NV12 surfaces,
@@ -82,7 +82,7 @@ The branch currently provides:
   backend registry used by AVD and future non-VirtIO backends.
 - `user/lib/scarlet-codecs`: userspace codec request builders. The current H.264
   module owns Annex B scanning, SPS/PPS/slice parsing, POC, DPB, and reference
-  list construction for `video_player`.
+  list construction for `video-player`.
 
 The `/dev/video0` AVD frontend implements the shared mmap/ioctl entrypoints and
 accepts `SCARLET_VIDEO_SUBMIT_H264_STATELESS` and

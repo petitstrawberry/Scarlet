@@ -527,3 +527,90 @@ fn test_handle_table_deep_clone() {
     assert_eq!(table1.open_count(), 1);
     assert_eq!(table2.open_count(), 0);
 }
+
+#[cfg(feature = "network")]
+#[test_case]
+fn close_all_closes_named_socket_while_inflight_clone_survives() {
+    use crate::network::local::LocalSocket;
+    use crate::network::{
+        LocalSocketAddress, NetworkManager, SocketAddress, SocketError, SocketObject,
+        SocketProtocol, SocketState, SocketType,
+    };
+
+    let table = HandleTable::new();
+    let path = "/handle-table-close-retained-socket";
+    let socket: Arc<dyn SocketObject> = Arc::new(LocalSocket::new(
+        SocketType::Stream,
+        SocketProtocol::Default,
+    ));
+    socket
+        .bind(&SocketAddress::Local(
+            LocalSocketAddress::from_path(path).unwrap(),
+        ))
+        .unwrap();
+    socket.listen(1).unwrap();
+
+    let manager = NetworkManager::get_manager();
+    manager.allocate_socket_id(Arc::clone(&socket)).unwrap();
+    manager
+        .register_named_socket(path, Arc::clone(&socket))
+        .unwrap();
+    let handle = table
+        .insert(KernelObject::from_socket_object(Arc::clone(&socket)))
+        .unwrap();
+    let in_flight = table.get(handle).unwrap();
+
+    table.close_all();
+
+    assert_eq!(socket.state(), SocketState::Closed);
+    assert!(matches!(
+        manager.lookup_named_socket(path),
+        Err(SocketError::ConnectionRefused)
+    ));
+    assert_eq!(table.open_count(), 0);
+    drop(in_flight);
+}
+
+#[cfg(feature = "network")]
+#[test_case]
+fn duplicated_socket_reference_defers_final_listener_close() {
+    use crate::network::local::LocalSocket;
+    use crate::network::{
+        LocalSocketAddress, NetworkManager, SocketAddress, SocketObject, SocketProtocol,
+        SocketState, SocketType,
+    };
+
+    let table = HandleTable::new();
+    let path = "/duplicated-socket-defers-close";
+    let socket: Arc<dyn SocketObject> = Arc::new(LocalSocket::new(
+        SocketType::Stream,
+        SocketProtocol::Default,
+    ));
+    socket
+        .bind(&SocketAddress::Local(
+            LocalSocketAddress::from_path(path).unwrap(),
+        ))
+        .unwrap();
+    socket.listen(1).unwrap();
+
+    let manager = NetworkManager::get_manager();
+    manager.allocate_socket_id(Arc::clone(&socket)).unwrap();
+    manager
+        .register_named_socket(path, Arc::clone(&socket))
+        .unwrap();
+    let handle = table
+        .insert(KernelObject::from_socket_object(Arc::clone(&socket)))
+        .unwrap();
+    let (duplicate, _) = table.clone_for_dup(handle).unwrap();
+
+    table.close_all();
+    assert_eq!(socket.state(), SocketState::Listening);
+    assert!(Arc::ptr_eq(
+        &manager.lookup_named_socket(path).unwrap(),
+        &socket
+    ));
+
+    drop(duplicate);
+    assert_eq!(socket.state(), SocketState::Closed);
+    assert!(manager.lookup_named_socket(path).is_err());
+}

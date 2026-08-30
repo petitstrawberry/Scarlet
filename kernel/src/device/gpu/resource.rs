@@ -9,14 +9,14 @@ use super::{
     GPU_MAX_IMAGE_UPLOAD_SIZE, GPU_RESULT_INVALID_ABI, GPU_TIMELINE_CREATE_POINT,
     GPU_TIMELINE_FAIL, GPU_TIMELINE_QUERY, GPU_TIMELINE_SIGNAL, GpuBackend, GpuBackendBuffer,
     GpuBackendImage, GpuBackendImageLayout, GpuBufferCreateInfo, GpuBufferInfo,
-    GpuContextUploadImageBgra, GpuImageBackingInfo, GpuImageCreateInfo, GpuImageInfo,
-    GpuImageLayout, GpuImagePlaneLayout, GpuImageUploadInfo, GpuTimelineCreatePoint,
-    GpuTimelineFail, GpuTimelineInfo, GpuTimelineSignal,
+    GpuContextReadbackImageBgra, GpuContextUploadImageBgra, GpuImageBackingInfo,
+    GpuImageCreateInfo, GpuImageInfo, GpuImageLayout, GpuImagePlaneLayout, GpuImageUploadInfo,
+    GpuTimelineCreatePoint, GpuTimelineFail, GpuTimelineInfo, GpuTimelineSignal,
 };
 use crate::device::graphics::GpuBackingSegment;
 use crate::environment::PAGE_SIZE;
 use crate::ipc::shared_memory::{SharedMemoryObject, SharedMemoryPin};
-use crate::library::std::usercopy::copy_from_user;
+use crate::library::std::usercopy::{copy_from_user, copy_to_user};
 use crate::mem::page::{ContiguousPages, Page, allocate_raw_pages, free_raw_pages};
 use crate::object::capability::ControlOps;
 use crate::object::capability::memory_mapping::{
@@ -427,6 +427,168 @@ pub(crate) fn image_upload_layout(
     })
 }
 
+/// Validated layout for one image-to-userspace BGRA readback.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct GpuImageReadbackLayout {
+    destination_stride: usize,
+    destination_row_bytes: usize,
+    destination_offset: usize,
+    source_offset: usize,
+    source_stride: usize,
+    height: usize,
+    transfer: GpuImageUploadInfo,
+}
+
+/// Validate a BGRA readback request and derive backing and destination ranges.
+///
+/// # Arguments
+///
+/// * `request` - Userspace destination and source rectangle.
+/// * `image` - Immutable image metadata.
+/// * `layout` - Immutable backend-selected image layout.
+///
+/// # Returns
+///
+/// Validated pointer-free transfer metadata and CPU copy ranges.
+pub(crate) fn image_readback_layout(
+    request: &GpuContextReadbackImageBgra,
+    image: super::GpuBackendImageInfo,
+    layout: GpuBackendImageLayout,
+) -> Result<GpuImageReadbackLayout, &'static str> {
+    if request.destination_ptr == 0
+        || request.destination_length == 0
+        || request.width == 0
+        || request.height == 0
+        || image.format != GPU_IMAGE_FORMAT_BGRA8_UNORM
+        || image.usage & super::GPU_IMAGE_USAGE_TRANSFER_SRC == 0
+        || layout.modifier != super::GPU_IMAGE_MODIFIER_LINEAR
+        || layout.plane_count != 1
+    {
+        return Err("GPU image readback request is invalid");
+    }
+    let plane = layout.planes[0];
+    if plane.block_width != 1 || plane.block_height != 1 || plane.bytes_per_block != 4 {
+        return Err("GPU image readback layout is unsupported");
+    }
+    let image_row_bytes = image
+        .width
+        .checked_mul(4)
+        .ok_or("GPU image readback row width overflows")?;
+    let image_layer_bytes = u64::from(image.height)
+        .checked_sub(1)
+        .and_then(|rows| rows.checked_mul(u64::from(plane.row_pitch)))
+        .and_then(|offset| offset.checked_add(u64::from(image_row_bytes)))
+        .ok_or("GPU image readback layer size overflows")?;
+    if plane.row_pitch < image_row_bytes
+        || u64::from(plane.array_pitch) < image_layer_bytes
+        || plane.size < image_layer_bytes
+    {
+        return Err("GPU image readback layout is too small for the image extent");
+    }
+
+    let src_x_end = request
+        .src_x
+        .checked_add(request.width)
+        .ok_or("GPU image readback x range overflows")?;
+    let src_y_end = request
+        .src_y
+        .checked_add(request.height)
+        .ok_or("GPU image readback y range overflows")?;
+    if src_x_end > image.width || src_y_end > image.height {
+        return Err("GPU image readback rectangle exceeds image bounds");
+    }
+    let row_bytes = request
+        .width
+        .checked_mul(4)
+        .ok_or("GPU image readback row width overflows")?;
+    let destination_row_end = src_x_end
+        .checked_mul(4)
+        .ok_or("GPU image readback destination row overflows")?;
+    if request.destination_stride < destination_row_end {
+        return Err("GPU image readback destination stride is too small");
+    }
+
+    let destination_length = usize::try_from(request.destination_length)
+        .map_err(|_| "GPU image readback destination length does not fit kernel address size")?;
+    let destination_stride = usize::try_from(request.destination_stride)
+        .map_err(|_| "GPU image readback destination stride does not fit kernel address size")?;
+    let destination_row_bytes = usize::try_from(row_bytes)
+        .map_err(|_| "GPU image readback row width does not fit kernel address size")?;
+    let height = usize::try_from(request.height)
+        .map_err(|_| "GPU image readback height does not fit kernel address size")?;
+    let destination_offset = usize::try_from(request.src_y)
+        .ok()
+        .and_then(|y| y.checked_mul(destination_stride))
+        .and_then(|offset| {
+            usize::try_from(request.src_x)
+                .ok()
+                .and_then(|x| x.checked_mul(4))
+                .and_then(|x_offset| offset.checked_add(x_offset))
+        })
+        .ok_or("GPU image readback destination offset overflows")?;
+    let destination_end = height
+        .checked_sub(1)
+        .and_then(|rows| rows.checked_mul(destination_stride))
+        .and_then(|offset| offset.checked_add(destination_offset))
+        .and_then(|offset| offset.checked_add(destination_row_bytes))
+        .ok_or("GPU image readback destination range overflows")?;
+    if destination_end > destination_length {
+        return Err("GPU image readback destination range is too small");
+    }
+    let copy_size = destination_row_bytes
+        .checked_mul(height)
+        .ok_or("GPU image readback copy size overflows")?;
+    if copy_size > GPU_MAX_IMAGE_UPLOAD_SIZE as usize {
+        return Err("GPU image readback exceeds the maximum copy size");
+    }
+
+    let source_stride = usize::try_from(plane.row_pitch)
+        .map_err(|_| "GPU image readback source stride does not fit kernel address size")?;
+    let source_offset = usize::try_from(plane.offset)
+        .ok()
+        .and_then(|offset| {
+            usize::try_from(request.src_y)
+                .ok()
+                .and_then(|y| y.checked_mul(source_stride))
+                .and_then(|y_offset| offset.checked_add(y_offset))
+        })
+        .and_then(|offset| {
+            usize::try_from(request.src_x)
+                .ok()
+                .and_then(|x| x.checked_mul(4))
+                .and_then(|x_offset| offset.checked_add(x_offset))
+        })
+        .ok_or("GPU image readback source offset overflows")?;
+    let source_end = height
+        .checked_sub(1)
+        .and_then(|rows| rows.checked_mul(source_stride))
+        .and_then(|offset| offset.checked_add(source_offset))
+        .and_then(|offset| offset.checked_add(destination_row_bytes))
+        .ok_or("GPU image readback source range overflows")?;
+    if source_end > usize::try_from(layout.total_size).unwrap_or(0) {
+        return Err("GPU image readback exceeds image backing");
+    }
+
+    Ok(GpuImageReadbackLayout {
+        destination_stride,
+        destination_row_bytes,
+        destination_offset,
+        source_offset,
+        source_stride,
+        height,
+        transfer: GpuImageUploadInfo::new(
+            u64::try_from(source_offset)
+                .map_err(|_| "GPU image readback offset does not fit backend ABI")?,
+            plane.row_pitch,
+            plane.array_pitch,
+            request.src_x,
+            request.src_y,
+            request.width,
+            request.height,
+        ),
+    })
+}
+
 /// Stable private page-backed allocation retained by a GPU image and its attachments.
 struct GpuPrivateImageBacking {
     chunks: Vec<ContiguousPages>,
@@ -586,6 +748,29 @@ impl GpuPrivateImageBacking {
     fn clean_range(&self, offset: usize, length: usize) -> Result<(), &'static str> {
         self.for_each_range(offset, length, |address, part_length| {
             crate::arch::clean_dcache_to_poc_range(address, part_length);
+            Ok(())
+        })
+    }
+
+    fn copy_to_user(
+        &self,
+        task: &crate::task::Task,
+        destination_address: usize,
+        source_offset: usize,
+        length: usize,
+    ) -> Result<(), &'static str> {
+        let mut copied = 0usize;
+        self.for_each_range(source_offset, length, |source, part_length| {
+            crate::arch::invalidate_dcache_to_poc_range(source, part_length);
+            // SAFETY: `for_each_range` supplies a live initialized backing
+            // range retained by this image for the complete copy operation.
+            let source = unsafe { core::slice::from_raw_parts(source as *const u8, part_length) };
+            let destination = destination_address
+                .checked_add(copied)
+                .ok_or("GPU image readback destination address overflows")?;
+            copy_to_user(task, destination, source)
+                .map_err(|_| "Failed to copy GPU image pixels to user")?;
+            copied += part_length;
             Ok(())
         })
     }
@@ -985,6 +1170,39 @@ impl GpuImage {
         )?;
         self.backing.clean_imported_transfer_range(layout)?;
         transfer(self.backend_image.as_ref(), layout)
+    }
+
+    pub(crate) fn readback_bgra_to_user<F>(
+        &self,
+        destination_ptr: usize,
+        layout: GpuImageReadbackLayout,
+        readback: F,
+    ) -> Result<(), &'static str>
+    where
+        F: FnOnce(&dyn GpuBackendImage, GpuImageUploadInfo) -> Result<(), &'static str>,
+    {
+        let _upload_guard = self.upload_lock.lock();
+        let task = crate::task::mytask().ok_or("No current task for GPU image readback")?;
+        let backing = self.backing.private_backing()?;
+        readback(self.backend_image.as_ref(), layout.transfer)?;
+        for row in 0..layout.height {
+            let source_offset = row
+                .checked_mul(layout.source_stride)
+                .and_then(|offset| offset.checked_add(layout.source_offset))
+                .ok_or("GPU image readback source row offset overflows")?;
+            let destination_address = row
+                .checked_mul(layout.destination_stride)
+                .and_then(|offset| offset.checked_add(layout.destination_offset))
+                .and_then(|offset| destination_ptr.checked_add(offset))
+                .ok_or("GPU image readback destination row address overflows")?;
+            backing.copy_to_user(
+                &task,
+                destination_address,
+                source_offset,
+                layout.destination_row_bytes,
+            )?;
+        }
+        Ok(())
     }
 
     /// Return this image's display descriptor when it is presentable.

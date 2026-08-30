@@ -213,7 +213,7 @@ pub fn decode_loop(
 ) -> Result<(), String> {
     let _ = (path, mp4_data, controls, clock, queue);
     Err(String::from(
-        "software H.264 decode is disabled; rebuild video_player with the h264-sw feature or use --hwdc with a stateful H.264 backend",
+        "software H.264 decode is disabled; rebuild video-player with the h264-sw feature or use --hwdc with a stateful H.264 backend",
     ))
 }
 

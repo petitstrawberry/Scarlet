@@ -4,13 +4,15 @@ use alloc::{rc::Rc, vec::Vec};
 use core::cell::Cell;
 
 use gpu_raw::{
-    GPU_DEVICE_STATE_READY, GPU_EXECUTION_SUPPORT_DEPTH, GPU_EXECUTION_SUPPORT_IMAGE_UPLOAD,
-    GPU_EXECUTION_SUPPORT_PRESENTATION, GPU_EXECUTION_SUPPORT_QUEUE, GPU_IMAGE_FORMAT_BGRA8_UNORM,
+    GPU_DEVICE_STATE_READY, GPU_EXECUTION_SUPPORT_DEPTH, GPU_EXECUTION_SUPPORT_IMAGE_READBACK,
+    GPU_EXECUTION_SUPPORT_IMAGE_UPLOAD, GPU_EXECUTION_SUPPORT_PRESENTATION,
+    GPU_EXECUTION_SUPPORT_QUEUE, GPU_IMAGE_FORMAT_BGRA8_UNORM,
     GPU_IMAGE_FORMAT_DEPTH32_FLOAT, GPU_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT,
     GPU_IMAGE_USAGE_PRESENTABLE, GPU_IMAGE_USAGE_RENDER_TARGET, GPU_IMAGE_USAGE_SAMPLED,
-    GPU_IMAGE_USAGE_TRANSFER_DST, GPU_RESULT_SUCCESS, Gpu as RawGpu, GpuBuffer as RawBuffer,
-    GpuContext as RawContext, GpuDialect as RawDialect, GpuImage as RawImage, GpuImageBgraRect,
-    GpuQueryInfo, GpuQueue as RawQueue,
+    GPU_IMAGE_USAGE_TRANSFER_DST, GPU_IMAGE_USAGE_TRANSFER_SRC, GPU_MAX_IMAGE_UPLOAD_SIZE,
+    GPU_RESULT_SUCCESS, Gpu as RawGpu, GpuBuffer as RawBuffer, GpuContext as RawContext,
+    GpuDialect as RawDialect, GpuImage as RawImage, GpuImageBgraRect, GpuQueryInfo,
+    GpuQueue as RawQueue,
 };
 #[cfg(feature = "std")]
 use scarlet_os::handle::{Handle, HandleError, HandleResult};
@@ -342,6 +344,7 @@ impl Device {
             rendering: true,
             presentation: info.execution_support & GPU_EXECUTION_SUPPORT_PRESENTATION != 0,
             image_upload: info.execution_support & GPU_EXECUTION_SUPPORT_IMAGE_UPLOAD != 0,
+            image_readback: info.execution_support & GPU_EXECUTION_SUPPORT_IMAGE_READBACK != 0,
             depth: info.execution_support & GPU_EXECUTION_SUPPORT_DEPTH != 0,
         };
         let dialect = raw.query_dialect(0)?;
@@ -407,7 +410,10 @@ impl Context {
         let raw = self.device.raw.create_image_with_usage(
             width,
             height,
-            GPU_IMAGE_USAGE_RENDER_TARGET | GPU_IMAGE_USAGE_PRESENTABLE | GPU_IMAGE_USAGE_SAMPLED,
+            GPU_IMAGE_USAGE_RENDER_TARGET
+                | GPU_IMAGE_USAGE_PRESENTABLE
+                | GPU_IMAGE_USAGE_SAMPLED
+                | GPU_IMAGE_USAGE_TRANSFER_SRC,
         )?;
         let resource_id = resource_id_from_token(self.raw.attach_image(&raw)?)?;
         Ok(Image {
@@ -594,6 +600,48 @@ impl Context {
             &texture.raw,
             GpuImageBgraRect::new(damage.x(), damage.y(), damage.width(), damage.height()),
         )
+    }
+
+    pub(crate) fn readback_image_bgra(
+        &self,
+        image: &Image,
+        destination: &mut [u8],
+        destination_stride: u32,
+        rect: PixelRect,
+    ) -> HandleResult<()> {
+        if image.context_handle != self.handle_id()
+            || !rect.is_within(image.width, image.height)
+            || !self.device.capabilities.supports_image_readback()
+        {
+            return Err(HandleError::InvalidParameter);
+        }
+        let row_bytes = usize::try_from(rect.width())
+            .ok()
+            .and_then(|width| width.checked_mul(4))
+            .ok_or(HandleError::InvalidParameter)?;
+        let max_rows = usize::try_from(GPU_MAX_IMAGE_UPLOAD_SIZE)
+            .ok()
+            .and_then(|maximum| maximum.checked_div(row_bytes))
+            .and_then(|rows| u32::try_from(rows).ok())
+            .filter(|rows| *rows != 0)
+            .ok_or(HandleError::InvalidParameter)?;
+
+        let mut y = rect.y();
+        let mut remaining = rect.height();
+        while remaining != 0 {
+            let height = remaining.min(max_rows);
+            self.raw.readback_image_bgra(
+                &image.raw,
+                destination,
+                destination_stride,
+                GpuImageBgraRect::new(rect.x(), y, rect.width(), height),
+            )?;
+            y = y
+                .checked_add(height)
+                .ok_or(HandleError::InvalidParameter)?;
+            remaining -= height;
+        }
+        Ok(())
     }
 
     pub(crate) fn release_texture(&self, texture: Texture) -> HandleResult<()> {

@@ -1,6 +1,6 @@
 [Desktop Entry]
 Name=Task Manager
-Exec=/bin/task_manager
+Exec=/bin/task-manager
 Icon=utilities-system-monitor
 Type=Application
 Terminal=false

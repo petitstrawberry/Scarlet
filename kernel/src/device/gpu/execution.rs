@@ -5,15 +5,15 @@ use alloc::{sync::Arc, vec::Vec};
 use super::connection::{read_user_value, write_user_value};
 use super::{
     GPU_ABI_VERSION, GPU_CONTEXT_ATTACH_IMAGE, GPU_CONTEXT_DETACH_BUFFER, GPU_CONTEXT_DETACH_IMAGE,
-    GPU_CONTEXT_QUERY, GPU_CONTEXT_TRANSFER_IMPORTED_IMAGE_BGRA, GPU_CONTEXT_UPLOAD_IMAGE_BGRA,
-    GPU_CREATE_QUEUE, GPU_MAX_OPAQUE_COMMAND_SIZE, GPU_QUEUE_QUERY, GPU_QUEUE_SUBMIT,
-    GPU_QUEUE_SUBMIT_FLAG_SIGNAL_TIMELINE, GPU_QUEUE_SUBMIT_FLAGS_VALID, GPU_RESULT_INVALID_ABI,
-    GPU_RESULT_INVALID_ARGUMENT, GPU_RESULT_INVALID_STATE, GPU_RESULT_OUT_OF_RESOURCES,
-    GpuBackendBuffer, GpuBackendContext, GpuBackendContextInfo, GpuBackendImage, GpuBackendQueue,
-    GpuBackendQueueInfo, GpuBuffer, GpuContextAttachBuffer, GpuContextAttachImage,
-    GpuContextDetachBuffer, GpuContextDetachImage, GpuContextInfo,
-    GpuContextTransferImportedImageBgra, GpuContextUploadImageBgra, GpuCreateQueue, GpuImage,
-    GpuObject, GpuQueueInfo, GpuQueueSubmit,
+    GPU_CONTEXT_QUERY, GPU_CONTEXT_READBACK_IMAGE_BGRA, GPU_CONTEXT_TRANSFER_IMPORTED_IMAGE_BGRA,
+    GPU_CONTEXT_UPLOAD_IMAGE_BGRA, GPU_CREATE_QUEUE, GPU_MAX_OPAQUE_COMMAND_SIZE, GPU_QUEUE_QUERY,
+    GPU_QUEUE_SUBMIT, GPU_QUEUE_SUBMIT_FLAG_SIGNAL_TIMELINE, GPU_QUEUE_SUBMIT_FLAGS_VALID,
+    GPU_RESULT_INVALID_ABI, GPU_RESULT_INVALID_ARGUMENT, GPU_RESULT_INVALID_STATE,
+    GPU_RESULT_OUT_OF_RESOURCES, GpuBackendBuffer, GpuBackendContext, GpuBackendContextInfo,
+    GpuBackendImage, GpuBackendQueue, GpuBackendQueueInfo, GpuBuffer, GpuContextAttachBuffer,
+    GpuContextAttachImage, GpuContextDetachBuffer, GpuContextDetachImage, GpuContextInfo,
+    GpuContextReadbackImageBgra, GpuContextTransferImportedImageBgra, GpuContextUploadImageBgra,
+    GpuCreateQueue, GpuImage, GpuObject, GpuQueueInfo, GpuQueueSubmit,
 };
 use crate::library::std::usercopy::copy_from_user;
 use crate::object::KernelObject;
@@ -535,6 +535,73 @@ impl GpuContext {
         write_user_value(arg, &request)?;
         Ok(0)
     }
+
+    fn handle_readback_image_bgra(&self, arg: usize) -> Result<i32, &'static str> {
+        let mut request: GpuContextReadbackImageBgra = read_user_value(arg)?;
+        let reserved = request.reserved;
+        let reserved2 = request.reserved2;
+        let reserved3 = request.reserved3;
+        request.clear_response();
+        if request.abi_version != GPU_ABI_VERSION {
+            request.result = GPU_RESULT_INVALID_ABI;
+            write_user_value(arg, &request)?;
+            return Ok(0);
+        }
+        if reserved != 0 || reserved2 != 0 || reserved3 != 0 || request.image_handle == 0 {
+            request.result = GPU_RESULT_INVALID_ARGUMENT;
+            write_user_value(arg, &request)?;
+            return Ok(0);
+        }
+        let task = crate::task::mytask().ok_or("No current task for GPU image readback")?;
+        let image_owner = match task.handle_table.get_arc_clone(request.image_handle) {
+            Some(object) if object.as_gpu().and_then(GpuObject::as_image).is_some() => object,
+            _ => {
+                request.result = GPU_RESULT_INVALID_ARGUMENT;
+                write_user_value(arg, &request)?;
+                return Ok(0);
+            }
+        };
+        let image = image_owner
+            .as_gpu()
+            .and_then(GpuObject::as_image)
+            .ok_or("GPU image handle changed while reading back")?;
+        let layout = match super::resource::image_readback_layout(
+            &request,
+            image.query_info(),
+            image.layout(),
+        ) {
+            Ok(layout) => layout,
+            Err(_) => {
+                request.result = GPU_RESULT_INVALID_ARGUMENT;
+                write_user_value(arg, &request)?;
+                return Ok(0);
+            }
+        };
+        let destination_ptr = match usize::try_from(request.destination_ptr) {
+            Ok(pointer) => pointer,
+            Err(_) => {
+                request.result = GPU_RESULT_INVALID_ARGUMENT;
+                write_user_value(arg, &request)?;
+                return Ok(0);
+            }
+        };
+        if !self.image_is_attached(image) {
+            request.result = GPU_RESULT_INVALID_STATE;
+            write_user_value(arg, &request)?;
+            return Ok(0);
+        }
+        if image
+            .readback_bgra_to_user(destination_ptr, layout, |backend_image, readback| {
+                self.backend_context
+                    .readback_image_bgra(backend_image, readback)
+            })
+            .is_err()
+        {
+            request.result = GPU_RESULT_INVALID_STATE;
+        }
+        write_user_value(arg, &request)?;
+        Ok(0)
+    }
 }
 
 impl ControlOps for GpuContext {
@@ -550,6 +617,7 @@ impl ControlOps for GpuContext {
             GPU_CONTEXT_TRANSFER_IMPORTED_IMAGE_BGRA => {
                 self.handle_transfer_imported_image_bgra(arg)
             }
+            GPU_CONTEXT_READBACK_IMAGE_BGRA => self.handle_readback_image_bgra(arg),
             _ => Err("Unsupported GPU context control command"),
         }
     }

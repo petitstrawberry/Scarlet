@@ -17,21 +17,21 @@ impl InputEvent {
 }
 
 fn main() -> ExitCode {
-    println!("input_dump: Rust std version");
+    println!("input-dump: Rust std version");
 
     let args = env::args().collect::<Vec<_>>();
     let path = args.get(1).map(String::as_str).unwrap_or("/dev/keyboard0");
 
-    println!("input_dump: opening {path}");
+    println!("input-dump: opening {path}");
     let mut file = match File::open(path) {
         Ok(file) => file,
         Err(err) => {
-            println!("input_dump: failed to open {path}: {err}");
+            println!("input-dump: failed to open {path}: {err}");
             return ExitCode::from(1);
         }
     };
 
-    println!("input_dump: waiting for input events...");
+    println!("input-dump: waiting for input events...");
     let mut buffer = [0; InputEvent::SIZE];
     loop {
         match file.read_exact(&mut buffer) {
@@ -44,7 +44,7 @@ fn main() -> ExitCode {
                 );
             }
             Err(err) => {
-                println!("input_dump: read error {err}");
+                println!("input-dump: read error {err}");
                 return ExitCode::from(1);
             }
         }

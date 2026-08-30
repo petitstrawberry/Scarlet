@@ -4,12 +4,14 @@ version = "0.16.0"
 edition = "2024"
 workspace = "../../.cargo"
 
+# User-facing executable names use kebab-case. Rust source paths stay snake_case.
+
 [[bin]]
 name = "init"
 path = "src/init.rs"
 
 [[bin]]
-name = "microvm_init"
+name = "microvm-init"
 path = "src/microvm_init.rs"
 
 [[bin]]
@@ -29,27 +31,27 @@ name = "xv6"
 path = "src/xv6.rs"
 
 [[bin]]
-name = "fb_test"
+name = "fb-test"
 path = "src/fb_test.rs"
 
 [[bin]]
-name = "sgfx_probe"
+name = "sgfx-probe"
 path = "src/sgfx_probe.rs"
 
 [[bin]]
-name = "dcp_flip_test"
+name = "dcp-flip-test"
 path = "src/dcp_flip_test.rs"
 
- [[bin]]
- name = "socket_server"
- path = "src/socket_server.rs"
+[[bin]]
+name = "socket-server"
+path = "src/socket_server.rs"
 
 [[bin]]
-name = "socket_client"
+name = "socket-client"
 path = "src/socket_client.rs"
 
 [[bin]]
-name = "socket_pair"
+name = "socket-pair"
 path = "src/socket_pair.rs"
 
 [[bin]]
@@ -69,16 +71,16 @@ name = "netcfgd"
 path = "src/netcfgd/main.rs"
 
 [[bin]]
-name = "container_demo"
+name = "container-demo"
 path = "src/container_demo.rs"
 
 [[bin]]
-name = "socket_handle_transfer_demo"
+name = "socket-handle-transfer-demo"
 path = "src/socket_handle_transfer_demo.rs"
 test = false
 
 # [[bin]]
-# name = "ui_demo"
+# name = "ui-demo"
 # path = "src/ui_demo.rs"
 
 [[bin]]
@@ -86,7 +88,7 @@ name = "sbusd"
 path = "src/sbusd/main.rs"
 
 [[bin]]
-name = "scarlet_desktop"
+name = "scarlet-desktop"
 path = "src/scarlet_desktop/main.rs"
 
 [[bin]]
@@ -114,23 +116,23 @@ name = "ui-benchmark"
 path = "src/ui_benchmark.rs"
 
 [[bin]]
-name = "wayland_bridge"
+name = "wayland-bridge"
 path = "src/wayland_bridge/main.rs"
 
 [[bin]]
-name = "event_demo"
+name = "event-demo"
 path = "src/event_demo.rs"
 
 [[bin]]
-name = "scarlet_skk"
+name = "scarlet-skk"
 path = "src/scarlet_skk.rs"
 
 [[bin]]
-name = "scarlet_mozc"
+name = "scarlet-mozc"
 path = "src/scarlet_mozc.rs"
 
 [[bin]]
-name = "mozc_server"
+name = "mozc-server"
 path = "src/mozc_server.rs"
 
 [[bin]]
@@ -154,7 +156,7 @@ name = "ps"
 path = "src/ps.rs"
 
 [[bin]]
-name = "pty_smoke"
+name = "pty-smoke"
 path = "src/pty_smoke.rs"
 
 [[bin]]

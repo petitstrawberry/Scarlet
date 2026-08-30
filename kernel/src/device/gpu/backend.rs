@@ -28,6 +28,8 @@ pub const GPU_EXECUTION_SUPPORT_PRESENTATION: u32 = 1 << 4;
 pub const GPU_EXECUTION_SUPPORT_IMAGE_UPLOAD: u32 = 1 << 5;
 /// Generic depth attachment and depth-test operations are available.
 pub const GPU_EXECUTION_SUPPORT_DEPTH: u32 = 1 << 6;
+/// Generic synchronous image readback operations are available.
+pub const GPU_EXECUTION_SUPPORT_IMAGE_READBACK: u32 = 1 << 7;
 
 /// Stable state of a GPU device.
 #[repr(u32)]
@@ -846,6 +848,25 @@ pub trait GpuBackendContext: Send + Sync {
         _transfer: GpuImageUploadInfo,
     ) -> Result<(), &'static str> {
         Err("GPU backend context does not support imported image transfers")
+    }
+
+    /// Read a rectangle from an attached image into its generic CPU backing.
+    ///
+    /// # Arguments
+    ///
+    /// * `image` - Backend image retained by the calling kernel capability.
+    /// * `readback` - Validated image-backing rectangle to populate.
+    ///
+    /// # Returns
+    ///
+    /// Nothing after the backend has synchronously completed GPU-to-backing
+    /// transfer, or an error when readback is unavailable.
+    fn readback_image_bgra(
+        &self,
+        _image: &dyn GpuBackendImage,
+        _readback: GpuImageUploadInfo,
+    ) -> Result<(), &'static str> {
+        Err("GPU backend context does not support image readback")
     }
 
     /// Attach a buffer so opaque commands in this context may reference it.

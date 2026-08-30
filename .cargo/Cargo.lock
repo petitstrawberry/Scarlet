@@ -2316,6 +2316,7 @@ dependencies = [
  "libm",
  "lyon_path",
  "lyon_tessellation",
+ "miniz_oxide 0.8.9",
  "png",
  "pulldown-cmark",
  "ratatui",
@@ -2336,6 +2337,7 @@ dependencies = [
  "svgtypes",
  "sws-client",
  "sws-protocol",
+ "sws-remote-protocol",
  "symphonia-codec-aac",
  "symphonia-core",
  "url",
@@ -2809,6 +2811,10 @@ version = "0.16.0"
 dependencies = [
  "scarlet-std",
 ]
+
+[[package]]
+name = "sws-remote-protocol"
+version = "0.1.0"
 
 [[package]]
 name = "symphonia-codec-aac"

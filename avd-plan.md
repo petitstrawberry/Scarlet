@@ -4,7 +4,7 @@
 
 Apple Silicon 上の Scarlet で Apple Video Decoder、以下 AVD、を利用し、H.264 のハードウェアデコードを実現する。
 
-初期ゴールは **H.264 Annex B access unit を AVD で decode し、NV12 frame として既存の Scarlet video decode device API に返すこと**。SWS は現時点では BGRA 前提なので、初期段階では SWS を変更せず、既存 `video_player` 側の NV12→BGRA 変換経路を使う。
+初期ゴールは **H.264 Annex B access unit を AVD で decode し、NV12 frame として既存の Scarlet video decode device API に返すこと**。SWS は現時点では BGRA 前提なので、初期段階では SWS を変更せず、既存 `video-player` 側の NV12→BGRA 変換経路を使う。
 
 Scarlet にはすでに `/dev/vvideo0` という video decode device contract があり、このAPIは現在 VirtIO video backend で使われているが、設計上 VirtIO 専用ではなく、将来の非 VirtIO backend も同じ contract を露出できるとされている。
 
@@ -23,7 +23,7 @@ Scarlet にはすでに `/dev/vvideo0` という video decode device contract �
 ## Target architecture
 
 ```text
-user/bin/video_player
+/bin/video-player
   ↓ existing Scarlet video decode API: /dev/vvideo0
 kernel Apple AVD video backend
   ↓
@@ -40,11 +40,11 @@ NV12 output frame
 
 ## Existing Scarlet integration points
 
-Scarlet 側にはすでに video decode device API がある。`write/read` の simple path と、`mmap + control` の preferred path があり、`video_player` は mapped control path を使う想定になっている。
+Scarlet 側にはすでに video decode device API がある。`write/read` の simple path と、`mmap + control` の preferred path があり、`video-player` は mapped control path を使う想定になっている。
 
-現在の decoded frame format は `SVF1` header + payload であり、`video_player` は NV12 video-range payload を期待している。pixel format は `0x3432_3076`、つまり `v024` と定義されている。
+現在の decoded frame format は `SVF1` header + payload であり、`video-player` は NV12 video-range payload を期待している。pixel format は `0x3432_3076`、つまり `v024` と定義されている。
 
-`video_player` 側も `/dev/vvideo0`、`VVIDEO_*` command、H.264/AV1 format value、NV12 pixel format をすでに持っている。 また、hardware decoder が返した NV12 payload を BGRA buffer に変換する `update_from_nv12()` 経路も存在する。
+`video-player` 側も `/dev/vvideo0`、`VVIDEO_*` command、H.264/AV1 format value、NV12 pixel format をすでに持っている。 また、hardware decoder が返した NV12 payload を BGRA buffer に変換する `update_from_nv12()` 経路も存在する。
 
 そのため、初期実装では SWS は触らず、AVD backend が既存 ABI と同じ NV12 frame を返すことを目標にする。
 
@@ -295,7 +295,7 @@ Support only:
 
 Use existing code only as a guide for the first pass.
 
-`video_player` currently imports `rust_h264` and `parse_annex_b`, so Scarlet already has H.264 parsing pieces in the tree/userland path. However, AVD instruction stream generation is separate from normal software decode. The implementation should introduce a dedicated AVD H.264 frontend rather than trying to reuse the full CPU decoder as-is.
+`video-player` currently imports `rust_h264` and `parse_annex_b`, so Scarlet already has H.264 parsing pieces in the tree/userland path. However, AVD instruction stream generation is separate from normal software decode. The implementation should introduce a dedicated AVD H.264 frontend rather than trying to reuse the full CPU decoder as-is.
 
 Suggested split:
 
@@ -390,11 +390,11 @@ VirtioVideoBackend
 AppleAvdBackend
 ```
 
-The current API structures are duplicated in kernel and `video_player`; the documentation already notes this should move to a shared header/crate before being stable. Do that refactor only if it is small. Otherwise keep the ABI duplicated for the initial AVD bring-up and avoid expanding scope.
+The current API structures are duplicated in kernel and `video-player`; the documentation already notes this should move to a shared header/crate before being stable. Do that refactor only if it is small. Otherwise keep the ABI duplicated for the initial AVD bring-up and avoid expanding scope.
 
 ### Output layout
 
-Return the same logical frame format that `video_player` already expects:
+Return the same logical frame format that `video-player` already expects:
 
 ```text
 SVF1 header
@@ -409,9 +409,9 @@ The existing API currently assumes a single-buffer NV12 frame. If AVD internally
 
 ### Acceptance criteria
 
-* Existing `video_player` can open `/dev/vvideo0` on Apple Silicon.
+* Existing `video-player` can open `/dev/vvideo0` on Apple Silicon.
 * `VVIDEO_CREATE_SESSION`, `mmap`, `VVIDEO_SUBMIT_SESSION`, and `VVIDEO_DEQUEUE_SESSION` work.
-* `video_player` receives NV12 and converts it to BGRA using the existing path.
+* `video-player` receives NV12 and converts it to BGRA using the existing path.
 * No SWS changes are required for the first working demo.
 
 ## WP6: Test and debug tooling
@@ -441,13 +441,13 @@ avd-trace
 
 Add a small H.264 Annex B test file to an appropriate media/test bundle, or document how to provide it externally.
 
-The existing `video_player` default path is `/root/media/bad_apple.h264`. That can be used as a smoke target once the simple one-frame test passes.
+The existing `video-player` default path is `/root/media/bad_apple.h264`. That can be used as a smoke target once the simple one-frame test passes.
 
 ### Acceptance criteria
 
 * `avd-fw-ping` succeeds repeatedly after cold boot.
 * `avd-decode-one` produces stable output checksum.
-* `video_player` can play a short H.264 stream via AVD backend.
+* `video-player` can play a short H.264 stream via AVD backend.
 * Timeout paths do not wedge the kernel permanently.
 * Errors include enough state: last mailbox message, status register, stream id, pending request id.
 
@@ -531,11 +531,11 @@ Deliverables:
 * Implement AVD backend for current Scarlet video decode contract.
 * Support one session and one pending decode initially.
 * Return `SVF1` + single-buffer NV12.
-* Wire `video_player` to use the same API without SWS changes.
+* Wire `video-player` to use the same API without SWS changes.
 
 Done when:
 
-* `video_player` can display a short H.264 file using AVD backend.
+* `video-player` can display a short H.264 file using AVD backend.
 
 ### M6: Continuous playback
 
@@ -607,7 +607,7 @@ Do not add SWS NV12 surface support, V4L2 Request API, HEVC, VP9, AV1, or GPU co
 6. AVD engine init/register definitions.
 7. One-frame H.264 decode debug command.
 8. `/dev/vvideo0` AVD backend integration.
-9. `video_player` smoke path and documentation update.
+9. `video-player` smoke path and documentation update.
 
 ## Final success definition
 
@@ -618,8 +618,8 @@ On aarch64-apple-limine-full running on M1/M2 hardware:
   - Scarlet boots normally.
   - AVD firmware is loaded by Scarlet, not Apple firmware.
   - /dev/vvideo0 is backed by Apple AVD.
-  - video_player submits H.264 access units.
+  - video-player submits H.264 access units.
   - AVD returns NV12 frames.
-  - video_player converts NV12 to BGRA and displays through existing SWS.
+  - video-player converts NV12 to BGRA and displays through existing SWS.
   - CPU-side rust_h264 full software decode is not used for the video frames.
 ```

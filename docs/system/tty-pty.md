@@ -95,7 +95,7 @@ Current Phase 4 foundation:
   `/dev/ptmx`; PTY-specific operations use Scarlet-private `SCTL_PTY_*`
   controls, and terminal operations go through the typed `Terminal` wrapper
   rather than adding Linux ioctl or POSIX wrapper names to the native ABI.
-- `user/bin/pty_smoke` is a small manual integration check for opening a PTY and
+- `pty-smoke` (`user/bin/src/pty_smoke.rs`) is a small manual integration check for opening a PTY and
   verifying basic master/slave I/O.
 
 ## Ownership Model

@@ -6,7 +6,7 @@ Runtime kernel module loader for Scarlet OS. Loads `.lsm` (relocatable ELF) file
 
 - `.lsm` = ELF64 relocatable object (`ET_REL`), self-implemented parser (no external crates)
 - Modules are `#![no_std]` Rust crates depending on `scarlet` kernel crate
-- Dependency resolution in userspace (`lsm_load`), kernel only validates and registers
+- Dependency resolution in userspace (`lsm-load`), kernel only validates and registers
 - Supported architectures: RISC-V 64, AArch64
 
 ## Quick Start
@@ -18,17 +18,17 @@ cargo make run-debug-riscv64
 ```
 
 ```
-# lsm_load lsm-test
+# lsm-load lsm-test
 loading module: /scarlet/system/scarlet/modules/lsm-test.lsm
 [lsm-test] Loadable Scarlet Module loaded successfully!
 module loaded successfully
 
-# lsm_list
+# lsm-list
 1 module(s) loaded:
 ID    NAME
 1     lsm-test
 
-# lsm_unload lsm-test
+# lsm-unload lsm-test
 module 'lsm-test' (id=1) unloaded successfully
 ```
 
@@ -53,7 +53,7 @@ name = "lsm-test"
 depends = []
 ```
 
-`name` is the module identity used by dependency resolution, `lsm_list`, and `lsm_unload`. The `.lsm` filename is derived from this name.
+`name` is the module identity used by dependency resolution, `lsm-list`, and `lsm-unload`. The `.lsm` filename is derived from this name.
 
 ### Required Symbols
 
@@ -179,10 +179,10 @@ Initramfs generation copies all `*.lsm` from the project's module output directo
 
 ## Userspace Tools
 
-### lsm_load
+### lsm-load
 
 ```
-lsm_load <path_or_name>
+lsm-load <path_or_name>
 ```
 
 Path resolution order:
@@ -200,18 +200,18 @@ Dependency resolution:
 - Cycle detection prevents circular dependencies
 - Skips already-loaded modules
 
-### lsm_unload
+### lsm-unload
 
 ```
-lsm_unload <module_name>
+lsm-unload <module_name>
 ```
 
-Resolves module name to ID via `lsm_list`, then calls the unload syscall. Refuses if other loaded modules depend on the target.
+Resolves module name to ID via `lsm-list`, then calls the unload syscall. Refuses if other loaded modules depend on the target.
 
-### lsm_list
+### lsm-list
 
 ```
-lsm_list
+lsm-list
 ```
 
 Lists all loaded modules with ID and name.
@@ -280,7 +280,7 @@ Each `RegistryEntry` tracks `{ name, addr, module_id }` where `module_id: None` 
 | `sys_lsm_unload` | 1201 | `arg0`: `module_id` as `u64` | `LsmErrorCode` as `usize` |
 | `sys_lsm_list` | 1202 | `arg0`: buffer ptr, `arg1`: buffer size | count of entries written |
 
-### lsm_list ABI
+### lsm-list ABI
 
 Each entry is 264 bytes:
 - Bytes 0-7: `u64` module ID (little-endian)
@@ -306,7 +306,7 @@ Each entry is 264 bytes:
 
 **BuildInfoMismatch (error 7)**: Module was built with a different rustc version or target than the running kernel. Rebuild the module with the same toolchain, or rebuild the kernel.
 
-**MissingDependency (error 10)**: A dependency declared in `module.toml` is not loaded. Load dependencies first (or use `lsm_load` which auto-resolves), or check that the dependency module name matches exactly.
+**MissingDependency (error 10)**: A dependency declared in `module.toml` is not loaded. Load dependencies first (or use `lsm-load` which auto-resolves), or check that the dependency module name matches exactly.
 
 **RelocationError (error 4)**: The module references an undefined symbol, uses an unsupported relocation type (e.g. RVC on RISC-V), or has a malformed relocation. Check that all referenced kernel functions are accessible.
 

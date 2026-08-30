@@ -5,18 +5,18 @@ use std::fs;
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
-    println!("h264_probe: Rust std version");
+    println!("h264-probe: Rust std version");
 
     let args = env::args().collect::<Vec<_>>();
     if args.len() != 2 {
-        println!("usage: h264_probe FILE.h264");
+        println!("usage: h264-probe FILE.h264");
         return ExitCode::from(1);
     }
 
     let data = match fs::read(&args[1]) {
         Ok(data) => data,
         Err(err) => {
-            println!("h264_probe: {}: {err}", args[1]);
+            println!("h264-probe: {}: {err}", args[1]);
             return ExitCode::from(1);
         }
     };

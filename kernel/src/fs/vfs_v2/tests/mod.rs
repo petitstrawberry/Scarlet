@@ -56,6 +56,44 @@ fn test_vfs_manager_creation() {
     let _manager_arc = Arc::new(manager);
 }
 
+/// Removing a socket node must also release its local-socket registry name.
+#[cfg(feature = "network")]
+#[test_case]
+fn test_remove_socket_file_unregisters_named_socket() {
+    use crate::fs::{FileType, SocketFileInfo};
+    use crate::network::local::LocalSocket;
+    use crate::network::{
+        LocalSocketAddress, NetworkManager, SocketAddress, SocketError, SocketObject,
+        SocketProtocol, SocketType,
+    };
+
+    let vfs = VfsManager::new();
+    let path = "/vfs-remove-named-socket-test";
+    let socket: Arc<dyn SocketObject> = Arc::new(LocalSocket::new(
+        SocketType::Stream,
+        SocketProtocol::Default,
+    ));
+    socket
+        .bind(&SocketAddress::Local(
+            LocalSocketAddress::from_path(path).unwrap(),
+        ))
+        .unwrap();
+
+    let network = NetworkManager::get_manager();
+    let socket_id = network.allocate_socket_id(Arc::clone(&socket)).unwrap();
+    network
+        .register_named_socket(path, Arc::clone(&socket))
+        .unwrap();
+    vfs.create_file(path, FileType::Socket(SocketFileInfo { socket_id }))
+        .unwrap();
+
+    vfs.remove(path).unwrap();
+    assert!(matches!(
+        network.lookup_named_socket(path),
+        Err(SocketError::ConnectionRefused)
+    ));
+}
+
 /// Test mount options
 #[test_case]
 fn test_mount_options() {

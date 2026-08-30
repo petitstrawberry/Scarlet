@@ -239,9 +239,9 @@ path = "../../user/std-bin"
 
 [[sections.initramfs.layers]]
 kind = "cargo"
-bin = "fb_test"
-to = "/system/scarlet/bin/fb_test"
-hash = "sha256:4643107d7c8f16b617a9440412095504d6574fd608e48a7739ea268bb0d6079a"
+bin = "fb-test"
+to = "/system/scarlet/bin/fb-test"
+hash = ""
 
 [sections.initramfs.layers.source]
 type = "path"
@@ -482,9 +482,9 @@ path = "../../user/std-bin"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
-bin = "fb_test"
-to = "/system/scarlet/bin/fb_test"
-hash = "sha256:4643107d7c8f16b617a9440412095504d6574fd608e48a7739ea268bb0d6079a"
+bin = "fb-test"
+to = "/system/scarlet/bin/fb-test"
+hash = ""
 
 [sections.rootfs.layers.source]
 type = "path"
@@ -493,9 +493,9 @@ path = "../../user/std-bin"
 [[sections.rootfs.layers]]
 kind = "cargo"
 package = "user-bin"
-bin = "scarlet_desktop"
-to = "/system/scarlet/bin/scarlet_desktop"
-hash = "sha256:0a6a25125ff7b00b5744fd93037f669ee080ca7c0008c1ba9f5e42453fca3f50"
+bin = "scarlet-desktop"
+to = "/system/scarlet/bin/scarlet-desktop"
+hash = ""
 
 [sections.rootfs.layers.source]
 type = "path"
@@ -646,17 +646,17 @@ path = "../../user/bin"
 [[sections.rootfs.layers]]
 kind = "cargo"
 git = "https://github.com/petitstrawberry/scarlet-ui"
-resolved_rev = "b7443f43d335c30015a46d0a849594da4cf5b0ab"
+resolved_rev = "6cecb4606f489f190b0a221d01868de1117d161d"
 package = "scarlet-ui-widget-factory"
 bin = "scarlet-ui-widget-factory"
 subdir = "examples/widget-factory"
-to = "/system/scarlet/bin/widget_factory"
-hash = "sha256:4519e1a4e7a9b97a869adfcc0e0aca335db6f2e02579d4c02b7cf1e6ecf143e8"
+to = "/system/scarlet/bin/widget-factory"
+hash = ""
 
 [sections.rootfs.layers.source]
 type = "git"
 url = "https://github.com/petitstrawberry/scarlet-ui"
-rev = "b7443f43d335c30015a46d0a849594da4cf5b0ab"
+rev = "6cecb4606f489f190b0a221d01868de1117d161d"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
@@ -681,9 +681,9 @@ path = "../../user/bin"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
-bin = "task_manager"
-to = "/system/scarlet/bin/task_manager"
-hash = "sha256:96a331a53b21edafb931d310f7b266490030c8a962be18137f4b8fb35929fa91"
+bin = "task-manager"
+to = "/system/scarlet/bin/task-manager"
+hash = ""
 
 [sections.rootfs.layers.source]
 type = "path"
@@ -692,9 +692,9 @@ path = "../../user/std-bin"
 [[sections.rootfs.layers]]
 kind = "cargo"
 package = "user-bin"
-bin = "scarlet_skk"
-to = "/system/scarlet/bin/scarlet_skk"
-hash = "sha256:ba20658708c94e2c223a166cdc9e78890dc20e931a35a95e542daf9bdd7d86f8"
+bin = "scarlet-skk"
+to = "/system/scarlet/bin/scarlet-skk"
+hash = ""
 
 [sections.rootfs.layers.source]
 type = "path"
@@ -713,9 +713,9 @@ path = "../../bundles/desktop/tools/fetch_skk_dictionary.sh"
 [[sections.rootfs.layers]]
 kind = "cargo"
 package = "user-bin"
-bin = "wayland_bridge"
-to = "/system/scarlet/bin/wayland_bridge"
-hash = "sha256:ea88a555470f18a3628f1c95db02df8206cc9e16d744eb07c65c4f499ce0d9d2"
+bin = "wayland-bridge"
+to = "/system/scarlet/bin/wayland-bridge"
+hash = ""
 
 [sections.rootfs.layers.source]
 type = "path"
@@ -723,9 +723,9 @@ path = "../../user/bin"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
-bin = "ansi_banner"
-to = "/system/scarlet/bin/ansi_banner"
-hash = "sha256:931771dd165c3de9046dd217f2cc786726aa5cb225650d82a47e947a21cedd2b"
+bin = "ansi-banner"
+to = "/system/scarlet/bin/ansi-banner"
+hash = ""
 
 [sections.rootfs.layers.source]
 type = "path"
@@ -734,9 +734,9 @@ path = "../../user/std-bin"
 [[sections.rootfs.layers]]
 kind = "cargo"
 package = "user-bin"
-bin = "sgfx_probe"
-to = "/system/scarlet/bin/sgfx_probe"
-hash = "sha256:690950ce36e275ffa7fca32727c705cc52fc89dcc0607072fdabdedb1d8f6a1d"
+bin = "sgfx-probe"
+to = "/system/scarlet/bin/sgfx-probe"
+hash = ""
 
 [sections.rootfs.layers.source]
 type = "path"
@@ -744,9 +744,9 @@ path = "../../user/bin"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
-bin = "sgfx_cube"
-to = "/system/scarlet/bin/sgfx_cube"
-hash = "sha256:2247cf0a8d17ec971326bff0f72779a3a2e764af95749e58eef65afc9a5e679a"
+bin = "sgfx-cube"
+to = "/system/scarlet/bin/sgfx-cube"
+hash = ""
 
 [sections.rootfs.layers.source]
 type = "path"
@@ -754,9 +754,9 @@ path = "../../user/std-bin"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
-bin = "sgfx_texture"
-to = "/system/scarlet/bin/sgfx_texture"
-hash = "sha256:69049b40c399095d38da00a3405f9ff136b8e765e004aea99a53f044f7f98526"
+bin = "sgfx-texture"
+to = "/system/scarlet/bin/sgfx-texture"
+hash = ""
 
 [sections.rootfs.layers.source]
 type = "path"
@@ -764,9 +764,9 @@ path = "../../user/std-bin"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
-bin = "sgfx_showcase"
-to = "/system/scarlet/bin/sgfx_showcase"
-hash = "sha256:853d06238078ba3dacd888ae38f649ee780eac97e2d211873571bc3708f1ba5c"
+bin = "sgfx-showcase"
+to = "/system/scarlet/bin/sgfx-showcase"
+hash = ""
 
 [sections.rootfs.layers.source]
 type = "path"
@@ -795,9 +795,9 @@ path = "../../user/bin"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
-bin = "lsm_list"
-to = "/system/scarlet/bin/lsm_list"
-hash = "sha256:f462c55694b9c6623a2bdbd144791fcee3233a1b999b1675e0e02fd090e00953"
+bin = "lsm-list"
+to = "/system/scarlet/bin/lsm-list"
+hash = ""
 
 [sections.rootfs.layers.source]
 type = "path"
@@ -815,9 +815,9 @@ path = "../../user/std-bin"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
-bin = "lsm_load"
-to = "/system/scarlet/bin/lsm_load"
-hash = "sha256:22ba809ee89a21480f9a14e67f8e03d139d4020a688f217b0b66bf1b04ce16e9"
+bin = "lsm-load"
+to = "/system/scarlet/bin/lsm-load"
+hash = ""
 
 [sections.rootfs.layers.source]
 type = "path"
@@ -825,9 +825,9 @@ path = "../../user/std-bin"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
-bin = "lsm_unload"
-to = "/system/scarlet/bin/lsm_unload"
-hash = "sha256:51c159ed2b076df03af2e058afb299eb91bda0b399787b145972d2e914a938bf"
+bin = "lsm-unload"
+to = "/system/scarlet/bin/lsm-unload"
+hash = ""
 
 [sections.rootfs.layers.source]
 type = "path"
@@ -835,9 +835,9 @@ path = "../../user/std-bin"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
-bin = "input_dump"
-to = "/system/scarlet/bin/input_dump"
-hash = "sha256:2beb7a04551d7dde6c98146e1d850575d6173b86a09ee7b8f89959e79538ad2f"
+bin = "input-dump"
+to = "/system/scarlet/bin/input-dump"
+hash = ""
 
 [sections.rootfs.layers.source]
 type = "path"
@@ -845,9 +845,9 @@ path = "../../user/std-bin"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
-bin = "mozc_server"
-to = "/system/scarlet/bin/mozc_server"
-hash = "sha256:ae6622c32438521419345b7417136d935d7297df1b0734a072386c6415ef0a8c"
+bin = "mozc-server"
+to = "/system/scarlet/bin/mozc-server"
+hash = ""
 
 [sections.rootfs.layers.source]
 type = "path"
@@ -856,9 +856,9 @@ path = "../../user/bin"
 [[sections.rootfs.layers]]
 kind = "cargo"
 package = "user-bin"
-bin = "scarlet_mozc"
-to = "/system/scarlet/bin/scarlet_mozc"
-hash = "sha256:50a858bf70a4275f78aecc8769d37df0750cc85a8f9713d1cc4f2b9938a848cf"
+bin = "scarlet-mozc"
+to = "/system/scarlet/bin/scarlet-mozc"
+hash = ""
 
 [sections.rootfs.layers.source]
 type = "path"
@@ -867,9 +867,9 @@ path = "../../user/bin"
 [[sections.rootfs.layers]]
 kind = "cargo"
 package = "user-bin"
-bin = "dcp_flip_test"
-to = "/system/scarlet/bin/dcp_flip_test"
-hash = "sha256:7517988ed154ae6a4d8148c67c7fcdafe3653af399dfbd613e87396fa2bd38a3"
+bin = "dcp-flip-test"
+to = "/system/scarlet/bin/dcp-flip-test"
+hash = ""
 
 [sections.rootfs.layers.source]
 type = "path"
@@ -907,7 +907,7 @@ rev = "c2755acf5f6aa301700449c30c2f4f7b02c5dbd5"
 [[sections.rootfs.layers]]
 kind = "cargo"
 git = "https://github.com/petitstrawberry/boxcraft"
-resolved_rev = "5cfb79b9751755ef8e6ab7101c7f1d2de223fe60"
+resolved_rev = "884d12d7d429bac735cd4200812cd549f0e386ce"
 package = "boxcraft"
 bin = "boxcraft"
 to = "/system/scarlet/bin/boxcraft"
@@ -916,7 +916,17 @@ hash = "sha256:c62576205f84fc50dddfa3226fd1c4d30a2e398d856479870e5801c881a98a51"
 [sections.rootfs.layers.source]
 type = "git"
 url = "https://github.com/petitstrawberry/boxcraft"
-rev = "5cfb79b9751755ef8e6ab7101c7f1d2de223fe60"
+rev = "884d12d7d429bac735cd4200812cd549f0e386ce"
+
+[[sections.rootfs.layers]]
+kind = "cargo"
+bin = "remote-desktop"
+to = "/system/scarlet/bin/remote-desktop"
+hash = ""
+
+[sections.rootfs.layers.source]
+type = "path"
+path = "../../user/std-bin"
 
 [[sections.rootfs.layers]]
 kind = "archive"
@@ -945,7 +955,7 @@ sha256 = "sha256:72458aa767224fa7bd87a324a47faeeb524aad109b8c98aaaf83d304829eb5e
 [[sections.rootfs.layers]]
 kind = "cargo"
 package = "video_player"
-bin = "video_player"
+bin = "video-player"
 features = [
     "av1-stateful-hw",
     "h264-stateful-hw",
@@ -953,8 +963,8 @@ features = [
     "mp4-aac",
 ]
 default-features = false
-to = "/system/scarlet/bin/video_player"
-hash = "sha256:9aeb2ae087394805ff92ab585b960cb1dfb4c052314fa9408a11b017f0cc4728"
+to = "/system/scarlet/bin/video-player"
+hash = ""
 
 [sections.rootfs.layers.source]
 type = "path"
@@ -963,7 +973,7 @@ path = "../../user/video_player"
 [[sections.rootfs.layers]]
 kind = "cargo"
 git = "https://github.com/petitstrawberry/yt-for-scarlet"
-resolved_rev = "47931bcd5ae87e7454741d6616aa1c0cccbda373"
+resolved_rev = "423063441fa52c8ecef52d40564264619b213899"
 package = "yt"
 bin = "yt"
 to = "/system/scarlet/bin/yt"
@@ -972,12 +982,12 @@ hash = "sha256:117e20bd7e0dc98480e001dc29340386915f2f5f942d45349142f3570a458f05"
 [sections.rootfs.layers.source]
 type = "git"
 url = "https://github.com/petitstrawberry/yt-for-scarlet"
-rev = "47931bcd5ae87e7454741d6616aa1c0cccbda373"
+rev = "423063441fa52c8ecef52d40564264619b213899"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
 git = "https://github.com/petitstrawberry/yt-for-scarlet"
-resolved_rev = "47931bcd5ae87e7454741d6616aa1c0cccbda373"
+resolved_rev = "423063441fa52c8ecef52d40564264619b213899"
 package = "yt-gui"
 bin = "yt-gui"
 to = "/system/scarlet/bin/yt-gui"
@@ -986,4 +996,4 @@ hash = "sha256:6141c692a09c70fcb67d5f4defd7bb7637eaf84eaf23cfc8e81f4519992406d5"
 [sections.rootfs.layers.source]
 type = "git"
 url = "https://github.com/petitstrawberry/yt-for-scarlet"
-rev = "47931bcd5ae87e7454741d6616aa1c0cccbda373"
+rev = "423063441fa52c8ecef52d40564264619b213899"

@@ -113,7 +113,7 @@ impl ScarletSkk {
                 self.sync_candidate_popup(conn, state.context_id)?;
                 self.emit_status(conn, state.context_id)?;
                 println!(
-                    "[scarlet_skk] activated context={} window={}",
+                    "[scarlet-skk] activated context={} window={}",
                     state.context_id, state.window_id
                 );
             }
@@ -125,12 +125,12 @@ impl ScarletSkk {
                     self.grabbing = false;
                     self.reset_context();
                 }
-                println!("[scarlet_skk] deactivated context={}", context_id);
+                println!("[scarlet-skk] deactivated context={}", context_id);
             }
             Event::ImeContextState(state) => {
                 self.active_context_id = Some(state.context_id);
                 println!(
-                    "[scarlet_skk] context-state context={} serial={} cursor=({}, {}) purpose={} text='{}' grabbing={}",
+                    "[scarlet-skk] context-state context={} serial={} cursor=({}, {}) purpose={} text='{}' grabbing={}",
                     state.context_id,
                     state.serial,
                     state.cursor_x,
@@ -142,7 +142,7 @@ impl ScarletSkk {
             }
             Event::ImeReset { context_id, .. } => {
                 if self.active_context_id == Some(context_id) {
-                    println!("[scarlet_skk] reset context={}", context_id);
+                    println!("[scarlet-skk] reset context={}", context_id);
                     self.grabbing = false;
                     self.reset_context();
                     conn.ime_set_preedit(context_id, 0, 0, "", &[])?;
@@ -158,7 +158,7 @@ impl ScarletSkk {
                 serial,
             } => {
                 println!(
-                    "[scarlet_skk] trigger context={} serial={} trigger={} code={} time={} grabbing={}",
+                    "[scarlet-skk] trigger context={} serial={} trigger={} code={} time={} grabbing={}",
                     context_id, serial, trigger_id, code, time, self.grabbing
                 );
                 if trigger_id == ime_trigger::TOGGLE {
@@ -174,7 +174,7 @@ impl ScarletSkk {
                 ..
             } => {
                 println!(
-                    "[scarlet_skk] key-event context={} serial={} {}({}) type={} value={} grabbing={} text='{}'",
+                    "[scarlet-skk] key-event context={} serial={} {}({}) type={} value={} grabbing={} text='{}'",
                     context_id,
                     key_serial,
                     key_name(code),
@@ -187,7 +187,7 @@ impl ScarletSkk {
                 let handled = self.handle_key(conn, context_id, type_, code, value)?;
                 conn.ime_key_handled(key_serial, handled)?;
                 println!(
-                    "[scarlet_skk] key-handled serial={} handled={} text='{}'",
+                    "[scarlet-skk] key-handled serial={} handled={} text='{}'",
                     key_serial,
                     handled,
                     self.debug_text()
@@ -199,7 +199,7 @@ impl ScarletSkk {
                     .is_some_and(|popup| popup.window_id == surface_id)
                 {
                     println!(
-                        "[scarlet_skk] candidate popup destroyed window={}",
+                        "[scarlet-skk] candidate popup destroyed window={}",
                         surface_id
                     );
                     self.candidate_popup = None;
@@ -220,13 +220,13 @@ impl ScarletSkk {
     ) -> Result<bool, Error> {
         if !self.grabbing || self.active_context_id != Some(context_id) {
             println!(
-                "[scarlet_skk] pass-through: not grabbing or inactive context={} active={:?}",
+                "[scarlet-skk] pass-through: not grabbing or inactive context={} active={:?}",
                 context_id, self.active_context_id
             );
             return Ok(false);
         }
         if type_ != event_type::EV_KEY {
-            println!("[scarlet_skk] pass-through: non-key type={}", type_);
+            println!("[scarlet-skk] pass-through: non-key type={}", type_);
             return Ok(false);
         }
 
@@ -238,7 +238,7 @@ impl ScarletSkk {
         if value == 0 {
             let handled = self.remove_eaten_key(code);
             println!(
-                "[scarlet_skk] key-release {}({}) handled={}",
+                "[scarlet-skk] key-release {}({}) handled={}",
                 key_name(code),
                 code,
                 handled
@@ -285,7 +285,7 @@ impl ScarletSkk {
 
         if self.grabbing {
             println!(
-                "[scarlet_skk] toggle: release requested context={} pending='{}'",
+                "[scarlet-skk] toggle: release requested context={} pending='{}'",
                 context_id,
                 self.pending_text()
             );
@@ -296,12 +296,12 @@ impl ScarletSkk {
             conn.ime_set_preedit(context_id, 0, 0, "", &[])?;
             self.sync_candidate_popup(conn, context_id)?;
             self.emit_status(conn, context_id)?;
-            println!("[scarlet_skk] released keyboard context={}", context_id);
+            println!("[scarlet-skk] released keyboard context={}", context_id);
             return Ok(());
         }
 
         println!(
-            "[scarlet_skk] toggle: grab requested context={}",
+            "[scarlet-skk] toggle: grab requested context={}",
             context_id
         );
         self.reset_context();
@@ -309,7 +309,7 @@ impl ScarletSkk {
         conn.ime_grab_keyboard(context_id)?;
         conn.ime_set_preedit(context_id, 0, 0, "", &[])?;
         self.emit_status(conn, context_id)?;
-        println!("[scarlet_skk] grabbed keyboard context={}", context_id);
+        println!("[scarlet-skk] grabbed keyboard context={}", context_id);
         Ok(())
     }
 
@@ -338,7 +338,7 @@ impl ScarletSkk {
                         if self.katakana_mode {
                             text = hiragana_to_katakana(&text);
                         }
-                        println!("[scarlet_skk] direct commit '{}'", text);
+                        println!("[scarlet-skk] direct commit '{}'", text);
                         conn.ime_commit_text(context_id, &text)?;
                     }
                     self.update_preedit(conn, context_id)
@@ -372,7 +372,7 @@ impl ScarletSkk {
         if self.phase == SkkPhase::Direct && self.pending.is_empty() {
             let mut text = String::new();
             text.push(ch);
-            println!("[scarlet_skk] direct symbol commit '{}'", text);
+            println!("[scarlet-skk] direct symbol commit '{}'", text);
             conn.ime_commit_text(context_id, &text)?;
             return self.update_preedit(conn, context_id);
         }
@@ -404,7 +404,7 @@ impl ScarletSkk {
         if self.reading.is_empty() && self.okuri.is_empty() {
             self.katakana_mode = !self.katakana_mode;
             println!(
-                "[scarlet_skk] katakana mode {}",
+                "[scarlet-skk] katakana mode {}",
                 if self.katakana_mode { "on" } else { "off" }
             );
             self.update_preedit(conn, context_id)?;
@@ -417,7 +417,7 @@ impl ScarletSkk {
         let text = hiragana_to_katakana(&text);
         self.clear_composition();
         if !text.is_empty() {
-            println!("[scarlet_skk] katakana commit '{}'", text);
+            println!("[scarlet-skk] katakana commit '{}'", text);
             conn.ime_commit_text(context_id, &text)?;
         }
         self.update_preedit(conn, context_id)?;
@@ -580,7 +580,7 @@ impl ScarletSkk {
         let text = self.current_commit_text();
         self.clear_composition();
         if !text.is_empty() {
-            println!("[scarlet_skk] commit '{}'", text);
+            println!("[scarlet-skk] commit '{}'", text);
             conn.ime_commit_text(context_id, &text)?;
         }
         self.update_preedit(conn, context_id)
@@ -588,7 +588,7 @@ impl ScarletSkk {
 
     fn update_preedit(&mut self, conn: &mut Connection, context_id: u32) -> Result<(), Error> {
         let preedit = self.preedit_text();
-        println!("[scarlet_skk] preedit '{}'", preedit);
+        println!("[scarlet-skk] preedit '{}'", preedit);
         let spans = preedit_spans(&preedit, self.phase);
         conn.ime_set_preedit(context_id, preedit.len() as u32, 0, &preedit, &spans)?;
         self.sync_candidate_popup(conn, context_id)?;
@@ -621,7 +621,7 @@ impl ScarletSkk {
             flags |= ime_status_flags::CANDIDATES_VISIBLE;
         }
         println!(
-            "[scarlet_skk] status context={} state={} mode_id={} label='{}' flags={}",
+            "[scarlet-skk] status context={} state={} mode_id={} label='{}' flags={}",
             context_id, state, mode_id, mode_label, flags
         );
         conn.ime_set_status(context_id, state, mode_id, flags, mode_label)
@@ -835,7 +835,7 @@ impl ScarletSkk {
             .position(0, 0)
             .build(conn)?;
         self.candidate_popup = Some(CandidatePopup { window_id });
-        println!("[scarlet_skk] created candidate popup window={}", window_id);
+        println!("[scarlet-skk] created candidate popup window={}", window_id);
         Ok(window_id)
     }
 
@@ -847,7 +847,7 @@ impl ScarletSkk {
         match conn.destroy_surface(popup.window_id) {
             Ok(()) | Err(Error::SurfaceNotFound) => {
                 println!(
-                    "[scarlet_skk] candidate popup closed window={}",
+                    "[scarlet-skk] candidate popup closed window={}",
                     popup.window_id
                 );
                 Ok(())
@@ -884,7 +884,7 @@ impl ScarletSkk {
         )?;
         self.candidate_popup = Some(CandidatePopup { window_id });
         println!(
-            "[scarlet_skk] candidate popup shown context={} window={} selected={}",
+            "[scarlet-skk] candidate popup shown context={} window={} selected={}",
             context_id, window_id, self.selected_index
         );
         Ok(())
@@ -1377,19 +1377,19 @@ fn load_skk_dictionary() -> Vec<SkkDictionaryEntry> {
         match load_skk_dictionary_file(path) {
             Some(dictionary) if !dictionary.is_empty() => {
                 println!(
-                    "[scarlet_skk] loaded SKK dictionary '{}' entries={}",
+                    "[scarlet-skk] loaded SKK dictionary '{}' entries={}",
                     path,
                     dictionary.len()
                 );
                 return dictionary;
             }
             Some(_) => {
-                println!("[scarlet_skk] ignored empty SKK dictionary '{}'", path);
+                println!("[scarlet-skk] ignored empty SKK dictionary '{}'", path);
             }
             None => {}
         }
     }
-    println!("[scarlet_skk] no UTF-8 SKK dictionary found; using built-in fallback");
+    println!("[scarlet-skk] no UTF-8 SKK dictionary found; using built-in fallback");
     Vec::new()
 }
 
@@ -1412,7 +1412,7 @@ fn read_dictionary_text(path: &str) -> Option<String> {
             Ok(len) => len,
             Err(err) => {
                 println!(
-                    "[scarlet_skk] failed to read SKK dictionary '{}': {:?}",
+                    "[scarlet-skk] failed to read SKK dictionary '{}': {:?}",
                     path, err
                 );
                 return None;
@@ -1420,7 +1420,7 @@ fn read_dictionary_text(path: &str) -> Option<String> {
         };
         if bytes.len() + len > MAX_SKK_DICTIONARY_BYTES {
             println!(
-                "[scarlet_skk] SKK dictionary '{}' is larger than {} bytes",
+                "[scarlet-skk] SKK dictionary '{}' is larger than {} bytes",
                 path, MAX_SKK_DICTIONARY_BYTES
             );
             return None;
@@ -1432,7 +1432,7 @@ fn read_dictionary_text(path: &str) -> Option<String> {
         Ok(text) => Some(text),
         Err(_) => {
             println!(
-                "[scarlet_skk] SKK dictionary '{}' is not UTF-8; fetch script converts upstream EUC-JP",
+                "[scarlet-skk] SKK dictionary '{}' is not UTF-8; fetch script converts upstream EUC-JP",
                 path
             );
             None
@@ -1649,12 +1649,12 @@ fn preedit_spans(text: &str, phase: SkkPhase) -> Vec<u8> {
 
 #[unsafe(no_mangle)]
 fn main() -> i32 {
-    println!("[scarlet_skk] connecting to SWS...");
+    println!("[scarlet-skk] connecting to SWS...");
 
     let mut conn = match Connection::connect_default() {
         Ok(conn) => conn,
         Err(err) => {
-            println!("[scarlet_skk] failed to connect to SWS: {:?}", err);
+            println!("[scarlet-skk] failed to connect to SWS: {:?}", err);
             return 1;
         }
     };
@@ -1667,12 +1667,12 @@ fn main() -> i32 {
     let ime_id = match conn.register_input_method(IME_NAME, capabilities) {
         Ok(ime_id) => ime_id,
         Err(err) => {
-            println!("[scarlet_skk] failed to register IME: {:?}", err);
+            println!("[scarlet-skk] failed to register IME: {:?}", err);
             return 1;
         }
     };
 
-    println!("[scarlet_skk] registered {} as id={}", IME_NAME, ime_id);
+    println!("[scarlet-skk] registered {} as id={}", IME_NAME, ime_id);
 
     let mut ime = ScarletSkk::new(scale_milli);
     loop {
@@ -1680,18 +1680,18 @@ fn main() -> i32 {
             Ok(_) => {
                 while let Some(event) = conn.poll_event() {
                     if let Err(err) = ime.handle_event(&mut conn, event) {
-                        println!("[scarlet_skk] event handling failed: {:?}", err);
+                        println!("[scarlet-skk] event handling failed: {:?}", err);
                         return 1;
                     }
                 }
             }
             Err(Error::WouldBlock) => {}
             Err(Error::Disconnected) => {
-                println!("[scarlet_skk] disconnected from SWS");
+                println!("[scarlet-skk] disconnected from SWS");
                 return 1;
             }
             Err(err) => {
-                println!("[scarlet_skk] dispatch failed: {:?}", err);
+                println!("[scarlet-skk] dispatch failed: {:?}", err);
                 return 1;
             }
         }

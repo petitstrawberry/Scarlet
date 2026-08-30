@@ -1,0 +1,16 @@
+[package]
+name = "sws-remote-protocol"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = ["legacy-scarlet-std"]
+legacy-scarlet-std = ["dep:scarlet-std"]
+std = []
+
+[dependencies]
+scarlet-std = { path = "../std", optional = true }
+
+[lib]
+name = "sws_remote_protocol"
+path = "src/lib.rs"

@@ -37,7 +37,7 @@ pub enum KernelObject {
     EventChannel(Arc<EventChannelObject>),
     EventSubscription(Arc<EventSubscriptionObject>),
     #[cfg(feature = "network")]
-    Socket(Arc<dyn SocketObject>),
+    Socket(SocketHandle),
     SharedMemory(Arc<dyn SharedMemoryObject>),
     /// GPU child capability object with optional control, mapping, and readiness capabilities.
     Gpu(Arc<dyn GpuObject>),
@@ -48,6 +48,118 @@ pub enum KernelObject {
     // Future variants will be added here:
     // MessageQueue(Arc<dyn MessageQueueObject>),
     // CharDevice(Arc<dyn CharDevice>),
+}
+
+/// Logical ownership wrapper for a socket kernel object.
+///
+/// Owning wrappers represent a user-visible handle, a pending fork/dup copy,
+/// or a handle queued for IPC transfer. Temporary wrappers keep the socket
+/// allocation alive for an in-flight syscall without delaying final handle
+/// close side effects.
+#[cfg(feature = "network")]
+pub struct SocketHandle {
+    socket: Arc<dyn SocketObject>,
+    owns_reference: bool,
+}
+
+#[cfg(feature = "network")]
+impl SocketHandle {
+    /// Create a logical owning socket reference.
+    ///
+    /// # Arguments
+    ///
+    /// * `socket` - Socket object owned by the new reference.
+    ///
+    /// # Returns
+    ///
+    /// A wrapper that closes the socket when the last logical owner is
+    /// released.
+    fn new(socket: Arc<dyn SocketObject>) -> Self {
+        crate::network::NetworkManager::get_manager().retain_socket_handle_reference(&socket);
+        Self {
+            socket,
+            owns_reference: true,
+        }
+    }
+
+    /// Duplicate this logical socket reference.
+    ///
+    /// # Returns
+    ///
+    /// A new owning reference suitable for fork, dup, or IPC transfer.
+    fn duplicate(&self) -> Self {
+        Self::new(Arc::clone(&self.socket))
+    }
+
+    /// Clone this socket only for temporary kernel access.
+    ///
+    /// # Returns
+    ///
+    /// A non-owning wrapper that does not delay final handle close.
+    fn temporary_clone(&self) -> Self {
+        Self {
+            socket: Arc::clone(&self.socket),
+            owns_reference: false,
+        }
+    }
+
+    /// Promote a temporary wrapper to logical ownership.
+    ///
+    /// This is idempotent and is used when a kernel object enters a handle
+    /// table through an API that may have received a temporary access clone.
+    fn ensure_owning(&mut self) {
+        if !self.owns_reference {
+            crate::network::NetworkManager::get_manager()
+                .retain_socket_handle_reference(&self.socket);
+            self.owns_reference = true;
+        }
+    }
+
+    /// Borrow the underlying socket `Arc`.
+    ///
+    /// # Returns
+    ///
+    /// The allocation-level socket reference without changing logical
+    /// ownership.
+    pub(crate) fn as_arc(&self) -> &Arc<dyn SocketObject> {
+        &self.socket
+    }
+
+    /// Consume this wrapper and return an allocation-level socket clone.
+    ///
+    /// # Returns
+    ///
+    /// A temporary `Arc` to the underlying socket. Consuming an owning wrapper
+    /// still releases its logical ownership.
+    fn into_arc(self) -> Arc<dyn SocketObject> {
+        Arc::clone(&self.socket)
+    }
+}
+
+#[cfg(feature = "network")]
+impl core::ops::Deref for SocketHandle {
+    type Target = dyn SocketObject;
+
+    fn deref(&self) -> &Self::Target {
+        self.socket.as_ref()
+    }
+}
+
+#[cfg(feature = "network")]
+impl AsRef<dyn SocketObject + 'static> for SocketHandle {
+    fn as_ref(&self) -> &(dyn SocketObject + 'static) {
+        self.socket.as_ref()
+    }
+}
+
+#[cfg(feature = "network")]
+impl Drop for SocketHandle {
+    fn drop(&mut self) {
+        if self.owns_reference {
+            crate::network::NetworkManager::get_manager()
+                .release_socket_handle_reference(&self.socket);
+        }
+    }
 }
 
 /// Strong mapping owner that retains a GPU child object while a VMA exists.
@@ -338,6 +450,19 @@ impl<'a> KernelObjectRef<'a> {
 }
 
 impl KernelObject {
+    /// Ensure this object carries the logical ownership required by a handle slot.
+    ///
+    /// # Returns
+    ///
+    /// This method returns no value. Non-socket objects and already-owning
+    /// socket objects are unchanged.
+    pub(crate) fn ensure_handle_ownership(&mut self) {
+        #[cfg(feature = "network")]
+        if let KernelObject::Socket(socket) = self {
+            socket.ensure_owning();
+        }
+    }
+
     /// Get the underlying kernel object by reference.
     pub(crate) fn as_kernel_object(&self) -> &KernelObject {
         self
@@ -385,7 +510,7 @@ impl KernelObject {
     #[cfg(feature = "network")]
     pub(crate) fn into_socket_arc(self) -> Option<Arc<dyn SocketObject>> {
         match self {
-            KernelObject::Socket(socket) => Some(socket),
+            KernelObject::Socket(socket) => Some(socket.into_arc()),
             _ => None,
         }
     }
@@ -439,7 +564,7 @@ impl KernelObject {
     /// Create a KernelObject from a SocketObject
     #[cfg(feature = "network")]
     pub fn from_socket_object(socket: Arc<dyn SocketObject>) -> Self {
-        KernelObject::Socket(socket)
+        KernelObject::Socket(SocketHandle::new(socket))
     }
 
     /// Create a KernelObject from a SharedMemoryObject
@@ -970,7 +1095,7 @@ impl KernelObject {
             KernelObject::Counter(counter) => KernelObject::Counter(Arc::clone(counter)),
             KernelObject::Timer(timer) => KernelObject::Timer(Arc::clone(timer)),
             #[cfg(feature = "network")]
-            KernelObject::Socket(socket) => KernelObject::Socket(Arc::clone(socket)),
+            KernelObject::Socket(socket) => KernelObject::Socket(socket.temporary_clone()),
             KernelObject::EventChannel(event_channel) => {
                 KernelObject::EventChannel(Arc::clone(event_channel))
             }
@@ -1002,7 +1127,7 @@ impl Clone for KernelObject {
                 KernelObject::Counter(counter) => KernelObject::Counter(Arc::clone(counter)),
                 KernelObject::Timer(timer) => KernelObject::Timer(Arc::clone(timer)),
                 #[cfg(feature = "network")]
-                KernelObject::Socket(socket) => KernelObject::Socket(Arc::clone(socket)),
+                KernelObject::Socket(socket) => KernelObject::Socket(socket.duplicate()),
                 KernelObject::EventChannel(event_channel) => {
                     KernelObject::EventChannel(Arc::clone(event_channel))
                 }

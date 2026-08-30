@@ -153,7 +153,7 @@ path = "../../bundles/base/bundle.toml"
 kind = "cargo"
 source = "../../user/bin"
 package = "user-bin"
-bin = "microvm_init"
+bin = "microvm-init"
 to = "/system/scarlet/bin/init"
 
 [images.boot]

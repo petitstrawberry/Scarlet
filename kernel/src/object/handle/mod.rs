@@ -100,9 +100,10 @@ impl HandleTable {
     /// O(1) allocation with explicit metadata
     pub fn insert_with_metadata(
         &self,
-        obj: KernelObject,
+        mut obj: KernelObject,
         metadata: HandleMetadata,
     ) -> Result<Handle, &'static str> {
+        obj.ensure_handle_ownership();
         let mut inner = self.inner.write();
         if let Some(handle) = inner.free_handles.pop() {
             inner.handles[handle as usize] = Some(obj);

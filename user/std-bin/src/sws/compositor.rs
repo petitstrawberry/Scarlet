@@ -11,6 +11,8 @@ use super::pointer_lock::{
     CorrelatedReply, PointerInteractionState, PointerLockDenial, PointerLockState, captured_window,
     confirmed_lock_state, correlated_reply, cursor_visible, input_route, validate_request,
 };
+use super::remote::capture::CaptureSession;
+use super::remote::server::{RemoteEvent, RemoteServer};
 use super::window::WindowManager;
 use core::sync::atomic::{AtomicU8, Ordering};
 use core::time::Duration;
@@ -597,6 +599,8 @@ pub struct Compositor {
     gpu_compositor: Option<GpuCompositor>,
     window_manager: WindowManager,
     ipc_server: IpcServer,
+    remote_server: RemoteServer,
+    capture_session: CaptureSession,
     wake_read: Handle,
     cursor: Cursor,
     screen_width: u32,
@@ -750,11 +754,17 @@ impl Compositor {
         super::ipc::set_compositor_wake_handle(wake_write);
         super::ipc::set_preferred_input_method(sws_config.preferred_input_method_name.clone());
 
-        // Start input thread
-        InputManager::start_input_thread(screen_width, screen_height)?;
-
         // Initialize IPC server
         let mut ipc_server = IpcServer::new("/tmp/sws.sock")?;
+        let mut remote_server = RemoteServer::new("/tmp/sws-remote.sock");
+        // Claim both public endpoints before starting any compositor workers.
+        // A stale or live server address must fail initialization without
+        // leaving input, GPU, or accept threads behind.
+        ipc_server.bind()?;
+        remote_server.bind()?;
+
+        // Start input threads only after both server addresses are secured.
+        InputManager::start_input_thread(screen_width, screen_height)?;
 
         // Initialize window manager
         let window_manager = WindowManager::new();
@@ -808,6 +818,7 @@ impl Compositor {
         };
         super::ipc::set_sgfx_shared_images_available(gpu_compositor.is_some());
         ipc_server.listen()?;
+        remote_server.listen()?;
 
         Ok(Self {
             display,
@@ -815,6 +826,8 @@ impl Compositor {
             gpu_compositor,
             window_manager,
             ipc_server,
+            remote_server,
+            capture_session: CaptureSession::new(screen_width, screen_height),
             wake_read,
             cursor,
             screen_width,
@@ -1088,6 +1101,7 @@ impl Compositor {
             println!("[Compositor] Disabling GPU composition after display resize failure");
             self.disable_gpu_after_runtime_failure("SWS_BACKEND=sgfx target resize failed")?;
         }
+        self.capture_session.output_changed(new_width, new_height);
 
         let payload = sws_protocol::payload_screen_size(new_width, new_height);
         super::ipc::broadcast_message_to_all_clients(
@@ -3102,6 +3116,72 @@ impl Compositor {
         super::ipc::consume_compositor_wake();
     }
 
+    fn handle_remote_event(&mut self, event: RemoteEvent) -> Result<(), &'static str> {
+        match event {
+            RemoteEvent::CreateCapture {
+                client_id,
+                output_id,
+            } => {
+                if !self.capture_session.create(client_id, output_id) {
+                    println!(
+                        "[SwsRemote] Rejected capture session from client {} for output {}",
+                        client_id, output_id
+                    );
+                }
+            }
+            RemoteEvent::RegisterBuffer {
+                client_id,
+                buffer_id,
+                width,
+                height,
+                stride,
+                format,
+                handle,
+            } => {
+                if let Err(error) = self
+                    .capture_session
+                    .register_buffer(client_id, buffer_id, width, height, stride, format, handle)
+                {
+                    println!(
+                        "[SwsRemote] Rejected capture buffer {} from client {}: {}",
+                        buffer_id, client_id, error
+                    );
+                }
+            }
+            RemoteEvent::RequestFrame {
+                client_id,
+                buffer_id,
+            } => {
+                let result = match self.gpu_compositor.as_ref() {
+                    Some(gpu) => self.capture_session.capture_gpu(client_id, buffer_id, gpu),
+                    None => self.capture_session.capture_cpu(
+                        client_id,
+                        buffer_id,
+                        &self.backbuffer,
+                        self.backbuffer_stride,
+                    ),
+                };
+                if let Err(error) = result {
+                    println!(
+                        "[SwsRemote] Failed capture request {} from client {}: {}",
+                        buffer_id, client_id, error
+                    );
+                }
+            }
+            RemoteEvent::Input { client_id, message } => {
+                if self.capture_session.is_owner(client_id)
+                    && let Some(event) = super::remote::input::compositor_event(&message)
+                {
+                    super::input::push_input_event(event);
+                }
+            }
+            RemoteEvent::Disconnected { client_id } => {
+                self.capture_session.disconnect(client_id);
+            }
+        }
+        Ok(())
+    }
+
     fn process_pending_events(&mut self) -> Result<(), &'static str> {
         if cursor_visible(self.pointer_lock) {
             self.cursor.advance_animation(monotonic_time_ns());
@@ -3116,6 +3196,13 @@ impl Compositor {
         // }
         for event in ipc_events {
             self.handle_ipc_event(event)?;
+        }
+
+        // Remote capture and virtual input use a separate privileged protocol,
+        // but converge on the same compositor thread and input pipeline.
+        let remote_events = self.remote_server.process_messages();
+        for event in remote_events {
+            self.handle_remote_event(event)?;
         }
 
         // Process input events from global queue (non-blocking)
@@ -3182,7 +3269,9 @@ impl Compositor {
     }
 
     fn has_queued_event_work(&self) -> bool {
-        super::ipc::has_pending_ipc_events() || super::input::has_pending_input_events()
+        super::ipc::has_pending_ipc_events()
+            || super::remote::server::has_pending_events()
+            || super::input::has_pending_input_events()
     }
 
     /// Main event loop
@@ -3228,7 +3317,16 @@ impl Compositor {
                     sws_debug!("[Compositor] Full redraw triggered");
                 }
                 super::trace::set_compositor_stage(super::trace::STAGE_GPU_COMPOSITE);
+                let present_damage = self.pending_present_damage();
                 self.composite_and_present()?;
+                if self.gpu_compositor.is_some() {
+                    self.capture_session.frame_presented(&present_damage);
+                } else {
+                    // Automatic GPU fallback reconstructs the CPU backbuffer
+                    // from scratch, so a capture previously sourced from the
+                    // GPU target must refresh the complete output.
+                    self.capture_session.frame_presented(&None);
+                }
             } else {
                 super::trace::set_compositor_stage(super::trace::STAGE_CPU_COMPOSITE);
                 let mut present_damage = self.composite_pending_to_display()?;
@@ -3243,7 +3341,8 @@ impl Compositor {
                     Self::merge_present_damage(&mut present_damage, next_damage);
                 }
                 super::trace::set_compositor_stage(super::trace::STAGE_PRESENT);
-                self.present_damage(present_damage)?;
+                self.present_damage(present_damage.clone())?;
+                self.capture_session.frame_presented(&present_damage);
             }
             super::trace::compositor_present();
             super::trace::set_compositor_stage(super::trace::STAGE_ACTIVE);

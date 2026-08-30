@@ -609,7 +609,7 @@ pub fn sys_socket_create(tf: &mut Trapframe) -> usize {
     };
 
     // Wrap in KernelObject
-    let kernel_obj = KernelObject::Socket(socket);
+    let kernel_obj = KernelObject::from_socket_object(socket);
 
     // Create metadata for the socket handle
     let metadata = HandleMetadata {
@@ -705,7 +705,7 @@ pub fn sys_socket_bind(tf: &mut Trapframe) -> usize {
     // Register the same Arc in NetworkManager's named socket namespace
     // This ensures the registered socket and the one in handle_table are identical
     if NetworkManager::get_manager()
-        .register_named_socket(&registry_name, socket_arc.clone())
+        .register_named_socket(&registry_name, Arc::clone(socket_arc.as_arc()))
         .is_err()
     {
         return usize::MAX;
@@ -716,7 +716,7 @@ pub fn sys_socket_bind(tf: &mut Trapframe) -> usize {
     }
 
     // Get the socket ID from NetworkManager for VFS integration
-    let socket_id = match NetworkManager::get_manager().get_socket_id(&socket_arc) {
+    let socket_id = match NetworkManager::get_manager().get_socket_id(socket_arc.as_arc()) {
         Some(id) => id,
         None => return usize::MAX, // Socket not found in NetworkManager
     };
@@ -1002,7 +1002,7 @@ pub fn sys_socket_accept(tf: &mut Trapframe) -> usize {
         };
 
     // Add the accepted socket to handle table
-    let kernel_obj = KernelObject::Socket(accepted_socket);
+    let kernel_obj = KernelObject::from_socket_object(accepted_socket);
     let metadata = HandleMetadata {
         handle_type: HandleType::IpcChannel,
         access_mode: AccessMode::ReadWrite,
@@ -1052,7 +1052,7 @@ pub fn sys_socketpair(tf: &mut Trapframe) -> usize {
     );
 
     // Add both sockets to handle table
-    let kernel_obj1 = KernelObject::Socket(socket1);
+    let kernel_obj1 = KernelObject::from_socket_object(socket1);
     let metadata = HandleMetadata {
         handle_type: HandleType::IpcChannel,
         access_mode: AccessMode::ReadWrite,
@@ -1067,7 +1067,7 @@ pub fn sys_socketpair(tf: &mut Trapframe) -> usize {
         Err(_) => return usize::MAX,
     };
 
-    let kernel_obj2 = KernelObject::Socket(socket2);
+    let kernel_obj2 = KernelObject::from_socket_object(socket2);
     let handle2 = match task
         .handle_table
         .insert_with_metadata(kernel_obj2, metadata)

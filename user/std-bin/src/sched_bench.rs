@@ -86,7 +86,7 @@ fn main() -> ExitCode {
     };
 
     println!(
-        "[sched_bench] scenario={} threads={} seconds={} util_min={}",
+        "[sched-bench] scenario={} threads={} seconds={} util_min={}",
         config.scenario.as_str(),
         config.threads,
         config.seconds,
@@ -96,8 +96,8 @@ fn main() -> ExitCode {
             0
         },
     );
-    println!("[sched_bench] sample with: top --sort cpu");
-    println!("[sched_bench] inspect placement with: cat /dev/cpuinfo");
+    println!("[sched-bench] sample with: top --sort cpu");
+    println!("[sched-bench] inspect placement with: cat /dev/cpuinfo");
 
     let stop = Arc::new(AtomicBool::new(false));
     let mut counters = Vec::new();
@@ -134,7 +134,7 @@ fn main() -> ExitCode {
             }
             Err(error) => {
                 println!(
-                    "[sched_bench] failed to spawn worker {}: {}",
+                    "[sched-bench] failed to spawn worker {}: {}",
                     worker_id, error
                 );
                 stop.store(true, Ordering::SeqCst);
@@ -151,7 +151,7 @@ fn main() -> ExitCode {
         let delta = total.saturating_sub(previous_total);
         previous_total = total;
         println!(
-            "[sched_bench] t={:>3}s iter/s={:>12} total={:>14}",
+            "[sched-bench] t={:>3}s iter/s={:>12} total={:>14}",
             started_at.elapsed().as_secs(),
             delta,
             total,
@@ -166,7 +166,7 @@ fn main() -> ExitCode {
     let total = total_iterations(&counters);
     let checksum = total_checksum(&counters);
     println!(
-        "[sched_bench] done total={} checksum=0x{:016x}",
+        "[sched-bench] done total={} checksum=0x{:016x}",
         total, checksum
     );
     ExitCode::SUCCESS
@@ -219,7 +219,7 @@ fn parse_args() -> Result<Config, ()> {
 
 fn print_usage() {
     println!(
-        "usage: sched_bench [--scenario cpu|bursty|sleepy|mixed] [--threads N] [--seconds N] [--performance]"
+        "usage: sched-bench [--scenario cpu|bursty|sleepy|mixed] [--threads N] [--seconds N] [--performance]"
     );
     println!("  --performance requests util_min=1024 for worker threads");
 }
@@ -236,7 +236,7 @@ fn run_worker(
         let result = syscall1(Syscall::SetTaskUtilMin, util_min as usize);
         if result == usize::MAX {
             println!(
-                "[sched_bench] worker {} failed to set util_min={}",
+                "[sched-bench] worker {} failed to set util_min={}",
                 worker_id, util_min
             );
         }

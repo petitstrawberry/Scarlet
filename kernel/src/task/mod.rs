@@ -3346,6 +3346,12 @@ impl Task {
         self.trace_fork_exit_phase("exit-vm-done", removed_maps.len());
     }
 
+    fn release_process_memory_maps_if_sole_owner(&self) {
+        if self.vm_manager.is_sole_owner() {
+            self.release_all_memory_maps_for_exit();
+        }
+    }
+
     fn trace_fork_exit_phase(&self, phase: &'static str, detail: usize) {
         if crate::sched::scheduler::DEBUG_FORK_TRACE_LOGGING
             && crate::sched::scheduler::is_fork_trace_task(self.id)
@@ -3386,9 +3392,7 @@ impl Task {
         self.with_default_abi_mut(|abi, task| abi.on_task_exit(task));
         crate::breadcrumb::drop(crate::breadcrumb::EXIT_ABI_DONE, self.id as u64, 0);
         self.trace_fork_exit_phase("exit-abi-done", 0);
-        if self.vm_manager.is_sole_owner() {
-            self.release_all_memory_maps_for_exit();
-        }
+        self.release_process_memory_maps_if_sole_owner();
         cleanup(self);
         self.reparent_children();
         crate::breadcrumb::drop(crate::breadcrumb::EXIT_REPARENT_DONE, self.id as u64, 0);
@@ -3520,7 +3524,11 @@ impl Task {
 
         if my_id == leader_id {
             if is_current {
-                self.exit_with_cleanup(status, |task| task.release_all_memory_maps_for_exit());
+                // Sibling threads can still be executing on remote CPUs after
+                // complete_non_current_task_exit() requests their reschedule.
+                // Keep their shared address space mapped until the final VMM
+                // owner exits instead of invalidating code beneath them.
+                self.exit_with_cleanup(status, |_| {});
             } else {
                 self.exit_non_current_thread_group_member(status, true);
             }
@@ -3545,7 +3553,7 @@ impl Task {
 
         self.clear_process_control_stopped();
         self.with_default_abi_mut(|abi, task| abi.on_task_exit(task));
-        self.release_all_memory_maps_for_exit();
+        self.release_process_memory_maps_if_sole_owner();
         self.reparent_children();
         self.set_exit_status(status);
         self.state.store(TaskState::Terminated, Ordering::SeqCst);
@@ -5726,6 +5734,28 @@ mod tests {
                 .is_some(),
             "reaping a CLONE_VM worker must retain its shared mapping"
         );
+    }
+
+    #[test_case]
+    fn test_process_memory_release_waits_for_last_clone_vm_owner() {
+        reset();
+
+        let mut leader = super::new_user_task("ExitGroupLeader".to_string(), 0);
+        leader.init();
+        leader.allocate_data_pages(0x4000, 1).unwrap();
+
+        let mut flags = super::CloneFlags::new();
+        flags.set(super::CloneFlagsDef::Vm);
+        flags.set(super::CloneFlagsDef::Thread);
+        let worker = leader.clone_task(flags).unwrap();
+        let map_count = leader.vm_manager.memmap_len();
+
+        leader.release_process_memory_maps_if_sole_owner();
+        assert_eq!(leader.vm_manager.memmap_len(), map_count);
+
+        drop(worker);
+        leader.release_process_memory_maps_if_sole_owner();
+        assert_eq!(leader.vm_manager.memmap_len(), 0);
     }
 
     #[test_case]

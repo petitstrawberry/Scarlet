@@ -1,6 +1,6 @@
 [Desktop Entry]
 Name=Widget Factory
-Exec=/bin/widget_factory
+Exec=/bin/widget-factory
 Icon=applications-development
 Type=Application
 Terminal=false

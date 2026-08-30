@@ -55,5 +55,5 @@ to = "/system/scarlet/bin/date"
 [[layers]]
 kind = "cargo"
 source = "../../user/std-bin"
-bin = "fb_test"
-to = "/system/scarlet/bin/fb_test"
+bin = "fb-test"
+to = "/system/scarlet/bin/fb-test"

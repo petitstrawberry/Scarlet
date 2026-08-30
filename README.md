@@ -142,7 +142,7 @@ See [Scarlet Distribution Model](docs/architecture/distro-model.md) and
 
 ## Media Codecs
 
-The in-tree `video_player` is built as its own user program crate under
+The in-tree `video-player` binary is built as its own user program crate under
 `user/video_player`. The default build enables the stateful H.264 hardware path
 for H.264 decode and stateful AV1 hardware decode. Other codec paths are
 selected explicitly by crate or bundle features. See
@@ -226,7 +226,7 @@ hardware support are being developed together.
 | AArch64 QEMU | Active target. Limine/UEFI boot, kernel tests, VirtIO devices, and desktop/full projects are supported. |
 | ABI support | Scarlet native ABI works for the in-tree userland. xv6 RISC-V supports shell and common commands. Linux ABI is partial but already used for selected Buildroot/BusyBox userlands, Wayland GUI apps, and services such as Mozc. |
 | Desktop/UI | SWS, `sws-client`, ScarletUI, desktop shell, taskbar, terminal, settings, IME experiments, and selected Wayland bridge applications are in progress. |
-| Audio/media | `/dev/audioN`, VirtIO sound, Apple MCA/ADMAC playback, SAS, `sasctl`, `mplayer`, and `video_player` are available for current experiments. Audio design is still evolving around realtime and device-routing constraints. |
+| Audio/media | `/dev/audioN`, VirtIO sound, Apple MCA/ADMAC playback, SAS, `sasctl`, `mplayer`, and `video-player` are available for current experiments. Audio design is still evolving around realtime and device-routing constraints. |
 | Storage/USB | VFS supports tmpfs, cpiofs, ext2, FAT32, overlay, bind mounts, and devfs. VirtIO block is the primary block path. xHCI/DWC3 USB is early; USB storage is not a supported path yet. |
 | Hypervisor | SHV provides Type-2 virtualization for RISC-V H-extension and AArch64 EL2/VHE. The Linux `/dev/kvm` compatibility layer is functional enough for current kvmtool/Firecracker-class workloads, while device models and multi-vCPU coverage are still evolving. |
 

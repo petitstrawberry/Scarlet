@@ -52,7 +52,7 @@ command = "cargo"
 args = ["make", "fmt-check"]
 
 [tasks.fmt-video-player-check]
-description = "Check video_player formatting"
+description = "Check video-player formatting"
 cwd = "user/video_player"
 command = "cargo"
 args = ["make", "fmt-check"]
@@ -123,7 +123,7 @@ command = "cargo"
 args = ["make", "clippy"]
 
 [tasks.clippy-video-player]
-description = "Run clippy for video_player"
+description = "Run clippy for video-player"
 cwd = "user/video_player"
 command = "cargo"
 args = ["make", "clippy"]
@@ -164,7 +164,7 @@ command = "cargo"
 args = ["make", "fmt"]
 
 [tasks.fmt-video-player]
-description = "Format video_player code"
+description = "Format video-player code"
 cwd = "user/video_player"
 command = "cargo"
 args = ["make", "fmt"]
@@ -449,7 +449,7 @@ command = "cargo"
 args = ["clean"]
 
 [tasks.clean-video-player]
-description = "Clean video_player build artifacts"
+description = "Clean video-player build artifacts"
 cwd = "user/video_player"
 command = "cargo"
 args = ["clean"]

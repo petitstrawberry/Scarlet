@@ -57,6 +57,7 @@ pub struct Capabilities {
     rendering: bool,
     presentation: bool,
     image_upload: bool,
+    image_readback: bool,
     depth: bool,
 }
 
@@ -86,6 +87,15 @@ impl Capabilities {
     /// `true` when sampled texture upload and composition are available.
     pub const fn supports_image_upload(&self) -> bool {
         self.image_upload
+    }
+
+    /// Return whether rendered BGRA images can be read back synchronously.
+    ///
+    /// # Returns
+    ///
+    /// `true` when image-to-CPU transfer is available.
+    pub const fn supports_image_readback(&self) -> bool {
+        self.image_readback
     }
 
     /// Return whether depth attachments and depth testing are available.
@@ -418,6 +428,32 @@ impl Context {
             .transfer_imported_bgra_rect(&texture.backend, damage)
     }
 
+    /// Read one render-target rectangle into a complete BGRA destination buffer.
+    ///
+    /// # Arguments
+    ///
+    /// * `image` - Render-target image created by this context.
+    /// * `destination` - Complete writable BGRA destination buffer.
+    /// * `destination_stride` - Bytes between destination rows.
+    /// * `rect` - Source image rectangle written at identical destination coordinates.
+    ///
+    /// # Returns
+    ///
+    /// Success after synchronous GPU readback, or a handle error.
+    pub fn readback_image_bgra(
+        &self,
+        image: &Image,
+        destination: &mut [u8],
+        destination_stride: u32,
+        rect: PixelRect,
+    ) -> HandleResult<()> {
+        if !rect.is_within(image.width, image.height) {
+            return Err(HandleError::InvalidParameter);
+        }
+        self.backend
+            .readback_image_bgra(&image.backend, destination, destination_stride, rect)
+    }
+
     /// Detach a texture from this context and consume it deterministically.
     ///
     /// # Arguments
@@ -547,6 +583,32 @@ impl MappedTargetSession {
             .find(|(candidate, _)| *candidate == target)
             .map(|(_, image)| image.as_ref())
             .ok_or(IrSubmitError::ImageNotMapped)
+    }
+
+    /// Read one mapped presentation-image rectangle into a BGRA buffer.
+    ///
+    /// # Arguments
+    ///
+    /// * `target` - Logical presentation texture identity.
+    /// * `destination` - Complete writable BGRA destination buffer.
+    /// * `destination_stride` - Bytes between destination rows.
+    /// * `rect` - Source target rectangle written at identical destination coordinates.
+    ///
+    /// # Returns
+    ///
+    /// Success after synchronous GPU readback, or an execution error.
+    pub fn readback_bgra(
+        &self,
+        target: ir::TextureId,
+        destination: &mut [u8],
+        destination_stride: u32,
+        rect: ir::PixelRect,
+    ) -> Result<(), IrSubmitError> {
+        let image = self.image(target)?;
+        let rect = PixelRect::new(rect.x(), rect.y(), rect.width(), rect.height());
+        self.context
+            .readback_image_bgra(image, destination, destination_stride, rect)?;
+        Ok(())
     }
 
     /// Bind all session state for portable command execution.

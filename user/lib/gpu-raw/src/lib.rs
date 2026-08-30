@@ -87,6 +87,8 @@ pub mod commands {
     pub const GPU_IMAGE_QUERY_LAYOUT: u32 = 0x4766;
     /// Detach a GPU buffer from an execution context.
     pub const GPU_CONTEXT_DETACH_BUFFER: u32 = 0x4767;
+    /// Read one attached BGRA image rectangle into userspace.
+    pub const GPU_CONTEXT_READBACK_IMAGE_BGRA: u32 = 0x4768;
 }
 
 /// ABI version accepted by [`GpuQueryInfo`].
@@ -127,12 +129,15 @@ pub const GPU_IMAGE_USAGE_SAMPLED: u32 = 1 << 2;
 pub const GPU_IMAGE_USAGE_TRANSFER_DST: u32 = 1 << 3;
 /// Image usage permitting binding as a depth-stencil attachment.
 pub const GPU_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT: u32 = 1 << 4;
+/// Image usage permitting BGRA pixel transfers out of the image.
+pub const GPU_IMAGE_USAGE_TRANSFER_SRC: u32 = 1 << 5;
 /// All currently defined GPU image usage flags.
 pub const GPU_IMAGE_USAGE_VALID: u32 = GPU_IMAGE_USAGE_RENDER_TARGET
     | GPU_IMAGE_USAGE_PRESENTABLE
     | GPU_IMAGE_USAGE_SAMPLED
     | GPU_IMAGE_USAGE_TRANSFER_DST
-    | GPU_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT;
+    | GPU_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT
+    | GPU_IMAGE_USAGE_TRANSFER_SRC;
 
 /// The GPU backend is not available for control.
 pub const GPU_DEVICE_STATE_UNAVAILABLE: u32 = 0;
@@ -157,6 +162,8 @@ pub const GPU_EXECUTION_SUPPORT_PRESENTATION: u32 = 1 << 4;
 pub const GPU_EXECUTION_SUPPORT_IMAGE_UPLOAD: u32 = 1 << 5;
 /// Generic depth attachment and depth-test operations are available.
 pub const GPU_EXECUTION_SUPPORT_DEPTH: u32 = 1 << 6;
+/// Generic synchronous image readback operations are available.
+pub const GPU_EXECUTION_SUPPORT_IMAGE_READBACK: u32 = 1 << 7;
 
 /// Fixed byte capacity of an opaque backend or dialect identifier.
 pub const GPU_BACKEND_ID_BYTES: usize = 32;
@@ -646,6 +653,80 @@ impl GpuContextTransferImportedImageBgra {
             height: rect.height,
             reserved2: 0,
         }
+    }
+}
+
+/// Fixed-width request and response for [`commands::GPU_CONTEXT_READBACK_IMAGE_BGRA`].
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct GpuContextReadbackImageBgra {
+    /// ABI version supplied by userspace and echoed by the kernel.
+    pub abi_version: u32,
+    /// Explicit `GPU_RESULT_*` result code.
+    pub result: u32,
+    /// Existing GPU image child handle attached to this context.
+    pub image_handle: u32,
+    /// Reserved for ABI-compatible future use. Must be zero.
+    pub reserved: u32,
+    /// Userspace address of the complete destination BGRA buffer.
+    pub destination_ptr: u64,
+    /// Length of the complete destination userspace byte range.
+    pub destination_length: u64,
+    /// Number of bytes between destination rows.
+    pub destination_stride: u32,
+    /// Source image x coordinate in pixels.
+    pub src_x: u32,
+    /// Source image y coordinate in pixels.
+    pub src_y: u32,
+    /// Rectangle width in pixels.
+    pub width: u32,
+    /// Rectangle height in pixels.
+    pub height: u32,
+    /// Reserved for ABI-compatible future use. Must be zero.
+    pub reserved2: u32,
+    /// Reserved for ABI-compatible future use. Must be zero.
+    pub reserved3: u64,
+}
+
+impl GpuContextReadbackImageBgra {
+    /// Create a pointer-based BGRA readback request.
+    ///
+    /// The source rectangle is written at identical coordinates in the
+    /// complete destination buffer.
+    ///
+    /// # Arguments
+    ///
+    /// * `image_handle` - Image capability attached to the context.
+    /// * `destination` - Complete writable destination buffer.
+    /// * `destination_stride` - Bytes between destination rows.
+    /// * `rect` - Source image rectangle.
+    ///
+    /// # Returns
+    ///
+    /// A request, or an invalid-parameter error when pointer/length conversion fails.
+    pub fn new(
+        image_handle: u32,
+        destination: &mut [u8],
+        destination_stride: u32,
+        rect: GpuImageBgraRect,
+    ) -> HandleResult<Self> {
+        Ok(Self {
+            abi_version: GPU_ABI_VERSION,
+            result: GPU_RESULT_SUCCESS,
+            image_handle,
+            reserved: 0,
+            destination_ptr: u64::try_from(destination.as_mut_ptr() as usize)
+                .map_err(|_| HandleError::InvalidParameter)?,
+            destination_length: u64::try_from(destination.len())
+                .map_err(|_| HandleError::InvalidParameter)?,
+            destination_stride,
+            src_x: rect.x,
+            src_y: rect.y,
+            width: rect.width,
+            height: rect.height,
+            reserved2: 0,
+            reserved3: 0,
+        })
     }
 }
 
@@ -1833,6 +1914,41 @@ impl GpuContext {
         result_to_handle_error(request.result)
     }
 
+    /// Read one attached BGRA image rectangle into a CPU-visible destination.
+    ///
+    /// The destination describes a complete framebuffer and receives the
+    /// rectangle at the same `(x, y)` coordinates used by `rect`. The kernel
+    /// waits for GPU-to-backing transfer, invalidates the backing cache range,
+    /// and copies only the requested rows before returning.
+    ///
+    /// # Arguments
+    ///
+    /// * `image` - Image capability previously attached to this context.
+    /// * `destination` - Complete writable BGRA destination buffer.
+    /// * `destination_stride` - Bytes between destination rows.
+    /// * `rect` - Source image rectangle.
+    ///
+    /// # Returns
+    ///
+    /// Success after synchronous readback completion, or a handle error.
+    pub fn readback_image_bgra(
+        &self,
+        image: &GpuImage,
+        destination: &mut [u8],
+        destination_stride: u32,
+        rect: GpuImageBgraRect,
+    ) -> HandleResult<()> {
+        let image_handle =
+            u32::try_from(image.handle.as_raw()).map_err(|_| HandleError::InvalidHandle)?;
+        let mut request =
+            GpuContextReadbackImageBgra::new(image_handle, destination, destination_stride, rect)?;
+        self.handle.control(
+            commands::GPU_CONTEXT_READBACK_IMAGE_BGRA,
+            &mut request as *mut _ as usize,
+        )?;
+        result_to_handle_error(request.result)
+    }
+
     /// Return the effective backend-defined dialect index.
     ///
     /// # Returns
@@ -2343,3 +2459,4 @@ const _: [(); 32] = [(); core::mem::size_of::<GpuContextAttachBuffer>()];
 const _: [(); 24] = [(); core::mem::size_of::<GpuContextDetachBuffer>()];
 const _: [(); 64] = [(); core::mem::size_of::<GpuContextUploadImageBgra>()];
 const _: [(); 40] = [(); core::mem::size_of::<GpuContextTransferImportedImageBgra>()];
+const _: [(); 64] = [(); core::mem::size_of::<GpuContextReadbackImageBgra>()];

@@ -185,6 +185,20 @@ impl Context {
         }
     }
 
+    pub(crate) fn readback_image_bgra(
+        &self,
+        image: &Image,
+        destination: &mut [u8],
+        destination_stride: u32,
+        rect: PixelRect,
+    ) -> HandleResult<()> {
+        match (self, image) {
+            (Self::Virgl(context), Image::Virgl(image)) => {
+                context.readback_image_bgra(image, destination, destination_stride, rect)
+            }
+        }
+    }
+
     pub(crate) fn release_texture(&self, texture: Texture) -> HandleResult<()> {
         match (self, texture) {
             (Self::Virgl(context), Texture::Virgl(texture)) => context.release_texture(texture),
