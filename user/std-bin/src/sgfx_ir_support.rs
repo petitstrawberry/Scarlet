@@ -93,7 +93,11 @@ impl MappedTarget {
 
     /// Open a two-image presentation target for tear-free direct scanout.
     pub(crate) fn open_swapchain(width: u32, height: u32) -> Result<Self, Error> {
-        Self::open_with_target_count(width, height, 2, true)
+        // Readback is an optional remote-capture capability, not a prerequisite
+        // for local GPU composition or presentation. Backends such as native
+        // Adreno can therefore keep the desktop on the GPU while an attempted
+        // capture reports its own unsupported readback operation.
+        Self::open_with_target_count(width, height, 2, false)
     }
 
     fn open_with_target_count(
