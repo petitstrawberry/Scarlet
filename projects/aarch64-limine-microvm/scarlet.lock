@@ -139,6 +139,17 @@ path = "../../user/bin"
 
 [[sections.initramfs.layers]]
 kind = "cargo"
+package = "user-bin"
+bin = "sshd"
+to = "/system/scarlet/bin/sshd"
+hash = ""
+
+[sections.initramfs.layers.source]
+type = "path"
+path = "../../user/bin"
+
+[[sections.initramfs.layers]]
+kind = "cargo"
 bin = "resolverd"
 to = "/system/scarlet/bin/resolverd"
 hash = "sha256:b4a33d2c97fbd89ffe07f3d89540e7790ffd23c3684d94b565e2922871b6968b"
@@ -286,6 +297,17 @@ package = "user-bin"
 bin = "netcfgd"
 to = "/system/scarlet/bin/netcfgd"
 hash = "sha256:79ae13af49dbb7e07423e5df1fabdb3f3e57999a44b61811d17bd747ea5876d6"
+
+[sections.rootfs.layers.source]
+type = "path"
+path = "../../user/bin"
+
+[[sections.rootfs.layers]]
+kind = "cargo"
+package = "user-bin"
+bin = "sshd"
+to = "/system/scarlet/bin/sshd"
+hash = ""
 
 [sections.rootfs.layers.source]
 type = "path"
