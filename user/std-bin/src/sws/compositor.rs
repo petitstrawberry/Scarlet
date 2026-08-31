@@ -58,6 +58,7 @@ pub(super) fn is_sws_debug_enabled() -> bool {
 #[cfg(test)]
 mod touch_modality_tests {
     use super::*;
+    use crate::input::{abs_codes, event_types};
 
     #[test]
     fn direct_touch_hides_cursor_without_changing_pointer_position() {
@@ -81,6 +82,56 @@ mod touch_modality_tests {
     fn normalized_direct_coordinates_hit_screen_edges() {
         assert_eq!(normalized_touch_to_screen(0, 1920), 0);
         assert_eq!(normalized_touch_to_screen(TOUCH_COORD_MAX, 1920), 1919);
+    }
+
+    #[test]
+    fn direct_touch_press_and_move_update_coordinates_before_button_or_sync() {
+        assert_eq!(
+            direct_legacy_event_sequence(12, 34, DirectLegacyEventKind::Press),
+            vec![
+                (event_types::EV_ABS, abs_codes::ABS_X, 12),
+                (event_types::EV_ABS, abs_codes::ABS_Y, 34),
+                (event_types::EV_KEY, key_codes::BTN_LEFT, 1),
+                (event_types::EV_SYN, 0, 0),
+            ]
+        );
+        assert_eq!(
+            direct_legacy_event_sequence(56, 78, DirectLegacyEventKind::Move),
+            vec![
+                (event_types::EV_ABS, abs_codes::ABS_X, 56),
+                (event_types::EV_ABS, abs_codes::ABS_Y, 78),
+                (event_types::EV_SYN, 0, 0),
+            ]
+        );
+    }
+
+    #[test]
+    fn direct_touch_release_commits_at_contact_then_clears_hover() {
+        assert_eq!(
+            direct_legacy_event_sequence(12, 34, DirectLegacyEventKind::Release),
+            vec![
+                (event_types::EV_ABS, abs_codes::ABS_X, 12),
+                (event_types::EV_ABS, abs_codes::ABS_Y, 34),
+                (event_types::EV_KEY, key_codes::BTN_LEFT, 0),
+                (event_types::EV_SYN, 0, 0),
+                (event_types::EV_ABS, abs_codes::ABS_X, -1),
+                (event_types::EV_ABS, abs_codes::ABS_Y, -1),
+                (event_types::EV_SYN, 0, 0),
+            ]
+        );
+    }
+
+    #[test]
+    fn direct_touch_cancel_releases_only_after_pointer_is_outside() {
+        assert_eq!(
+            direct_legacy_event_sequence(12, 34, DirectLegacyEventKind::Cancel),
+            vec![
+                (event_types::EV_ABS, abs_codes::ABS_X, -1),
+                (event_types::EV_ABS, abs_codes::ABS_Y, -1),
+                (event_types::EV_KEY, key_codes::BTN_LEFT, 0),
+                (event_types::EV_SYN, 0, 0),
+            ]
+        );
     }
 
     #[test]
@@ -718,6 +769,58 @@ struct DirectTouchGrab {
     legacy_primary: bool,
     screen_x: i32,
     screen_y: i32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DirectLegacyEventKind {
+    Press,
+    Move,
+    Release,
+    Cancel,
+}
+
+type DirectLegacyInputEvent = (u16, u16, i32);
+// Window-local coordinates are non-negative.  A fixed sentinel avoids any
+// arithmetic on the window geometry and therefore cannot overflow.
+const DIRECT_LEGACY_OUTSIDE_COORD: i32 = -1;
+
+fn direct_legacy_event_sequence(
+    local_x: i32,
+    local_y: i32,
+    kind: DirectLegacyEventKind,
+) -> Vec<DirectLegacyInputEvent> {
+    let abs = super::input::event_types::EV_ABS;
+    let key = super::input::event_types::EV_KEY;
+    let syn = super::input::event_types::EV_SYN;
+    let x = super::input::abs_codes::ABS_X;
+    let y = super::input::abs_codes::ABS_Y;
+    let button = key_codes::BTN_LEFT;
+    let outside = DIRECT_LEGACY_OUTSIDE_COORD;
+
+    match kind {
+        DirectLegacyEventKind::Press => vec![
+            (abs, x, local_x),
+            (abs, y, local_y),
+            (key, button, 1),
+            (syn, 0, 0),
+        ],
+        DirectLegacyEventKind::Move => vec![(abs, x, local_x), (abs, y, local_y), (syn, 0, 0)],
+        DirectLegacyEventKind::Release => vec![
+            (abs, x, local_x),
+            (abs, y, local_y),
+            (key, button, 0),
+            (syn, 0, 0),
+            (abs, x, outside),
+            (abs, y, outside),
+            (syn, 0, 0),
+        ],
+        DirectLegacyEventKind::Cancel => vec![
+            (abs, x, outside),
+            (abs, y, outside),
+            (key, button, 0),
+            (syn, 0, 0),
+        ],
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -2909,15 +3012,14 @@ impl Compositor {
         true
     }
 
-    fn send_direct_legacy_event(&self, grab: DirectTouchGrab, pressed: Option<bool>) {
+    fn send_direct_legacy_event(&self, grab: DirectTouchGrab, kind: DirectLegacyEventKind) {
         let Some(window) = self.window_manager.get_window(grab.window_id) else {
             return;
         };
         let local_x = grab.screen_x - window.x;
         let local_y = grab.screen_y - window.y;
-        let event_type = super::input::event_types::EV_ABS;
         if let Some((extension_id, external_client_id)) = window.extension_owner {
-            let send = |type_, code, value| {
+            for (type_, code, value) in direct_legacy_event_sequence(local_x, local_y, kind) {
                 super::ipc::send_extension_input_event(
                     extension_id,
                     external_client_id,
@@ -2927,31 +3029,11 @@ impl Compositor {
                     code,
                     value,
                 );
-            };
-            send(event_type, super::input::abs_codes::ABS_X, local_x);
-            send(event_type, super::input::abs_codes::ABS_Y, local_y);
-            if let Some(pressed) = pressed {
-                send(
-                    super::input::event_types::EV_KEY,
-                    key_codes::BTN_LEFT,
-                    i32::from(pressed),
-                );
             }
-            send(super::input::event_types::EV_SYN, 0, 0);
         } else {
-            let send = |type_, code, value| {
+            for (type_, code, value) in direct_legacy_event_sequence(local_x, local_y, kind) {
                 super::ipc::send_input_to_window(grab.window_id, 0, type_, code, value);
-            };
-            send(event_type, super::input::abs_codes::ABS_X, local_x);
-            send(event_type, super::input::abs_codes::ABS_Y, local_y);
-            if let Some(pressed) = pressed {
-                send(
-                    super::input::event_types::EV_KEY,
-                    key_codes::BTN_LEFT,
-                    i32::from(pressed),
-                );
             }
-            send(super::input::event_types::EV_SYN, 0, 0);
         }
     }
 
@@ -2978,7 +3060,12 @@ impl Compositor {
             if ended {
                 let grab = self.direct_touch_grabs.remove(index);
                 if grab.legacy_primary {
-                    self.send_direct_legacy_event(grab, Some(false));
+                    let kind = if frame.cancelled {
+                        DirectLegacyEventKind::Cancel
+                    } else {
+                        DirectLegacyEventKind::Release
+                    };
+                    self.send_direct_legacy_event(grab, kind);
                 }
             } else {
                 index += 1;
@@ -2998,7 +3085,7 @@ impl Compositor {
                 self.direct_touch_grabs[index].screen_y = screen_y;
                 let grab = self.direct_touch_grabs[index];
                 if grab.legacy_primary {
-                    self.send_direct_legacy_event(grab, None);
+                    self.send_direct_legacy_event(grab, DirectLegacyEventKind::Move);
                 }
                 continue;
             }
@@ -3024,7 +3111,7 @@ impl Compositor {
             };
             self.direct_touch_grabs.push(grab);
             if legacy_primary {
-                self.send_direct_legacy_event(grab, Some(true));
+                self.send_direct_legacy_event(grab, DirectLegacyEventKind::Press);
             }
         }
         redraw
