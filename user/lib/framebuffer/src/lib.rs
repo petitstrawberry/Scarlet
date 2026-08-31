@@ -84,6 +84,15 @@ pub mod display_commands {
     pub const DISPLAY_PRESENT_BUFFER: u32 = 0x5004;
     /// Present one GPU image capability through this display device.
     pub const DISPLAY_PRESENT_IMAGE: u32 = 0x5005;
+    /// Get the display backlight level as an integer percentage in `0..=100`.
+    ///
+    /// The command returns the percentage directly as the successful control
+    /// result and ignores its argument.
+    pub const DISPLAY_GET_BRIGHTNESS: u32 = 0x5006;
+    /// Set the display backlight level from an integer percentage in `0..=100`.
+    ///
+    /// The requested percentage is passed as the scalar control argument.
+    pub const DISPLAY_SET_BRIGHTNESS: u32 = 0x5007;
 }
 
 /// 32-bit RGBA pixel layout.
@@ -394,6 +403,115 @@ pub struct DisplaySurface {
     swapchain_pending_damage: alloc::vec::Vec<alloc::vec::Vec<DisplayPresentRegion>>,
     present_sequence: u64,
     draw_buffer: usize,
+}
+
+/// Lightweight display control wrapper.
+///
+/// Unlike [`DisplaySurface`], this type only keeps the display handle and does
+/// not map scanout memory or initialize a swapchain. It is intended for
+/// display controls such as backlight changes from settings and hotkey
+/// handlers.
+pub struct DisplayControl {
+    file: File,
+}
+
+fn brightness_percent_from_control(value: i32) -> HandleResult<u8> {
+    if !(0..=100).contains(&value) {
+        return Err(HandleError::InvalidParameter);
+    }
+    Ok(value as u8)
+}
+
+fn validate_brightness_percent(percent: u8) -> HandleResult<()> {
+    if percent > 100 {
+        return Err(HandleError::InvalidParameter);
+    }
+    Ok(())
+}
+
+fn get_brightness_percent(file: &File) -> HandleResult<u8> {
+    let value = file
+        .as_handle()
+        .control(display_commands::DISPLAY_GET_BRIGHTNESS, 0)?;
+    brightness_percent_from_control(value)
+}
+
+fn set_brightness_percent(file: &File, percent: u8) -> HandleResult<()> {
+    validate_brightness_percent(percent)?;
+    file.as_handle()
+        .control(display_commands::DISPLAY_SET_BRIGHTNESS, percent as usize)?;
+    Ok(())
+}
+
+impl DisplayControl {
+    const PRIMARY_DISPLAY_SCAN_LIMIT: usize = 16;
+
+    /// Open a display control endpoint by path without mapping its scanout.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - Display character-device path, typically `/dev/display0`.
+    ///
+    /// # Returns
+    ///
+    /// A lightweight display control wrapper or a handle error.
+    pub fn open(path: &str) -> HandleResult<Self> {
+        Ok(Self {
+            file: File::open(path).map_err(|_| HandleError::NotFound)?,
+        })
+    }
+
+    /// Open the first display endpoint that supports brightness control.
+    ///
+    /// The probe issues only `DISPLAY_GET_BRIGHTNESS`; it never maps scanout
+    /// memory. This keeps settings and other control-only clients from
+    /// consuming framebuffer mappings merely to change the backlight.
+    ///
+    /// # Returns
+    ///
+    /// The first compatible display control wrapper or [`HandleError::NotFound`]
+    /// when no display endpoint accepts the brightness query.
+    pub fn open_primary() -> HandleResult<Self> {
+        for index in 0..Self::PRIMARY_DISPLAY_SCAN_LIMIT {
+            let path = format!("/dev/display{}", index);
+            let Ok(file) = File::open(&path) else {
+                continue;
+            };
+            if file
+                .as_handle()
+                .control(display_commands::DISPLAY_GET_BRIGHTNESS, 0)
+                .is_ok()
+            {
+                return Ok(Self { file });
+            }
+        }
+        Err(HandleError::NotFound)
+    }
+
+    /// Get the current display backlight level.
+    ///
+    /// # Returns
+    ///
+    /// The backlight level as a percentage in `0..=100`, or a handle error.
+    /// A malformed kernel response outside that range is reported as
+    /// [`HandleError::InvalidParameter`].
+    pub fn get_brightness_percent(&self) -> HandleResult<u8> {
+        get_brightness_percent(&self.file)
+    }
+
+    /// Set the display backlight level.
+    ///
+    /// # Arguments
+    ///
+    /// * `percent` - Requested backlight level in `0..=100`.
+    ///
+    /// # Returns
+    ///
+    /// Success or a handle error. Values above `100` are rejected locally as
+    /// [`HandleError::InvalidParameter`].
+    pub fn set_brightness_percent(&self, percent: u8) -> HandleResult<()> {
+        set_brightness_percent(&self.file, percent)
+    }
 }
 
 impl DisplaySurface {
@@ -786,6 +904,31 @@ impl DisplaySurface {
             &mut info as *mut DisplayInfo as usize,
         )?;
         Ok(info)
+    }
+
+    /// Get the current display backlight level.
+    ///
+    /// # Returns
+    ///
+    /// The backlight level as a percentage in `0..=100`, or a handle error.
+    /// A malformed kernel response outside that range is reported as
+    /// [`HandleError::InvalidParameter`].
+    pub fn get_brightness_percent(&self) -> HandleResult<u8> {
+        get_brightness_percent(&self.file)
+    }
+
+    /// Set the display backlight level.
+    ///
+    /// # Arguments
+    ///
+    /// * `percent` - Requested backlight level in `0..=100`.
+    ///
+    /// # Returns
+    ///
+    /// Success or a handle error. Values above `100` are rejected locally as
+    /// [`HandleError::InvalidParameter`].
+    pub fn set_brightness_percent(&self, percent: u8) -> HandleResult<()> {
+        set_brightness_percent(&self.file, percent)
     }
 
     /// Get variable screen information from the display surface.
@@ -2209,6 +2352,27 @@ impl Drop for DisplaySurface {
             for (mapped_addr, mapped_size) in self.swapchain_buffers.drain(..) {
                 let _ = munmap(mapped_addr, mapped_size);
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{brightness_percent_from_control, HandleError};
+
+    #[test]
+    fn brightness_control_result_accepts_inclusive_range() {
+        assert_eq!(brightness_percent_from_control(0).unwrap(), 0);
+        assert_eq!(brightness_percent_from_control(100).unwrap(), 100);
+    }
+
+    #[test]
+    fn brightness_control_result_rejects_out_of_range_values() {
+        for value in [-1, 101, i32::MAX, i32::MIN] {
+            assert_eq!(
+                brightness_percent_from_control(value),
+                Err(HandleError::InvalidParameter)
+            );
         }
     }
 }

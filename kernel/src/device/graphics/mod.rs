@@ -452,6 +452,41 @@ pub trait GraphicsDevice: Device {
     /// Get the device display name
     fn get_display_name(&self) -> &'static str;
 
+    /// Return the current display backlight level as a percentage.
+    ///
+    /// Implementations that expose a physical display backlight must return a
+    /// value in the inclusive `0..=100` range. Devices without a controllable
+    /// backlight retain backward-compatible behavior by returning an error.
+    ///
+    /// # Returns
+    ///
+    /// The current brightness percentage, or an error when this graphics
+    /// device does not provide display-brightness control.
+    fn get_brightness_percent(&self) -> Result<u8, &'static str> {
+        Err("Display brightness control is not supported")
+    }
+
+    /// Set the display backlight level as a percentage.
+    ///
+    /// Implementations must reject values outside the inclusive `0..=100`
+    /// range. Devices without a controllable backlight retain
+    /// backward-compatible behavior by returning an error.
+    ///
+    /// # Arguments
+    ///
+    /// * `percent` - Requested display brightness in the inclusive `0..=100`
+    ///   range, where `0` disables the backlight and `100` requests full
+    ///   brightness.
+    ///
+    /// # Returns
+    ///
+    /// Success after applying the requested level, or an error when the level
+    /// is invalid or this graphics device does not provide
+    /// display-brightness control.
+    fn set_brightness_percent(&self, _percent: u8) -> Result<(), &'static str> {
+        Err("Display brightness control is not supported")
+    }
+
     /// Get framebuffer configuration
     fn get_framebuffer_config(&self) -> Result<FramebufferConfig, &'static str>;
 

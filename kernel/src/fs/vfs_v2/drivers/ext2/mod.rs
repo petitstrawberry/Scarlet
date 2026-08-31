@@ -1272,23 +1272,141 @@ impl Ext2FileSystem {
         Ok(())
     }
 
-    /// Write a single page (4096 bytes) of file content from physical memory.
+    /// Write dirty page-cache pages without constructing a full-file buffer.
     ///
-    /// This is used by the page cache manager for writeback.
-    pub fn write_page_content(
+    /// The old close path copied the complete file into one `Vec` before
+    /// writing it. A growing video spool therefore needed a second contiguous
+    /// allocation as large as the stream. This routine retains at most 64 ext2
+    /// blocks (normally 256 KiB) and commits the inode once per flush.
+    pub fn write_cached_pages(
         &self,
         inode_num: u32,
-        page_index: u64,
-        paddr: usize,
+        file_size: usize,
+        pages: &[(u64, usize)],
     ) -> Result<(), FileSystemError> {
-        profile_scope!("ext2::write_page_content");
+        profile_scope!("ext2::write_cached_pages");
 
-        // TODO: Phase 2 - Implement page writeback
-        let _ = (inode_num, page_index, paddr);
-        Err(FileSystemError::new(
-            FileSystemErrorKind::NotSupported,
-            "Page writeback not yet implemented",
-        ))
+        if pages.is_empty() {
+            return Ok(());
+        }
+        let file_size_u32 = u32::try_from(file_size).map_err(|_| {
+            FileSystemError::new(
+                FileSystemErrorKind::InvalidData,
+                "ext2 file is too large for 32-bit inode size",
+            )
+        })?;
+        let block_size = self.block_size as usize;
+        if block_size == 0 || crate::environment::PAGE_SIZE % block_size != 0 {
+            return Err(FileSystemError::new(
+                FileSystemErrorKind::InvalidData,
+                "ext2 block size is incompatible with page cache",
+            ));
+        }
+
+        let mut inode = self.read_inode(inode_num)?;
+        let mut write_blocks = BTreeMap::new();
+        const WRITEBACK_BLOCK_BATCH: usize = 64;
+
+        for &(page_index, paddr) in pages {
+            let page_offset = usize::try_from(page_index)
+                .ok()
+                .and_then(|index| index.checked_mul(crate::environment::PAGE_SIZE))
+                .ok_or_else(|| {
+                    FileSystemError::new(
+                        FileSystemErrorKind::InvalidData,
+                        "ext2 page writeback offset overflow",
+                    )
+                })?;
+            if page_offset >= file_size {
+                continue;
+            }
+            let page_end = page_offset
+                .saturating_add(crate::environment::PAGE_SIZE)
+                .min(file_size);
+            let first_logical_block = page_offset / block_size;
+            let block_count = (page_end - page_offset + block_size - 1) / block_size;
+            let mut blocks =
+                self.get_inode_blocks(&inode, first_logical_block as u64, block_count as u64)?;
+            blocks.resize(block_count, 0);
+
+            let mut assignments = Vec::new();
+            let mut index = 0usize;
+            while index < blocks.len() {
+                if blocks[index] != 0 {
+                    index += 1;
+                    continue;
+                }
+                let range_start = index;
+                while index < blocks.len() && blocks[index] == 0 {
+                    index += 1;
+                }
+                let count = index - range_start;
+                let allocated = if count >= 3 {
+                    self.allocate_blocks_contiguous(count as u32)?
+                } else {
+                    let mut allocated = Vec::with_capacity(count);
+                    for _ in 0..count {
+                        allocated.push(self.allocate_block()?);
+                    }
+                    allocated
+                };
+                for (relative, block) in allocated.into_iter().enumerate() {
+                    let slot = range_start + relative;
+                    blocks[slot] = block;
+                    assignments.push((
+                        (first_logical_block + slot) as u64,
+                        u32::try_from(block).map_err(|_| {
+                            FileSystemError::new(
+                                FileSystemErrorKind::InvalidData,
+                                "ext2 allocated block number overflow",
+                            )
+                        })?,
+                    ));
+                }
+            }
+            if !assignments.is_empty() {
+                self.set_inode_blocks_simple_batch(&mut inode, &assignments)?;
+            }
+
+            for (relative, &block) in blocks.iter().enumerate() {
+                let block_file_offset = page_offset + relative * block_size;
+                let bytes_to_write = (page_end - block_file_offset).min(block_size);
+                let mut block_data = vec![0u8; block_size];
+                // SAFETY: every supplied physical address owns one pinned page
+                // for the duration of PageCacheManager::flush_batch.
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        (crate::vm::addr::phys_to_virt(paddr) as *const u8)
+                            .add(relative * block_size),
+                        block_data.as_mut_ptr(),
+                        bytes_to_write,
+                    );
+                }
+                write_blocks.insert(block, block_data);
+                if write_blocks.len() >= WRITEBACK_BLOCK_BATCH {
+                    self.write_blocks_cached(&write_blocks)?;
+                    write_blocks.clear();
+                }
+            }
+        }
+
+        if !write_blocks.is_empty() {
+            self.write_blocks_cached(&write_blocks)?;
+        }
+
+        let blocks_needed = if file_size == 0 {
+            0
+        } else {
+            (file_size + block_size - 1) / block_size
+        };
+        inode.size = file_size_u32;
+        inode.mtime = 0;
+        inode.blocks = u32::try_from(blocks_needed)
+            .unwrap_or(u32::MAX)
+            .saturating_mul(self.block_size / 512);
+        self.write_inode(inode_num, &inode)?;
+        self.inode_cache.write().insert(inode_num, inode);
+        Ok(())
     }
 
     /// Write an inode to disk

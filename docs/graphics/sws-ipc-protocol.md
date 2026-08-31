@@ -168,7 +168,9 @@ Payload (12 bytes):
 
 Semantics:
 
-- This is a **programmatic reposition** request to set an absolute window origin.
+- This is a **programmatic reposition** request to set the absolute top-left of
+  the managed window geometry. Before `SET_WINDOW_GEOMETRY`, this is also the
+  complete surface origin.
 - Intended for non-interactive use cases (e.g. centering a dialog, restoring a
 	saved layout).
 - Interactive drag moves should prefer `REQUEST_MOVE_WINDOW` so the compositor can
@@ -440,6 +442,47 @@ from `GET_CAPABILITIES`. SWS responds with a correlated
 connection to later changes, broadcast with the same message type and no
 response flag. SWS does not send message type 35 to clients that have not made
 this request, so clients from before this additive extension remain compatible.
+
+#### `SET_WINDOW_GEOMETRY` (type = 46, protocol version 4)
+
+Payload (20 bytes):
+
+| Offset | Size | Field       | Type |
+|--------|------|-------------|------|
+| 0      | 4    | `window_id` | u32  |
+| 4      | 4    | `x`         | i32  |
+| 8      | 4    | `y`         | i32  |
+| 12     | 4    | `width`     | u32  |
+| 16     | 4    | `height`    | u32  |
+
+The rectangle is expressed in surface-local physical pixels. It identifies the
+managed, interactive window geometry inside the complete client surface. The
+surface may extend outside it for non-functional client-side decoration such as
+a drop shadow.
+
+- `x` and `y` must be non-negative, `width` and `height` must be non-zero, and
+  the complete rectangle must fit inside the current surface bounds.
+- Placement, move coordinates, maximize/fullscreen sizing, resize-edge
+  detection, pointer focus, and pointer lock use the managed geometry.
+- Composition, alpha blending, buffer damage, and local input coordinates keep
+  using the complete surface. This lets transparent shadow pixels render
+  outside the managed rectangle without stealing input.
+- A later buffer resize retains the same four edge insets when they still fit.
+  Clients should resend this request after changing scale or decoration
+  outsets. An invalid rectangle returns `INVALID_WINDOW_GEOMETRY` (112).
+- Before the first successful request, managed geometry equals the complete
+  surface for backward compatibility.
+
+Clients must confirm the `WINDOW_GEOMETRY` capability bit (`1 << 5`) before
+using this request.
+
+ScarletUI's SWS backend enables its standard client-rendered shadow by default
+for custom-framed `NORMAL` windows. The toolkit expands the complete surface,
+advertises the original visible window rectangle with this request, and keeps
+`TASKBAR`, `DESKTOP`, `IME_POPUP`, and explicitly frameless shell surfaces flat.
+Applications may explicitly disable the standard shadow; transient shell UI
+such as Control Center selects the floating elevation while the same top-level
+window machinery derives its surface outsets and managed geometry automatically.
 
 #### `REGISTER_EXTENSION` (type = 100)
 
@@ -1063,8 +1106,9 @@ The Extension API allows specialized bridge servers (like the Wayland bridge) to
 
 - The frame header has no version field. `GET_CAPABILITIES` reports the current
   protocol version; version 3 adds compositor-provided cursor icons and live
-  cursor-theme selection. Input-environment support is additive and advertised
-  by the `INPUT_ENVIRONMENT` capability bit without changing the version.
+  cursor-theme selection, and version 4 adds managed window geometry distinct
+  from the composited surface. Input-environment support is additive and
+  advertised by the `INPUT_ENVIRONMENT` capability bit.
 - The current wire format is the request-routed 8-byte header described above:
   `msg_type: u16`, `flags: u8`, `request_id: u8`, `payload_size: u32`.
 - The older `msg_type: u32`, `payload_size: u32` header is not supported.

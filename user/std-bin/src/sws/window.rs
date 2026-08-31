@@ -68,6 +68,25 @@ impl WindowSizeLimits {
     }
 }
 
+/// Non-visible client-side decoration around a window's managed geometry.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WindowGeometryInsets {
+    pub left: u32,
+    pub top: u32,
+    pub right: u32,
+    pub bottom: u32,
+}
+
+impl WindowGeometryInsets {
+    pub const fn horizontal(self) -> u32 {
+        self.left.saturating_add(self.right)
+    }
+
+    pub const fn vertical(self) -> u32 {
+        self.top.saturating_add(self.bottom)
+    }
+}
+
 /// Window type for Z-order management
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WindowType {
@@ -108,6 +127,10 @@ pub struct Window {
     pub y: i32,
     pub width: u32,
     pub height: u32,
+    /// Insets between complete surface bounds and managed visible geometry.
+    pub window_geometry_insets: WindowGeometryInsets,
+    /// Recenter the managed rectangle when the client advertises it initially.
+    pub center_on_first_geometry: bool,
     pub size_limits: WindowSizeLimits,
     pub title: Option<Vec<u8>>,
     pub visible: bool,
@@ -437,6 +460,8 @@ impl Window {
             y,
             width,
             height,
+            window_geometry_insets: WindowGeometryInsets::default(),
+            center_on_first_geometry: false,
             size_limits: WindowSizeLimits::default(),
             title: None,
             visible: true,
@@ -480,6 +505,8 @@ impl Window {
             y,
             width,
             height,
+            window_geometry_insets: WindowGeometryInsets::default(),
+            center_on_first_geometry: false,
             size_limits: WindowSizeLimits::default(),
             title: None,
             visible: true,
@@ -549,6 +576,8 @@ impl Window {
             y,
             width,
             height,
+            window_geometry_insets: WindowGeometryInsets::default(),
+            center_on_first_geometry: false,
             size_limits: WindowSizeLimits::default(),
             title: None,
             visible: true,
@@ -590,12 +619,105 @@ impl Window {
         self.title = Some(title.as_bytes().to_vec());
     }
 
-    /// Check if point is inside window bounds
+    /// Return the complete surface rectangle used for composition and damage.
+    pub const fn surface_geometry(&self) -> (i32, i32, u32, u32) {
+        (self.x, self.y, self.width, self.height)
+    }
+
+    /// Return the managed visible geometry in screen coordinates.
+    pub fn window_geometry(&self) -> (i32, i32, u32, u32) {
+        let insets = self.window_geometry_insets;
+        (
+            self.x.saturating_add(insets.left as i32),
+            self.y.saturating_add(insets.top as i32),
+            self.width.saturating_sub(insets.horizontal()).max(1),
+            self.height.saturating_sub(insets.vertical()).max(1),
+        )
+    }
+
+    /// Convert managed geometry into the complete surface rectangle.
+    pub fn surface_geometry_for_window_geometry(
+        &self,
+        x: i32,
+        y: i32,
+        width: u32,
+        height: u32,
+    ) -> (i32, i32, u32, u32) {
+        let insets = self.window_geometry_insets;
+        (
+            x.saturating_sub(insets.left as i32),
+            y.saturating_sub(insets.top as i32),
+            width.saturating_add(insets.horizontal()).max(1),
+            height.saturating_add(insets.vertical()).max(1),
+        )
+    }
+
+    /// Set visible geometry in surface-local coordinates while preserving its
+    /// current screen-space origin.
+    pub fn set_window_geometry(
+        &mut self,
+        x: i32,
+        y: i32,
+        width: u32,
+        height: u32,
+    ) -> Result<bool, &'static str> {
+        if x < 0 || y < 0 || width == 0 || height == 0 {
+            return Err("Window geometry must be non-empty and surface-local");
+        }
+        let left = x as u32;
+        let top = y as u32;
+        let right_edge = left
+            .checked_add(width)
+            .ok_or("Window geometry horizontal overflow")?;
+        let bottom_edge = top
+            .checked_add(height)
+            .ok_or("Window geometry vertical overflow")?;
+        if right_edge > self.width || bottom_edge > self.height {
+            return Err("Window geometry exceeds surface bounds");
+        }
+
+        let (visible_x, visible_y, _, _) = self.window_geometry();
+        let next = WindowGeometryInsets {
+            left,
+            top,
+            right: self.width - right_edge,
+            bottom: self.height - bottom_edge,
+        };
+        let next_x = visible_x.saturating_sub(left as i32);
+        let next_y = visible_y.saturating_sub(top as i32);
+        let changed = self.window_geometry_insets != next || self.x != next_x || self.y != next_y;
+        self.window_geometry_insets = next;
+        self.x = next_x;
+        self.y = next_y;
+        Ok(changed)
+    }
+
+    pub(super) fn reconcile_window_geometry_after_resize(&mut self) {
+        let insets = self.window_geometry_insets;
+        if insets.horizontal() < self.width && insets.vertical() < self.height {
+            return;
+        }
+        let (visible_x, visible_y, _, _) = self.window_geometry();
+        self.window_geometry_insets = WindowGeometryInsets::default();
+        self.x = visible_x;
+        self.y = visible_y;
+    }
+
+    /// Check if a point is inside the managed visible window geometry.
     pub fn contains_point(&self, x: i32, y: i32) -> bool {
+        let (window_x, window_y, width, height) = self.window_geometry();
+        x >= window_x
+            && x < window_x.saturating_add(width as i32)
+            && y >= window_y
+            && y < window_y.saturating_add(height as i32)
+    }
+
+    /// Check if a point is inside the complete composited surface bounds.
+    pub fn contains_surface_point(&self, x: i32, y: i32) -> bool {
         x >= self.x
-            && x < self.x + self.width as i32
+            && x < self.x.saturating_add(self.width as i32)
             && y >= self.y
-            && y < self.y + self.height as i32
+            && y < self.y.saturating_add(self.height as i32)
     }
 
     /// Return compositor-visible presentation-state flags.
@@ -631,6 +753,7 @@ impl Window {
         let (w, h) = self.size_limits.clamp(width, height);
         self.width = w;
         self.height = h;
+        self.reconcile_window_geometry_after_resize();
     }
 }
 
@@ -787,6 +910,8 @@ impl WindowManager {
             y,
             width,
             height,
+            window_geometry_insets: WindowGeometryInsets::default(),
+            center_on_first_geometry: false,
             size_limits: WindowSizeLimits::default(),
             title: None,
             visible: true,
@@ -850,6 +975,8 @@ impl WindowManager {
             y,
             width,
             height,
+            window_geometry_insets: WindowGeometryInsets::default(),
+            center_on_first_geometry: false,
             size_limits: WindowSizeLimits::default(),
             title: None, // No title from IPC yet
             visible: true,
@@ -907,6 +1034,7 @@ impl WindowManager {
         }
         window.width = width;
         window.height = height;
+        window.reconcile_window_geometry_after_resize();
         window.buffer = None;
         window.shm = Some(shm);
         window.shm_mapped_addr = shm_mapped_addr;
@@ -1305,17 +1433,22 @@ impl WindowManager {
         }
     }
 
-    /// Set window position (absolute)
+    /// Set the managed visible window position (absolute).
     pub fn set_window_position(&mut self, id: WindowId, x: i32, y: i32) {
-        // Compute delta from current position, then apply to descendants as well.
-        let (dx, dy) = match self.get_window(id) {
-            Some(w) => (x - w.x, y - w.y),
+        // Compute the corresponding surface origin and apply the same movement
+        // delta to transient descendants.
+        let (surface_x, surface_y, dx, dy) = match self.get_window(id) {
+            Some(w) => {
+                let surface_x = x.saturating_sub(w.window_geometry_insets.left as i32);
+                let surface_y = y.saturating_sub(w.window_geometry_insets.top as i32);
+                (surface_x, surface_y, surface_x - w.x, surface_y - w.y)
+            }
             None => return,
         };
 
         if let Some(window) = self.get_window_mut(id) {
-            window.x = x;
-            window.y = y;
+            window.x = surface_x;
+            window.y = surface_y;
         }
 
         if dx != 0 || dy != 0 {
@@ -1328,6 +1461,20 @@ impl WindowManager {
                 }
             }
         }
+    }
+
+    /// Set managed visible geometry inside a complete window surface.
+    pub fn set_window_geometry(
+        &mut self,
+        id: WindowId,
+        x: i32,
+        y: i32,
+        width: u32,
+        height: u32,
+    ) -> Result<bool, &'static str> {
+        self.get_window_mut(id)
+            .ok_or("Window not found")?
+            .set_window_geometry(x, y, width, height)
     }
 
     pub fn resize_window_with_shm(
@@ -1350,6 +1497,7 @@ impl WindowManager {
             // for the provided width/height by the IPC thread.
             w.width = width.max(1);
             w.height = height.max(1);
+            w.reconcile_window_geometry_after_resize();
             w.buffer = None;
             w.shm = Some(shm);
             w.shm_mapped_addr = shm_mapped_addr;
@@ -1372,10 +1520,42 @@ impl WindowManager {
         if let Some(w) = self.get_window_mut(id) {
             w.width = width.max(1);
             w.height = height.max(1);
+            w.reconcile_window_geometry_after_resize();
             true
         } else {
             false
         }
+    }
+
+    /// Resize a surface so its managed window geometry has the requested size.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - Window identifier to resize.
+    /// * `width` - Requested managed geometry width in physical pixels.
+    /// * `height` - Requested managed geometry height in physical pixels.
+    ///
+    /// # Returns
+    ///
+    /// `true` when the window exists and its surface size was updated.
+    pub fn resize_window_geometry_in_place(
+        &mut self,
+        id: WindowId,
+        width: u32,
+        height: u32,
+    ) -> bool {
+        let Some(window) = self.get_window_mut(id) else {
+            return false;
+        };
+        let (_, _, surface_width, surface_height) = window.surface_geometry_for_window_geometry(
+            window.x,
+            window.y,
+            width.max(1),
+            height.max(1),
+        );
+        window.width = surface_width;
+        window.height = surface_height;
+        true
     }
 
     /// Minimize a window (hide from display but keep in window list)
@@ -1422,10 +1602,12 @@ impl WindowManager {
             if !w.maximized {
                 // Save current geometry for restore
                 w.saved_geometry = Some((w.x, w.y, w.width, w.height));
-                w.x = 0;
-                w.y = 0;
-                w.width = screen_width;
-                w.height = screen_height;
+                let (x, y, width, height) =
+                    w.surface_geometry_for_window_geometry(0, 0, screen_width, screen_height);
+                w.x = x;
+                w.y = y;
+                w.width = width;
+                w.height = height;
                 w.maximized = true;
                 println!(
                     "[WindowManager] Window #{} maximized to {}x{}",
@@ -1480,10 +1662,16 @@ impl WindowManager {
 
         window.fullscreen_restore_geometry =
             Some((window.x, window.y, window.width, window.height));
-        window.x = 0;
-        window.y = 0;
-        window.width = screen_width.max(1);
-        window.height = screen_height.max(1);
+        let (x, y, width, height) = window.surface_geometry_for_window_geometry(
+            0,
+            0,
+            screen_width.max(1),
+            screen_height.max(1),
+        );
+        window.x = x;
+        window.y = y;
+        window.width = width;
+        window.height = height;
         window.fullscreen = true;
         println!(
             "[WindowManager] Window #{} entered fullscreen at {}x{}",
@@ -1998,6 +2186,47 @@ mod tests {
     use std::vec::Vec;
 
     use super::WindowManager;
+
+    #[test]
+    fn client_geometry_preserves_visible_origin_and_excludes_shadow_hit_area() {
+        let mut manager = WindowManager::new();
+        let id = manager.create_window_no_buffer(100, 80, 324, 260);
+
+        assert!(manager.set_window_geometry(id, 10, 6, 304, 240).unwrap());
+        let window = manager.get_window(id).unwrap();
+        assert_eq!(window.surface_geometry(), (90, 74, 324, 260));
+        assert_eq!(window.window_geometry(), (100, 80, 304, 240));
+        assert!(window.contains_surface_point(91, 75));
+        assert!(!window.contains_point(91, 75));
+        assert!(window.contains_point(100, 80));
+    }
+
+    #[test]
+    fn managed_position_moves_the_visible_geometry_not_the_shadow_surface() {
+        let mut manager = WindowManager::new();
+        let id = manager.create_window_no_buffer(100, 80, 324, 260);
+        manager.set_window_geometry(id, 10, 6, 304, 240).unwrap();
+
+        manager.set_window_position(id, 200, 150);
+
+        let window = manager.get_window(id).unwrap();
+        assert_eq!(window.surface_geometry(), (190, 144, 324, 260));
+        assert_eq!(window.window_geometry(), (200, 150, 304, 240));
+    }
+
+    #[test]
+    fn maximize_sizes_managed_geometry_to_workarea_and_keeps_shadow_outside() {
+        let mut manager = WindowManager::new();
+        let id = manager.create_window_no_buffer(100, 80, 324, 260);
+        manager.set_window_geometry(id, 10, 6, 304, 240).unwrap();
+
+        assert!(manager.maximize_window(id, 1000, 700));
+        manager.set_window_position(id, 10, 20);
+
+        let window = manager.get_window(id).unwrap();
+        assert_eq!(window.window_geometry(), (10, 20, 1000, 700));
+        assert_eq!(window.surface_geometry(), (0, 14, 1020, 720));
+    }
 
     #[test]
     fn fullscreen_round_trip_restores_normal_geometry() {

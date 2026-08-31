@@ -22,10 +22,13 @@ use scarlet_ui::{
 const WINDOW_WIDTH: f32 = 480.0;
 const WINDOW_HEIGHT: f32 = 480.0;
 const HUD_HEIGHT: f32 = 48.0;
-const WINDOW_CONTENT_LAYOUT: WindowContentLayout = WindowContentLayout::new(true);
-const CONTENT_WIDTH: f32 = WINDOW_WIDTH - WINDOW_CONTENT_LAYOUT.decoration_size().width;
-const CONTENT_HEIGHT: f32 = WINDOW_HEIGHT - WINDOW_CONTENT_LAYOUT.decoration_size().height;
-const CANVAS_ASPECT: f32 = CONTENT_WIDTH / (CONTENT_HEIGHT - HUD_HEIGHT);
+
+fn canvas_aspect() -> f32 {
+    let content_layout = WindowContentLayout::new(true);
+    let content_width = WINDOW_WIDTH - content_layout.decoration_size().width;
+    let content_height = WINDOW_HEIGHT - content_layout.decoration_size().height;
+    content_width / (content_height - HUD_HEIGHT)
+}
 const STATS_INTERVAL_NS: u64 = 500_000_000;
 const PARTICLE_COUNT: usize = 72;
 const CUBE_WINDOW_KEY: &str = "cube";
@@ -431,13 +434,14 @@ fn showcase_menu_bar() -> MenuBarModel {
 }
 
 fn base_frame(frame_number: u64) -> SgfxCanvasFrame {
-    SgfxCanvasFrame::new(frame_number, Color::rgb(6u8, 11u8, 24u8)).reference_aspect(CANVAS_ASPECT)
+    SgfxCanvasFrame::new(frame_number, Color::rgb(6u8, 11u8, 24u8))
+        .reference_aspect(canvas_aspect())
 }
 
 fn projection() -> [f32; 16] {
     perspective(
         50.0 * core::f32::consts::PI / 180.0,
-        CANVAS_ASPECT,
+        canvas_aspect(),
         0.5,
         40.0,
     )

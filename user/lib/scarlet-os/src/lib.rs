@@ -38,6 +38,9 @@ pub mod socket;
 /// Safe current-task scheduler control APIs.
 pub mod scheduler;
 
+/// Scarlet native sensor metadata and event-stream APIs.
+pub mod sensor;
+
 /// Scarlet time APIs.
 pub mod time;
 

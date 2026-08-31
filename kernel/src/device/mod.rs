@@ -30,6 +30,7 @@ pub mod platform;
 pub mod power;
 pub mod remoteproc;
 pub mod reset;
+pub mod sensor;
 pub mod spi;
 pub mod usb;
 pub mod video;
@@ -53,6 +54,8 @@ pub enum DeviceCapability {
     Serial,
     /// Device provides native Scarlet PCM audio.
     Audio,
+    /// Device provides a Scarlet sensor event stream and metadata ABI.
+    Sensor,
 }
 
 pub trait DeviceInfo {

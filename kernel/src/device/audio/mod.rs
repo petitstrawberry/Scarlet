@@ -777,9 +777,22 @@ impl AudioCharDevice {
     fn pump_locked(&self, ring: &mut AudioPcmRing) {
         let completed = self.backend.process_completions();
         if completed != 0 {
-            ring.hw_ptr_frames = ring
+            let next_hw_ptr = ring
                 .hw_ptr_frames
                 .saturating_add(completed as u64 * u64::from(ring.params.period_frames));
+            if next_hw_ptr > ring.submitted_ptr_frames {
+                ring.hw_ptr_frames = ring.submitted_ptr_frames;
+                if ring.state == AUDIO_STATE_RUNNING {
+                    ring.xruns = ring.xruns.saturating_add(1);
+                    ring.state = AUDIO_STATE_XRUN;
+                    println!(
+                        "[audio] pump: XRUN backend advanced beyond submitted data: completed={} hw={} submitted={}",
+                        completed, next_hw_ptr, ring.submitted_ptr_frames
+                    );
+                }
+                return;
+            }
+            ring.hw_ptr_frames = next_hw_ptr;
         }
 
         if ring.state != AUDIO_STATE_RUNNING {

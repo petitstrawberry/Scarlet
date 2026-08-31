@@ -30,10 +30,10 @@ use crate::object::capability::selectable::{
 use crate::object::capability::{ControlOps, MemoryMappingOps};
 use crate::sync::Waker;
 
+use super::InputEvent;
 use super::event_types::EV_SW;
 use super::switch_codes::SW_MAX;
 use super::syn_codes::{SYN_DROPPED, SYN_REPORT};
-use super::InputEvent;
 
 /// Maximum number of events to buffer
 const EVENT_QUEUE_CAPACITY: usize = 256;
@@ -736,19 +736,25 @@ mod tests {
             .with_absolute_axis(0x00, 0, 10)
             .unwrap();
         assert!(metadata.with_absolute_axis(0x00, 0, 20).is_err());
-        assert!(InputDeviceMetadata::new(InputDeviceKind::Touchscreen, 0)
-            .with_absolute_axis(ABS_MAX + 1, 0, 10)
-            .is_err());
+        assert!(
+            InputDeviceMetadata::new(InputDeviceKind::Touchscreen, 0)
+                .with_absolute_axis(ABS_MAX + 1, 0, 10)
+                .is_err()
+        );
     }
 
     #[test_case]
     fn test_multitouch_slot_metadata_bounds_and_control() {
-        assert!(InputDeviceMetadata::new(InputDeviceKind::Touchscreen, 0)
-            .with_multitouch_slots(0)
-            .is_err());
-        assert!(InputDeviceMetadata::new(InputDeviceKind::Touchscreen, 0)
-            .with_multitouch_slots(MAX_MT_SLOTS + 1)
-            .is_err());
+        assert!(
+            InputDeviceMetadata::new(InputDeviceKind::Touchscreen, 0)
+                .with_multitouch_slots(0)
+                .is_err()
+        );
+        assert!(
+            InputDeviceMetadata::new(InputDeviceKind::Touchscreen, 0)
+                .with_multitouch_slots(MAX_MT_SLOTS + 1)
+                .is_err()
+        );
 
         let metadata = InputDeviceMetadata::new(InputDeviceKind::Touchscreen, 0)
             .with_multitouch_slots(MAX_MT_SLOTS)
@@ -804,14 +810,17 @@ mod tests {
                 .unwrap(),
             0
         );
-        assert!(dev
-            .control(SCTL_INPUT_GET_SWITCH_STATE, SW_MAX as usize + 1)
-            .is_err());
-        assert!(InputDeviceMetadata::new(InputDeviceKind::Switch, 0)
-            .with_switch(SW_LID)
-            .unwrap()
-            .with_switch(SW_LID)
-            .is_err());
+        assert!(
+            dev.control(SCTL_INPUT_GET_SWITCH_STATE, SW_MAX as usize + 1)
+                .is_err()
+        );
+        assert!(
+            InputDeviceMetadata::new(InputDeviceKind::Switch, 0)
+                .with_switch(SW_LID)
+                .unwrap()
+                .with_switch(SW_LID)
+                .is_err()
+        );
     }
 
     #[test_case]

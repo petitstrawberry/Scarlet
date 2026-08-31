@@ -28,7 +28,7 @@ use std::vec::Vec;
 pub const MAX_PAYLOAD_SIZE: usize = 1024 * 1024; // 1 MiB
 
 /// Current SWS capability-negotiation protocol version.
-pub const SWS_PROTOCOL_VERSION: u32 = 3;
+pub const SWS_PROTOCOL_VERSION: u32 = 4;
 
 /// Maximum damage rectangles carried by one shared SGFX frame commit.
 pub const SGFX_MAX_DAMAGE_RECTS: usize = 16;
@@ -45,6 +45,8 @@ pub mod capabilities {
     pub const CURSOR_THEMES: u64 = 1 << 3;
     /// Clients may query and subscribe to the current input environment.
     pub const INPUT_ENVIRONMENT: u64 = 1 << 4;
+    /// Clients may distinguish visible window geometry from surface bounds.
+    pub const WINDOW_GEOMETRY: u64 = 1 << 5;
 }
 
 /// Known input-environment state bits.
@@ -222,6 +224,8 @@ pub mod error_codes {
     pub const INVALID_CURSOR_THEME: u32 = 110;
     /// SWS loaded the cursor theme but could not persist the selection.
     pub const CURSOR_THEME_PERSIST_FAILED: u32 = 111;
+    /// The requested visible geometry is empty or outside the surface bounds.
+    pub const INVALID_WINDOW_GEOMETRY: u32 = 112;
 }
 
 /// Message type IDs (client -> server).
@@ -283,6 +287,8 @@ pub mod client_msg {
     pub const SET_CURSOR_THEME: u32 = 44;
     /// Query the current input environment snapshot.
     pub const GET_INPUT_ENVIRONMENT: u32 = 45;
+    /// Set the visible window geometry inside the complete surface bounds.
+    pub const SET_WINDOW_GEOMETRY: u32 = 46;
 
     // Text input client API messages (200-219)
     pub const TEXT_INPUT_CREATE: u32 = 200;
@@ -873,6 +879,24 @@ pub enum WindowPlacement {
     Absolute { x: i32, y: i32 },
 }
 
+/// Visible window geometry in surface-local physical pixels.
+///
+/// The complete surface may extend outside this rectangle for non-functional
+/// client-side decoration such as drop shadows. Placement, window management,
+/// and pointer targeting use this rectangle; composition and damage continue
+/// to use the complete surface bounds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WindowGeometry {
+    /// Horizontal offset from the surface origin.
+    pub x: i32,
+    /// Vertical offset from the surface origin.
+    pub y: i32,
+    /// Visible width. Must be non-zero.
+    pub width: u32,
+    /// Visible height. Must be non-zero.
+    pub height: u32,
+}
+
 /// Borrowed client->server messages (payload may be borrowed).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClientMessageRef<'a> {
@@ -1133,6 +1157,11 @@ pub enum ClientMessageRef<'a> {
     SetWindowHasAlphaContent {
         window_id: u32,
         has_alpha: bool,
+    },
+    /// Set the visible geometry inside a window's complete surface.
+    SetWindowGeometry {
+        window_id: u32,
+        geometry: WindowGeometry,
     },
     SetWindowMenuTitles {
         window_id: u32,
@@ -2127,6 +2156,20 @@ pub fn parse_client_message<'a>(
             Ok(ClientMessageRef::SetWindowHasAlphaContent {
                 window_id,
                 has_alpha,
+            })
+        }
+        client_msg::SET_WINDOW_GEOMETRY => {
+            if payload.len() != 20 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            Ok(ClientMessageRef::SetWindowGeometry {
+                window_id: read_u32(payload, 0)?,
+                geometry: WindowGeometry {
+                    x: read_i32(payload, 4)?,
+                    y: read_i32(payload, 8)?,
+                    width: read_u32(payload, 12)?,
+                    height: read_u32(payload, 16)?,
+                },
             })
         }
         client_msg::SET_WINDOW_MENU_TITLES => {
@@ -4675,21 +4718,59 @@ pub fn payload_set_window_has_alpha_content(window_id: u32, has_alpha: bool) -> 
     payload
 }
 
+/// Build payload for client->server `SET_WINDOW_GEOMETRY`.
+///
+/// # Arguments
+///
+/// * `window_id` - Target window owned by the client.
+/// * `geometry` - Visible rectangle in surface-local physical pixels.
+///
+/// # Returns
+///
+/// A fixed-width geometry payload.
+pub fn payload_set_window_geometry(window_id: u32, geometry: WindowGeometry) -> [u8; 20] {
+    let mut payload = [0u8; 20];
+    payload[0..4].copy_from_slice(&window_id.to_le_bytes());
+    payload[4..8].copy_from_slice(&geometry.x.to_le_bytes());
+    payload[8..12].copy_from_slice(&geometry.y.to_le_bytes());
+    payload[12..16].copy_from_slice(&geometry.width.to_le_bytes());
+    payload[16..20].copy_from_slice(&geometry.height.to_le_bytes());
+    payload
+}
+
 #[cfg(all(test, feature = "std"))]
 mod tests {
     use super::{
         CURSOR_THEME_PATH_MAX_BYTES, ClientMessageRef, CursorIcon, InputEnvironment, MessageHeader,
-        ProtocolError, ServerMessage, WindowPlacement, client_msg, encode_routed_frame,
-        error_codes, input_environment_capability_flags, input_environment_known_flags,
-        input_environment_state_flags, parse_client_message, parse_server_message,
-        payload_activation_token, payload_create_window_with_placement,
+        ProtocolError, ServerMessage, WindowGeometry, WindowPlacement, client_msg,
+        encode_routed_frame, error_codes, input_environment_capability_flags,
+        input_environment_known_flags, input_environment_state_flags, parse_client_message,
+        parse_server_message, payload_activation_token, payload_create_window_with_placement,
         payload_create_window_with_placement_and_activation_token,
         payload_create_window_with_position, payload_error, payload_input_environment_changed,
         payload_pointer_lock_changed, payload_request_activation_token, payload_set_cursor_icon,
         payload_set_cursor_theme, payload_set_fullscreen, payload_set_pointer_lock,
-        payload_unset_fullscreen, payload_window_state_changed, server_msg, window_placement,
-        window_state,
+        payload_set_window_geometry, payload_unset_fullscreen, payload_window_state_changed,
+        server_msg, window_placement, window_state,
     };
+
+    #[test]
+    fn window_geometry_round_trips_signed_offsets_and_visible_extent() {
+        let geometry = WindowGeometry {
+            x: 10,
+            y: 6,
+            width: 304,
+            height: 240,
+        };
+        let payload = payload_set_window_geometry(42, geometry);
+        assert_eq!(
+            parse_client_message(client_msg::SET_WINDOW_GEOMETRY, &payload),
+            Ok(ClientMessageRef::SetWindowGeometry {
+                window_id: 42,
+                geometry,
+            })
+        );
+    }
 
     #[test]
     fn create_window_placement_preserves_focus_policies() {

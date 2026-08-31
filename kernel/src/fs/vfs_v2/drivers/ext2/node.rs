@@ -260,50 +260,16 @@ impl Ext2FileObject {
             None => on_disk,
         };
 
-        let mut buffer = Vec::with_capacity(eff_size);
-        buffer.resize(eff_size, 0);
         let cache_id = self.cache_id();
-        let page_count = (eff_size + PAGE_SIZE - 1) / PAGE_SIZE;
-        for page_index in 0..(page_count as u64) {
-            let start = page_index as usize * PAGE_SIZE;
-            let len = core::cmp::min(PAGE_SIZE, eff_size.saturating_sub(start));
-            if len == 0 {
-                break;
-            }
-
-            let pinned = if let Some(p) = PageCacheManager::global().try_pin(cache_id, page_index) {
-                p
-            } else {
-                PageCacheManager::global()
-                    .pin_or_load(cache_id, page_index, |paddr| {
-                        ext2_fs
-                            .read_page_content(self.inode_number, page_index, paddr)
-                            .map_err(|_| "io error")
-                    })
-                    .map_err(|_| {
-                        crate::println!(
-                            "[ext2] sync_to_disk: pin_or_load failed for inode {} page {}",
-                            self.inode_number,
-                            page_index
-                        );
-                        StreamError::IoError
-                    })?
-            };
-
-            unsafe {
-                core::ptr::copy_nonoverlapping(
-                    phys_to_virt(pinned.paddr()) as *const u8,
-                    buffer.as_mut_ptr().add(start),
-                    len,
-                );
-            }
-        }
-
-        ext2_fs
-            .write_file_content(self.inode_number, &buffer)
+        PageCacheManager::global()
+            .flush_batch(cache_id, |pages| {
+                ext2_fs
+                    .write_cached_pages(self.inode_number, eff_size, pages)
+                    .map_err(|_| "ext2 page writeback failed")
+            })
             .map_err(|e| {
                 crate::println!(
-                    "[ext2] sync_to_disk: write_file_content failed for inode {} (size {}): {:?}",
+                    "[ext2] sync_to_disk: page writeback failed for inode {} (size {}): {:?}",
                     self.inode_number,
                     eff_size,
                     e
@@ -311,8 +277,10 @@ impl Ext2FileObject {
                 StreamError::IoError
             })?;
 
-        *self.size_override.lock() = None;
-        *self.dirty.lock() = false;
+        if !PageCacheManager::global().has_dirty_pages(cache_id) {
+            *self.size_override.lock() = None;
+            *self.dirty.lock() = false;
+        }
         Ok(())
     }
 

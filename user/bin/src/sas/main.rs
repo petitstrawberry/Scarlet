@@ -15,7 +15,6 @@ use core::sync::atomic::{Ordering, compiler_fence};
 use core::time::Duration;
 
 use sbus_client as sbus;
-use scarlet_os::time::monotonic_time_ns;
 use std::audio::{
     AUDIO_DEVICE_KIND_HEADPHONES, AUDIO_DEVICE_KIND_SPEAKERS, AUDIO_PCM_FORMAT_S16LE, AudioDevice,
     AudioDeviceInfo, AudioPcmCapabilities, AudioPcmParams, AudioVolumeCurve,
@@ -169,61 +168,6 @@ struct MixPeriodResult {
     pending: bool,
     draining: bool,
     has_clients: bool,
-}
-
-struct OutputPacer {
-    period_ns: u64,
-    next_period_ns: Option<u64>,
-}
-
-impl OutputPacer {
-    fn new(params: &AudioPcmParams) -> Self {
-        Self {
-            period_ns: u64::from(params.period_frames).saturating_mul(1_000_000_000)
-                / u64::from(params.rate),
-            next_period_ns: None,
-        }
-    }
-
-    fn reset(&mut self) {
-        self.next_period_ns = None;
-    }
-
-    fn update_params(&mut self, params: &AudioPcmParams) {
-        let period_ns =
-            u64::from(params.period_frames).saturating_mul(1_000_000_000) / u64::from(params.rate);
-        if self.period_ns != period_ns {
-            self.period_ns = period_ns;
-            self.reset();
-        }
-    }
-
-    fn wait_for_next_period(&mut self) {
-        if self.period_ns == 0 {
-            return;
-        }
-
-        let now_ns = monotonic_time_ns();
-        let deadline_ns = self
-            .next_period_ns
-            .unwrap_or_else(|| now_ns.saturating_add(self.period_ns));
-        if now_ns < deadline_ns {
-            sleep(Duration::from_nanos(deadline_ns - now_ns));
-        }
-
-        // Keep an absolute cadence so a hardware wait that already consumed a
-        // period does not add another full-period delay. If this task woke up
-        // late, skip missed deadlines instead of trying to catch up in a busy
-        // loop.
-        let after_sleep_ns = monotonic_time_ns();
-        let periods_elapsed = after_sleep_ns
-            .saturating_sub(deadline_ns)
-            .checked_div(self.period_ns)
-            .unwrap_or(0)
-            .saturating_add(1);
-        self.next_period_ns =
-            Some(deadline_ns.saturating_add(self.period_ns.saturating_mul(periods_elapsed)));
-    }
 }
 
 struct ClientMixResult {
@@ -777,17 +721,14 @@ fn audio_thread(state: Arc<Mutex<ServerState>>, output: OutputDevice) {
 
     let mut mixer = ScalarF32Mixer::new();
     let mut mixed = Vec::new();
-    let mut pacer = OutputPacer::new(&output.params);
     let mut output = Some(output);
     loop {
         apply_pending_output(&state, &mut output);
         let Some(output_device) = output.as_mut() else {
-            pacer.reset();
             discard_client_queues(&state);
             sleep(Duration::from_millis(5));
             continue;
         };
-        pacer.update_params(&output_device.params);
         let samples_per_period =
             output_device.params.period_frames as usize * output_device.params.channels as usize;
         if mixed.len() != samples_per_period {
@@ -799,7 +740,6 @@ fn audio_thread(state: Arc<Mutex<ServerState>>, output: OutputDevice) {
             if let Err(e) = output_device.wait_writable_period() {
                 println!("sas: output error: {}", e);
                 output_device.stop_stream();
-                pacer.reset();
                 discard_client_queues(&state);
                 sleep(Duration::from_millis(20));
                 continue;
@@ -813,34 +753,24 @@ fn audio_thread(state: Arc<Mutex<ServerState>>, output: OutputDevice) {
             output_device.params.period_frames as usize,
         );
         if result.active {
-            match output_device.write_period(&mixed, result.draining) {
-                Ok(()) if output_device.is_started() => pacer.wait_for_next_period(),
-                Ok(()) => pacer.reset(),
-                Err(e) => {
-                    println!("sas: output error: {}", e);
-                    output_device.stop_stream();
-                    pacer.reset();
-                    discard_client_queues(&state);
-                    sleep(Duration::from_millis(20));
-                }
+            if let Err(e) = output_device.write_period(&mixed, result.draining) {
+                println!("sas: output error: {}", e);
+                output_device.stop_stream();
+                discard_client_queues(&state);
+                sleep(Duration::from_millis(20));
             }
         } else if result.has_clients && output_device.is_started() {
-            match output_device.write_period(&mixed, false) {
-                Ok(()) => pacer.wait_for_next_period(),
-                Err(e) => {
-                    println!("sas: output error: {}", e);
-                    output_device.stop_stream();
-                    pacer.reset();
-                    discard_client_queues(&state);
-                    sleep(Duration::from_millis(20));
-                }
+            if let Err(e) = output_device.write_period(&mixed, false) {
+                println!("sas: output error: {}", e);
+                output_device.stop_stream();
+                discard_client_queues(&state);
+                sleep(Duration::from_millis(20));
             }
         } else if result.pending {
             sleep(Duration::from_millis(1));
         } else {
             if !result.has_clients {
                 output_device.stop_stream();
-                pacer.reset();
             }
             sleep(Duration::from_millis(5));
         }

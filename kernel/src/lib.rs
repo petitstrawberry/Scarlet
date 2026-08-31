@@ -427,6 +427,12 @@ pub struct BootInfo {
     pub cpu_count: usize,
     /// Physical memory area available for PMM allocation (usable RAM excluding reserved regions)
     pub usable_memory_paddr: MemoryArea,
+    /// Every physical RAM region available to the PMM.
+    ///
+    /// `usable_memory_paddr` remains the primary boot-time scratch region for
+    /// compatibility, while this set prevents fragmented firmware memory maps
+    /// from silently discarding otherwise usable RAM.
+    pub usable_memory_regions: DirectMapRegions,
     /// Sparse physical regions mapped into Scarlet's HHDM (direct map).
     pub direct_map_regions: DirectMapRegions,
     /// Optional initramfs physical memory area
@@ -480,10 +486,18 @@ impl BootInfo {
         framebuffer_paddr: Option<MemoryArea>,
         start_secondary_cpus_hook: Option<fn()>,
     ) -> Self {
+        let mut usable_memory_regions = DirectMapRegions::new();
+        usable_memory_regions
+            .insert(
+                usable_memory_paddr,
+                crate::vm::vmem::MemoryAttribute::Normal,
+            )
+            .expect("primary usable memory region is invalid");
         Self {
             cpu_id,
             cpu_count,
             usable_memory_paddr,
+            usable_memory_regions,
             direct_map_regions,
             initramfs_paddr,
             hhdm_offset,
@@ -492,6 +506,16 @@ impl BootInfo {
             framebuffer_paddr,
             start_secondary_cpus_hook,
         }
+    }
+
+    /// Replace the default single PMM region with the complete firmware RAM set.
+    pub fn with_usable_memory_regions(mut self, regions: DirectMapRegions) -> Self {
+        assert!(
+            !regions.is_empty(),
+            "usable memory region set must not be empty"
+        );
+        self.usable_memory_regions = regions;
+        self
     }
 
     /// Returns the kernel command line arguments
@@ -621,12 +645,17 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
     early_println!("[Scarlet Kernel] Boot on CPU {}", cpu_id);
     early_println!("[Scarlet Kernel] Detected {} CPU(s)", cpu_count);
     let usable_memory_paddr = boot_info.usable_memory_paddr;
+    let usable_memory_regions = boot_info.usable_memory_regions;
     let direct_map_regions = boot_info.direct_map_regions;
     let hhdm_offset = boot_info.hhdm_offset;
     early_println!(
         "[Scarlet Kernel] Usable memory (PA) : {:#x} - {:#x}",
         usable_memory_paddr.start,
         usable_memory_paddr.end
+    );
+    early_println!(
+        "[Scarlet Kernel] PMM usable regions : {}",
+        usable_memory_regions.len()
     );
     let direct_map_bounds = direct_map_regions
         .bounding_area()
@@ -651,10 +680,16 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
     }
 
     early_println!("[Scarlet Kernel] Initializing PMM...");
-    let pmm_start_aligned = (usable_memory_paddr.start + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
-    if pmm_start_aligned < usable_memory_paddr.end {
-        unsafe {
-            mem::pmm::init(MemoryArea::new(pmm_start_aligned, usable_memory_paddr.end));
+    for index in 0..usable_memory_regions.len() {
+        let region = usable_memory_regions
+            .get(index)
+            .expect("usable memory region index must be valid")
+            .area();
+        let pmm_start_aligned = (region.start + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+        if pmm_start_aligned < region.end {
+            unsafe {
+                mem::pmm::init(MemoryArea::new(pmm_start_aligned, region.end));
+            }
         }
     }
 

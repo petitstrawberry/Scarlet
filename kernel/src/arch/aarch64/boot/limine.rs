@@ -8,7 +8,7 @@ use crate::boot::limine::{
     DTB_REQUEST, EXECUTABLE_ADDRESS_REQUEST, FRAMEBUFFER_REQUEST, HHDM_REQUEST, MEMMAP_REQUEST,
     MODULE_REQUEST, MP_REQUEST, boot_cmdline, bootloader_hhdm_physical_bound,
     ensure_base_revision_supported, framebuffer_area, module_area, reserve_front, response,
-    runtime_direct_map_regions, select_usable_region,
+    runtime_direct_map_regions, select_usable_region, usable_memory_regions,
 };
 use crate::device::fdt::{FdtManager, init_fdt, relocate_fdt};
 use crate::environment::{PAGE_SIZE, STACK_SIZE};
@@ -672,6 +672,13 @@ extern "C" fn limine_entry_after_el_drop(_arg0: usize, inherited_sctlr: u64) -> 
     bootstrap_aps();
     register_cpu_topology_from_fdt();
 
+    let usable_memory_regions = usable_memory_regions(
+        memmap.entries(),
+        usable_region,
+        usable_memory_paddr,
+        framebuffer_paddr,
+    )
+    .unwrap_or_else(|error| panic!("failed to build PMM memory regions: {}", error));
     let bootinfo = BootInfo::new(
         cpu_id,
         cpu_count,
@@ -683,7 +690,8 @@ extern "C" fn limine_entry_after_el_drop(_arg0: usize, inherited_sctlr: u64) -> 
         DeviceSource::Fdt(relocated_fdt_paddr),
         framebuffer_paddr,
         Some(start_secondary_cpus),
-    );
+    )
+    .with_usable_memory_regions(usable_memory_regions);
 
     crate::arch::init_user_context_from_fdt();
 

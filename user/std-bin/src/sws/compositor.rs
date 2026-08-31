@@ -135,6 +135,26 @@ mod touch_modality_tests {
     }
 
     #[test]
+    fn direct_touch_can_authorize_move_without_mouse_button_state() {
+        assert_eq!(
+            interactive_move_grab_origin(false, Some((640, 360)), None, (20, 30)),
+            Some((640, 360))
+        );
+    }
+
+    #[test]
+    fn interactive_move_requires_a_mouse_or_direct_touch_grab() {
+        assert_eq!(
+            interactive_move_grab_origin(false, None, Some((10, 20)), (30, 40)),
+            None
+        );
+        assert_eq!(
+            interactive_move_grab_origin(true, None, Some((10, 20)), (30, 40)),
+            Some((10, 20))
+        );
+    }
+
+    #[test]
     fn maximized_normal_window_tracks_shell_workarea() {
         assert_eq!(
             maximized_geometry_for(
@@ -767,6 +787,8 @@ struct DirectTouchGrab {
     tracking_id: i32,
     window_id: u32,
     legacy_primary: bool,
+    /// This contact has taken over a client-requested interactive move.
+    driving_move_drag: bool,
     screen_x: i32,
     screen_y: i32,
 }
@@ -842,6 +864,15 @@ fn normalized_touch_to_screen(value: i32, dimension: u32) -> i32 {
     (i64::from(value.clamp(0, TOUCH_COORD_MAX))
         .saturating_mul(i64::from(dimension.saturating_sub(1)))
         / i64::from(TOUCH_COORD_MAX)) as i32
+}
+
+fn interactive_move_grab_origin(
+    mouse_button_down: bool,
+    direct_touch: Option<(i32, i32)>,
+    last_mouse_down: Option<(i32, i32)>,
+    cursor: (i32, i32),
+) -> Option<(i32, i32)> {
+    direct_touch.or_else(|| mouse_button_down.then(|| last_mouse_down.unwrap_or(cursor)))
 }
 
 fn maximized_geometry_for(
@@ -1349,14 +1380,8 @@ impl Compositor {
                 );
                 self.window_manager.set_window_position(window_id, 0, 0);
                 self.window_manager
-                    .resize_window_in_place(window_id, new_width, new_height);
-                let payload =
-                    sws_protocol::payload_window_configure(window_id, new_width, new_height);
-                super::ipc::send_message_to_window(
-                    window_id,
-                    sws_protocol::server_msg::WINDOW_CONFIGURE,
-                    payload.to_vec(),
-                );
+                    .resize_window_geometry_in_place(window_id, new_width, new_height);
+                self.send_current_window_configure(window_id);
                 continue;
             }
             match window_type {
@@ -2242,7 +2267,7 @@ impl Compositor {
             .get_windows()
             .iter()
             .rev()
-            .find(|w| w.visible && w.contains_point(sx, sy))
+            .find(|w| w.visible && w.contains_surface_point(sx, sy))
         {
             let local_x = (sx - window.x) as u32;
             let local_y = (sy - window.y) as u32;
@@ -2912,11 +2937,7 @@ impl Compositor {
         // println!("[Boundary Check] Window #{}: cursor=({}, {}), window pos=({}, {}), size={}x{}, window_local=({}, {})",
         //     window_id, self.cursor.x, self.cursor.y, window.x, window.y, window.width, window.height, window_x, window_y);
 
-        if window_x >= 0
-            && window_x < window.width as i32
-            && window_y >= 0
-            && window_y < window.height as i32
-        {
+        if window.contains_point(self.cursor.x, self.cursor.y) {
             // println!("[Boundary Check] -> INSIDE");
             Some((window_x, window_y))
         } else {
@@ -3066,6 +3087,13 @@ impl Compositor {
                         DirectLegacyEventKind::Release
                     };
                     self.send_direct_legacy_event(grab, kind);
+                    if grab.driving_move_drag
+                        && self
+                            .move_drag
+                            .is_some_and(|state| state.window_id == grab.window_id)
+                    {
+                        self.move_drag = None;
+                    }
                 }
             } else {
                 index += 1;
@@ -3081,8 +3109,29 @@ impl Compositor {
             if let Some(index) = self.direct_touch_grabs.iter().position(|grab| {
                 grab.source == frame.source && grab.tracking_id == contact.tracking_id
             }) {
+                let previous = self.direct_touch_grabs[index];
                 self.direct_touch_grabs[index].screen_x = screen_x;
                 self.direct_touch_grabs[index].screen_y = screen_y;
+                if previous.legacy_primary
+                    && let Some(mut state) = self.move_drag
+                    && state.window_id == previous.window_id
+                {
+                    // request_move_window is shared with mouse input and is
+                    // initially anchored to the cursor.  A direct contact
+                    // deliberately never moves that cursor, so rebase the
+                    // first touch-driven update to the finger's previous
+                    // position and keep using finger deltas thereafter.
+                    if !previous.driving_move_drag {
+                        state.grab_cursor_x = previous.screen_x;
+                        state.grab_cursor_y = previous.screen_y;
+                        self.direct_touch_grabs[index].driving_move_drag = true;
+                    }
+                    let new_x = state.start_window_x + (screen_x - state.grab_cursor_x);
+                    let new_y = state.start_window_y + (screen_y - state.grab_cursor_y);
+                    self.move_drag = Some(state);
+                    self.set_window_position_with_damage(state.window_id, new_x, new_y);
+                    redraw = true;
+                }
                 let grab = self.direct_touch_grabs[index];
                 if grab.legacy_primary {
                     self.send_direct_legacy_event(grab, DirectLegacyEventKind::Move);
@@ -3106,6 +3155,7 @@ impl Compositor {
                 tracking_id: contact.tracking_id,
                 window_id,
                 legacy_primary,
+                driving_move_drag: false,
                 screen_x,
                 screen_y,
             };
@@ -3173,14 +3223,15 @@ impl Compositor {
         };
 
         if window.resizable && !window.fullscreen {
-            let local_x = self.cursor.x.saturating_sub(window.x);
-            let local_y = self.cursor.y.saturating_sub(window.y);
-            let inside = local_x >= 0
-                && local_y >= 0
-                && local_x < window.width as i32
-                && local_y < window.height as i32;
-            let near_right = inside && local_x >= window.width as i32 - RESIZE_GRIP_PX;
-            let near_bottom = inside && local_y >= window.height as i32 - RESIZE_GRIP_PX;
+            let (geometry_x, geometry_y, geometry_width, geometry_height) =
+                window.window_geometry();
+            let inside = window.contains_point(self.cursor.x, self.cursor.y);
+            let near_right = inside
+                && self.cursor.x
+                    >= geometry_x.saturating_add(geometry_width as i32 - RESIZE_GRIP_PX);
+            let near_bottom = inside
+                && self.cursor.y
+                    >= geometry_y.saturating_add(geometry_height as i32 - RESIZE_GRIP_PX);
             match (near_right, near_bottom) {
                 (true, true) => return sws_protocol::CursorIcon::ResizeNwse,
                 (true, false) => return sws_protocol::CursorIcon::ResizeEw,
@@ -3278,7 +3329,7 @@ impl Compositor {
         if let Some((x, y, width, height)) = self
             .window_manager
             .get_window(state.window_id)
-            .map(|window| (window.x, window.y, window.width, window.height))
+            .map(|window| window.window_geometry())
         {
             let max_x = x.saturating_add(width.saturating_sub(1) as i32);
             let max_y = y.saturating_add(height.saturating_sub(1) as i32);
@@ -3338,14 +3389,11 @@ impl Compositor {
         }
 
         let cursor_rect = self.cursor_rect();
-        let max_x = window
-            .x
-            .saturating_add(window.width.saturating_sub(1) as i32);
-        let max_y = window
-            .y
-            .saturating_add(window.height.saturating_sub(1) as i32);
-        let locked_x = self.cursor.x.clamp(window.x, max_x);
-        let locked_y = self.cursor.y.clamp(window.y, max_y);
+        let (geometry_x, geometry_y, geometry_width, geometry_height) = window.window_geometry();
+        let max_x = geometry_x.saturating_add(geometry_width.saturating_sub(1) as i32);
+        let max_y = geometry_y.saturating_add(geometry_height.saturating_sub(1) as i32);
+        let locked_x = self.cursor.x.clamp(geometry_x, max_x);
+        let locked_y = self.cursor.y.clamp(geometry_y, max_y);
         self.add_pending_damage(cursor_rect);
         self.cursor
             .set_position(locked_x, locked_y, self.screen_width, self.screen_height);
@@ -4051,9 +4099,15 @@ impl Compositor {
 
                         // Start interactive resize if we're near the bottom/right edge.
                         if let Some(window) = self.window_manager.get_window(win_id) {
-                            if let Some((wx, wy)) = self.cursor_position_in_window(window) {
-                                let near_right = wx >= window.width as i32 - RESIZE_GRIP_PX;
-                                let near_bottom = wy >= window.height as i32 - RESIZE_GRIP_PX;
+                            if self.cursor_position_in_window(window).is_some() {
+                                let (geometry_x, geometry_y, geometry_width, geometry_height) =
+                                    window.window_geometry();
+                                let near_right = self.cursor.x
+                                    >= geometry_x
+                                        .saturating_add(geometry_width as i32 - RESIZE_GRIP_PX);
+                                let near_bottom = self.cursor.y
+                                    >= geometry_y
+                                        .saturating_add(geometry_height as i32 - RESIZE_GRIP_PX);
                                 // Only allow resize if window is marked as resizable
                                 if (near_right || near_bottom)
                                     && window.resizable
@@ -4725,13 +4779,11 @@ impl Compositor {
         let mut changed = false;
 
         for window_id in window_ids {
-            let Some((old_x, old_y, old_width, old_height, visible)) =
+            let Some((old_surface, old_geometry, visible)) =
                 self.window_manager.get_window(window_id).map(|window| {
                     (
-                        window.x,
-                        window.y,
-                        window.width,
-                        window.height,
+                        window.surface_geometry(),
+                        window.window_geometry(),
                         window.visible,
                     )
                 })
@@ -4741,16 +4793,22 @@ impl Compositor {
             let Some((x, y, width, height)) = self.maximized_geometry(window_id) else {
                 continue;
             };
-            if (old_x, old_y, old_width, old_height) == (x, y, width, height) {
+            if old_geometry == (x, y, width, height) {
                 continue;
             }
 
             self.window_manager.set_window_position(window_id, x, y);
             self.window_manager
-                .resize_window_in_place(window_id, width, height);
+                .resize_window_geometry_in_place(window_id, width, height);
             if visible {
-                self.add_pending_damage((old_x, old_y, old_width, old_height));
-                self.add_pending_damage((x, y, width, height));
+                self.add_pending_damage(old_surface);
+                if let Some(new_surface) = self
+                    .window_manager
+                    .get_window(window_id)
+                    .map(|window| window.surface_geometry())
+                {
+                    self.add_pending_damage(new_surface);
+                }
             }
             self.send_current_window_configure(window_id);
             changed = true;
@@ -4876,7 +4934,10 @@ impl Compositor {
                         && !window.minimized
                 })
         });
-        let anchor_position = anchor.map(|window| (window.x, window.y));
+        let anchor_position = anchor.map(|window| {
+            let (x, y, _, _) = window.window_geometry();
+            (x, y)
+        });
 
         let (bounds_x, bounds_y, bounds_width, bounds_height) =
             self.workarea
@@ -4909,6 +4970,16 @@ impl Compositor {
             desired_y
                 .clamp(min_y, max_y)
                 .clamp(i32::MIN as i64, i32::MAX as i64) as i32,
+        )
+    }
+
+    fn centered_window_position(&self, width: u32, height: u32) -> (i32, i32) {
+        let (work_x, work_y, work_width, work_height) =
+            self.workarea
+                .unwrap_or((0, 0, self.screen_width, self.screen_height));
+        (
+            work_x + (work_width as i32 - width as i32).max(0) / 2,
+            work_y + (work_height as i32 - height as i32).max(0) / 2,
         )
     }
 
@@ -4947,6 +5018,8 @@ impl Compositor {
                     focus_on_create = true;
                     active_on_focus = true;
                 }
+                let center_on_first_geometry =
+                    matches!(initial_position, sws_protocol::WindowPlacement::Centered);
 
                 // Calculate initial position based on window type
                 let (x, y) = match initial_position {
@@ -4958,11 +5031,7 @@ impl Compositor {
                         (x, y)
                     }
                     sws_protocol::WindowPlacement::Centered => {
-                        let (work_x, work_y, work_width, work_height) =
-                            self.workarea
-                                .unwrap_or((0, 0, self.screen_width, self.screen_height));
-                        let x = work_x + (work_width as i32 - width as i32).max(0) / 2;
-                        let y = work_y + (work_height as i32 - height as i32).max(0) / 2;
+                        let (x, y) = self.centered_window_position(width, height);
                         println!(
                             "[Compositor] Centering window #{} in workarea at ({}, {})",
                             window_id, x, y
@@ -5034,6 +5103,7 @@ impl Compositor {
                 if let Some(window) = self.window_manager.get_window_mut(window_id) {
                     window.app_id = Some(app_id);
                     window.owner_client_id = Some(client_id);
+                    window.center_on_first_geometry = center_on_first_geometry;
                 }
                 if self.window_manager.set_window_type(window_id, wtype) {
                     println!("[Compositor] Set window #{} type to {:?}", window_id, wtype);
@@ -5411,30 +5481,42 @@ impl Compositor {
                     );
                     return Ok(false);
                 }
-                sws_debug!(
-                    "[Compositor] RequestMove state: left_down={} last_left_down={:?} cursor=({}, {})",
+                let direct_grab_position = self
+                    .direct_touch_grabs
+                    .iter()
+                    .find(|grab| grab.window_id == window_id && grab.legacy_primary)
+                    .map(|grab| (grab.screen_x, grab.screen_y));
+                let move_grab_origin = interactive_move_grab_origin(
                     self.left_button_down,
+                    direct_grab_position,
+                    self.last_left_down_cursor,
+                    (self.cursor.x, self.cursor.y),
+                );
+                sws_debug!(
+                    "[Compositor] RequestMove state: left_down={} direct_grab={:?} last_left_down={:?} cursor=({}, {})",
+                    self.left_button_down,
+                    direct_grab_position,
                     self.last_left_down_cursor,
                     self.cursor.x,
                     self.cursor.y
                 );
-                if !self.left_button_down {
+                let Some((grab_cursor_x, grab_cursor_y)) = move_grab_origin else {
                     sws_debug!(
-                        "[Compositor] Ignoring move request for window #{} (left button not down)",
+                        "[Compositor] Ignoring move request for window #{} (no mouse or touch grab)",
                         window_id
                     );
                     return Ok(false);
-                }
+                };
 
                 let (start_window_x, start_window_y) =
                     match self.window_manager.get_window(window_id) {
-                        Some(w) => (w.x, w.y),
+                        Some(w) => {
+                            let (x, y, _, _) = w.window_geometry();
+                            (x, y)
+                        }
                         None => return Ok(false),
                     };
 
-                let (grab_cursor_x, grab_cursor_y) = self
-                    .last_left_down_cursor
-                    .unwrap_or((self.cursor.x, self.cursor.y));
                 sws_debug!(
                     "[Compositor] Move start: window #{} grab=({}, {}) cursor=({}, {})",
                     window_id,
@@ -5454,6 +5536,14 @@ impl Compositor {
                     start_window_x,
                     start_window_y,
                 });
+                if direct_grab_position.is_some()
+                    && let Some(grab) = self
+                        .direct_touch_grabs
+                        .iter_mut()
+                        .find(|grab| grab.window_id == window_id && grab.legacy_primary)
+                {
+                    grab.driving_move_drag = true;
+                }
                 self.refresh_cursor_icon();
             }
             IpcEvent::MoveWindow { window_id, x, y } => {
@@ -5576,6 +5666,18 @@ impl Compositor {
                         shm_mapped_addr,
                         shm_size,
                     ) {
+                        // Replacing the CPU backing makes every retained
+                        // shared SGFX frame for this window obsolete.  Release
+                        // their exact commit tokens now, while keeping their
+                        // imported registrations alive for the client's
+                        // explicit DestroySgfxBuffer requests.
+                        if let Some(gpu_compositor) = self.gpu_compositor.as_mut() {
+                            for release in
+                                gpu_compositor.release_shared_buffers_for_resize(window_id)
+                            {
+                                send_sgfx_buffer_released(release);
+                            }
+                        }
                         if let Some(w) = self.window_manager.get_window(window_id) {
                             let rect = (w.x, w.y, w.width, w.height);
                             if let Some(old_rect) = old_rect {
@@ -5820,7 +5922,7 @@ impl Compositor {
                 {
                     self.window_manager.set_window_position(window_id, x, y);
                     self.window_manager
-                        .resize_window_in_place(window_id, width, height);
+                        .resize_window_geometry_in_place(window_id, width, height);
                 }
                 if let Some(rect) = old_rect {
                     self.add_pending_damage(rect);
@@ -6174,6 +6276,7 @@ impl Compositor {
                             w.shm = None;
                             w.width = width;
                             w.height = height;
+                            w.reconcile_window_geometry_after_resize();
                             w.shm_mapped_addr = Some(addr);
                             w.shm_size = shm_size;
                             w.shm_offset = offset.max(0) as usize;
@@ -6217,6 +6320,83 @@ impl Compositor {
                 {
                     if let Some(w) = self.window_manager.get_window(window_id) {
                         self.add_pending_damage((w.x, w.y, w.width, w.height));
+                    }
+                }
+            }
+            IpcEvent::SetWindowGeometry {
+                client_id,
+                request_id,
+                window_id,
+                geometry,
+            } => {
+                if !self.client_owns_window(client_id, window_id) {
+                    send_response_to_client(
+                        client_id,
+                        sws_protocol::server_msg::ERROR,
+                        request_id,
+                        sws_protocol::payload_error(sws_protocol::error_codes::WINDOW_NOT_OWNED)
+                            .to_vec(),
+                    );
+                    return Ok(false);
+                }
+                let old_surface = self
+                    .window_manager
+                    .get_window(window_id)
+                    .map(|window| window.surface_geometry());
+                let center_after_geometry = self
+                    .window_manager
+                    .get_window(window_id)
+                    .is_some_and(|window| window.center_on_first_geometry);
+                match self.window_manager.set_window_geometry(
+                    window_id,
+                    geometry.x,
+                    geometry.y,
+                    geometry.width,
+                    geometry.height,
+                ) {
+                    Ok(changed) => {
+                        if center_after_geometry {
+                            if let Some((width, height)) =
+                                self.window_manager.get_window(window_id).map(|window| {
+                                    let (_, _, width, height) = window.window_geometry();
+                                    (width, height)
+                                })
+                            {
+                                let (x, y) = self.centered_window_position(width, height);
+                                self.window_manager.set_window_position(window_id, x, y);
+                            }
+                            if let Some(window) = self.window_manager.get_window_mut(window_id) {
+                                window.center_on_first_geometry = false;
+                            }
+                        }
+                        if changed || center_after_geometry {
+                            if let Some(rect) = old_surface {
+                                self.add_pending_damage(rect);
+                            }
+                            if let Some(rect) = self
+                                .window_manager
+                                .get_window(window_id)
+                                .map(|window| window.surface_geometry())
+                            {
+                                self.add_pending_damage(rect);
+                            }
+                            self.route_pointer_motion_at_cursor();
+                        }
+                    }
+                    Err(error) => {
+                        println!(
+                            "[Compositor] Rejecting window geometry for #{}: {}",
+                            window_id, error
+                        );
+                        send_response_to_client(
+                            client_id,
+                            sws_protocol::server_msg::ERROR,
+                            request_id,
+                            sws_protocol::payload_error(
+                                sws_protocol::error_codes::INVALID_WINDOW_GEOMETRY,
+                            )
+                            .to_vec(),
+                        );
                     }
                 }
             }

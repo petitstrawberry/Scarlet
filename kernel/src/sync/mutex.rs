@@ -15,7 +15,25 @@ use core::marker::PhantomData;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::sync::IrqSpinLock;
-use crate::task::{BlockedType, TaskState};
+use crate::task::{AtomicTaskState, BlockedType, TaskState};
+
+#[inline]
+fn transition_waiter_to_blocked(state: &AtomicTaskState) -> Result<bool, TaskState> {
+    let blocked = TaskState::Blocked(BlockedType::Uninterruptible);
+    match state.compare_exchange(
+        TaskState::Running,
+        blocked,
+        Ordering::SeqCst,
+        Ordering::SeqCst,
+    ) {
+        Ok(_) => Ok(true),
+        // A remote exit can publish a terminal state while this task still
+        // owns the current CPU. Preserve that state and let the caller
+        // schedule the task away without adding it to the mutex wait queue.
+        Err(TaskState::Zombie | TaskState::Terminated) => Ok(false),
+        Err(actual) => Err(actual),
+    }
+}
 
 /// A task-context mutual-exclusion lock that sleeps while contended.
 ///
@@ -117,21 +135,25 @@ impl<T> Mutex<T> {
                     return MutexGuard::new(self);
                 }
 
-                let blocked = TaskState::Blocked(BlockedType::Uninterruptible);
-                if let Err(actual) = task.state.compare_exchange(
-                    TaskState::Running,
-                    blocked,
-                    Ordering::SeqCst,
-                    Ordering::SeqCst,
-                ) {
-                    panic!(
-                        "Mutex waiter task {} is not running (state={:?})",
-                        task_id, actual
-                    );
-                }
-                crate::sched::scheduler::mark_blocked(task_id);
-                if !waiters.contains(&task_id) {
-                    waiters.push_back(task_id);
+                match transition_waiter_to_blocked(&task.state) {
+                    Ok(true) => {
+                        crate::sched::scheduler::mark_blocked(task_id);
+                        if !waiters.contains(&task_id) {
+                            waiters.push_back(task_id);
+                        }
+                    }
+                    // The schedule below switches a terminal task away through
+                    // the scheduler's normal running_cpu handoff.
+                    Ok(false) => {}
+                    Err(actual) => {
+                        // Do not strand the mutex's internal spin lock if an
+                        // invariant failure reaches the kernel panic handler.
+                        drop(waiters);
+                        panic!(
+                            "Mutex waiter task {} is not running (state={:?})",
+                            task_id, actual
+                        );
+                    }
                 }
             }
 
@@ -250,5 +272,14 @@ mod tests {
         let mut mutex = Mutex::new(7u32);
         *mutex.get_mut() = 9;
         assert_eq!(mutex.into_inner(), 9);
+    }
+
+    #[test_case]
+    fn mutex_waiter_transition_preserves_terminal_states() {
+        for terminal in [TaskState::Zombie, TaskState::Terminated] {
+            let state = AtomicTaskState::new(terminal);
+            assert_eq!(transition_waiter_to_blocked(&state), Ok(false));
+            assert_eq!(state.load(Ordering::SeqCst), terminal);
+        }
     }
 }

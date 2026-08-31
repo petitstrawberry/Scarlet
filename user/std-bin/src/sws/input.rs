@@ -436,6 +436,9 @@ pub mod key_codes {
     pub const KEY_NUMLOCK: u16 = 0x45;
     pub const KEY_SCROLLLOCK: u16 = 0x46;
     pub const KEY_FN: u16 = 0x1d0;
+    pub const KEY_VOLUMEDOWN: u16 = 0x72;
+    pub const KEY_VOLUMEUP: u16 = 0x73;
+    pub const KEY_POWER: u16 = 0x74;
 }
 
 /// Input manager - starts one independent reader for every logical-seat device.

@@ -125,6 +125,7 @@ const KEY_RIGHTALT: u16 = 0x64;
 const KEY_LEFTMETA: u16 = 0x7d;
 const KEY_RIGHTMETA: u16 = 0x7e;
 const KEY_FN: u16 = 0x1d0;
+const KEY_POWER: u16 = 0x74;
 
 /// State for one compositor-owned keyboard repeat candidate.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -234,6 +235,7 @@ fn is_repeatable_key(code: u16) -> bool {
             | KEY_CAPSLOCK
             | KEY_NUMLOCK
             | KEY_SCROLLLOCK
+            | KEY_POWER
             | KEY_FN
     )
 }
@@ -308,6 +310,7 @@ mod tests {
             KEY_CAPSLOCK,
             KEY_NUMLOCK,
             KEY_SCROLLLOCK,
+            KEY_POWER,
             KEY_FN,
         ] {
             let mut repeat = KeyRepeatState::default();
@@ -318,6 +321,22 @@ mod tests {
         let mut repeat = KeyRepeatState::default();
         repeat.handle_key_event(KEY_SPACE, 1, KeyboardSource::Local(0), None, 0);
         assert_eq!(repeat.take_due(KEY_REPEAT_DELAY_NS, None), None);
+    }
+
+    #[test]
+    fn volume_keys_repeat_but_power_does_not() {
+        for code in [0x72, 0x73] {
+            let mut repeat = KeyRepeatState::default();
+            repeat.handle_key_event(code, 1, KeyboardSource::Local(0), Some(7), 0);
+            assert_eq!(
+                repeat.take_due(KEY_REPEAT_DELAY_NS, Some(7)),
+                Some((KeyboardSource::Local(0), code))
+            );
+        }
+
+        let mut repeat = KeyRepeatState::default();
+        repeat.handle_key_event(KEY_POWER, 1, KeyboardSource::Local(0), Some(7), 0);
+        assert_eq!(repeat.take_due(KEY_REPEAT_DELAY_NS, Some(7)), None);
     }
 
     #[test]

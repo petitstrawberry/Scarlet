@@ -183,6 +183,78 @@ pub fn select_usable_region(memmap: &[&memmap::Entry]) -> MemoryArea {
     best.expect("no usable Limine memmap region")
 }
 
+/// Build the complete set of Limine RAM regions available to the PMM.
+///
+/// The front of `primary_before_reservation` contains the relocated FDT and is
+/// replaced by `primary_after_reservation`. A boot framebuffer is excluded if
+/// firmware reports it inside a usable entry.
+pub fn usable_memory_regions(
+    memmap: &[&memmap::Entry],
+    primary_before_reservation: MemoryArea,
+    primary_after_reservation: MemoryArea,
+    framebuffer: Option<MemoryArea>,
+) -> Result<DirectMapRegions, &'static str> {
+    let mut regions = DirectMapRegions::new();
+    let mut replaced_primary = false;
+
+    for entry in memmap {
+        if entry.type_ != memmap::MEMMAP_USABLE || entry.length == 0 {
+            continue;
+        }
+        let end_exclusive = entry
+            .base
+            .checked_add(entry.length)
+            .ok_or("Limine usable memory region end overflows")?;
+        let mut area = MemoryArea::new(
+            usize::try_from(entry.base)
+                .map_err(|_| "Limine usable memory start does not fit usize")?,
+            usize::try_from(end_exclusive - 1)
+                .map_err(|_| "Limine usable memory end does not fit usize")?,
+        );
+        if area.start == primary_before_reservation.start
+            && area.end == primary_before_reservation.end
+        {
+            area = primary_after_reservation;
+            replaced_primary = true;
+        }
+        insert_usable_region_excluding(&mut regions, area, framebuffer)?;
+    }
+
+    if !replaced_primary {
+        return Err("primary Limine usable memory region disappeared");
+    }
+    if regions.is_empty() {
+        return Err("Limine did not provide PMM usable memory regions");
+    }
+    Ok(regions)
+}
+
+fn insert_usable_region_excluding(
+    regions: &mut DirectMapRegions,
+    area: MemoryArea,
+    excluded: Option<MemoryArea>,
+) -> Result<(), &'static str> {
+    let Some(excluded) = excluded else {
+        return regions.insert(area, MemoryAttribute::Normal);
+    };
+    if area.end < excluded.start || excluded.end < area.start {
+        return regions.insert(area, MemoryAttribute::Normal);
+    }
+    if area.start < excluded.start {
+        regions.insert(
+            MemoryArea::new(area.start, excluded.start - 1),
+            MemoryAttribute::Normal,
+        )?;
+    }
+    if excluded.end < area.end {
+        regions.insert(
+            MemoryArea::new(excluded.end + 1, area.end),
+            MemoryAttribute::Normal,
+        )?;
+    }
+    Ok(())
+}
+
 /// Returns Limine's broad bootloader direct-map bounds.
 ///
 /// These bounds describe the page tables owned by Limine and can include
@@ -408,5 +480,32 @@ mod tests {
                 .validate_alias(framebuffer, MemoryAttribute::Normal)
                 .is_err()
         );
+    }
+
+    #[test_case]
+    fn usable_memory_keeps_all_regions_and_reserves_boot_scratch() {
+        let low = memmap::Entry {
+            base: 0x1000,
+            length: 0x5000,
+            type_: memmap::MEMMAP_USABLE,
+        };
+        let high = memmap::Entry {
+            base: 0x1_0000_0000,
+            length: 0x8000,
+            type_: memmap::MEMMAP_USABLE,
+        };
+        let entries = [&low, &high];
+        let regions = usable_memory_regions(
+            &entries,
+            MemoryArea::new(0x1000, 0x5fff),
+            MemoryArea::new(0x3000, 0x5fff),
+            Some(MemoryArea::new(0x4000, 0x4fff)),
+        )
+        .unwrap();
+
+        assert!(regions.contains(0x3000));
+        assert!(!regions.contains(0x4000));
+        assert!(regions.contains(0x5000));
+        assert!(regions.contains(0x1_0000_0000));
     }
 }

@@ -284,6 +284,48 @@ impl PageCacheManager {
         Ok(())
     }
 
+    /// Flush all currently unpinned dirty pages for one object in a single
+    /// filesystem transaction.
+    ///
+    /// Filesystems that need to allocate block maps or update inode metadata
+    /// should prefer this over [`Self::flush`]. The batch callback can retain a
+    /// bounded write buffer and commit the inode once instead of rebuilding
+    /// whole-file state for every page.
+    pub fn flush_batch<F>(&self, id: CacheId, writer: F) -> Result<(), &'static str>
+    where
+        F: FnOnce(&[(PageIndex, PhysicalAddress)]) -> Result<(), &'static str>,
+    {
+        let targets = {
+            let map = self.entries.read();
+            map.iter()
+                .filter_map(|(&(cache_id, page_index), entry)| {
+                    (cache_id == id && entry.is_dirty() && entry.pin_count() == 0)
+                        .then_some((page_index, entry.paddr()))
+                })
+                .collect::<alloc::vec::Vec<_>>()
+        };
+
+        if targets.is_empty() {
+            return Ok(());
+        }
+        writer(&targets)?;
+        let map = self.entries.read();
+        for (page_index, _) in targets {
+            if let Some(entry) = map.get(&(id, page_index)) {
+                entry.is_dirty.store(0, Ordering::SeqCst);
+            }
+        }
+        Ok(())
+    }
+
+    /// Return whether an object still owns any dirty cache page.
+    pub fn has_dirty_pages(&self, id: CacheId) -> bool {
+        self.entries
+            .read()
+            .iter()
+            .any(|(&(cache_id, _), entry)| cache_id == id && entry.is_dirty())
+    }
+
     /// Get or load a page and return an RAII guard that unpins on drop.
     #[inline]
     pub fn pin_or_load<F>(

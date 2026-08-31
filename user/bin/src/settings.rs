@@ -11,6 +11,7 @@ extern crate scarlet_ui_macros;
 use core::f32;
 use core::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 
+use framebuffer::DisplayControl;
 use sas_client::{Error as SasError, SasClient};
 use sas_protocol::{
     CONTROL_FLAG_MUTED, ControlState, MASTER_VOLUME_UNITY_Q16, OUTPUT_ENTRY_FLAG_COMPATIBLE,
@@ -19,11 +20,13 @@ use sas_protocol::{
 use sbus::{Argument, Message};
 use sbus_client::Connection as SbusConnection;
 use scarlet_desktop_config::{
-    BackgroundStyle, DESKTOP_FILE_MANAGER_BUS_NAME, DESKTOP_FILE_MANAGER_INTERFACE,
+    BackgroundStyle, ClockFormat, DESKTOP_FILE_MANAGER_BUS_NAME, DESKTOP_FILE_MANAGER_INTERFACE,
     DESKTOP_FILE_MANAGER_OBJECT_PATH, DESKTOP_FILE_MANAGER_OPEN_FILE_METHOD,
     DESKTOP_FILE_MANAGER_RESPONSE_SIGNAL, DESKTOP_FILES_APP_ID, DESKTOP_SETTINGS_BUS_NAME,
-    DESKTOP_SETTINGS_RESET_BACKGROUND_METHOD, DESKTOP_SETTINGS_SERVICE_INTERFACE,
+    DESKTOP_SETTINGS_GET_STATUS_PREFERENCES_METHOD, DESKTOP_SETTINGS_RESET_BACKGROUND_METHOD,
+    DESKTOP_SETTINGS_RESET_STATUS_PREFERENCES_METHOD, DESKTOP_SETTINGS_SERVICE_INTERFACE,
     DESKTOP_SETTINGS_SERVICE_OBJECT_PATH, DESKTOP_SETTINGS_SET_BACKGROUND_METHOD,
+    DESKTOP_SETTINGS_SET_STATUS_PREFERENCES_METHOD, StatusItemId, StatusPreferences,
 };
 use scarlet_ui::{
     HeaderBar, Icon, IconSize, IconView, NavigationLink, State, StateId, hstack, navigation,
@@ -145,6 +148,22 @@ fn f32_to_percent(value: f32) -> u32 {
     (value.max(0.0).min(100.0) + 0.5) as u32
 }
 
+fn load_display_brightness() -> (f32, String) {
+    match DisplayControl::open_primary().and_then(|display| display.get_brightness_percent()) {
+        Ok(percent) => {
+            let percent = percent.min(100);
+            (percent as f32, format!("Current brightness: {}%", percent))
+        }
+        Err(error) => {
+            println!("[settings] failed to read display brightness: {:?}", error);
+            (
+                80.0,
+                String::from("Display brightness is unavailable; showing the default value"),
+            )
+        }
+    }
+}
+
 fn output_kind_name(kind: u32) -> &'static str {
     match kind {
         1 => "Speakers",
@@ -228,6 +247,152 @@ fn save_background_via_service(
             SBUS_METHOD_TIMEOUT_MS,
         )
         .map(|_| ())
+}
+
+fn parse_status_preferences_response(
+    args: &[Argument],
+) -> core::result::Result<StatusPreferences, &'static str> {
+    if args.len() != 3 {
+        return Err("settingsd returned an incomplete status preference response");
+    }
+    let order = match &args[0] {
+        Argument::String(value) => value.as_str(),
+        _ => return Err("settingsd returned an invalid status item order"),
+    };
+    let visible = match &args[1] {
+        Argument::String(value) => value.as_str(),
+        _ => return Err("settingsd returned an invalid visible item list"),
+    };
+    let clock_format = match &args[2] {
+        Argument::String(value) => value.as_str(),
+        _ => return Err("settingsd returned an invalid clock format"),
+    };
+    StatusPreferences::from_ipc_values(order, visible, clock_format)
+}
+
+fn call_status_preferences_method(
+    method: &str,
+    args: Vec<Argument>,
+) -> core::result::Result<Vec<Argument>, String> {
+    let mut connection = SbusConnection::connect().map_err(|error| format!("{error:?}"))?;
+    connection
+        .call_method_timeout(
+            DESKTOP_SETTINGS_BUS_NAME,
+            DESKTOP_SETTINGS_SERVICE_OBJECT_PATH,
+            DESKTOP_SETTINGS_SERVICE_INTERFACE,
+            method,
+            args,
+            SBUS_METHOD_TIMEOUT_MS,
+        )
+        .map_err(|error| format!("{error:?}"))
+}
+
+fn get_status_preferences_via_service() -> core::result::Result<StatusPreferences, String> {
+    let response =
+        call_status_preferences_method(DESKTOP_SETTINGS_GET_STATUS_PREFERENCES_METHOD, Vec::new())?;
+    parse_status_preferences_response(&response).map_err(String::from)
+}
+
+fn load_status_preferences() -> (StatusPreferences, String) {
+    match get_status_preferences_via_service() {
+        Ok(preferences) => (
+            preferences,
+            String::from("Loaded authoritative preferences from settingsd"),
+        ),
+        Err(error) => {
+            println!(
+                "[settings] failed to load status preferences through settingsd: {}",
+                error
+            );
+            (
+                scarlet_desktop_config::load_desktop_config().status,
+                format!("settingsd unavailable; showing saved configuration ({error})"),
+            )
+        }
+    }
+}
+
+fn save_status_preferences_via_service(
+    preferences: &StatusPreferences,
+) -> core::result::Result<StatusPreferences, String> {
+    let order = preferences.order_csv();
+    let visible = preferences.visible_csv();
+    let clock_format = preferences.clock_format.as_str();
+    let strict =
+        StatusPreferences::from_ipc_values(&order, &visible, clock_format).map_err(String::from)?;
+    let response = call_status_preferences_method(
+        DESKTOP_SETTINGS_SET_STATUS_PREFERENCES_METHOD,
+        vec![
+            Argument::String(order),
+            Argument::String(visible),
+            Argument::String(String::from(clock_format)),
+        ],
+    )?;
+
+    if response.is_empty() {
+        Ok(strict)
+    } else {
+        parse_status_preferences_response(&response).map_err(String::from)
+    }
+}
+
+fn reset_status_preferences_via_service() -> core::result::Result<StatusPreferences, String> {
+    let response = call_status_preferences_method(
+        DESKTOP_SETTINGS_RESET_STATUS_PREFERENCES_METHOD,
+        Vec::new(),
+    )?;
+    if response.is_empty() {
+        get_status_preferences_via_service()
+    } else {
+        parse_status_preferences_response(&response).map_err(String::from)
+    }
+}
+
+fn set_status_item_visibility(
+    preferences: &StatusPreferences,
+    item: StatusItemId,
+    visible: bool,
+) -> StatusPreferences {
+    let mut updated = preferences.clone();
+    if visible {
+        if !updated.visible.contains(&item) {
+            updated.visible.push(item);
+        }
+    } else {
+        updated.visible.retain(|candidate| *candidate != item);
+    }
+    updated.visible = updated
+        .order
+        .iter()
+        .copied()
+        .filter(|candidate| updated.visible.contains(candidate))
+        .collect();
+    updated
+}
+
+fn move_status_item(
+    preferences: &StatusPreferences,
+    item: StatusItemId,
+    offset: isize,
+) -> Option<StatusPreferences> {
+    let index = preferences
+        .order
+        .iter()
+        .position(|candidate| *candidate == item)?;
+    let destination = index.checked_add_signed(offset)?;
+    if destination >= preferences.order.len() || destination == index {
+        return None;
+    }
+
+    let mut updated = preferences.clone();
+    updated.order.swap(index, destination);
+    updated.visible = updated
+        .order
+        .iter()
+        .copied()
+        .filter(|candidate| preferences.visible.contains(candidate))
+        .collect();
+    Some(updated)
 }
 
 fn request_background_picker() -> core::result::Result<String, sbus_client::Error> {
@@ -832,10 +997,15 @@ struct SettingsApp {
     audio_volume_percent: State<f32>,
     audio_muted: State<bool>,
     audio_status: State<String>,
+    display_brightness_percent: State<f32>,
+    display_brightness_last_good: State<f32>,
+    display_brightness_status: State<String>,
     navigation_title: State<String>,
     cursor_themes: State<Vec<CursorThemeInfo>>,
     cursor_theme_index: State<usize>,
     cursor_theme_status: State<String>,
+    status_preferences: State<StatusPreferences>,
+    status_preferences_status: State<String>,
 }
 
 impl SettingsApp {
@@ -871,11 +1041,13 @@ impl SettingsApp {
             .unwrap_or(0);
         let (audio_outputs, audio_output_index, audio_volume, audio_muted, audio_status) =
             load_audio_controls();
+        let (display_brightness, display_brightness_status) = load_display_brightness();
         let (cursor_themes, cursor_theme_index) = load_cursor_theme_choices();
         let cursor_theme_status = cursor_themes
             .get(cursor_theme_index)
             .map(|theme| format!("Active: {}", theme.name))
             .unwrap_or_else(|| String::from("No cursor themes installed"));
+        let (status_preferences, status_preferences_status) = load_status_preferences();
         let app = Self {
             background_style: State::new(StateId::new(0), style),
             background_image: State::new(StateId::new(1), background_image),
@@ -895,10 +1067,15 @@ impl SettingsApp {
             audio_volume_percent: State::new(StateId::new(15), audio_volume),
             audio_muted: State::new(StateId::new(16), audio_muted),
             audio_status: State::new(StateId::new(17), audio_status),
-            navigation_title: State::new(StateId::new(18), String::from("Appearance")),
-            cursor_themes: State::new(StateId::new(19), cursor_themes),
-            cursor_theme_index: State::new(StateId::new(20), cursor_theme_index),
-            cursor_theme_status: State::new(StateId::new(21), cursor_theme_status),
+            display_brightness_percent: State::new(StateId::new(18), display_brightness),
+            display_brightness_last_good: State::new(StateId::new(19), display_brightness),
+            display_brightness_status: State::new(StateId::new(20), display_brightness_status),
+            navigation_title: State::new(StateId::new(21), String::from("Appearance")),
+            cursor_themes: State::new(StateId::new(22), cursor_themes),
+            cursor_theme_index: State::new(StateId::new(23), cursor_theme_index),
+            cursor_theme_status: State::new(StateId::new(24), cursor_theme_status),
+            status_preferences: State::new(StateId::new(25), status_preferences),
+            status_preferences_status: State::new(StateId::new(26), status_preferences_status),
         };
         start_picker_response_listener();
         start_background_autosave(&app);
@@ -914,6 +1091,88 @@ impl SettingsApp {
                 "[settings] failed to save background through settingsd: {:?}",
                 error
             );
+        }
+    }
+
+    fn refresh_status_preferences(&self) {
+        match get_status_preferences_via_service() {
+            Ok(preferences) => {
+                self.status_preferences.set(preferences);
+                self.status_preferences_status.set(String::from(
+                    "Loaded authoritative preferences from settingsd",
+                ));
+            }
+            Err(error) => {
+                self.status_preferences_status
+                    .set(format!("Failed to refresh status preferences: {error}"));
+                println!(
+                    "[settings] failed to refresh status preferences through settingsd: {}",
+                    error
+                );
+            }
+        }
+    }
+
+    fn save_status_preferences(&self, requested: StatusPreferences, action: &'static str) {
+        match save_status_preferences_via_service(&requested) {
+            Ok(saved) => {
+                self.status_preferences.set(saved);
+                self.status_preferences_status
+                    .set(format!("{action} saved through settingsd"));
+            }
+            Err(error) => {
+                self.status_preferences_status
+                    .set(format!("Failed to save {action}: {error}"));
+                println!(
+                    "[settings] failed to save status preferences through settingsd: {}",
+                    error
+                );
+            }
+        }
+    }
+
+    fn set_status_item_visible(&self, item: StatusItemId, visible: bool) {
+        let current = self.status_preferences.get();
+        if current.is_visible(item) == visible {
+            return;
+        }
+        self.save_status_preferences(
+            set_status_item_visibility(&current, item, visible),
+            "status item visibility",
+        );
+    }
+
+    fn move_status_item(&self, item: StatusItemId, offset: isize) {
+        let current = self.status_preferences.get();
+        if let Some(updated) = move_status_item(&current, item, offset) {
+            self.save_status_preferences(updated, "status item order");
+        }
+    }
+
+    fn set_status_clock_format(&self, clock_format: ClockFormat) {
+        let mut requested = self.status_preferences.get();
+        if requested.clock_format == clock_format {
+            return;
+        }
+        requested.clock_format = clock_format;
+        self.save_status_preferences(requested, "clock format");
+    }
+
+    fn reset_status_preferences(&self) {
+        match reset_status_preferences_via_service() {
+            Ok(preferences) => {
+                self.status_preferences.set(preferences);
+                self.status_preferences_status
+                    .set(String::from("Status preferences reset through settingsd"));
+            }
+            Err(error) => {
+                self.status_preferences_status
+                    .set(format!("Failed to reset status preferences: {error}"));
+                println!(
+                    "[settings] failed to reset status preferences through settingsd: {}",
+                    error
+                );
+            }
         }
     }
 
@@ -1060,6 +1319,37 @@ impl SettingsApp {
             Err(error) => self
                 .audio_status
                 .set(format!("Failed to set volume: {}", error.as_str())),
+        }
+    }
+
+    fn set_display_brightness_percent(&self, percent: u32) {
+        let percent = percent.min(100) as u8;
+        let last_good = self.display_brightness_last_good.get();
+        if f32_to_percent(last_good) == percent as u32 {
+            self.display_brightness_percent.set(last_good);
+            return;
+        }
+
+        match DisplayControl::open_primary()
+            .and_then(|display| display.set_brightness_percent(percent))
+        {
+            Ok(()) => {
+                let applied = percent as f32;
+                self.display_brightness_percent.set(applied);
+                self.display_brightness_last_good.set(applied);
+                self.display_brightness_status
+                    .set(format!("Current brightness: {}%", percent));
+                println!("[settings] display brightness set to {}%", percent);
+            }
+            Err(error) => {
+                self.display_brightness_percent.set(last_good);
+                self.display_brightness_status.set(format!(
+                    "Failed to set brightness; keeping {}% ({:?})",
+                    f32_to_percent(last_good),
+                    error
+                ));
+                println!("[settings] failed to set display brightness: {:?}", error);
+            }
         }
     }
 
@@ -1485,8 +1775,35 @@ fn network_page() -> impl View {
     .frame(f32::INFINITY, f32::INFINITY)
 }
 
-fn display_page() -> impl View {
+fn display_page(app: SettingsApp) -> impl View {
+    let brightness = app.display_brightness_percent.clone();
+    let brightness_label = f32_to_percent(app.display_brightness_percent.get());
+    let brightness_status = app.display_brightness_status.get();
+    let brightness_app = app.clone();
+
     vstack! {
+        vstack! {
+            Text::new("Brightness").font_size(14.0),
+            hstack! {
+                Text::new("Brightness").font_size(13.0).frame_width(100.0),
+                Slider::new(brightness)
+                    .min(0.0)
+                    .max(100.0)
+                    .on_changed(move |value| {
+                        brightness_app.set_display_brightness_percent(f32_to_percent(value));
+                    })
+                    .frame(300.0, 20.0),
+                Text::new(format!("{}%", brightness_label))
+                    .font_size(12.0)
+                    .frame_width(48.0),
+            }
+            .padding(10.0),
+            Text::new(brightness_status).font_size(12.0),
+        }
+        .padding(10.0),
+
+        Divider::new(),
+
         vstack! {
             Text::new("Scaling").font_size(14.0),
             hstack! {
@@ -1640,54 +1957,179 @@ fn input_page(app: SettingsApp) -> impl View {
     .frame(f32::INFINITY, f32::INFINITY)
 }
 
-fn datetime_page(
+fn status_item_label(item: StatusItemId) -> &'static str {
+    match item {
+        StatusItemId::Cpu => "CPU",
+        StatusItemId::Audio => "Audio",
+    }
+}
+
+fn status_item_row(
+    app: SettingsApp,
+    item: StatusItemId,
+    index: usize,
+    item_count: usize,
+) -> impl View + Clone {
+    let preferences = app.status_preferences.get();
+    let visible = preferences.is_visible(item);
+    let visibility_app = app.clone();
+    let up_app = app.clone();
+    let down_app = app;
+
+    hstack! {
+        Text::new(status_item_label(item)).font_size(13.0).frame_width(110.0),
+        Text::new(if visible { "Visible" } else { "Hidden" })
+            .font_size(12.0)
+            .frame_width(70.0),
+        Button::new(if visible { "Hide" } else { "Show" }).on_click(move || {
+            visibility_app.set_status_item_visible(item, !visible);
+        }),
+        Spacer::new().frame_width(8.0),
+        Button::new("Move Up").on_click(move || {
+            if index > 0 {
+                up_app.move_status_item(item, -1);
+            }
+        }),
+        Spacer::new().frame_width(8.0),
+        Button::new("Move Down").on_click(move || {
+            if index + 1 < item_count {
+                down_app.move_status_item(item, 1);
+            }
+        }),
+    }
+    .padding(8.0)
+}
+
+fn status_page(
+    app: SettingsApp,
     regions: Vec<String>,
     region_idx: State<usize>,
     cities_state: State<Vec<String>>,
     city_idx: State<usize>,
 ) -> impl View {
+    let preferences = app.status_preferences.get();
+    let first = preferences
+        .order
+        .first()
+        .copied()
+        .unwrap_or(StatusItemId::Cpu);
+    let second = preferences
+        .order
+        .get(1)
+        .copied()
+        .unwrap_or(StatusItemId::Audio);
+    let item_count = preferences.order.len();
+    let clock_format = preferences.clock_format;
+    let refresh_app = app.clone();
+    let reset_app = app.clone();
+    let twenty_four_hour_app = app.clone();
+    let twelve_hour_app = app.clone();
     let cities = cities_state.get();
     let current_region = regions.get(region_idx.get()).cloned().unwrap_or_default();
     let current_city = cities.get(city_idx.get()).cloned().unwrap_or_default();
-    let cities_state2 = cities_state.clone();
-    let city_idx2 = city_idx.clone();
-    let region_idx2 = region_idx.clone();
-    let cities2 = cities.clone();
-    let regions2 = regions.clone();
+    let cities_state_for_region = cities_state.clone();
+    let city_idx_for_region = city_idx.clone();
+    let region_idx_for_city = region_idx.clone();
+    let cities_state_for_city = cities_state.clone();
+    let city_idx_for_city = city_idx.clone();
+    let regions_for_city = regions.clone();
 
     vstack! {
         vstack! {
+            Text::new("Optional Status Items").font_size(14.0),
+            Text::new("Choose which items appear and their left-to-right order before the clock.")
+                .font_size(11.0)
+                .color(ColorPalette::default().text_secondary()),
+            status_item_row(app.clone(), first, 0, item_count),
+            status_item_row(app.clone(), second, 1, item_count),
+        }
+        .padding(10.0),
+
+        Divider::new(),
+
+        vstack! {
+            Text::new("Date & Time").font_size(14.0),
             hstack! {
-                Text::new("Region").font_size(13.0).frame_width(120.0),
+                Text::new("Region").font_size(13.0).frame_width(110.0),
                 Select::new(regions.clone(), region_idx.clone())
                     .width(250.0)
                     .on_change(move |index| {
-                        if let Some(r) = regions.get(index) {
-                            let new_cities = enumerate_cities(r);
-                            cities_state.set(new_cities);
-                            city_idx.set(0);
+                        if let Some(region) = regions.get(index) {
+                            cities_state_for_region.set(enumerate_cities(region));
+                            city_idx_for_region.set(0);
                         }
                         region_idx.set(index);
                     }),
             }
-            .padding(10.0),
+            .padding(8.0),
             hstack! {
-                Text::new("City").font_size(13.0).frame_width(120.0),
-                Select::new(cities2, city_idx2.clone())
+                Text::new("City").font_size(13.0).frame_width(110.0),
+                Select::new(cities, city_idx_for_city.clone())
                     .width(250.0)
                     .on_change(move |index| {
-                        if let (Some(r), Some(c)) = (
-                            regions2.get(region_idx2.get()),
-                            cities_state2.get().get(index),
+                        if let (Some(region), Some(city)) = (
+                            regions_for_city.get(region_idx_for_city.get()),
+                            cities_state_for_city.get().get(index),
                         ) {
-                            let zone = format!("{}/{}", r, c);
-                            save_timezone(&zone);
+                            save_timezone(&format!("{region}/{city}"));
                         }
-                        city_idx2.set(index);
+                        city_idx_for_city.set(index);
                     }),
             }
-            .padding(10.0),
-            Text::new(format!("Current: {}/{}", current_region, current_city)).font_size(12.0),
+            .padding(8.0),
+            Text::new(format!("Current: {current_region}/{current_city}")).font_size(12.0),
+        }
+        .padding(10.0),
+
+        Divider::new(),
+
+        vstack! {
+            Text::new("Clock").font_size(14.0),
+            hstack! {
+                Text::new("Clock").font_size(13.0).frame_width(110.0),
+                Text::new("Always visible · Fixed at far right")
+                    .font_size(12.0)
+                    .color(ColorPalette::default().text_secondary()),
+            }
+            .padding(8.0),
+            hstack! {
+                Text::new("Format").font_size(13.0).frame_width(110.0),
+                Button::new(if clock_format == ClockFormat::TwentyFourHour {
+                    "24-hour (Selected)"
+                } else {
+                    "24-hour"
+                })
+                .on_click(move || {
+                    twenty_four_hour_app.set_status_clock_format(ClockFormat::TwentyFourHour);
+                }),
+                Spacer::new().frame_width(8.0),
+                Button::new(if clock_format == ClockFormat::TwelveHour {
+                    "12-hour (Selected)"
+                } else {
+                    "12-hour"
+                })
+                .on_click(move || {
+                    twelve_hour_app.set_status_clock_format(ClockFormat::TwelveHour);
+                }),
+            }
+            .padding(8.0),
+        }
+        .padding(10.0),
+
+        Divider::new(),
+
+        vstack! {
+            Text::new(app.status_preferences_status.get()).font_size(12.0),
+            hstack! {
+                Button::new("Refresh").on_click(move || {
+                    refresh_app.refresh_status_preferences();
+                }),
+                Spacer::new().frame_width(8.0),
+                Button::new("Reset to Defaults").on_click(move || {
+                    reset_app.reset_status_preferences();
+                }),
+            }
+            .padding(8.0),
         }
         .padding(10.0),
     }
@@ -1702,9 +2144,11 @@ impl Application for SettingsApp {
 
     fn scenes(&self) -> impl Scene {
         let app = self.clone();
+        let display_app = self.clone();
         let audio_app = self.clone();
         let input_app = self.clone();
         let cursor_app = self.clone();
+        let status_app = self.clone();
         let navigation_title = self.navigation_title.clone();
         let tz_regions = self.timezone_regions.get();
         let tz_region_idx = self.timezone_region_index.clone();
@@ -1782,7 +2226,7 @@ impl Application for SettingsApp {
                         let title = navigation_title.clone();
                         move || title.set(String::from("Appearance"))
                     }),
-                    NavigationLink::new("Display", display_page).on_select({
+                    NavigationLink::new("Display", move || display_page(display_app.clone())).on_select({
                         let title = navigation_title.clone();
                         move || title.set(String::from("Display"))
                     }),
@@ -1798,17 +2242,21 @@ impl Application for SettingsApp {
                         let title = navigation_title.clone();
                         move || title.set(String::from("Input"))
                     }),
-                    NavigationLink::new("Date & Time", move || {
-                        datetime_page(
+                    NavigationLink::new("Shell & Status", move || {
+                        status_page(
+                            status_app.clone(),
                             tz_regions.clone(),
                             tz_region_idx.clone(),
                             tz_cities.clone(),
                             tz_city_idx.clone(),
                         )
-                    })
-                    .on_select({
+                    }).on_select({
                         let title = navigation_title.clone();
-                        move || title.set(String::from("Date & Time"))
+                        let app = self.clone();
+                        move || {
+                            app.refresh_status_preferences();
+                            title.set(String::from("Shell & Status"));
+                        }
                     }),
                 }
                 .header(move || {
@@ -1833,6 +2281,77 @@ impl Application for SettingsApp {
 
     fn debug_logging(&self) -> bool {
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{move_status_item, parse_status_preferences_response, set_status_item_visibility};
+    use sbus::Argument;
+    use scarlet_desktop_config::{ClockFormat, StatusItemId, StatusPreferences};
+    use std::string::String;
+    use std::vec;
+
+    #[test]
+    fn parses_complete_strict_status_response() {
+        let parsed = parse_status_preferences_response(&[
+            Argument::String(String::from("audio,cpu")),
+            Argument::String(String::from("audio")),
+            Argument::String(String::from("12h")),
+        ])
+        .unwrap();
+
+        assert_eq!(parsed.order, vec![StatusItemId::Audio, StatusItemId::Cpu]);
+        assert_eq!(parsed.visible, vec![StatusItemId::Audio]);
+        assert_eq!(parsed.clock_format, ClockFormat::TwelveHour);
+    }
+
+    #[test]
+    fn rejects_incomplete_or_non_strict_status_response() {
+        assert!(
+            parse_status_preferences_response(&[
+                Argument::String(String::from("cpu,audio")),
+                Argument::String(String::from("cpu,audio")),
+            ])
+            .is_err()
+        );
+        assert!(
+            parse_status_preferences_response(&[
+                Argument::String(String::from("cpu,cpu")),
+                Argument::String(String::from("cpu")),
+                Argument::String(String::from("24h")),
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn reorders_items_and_keeps_visible_items_in_display_order() {
+        let preferences = StatusPreferences {
+            order: vec![StatusItemId::Cpu, StatusItemId::Audio],
+            visible: vec![StatusItemId::Cpu, StatusItemId::Audio],
+            clock_format: ClockFormat::TwentyFourHour,
+        };
+        let moved = move_status_item(&preferences, StatusItemId::Audio, -1).unwrap();
+
+        assert_eq!(moved.order, vec![StatusItemId::Audio, StatusItemId::Cpu]);
+        assert_eq!(moved.visible, moved.order);
+        assert!(move_status_item(&moved, StatusItemId::Audio, -1).is_none());
+    }
+
+    #[test]
+    fn visibility_changes_are_ordered_and_leave_clock_outside_optional_state() {
+        let preferences = StatusPreferences {
+            order: vec![StatusItemId::Audio, StatusItemId::Cpu],
+            visible: vec![StatusItemId::Audio],
+            clock_format: ClockFormat::TwelveHour,
+        };
+        let shown = set_status_item_visibility(&preferences, StatusItemId::Cpu, true);
+        let hidden = set_status_item_visibility(&shown, StatusItemId::Audio, false);
+
+        assert_eq!(shown.visible, vec![StatusItemId::Audio, StatusItemId::Cpu]);
+        assert_eq!(hidden.visible, vec![StatusItemId::Cpu]);
+        assert_eq!(hidden.clock_format, ClockFormat::TwelveHour);
     }
 }
 

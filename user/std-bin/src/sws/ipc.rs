@@ -595,7 +595,8 @@ fn sws_capabilities() -> u64 {
     let mut capabilities = protocol::capabilities::POINTER_LOCK
         | protocol::capabilities::CURSOR_ICONS
         | protocol::capabilities::CURSOR_THEMES
-        | protocol::capabilities::INPUT_ENVIRONMENT;
+        | protocol::capabilities::INPUT_ENVIRONMENT
+        | protocol::capabilities::WINDOW_GEOMETRY;
     if SGFX_SHARED_IMAGES_AVAILABLE.load(Ordering::Acquire) {
         capabilities |= protocol::capabilities::SGFX_SHARED_IMAGE;
     }
@@ -3299,6 +3300,21 @@ fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Ha
                     has_alpha,
                 });
             }
+            Ok(ClientMessageRef::SetWindowGeometry {
+                window_id,
+                geometry,
+            }) => {
+                println!(
+                    "[ClientThread {}] SetWindowGeometry: window_id={} geometry=({}, {}) {}x{}",
+                    client_id, window_id, geometry.x, geometry.y, geometry.width, geometry.height
+                );
+                push_ipc_event(IpcEvent::SetWindowGeometry {
+                    client_id,
+                    request_id,
+                    window_id,
+                    geometry,
+                });
+            }
             Ok(ClientMessageRef::SetWindowMenuTitles {
                 window_id,
                 menu_titles,
@@ -4097,6 +4113,13 @@ pub enum IpcEvent {
     SetWindowHasAlphaContent {
         window_id: u32,
         has_alpha: bool,
+    },
+    /// Set visible geometry inside the complete surface bounds.
+    SetWindowGeometry {
+        client_id: usize,
+        request_id: u8,
+        window_id: u32,
+        geometry: protocol::WindowGeometry,
     },
     SetWindowMenuTitles {
         window_id: u32,

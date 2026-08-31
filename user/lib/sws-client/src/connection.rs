@@ -95,6 +95,15 @@ impl Capabilities {
     pub const fn supports_input_environment(self) -> bool {
         self.capabilities & protocol::capabilities::INPUT_ENVIRONMENT != 0
     }
+
+    /// Whether the server supports visible geometry distinct from surface bounds.
+    ///
+    /// # Returns
+    ///
+    /// `true` when [`Connection::set_window_geometry`] may be requested.
+    pub const fn supports_window_geometry(self) -> bool {
+        self.capabilities & protocol::capabilities::WINDOW_GEOMETRY != 0
+    }
 }
 
 /// Stable identity for one registered shared SGFX buffer.
@@ -2208,6 +2217,32 @@ impl Connection {
         }
         let payload = protocol::payload_set_window_has_alpha_content(surface_id, has_alpha);
         self.send_message(protocol::client_msg::SET_WINDOW_HAS_ALPHA_CONTENT, &payload)
+            .map_err(|_| Error::SendFailed)
+    }
+
+    /// Set the visible window geometry inside the complete surface bounds.
+    ///
+    /// # Arguments
+    ///
+    /// * `surface_id` - Window owned by this connection.
+    /// * `geometry` - Visible rectangle in surface-local physical pixels.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` once the request has been written to SWS.
+    pub fn set_window_geometry(
+        &self,
+        surface_id: u32,
+        geometry: protocol::WindowGeometry,
+    ) -> Result<(), Error> {
+        if !mutex_lock(&self.surfaces).contains_key(&surface_id) {
+            return Err(Error::SurfaceNotFound);
+        }
+        if geometry.x < 0 || geometry.y < 0 || geometry.width == 0 || geometry.height == 0 {
+            return Err(Error::InvalidRequest);
+        }
+        let payload = protocol::payload_set_window_geometry(surface_id, geometry);
+        self.send_message(protocol::client_msg::SET_WINDOW_GEOMETRY, &payload)
             .map_err(|_| Error::SendFailed)
     }
 

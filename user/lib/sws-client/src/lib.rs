@@ -112,7 +112,7 @@ pub use event::rel_code;
 pub use event::{Event, ImeContextState, InputEnvironment, InputEvent};
 pub use os::Handle;
 pub use surface::Surface;
-pub use sws_protocol::window_state;
+pub use sws_protocol::{WindowGeometry, window_state};
 pub use sws_protocol::{CursorIcon, SgfxDamageRect};
 
 /// Transient relationship policy flags for child windows.

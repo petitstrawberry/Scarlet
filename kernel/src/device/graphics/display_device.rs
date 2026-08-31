@@ -37,6 +37,16 @@ pub mod display_commands {
     pub const DISPLAY_PRESENT_BUFFER: u32 = 0x5004;
     /// Present one GPU image capability through this display device.
     pub const DISPLAY_PRESENT_IMAGE: u32 = 0x5005;
+    /// Return the display backlight level as an integer percentage in `0..=100`.
+    ///
+    /// This command ignores its argument and returns the percentage directly
+    /// as the successful `control` return value.
+    pub const DISPLAY_GET_BRIGHTNESS: u32 = 0x5006;
+    /// Set the display backlight level from an integer percentage in `0..=100`.
+    ///
+    /// The scalar `control` argument is the requested percentage. Values
+    /// outside the inclusive `0..=100` range are rejected.
+    pub const DISPLAY_SET_BRIGHTNESS: u32 = 0x5007;
 }
 
 /// 32-bit RGBA pixel layout.
@@ -268,6 +278,18 @@ impl DisplayCharDevice {
         })
     }
 
+    /// Resolve the graphics device that owns this display surface.
+    fn source_graphics_device(&self) -> Result<Arc<dyn Device>, &'static str> {
+        let device = self
+            .device_manager()
+            .get_device(self.fb_resource.source_device_id)
+            .ok_or("Display source device not found")?;
+        if device.as_graphics_device().is_none() {
+            return Err("Display source device is not graphics-capable");
+        }
+        Ok(device)
+    }
+
     fn display_format(format: PixelFormat) -> u32 {
         match format {
             PixelFormat::RGBA8888 => DISPLAY_PIXEL_FORMAT_RGBA8888,
@@ -319,6 +341,28 @@ impl DisplayCharDevice {
             core::ptr::write(target_ptr as *mut DisplayInfo, info);
         }
 
+        Ok(0)
+    }
+
+    fn handle_get_brightness(&self) -> Result<i32, &'static str> {
+        let device = self.source_graphics_device()?;
+        let brightness = device
+            .as_graphics_device()
+            .ok_or("Display source device is not graphics-capable")?
+            .get_brightness_percent()?;
+        Ok(i32::from(brightness))
+    }
+
+    fn handle_set_brightness(&self, arg: usize) -> Result<i32, &'static str> {
+        if arg > 100 {
+            return Err("Display brightness must be in the range 0..=100");
+        }
+
+        let device = self.source_graphics_device()?;
+        device
+            .as_graphics_device()
+            .ok_or("Display source device is not graphics-capable")?
+            .set_brightness_percent(arg as u8)?;
         Ok(0)
     }
 
@@ -649,6 +693,8 @@ impl ControlOps for DisplayCharDevice {
 
         match command {
             DISPLAY_GET_INFO => self.handle_get_info(arg),
+            DISPLAY_GET_BRIGHTNESS => self.handle_get_brightness(),
+            DISPLAY_SET_BRIGHTNESS => self.handle_set_brightness(arg),
             DISPLAY_PRESENT => self.handle_present(),
             DISPLAY_PRESENT_REGION => self.handle_present_region(arg),
             DISPLAY_GET_SWAPCHAIN => self.handle_get_swapchain(arg),
@@ -662,6 +708,8 @@ impl ControlOps for DisplayCharDevice {
         use display_commands::*;
         vec![
             (DISPLAY_GET_INFO, "Get display surface information"),
+            (DISPLAY_GET_BRIGHTNESS, "Get display brightness percentage"),
+            (DISPLAY_SET_BRIGHTNESS, "Set display brightness percentage"),
             (DISPLAY_PRESENT, "Present whole display surface"),
             (DISPLAY_PRESENT_REGION, "Present display surface region"),
             (DISPLAY_GET_SWAPCHAIN, "Get direct scanout swapchain"),
@@ -775,5 +823,206 @@ impl Selectable for DisplayCharDevice {
         _min_wait_ticks: u64,
     ) -> SelectWaitOutcome {
         SelectWaitOutcome::Ready
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DisplayCharDevice, display_commands};
+    use crate::device::{
+        Device, DeviceType,
+        graphics::{
+            FramebufferConfig, GenericGraphicsDevice, GraphicsDevice, PixelFormat,
+            manager::FramebufferResource,
+        },
+        manager::DeviceManager,
+    };
+    use crate::object::capability::selectable::{SelectWaitOutcome, Selectable};
+    use crate::object::capability::{ControlOps, MemoryMappingOps};
+    use alloc::{string::ToString, sync::Arc};
+    use core::{
+        any::Any,
+        sync::atomic::{AtomicU8, Ordering},
+    };
+
+    struct TestBrightnessGraphicsDevice {
+        brightness: AtomicU8,
+    }
+
+    impl TestBrightnessGraphicsDevice {
+        fn new(brightness: u8) -> Self {
+            Self {
+                brightness: AtomicU8::new(brightness),
+            }
+        }
+    }
+
+    impl Device for TestBrightnessGraphicsDevice {
+        fn device_type(&self) -> DeviceType {
+            DeviceType::Graphics
+        }
+
+        fn name(&self) -> &'static str {
+            "test-brightness-graphics"
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+
+        fn as_any_mut(&mut self) -> &mut dyn Any {
+            self
+        }
+
+        fn as_graphics_device(&self) -> Option<&dyn GraphicsDevice> {
+            Some(self)
+        }
+    }
+
+    impl ControlOps for TestBrightnessGraphicsDevice {}
+
+    impl MemoryMappingOps for TestBrightnessGraphicsDevice {
+        fn get_mapping_info(
+            &self,
+            _offset: usize,
+            _length: usize,
+        ) -> Result<crate::object::capability::MemoryMappingInfo, &'static str> {
+            Err("Test graphics device has no mappings")
+        }
+    }
+
+    impl Selectable for TestBrightnessGraphicsDevice {
+        fn wait_until_ready(
+            &self,
+            _interest: crate::object::capability::selectable::ReadyInterest,
+            _trapframe: &mut crate::arch::Trapframe,
+            _timeout_ticks: Option<u64>,
+            _min_wait_ticks: u64,
+        ) -> SelectWaitOutcome {
+            SelectWaitOutcome::Ready
+        }
+    }
+
+    impl GraphicsDevice for TestBrightnessGraphicsDevice {
+        fn get_display_name(&self) -> &'static str {
+            "test-brightness-graphics"
+        }
+
+        fn get_brightness_percent(&self) -> Result<u8, &'static str> {
+            Ok(self.brightness.load(Ordering::Relaxed))
+        }
+
+        fn set_brightness_percent(&self, percent: u8) -> Result<(), &'static str> {
+            if percent > 100 {
+                return Err("Display brightness must be in the range 0..=100");
+            }
+            self.brightness.store(percent, Ordering::Relaxed);
+            Ok(())
+        }
+
+        fn get_framebuffer_config(&self) -> Result<FramebufferConfig, &'static str> {
+            Ok(FramebufferConfig::new(1, 1, PixelFormat::XRGB8888))
+        }
+
+        fn get_framebuffer_address(&self) -> Result<usize, &'static str> {
+            Ok(0x1000)
+        }
+
+        fn present_framebuffer_region(
+            &self,
+            _config: &FramebufferConfig,
+            _physical_addr: usize,
+            _region: crate::device::graphics::output::DisplayRegion,
+        ) -> Result<(), &'static str> {
+            Ok(())
+        }
+
+        fn init_graphics(&self) -> Result<(), &'static str> {
+            Ok(())
+        }
+    }
+
+    fn display_for_test(manager: &DeviceManager, device: Arc<dyn Device>) -> DisplayCharDevice {
+        let source_device_id =
+            manager.register_device_with_name("test-brightness-graphics".to_string(), device);
+        let config = FramebufferConfig::new(1, 1, PixelFormat::XRGB8888);
+        let resource = Arc::new(FramebufferResource::new(
+            source_device_id,
+            "fb-test".to_string(),
+            config.clone(),
+            0x1000,
+            config.size(),
+        ));
+        DisplayCharDevice::new_with_device_manager(resource, manager)
+    }
+
+    #[test_case]
+    fn display_brightness_control_round_trips_valid_percentages() {
+        let manager = DeviceManager::new_for_test();
+        let graphics = Arc::new(TestBrightnessGraphicsDevice::new(42));
+        let display = display_for_test(&manager, graphics.clone());
+
+        assert_eq!(
+            display
+                .control(display_commands::DISPLAY_GET_BRIGHTNESS, 0)
+                .expect("get brightness should succeed"),
+            42
+        );
+        assert_eq!(
+            display
+                .control(display_commands::DISPLAY_SET_BRIGHTNESS, 100)
+                .expect("set brightness should succeed"),
+            0
+        );
+        assert_eq!(graphics.brightness.load(Ordering::Relaxed), 100);
+        assert_eq!(
+            display
+                .control(display_commands::DISPLAY_GET_BRIGHTNESS, 0)
+                .expect("get brightness after set should succeed"),
+            100
+        );
+        assert!(
+            display
+                .supported_control_commands()
+                .iter()
+                .any(|(command, _)| *command == display_commands::DISPLAY_GET_BRIGHTNESS)
+        );
+        assert!(
+            display
+                .supported_control_commands()
+                .iter()
+                .any(|(command, _)| *command == display_commands::DISPLAY_SET_BRIGHTNESS)
+        );
+    }
+
+    #[test_case]
+    fn display_brightness_control_rejects_out_of_range_percentages() {
+        let manager = DeviceManager::new_for_test();
+        let graphics = Arc::new(TestBrightnessGraphicsDevice::new(37));
+        let display = display_for_test(&manager, graphics.clone());
+
+        assert_eq!(
+            display
+                .control(display_commands::DISPLAY_SET_BRIGHTNESS, 101)
+                .expect_err("brightness above 100 must be rejected"),
+            "Display brightness must be in the range 0..=100"
+        );
+        assert_eq!(graphics.brightness.load(Ordering::Relaxed), 37);
+    }
+
+    #[test_case]
+    fn display_brightness_control_preserves_unsupported_default() {
+        let manager = DeviceManager::new_for_test();
+        let mut graphics = GenericGraphicsDevice::new("test-generic-graphics");
+        graphics.set_framebuffer_config(FramebufferConfig::new(1, 1, PixelFormat::XRGB8888));
+        graphics.set_framebuffer_address(0x1000);
+        let display = display_for_test(&manager, Arc::new(graphics));
+
+        assert_eq!(
+            display
+                .control(display_commands::DISPLAY_GET_BRIGHTNESS, 0)
+                .expect_err("generic graphics must preserve the unsupported default"),
+            "Display brightness control is not supported"
+        );
     }
 }

@@ -358,6 +358,12 @@ pub mod key_code {
     pub const KEY_F10: u16 = 0x44;
     pub const KEY_F11: u16 = 0x57;
     pub const KEY_F12: u16 = 0x58;
+    /// Volume down key (Linux input-event code 114).
+    pub const KEY_VOLUMEDOWN: u16 = 0x72;
+    /// Volume up key (Linux input-event code 115).
+    pub const KEY_VOLUMEUP: u16 = 0x73;
+    /// Power key (Linux input-event code 116).
+    pub const KEY_POWER: u16 = 0x74;
 }
 
 #[cfg(test)]

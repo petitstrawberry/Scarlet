@@ -230,6 +230,11 @@ pub mod key_codes {
     pub const KEY_PAGEDOWN: u16 = 109;
     pub const KEY_INSERT: u16 = 110;
     pub const KEY_DELETE: u16 = 111;
+    /// Volume down key.
+    pub const KEY_VOLUMEDOWN: u16 = 114;
+    /// Volume up key.
+    pub const KEY_VOLUMEUP: u16 = 115;
+    /// Power key.
     pub const KEY_POWER: u16 = 116;
     pub const KEY_KPEQUAL: u16 = 117;
     pub const KEY_PAUSE: u16 = 119;
