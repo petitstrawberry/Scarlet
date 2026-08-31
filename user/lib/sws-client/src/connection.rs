@@ -1,14 +1,14 @@
 //! Connection management for SWS client
 
-use crate::{CursorIcon, TransientFlags, WindowSizeLimits};
 use crate::error::Error;
-use crate::event::{Event, ImeContextState, InputEvent};
+use crate::event::{Event, ImeContextState, InputEnvironment, InputEvent};
 use crate::os::{Arc, BTreeMap, Handle, Mutex, SharedMemory, Socket, String, Vec, mutex_lock};
 use crate::os::{
     socket_flush, socket_read, socket_recv_handle_and_data, socket_send_handle_and_data,
     socket_write,
 };
 use crate::surface::Surface;
+use crate::{CursorIcon, TransientFlags, WindowSizeLimits};
 use sws_protocol::{self as protocol, ServerMessage};
 
 const HANDLE_RECORD_CAPACITY: usize = protocol::MessageHeader::SIZE + protocol::MAX_PAYLOAD_SIZE;
@@ -85,6 +85,15 @@ impl Capabilities {
     /// `true` when [`Connection::set_cursor_theme`] may be requested.
     pub const fn supports_cursor_themes(self) -> bool {
         self.capabilities & protocol::capabilities::CURSOR_THEMES != 0
+    }
+
+    /// Whether the server supports input-environment snapshots and changes.
+    ///
+    /// # Returns
+    ///
+    /// `true` when [`Connection::get_input_environment`] may be requested.
+    pub const fn supports_input_environment(self) -> bool {
+        self.capabilities & protocol::capabilities::INPUT_ENVIRONMENT != 0
     }
 }
 
@@ -875,6 +884,7 @@ impl TransportState {
             | Event::SgfxBufferReleased { window_id, .. } => Some(*window_id),
             Event::ScreenSizeChanged { .. }
             | Event::OutputScaleChanged { .. }
+            | Event::InputEnvironmentChanged(_)
             | Event::SgfxBackendLost { .. }
             | Event::FocusChanged { .. }
             | Event::ActiveAppChanged { .. }
@@ -2109,9 +2119,7 @@ impl Connection {
     /// `Ok(())` after SWS has loaded and persisted the theme, or an error when
     /// the path, theme contents, connection, or configuration write is invalid.
     pub fn set_cursor_theme(&self, theme_path: &str) -> Result<(), Error> {
-        if theme_path.is_empty()
-            || theme_path.len() > protocol::CURSOR_THEME_PATH_MAX_BYTES
-        {
+        if theme_path.is_empty() || theme_path.len() > protocol::CURSOR_THEME_PATH_MAX_BYTES {
             return Err(Error::InvalidRequest);
         }
         let payload = protocol::payload_set_cursor_theme(theme_path.as_bytes());
@@ -2590,6 +2598,20 @@ impl TransportState {
                 self.push_event(pointer_lock_event(window_id, locked));
                 true
             }
+            ServerMessage::InputEnvironmentChanged {
+                generation,
+                known_flags,
+                state_flags,
+                capability_flags,
+            } => {
+                self.push_event(input_environment_event(
+                    generation,
+                    known_flags,
+                    state_flags,
+                    capability_flags,
+                ));
+                true
+            }
             ServerMessage::ScreenSizeChanged { width, height } => {
                 self.push_event(Event::ScreenSizeChanged { width, height });
                 true
@@ -2677,6 +2699,20 @@ fn pointer_lock_event(window_id: u32, locked: bool) -> Event {
     Event::PointerLockChanged { window_id, locked }
 }
 
+fn input_environment_event(
+    generation: u32,
+    known_flags: u32,
+    state_flags: u32,
+    capability_flags: u32,
+) -> Event {
+    Event::InputEnvironmentChanged(InputEnvironment {
+        generation,
+        known_flags,
+        state_flags,
+        capability_flags,
+    })
+}
+
 #[cfg(test)]
 mod pointer_lock_tests {
     use super::*;
@@ -2689,6 +2725,19 @@ mod pointer_lock_tests {
                 window_id: 27,
                 locked: true,
             }
+        );
+    }
+
+    #[test]
+    fn converts_input_environment_server_event() {
+        assert_eq!(
+            input_environment_event(11, 3, 1, 12),
+            Event::InputEnvironmentChanged(InputEnvironment {
+                generation: 11,
+                known_flags: 3,
+                state_flags: 1,
+                capability_flags: 12,
+            })
         );
     }
 
@@ -2730,6 +2779,19 @@ mod pointer_lock_tests {
         capabilities.capabilities |= protocol::capabilities::CURSOR_THEMES;
         assert!(capabilities.supports_cursor_themes());
     }
+
+    #[test]
+    fn capability_reports_input_environment_support() {
+        let mut capabilities = Capabilities {
+            protocol_version: protocol::SWS_PROTOCOL_VERSION,
+            capabilities: 0,
+            compositor_epoch: 1,
+            compositor_backend: protocol::compositor_backends::CPU,
+        };
+        assert!(!capabilities.supports_input_environment());
+        capabilities.capabilities |= protocol::capabilities::INPUT_ENVIRONMENT;
+        assert!(capabilities.supports_input_environment());
+    }
 }
 
 impl Connection {
@@ -2752,6 +2814,33 @@ impl Connection {
                 capabilities,
                 compositor_epoch,
                 compositor_backend,
+            }),
+            ServerMessage::Error { code } => Err(Error::ServerError(code)),
+            _ => Err(Error::InvalidResponse),
+        }
+    }
+
+    /// Query the current input environment.
+    ///
+    /// # Returns
+    ///
+    /// The current compositor input-environment snapshot.
+    pub fn get_input_environment(&self) -> Result<InputEnvironment, Error> {
+        if !self.get_capabilities()?.supports_input_environment() {
+            return Err(Error::InputEnvironmentUnsupported);
+        }
+        let response = self.request(protocol::client_msg::GET_INPUT_ENVIRONMENT, &[])?;
+        match response.message() {
+            ServerMessage::InputEnvironmentChanged {
+                generation,
+                known_flags,
+                state_flags,
+                capability_flags,
+            } => Ok(InputEnvironment {
+                generation,
+                known_flags,
+                state_flags,
+                capability_flags,
             }),
             ServerMessage::Error { code } => Err(Error::ServerError(code)),
             _ => Err(Error::InvalidResponse),

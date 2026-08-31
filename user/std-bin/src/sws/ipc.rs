@@ -1,6 +1,7 @@
 //! IPC Server module - handles client connections and messages
 
 use super::config;
+use super::input_environment::{self, Snapshot};
 use super::pointer_lock::{
     InputRoute, enqueue_routed_event, take_extension_events, take_window_events,
 };
@@ -10,7 +11,7 @@ use scarlet_os::handle::capability::memory_mapping::flags as mmap_flags;
 use scarlet_os::ipc::{SharedMemory, permissions};
 use scarlet_os::poll::{POLLERR, POLLHUP, POLLIN, POLLNVAL, POLLOUT, PollHandle, poll};
 use scarlet_os::socket::Socket;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::println;
 use std::string::String;
@@ -593,7 +594,8 @@ pub fn set_sgfx_shared_images_available(available: bool) {
 fn sws_capabilities() -> u64 {
     let mut capabilities = protocol::capabilities::POINTER_LOCK
         | protocol::capabilities::CURSOR_ICONS
-        | protocol::capabilities::CURSOR_THEMES;
+        | protocol::capabilities::CURSOR_THEMES
+        | protocol::capabilities::INPUT_ENVIRONMENT;
     if SGFX_SHARED_IMAGES_AVAILABLE.load(Ordering::Acquire) {
         capabilities |= protocol::capabilities::SGFX_SHARED_IMAGE;
     }
@@ -745,6 +747,27 @@ static PENDING_SERVER_FRAMES: Mutex<BTreeMap<u32, Vec<PendingServerFrame>>> =
 /// This is used for responses to clients that don't have windows (like stemd)
 static PENDING_CLIENT_RESPONSES: Mutex<BTreeMap<usize, Vec<PendingServerFrame>>> =
     Mutex::new(BTreeMap::new());
+
+/// Clients that explicitly opted into input-environment notifications by
+/// issuing `GET_INPUT_ENVIRONMENT`.
+///
+/// Keeping this separate from the general client registry preserves protocol
+/// compatibility with clients that predate message type 35.
+static INPUT_ENVIRONMENT_SUBSCRIBERS: Mutex<BTreeSet<usize>> = Mutex::new(BTreeSet::new());
+
+fn subscribe_input_environment(client_id: usize) {
+    INPUT_ENVIRONMENT_SUBSCRIBERS
+        .lock()
+        .expect("SWS input-environment subscriber mutex poisoned")
+        .insert(client_id);
+}
+
+fn unsubscribe_input_environment(client_id: usize) {
+    INPUT_ENVIRONMENT_SUBSCRIBERS
+        .lock()
+        .expect("SWS input-environment subscriber mutex poisoned")
+        .remove(&client_id);
+}
 
 /// Add an event to the global queue
 pub fn push_ipc_event(event: IpcEvent) {
@@ -1082,6 +1105,33 @@ pub fn broadcast_message_to_all_clients(msg_type: u32, payload: Vec<u8>) {
         // Clone the payload for each client
         let payload_clone = payload.clone();
         send_message_to_client(client_id, msg_type, payload_clone);
+    }
+}
+
+fn input_environment_frame(snapshot: Snapshot) -> PendingServerFrame {
+    PendingServerFrame {
+        msg_type: protocol::server_msg::INPUT_ENVIRONMENT_CHANGED,
+        flags: 0,
+        request_id: 0,
+        payload: input_environment::protocol_payload(snapshot).to_vec(),
+    }
+}
+
+/// Broadcast one complete input-environment snapshot to subscribed clients.
+///
+/// # Arguments
+///
+/// * `snapshot` - Authoritative snapshot produced by an effective state change.
+pub fn broadcast_input_environment_changed(snapshot: Snapshot) {
+    let frame = input_environment_frame(snapshot);
+    let client_ids: Vec<usize> = INPUT_ENVIRONMENT_SUBSCRIBERS
+        .lock()
+        .expect("SWS input-environment subscriber mutex poisoned")
+        .iter()
+        .copied()
+        .collect();
+    for client_id in client_ids {
+        send_message_to_client(client_id, frame.msg_type, frame.payload.clone());
     }
 }
 
@@ -3373,6 +3423,26 @@ fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Ha
                     break;
                 }
             }
+            Ok(ClientMessageRef::GetInputEnvironment {}) => {
+                // Subscribe before reading the snapshot. A concurrent posture
+                // change is then either reflected by the response snapshot or
+                // delivered as a later notification, so no transition can be
+                // missed between query and subscription.
+                subscribe_input_environment(client_id);
+                let payload = input_environment::protocol_payload(input_environment::snapshot());
+                if let Err(error) = write_frame_response(
+                    &mut stream_writer,
+                    protocol::server_msg::INPUT_ENVIRONMENT_CHANGED,
+                    request_id,
+                    &payload,
+                ) {
+                    println!(
+                        "[ClientThread {}] Failed to send input environment: {:?}",
+                        client_id, error
+                    );
+                    break;
+                }
+            }
             Ok(ClientMessageRef::RegisterSgfxBuffer {
                 window_id,
                 buffer_id,
@@ -3762,6 +3832,7 @@ fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Ha
             client_id, client_id
         );
     }
+    unsubscribe_input_environment(client_id);
     CLIENT_WAKES
         .lock()
         .expect("SWS mutex poisoned")
@@ -4075,4 +4146,63 @@ pub enum IpcEvent {
         source_window_id: u32,
         target_app_id: Vec<u8>,
     },
+}
+
+#[cfg(test)]
+mod input_environment_tests {
+    use super::*;
+
+    static SUBSCRIPTION_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn broadcast_frame_is_a_full_unsolicited_snapshot() {
+        let snapshot = Snapshot {
+            generation: 9,
+            known_flags: 3,
+            state_flags: 1,
+            capability_flags: 7,
+        };
+        let frame = input_environment_frame(snapshot);
+        assert_eq!(
+            frame.msg_type,
+            protocol::server_msg::INPUT_ENVIRONMENT_CHANGED
+        );
+        assert_eq!(frame.flags, 0);
+        assert_eq!(frame.request_id, 0);
+        assert_eq!(
+            frame.payload,
+            input_environment::protocol_payload(snapshot).to_vec()
+        );
+    }
+
+    #[test]
+    fn input_environment_broadcast_requires_explicit_subscription() {
+        let _guard = SUBSCRIPTION_TEST_LOCK
+            .lock()
+            .expect("subscription test mutex poisoned");
+        let legacy_client = usize::MAX - 1;
+        let subscribed_client = usize::MAX;
+        {
+            let mut pending = PENDING_CLIENT_RESPONSES.lock().expect("SWS mutex poisoned");
+            pending.insert(legacy_client, Vec::new());
+            pending.insert(subscribed_client, Vec::new());
+        }
+        unsubscribe_input_environment(legacy_client);
+        subscribe_input_environment(subscribed_client);
+
+        broadcast_input_environment_changed(Snapshot {
+            generation: 10,
+            known_flags: 1,
+            state_flags: 1,
+            capability_flags: 0,
+        });
+
+        let mut pending = PENDING_CLIENT_RESPONSES.lock().expect("SWS mutex poisoned");
+        assert!(pending.get(&legacy_client).is_some_and(Vec::is_empty));
+        assert_eq!(pending.get(&subscribed_client).map(Vec::len), Some(1));
+        pending.remove(&legacy_client);
+        pending.remove(&subscribed_client);
+        drop(pending);
+        unsubscribe_input_environment(subscribed_client);
+    }
 }

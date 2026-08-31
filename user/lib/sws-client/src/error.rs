@@ -32,6 +32,8 @@ pub enum Error {
     },
     /// Invalid server response
     InvalidResponse,
+    /// The connected server does not advertise input-environment support.
+    InputEnvironmentUnsupported,
     /// Failed to receive shared memory handle
     ShmHandleFailed,
     /// Failed to map shared memory
@@ -65,6 +67,7 @@ impl Error {
             Error::ReceiveFailed => "failed to receive message",
             Error::ReceiveBufferTooSmall { .. } => "receive buffer is too small",
             Error::InvalidResponse => "invalid server response",
+            Error::InputEnvironmentUnsupported => "input environment is not supported",
             Error::ShmHandleFailed => "failed to receive shared memory handle",
             Error::ShmMapFailed => "failed to map shared memory",
             Error::SurfaceNotFound => "surface not found",

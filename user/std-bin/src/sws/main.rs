@@ -9,6 +9,8 @@ mod cursor_theme;
 mod damage;
 mod gpu_compositor;
 mod input;
+mod input_environment;
+mod input_environment_sbus;
 mod ipc;
 mod pointer_lock;
 mod remote;
@@ -62,6 +64,10 @@ fn main() -> ExitCode {
     println!("=== Scarlet Window Server (SWS) ===");
     println!("Initializing compositor...");
 
+    // Publish startup posture before Compositor::new starts input or IPC
+    // workers, so every consumer observes the same first-frame policy.
+    input_environment::initialize_from_env();
+
     // Initialize compositor
     let mut compositor = match Compositor::new() {
         Ok(comp) => comp,
@@ -82,7 +88,7 @@ fn main() -> ExitCode {
     // connection alive for the compositor lifetime; dropping it immediately
     // would unregister the service again.
     println!("Registering with sbus...");
-    let _sbus_connection = match sbus::Connection::connect() {
+    let sbus_connection = match sbus::Connection::connect() {
         Ok(mut conn) => {
             match conn.register_service_timeout("org.scarlet-os.sws", SBUS_REGISTRATION_TIMEOUT_MS)
             {
@@ -102,6 +108,7 @@ fn main() -> ExitCode {
             None
         }
     };
+    input_environment_sbus::start_service(sbus_connection);
 
     println!("Compositor ready. Starting main loop...");
     notify_service_ready("sws");

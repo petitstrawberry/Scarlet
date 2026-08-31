@@ -10,6 +10,7 @@ use super::input::{
     KeyRepeatState, KeyboardSource, PointerSource, TOUCH_COORD_MAX, TouchFrame, TouchPolicyEvent,
     forward_to_binary_key_protocol, is_initial_press, is_physical_key_value, key_codes,
 };
+use super::input_environment;
 use super::ipc::{IpcEvent, IpcServer, send_message_to_client, send_response_to_client};
 use super::pointer_lock::{
     CorrelatedReply, PointerInteractionState, PointerLockDenial, PointerLockState, captured_window,
@@ -80,6 +81,28 @@ mod touch_modality_tests {
     fn normalized_direct_coordinates_hit_screen_edges() {
         assert_eq!(normalized_touch_to_screen(0, 1920), 0);
         assert_eq!(normalized_touch_to_screen(TOUCH_COORD_MAX, 1920), 1919);
+    }
+
+    #[test]
+    fn maximized_normal_window_tracks_shell_workarea() {
+        assert_eq!(
+            maximized_geometry_for(
+                super::super::window::WindowType::Normal,
+                Some((0, 56, 1920, 1024)),
+                1920,
+                1080,
+            ),
+            (10, 66, 1900, 1004)
+        );
+        assert_eq!(
+            maximized_geometry_for(
+                super::super::window::WindowType::Taskbar,
+                Some((0, 56, 1920, 1024)),
+                1920,
+                1080,
+            ),
+            (0, 0, 1920, 1080)
+        );
     }
 }
 
@@ -718,6 +741,26 @@ fn normalized_touch_to_screen(value: i32, dimension: u32) -> i32 {
         / i64::from(TOUCH_COORD_MAX)) as i32
 }
 
+fn maximized_geometry_for(
+    window_type: super::window::WindowType,
+    workarea: Option<(i32, i32, u32, u32)>,
+    screen_width: u32,
+    screen_height: u32,
+) -> (i32, i32, u32, u32) {
+    if window_type == super::window::WindowType::Normal
+        && let Some((work_x, work_y, work_width, work_height)) = workarea
+    {
+        let padding = 10i32;
+        return (
+            work_x + padding,
+            work_y + padding,
+            work_width.saturating_sub(padding as u32 * 2).max(1),
+            work_height.saturating_sub(padding as u32 * 2).max(1),
+        );
+    }
+    (0, 0, screen_width.max(1), screen_height.max(1))
+}
+
 #[derive(Debug, Clone, Copy)]
 struct MoveDragState {
     window_id: u32,
@@ -883,6 +926,12 @@ impl Compositor {
         ipc_server.listen()?;
         remote_server.listen()?;
 
+        let input_environment = input_environment::snapshot();
+        let mut gesture_recognizer = GestureRecognizer::new(screen_width, screen_height);
+        // No contact can be active during construction, so this only installs
+        // the first-frame filtering policy.
+        let _ = gesture_recognizer.set_tablet_mode(input_environment.tablet_mode());
+
         Ok(Self {
             display,
             backend,
@@ -921,11 +970,11 @@ impl Compositor {
             ime_toggle_bindings: sws_config.ime_toggle_bindings,
             ime_trigger_keys: ConsumedKeys::default(),
             key_repeat: KeyRepeatState::default(),
-            gesture_recognizer: GestureRecognizer::new(screen_width, screen_height),
+            gesture_recognizer,
             direct_touch_grabs: Vec::new(),
             input_modality: InputModality::default(),
-            tablet_mode: false,
-            lid_closed: false,
+            tablet_mode: input_environment.tablet_mode(),
+            lid_closed: input_environment.lid_closed(),
             ime_popup_windows: Vec::new(),
             next_activation_token_serial: 1,
             activation_tokens: Vec::new(),
@@ -1249,6 +1298,7 @@ impl Compositor {
             self.workarea = Some((0, workarea_y, new_width, workarea_height));
             self.window_manager
                 .set_workarea(0, workarea_y, new_width, workarea_height);
+            self.reflow_maximized_windows_to_workarea();
         }
 
         self.full_redraw_needed = true;
@@ -4063,40 +4113,44 @@ impl Compositor {
                 tablet_mode,
                 lid_closed,
             } => {
-                if let Some(lid_closed) = lid_closed {
-                    self.lid_closed = lid_closed;
-                }
-                if let Some(tablet_mode) = tablet_mode
-                    && self.tablet_mode != tablet_mode
-                {
-                    self.tablet_mode = tablet_mode;
-                    for policy_event in self.gesture_recognizer.set_tablet_mode(tablet_mode) {
-                        match policy_event {
-                            TouchPolicyEvent::Pointer(CompositorInputEvent::MouseButton {
-                                button,
-                                pressed,
-                            }) => super::input::push_pointer_button(
-                                PointerSource::Local(u8::MAX),
-                                button,
-                                pressed,
-                            ),
-                            TouchPolicyEvent::Pointer(event) => {
-                                let _ = self.handle_input_event(event)?;
-                            }
-                            TouchPolicyEvent::Gesture(event) => self.handle_gesture_event(event),
-                            TouchPolicyEvent::DirectTouch(frame) => {
-                                let _ = self.handle_direct_touch_frame(frame);
-                            }
-                            TouchPolicyEvent::SourceButton {
-                                source,
-                                button,
-                                pressed,
-                            } => super::input::push_pointer_button(source, button, pressed),
-                            TouchPolicyEvent::ReleaseSource { source } => {
-                                super::input::release_pointer_source(source)
+                let updated = input_environment::update_posture(tablet_mode, lid_closed);
+                if let Some(snapshot) = updated {
+                    self.lid_closed = snapshot.lid_closed();
+                    let tablet_mode = snapshot.tablet_mode();
+                    if self.tablet_mode != tablet_mode {
+                        self.tablet_mode = tablet_mode;
+                        for policy_event in self.gesture_recognizer.set_tablet_mode(tablet_mode) {
+                            match policy_event {
+                                TouchPolicyEvent::Pointer(CompositorInputEvent::MouseButton {
+                                    button,
+                                    pressed,
+                                }) => super::input::push_pointer_button(
+                                    PointerSource::Local(u8::MAX),
+                                    button,
+                                    pressed,
+                                ),
+                                TouchPolicyEvent::Pointer(event) => {
+                                    let _ = self.handle_input_event(event)?;
+                                }
+                                TouchPolicyEvent::Gesture(event) => {
+                                    self.handle_gesture_event(event)
+                                }
+                                TouchPolicyEvent::DirectTouch(frame) => {
+                                    let _ = self.handle_direct_touch_frame(frame);
+                                }
+                                TouchPolicyEvent::SourceButton {
+                                    source,
+                                    button,
+                                    pressed,
+                                } => super::input::push_pointer_button(source, button, pressed),
+                                TouchPolicyEvent::ReleaseSource { source } => {
+                                    super::input::release_pointer_source(source)
+                                }
                             }
                         }
                     }
+                    super::ipc::broadcast_input_environment_changed(snapshot);
+                    super::input_environment_sbus::queue_state_changed(snapshot);
                 }
                 Ok(false)
             }
@@ -4561,18 +4615,61 @@ impl Compositor {
 
     fn maximized_geometry(&self, window_id: u32) -> Option<(i32, i32, u32, u32)> {
         let window = self.window_manager.get_window(window_id)?;
-        if window.window_type == super::window::WindowType::Normal
-            && let Some((work_x, work_y, work_width, work_height)) = self.workarea
-        {
-            let padding = 10i32;
-            return Some((
-                work_x + padding,
-                work_y + padding,
-                work_width.saturating_sub(padding as u32 * 2).max(1),
-                work_height.saturating_sub(padding as u32 * 2).max(1),
-            ));
+        Some(maximized_geometry_for(
+            window.window_type,
+            self.workarea,
+            self.screen_width,
+            self.screen_height,
+        ))
+    }
+
+    fn reflow_maximized_windows_to_workarea(&mut self) -> bool {
+        let window_ids: Vec<u32> = self
+            .window_manager
+            .get_windows()
+            .iter()
+            .filter(|window| {
+                window.maximized
+                    && !window.fullscreen
+                    && window.window_type == super::window::WindowType::Normal
+            })
+            .map(|window| window.id)
+            .collect();
+        let mut changed = false;
+
+        for window_id in window_ids {
+            let Some((old_x, old_y, old_width, old_height, visible)) =
+                self.window_manager.get_window(window_id).map(|window| {
+                    (
+                        window.x,
+                        window.y,
+                        window.width,
+                        window.height,
+                        window.visible,
+                    )
+                })
+            else {
+                continue;
+            };
+            let Some((x, y, width, height)) = self.maximized_geometry(window_id) else {
+                continue;
+            };
+            if (old_x, old_y, old_width, old_height) == (x, y, width, height) {
+                continue;
+            }
+
+            self.window_manager.set_window_position(window_id, x, y);
+            self.window_manager
+                .resize_window_in_place(window_id, width, height);
+            if visible {
+                self.add_pending_damage((old_x, old_y, old_width, old_height));
+                self.add_pending_damage((x, y, width, height));
+            }
+            self.send_current_window_configure(window_id);
+            changed = true;
         }
-        Some((0, 0, self.screen_width.max(1), self.screen_height.max(1)))
+
+        changed
     }
 
     fn prune_expired_activation_tokens(&mut self, now_ns: u64) {
@@ -6108,6 +6205,7 @@ impl Compositor {
                 self.workarea = Some((x, y, width, height));
                 // Notify window manager about workarea change
                 self.window_manager.set_workarea(x, y, width, height);
+                self.reflow_maximized_windows_to_workarea();
                 self.full_redraw_needed = true;
             }
             IpcEvent::SetWindowResizable {

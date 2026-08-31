@@ -43,6 +43,58 @@ pub mod capabilities {
     pub const CURSOR_ICONS: u64 = 1 << 2;
     /// System settings may replace the active filesystem-backed cursor theme.
     pub const CURSOR_THEMES: u64 = 1 << 3;
+    /// Clients may query and subscribe to the current input environment.
+    pub const INPUT_ENVIRONMENT: u64 = 1 << 4;
+}
+
+/// Known input-environment state bits.
+///
+/// A bit in [`input_environment_state_flags`] is meaningful only when its
+/// matching bit is set here.
+pub mod input_environment_known_flags {
+    /// Whether the tablet-mode state is known.
+    pub const TABLET_MODE: u32 = 1 << 0;
+    /// Whether the lid-closed state is known.
+    pub const LID_CLOSED: u32 = 1 << 1;
+}
+
+/// Current input-environment state bits.
+///
+/// Each bit is meaningful only when the corresponding bit is set in
+/// [`input_environment_known_flags`].
+pub mod input_environment_state_flags {
+    /// The device is currently in tablet mode.
+    pub const TABLET_MODE: u32 = 1 << 0;
+    /// The device lid is currently closed.
+    pub const LID_CLOSED: u32 = 1 << 1;
+}
+
+/// Input-device capabilities reported by the input environment.
+pub mod input_environment_capability_flags {
+    /// A direct-touch input device is present.
+    pub const DIRECT_TOUCH: u32 = 1 << 0;
+    /// A fine pointer input device is present.
+    pub const FINE_POINTER: u32 = 1 << 1;
+    /// A keyboard is present.
+    pub const KEYBOARD: u32 = 1 << 2;
+    /// A pen input device is present.
+    pub const PEN: u32 = 1 << 3;
+}
+
+/// Snapshot of the compositor's current input environment.
+///
+/// `state_flags` bits are meaningful only when the matching bit is present in
+/// `known_flags`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InputEnvironment {
+    /// Monotonically increasing compositor generation for this snapshot.
+    pub generation: u32,
+    /// Bitset from [`input_environment_known_flags`].
+    pub known_flags: u32,
+    /// Bitset from [`input_environment_state_flags`].
+    pub state_flags: u32,
+    /// Bitset from [`input_environment_capability_flags`].
+    pub capability_flags: u32,
 }
 
 /// Compositor-provided mouse cursor icons.
@@ -229,6 +281,8 @@ pub mod client_msg {
     pub const SET_CURSOR_ICON: u32 = 43;
     /// Validate, persist, and activate an installed cursor theme.
     pub const SET_CURSOR_THEME: u32 = 44;
+    /// Query the current input environment snapshot.
+    pub const GET_INPUT_ENVIRONMENT: u32 = 45;
 
     // Text input client API messages (200-219)
     pub const TEXT_INPUT_CREATE: u32 = 200;
@@ -293,6 +347,8 @@ pub mod server_msg {
     pub const POINTER_LOCK_CHANGED: u32 = 33;
     /// Confirmation that the active cursor theme changed.
     pub const CURSOR_THEME_CHANGED: u32 = 34;
+    /// Current input environment changed, or a response to `GET_INPUT_ENVIRONMENT`.
+    pub const INPUT_ENVIRONMENT_CHANGED: u32 = 35;
 
     // Text input client events (200-219)
     pub const TEXT_INPUT_CREATED: u32 = 200;
@@ -1022,6 +1078,9 @@ pub enum ClientMessageRef<'a> {
     /// Query protocol version and optional server capabilities.
     GetCapabilities {},
 
+    /// Query the current input environment snapshot.
+    GetInputEnvironment {},
+
     /// Register one transferred SGFX image capability for a window.
     RegisterSgfxBuffer {
         window_id: u32,
@@ -1213,6 +1272,13 @@ pub enum ServerMessage {
     },
     /// The requested global cursor theme was loaded and persisted.
     CursorThemeChanged,
+    /// Current input environment snapshot.
+    InputEnvironmentChanged {
+        generation: u32,
+        known_flags: u32,
+        state_flags: u32,
+        capability_flags: u32,
+    },
     InputEvent {
         window_id: u32,
         time: u64,
@@ -1961,6 +2027,12 @@ pub fn parse_client_message<'a>(
             }
             Ok(ClientMessageRef::GetCapabilities {})
         }
+        client_msg::GET_INPUT_ENVIRONMENT => {
+            if !payload.is_empty() {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            Ok(ClientMessageRef::GetInputEnvironment {})
+        }
         client_msg::REGISTER_SGFX_BUFFER => {
             if payload.len() != 24 {
                 return Err(ProtocolError::MalformedPayload);
@@ -2474,6 +2546,17 @@ pub fn parse_server_message(msg_type: u32, payload: &[u8]) -> Result<ServerMessa
                 return Err(ProtocolError::MalformedPayload);
             }
             Ok(ServerMessage::CursorThemeChanged)
+        }
+        server_msg::INPUT_ENVIRONMENT_CHANGED => {
+            if payload.len() != 16 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            Ok(ServerMessage::InputEnvironmentChanged {
+                generation: read_u32(payload, 0)?,
+                known_flags: read_u32(payload, 4)?,
+                state_flags: read_u32(payload, 8)?,
+                capability_flags: read_u32(payload, 12)?,
+            })
         }
         server_msg::INPUT_EVENT => {
             if payload.len() != 20 {
@@ -3978,6 +4061,32 @@ pub fn payload_pointer_lock_changed(window_id: u32, locked: bool) -> [u8; 8] {
     payload_set_pointer_lock(window_id, locked)
 }
 
+/// Build payload for server->client `INPUT_ENVIRONMENT_CHANGED`.
+///
+/// # Arguments
+///
+/// * `generation` - Monotonically increasing compositor snapshot generation.
+/// * `known_flags` - Bitset from [`input_environment_known_flags`].
+/// * `state_flags` - Bitset from [`input_environment_state_flags`].
+/// * `capability_flags` - Bitset from [`input_environment_capability_flags`].
+///
+/// # Returns
+///
+/// The fixed-width 16-byte input-environment payload.
+pub fn payload_input_environment_changed(
+    generation: u32,
+    known_flags: u32,
+    state_flags: u32,
+    capability_flags: u32,
+) -> [u8; 16] {
+    let mut payload = [0u8; 16];
+    payload[0..4].copy_from_slice(&generation.to_le_bytes());
+    payload[4..8].copy_from_slice(&known_flags.to_le_bytes());
+    payload[8..12].copy_from_slice(&state_flags.to_le_bytes());
+    payload[12..16].copy_from_slice(&capability_flags.to_le_bytes());
+    payload
+}
+
 /// Build payload for client->server `SET_WINDOW_TYPE`.
 pub fn payload_set_window_type(window_id: u32, window_type: u32) -> [u8; 8] {
     let mut payload = [0u8; 8];
@@ -4569,15 +4678,17 @@ pub fn payload_set_window_has_alpha_content(window_id: u32, has_alpha: bool) -> 
 #[cfg(all(test, feature = "std"))]
 mod tests {
     use super::{
-        CURSOR_THEME_PATH_MAX_BYTES, ClientMessageRef, CursorIcon, MessageHeader, ProtocolError,
-        ServerMessage, WindowPlacement, client_msg, encode_routed_frame, error_codes,
-        parse_client_message, parse_server_message, payload_activation_token,
-        payload_create_window_with_placement,
+        CURSOR_THEME_PATH_MAX_BYTES, ClientMessageRef, CursorIcon, InputEnvironment, MessageHeader,
+        ProtocolError, ServerMessage, WindowPlacement, client_msg, encode_routed_frame,
+        error_codes, input_environment_capability_flags, input_environment_known_flags,
+        input_environment_state_flags, parse_client_message, parse_server_message,
+        payload_activation_token, payload_create_window_with_placement,
         payload_create_window_with_placement_and_activation_token,
-        payload_create_window_with_position, payload_error, payload_pointer_lock_changed,
-        payload_request_activation_token, payload_set_cursor_icon, payload_set_cursor_theme,
-        payload_set_fullscreen, payload_set_pointer_lock, payload_unset_fullscreen,
-        payload_window_state_changed, server_msg, window_placement, window_state,
+        payload_create_window_with_position, payload_error, payload_input_environment_changed,
+        payload_pointer_lock_changed, payload_request_activation_token, payload_set_cursor_icon,
+        payload_set_cursor_theme, payload_set_fullscreen, payload_set_pointer_lock,
+        payload_unset_fullscreen, payload_window_state_changed, server_msg, window_placement,
+        window_state,
     };
 
     #[test]
@@ -4865,6 +4976,61 @@ mod tests {
             assert_eq!(header.msg_type_u32(), msg_type);
             assert_eq!(&frame[MessageHeader::SIZE..], payload.as_slice());
             parse_server_message(msg_type, &frame[MessageHeader::SIZE..]).unwrap();
+        }
+    }
+
+    #[test]
+    fn input_environment_request_and_snapshot_round_trip() {
+        assert_eq!(
+            parse_client_message(client_msg::GET_INPUT_ENVIRONMENT, &[]).unwrap(),
+            ClientMessageRef::GetInputEnvironment {}
+        );
+
+        let environment = InputEnvironment {
+            generation: 0x0102_0304,
+            known_flags: input_environment_known_flags::TABLET_MODE
+                | input_environment_known_flags::LID_CLOSED,
+            state_flags: input_environment_state_flags::TABLET_MODE,
+            capability_flags: input_environment_capability_flags::DIRECT_TOUCH
+                | input_environment_capability_flags::KEYBOARD
+                | input_environment_capability_flags::PEN,
+        };
+        let payload = payload_input_environment_changed(
+            environment.generation,
+            environment.known_flags,
+            environment.state_flags,
+            environment.capability_flags,
+        );
+        assert_eq!(payload.len(), 16);
+        assert_eq!(&payload[0..4], &environment.generation.to_le_bytes());
+        assert_eq!(&payload[4..8], &environment.known_flags.to_le_bytes());
+        assert_eq!(&payload[8..12], &environment.state_flags.to_le_bytes());
+        assert_eq!(
+            &payload[12..16],
+            &environment.capability_flags.to_le_bytes()
+        );
+        assert_eq!(
+            parse_server_message(server_msg::INPUT_ENVIRONMENT_CHANGED, &payload).unwrap(),
+            ServerMessage::InputEnvironmentChanged {
+                generation: environment.generation,
+                known_flags: environment.known_flags,
+                state_flags: environment.state_flags,
+                capability_flags: environment.capability_flags,
+            }
+        );
+    }
+
+    #[test]
+    fn input_environment_rejects_malformed_payloads() {
+        assert_eq!(
+            parse_client_message(client_msg::GET_INPUT_ENVIRONMENT, &[0]),
+            Err(ProtocolError::MalformedPayload)
+        );
+        for length in [0, 1, 15, 17] {
+            assert_eq!(
+                parse_server_message(server_msg::INPUT_ENVIRONMENT_CHANGED, &vec![0; length]),
+                Err(ProtocolError::MalformedPayload)
+            );
         }
     }
 }

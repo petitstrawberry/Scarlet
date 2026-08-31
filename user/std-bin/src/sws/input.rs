@@ -25,6 +25,7 @@ use scarlet_os::handle::capability::StreamError;
 use scarlet_os::input::{
     INPUT_CAP_DIRECT_TOUCH, INPUT_CAP_INTERNAL, INPUT_CAP_MT, InputDevice, InputDeviceKind,
 };
+use sws_protocol::input_environment_capability_flags as environment_capabilities;
 
 const DEVICE_INDEX_LIMIT: u8 = 8;
 const DEVICE_SCAN_INTERVAL: Duration = Duration::from_secs(1);
@@ -80,10 +81,14 @@ pub enum CompositorInputEvent {
     },
     /// A normalized per-device multitouch snapshot for compositor-thread policy.
     TouchFrame(TouchFrame),
-    /// Current convertible/lid posture reported by `/dev/switch0`.
+    /// Aggregated convertible/lid posture reported by live switch readers.
     PostureChanged {
-        tablet_mode: Option<bool>,
-        lid_closed: Option<bool>,
+        /// `None` is unchanged; `Some(None)` became unknown; `Some(Some(v))`
+        /// became known with value `v`.
+        tablet_mode: Option<Option<bool>>,
+        /// `None` is unchanged; `Some(None)` became unknown; `Some(Some(v))`
+        /// became known with value `v`.
+        lid_closed: Option<Option<bool>>,
     },
 }
 
@@ -92,6 +97,212 @@ static INPUT_EVENT_QUEUE: Mutex<Vec<CompositorInputEvent>> = Mutex::new(Vec::new
 static SCREEN_WIDTH: AtomicU32 = AtomicU32::new(1);
 static SCREEN_HEIGHT: AtomicU32 = AtomicU32::new(1);
 static INPUT_STARTED: AtomicBool = AtomicBool::new(false);
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct PostureReport {
+    tablet_mode: Option<bool>,
+    lid_closed: Option<bool>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct PostureDelta {
+    tablet_mode: Option<Option<bool>>,
+    lid_closed: Option<Option<bool>>,
+}
+
+impl PostureDelta {
+    fn between(previous: PostureReport, current: PostureReport) -> Self {
+        Self {
+            tablet_mode: (previous.tablet_mode != current.tablet_mode)
+                .then_some(current.tablet_mode),
+            lid_closed: (previous.lid_closed != current.lid_closed).then_some(current.lid_closed),
+        }
+    }
+
+    fn is_empty(self) -> bool {
+        self.tablet_mode.is_none() && self.lid_closed.is_none()
+    }
+}
+
+#[derive(Debug, Default)]
+struct PostureRegistry {
+    sources: Vec<(u8, PostureReport)>,
+}
+
+impl PostureRegistry {
+    fn aggregate(&self) -> PostureReport {
+        fn aggregate_field(values: impl Iterator<Item = Option<bool>>) -> Option<bool> {
+            let mut reporters = values.flatten().peekable();
+            reporters.peek()?;
+            Some(reporters.any(|value| value))
+        }
+
+        PostureReport {
+            tablet_mode: aggregate_field(self.sources.iter().map(|(_, report)| report.tablet_mode)),
+            lid_closed: aggregate_field(self.sources.iter().map(|(_, report)| report.lid_closed)),
+        }
+    }
+
+    fn update(&mut self, source: u8, report: PostureReport) -> PostureDelta {
+        let previous = self.aggregate();
+        if let Some((_, current)) = self
+            .sources
+            .iter_mut()
+            .find(|(existing, _)| *existing == source)
+        {
+            *current = report;
+        } else {
+            self.sources.push((source, report));
+        }
+        PostureDelta::between(previous, self.aggregate())
+    }
+
+    fn remove(&mut self, source: u8) -> PostureDelta {
+        let previous = self.aggregate();
+        self.sources.retain(|(existing, _)| *existing != source);
+        PostureDelta::between(previous, self.aggregate())
+    }
+}
+
+static SWITCH_POSTURE: Mutex<PostureRegistry> = Mutex::new(PostureRegistry {
+    sources: Vec::new(),
+});
+
+fn publish_posture_delta(delta: PostureDelta) {
+    if !delta.is_empty() {
+        push_input_event(CompositorInputEvent::PostureChanged {
+            tablet_mode: delta.tablet_mode,
+            lid_closed: delta.lid_closed,
+        });
+    }
+}
+
+struct PostureRegistration {
+    source: u8,
+}
+
+impl PostureRegistration {
+    fn new(source: u8, report: PostureReport) -> Self {
+        let mut registry = SWITCH_POSTURE
+            .lock()
+            .expect("SWS posture registry mutex poisoned");
+        publish_posture_delta(registry.update(source, report));
+        Self { source }
+    }
+
+    fn update(&self, report: PostureReport) {
+        let mut registry = SWITCH_POSTURE
+            .lock()
+            .expect("SWS posture registry mutex poisoned");
+        publish_posture_delta(registry.update(self.source, report));
+    }
+}
+
+impl Drop for PostureRegistration {
+    fn drop(&mut self) {
+        let mut registry = SWITCH_POSTURE
+            .lock()
+            .expect("SWS posture registry mutex poisoned");
+        publish_posture_delta(registry.remove(self.source));
+    }
+}
+
+#[derive(Debug, Default)]
+struct CapabilityRegistry {
+    direct_touch: u32,
+    fine_pointer: u32,
+    keyboard: u32,
+}
+
+impl CapabilityRegistry {
+    fn flags(&self) -> u32 {
+        let mut flags = 0;
+        if self.direct_touch != 0 {
+            flags |= environment_capabilities::DIRECT_TOUCH;
+        }
+        if self.fine_pointer != 0 {
+            flags |= environment_capabilities::FINE_POINTER;
+        }
+        if self.keyboard != 0 {
+            flags |= environment_capabilities::KEYBOARD;
+        }
+        flags
+    }
+
+    fn add(&mut self, flags: u32) -> Option<u32> {
+        let previous = self.flags();
+        if flags & environment_capabilities::DIRECT_TOUCH != 0 {
+            self.direct_touch = self.direct_touch.saturating_add(1);
+        }
+        if flags & environment_capabilities::FINE_POINTER != 0 {
+            self.fine_pointer = self.fine_pointer.saturating_add(1);
+        }
+        if flags & environment_capabilities::KEYBOARD != 0 {
+            self.keyboard = self.keyboard.saturating_add(1);
+        }
+        let current = self.flags();
+        (current != previous).then_some(current)
+    }
+
+    fn remove(&mut self, flags: u32) -> Option<u32> {
+        let previous = self.flags();
+        if flags & environment_capabilities::DIRECT_TOUCH != 0 {
+            self.direct_touch = self.direct_touch.saturating_sub(1);
+        }
+        if flags & environment_capabilities::FINE_POINTER != 0 {
+            self.fine_pointer = self.fine_pointer.saturating_sub(1);
+        }
+        if flags & environment_capabilities::KEYBOARD != 0 {
+            self.keyboard = self.keyboard.saturating_sub(1);
+        }
+        let current = self.flags();
+        (current != previous).then_some(current)
+    }
+}
+
+static LIVE_CAPABILITIES: Mutex<CapabilityRegistry> = Mutex::new(CapabilityRegistry {
+    direct_touch: 0,
+    fine_pointer: 0,
+    keyboard: 0,
+});
+
+struct CapabilityRegistration {
+    flags: u32,
+}
+
+impl Drop for CapabilityRegistration {
+    fn drop(&mut self) {
+        update_live_capabilities(self.flags, false);
+    }
+}
+
+fn publish_capabilities(flags: u32) {
+    if let Some(snapshot) = super::input_environment::update_capabilities(flags) {
+        super::ipc::broadcast_input_environment_changed(snapshot);
+        super::input_environment_sbus::queue_state_changed(snapshot);
+    }
+}
+
+fn update_live_capabilities(flags: u32, add: bool) {
+    let mut registry = LIVE_CAPABILITIES
+        .lock()
+        .expect("SWS input capability mutex poisoned");
+    let changed = if add {
+        registry.add(flags)
+    } else {
+        registry.remove(flags)
+    };
+    if let Some(flags) = changed {
+        // Publish while the registry is locked so concurrent reader starts and
+        // disconnects cannot reorder authoritative snapshots.
+        publish_capabilities(flags);
+    }
+}
+
+fn register_live_capabilities(flags: u32) -> CapabilityRegistration {
+    update_live_capabilities(flags, true);
+    CapabilityRegistration { flags }
+}
 
 /// Update the screen size used to scale absolute input devices.
 pub fn set_screen_size(width: u32, height: u32) {
@@ -309,6 +520,21 @@ impl PointerMetadata {
             TouchSurface::Touchpad {
                 internal: self.internal,
             }
+        }
+    }
+
+    fn environment_capabilities(self) -> u32 {
+        if self.direct_touch {
+            environment_capabilities::DIRECT_TOUCH
+        } else if matches!(
+            self.kind,
+            InputDeviceKind::Mouse | InputDeviceKind::Touchpad | InputDeviceKind::Tablet
+        ) {
+            // Tablet is the legacy absolute tablet pointer class here. There
+            // is no reliable pen metadata in the current input ABI.
+            environment_capabilities::FINE_POINTER
+        } else {
+            0
         }
     }
 }
@@ -587,7 +813,7 @@ fn input_discovery_supervisor() {
             try_spawn_keyboard_reader(&active_paths, path, index);
         }
         for index in 0..DEVICE_INDEX_LIMIT {
-            try_spawn_switch_reader(&active_paths, std::format!("/dev/switch{index}"));
+            try_spawn_switch_reader(&active_paths, std::format!("/dev/switch{index}"), index);
         }
         thread::sleep(DEVICE_SCAN_INTERVAL);
     }
@@ -644,6 +870,7 @@ fn pointer_device_reader(
 ) {
     let metadata = PointerMetadata::query(&device, expected_kind);
     println!("[InputThread] Opened {} as {:?}", path, metadata.kind);
+    let _capability_registration = register_live_capabilities(metadata.environment_capabilities());
     let mut frame = PointerFrame::default();
     let mut mt = match (metadata.mt_x_axis, metadata.mt_y_axis) {
         (Some(x), Some(y)) if metadata.multitouch() => Some(touch::MtFrameAssembler::new(
@@ -750,6 +977,7 @@ fn consume_mt_event(
 fn try_spawn_switch_reader(
     active_paths: &Arc<Mutex<Vec<std::string::String>>>,
     path: std::string::String,
+    source: u8,
 ) {
     let Some(device) = claim_device(active_paths, &path) else {
         return;
@@ -759,7 +987,7 @@ fn try_spawn_switch_reader(
     let failure_path = cleanup_path.clone();
     if thread::Builder::new()
         .spawn(move || {
-            switch_device_reader(device, path);
+            switch_device_reader(device, path, source);
             release_device(&reader_paths, &cleanup_path);
         })
         .is_err()
@@ -768,13 +996,16 @@ fn try_spawn_switch_reader(
     }
 }
 
-fn switch_device_reader(device: InputDevice, path: std::string::String) {
+fn switch_device_reader(device: InputDevice, path: std::string::String, source: u8) {
     let mut tablet_mode = device.switch_state(switch_codes::SW_TABLET_MODE).ok();
     let mut lid_closed = device.switch_state(switch_codes::SW_LID).ok();
-    push_input_event(CompositorInputEvent::PostureChanged {
-        tablet_mode,
-        lid_closed,
-    });
+    let registration = PostureRegistration::new(
+        source,
+        PostureReport {
+            tablet_mode,
+            lid_closed,
+        },
+    );
     let mut dirty = false;
     let mut desynced = false;
     loop {
@@ -787,7 +1018,7 @@ fn switch_device_reader(device: InputDevice, path: std::string::String) {
                 // frame through the recovery SYN_REPORT boundary.
                 tablet_mode = device.switch_state(switch_codes::SW_TABLET_MODE).ok();
                 lid_closed = device.switch_state(switch_codes::SW_LID).ok();
-                push_input_event(CompositorInputEvent::PostureChanged {
+                registration.update(PostureReport {
                     tablet_mode,
                     lid_closed,
                 });
@@ -812,7 +1043,7 @@ fn switch_device_reader(device: InputDevice, path: std::string::String) {
                     && event.code == syn_codes::SYN_REPORT
                     && dirty =>
             {
-                push_input_event(CompositorInputEvent::PostureChanged {
+                registration.update(PostureReport {
                     tablet_mode,
                     lid_closed,
                 });
@@ -853,6 +1084,7 @@ fn try_spawn_keyboard_reader(
 fn keyboard_device_reader(device: InputDevice, path: std::string::String, index: u8) {
     let source = KeyboardSource::Local(index);
     println!("[KeyboardThread] Opened {}", path);
+    let _capability_registration = register_live_capabilities(environment_capabilities::KEYBOARD);
     let mut desynced = false;
     loop {
         super::trace::keyboard_loop();
@@ -942,6 +1174,154 @@ mod tests {
             mt_slot_count: 0,
             internal: false,
         }
+    }
+
+    #[test]
+    fn sole_posture_source_disconnect_becomes_unknown() {
+        let mut registry = PostureRegistry::default();
+        assert_eq!(
+            registry.update(
+                0,
+                PostureReport {
+                    tablet_mode: Some(false),
+                    lid_closed: None,
+                }
+            ),
+            PostureDelta {
+                tablet_mode: Some(Some(false)),
+                lid_closed: None,
+            }
+        );
+        assert_eq!(
+            registry.remove(0),
+            PostureDelta {
+                tablet_mode: Some(None),
+                lid_closed: None,
+            }
+        );
+    }
+
+    #[test]
+    fn posture_registry_recomputes_disagreeing_sources_on_removal() {
+        let mut registry = PostureRegistry::default();
+        registry.update(
+            0,
+            PostureReport {
+                tablet_mode: Some(false),
+                lid_closed: None,
+            },
+        );
+        assert_eq!(
+            registry.update(
+                1,
+                PostureReport {
+                    tablet_mode: Some(true),
+                    lid_closed: None,
+                }
+            ),
+            PostureDelta {
+                tablet_mode: Some(Some(true)),
+                lid_closed: None,
+            }
+        );
+        assert_eq!(
+            registry.remove(1),
+            PostureDelta {
+                tablet_mode: Some(Some(false)),
+                lid_closed: None,
+            }
+        );
+        assert_eq!(registry.aggregate().tablet_mode, Some(false));
+    }
+
+    #[test]
+    fn posture_registry_aggregates_split_field_sources_independently() {
+        let mut registry = PostureRegistry::default();
+        registry.update(
+            0,
+            PostureReport {
+                tablet_mode: Some(true),
+                lid_closed: None,
+            },
+        );
+        assert_eq!(
+            registry.update(
+                1,
+                PostureReport {
+                    tablet_mode: None,
+                    lid_closed: Some(false),
+                }
+            ),
+            PostureDelta {
+                tablet_mode: None,
+                lid_closed: Some(Some(false)),
+            }
+        );
+        assert_eq!(
+            registry.remove(1),
+            PostureDelta {
+                tablet_mode: None,
+                lid_closed: Some(None),
+            }
+        );
+        assert_eq!(registry.aggregate().tablet_mode, Some(true));
+    }
+
+    #[test]
+    fn capability_registry_keeps_shared_flags_until_last_disconnect() {
+        let mut registry = CapabilityRegistry::default();
+        let direct_touch = environment_capabilities::DIRECT_TOUCH;
+
+        assert_eq!(registry.add(direct_touch), Some(direct_touch));
+        assert_eq!(registry.add(direct_touch), None);
+        assert_eq!(registry.remove(direct_touch), None);
+        assert_eq!(registry.flags(), direct_touch);
+        assert_eq!(registry.remove(direct_touch), Some(0));
+        assert_eq!(registry.flags(), 0);
+    }
+
+    #[test]
+    fn capability_registry_aggregates_independent_device_classes() {
+        let mut registry = CapabilityRegistry::default();
+        let direct_touch = environment_capabilities::DIRECT_TOUCH;
+        let fine_pointer = environment_capabilities::FINE_POINTER;
+        let keyboard = environment_capabilities::KEYBOARD;
+
+        assert_eq!(registry.add(direct_touch), Some(direct_touch));
+        assert_eq!(
+            registry.add(fine_pointer),
+            Some(direct_touch | fine_pointer)
+        );
+        assert_eq!(
+            registry.add(keyboard),
+            Some(direct_touch | fine_pointer | keyboard)
+        );
+        assert_eq!(registry.remove(fine_pointer), Some(direct_touch | keyboard));
+        assert_eq!(registry.remove(direct_touch), Some(keyboard));
+        assert_eq!(registry.remove(keyboard), Some(0));
+    }
+
+    #[test]
+    fn pointer_metadata_maps_only_reliable_environment_capabilities() {
+        assert_eq!(
+            metadata(InputDeviceKind::Touchscreen).environment_capabilities(),
+            environment_capabilities::DIRECT_TOUCH
+        );
+        for kind in [
+            InputDeviceKind::Mouse,
+            InputDeviceKind::Touchpad,
+            InputDeviceKind::Tablet,
+        ] {
+            assert_eq!(
+                metadata(kind).environment_capabilities(),
+                environment_capabilities::FINE_POINTER
+            );
+        }
+        assert_eq!(
+            metadata(InputDeviceKind::Tablet).environment_capabilities()
+                & environment_capabilities::PEN,
+            0
+        );
     }
 
     #[test]

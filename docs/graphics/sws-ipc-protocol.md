@@ -279,6 +279,8 @@ Semantics:
 
 - Expand a normal application window to the compositor workarea. Shell surfaces
   such as the taskbar remain visible; this is not fullscreen.
+- While the window remains maximized, later workarea changes reflow it and emit
+  `WINDOW_CONFIGURE` with the new size.
 - The compositor saves the current position and size for restoration.
 - The window can be restored with `RESTORE_WINDOW`.
 - Windows that specify explicit maximum size limits (i.e. `max_width` or `max_height` is non-zero) are **not** maximized; clients SHOULD NOT send `MAXIMIZE_WINDOW` for such windows and MUST be prepared for the request to be ignored.
@@ -427,6 +429,17 @@ Success is a correlated empty `CURSOR_THEME_CHANGED` response. Invalid paths or
 theme contents return `INVALID_CURSOR_THEME`; a configuration write failure
 returns `CURSOR_THEME_PERSIST_FAILED`. Clients should confirm the
 `CURSOR_THEMES` capability bit before using this request with an older server.
+
+#### `GET_INPUT_ENVIRONMENT` (type = 45)
+
+Payload: empty.
+
+Clients should first confirm the `INPUT_ENVIRONMENT` capability bit (`1 << 4`)
+from `GET_CAPABILITIES`. SWS responds with a correlated
+`INPUT_ENVIRONMENT_CHANGED` snapshot. A successful request also subscribes that
+connection to later changes, broadcast with the same message type and no
+response flag. SWS does not send message type 35 to clients that have not made
+this request, so clients from before this additive extension remain compatible.
 
 #### `REGISTER_EXTENSION` (type = 100)
 
@@ -844,6 +857,81 @@ This is a correlated response to `SET_CURSOR_THEME`. It is sent only after the
 new theme has loaded, its selection has been persisted, and the compositor has
 scheduled the replacement cursor for redraw.
 
+#### `INPUT_ENVIRONMENT_CHANGED` (type = 35)
+
+Payload (16 bytes):
+
+| Offset | Size | Field              | Type |
+|--------|------|--------------------|------|
+| 0      | 4    | `generation`       | u32  |
+| 4      | 4    | `known_flags`      | u32  |
+| 8      | 4    | `state_flags`      | u32  |
+| 12     | 4    | `capability_flags` | u32  |
+
+This message is the correlated response to `GET_INPUT_ENVIRONMENT` and is also
+broadcast asynchronously to subscribed connections whenever the input
+environment changes. `generation` is a monotonically increasing snapshot
+generation.
+
+`known_flags` and `state_flags` use the same bits. A state bit is meaningful
+only when the matching known bit is set:
+
+| Bit | Constant | Meaning |
+|-----|----------|---------|
+| `0x01` | `TABLET_MODE` | Tablet-mode state is known / device is in tablet mode. |
+| `0x02` | `LID_CLOSED` | Lid-closed state is known / lid is closed. |
+
+`capability_flags` describes currently available input devices:
+
+| Bit | Constant | Meaning |
+|-----|----------|---------|
+| `0x01` | `DIRECT_TOUCH` | A direct-touch device is present. |
+| `0x02` | `FINE_POINTER` | A fine pointer device is present. |
+| `0x04` | `KEYBOARD` | A keyboard is present. |
+| `0x08` | `PEN` | A pen device is present. |
+
+##### Runtime source and test override
+
+SWS reads convertible posture from Scarlet event devices named
+`/dev/switchN`. The device exposes Linux-style `EV_SW` frames; SWS samples
+`SW_TABLET_MODE` and `SW_LID` initially and after `SYN_DROPPED`, then publishes
+one coherent snapshot after each effective `SYN_REPORT` change.
+Each field is aggregated independently across live switch readers: it is known
+when at least one source reports it and true when any reporting source is true.
+Disconnecting the last source for a field changes that field back to unknown.
+
+The input discovery supervisor also reference-counts live device readers.
+`/dev/touchscreenN` contributes `DIRECT_TOUCH`, mouse/touchpad/legacy absolute
+tablet readers contribute `FINE_POINTER`, and `/dev/keyboardN` contributes
+`KEYBOARD`. Disconnecting the last device in a class clears its bit and advances
+the snapshot generation. `PEN` remains clear until the input ABI can distinguish
+a pen reliably.
+
+`SCARLET_TABLET_MODE` provides an initial posture for development hosts without
+a switch device. The values `1`, `true`, `yes`, `on`, and `tablet` enable tablet
+mode; `0`, `false`, `no`, `off`, and `laptop` disable it. Matching is
+case-insensitive. Invalid or absent values leave the posture unknown. This is a
+startup override only: a later hardware posture report is authoritative.
+
+##### SBus mirror
+
+The same state is available to non-window-system services over SBus:
+
+| Field | Value |
+|-------|-------|
+| Service | `org.scarlet-os.sws` |
+| Object path | `/org/scarlet/InputEnvironment` |
+| Interface | `org.scarlet.InputEnvironment` |
+| Method | `GetState` (no arguments) |
+| Signal | `StateChanged` |
+
+`GetState` returns four `UInt` arguments in
+`generation, known_flags, state_flags, capability_flags` order.
+`StateChanged` carries the same four arguments after an effective change. If
+SBus is temporarily unavailable, SWS reconnects and coalesces pending signals
+to the newest full snapshot; consumers must always treat each signal as a
+complete state replacement.
+
 #### `EXTENSION_REGISTERED` (type = 100)
 
 **Extension API**: This message is part of the SWS Extension API.
@@ -975,7 +1063,8 @@ The Extension API allows specialized bridge servers (like the Wayland bridge) to
 
 - The frame header has no version field. `GET_CAPABILITIES` reports the current
   protocol version; version 3 adds compositor-provided cursor icons and live
-  cursor-theme selection.
+  cursor-theme selection. Input-environment support is additive and advertised
+  by the `INPUT_ENVIRONMENT` capability bit without changing the version.
 - The current wire format is the request-routed 8-byte header described above:
   `msg_type: u16`, `flags: u8`, `request_id: u8`, `payload_size: u32`.
 - The older `msg_type: u32`, `payload_size: u32` header is not supported.

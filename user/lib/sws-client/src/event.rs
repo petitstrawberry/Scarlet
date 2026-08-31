@@ -15,6 +15,86 @@ pub struct InputEvent {
     pub value: i32,
 }
 
+/// Snapshot of the compositor's current input environment.
+///
+/// State values are optional because a compositor can report that a particular
+/// state is not known. Capability helpers report device presence directly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InputEnvironment {
+    /// Monotonically increasing compositor generation for this snapshot.
+    pub generation: u32,
+    /// Bitset from [`sws_protocol::input_environment_known_flags`].
+    pub known_flags: u32,
+    /// Bitset from [`sws_protocol::input_environment_state_flags`].
+    pub state_flags: u32,
+    /// Bitset from [`sws_protocol::input_environment_capability_flags`].
+    pub capability_flags: u32,
+}
+
+impl InputEnvironment {
+    /// Return whether tablet-mode state is known and enabled.
+    ///
+    /// # Returns
+    ///
+    /// `Some(true)` or `Some(false)` when the state is known, otherwise `None`.
+    pub const fn tablet_mode(self) -> Option<bool> {
+        if self.known_flags & sws_protocol::input_environment_known_flags::TABLET_MODE != 0 {
+            Some(self.state_flags & sws_protocol::input_environment_state_flags::TABLET_MODE != 0)
+        } else {
+            None
+        }
+    }
+
+    /// Return whether lid-closed state is known and enabled.
+    ///
+    /// # Returns
+    ///
+    /// `Some(true)` or `Some(false)` when the state is known, otherwise `None`.
+    pub const fn lid_closed(self) -> Option<bool> {
+        if self.known_flags & sws_protocol::input_environment_known_flags::LID_CLOSED != 0 {
+            Some(self.state_flags & sws_protocol::input_environment_state_flags::LID_CLOSED != 0)
+        } else {
+            None
+        }
+    }
+
+    /// Return whether a direct-touch input device is present.
+    ///
+    /// # Returns
+    ///
+    /// `true` when a direct-touch input device is available.
+    pub const fn has_direct_touch(self) -> bool {
+        self.capability_flags & sws_protocol::input_environment_capability_flags::DIRECT_TOUCH != 0
+    }
+
+    /// Return whether a fine pointer input device is present.
+    ///
+    /// # Returns
+    ///
+    /// `true` when a fine pointer input device is available.
+    pub const fn has_fine_pointer(self) -> bool {
+        self.capability_flags & sws_protocol::input_environment_capability_flags::FINE_POINTER != 0
+    }
+
+    /// Return whether a keyboard is present.
+    ///
+    /// # Returns
+    ///
+    /// `true` when a keyboard is available.
+    pub const fn has_keyboard(self) -> bool {
+        self.capability_flags & sws_protocol::input_environment_capability_flags::KEYBOARD != 0
+    }
+
+    /// Return whether a pen input device is present.
+    ///
+    /// # Returns
+    ///
+    /// `true` when a pen input device is available.
+    pub const fn has_pen(self) -> bool {
+        self.capability_flags & sws_protocol::input_environment_capability_flags::PEN != 0
+    }
+}
+
 /// Text-input context state sent to an input method service.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImeContextState {
@@ -115,6 +195,8 @@ pub enum Event {
     /// A `locked: false` event can be caused by an explicit request or by the
     /// compositor releasing capture after focus/visibility/lifetime changes.
     PointerLockChanged { window_id: u32, locked: bool },
+    /// The compositor's input environment changed.
+    InputEnvironmentChanged(InputEnvironment),
     /// Display size changed.
     ScreenSizeChanged { width: u32, height: u32 },
     /// Output scale changed.
@@ -276,4 +358,27 @@ pub mod key_code {
     pub const KEY_F10: u16 = 0x44;
     pub const KEY_F11: u16 = 0x57;
     pub const KEY_F12: u16 = 0x58;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::InputEnvironment;
+
+    #[test]
+    fn input_environment_helpers_distinguish_unknown_state() {
+        let environment = InputEnvironment {
+            generation: 9,
+            known_flags: sws_protocol::input_environment_known_flags::TABLET_MODE,
+            state_flags: sws_protocol::input_environment_state_flags::TABLET_MODE,
+            capability_flags: sws_protocol::input_environment_capability_flags::DIRECT_TOUCH
+                | sws_protocol::input_environment_capability_flags::KEYBOARD,
+        };
+
+        assert_eq!(environment.tablet_mode(), Some(true));
+        assert_eq!(environment.lid_closed(), None);
+        assert!(environment.has_direct_touch());
+        assert!(!environment.has_fine_pointer());
+        assert!(environment.has_keyboard());
+        assert!(!environment.has_pen());
+    }
 }
