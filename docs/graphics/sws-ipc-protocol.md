@@ -90,12 +90,46 @@ Implementations **must** reject frames with excessively large payloads to avoid 
 
 #### `CREATE_WINDOW` (type = 1)
 
-Payload (8 bytes):
+Legacy variable payload: three length-prefixed byte strings (`app_id`,
+`app_name`, `menu_titles`) followed by the preferred `width`, `height`,
+`window_type`, `resizable`, `focus_on_create`, and `active_on_focus` values.
+Newer legacy forms may append placement and activation-token fields. This form
+allocates the preferred-size buffer before compositor policy is applied; new
+toolkits should use `CREATE_WINDOW_CONFIGURED`.
 
-| Offset | Size | Field    | Type |
-|--------|------|----------|------|
-| 0      | 4    | `width`  | u32  |
-| 4      | 4    | `height` | u32  |
+#### `CREATE_WINDOW_CONFIGURED` (type = 49)
+
+Atomically supplies every property needed before SWS allocates the first
+buffer. After the three length-prefixed identity/menu strings, offsets below
+are relative to the end of `menu_titles`:
+
+| Offset | Size | Field | Type |
+|--------|------|-------|------|
+| 0 | 4 | preferred width | u32 |
+| 4 | 4 | preferred height | u32 |
+| 8 | 4 | window type | u32 |
+| 12 | 4 | resizable | u32 boolean |
+| 16 | 4 | focus on create | u32 boolean |
+| 20 | 4 | active on focus | u32 boolean |
+| 24 | 4 | placement | u32 |
+| 28 | 4 | initial x | i32 |
+| 32 | 4 | initial y | i32 |
+| 36 | 4 | minimum surface width | u32, zero = unset |
+| 40 | 4 | minimum surface height | u32, zero = unset |
+| 44 | 4 | maximum surface width | u32, zero = unset |
+| 48 | 4 | maximum surface height | u32, zero = unset |
+| 52 | 4 | managed-geometry left inset | u32 |
+| 56 | 4 | managed-geometry top inset | u32 |
+| 60 | 4 | managed-geometry right inset | u32 |
+| 64 | 4 | managed-geometry bottom inset | u32 |
+| 68 | 4 | activation-token length | u32, zero = absent |
+| 72 | N | activation token | opaque bytes |
+
+SWS snapshots the current output, workarea, and system windowing mode; clamps
+the chosen surface extent to the supplied limits; and only then allocates SHM.
+In focused mode, eligible resizable normal windows receive a first buffer whose
+managed geometry already matches the workarea. Fixed-size and finite-maximum
+compatibility windows retain a constrained preferred size and remain floating.
 
 #### `DESTROY_WINDOW` (type = 2)
 
@@ -743,8 +777,9 @@ request failure.
 
 #### `WINDOW_CREATED` (type = 10)
 
-When sent as the result of `CREATE_WINDOW` or `EXTENSION_CREATE_WINDOW`, this is
-a response frame: `IS_RESPONSE` is set and `request_id` matches the request.
+When sent as the result of `CREATE_WINDOW`, `CREATE_WINDOW_CONFIGURED`, or
+`EXTENSION_CREATE_WINDOW`, this is a response frame: `IS_RESPONSE` is set and
+`request_id` matches the request.
 
 Payload (12 bytes):
 
@@ -754,6 +789,11 @@ Payload (12 bytes):
 | 4      | 8    | `shm_size`  | u64  | Size (bytes) of the window's shared-memory buffer |
 
 `shm_size` is a fixed-width `u64` to keep the protocol stable across architectures.
+
+For `CREATE_WINDOW_CONFIGURED`, the payload is 20 bytes and appends the
+authoritative first-buffer `width: u32` and `height: u32` at offsets 12 and 16.
+ScarletUI must use those values for initial layout, CPU presentation, and SGFX
+registration; no initial `WINDOW_CONFIGURE` round trip is required.
 
 After `WINDOW_CREATED`, the server sends the shared-memory handle out-of-band via handle passing (SCM_RIGHTS-style capability transfer). See `sws_protocol::send_shm_handle` / `sws_protocol::recv_shm_handle`.
 
@@ -1107,8 +1147,9 @@ The Extension API allows specialized bridge servers (like the Wayland bridge) to
 - The frame header has no version field. `GET_CAPABILITIES` reports the current
   protocol version; version 3 adds compositor-provided cursor icons and live
   cursor-theme selection, and version 4 adds managed window geometry distinct
-  from the composited surface. Input-environment support is additive and
-  advertised by the `INPUT_ENVIRONMENT` capability bit.
+  from the composited surface. Version 5 adds system mode overrides; version 6
+  adds atomic configured-window creation. Input-environment and configured
+  creation support remain capability-gated.
 - The current wire format is the request-routed 8-byte header described above:
   `msg_type: u16`, `flags: u8`, `request_id: u8`, `payload_size: u32`.
 - The older `msg_type: u32`, `payload_size: u32` header is not supported.

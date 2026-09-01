@@ -58,6 +58,60 @@ impl InputEnvironment {
         }
     }
 
+    /// Return the effective system-wide windowing policy.
+    ///
+    /// # Returns
+    ///
+    /// The current policy when reported by the compositor, otherwise `None`.
+    pub const fn windowing_mode(self) -> Option<sws_protocol::WindowingMode> {
+        if self.known_flags & sws_protocol::input_environment_known_flags::WINDOWING_MODE == 0 {
+            return None;
+        }
+        if self.state_flags & sws_protocol::input_environment_state_flags::FOCUSED_WINDOWING != 0 {
+            Some(sws_protocol::WindowingMode::Focused)
+        } else {
+            Some(sws_protocol::WindowingMode::Freeform)
+        }
+    }
+
+    /// Return whether a system-wide tablet-mode override is active.
+    ///
+    /// # Returns
+    ///
+    /// The override state when reported by the compositor, otherwise `None`.
+    pub const fn tablet_mode_override_active(self) -> Option<bool> {
+        if self.known_flags
+            & sws_protocol::input_environment_known_flags::TABLET_MODE_OVERRIDE_ACTIVE
+            == 0
+        {
+            return None;
+        }
+        Some(
+            self.state_flags
+                & sws_protocol::input_environment_state_flags::TABLET_MODE_OVERRIDE_ACTIVE
+                != 0,
+        )
+    }
+
+    /// Return whether a system-wide windowing-mode override is active.
+    ///
+    /// # Returns
+    ///
+    /// The override state when reported by the compositor, otherwise `None`.
+    pub const fn windowing_mode_override_active(self) -> Option<bool> {
+        if self.known_flags
+            & sws_protocol::input_environment_known_flags::WINDOWING_MODE_OVERRIDE_ACTIVE
+            == 0
+        {
+            return None;
+        }
+        Some(
+            self.state_flags
+                & sws_protocol::input_environment_state_flags::WINDOWING_MODE_OVERRIDE_ACTIVE
+                != 0,
+        )
+    }
+
     /// Return whether a direct-touch input device is present.
     ///
     /// # Returns
@@ -374,14 +428,25 @@ mod tests {
     fn input_environment_helpers_distinguish_unknown_state() {
         let environment = InputEnvironment {
             generation: 9,
-            known_flags: sws_protocol::input_environment_known_flags::TABLET_MODE,
-            state_flags: sws_protocol::input_environment_state_flags::TABLET_MODE,
+            known_flags: sws_protocol::input_environment_known_flags::TABLET_MODE
+                | sws_protocol::input_environment_known_flags::WINDOWING_MODE
+                | sws_protocol::input_environment_known_flags::TABLET_MODE_OVERRIDE_ACTIVE
+                | sws_protocol::input_environment_known_flags::WINDOWING_MODE_OVERRIDE_ACTIVE,
+            state_flags: sws_protocol::input_environment_state_flags::TABLET_MODE
+                | sws_protocol::input_environment_state_flags::FOCUSED_WINDOWING
+                | sws_protocol::input_environment_state_flags::TABLET_MODE_OVERRIDE_ACTIVE,
             capability_flags: sws_protocol::input_environment_capability_flags::DIRECT_TOUCH
                 | sws_protocol::input_environment_capability_flags::KEYBOARD,
         };
 
         assert_eq!(environment.tablet_mode(), Some(true));
         assert_eq!(environment.lid_closed(), None);
+        assert_eq!(
+            environment.windowing_mode(),
+            Some(sws_protocol::WindowingMode::Focused)
+        );
+        assert_eq!(environment.tablet_mode_override_active(), Some(true));
+        assert_eq!(environment.windowing_mode_override_active(), Some(false));
         assert!(environment.has_direct_touch());
         assert!(!environment.has_fine_pointer());
         assert!(environment.has_keyboard());

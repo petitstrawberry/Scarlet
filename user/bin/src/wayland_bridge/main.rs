@@ -1154,6 +1154,7 @@ impl WaylandBridge {
         if let protocol_sws::ServerMessage::WindowCreated {
             window_id,
             shm_size,
+            ..
         } = create_response
         {
             bridge_log!(
@@ -1259,6 +1260,7 @@ impl WaylandBridge {
         if let protocol_sws::ServerMessage::WindowCreated {
             window_id,
             shm_size,
+            ..
         } = create_response
         {
             bridge_log!(

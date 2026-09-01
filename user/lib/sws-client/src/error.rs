@@ -34,6 +34,8 @@ pub enum Error {
     InvalidResponse,
     /// The connected server does not advertise input-environment support.
     InputEnvironmentUnsupported,
+    /// The connected server does not allow system-wide mode overrides.
+    SystemModeOverrideUnsupported,
     /// Failed to receive shared memory handle
     ShmHandleFailed,
     /// Failed to map shared memory
@@ -68,6 +70,7 @@ impl Error {
             Error::ReceiveBufferTooSmall { .. } => "receive buffer is too small",
             Error::InvalidResponse => "invalid server response",
             Error::InputEnvironmentUnsupported => "input environment is not supported",
+            Error::SystemModeOverrideUnsupported => "system mode overrides are not supported",
             Error::ShmHandleFailed => "failed to receive shared memory handle",
             Error::ShmMapFailed => "failed to map shared memory",
             Error::SurfaceNotFound => "surface not found",

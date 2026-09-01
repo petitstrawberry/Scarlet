@@ -104,6 +104,35 @@ impl Capabilities {
     pub const fn supports_window_geometry(self) -> bool {
         self.capabilities & protocol::capabilities::WINDOW_GEOMETRY != 0
     }
+
+    /// Whether the server accepts system-wide tablet and windowing overrides.
+    ///
+    /// # Returns
+    ///
+    /// `true` when the mode-override setters may be requested.
+    pub const fn supports_system_mode_overrides(self) -> bool {
+        self.capabilities & protocol::capabilities::SYSTEM_MODE_OVERRIDES != 0
+    }
+
+    /// Whether SWS can configure initial size before allocating the first buffer.
+    ///
+    /// # Returns
+    ///
+    /// `true` when configured window creation may be requested.
+    pub const fn supports_configured_window_creation(self) -> bool {
+        self.capabilities & protocol::capabilities::CONFIGURED_WINDOW_CREATION != 0
+    }
+}
+
+/// Surface identity and physical extent returned by configured creation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CreatedSurface {
+    /// Server-assigned surface identifier.
+    pub surface_id: u32,
+    /// Negotiated physical width of the first buffer.
+    pub width: u32,
+    /// Negotiated physical height of the first buffer.
+    pub height: u32,
 }
 
 /// Stable identity for one registered shared SGFX buffer.
@@ -1753,6 +1782,102 @@ impl Connection {
         Ok(surface_id)
     }
 
+    /// Create a surface after SWS atomically applies initial policy and limits.
+    ///
+    /// The returned dimensions are authoritative and back the first shared
+    /// buffer; clients must perform their first layout and SGFX registration at
+    /// exactly that extent.
+    ///
+    /// # Arguments
+    ///
+    /// * `app_id` - Stable application identifier.
+    /// * `app_name` - Human-readable application name.
+    /// * `menu_titles` - Serialized application menu titles.
+    /// * `width` - Preferred initial physical surface width.
+    /// * `height` - Preferred initial physical surface height.
+    /// * `window_type` - SWS window role.
+    /// * `resizable` - Whether the window may be resized.
+    /// * `focus_on_create` - Whether the new window requests focus.
+    /// * `active_on_focus` - Whether focus activates the application.
+    /// * `placement` - Initial placement hint.
+    /// * `size_limits` - Initial physical surface-size limits.
+    /// * `geometry_insets` - Non-interactive decoration around managed geometry.
+    /// * `activation_token` - Optional one-shot activation token.
+    ///
+    /// # Returns
+    ///
+    /// The new surface identifier and negotiated first-buffer extent.
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_surface_configured(
+        &self,
+        app_id: &str,
+        app_name: &str,
+        menu_titles: &str,
+        width: u32,
+        height: u32,
+        window_type: u32,
+        resizable: bool,
+        focus_on_create: bool,
+        active_on_focus: bool,
+        placement: protocol::WindowPlacement,
+        size_limits: WindowSizeLimits,
+        geometry_insets: protocol::WindowGeometryInsets,
+        activation_token: Option<&str>,
+    ) -> Result<CreatedSurface, Error> {
+        if activation_token.is_some_and(|token| {
+            token.is_empty() || token.len() > protocol::ACTIVATION_TOKEN_MAX_BYTES
+        }) {
+            return Err(Error::InvalidRequest);
+        }
+        let (placement, initial_x, initial_y) = match placement {
+            protocol::WindowPlacement::Default => (protocol::window_placement::DEFAULT, 0, 0),
+            protocol::WindowPlacement::Centered => (protocol::window_placement::CENTERED, 0, 0),
+            protocol::WindowPlacement::Absolute { x, y } => {
+                (protocol::window_placement::ABSOLUTE, x, y)
+            }
+        };
+        let payload = protocol::payload_create_window_configured(
+            app_id.as_bytes(),
+            app_name.as_bytes(),
+            menu_titles.as_bytes(),
+            width,
+            height,
+            window_type,
+            resizable,
+            focus_on_create,
+            active_on_focus,
+            placement,
+            initial_x,
+            initial_y,
+            protocol::InitialWindowConfiguration {
+                size_limits,
+                geometry_insets,
+            },
+            activation_token.map(str::as_bytes),
+        );
+        let mut response =
+            self.request(protocol::client_msg::CREATE_WINDOW_CONFIGURED, &payload)?;
+        let created = match response.message() {
+            ServerMessage::WindowCreated {
+                window_id,
+                width,
+                height,
+                ..
+            } if width != 0 && height != 0 => CreatedSurface {
+                surface_id: window_id,
+                width,
+                height,
+            },
+            ServerMessage::Error { code } => return Err(Error::ServerError(code)),
+            _ => return Err(Error::InvalidResponse),
+        };
+        let shm_handle = response.take_handle().ok_or(Error::ShmHandleFailed)?;
+        let shm = SharedMemory::from_handle(shm_handle).map_err(|_| Error::ShmHandleFailed)?;
+        let surface = Surface::new(created.surface_id, created.width, created.height, shm)?;
+        mutex_lock(&self.surfaces).insert(created.surface_id, surface);
+        Ok(created)
+    }
+
     /// Destroy a surface
     pub fn destroy_surface(&self, surface_id: u32) -> Result<(), Error> {
         if mutex_lock(&self.surfaces).remove(&surface_id).is_none() {
@@ -2748,6 +2873,26 @@ fn input_environment_event(
     })
 }
 
+fn input_environment_from_server_message(
+    message: ServerMessage,
+) -> Result<InputEnvironment, Error> {
+    match message {
+        ServerMessage::InputEnvironmentChanged {
+            generation,
+            known_flags,
+            state_flags,
+            capability_flags,
+        } => Ok(InputEnvironment {
+            generation,
+            known_flags,
+            state_flags,
+            capability_flags,
+        }),
+        ServerMessage::Error { code } => Err(Error::ServerError(code)),
+        _ => Err(Error::InvalidResponse),
+    }
+}
+
 #[cfg(test)]
 mod pointer_lock_tests {
     use super::*;
@@ -2827,6 +2972,32 @@ mod pointer_lock_tests {
         capabilities.capabilities |= protocol::capabilities::INPUT_ENVIRONMENT;
         assert!(capabilities.supports_input_environment());
     }
+
+    #[test]
+    fn capability_reports_system_mode_override_support() {
+        let mut capabilities = Capabilities {
+            protocol_version: protocol::SWS_PROTOCOL_VERSION,
+            capabilities: 0,
+            compositor_epoch: 1,
+            compositor_backend: protocol::compositor_backends::CPU,
+        };
+        assert!(!capabilities.supports_system_mode_overrides());
+        capabilities.capabilities |= protocol::capabilities::SYSTEM_MODE_OVERRIDES;
+        assert!(capabilities.supports_system_mode_overrides());
+    }
+
+    #[test]
+    fn capability_reports_configured_window_creation_support() {
+        let mut capabilities = Capabilities {
+            protocol_version: protocol::SWS_PROTOCOL_VERSION,
+            capabilities: 0,
+            compositor_epoch: 1,
+            compositor_backend: protocol::compositor_backends::CPU,
+        };
+        assert!(!capabilities.supports_configured_window_creation());
+        capabilities.capabilities |= protocol::capabilities::CONFIGURED_WINDOW_CREATION;
+        assert!(capabilities.supports_configured_window_creation());
+    }
 }
 
 impl Connection {
@@ -2880,6 +3051,52 @@ impl Connection {
             ServerMessage::Error { code } => Err(Error::ServerError(code)),
             _ => Err(Error::InvalidResponse),
         }
+    }
+
+    /// Set or clear the system-wide tablet-mode override.
+    ///
+    /// This affects the compositor, desktop shell, and every subscribed
+    /// application. Clearing the override immediately resumes the most recent
+    /// hardware posture sampled by SWS.
+    ///
+    /// # Arguments
+    ///
+    /// * `tablet_mode` - Forced posture, or `None` to resume hardware detection.
+    ///
+    /// # Returns
+    ///
+    /// The resulting complete system input-environment snapshot.
+    pub fn set_tablet_mode_override(
+        &self,
+        tablet_mode: Option<bool>,
+    ) -> Result<InputEnvironment, Error> {
+        if !self.get_capabilities()?.supports_system_mode_overrides() {
+            return Err(Error::SystemModeOverrideUnsupported);
+        }
+        let payload = protocol::payload_set_tablet_mode_override(tablet_mode);
+        let response = self.request(protocol::client_msg::SET_TABLET_MODE_OVERRIDE, &payload)?;
+        input_environment_from_server_message(response.message())
+    }
+
+    /// Set or clear the system-wide windowing-policy override.
+    ///
+    /// # Arguments
+    ///
+    /// * `windowing_mode` - Forced policy, or `None` to derive policy from posture.
+    ///
+    /// # Returns
+    ///
+    /// The resulting complete system input-environment snapshot.
+    pub fn set_windowing_mode_override(
+        &self,
+        windowing_mode: Option<protocol::WindowingMode>,
+    ) -> Result<InputEnvironment, Error> {
+        if !self.get_capabilities()?.supports_system_mode_overrides() {
+            return Err(Error::SystemModeOverrideUnsupported);
+        }
+        let payload = protocol::payload_set_windowing_mode_override(windowing_mode);
+        let response = self.request(protocol::client_msg::SET_WINDOWING_MODE_OVERRIDE, &payload)?;
+        input_environment_from_server_message(response.message())
     }
 
     /// Register one shared SGFX image capability with SWS.

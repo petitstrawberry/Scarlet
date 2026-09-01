@@ -101,8 +101,8 @@ mod surface;
 
 pub use builder::SurfaceBuilder;
 pub use connection::{
-    Capabilities, Connection, EventReceiver, InputMethodInfo, RequestToken, Response,
-    SgfxBufferIdentity, WindowListEntry,
+    Capabilities, Connection, CreatedSurface, EventReceiver, InputMethodInfo, RequestToken,
+    Response, SgfxBufferIdentity, WindowListEntry,
 };
 pub use error::Error;
 pub use event::abs_code;
@@ -112,8 +112,10 @@ pub use event::rel_code;
 pub use event::{Event, ImeContextState, InputEnvironment, InputEvent};
 pub use os::Handle;
 pub use surface::Surface;
-pub use sws_protocol::{WindowGeometry, window_state};
 pub use sws_protocol::{CursorIcon, SgfxDamageRect};
+pub use sws_protocol::{
+    WindowGeometry, WindowGeometryInsets, WindowSizeLimits, WindowingMode, window_state,
+};
 
 /// Transient relationship policy flags for child windows.
 ///
@@ -169,25 +171,4 @@ pub mod transient_flags {
 
     pub const FOLLOW_PARENT_MOVE: u32 = TransientFlags::FOLLOW_PARENT_MOVE.bits();
     pub const RAISE_WITH_PARENT: u32 = TransientFlags::RAISE_WITH_PARENT.bits();
-}
-
-/// Per-window size constraints.
-///
-/// All values are in pixels.
-/// - `0` means "unset".
-#[derive(Clone, Copy, PartialEq, Eq, Default)]
-pub struct WindowSizeLimits {
-    pub min_width: u32,
-    pub min_height: u32,
-    pub max_width: u32,
-    pub max_height: u32,
-}
-
-impl WindowSizeLimits {
-    pub const NONE: Self = Self {
-        min_width: 0,
-        min_height: 0,
-        max_width: 0,
-        max_height: 0,
-    };
 }

@@ -578,6 +578,95 @@ static WINDOW_OWNERS: Mutex<BTreeMap<u32, usize>> = Mutex::new(BTreeMap::new());
 static SGFX_SHARED_IMAGES_AVAILABLE: AtomicBool = AtomicBool::new(false);
 static COMPOSITOR_EPOCH: AtomicU32 = AtomicU32::new(1);
 
+#[derive(Debug, Clone, Copy)]
+struct WindowCreationEnvironment {
+    screen_width: u32,
+    screen_height: u32,
+    workarea: Option<(i32, i32, u32, u32)>,
+    windowing_mode: protocol::WindowingMode,
+}
+
+impl WindowCreationEnvironment {
+    const fn initial() -> Self {
+        Self {
+            screen_width: 1,
+            screen_height: 1,
+            workarea: None,
+            windowing_mode: protocol::WindowingMode::Freeform,
+        }
+    }
+
+    fn usable_extent(self) -> (u32, u32) {
+        match self.workarea {
+            Some((_, _, width, height)) => (width.max(1), height.max(1)),
+            None => (self.screen_width.max(1), self.screen_height.max(1)),
+        }
+    }
+}
+
+static WINDOW_CREATION_ENVIRONMENT: Mutex<WindowCreationEnvironment> =
+    Mutex::new(WindowCreationEnvironment::initial());
+
+/// Publish the compositor state used for atomic initial window configuration.
+///
+/// # Arguments
+///
+/// * `screen_width` - Current physical output width.
+/// * `screen_height` - Current physical output height.
+/// * `workarea` - Current managed workarea, when a shell reserved one.
+/// * `windowing_mode` - Effective system-wide windowing policy.
+///
+/// # Returns
+///
+/// This function does not return a value.
+pub fn set_window_creation_environment(
+    screen_width: u32,
+    screen_height: u32,
+    workarea: Option<(i32, i32, u32, u32)>,
+    windowing_mode: protocol::WindowingMode,
+) {
+    *WINDOW_CREATION_ENVIRONMENT
+        .lock()
+        .expect("SWS window-creation environment mutex poisoned") = WindowCreationEnvironment {
+        screen_width: screen_width.max(1),
+        screen_height: screen_height.max(1),
+        workarea,
+        windowing_mode,
+    };
+}
+
+fn set_pending_window_creation_workarea(x: i32, y: i32, width: u32, height: u32) {
+    WINDOW_CREATION_ENVIRONMENT
+        .lock()
+        .expect("SWS window-creation environment mutex poisoned")
+        .workarea = Some((x, y, width.max(1), height.max(1)));
+}
+
+fn configured_initial_surface_extent(
+    requested_width: u32,
+    requested_height: u32,
+    window_type: u32,
+    resizable: bool,
+    configuration: protocol::InitialWindowConfiguration,
+    environment: WindowCreationEnvironment,
+) -> Option<(u32, u32)> {
+    let limits = configuration.size_limits;
+    let insets = configuration.geometry_insets;
+    let (mut width, mut height) = limits.clamp(requested_width, requested_height);
+    let focused_normal = window_type == protocol::window_types::NORMAL
+        && resizable
+        && environment.windowing_mode == protocol::WindowingMode::Focused
+        && limits.max_width == 0
+        && limits.max_height == 0;
+    if focused_normal {
+        let (managed_width, managed_height) = environment.usable_extent();
+        width = managed_width.saturating_add(insets.horizontal()).max(1);
+        height = managed_height.saturating_add(insets.vertical()).max(1);
+        (width, height) = limits.clamp(width, height);
+    }
+    (width > insets.horizontal() && height > insets.vertical()).then_some((width, height))
+}
+
 /// Publish shared-SGFX availability before accepting client connections.
 ///
 /// # Arguments
@@ -596,7 +685,9 @@ fn sws_capabilities() -> u64 {
         | protocol::capabilities::CURSOR_ICONS
         | protocol::capabilities::CURSOR_THEMES
         | protocol::capabilities::INPUT_ENVIRONMENT
-        | protocol::capabilities::WINDOW_GEOMETRY;
+        | protocol::capabilities::WINDOW_GEOMETRY
+        | protocol::capabilities::SYSTEM_MODE_OVERRIDES
+        | protocol::capabilities::CONFIGURED_WINDOW_CREATION;
     if SGFX_SHARED_IMAGES_AVAILABLE.load(Ordering::Acquire) {
         capabilities |= protocol::capabilities::SGFX_SHARED_IMAGE;
     }
@@ -2602,11 +2693,38 @@ fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Ha
                 active_on_focus,
                 initial_position,
                 activation_token,
+                initial_configuration,
             }) => {
                 // Convert &[u8] to String
                 let app_id_str = String::from_utf8_lossy(app_id).into_owned();
                 let app_name_str = String::from_utf8_lossy(app_name).into_owned();
                 let menu_titles_str = String::from_utf8_lossy(menu_titles).into_owned();
+                let requested_width = width.max(1);
+                let requested_height = height.max(1);
+
+                let (width, height) = if let Some(configuration) = initial_configuration {
+                    let environment = *WINDOW_CREATION_ENVIRONMENT
+                        .lock()
+                        .expect("SWS window-creation environment mutex poisoned");
+                    let Some(extent) = configured_initial_surface_extent(
+                        width,
+                        height,
+                        window_type,
+                        resizable,
+                        configuration,
+                        environment,
+                    ) else {
+                        let _ = write_protocol_error(
+                            &mut stream_writer,
+                            request_id,
+                            protocol::error_codes::INVALID_WINDOW_GEOMETRY,
+                        );
+                        continue;
+                    };
+                    extent
+                } else {
+                    (width.max(1), height.max(1))
+                };
 
                 // Calculate buffer size
                 let buffer_size = (width as u64)
@@ -2715,14 +2833,31 @@ fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Ha
 
                         window_resizable.insert(window_id, resizable);
 
-                        let payload = protocol::payload_window_created(window_id, buffer_size);
-                        if let Err(e) = write_handle_frame_response(
-                            &socket,
-                            shm.as_handle(),
-                            protocol::server_msg::WINDOW_CREATED,
-                            request_id,
-                            &payload,
-                        ) {
+                        let response = if initial_configuration.is_some() {
+                            let payload = protocol::payload_window_created_configured(
+                                window_id,
+                                buffer_size,
+                                width,
+                                height,
+                            );
+                            write_handle_frame_response(
+                                &socket,
+                                shm.as_handle(),
+                                protocol::server_msg::WINDOW_CREATED,
+                                request_id,
+                                &payload,
+                            )
+                        } else {
+                            let payload = protocol::payload_window_created(window_id, buffer_size);
+                            write_handle_frame_response(
+                                &socket,
+                                shm.as_handle(),
+                                protocol::server_msg::WINDOW_CREATED,
+                                request_id,
+                                &payload,
+                            )
+                        };
+                        if let Err(e) = response {
                             println!(
                                 "[ClientThread {}] Failed to send atomic WINDOW_CREATED: {:?}",
                                 client_id, e
@@ -2741,6 +2876,8 @@ fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Ha
                             client_id,
                             app_id: app_id.to_vec(),
                             window_id,
+                            requested_width,
+                            requested_height,
                             width,
                             height,
                             window_type,
@@ -2749,6 +2886,7 @@ fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Ha
                             active_on_focus,
                             initial_position,
                             activation_token: activation_token.map(|token| token.to_vec()),
+                            initial_configuration,
                             shm: Some(shm),
                             shm_mapped_addr,
                             shm_size: buffer_size as usize,
@@ -3357,6 +3495,7 @@ fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Ha
                     "[ClientThread {}] SetWorkarea: x={}, y={}, width={}, height={}",
                     client_id, x, y, width, height
                 );
+                set_pending_window_creation_workarea(x, y, width, height);
                 push_ipc_event(IpcEvent::SetWorkarea {
                     x,
                     y,
@@ -3458,6 +3597,22 @@ fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Ha
                     );
                     break;
                 }
+            }
+            Ok(ClientMessageRef::SetTabletModeOverride { tablet_mode }) => {
+                subscribe_input_environment(client_id);
+                push_ipc_event(IpcEvent::SetTabletModeOverride {
+                    client_id,
+                    request_id,
+                    tablet_mode,
+                });
+            }
+            Ok(ClientMessageRef::SetWindowingModeOverride { windowing_mode }) => {
+                subscribe_input_environment(client_id);
+                push_ipc_event(IpcEvent::SetWindowingModeOverride {
+                    client_id,
+                    request_id,
+                    windowing_mode,
+                });
             }
             Ok(ClientMessageRef::RegisterSgfxBuffer {
                 window_id,
@@ -3879,6 +4034,10 @@ pub enum IpcEvent {
         client_id: usize,
         app_id: Vec<u8>,
         window_id: u32,
+        /// Client-preferred surface width before focused-windowing policy.
+        requested_width: u32,
+        /// Client-preferred surface height before focused-windowing policy.
+        requested_height: u32,
         width: u32,
         height: u32,
         window_type: u32, // Window type (0=Normal, 1=AlwaysOnTop, 2=Taskbar, 3=Desktop)
@@ -3887,6 +4046,8 @@ pub enum IpcEvent {
         active_on_focus: bool,
         initial_position: protocol::WindowPlacement,
         activation_token: Option<Vec<u8>>,
+        /// Initial constraints/insets already applied to the allocated buffer.
+        initial_configuration: Option<protocol::InitialWindowConfiguration>,
         /// Shared memory for the window buffer (server-allocated)
         shm: Option<SharedMemory>,
         shm_mapped_addr: Option<usize>,
@@ -4169,6 +4330,111 @@ pub enum IpcEvent {
         source_window_id: u32,
         target_app_id: Vec<u8>,
     },
+
+    /// Set or clear the system-wide tablet posture override.
+    SetTabletModeOverride {
+        client_id: usize,
+        request_id: u8,
+        tablet_mode: Option<bool>,
+    },
+
+    /// Set or clear the system-wide windowing-policy override.
+    SetWindowingModeOverride {
+        client_id: usize,
+        request_id: u8,
+        windowing_mode: Option<protocol::WindowingMode>,
+    },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{WindowCreationEnvironment, configured_initial_surface_extent, protocol};
+
+    fn configuration() -> protocol::InitialWindowConfiguration {
+        protocol::InitialWindowConfiguration {
+            size_limits: protocol::WindowSizeLimits {
+                min_width: 320,
+                min_height: 240,
+                max_width: 0,
+                max_height: 0,
+            },
+            geometry_insets: protocol::WindowGeometryInsets {
+                left: 12,
+                top: 8,
+                right: 12,
+                bottom: 16,
+            },
+        }
+    }
+
+    #[test]
+    fn focused_creation_allocates_the_first_buffer_for_managed_workarea() {
+        let environment = WindowCreationEnvironment {
+            screen_width: 1920,
+            screen_height: 1080,
+            workarea: Some((0, 40, 1920, 1040)),
+            windowing_mode: protocol::WindowingMode::Focused,
+        };
+        assert_eq!(
+            configured_initial_surface_extent(
+                824,
+                624,
+                protocol::window_types::NORMAL,
+                true,
+                configuration(),
+                environment,
+            ),
+            Some((1944, 1064))
+        );
+    }
+
+    #[test]
+    fn freeform_and_finite_maximum_keep_a_constrained_preferred_extent() {
+        let mut environment = WindowCreationEnvironment {
+            screen_width: 1920,
+            screen_height: 1080,
+            workarea: Some((0, 40, 1920, 1040)),
+            windowing_mode: protocol::WindowingMode::Freeform,
+        };
+        assert_eq!(
+            configured_initial_surface_extent(
+                200,
+                180,
+                protocol::window_types::NORMAL,
+                true,
+                configuration(),
+                environment,
+            ),
+            Some((320, 240))
+        );
+
+        environment.windowing_mode = protocol::WindowingMode::Focused;
+        let mut finite = configuration();
+        finite.size_limits.max_width = 900;
+        finite.size_limits.max_height = 700;
+        assert_eq!(
+            configured_initial_surface_extent(
+                824,
+                624,
+                protocol::window_types::NORMAL,
+                true,
+                finite,
+                environment,
+            ),
+            Some((824, 624))
+        );
+        assert_eq!(
+            configured_initial_surface_extent(
+                1200,
+                900,
+                protocol::window_types::NORMAL,
+                true,
+                finite,
+                environment,
+            ),
+            Some((900, 700))
+        );
+    }
 }
 
 #[cfg(test)]

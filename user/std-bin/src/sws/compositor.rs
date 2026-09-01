@@ -175,6 +175,25 @@ mod touch_modality_tests {
             (0, 0, 1920, 1080)
         );
     }
+
+    #[test]
+    fn resize_outline_excludes_client_reported_window_decoration() {
+        let insets = sws_protocol::WindowGeometryInsets {
+            left: 10,
+            top: 6,
+            right: 10,
+            bottom: 14,
+        };
+
+        assert_eq!(
+            resize_outline_for_surface(90, 74, 324, 260, insets),
+            (100, 80, 304, 240)
+        );
+        assert_eq!(
+            resize_outline_for_surface(90, 74, 344, 280, insets),
+            (100, 80, 324, 260)
+        );
+    }
 }
 
 macro_rules! sws_debug {
@@ -766,6 +785,10 @@ pub struct Compositor {
     direct_touch_grabs: Vec<DirectTouchGrab>,
     input_modality: InputModality,
     tablet_mode: bool,
+    windowing_mode: sws_protocol::WindowingMode,
+    /// Apply geometry-changing startup policy only after the initial client
+    /// frame has been presented with its original buffer identity.
+    window_policy_after_present: bool,
     lid_closed: bool,
     ime_popup_windows: Vec<ImePopupWindow>,
     next_activation_token_serial: u64,
@@ -916,6 +939,21 @@ struct ResizeDragState {
     last_height: u32,
 }
 
+fn resize_outline_for_surface(
+    surface_x: i32,
+    surface_y: i32,
+    surface_width: u32,
+    surface_height: u32,
+    insets: sws_protocol::WindowGeometryInsets,
+) -> (i32, i32, u32, u32) {
+    (
+        surface_x.saturating_add(insets.left as i32),
+        surface_y.saturating_add(insets.top as i32),
+        surface_width.saturating_sub(insets.horizontal()).max(1),
+        surface_height.saturating_sub(insets.vertical()).max(1),
+    )
+}
+
 const RESIZE_GRIP_PX: i32 = 8;
 const MIN_WINDOW_WIDTH: u32 = 64;
 const MIN_WINDOW_HEIGHT: u32 = 64;
@@ -1057,10 +1095,16 @@ impl Compositor {
             ),
         };
         super::ipc::set_sgfx_shared_images_available(gpu_compositor.is_some());
+        let input_environment = input_environment::snapshot();
+        super::ipc::set_window_creation_environment(
+            screen_width,
+            screen_height,
+            None,
+            input_environment.windowing_mode(),
+        );
         ipc_server.listen()?;
         remote_server.listen()?;
 
-        let input_environment = input_environment::snapshot();
         let mut gesture_recognizer = GestureRecognizer::new(screen_width, screen_height);
         // No contact can be active during construction, so this only installs
         // the first-frame filtering policy.
@@ -1108,6 +1152,8 @@ impl Compositor {
             direct_touch_grabs: Vec::new(),
             input_modality: InputModality::default(),
             tablet_mode: input_environment.tablet_mode(),
+            windowing_mode: input_environment.windowing_mode(),
+            window_policy_after_present: false,
             lid_closed: input_environment.lid_closed(),
             ime_popup_windows: Vec::new(),
             next_activation_token_serial: 1,
@@ -1427,6 +1473,10 @@ impl Compositor {
             self.window_manager
                 .set_workarea(0, workarea_y, new_width, workarea_height);
             self.reflow_maximized_windows_to_workarea();
+        }
+        self.publish_window_creation_environment();
+        if self.windowing_mode == sws_protocol::WindowingMode::Focused {
+            self.apply_windowing_mode_policy();
         }
 
         self.full_redraw_needed = true;
@@ -3758,6 +3808,11 @@ impl Compositor {
             super::trace::set_compositor_stage(super::trace::STAGE_ACTIVE);
             self.note_frame_presented();
             self.event_counter += 1;
+
+            if self.window_policy_after_present {
+                self.window_policy_after_present = false;
+                let _ = self.apply_post_present_window_policy();
+            }
         }
 
         // Sleep until IPC/input explicitly signals that new work is queued.
@@ -3772,6 +3827,55 @@ impl Compositor {
         }
 
         Ok(())
+    }
+
+    fn apply_input_environment_snapshot(
+        &mut self,
+        snapshot: input_environment::Snapshot,
+    ) -> Result<bool, &'static str> {
+        self.lid_closed = snapshot.lid_closed();
+        let windowing_mode = snapshot.windowing_mode();
+        let windowing_mode_changed = self.windowing_mode != windowing_mode;
+        self.windowing_mode = windowing_mode;
+        self.publish_window_creation_environment();
+        let tablet_mode = snapshot.tablet_mode();
+        let mut redraw = false;
+        if self.tablet_mode != tablet_mode {
+            self.tablet_mode = tablet_mode;
+            for policy_event in self.gesture_recognizer.set_tablet_mode(tablet_mode) {
+                match policy_event {
+                    TouchPolicyEvent::Pointer(CompositorInputEvent::MouseButton {
+                        button,
+                        pressed,
+                    }) => super::input::push_pointer_button(
+                        PointerSource::Local(u8::MAX),
+                        button,
+                        pressed,
+                    ),
+                    TouchPolicyEvent::Pointer(event) => {
+                        redraw |= self.handle_input_event(event)?;
+                    }
+                    TouchPolicyEvent::Gesture(event) => self.handle_gesture_event(event),
+                    TouchPolicyEvent::DirectTouch(frame) => {
+                        redraw |= self.handle_direct_touch_frame(frame);
+                    }
+                    TouchPolicyEvent::SourceButton {
+                        source,
+                        button,
+                        pressed,
+                    } => super::input::push_pointer_button(source, button, pressed),
+                    TouchPolicyEvent::ReleaseSource { source } => {
+                        super::input::release_pointer_source(source)
+                    }
+                }
+            }
+        }
+        if windowing_mode_changed {
+            redraw |= self.apply_windowing_mode_policy();
+        }
+        super::ipc::broadcast_input_environment_changed(snapshot);
+        super::input_environment_sbus::queue_state_changed(snapshot);
+        Ok(redraw)
     }
 
     /// Handle input event from input thread
@@ -3810,7 +3914,13 @@ impl Compositor {
                         self.resize_drag = Some(state);
 
                         if let Some(window) = self.window_manager.get_window(state.window_id) {
-                            self.resize_outline = Some((window.x, window.y, new_w, new_h));
+                            self.resize_outline = Some(resize_outline_for_surface(
+                                window.x,
+                                window.y,
+                                new_w,
+                                new_h,
+                                window.window_geometry_insets,
+                            ));
                         }
 
                         if let Some(r) = old_outline {
@@ -3898,7 +4008,13 @@ impl Compositor {
                         self.resize_drag = Some(state);
 
                         if let Some(window) = self.window_manager.get_window(state.window_id) {
-                            self.resize_outline = Some((window.x, window.y, new_w, new_h));
+                            self.resize_outline = Some(resize_outline_for_surface(
+                                window.x,
+                                window.y,
+                                new_w,
+                                new_h,
+                                window.window_geometry_insets,
+                            ));
                         }
 
                         if let Some(r) = old_outline {
@@ -4130,8 +4246,13 @@ impl Compositor {
                                         last_width: window.width,
                                         last_height: window.height,
                                     });
-                                    self.resize_outline =
-                                        Some((window.x, window.y, window.width, window.height));
+                                    self.resize_outline = Some(resize_outline_for_surface(
+                                        window.x,
+                                        window.y,
+                                        window.width,
+                                        window.height,
+                                        window.window_geometry_insets,
+                                    ));
                                     if let Some(outline) = self.resize_outline {
                                         self.add_pending_damage(outline);
                                     }
@@ -4256,42 +4377,7 @@ impl Compositor {
             } => {
                 let updated = input_environment::update_posture(tablet_mode, lid_closed);
                 if let Some(snapshot) = updated {
-                    self.lid_closed = snapshot.lid_closed();
-                    let tablet_mode = snapshot.tablet_mode();
-                    if self.tablet_mode != tablet_mode {
-                        self.tablet_mode = tablet_mode;
-                        for policy_event in self.gesture_recognizer.set_tablet_mode(tablet_mode) {
-                            match policy_event {
-                                TouchPolicyEvent::Pointer(CompositorInputEvent::MouseButton {
-                                    button,
-                                    pressed,
-                                }) => super::input::push_pointer_button(
-                                    PointerSource::Local(u8::MAX),
-                                    button,
-                                    pressed,
-                                ),
-                                TouchPolicyEvent::Pointer(event) => {
-                                    let _ = self.handle_input_event(event)?;
-                                }
-                                TouchPolicyEvent::Gesture(event) => {
-                                    self.handle_gesture_event(event)
-                                }
-                                TouchPolicyEvent::DirectTouch(frame) => {
-                                    let _ = self.handle_direct_touch_frame(frame);
-                                }
-                                TouchPolicyEvent::SourceButton {
-                                    source,
-                                    button,
-                                    pressed,
-                                } => super::input::push_pointer_button(source, button, pressed),
-                                TouchPolicyEvent::ReleaseSource { source } => {
-                                    super::input::release_pointer_source(source)
-                                }
-                            }
-                        }
-                    }
-                    super::ipc::broadcast_input_environment_changed(snapshot);
-                    super::input_environment_sbus::queue_state_changed(snapshot);
+                    return self.apply_input_environment_snapshot(snapshot);
                 }
                 Ok(false)
             }
@@ -4817,6 +4903,255 @@ impl Compositor {
         changed
     }
 
+    fn finish_policy_geometry_change(
+        &mut self,
+        window_id: u32,
+        old_surface: (i32, i32, u32, u32),
+        old_state_flags: u32,
+        old_visible: bool,
+    ) -> bool {
+        let Some((new_surface, new_state_flags, new_visible)) =
+            self.window_manager.get_window(window_id).map(|window| {
+                (
+                    window.surface_geometry(),
+                    window.state_flags(),
+                    window.visible,
+                )
+            })
+        else {
+            return false;
+        };
+        let geometry_changed = old_surface != new_surface;
+        let state_changed = old_state_flags != new_state_flags;
+        let surface_resized = old_surface.2 != new_surface.2 || old_surface.3 != new_surface.3;
+        if !geometry_changed && !state_changed {
+            return false;
+        }
+
+        if old_visible {
+            self.add_pending_damage(old_surface);
+        }
+        if new_visible {
+            self.add_pending_damage(new_surface);
+        }
+        if state_changed {
+            self.send_window_state_changed(window_id);
+        }
+        if surface_resized {
+            self.send_current_window_configure(window_id);
+        }
+        self.full_redraw_needed = true;
+        true
+    }
+
+    fn note_window_frame_submitted(&mut self, window_id: u32) {
+        let focused = self.windowing_mode == sws_protocol::WindowingMode::Focused;
+        let first_frame_needs_policy =
+            self.window_manager
+                .get_window_mut(window_id)
+                .is_some_and(|window| {
+                    let first = window.mark_presented_frame();
+                    first && (window.pending_maximize || focused)
+                });
+        if first_frame_needs_policy {
+            self.window_policy_after_present = true;
+        }
+    }
+
+    fn maximize_window_from_client(&mut self, window_id: u32) -> bool {
+        let Some((old_surface, old_state_flags, old_visible)) =
+            self.window_manager.get_window(window_id).map(|window| {
+                (
+                    window.surface_geometry(),
+                    window.state_flags(),
+                    window.visible,
+                )
+            })
+        else {
+            return false;
+        };
+        let Some((max_x, max_y, max_width, max_height)) = self.maximized_geometry(window_id) else {
+            return false;
+        };
+        if !self
+            .window_manager
+            .maximize_window(window_id, max_width, max_height)
+        {
+            return false;
+        }
+        self.window_manager
+            .set_window_position(window_id, max_x, max_y);
+        self.finish_policy_geometry_change(window_id, old_surface, old_state_flags, old_visible)
+    }
+
+    fn apply_post_present_window_policy(&mut self) -> bool {
+        let pending_maximize: Vec<u32> = self
+            .window_manager
+            .get_windows()
+            .iter()
+            .filter(|window| window.has_presented_frame && window.pending_maximize)
+            .map(|window| window.id)
+            .collect();
+        let mut changed = false;
+        for window_id in pending_maximize {
+            if let Some(window) = self.window_manager.get_window_mut(window_id) {
+                window.pending_maximize = false;
+            }
+            changed |= self.maximize_window_from_client(window_id);
+        }
+        if self.windowing_mode == sws_protocol::WindowingMode::Focused {
+            changed |= self.apply_windowing_mode_policy();
+        }
+        changed
+    }
+
+    fn restore_focused_managed_window(&mut self, window_id: u32) -> bool {
+        let Some((old_surface, old_state_flags, old_visible, managed)) =
+            self.window_manager.get_window(window_id).map(|window| {
+                (
+                    window.surface_geometry(),
+                    window.state_flags(),
+                    window.visible,
+                    window.focused_mode_managed,
+                )
+            })
+        else {
+            return false;
+        };
+        if !managed {
+            return false;
+        }
+        if !self.window_manager.restore_window(window_id) {
+            if let Some(window) = self.window_manager.get_window_mut(window_id) {
+                window.focused_mode_managed = false;
+            }
+            return false;
+        }
+        self.finish_policy_geometry_change(window_id, old_surface, old_state_flags, old_visible)
+    }
+
+    fn center_focused_compatibility_window(&mut self, window_id: u32) -> bool {
+        let Some((old_surface, old_state_flags, old_visible, geometry)) =
+            self.window_manager.get_window(window_id).map(|window| {
+                (
+                    window.surface_geometry(),
+                    window.state_flags(),
+                    window.visible,
+                    window.window_geometry(),
+                )
+            })
+        else {
+            return false;
+        };
+        let (work_x, work_y, work_width, work_height) =
+            self.workarea
+                .unwrap_or((0, 0, self.screen_width, self.screen_height));
+        let target_x = work_x.saturating_add(
+            (work_width.saturating_sub(geometry.2) / 2).min(i32::MAX as u32) as i32,
+        );
+        let target_y = work_y.saturating_add(
+            (work_height.saturating_sub(geometry.3) / 2).min(i32::MAX as u32) as i32,
+        );
+        if geometry.0 == target_x && geometry.1 == target_y {
+            return false;
+        }
+        self.window_manager
+            .set_window_position(window_id, target_x, target_y);
+        self.finish_policy_geometry_change(window_id, old_surface, old_state_flags, old_visible)
+    }
+
+    fn apply_focused_policy_to_window(&mut self, window_id: u32) -> bool {
+        let Some((ready, negotiated, supports_focused, compatibility, already_maximized, managed)) =
+            self.window_manager.get_window(window_id).map(|window| {
+                (
+                    window.has_presented_frame,
+                    window.initial_size_negotiated,
+                    window.supports_focused_windowing(),
+                    window.is_focused_compatibility_window(),
+                    window.maximized,
+                    window.focused_mode_managed,
+                )
+            })
+        else {
+            return false;
+        };
+
+        // Resizing before the first CPU/SGFX submission invalidates the
+        // client's initial buffer extent and, for decorated windows, applies
+        // policy before the client has advertised its shadow insets.
+        if !ready && !negotiated {
+            return false;
+        }
+
+        if supports_focused {
+            if already_maximized {
+                return false;
+            }
+            let Some((max_x, max_y, max_width, max_height)) = self.maximized_geometry(window_id)
+            else {
+                return false;
+            };
+            let Some((old_surface, old_state_flags, old_visible)) =
+                self.window_manager.get_window(window_id).map(|window| {
+                    (
+                        window.surface_geometry(),
+                        window.state_flags(),
+                        window.visible,
+                    )
+                })
+            else {
+                return false;
+            };
+            if !self
+                .window_manager
+                .maximize_window(window_id, max_width, max_height)
+            {
+                return false;
+            }
+            self.window_manager
+                .set_window_position(window_id, max_x, max_y);
+            if let Some(window) = self.window_manager.get_window_mut(window_id) {
+                window.focused_mode_managed = true;
+                window.center_on_first_geometry = false;
+            }
+            return self.finish_policy_geometry_change(
+                window_id,
+                old_surface,
+                old_state_flags,
+                old_visible,
+            );
+        }
+
+        let restored = managed && self.restore_focused_managed_window(window_id);
+        if compatibility {
+            return self.center_focused_compatibility_window(window_id) || restored;
+        }
+        restored
+    }
+
+    fn apply_windowing_mode_policy(&mut self) -> bool {
+        let window_ids: Vec<u32> = self
+            .window_manager
+            .get_windows()
+            .iter()
+            .map(|window| window.id)
+            .collect();
+        let mut changed = false;
+        match self.windowing_mode {
+            sws_protocol::WindowingMode::Freeform => {
+                for window_id in window_ids {
+                    changed |= self.restore_focused_managed_window(window_id);
+                }
+            }
+            sws_protocol::WindowingMode::Focused => {
+                for window_id in window_ids {
+                    changed |= self.apply_focused_policy_to_window(window_id);
+                }
+            }
+        }
+        changed
+    }
+
     fn prune_expired_activation_tokens(&mut self, now_ns: u64) {
         self.activation_tokens.retain(|record| {
             now_ns.saturating_sub(record.created_at_ns) <= ACTIVATION_TOKEN_TTL_NS
@@ -4983,12 +5318,23 @@ impl Compositor {
         )
     }
 
+    fn publish_window_creation_environment(&self) {
+        super::ipc::set_window_creation_environment(
+            self.screen_width,
+            self.screen_height,
+            self.workarea,
+            self.windowing_mode,
+        );
+    }
+
     fn handle_ipc_event(&mut self, event: IpcEvent) -> Result<bool, &'static str> {
         match event {
             IpcEvent::CreateWindow {
                 client_id,
                 app_id,
                 window_id,
+                requested_width,
+                requested_height,
                 width,
                 height,
                 window_type,
@@ -4997,6 +5343,7 @@ impl Compositor {
                 mut active_on_focus,
                 initial_position,
                 activation_token,
+                initial_configuration,
                 shm,
                 shm_mapped_addr,
                 shm_size,
@@ -5114,6 +5461,55 @@ impl Compositor {
                     window.active_on_focus = active_on_focus;
                 }
 
+                let mut negotiated_restore_geometry = None;
+                if let Some(configuration) = initial_configuration {
+                    let limits = configuration.size_limits;
+                    self.window_manager.set_window_size_limits(
+                        window_id,
+                        limits.min_width,
+                        limits.min_height,
+                        limits.max_width,
+                        limits.max_height,
+                    );
+                    let insets = configuration.geometry_insets;
+                    let managed_width = width.saturating_sub(insets.horizontal()).max(1);
+                    let managed_height = height.saturating_sub(insets.vertical()).max(1);
+                    if let Err(error) = self.window_manager.set_window_geometry(
+                        window_id,
+                        insets.left as i32,
+                        insets.top as i32,
+                        managed_width,
+                        managed_height,
+                    ) {
+                        println!(
+                            "[Compositor] Invalid negotiated geometry for window #{}: {}",
+                            window_id, error
+                        );
+                    }
+                    if center_on_first_geometry {
+                        let (x, y) = self.centered_window_position(managed_width, managed_height);
+                        self.window_manager.set_window_position(window_id, x, y);
+                    }
+                    let (restore_width, restore_height) =
+                        limits.clamp(requested_width, requested_height);
+                    if let Some(window) = self.window_manager.get_window_mut(window_id) {
+                        window.initial_size_negotiated = true;
+                        window.center_on_first_geometry = false;
+                        negotiated_restore_geometry =
+                            Some((window.x, window.y, restore_width, restore_height));
+                    }
+                }
+
+                if self.windowing_mode == sws_protocol::WindowingMode::Focused {
+                    self.apply_focused_policy_to_window(window_id);
+                    if let Some(restore_geometry) = negotiated_restore_geometry
+                        && let Some(window) = self.window_manager.get_window_mut(window_id)
+                        && window.focused_mode_managed
+                    {
+                        window.saved_geometry = Some(restore_geometry);
+                    }
+                }
+
                 // Focus is for input routing only; give focus to newly created windows.
                 if focus_on_create && self.window_manager.window_accepts_focus(window_id) {
                     self.window_manager.set_focus(window_id);
@@ -5181,6 +5577,7 @@ impl Compositor {
                             self.screen_width,
                             workarea_height,
                         );
+                        self.publish_window_creation_environment();
                         println!(
                             "[Compositor] Updated workarea for taskbar #{}: y={}, height={}",
                             window_id, workarea_y, workarea_height
@@ -5285,6 +5682,7 @@ impl Compositor {
                         damage_height,
                     );
                 }
+                self.note_window_frame_submitted(window_id);
             }
             IpcEvent::RegisterSgfxBuffer {
                 client_id,
@@ -5402,6 +5800,7 @@ impl Compositor {
                                 ));
                             }
                         }
+                        self.note_window_frame_submitted(window_id);
                     }
                     Err(error) => {
                         println!(
@@ -5474,7 +5873,12 @@ impl Compositor {
             }
             IpcEvent::RequestMove { window_id } => {
                 sws_debug!("[Compositor] Window #{} requested move", window_id);
-                if self.window_manager.is_fullscreen(window_id) {
+                if self.window_manager.is_fullscreen(window_id)
+                    || self
+                        .window_manager
+                        .get_window(window_id)
+                        .is_some_and(|window| window.focused_mode_managed)
+                {
                     sws_debug!(
                         "[Compositor] Ignoring move request for fullscreen window #{}",
                         window_id
@@ -5547,7 +5951,12 @@ impl Compositor {
                 self.refresh_cursor_icon();
             }
             IpcEvent::MoveWindow { window_id, x, y } => {
-                if self.window_manager.is_fullscreen(window_id) {
+                if self.window_manager.is_fullscreen(window_id)
+                    || self
+                        .window_manager
+                        .get_window(window_id)
+                        .is_some_and(|window| window.focused_mode_managed)
+                {
                     println!(
                         "[Compositor] Ignoring explicit move for fullscreen window #{}",
                         window_id
@@ -5575,6 +5984,9 @@ impl Compositor {
                 );
 
                 if self.window_manager.set_window_parent(window_id, parent) {
+                    if self.windowing_mode == sws_protocol::WindowingMode::Focused {
+                        self.apply_focused_policy_to_window(window_id);
+                    }
                     // Keep transient children above their parent by raising the group.
                     self.window_manager.raise_to_top_with_type(window_id);
                     self.full_redraw_needed = true;
@@ -5611,7 +6023,9 @@ impl Compositor {
                     .window_manager
                     .set_window_size_limits(window_id, min_width, min_height, max_width, max_height)
                 {
-                    // Size limits affect interactive resize behavior.
+                    if self.windowing_mode == sws_protocol::WindowingMode::Focused {
+                        self.apply_focused_policy_to_window(window_id);
+                    }
                     self.full_redraw_needed = true;
                 }
             }
@@ -5689,6 +6103,9 @@ impl Compositor {
             }
             IpcEvent::MinimizeWindow { window_id } => {
                 println!("[Compositor] Minimizing window #{}", window_id);
+                if let Some(window) = self.window_manager.get_window_mut(window_id) {
+                    window.pending_maximize = false;
+                }
                 if self
                     .pointer_lock
                     .is_some_and(|state| state.window_id == window_id)
@@ -5727,45 +6144,39 @@ impl Compositor {
             }
             IpcEvent::MaximizeWindow { window_id } => {
                 println!("[Compositor] Maximizing window #{}", window_id);
-                let old_rect = self
+                let ready = self
                     .window_manager
                     .get_window(window_id)
-                    .map(|w| (w.x, w.y, w.width, w.height));
-
-                let Some((max_x, max_y, max_w, max_h)) = self.maximized_geometry(window_id) else {
-                    return Ok(false);
-                };
-                println!(
-                    "[Compositor] Maximizing window #{} to ({}, {}) {}x{}",
-                    window_id, max_x, max_y, max_w, max_h
-                );
-
-                if self.window_manager.maximize_window(window_id, max_w, max_h) {
-                    self.window_manager
-                        .set_window_position(window_id, max_x, max_y);
-
-                    if let Some(r) = old_rect {
-                        self.add_pending_damage(r);
+                    .is_some_and(|window| window.has_presented_frame);
+                if !ready {
+                    if let Some(window) = self.window_manager.get_window_mut(window_id) {
+                        window.pending_maximize = true;
                     }
-                    self.send_window_state_changed(window_id);
-                    if let Some(w) = self.window_manager.get_window(window_id) {
-                        let (x, y, width, height) = (w.x, w.y, w.width, w.height);
-                        self.add_pending_damage((x, y, width, height));
-
-                        // Ask the client to resize its buffer to match the new geometry.
-                        let payload =
-                            sws_protocol::payload_window_configure(window_id, width, height);
-                        super::ipc::send_message_to_window(
-                            window_id,
-                            sws_protocol::server_msg::WINDOW_CONFIGURE,
-                            payload.to_vec(),
-                        );
-                    }
-                    self.full_redraw_needed = true;
+                    println!(
+                        "[Compositor] Deferring maximize for window #{} until its first frame",
+                        window_id
+                    );
+                } else {
+                    let _ = self.maximize_window_from_client(window_id);
                 }
             }
             IpcEvent::RestoreWindow { window_id } => {
                 println!("[Compositor] Restoring window #{}", window_id);
+                if let Some(window) = self.window_manager.get_window_mut(window_id) {
+                    window.pending_maximize = false;
+                }
+                if self.windowing_mode == sws_protocol::WindowingMode::Focused
+                    && self
+                        .window_manager
+                        .get_window(window_id)
+                        .is_some_and(|window| window.supports_focused_windowing())
+                {
+                    println!(
+                        "[Compositor] Keeping window #{} maximized in focused windowing mode",
+                        window_id
+                    );
+                    return Ok(false);
+                }
                 let old_rect = self
                     .window_manager
                     .get_window(window_id)
@@ -6085,6 +6496,9 @@ impl Compositor {
                     }
                 };
                 if self.window_manager.set_window_type(window_id, wtype) {
+                    if self.windowing_mode == sws_protocol::WindowingMode::Focused {
+                        self.apply_focused_policy_to_window(window_id);
+                    }
                     // Re-raise to update Z-order based on window type
                     self.window_manager.raise_to_top_with_type(window_id);
                     self.full_redraw_needed = true;
@@ -6210,6 +6624,7 @@ impl Compositor {
                             damage_height,
                         );
                     }
+                    self.note_window_frame_submitted(window_id);
                 }
             }
             IpcEvent::ExtensionAttachBuffer {
@@ -6472,7 +6887,11 @@ impl Compositor {
                 self.workarea = Some((x, y, width, height));
                 // Notify window manager about workarea change
                 self.window_manager.set_workarea(x, y, width, height);
+                self.publish_window_creation_environment();
                 self.reflow_maximized_windows_to_workarea();
+                if self.windowing_mode == sws_protocol::WindowingMode::Focused {
+                    self.apply_windowing_mode_policy();
+                }
                 self.full_redraw_needed = true;
             }
             IpcEvent::SetWindowResizable {
@@ -6487,7 +6906,9 @@ impl Compositor {
                     .window_manager
                     .set_window_resizable(window_id, resizable)
                 {
-                    // No redraw needed, just state change
+                    if self.windowing_mode == sws_protocol::WindowingMode::Focused {
+                        self.apply_focused_policy_to_window(window_id);
+                    }
                 }
             }
             IpcEvent::GetScreenSize {
@@ -6598,6 +7019,43 @@ impl Compositor {
                             .to_vec(),
                     );
                 }
+            }
+            IpcEvent::SetTabletModeOverride {
+                client_id,
+                request_id,
+                tablet_mode,
+            } => {
+                if let Some(snapshot) = input_environment::set_tablet_mode_override(tablet_mode)
+                    && self.apply_input_environment_snapshot(snapshot)?
+                {
+                    self.full_redraw_needed = true;
+                }
+                let snapshot = input_environment::snapshot();
+                send_response_to_client(
+                    client_id,
+                    sws_protocol::server_msg::INPUT_ENVIRONMENT_CHANGED,
+                    request_id,
+                    input_environment::protocol_payload(snapshot).to_vec(),
+                );
+            }
+            IpcEvent::SetWindowingModeOverride {
+                client_id,
+                request_id,
+                windowing_mode,
+            } => {
+                if let Some(snapshot) =
+                    input_environment::set_windowing_mode_override(windowing_mode)
+                    && self.apply_input_environment_snapshot(snapshot)?
+                {
+                    self.full_redraw_needed = true;
+                }
+                let snapshot = input_environment::snapshot();
+                send_response_to_client(
+                    client_id,
+                    sws_protocol::server_msg::INPUT_ENVIRONMENT_CHANGED,
+                    request_id,
+                    input_environment::protocol_payload(snapshot).to_vec(),
+                );
             }
         }
         self.refresh_cursor_icon();

@@ -6,6 +6,7 @@ use std::string::String;
 use std::vec::Vec;
 use std::{print, println};
 use sws_protocol;
+pub use sws_protocol::{WindowGeometryInsets, WindowSizeLimits};
 
 macro_rules! window_debug {
     ($($arg:tt)*) => {
@@ -17,75 +18,6 @@ macro_rules! window_debug {
 
 /// Window ID type
 pub type WindowId = u32;
-
-/// Per-window size constraints.
-///
-/// All values are in pixels.
-/// - `0` means "unset".
-#[derive(Debug, Clone, Copy, Default)]
-pub struct WindowSizeLimits {
-    pub min_width: u32,
-    pub min_height: u32,
-    pub max_width: u32,
-    pub max_height: u32,
-}
-
-impl WindowSizeLimits {
-    pub fn clamp(&self, width: u32, height: u32) -> (u32, u32) {
-        let mut w = width.max(1);
-        let mut h = height.max(1);
-
-        if self.min_width != 0 {
-            w = w.max(self.min_width.max(1));
-        }
-        if self.min_height != 0 {
-            h = h.max(self.min_height.max(1));
-        }
-
-        let effective_max_width = if self.max_width == 0 {
-            0
-        } else if self.min_width != 0 {
-            self.max_width.max(self.min_width.max(1))
-        } else {
-            self.max_width.max(1)
-        };
-        let effective_max_height = if self.max_height == 0 {
-            0
-        } else if self.min_height != 0 {
-            self.max_height.max(self.min_height.max(1))
-        } else {
-            self.max_height.max(1)
-        };
-
-        if effective_max_width != 0 {
-            w = w.min(effective_max_width);
-        }
-        if effective_max_height != 0 {
-            h = h.min(effective_max_height);
-        }
-
-        (w, h)
-    }
-}
-
-/// Non-visible client-side decoration around a window's managed geometry.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct WindowGeometryInsets {
-    pub left: u32,
-    pub top: u32,
-    pub right: u32,
-    pub bottom: u32,
-}
-
-impl WindowGeometryInsets {
-    pub const fn horizontal(self) -> u32 {
-        self.left.saturating_add(self.right)
-    }
-
-    pub const fn vertical(self) -> u32 {
-        self.top.saturating_add(self.bottom)
-    }
-}
 
 /// Window type for Z-order management
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -156,6 +88,20 @@ pub struct Window {
     pub minimized: bool,
     /// Whether the window is maximized
     pub maximized: bool,
+    /// Whether focused-windowing policy, rather than the application or user,
+    /// placed this window in the maximized state.
+    pub focused_mode_managed: bool,
+    /// Whether the client has successfully submitted at least one frame.
+    ///
+    /// Geometry-changing compositor policy is deferred until this becomes
+    /// true so the client's initial CPU or SGFX buffer identity still matches
+    /// the surface created by SWS.
+    pub has_presented_frame: bool,
+    /// An application-requested maximize waiting for the initial frame.
+    pub pending_maximize: bool,
+    /// Whether SWS negotiated constraints, decoration insets, and surface size
+    /// before allocating this window's first buffer.
+    pub initial_size_negotiated: bool,
     /// Saved position and size before maximize (for restore)
     pub saved_geometry: Option<(i32, i32, u32, u32)>,
     /// Whether the window currently occupies the complete output.
@@ -476,6 +422,10 @@ impl Window {
             window_type: WindowType::default(),
             minimized: false,
             maximized: false,
+            focused_mode_managed: false,
+            has_presented_frame: false,
+            pending_maximize: false,
+            initial_size_negotiated: false,
             saved_geometry: None,
             fullscreen: false,
             fullscreen_restore_geometry: None,
@@ -521,6 +471,10 @@ impl Window {
             window_type: WindowType::default(),
             minimized: false,
             maximized: false,
+            focused_mode_managed: false,
+            has_presented_frame: false,
+            pending_maximize: false,
+            initial_size_negotiated: false,
             saved_geometry: None,
             fullscreen: false,
             fullscreen_restore_geometry: None,
@@ -592,6 +546,10 @@ impl Window {
             window_type: WindowType::default(),
             minimized: false,
             maximized: false,
+            focused_mode_managed: false,
+            has_presented_frame: false,
+            pending_maximize: false,
+            initial_size_negotiated: false,
             saved_geometry: None,
             fullscreen: false,
             fullscreen_restore_geometry: None,
@@ -740,6 +698,52 @@ impl Window {
             flags |= sws_protocol::window_state::MAXIMIZED;
         }
         flags
+    }
+
+    /// Return whether focused windowing may manage this as a full workarea window.
+    ///
+    /// Top-level normal windows must be resizable and must not advertise a
+    /// fixed maximum size. Transients, panels, popups, and fixed-size
+    /// compatibility windows remain floating.
+    ///
+    /// # Returns
+    ///
+    /// `true` when focused policy may maximize and later restore this window.
+    pub fn supports_focused_windowing(&self) -> bool {
+        self.window_type == WindowType::Normal
+            && self.parent.is_none()
+            && self.resizable
+            && self.size_limits.max_width == 0
+            && self.size_limits.max_height == 0
+            && !self.fullscreen
+    }
+
+    /// Record that the client has submitted its first usable frame.
+    ///
+    /// # Returns
+    ///
+    /// `true` only for the transition from not-yet-presented to ready. Later
+    /// submissions return `false`.
+    pub fn mark_presented_frame(&mut self) -> bool {
+        if self.has_presented_frame {
+            false
+        } else {
+            self.has_presented_frame = true;
+            true
+        }
+    }
+
+    /// Return whether this is a top-level normal compatibility window.
+    ///
+    /// # Returns
+    ///
+    /// `true` for ordinary top-level windows that cannot participate in
+    /// focused resizing and therefore must remain floating.
+    pub fn is_focused_compatibility_window(&self) -> bool {
+        self.window_type == WindowType::Normal
+            && self.parent.is_none()
+            && !self.supports_focused_windowing()
+            && !self.fullscreen
     }
 
     /// Move window to new position
@@ -926,6 +930,10 @@ impl WindowManager {
             window_type: WindowType::default(),
             minimized: false,
             maximized: false,
+            focused_mode_managed: false,
+            has_presented_frame: false,
+            pending_maximize: false,
+            initial_size_negotiated: false,
             saved_geometry: None,
             fullscreen: false,
             fullscreen_restore_geometry: None,
@@ -991,6 +999,10 @@ impl WindowManager {
             window_type: WindowType::default(),
             minimized: false,
             maximized: false,
+            focused_mode_managed: false,
+            has_presented_frame: false,
+            pending_maximize: false,
+            initial_size_negotiated: false,
             saved_geometry: None,
             fullscreen: false,
             fullscreen_restore_geometry: None,
@@ -1590,6 +1602,13 @@ impl WindowManager {
                 );
                 return false;
             }
+            if !w.resizable {
+                println!(
+                    "[WindowManager] Window #{} is not maximizable (fixed-size window)",
+                    id
+                );
+                return false;
+            }
             // Policy: windows with an explicit max size are not maximizable.
             // (max_* != 0 means "set")
             if w.size_limits.max_width != 0 || w.size_limits.max_height != 0 {
@@ -1602,8 +1621,9 @@ impl WindowManager {
             if !w.maximized {
                 // Save current geometry for restore
                 w.saved_geometry = Some((w.x, w.y, w.width, w.height));
-                let (x, y, width, height) =
+                let (x, y, surface_width, surface_height) =
                     w.surface_geometry_for_window_geometry(0, 0, screen_width, screen_height);
+                let (width, height) = w.size_limits.clamp(surface_width, surface_height);
                 w.x = x;
                 w.y = y;
                 w.width = width;
@@ -1780,6 +1800,7 @@ impl WindowManager {
                     w.width = width;
                     w.height = height;
                     w.maximized = false;
+                    w.focused_mode_managed = false;
                     w.saved_geometry = None;
                     println!("[WindowManager] Window #{} restored from maximized", id);
                     return true;
@@ -2226,6 +2247,85 @@ mod tests {
         let window = manager.get_window(id).unwrap();
         assert_eq!(window.window_geometry(), (10, 20, 1000, 700));
         assert_eq!(window.surface_geometry(), (0, 14, 1020, 720));
+    }
+
+    #[test]
+    fn asymmetric_shadow_outsets_do_not_shift_maximized_visible_geometry() {
+        let mut manager = WindowManager::new();
+        let id = manager.create_window_no_buffer(100, 80, 344, 280);
+        manager.set_window_geometry(id, 10, 6, 304, 240).unwrap();
+
+        assert!(manager.maximize_window(id, 1000, 700));
+        manager.set_window_position(id, 10, 42);
+
+        let window = manager.get_window(id).unwrap();
+        assert_eq!(window.window_geometry(), (10, 42, 1000, 700));
+        assert_eq!(window.surface_geometry(), (0, 36, 1040, 740));
+    }
+
+    #[test]
+    fn maximize_never_violates_minimum_surface_constraints() {
+        let mut manager = WindowManager::new();
+        let id = manager.create_window_no_buffer(100, 80, 324, 260);
+        manager.set_window_geometry(id, 10, 6, 304, 240).unwrap();
+        assert!(manager.set_window_size_limits(id, 1100, 800, 0, 0));
+
+        assert!(manager.maximize_window(id, 1000, 700));
+        manager.set_window_position(id, 10, 42);
+
+        let window = manager.get_window(id).unwrap();
+        assert_eq!((window.width, window.height), (1100, 800));
+        assert_eq!(window.window_geometry(), (10, 42, 1080, 780));
+    }
+
+    #[test]
+    fn first_presented_frame_opens_the_geometry_policy_gate_once() {
+        let mut manager = WindowManager::new();
+        let id = manager.create_window_no_buffer(100, 80, 324, 260);
+        let window = manager.get_window_mut(id).unwrap();
+
+        assert!(!window.has_presented_frame);
+        assert!(!window.initial_size_negotiated);
+        assert!(window.mark_presented_frame());
+        assert!(window.has_presented_frame);
+        assert!(!window.mark_presented_frame());
+    }
+
+    #[test]
+    fn focused_windowing_accepts_only_resizable_top_level_normal_windows() {
+        let mut manager = WindowManager::new();
+        let parent_id = manager.create_window_no_buffer(20, 20, 640, 480);
+        assert!(
+            manager
+                .get_window(parent_id)
+                .unwrap()
+                .supports_focused_windowing()
+        );
+
+        let fixed_id = manager.create_window_no_buffer(40, 40, 320, 200);
+        assert!(manager.set_window_resizable(fixed_id, false));
+        let fixed = manager.get_window(fixed_id).unwrap();
+        assert!(!fixed.supports_focused_windowing());
+        assert!(fixed.is_focused_compatibility_window());
+        assert!(!manager.maximize_window(fixed_id, 1000, 700));
+
+        let transient_id = manager.create_window_no_buffer(60, 60, 240, 160);
+        assert!(manager.set_window_parent(transient_id, Some(parent_id)));
+        let transient = manager.get_window(transient_id).unwrap();
+        assert!(!transient.supports_focused_windowing());
+        assert!(!transient.is_focused_compatibility_window());
+    }
+
+    #[test]
+    fn explicit_maximum_size_keeps_window_in_compatibility_floating_class() {
+        let mut manager = WindowManager::new();
+        let id = manager.create_window_no_buffer(10, 10, 480, 320);
+        assert!(manager.set_window_size_limits(id, 320, 240, 640, 480));
+
+        let window = manager.get_window(id).unwrap();
+        assert!(!window.supports_focused_windowing());
+        assert!(window.is_focused_compatibility_window());
+        assert!(!manager.maximize_window(id, 1000, 700));
     }
 
     #[test]

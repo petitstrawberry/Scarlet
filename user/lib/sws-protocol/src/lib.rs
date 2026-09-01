@@ -28,7 +28,7 @@ use std::vec::Vec;
 pub const MAX_PAYLOAD_SIZE: usize = 1024 * 1024; // 1 MiB
 
 /// Current SWS capability-negotiation protocol version.
-pub const SWS_PROTOCOL_VERSION: u32 = 4;
+pub const SWS_PROTOCOL_VERSION: u32 = 6;
 
 /// Maximum damage rectangles carried by one shared SGFX frame commit.
 pub const SGFX_MAX_DAMAGE_RECTS: usize = 16;
@@ -47,6 +47,10 @@ pub mod capabilities {
     pub const INPUT_ENVIRONMENT: u64 = 1 << 4;
     /// Clients may distinguish visible window geometry from surface bounds.
     pub const WINDOW_GEOMETRY: u64 = 1 << 5;
+    /// Trusted user-space tools may override system-wide tablet and windowing modes.
+    pub const SYSTEM_MODE_OVERRIDES: u64 = 1 << 6;
+    /// Window creation may atomically negotiate initial size, limits, and geometry.
+    pub const CONFIGURED_WINDOW_CREATION: u64 = 1 << 7;
 }
 
 /// Known input-environment state bits.
@@ -58,6 +62,12 @@ pub mod input_environment_known_flags {
     pub const TABLET_MODE: u32 = 1 << 0;
     /// Whether the lid-closed state is known.
     pub const LID_CLOSED: u32 = 1 << 1;
+    /// Whether the current windowing mode is known.
+    pub const WINDOWING_MODE: u32 = 1 << 2;
+    /// Whether the tablet-mode override state is known.
+    pub const TABLET_MODE_OVERRIDE_ACTIVE: u32 = 1 << 3;
+    /// Whether the windowing-mode override state is known.
+    pub const WINDOWING_MODE_OVERRIDE_ACTIVE: u32 = 1 << 4;
 }
 
 /// Current input-environment state bits.
@@ -69,6 +79,51 @@ pub mod input_environment_state_flags {
     pub const TABLET_MODE: u32 = 1 << 0;
     /// The device lid is currently closed.
     pub const LID_CLOSED: u32 = 1 << 1;
+    /// Focused windowing is active. When clear, freeform windowing is active.
+    pub const FOCUSED_WINDOWING: u32 = 1 << 2;
+    /// A system-wide tablet-mode override is active.
+    pub const TABLET_MODE_OVERRIDE_ACTIVE: u32 = 1 << 3;
+    /// A system-wide windowing-mode override is active.
+    pub const WINDOWING_MODE_OVERRIDE_ACTIVE: u32 = 1 << 4;
+}
+
+/// System-wide window-management presentation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[repr(u32)]
+pub enum WindowingMode {
+    /// Conventional independently positioned and sized windows.
+    #[default]
+    Freeform = 0,
+    /// Tablet-oriented focused windows, with explicit split/multitasking affordances.
+    Focused = 1,
+}
+
+impl WindowingMode {
+    /// Decode a stable wire value.
+    ///
+    /// # Arguments
+    ///
+    /// * `raw` - Numeric protocol value.
+    ///
+    /// # Returns
+    ///
+    /// The matching windowing mode, or `None` for an unknown value.
+    pub const fn from_raw(raw: u32) -> Option<Self> {
+        match raw {
+            0 => Some(Self::Freeform),
+            1 => Some(Self::Focused),
+            _ => None,
+        }
+    }
+
+    /// Return the stable wire value.
+    ///
+    /// # Returns
+    ///
+    /// The numeric protocol representation.
+    pub const fn as_raw(self) -> u32 {
+        self as u32
+    }
 }
 
 /// Input-device capabilities reported by the input environment.
@@ -289,6 +344,12 @@ pub mod client_msg {
     pub const GET_INPUT_ENVIRONMENT: u32 = 45;
     /// Set the visible window geometry inside the complete surface bounds.
     pub const SET_WINDOW_GEOMETRY: u32 = 46;
+    /// Set or clear the system-wide tablet-mode override.
+    pub const SET_TABLET_MODE_OVERRIDE: u32 = 47;
+    /// Set or clear the system-wide windowing-mode override.
+    pub const SET_WINDOWING_MODE_OVERRIDE: u32 = 48;
+    /// Create a window after applying compositor policy and client size constraints.
+    pub const CREATE_WINDOW_CONFIGURED: u32 = 49;
 
     // Text input client API messages (200-219)
     pub const TEXT_INPUT_CREATE: u32 = 200;
@@ -897,6 +958,104 @@ pub struct WindowGeometry {
     pub height: u32,
 }
 
+/// Initial physical size constraints supplied atomically with window creation.
+///
+/// A zero component is unset. When a maximum is below its matching minimum,
+/// the minimum wins.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WindowSizeLimits {
+    /// Minimum physical surface width, or zero when unset.
+    pub min_width: u32,
+    /// Minimum physical surface height, or zero when unset.
+    pub min_height: u32,
+    /// Maximum physical surface width, or zero when unset.
+    pub max_width: u32,
+    /// Maximum physical surface height, or zero when unset.
+    pub max_height: u32,
+}
+
+impl WindowSizeLimits {
+    /// No minimum or maximum constraints.
+    pub const NONE: Self = Self {
+        min_width: 0,
+        min_height: 0,
+        max_width: 0,
+        max_height: 0,
+    };
+
+    /// Clamp one surface extent to these limits.
+    ///
+    /// # Arguments
+    ///
+    /// * `width` - Requested physical surface width.
+    /// * `height` - Requested physical surface height.
+    ///
+    /// # Returns
+    ///
+    /// A non-zero physical extent satisfying the effective limits.
+    pub fn clamp(self, width: u32, height: u32) -> (u32, u32) {
+        let mut width = width.max(1);
+        let mut height = height.max(1);
+        if self.min_width != 0 {
+            width = width.max(self.min_width.max(1));
+        }
+        if self.min_height != 0 {
+            height = height.max(self.min_height.max(1));
+        }
+        let max_width = if self.max_width == 0 {
+            0
+        } else {
+            self.max_width.max(self.min_width.max(1))
+        };
+        let max_height = if self.max_height == 0 {
+            0
+        } else {
+            self.max_height.max(self.min_height.max(1))
+        };
+        if max_width != 0 {
+            width = width.min(max_width);
+        }
+        if max_height != 0 {
+            height = height.min(max_height);
+        }
+        (width, height)
+    }
+}
+
+/// Non-interactive decoration outside the managed window rectangle.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WindowGeometryInsets {
+    /// Physical pixels outside managed geometry on the left.
+    pub left: u32,
+    /// Physical pixels outside managed geometry above it.
+    pub top: u32,
+    /// Physical pixels outside managed geometry on the right.
+    pub right: u32,
+    /// Physical pixels outside managed geometry below it.
+    pub bottom: u32,
+}
+
+impl WindowGeometryInsets {
+    /// Total horizontal decoration extent.
+    pub const fn horizontal(self) -> u32 {
+        self.left.saturating_add(self.right)
+    }
+
+    /// Total vertical decoration extent.
+    pub const fn vertical(self) -> u32 {
+        self.top.saturating_add(self.bottom)
+    }
+}
+
+/// Properties SWS must know before allocating a window's first buffer.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct InitialWindowConfiguration {
+    /// Surface extent constraints known before buffer allocation.
+    pub size_limits: WindowSizeLimits,
+    /// Non-interactive decoration outside the managed rectangle.
+    pub geometry_insets: WindowGeometryInsets,
+}
+
 /// Borrowed client->server messages (payload may be borrowed).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClientMessageRef<'a> {
@@ -912,6 +1071,8 @@ pub enum ClientMessageRef<'a> {
         active_on_focus: bool,
         initial_position: WindowPlacement,
         activation_token: Option<&'a [u8]>,
+        /// Atomic initial configuration, present for `CREATE_WINDOW_CONFIGURED`.
+        initial_configuration: Option<InitialWindowConfiguration>,
     },
     DestroyWindow {
         window_id: u32,
@@ -1105,6 +1266,18 @@ pub enum ClientMessageRef<'a> {
     /// Query the current input environment snapshot.
     GetInputEnvironment {},
 
+    /// Set or clear the system-wide tablet-mode override.
+    SetTabletModeOverride {
+        /// `None` restores hardware-driven posture.
+        tablet_mode: Option<bool>,
+    },
+
+    /// Set or clear the system-wide windowing-mode override.
+    SetWindowingModeOverride {
+        /// `None` restores posture-derived windowing policy.
+        windowing_mode: Option<WindowingMode>,
+    },
+
     /// Register one transferred SGFX image capability for a window.
     RegisterSgfxBuffer {
         window_id: u32,
@@ -1267,6 +1440,10 @@ pub enum ServerMessage {
     WindowCreated {
         window_id: u32,
         shm_size: u64,
+        /// Negotiated initial width, or zero for a legacy creation response.
+        width: u32,
+        /// Negotiated initial height, or zero for a legacy creation response.
+        height: u32,
     },
     WindowDestroyed {
         window_id: u32,
@@ -1555,7 +1732,8 @@ pub fn parse_client_message<'a>(
     payload: &'a [u8],
 ) -> Result<ClientMessageRef<'a>, ProtocolError> {
     match msg_type {
-        client_msg::CREATE_WINDOW => {
+        client_msg::CREATE_WINDOW | client_msg::CREATE_WINDOW_CONFIGURED => {
+            let configured = msg_type == client_msg::CREATE_WINDOW_CONFIGURED;
             // Payload: app_id_len (u32) + app_id_bytes + app_name_len (u32) + app_name_bytes
             //          + menu_titles_len (u32) + menu_titles_bytes + width (u32) + height (u32)
             //          + window_type (u32) + resizable (u32, optional)
@@ -1590,13 +1768,14 @@ pub fn parse_client_message<'a>(
             ]) as usize;
             offset += 4 + menu_titles_len;
 
-            if payload.len() != offset + 12
-                && payload.len() != offset + 16
-                && payload.len() != offset + 24
-                && payload.len() != offset + 32
-                && payload.len() != offset + 36
-                && payload.len() < offset + 40
-            {
+            let legacy_length_valid = payload.len() == offset + 12
+                || payload.len() == offset + 16
+                || payload.len() == offset + 24
+                || payload.len() == offset + 32
+                || payload.len() == offset + 36
+                || payload.len() >= offset + 40;
+            let configured_length_valid = payload.len() >= offset + 72;
+            if (configured && !configured_length_valid) || (!configured && !legacy_length_valid) {
                 return Err(ProtocolError::MalformedPayload);
             }
 
@@ -1699,7 +1878,38 @@ pub fn parse_client_message<'a>(
             } else {
                 WindowPlacement::Default
             };
-            let activation_token = if payload.len() >= offset + 40 {
+            let (activation_token, initial_configuration) = if configured {
+                let size_limits = WindowSizeLimits {
+                    min_width: read_u32(payload, offset + 36)?,
+                    min_height: read_u32(payload, offset + 40)?,
+                    max_width: read_u32(payload, offset + 44)?,
+                    max_height: read_u32(payload, offset + 48)?,
+                };
+                let geometry_insets = WindowGeometryInsets {
+                    left: read_u32(payload, offset + 52)?,
+                    top: read_u32(payload, offset + 56)?,
+                    right: read_u32(payload, offset + 60)?,
+                    bottom: read_u32(payload, offset + 64)?,
+                };
+                let token_len = read_u32(payload, offset + 68)? as usize;
+                if token_len > ACTIVATION_TOKEN_MAX_BYTES
+                    || payload.len() != offset + 72 + token_len
+                {
+                    return Err(ProtocolError::MalformedPayload);
+                }
+                let token = if token_len == 0 {
+                    None
+                } else {
+                    Some(&payload[offset + 72..])
+                };
+                (
+                    token,
+                    Some(InitialWindowConfiguration {
+                        size_limits,
+                        geometry_insets,
+                    }),
+                )
+            } else if payload.len() >= offset + 40 {
                 let token_len = read_u32(payload, offset + 36)? as usize;
                 if token_len == 0
                     || token_len > ACTIVATION_TOKEN_MAX_BYTES
@@ -1707,9 +1917,9 @@ pub fn parse_client_message<'a>(
                 {
                     return Err(ProtocolError::MalformedPayload);
                 }
-                Some(&payload[offset + 40..])
+                (Some(&payload[offset + 40..]), None)
             } else {
-                None
+                (None, None)
             };
             Ok(ClientMessageRef::CreateWindow {
                 app_id,
@@ -1723,6 +1933,7 @@ pub fn parse_client_message<'a>(
                 active_on_focus,
                 initial_position,
                 activation_token,
+                initial_configuration,
             })
         }
         client_msg::DESTROY_WINDOW => {
@@ -2061,6 +2272,30 @@ pub fn parse_client_message<'a>(
                 return Err(ProtocolError::MalformedPayload);
             }
             Ok(ClientMessageRef::GetInputEnvironment {})
+        }
+        client_msg::SET_TABLET_MODE_OVERRIDE => {
+            if payload.len() != 4 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            let tablet_mode = match read_u32(payload, 0)? {
+                u32::MAX => None,
+                0 => Some(false),
+                1 => Some(true),
+                _ => return Err(ProtocolError::MalformedPayload),
+            };
+            Ok(ClientMessageRef::SetTabletModeOverride { tablet_mode })
+        }
+        client_msg::SET_WINDOWING_MODE_OVERRIDE => {
+            if payload.len() != 4 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            let raw = read_u32(payload, 0)?;
+            let windowing_mode = if raw == u32::MAX {
+                None
+            } else {
+                Some(WindowingMode::from_raw(raw).ok_or(ProtocolError::MalformedPayload)?)
+            };
+            Ok(ClientMessageRef::SetWindowingModeOverride { windowing_mode })
         }
         client_msg::REGISTER_SGFX_BUFFER => {
             if payload.len() != 24 {
@@ -2498,7 +2733,7 @@ fn parse_sgfx_buffer_identity(payload: &[u8]) -> Result<(u32, u32, u32, u32), Pr
 pub fn parse_server_message(msg_type: u32, payload: &[u8]) -> Result<ServerMessage, ProtocolError> {
     match msg_type {
         server_msg::WINDOW_CREATED => {
-            if payload.len() != 12 {
+            if payload.len() != 12 && payload.len() != 20 {
                 return Err(ProtocolError::MalformedPayload);
             }
             let window_id = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
@@ -2512,9 +2747,16 @@ pub fn parse_server_message(msg_type: u32, payload: &[u8]) -> Result<ServerMessa
                 payload[10],
                 payload[11],
             ]);
+            let (width, height) = if payload.len() == 20 {
+                (read_u32(payload, 12)?, read_u32(payload, 16)?)
+            } else {
+                (0, 0)
+            };
             Ok(ServerMessage::WindowCreated {
                 window_id,
                 shm_size,
+                width,
+                height,
             })
         }
         server_msg::WINDOW_DESTROYED => {
@@ -3401,6 +3643,78 @@ pub fn payload_create_window_with_placement_and_activation_token(
     payload
 }
 
+/// Build an atomic configured-window creation payload.
+///
+/// This form lets SWS apply the current workarea policy, size limits, and
+/// client-side decoration geometry before allocating the first buffer.
+///
+/// # Arguments
+///
+/// * `app_id` - Stable application identifier.
+/// * `app_name` - Human-readable application name.
+/// * `menu_titles` - Serialized application menu titles.
+/// * `width` - Preferred initial physical surface width.
+/// * `height` - Preferred initial physical surface height.
+/// * `window_type` - SWS window role.
+/// * `resizable` - Whether the window may be resized.
+/// * `focus_on_create` - Whether the window requests focus.
+/// * `active_on_focus` - Whether focus activates the application.
+/// * `placement` - Initial placement policy.
+/// * `initial_x` - Absolute managed horizontal position when requested.
+/// * `initial_y` - Absolute managed vertical position when requested.
+/// * `configuration` - Initial size limits and non-interactive insets.
+/// * `activation_token` - Optional one-shot activation token.
+///
+/// # Returns
+///
+/// Serialized `CREATE_WINDOW_CONFIGURED` payload.
+#[allow(clippy::too_many_arguments)]
+pub fn payload_create_window_configured(
+    app_id: &[u8],
+    app_name: &[u8],
+    menu_titles: &[u8],
+    width: u32,
+    height: u32,
+    window_type: u32,
+    resizable: bool,
+    focus_on_create: bool,
+    active_on_focus: bool,
+    placement: u32,
+    initial_x: i32,
+    initial_y: i32,
+    configuration: InitialWindowConfiguration,
+    activation_token: Option<&[u8]>,
+) -> Vec<u8> {
+    let mut payload = payload_create_window_with_placement(
+        app_id,
+        app_name,
+        menu_titles,
+        width,
+        height,
+        window_type,
+        resizable,
+        focus_on_create,
+        active_on_focus,
+        placement,
+        initial_x,
+        initial_y,
+    );
+    let limits = configuration.size_limits;
+    payload.extend_from_slice(&limits.min_width.to_le_bytes());
+    payload.extend_from_slice(&limits.min_height.to_le_bytes());
+    payload.extend_from_slice(&limits.max_width.to_le_bytes());
+    payload.extend_from_slice(&limits.max_height.to_le_bytes());
+    let insets = configuration.geometry_insets;
+    payload.extend_from_slice(&insets.left.to_le_bytes());
+    payload.extend_from_slice(&insets.top.to_le_bytes());
+    payload.extend_from_slice(&insets.right.to_le_bytes());
+    payload.extend_from_slice(&insets.bottom.to_le_bytes());
+    let activation_token = activation_token.unwrap_or_default();
+    payload.extend_from_slice(&(activation_token.len() as u32).to_le_bytes());
+    payload.extend_from_slice(activation_token);
+    payload
+}
+
 /// Build a request for an opaque application activation token.
 ///
 /// # Arguments
@@ -3574,6 +3888,32 @@ pub fn payload_window_created(window_id: u32, shm_size: u64) -> [u8; 12] {
     let mut payload = [0u8; 12];
     payload[0..4].copy_from_slice(&window_id.to_le_bytes());
     payload[4..12].copy_from_slice(&shm_size.to_le_bytes());
+    payload
+}
+
+/// Build a configured `WINDOW_CREATED` response carrying the negotiated extent.
+///
+/// # Arguments
+///
+/// * `window_id` - Newly allocated window identifier.
+/// * `shm_size` - Shared-memory byte length.
+/// * `width` - Negotiated physical surface width.
+/// * `height` - Negotiated physical surface height.
+///
+/// # Returns
+///
+/// A fixed-width configured creation response.
+pub fn payload_window_created_configured(
+    window_id: u32,
+    shm_size: u64,
+    width: u32,
+    height: u32,
+) -> [u8; 20] {
+    let mut payload = [0u8; 20];
+    payload[0..4].copy_from_slice(&window_id.to_le_bytes());
+    payload[4..12].copy_from_slice(&shm_size.to_le_bytes());
+    payload[12..16].copy_from_slice(&width.to_le_bytes());
+    payload[16..20].copy_from_slice(&height.to_le_bytes());
     payload
 }
 
@@ -4128,6 +4468,39 @@ pub fn payload_input_environment_changed(
     payload[8..12].copy_from_slice(&state_flags.to_le_bytes());
     payload[12..16].copy_from_slice(&capability_flags.to_le_bytes());
     payload
+}
+
+/// Build payload for client->server `SET_TABLET_MODE_OVERRIDE`.
+///
+/// # Arguments
+///
+/// * `tablet_mode` - Forced posture, or `None` to resume hardware detection.
+///
+/// # Returns
+///
+/// A fixed-width override payload.
+pub fn payload_set_tablet_mode_override(tablet_mode: Option<bool>) -> [u8; 4] {
+    let raw = match tablet_mode {
+        None => u32::MAX,
+        Some(false) => 0,
+        Some(true) => 1,
+    };
+    raw.to_le_bytes()
+}
+
+/// Build payload for client->server `SET_WINDOWING_MODE_OVERRIDE`.
+///
+/// # Arguments
+///
+/// * `windowing_mode` - Forced policy, or `None` to resume posture-derived policy.
+///
+/// # Returns
+///
+/// A fixed-width override payload.
+pub fn payload_set_windowing_mode_override(windowing_mode: Option<WindowingMode>) -> [u8; 4] {
+    windowing_mode
+        .map_or(u32::MAX, WindowingMode::as_raw)
+        .to_le_bytes()
 }
 
 /// Build payload for client->server `SET_WINDOW_TYPE`.
@@ -4741,17 +5114,21 @@ pub fn payload_set_window_geometry(window_id: u32, geometry: WindowGeometry) -> 
 #[cfg(all(test, feature = "std"))]
 mod tests {
     use super::{
-        CURSOR_THEME_PATH_MAX_BYTES, ClientMessageRef, CursorIcon, InputEnvironment, MessageHeader,
-        ProtocolError, ServerMessage, WindowGeometry, WindowPlacement, client_msg,
+        CURSOR_THEME_PATH_MAX_BYTES, ClientMessageRef, CursorIcon, InitialWindowConfiguration,
+        InputEnvironment, MessageHeader, ProtocolError, ServerMessage, WindowGeometry,
+        WindowGeometryInsets, WindowPlacement, WindowSizeLimits, WindowingMode, client_msg,
         encode_routed_frame, error_codes, input_environment_capability_flags,
         input_environment_known_flags, input_environment_state_flags, parse_client_message,
-        parse_server_message, payload_activation_token, payload_create_window_with_placement,
+        parse_server_message, payload_activation_token, payload_create_window_configured,
+        payload_create_window_with_placement,
         payload_create_window_with_placement_and_activation_token,
         payload_create_window_with_position, payload_error, payload_input_environment_changed,
         payload_pointer_lock_changed, payload_request_activation_token, payload_set_cursor_icon,
         payload_set_cursor_theme, payload_set_fullscreen, payload_set_pointer_lock,
-        payload_set_window_geometry, payload_unset_fullscreen, payload_window_state_changed,
-        server_msg, window_placement, window_state,
+        payload_set_tablet_mode_override, payload_set_window_geometry,
+        payload_set_windowing_mode_override, payload_unset_fullscreen,
+        payload_window_created_configured, payload_window_state_changed, server_msg,
+        window_placement, window_state,
     };
 
     #[test]
@@ -4804,6 +5181,64 @@ mod tests {
         assert!(!focus_on_create);
         assert!(active_on_focus);
         assert_eq!(initial_position, WindowPlacement::Centered);
+    }
+
+    #[test]
+    fn configured_window_creation_round_trips_constraints_geometry_and_extent() {
+        let configuration = InitialWindowConfiguration {
+            size_limits: WindowSizeLimits {
+                min_width: 320,
+                min_height: 240,
+                max_width: 0,
+                max_height: 0,
+            },
+            geometry_insets: WindowGeometryInsets {
+                left: 12,
+                top: 8,
+                right: 16,
+                bottom: 20,
+            },
+        };
+        let payload = payload_create_window_configured(
+            b"org.example.app",
+            b"Example",
+            b"",
+            640,
+            480,
+            0,
+            true,
+            true,
+            true,
+            window_placement::DEFAULT,
+            0,
+            0,
+            configuration,
+            Some(b"token"),
+        );
+        let ClientMessageRef::CreateWindow {
+            width,
+            height,
+            activation_token,
+            initial_configuration,
+            ..
+        } = parse_client_message(client_msg::CREATE_WINDOW_CONFIGURED, &payload).unwrap()
+        else {
+            panic!("expected configured CREATE_WINDOW");
+        };
+        assert_eq!((width, height), (640, 480));
+        assert_eq!(activation_token, Some(b"token".as_slice()));
+        assert_eq!(initial_configuration, Some(configuration));
+
+        let response = payload_window_created_configured(42, 8_388_608, 1920, 1096);
+        assert_eq!(
+            parse_server_message(server_msg::WINDOW_CREATED, &response),
+            Ok(ServerMessage::WindowCreated {
+                window_id: 42,
+                shm_size: 8_388_608,
+                width: 1920,
+                height: 1096,
+            })
+        );
     }
 
     #[test]
@@ -5098,6 +5533,38 @@ mod tests {
                 state_flags: environment.state_flags,
                 capability_flags: environment.capability_flags,
             }
+        );
+    }
+
+    #[test]
+    fn system_mode_override_requests_round_trip_and_reject_unknown_values() {
+        for tablet_mode in [None, Some(false), Some(true)] {
+            let payload = payload_set_tablet_mode_override(tablet_mode);
+            assert_eq!(
+                parse_client_message(client_msg::SET_TABLET_MODE_OVERRIDE, &payload),
+                Ok(ClientMessageRef::SetTabletModeOverride { tablet_mode })
+            );
+        }
+
+        for windowing_mode in [
+            None,
+            Some(WindowingMode::Freeform),
+            Some(WindowingMode::Focused),
+        ] {
+            let payload = payload_set_windowing_mode_override(windowing_mode);
+            assert_eq!(
+                parse_client_message(client_msg::SET_WINDOWING_MODE_OVERRIDE, &payload),
+                Ok(ClientMessageRef::SetWindowingModeOverride { windowing_mode })
+            );
+        }
+
+        assert_eq!(
+            parse_client_message(client_msg::SET_TABLET_MODE_OVERRIDE, &2u32.to_le_bytes()),
+            Err(ProtocolError::MalformedPayload)
+        );
+        assert_eq!(
+            parse_client_message(client_msg::SET_WINDOWING_MODE_OVERRIDE, &2u32.to_le_bytes()),
+            Err(ProtocolError::MalformedPayload)
         );
     }
 
