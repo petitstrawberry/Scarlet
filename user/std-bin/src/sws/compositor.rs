@@ -6081,18 +6081,11 @@ impl Compositor {
                         shm_mapped_addr,
                         shm_size,
                     ) {
-                        // Replacing the CPU backing makes every retained
-                        // shared SGFX frame for this window obsolete.  Release
-                        // their exact commit tokens now, while keeping their
-                        // imported registrations alive for the client's
-                        // explicit DestroySgfxBuffer requests.
-                        if let Some(gpu_compositor) = self.gpu_compositor.as_mut() {
-                            for release in
-                                gpu_compositor.release_shared_buffers_for_resize(window_id)
-                            {
-                                send_sgfx_buffer_released(release);
-                            }
-                        }
+                        // Keep the last presented shared frame alive while the
+                        // client renders the replacement extent. The normal
+                        // shared-frame promotion path releases it only after a
+                        // new generation has reached the display, so the empty
+                        // resized SHM backing is never exposed between frames.
                         if let Some(w) = self.window_manager.get_window(window_id) {
                             let rect = (w.x, w.y, w.width, w.height);
                             if let Some(old_rect) = old_rect {

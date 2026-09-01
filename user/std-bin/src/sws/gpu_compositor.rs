@@ -289,28 +289,6 @@ impl GpuCompositor {
         Ok(())
     }
 
-    /// Stop sampling every shared frame retained for a window during a
-    /// successful CPU-backing resize.
-    ///
-    /// The client cannot safely retire the preceding SGFX generation until it
-    /// receives a release for every commit that SWS may still sample.  A SHM
-    /// resize is a scene discontinuity: after its new backing is installed,
-    /// retain none of the old shared frames, but keep their registrations
-    /// mapped until the client explicitly destroys them.
-    pub(super) fn release_shared_buffers_for_resize(
-        &mut self,
-        window_id: WindowId,
-    ) -> Vec<SgfxCommitToken> {
-        let Some(state) = self
-            .shared_windows
-            .iter_mut()
-            .find(|state| state.window_id == window_id)
-        else {
-            return Vec::new();
-        };
-        take_shared_window_releases(state)
-    }
-
     /// Rebuild private composition resources before the next output frame.
     pub(super) fn resize_target(&mut self, width: u32, height: u32) -> Result<(), &'static str> {
         if width == 0 || height == 0 {
@@ -673,15 +651,7 @@ impl GpuCompositor {
     fn take_presented_releases(&mut self) -> Vec<SgfxCommitToken> {
         let mut releases = Vec::new();
         for state in &mut self.shared_windows {
-            let Some(pending) = state.pending.take() else {
-                continue;
-            };
-            if let Some(previous) = state.presented.replace(pending) {
-                releases.push(previous);
-            }
-            if let Some(superseded) = state.retire_after_present.take() {
-                releases.push(superseded);
-            }
+            releases.extend(promote_pending_shared_frame(state).into_iter().flatten());
         }
         // Once a shared image has reached the display, the CPU-upload cache
         // for that window is redundant. Keep its physical image as a reusable
@@ -858,36 +828,31 @@ impl GpuCompositor {
     }
 }
 
-/// Take each exact shared-frame retention held by one window.
+/// Promote the frame used for the completed display present.
 ///
-/// `presented`, `pending`, and `retire_after_present` are distinct slots in
-/// the bounded commit state machine.  Clearing all three before reporting any
-/// release ensures a resize cannot race a later composition into sampling an
-/// old-size client image.
-fn take_shared_window_releases(state: &mut SharedWindowState) -> Vec<SgfxCommitToken> {
-    let mut releases = Vec::new();
-    if let Some(presented) = state.presented.take() {
-        releases.push(presented);
-    }
-    if let Some(pending) = state.pending.take() {
-        releases.push(pending);
-    }
-    if let Some(retired) = state.retire_after_present.take() {
-        releases.push(retired);
-    }
-    releases
+/// The previously presented commit remains retained until this transition.
+/// This is also the generation boundary used during a window resize: SWS may
+/// sample the old extent until the replacement extent has actually presented.
+fn promote_pending_shared_frame(state: &mut SharedWindowState) -> [Option<SgfxCommitToken>; 2] {
+    let Some(pending) = state.pending.take() else {
+        return [None, None];
+    };
+    [
+        state.presented.replace(pending),
+        state.retire_after_present.take(),
+    ]
 }
 
 #[cfg(test)]
-mod shared_frame_release_tests {
+mod shared_frame_promotion_tests {
     use super::*;
 
-    fn token(buffer_id: u32, commit_serial: u64) -> SgfxCommitToken {
+    fn token(buffer_id: u32, generation: u32, commit_serial: u64) -> SgfxCommitToken {
         SgfxCommitToken {
             identity: SgfxBufferIdentity {
                 window_id: 41,
                 buffer_id,
-                generation: 7,
+                generation,
                 compositor_epoch: 3,
             },
             commit_serial,
@@ -895,27 +860,26 @@ mod shared_frame_release_tests {
     }
 
     #[test]
-    fn resize_release_clears_every_retained_shared_frame_once() {
-        let presented = token(1, 101);
-        let pending = token(2, 102);
-        let retired = token(3, 103);
+    fn replacement_generation_releases_old_frame_only_after_promotion() {
+        let old_presented = token(1, 7, 101);
+        let replacement = token(1, 8, 102);
         let mut state = SharedWindowState {
             window_id: 41,
-            latest_generation: 7,
+            latest_generation: 8,
             compositor_epoch: 3,
-            presented: Some(presented),
-            pending: Some(pending),
-            retire_after_present: Some(retired),
+            presented: Some(old_presented),
+            pending: Some(replacement),
+            retire_after_present: None,
         };
 
-        let releases = take_shared_window_releases(&mut state);
+        assert_eq!(state.presented, Some(old_presented));
+        assert_eq!(state.pending, Some(replacement));
 
-        assert_eq!(releases, vec![presented, pending, retired]);
-        assert!(state.presented.is_none());
+        let releases = promote_pending_shared_frame(&mut state);
+
+        assert_eq!(releases, [Some(old_presented), None]);
+        assert_eq!(state.presented, Some(replacement));
         assert!(state.pending.is_none());
-        assert!(state.retire_after_present.is_none());
-        assert_eq!(state.latest_generation, 7);
-        assert_eq!(state.compositor_epoch, 3);
     }
 }
 
