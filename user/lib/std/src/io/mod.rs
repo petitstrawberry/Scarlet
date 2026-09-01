@@ -134,6 +134,23 @@ pub enum SeekFrom {
 
 use crate::syscall::{Syscall, syscall3};
 
+const EINTR: i32 = 4;
+const EAGAIN: i32 = 11;
+
+fn stream_syscall_result(result: usize, message: &'static str) -> Result<usize> {
+    if result <= isize::MAX as usize {
+        return Ok(result);
+    }
+
+    let errno = result.wrapping_neg() as i32;
+    let kind = match errno {
+        EINTR => ErrorKind::Interrupted,
+        EAGAIN => ErrorKind::WouldBlock,
+        _ => ErrorKind::Other,
+    };
+    Err(Error::new(kind, message))
+}
+
 /// A handle to the standard input stream of a process
 ///
 /// This handle is created from the global file descriptor 0. This is similar
@@ -204,11 +221,7 @@ impl Stdin {
             buffer.len(),
         );
 
-        if result == usize::MAX {
-            Err(Error::new(ErrorKind::Other, "Read from stdin failed"))
-        } else {
-            Ok(result)
-        }
+        stream_syscall_result(result, "Read from stdin failed")
     }
 }
 
@@ -362,6 +375,28 @@ pub fn _print(args: fmt::Arguments) {
 
     let output = fmt_format(args);
     let _ = stdout().write_all(output.as_bytes());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{EAGAIN, EINTR, ErrorKind, stream_syscall_result};
+
+    #[test]
+    fn stream_syscall_result_preserves_retryable_errors() {
+        assert_eq!(
+            stream_syscall_result((-EINTR) as usize, "read failed")
+                .unwrap_err()
+                .kind(),
+            ErrorKind::Interrupted
+        );
+        assert_eq!(
+            stream_syscall_result((-EAGAIN) as usize, "read failed")
+                .unwrap_err()
+                .kind(),
+            ErrorKind::WouldBlock
+        );
+        assert_eq!(stream_syscall_result(3, "read failed").unwrap(), 3);
+    }
 }
 
 /// Macro for printing to stdout

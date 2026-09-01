@@ -7,6 +7,17 @@ use crate::arch::Trapframe;
 use crate::library::std::usercopy::copy_from_user;
 use crate::task::mytask;
 
+const EAGAIN: i32 = 11;
+const EINTR: i32 = 4;
+
+fn stream_read_error_result(error: super::StreamError) -> usize {
+    match error {
+        super::StreamError::WouldBlock => (-EAGAIN) as usize,
+        super::StreamError::Interrupted => (-EINTR) as usize,
+        _ => usize::MAX,
+    }
+}
+
 /// System call for reading from a KernelObject with StreamOps capability
 ///
 /// # Arguments
@@ -16,7 +27,8 @@ use crate::task::mytask;
 ///
 /// # Returns
 /// - On success: number of bytes read
-/// - On error: usize::MAX
+/// - On a recognized stream error: a negative errno encoded as `usize`
+/// - On any other error: `usize::MAX`
 pub fn sys_stream_read(trapframe: &mut Trapframe) -> usize {
     let task = match mytask() {
         Some(task) => task,
@@ -46,11 +58,7 @@ pub fn sys_stream_read(trapframe: &mut Trapframe) -> usize {
     let mut kernel_buf = alloc::vec![0u8; count];
     let bytes_read = match stream.read(&mut kernel_buf) {
         Ok(n) => n,
-        Err(super::StreamError::WouldBlock) => {
-            // Return EAGAIN error code (negative value indicates error)
-            return (-(11i32)) as usize;
-        }
-        Err(_) => return usize::MAX,
+        Err(error) => return stream_read_error_result(error),
     };
 
     // Copy to user space using copy_to_user (handles page boundaries)
@@ -110,5 +118,24 @@ pub fn sys_stream_write(trapframe: &mut Trapframe) -> usize {
         Ok(bytes_written) => bytes_written,
         Err(super::StreamError::WouldBlock) => (-(11i32)) as usize,
         Err(_) => usize::MAX, // Write error
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{EAGAIN, EINTR, stream_read_error_result};
+    use crate::object::capability::StreamError;
+
+    #[test_case]
+    fn stream_error_result_preserves_retryable_errors() {
+        assert_eq!(
+            stream_read_error_result(StreamError::WouldBlock),
+            (-EAGAIN) as usize
+        );
+        assert_eq!(
+            stream_read_error_result(StreamError::Interrupted),
+            (-EINTR) as usize
+        );
+        assert_eq!(stream_read_error_result(StreamError::IoError), usize::MAX);
     }
 }

@@ -20,6 +20,8 @@ pub enum StreamError {
     EndOfStream,
     /// Operation would block (non-blocking I/O)
     WouldBlock,
+    /// Operation was interrupted before any data was transferred
+    Interrupted,
     /// Input/output error
     IoError,
     /// Permission denied
@@ -31,6 +33,15 @@ pub enum StreamError {
 }
 
 impl StreamError {
+    /// Convert a raw stream syscall result into a typed result.
+    ///
+    /// # Arguments
+    ///
+    /// * `result` - Raw return value from `StreamRead` or `StreamWrite`.
+    ///
+    /// # Returns
+    ///
+    /// The transferred byte count, or the corresponding [`StreamError`].
     pub fn from_syscall_result(result: usize) -> Result<usize, Self> {
         // Check for negative error codes (stored as large usize values)
         if result == usize::MAX {
@@ -39,12 +50,31 @@ impl StreamError {
             // Negative value stored as usize indicates errno
             let errno = -(result as isize) as i32;
             match errno {
+                4 => Err(StreamError::Interrupted), // EINTR
                 11 => Err(StreamError::WouldBlock), // EAGAIN
                 _ => Err(StreamError::SystemError(errno)),
             }
         } else {
             Ok(result)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::StreamError;
+
+    #[test]
+    fn syscall_result_distinguishes_interrupted_from_would_block() {
+        assert_eq!(
+            StreamError::from_syscall_result((-(4i32)) as usize),
+            Err(StreamError::Interrupted)
+        );
+        assert_eq!(
+            StreamError::from_syscall_result((-(11i32)) as usize),
+            Err(StreamError::WouldBlock)
+        );
+        assert_eq!(StreamError::from_syscall_result(7), Ok(7));
     }
 }
 

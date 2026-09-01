@@ -10,6 +10,10 @@ impl crate::io::Write for Socket {
         stream.write(buf).map_err(|error| {
             use crate::handle::capability::StreamError;
             match error {
+                StreamError::Interrupted => crate::io::Error::new(
+                    crate::io::ErrorKind::Interrupted,
+                    "Operation interrupted",
+                ),
                 StreamError::WouldBlock => {
                     crate::io::Error::new(crate::io::ErrorKind::WouldBlock, "Would block")
                 }
@@ -44,6 +48,10 @@ impl crate::io::Read for Socket {
         stream.read(buf).map_err(|error| {
             use crate::handle::capability::StreamError;
             match error {
+                StreamError::Interrupted => crate::io::Error::new(
+                    crate::io::ErrorKind::Interrupted,
+                    "Operation interrupted",
+                ),
                 StreamError::WouldBlock => {
                     crate::io::Error::new(crate::io::ErrorKind::WouldBlock, "Would block")
                 }

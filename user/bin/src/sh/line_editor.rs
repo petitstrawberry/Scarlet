@@ -430,10 +430,13 @@ impl LineEditor {
 
     fn read_input_byte(&self) -> Result<u8, ()> {
         let mut buf = [0u8; 1];
-        match std::io::stdin().read(&mut buf) {
-            Ok(bytes_read) if bytes_read > 0 => Ok(buf[0]),
-            Ok(_) => Err(()),
-            Err(_) => Err(()),
+        loop {
+            match std::io::stdin().read(&mut buf) {
+                Ok(bytes_read) if bytes_read > 0 => return Ok(buf[0]),
+                Ok(_) => return Err(()),
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => return Err(()),
+            }
         }
     }
 
