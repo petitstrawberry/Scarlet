@@ -12,9 +12,10 @@ init
       ├── Config parser (TOML: /etc/stemd.d/*.toml)
       ├── Desktop file loader (/usr/share/applications/*.desktop)
       ├── Dependency resolver (topological sort)
-      ├── Service launcher (fork/exec with TTY attachment)
+      ├── Service launcher (fork/exec with TTY or log pipe attachment)
       ├── IPC thread (Unix socket: /tmp/stemd.sock)
       ├── sbus listener (org.scarlet-os.stem method calls)
+      ├── stdout/stderr forwarders (local socket: /tmp/logd.sock)
       └── Process reaper (waitpid)
 ```
 
@@ -22,9 +23,11 @@ stemd consists of these modules:
 
 | Module | File | Responsibility |
 |--------|------|----------------|
-| Main | `user/bin/src/stemd/main.rs` | Config parsing, service lifecycle, process reaping |
-| Protocol | `user/bin/src/stemd/protocol.rs` | IPC command definitions and payload builders |
-| Desktop | `user/bin/src/stemd/desktop.rs` | XDG .desktop file parser and app registry |
+| Main | `user/std-bin/src/stemd/main.rs` | Config parsing, service lifecycle, process reaping |
+| Protocol | `user/std-bin/src/stemd/protocol.rs` | IPC command definitions and payload builders |
+| Desktop | `user/std-bin/src/stemd/desktop.rs` | XDG .desktop file parser and app registry |
+| Log daemon | `user/std-bin/src/logd.rs` | Bounded journal, filtering, and live queries |
+| Log protocol | `user/lib/log-protocol/src/lib.rs` | Shared framed wire types and limits |
 
 ## Configuration
 
@@ -55,6 +58,34 @@ ready_timeout_ms = 10000
 | `order` | No | Integer ordering hint (default 0) |
 | `ready_notify` | No | Expect `SERVICE_READY` from this service (default false) |
 | `ready_timeout_ms` | No | Timeout for readiness notification (default 5000 ms) |
+
+## Central Logging
+
+`logd` is an early `stemd` dependency. After `logd` reports ready, `stemd`
+connects stdout and stderr of every non-TTY service and desktop application to
+native pipes. Dedicated readers split output at newline or NUL boundaries and
+forward framed records to `/tmp/logd.sock`. `logd` tags each record with a unit,
+PID, stream, priority, sequence, boot-journal identifier, and monotonic and
+realtime timestamps.
+
+The current journal is intentionally volatile. It retains at most 8,192 records
+and 4 MiB of record data, evicting the oldest entries first. A single record is
+limited to 48 KiB. TTY services retain their configured terminal streams, and
+`logd` itself is excluded from capture to prevent a logging recursion.
+
+Use `logctl` to inspect or follow the journal:
+
+```text
+logctl -u sws
+logctl -u sws -f
+logctl -u sws -n 200
+logctl -p warning
+logctl --pid 42
+```
+
+`-p LEVEL` follows syslog ordering and includes the selected level and all more
+important records. `-b` selects the active in-memory boot journal; persistent
+multi-boot storage is not implemented yet.
 
 ## .desktop Application Registry
 
@@ -115,8 +146,11 @@ When run from an interactive shell, stemd forks once and the parent exits immedi
 
 ## Source Code
 
-- Main: `user/bin/src/stemd/main.rs`
-- Protocol: `user/bin/src/stemd/protocol.rs`
-- Desktop parser: `user/bin/src/stemd/desktop.rs`
+- Main: `user/std-bin/src/stemd/main.rs`
+- Protocol: `user/std-bin/src/stemd/protocol.rs`
+- Desktop parser: `user/std-bin/src/stemd/desktop.rs`
+- Log daemon: `user/std-bin/src/logd.rs`
+- Log query tool: `user/std-bin/src/logctl.rs`
+- Log wire protocol: `user/lib/log-protocol/src/lib.rs`
 - Init integration: `user/bin/src/init.rs`
 - Default config: `mkfs/initramfs/system/scarlet/etc/stemd.d/`

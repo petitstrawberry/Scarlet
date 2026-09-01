@@ -4,4 +4,4 @@
 [service.stemd]
 exec = "/bin/stemd"
 order = 01
-depends = ["sbusd"]
+depends = ["logd", "sbusd"]

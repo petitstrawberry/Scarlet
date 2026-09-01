@@ -1076,6 +1076,16 @@ impl Compositor {
         };
         super::ipc::set_sgfx_shared_images_available(gpu_compositor.is_some());
         let input_environment = input_environment::snapshot();
+        println!(
+            "[Compositor] Input environment: generation={} tablet={} lid_closed={} windowing={:?} tablet_override={} windowing_override={} capabilities={:#x}",
+            input_environment.generation,
+            input_environment.tablet_mode(),
+            input_environment.lid_closed(),
+            input_environment.windowing_mode(),
+            input_environment.tablet_mode_override_active(),
+            input_environment.windowing_mode_override_active(),
+            input_environment.capability_flags,
+        );
         super::ipc::set_window_creation_environment(
             screen_width,
             screen_height,
@@ -3819,8 +3829,9 @@ impl Compositor {
         self.windowing_mode = windowing_mode;
         self.publish_window_creation_environment();
         let tablet_mode = snapshot.tablet_mode();
+        let tablet_mode_changed = self.tablet_mode != tablet_mode;
         let mut redraw = false;
-        if self.tablet_mode != tablet_mode {
+        if tablet_mode_changed {
             self.tablet_mode = tablet_mode;
             for policy_event in self.gesture_recognizer.set_tablet_mode(tablet_mode) {
                 match policy_event {
@@ -3853,6 +3864,16 @@ impl Compositor {
         if windowing_mode_changed {
             redraw |= self.apply_windowing_mode_policy();
         }
+        println!(
+            "[Compositor] Input environment changed: generation={} tablet={} lid_closed={} windowing={:?} tablet_override={} windowing_override={} capabilities={:#x}",
+            snapshot.generation,
+            tablet_mode,
+            self.lid_closed,
+            windowing_mode,
+            snapshot.tablet_mode_override_active(),
+            snapshot.windowing_mode_override_active(),
+            snapshot.capability_flags,
+        );
         super::ipc::broadcast_input_environment_changed(snapshot);
         super::input_environment_sbus::queue_state_changed(snapshot);
         Ok(redraw)

@@ -1,0 +1,7 @@
+# Stem Daemon Configuration File
+
+[service.logd]
+exec = "/bin/logd"
+depends = []
+ready_notify = true
+ready_timeout_ms = 5000

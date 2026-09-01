@@ -36,6 +36,20 @@ to = "/system/scarlet/bin/stemd"
 
 [[layers]]
 kind = "cargo"
+source = "../../user/std-bin"
+package = "scarlet-std-bin"
+bin = "logd"
+to = "/system/scarlet/bin/logd"
+
+[[layers]]
+kind = "cargo"
+source = "../../user/std-bin"
+package = "scarlet-std-bin"
+bin = "logctl"
+to = "/system/scarlet/bin/logctl"
+
+[[layers]]
+kind = "cargo"
 source = "../../user/bin"
 package = "user-bin"
 bin = "sbusd"

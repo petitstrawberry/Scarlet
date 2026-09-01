@@ -1,0 +1,12 @@
+[package]
+name = "log-protocol"
+version = "0.16.0"
+edition = "2024"
+
+[features]
+default = ["std"]
+std = []
+
+[lib]
+name = "log_protocol"
+path = "src/lib.rs"

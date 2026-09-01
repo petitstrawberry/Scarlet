@@ -17,6 +17,7 @@ framebuffer = { path = "../lib/framebuffer", default-features = false, features 
 sgfx = { path = "../lib/sgfx-frontend" }
 httparse = "1.9"
 libm = "0.2"
+log-protocol = { path = "../lib/log-protocol" }
 lyon_path = "1.0"
 lyon_tessellation = "1.0"
 miniz_oxide = { version = "0.8", default-features = false, features = ["with-alloc"] }
@@ -273,3 +274,11 @@ path = "src/sensor_dump.rs"
 [[bin]]
 name = "tabletctl"
 path = "src/tabletctl.rs"
+
+[[bin]]
+name = "logd"
+path = "src/logd.rs"
+
+[[bin]]
+name = "logctl"
+path = "src/logctl.rs"

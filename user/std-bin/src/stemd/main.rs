@@ -8,6 +8,10 @@
 //! - Supports .desktop files for application definitions
 
 use core::sync::atomic::{AtomicBool, Ordering, fence};
+use log_protocol::{
+    AppendRequest, Header as LogHeader, LogPriority, LogStream, MAX_MESSAGE_LEN, MSG_APPEND,
+    SOCKET_PATH as LOG_SOCKET_PATH,
+};
 use sbus_client as sbus;
 use scarlet_desktop_config::DESKTOP_STEMD_LIST_APPLICATIONS_METHOD;
 use scarlet_os::handle::capability::StreamOps;
@@ -16,7 +20,7 @@ use scarlet_os::socket::Socket;
 use std::{
     format,
     fs::{self, File, OpenOptions},
-    io::Read,
+    io::{Read, Write},
     println,
     process::{Command, Stdio},
     string::{String, ToString},
@@ -76,10 +80,17 @@ fn configure_command_stdio(command: &mut Command, path: &str) -> Result<(), &'st
     Ok(())
 }
 
+fn configure_captured_stdio(command: &mut Command) {
+    command.stdin(Stdio::null());
+    command.stdout(Stdio::piped());
+    command.stderr(Stdio::piped());
+}
+
 fn spawn_command(
     argv: &[String],
     activation_token: Option<&str>,
     stdio_path: Option<&str>,
+    log_unit: Option<&str>,
 ) -> Result<i32, &'static str> {
     let program = argv.first().ok_or("Invalid empty command")?;
     let mut command = Command::new(program);
@@ -91,12 +102,115 @@ fn spawn_command(
             .ok_or("Invalid application environment")?;
         command.env(key, value);
     }
-    configure_command_stdio(&mut command, stdio_path.unwrap_or("/dev/null"))?;
+    if let Some(path) = stdio_path {
+        configure_command_stdio(&mut command, path)?;
+    } else if log_unit.is_some() {
+        configure_captured_stdio(&mut command);
+    } else {
+        configure_command_stdio(&mut command, "/dev/null")?;
+    }
 
-    command
-        .spawn()
-        .map(|child| child.id() as i32)
-        .map_err(|_| "Failed to spawn process")
+    let mut child = command.spawn().map_err(|_| "Failed to spawn process")?;
+    let pid = child.id() as i32;
+    if let Some(unit) = log_unit {
+        if let Some(stdout) = child.stdout.take() {
+            start_log_forwarder(stdout, unit.to_string(), pid, LogStream::Stdout);
+        }
+        if let Some(stderr) = child.stderr.take() {
+            start_log_forwarder(stderr, unit.to_string(), pid, LogStream::Stderr);
+        }
+    }
+    Ok(pid)
+}
+
+fn start_log_forwarder<R>(mut reader: R, unit: String, pid: i32, stream: LogStream)
+where
+    R: Read + Send + 'static,
+{
+    let thread_name = match stream {
+        LogStream::Stdout => String::from("stemd-log-stdout"),
+        LogStream::Stderr => String::from("stemd-log-stderr"),
+        LogStream::Internal => String::from("stemd-log-internal"),
+    };
+    if let Err(error) = thread::Builder::new().name(thread_name).spawn(move || {
+        let mut socket: Option<Socket> = None;
+        let mut read_buffer = [0u8; 4096];
+        let mut line = Vec::new();
+        loop {
+            let read = match reader.read(&mut read_buffer) {
+                Ok(0) => break,
+                Ok(read) => read,
+                Err(_) => break,
+            };
+            for &byte in &read_buffer[..read] {
+                if byte == b'\n' || byte == 0 {
+                    submit_log_line(&mut socket, &unit, pid, stream, &mut line);
+                    continue;
+                }
+                if line.len() == MAX_MESSAGE_LEN {
+                    submit_log_line(&mut socket, &unit, pid, stream, &mut line);
+                }
+                line.push(byte);
+            }
+        }
+        if !line.is_empty() {
+            submit_log_line(&mut socket, &unit, pid, stream, &mut line);
+        }
+    }) {
+        println!(
+            "stemd: Failed to start {:?} log forwarder for PID {}: {}",
+            stream, pid, error
+        );
+    }
+}
+
+fn submit_log_line(
+    socket: &mut Option<Socket>,
+    unit: &str,
+    pid: i32,
+    stream: LogStream,
+    line: &mut Vec<u8>,
+) {
+    if line.last() == Some(&b'\r') {
+        line.pop();
+    }
+    let request = AppendRequest {
+        unit: unit.to_string(),
+        pid,
+        stream,
+        priority: match stream {
+            LogStream::Stderr => LogPriority::Warning,
+            LogStream::Stdout | LogStream::Internal => LogPriority::Info,
+        },
+        message: core::mem::take(line),
+    };
+    let Ok(payload) = request.to_payload() else {
+        return;
+    };
+    for _ in 0..2 {
+        if socket.is_none() {
+            *socket = Socket::new().ok().and_then(|candidate| {
+                if candidate.connect(LOG_SOCKET_PATH).is_ok() {
+                    Some(candidate)
+                } else {
+                    None
+                }
+            });
+        }
+        let Some(connection) = socket.as_mut() else {
+            return;
+        };
+        let header = LogHeader {
+            message_type: MSG_APPEND,
+            payload_size: payload.len() as u32,
+        };
+        if connection.write_all(&header.to_le_bytes()).is_ok()
+            && connection.write_all(&payload).is_ok()
+        {
+            return;
+        }
+        *socket = None;
+    }
 }
 
 /// Service configuration
@@ -693,7 +807,7 @@ fn launch_or_focus(app_id: &str, exec_path: Option<&str>) -> Result<(), &'static
     println!("stemd: Launching app '{}' with exec: {}", app_id, exec_path);
 
     let argv: Vec<String> = exec_path.split_whitespace().map(String::from).collect();
-    let pid = spawn_command(&argv, None, None).map_err(|error| {
+    let pid = spawn_command(&argv, None, None, Some(app_id)).map_err(|error| {
         println!("stemd: Failed to launch app '{}': {}", app_id, error);
         error
     })?;
@@ -839,10 +953,11 @@ fn launch_desktop_entry(
     let app_id = entry.app_id.clone();
     let exec_path = entry.exec.clone();
 
-    let pid = spawn_command(&argv_strings, activation_token, None).map_err(|error| {
-        println!("stemd: Failed to launch app '{}': {}", app_id, error);
-        error
-    })?;
+    let pid =
+        spawn_command(&argv_strings, activation_token, None, Some(&app_id)).map_err(|error| {
+            println!("stemd: Failed to launch app '{}': {}", app_id, error);
+            error
+        })?;
 
     add_running_app(app_id.clone(), pid, exec_path);
     println!("stemd: App '{}' launched with PID: {}", app_id, pid);
@@ -866,7 +981,8 @@ fn launch_service(service: &Service) -> Result<i32, &'static str> {
     println!("stemd: Launching service: {}", service.name);
 
     let argv: Vec<String> = service.exec.split_whitespace().map(String::from).collect();
-    let pid = spawn_command(&argv, None, service.tty.as_deref()).map_err(|error| {
+    let log_unit = (service.name != "logd").then_some(service.name.as_str());
+    let pid = spawn_command(&argv, None, service.tty.as_deref(), log_unit).map_err(|error| {
         println!(
             "stemd: Failed to launch service '{}': {}",
             service.name, error
@@ -1779,6 +1895,16 @@ fn main() {
         // Default configuration with login service
         String::from(
             r#"
+[service.logd]
+exec = "/bin/logd"
+depends = []
+ready_notify = true
+ready_timeout_ms = 5000
+
+[service.stemd]
+exec = "/bin/stemd"
+depends = ["logd"]
+
 [service.login]
 exec = "/bin/login"
 depends = []
