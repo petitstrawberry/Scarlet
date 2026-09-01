@@ -5675,7 +5675,6 @@ impl Compositor {
 
                 self.add_pending_damage((sx0, sy0, w, h));
                 if let Some(gpu_compositor) = self.gpu_compositor.as_mut() {
-                    gpu_compositor.retire_resize_snapshot(window_id);
                     gpu_compositor.mark_window_damage(
                         window_id,
                         damage_x,
@@ -6073,24 +6072,7 @@ impl Compositor {
                     .get_window(window_id)
                     .map(|w| (w.x, w.y, w.width, w.height));
                 if let Some(shm) = shm {
-                    let preserved = match self.gpu_compositor.as_mut() {
-                        Some(gpu_compositor) => {
-                            match gpu_compositor.preserve_window_for_resize(window_id) {
-                                Ok(preserved) => preserved,
-                                Err(error) => {
-                                    println!(
-                                        "[Compositor] Failed to preserve window #{} during resize: {}",
-                                        window_id, error
-                                    );
-                                    false
-                                }
-                            }
-                        }
-                        None => false,
-                    };
-                    if !preserved {
-                        self.release_gpu_window_texture(window_id)?;
-                    }
+                    self.release_gpu_window_texture(window_id)?;
                     if self.window_manager.resize_window_with_shm(
                         window_id,
                         width,
