@@ -5,6 +5,7 @@ use super::input_environment::{self, Snapshot};
 use super::pointer_lock::{
     InputRoute, enqueue_routed_event, take_extension_events, take_window_events,
 };
+use super::window::{WindowType, maximized_geometry_for};
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 use scarlet_os::handle::Handle;
 use scarlet_os::handle::capability::memory_mapping::flags as mmap_flags;
@@ -595,13 +596,6 @@ impl WindowCreationEnvironment {
             windowing_mode: protocol::WindowingMode::Freeform,
         }
     }
-
-    fn usable_extent(self) -> (u32, u32) {
-        match self.workarea {
-            Some((_, _, width, height)) => (width.max(1), height.max(1)),
-            None => (self.screen_width.max(1), self.screen_height.max(1)),
-        }
-    }
 }
 
 static WINDOW_CREATION_ENVIRONMENT: Mutex<WindowCreationEnvironment> =
@@ -659,7 +653,12 @@ fn configured_initial_surface_extent(
         && limits.max_width == 0
         && limits.max_height == 0;
     if focused_normal {
-        let (managed_width, managed_height) = environment.usable_extent();
+        let (_, _, managed_width, managed_height) = maximized_geometry_for(
+            WindowType::Normal,
+            environment.workarea,
+            environment.screen_width,
+            environment.screen_height,
+        );
         width = managed_width.saturating_add(insets.horizontal()).max(1);
         height = managed_height.saturating_add(insets.vertical()).max(1);
         (width, height) = limits.clamp(width, height);
@@ -4368,7 +4367,7 @@ mod tests {
     }
 
     #[test]
-    fn focused_creation_allocates_the_first_buffer_for_managed_workarea() {
+    fn focused_creation_allocates_the_first_buffer_for_maximized_geometry() {
         let environment = WindowCreationEnvironment {
             screen_width: 1920,
             screen_height: 1080,
@@ -4384,7 +4383,43 @@ mod tests {
                 configuration(),
                 environment,
             ),
-            Some((1944, 1064))
+            Some((1924, 1044))
+        );
+    }
+
+    #[test]
+    fn focused_creation_matches_chromebook_maximized_surface_extent() {
+        let environment = WindowCreationEnvironment {
+            screen_width: 2160,
+            screen_height: 1440,
+            workarea: Some((0, 64, 2160, 1376)),
+            windowing_mode: protocol::WindowingMode::Focused,
+        };
+        let configuration = protocol::InitialWindowConfiguration {
+            size_limits: protocol::WindowSizeLimits {
+                min_width: 1,
+                min_height: 1,
+                max_width: 0,
+                max_height: 0,
+            },
+            geometry_insets: protocol::WindowGeometryInsets {
+                left: 22,
+                top: 12,
+                right: 22,
+                bottom: 32,
+            },
+        };
+
+        assert_eq!(
+            configured_initial_surface_extent(
+                1324,
+                764,
+                protocol::window_types::NORMAL,
+                true,
+                configuration,
+                environment,
+            ),
+            Some((2184, 1400))
         );
     }
 

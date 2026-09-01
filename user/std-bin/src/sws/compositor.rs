@@ -18,7 +18,7 @@ use super::pointer_lock::{
 };
 use super::remote::capture::CaptureSession;
 use super::remote::server::{RemoteEvent, RemoteServer};
-use super::window::WindowManager;
+use super::window::{WindowManager, maximized_geometry_for};
 use core::sync::atomic::{AtomicU8, Ordering};
 use core::time::Duration;
 use framebuffer::{DisplayPresentRegion, DisplaySurface};
@@ -896,26 +896,6 @@ fn interactive_move_grab_origin(
     cursor: (i32, i32),
 ) -> Option<(i32, i32)> {
     direct_touch.or_else(|| mouse_button_down.then(|| last_mouse_down.unwrap_or(cursor)))
-}
-
-fn maximized_geometry_for(
-    window_type: super::window::WindowType,
-    workarea: Option<(i32, i32, u32, u32)>,
-    screen_width: u32,
-    screen_height: u32,
-) -> (i32, i32, u32, u32) {
-    if window_type == super::window::WindowType::Normal
-        && let Some((work_x, work_y, work_width, work_height)) = workarea
-    {
-        let padding = 10i32;
-        return (
-            work_x + padding,
-            work_y + padding,
-            work_width.saturating_sub(padding as u32 * 2).max(1),
-            work_height.saturating_sub(padding as u32 * 2).max(1),
-        );
-    }
-    (0, 0, screen_width.max(1), screen_height.max(1))
 }
 
 #[derive(Debug, Clone, Copy)]

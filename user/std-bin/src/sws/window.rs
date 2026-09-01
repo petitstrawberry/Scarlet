@@ -40,6 +40,33 @@ impl Default for WindowType {
     }
 }
 
+const FOCUSED_NORMAL_WINDOW_MARGIN: u32 = 10;
+
+/// Compute the authoritative managed geometry for a maximized window.
+///
+/// Both atomic window creation and the compositor's runtime policy use this
+/// helper so the first client buffer has the same extent as the maximized
+/// surface that SWS accepts for SGFX registration.
+pub(super) fn maximized_geometry_for(
+    window_type: WindowType,
+    workarea: Option<(i32, i32, u32, u32)>,
+    screen_width: u32,
+    screen_height: u32,
+) -> (i32, i32, u32, u32) {
+    if window_type == WindowType::Normal
+        && let Some((work_x, work_y, work_width, work_height)) = workarea
+    {
+        let margin = FOCUSED_NORMAL_WINDOW_MARGIN;
+        return (
+            work_x.saturating_add(margin as i32),
+            work_y.saturating_add(margin as i32),
+            work_width.saturating_sub(margin.saturating_mul(2)).max(1),
+            work_height.saturating_sub(margin.saturating_mul(2)).max(1),
+        );
+    }
+    (0, 0, screen_width.max(1), screen_height.max(1))
+}
+
 /// Window properties
 #[derive(Debug)]
 pub struct Window {
