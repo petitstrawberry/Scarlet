@@ -757,6 +757,37 @@ pub(crate) fn upload_bgra(
         .map_err(|_| "Failed to execute SGFX texture upload")
 }
 
+pub(crate) fn copy_bgra_texture(
+    target: &mut MappedTarget,
+    source: TextureId,
+    destination: TextureId,
+    width: u32,
+    height: u32,
+) -> Result<(), &'static str> {
+    let resources = Rc::clone(&target.resources);
+    let area =
+        PixelRect::new(0, 0, width, height).map_err(|_| "Invalid SGFX texture copy extent")?;
+    let mut encoder = CommandEncoder::new(resources.as_ref());
+    encoder
+        .copy_texture_to_texture(
+            resources
+                .texture_ref(source)
+                .map_err(|_| "Invalid SGFX texture copy source")?,
+            area,
+            resources
+                .texture_ref(destination)
+                .map_err(|_| "Invalid SGFX texture copy destination")?,
+            area,
+        )
+        .map_err(|_| "Failed to record SGFX texture copy")?;
+    let commands = encoder
+        .finish()
+        .map_err(|_| "Failed to finish SGFX texture copy")?;
+    target
+        .execute(&commands)
+        .map_err(|_| "Failed to execute SGFX texture copy")
+}
+
 fn append_quad(
     bytes: &mut Vec<u8>,
     destination: PixelRect,

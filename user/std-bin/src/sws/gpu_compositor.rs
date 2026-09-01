@@ -8,7 +8,8 @@ use sgfx::ir::{Color, LoadOp, PixelRect, TextureId};
 use std::vec::Vec;
 
 use crate::sgfx_ir_support::{
-    CopiedRect, MappedTarget, Quad, QuadRenderer, SampledRect, define_bgra_texture, upload_bgra,
+    CopiedRect, MappedTarget, Quad, QuadRenderer, SampledRect, copy_bgra_texture,
+    define_bgra_texture, upload_bgra,
 };
 
 type DamageRect = (u32, u32, u32, u32);
@@ -81,6 +82,7 @@ pub(super) struct GpuCompositor {
     textures: Vec<CachedWindowTexture>,
     shared_textures: Vec<SharedWindowTexture>,
     shared_windows: Vec<SharedWindowState>,
+    resize_snapshots: Vec<WindowId>,
     rebuild_pending: bool,
     rebuild_extent: Option<(u32, u32)>,
     force_full_repaint: bool,
@@ -105,6 +107,7 @@ impl GpuCompositor {
             textures: Vec::new(),
             shared_textures: Vec::new(),
             shared_windows: Vec::new(),
+            resize_snapshots: Vec::new(),
             rebuild_pending: false,
             rebuild_extent: None,
             force_full_repaint: false,
@@ -311,6 +314,78 @@ impl GpuCompositor {
         take_shared_window_releases(state)
     }
 
+    /// Preserve the current GPU window image while a resized client backing is empty.
+    ///
+    /// The snapshot is compositor-owned, allowing SWS to release all client
+    /// presentation buffers before the client allocates its next SGFX session.
+    /// It remains visible until either a new shared frame is presented or the
+    /// client damages its resized CPU backing.
+    pub(super) fn preserve_window_for_resize(
+        &mut self,
+        window_id: WindowId,
+    ) -> Result<bool, &'static str> {
+        if self.has_resize_snapshot(window_id) {
+            return Ok(true);
+        }
+        if let Some((source, width, height)) = self.committed_shared_texture(window_id) {
+            let snapshot_index = match self.textures.iter().position(|texture| {
+                (texture.window_id == Some(window_id) || texture.window_id.is_none())
+                    && texture.width == width
+                    && texture.height == height
+            }) {
+                Some(index) => index,
+                None => {
+                    let snapshot =
+                        define_bgra_texture(self.target.resources.as_ref(), width, height)
+                            .map_err(|_| "Failed to define SGFX resize snapshot")?;
+                    self.textures.push(CachedWindowTexture {
+                        window_id: None,
+                        width,
+                        height,
+                        texture: snapshot,
+                        pending_damage: None,
+                    });
+                    self.textures.len() - 1
+                }
+            };
+            let snapshot = self.textures[snapshot_index].texture;
+            copy_bgra_texture(&mut self.target, source, snapshot, width, height)?;
+            self.textures[snapshot_index].window_id = Some(window_id);
+            self.textures[snapshot_index].pending_damage = None;
+        } else if let Some(texture) = self
+            .textures
+            .iter_mut()
+            .find(|texture| texture.window_id == Some(window_id))
+        {
+            texture.pending_damage = None;
+        } else {
+            return Ok(false);
+        }
+        track_resize_snapshot(&mut self.resize_snapshots, window_id);
+        Ok(true)
+    }
+
+    /// Retire a resize snapshot after the client commits its resized CPU backing.
+    pub(super) fn retire_resize_snapshot(&mut self, window_id: WindowId) -> bool {
+        if !untrack_resize_snapshot(&mut self.resize_snapshots, window_id) {
+            return false;
+        }
+        if let Some(texture) = self
+            .textures
+            .iter_mut()
+            .find(|texture| texture.window_id == Some(window_id))
+        {
+            texture.window_id = None;
+            texture.pending_damage = None;
+        }
+        self.schedule_retired_texture_rebuild();
+        true
+    }
+
+    fn has_resize_snapshot(&self, window_id: WindowId) -> bool {
+        self.resize_snapshots.contains(&window_id)
+    }
+
     /// Rebuild private composition resources before the next output frame.
     pub(super) fn resize_target(&mut self, width: u32, height: u32) -> Result<(), &'static str> {
         if width == 0 || height == 0 {
@@ -423,6 +498,7 @@ impl GpuCompositor {
         &mut self,
         window_id: WindowId,
     ) -> Result<(), &'static str> {
+        untrack_resize_snapshot(&mut self.resize_snapshots, window_id);
         if let Some(texture) = self
             .textures
             .iter_mut()
@@ -475,7 +551,10 @@ impl GpuCompositor {
             // and cause a fresh private resource table. Each active window is
             // therefore re-uploaded into that replacement table here.
             let has_current_backing = window.pixels().is_ok();
-            if window.visible && !self.has_committed_shared_buffer(window.id) && has_current_backing
+            if window.visible
+                && !self.has_committed_shared_buffer(window.id)
+                && !self.has_resize_snapshot(window.id)
+                && has_current_backing
             {
                 self.sync_window_texture(window)?;
             }
@@ -699,6 +778,7 @@ impl GpuCompositor {
             {
                 texture.window_id = None;
                 texture.pending_damage = None;
+                untrack_resize_snapshot(&mut self.resize_snapshots, window_id);
             }
         }
         self.schedule_retired_texture_rebuild();
@@ -804,6 +884,9 @@ impl GpuCompositor {
             let Some(window_id) = texture.window_id else {
                 return false;
             };
+            if self.has_resize_snapshot(window_id) {
+                return false;
+            }
             windows
                 .iter()
                 .find(|window| window.id == window_id)
@@ -813,6 +896,16 @@ impl GpuCompositor {
                     })
                 })
         });
+        if !self.resize_snapshots.is_empty()
+            && self.rebuild_extent.is_none()
+            && !cursor_layout_changed
+            && !texture_extent_changed
+        {
+            // A cache-pressure rebuild can wait until the resized client has
+            // submitted a replacement frame. Rebuilding here would discard
+            // the only compositor-owned copy of its preceding frame.
+            return Ok(());
+        }
         if !self.rebuild_pending && !cursor_layout_changed && !texture_extent_changed {
             return Ok(());
         }
@@ -848,6 +941,7 @@ impl GpuCompositor {
         self.quad_renderer = quad_renderer;
         self.cursor_images = cursor_images;
         self.textures.clear();
+        self.resize_snapshots.clear();
         for (shared, texture) in self.shared_textures.iter_mut().zip(shared_texture_ids) {
             shared.texture = texture;
         }
@@ -876,6 +970,25 @@ fn take_shared_window_releases(state: &mut SharedWindowState) -> Vec<SgfxCommitT
         releases.push(retired);
     }
     releases
+}
+
+fn track_resize_snapshot(window_ids: &mut Vec<WindowId>, window_id: WindowId) -> bool {
+    if window_ids.contains(&window_id) {
+        return false;
+    }
+    window_ids.push(window_id);
+    true
+}
+
+fn untrack_resize_snapshot(window_ids: &mut Vec<WindowId>, window_id: WindowId) -> bool {
+    let Some(index) = window_ids
+        .iter()
+        .position(|candidate| *candidate == window_id)
+    else {
+        return false;
+    };
+    window_ids.remove(index);
+    true
 }
 
 #[cfg(test)]
@@ -916,6 +1029,18 @@ mod shared_frame_release_tests {
         assert!(state.retire_after_present.is_none());
         assert_eq!(state.latest_generation, 7);
         assert_eq!(state.compositor_epoch, 3);
+    }
+
+    #[test]
+    fn resize_snapshot_tracking_is_unique_and_explicitly_retired() {
+        let mut window_ids = Vec::new();
+
+        assert!(track_resize_snapshot(&mut window_ids, 41));
+        assert!(!track_resize_snapshot(&mut window_ids, 41));
+        assert_eq!(window_ids, vec![41]);
+        assert!(untrack_resize_snapshot(&mut window_ids, 41));
+        assert!(!untrack_resize_snapshot(&mut window_ids, 41));
+        assert!(window_ids.is_empty());
     }
 }
 
