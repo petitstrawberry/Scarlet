@@ -32,17 +32,86 @@ use sws_protocol::window_types;
 const APP_ID: &str = "org.scarlet-os.desktop.launcher";
 const FILE_MANAGER_APP_ID: &str = DESKTOP_FILES_APP_ID;
 const APP_TITLE: &str = "Applications";
-const WINDOW_WIDTH: f32 = 820.0;
-const WINDOW_HEIGHT: f32 = 540.0;
-const GRID_COLUMNS: usize = 6;
-const GRID_ROW_HEIGHT: f32 = 112.0;
-const GRID_CELL_WIDTH: f32 = 116.0;
+const PALETTE_WIDTH: f32 = 820.0;
+const PALETTE_HEIGHT: f32 = 540.0;
+const PALETTE_GRID_COLUMNS: usize = 6;
+const GRID_ROW_HEIGHT: f32 = 104.0;
+const GRID_CELL_WIDTH: f32 = 108.0;
+const GRID_SPACING: f32 = 12.0;
 const SEARCH_ROW_HEIGHT: f32 = 72.0;
 const SEARCH_VISIBLE_ROWS: usize = 5;
 const SEARCH_LIST_HEIGHT: f32 = SEARCH_ROW_HEIGHT * SEARCH_VISIBLE_ROWS as f32;
 const SERVICE_RETRY_DELAY: Duration = Duration::from_millis(100);
 const CATALOG_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 const CATALOG_REQUEST_TIMEOUT_MS: u64 = 3_000;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum LauncherPresentation {
+    #[default]
+    Palette,
+    Home,
+}
+
+impl LauncherPresentation {
+    fn from_environment(environment: InputEnvironment) -> Self {
+        if environment.tablet_mode() == Some(true) {
+            Self::Home
+        } else {
+            Self::Palette
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct LauncherMetrics {
+    size: Size,
+    columns: usize,
+    row_height: f32,
+    cell_width: f32,
+    search_width: f32,
+    results_height: f32,
+    outer_padding: f32,
+    corner_radius: f32,
+}
+
+impl LauncherMetrics {
+    fn resolve(presentation: LauncherPresentation, viewport: Size) -> Self {
+        match presentation {
+            LauncherPresentation::Palette => Self {
+                size: Size::new(PALETTE_WIDTH, PALETTE_HEIGHT),
+                columns: PALETTE_GRID_COLUMNS,
+                row_height: GRID_ROW_HEIGHT,
+                cell_width: GRID_CELL_WIDTH,
+                search_width: 560.0,
+                results_height: SEARCH_LIST_HEIGHT,
+                outer_padding: 18.0,
+                corner_radius: 20.0,
+            },
+            LauncherPresentation::Home => {
+                let size = Size::new(viewport.width.max(320.0), viewport.height.max(320.0));
+                let outer_padding = if size.width < 600.0 { 16.0 } else { 24.0 };
+                let available_width = (size.width - outer_padding * 2.0).max(GRID_CELL_WIDTH);
+                let columns =
+                    (((available_width + GRID_SPACING) / (GRID_CELL_WIDTH + GRID_SPACING)).floor()
+                        as usize)
+                        .clamp(3, 10);
+                let results_height =
+                    (size.height - outer_padding * 2.0 - 142.0).max(SEARCH_ROW_HEIGHT);
+                let search_rows = (results_height / SEARCH_ROW_HEIGHT).floor().max(1.0);
+                Self {
+                    size,
+                    columns,
+                    row_height: GRID_ROW_HEIGHT,
+                    cell_width: GRID_CELL_WIDTH,
+                    search_width: (available_width - 24.0).clamp(240.0, 720.0),
+                    results_height: search_rows * SEARCH_ROW_HEIGHT,
+                    outer_padding,
+                    corner_radius: 0.0,
+                }
+            }
+        }
+    }
+}
 
 #[derive(Clone, PartialEq, Eq)]
 struct ApplicationEntry {
@@ -66,13 +135,25 @@ struct LauncherApp {
     window_id: State<u32>,
     focus_ready: State<bool>,
     hide_requested: State<bool>,
+    presentation: State<LauncherPresentation>,
+    applied_presentation: State<Option<LauncherPresentation>>,
+    viewport_size: State<Size>,
 }
 
 impl LauncherApp {
     fn new() -> Self {
         let app = Self::default();
         app.status.set(String::from("Loading applications..."));
+        app.presentation.set(LauncherPresentation::from_environment(
+            current_input_environment(),
+        ));
+        app.viewport_size
+            .set(Size::new(PALETTE_WIDTH, PALETTE_HEIGHT));
         app
+    }
+
+    fn metrics(&self) -> LauncherMetrics {
+        LauncherMetrics::resolve(self.presentation.get(), self.viewport_size.get())
     }
 
     fn launch_selected(&self) {
@@ -145,7 +226,7 @@ impl LauncherApp {
             .min(applications.len().saturating_sub(1));
         let last = applications.len().saturating_sub(1);
         let columns = if self.query.get().trim().is_empty() {
-            GRID_COLUMNS
+            self.metrics().columns
         } else {
             1
         };
@@ -227,6 +308,7 @@ impl LauncherApp {
         index: usize,
         application: ApplicationEntry,
         selected: Option<usize>,
+        row_height: f32,
     ) -> impl View + Clone + use<> {
         let palette = ColorPalette::default();
         let is_selected = selected == Some(index);
@@ -254,7 +336,7 @@ impl LauncherApp {
         }
         .spacing(4.0)
         .alignment(Alignment::Center)
-        .frame(f32::INFINITY, GRID_ROW_HEIGHT)
+        .frame(f32::INFINITY, row_height)
         .padding(8.0)
         .background(background)
         .clip_radius(12.0)
@@ -327,6 +409,9 @@ impl LauncherApp {
         let submit_app = self.clone();
         let empty_app = self.clone();
         let palette = ColorPalette::default();
+        let presentation = self.presentation.get();
+        let metrics = self.metrics();
+        let home = presentation == LauncherPresentation::Home;
         let searching = !self.query.get().trim().is_empty();
         let section_title = if searching {
             "Search Results"
@@ -347,18 +432,20 @@ impl LauncherApp {
                 move || cancel_app.request_hide()
             })
             .on_empty(move || empty_app.search_focused.set(false))
-            .frame(560.0, 46.0);
+            .frame(metrics.search_width, 42.0);
+        let row_height = metrics.row_height;
         let grid = GridView::new(
             self.filtered_applications.clone(),
             self.selected.clone(),
-            GRID_COLUMNS,
-            GRID_ROW_HEIGHT,
+            metrics.columns,
+            metrics.row_height,
             move |index, application, selected| {
-                grid_app.application_cell(index, application, selected)
+                grid_app.application_cell(index, application, selected, row_height)
             },
         )
-        .spacing(12.0)
-        .minimum_cell_width(GRID_CELL_WIDTH);
+        .spacing(GRID_SPACING)
+        .minimum_cell_width(metrics.cell_width)
+        .frame(f32::INFINITY, metrics.results_height);
         let list = ListView::new(
             self.filtered_applications.clone(),
             self.selected.clone(),
@@ -372,9 +459,17 @@ impl LauncherApp {
         // launcher surface has left, so the parent clips a row that the
         // ScrollView still considers visible.
         let results = if searching {
-            Either::A(list.frame(f32::INFINITY, SEARCH_LIST_HEIGHT))
+            Either::A(list.frame(f32::INFINITY, metrics.results_height))
         } else {
             Either::B(grid)
+        };
+
+        let shortcut_hint = if home { "" } else { "Super + Space" };
+        let title_size = if home { 24.0 } else { 22.0 };
+        let background = if home {
+            palette.window_background()
+        } else {
+            palette.window_background().with_opacity(0.94)
         };
 
         vstack! {
@@ -382,9 +477,9 @@ impl LauncherApp {
                 IconView::new(Icon::Apps)
                     .size(IconSize::Medium)
                     .color(palette.primary()),
-                Text::new(APP_TITLE).font_size(22.0),
+                Text::new(APP_TITLE).font_size(title_size),
                 Spacer::new(),
-                Text::new("Super + Space")
+                Text::new(shortcut_hint)
                     .font_size(11.0)
                     .color(palette.secondary()),
             }
@@ -413,10 +508,10 @@ impl LauncherApp {
             .padding(8.0),
             results,
         }
-        .padding(18.0)
-        .frame(WINDOW_WIDTH, WINDOW_HEIGHT)
-        .background(palette.window_background().with_opacity(0.94))
-        .clip_radius(20.0)
+        .padding(metrics.outer_padding)
+        .frame(metrics.size.width, metrics.size.height)
+        .background(background)
+        .clip_radius(metrics.corner_radius)
         .on_key(move |event| key_app.handle_key(event))
     }
 }
@@ -514,7 +609,47 @@ impl Application for LauncherApp {
         }
     }
 
+    fn on_input_environment_changed(&mut self, environment: InputEnvironment) {
+        let presentation = LauncherPresentation::from_environment(environment);
+        if self.presentation.get() != presentation {
+            self.presentation.set(presentation);
+            self.hovered.set(None);
+        }
+    }
+
+    fn on_window_resize(&mut self, _ctx: &WindowContext, width: u32, height: u32) {
+        let size = Size::new(width as f32, height as f32);
+        if self.viewport_size.get() != size {
+            self.viewport_size.set(size);
+        }
+    }
+
     fn on_window_sync(&mut self, _ctx: &WindowContext, window: &mut dyn PlatformWindow) {
+        let presentation = self.presentation.get();
+        if self.applied_presentation.get() != Some(presentation) {
+            match presentation {
+                LauncherPresentation::Home => {
+                    let _ = window.set_resizable(true);
+                    let _ = window.set_window_type(window.surface_id(), window_types::NORMAL);
+                    let _ = window.set_opaque(true);
+                    let _ = window.maximize();
+                }
+                LauncherPresentation::Palette => {
+                    let _ =
+                        window.set_window_type(window.surface_id(), window_types::ALWAYS_ON_TOP);
+                    let _ = window.restore();
+                    let _ = window.resize_managed(PALETTE_WIDTH as u32, PALETTE_HEIGHT as u32);
+                    let _ = window.set_resizable(false);
+                    let _ = window.set_opaque(false);
+                    if let Ok((screen_width, screen_height)) = window.get_screen_size() {
+                        let x = (screen_width.saturating_sub(PALETTE_WIDTH as u32) / 2) as i32;
+                        let y = (screen_height.saturating_sub(PALETTE_HEIGHT as u32) / 2) as i32;
+                        let _ = window.move_window(x, y);
+                    }
+                }
+            }
+            self.applied_presentation.set(Some(presentation));
+        }
         if self.hide_requested.get() {
             self.hide_requested.set(false);
             let _ = window.minimize();
@@ -526,14 +661,21 @@ impl Application for LauncherApp {
     }
 
     fn scenes(&self) -> impl Scene {
+        let presentation = self.presentation.get();
+        let metrics = self.metrics();
+        let home = presentation == LauncherPresentation::Home;
         Window::new(APP_TITLE, self.content())
             .app_id(APP_ID)
-            .size(Size::new(WINDOW_WIDTH, WINDOW_HEIGHT))
-            .resizable(false)
+            .size(metrics.size)
+            .resizable(home)
             .decorated(false)
             .opaque(false)
             .background_color(Color::TRANSPARENT)
-            .window_type(window_types::ALWAYS_ON_TOP)
+            .window_type(if home {
+                window_types::NORMAL
+            } else {
+                window_types::ALWAYS_ON_TOP
+            })
             .placement(WindowPlacement::Centered)
             .scene_key("main")
             .open_at_launch(true)
@@ -728,6 +870,45 @@ fn icon_for_desktop_name(name: &str) -> Icon {
         "utilities-terminal" => Icon::Terminal,
         "video" | "multimedia-player" => Icon::Video,
         _ => Icon::Apps,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn palette_metrics_preserve_compact_launcher_geometry() {
+        let metrics =
+            LauncherMetrics::resolve(LauncherPresentation::Palette, Size::new(1440.0, 900.0));
+        assert_eq!(metrics.size, Size::new(PALETTE_WIDTH, PALETTE_HEIGHT));
+        assert_eq!(metrics.columns, 6);
+        assert_eq!(metrics.corner_radius, 20.0);
+    }
+
+    #[test]
+    fn home_grid_tracks_each_window_width_without_global_touch_scaling() {
+        let compact = LauncherMetrics::resolve(LauncherPresentation::Home, Size::new(390.0, 800.0));
+        let regular =
+            LauncherMetrics::resolve(LauncherPresentation::Home, Size::new(768.0, 1024.0));
+        let expanded =
+            LauncherMetrics::resolve(LauncherPresentation::Home, Size::new(1366.0, 900.0));
+
+        assert_eq!(compact.columns, 3);
+        assert_eq!(regular.columns, 6);
+        assert_eq!(expanded.columns, 10);
+        assert_eq!(compact.row_height, regular.row_height);
+        assert_eq!(regular.row_height, expanded.row_height);
+        assert_eq!(compact.corner_radius, 0.0);
+    }
+
+    #[test]
+    fn tablet_posture_selects_home_independently_of_pointer_capabilities() {
+        let environment = InputEnvironment::new(1, Some(true), None, false, true, true, false);
+        assert_eq!(
+            LauncherPresentation::from_environment(environment),
+            LauncherPresentation::Home
+        );
     }
 }
 

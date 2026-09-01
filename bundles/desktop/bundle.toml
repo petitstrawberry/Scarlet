@@ -244,6 +244,24 @@ to = "/system/scarlet/bin/input-dump"
 
 [[layers]]
 kind = "cargo"
+source = "../../user/std-bin"
+bin = "displayctl"
+to = "/system/scarlet/bin/displayctl"
+
+[[layers]]
+kind = "cargo"
+source = "../../user/std-bin"
+bin = "sensor-dump"
+to = "/system/scarlet/bin/sensor-dump"
+
+[[layers]]
+kind = "cargo"
+source = "../../user/std-bin"
+bin = "tabletctl"
+to = "/system/scarlet/bin/tabletctl"
+
+[[layers]]
+kind = "cargo"
 source = "../../user/bin"
 bin = "mozc-server"
 to = "/system/scarlet/bin/mozc-server"
@@ -271,7 +289,7 @@ to = "/system/scarlet/bin/carmine"
 
 [[layers]]
 kind = "cargo"
-source = { git = "https://github.com/petitstrawberry/vellum", rev = "c2755acf5f6aa301700449c30c2f4f7b02c5dbd5" }
+source = { git = "https://github.com/petitstrawberry/vellum" }
 package = "vellum"
 bin = "vellum"
 to = "/system/scarlet/bin/vellum"

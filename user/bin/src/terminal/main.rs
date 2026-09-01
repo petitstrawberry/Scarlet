@@ -235,6 +235,34 @@ impl TerminalApp {
             state.last_cursor_rect = Some(cursor_rect);
         }
     }
+
+    fn sync_managed_window_size(&self, window: &dyn PlatformWindow) {
+        let managed = window.managed_size();
+        let width = libm::floorf(managed.width.max(1.0)) as u32;
+        let height = libm::floorf(managed.height.max(1.0)) as u32;
+        let next_size = (width.max(1), height.max(1));
+
+        let mut current_size = self.window_size.lock();
+        if *current_size == next_size {
+            return;
+        }
+        *current_size = next_size;
+        drop(current_size);
+
+        if let Some(state) = self.text_input.lock().as_mut() {
+            state.last_cursor_rect = None;
+        }
+        resize_terminal(
+            &self.screen,
+            &self.grid,
+            &self.cursor,
+            &self.master_writer,
+            &self.preedit,
+            next_size.0,
+            next_size.1,
+            self.metrics.get(),
+        );
+    }
 }
 
 struct OwnedChildTask {
@@ -449,21 +477,10 @@ impl Application for TerminalApp {
         }
     }
 
-    fn on_window_resize(&mut self, _ctx: &WindowContext, width: u32, height: u32) {
-        *self.window_size.lock() = (width, height);
+    fn on_window_resize(&mut self, _ctx: &WindowContext, _width: u32, _height: u32) {
         if let Some(state) = self.text_input.lock().as_mut() {
             state.last_cursor_rect = None;
         }
-        resize_terminal(
-            &self.screen,
-            &self.grid,
-            &self.cursor,
-            &self.master_writer,
-            &self.preedit,
-            width,
-            height,
-            self.metrics.get(),
-        );
     }
 
     fn debug_logging(&self) -> bool {
@@ -471,6 +488,7 @@ impl Application for TerminalApp {
     }
 
     fn on_window_sync(&mut self, _ctx: &WindowContext, window: &mut dyn PlatformWindow) {
+        self.sync_managed_window_size(window);
         let Some(window) = window.as_any_mut().downcast_mut::<SWSPlatformWindow>() else {
             return;
         };
@@ -940,9 +958,16 @@ fn grid_dimensions(width: u32, height: u32, metrics: TerminalMetrics) -> (usize,
     let content_width = (width as f32 - decoration_size.width).max(metrics.cell_width);
     let content_height = (height as f32 - decoration_size.height).max(metrics.cell_height);
     (
-        (content_width / metrics.cell_width).max(1.0) as usize,
-        (content_height / metrics.cell_height).max(1.0) as usize,
+        fully_fitting_cells(content_width, metrics.cell_width),
+        fully_fitting_cells(content_height, metrics.cell_height),
     )
+}
+
+fn fully_fitting_cells(available: f32, cell_extent: f32) -> usize {
+    if !available.is_finite() || !cell_extent.is_finite() || cell_extent <= 0.0 {
+        return 1;
+    }
+    libm::floorf((available.max(0.0) / cell_extent).max(1.0)) as usize
 }
 
 fn write_bytes(writer: &Arc<Mutex<Option<File>>>, bytes: &[u8]) {
@@ -951,6 +976,19 @@ fn write_bytes(writer: &Arc<Mutex<Option<File>>>, bytes: &[u8]) {
         let _ = file.write_all(bytes);
     } else {
         println!("[terminal] pty writer is not ready");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fully_fitting_cells;
+
+    #[test]
+    fn row_count_never_includes_a_partially_visible_cell() {
+        assert_eq!(fully_fitting_cells(35.99, 18.0), 1);
+        assert_eq!(fully_fitting_cells(36.0, 18.0), 2);
+        assert_eq!(fully_fitting_cells(53.99, 18.0), 2);
+        assert_eq!(fully_fitting_cells(54.0, 18.0), 3);
     }
 }
 

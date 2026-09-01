@@ -261,3 +261,15 @@ path = "src/markdown_demo.rs"
 [[bin]]
 name = "sasctl"
 path = "src/sasctl.rs"
+
+[[bin]]
+name = "displayctl"
+path = "src/displayctl.rs"
+
+[[bin]]
+name = "sensor-dump"
+path = "src/sensor_dump.rs"
+
+[[bin]]
+name = "tabletctl"
+path = "src/tabletctl.rs"
