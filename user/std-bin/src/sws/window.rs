@@ -86,6 +86,13 @@ pub struct Window {
     pub y: i32,
     pub width: u32,
     pub height: u32,
+    /// Width of the currently attached CPU/shared-image backing.
+    ///
+    /// This intentionally differs from `width` while a compositor configure
+    /// is waiting for the client to attach its replacement buffer.
+    backing_width: u32,
+    /// Height of the currently attached CPU/shared-image backing.
+    backing_height: u32,
     /// Insets between complete surface bounds and managed visible geometry.
     pub window_geometry_insets: WindowGeometryInsets,
     /// Recenter the managed rectangle when the client advertises it initially.
@@ -307,6 +314,27 @@ impl<'a> WindowPixels<'a> {
 
 #[allow(dead_code)]
 impl Window {
+    /// Return the extent of the buffer most recently attached by the client.
+    ///
+    /// # Returns
+    ///
+    /// Physical backing width and height. These remain stable across managed
+    /// geometry changes until the corresponding buffer resize is received.
+    pub(super) const fn backing_extent(&self) -> (u32, u32) {
+        (self.backing_width, self.backing_height)
+    }
+
+    /// Record a newly attached client-buffer extent.
+    ///
+    /// # Arguments
+    ///
+    /// * `width` - New physical backing width.
+    /// * `height` - New physical backing height.
+    pub(super) fn set_backing_extent(&mut self, width: u32, height: u32) {
+        self.backing_width = width.max(1);
+        self.backing_height = height.max(1);
+    }
+
     /// Return whether this window currently has a CPU-readable pixel backing.
     pub fn has_pixel_buffer(&self) -> bool {
         self.shm_mapped_addr.is_some() || self.buffer.is_some()
@@ -433,6 +461,8 @@ impl Window {
             y,
             width,
             height,
+            backing_width: width,
+            backing_height: height,
             window_geometry_insets: WindowGeometryInsets::default(),
             center_on_first_geometry: false,
             size_limits: WindowSizeLimits::default(),
@@ -482,6 +512,8 @@ impl Window {
             y,
             width,
             height,
+            backing_width: width,
+            backing_height: height,
             window_geometry_insets: WindowGeometryInsets::default(),
             center_on_first_geometry: false,
             size_limits: WindowSizeLimits::default(),
@@ -557,6 +589,8 @@ impl Window {
             y,
             width,
             height,
+            backing_width: width,
+            backing_height: height,
             window_geometry_insets: WindowGeometryInsets::default(),
             center_on_first_geometry: false,
             size_limits: WindowSizeLimits::default(),
@@ -941,6 +975,8 @@ impl WindowManager {
             y,
             width,
             height,
+            backing_width: width,
+            backing_height: height,
             window_geometry_insets: WindowGeometryInsets::default(),
             center_on_first_geometry: false,
             size_limits: WindowSizeLimits::default(),
@@ -1010,6 +1046,8 @@ impl WindowManager {
             y,
             width,
             height,
+            backing_width: width,
+            backing_height: height,
             window_geometry_insets: WindowGeometryInsets::default(),
             center_on_first_geometry: false,
             size_limits: WindowSizeLimits::default(),
@@ -1073,6 +1111,7 @@ impl WindowManager {
         }
         window.width = width;
         window.height = height;
+        window.set_backing_extent(width, height);
         window.reconcile_window_geometry_after_resize();
         window.buffer = None;
         window.shm = Some(shm);
@@ -1536,6 +1575,7 @@ impl WindowManager {
             // for the provided width/height by the IPC thread.
             w.width = width.max(1);
             w.height = height.max(1);
+            w.set_backing_extent(width, height);
             w.reconcile_window_geometry_after_resize();
             w.buffer = None;
             w.shm = Some(shm);
@@ -2412,6 +2452,22 @@ mod tests {
             (restored.x, restored.y, restored.width, restored.height),
             (25, 30, 640, 480)
         );
+    }
+
+    #[test]
+    fn restored_geometry_keeps_the_last_attached_backing_extent() {
+        let mut manager = WindowManager::new();
+        let id = manager.create_window(25, 30, 1844, 1284);
+
+        assert!(manager.maximize_window(id, 2184, 1400));
+        let maximized = manager.get_window_mut(id).unwrap();
+        assert_eq!((maximized.width, maximized.height), (2184, 1400));
+        maximized.set_backing_extent(2184, 1400);
+
+        assert!(manager.restore_window(id));
+        let restored = manager.get_window(id).unwrap();
+        assert_eq!((restored.width, restored.height), (1844, 1284));
+        assert_eq!(restored.backing_extent(), (2184, 1400));
     }
 
     #[test]

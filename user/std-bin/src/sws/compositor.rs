@@ -5713,7 +5713,7 @@ impl Compositor {
                 let extent_matches = self
                     .window_manager
                     .get_window(window_id)
-                    .is_some_and(|window| window.width == width && window.height == height);
+                    .is_some_and(|window| window.backing_extent() == (width, height));
                 let result = if !extent_matches {
                     Err(SgfxBufferError::InvalidBuffer)
                 } else {
@@ -6685,6 +6685,7 @@ impl Compositor {
                             w.shm = None;
                             w.width = width;
                             w.height = height;
+                            w.set_backing_extent(width, height);
                             w.reconcile_window_geometry_after_resize();
                             w.shm_mapped_addr = Some(addr);
                             w.shm_size = shm_size;
