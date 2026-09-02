@@ -93,6 +93,19 @@ fn intersect_compositor_rects(
     ))
 }
 
+fn presentation_instance_contains_point(instance: &PresentationInstance, px: i32, py: i32) -> bool {
+    if let Some(clip) = instance.clip
+        && !rounded_rect_contains_point(clip, instance.clip_radius, px, py)
+    {
+        return false;
+    }
+    let transform = instance.transform;
+    px >= transform.x
+        && px < transform.x.saturating_add(transform.width as i32)
+        && py >= transform.y
+        && py < transform.y.saturating_add(transform.height as i32)
+}
+
 fn layout_overview_cards(
     workarea: (i32, i32, u32, u32),
     tablet_mode: bool,
@@ -119,51 +132,31 @@ fn layout_overview_cards(
             sws_protocol::workspace::ShellPresentation::Home
         );
     let target_width = scale_length(if compact { 170 } else { 320 });
-    let minimum_columns = if region_width >= target_width.saturating_mul(2) {
-        2
-    } else {
-        1
-    };
-    let maximum_columns = if compact { 10 } else { 5 };
-    let column_capacity =
-        (region_width / target_width).clamp(minimum_columns, maximum_columns) as usize;
-    let visible_count = workspace_ids.len().min(column_capacity).max(1);
     let active_index = workspace_ids
         .iter()
         .position(|workspace_id| *workspace_id == active_workspace)
         .unwrap_or(0);
-    let maximum_first_visible = workspace_ids.len().saturating_sub(visible_count);
-    let mut first_visible = active_index
-        .saturating_sub(visible_count / 2)
-        .min(maximum_first_visible);
-    // The trailing zero is the visual-only workspace creation card. When the
-    // final real workspace is selected, shift the viewport through that card
-    // as well. Without this edge rule a two-column layout gets stuck showing
-    // the two real cards and offers no way to reach `+`.
-    if workspace_ids.last() == Some(&0) && active_index == workspace_ids.len().saturating_sub(2) {
-        first_visible = maximum_first_visible;
-    }
-    let visible_ids = &workspace_ids[first_visible..first_visible + visible_count];
 
-    let outer_margin = if compact {
-        (region_width / 64).clamp(scale_length(12), scale_length(24))
-    } else {
-        (region_width / 40).clamp(scale_length(20), scale_length(48))
-    };
     let gap = if compact {
         (region_width / 128).clamp(scale_length(8), scale_length(14))
     } else {
         (region_width / 80).clamp(scale_length(12), scale_length(28))
     };
-    let gap_width = gap.saturating_mul(visible_count.saturating_sub(1) as u32);
-    let available_width = region_width
-        .saturating_sub(outer_margin.saturating_mul(2))
-        .saturating_sub(gap_width)
-        .max(1);
     let maximum_card_width = scale_length(if compact { 176 } else { 620 });
-    let mut card_width = (available_width / visible_count as u32)
-        .max(1)
+    let preferred_pitch = target_width.saturating_add(gap).max(1);
+    // The rail is a full-width horizontal ScrollView. Choose a pitch whose
+    // snap points put the next card centre close to either viewport edge. A
+    // clipped neighbour therefore remains legible without manufacturing
+    // special one-off rectangles at the sides.
+    let maximum_edge_steps = if compact { 5 } else { 3 };
+    let edge_steps = ((u64::from(region_width).saturating_add(u64::from(preferred_pitch)))
+        / u64::from(preferred_pitch.saturating_mul(2).max(1)))
+    .clamp(1, maximum_edge_steps) as u32;
+    let pitch = (region_width / edge_steps.saturating_mul(2).max(1)).max(1);
+    let effective_gap = gap.min(pitch.saturating_sub(1));
+    let mut card_width = target_width
         .min(maximum_card_width)
+        .min(pitch.saturating_sub(effective_gap).max(1))
         .min(region_width.max(1));
     let mut card_height = ((u64::from(card_width) * u64::from(work_height.max(1)))
         / u64::from(work_width.max(1))) as u32;
@@ -178,32 +171,61 @@ fn layout_overview_cards(
     card_width = card_width.max(1);
     card_height = card_height.max(1);
 
-    let row_width = card_width
-        .saturating_mul(visible_count as u32)
-        .saturating_add(gap_width);
-    let row_x = region_x.saturating_add(
-        region_width
-            .saturating_sub(row_width)
-            .checked_div(2)
-            .unwrap_or(0) as i32,
-    );
     let row_y = region_y.saturating_add(
         region_height
             .saturating_sub(card_height)
             .checked_div(2)
             .unwrap_or(0) as i32,
     );
+    let item_count = u64::try_from(workspace_ids.len()).unwrap_or(u64::MAX);
+    let viewport_width = u64::from(region_width);
+    // This is the compositor equivalent of a full-width horizontal
+    // ScrollView containing one fixed-pitch HStack. The extra pitch split
+    // across both ends is scroll content padding; `max` is the HStack's
+    // min-width alignment, not a second layout mode.
+    let intrinsic_content_width = u64::from(pitch).saturating_mul(item_count.saturating_add(1));
+    let scroll_content_width = intrinsic_content_width.max(viewport_width);
+    let content_alignment = scroll_content_width.saturating_sub(intrinsic_content_width) / 2;
+    let maximum_scroll = scroll_content_width.saturating_sub(viewport_width);
+    let active_center = content_alignment.saturating_add(
+        u64::from(pitch).saturating_mul(
+            u64::try_from(active_index)
+                .unwrap_or(u64::MAX)
+                .saturating_add(1),
+        ),
+    );
+    let scroll_offset = active_center
+        .saturating_sub(viewport_width / 2)
+        .min(maximum_scroll);
+    let viewport_left = i64::from(region_x);
+    let viewport_right = viewport_left.saturating_add(i64::from(region_width));
+    let half_card_width = i64::from(card_width / 2);
 
-    visible_ids
+    workspace_ids
         .iter()
         .enumerate()
-        .map(|(index, workspace_id)| {
-            let x = row_x.saturating_add(
-                index
-                    .saturating_mul(card_width.saturating_add(gap) as usize)
-                    .min(i32::MAX as usize) as i32,
-            );
-            (*workspace_id, (x, row_y, card_width, card_height))
+        .filter_map(|(index, workspace_id)| {
+            let center = viewport_left
+                .saturating_add(i64::try_from(content_alignment).unwrap_or(i64::MAX))
+                .saturating_add(
+                    i64::from(pitch)
+                        .saturating_mul(i64::try_from(index).unwrap_or(i64::MAX).saturating_add(1)),
+                )
+                .saturating_sub(i64::try_from(scroll_offset).unwrap_or(i64::MAX));
+            let x = center.saturating_sub(half_card_width);
+            let right = x.saturating_add(i64::from(card_width));
+            if right <= viewport_left || x >= viewport_right {
+                return None;
+            }
+            Some((
+                *workspace_id,
+                (
+                    x.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32,
+                    row_y,
+                    card_width,
+                    card_height,
+                ),
+            ))
         })
         .collect()
 }
@@ -612,7 +634,7 @@ mod touch_modality_tests {
     }
 
     #[test]
-    fn overview_lays_out_multiple_complete_cards_without_edge_slivers() {
+    fn overview_lays_out_complete_cards_when_every_workspace_fits() {
         let ids = [1, 2, 3, 4, 5, 6, 7];
         let cards = layout_overview_cards(
             (0, 32, 1920, 1048),
@@ -664,6 +686,36 @@ mod touch_modality_tests {
     }
 
     #[test]
+    fn overview_keeps_one_neighbor_peeking_at_each_viewport_edge() {
+        let ids = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
+        let cards = layout_overview_cards(
+            (0, 32, 1366, 736),
+            false,
+            1000,
+            sws_protocol::workspace::ShellPresentation::Overview,
+            &ids,
+            7,
+        );
+
+        assert_eq!(
+            cards.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+            vec![3, 4, 5, 6, 7, 8, 9, 10, 11]
+        );
+        let left = cards.first().expect("left neighbor").1;
+        let right = cards.last().expect("right neighbor").1;
+        assert!(left.0 < 0);
+        assert!(left.0.saturating_add(left.2 as i32) > 0);
+        assert!(right.0 < 1366);
+        assert!(right.0.saturating_add(right.2 as i32) > 1366);
+        let left_visible = left.0.saturating_add(left.2 as i32).max(0) as u32;
+        let right_visible = 1366i32.saturating_sub(right.0).max(0) as u32;
+        assert!(left_visible.saturating_mul(3) >= left.2);
+        assert!(left_visible.saturating_mul(3) <= left.2.saturating_mul(2));
+        assert!(right_visible.saturating_mul(3) >= right.2);
+        assert!(right_visible.saturating_mul(3) <= right.2.saturating_mul(2));
+    }
+
+    #[test]
     fn overview_scrolls_the_creation_card_into_the_final_viewport() {
         let ids = [1, 2, 3, 4, 0];
         let first = layout_overview_cards(
@@ -685,12 +737,38 @@ mod touch_modality_tests {
 
         assert_eq!(
             first.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
-            vec![1, 2, 3]
+            vec![1, 2, 3, 4]
         );
         assert_eq!(
             last.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
-            vec![3, 4, 0]
+            vec![2, 3, 4, 0]
         );
+    }
+
+    #[test]
+    fn overview_workspace_thumbnail_instances_are_hit_testable() {
+        let instance = PresentationInstance {
+            transform: PresentationTransform {
+                x: 120,
+                y: 60,
+                width: 160,
+                height: 90,
+                opacity: 1.0,
+            },
+            clip: Some((100, 40, 200, 130)),
+            clip_radius: 12,
+        };
+
+        assert!(presentation_instance_contains_point(&instance, 180, 100));
+        assert!(!presentation_instance_contains_point(&instance, 119, 100));
+        assert!(!presentation_instance_contains_point(&instance, 280, 100));
+
+        let clipped = PresentationInstance {
+            clip: Some((150, 80, 80, 40)),
+            ..instance
+        };
+        assert!(!presentation_instance_contains_point(&clipped, 140, 90));
+        assert!(presentation_instance_contains_point(&clipped, 180, 100));
     }
 
     #[test]
@@ -2083,6 +2161,11 @@ pub struct Compositor {
     tablet_mode: bool,
     windowing_mode: sws_protocol::WindowingMode,
     workspace_manager: super::workspace::WorkspaceManager,
+    /// Normal surfaces awaiting a definitive top-level/transient relationship.
+    ///
+    /// Parent assignment is a separate IPC request, so tablet launch policy is
+    /// committed on the first submitted frame instead of at window creation.
+    pending_workspace_scenes: Vec<u32>,
     /// Apply geometry-changing startup policy only after the initial client
     /// frame has been presented with its original buffer identity.
     window_policy_after_present: bool,
@@ -2140,6 +2223,7 @@ struct OverviewPointerNavigation {
 struct OverviewWindowDrag {
     window_id: u32,
     source_workspace_id: u32,
+    from_workspace_thumbnail: bool,
     start_x: i32,
     start_y: i32,
     current_x: i32,
@@ -2496,6 +2580,7 @@ impl Compositor {
             workspace_manager: super::workspace::WorkspaceManager::with_auto_remove_empty(
                 auto_remove_empty_workspaces,
             ),
+            pending_workspace_scenes: Vec::new(),
             window_policy_after_present: false,
             lid_closed: input_environment.lid_closed(),
             ime_popup_windows: Vec::new(),
@@ -5067,8 +5152,13 @@ impl Compositor {
             .find(|window| {
                 window.window_type == WindowType::Normal
                     && window.is_presented()
-                    && window.presentation_transform.is_some()
-                    && window.contains_presentation_point(x, y)
+                    && (window.presentation_transform.is_some()
+                        && window.contains_presentation_point(x, y)
+                        || window
+                            .presentation_instances
+                            .iter()
+                            .rev()
+                            .any(|instance| presentation_instance_contains_point(instance, x, y)))
             })
             .map(|window| self.top_level_window_id(window.id))
             .filter(|window_id| {
@@ -5097,6 +5187,7 @@ impl Compositor {
         self.overview_window_drag = Some(OverviewWindowDrag {
             window_id,
             source_workspace_id,
+            from_workspace_thumbnail: self.point_in_overview_workspace_region(x, y),
             start_x: x,
             start_y: y,
             current_x: x,
@@ -6076,6 +6167,22 @@ impl Compositor {
         // }
         for event in ipc_events {
             self.handle_ipc_event(event)?;
+        }
+        // Parent assignment is a separate request. Resolve first-frame scene
+        // candidates only after the complete IPC batch so a trailing parent
+        // request can classify the surface as a transient before publication.
+        let ready_workspace_scenes = self
+            .pending_workspace_scenes
+            .iter()
+            .copied()
+            .filter(|window_id| {
+                self.window_manager
+                    .get_window(*window_id)
+                    .is_some_and(|window| window.has_presented_frame)
+            })
+            .collect::<Vec<_>>();
+        for window_id in ready_workspace_scenes {
+            self.finalize_pending_workspace_scene(window_id);
         }
 
         // Remote capture and virtual input use a separate privileged protocol,
@@ -7197,6 +7304,8 @@ impl Compositor {
     }
 
     fn clear_interaction_state_for_removed_windows(&mut self, window_ids: &[u32]) {
+        self.pending_workspace_scenes
+            .retain(|window_id| !Self::window_id_in(window_ids, *window_id));
         if self
             .pointer_lock
             .is_some_and(|state| Self::window_id_in(window_ids, state.window_id))
@@ -7486,10 +7595,69 @@ impl Compositor {
         true
     }
 
-    /// Handle IPC events from clients
-    ///
-    /// Returns `Ok(true)` if an immediate redraw is required (e.g., window created/destroyed).
-    /// Returns `Ok(false)` if only damage was accumulated (redraw via `pending_damage`).
+    /// Return whether a normal surface is currently a top-level app scene.
+    fn is_workspace_scene_root(&self, window_id: u32) -> bool {
+        self.window_manager
+            .get_window(window_id)
+            .is_some_and(|window| {
+                window.window_type == WindowType::Normal
+                    && window.parent.is_none()
+                    && !is_shell_app_id(window.app_id.as_deref().unwrap_or(b""))
+            })
+    }
+
+    fn register_new_workspace_scene(&mut self, window_id: u32) -> bool {
+        if !self.is_workspace_scene_root(window_id) {
+            return false;
+        }
+        if self.tablet_mode {
+            if !self.pending_workspace_scenes.contains(&window_id) {
+                self.pending_workspace_scenes.push(window_id);
+            }
+            return false;
+        }
+        self.workspace_manager.add_scene_root(
+            window_id,
+            false,
+            self.windowing_mode == sws_protocol::WindowingMode::Focused,
+        );
+        true
+    }
+
+    fn discard_pending_workspace_scene(&mut self, window_id: u32) -> bool {
+        let previous_len = self.pending_workspace_scenes.len();
+        self.pending_workspace_scenes
+            .retain(|candidate| *candidate != window_id);
+        previous_len != self.pending_workspace_scenes.len()
+    }
+
+    fn finalize_pending_workspace_scene(&mut self, window_id: u32) -> bool {
+        if !self.discard_pending_workspace_scene(window_id)
+            || !self.is_workspace_scene_root(window_id)
+            || self
+                .workspace_manager
+                .workspace_for_window(window_id)
+                .is_some()
+        {
+            return false;
+        }
+
+        self.workspace_manager.add_scene_root(
+            window_id,
+            self.tablet_mode,
+            self.windowing_mode == sws_protocol::WindowingMode::Focused,
+        );
+        if let Some(focused_window_id) = self.window_manager.get_focused_window_id()
+            && self.top_level_window_id(focused_window_id) == window_id
+        {
+            self.last_workspace_focus = Some(focused_window_id);
+        }
+        self.apply_workspace_presentation_policy();
+        self.publish_workspace_state();
+        self.full_redraw_needed = true;
+        true
+    }
+
     fn client_owns_window(&self, client_id: usize, window_id: u32) -> bool {
         self.window_manager
             .get_window(window_id)
@@ -8168,15 +8336,7 @@ impl Compositor {
             y,
             width: width.max(1),
             height: height.max(1),
-            opacity: if dragging.is_some() {
-                0.94
-            } else if !self.overview_add_workspace_selected
-                && workspace_id == self.workspace_manager.active_workspace()
-            {
-                1.0
-            } else {
-                0.82
-            },
+            opacity: if dragging.is_some() { 0.94 } else { 1.0 },
         })
     }
 
@@ -8289,13 +8449,15 @@ impl Compositor {
     }
 
     fn uses_laptop_overview_spread(&self, window_id: u32) -> bool {
+        let root_id = self.top_level_window_id(window_id);
         !self.tablet_mode
             && self.workspace_manager.presentation()
                 == sws_protocol::workspace::ShellPresentation::Overview
-            && self
-                .workspace_manager
-                .workspace_for_window(self.top_level_window_id(window_id))
+            && self.workspace_manager.workspace_for_window(root_id)
                 == Some(self.workspace_manager.active_workspace())
+            && !self
+                .overview_window_drag
+                .is_some_and(|drag| drag.window_id == root_id && drag.from_workspace_thumbnail)
     }
 
     fn overview_transform_for_window(&self, window_id: u32) -> Option<PresentationTransform> {
@@ -8855,18 +9017,7 @@ impl Compositor {
                     window.active_on_focus = active_on_focus;
                 }
 
-                if wtype == WindowType::Normal
-                    && self
-                        .window_manager
-                        .get_window(window_id)
-                        .is_some_and(|window| {
-                            !is_shell_app_id(window.app_id.as_deref().unwrap_or(b""))
-                        })
-                {
-                    self.workspace_manager.add_window(
-                        window_id,
-                        self.windowing_mode == sws_protocol::WindowingMode::Focused,
-                    );
+                if self.register_new_workspace_scene(window_id) {
                     self.publish_workspace_state();
                 }
 
@@ -9465,28 +9616,28 @@ impl Compositor {
 
                 if self.window_manager.set_window_parent(window_id, parent) {
                     let workspace_changed = if parent.is_some() {
+                        self.discard_pending_workspace_scene(window_id);
                         self.workspace_manager.remove_window(window_id)
-                    } else if self
-                        .window_manager
-                        .get_window(window_id)
-                        .is_some_and(|window| {
-                            window.window_type == WindowType::Normal
-                                && !is_shell_app_id(window.app_id.as_deref().unwrap_or(b""))
-                        })
+                    } else if self.is_workspace_scene_root(window_id)
+                        && self
+                            .workspace_manager
+                            .workspace_for_window(window_id)
+                            .is_none()
                     {
-                        self.workspace_manager.add_window(
+                        self.discard_pending_workspace_scene(window_id);
+                        self.workspace_manager.add_scene_root(
                             window_id,
+                            self.tablet_mode,
                             self.windowing_mode == sws_protocol::WindowingMode::Focused,
                         );
                         true
                     } else {
+                        self.discard_pending_workspace_scene(window_id);
                         false
                     };
+                    self.apply_workspace_presentation_policy();
                     if workspace_changed {
                         self.publish_workspace_state();
-                    }
-                    if self.windowing_mode == sws_protocol::WindowingMode::Focused {
-                        self.apply_focused_policy_to_window(window_id);
                     }
                     // Keep transient children above their parent by raising the group.
                     self.window_manager.raise_to_top_with_type(window_id);

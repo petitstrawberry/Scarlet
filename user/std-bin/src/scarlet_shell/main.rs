@@ -44,8 +44,8 @@ use scarlet_ui::views::menu::MenuRenderObject;
 use scarlet_ui::views::{MenuAction, MenuBar, MenuItem, MenuItemContent};
 use scarlet_ui::{GridView, IconView, StateId, hstack, vstack};
 use scarlet_ui::{
-    Icon, IconSize, KeyCode, ListView, MenuBarModel, MenuItemModel, PlatformWindow, dismiss_window,
-    open_window,
+    Icon, IconSize, IconWeight, KeyCode, ListView, MenuBarModel, MenuItemModel, PlatformWindow,
+    dismiss_window, open_window,
 };
 use scarlet_ui_macros::View;
 use serde::Deserialize;
@@ -75,8 +75,12 @@ const HOME_SCENE_KEY: &str = "home";
 const HOME_CATALOG_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 const HOME_CATALOG_TIMEOUT_MS: u64 = 3_000;
 const HOME_SEARCH_RESULT_ROW_HEIGHT: f32 = 64.0;
-const HOME_GRID_CELL_WIDTH: f32 = 112.0;
-const HOME_GRID_COLUMN_SPACING: f32 = 12.0;
+const HOME_GRID_CELL_WIDTH: f32 = 116.0;
+const HOME_GRID_COLUMN_SPACING: f32 = 14.0;
+const HOME_GRID_ICON_SIZE: u16 = 45;
+const HOME_GRID_ICON_PADDING: f32 = 12.5;
+const HOME_GRID_LABEL_SIZE: f32 = 16.0;
+const HOME_DRAWER_RESULTS_SPACING: f32 = 20.0;
 const HOME_BACKDROP_TINT: Color = Color::rgba_f32(0.30, 0.34, 0.41, 0.78);
 const STATUS_NAVIGATION_HOVER: Color = Color::rgba_f32(0.0, 0.0, 0.0, 0.24);
 const STATUS_NAVIGATION_ACTIVE: Color = Color::rgba_f32(0.0, 0.0, 0.0, 0.36);
@@ -2124,10 +2128,12 @@ impl ShellPopupRenderer {
 
 fn home_icon(name: &str) -> Icon {
     match name {
+        "apps" => Icon::Package,
         "applications-development" | "code" => Icon::Code,
         "file-description" => Icon::FileDescription,
         "file-music" => Icon::FileMusic,
         "folder" => Icon::Folder,
+        "image" => Icon::Photo,
         "preferences-system" => Icon::Settings,
         "preferences-system-time" => Icon::Clock,
         "text-editor" => Icon::FileText,
@@ -2135,6 +2141,24 @@ fn home_icon(name: &str) -> Icon {
         "utilities-terminal" => Icon::Terminal,
         "video" | "multimedia-player" => Icon::Video,
         _ => Icon::Apps,
+    }
+}
+
+fn home_icon_tile_color(name: &str) -> Color {
+    match name {
+        "apps" => Color::rgb(186, 95, 43),
+        "applications-development" | "code" => Color::rgb(47, 94, 174),
+        "file-description" => Color::rgb(28, 119, 126),
+        "file-music" => Color::rgb(152, 62, 161),
+        "folder" => Color::rgb(46, 112, 190),
+        "image" => Color::rgb(180, 62, 121),
+        "preferences-system" => Color::rgb(84, 96, 119),
+        "preferences-system-time" => Color::rgb(195, 76, 54),
+        "text-editor" => Color::rgb(31, 132, 103),
+        "utilities-system-monitor" => Color::rgb(25, 128, 139),
+        "utilities-terminal" => Color::rgb(68, 78, 96),
+        "video" | "multimedia-player" => Color::rgb(103, 70, 177),
+        _ => Color::rgb(184, 55, 79),
     }
 }
 
@@ -2506,26 +2530,37 @@ impl ShellApp {
         } else {
             palette.window_background().with_opacity(0.0)
         };
+        let icon_tile_color = home_icon_tile_color(&application.icon);
+        let icon_tile_size = HOME_GRID_ICON_SIZE as f32 + HOME_GRID_ICON_PADDING * 2.0;
+        let label_height =
+            graphics::measure_text_sized(&application.name, HOME_GRID_LABEL_SIZE).1 as f32;
+        let label_gap = 4.0;
+        let outer_padding =
+            ((row_height - icon_tile_size - label_gap - label_height) * 0.5).max(0.0);
         let hover_state = self.home_hovered.clone();
         let exit_state = hover_state.clone();
         let launch_app = self.clone();
         let launch_application = application.clone();
         vstack! {
+            Spacer::new().frame(1.0, outer_padding),
             IconView::new(home_icon(&application.icon))
-                .size(IconSize::Pixels(40))
-                .color(palette.primary()),
+                .size(IconSize::Pixels(HOME_GRID_ICON_SIZE))
+                .weight(IconWeight::Bold)
+                .color(Color::WHITE)
+                .padding(HOME_GRID_ICON_PADDING)
+                .background(icon_tile_color)
+                .clip_radius(17.5),
+            Spacer::new().frame(1.0, label_gap),
             Text::new(application.name)
-                .font_size(13.0)
-                .color(palette.text())
-                .alignment(Alignment::Center)
-                .frame(f32::INFINITY, 30.0),
+                .font_size(HOME_GRID_LABEL_SIZE)
+                .color(palette.text()),
+            Spacer::new().frame(1.0, outer_padding),
         }
-        .spacing(4.0)
+        .spacing(0.0)
         .alignment(Alignment::Center)
-        .padding(6.0)
         .frame(f32::INFINITY, row_height)
         .background(background)
-        .clip_radius(12.0)
+        .clip_radius(13.0)
         .on_hover(move || hover_state.set(Some(index)))
         .on_exit(move || {
             if exit_state.get() == Some(index) {
@@ -2552,6 +2587,7 @@ impl ShellApp {
         } else {
             palette.window_background().with_opacity(0.0)
         };
+        let icon_tile_color = home_icon_tile_color(&application.icon);
         let hover_state = self.home_hovered.clone();
         let exit_state = hover_state.clone();
         let launch_app = self.clone();
@@ -2559,8 +2595,12 @@ impl ShellApp {
 
         hstack! {
             IconView::new(home_icon(&application.icon))
-                .size(IconSize::Medium)
-                .color(palette.primary()),
+                .size(IconSize::Pixels(26))
+                .weight(IconWeight::Bold)
+                .color(Color::WHITE)
+                .padding(8.0)
+                .background(icon_tile_color)
+                .clip_radius(11.0),
             hstack! {
                 Text::new(application.name)
                     .font_size(15.0)
@@ -2605,7 +2645,7 @@ impl ShellApp {
         let shell_visible = shell_state_ready && presentation != sws::ShellPresentation::Workspace;
         let drawer_padding = if width < 720.0 { 16.0 } else { 24.0 };
         let columns = home_grid_columns(width);
-        let row_height = if height < 760.0 { 76.0 } else { 84.0 };
+        let row_height = if height < 760.0 { 110.0 } else { 116.0 };
         let bar_height = shell_layout.status_bar_height() as f32;
         let work_height = (height - bar_height).max(1.0);
         // This surface is prepared while hidden. Keep its geometry identical
@@ -2643,7 +2683,8 @@ impl ShellApp {
         let drawer_body_bottom_padding = drawer_padding;
         let drawer_content_height =
             (drawer_body_height - drawer_body_top_padding - drawer_body_bottom_padding).max(1.0);
-        let grid_height = (drawer_content_height - drawer_header_height - 12.0).max(1.0);
+        let grid_height =
+            (drawer_content_height - drawer_header_height - HOME_DRAWER_RESULTS_SPACING).max(1.0);
         let cell_app = self.clone();
         let list_app = self.clone();
         let key_app = self.clone();
@@ -2664,7 +2705,7 @@ impl ShellApp {
             },
         )
         .spacing(HOME_GRID_COLUMN_SPACING)
-        .row_spacing(6.0)
+        .row_spacing(14.0)
         .minimum_cell_width(96.0)
         .frame(app_grid_width, grid_height);
         let centered_grid = hstack! {
@@ -2791,7 +2832,7 @@ impl ShellApp {
             .frame(drawer_content_width, drawer_header_height),
             results,
         }
-        .spacing(12.0)
+        .spacing(HOME_DRAWER_RESULTS_SPACING)
         .alignment(Alignment::TopLeading)
         .frame(drawer_content_width, drawer_content_height)
         .padding_insets(EdgeInsets {

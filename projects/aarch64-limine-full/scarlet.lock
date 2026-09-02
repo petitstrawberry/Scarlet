@@ -5,7 +5,7 @@ hash = "sha256:84e689ea32f6ebad9fb9ab5c36ac5ebf84824f4c2969a6081ddb18b7c37a3cb8"
 layers = []
 
 [sections.disk]
-hash = "sha256:e14c51af841b040640d2fc62c33fd4b37ac5ecd442052bd285ce52e2b15c44f7"
+hash = "sha256:1eacf8eac0f9040b640254eedc897d1d9d7e6194ed62c49b6c459d1a1e9c4fd2"
 layers = []
 
 [sections.initramfs]
@@ -285,7 +285,7 @@ type = "path"
 path = "../../user/std-bin"
 
 [sections.rootfs]
-hash = "sha256:61279d2fc505ca2268c210bdfd533c07f38e66e4d473470f290b0445eed6575f"
+hash = "sha256:6cb112c7b5c49338feca060cb38434e98eb293a079a78680ab7fce97fb32e0bf"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
@@ -609,7 +609,7 @@ kind = "cargo"
 package = "scarlet-std-bin"
 bin = "scarlet-shell"
 to = "/system/scarlet/bin/scarlet-shell"
-hash = "sha256:8525d6879143ab69304bb215797f8020a3a28bae224a8f89362beb47683bd9bb"
+hash = "sha256:5598da61f570276d8c2a342158f12533127f7c65717feaea193f05841a315675"
 
 [sections.rootfs.layers.source]
 type = "path"
@@ -631,7 +631,7 @@ kind = "cargo"
 package = "scarlet-std-bin"
 bin = "sws"
 to = "/system/scarlet/bin/sws"
-hash = "sha256:0c87527bc6f1f237530b256cb6bcc62f0b7bbff6de0ea6f232e5046dd8f99b4b"
+hash = "sha256:dcbcedcef88b2da49d89cf44bb81c3857e5486be161fb7314e1bfbd21ab4c7f8"
 
 [sections.rootfs.layers.source]
 type = "path"

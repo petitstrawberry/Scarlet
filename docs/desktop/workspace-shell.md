@@ -112,8 +112,9 @@ The shell and compositor must preserve these invariants:
 11. Overview/application-catalog shell surfaces never become members of an
     application workspace.
 12. A shell restart does not destroy application surfaces or workspace state.
-13. Workspace lifetime is manual by default. Empty workspaces remain ordered,
-    addressable destinations until the user explicitly removes them.
+13. Workspace removal is manual by default. Empty workspaces remain ordered,
+    addressable destinations until the user explicitly removes them; the
+    tablet top-level launch rule may append a workspace but never cleans one up.
 14. The Overview `+` card is a visual creation target, not a workspace. It has
     no `WorkspaceId`, is excluded from the authoritative snapshot, and only
     becomes a real workspace after a click, tap, or successful drop.
@@ -169,17 +170,24 @@ reconciles any persisted names/order without replacing live compositor state.
 
 ### Application launch
 
-Workspace creation is explicit in both experiences:
+Workspace lifetime remains manual, with one tablet launch exception:
 
 - Desktop: add the new top-level scene to the active workspace.
-- Tablet: add the new top-level scene to the active workspace and present it as
-  the workspace's `Single` composition. It does not create or delete a
-  workspace implicitly.
+- Tablet: if the selected workspace is empty, fill it. Otherwise atomically
+  append a new workspace containing the new top-level scene as its `Single`
+  composition, select it, and leave the previous workspace intact.
 - Explicit split launch: add the new scene to the requested side of the active
   tablet workspace instead of creating another workspace.
 - Transient window: join the parent scene's workspace in both experiences.
 - Activation of an existing scene: activate its workspace and focus the scene;
   do not create a duplicate workspace.
+
+Parent assignment is currently a separate SWS request from surface creation.
+In tablet mode a new normal surface therefore remains unassigned and hidden
+until either its parent relationship arrives or it submits its first real
+frame. A parented surface inherits its scene; only a confirmed parentless root
+can trigger the tablet launch exception. This avoids briefly publishing and
+then abandoning a workspace for a dialog.
 
 The launch token will eventually carry a placement intent. Until that field is
 available, SWS applies the defaults above and the shell may reconcile the new
@@ -226,8 +234,9 @@ materialized as another ordered tablet projection while tablet experience is
 active. These projection slots are derived from the retained desktop snapshot,
 not user-created workspaces: leaving tablet restores that snapshot exactly.
 Every scene remains live and keeps its freeform geometry; it is never maximized
-or discarded. A normal tablet launch still joins the explicitly selected
-workspace and does not create another one.
+or discarded. A normal tablet launch fills the explicitly selected workspace
+when it is empty; otherwise it appends a separate tablet workspace as described
+above.
 
 ### Tablet-to-desktop conversion
 
@@ -280,9 +289,11 @@ window spread are visible at the same time.
 ```
 
 - The laptop workspace rail uses approximately 10% of the work area, clamped
-  to `96..=112` logical pixels. It shows complete cards only, scrolls
-  horizontally without wrapping, and includes `+` as its final selectable
-  pseudo-card.
+  to `96..=112` logical pixels. Its viewport spans the full output width and
+  its fixed-pitch card content scrolls horizontally without wrapping. When
+  content overflows, at most one neighboring card remains clipped at each
+  available viewport edge; `+` is the final selectable pseudo-card in the same
+  scroll content.
 - Rail cards, the selected-workspace stage, and the application layer share one
   cool-slate backdrop. The reference tint is `#4d5769` at 78% opacity: the
   wallpaper remains texture rather than determining the navigation surface's
@@ -387,10 +398,12 @@ valid Home actions.
 
 #### Shared projection and visual rules
 
-- Compact rails show two through five complete cards. Tablet Overview instead
-  shows one complete large card in portrait or at most two in landscape. No
-  layout relies on cropped neighbor slivers as the only indication of another
-  workspace.
+- Rails center every card when their content fits. When content overflows, the
+  full-width horizontal viewport shows complete cards plus at most one
+  substantial clipped neighbor at each available edge. The clipped card is an
+  intentional continuation affordance, not a narrow accidental sliver.
+  Tablet Overview uses the same scroll model with larger cards and fewer
+  complete cards in its viewport.
 - Every card uses a 14-pixel corner radius for its backplate, live-content
   clip, and hit test. Application pixels cannot escape the rounded projection.
 - Workspace cards and spread windows use a compact, soft elevation shadow.
@@ -790,8 +803,8 @@ implemented incrementally; animation remains intentionally deferred.
 - Use the shared cool-slate full-output backdrop, including beneath the
   transparent StatusBar. Do not draw enclosing rail, stage, or drawer panels.
 - Implement the tablet large-card Overview switcher and the Home catalog with
-  its compact complete-card rail, including the final `+`, without adding
-  tablet-only button semantics.
+  its compact full-width horizontal rail, including the final `+`, without
+  adding tablet-only button semantics.
 - Make `Overview:Windows` and `Home:Apps` visibly distinct and keep rail targets
   stable across their immediate, non-animated transition.
 

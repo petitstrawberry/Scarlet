@@ -331,6 +331,78 @@ impl WorkspaceManager {
         workspace_id
     }
 
+    /// Assign a newly confirmed top-level app scene to its launch workspace.
+    ///
+    /// Desktop launches remain members of the selected virtual desktop. In
+    /// tablet experience an occupied composition is never silently replaced:
+    /// an empty selected workspace is filled, otherwise a new `Single`
+    /// workspace is appended and selected atomically. At the protocol limit an
+    /// existing empty workspace is preferred before falling back to the active
+    /// workspace.
+    ///
+    /// # Arguments
+    ///
+    /// * `window_id` - Confirmed top-level scene-root identifier.
+    /// * `tablet_experience` - Whether launches use one composition per
+    ///   workspace.
+    /// * `focused_layout` - Whether the active projection should immediately
+    ///   present the new scene as `Single`.
+    ///
+    /// # Returns
+    ///
+    /// The workspace containing the scene after assignment.
+    pub(super) fn add_scene_root(
+        &mut self,
+        window_id: u32,
+        tablet_experience: bool,
+        focused_layout: bool,
+    ) -> WorkspaceId {
+        if let Some(workspace_id) = self.workspace_for_window(window_id) {
+            return workspace_id;
+        }
+        if !tablet_experience {
+            return self.add_window(window_id, focused_layout);
+        }
+
+        let active_index = self
+            .workspaces
+            .iter()
+            .position(|workspace| workspace.id == self.active_workspace)
+            .unwrap_or(0);
+        if self.workspaces[active_index].window_ids.is_empty() {
+            return self.add_window(window_id, true);
+        }
+
+        let target_index = if self.workspaces.len() < MAX_WORKSPACES {
+            let id = self.allocate_workspace_id();
+            self.workspaces.push(WorkspaceSnapshot {
+                id,
+                window_ids: Vec::new(),
+                tablet_layout: TabletLayout::Empty,
+            });
+            self.workspaces.len() - 1
+        } else if let Some(index) = self
+            .workspaces
+            .iter()
+            .position(|workspace| workspace.window_ids.is_empty())
+        {
+            index
+        } else {
+            return self.add_window(window_id, true);
+        };
+
+        let workspace = &mut self.workspaces[target_index];
+        workspace.window_ids.push(window_id);
+        workspace.tablet_layout = TabletLayout::Single { window_id };
+        let workspace_id = workspace.id;
+        self.active_workspace = workspace_id;
+        self.normal_workspace = workspace_id;
+        self.presentation = ShellPresentation::Workspace;
+        self.ensure_manual_workspace_invariants();
+        self.bump_generation();
+        workspace_id
+    }
+
     /// Remove a destroyed scene root and repair every referencing layout.
     pub(super) fn remove_window(&mut self, window_id: u32) -> bool {
         let mut changed = false;
@@ -894,11 +966,19 @@ impl WorkspaceManager {
             if new_members.is_empty() {
                 continue;
             }
-            let destination = current_workspace.window_ids.iter().find_map(|window_id| {
-                restored
-                    .iter()
-                    .position(|workspace| workspace.window_ids.contains(window_id))
-            });
+            let destination = current_workspace
+                .window_ids
+                .iter()
+                .find_map(|window_id| {
+                    restored
+                        .iter()
+                        .position(|workspace| workspace.window_ids.contains(window_id))
+                })
+                .or_else(|| {
+                    restored.iter().position(|workspace| {
+                        workspace.id == current_workspace.id && workspace.window_ids.is_empty()
+                    })
+                });
             if let Some(index) = destination {
                 restored[index].window_ids.extend_from_slice(&new_members);
                 restored[index].tablet_layout = retained_layout_for_members(
@@ -1259,11 +1339,11 @@ mod tests {
     use sws_protocol::workspace::{SplitAxis, TransitionKind, ValidationError};
 
     #[test]
-    fn tablet_launches_use_explicitly_created_workspace_compositions() {
+    fn tablet_top_level_launches_create_separate_workspace_compositions() {
         let mut manager = WorkspaceManager::new();
-        assert_eq!(manager.add_window(10, true), 1);
-        let second = manager.create_workspace().unwrap();
-        assert_eq!(manager.add_window(11, true), second);
+        assert_eq!(manager.add_scene_root(10, true, true), 1);
+        let generation = manager.snapshot().generation;
+        let second = manager.add_scene_root(11, true, true);
         assert_ne!(second, 1);
         assert_eq!(manager.active_workspace(), second);
         assert_eq!(
@@ -1276,13 +1356,30 @@ mod tests {
         );
         let state = manager.snapshot();
         assert_eq!(state.workspaces.len(), 2);
+        assert_eq!(state.generation, generation.wrapping_add(1));
+        assert_eq!(state.presentation, ShellPresentation::Workspace);
+    }
+
+    #[test]
+    fn tablet_top_level_launch_fills_the_selected_empty_workspace() {
+        let mut manager = WorkspaceManager::new();
+        manager.add_scene_root(10, true, true);
+        let empty = manager.create_workspace().unwrap();
+        let workspace_count = manager.snapshot().workspaces.len();
+
+        assert_eq!(manager.add_scene_root(11, true, true), empty);
+        assert_eq!(manager.snapshot().workspaces.len(), workspace_count);
+        assert_eq!(
+            manager.tablet_layout(empty),
+            TabletLayout::Single { window_id: 11 }
+        );
     }
 
     #[test]
     fn desktop_launches_share_the_active_virtual_desktop() {
         let mut manager = WorkspaceManager::new();
-        manager.add_window(10, false);
-        manager.add_window(11, false);
+        manager.add_scene_root(10, false, false);
+        manager.add_scene_root(11, false, false);
         assert_eq!(manager.snapshot().workspaces[0].window_ids, vec![10, 11]);
         assert_eq!(manager.snapshot().workspaces.len(), 1);
     }
@@ -1312,7 +1409,7 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(manager.add_window(999, true), 1);
+        assert_eq!(manager.add_scene_root(999, true, true), 1);
         assert_eq!(manager.snapshot().workspaces.len(), MAX_WORKSPACES);
     }
 
@@ -1351,6 +1448,33 @@ mod tests {
         assert_eq!(state.workspaces.len(), 1);
         assert_eq!(state.workspaces[0].window_ids, vec![10, 11, 12]);
         assert_eq!(state.active_workspace, state.workspaces[0].id);
+    }
+
+    #[test]
+    fn tablet_launch_filling_a_retained_empty_workspace_survives_desktop_restore() {
+        let mut manager = WorkspaceManager::new();
+        manager.add_scene_root(10, false, false);
+        let empty = manager.create_workspace().unwrap();
+        manager.enter_tablet_experience(None);
+
+        assert_eq!(manager.active_workspace(), empty);
+        assert_eq!(manager.add_scene_root(11, true, true), empty);
+        manager.leave_tablet_experience();
+        assert_eq!(manager.workspace_for_window(11), Some(empty));
+        assert_eq!(manager.snapshot().workspaces.len(), 2);
+    }
+
+    #[test]
+    fn tablet_launch_appended_workspace_survives_desktop_restore() {
+        let mut manager = WorkspaceManager::new();
+        manager.add_scene_root(10, false, false);
+        manager.enter_tablet_experience(Some(10));
+
+        let launched = manager.add_scene_root(11, true, true);
+        assert_ne!(launched, 1);
+        manager.leave_tablet_experience();
+        assert_eq!(manager.workspace_for_window(11), Some(launched));
+        assert_eq!(manager.snapshot().workspaces.len(), 2);
     }
 
     #[test]
