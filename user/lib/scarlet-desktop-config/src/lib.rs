@@ -85,18 +85,6 @@ pub const DESKTOP_STEMD_LIST_APPLICATIONS_METHOD: &str = "ListApplications";
 /// Method used to launch an application or focus its existing window.
 pub const DESKTOP_STEMD_LAUNCH_OR_FOCUS_METHOD: &str = "LaunchOrFocus";
 
-/// Bus name owned by the resident desktop application launcher.
-pub const DESKTOP_LAUNCHER_BUS_NAME: &str = "org.scarlet-os.desktop.launcher";
-
-/// Object path used by the resident application launcher.
-pub const DESKTOP_LAUNCHER_OBJECT_PATH: &str = "/org/scarlet/os/launcher";
-
-/// Interface implemented by the resident application launcher.
-pub const DESKTOP_LAUNCHER_INTERFACE: &str = "org.scarlet.desktop.Launcher";
-
-/// Method used to show the resident application launcher window.
-pub const DESKTOP_LAUNCHER_SHOW_METHOD: &str = "Show";
-
 /// Persistent desktop status-preferences configuration path.
 pub const DESKTOP_STATUS_CONFIG_PATH: &str = "/etc/scarlet-desktop.d/status.toml";
 

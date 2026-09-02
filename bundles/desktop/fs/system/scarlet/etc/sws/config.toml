@@ -8,7 +8,26 @@ theme = "/share/cursors/default"
 # Stable service name; SWS restores it when the IME registers.
 active = "scarlet-mozc"
 
+[workspaces]
+# Manual lifecycle is the default: empty workspaces persist until explicitly
+# removed. Set true only for an optional automatic cleanup policy.
+auto_remove_empty = false
+
 [keybindings]
 # SWS-level shortcuts are matched before the focused client receives the key.
+# A modifier-only overview shortcut toggles when the key is released, but only
+# when no other key was pressed while it was held. Chords such as
+# "Super+Space" or "Super+Tab" can be used instead.
+overview_toggle = "Super"
+# Shell navigation chords. Bindings match the exact modifier set, so
+# Super+Shift+Left and Super+Left stay distinct.
+# workspace_left = "Super+Left"
+# workspace_right = "Super+Right"
+# move_window_left = "Super+Shift+Left"
+# move_window_right = "Super+Shift+Right"
+# home = "Super+Space"
+# overview_activate = "Super+Enter"
+# add_workspace = "Super+Shift+N"
+# remove_workspace = "Super+Delete"
 # Other useful values include "Ctrl+Space", "Zenkaku_Hankaku", "Henkan", and "Muhenkan".
 ime_toggle = "Ctrl+Space"

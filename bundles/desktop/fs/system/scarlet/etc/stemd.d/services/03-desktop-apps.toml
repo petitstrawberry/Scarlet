@@ -5,8 +5,3 @@
 exec = "/bin/files --service"
 order = 03
 depends = ["sws"]
-
-[service.desktop-launcher]
-exec = "/bin/launcher --service"
-order = 03
-depends = ["sws"]

@@ -56,6 +56,8 @@ describes the repository at a high level; this page is the documentation map.
 
 ## User Space and Desktop
 
+- [Workspace shell](desktop/workspace-shell.md) - unified laptop/tablet
+  workspace model, Home, Overview, gestures, and compositor boundary.
 - [SWS IPC protocol](graphics/sws-ipc-protocol.md) - Scarlet Window Server wire
   protocol.
 - [sws-client](graphics/sws-client.md) - low-level SWS client library.

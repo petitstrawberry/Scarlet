@@ -92,16 +92,8 @@ name = "scarlet-desktop"
 path = "src/scarlet_desktop/main.rs"
 
 [[bin]]
-name = "desktop-background"
-path = "src/scarlet_desktop/background/main.rs"
-
-[[bin]]
 name = "desktop-settings"
 path = "src/scarlet_desktop/settingsd.rs"
-
-[[bin]]
-name = "taskbar"
-path = "src/scarlet_desktop/taskbar/scarlet_ui.rs"
 
 [[bin]]
 name = "terminal"

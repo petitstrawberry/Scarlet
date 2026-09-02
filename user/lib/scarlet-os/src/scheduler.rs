@@ -12,6 +12,101 @@ use scarlet_sys::{
     SCHED_UTIL_SCALE, Syscall, syscall1,
 };
 
+/// System-wide scheduler CPU accounting snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CpuUsageInfo {
+    online_cpus: usize,
+    busy_time_ns: u64,
+    idle_time_ns: u64,
+    total_time_ns: u64,
+    usage_per_mille: u32,
+}
+
+impl CpuUsageInfo {
+    /// Return the number of CPUs known to the scheduler.
+    ///
+    /// # Returns
+    ///
+    /// The number of online CPUs represented by this snapshot.
+    pub const fn online_cpus(self) -> usize {
+        self.online_cpus
+    }
+
+    /// Return cumulative non-idle CPU time.
+    ///
+    /// # Returns
+    ///
+    /// Busy scheduler time in nanoseconds.
+    pub const fn busy_time_ns(self) -> u64 {
+        self.busy_time_ns
+    }
+
+    /// Return cumulative idle CPU time.
+    ///
+    /// # Returns
+    ///
+    /// Idle scheduler time in nanoseconds.
+    pub const fn idle_time_ns(self) -> u64 {
+        self.idle_time_ns
+    }
+
+    /// Return total accounted CPU capacity time.
+    ///
+    /// # Returns
+    ///
+    /// Total scheduler capacity time in nanoseconds.
+    pub const fn total_time_ns(self) -> u64 {
+        self.total_time_ns
+    }
+
+    /// Return the kernel's instantaneous utilization estimate.
+    ///
+    /// # Returns
+    ///
+    /// Utilization in per-mille, where `1000` represents 100 percent.
+    pub const fn usage_per_mille(self) -> u32 {
+        self.usage_per_mille
+    }
+}
+
+#[repr(C)]
+struct RawCpuUsageInfo {
+    online_cpus: usize,
+    busy_time_ns: u64,
+    idle_time_ns: u64,
+    total_time_ns: u64,
+    usage_per_mille: u32,
+    reserved: u32,
+}
+
+/// Query system-wide CPU accounting from the scheduler.
+///
+/// # Returns
+///
+/// A coherent scheduler snapshot, or `None` when the kernel rejects the
+/// query.
+pub fn cpu_usage() -> Option<CpuUsageInfo> {
+    let mut raw = RawCpuUsageInfo {
+        online_cpus: 0,
+        busy_time_ns: 0,
+        idle_time_ns: 0,
+        total_time_ns: 0,
+        usage_per_mille: 0,
+        reserved: 0,
+    };
+    let result = syscall1(
+        Syscall::GetCpuUsageInfo,
+        &mut raw as *mut RawCpuUsageInfo as usize,
+    );
+    (result != usize::MAX).then_some(CpuUsageInfo {
+        online_cpus: raw.online_cpus,
+        busy_time_ns: raw.busy_time_ns,
+        idle_time_ns: raw.idle_time_ns,
+        total_time_ns: raw.total_time_ns,
+        usage_per_mille: raw.usage_per_mille,
+    })
+}
+
 /// Scheduler policy selected for the calling task.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SchedulerPolicy {

@@ -22,13 +22,15 @@ extern crate scarlet_std as std;
 
 use std::vec::Vec;
 
+pub mod workspace;
+
 /// Maximum payload we accept from the socket.
 ///
 /// This prevents unbounded allocations on malformed frames.
 pub const MAX_PAYLOAD_SIZE: usize = 1024 * 1024; // 1 MiB
 
 /// Current SWS capability-negotiation protocol version.
-pub const SWS_PROTOCOL_VERSION: u32 = 6;
+pub const SWS_PROTOCOL_VERSION: u32 = 7;
 
 /// Maximum damage rectangles carried by one shared SGFX frame commit.
 pub const SGFX_MAX_DAMAGE_RECTS: usize = 16;
@@ -51,6 +53,8 @@ pub mod capabilities {
     pub const SYSTEM_MODE_OVERRIDES: u64 = 1 << 6;
     /// Window creation may atomically negotiate initial size, limits, and geometry.
     pub const CONFIGURED_WINDOW_CREATION: u64 = 1 << 7;
+    /// An exclusive system shell may manage generation-checked workspaces.
+    pub const WORKSPACE_SHELL: u64 = 1 << 8;
 }
 
 /// Known input-environment state bits.
@@ -281,6 +285,14 @@ pub mod error_codes {
     pub const CURSOR_THEME_PERSIST_FAILED: u32 = 111;
     /// The requested visible geometry is empty or outside the surface bounds.
     pub const INVALID_WINDOW_GEOMETRY: u32 = 112;
+    /// Another live connection already owns the exclusive system-shell role.
+    pub const SYSTEM_SHELL_UNAVAILABLE: u32 = 113;
+    /// The request requires the exclusive system-shell role.
+    pub const SYSTEM_SHELL_REQUIRED: u32 = 114;
+    /// A workspace transaction was based on an obsolete compositor generation.
+    pub const STALE_WORKSPACE_GENERATION: u32 = 115;
+    /// A workspace transaction violates membership or layout invariants.
+    pub const INVALID_WORKSPACE_STATE: u32 = 116;
 }
 
 /// Message type IDs (client -> server).
@@ -351,6 +363,14 @@ pub mod client_msg {
     /// Create a window after applying compositor policy and client size constraints.
     pub const CREATE_WINDOW_CONFIGURED: u32 = 49;
 
+    // Exclusive system-shell workspace control (50-52)
+    /// Claim the single live system-shell role and return the current snapshot.
+    pub const REGISTER_SYSTEM_SHELL: u32 = 50;
+    /// Query the compositor's current authoritative workspace snapshot.
+    pub const GET_WORKSPACE_STATE: u32 = 51;
+    /// Atomically apply one generation-checked complete workspace transaction.
+    pub const APPLY_WORKSPACE_TRANSACTION: u32 = 52;
+
     // Text input client API messages (200-219)
     pub const TEXT_INPUT_CREATE: u32 = 200;
     pub const TEXT_INPUT_DESTROY: u32 = 201;
@@ -416,6 +436,10 @@ pub mod server_msg {
     pub const CURSOR_THEME_CHANGED: u32 = 34;
     /// Current input environment changed, or a response to `GET_INPUT_ENVIRONMENT`.
     pub const INPUT_ENVIRONMENT_CHANGED: u32 = 35;
+    /// Registration response for the exclusive system-shell role.
+    pub const SYSTEM_SHELL_REGISTERED: u32 = 36;
+    /// Current authoritative workspace snapshot or asynchronous state change.
+    pub const WORKSPACE_STATE: u32 = 37;
 
     // Text input client events (200-219)
     pub const TEXT_INPUT_CREATED: u32 = 200;
@@ -572,6 +596,10 @@ pub mod window_types {
     pub const DESKTOP: u32 = 3;
     /// Input-method-owned popup surface anchored to the active text input.
     pub const IME_POPUP: u32 = 4;
+    /// System-shell background rendered above wallpaper and below app scenes.
+    pub const SHELL_BACKGROUND: u32 = 5;
+    /// Pointer-transparent system-shell chrome rendered above app scenes.
+    pub const SHELL_CHROME: u32 = 6;
 }
 
 /// Window presentation-state flags reported by `WINDOW_STATE_CHANGED`.
@@ -1278,6 +1306,18 @@ pub enum ClientMessageRef<'a> {
         windowing_mode: Option<WindowingMode>,
     },
 
+    /// Claim the exclusive system-shell workspace-control role.
+    RegisterSystemShell {},
+
+    /// Query the current authoritative workspace snapshot.
+    GetWorkspaceState {},
+
+    /// Submit a complete generation-checked desired workspace state.
+    ApplyWorkspaceTransaction {
+        /// Encoded [`workspace::WorkspaceTransaction`] payload.
+        transaction: &'a [u8],
+    },
+
     /// Register one transferred SGFX image capability for a window.
     RegisterSgfxBuffer {
         window_id: u32,
@@ -1485,6 +1525,10 @@ pub enum ServerMessage {
         state_flags: u32,
         capability_flags: u32,
     },
+    /// The connection successfully claimed the exclusive system-shell role.
+    SystemShellRegistered,
+    /// Contains an encoded [`workspace::WorkspaceState`] payload.
+    WorkspaceState,
     InputEvent {
         window_id: u32,
         time: u64,
@@ -2297,6 +2341,24 @@ pub fn parse_client_message<'a>(
             };
             Ok(ClientMessageRef::SetWindowingModeOverride { windowing_mode })
         }
+        client_msg::REGISTER_SYSTEM_SHELL => {
+            if !payload.is_empty() {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            Ok(ClientMessageRef::RegisterSystemShell {})
+        }
+        client_msg::GET_WORKSPACE_STATE => {
+            if !payload.is_empty() {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            Ok(ClientMessageRef::GetWorkspaceState {})
+        }
+        client_msg::APPLY_WORKSPACE_TRANSACTION => {
+            workspace::decode_transaction(payload)?;
+            Ok(ClientMessageRef::ApplyWorkspaceTransaction {
+                transaction: payload,
+            })
+        }
         client_msg::REGISTER_SGFX_BUFFER => {
             if payload.len() != 24 {
                 return Err(ProtocolError::MalformedPayload);
@@ -2842,6 +2904,14 @@ pub fn parse_server_message(msg_type: u32, payload: &[u8]) -> Result<ServerMessa
                 state_flags: read_u32(payload, 8)?,
                 capability_flags: read_u32(payload, 12)?,
             })
+        }
+        server_msg::SYSTEM_SHELL_REGISTERED => {
+            workspace::decode_state(payload)?;
+            Ok(ServerMessage::SystemShellRegistered)
+        }
+        server_msg::WORKSPACE_STATE => {
+            workspace::decode_state(payload)?;
+            Ok(ServerMessage::WorkspaceState)
         }
         server_msg::INPUT_EVENT => {
             if payload.len() != 20 {

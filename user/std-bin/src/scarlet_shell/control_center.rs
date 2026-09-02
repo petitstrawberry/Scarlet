@@ -1,6 +1,6 @@
 //! ScarletUI Control Center scene content.
 //!
-//! The taskbar owns provider sampling. This module only maps immutable provider
+//! The shell owns provider sampling. This module only maps immutable provider
 //! snapshots to ordinary ScarletUI views and typed actions. Rendering, layout,
 //! hit testing, hover, press, and slider capture remain owned by ScarletUI.
 
@@ -21,7 +21,7 @@ use scarlet_ui::{Icon, IconSize};
 /// The shell presentation used for the Control Center window.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ControlCenterPresentation {
-    /// A compact popover anchored below the laptop taskbar status item.
+    /// A compact popover anchored below the laptop StatusBar status item.
     LaptopPopover,
     /// A wider touch-first sheet.
     TabletSheet,
@@ -52,7 +52,7 @@ pub struct AudioSnapshot {
 }
 
 impl AudioSnapshot {
-    /// Build audio state from the same sample used by taskbar status.
+    /// Build audio state from the same sample used by StatusBar status.
     ///
     /// # Arguments
     ///
@@ -144,7 +144,7 @@ pub struct InputEnvironmentSnapshot {
 /// Complete provider snapshot consumed by Control Center.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ControlCenterSnapshot {
-    /// Audio state sourced from the taskbar's shared sample.
+    /// Audio state sourced from the StatusBar's shared sample.
     pub audio: AudioSnapshot,
     /// Read-only network state.
     pub network: NetworkSnapshot,
@@ -220,15 +220,12 @@ impl ControlCenterMetrics {
     ///
     /// # Returns
     ///
-    /// Deterministic logical dimensions shared by laptop and tablet mode while
-    /// the tablet-specific shell design is intentionally disabled.
+    /// Presentation-specific dimensions for pointer and touch targets.
     pub fn resolve(presentation: ControlCenterPresentation, output_count: usize) -> Self {
-        let _ = presentation;
-        let width = 304;
-        let margin = 8;
-        let gap = 6;
-        let target_height = 32;
-        let details_height = 84;
+        let (width, margin, gap, target_height, details_height) = match presentation {
+            ControlCenterPresentation::LaptopPopover => (304, 8, 6, 32, 84),
+            ControlCenterPresentation::TabletSheet => (392, 16, 10, 44, 112),
+        };
         let output_rows = if output_count > 1 {
             output_count as u32
         } else if output_count == 0 {
@@ -267,7 +264,7 @@ impl ControlCenterMetrics {
 /// * `presentation` - Laptop popover or tablet sheet.
 /// * `snapshot` - Current provider snapshot.
 /// * `volume` - Shared standard Slider value state.
-/// * `action` - Typed action queue consumed by the taskbar service loop.
+/// * `action` - Typed action queue consumed by the StatusBar service loop.
 /// * `armed_power` - Current two-step power confirmation state.
 ///
 /// # Returns

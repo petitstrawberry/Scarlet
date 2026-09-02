@@ -26,13 +26,6 @@ to = "/system/scarlet/bin/scarlet-desktop"
 kind = "cargo"
 source = "../../user/bin"
 package = "user-bin"
-bin = "desktop-background"
-to = "/system/scarlet/bin/desktop-background"
-
-[[layers]]
-kind = "cargo"
-source = "../../user/bin"
-package = "user-bin"
 bin = "desktop-settings"
 to = "/system/scarlet/bin/desktop-settings"
 
@@ -47,22 +40,15 @@ to = "/system/scarlet/bin/files"
 kind = "cargo"
 source = "../../user/std-bin"
 package = "scarlet-std-bin"
-bin = "launcher"
-to = "/system/scarlet/bin/launcher"
-
-[[layers]]
-kind = "cargo"
-source = "../../user/std-bin"
-package = "scarlet-std-bin"
 bin = "notepad"
 to = "/system/scarlet/bin/notepad"
 
 [[layers]]
 kind = "cargo"
-source = "../../user/bin"
-package = "user-bin"
-bin = "taskbar"
-to = "/system/scarlet/bin/taskbar"
+source = "../../user/std-bin"
+package = "scarlet-std-bin"
+bin = "scarlet-shell"
+to = "/system/scarlet/bin/scarlet-shell"
 
 [[layers]]
 kind = "cargo"

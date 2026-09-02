@@ -5,7 +5,6 @@ use super::input_environment::{self, Snapshot};
 use super::pointer_lock::{
     InputRoute, enqueue_routed_event, take_extension_events, take_window_events,
 };
-use super::window::{WindowType, maximized_geometry_for};
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 use scarlet_os::handle::Handle;
 use scarlet_os::handle::capability::memory_mapping::flags as mmap_flags;
@@ -647,18 +646,18 @@ fn configured_initial_surface_extent(
     let limits = configuration.size_limits;
     let insets = configuration.geometry_insets;
     let (mut width, mut height) = limits.clamp(requested_width, requested_height);
-    let focused_normal = window_type == protocol::window_types::NORMAL
+    let tablet_workspace_root = window_type == protocol::window_types::NORMAL
         && resizable
         && environment.windowing_mode == protocol::WindowingMode::Focused
         && limits.max_width == 0
         && limits.max_height == 0;
-    if focused_normal {
-        let (_, _, managed_width, managed_height) = maximized_geometry_for(
-            WindowType::Normal,
-            environment.workarea,
+    if tablet_workspace_root {
+        let (_, _, managed_width, managed_height) = environment.workarea.unwrap_or((
+            0,
+            0,
             environment.screen_width,
             environment.screen_height,
-        );
+        ));
         width = managed_width.saturating_add(insets.horizontal()).max(1);
         height = managed_height.saturating_add(insets.vertical()).max(1);
         (width, height) = limits.clamp(width, height);
@@ -686,7 +685,8 @@ fn sws_capabilities() -> u64 {
         | protocol::capabilities::INPUT_ENVIRONMENT
         | protocol::capabilities::WINDOW_GEOMETRY
         | protocol::capabilities::SYSTEM_MODE_OVERRIDES
-        | protocol::capabilities::CONFIGURED_WINDOW_CREATION;
+        | protocol::capabilities::CONFIGURED_WINDOW_CREATION
+        | protocol::capabilities::WORKSPACE_SHELL;
     if SGFX_SHARED_IMAGES_AVAILABLE.load(Ordering::Acquire) {
         capabilities |= protocol::capabilities::SGFX_SHARED_IMAGE;
     }
@@ -845,6 +845,49 @@ static PENDING_CLIENT_RESPONSES: Mutex<BTreeMap<usize, Vec<PendingServerFrame>>>
 /// Keeping this separate from the general client registry preserves protocol
 /// compatibility with clients that predate message type 35.
 static INPUT_ENVIRONMENT_SUBSCRIBERS: Mutex<BTreeSet<usize>> = Mutex::new(BTreeSet::new());
+
+/// Connection holding the exclusive system-shell workspace-control role.
+static SYSTEM_SHELL_CLIENT: Mutex<Option<usize>> = Mutex::new(None);
+
+fn claim_system_shell(client_id: usize) -> bool {
+    let mut owner = SYSTEM_SHELL_CLIENT
+        .lock()
+        .expect("SWS system-shell role mutex poisoned");
+    match *owner {
+        Some(existing) => existing == client_id,
+        None => {
+            *owner = Some(client_id);
+            true
+        }
+    }
+}
+
+/// Return whether a live client owns the exclusive system-shell role.
+pub(super) fn is_system_shell_client(client_id: usize) -> bool {
+    *SYSTEM_SHELL_CLIENT
+        .lock()
+        .expect("SWS system-shell role mutex poisoned")
+        == Some(client_id)
+}
+
+fn release_system_shell(client_id: usize) {
+    let mut owner = SYSTEM_SHELL_CLIENT
+        .lock()
+        .expect("SWS system-shell role mutex poisoned");
+    if *owner == Some(client_id) {
+        *owner = None;
+    }
+}
+
+/// Publish an authoritative workspace snapshot to the registered shell.
+pub(super) fn publish_workspace_state(payload: Vec<u8>) {
+    let client_id = *SYSTEM_SHELL_CLIENT
+        .lock()
+        .expect("SWS system-shell role mutex poisoned");
+    if let Some(client_id) = client_id {
+        send_message_to_client(client_id, protocol::server_msg::WORKSPACE_STATE, payload);
+    }
+}
 
 fn subscribe_input_environment(client_id: usize) {
     INPUT_ENVIRONMENT_SUBSCRIBERS
@@ -3613,6 +3656,52 @@ fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Ha
                     windowing_mode,
                 });
             }
+            Ok(ClientMessageRef::RegisterSystemShell {}) => {
+                if claim_system_shell(client_id) {
+                    push_ipc_event(IpcEvent::RegisterSystemShell {
+                        client_id,
+                        request_id,
+                    });
+                } else {
+                    let _ = write_protocol_error(
+                        &mut stream_writer,
+                        request_id,
+                        protocol::error_codes::SYSTEM_SHELL_UNAVAILABLE,
+                    );
+                }
+            }
+            Ok(ClientMessageRef::GetWorkspaceState {}) => {
+                push_ipc_event(IpcEvent::GetWorkspaceState {
+                    client_id,
+                    request_id,
+                });
+            }
+            Ok(ClientMessageRef::ApplyWorkspaceTransaction { transaction }) => {
+                if !is_system_shell_client(client_id) {
+                    let _ = write_protocol_error(
+                        &mut stream_writer,
+                        request_id,
+                        protocol::error_codes::SYSTEM_SHELL_REQUIRED,
+                    );
+                    continue;
+                }
+                match protocol::workspace::decode_transaction(transaction) {
+                    Ok(transaction) => {
+                        push_ipc_event(IpcEvent::ApplyWorkspaceTransaction {
+                            client_id,
+                            request_id,
+                            transaction,
+                        });
+                    }
+                    Err(_) => {
+                        let _ = write_protocol_error(
+                            &mut stream_writer,
+                            request_id,
+                            protocol::error_codes::INVALID_WORKSPACE_STATE,
+                        );
+                    }
+                }
+            }
             Ok(ClientMessageRef::RegisterSgfxBuffer {
                 window_id,
                 buffer_id,
@@ -4003,6 +4092,7 @@ fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Ha
         );
     }
     unsubscribe_input_environment(client_id);
+    release_system_shell(client_id);
     CLIENT_WAKES
         .lock()
         .expect("SWS mutex poisoned")
@@ -4343,6 +4433,25 @@ pub enum IpcEvent {
         request_id: u8,
         windowing_mode: Option<protocol::WindowingMode>,
     },
+
+    /// A client claimed the exclusive system-shell role.
+    RegisterSystemShell {
+        client_id: usize,
+        request_id: u8,
+    },
+
+    /// A client requested the authoritative workspace snapshot.
+    GetWorkspaceState {
+        client_id: usize,
+        request_id: u8,
+    },
+
+    /// The registered system shell submitted one complete desired state.
+    ApplyWorkspaceTransaction {
+        client_id: usize,
+        request_id: u8,
+        transaction: protocol::workspace::WorkspaceTransaction,
+    },
 }
 
 #[cfg(test)]
@@ -4367,7 +4476,7 @@ mod tests {
     }
 
     #[test]
-    fn focused_creation_allocates_the_first_buffer_for_maximized_geometry() {
+    fn tablet_creation_allocates_the_first_buffer_for_workspace_geometry() {
         let environment = WindowCreationEnvironment {
             screen_width: 1920,
             screen_height: 1080,
@@ -4383,12 +4492,12 @@ mod tests {
                 configuration(),
                 environment,
             ),
-            Some((1924, 1044))
+            Some((1944, 1064))
         );
     }
 
     #[test]
-    fn focused_creation_matches_chromebook_maximized_surface_extent() {
+    fn tablet_creation_matches_chromebook_workspace_surface_extent() {
         let environment = WindowCreationEnvironment {
             screen_width: 2160,
             screen_height: 1440,
@@ -4419,7 +4528,7 @@ mod tests {
                 configuration,
                 environment,
             ),
-            Some((2184, 1400))
+            Some((2204, 1420))
         );
     }
 

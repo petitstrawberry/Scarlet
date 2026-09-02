@@ -36,6 +36,8 @@ pub enum Error {
     InputEnvironmentUnsupported,
     /// The connected server does not allow system-wide mode overrides.
     SystemModeOverrideUnsupported,
+    /// The connected server does not implement exclusive workspace-shell control.
+    WorkspaceShellUnsupported,
     /// Failed to receive shared memory handle
     ShmHandleFailed,
     /// Failed to map shared memory
@@ -71,6 +73,7 @@ impl Error {
             Error::InvalidResponse => "invalid server response",
             Error::InputEnvironmentUnsupported => "input environment is not supported",
             Error::SystemModeOverrideUnsupported => "system mode overrides are not supported",
+            Error::WorkspaceShellUnsupported => "workspace shell control is not supported",
             Error::ShmHandleFailed => "failed to receive shared memory handle",
             Error::ShmMapFailed => "failed to map shared memory",
             Error::SurfaceNotFound => "surface not found",

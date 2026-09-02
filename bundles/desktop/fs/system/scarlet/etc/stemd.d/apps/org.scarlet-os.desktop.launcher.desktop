@@ -1,7 +1,0 @@
-[Desktop Entry]
-Name=Application Launcher
-Comment=Launch applications
-Exec=/bin/launcher --main
-Icon=apps
-Type=Application
-Terminal=false

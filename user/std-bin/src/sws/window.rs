@@ -19,6 +19,83 @@ macro_rules! window_debug {
 /// Window ID type
 pub type WindowId = u32;
 
+pub(super) fn rounded_rect_contains_point(
+    rect: (i32, i32, u32, u32),
+    radius: u32,
+    px: i32,
+    py: i32,
+) -> bool {
+    let (x, y, width, height) = rect;
+    if width == 0 || height == 0 {
+        return false;
+    }
+    let right = x.saturating_add(width as i32);
+    let bottom = y.saturating_add(height as i32);
+    if px < x || px >= right || py < y || py >= bottom {
+        return false;
+    }
+
+    let radius = radius.min(width / 2).min(height / 2);
+    if radius == 0 {
+        return true;
+    }
+    let radius_i32 = radius as i32;
+    let inner_left = x.saturating_add(radius_i32);
+    let inner_right = right.saturating_sub(radius_i32);
+    let inner_top = y.saturating_add(radius_i32);
+    let inner_bottom = bottom.saturating_sub(radius_i32);
+    if (px >= inner_left && px < inner_right) || (py >= inner_top && py < inner_bottom) {
+        return true;
+    }
+
+    let center_x = if px < inner_left {
+        inner_left
+    } else {
+        inner_right.saturating_sub(1)
+    };
+    let center_y = if py < inner_top {
+        inner_top
+    } else {
+        inner_bottom.saturating_sub(1)
+    };
+    let dx = i64::from(px.saturating_sub(center_x));
+    let dy = i64::from(py.saturating_sub(center_y));
+    dx.saturating_mul(dx).saturating_add(dy.saturating_mul(dy))
+        <= i64::from(radius).saturating_mul(i64::from(radius))
+}
+
+pub(super) fn rounded_rect_row_span(
+    rect: (i32, i32, u32, u32),
+    radius: u32,
+    row_y: i32,
+) -> Option<(i32, i32)> {
+    let (x, y, width, height) = rect;
+    let right = x.saturating_add(width as i32);
+    let bottom = y.saturating_add(height as i32);
+    if width == 0 || height == 0 || row_y < y || row_y >= bottom {
+        return None;
+    }
+    let radius = radius.min(width / 2).min(height / 2);
+    if radius == 0
+        || (row_y >= y.saturating_add(radius as i32)
+            && row_y < bottom.saturating_sub(radius as i32))
+    {
+        return Some((x, right));
+    }
+
+    let mut left = x;
+    while left < right && !rounded_rect_contains_point(rect, radius, left, row_y) {
+        left = left.saturating_add(1);
+    }
+    let mut right_exclusive = right;
+    while right_exclusive > left
+        && !rounded_rect_contains_point(rect, radius, right_exclusive - 1, row_y)
+    {
+        right_exclusive -= 1;
+    }
+    (right_exclusive > left).then_some((left, right_exclusive))
+}
+
 /// Window type for Z-order management
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WindowType {
@@ -30,6 +107,10 @@ pub enum WindowType {
     Taskbar,
     /// Desktop background window (bottom layer)
     Desktop,
+    /// Shell-owned Overview/application background below app scenes.
+    ShellBackground,
+    /// Pointer-transparent shell decoration above app scenes.
+    ShellChrome,
     /// Input-method-owned popup surface.
     ImePopup,
 }
@@ -41,6 +122,36 @@ impl Default for WindowType {
 }
 
 const FOCUSED_NORMAL_WINDOW_MARGIN: u32 = 10;
+
+/// Compositor-only visual rectangle used by Overview and shell transitions.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PresentationTransform {
+    /// Destination X coordinate in output pixels.
+    pub x: i32,
+    /// Destination Y coordinate in output pixels.
+    pub y: i32,
+    /// Destination width in output pixels.
+    pub width: u32,
+    /// Destination height in output pixels.
+    pub height: u32,
+    /// Additional compositor opacity multiplier.
+    pub opacity: f32,
+}
+
+/// Additional read-only projection of one retained window buffer.
+///
+/// A presentation instance lets Overview show the same client surface in a
+/// workspace thumbnail and in the selected-workspace spread without creating a
+/// fake window or asking the client for another buffer.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PresentationInstance {
+    /// Destination transform for this projection.
+    pub transform: PresentationTransform,
+    /// Optional compositor-space clip rectangle.
+    pub clip: Option<(i32, i32, u32, u32)>,
+    /// Corner radius applied to [`Self::clip`].
+    pub clip_radius: u32,
+}
 
 /// Compute the authoritative managed geometry for a maximized window.
 ///
@@ -100,6 +211,19 @@ pub struct Window {
     pub size_limits: WindowSizeLimits,
     pub title: Option<Vec<u8>>,
     pub visible: bool,
+    /// Whether workspace presentation currently exposes this surface.
+    ///
+    /// This compositor-only gate is independent of client visibility and
+    /// minimized state, so workspace switches never rewrite public window state.
+    pub workspace_visible: bool,
+    /// Optional compositor-only visual transform.
+    pub presentation_transform: Option<PresentationTransform>,
+    /// Additional compositor-only projections of the retained backing.
+    pub presentation_instances: Vec<PresentationInstance>,
+    /// Optional compositor-only clip for Overview workspace actors.
+    pub presentation_clip: Option<(i32, i32, u32, u32)>,
+    /// Corner radius applied to [`Self::presentation_clip`].
+    pub presentation_clip_radius: u32,
     pub focused: bool,
     /// Window contents buffer (BGRA format, 4 bytes per pixel)
     /// This is used for test/legacy windows.
@@ -125,6 +249,10 @@ pub struct Window {
     /// Whether focused-windowing policy, rather than the application or user,
     /// placed this window in the maximized state.
     pub focused_mode_managed: bool,
+    /// Whether tablet workspace layout currently owns this surface geometry.
+    pub workspace_layout_managed: bool,
+    /// Freeform geometry retained while tablet workspace layout is active.
+    pub workspace_restore_geometry: Option<(i32, i32, u32, u32)>,
     /// Whether the client has successfully submitted at least one frame.
     ///
     /// Geometry-changing compositor policy is deferred until this becomes
@@ -468,6 +596,11 @@ impl Window {
             size_limits: WindowSizeLimits::default(),
             title: None,
             visible: true,
+            workspace_visible: true,
+            presentation_transform: None,
+            presentation_instances: Vec::new(),
+            presentation_clip: None,
+            presentation_clip_radius: 0,
             focused: false,
             buffer: None,
             shm: None,
@@ -480,6 +613,8 @@ impl Window {
             minimized: false,
             maximized: false,
             focused_mode_managed: false,
+            workspace_layout_managed: false,
+            workspace_restore_geometry: None,
             has_presented_frame: false,
             pending_maximize: false,
             initial_size_negotiated: false,
@@ -519,6 +654,11 @@ impl Window {
             size_limits: WindowSizeLimits::default(),
             title: None,
             visible: true,
+            workspace_visible: true,
+            presentation_transform: None,
+            presentation_instances: Vec::new(),
+            presentation_clip: None,
+            presentation_clip_radius: 0,
             focused: false,
             buffer: Some(buffer),
             shm: None,
@@ -531,6 +671,8 @@ impl Window {
             minimized: false,
             maximized: false,
             focused_mode_managed: false,
+            workspace_layout_managed: false,
+            workspace_restore_geometry: None,
             has_presented_frame: false,
             pending_maximize: false,
             initial_size_negotiated: false,
@@ -596,6 +738,11 @@ impl Window {
             size_limits: WindowSizeLimits::default(),
             title: None,
             visible: true,
+            workspace_visible: true,
+            presentation_transform: None,
+            presentation_instances: Vec::new(),
+            presentation_clip: None,
+            presentation_clip_radius: 0,
             focused: false,
             buffer: None,
             shm: Some(shm),
@@ -608,6 +755,8 @@ impl Window {
             minimized: false,
             maximized: false,
             focused_mode_managed: false,
+            workspace_layout_managed: false,
+            workspace_restore_geometry: None,
             has_presented_frame: false,
             pending_maximize: false,
             initial_size_negotiated: false,
@@ -636,6 +785,43 @@ impl Window {
     /// Set window title
     pub fn set_title(&mut self, title: &str) {
         self.title = Some(title.as_bytes().to_vec());
+    }
+
+    /// Return whether the surface participates in composition and hit testing.
+    ///
+    /// Client visibility and compositor workspace visibility are independent;
+    /// both must permit presentation and the client must not be minimized.
+    pub const fn is_presented(&self) -> bool {
+        self.visible && self.workspace_visible && !self.minimized
+    }
+
+    /// Return the compositor destination rectangle for this surface.
+    pub const fn presentation_geometry(&self) -> (i32, i32, u32, u32) {
+        match self.presentation_transform {
+            Some(transform) => (transform.x, transform.y, transform.width, transform.height),
+            None => self.surface_geometry(),
+        }
+    }
+
+    /// Return opacity after applying a shell presentation transform.
+    pub fn presentation_opacity(&self) -> f32 {
+        self.presentation_transform
+            .map_or(self.opacity, |transform| self.opacity * transform.opacity)
+            .clamp(0.0, 1.0)
+    }
+
+    /// Test a point against the compositor destination rectangle.
+    pub fn contains_presentation_point(&self, px: i32, py: i32) -> bool {
+        if let Some(clip) = self.presentation_clip
+            && !rounded_rect_contains_point(clip, self.presentation_clip_radius, px, py)
+        {
+            return false;
+        }
+        let (x, y, width, height) = self.presentation_geometry();
+        px >= x
+            && px < x.saturating_add(width as i32)
+            && py >= y
+            && py < y.saturating_add(height as i32)
     }
 
     /// Return the complete surface rectangle used for composition and damage.
@@ -982,6 +1168,11 @@ impl WindowManager {
             size_limits: WindowSizeLimits::default(),
             title: None,
             visible: true,
+            workspace_visible: true,
+            presentation_transform: None,
+            presentation_instances: Vec::new(),
+            presentation_clip: None,
+            presentation_clip_radius: 0,
             focused: false,
             buffer: None,
             shm: Some(shm),
@@ -994,6 +1185,8 @@ impl WindowManager {
             minimized: false,
             maximized: false,
             focused_mode_managed: false,
+            workspace_layout_managed: false,
+            workspace_restore_geometry: None,
             has_presented_frame: false,
             pending_maximize: false,
             initial_size_negotiated: false,
@@ -1053,6 +1246,11 @@ impl WindowManager {
             size_limits: WindowSizeLimits::default(),
             title: None, // No title from IPC yet
             visible: true,
+            workspace_visible: true,
+            presentation_transform: None,
+            presentation_instances: Vec::new(),
+            presentation_clip: None,
+            presentation_clip_radius: 0,
             focused: false, // Will be focused via focus_window below
             buffer: None,   // No Vec buffer
             shm: Some(shm),
@@ -1065,6 +1263,8 @@ impl WindowManager {
             minimized: false,
             maximized: false,
             focused_mode_managed: false,
+            workspace_layout_managed: false,
+            workspace_restore_geometry: None,
             has_presented_frame: false,
             pending_maximize: false,
             initial_size_negotiated: false,
@@ -1164,7 +1364,11 @@ impl WindowManager {
         self.windows
             .iter()
             .rev()
-            .find(|w| w.visible && w.contains_point(x, y))
+            .find(|w| {
+                w.window_type != WindowType::ShellChrome
+                    && w.is_presented()
+                    && w.contains_presentation_point(x, y)
+            })
             .map(|w| w.id)
     }
 
@@ -1178,8 +1382,12 @@ impl WindowManager {
     ///
     /// * `id` - Window that should receive keyboard focus.
     pub fn focus_window(&mut self, id: WindowId) {
+        let system_shell_focus = self
+            .get_window(id)
+            .is_some_and(|window| window.window_type == WindowType::ShellBackground);
         if let Some(fullscreen_id) = self.fullscreen_window_id()
             && !self.is_in_fullscreen_group(id)
+            && !system_shell_focus
         {
             println!(
                 "[WindowManager] Window #{} cannot take focus from fullscreen window #{}",
@@ -1191,7 +1399,7 @@ impl WindowManager {
         if self.focused_window == Some(id)
             && self
                 .get_window(id)
-                .is_some_and(|window| window.focused && window.visible && !window.minimized)
+                .is_some_and(|window| window.focused && window.is_presented())
         {
             return;
         }
@@ -1231,6 +1439,8 @@ impl WindowManager {
             WindowType::AlwaysOnTop => true,
             WindowType::Taskbar => true,
             WindowType::Desktop => true, // Desktop can now accept focus (for events), but won't raise
+            WindowType::ShellBackground => true,
+            WindowType::ShellChrome => false,
             WindowType::ImePopup => false,
         }
     }
@@ -1900,7 +2110,11 @@ impl WindowManager {
             // Set default resizable behavior based on window type
             // Taskbar and Desktop windows should not be resizable by default
             match window_type {
-                WindowType::Taskbar | WindowType::Desktop | WindowType::ImePopup => {
+                WindowType::Taskbar
+                | WindowType::Desktop
+                | WindowType::ShellBackground
+                | WindowType::ShellChrome
+                | WindowType::ImePopup => {
                     w.resizable = false;
                 }
                 WindowType::Normal | WindowType::AlwaysOnTop => {
@@ -1910,7 +2124,7 @@ impl WindowManager {
             // Set raise_on_focus behavior based on window type
             // Desktop windows should NOT raise when focused (they stay in background)
             match window_type {
-                WindowType::Desktop => {
+                WindowType::Desktop | WindowType::ShellBackground | WindowType::ShellChrome => {
                     w.raise_on_focus = false;
                 }
                 WindowType::Normal | WindowType::Taskbar | WindowType::AlwaysOnTop => {
@@ -1950,7 +2164,9 @@ impl WindowManager {
 
         let old = core::mem::take(&mut self.windows);
         let mut desktop: Vec<Window> = Vec::new();
+        let mut shell_background: Vec<Window> = Vec::new();
         let mut normal: Vec<Window> = Vec::new();
+        let mut shell_chrome: Vec<Window> = Vec::new();
         let mut taskbar: Vec<Window> = Vec::new();
         let mut always_on_top: Vec<Window> = Vec::new();
         let mut fullscreen: Vec<Window> = Vec::new();
@@ -1965,7 +2181,9 @@ impl WindowManager {
             }
             match w.window_type {
                 WindowType::Desktop => desktop.push(w),
+                WindowType::ShellBackground => shell_background.push(w),
                 WindowType::Normal => normal.push(w),
+                WindowType::ShellChrome => shell_chrome.push(w),
                 WindowType::Taskbar => taskbar.push(w),
                 WindowType::AlwaysOnTop => always_on_top.push(w),
                 WindowType::ImePopup => ime_popup.push(w),
@@ -1981,7 +2199,9 @@ impl WindowManager {
 
         // Reconstruct bottom-to-top layer order.
         self.windows = desktop;
+        self.windows.extend(shell_background);
         self.windows.extend(normal);
+        self.windows.extend(shell_chrome);
         self.windows.extend(taskbar);
         self.windows.extend(always_on_top);
         self.windows.extend(fullscreen);
@@ -2098,7 +2318,9 @@ impl WindowManager {
         // Rebuild Z-order respecting window types
         let old = core::mem::take(&mut self.windows);
         let mut desktop: Vec<Window> = Vec::new();
+        let mut shell_background: Vec<Window> = Vec::new();
         let mut normal: Vec<Window> = Vec::new();
+        let mut shell_chrome: Vec<Window> = Vec::new();
         let mut taskbar: Vec<Window> = Vec::new();
         let mut always_on_top: Vec<Window> = Vec::new();
         let mut ime_popup: Vec<Window> = Vec::new();
@@ -2110,7 +2332,9 @@ impl WindowManager {
             } else {
                 match w.window_type {
                     WindowType::Desktop => desktop.push(w),
+                    WindowType::ShellBackground => shell_background.push(w),
                     WindowType::Normal => normal.push(w),
+                    WindowType::ShellChrome => shell_chrome.push(w),
                     WindowType::Taskbar => taskbar.push(w),
                     WindowType::AlwaysOnTop => always_on_top.push(w),
                     WindowType::ImePopup => ime_popup.push(w),
@@ -2132,7 +2356,9 @@ impl WindowManager {
                 // This ensures focused Desktop stays below all Normal windows
                 self.windows.extend(group);
                 self.windows.extend(desktop);
+                self.windows.extend(shell_background);
                 self.windows.extend(normal);
+                self.windows.extend(shell_chrome);
                 self.windows.extend(taskbar);
                 self.windows.extend(always_on_top);
                 self.windows.extend(ime_popup);
@@ -2140,8 +2366,10 @@ impl WindowManager {
             WindowType::Normal => {
                 // Normal: put desktop, then normal, then group at top of Normal layer
                 self.windows = desktop;
+                self.windows.extend(shell_background);
                 self.windows.extend(normal);
                 self.windows.extend(group);
+                self.windows.extend(shell_chrome);
                 self.windows.extend(taskbar);
                 self.windows.extend(always_on_top);
                 self.windows.extend(ime_popup);
@@ -2149,7 +2377,9 @@ impl WindowManager {
             WindowType::Taskbar => {
                 // Taskbar: desktop, normal, taskbar, group at top of Taskbar layer
                 self.windows = desktop;
+                self.windows.extend(shell_background);
                 self.windows.extend(normal);
+                self.windows.extend(shell_chrome);
                 self.windows.extend(taskbar);
                 self.windows.extend(group);
                 self.windows.extend(always_on_top);
@@ -2158,7 +2388,9 @@ impl WindowManager {
             WindowType::AlwaysOnTop => {
                 // AlwaysOnTop: desktop, normal, taskbar, always_on_top, group, ime_popup
                 self.windows = desktop;
+                self.windows.extend(shell_background);
                 self.windows.extend(normal);
+                self.windows.extend(shell_chrome);
                 self.windows.extend(taskbar);
                 self.windows.extend(always_on_top);
                 self.windows.extend(group);
@@ -2167,11 +2399,33 @@ impl WindowManager {
             WindowType::ImePopup => {
                 // IME popup: always above application and shell UI.
                 self.windows = desktop;
+                self.windows.extend(shell_background);
                 self.windows.extend(normal);
+                self.windows.extend(shell_chrome);
                 self.windows.extend(taskbar);
                 self.windows.extend(always_on_top);
                 self.windows.extend(ime_popup);
                 self.windows.extend(group);
+            }
+            WindowType::ShellBackground => {
+                self.windows = desktop;
+                self.windows.extend(shell_background);
+                self.windows.extend(group);
+                self.windows.extend(normal);
+                self.windows.extend(shell_chrome);
+                self.windows.extend(taskbar);
+                self.windows.extend(always_on_top);
+                self.windows.extend(ime_popup);
+            }
+            WindowType::ShellChrome => {
+                self.windows = desktop;
+                self.windows.extend(shell_background);
+                self.windows.extend(normal);
+                self.windows.extend(shell_chrome);
+                self.windows.extend(group);
+                self.windows.extend(taskbar);
+                self.windows.extend(always_on_top);
+                self.windows.extend(ime_popup);
             }
         }
 
@@ -2228,7 +2482,11 @@ impl WindowManager {
             // Skip taskbar/desktop windows from the list
             if matches!(
                 w.window_type,
-                WindowType::Taskbar | WindowType::Desktop | WindowType::ImePopup
+                WindowType::Taskbar
+                    | WindowType::Desktop
+                    | WindowType::ShellBackground
+                    | WindowType::ShellChrome
+                    | WindowType::ImePopup
             ) {
                 continue;
             }
@@ -2253,6 +2511,8 @@ impl WindowManager {
                 WindowType::Taskbar => 2,
                 WindowType::Desktop => 3,
                 WindowType::ImePopup => 4,
+                WindowType::ShellBackground => 5,
+                WindowType::ShellChrome => 6,
             };
 
             result.push((
@@ -2260,7 +2520,7 @@ impl WindowManager {
                 app_id,
                 title,
                 window_type,
-                w.visible,
+                w.is_presented(),
                 w.focused,
                 w.minimized,
             ));
@@ -2273,7 +2533,19 @@ impl WindowManager {
 mod tests {
     use std::vec::Vec;
 
-    use super::WindowManager;
+    use super::{WindowManager, rounded_rect_contains_point, rounded_rect_row_span};
+
+    #[test]
+    fn rounded_overview_clip_rejects_only_card_corners() {
+        let rect = (10, 20, 100, 60);
+        assert!(!rounded_rect_contains_point(rect, 12, 10, 20));
+        assert!(!rounded_rect_contains_point(rect, 12, 109, 20));
+        assert!(rounded_rect_contains_point(rect, 12, 22, 20));
+        assert!(rounded_rect_contains_point(rect, 12, 10, 32));
+        assert!(rounded_rect_contains_point(rect, 12, 60, 50));
+        assert_eq!(rounded_rect_row_span(rect, 12, 20), Some((22, 98)));
+        assert_eq!(rounded_rect_row_span(rect, 12, 50), Some((10, 110)));
+    }
 
     #[test]
     fn client_geometry_preserves_visible_origin_and_excludes_shadow_hit_area() {

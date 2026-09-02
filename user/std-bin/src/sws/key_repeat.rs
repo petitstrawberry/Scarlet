@@ -46,6 +46,98 @@ pub(crate) struct ConsumedKeys {
     keys: std::vec::Vec<(KeyboardSource, u16)>,
 }
 
+/// Tracks a modifier-only tap without stealing modifier chords from clients.
+///
+/// A tap completes only when the last tracked modifier is released and no
+/// other key was pressed while it was held. The compositor still forwards the
+/// modifier press and release to the focused client; this state only decides
+/// whether a global action should run after the release has been delivered.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct ModifierTapState {
+    held_modifiers: std::vec::Vec<(KeyboardSource, u16)>,
+    clean: bool,
+}
+
+impl ModifierTapState {
+    /// Observe one physical key transition.
+    ///
+    /// # Arguments
+    ///
+    /// * `source` - Keyboard source that produced the transition.
+    /// * `code` - Linux input-event key code.
+    /// * `value` - Physical key value (`0` release or `1` press).
+    /// * `modifier_codes` - Modifier keys that form the tap gesture.
+    /// * `blocked_at_start` - Whether another key was already held when the
+    ///   first modifier was pressed.
+    ///
+    /// # Returns
+    ///
+    /// `true` exactly once when a clean modifier-only tap completes.
+    pub(crate) fn observe(
+        &mut self,
+        source: KeyboardSource,
+        code: u16,
+        value: i32,
+        modifier_codes: &[u16],
+        blocked_at_start: bool,
+    ) -> bool {
+        let is_modifier = modifier_codes.contains(&code);
+        match value {
+            1 if is_modifier => {
+                let key = (source, code);
+                if self.held_modifiers.contains(&key) {
+                    return false;
+                }
+                if self.held_modifiers.is_empty() {
+                    self.clean = !blocked_at_start;
+                } else {
+                    // Pressing both modifier keys is a chord, not a tap.
+                    self.clean = false;
+                }
+                self.held_modifiers.push(key);
+                false
+            }
+            1 => {
+                if !self.held_modifiers.is_empty() {
+                    self.clean = false;
+                }
+                false
+            }
+            0 if is_modifier => {
+                let key = (source, code);
+                if !self.held_modifiers.contains(&key) {
+                    return false;
+                }
+                self.held_modifiers.retain(|held| *held != key);
+                if self.held_modifiers.is_empty() {
+                    let completed = self.clean;
+                    self.clean = false;
+                    completed
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        }
+    }
+
+    /// Cancel tap state owned by a disconnected keyboard source.
+    ///
+    /// # Arguments
+    ///
+    /// * `source` - Keyboard source being disconnected.
+    pub(crate) fn cancel_source(&mut self, source: KeyboardSource) {
+        let previous_len = self.held_modifiers.len();
+        self.held_modifiers
+            .retain(|(held_source, _)| *held_source != source);
+        if self.held_modifiers.len() != previous_len {
+            // A disconnect-generated modifier release must never toggle the
+            // shell, even if another source still owns a modifier key.
+            self.clean = false;
+        }
+    }
+}
+
 impl ConsumedKeys {
     pub(crate) fn contains_code(&self, code: u16) -> bool {
         self.keys.iter().any(|(_, held_code)| *held_code == code)
@@ -94,6 +186,11 @@ impl HeldKeys {
     /// Return whether any source currently holds one of the supplied keys.
     pub(crate) fn has_any(&self, codes: &[u16]) -> bool {
         self.keys.iter().any(|(_, code)| codes.contains(code))
+    }
+
+    /// Return whether any source holds a key outside the supplied set.
+    pub(crate) fn has_any_other_than(&self, codes: &[u16]) -> bool {
+        self.keys.iter().any(|(_, code)| !codes.contains(code))
     }
 
     /// Return a remaining owner for a logical key, if any.
@@ -246,6 +343,46 @@ mod tests {
 
     const KEY_SPACE: u16 = 0x39;
     const KEY_C: u16 = 0x2e;
+    const SUPER_KEYS: [u16; 2] = [KEY_LEFTMETA, KEY_RIGHTMETA];
+
+    #[test]
+    fn clean_modifier_tap_completes_on_release() {
+        let source = KeyboardSource::Local(0);
+        let mut tap = ModifierTapState::default();
+
+        assert!(!tap.observe(source, KEY_LEFTMETA, 1, &SUPER_KEYS, false));
+        assert!(tap.observe(source, KEY_LEFTMETA, 0, &SUPER_KEYS, false));
+        assert!(!tap.observe(source, KEY_LEFTMETA, 0, &SUPER_KEYS, false));
+    }
+
+    #[test]
+    fn chord_or_preexisting_key_cancels_modifier_tap() {
+        let source = KeyboardSource::Local(0);
+        let mut tap = ModifierTapState::default();
+
+        tap.observe(source, KEY_LEFTMETA, 1, &SUPER_KEYS, false);
+        tap.observe(source, KEY_SPACE, 1, &SUPER_KEYS, false);
+        tap.observe(source, KEY_SPACE, 0, &SUPER_KEYS, false);
+        assert!(!tap.observe(source, KEY_LEFTMETA, 0, &SUPER_KEYS, false));
+
+        tap.observe(source, KEY_LEFTMETA, 1, &SUPER_KEYS, true);
+        assert!(!tap.observe(source, KEY_LEFTMETA, 0, &SUPER_KEYS, false));
+    }
+
+    #[test]
+    fn multiple_super_keys_and_disconnect_never_complete_a_tap() {
+        let source = KeyboardSource::Remote(7);
+        let mut tap = ModifierTapState::default();
+
+        tap.observe(source, KEY_LEFTMETA, 1, &SUPER_KEYS, false);
+        tap.observe(source, KEY_RIGHTMETA, 1, &SUPER_KEYS, false);
+        assert!(!tap.observe(source, KEY_LEFTMETA, 0, &SUPER_KEYS, false));
+        assert!(!tap.observe(source, KEY_RIGHTMETA, 0, &SUPER_KEYS, false));
+
+        tap.observe(source, KEY_LEFTMETA, 1, &SUPER_KEYS, false);
+        tap.cancel_source(source);
+        assert!(!tap.observe(source, KEY_LEFTMETA, 0, &SUPER_KEYS, false));
+    }
 
     #[test]
     fn repeat_starts_after_delay_and_uses_20_hz_interval() {
@@ -422,6 +559,16 @@ mod tests {
         assert!(!held.update(KeyboardSource::Local(0), KEY_LEFTCTRL, 0));
         assert!(held.has_any(&[KEY_LEFTCTRL]));
         assert!(held.update(KeyboardSource::Local(1), KEY_LEFTCTRL, 0));
+    }
+
+    #[test]
+    fn held_key_filter_distinguishes_a_modifier_only_press() {
+        let source = KeyboardSource::Local(0);
+        let mut held = HeldKeys::default();
+        held.update(source, KEY_LEFTMETA, 1);
+        assert!(!held.has_any_other_than(&SUPER_KEYS));
+        held.update(source, KEY_SPACE, 1);
+        assert!(held.has_any_other_than(&SUPER_KEYS));
     }
 
     #[test]

@@ -1,16 +1,11 @@
-//! Scarlet Desktop TaskBar (ScarletUI version)
+//! Scarlet workspace shell.
 //!
-//! macOS-style menu bar implemented with ScarletUI
-
-#![no_std]
-#![no_main]
+//! Owns the desktop bar, Control Center, Home, and the privileged workspace
+//! controller connection while SWS retains authoritative surface state.
 
 extern crate alloc;
-extern crate scarlet_desktop_config;
-extern crate scarlet_std as std;
-extern crate scarlet_ui;
-extern crate scarlet_ui_macros;
 
+mod background;
 mod control_center;
 mod status;
 
@@ -27,16 +22,19 @@ use sbus::{Argument as SbusArgument, Message as SbusMessage};
 use sbus_client::Connection as SbusConnection;
 use scarlet_desktop_config::{
     DESKTOP_FILE_MANAGER_BUS_NAME, DESKTOP_FILE_MANAGER_INTERFACE,
-    DESKTOP_FILE_MANAGER_OBJECT_PATH, DESKTOP_FILE_MANAGER_SHOW_METHOD, DESKTOP_LAUNCHER_BUS_NAME,
-    DESKTOP_LAUNCHER_INTERFACE, DESKTOP_LAUNCHER_OBJECT_PATH, DESKTOP_LAUNCHER_SHOW_METHOD,
-    DESKTOP_SETTINGS_BUS_NAME, DESKTOP_SETTINGS_GET_STATUS_PREFERENCES_METHOD,
-    DESKTOP_SETTINGS_INTERFACE, DESKTOP_SETTINGS_OBJECT_PATH, DESKTOP_SETTINGS_SERVICE_INTERFACE,
+    DESKTOP_FILE_MANAGER_OBJECT_PATH, DESKTOP_FILE_MANAGER_SHOW_METHOD, DESKTOP_SETTINGS_BUS_NAME,
+    DESKTOP_SETTINGS_GET_STATUS_PREFERENCES_METHOD, DESKTOP_SETTINGS_INTERFACE,
+    DESKTOP_SETTINGS_OBJECT_PATH, DESKTOP_SETTINGS_SERVICE_INTERFACE,
     DESKTOP_SETTINGS_SERVICE_OBJECT_PATH, DESKTOP_SETTINGS_SIGNAL_SENDER,
-    DESKTOP_STATUS_PREFERENCES_CHANGED_SIGNAL, StatusItemId, StatusPreferences,
+    DESKTOP_STATUS_PREFERENCES_CHANGED_SIGNAL, DESKTOP_STEMD_BUS_NAME, DESKTOP_STEMD_INTERFACE,
+    DESKTOP_STEMD_LAUNCH_OR_FOCUS_METHOD, DESKTOP_STEMD_LIST_APPLICATIONS_METHOD,
+    DESKTOP_STEMD_OBJECT_PATH, StatusItemId, StatusPreferences,
 };
+use scarlet_os::socket::Socket;
 use scarlet_os::time;
+use scarlet_os::{network, process, scheduler};
 use scarlet_ui::buffer::Buffer;
-use scarlet_ui::color::ColorPalette;
+use scarlet_ui::color::{Color, ColorPalette};
 use scarlet_ui::element::{ElementRenderObject, LayoutConstraints};
 use scarlet_ui::geometry::Size;
 use scarlet_ui::graphics;
@@ -44,10 +42,11 @@ use scarlet_ui::platform::WindowPlacement;
 use scarlet_ui::prelude::*;
 use scarlet_ui::views::menu::MenuRenderObject;
 use scarlet_ui::views::{MenuAction, MenuBar, MenuItem, MenuItemContent};
+use scarlet_ui::{GridView, IconView, StateId, hstack, vstack};
 use scarlet_ui::{
-    Icon, IconSize, MenuBarModel, MenuItemModel, PlatformWindow, dismiss_window, open_window,
+    Icon, IconSize, KeyCode, ListView, MenuBarModel, MenuItemModel, PlatformWindow, dismiss_window,
+    open_window,
 };
-use scarlet_ui::{StateId, hstack};
 use scarlet_ui_macros::View;
 use serde::Deserialize;
 use serde_json_core::from_str;
@@ -72,13 +71,34 @@ const WINDOW_LIST_TIMEOUT_MS: u64 = 250;
 const WINDOW_LIST_REFRESH_TICKS: u32 = 60;
 const OVERVIEW_MENU_INDEX: usize = usize::MAX;
 const CONTROL_CENTER_SCENE_KEY: &str = "control-center";
-const TASKBAR_SETTINGS_LISTENER_BUS_NAME: &str = "org.scarlet-os.desktop.taskbar.settings-listener";
+const HOME_SCENE_KEY: &str = "home";
+const HOME_CATALOG_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
+const HOME_CATALOG_TIMEOUT_MS: u64 = 3_000;
+const HOME_SEARCH_RESULT_ROW_HEIGHT: f32 = 64.0;
+const HOME_GRID_CELL_WIDTH: f32 = 112.0;
+const HOME_GRID_COLUMN_SPACING: f32 = 12.0;
+const HOME_BACKDROP_TINT: Color = Color::rgba_f32(0.30, 0.34, 0.41, 0.78);
+const STATUS_NAVIGATION_HOVER: Color = Color::rgba_f32(0.0, 0.0, 0.0, 0.24);
+const STATUS_NAVIGATION_ACTIVE: Color = Color::rgba_f32(0.0, 0.0, 0.0, 0.36);
+const STATUS_BAR_SETTINGS_LISTENER_BUS_NAME: &str =
+    "org.scarlet-os.desktop.status-bar.settings-listener";
 const SBUS_METHOD_TIMEOUT_MS: u64 = 1_000;
 const CONTROL_CENTER_MARGIN: i32 = 8;
 const OVERVIEW_SYSTEM_ROWS: usize = 3;
 const OVERVIEW_NAVIGATION_ROWS: usize = 2;
 const OVERVIEW_SEPARATOR_HEIGHT: f32 = 1.0;
 const OVERVIEW_VERTICAL_PADDING: f32 = 4.0;
+
+fn set_state_if_changed<T>(state: &State<T>, next: T) -> bool
+where
+    T: Clone + PartialEq,
+{
+    if state.get() == next {
+        return false;
+    }
+    state.set(next);
+    true
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct WindowSnapshot {
@@ -113,6 +133,196 @@ struct ShellWindow {
     visible: bool,
     focused: bool,
     minimized: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct HomeApplication {
+    app_id: String,
+    name: String,
+    icon: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WorkspaceCommand {
+    ShowHome,
+    ShowWorkspace,
+    ReturnToWorkspace,
+    ToggleOverview,
+    Cycle(i32),
+    ToggleSplit,
+}
+
+fn repaired_shell_layout_after_removal(
+    layout: sws::TabletLayout,
+    removed_window_id: u32,
+    remaining_window_ids: &[u32],
+) -> sws::TabletLayout {
+    let fallback = || {
+        remaining_window_ids
+            .first()
+            .copied()
+            .map_or(sws::TabletLayout::Empty, |window_id| {
+                sws::TabletLayout::Single { window_id }
+            })
+    };
+    match layout {
+        sws::TabletLayout::Empty => fallback(),
+        sws::TabletLayout::Single { window_id } if window_id == removed_window_id => fallback(),
+        sws::TabletLayout::Single { window_id } => sws::TabletLayout::Single { window_id },
+        sws::TabletLayout::Split {
+            first_window_id,
+            second_window_id,
+            ..
+        } if first_window_id == removed_window_id => {
+            if remaining_window_ids.contains(&second_window_id) {
+                sws::TabletLayout::Single {
+                    window_id: second_window_id,
+                }
+            } else {
+                fallback()
+            }
+        }
+        sws::TabletLayout::Split {
+            first_window_id,
+            second_window_id,
+            ..
+        } if second_window_id == removed_window_id => {
+            if remaining_window_ids.contains(&first_window_id) {
+                sws::TabletLayout::Single {
+                    window_id: first_window_id,
+                }
+            } else {
+                fallback()
+            }
+        }
+        layout => layout,
+    }
+}
+
+fn workspace_transaction_for_command(
+    state: &sws::WorkspaceState,
+    command: WorkspaceCommand,
+) -> Option<sws::WorkspaceTransaction> {
+    let mut active_workspace = state.active_workspace;
+    let mut presentation = state.presentation;
+    let mut workspaces = state.workspaces.clone();
+
+    match command {
+        WorkspaceCommand::ShowHome => {
+            if presentation == sws::ShellPresentation::Home {
+                return None;
+            }
+            presentation = sws::ShellPresentation::Home;
+        }
+        WorkspaceCommand::ShowWorkspace => {
+            if presentation == sws::ShellPresentation::Workspace {
+                return None;
+            }
+            presentation = sws::ShellPresentation::Workspace;
+        }
+        WorkspaceCommand::ReturnToWorkspace => {
+            active_workspace = state.normal_workspace;
+            if presentation == sws::ShellPresentation::Workspace
+                && active_workspace == state.active_workspace
+            {
+                return None;
+            }
+            presentation = sws::ShellPresentation::Workspace;
+        }
+        WorkspaceCommand::ToggleOverview => {
+            if presentation == sws::ShellPresentation::Overview {
+                active_workspace = state.normal_workspace;
+                presentation = sws::ShellPresentation::Workspace;
+            } else {
+                presentation = sws::ShellPresentation::Overview;
+            }
+        }
+        WorkspaceCommand::Cycle(direction) => {
+            if workspaces.len() < 2 || direction == 0 {
+                return None;
+            }
+            let index = workspaces
+                .iter()
+                .position(|workspace| workspace.id == active_workspace)?;
+            let next = if direction < 0 {
+                index.checked_sub(1)?
+            } else {
+                let next = index.saturating_add(1);
+                (next < workspaces.len()).then_some(next)?
+            };
+            active_workspace = workspaces[next].id;
+            presentation = sws::ShellPresentation::Workspace;
+        }
+        WorkspaceCommand::ToggleSplit => {
+            let active_index = workspaces
+                .iter()
+                .position(|workspace| workspace.id == active_workspace)?;
+            match workspaces[active_index].tablet_layout {
+                sws::TabletLayout::Split {
+                    first_window_id, ..
+                } => {
+                    workspaces[active_index].tablet_layout = sws::TabletLayout::Single {
+                        window_id: first_window_id,
+                    };
+                }
+                sws::TabletLayout::Empty => return None,
+                sws::TabletLayout::Single {
+                    window_id: first_window_id,
+                } => {
+                    let local_candidate = workspaces[active_index]
+                        .window_ids
+                        .iter()
+                        .copied()
+                        .find(|window_id| *window_id != first_window_id);
+                    let donor = if local_candidate.is_none() {
+                        (1..workspaces.len()).find_map(|offset| {
+                            let index = (active_index + offset) % workspaces.len();
+                            workspaces[index]
+                                .window_ids
+                                .first()
+                                .copied()
+                                .map(|window_id| (index, window_id))
+                        })
+                    } else {
+                        None
+                    };
+                    let second_window_id = local_candidate.or_else(|| donor.map(|(_, id)| id))?;
+
+                    if let Some((donor_index, _)) = donor {
+                        workspaces[donor_index]
+                            .window_ids
+                            .retain(|window_id| *window_id != second_window_id);
+                        workspaces[donor_index].tablet_layout = repaired_shell_layout_after_removal(
+                            workspaces[donor_index].tablet_layout,
+                            second_window_id,
+                            &workspaces[donor_index].window_ids,
+                        );
+                        workspaces[active_index].window_ids.push(second_window_id);
+                    }
+                    let active_index = workspaces
+                        .iter()
+                        .position(|workspace| workspace.id == active_workspace)?;
+                    workspaces[active_index].tablet_layout = sws::TabletLayout::Split {
+                        axis: sws::SplitAxis::Horizontal,
+                        first_window_id,
+                        second_window_id,
+                        ratio_milli: 500,
+                    };
+                }
+            }
+            presentation = sws::ShellPresentation::Workspace;
+        }
+    }
+
+    Some(sws::WorkspaceTransaction {
+        base_generation: state.generation,
+        active_workspace,
+        presentation,
+        workspaces,
+        // Runtime animation remains deliberately disabled until the complete
+        // state and input paths have settled.
+        transition: sws::TransitionSpec::default(),
+    })
 }
 
 fn is_shell_app(app_id: &str) -> bool {
@@ -217,7 +427,7 @@ impl OverviewGeometry {
 }
 
 fn overview_page_capacity(screen_height: u32, layout: ShellLayout) -> usize {
-    let available_height = screen_height.saturating_sub(layout.taskbar_height() + 8) as f32;
+    let available_height = screen_height.saturating_sub(layout.status_bar_height() + 8) as f32;
     let row_height = OverviewGeometry::for_layout(layout).row_height;
     let row_space =
         (available_height - OVERVIEW_VERTICAL_PADDING - OVERVIEW_SEPARATOR_HEIGHT).max(0.0);
@@ -246,26 +456,26 @@ fn overview_page_bounds(
     (start, start.saturating_add(capacity).min(item_count))
 }
 
-fn is_taskbar_debug_enabled() -> bool {
+fn is_status_bar_debug_enabled() -> bool {
     static LOG_CACHE: AtomicU8 = AtomicU8::new(u8::MAX);
     let cached = LOG_CACHE.load(Ordering::Relaxed);
     if cached != u8::MAX {
         return cached != 0;
     }
     let enabled = match std::env::var("SWS_LOG") {
-        Some(value) => matches!(
+        Ok(value) => matches!(
             value.as_str(),
             "debug" | "DEBUG" | "3" | "trace" | "TRACE" | "4"
         ),
-        None => false,
+        Err(_) => false,
     };
     LOG_CACHE.store(enabled as u8, Ordering::Relaxed);
     enabled
 }
 
-macro_rules! taskbar_debug {
+macro_rules! status_bar_debug {
     ($($arg:tt)*) => {
-        if is_taskbar_debug_enabled() {
+        if is_status_bar_debug_enabled() {
             std::println!($($arg)*);
         }
     };
@@ -275,7 +485,7 @@ macro_rules! taskbar_debug {
 ///
 /// The shell deliberately keeps this independent of individual views so a
 /// future overview, workspace switcher, or quick-settings surface can use the
-/// same logical and physical coordinate system as the taskbar.
+/// same logical and physical coordinate system as the StatusBar.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct ShellLayout {
     tablet_mode: bool,
@@ -291,8 +501,8 @@ struct PhysicalWorkarea {
 }
 
 impl ShellLayout {
-    const LAPTOP_TASKBAR_HEIGHT: u32 = 32;
-    const TABLET_TASKBAR_HEIGHT: u32 = Self::LAPTOP_TASKBAR_HEIGHT;
+    const LAPTOP_STATUS_BAR_HEIGHT: u32 = 32;
+    const TABLET_STATUS_BAR_HEIGHT: u32 = 40;
 
     /// Build a layout from the compositor state, treating an unknown state as
     /// the laptop/desktop default.
@@ -302,38 +512,38 @@ impl ShellLayout {
         }
     }
 
-    /// Return the taskbar height in logical pixels.
-    const fn taskbar_height(self) -> u32 {
+    /// Return the StatusBar height in logical pixels.
+    const fn status_bar_height(self) -> u32 {
         if self.tablet_mode {
-            Self::TABLET_TASKBAR_HEIGHT
+            Self::TABLET_STATUS_BAR_HEIGHT
         } else {
-            Self::LAPTOP_TASKBAR_HEIGHT
+            Self::LAPTOP_STATUS_BAR_HEIGHT
         }
     }
 
-    /// Return the taskbar window size for a logical output width.
-    fn taskbar_window_size(self, screen_width: f32) -> Size {
-        Size::new(screen_width, self.taskbar_height() as f32)
+    /// Return the StatusBar window size for a logical output width.
+    fn status_bar_window_size(self, screen_width: f32) -> Size {
+        Size::new(screen_width, self.status_bar_height() as f32)
     }
 
-    /// Return the logical Y coordinate immediately below the taskbar.
+    /// Return the logical Y coordinate immediately below the StatusBar.
     const fn popup_y(self) -> i32 {
-        self.taskbar_height() as i32
+        self.status_bar_height() as i32
     }
 
-    /// Return the physical popup anchor directly below the taskbar.
+    /// Return the physical popup anchor directly below the StatusBar.
     fn physical_popup_y(self, scale_milli: u32) -> i32 {
         scale_u32(self.popup_y() as u32, scale_milli) as i32
     }
 
-    /// Return a physical workarea after reserving the scaled taskbar height.
+    /// Return a physical workarea after reserving the scaled StatusBar height.
     fn physical_workarea(
         self,
         physical_width: u32,
         physical_height: u32,
         scale_milli: u32,
     ) -> PhysicalWorkarea {
-        let physical_bar_height = scale_u32(self.taskbar_height(), scale_milli);
+        let physical_bar_height = scale_u32(self.status_bar_height(), scale_milli);
         PhysicalWorkarea {
             x: 0,
             y: physical_bar_height as i32,
@@ -353,29 +563,61 @@ struct StatusItemTokens {
 }
 
 impl StatusItemTokens {
-    const fn for_layout(_layout: ShellLayout) -> Self {
-        Self {
-            logical_height: 24.0,
-            font_size: 13.0,
-            horizontal_padding: 3.0,
-            spacing: 3.0,
-            bar_padding: MENU_BAR_OUTER_PADDING,
+    const fn for_layout(layout: ShellLayout) -> Self {
+        if layout.tablet_mode {
+            Self {
+                logical_height: 30.0,
+                font_size: 14.0,
+                horizontal_padding: 6.0,
+                spacing: 5.0,
+                bar_padding: MENU_BAR_OUTER_PADDING,
+            }
+        } else {
+            Self {
+                logical_height: 24.0,
+                font_size: 13.0,
+                horizontal_padding: 3.0,
+                spacing: 3.0,
+                bar_padding: MENU_BAR_OUTER_PADDING,
+            }
         }
     }
 }
 
-fn build_passive_clock(label: impl Into<String>, tokens: StatusItemTokens) -> impl View + Clone {
-    passive_clock_control(label, tokens).frame_height(tokens.logical_height)
+fn build_passive_clock(
+    label: impl Into<String>,
+    tokens: StatusItemTokens,
+    foreground: Option<Color>,
+) -> impl View + Clone {
+    passive_clock_control(label, tokens, foreground).frame_height(tokens.logical_height)
 }
 
-fn status_text_control(label: impl Into<String>, tokens: StatusItemTokens) -> MenuItem {
-    MenuItem::new(label)
+fn menu_item_with_foreground(item: MenuItem, foreground: Option<Color>) -> MenuItem {
+    match foreground {
+        Some(color) => item
+            .foreground_color(color)
+            .interaction_background_colors(STATUS_NAVIGATION_HOVER, STATUS_NAVIGATION_ACTIVE),
+        None => item,
+    }
+}
+
+fn status_text_control(
+    label: impl Into<String>,
+    tokens: StatusItemTokens,
+    foreground: Option<Color>,
+) -> MenuItem {
+    let item = MenuItem::new(label)
         .font_size(tokens.font_size)
-        .padding(tokens.horizontal_padding)
+        .padding(tokens.horizontal_padding);
+    menu_item_with_foreground(item, foreground)
 }
 
-fn passive_clock_control(label: impl Into<String>, tokens: StatusItemTokens) -> MenuItem {
-    status_text_control(label, tokens)
+fn passive_clock_control(
+    label: impl Into<String>,
+    tokens: StatusItemTokens,
+    foreground: Option<Color>,
+) -> MenuItem {
+    status_text_control(label, tokens, foreground)
 }
 
 fn toggle_control_center(open: State<bool>) {
@@ -423,23 +665,25 @@ fn build_status_cluster(
     presentation: StatusPresentation,
     tokens: StatusItemTokens,
     control_center_open: State<bool>,
+    foreground: Option<Color>,
 ) -> impl View + Clone {
     let mut items = Vec::new();
     if let Some(cpu_label) = status_item_label(&snapshot, presentation, StatusItemId::Cpu) {
         items.push(boxed(
-            status_text_control(cpu_label, tokens).frame_height(tokens.logical_height),
+            status_text_control(cpu_label, tokens, foreground).frame_height(tokens.logical_height),
         ));
     }
     if snapshot.preferences.is_visible(StatusItemId::Audio) {
         let volume_icon = volume_status_icon(snapshot.audio_volume_percent, snapshot.audio_muted);
+        let item = MenuItem::new("")
+            .icon(volume_icon)
+            .icon_size(IconSize::Small)
+            .font_size(tokens.font_size)
+            .padding(tokens.horizontal_padding)
+            .on_click(move || toggle_control_center(control_center_open.clone()));
+        let item = menu_item_with_foreground(item, foreground);
         items.push(boxed(
-            MenuItem::new("")
-                .icon(volume_icon)
-                .icon_size(IconSize::Small)
-                .font_size(tokens.font_size)
-                .padding(tokens.horizontal_padding)
-                .on_click(move || toggle_control_center(control_center_open.clone()))
-                .frame(tokens.logical_height, tokens.logical_height),
+            item.frame(tokens.logical_height, tokens.logical_height),
         ));
     }
     HStack::new(DynamicViews::new(items))
@@ -497,12 +741,12 @@ fn connect_sws_with_screen_size_retry() -> core::result::Result<SwsScreenConnect
                 input_environment.and_then(|environment| environment.tablet_mode()),
             );
             println!(
-                "[TaskBar] Connected to SWS after {} attempt(s); screen={}x{} scale_milli={} taskbar_height={}",
+                "[StatusBar] Connected to SWS after {} attempt(s); screen={}x{} scale_milli={} status_bar_height={}",
                 attempt + 1,
                 width,
                 height,
                 scale_milli,
-                layout.taskbar_height(),
+                layout.status_bar_height(),
             );
             return Ok(SwsScreenConnection {
                 connection: conn,
@@ -531,7 +775,7 @@ fn publish_workarea(
     let workarea = layout.physical_workarea(physical_width, physical_height, scale_milli);
     let _ = conn.set_workarea(workarea.x, workarea.y, workarea.width, workarea.height);
     println!(
-        "[TaskBar] Workarea: x={}, y={}, width={}, height={}",
+        "[StatusBar] Workarea: x={}, y={}, width={}, height={}",
         workarea.x, workarea.y, workarea.width, workarea.height
     );
 }
@@ -549,20 +793,34 @@ fn publish_current_workarea(conn: &sws::Connection, layout: ShellLayout) {
     }
 }
 
-/// Return whether a platform taskbar surface must change size.
+/// Return whether a platform StatusBar surface must change size.
 ///
 /// Keeping this comparison pure prevents the sync hook from issuing a resize
 /// on every application-runner tick after a layout transition has settled.
-fn taskbar_resize_needed(current: Size, desired: Size) -> bool {
+fn status_bar_resize_needed(current: Size, desired: Size) -> bool {
     current != desired
 }
 
-fn control_center_body_position(screen_width: f32, popup_y: i32, body_width: f32) -> (i32, i32) {
+fn control_center_body_position(
+    screen_width: f32,
+    screen_height: f32,
+    popup_y: i32,
+    body_size: Size,
+    presentation: ControlCenterPresentation,
+) -> (i32, i32) {
     let outsets = ElevationRole::Floating.paint_outsets();
-    (
-        (screen_width - body_width - CONTROL_CENTER_MARGIN as f32 - outsets.right).max(0.0) as i32,
-        popup_y + CONTROL_CENTER_MARGIN + outsets.top as i32,
-    )
+    match presentation {
+        ControlCenterPresentation::LaptopPopover => (
+            (screen_width - body_size.width - CONTROL_CENTER_MARGIN as f32 - outsets.right).max(0.0)
+                as i32,
+            popup_y + CONTROL_CENTER_MARGIN + outsets.top as i32,
+        ),
+        ControlCenterPresentation::TabletSheet => (
+            ((screen_width - body_size.width) / 2.0).max(0.0) as i32,
+            (screen_height - body_size.height - 24.0 - outsets.bottom)
+                .max((popup_y + CONTROL_CENTER_MARGIN) as f32) as i32,
+        ),
+    }
 }
 
 /// Apply one compositor input-environment snapshot to reactive shell state.
@@ -581,9 +839,9 @@ fn apply_input_environment(
         open_menu_index.set(None);
         shell_layout.set(next_layout);
         println!(
-            "[TaskBar] Input environment generation {} selected taskbar_height={}",
+            "[StatusBar] Input environment generation {} selected status_bar_height={}",
             environment.generation,
-            next_layout.taskbar_height()
+            next_layout.status_bar_height()
         );
         publish_current_workarea(conn, next_layout);
     }
@@ -592,7 +850,7 @@ fn apply_input_environment(
 /// Keep an independent SWS connection subscribed to shell-environment changes.
 ///
 /// The ScarletUI runner owns a different connection, so a listener transport
-/// failure cannot stop the taskbar from rendering. Each reconnect re-queries
+/// failure cannot stop the StatusBar from rendering. Each reconnect re-queries
 /// the authoritative input environment before accepting notifications.
 fn listen_for_input_environment_changes(
     shell_layout: State<ShellLayout>,
@@ -605,7 +863,7 @@ fn listen_for_input_environment_changes(
             ..
         }) = connect_sws_with_screen_size_retry()
         else {
-            println!("[TaskBar] Input-environment listener reconnect failed; retrying");
+            println!("[StatusBar] Input-environment listener reconnect failed; retrying");
             std::thread::sleep(Duration::from_millis(SWS_RETRY_DELAY_MS));
             continue;
         };
@@ -616,7 +874,7 @@ fn listen_for_input_environment_changes(
 
         loop {
             if conn.dispatch().is_err() {
-                println!("[TaskBar] Input-environment listener transport lost; reconnecting");
+                println!("[StatusBar] Input-environment listener transport lost; reconnecting");
                 break;
             }
             while let Some(event) = conn.poll_event() {
@@ -641,11 +899,12 @@ fn listen_for_input_environment_changes(
     }
 }
 
-/// TaskBar Application
+/// Unified visual workspace shell application.
 #[derive(View, Clone)]
-struct TaskBarApp {
+struct ShellApp {
     clock: State<u32>,
     screen_width: State<f32>,
+    screen_height: State<f32>,
     shell_layout: State<ShellLayout>,
     menu_bar: State<MenuBarModel>,
     active_window_id: State<u32>,
@@ -662,9 +921,18 @@ struct TaskBarApp {
     control_center_action: State<Option<ControlCenterAction>>,
     control_center_armed_power: State<Option<ArmedPowerAction>>,
     control_center_size: State<Size>,
+    home_applications: State<Vec<HomeApplication>>,
+    home_filtered_applications: State<Vec<HomeApplication>>,
+    home_query: State<String>,
+    home_search_focused: State<bool>,
+    home_selected: State<Option<usize>>,
+    home_hovered: State<Option<usize>>,
+    home_window_id: State<u32>,
+    workspace_state: State<Option<sws::WorkspaceState>>,
+    workspace_commands: State<Vec<WorkspaceCommand>>,
 }
 
-impl TaskBarApp {
+impl ShellApp {
     fn new(shell_layout: ShellLayout) -> Self {
         let root_menu = MenuTree {
             items: default_root_menu_items(),
@@ -679,6 +947,7 @@ impl TaskBarApp {
         Self {
             clock: State::new(StateId::new(2), 0),
             screen_width: State::new(StateId::new(3), 1920.0),
+            screen_height: State::new(StateId::new(22), 1080.0),
             shell_layout: State::new(StateId::new(13), shell_layout),
             menu_bar: State::new(StateId::new(4), menu_bar_from_tree(&root_menu)),
             active_window_id: State::new(StateId::new(5), 0),
@@ -695,6 +964,15 @@ impl TaskBarApp {
             control_center_action: State::new(StateId::new(19), None),
             control_center_armed_power: State::new(StateId::new(20), None),
             control_center_size: State::new(StateId::new(21), initial_control_center.body_size()),
+            home_applications: State::new(StateId::new(23), Vec::new()),
+            home_filtered_applications: State::new(StateId::new(28), Vec::new()),
+            home_query: State::new(StateId::new(29), String::new()),
+            home_search_focused: State::new(StateId::new(31), false),
+            home_selected: State::new(StateId::new(24), None),
+            home_hovered: State::new(StateId::new(30), None),
+            home_window_id: State::new(StateId::new(25), 0),
+            workspace_state: State::new(StateId::new(26), None),
+            workspace_commands: State::new(StateId::new(27), Vec::new()),
         }
     }
 
@@ -761,61 +1039,7 @@ struct MenuEntryPayload {
 }
 
 fn default_root_menu_items() -> Vec<TaskMenuItem> {
-    vec![TaskMenuItem {
-        id: String::from("system_scarlet"),
-        title: String::from("Scarlet"),
-        enabled: true,
-        shortcut: None,
-        children: default_system_menu_entries(),
-    }]
-}
-
-fn default_system_menu_entries() -> Vec<TaskMenuEntry> {
-    vec![
-        TaskMenuEntry::Item(TaskMenuItem {
-            id: String::from("system_launcher"),
-            title: String::from("Applications"),
-            enabled: true,
-            shortcut: Some(String::from("Super+Space")),
-            children: Vec::new(),
-        }),
-        TaskMenuEntry::Item(TaskMenuItem {
-            id: String::from("system_terminal"),
-            title: String::from("Terminal"),
-            enabled: true,
-            shortcut: None,
-            children: Vec::new(),
-        }),
-        TaskMenuEntry::Item(TaskMenuItem {
-            id: String::from("system_files"),
-            title: String::from("Files"),
-            enabled: true,
-            shortcut: None,
-            children: Vec::new(),
-        }),
-        TaskMenuEntry::Item(TaskMenuItem {
-            id: String::from("system_clock"),
-            title: String::from("Clock"),
-            enabled: true,
-            shortcut: None,
-            children: Vec::new(),
-        }),
-        TaskMenuEntry::Item(TaskMenuItem {
-            id: String::from("system_settings"),
-            title: String::from("Settings"),
-            enabled: true,
-            shortcut: None,
-            children: Vec::new(),
-        }),
-        TaskMenuEntry::Separator,
-        TaskMenuEntry::Item(TaskMenuItem {
-            id: String::from("system_quit"),
-            title: String::from("Shutdown"),
-            enabled: true,
-            shortcut: None,
-            children: Vec::new(),
-        }),
-    ]
+    Vec::new()
 }
 
 fn status_preferences_from_arguments(args: &[SbusArgument]) -> Option<StatusPreferences> {
@@ -859,7 +1083,7 @@ fn listen_for_status_preferences(status_snapshot: State<StatusProviderSnapshot>)
             }
         };
         if connection
-            .register_service(TASKBAR_SETTINGS_LISTENER_BUS_NAME)
+            .register_service(STATUS_BAR_SETTINGS_LISTENER_BUS_NAME)
             .is_err()
         {
             std::thread::sleep(Duration::from_millis(SWS_RETRY_DELAY_MS));
@@ -909,7 +1133,7 @@ fn poll_status_provider(status_snapshot: State<StatusProviderSnapshot>) {
             None => None,
         };
         let preferences = status_snapshot.get().preferences;
-        let sampled = provider.snapshot(&preferences, std::task::cpu_usage(), audio_state);
+        let sampled = provider.snapshot(&preferences, scheduler::cpu_usage(), audio_state);
         status_snapshot.update(|current| {
             current.cpu_percent = sampled.cpu_percent;
             current.audio_volume_percent = sampled.audio_volume_percent;
@@ -973,7 +1197,7 @@ fn collect_audio_snapshot(status: &StatusProviderSnapshot) -> AudioSnapshot {
 }
 
 fn collect_network_snapshot() -> NetworkSnapshot {
-    let Ok((_status, interfaces)) = std::network::list_interfaces() else {
+    let Ok(interfaces) = network::list_interface_configs() else {
         return NetworkSnapshot {
             available: false,
             interfaces: Vec::new(),
@@ -984,7 +1208,7 @@ fn collect_network_snapshot() -> NetworkSnapshot {
         interfaces: interfaces
             .into_iter()
             .map(|interface| {
-                let name = fixed_string(&interface.name);
+                let name = interface.interface_name().unwrap_or_default().to_string();
                 let connected = interface.ip_set != 0;
                 NetworkInterfaceSnapshot {
                     name: if name.is_empty() {
@@ -1040,7 +1264,7 @@ fn collect_control_center_snapshot(status: StatusProviderSnapshot) -> ControlCen
         network: collect_network_snapshot(),
         system: SystemSnapshot {
             cpu_percent: status.cpu_percent,
-            task_count: Some(std::task::info().len().min(u32::MAX as usize) as u32),
+            task_count: process::task_count().map(|count| count.min(u32::MAX as usize) as u32),
         },
         input_environment: collect_input_environment_snapshot(),
     }
@@ -1128,10 +1352,10 @@ fn apply_control_center_action(
             control_center_open.set(false);
         }
         ControlCenterAction::ConfirmPowerOff => {
-            std::task::shutdown(std::task::ShutdownType::PowerOff);
+            process::shutdown(process::ShutdownType::PowerOff);
         }
         ControlCenterAction::ConfirmReboot => {
-            std::task::shutdown(std::task::ShutdownType::Reboot);
+            process::shutdown(process::ShutdownType::Reboot);
         }
         ControlCenterAction::ArmPowerOff | ControlCenterAction::ArmReboot => {}
     }
@@ -1213,7 +1437,7 @@ fn show_file_manager() {
             return;
         }
     }
-    println!("[TaskBar] File Manager service is not ready");
+    println!("[StatusBar] File Manager service is not ready");
 }
 
 fn request_file_manager_window() -> bool {
@@ -1232,29 +1456,8 @@ fn request_file_manager_window() -> bool {
         .is_ok()
 }
 
-fn show_launcher() {
-    for _ in 0..5 {
-        if let Ok(mut connection) = SbusConnection::connect()
-            && connection
-                .call_method_timeout(
-                    DESKTOP_LAUNCHER_BUS_NAME,
-                    DESKTOP_LAUNCHER_OBJECT_PATH,
-                    DESKTOP_LAUNCHER_INTERFACE,
-                    DESKTOP_LAUNCHER_SHOW_METHOD,
-                    Vec::new(),
-                    1_000,
-                )
-                .is_ok()
-        {
-            return;
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    println!("[TaskBar] Resident launcher is not ready");
-}
-
 fn send_launch_command(command: u8, app_id: &[u8]) {
-    if let Ok(mut stream) = std::socket::Socket::new()
+    if let Ok(mut stream) = Socket::new()
         && stream.connect("/tmp/stemd.sock").is_ok()
     {
         let exec_path = b"";
@@ -1273,6 +1476,33 @@ const MENU_BAR_ITEM_PADDING: f32 = 3.0;
 const MENU_BAR_ITEM_SPACING: f32 = 2.0;
 const MENU_BAR_OUTER_PADDING: f32 = 4.0;
 const MENU_BAR_MAX_APP_LABEL: usize = 18;
+const HOME_BUTTON_WIDTH: f32 = 64.0;
+const LEADING_CONTROLS_SPACING: f32 = 8.0;
+
+#[derive(Clone, Copy)]
+struct MenuBarMetrics {
+    font_size: f32,
+    item_padding: f32,
+    item_spacing: f32,
+}
+
+impl MenuBarMetrics {
+    const fn for_layout(layout: ShellLayout) -> Self {
+        if layout.tablet_mode {
+            Self {
+                font_size: 14.0,
+                item_padding: 5.0,
+                item_spacing: 4.0,
+            }
+        } else {
+            Self {
+                font_size: MENU_BAR_FONT_SIZE,
+                item_padding: MENU_BAR_ITEM_PADDING,
+                item_spacing: MENU_BAR_ITEM_SPACING,
+            }
+        }
+    }
+}
 
 fn menu_bar_label(title: &str) -> String {
     if title.chars().count() <= MENU_BAR_MAX_APP_LABEL {
@@ -1286,18 +1516,20 @@ fn menu_bar_label(title: &str) -> String {
     shortened
 }
 
-fn menu_bar_item_width(label: &str) -> f32 {
-    let (text_w, _text_h) = graphics::measure_text_sized(label, MENU_BAR_FONT_SIZE);
-    text_w as f32 + MENU_BAR_ITEM_PADDING * 2.0
+fn menu_bar_item_width(label: &str, layout: ShellLayout) -> f32 {
+    let metrics = MenuBarMetrics::for_layout(layout);
+    let (text_w, _text_h) = graphics::measure_text_sized(label, metrics.font_size);
+    text_w as f32 + metrics.item_padding * 2.0
 }
 
-fn menu_bar_popup_x(items: &[TaskMenuItem], index: usize) -> f32 {
-    let mut x = MENU_BAR_OUTER_PADDING;
+fn menu_bar_popup_x(items: &[TaskMenuItem], index: usize, layout: ShellLayout) -> f32 {
+    let metrics = MenuBarMetrics::for_layout(layout);
+    let mut x = MENU_BAR_OUTER_PADDING + HOME_BUTTON_WIDTH + LEADING_CONTROLS_SPACING;
     for (i, item) in items.iter().enumerate() {
         if i >= index {
             break;
         }
-        x += menu_bar_item_width(&item.title) + MENU_BAR_ITEM_SPACING;
+        x += menu_bar_item_width(&item.title, layout) + metrics.item_spacing;
     }
     x
 }
@@ -1354,6 +1586,21 @@ fn build_menu_tree(app_name: &str, menu_titles: &str) -> MenuTree {
     MenuTree { items }
 }
 
+fn status_bar_menu_items(
+    menu_tree: &MenuTree,
+    presentation: sws::ShellPresentation,
+) -> Vec<TaskMenuItem> {
+    if presentation == sws::ShellPresentation::Workspace {
+        return menu_tree.items.clone();
+    }
+    menu_tree
+        .items
+        .iter()
+        .filter(|item| item.id == "system_scarlet")
+        .cloned()
+        .collect()
+}
+
 fn menu_bar_from_tree(tree: &MenuTree) -> MenuBarModel {
     let items = tree
         .items
@@ -1383,7 +1630,7 @@ fn parse_menu_tree_json(input: &str) -> Vec<TaskMenuItem> {
     };
     let Ok((payload, _)) = from_str::<MenuTreePayload>(candidate) else {
         println!(
-            "[TaskBar] Failed to parse menu JSON (len={}, cleaned_len={}, candidate_len={})",
+            "[StatusBar] Failed to parse menu JSON (len={}, cleaned_len={}, candidate_len={})",
             input.len(),
             cleaned.len(),
             candidate.len()
@@ -1460,14 +1707,17 @@ fn build_menu_bar_view(
     items: &[TaskMenuItem],
     _active_window_id: u32,
     open_menu_index: State<Option<usize>>,
+    layout: ShellLayout,
+    foreground: Option<Color>,
 ) -> MenuBar {
     // println!(
-    //     "[TaskBar] build_menu_bar_view: {} items, active_window_id={}",
+    //     "[StatusBar] build_menu_bar_view: {} items, active_window_id={}",
     //     items.len(),
     //     active_window_id
     // );
     let has_children_by_index: Vec<bool> =
         items.iter().map(|item| !item.children.is_empty()).collect();
+    let metrics = MenuBarMetrics::for_layout(layout);
     let entries = items
         .iter()
         .enumerate()
@@ -1479,10 +1729,13 @@ fn build_menu_bar_view(
             let open_state_click = open_menu_index.clone();
             let is_open = open_menu_index.get() == Some(idx);
 
-            MenuItem::new(item.title.as_str())
-                .font_size(MENU_BAR_FONT_SIZE)
-                .padding(MENU_BAR_ITEM_PADDING)
-                .selected(is_open)
+            let menu_item = MenuItem::new(item.title.as_str())
+                .font_size(metrics.font_size)
+                .padding(metrics.item_padding)
+                .selected(is_open);
+            let menu_item = menu_item_with_foreground(menu_item, foreground);
+
+            menu_item
                 .on_hover(move || {
                     if !has_children {
                         return;
@@ -1507,7 +1760,7 @@ fn build_menu_bar_view(
     let open_state_bar = open_menu_index.clone();
     let hover_children = has_children_by_index.clone();
     MenuBar::new(entries)
-        .spacing(MENU_BAR_ITEM_SPACING)
+        .spacing(metrics.item_spacing)
         .on_hover_index(move |idx| {
             if !hover_children.get(idx).copied().unwrap_or(false) {
                 return;
@@ -1516,6 +1769,51 @@ fn build_menu_bar_view(
                 open_state_bar.set(Some(idx));
             }
         })
+}
+
+fn enqueue_workspace_command(commands: &State<Vec<WorkspaceCommand>>, command: WorkspaceCommand) {
+    commands.update(|pending| pending.push(command));
+}
+
+fn build_home_button(
+    state: Option<sws::WorkspaceState>,
+    commands: State<Vec<WorkspaceCommand>>,
+) -> impl View + Clone {
+    let shell_navigation = state
+        .as_ref()
+        .is_some_and(|state| state.presentation != sws::ShellPresentation::Workspace);
+    let position = state.as_ref().map_or(String::from("—"), |state| {
+        let index = state
+            .workspaces
+            .iter()
+            .position(|workspace| workspace.id == state.active_workspace)
+            .unwrap_or(0);
+        format!("{}/{}", index + 1, state.workspaces.len())
+    });
+    let palette = if shell_navigation {
+        ColorPalette::dark()
+    } else {
+        ColorPalette::light()
+    };
+    hstack! {
+        IconView::new(Icon::Apps)
+            .size(IconSize::Small)
+            .color(palette.text()),
+        Text::new(position)
+            .font_size(12.0)
+            .color(palette.text())
+    }
+    .spacing(4.0)
+    .alignment(Alignment::Center)
+    .padding(5.0)
+    .frame(HOME_BUTTON_WIDTH, 24.0)
+    .background(
+        palette
+            .text()
+            .with_opacity(if shell_navigation { 0.14 } else { 0.06 }),
+    )
+    .clip_radius(10.0)
+    .on_click(move || enqueue_workspace_command(&commands, WorkspaceCommand::ToggleOverview))
 }
 
 fn build_overview_button(
@@ -1560,10 +1858,6 @@ fn build_menu_items(
                 content = content.callback(move || {
                     open_state.set(None);
                     // Handle system menu items
-                    if item_id == "system_launcher" {
-                        show_launcher();
-                        return;
-                    }
                     if item_id == "system_terminal" {
                         launch_new_app(b"org.scarlet-os.desktop.terminal");
                         return;
@@ -1582,7 +1876,7 @@ fn build_menu_items(
                     }
                     if item_id == "system_quit" {
                         // TODO: Show shutdown dialog
-                        println!("[TaskBar] System shutdown requested");
+                        println!("[StatusBar] System shutdown requested");
                         return;
                     }
                     // Handle application menu items
@@ -1623,17 +1917,9 @@ fn build_overview_items(
     overview_page: State<usize>,
     open_menu_index: State<Option<usize>>,
 ) -> Vec<MenuItemContent> {
-    let launcher_open = open_menu_index.clone();
     let files_open = open_menu_index.clone();
     let settings_open = open_menu_index.clone();
     let mut items = vec![
-        MenuItemContent::new("Applications")
-            .action(MenuAction::Submenu)
-            .shortcut("Applications")
-            .callback(move || {
-                launcher_open.set(None);
-                show_launcher();
-            }),
         MenuItemContent::new("Files")
             .action(MenuAction::Submenu)
             .callback(move || {
@@ -1836,10 +2122,711 @@ impl ShellPopupRenderer {
     }
 }
 
-impl Application for TaskBarApp {
+fn home_icon(name: &str) -> Icon {
+    match name {
+        "applications-development" | "code" => Icon::Code,
+        "file-description" => Icon::FileDescription,
+        "file-music" => Icon::FileMusic,
+        "folder" => Icon::Folder,
+        "preferences-system" => Icon::Settings,
+        "preferences-system-time" => Icon::Clock,
+        "text-editor" => Icon::FileText,
+        "utilities-system-monitor" => Icon::ChartBar,
+        "utilities-terminal" => Icon::Terminal,
+        "video" | "multimedia-player" => Icon::Video,
+        _ => Icon::Apps,
+    }
+}
+
+fn launch_home_application(source_window_id: u32, application: &HomeApplication) -> bool {
+    let Ok(connection) = sws::Connection::connect("/tmp/sws.sock") else {
+        return false;
+    };
+    let Ok(token) = connection.request_activation_token(source_window_id, &application.app_id)
+    else {
+        return false;
+    };
+    SbusConnection::connect()
+        .and_then(|mut connection| {
+            connection.call_method_timeout(
+                DESKTOP_STEMD_BUS_NAME,
+                DESKTOP_STEMD_OBJECT_PATH,
+                DESKTOP_STEMD_INTERFACE,
+                DESKTOP_STEMD_LAUNCH_OR_FOCUS_METHOD,
+                vec![
+                    SbusArgument::String(application.app_id.clone()),
+                    SbusArgument::String(token),
+                ],
+                HOME_CATALOG_TIMEOUT_MS,
+            )
+        })
+        .is_ok()
+}
+
+fn load_home_applications() -> Vec<HomeApplication> {
+    let Ok(arguments) = SbusConnection::connect().and_then(|mut connection| {
+        connection.call_method_timeout(
+            DESKTOP_STEMD_BUS_NAME,
+            DESKTOP_STEMD_OBJECT_PATH,
+            DESKTOP_STEMD_INTERFACE,
+            DESKTOP_STEMD_LIST_APPLICATIONS_METHOD,
+            Vec::new(),
+            HOME_CATALOG_TIMEOUT_MS,
+        )
+    }) else {
+        return Vec::new();
+    };
+
+    let mut applications = Vec::new();
+    for fields in arguments.chunks(3) {
+        let [
+            SbusArgument::String(app_id),
+            SbusArgument::String(name),
+            SbusArgument::String(icon),
+        ] = fields
+        else {
+            continue;
+        };
+        if app_id.is_empty()
+            || name.is_empty()
+            || app_id == "org.scarlet-os.desktop.launcher"
+            || is_shell_app(app_id)
+        {
+            continue;
+        }
+        applications.push(HomeApplication {
+            app_id: app_id.clone(),
+            name: name.clone(),
+            icon: icon.clone(),
+        });
+    }
+    applications.sort_by(|left, right| {
+        left.name
+            .to_lowercase()
+            .cmp(&right.name.to_lowercase())
+            .then_with(|| left.app_id.cmp(&right.app_id))
+    });
+    applications
+}
+
+fn refresh_home_catalog(applications: State<Vec<HomeApplication>>) {
+    let mut previous = Vec::new();
+    loop {
+        let next = load_home_applications();
+        if next != previous {
+            applications.set(next.clone());
+            previous = next;
+        }
+        std::thread::sleep(HOME_CATALOG_REFRESH_INTERVAL);
+    }
+}
+
+fn filter_home_applications(applications: &[HomeApplication], query: &str) -> Vec<HomeApplication> {
+    let query = query.trim().to_lowercase();
+    if query.is_empty() {
+        return applications.to_vec();
+    }
+    let mut matches = applications
+        .iter()
+        .filter_map(|application| {
+            let name = application.name.to_lowercase();
+            let app_id = application.app_id.to_lowercase();
+            let rank = if name == query {
+                Some(0)
+            } else if name.starts_with(&query) {
+                Some(1)
+            } else if name.contains(&query) {
+                Some(2)
+            } else if app_id == query {
+                Some(3)
+            } else if app_id.starts_with(&query) {
+                Some(4)
+            } else if app_id.contains(&query) {
+                Some(5)
+            } else {
+                None
+            }?;
+            Some((rank, application.clone()))
+        })
+        .collect::<Vec<_>>();
+    matches.sort_by_key(|(rank, _)| *rank);
+    matches
+        .into_iter()
+        .map(|(_, application)| application)
+        .collect()
+}
+
+fn home_grid_columns(width: f32) -> usize {
+    let horizontal_padding = if width < 720.0 { 20.0 } else { 48.0 };
+    let drawer_padding = if width < 720.0 { 16.0 } else { 24.0 };
+    let available_width = (width - horizontal_padding * 2.0 - drawer_padding * 2.0).max(1.0);
+    (((available_width + HOME_GRID_COLUMN_SPACING)
+        / (HOME_GRID_CELL_WIDTH + HOME_GRID_COLUMN_SPACING)) as usize)
+        .clamp(1, 6)
+}
+
+fn next_home_selection_index(
+    current: usize,
+    application_count: usize,
+    columns: usize,
+    keycode: KeyCode,
+) -> usize {
+    let last = application_count.saturating_sub(1);
+    let current = current.min(last);
+    let columns = columns.max(1);
+    match keycode {
+        KeyCode::Left => current.saturating_sub(1),
+        KeyCode::Right => current.saturating_add(1).min(last),
+        KeyCode::Up => current.saturating_sub(columns),
+        KeyCode::Down => current.saturating_add(columns).min(last),
+        _ => current,
+    }
+}
+
+fn maintain_home_filter(
+    applications: State<Vec<HomeApplication>>,
+    query: State<String>,
+    filtered: State<Vec<HomeApplication>>,
+    selected: State<Option<usize>>,
+    hovered: State<Option<usize>>,
+) {
+    let mut previous_applications = Vec::new();
+    let mut previous_query = String::new();
+    loop {
+        let current_applications = applications.get();
+        let current_query = query.get();
+        if current_applications != previous_applications || current_query != previous_query {
+            let next = filter_home_applications(&current_applications, &current_query);
+            selected.set((!next.is_empty()).then_some(0));
+            hovered.set(None);
+            filtered.set(next);
+            previous_applications = current_applications;
+            previous_query = current_query;
+        }
+        std::thread::sleep(Duration::from_millis(16));
+    }
+}
+
+fn maintain_workspace_shell_role(
+    state: State<Option<sws::WorkspaceState>>,
+    commands: State<Vec<WorkspaceCommand>>,
+) {
+    loop {
+        let Ok(connection) = sws::Connection::connect("/tmp/sws.sock") else {
+            std::thread::sleep(Duration::from_millis(100));
+            continue;
+        };
+        let Ok(mut snapshot) = connection.register_system_shell() else {
+            std::thread::sleep(Duration::from_millis(250));
+            continue;
+        };
+        println!(
+            "[Shell] Registered workspace role at generation {}",
+            snapshot.generation
+        );
+        state.set(Some(snapshot.clone()));
+        loop {
+            if let Some(command) = commands.get().first().copied() {
+                if let Ok(latest) = connection.get_workspace_state() {
+                    snapshot = latest;
+                }
+                let result = match workspace_transaction_for_command(&snapshot, command) {
+                    Some(transaction) => connection.apply_workspace_transaction(&transaction),
+                    None => Ok(snapshot.clone()),
+                };
+                match result {
+                    Ok(updated) => {
+                        snapshot = updated;
+                        state.set(Some(snapshot.clone()));
+                    }
+                    Err(error) => {
+                        println!("[Shell] Workspace command failed: {:?}", error);
+                    }
+                }
+                commands.update(|pending| {
+                    if pending.first().copied() == Some(command) {
+                        pending.remove(0);
+                    }
+                });
+            }
+            if connection.dispatch().is_err() {
+                state.set(None);
+                break;
+            }
+            while let Some(event) = connection.poll_event() {
+                if let sws::event::Event::WorkspaceStateChanged(updated) = event {
+                    snapshot = updated;
+                    state.set(Some(snapshot.clone()));
+                }
+            }
+            std::thread::sleep(Duration::from_millis(16));
+        }
+    }
+}
+
+impl ShellApp {
+    fn shell_presentation(&self) -> sws::ShellPresentation {
+        self.workspace_state
+            .get()
+            .map_or(sws::ShellPresentation::Workspace, |state| {
+                state.presentation
+            })
+    }
+
+    fn show_application_drawer(&self) {
+        if self.shell_presentation() != sws::ShellPresentation::Home {
+            enqueue_workspace_command(&self.workspace_commands, WorkspaceCommand::ShowHome);
+        }
+    }
+
+    fn lower_application_drawer(&self) {
+        if self.shell_presentation() == sws::ShellPresentation::Home {
+            enqueue_workspace_command(&self.workspace_commands, WorkspaceCommand::ToggleOverview);
+        }
+    }
+
+    fn dismiss_shell_depth(&self) {
+        match self.shell_presentation() {
+            sws::ShellPresentation::Home => self.lower_application_drawer(),
+            sws::ShellPresentation::Overview => enqueue_workspace_command(
+                &self.workspace_commands,
+                WorkspaceCommand::ReturnToWorkspace,
+            ),
+            sws::ShellPresentation::Workspace => {}
+        }
+    }
+
+    fn launch_home_application(&self, application: HomeApplication) {
+        if launch_home_application(self.home_window_id.get(), &application) {
+            self.home_query.set(String::new());
+            self.home_search_focused.set(false);
+            enqueue_workspace_command(&self.workspace_commands, WorkspaceCommand::ShowWorkspace);
+        }
+    }
+
+    fn launch_selected_home_application(&self) {
+        let applications = self.home_filtered_applications.get();
+        let Some(application) = self
+            .home_selected
+            .get()
+            .and_then(|index| applications.get(index))
+            .cloned()
+        else {
+            return;
+        };
+        self.launch_home_application(application);
+    }
+
+    fn move_home_selection(&self, keycode: KeyCode) {
+        let applications = self.home_filtered_applications.get();
+        if applications.is_empty() {
+            self.home_selected.set(None);
+            return;
+        }
+        let current = self
+            .home_selected
+            .get()
+            .unwrap_or(0)
+            .min(applications.len().saturating_sub(1));
+        let columns = if self.home_query.get().trim().is_empty() {
+            home_grid_columns(self.screen_width.get())
+        } else {
+            1
+        };
+        self.home_selected.set(Some(next_home_selection_index(
+            current,
+            applications.len(),
+            columns,
+            keycode,
+        )));
+        self.home_hovered.set(None);
+    }
+
+    fn handle_home_key(&self, event: KeyEvent) -> bool {
+        match event {
+            KeyEvent::Char { c } if !c.is_control() => {
+                self.show_application_drawer();
+                self.home_search_focused.set(true);
+                self.home_query.update(|query| query.push(c));
+                true
+            }
+            KeyEvent::Pressed { keycode, .. } => {
+                let searching = !self.home_query.get().trim().is_empty();
+                match keycode {
+                    KeyCode::Up | KeyCode::Down => {
+                        self.move_home_selection(keycode);
+                        true
+                    }
+                    KeyCode::Left | KeyCode::Right if !searching => {
+                        self.move_home_selection(keycode);
+                        true
+                    }
+                    KeyCode::Enter => {
+                        self.launch_selected_home_application();
+                        true
+                    }
+                    KeyCode::Escape => {
+                        if searching {
+                            self.home_query.set(String::new());
+                            self.home_search_focused.set(false);
+                        } else {
+                            self.dismiss_shell_depth();
+                        }
+                        true
+                    }
+                    _ => false,
+                }
+            }
+            _ => false,
+        }
+    }
+
+    fn home_application_cell(
+        &self,
+        index: usize,
+        application: HomeApplication,
+        selected: Option<usize>,
+        row_height: f32,
+    ) -> impl View + Clone + use<> {
+        let palette = ColorPalette::dark();
+        let hovered = self.home_hovered.get() == Some(index);
+        let background = if selected == Some(index) && hovered {
+            palette.text().with_opacity(0.30)
+        } else if selected == Some(index) {
+            palette.text().with_opacity(0.24)
+        } else if hovered {
+            palette.text().with_opacity(0.18)
+        } else {
+            palette.window_background().with_opacity(0.0)
+        };
+        let hover_state = self.home_hovered.clone();
+        let exit_state = hover_state.clone();
+        let launch_app = self.clone();
+        let launch_application = application.clone();
+        vstack! {
+            IconView::new(home_icon(&application.icon))
+                .size(IconSize::Pixels(40))
+                .color(palette.primary()),
+            Text::new(application.name)
+                .font_size(13.0)
+                .color(palette.text())
+                .alignment(Alignment::Center)
+                .frame(f32::INFINITY, 30.0),
+        }
+        .spacing(4.0)
+        .alignment(Alignment::Center)
+        .padding(6.0)
+        .frame(f32::INFINITY, row_height)
+        .background(background)
+        .clip_radius(12.0)
+        .on_hover(move || hover_state.set(Some(index)))
+        .on_exit(move || {
+            if exit_state.get() == Some(index) {
+                exit_state.set(None);
+            }
+        })
+        .on_click(move || launch_app.launch_home_application(launch_application.clone()))
+    }
+
+    fn home_application_list_row(
+        &self,
+        index: usize,
+        application: HomeApplication,
+        selected: Option<usize>,
+    ) -> impl View + Clone + use<> {
+        let palette = ColorPalette::dark();
+        let hovered = self.home_hovered.get() == Some(index);
+        let background = if selected == Some(index) && hovered {
+            palette.text().with_opacity(0.30)
+        } else if selected == Some(index) {
+            palette.text().with_opacity(0.24)
+        } else if hovered {
+            palette.text().with_opacity(0.18)
+        } else {
+            palette.window_background().with_opacity(0.0)
+        };
+        let hover_state = self.home_hovered.clone();
+        let exit_state = hover_state.clone();
+        let launch_app = self.clone();
+        let launch_application = application.clone();
+
+        hstack! {
+            IconView::new(home_icon(&application.icon))
+                .size(IconSize::Medium)
+                .color(palette.primary()),
+            hstack! {
+                Text::new(application.name)
+                    .font_size(15.0)
+                    .color(palette.text()),
+                Text::new(application.app_id)
+                    .font_size(13.0)
+                    .color(palette.text_secondary())
+                    .padding_insets(EdgeInsets {
+                        top: 0.0,
+                        left: 8.0,
+                        bottom: 0.0,
+                        right: 0.0,
+                    }),
+            }
+            .spacing(8.0),
+            Spacer::new(),
+            Text::new("Application")
+                .font_size(13.0)
+                .color(palette.text_secondary()),
+        }
+        .spacing(14.0)
+        .alignment(Alignment::Center)
+        .padding(12.0)
+        .frame(f32::INFINITY, HOME_SEARCH_RESULT_ROW_HEIGHT)
+        .background(background)
+        .clip_radius(10.0)
+        .on_hover(move || hover_state.set(Some(index)))
+        .on_exit(move || {
+            if exit_state.get() == Some(index) {
+                exit_state.set(None);
+            }
+        })
+        .on_click(move || launch_app.launch_home_application(launch_application.clone()))
+    }
+
+    fn home_content(&self) -> impl View + Clone + use<> {
+        let width = self.screen_width.get().max(320.0);
+        let height = self.screen_height.get().max(320.0);
+        let shell_layout = self.shell_layout.get();
+        let presentation = self.shell_presentation();
+        let shell_state_ready = self.workspace_state.get().is_some();
+        let shell_visible = shell_state_ready && presentation != sws::ShellPresentation::Workspace;
+        let drawer_padding = if width < 720.0 { 16.0 } else { 24.0 };
+        let columns = home_grid_columns(width);
+        let row_height = if height < 760.0 { 76.0 } else { 84.0 };
+        let bar_height = shell_layout.status_bar_height() as f32;
+        let work_height = (height - bar_height).max(1.0);
+        // This surface is prepared while hidden. Keep its geometry identical
+        // before and after the asynchronous workspace-state notification so
+        // the first visible frame cannot expose the drawer moving into place.
+        let workspace_total_height = sws_protocol::workspace::workspace_region_height(
+            work_height as u32,
+            shell_layout.tablet_mode,
+            presentation,
+            1000,
+        ) as f32;
+        let compact_rail_height = sws_protocol::workspace::workspace_region_height(
+            work_height as u32,
+            false,
+            sws::ShellPresentation::Home,
+            1000,
+        ) as f32;
+        let drawer_height = (work_height - compact_rail_height).max(1.0);
+        let drawer_width = width;
+        let drawer_content_width = (drawer_width - drawer_padding * 2.0).max(1.0);
+        let drawer_lip_height = sws_protocol::workspace::DRAWER_SHEET_LIP_HEIGHT as f32;
+        let drawer_top = if !shell_state_ready || presentation == sws::ShellPresentation::Workspace
+        {
+            work_height
+        } else if presentation == sws::ShellPresentation::Home {
+            compact_rail_height
+        } else if shell_layout.tablet_mode {
+            workspace_total_height
+        } else {
+            work_height - drawer_lip_height
+        };
+        let drawer_header_height = 44.0;
+        let drawer_body_height = (drawer_height - drawer_lip_height).max(1.0);
+        let drawer_body_top_padding = if height < 760.0 { 6.0 } else { 10.0 };
+        let drawer_body_bottom_padding = drawer_padding;
+        let drawer_content_height =
+            (drawer_body_height - drawer_body_top_padding - drawer_body_bottom_padding).max(1.0);
+        let grid_height = (drawer_content_height - drawer_header_height - 12.0).max(1.0);
+        let cell_app = self.clone();
+        let list_app = self.clone();
+        let key_app = self.clone();
+        let palette = ColorPalette::dark();
+        let search_palette = ColorPalette::light();
+        let application_count = self.home_filtered_applications.get().len();
+        let searching = !self.home_query.get().trim().is_empty();
+        let app_grid_width = (columns as f32 * HOME_GRID_CELL_WIDTH
+            + columns.saturating_sub(1) as f32 * HOME_GRID_COLUMN_SPACING)
+            .min(drawer_content_width);
+        let grid = GridView::new(
+            self.home_filtered_applications.clone(),
+            self.home_selected.clone(),
+            columns,
+            row_height,
+            move |index, application, selected| {
+                cell_app.home_application_cell(index, application, selected, row_height)
+            },
+        )
+        .spacing(HOME_GRID_COLUMN_SPACING)
+        .row_spacing(6.0)
+        .minimum_cell_width(96.0)
+        .frame(app_grid_width, grid_height);
+        let centered_grid = hstack! {
+            Spacer::new(),
+            grid,
+            Spacer::new(),
+        }
+        .frame(drawer_content_width, grid_height)
+        .alignment(Alignment::Top);
+        let list = ListView::new(
+            self.home_filtered_applications.clone(),
+            self.home_selected.clone(),
+            HOME_SEARCH_RESULT_ROW_HEIGHT,
+            move |index, application, selected| {
+                list_app.home_application_list_row(index, application, selected)
+            },
+        )
+        .frame(drawer_content_width, grid_height);
+        let populated_results = if searching {
+            Either::A(list)
+        } else {
+            Either::B(centered_grid)
+        };
+        let results = if application_count == 0 {
+            Either::A(
+                vstack! {
+                    IconView::new(Icon::Search)
+                        .size(IconSize::Large)
+                        .color(palette.text_secondary()),
+                    Text::new(if searching {
+                        "No applications found"
+                    } else {
+                        "No applications available"
+                    })
+                    .font_size(14.0)
+                    .color(palette.text_secondary()),
+                }
+                .spacing(8.0)
+                .alignment(Alignment::Center)
+                .frame(drawer_content_width, grid_height),
+            )
+        } else {
+            Either::B(populated_results)
+        };
+
+        let submit_app = self.clone();
+        let cancel_query = self.home_query.clone();
+        let cancel_focus = self.home_search_focused.clone();
+        let cancel_app = self.clone();
+        let empty_focus = self.home_search_focused.clone();
+        let search = TextField::new(self.home_query.clone())
+            .autofocus(self.home_search_focused.get())
+            .placeholder("Search applications")
+            .font_size(14.0)
+            .padding(8.0)
+            .background_color(search_palette.window_background().with_opacity(0.86))
+            .border_color(search_palette.divider().with_opacity(0.65))
+            .focused_border_color(palette.primary().with_opacity(0.9))
+            .text_color(search_palette.text())
+            .on_submit(move || submit_app.launch_selected_home_application())
+            .on_cancel(move || {
+                if cancel_query.get().trim().is_empty() {
+                    cancel_app.dismiss_shell_depth();
+                } else {
+                    cancel_query.set(String::new());
+                    cancel_focus.set(false);
+                }
+            })
+            .on_empty(move || empty_focus.set(false))
+            .frame(
+                (width * 0.32).clamp(if width < 720.0 { 180.0 } else { 280.0 }, 460.0),
+                36.0,
+            );
+        let drawer_header_side_width = if width < 520.0 {
+            52.0
+        } else if width < 720.0 {
+            84.0
+        } else {
+            112.0
+        };
+        let application_count_label = if application_count == 1 {
+            String::from("1 app")
+        } else {
+            format!("{} apps", application_count)
+        };
+        let drawer_toggle_app = self.clone();
+        let drawer_lip = hstack! {
+            Spacer::new(),
+            Spacer::new()
+                .frame(44.0, 4.0)
+                .background(palette.text().with_opacity(0.52))
+                .clip_radius(2.0),
+            Spacer::new(),
+        }
+        .alignment(Alignment::Center)
+        .frame(drawer_width, drawer_lip_height)
+        .on_click(move || {
+            if drawer_toggle_app.shell_presentation() == sws::ShellPresentation::Home {
+                drawer_toggle_app.lower_application_drawer();
+            } else {
+                drawer_toggle_app.show_application_drawer();
+            }
+        });
+
+        let drawer_body = vstack! {
+            hstack! {
+                Text::new("Applications")
+                    .font_size(16.0)
+                    .color(palette.text())
+                    .alignment(Alignment::Leading)
+                    .frame(drawer_header_side_width, drawer_header_height),
+                Spacer::new(),
+                search,
+                Spacer::new(),
+                Text::new(application_count_label)
+                    .font_size(11.0)
+                    .color(palette.text_secondary())
+                    .alignment(Alignment::Trailing)
+                    .frame(drawer_header_side_width, drawer_header_height),
+            }
+            .alignment(Alignment::Center)
+            .frame(drawer_content_width, drawer_header_height),
+            results,
+        }
+        .spacing(12.0)
+        .alignment(Alignment::TopLeading)
+        .frame(drawer_content_width, drawer_content_height)
+        .padding_insets(EdgeInsets {
+            top: drawer_body_top_padding,
+            left: drawer_padding,
+            bottom: drawer_body_bottom_padding,
+            right: drawer_padding,
+        })
+        .frame(drawer_width, drawer_body_height);
+        let drawer = vstack! {
+            drawer_lip,
+            drawer_body,
+        }
+        .alignment(Alignment::TopLeading)
+        .frame(drawer_width, drawer_height);
+        let drawer_layer = vstack! {
+            Spacer::new().frame(width, drawer_top),
+            drawer,
+        }
+        .alignment(Alignment::TopLeading)
+        .frame(width, work_height)
+        .clip_radius(0.0);
+
+        drawer_layer
+            .padding_insets(EdgeInsets {
+                top: bar_height,
+                left: 0.0,
+                bottom: 0.0,
+                right: 0.0,
+            })
+            .frame(width, height)
+            .background(if shell_visible {
+                HOME_BACKDROP_TINT
+            } else {
+                HOME_BACKDROP_TINT.with_opacity(0.0)
+            })
+            .on_key(move |event| key_app.handle_home_key(event))
+    }
+}
+
+impl Application for ShellApp {
     fn on_focus_changed(&mut self, window_id: u32, app_name: &str, menu_titles: &str) {
-        taskbar_debug!(
-            "[TaskBar] on_focus_changed: window_id={}, app_name={}, menu_titles={}",
+        status_bar_debug!(
+            "[StatusBar] on_focus_changed: window_id={}, app_name={}, menu_titles={}",
             window_id,
             app_name,
             menu_titles
@@ -1862,6 +2849,9 @@ impl Application for TaskBarApp {
             self.control_center_window_id
                 .set(Some(ctx.platform_window_id as u32));
             let _ = window.set_opaque(false);
+        } else if ctx.scene_key.as_str() == HOME_SCENE_KEY {
+            self.home_window_id.set(ctx.platform_window_id as u32);
+            let _ = window.set_opaque(false);
         }
     }
 
@@ -1875,8 +2865,8 @@ impl Application for TaskBarApp {
     }
 
     fn on_active_app_changed(&mut self, window_id: u32, app_name: &str, menu_titles: &str) {
-        taskbar_debug!(
-            "[TaskBar] on_active_app_changed: window_id={}, app_name={}, menu_titles={}",
+        status_bar_debug!(
+            "[StatusBar] on_active_app_changed: window_id={}, app_name={}, menu_titles={}",
             window_id,
             app_name,
             menu_titles
@@ -1886,10 +2876,15 @@ impl Application for TaskBarApp {
     }
 
     fn on_window_resize(&mut self, ctx: &WindowContext, width: u32, height: u32) {
+        if ctx.scene_key.as_str() == HOME_SCENE_KEY {
+            self.screen_width.set(width as f32);
+            self.screen_height.set(height as f32);
+            return;
+        }
         if ctx.scene_key.as_str() != "main" {
             return;
         }
-        println!("[TaskBar] on_resize: width={}, height={}", width, height);
+        println!("[StatusBar] on_resize: width={}, height={}", width, height);
         self.screen_width.set(width as f32);
         self.open_menu_index.set(None);
         self.update_workarea_from_screen_query(width, self.shell_layout.get());
@@ -1898,8 +2893,20 @@ impl Application for TaskBarApp {
     fn on_window_sync(&mut self, ctx: &WindowContext, window: &mut dyn PlatformWindow) {
         if ctx.scene_key.as_str() == CONTROL_CENTER_SCENE_KEY {
             let desired = self.control_center_size.get();
-            if taskbar_resize_needed(window.managed_size(), desired) {
+            if status_bar_resize_needed(window.managed_size(), desired) {
                 let _ = window.resize_managed(desired.width as u32, desired.height as u32);
+            }
+            return;
+        }
+        if ctx.scene_key.as_str() == HOME_SCENE_KEY {
+            let desired = Size::new(self.screen_width.get(), self.screen_height.get());
+            if status_bar_resize_needed(window.size(), desired)
+                && let Err(error) = window.resize(
+                    desired.width.max(1.0) as u32,
+                    desired.height.max(1.0) as u32,
+                )
+            {
+                println!("[Shell] Failed to resize Home surface: {}", error);
             }
             return;
         }
@@ -1909,31 +2916,35 @@ impl Application for TaskBarApp {
         let desired = self
             .shell_layout
             .get()
-            .taskbar_window_size(self.screen_width.get());
-        if taskbar_resize_needed(window.size(), desired)
+            .status_bar_window_size(self.screen_width.get());
+        if status_bar_resize_needed(window.size(), desired)
             && let Err(error) = window.resize(desired.width.max(1.0) as u32, desired.height as u32)
         {
-            println!("[TaskBar] Failed to resize shell surface: {}", error);
+            println!("[StatusBar] Failed to resize shell surface: {}", error);
         }
     }
 
     fn on_screen_size_changed(&mut self, width: u32, height: u32) -> Option<Size> {
-        println!("[TaskBar] on_screen_size_changed: {}x{}", width, height);
+        println!("[StatusBar] on_screen_size_changed: {}x{}", width, height);
         self.screen_width.set(width as f32);
+        self.screen_height.set(height as f32);
         self.open_menu_index.set(None);
         let layout = self.shell_layout.get();
         self.update_workarea(width, height, layout);
-        Some(layout.taskbar_window_size(width as f32))
+        Some(layout.status_bar_window_size(width as f32))
     }
 
     fn scenes(&self) -> impl Scene {
         let clock = self.clock.get();
         let screen_width = self.screen_width.get();
+        let screen_height = self.screen_height.get();
         let shell_layout = self.shell_layout.get();
+        let shell_presentation = self.shell_presentation();
+        let shell_navigation = shell_presentation != sws::ShellPresentation::Workspace;
         let _menu_bar = self.menu_bar.get();
         let menu_tree = self.menu_tree.get();
         // println!(
-        //     "[TaskBar] scenes() called: menu_tree has {} items",
+        //     "[StatusBar] scenes() called: menu_tree has {} items",
         //     menu_tree.items.len()
         // );
         let active_window_id = self.active_window_id.get();
@@ -1944,13 +2955,26 @@ impl Application for TaskBarApp {
         let clock_label = status_snapshot.clock_label(hours as u8, mins as u8);
         // The desktop top bar intentionally uses a light material. Its status
         // labels and Tabler icons use ScarletUI's matching dark foreground.
-        let taskbar_palette = ColorPalette::light();
-        let status_tokens =
-            StatusItemTokens::for_layout(ShellLayout::from_tablet_mode(Some(false)));
+        let status_bar_palette = if shell_navigation {
+            ColorPalette::dark()
+        } else {
+            ColorPalette::light()
+        };
+        let status_bar_background = if shell_navigation {
+            scarlet_ui::color::Color::TRANSPARENT
+        } else {
+            status_bar_palette.surface_variant()
+        };
+        let status_tokens = StatusItemTokens::for_layout(shell_layout);
+        let status_presentation = if shell_layout.tablet_mode {
+            StatusPresentation::Touch
+        } else {
+            StatusPresentation::Compact
+        };
         if !self.control_center_open.get()
             && let Some(volume) = status_snapshot.audio_volume_percent
         {
-            self.control_center_volume.set(volume as f32);
+            set_state_if_changed(&self.control_center_volume, volume as f32);
         }
 
         let control_center_snapshot = if self.control_center_open.get() {
@@ -1975,57 +2999,85 @@ impl Application for TaskBarApp {
                 },
             }
         };
+        let control_center_presentation = if shell_layout.tablet_mode {
+            ControlCenterPresentation::TabletSheet
+        } else {
+            ControlCenterPresentation::LaptopPopover
+        };
         let control_center_metrics = ControlCenterMetrics::resolve(
-            ControlCenterPresentation::LaptopPopover,
+            control_center_presentation,
             control_center_snapshot.audio.outputs.len(),
         );
         let control_center_size = control_center_metrics.body_size();
-        if self.control_center_size.get() != control_center_size {
-            self.control_center_size.set(control_center_size);
-        }
+        set_state_if_changed(&self.control_center_size, control_center_size);
         let (control_center_body_x, control_center_body_y) = control_center_body_position(
             screen_width,
+            screen_height,
             shell_layout.popup_y(),
-            control_center_metrics.width as f32,
+            control_center_size,
+            control_center_presentation,
         );
+        let home_button =
+            build_home_button(self.workspace_state.get(), self.workspace_commands.clone());
+        let visible_menu_items = status_bar_menu_items(&menu_tree, shell_presentation);
+        let status_foreground = shell_navigation.then(|| status_bar_palette.text());
+        let menu_controls = build_menu_bar_view(
+            &visible_menu_items,
+            active_window_id,
+            self.open_menu_index.clone(),
+            shell_layout,
+            status_foreground,
+        );
+        let leading_controls = hstack! {
+            home_button,
+            menu_controls,
+        }
+        .spacing(LEADING_CONTROLS_SPACING)
+        .alignment(Alignment::Center);
+        let trailing_controls = hstack! {
+            build_status_cluster(
+                status_snapshot.clone(),
+                status_presentation,
+                status_tokens,
+                self.control_center_open.clone(),
+                status_foreground,
+            ),
+            build_passive_clock(clock_label, status_tokens, status_foreground),
+        }
+        .spacing(status_tokens.spacing)
+        .alignment(Alignment::Center);
 
         (
             WindowGroup::new(
                 "main",
                 Window::new(
-                    "TaskBar",
+                    "Scarlet Shell",
                     hstack! {
-                        build_menu_bar_view(
-                            &menu_tree.items,
-                            active_window_id,
-                            self.open_menu_index.clone(),
-                        ),
+                        leading_controls,
                         Spacer::new(),
-                        build_status_cluster(
-                            status_snapshot,
-                            StatusPresentation::Compact,
-                            status_tokens,
-                            self.control_center_open.clone(),
-                        ),
-                        build_passive_clock(clock_label, status_tokens),
+                        trailing_controls,
                     }
                     .spacing(status_tokens.spacing)
                     .alignment(Alignment::Center)
                     .padding(status_tokens.bar_padding),
                 )
-                .app_id("org.scarlet-os.desktop.taskbar")
+                .app_id("org.scarlet-os.desktop.shell")
                 .decorated(false)
-                .background_color(taskbar_palette.surface_variant())
+                .background_color(status_bar_background)
+                // The shell changes between an opaque workspace material and
+                // per-pixel transparency without recreating this surface.
+                // Keep alpha composition enabled from the first frame.
+                .opaque(false)
                 .window_type(scarlet_ui::views::window_type::TASKBAR)
                 .active_on_focus(false)
                 .resizable(false)
                 .movable(false)
-                .size(shell_layout.taskbar_window_size(screen_width)),
+                .size(shell_layout.status_bar_window_size(screen_width)),
             ),
             Window::new(
                 "Control Center",
                 build_control_center_view(
-                    ControlCenterPresentation::LaptopPopover,
+                    control_center_presentation,
                     control_center_snapshot,
                     self.control_center_volume.clone(),
                     self.control_center_action.clone(),
@@ -2050,6 +3102,20 @@ impl Application for TaskBarApp {
                 y: control_center_body_y,
             })
             .size(control_center_size),
+            Window::new("Home", self.home_content())
+                .scene_key(HOME_SCENE_KEY)
+                .open_at_launch(false)
+                .app_id("org.scarlet-os.desktop.shell.home")
+                .decorated(false)
+                .background_color(scarlet_ui::color::Color::TRANSPARENT)
+                .opaque(false)
+                .window_type(sws_protocol::window_types::SHELL_BACKGROUND)
+                .focus_on_create(false)
+                .active_on_focus(false)
+                .resizable(false)
+                .movable(false)
+                .placement(WindowPlacement::At { x: 0, y: 0 })
+                .size(Size::new(screen_width, screen_height)),
         )
     }
 
@@ -2058,13 +3124,40 @@ impl Application for TaskBarApp {
     }
 
     fn init(&mut self) {
-        println!("[TaskBar] Initializing ScarletUI TaskBar");
+        println!("[Shell] Initializing Scarlet workspace shell");
+        // Pre-create the full-output Home surface at its final geometry. SWS
+        // keeps it workspace-invisible until Home/Overview is selected, so the
+        // first reveal is only a visibility change and never exposes a
+        // create-then-move or create-then-resize frame.
+        open_window(HOME_SCENE_KEY);
         // Screen size will be obtained by sws_client in main()
+        std::thread::spawn(background::run);
         self.start_background_tasks();
+        let home_applications = self.home_applications.clone();
+        std::thread::spawn(move || refresh_home_catalog(home_applications));
+        let filter_applications = self.home_applications.clone();
+        let filter_query = self.home_query.clone();
+        let filtered_applications = self.home_filtered_applications.clone();
+        let filtered_selection = self.home_selected.clone();
+        let filtered_hover = self.home_hovered.clone();
+        std::thread::spawn(move || {
+            maintain_home_filter(
+                filter_applications,
+                filter_query,
+                filtered_applications,
+                filtered_selection,
+                filtered_hover,
+            )
+        });
+        let workspace_state = self.workspace_state.clone();
+        let workspace_commands = self.workspace_commands.clone();
+        std::thread::spawn(move || {
+            maintain_workspace_shell_role(workspace_state, workspace_commands)
+        });
     }
 }
 
-impl TaskBarApp {
+impl ShellApp {
     fn update_workarea(&self, screen_width: u32, screen_height: u32, layout: ShellLayout) {
         if let Ok(conn) = sws::Connection::connect("/tmp/sws.sock") {
             let scale_milli = query_output_scale(&conn);
@@ -2083,9 +3176,9 @@ impl TaskBarApp {
             }
         }
         println!(
-            "[TaskBar] Failed to query screen size for workarea update (fallback_width={}, taskbar_height={})",
+            "[StatusBar] Failed to query screen size for workarea update (fallback_width={}, status_bar_height={})",
             fallback_width,
-            layout.taskbar_height()
+            layout.status_bar_height()
         );
     }
 
@@ -2157,7 +3250,7 @@ impl TaskBarApp {
             } = match connect_sws_with_screen_size_retry() {
                 Ok(connection) => connection,
                 Err(()) => {
-                    println!("[TaskBar] Failed to connect to SWS for menu popup after retries");
+                    println!("[StatusBar] Failed to connect to SWS for menu popup after retries");
                     return;
                 }
             };
@@ -2266,7 +3359,7 @@ impl TaskBarApp {
                             let popup_x = if overview_open {
                                 8.0
                             } else {
-                                menu_bar_popup_x(&menu_tree_value.items, index)
+                                menu_bar_popup_x(&menu_tree_value.items, index, layout)
                                     .min((screen_width - width as f32).max(0.0))
                             };
                             let popup_app_id = "org.scarlet-os.popup.menu";
@@ -2302,7 +3395,7 @@ impl TaskBarApp {
                                         }
                                         Err(e) => {
                                             println!(
-                                                "[TaskBar] Failed to create {} popup: {:?}",
+                                                "[StatusBar] Failed to create {} popup: {:?}",
                                                 popup_title, e
                                             );
                                             popup_renderer = None;
@@ -2491,20 +3584,23 @@ impl TaskBarApp {
         menu_titles: &str,
         menu_changed: bool,
     ) {
-        taskbar_debug!(
-            "[TaskBar] update_menu_for_app: window_id={}, app_name={}, menu_titles={}",
+        status_bar_debug!(
+            "[StatusBar] update_menu_for_app: window_id={}, app_name={}, menu_titles={}",
             window_id,
             app_name,
             menu_titles
         );
 
         if self.popup_surface_id.get() == Some(window_id) {
-            taskbar_debug!("[TaskBar] Skipping popup surface {}", window_id);
+            status_bar_debug!("[StatusBar] Skipping popup surface {}", window_id);
             return;
         }
 
-        if app_name == "TaskBar" || app_name == "Menu" {
-            taskbar_debug!("[TaskBar] Skipping menu update for {}", app_name);
+        if matches!(
+            app_name,
+            "TaskBar" | "StatusBar" | "Scarlet Shell" | "Home" | "Menu"
+        ) {
+            status_bar_debug!("[StatusBar] Skipping menu update for {}", app_name);
             return;
         }
 
@@ -2512,7 +3608,7 @@ impl TaskBarApp {
             if self.active_window_id.get() == 0 {
                 return;
             }
-            taskbar_debug!("[TaskBar] No active application, showing default menu");
+            status_bar_debug!("[StatusBar] No active application, showing default menu");
             self.active_window_id.set(0);
             self.open_menu_index.set(None);
             let tree = MenuTree {
@@ -2525,14 +3621,17 @@ impl TaskBarApp {
 
         // A focus transition broadcasts both FOCUS_CHANGED and, when the
         // active application changes, ACTIVE_APP_CHANGED. The payloads are
-        // intentionally equivalent for TaskBar, so rebuilding the full menu
+        // intentionally equivalent for StatusBar, so rebuilding the full menu
         // tree twice only adds latency and an avoidable redraw.
         if self.active_window_id.get() == window_id && !menu_changed {
             return;
         }
 
         let tree = build_menu_tree(app_name, menu_titles);
-        taskbar_debug!("[TaskBar] Built menu tree with {} items", tree.items.len());
+        status_bar_debug!(
+            "[StatusBar] Built menu tree with {} items",
+            tree.items.len()
+        );
         self.menu_bar.set(menu_bar_from_tree(&tree));
         self.menu_tree.set(tree);
         self.active_window_id.set(window_id);
@@ -2540,12 +3639,11 @@ impl TaskBarApp {
     }
 }
 
-#[unsafe(no_mangle)]
-pub extern "C" fn main() {
-    println!("[TaskBar] Starting ScarletUI TaskBar");
+fn main() {
+    println!("[Shell] Starting Scarlet workspace shell");
 
     // Get screen size from SWS before creating the app
-    let (screen_width, shell_layout) = match connect_sws_with_screen_size_retry() {
+    let (screen_width, screen_height, shell_layout) = match connect_sws_with_screen_size_retry() {
         Ok(SwsScreenConnection {
             connection: conn,
             logical_width,
@@ -2561,27 +3659,28 @@ pub extern "C" fn main() {
                 scale_u32(logical_height, scale_milli),
                 scale_milli,
             );
-            (logical_width as f32, layout)
+            (logical_width as f32, logical_height as f32, layout)
         }
         Err(()) => {
             println!(
-                "[TaskBar] Failed to connect to SWS after retries, using default screen width 1920"
+                "[StatusBar] Failed to connect to SWS after retries, using default screen width 1920"
             );
-            (1920.0, ShellLayout::from_tablet_mode(None))
+            (1920.0, 1080.0, ShellLayout::from_tablet_mode(None))
         }
     };
 
-    let mut app = TaskBarApp::new(shell_layout);
+    let mut app = ShellApp::new(shell_layout);
 
     // Update screen_width state with actual screen size
     app.screen_width.update(|w| *w = screen_width);
+    app.screen_height.update(|h| *h = screen_height);
 
     match app.run() {
         Ok(_) => {
-            println!("[TaskBar] Application exited successfully");
+            println!("[Shell] Application exited successfully");
         }
         Err(e) => {
-            println!("[TaskBar] Application error: {}", e);
+            println!("[Shell] Application error: {}", e);
         }
     }
 }
@@ -2589,23 +3688,146 @@ pub extern "C" fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        MenuTree, OVERVIEW_NAVIGATION_ROWS, OVERVIEW_SEPARATOR_HEIGHT, OVERVIEW_SYSTEM_ROWS,
-        OVERVIEW_VERTICAL_PADDING, OverviewGeometry, ShellLayout, StatusItemId, StatusItemTokens,
-        StatusPresentation, StatusProviderSnapshot, TaskMenuEntry, TaskMenuItem, WindowSnapshot,
-        build_window_model, control_center_body_position, overview_app_menu_indices,
-        overview_page_bounds, overview_page_capacity, overview_page_count, overview_window_status,
-        passive_clock_control, scale_u32, status_item_label, taskbar_resize_needed,
-        volume_status_icon,
+        ControlCenterPresentation, HOME_BUTTON_WIDTH, HomeApplication, LEADING_CONTROLS_SPACING,
+        MENU_BAR_OUTER_PADDING, MenuTree, OVERVIEW_NAVIGATION_ROWS, OVERVIEW_SEPARATOR_HEIGHT,
+        OVERVIEW_SYSTEM_ROWS, OVERVIEW_VERTICAL_PADDING, OverviewGeometry, ShellLayout,
+        StatusItemId, StatusItemTokens, StatusPresentation, StatusProviderSnapshot, TaskMenuEntry,
+        TaskMenuItem, WindowSnapshot, WorkspaceCommand, build_window_model,
+        control_center_body_position, filter_home_applications, home_grid_columns,
+        menu_bar_item_width, menu_bar_popup_x, next_home_selection_index,
+        overview_app_menu_indices, overview_page_bounds, overview_page_capacity,
+        overview_page_count, overview_window_status, passive_clock_control, scale_u32,
+        set_state_if_changed, status_bar_menu_items, status_bar_resize_needed, status_item_label,
+        volume_status_icon, workspace_transaction_for_command,
     };
     use alloc::string::String;
     use alloc::sync::Arc;
     use alloc::vec;
-    use core::sync::atomic::{AtomicBool, Ordering};
-    use scarlet_ui::Icon;
+    use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use scarlet_ui::element::{ElementRenderObject, LayoutConstraints};
+    use scarlet_ui::geometry::Size;
     use scarlet_ui::views::menu::MenuRenderObject;
     use scarlet_ui::views::{MenuAction, MenuItemContent};
+    use scarlet_ui::{Icon, KeyCode, Listenable, State, StateId};
+    use sws_client as sws;
     use sws_protocol::window_types;
+
+    fn workspace_state(workspaces: Vec<sws::WorkspaceSnapshot>) -> sws::WorkspaceState {
+        sws::WorkspaceState {
+            generation: 7,
+            active_workspace: workspaces[0].id,
+            normal_workspace: workspaces[0].id,
+            presentation: sws::ShellPresentation::Workspace,
+            workspaces,
+        }
+    }
+
+    #[test]
+    fn unchanged_render_derived_state_does_not_notify_or_rebuild() {
+        let state = State::new(StateId::new(90_001), 42u32);
+        let notifications = Arc::new(AtomicUsize::new(0));
+        let observed = notifications.clone();
+        let subscription = state.subscribe_any(Arc::new(move || {
+            observed.fetch_add(1, Ordering::Relaxed);
+        }));
+
+        assert!(!set_state_if_changed(&state, 42));
+        assert_eq!(notifications.load(Ordering::Relaxed), 0);
+        assert!(set_state_if_changed(&state, 43));
+        assert_eq!(notifications.load(Ordering::Relaxed), 1);
+        assert!(state.unsubscribe(subscription));
+    }
+
+    fn single_workspace(id: u32, window_id: u32) -> sws::WorkspaceSnapshot {
+        sws::WorkspaceSnapshot {
+            id,
+            window_ids: vec![window_id],
+            tablet_layout: sws::TabletLayout::Single { window_id },
+        }
+    }
+
+    #[test]
+    fn home_command_changes_only_presentation() {
+        let state = workspace_state(vec![single_workspace(1, 10)]);
+        let transaction =
+            workspace_transaction_for_command(&state, WorkspaceCommand::ShowHome).unwrap();
+        assert_eq!(transaction.base_generation, state.generation);
+        assert_eq!(transaction.presentation, sws::ShellPresentation::Home);
+        assert_eq!(transaction.workspaces, state.workspaces);
+    }
+
+    #[test]
+    fn cycle_command_stops_at_edges_and_returns_to_workspace_presentation() {
+        let mut state = workspace_state(vec![single_workspace(1, 10), single_workspace(2, 20)]);
+        state.presentation = sws::ShellPresentation::Overview;
+        assert!(workspace_transaction_for_command(&state, WorkspaceCommand::Cycle(-1)).is_none());
+
+        let next = workspace_transaction_for_command(&state, WorkspaceCommand::Cycle(1)).unwrap();
+        assert_eq!(next.active_workspace, 2);
+        assert_eq!(next.presentation, sws::ShellPresentation::Workspace);
+
+        state.active_workspace = 2;
+        assert!(workspace_transaction_for_command(&state, WorkspaceCommand::Cycle(1)).is_none());
+    }
+
+    #[test]
+    fn overview_dismissal_restores_normal_instead_of_selected_empty_workspace() {
+        let mut state = workspace_state(vec![
+            single_workspace(1, 10),
+            sws::WorkspaceSnapshot {
+                id: 2,
+                window_ids: vec![],
+                tablet_layout: sws::TabletLayout::Empty,
+            },
+        ]);
+        state.active_workspace = 2;
+        state.presentation = sws::ShellPresentation::Overview;
+
+        let transaction =
+            workspace_transaction_for_command(&state, WorkspaceCommand::ReturnToWorkspace).unwrap();
+        assert_eq!(transaction.active_workspace, 1);
+        assert_eq!(transaction.presentation, sws::ShellPresentation::Workspace);
+    }
+
+    #[test]
+    fn split_command_merges_the_adjacent_workspace_atomically() {
+        let state = workspace_state(vec![single_workspace(1, 10), single_workspace(2, 20)]);
+        let transaction =
+            workspace_transaction_for_command(&state, WorkspaceCommand::ToggleSplit).unwrap();
+        assert_eq!(transaction.workspaces.len(), 2);
+        assert_eq!(transaction.workspaces[0].window_ids, vec![10, 20]);
+        assert!(transaction.workspaces[1].window_ids.is_empty());
+        assert_eq!(
+            transaction.workspaces[0].tablet_layout,
+            sws::TabletLayout::Split {
+                axis: sws::SplitAxis::Horizontal,
+                first_window_id: 10,
+                second_window_id: 20,
+                ratio_milli: 500,
+            }
+        );
+    }
+
+    #[test]
+    fn unsplit_parks_the_second_scene_without_losing_membership() {
+        let state = workspace_state(vec![sws::WorkspaceSnapshot {
+            id: 1,
+            window_ids: vec![10, 20],
+            tablet_layout: sws::TabletLayout::Split {
+                axis: sws::SplitAxis::Horizontal,
+                first_window_id: 10,
+                second_window_id: 20,
+                ratio_milli: 640,
+            },
+        }]);
+        let transaction =
+            workspace_transaction_for_command(&state, WorkspaceCommand::ToggleSplit).unwrap();
+        assert_eq!(transaction.workspaces[0].window_ids, vec![10, 20]);
+        assert_eq!(
+            transaction.workspaces[0].tablet_layout,
+            sws::TabletLayout::Single { window_id: 10 }
+        );
+    }
 
     fn snapshot(
         window_id: u32,
@@ -2628,20 +3850,20 @@ mod tests {
 
     #[test]
     fn shell_layout_uses_laptop_height_when_tablet_state_is_unknown_or_disabled() {
-        assert_eq!(ShellLayout::from_tablet_mode(None).taskbar_height(), 32);
+        assert_eq!(ShellLayout::from_tablet_mode(None).status_bar_height(), 32);
         assert_eq!(
-            ShellLayout::from_tablet_mode(Some(false)).taskbar_height(),
+            ShellLayout::from_tablet_mode(Some(false)).status_bar_height(),
             32
         );
     }
 
     #[test]
-    fn tablet_mode_temporarily_keeps_the_approved_laptop_height() {
+    fn tablet_mode_uses_a_larger_touch_status_bar() {
         assert_eq!(
-            ShellLayout::from_tablet_mode(Some(true)).taskbar_height(),
-            32
+            ShellLayout::from_tablet_mode(Some(true)).status_bar_height(),
+            40
         );
-        assert_eq!(ShellLayout::from_tablet_mode(Some(true)).popup_y(), 32);
+        assert_eq!(ShellLayout::from_tablet_mode(Some(true)).popup_y(), 40);
     }
 
     #[test]
@@ -2649,23 +3871,98 @@ mod tests {
         let layout = ShellLayout::from_tablet_mode(Some(true));
         let workarea = layout.physical_workarea(2880, 1800, 1500);
         assert_eq!(workarea.x, 0);
-        assert_eq!(workarea.y, scale_u32(32, 1500) as i32);
+        assert_eq!(workarea.y, scale_u32(40, 1500) as i32);
         assert_eq!(workarea.width, 2880);
-        assert_eq!(workarea.height, 1800 - scale_u32(32, 1500));
+        assert_eq!(workarea.height, 1800 - scale_u32(40, 1500));
     }
 
     #[test]
-    fn taskbar_resize_is_deduplicated_after_layout_sync() {
-        let laptop = ShellLayout::from_tablet_mode(Some(false)).taskbar_window_size(1920.0);
-        let tablet = ShellLayout::from_tablet_mode(Some(true)).taskbar_window_size(1920.0);
-        assert!(!taskbar_resize_needed(laptop, laptop));
-        assert!(!taskbar_resize_needed(laptop, tablet));
+    fn status_bar_resize_is_deduplicated_after_layout_sync() {
+        let laptop = ShellLayout::from_tablet_mode(Some(false)).status_bar_window_size(1920.0);
+        let tablet = ShellLayout::from_tablet_mode(Some(true)).status_bar_window_size(1920.0);
+        assert!(!status_bar_resize_needed(laptop, laptop));
+        assert!(status_bar_resize_needed(laptop, tablet));
+    }
+
+    #[test]
+    fn first_app_menu_popup_starts_after_compact_home_button() {
+        assert_eq!(
+            menu_bar_popup_x(&[], 0, ShellLayout::from_tablet_mode(Some(false))),
+            MENU_BAR_OUTER_PADDING + HOME_BUTTON_WIDTH + LEADING_CONTROLS_SPACING
+        );
+    }
+
+    #[test]
+    fn tablet_keeps_separate_app_menus_with_larger_touch_widths() {
+        let laptop = ShellLayout::from_tablet_mode(Some(false));
+        let tablet = ShellLayout::from_tablet_mode(Some(true));
+        assert!(menu_bar_item_width("File", tablet) > menu_bar_item_width("File", laptop));
+    }
+
+    #[test]
+    fn home_search_prefers_name_prefixes_before_identifier_matches() {
+        let applications = vec![
+            HomeApplication {
+                app_id: String::from("org.example.search-tool"),
+                name: String::from("Utilities"),
+                icon: String::new(),
+            },
+            HomeApplication {
+                app_id: String::from("org.example.editor"),
+                name: String::from("Search Notes"),
+                icon: String::new(),
+            },
+            HomeApplication {
+                app_id: String::from("org.example.search"),
+                name: String::from("Search"),
+                icon: String::new(),
+            },
+        ];
+
+        let filtered = filter_home_applications(&applications, "search");
+        assert_eq!(
+            filtered
+                .iter()
+                .map(|application| application.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Search", "Search Notes", "Utilities"]
+        );
+    }
+
+    #[test]
+    fn home_grid_uses_four_direction_selection_stride() {
+        let columns = home_grid_columns(1280.0);
+        assert_eq!(columns, 6);
+        assert_eq!(home_grid_columns(2560.0), 6);
+        assert_eq!(home_grid_columns(480.0), 3);
+        assert_eq!(home_grid_columns(320.0), 2);
+        assert_eq!(next_home_selection_index(0, 20, columns, KeyCode::Right), 1);
+        assert_eq!(
+            next_home_selection_index(0, 20, columns, KeyCode::Down),
+            columns
+        );
+        assert_eq!(
+            next_home_selection_index(columns, 20, columns, KeyCode::Up),
+            0
+        );
+    }
+
+    #[test]
+    fn home_search_list_uses_single_row_selection_stride() {
+        assert_eq!(next_home_selection_index(2, 6, 1, KeyCode::Down), 3);
+        assert_eq!(next_home_selection_index(2, 6, 1, KeyCode::Up), 1);
     }
 
     #[test]
     fn control_center_shadow_surface_keeps_the_requested_outer_margin() {
         let outsets = scarlet_ui::ElevationRole::Floating.paint_outsets();
-        let (body_x, body_y) = control_center_body_position(1920.0, 32, 304.0);
+        let (body_x, body_y) = control_center_body_position(
+            1920.0,
+            1080.0,
+            32,
+            Size::new(304.0, 300.0),
+            ControlCenterPresentation::LaptopPopover,
+        );
 
         assert_eq!(body_x as f32 - outsets.left, 1920.0 - 8.0 - 324.0);
         assert_eq!(body_x as f32 + 304.0 + outsets.right, 1920.0 - 8.0);
@@ -2673,7 +3970,7 @@ mod tests {
     }
 
     #[test]
-    fn tablet_mode_temporarily_uses_the_same_status_geometry_as_laptop() {
+    fn tablet_mode_uses_larger_status_targets_than_laptop() {
         let laptop = StatusItemTokens::for_layout(ShellLayout::from_tablet_mode(Some(false)));
         let tablet = StatusItemTokens::for_layout(ShellLayout::from_tablet_mode(Some(true)));
         assert_eq!(laptop.logical_height, 24.0);
@@ -2681,9 +3978,14 @@ mod tests {
         assert!(laptop.font_size * 1.2 + laptop.horizontal_padding * 2.0 <= laptop.logical_height);
         assert!(
             laptop.logical_height + laptop.bar_padding * 2.0
-                <= ShellLayout::LAPTOP_TASKBAR_HEIGHT as f32
+                <= ShellLayout::LAPTOP_STATUS_BAR_HEIGHT as f32
         );
-        assert_eq!(tablet, laptop);
+        assert!(tablet.logical_height > laptop.logical_height);
+        assert!(tablet.font_size > laptop.font_size);
+        assert!(
+            tablet.logical_height + tablet.bar_padding * 2.0
+                <= ShellLayout::TABLET_STATUS_BAR_HEIGHT as f32
+        );
     }
 
     #[test]
@@ -2719,7 +4021,7 @@ mod tests {
             ShellLayout::from_tablet_mode(Some(true)),
         ] {
             let tokens = StatusItemTokens::for_layout(layout);
-            let clock = passive_clock_control("12:34", tokens);
+            let clock = passive_clock_control("12:34", tokens, None);
             assert_eq!(clock.get_font_size(), tokens.font_size);
             assert_eq!(clock.get_padding(), tokens.horizontal_padding);
             assert!(!clock.is_selected());
@@ -2784,7 +4086,7 @@ mod tests {
             + OVERVIEW_SEPARATOR_HEIGHT
             + ((OVERVIEW_SYSTEM_ROWS + OVERVIEW_NAVIGATION_ROWS + capacity) as f32
                 * OverviewGeometry::for_layout(tablet).row_height);
-        assert!(popup_height <= (800 - tablet.taskbar_height() - 8) as f32);
+        assert!(popup_height <= (800 - tablet.status_bar_height() - 8) as f32);
         assert_eq!(overview_page_count(23, 5), 5);
         assert_eq!(overview_page_bounds(23, 5, 0), (0, 5));
         assert_eq!(overview_page_bounds(23, 5, 3), (15, 20));
@@ -2834,6 +4136,48 @@ mod tests {
             ],
         };
         assert_eq!(overview_app_menu_indices(&tree), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn status_bar_hides_application_context_during_shell_navigation() {
+        let tree = MenuTree {
+            items: vec![
+                TaskMenuItem {
+                    id: String::from("system_scarlet"),
+                    title: String::from("Scarlet"),
+                    enabled: true,
+                    shortcut: None,
+                    children: vec![],
+                },
+                TaskMenuItem {
+                    id: String::from("system_app"),
+                    title: String::from("Active App"),
+                    enabled: true,
+                    shortcut: None,
+                    children: vec![],
+                },
+                TaskMenuItem {
+                    id: String::from("file"),
+                    title: String::from("File"),
+                    enabled: true,
+                    shortcut: None,
+                    children: vec![],
+                },
+            ],
+        };
+
+        assert_eq!(
+            status_bar_menu_items(&tree, sws::ShellPresentation::Workspace).len(),
+            3
+        );
+        for presentation in [
+            sws::ShellPresentation::Overview,
+            sws::ShellPresentation::Home,
+        ] {
+            let items = status_bar_menu_items(&tree, presentation);
+            assert_eq!(items.len(), 1);
+            assert_eq!(items[0].id, "system_scarlet");
+        }
     }
 
     #[test]

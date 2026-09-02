@@ -251,6 +251,8 @@ pub enum Event {
     PointerLockChanged { window_id: u32, locked: bool },
     /// The compositor's input environment changed.
     InputEnvironmentChanged(InputEnvironment),
+    /// The compositor's authoritative workspace state changed.
+    WorkspaceStateChanged(sws_protocol::workspace::WorkspaceState),
     /// Display size changed.
     ScreenSizeChanged { width: u32, height: u32 },
     /// Output scale changed.

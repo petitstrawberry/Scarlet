@@ -5,7 +5,7 @@
 //! feature is available. This module contains the Native operations that do
 //! not have a portable Rust standard-library equivalent.
 
-use scarlet_sys::{Syscall, syscall1, syscall3};
+use scarlet_sys::{Syscall, syscall0, syscall1, syscall3};
 
 /// Return immediately when no requested child has changed state.
 pub const WAIT_NOHANG: i32 = 0x1;
@@ -54,4 +54,14 @@ pub fn waitpid(pid: i32, options: i32) -> (i32, i32) {
 pub fn shutdown(shutdown_type: ShutdownType) -> ! {
     syscall1(Syscall::Shutdown, shutdown_type as usize);
     panic!("shutdown syscall unexpectedly returned")
+}
+
+/// Query the number of tasks currently known to the kernel.
+///
+/// # Returns
+///
+/// The current task count, or `None` when the kernel rejects the query.
+pub fn task_count() -> Option<usize> {
+    let count = syscall0(Syscall::GetTaskInfoCount);
+    (count != usize::MAX).then_some(count)
 }

@@ -6,8 +6,9 @@ mod key_repeat;
 mod touch;
 
 pub(crate) use key_repeat::{
-    ConsumedKeys, HeldKeys, KeyRepeatState, KeyboardSource, forward_to_binary_key_protocol,
-    is_initial_press, is_physical_key_value, should_retry_keyboard_read,
+    ConsumedKeys, HeldKeys, KeyRepeatState, KeyboardSource, ModifierTapState,
+    forward_to_binary_key_protocol, is_initial_press, is_physical_key_value,
+    should_retry_keyboard_read,
 };
 pub(crate) use touch::{
     GestureEvent, GestureRecognizer, TOUCH_COORD_MAX, TouchContact, TouchFrame, TouchPolicyEvent,
@@ -409,6 +410,8 @@ pub mod key_codes {
     pub const KEY_EQUAL: u16 = 0x0d;
     pub const KEY_BACKSPACE: u16 = 0x0e;
     pub const KEY_TAB: u16 = 0x0f;
+    pub const KEY_H: u16 = 0x23;
+    pub const KEY_N: u16 = 0x31;
     pub const KEY_LEFTBRACE: u16 = 0x1a;
     pub const KEY_RIGHTBRACE: u16 = 0x1b;
     pub const KEY_ENTER: u16 = 0x1c;
@@ -419,6 +422,9 @@ pub mod key_codes {
     pub const KEY_RIGHTSHIFT: u16 = 0x36;
     pub const KEY_LEFTALT: u16 = 0x38;
     pub const KEY_RIGHTALT: u16 = 0x64;
+    pub const KEY_LEFT: u16 = 0x69;
+    pub const KEY_RIGHT: u16 = 0x6a;
+    pub const KEY_DELETE: u16 = 0x6f;
     pub const KEY_ZENKAKUHANKAKU: u16 = 0x55;
     pub const KEY_HENKAN: u16 = 0x5c;
     pub const KEY_MUHENKAN: u16 = 0x5e;

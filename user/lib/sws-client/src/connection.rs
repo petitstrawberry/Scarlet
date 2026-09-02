@@ -122,6 +122,15 @@ impl Capabilities {
     pub const fn supports_configured_window_creation(self) -> bool {
         self.capabilities & protocol::capabilities::CONFIGURED_WINDOW_CREATION != 0
     }
+
+    /// Whether SWS implements exclusive, generation-checked workspace control.
+    ///
+    /// # Returns
+    ///
+    /// `true` when the system-shell workspace methods may be requested.
+    pub const fn supports_workspace_shell(self) -> bool {
+        self.capabilities & protocol::capabilities::WORKSPACE_SHELL != 0
+    }
 }
 
 /// Surface identity and physical extent returned by configured creation.
@@ -759,7 +768,7 @@ impl TransportState {
             self.fail_pending(Error::ProtocolError);
             return Err(Error::ProtocolError);
         }
-        let event_queued = self.queue_async_message(message);
+        let event_queued = self.queue_async_message(message, payload);
         Ok(PumpResult {
             progressed: true,
             event_queued,
@@ -923,6 +932,7 @@ impl TransportState {
             Event::ScreenSizeChanged { .. }
             | Event::OutputScaleChanged { .. }
             | Event::InputEnvironmentChanged(_)
+            | Event::WorkspaceStateChanged(_)
             | Event::SgfxBackendLost { .. }
             | Event::FocusChanged { .. }
             | Event::ActiveAppChanged { .. }
@@ -2479,7 +2489,7 @@ impl Connection {
 }
 
 impl TransportState {
-    fn queue_async_message(&mut self, message: ServerMessage) -> bool {
+    fn queue_async_message(&mut self, message: ServerMessage, payload: &[u8]) -> bool {
         match message {
             ServerMessage::InputEvent {
                 window_id,
@@ -2772,6 +2782,13 @@ impl TransportState {
                 ));
                 true
             }
+            ServerMessage::WorkspaceState => {
+                let Ok(state) = protocol::workspace::decode_state(payload) else {
+                    return false;
+                };
+                self.push_event(Event::WorkspaceStateChanged(state));
+                true
+            }
             ServerMessage::ScreenSizeChanged { width, height } => {
                 self.push_event(Event::ScreenSizeChanged { width, height });
                 true
@@ -2888,6 +2905,18 @@ fn input_environment_from_server_message(
             state_flags,
             capability_flags,
         }),
+        ServerMessage::Error { code } => Err(Error::ServerError(code)),
+        _ => Err(Error::InvalidResponse),
+    }
+}
+
+fn decode_workspace_response(
+    response: Response,
+    expected: ServerMessage,
+) -> Result<protocol::workspace::WorkspaceState, Error> {
+    match response.message() {
+        message if message == expected => protocol::workspace::decode_state(response.payload())
+            .map_err(|_| Error::InvalidResponse),
         ServerMessage::Error { code } => Err(Error::ServerError(code)),
         _ => Err(Error::InvalidResponse),
     }
@@ -3097,6 +3126,59 @@ impl Connection {
         let payload = protocol::payload_set_windowing_mode_override(windowing_mode);
         let response = self.request(protocol::client_msg::SET_WINDOWING_MODE_OVERRIDE, &payload)?;
         input_environment_from_server_message(response.message())
+    }
+
+    /// Claim the exclusive system-shell role and obtain the live workspace state.
+    ///
+    /// Only one live SWS connection may own this role. The role is released
+    /// automatically when the connection closes.
+    ///
+    /// # Returns
+    ///
+    /// The compositor's authoritative workspace snapshot at registration time.
+    pub fn register_system_shell(&self) -> Result<protocol::workspace::WorkspaceState, Error> {
+        if !self.get_capabilities()?.supports_workspace_shell() {
+            return Err(Error::WorkspaceShellUnsupported);
+        }
+        let response = self.request(protocol::client_msg::REGISTER_SYSTEM_SHELL, &[])?;
+        decode_workspace_response(response, ServerMessage::SystemShellRegistered)
+    }
+
+    /// Query the compositor's authoritative workspace state.
+    ///
+    /// The query is available to ordinary clients for diagnostics. Mutations
+    /// still require the exclusive system-shell role.
+    ///
+    /// # Returns
+    ///
+    /// Current workspace generation, order, membership, layout, and presentation.
+    pub fn get_workspace_state(&self) -> Result<protocol::workspace::WorkspaceState, Error> {
+        if !self.get_capabilities()?.supports_workspace_shell() {
+            return Err(Error::WorkspaceShellUnsupported);
+        }
+        let response = self.request(protocol::client_msg::GET_WORKSPACE_STATE, &[])?;
+        decode_workspace_response(response, ServerMessage::WorkspaceState)
+    }
+
+    /// Atomically apply one generation-checked complete workspace state.
+    ///
+    /// # Arguments
+    ///
+    /// * `transaction` - Desired state based on the latest compositor generation.
+    ///
+    /// # Returns
+    ///
+    /// The accepted authoritative state after SWS increments its generation.
+    pub fn apply_workspace_transaction(
+        &self,
+        transaction: &protocol::workspace::WorkspaceTransaction,
+    ) -> Result<protocol::workspace::WorkspaceState, Error> {
+        if !self.get_capabilities()?.supports_workspace_shell() {
+            return Err(Error::WorkspaceShellUnsupported);
+        }
+        let payload = protocol::workspace::encode_transaction(transaction);
+        let response = self.request(protocol::client_msg::APPLY_WORKSPACE_TRANSACTION, &payload)?;
+        decode_workspace_response(response, ServerMessage::WorkspaceState)
     }
 
     /// Register one shared SGFX image capability with SWS.

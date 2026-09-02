@@ -1,23 +1,23 @@
-//! Data-only status-area model for the Scarlet desktop taskbar.
+//! Data-only status-area model for the Scarlet desktop StatusBar.
 //!
 //! This module deliberately keeps status collection separate from ScarletUI
 //! rendering. Callers obtain real kernel and SAS snapshots, then pass them to
 //! [`StatusProvider`] to produce a normalized, ordered model suitable for
-//! compact laptop or touch-first taskbar presentations.
+//! compact laptop or touch-first shell-bar presentations.
 
-use crate::std::task::CpuUsageInfo;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt::Write;
 use sas_protocol::{CONTROL_FLAG_MUTED, ControlState, MASTER_VOLUME_UNITY_Q16};
 use scarlet_desktop_config::{ClockFormat, StatusItemId, StatusPreferences};
+use scarlet_os::scheduler::CpuUsageInfo;
 
 /// Selects the text treatment used for a status item.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StatusPresentation {
-    /// Short labels for a pointer-oriented, space-constrained taskbar.
+    /// Short labels for a pointer-oriented, space-constrained StatusBar.
     Compact,
-    /// Explicit labels for a touch-first taskbar.
+    /// Explicit labels for a touch-first StatusBar.
     Touch,
 }
 
@@ -44,11 +44,11 @@ impl CpuStatus {
         }
     }
 
-    /// Formats this status for the selected taskbar presentation.
+    /// Formats this status for the selected StatusBar presentation.
     ///
     /// # Arguments
     ///
-    /// * `presentation` - The taskbar presentation that will render the label.
+    /// * `presentation` - The StatusBar presentation that will render the label.
     ///
     /// # Returns
     ///
@@ -79,11 +79,11 @@ pub enum AudioStatus {
 }
 
 impl AudioStatus {
-    /// Formats this status for the selected taskbar presentation.
+    /// Formats this status for the selected StatusBar presentation.
     ///
     /// # Arguments
     ///
-    /// * `presentation` - The taskbar presentation that will render the label.
+    /// * `presentation` - The StatusBar presentation that will render the label.
     ///
     /// # Returns
     ///
@@ -107,7 +107,7 @@ pub struct StatusDescriptor {
     pub id: StatusItemId,
     /// Current value for the item.
     pub snapshot: StatusItemSnapshot,
-    /// Label preformatted for the requested taskbar presentation.
+    /// Label preformatted for the requested StatusBar presentation.
     pub label: String,
 }
 
@@ -121,11 +121,11 @@ pub enum StatusItemSnapshot {
 }
 
 impl StatusItemSnapshot {
-    /// Formats this snapshot for the selected taskbar presentation.
+    /// Formats this snapshot for the selected StatusBar presentation.
     ///
     /// # Arguments
     ///
-    /// * `presentation` - The taskbar presentation that will render the label.
+    /// * `presentation` - The StatusBar presentation that will render the label.
     ///
     /// # Returns
     ///
@@ -138,7 +138,7 @@ impl StatusItemSnapshot {
     }
 }
 
-/// Shared real-data state for taskbar and Control Center status presentations.
+/// Shared real-data state for StatusBar and Control Center status presentations.
 ///
 /// This model contains only real observations. A missing kernel or SAS
 /// observation remains `None`; callers must not substitute synthetic values.
@@ -203,7 +203,7 @@ impl StatusProviderSnapshot {
     }
 }
 
-/// Samples cumulative CPU accounting and constructs taskbar status snapshots.
+/// Samples cumulative CPU accounting and constructs StatusBar status snapshots.
 #[derive(Clone, Debug, Default)]
 pub struct StatusProvider {
     cpu_sampler: CpuUsageSampler,
@@ -232,7 +232,7 @@ impl StatusProvider {
     /// # Returns
     ///
     /// Cloneable shared state for a [`scarlet_ui::State`] that can feed both
-    /// the taskbar and Control Center without a second backend.
+    /// the StatusBar and Control Center without a second backend.
     pub fn snapshot(
         &mut self,
         preferences: &StatusPreferences,
@@ -496,7 +496,7 @@ mod tests {
     }
 
     #[test]
-    fn labels_are_concise_on_compact_taskbars_and_explicit_for_touch() {
+    fn labels_are_concise_on_compact_status_bars_and_explicit_for_touch() {
         assert_eq!(
             CpuStatus::Utilization(42).label(StatusPresentation::Compact),
             "CPU 42%"

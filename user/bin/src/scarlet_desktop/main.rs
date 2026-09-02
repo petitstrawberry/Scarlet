@@ -1,7 +1,6 @@
 //! Scarlet Desktop session launcher.
 //!
-//! This binary is responsible for starting the desktop components as separate
-//! SWS clients (background, taskbar, etc.).
+//! This binary supervises the workspace shell and desktop settings service.
 
 #![no_std]
 #![no_main]
@@ -83,19 +82,14 @@ pub extern "C" fn main() -> i32 {
     println!("[scarlet-desktop] Starting desktop session");
     wait_for_sws_ready();
 
-    let mut bg_pid = spawn_component("desktop-background", &[]);
-    if bg_pid > 0 {
-        println!("[scarlet-desktop] background pid={}", bg_pid);
-    }
-
     let mut settingsd_pid = spawn_component("desktop-settings", &[]);
     if settingsd_pid > 0 {
         println!("[scarlet-desktop] settingsd pid={}", settingsd_pid);
     }
 
-    let mut taskbar_pid = spawn_component("taskbar", &[]);
-    if taskbar_pid > 0 {
-        println!("[scarlet-desktop] taskbar pid={}", taskbar_pid);
+    let mut shell_pid = spawn_component("scarlet-shell", &[]);
+    if shell_pid > 0 {
+        println!("[scarlet-desktop] shell pid={}", shell_pid);
     }
 
     // Session manager: supervise core components and respawn them if they exit.
@@ -109,24 +103,13 @@ pub extern "C" fn main() -> i32 {
             pid, status
         );
 
-        if pid == bg_pid {
-            println!("[scarlet-desktop] background exited; respawning");
+        if pid == shell_pid {
+            println!("[scarlet-desktop] shell exited; respawning");
             thread::sleep(Duration::from_millis(COMPONENT_RESPAWN_DELAY_MS));
             wait_for_sws_ready();
-            bg_pid = spawn_component("desktop-background", &[]);
-            if bg_pid > 0 {
-                println!("[scarlet-desktop] background respawned pid={}", bg_pid);
-            }
-            continue;
-        }
-
-        if pid == taskbar_pid {
-            println!("[scarlet-desktop] taskbar exited; respawning");
-            thread::sleep(Duration::from_millis(COMPONENT_RESPAWN_DELAY_MS));
-            wait_for_sws_ready();
-            taskbar_pid = spawn_component("taskbar", &[]);
-            if taskbar_pid > 0 {
-                println!("[scarlet-desktop] taskbar respawned pid={}", taskbar_pid);
+            shell_pid = spawn_component("scarlet-shell", &[]);
+            if shell_pid > 0 {
+                println!("[scarlet-desktop] shell respawned pid={}", shell_pid);
             }
             continue;
         }

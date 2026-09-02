@@ -112,6 +112,10 @@ pub use event::rel_code;
 pub use event::{Event, ImeContextState, InputEnvironment, InputEvent};
 pub use os::Handle;
 pub use surface::Surface;
+pub use sws_protocol::workspace::{
+    ShellPresentation, SplitAxis, TabletLayout, TransitionKind, TransitionSpec, WorkspaceId,
+    WorkspaceSnapshot, WorkspaceState, WorkspaceTransaction,
+};
 pub use sws_protocol::{CursorIcon, SgfxDamageRect};
 pub use sws_protocol::{
     WindowGeometry, WindowGeometryInsets, WindowSizeLimits, WindowingMode, window_state,

@@ -18,6 +18,7 @@ mod remote;
 mod sgfx_ir_support;
 mod trace;
 mod window;
+mod workspace;
 
 use compositor::Compositor;
 use core::time::Duration;

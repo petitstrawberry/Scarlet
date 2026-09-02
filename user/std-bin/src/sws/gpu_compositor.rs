@@ -1,7 +1,7 @@
 //! Optional GPU-backed scene composition for SWS.
 
 use super::cursor::Cursor;
-use super::window::{Window, WindowId};
+use super::window::{PresentationInstance, Window, WindowId, WindowType, rounded_rect_row_span};
 use framebuffer::{DisplayPresentRegion, DisplaySurface};
 use scarlet_os::handle::Handle;
 use sgfx::ir::{Color, LoadOp, PixelRect, TextureId};
@@ -15,6 +15,7 @@ type DamageRect = (u32, u32, u32, u32);
 
 const MAX_RETIRED_WINDOW_TEXTURES: usize = 8;
 const MAX_RETIRED_WINDOW_TEXTURE_BYTES: u64 = 24 * 1024 * 1024;
+const COMPOSITION_QUAD_CAPACITY: usize = 2048;
 
 /// Complete identity of one client-owned shared SGFX buffer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,8 +92,9 @@ impl GpuCompositor {
     pub(super) fn new(width: u32, height: u32, cursor: &Cursor) -> Result<Self, &'static str> {
         let mut target = MappedTarget::open_swapchain(width, height)
             .map_err(|_| "Failed to create mapped GPU swapchain")?;
-        let quad_renderer = QuadRenderer::define(target.resources.as_ref(), 96)
-            .map_err(|_| "Failed to define GPU composition resources")?;
+        let quad_renderer =
+            QuadRenderer::define(target.resources.as_ref(), COMPOSITION_QUAD_CAPACITY)
+                .map_err(|_| "Failed to define GPU composition resources")?;
         // Upload the complete theme once. Pointer-shape changes are common
         // during hover and resize, and must only select another texture rather
         // than rebuilding the GPU context and every live window resource.
@@ -432,6 +434,169 @@ impl GpuCompositor {
         Ok(())
     }
 
+    fn append_window_projection(
+        &self,
+        operations: &mut Vec<Quad>,
+        window: &Window,
+        instance: Option<PresentationInstance>,
+        damage_clip: Option<PixelRect>,
+    ) -> Result<(), &'static str> {
+        let presentation_clip = instance
+            .and_then(|instance| instance.clip)
+            .or(window.presentation_clip);
+        let clip_radius = instance.map_or(window.presentation_clip_radius, |instance| {
+            instance.clip_radius
+        });
+        let rounded_clip = presentation_clip
+            .filter(|_| clip_radius > 0)
+            .map(|rect| (rect, clip_radius));
+        let presentation_clip = if let Some((x, y, width, height)) = presentation_clip {
+            let Some((clip, _)) =
+                clipped_rect(x, y, width, height, self.target.width, self.target.height)
+            else {
+                return Ok(());
+            };
+            Some(clip)
+        } else {
+            None
+        };
+        let operation_clip = match (damage_clip, presentation_clip) {
+            (Some(damage), Some(presentation)) => {
+                let Some(intersection) = intersect_pixel_rects(damage, presentation) else {
+                    return Ok(());
+                };
+                Some(intersection)
+            }
+            (Some(clip), None) | (None, Some(clip)) => Some(clip),
+            (None, None) => None,
+        };
+
+        let has_cached_texture = self
+            .textures
+            .iter()
+            .any(|entry| entry.window_id == Some(window.id));
+        let has_current_backing = window.pixels().is_ok();
+        let visual_geometry = instance.map_or_else(
+            || window.presentation_geometry(),
+            |instance| {
+                let transform = instance.transform;
+                (transform.x, transform.y, transform.width, transform.height)
+            },
+        );
+        let opacity = instance.map_or_else(
+            || window.presentation_opacity(),
+            |instance| (window.opacity * instance.transform.opacity).clamp(0.0, 1.0),
+        );
+        let transformed = instance.is_some() || window.presentation_transform.is_some();
+        if self.has_committed_shared_buffer(window.id) || has_cached_texture || has_current_backing
+        {
+            let (texture, texture_width, texture_height) =
+                match self.committed_shared_texture(window.id) {
+                    Some(texture) => texture,
+                    None => {
+                        let texture = self
+                            .textures
+                            .iter()
+                            .find(|entry| entry.window_id == Some(window.id))
+                            .ok_or("GPU window texture cache is missing")?;
+                        (texture.texture, texture.width, texture.height)
+                    }
+                };
+            let content_width = window.width.min(texture_width);
+            let content_height = window.height.min(texture_height);
+            let (visual_x, visual_y, visual_width, visual_height) = visual_geometry;
+            let rects = if transformed {
+                clipped_scaled_rect(
+                    visual_x,
+                    visual_y,
+                    visual_width,
+                    visual_height,
+                    content_width,
+                    content_height,
+                    self.target.width,
+                    self.target.height,
+                )
+            } else {
+                clipped_rect(
+                    visual_x,
+                    visual_y,
+                    content_width,
+                    content_height,
+                    self.target.width,
+                    self.target.height,
+                )
+            };
+            let Some((destination, source)) = rects else {
+                return Ok(());
+            };
+            if operation_clip.is_some_and(|clip| !pixel_rects_intersect(destination, clip)) {
+                return Ok(());
+            }
+            if !transformed && opacity == 1.0 && !window.has_alpha_content {
+                append_rounded_quad(
+                    operations,
+                    Quad::Copy(CopiedRect {
+                        texture,
+                        destination,
+                        source,
+                        clip: None,
+                    }),
+                    rounded_clip,
+                    operation_clip,
+                    self.target.width,
+                    self.target.height,
+                )?;
+            } else {
+                append_rounded_quad(
+                    operations,
+                    Quad::Sampled(SampledRect {
+                        texture,
+                        texture_width,
+                        texture_height,
+                        destination,
+                        source,
+                        tint: Color::rgba(1.0, 1.0, 1.0, opacity)
+                            .map_err(|_| "Invalid window opacity")?,
+                        ignore_source_alpha: !window.has_alpha_content,
+                        clip: None,
+                    }),
+                    rounded_clip,
+                    operation_clip,
+                    self.target.width,
+                    self.target.height,
+                )?;
+            }
+        } else {
+            let (x, y, width, height) = visual_geometry;
+            let Some((destination, _)) =
+                clipped_rect(x, y, width, height, self.target.width, self.target.height)
+            else {
+                return Ok(());
+            };
+            if operation_clip.is_some_and(|clip| !pixel_rects_intersect(destination, clip)) {
+                return Ok(());
+            }
+            let color = if window.focused {
+                bgra_color([150, 150, 200, 255])
+            } else {
+                bgra_color([180, 180, 180, 255])
+            };
+            append_rounded_quad(
+                operations,
+                Quad::Solid {
+                    destination,
+                    color,
+                    clip: None,
+                },
+                rounded_clip,
+                operation_clip,
+                self.target.width,
+                self.target.height,
+            )?;
+        }
+        Ok(())
+    }
+
     /// Upload all changed window textures, compose the complete scene, and present it.
     pub(super) fn compose_and_present(
         &mut self,
@@ -439,6 +604,9 @@ impl GpuCompositor {
         windows: &[Window],
         cursor: &Cursor,
         background: [u8; 4],
+        overview_shadows: &[((i32, i32, u32, u32), u32, [u8; 4])],
+        overview_cards: &[((i32, i32, u32, u32), bool, bool)],
+        overview_remove_buttons: &[(u32, (i32, i32, u32, u32), bool)],
         resize_outline: Option<(i32, i32, u32, u32)>,
         cursor_visible: bool,
         damage: Option<DamageRect>,
@@ -453,7 +621,9 @@ impl GpuCompositor {
             // and cause a fresh private resource table. Each active window is
             // therefore re-uploaded into that replacement table here.
             let has_current_backing = window.pixels().is_ok();
-            if window.visible && !self.has_committed_shared_buffer(window.id) && has_current_backing
+            if window.is_presented()
+                && !self.has_committed_shared_buffer(window.id)
+                && has_current_backing
             {
                 self.sync_window_texture(window)?;
             }
@@ -474,96 +644,66 @@ impl GpuCompositor {
             .map_err(|_| "Failed to prepare GPU swapchain damage")?;
         let damage_clip = (render_area != full_area).then_some(render_area);
         let mut operations = Vec::new();
+        let mut overview_backplates_drawn = false;
         for window in windows {
-            if !window.visible {
+            if !window.is_presented() {
                 continue;
             }
-
-            let has_cached_texture = self
-                .textures
-                .iter()
-                .any(|entry| entry.window_id == Some(window.id));
-            let has_current_backing = window.pixels().is_ok();
-            if self.has_committed_shared_buffer(window.id)
-                || has_cached_texture
-                || has_current_backing
+            if !overview_backplates_drawn
+                && !matches!(
+                    window.window_type,
+                    WindowType::Desktop | WindowType::ShellBackground
+                )
             {
-                let (texture, texture_width, texture_height) =
-                    match self.committed_shared_texture(window.id) {
-                        Some(texture) => texture,
-                        None => {
-                            let texture = self
-                                .textures
-                                .iter()
-                                .find(|entry| entry.window_id == Some(window.id))
-                                .ok_or("GPU window texture cache is missing")?;
-                            (texture.texture, texture.width, texture.height)
-                        }
-                    };
-                // A geometry change can temporarily precede its next CPU
-                // upload or shared generation. Keep sampling the current cache
-                // without extending beyond the registered image extent.
-                let content_width = window.width.min(texture_width);
-                let content_height = window.height.min(texture_height);
-                let Some((destination, source)) = clipped_rect(
-                    window.x,
-                    window.y,
-                    content_width,
-                    content_height,
+                append_overview_shadows(
+                    &mut operations,
+                    overview_shadows,
                     self.target.width,
                     self.target.height,
-                ) else {
-                    continue;
-                };
-                if damage_clip.is_some_and(|clip| !pixel_rects_intersect(destination, clip)) {
-                    continue;
-                }
-                if window.opacity == 1.0 && !window.has_alpha_content {
-                    operations.push(Quad::Copy(CopiedRect {
-                        texture,
-                        destination,
-                        source,
-                        clip: damage_clip,
-                    }));
-                } else {
-                    operations.push(Quad::Sampled(SampledRect {
-                        texture,
-                        texture_width,
-                        texture_height,
-                        destination,
-                        source,
-                        tint: Color::rgba(1.0, 1.0, 1.0, window.opacity)
-                            .map_err(|_| "Invalid window opacity")?,
-                        ignore_source_alpha: !window.has_alpha_content,
-                        clip: damage_clip,
-                    }));
-                }
-            } else {
-                let Some((destination, _)) = clipped_rect(
-                    window.x,
-                    window.y,
-                    window.width,
-                    window.height,
+                    damage_clip,
+                )?;
+                append_overview_backplates(
+                    &mut operations,
+                    overview_cards,
                     self.target.width,
                     self.target.height,
-                ) else {
-                    continue;
-                };
-                if damage_clip.is_some_and(|clip| !pixel_rects_intersect(destination, clip)) {
-                    continue;
-                }
-                let color = if window.focused {
-                    bgra_color([150, 150, 200, 255])
-                } else {
-                    bgra_color([180, 180, 180, 255])
-                };
-                operations.push(Quad::Solid {
-                    destination,
-                    color,
-                    clip: damage_clip,
-                });
+                    damage_clip,
+                )?;
+                overview_backplates_drawn = true;
+            }
+            self.append_window_projection(&mut operations, window, None, damage_clip)?;
+            for instance in &window.presentation_instances {
+                self.append_window_projection(
+                    &mut operations,
+                    window,
+                    Some(*instance),
+                    damage_clip,
+                )?;
             }
         }
+        if !overview_backplates_drawn {
+            append_overview_shadows(
+                &mut operations,
+                overview_shadows,
+                self.target.width,
+                self.target.height,
+                damage_clip,
+            )?;
+            append_overview_backplates(
+                &mut operations,
+                overview_cards,
+                self.target.width,
+                self.target.height,
+                damage_clip,
+            )?;
+        }
+        append_overview_remove_buttons(
+            &mut operations,
+            overview_remove_buttons,
+            self.target.width,
+            self.target.height,
+            damage_clip,
+        )?;
 
         if let Some(outline) = resize_outline {
             append_outline(
@@ -792,8 +932,9 @@ impl GpuCompositor {
             .unwrap_or((self.target.width, self.target.height));
         let mut target = MappedTarget::open_swapchain(width, height)
             .map_err(|_| "Failed to rebuild mapped GPU swapchain")?;
-        let quad_renderer = QuadRenderer::define(target.resources.as_ref(), 96)
-            .map_err(|_| "Failed to redefine GPU composition resources")?;
+        let quad_renderer =
+            QuadRenderer::define(target.resources.as_ref(), COMPOSITION_QUAD_CAPACITY)
+                .map_err(|_| "Failed to redefine GPU composition resources")?;
         let cursor_images = create_cursor_images(&mut target, cursor)?;
         let mut shared_texture_ids = Vec::new();
         shared_texture_ids
@@ -966,12 +1107,331 @@ fn clipped_rect(
     ))
 }
 
+fn clipped_scaled_rect(
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+    source_width: u32,
+    source_height: u32,
+    target_width: u32,
+    target_height: u32,
+) -> Option<(PixelRect, PixelRect)> {
+    if width == 0 || height == 0 || source_width == 0 || source_height == 0 {
+        return None;
+    }
+    let right = x.checked_add(width as i32)?;
+    let bottom = y.checked_add(height as i32)?;
+    let left = x.max(0).min(target_width as i32);
+    let top = y.max(0).min(target_height as i32);
+    let right = right.max(0).min(target_width as i32);
+    let bottom = bottom.max(0).min(target_height as i32);
+    if right <= left || bottom <= top {
+        return None;
+    }
+
+    let source_left = ((i64::from(left - x) * i64::from(source_width)) / i64::from(width)) as u32;
+    let source_top = ((i64::from(top - y) * i64::from(source_height)) / i64::from(height)) as u32;
+    let source_right = ((i64::from(right - x) * i64::from(source_width)
+        + i64::from(width.saturating_sub(1)))
+        / i64::from(width)) as u32;
+    let source_bottom = ((i64::from(bottom - y) * i64::from(source_height)
+        + i64::from(height.saturating_sub(1)))
+        / i64::from(height)) as u32;
+    Some((
+        PixelRect::new(
+            left as u32,
+            top as u32,
+            (right - left) as u32,
+            (bottom - top) as u32,
+        )
+        .ok()?,
+        PixelRect::new(
+            source_left.min(source_width.saturating_sub(1)),
+            source_top.min(source_height.saturating_sub(1)),
+            source_right
+                .min(source_width)
+                .saturating_sub(source_left)
+                .max(1),
+            source_bottom
+                .min(source_height)
+                .saturating_sub(source_top)
+                .max(1),
+        )
+        .ok()?,
+    ))
+}
+
 fn pixel_rects_intersect(a: PixelRect, b: PixelRect) -> bool {
     let a_right = a.x().saturating_add(a.width());
     let a_bottom = a.y().saturating_add(a.height());
     let b_right = b.x().saturating_add(b.width());
     let b_bottom = b.y().saturating_add(b.height());
     a.x() < b_right && b.x() < a_right && a.y() < b_bottom && b.y() < a_bottom
+}
+
+fn intersect_pixel_rects(a: PixelRect, b: PixelRect) -> Option<PixelRect> {
+    let left = a.x().max(b.x());
+    let top = a.y().max(b.y());
+    let right = a
+        .x()
+        .saturating_add(a.width())
+        .min(b.x().saturating_add(b.width()));
+    let bottom = a
+        .y()
+        .saturating_add(a.height())
+        .min(b.y().saturating_add(b.height()));
+    (right > left && bottom > top)
+        .then(|| PixelRect::new(left, top, right - left, bottom - top).ok())
+        .flatten()
+}
+
+fn quad_with_clip(operation: Quad, clip: Option<PixelRect>) -> Quad {
+    match operation {
+        Quad::Solid {
+            destination, color, ..
+        } => Quad::Solid {
+            destination,
+            color,
+            clip,
+        },
+        Quad::Sampled(mut rect) => {
+            rect.clip = clip;
+            Quad::Sampled(rect)
+        }
+        Quad::Copy(mut rect) => {
+            rect.clip = clip;
+            Quad::Copy(rect)
+        }
+    }
+}
+
+fn append_rounded_quad(
+    operations: &mut Vec<Quad>,
+    operation: Quad,
+    rounded_clip: Option<((i32, i32, u32, u32), u32)>,
+    base_clip: Option<PixelRect>,
+    target_width: u32,
+    target_height: u32,
+) -> Result<(), &'static str> {
+    let Some((rect, radius)) = rounded_clip else {
+        operations.push(quad_with_clip(operation, base_clip));
+        return Ok(());
+    };
+
+    let top = rect.1.max(0);
+    let bottom = rect
+        .1
+        .saturating_add(rect.3 as i32)
+        .min(target_height as i32);
+    let mut bands: Vec<(i32, i32, u32, u32)> = Vec::new();
+    for row_y in top..bottom {
+        let Some((left, right)) = rounded_rect_row_span(rect, radius, row_y) else {
+            continue;
+        };
+        let left = left.max(0);
+        let right = right.min(target_width as i32);
+        if right <= left {
+            continue;
+        }
+        let width = (right - left) as u32;
+        if let Some(last) = bands.last_mut()
+            && last.0 == left
+            && last.2 == width
+            && last.1.saturating_add(last.3 as i32) == row_y
+        {
+            last.3 = last.3.saturating_add(1);
+        } else {
+            bands.push((left, row_y, width, 1));
+        }
+    }
+
+    for (x, y, width, height) in bands {
+        let mut clip = PixelRect::new(x as u32, y as u32, width, height)
+            .map_err(|_| "Invalid rounded Overview clip")?;
+        if let Some(base) = base_clip {
+            let Some(intersection) = intersect_pixel_rects(clip, base) else {
+                continue;
+            };
+            clip = intersection;
+        }
+        operations.push(quad_with_clip(operation, Some(clip)));
+    }
+    Ok(())
+}
+
+fn append_overview_backplates(
+    operations: &mut Vec<Quad>,
+    overview_cards: &[((i32, i32, u32, u32), bool, bool)],
+    target_width: u32,
+    target_height: u32,
+    damage_clip: Option<PixelRect>,
+) -> Result<(), &'static str> {
+    for (rect, selected_or_hovered, add_workspace) in overview_cards {
+        let Some((destination, _)) =
+            clipped_rect(rect.0, rect.1, rect.2, rect.3, target_width, target_height)
+        else {
+            continue;
+        };
+        let color = if *add_workspace {
+            if *selected_or_hovered {
+                bgra_color([255, 255, 255, 34])
+            } else {
+                bgra_color([255, 255, 255, 18])
+            }
+        } else if *selected_or_hovered {
+            bgra_color(sws_protocol::workspace::OVERVIEW_CARD_SELECTED_OVERLAY_BGRA)
+        } else {
+            bgra_color(sws_protocol::workspace::OVERVIEW_CARD_INACTIVE_OVERLAY_BGRA)
+        };
+        append_rounded_quad(
+            operations,
+            Quad::Solid {
+                destination,
+                color,
+                clip: None,
+            },
+            Some((*rect, sws_protocol::workspace::OVERVIEW_CARD_CORNER_RADIUS)),
+            damage_clip,
+            target_width,
+            target_height,
+        )?;
+        if *add_workspace {
+            let short_side = rect.2.min(rect.3);
+            let arm = (short_side / 5).clamp(14, 52);
+            let thickness = (short_side / 48).clamp(2, 6);
+            let center_x = rect.0.saturating_add((rect.2 / 2) as i32);
+            let center_y = rect.1.saturating_add((rect.3 / 2) as i32);
+            let plus_color =
+                bgra_color([255, 255, 255, if *selected_or_hovered { 220 } else { 170 }]);
+            for plus_rect in [
+                (
+                    center_x.saturating_sub((arm / 2) as i32),
+                    center_y.saturating_sub((thickness / 2) as i32),
+                    arm,
+                    thickness,
+                ),
+                (
+                    center_x.saturating_sub((thickness / 2) as i32),
+                    center_y.saturating_sub((arm / 2) as i32),
+                    thickness,
+                    arm,
+                ),
+            ] {
+                let Some((plus_destination, _)) = clipped_rect(
+                    plus_rect.0,
+                    plus_rect.1,
+                    plus_rect.2,
+                    plus_rect.3,
+                    target_width,
+                    target_height,
+                ) else {
+                    continue;
+                };
+                operations.push(Quad::Solid {
+                    destination: plus_destination,
+                    color: plus_color,
+                    clip: damage_clip,
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn append_overview_shadows(
+    operations: &mut Vec<Quad>,
+    shadows: &[((i32, i32, u32, u32), u32, [u8; 4])],
+    target_width: u32,
+    target_height: u32,
+    damage_clip: Option<PixelRect>,
+) -> Result<(), &'static str> {
+    for (rect, radius, color) in shadows {
+        let Some((destination, _)) =
+            clipped_rect(rect.0, rect.1, rect.2, rect.3, target_width, target_height)
+        else {
+            continue;
+        };
+        append_rounded_quad(
+            operations,
+            Quad::Solid {
+                destination,
+                color: bgra_color(*color),
+                clip: None,
+            },
+            Some((*rect, *radius)),
+            damage_clip,
+            target_width,
+            target_height,
+        )?;
+    }
+    Ok(())
+}
+
+fn append_overview_remove_buttons(
+    operations: &mut Vec<Quad>,
+    buttons: &[(u32, (i32, i32, u32, u32), bool)],
+    target_width: u32,
+    target_height: u32,
+    damage_clip: Option<PixelRect>,
+) -> Result<(), &'static str> {
+    for (_, rect, hovered) in buttons {
+        let Some((destination, _)) =
+            clipped_rect(rect.0, rect.1, rect.2, rect.3, target_width, target_height)
+        else {
+            continue;
+        };
+        append_rounded_quad(
+            operations,
+            Quad::Solid {
+                destination,
+                color: bgra_color([0, 0, 0, if *hovered { 118 } else { 82 }]),
+                clip: None,
+            },
+            Some((*rect, rect.2 / 2)),
+            damage_clip,
+            target_width,
+            target_height,
+        )?;
+
+        let center_x = rect.0.saturating_add((rect.2 / 2) as i32);
+        let center_y = rect.1.saturating_add((rect.3 / 2) as i32);
+        let half = (rect.2.min(rect.3) / 5).max(5) as i32;
+        let dot = (rect.2.min(rect.3) / 16).clamp(2, 3);
+        let color = bgra_color([255, 255, 255, if *hovered { 235 } else { 205 }]);
+        for delta in -half..=half {
+            for (x, y) in [
+                (
+                    center_x.saturating_add(delta),
+                    center_y.saturating_add(delta),
+                ),
+                (
+                    center_x.saturating_add(delta),
+                    center_y.saturating_sub(delta),
+                ),
+            ] {
+                let Some((dot_rect, _)) = clipped_rect(
+                    x.saturating_sub((dot / 2) as i32),
+                    y.saturating_sub((dot / 2) as i32),
+                    dot,
+                    dot,
+                    target_width,
+                    target_height,
+                ) else {
+                    continue;
+                };
+                if damage_clip.is_some_and(|clip| !pixel_rects_intersect(dot_rect, clip)) {
+                    continue;
+                }
+                operations.push(Quad::Solid {
+                    destination: dot_rect,
+                    color,
+                    clip: damage_clip,
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 fn append_outline(

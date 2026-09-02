@@ -33,6 +33,7 @@ regex = "1"
 svgtypes = "0.15"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+serde-json-core = { package = "serde-json-core", version = "0.6", default-features = false }
 pulldown-cmark = "0.12"
 png = "0.18.1"
 sbus = { path = "../lib/sbus" }
@@ -92,8 +93,8 @@ name = "files"
 path = "src/filer.rs"
 
 [[bin]]
-name = "launcher"
-path = "src/app_launcher.rs"
+name = "scarlet-shell"
+path = "src/scarlet_shell/main.rs"
 
 [[bin]]
 name = "notepad"
