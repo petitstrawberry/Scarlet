@@ -5,13 +5,62 @@ use super::window::{PresentationInstance, Window, WindowId, WindowType, rounded_
 use framebuffer::{DisplayPresentRegion, DisplaySurface};
 use scarlet_os::handle::Handle;
 use sgfx::ir::{Color, LoadOp, PixelRect, TextureId};
+use std::fmt;
 use std::vec::Vec;
 
 use crate::sgfx_ir_support::{
-    CopiedRect, MappedTarget, Quad, QuadRenderer, SampledRect, define_bgra_texture, upload_bgra,
+    CopiedRect, MappedTarget, Quad, QuadRenderer, QuadSubmitError, SampledRect,
+    define_bgra_texture, upload_bgra,
 };
 
 type DamageRect = (u32, u32, u32, u32);
+
+/// Scope of one failed GPU-composition frame.
+#[derive(Debug)]
+pub(super) enum GpuCompositionError {
+    /// Frame construction failed before valid work reached the backend.
+    Frame(&'static str),
+    /// The mapped target or selected backend can no longer be trusted.
+    Backend(&'static str),
+    /// The SGFX backend rejected execution of a valid command buffer.
+    Execution(sgfx::Error),
+}
+
+impl GpuCompositionError {
+    /// Return whether shared client images must be invalidated.
+    pub(super) const fn invalidates_shared_images(&self) -> bool {
+        // SGFX execution errors currently combine validation, unsupported IR,
+        // allocation, and transport failures. None is an explicit Vulkan-like
+        // DEVICE_LOST signal, so execution rejection alone must remain local
+        // to the frame. A mapped-target failure is the narrower point at which
+        // the compositor can no longer promise that imported images survive.
+        matches!(self, Self::Backend(_))
+    }
+}
+
+impl From<&'static str> for GpuCompositionError {
+    fn from(error: &'static str) -> Self {
+        Self::Frame(error)
+    }
+}
+
+impl From<QuadSubmitError> for GpuCompositionError {
+    fn from(error: QuadSubmitError) -> Self {
+        match error {
+            QuadSubmitError::Recording(error) => Self::Frame(error),
+            QuadSubmitError::Execution(error) => Self::Execution(error),
+        }
+    }
+}
+
+impl fmt::Display for GpuCompositionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Frame(error) | Self::Backend(error) => formatter.write_str(error),
+            Self::Execution(error) => write!(formatter, "SGFX execution failed: {error}"),
+        }
+    }
+}
 
 const MAX_RETIRED_WINDOW_TEXTURES: usize = 8;
 const MAX_RETIRED_WINDOW_TEXTURE_BYTES: u64 = 24 * 1024 * 1024;
@@ -610,7 +659,7 @@ impl GpuCompositor {
         resize_outline: Option<(i32, i32, u32, u32)>,
         cursor_visible: bool,
         damage: Option<DamageRect>,
-    ) -> Result<Vec<SgfxCommitToken>, &'static str> {
+    ) -> Result<Vec<SgfxCommitToken>, GpuCompositionError> {
         super::trace::set_compositor_stage(super::trace::STAGE_GPU_SYNC_WINDOWS);
         self.rebuild_if_needed(cursor, windows)?;
         let force_full_repaint = self.force_full_repaint;
@@ -764,7 +813,9 @@ impl GpuCompositor {
             width: render_area.width(),
             height: render_area.height(),
         });
-        self.target.present(display, region)?;
+        self.target
+            .present(display, region)
+            .map_err(GpuCompositionError::Backend)?;
         self.force_full_repaint = false;
         super::trace::set_compositor_stage(super::trace::STAGE_GPU_COLLECT_RELEASES);
         Ok(self.take_presented_releases())
@@ -987,6 +1038,16 @@ fn promote_pending_shared_frame(state: &mut SharedWindowState) -> [Option<SgfxCo
 #[cfg(test)]
 mod shared_frame_promotion_tests {
     use super::*;
+
+    #[test]
+    fn frame_recording_failure_does_not_invalidate_client_epochs() {
+        assert!(!GpuCompositionError::Frame("invalid frame").invalidates_shared_images());
+        assert!(
+            !GpuCompositionError::Execution(sgfx::Error::InvalidBackendPreference)
+                .invalidates_shared_images()
+        );
+        assert!(GpuCompositionError::Backend("device unavailable").invalidates_shared_images());
+    }
 
     fn token(buffer_id: u32, generation: u32, commit_serial: u64) -> SgfxCommitToken {
         SgfxCommitToken {

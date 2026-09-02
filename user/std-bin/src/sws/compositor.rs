@@ -1112,6 +1112,28 @@ struct KeyModifiers {
     meta: bool,
 }
 
+fn laptop_overview_space_opens_home(
+    tablet_mode: bool,
+    presentation: sws_protocol::workspace::ShellPresentation,
+    code: u16,
+    modifiers: KeyModifiers,
+) -> bool {
+    !tablet_mode
+        && presentation == sws_protocol::workspace::ShellPresentation::Overview
+        && code == key_codes::KEY_SPACE
+        && modifiers == KeyModifiers::default()
+}
+
+fn shell_workspace_rail_accepts_selection(
+    presentation: sws_protocol::workspace::ShellPresentation,
+) -> bool {
+    matches!(
+        presentation,
+        sws_protocol::workspace::ShellPresentation::Overview
+            | sws_protocol::workspace::ShellPresentation::Home
+    )
+}
+
 const SUPER_KEY_CODES: [u16; 2] = [key_codes::KEY_LEFTMETA, key_codes::KEY_RIGHTMETA];
 
 fn load_sws_config() -> SwsConfig {
@@ -1704,6 +1726,51 @@ mod keybinding_config_tests {
             resolve_shell_action(&bindings, key_codes::KEY_SPACE, meta),
             Some(ShellAction::Home)
         );
+    }
+
+    #[test]
+    fn plain_space_opens_home_only_from_laptop_overview() {
+        let overview = sws_protocol::workspace::ShellPresentation::Overview;
+        assert!(laptop_overview_space_opens_home(
+            false,
+            overview,
+            key_codes::KEY_SPACE,
+            KeyModifiers::default()
+        ));
+        assert!(!laptop_overview_space_opens_home(
+            true,
+            overview,
+            key_codes::KEY_SPACE,
+            KeyModifiers::default()
+        ));
+        assert!(!laptop_overview_space_opens_home(
+            false,
+            sws_protocol::workspace::ShellPresentation::Home,
+            key_codes::KEY_SPACE,
+            KeyModifiers::default()
+        ));
+        assert!(!laptop_overview_space_opens_home(
+            false,
+            overview,
+            key_codes::KEY_SPACE,
+            KeyModifiers {
+                meta: true,
+                ..KeyModifiers::default()
+            }
+        ));
+    }
+
+    #[test]
+    fn overview_and_home_both_expose_keyboard_workspace_selection() {
+        assert!(shell_workspace_rail_accepts_selection(
+            sws_protocol::workspace::ShellPresentation::Overview
+        ));
+        assert!(shell_workspace_rail_accepts_selection(
+            sws_protocol::workspace::ShellPresentation::Home
+        ));
+        assert!(!shell_workspace_rail_accepts_selection(
+            sws_protocol::workspace::ShellPresentation::Workspace
+        ));
     }
 
     #[test]
@@ -2521,9 +2588,7 @@ impl Compositor {
     }
 
     fn navigate_workspace(&mut self, direction: i32) -> bool {
-        if self.workspace_manager.presentation()
-            == sws_protocol::workspace::ShellPresentation::Overview
-        {
+        if shell_workspace_rail_accepts_selection(self.workspace_manager.presentation()) {
             return self.move_overview_selection(direction);
         }
         let changed = self.workspace_manager.cycle_workspace(direction);
@@ -2533,10 +2598,8 @@ impl Compositor {
         changed
     }
 
-    fn activate_overview_selection(&mut self) -> bool {
-        if self.workspace_manager.presentation()
-            != sws_protocol::workspace::ShellPresentation::Overview
-        {
+    fn activate_shell_workspace_selection(&mut self) -> bool {
+        if !shell_workspace_rail_accepts_selection(self.workspace_manager.presentation()) {
             return false;
         }
         let changed = if self.overview_add_workspace_selected {
@@ -2583,7 +2646,7 @@ impl Compositor {
                 self.move_focused_window_to_adjacent_workspace(1);
             }
             ShellAction::OverviewActivate => {
-                self.activate_overview_selection();
+                self.activate_shell_workspace_selection();
             }
             ShellAction::AddWorkspace => {
                 if self.workspace_manager.create_workspace().is_some() {
@@ -3830,7 +3893,23 @@ impl Compositor {
             }
             Err(error) => {
                 println!("[Compositor] GPU composition failed: {}", error);
-                self.disable_gpu_after_runtime_failure("SWS_BACKEND=sgfx compositor failed")?;
+                if error.invalidates_shared_images() {
+                    self.disable_gpu_after_runtime_failure("SWS_BACKEND=sgfx compositor failed")?;
+                } else {
+                    // IR recording and frame construction failures are local to
+                    // this frame. They are not equivalent to Vulkan-style
+                    // device loss and must not invalidate every client's shared
+                    // image epoch. Keep the compositor session so the next
+                    // frame can retry after the CPU fallback has presented a
+                    // coherent desktop.
+                    self.full_redraw_needed = true;
+                    if self.backend == SwsBackend::Sgfx {
+                        return Err("SWS_BACKEND=sgfx frame composition failed");
+                    }
+                    if self.backend == SwsBackend::Auto {
+                        println!("[Compositor] Using CPU fallback for this frame");
+                    }
+                }
                 Ok(false)
             }
         }
@@ -6881,11 +6960,6 @@ impl Compositor {
                 }
                 let pressed = value != 0;
                 let focused_id = self.window_manager.get_focused_window_id();
-                let shell_background_focused = focused_id.is_some_and(|window_id| {
-                    self.window_manager
-                        .get_window(window_id)
-                        .is_some_and(|window| window.window_type == WindowType::ShellBackground)
-                });
                 let super_tap_completed = if !synthetic && self.uses_super_tap_for_overview() {
                     let blocked_at_start = self.held_keys.has_any_other_than(&SUPER_KEY_CODES);
                     self.super_tap_state.observe(
@@ -6947,6 +7021,24 @@ impl Compositor {
                     return Ok(true);
                 }
                 if is_initial_press(value)
+                    && laptop_overview_space_opens_home(
+                        self.tablet_mode,
+                        self.workspace_manager.presentation(),
+                        code,
+                        modifiers,
+                    )
+                {
+                    self.key_repeat.cancel_key(source, code);
+                    self.workspace_shortcut_keys.press(source, code);
+                    if self
+                        .workspace_manager
+                        .set_presentation(sws_protocol::workspace::ShellPresentation::Home)
+                    {
+                        self.commit_workspace_change();
+                    }
+                    return Ok(true);
+                }
+                if is_initial_press(value)
                     && code == key_codes::KEY_ENTER
                     && modifiers == KeyModifiers::default()
                     && self.overview_add_workspace_selected
@@ -6955,14 +7047,13 @@ impl Compositor {
                 {
                     self.key_repeat.cancel_key(source, code);
                     self.workspace_shortcut_keys.press(source, code);
-                    self.activate_overview_selection();
+                    self.activate_shell_workspace_selection();
                     return Ok(true);
                 }
                 if is_initial_press(value)
                     && self.workspace_manager.presentation()
                         == sws_protocol::workspace::ShellPresentation::Overview
                     && modifiers == KeyModifiers::default()
-                    && !shell_background_focused
                 {
                     let handled = match code {
                         key_codes::KEY_LEFT => {
@@ -6974,7 +7065,7 @@ impl Compositor {
                             true
                         }
                         key_codes::KEY_ENTER => {
-                            self.activate_overview_selection();
+                            self.activate_shell_workspace_selection();
                             true
                         }
                         key_codes::KEY_ESC => {
@@ -6995,6 +7086,22 @@ impl Compositor {
                 // focus or the focused window's extension route changed while
                 // the key was held.
                 if !pressed && self.ime_trigger_keys.release(source, code) {
+                    return Ok(false);
+                }
+
+                // Overview is a compositor-owned modal keyboard surface. Its
+                // navigation keys and global shell chords were handled above;
+                // no remaining key may leak into the hidden application
+                // drawer (or an application underneath it). Home deliberately
+                // falls through because that is the drawer's input depth.
+                if self.workspace_manager.presentation()
+                    == sws_protocol::workspace::ShellPresentation::Overview
+                {
+                    if super_tap_completed {
+                        self.toggle_overview_presentation();
+                        return Ok(true);
+                    }
+                    self.key_repeat.cancel_key(source, code);
                     return Ok(false);
                 }
 

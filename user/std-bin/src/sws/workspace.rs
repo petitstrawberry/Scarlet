@@ -83,16 +83,15 @@ impl WorkspaceManager {
         self.active_workspace
     }
 
-    /// Return the normal workspace restored when shell navigation closes.
+    /// Return the committed workspace restored when shell navigation closes.
     pub(super) const fn normal_workspace(&self) -> WorkspaceId {
         self.normal_workspace
     }
 
     /// Append one explicitly requested empty workspace.
     ///
-    /// The new workspace is selected immediately. When called from Overview,
-    /// the prior normal workspace is retained for toggle dismissal; when
-    /// called from normal presentation, the new workspace becomes normal.
+    /// The new workspace is selected immediately and becomes the committed
+    /// return destination even when it is created from shell navigation.
     ///
     /// # Returns
     ///
@@ -108,9 +107,7 @@ impl WorkspaceManager {
             tablet_layout: TabletLayout::Empty,
         });
         self.active_workspace = id;
-        if self.presentation == ShellPresentation::Workspace {
-            self.normal_workspace = id;
-        }
+        self.normal_workspace = id;
         self.bump_generation();
         Some(id)
     }
@@ -149,9 +146,7 @@ impl WorkspaceManager {
             tablet_layout: TabletLayout::Single { window_id },
         });
         self.active_workspace = id;
-        if self.presentation == ShellPresentation::Workspace {
-            self.normal_workspace = id;
-        }
+        self.normal_workspace = id;
         self.ensure_manual_workspace_invariants();
         self.bump_generation();
         Some(id)
@@ -445,7 +440,7 @@ impl WorkspaceManager {
     /// Toggle between normal workspace presentation and Workspace Overview.
     ///
     /// Home and Overview are both shell-navigation presentations, so toggling
-    /// either one returns to the last usable normal workspace.
+    /// either one enters the workspace currently selected in shell navigation.
     ///
     /// # Returns
     ///
@@ -458,7 +453,7 @@ impl WorkspaceManager {
         }
     }
 
-    /// Leave shell navigation for the saved normal workspace.
+    /// Leave shell navigation for the committed workspace selection.
     ///
     /// Occupancy is irrelevant: an explicitly selected empty workspace is a
     /// complete normal destination and is restored exactly like an occupied
@@ -719,7 +714,9 @@ impl WorkspaceManager {
     ///
     /// Unlike normal workspace cycling, Overview selection stops at the first
     /// and last cards. This gives horizontal scroll and keyboard navigation a
-    /// stable edge instead of unexpectedly wrapping the whole row.
+    /// stable edge instead of unexpectedly wrapping the whole row. Selection
+    /// also commits the card as the destination restored when shell navigation
+    /// closes.
     pub(super) fn move_overview_selection(&mut self, direction: i32) -> bool {
         if self.presentation == ShellPresentation::Workspace
             || self.workspaces.len() < 2
@@ -741,6 +738,7 @@ impl WorkspaceManager {
             return false;
         }
         self.active_workspace = self.workspaces[next].id;
+        self.normal_workspace = self.active_workspace;
         self.bump_generation();
         true
     }
@@ -1053,7 +1051,9 @@ impl WorkspaceManager {
         self.active_workspace = transaction.active_workspace;
         self.presentation = transaction.presentation;
         self.workspaces = transaction.workspaces;
-        self.normal_workspace = if self.presentation == ShellPresentation::Workspace {
+        self.normal_workspace = if self.presentation == ShellPresentation::Workspace
+            || self.active_workspace != previous_active
+        {
             self.active_workspace
         } else if previous_presentation == ShellPresentation::Workspace
             && self
@@ -1413,10 +1413,31 @@ mod tests {
         assert_eq!(manager.presentation(), ShellPresentation::Overview);
         assert!(manager.move_overview_selection(-1));
         assert_eq!(manager.active_workspace(), 1);
+        assert_eq!(manager.normal_workspace(), 1);
         assert_eq!(manager.presentation(), ShellPresentation::Overview);
         assert!(!manager.move_overview_selection(-1));
         assert!(manager.move_overview_selection(1));
         assert_eq!(manager.active_workspace(), second);
+        assert_eq!(manager.normal_workspace(), second);
+    }
+
+    #[test]
+    fn home_workspace_selection_moves_without_closing_the_drawer() {
+        let mut manager = WorkspaceManager::new();
+        manager.add_window(10, true);
+        let second = manager.create_workspace().unwrap();
+        manager.add_window(11, true);
+        assert!(manager.set_presentation(ShellPresentation::Home));
+
+        assert!(manager.move_overview_selection(-1));
+        assert_eq!(manager.active_workspace(), 1);
+        assert_eq!(manager.normal_workspace(), 1);
+        assert_eq!(manager.presentation(), ShellPresentation::Home);
+        assert!(!manager.move_overview_selection(-1));
+        assert!(manager.move_overview_selection(1));
+        assert_eq!(manager.active_workspace(), second);
+        assert_eq!(manager.normal_workspace(), second);
+        assert_eq!(manager.presentation(), ShellPresentation::Home);
     }
 
     #[test]
@@ -1644,7 +1665,7 @@ mod tests {
     }
 
     #[test]
-    fn dismissing_overview_restores_normal_workspace_without_occupancy_guessing() {
+    fn dismissing_overview_enters_the_selected_empty_workspace() {
         let mut manager = WorkspaceManager::new();
         manager.add_window(10, false);
         let empty = manager.create_workspace().unwrap();
@@ -1652,11 +1673,40 @@ mod tests {
         manager.set_presentation(ShellPresentation::Overview);
         assert!(manager.move_overview_selection(1));
         assert_eq!(manager.active_workspace(), empty);
+        assert_eq!(manager.normal_workspace(), empty);
 
         assert!(manager.return_to_workspace());
-        assert_eq!(manager.active_workspace(), 1);
-        assert_eq!(manager.normal_workspace(), 1);
+        assert_eq!(manager.active_workspace(), empty);
+        assert_eq!(manager.normal_workspace(), empty);
         assert_eq!(manager.presentation(), ShellPresentation::Workspace);
+    }
+
+    #[test]
+    fn every_shell_exit_path_uses_the_latest_overview_selection() {
+        for exit_path in 0..3 {
+            let mut manager = WorkspaceManager::new();
+            manager.add_window(10, false);
+            let second = manager.create_workspace().unwrap();
+            manager.set_presentation(ShellPresentation::Overview);
+            assert!(manager.move_overview_selection(-1));
+            assert_eq!(manager.active_workspace(), 1);
+            assert_eq!(manager.normal_workspace(), 1);
+
+            match exit_path {
+                0 => assert!(manager.return_to_workspace()),
+                1 => assert!(manager.toggle_overview()),
+                2 => {
+                    assert!(manager.set_presentation(ShellPresentation::Home));
+                    assert!(manager.return_to_workspace());
+                }
+                _ => unreachable!(),
+            }
+
+            assert_eq!(manager.active_workspace(), 1);
+            assert_eq!(manager.normal_workspace(), 1);
+            assert_eq!(manager.presentation(), ShellPresentation::Workspace);
+            assert_ne!(manager.active_workspace(), second);
+        }
     }
 
     #[test]
@@ -1675,7 +1725,7 @@ mod tests {
         assert_eq!(state.workspaces[1].id, created);
         assert_eq!(state.workspaces[1].window_ids, vec![11]);
         assert_eq!(state.active_workspace, created);
-        assert_eq!(state.normal_workspace, 1);
+        assert_eq!(state.normal_workspace, created);
         assert_eq!(state.presentation, ShellPresentation::Overview);
     }
 

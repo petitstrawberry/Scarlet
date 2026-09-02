@@ -70,7 +70,8 @@ scene root and its transient descendants belong to the same scene.
 The global application-launch layer owned by `scarlet-shell`. It is the second
 depth of the same shell navigation experience, not a standalone launcher
 process. `ShellPresentation::Home` denotes this expanded application drawer;
-`Super+Space` enters it directly and toggles back to the normal workspace.
+`Super+Space` enters it directly and toggles back to the workspace selected in
+the rail.
 
 ### Workspace Overview
 
@@ -78,9 +79,10 @@ The outermost navigation view. Each rail card represents a workspace's current
 composition. Laptop Overview combines a compact workspace rail, a non-overlap
 spread of windows in the selected workspace, and a shallow pull affordance for
 the application layer; expanding the application layer is the next depth.
-Tablet Overview retains the current combined card/catalog layout because a
-workspace already represents one `Single` app or one `Split` pair. Both layouts
-use the same presentation and input state machine.
+Tablet Overview is a dedicated large-card switcher because a workspace already
+represents one `Single` app or one `Split` pair. Tablet Home retains a compact
+workspace rail above the catalog. Both layouts use the same presentation and
+input state machine.
 
 ### Window switcher
 
@@ -151,11 +153,11 @@ enum OutputPresentation {
 Desktop while the internal display uses Tablet. Closing or detaching an output
 makes its workspace unassigned; it does not delete that workspace.
 
-The single-output implementation stores one active workspace, the normal
-workspace to restore after shell navigation, and one presentation. The normal
-workspace may be empty; occupancy is never used to guess where Overview should
-return. Protocol fields and transactions must not assume this state is
-permanently global.
+The single-output implementation stores one active workspace, its committed
+shell-navigation return target, and one presentation. Moving the Overview
+selection updates both identifiers, including when the destination is empty;
+occupancy is never used to guess where Overview should return. Protocol fields
+and transactions must not assume this state is permanently global.
 
 ## Workspace Lifecycle
 
@@ -300,7 +302,7 @@ window spread are visible at the same time.
   never an application-grid icon. Its full-width transparent row is the hit
   target; there is no visible bottom bar, dock, or floating sheet.
 
-Activating the pull row, `Super+Space`, or typing from the first depth replaces
+Activating the pull row or `Super+Space` from the first depth replaces
 the selected-workspace stage with the application catalog on the same canvas.
 The workspace rail remains fixed. Spread windows are neither visible nor
 interactive in `Home:Apps`.
@@ -322,24 +324,31 @@ interactive in `Home:Apps`.
 #### Pattern B: tablet
 
 A tablet workspace already exposes its entire `Single` or `Split`
-composition. Repeating those same scenes in a second window spread wastes
-space, so the first depth retains the current combined workspace-card and
-application-catalog layout.
+composition, so Overview treats that composition itself as the switchable
+unit. The first depth is a dedicated large-card switcher; the application
+catalog is not visible there.
 
 ```text
 ┌────────────── one Overview/Home canvas ───────────────────┐
 │ [Home 1/3] [Scarlet]                       [status][clock] │
-│  ╭──────── workspace card ───────╮  ╭──────────────╮     │
-│  │ clipped Single/Split actors   │  │ next / +     │     │
-│  ╰───────────────────────────────╯  ╰──────────────╯     │
+│  ╭────────── WS 1 ──────────╮ ╭──────── WS 2 ────────╮  │
+│  │ complete Single/Split    │ │ complete composition │  │
+│  │ live composition         │ │ or final + target    │  │
+│  ╰──────────────────────────╯ ╰───────────────────────╯  │
+│                                                          │
 │                         ━━━━                             │
-│ Applications              [ Search ]              count │
-│              icon grid / search results                  │
 └──────────────────────────────────────────────────────────┘
 ```
 
-The application depth keeps the same hierarchy, but makes application launch
-the dominant task instead of adding a separate tablet-only destination:
+Landscape shows at most two complete large cards. Portrait centers one large
+complete card. Other workspaces remain reachable through horizontal movement
+and a position indicator; cropped neighbor slivers are never the only evidence
+that another workspace exists.
+
+Home uses the same full-output canvas, but makes application launch dominant
+and reduces workspace navigation to a compact rail. The rail remains present
+because changing the launch destination and explicitly adding a workspace are
+valid Home actions.
 
 ```text
 ┌────────────── one Overview/Home canvas ───────────────────┐
@@ -352,20 +361,24 @@ the dominant task instead of adding a separate tablet-only destination:
 │                                                          │
 │              large touch-oriented icon grid              │
 │                                                          │
+│                         ━━━━                             │
 └──────────────────────────────────────────────────────────┘
 ```
 
-- Workspace cards initially receive approximately 60% through 66% of the work
-  area; the drawer receives the remainder. The exact ratio is a responsive
-  token rather than a different interaction mode.
-- The workspace-card region uses the same shared backdrop as the application
-  region. Cards remain distinct through their own rounded backplates; there is
-  no enclosing panel.
-- `Super+Space`, the pull row, or typing expands the application region to approximately
-  76% through 82% and collapses workspaces into a compact rail. Returning to
-  the first depth restores the larger cards and partially exposed catalog. This
-  is a responsive exposure difference only: laptop shows the pill-only pull
-  row, while tablet keeps useful catalog content visible.
+- Overview gives the large workspace cards the complete area between the
+  transparent StatusBar and bottom gesture region. It has no drawer, search
+  field, or application icons.
+- Home gives the catalog the remaining area below its compact complete-card
+  rail. `Super+Left` / `Super+Right` traverses real cards and then the final `+`
+  pseudo-card without closing Home. `Super+Enter` activates the selected real
+  card or confirms creation at `+`; plain `Enter` remains application launch.
+- The workspace-card and application regions use the same shared backdrop.
+  Cards remain distinct through their own rounded backplates; there is no
+  enclosing panel.
+- A thin home indicator is visible by default in every tablet presentation.
+  Its visual remains small while its reserved system-gesture hit region is
+  touch-sized and overlays the safe-area edge instead of shrinking app layout.
+  Fullscreen dimming or hiding is a later policy, not the default.
 - Direct-touch targets are at least 44 logical pixels. The selected workspace's
   remove control stays visible because touch has no hover state.
 - There is no tablet-only Home button behavior. The existing Overview control,
@@ -374,8 +387,10 @@ the dominant task instead of adding a separate tablet-only destination:
 
 #### Shared projection and visual rules
 
-- The rail shows two through five complete cards. It never relies on cropped
-  neighbor slivers as the only indication of another workspace.
+- Compact rails show two through five complete cards. Tablet Overview instead
+  shows one complete large card in portrait or at most two in landscape. No
+  layout relies on cropped neighbor slivers as the only indication of another
+  workspace.
 - Every card uses a 14-pixel corner radius for its backplate, live-content
   clip, and hit test. Application pixels cannot escape the rounded projection.
 - Workspace cards and spread windows use a compact, soft elevation shadow.
@@ -466,7 +481,7 @@ Laptop and tablet share three semantic states. Only their Overview layout is
 responsive:
 
 ```text
-Workspace ── Super ──> Overview:Windows ── drawer affordance / typing ──> Home:Apps
+Workspace ── Super ──> Overview:Windows ── drawer affordance / Laptop Space ──> Home:Apps
 Workspace <─ Escape ── Overview:Windows <─ Escape / drawer affordance ── Home:Apps
 
 Super from either shell depth ──────────────────────────────> Workspace
@@ -476,21 +491,24 @@ Super+Space: Home:Apps ───────────────────
 
 - `Workspace` is the normal application destination.
 - `Overview:Windows` is the first Overview depth. Laptop renders the rail,
-  selected-workspace window spread, and pill-only pull row. Tablet renders
-  large workspace cards with part of the application catalog exposed below.
+  selected-workspace window spread, and pill-only pull row. Tablet uses the
+  available work area for its dedicated large-card workspace switcher.
 - `Home:Apps` is the application-focused depth. Laptop replaces the window
   spread with the catalog. Tablet expands the catalog and collapses cards into
   a rail.
 - The Overview button and modifier-only `Super` toggle the complete shell
   experience: from `Workspace` they enter `Overview:Windows`; from either shell
-  depth they restore the saved normal workspace.
+  depth they enter the workspace currently selected in the rail.
 - `Super+Space` is the direct application toggle: from `Workspace` or
   `Overview:Windows` it enters `Home:Apps`; from `Home:Apps` it restores the
-  saved normal workspace.
+  workspace currently selected in the rail.
+- On laptop, unmodified `Space` moves from `Overview:Windows` to `Home:Apps`.
+  Tablet reserves this key for future input policy and does not perform this
+  transition. Space keeps its ordinary text-input meaning once Home is open.
 - Activating or dragging the pull affordance changes `Overview:Windows` to
   `Home:Apps` and collapses it back without leaving shell navigation. The
-  affordance is a pill-only full-width row on laptop and the catalog header on
-  tablet.
+  affordance is a pill-only full-width row on laptop; tablet uses the persistent
+  bottom home indicator and its upward gesture path.
 - Escape first clears a non-empty search. With an empty query it moves one depth
   outward (`Home:Apps` to `Overview:Windows`, then to `Workspace`).
 
@@ -498,10 +516,12 @@ Required gestures:
 
 | Origin | Gesture | Destination/action |
 |---|---|---|
-| Workspace | bottom-edge swipe up, release | `Overview:Windows` |
-| Overview | second upward swipe / raise application layer | `Home:Apps` |
-| Home | downward swipe / lower application layer | `Overview:Windows` |
 | Workspace | home-indicator horizontal swipe | adjacent workspace |
+| Workspace | home-indicator swipe up and hold at switcher detent | `Overview:Windows` |
+| Workspace | fast/full home-indicator swipe up | `Home:Apps` |
+| Overview | upward swipe / raise application layer | `Home:Apps` |
+| Overview | downward swipe / cancel shell navigation | selected workspace |
+| Home | downward swipe / lower application layer | `Overview:Windows` |
 | Overview | tap workspace card | selected workspace |
 | Overview | tap an existing empty card | enter that empty workspace |
 | Overview | tap `+` pseudo-card | create and select an empty workspace |
@@ -519,16 +539,20 @@ an application.
 Pointer and keyboard equivalents are required for development and laptop use:
 
 - Tap and release `Super`: toggle Workspace Overview; when already open, return
-  to the last normal workspace. Pressing another key while `Super` is held
-  cancels the tap, so `Super` chords do not also toggle Overview.
+  to the workspace currently selected in the rail. Pressing another key while
+  `Super` is held cancels the tap, so `Super` chords do not also toggle
+  Overview.
 - Shell navigation chords are loaded from `/etc/sws/config.toml` under
   `[keybindings]`: `overview_toggle`, `workspace_left`, `workspace_right`,
   `move_window_left`, `move_window_right`, `home`, and `overview_activate`.
   Workspace lifecycle adds `add_workspace` and `remove_workspace`.
   Bindings match the exact modifier set, so `Super+Shift+Left` and
   `Super+Left` remain distinct actions; changes apply after restarting SWS.
-- `Super+Left` / `Super+Right`: adjacent workspace, stopping at the first and
-  last workspace without wrapping.
+- `Super+Left` / `Super+Right`: adjacent workspace without wrapping. In
+  `Workspace` it stops at the first and last real workspace. In
+  `Overview:Windows` and `Home:Apps`, moving once past the final real workspace
+  selects the final `+` pseudo-card when creation is available; the current
+  shell depth remains open.
 - `Super+Shift+Left` / `Super+Shift+Right`: move the focused window to the
   adjacent existing workspace and follow it. At either end the action is a
   no-op; it never creates a workspace. The vacated workspace remains even when
@@ -538,16 +562,24 @@ Pointer and keyboard equivalents are required for development and laptop use:
   members can be migrated safely. It is a no-op for the final workspace or an
   unsafe tablet merge.
 - `Super+Space`: toggle the application drawer directly as described above.
-- In Overview, `Super+Left` / `Super+Right` always moves the selected workspace.
+- In Overview, ordinary `Left` / `Right` and `Super+Left` / `Super+Right` move
+  the selected workspace. The selection is also the committed destination for
+  `Escape`, modifier-only `Super`, and the closing half of the `Super+Space`
+  toggle; dismissal never jumps back to the workspace selected on entry.
   Moving right once past the final real workspace selects `+`; it never creates
   immediately. `Enter` or `Super+Enter` confirms creation, while Left returns
-  to the final real workspace.
-  Search starts unfocused; typing a printable character focuses it. With an
-  empty query, ordinary arrow keys move freely through the application icon
-  grid. With a non-empty query, results switch to a list, `Up` / `Down` move its
-  selection, and `Left` / `Right` remain text-editing keys. `Super+Enter` opens
-  the selected workspace card. `Enter` launches the selected application.
-  `Escape` first clears search, then returns one shell depth at a time.
+  to the final real workspace. While `Overview:Windows` is active, printable
+  text and application-grid cursor navigation are not routed to the hidden
+  drawer.
+- In `Home:Apps`, search starts unfocused; typing a printable character focuses
+  it. With an empty query, ordinary arrow keys move freely through the
+  application icon grid. With a non-empty query, results switch to a list,
+  `Up` / `Down` move its selection, and `Left` / `Right` remain text-editing
+  keys. `Super+Left` / `Super+Right` traverse the compact workspace rail,
+  including its final `+`, without closing Home. `Super+Enter` opens a real
+  selected workspace or creates the selected `+`; plain `Enter` launches the
+  selected application. `Escape` first clears search, then returns one shell
+  depth at a time.
 - Alt-Tab: local window switcher, when implemented.
 
 ## StatusBar
@@ -565,7 +597,7 @@ generic menu:
 
 - The first button replaces the former Scarlet launcher button. From Home or a
   workspace it opens Overview; pressing it again in Overview returns to the
-  last normal workspace.
+  workspace currently selected in the rail.
 - The button has a fixed 64-pixel width and shows only the grid glyph and
   current/total workspace position. It never expands to fit the words `Home`
   or `Overview`.
@@ -757,8 +789,9 @@ implemented incrementally; animation remains intentionally deferred.
   it replaces and disables input for the window spread.
 - Use the shared cool-slate full-output backdrop, including beneath the
   transparent StatusBar. Do not draw enclosing rail, stage, or drawer panels.
-- Implement the tablet combined card/catalog layout and its catalog-expanded
-  ratio without adding tablet-only control semantics.
+- Implement the tablet large-card Overview switcher and the Home catalog with
+  its compact complete-card rail, including the final `+`, without adding
+  tablet-only button semantics.
 - Make `Overview:Windows` and `Home:Apps` visibly distinct and keep rail targets
   stable across their immediate, non-animated transition.
 
@@ -786,6 +819,10 @@ implemented incrementally; animation remains intentionally deferred.
   fixed, and fade/clip the window spread only as the catalog replaces it. Also
   animate adjacent-workspace and split-divider transitions using compositor
   presentation transforms.
+- Drive tablet bottom-edge horizontal switching, upward Home entry, and
+  hold-to-Switcher transitions from continuous gesture progress and velocity.
+  The persistent home indicator is the gesture origin, not a fourth shell
+  presentation or a clickable button.
 
 ### Stage 6: hardware and multi-output completion
 
@@ -804,9 +841,9 @@ changes a flag. A release candidate must demonstrate:
    non-overlapping spread of the selected workspace's windows; Apps visibly
    replaces that spread on the same canvas without moving the rail. No Dash or
    enclosing drawer panel is present.
-3. Tablet Overview keeps the large `Single`/`Split` cards and catalog together;
-   Apps expands the catalog and compacts the cards without changing input
-   semantics.
+3. Tablet Overview is a dedicated large-card `Single`/`Split` switcher with no
+   catalog. Home shows the app catalog with a compact complete-card rail and
+   selectable `+`; the home indicator remains visible by default.
 4. Entering either Overview depth cannot alter workspace membership by itself.
 5. Workspace switching preserves app buffers and does not flash blank frames.
 6. Returning to Desktop restores prior freeform geometry.

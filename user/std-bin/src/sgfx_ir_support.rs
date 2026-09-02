@@ -18,6 +18,10 @@ use sgfx::{Context, Instance, MappedTargetSession};
 
 const QUAD_VERTEX_STRIDE: u32 = 24;
 const QUAD_VERTEX_COUNT: usize = 6;
+const MAX_COMMANDS_PER_QUAD: usize = 7;
+const QUAD_BATCH_COMMAND_OVERHEAD: usize = 3;
+const MAX_QUADS_PER_COMMAND_BUFFER: usize =
+    (ir::MAX_COMMANDS - QUAD_BATCH_COMMAND_OVERHEAD) / MAX_COMMANDS_PER_QUAD;
 
 #[derive(Debug)]
 pub(crate) enum Error {
@@ -359,6 +363,30 @@ pub(crate) enum Quad {
     Copy(CopiedRect),
 }
 
+/// Failure while recording or executing one quad-composition submission.
+#[derive(Debug)]
+pub(crate) enum QuadSubmitError {
+    /// Portable IR recording rejected the requested frame.
+    Recording(&'static str),
+    /// The selected SGFX backend failed while executing valid recorded IR.
+    Execution(sgfx::Error),
+}
+
+impl From<&'static str> for QuadSubmitError {
+    fn from(error: &'static str) -> Self {
+        Self::Recording(error)
+    }
+}
+
+impl fmt::Display for QuadSubmitError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Recording(error) => formatter.write_str(error),
+            Self::Execution(error) => write!(formatter, "SGFX execution failed: {error}"),
+        }
+    }
+}
+
 pub(crate) struct QuadRenderer {
     buffer: BufferId,
     sampler: SamplerId,
@@ -428,7 +456,7 @@ impl QuadRenderer {
         target: &mut MappedTarget,
         load: LoadOp,
         operations: &[Quad],
-    ) -> Result<(), &'static str> {
+    ) -> Result<(), QuadSubmitError> {
         let area = PixelRect::new(0, 0, target.width, target.height)
             .map_err(|_| "Invalid SGFX target area")?;
         self.submit_region(target, area, load, operations)
@@ -441,9 +469,11 @@ impl QuadRenderer {
         area: PixelRect,
         load: LoadOp,
         operations: &[Quad],
-    ) -> Result<(), &'static str> {
+    ) -> Result<(), QuadSubmitError> {
         if operations.len() > self.capacity {
-            return Err("SGFX composition operation capacity exceeded");
+            return Err(QuadSubmitError::Recording(
+                "SGFX composition operation capacity exceeded",
+            ));
         }
         let resources = Rc::clone(&target.resources);
         let mut vertices = Vec::new();
@@ -494,18 +524,63 @@ impl QuadRenderer {
             );
         }
 
-        let mut encoder = CommandEncoder::new(resources.as_ref());
-        if !vertices.is_empty() {
-            encoder
-                .write_buffer(
-                    resources
-                        .buffer_ref(self.buffer)
-                        .map_err(|_| "Invalid quad buffer")?,
-                    0,
-                    &vertices,
-                )
-                .map_err(|_| "Failed to upload SGFX composition vertices")?;
+        let mut batch_start = 0usize;
+        let mut first_batch = true;
+        loop {
+            let batch_end = if operations.is_empty() {
+                0
+            } else {
+                batch_start
+                    .saturating_add(MAX_QUADS_PER_COMMAND_BUFFER)
+                    .min(operations.len())
+            };
+            let mut encoder = CommandEncoder::new(resources.as_ref());
+            if first_batch && !vertices.is_empty() {
+                encoder
+                    .write_buffer(
+                        resources
+                            .buffer_ref(self.buffer)
+                            .map_err(|_| "Invalid quad buffer")?,
+                        0,
+                        &vertices,
+                    )
+                    .map_err(|_| "Failed to upload SGFX composition vertices")?;
+            }
+            self.record_operations(
+                &mut encoder,
+                resources.as_ref(),
+                target.texture,
+                area,
+                if first_batch { load } else { LoadOp::Load },
+                &operations[batch_start..batch_end],
+                batch_start,
+            )?;
+            let commands = encoder
+                .finish()
+                .map_err(|_| "Failed to finish SGFX composition commands")?;
+            target
+                .execute(&commands)
+                .map_err(QuadSubmitError::Execution)?;
+            if batch_end == operations.len() {
+                break;
+            }
+            batch_start = batch_end;
+            first_batch = false;
         }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn record_operations<'r, 'data>(
+        &self,
+        encoder: &mut CommandEncoder<'r, 'data>,
+        resources: &'r ResourceTable,
+        target: TextureId,
+        area: PixelRect,
+        load: LoadOp,
+        operations: &[Quad],
+        base_index: usize,
+    ) -> Result<(), &'static str> {
         let mut segment_start = 0usize;
         let mut first_pass = true;
         for (index, operation) in operations.iter().enumerate() {
@@ -514,13 +589,13 @@ impl QuadRenderer {
             };
             if first_pass || segment_start < index {
                 self.record_pass(
-                    &mut encoder,
-                    resources.as_ref(),
-                    target.texture,
+                    encoder,
+                    resources,
+                    target,
                     area,
                     if first_pass { load } else { LoadOp::Load },
                     &operations[segment_start..index],
-                    segment_start,
+                    base_index.saturating_add(segment_start),
                 )?;
                 first_pass = false;
             }
@@ -532,7 +607,7 @@ impl QuadRenderer {
                             .map_err(|_| "Invalid copy source texture")?,
                         source,
                         resources
-                            .texture_ref(target.texture)
+                            .texture_ref(target)
                             .map_err(|_| "Invalid SGFX target texture")?,
                         destination,
                     )
@@ -542,21 +617,16 @@ impl QuadRenderer {
         }
         if first_pass || segment_start < operations.len() {
             self.record_pass(
-                &mut encoder,
-                resources.as_ref(),
-                target.texture,
+                encoder,
+                resources,
+                target,
                 area,
                 if first_pass { load } else { LoadOp::Load },
                 &operations[segment_start..],
-                segment_start,
+                base_index.saturating_add(segment_start),
             )?;
         }
-        let commands = encoder
-            .finish()
-            .map_err(|_| "Failed to finish SGFX composition commands")?;
-        target
-            .execute(&commands)
-            .map_err(|_| "Failed to execute SGFX composition")
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -584,6 +654,20 @@ impl QuadRenderer {
             .begin_render_pass(descriptor)
             .map_err(|_| "Failed to begin SGFX composition pass")?;
         for (local_index, operation) in operations.iter().enumerate() {
+            let requested_clip = match operation {
+                Quad::Solid { clip, .. } => *clip,
+                Quad::Sampled(rect) => rect.clip,
+                Quad::Copy(_) => return Err("SGFX copy leaked into a render segment"),
+            };
+            let effective_clip = match requested_clip {
+                Some(clip) => {
+                    let Some(clip) = intersect_pixel_rect(clip, area)? else {
+                        continue;
+                    };
+                    Some(clip)
+                }
+                None => None,
+            };
             let index = base_index
                 .checked_add(local_index)
                 .ok_or("SGFX quad offset overflow")?;
@@ -599,7 +683,7 @@ impl QuadRenderer {
             )
             .map_err(|_| "Failed to bind SGFX composition vertices")?;
             match operation {
-                Quad::Solid { color, clip, .. } => {
+                Quad::Solid { color, .. } => {
                     pass.set_pipeline(
                         resources
                             .render_pipeline_ref(self.solid_pipeline)
@@ -608,7 +692,7 @@ impl QuadRenderer {
                     .map_err(|_| "Failed to bind solid pipeline")?;
                     pass.set_uniforms(DrawUniforms::new(Transform::identity(), *color))
                         .map_err(|_| "Failed to set solid uniforms")?;
-                    pass.set_scissor(*clip)
+                    pass.set_scissor(effective_clip)
                         .map_err(|_| "Failed to set solid scissor")?;
                 }
                 Quad::Sampled(rect) => {
@@ -637,7 +721,7 @@ impl QuadRenderer {
                     .map_err(|_| "Failed to bind composition sampler")?;
                     pass.set_uniforms(DrawUniforms::new(Transform::identity(), rect.tint))
                         .map_err(|_| "Failed to set texture uniforms")?;
-                    pass.set_scissor(rect.clip)
+                    pass.set_scissor(effective_clip)
                         .map_err(|_| "Failed to set texture scissor")?;
                 }
                 Quad::Copy(_) => return Err("SGFX copy leaked into a render segment"),
@@ -791,9 +875,23 @@ fn append_quad(
 #[cfg(test)]
 mod tests {
     use super::{
-        CopiedRect, ReusableImport, clipped_copy_rect, supports_mapped_target, take_reusable_import,
+        CopiedRect, MAX_COMMANDS_PER_QUAD, MAX_QUADS_PER_COMMAND_BUFFER,
+        QUAD_BATCH_COMMAND_OVERHEAD, ReusableImport, clipped_copy_rect, supports_mapped_target,
+        take_reusable_import,
     };
     use sgfx::ir::{Extent2D, ResourceTable, TextureDesc, TextureFormat, TextureUsage};
+
+    #[test]
+    fn quad_batches_fit_the_portable_command_limit() {
+        let commands =
+            MAX_QUADS_PER_COMMAND_BUFFER * MAX_COMMANDS_PER_QUAD + QUAD_BATCH_COMMAND_OVERHEAD;
+        let next_commands = (MAX_QUADS_PER_COMMAND_BUFFER + 1) * MAX_COMMANDS_PER_QUAD
+            + QUAD_BATCH_COMMAND_OVERHEAD;
+
+        assert!(MAX_QUADS_PER_COMMAND_BUFFER > 0);
+        assert!(commands <= sgfx::ir::MAX_COMMANDS);
+        assert!(next_commands > sgfx::ir::MAX_COMMANDS);
+    }
 
     #[test]
     fn mapped_target_requires_all_composition_capabilities() {

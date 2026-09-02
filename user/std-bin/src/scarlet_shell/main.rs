@@ -2265,6 +2265,10 @@ fn home_grid_columns(width: f32) -> usize {
         .clamp(1, 6)
 }
 
+fn application_drawer_accepts_keyboard(presentation: sws::ShellPresentation) -> bool {
+    presentation == sws::ShellPresentation::Home
+}
+
 fn next_home_selection_index(
     current: usize,
     application_count: usize,
@@ -2381,6 +2385,7 @@ impl ShellApp {
 
     fn lower_application_drawer(&self) {
         if self.shell_presentation() == sws::ShellPresentation::Home {
+            self.home_search_focused.set(false);
             enqueue_workspace_command(&self.workspace_commands, WorkspaceCommand::ToggleOverview);
         }
     }
@@ -2443,9 +2448,11 @@ impl ShellApp {
     }
 
     fn handle_home_key(&self, event: KeyEvent) -> bool {
+        if !application_drawer_accepts_keyboard(self.shell_presentation()) {
+            return false;
+        }
         match event {
             KeyEvent::Char { c } if !c.is_control() => {
-                self.show_application_drawer();
                 self.home_search_focused.set(true);
                 self.home_query.update(|query| query.push(c));
                 true
@@ -2709,7 +2716,9 @@ impl ShellApp {
         let cancel_app = self.clone();
         let empty_focus = self.home_search_focused.clone();
         let search = TextField::new(self.home_query.clone())
-            .autofocus(self.home_search_focused.get())
+            .autofocus(
+                application_drawer_accepts_keyboard(presentation) && self.home_search_focused.get(),
+            )
             .placeholder("Search applications")
             .font_size(14.0)
             .padding(8.0)
@@ -3692,9 +3701,9 @@ mod tests {
         MENU_BAR_OUTER_PADDING, MenuTree, OVERVIEW_NAVIGATION_ROWS, OVERVIEW_SEPARATOR_HEIGHT,
         OVERVIEW_SYSTEM_ROWS, OVERVIEW_VERTICAL_PADDING, OverviewGeometry, ShellLayout,
         StatusItemId, StatusItemTokens, StatusPresentation, StatusProviderSnapshot, TaskMenuEntry,
-        TaskMenuItem, WindowSnapshot, WorkspaceCommand, build_window_model,
-        control_center_body_position, filter_home_applications, home_grid_columns,
-        menu_bar_item_width, menu_bar_popup_x, next_home_selection_index,
+        TaskMenuItem, WindowSnapshot, WorkspaceCommand, application_drawer_accepts_keyboard,
+        build_window_model, control_center_body_position, filter_home_applications,
+        home_grid_columns, menu_bar_item_width, menu_bar_popup_x, next_home_selection_index,
         overview_app_menu_indices, overview_page_bounds, overview_page_capacity,
         overview_page_count, overview_window_status, passive_clock_control, scale_u32,
         set_state_if_changed, status_bar_menu_items, status_bar_resize_needed, status_item_label,
@@ -3757,6 +3766,19 @@ mod tests {
     }
 
     #[test]
+    fn application_drawer_owns_keyboard_only_while_open() {
+        assert!(!application_drawer_accepts_keyboard(
+            sws::ShellPresentation::Workspace
+        ));
+        assert!(!application_drawer_accepts_keyboard(
+            sws::ShellPresentation::Overview
+        ));
+        assert!(application_drawer_accepts_keyboard(
+            sws::ShellPresentation::Home
+        ));
+    }
+
+    #[test]
     fn cycle_command_stops_at_edges_and_returns_to_workspace_presentation() {
         let mut state = workspace_state(vec![single_workspace(1, 10), single_workspace(2, 20)]);
         state.presentation = sws::ShellPresentation::Overview;
@@ -3771,7 +3793,7 @@ mod tests {
     }
 
     #[test]
-    fn overview_dismissal_restores_normal_instead_of_selected_empty_workspace() {
+    fn overview_dismissal_uses_the_committed_empty_workspace_selection() {
         let mut state = workspace_state(vec![
             single_workspace(1, 10),
             sws::WorkspaceSnapshot {
@@ -3781,11 +3803,12 @@ mod tests {
             },
         ]);
         state.active_workspace = 2;
+        state.normal_workspace = 2;
         state.presentation = sws::ShellPresentation::Overview;
 
         let transaction =
             workspace_transaction_for_command(&state, WorkspaceCommand::ReturnToWorkspace).unwrap();
-        assert_eq!(transaction.active_workspace, 1);
+        assert_eq!(transaction.active_workspace, 2);
         assert_eq!(transaction.presentation, sws::ShellPresentation::Workspace);
     }
 
