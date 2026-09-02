@@ -3194,9 +3194,8 @@ impl Compositor {
                     "[Compositor] Configuring fullscreen window #{} to {}x{}",
                     window_id, new_width, new_height
                 );
-                self.window_manager.set_window_position(window_id, 0, 0);
                 self.window_manager
-                    .resize_window_geometry_in_place(window_id, new_width, new_height);
+                    .resize_fullscreen_window(window_id, new_width, new_height);
                 self.send_current_window_configure(window_id);
                 continue;
             }

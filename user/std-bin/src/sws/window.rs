@@ -831,6 +831,13 @@ impl Window {
 
     /// Return the managed visible geometry in screen coordinates.
     pub fn window_geometry(&self) -> (i32, i32, u32, u32) {
+        // Fullscreen is defined by the output-sized surface itself. Clients can
+        // retain their normal-mode decoration insets while they rebuild an
+        // undecorated frame, but those insets must not shrink hit testing or
+        // pointer-lock bounds in fullscreen.
+        if self.fullscreen {
+            return self.surface_geometry();
+        }
         let insets = self.window_geometry_insets;
         (
             self.x.saturating_add(insets.left as i32),
@@ -881,15 +888,24 @@ impl Window {
             return Err("Window geometry exceeds surface bounds");
         }
 
-        let (visible_x, visible_y, _, _) = self.window_geometry();
         let next = WindowGeometryInsets {
             left,
             top,
             right: self.width - right_edge,
             bottom: self.height - bottom_edge,
         };
-        let next_x = visible_x.saturating_sub(left as i32);
-        let next_y = visible_y.saturating_sub(top as i32);
+        let (next_x, next_y) = if self.fullscreen {
+            // A configure response can carry the client's retained normal-mode
+            // decoration geometry. Never let that asynchronous response move
+            // the fullscreen surface away from the output origin.
+            (self.x, self.y)
+        } else {
+            let (visible_x, visible_y, _, _) = self.window_geometry();
+            (
+                visible_x.saturating_sub(left as i32),
+                visible_y.saturating_sub(top as i32),
+            )
+        };
         let changed = self.window_geometry_insets != next || self.x != next_x || self.y != next_y;
         self.window_geometry_insets = next;
         self.x = next_x;
@@ -1959,16 +1975,14 @@ impl WindowManager {
 
         window.fullscreen_restore_geometry =
             Some((window.x, window.y, window.width, window.height));
-        let (x, y, width, height) = window.surface_geometry_for_window_geometry(
-            0,
-            0,
-            screen_width.max(1),
-            screen_height.max(1),
-        );
-        window.x = x;
-        window.y = y;
-        window.width = width;
-        window.height = height;
+        // Unlike maximize, fullscreen sizes the complete client surface to the
+        // output. Expanding the surface by normal-mode shadow outsets makes an
+        // undecorated fullscreen frame larger than the output and clips its
+        // right and bottom edges.
+        window.x = 0;
+        window.y = 0;
+        window.width = screen_width.max(1);
+        window.height = screen_height.max(1);
         window.fullscreen = true;
         println!(
             "[WindowManager] Window #{} entered fullscreen at {}x{}",
@@ -1976,6 +1990,41 @@ impl WindowManager {
         );
 
         self.rebuild_z_order();
+        true
+    }
+
+    /// Resize the active fullscreen surface to the complete output.
+    ///
+    /// Normal-mode window geometry insets are deliberately ignored. They can
+    /// remain cached for restoration, but must never enlarge or offset the
+    /// fullscreen surface.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - Fullscreen window to resize.
+    /// * `screen_width` - Updated output width in physical pixels.
+    /// * `screen_height` - Updated output height in physical pixels.
+    ///
+    /// # Returns
+    ///
+    /// `true` when the window exists in fullscreen state, or `false` otherwise.
+    pub fn resize_fullscreen_window(
+        &mut self,
+        id: WindowId,
+        screen_width: u32,
+        screen_height: u32,
+    ) -> bool {
+        let Some(window) = self.get_window_mut(id) else {
+            return false;
+        };
+        if !window.fullscreen {
+            return false;
+        }
+
+        window.x = 0;
+        window.y = 0;
+        window.width = screen_width.max(1);
+        window.height = screen_height.max(1);
         true
     }
 
@@ -2695,6 +2744,40 @@ mod tests {
             (25, 30, 640, 480)
         );
         assert_eq!(restored.state_flags(), 0);
+    }
+
+    #[test]
+    fn fullscreen_uses_the_output_surface_extent_despite_normal_decoration_insets() {
+        let mut manager = WindowManager::new();
+        let id = manager.create_window_no_buffer(25, 30, 640, 480);
+        assert!(manager.set_window_geometry(id, 10, 6, 620, 460).unwrap());
+        let normal_surface = manager.get_window(id).unwrap().surface_geometry();
+        let normal_window = manager.get_window(id).unwrap().window_geometry();
+
+        assert!(manager.set_fullscreen_window(id, 1920, 1080));
+        let fullscreen = manager.get_window(id).unwrap();
+        assert_eq!(fullscreen.surface_geometry(), (0, 0, 1920, 1080));
+        assert_eq!(fullscreen.window_geometry(), (0, 0, 1920, 1080));
+
+        // ScarletUI responds to configure with its cached normal decoration
+        // insets. That response must not offset the fullscreen surface.
+        assert!(!manager.set_window_geometry(id, 10, 6, 1900, 1060).unwrap());
+        assert_eq!(
+            manager.get_window(id).unwrap().surface_geometry(),
+            (0, 0, 1920, 1080)
+        );
+
+        assert!(manager.resize_fullscreen_window(id, 2560, 1440));
+        assert!(!manager.set_window_geometry(id, 10, 6, 2540, 1420).unwrap());
+        let resized = manager.get_window(id).unwrap();
+        assert_eq!(resized.surface_geometry(), (0, 0, 2560, 1440));
+        assert_eq!(resized.window_geometry(), (0, 0, 2560, 1440));
+
+        assert!(manager.unset_fullscreen_window(id));
+        let restored = manager.get_window(id).unwrap();
+        assert_eq!(restored.surface_geometry(), normal_surface);
+        assert_eq!(restored.window_geometry(), normal_window);
+        assert!(!manager.resize_fullscreen_window(id, 1280, 720));
     }
 
     #[test]
