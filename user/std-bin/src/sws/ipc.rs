@@ -686,7 +686,8 @@ fn sws_capabilities() -> u64 {
         | protocol::capabilities::WINDOW_GEOMETRY
         | protocol::capabilities::SYSTEM_MODE_OVERRIDES
         | protocol::capabilities::CONFIGURED_WINDOW_CREATION
-        | protocol::capabilities::WORKSPACE_SHELL;
+        | protocol::capabilities::WORKSPACE_SHELL
+        | protocol::capabilities::FRAME_CALLBACKS;
     if SGFX_SHARED_IMAGES_AVAILABLE.load(Ordering::Acquire) {
         capabilities |= protocol::capabilities::SGFX_SHARED_IMAGE;
     }
@@ -3702,6 +3703,33 @@ fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Ha
                     }
                 }
             }
+            Ok(ClientMessageRef::RequestFrame {
+                window_id,
+                callback_id,
+            }) => {
+                if header.flags != 0 || request_id != 0 {
+                    send_message_to_client(
+                        client_id,
+                        protocol::server_msg::ERROR,
+                        protocol::payload_error(protocol::error_codes::INVALID_FRAME_REQUEST)
+                            .to_vec(),
+                    );
+                    continue;
+                }
+                if !managed_windows.contains(&window_id) {
+                    send_message_to_client(
+                        client_id,
+                        protocol::server_msg::ERROR,
+                        protocol::payload_error(protocol::error_codes::WINDOW_NOT_OWNED).to_vec(),
+                    );
+                    continue;
+                }
+                push_ipc_event(IpcEvent::RequestFrame {
+                    client_id,
+                    window_id,
+                    callback_id,
+                });
+            }
             Ok(ClientMessageRef::RegisterSgfxBuffer {
                 window_id,
                 buffer_id,
@@ -4160,6 +4188,12 @@ pub enum IpcEvent {
         damage_y: i32,
         damage_width: u32,
         damage_height: u32,
+    },
+    /// Client requested one compositor-paced frame opportunity.
+    RequestFrame {
+        client_id: usize,
+        window_id: u32,
+        callback_id: u64,
     },
     /// Import one transferred shared SGFX image into the compositor context.
     RegisterSgfxBuffer {

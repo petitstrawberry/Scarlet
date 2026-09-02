@@ -131,6 +131,15 @@ impl Capabilities {
     pub const fn supports_workspace_shell(self) -> bool {
         self.capabilities & protocol::capabilities::WORKSPACE_SHELL != 0
     }
+
+    /// Whether SWS supports one-shot compositor-paced frame callbacks.
+    ///
+    /// # Returns
+    ///
+    /// `true` when [`Connection::request_frame`] may be requested.
+    pub const fn supports_frame_callbacks(self) -> bool {
+        self.capabilities & protocol::capabilities::FRAME_CALLBACKS != 0
+    }
 }
 
 /// Surface identity and physical extent returned by configured creation.
@@ -924,6 +933,7 @@ impl TransportState {
             Event::ImeKeyEvent { window_id, .. } => Some(*window_id),
             Event::SurfaceConfigure { surface_id, .. }
             | Event::SurfaceStateChanged { surface_id, .. }
+            | Event::FrameDone { surface_id, .. }
             | Event::SurfaceDestroyed { surface_id } => Some(*surface_id),
             Event::MenuItemActivated { window_id, .. }
             | Event::PointerLockChanged { window_id, .. }
@@ -2201,6 +2211,32 @@ impl Connection {
             .map_err(|_| Error::SendFailed)
     }
 
+    /// Request one compositor-paced frame opportunity for a surface.
+    ///
+    /// The callback is one-shot. A client that needs another frame must submit
+    /// a new request after receiving [`Event::FrameDone`]. SWS intentionally
+    /// withholds callbacks while the surface is not being presented.
+    ///
+    /// # Arguments
+    ///
+    /// * `surface_id` - Owned surface that needs another frame.
+    /// * `callback_id` - Client-selected non-zero callback identifier.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` after the request is sent, or a connection/surface error.
+    pub fn request_frame(&self, surface_id: u32, callback_id: u64) -> Result<(), Error> {
+        if !mutex_lock(&self.surfaces).contains_key(&surface_id) {
+            return Err(Error::SurfaceNotFound);
+        }
+        if callback_id == 0 {
+            return Err(Error::InvalidRequest);
+        }
+        let payload = protocol::payload_request_frame(surface_id, callback_id);
+        self.send_message(protocol::client_msg::REQUEST_FRAME, &payload)
+            .map_err(|_| Error::SendFailed)
+    }
+
     /// Capture or release raw relative pointer motion for a surface.
     ///
     /// Lock requests are accepted by SWS only while the surface is visible,
@@ -2764,6 +2800,18 @@ impl TransportState {
                 });
                 true
             }
+            ServerMessage::FrameDone {
+                window_id,
+                callback_id,
+                presentation_time_ns,
+            } => {
+                self.push_event(Event::FrameDone {
+                    surface_id: window_id,
+                    callback_id,
+                    presentation_time_ns,
+                });
+                true
+            }
             ServerMessage::PointerLockChanged { window_id, locked } => {
                 self.push_event(pointer_lock_event(window_id, locked));
                 true
@@ -3026,6 +3074,19 @@ mod pointer_lock_tests {
         assert!(!capabilities.supports_configured_window_creation());
         capabilities.capabilities |= protocol::capabilities::CONFIGURED_WINDOW_CREATION;
         assert!(capabilities.supports_configured_window_creation());
+    }
+
+    #[test]
+    fn capability_reports_frame_callback_support() {
+        let mut capabilities = Capabilities {
+            protocol_version: protocol::SWS_PROTOCOL_VERSION,
+            capabilities: 0,
+            compositor_epoch: 1,
+            compositor_backend: protocol::compositor_backends::CPU,
+        };
+        assert!(!capabilities.supports_frame_callbacks());
+        capabilities.capabilities |= protocol::capabilities::FRAME_CALLBACKS;
+        assert!(capabilities.supports_frame_callbacks());
     }
 }
 

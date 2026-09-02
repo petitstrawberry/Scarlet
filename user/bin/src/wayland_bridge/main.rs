@@ -258,8 +258,16 @@ struct WaylandBridge {
     next_sws_request_id: u8,
     /// Coalesced SWS updates waiting to be sent per window
     pending_damage: BTreeMap<u32, PendingDamage>,
-    /// Frame callbacks waiting for the next SWS update flush per surface
-    pending_frame_callbacks: BTreeMap<u32, Vec<(u32, u32)>>,
+    /// Wayland frame callbacks committed for each surface.
+    pending_frame_callbacks: BTreeMap<u32, Vec<u32>>,
+    /// SWS frame callback token -> Wayland surface.
+    frame_request_tokens: BTreeMap<u64, u32>,
+    /// Wayland callbacks assigned to each in-flight SWS frame request.
+    frame_callbacks_by_token: BTreeMap<u64, Vec<u32>>,
+    /// One outstanding SWS frame request per Wayland surface.
+    surface_frame_request_outstanding: BTreeMap<u32, u64>,
+    /// Next non-zero SWS frame callback token.
+    next_frame_request_token: u64,
     /// Whether a coalescing delay is pending before the next flush
     flush_deferred: bool,
     /// Minimum interval between EXTENSION_UPDATE_BUFFER flushes
@@ -330,6 +338,10 @@ impl WaylandBridge {
             next_sws_request_id: 1,
             pending_damage: BTreeMap::new(),
             pending_frame_callbacks: BTreeMap::new(),
+            frame_request_tokens: BTreeMap::new(),
+            frame_callbacks_by_token: BTreeMap::new(),
+            surface_frame_request_outstanding: BTreeMap::new(),
+            next_frame_request_token: 1,
             flush_deferred: false,
             update_flush_interval: Duration::from_millis(16),
             pointer_x: 0,
@@ -438,6 +450,39 @@ impl WaylandBridge {
         // Update input thread's objects map
         let mut objects = self.objects_for_input_thread.lock();
         objects.insert(id, interface);
+    }
+
+    fn remove_object(&mut self, id: u32) {
+        self.objects.remove(&id);
+        self.object_versions.remove(&id);
+        self.objects_for_input_thread.lock().remove(&id);
+    }
+
+    fn append_callback_done(
+        &mut self,
+        messages: &mut Vec<WaylandMessage>,
+        callback_id: u32,
+        time: u32,
+    ) {
+        let mut done = WaylandMessage::new(callback_id, protocol::callback_event::DONE);
+        done.add_arg(WaylandArg::Uint(time));
+        messages.push(done);
+
+        let mut delete_id = WaylandMessage::new(1, protocol::display_event::DELETE_ID);
+        delete_id.add_arg(WaylandArg::Uint(callback_id));
+        messages.push(delete_id);
+        self.remove_object(callback_id);
+    }
+
+    fn discard_callbacks(&mut self, callbacks: Vec<u32>) {
+        let mut messages = Vec::new();
+        for callback_id in callbacks {
+            let mut delete_id = WaylandMessage::new(1, protocol::display_event::DELETE_ID);
+            delete_id.add_arg(WaylandArg::Uint(callback_id));
+            messages.push(delete_id);
+            self.remove_object(callback_id);
+        }
+        self.queue_input_messages(messages);
     }
 
     fn surface_id_for_window(&self, window_id: u32) -> Option<u32> {
@@ -828,6 +873,150 @@ impl WaylandBridge {
         Ok(request_id)
     }
 
+    fn send_sws_async_message(
+        &mut self,
+        msg_type: u32,
+        payload: &[u8],
+    ) -> Result<(), &'static str> {
+        if payload.len() > protocol_sws::MAX_PAYLOAD_SIZE {
+            return Err("SWS asynchronous payload is too large");
+        }
+        let header = protocol_sws::MessageHeader::new(msg_type, payload.len() as u32);
+        let mut frame = Vec::with_capacity(protocol_sws::MessageHeader::SIZE + payload.len());
+        frame.extend_from_slice(&header.to_le_bytes());
+        frame.extend_from_slice(payload);
+        let connection = self.sws_connection.as_mut().ok_or("Not connected to SWS")?;
+        let mut written = 0;
+        while written < frame.len() {
+            match connection.write(&frame[written..]) {
+                Ok(0) => return Err("SWS connection closed while sending message"),
+                Ok(count) => written += count,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(1));
+                }
+                Err(_) => return Err("Failed to send asynchronous SWS message"),
+            }
+        }
+        connection
+            .flush()
+            .map_err(|_| "Failed to flush asynchronous SWS message")
+    }
+
+    fn allocate_frame_request_token(&mut self) -> u64 {
+        loop {
+            let token = self.next_frame_request_token.max(1);
+            self.next_frame_request_token = token.wrapping_add(1).max(1);
+            if !self.frame_request_tokens.contains_key(&token) {
+                return token;
+            }
+        }
+    }
+
+    fn ensure_sws_frame_request(&mut self, surface_id: u32) -> Result<(), &'static str> {
+        if self
+            .surface_frame_request_outstanding
+            .contains_key(&surface_id)
+            || !self
+                .pending_frame_callbacks
+                .get(&surface_id)
+                .is_some_and(|callbacks| !callbacks.is_empty())
+        {
+            return Ok(());
+        }
+        let Some(&window_id) = self.surface_to_window.get(&surface_id) else {
+            return Ok(());
+        };
+        let token = self.allocate_frame_request_token();
+        let payload = protocol_sws::payload_request_frame(window_id, token);
+        let callbacks = self
+            .pending_frame_callbacks
+            .remove(&surface_id)
+            .unwrap_or_default();
+        if let Err(error) =
+            self.send_sws_async_message(protocol_sws::client_msg::REQUEST_FRAME, &payload)
+        {
+            self.pending_frame_callbacks
+                .entry(surface_id)
+                .or_insert_with(Vec::new)
+                .extend(callbacks);
+            return Err(error);
+        }
+        self.frame_request_tokens.insert(token, surface_id);
+        self.frame_callbacks_by_token.insert(token, callbacks);
+        self.surface_frame_request_outstanding
+            .insert(surface_id, token);
+        Ok(())
+    }
+
+    fn complete_sws_frame_request(
+        &mut self,
+        window_id: u32,
+        token: u64,
+        presentation_time_ns: u64,
+    ) {
+        let Some(surface_id) = self.frame_request_tokens.remove(&token) else {
+            bridge_log!(
+                "[Bridge] Ignoring unknown SWS frame callback token {}",
+                token
+            );
+            return;
+        };
+        let callbacks = self
+            .frame_callbacks_by_token
+            .remove(&token)
+            .unwrap_or_default();
+        if self.surface_frame_request_outstanding.get(&surface_id) != Some(&token) {
+            bridge_log!(
+                "[Bridge] Ignoring stale SWS frame callback token {} for surface {}",
+                token,
+                surface_id
+            );
+            self.discard_callbacks(callbacks);
+            return;
+        }
+        self.surface_frame_request_outstanding.remove(&surface_id);
+        if self.surface_to_window.get(&surface_id) != Some(&window_id) {
+            bridge_log!(
+                "[Bridge] Ignoring SWS frame callback token {} with mismatched window {}",
+                token,
+                window_id
+            );
+            self.discard_callbacks(callbacks);
+            return;
+        }
+
+        let time_ms = (presentation_time_ns / 1_000_000) as u32;
+        let mut messages = Vec::new();
+        for callback_id in callbacks {
+            self.append_callback_done(&mut messages, callback_id, time_ms);
+        }
+        self.queue_input_messages(messages);
+
+        let update_is_pending = self
+            .surface_to_window
+            .get(&surface_id)
+            .is_some_and(|next_window_id| self.pending_damage.contains_key(next_window_id));
+        if !update_is_pending && let Err(error) = self.ensure_sws_frame_request(surface_id) {
+            bridge_log!(
+                "[Bridge] Failed to request the next SWS frame for surface {}: {}",
+                surface_id,
+                error
+            );
+        }
+    }
+
+    fn cancel_surface_frame_request(&mut self, surface_id: u32) {
+        if let Some(token) = self.surface_frame_request_outstanding.remove(&surface_id) {
+            self.frame_request_tokens.remove(&token);
+            if let Some(callbacks) = self.frame_callbacks_by_token.remove(&token) {
+                self.discard_callbacks(callbacks);
+            }
+        }
+        if let Some(callbacks) = self.pending_frame_callbacks.remove(&surface_id) {
+            self.discard_callbacks(callbacks);
+        }
+    }
+
     fn route_sws_message(
         &mut self,
         header: protocol_sws::MessageHeader,
@@ -888,6 +1077,13 @@ impl WaylandBridge {
                 state_flags,
             } => {
                 self.update_xdg_window_state(window_id, state_flags);
+            }
+            protocol_sws::ServerMessage::FrameDone {
+                window_id,
+                callback_id,
+                presentation_time_ns,
+            } => {
+                self.complete_sws_frame_request(window_id, callback_id, presentation_time_ns);
             }
             protocol_sws::ServerMessage::WindowConfigure {
                 window_id,
@@ -1498,15 +1694,10 @@ impl WaylandBridge {
                 sent_any = true;
             }
 
-            if let Some(callbacks) = self.pending_frame_callbacks.remove(&pending.surface_id) {
-                let mut callback_msgs = Vec::new();
-                for (callback_id, time) in callbacks {
-                    let mut msg = WaylandMessage::new(callback_id, protocol::callback_event::DONE);
-                    msg.add_arg(WaylandArg::Uint(time));
-                    callback_msgs.push(msg);
-                }
-                self.queue_input_messages(callback_msgs);
-            }
+            // The update messages precede REQUEST_FRAME on the same SWS
+            // stream. SWS therefore completes Wayland callbacks only after the
+            // committed content has reached a compositor presentation.
+            self.ensure_sws_frame_request(pending.surface_id)?;
 
             if let Some(surface) = self.surface_manager.get_surface_mut(pending.surface_id)
                 && !surface.pending_release.is_empty()
@@ -2405,8 +2596,9 @@ impl WaylandBridge {
         match opcode {
             protocol::surface_request::DESTROY => {
                 bridge_log!("[Bridge] wl_surface.destroy: {}", surface_id);
+                self.cancel_surface_frame_request(surface_id);
                 self.surface_manager.destroy_surface(surface_id);
-                self.objects.remove(&surface_id);
+                self.remove_object(surface_id);
                 // Remove from surface_to_window mapping
                 if let Some(window_id) = self.surface_to_window.remove(&surface_id) {
                     self.pending_damage.remove(&window_id);
@@ -2556,21 +2748,16 @@ impl WaylandBridge {
                     bridge_log!("[Bridge] wl_surface.commit on surface {}", surface_id);
                 }
                 let mut release_buffers = Vec::new();
-                let mut callback_msg = None;
                 let mut should_update = false;
                 let mut buffer_present = false;
                 let mut surface_size = (0u32, 0u32);
                 let mut damage_rects = Vec::new();
-                let mut callback_serial = None;
-                let serial_for_callback = self.allocate_serial();
+                let mut frame_callbacks = Vec::new();
                 let mut configure_msgs = Vec::new();
                 let mut configure_state = None;
-                let mut defer_callback_until_update = false;
 
                 if let Some(surface) = self.surface_manager.get_surface_mut(surface_id) {
-                    if let Some(cb_id) = surface.take_pending_callback() {
-                        callback_serial = Some((cb_id, serial_for_callback));
-                    }
+                    frame_callbacks = surface.take_pending_callbacks();
                     should_update = matches!(
                         surface.role,
                         Some(surface::SurfaceRole::XdgToplevel)
@@ -2652,7 +2839,7 @@ impl WaylandBridge {
                     if self.surface_to_window.contains_key(&surface_id) {
                         for damage_rect in damage_rects {
                             match self.update_sws_window(surface_id, damage_rect) {
-                                Ok(()) => defer_callback_until_update = true,
+                                Ok(()) => {}
                                 Err(e) => {
                                     bridge_log!("[Bridge] Failed to update SWS window: {}", e);
                                 }
@@ -2664,23 +2851,30 @@ impl WaylandBridge {
                     }
                 }
 
-                if let Some((cb_id, time)) = callback_serial {
-                    if defer_callback_until_update {
+                let mut msgs = Vec::new();
+                if !frame_callbacks.is_empty() {
+                    if should_update {
                         self.pending_frame_callbacks
                             .entry(surface_id)
                             .or_insert_with(Vec::new)
-                            .push((cb_id, time));
+                            .extend(frame_callbacks);
+                        let update_is_pending = self
+                            .surface_to_window
+                            .get(&surface_id)
+                            .is_some_and(|window_id| self.pending_damage.contains_key(window_id));
+                        if !update_is_pending {
+                            self.ensure_sws_frame_request(surface_id)?;
+                        }
                     } else {
-                        let mut msg = WaylandMessage::new(cb_id, protocol::callback_event::DONE);
-                        msg.add_arg(WaylandArg::Uint(time));
-                        callback_msg = Some(msg);
+                        // Cursor and role-less surfaces have no SWS window to
+                        // pace against. Preserve their legacy immediate path.
+                        let time = self.allocate_serial();
+                        for callback_id in frame_callbacks {
+                            self.append_callback_done(&mut msgs, callback_id, time);
+                        }
                     }
                 }
 
-                let mut msgs = Vec::new();
-                if let Some(msg) = callback_msg {
-                    msgs.push(msg);
-                }
                 if !configure_msgs.is_empty() {
                     msgs.extend(configure_msgs);
                 }

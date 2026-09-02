@@ -28,8 +28,8 @@ pub struct Surface {
     /// Width and height (set when buffer is attached)
     pub width: u32,
     pub height: u32,
-    /// Pending frame callback ID (if any)
-    pub pending_callback: Option<u32>,
+    /// Frame callback IDs requested for the next surface commit.
+    pub pending_callbacks: Vec<u32>,
     /// Opaque region (region ID or None for entire surface)
     pub opaque_region: Option<u32>,
     /// Input region (region ID or None for entire surface)
@@ -65,7 +65,7 @@ impl Surface {
             role: None,
             width: 0,
             height: 0,
-            pending_callback: None,
+            pending_callbacks: Vec::new(),
             opaque_region: None,
             input_region: None,
             buffer_scale: 1,
@@ -83,14 +83,22 @@ impl Surface {
         self.damage.push((x, y, width, height));
     }
 
-    /// Set the pending frame callback
+    /// Add a frame callback to the next surface commit.
+    ///
+    /// # Arguments
+    ///
+    /// * `callback_id` - Wayland callback object created by `wl_surface.frame`
     pub fn set_pending_callback(&mut self, callback_id: u32) {
-        self.pending_callback = Some(callback_id);
+        self.pending_callbacks.push(callback_id);
     }
 
-    /// Take the pending frame callback (returns None if already taken)
-    pub fn take_pending_callback(&mut self) -> Option<u32> {
-        self.pending_callback.take()
+    /// Take every frame callback associated with the next surface commit.
+    ///
+    /// # Returns
+    ///
+    /// Callback object IDs in request order.
+    pub fn take_pending_callbacks(&mut self) -> Vec<u32> {
+        core::mem::take(&mut self.pending_callbacks)
     }
 
     /// Commit surface state (this is when changes take effect)
@@ -168,5 +176,20 @@ impl SurfaceManager {
         if let Some(surface) = self.surfaces.get_mut(&wl_surface_id) {
             surface.input_region = region_id;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Surface;
+
+    #[test]
+    fn commit_preserves_all_requested_frame_callbacks() {
+        let mut surface = Surface::new(7);
+        surface.set_pending_callback(41);
+        surface.set_pending_callback(42);
+
+        assert_eq!(surface.take_pending_callbacks(), std::vec![41, 42]);
+        assert!(surface.take_pending_callbacks().is_empty());
     }
 }

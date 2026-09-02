@@ -244,6 +244,15 @@ pub enum Event {
     ///
     /// `state_flags` is a bitset of constants from [`crate::window_state`].
     SurfaceStateChanged { surface_id: u32, state_flags: u32 },
+    /// One requested compositor-paced frame opportunity is ready.
+    FrameDone {
+        /// Surface whose request completed.
+        surface_id: u32,
+        /// Client-selected callback identifier.
+        callback_id: u64,
+        /// Compositor monotonic timestamp in nanoseconds.
+        presentation_time_ns: u64,
+    },
     /// Compositor-confirmed pointer lock state.
     ///
     /// A `locked: false` event can be caused by an explicit request or by the

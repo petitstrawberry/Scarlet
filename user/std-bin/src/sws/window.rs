@@ -960,6 +960,9 @@ impl Window {
         if self.maximized {
             flags |= sws_protocol::window_state::MAXIMIZED;
         }
+        if !self.is_presented() {
+            flags |= sws_protocol::window_state::SUSPENDED;
+        }
         flags
     }
 
@@ -2677,6 +2680,22 @@ mod tests {
         assert!(window.mark_presented_frame());
         assert!(window.has_presented_frame);
         assert!(!window.mark_presented_frame());
+    }
+
+    #[test]
+    fn non_presented_window_reports_suspended_state() {
+        let mut manager = WindowManager::new();
+        let id = manager.create_window_no_buffer(100, 80, 324, 260);
+        let window = manager.get_window_mut(id).unwrap();
+
+        assert_eq!(window.state_flags(), 0);
+        window.workspace_visible = false;
+        assert_eq!(window.state_flags(), sws_protocol::window_state::SUSPENDED);
+        window.minimized = true;
+        assert_eq!(
+            window.state_flags(),
+            sws_protocol::window_state::MINIMIZED | sws_protocol::window_state::SUSPENDED
+        );
     }
 
     #[test]

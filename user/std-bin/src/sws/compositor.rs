@@ -595,6 +595,14 @@ mod touch_modality_tests {
     }
 
     #[test]
+    fn frame_callbacks_wait_for_visibility_and_a_new_presentation_boundary() {
+        assert!(frame_callback_is_ready(true, false, 0, 0));
+        assert!(!frame_callback_is_ready(false, false, 1, 0));
+        assert!(!frame_callback_is_ready(true, true, 4, 4));
+        assert!(frame_callback_is_ready(true, true, 5, 4));
+    }
+
+    #[test]
     fn overview_shadow_uses_a_soft_monotonic_falloff() {
         let mut layers = Vec::new();
         push_overview_shadow_layers(&mut layers, (100, 80, 480, 300), 12, true);
@@ -2100,6 +2108,24 @@ fn is_shell_app_id(app_id: &[u8]) -> bool {
         || app_id == b"org.scarlet-os.desktop.shell.home"
 }
 
+#[derive(Debug, Clone, Copy)]
+struct PendingFrameCallback {
+    client_id: usize,
+    window_id: u32,
+    callback_id: u64,
+    /// Presentation counter observed when the request entered the compositor.
+    requested_after_present: u64,
+}
+
+const fn frame_callback_is_ready(
+    is_presented: bool,
+    has_submitted_frame: bool,
+    presentation_counter: u64,
+    requested_after_present: u64,
+) -> bool {
+    is_presented && (!has_submitted_frame || presentation_counter > requested_after_present)
+}
+
 /// Compositor - the main window server with proper layer compositing
 pub struct Compositor {
     display: DisplaySurface,
@@ -2122,6 +2148,7 @@ pub struct Compositor {
     pending_damage: Vec<(i32, i32, u32, u32)>,
     presented_damage: Vec<PresentDamage>,
     event_counter: u64,
+    pending_frame_callbacks: Vec<PendingFrameCallback>,
     next_frame_deadline_ns: Option<u64>,
     left_button_down: bool,
     overview_pointer_navigation: Option<OverviewPointerNavigation>,
@@ -2545,6 +2572,7 @@ impl Compositor {
             pending_damage: Vec::new(),
             presented_damage: Vec::new(),
             event_counter: 0,
+            pending_frame_callbacks: Vec::new(),
             next_frame_deadline_ns: None,
             left_button_down: false,
             overview_pointer_navigation: None,
@@ -6305,7 +6333,8 @@ impl Compositor {
             return Err("SWS_BACKEND=sgfx compositor is unavailable");
         }
 
-        // Re-composite and present if needed
+        // Re-composite and present if needed.
+        let mut presented = false;
         if self.has_pending_redraw() {
             if self.gpu_compositor.is_some() {
                 super::trace::set_compositor_stage(super::trace::STAGE_FRAME_BATCH);
@@ -6345,17 +6374,28 @@ impl Compositor {
             super::trace::set_compositor_stage(super::trace::STAGE_ACTIVE);
             self.note_frame_presented();
             self.event_counter += 1;
+            presented = true;
+            // Grant only after the display accepted the frame. Presentation
+            // policy applied below may expose a different scene, which must
+            // first reach its own redraw before receiving callbacks.
+            self.grant_pending_frame_callbacks();
 
             if self.window_policy_after_present {
                 self.window_policy_after_present = false;
                 let _ = self.apply_post_present_window_policy();
             }
         }
+        if !presented {
+            // A never-submitted surface needs one bootstrap callback before it
+            // can produce its first frame. Already-rendered surfaces remain
+            // pending until a later presentation advances `event_counter`.
+            self.grant_pending_frame_callbacks();
+        }
 
         // Sleep until IPC/input explicitly signals that new work is queued.
         // Signal writes are coalesced so producers cannot fill the pipe while
         // the compositor is busy processing a batch.
-        if self.has_queued_event_work() {
+        if self.has_pending_redraw() || self.has_queued_event_work() {
             self.consume_event_signal_if_ready();
         } else {
             super::trace::set_compositor_stage(super::trace::STAGE_WAIT_SIGNAL);
@@ -7351,6 +7391,9 @@ impl Compositor {
         window_ids: &[u32],
         notify_client: bool,
     ) -> Result<bool, &'static str> {
+        self.pending_frame_callbacks.retain(|callback| {
+            callback.client_id != client_id || !window_ids.contains(&callback.window_id)
+        });
         let mut removed_windows: Vec<(u32, (i32, i32, u32, u32), Vec<u8>)> = Vec::new();
         for &window_id in window_ids {
             if let Some(window) = self.window_manager.get_window(window_id) {
@@ -7661,6 +7704,70 @@ impl Compositor {
         self.window_manager
             .get_window(window_id)
             .is_some_and(|window| window.owner_client_id == Some(client_id))
+    }
+
+    fn queue_frame_callback(&mut self, client_id: usize, window_id: u32, callback_id: u64) {
+        if !self.client_owns_window(client_id, window_id) {
+            send_message_to_client(
+                client_id,
+                sws_protocol::server_msg::ERROR,
+                sws_protocol::payload_error(sws_protocol::error_codes::WINDOW_NOT_OWNED).to_vec(),
+            );
+            return;
+        }
+        if self
+            .pending_frame_callbacks
+            .iter()
+            .any(|callback| callback.client_id == client_id && callback.window_id == window_id)
+        {
+            send_message_to_client(
+                client_id,
+                sws_protocol::server_msg::ERROR,
+                sws_protocol::payload_error(sws_protocol::error_codes::INVALID_FRAME_REQUEST)
+                    .to_vec(),
+            );
+            return;
+        }
+        self.pending_frame_callbacks.push(PendingFrameCallback {
+            client_id,
+            window_id,
+            callback_id,
+            requested_after_present: self.event_counter,
+        });
+    }
+
+    fn grant_pending_frame_callbacks(&mut self) {
+        if self.pending_frame_callbacks.is_empty() {
+            return;
+        }
+        let now_ns = monotonic_time_ns();
+        let mut waiting = Vec::new();
+        for callback in core::mem::take(&mut self.pending_frame_callbacks) {
+            let Some(window) = self.window_manager.get_window(callback.window_id) else {
+                continue;
+            };
+            if window.owner_client_id != Some(callback.client_id) {
+                continue;
+            }
+            let ready = frame_callback_is_ready(
+                window.is_presented(),
+                window.has_presented_frame,
+                self.event_counter,
+                callback.requested_after_present,
+            );
+            if !ready {
+                waiting.push(callback);
+                continue;
+            }
+            let payload =
+                sws_protocol::payload_frame_done(callback.window_id, callback.callback_id, now_ns);
+            send_message_to_client(
+                callback.client_id,
+                sws_protocol::server_msg::FRAME_DONE,
+                payload.to_vec(),
+            );
+        }
+        self.pending_frame_callbacks = waiting;
     }
 
     fn send_window_state_changed(&self, window_id: u32) {
@@ -8070,11 +8177,15 @@ impl Compositor {
             }
             sws_protocol::workspace::ShellPresentation::Home
             | sws_protocol::workspace::ShellPresentation::Overview => {
-                self.overview_card_rects()
-                    .iter()
-                    .any(|(candidate, _)| *candidate == workspace_id)
-                    && (self.windowing_mode == sws_protocol::WindowingMode::Freeform
-                        || self.tablet_slot_for_window(root_id).is_some())
+                self.overview_card_rects().iter().any(|(candidate, rect)| {
+                    *candidate == workspace_id
+                        && intersect_compositor_rects(
+                            *rect,
+                            (0, 0, self.screen_width, self.screen_height),
+                        )
+                        .is_some()
+                }) && (self.windowing_mode == sws_protocol::WindowingMode::Freeform
+                    || self.tablet_slot_for_window(root_id).is_some())
             }
         }
     }
@@ -8654,6 +8765,7 @@ impl Compositor {
             .map(|window| window.id)
             .collect::<Vec<_>>();
         let mut changed = false;
+        let mut visibility_changed = Vec::new();
 
         if self.windowing_mode == sws_protocol::WindowingMode::Freeform {
             for window_id in &window_ids {
@@ -8667,12 +8779,16 @@ impl Compositor {
                 && window.workspace_visible != desired
             {
                 window.workspace_visible = desired;
+                visibility_changed.push(*window_id);
                 changed = true;
             }
         }
 
         changed |= self.update_overview_transforms();
         changed |= self.sync_shell_presentation_focus();
+        for window_id in visibility_changed {
+            self.send_window_state_changed(window_id);
+        }
 
         if self.windowing_mode == sws_protocol::WindowingMode::Focused
             && self.workspace_manager.presentation()
@@ -9193,6 +9309,13 @@ impl Compositor {
                     return Ok(true);
                 }
             }
+            IpcEvent::RequestFrame {
+                client_id,
+                window_id,
+                callback_id,
+            } => {
+                self.queue_frame_callback(client_id, window_id, callback_id);
+            }
             IpcEvent::BufferUpdated {
                 window_id,
                 damage_x,
@@ -9209,27 +9332,39 @@ impl Compositor {
                     return Ok(false);
                 }
 
-                let (win_x, win_y, presentation_transform, presentation_instances) = match self
-                    .window_manager
-                    .get_window(window_id)
-                {
-                    Some(w) => (
-                        w.x,
-                        w.y,
-                        w.presentation_transform,
-                        w.presentation_instances
-                            .iter()
-                            .map(|instance| instance.transform)
-                            .collect::<Vec<_>>(),
-                    ),
-                    None => {
-                        println!(
-                            "[Compositor] Window #{} buffer updated but window not found (ignored)",
-                            window_id
-                        );
-                        return Ok(false);
-                    }
-                };
+                let (win_x, win_y, presented, presentation_transform, presentation_instances) =
+                    match self.window_manager.get_window(window_id) {
+                        Some(w) => (
+                            w.x,
+                            w.y,
+                            w.is_presented(),
+                            w.presentation_transform,
+                            w.presentation_instances
+                                .iter()
+                                .map(|instance| instance.transform)
+                                .collect::<Vec<_>>(),
+                        ),
+                        None => {
+                            println!(
+                                "[Compositor] Window #{} buffer updated but window not found (ignored)",
+                                window_id
+                            );
+                            return Ok(false);
+                        }
+                    };
+                if let Some(gpu_compositor) = self.gpu_compositor.as_mut() {
+                    gpu_compositor.mark_window_damage(
+                        window_id,
+                        damage_x,
+                        damage_y,
+                        damage_width,
+                        damage_height,
+                    );
+                }
+                self.note_window_frame_submitted(window_id);
+                if !presented {
+                    return Ok(false);
+                }
 
                 // Convert window-local damage -> screen-space rect and clamp to screen.
                 let rx0 = win_x.saturating_add(damage_x);
@@ -9277,16 +9412,6 @@ impl Compositor {
                         transform.height,
                     ));
                 }
-                if let Some(gpu_compositor) = self.gpu_compositor.as_mut() {
-                    gpu_compositor.mark_window_damage(
-                        window_id,
-                        damage_x,
-                        damage_y,
-                        damage_width,
-                        damage_height,
-                    );
-                }
-                self.note_window_frame_submitted(window_id);
             }
             IpcEvent::RegisterSgfxBuffer {
                 client_id,
@@ -9390,11 +9515,12 @@ impl Compositor {
                 };
                 match result {
                     Ok(damage) => {
-                        if let Some((window_x, window_y, transform, instances)) =
+                        if let Some((window_x, window_y, presented, transform, instances)) =
                             self.window_manager.get_window(window_id).map(|window| {
                                 (
                                     window.x,
                                     window.y,
+                                    window.is_presented(),
                                     window.presentation_transform,
                                     window
                                         .presentation_instances
@@ -9403,6 +9529,7 @@ impl Compositor {
                                         .collect::<Vec<_>>(),
                                 )
                             })
+                            && presented
                         {
                             if let Some(transform) = transform {
                                 self.add_pending_damage((
@@ -10254,13 +10381,19 @@ impl Compositor {
                 );
 
                 // Mark window as damaged and trigger redraw
-                if let Some(w) = self.window_manager.get_window(window_id) {
-                    self.add_pending_damage((
-                        w.x + damage_x,
-                        w.y + damage_y,
-                        damage_width,
-                        damage_height,
-                    ));
+                if let Some((window_x, window_y, presented)) = self
+                    .window_manager
+                    .get_window(window_id)
+                    .map(|window| (window.x, window.y, window.is_presented()))
+                {
+                    if presented {
+                        self.add_pending_damage((
+                            window_x + damage_x,
+                            window_y + damage_y,
+                            damage_width,
+                            damage_height,
+                        ));
+                    }
                     if let Some(gpu_compositor) = self.gpu_compositor.as_mut() {
                         gpu_compositor.mark_window_damage(
                             window_id,
@@ -10316,8 +10449,13 @@ impl Compositor {
                                 window_id, e
                             );
                         } else {
-                            if let Some(w) = self.window_manager.get_window(window_id) {
-                                self.add_pending_damage((w.x, w.y, w.width, w.height));
+                            if let Some(rect) = self
+                                .window_manager
+                                .get_window(window_id)
+                                .filter(|window| window.is_presented())
+                                .map(|window| window.presentation_geometry())
+                            {
+                                self.add_pending_damage(rect);
                             }
                         }
                     } else {
@@ -10350,7 +10488,7 @@ impl Compositor {
                             w.shm_format = format;
                             w.has_alpha_content = format == 0;
                             w.buffer = None; // Clear Vec buffer if present
-                            Some((w.x, w.y, w.width, w.height))
+                            w.is_presented().then_some(w.presentation_geometry())
                         } else {
                             println!("[Compositor] Window {} not found", window_id);
                             None

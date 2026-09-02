@@ -773,6 +773,30 @@ from the older compositor epoch. A malformed commit that does not contain a
 parseable identity and serial is a protocol violation rather than a routed
 request failure.
 
+### Compositor-paced frame lifecycle (protocol version 8)
+
+Clients that observe the `FRAME_CALLBACKS` capability (`1 << 9`) use
+`REQUEST_FRAME` (53) instead of an application-owned render timer. The request
+is asynchronous (`flags = 0`, `request_id = 0`) and has this 12-byte payload:
+
+| Offset | Size | Field | Type |
+|--------|------|-------|------|
+| 0 | 4 | `window_id` | u32 |
+| 4 | 8 | `callback_id` | non-zero u64 |
+
+Only one request may remain outstanding for a client window. `callback_id` is
+client-selected and is returned unchanged by `FRAME_DONE`. A callback is
+one-shot; the client requests the following opportunity after submitting its
+new frame.
+
+SWS returns callbacks only while `Window::is_presented()` is true. A window on
+an inactive workspace, a minimized window, or another non-presented surface
+retains its request until it becomes presentable again. Buffer updates received
+while suspended replace the latest window content but do not damage the output.
+When the window becomes visible, SWS presents that latest content before
+releasing the pending callback. Overview/Home workspace previews count as live
+presentation, so their visible cards may continue receiving callbacks.
+
 ### Server → Client
 
 #### `WINDOW_CREATED` (type = 10)
@@ -920,6 +944,7 @@ Payload (8 bytes):
 | `0x01` | `MINIMIZED` | The window is hidden by minimization. |
 | `0x02` | `MAXIMIZED` | The underlying presentation state is maximized to the workarea. |
 | `0x04` | `FULLSCREEN` | The window occupies the complete output. |
+| `0x08` | `SUSPENDED` | SWS is not currently presenting the window. |
 
 Semantics:
 
@@ -931,6 +956,24 @@ Semantics:
   corresponding `WINDOW_CONFIGURE`. Clients should treat the state and geometry
   as compositor-authoritative and resize their backing buffer in response to
   the configure event.
+- Workspace presentation changes also emit this event when `SUSPENDED` changes.
+  Applications may keep model/background work alive, but renderers should wait
+  for `FRAME_DONE` before producing another frame.
+
+#### `FRAME_DONE` (type = 38, protocol version 8)
+
+Payload (20 bytes):
+
+| Offset | Size | Field | Type |
+|--------|------|-------|------|
+| 0 | 4 | `window_id` | u32 |
+| 4 | 8 | `callback_id` | non-zero u64 |
+| 12 | 8 | `presentation_time_ns` | u64 monotonic nanoseconds |
+
+This asynchronous event grants exactly one render opportunity. It is normally
+sent after a display presentation boundary. A newly created surface may receive
+one bootstrap grant before its first submitted frame so that callback-driven
+clients can produce initial content.
 
 #### `CURSOR_THEME_CHANGED` (type = 34, protocol version 3)
 
@@ -1148,8 +1191,9 @@ The Extension API allows specialized bridge servers (like the Wayland bridge) to
   protocol version; version 3 adds compositor-provided cursor icons and live
   cursor-theme selection, and version 4 adds managed window geometry distinct
   from the composited surface. Version 5 adds system mode overrides; version 6
-  adds atomic configured-window creation. Input-environment and configured
-  creation support remain capability-gated.
+  adds atomic configured-window creation; version 7 adds exclusive workspace
+  control; and version 8 adds compositor-paced frame callbacks plus suspended
+  window state. Optional features remain capability-gated.
 - The current wire format is the request-routed 8-byte header described above:
   `msg_type: u16`, `flags: u8`, `request_id: u8`, `payload_size: u32`.
 - The older `msg_type: u32`, `payload_size: u32` header is not supported.

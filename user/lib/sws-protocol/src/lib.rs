@@ -30,7 +30,7 @@ pub mod workspace;
 pub const MAX_PAYLOAD_SIZE: usize = 1024 * 1024; // 1 MiB
 
 /// Current SWS capability-negotiation protocol version.
-pub const SWS_PROTOCOL_VERSION: u32 = 7;
+pub const SWS_PROTOCOL_VERSION: u32 = 8;
 
 /// Maximum damage rectangles carried by one shared SGFX frame commit.
 pub const SGFX_MAX_DAMAGE_RECTS: usize = 16;
@@ -55,6 +55,8 @@ pub mod capabilities {
     pub const CONFIGURED_WINDOW_CREATION: u64 = 1 << 7;
     /// An exclusive system shell may manage generation-checked workspaces.
     pub const WORKSPACE_SHELL: u64 = 1 << 8;
+    /// Clients may request one-shot compositor-paced frame callbacks.
+    pub const FRAME_CALLBACKS: u64 = 1 << 9;
 }
 
 /// Known input-environment state bits.
@@ -293,6 +295,8 @@ pub mod error_codes {
     pub const STALE_WORKSPACE_GENERATION: u32 = 115;
     /// A workspace transaction violates membership or layout invariants.
     pub const INVALID_WORKSPACE_STATE: u32 = 116;
+    /// A frame callback request is malformed, duplicated, or otherwise invalid.
+    pub const INVALID_FRAME_REQUEST: u32 = 117;
 }
 
 /// Message type IDs (client -> server).
@@ -370,6 +374,8 @@ pub mod client_msg {
     pub const GET_WORKSPACE_STATE: u32 = 51;
     /// Atomically apply one generation-checked complete workspace transaction.
     pub const APPLY_WORKSPACE_TRANSACTION: u32 = 52;
+    /// Request one compositor-paced frame opportunity for an owned window.
+    pub const REQUEST_FRAME: u32 = 53;
 
     // Text input client API messages (200-219)
     pub const TEXT_INPUT_CREATE: u32 = 200;
@@ -440,6 +446,8 @@ pub mod server_msg {
     pub const SYSTEM_SHELL_REGISTERED: u32 = 36;
     /// Current authoritative workspace snapshot or asynchronous state change.
     pub const WORKSPACE_STATE: u32 = 37;
+    /// One requested frame may now be rendered for the identified window.
+    pub const FRAME_DONE: u32 = 38;
 
     // Text input client events (200-219)
     pub const TEXT_INPUT_CREATED: u32 = 200;
@@ -610,6 +618,8 @@ pub mod window_state {
     pub const MAXIMIZED: u32 = 1 << 1;
     /// The window occupies the complete output and covers shell surfaces.
     pub const FULLSCREEN: u32 = 1 << 2;
+    /// The compositor is not currently presenting this window.
+    pub const SUSPENDED: u32 = 1 << 3;
 }
 
 /// Initial placement hints understood by the SWS window manager.
@@ -1318,6 +1328,14 @@ pub enum ClientMessageRef<'a> {
         transaction: &'a [u8],
     },
 
+    /// Request one compositor-paced frame opportunity for an owned window.
+    RequestFrame {
+        /// Owned window that needs another frame.
+        window_id: u32,
+        /// Client-selected non-zero identifier returned by `FRAME_DONE`.
+        callback_id: u64,
+    },
+
     /// Register one transferred SGFX image capability for a window.
     RegisterSgfxBuffer {
         window_id: u32,
@@ -1510,6 +1528,15 @@ pub enum ServerMessage {
     WindowStateChanged {
         window_id: u32,
         state_flags: u32,
+    },
+    /// One requested frame may now be rendered.
+    FrameDone {
+        /// Window whose frame request completed.
+        window_id: u32,
+        /// Client-selected identifier from `REQUEST_FRAME`.
+        callback_id: u64,
+        /// Compositor monotonic timestamp associated with the frame opportunity.
+        presentation_time_ns: u64,
     },
     /// Compositor-confirmed pointer lock state.
     PointerLockChanged {
@@ -2359,6 +2386,19 @@ pub fn parse_client_message<'a>(
                 transaction: payload,
             })
         }
+        client_msg::REQUEST_FRAME => {
+            if payload.len() != 12 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            let callback_id = read_u64(payload, 4)?;
+            if callback_id == 0 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            Ok(ClientMessageRef::RequestFrame {
+                window_id: read_u32(payload, 0)?,
+                callback_id,
+            })
+        }
         client_msg::REGISTER_SGFX_BUFFER => {
             if payload.len() != 24 {
                 return Err(ProtocolError::MalformedPayload);
@@ -2874,6 +2914,20 @@ pub fn parse_server_message(msg_type: u32, payload: &[u8]) -> Result<ServerMessa
             Ok(ServerMessage::WindowStateChanged {
                 window_id,
                 state_flags,
+            })
+        }
+        server_msg::FRAME_DONE => {
+            if payload.len() != 20 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            let callback_id = read_u64(payload, 4)?;
+            if callback_id == 0 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            Ok(ServerMessage::FrameDone {
+                window_id: read_u32(payload, 0)?,
+                callback_id,
+                presentation_time_ns: read_u64(payload, 12)?,
             })
         }
         server_msg::POINTER_LOCK_CHANGED => {
@@ -4023,6 +4077,25 @@ pub fn payload_window_state_changed(window_id: u32, state_flags: u32) -> [u8; 8]
     payload
 }
 
+/// Build payload for server->client `FRAME_DONE`.
+///
+/// # Arguments
+///
+/// * `window_id` - Window whose requested frame may now be rendered.
+/// * `callback_id` - Non-zero identifier supplied by the client.
+/// * `presentation_time_ns` - Compositor monotonic timestamp in nanoseconds.
+///
+/// # Returns
+///
+/// The fixed-width frame callback payload.
+pub fn payload_frame_done(window_id: u32, callback_id: u64, presentation_time_ns: u64) -> [u8; 20] {
+    let mut payload = [0u8; 20];
+    payload[0..4].copy_from_slice(&window_id.to_le_bytes());
+    payload[4..12].copy_from_slice(&callback_id.to_le_bytes());
+    payload[12..20].copy_from_slice(&presentation_time_ns.to_le_bytes());
+    payload
+}
+
 /// Build payload for server->client `WINDOW_DESTROYED`.
 pub fn payload_window_destroyed(window_id: u32) -> [u8; 4] {
     window_id.to_le_bytes()
@@ -4448,6 +4521,23 @@ pub fn payload_set_fullscreen(window_id: u32) -> [u8; 4] {
 /// The serialized window identifier.
 pub fn payload_unset_fullscreen(window_id: u32) -> [u8; 4] {
     window_id.to_le_bytes()
+}
+
+/// Build payload for client->server `REQUEST_FRAME`.
+///
+/// # Arguments
+///
+/// * `window_id` - Owned window that needs another frame opportunity.
+/// * `callback_id` - Client-selected non-zero identifier.
+///
+/// # Returns
+///
+/// The fixed-width frame request payload.
+pub fn payload_request_frame(window_id: u32, callback_id: u64) -> [u8; 12] {
+    let mut payload = [0u8; 12];
+    payload[0..4].copy_from_slice(&window_id.to_le_bytes());
+    payload[4..12].copy_from_slice(&callback_id.to_le_bytes());
+    payload
 }
 
 /// Build payload for client->server `SET_POINTER_LOCK`.
@@ -5192,8 +5282,9 @@ mod tests {
         parse_server_message, payload_activation_token, payload_create_window_configured,
         payload_create_window_with_placement,
         payload_create_window_with_placement_and_activation_token,
-        payload_create_window_with_position, payload_error, payload_input_environment_changed,
-        payload_pointer_lock_changed, payload_request_activation_token, payload_set_cursor_icon,
+        payload_create_window_with_position, payload_error, payload_frame_done,
+        payload_input_environment_changed, payload_pointer_lock_changed,
+        payload_request_activation_token, payload_request_frame, payload_set_cursor_icon,
         payload_set_cursor_theme, payload_set_fullscreen, payload_set_pointer_lock,
         payload_set_tablet_mode_override, payload_set_window_geometry,
         payload_set_windowing_mode_override, payload_unset_fullscreen,
@@ -5417,7 +5508,7 @@ mod tests {
 
     #[test]
     fn window_state_changed_preserves_flags() {
-        let flags = window_state::MAXIMIZED | window_state::FULLSCREEN;
+        let flags = window_state::MAXIMIZED | window_state::FULLSCREEN | window_state::SUSPENDED;
         let payload = payload_window_state_changed(77, flags);
         assert_eq!(
             parse_server_message(server_msg::WINDOW_STATE_CHANGED, &payload).unwrap(),
@@ -5425,6 +5516,37 @@ mod tests {
                 window_id: 77,
                 state_flags: flags,
             }
+        );
+    }
+
+    #[test]
+    fn frame_request_and_done_round_trip() {
+        let request = payload_request_frame(77, 1234);
+        assert_eq!(
+            parse_client_message(client_msg::REQUEST_FRAME, &request).unwrap(),
+            ClientMessageRef::RequestFrame {
+                window_id: 77,
+                callback_id: 1234,
+            }
+        );
+
+        let done = payload_frame_done(77, 1234, 9_876_543_210);
+        assert_eq!(
+            parse_server_message(server_msg::FRAME_DONE, &done).unwrap(),
+            ServerMessage::FrameDone {
+                window_id: 77,
+                callback_id: 1234,
+                presentation_time_ns: 9_876_543_210,
+            }
+        );
+
+        assert_eq!(
+            parse_client_message(client_msg::REQUEST_FRAME, &payload_request_frame(77, 0)),
+            Err(ProtocolError::MalformedPayload)
+        );
+        assert_eq!(
+            parse_server_message(server_msg::FRAME_DONE, &payload_frame_done(77, 0, 1)),
+            Err(ProtocolError::MalformedPayload)
         );
     }
 
