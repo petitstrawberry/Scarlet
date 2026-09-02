@@ -3,19 +3,24 @@
 version = 4
 
 [[package]]
+name = "adreno-a6xx-layout"
+version = "0.1.0"
+source = "git+https://github.com/petitstrawberry/scarlet-project-chromebook.git#c8114b3c63ac20178eb3a4adffbcae1128af4cfa"
+
+[[package]]
 name = "adreno-a6xx-pm4"
 version = "0.1.0"
-source = "git+https://github.com/petitstrawberry/scarlet-project-chromebook.git#dde179b50c666af6ed55ff885e9ffdb5bed50737"
+source = "git+https://github.com/petitstrawberry/scarlet-project-chromebook.git#c8114b3c63ac20178eb3a4adffbcae1128af4cfa"
 
 [[package]]
 name = "adreno-a6xx-shader-pack"
 version = "0.1.0"
-source = "git+https://github.com/petitstrawberry/scarlet-project-chromebook.git#dde179b50c666af6ed55ff885e9ffdb5bed50737"
+source = "git+https://github.com/petitstrawberry/scarlet-project-chromebook.git#c8114b3c63ac20178eb3a4adffbcae1128af4cfa"
 
 [[package]]
 name = "adreno-a6xx-submit-wire"
 version = "0.1.0"
-source = "git+https://github.com/petitstrawberry/scarlet-project-chromebook.git#dde179b50c666af6ed55ff885e9ffdb5bed50737"
+source = "git+https://github.com/petitstrawberry/scarlet-project-chromebook.git#c8114b3c63ac20178eb3a4adffbcae1128af4cfa"
 dependencies = [
  "adreno-a6xx-shader-pack",
 ]
@@ -750,8 +755,9 @@ dependencies = [
 [[package]]
 name = "sgfx-backend-scarlet-adreno"
 version = "0.1.0"
-source = "git+https://github.com/petitstrawberry/scarlet-project-chromebook.git#dde179b50c666af6ed55ff885e9ffdb5bed50737"
+source = "git+https://github.com/petitstrawberry/scarlet-project-chromebook.git#c8114b3c63ac20178eb3a4adffbcae1128af4cfa"
 dependencies = [
+ "adreno-a6xx-layout",
  "adreno-a6xx-submit-wire",
  "gpu-raw",
  "scarlet-os",
@@ -785,8 +791,9 @@ dependencies = [
 [[package]]
 name = "sgfx-codegen-adreno-a6xx"
 version = "0.1.0"
-source = "git+https://github.com/petitstrawberry/scarlet-project-chromebook.git#dde179b50c666af6ed55ff885e9ffdb5bed50737"
+source = "git+https://github.com/petitstrawberry/scarlet-project-chromebook.git#c8114b3c63ac20178eb3a4adffbcae1128af4cfa"
 dependencies = [
+ "adreno-a6xx-layout",
  "adreno-a6xx-pm4",
  "adreno-a6xx-shader-pack",
  "sgfx-core",
