@@ -603,26 +603,15 @@ mod touch_modality_tests {
     }
 
     #[test]
-    fn shell_depth_replacement_withholds_stale_content_in_both_directions() {
+    fn hidden_shell_content_is_withheld_but_visible_depths_keep_the_last_commit() {
         use sws_protocol::workspace::ShellPresentation::{Home, Overview, Workspace};
 
         assert!(shell_background_must_be_withheld(Workspace, Overview));
         assert!(shell_background_must_be_withheld(Workspace, Home));
-        assert!(shell_background_must_be_withheld(Home, Overview));
-        assert!(shell_background_must_be_withheld(Overview, Home));
+        assert!(!shell_background_must_be_withheld(Home, Overview));
+        assert!(!shell_background_must_be_withheld(Overview, Home));
         assert!(!shell_background_must_be_withheld(Overview, Overview));
         assert!(!shell_background_must_be_withheld(Home, Workspace));
-    }
-
-    #[test]
-    fn shell_depth_replacement_uses_a_continuous_fallback_backdrop() {
-        use sws_protocol::workspace::ShellPresentation::{Home, Overview, Workspace};
-
-        assert!(shell_fallback_backdrop_required(Home, false));
-        assert!(shell_fallback_backdrop_required(Overview, false));
-        assert!(!shell_fallback_backdrop_required(Workspace, false));
-        assert!(!shell_fallback_backdrop_required(Home, true));
-        assert!(!shell_fallback_backdrop_required(Overview, true));
     }
 
     #[test]
@@ -2153,32 +2142,16 @@ fn shell_background_must_be_withheld(
     previous: sws_protocol::workspace::ShellPresentation,
     current: sws_protocol::workspace::ShellPresentation,
 ) -> bool {
-    previous != current
+    // A hidden surface may retain content from any earlier shell depth. Once
+    // it is visible, keep its last completed commit across depth changes until
+    // the client submits the replacement; this preserves client-owned chrome
+    // without teaching the compositor how that surface is internally drawn.
+    previous == sws_protocol::workspace::ShellPresentation::Workspace
         && matches!(
             current,
             sws_protocol::workspace::ShellPresentation::Home
                 | sws_protocol::workspace::ShellPresentation::Overview
         )
-}
-
-fn shell_fallback_backdrop_required(
-    presentation: sws_protocol::workspace::ShellPresentation,
-    shell_background_ready: bool,
-) -> bool {
-    !shell_background_ready
-        && matches!(
-            presentation,
-            sws_protocol::workspace::ShellPresentation::Home
-                | sws_protocol::workspace::ShellPresentation::Overview
-        )
-}
-
-fn shell_fallback_backdrop_color(
-    presentation: sws_protocol::workspace::ShellPresentation,
-    shell_background_ready: bool,
-) -> Option<[u8; 4]> {
-    shell_fallback_backdrop_required(presentation, shell_background_ready)
-        .then_some(sws_protocol::workspace::SHELL_NAVIGATION_BACKDROP_BGRA)
 }
 
 /// Compositor - the main window server with proper layer compositing
@@ -4034,7 +4007,6 @@ impl Compositor {
         let overview_shadows = self.overview_render_shadows();
         let overview_cards = self.overview_render_backplates();
         let overview_remove_buttons = self.overview_remove_buttons();
-        let shell_fallback_backdrop = self.shell_fallback_backdrop();
         let Some(gpu_compositor) = self.gpu_compositor.as_mut() else {
             return Ok(false);
         };
@@ -4043,7 +4015,6 @@ impl Compositor {
             self.window_manager.get_windows(),
             &self.cursor,
             self.bg_color,
-            shell_fallback_backdrop,
             &overview_shadows,
             &overview_cards,
             &overview_remove_buttons,
@@ -4696,7 +4667,6 @@ impl Compositor {
         let overview_shadows = self.overview_render_shadows();
         let overview_cards = self.overview_render_backplates();
         let overview_remove_buttons = self.overview_remove_buttons();
-        let shell_fallback_backdrop = self.shell_fallback_backdrop();
 
         // Clip dirty region to screen bounds.
         let (x0, y0, w, h) = match dirty {
@@ -4748,8 +4718,8 @@ impl Compositor {
                 }
             }
 
-            // Layer 2: Draw the persistent shell backdrop, shell content, then
-            // independent rounded workspace cards and live application actors.
+            // Layer 2: Draw shell background, then independent rounded
+            // workspace cards and their live application actors.
             let clip = if dirty.is_some() {
                 Some((x0, y0, w, h))
             } else {
@@ -4758,25 +4728,8 @@ impl Compositor {
             let screen_width = self.screen_width;
             let screen_height = self.screen_height;
             let bytes_per_pixel = self.bytes_per_pixel;
-            let mut shell_fallback_backdrop_drawn = false;
             let mut overview_backplates_drawn = false;
             for window in self.window_manager.get_windows() {
-                if !shell_fallback_backdrop_drawn && window.window_type != WindowType::Desktop {
-                    if let Some(color) = shell_fallback_backdrop {
-                        Self::fill_rounded_rect_to_buffer(
-                            screen_width,
-                            screen_height,
-                            bytes_per_pixel,
-                            backbuffer,
-                            stride,
-                            (0, 0, screen_width, screen_height),
-                            0,
-                            color,
-                            clip,
-                        );
-                    }
-                    shell_fallback_backdrop_drawn = true;
-                }
                 if !window.is_presented() {
                     continue;
                 }
@@ -4827,19 +4780,6 @@ impl Compositor {
                         clip,
                     );
                 }
-            }
-            if !shell_fallback_backdrop_drawn && let Some(color) = shell_fallback_backdrop {
-                Self::fill_rounded_rect_to_buffer(
-                    screen_width,
-                    screen_height,
-                    bytes_per_pixel,
-                    backbuffer,
-                    stride,
-                    (0, 0, screen_width, screen_height),
-                    0,
-                    color,
-                    clip,
-                );
             }
             if !overview_backplates_drawn {
                 Self::draw_overview_shadows_to_buffer(
@@ -8440,16 +8380,6 @@ impl Compositor {
             backplates.push((rect, hovered || self.overview_add_workspace_selected, true));
         }
         backplates
-    }
-
-    fn shell_fallback_backdrop(&self) -> Option<[u8; 4]> {
-        let shell_background_ready = self.window_manager.get_windows().iter().any(|window| {
-            window.window_type == WindowType::ShellBackground && window.is_presented()
-        });
-        shell_fallback_backdrop_color(
-            self.workspace_manager.presentation(),
-            shell_background_ready,
-        )
     }
 
     fn overview_render_shadows(&self) -> Vec<OverviewShadowLayer> {

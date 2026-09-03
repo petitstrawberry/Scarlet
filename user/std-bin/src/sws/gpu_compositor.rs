@@ -647,16 +647,12 @@ impl GpuCompositor {
     }
 
     /// Upload all changed window textures, compose the complete scene, and present it.
-    ///
-    /// The optional shell fallback is placed above desktop surfaces but below
-    /// shell content and workspace actors while a replacement frame is pending.
     pub(super) fn compose_and_present(
         &mut self,
         display: &DisplaySurface,
         windows: &[Window],
         cursor: &Cursor,
         background: [u8; 4],
-        shell_fallback_backdrop: Option<[u8; 4]>,
         overview_shadows: &[((i32, i32, u32, u32), u32, [u8; 4])],
         overview_cards: &[((i32, i32, u32, u32), bool, bool)],
         overview_remove_buttons: &[(u32, (i32, i32, u32, u32), bool)],
@@ -697,19 +693,8 @@ impl GpuCompositor {
             .map_err(|_| "Failed to prepare GPU swapchain damage")?;
         let damage_clip = (render_area != full_area).then_some(render_area);
         let mut operations = Vec::new();
-        let mut shell_fallback_backdrop_drawn = false;
         let mut overview_backplates_drawn = false;
         for window in windows {
-            if !shell_fallback_backdrop_drawn && window.window_type != WindowType::Desktop {
-                if let Some(color) = shell_fallback_backdrop {
-                    operations.push(Quad::Solid {
-                        destination: full_area,
-                        color: bgra_color(color),
-                        clip: damage_clip,
-                    });
-                }
-                shell_fallback_backdrop_drawn = true;
-            }
             if !window.is_presented() {
                 continue;
             }
@@ -744,13 +729,6 @@ impl GpuCompositor {
                     damage_clip,
                 )?;
             }
-        }
-        if !shell_fallback_backdrop_drawn && let Some(color) = shell_fallback_backdrop {
-            operations.push(Quad::Solid {
-                destination: full_area,
-                color: bgra_color(color),
-                clip: damage_clip,
-            });
         }
         if !overview_backplates_drawn {
             append_overview_shadows(
