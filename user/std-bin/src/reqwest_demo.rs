@@ -21,6 +21,10 @@ const DEFAULT_URLS: &[&str] = &[
     "https://docs.rs/reqwest/latest/reqwest/",
 ];
 #[cfg(target_os = "scarlet")]
+const LOCAL_DEMO_URL: &str = "http://127.0.0.1:8080/delay/1500";
+#[cfg(target_os = "scarlet")]
+const LOCAL_DEMO_REQUESTS: usize = 4;
+#[cfg(target_os = "scarlet")]
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 #[cfg(target_os = "scarlet")]
 const BODY_PREVIEW_LIMIT: usize = 160;
@@ -34,8 +38,12 @@ const CUSTOM_RANDOM_ERROR: u32 = getrandom::Error::CUSTOM_START + 1;
 #[command(about = "Fetch HTTP(S) URLs concurrently with reqwest on Scarlet")]
 struct Arguments {
     /// Repeat every URL this many times.
-    #[arg(short = 'n', long, default_value_t = 1)]
-    repeat: usize,
+    #[arg(short = 'n', long)]
+    repeat: Option<usize>,
+
+    /// Run four delayed requests against a local axum-demo server.
+    #[arg(long)]
+    local: bool,
 
     /// URLs to fetch. A small HTTPS batch is used when omitted.
     #[arg(value_name = "URL")]
@@ -144,11 +152,22 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
 #[cfg(target_os = "scarlet")]
 fn build_request_urls(arguments: Arguments) -> Result<Vec<Url>, Box<dyn Error>> {
-    if arguments.repeat == 0 {
+    if arguments.local && !arguments.urls.is_empty() {
+        return Err("--local cannot be combined with explicit URLs".into());
+    }
+
+    let repeat = arguments.repeat.unwrap_or(if arguments.local {
+        LOCAL_DEMO_REQUESTS
+    } else {
+        1
+    });
+    if repeat == 0 {
         return Err("--repeat must be at least 1".into());
     }
 
-    let raw_urls = if arguments.urls.is_empty() {
+    let raw_urls = if arguments.local {
+        vec![LOCAL_DEMO_URL.to_owned()]
+    } else if arguments.urls.is_empty() {
         DEFAULT_URLS.iter().map(|url| (*url).to_owned()).collect()
     } else {
         arguments.urls
@@ -156,7 +175,7 @@ fn build_request_urls(arguments: Arguments) -> Result<Vec<Url>, Box<dyn Error>> 
 
     let request_count = raw_urls
         .len()
-        .checked_mul(arguments.repeat)
+        .checked_mul(repeat)
         .ok_or("request count overflow")?;
     if request_count > MAX_REQUESTS {
         return Err(format!("at most {MAX_REQUESTS} requests may be launched at once").into());
@@ -168,7 +187,7 @@ fn build_request_urls(arguments: Arguments) -> Result<Vec<Url>, Box<dyn Error>> 
         if !matches!(url.scheme(), "http" | "https") {
             return Err(format!("unsupported URL scheme in {url}").into());
         }
-        for _ in 0..arguments.repeat {
+        for _ in 0..repeat {
             urls.push(url.clone());
         }
     }
@@ -182,7 +201,12 @@ async fn fetch(
     requested_url: Url,
 ) -> Result<FetchReport, (usize, Url, reqwest::Error)> {
     let started = Instant::now();
-    let mut response = match client.get(requested_url.clone()).send().await {
+    let mut response = match client
+        .get(requested_url.clone())
+        .header("x-scarlet-request-id", request_id.to_string())
+        .send()
+        .await
+    {
         Ok(response) => response,
         Err(error) => return Err((request_id, requested_url, error)),
     };
