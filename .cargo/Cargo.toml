@@ -4,6 +4,7 @@ members = [
     "../user/bin",
     "../user/std-bin",
     "../user/tonic-demo",
+    "../user/websocket-demo",
     "../user/video_player",
 ]
 

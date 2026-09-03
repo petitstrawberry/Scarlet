@@ -1,0 +1,5 @@
+# Scarlet target needs a custom getrandom 0.4 backend backed by the
+# native GetRandom syscall. The cfg is namespaced and only checked
+# by the getrandom crate itself.
+[target.'cfg(target_os = "scarlet")']
+rustflags = ["--cfg", "getrandom_backend=\"custom\""]

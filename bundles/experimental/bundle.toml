@@ -57,3 +57,17 @@ source = "../../user/tonic-demo"
 package = "scarlet-tonic-demo"
 bin = "tonic-client"
 to = "/system/scarlet/bin/tonic-client"
+
+[[layers]]
+kind = "cargo"
+source = "../../user/websocket-demo"
+package = "scarlet-websocket-demo"
+bin = "ws-server"
+to = "/system/scarlet/bin/ws-server"
+
+[[layers]]
+kind = "cargo"
+source = "../../user/websocket-demo"
+package = "scarlet-websocket-demo"
+bin = "ws-client"
+to = "/system/scarlet/bin/ws-client"
