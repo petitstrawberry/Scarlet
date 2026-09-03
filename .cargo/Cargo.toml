@@ -13,6 +13,8 @@ panic = "abort"
 panic = "abort"
 
 [patch.crates-io]
+ring = { git = "https://github.com/petitstrawberry/ring.git", branch = "scarlet" }
+socket2 = { git = "https://github.com/petitstrawberry/socket2.git", branch = "scarlet" }
 tokio = { git = "https://github.com/petitstrawberry/tokio.git", branch = "scarlet" }
 
 [patch."https://github.com/petitstrawberry/Scarlet"]

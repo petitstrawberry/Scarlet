@@ -36,3 +36,10 @@ source = "../../user/std-bin"
 package = "scarlet-std-bin"
 bin = "axum-demo"
 to = "/system/scarlet/bin/axum-demo"
+
+[[layers]]
+kind = "cargo"
+source = "../../user/std-bin"
+package = "scarlet-std-bin"
+bin = "reqwest-demo"
+to = "/system/scarlet/bin/reqwest-demo"

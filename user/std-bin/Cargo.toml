@@ -45,6 +45,8 @@ sws-remote-protocol = { path = "../lib/sws-remote-protocol", default-features = 
 
 [target.'cfg(target_os = "scarlet")'.dependencies]
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
+getrandom = { version = "0.2.16", default-features = false, features = ["custom"] }
+reqwest = { version = "0.12.24", default-features = false, features = ["rustls-tls-webpki-roots"] }
 scarlet-os = { path = "../lib/scarlet-os", default-features = false, features = ["std"] }
 scarlet-ui = { git = "https://github.com/petitstrawberry/scarlet-ui", package = "scarlet-ui", default-features = false, features = ["std", "platform-sws"] }
 sas-protocol = { path = "../lib/sas-protocol", default-features = false, features = ["std"] }
@@ -121,6 +123,10 @@ path = "src/csv_demo.rs"
 [[bin]]
 name = "http-get-demo"
 path = "src/http_get_demo.rs"
+
+[[bin]]
+name = "reqwest-demo"
+path = "src/reqwest_demo.rs"
 
 [[bin]]
 name = "tcp-client"
