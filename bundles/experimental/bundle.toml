@@ -75,6 +75,7 @@ to = "/system/scarlet/bin/ws-client"
 [[layers]]
 kind = "cargo"
 source = { git = "https://github.com/petitstrawberry/blitz", branch = "scarlet" }
+subdir = "apps/scarlet-browser"
 package = "blitz-scarlet-browser"
 bin = "blitz"
 to = "/system/scarlet/bin/blitz"
