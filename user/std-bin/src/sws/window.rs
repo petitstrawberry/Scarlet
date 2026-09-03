@@ -232,6 +232,8 @@ pub struct Window {
     pub shm: Option<SharedMemory>,
     /// Mapped address of the shared memory (for server-side access)
     pub shm_mapped_addr: Option<usize>,
+    /// Whether this window, rather than an extension backing registry, owns the mapping.
+    pub(super) shm_mapping_owned: bool,
     /// Size of the SHM mapping in bytes (0 when not SHM-backed).
     pub shm_size: usize,
     /// Byte offset into the SHM where pixel data begins.
@@ -240,6 +242,10 @@ pub struct Window {
     pub shm_stride: u32,
     /// Pixel format for SHM-backed windows (Wayland wl_shm format).
     pub shm_format: u32,
+    /// Extension-scoped buffer currently selected for this window.
+    pub(super) external_buffer_id: Option<u32>,
+    /// Exact retained use of [`Self::external_buffer_id`].
+    pub(super) external_buffer_commit_serial: Option<u64>,
     /// Window type for Z-order management
     pub window_type: WindowType,
     /// Whether the window is minimized
@@ -259,6 +265,8 @@ pub struct Window {
     /// true so the client's initial CPU or SGFX buffer identity still matches
     /// the surface created by SWS.
     pub has_presented_frame: bool,
+    /// Global presentation counter observed for the newest submitted frame.
+    pub(super) last_frame_submission_counter: Option<u64>,
     /// Whether the retained buffer belongs to the current shell presentation.
     ///
     /// A shell background is withheld after a Home/Overview transition until
@@ -478,21 +486,23 @@ impl Window {
     /// # Returns
     ///
     /// A view beginning at local pixel `(0, 0)`, or an error when the backing
-    /// store is unavailable or does not cover the window geometry.
+    /// store is unavailable or does not cover the last attached buffer extent.
     pub fn pixels(&self) -> Result<WindowPixels<'_>, &'static str> {
+        let (backing_width, backing_height) = self.backing_extent();
         let stride = if self.shm_mapped_addr.is_some() && self.shm_stride != 0 {
             self.shm_stride
         } else {
-            self.width.checked_mul(4).ok_or("Window stride overflow")?
+            backing_width
+                .checked_mul(4)
+                .ok_or("Window stride overflow")?
         };
-        let row_bytes = self
-            .width
+        let row_bytes = backing_width
             .checked_mul(4)
             .ok_or("Window row width overflow")?;
-        if self.width == 0 || self.height == 0 || stride < row_bytes {
+        if backing_width == 0 || backing_height == 0 || stride < row_bytes {
             return Err("Window backing stride is invalid");
         }
-        let required = (self.height as usize - 1)
+        let required = (backing_height as usize - 1)
             .checked_mul(stride as usize)
             .and_then(|offset| offset.checked_add(row_bytes as usize))
             .ok_or("Window backing size overflow")?;
@@ -504,29 +514,31 @@ impl Window {
                 .checked_add(required)
                 .ok_or("Window SHM range overflow")?;
             if mapping_size == 0 || end > mapping_size {
-                return Err("Window SHM backing does not cover its geometry");
+                return Err("Window SHM backing does not cover its buffer extent");
             }
-            // SAFETY: `mapped_addr` is owned by this live window, and the checked
-            // `shm_offset..end` range is entirely inside its recorded SHM mapping.
+            // SAFETY: owned mappings live with this window; borrowed extension
+            // mappings live in the compositor registry until every selecting
+            // window releases them. The checked `shm_offset..end` range is
+            // entirely inside the recorded mapping in either case.
             let mapping =
                 unsafe { core::slice::from_raw_parts(mapped_addr as *const u8, mapping_size) };
             return Ok(WindowPixels {
                 pixels: &mapping[self.shm_offset..end],
                 stride,
-                width: self.width,
-                height: self.height,
+                width: backing_width,
+                height: backing_height,
             });
         }
 
         if let Some(buffer) = self.buffer.as_deref() {
             if required > buffer.len() {
-                return Err("Window buffer does not cover its geometry");
+                return Err("Window buffer does not cover its buffer extent");
             }
             return Ok(WindowPixels {
                 pixels: &buffer[..required],
                 stride,
-                width: self.width,
-                height: self.height,
+                width: backing_width,
+                height: backing_height,
             });
         }
 
@@ -538,29 +550,30 @@ impl Window {
     /// # Returns
     ///
     /// A SharedMemory owner and fixed pixel layout, or an error when this window
-    /// is not backed by BGRA-compatible SharedMemory covering its geometry.
+    /// is not backed by BGRA-compatible SharedMemory covering its last attached
+    /// buffer extent.
     pub fn shm_layout(&self) -> Result<WindowShmLayout<'_>, &'static str> {
         const WL_SHM_FORMAT_ARGB8888: u32 = 0;
 
+        let (backing_width, backing_height) = self.backing_extent();
         let shared_memory = self
             .shm
             .as_ref()
             .ok_or("Window does not own shared memory")?;
-        if self.width == 0
-            || self.height == 0
+        if backing_width == 0
+            || backing_height == 0
             || self.shm_size == 0
             || self.shm_format != WL_SHM_FORMAT_ARGB8888
         {
             return Err("Window shared memory layout is not BGRA-compatible");
         }
-        let row_bytes = self
-            .width
+        let row_bytes = backing_width
             .checked_mul(4)
             .ok_or("Window shared memory row width overflow")?;
         if self.shm_stride < row_bytes {
             return Err("Window shared memory stride is too small");
         }
-        let required = (self.height as usize - 1)
+        let required = (backing_height as usize - 1)
             .checked_mul(self.shm_stride as usize)
             .and_then(|offset| offset.checked_add(row_bytes as usize))
             .ok_or("Window shared memory layout overflows")?;
@@ -573,8 +586,8 @@ impl Window {
         }
         Ok(WindowShmLayout {
             shared_memory,
-            width: self.width,
-            height: self.height,
+            width: backing_width,
+            height: backing_height,
             offset: self.shm_offset,
             stride: self.shm_stride,
             size: self.shm_size,
@@ -610,10 +623,13 @@ impl Window {
             buffer: None,
             shm: None,
             shm_mapped_addr: None,
+            shm_mapping_owned: true,
             shm_size: 0,
             shm_offset: 0,
             shm_stride: 0,
             shm_format: 0,
+            external_buffer_id: None,
+            external_buffer_commit_serial: None,
             window_type: WindowType::default(),
             minimized: false,
             maximized: false,
@@ -621,6 +637,7 @@ impl Window {
             workspace_layout_managed: false,
             workspace_restore_geometry: None,
             has_presented_frame: false,
+            last_frame_submission_counter: None,
             presentation_content_ready: true,
             pending_maximize: false,
             initial_size_negotiated: false,
@@ -669,10 +686,13 @@ impl Window {
             buffer: Some(buffer),
             shm: None,
             shm_mapped_addr: None,
+            shm_mapping_owned: true,
             shm_size: 0,
             shm_offset: 0,
             shm_stride: 0,
             shm_format: 0,
+            external_buffer_id: None,
+            external_buffer_commit_serial: None,
             window_type: WindowType::default(),
             minimized: false,
             maximized: false,
@@ -680,6 +700,7 @@ impl Window {
             workspace_layout_managed: false,
             workspace_restore_geometry: None,
             has_presented_frame: false,
+            last_frame_submission_counter: None,
             presentation_content_ready: true,
             pending_maximize: false,
             initial_size_negotiated: false,
@@ -754,10 +775,13 @@ impl Window {
             buffer: None,
             shm: Some(shm),
             shm_mapped_addr: Some(mapped_addr),
+            shm_mapping_owned: true,
             shm_size: buffer_size,
             shm_offset: 0,
             shm_stride: width.saturating_mul(4),
             shm_format: 0,
+            external_buffer_id: None,
+            external_buffer_commit_serial: None,
             window_type: WindowType::default(),
             minimized: false,
             maximized: false,
@@ -765,6 +789,7 @@ impl Window {
             workspace_layout_managed: false,
             workspace_restore_geometry: None,
             has_presented_frame: false,
+            last_frame_submission_counter: None,
             presentation_content_ready: true,
             pending_maximize: false,
             initial_size_negotiated: false,
@@ -1023,6 +1048,21 @@ impl Window {
         }
     }
 
+    /// Record one submitted frame against the compositor presentation clock.
+    ///
+    /// # Arguments
+    ///
+    /// * `presentation_counter` - Global completed-presentation count observed
+    ///   when this frame entered the compositor.
+    ///
+    /// # Returns
+    ///
+    /// `true` only when this is the window's first usable frame.
+    pub(super) fn note_frame_submission(&mut self, presentation_counter: u64) -> bool {
+        self.last_frame_submission_counter = Some(presentation_counter);
+        self.mark_presented_frame()
+    }
+
     /// Require a fresh commit before composing this shell background.
     ///
     /// # Returns
@@ -1075,11 +1115,118 @@ impl Window {
         self.height = h;
         self.reconcile_window_geometry_after_resize();
     }
+
+    pub(super) fn release_owned_shm_mapping(&mut self) {
+        if self.shm_mapping_owned
+            && let (Some(addr), size) = (self.shm_mapped_addr.take(), self.shm_size)
+            && size != 0
+        {
+            let _ = munmap(addr, size);
+        } else {
+            self.shm_mapped_addr = None;
+        }
+        self.shm = None;
+        self.shm_size = 0;
+        self.shm_offset = 0;
+        self.shm_stride = 0;
+        self.shm_mapping_owned = true;
+    }
+
+    /// Select a non-owning view into an extension-managed SHM pool.
+    ///
+    /// # Arguments
+    ///
+    /// * `buffer_id` - Extension-scoped reusable buffer identifier.
+    /// * `commit_serial` - Non-zero identity of this retained buffer use.
+    /// * `width` - Buffer width in physical pixels.
+    /// * `height` - Buffer height in physical pixels.
+    /// * `offset` - Byte offset into the mapped pool.
+    /// * `stride` - Bytes between adjacent rows.
+    /// * `format` - Wayland SHM pixel format.
+    /// * `mapped_addr` - Base address of the compositor-owned pool mapping.
+    /// * `mapping_size` - Complete size of that mapping.
+    ///
+    /// # Returns
+    ///
+    /// The previously selected extension buffer and retained-use serial, or an
+    /// error when the view cannot cover the declared extent.
+    pub(super) fn select_external_shm_buffer(
+        &mut self,
+        buffer_id: u32,
+        commit_serial: u64,
+        width: u32,
+        height: u32,
+        offset: usize,
+        stride: u32,
+        format: u32,
+        mapped_addr: usize,
+        mapping_size: usize,
+    ) -> Result<Option<(u32, u64)>, &'static str> {
+        let row_bytes = width.checked_mul(4).ok_or("External row width overflow")?;
+        if buffer_id == 0
+            || commit_serial == 0
+            || width == 0
+            || height == 0
+            || stride < row_bytes
+            || mapped_addr == 0
+            || mapping_size == 0
+        {
+            return Err("Invalid external SHM view");
+        }
+        let required = (height as usize - 1)
+            .checked_mul(stride as usize)
+            .and_then(|bytes| bytes.checked_add(row_bytes as usize))
+            .ok_or("External SHM view overflow")?;
+        let end = offset
+            .checked_add(required)
+            .ok_or("External SHM view overflow")?;
+        if end > mapping_size {
+            return Err("External SHM view exceeds its pool");
+        }
+
+        let previous = self
+            .external_buffer_id
+            .zip(self.external_buffer_commit_serial);
+        self.release_owned_shm_mapping();
+        self.buffer = None;
+        self.width = width;
+        self.height = height;
+        self.set_backing_extent(width, height);
+        self.reconcile_window_geometry_after_resize();
+        self.shm_mapped_addr = Some(mapped_addr);
+        self.shm_mapping_owned = false;
+        self.shm_size = mapping_size;
+        self.shm_offset = offset;
+        self.shm_stride = stride;
+        self.shm_format = format;
+        self.external_buffer_id = Some(buffer_id);
+        self.external_buffer_commit_serial = Some(commit_serial);
+        self.has_alpha_content = format == 0;
+        self.presentation_content_ready = true;
+        Ok(previous)
+    }
+
+    /// Unmap the logical contents of an extension-managed surface.
+    ///
+    /// # Returns
+    ///
+    /// The previously selected external buffer and retained-use serial, if any.
+    pub(super) fn detach_external_buffer(&mut self) -> Option<(u32, u64)> {
+        let previous = self
+            .external_buffer_id
+            .take()
+            .zip(self.external_buffer_commit_serial.take());
+        self.release_owned_shm_mapping();
+        self.buffer = None;
+        self.presentation_content_ready = false;
+        previous
+    }
 }
 
 impl Drop for Window {
     fn drop(&mut self) {
-        if let (Some(addr), size) = (self.shm_mapped_addr.take(), self.shm_size)
+        if self.shm_mapping_owned
+            && let (Some(addr), size) = (self.shm_mapped_addr.take(), self.shm_size)
             && size != 0
         {
             let _ = munmap(addr, size);
@@ -1246,10 +1393,13 @@ impl WindowManager {
             buffer: None,
             shm: Some(shm),
             shm_mapped_addr,
+            shm_mapping_owned: true,
             shm_size,
             shm_offset: 0,
             shm_stride: width.saturating_mul(4),
             shm_format: 0,
+            external_buffer_id: None,
+            external_buffer_commit_serial: None,
             window_type: WindowType::default(),
             minimized: false,
             maximized: false,
@@ -1257,6 +1407,7 @@ impl WindowManager {
             workspace_layout_managed: false,
             workspace_restore_geometry: None,
             has_presented_frame: false,
+            last_frame_submission_counter: None,
             presentation_content_ready: true,
             pending_maximize: false,
             initial_size_negotiated: false,
@@ -1325,10 +1476,13 @@ impl WindowManager {
             buffer: None,   // No Vec buffer
             shm: Some(shm),
             shm_mapped_addr,
+            shm_mapping_owned: true,
             shm_size,
             shm_offset: 0,
             shm_stride: width.saturating_mul(4),
             shm_format: 0,
+            external_buffer_id: None,
+            external_buffer_commit_serial: None,
             window_type: WindowType::default(),
             minimized: false,
             maximized: false,
@@ -1336,6 +1490,7 @@ impl WindowManager {
             workspace_layout_managed: false,
             workspace_restore_geometry: None,
             has_presented_frame: false,
+            last_frame_submission_counter: None,
             presentation_content_ready: true,
             pending_maximize: false,
             initial_size_negotiated: false,
@@ -1375,11 +1530,7 @@ impl WindowManager {
             .find(|window| window.id == id)
             .ok_or("Window not found")?;
 
-        if let (Some(old_addr), old_size) = (window.shm_mapped_addr.take(), window.shm_size)
-            && old_size != 0
-        {
-            let _ = munmap(old_addr, old_size);
-        }
+        window.release_owned_shm_mapping();
         window.width = width;
         window.height = height;
         window.set_backing_extent(width, height);
@@ -1387,6 +1538,7 @@ impl WindowManager {
         window.buffer = None;
         window.shm = Some(shm);
         window.shm_mapped_addr = shm_mapped_addr;
+        window.shm_mapping_owned = true;
         window.shm_size = shm_size;
         window.shm_offset = offset.max(0) as usize;
         window.shm_stride = if stride > 0 {
@@ -1395,6 +1547,8 @@ impl WindowManager {
             width.saturating_mul(4)
         };
         window.shm_format = format;
+        window.external_buffer_id = None;
+        window.external_buffer_commit_serial = None;
         window.has_alpha_content = format == 0;
         Ok(())
     }
@@ -1859,11 +2013,7 @@ impl WindowManager {
         shm_size: usize,
     ) -> bool {
         if let Some(w) = self.get_window_mut(id) {
-            if let (Some(old_addr), old_size) = (w.shm_mapped_addr.take(), w.shm_size)
-                && old_size != 0
-            {
-                let _ = munmap(old_addr, old_size);
-            }
+            w.release_owned_shm_mapping();
 
             // IMPORTANT: Do not clamp here. The SHM buffer was already allocated
             // for the provided width/height by the IPC thread.
@@ -1874,10 +2024,13 @@ impl WindowManager {
             w.buffer = None;
             w.shm = Some(shm);
             w.shm_mapped_addr = shm_mapped_addr;
+            w.shm_mapping_owned = true;
             w.shm_size = shm_size;
             w.shm_offset = 0;
             w.shm_stride = width.saturating_mul(4);
             w.shm_format = 0;
+            w.external_buffer_id = None;
+            w.external_buffer_commit_serial = None;
             true
         } else {
             false
@@ -2961,6 +3114,22 @@ mod tests {
         let restored = manager.get_window(id).unwrap();
         assert_eq!((restored.width, restored.height), (1844, 1284));
         assert_eq!(restored.backing_extent(), (2184, 1400));
+    }
+
+    #[test]
+    fn pixels_use_attached_backing_while_managed_geometry_waits_for_resize() {
+        let mut manager = WindowManager::new();
+        let id = manager.create_window(25, 30, 640, 480);
+
+        assert!(manager.maximize_window(id, 1000, 700));
+        let window = manager.get_window(id).unwrap();
+        assert_eq!((window.width, window.height), (1000, 700));
+        assert_eq!(window.backing_extent(), (640, 480));
+
+        let pixels = window.pixels().unwrap();
+        assert_eq!((pixels.width(), pixels.height()), (640, 480));
+        assert_eq!(pixels.stride(), 640 * 4);
+        assert_eq!(pixels.bytes().len(), 640 * 480 * 4);
     }
 
     #[test]

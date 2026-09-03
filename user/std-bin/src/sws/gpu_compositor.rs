@@ -3,13 +3,16 @@
 use super::cursor::Cursor;
 use super::window::{PresentationInstance, Window, WindowId, WindowType, rounded_rect_row_span};
 use framebuffer::{DisplayPresentRegion, DisplaySurface};
+use gpu_raw::{Gpu, GpuContext, GpuImage, GpuImageBgraRect};
 use scarlet_os::handle::Handle;
+use scarlet_os::ipc::SharedMemory;
 use sgfx::ir::{Color, LoadOp, PixelRect, TextureId};
+use std::env;
 use std::fmt;
 use std::vec::Vec;
 
 use crate::sgfx_ir_support::{
-    CopiedRect, MappedTarget, Quad, QuadRenderer, QuadSubmitError, SampledRect,
+    CopiedRect, MappedTarget, Quad, QuadRenderer, QuadSubmitError, SampledRect, TextureUpload,
     define_bgra_texture, upload_bgra,
 };
 
@@ -66,6 +69,55 @@ const MAX_RETIRED_WINDOW_TEXTURES: usize = 8;
 const MAX_RETIRED_WINDOW_TEXTURE_BYTES: u64 = 24 * 1024 * 1024;
 const COMPOSITION_QUAD_CAPACITY: usize = 2048;
 
+fn direct_extension_shm_import_enabled() -> bool {
+    env::var("SWS_EXTENSION_SHM_DIRECT_IMPORT")
+        .ok()
+        .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
+}
+
+fn clipped_damage(
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+    target_width: u32,
+    target_height: u32,
+) -> Option<DamageRect> {
+    if width == 0 || height == 0 {
+        return None;
+    }
+    let left = i64::from(x).max(0).min(i64::from(target_width));
+    let top = i64::from(y).max(0).min(i64::from(target_height));
+    let right = i64::from(x)
+        .saturating_add(i64::from(width))
+        .max(0)
+        .min(i64::from(target_width));
+    let bottom = i64::from(y)
+        .saturating_add(i64::from(height))
+        .max(0)
+        .min(i64::from(target_height));
+    (right > left && bottom > top).then_some((
+        left as u32,
+        top as u32,
+        (right - left) as u32,
+        (bottom - top) as u32,
+    ))
+}
+
+fn union_damage(left: DamageRect, right: DamageRect) -> DamageRect {
+    let x = left.0.min(right.0);
+    let y = left.1.min(right.1);
+    let right_edge = left
+        .0
+        .saturating_add(left.2)
+        .max(right.0.saturating_add(right.2));
+    let bottom_edge = left
+        .1
+        .saturating_add(left.3)
+        .max(right.1.saturating_add(right.3));
+    (x, y, right_edge - x, bottom_edge - y)
+}
+
 /// Complete identity of one client-owned shared SGFX buffer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct SgfxBufferIdentity {
@@ -100,6 +152,40 @@ struct CachedWindowTexture {
     pending_damage: Option<DamageRect>,
 }
 
+/// Context used only to make client-owned SHM writes visible to imported images.
+///
+/// The SGFX mapped target owns the sampling context. Keeping this small raw
+/// context separate lets SWS invoke the generic imported-image cache transfer
+/// without teaching the compositor about the selected SGFX backend.
+struct ImportedShmContext {
+    gpu: Gpu,
+    context: GpuContext,
+}
+
+impl ImportedShmContext {
+    fn open() -> Result<Self, &'static str> {
+        let gpu = Gpu::open("/dev/gpu0").map_err(|_| "Failed to open GPU for SHM imports")?;
+        let dialect = gpu
+            .query_dialect(0)
+            .map_err(|_| "Failed to query GPU dialect for SHM imports")?;
+        let context = gpu
+            .create_context(&dialect)
+            .map_err(|_| "Failed to create GPU context for SHM imports")?;
+        Ok(Self { gpu, context })
+    }
+}
+
+/// One Wayland-style SHM buffer sampled directly by the GPU compositor.
+struct ImportedShmTexture {
+    client_id: usize,
+    buffer_id: u32,
+    width: u32,
+    height: u32,
+    texture: TextureId,
+    image: GpuImage,
+    pending_damage: Option<DamageRect>,
+}
+
 struct SharedWindowTexture {
     identity: SgfxBufferIdentity,
     width: u32,
@@ -129,6 +215,8 @@ pub(super) struct GpuCompositor {
     quad_renderer: QuadRenderer,
     cursor_images: Vec<CursorTextureSet>,
     textures: Vec<CachedWindowTexture>,
+    imported_shm_context: Option<ImportedShmContext>,
+    imported_shm_textures: Vec<ImportedShmTexture>,
     shared_textures: Vec<SharedWindowTexture>,
     shared_windows: Vec<SharedWindowState>,
     rebuild_pending: bool,
@@ -148,18 +236,206 @@ impl GpuCompositor {
         // during hover and resize, and must only select another texture rather
         // than rebuilding the GPU context and every live window resource.
         let cursor_images = create_cursor_images(&mut target, cursor)?;
+        let imported_shm_context = if direct_extension_shm_import_enabled() {
+            match ImportedShmContext::open() {
+                Ok(context) => {
+                    println!("[Compositor] Experimental extension SHM GPU import enabled");
+                    Some(context)
+                }
+                Err(error) => {
+                    println!(
+                        "[Compositor] Direct SHM texture import unavailable: {}; using copied uploads",
+                        error
+                    );
+                    None
+                }
+            }
+        } else {
+            println!(
+                "[Compositor] Extension SHM uses copied GPU uploads (set SWS_EXTENSION_SHM_DIRECT_IMPORT=1 to experiment with direct import)"
+            );
+            None
+        };
 
         Ok(Self {
             target,
             quad_renderer,
             cursor_images,
             textures: Vec::new(),
+            imported_shm_context,
+            imported_shm_textures: Vec::new(),
             shared_textures: Vec::new(),
             shared_windows: Vec::new(),
             rebuild_pending: false,
             rebuild_extent: None,
             force_full_repaint: false,
         })
+    }
+
+    /// Import one extension-owned SHM buffer as a directly sampled GPU image.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn register_extension_shm_buffer(
+        &mut self,
+        client_id: usize,
+        buffer_id: u32,
+        width: u32,
+        height: u32,
+        offset: usize,
+        stride: u32,
+        handle: Handle,
+    ) -> Result<(), &'static str> {
+        if self
+            .imported_shm_textures
+            .iter()
+            .any(|entry| entry.client_id == client_id && entry.buffer_id == buffer_id)
+        {
+            return Err("Extension SHM buffer is already imported");
+        }
+        let imported = self
+            .imported_shm_context
+            .as_ref()
+            .ok_or("Direct extension SHM import is unavailable")?;
+        let shared_memory =
+            SharedMemory::from_handle(handle).map_err(|_| "Invalid extension SHM handle")?;
+        let offset = u64::try_from(offset).map_err(|_| "Extension SHM offset is too large")?;
+        let image = imported
+            .gpu
+            .create_imported_bgra_image(&shared_memory, width, height, offset, stride)
+            .map_err(|_| "Failed to create imported extension SHM image")?;
+        let sampled_handle = image
+            .as_handle()
+            .duplicate()
+            .map_err(|_| "Failed to duplicate imported extension SHM image")?;
+        imported
+            .context
+            .attach_image(&image)
+            .map_err(|_| "Failed to attach imported extension SHM image")?;
+        if imported
+            .context
+            .transfer_imported_image_bgra(&image, GpuImageBgraRect::new(0, 0, width, height))
+            .is_err()
+        {
+            let _ = imported.context.detach_image(&image);
+            return Err("GPU backend does not support imported SHM transfers");
+        }
+        let texture = match self
+            .target
+            .import_shared_bgra_texture(width, height, sampled_handle)
+        {
+            Ok(texture) => texture,
+            Err(_) => {
+                let _ = imported.context.detach_image(&image);
+                return Err("Failed to map imported extension SHM image into SGFX");
+            }
+        };
+        self.imported_shm_textures.push(ImportedShmTexture {
+            client_id,
+            buffer_id,
+            width,
+            height,
+            texture,
+            image,
+            // The capability probe above performed the initial full-range
+            // transfer. A later client commit supplies the damage written
+            // after definition and makes those bytes visible before sampling.
+            pending_damage: Some((0, 0, width, height)),
+        });
+        Ok(())
+    }
+
+    /// Stop retaining a directly imported extension SHM buffer.
+    pub(super) fn unregister_extension_shm_buffer(
+        &mut self,
+        client_id: usize,
+        buffer_id: u32,
+    ) -> Result<(), &'static str> {
+        let Some(index) = self
+            .imported_shm_textures
+            .iter()
+            .position(|entry| entry.client_id == client_id && entry.buffer_id == buffer_id)
+        else {
+            return Ok(());
+        };
+        let entry = self.imported_shm_textures.swap_remove(index);
+        let release_failed = self.target.release_imported_texture(entry.texture).is_err();
+        let detach_failed = self
+            .imported_shm_context
+            .as_ref()
+            .is_some_and(|imported| imported.context.detach_image(&entry.image).is_err());
+        if release_failed || detach_failed {
+            // A fresh mapped target drops any stale sampling attachment. The
+            // raw transfer context is independently retired with `entry`.
+            self.rebuild_pending = true;
+            return Err("Failed to release imported extension SHM image cleanly");
+        }
+        Ok(())
+    }
+
+    /// Accumulate damage for a directly imported extension SHM buffer.
+    pub(super) fn mark_extension_shm_damage(
+        &mut self,
+        client_id: usize,
+        buffer_id: u32,
+        x: i32,
+        y: i32,
+        width: u32,
+        height: u32,
+    ) {
+        let Some(entry) = self
+            .imported_shm_textures
+            .iter_mut()
+            .find(|entry| entry.client_id == client_id && entry.buffer_id == buffer_id)
+        else {
+            return;
+        };
+        let Some(damage) = clipped_damage(x, y, width, height, entry.width, entry.height) else {
+            return;
+        };
+        entry.pending_damage = Some(match entry.pending_damage {
+            Some(previous) => union_damage(previous, damage),
+            None => damage,
+        });
+    }
+
+    fn imported_shm_texture(&self, window: &Window) -> Option<(TextureId, u32, u32)> {
+        let client_id = window.owner_client_id?;
+        let buffer_id = window.external_buffer_id?;
+        self.imported_shm_textures
+            .iter()
+            .find(|entry| entry.client_id == client_id && entry.buffer_id == buffer_id)
+            .map(|entry| (entry.texture, entry.width, entry.height))
+    }
+
+    fn transfer_visible_imported_shm(&mut self, windows: &[Window]) -> Result<(), &'static str> {
+        let Some(imported) = self.imported_shm_context.as_ref() else {
+            return Ok(());
+        };
+        for window in windows.iter().filter(|window| window.is_presented()) {
+            let (Some(client_id), Some(buffer_id)) =
+                (window.owner_client_id, window.external_buffer_id)
+            else {
+                continue;
+            };
+            let Some(entry) = self
+                .imported_shm_textures
+                .iter_mut()
+                .find(|entry| entry.client_id == client_id && entry.buffer_id == buffer_id)
+            else {
+                continue;
+            };
+            let Some((x, y, width, height)) = entry.pending_damage else {
+                continue;
+            };
+            imported
+                .context
+                .transfer_imported_image_bgra(
+                    &entry.image,
+                    GpuImageBgraRect::new(x, y, width, height),
+                )
+                .map_err(|_| "Failed to transfer imported extension SHM damage")?;
+            entry.pending_damage = None;
+        }
+        Ok(())
     }
 
     /// Import one client-owned shared image into the compositor context.
@@ -398,9 +674,6 @@ impl GpuCompositor {
         width: u32,
         height: u32,
     ) {
-        if width == 0 || height == 0 {
-            return;
-        }
         let Some(entry) = self
             .textures
             .iter_mut()
@@ -408,37 +681,12 @@ impl GpuCompositor {
         else {
             return;
         };
-        let left = i64::from(x).max(0).min(i64::from(entry.width));
-        let top = i64::from(y).max(0).min(i64::from(entry.height));
-        let right = i64::from(x)
-            .saturating_add(i64::from(width))
-            .max(0)
-            .min(i64::from(entry.width));
-        let bottom = i64::from(y)
-            .saturating_add(i64::from(height))
-            .max(0)
-            .min(i64::from(entry.height));
-        if right <= left || bottom <= top {
+        let Some(damage) = clipped_damage(x, y, width, height, entry.width, entry.height) else {
             return;
-        }
-        let x = left as u32;
-        let y = top as u32;
-        let width = (right - left) as u32;
-        let height = (bottom - top) as u32;
+        };
         entry.pending_damage = Some(match entry.pending_damage {
-            Some((old_x, old_y, old_width, old_height)) => {
-                let right = old_x.saturating_add(old_width).max(x.saturating_add(width));
-                let bottom = old_y
-                    .saturating_add(old_height)
-                    .max(y.saturating_add(height));
-                (
-                    old_x.min(x),
-                    old_y.min(y),
-                    right - old_x.min(x),
-                    bottom - old_y.min(y),
-                )
-            }
-            None => (x, y, width, height),
+            Some(previous) => union_damage(previous, damage),
+            None => damage,
         });
     }
 
@@ -525,6 +773,9 @@ impl GpuCompositor {
             .iter()
             .any(|entry| entry.window_id == Some(window.id));
         let has_current_backing = window.pixels().is_ok();
+        let shared_texture = self.committed_shared_texture(window.id);
+        let imported_shm_texture = self.imported_shm_texture(window);
+        let directly_imported_shm = imported_shm_texture.is_some();
         let visual_geometry = instance.map_or_else(
             || window.presentation_geometry(),
             |instance| {
@@ -537,10 +788,13 @@ impl GpuCompositor {
             |instance| (window.opacity * instance.transform.opacity).clamp(0.0, 1.0),
         );
         let transformed = instance.is_some() || window.presentation_transform.is_some();
-        if self.has_committed_shared_buffer(window.id) || has_cached_texture || has_current_backing
+        if shared_texture.is_some()
+            || imported_shm_texture.is_some()
+            || has_cached_texture
+            || has_current_backing
         {
             let (texture, texture_width, texture_height) =
-                match self.committed_shared_texture(window.id) {
+                match shared_texture.or(imported_shm_texture) {
                     Some(texture) => texture,
                     None => {
                         let texture = self
@@ -551,10 +805,12 @@ impl GpuCompositor {
                         (texture.texture, texture.width, texture.height)
                     }
                 };
-            let content_width = window.width.min(texture_width);
-            let content_height = window.height.min(texture_height);
+            let content_width = texture_width;
+            let content_height = texture_height;
             let (visual_x, visual_y, visual_width, visual_height) = visual_geometry;
-            let rects = if transformed {
+            let scaled =
+                transformed || content_width != visual_width || content_height != visual_height;
+            let rects = if scaled {
                 clipped_scaled_rect(
                     visual_x,
                     visual_y,
@@ -581,7 +837,7 @@ impl GpuCompositor {
             if operation_clip.is_some_and(|clip| !pixel_rects_intersect(destination, clip)) {
                 return Ok(());
             }
-            if !transformed && opacity == 1.0 && !window.has_alpha_content {
+            if !directly_imported_shm && !scaled && opacity == 1.0 && !window.has_alpha_content {
                 append_rounded_quad(
                     operations,
                     Quad::Copy(CopiedRect {
@@ -662,19 +918,26 @@ impl GpuCompositor {
     ) -> Result<Vec<SgfxCommitToken>, GpuCompositionError> {
         super::trace::set_compositor_stage(super::trace::STAGE_GPU_SYNC_WINDOWS);
         self.rebuild_if_needed(cursor, windows)?;
+        self.transfer_visible_imported_shm(windows)?;
         let force_full_repaint = self.force_full_repaint;
         let damage = if force_full_repaint { None } else { damage };
+        let mut texture_uploads = Vec::new();
+        let mut uploaded_texture_indices = Vec::new();
         for window in windows {
             super::trace::set_gpu_window(window.id);
             // CPU-backed texture extent changes are detected before this loop
             // and cause a fresh private resource table. Each active window is
             // therefore re-uploaded into that replacement table here.
             let has_current_backing = window.pixels().is_ok();
+            let has_direct_shm_texture = self.imported_shm_texture(window).is_some();
             if window.is_presented()
                 && !self.has_committed_shared_buffer(window.id)
+                && !has_direct_shm_texture
                 && has_current_backing
+                && let Some((texture_index, upload)) = self.prepare_window_texture_upload(window)?
             {
-                self.sync_window_texture(window)?;
+                uploaded_texture_indices.push(texture_index);
+                texture_uploads.push(upload);
             }
         }
 
@@ -800,12 +1063,16 @@ impl GpuCompositor {
         }
 
         super::trace::set_compositor_stage(super::trace::STAGE_GPU_SUBMIT);
-        self.quad_renderer.submit_region(
+        self.quad_renderer.submit_region_with_uploads(
             &mut self.target,
             render_area,
             LoadOp::Clear(clear_color),
+            &texture_uploads,
             &operations,
         )?;
+        for texture_index in uploaded_texture_indices {
+            self.textures[texture_index].pending_damage = None;
+        }
         super::trace::set_compositor_stage(super::trace::STAGE_GPU_PRESENT);
         let region = (render_area != full_area).then_some(DisplayPresentRegion {
             x: render_area.x(),
@@ -888,7 +1155,10 @@ impl GpuCompositor {
         }
     }
 
-    fn sync_window_texture(&mut self, window: &Window) -> Result<(), &'static str> {
+    fn prepare_window_texture_upload<'a>(
+        &mut self,
+        window: &'a Window,
+    ) -> Result<Option<(usize, TextureUpload<'a>)>, &'static str> {
         let pixels = window.pixels().ok();
         let pixels = pixels
             .as_ref()
@@ -909,21 +1179,21 @@ impl GpuCompositor {
         };
         let entry = &self.textures[texture_index];
         let Some(damage) = entry.pending_damage else {
-            return Ok(());
+            return Ok(None);
         };
         let texture = entry.texture;
         let damage_rect = PixelRect::new(damage.0, damage.1, damage.2, damage.3)
             .map_err(|_| "Invalid GPU window damage")?;
         let source = pixels.damage_bytes(damage.0, damage.1, damage.2, damage.3)?;
-        upload_bgra(
-            &mut self.target,
-            texture,
-            damage_rect,
-            pixels.stride(),
-            source,
-        )?;
-        self.textures[texture_index].pending_damage = None;
-        Ok(())
+        Ok(Some((
+            texture_index,
+            TextureUpload {
+                texture,
+                destination: damage_rect,
+                stride: pixels.stride(),
+                bytes: source,
+            },
+        )))
     }
 
     fn create_window_texture(
@@ -987,6 +1257,21 @@ impl GpuCompositor {
             QuadRenderer::define(target.resources.as_ref(), COMPOSITION_QUAD_CAPACITY)
                 .map_err(|_| "Failed to redefine GPU composition resources")?;
         let cursor_images = create_cursor_images(&mut target, cursor)?;
+        let mut imported_shm_texture_ids = Vec::new();
+        imported_shm_texture_ids
+            .try_reserve_exact(self.imported_shm_textures.len())
+            .map_err(|_| "Failed to reserve rebuilt extension SHM texture mappings")?;
+        for imported in &self.imported_shm_textures {
+            let handle = imported
+                .image
+                .as_handle()
+                .duplicate()
+                .map_err(|_| "Failed to duplicate imported extension SHM image")?;
+            let texture = target
+                .import_shared_bgra_texture(imported.width, imported.height, handle)
+                .map_err(|_| "Failed to reimport extension SHM image")?;
+            imported_shm_texture_ids.push(texture);
+        }
         let mut shared_texture_ids = Vec::new();
         shared_texture_ids
             .try_reserve_exact(self.shared_textures.len())
@@ -1010,6 +1295,13 @@ impl GpuCompositor {
         self.quad_renderer = quad_renderer;
         self.cursor_images = cursor_images;
         self.textures.clear();
+        for (imported, texture) in self
+            .imported_shm_textures
+            .iter_mut()
+            .zip(imported_shm_texture_ids)
+        {
+            imported.texture = texture;
+        }
         for (shared, texture) in self.shared_textures.iter_mut().zip(shared_texture_ids) {
             shared.texture = texture;
         }

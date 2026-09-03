@@ -363,6 +363,14 @@ pub(crate) enum Quad {
     Copy(CopiedRect),
 }
 
+/// One CPU-backed texture update recorded before scene composition.
+pub(crate) struct TextureUpload<'a> {
+    pub(crate) texture: TextureId,
+    pub(crate) destination: PixelRect,
+    pub(crate) stride: u32,
+    pub(crate) bytes: &'a [u8],
+}
+
 /// Failure while recording or executing one quad-composition submission.
 #[derive(Debug)]
 pub(crate) enum QuadSubmitError {
@@ -470,9 +478,30 @@ impl QuadRenderer {
         load: LoadOp,
         operations: &[Quad],
     ) -> Result<(), QuadSubmitError> {
+        self.submit_region_with_uploads(target, area, load, &[], operations)
+    }
+
+    /// Upload CPU-backed textures and compose one damaged target region.
+    ///
+    /// Keeping uploads in the first composition command buffer removes a
+    /// synchronous executor round trip from CPU-rendered clients such as
+    /// Wayland SHM applications.
+    pub(crate) fn submit_region_with_uploads(
+        &self,
+        target: &mut MappedTarget,
+        area: PixelRect,
+        load: LoadOp,
+        uploads: &[TextureUpload<'_>],
+        operations: &[Quad],
+    ) -> Result<(), QuadSubmitError> {
         if operations.len() > self.capacity {
             return Err(QuadSubmitError::Recording(
                 "SGFX composition operation capacity exceeded",
+            ));
+        }
+        if uploads.len().saturating_add(QUAD_BATCH_COMMAND_OVERHEAD) > ir::MAX_COMMANDS {
+            return Err(QuadSubmitError::Recording(
+                "SGFX texture upload command capacity exceeded",
             ));
         }
         let resources = Rc::clone(&target.resources);
@@ -527,14 +556,40 @@ impl QuadRenderer {
         let mut batch_start = 0usize;
         let mut first_batch = true;
         loop {
+            let batch_capacity = if first_batch {
+                (ir::MAX_COMMANDS
+                    .saturating_sub(QUAD_BATCH_COMMAND_OVERHEAD)
+                    .saturating_sub(uploads.len()))
+                    / MAX_COMMANDS_PER_QUAD
+            } else {
+                MAX_QUADS_PER_COMMAND_BUFFER
+            };
+            if batch_capacity == 0 && !operations.is_empty() {
+                return Err(QuadSubmitError::Recording(
+                    "SGFX composition has no command capacity after texture uploads",
+                ));
+            }
             let batch_end = if operations.is_empty() {
                 0
             } else {
                 batch_start
-                    .saturating_add(MAX_QUADS_PER_COMMAND_BUFFER)
+                    .saturating_add(batch_capacity)
                     .min(operations.len())
             };
             let mut encoder = CommandEncoder::new(resources.as_ref());
+            if first_batch {
+                for upload in uploads {
+                    encoder
+                        .write_texture(
+                            resources
+                                .texture_ref(upload.texture)
+                                .map_err(|_| "Invalid SGFX upload texture")?,
+                            TextureWrite::new(upload.destination, upload.stride, upload.bytes)
+                                .map_err(|_| "Invalid SGFX texture upload")?,
+                        )
+                        .map_err(|_| "Failed to record SGFX texture upload")?;
+                }
+            }
             if first_batch && !vertices.is_empty() {
                 encoder
                     .write_buffer(

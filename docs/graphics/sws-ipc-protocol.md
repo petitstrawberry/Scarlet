@@ -4,6 +4,10 @@ This document describes the wire protocol used between the Scarlet Window Server
 
 The canonical implementation is the `sws_protocol` crate located at `user/lib/sws-protocol`.
 
+The current protocol version is **9**. Clients discover the version and
+optional feature bits with `GET_CAPABILITIES`; reusable extension buffers are
+advertised by `EXTENSION_BUFFER_OBJECTS` (`1 << 10`).
+
 Client-side reference implementations:
 
 - Low-level client library: `sws-client` (crate name `sws_client`) in `user/lib/sws-client`
@@ -575,6 +579,96 @@ Semantics:
 - Updates the buffer for a window created via `EXTENSION_CREATE_WINDOW`.
 - Similar to `UPDATE_BUFFER` but includes the external client ID.
 
+#### `EXTENSION_ATTACH_BUFFER` (type = 103, legacy)
+
+This compatibility request transfers one SHM capability and immediately
+replaces an extension window's backing. It requires a handle for every attach,
+which forces SWS to map the allocation again and invalidates the private upload
+texture. New extensions must use the version 9 reusable-buffer lifecycle below.
+
+#### `EXTENSION_REGISTER_SHM_POOL` (type = 104, protocol version 9)
+
+This correlated request carries exactly one SHM capability.
+
+| Offset | Size | Field | Type |
+|--------|------|-------|------|
+| 0 | 4 | `pool_id` | non-zero u32 |
+| 4 | 8 | `size` | non-zero u64 |
+
+SWS validates and maps the complete pool once, retains the capability, and
+responds with `EXTENSION_SHM_POOL_REGISTERED`. The ID is scoped to the calling
+SWS connection. A duplicate ID or an un-mappable extent returns
+`INVALID_EXTENSION_SHM_POOL` (118).
+
+#### `EXTENSION_RESIZE_SHM_POOL` (type = 105, protocol version 9)
+
+Correlated payload: `pool_id: u32`, `size: u64`. `size` must strictly grow the
+live pool. The sender resizes the underlying allocation first; SWS then maps the
+new extent, retargets every selected view, unmaps the old extent, and responds
+with `EXTENSION_SHM_POOL_RESIZED`.
+
+#### `EXTENSION_DESTROY_SHM_POOL` (type = 106, protocol version 9)
+
+Asynchronous payload: `pool_id: u32`. Destruction is deferred while any defined
+buffer refers to the pool. New buffers cannot be defined after destruction was
+requested.
+
+#### `EXTENSION_DEFINE_BUFFER` (type = 107, protocol version 9)
+
+Defines a reusable single-plane SHM view. This request is asynchronous.
+
+| Offset | Size | Field | Type |
+|--------|------|-------|------|
+| 0 | 4 | `buffer_id` | non-zero u32 |
+| 4 | 4 | `pool_id` | u32 |
+| 8 | 8 | `offset` | u64 bytes |
+| 16 | 4 | `width` | non-zero u32 pixels |
+| 20 | 4 | `height` | non-zero u32 pixels |
+| 24 | 4 | `stride` | u32 bytes |
+| 28 | 4 | `format` | u32 |
+
+The current SHM formats are Wayland `ARGB8888` (0) and `XRGB8888` (1). The
+stride must cover one BGRA row and the last pixel must fit within the registered
+pool. The logical buffer ID is deliberately independent of its backing; a
+future GPU/dma-buf definition message can create the same kind of logical
+object without changing commit or release messages.
+
+#### `EXTENSION_DESTROY_BUFFER` (type = 108, protocol version 9)
+
+Asynchronous payload: `buffer_id: u32`. SWS rejects new commits of the object
+but defers final removal while a window still selects it. When the last use is
+released, its pool may also become eligible for destruction.
+
+#### `EXTENSION_COMMIT_BUFFER` (type = 109, protocol version 9)
+
+Atomically publishes an extension surface's effective buffer and all damage
+from one external commit.
+
+| Offset | Size | Field | Type |
+|--------|------|-------|------|
+| 0 | 4 | `external_client_id` | u32 |
+| 4 | 4 | `window_id` | u32 |
+| 8 | 4 | `buffer_id` | u32; zero means detached |
+| 12 | 8 | `commit_serial` | non-zero u64 |
+| 20 | 4 | `flags` | u32 |
+| 24 | 4 | `damage_count` | u32, at most 16 |
+| 28 | 16 × N | damage records | `x: i32, y: i32, width: u32, height: u32` |
+
+`BUFFER_CHANGED` (`1 << 0`) means this commit selects `buffer_id` or explicitly
+detaches with ID zero. Without that flag, `buffer_id` must equal the window's
+currently selected object. Damage is in window-local physical pixels and is
+clipped to the buffer extent. Empty damage is valid for a state-only commit.
+
+SWS normally retains a private GPU upload texture and uploads only declared
+damage; same-size buffer rotation does not retire that fallback texture. An
+experimental `SWS_EXTENSION_SHM_DIRECT_IMPORT=1` mode may instead pin a defined
+SHM view as an imported linear image and perform a damage-bounded
+cache/visibility transfer before sampling it. This is not the production
+default until every selected backend has reliable import and teardown support.
+Selection, damage, and the retained-use serial enter compositor state together;
+when SWS no longer samples the old object it sends
+`EXTENSION_BUFFER_RELEASED`.
+
 #### Text Input Client API (types = 200-208)
 
 Text input contexts let applications describe editable text state to SWS. SWS brokers the active focused context to a separately registered input method service. SWS does not implement conversion engines or dictionaries.
@@ -788,6 +882,12 @@ Only one request may remain outstanding for a client window. `callback_id` is
 client-selected and is returned unchanged by `FRAME_DONE`. A callback is
 one-shot; the client requests the following opportunity after submitting its
 new frame.
+
+The socket order is commit followed by `REQUEST_FRAME`. SWS records the latest
+buffer submission's presentation counter per window, so a request received
+after that commit has already reached the display is immediately eligible. It
+must not wait for a second, unrelated redraw merely because the two messages
+were consumed in different compositor iterations.
 
 SWS returns callbacks only while `Window::is_presented()` is true. A window on
 an inactive workspace, a minimized window, or another non-presented surface
@@ -1096,6 +1196,24 @@ Semantics:
 - Similar to `INPUT_EVENT` but includes the external client ID.
 - Allows the extension to route events to the appropriate external client.
 
+#### Reusable extension-buffer events (types = 102-104, protocol version 9)
+
+`EXTENSION_SHM_POOL_REGISTERED` (102) and
+`EXTENSION_SHM_POOL_RESIZED` (103) are correlated responses. Both carry
+`pool_id: u32` followed by the authoritative `size: u64`.
+
+`EXTENSION_BUFFER_RELEASED` (104) is asynchronous:
+
+| Offset | Size | Field | Type |
+|--------|------|-------|------|
+| 0 | 4 | `buffer_id` | u32 |
+| 4 | 8 | `commit_serial` | u64 |
+
+The event means SWS has stopped sampling that retained buffer use. An extension
+may now translate the release to its external protocol or complete deferred
+destruction. Matching both resource identity and serial avoids confusing a
+delayed release with a newer use.
+
 #### Text Input Client Events (types = 200-207)
 
 `TEXT_INPUT_CREATED` (200), payload 8 bytes:
@@ -1192,8 +1310,10 @@ The Extension API allows specialized bridge servers (like the Wayland bridge) to
   cursor-theme selection, and version 4 adds managed window geometry distinct
   from the composited surface. Version 5 adds system mode overrides; version 6
   adds atomic configured-window creation; version 7 adds exclusive workspace
-  control; and version 8 adds compositor-paced frame callbacks plus suspended
-  window state. Optional features remain capability-gated.
+  control; version 8 adds compositor-paced frame callbacks plus suspended
+  window state; and version 9 adds persistent extension pools, reusable buffer
+  objects, atomic external commits, and explicit release. Optional features
+  remain capability-gated.
 - The current wire format is the request-routed 8-byte header described above:
   `msg_type: u16`, `flags: u8`, `request_id: u8`, `payload_size: u32`.
 - The older `msg_type: u32`, `payload_size: u32` header is not supported.
@@ -1212,7 +1332,9 @@ The Extension API allows specialized bridge servers (like the Wayland bridge) to
 1. Extension connects to SWS via normal socket connection
 2. Extension sends `REGISTER_EXTENSION` with its name (e.g., "wayland_bridge")
 3. SWS responds with `EXTENSION_REGISTERED` containing an extension ID
-4. Extension can now use `EXTENSION_CREATE_WINDOW` and receive `EXTENSION_INPUT_EVENT`
+4. Extension confirms `EXTENSION_BUFFER_OBJECTS` when it needs reusable buffers
+5. Extension can use `EXTENSION_CREATE_WINDOW`, register backing resources, and
+   receive `EXTENSION_INPUT_EVENT` plus buffer-release events
 
 ### Window Management
 

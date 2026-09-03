@@ -687,7 +687,8 @@ fn sws_capabilities() -> u64 {
         | protocol::capabilities::SYSTEM_MODE_OVERRIDES
         | protocol::capabilities::CONFIGURED_WINDOW_CREATION
         | protocol::capabilities::WORKSPACE_SHELL
-        | protocol::capabilities::FRAME_CALLBACKS;
+        | protocol::capabilities::FRAME_CALLBACKS
+        | protocol::capabilities::EXTENSION_BUFFER_OBJECTS;
     if SGFX_SHARED_IMAGES_AVAILABLE.load(Ordering::Acquire) {
         capabilities |= protocol::capabilities::SGFX_SHARED_IMAGE;
     }
@@ -2713,6 +2714,7 @@ fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Ha
             header.msg_type_u32(),
             protocol::client_msg::REGISTER_SGFX_BUFFER
                 | protocol::client_msg::EXTENSION_ATTACH_BUFFER
+                | protocol::client_msg::EXTENSION_REGISTER_SHM_POOL
         );
         if handle_required != received_handle.is_some() {
             let _ = write_protocol_error(
@@ -3225,7 +3227,7 @@ fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Ha
                 );
 
                 // Allocate extension ID
-                let extension_id = next_window_id; // Reuse window ID counter for simplicity
+                extension_id = next_window_id; // Reuse window ID counter for simplicity
                 next_window_id = next_window_id.saturating_add(1);
 
                 let name = std::string::String::from_utf8_lossy(extension_name).into_owned();
@@ -3467,6 +3469,163 @@ fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Ha
                     }
                 }
                 // println!("[ClientThread {}] === EXTENSION_ATTACH_BUFFER COMPLETE ===", client_id);
+            }
+            Ok(ClientMessageRef::ExtensionRegisterShmPool { pool_id, size }) => {
+                if !is_extension_client || request_id == 0 || header.flags != 0 {
+                    let _ = write_protocol_error(
+                        &mut stream_writer,
+                        request_id,
+                        protocol::error_codes::INVALID_EXTENSION_SHM_POOL,
+                    );
+                    continue;
+                }
+                let Some(handle) = received_handle else {
+                    let _ = write_protocol_error(
+                        &mut stream_writer,
+                        request_id,
+                        protocol::error_codes::INVALID_EXTENSION_SHM_POOL,
+                    );
+                    continue;
+                };
+                let Ok(size) = usize::try_from(size) else {
+                    let _ = write_protocol_error(
+                        &mut stream_writer,
+                        request_id,
+                        protocol::error_codes::INVALID_EXTENSION_SHM_POOL,
+                    );
+                    continue;
+                };
+                push_ipc_event(IpcEvent::ExtensionRegisterShmPool {
+                    client_id,
+                    request_id,
+                    pool_id,
+                    size,
+                    handle,
+                });
+            }
+            Ok(ClientMessageRef::ExtensionResizeShmPool { pool_id, size }) => {
+                if !is_extension_client || request_id == 0 || header.flags != 0 {
+                    let _ = write_protocol_error(
+                        &mut stream_writer,
+                        request_id,
+                        protocol::error_codes::INVALID_EXTENSION_SHM_POOL,
+                    );
+                    continue;
+                }
+                let Ok(size) = usize::try_from(size) else {
+                    let _ = write_protocol_error(
+                        &mut stream_writer,
+                        request_id,
+                        protocol::error_codes::INVALID_EXTENSION_SHM_POOL,
+                    );
+                    continue;
+                };
+                push_ipc_event(IpcEvent::ExtensionResizeShmPool {
+                    client_id,
+                    request_id,
+                    pool_id,
+                    size,
+                });
+            }
+            Ok(ClientMessageRef::ExtensionDestroyShmPool { pool_id }) => {
+                if !is_extension_client || request_id != 0 || header.flags != 0 {
+                    let _ = write_protocol_error(
+                        &mut stream_writer,
+                        request_id,
+                        protocol::error_codes::INVALID_EXTENSION_SHM_POOL,
+                    );
+                    continue;
+                }
+                push_ipc_event(IpcEvent::ExtensionDestroyShmPool { client_id, pool_id });
+            }
+            Ok(ClientMessageRef::ExtensionDefineBuffer {
+                buffer_id,
+                pool_id,
+                offset,
+                width,
+                height,
+                stride,
+                format,
+            }) => {
+                if !is_extension_client || request_id != 0 || header.flags != 0 {
+                    let _ = write_protocol_error(
+                        &mut stream_writer,
+                        request_id,
+                        protocol::error_codes::INVALID_EXTENSION_BUFFER,
+                    );
+                    continue;
+                }
+                let Ok(offset) = usize::try_from(offset) else {
+                    let _ = write_protocol_error(
+                        &mut stream_writer,
+                        request_id,
+                        protocol::error_codes::INVALID_EXTENSION_BUFFER,
+                    );
+                    continue;
+                };
+                push_ipc_event(IpcEvent::ExtensionDefineBuffer {
+                    client_id,
+                    buffer_id,
+                    pool_id,
+                    offset,
+                    width,
+                    height,
+                    stride,
+                    format,
+                });
+            }
+            Ok(ClientMessageRef::ExtensionDestroyBuffer { buffer_id }) => {
+                if !is_extension_client || request_id != 0 || header.flags != 0 {
+                    let _ = write_protocol_error(
+                        &mut stream_writer,
+                        request_id,
+                        protocol::error_codes::INVALID_EXTENSION_BUFFER,
+                    );
+                    continue;
+                }
+                push_ipc_event(IpcEvent::ExtensionDestroyBuffer {
+                    client_id,
+                    buffer_id,
+                });
+            }
+            Ok(ClientMessageRef::ExtensionCommitBuffer {
+                external_client_id,
+                window_id,
+                buffer_id,
+                buffer_changed,
+                commit_serial,
+                damage_rects,
+            }) => {
+                let valid_window = managed_windows.contains(&window_id)
+                    && window_to_external_client.get(&window_id) == Some(&external_client_id);
+                if !is_extension_client || !valid_window || request_id != 0 || header.flags != 0 {
+                    let _ = write_protocol_error(
+                        &mut stream_writer,
+                        request_id,
+                        protocol::error_codes::INVALID_EXTENSION_COMMIT,
+                    );
+                    continue;
+                }
+                let damage_rects = match protocol::parse_extension_damage_rects(damage_rects) {
+                    Ok(rects) => rects,
+                    Err(_) => {
+                        let _ = write_protocol_error(
+                            &mut stream_writer,
+                            request_id,
+                            protocol::error_codes::INVALID_EXTENSION_COMMIT,
+                        );
+                        continue;
+                    }
+                };
+                push_ipc_event(IpcEvent::ExtensionCommitBuffer {
+                    client_id,
+                    external_client_id,
+                    window_id,
+                    buffer_id,
+                    buffer_changed,
+                    commit_serial,
+                    damage_rects,
+                });
             }
             Ok(ClientMessageRef::SetWindowHasAlphaContent {
                 window_id,
@@ -4134,11 +4293,13 @@ fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Ha
             client_id,
             disconnected_windows.len()
         );
-        push_ipc_event(IpcEvent::ClientDisconnected {
-            client_id,
-            window_ids: disconnected_windows,
-        });
     }
+    // A client can own registered extension buffers without a live window, so
+    // compositor cleanup must run even when `disconnected_windows` is empty.
+    push_ipc_event(IpcEvent::ClientDisconnected {
+        client_id,
+        window_ids: disconnected_windows,
+    });
 
     println!("[ClientThread {}] Exiting", client_id);
 }
@@ -4391,6 +4552,58 @@ pub enum IpcEvent {
         shm: Option<SharedMemory>,
         shm_mapped_addr: Option<usize>,
         shm_size: usize,
+    },
+
+    /// Register one persistent SHM backing store for extension buffers.
+    ExtensionRegisterShmPool {
+        client_id: usize,
+        request_id: u8,
+        pool_id: u32,
+        size: usize,
+        handle: Handle,
+    },
+
+    /// Remap a registered extension SHM pool after it grows.
+    ExtensionResizeShmPool {
+        client_id: usize,
+        request_id: u8,
+        pool_id: u32,
+        size: usize,
+    },
+
+    /// Mark an extension SHM pool for destruction.
+    ExtensionDestroyShmPool {
+        client_id: usize,
+        pool_id: u32,
+    },
+
+    /// Define one reusable SHM buffer view.
+    ExtensionDefineBuffer {
+        client_id: usize,
+        buffer_id: u32,
+        pool_id: u32,
+        offset: usize,
+        width: u32,
+        height: u32,
+        stride: u32,
+        format: u32,
+    },
+
+    /// Mark one reusable extension buffer for destruction.
+    ExtensionDestroyBuffer {
+        client_id: usize,
+        buffer_id: u32,
+    },
+
+    /// Atomically select an extension buffer and publish its damage.
+    ExtensionCommitBuffer {
+        client_id: usize,
+        external_client_id: u32,
+        window_id: u32,
+        buffer_id: u32,
+        buffer_changed: bool,
+        commit_serial: u64,
+        damage_rects: Vec<protocol::ExtensionDamageRect>,
     },
 
     /// Set whether window content contains alpha channel

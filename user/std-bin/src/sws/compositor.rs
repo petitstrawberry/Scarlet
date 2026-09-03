@@ -27,9 +27,11 @@ use core::sync::atomic::{AtomicU8, Ordering};
 use core::time::Duration;
 use framebuffer::{DisplayPresentRegion, DisplaySurface};
 use scarlet_os::handle::Handle;
-use scarlet_os::handle::capability::memory_mapping::munmap;
+use scarlet_os::handle::capability::memory_mapping::{flags as mmap_flags, munmap};
+use scarlet_os::ipc::permissions;
 use scarlet_os::poll::{POLLIN, PollHandle, poll};
 use scarlet_os::time::monotonic_time_ns;
+use std::collections::BTreeMap;
 use std::env;
 use std::println;
 use std::string::String;
@@ -91,6 +93,74 @@ fn intersect_compositor_rects(
         u32::try_from(right - left).unwrap_or(u32::MAX),
         u32::try_from(bottom - top).unwrap_or(u32::MAX),
     ))
+}
+
+fn log_first_extension_buffer_sample(window: &super::window::Window) {
+    let Ok(pixels) = window.pixels() else {
+        println!(
+            "[Compositor] Extension window #{} first buffer has no readable pixels",
+            window.id
+        );
+        return;
+    };
+    let width = pixels.width();
+    let height = pixels.height();
+    let stride = pixels.stride() as usize;
+    let bytes = pixels.bytes();
+    let mut sampled = 0u32;
+    let mut nonzero = 0u32;
+    let mut alpha_nonzero = 0u32;
+    let mut alpha_opaque = 0u32;
+    for sample_y in 0..16u32 {
+        let y = if height <= 1 {
+            0
+        } else {
+            (height - 1).saturating_mul(sample_y) / 15
+        };
+        for sample_x in 0..16u32 {
+            let x = if width <= 1 {
+                0
+            } else {
+                (width - 1).saturating_mul(sample_x) / 15
+            };
+            let Some(offset) = (y as usize)
+                .checked_mul(stride)
+                .and_then(|offset| offset.checked_add(x as usize * 4))
+            else {
+                continue;
+            };
+            let Some(pixel) = bytes.get(offset..offset + 4) else {
+                continue;
+            };
+            sampled += 1;
+            nonzero += u32::from(pixel.iter().any(|component| *component != 0));
+            alpha_nonzero += u32::from(pixel[3] != 0);
+            alpha_opaque += u32::from(pixel[3] == 255);
+        }
+    }
+    let pixel_at = |x: u32, y: u32| -> [u8; 4] {
+        let offset = (y as usize)
+            .saturating_mul(stride)
+            .saturating_add(x as usize * 4);
+        bytes
+            .get(offset..offset + 4)
+            .and_then(|pixel| pixel.try_into().ok())
+            .unwrap_or([0; 4])
+    };
+    println!(
+        "[Compositor] Extension window #{} first buffer: {}x{} stride={} format={} samples={} nonzero={} alpha_nonzero={} alpha_opaque={} first={:02x?} center={:02x?}",
+        window.id,
+        width,
+        height,
+        pixels.stride(),
+        window.shm_format,
+        sampled,
+        nonzero,
+        alpha_nonzero,
+        alpha_opaque,
+        pixel_at(0, 0),
+        pixel_at(width / 2, height / 2)
+    );
 }
 
 fn presentation_instance_contains_point(instance: &PresentationInstance, px: i32, py: i32) -> bool {
@@ -600,6 +670,32 @@ mod touch_modality_tests {
         assert!(!frame_callback_is_ready(false, false, 1, 0));
         assert!(!frame_callback_is_ready(true, true, 4, 4));
         assert!(frame_callback_is_ready(true, true, 5, 4));
+    }
+
+    #[test]
+    fn late_frame_request_targets_the_commit_that_already_presented() {
+        let target = frame_callback_target(5, Some(4));
+        assert_eq!(target, 4);
+        assert!(frame_callback_is_ready(true, true, 5, target));
+
+        let pending_target = frame_callback_target(5, Some(5));
+        assert_eq!(pending_target, 5);
+        assert!(!frame_callback_is_ready(true, true, 5, pending_target));
+    }
+
+    #[test]
+    fn extension_backed_normal_root_is_a_workspace_scene() {
+        assert!(is_workspace_scene_root_role(WindowType::Normal, None, None));
+        assert!(!is_workspace_scene_root_role(
+            WindowType::Normal,
+            Some(41),
+            None
+        ));
+        assert!(!is_workspace_scene_root_role(
+            WindowType::Normal,
+            None,
+            Some(b"org.scarlet-os.desktop.shell.home")
+        ));
     }
 
     #[test]
@@ -2168,6 +2264,16 @@ const fn frame_callback_is_ready(
     is_presented && (!has_submitted_frame || presentation_counter > requested_after_present)
 }
 
+const fn frame_callback_target(
+    presentation_counter: u64,
+    last_submission_counter: Option<u64>,
+) -> u64 {
+    match last_submission_counter {
+        Some(counter) => counter,
+        None => presentation_counter,
+    }
+}
+
 fn shell_background_must_be_withheld(
     previous: sws_protocol::workspace::ShellPresentation,
     current: sws_protocol::workspace::ShellPresentation,
@@ -2182,6 +2288,49 @@ fn shell_background_must_be_withheld(
             sws_protocol::workspace::ShellPresentation::Home
                 | sws_protocol::workspace::ShellPresentation::Overview
         )
+}
+
+type ExtensionResourceKey = (usize, u32);
+
+/// One capability-backed SHM allocation registered by an extension client.
+struct ExtensionShmPool {
+    handle: Handle,
+    mapped_addr: usize,
+    size: usize,
+    destroy_requested: bool,
+}
+
+impl Drop for ExtensionShmPool {
+    fn drop(&mut self) {
+        if self.mapped_addr != 0 && self.size != 0 {
+            let _ = munmap(self.mapped_addr, self.size);
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ExtensionShmBufferView {
+    pool_id: u32,
+    offset: usize,
+    width: u32,
+    height: u32,
+    stride: u32,
+    format: u32,
+}
+
+/// Storage behind one reusable extension buffer object.
+///
+/// SHM is implemented first. A future GPU or dma-buf registration adds a new
+/// variant here while retaining the same buffer-ID commit and release path.
+#[derive(Debug, Clone, Copy)]
+enum ExtensionBufferBacking {
+    Shm(ExtensionShmBufferView),
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ExtensionBuffer {
+    backing: ExtensionBufferBacking,
+    destroy_requested: bool,
 }
 
 /// Compositor - the main window server with proper layer compositing
@@ -2207,6 +2356,8 @@ pub struct Compositor {
     presented_damage: Vec<PresentDamage>,
     event_counter: u64,
     pending_frame_callbacks: Vec<PendingFrameCallback>,
+    extension_shm_pools: BTreeMap<ExtensionResourceKey, ExtensionShmPool>,
+    extension_buffers: BTreeMap<ExtensionResourceKey, ExtensionBuffer>,
     next_frame_deadline_ns: Option<u64>,
     left_button_down: bool,
     overview_pointer_navigation: Option<OverviewPointerNavigation>,
@@ -2409,6 +2560,14 @@ fn interactive_move_grab_origin(
     cursor: (i32, i32),
 ) -> Option<(i32, i32)> {
     direct_touch.or_else(|| mouse_button_down.then(|| last_mouse_down.unwrap_or(cursor)))
+}
+
+fn is_workspace_scene_root_role(
+    window_type: WindowType,
+    parent: Option<u32>,
+    app_id: Option<&[u8]>,
+) -> bool {
+    window_type == WindowType::Normal && parent.is_none() && !is_shell_app_id(app_id.unwrap_or(b""))
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -2645,6 +2804,8 @@ impl Compositor {
             presented_damage: Vec::new(),
             event_counter: 0,
             pending_frame_callbacks: Vec::new(),
+            extension_shm_pools: BTreeMap::new(),
+            extension_buffers: BTreeMap::new(),
             next_frame_deadline_ns: None,
             left_button_down: false,
             overview_pointer_navigation: None,
@@ -7459,6 +7620,598 @@ impl Compositor {
         }
     }
 
+    fn send_extension_resource_error(&self, client_id: usize, request_id: u8, code: u32) {
+        let payload = sws_protocol::payload_error(code).to_vec();
+        if request_id == 0 {
+            send_message_to_client(client_id, sws_protocol::server_msg::ERROR, payload);
+        } else {
+            send_response_to_client(
+                client_id,
+                sws_protocol::server_msg::ERROR,
+                request_id,
+                payload,
+            );
+        }
+    }
+
+    fn extension_shm_view_fits(pool_size: usize, view: ExtensionShmBufferView) -> bool {
+        if view.width == 0
+            || view.height == 0
+            || !matches!(view.format, 0 | 1)
+            || view.stride < view.width.saturating_mul(4)
+        {
+            return false;
+        }
+        let Some(row_bytes) = (view.width as usize).checked_mul(4) else {
+            return false;
+        };
+        let Some(required) = (view.height as usize - 1)
+            .checked_mul(view.stride as usize)
+            .and_then(|bytes| bytes.checked_add(row_bytes))
+        else {
+            return false;
+        };
+        view.offset
+            .checked_add(required)
+            .is_some_and(|end| end <= pool_size)
+    }
+
+    fn register_extension_shm_pool(
+        &mut self,
+        client_id: usize,
+        request_id: u8,
+        pool_id: u32,
+        size: usize,
+        handle: Handle,
+    ) {
+        let key = (client_id, pool_id);
+        if size == 0 || self.extension_shm_pools.contains_key(&key) {
+            self.send_extension_resource_error(
+                client_id,
+                request_id,
+                sws_protocol::error_codes::INVALID_EXTENSION_SHM_POOL,
+            );
+            return;
+        }
+        let mapped_addr = handle
+            .as_memory_mapping()
+            .ok()
+            .and_then(|mapper| {
+                mapper
+                    .mmap(0, size, permissions::READ_WRITE, mmap_flags::SHARED, 0)
+                    .ok()
+            })
+            .unwrap_or(0);
+        if mapped_addr == 0 {
+            self.send_extension_resource_error(
+                client_id,
+                request_id,
+                sws_protocol::error_codes::INVALID_EXTENSION_SHM_POOL,
+            );
+            return;
+        }
+        self.extension_shm_pools.insert(
+            key,
+            ExtensionShmPool {
+                handle,
+                mapped_addr,
+                size,
+                destroy_requested: false,
+            },
+        );
+        let payload = sws_protocol::payload_extension_shm_pool_state(pool_id, size as u64);
+        send_response_to_client(
+            client_id,
+            sws_protocol::server_msg::EXTENSION_SHM_POOL_REGISTERED,
+            request_id,
+            payload.to_vec(),
+        );
+    }
+
+    fn resize_extension_shm_pool(
+        &mut self,
+        client_id: usize,
+        request_id: u8,
+        pool_id: u32,
+        size: usize,
+    ) {
+        let key = (client_id, pool_id);
+        let Some(pool) = self.extension_shm_pools.get(&key) else {
+            self.send_extension_resource_error(
+                client_id,
+                request_id,
+                sws_protocol::error_codes::INVALID_EXTENSION_SHM_POOL,
+            );
+            return;
+        };
+        if size <= pool.size || pool.destroy_requested {
+            self.send_extension_resource_error(
+                client_id,
+                request_id,
+                sws_protocol::error_codes::INVALID_EXTENSION_SHM_POOL,
+            );
+            return;
+        }
+        let mapped_addr = pool
+            .handle
+            .as_memory_mapping()
+            .ok()
+            .and_then(|mapper| {
+                mapper
+                    .mmap(0, size, permissions::READ_WRITE, mmap_flags::SHARED, 0)
+                    .ok()
+            })
+            .unwrap_or(0);
+        if mapped_addr == 0 {
+            self.send_extension_resource_error(
+                client_id,
+                request_id,
+                sws_protocol::error_codes::INVALID_EXTENSION_SHM_POOL,
+            );
+            return;
+        }
+
+        let selected: Vec<(u32, u32, u64, ExtensionShmBufferView)> = self
+            .window_manager
+            .get_windows()
+            .iter()
+            .filter_map(|window| {
+                if window.owner_client_id != Some(client_id) {
+                    return None;
+                }
+                let buffer_id = window.external_buffer_id?;
+                let commit_serial = window.external_buffer_commit_serial?;
+                let buffer = self.extension_buffers.get(&(client_id, buffer_id))?;
+                let ExtensionBufferBacking::Shm(view) = buffer.backing;
+                (view.pool_id == pool_id).then_some((window.id, buffer_id, commit_serial, view))
+            })
+            .collect();
+        if selected
+            .iter()
+            .any(|(_, _, _, view)| !Self::extension_shm_view_fits(size, *view))
+        {
+            let _ = munmap(mapped_addr, size);
+            self.send_extension_resource_error(
+                client_id,
+                request_id,
+                sws_protocol::error_codes::INVALID_EXTENSION_SHM_POOL,
+            );
+            return;
+        }
+
+        let (old_addr, old_size) = {
+            let pool = self
+                .extension_shm_pools
+                .get_mut(&key)
+                .expect("validated extension SHM pool disappeared");
+            let old = (pool.mapped_addr, pool.size);
+            pool.mapped_addr = mapped_addr;
+            pool.size = size;
+            old
+        };
+        for (window_id, buffer_id, commit_serial, view) in selected {
+            if let Some(window) = self.window_manager.get_window_mut(window_id) {
+                let _ = window.select_external_shm_buffer(
+                    buffer_id,
+                    commit_serial,
+                    view.width,
+                    view.height,
+                    view.offset,
+                    view.stride,
+                    view.format,
+                    mapped_addr,
+                    size,
+                );
+            }
+        }
+        if old_addr != 0 && old_size != 0 {
+            let _ = munmap(old_addr, old_size);
+        }
+        let payload = sws_protocol::payload_extension_shm_pool_state(pool_id, size as u64);
+        send_response_to_client(
+            client_id,
+            sws_protocol::server_msg::EXTENSION_SHM_POOL_RESIZED,
+            request_id,
+            payload.to_vec(),
+        );
+    }
+
+    fn define_extension_buffer(
+        &mut self,
+        client_id: usize,
+        buffer_id: u32,
+        view: ExtensionShmBufferView,
+    ) {
+        let buffer_key = (client_id, buffer_id);
+        let pool_key = (client_id, view.pool_id);
+        let valid = self.extension_shm_pools.get(&pool_key).is_some_and(|pool| {
+            !pool.destroy_requested && Self::extension_shm_view_fits(pool.size, view)
+        });
+        if !valid || self.extension_buffers.contains_key(&buffer_key) {
+            self.send_extension_resource_error(
+                client_id,
+                0,
+                sws_protocol::error_codes::INVALID_EXTENSION_BUFFER,
+            );
+            return;
+        }
+        let import_handle = self
+            .extension_shm_pools
+            .get(&pool_key)
+            .and_then(|pool| pool.handle.duplicate().ok());
+        self.extension_buffers.insert(
+            buffer_key,
+            ExtensionBuffer {
+                backing: ExtensionBufferBacking::Shm(view),
+                destroy_requested: false,
+            },
+        );
+        if let Some(gpu_compositor) = self.gpu_compositor.as_mut() {
+            let import_result = import_handle
+                .ok_or("Failed to duplicate extension SHM pool handle")
+                .and_then(|handle| {
+                    gpu_compositor.register_extension_shm_buffer(
+                        client_id,
+                        buffer_id,
+                        view.width,
+                        view.height,
+                        view.offset,
+                        view.stride,
+                        handle,
+                    )
+                });
+            match import_result {
+                Ok(()) => println!(
+                    "[Compositor] Extension buffer {}:{} directly imports SHM",
+                    client_id, buffer_id
+                ),
+                Err(error) => println!(
+                    "[Compositor] Extension buffer {}:{} uses copied GPU uploads: {}",
+                    client_id, buffer_id, error
+                ),
+            }
+        }
+    }
+
+    fn extension_buffer_is_selected(&self, client_id: usize, buffer_id: u32) -> bool {
+        self.window_manager.get_windows().iter().any(|window| {
+            window.owner_client_id == Some(client_id)
+                && window.external_buffer_id == Some(buffer_id)
+        })
+    }
+
+    fn reap_extension_shm_pool(&mut self, client_id: usize, pool_id: u32) {
+        let key = (client_id, pool_id);
+        let still_defined = self.extension_buffers.iter().any(|(&(owner, _), buffer)| {
+            owner == client_id
+                && matches!(buffer.backing, ExtensionBufferBacking::Shm(view) if view.pool_id == pool_id)
+        });
+        let remove = self
+            .extension_shm_pools
+            .get(&key)
+            .is_some_and(|pool| pool.destroy_requested && !still_defined);
+        if remove {
+            self.extension_shm_pools.remove(&key);
+        }
+    }
+
+    fn reap_extension_buffer(&mut self, client_id: usize, buffer_id: u32) {
+        let key = (client_id, buffer_id);
+        let remove = self.extension_buffers.get(&key).is_some_and(|buffer| {
+            buffer.destroy_requested && !self.extension_buffer_is_selected(client_id, buffer_id)
+        });
+        if !remove {
+            return;
+        }
+        let pool_id = self.extension_buffers.remove(&key).map(|buffer| {
+            let ExtensionBufferBacking::Shm(view) = buffer.backing;
+            view.pool_id
+        });
+        if let Some(pool_id) = pool_id {
+            if let Some(gpu_compositor) = self.gpu_compositor.as_mut()
+                && let Err(error) =
+                    gpu_compositor.unregister_extension_shm_buffer(client_id, buffer_id)
+            {
+                sws_debug!(
+                    "[Compositor] Failed to retire extension SHM texture {}:{}: {}",
+                    client_id,
+                    buffer_id,
+                    error
+                );
+            }
+            self.reap_extension_shm_pool(client_id, pool_id);
+        }
+    }
+
+    fn destroy_extension_shm_pool(&mut self, client_id: usize, pool_id: u32) {
+        let Some(pool) = self.extension_shm_pools.get_mut(&(client_id, pool_id)) else {
+            self.send_extension_resource_error(
+                client_id,
+                0,
+                sws_protocol::error_codes::INVALID_EXTENSION_SHM_POOL,
+            );
+            return;
+        };
+        pool.destroy_requested = true;
+        self.reap_extension_shm_pool(client_id, pool_id);
+    }
+
+    fn destroy_extension_buffer(&mut self, client_id: usize, buffer_id: u32) {
+        let Some(buffer) = self.extension_buffers.get_mut(&(client_id, buffer_id)) else {
+            self.send_extension_resource_error(
+                client_id,
+                0,
+                sws_protocol::error_codes::INVALID_EXTENSION_BUFFER,
+            );
+            return;
+        };
+        buffer.destroy_requested = true;
+        self.reap_extension_buffer(client_id, buffer_id);
+    }
+
+    fn clipped_extension_damage(
+        rect: sws_protocol::ExtensionDamageRect,
+        width: u32,
+        height: u32,
+    ) -> Option<(i32, i32, u32, u32)> {
+        if rect.width == 0 || rect.height == 0 || width == 0 || height == 0 {
+            return None;
+        }
+        let left = i64::from(rect.x).max(0).min(i64::from(width));
+        let top = i64::from(rect.y).max(0).min(i64::from(height));
+        let right = i64::from(rect.x)
+            .saturating_add(i64::from(rect.width))
+            .max(0)
+            .min(i64::from(width));
+        let bottom = i64::from(rect.y)
+            .saturating_add(i64::from(rect.height))
+            .max(0)
+            .min(i64::from(height));
+        (right > left && bottom > top).then_some((
+            left as i32,
+            top as i32,
+            (right - left) as u32,
+            (bottom - top) as u32,
+        ))
+    }
+
+    fn send_extension_buffer_released(&mut self, client_id: usize, retained: Option<(u32, u64)>) {
+        let Some((buffer_id, commit_serial)) = retained else {
+            return;
+        };
+        if self.extension_buffer_is_selected(client_id, buffer_id) {
+            return;
+        }
+        let payload =
+            sws_protocol::payload_extension_buffer_released(buffer_id, commit_serial).to_vec();
+        send_message_to_client(
+            client_id,
+            sws_protocol::server_msg::EXTENSION_BUFFER_RELEASED,
+            payload,
+        );
+        self.reap_extension_buffer(client_id, buffer_id);
+    }
+
+    fn commit_extension_buffer(
+        &mut self,
+        client_id: usize,
+        external_client_id: u32,
+        window_id: u32,
+        buffer_id: u32,
+        buffer_changed: bool,
+        commit_serial: u64,
+        damage_rects: &[sws_protocol::ExtensionDamageRect],
+    ) {
+        let valid_window = self
+            .window_manager
+            .get_window(window_id)
+            .is_some_and(|window| {
+                window.owner_client_id == Some(client_id)
+                    && window.extension_owner.map(|owner| owner.1) == Some(external_client_id)
+            });
+        if !valid_window {
+            self.send_extension_resource_error(
+                client_id,
+                0,
+                sws_protocol::error_codes::INVALID_EXTENSION_COMMIT,
+            );
+            return;
+        }
+
+        let expected_buffer = (buffer_id != 0).then_some(buffer_id);
+        let current_buffer = self
+            .window_manager
+            .get_window(window_id)
+            .and_then(|window| window.external_buffer_id);
+        if !buffer_changed && current_buffer != expected_buffer {
+            self.send_extension_resource_error(
+                client_id,
+                0,
+                sws_protocol::error_codes::INVALID_EXTENSION_COMMIT,
+            );
+            return;
+        }
+
+        let old_geometry = self
+            .window_manager
+            .get_window(window_id)
+            .map(|window| (window.is_presented(), window.presentation_geometry()));
+        let mut released = None;
+        if buffer_changed {
+            if buffer_id == 0 {
+                released = self
+                    .window_manager
+                    .get_window_mut(window_id)
+                    .and_then(|window| window.detach_external_buffer());
+            } else {
+                let Some(buffer) = self.extension_buffers.get(&(client_id, buffer_id)).copied()
+                else {
+                    self.send_extension_resource_error(
+                        client_id,
+                        0,
+                        sws_protocol::error_codes::INVALID_EXTENSION_BUFFER,
+                    );
+                    return;
+                };
+                if buffer.destroy_requested {
+                    self.send_extension_resource_error(
+                        client_id,
+                        0,
+                        sws_protocol::error_codes::INVALID_EXTENSION_BUFFER,
+                    );
+                    return;
+                }
+                let ExtensionBufferBacking::Shm(view) = buffer.backing;
+                let Some(pool) = self.extension_shm_pools.get(&(client_id, view.pool_id)) else {
+                    self.send_extension_resource_error(
+                        client_id,
+                        0,
+                        sws_protocol::error_codes::INVALID_EXTENSION_SHM_POOL,
+                    );
+                    return;
+                };
+                let (mapped_addr, mapping_size) = (pool.mapped_addr, pool.size);
+                let result = self
+                    .window_manager
+                    .get_window_mut(window_id)
+                    .expect("validated extension window disappeared")
+                    .select_external_shm_buffer(
+                        buffer_id,
+                        commit_serial,
+                        view.width,
+                        view.height,
+                        view.offset,
+                        view.stride,
+                        view.format,
+                        mapped_addr,
+                        mapping_size,
+                    );
+                match result {
+                    Ok(previous) => released = previous,
+                    Err(_) => {
+                        self.send_extension_resource_error(
+                            client_id,
+                            0,
+                            sws_protocol::error_codes::INVALID_EXTENSION_BUFFER,
+                        );
+                        return;
+                    }
+                }
+            }
+        }
+
+        if buffer_changed
+            && buffer_id != 0
+            && let Some(window) = self
+                .window_manager
+                .get_window(window_id)
+                .filter(|window| !window.has_presented_frame)
+        {
+            log_first_extension_buffer_sample(window);
+        }
+
+        let Some((presented, window_x, window_y, width, height, new_rect, transform, instances)) =
+            self.window_manager.get_window(window_id).map(|window| {
+                (
+                    window.is_presented(),
+                    window.x,
+                    window.y,
+                    window.width,
+                    window.height,
+                    window.presentation_geometry(),
+                    window.presentation_transform,
+                    window
+                        .presentation_instances
+                        .iter()
+                        .map(|instance| instance.transform)
+                        .collect::<Vec<_>>(),
+                )
+            })
+        else {
+            return;
+        };
+
+        if let Some((old_presented, old_rect)) = old_geometry
+            && (old_rect != new_rect
+                || old_presented != presented
+                || (buffer_changed && buffer_id == 0))
+        {
+            if old_presented {
+                self.add_pending_damage(old_rect);
+            }
+            if presented && buffer_id != 0 {
+                self.add_pending_damage(new_rect);
+            }
+        }
+
+        let mut submitted_damage = false;
+        for rect in damage_rects {
+            let Some((x, y, damage_width, damage_height)) =
+                Self::clipped_extension_damage(*rect, width, height)
+            else {
+                continue;
+            };
+            submitted_damage = true;
+            if let Some(gpu) = self.gpu_compositor.as_mut() {
+                gpu.mark_extension_shm_damage(
+                    client_id,
+                    buffer_id,
+                    x,
+                    y,
+                    damage_width,
+                    damage_height,
+                );
+                gpu.mark_window_damage(window_id, x, y, damage_width, damage_height);
+            }
+            if presented {
+                if let Some(transform) = transform {
+                    self.add_pending_damage((
+                        transform.x,
+                        transform.y,
+                        transform.width,
+                        transform.height,
+                    ));
+                } else {
+                    self.add_pending_damage((
+                        window_x.saturating_add(x),
+                        window_y.saturating_add(y),
+                        damage_width,
+                        damage_height,
+                    ));
+                }
+                for instance in &instances {
+                    self.add_pending_damage((
+                        instance.x,
+                        instance.y,
+                        instance.width,
+                        instance.height,
+                    ));
+                }
+            }
+        }
+        if buffer_id != 0 && (buffer_changed || submitted_damage) {
+            self.note_window_frame_submitted(window_id);
+        }
+        self.send_extension_buffer_released(client_id, released);
+    }
+
+    fn cleanup_extension_resources_for_client(&mut self, client_id: usize) {
+        let buffer_ids: Vec<u32> = self
+            .extension_buffers
+            .keys()
+            .filter_map(|&(owner, buffer_id)| (owner == client_id).then_some(buffer_id))
+            .collect();
+        if let Some(gpu_compositor) = self.gpu_compositor.as_mut() {
+            for buffer_id in buffer_ids {
+                let _ = gpu_compositor.unregister_extension_shm_buffer(client_id, buffer_id);
+            }
+        }
+        self.extension_buffers
+            .retain(|(owner, _), _| *owner != client_id);
+        self.extension_shm_pools
+            .retain(|(owner, _), _| *owner != client_id);
+    }
+
     fn close_client_windows(
         &mut self,
         client_id: usize,
@@ -7469,6 +8222,7 @@ impl Compositor {
             callback.client_id != client_id || !window_ids.contains(&callback.window_id)
         });
         let mut removed_windows: Vec<(u32, (i32, i32, u32, u32), Vec<u8>)> = Vec::new();
+        let mut retained_extension_buffers: Vec<(u32, u64)> = Vec::new();
         for &window_id in window_ids {
             if let Some(window) = self.window_manager.get_window(window_id) {
                 removed_windows.push((
@@ -7476,6 +8230,24 @@ impl Compositor {
                     (window.x, window.y, window.width, window.height),
                     window.app_id.clone().unwrap_or_default(),
                 ));
+                if window.owner_client_id == Some(client_id)
+                    && let (Some(buffer_id), Some(commit_serial)) = (
+                        window.external_buffer_id,
+                        window.external_buffer_commit_serial,
+                    )
+                    && let Some(existing) = retained_extension_buffers
+                        .iter_mut()
+                        .find(|(existing_id, _)| *existing_id == buffer_id)
+                {
+                    existing.1 = existing.1.max(commit_serial);
+                } else if window.owner_client_id == Some(client_id)
+                    && let (Some(buffer_id), Some(commit_serial)) = (
+                        window.external_buffer_id,
+                        window.external_buffer_commit_serial,
+                    )
+                {
+                    retained_extension_buffers.push((buffer_id, commit_serial));
+                }
             }
         }
 
@@ -7535,6 +8307,12 @@ impl Compositor {
 
             self.window_manager.close_window(*window_id);
             self.add_pending_damage(*rect);
+        }
+
+        if notify_client {
+            for retained in retained_extension_buffers {
+                self.send_extension_buffer_released(client_id, Some(retained));
+            }
         }
 
         if active_app_removed {
@@ -7716,9 +8494,11 @@ impl Compositor {
         self.window_manager
             .get_window(window_id)
             .is_some_and(|window| {
-                window.window_type == WindowType::Normal
-                    && window.parent.is_none()
-                    && !is_shell_app_id(window.app_id.as_deref().unwrap_or(b""))
+                is_workspace_scene_root_role(
+                    window.window_type,
+                    window.parent,
+                    window.app_id.as_deref(),
+                )
             })
     }
 
@@ -7738,6 +8518,12 @@ impl Compositor {
             self.windowing_mode == sws_protocol::WindowingMode::Focused,
         );
         true
+    }
+
+    fn register_new_workspace_scene_and_publish(&mut self, window_id: u32) {
+        if self.register_new_workspace_scene(window_id) {
+            self.publish_workspace_state();
+        }
     }
 
     fn discard_pending_workspace_scene(&mut self, window_id: u32) -> bool {
@@ -7802,11 +8588,21 @@ impl Compositor {
             );
             return;
         }
+        let last_submission_counter = self
+            .window_manager
+            .get_window(window_id)
+            .and_then(|window| window.last_frame_submission_counter);
+        let requested_after_present =
+            frame_callback_target(self.event_counter, last_submission_counter);
         self.pending_frame_callbacks.push(PendingFrameCallback {
             client_id,
             window_id,
             callback_id,
-            requested_after_present: self.event_counter,
+            // REQUEST_FRAME follows the corresponding buffer commit on the
+            // socket. If a slow composition completed between those messages,
+            // target the commit's submission counter instead of waiting for a
+            // nonexistent extra redraw.
+            requested_after_present,
         });
     }
 
@@ -7975,9 +8771,10 @@ impl Compositor {
 
     fn note_window_frame_submitted(&mut self, window_id: u32) {
         let focused = self.windowing_mode == sws_protocol::WindowingMode::Focused;
+        let presentation_counter = self.event_counter;
         let Some((first_frame_needs_policy, presentation_content_became_ready)) =
             self.window_manager.get_window_mut(window_id).map(|window| {
-                let first = window.mark_presented_frame();
+                let first = window.note_frame_submission(presentation_counter);
                 (
                     first && (window.pending_maximize || focused),
                     window.validate_presentation_content() && window.is_logically_presented(),
@@ -9227,9 +10024,7 @@ impl Compositor {
                     window.active_on_focus = active_on_focus;
                 }
 
-                if self.register_new_workspace_scene(window_id) {
-                    self.publish_workspace_state();
-                }
+                self.register_new_workspace_scene_and_publish(window_id);
 
                 let mut negotiated_restore_geometry = None;
                 if let Some(configuration) = initial_configuration {
@@ -9399,7 +10194,9 @@ impl Compositor {
                     window_ids.len()
                 );
 
-                if self.close_client_windows(client_id, &window_ids, false)? {
+                let windows_removed = self.close_client_windows(client_id, &window_ids, false)?;
+                self.cleanup_extension_resources_for_client(client_id);
+                if windows_removed {
                     self.dump_memory_layout("after IPC ClientDisconnected");
                     return Ok(true);
                 }
@@ -10411,6 +11208,74 @@ impl Compositor {
                 );
                 // Extension is now registered and can create windows
             }
+            IpcEvent::ExtensionRegisterShmPool {
+                client_id,
+                request_id,
+                pool_id,
+                size,
+                handle,
+            } => {
+                self.register_extension_shm_pool(client_id, request_id, pool_id, size, handle);
+            }
+            IpcEvent::ExtensionResizeShmPool {
+                client_id,
+                request_id,
+                pool_id,
+                size,
+            } => {
+                self.resize_extension_shm_pool(client_id, request_id, pool_id, size);
+            }
+            IpcEvent::ExtensionDestroyShmPool { client_id, pool_id } => {
+                self.destroy_extension_shm_pool(client_id, pool_id);
+            }
+            IpcEvent::ExtensionDefineBuffer {
+                client_id,
+                buffer_id,
+                pool_id,
+                offset,
+                width,
+                height,
+                stride,
+                format,
+            } => {
+                self.define_extension_buffer(
+                    client_id,
+                    buffer_id,
+                    ExtensionShmBufferView {
+                        pool_id,
+                        offset,
+                        width,
+                        height,
+                        stride,
+                        format,
+                    },
+                );
+            }
+            IpcEvent::ExtensionDestroyBuffer {
+                client_id,
+                buffer_id,
+            } => {
+                self.destroy_extension_buffer(client_id, buffer_id);
+            }
+            IpcEvent::ExtensionCommitBuffer {
+                client_id,
+                external_client_id,
+                window_id,
+                buffer_id,
+                buffer_changed,
+                commit_serial,
+                damage_rects,
+            } => {
+                self.commit_extension_buffer(
+                    client_id,
+                    external_client_id,
+                    window_id,
+                    buffer_id,
+                    buffer_changed,
+                    commit_serial,
+                    &damage_rects,
+                );
+            }
             IpcEvent::ExtensionCreateWindow {
                 client_id,
                 extension_id,
@@ -10447,6 +11312,12 @@ impl Compositor {
                                 "[Compositor] Created extension window: {} (ext_id={}, ext_client_id={})",
                                 wid, extension_id, external_client_id
                             );
+                            // Extension-backed top levels are ordinary
+                            // workspace scenes. Register them through the
+                            // same path as native SWS clients so Overview can
+                            // assign a presentation transform instead of
+                            // hiding an unowned Normal window.
+                            self.register_new_workspace_scene_and_publish(wid);
                             self.full_redraw_needed = true;
                         }
                         Err(e) => {
@@ -10527,6 +11398,13 @@ impl Compositor {
                     // println!("[Compositor] Attaching external buffer at address 0x{:x}", addr);
                     if let Some(shm_handle) = shm {
                         // We have both handle and address (normal case)
+                        let retained = self.window_manager.get_window(window_id).and_then(|w| {
+                            w.external_buffer_id.zip(w.external_buffer_commit_serial)
+                        });
+                        let owner_client_id = self
+                            .window_manager
+                            .get_window(window_id)
+                            .and_then(|window| window.owner_client_id);
                         self.release_gpu_window_texture(window_id)?;
                         if let Err(e) = self.window_manager.replace_window_shm_from_event(
                             window_id,
@@ -10552,16 +11430,30 @@ impl Compositor {
                             {
                                 self.add_pending_damage(rect);
                             }
+                            if let Some(owner_client_id) = owner_client_id {
+                                self.send_extension_buffer_released(owner_client_id, retained);
+                            }
                         }
                     } else {
                         // We have address but no SharedMemory wrapper (e.g., File handle from Linux compat)
                         // This is zero-copy mode - just update the mapped address
                         // println!("[Compositor] Zero-copy mode: updating mapped address without SharedMemory wrapper");
+                        let (owner_client_id, retained) = self
+                            .window_manager
+                            .get_window(window_id)
+                            .map(|w| {
+                                (
+                                    w.owner_client_id,
+                                    w.external_buffer_id.zip(w.external_buffer_commit_serial),
+                                )
+                            })
+                            .unwrap_or((None, None));
                         self.release_gpu_window_texture(window_id)?;
                         let rect = if let Some(w) = self.window_manager.get_window_mut(window_id) {
                             if let (Some(old_addr), old_size) =
                                 (w.shm_mapped_addr.take(), w.shm_size)
                                 && old_size != 0
+                                && w.shm_mapping_owned
                             {
                                 let _ = scarlet_os::handle::capability::memory_mapping::munmap(
                                     old_addr, old_size,
@@ -10574,6 +11466,7 @@ impl Compositor {
                             w.reconcile_window_geometry_after_resize();
                             w.shm_mapped_addr = Some(addr);
                             w.shm_size = shm_size;
+                            w.shm_mapping_owned = true;
                             w.shm_offset = offset.max(0) as usize;
                             w.shm_stride = if stride > 0 {
                                 stride as u32
@@ -10583,6 +11476,8 @@ impl Compositor {
                             w.shm_format = format;
                             w.has_alpha_content = format == 0;
                             w.buffer = None; // Clear Vec buffer if present
+                            w.external_buffer_id = None;
+                            w.external_buffer_commit_serial = None;
                             w.is_presented().then_some(w.presentation_geometry())
                         } else {
                             println!("[Compositor] Window {} not found", window_id);
@@ -10591,6 +11486,9 @@ impl Compositor {
 
                         if let Some(rect) = rect {
                             self.add_pending_damage(rect);
+                        }
+                        if let Some(owner_client_id) = owner_client_id {
+                            self.send_extension_buffer_released(owner_client_id, retained);
                         }
                     }
                 } else {

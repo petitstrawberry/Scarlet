@@ -13,16 +13,15 @@ pub struct Surface {
     pub wl_surface_id: u32,
     /// Corresponding SWS window ID (if created)
     pub sws_window_id: Option<u32>,
-    /// Attached buffer ID
+    /// Buffer selected by the last committed surface state.
     pub buffer_id: Option<u32>,
+    /// Buffer selection staged by `wl_surface.attach` for the next commit.
+    ///
+    /// The outer option distinguishes "no attach request" from an explicit
+    /// `attach(NULL)` represented by `Some(None)`.
+    pending_buffer_id: Option<Option<u32>>,
     /// Pending damage regions (x, y, width, height)
     pub damage: Vec<(i32, i32, i32, i32)>,
-    /// Last buffer ID attached to SWS (avoid redundant attach)
-    pub last_attached_buffer: Option<u32>,
-    /// Last buffer ID we committed (used to delay wl_buffer.release for zero-copy)
-    pub last_committed_buffer: Option<u32>,
-    /// Buffers pending wl_buffer.release (sent after SWS consumes updates)
-    pub pending_release: Vec<u32>,
     /// Surface role (e.g., "xdg_toplevel")
     pub role: Option<SurfaceRole>,
     /// Width and height (set when buffer is attached)
@@ -51,6 +50,17 @@ pub enum SurfaceRole {
     Cursor,
 }
 
+/// Result of applying the buffer state staged for a surface commit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BufferCommit {
+    /// Whether this commit contained an explicit `wl_surface.attach` request.
+    pub attached: bool,
+    /// Whether the effective buffer changed from the previous commit.
+    pub changed: bool,
+    /// Effective buffer selected after applying the pending state.
+    pub buffer_id: Option<u32>,
+}
+
 impl Surface {
     /// Create a new surface
     pub fn new(wl_surface_id: u32) -> Self {
@@ -58,10 +68,8 @@ impl Surface {
             wl_surface_id,
             sws_window_id: None,
             buffer_id: None,
+            pending_buffer_id: None,
             damage: Vec::new(),
-            last_attached_buffer: None,
-            last_committed_buffer: None,
-            pending_release: Vec::new(),
             role: None,
             width: 0,
             height: 0,
@@ -73,9 +81,36 @@ impl Surface {
         }
     }
 
-    /// Attach a buffer to this surface
-    pub fn attach(&mut self, buffer_id: u32) {
-        self.buffer_id = Some(buffer_id);
+    /// Stage a buffer selection for the next surface commit.
+    ///
+    /// # Arguments
+    ///
+    /// * `buffer_id` - Buffer object to attach, or `None` to detach content.
+    pub fn attach(&mut self, buffer_id: Option<u32>) {
+        self.pending_buffer_id = Some(buffer_id);
+    }
+
+    /// Apply the pending buffer selection atomically.
+    ///
+    /// # Returns
+    ///
+    /// The applied buffer state, including whether this commit contained an
+    /// explicit attach request.
+    pub fn commit_buffer(&mut self) -> BufferCommit {
+        let Some(pending_buffer_id) = self.pending_buffer_id.take() else {
+            return BufferCommit {
+                attached: false,
+                changed: false,
+                buffer_id: self.buffer_id,
+            };
+        };
+        let changed = self.buffer_id != pending_buffer_id;
+        self.buffer_id = pending_buffer_id;
+        BufferCommit {
+            attached: true,
+            changed,
+            buffer_id: self.buffer_id,
+        }
     }
 
     /// Add damage to this surface
@@ -107,12 +142,6 @@ impl Surface {
         self.damage.clear();
     }
 
-    pub fn swap_committed_buffer(&mut self, new_buffer: Option<u32>) -> Option<u32> {
-        let old = self.last_committed_buffer;
-        self.last_committed_buffer = new_buffer;
-        old
-    }
-
     /// Set the surface role
     pub fn set_role(&mut self, role: SurfaceRole) {
         self.role = Some(role);
@@ -126,6 +155,69 @@ impl Surface {
     /// Set the buffer transform
     pub fn set_buffer_transform(&mut self, transform: i32) {
         self.buffer_transform = transform;
+    }
+}
+
+#[cfg(test)]
+mod buffer_state_tests {
+    use super::{BufferCommit, Surface};
+
+    #[test]
+    fn attach_is_double_buffered_until_commit() {
+        let mut surface = Surface::new(7);
+
+        surface.attach(Some(11));
+        assert_eq!(surface.buffer_id, None);
+        assert_eq!(
+            surface.commit_buffer(),
+            BufferCommit {
+                attached: true,
+                changed: true,
+                buffer_id: Some(11),
+            }
+        );
+        assert_eq!(surface.buffer_id, Some(11));
+    }
+
+    #[test]
+    fn commit_without_attach_keeps_the_selected_buffer() {
+        let mut surface = Surface::new(7);
+        surface.attach(Some(11));
+        assert_eq!(
+            surface.commit_buffer(),
+            BufferCommit {
+                attached: true,
+                changed: true,
+                buffer_id: Some(11),
+            }
+        );
+
+        assert_eq!(
+            surface.commit_buffer(),
+            BufferCommit {
+                attached: false,
+                changed: false,
+                buffer_id: Some(11),
+            }
+        );
+        surface.attach(Some(11));
+        assert_eq!(
+            surface.commit_buffer(),
+            BufferCommit {
+                attached: true,
+                changed: false,
+                buffer_id: Some(11),
+            }
+        );
+        surface.attach(None);
+        assert_eq!(
+            surface.commit_buffer(),
+            BufferCommit {
+                attached: true,
+                changed: true,
+                buffer_id: None,
+            }
+        );
     }
 }
 

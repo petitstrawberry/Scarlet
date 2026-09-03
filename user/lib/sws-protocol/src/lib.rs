@@ -13,7 +13,7 @@
 //!   - `payload_size: u32`
 //! - Payload (`payload_size` bytes)
 //!
-//! See `docs/sws_ipc_protocol.md` for the detailed specification.
+//! See `docs/graphics/sws-ipc-protocol.md` for the detailed specification.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
@@ -30,10 +30,13 @@ pub mod workspace;
 pub const MAX_PAYLOAD_SIZE: usize = 1024 * 1024; // 1 MiB
 
 /// Current SWS capability-negotiation protocol version.
-pub const SWS_PROTOCOL_VERSION: u32 = 8;
+pub const SWS_PROTOCOL_VERSION: u32 = 9;
 
 /// Maximum damage rectangles carried by one shared SGFX frame commit.
 pub const SGFX_MAX_DAMAGE_RECTS: usize = 16;
+
+/// Maximum damage rectangles carried by one extension-buffer commit.
+pub const EXTENSION_MAX_DAMAGE_RECTS: usize = 16;
 
 /// Optional SWS capabilities returned by `GET_CAPABILITIES`.
 pub mod capabilities {
@@ -57,6 +60,16 @@ pub mod capabilities {
     pub const WORKSPACE_SHELL: u64 = 1 << 8;
     /// Clients may request one-shot compositor-paced frame callbacks.
     pub const FRAME_CALLBACKS: u64 = 1 << 9;
+    /// Extensions may register persistent external buffers and commit them by ID.
+    pub const EXTENSION_BUFFER_OBJECTS: u64 = 1 << 10;
+}
+
+/// Flags attached to an extension-buffer commit.
+pub mod extension_commit_flags {
+    /// The commit changes the buffer selected by the external surface.
+    pub const BUFFER_CHANGED: u32 = 1 << 0;
+    /// Flags understood by this protocol version.
+    pub const SUPPORTED: u32 = BUFFER_CHANGED;
 }
 
 /// Known input-environment state bits.
@@ -297,6 +310,12 @@ pub mod error_codes {
     pub const INVALID_WORKSPACE_STATE: u32 = 116;
     /// A frame callback request is malformed, duplicated, or otherwise invalid.
     pub const INVALID_FRAME_REQUEST: u32 = 117;
+    /// An extension SHM pool is invalid, unknown, or conflicts with a live pool.
+    pub const INVALID_EXTENSION_SHM_POOL: u32 = 118;
+    /// An extension buffer is invalid, unknown, or conflicts with a live buffer.
+    pub const INVALID_EXTENSION_BUFFER: u32 = 119;
+    /// An extension buffer commit has invalid ownership, ordering, or damage.
+    pub const INVALID_EXTENSION_COMMIT: u32 = 120;
 }
 
 /// Message type IDs (client -> server).
@@ -327,6 +346,18 @@ pub mod client_msg {
     pub const EXTENSION_UPDATE_BUFFER: u32 = 102;
     /// Attach SHM buffer on behalf of another client (extension-only)
     pub const EXTENSION_ATTACH_BUFFER: u32 = 103;
+    /// Register one persistent SHM pool capability (extension-only).
+    pub const EXTENSION_REGISTER_SHM_POOL: u32 = 104;
+    /// Remap a previously registered SHM pool after it grows (extension-only).
+    pub const EXTENSION_RESIZE_SHM_POOL: u32 = 105;
+    /// Request destruction of a registered SHM pool (extension-only).
+    pub const EXTENSION_DESTROY_SHM_POOL: u32 = 106;
+    /// Define one buffer view over a registered backing object (extension-only).
+    pub const EXTENSION_DEFINE_BUFFER: u32 = 107;
+    /// Request destruction of a defined external buffer (extension-only).
+    pub const EXTENSION_DESTROY_BUFFER: u32 = 108;
+    /// Atomically select a registered buffer and publish damage (extension-only).
+    pub const EXTENSION_COMMIT_BUFFER: u32 = 109;
     pub const SET_WORKAREA: u32 = 22;
     pub const SET_WINDOW_RESIZABLE: u32 = 23;
     pub const GET_WINDOW_LIST: u32 = 24;
@@ -417,6 +448,12 @@ pub mod server_msg {
     pub const EXTENSION_REGISTERED: u32 = 100;
     /// Forward input event to extension (for extension clients)
     pub const EXTENSION_INPUT_EVENT: u32 = 101;
+    /// Confirmation that an extension SHM pool was registered.
+    pub const EXTENSION_SHM_POOL_REGISTERED: u32 = 102;
+    /// Confirmation that an extension SHM pool was resized.
+    pub const EXTENSION_SHM_POOL_RESIZED: u32 = 103;
+    /// Notification that SWS no longer samples an external buffer.
+    pub const EXTENSION_BUFFER_RELEASED: u32 = 104;
     pub const SCREEN_SIZE: u32 = 16;
     pub const WINDOW_LIST: u32 = 17;
     pub const FOCUS_CHANGED: u32 = 18;
@@ -643,6 +680,42 @@ pub struct SgfxDamageRect {
     pub width: u32,
     /// Damage height in pixels.
     pub height: u32,
+}
+
+/// One window-local damage rectangle in an extension-buffer commit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExtensionDamageRect {
+    /// Horizontal origin in window-local pixels.
+    pub x: i32,
+    /// Vertical origin in window-local pixels.
+    pub y: i32,
+    /// Damage width in pixels.
+    pub width: u32,
+    /// Damage height in pixels.
+    pub height: u32,
+}
+
+impl ExtensionDamageRect {
+    /// Create a window-local extension-buffer damage rectangle.
+    ///
+    /// # Arguments
+    ///
+    /// * `x` - Horizontal origin in pixels.
+    /// * `y` - Vertical origin in pixels.
+    /// * `width` - Width in pixels.
+    /// * `height` - Height in pixels.
+    ///
+    /// # Returns
+    ///
+    /// A damage rectangle with the supplied coordinates.
+    pub const fn new(x: i32, y: i32, width: u32, height: u32) -> Self {
+        Self {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
 }
 
 impl SgfxDamageRect {
@@ -1264,6 +1337,53 @@ pub enum ClientMessageRef<'a> {
         shm_size: u64,
     },
 
+    /// Register one persistent SHM pool capability for extension buffers.
+    ExtensionRegisterShmPool {
+        pool_id: u32,
+        size: u64,
+    },
+
+    /// Remap a registered extension SHM pool after it grows.
+    ExtensionResizeShmPool {
+        pool_id: u32,
+        size: u64,
+    },
+
+    /// Request destruction of a registered extension SHM pool.
+    ExtensionDestroyShmPool {
+        pool_id: u32,
+    },
+
+    /// Define one reusable buffer view over a registered backing object.
+    ///
+    /// The first backing kind is a single-plane SHM pool. Future GPU-backed
+    /// registrations can add another definition message while retaining the
+    /// same commit and release lifecycle.
+    ExtensionDefineBuffer {
+        buffer_id: u32,
+        pool_id: u32,
+        offset: u64,
+        width: u32,
+        height: u32,
+        stride: u32,
+        format: u32,
+    },
+
+    /// Request destruction of a reusable external buffer object.
+    ExtensionDestroyBuffer {
+        buffer_id: u32,
+    },
+
+    /// Atomically select a registered external buffer and publish its damage.
+    ExtensionCommitBuffer {
+        external_client_id: u32,
+        window_id: u32,
+        buffer_id: u32,
+        buffer_changed: bool,
+        commit_serial: u64,
+        damage_rects: &'a [u8],
+    },
+
     /// Set the workarea (usable screen area) for the window manager
     ///
     /// This is typically sent by the taskbar to inform the window manager
@@ -1795,6 +1915,24 @@ pub enum ServerMessage {
         code: u16,
         value: i32,
     },
+
+    /// Confirmation that a persistent extension SHM pool was registered.
+    ExtensionShmPoolRegistered {
+        pool_id: u32,
+        size: u64,
+    },
+
+    /// Confirmation that a persistent extension SHM pool was remapped.
+    ExtensionShmPoolResized {
+        pool_id: u32,
+        size: u64,
+    },
+
+    /// Notification that SWS no longer samples an external buffer object.
+    ExtensionBufferReleased {
+        buffer_id: u32,
+        commit_serial: u64,
+    },
 }
 
 /// Parse a client->server message from `(msg_type, payload)`.
@@ -2272,6 +2410,99 @@ pub fn parse_client_message<'a>(
                 stride,
                 format,
                 shm_size,
+            })
+        }
+        client_msg::EXTENSION_REGISTER_SHM_POOL => {
+            if payload.len() != 12 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            let pool_id = read_u32(payload, 0)?;
+            let size = read_u64(payload, 4)?;
+            if pool_id == 0 || size == 0 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            Ok(ClientMessageRef::ExtensionRegisterShmPool { pool_id, size })
+        }
+        client_msg::EXTENSION_RESIZE_SHM_POOL => {
+            if payload.len() != 12 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            let pool_id = read_u32(payload, 0)?;
+            let size = read_u64(payload, 4)?;
+            if pool_id == 0 || size == 0 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            Ok(ClientMessageRef::ExtensionResizeShmPool { pool_id, size })
+        }
+        client_msg::EXTENSION_DESTROY_SHM_POOL => {
+            if payload.len() != 4 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            let pool_id = read_u32(payload, 0)?;
+            if pool_id == 0 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            Ok(ClientMessageRef::ExtensionDestroyShmPool { pool_id })
+        }
+        client_msg::EXTENSION_DEFINE_BUFFER => {
+            if payload.len() != 32 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            let buffer_id = read_u32(payload, 0)?;
+            let pool_id = read_u32(payload, 4)?;
+            let offset = read_u64(payload, 8)?;
+            let width = read_u32(payload, 16)?;
+            let height = read_u32(payload, 20)?;
+            let stride = read_u32(payload, 24)?;
+            let format = read_u32(payload, 28)?;
+            if buffer_id == 0 || pool_id == 0 || width == 0 || height == 0 || stride == 0 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            Ok(ClientMessageRef::ExtensionDefineBuffer {
+                buffer_id,
+                pool_id,
+                offset,
+                width,
+                height,
+                stride,
+                format,
+            })
+        }
+        client_msg::EXTENSION_DESTROY_BUFFER => {
+            if payload.len() != 4 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            let buffer_id = read_u32(payload, 0)?;
+            if buffer_id == 0 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            Ok(ClientMessageRef::ExtensionDestroyBuffer { buffer_id })
+        }
+        client_msg::EXTENSION_COMMIT_BUFFER => {
+            if payload.len() < 28 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            let commit_serial = read_u64(payload, 12)?;
+            let flags = read_u32(payload, 20)?;
+            let damage_count = read_u32(payload, 24)? as usize;
+            let expected_len = damage_count
+                .checked_mul(16)
+                .and_then(|bytes| bytes.checked_add(28))
+                .ok_or(ProtocolError::MalformedPayload)?;
+            if commit_serial == 0
+                || (flags & !extension_commit_flags::SUPPORTED) != 0
+                || damage_count > EXTENSION_MAX_DAMAGE_RECTS
+                || payload.len() != expected_len
+            {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            Ok(ClientMessageRef::ExtensionCommitBuffer {
+                external_client_id: read_u32(payload, 0)?,
+                window_id: read_u32(payload, 4)?,
+                buffer_id: read_u32(payload, 8)?,
+                buffer_changed: (flags & extension_commit_flags::BUFFER_CHANGED) != 0,
+                commit_serial,
+                damage_rects: &payload[28..],
             })
         }
         client_msg::SET_WORKAREA => {
@@ -3503,6 +3734,33 @@ pub fn parse_server_message(msg_type: u32, payload: &[u8]) -> Result<ServerMessa
                 value,
             })
         }
+        server_msg::EXTENSION_SHM_POOL_REGISTERED => {
+            if payload.len() != 12 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            Ok(ServerMessage::ExtensionShmPoolRegistered {
+                pool_id: read_u32(payload, 0)?,
+                size: read_u64(payload, 4)?,
+            })
+        }
+        server_msg::EXTENSION_SHM_POOL_RESIZED => {
+            if payload.len() != 12 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            Ok(ServerMessage::ExtensionShmPoolResized {
+                pool_id: read_u32(payload, 0)?,
+                size: read_u64(payload, 4)?,
+            })
+        }
+        server_msg::EXTENSION_BUFFER_RELEASED => {
+            if payload.len() != 12 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            Ok(ServerMessage::ExtensionBufferReleased {
+                buffer_id: read_u32(payload, 0)?,
+                commit_serial: read_u64(payload, 4)?,
+            })
+        }
         server_msg::ACTIVE_APP => {
             // Payload: app_id_len (u32) + app_id (variable, max 128)
             //          + app_name_len (u32) + app_name (variable, max 128)
@@ -3946,6 +4204,204 @@ pub fn payload_extension_attach_buffer(
     payload[20..24].copy_from_slice(&stride.to_le_bytes());
     payload[24..28].copy_from_slice(&format.to_le_bytes());
     payload[28..36].copy_from_slice(&shm_size.to_le_bytes());
+    payload
+}
+
+/// Build a persistent extension SHM-pool registration payload.
+///
+/// # Arguments
+///
+/// * `pool_id` - Non-zero extension-scoped backing-store identifier.
+/// * `size` - Complete mapping size in bytes.
+///
+/// # Returns
+///
+/// Fixed-width payload carried with exactly one memory capability.
+pub fn payload_extension_register_shm_pool(pool_id: u32, size: u64) -> [u8; 12] {
+    let mut payload = [0u8; 12];
+    payload[0..4].copy_from_slice(&pool_id.to_le_bytes());
+    payload[4..12].copy_from_slice(&size.to_le_bytes());
+    payload
+}
+
+/// Build an extension SHM-pool resize payload.
+///
+/// # Arguments
+///
+/// * `pool_id` - Previously registered pool identifier.
+/// * `size` - New complete mapping size in bytes.
+///
+/// # Returns
+///
+/// Fixed-width resize payload.
+pub fn payload_extension_resize_shm_pool(pool_id: u32, size: u64) -> [u8; 12] {
+    payload_extension_register_shm_pool(pool_id, size)
+}
+
+/// Build an extension SHM-pool destruction payload.
+///
+/// # Arguments
+///
+/// * `pool_id` - Previously registered pool identifier.
+///
+/// # Returns
+///
+/// Fixed-width destruction payload.
+pub fn payload_extension_destroy_shm_pool(pool_id: u32) -> [u8; 4] {
+    pool_id.to_le_bytes()
+}
+
+/// Build a reusable extension-buffer definition payload.
+///
+/// # Arguments
+///
+/// * `buffer_id` - Non-zero extension-scoped buffer identifier.
+/// * `pool_id` - Registered SHM pool containing the buffer.
+/// * `offset` - Byte offset of the first pixel within the pool.
+/// * `width` - Buffer width in pixels.
+/// * `height` - Buffer height in pixels.
+/// * `stride` - Bytes between adjacent rows.
+/// * `format` - Backing format identifier; SHM uses Wayland format values.
+///
+/// # Returns
+///
+/// Fixed-width buffer-view payload.
+pub fn payload_extension_define_buffer(
+    buffer_id: u32,
+    pool_id: u32,
+    offset: u64,
+    width: u32,
+    height: u32,
+    stride: u32,
+    format: u32,
+) -> [u8; 32] {
+    let mut payload = [0u8; 32];
+    payload[0..4].copy_from_slice(&buffer_id.to_le_bytes());
+    payload[4..8].copy_from_slice(&pool_id.to_le_bytes());
+    payload[8..16].copy_from_slice(&offset.to_le_bytes());
+    payload[16..20].copy_from_slice(&width.to_le_bytes());
+    payload[20..24].copy_from_slice(&height.to_le_bytes());
+    payload[24..28].copy_from_slice(&stride.to_le_bytes());
+    payload[28..32].copy_from_slice(&format.to_le_bytes());
+    payload
+}
+
+/// Build an extension-buffer destruction payload.
+///
+/// # Arguments
+///
+/// * `buffer_id` - Previously defined buffer identifier.
+///
+/// # Returns
+///
+/// Fixed-width destruction payload.
+pub fn payload_extension_destroy_buffer(buffer_id: u32) -> [u8; 4] {
+    buffer_id.to_le_bytes()
+}
+
+/// Build one atomic extension-buffer commit payload.
+///
+/// # Arguments
+///
+/// * `external_client_id` - Extension-defined owner of the target surface.
+/// * `window_id` - Target SWS window.
+/// * `buffer_id` - Effective buffer after this commit, or zero to unmap it.
+/// * `buffer_changed` - Whether this commit selects or detaches a buffer.
+/// * `commit_serial` - Non-zero monotonically allocated commit identifier.
+/// * `damage_rects` - Bounded list of window-local physical damage rectangles.
+///
+/// # Returns
+///
+/// A complete commit payload, or [`ProtocolError::MalformedPayload`] when the
+/// serial is zero or the damage list exceeds [`EXTENSION_MAX_DAMAGE_RECTS`].
+pub fn payload_extension_commit_buffer(
+    external_client_id: u32,
+    window_id: u32,
+    buffer_id: u32,
+    buffer_changed: bool,
+    commit_serial: u64,
+    damage_rects: &[ExtensionDamageRect],
+) -> Result<Vec<u8>, ProtocolError> {
+    if commit_serial == 0 || damage_rects.len() > EXTENSION_MAX_DAMAGE_RECTS {
+        return Err(ProtocolError::MalformedPayload);
+    }
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&external_client_id.to_le_bytes());
+    payload.extend_from_slice(&window_id.to_le_bytes());
+    payload.extend_from_slice(&buffer_id.to_le_bytes());
+    payload.extend_from_slice(&commit_serial.to_le_bytes());
+    let flags = if buffer_changed {
+        extension_commit_flags::BUFFER_CHANGED
+    } else {
+        0
+    };
+    payload.extend_from_slice(&flags.to_le_bytes());
+    payload.extend_from_slice(&(damage_rects.len() as u32).to_le_bytes());
+    for rect in damage_rects {
+        payload.extend_from_slice(&rect.x.to_le_bytes());
+        payload.extend_from_slice(&rect.y.to_le_bytes());
+        payload.extend_from_slice(&rect.width.to_le_bytes());
+        payload.extend_from_slice(&rect.height.to_le_bytes());
+    }
+    Ok(payload)
+}
+
+/// Parse the packed rectangle suffix from an extension-buffer commit.
+///
+/// # Arguments
+///
+/// * `payload` - Packed 16-byte rectangle records after the commit prefix.
+///
+/// # Returns
+///
+/// Parsed rectangles, including an empty list for a state-only commit, or
+/// [`ProtocolError::MalformedPayload`] for a misaligned or oversized list.
+pub fn parse_extension_damage_rects(
+    payload: &[u8],
+) -> Result<Vec<ExtensionDamageRect>, ProtocolError> {
+    if payload.len() % 16 != 0 || payload.len() / 16 > EXTENSION_MAX_DAMAGE_RECTS {
+        return Err(ProtocolError::MalformedPayload);
+    }
+    let mut rects = Vec::new();
+    for offset in (0..payload.len()).step_by(16) {
+        rects.push(ExtensionDamageRect {
+            x: read_i32(payload, offset)?,
+            y: read_i32(payload, offset + 4)?,
+            width: read_u32(payload, offset + 8)?,
+            height: read_u32(payload, offset + 12)?,
+        });
+    }
+    Ok(rects)
+}
+
+/// Build a registered or resized extension SHM-pool response payload.
+///
+/// # Arguments
+///
+/// * `pool_id` - Confirmed pool identifier.
+/// * `size` - Confirmed mapping size in bytes.
+///
+/// # Returns
+///
+/// Fixed-width pool state payload.
+pub fn payload_extension_shm_pool_state(pool_id: u32, size: u64) -> [u8; 12] {
+    payload_extension_register_shm_pool(pool_id, size)
+}
+
+/// Build an external-buffer release notification payload.
+///
+/// # Arguments
+///
+/// * `buffer_id` - Buffer object no longer sampled by SWS.
+/// * `commit_serial` - Exact retained use of the reusable buffer object.
+///
+/// # Returns
+///
+/// Fixed-width release payload.
+pub fn payload_extension_buffer_released(buffer_id: u32, commit_serial: u64) -> [u8; 12] {
+    let mut payload = [0u8; 12];
+    payload[0..4].copy_from_slice(&buffer_id.to_le_bytes());
+    payload[4..12].copy_from_slice(&commit_serial.to_le_bytes());
     payload
 }
 
@@ -5274,23 +5730,141 @@ pub fn payload_set_window_geometry(window_id: u32, geometry: WindowGeometry) -> 
 #[cfg(all(test, feature = "std"))]
 mod tests {
     use super::{
-        CURSOR_THEME_PATH_MAX_BYTES, ClientMessageRef, CursorIcon, InitialWindowConfiguration,
-        InputEnvironment, MessageHeader, ProtocolError, ServerMessage, WindowGeometry,
-        WindowGeometryInsets, WindowPlacement, WindowSizeLimits, WindowingMode, client_msg,
-        encode_routed_frame, error_codes, input_environment_capability_flags,
+        CURSOR_THEME_PATH_MAX_BYTES, ClientMessageRef, CursorIcon, ExtensionDamageRect,
+        InitialWindowConfiguration, InputEnvironment, MessageHeader, ProtocolError, ServerMessage,
+        WindowGeometry, WindowGeometryInsets, WindowPlacement, WindowSizeLimits, WindowingMode,
+        client_msg, encode_routed_frame, error_codes, input_environment_capability_flags,
         input_environment_known_flags, input_environment_state_flags, parse_client_message,
-        parse_server_message, payload_activation_token, payload_create_window_configured,
-        payload_create_window_with_placement,
+        parse_extension_damage_rects, parse_server_message, payload_activation_token,
+        payload_create_window_configured, payload_create_window_with_placement,
         payload_create_window_with_placement_and_activation_token,
-        payload_create_window_with_position, payload_error, payload_frame_done,
-        payload_input_environment_changed, payload_pointer_lock_changed,
-        payload_request_activation_token, payload_request_frame, payload_set_cursor_icon,
-        payload_set_cursor_theme, payload_set_fullscreen, payload_set_pointer_lock,
-        payload_set_tablet_mode_override, payload_set_window_geometry,
+        payload_create_window_with_position, payload_error, payload_extension_buffer_released,
+        payload_extension_commit_buffer, payload_extension_define_buffer,
+        payload_extension_destroy_buffer, payload_extension_destroy_shm_pool,
+        payload_extension_register_shm_pool, payload_extension_resize_shm_pool,
+        payload_extension_shm_pool_state, payload_frame_done, payload_input_environment_changed,
+        payload_pointer_lock_changed, payload_request_activation_token, payload_request_frame,
+        payload_set_cursor_icon, payload_set_cursor_theme, payload_set_fullscreen,
+        payload_set_pointer_lock, payload_set_tablet_mode_override, payload_set_window_geometry,
         payload_set_windowing_mode_override, payload_unset_fullscreen,
         payload_window_created_configured, payload_window_state_changed, server_msg,
         window_placement, window_state,
     };
+
+    #[test]
+    fn extension_buffer_object_lifecycle_round_trips() {
+        let register = payload_extension_register_shm_pool(7, 65_536);
+        assert_eq!(
+            parse_client_message(client_msg::EXTENSION_REGISTER_SHM_POOL, &register),
+            Ok(ClientMessageRef::ExtensionRegisterShmPool {
+                pool_id: 7,
+                size: 65_536,
+            })
+        );
+
+        let resize = payload_extension_resize_shm_pool(7, 131_072);
+        assert_eq!(
+            parse_client_message(client_msg::EXTENSION_RESIZE_SHM_POOL, &resize),
+            Ok(ClientMessageRef::ExtensionResizeShmPool {
+                pool_id: 7,
+                size: 131_072,
+            })
+        );
+
+        let define = payload_extension_define_buffer(19, 7, 4096, 320, 200, 1280, 0);
+        assert_eq!(
+            parse_client_message(client_msg::EXTENSION_DEFINE_BUFFER, &define),
+            Ok(ClientMessageRef::ExtensionDefineBuffer {
+                buffer_id: 19,
+                pool_id: 7,
+                offset: 4096,
+                width: 320,
+                height: 200,
+                stride: 1280,
+                format: 0,
+            })
+        );
+
+        let damage = [
+            ExtensionDamageRect::new(-2, 4, 18, 20),
+            ExtensionDamageRect::new(30, 40, 50, 60),
+        ];
+        let commit = payload_extension_commit_buffer(11, 42, 19, true, 99, &damage).unwrap();
+        let ClientMessageRef::ExtensionCommitBuffer {
+            external_client_id,
+            window_id,
+            buffer_id,
+            buffer_changed,
+            commit_serial,
+            damage_rects,
+        } = parse_client_message(client_msg::EXTENSION_COMMIT_BUFFER, &commit).unwrap()
+        else {
+            panic!("expected extension-buffer commit");
+        };
+        assert_eq!((external_client_id, window_id, buffer_id), (11, 42, 19));
+        assert!(buffer_changed);
+        assert_eq!(commit_serial, 99);
+        assert_eq!(parse_extension_damage_rects(damage_rects).unwrap(), damage);
+
+        assert_eq!(
+            parse_client_message(
+                client_msg::EXTENSION_DESTROY_BUFFER,
+                &payload_extension_destroy_buffer(19),
+            ),
+            Ok(ClientMessageRef::ExtensionDestroyBuffer { buffer_id: 19 })
+        );
+        assert_eq!(
+            parse_client_message(
+                client_msg::EXTENSION_DESTROY_SHM_POOL,
+                &payload_extension_destroy_shm_pool(7),
+            ),
+            Ok(ClientMessageRef::ExtensionDestroyShmPool { pool_id: 7 })
+        );
+    }
+
+    #[test]
+    fn extension_buffer_responses_round_trip() {
+        let state = payload_extension_shm_pool_state(7, 131_072);
+        assert_eq!(
+            parse_server_message(server_msg::EXTENSION_SHM_POOL_REGISTERED, &state),
+            Ok(ServerMessage::ExtensionShmPoolRegistered {
+                pool_id: 7,
+                size: 131_072,
+            })
+        );
+        assert_eq!(
+            parse_server_message(server_msg::EXTENSION_SHM_POOL_RESIZED, &state),
+            Ok(ServerMessage::ExtensionShmPoolResized {
+                pool_id: 7,
+                size: 131_072,
+            })
+        );
+        assert_eq!(
+            parse_server_message(
+                server_msg::EXTENSION_BUFFER_RELEASED,
+                &payload_extension_buffer_released(19, 99),
+            ),
+            Ok(ServerMessage::ExtensionBufferReleased {
+                buffer_id: 19,
+                commit_serial: 99,
+            })
+        );
+    }
+
+    #[test]
+    fn extension_buffer_commit_accepts_state_only_damage() {
+        let payload = payload_extension_commit_buffer(11, 42, 19, false, 1, &[]).unwrap();
+        let ClientMessageRef::ExtensionCommitBuffer { damage_rects, .. } =
+            parse_client_message(client_msg::EXTENSION_COMMIT_BUFFER, &payload).unwrap()
+        else {
+            panic!("expected extension-buffer commit");
+        };
+        assert!(
+            parse_extension_damage_rects(damage_rects)
+                .unwrap()
+                .is_empty()
+        );
+    }
 
     #[test]
     fn window_geometry_round_trips_signed_offsets_and_visible_extent() {
