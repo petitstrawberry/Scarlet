@@ -595,8 +595,18 @@ impl PointerFrame {
                 _ => {}
             },
             event_types::EV_KEY => {
-                if metadata.multitouch() && event.code == key_codes::BTN_TOUCH {
-                    return None;
+                if metadata.multitouch() {
+                    // A multitouch contact lifecycle is owned exclusively by
+                    // MtFrameAssembler. Direct-touch devices commonly mirror
+                    // it through BTN_TOUCH and may also expose BTN_LEFT for
+                    // legacy consumers; forwarding either mirror would turn
+                    // one physical contact into both TouchFrame and mouse
+                    // button streams.
+                    if event.code == key_codes::BTN_TOUCH
+                        || metadata.direct_touch && event.code == key_codes::BTN_LEFT
+                    {
+                        return None;
+                    }
                 }
                 if metadata.direct_touch && event.code == key_codes::BTN_TOUCH {
                     if event.value == 0 || event.value == 1 {
@@ -604,13 +614,8 @@ impl PointerFrame {
                     }
                     return None;
                 }
-                let code = if metadata.direct_touch && event.code == key_codes::BTN_TOUCH {
-                    key_codes::BTN_LEFT
-                } else {
-                    event.code
-                };
                 if event.value == 0 || event.value == 1 {
-                    self.buttons.push((code, event.value == 1));
+                    self.buttons.push((event.code, event.value == 1));
                 }
             }
             event_types::EV_SYN if event.code == syn_codes::SYN_REPORT => {
@@ -1185,6 +1190,21 @@ mod tests {
         }
     }
 
+    fn multitouch_metadata(kind: InputDeviceKind) -> PointerMetadata {
+        PointerMetadata {
+            mt_x_axis: Some(AxisRange {
+                minimum: 100,
+                maximum: 1100,
+            }),
+            mt_y_axis: Some(AxisRange {
+                minimum: -500,
+                maximum: 1500,
+            }),
+            mt_slot_count: 5,
+            ..metadata(kind)
+        }
+    }
+
     #[test]
     fn sole_posture_source_disconnect_becomes_unknown() {
         let mut registry = PostureRegistry::default();
@@ -1466,6 +1486,64 @@ mod tests {
                 }],
                 cancelled: false,
             })]
+        );
+    }
+
+    #[test]
+    fn multitouch_touchscreen_does_not_duplicate_legacy_button_mirrors() {
+        let metadata = multitouch_metadata(InputDeviceKind::Touchscreen);
+        let source = PointerSource::Local(24);
+        let mut frame = PointerFrame::default();
+
+        assert!(
+            frame
+                .consume(
+                    metadata,
+                    source,
+                    event(event_types::EV_KEY, key_codes::BTN_TOUCH, 1),
+                )
+                .is_none()
+        );
+        assert!(
+            frame
+                .consume(
+                    metadata,
+                    source,
+                    event(event_types::EV_KEY, key_codes::BTN_LEFT, 1),
+                )
+                .is_none()
+        );
+        assert_eq!(
+            frame.consume(
+                metadata,
+                source,
+                event(event_types::EV_SYN, syn_codes::SYN_REPORT, 0),
+            ),
+            Some(std::vec![])
+        );
+    }
+
+    #[test]
+    fn multitouch_touchpad_keeps_its_physical_click_button() {
+        let metadata = multitouch_metadata(InputDeviceKind::Touchpad);
+        let source = PointerSource::Local(8);
+        let mut frame = PointerFrame::default();
+
+        frame.consume(
+            metadata,
+            source,
+            event(event_types::EV_KEY, key_codes::BTN_LEFT, 1),
+        );
+        assert_eq!(
+            frame.consume(
+                metadata,
+                source,
+                event(event_types::EV_SYN, syn_codes::SYN_REPORT, 0),
+            ),
+            Some(std::vec![CompositorInputEvent::MouseButton {
+                button: key_codes::BTN_LEFT,
+                pressed: true,
+            }])
         );
     }
 

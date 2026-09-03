@@ -679,11 +679,13 @@ fn build_status_cluster(
     }
     if snapshot.preferences.is_visible(StatusItemId::Audio) {
         let volume_icon = volume_status_icon(snapshot.audio_volume_percent, snapshot.audio_muted);
+        let selected = control_center_open.get();
         let item = MenuItem::new("")
             .icon(volume_icon)
             .icon_size(IconSize::Small)
             .font_size(tokens.font_size)
             .padding(tokens.horizontal_padding)
+            .selected(selected)
             .on_click(move || toggle_control_center(control_center_open.clone()));
         let item = menu_item_with_foreground(item, foreground);
         items.push(boxed(

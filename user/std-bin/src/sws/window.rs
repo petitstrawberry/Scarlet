@@ -1502,13 +1502,16 @@ impl WindowManager {
         self.focus_window(id);
     }
 
-    /// Check if a window type should accept keyboard focus
-    /// Desktop windows can accept focus (to receive events) but won't raise (raise_on_focus=false)
+    /// Check if a window type should accept keyboard focus.
+    ///
+    /// Pointer events are routed independently from keyboard focus. The
+    /// taskbar therefore remains interactive without replacing the focused
+    /// application when a status control is pressed.
     pub fn window_type_accepts_focus(window_type: WindowType) -> bool {
         match window_type {
             WindowType::Normal => true,
             WindowType::AlwaysOnTop => true,
-            WindowType::Taskbar => true,
+            WindowType::Taskbar => false,
             WindowType::Desktop => true, // Desktop can now accept focus (for events), but won't raise
             WindowType::ShellBackground => true,
             WindowType::ShellChrome => false,
@@ -1762,7 +1765,17 @@ impl WindowManager {
 
             // Update focus if closed window was focused
             if self.focused_window == Some(id) {
-                self.focused_window = self.windows.last().map(|w| w.id);
+                self.focused_window =
+                    self.windows
+                        .iter()
+                        .rev()
+                        .map(|window| window.id)
+                        .find(|candidate| {
+                            self.window_accepts_focus(*candidate)
+                                && self
+                                    .get_window(*candidate)
+                                    .is_some_and(Window::is_presented)
+                        });
                 if let Some(new_focus) = self.focused_window {
                     if let Some(window) = self.get_window_mut(new_focus) {
                         window.focused = true;
@@ -2644,6 +2657,37 @@ mod tests {
     use std::vec::Vec;
 
     use super::{WindowManager, WindowType, rounded_rect_contains_point, rounded_rect_row_span};
+
+    #[test]
+    fn taskbar_routes_pointer_input_without_taking_keyboard_focus() {
+        assert!(!WindowManager::window_type_accepts_focus(
+            WindowType::Taskbar
+        ));
+        assert!(WindowManager::window_type_accepts_focus(
+            WindowType::AlwaysOnTop
+        ));
+    }
+
+    #[test]
+    fn closing_popup_restores_focus_past_non_focusable_taskbar() {
+        let mut manager = WindowManager::new();
+        let app = manager.create_window_no_buffer(0, 32, 800, 600);
+        let taskbar = manager.create_window_no_buffer(0, 0, 800, 32);
+        let popup = manager.create_window_no_buffer(600, 32, 200, 300);
+        assert!(manager.set_window_type(taskbar, WindowType::Taskbar));
+        assert!(manager.set_window_type(popup, WindowType::AlwaysOnTop));
+        manager.set_focus(popup);
+
+        manager.close_window(popup);
+
+        assert_eq!(manager.get_focused_window_id(), Some(app));
+        assert!(manager.get_window(app).is_some_and(|window| window.focused));
+        assert!(
+            !manager
+                .get_window(taskbar)
+                .is_some_and(|window| window.focused)
+        );
+    }
 
     #[test]
     fn rounded_overview_clip_rejects_only_card_corners() {

@@ -969,10 +969,40 @@ mod touch_modality_tests {
             vec![
                 (event_types::EV_ABS, abs_codes::ABS_X, -1),
                 (event_types::EV_ABS, abs_codes::ABS_Y, -1),
+                (event_types::EV_SYN, 0, 0),
                 (event_types::EV_KEY, key_codes::BTN_LEFT, 0),
                 (event_types::EV_SYN, 0, 0),
             ]
         );
+    }
+
+    #[test]
+    fn direct_touch_has_only_one_legacy_primary_across_the_seat() {
+        let primary = DirectTouchGrab {
+            source: PointerSource::Local(24),
+            tracking_id: 1,
+            window_id: 100,
+            legacy_primary: true,
+            driving_move_drag: false,
+            screen_x: 10,
+            screen_y: 20,
+        };
+        let secondary = DirectTouchGrab {
+            source: PointerSource::Local(25),
+            tracking_id: 2,
+            window_id: 100,
+            legacy_primary: false,
+            driving_move_drag: false,
+            screen_x: 10,
+            screen_y: 20,
+        };
+
+        assert!(direct_touch_legacy_primary_available(&[]));
+        assert!(!direct_touch_legacy_primary_available(&[primary]));
+        assert!(!direct_touch_legacy_primary_available(&[
+            primary, secondary
+        ]));
+        assert!(direct_touch_legacy_primary_available(&[secondary]));
     }
 
     #[test]
@@ -2253,6 +2283,10 @@ struct DirectTouchGrab {
     screen_y: i32,
 }
 
+fn direct_touch_legacy_primary_available(grabs: &[DirectTouchGrab]) -> bool {
+    !grabs.iter().any(|grab| grab.legacy_primary)
+}
+
 #[derive(Debug, Clone, Copy)]
 struct SystemTouchNavigation {
     source: PointerSource,
@@ -2330,12 +2364,20 @@ fn direct_legacy_event_sequence(
             (abs, y, outside),
             (syn, 0, 0),
         ],
-        DirectLegacyEventKind::Cancel => vec![
-            (abs, x, outside),
-            (abs, y, outside),
-            (key, button, 0),
-            (syn, 0, 0),
-        ],
+        DirectLegacyEventKind::Cancel => {
+            // SWS clients batch ABS motion until SYN_REPORT. Commit the
+            // outside position first so controls observe pointer exit and
+            // clear their pressed state before the compatibility button-up;
+            // otherwise a cancelled contact is indistinguishable from a
+            // successful click.
+            vec![
+                (abs, x, outside),
+                (abs, y, outside),
+                (syn, 0, 0),
+                (key, button, 0),
+                (syn, 0, 0),
+            ]
+        }
     }
 }
 
@@ -5767,10 +5809,11 @@ impl Compositor {
             let Some(window_id) = self.window_manager.window_at_point(screen_x, screen_y) else {
                 continue;
             };
-            let legacy_primary = !self
-                .direct_touch_grabs
-                .iter()
-                .any(|grab| grab.source == frame.source);
+            // The compatibility ABI exposes one logical pointer, not one
+            // pointer per physical source. Keep a single legacy-primary
+            // contact across the whole seat so duplicate/overlapping direct
+            // devices cannot deliver two button lifecycles for one tap.
+            let legacy_primary = direct_touch_legacy_primary_available(&self.direct_touch_grabs);
             if legacy_primary {
                 self.activate_window_from_input(window_id);
                 redraw = true;
