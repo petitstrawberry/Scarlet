@@ -24,8 +24,11 @@
 
 use crate::handle::Handle;
 use crate::handle::RawHandle;
+use crate::handle::capability::socket::SocketObjectError;
 use scarlet_sys::{
-    SCTL_SOCKET_GET_NONBLOCK, SCTL_SOCKET_SET_NONBLOCK, Syscall, syscall1, syscall3,
+    ERRNO_EADDRINUSE, ERRNO_EADDRNOTAVAIL, ERRNO_ECONNREFUSED, ERRNO_ECONNRESET, ERRNO_EINTR,
+    ERRNO_EINVAL, ERRNO_ENOTCONN, ERRNO_ETIMEDOUT, SCTL_SOCKET_GET_NONBLOCK,
+    SCTL_SOCKET_SET_NONBLOCK, Syscall, syscall1, syscall3,
 };
 
 pub use crate::handle::capability::ShutdownHow;
@@ -61,6 +64,16 @@ pub enum SocketError {
     NotListening,
     /// Connection refused
     ConnectionRefused,
+    /// Connection reset by the peer
+    ConnectionReset,
+    /// Socket is not connected
+    NotConnected,
+    /// Operation was interrupted
+    Interrupted,
+    /// Operation timed out
+    TimedOut,
+    /// Requested address is unavailable
+    AddressNotAvailable,
     /// Operation would block
     WouldBlock,
     /// The supplied destination cannot hold the next complete socket record
@@ -70,9 +83,31 @@ pub enum SocketError {
     },
     /// The outgoing record exceeds the local socket record limit
     MessageTooLarge,
+    /// Other system error with its positive Scarlet errno
+    SystemError(i32),
 }
 
 pub type Result<T> = core::result::Result<T, SocketError>;
+
+fn socket_object_error(error: SocketObjectError) -> SocketError {
+    match error {
+        SocketObjectError::WouldBlock => SocketError::WouldBlock,
+        SocketObjectError::ReceiveBufferTooSmall { required_len } => {
+            SocketError::ReceiveBufferTooSmall { required_len }
+        }
+        SocketObjectError::MessageTooLarge => SocketError::MessageTooLarge,
+        SocketObjectError::SystemError(-1) => SocketError::SyscallFailed,
+        SocketObjectError::SystemError(ERRNO_EADDRINUSE) => SocketError::AlreadyBound,
+        SocketObjectError::SystemError(ERRNO_EADDRNOTAVAIL) => SocketError::AddressNotAvailable,
+        SocketObjectError::SystemError(ERRNO_ECONNREFUSED) => SocketError::ConnectionRefused,
+        SocketObjectError::SystemError(ERRNO_ECONNRESET) => SocketError::ConnectionReset,
+        SocketObjectError::SystemError(ERRNO_EINTR) => SocketError::Interrupted,
+        SocketObjectError::SystemError(ERRNO_ENOTCONN) => SocketError::NotConnected,
+        SocketObjectError::SystemError(ERRNO_ETIMEDOUT) => SocketError::TimedOut,
+        SocketObjectError::SystemError(ERRNO_EINVAL) => SocketError::InvalidAddress,
+        SocketObjectError::SystemError(errno) => SocketError::SystemError(errno),
+    }
+}
 
 impl Socket {
     /// Create a new socket
@@ -159,7 +194,7 @@ impl Socket {
             .handle
             .as_socket()
             .map_err(|_| SocketError::InvalidHandle)?;
-        sock.bind_inet(&addr).map_err(|_| SocketError::AlreadyBound)
+        sock.bind_inet(&addr).map_err(socket_object_error)
     }
 
     /// Bind outgoing IPv4 datagrams to a network interface.
@@ -213,8 +248,7 @@ impl Socket {
             .handle
             .as_socket()
             .map_err(|_| SocketError::InvalidHandle)?;
-        sock.connect_inet(&addr)
-            .map_err(|_| SocketError::ConnectionRefused)
+        sock.connect_inet(&addr).map_err(socket_object_error)
     }
 
     /// Create a `Socket` from an existing [`Handle`].
@@ -246,6 +280,46 @@ impl Socket {
         self.handle.as_raw()
     }
 
+    /// Query the socket's local IPv4 address.
+    ///
+    /// # Returns
+    ///
+    /// The bound address, or an error if the socket is unbound or not IPv4.
+    pub fn local_addr_inet(&self) -> Result<Inet4SocketAddress> {
+        self.handle
+            .as_socket()
+            .map_err(|_| SocketError::InvalidHandle)?
+            .local_addr_inet()
+            .map_err(socket_object_error)
+    }
+
+    /// Query the socket's peer IPv4 address.
+    ///
+    /// # Returns
+    ///
+    /// The connected peer address, or an error if the socket is not connected
+    /// or not IPv4.
+    pub fn peer_addr_inet(&self) -> Result<Inet4SocketAddress> {
+        self.handle
+            .as_socket()
+            .map_err(|_| SocketError::InvalidHandle)?
+            .peer_addr_inet()
+            .map_err(socket_object_error)
+    }
+
+    /// Take and clear a deferred asynchronous socket error.
+    ///
+    /// # Returns
+    ///
+    /// A positive Scarlet errno when an error was pending, or None otherwise.
+    pub fn take_error(&self) -> Result<Option<i32>> {
+        self.handle
+            .as_socket()
+            .map_err(|_| SocketError::InvalidHandle)?
+            .take_error()
+            .map_err(socket_object_error)
+    }
+
     /// Convert the Socket into a Handle
     pub fn into_handle(self) -> Handle {
         self.handle
@@ -267,7 +341,7 @@ impl Socket {
             .handle
             .as_socket()
             .map_err(|_| SocketError::InvalidHandle)?;
-        let raw = sock.recv_handle().map_err(|_| SocketError::WouldBlock)?;
+        let raw = sock.recv_handle().map_err(socket_object_error)?;
         unsafe { Handle::from_raw(raw) }.map_err(|_| SocketError::SyscallFailed)
     }
 
@@ -355,7 +429,7 @@ impl Socket {
             .handle
             .as_socket()
             .map_err(|_| SocketError::InvalidHandle)?;
-        sock.bind(path).map_err(|_| SocketError::AlreadyBound)
+        sock.bind(path).map_err(socket_object_error)
     }
 
     /// Bind socket to an abstract local name.
@@ -376,8 +450,7 @@ impl Socket {
             .handle
             .as_socket()
             .map_err(|_| SocketError::InvalidHandle)?;
-        sock.bind_abstract(name)
-            .map_err(|_| SocketError::AlreadyBound)
+        sock.bind_abstract(name).map_err(socket_object_error)
     }
 
     /// Start listening for connections
@@ -402,7 +475,7 @@ impl Socket {
             .handle
             .as_socket()
             .map_err(|_| SocketError::InvalidHandle)?;
-        sock.listen(backlog).map_err(|_| SocketError::NotListening)
+        sock.listen(backlog).map_err(socket_object_error)
     }
 
     /// Connect to a named socket
@@ -426,8 +499,7 @@ impl Socket {
             .handle
             .as_socket()
             .map_err(|_| SocketError::InvalidHandle)?;
-        sock.connect(path)
-            .map_err(|_| SocketError::ConnectionRefused)
+        sock.connect(path).map_err(socket_object_error)
     }
 
     /// Connect to an abstract local socket.
@@ -444,8 +516,7 @@ impl Socket {
             .handle
             .as_socket()
             .map_err(|_| SocketError::InvalidHandle)?;
-        sock.connect_abstract(name)
-            .map_err(|_| SocketError::ConnectionRefused)
+        sock.connect_abstract(name).map_err(socket_object_error)
     }
 
     /// Accept an incoming connection
@@ -468,7 +539,7 @@ impl Socket {
             .handle
             .as_socket()
             .map_err(|_| SocketError::InvalidHandle)?;
-        let raw = sock.accept().map_err(|_| SocketError::WouldBlock)?;
+        let raw = sock.accept().map_err(socket_object_error)?;
         let handle = unsafe { Handle::from_raw(raw) }.map_err(|_| SocketError::SyscallFailed)?;
         Ok(Socket { handle })
     }
@@ -533,7 +604,7 @@ impl Socket {
             .handle
             .as_socket()
             .map_err(|_| SocketError::InvalidHandle)?;
-        sock.shutdown(how).map_err(|_| SocketError::SyscallFailed)
+        sock.shutdown(how).map_err(socket_object_error)
     }
 
     /// Get StreamOps capability for this socket
@@ -703,18 +774,7 @@ impl DatagramOps for Socket {
             addr_buf.as_mut_ptr() as usize,
         );
 
-        // Handle negative errno values first
-        if result > (isize::MAX as usize) {
-            let errno = -(result as isize) as i32;
-            if errno == 11 {
-                return Err(SocketError::WouldBlock);
-            }
-            return Err(SocketError::SyscallFailed);
-        }
-
-        if result == usize::MAX {
-            return Err(SocketError::SyscallFailed);
-        }
+        let result = SocketObjectError::from_syscall_result(result).map_err(socket_object_error)?;
 
         // Success - parse address
         let addr = match addr_buf[0] {
@@ -751,11 +811,7 @@ impl DatagramOps for Socket {
             addr_buf.as_ptr() as usize,
         );
 
-        if result == usize::MAX {
-            return Err(SocketError::SyscallFailed);
-        }
-
-        Ok(result)
+        SocketObjectError::from_syscall_result(result).map_err(socket_object_error)
     }
 }
 

@@ -51,6 +51,8 @@ pub mod socket_ctl {
     pub const SCTL_SOCKET_GET_READ_TIMEOUT_MS: u32 = 0x5353_000E;
     /// Get socket write timeout in milliseconds (returns 0 if disabled)
     pub const SCTL_SOCKET_GET_WRITE_TIMEOUT_MS: u32 = 0x5353_000F;
+    /// Take the pending socket error (returns zero or a positive native errno)
+    pub const SCTL_SOCKET_TAKE_ERROR: u32 = 0x5353_0010;
     /// Get socket type (returns SocketType value)
     pub const SCTL_SOCKET_GET_TYPE: u32 = 0x5353_0009;
     /// Check if connected (returns 0 or 1)
@@ -297,6 +299,8 @@ pub enum SocketError {
     WouldBlock,
     /// Operation was interrupted by asynchronous task event delivery
     Interrupted,
+    /// Operation timed out
+    TimedOut,
     /// Invalid argument
     InvalidArgument,
     /// Not supported
@@ -309,6 +313,28 @@ pub enum SocketError {
     InvalidPacket,
     /// Custom error message
     Other(String),
+}
+
+/// Convert a socket error into the positive errno used by Scarlet Native.
+pub(crate) fn socket_error_to_native_errno(error: &SocketError) -> i32 {
+    match error {
+        SocketError::InvalidAddress | SocketError::InvalidArgument => 22,
+        SocketError::AddressInUse => 98,
+        SocketError::AddressNotAvailable => 99,
+        SocketError::ConnectionRefused => 111,
+        SocketError::ConnectionReset => 104,
+        SocketError::ConnectionAborted => 103,
+        SocketError::NotConnected => 107,
+        SocketError::AlreadyConnected => 106,
+        SocketError::InvalidOperation | SocketError::NotListening => 22,
+        SocketError::NoConnections | SocketError::WouldBlock => 11,
+        SocketError::Interrupted => 4,
+        SocketError::TimedOut => 110,
+        SocketError::NotSupported => 95,
+        SocketError::NoRoute => 101,
+        SocketError::ProtocolNotSupported => 93,
+        SocketError::InvalidPacket | SocketError::Other(_) => 5,
+    }
 }
 
 /// Socket control operations trait
@@ -343,6 +369,24 @@ pub trait SocketControl {
 
     /// Get socket state
     fn state(&self) -> SocketState;
+
+    /// Check whether the socket has a deferred asynchronous error.
+    ///
+    /// # Returns
+    ///
+    /// `true` when [`SocketControl::take_pending_error`] would return an error.
+    fn has_pending_error(&self) -> bool {
+        false
+    }
+
+    /// Take and clear a deferred asynchronous socket error.
+    ///
+    /// # Returns
+    ///
+    /// The pending error, or `None` when no asynchronous error is pending.
+    fn take_pending_error(&self) -> Option<SocketError> {
+        None
+    }
 }
 
 /// Socket operations trait

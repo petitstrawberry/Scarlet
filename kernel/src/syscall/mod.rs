@@ -102,8 +102,8 @@ use crate::network::syscall::{
 };
 use crate::network::syscall::{
     sys_socket_accept, sys_socket_bind, sys_socket_bind_interface, sys_socket_connect,
-    sys_socket_create, sys_socket_listen, sys_socket_recvfrom, sys_socket_sendto,
-    sys_socket_shutdown, sys_socketpair,
+    sys_socket_create, sys_socket_get_local_address, sys_socket_get_peer_address,
+    sys_socket_listen, sys_socket_recvfrom, sys_socket_sendto, sys_socket_shutdown, sys_socketpair,
 };
 use crate::object::capability::file::{sys_file_metadata, sys_file_seek, sys_file_truncate};
 use crate::object::capability::memory_mapping::{sys_memory_map, sys_memory_unmap};
@@ -328,6 +328,8 @@ syscall_table! {
     NetworkConfigureIpv4 = 915 => sys_network_configure_ipv4, // Configure one interface
     NetworkListInterfacesV2 = 916 => sys_network_list_interfaces_v2, // List per-interface configuration
     NetworkClearIpv4 = 917 => sys_network_clear_ipv4, // Clear one interface's IPv4 configuration
+    SocketGetLocalAddress = 918 => sys_socket_get_local_address, // Query local IPv4 address
+    SocketGetPeerAddress = 919 => sys_socket_get_peer_address, // Query peer IPv4 address
 
     // === Task Event Operations ===
 

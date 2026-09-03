@@ -19,6 +19,8 @@
 //! - `sys_socket_accept()` - Accept an incoming connection (returns new handle)
 //! - `sys_socketpair()` - Create a connected socket pair (for IPC)
 //! - `sys_socket_shutdown()` - Shutdown socket (read, write, or both)
+//! - `sys_socket_get_local_address()` - Query a socket's local IPv4 address
+//! - `sys_socket_get_peer_address()` - Query a socket's peer IPv4 address
 //!
 //! # Usage Example
 //!
@@ -46,11 +48,34 @@ use crate::arch::Trapframe;
 use crate::library::std::usercopy::{copy_from_user, copy_to_user};
 use crate::network::{
     Inet4SocketAddress, Ipv4Address, LocalSocketAddress, NetworkManager, ShutdownHow,
-    SocketAddress, SocketDomain, SocketObject, SocketProtocol, SocketType, local::LocalSocket,
+    SocketAddress, SocketDomain, SocketError, SocketObject, SocketProtocol, SocketType,
+    local::LocalSocket,
 };
 use crate::object::KernelObject;
 use crate::object::handle::{AccessMode, HandleMetadata, HandleType};
 use crate::task::mytask;
+
+fn socket_error_result(error: SocketError) -> usize {
+    let errno = crate::network::socket::socket_error_to_native_errno(&error);
+    (-(errno as isize)) as usize
+}
+
+fn encode_native_ipv4_address(address: SocketAddress) -> Result<[u8; 8], SocketError> {
+    let SocketAddress::Inet(inet) = address else {
+        return Err(SocketError::NotSupported);
+    };
+    let port = inet.port.to_be_bytes();
+    Ok([
+        2,
+        0,
+        inet.addr[0],
+        inet.addr[1],
+        inet.addr[2],
+        inet.addr[3],
+        port[0],
+        port[1],
+    ])
+}
 
 fn local_socket_address_from_user_bytes(
     bytes: &[u8],
@@ -678,8 +703,8 @@ pub fn sys_socket_bind(tf: &mut Trapframe) -> usize {
         }
         let addr =
             unsafe { core::ptr::read_unaligned(addr_bytes.as_ptr() as *const Inet4SocketAddress) };
-        if socket_arc.bind(&SocketAddress::Inet(addr)).is_err() {
-            return usize::MAX;
+        if let Err(error) = socket_arc.bind(&SocketAddress::Inet(addr)) {
+            return socket_error_result(error);
         }
         return 0;
     }
@@ -695,11 +720,8 @@ pub fn sys_socket_bind(tf: &mut Trapframe) -> usize {
         };
 
     // Bind updates the socket's internal state
-    if socket_arc
-        .bind(&SocketAddress::Local(local_addr.clone()))
-        .is_err()
-    {
-        return usize::MAX;
+    if let Err(error) = socket_arc.bind(&SocketAddress::Local(local_addr.clone())) {
+        return socket_error_result(error);
     }
 
     // Register the same Arc in NetworkManager's named socket namespace
@@ -851,9 +873,9 @@ pub fn sys_socket_listen(tf: &mut Trapframe) -> usize {
             crate::println!("[sys_socket_listen] Socket {} now listening", handle_id);
             0
         }
-        Err(e) => {
-            crate::println!("[sys_socket_listen] listen() failed: {:?}", e);
-            usize::MAX
+        Err(error) => {
+            crate::println!("[sys_socket_listen] listen() failed: {:?}", error);
+            socket_error_result(error)
         }
     }
 }
@@ -908,10 +930,10 @@ pub fn sys_socket_connect(tf: &mut Trapframe) -> usize {
         }
         let addr =
             unsafe { core::ptr::read_unaligned(addr_bytes.as_ptr() as *const Inet4SocketAddress) };
-        if socket.connect(&SocketAddress::Inet(addr)).is_err() {
-            return usize::MAX;
-        }
-        return 0;
+        return match socket.connect(&SocketAddress::Inet(addr)) {
+            Ok(()) => 0,
+            Err(error) => socket_error_result(error),
+        };
     }
 
     let mut path_bytes = vec![0u8; path_len.min(108)];
@@ -924,11 +946,10 @@ pub fn sys_socket_connect(tf: &mut Trapframe) -> usize {
     };
 
     // Connect the socket - this updates its internal state
-    if socket.connect(&SocketAddress::Local(peer_addr)).is_err() {
-        return usize::MAX;
+    match socket.connect(&SocketAddress::Local(peer_addr)) {
+        Ok(()) => 0,
+        Err(error) => socket_error_result(error),
     }
-
-    0
 }
 
 /// System call: Accept an incoming connection
@@ -980,12 +1001,12 @@ pub fn sys_socket_accept(tf: &mut Trapframe) -> usize {
             // LocalSocket accept
             match local_socket.accept_blocking(task.get_id(), tf) {
                 Ok(socket) => socket,
-                Err(e) => {
+                Err(error) => {
                     crate::println!(
                         "[sys_socket_accept] LocalSocket accept_blocking failed: {:?}",
-                        e
+                        error
                     );
-                    return usize::MAX;
+                    return socket_error_result(error);
                 }
             }
         } else if let Some(tcp_socket) =
@@ -994,7 +1015,7 @@ pub fn sys_socket_accept(tf: &mut Trapframe) -> usize {
             // TcpSocket accept
             match tcp_socket.accept_blocking(task.get_id(), tf) {
                 Ok(socket) => socket,
-                Err(_) => return usize::MAX,
+                Err(error) => return socket_error_result(error),
             }
         } else {
             crate::println!("[sys_socket_accept] Not a supported socket type");
@@ -1150,6 +1171,68 @@ pub fn sys_socket_shutdown(tf: &mut Trapframe) -> usize {
     0
 }
 
+fn sys_socket_address(tf: &mut Trapframe, peer: bool) -> usize {
+    let task = match mytask() {
+        Some(task) => task,
+        None => return usize::MAX,
+    };
+    tf.increment_pc_next(&task);
+
+    let handle_id = tf.get_arg(0) as u32;
+    let address_ptr = tf.get_arg(1);
+    let socket = match task
+        .handle_table
+        .get(handle_id)
+        .and_then(KernelObject::into_socket_arc)
+    {
+        Some(socket) => socket,
+        None => return (-(9isize)) as usize,
+    };
+
+    let address = if peer {
+        socket.getpeername()
+    } else {
+        socket.getsockname()
+    };
+    let encoded = match address.and_then(encode_native_ipv4_address) {
+        Ok(address) => address,
+        Err(error) => return socket_error_result(error),
+    };
+
+    if copy_to_user(&task, address_ptr, &encoded).is_err() {
+        return (-(22isize)) as usize;
+    }
+    0
+}
+
+/// Query a socket's local IPv4 address.
+///
+/// # Arguments
+///
+/// * Trapframe argument 0 - Socket handle.
+/// * Trapframe argument 1 - Pointer to an eight-byte native IPv4 address buffer.
+///
+/// # Returns
+///
+/// Zero on success, or a negative native errno on failure.
+pub fn sys_socket_get_local_address(tf: &mut Trapframe) -> usize {
+    sys_socket_address(tf, false)
+}
+
+/// Query a socket's peer IPv4 address.
+///
+/// # Arguments
+///
+/// * Trapframe argument 0 - Socket handle.
+/// * Trapframe argument 1 - Pointer to an eight-byte native IPv4 address buffer.
+///
+/// # Returns
+///
+/// Zero on success, or a negative native errno on failure.
+pub fn sys_socket_get_peer_address(tf: &mut Trapframe) -> usize {
+    sys_socket_address(tf, true)
+}
+
 /// System call: Receive datagram with sender address
 ///
 /// Receives a datagram from a socket and returns the sender's address.
@@ -1230,8 +1313,7 @@ pub fn sys_socket_recvfrom(tf: &mut Trapframe) -> usize {
 
             len
         }
-        Err(crate::network::socket::SocketError::WouldBlock) => (-(11i32)) as usize,
-        Err(_) => usize::MAX,
+        Err(error) => socket_error_result(error),
     }
 }
 
@@ -1307,6 +1389,6 @@ pub fn sys_socket_sendto(tf: &mut Trapframe) -> usize {
     // Send datagram
     match socket.sendto(&data, &addr, 0) {
         Ok(len) => len,
-        Err(_) => usize::MAX,
+        Err(error) => socket_error_result(error),
     }
 }

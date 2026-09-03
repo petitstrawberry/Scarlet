@@ -4,7 +4,10 @@
 //! implement the Scarlet Native local socket interface.
 
 use crate::handle::{Handle, RawHandle};
-use scarlet_sys::{Syscall, syscall1, syscall2, syscall3, syscall4, syscall5};
+use scarlet_sys::{
+    ERRNO_EAGAIN, ERRNO_EMSGSIZE, SCTL_SOCKET_TAKE_ERROR, Syscall, syscall1, syscall2, syscall3,
+    syscall4, syscall5,
+};
 
 /// Scarlet Native socket domains
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -85,14 +88,14 @@ pub enum SocketObjectError {
 }
 
 impl SocketObjectError {
-    fn from_syscall_result(result: usize) -> Result<usize, Self> {
+    pub(crate) fn from_syscall_result(result: usize) -> Result<usize, Self> {
         if result == usize::MAX {
             Err(SocketObjectError::SystemError(-1))
         } else if result > isize::MAX as usize {
             let errno = -(result as isize) as i32;
             match errno {
-                11 => Err(SocketObjectError::WouldBlock),
-                90 => Err(SocketObjectError::MessageTooLarge),
+                ERRNO_EAGAIN => Err(SocketObjectError::WouldBlock),
+                ERRNO_EMSGSIZE => Err(SocketObjectError::MessageTooLarge),
                 _ => Err(SocketObjectError::SystemError(errno)),
             }
         } else {
@@ -118,6 +121,23 @@ pub struct SocketObject<'a> {
 }
 
 impl<'a> SocketObject<'a> {
+    fn query_inet_address(&self, syscall: Syscall) -> SocketObjectResult<Inet4SocketAddress> {
+        let mut address = [0u8; 8];
+        let result = syscall2(
+            syscall,
+            self.handle.as_raw() as usize,
+            address.as_mut_ptr() as usize,
+        );
+        SocketObjectError::from_syscall_result(result)?;
+        if address[0] != SocketDomain::Inet4 as u8 {
+            return Err(SocketObjectError::SystemError(-1));
+        }
+        Ok(Inet4SocketAddress::new(
+            [address[2], address[3], address[4], address[5]],
+            u16::from_be_bytes([address[6], address[7]]),
+        ))
+    }
+
     /// Create a SocketObject capability from a Handle reference.
     ///
     /// This is crate-internal to prevent bypassing `Handle::as_socket` validation.
@@ -240,6 +260,43 @@ impl<'a> SocketObject<'a> {
     pub fn accept(&self) -> SocketObjectResult<RawHandle> {
         let result = syscall1(Syscall::SocketAccept, self.handle.as_raw() as usize);
         SocketObjectError::from_syscall_result(result).map(|h| h as RawHandle)
+    }
+
+    /// Query the socket's local IPv4 address.
+    ///
+    /// # Returns
+    ///
+    /// The bound local IPv4 address, or an error when the socket is unbound or
+    /// is not an IPv4 socket.
+    pub fn local_addr_inet(&self) -> SocketObjectResult<Inet4SocketAddress> {
+        self.query_inet_address(Syscall::SocketGetLocalAddress)
+    }
+
+    /// Query the socket's peer IPv4 address.
+    ///
+    /// # Returns
+    ///
+    /// The connected peer IPv4 address, or an error when the socket is not
+    /// connected or is not an IPv4 socket.
+    pub fn peer_addr_inet(&self) -> SocketObjectResult<Inet4SocketAddress> {
+        self.query_inet_address(Syscall::SocketGetPeerAddress)
+    }
+
+    /// Take and clear the socket's deferred asynchronous error.
+    ///
+    /// # Returns
+    ///
+    /// A positive Scarlet errno when an error was pending, None when no error
+    /// was pending, or an error when the handle does not support this query.
+    pub fn take_error(&self) -> SocketObjectResult<Option<i32>> {
+        let result = syscall3(
+            Syscall::HandleControl,
+            self.handle.as_raw() as usize,
+            SCTL_SOCKET_TAKE_ERROR as usize,
+            0,
+        );
+        SocketObjectError::from_syscall_result(result)
+            .map(|errno| (errno != 0).then_some(errno as i32))
     }
 
     /// Shutdown socket

@@ -86,6 +86,7 @@ fn socket_error_to_errno(error: SocketError) -> usize {
         SocketError::NotListening => errno::EINVAL,
         SocketError::NoConnections | SocketError::WouldBlock => errno::EAGAIN,
         SocketError::Interrupted => errno::EINTR,
+        SocketError::TimedOut => errno::ETIMEDOUT,
         SocketError::NotSupported => errno::EOPNOTSUPP,
         SocketError::NoRoute => errno::ENETUNREACH,
         SocketError::ProtocolNotSupported => errno::EPROTONOSUPPORT,

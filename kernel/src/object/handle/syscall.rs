@@ -227,6 +227,18 @@ fn sys_handle_control_for_object(
     command: u32,
     arg: usize,
 ) -> usize {
+    #[cfg(feature = "network")]
+    if command == crate::network::socket::socket_ctl::SCTL_SOCKET_TAKE_ERROR {
+        let Some(socket) = kernel_object.as_socket() else {
+            return usize::MAX;
+        };
+        return socket
+            .take_pending_error()
+            .as_ref()
+            .map(crate::network::socket::socket_error_to_native_errno)
+            .unwrap_or(0) as usize;
+    }
+
     sys_handle_control_for_capabilities(
         kernel_object.as_selectable(),
         kernel_object.as_control(),

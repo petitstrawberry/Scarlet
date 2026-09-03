@@ -589,6 +589,46 @@ pub const SCTL_SOCKET_SET_WRITE_TIMEOUT_MS: u32 = 0x5353_000D;
 pub const SCTL_SOCKET_GET_READ_TIMEOUT_MS: u32 = 0x5353_000E;
 /// Scarlet-private socket control opcode for querying write timeout in milliseconds.
 pub const SCTL_SOCKET_GET_WRITE_TIMEOUT_MS: u32 = 0x5353_000F;
+/// Scarlet-private socket control opcode for taking the pending socket error.
+///
+/// The return value is zero when no error is pending, or a positive `ERRNO_*`
+/// value. Reading the value clears it.
+pub const SCTL_SOCKET_TAKE_ERROR: u32 = 0x5353_0010;
+
+/// Interrupted system call.
+pub const ERRNO_EINTR: i32 = 4;
+/// Input/output error.
+pub const ERRNO_EIO: i32 = 5;
+/// Bad handle.
+pub const ERRNO_EBADF: i32 = 9;
+/// Operation would block.
+pub const ERRNO_EAGAIN: i32 = 11;
+/// Invalid argument.
+pub const ERRNO_EINVAL: i32 = 22;
+/// Message too large.
+pub const ERRNO_EMSGSIZE: i32 = 90;
+/// Protocol not supported.
+pub const ERRNO_EPROTONOSUPPORT: i32 = 93;
+/// Operation not supported.
+pub const ERRNO_EOPNOTSUPP: i32 = 95;
+/// Address already in use.
+pub const ERRNO_EADDRINUSE: i32 = 98;
+/// Address not available.
+pub const ERRNO_EADDRNOTAVAIL: i32 = 99;
+/// Network is unreachable.
+pub const ERRNO_ENETUNREACH: i32 = 101;
+/// Connection aborted.
+pub const ERRNO_ECONNABORTED: i32 = 103;
+/// Connection reset.
+pub const ERRNO_ECONNRESET: i32 = 104;
+/// Socket is already connected.
+pub const ERRNO_EISCONN: i32 = 106;
+/// Socket is not connected.
+pub const ERRNO_ENOTCONN: i32 = 107;
+/// Connection timed out.
+pub const ERRNO_ETIMEDOUT: i32 = 110;
+/// Connection refused.
+pub const ERRNO_ECONNREFUSED: i32 = 111;
 
 /// Fixed-layout file metadata returned by Scarlet Native metadata syscalls.
 #[repr(C)]
@@ -762,6 +802,10 @@ pub enum Syscall {
     NetworkConfigureIpv4 = 915,
     NetworkListInterfacesV2 = 916,
     NetworkClearIpv4 = 917,
+    /// Write the socket's local IPv4 address to an eight-byte native address buffer.
+    SocketGetLocalAddress = 918,
+    /// Write the socket's peer IPv4 address to an eight-byte native address buffer.
+    SocketGetPeerAddress = 919,
 
     // Debug/profiler operations
     GetCpuDebugInfo = 997,

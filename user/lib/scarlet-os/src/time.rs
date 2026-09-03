@@ -89,7 +89,6 @@ fn tzif_offset(data: &[u8], now_secs: i64) -> Option<i64> {
     if data.len() < 44 || &data[0..4] != b"TZif" {
         return None;
     }
-    let version = data[4];
     let rd = |off: usize| -> i32 {
         i32::from_be_bytes([data[off], data[off + 1], data[off + 2], data[off + 3]])
     };

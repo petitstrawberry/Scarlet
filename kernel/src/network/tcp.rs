@@ -429,6 +429,8 @@ pub struct TcpSocket {
     read_timeout_ms: AtomicU64,
     /// Write timeout in milliseconds. Zero means no timeout.
     write_timeout_ms: AtomicU64,
+    /// Deferred asynchronous error consumed by `SO_ERROR`-style queries.
+    pending_error: IrqSpinLock<Option<SocketError>>,
     /// Direct peer for in-kernel loopback connections.
     loopback_peer: IrqSpinLock<Weak<TcpSocket>>,
     /// Listening socket that should receive this socket once the handshake completes.
@@ -551,6 +553,7 @@ impl TcpSocket {
             blocking_mode: AtomicBool::new(true), // Default to blocking mode
             read_timeout_ms: AtomicU64::new(0),
             write_timeout_ms: AtomicU64::new(0),
+            pending_error: IrqSpinLock::new(None),
             loopback_peer: IrqSpinLock::new(Weak::new()),
             accept_listener: IrqSpinLock::new(Weak::new()),
             accept_queued: AtomicBool::new(false),
@@ -724,9 +727,6 @@ impl TcpSocket {
         child.send_unacked.store(1000, Ordering::SeqCst);
         child.recv_seq.store(1000, Ordering::SeqCst);
         child.recv_ack.store(1000, Ordering::SeqCst);
-        child.set_state(TcpState::Established);
-        child.accept_queued.store(true, Ordering::SeqCst);
-        *child.loopback_peer.lock() = self.self_weak.clone();
 
         *self.remote_ip.lock() = Some(listener_ip);
         self.remote_port.store(port, Ordering::SeqCst);
@@ -734,8 +734,6 @@ impl TcpSocket {
         self.send_unacked.store(1000, Ordering::SeqCst);
         self.recv_seq.store(1000, Ordering::SeqCst);
         self.recv_ack.store(1000, Ordering::SeqCst);
-        self.set_state(TcpState::Established);
-        *self.loopback_peer.lock() = child.self_weak.clone();
 
         {
             let max_backlog = listener.max_backlog.load(Ordering::SeqCst);
@@ -743,6 +741,12 @@ impl TcpSocket {
             if pending.len() >= max_backlog {
                 return Err(SocketError::ConnectionRefused);
             }
+            child.set_state(TcpState::Established);
+            child.accept_queued.store(true, Ordering::SeqCst);
+            *child.loopback_peer.lock() = self.self_weak.clone();
+            self.clear_pending_error();
+            self.set_state(TcpState::Established);
+            *self.loopback_peer.lock() = child.self_weak.clone();
             pending.push_back(child);
         }
 
@@ -805,6 +809,22 @@ impl TcpSocket {
     /// Set TCP state
     pub fn set_state(&self, new_state: TcpState) {
         *self.state.lock() = new_state;
+    }
+
+    fn clear_pending_error(&self) {
+        self.pending_error.lock().take();
+    }
+
+    fn set_pending_error(&self, error: SocketError) {
+        *self.pending_error.lock() = Some(error);
+    }
+
+    fn has_deferred_error(&self) -> bool {
+        self.pending_error.lock().is_some()
+    }
+
+    fn take_deferred_error(&self) -> Option<SocketError> {
+        self.pending_error.lock().take()
     }
 
     fn set_peer_mss(&self, advertised_mss: Option<u16>) {
@@ -1007,6 +1027,7 @@ impl TcpSocket {
         self.stop_rtt_measurement(acked);
         self.remove_acked_segments(acked);
 
+        self.clear_pending_error();
         self.set_state(TcpState::Established);
         if let Some(waker) = self.send_waker.lock().as_ref() {
             waker.wake_all();
@@ -1017,6 +1038,13 @@ impl TcpSocket {
 
     /// Handle RST (Reset) - properly cleanup connection
     fn handle_rst(&self) {
+        let state = self.get_state();
+        match state {
+            TcpState::Closed | TcpState::Listen => {}
+            TcpState::SynSent => self.set_pending_error(SocketError::ConnectionRefused),
+            _ => self.set_pending_error(SocketError::ConnectionReset),
+        }
+
         // Cancel retransmission timers
         self.cancel_retrans_timer();
 
@@ -2086,6 +2114,7 @@ impl TcpSocket {
             }
 
             if seg.tx_count >= Self::MAX_SEGMENT_TRANSMISSIONS {
+                self.set_pending_error(SocketError::TimedOut);
                 self.set_state(TcpState::Closed);
                 if let Some(waker) = self.send_waker.lock().as_ref() {
                     waker.wake_all();
@@ -2440,13 +2469,15 @@ impl SocketControl for TcpSocket {
     fn bind(&self, address: &SocketAddress) -> Result<(), SocketError> {
         match address {
             SocketAddress::Inet(inet) => {
-                if inet.port == 0 {
-                    return Err(SocketError::InvalidAddress);
-                }
+                let port = if inet.port == 0 {
+                    self.allocate_ephemeral_port()
+                } else {
+                    inet.port
+                };
 
-                self.register_local_port(inet.port)?;
+                self.register_local_port(port)?;
                 *self.local_ip.lock() = Some(Ipv4Address::from_bytes(inet.addr));
-                self.local_port.store(inet.port, Ordering::SeqCst);
+                self.local_port.store(port, Ordering::SeqCst);
                 Ok(())
             }
             _ => Err(SocketError::InvalidAddress),
@@ -2476,6 +2507,7 @@ impl SocketControl for TcpSocket {
     fn connect(&self, address: &SocketAddress) -> Result<(), SocketError> {
         match address {
             SocketAddress::Inet(inet) => {
+                self.clear_pending_error();
                 let addr = Ipv4Address::from_bytes(inet.addr);
                 let port = inet.port;
                 *self.remote_ip.lock() = Some(addr);
@@ -2512,7 +2544,11 @@ impl SocketControl for TcpSocket {
                 loop {
                     match self.get_state() {
                         TcpState::Established => return Ok(()),
-                        TcpState::Closed => return Err(SocketError::ConnectionRefused),
+                        TcpState::Closed => {
+                            return Err(self
+                                .take_deferred_error()
+                                .unwrap_or(SocketError::ConnectionRefused));
+                        }
                         TcpState::SynSent => {
                             let waker = {
                                 let mut waker_lock = self.send_waker.lock();
@@ -2526,7 +2562,11 @@ impl SocketControl for TcpSocket {
                             };
                             match self.get_state() {
                                 TcpState::Established => return Ok(()),
-                                TcpState::Closed => return Err(SocketError::ConnectionRefused),
+                                TcpState::Closed => {
+                                    return Err(self
+                                        .take_deferred_error()
+                                        .unwrap_or(SocketError::ConnectionRefused));
+                                }
                                 TcpState::SynSent => {}
                                 _ => return Err(SocketError::InvalidOperation),
                             }
@@ -2608,9 +2648,18 @@ impl SocketControl for TcpSocket {
         match self.get_state() {
             TcpState::Closed => SocketState::Unconnected,
             TcpState::Listen => SocketState::Listening,
+            TcpState::SynSent => SocketState::Connecting,
             state if tcp_connection_present(state) => SocketState::Connected,
             _ => SocketState::Unconnected,
         }
+    }
+
+    fn has_pending_error(&self) -> bool {
+        self.has_deferred_error()
+    }
+
+    fn take_pending_error(&self) -> Option<SocketError> {
+        self.take_deferred_error()
     }
 }
 
@@ -2700,19 +2749,28 @@ impl crate::object::capability::Selectable for TcpSocket {
         interest: crate::object::capability::selectable::ReadyInterest,
     ) -> crate::object::capability::selectable::ReadySet {
         let mut ready = crate::object::capability::selectable::ReadySet::none();
+        let has_pending_error = self.has_deferred_error();
 
         if interest.read {
-            let recv_buf = self.recv_buffer.lock();
-            let has_data = !recv_buf.is_empty();
-            drop(recv_buf);
             let state = self.get_state();
-            ready.read = has_data || tcp_receive_side_eof(state);
+            ready.read = if state == TcpState::Listen {
+                has_pending_error || !self.pending_accept.lock().is_empty()
+            } else {
+                let recv_buf = self.recv_buffer.lock();
+                let has_data = !recv_buf.is_empty();
+                drop(recv_buf);
+                has_pending_error || has_data || tcp_receive_side_eof(state)
+            };
         }
 
         if interest.write {
             let send_buf = self.send_buffer.lock();
-            ready.write =
-                tcp_send_side_open(self.get_state()) && send_buf.len() < MAX_SEND_BUFFER_SIZE;
+            ready.write = has_pending_error
+                || (tcp_send_side_open(self.get_state()) && send_buf.len() < MAX_SEND_BUFFER_SIZE);
+        }
+
+        if interest.except {
+            ready.except = has_pending_error;
         }
 
         ready
@@ -2755,7 +2813,14 @@ impl crate::object::capability::Selectable for TcpSocket {
             }
 
             let woke = if interest.read {
-                let waker = {
+                let waker = if self.get_state() == TcpState::Listen {
+                    let mut waker_lock = self.accept_waker.lock();
+                    waker_lock
+                        .get_or_insert_with(|| {
+                            Arc::new(crate::sync::Waker::new_interruptible("tcp_accept"))
+                        })
+                        .clone()
+                } else {
                     let mut waker_lock = self.recv_waker.lock();
                     waker_lock
                         .get_or_insert_with(|| {
@@ -3198,6 +3263,77 @@ mod tests {
 
         socket.set_state(TcpState::Established);
         assert_eq!(socket.get_state(), TcpState::Established);
+    }
+
+    #[test_case]
+    fn pending_connect_error_is_ready_and_consumed_once() {
+        let tcp_layer = TcpLayer::new();
+        let socket = TcpSocket::new(Arc::downgrade(&tcp_layer));
+        socket.set_state(TcpState::SynSent);
+
+        socket.handle_rst();
+
+        let ready = crate::object::capability::Selectable::current_ready(
+            socket.as_ref(),
+            crate::object::capability::selectable::ReadyInterest {
+                read: false,
+                write: true,
+                except: true,
+            },
+        );
+        assert!(ready.write);
+        assert!(ready.except);
+        assert!(SocketControl::has_pending_error(socket.as_ref()));
+        assert_eq!(
+            SocketControl::take_pending_error(socket.as_ref()),
+            Some(SocketError::ConnectionRefused)
+        );
+        assert!(!SocketControl::has_pending_error(socket.as_ref()));
+        assert_eq!(SocketControl::take_pending_error(socket.as_ref()), None);
+    }
+
+    #[test_case]
+    fn tcp_bind_zero_allocates_an_ephemeral_port() {
+        let tcp_layer = TcpLayer::new();
+        let socket = TcpSocket::new(Arc::downgrade(&tcp_layer));
+
+        SocketControl::bind(
+            socket.as_ref(),
+            &SocketAddress::Inet(Inet4SocketAddress::new([0, 0, 0, 0], 0)),
+        )
+        .expect("binding port zero should allocate an ephemeral port");
+
+        let SocketAddress::Inet(local) =
+            SocketControl::getsockname(socket.as_ref()).expect("bound socket has a local address")
+        else {
+            panic!("TCP local address must be IPv4");
+        };
+        assert!(local.port >= 49152);
+    }
+
+    #[test_case]
+    fn listener_becomes_readable_when_a_connection_can_be_accepted() {
+        let tcp_layer = TcpLayer::new();
+        let listener = TcpSocket::new(Arc::downgrade(&tcp_layer));
+        let client = TcpSocket::new(Arc::downgrade(&tcp_layer));
+        let address = SocketAddress::Inet(Inet4SocketAddress::new([127, 0, 0, 1], 24_680));
+
+        SocketControl::bind(listener.as_ref(), &address).expect("listener bind should succeed");
+        SocketControl::listen(listener.as_ref(), 16).expect("listener should start listening");
+        SocketControl::connect(client.as_ref(), &address).expect("loopback connect should succeed");
+
+        let ready = crate::object::capability::Selectable::current_ready(
+            listener.as_ref(),
+            crate::object::capability::selectable::ReadyInterest::read(),
+        );
+        assert!(ready.read);
+
+        SocketControl::accept(listener.as_ref()).expect("pending connection should be accepted");
+        let ready_after_accept = crate::object::capability::Selectable::current_ready(
+            listener.as_ref(),
+            crate::object::capability::selectable::ReadyInterest::read(),
+        );
+        assert!(!ready_after_accept.read);
     }
 
     #[test_case]

@@ -74,6 +74,14 @@ fn eval_poll_handle(pfd: &mut PollHandle, task: &crate::task::Task) -> (bool, bo
         }
     }
 
+    #[cfg(feature = "network")]
+    if kobj
+        .as_socket()
+        .is_some_and(|socket| socket.has_pending_error())
+    {
+        pfd.revents |= POLLERR;
+    }
+
     (pfd.revents != 0, selectable)
 }
 
