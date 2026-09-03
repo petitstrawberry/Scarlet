@@ -29,3 +29,10 @@ source = { git = "https://github.com/petitstrawberry/yt-for-scarlet" }
 package = "yt-gui"
 bin = "yt-gui"
 to = "/system/scarlet/bin/yt-gui"
+
+[[layers]]
+kind = "cargo"
+source = "../../user/std-bin"
+package = "scarlet-std-bin"
+bin = "axum-demo"
+to = "/system/scarlet/bin/axum-demo"

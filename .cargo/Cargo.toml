@@ -12,6 +12,9 @@ panic = "abort"
 [profile.release]
 panic = "abort"
 
+[patch.crates-io]
+tokio = { git = "https://github.com/petitstrawberry/tokio.git", branch = "scarlet" }
+
 [patch."https://github.com/petitstrawberry/Scarlet"]
 scarlet-abi = { path = "../user/lib/scarlet-abi" }
 scarlet-os = { path = "../user/lib/scarlet-os" }

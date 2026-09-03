@@ -44,10 +44,12 @@ sws-client = { path = "../lib/sws-client", default-features = false, features = 
 sws-remote-protocol = { path = "../lib/sws-remote-protocol", default-features = false, features = ["std"] }
 
 [target.'cfg(target_os = "scarlet")'.dependencies]
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
 scarlet-os = { path = "../lib/scarlet-os", default-features = false, features = ["std"] }
 scarlet-ui = { git = "https://github.com/petitstrawberry/scarlet-ui", package = "scarlet-ui", default-features = false, features = ["std", "platform-sws"] }
 sas-protocol = { path = "../lib/sas-protocol", default-features = false, features = ["std"] }
 sas-client = { path = "../lib/sas-client", default-features = false, features = ["std"] }
+tokio = { version = "1.53.1", features = ["macros", "net", "rt", "time"] }
 
 [target.'cfg(not(target_os = "scarlet"))'.dependencies]
 scarlet-ui = { git = "https://github.com/petitstrawberry/scarlet-ui", package = "scarlet-ui", default-features = false, features = ["std", "platform-winit"] }
@@ -283,3 +285,7 @@ path = "src/logd.rs"
 [[bin]]
 name = "logctl"
 path = "src/logctl.rs"
+
+[[bin]]
+name = "axum-demo"
+path = "src/axum_demo.rs"
