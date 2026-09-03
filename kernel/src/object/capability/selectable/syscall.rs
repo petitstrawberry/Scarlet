@@ -166,18 +166,30 @@ pub fn sys_poll(trapframe: &mut Trapframe) -> usize {
         if !zero_poll {
             if selectable_count > 1 {
                 use crate::object::capability::selectable::multi_readiness_recheck_delay;
-                use crate::timer::{TimerPrecision, get_time_ns};
+                use crate::timer::get_time_ns;
 
                 let deadline =
                     timeout_ns.map(|duration_ns| get_time_ns().saturating_add(duration_ns));
                 loop {
+                    // Process-control events (Kill, Interrupt, ...) are only
+                    // processed at the user-space return boundary. Break the
+                    // loop so they can be delivered instead of starving them
+                    // behind kernel-space readiness rechecks.
+                    if task.has_pending_process_control() {
+                        break;
+                    }
+
                     let Some(recheck_delay_ns) =
                         multi_readiness_recheck_delay(deadline, get_time_ns())
                     else {
                         break;
                     };
 
-                    task.sleep_with_precision(trapframe, recheck_delay_ns, TimerPrecision::Exact);
+                    task.sleep_with_precision(
+                        trapframe,
+                        recheck_delay_ns,
+                        crate::timer::TimerPrecision::Exact,
+                    );
 
                     any_ready = false;
                     for pfd in fds.iter_mut() {
@@ -197,6 +209,12 @@ pub fn sys_poll(trapframe: &mut Trapframe) -> usize {
                 let deadline =
                     timeout_ns.map(|duration_ns| get_time_ns().saturating_add(duration_ns));
                 loop {
+                    // Same process-control check as the multi-object loop:
+                    // break so signals can be processed on user-space return.
+                    if task.has_pending_process_control() {
+                        break;
+                    }
+
                     let remaining_ns =
                         deadline.map(|deadline| deadline.saturating_sub(get_time_ns()));
                     if matches!(remaining_ns, Some(0)) {

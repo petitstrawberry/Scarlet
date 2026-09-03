@@ -3829,6 +3829,19 @@ impl Task {
         *self.events_enabled.lock()
     }
 
+    /// Check whether any process-control event (Kill, Terminate, Interrupt,
+    /// etc.) is queued for this task.
+    ///
+    /// Kernel-space blocking loops (poll, select, futex, etc.) must check
+    /// this before re-entering a wait. Process-control events are only
+    /// consumed at the user-space return boundary
+    /// (\`process_pending_events_before_user_return\`), so a task that spins
+    /// in a kernel loop without yielding to user space would otherwise starve
+    /// signal delivery indefinitely.
+    pub fn has_pending_process_control(&self) -> bool {
+        self.event_queue.lock().has_pending_process_control()
+    }
+
     /// Process pending events if events are enabled
     /// This should be called by the scheduler before resuming the task
     ///
