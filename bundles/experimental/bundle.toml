@@ -71,3 +71,10 @@ source = "../../user/websocket-demo"
 package = "scarlet-websocket-demo"
 bin = "ws-client"
 to = "/system/scarlet/bin/ws-client"
+
+[[layers]]
+kind = "cargo"
+source = { git = "https://github.com/petitstrawberry/blitz", branch = "scarlet" }
+package = "blitz-scarlet-browser"
+bin = "blitz"
+to = "/system/scarlet/bin/blitz"
