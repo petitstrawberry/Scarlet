@@ -43,3 +43,17 @@ source = "../../user/std-bin"
 package = "scarlet-std-bin"
 bin = "reqwest-demo"
 to = "/system/scarlet/bin/reqwest-demo"
+
+[[layers]]
+kind = "cargo"
+source = "../../user/tonic-demo"
+package = "scarlet-tonic-demo"
+bin = "tonic-server"
+to = "/system/scarlet/bin/tonic-server"
+
+[[layers]]
+kind = "cargo"
+source = "../../user/tonic-demo"
+package = "scarlet-tonic-demo"
+bin = "tonic-client"
+to = "/system/scarlet/bin/tonic-client"

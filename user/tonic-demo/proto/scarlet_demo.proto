@@ -1,0 +1,29 @@
+syntax = "proto3";
+
+package scarlet.demo;
+
+service Demo {
+  rpc Greet(GreetRequest) returns (GreetReply);
+  rpc Countdown(CountdownRequest) returns (stream CountdownReply);
+}
+
+message GreetRequest {
+  uint32 request_id = 1;
+  string name = 2;
+  uint64 delay_milliseconds = 3;
+}
+
+message GreetReply {
+  uint32 request_id = 1;
+  string message = 2;
+  uint64 delay_milliseconds = 3;
+}
+
+message CountdownRequest {
+  uint32 from = 1;
+  uint64 interval_milliseconds = 2;
+}
+
+message CountdownReply {
+  uint32 value = 1;
+}

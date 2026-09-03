@@ -1,0 +1,24 @@
+[package]
+name = "scarlet-tonic-demo"
+version = "0.1.0"
+edition = "2024"
+workspace = "../../.cargo"
+
+[dependencies]
+prost = "0.14"
+tokio = { version = "1.53.1", features = ["macros", "net", "rt", "sync", "time"] }
+tokio-stream = "0.1"
+tonic = "0.14"
+tonic-prost = "0.14"
+
+[build-dependencies]
+protoc-bin-vendored = "3.2"
+tonic-prost-build = "0.14"
+
+[[bin]]
+name = "tonic-server"
+path = "src/bin/tonic_server.rs"
+
+[[bin]]
+name = "tonic-client"
+path = "src/bin/tonic_client.rs"

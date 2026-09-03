@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "../user/bin",
     "../user/std-bin",
+    "../user/tonic-demo",
     "../user/video_player",
 ]
 
@@ -16,6 +17,7 @@ panic = "abort"
 ring = { git = "https://github.com/petitstrawberry/ring.git", branch = "scarlet" }
 socket2 = { git = "https://github.com/petitstrawberry/socket2.git", branch = "scarlet" }
 tokio = { git = "https://github.com/petitstrawberry/tokio.git", branch = "scarlet" }
+tonic = { git = "https://github.com/petitstrawberry/grpc-rust.git", branch = "scarlet" }
 
 [patch."https://github.com/petitstrawberry/Scarlet"]
 scarlet-abi = { path = "../user/lib/scarlet-abi" }
