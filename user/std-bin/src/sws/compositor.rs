@@ -603,6 +603,29 @@ mod touch_modality_tests {
     }
 
     #[test]
+    fn shell_depth_replacement_withholds_stale_content_in_both_directions() {
+        use sws_protocol::workspace::ShellPresentation::{Home, Overview, Workspace};
+
+        assert!(shell_background_must_be_withheld(Workspace, Overview));
+        assert!(shell_background_must_be_withheld(Workspace, Home));
+        assert!(shell_background_must_be_withheld(Home, Overview));
+        assert!(shell_background_must_be_withheld(Overview, Home));
+        assert!(!shell_background_must_be_withheld(Overview, Overview));
+        assert!(!shell_background_must_be_withheld(Home, Workspace));
+    }
+
+    #[test]
+    fn shell_depth_replacement_uses_a_continuous_fallback_backdrop() {
+        use sws_protocol::workspace::ShellPresentation::{Home, Overview, Workspace};
+
+        assert!(shell_fallback_backdrop_required(Home, false));
+        assert!(shell_fallback_backdrop_required(Overview, false));
+        assert!(!shell_fallback_backdrop_required(Workspace, false));
+        assert!(!shell_fallback_backdrop_required(Home, true));
+        assert!(!shell_fallback_backdrop_required(Overview, true));
+    }
+
+    #[test]
     fn overview_shadow_uses_a_soft_monotonic_falloff() {
         let mut layers = Vec::new();
         push_overview_shadow_layers(&mut layers, (100, 80, 480, 300), 12, true);
@@ -2126,6 +2149,38 @@ const fn frame_callback_is_ready(
     is_presented && (!has_submitted_frame || presentation_counter > requested_after_present)
 }
 
+fn shell_background_must_be_withheld(
+    previous: sws_protocol::workspace::ShellPresentation,
+    current: sws_protocol::workspace::ShellPresentation,
+) -> bool {
+    previous != current
+        && matches!(
+            current,
+            sws_protocol::workspace::ShellPresentation::Home
+                | sws_protocol::workspace::ShellPresentation::Overview
+        )
+}
+
+fn shell_fallback_backdrop_required(
+    presentation: sws_protocol::workspace::ShellPresentation,
+    shell_background_ready: bool,
+) -> bool {
+    !shell_background_ready
+        && matches!(
+            presentation,
+            sws_protocol::workspace::ShellPresentation::Home
+                | sws_protocol::workspace::ShellPresentation::Overview
+        )
+}
+
+fn shell_fallback_backdrop_color(
+    presentation: sws_protocol::workspace::ShellPresentation,
+    shell_background_ready: bool,
+) -> Option<[u8; 4]> {
+    shell_fallback_backdrop_required(presentation, shell_background_ready)
+        .then_some(sws_protocol::workspace::SHELL_NAVIGATION_BACKDROP_BGRA)
+}
+
 /// Compositor - the main window server with proper layer compositing
 pub struct Compositor {
     display: DisplaySurface,
@@ -2188,6 +2243,8 @@ pub struct Compositor {
     tablet_mode: bool,
     windowing_mode: sws_protocol::WindowingMode,
     workspace_manager: super::workspace::WorkspaceManager,
+    /// Shell presentation observed by the previous policy application.
+    last_shell_presentation: sws_protocol::workspace::ShellPresentation,
     /// Normal surfaces awaiting a definitive top-level/transient relationship.
     ///
     /// Parent assignment is a separate IPC request, so tablet launch policy is
@@ -2608,6 +2665,7 @@ impl Compositor {
             workspace_manager: super::workspace::WorkspaceManager::with_auto_remove_empty(
                 auto_remove_empty_workspaces,
             ),
+            last_shell_presentation: sws_protocol::workspace::ShellPresentation::Workspace,
             pending_workspace_scenes: Vec::new(),
             window_policy_after_present: false,
             lid_closed: input_environment.lid_closed(),
@@ -3976,6 +4034,7 @@ impl Compositor {
         let overview_shadows = self.overview_render_shadows();
         let overview_cards = self.overview_render_backplates();
         let overview_remove_buttons = self.overview_remove_buttons();
+        let shell_fallback_backdrop = self.shell_fallback_backdrop();
         let Some(gpu_compositor) = self.gpu_compositor.as_mut() else {
             return Ok(false);
         };
@@ -3984,6 +4043,7 @@ impl Compositor {
             self.window_manager.get_windows(),
             &self.cursor,
             self.bg_color,
+            shell_fallback_backdrop,
             &overview_shadows,
             &overview_cards,
             &overview_remove_buttons,
@@ -4636,6 +4696,7 @@ impl Compositor {
         let overview_shadows = self.overview_render_shadows();
         let overview_cards = self.overview_render_backplates();
         let overview_remove_buttons = self.overview_remove_buttons();
+        let shell_fallback_backdrop = self.shell_fallback_backdrop();
 
         // Clip dirty region to screen bounds.
         let (x0, y0, w, h) = match dirty {
@@ -4687,8 +4748,8 @@ impl Compositor {
                 }
             }
 
-            // Layer 2: Draw shell background, then independent rounded
-            // workspace cards and their live application actors.
+            // Layer 2: Draw the persistent shell backdrop, shell content, then
+            // independent rounded workspace cards and live application actors.
             let clip = if dirty.is_some() {
                 Some((x0, y0, w, h))
             } else {
@@ -4697,8 +4758,25 @@ impl Compositor {
             let screen_width = self.screen_width;
             let screen_height = self.screen_height;
             let bytes_per_pixel = self.bytes_per_pixel;
+            let mut shell_fallback_backdrop_drawn = false;
             let mut overview_backplates_drawn = false;
             for window in self.window_manager.get_windows() {
+                if !shell_fallback_backdrop_drawn && window.window_type != WindowType::Desktop {
+                    if let Some(color) = shell_fallback_backdrop {
+                        Self::fill_rounded_rect_to_buffer(
+                            screen_width,
+                            screen_height,
+                            bytes_per_pixel,
+                            backbuffer,
+                            stride,
+                            (0, 0, screen_width, screen_height),
+                            0,
+                            color,
+                            clip,
+                        );
+                    }
+                    shell_fallback_backdrop_drawn = true;
+                }
                 if !window.is_presented() {
                     continue;
                 }
@@ -4749,6 +4827,19 @@ impl Compositor {
                         clip,
                     );
                 }
+            }
+            if !shell_fallback_backdrop_drawn && let Some(color) = shell_fallback_backdrop {
+                Self::fill_rounded_rect_to_buffer(
+                    screen_width,
+                    screen_height,
+                    bytes_per_pixel,
+                    backbuffer,
+                    stride,
+                    (0, 0, screen_width, screen_height),
+                    0,
+                    color,
+                    clip,
+                );
             }
             if !overview_backplates_drawn {
                 Self::draw_overview_shadows_to_buffer(
@@ -7750,7 +7841,7 @@ impl Compositor {
                 continue;
             }
             let ready = frame_callback_is_ready(
-                window.is_presented(),
+                window.is_logically_presented(),
                 window.has_presented_frame,
                 self.event_counter,
                 callback.requested_after_present,
@@ -7901,15 +7992,25 @@ impl Compositor {
 
     fn note_window_frame_submitted(&mut self, window_id: u32) {
         let focused = self.windowing_mode == sws_protocol::WindowingMode::Focused;
-        let first_frame_needs_policy =
-            self.window_manager
-                .get_window_mut(window_id)
-                .is_some_and(|window| {
-                    let first = window.mark_presented_frame();
-                    first && (window.pending_maximize || focused)
-                });
+        let Some((first_frame_needs_policy, presentation_content_became_ready)) =
+            self.window_manager.get_window_mut(window_id).map(|window| {
+                let first = window.mark_presented_frame();
+                (
+                    first && (window.pending_maximize || focused),
+                    window.validate_presentation_content() && window.is_logically_presented(),
+                )
+            })
+        else {
+            return;
+        };
         if first_frame_needs_policy {
             self.window_policy_after_present = true;
+        }
+        if presentation_content_became_ready {
+            // Buffer damage was evaluated while the stale-content gate was
+            // closed. Reveal the replacement atomically with a full redraw.
+            self.full_redraw_needed = true;
+            self.route_pointer_motion_at_cursor();
         }
     }
 
@@ -8341,6 +8442,16 @@ impl Compositor {
         backplates
     }
 
+    fn shell_fallback_backdrop(&self) -> Option<[u8; 4]> {
+        let shell_background_ready = self.window_manager.get_windows().iter().any(|window| {
+            window.window_type == WindowType::ShellBackground && window.is_presented()
+        });
+        shell_fallback_backdrop_color(
+            self.workspace_manager.presentation(),
+            shell_background_ready,
+        )
+    }
+
     fn overview_render_shadows(&self) -> Vec<OverviewShadowLayer> {
         if !matches!(
             self.workspace_manager.presentation(),
@@ -8698,7 +8809,8 @@ impl Compositor {
                 .iter()
                 .rev()
                 .find(|window| {
-                    window.window_type == WindowType::ShellBackground && window.is_presented()
+                    window.window_type == WindowType::ShellBackground
+                        && window.is_logically_presented()
                 })
                 .map(|window| window.id);
             let Some(shell_focus) = shell_focus else {
@@ -8753,9 +8865,11 @@ impl Compositor {
     }
 
     fn apply_workspace_presentation_policy(&mut self) -> bool {
-        if self.workspace_manager.presentation()
-            != sws_protocol::workspace::ShellPresentation::Overview
-        {
+        let presentation = self.workspace_manager.presentation();
+        let withhold_shell_background =
+            shell_background_must_be_withheld(self.last_shell_presentation, presentation);
+        self.last_shell_presentation = presentation;
+        if presentation != sws_protocol::workspace::ShellPresentation::Overview {
             self.overview_add_workspace_selected = false;
         }
         let window_ids = self
@@ -8766,6 +8880,14 @@ impl Compositor {
             .collect::<Vec<_>>();
         let mut changed = false;
         let mut visibility_changed = Vec::new();
+
+        if withhold_shell_background {
+            for window_id in &window_ids {
+                if let Some(window) = self.window_manager.get_window_mut(*window_id) {
+                    changed |= window.invalidate_presentation_content();
+                }
+            }
+        }
 
         if self.windowing_mode == sws_protocol::WindowingMode::Freeform {
             for window_id in &window_ids {

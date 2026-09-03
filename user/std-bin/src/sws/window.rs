@@ -259,6 +259,11 @@ pub struct Window {
     /// true so the client's initial CPU or SGFX buffer identity still matches
     /// the surface created by SWS.
     pub has_presented_frame: bool,
+    /// Whether the retained buffer belongs to the current shell presentation.
+    ///
+    /// A shell background is withheld after a Home/Overview transition until
+    /// its client commits a frame for that new presentation.
+    pub presentation_content_ready: bool,
     /// An application-requested maximize waiting for the initial frame.
     pub pending_maximize: bool,
     /// Whether SWS negotiated constraints, decoration insets, and surface size
@@ -616,6 +621,7 @@ impl Window {
             workspace_layout_managed: false,
             workspace_restore_geometry: None,
             has_presented_frame: false,
+            presentation_content_ready: true,
             pending_maximize: false,
             initial_size_negotiated: false,
             saved_geometry: None,
@@ -674,6 +680,7 @@ impl Window {
             workspace_layout_managed: false,
             workspace_restore_geometry: None,
             has_presented_frame: false,
+            presentation_content_ready: true,
             pending_maximize: false,
             initial_size_negotiated: false,
             saved_geometry: None,
@@ -758,6 +765,7 @@ impl Window {
             workspace_layout_managed: false,
             workspace_restore_geometry: None,
             has_presented_frame: false,
+            presentation_content_ready: true,
             pending_maximize: false,
             initial_size_negotiated: false,
             saved_geometry: None,
@@ -787,12 +795,28 @@ impl Window {
         self.title = Some(title.as_bytes().to_vec());
     }
 
+    /// Return whether the surface is logically eligible for presentation.
+    ///
+    /// This deliberately ignores retained-buffer freshness. A client must be
+    /// resumed and receive a frame callback before it can submit the commit
+    /// that opens that freshness gate.
+    ///
+    /// # Returns
+    ///
+    /// `true` when compositor policy currently exposes the surface.
+    pub const fn is_logically_presented(&self) -> bool {
+        self.visible && self.workspace_visible && !self.minimized
+    }
+
     /// Return whether the surface participates in composition and hit testing.
     ///
-    /// Client visibility and compositor workspace visibility are independent;
-    /// both must permit presentation and the client must not be minimized.
+    /// Logical visibility and retained-buffer freshness must both permit it.
+    ///
+    /// # Returns
+    ///
+    /// `true` when the retained surface may be sampled and receive pointer input.
     pub const fn is_presented(&self) -> bool {
-        self.visible && self.workspace_visible && !self.minimized
+        self.is_logically_presented() && self.presentation_content_ready
     }
 
     /// Return the compositor destination rectangle for this surface.
@@ -960,7 +984,7 @@ impl Window {
         if self.maximized {
             flags |= sws_protocol::window_state::MAXIMIZED;
         }
-        if !self.is_presented() {
+        if !self.is_logically_presented() {
             flags |= sws_protocol::window_state::SUSPENDED;
         }
         flags
@@ -997,6 +1021,32 @@ impl Window {
             self.has_presented_frame = true;
             true
         }
+    }
+
+    /// Require a fresh commit before composing this shell background.
+    ///
+    /// # Returns
+    ///
+    /// `true` when the surface changed from ready to waiting.
+    pub fn invalidate_presentation_content(&mut self) -> bool {
+        if self.window_type != WindowType::ShellBackground || !self.presentation_content_ready {
+            return false;
+        }
+        self.presentation_content_ready = false;
+        true
+    }
+
+    /// Mark the retained buffer as valid for the current presentation.
+    ///
+    /// # Returns
+    ///
+    /// `true` when a pending shell-background refresh was completed.
+    pub fn validate_presentation_content(&mut self) -> bool {
+        if self.presentation_content_ready {
+            return false;
+        }
+        self.presentation_content_ready = true;
+        true
     }
 
     /// Return whether this is a top-level normal compatibility window.
@@ -1207,6 +1257,7 @@ impl WindowManager {
             workspace_layout_managed: false,
             workspace_restore_geometry: None,
             has_presented_frame: false,
+            presentation_content_ready: true,
             pending_maximize: false,
             initial_size_negotiated: false,
             saved_geometry: None,
@@ -1285,6 +1336,7 @@ impl WindowManager {
             workspace_layout_managed: false,
             workspace_restore_geometry: None,
             has_presented_frame: false,
+            presentation_content_ready: true,
             pending_maximize: false,
             initial_size_negotiated: false,
             saved_geometry: None,
@@ -2187,6 +2239,12 @@ impl WindowManager {
                     w.visible = false;
                 }
             }
+            if window_type == WindowType::ShellBackground {
+                // The role is assigned before the client's first real frame.
+                // Keep any zero-filled or predecessor buffer out of the
+                // composition until that commit arrives.
+                w.presentation_content_ready = false;
+            }
             println!(
                 "[WindowManager] Window #{} type set to {:?}, resizable={}, raise_on_focus={}",
                 id, window_type, w.resizable, w.raise_on_focus
@@ -2585,7 +2643,7 @@ impl WindowManager {
 mod tests {
     use std::vec::Vec;
 
-    use super::{WindowManager, rounded_rect_contains_point, rounded_rect_row_span};
+    use super::{WindowManager, WindowType, rounded_rect_contains_point, rounded_rect_row_span};
 
     #[test]
     fn rounded_overview_clip_rejects_only_card_corners() {
@@ -2696,6 +2754,23 @@ mod tests {
             window.state_flags(),
             sws_protocol::window_state::MINIMIZED | sws_protocol::window_state::SUSPENDED
         );
+    }
+
+    #[test]
+    fn stale_shell_content_is_not_composed_but_remains_frame_eligible() {
+        let mut manager = WindowManager::new();
+        let id = manager.create_window_no_buffer(0, 0, 1920, 1080);
+        assert!(manager.set_window_type(id, WindowType::ShellBackground));
+        let window = manager.get_window_mut(id).unwrap();
+
+        assert!(window.is_logically_presented());
+        assert!(!window.is_presented());
+        assert_eq!(window.state_flags(), 0);
+        assert!(window.validate_presentation_content());
+        assert!(window.is_presented());
+        assert!(window.invalidate_presentation_content());
+        assert!(!window.is_presented());
+        assert!(!window.invalidate_presentation_content());
     }
 
     #[test]

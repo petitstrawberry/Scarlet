@@ -81,7 +81,12 @@ const HOME_GRID_ICON_SIZE: u16 = 45;
 const HOME_GRID_ICON_PADDING: f32 = 12.5;
 const HOME_GRID_LABEL_SIZE: f32 = 16.0;
 const HOME_DRAWER_RESULTS_SPACING: f32 = 20.0;
-const HOME_BACKDROP_TINT: Color = Color::rgba_f32(0.30, 0.34, 0.41, 0.78);
+const HOME_BACKDROP_TINT: Color = Color::rgba_f32(
+    sws_protocol::workspace::SHELL_NAVIGATION_BACKDROP_BGRA[2] as f32 / 255.0,
+    sws_protocol::workspace::SHELL_NAVIGATION_BACKDROP_BGRA[1] as f32 / 255.0,
+    sws_protocol::workspace::SHELL_NAVIGATION_BACKDROP_BGRA[0] as f32 / 255.0,
+    sws_protocol::workspace::SHELL_NAVIGATION_BACKDROP_BGRA[3] as f32 / 255.0,
+);
 const STATUS_NAVIGATION_HOVER: Color = Color::rgba_f32(0.0, 0.0, 0.0, 0.24);
 const STATUS_NAVIGATION_ACTIVE: Color = Color::rgba_f32(0.0, 0.0, 0.0, 0.36);
 const STATUS_BAR_SETTINGS_LISTENER_BUS_NAME: &str =

@@ -56,6 +56,12 @@ pub const OVERVIEW_CARD_SELECTED_OVERLAY_BGRA: [u8; 4] = [255, 255, 255, 24];
 /// replacing the desktop with an opaque, theme-tinted placeholder.
 pub const OVERVIEW_CARD_INACTIVE_OVERLAY_BGRA: [u8; 4] = [0, 0, 0, 40];
 
+/// BGRA tint shared by the Home and Overview backdrop.
+///
+/// SWS uses the same material while a shell-depth replacement frame is still
+/// pending, so removing or revealing the drawer never blanks the background.
+pub const SHELL_NAVIGATION_BACKDROP_BGRA: [u8; 4] = [104, 86, 76, 198];
+
 /// Return the preferred workspace-card share for a posture.
 ///
 /// # Arguments
