@@ -280,6 +280,37 @@ impl UdpSocket {
         *self.write_timeout_ms.lock() = timeout_ms as u64;
         Ok(())
     }
+
+    fn bind_for_connected_peer(&self, destination: [u8; 4]) -> Result<(), SocketError> {
+        let current = self.local_addr.read().clone();
+        let bound_address = match current {
+            Some(SocketAddress::Inet(address)) => Some(address.addr),
+            _ => None,
+        };
+        let requested_interface = self.bound_interface.read().clone();
+        let (source_address, selected_interface) =
+            select_local_endpoint(requested_interface.as_deref(), bound_address, destination);
+        if source_address == [0; 4] {
+            return Err(SocketError::NoRoute);
+        }
+
+        let port = match current {
+            Some(SocketAddress::Inet(address)) => address.port,
+            _ => {
+                let port = self.udp_layer.allocate_port();
+                self.udp_layer.register_port(port, self.self_weak.clone())?;
+                port
+            }
+        };
+        *self.local_addr.write() = Some(SocketAddress::Inet(Inet4SocketAddress::new(
+            source_address,
+            port,
+        )));
+        if requested_interface.is_none() {
+            *self.bound_interface.write() = selected_interface;
+        }
+        Ok(())
+    }
 }
 
 impl Drop for UdpSocket {
@@ -437,7 +468,11 @@ impl SocketControl for UdpSocket {
 
     fn connect(&self, address: &SocketAddress) -> Result<(), SocketError> {
         match address {
-            SocketAddress::Inet(_) => {
+            SocketAddress::Inet(inet) => {
+                // POSIX UDP connect implicitly binds an unbound socket and
+                // selects the route's source address. Callers rely on
+                // getsockname() immediately after connect() to discover it.
+                self.bind_for_connected_peer(inet.addr)?;
                 *self.remote_addr.write() = Some(address.clone());
                 *self.state.write() = SocketState::Connected;
                 Ok(())
