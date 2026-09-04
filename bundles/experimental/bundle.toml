@@ -8,6 +8,13 @@ to = "/"
 
 [[layers]]
 kind = "cargo"
+source = { git = "https://github.com/petitstrawberry/moonlight-scarlet.git", rev = "0a0a263b8b1538d0f98d9ad7820a589230228c6b" }
+package = "moonlight"
+bin = "moonlight"
+to = "/system/scarlet/bin/moonlight"
+
+[[layers]]
+kind = "cargo"
 source = "../../user/video_player"
 package = "video_player"
 bin = "video-player"
