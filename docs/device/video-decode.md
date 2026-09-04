@@ -12,14 +12,22 @@ The current API is intentionally small:
 - `write()` / `read()` provide a compatibility path for stateful backends that
   accept one coded access unit at a time.
 - `mmap()` plus `control()` commands provide the preferred zero-copy-ish path
-  used by `video-player`.
+  used by `scarlet-video-client`; applications such as `video-player` use the
+  client abstraction instead of issuing controls directly.
 - Session-aware commands allow several independent task groups to own separate
   streams on the same device.
 - Stateless H.264 and VP9 submit use a Scarlet request split: userspace parses
   codec headers and manages codec reference state, while the kernel validates
   copied parameters and lowers them to the selected backend.
-  `user/lib/scarlet-codecs` contains the userspace request builder used by
-  `video-player`; future stateless codecs should follow the same split.
+  `user/lib/scarlet-codecs` contains the request builders owned by
+  `user/lib/scarlet-video-client`; future stateless codecs should follow the
+  same split.
+
+New applications should use `scarlet-video-client`. Its public flow is
+`open → configure → submit → dequeue`, and it returns validated NV12 frames
+without exposing whether the selected backend is stateful or stateless. The raw
+structures below remain the kernel/client transport contract and are documented
+for backend development.
 
 This interface is not a stable userspace ABI yet. The structures below document
 the current state so that callers and future driver changes have a shared
@@ -217,6 +225,8 @@ m1n1 captures and `eiln/avd`.
 
 ## Typical Mapped Decode Sequence
 
+`scarlet-video-client` performs this sequence internally:
+
 1. Open `/dev/video0`.
 2. Call `SCARLET_VIDEO_CREATE_SESSION` with `stream_id = 0`.
 3. Map `buffer.mmap_len` bytes at `buffer.mmap_offset` with read/write shared
@@ -247,8 +257,8 @@ as "not ready yet" and retry with their own timeout.
 
 ## Current Limitations
 
-- The ABI is duplicated in the kernel driver and `video-player`; it should move
-  to a shared userspace-visible header or crate before being treated as stable.
+- The raw ABI remains experimental and is mirrored privately by
+  `scarlet-video-client`; applications no longer duplicate it.
 - The mapped path has fixed buffer sizes and a fixed session limit.
 - The output path currently assumes a single-buffer NV12 frame.
 - Error reporting is mostly string-based through kernel `Result<&'static str>`

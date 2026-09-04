@@ -351,7 +351,50 @@ impl Default for Vp9RequestContext {
 }
 
 impl Vp9RequestContext {
+    /// Build a stateless request using an automatically assigned reference
+    /// timestamp.
+    ///
+    /// # Arguments
+    ///
+    /// * `data` - One complete VP9 coded frame.
+    ///
+    /// # Returns
+    ///
+    /// Parsed request parameters and the nonzero timestamp used to identify
+    /// the decoded reference frame.
     pub fn params_for_frame(&mut self, data: &[u8]) -> Result<Vp9PreparedFrame, String> {
+        self.params_for_frame_inner(data, None)
+    }
+
+    /// Build a stateless request with a caller-provided reference timestamp.
+    ///
+    /// A nonzero timestamp is preserved in both the returned request and the
+    /// reference slots constructed for later frames. It must remain unique
+    /// while the decoded frame occupies a reference slot. Zero retains
+    /// automatic timestamp assignment because the Scarlet video ABI reserves
+    /// zero for driver-side timestamp assignment.
+    ///
+    /// # Arguments
+    ///
+    /// * `data` - One complete VP9 coded frame.
+    /// * `timestamp` - Caller timestamp, or zero to allocate one internally.
+    ///
+    /// # Returns
+    ///
+    /// Parsed request parameters and the actual nonzero reference timestamp.
+    pub fn params_for_frame_with_timestamp(
+        &mut self,
+        data: &[u8],
+        timestamp: u64,
+    ) -> Result<Vp9PreparedFrame, String> {
+        self.params_for_frame_inner(data, Some(timestamp))
+    }
+
+    fn params_for_frame_inner(
+        &mut self,
+        data: &[u8],
+        requested_timestamp: Option<u64>,
+    ) -> Result<Vp9PreparedFrame, String> {
         if data.is_empty() {
             return Err(String::from("VP9 frame is empty"));
         }
@@ -360,7 +403,7 @@ impl Vp9RequestContext {
         let mut probabilities = self.frame_contexts[context_index];
         self.parse_compressed_header(data, &mut parsed, &mut probabilities)?;
         let tiles = parse_tiles(data, &parsed.frame)?;
-        let timestamp = self.next_submit_timestamp();
+        let timestamp = self.resolve_submit_timestamp(requested_timestamp);
         let params = ScarletVideoVp9StatelessParams {
             frame: parsed.frame,
             probabilities: probabilities.pack_avd(parsed.intra_probability_tables),
@@ -904,6 +947,32 @@ impl Vp9RequestContext {
             self.next_timestamp = 1;
         }
         timestamp
+    }
+
+    fn resolve_submit_timestamp(&mut self, requested_timestamp: Option<u64>) -> u64 {
+        let Some(timestamp) = requested_timestamp.filter(|timestamp| *timestamp != 0) else {
+            return self.next_submit_timestamp();
+        };
+        if self.next_timestamp == 0 || timestamp >= self.next_timestamp {
+            self.next_timestamp = timestamp.wrapping_add(1);
+            if self.next_timestamp == 0 {
+                self.next_timestamp = 1;
+            }
+        }
+        timestamp
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Vp9RequestContext;
+
+    #[test]
+    fn preserves_explicit_nonzero_timestamp() {
+        let mut context = Vp9RequestContext::default();
+        assert_eq!(context.resolve_submit_timestamp(Some(42)), 42);
+        assert_eq!(context.resolve_submit_timestamp(Some(0)), 43);
+        assert_eq!(context.resolve_submit_timestamp(None), 44);
     }
 }
 

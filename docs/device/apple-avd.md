@@ -13,6 +13,7 @@ The first working path is:
 
 ```text
 video-player
+  -> scarlet-video-client
   -> /dev/video0
   -> Apple AVD video backend
   -> AVD low-level MMIO + DART driver
@@ -82,7 +83,10 @@ The branch currently provides:
   backend registry used by AVD and future non-VirtIO backends.
 - `user/lib/scarlet-codecs`: userspace codec request builders. The current H.264
   module owns Annex B scanning, SPS/PPS/slice parsing, POC, DPB, and reference
-  list construction for `video-player`.
+  list construction for `scarlet-video-client`.
+- `user/lib/scarlet-video-client`: the application-facing stateful/stateless
+  decoder abstraction, including session/mmap ownership and NV12 frame
+  validation. `video-player` no longer carries the raw video device ABI.
 
 The `/dev/video0` AVD frontend implements the shared mmap/ioctl entrypoints and
 accepts `SCARLET_VIDEO_SUBMIT_H264_STATELESS` and

@@ -1,110 +1,113 @@
-use super::*;
+//! Stateless VP9 request preparation, diagnostics, and ABI submission.
+
+#[cfg(feature = "vp9-stateless-hw")]
+use alloc::format;
+use alloc::string::String;
 
 #[cfg(feature = "vp9-stateless-hw")]
 use core::mem;
 #[cfg(feature = "vp9-stateless-hw")]
 use scarlet_codecs::{ScarletVideoVp9StatelessParams, Vp9RequestContext};
+use scarlet_os::handle::Handle;
+#[cfg(feature = "vp9-stateless-hw")]
 use std::fs::File;
+#[cfg(all(feature = "std", feature = "vp9-stateless-hw"))]
+use std::io::Write;
 #[cfg(feature = "vp9-stateless-hw")]
 use std::sync::OnceLock;
 
+use crate::abi::ScarletVideoCapabilities;
 #[cfg(feature = "vp9-stateless-hw")]
-const SCARLET_VIDEO_SUBMIT_VP9_STATELESS: u32 = 0x5609;
+use crate::abi::{
+    SCARLET_VIDEO_CAP_STATELESS_VP9, SCARLET_VIDEO_SUBMIT_VP9_STATELESS, ScarletVideoVp9ParamPtrs,
+    ScarletVideoVp9StatelessSubmit,
+};
+#[cfg(feature = "vp9-stateless-hw")]
+use crate::read_device;
 
 #[cfg(feature = "vp9-stateless-hw")]
 static VP9_STATELESS_DUMP_DIR: OnceLock<String> = OnceLock::new();
 
-#[cfg(feature = "vp9-stateless-hw")]
-#[repr(C)]
-#[derive(Clone, Copy, Default)]
-struct ScarletVideoVp9ParamPtrs {
-    frame: u64,
-    probabilities: u64,
-    tiles: u64,
+#[cfg(all(feature = "std", feature = "vp9-stateless-hw"))]
+fn create_dump_directory(path: &str) {
+    let _ = std::fs::create_dir_all(path);
 }
 
-#[cfg(feature = "vp9-stateless-hw")]
-#[repr(C)]
-#[derive(Clone, Copy, Default)]
-struct ScarletVideoVp9StatelessSubmit {
-    stream_id: u32,
-    input_len: u32,
-    timestamp: u64,
-    params: ScarletVideoVp9ParamPtrs,
-    flags: u32,
-    padding: u32,
+#[cfg(all(feature = "legacy-scarlet-std", feature = "vp9-stateless-hw"))]
+fn create_dump_directory(path: &str) {
+    let _ = std::fs::create_directory(path);
 }
 
 #[cfg(feature = "vp9-stateless-hw")]
 #[derive(Default)]
-pub struct Context {
+pub(crate) struct Context {
     request: Vp9RequestContext,
 }
 
 #[cfg(not(feature = "vp9-stateless-hw"))]
 #[derive(Default)]
-pub struct Context;
+pub(crate) struct Context;
 
 #[cfg(feature = "vp9-stateless-hw")]
-pub fn enable_dump(path: &str) {
+pub(crate) fn enable_dump(path: &str) {
     if path.is_empty() {
         return;
     }
-    let _ = std::fs::create_directory(path);
+    create_dump_directory(path);
     let _ = VP9_STATELESS_DUMP_DIR.set(String::from(path));
-    println!("[{}] VP9 stateless dump {}", APP_NAME, path);
+    std::println!("[scarlet-video-client] VP9 stateless dump {path}");
 }
 
 #[cfg(not(feature = "vp9-stateless-hw"))]
-pub fn enable_dump(path: &str) {
+pub(crate) fn enable_dump(path: &str) {
     let _ = path;
-    println!(
-        "[{}] --dump-vp9-stateless ignored because vp9-stateless-hw is disabled",
-        APP_NAME
+    std::println!(
+        "[scarlet-video-client] VP9 stateless dump ignored because vp9-stateless-hw is disabled"
     );
 }
 
 #[cfg(feature = "vp9-stateless-hw")]
-pub fn supported(caps: Option<ScarletVideoCapabilities>) -> bool {
+pub(crate) fn supported(caps: Option<ScarletVideoCapabilities>) -> bool {
     caps.map(|caps| caps.has_flag(SCARLET_VIDEO_CAP_STATELESS_VP9))
         .unwrap_or(false)
 }
 
 #[cfg(not(feature = "vp9-stateless-hw"))]
-pub fn supported(caps: Option<ScarletVideoCapabilities>) -> bool {
+pub(crate) fn supported(caps: Option<ScarletVideoCapabilities>) -> bool {
     let _ = caps;
     false
 }
 
-pub fn reset_for_discontinuity(context: &mut Context) {
+pub(crate) fn reset_for_discontinuity(context: &mut Context) {
     *context = Context::default();
 }
 
 #[cfg(feature = "vp9-stateless-hw")]
-pub fn submit(
-    device: &mut File,
+pub(crate) fn submit(
+    device: &Handle,
     context: &mut Context,
     stream_id: u32,
     access_unit: &[u8],
+    timestamp: u64,
     debug_submits: &mut u32,
-) -> Result<bool, String> {
+) -> Result<(bool, u64), String> {
     let log_submit = *debug_submits < 4;
     if log_submit {
-        println!(
-            "[{}] VP9 stateless prepare input={} stream={}",
-            APP_NAME,
+        std::println!(
+            "[scarlet-video-client] VP9 stateless prepare input={} stream={}",
             access_unit.len(),
             stream_id
         );
     }
-    let vp9 = context.request.params_for_frame(access_unit)?;
+    let vp9 = context
+        .request
+        .params_for_frame_with_timestamp(access_unit, timestamp)?;
     let params: &ScarletVideoVp9StatelessParams = &vp9.params;
     let should_display =
         params.frame.flags & scarlet_codecs::SCARLET_VIDEO_VP9_FRAME_FLAG_SHOW_FRAME != 0;
     if log_submit {
-        println!(
-            "[{}] VP9 stateless parsed ts={} key={} show={} size={}x{} render={}x{} tiles={} uh={} ch={} flags=0x{:x}",
-            APP_NAME,
+        std::println!(
+            "[scarlet-video-client] VP9 stateless parsed ts={} key={} show={} size={}x{} render={}x{} tiles={} uh={} ch={} flags=0x{:x}",
             vp9.timestamp,
             params.frame.flags & scarlet_codecs::SCARLET_VIDEO_VP9_FRAME_FLAG_KEY_FRAME != 0,
             should_display,
@@ -131,18 +134,18 @@ pub fn submit(
         padding: 0,
     };
     if let Some(dir) = VP9_STATELESS_DUMP_DIR.get()
-        && let Err(err) = dump_stateless_request(dir, vp9.timestamp, access_unit, params)
+        && let Err(error) = dump_stateless_request(dir, vp9.timestamp, access_unit, params)
     {
-        println!("[{}] VP9 stateless dump failed: {}", APP_NAME, err);
+        std::println!("[scarlet-video-client] VP9 stateless dump failed: {error}");
     }
     if log_submit {
-        println!(
-            "[{}] VP9 stateless submit begin ts={} stream={}",
-            APP_NAME, vp9.timestamp, stream_id
+        std::println!(
+            "[scarlet-video-client] VP9 stateless submit begin ts={} stream={}",
+            vp9.timestamp,
+            stream_id
         );
     }
     device
-        .as_handle()
         .control(
             SCARLET_VIDEO_SUBMIT_VP9_STATELESS,
             &submit as *const _ as usize,
@@ -152,49 +155,57 @@ pub fn submit(
             format!("hardware decoder stateless VP9 submit failed{status}")
         })?;
     if log_submit {
-        println!(
-            "[{}] VP9 stateless submit ok ts={} stream={}",
-            APP_NAME, vp9.timestamp, stream_id
+        std::println!(
+            "[scarlet-video-client] VP9 stateless submit ok ts={} stream={}",
+            vp9.timestamp,
+            stream_id
         );
     }
     *debug_submits = debug_submits.saturating_add(1);
-    Ok(should_display)
+    Ok((should_display, vp9.timestamp))
 }
 
 #[cfg(not(feature = "vp9-stateless-hw"))]
-pub fn submit(
-    device: &mut File,
+pub(crate) fn submit(
+    device: &Handle,
     context: &mut Context,
     stream_id: u32,
     access_unit: &[u8],
+    timestamp: u64,
     debug_submits: &mut u32,
-) -> Result<bool, String> {
-    let _ = (device, context, stream_id, access_unit, debug_submits);
+) -> Result<(bool, u64), String> {
+    let _ = (
+        device,
+        context,
+        stream_id,
+        access_unit,
+        timestamp,
+        debug_submits,
+    );
     Err(String::from("stateless VP9 hardware decode is disabled"))
 }
 
 #[cfg(feature = "vp9-stateless-hw")]
 fn join_dump_path(dir: &str, name: &str) -> String {
     if dir.ends_with('/') {
-        format!("{}{}", dir, name)
+        format!("{dir}{name}")
     } else {
-        format!("{}/{}", dir, name)
+        format!("{dir}/{name}")
     }
 }
 
 #[cfg(feature = "vp9-stateless-hw")]
 fn struct_bytes<T>(value: &T) -> &[u8] {
-    // SAFETY: Scarlet video request structs are #[repr(C)] plain data copied
-    // through the kernel ABI. The byte slice is only used synchronously for a
-    // diagnostic dump while `value` is still alive.
+    // SAFETY: Scarlet video request structs are `repr(C)` plain data. The byte
+    // slice is consumed synchronously while `value` remains alive.
     unsafe { core::slice::from_raw_parts(value as *const T as *const u8, mem::size_of::<T>()) }
 }
 
 #[cfg(feature = "vp9-stateless-hw")]
 fn dump_file(path: &str, data: &[u8]) -> Result<(), String> {
-    let mut file = File::create(path).map_err(|err| format!("create {} failed: {}", path, err))?;
+    let mut file = File::create(path).map_err(|error| format!("create {path} failed: {error}"))?;
     file.write_all(data)
-        .map_err(|err| format!("write {} failed: {}", path, err))
+        .map_err(|error| format!("write {path} failed: {error}"))
 }
 
 #[cfg(feature = "vp9-stateless-hw")]
@@ -204,21 +215,21 @@ fn dump_stateless_request(
     access_unit: &[u8],
     params: &ScarletVideoVp9StatelessParams,
 ) -> Result<(), String> {
-    let prefix = format!("scarlet-vp9.{:016x}", timestamp);
+    let prefix = format!("scarlet-vp9.{timestamp:016x}");
     dump_file(
-        &join_dump_path(dir, &format!("{}.input.bin", prefix)),
+        &join_dump_path(dir, &format!("{prefix}.input.bin")),
         access_unit,
     )?;
     dump_file(
-        &join_dump_path(dir, &format!("{}.frame-params.bin", prefix)),
+        &join_dump_path(dir, &format!("{prefix}.frame-params.bin")),
         struct_bytes(&params.frame),
     )?;
     dump_file(
-        &join_dump_path(dir, &format!("{}.probs.bin", prefix)),
+        &join_dump_path(dir, &format!("{prefix}.probs.bin")),
         &params.probabilities.data,
     )?;
     dump_file(
-        &join_dump_path(dir, &format!("{}.tiles.bin", prefix)),
+        &join_dump_path(dir, &format!("{prefix}.tiles.bin")),
         struct_bytes(&params.tiles),
     )?;
 
@@ -256,15 +267,15 @@ refresh_frame_flags=0x{:x}\n",
         params.frame.refresh_frame_flags,
     );
     dump_file(
-        &join_dump_path(dir, &format!("{}.manifest.txt", prefix)),
+        &join_dump_path(dir, &format!("{prefix}.manifest.txt")),
         manifest.as_bytes(),
     )
 }
 
 #[cfg(feature = "vp9-stateless-hw")]
-fn read_decoder_status(device: &mut File) -> String {
+fn read_decoder_status(device: &Handle) -> String {
     let mut buffer = [0u8; 512];
-    match device.read(&mut buffer) {
+    match read_device(device, &mut buffer) {
         Ok(0) | Err(_) => String::new(),
         Ok(read) => {
             let status = core::str::from_utf8(&buffer[..read]).unwrap_or("<non-utf8 status>");

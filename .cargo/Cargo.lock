@@ -3601,6 +3601,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "scarlet-video-client"
+version = "0.16.0"
+dependencies = [
+ "scarlet-codecs",
+ "scarlet-os",
+ "scarlet-std",
+]
+
+[[package]]
 name = "scarlet-websocket-demo"
 version = "0.1.0"
 dependencies = [
@@ -4827,10 +4836,10 @@ dependencies = [
  "sas-client",
  "sbus",
  "sbus-client",
- "scarlet-codecs",
  "scarlet-desktop-config",
  "scarlet-std",
  "scarlet-ui",
+ "scarlet-video-client",
  "symphonia-codec-aac",
  "symphonia-core",
 ]

@@ -10,21 +10,21 @@ path = "src/main.rs"
 
 [features]
 default = ["av1-stateful-hw", "h264-stateful-hw", "mp4-aac"]
-av1-stateful-hw = []
-h264-stateful-hw = []
+av1-stateful-hw = ["scarlet-video-client/av1-stateful-hw"]
+h264-stateful-hw = ["scarlet-video-client/h264-stateful-hw"]
 # H.264 stateless and software paths are opt-in because H.264/AVC may be
 # patent-encumbered in some jurisdictions. The default build keeps only the
 # platform/stateful hardware path.
-h264-stateless-hw = ["dep:scarlet-codecs", "scarlet-codecs/h264"]
+h264-stateless-hw = ["scarlet-video-client/h264-stateless-hw"]
 h264-sw = ["dep:rust_h264"]
-hevc-stateful-hw = []
+hevc-stateful-hw = ["scarlet-video-client/hevc-stateful-hw"]
 mp4-aac = ["dep:symphonia-core", "dep:symphonia-codec-aac"]
-vp9-stateful-hw = []
-vp9-stateless-hw = ["dep:scarlet-codecs", "scarlet-codecs/vp9"]
+vp9-stateful-hw = ["scarlet-video-client/vp9-stateful-hw"]
+vp9-stateless-hw = ["scarlet-video-client/vp9-stateless-hw"]
 
 [dependencies]
 scarlet-std = { path = "../lib/std", features = ["alloc_debug"] }
-scarlet-codecs = { path = "../lib/scarlet-codecs", default-features = false, optional = true }
+scarlet-video-client = { path = "../lib/scarlet-video-client", default-features = false, features = ["legacy-scarlet-std"] }
 scarlet-ui = { git = "https://github.com/petitstrawberry/scarlet-ui", package = "scarlet-ui", default-features = false, features = ["legacy-scarlet-std", "platform-sws"] }
 sas-client = { path = "../lib/sas-client", default-features = false, features = ["legacy-scarlet-std"] }
 sbus = { path = "../lib/sbus" }

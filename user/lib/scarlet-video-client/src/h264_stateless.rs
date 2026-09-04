@@ -1,76 +1,65 @@
-use super::*;
+//! Stateless H.264 request preparation and Scarlet ABI submission.
+
+#[cfg(feature = "h264-stateless-hw")]
+use alloc::format;
+use alloc::string::String;
 
 #[cfg(feature = "h264-stateless-hw")]
 use scarlet_codecs::H264RequestContext;
-use std::fs::File;
+use scarlet_os::handle::Handle;
 
+use crate::abi::ScarletVideoCapabilities;
 #[cfg(feature = "h264-stateless-hw")]
-const SCARLET_VIDEO_SUBMIT_H264_STATELESS: u32 = 0x5608;
-
+use crate::abi::{
+    SCARLET_VIDEO_CAP_STATELESS_H264, SCARLET_VIDEO_SUBMIT_H264_STATELESS,
+    ScarletVideoH264ParamPtrs, ScarletVideoH264StatelessSubmit,
+};
 #[cfg(feature = "h264-stateless-hw")]
-#[repr(C)]
-#[derive(Clone, Copy, Default)]
-struct ScarletVideoH264ParamPtrs {
-    sps: u64,
-    pps: u64,
-    scaling_matrix: u64,
-    pred_weights: u64,
-    slice_params: u64,
-    decode_params: u64,
-}
-
-#[cfg(feature = "h264-stateless-hw")]
-#[repr(C)]
-#[derive(Clone, Copy, Default)]
-struct ScarletVideoH264StatelessSubmit {
-    stream_id: u32,
-    input_len: u32,
-    timestamp: u64,
-    params: ScarletVideoH264ParamPtrs,
-    flags: u32,
-    padding: u32,
-}
+use crate::read_device;
 
 #[cfg(feature = "h264-stateless-hw")]
 #[derive(Default)]
-pub struct Context {
+pub(crate) struct Context {
     request: H264RequestContext,
 }
 
 #[cfg(not(feature = "h264-stateless-hw"))]
 #[derive(Default)]
-pub struct Context;
+pub(crate) struct Context;
 
 #[cfg(feature = "h264-stateless-hw")]
-pub fn supported(caps: Option<ScarletVideoCapabilities>) -> bool {
+pub(crate) fn supported(caps: Option<ScarletVideoCapabilities>) -> bool {
     caps.map(|caps| caps.has_flag(SCARLET_VIDEO_CAP_STATELESS_H264))
         .unwrap_or(false)
 }
 
 #[cfg(not(feature = "h264-stateless-hw"))]
-pub fn supported(caps: Option<ScarletVideoCapabilities>) -> bool {
+pub(crate) fn supported(caps: Option<ScarletVideoCapabilities>) -> bool {
     let _ = caps;
     false
 }
 
 #[cfg(feature = "h264-stateless-hw")]
-pub fn reset_for_discontinuity(context: &mut Context) {
+pub(crate) fn reset_for_discontinuity(context: &mut Context) {
     context.request.reset_decode_state();
 }
 
 #[cfg(not(feature = "h264-stateless-hw"))]
-pub fn reset_for_discontinuity(context: &mut Context) {
+pub(crate) fn reset_for_discontinuity(context: &mut Context) {
     let _ = context;
 }
 
 #[cfg(feature = "h264-stateless-hw")]
-pub fn submit(
-    device: &mut File,
+pub(crate) fn submit(
+    device: &Handle,
     context: &mut Context,
     stream_id: u32,
     access_unit: &[u8],
-) -> Result<(), String> {
-    let h264 = context.request.params_for_access_unit(access_unit)?;
+    timestamp: u64,
+) -> Result<u64, String> {
+    let h264 = context
+        .request
+        .params_for_access_unit_with_timestamp(access_unit, timestamp)?;
     let params = &h264.params;
     let submit = ScarletVideoH264StatelessSubmit {
         stream_id,
@@ -88,7 +77,6 @@ pub fn submit(
         padding: 0,
     };
     device
-        .as_handle()
         .control(
             SCARLET_VIDEO_SUBMIT_H264_STATELESS,
             &submit as *const _ as usize,
@@ -97,24 +85,25 @@ pub fn submit(
             let status = read_decoder_status(device);
             format!("hardware decoder stateless H.264 submit failed{status}")
         })?;
-    Ok(())
+    Ok(h264.timestamp)
 }
 
 #[cfg(not(feature = "h264-stateless-hw"))]
-pub fn submit(
-    device: &mut File,
+pub(crate) fn submit(
+    device: &Handle,
     context: &mut Context,
     stream_id: u32,
     access_unit: &[u8],
-) -> Result<(), String> {
-    let _ = (device, context, stream_id, access_unit);
+    timestamp: u64,
+) -> Result<u64, String> {
+    let _ = (device, context, stream_id, access_unit, timestamp);
     Err(String::from("stateless H.264 hardware decode is disabled"))
 }
 
 #[cfg(feature = "h264-stateless-hw")]
-fn read_decoder_status(device: &mut File) -> String {
+fn read_decoder_status(device: &Handle) -> String {
     let mut buffer = [0u8; 512];
-    match device.read(&mut buffer) {
+    match read_device(device, &mut buffer) {
         Ok(0) | Err(_) => String::new(),
         Ok(read) => {
             let status = core::str::from_utf8(&buffer[..read]).unwrap_or("<non-utf8 status>");

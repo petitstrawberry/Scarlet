@@ -12,9 +12,7 @@
     clippy::useless_format
 )]
 
-mod h264_stateless_hw;
 mod h264_sw;
-mod vp9_stateless_hw;
 
 extern crate alloc;
 extern crate scarlet_std as std;
@@ -51,8 +49,13 @@ use scarlet_ui::{
     MouseButton, MouseEvent, Scene, Size, SubscriptionId, View, ViewExt, Window, WindowGroup,
     dismiss_window, graphics,
 };
+use scarlet_video_client::{
+    AUTOMATIC_TIMESTAMP, DecodedFrame, DecoderOptions, OwnedDecodedFrame, ScarletVideoDecoder,
+    VideoBufferRequest, VideoFormat, enable_vp9_stateless_dump, recommended_input_buffer_len,
+    recommended_nv12_output_buffer_len,
+};
 use std::audio::AUDIO_PCM_FORMAT_S16LE;
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::handle::capability::memory_mapping::{flags as mmap_flags, munmap, prot};
 use std::io::{ErrorKind, Read, SeekFrom};
 use std::socket::Socket;
@@ -94,7 +97,6 @@ const DISPLAY_QUEUE_MAX_FRAMES: usize = 2;
 // may own one additional frame while it waits for the queue, so a 4 MiB byte
 // bound caps the steady-state payload working set at two 1080p frames.
 const DISPLAY_QUEUE_MAX_BYTES: usize = 4 * 1024 * 1024;
-const PAYLOAD_POOL_MAX_BYTES: usize = 4 * 1024 * 1024;
 const DECODE_TARGET_LEAD_FRAMES: usize = 1;
 const AUDIO_CLOCK_START_TIMEOUT_MS: u64 = 3_000;
 const AUDIO_CLOCK_STALL_TIMEOUT_MS: u64 = 3_000;
@@ -196,31 +198,6 @@ const SEEK_TRACK_HEIGHT: u32 = 2;
 const SEEK_TRACK_HIT_INSET: u32 = 10;
 const SEEK_KNOB_WIDTH: u32 = 4;
 const SEEK_KNOB_HEIGHT: u32 = 8;
-const VIDEO_DEVICE_PATH: &str = "/dev/video0";
-const SCARLET_VIDEO_FRAME_HEADER_LEN: usize = 20;
-const NV12_VIDEO_RANGE_PIXEL_FORMAT: u32 = 0x3432_3076;
-const SCARLET_VIDEO_GET_BUFFER: u32 = 0x5600;
-const SCARLET_VIDEO_SUBMIT: u32 = 0x5601;
-const SCARLET_VIDEO_DEQUEUE: u32 = 0x5602;
-const SCARLET_VIDEO_CREATE_SESSION: u32 = 0x5603;
-const SCARLET_VIDEO_SUBMIT_SESSION: u32 = 0x5604;
-const SCARLET_VIDEO_DEQUEUE_SESSION: u32 = 0x5605;
-const SCARLET_VIDEO_DESTROY_SESSION: u32 = 0x5606;
-const SCARLET_VIDEO_GET_CAPS: u32 = 0x5607;
-const SCARLET_VIDEO_CAPS_VERSION: u32 = 1;
-const SCARLET_VIDEO_CAP_STATEFUL_H264: u32 = 1 << 0;
-const SCARLET_VIDEO_CAP_STATEFUL_AV1: u32 = 1 << 1;
-const SCARLET_VIDEO_CAP_STATEFUL_HEVC: u32 = 1 << 2;
-const SCARLET_VIDEO_CAP_STATEFUL_VP9: u32 = 1 << 3;
-const SCARLET_VIDEO_CAP_STATELESS_H264: u32 = 1 << 8;
-const SCARLET_VIDEO_CAP_STATELESS_VP9: u32 = 1 << 9;
-const SCARLET_VIDEO_CAP_MAPPED_BUFFERS: u32 = 1 << 16;
-const SCARLET_VIDEO_CAP_SESSIONS: u32 = 1 << 17;
-const SCARLET_VIDEO_CAP_VARIABLE_MAPPED_BUFFERS: u32 = 1 << 18;
-const SCARLET_VIDEO_FORMAT_H264: u32 = 4098;
-const SCARLET_VIDEO_FORMAT_HEVC: u32 = 4099;
-const SCARLET_VIDEO_FORMAT_VP9: u32 = 4102;
-const SCARLET_VIDEO_FORMAT_AV1: u32 = 4103;
 const SCARLET_AV1_ACCESS_UNIT_MAGIC: &[u8; 4] = b"SVA1";
 // Software decode needs a large-core latency floor.  The hardware path only
 // copies/colour-converts completed frames, and pinning every decoder and
@@ -232,127 +209,9 @@ const VIDEO_HARDWARE_DECODE_UTIL_MIN: u32 = SCHED_UTIL_SCALE / 4;
 const VIDEO_SOFTWARE_DECODE_UTIL_MIN: u32 = SCHED_UTIL_SCALE * 7 / 8;
 const VIDEO_HARDWARE_DISPLAY_UTIL_MIN: u32 = SCHED_UTIL_SCALE / 4;
 const VIDEO_SOFTWARE_DISPLAY_UTIL_MIN: u32 = SCHED_UTIL_SCALE * 3 / 4;
-const VIDEO_BUFFER_REQUEST_GRANULARITY: usize = 1024 * 1024;
-const VIDEO_BUFFER_MIN_INPUT: usize = VIDEO_BUFFER_REQUEST_GRANULARITY;
-const VIDEO_BUFFER_MIN_OUTPUT: usize = VIDEO_BUFFER_REQUEST_GRANULARITY;
-const VIDEO_HARDWARE_OUTPUT_OFFSET: usize = 4096;
 
 fn monotonic_time_ns() -> u64 {
     syscall0(Syscall::MonotonicTime) as u64
-}
-
-/// One released full-resolution frame is enough for steady-state reuse because
-/// display backpressure admits only one queued frame.
-const PAYLOAD_POOL_MAX_BUFFERS: usize = 1;
-
-/// Recycle pool for decoded-frame payload buffers. Eliminates per-frame heap
-/// churn for the ~3 MiB full-HD NV12 payloads at 24-30 fps.
-static PAYLOAD_POOL: Mutex<Vec<Vec<u8>>> = Mutex::new(Vec::new());
-
-fn acquire_payload_buffer(len: usize) -> Result<Vec<u8>, String> {
-    let mut pool = PAYLOAD_POOL.lock();
-    while let Some(buf) = pool.pop() {
-        if buf.capacity() >= len {
-            drop(pool);
-            let mut buf = buf;
-            buf.resize(len, 0);
-            return Ok(buf);
-        }
-    }
-    drop(pool);
-    let mut buf = Vec::new();
-    buf.try_reserve_exact(len)
-        .map_err(|_| format!("decoded frame allocation failed: {} bytes", len))?;
-    buf.resize(len, 0);
-    Ok(buf)
-}
-
-fn release_payload_buffer(buf: Vec<u8>) {
-    let mut pool = PAYLOAD_POOL.lock();
-    let retained_bytes = pool.iter().fold(0usize, |total, retained| {
-        total.saturating_add(retained.capacity())
-    });
-    if pool.len() < PAYLOAD_POOL_MAX_BUFFERS
-        && (pool.is_empty()
-            || retained_bytes.saturating_add(buf.capacity()) <= PAYLOAD_POOL_MAX_BYTES)
-    {
-        pool.push(buf);
-    }
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, Default)]
-struct ScarletVideoBufferInfo {
-    mmap_offset: u64,
-    mmap_len: u64,
-    input_offset: u64,
-    input_len: u32,
-    output_offset: u64,
-    output_len: u32,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, Default)]
-struct ScarletVideoSubmit {
-    input_len: u32,
-    coded_format: u32,
-    timestamp: u64,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, Default)]
-struct ScarletVideoDequeuedFrame {
-    width: u32,
-    height: u32,
-    pixel_format: u32,
-    payload_offset: u64,
-    payload_len: u32,
-    flags: u32,
-    timestamp: u64,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, Default)]
-struct ScarletVideoSessionInfo {
-    stream_id: u32,
-    padding: u32,
-    buffer: ScarletVideoBufferInfo,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, Default)]
-struct ScarletVideoSessionSubmit {
-    stream_id: u32,
-    input_len: u32,
-    coded_format: u32,
-    padding: u32,
-    timestamp: u64,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, Default)]
-struct ScarletVideoSessionDequeuedFrame {
-    stream_id: u32,
-    padding: u32,
-    frame: ScarletVideoDequeuedFrame,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, Default)]
-struct ScarletVideoCapabilities {
-    version: u32,
-    flags: u32,
-    max_sessions: u32,
-    output_pixel_format: u32,
-    mapped_input_len: u32,
-    mapped_output_len: u32,
-    reserved: [u32; 8],
-}
-
-impl ScarletVideoCapabilities {
-    fn has_flag(self, flag: u32) -> bool {
-        self.flags & flag != 0
-    }
 }
 
 struct VideoFrameStore {
@@ -382,25 +241,13 @@ impl VideoFrameStore {
 
     fn update_from_nv12(
         &self,
-        frame: &ScarletVideoFrame,
+        frame: &OwnedDecodedFrame,
         current_frame: u32,
         total_frames: u32,
     ) -> Result<(), String> {
-        let width = frame.width;
-        let height = frame.height;
-        if frame.pixel_format != NV12_VIDEO_RANGE_PIXEL_FORMAT {
-            return Err(format!(
-                "hardware decoder returned unsupported pixel format 0x{:08x}",
-                frame.pixel_format
-            ));
-        }
-        let required_nv12_len = width as usize * height as usize * 3 / 2;
+        let width = frame.width();
+        let height = frame.height();
         let payload = frame.payload();
-        if payload.len() < required_nv12_len {
-            return Err(String::from(
-                "hardware decoder returned truncated NV12 frame",
-            ));
-        }
 
         let mut data = self.data.lock();
         let required_len = width as usize * height as usize * 4;
@@ -1865,7 +1712,7 @@ fn decode_loop_hardware(
     let mut seek_epoch = controls.current_seek_epoch();
     let mut seek_target_us = 0u64;
     let mut decoder =
-        HardwareVideoDecoder::open(queue.cancel.clone(), source.hardware_buffer_request())?;
+        open_hardware_decoder(queue.cancel.clone(), source.hardware_buffer_request())?;
     let mut first_pass = true;
 
     loop {
@@ -1894,8 +1741,9 @@ fn decode_loop_hardware(
             }
             wait_while_paused(controls, queue);
             let access_unit_bytes = access_unit.bytes(mp4_data, &mut access_unit_scratch)?;
-            let frame = decoder.decode_access_unit(
-                access_unit.codec,
+            let frame = decode_hardware_access_unit(
+                &mut decoder,
+                access_unit,
                 access_unit_bytes,
                 controls,
                 seek_epoch,
@@ -2018,7 +1866,7 @@ fn decode_loop_hardware_streaming_mp4(
 ) -> Result<(), String> {
     let mut data = Vec::new();
     let mut decoder =
-        HardwareVideoDecoder::open(queue.cancel.clone(), HardwareBufferRequest::default())?;
+        open_hardware_decoder(queue.cancel.clone(), HardwareBufferRequest::default())?;
     let mut reorder = FrameReorderBuffer::new(u32::MAX);
     let mut access_unit_scratch = Vec::new();
     let mut decoded = 0usize;
@@ -2183,8 +2031,9 @@ fn decode_loop_hardware_streaming_mp4(
                     access_unit.presentation_time_us
                 );
             }
-            let frame = decoder.decode_access_unit(
-                access_unit.codec,
+            let frame = decode_hardware_access_unit(
+                &mut decoder,
+                access_unit,
                 access_unit_bytes,
                 controls,
                 active_seek_epoch,
@@ -2353,7 +2202,7 @@ fn decode_loop_hardware_streaming_mp4_socket(
 
     let mut data = Vec::new();
     let mut decoder =
-        HardwareVideoDecoder::open(queue.cancel.clone(), HardwareBufferRequest::default())?;
+        open_hardware_decoder(queue.cancel.clone(), HardwareBufferRequest::default())?;
     let mut reorder = FrameReorderBuffer::new(u32::MAX);
     let mut access_unit_scratch = Vec::new();
     let mut decoded = 0usize;
@@ -2528,8 +2377,9 @@ fn decode_loop_hardware_streaming_mp4_socket(
                     access_unit.presentation_time_us
                 );
             }
-            let frame = decoder.decode_access_unit(
-                access_unit.codec,
+            let frame = decode_hardware_access_unit(
+                &mut decoder,
+                access_unit,
                 access_unit_bytes,
                 controls,
                 active_seek_epoch,
@@ -2732,8 +2582,9 @@ fn replay_hardware_source_loops(
             }
             wait_while_paused(controls, queue);
             let access_unit_bytes = access_unit.bytes(Some(mp4_data), &mut access_unit_scratch)?;
-            let frame = decoder.decode_access_unit(
-                access_unit.codec,
+            let frame = decode_hardware_access_unit(
+                &mut decoder,
+                access_unit,
                 access_unit_bytes,
                 controls,
                 seek_epoch,
@@ -2855,10 +2706,35 @@ struct VideoSource {
     coded_height: u32,
 }
 
-#[derive(Clone, Copy, Default)]
-struct HardwareBufferRequest {
-    input_len: u32,
-    output_len: u32,
+type HardwareBufferRequest = VideoBufferRequest;
+type HardwareVideoDecoder = ScarletVideoDecoder;
+
+fn open_hardware_decoder(
+    cancel: Arc<AtomicBool>,
+    buffer_request: HardwareBufferRequest,
+) -> Result<HardwareVideoDecoder, String> {
+    HardwareVideoDecoder::open_with_options(
+        DecoderOptions::new()
+            .with_buffer_request(buffer_request)
+            .with_cancellation(cancel),
+    )
+}
+
+fn decode_hardware_access_unit<'decoder>(
+    decoder: &'decoder mut HardwareVideoDecoder,
+    access_unit: &VideoAccessUnit,
+    access_unit_bytes: &[u8],
+    controls: &ControlsOverlay,
+    seek_epoch: u32,
+) -> Result<Option<DecodedFrame<'decoder>>, String> {
+    if controls.current_seek_epoch() != seek_epoch {
+        return Ok(None);
+    }
+    decoder.decode(
+        access_unit.codec.video_format(),
+        access_unit_bytes,
+        AUTOMATIC_TIMESTAMP,
+    )
 }
 
 struct VideoAccessUnit {
@@ -2980,7 +2856,7 @@ fn restart_hardware_decoder_for_discontinuity(
         return Ok(decoder);
     };
     decoder.restart_for_discontinuity(
-        access_unit.codec,
+        access_unit.codec.video_format(),
         video_access_unit_is_random_access(access_unit),
     )
 }
@@ -3135,31 +3011,13 @@ enum VideoCodec {
 }
 
 impl VideoCodec {
-    fn coded_format(self) -> u32 {
+    fn video_format(self) -> VideoFormat {
         match self {
-            VideoCodec::H264 => SCARLET_VIDEO_FORMAT_H264,
-            VideoCodec::Hevc => SCARLET_VIDEO_FORMAT_HEVC,
-            VideoCodec::Vp9 => SCARLET_VIDEO_FORMAT_VP9,
-            VideoCodec::Av1 => SCARLET_VIDEO_FORMAT_AV1,
+            VideoCodec::H264 => VideoFormat::H264,
+            VideoCodec::Hevc => VideoFormat::Hevc,
+            VideoCodec::Vp9 => VideoFormat::Vp9,
+            VideoCodec::Av1 => VideoFormat::Av1,
         }
-    }
-
-    fn name(self) -> &'static str {
-        match self {
-            VideoCodec::H264 => "H.264",
-            VideoCodec::Hevc => "HEVC",
-            VideoCodec::Vp9 => "VP9",
-            VideoCodec::Av1 => "AV1",
-        }
-    }
-}
-
-fn stateful_hardware_feature_enabled(codec: VideoCodec) -> bool {
-    match codec {
-        VideoCodec::H264 => cfg!(feature = "h264-stateful-hw"),
-        VideoCodec::Hevc => cfg!(feature = "hevc-stateful-hw"),
-        VideoCodec::Vp9 => cfg!(feature = "vp9-stateful-hw"),
-        VideoCodec::Av1 => cfg!(feature = "av1-stateful-hw"),
     }
 }
 
@@ -3189,41 +3047,12 @@ impl VideoSource {
             .try_fold(0usize, |largest, unit| {
                 Some(largest.max(unit.encoded_len_upper_bound()?))
             })
-            .and_then(|largest| rounded_buffer_request(largest, VIDEO_BUFFER_MIN_INPUT))
+            .and_then(recommended_input_buffer_len)
             .unwrap_or(0);
         let output_len =
-            nv12_output_buffer_request(self.coded_width, self.coded_height).unwrap_or(0);
-        HardwareBufferRequest {
-            input_len,
-            output_len,
-        }
+            recommended_nv12_output_buffer_len(self.coded_width, self.coded_height).unwrap_or(0);
+        HardwareBufferRequest::new(input_len, output_len)
     }
-}
-
-fn rounded_buffer_request(required: usize, minimum: usize) -> Option<u32> {
-    let required = required.max(minimum);
-    let aligned = required.checked_add(VIDEO_BUFFER_REQUEST_GRANULARITY - 1)?
-        & !(VIDEO_BUFFER_REQUEST_GRANULARITY - 1);
-    u32::try_from(aligned).ok()
-}
-
-fn nv12_output_buffer_request(width: u32, height: u32) -> Option<u32> {
-    if width == 0 || height == 0 {
-        return None;
-    }
-    let width = width as usize;
-    let height = height as usize;
-    let stride = width.checked_add(127)? & !127;
-    let y_scanlines = height.checked_add(31)? & !31;
-    let uv_height = height.checked_add(1)? / 2;
-    let uv_scanlines = uv_height.checked_add(15)? & !15;
-    let linear_size = stride.checked_mul(y_scanlines.checked_add(uv_scanlines)?)?;
-    let hardware_size = VIDEO_HARDWARE_OUTPUT_OFFSET.checked_add(linear_size)?;
-    let tight_size = width
-        .checked_mul(height)?
-        .checked_add(width.checked_mul(uv_height)?)?
-        .checked_add(SCARLET_VIDEO_FRAME_HEADER_LEN)?;
-    rounded_buffer_request(hardware_size.max(tight_size), VIDEO_BUFFER_MIN_OUTPUT)
 }
 
 fn load_video_source(path: &str, mp4_data: Option<&[u8]>) -> Result<VideoSource, String> {
@@ -5718,679 +5547,11 @@ fn hevc_access_unit_is_keyframe(access_unit: &[u8]) -> bool {
     is_keyframe
 }
 
-struct ScarletVideoFrame {
-    width: u32,
-    height: u32,
-    pixel_format: u32,
-    payload: ScarletVideoPayload,
-}
-
-enum ScarletVideoPayload {
-    Owned(Vec<u8>),
-    Mapped { ptr: *const u8, len: usize },
-}
-
-impl Drop for ScarletVideoPayload {
-    fn drop(&mut self) {
-        match self {
-            ScarletVideoPayload::Owned(buf) => {
-                release_payload_buffer(core::mem::take(buf));
-            }
-            ScarletVideoPayload::Mapped { .. } => {}
-        }
-    }
-}
-
-impl ScarletVideoFrame {
-    fn payload(&self) -> &[u8] {
-        match &self.payload {
-            ScarletVideoPayload::Owned(payload) => payload,
-            ScarletVideoPayload::Mapped { ptr, len } => {
-                // SAFETY: mapped video frames point into the live /dev/video0
-                // mmap owned by HardwareVideoDecoder. Frames are consumed before
-                // the next decode submission overwrites the output buffer.
-                unsafe { core::slice::from_raw_parts(*ptr, *len) }
-            }
-        }
-    }
-
-    fn try_into_owned(mut self) -> Result<Self, String> {
-        if matches!(&self.payload, ScarletVideoPayload::Mapped { .. }) {
-            let len = self.payload().len();
-            let mut buf = acquire_payload_buffer(len)?;
-            buf[..len].copy_from_slice(self.payload());
-            self.payload = ScarletVideoPayload::Owned(buf);
-        }
-        Ok(self)
-    }
-}
-
-#[derive(Clone, Copy)]
-struct MappedVideoBuffer {
-    stream_id: u32,
-    session_commands: bool,
-    coded_format: u32,
-    ptr: *mut u8,
-    mmap_len: usize,
-    input_offset: usize,
-    input_len: usize,
-    output_offset: usize,
-    output_len: usize,
-}
-
-impl MappedVideoBuffer {
-    fn payload_ptr(&self, payload_offset: u64, payload_len: usize) -> Result<*const u8, String> {
-        let payload_offset = payload_offset as usize;
-        let end = payload_offset
-            .checked_add(payload_len)
-            .ok_or_else(|| String::from("hardware decoder mmap payload length overflow"))?;
-        let output_start = self.output_offset;
-        let output_end = self
-            .output_offset
-            .checked_add(self.output_len)
-            .ok_or_else(|| String::from("hardware decoder mmap output length overflow"))?;
-        if payload_offset < output_start || end > output_end || end > self.mmap_len {
-            return Err(String::from(
-                "hardware decoder returned invalid mmap payload range",
-            ));
-        }
-        // SAFETY: the range was validated to lie within the live mmap.
-        Ok(unsafe { self.ptr.add(payload_offset) as *const u8 })
-    }
-}
-
-struct HardwareVideoDecoder {
-    device: File,
-    mapped: Option<MappedVideoBuffer>,
-    caps: Option<ScarletVideoCapabilities>,
-    buffer_request: HardwareBufferRequest,
-    last_decode_mode: Option<HardwareDecodeMode>,
-    h264_stateless_context: h264_stateless_hw::Context,
-    vp9_stateless_context: vp9_stateless_hw::Context,
-    vp9_debug_submits: u32,
-    cancel: Arc<AtomicBool>,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum HardwareDecodeMode {
-    Stateful,
-    StatelessH264,
-    StatelessVp9,
-}
-
-impl HardwareVideoDecoder {
-    fn open(
-        cancel: Arc<AtomicBool>,
-        buffer_request: HardwareBufferRequest,
-    ) -> Result<Self, String> {
-        if cancel.load(Ordering::Acquire) {
-            return Err(String::from("hardware decoder open cancelled"));
-        }
-        let device = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(VIDEO_DEVICE_PATH)
-            .map_err(|_| format!("failed to open {}", VIDEO_DEVICE_PATH))?;
-        let caps = Self::query_capabilities(&device);
-        if let Some(caps) = caps {
-            println!(
-                "[{}] hardware decoder caps flags=0x{:x} stateful_h264={} stateful_av1={} stateful_hevc={} stateful_vp9={} stateless_h264={} stateless_vp9={}",
-                APP_NAME,
-                caps.flags,
-                caps.has_flag(SCARLET_VIDEO_CAP_STATEFUL_H264),
-                caps.has_flag(SCARLET_VIDEO_CAP_STATEFUL_AV1),
-                caps.has_flag(SCARLET_VIDEO_CAP_STATEFUL_HEVC),
-                caps.has_flag(SCARLET_VIDEO_CAP_STATEFUL_VP9),
-                caps.has_flag(SCARLET_VIDEO_CAP_STATELESS_H264),
-                caps.has_flag(SCARLET_VIDEO_CAP_STATELESS_VP9)
-            );
-        }
-        let mapped = Self::map_video_buffer(&device, caps, buffer_request);
-        if let Some(buffer) = &mapped {
-            println!(
-                "[{}] hardware decoder mmap input={} output={}",
-                APP_NAME, buffer.input_len, buffer.output_len
-            );
-        }
-        Ok(Self {
-            device,
-            mapped,
-            caps,
-            buffer_request,
-            last_decode_mode: None,
-            h264_stateless_context: h264_stateless_hw::Context::default(),
-            vp9_stateless_context: vp9_stateless_hw::Context::default(),
-            vp9_debug_submits: 0,
-            cancel,
-        })
-    }
-
-    fn is_cancelled(&self) -> bool {
-        self.cancel.load(Ordering::Acquire)
-    }
-
-    fn restart_for_discontinuity(
-        mut self,
-        codec: VideoCodec,
-        random_access: bool,
-    ) -> Result<Self, String> {
-        let reusable_h264 = self.last_decode_mode.is_none()
-            || self.last_decode_mode == Some(HardwareDecodeMode::StatelessH264);
-        if random_access
-            && codec == VideoCodec::H264
-            && reusable_h264
-            && self.supports_stateless_h264()
-        {
-            h264_stateless_hw::reset_for_discontinuity(&mut self.h264_stateless_context);
-            return Ok(self);
-        }
-        let reusable_vp9 = self.last_decode_mode.is_none()
-            || self.last_decode_mode == Some(HardwareDecodeMode::StatelessVp9);
-        if random_access
-            && codec == VideoCodec::Vp9
-            && reusable_vp9
-            && self.supports_stateless_vp9()
-        {
-            vp9_stateless_hw::reset_for_discontinuity(&mut self.vp9_stateless_context);
-            self.vp9_debug_submits = 0;
-            return Ok(self);
-        }
-
-        // Stateful decoders do not yet expose a flush/reset command. A fresh
-        // session remains necessary there, and for malformed sources whose
-        // chosen seek point is not independently decodable.
-        let cancel = self.cancel.clone();
-        let buffer_request = self.buffer_request;
-        drop(self);
-        Self::open(cancel, buffer_request)
-    }
-
-    fn decode_access_unit(
-        &mut self,
-        codec: VideoCodec,
-        access_unit: &[u8],
-        controls: &ControlsOverlay,
-        seek_epoch: u32,
-    ) -> Result<Option<ScarletVideoFrame>, String> {
-        if self.decode_interrupted(controls, seek_epoch) {
-            return Ok(None);
-        }
-        if access_unit.is_empty() {
-            return Ok(None);
-        }
-        if !self.supports_decode_codec(codec) {
-            return Err(format!(
-                "hardware decoder does not support {}",
-                codec.name()
-            ));
-        }
-        if let Some(buffer) = &self.mapped {
-            if access_unit.len() <= buffer.input_len {
-                return self.decode_access_unit_mapped(codec, access_unit, controls, seek_epoch);
-            }
-        }
-        if !self.supports_stateful_codec(codec) {
-            return Err(format!(
-                "hardware decoder stateless {} requires mmap input",
-                codec.name()
-            ));
-        }
-        if codec != VideoCodec::H264 {
-            return Err(String::from(
-                "hardware decoder mmap input overflow for non-H.264 access unit",
-            ));
-        }
-        self.last_decode_mode = Some(HardwareDecodeMode::Stateful);
-        self.decode_access_unit_stream(access_unit, controls, seek_epoch)
-    }
-
-    fn decode_interrupted(&self, controls: &ControlsOverlay, seek_epoch: u32) -> bool {
-        self.is_cancelled() || controls.current_seek_epoch() != seek_epoch
-    }
-
-    fn supports_decode_codec(&self, codec: VideoCodec) -> bool {
-        self.supports_stateful_codec(codec)
-            || (codec == VideoCodec::H264 && h264_stateless_hw::supported(self.caps))
-            || (codec == VideoCodec::Vp9 && vp9_stateless_hw::supported(self.caps))
-    }
-
-    fn supports_stateful_codec(&self, codec: VideoCodec) -> bool {
-        if !stateful_hardware_feature_enabled(codec) {
-            return false;
-        }
-        let Some(caps) = self.caps else {
-            return codec != VideoCodec::Vp9;
-        };
-        match codec {
-            VideoCodec::H264 => caps.has_flag(SCARLET_VIDEO_CAP_STATEFUL_H264),
-            VideoCodec::Hevc => caps.has_flag(SCARLET_VIDEO_CAP_STATEFUL_HEVC),
-            VideoCodec::Vp9 => caps.has_flag(SCARLET_VIDEO_CAP_STATEFUL_VP9),
-            VideoCodec::Av1 => caps.has_flag(SCARLET_VIDEO_CAP_STATEFUL_AV1),
-        }
-    }
-
-    fn supports_stateless_h264(&self) -> bool {
-        h264_stateless_hw::supported(self.caps)
-    }
-
-    fn supports_stateless_vp9(&self) -> bool {
-        vp9_stateless_hw::supported(self.caps)
-    }
-
-    fn decode_access_unit_stream(
-        &mut self,
-        access_unit: &[u8],
-        controls: &ControlsOverlay,
-        seek_epoch: u32,
-    ) -> Result<Option<ScarletVideoFrame>, String> {
-        let written = match self.device.write(access_unit) {
-            Ok(written) => written,
-            Err(err) => {
-                let status = self.read_decoder_status();
-                return Err(format!("hardware decoder write failed: {err}{status}"));
-            }
-        };
-        if written != access_unit.len() {
-            return Err(format!(
-                "hardware decoder accepted only {} of {} bytes",
-                written,
-                access_unit.len()
-            ));
-        }
-
-        let mut header = [0u8; SCARLET_VIDEO_FRAME_HEADER_LEN];
-        if let Err(error) = read_exact_file(&mut self.device, &mut header, Some(&self.cancel)) {
-            return if self.is_cancelled() {
-                Ok(None)
-            } else {
-                Err(error)
-            };
-        }
-        if &header[0..4] != b"SVF1" {
-            let text = core::str::from_utf8(&header).unwrap_or("");
-            return Err(format!(
-                "hardware decoder returned invalid frame magic {:02x} {:02x} {:02x} {:02x} {}",
-                header[0], header[1], header[2], header[3], text
-            ));
-        }
-
-        let width = read_u32_le(&header[4..8]);
-        let height = read_u32_le(&header[8..12]);
-        let pixel_format = read_u32_le(&header[12..16]);
-        let payload_len = read_u32_le(&header[16..20]) as usize;
-        if width == 0 || height == 0 {
-            return Err(String::from("hardware decoder returned empty frame"));
-        }
-
-        let mut payload = acquire_payload_buffer(payload_len)?;
-        if let Err(error) = read_exact_file(&mut self.device, &mut payload, Some(&self.cancel)) {
-            return if self.is_cancelled() {
-                Ok(None)
-            } else {
-                Err(error)
-            };
-        }
-        if controls.current_seek_epoch() != seek_epoch {
-            release_payload_buffer(payload);
-            return Ok(None);
-        }
-        Ok(Some(ScarletVideoFrame {
-            width,
-            height,
-            pixel_format,
-            payload: ScarletVideoPayload::Owned(payload),
-        }))
-    }
-
-    fn decode_access_unit_mapped(
-        &mut self,
-        codec: VideoCodec,
-        access_unit: &[u8],
-        controls: &ControlsOverlay,
-        seek_epoch: u32,
-    ) -> Result<Option<ScarletVideoFrame>, String> {
-        let buffer = self.ensure_mapped_session_format(codec)?;
-        let input_ptr = buffer.ptr;
-        let input_offset = buffer.input_offset;
-        let input_len = buffer.input_len;
-        if access_unit.len() > input_len {
-            return Err(String::from("hardware decoder mmap input overflow"));
-        }
-
-        // SAFETY: the mapped input buffer is writable for `input_len` bytes,
-        // and `access_unit.len()` was validated to fit. The source slice does
-        // not overlap the device mapping.
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                access_unit.as_ptr(),
-                input_ptr.add(input_offset),
-                access_unit.len(),
-            );
-        }
-
-        let mut should_display = true;
-        let mut stateless_submitted = false;
-        if codec == VideoCodec::H264 && self.supports_stateless_h264() {
-            self.last_decode_mode = Some(HardwareDecodeMode::StatelessH264);
-            h264_stateless_hw::submit(
-                &mut self.device,
-                &mut self.h264_stateless_context,
-                buffer.stream_id,
-                access_unit,
-            )?;
-            stateless_submitted = true;
-        }
-        if !stateless_submitted && codec == VideoCodec::Vp9 && self.supports_stateless_vp9() {
-            self.last_decode_mode = Some(HardwareDecodeMode::StatelessVp9);
-            should_display = vp9_stateless_hw::submit(
-                &mut self.device,
-                &mut self.vp9_stateless_context,
-                buffer.stream_id,
-                access_unit,
-                &mut self.vp9_debug_submits,
-            )?;
-            stateless_submitted = true;
-        }
-        if !stateless_submitted && buffer.session_commands {
-            self.last_decode_mode = Some(HardwareDecodeMode::Stateful);
-            let submit = ScarletVideoSessionSubmit {
-                stream_id: buffer.stream_id,
-                input_len: access_unit.len() as u32,
-                coded_format: codec.coded_format(),
-                padding: 0,
-                timestamp: 0,
-            };
-            self.device
-                .as_handle()
-                .control(SCARLET_VIDEO_SUBMIT_SESSION, &submit as *const _ as usize)
-                .map_err(|_| {
-                    let status = self.read_decoder_status();
-                    format!("hardware decoder mmap submit failed{status}")
-                })?;
-        } else if !stateless_submitted {
-            self.last_decode_mode = Some(HardwareDecodeMode::Stateful);
-            let submit = ScarletVideoSubmit {
-                input_len: access_unit.len() as u32,
-                coded_format: codec.coded_format(),
-                timestamp: 0,
-            };
-            self.device
-                .as_handle()
-                .control(SCARLET_VIDEO_SUBMIT, &submit as *const _ as usize)
-                .map_err(|_| {
-                    let status = self.read_decoder_status();
-                    format!("hardware decoder mmap submit failed{status}")
-                })?;
-        }
-
-        let mut empty_polls = 0usize;
-        loop {
-            // Once submitted, a request must be dequeued even if a seek makes
-            // its result stale. Leaving it pending would force session
-            // destruction (and an AVD firmware reset) before the next frame.
-            if self.is_cancelled() {
-                return Ok(None);
-            }
-            let dequeue_result = if buffer.session_commands {
-                let mut session_frame = ScarletVideoSessionDequeuedFrame {
-                    stream_id: buffer.stream_id,
-                    ..Default::default()
-                };
-                let result = self.device.as_handle().control(
-                    SCARLET_VIDEO_DEQUEUE_SESSION,
-                    &mut session_frame as *mut _ as usize,
-                );
-                result.map(|value| (value, session_frame.frame))
-            } else {
-                let mut frame = ScarletVideoDequeuedFrame::default();
-                let result = self
-                    .device
-                    .as_handle()
-                    .control(SCARLET_VIDEO_DEQUEUE, &mut frame as *mut _ as usize);
-                result.map(|value| (value, frame))
-            };
-            match dequeue_result {
-                Ok((1, frame)) => {
-                    if controls.current_seek_epoch() != seek_epoch {
-                        return Ok(None);
-                    }
-                    if !should_display {
-                        return Ok(None);
-                    }
-                    if frame.width == 0 || frame.height == 0 || frame.payload_len == 0 {
-                        return Err(String::from("hardware decoder returned empty mmap frame"));
-                    }
-                    let Some(buffer) = self.mapped else {
-                        return Err(String::from("hardware decoder mmap buffer disappeared"));
-                    };
-                    let payload_ptr =
-                        buffer.payload_ptr(frame.payload_offset, frame.payload_len as usize)?;
-                    return Ok(Some(ScarletVideoFrame {
-                        width: frame.width,
-                        height: frame.height,
-                        pixel_format: frame.pixel_format,
-                        payload: ScarletVideoPayload::Mapped {
-                            ptr: payload_ptr,
-                            len: frame.payload_len as usize,
-                        },
-                    }));
-                }
-                Ok((0, _)) => {
-                    empty_polls += 1;
-                    if empty_polls > 10_000 {
-                        return Err(String::from(
-                            "hardware decoder timed out before mmap frame was complete",
-                        ));
-                    }
-                    thread::sleep(Duration::from_millis(1));
-                }
-                Ok((_, _)) => {
-                    return Err(String::from(
-                        "hardware decoder returned invalid dequeue result",
-                    ));
-                }
-                Err(_) => {
-                    let status = self.read_decoder_status();
-                    return Err(format!("hardware decoder mmap dequeue failed{status}"));
-                }
-            }
-        }
-    }
-
-    fn ensure_mapped_session_format(
-        &mut self,
-        codec: VideoCodec,
-    ) -> Result<MappedVideoBuffer, String> {
-        let Some(mut buffer) = self.mapped else {
-            return Err(String::from("hardware decoder mmap buffer is unavailable"));
-        };
-        let coded_format = codec.coded_format();
-        if !buffer.session_commands || buffer.coded_format == coded_format {
-            return Ok(buffer);
-        }
-
-        let destroy = ScarletVideoSessionInfo {
-            stream_id: buffer.stream_id,
-            padding: 0,
-            buffer: ScarletVideoBufferInfo::default(),
-        };
-        let _ = self
-            .device
-            .as_handle()
-            .control(SCARLET_VIDEO_DESTROY_SESSION, &destroy as *const _ as usize);
-
-        let mut session_info = ScarletVideoSessionInfo {
-            stream_id: 0,
-            padding: coded_format,
-            buffer: ScarletVideoBufferInfo {
-                input_len: buffer.input_len as u32,
-                output_len: buffer.output_len as u32,
-                ..ScarletVideoBufferInfo::default()
-            },
-        };
-        self.device
-            .as_handle()
-            .control(
-                SCARLET_VIDEO_CREATE_SESSION,
-                &mut session_info as *mut _ as usize,
-            )
-            .map_err(|_| {
-                let status = self.read_decoder_status();
-                format!(
-                    "hardware decoder failed to create {} session{status}",
-                    codec.name()
-                )
-            })?;
-        if session_info.buffer.mmap_len as usize != buffer.mmap_len {
-            return Err(String::from(
-                "hardware decoder changed mmap layout while switching codec sessions",
-            ));
-        }
-        buffer.stream_id = session_info.stream_id;
-        buffer.coded_format = coded_format;
-        buffer.input_offset = session_info.buffer.input_offset as usize;
-        buffer.input_len = session_info.buffer.input_len as usize;
-        buffer.output_offset = session_info.buffer.output_offset as usize;
-        buffer.output_len = session_info.buffer.output_len as usize;
-        self.mapped = Some(buffer);
-        Ok(buffer)
-    }
-
-    fn map_video_buffer(
-        device: &File,
-        caps: Option<ScarletVideoCapabilities>,
-        buffer_request: HardwareBufferRequest,
-    ) -> Option<MappedVideoBuffer> {
-        if caps
-            .map(|caps| caps.has_flag(SCARLET_VIDEO_CAP_MAPPED_BUFFERS))
-            .is_some_and(|has_mapped_buffers| !has_mapped_buffers)
-        {
-            return None;
-        }
-        let use_session_commands = caps
-            .map(|caps| caps.has_flag(SCARLET_VIDEO_CAP_SESSIONS))
-            .unwrap_or(true);
-        let (stream_id, session_commands, info) = if use_session_commands {
-            let request = caps
-                .filter(|caps| caps.has_flag(SCARLET_VIDEO_CAP_VARIABLE_MAPPED_BUFFERS))
-                .map(|caps| HardwareBufferRequest {
-                    input_len: if buffer_request.input_len == 0 {
-                        0
-                    } else {
-                        buffer_request.input_len.min(caps.mapped_input_len)
-                    },
-                    output_len: if buffer_request.output_len == 0 {
-                        0
-                    } else {
-                        buffer_request.output_len.min(caps.mapped_output_len)
-                    },
-                })
-                .unwrap_or_default();
-            let mut session_info = ScarletVideoSessionInfo {
-                buffer: ScarletVideoBufferInfo {
-                    input_len: request.input_len,
-                    output_len: request.output_len,
-                    ..ScarletVideoBufferInfo::default()
-                },
-                ..ScarletVideoSessionInfo::default()
-            };
-            if device
-                .as_handle()
-                .control(
-                    SCARLET_VIDEO_CREATE_SESSION,
-                    &mut session_info as *mut _ as usize,
-                )
-                .is_ok()
-            {
-                (session_info.stream_id, true, session_info.buffer)
-            } else {
-                let mut info = ScarletVideoBufferInfo::default();
-                device
-                    .as_handle()
-                    .control(SCARLET_VIDEO_GET_BUFFER, &mut info as *mut _ as usize)
-                    .ok()?;
-                (1, false, info)
-            }
-        } else {
-            let mut info = ScarletVideoBufferInfo::default();
-            device
-                .as_handle()
-                .control(SCARLET_VIDEO_GET_BUFFER, &mut info as *mut _ as usize)
-                .ok()?;
-            (1, false, info)
-        };
-        let mapper = device.as_handle().as_memory_mapping().ok()?;
-        let addr = mapper
-            .mmap(
-                0,
-                info.mmap_len as usize,
-                prot::READ | prot::WRITE,
-                mmap_flags::SHARED,
-                info.mmap_offset as usize,
-            )
-            .ok()?;
-        Some(MappedVideoBuffer {
-            stream_id,
-            session_commands,
-            coded_format: SCARLET_VIDEO_FORMAT_H264,
-            ptr: addr as *mut u8,
-            mmap_len: info.mmap_len as usize,
-            input_offset: info.input_offset as usize,
-            input_len: info.input_len as usize,
-            output_offset: info.output_offset as usize,
-            output_len: info.output_len as usize,
-        })
-    }
-
-    fn query_capabilities(device: &File) -> Option<ScarletVideoCapabilities> {
-        let mut caps = ScarletVideoCapabilities::default();
-        device
-            .as_handle()
-            .control(SCARLET_VIDEO_GET_CAPS, &mut caps as *mut _ as usize)
-            .ok()?;
-        if caps.version == SCARLET_VIDEO_CAPS_VERSION {
-            Some(caps)
-        } else {
-            None
-        }
-    }
-
-    fn read_decoder_status(&mut self) -> String {
-        let mut buffer = [0u8; 512];
-        match self.device.read(&mut buffer) {
-            Ok(0) | Err(_) => String::new(),
-            Ok(read) => {
-                let status = core::str::from_utf8(&buffer[..read]).unwrap_or("<non-utf8 status>");
-                format!("; {status}")
-            }
-        }
-    }
-}
-
-impl Drop for HardwareVideoDecoder {
-    fn drop(&mut self) {
-        if let Some(buffer) = self.mapped.take() {
-            if buffer.session_commands {
-                let info = ScarletVideoSessionInfo {
-                    stream_id: buffer.stream_id,
-                    padding: 0,
-                    buffer: ScarletVideoBufferInfo::default(),
-                };
-                let _ = self
-                    .device
-                    .as_handle()
-                    .control(SCARLET_VIDEO_DESTROY_SESSION, &info as *const _ as usize);
-            }
-            let _ = munmap(buffer.ptr as usize, buffer.mmap_len);
-        }
-    }
-}
-
 enum DecodedVideoFrame {
     #[cfg_attr(not(feature = "h264-sw"), allow(dead_code))]
     Software(h264_sw::DecodedFrame),
     #[allow(dead_code)]
-    Hardware(ScarletVideoFrame),
+    Hardware(OwnedDecodedFrame),
 }
 
 enum DisplayItem {
@@ -6405,11 +5566,6 @@ enum DisplayItem {
         seek_epoch: u32,
     },
 }
-
-// SAFETY: every hardware variant is constructed by
-// `hardware_frame_to_owned`, so display-thread items never carry mmap pointers
-// borrowed from the decoder thread's reusable hardware buffer.
-unsafe impl Send for DisplayItem {}
 
 impl DisplayItem {
     fn frame(
@@ -6443,7 +5599,7 @@ impl DisplayItem {
                     if payload_len != 0 {
                         payload_len
                     } else {
-                        frame.width as usize * frame.height as usize * 3 / 2
+                        frame.width() as usize * frame.height() as usize * 3 / 2
                     }
                 }
             },
@@ -7642,19 +6798,7 @@ fn publish_seek_preview(
     Ok(controls.current_seek_epoch() == seek_epoch)
 }
 
-fn hardware_frame_to_owned(frame: ScarletVideoFrame) -> Result<DecodedVideoFrame, String> {
-    if frame.pixel_format != NV12_VIDEO_RANGE_PIXEL_FORMAT {
-        return Err(format!(
-            "hardware decoder returned unsupported pixel format 0x{:08x}",
-            frame.pixel_format
-        ));
-    }
-    let required_nv12_len = frame.width as usize * frame.height as usize * 3 / 2;
-    if frame.payload().len() < required_nv12_len {
-        return Err(String::from(
-            "hardware decoder returned truncated NV12 frame",
-        ));
-    }
+fn hardware_frame_to_owned(frame: DecodedFrame<'_>) -> Result<DecodedVideoFrame, String> {
     Ok(DecodedVideoFrame::Hardware(frame.try_into_owned()?))
 }
 
@@ -7930,36 +7074,6 @@ fn wait_for_marker(path: &str, cancel: &AtomicBool) -> bool {
         }
         thread::sleep(Duration::from_millis(STREAM_POLL_INTERVAL_MS));
     }
-}
-
-fn read_exact_file(
-    file: &mut File,
-    out: &mut [u8],
-    cancel: Option<&AtomicBool>,
-) -> Result<(), String> {
-    let mut read = 0usize;
-    let mut empty_reads = 0usize;
-    while read < out.len() {
-        if cancel.is_some_and(|cancel| cancel.load(Ordering::Acquire)) {
-            return Err(String::from("hardware decoder read cancelled"));
-        }
-        let n = file
-            .read(&mut out[read..])
-            .map_err(|_| String::from("hardware decoder read failed"))?;
-        if n == 0 {
-            empty_reads += 1;
-            if empty_reads > 10_000 {
-                return Err(String::from(
-                    "hardware decoder timed out before frame was complete",
-                ));
-            }
-            thread::sleep(Duration::from_millis(1));
-            continue;
-        }
-        empty_reads = 0;
-        read += n;
-    }
-    Ok(())
 }
 
 struct WavInfo {
@@ -9155,7 +8269,7 @@ fn fill_bgra(buffer: &mut [u8], color: [u8; 4]) {
 pub extern "C" fn main() -> i32 {
     let args = parse_args(std::env::args().collect());
     if let Some(path) = args.vp9_stateless_dump_dir.as_deref() {
-        vp9_stateless_hw::enable_dump(path);
+        enable_vp9_stateless_dump(path);
     }
     let video_path = args.video_path;
     let window_title = video_window_title(args.title.as_deref(), &video_path);
@@ -9165,7 +8279,7 @@ pub extern "C" fn main() -> i32 {
         println!("[{}] playing {}", APP_NAME, video_path);
     }
     if args.hardware_decode {
-        println!("[{}] hardware decoder {}", APP_NAME, VIDEO_DEVICE_PATH);
+        println!("[{}] hardware decoder via scarlet-video-client", APP_NAME);
     }
     let video_is_mp4 = is_mp4_path(&video_path);
     // Keep startup/window creation independent of media size and I/O health.

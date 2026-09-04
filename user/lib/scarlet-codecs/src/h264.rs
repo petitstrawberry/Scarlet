@@ -605,9 +605,52 @@ impl H264RequestContext {
         self.poc = H264PocState::default();
     }
 
+    /// Build a stateless request using an automatically assigned reference
+    /// timestamp.
+    ///
+    /// # Arguments
+    ///
+    /// * `access_unit` - Complete H.264 Annex B access unit.
+    ///
+    /// # Returns
+    ///
+    /// Parsed request parameters and the nonzero timestamp used to identify
+    /// the decoded reference frame.
     pub fn params_for_access_unit(
         &mut self,
         access_unit: &[u8],
+    ) -> Result<H264PreparedAccessUnit, String> {
+        self.params_for_access_unit_inner(access_unit, None)
+    }
+
+    /// Build a stateless request with a caller-provided reference timestamp.
+    ///
+    /// A nonzero timestamp is preserved in both the returned request and the
+    /// decoder-picture-buffer references constructed for later access units.
+    /// It must remain unique while the decoded picture can be referenced.
+    /// Zero retains the automatic timestamp behavior because the Scarlet video
+    /// ABI reserves zero for driver-side timestamp assignment.
+    ///
+    /// # Arguments
+    ///
+    /// * `access_unit` - Complete H.264 Annex B access unit.
+    /// * `timestamp` - Caller timestamp, or zero to allocate one internally.
+    ///
+    /// # Returns
+    ///
+    /// Parsed request parameters and the actual nonzero reference timestamp.
+    pub fn params_for_access_unit_with_timestamp(
+        &mut self,
+        access_unit: &[u8],
+        timestamp: u64,
+    ) -> Result<H264PreparedAccessUnit, String> {
+        self.params_for_access_unit_inner(access_unit, Some(timestamp))
+    }
+
+    fn params_for_access_unit_inner(
+        &mut self,
+        access_unit: &[u8],
+        requested_timestamp: Option<u64>,
     ) -> Result<H264PreparedAccessUnit, String> {
         let mut slice = None;
         let mut decode = None;
@@ -659,7 +702,7 @@ impl H264RequestContext {
             decode_params: decode
                 .ok_or_else(|| String::from("H.264 stateless submit has no decode params"))?,
         };
-        let timestamp = self.next_submit_timestamp();
+        let timestamp = self.resolve_submit_timestamp(requested_timestamp);
         self.update_dpb_after_submit(
             &params,
             &ref_pic_marking.unwrap_or_else(H264RefPicMarking::default),
@@ -810,6 +853,32 @@ impl H264RequestContext {
             self.next_timestamp = 1;
         }
         timestamp
+    }
+
+    fn resolve_submit_timestamp(&mut self, requested_timestamp: Option<u64>) -> u64 {
+        let Some(timestamp) = requested_timestamp.filter(|timestamp| *timestamp != 0) else {
+            return self.next_submit_timestamp();
+        };
+        if self.next_timestamp == 0 || timestamp >= self.next_timestamp {
+            self.next_timestamp = timestamp.wrapping_add(1);
+            if self.next_timestamp == 0 {
+                self.next_timestamp = 1;
+            }
+        }
+        timestamp
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::H264RequestContext;
+
+    #[test]
+    fn preserves_explicit_nonzero_timestamp() {
+        let mut context = H264RequestContext::default();
+        assert_eq!(context.resolve_submit_timestamp(Some(42)), 42);
+        assert_eq!(context.resolve_submit_timestamp(Some(0)), 43);
+        assert_eq!(context.resolve_submit_timestamp(None), 44);
     }
 }
 

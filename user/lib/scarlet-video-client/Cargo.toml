@@ -1,0 +1,28 @@
+[package]
+name = "scarlet-video-client"
+version = "0.16.0"
+edition = "2024"
+description = "Userspace client for Scarlet hardware video decoders"
+readme = "README.md"
+
+[features]
+default = ["std", "av1-stateful-hw", "h264-stateful-hw"]
+std = ["scarlet-os/std"]
+legacy-scarlet-std = ["dep:scarlet-std"]
+av1-stateful-hw = []
+h264-stateful-hw = []
+# H.264/AVC can be patent-encumbered in some jurisdictions. Keep the
+# userspace parser and stateless hardware path behind an explicit opt-in.
+h264-stateless-hw = ["dep:scarlet-codecs", "scarlet-codecs/h264"]
+hevc-stateful-hw = []
+vp9-stateful-hw = []
+vp9-stateless-hw = ["dep:scarlet-codecs", "scarlet-codecs/vp9"]
+
+[dependencies]
+scarlet-os = { path = "../scarlet-os", default-features = false }
+scarlet-std = { path = "../std", optional = true }
+scarlet-codecs = { path = "../scarlet-codecs", default-features = false, optional = true }
+
+[lib]
+name = "scarlet_video_client"
+path = "src/lib.rs"
