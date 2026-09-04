@@ -46,6 +46,70 @@ use crate::vm::vmem::MemoryArea;
 
 pub type Arch = Aarch64;
 
+const USER_BACKTRACE_MAX_FRAMES: usize = 16;
+const USER_BACKTRACE_MAX_FRAME_DISTANCE: usize = 8 * 1024 * 1024;
+
+/// Log an AArch64 userspace frame-pointer chain from a saved trapframe.
+///
+/// This is a diagnostic helper for fatal userspace signals. Each reported
+/// return PC is adjusted to the call instruction so it can be passed directly
+/// to `addr2line` or `objdump`.
+///
+/// # Arguments
+///
+/// * `task` - Task whose user address space contains the stack frames.
+/// * `trapframe` - Saved userspace register state at the diagnostic point.
+///
+/// # Returns
+///
+/// This function returns after logging the valid prefix of the frame chain.
+pub fn log_user_backtrace(task: &Task, trapframe: &Trapframe) {
+    let mut frame_pointer = trapframe.regs.reg[29] as usize;
+    crate::println!(
+        "[user-bt] #0 pc={:#x} lr={:#x} fp={:#x}",
+        trapframe.elr,
+        trapframe.regs.reg[30],
+        frame_pointer
+    );
+
+    for depth in 1..=USER_BACKTRACE_MAX_FRAMES {
+        if frame_pointer == 0 || !frame_pointer.is_multiple_of(16) {
+            break;
+        }
+
+        let mut frame = [0u8; 16];
+        if crate::library::std::usercopy::copy_from_user(task, frame_pointer, &mut frame).is_err() {
+            crate::println!("[user-bt] stopped: unreadable fp={:#x}", frame_pointer);
+            break;
+        }
+
+        let previous_frame_pointer = u64::from_ne_bytes([
+            frame[0], frame[1], frame[2], frame[3], frame[4], frame[5], frame[6], frame[7],
+        ]) as usize;
+        let saved_link_register = u64::from_ne_bytes([
+            frame[8], frame[9], frame[10], frame[11], frame[12], frame[13], frame[14], frame[15],
+        ]) as usize;
+        if saved_link_register == 0 {
+            break;
+        }
+
+        crate::println!(
+            "[user-bt] #{} pc={:#x} lr={:#x} fp={:#x}",
+            depth,
+            saved_link_register.saturating_sub(4),
+            saved_link_register,
+            frame_pointer
+        );
+
+        if previous_frame_pointer <= frame_pointer
+            || previous_frame_pointer - frame_pointer > USER_BACKTRACE_MAX_FRAME_DISTANCE
+        {
+            break;
+        }
+        frame_pointer = previous_frame_pointer;
+    }
+}
+
 // Common scheduler code enables interrupts before calling timer.start().
 // On AArch64 we must keep global interrupts masked until the timer has been
 // programmed (and the IRQ line is configured) to avoid spurious early IRQs.

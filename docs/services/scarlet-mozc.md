@@ -101,6 +101,9 @@ Mozc's Linux IPC path currently needs:
 - stream `read` / `write` / `send` / `recv`
 - `shutdown(SHUT_WR)` to terminate a request body
 - `getsockopt(SOL_SOCKET, SO_PEERCRED)` for peer validation
+- `newfstatat(..., AT_SYMLINK_NOFOLLOW)` and `readlinkat` for
+  `/proc/<peer-pid>/exe` server-path validation
+- `renameat` for atomic profile and state-file replacement
 - `select` / `pselect` style readiness waits for IPC timeouts
 
 Scarlet's local socket registry now preserves abstract socket names separately from filesystem paths by storing them internally as `NUL + name`. Abstract sockets do not create VFS socket files.

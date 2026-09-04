@@ -101,6 +101,7 @@ impl AbiModule for LinuxAarch64Abi {
         if let Some(result) =
             generic::dispatch_common_syscall(&mut self.0, trapframe, syscall_number)
         {
+            generic::signal::deliver_pending_signals(&mut self.0);
             return Ok(result);
         }
 
@@ -151,7 +152,7 @@ impl AbiModule for LinuxAarch64Abi {
             if parent_tgid != 0 {
                 parent_tgid
             } else {
-                _parent_task.get_id()
+                _parent_task.get_namespace_id()
             }
         } else {
             0
@@ -518,7 +519,7 @@ impl AbiModule for LinuxAarch64Abi {
         _task: &crate::task::Task,
     ) -> Result<(), &'static str> {
         self.0.init_std_fds(0, 1, 2);
-        self.0.thread_state.tgid = _task.get_id();
+        self.0.thread_state.tgid = _task.get_namespace_id();
         Ok(())
     }
 

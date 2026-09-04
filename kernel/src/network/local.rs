@@ -25,9 +25,12 @@ use alloc::{
     sync::{Arc, Weak},
     vec::Vec,
 };
-use core::any::Any;
+use core::{
+    any::Any,
+    sync::atomic::{AtomicUsize, Ordering},
+};
 
-use crate::sched::scheduler::current_task_id;
+use crate::sched::scheduler::{current_task_id, get_task_by_id};
 
 use super::{
     LocalSocketAddress, NetworkManager, ShutdownHow, SocketAddress, SocketControl, SocketDomain,
@@ -287,6 +290,15 @@ pub struct LocalSocket {
     /// Peer address (if connected)
     peer_addr: IrqRwSpinLock<Option<String>>,
 
+    /// Global thread-group leader ID whose credentials own this endpoint.
+    ///
+    /// For connection-oriented sockets this is captured by `listen()` or
+    /// `connect()`, matching the point where Linux snapshots peer credentials.
+    owner_process_id: AtomicUsize,
+
+    /// Global thread-group leader ID at the other end of the connection.
+    peer_process_id: AtomicUsize,
+
     /// Read buffer: data received from peer (shared with peer for writing)
     read_buffer: IrqRwSpinLock<Arc<SocketBuffer>>,
 
@@ -362,6 +374,8 @@ impl LocalSocket {
             state: IrqRwSpinLock::new(SocketState::Unconnected),
             local_addr: IrqRwSpinLock::new(None),
             peer_addr: IrqRwSpinLock::new(None),
+            owner_process_id: AtomicUsize::new(0),
+            peer_process_id: AtomicUsize::new(0),
             read_buffer: IrqRwSpinLock::new(SocketBuffer::new()),
             peer_read_buffer: IrqRwSpinLock::new(None),
             peer_socket: IrqRwSpinLock::new(None),
@@ -374,6 +388,27 @@ impl LocalSocket {
             self_weak: IrqRwSpinLock::new(Weak::new()),
             nonblocking: IrqRwSpinLock::new(false),
         }
+    }
+
+    /// Return the global thread-group leader ID captured for the connected peer.
+    ///
+    /// # Returns
+    ///
+    /// The peer process ID, or `None` for a socket that has no credential
+    /// snapshot yet.
+    pub fn peer_process_id(&self) -> Option<usize> {
+        let process_id = self.peer_process_id.load(Ordering::Acquire);
+        (process_id != 0).then_some(process_id)
+    }
+
+    fn current_process_id() -> Option<usize> {
+        let cpu_id = crate::arch::get_cpu().get_cpuid();
+        let task_id = current_task_id(cpu_id)?;
+        Some(
+            get_task_by_id(task_id)
+                .map(|task| task.get_thread_group_id())
+                .unwrap_or(task_id),
+        )
     }
 
     /// Send a KernelObject handle through this socket
@@ -414,9 +449,11 @@ impl LocalSocket {
 
         // Readiness is level-triggered by the queue state. Wake only on the
         // empty-to-nonempty edge so stale Waker credits cannot accumulate.
+        // Read waiters are non-exclusive: wake all of them so a waiter that
+        // loses userspace's read arbitration cannot strand the actual reader.
         if became_readable {
             peer.handle_waker.wake_one();
-            peer.read_waker.wake_one();
+            peer.read_waker.wake_all();
         }
 
         Ok(())
@@ -499,7 +536,7 @@ impl LocalSocket {
         // Wake after the complete record becomes the first readable item.
         if became_readable {
             peer.handle_waker.wake_one();
-            peer.read_waker.wake_one();
+            peer.read_waker.wake_all();
         }
 
         Ok(())
@@ -624,6 +661,7 @@ impl LocalSocket {
     ///
     /// A tuple of (local_socket, peer_socket) that are connected
     pub fn create_connected_pair(local_addr: String, peer_addr: String) -> (Arc<Self>, Arc<Self>) {
+        let owner_process_id = Self::current_process_id().unwrap_or(0);
         // Create shared buffers for bidirectional communication
         let local_read_buffer = SocketBuffer::new();
         let peer_read_buffer = SocketBuffer::new();
@@ -636,6 +674,8 @@ impl LocalSocket {
             state: IrqRwSpinLock::new(SocketState::Connected),
             local_addr: IrqRwSpinLock::new(Some(local_addr.clone())),
             peer_addr: IrqRwSpinLock::new(Some(peer_addr.clone())),
+            owner_process_id: AtomicUsize::new(owner_process_id),
+            peer_process_id: AtomicUsize::new(owner_process_id),
             read_buffer: IrqRwSpinLock::new(local_read_buffer.clone()),
             peer_read_buffer: IrqRwSpinLock::new(Some(peer_read_buffer.clone())),
             peer_socket: IrqRwSpinLock::new(None),
@@ -657,6 +697,8 @@ impl LocalSocket {
             state: IrqRwSpinLock::new(SocketState::Connected),
             local_addr: IrqRwSpinLock::new(Some(peer_addr)),
             peer_addr: IrqRwSpinLock::new(Some(local_addr)),
+            owner_process_id: AtomicUsize::new(owner_process_id),
+            peer_process_id: AtomicUsize::new(owner_process_id),
             read_buffer: IrqRwSpinLock::new(peer_read_buffer.clone()),
             peer_read_buffer: IrqRwSpinLock::new(Some(local_read_buffer.clone())),
             peer_socket: IrqRwSpinLock::new(None),
@@ -859,8 +901,11 @@ impl StreamOps for LocalSocket {
             if bytes_written > 0 {
                 // Queue state carries level readiness. Only publish the
                 // empty-to-nonempty transition to avoid stale wake credits.
+                // All poll/read waiters must recheck the level condition;
+                // waking just one can select a non-reading toolkit thread and
+                // leave the designated reader asleep indefinitely.
                 if became_readable {
-                    peer.read_waker.wake_one();
+                    peer.read_waker.wake_all();
                 }
                 return Ok(bytes_written);
             }
@@ -995,6 +1040,9 @@ impl SocketControl for LocalSocket {
         // Some Linux applications pass backlog=0 and still expect at least one
         // pending connection to be accepted. Keep the internal queue usable.
         *self.max_backlog.write() = backlog.max(1);
+        if let Some(process_id) = Self::current_process_id() {
+            self.owner_process_id.store(process_id, Ordering::Release);
+        }
         *state = SocketState::Listening;
 
         Ok(())
@@ -1042,6 +1090,13 @@ impl SocketControl for LocalSocket {
             return Err(SocketError::ConnectionRefused);
         }
 
+        let server_local = match Self::from_socket_object(server_socket.as_ref()) {
+            Some(socket) => socket,
+            None => return Err(SocketError::InvalidOperation),
+        };
+        let client_process_id = Self::current_process_id().unwrap_or(0);
+        let server_process_id = server_local.owner_process_id.load(Ordering::Acquire);
+
         // We need to create a proper Arc to self to be able to store a Weak reference in the peer
         // Since we're in &self, we don't have access to the Arc. We'll need to store the
         // connection information and let the server-side socket refer back through handle table.
@@ -1060,6 +1115,8 @@ impl SocketControl for LocalSocket {
             state: IrqRwSpinLock::new(SocketState::Connected),
             local_addr: IrqRwSpinLock::new(Some(name.clone())),
             peer_addr: IrqRwSpinLock::new(Some(local_addr.clone())),
+            owner_process_id: AtomicUsize::new(server_process_id),
+            peer_process_id: AtomicUsize::new(client_process_id),
             read_buffer: IrqRwSpinLock::new(server_read_buffer.clone()),
             peer_read_buffer: IrqRwSpinLock::new(Some(client_read_buffer.clone())),
             peer_socket: IrqRwSpinLock::new(None), // Will be set below
@@ -1080,6 +1137,10 @@ impl SocketControl for LocalSocket {
         *self.peer_read_buffer.write() = Some(server_read_buffer.clone());
         *self.local_addr.write() = Some(local_addr);
         *self.peer_addr.write() = Some(name.clone());
+        self.owner_process_id
+            .store(client_process_id, Ordering::Release);
+        self.peer_process_id
+            .store(server_process_id, Ordering::Release);
         *self.state.write() = SocketState::Connected;
 
         // Set peer_socket references - IMPORTANT for shutdown()
@@ -1096,10 +1157,6 @@ impl SocketControl for LocalSocket {
         *server_conn.peer_socket.write() = Some(Arc::downgrade(&client_arc));
 
         // Add server connection to server's backlog
-        let server_local = match Self::from_socket_object(server_socket.as_ref()) {
-            Some(socket) => socket,
-            None => return Err(SocketError::InvalidOperation), // Not a LocalSocket
-        };
         let mut server_backlog = server_local.backlog.write();
         let max_backlog = *server_local.max_backlog.read();
 
@@ -1111,6 +1168,8 @@ impl SocketControl for LocalSocket {
             *self.peer_addr.write() = None;
             *self.peer_read_buffer.write() = None;
             *self.peer_socket.write() = None;
+            self.owner_process_id.store(0, Ordering::Release);
+            self.peer_process_id.store(0, Ordering::Release);
             return Err(SocketError::ConnectionRefused);
         }
         server_backlog.push(server_conn);
@@ -1507,6 +1566,28 @@ mod tests {
                 .write,
             "socket should not report writable after SHUT_WR"
         );
+    }
+
+    #[test_case]
+    fn test_request_response_survives_half_close() {
+        let (client, server) =
+            LocalSocket::create_connected_pair("client".to_string(), "server".to_string());
+
+        assert_eq!(client.write(b"request").unwrap(), 7);
+        client.shutdown(ShutdownHow::Write).unwrap();
+
+        let mut request = [0u8; 16];
+        assert_eq!(server.read(&mut request).unwrap(), 7);
+        assert_eq!(&request[..7], b"request");
+        assert_eq!(server.read(&mut request).unwrap(), 0);
+
+        assert_eq!(server.write(b"response").unwrap(), 8);
+        server.shutdown(ShutdownHow::Write).unwrap();
+
+        let mut response = [0u8; 16];
+        assert_eq!(client.read(&mut response).unwrap(), 8);
+        assert_eq!(&response[..8], b"response");
+        assert_eq!(client.read(&mut response).unwrap(), 0);
     }
 
     #[test_case]

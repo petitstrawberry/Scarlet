@@ -185,11 +185,35 @@ pub fn sys_poll(trapframe: &mut Trapframe) -> usize {
                         break;
                     };
 
-                    task.sleep_with_precision(
-                        trapframe,
-                        recheck_delay_ns,
-                        crate::timer::TimerPrecision::Exact,
-                    );
+                    // Multi-object registration is not available yet, but a
+                    // pure timer sleep also means activity on every watched
+                    // object must wait for that timer. Anchor the bounded wait
+                    // to the first selectable object so its readiness wakes us
+                    // immediately, while the timeout still guarantees that all
+                    // other objects are rescanned.
+                    let wait_idx = first_selectable_idx
+                        .expect("multiple selectable handles must have a first handle");
+                    let pfd = &fds[wait_idx];
+                    if let Some(kobj) = task.handle_table.get(pfd.handle)
+                        && let Some(sel) = kobj.as_selectable()
+                    {
+                        let _ = sel.wait_until_ready(
+                            ReadyInterest {
+                                read: (pfd.events & POLLIN) != 0,
+                                write: (pfd.events & POLLOUT) != 0,
+                                except: (pfd.events & POLLPRI) != 0,
+                            },
+                            trapframe,
+                            Some(recheck_delay_ns),
+                            0,
+                        );
+                    } else {
+                        task.sleep_with_precision(
+                            trapframe,
+                            recheck_delay_ns,
+                            crate::timer::TimerPrecision::Exact,
+                        );
+                    }
 
                     any_ready = false;
                     for pfd in fds.iter_mut() {

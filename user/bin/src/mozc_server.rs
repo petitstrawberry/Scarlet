@@ -37,6 +37,9 @@ fn main() -> i32 {
     let args: Vec<String> = env::args().collect();
     let mut server_args: Vec<String> = Vec::new();
     server_args.push(String::from(SERVER_ARG0));
+    // Preserve Mozc's fatal diagnostic on the service's inherited stderr.
+    // Otherwise only musl's final abort trap is visible from Scarlet.
+    server_args.push(String::from("--logtostderr"));
     server_args.extend(args.iter().skip(1).cloned());
 
     let argv: Vec<&str> = server_args.iter().map(|arg| arg.as_str()).collect();

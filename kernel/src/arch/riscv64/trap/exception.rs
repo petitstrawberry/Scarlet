@@ -73,6 +73,7 @@ fn terminate_current_user_exception(
             &task.name.read(),
             task.vm_manager.get_asid(),
         );
+        crate::arch::log_user_backtrace(&task, trapframe);
         task.vcpu.lock().store(trapframe);
         task.exit_group(exit_status);
         schedule(trapframe);

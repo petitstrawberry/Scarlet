@@ -1,7 +1,11 @@
-use alloc::{string::String, sync::Arc, vec::Vec};
+use alloc::{string::String, sync::Arc, vec, vec::Vec};
 
+use crate::task::INIT_TASK_ID;
 use crate::{
-    abi::linux::generic::{LinuxAbi, errno},
+    abi::linux::generic::{
+        LinuxAbi, errno,
+        signal::{LinuxSignal, deliver_signal},
+    },
     arch::Trapframe,
     library::std::usercopy::{copy_from_user, copy_to_user},
     sched::scheduler::{
@@ -434,11 +438,131 @@ fn wait_owner_for_child(
     (parent.get_thread_group_id() == task.get_thread_group_id()).then_some(parent)
 }
 
-#[allow(dead_code)]
-pub fn sys_kill(_abi: &mut LinuxAbi, _trapframe: &mut Trapframe) -> usize {
-    // Implement the kill syscall
-    // This syscall is not yet implemented. Returning ENOSYS error code (-1).
-    usize::MAX
+/// Resolve the thread-group leader for a Linux PID (namespace ID).
+///
+/// Linux `kill()` accepts any TID of a process and targets that process's
+/// whole thread group, so the matched task is mapped to its group leader.
+///
+/// # Arguments
+///
+/// * `current` - Calling task whose PID namespace defines `pid`
+/// * `pid` - Linux PID (or TID) seen by the caller
+///
+/// # Returns
+///
+/// The group leader task, or `None` when no user task owns the PID.
+fn linux_group_leader_by_pid(current: &Task, pid: i32) -> Option<Arc<Task>> {
+    if pid <= 0 {
+        return None;
+    }
+    let global_id = current.get_namespace().resolve_global_id(pid as usize)?;
+    let member =
+        get_task_by_id(global_id).filter(|task| matches!(task.task_type, TaskType::User))?;
+    get_task_by_id(member.get_thread_group_id()).or(Some(member))
+}
+
+/// Collect the group leaders of every user task except init.
+///
+/// # Arguments
+///
+/// * `current` - Calling task whose namespace limits the returned processes
+///
+/// # Returns
+///
+/// Vector of distinct thread-group leader tasks visible to Linux `kill()`.
+fn all_linux_group_leaders(current: &Task) -> Vec<Arc<Task>> {
+    let mut leaders: Vec<usize> = Vec::new();
+    for task_id in get_all_task_ids() {
+        if current.get_namespace().resolve_local_id(task_id).is_none() {
+            continue;
+        }
+        let Some(task) = get_task_by_id(task_id) else {
+            continue;
+        };
+        if !matches!(task.task_type, TaskType::User) {
+            continue;
+        }
+        let leader_id = task.get_thread_group_id();
+        if leader_id == INIT_TASK_ID || leaders.contains(&leader_id) {
+            continue;
+        }
+        leaders.push(leader_id);
+    }
+    leaders.into_iter().filter_map(get_task_by_id).collect()
+}
+
+/// Send a signal to a process or process group.
+///
+/// `kill()` delivers `sig` to the thread group identified by `pid`:
+///
+/// * `pid > 0` - the process (or thread) with that Linux PID
+/// * `pid == 0` - the caller's own process group (currently the caller)
+/// * `pid == -1` - every user process except init
+/// * `pid < -1` - the process group named by `-pid`
+///
+/// # Arguments
+///
+/// * `abi` - Linux ABI context used for the caller's signal state.
+/// * `trapframe` - Trapframe containing the target PID and signal number.
+///
+/// # Returns
+///
+/// `0` on success, or a negative Linux errno encoded in `usize` on failure.
+pub fn sys_kill(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
+    let task = match mytask() {
+        Some(t) => t,
+        None => return usize::MAX,
+    };
+
+    let pid = trapframe.get_arg(0) as i32;
+    let sig = trapframe.get_arg(1) as i32;
+
+    trapframe.increment_pc_next(&task);
+
+    if !(0..=64).contains(&sig) {
+        return errno::to_result(errno::EINVAL);
+    }
+
+    let targets: Vec<Arc<Task>> = if pid > 0 {
+        match linux_group_leader_by_pid(&task, pid) {
+            Some(leader) => vec![leader],
+            None => return errno::to_result(errno::ESRCH),
+        }
+    } else if pid == 0 {
+        match get_task_by_id(task.get_thread_group_id()).or_else(|| get_task_by_id(task.get_id())) {
+            Some(leader) => vec![leader],
+            None => return errno::to_result(errno::ESRCH),
+        }
+    } else if pid == -1 {
+        all_linux_group_leaders(&task)
+            .into_iter()
+            .filter(|leader| leader.get_thread_group_id() != task.get_thread_group_id())
+            .collect()
+    } else {
+        match linux_group_leader_by_pid(&task, -pid) {
+            Some(leader) => vec![leader],
+            None => return errno::to_result(errno::ESRCH),
+        }
+    };
+
+    if targets.is_empty() {
+        return errno::to_result(errno::ESRCH);
+    }
+
+    // Signal 0 only probes target existence.
+    if sig == 0 {
+        return 0;
+    }
+
+    let Some(signal) = LinuxSignal::from_u32(sig as u32) else {
+        return errno::to_result(errno::EINVAL);
+    };
+
+    for target in targets {
+        deliver_signal(abi, &task, &target, signal);
+    }
+
+    0
 }
 
 #[allow(dead_code)]
@@ -516,24 +640,31 @@ pub fn sys_brk(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 
 pub fn sys_getpid(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
-    // Return TGID for Linux semantics; fallback to Task ID if unset
-    let tgid = _abi.thread_state().tgid;
     trapframe.increment_pc_next(&task);
-    if tgid != 0 { tgid } else { task.get_id() }
+    _abi.visible_thread_group_id(&task)
 }
 
 pub fn sys_getppid(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     trapframe.increment_pc_next(&task);
-    task.get_parent_id().unwrap_or(1) // Return parent PID or 1 if none
+    let Some(parent_id) = task.get_parent_id() else {
+        return 0;
+    };
+    let parent_process_id = get_task_by_id(parent_id)
+        .map(|parent| parent.get_thread_group_id())
+        .unwrap_or(parent_id);
+    task.get_namespace()
+        .resolve_local_id(parent_process_id)
+        .unwrap_or(0)
 }
 
-/// Linux gettid system call implementation
-/// Returns the calling thread ID (TID). For now, this equals Scarlet Task ID.
+/// Linux gettid system call implementation.
+///
+/// Returns the calling thread's namespace-local task ID.
 pub fn sys_gettid(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     trapframe.increment_pc_next(&task);
-    task.get_id()
+    task.get_namespace_id()
 }
 
 const PR_SET_NAME: i32 = 15;
@@ -1108,6 +1239,13 @@ pub fn sys_clone(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                     return usize::MAX;
                 }
             };
+            // Linux-facing process/thread IDs are namespace-local.  The child
+            // has just been registered, so its namespace ID is now stable and
+            // must be used consistently for clone's return value and TID
+            // stores.  Kernel task IDs remain internal scheduler identities.
+            let child_linux_tid = get_task_by_id(child_id)
+                .and_then(|child| child.try_get_namespace_id())
+                .expect("registered clone child must have a namespace ID");
 
             // Establish parent-child ownership before enqueueing. The adoption
             // protocol rejects an exiting parent and retries init atomically.
@@ -1122,26 +1260,24 @@ pub fn sys_clone(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
             // Do not modify user pthread list; musl manages linkage. No safety-net writes.
             // Handle parent TID store when CLONE_PARENT_SETTID is requested
             if (flags & CLONE_PARENT_SETTID) != 0 && !parent_tid_ptr.is_null() {
-                if let Some(paddr) = parent_task
-                    .vm_manager
-                    .translate_to_kva(parent_tid_ptr as usize)
-                {
-                    unsafe {
-                        *(paddr as *mut i32) = child_id as i32;
-                    }
-                }
+                let _ = copy_to_user(
+                    &parent_task,
+                    parent_tid_ptr as usize,
+                    &(child_linux_tid as i32).to_ne_bytes(),
+                );
             }
             // IMPORTANT: Only write child TID when CLONE_CHILD_SETTID is set.
             // For CLONE_CHILD_CLEARTID, the pointer is a futex lock to clear on exit.
             if (flags & CLONE_CHILD_SETTID) != 0 && !child_tid_ptr.is_null() {
-                if let Some(paddr) = get_task_by_id(child_id)
-                    .unwrap()
-                    .vm_manager
-                    .translate_to_kva(child_tid_ptr as usize)
-                {
-                    unsafe {
-                        *(paddr as *mut i32) = child_id as i32;
-                    }
+                // The value must be the Linux-visible TID (namespace ID), not
+                // the kernel task ID, or tkill/tgkill from user space cannot
+                // resolve the target thread.
+                if let Some(child) = get_task_by_id(child_id) {
+                    let _ = copy_to_user(
+                        &child,
+                        child_tid_ptr as usize,
+                        &(child_linux_tid as i32).to_ne_bytes(),
+                    );
                 }
             }
             let vfork_waker = if (flags & CLONE_VFORK) != 0 {
@@ -1156,7 +1292,7 @@ pub fn sys_clone(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                 waker.wait_owned(parent_id, trapframe);
             }
 
-            child_id
+            child_linux_tid
         }
         Err(_) => usize::MAX,
     };
@@ -1270,6 +1406,9 @@ pub fn sys_wait4(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         if pid == -1 {
             // Wait for any child process
             for child_pid in waitable_children_for_thread_group(&task) {
+                let Some(child_linux_pid) = task.get_namespace().resolve_local_id(child_pid) else {
+                    continue;
+                };
                 let Some(owner) = wait_owner_for_child(&task, child_pid) else {
                     continue;
                 };
@@ -1277,22 +1416,14 @@ pub fn sys_wait4(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                     Ok(status) => {
                         // Child has exited, return the status
                         if wstatus != core::ptr::null_mut() {
-                            match task.vm_manager.translate_to_kva(wstatus as usize) {
-                                Some(phys_addr) => {
-                                    let status_ptr = phys_addr as *mut i32;
-                                    unsafe {
-                                        *status_ptr = status;
-                                    }
-                                }
-                                None => {
-                                    // Invalid address, return EFAULT
-                                    trapframe.increment_pc_next(&task);
-                                    return usize::MAX - 13; // -EFAULT
-                                }
+                            if copy_to_user(&task, wstatus as usize, &status.to_ne_bytes()).is_err()
+                            {
+                                trapframe.increment_pc_next(&task);
+                                return errno::to_result(errno::EFAULT);
                             }
                         }
                         trapframe.increment_pc_next(&task);
-                        return child_pid;
+                        return child_linux_pid;
                     }
                     Err(error) => {
                         match error {
@@ -1322,7 +1453,11 @@ pub fn sys_wait4(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
             continue;
         } else if pid > 0 {
             // Wait for specific child process
-            let child_pid = pid as usize;
+            let child_linux_pid = pid as usize;
+            let Some(child_pid) = task.get_namespace().resolve_global_id(child_linux_pid) else {
+                trapframe.increment_pc_next(&task);
+                return errno::to_result(errno::ECHILD);
+            };
 
             // Check if this is actually our child
             let Some(owner) = wait_owner_for_child(&task, child_pid) else {
@@ -1334,22 +1469,13 @@ pub fn sys_wait4(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                 Ok(status) => {
                     // Child has exited, return the status
                     if wstatus != core::ptr::null_mut() {
-                        match task.vm_manager.translate_to_kva(wstatus as usize) {
-                            Some(phys_addr) => {
-                                let status_ptr = phys_addr as *mut i32;
-                                unsafe {
-                                    *status_ptr = status;
-                                }
-                            }
-                            None => {
-                                // Invalid address, return EFAULT
-                                trapframe.increment_pc_next(&task);
-                                return usize::MAX - 13; // -EFAULT
-                            }
+                        if copy_to_user(&task, wstatus as usize, &status.to_ne_bytes()).is_err() {
+                            trapframe.increment_pc_next(&task);
+                            return errno::to_result(errno::EFAULT);
                         }
                     }
                     trapframe.increment_pc_next(&task);
-                    return child_pid;
+                    return child_linux_pid;
                 }
                 Err(error) => {
                     match error {
@@ -1391,37 +1517,22 @@ fn write_waitid_siginfo(
         return Ok(());
     }
 
-    let Some(kva) = task.vm_manager.translate_to_kva(infop) else {
-        return Err(errno::to_result(errno::EFAULT));
-    };
-
     // Linux siginfo_t is 128 bytes. For SIGCHLD, aarch64 uses:
     // si_signo @ 0, si_errno @ 4, si_code @ 8, si_pid @ 16,
     // si_uid @ 20, si_status @ 24.
-    unsafe {
-        core::ptr::write_bytes(kva as *mut u8, 0, 128);
-        *(kva as *mut i32).add(0) = 17; // SIGCHLD
-        *(kva as *mut i32).add(1) = 0;
-        *(kva as *mut i32).add(2) = 1; // CLD_EXITED
-        *((kva + 16) as *mut i32) = pid as i32;
-        *((kva + 20) as *mut u32) = 0;
-        *((kva + 24) as *mut i32) = status;
-    }
-
-    Ok(())
+    let mut siginfo = [0u8; 128];
+    siginfo[0..4].copy_from_slice(&17i32.to_ne_bytes()); // SIGCHLD
+    siginfo[8..12].copy_from_slice(&1i32.to_ne_bytes()); // CLD_EXITED
+    siginfo[16..20].copy_from_slice(&(pid as i32).to_ne_bytes());
+    siginfo[24..28].copy_from_slice(&status.to_ne_bytes());
+    copy_to_user(task, infop, &siginfo).map_err(|_| errno::to_result(errno::EFAULT))
 }
 
 fn clear_waitid_siginfo(task: &crate::task::Task, infop: usize) -> Result<(), usize> {
     if infop == 0 {
         return Ok(());
     }
-    let Some(kva) = task.vm_manager.translate_to_kva(infop) else {
-        return Err(errno::to_result(errno::EFAULT));
-    };
-    unsafe {
-        core::ptr::write_bytes(kva as *mut u8, 0, 128);
-    }
-    Ok(())
+    copy_to_user(task, infop, &[0u8; 128]).map_err(|_| errno::to_result(errno::EFAULT))
 }
 
 /// Linux waitid syscall.
@@ -1473,9 +1584,13 @@ pub fn sys_waitid(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                     if child_task.get_state() != TaskState::Zombie {
                         continue;
                     }
+                    let Some(child_linux_pid) = task.get_namespace().resolve_local_id(child_pid)
+                    else {
+                        continue;
+                    };
 
                     let status = child_task.get_exit_status().unwrap_or(-1);
-                    if let Err(err) = write_waitid_siginfo(&task, infop, child_pid, status) {
+                    if let Err(err) = write_waitid_siginfo(&task, infop, child_linux_pid, status) {
                         trapframe.increment_pc_next(&task);
                         return err;
                     }
@@ -1500,7 +1615,14 @@ pub fn sys_waitid(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                 get_parent_waitpid_waker(task.get_id()).wait_owned(task.get_id(), trapframe);
             }
             P_PID => {
-                let child_pid = id;
+                if id == 0 {
+                    trapframe.increment_pc_next(&task);
+                    return errno::to_result(errno::EINVAL);
+                }
+                let Some(child_pid) = task.get_namespace().resolve_global_id(id) else {
+                    trapframe.increment_pc_next(&task);
+                    return errno::to_result(errno::ECHILD);
+                };
                 let Some(owner) = wait_owner_for_child(&task, child_pid) else {
                     trapframe.increment_pc_next(&task);
                     return errno::to_result(errno::ECHILD);
@@ -1513,7 +1635,7 @@ pub fn sys_waitid(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 
                 if child_task.get_state() == TaskState::Zombie {
                     let status = child_task.get_exit_status().unwrap_or(-1);
-                    if let Err(err) = write_waitid_siginfo(&task, infop, child_pid, status) {
+                    if let Err(err) = write_waitid_siginfo(&task, infop, id, status) {
                         trapframe.increment_pc_next(&task);
                         return err;
                     }

@@ -20,8 +20,9 @@ pub const MULTI_READINESS_RECHECK_NS: u64 = crate::timer::NANOSECONDS_PER_MILLIS
 /// Return the next deadline-clipped readiness recheck delay.
 ///
 /// Multi-object waits cannot yet register a single task with every object's
-/// Waker. Callers therefore use bounded one-shot rechecks until Selectable
-/// gains multi-registration support.
+/// Waker. Callers therefore anchor a timed wait to one object and use bounded
+/// one-shot rechecks for the remaining objects until Selectable gains native
+/// multi-registration support.
 ///
 /// # Arguments
 ///

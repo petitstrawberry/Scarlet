@@ -9,7 +9,7 @@ use crate::{
         cstring_to_string, parse_c_string_from_userspace, parse_string_array_from_userspace,
     },
     object::capability::StreamError,
-    sched::scheduler::schedule,
+    sched::scheduler::{get_task_by_id, schedule},
     task::mytask,
 };
 use alloc::{
@@ -26,6 +26,8 @@ static NEXT_EPOLL_HANDLE_ID: AtomicU32 = AtomicU32::new(1);
 static EPOLL_INTERESTS: Once<IrqRwSpinLock<Vec<EpollInterest>>> = Once::new();
 
 const NSEC_PER_SEC_I64: i64 = 1_000_000_000;
+// Enable only while tracing Mozc's Linux IPC compatibility path.
+const MOZC_IPC_TRACE_ENABLED: bool = false;
 
 #[repr(C)]
 struct LinuxTimespec {
@@ -70,7 +72,22 @@ fn mozc_ipc_path(file: &dyn crate::object::capability::FileObject) -> Option<&st
     }
 }
 
+fn is_mozc_server_task(task: &crate::task::Task) -> bool {
+    let matches_name = |name: &str| {
+        name.ends_with("/mozc_server")
+            || name.ends_with("/mozc-server")
+            || name == "mozc_server"
+            || name == "mozc-server"
+    };
+    task.executable_path()
+        .is_some_and(|path| matches_name(&path))
+        || matches_name(&task.name.read())
+}
+
 fn log_mozc_ipc_file(file: &dyn crate::object::capability::FileObject, op: &str, n: usize) {
+    if !MOZC_IPC_TRACE_ENABLED {
+        return;
+    }
     let Some(path) = mozc_ipc_path(file) else {
         return;
     };
@@ -291,6 +308,8 @@ pub struct LinuxStat {
     pub __unused4: u32,     // Reserved
     pub __unused5: u32,     // Reserved
 }
+
+const _: [(); 128] = [(); core::mem::size_of::<LinuxStat>()];
 
 /// Linux `statfs` structure for the 64-bit asm-generic ABI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -582,6 +601,54 @@ impl LinuxStat {
             __unused4: 0,
             __unused5: 0,
         }
+    }
+}
+
+fn proc_exe_linux_stat(inode: u64, target_size: usize) -> LinuxStat {
+    LinuxStat {
+        st_dev: 0,
+        st_ino: inode,
+        st_mode: S_IFLNK | 0o777,
+        st_nlink: 1,
+        st_uid: 0,
+        st_gid: 0,
+        st_rdev: 0,
+        __pad1: 0,
+        st_size: target_size as i64,
+        st_blksize: 4096,
+        __pad2: 0,
+        st_blocks: 0,
+        st_atime: 0,
+        st_atime_nsec: 0,
+        st_mtime: 0,
+        st_mtime_nsec: 0,
+        st_ctime: 0,
+        st_ctime_nsec: 0,
+        __unused4: 0,
+        __unused5: 0,
+    }
+}
+
+fn write_linux_stat(
+    task: &crate::task::Task,
+    userspace_address: usize,
+    statistics: &LinuxStat,
+) -> Result<(), usize> {
+    if userspace_address == 0 {
+        return Err(errno::EFAULT);
+    }
+    // SAFETY: `LinuxStat` is a fully initialized `repr(C)` plain-data value;
+    // the resulting bytes are copied out before `statistics` can be dropped.
+    let bytes = unsafe {
+        core::slice::from_raw_parts(
+            statistics as *const LinuxStat as *const u8,
+            core::mem::size_of::<LinuxStat>(),
+        )
+    };
+    if copy_to_user_pagewise(userspace_address, bytes, &task.vm_manager) == bytes.len() {
+        Ok(())
+    } else {
+        Err(errno::EFAULT)
     }
 }
 
@@ -1909,27 +1976,24 @@ pub fn sys_lseek(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 ///
 /// Returns:
 /// - 0 on success
-/// - usize::MAX (Linux -1) on error
+/// - A negative Linux errno encoded in `usize` on error
 pub fn sys_newfstatat(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
-    let task = mytask().unwrap();
+    let task = match mytask() {
+        Some(task) => task,
+        None => return errno::to_result(errno::EIO),
+    };
     let dirfd = trapframe.get_arg(0) as i32;
-    let path_ptr = task
-        .vm_manager
-        .translate_to_kva(trapframe.get_arg(1))
-        .unwrap() as *const u8;
-    let stat_ptr = task
-        .vm_manager
-        .translate_to_kva(trapframe.get_arg(2))
-        .unwrap() as *mut u8;
+    let pathname_ptr = trapframe.get_arg(1);
+    let stat_ptr = trapframe.get_arg(2);
     let flags = trapframe.get_arg(3) as i32;
 
     // Increment PC to avoid infinite loop if fstatat fails
     trapframe.increment_pc_next(&task);
 
     // Parse path from user space
-    let path_str = match cstring_to_string(path_ptr, MAX_PATH_LENGTH) {
-        Ok((path, _)) => path,
-        Err(_) => return usize::MAX, // Invalid UTF-8
+    let path_str = match parse_c_string_from_userspace(&task, pathname_ptr, MAX_PATH_LENGTH) {
+        Ok(path) => path,
+        Err(_) => return errno::to_result(errno::EFAULT),
     };
 
     let path_str = remap_shm_path(&path_str);
@@ -1941,18 +2005,45 @@ pub fn sys_newfstatat(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     //     flags
     // );
 
-    let vfs_guard = task.vfs.read();
-    let vfs = vfs_guard.as_deref().unwrap();
-
-    // Determine base directory (entry and mount) for path resolution
-    use crate::fs::vfs_v2::core::VfsFileObject;
-
     const AT_FDCWD: i32 = -100;
     const AT_SYMLINK_NOFOLLOW: i32 = 0x100;
 
-    // TODO: Handle AT_SYMLINK_NOFOLLOW flag properly
-    // For now, we always follow symbolic links
-    let _follow_symlinks = (flags & AT_SYMLINK_NOFOLLOW) == 0;
+    // Scarlet does not mount a synthetic procfs yet. Linux's lstat path for
+    // `/proc/<pid>/exe` must nevertheless report a symlink before C++
+    // `std::filesystem::read_symlink` will issue the subsequent readlinkat.
+    if (flags & AT_SYMLINK_NOFOLLOW) != 0
+        && let Some(selector) = proc_exe_selector(&path_str)
+    {
+        let identity = match resolve_proc_exe_identity(&task, &path_str, selector) {
+            Ok(identity) => identity,
+            Err(error) => return errno::to_result(error),
+        };
+        let statistics = proc_exe_linux_stat(identity.leader_id as u64, identity.path.len());
+        if let Err(error) = write_linux_stat(&task, stat_ptr, &statistics) {
+            return errno::to_result(error);
+        }
+        if MOZC_IPC_TRACE_ENABLED {
+            crate::println!(
+                "[linux proc-exe] lstat path='{}' caller_global={} caller_local={} target_global={} leader={} size={}",
+                path_str,
+                task.get_id(),
+                task.try_get_namespace_id().unwrap_or(0),
+                identity.target_id,
+                identity.leader_id,
+                identity.path.len()
+            );
+        }
+        return 0;
+    }
+
+    let vfs_guard = task.vfs.read();
+    let vfs = match vfs_guard.as_deref() {
+        Some(vfs) => vfs,
+        None => return errno::to_result(errno::EIO),
+    };
+
+    // Determine base directory (entry and mount) for path resolution
+    use crate::fs::vfs_v2::core::VfsFileObject;
 
     let (base_entry, base_mount) = if dirfd == AT_FDCWD {
         // Use current working directory as base
@@ -1964,21 +2055,20 @@ pub fn sys_newfstatat(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         // Use directory file descriptor as base
         let handle = match abi.get_handle(dirfd as usize) {
             Some(h) => h,
-            None => return usize::MAX,
+            None => return errno::to_result(errno::EBADF),
         };
         let kernel_obj = match task.handle_table.get(handle) {
             Some(obj) => obj,
-            None => return usize::MAX,
+            None => return errno::to_result(errno::EBADF),
         };
         let file_obj = match kernel_obj.as_file() {
             Some(f) => f,
-            None => return usize::MAX,
+            None => return errno::to_result(errno::ENOTDIR),
         };
-        let vfs_file_obj = file_obj
-            .as_any()
-            .downcast_ref::<VfsFileObject>()
-            .ok_or(())
-            .unwrap();
+        let vfs_file_obj = match file_obj.as_any().downcast_ref::<VfsFileObject>() {
+            Some(file) => file,
+            None => return errno::to_result(errno::ENOTDIR),
+        };
         (
             vfs_file_obj.get_vfs_entry().clone(),
             vfs_file_obj.get_mount_point().clone(),
@@ -1986,29 +2076,18 @@ pub fn sys_newfstatat(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     };
 
     // Resolve the path from the base directory
-    match vfs.resolve_path_from(&base_entry, &base_mount, &path_str) {
-        Ok((entry, _mount_point)) => {
-            // Get metadata from the resolved VfsEntry
-            let node = entry.node();
-            match node.metadata() {
-                Ok(metadata) => {
-                    if stat_ptr.is_null() {
-                        return usize::MAX; // Return -1 if stat pointer is null
-                    }
-
-                    let stat = unsafe { &mut *(stat_ptr as *mut LinuxStat) };
-                    *stat = LinuxStat::from_metadata(&metadata);
-                    // crate::println!(
-                    //     "sys_newfstatat: path='{}' size={}",
-                    //     path_str,
-                    //     metadata.size
-                    // );
-                    0 // Success
-                }
-                Err(_) => usize::MAX, // Error getting metadata
-            }
-        }
-        Err(_) => usize::MAX, // Error resolving path
+    let (entry, _mount_point) = match vfs.resolve_path_from(&base_entry, &base_mount, &path_str) {
+        Ok(resolved) => resolved,
+        Err(error) => return errno::to_result(errno::from_fs_error(&error)),
+    };
+    let metadata = match entry.node().metadata() {
+        Ok(metadata) => metadata,
+        Err(error) => return errno::to_result(errno::from_fs_error(&error)),
+    };
+    let statistics = LinuxStat::from_metadata(&metadata);
+    match write_linux_stat(&task, stat_ptr, &statistics) {
+        Ok(()) => 0,
+        Err(error) => errno::to_result(error),
     }
 }
 
@@ -2047,6 +2126,7 @@ pub fn sys_statx(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         Ok(s) => s,
         Err(_) => return errno::to_result(errno::EFAULT),
     };
+
     let path_str = remap_shm_path(&path_str);
     // crate::println!(
     //     "sys_statx: dirfd={} path='{}' flags={:#x} mask={:#x}",
@@ -2452,6 +2532,54 @@ fn to_absolute_path_v2(task: &crate::task::Task, path: &str) -> Result<String, (
         let vfs = vfs_guard.as_ref().ok_or(())?;
         Ok(vfs.resolve_path_to_absolute(path))
     }
+}
+
+fn path_at_to_absolute(
+    abi: &LinuxAbi,
+    task: &crate::task::Task,
+    vfs: &crate::fs::VfsManager,
+    dirfd: i32,
+    path: &str,
+) -> Result<String, usize> {
+    const AT_FDCWD: i32 = -100;
+
+    if path.is_empty() {
+        return Err(errno::ENOENT);
+    }
+    if path.starts_with('/') {
+        return Ok(vfs.resolve_path_to_absolute(path));
+    }
+
+    let base_path = if dirfd == AT_FDCWD {
+        vfs.get_cwd_path()
+    } else {
+        if dirfd < 0 {
+            return Err(errno::EBADF);
+        }
+        let handle = abi.get_handle(dirfd as usize).ok_or(errno::EBADF)?;
+        let kernel_object = task.handle_table.get(handle).ok_or(errno::EBADF)?;
+        let file = kernel_object.as_file().ok_or(errno::ENOTDIR)?;
+        let vfs_file = file
+            .as_any()
+            .downcast_ref::<crate::fs::vfs_v2::core::VfsFileObject>()
+            .ok_or(errno::ENOTDIR)?;
+        let entry = vfs_file.get_vfs_entry();
+        let metadata = entry
+            .node()
+            .metadata()
+            .map_err(|error| errno::from_fs_error(&error))?;
+        if metadata.file_type != FileType::Directory {
+            return Err(errno::ENOTDIR);
+        }
+        vfs.build_absolute_path(entry, vfs_file.get_mount_point())
+    };
+
+    let combined = if base_path == "/" {
+        alloc::format!("/{}", path)
+    } else {
+        alloc::format!("{}/{}", base_path, path)
+    };
+    Ok(vfs.resolve_path_to_absolute(&combined))
 }
 
 /// Helper function to replace the missing get_path_str function
@@ -3502,35 +3630,38 @@ pub fn sys_faccessat2(_abi: &mut LinuxAbi, trapframe: &mut crate::arch::Trapfram
 pub fn sys_mkdirat(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = match mytask() {
         Some(t) => t,
-        None => return usize::MAX,
+        None => return errno::to_result(errno::EIO),
     };
     trapframe.increment_pc_next(&task);
     let dirfd = trapframe.get_arg(0) as i32;
     let path_ptr = match task.vm_manager.translate_to_kva(trapframe.get_arg(1)) {
         Some(ptr) => ptr as *const u8,
-        None => return usize::MAX,
+        None => return errno::to_result(errno::EFAULT),
     };
-    let path = match cstring_to_string(path_ptr, 128) {
+    let path = match cstring_to_string(path_ptr, MAX_PATH_LENGTH) {
         Ok((p, _)) => p,
-        Err(_) => return usize::MAX,
+        Err(_) => return errno::to_result(errno::EFAULT),
     };
+    if path.is_empty() {
+        return errno::to_result(errno::ENOENT);
+    }
     // NOTE: Currently only AT_FDCWD is supported
-    if dirfd != -100 {
+    if dirfd != -100 && !path.starts_with('/') {
         // AT_FDCWD
-        return usize::MAX;
+        return errno::to_result(errno::EBADF);
     }
 
     let abs_path = match to_absolute_path_v2(&task, &path) {
         Ok(p) => p,
-        Err(_) => return usize::MAX,
+        Err(()) => return errno::to_result(errno::EIO),
     };
-    let vfs = match task.vfs.write().clone() {
+    let vfs = match task.vfs.read().clone() {
         Some(v) => v,
-        None => return usize::MAX,
+        None => return errno::to_result(errno::EIO),
     };
     match vfs.create_dir(&abs_path) {
         Ok(_) => 0,
-        Err(_) => usize::MAX,
+        Err(error) => errno::to_result(errno::from_fs_error(&error)),
     }
 }
 
@@ -4276,13 +4407,14 @@ pub fn sys_pselect6(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 
     // If nothing is ready and a non-zero timeout is provided, wait then
     // re-evaluate every requested descriptor. A single selectable can use its
-    // Waker directly; multiple selectables require periodic level rechecks.
+    // Waker directly; multiple selectables anchor a timed wait to the first
+    // descriptor and periodically recheck the rest.
     if !any_ready {
         let zero_poll = matches!(timeout_ns, Some(t) if t == 0);
         if !zero_poll {
             if selectable_count > 1 {
                 use crate::object::capability::selectable::multi_readiness_recheck_delay;
-                use crate::timer::{TimerPrecision, get_time_ns};
+                use crate::timer::get_time_ns;
 
                 let deadline =
                     timeout_ns.map(|duration_ns| get_time_ns().saturating_add(duration_ns));
@@ -4292,7 +4424,34 @@ pub fn sys_pselect6(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                     else {
                         break;
                     };
-                    task.sleep_with_precision(trapframe, recheck_delay_ns, TimerPrecision::Exact);
+
+                    let fd_wait = first_selectable_fd
+                        .expect("multiple selectable descriptors must have a first descriptor");
+                    let bit = 1u64 << fd_wait;
+                    let mut anchored = false;
+                    if let Some(handle) = abi.get_handle(fd_wait)
+                        && let Some(kobj) = task.handle_table.get(handle)
+                        && let Some(sel) = kobj.as_selectable()
+                    {
+                        let _ = sel.wait_until_ready(
+                            ReadyInterest {
+                                read: (in_read & bit) != 0,
+                                write: (in_write & bit) != 0,
+                                except: (in_except & bit) != 0,
+                            },
+                            trapframe,
+                            Some(recheck_delay_ns),
+                            0,
+                        );
+                        anchored = true;
+                    }
+                    if !anchored {
+                        task.sleep_with_precision(
+                            trapframe,
+                            recheck_delay_ns,
+                            crate::timer::TimerPrecision::Exact,
+                        );
+                    }
 
                     (out_read, out_write, out_except, any_ready) =
                         reevaluate_pselect_fds(abi, &task, max_fds, in_read, in_write, in_except);
@@ -4367,6 +4526,23 @@ pub fn sys_pselect6(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let ready_count = out_read.count_ones() as usize
         + out_write.count_ones() as usize
         + out_except.count_ones() as usize;
+
+    if MOZC_IPC_TRACE_ENABLED && is_mozc_server_task(&task) {
+        crate::println!(
+            "[linux mozc-ipc] pselect task_global={} task_local={} nfds={} read={:#x}->{:#x} write={:#x}->{:#x} except={:#x}->{:#x} timeout_ns={:?} ready={}",
+            task.get_id(),
+            task.try_get_namespace_id().unwrap_or(0),
+            nfds,
+            in_read,
+            out_read,
+            in_write,
+            out_write,
+            in_except,
+            out_except,
+            timeout_ns,
+            ready_count
+        );
+    }
 
     trapframe.increment_pc_next(&task);
     ready_count
@@ -4548,7 +4724,7 @@ pub fn sys_ppoll(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         if !zero_poll {
             if selectable_count > 1 {
                 use crate::object::capability::selectable::multi_readiness_recheck_delay;
-                use crate::timer::{TimerPrecision, get_time_ns};
+                use crate::timer::get_time_ns;
 
                 let deadline =
                     timeout_ns.map(|duration_ns| get_time_ns().saturating_add(duration_ns));
@@ -4559,7 +4735,40 @@ pub fn sys_ppoll(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                         break;
                     };
 
-                    task.sleep_with_precision(trapframe, recheck_delay_ns, TimerPrecision::Exact);
+                    // Register with one real readiness source and use the
+                    // bounded timeout to rescan the rest. Sleeping only on a
+                    // timer here can strand a multi-fd event loop even though
+                    // its primary socket has become readable.
+                    let wait_idx = first_selectable_index
+                        .expect("multiple selectable descriptors must have a first descriptor");
+                    let pfd = &fds[wait_idx];
+                    let mut anchored = false;
+                    if pfd.fd >= 0 {
+                        let fd = pfd.fd as usize;
+                        if let Some(handle) = abi.get_handle(fd)
+                            && let Some(kobj) = task.handle_table.get(handle)
+                            && let Some(sel) = kobj.as_selectable()
+                        {
+                            let _ = sel.wait_until_ready(
+                                ReadyInterest {
+                                    read: (pfd.events & POLLIN) != 0,
+                                    write: (pfd.events & POLLOUT) != 0,
+                                    except: (pfd.events & POLLPRI) != 0,
+                                },
+                                trapframe,
+                                Some(recheck_delay_ns),
+                                0,
+                            );
+                            anchored = true;
+                        }
+                    }
+                    if !anchored {
+                        task.sleep_with_precision(
+                            trapframe,
+                            recheck_delay_ns,
+                            crate::timer::TimerPrecision::Exact,
+                        );
+                    }
 
                     any_ready = false;
                     {
@@ -4818,6 +5027,46 @@ pub fn sys_readlinkat(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         Err(_) => return errno::to_result(errno::EFAULT),
     };
 
+    if MOZC_IPC_TRACE_ENABLED && is_mozc_server_task(&task) {
+        crate::println!(
+            "[linux mozc-ipc] readlink task_global={} task_local={} path='{}' bufsiz={}",
+            task.get_id(),
+            task.try_get_namespace_id().unwrap_or(0),
+            path_str,
+            bufsiz
+        );
+    }
+
+    // Scarlet does not mount a synthetic procfs yet, but Linux applications
+    // rely on this symlink for executable identity checks. In particular,
+    // Mozc's watchdog validates the peer returned by SO_PEERCRED before it
+    // sends its periodic cleanup request. Resolve the namespace-visible task
+    // directly and expose the immutable exec identity rather than its mutable
+    // PR_SET_NAME task name.
+    if let Some(selector) = proc_exe_selector(&path_str) {
+        let identity = match resolve_proc_exe_identity(&task, &path_str, selector) {
+            Ok(identity) => identity,
+            Err(error) => return errno::to_result(error),
+        };
+        if MOZC_IPC_TRACE_ENABLED {
+            crate::println!(
+                "[linux proc-exe] path='{}' caller_global={} caller_local={} target_global={} leader={} -> '{}'",
+                path_str,
+                task.get_id(),
+                task.try_get_namespace_id().unwrap_or(0),
+                identity.target_id,
+                identity.leader_id,
+                identity.path
+            );
+        }
+        let target_bytes = identity.path.as_bytes();
+        let copy_len = core::cmp::min(target_bytes.len(), bufsiz);
+        if copy_to_user_pagewise(buf_ptr, &target_bytes[..copy_len], &task.vm_manager) != copy_len {
+            return errno::to_result(errno::EFAULT);
+        }
+        return copy_len;
+    }
+
     // Acquire VFS
     let vfs = match task.vfs.read().clone() {
         Some(v) => v,
@@ -4891,6 +5140,75 @@ pub fn sys_readlinkat(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     }
 
     copy_len
+}
+
+fn proc_exe_selector(path: &str) -> Option<&str> {
+    let selector = path.strip_prefix("/proc/")?.strip_suffix("/exe")?;
+    (!selector.is_empty() && !selector.contains('/')).then_some(selector)
+}
+
+struct ProcExeIdentity {
+    target_id: usize,
+    leader_id: usize,
+    path: String,
+}
+
+fn resolve_proc_exe_identity(
+    task: &crate::task::Task,
+    source_path: &str,
+    selector: &str,
+) -> Result<ProcExeIdentity, usize> {
+    let target_id = match selector {
+        "self" | "thread-self" => task.get_thread_group_id(),
+        pid => pid
+            .parse::<usize>()
+            .ok()
+            .and_then(|pid| task.get_namespace().resolve_global_id(pid))
+            .ok_or_else(|| {
+                if MOZC_IPC_TRACE_ENABLED {
+                    crate::println!(
+                        "[linux proc-exe] path='{}' caller_global={} caller_local={} selector='{}' unresolved",
+                        source_path,
+                        task.get_id(),
+                        task.try_get_namespace_id().unwrap_or(0),
+                        selector
+                    );
+                }
+                errno::ENOENT
+            })?,
+    };
+    let target = get_task_by_id(target_id).ok_or_else(|| {
+        if MOZC_IPC_TRACE_ENABLED {
+            crate::println!(
+                "[linux proc-exe] path='{}' selector='{}' global={} missing",
+                source_path,
+                selector,
+                target_id
+            );
+        }
+        errno::ENOENT
+    })?;
+    let leader = get_task_by_id(target.get_thread_group_id()).unwrap_or_else(|| target.clone());
+    let path = leader
+        .executable_path()
+        .or_else(|| target.executable_path())
+        .ok_or_else(|| {
+            if MOZC_IPC_TRACE_ENABLED {
+                crate::println!(
+                    "[linux proc-exe] path='{}' selector='{}' global={} leader={} executable missing",
+                    source_path,
+                    selector,
+                    target_id,
+                    leader.get_id()
+                );
+            }
+            errno::ENOENT
+        })?;
+    Ok(ProcExeIdentity {
+        target_id,
+        leader_id: leader.get_id(),
+        path,
+    })
 }
 
 /// Linux sys_getrandom implementation
@@ -5074,6 +5392,78 @@ pub fn sys_chdir(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         Err(_) => {
             crate::println!("sys_chdir: Path '{}' not found", absolute_path);
             usize::MAX // Path not found (ENOENT)
+        }
+    }
+}
+
+/// Linux `renameat` system call implementation (syscall 38).
+///
+/// Renames a filesystem entry, resolving relative paths against their
+/// respective directory file descriptors.
+///
+/// # Arguments
+///
+/// * `abi` - Linux ABI context used to resolve directory file descriptors.
+/// * `trapframe` - Trapframe containing `olddirfd`, `oldpath`, `newdirfd`, and
+///   `newpath`.
+///
+/// # Returns
+///
+/// `0` on success, or a negative Linux errno encoded in `usize` on failure.
+pub fn sys_renameat(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
+    let task = match mytask() {
+        Some(task) => task,
+        None => return errno::to_result(errno::EIO),
+    };
+    let olddirfd = trapframe.get_arg(0) as i32;
+    let oldpath_ptr = trapframe.get_arg(1);
+    let newdirfd = trapframe.get_arg(2) as i32;
+    let newpath_ptr = trapframe.get_arg(3);
+
+    trapframe.increment_pc_next(&task);
+
+    let old_path = match parse_c_string_from_userspace(&task, oldpath_ptr, MAX_PATH_LENGTH) {
+        Ok(path) => remap_shm_path(&path),
+        Err(_) => return errno::to_result(errno::EFAULT),
+    };
+    let new_path = match parse_c_string_from_userspace(&task, newpath_ptr, MAX_PATH_LENGTH) {
+        Ok(path) => remap_shm_path(&path),
+        Err(_) => return errno::to_result(errno::EFAULT),
+    };
+    let vfs = match task.vfs.read().clone() {
+        Some(vfs) => vfs,
+        None => return errno::to_result(errno::EIO),
+    };
+    let old_absolute_path = match path_at_to_absolute(abi, &task, &vfs, olddirfd, &old_path) {
+        Ok(path) => path,
+        Err(error) => return errno::to_result(error),
+    };
+    let new_absolute_path = match path_at_to_absolute(abi, &task, &vfs, newdirfd, &new_path) {
+        Ok(path) => path,
+        Err(error) => return errno::to_result(error),
+    };
+
+    if MOZC_IPC_TRACE_ENABLED && is_mozc_server_task(&task) {
+        crate::println!(
+            "[linux mozc-fs] renameat task_global={} task_local={} '{}' -> '{}'",
+            task.get_id(),
+            task.try_get_namespace_id().unwrap_or(0),
+            old_absolute_path,
+            new_absolute_path
+        );
+    }
+
+    match vfs.rename(&old_absolute_path, &new_absolute_path) {
+        Ok(()) => 0,
+        Err(error) => {
+            if MOZC_IPC_TRACE_ENABLED && is_mozc_server_task(&task) {
+                crate::println!(
+                    "[linux mozc-fs] renameat failed kind={:?} message='{}'",
+                    error.kind,
+                    error.message
+                );
+            }
+            errno::to_result(errno::from_fs_error(&error))
         }
     }
 }
@@ -5289,7 +5679,10 @@ pub fn sys_eventfd2(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{LinuxStatFs, LinuxTimespec, linux_timespec_timeout_ns};
+    use super::{
+        LinuxStatFs, LinuxTimespec, S_IFLNK, S_IFMT, linux_timespec_timeout_ns,
+        proc_exe_linux_stat, proc_exe_selector,
+    };
     use crate::abi::linux::generic::errno;
 
     #[test_case]
@@ -5333,5 +5726,28 @@ mod tests {
             }),
             Ok(u64::MAX)
         );
+    }
+
+    #[test_case]
+    fn proc_exe_selector_accepts_only_one_process_component() {
+        assert_eq!(proc_exe_selector("/proc/self/exe"), Some("self"));
+        assert_eq!(
+            proc_exe_selector("/proc/thread-self/exe"),
+            Some("thread-self")
+        );
+        assert_eq!(proc_exe_selector("/proc/42/exe"), Some("42"));
+        assert_eq!(proc_exe_selector("/proc/42/fd/1"), None);
+        assert_eq!(proc_exe_selector("/proc//exe"), None);
+    }
+
+    #[test_case]
+    fn proc_exe_stat_describes_symlink_and_target_size() {
+        let statistics = proc_exe_linux_stat(42, 31);
+
+        assert_eq!(statistics.st_ino, 42);
+        assert_eq!(statistics.st_mode & S_IFMT, S_IFLNK);
+        assert_eq!(statistics.st_mode & 0o777, 0o777);
+        assert_eq!(statistics.st_nlink, 1);
+        assert_eq!(statistics.st_size, 31);
     }
 }

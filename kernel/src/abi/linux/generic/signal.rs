@@ -10,6 +10,12 @@ use crate::arch::Trapframe;
 use crate::ipc::event::{Event, EventContent, ProcessControlType};
 use crate::task::mytask;
 use alloc::collections::BTreeMap;
+use alloc::sync::Arc;
+
+use crate::sched::scheduler::{
+    get_task_by_id, mark_blocked, push_ready_task, remove_from_ready_queues, unmark_blocked,
+};
+use crate::task::{Task, TaskType};
 
 /// Linux signal numbers (POSIX standard)
 #[repr(u32)]
@@ -756,6 +762,216 @@ pub fn is_fatal_signal(signal: LinuxSignal) -> bool {
     )
 }
 
+/// Linux wait status reported when a task is killed by `signal`.
+///
+/// Scarlet currently stores shell-style process statuses, so signal deaths use
+/// `128 + signal`. Converting this to Linux's raw `wait(2)` bit layout belongs
+/// at the wait ABI boundary once normal exit statuses are encoded there too.
+///
+/// # Arguments
+///
+/// * `signal` - Fatal signal being delivered
+///
+/// # Returns
+///
+/// Exit status encoding the signal death.
+fn signal_death_status(signal: LinuxSignal) -> i32 {
+    128 + signal as i32
+}
+
+/// Find the task currently owning a Linux TID (namespace ID).
+///
+/// # Arguments
+///
+/// * `current` - Calling task whose PID namespace defines `tid`
+/// * `tid` - Linux thread ID as seen by the caller
+///
+/// # Returns
+///
+/// The task owning the TID, or `None` if no live task matches.
+fn resolve_task_by_linux_tid(current: &Task, tid: i32) -> Option<Arc<Task>> {
+    if tid <= 0 {
+        return None;
+    }
+    let global_id = current.get_namespace().resolve_global_id(tid as usize)?;
+    get_task_by_id(global_id).filter(|task| matches!(task.task_type, TaskType::User))
+}
+
+/// Wake a task that may be blocked so it can observe kernel state changes.
+///
+/// # Arguments
+///
+/// * `target` - Task to make runnable again
+fn wake_target_for_signal(target: &Task) {
+    if matches!(target.get_state(), crate::task::TaskState::Blocked(_)) {
+        target.set_state(crate::task::TaskState::Ready);
+        unmark_blocked(target.get_id());
+        push_ready_task(crate::arch::get_cpu().get_cpuid(), target.get_id());
+    }
+}
+
+/// Move a task into the stopped state.
+///
+/// # Arguments
+///
+/// * `target` - Task to stop
+fn stop_target_for_signal(target: &Task) {
+    target.set_state(crate::task::TaskState::Blocked(
+        crate::task::BlockedType::Interruptible,
+    ));
+    mark_blocked(target.get_id());
+    remove_from_ready_queues(target.get_id());
+}
+
+/// Deliver a signal to the calling task itself.
+///
+/// The action is resolved through the caller's installed handler table, so
+/// applications that installed handlers keep the historical permissive
+/// behavior (the syscall still succeeds), while unhandled fatal signals now
+/// terminate the thread group with a signal wait status. This is what musl's
+/// `abort()` path depends on: it restores the default SIGABRT disposition,
+/// unblocks the signal, and raises it.
+///
+/// # Arguments
+///
+/// * `abi` - Linux ABI state that owns the signal handler table
+/// * `task` - Currently running task
+/// * `signal` - Signal to deliver
+fn deliver_signal_to_self(abi: &LinuxAbi, task: &Task, signal: LinuxSignal) {
+    let action = {
+        let mut signal_state = abi.signal_state.lock();
+        if signal != LinuxSignal::SIGKILL && signal_state.blocked.is_blocked(signal) {
+            signal_state.add_pending(signal);
+            return;
+        }
+        signal_state.get_handler(signal)
+    };
+
+    match action {
+        SignalAction::Terminate | SignalAction::ForceTerminate => {
+            let status = signal_death_status(signal);
+            crate::println!(
+                "[linux] signal {} terminating task {} (PID {}) with status {}",
+                signal as u32,
+                task.get_id(),
+                task.try_get_namespace_id().unwrap_or(0),
+                status
+            );
+            task.request_deferred_exit_group(status);
+        }
+        SignalAction::Stop => stop_target_for_signal(task),
+        SignalAction::Ignore | SignalAction::Continue | SignalAction::Custom(_) => {}
+    }
+}
+
+/// Deliver a signal to another task using its default disposition.
+///
+/// The remote task's installed handler table is not reachable from the
+/// caller's syscall context, so the signal's default action is applied
+/// instead. Fatal defaults terminate the target thread group; custom
+/// handlers and ignored signals stay permissive to keep runtimes such as Go
+/// working until cross-task userspace signal frames are available.
+///
+/// # Arguments
+///
+/// * `target` - Task receiving the signal
+/// * `signal` - Signal to deliver
+fn deliver_signal_to_remote(target: &Task, signal: LinuxSignal) {
+    match signal.default_action() {
+        SignalAction::Terminate | SignalAction::ForceTerminate => {
+            let status = signal_death_status(signal);
+            crate::println!(
+                "[linux] signal {} terminating task {} (PID {}) with status {}",
+                signal as u32,
+                target.get_id(),
+                target.try_get_namespace_id().unwrap_or(0),
+                status
+            );
+            target.request_deferred_exit_group(status);
+            wake_target_for_signal(target);
+        }
+        SignalAction::Stop => stop_target_for_signal(target),
+        SignalAction::Continue => wake_target_for_signal(target),
+        SignalAction::Ignore | SignalAction::Custom(_) => {}
+    }
+}
+
+/// Route signal delivery between the calling task and a remote target.
+///
+/// # Arguments
+///
+/// * `abi` - Linux ABI state of the calling task
+/// * `current` - Currently running task
+/// * `target` - Task the signal is addressed to
+/// * `signal` - Signal to deliver
+pub fn deliver_signal(abi: &LinuxAbi, current: &Task, target: &Task, signal: LinuxSignal) {
+    let is_self = target.get_id() == current.get_id()
+        || target.get_thread_group_id() == current.get_thread_group_id();
+    if is_self {
+        deliver_signal_to_self(abi, current, signal);
+    } else {
+        deliver_signal_to_remote(target, signal);
+    }
+}
+
+/// Deliver unblocked pending signals when returning from a syscall.
+///
+/// Linux delivers a pending signal as soon as it becomes unblocked and the
+/// task returns to user space. musl's `abort()` relies on exactly this: it
+/// raises SIGABRT while the signal may still be blocked, unblocks it, and
+/// expects the kernel to perform the default termination.
+///
+/// # Arguments
+///
+/// * `abi` - Linux ABI state of the calling task
+pub fn deliver_pending_signals(abi: &mut LinuxAbi) {
+    let Some(task) = mytask() else {
+        return;
+    };
+
+    loop {
+        let deliverable = {
+            let signal_state = abi.signal_state.lock();
+            match signal_state.next_deliverable_signal() {
+                Some(signal) => match signal_state.get_handler(signal) {
+                    SignalAction::Custom(_) => None,
+                    _ => Some(signal),
+                },
+                None => None,
+            }
+        };
+        let Some(signal) = deliverable else {
+            return;
+        };
+
+        let action = {
+            let mut signal_state = abi.signal_state.lock();
+            signal_state.remove_pending(signal);
+            signal_state.get_handler(signal)
+        };
+
+        match action {
+            SignalAction::Terminate | SignalAction::ForceTerminate => {
+                let status = signal_death_status(signal);
+                crate::println!(
+                    "[linux] pending signal {} terminating task {} (PID {}) with status {}",
+                    signal as u32,
+                    task.get_id(),
+                    task.try_get_namespace_id().unwrap_or(0),
+                    status
+                );
+                task.request_deferred_exit_group(status);
+                return;
+            }
+            SignalAction::Stop => {
+                stop_target_for_signal(&task);
+                return;
+            }
+            SignalAction::Ignore | SignalAction::Continue | SignalAction::Custom(_) => continue,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -778,20 +994,45 @@ mod tests {
     }
 }
 
-/// Linux sys_tkill - Send a signal to a specific thread
+#[cfg(test)]
+mod signal_delivery_tests {
+    use super::*;
+
+    #[test_case]
+    fn test_signal_death_status_matches_shell_status_convention() {
+        assert_eq!(signal_death_status(LinuxSignal::SIGABRT), 134);
+        assert_eq!(signal_death_status(LinuxSignal::SIGSEGV), 139);
+        assert_eq!(signal_death_status(LinuxSignal::SIGKILL), 137);
+    }
+
+    #[test_case]
+    fn test_blocked_fatal_signal_stays_pending_for_self() {
+        let mut state = SignalState::new();
+        state.blocked.block_signal(LinuxSignal::SIGABRT);
+        state.add_pending(LinuxSignal::SIGABRT);
+        assert!(state.is_pending(LinuxSignal::SIGABRT));
+        assert_eq!(
+            state.next_deliverable_signal(),
+            None,
+            "blocked signals must not be delivered while masked"
+        );
+    }
+}
+
+/// Send a signal to a specific thread.
 ///
-/// tkill() sends a signal to a specific thread within the same thread group.
-/// This is a simplified implementation that mainly prevents crashes.
+/// The target TID is resolved in the caller's PID namespace. Signal zero only
+/// checks that the target exists; other signals are delivered according to the
+/// supported local or remote disposition semantics.
 ///
-/// Arguments:
-/// - abi: LinuxAbi context
-/// - trapframe: Trapframe containing syscall arguments
-///   - arg0: tid (thread ID)
-///   - arg1: sig (signal number)
+/// # Arguments
 ///
-/// Returns:
-/// - 0 on success
-/// - usize::MAX (Linux -1) on error
+/// * `abi` - Linux ABI context used for the caller's signal state.
+/// * `trapframe` - Trapframe containing the target TID and signal number.
+///
+/// # Returns
+///
+/// `0` on success, or a negative Linux errno encoded in `usize` on failure.
 pub fn sys_tkill(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = match mytask() {
         Some(t) => t,
@@ -804,42 +1045,105 @@ pub fn sys_tkill(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     // Increment PC to avoid infinite loop
     trapframe.increment_pc_next(&task);
 
-    // For now, just log and return success
-    // A proper implementation would:
-    // 1. Find the target task by TID
-    // 2. Add the signal to its pending signal queue
-    // 3. Wake the task if it's sleeping
-    crate::early_println!(
-        "[sys_tkill] tid={} sig={} - NOOP (signal delivery not implemented)",
-        tid,
-        sig
-    );
+    if !(0..=64).contains(&sig) {
+        return errno::to_result(errno::EINVAL);
+    }
 
-    // Return success to avoid crashing applications
-    // Many applications use tkill for thread management
+    if tid <= 0 {
+        return errno::to_result(errno::EINVAL);
+    }
+
+    let Some(target) = resolve_task_by_linux_tid(&task, tid) else {
+        return errno::to_result(errno::ESRCH);
+    };
+
+    // Signal 0 only probes whether the target exists.
+    if sig == 0 {
+        return 0;
+    }
+
+    let Some(signal) = LinuxSignal::from_u32(sig as u32) else {
+        return errno::to_result(errno::EINVAL);
+    };
+
+    if signal == LinuxSignal::SIGABRT && target.get_id() == task.get_id() {
+        crate::println!(
+            "[linux] task {} (PID {}) requested SIGABRT",
+            task.get_id(),
+            task.try_get_namespace_id().unwrap_or(0)
+        );
+        crate::arch::log_user_backtrace(&task, trapframe);
+    }
+
+    deliver_signal(abi, &task, &target, signal);
+
     0
 }
 
-/// Linux sys_tgkill - Send a signal to a thread in a specific thread group.
+/// Send a signal to a thread in a specific thread group.
 ///
-/// This currently mirrors `tkill`'s permissive behavior. Go's runtime uses
-/// `tgkill` for internal signal delivery, so returning success is enough for
-/// runtimes that install handlers but do not require full signal semantics yet.
-pub fn sys_tgkill(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
+/// Both IDs are resolved in the caller's PID namespace, and the target TID must
+/// belong to the supplied thread-group ID.
+///
+/// # Arguments
+///
+/// * `abi` - Linux ABI context used for the caller's signal state.
+/// * `trapframe` - Trapframe containing the target TGID, TID, and signal number.
+///
+/// # Returns
+///
+/// `0` on success, or a negative Linux errno encoded in `usize` on failure.
+pub fn sys_tgkill(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = match mytask() {
         Some(t) => t,
         None => return usize::MAX,
     };
 
-    let _tgid = trapframe.get_arg(0) as i32;
-    let _tid = trapframe.get_arg(1) as i32;
+    let tgid = trapframe.get_arg(0) as i32;
+    let tid = trapframe.get_arg(1) as i32;
     let sig = trapframe.get_arg(2) as i32;
 
     trapframe.increment_pc_next(&task);
 
-    if sig < 0 {
+    if !(0..=64).contains(&sig) {
         return errno::to_result(errno::EINVAL);
     }
+
+    if tgid <= 0 || tid <= 0 {
+        return errno::to_result(errno::EINVAL);
+    }
+
+    let Some(target) = resolve_task_by_linux_tid(&task, tid) else {
+        return errno::to_result(errno::ESRCH);
+    };
+
+    // The supplied tgid must name the target's thread group.
+    let target_tgid = task
+        .get_namespace()
+        .resolve_local_id(target.get_thread_group_id());
+    if target_tgid != Some(tgid as usize) {
+        return errno::to_result(errno::ESRCH);
+    }
+
+    // Signal 0 only probes whether the target exists.
+    if sig == 0 {
+        return 0;
+    }
+
+    let Some(signal) = LinuxSignal::from_u32(sig as u32) else {
+        return errno::to_result(errno::EINVAL);
+    };
+
+    if signal == LinuxSignal::SIGABRT && target.get_id() == task.get_id() {
+        crate::println!(
+            "[linux] task {} (PID {}) requested SIGABRT",
+            task.get_id(),
+            task.try_get_namespace_id().unwrap_or(0)
+        );
+        crate::arch::log_user_backtrace(&task, trapframe);
+    }
+
+    deliver_signal(abi, &task, &target, signal);
 
     0
 }

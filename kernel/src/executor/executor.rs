@@ -314,6 +314,17 @@ impl TransparentExecutor {
             }
         }
 
+        // Linux-visible launchers can use a namespace-relative absolute
+        // argv[0] even when Scarlet opened the image through a host-visible
+        // bundle path. Prefer that stable executable identity for `/proc/*/exe`
+        // and keep the actual open path as the fallback.
+        let executable_path = argv
+            .first()
+            .copied()
+            .filter(|arg| arg.starts_with('/'))
+            .unwrap_or(path);
+        task.set_executable_path(executable_path);
+
         Ok(())
     }
 

@@ -58,7 +58,7 @@ use core::sync::atomic::{
     AtomicBool, AtomicI32, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering,
 };
 
-const INIT_TASK_ID: usize = 1;
+pub(crate) const INIT_TASK_ID: usize = 1;
 const LOG_EXIT_GROUP_SIBLINGS: bool = false;
 // Keep process heaps virtually contiguous without requiring one equally large
 // physically contiguous PMM allocation. Large image and video buffers can
@@ -954,6 +954,11 @@ pub struct Task {
     // === IRQ reader-writer spin lock fields (frequent reads) ===
     /// Task name
     pub name: IrqRwSpinLock<String>,
+    /// Executable path reported through process-introspection interfaces.
+    ///
+    /// Unlike `name`, this value is not changed by `prctl(PR_SET_NAME)` and is
+    /// inherited by forked processes and threads until a successful exec.
+    executable_path: IrqRwSpinLock<Option<String>>,
     /// List of child task IDs
     pub children: IrqRwSpinLock<Vec<usize>>,
     /// Contiguous page allocations (PMM-backed, auto-freed on drop).
@@ -1228,6 +1233,7 @@ impl Task {
             brk_transaction: vm_manager.brk_transaction_handle(),
             // IRQ reader-writer spin lock fields
             name: IrqRwSpinLock::new(name),
+            executable_path: IrqRwSpinLock::new(None),
             children: IrqRwSpinLock::new(Vec::new()),
             page_allocations: vm_manager.page_allocations_handle(),
             task_pages: vm_manager.task_pages_handle(),
@@ -1863,6 +1869,24 @@ impl Task {
         self.id
     }
 
+    /// Record the executable path installed by a successful exec operation.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - Path that should be exposed as the task's executable image.
+    pub(crate) fn set_executable_path(&self, path: &str) {
+        *self.executable_path.write() = Some(path.to_string());
+    }
+
+    /// Return the executable path installed by the most recent successful exec.
+    ///
+    /// # Returns
+    ///
+    /// The executable path, or `None` before the task has executed an image.
+    pub(crate) fn executable_path(&self) -> Option<String> {
+        self.executable_path.read().clone()
+    }
+
     /// Return the task ID if this task has been registered with the scheduler.
     ///
     /// # Returns
@@ -2007,6 +2031,20 @@ impl Task {
             "Task namespace_id is 0 - task may not have been added to scheduler yet"
         );
         namespace_id
+    }
+
+    /// Return the task's namespace ID if it has been registered yet.
+    ///
+    /// Unlike `get_namespace_id()`, this never panics for tasks that have
+    /// not joined a namespace yet (for example kernel service tasks).
+    ///
+    /// # Returns
+    ///
+    /// The namespace ID, or `None` when the task is not registered with a
+    /// namespace.
+    pub fn try_get_namespace_id(&self) -> Option<usize> {
+        let namespace_id = self.namespace_id.load(atomic::Ordering::SeqCst);
+        (namespace_id != 0).then_some(namespace_id)
     }
 
     /// Get the task's namespace.
@@ -2525,6 +2563,7 @@ impl Task {
         }
         self.cancel_software_timers();
         crate::sync::futex::remove_task_waiter(self.id, self.thread_group_id);
+        crate::abi::linux::generic::futex::remove_task_waiter(self.id);
         release_task_deadline(self);
     }
 
@@ -2798,7 +2837,7 @@ impl Task {
         unsafe {
             core::ptr::write_volatile(paddr as *mut i32, 0);
         }
-        let _ = crate::abi::linux::generic::futex::wake_address(ptr, 1);
+        let _ = crate::abi::linux::generic::futex::wake_task_address(self, ptr, 1);
     }
 
     fn take_deferred_exit_request(&self) -> Option<DeferredExitRequest> {
@@ -3191,6 +3230,7 @@ impl Task {
         child.max_stack_size = self.max_stack_size;
         child.max_data_size = self.max_data_size;
         child.max_text_size = self.max_text_size;
+        *child.executable_path.write() = self.executable_path.read().clone();
         // A fork-style child owns a fresh VMM resource set initialized to the
         // parent's current break. CLONE_VM already shared the complete set
         // above, including backing-page ownership and the brk transaction lock.
@@ -3835,7 +3875,7 @@ impl Task {
     /// Kernel-space blocking loops (poll, select, futex, etc.) must check
     /// this before re-entering a wait. Process-control events are only
     /// consumed at the user-space return boundary
-    /// (\`process_pending_events_before_user_return\`), so a task that spins
+    /// (`process_pending_events_before_user_return`), so a task that spins
     /// in a kernel loop without yielding to user space would otherwise starve
     /// signal delivery indefinitely.
     pub fn has_pending_process_control(&self) -> bool {

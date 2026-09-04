@@ -69,6 +69,11 @@ pub struct LinuxThreadState {
     pub sigaltstack_sp: usize,
     pub sigaltstack_size: usize,
     pub sigaltstack_flags: u32,
+    /// Linux-visible, namespace-local thread-group ID.
+    ///
+    /// Kernel task relationships use global task IDs. Keeping the ABI-facing
+    /// TGID in the namespace domain prevents `getpid`, `SO_PEERCRED`, and
+    /// `/proc/<pid>` from describing the same process with different numbers.
     pub tgid: usize,
     pub pending_clone_is_thread: bool,
 }
@@ -124,6 +129,27 @@ impl LinuxAbi {
     }
     pub fn thread_state_mut(&mut self) -> &mut LinuxThreadState {
         &mut self.thread_state
+    }
+
+    /// Return the Linux-visible thread-group ID for a task.
+    ///
+    /// A newly forked process cannot store its own TGID until it has been
+    /// registered and assigned a namespace-local ID, so zero means to use the
+    /// task's namespace ID. Threads inherit the leader's stored TGID.
+    ///
+    /// # Arguments
+    ///
+    /// * `task` - Task whose process ID should be exposed to Linux userspace.
+    ///
+    /// # Returns
+    ///
+    /// The namespace-local Linux process ID.
+    pub(crate) fn visible_thread_group_id(&self, task: &crate::task::Task) -> usize {
+        if self.thread_state.tgid != 0 {
+            self.thread_state.tgid
+        } else {
+            task.get_namespace_id()
+        }
     }
 
     pub fn unshare_fd_table(&mut self) {
@@ -401,6 +427,7 @@ syscall_table! {
     Ioctl = 29 => fs::sys_ioctl,
     MkdirAt = 34 => fs::sys_mkdirat,
     UnlinkAt = 35 => fs::sys_unlinkat,
+    RenameAt = 38 => fs::sys_renameat,
     Mount = 40 => fs::sys_mount,
     Statfs = 43 => fs::sys_statfs,
     Fstatfs = 44 => fs::sys_fstatfs,
@@ -475,7 +502,7 @@ syscall_table! {
     GetEgid = 177 => proc::sys_getegid,
     GetTid = 178 => proc::sys_gettid,
     Sysinfo = 179 => proc::sys_sysinfo,
-    Kill = 129 => signal::sys_tkill,
+    Kill = 129 => proc::sys_kill,
     Tkill = 130 => signal::sys_tkill,
     Tgkill = 131 => signal::sys_tgkill,
     Brk = 214 => proc::sys_brk,

@@ -64,12 +64,27 @@ pub const SCM_RIGHTS: i32 = 1;
 pub const SO_PEERCRED: i32 = 17;
 pub const MSG_DONTWAIT: i32 = 0x40;
 
+// Enable only while tracing Mozc's Linux IPC compatibility path.
+const MOZC_IPC_TRACE_ENABLED: bool = false;
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct LinuxUcred {
     pid: i32,
     uid: u32,
     gid: u32,
+}
+
+fn is_mozc_server_task(task: &crate::task::Task) -> bool {
+    let matches_name = |name: &str| {
+        name.ends_with("/mozc_server")
+            || name.ends_with("/mozc-server")
+            || name == "mozc_server"
+            || name == "mozc-server"
+    };
+    task.executable_path()
+        .is_some_and(|path| matches_name(&path))
+        || matches_name(&task.name.read())
 }
 
 fn socket_error_to_errno(error: SocketError) -> usize {
@@ -507,7 +522,7 @@ pub fn sys_bind(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                 let log_name = registry_name
                     .strip_prefix('\0')
                     .unwrap_or(registry_name.as_str());
-                if is_abstract && log_name.contains(".mozc.") {
+                if MOZC_IPC_TRACE_ENABLED && is_abstract && log_name.contains(".mozc.") {
                     crate::println!("[linux mozc-ipc] bind abstract '{}'", log_name);
                 }
 
@@ -832,8 +847,38 @@ pub fn sys_connect(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                         Err(errno) => return errno::to_result(errno),
                     };
 
+                let mozc_path = if MOZC_IPC_TRACE_ENABLED {
+                    match &socket_addr {
+                        crate::network::SocketAddress::Local(address)
+                            if address.path().contains(".mozc.") =>
+                        {
+                            Some(address.path())
+                        }
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
+                if let Some(path) = mozc_path {
+                    crate::println!(
+                        "[linux mozc-ipc] connect begin task_global={} task_local={} path='{}'",
+                        task.get_id(),
+                        task.get_namespace_id(),
+                        path
+                    );
+                }
                 if let Err(error) = socket_arc.connect(&socket_addr) {
+                    if let Some(path) = mozc_path {
+                        crate::println!(
+                            "[linux mozc-ipc] connect failed path='{}' error={:?}",
+                            path,
+                            error
+                        );
+                    }
                     return errno::to_result(socket_error_to_errno(error));
+                }
+                if let Some(path) = mozc_path {
+                    crate::println!("[linux mozc-ipc] connect ok path='{}'", path);
                 };
             }
             AF_INET_U16 => {
@@ -1027,7 +1072,7 @@ pub fn sys_getsockopt(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         None => return usize::MAX,
     };
 
-    let _sockfd = trapframe.get_arg(0) as i32;
+    let sockfd = trapframe.get_arg(0) as i32;
     let level = trapframe.get_arg(1) as i32;
     let optname = trapframe.get_arg(2) as i32;
     let optval_ptr = trapframe.get_arg(3);
@@ -1036,32 +1081,54 @@ pub fn sys_getsockopt(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     // Increment PC to avoid infinite loop
     trapframe.increment_pc_next(&task);
 
-    let (Some(optval_paddr), Some(optlen_paddr)) = (
-        task.vm_manager.translate_to_kva(optval_ptr),
-        task.vm_manager.translate_to_kva(optlen_ptr),
-    ) else {
+    let mut optlen_bytes = [0u8; size_of::<u32>()];
+    if copy_from_user(&task, optlen_ptr, &mut optlen_bytes).is_err() {
         return errno::to_result(errno::EFAULT);
-    };
-
-    let optlen = unsafe { *(optlen_paddr as *const u32) };
+    }
+    let optlen = u32::from_ne_bytes(optlen_bytes);
 
     if level == SOL_SOCKET && optname == SO_PEERCRED {
         if optlen < size_of::<LinuxUcred>() as u32 {
             return errno::to_result(errno::EINVAL);
         }
-        let pid = {
-            let tgid = abi.thread_state().tgid;
-            if tgid != 0 {
-                tgid
-            } else {
-                task.get_namespace_id()
-            }
+        let handle = match abi.get_handle(sockfd as usize) {
+            Some(handle) => handle,
+            None => return errno::to_result(errno::EBADF),
+        };
+        let socket = match task
+            .handle_table
+            .get(handle)
+            .and_then(KernelObject::into_socket_arc)
+        {
+            Some(socket) => socket,
+            None => return errno::to_result(errno::ENOTSOCK),
+        };
+        let local_socket = match LocalSocket::from_socket_object(socket.as_ref()) {
+            Some(socket) => socket,
+            None => return errno::to_result(errno::ENOPROTOOPT),
+        };
+        let peer_process_id = match local_socket.peer_process_id() {
+            Some(process_id) => process_id,
+            None => return errno::to_result(errno::ENOTCONN),
+        };
+        let pid = match task.get_namespace().resolve_local_id(peer_process_id) {
+            Some(pid) => pid,
+            None => return errno::to_result(errno::ESRCH),
         };
         let cred = LinuxUcred {
             pid: pid as i32,
             uid: 0,
             gid: 0,
         };
+        if MOZC_IPC_TRACE_ENABLED && is_mozc_server_task(&task) {
+            crate::println!(
+                "[linux mozc-ipc] peercred task_global={} task_local={} fd={} peer_pid={}",
+                task.get_id(),
+                task.try_get_namespace_id().unwrap_or(0),
+                sockfd,
+                pid
+            );
+        }
         if copy_to_user(&task, optval_ptr, unsafe {
             core::slice::from_raw_parts(
                 (&cred as *const LinuxUcred).cast::<u8>(),
@@ -1072,17 +1139,24 @@ pub fn sys_getsockopt(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         {
             return errno::to_result(errno::EFAULT);
         }
-        unsafe {
-            *(optlen_paddr as *mut u32) = size_of::<LinuxUcred>() as u32;
+        if copy_to_user(
+            &task,
+            optlen_ptr,
+            &(size_of::<LinuxUcred>() as u32).to_ne_bytes(),
+        )
+        .is_err()
+        {
+            return errno::to_result(errno::EFAULT);
         }
         return 0;
     }
 
     // Fallback for options that are not semantically important yet.
     if optlen >= 4 && optval_ptr != 0 {
-        unsafe {
-            *(optval_paddr as *mut u32) = 1;
-            *(optlen_paddr as *mut u32) = 4;
+        if copy_to_user(&task, optval_ptr, &1u32.to_ne_bytes()).is_err()
+            || copy_to_user(&task, optlen_ptr, &4u32.to_ne_bytes()).is_err()
+        {
+            return errno::to_result(errno::EFAULT);
         }
     }
     0
@@ -1761,7 +1835,28 @@ pub fn sys_sendto(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     };
 
     // Send data
-    match socket.sendto(data, &dest_addr, flags) {
+    let result = socket.sendto(data, &dest_addr, flags);
+    if MOZC_IPC_TRACE_ENABLED && is_mozc_server_task(&task) {
+        match &result {
+            Ok(written) => crate::println!(
+                "[linux mozc-ipc] send task_global={} task_local={} fd={} requested={} written={}",
+                task.get_id(),
+                task.try_get_namespace_id().unwrap_or(0),
+                sockfd,
+                len,
+                written
+            ),
+            Err(error) => crate::println!(
+                "[linux mozc-ipc] send task_global={} task_local={} fd={} requested={} error={:?}",
+                task.get_id(),
+                task.try_get_namespace_id().unwrap_or(0),
+                sockfd,
+                len,
+                error
+            ),
+        }
+    }
+    match result {
         Ok(n) => n,
         Err(crate::network::socket::SocketError::WouldBlock) => errno::to_result(errno::EAGAIN),
         Err(crate::network::socket::SocketError::NotConnected) => errno::to_result(errno::ENOTCONN),
@@ -1848,6 +1943,27 @@ pub fn sys_recvfrom(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     if nonblocking {
         if let Some(selectable) = socket.as_selectable() {
             selectable.set_nonblocking(false);
+        }
+    }
+
+    if MOZC_IPC_TRACE_ENABLED && is_mozc_server_task(&task) {
+        match &result {
+            Ok((received, _)) => crate::println!(
+                "[linux mozc-ipc] recv task_global={} task_local={} fd={} requested={} received={}",
+                task.get_id(),
+                task.try_get_namespace_id().unwrap_or(0),
+                sockfd,
+                len,
+                received
+            ),
+            Err(error) => crate::println!(
+                "[linux mozc-ipc] recv task_global={} task_local={} fd={} requested={} error={:?}",
+                task.get_id(),
+                task.try_get_namespace_id().unwrap_or(0),
+                sockfd,
+                len,
+                error
+            ),
         }
     }
 
@@ -2072,7 +2188,18 @@ pub fn sys_shutdown(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         _ => return errno::to_result(errno::EINVAL),
     };
 
-    match socket.shutdown(shutdown_how) {
+    let result = socket.shutdown(shutdown_how);
+    if MOZC_IPC_TRACE_ENABLED && is_mozc_server_task(&task) {
+        crate::println!(
+            "[linux mozc-ipc] shutdown task_global={} task_local={} fd={} how={} result={:?}",
+            task.get_id(),
+            task.try_get_namespace_id().unwrap_or(0),
+            sockfd,
+            how,
+            result
+        );
+    }
+    match result {
         Ok(()) => 0,
         Err(crate::network::socket::SocketError::NotConnected) => errno::to_result(errno::ENOTCONN),
         Err(_) => errno::to_result(errno::EIO),
