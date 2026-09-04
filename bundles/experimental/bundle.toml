@@ -79,3 +79,10 @@ subdir = "apps/scarlet-browser"
 package = "blitz-scarlet-browser"
 bin = "blitz"
 to = "/system/scarlet/bin/blitz"
+
+[[layers]]
+kind = "cargo"
+source = { git = "https://github.com/petitstrawberry/myrica", rev = "e49edf9367cb2172d442d71326f51df83d5ec127" }
+package = "myrica"
+bin = "myrica"
+to = "/system/scarlet/bin/myrica"
