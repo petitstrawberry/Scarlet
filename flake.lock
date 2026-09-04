@@ -103,11 +103,11 @@
         "rust-overlay": "rust-overlay"
       },
       "locked": {
-        "lastModified": 1781616333,
-        "narHash": "sha256-oMWBZAa3GkcJHBkdcWcSf99x8Nu0azHa8ilvaLVP5Cc=",
+        "lastModified": 1788500970,
+        "narHash": "sha256-h9IilWrAlWeWdIN82Afw5s4YCeYREQvjlcD4CYuGhEg=",
         "owner": "petitstrawberry",
         "repo": "scarlet-rust-nix",
-        "rev": "4aabad72da5827cdc992b51c671effed586015fb",
+        "rev": "2b4ddd555389a8c53806bbc2586440b2662c38dd",
         "type": "github"
       },
       "original": {
@@ -119,11 +119,11 @@
     "scarlet-sdk": {
       "flake": false,
       "locked": {
-        "lastModified": 1788235286,
-        "narHash": "sha256-OpOaBvifBFDFfVedSEsYM0/vX4pfBAR6Zfm/SCi3v7I=",
+        "lastModified": 1788487831,
+        "narHash": "sha256-ynuBcTBWtVbJqyWlcA6otG1Mw/zeaOyWG8b+/z3xZb4=",
         "owner": "petitstrawberry",
         "repo": "scarlet-sdk",
-        "rev": "7a67ce130ab60ed77c353f97f30d747af9743f45",
+        "rev": "10a17cce4e8429f6de196a65d55f24395b22b84d",
         "type": "github"
       },
       "original": {
