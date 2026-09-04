@@ -82,7 +82,7 @@ to = "/system/scarlet/bin/blitz"
 
 [[layers]]
 kind = "cargo"
-source = { git = "https://github.com/petitstrawberry/myrica", rev = "e49edf9367cb2172d442d71326f51df83d5ec127" }
+source = { git = "https://github.com/petitstrawberry/myrica", rev = "083ffb2a394d517d5bc9518c7227b654d5836f71" }
 package = "myrica"
 bin = "myrica"
 to = "/system/scarlet/bin/myrica"
