@@ -2816,13 +2816,16 @@ fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Ha
                                         );
 
                                         // Zero-initialize the SHM for deterministic behavior.
+                                        // Use a bulk fill: a debug-mode byte loop can exceed
+                                        // the client's response deadline for ordinary windows.
                                         // SAFETY: `addr` is a newly created writable mapping
                                         // whose extent is exactly `buffer_size` bytes.
                                         unsafe {
-                                            let ptr = addr as *mut u8;
-                                            for i in 0..buffer_size as usize {
-                                                *ptr.add(i) = 0;
-                                            }
+                                            core::ptr::write_bytes(
+                                                addr as *mut u8,
+                                                0,
+                                                buffer_size as usize,
+                                            );
                                         }
                                         println!(
                                             "[ClientThread {}] SHM zero-initialized",
