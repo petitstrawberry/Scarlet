@@ -390,6 +390,11 @@
             SCARLET_EFI_CODE_ARM64 = "${ovmf-aarch64-pflash}/FV/QEMU_EFI.fd";
             SCARLET_EFI_VARS_ARM64 = "${ovmf-aarch64-pflash}/FV/QEMU_VARS.fd";
 
+            # C dependencies for Scarlet must not inherit the host libc headers
+            # injected by Nix's native compiler wrapper. Keep native builds on
+            # the wrapper; use plain Clang only for the built-in Scarlet targets.
+            CC_riscv64gc_unknown_scarlet = "${pkgs.llvmPackages.clang-unwrapped}/bin/clang";
+            CC_aarch64_unknown_scarlet = "${pkgs.llvmPackages.clang-unwrapped}/bin/clang";
             CARGO_NET_GIT_FETCH_WITH_CLI = "true";
             LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath [
               pkgs.stdenv.cc.cc.lib
@@ -458,6 +463,8 @@
               Cmd = [ "bash" ];
               Env = [
                 "PATH=/bin"
+                "CC_riscv64gc_unknown_scarlet=${devEnv.CC_riscv64gc_unknown_scarlet}"
+                "CC_aarch64_unknown_scarlet=${devEnv.CC_aarch64_unknown_scarlet}"
                 "CARGO_NET_GIT_FETCH_WITH_CLI=${devEnv.CARGO_NET_GIT_FETCH_WITH_CLI}"
                 "LD_LIBRARY_PATH=${devEnv.LD_LIBRARY_PATH}"
                 "NIX_PATH=${devEnv.NIX_PATH}"
