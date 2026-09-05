@@ -1,10 +1,11 @@
 # Asynchronous GPU submission: implementation boundary
 
 Status (2026-09-06): generic kernel admission, read-only completion capabilities,
-and `gpu-raw` wrappers are implemented. **VirtIO/VirGL and A618 still use their
-existing synchronous implementations and report zero async capacity.** Native
-SGFX/facade and consumer integration remain open. This is not a performance
-claim or completion of the coordinated 1.0 release gate.
+`gpu-raw` wrappers, and **real VirtIO/VirGL asynchronous execution** are implemented.
+VirtIO queues advertise 16 retained submissions, with a shared device-wide bound
+of 16; existing synchronous operations remain available. **A618 still reports
+zero async capacity.** Native SGFX/facade and consumer integration remain open.
+This is not a performance claim or completion of the coordinated 1.0 release gate.
 
 The user approved portable completion tracking and actual asynchronous Scarlet
 execution for 1.0; the portable semantics are recorded in the
@@ -93,14 +94,66 @@ driver's separate DMA/staging allocations. Backends must still retain those.
 
 ## Verification and remaining work
 
+### VirtIO/VirGL transport and lifetime
+
+The control queue retains command/response DMA independently of callers and
+matches used entries to descriptor heads, including out-of-order responses.
+Publication and consumption use architecture I/O barriers. Invalid used IDs,
+invalid response lengths, timeouts, and failed checkpoint fences permanently
+stop new control work and quarantine unretired DMA, backing and admission slots.
+Installed queue memory is also retained when no reset proof exists. Recovery
+and actual fault/reset injection remain open; quarantine is not a reset path.
+
+A nonempty async submission publishes two chains in one available-ring update:
+the payload and an independent empty fenced `SUBMIT_3D` checkpoint. An empty
+submission publishes only the checkpoint. Both storage and ring capacity are
+reserved before publication, so Busy/rejection cannot accept a prefix. VirGL's
+legacy fence callback is 32-bit; fence IDs are rejected at exhaustion instead
+of wrapping into earlier work.
+
+A command response alone need not establish GPU retirement; VirtIO requires a
+fence for that observation. Moreover, QEMU's VirGL error path can respond before
+creating an execution fence. The independent checkpoint lets a failed payload
+retire its possibly accepted prefix without poisoning the queue; a malformed or
+failed checkpoint instead requires quarantine. See the
+[VirtIO GPU fencing requirements, sections 5.7.6.5 and 5.7.6.7](https://docs.oasis-open.org/virtio/virtio/v1.3/virtio-v1.3.html)
+and [QEMU's VirGL command/error/fence path](https://github.com/qemu/qemu/blob/v10.1.0/hw/display/virtio-gpu-virgl.c#L884).
+
+The completion worker is registered before async support is advertised. PCI
+INTx and platform MMIO IRQ handlers acknowledge the device and wake it without
+taking the synchronous core lock. While work is pending, a 1 ms timed wake also
+drives progress and timeout handling without userspace polling. The worker
+retires owners in publication order, outside locks that destructors can re-enter.
+Dropping every user receipt, queue/context handle or process does not cancel
+accepted work or remove the worker's ownership.
+
+Legacy control calls remain synchronous: before issuing their commands they
+drain preceding control requests and validate the async retirement checkpoints.
+In particular, detach does not remove a hardware context binding before GPU
+accesses retire. Upload/readback/presentation and synchronous submit therefore
+remain ordered with async work. Async enqueue uses `try_lock` and returns Busy
+when a legacy operation owns the core; it does not wait behind that GPU operation.
+
+### Evidence
+
 With the pinned `scarlet-rust-toolchain` (`scarlet-rust-nix` `2b4ddd55`):
 
-- Kernel suites pass 1,176 RISC-V and 1,147 AArch64 tests. New deterministic cases
+- Kernel suites pass 1,187 RISC-V and 1,158 AArch64 tests. New deterministic cases
   cover read-only authority, producer loss, readiness races, bounded admission,
   partial acceptance, detached backing, failed response publication, full handle
-  tables, and unretired-request quarantine.
+  tables, and unretired-request quarantine. The VirtIO additions exercise owned
+  DMA, out-of-order used entries, atomic paired admission, duplicate publication,
+  failed payload retirement, malformed checkpoints and autonomous-owner teardown.
 - Both full builds pass in the clean verification tree; source copies preserve
   the user's modified project lock in the working checkout. Root formatting passes.
+- The opt-in [`gpu-async-smoke`](../../user/std-bin/src/gpu_async_smoke.rs) passes
+  check and strict Clippy on both normal Scarlet std targets. Real AArch64 QEMU
+  release-image runs pass with `virtio-gpu-gl-pci` (two CPUs) and
+  `virtio-gpu-gl-device` / MMIO (one CPU), using TCG and Cocoa GL. The probe checks
+  all pixels of a 16x16 async red clear via explicit readback, ordered checkpoints,
+  immediate detach after queued drawing, 32 dropped receipts, and completion
+  after closing all queue/context/image/connection handles. Both runs report
+  `[gpu-async-smoke] ALL PASS` and exit zero alongside the existing desktop.
 - `gpu-raw` checks and strict Clippy pass for both normal Scarlet **std** targets.
   Its two pure response-classification/request tests and all-target Clippy pass
   in an AArch64 Linux harness with Scarlet Rust. This is not a claim that its
@@ -109,8 +162,7 @@ With the pinned `scarlet-rust-toolchain` (`scarlet-rust-nix` `2b4ddd55`):
   the new code does not waive them. Native-only ELF assembly prevents running
   the `gpu-raw` crate's test harness on macOS without additional platform work.
 
-Next: implement real VirtIO asynchronous control-queue ownership/completion,
-then A618 staging/fence retirement, native SGFX receipts and chunk failure
+Next: implement A618 staging/fence retirement, native SGFX receipts and chunk failure
 tracking, and SWS/UI resource lifetime integration. Driver fault/reset and A618
 hardware evidence remain required. Preserve the user's accepted current QEMU
 runtime baseline; the historical debug-build delay is not reopened here.
