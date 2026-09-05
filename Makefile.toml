@@ -15,6 +15,28 @@ dependencies = ["fmt-kernel", "fmt-project-riscv64", "fmt-project-aarch64", "fmt
 description = "Check formatting (no changes)"
 dependencies = ["fmt-kernel-check", "fmt-project-riscv64-check", "fmt-project-aarch64-check", "fmt-project-aarch64-microvm-check", "fmt-userlib-check", "fmt-userbin-check", "fmt-video-player-check", "fmt-userbin-std-check", "fmt-drivers-check", "fmt-modules-check"]
 
+[tasks.check-sgfx-riscv64]
+description = "Check std SGFX demos and legacy probes against one SGFX core (RISC-V)"
+env = { SGFX_STD_TARGET = "riscv64gc-unknown-scarlet", SGFX_LEGACY_TARGET = "../targets/riscv64gc-unknown-scarlet-elf.json" }
+run_task = "check-sgfx-integration"
+
+[tasks.check-sgfx-aarch64]
+description = "Check std SGFX demos and legacy probes against one SGFX core (AArch64)"
+env = { SGFX_STD_TARGET = "aarch64-unknown-scarlet", SGFX_LEGACY_TARGET = "../targets/aarch64-unknown-scarlet-elf.json" }
+run_task = "check-sgfx-integration"
+
+[tasks.check-sgfx-integration]
+private = true
+script = '''
+set -eu
+cd user/std-bin
+cargo tree --locked --invert sgfx-core --target "${SGFX_STD_TARGET}"
+cargo check --locked --target "${SGFX_STD_TARGET}" --bin sgfx-cube --bin sgfx-texture --bin sgfx-showcase --bin ui-sgfx-showcase
+cd ../bin
+cargo tree --locked --invert sgfx-core --target "${SGFX_LEGACY_TARGET}"
+cargo check --locked --target "${SGFX_LEGACY_TARGET}" --bin sgfx-probe --bin ui-demo
+'''
+
 [tasks.fmt-kernel-check]
 description = "Check kernel formatting"
 cwd = "kernel"
