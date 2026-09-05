@@ -3603,7 +3603,7 @@ dependencies = [
 [[package]]
 name = "scarlet-ui"
 version = "0.1.0"
-source = "git+https://github.com/petitstrawberry/scarlet-ui#ea1bdca85c5ad0af814eadd9b5452ce8021f994c"
+source = "git+https://github.com/petitstrawberry/scarlet-ui#8c9a8138e97c9e2dfe7b6c6a62827b03d879bee1"
 dependencies = [
  "scarlet-ui-core",
  "scarlet-ui-platform-sws",
@@ -3613,7 +3613,7 @@ dependencies = [
 [[package]]
 name = "scarlet-ui-core"
 version = "0.1.0"
-source = "git+https://github.com/petitstrawberry/scarlet-ui#ea1bdca85c5ad0af814eadd9b5452ce8021f994c"
+source = "git+https://github.com/petitstrawberry/scarlet-ui#8c9a8138e97c9e2dfe7b6c6a62827b03d879bee1"
 dependencies = [
  "ab_glyph",
  "bitflags 2.13.1",
@@ -3631,7 +3631,7 @@ dependencies = [
 [[package]]
 name = "scarlet-ui-icons-tabler"
 version = "0.1.0"
-source = "git+https://github.com/petitstrawberry/scarlet-ui#ea1bdca85c5ad0af814eadd9b5452ce8021f994c"
+source = "git+https://github.com/petitstrawberry/scarlet-ui#8c9a8138e97c9e2dfe7b6c6a62827b03d879bee1"
 dependencies = [
  "svgtypes",
 ]
@@ -3639,7 +3639,7 @@ dependencies = [
 [[package]]
 name = "scarlet-ui-macros"
 version = "0.1.0"
-source = "git+https://github.com/petitstrawberry/scarlet-ui#ea1bdca85c5ad0af814eadd9b5452ce8021f994c"
+source = "git+https://github.com/petitstrawberry/scarlet-ui#8c9a8138e97c9e2dfe7b6c6a62827b03d879bee1"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3649,7 +3649,7 @@ dependencies = [
 [[package]]
 name = "scarlet-ui-platform-sws"
 version = "0.1.0"
-source = "git+https://github.com/petitstrawberry/scarlet-ui#ea1bdca85c5ad0af814eadd9b5452ce8021f994c"
+source = "git+https://github.com/petitstrawberry/scarlet-ui#8c9a8138e97c9e2dfe7b6c6a62827b03d879bee1"
 dependencies = [
  "scarlet-std",
  "scarlet-ui-core",
@@ -3662,7 +3662,7 @@ dependencies = [
 [[package]]
 name = "scarlet-ui-platform-winit"
 version = "0.1.0"
-source = "git+https://github.com/petitstrawberry/scarlet-ui#ea1bdca85c5ad0af814eadd9b5452ce8021f994c"
+source = "git+https://github.com/petitstrawberry/scarlet-ui#8c9a8138e97c9e2dfe7b6c6a62827b03d879bee1"
 dependencies = [
  "objc2-app-kit",
  "objc2-quartz-core 0.2.2",
@@ -3677,7 +3677,7 @@ dependencies = [
 [[package]]
 name = "scarlet-ui-renderer-sgfx"
 version = "0.1.0"
-source = "git+https://github.com/petitstrawberry/scarlet-ui#ea1bdca85c5ad0af814eadd9b5452ce8021f994c"
+source = "git+https://github.com/petitstrawberry/scarlet-ui#8c9a8138e97c9e2dfe7b6c6a62827b03d879bee1"
 dependencies = [
  "libm",
  "scarlet-ui-core",
@@ -3812,7 +3812,7 @@ dependencies = [
 [[package]]
 name = "sgfx"
 version = "0.16.0"
-source = "git+https://github.com/petitstrawberry/sgfx#fc2d1cdb2f92bb0ceed0f79f5ae614d1b714bc3a"
+source = "git+https://github.com/petitstrawberry/sgfx#b6e4b5ecf3dd90ec0700173debf977c10cf5920d"
 dependencies = [
  "gpu-raw",
  "raw-window-handle",
@@ -3840,7 +3840,7 @@ dependencies = [
 [[package]]
 name = "sgfx-backend-scarlet-virgl"
 version = "0.16.0"
-source = "git+https://github.com/petitstrawberry/sgfx#fc2d1cdb2f92bb0ceed0f79f5ae614d1b714bc3a"
+source = "git+https://github.com/petitstrawberry/sgfx#b6e4b5ecf3dd90ec0700173debf977c10cf5920d"
 dependencies = [
  "gpu-raw",
  "scarlet-os",
@@ -3852,7 +3852,7 @@ dependencies = [
 [[package]]
 name = "sgfx-backend-wgpu"
 version = "0.16.0"
-source = "git+https://github.com/petitstrawberry/sgfx#fc2d1cdb2f92bb0ceed0f79f5ae614d1b714bc3a"
+source = "git+https://github.com/petitstrawberry/sgfx#b6e4b5ecf3dd90ec0700173debf977c10cf5920d"
 dependencies = [
  "bytemuck",
  "pollster",
@@ -3875,7 +3875,7 @@ dependencies = [
 [[package]]
 name = "sgfx-codegen-virgl"
 version = "0.16.0"
-source = "git+https://github.com/petitstrawberry/sgfx#fc2d1cdb2f92bb0ceed0f79f5ae614d1b714bc3a"
+source = "git+https://github.com/petitstrawberry/sgfx#b6e4b5ecf3dd90ec0700173debf977c10cf5920d"
 dependencies = [
  "sgfx-core",
 ]
@@ -3883,7 +3883,7 @@ dependencies = [
 [[package]]
 name = "sgfx-core"
 version = "0.16.0"
-source = "git+https://github.com/petitstrawberry/sgfx#fc2d1cdb2f92bb0ceed0f79f5ae614d1b714bc3a"
+source = "git+https://github.com/petitstrawberry/sgfx#b6e4b5ecf3dd90ec0700173debf977c10cf5920d"
 
 [[package]]
 name = "sha1"
