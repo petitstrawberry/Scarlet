@@ -378,6 +378,12 @@ impl<'a> VirtQueue<'a> {
             return None;
         }
 
+        // The device publishes the used entry before used.idx. Order our entry
+        // and response reads after observing that publication, not only before
+        // reading idx. This matters when multiple DMA requests are in flight
+        // on weakly ordered machines; volatile accesses alone are insufficient.
+        crate::arch::io_mb();
+
         // Calculate the index in the used ring
         let used_ring_idx = self.last_used_idx as usize % self.desc.len();
 
