@@ -6021,6 +6021,15 @@ mod tests {
 
     use super::*;
 
+    fn register_synthetic_remote_cpu(cpu_id: usize) {
+        assert_ne!(cpu_id, get_cpu().get_cpuid());
+        register_online_cpu(cpu_id);
+        // Queue-policy tests model remote CPUs without booting their interrupt
+        // controllers. Model an in-flight reschedule so further requests are
+        // coalesced; hardware IPI delivery is not part of these assertions.
+        assert!(reserve_reschedule_ipi(cpu_id));
+    }
+
     fn implicit_deadline_params(runtime_ns: u64, period_ns: u64) -> TaskDeadlineParams {
         TaskDeadlineParams {
             runtime_ns,
@@ -6741,7 +6750,7 @@ mod tests {
     fn test_enqueue_prefers_idle_cpu_over_requested_busy_cpu() {
         reset();
         register_online_cpu(0);
-        register_online_cpu(1);
+        register_synthetic_remote_cpu(1);
         register_cpu_topology(0, CpuCoreClass::Balanced, 0).unwrap();
         register_cpu_topology(1, CpuCoreClass::Balanced, 0).unwrap();
 
@@ -6862,7 +6871,7 @@ mod tests {
 
         reset();
         register_online_cpu(0);
-        register_online_cpu(1);
+        register_synthetic_remote_cpu(1);
         let task_id = register_task(Task::new("ClaimRaceTask".to_string(), 1, TaskType::Kernel));
         let task = TaskPool::get_task(task_id).unwrap();
         task.state.store(TaskState::Ready, Ordering::SeqCst);
@@ -6907,7 +6916,7 @@ mod tests {
 
         reset();
         register_online_cpu(0);
-        register_online_cpu(1);
+        register_synthetic_remote_cpu(1);
         let new_task = Task::new("RemoteWakeTask".to_string(), 1, TaskType::Kernel);
         new_task.set_pinned_cpu(Some(1));
         let task_id = register_task(new_task);
@@ -7123,7 +7132,7 @@ mod tests {
     fn test_deferred_release_migrates_ready_task() {
         reset();
         register_online_cpu(0);
-        register_online_cpu(1);
+        register_synthetic_remote_cpu(1);
         register_cpu_topology(0, CpuCoreClass::Efficiency, 0).unwrap();
         register_cpu_topology(1, CpuCoreClass::Performance, 0).unwrap();
 
