@@ -72,6 +72,9 @@ jobs:
     - name: Test QMP control helper
       run: nix develop .#default --command cargo make test-qmp
 
+    - name: Test native ABI and SWS wire contracts
+      run: nix develop .#default --command cargo make test-release-contracts
+
   docker-image:
     needs: nix-cache
     runs-on: ubuntu-latest

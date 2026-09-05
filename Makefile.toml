@@ -37,6 +37,17 @@ cargo tree --locked --invert sgfx-core --target "${SGFX_LEGACY_TARGET}"
 cargo check --locked --target "${SGFX_LEGACY_TARGET}" --bin sgfx-probe --bin ui-demo
 '''
 
+[tasks.test-release-contracts]
+description = "Run host-native ABI representation and SWS wire contract tests"
+script = '''
+set -eu
+# Stay at the repository root: crate-local configs select legacy bare targets.
+contract_host=$(rustc -vV | sed -n 's/^host: //p')
+test -n "$contract_host"
+cargo test --locked --manifest-path user/lib/scarlet-abi/Cargo.toml --target "$contract_host"
+cargo test --locked --manifest-path user/lib/sws-protocol/Cargo.toml --target "$contract_host" --no-default-features --features std
+'''
+
 [tasks.fmt-kernel-check]
 description = "Check kernel formatting"
 cwd = "kernel"
