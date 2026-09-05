@@ -32,16 +32,16 @@ use crate::{
             output::DisplayRegion,
         },
     },
-    drivers::virtio::{
-        device::VirtioDevice,
-        pci::VirtioPciTransport,
-        queue::{DescriptorFlag, VirtQueue},
-    },
+    drivers::virtio::{device::VirtioDevice, pci::VirtioPciTransport, queue::VirtQueue},
     mem::page::ContiguousPages,
     object::capability::{ControlOps, MemoryMappingOps, Selectable},
     vm::addr::virt_to_phys,
 };
 use core::ptr;
+
+mod control;
+
+use control::{ControlEnqueueError, ControlQueue, ControlRequest};
 
 // VirtIO GPU Constants
 const VIRTIO_GPU_F_VIRGL: u32 = 0;
@@ -451,11 +451,35 @@ fn classify_submit_transport_error(error: &'static str) -> GpuBackendSubmitError
     }
 }
 
+struct VirtioGpuQueues {
+    control: ControlQueue,
+    cursor: VirtQueue<'static>,
+}
+
+impl VirtioGpuQueues {
+    fn new() -> Self {
+        let mut cursor = VirtQueue::new(VIRTIO_GPU_CURSOR_QUEUE_SIZE);
+        cursor.init();
+        Self {
+            control: ControlQueue::new(),
+            cursor,
+        }
+    }
+
+    fn queue(&self, index: usize) -> &VirtQueue<'static> {
+        match index {
+            0 => &self.control.ring,
+            1 => &self.cursor,
+            _ => panic!("Invalid VirtIO GPU queue index"),
+        }
+    }
+}
+
 /// VirtIO GPU Device Core
 pub struct VirtioGpuDeviceCore {
     base_addr: usize,
     pci_transport: Option<VirtioPciTransport>,
-    virtqueues: IrqSpinLock<[VirtQueue<'static>; 2]>, // Control queue (0) and Cursor queue (1)
+    virtqueues: IrqSpinLock<VirtioGpuQueues>, // Control queue (0) and Cursor queue (1)
     display_info: IrqRwSpinLock<Option<VirtioGpuRespDisplayInfo>>,
     framebuffer_addr: IrqRwSpinLock<Option<usize>>,
     framebuffer_alloc: IrqRwSpinLock<Option<ContiguousPages>>,
@@ -467,7 +491,6 @@ pub struct VirtioGpuDeviceCore {
     scanout_resource_id: IrqRwSpinLock<Option<u32>>,
     negotiated_features: IrqRwSpinLock<u64>,
     transport_ready: IrqRwSpinLock<bool>,
-    control_queue_failed: IrqRwSpinLock<bool>,
     initialized: IrqSpinLock<bool>,
     // Track resources and their associated memory
     resources: IrqSpinLock<alloc::collections::BTreeMap<u32, (usize, usize)>>, // resource_id -> (addr, size)
@@ -504,10 +527,7 @@ impl VirtioGpuDeviceCore {
         let mut device = Self {
             base_addr,
             pci_transport,
-            virtqueues: IrqSpinLock::new([
-                VirtQueue::new(VIRTIO_GPU_CONTROL_QUEUE_SIZE),
-                VirtQueue::new(VIRTIO_GPU_CURSOR_QUEUE_SIZE),
-            ]),
+            virtqueues: IrqSpinLock::new(VirtioGpuQueues::new()),
             display_info: IrqRwSpinLock::new(None),
             framebuffer_addr: IrqRwSpinLock::new(None),
             framebuffer_alloc: IrqRwSpinLock::new(None),
@@ -519,18 +539,13 @@ impl VirtioGpuDeviceCore {
             scanout_resource_id: IrqRwSpinLock::new(None),
             negotiated_features: IrqRwSpinLock::new(0),
             transport_ready: IrqRwSpinLock::new(false),
-            control_queue_failed: IrqRwSpinLock::new(false),
             initialized: IrqSpinLock::new(false),
             resources: IrqSpinLock::new(alloc::collections::BTreeMap::new()),
         };
 
-        // Initialize virtqueues first
-        {
-            let mut virtqueues = device.virtqueues.lock();
-            for queue in virtqueues.iter_mut() {
-                queue.init();
-            }
-        }
+        // init may install a ring even if later negotiation fails. Without a
+        // reset proof its storage must outlive the device's configuration.
+        device.virtqueues.lock().control.mark_device_owned();
 
         // Initialize the VirtIO device - this will set up the queues with the device
         match device.init() {
@@ -623,128 +638,43 @@ impl VirtioGpuDeviceCore {
         cmd_buffer: &[u8],
         resp_buffer: &mut [u8],
     ) -> Result<(), &'static str> {
-        if cmd_buffer.is_empty() || resp_buffer.is_empty() {
-            return Err("VirtIO GPU control buffers must not be empty");
-        }
-        if *self.control_queue_failed.read() {
-            return Err("VirtIO GPU control queue is unavailable after a timeout");
-        }
+        // Legacy operations remain synchronous and ordered after all preceding
+        // control requests. Reaping only returns transport ownership; execution
+        // owners validate fences and release GPU resources outside driver locks.
+        self.wait_control_idle()?;
+        let request = ControlRequest::new(cmd_buffer, resp_buffer.len())?;
+        self.virtqueues
+            .lock()
+            .control
+            .enqueue(&request, crate::timer::get_time_ns())
+            .map_err(|error| match error {
+                ControlEnqueueError::Busy => "VirtIO GPU control queue is full",
+                ControlEnqueueError::Failed(error) => error,
+            })?;
+        self.notify(0);
+        self.wait_control_idle()?;
+        request.copy_response(resp_buffer)?;
+        Ok(())
+    }
 
-        let page_size = crate::environment::PAGE_SIZE;
-        let cmd_pages = cmd_buffer.len().div_ceil(page_size);
-        let resp_pages = resp_buffer.len().div_ceil(page_size);
-        let cmd_dma = ContiguousPages::new(cmd_pages)
-            .ok_or("Failed to allocate VirtIO GPU command DMA buffer")?;
-        let resp_dma = ContiguousPages::new(resp_pages)
-            .ok_or("Failed to allocate VirtIO GPU response DMA buffer")?;
-        // SAFETY: both PMM allocations cover at least the corresponding slice
-        // length and remain alive until the synchronous queue request finishes.
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                cmd_buffer.as_ptr(),
-                cmd_dma.as_ptr() as *mut u8,
-                cmd_buffer.len(),
-            );
-            core::ptr::write_bytes(resp_dma.as_ptr() as *mut u8, 0, resp_buffer.len());
-        }
-
-        let mut virtqueues = self.virtqueues.lock();
-        let control_queue = &mut virtqueues[0]; // Control queue is index 0
-
-        // Allocate descriptors
-        let cmd_desc = control_queue
-            .alloc_desc()
-            .ok_or("Failed to allocate command descriptor")?;
-        let resp_desc = match control_queue.alloc_desc() {
-            Some(desc) => desc,
-            None => {
-                // Free the already allocated cmd_desc before returning error
-                control_queue.free_desc(cmd_desc);
-                return Err("Failed to allocate response descriptor");
+    fn wait_control_idle(&self) -> Result<(), &'static str> {
+        let mut spins = 0u64;
+        loop {
+            {
+                let mut queues = self.virtqueues.lock();
+                queues.control.reap(crate::timer::get_time_ns())?;
+                if !queues.control.has_pending() {
+                    return Ok(());
+                }
+                spins = spins.saturating_add(1);
+                if spins >= VIRTIO_GPU_CONTROL_MAX_SPINS {
+                    return queues.control.fail(control::CONTROL_TIMEOUT);
+                }
             }
-        };
-
-        // Set up command descriptor (device readable)
-        let cmd_desc_ptr =
-            &mut control_queue.desc[cmd_desc] as *mut crate::drivers::virtio::queue::Descriptor;
-        unsafe {
-            core::ptr::write_volatile(&mut (*cmd_desc_ptr).addr, cmd_dma.as_paddr() as u64);
-            core::ptr::write_volatile(&mut (*cmd_desc_ptr).len, cmd_buffer.len() as u32);
-            core::ptr::write_volatile(&mut (*cmd_desc_ptr).flags, DescriptorFlag::Next as u16);
-            core::ptr::write_volatile(&mut (*cmd_desc_ptr).next, resp_desc as u16);
-        }
-
-        // Set up response descriptor (device writable)
-        let resp_desc_ptr =
-            &mut control_queue.desc[resp_desc] as *mut crate::drivers::virtio::queue::Descriptor;
-        unsafe {
-            core::ptr::write_volatile(&mut (*resp_desc_ptr).addr, resp_dma.as_paddr() as u64);
-            core::ptr::write_volatile(&mut (*resp_desc_ptr).len, resp_buffer.len() as u32);
-            core::ptr::write_volatile(&mut (*resp_desc_ptr).flags, DescriptorFlag::Write as u16);
-        }
-
-        // Submit the request to the queue
-        if let Err(e) = control_queue.push(cmd_desc) {
-            // Free descriptors if push fails
-            control_queue.free_desc(resp_desc);
-            control_queue.free_desc(cmd_desc);
-            return Err(e);
-        }
-
-        // Notify the device
-        self.notify(0); // Notify control queue
-
-        // Wait for the device-owned used index through VirtQueue's volatile
-        // accessor. A second plain dereference of used.idx used to follow this
-        // loop; that is not a valid way to observe DMA updates and could spin
-        // forever even after the device completed the request.
-        let wait_started_ns = crate::timer::get_time_ns();
-        let mut wait_spins = 0u64;
-        while control_queue.is_busy() {
-            wait_spins = wait_spins.saturating_add(1);
-            let timed_out = crate::timer::get_time_ns().saturating_sub(wait_started_ns)
-                >= VIRTIO_GPU_CONTROL_TIMEOUT_NS;
-            if timed_out || wait_spins >= VIRTIO_GPU_CONTROL_MAX_SPINS {
-                *self.control_queue_failed.write() = true;
-
-                // The device may still own both descriptors. Keep their DMA
-                // allocations alive and leave the descriptors reserved rather
-                // than allowing a late device write into freed memory. The
-                // failed queue is permanently rejected above, so this bounded
-                // one-request quarantine cannot accumulate.
-                core::mem::forget(cmd_dma);
-                core::mem::forget(resp_dma);
-                return Err("VirtIO GPU control queue timed out");
-            }
+            // Never hold the transport lock while waiting for DMA. The async
+            // completion worker can reap independently of the synchronous caller.
             core::hint::spin_loop();
         }
-
-        // Process response
-        let _resp_idx = match control_queue.pop() {
-            Some(idx) => idx,
-            None => {
-                // Free descriptors even if pop fails (device may have processed them)
-                control_queue.free_desc(resp_desc);
-                control_queue.free_desc(cmd_desc);
-                return Err("No response from device");
-            }
-        };
-
-        // Free descriptors (responsibility of driver, not VirtQueue)
-        control_queue.free_desc(resp_desc);
-        control_queue.free_desc(cmd_desc);
-
-        // SAFETY: the response PMM allocation covers `resp_buffer.len()` bytes
-        // and the device has completed writing before this copy executes.
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                resp_dma.as_ptr() as *const u8,
-                resp_buffer.as_mut_ptr(),
-                resp_buffer.len(),
-            );
-        }
-
-        Ok(())
     }
 
     fn negotiated_feature_enabled(&self, feature: u32) -> bool {
@@ -1583,7 +1513,7 @@ impl VirtioDevice for VirtioGpuDeviceCore {
         }
 
         let virtqueues = self.virtqueues.lock();
-        virtqueues[queue_idx].get_queue_size()
+        virtqueues.queue(queue_idx).get_queue_size()
     }
 
     fn get_queue_desc_addr(&self, queue_idx: usize) -> Option<u64> {
@@ -1592,7 +1522,7 @@ impl VirtioDevice for VirtioGpuDeviceCore {
         }
 
         let virtqueues = self.virtqueues.lock();
-        Some(virt_to_phys(virtqueues[queue_idx].desc.as_ptr() as usize) as u64)
+        Some(virt_to_phys(virtqueues.queue(queue_idx).desc.as_ptr() as usize) as u64)
     }
 
     fn get_queue_driver_addr(&self, queue_idx: usize) -> Option<u64> {
@@ -1601,7 +1531,7 @@ impl VirtioDevice for VirtioGpuDeviceCore {
         }
 
         let virtqueues = self.virtqueues.lock();
-        Some(virt_to_phys(virtqueues[queue_idx].avail.flags as *const u16 as usize) as u64)
+        Some(virt_to_phys(virtqueues.queue(queue_idx).avail.flags as *const u16 as usize) as u64)
     }
 
     fn get_queue_device_addr(&self, queue_idx: usize) -> Option<u64> {
@@ -1610,7 +1540,7 @@ impl VirtioDevice for VirtioGpuDeviceCore {
         }
 
         let virtqueues = self.virtqueues.lock();
-        Some(virt_to_phys(virtqueues[queue_idx].used.flags as *const u16 as usize) as u64)
+        Some(virt_to_phys(virtqueues.queue(queue_idx).used.flags as *const u16 as usize) as u64)
     }
 
     fn get_supported_features(&self, device_features: u64) -> u64 {
