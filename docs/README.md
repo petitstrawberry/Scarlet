@@ -8,6 +8,8 @@ describes the repository at a high level; this page is the documentation map.
 
 - [Coordinated 1.0 roadmap](release/1.0-roadmap.md) - Scarlet, SGFX, ScarletUI,
   and Adreno compatibility decisions, dependency migration, CI, and release gates.
+- [1.0 scope and compatibility policy](release/1.0-scope.md) - Package membership,
+  public API versus internal wire contracts, supported configurations, and RC1 gates.
 - [SGFX migration baseline](release/1.0-baseline.md) - Verified revisions,
   toolchains, CI results, and remaining release gates.
 - [1.0 package inventory](release/1.0-packages.md) - First-party crates,

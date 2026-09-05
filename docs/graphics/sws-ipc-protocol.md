@@ -11,7 +11,8 @@ advertised by `EXTENSION_BUFFER_OBJECTS` (`1 << 10`).
 Client-side reference implementations:
 
 - Low-level client library: `sws-client` (crate name `sws_client`) in `user/lib/sws-client`
-- High-level UI toolkit: `scarlet-ui` in `user/lib/scarlet-ui`
+- High-level UI toolkit: [ScarletUI](https://github.com/petitstrawberry/scarlet-ui),
+  maintained in its own repository
 
 ## Transport
 
@@ -1320,6 +1321,9 @@ The Extension API allows specialized bridge servers (like the Wayland bridge) to
 - Because SWS is still an internal protocol, incompatible wire changes may be
   made across the tree without preserving old-client compatibility. Update
   `sws_protocol`, `sws-client`, SWS, and direct protocol users together.
+  This includes ScarletUI's SWS platform adapter in its separate repository.
+  The [1.0 release policy](../release/1.0-scope.md) retains this matched-set
+  requirement: Cargo package versions do not negotiate wire compatibility.
 
 ### Use Cases
 
