@@ -4,6 +4,13 @@ This directory contains design notes, subsystem references, and status documents
 for the current Scarlet integration tree. The root [README](../README.md)
 describes the repository at a high level; this page is the documentation map.
 
+## Release Preparation
+
+- [Coordinated 1.0 roadmap](release/1.0-roadmap.md) - Scarlet, SGFX, ScarletUI,
+  and Adreno compatibility decisions, dependency migration, CI, and release gates.
+- [SGFX migration baseline](release/1.0-baseline.md) - Verified revisions,
+  toolchains, CI results, and remaining release gates.
+
 ## Build, Boot, and Project Layout
 
 - [Build system](build-system/README.md) - `cargo-scarlet`, project manifests,
