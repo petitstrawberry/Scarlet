@@ -10,6 +10,8 @@ describes the repository at a high level; this page is the documentation map.
   and Adreno compatibility decisions, dependency migration, CI, and release gates.
 - [SGFX migration baseline](release/1.0-baseline.md) - Verified revisions,
   toolchains, CI results, and remaining release gates.
+- [1.0 package inventory](release/1.0-packages.md) - First-party crates,
+  development fixtures, and vendored code before version alignment.
 
 ## Build, Boot, and Project Layout
 
