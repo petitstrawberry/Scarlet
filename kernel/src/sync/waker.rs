@@ -330,8 +330,23 @@ impl Waker {
     ///
     /// The event, timeout, or interruption which ended the wait.
     pub fn wait_result(&self, task_id: usize, trapframe: &mut Trapframe) -> WaitResult {
+        self.wait_result_until(task_id, trapframe, || false)
+    }
+
+    fn wait_result_until(
+        &self,
+        task_id: usize,
+        trapframe: &mut Trapframe,
+        ready: impl FnOnce() -> bool,
+    ) -> WaitResult {
         let outcome = Arc::new(WaitOutcome::new());
         let mut should_schedule = self.prepare_wait_registration(task_id, outcome.clone());
+        if ready() {
+            // A broadcast may have happened before this registration, with
+            // another waiter consuming its single coalesced notification.
+            // Rechecking the level after registration closes that window.
+            outcome.claim_coalesced_event();
+        }
         if !outcome.is_pending() && self.cancel_prepared_wait_registration(task_id, Some(&outcome))
         {
             should_schedule = false;
@@ -787,8 +802,23 @@ impl Waker {
         timeout_ns: Option<u64>,
         precision: crate::timer::TimerPrecision,
     ) -> WaitResult {
+        self.wait_with_timeout_precision_until(task_id, trapframe, timeout_ns, precision, || false)
+    }
+
+    fn wait_with_timeout_precision_until(
+        &self,
+        task_id: usize,
+        trapframe: &mut Trapframe,
+        timeout_ns: Option<u64>,
+        precision: crate::timer::TimerPrecision,
+        ready: impl FnOnce() -> bool,
+    ) -> WaitResult {
         if matches!(timeout_ns, Some(0)) {
-            return WaitResult::TimedOut;
+            return if ready() {
+                WaitResult::Woken
+            } else {
+                WaitResult::TimedOut
+            };
         }
 
         if let Some(duration_ns) = timeout_ns {
@@ -855,6 +885,9 @@ impl Waker {
             }
 
             let mut should_schedule = self.prepare_wait_registration(task_id, outcome.clone());
+            if ready() {
+                outcome.claim_coalesced_event();
+            }
             if !outcome.is_pending()
                 && self.cancel_prepared_wait_registration(task_id, Some(&outcome))
             {
@@ -871,8 +904,68 @@ impl Waker {
             }
             result
         } else {
-            self.wait_result(task_id, trapframe)
+            self.wait_result_until(task_id, trapframe, ready)
         }
+    }
+
+    /// Wait for a level-triggered condition without losing a readiness broadcast.
+    ///
+    /// The condition is checked after the optional minimum wait and again after
+    /// registration, before scheduling. The producer must publish its condition
+    /// before calling `wake_all()`. Unlike the coalesced notification latch, this
+    /// recheck also covers multiple observers of a permanently-ready condition.
+    /// No lock protecting that condition may be held when calling this method.
+    /// A wake can be spurious; callers must recheck readiness on return.
+    ///
+    /// # Arguments
+    ///
+    /// * `task_id` - ID of the current, locally executing task.
+    /// * `trapframe` - Current task's saved execution state.
+    /// * `timeout_ns` - Optional relative overall timeout in nanoseconds.
+    /// * `min_wait_ns` - Minimum initial wait, clipped to the overall timeout.
+    /// * `ready` - Non-blocking, synchronized readiness query, called without
+    ///   the wait-queue lock.
+    ///
+    /// # Returns
+    ///
+    /// The readiness/event wake, timeout, or interruption which ended the wait
+    /// after the minimum interval.
+    pub fn wait_with_condition(
+        &self,
+        task_id: usize,
+        trapframe: &mut Trapframe,
+        timeout_ns: Option<u64>,
+        min_wait_ns: u64,
+        mut ready: impl FnMut() -> bool,
+    ) -> WaitResult {
+        use crate::timer::{TimerPrecision, get_time_ns};
+
+        let started_ns = get_time_ns();
+        let deadline_ns = timeout_ns.map(|duration| started_ns.saturating_add(duration));
+        let minimum_ns = timeout_ns.map_or(min_wait_ns, |duration| min_wait_ns.min(duration));
+        if minimum_ns > 0 {
+            let Some(task) = get_task_by_id(task_id) else {
+                return WaitResult::Interrupted;
+            };
+            task.sleep_with_precision(trapframe, minimum_ns, TimerPrecision::Normal);
+        }
+        if ready() {
+            return WaitResult::Woken;
+        }
+        let remaining_ns = match deadline_ns {
+            Some(deadline) => match remaining_before_deadline(deadline, get_time_ns()) {
+                Some(remaining) => Some(remaining),
+                None => return WaitResult::TimedOut,
+            },
+            None => None,
+        };
+        self.wait_with_timeout_precision_until(
+            task_id,
+            trapframe,
+            remaining_ns,
+            TimerPrecision::Normal,
+            ready,
+        )
     }
 
     /// Block the task until woken, but wait at least `min_wait_ns` before
@@ -1353,6 +1446,69 @@ mod tests {
         assert_eq!(remaining_before_deadline(1_000, 400), Some(600));
         assert_eq!(remaining_before_deadline(1_000, 1_000), None);
         assert_eq!(remaining_before_deadline(1_000, 1_200), None);
+    }
+
+    #[test_case]
+    fn level_condition_is_rechecked_after_registration_without_a_pending_wake() {
+        reset();
+        let local_cpu = crate::arch::get_cpu().get_cpuid();
+        register_online_cpu(local_cpu);
+        let task_id = add_task(
+            Task::new("level-waiter".to_string(), 1, TaskType::Kernel),
+            local_cpu,
+        );
+        let task = get_task_by_id(task_id).expect("level waiter must be registered");
+        task.set_state(TaskState::Running);
+        task.running_cpu.store(local_cpu, Ordering::SeqCst);
+        set_current_task_for_test(local_cpu, Some(task_id));
+        remove_from_ready_queues(task_id);
+
+        for timeout in [
+            None,
+            Some(1_000 * crate::timer::NANOSECONDS_PER_MILLISECOND),
+        ] {
+            let waker = Waker::new_interruptible("level-recheck");
+            let mut checks = 0;
+            let result =
+                waker.wait_with_condition(task_id, &mut Trapframe::new(), timeout, 0, || {
+                    checks += 1;
+                    if checks == 1 {
+                        // Model a broadcast after the initial query, whose
+                        // pending notification another observer consumes.
+                        assert_eq!(waker.wake_all(), 0);
+                        assert!(waker.consume_pending_wake());
+                        false
+                    } else {
+                        assert_eq!(waker.waiting_count(), 1);
+                        assert_eq!(waker.pending_wake_count_for_test(), 0);
+                        true
+                    }
+                });
+            assert_eq!(checks, 2);
+            assert_eq!(result, WaitResult::Woken);
+            assert_eq!(task.get_state(), TaskState::Running);
+            assert_eq!(waker.waiting_count(), 0);
+            assert!(!has_ready_tasks(local_cpu));
+        }
+
+        set_current_task_for_test(local_cpu, None);
+        task.running_cpu.store(usize::MAX, Ordering::SeqCst);
+        drop(task);
+        reset();
+    }
+
+    #[test_case]
+    fn zero_timeout_condition_wait_only_queries_readiness() {
+        let waker = Waker::new_interruptible("level-poll");
+        assert_eq!(
+            waker.wait_with_condition(usize::MAX, &mut Trapframe::new(), Some(0), 0, || true),
+            WaitResult::Woken
+        );
+        assert_eq!(
+            waker.wait_with_condition(usize::MAX, &mut Trapframe::new(), Some(0), 0, || false),
+            WaitResult::TimedOut
+        );
+        assert_eq!(waker.waiting_count(), 0);
     }
 
     #[test_case]
