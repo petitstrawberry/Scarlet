@@ -173,7 +173,7 @@ impl Selectable for GpuCompletion {
         if !interest.read && !interest.except {
             return SelectWaitOutcome::TimedOut;
         }
-        if min_wait_ns == 0 && self.is_ready() {
+        if (min_wait_ns == 0 || timeout_ns == Some(0)) && self.is_ready() {
             return SelectWaitOutcome::Ready;
         }
         if timeout_ns == Some(0) {
@@ -358,5 +358,20 @@ mod tests {
         drop(observer);
         assert_eq!(*signal.shared.state.lock(), GpuCompletionState::Pending);
         signal.complete();
+    }
+
+    #[test_case]
+    fn zero_timeout_clips_the_minimum_wait_before_testing_completion() {
+        let (observer, signal) = GpuCompletion::pair();
+        signal.complete();
+        assert_eq!(
+            observer.wait_until_ready(
+                ReadyInterest::read(),
+                &mut crate::arch::Trapframe::new(),
+                Some(0),
+                u64::MAX
+            ),
+            SelectWaitOutcome::Ready,
+        );
     }
 }

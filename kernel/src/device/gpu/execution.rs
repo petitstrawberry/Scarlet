@@ -1,5 +1,7 @@
 //! Kernel-owned GPU execution context and queue capabilities.
 
+mod asynchronous;
+
 use alloc::{sync::Arc, vec::Vec};
 
 use super::connection::{read_user_value, write_user_value};
@@ -32,13 +34,15 @@ pub struct GpuContext {
 }
 
 /// Backend buffer and page backing retained by a context and its child queues.
-struct GpuAttachedBuffer {
+#[derive(Clone)]
+pub(super) struct GpuAttachedBuffer {
     _backend_buffer: Arc<dyn GpuBackendBuffer>,
     _backing: Arc<super::resource::GpuBufferBacking>,
 }
 
 /// Backend image and generic backing retained by a context and its queues.
-struct GpuAttachedImage {
+#[derive(Clone)]
+pub(super) struct GpuAttachedImage {
     backend_image: Arc<dyn GpuBackendImage>,
     _backing: Arc<super::resource::GpuImageBacking>,
 }
@@ -78,7 +82,8 @@ impl GpuContext {
     /// if the backend cannot create a queue.
     pub fn create_queue(&self) -> Result<GpuQueue, &'static str> {
         let backend_queue = self.backend_context.create_queue()?;
-        if bounded_command_limit(backend_queue.query_info()) == 0 {
+        let async_command_limit = bounded_command_limit(backend_queue.query_info());
+        if async_command_limit == 0 {
             return Err("GPU backend queue has no usable command limit");
         }
         Ok(GpuQueue {
@@ -86,6 +91,8 @@ impl GpuContext {
             _attached_images: Arc::clone(&self.attached_images),
             _attached_buffers: Arc::clone(&self.attached_buffers),
             backend_queue,
+            async_command_limit,
+            submission_slots: super::submission::SubmissionSlots::default(),
         })
     }
 
@@ -639,6 +646,10 @@ pub struct GpuQueue {
     _attached_images: Arc<crate::sync::Mutex<Vec<GpuAttachedImage>>>,
     _attached_buffers: Arc<crate::sync::Mutex<Vec<GpuAttachedBuffer>>>,
     backend_queue: Arc<dyn GpuBackendQueue>,
+    // Async admission never waits on a backend's potentially blocking legacy
+    // query path. Freeze its maximum at queue creation, before any submit.
+    async_command_limit: u32,
+    submission_slots: super::submission::SubmissionSlots,
 }
 
 impl GpuQueue {
@@ -771,6 +782,8 @@ impl ControlOps for GpuQueue {
         match command {
             GPU_QUEUE_QUERY => self.handle_query_info(arg),
             GPU_QUEUE_SUBMIT => self.handle_submit(arg),
+            super::GPU_QUEUE_QUERY_ASYNC => self.handle_query_async(arg),
+            super::GPU_QUEUE_SUBMIT_ASYNC => self.handle_submit_async(arg),
             _ => Err("Unsupported GPU queue control command"),
         }
     }
@@ -834,6 +847,7 @@ fn copy_command_bytes(command_ptr: u64, command_size: u32) -> Result<Vec<u8>, &'
 
 #[cfg(test)]
 mod tests {
+    mod asynchronous;
     use alloc::sync::Arc;
 
     use super::{GpuContext, bounded_command_limit, command_size_is_valid};

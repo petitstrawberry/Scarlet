@@ -913,6 +913,18 @@ pub enum GpuBackendSubmitError {
     DeviceLost(&'static str),
 }
 
+/// Async admission result with explicit ownership on side-effect-free rejection.
+#[derive(Debug)]
+pub enum GpuBackendEnqueueError {
+    /// No work accepted; return the entire request without waiting for capacity.
+    Busy(super::GpuSubmission),
+    /// No work accepted; return the request and a classified rejection.
+    Rejected(GpuBackendSubmitError, super::GpuSubmission),
+    /// A prefix may be accepted. The backend must independently retain the
+    /// request and eventually settle its completion, including on handle close.
+    Failed(GpuBackendSubmitError),
+}
+
 /// Backend execution queue retained by a [`crate::device::gpu::GpuQueue`].
 pub trait GpuBackendQueue: Send + Sync {
     /// Query limits for this backend queue.
@@ -933,6 +945,41 @@ pub trait GpuBackendQueue: Send + Sync {
     /// Nothing after the backend has completed the submitted work, or an error
     /// if the backend rejected or failed the submission.
     fn submit(&self, commands: &[u8]) -> Result<(), GpuBackendSubmitError>;
+
+    /// Query the bounded number of asynchronously retained submissions.
+    ///
+    /// # Returns
+    ///
+    /// Zero when async submission is not implemented, otherwise a queue limit.
+    /// The generic layer may impose a smaller bound. This is not a promise that
+    /// a slot is currently available and must not wait for hardware progress.
+    fn async_capacity(&self) -> u32 {
+        0
+    }
+
+    /// Enqueue owned work without waiting for its GPU completion or a free slot.
+    ///
+    /// # Arguments
+    ///
+    /// * `submission` - Owned commands, backing, attachment authority, and a
+    ///   kernel-only completion producer. An empty stream is a queue checkpoint.
+    ///   Generic attachment locks remain held during this call, so no detach can
+    ///   race validation/enqueue. Retain backend mappings for the snapshot after
+    ///   return; all accepted requests must progress without observer polling.
+    ///
+    /// # Returns
+    ///
+    /// Success after acceptance, not after GPU retirement. Busy/Rejected must
+    /// return the unchanged request and certify no work from it was accepted.
+    /// Failed may cover a prefix and must leave all possibly accepted work owned
+    /// independently by the driver. Completion covers earlier queue work too.
+    /// Never substitute the synchronous `submit` implementation for this method.
+    fn enqueue(&self, submission: super::GpuSubmission) -> Result<(), GpuBackendEnqueueError> {
+        Err(GpuBackendEnqueueError::Rejected(
+            GpuBackendSubmitError::Unavailable("GPU backend does not support asynchronous submit"),
+            submission,
+        ))
+    }
 }
 
 /// A backend that provides GPU information and optional execution capabilities.
