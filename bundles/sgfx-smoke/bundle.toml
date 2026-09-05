@@ -1,6 +1,12 @@
 # Focused desktop integration image using the current Scarlet Cargo graph.
 
 [[layers]]
+kind = "cargo"
+source = "../../user/std-bin"
+bin = "gpu-async-smoke"
+to = "/system/scarlet/bin/gpu-async-smoke"
+
+[[layers]]
 kind = "bundle"
 path = "../base/bundle.toml"
 

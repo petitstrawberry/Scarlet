@@ -58,6 +58,10 @@ tokio = { version = "1.53.1", features = ["macros", "net", "rt", "time"] }
 scarlet-ui = { git = "https://github.com/petitstrawberry/scarlet-ui", package = "scarlet-ui", default-features = false, features = ["std", "platform-winit"] }
 
 [[bin]]
+name = "gpu-async-smoke"
+path = "src/gpu_async_smoke.rs"
+
+[[bin]]
 name = "hello"
 path = "src/hello.rs"
 

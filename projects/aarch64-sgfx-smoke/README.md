@@ -70,6 +70,25 @@ and output scale when using pointer coordinates.
 
 ## Manual release scenarios
 
+### Native asynchronous GPU diagnostic
+
+Inside the guest, run `/bin/gpu-async-smoke`. It requires VirtIO/VirGL and uses
+the normal Scarlet Rust `std` userspace target. Success requires the literal
+`[gpu-async-smoke] ALL PASS` marker and exit status zero, not merely a booting
+desktop. It checks an async clear with exact pixel readback, queue checkpoints,
+detach ordering, dropped completion handles, and completion after closing the
+queue, context and image owners. It does not exercise the still-synchronous
+SGFX native facade or certify A618, imported-image reuse, or fault recovery.
+
+The diagnostic is installed but not automatically started. For automation in
+a disposable verification image, add a one-shot `stemd` service with
+`exec = "/bin/gpu-async-smoke"` and `tty = "/dev/tty0"`. Keep that autostart
+configuration out of the normal desktop. The actual 2026-09-06 checks used a
+release image, Cocoa GL, TCG and both PCI/two CPUs and MMIO/one CPU. To exercise
+MMIO, set `SCARLET_QEMU_GPU=virtio-gpu-gl-device` before running the image.
+
+### Desktop scenarios
+
 1. Confirm SWS readiness and
    `[ScarletUI] platform-sws renderer=sgfx backend=scarlet-virgl` in the
    `ui-smoke` UART output. Treat an application error as a failure even if
