@@ -1,0 +1,14 @@
+[service.sws]
+exec = "/bin/sws"
+depends = ["sbusd"]
+ready_notify = true
+ready_timeout_ms = 30000
+
+[service.scarlet-desktop]
+exec = "/bin/scarlet-desktop"
+depends = ["sws"]
+
+[service.ui-smoke]
+exec = "/bin/ui-smoke"
+depends = ["sws"]
+tty = "/dev/tty0"

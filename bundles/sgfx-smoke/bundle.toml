@@ -1,0 +1,73 @@
+# Focused desktop integration image using the current Scarlet Cargo graph.
+
+[[layers]]
+kind = "bundle"
+path = "../base/bundle.toml"
+
+[[layers]]
+kind = "bundle"
+path = "../cli-utils/bundle.toml"
+
+[[layers]]
+kind = "copy"
+source = "../desktop/fs/system/scarlet/fonts"
+to = "/system/scarlet/fonts"
+
+[[layers]]
+kind = "copy"
+source = "../desktop/fs/system/scarlet/share/cursors"
+to = "/system/scarlet/share/cursors"
+
+[[layers]]
+kind = "copy"
+source = "../desktop/fs/system/scarlet/etc/sws"
+to = "/system/scarlet/etc/sws"
+
+[[layers]]
+kind = "copy"
+source = "fs"
+to = "/"
+
+[[layers]]
+kind = "cargo"
+source = "../../user/std-bin"
+bin = "sws"
+to = "/system/scarlet/bin/sws"
+
+[[layers]]
+kind = "cargo"
+source = "../../user/std-bin"
+bin = "scarlet-shell"
+to = "/system/scarlet/bin/scarlet-shell"
+
+[[layers]]
+kind = "cargo"
+source = "../../user/bin"
+package = "user-bin"
+bin = "scarlet-desktop"
+to = "/system/scarlet/bin/scarlet-desktop"
+
+[[layers]]
+kind = "cargo"
+source = "../../user/bin"
+package = "user-bin"
+bin = "desktop-settings"
+to = "/system/scarlet/bin/desktop-settings"
+
+[[layers]]
+kind = "cargo"
+source = "../../user/std-bin"
+bin = "ui-smoke"
+to = "/system/scarlet/bin/ui-smoke"
+
+[[layers]]
+kind = "cargo"
+source = "../../user/std-bin"
+bin = "ui-sgfx-showcase"
+to = "/system/scarlet/bin/ui-sgfx-showcase"
+
+[[layers]]
+kind = "cargo"
+source = "../../user/std-bin"
+bin = "sgfx-showcase"
+to = "/system/scarlet/bin/sgfx-showcase"

@@ -69,6 +69,9 @@ jobs:
     - name: Run formatting check
       run: nix develop .#default --command cargo make fmt-check
 
+    - name: Test QMP control helper
+      run: nix develop .#default --command cargo make test-qmp
+
   docker-image:
     needs: nix-cache
     runs-on: ubuntu-latest

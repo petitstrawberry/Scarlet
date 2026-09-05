@@ -57,7 +57,7 @@ else
 fi
 
 PROJECT_ROOT="$(cd "$SCRIPT_DIR" && cd .. && cd .. && cd .. && pwd)"
-PROJECT_DIR="$(cd "$SCRIPT_DIR" && cd .. && pwd)"
+PROJECT_DIR="${SCARLET_QEMU_PROJECT_DIR:-$(cd "$SCRIPT_DIR" && cd .. && pwd)}"
 BOOT_IMAGE="$PROJECT_DIR/.scarlet/images/limine-aarch64-full.img"
 ROOTFS_IMAGE="$PROJECT_DIR/.scarlet/images/rootfs-aarch64-full.ext2"
 
@@ -285,14 +285,24 @@ fi
 ensure_efi_vars_writable "$EFI_VARS_RUNTIME"
 
 
-QEMU_DISPLAY_ARGS=(-serial mon:stdio -display "$QEMU_DISPLAY")
+QEMU_DISPLAY_ARGS=(-serial "${SCARLET_QEMU_SERIAL:-mon:stdio}" -display "$QEMU_DISPLAY")
+
+# Local automation uses a Unix QMP socket and an ephemeral disk overlay.
+# Defaults retain the interactive runner's existing behavior.
+QEMU_CONTROL_ARGS=()
+if [ -n "${SCARLET_QEMU_QMP:-}" ]; then
+    QEMU_CONTROL_ARGS+=(-qmp "unix:${SCARLET_QEMU_QMP},server=on,wait=off")
+fi
+if [ "${SCARLET_QEMU_SNAPSHOT:-0}" = "1" ]; then
+    QEMU_CONTROL_ARGS+=(-snapshot)
+fi
 
 QEMU_GPU_ARGS=()
 if [ "$QEMU_GPU" != "none" ]; then
     QEMU_GPU_ARGS=(-device "$QEMU_GPU")
 fi
 
-QEMU_NET_ARGS=()
+QEMU_NET_ARGS=(-nic none)
 if [ "$QEMU_NET" = "1" ] || [ "$QEMU_NET" = "true" ]; then
     QEMU_NETDEV="user,id=net0"
     QEMU_DEFAULT_HOSTFWD="tcp::8080-:8080,udp::8080-:8080,udp::1234-:1234,tcp::${QEMU_REMOTE_DESKTOP_HOST_PORT}-:5900,tcp:127.0.0.1:${QEMU_SSH_HOST_PORT}-:22"
@@ -477,6 +487,7 @@ QEMU_CMD=(qemu-system-aarch64
     "${QEMU_MEMORY_ARGS[@]}" \
     -smp "$QEMU_SMP" \
     "${QEMU_DISPLAY_ARGS[@]}" \
+    "${QEMU_CONTROL_ARGS[@]}" \
     --no-reboot \
     -drive if=pflash,format=raw,unit=0,file="$EFI_CODE",readonly=on \
     -drive if=pflash,format=raw,unit=1,file="$EFI_VARS_RUNTIME" \

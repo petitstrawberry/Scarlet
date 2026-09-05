@@ -544,6 +544,33 @@ description = "Build boot image for debugging (AArch64)"
 command = "cargo"
 args = ["scarlet", "image", "--project", "projects/aarch64-limine-full"]
 
+[tasks.image-sgfx-smoke-aarch64]
+description = "Build the focused SWS/ScarletUI/SGFX integration image"
+command = "cargo"
+args = ["scarlet", "image", "--project", "projects/aarch64-sgfx-smoke"]
+
+[tasks.run-sgfx-smoke-aarch64]
+description = "Boot the focused desktop integration image (build it first)"
+command = "bash"
+args = ["projects/aarch64-sgfx-smoke/tools/run_aarch64.sh"]
+
+[tasks.qmp]
+description = "Send QMP_COMMAND with JSON QMP_ARGUMENTS to SCARLET_QEMU_QMP"
+script = '''
+set -eu
+qmp_arguments="${QMP_ARGUMENTS:-}"
+if [ -z "$qmp_arguments" ]; then
+    qmp_arguments='{}'
+fi
+PYTHONDONTWRITEBYTECODE=1 python3 tools/qmp.py --socket "${SCARLET_QEMU_QMP:?Set the Unix QMP socket path}" "${QMP_COMMAND:-query-status}" "$qmp_arguments"
+'''
+
+[tasks.test-qmp]
+description = "Test the local QMP control helper without booting QEMU"
+env = { PYTHONDONTWRITEBYTECODE = "1" }
+command = "python3"
+args = ["-m", "unittest", "discover", "-s", "tools", "-p", "test_qmp.py", "-v"]
+
 [tasks.debug-riscv64]
 description = "Run the kernel in debug mode (RISC-V)"
 cwd = "projects/riscv64-limine-full"

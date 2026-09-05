@@ -1,0 +1,61 @@
+schema_version = 2
+
+[project]
+name = "scarlet-aarch64-sgfx-smoke"
+
+[bsp]
+path = "../aarch64-limine-full/bsp"
+package = "scarlet"
+
+[bsp.kernel]
+source = { path = "../../kernel" }
+features = { network = true, user-fpu = true, user-vector = true, hypervisor = false, limine = true }
+
+[images.initramfs]
+format = "newc"
+output = ".scarlet/images/initramfs-aarch64-full.cpio"
+
+[[images.initramfs.layers]]
+kind = "bundle"
+path = "../../bundles/base/bundle.toml"
+
+[[images.initramfs.layers]]
+kind = "bundle"
+path = "../../bundles/cli-utils/bundle.toml"
+
+[images.rootfs]
+format = "ext2"
+output = ".scarlet/images/rootfs-aarch64-full.ext2"
+
+[[images.rootfs.layers]]
+kind = "bundle"
+path = "../../bundles/sgfx-smoke/bundle.toml"
+
+[images.boot]
+format = "limine-uefi"
+output = ".scarlet/images/esp-aarch64-full.img"
+cmdline = "console=ttyS0 root=/dev/vblk0p2 rootfstype=ext2"
+deps = ["initramfs"]
+
+[[images.boot.layers]]
+kind = "image"
+source = "initramfs"
+to = "/boot/initramfs"
+
+[images.disk]
+format = "gpt"
+output = ".scarlet/images/limine-aarch64-full.img"
+deps = ["boot", "rootfs"]
+
+[[images.disk.partitions]]
+source = "boot"
+name = "SCARLET_BOOT"
+type = "efi-system"
+
+[[images.disk.partitions]]
+source = "rootfs"
+name = "SCARLET_ROOT"
+type = "linux-filesystem"
+
+[runner]
+command = "tools/run_aarch64.sh"

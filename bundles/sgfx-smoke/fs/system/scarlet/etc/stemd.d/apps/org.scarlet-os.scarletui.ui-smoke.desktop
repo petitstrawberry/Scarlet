@@ -1,0 +1,6 @@
+[Desktop Entry]
+Name=UI Smoke
+Exec=/bin/ui-smoke
+Icon=applications-development
+Type=Application
+Terminal=false
