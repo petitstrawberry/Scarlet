@@ -67,6 +67,7 @@ impl Default for GpuCompletionInfo {
 ///
 /// This handle cannot be signalled or failed by userspace. A successful query
 /// certifies only that the observation was read: inspect its state separately.
+#[derive(Debug)]
 pub struct GpuCompletion {
     pub(crate) handle: Handle,
 }

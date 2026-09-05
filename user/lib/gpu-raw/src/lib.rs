@@ -8,11 +8,13 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 
 mod completion;
+mod submission;
 pub use completion::{
     GPU_COMPLETION_COMPLETE, GPU_COMPLETION_FAILED, GPU_COMPLETION_FAILURE_ABANDONED,
     GPU_COMPLETION_FAILURE_DEVICE_LOST, GPU_COMPLETION_FAILURE_EXECUTION,
     GPU_COMPLETION_FAILURE_NONE, GPU_COMPLETION_PENDING, GpuCompletion, GpuCompletionInfo,
 };
+pub use submission::{GpuQueueAsyncInfo, GpuQueueSubmitAsync, GpuSubmitError};
 
 #[cfg(not(feature = "std"))]
 extern crate scarlet_std as std;
@@ -98,6 +100,10 @@ pub mod commands {
     pub const GPU_CONTEXT_READBACK_IMAGE_BGRA: u32 = 0x4768;
     /// Query an authoritative read-only GPU completion handle.
     pub const GPU_COMPLETION_QUERY: u32 = 0x4769;
+    /// Query explicitly implemented async queue capacity and command limits.
+    pub const GPU_QUEUE_QUERY_ASYNC: u32 = 0x476a;
+    /// Enqueue owned commands and return a read-only completion handle.
+    pub const GPU_QUEUE_SUBMIT_ASYNC: u32 = 0x476b;
 }
 
 /// ABI version accepted by [`GpuQueryInfo`].
@@ -114,6 +120,10 @@ pub const GPU_RESULT_OUT_OF_RESOURCES: u32 = 3;
 pub const GPU_RESULT_INVALID_STATE: u32 = 4;
 /// The requested backend operation is not available.
 pub const GPU_RESULT_UNSUPPORTED: u32 = 5;
+/// Async admission is unavailable; no work from this call was accepted.
+pub const GPU_RESULT_BUSY: u32 = 6;
+/// Async submission encountered confirmed device loss; inspect acceptance too.
+pub const GPU_RESULT_DEVICE_LOST: u32 = 7;
 
 /// Create buffer flag permitting CPU memory mappings.
 pub const GPU_BUFFER_FLAG_CPU_VISIBLE: u32 = 1 << 0;
