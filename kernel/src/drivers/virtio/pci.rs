@@ -422,6 +422,9 @@ fn probe_virtio_pci(device: &PciDeviceInfo) -> Result<(), &'static str> {
         }
         VIRTIO_PCI_TRANSITIONAL_GPU_DEVICE_ID | VIRTIO_PCI_MODERN_GPU_DEVICE_ID => {
             let dev = Arc::new(VirtioGpuDevice::new_pci(transport));
+            if let Some(interrupt_id) = register_legacy_intx(device, dev.clone()) {
+                dev.enable_interrupts(interrupt_id);
+            }
             let graphics_dev: Arc<dyn Device> = dev.clone();
             DeviceManager::get_manager().register_device(graphics_dev);
 

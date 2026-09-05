@@ -69,6 +69,42 @@ pub struct GpuSubmission {
 }
 
 impl GpuSubmission {
+    /// Build an owned request for driver tests without invoking user syscalls.
+    ///
+    /// # Arguments
+    ///
+    /// * `commands` - Owned test command bytes or an empty checkpoint.
+    /// * `context` - Backend context whose lifetime the test observes.
+    /// * `queue` - Backend queue whose lifetime the test observes.
+    ///
+    /// # Returns
+    ///
+    /// A read-only observer and an owned request with a real admission permit.
+    /// This helper is not compiled into production kernels.
+    #[cfg(test)]
+    pub(crate) fn test_request(
+        commands: Vec<u8>,
+        context: Arc<dyn GpuBackendContext>,
+        queue: Arc<dyn GpuBackendQueue>,
+    ) -> (super::GpuCompletion, Self) {
+        let (completion, signal) = super::GpuCompletion::pair();
+        let permit = SubmissionSlots::default()
+            .reserve(1)
+            .expect("test admission slot");
+        let submission = Self::new(
+            commands,
+            SubmissionResources {
+                _images: Vec::new(),
+                _buffers: Vec::new(),
+                _context: context,
+                _queue: queue,
+            },
+            permit,
+            signal,
+        );
+        (completion, submission)
+    }
+
     pub(super) fn new(
         commands: Vec<u8>,
         resources: SubmissionResources,

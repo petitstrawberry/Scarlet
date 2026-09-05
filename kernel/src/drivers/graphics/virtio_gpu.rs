@@ -22,10 +22,10 @@ use crate::{
             GPU_IMAGE_USAGE_RENDER_TARGET, GPU_IMAGE_USAGE_SAMPLED, GPU_IMAGE_USAGE_TRANSFER_DST,
             GPU_IMAGE_USAGE_TRANSFER_SRC, GpuBackend, GpuBackendBuffer, GpuBackendBufferInfo,
             GpuBackendContext, GpuBackendContextInfo, GpuBackendDialectDescriptor,
-            GpuBackendDialectInfo, GpuBackendImage, GpuBackendImageInfo, GpuBackendInfo,
-            GpuBackendQueue, GpuBackendQueueInfo, GpuBackendSubmitError, GpuBufferCreateInfo,
-            GpuDeviceInfo, GpuDeviceState, GpuImageBackingInfo, GpuImageCreateInfo,
-            GpuImageUploadInfo,
+            GpuBackendDialectInfo, GpuBackendEnqueueError, GpuBackendImage, GpuBackendImageInfo,
+            GpuBackendInfo, GpuBackendQueue, GpuBackendQueueInfo, GpuBackendSubmitError,
+            GpuBufferCreateInfo, GpuDeviceInfo, GpuDeviceState, GpuImageBackingInfo,
+            GpuImageCreateInfo, GpuImageUploadInfo, GpuSubmission,
         },
         graphics::{
             FramebufferConfig, GpuDisplayResource, GraphicsDevice, PixelFormat,
@@ -39,6 +39,7 @@ use crate::{
 };
 use core::ptr;
 
+mod asynchronous;
 mod control;
 
 use control::{ControlEnqueueError, ControlQueue, ControlRequest};
@@ -480,6 +481,8 @@ pub struct VirtioGpuDeviceCore {
     base_addr: usize,
     pci_transport: Option<VirtioPciTransport>,
     virtqueues: IrqSpinLock<VirtioGpuQueues>, // Control queue (0) and Cursor queue (1)
+    async_submissions: asynchronous::AsyncSubmissions,
+    async_enabled: bool,
     display_info: IrqRwSpinLock<Option<VirtioGpuRespDisplayInfo>>,
     framebuffer_addr: IrqRwSpinLock<Option<usize>>,
     framebuffer_alloc: IrqRwSpinLock<Option<ContiguousPages>>,
@@ -528,6 +531,8 @@ impl VirtioGpuDeviceCore {
             base_addr,
             pci_transport,
             virtqueues: IrqSpinLock::new(VirtioGpuQueues::new()),
+            async_submissions: asynchronous::AsyncSubmissions::default(),
+            async_enabled: false,
             display_info: IrqRwSpinLock::new(None),
             framebuffer_addr: IrqRwSpinLock::new(None),
             framebuffer_alloc: IrqRwSpinLock::new(None),
@@ -586,6 +591,11 @@ impl VirtioGpuDeviceCore {
     fn next_acceleration_fence_id(&self) -> Result<u64, &'static str> {
         let mut id = self.acceleration_fence_id.lock();
         let current = *id;
+        // The negotiated legacy VirGL fence callback carries only 32 bits.
+        // Never wrap/truncate into a fence that could certify unrelated work.
+        if current > u64::from(u32::MAX) {
+            return Err("VirtIO GPU acceleration fence IDs are exhausted");
+        }
         *id = current
             .checked_add(1)
             .ok_or("VirtIO GPU acceleration fence IDs are exhausted")?;
@@ -1556,6 +1566,7 @@ impl VirtioDevice for VirtioGpuDeviceCore {
 
 pub struct VirtioGpuDevice {
     core: Arc<IrqSpinLock<VirtioGpuDeviceCore>>,
+    interrupt_state: asynchronous::InterruptState,
 }
 
 impl VirtioGpuDevice {
@@ -1571,6 +1582,7 @@ impl VirtioGpuDevice {
     pub fn new(base_addr: usize) -> Self {
         Self {
             core: Arc::new(IrqSpinLock::new(VirtioGpuDeviceCore::new(base_addr))),
+            interrupt_state: asynchronous::InterruptState::new(base_addr, None),
         }
     }
 
@@ -1586,6 +1598,10 @@ impl VirtioGpuDevice {
     pub fn new_pci(transport: VirtioPciTransport) -> Self {
         Self {
             core: Arc::new(IrqSpinLock::new(VirtioGpuDeviceCore::new_pci(transport))),
+            interrupt_state: asynchronous::InterruptState::new(
+                transport.common_cfg,
+                Some(transport),
+            ),
         }
     }
 }
@@ -1669,6 +1685,9 @@ impl VirtioGpuBackend {
     ///
     /// A backend-neutral GPU adapter sharing the device transport.
     pub fn from_device(device: &VirtioGpuDevice) -> Self {
+        // Register independent progress before advertising async capability.
+        let enabled = asynchronous::register(&device.core);
+        device.core.lock().async_enabled = enabled;
         Self {
             core: Arc::clone(&device.core),
         }
@@ -1882,6 +1901,7 @@ impl GpuBackendContext for VirtioGpuBackendContext {
         Ok(Arc::new(VirtioGpuBackendQueue {
             core: Arc::clone(&self.core),
             context_id: self.context_id,
+            async_enabled: self.core.lock().async_enabled,
         }))
     }
 
@@ -1993,6 +2013,7 @@ impl GpuBackendContext for VirtioGpuBackendContext {
 struct VirtioGpuBackendQueue {
     core: Arc<IrqSpinLock<VirtioGpuDeviceCore>>,
     context_id: u32,
+    async_enabled: bool,
 }
 
 impl GpuBackendQueue for VirtioGpuBackendQueue {
@@ -2006,6 +2027,51 @@ impl GpuBackendQueue for VirtioGpuBackendQueue {
             .next_acceleration_fence_id()
             .map_err(GpuBackendSubmitError::Unavailable)?;
         core.submit_acceleration_commands(self.context_id, commands, Some(fence_id))
+    }
+
+    fn async_capacity(&self) -> u32 {
+        if self.async_enabled {
+            asynchronous::ASYNC_CAPACITY
+        } else {
+            0
+        }
+    }
+
+    fn enqueue(&self, submission: GpuSubmission) -> Result<(), GpuBackendEnqueueError> {
+        // A concurrent legacy control operation may wait for GPU execution.
+        // Async admission reports pressure instead of joining that wait.
+        let Some(mut guard) = self.core.try_lock() else {
+            return Err(GpuBackendEnqueueError::Busy(submission));
+        };
+        let core = &mut *guard;
+        if !self.async_enabled {
+            return Err(GpuBackendEnqueueError::Rejected(
+                GpuBackendSubmitError::Unavailable("VirtIO GPU async progress is not available"),
+                submission,
+            ));
+        }
+        let fence = match core.next_acceleration_fence_id() {
+            Ok(fence) => fence,
+            Err(error) => {
+                return Err(GpuBackendEnqueueError::Rejected(
+                    GpuBackendSubmitError::Unavailable(error),
+                    submission,
+                ));
+            }
+        };
+        {
+            let mut queues = core.virtqueues.lock();
+            core.async_submissions.enqueue(
+                &mut queues.control,
+                self.context_id,
+                fence,
+                submission,
+                crate::timer::get_time_ns(),
+            )?;
+        }
+        core.notify(0);
+        asynchronous::wake_worker();
+        Ok(())
     }
 }
 

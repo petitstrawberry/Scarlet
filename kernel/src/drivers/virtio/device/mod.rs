@@ -1184,6 +1184,22 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         }
         VirtioDeviceType::GPU => {
             let dev = Arc::new(VirtioGpuDevice::new(base_addr));
+            if let Some(irq_resource) = device
+                .get_resources()
+                .iter()
+                .find(|resource| resource.res_type == PlatformDeviceResourceType::IRQ)
+            {
+                match crate::interrupt::register_and_enable_platform_irq_device(
+                    irq_resource,
+                    dev.clone(),
+                    crate::arch::get_cpu().get_cpuid() as u32,
+                ) {
+                    Ok(interrupt_id) => dev.enable_interrupts(interrupt_id),
+                    Err(_) => crate::early_println!(
+                        "[Virtio] GPU IRQ unavailable; using timed completion progress"
+                    ),
+                }
+            }
             let graphics_dev: Arc<dyn Device> = dev.clone();
             DeviceManager::get_manager().register_device(graphics_dev);
 

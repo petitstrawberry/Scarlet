@@ -7,15 +7,20 @@
 
 use alloc::sync::Arc;
 use core::mem::ManuallyDrop;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::drivers::virtio::queue::{DescriptorFlag, VirtQueue};
 use crate::mem::page::ContiguousPages;
 use crate::sync::IrqSpinLock;
 
-use super::{VIRTIO_GPU_CONTROL_QUEUE_SIZE, VIRTIO_GPU_CONTROL_TIMEOUT_NS, VirtioGpuCtrlHdr};
+use super::{
+    VIRTIO_GPU_CONTROL_QUEUE_SIZE, VIRTIO_GPU_CONTROL_TIMEOUT_NS, VirtioGpuCtrlHdr,
+    validate_execution_response,
+};
 
 pub(super) const CONTROL_TIMEOUT: &str = "VirtIO GPU control queue timed out";
 const INVALID_RESPONSE: &str = "VirtIO GPU control queue returned an invalid response";
+const INVALID_FENCE: &str = "VirtIO GPU retirement checkpoint did not return its fence";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ControlStatus {
@@ -29,11 +34,29 @@ pub(super) struct ControlRequest {
     response: ContiguousPages,
     command_len: u32,
     response_len: u32,
+    expected_fence: Option<u64>,
+    published: AtomicBool,
     status: IrqSpinLock<ControlStatus>,
 }
 
 impl ControlRequest {
     pub(super) fn new(commands: &[u8], response_len: usize) -> Result<Arc<Self>, &'static str> {
+        Self::allocate(commands, response_len, None)
+    }
+
+    pub(super) fn new_checkpoint(commands: &[u8], fence: u64) -> Result<Arc<Self>, &'static str> {
+        Self::allocate(
+            commands,
+            core::mem::size_of::<VirtioGpuCtrlHdr>(),
+            Some(fence),
+        )
+    }
+
+    fn allocate(
+        commands: &[u8],
+        response_len: usize,
+        expected_fence: Option<u64>,
+    ) -> Result<Arc<Self>, &'static str> {
         if commands.is_empty() || response_len < core::mem::size_of::<VirtioGpuCtrlHdr>() {
             return Err("VirtIO GPU control buffers must include a command and response header");
         }
@@ -61,6 +84,8 @@ impl ControlRequest {
             response,
             command_len,
             response_len,
+            expected_fence,
+            published: AtomicBool::new(false),
             status: IrqSpinLock::new(ControlStatus::Pending),
         }))
     }
@@ -113,6 +138,23 @@ pub(super) struct ControlQueue {
 }
 
 impl ControlQueue {
+    #[cfg(test)]
+    pub(super) fn test_respond(&mut self, head: usize, header: VirtioGpuCtrlHdr) {
+        let request = &self.pending[head]
+            .as_ref()
+            .expect("test device-owned request")
+            .request;
+        // SAFETY: the fake device owns this live response DMA allocation. The
+        // test publishes the used entry only after writing the complete header.
+        unsafe {
+            core::ptr::write_unaligned(request.response.as_ptr() as *mut VirtioGpuCtrlHdr, header)
+        };
+        let index = *self.ring.used.idx as usize % VIRTIO_GPU_CONTROL_QUEUE_SIZE;
+        self.ring.used.ring[index].id = head as u32;
+        self.ring.used.ring[index].len = core::mem::size_of::<VirtioGpuCtrlHdr>() as u32;
+        *self.ring.used.idx = self.ring.used.idx.wrapping_add(1);
+    }
+
     pub(super) fn new() -> Self {
         let mut ring = VirtQueue::new(VIRTIO_GPU_CONTROL_QUEUE_SIZE);
         ring.init();
@@ -141,33 +183,68 @@ impl ControlQueue {
         request: &Arc<ControlRequest>,
         now_ns: u64,
     ) -> Result<(), ControlEnqueueError> {
+        self.enqueue_batch(core::slice::from_ref(request), now_ns)
+    }
+
+    /// Publish a command and its independent retirement checkpoint together.
+    /// The two-chain limit keeps pre-publication rollback bounded and leaves
+    /// no possibly accepted prefix when admission returns an error.
+    pub(super) fn enqueue_batch(
+        &mut self,
+        requests: &[Arc<ControlRequest>],
+        now_ns: u64,
+    ) -> Result<(), ControlEnqueueError> {
         self.check().map_err(ControlEnqueueError::Failed)?;
-        let command_desc = self.ring.alloc_desc().ok_or(ControlEnqueueError::Busy)?;
-        let Some(response_desc) = self.ring.alloc_desc() else {
-            self.ring.free_desc(command_desc);
+        if requests.is_empty() || requests.len() > 2 {
+            return Err(ControlEnqueueError::Failed(
+                "Invalid VirtIO GPU control batch size",
+            ));
+        }
+        if self.ring.free_descriptors.len() < requests.len() * 2 {
             return Err(ControlEnqueueError::Busy);
-        };
-        let command = &mut self.ring.desc[command_desc];
-        command.addr = request.command.as_paddr() as u64;
-        command.len = request.command_len;
-        command.flags = DescriptorFlag::Next as u16;
-        command.next = response_desc as u16;
-        let response = &mut self.ring.desc[response_desc];
-        response.addr = request.response.as_paddr() as u64;
-        response.len = request.response_len;
-        response.flags = DescriptorFlag::Write as u16;
-        response.next = 0;
-        self.pending[command_desc] = Some(PendingControl {
-            request: Arc::clone(request),
-            response_desc,
-            submitted_ns: now_ns,
-        });
-        // push publishes initialized descriptors with the architecture's I/O
-        // barriers. On error nothing was published, so ownership can be returned.
-        if let Err(error) = self.ring.push(command_desc) {
-            self.pending[command_desc] = None;
-            self.ring.free_desc(response_desc);
-            self.ring.free_desc(command_desc);
+        }
+        for (index, request) in requests.iter().enumerate() {
+            if request.published.swap(true, Ordering::AcqRel) {
+                for claimed in &requests[..index] {
+                    claimed.published.store(false, Ordering::Release);
+                }
+                return Err(ControlEnqueueError::Failed(
+                    "VirtIO GPU control request was already published",
+                ));
+            }
+        }
+        let mut heads = [0; 2];
+        for (index, request) in requests.iter().enumerate() {
+            let command_desc = self.ring.alloc_desc().expect("reserved command descriptor");
+            let response_desc = self
+                .ring
+                .alloc_desc()
+                .expect("reserved response descriptor");
+            heads[index] = command_desc;
+            let command = &mut self.ring.desc[command_desc];
+            command.addr = request.command.as_paddr() as u64;
+            command.len = request.command_len;
+            command.flags = DescriptorFlag::Next as u16;
+            command.next = response_desc as u16;
+            let response = &mut self.ring.desc[response_desc];
+            response.addr = request.response.as_paddr() as u64;
+            response.len = request.response_len;
+            response.flags = DescriptorFlag::Write as u16;
+            response.next = 0;
+            self.pending[command_desc] = Some(PendingControl {
+                request: Arc::clone(request),
+                response_desc,
+                submitted_ns: now_ns,
+            });
+        }
+        // One available-index update publishes the whole pair in order.
+        if let Err(error) = self.ring.push_many(&heads[..requests.len()]) {
+            for head in &heads[..requests.len()] {
+                let pending = self.pending[*head].take().expect("unpublished request");
+                pending.request.published.store(false, Ordering::Release);
+                self.ring.free_desc(pending.response_desc);
+                self.ring.free_desc(*head);
+            }
             return Err(ControlEnqueueError::Failed(error));
         }
         Ok(())
@@ -189,6 +266,18 @@ impl ControlQueue {
                 || written > pending.request.response_len
             {
                 return self.fail(INVALID_RESPONSE);
+            }
+            if let Some(fence) = pending.request.expected_fence {
+                // SAFETY: the used length covers the header, its DMA storage is
+                // live, and the I/O read barrier above follows used.idx.
+                let response = unsafe {
+                    core::ptr::read_unaligned(
+                        pending.request.response.as_ptr() as *const VirtioGpuCtrlHdr
+                    )
+                };
+                if validate_execution_response(response, Some(fence)).is_err() {
+                    return self.fail(INVALID_FENCE);
+                }
             }
             let pending = self.pending[head]
                 .take()
@@ -219,8 +308,10 @@ impl Drop for ControlQueue {
     fn drop(&mut self) {
         let had_pending = self.has_pending();
         for pending in self.pending.iter_mut().filter_map(Option::take) {
-            *pending.request.status.lock() =
-                ControlStatus::Failed("VirtIO GPU control queue was abandoned");
+            if pending.request.status() == ControlStatus::Pending {
+                *pending.request.status.lock() =
+                    ControlStatus::Failed("VirtIO GPU control queue was abandoned");
+            }
             core::mem::forget(pending);
         }
         if !self.device_owned && !had_pending {
@@ -235,7 +326,13 @@ impl Drop for ControlQueue {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use alloc::sync::Arc;
+    use core::sync::atomic::Ordering;
+
+    use super::{
+        CONTROL_TIMEOUT, ControlEnqueueError, ControlQueue, ControlRequest, ControlStatus,
+        INVALID_RESPONSE, VIRTIO_GPU_CONTROL_QUEUE_SIZE, VIRTIO_GPU_CONTROL_TIMEOUT_NS,
+    };
 
     fn request(value: u8) -> Arc<ControlRequest> {
         ControlRequest::new(&[value; 32], 24).expect("test DMA allocation")
@@ -342,6 +439,60 @@ mod tests {
         let weak = Arc::downgrade(&owned);
         drop((owned, queue));
         assert!(weak.upgrade().is_some());
+    }
+
+    #[test_case]
+    fn control_batch_pressure_and_duplicate_requests_never_publish_a_prefix() {
+        let mut queue = ControlQueue::new();
+        for _ in 0..VIRTIO_GPU_CONTROL_QUEUE_SIZE / 2 - 1 {
+            queue
+                .enqueue(&request(1), 0)
+                .expect("fill all but one chain");
+        }
+        let first = request(2);
+        let second = request(3);
+        let available = *queue.ring.avail.idx;
+        assert_eq!(
+            queue.enqueue_batch(&[first.clone(), second.clone()], 0),
+            Err(ControlEnqueueError::Busy)
+        );
+        assert_eq!(*queue.ring.avail.idx, available);
+        assert!(!first.published.load(Ordering::Acquire));
+        assert!(!second.published.load(Ordering::Acquire));
+        let heads: alloc::vec::Vec<_> = queue
+            .pending
+            .iter()
+            .enumerate()
+            .filter_map(|(head, pending)| pending.as_ref().map(|_| head))
+            .collect();
+        for head in heads {
+            respond(&mut queue, head, 24, 0);
+        }
+        queue.reap(1).expect("retire preceding requests");
+        assert!(
+            queue
+                .enqueue_batch(&[first.clone(), first.clone()], 2)
+                .is_err()
+        );
+        assert_eq!(*queue.ring.avail.idx, available);
+        assert!(!first.published.load(Ordering::Acquire));
+        queue
+            .enqueue_batch(&[first.clone(), second.clone()], 2)
+            .expect("whole pair fits");
+        assert_eq!(*queue.ring.avail.idx, available + 2);
+        assert!(
+            queue.enqueue(&first, 2).is_err(),
+            "a live request cannot be republished"
+        );
+        let first_head = queue.ring.avail.ring[available as usize] as usize;
+        let second_head = queue.ring.avail.ring[available as usize + 1] as usize;
+        respond(&mut queue, first_head, 24, 0);
+        respond(&mut queue, second_head, 24, 0);
+        queue.reap(3).expect("retire pair");
+        assert!(
+            queue.enqueue(&first, 4).is_err(),
+            "a returned receipt cannot be reused as a new request"
+        );
     }
 
     #[test_case]
