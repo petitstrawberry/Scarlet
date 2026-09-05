@@ -53,6 +53,23 @@ pub const GPU_IMAGE_QUERY_LAYOUT: u32 = 0x4766;
 pub const GPU_CONTEXT_DETACH_BUFFER: u32 = 0x4767;
 /// Control command that reads one attached BGRA image rectangle into userspace.
 pub const GPU_CONTEXT_READBACK_IMAGE_BGRA: u32 = 0x4768;
+/// Control command that queries an authoritative read-only completion handle.
+pub const GPU_COMPLETION_QUERY: u32 = 0x4769;
+
+/// Covered GPU work has not yet been observed to retire.
+pub const GPU_COMPLETION_PENDING: u32 = 0;
+/// All covered GPU accesses have retired; not a presentation or cache barrier.
+pub const GPU_COMPLETION_COMPLETE: u32 = 1;
+/// Completion failed. GPU quiescence is not implied.
+pub const GPU_COMPLETION_FAILED: u32 = 2;
+/// No failure has been reported.
+pub const GPU_COMPLETION_FAILURE_NONE: u32 = 0;
+/// A hardware fault, timeout, or reset made the device unusable.
+pub const GPU_COMPLETION_FAILURE_DEVICE_LOST: u32 = 1;
+/// The kernel producer was dropped without reporting a terminal result.
+pub const GPU_COMPLETION_FAILURE_ABANDONED: u32 = 2;
+/// Another failure occurred while executing accepted work.
+pub const GPU_COMPLETION_FAILURE_EXECUTION: u32 = 3;
 
 /// Query completed successfully.
 pub const GPU_RESULT_SUCCESS: u32 = 0;
@@ -1098,6 +1115,52 @@ impl GpuTimelineInfo {
 }
 
 impl Default for GpuTimelineInfo {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Fixed-width query and response for [`GPU_COMPLETION_QUERY`].
+///
+/// Both successful and failed completions become readable/selectable. A query
+/// must still inspect `state` and `failure`; readiness alone is not success.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct GpuCompletionInfo {
+    /// ABI version supplied by userspace and echoed by the kernel.
+    pub abi_version: u32,
+    /// Explicit `GPU_RESULT_*` query result, separate from execution failure.
+    pub result: u32,
+    /// One of `GPU_COMPLETION_PENDING`, `GPU_COMPLETION_COMPLETE`, or `GPU_COMPLETION_FAILED`.
+    pub state: u32,
+    /// `GPU_COMPLETION_FAILURE_*` reason, zero unless `state` is failed.
+    pub failure: u32,
+    /// Reserved for ABI-compatible future use. Must be zero.
+    pub reserved: u32,
+    /// Reserved for ABI-compatible future use. Must be zero.
+    pub reserved2: u32,
+}
+
+impl GpuCompletionInfo {
+    /// Create a completion query for the current ABI version.
+    ///
+    /// # Returns
+    ///
+    /// A request with reserved fields zeroed; output fields are not observations
+    /// until a successful completion-query control call fills them.
+    pub const fn new() -> Self {
+        Self {
+            abi_version: GPU_ABI_VERSION,
+            result: GPU_RESULT_SUCCESS,
+            state: GPU_COMPLETION_PENDING,
+            failure: GPU_COMPLETION_FAILURE_NONE,
+            reserved: 0,
+            reserved2: 0,
+        }
+    }
+}
+
+impl Default for GpuCompletionInfo {
     fn default() -> Self {
         Self::new()
     }

@@ -8,6 +8,7 @@
 
 mod abi;
 mod backend;
+mod completion;
 mod connection;
 mod execution;
 mod object;
@@ -41,6 +42,11 @@ pub use abi::{
     GpuQueryInfo, GpuQueueInfo, GpuQueueSubmit, GpuTimelineCreatePoint, GpuTimelineFail,
     GpuTimelineInfo, GpuTimelineSignal,
 };
+pub use abi::{
+    GPU_COMPLETION_COMPLETE, GPU_COMPLETION_FAILED, GPU_COMPLETION_FAILURE_ABANDONED,
+    GPU_COMPLETION_FAILURE_DEVICE_LOST, GPU_COMPLETION_FAILURE_EXECUTION,
+    GPU_COMPLETION_FAILURE_NONE, GPU_COMPLETION_PENDING, GPU_COMPLETION_QUERY, GpuCompletionInfo,
+};
 pub use backend::{
     GPU_EXECUTION_SUPPORT_ADDRESS_SPACE, GPU_EXECUTION_SUPPORT_DEPTH,
     GPU_EXECUTION_SUPPORT_IMAGE_READBACK, GPU_EXECUTION_SUPPORT_IMAGE_UPLOAD,
@@ -51,6 +57,9 @@ pub use backend::{
     GpuBackendImagePlaneLayout, GpuBackendInfo, GpuBackendLinearDisplayInfo, GpuBackendQueue,
     GpuBackendQueueInfo, GpuBackendSubmitError, GpuBufferCreateInfo, GpuDeviceInfo, GpuDeviceState,
     GpuImageBackingInfo, GpuImageCreateInfo, GpuImageUploadInfo,
+};
+pub use completion::{
+    GpuCompletion, GpuCompletionFailure, GpuCompletionSignal, GpuCompletionState,
 };
 pub use connection::GpuConnection;
 pub use execution::{GpuContext, GpuQueue};
@@ -211,6 +220,9 @@ mod tests {
 
     #[test_case]
     fn gpu_abi_records_are_fixed_width() {
+        assert_eq!(core::mem::size_of::<super::GpuCompletionInfo>(), 24);
+        assert_eq!(core::mem::align_of::<super::GpuCompletionInfo>(), 4);
+        assert_eq!(core::mem::offset_of!(super::GpuCompletionInfo, failure), 12);
         assert_eq!(core::mem::size_of::<super::GpuCreateBuffer>(), 48);
         assert_eq!(core::mem::size_of::<super::GpuBufferInfo>(), 40);
         assert_eq!(core::mem::size_of::<super::GpuCreateTimeline>(), 40);

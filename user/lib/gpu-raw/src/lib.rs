@@ -7,6 +7,13 @@
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
+mod completion;
+pub use completion::{
+    GPU_COMPLETION_COMPLETE, GPU_COMPLETION_FAILED, GPU_COMPLETION_FAILURE_ABANDONED,
+    GPU_COMPLETION_FAILURE_DEVICE_LOST, GPU_COMPLETION_FAILURE_EXECUTION,
+    GPU_COMPLETION_FAILURE_NONE, GPU_COMPLETION_PENDING, GpuCompletion, GpuCompletionInfo,
+};
+
 #[cfg(not(feature = "std"))]
 extern crate scarlet_std as std;
 
@@ -89,6 +96,8 @@ pub mod commands {
     pub const GPU_CONTEXT_DETACH_BUFFER: u32 = 0x4767;
     /// Read one attached BGRA image rectangle into userspace.
     pub const GPU_CONTEXT_READBACK_IMAGE_BGRA: u32 = 0x4768;
+    /// Query an authoritative read-only GPU completion handle.
+    pub const GPU_COMPLETION_QUERY: u32 = 0x4769;
 }
 
 /// ABI version accepted by [`GpuQueryInfo`].
