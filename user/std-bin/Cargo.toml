@@ -14,7 +14,7 @@ mp4-aac = ["dep:symphonia-core", "dep:symphonia-codec-aac"]
 clap = { version = "4.5.32", features = ["derive"] }
 csv = "1.3"
 framebuffer = { path = "../lib/framebuffer", default-features = false, features = ["std"] }
-sgfx = { path = "../lib/sgfx-frontend" }
+sgfx = { git = "https://github.com/petitstrawberry/sgfx" }
 httparse = "1.9"
 libm = "0.2"
 log-protocol = { path = "../lib/log-protocol" }
