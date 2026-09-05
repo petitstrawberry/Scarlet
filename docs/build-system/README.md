@@ -20,6 +20,22 @@ cargo make build-riscv64
 cargo make run-riscv64
 ```
 
+## Cross C compiler selection
+
+The Nix development shell and Docker image provide unwrapped Clang as
+`TARGET_CC`, the cc-rs fallback for cross compilation. Native C builds keep
+using `HOST_CC`/`CC` and the Nix compiler wrapper. Avoid exporting global
+`CC_<target>` defaults: they override application settings in Cargo's `[env]`
+table, including `yt-for-scarlet`'s cross GCC selection.
+
+Applications can select a different cross compiler with `CC_<target>` in
+their own `.cargo/config.toml`; cc-rs checks that before `TARGET_CC`. This
+controls C headers and compilation only, not Rust `std` support. Run
+`cargo make test-cross-cc` in the Nix shell to check both Scarlet targets,
+application overrides, and native compiler selection. After updating the
+flake, reload direnv or re-enter the Nix shell to discard old environment
+variables.
+
 ## Project Layout
 
 ```

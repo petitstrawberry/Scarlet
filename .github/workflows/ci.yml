@@ -75,6 +75,9 @@ jobs:
     - name: Test native ABI and SWS wire contracts
       run: nix develop .#default --command cargo make test-release-contracts
 
+    - name: Test cross C compiler defaults and application overrides
+      run: nix develop .#default --command cargo make test-cross-cc
+
   docker-image:
     needs: nix-cache
     runs-on: ubuntu-latest

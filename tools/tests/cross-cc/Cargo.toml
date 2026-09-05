@@ -1,0 +1,10 @@
+[package]
+name = "cross-cc-regression-test"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+cc = "=1.4.4"
