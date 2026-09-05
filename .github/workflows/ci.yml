@@ -141,7 +141,7 @@ jobs:
       with:
         name: ${{ env.CACHIX_CACHE_NAME }}
 
-    - name: Check SGFX userspace integration (riscv64)
+    - name: Check all std binaries and legacy SGFX integration (riscv64)
       run: nix develop .#default --command cargo make check-sgfx-riscv64
 
     - name: Build scarlet kernel (riscv64)
@@ -183,7 +183,7 @@ jobs:
       with:
         name: ${{ env.CACHIX_CACHE_NAME }}
 
-    - name: Check SGFX userspace integration (aarch64)
+    - name: Check all std binaries and legacy SGFX integration (aarch64)
       run: nix develop .#default --command cargo make check-sgfx-aarch64
 
     - name: Build scarlet kernel (aarch64)
