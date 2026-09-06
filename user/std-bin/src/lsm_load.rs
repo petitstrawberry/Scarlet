@@ -249,7 +249,8 @@ fn parent_dir(path: &str) -> Option<&str> {
 
 fn list_loaded_module_names() -> Vec<String> {
     let mut buf = [0; LSM_LIST_ENTRY_SIZE * LSM_LIST_MAX_MODULES];
-    let count = syscall2(Syscall::LsmList, buf.as_mut_ptr() as usize, buf.len());
+    // SAFETY: buf is exclusive byte storage of the advertised length; LsmList writes complete serialized records synchronously.
+    let count = unsafe { syscall2(Syscall::LsmList, buf.as_mut_ptr() as usize, buf.len()) };
     if count == 0 {
         return Vec::new();
     }
@@ -369,7 +370,8 @@ fn load_module_recursive(
         CString::new(syscall_path.as_str()).map_err(|_| format!("invalid path {syscall_path}"))?;
 
     println!("loading module: {syscall_path}");
-    let ret = syscall1(Syscall::LsmLoad, c_syscall_path.as_ptr() as usize);
+    // SAFETY: The NUL-terminated module path remains readable until the synchronous load returns.
+    let ret = unsafe { syscall1(Syscall::LsmLoad, c_syscall_path.as_ptr() as usize) };
     visiting.pop();
 
     if ret == 0 {

@@ -117,8 +117,8 @@ pub fn run() -> i32 {
         "[ushv] Adding memory region: guest={:#x}, size={:#x}",
         guest_phys_base, guest_memory_size
     );
-    if vm
-        .add_memory_region(0, guest_phys_base, guest_memory_size, host_addr as u64)
+    // SAFETY: The guest mapping remains allocated for the process lifetime; loading is finished and host guest-memory access is coordinated with vCPU execution.
+    if unsafe { vm.add_memory_region(0, guest_phys_base, guest_memory_size, host_addr as u64) }
         .is_err()
     {
         println!("[ushv] Failed to add memory region");
@@ -359,5 +359,6 @@ fn load_guest_image(path: &str) -> Option<Vec<u8>> {
 fn allocate_guest_memory(size: usize) -> usize {
     use scarlet_std::handle::capability::memory_mapping::{flags, mmap_anonymous, prot};
 
-    mmap_anonymous(0, size, prot::READ | prot::WRITE, flags::PRIVATE).unwrap_or(0)
+    // SAFETY: This allocates a fresh non-fixed guest range without replacing live memory; the VM retains it until process teardown.
+    unsafe { mmap_anonymous(0, size, prot::READ | prot::WRITE, flags::PRIVATE) }.unwrap_or(0)
 }

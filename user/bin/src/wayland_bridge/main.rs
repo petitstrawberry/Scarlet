@@ -1629,15 +1629,17 @@ impl WaylandBridge {
             .as_handle()
             .as_memory_mapping()
             .map_err(|_| "Keymap SHM mapping unsupported")?;
-        let addr = mapper
-            .mmap(
+        // SAFETY: This requests a fresh non-fixed mapping; its owning buffer/stream retains the backing and controls all CPU views and unmapping.
+        let addr = unsafe {
+            mapper.mmap(
                 0,
                 size,
                 permissions::READ_WRITE,
                 std::handle::capability::memory_mapping::flags::SHARED,
                 0,
             )
-            .map_err(|_| "Failed to mmap keymap SHM")?;
+        }
+        .map_err(|_| "Failed to mmap keymap SHM")?;
         unsafe {
             let ptr = addr as *mut u8;
             core::ptr::copy_nonoverlapping(keymap.as_ptr(), ptr, keymap.len());

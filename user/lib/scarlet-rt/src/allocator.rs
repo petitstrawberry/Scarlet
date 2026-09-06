@@ -32,23 +32,30 @@ impl FutexRawMutex {
     }
 
     fn wait(&self) {
-        let result = syscall3(
-            Syscall::FutexWait,
-            &self.state as *const AtomicU32 as usize,
-            MUTEX_CONTENDED as usize,
-            usize::MAX,
-        );
+        // SAFETY: The borrowed, aligned AtomicU32 remains live for the wait and is accessed through atomic operations.
+        let result = unsafe {
+            syscall3(
+                Syscall::FutexWait,
+                &self.state as *const AtomicU32 as usize,
+                MUTEX_CONTENDED as usize,
+                usize::MAX,
+            )
+        };
         if result == usize::MAX {
-            let _ = syscall1(Syscall::Sleep, 10_000_000);
+            // SAFETY: This fixed sleep operation takes only a scalar duration and has no userspace pointer arguments.
+            let _ = unsafe { syscall1(Syscall::Sleep, 10_000_000) };
         }
     }
 
     fn wake_one(&self) {
-        let _ = syscall2(
-            Syscall::FutexWake,
-            &self.state as *const AtomicU32 as usize,
-            1,
-        );
+        // SAFETY: The borrowed, aligned AtomicU32 remains live for the wake; the count is scalar.
+        let _ = unsafe {
+            syscall2(
+                Syscall::FutexWake,
+                &self.state as *const AtomicU32 as usize,
+                1,
+            )
+        };
     }
 }
 
@@ -131,7 +138,8 @@ impl OomHandler for SbrkOomHandler {
         // Reserve one unclaimed page after each heap so independently claimed
         // sbrk regions can never take that path.
         let reservation_size = aligned_size.checked_add(MIN_EXTEND_SIZE).ok_or(())?;
-        let result = sbrk(reservation_size);
+        // SAFETY: Talc calls this OOM handler under the allocator lock; the newly reserved heap range is claimed before use.
+        let result = unsafe { sbrk(reservation_size) };
         if result == usize::MAX {
             // sbrk failed
             return Err(());
@@ -217,13 +225,42 @@ pub fn fork_child() {
 
 /// Increase the program break by `size` bytes.
 /// Returns the previous break address, or `usize::MAX` on failure.
-pub fn sbrk(size: usize) -> usize {
-    syscall1(Syscall::Sbrk, size)
+///
+/// # Arguments
+///
+/// * `size` - Number of bytes requested from the process heap.
+///
+/// # Returns
+///
+/// The previous break address, or `usize::MAX` on failure.
+///
+/// # Safety
+///
+/// Coordinate with the process allocator and all other break users. The caller
+/// must establish ownership before accessing the returned raw memory and must
+/// not invalidate existing allocations or references.
+pub unsafe fn sbrk(size: usize) -> usize {
+    // SAFETY: The caller guarantees exclusive coordination with the process allocator and ownership of the resulting range.
+    unsafe { syscall1(Syscall::Sbrk, size) }
 }
 
 /// Set the program break to `addr`.
 /// Returns the new break address, or `usize::MAX` on failure.
+///
+/// # Arguments
+///
+/// * `addr` - Requested process break address.
+///
+/// # Returns
+///
+/// The new break address, or `usize::MAX` on failure.
+///
+/// # Safety
+///
+/// The caller must coordinate with the allocator and ensure the new break
+/// cannot release or overlap any live allocation, reference, stack or code.
 #[allow(dead_code)]
-pub fn brk(addr: usize) -> usize {
-    syscall1(Syscall::Brk, addr)
+pub unsafe fn brk(addr: usize) -> usize {
+    // SAFETY: The caller guarantees that changing the break preserves all live allocations and references.
+    unsafe { syscall1(Syscall::Brk, addr) }
 }

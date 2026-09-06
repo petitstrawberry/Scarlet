@@ -8,7 +8,8 @@ pub use types::{MmioInfo, VcpuExit, VcpuExitReason};
 use scarlet_sys::{Syscall, syscall2, syscall3};
 
 pub fn vm_create() -> Result<u32, ()> {
-    let ret = syscall2(Syscall::ShvVmCreate, 0, 0);
+    // SAFETY: This fixed create operation takes no userspace pointers and returns a new VM handle.
+    let ret = unsafe { syscall2(Syscall::ShvVmCreate, 0, 0) };
     if ret == usize::MAX {
         Err(())
     } else {
@@ -17,7 +18,8 @@ pub fn vm_create() -> Result<u32, ()> {
 }
 
 pub fn vcpu_create(vm_handle: u32, vcpu_id: u32) -> Result<u32, ()> {
-    let ret = syscall2(Syscall::ShvVcpuCreate, vm_handle as usize, vcpu_id as usize);
+    // SAFETY: The kernel validates the VM handle and scalar vCPU ID and returns a new handle.
+    let ret = unsafe { syscall2(Syscall::ShvVcpuCreate, vm_handle as usize, vcpu_id as usize) };
     if ret == usize::MAX {
         Err(())
     } else {
@@ -26,11 +28,14 @@ pub fn vcpu_create(vm_handle: u32, vcpu_id: u32) -> Result<u32, ()> {
 }
 
 pub fn vcpu_run(vcpu_handle: u32, exit: &mut VcpuExit) -> Result<(), ()> {
-    let ret = syscall2(
-        Syscall::ShvVcpuRun,
-        vcpu_handle as usize,
-        exit as *mut VcpuExit as usize,
-    );
+    // SAFETY: exit is an exclusively borrowed VcpuExit record for this synchronous execution call.
+    let ret = unsafe {
+        syscall2(
+            Syscall::ShvVcpuRun,
+            vcpu_handle as usize,
+            exit as *mut VcpuExit as usize,
+        )
+    };
     if ret == usize::MAX { Err(()) } else { Ok(()) }
 }
 
@@ -74,13 +79,33 @@ pub struct VcpuOneReg {
     pub value: u64,
 }
 
-pub fn vm_control(vm_handle: u32, command: u32, arg: usize) -> Result<i32, ()> {
-    let ret = syscall3(
-        Syscall::HandleControl,
-        vm_handle as usize,
-        command as usize,
-        arg,
-    );
+/// Invoke a raw VM control operation.
+///
+/// # Arguments
+///
+/// * `vm_handle` - Live VM capability.
+/// * `command` - Operation from the VM control ABI.
+/// * `arg` - Untyped scalar or pointer required by that operation.
+///
+/// # Returns
+///
+/// The kernel result, or `Err(())` on rejection.
+///
+/// # Safety
+///
+/// The caller must satisfy the command's record layout, pointer validity and
+/// ownership rules. Guest-memory backing must remain valid and exclusively
+/// coordinated with guest accesses for the entire installed region lifetime.
+pub unsafe fn vm_control(vm_handle: u32, command: u32, arg: usize) -> Result<i32, ()> {
+    // SAFETY: The caller supplies this raw control's pointer, ABI and resource-lifetime safety contract.
+    let ret = unsafe {
+        syscall3(
+            Syscall::HandleControl,
+            vm_handle as usize,
+            command as usize,
+            arg,
+        )
+    };
     if ret == usize::MAX {
         Err(())
     } else {
@@ -88,13 +113,32 @@ pub fn vm_control(vm_handle: u32, command: u32, arg: usize) -> Result<i32, ()> {
     }
 }
 
-pub fn vcpu_control(vcpu_handle: u32, command: u32, arg: usize) -> Result<i32, ()> {
-    let ret = syscall3(
-        Syscall::HandleControl,
-        vcpu_handle as usize,
-        command as usize,
-        arg,
-    );
+/// Invoke a raw vCPU control operation.
+///
+/// # Arguments
+///
+/// * `vcpu_handle` - Live vCPU capability.
+/// * `command` - Operation from the vCPU control ABI.
+/// * `arg` - Untyped scalar or pointer required by that operation.
+///
+/// # Returns
+///
+/// The kernel result, or `Err(())` on rejection.
+///
+/// # Safety
+///
+/// All command records and nested pointers must have the required layout,
+/// access permissions and lifetime. Output records require exclusive access.
+pub unsafe fn vcpu_control(vcpu_handle: u32, command: u32, arg: usize) -> Result<i32, ()> {
+    // SAFETY: The caller supplies this raw control's pointer, ABI and resource-lifetime safety contract.
+    let ret = unsafe {
+        syscall3(
+            Syscall::HandleControl,
+            vcpu_handle as usize,
+            command as usize,
+            arg,
+        )
+    };
     if ret == usize::MAX {
         Err(())
     } else {
@@ -120,7 +164,25 @@ impl Vm {
         })
     }
 
-    pub fn add_memory_region(
+    /// Install host memory as guest-accessible backing.
+    ///
+    /// # Arguments
+    ///
+    /// * `slot_id` - Guest region slot to configure.
+    /// * `guest_phys_addr` - Guest physical base address.
+    /// * `size` - Region size in bytes.
+    /// * `host_addr` - Address of the host backing allocation.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` when the region is installed, or `Err(())` on rejection.
+    ///
+    /// # Safety
+    ///
+    /// The caller must own the host range and keep it mapped for every guest
+    /// access, including accesses through other VM/vCPU handles. Guest writes
+    /// must not alias live Rust references or race unsynchronized host accesses.
+    pub unsafe fn add_memory_region(
         &self,
         slot_id: u32,
         guest_phys_addr: u64,
@@ -134,11 +196,14 @@ impl Vm {
             memory_size: size,
             userspace_addr: host_addr,
         };
-        vm_control(
-            self.handle,
-            vm_ctl::SET_MEMORY_REGION,
-            &region as *const VmMemoryRegion as usize,
-        )?;
+        // SAFETY: region is a live ABI record; the caller guarantees backing lifetime and guest/host access coordination.
+        unsafe {
+            vm_control(
+                self.handle,
+                vm_ctl::SET_MEMORY_REGION,
+                &region as *const VmMemoryRegion as usize,
+            )
+        }?;
         Ok(())
     }
 
@@ -147,7 +212,8 @@ impl Vm {
     }
 
     pub fn set_fast_path(&self, flags: u32) -> Result<(), ()> {
-        vm_control(self.handle, vm_ctl::SET_FAST_PATH, flags as usize)?;
+        // SAFETY: This fixed VM control takes only a scalar feature mask validated by the kernel.
+        unsafe { vm_control(self.handle, vm_ctl::SET_FAST_PATH, flags as usize) }?;
         Ok(())
     }
 }
@@ -192,11 +258,14 @@ impl Vcpu {
             _padding: 0,
             value: 0,
         };
-        vcpu_control(
-            self.handle,
-            vcpu_ctl::GET_ONE_REG,
-            &mut one_reg as *mut VcpuOneReg as usize,
-        )?;
+        // SAFETY: one_reg is an exclusive, initialized output record with the vCPU register ABI layout.
+        unsafe {
+            vcpu_control(
+                self.handle,
+                vcpu_ctl::GET_ONE_REG,
+                &mut one_reg as *mut VcpuOneReg as usize,
+            )
+        }?;
         Ok(one_reg.value)
     }
 
@@ -206,11 +275,14 @@ impl Vcpu {
             _padding: 0,
             value,
         };
-        vcpu_control(
-            self.handle,
-            vcpu_ctl::SET_ONE_REG,
-            &one_reg as *const VcpuOneReg as usize,
-        )?;
+        // SAFETY: one_reg is an initialized input record borrowed for the synchronous vCPU register update.
+        unsafe {
+            vcpu_control(
+                self.handle,
+                vcpu_ctl::SET_ONE_REG,
+                &one_reg as *const VcpuOneReg as usize,
+            )
+        }?;
         Ok(())
     }
 
@@ -223,12 +295,14 @@ impl Vcpu {
     }
 
     pub fn inject_interrupt(&self, irq_type: usize) -> Result<(), ()> {
-        vcpu_control(self.handle, vcpu_ctl::INJECT_INTERRUPT, irq_type)?;
+        // SAFETY: This fixed vCPU interrupt control takes a scalar interrupt kind and no pointer.
+        unsafe { vcpu_control(self.handle, vcpu_ctl::INJECT_INTERRUPT, irq_type) }?;
         Ok(())
     }
 
     pub fn clear_interrupt(&self, irq_type: usize) -> Result<(), ()> {
-        vcpu_control(self.handle, vcpu_ctl::CLEAR_INTERRUPT, irq_type)?;
+        // SAFETY: This fixed vCPU interrupt control takes a scalar interrupt kind and no pointer.
+        unsafe { vcpu_control(self.handle, vcpu_ctl::CLEAR_INTERRUPT, irq_type) }?;
         Ok(())
     }
 }

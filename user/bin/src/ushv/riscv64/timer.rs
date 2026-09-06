@@ -88,12 +88,16 @@ fn uart_loop(uart: Arc<Ns16550a>, vcpu: Arc<Vcpu>) {
 fn inject_timer_interrupt(vcpu_handle: u32) {
     use scarlet_std::syscall::{Syscall, syscall3};
     const VCPU_CTL_INJECT_INTERRUPT: u32 = 0x04;
-    let _ = syscall3(
-        Syscall::HandleControl,
-        vcpu_handle as usize,
-        VCPU_CTL_INJECT_INTERRUPT as usize,
-        TIMER_IRQ_TYPE,
-    );
+    // SAFETY: This fixed vCPU timer-interrupt control takes only scalar
+    // handle and interrupt values, with no userspace pointer.
+    let _ = unsafe {
+        syscall3(
+            Syscall::HandleControl,
+            vcpu_handle as usize,
+            VCPU_CTL_INJECT_INTERRUPT as usize,
+            TIMER_IRQ_TYPE,
+        )
+    };
 }
 
 fn timer_loop(state: Arc<Mutex<TimerState>>) {

@@ -11,17 +11,17 @@ extern crate scarlet_std as std;
 
 use alloc::{format, vec};
 #[cfg(feature = "std")]
-use scarlet_os::handle::capability::memory_mapping::{flags, munmap, prot};
-#[cfg(feature = "std")]
 use scarlet_os::handle::capability::SeekFrom;
+#[cfg(feature = "std")]
+use scarlet_os::handle::capability::memory_mapping::{flags, munmap, prot};
 #[cfg(feature = "std")]
 use scarlet_os::handle::{Handle, HandleError, HandleResult};
 #[cfg(not(feature = "std"))]
 use std::{
     fs::File,
     handle::{
-        capability::memory_mapping::{flags, munmap, prot},
         Handle, HandleError, HandleResult,
+        capability::memory_mapping::{flags, munmap, prot},
     },
     io::SeekFrom,
 };
@@ -430,16 +430,21 @@ fn validate_brightness_percent(percent: u8) -> HandleResult<()> {
 }
 
 fn get_brightness_percent(file: &File) -> HandleResult<u8> {
-    let value = file
-        .as_handle()
-        .control(display_commands::DISPLAY_GET_BRIGHTNESS, 0)?;
+    // SAFETY: This fixed brightness control takes only a scalar value and borrows a live display handle.
+    let value = unsafe {
+        file.as_handle()
+            .control(display_commands::DISPLAY_GET_BRIGHTNESS, 0)
+    }?;
     brightness_percent_from_control(value)
 }
 
 fn set_brightness_percent(file: &File, percent: u8) -> HandleResult<()> {
     validate_brightness_percent(percent)?;
-    file.as_handle()
-        .control(display_commands::DISPLAY_SET_BRIGHTNESS, percent as usize)?;
+    // SAFETY: This fixed brightness control takes only a scalar value and borrows a live display handle.
+    unsafe {
+        file.as_handle()
+            .control(display_commands::DISPLAY_SET_BRIGHTNESS, percent as usize)
+    }?;
     Ok(())
 }
 
@@ -477,10 +482,12 @@ impl DisplayControl {
             let Ok(file) = File::open(&path) else {
                 continue;
             };
-            if file
-                .as_handle()
-                .control(display_commands::DISPLAY_GET_BRIGHTNESS, 0)
-                .is_ok()
+            // SAFETY: This fixed brightness control takes only a scalar value and borrows a live display handle.
+            if unsafe {
+                file.as_handle()
+                    .control(display_commands::DISPLAY_GET_BRIGHTNESS, 0)
+            }
+            .is_ok()
             {
                 return Ok(Self { file });
             }
@@ -624,14 +631,14 @@ impl DisplaySurface {
         let handle = self.file.as_handle();
         let mapper = handle.as_memory_mapping()?;
         let mut swapchain = DisplaySwapchainInfo::default();
-        if self
-            .file
-            .as_handle()
-            .control(
+        // SAFETY: The initialized output record has this display query's exact ABI layout and stays exclusively borrowed until return.
+        if unsafe {
+            self.file.as_handle().control(
                 display_commands::DISPLAY_GET_SWAPCHAIN,
                 &mut swapchain as *mut DisplaySwapchainInfo as usize,
             )
-            .is_ok()
+        }
+        .is_ok()
             && swapchain.buffer_count >= 2
             && swapchain.buffer_len != 0
             && swapchain.front_buffer < swapchain.buffer_count
@@ -649,17 +656,21 @@ impl DisplaySurface {
 
             let mut mapped_buffers = alloc::vec::Vec::with_capacity(buffer_count);
             for offset in offsets {
-                let address = match mapper.mmap(
-                    0,
-                    buffer_len,
-                    prot::READ | prot::WRITE,
-                    flags::SHARED,
-                    offset,
-                ) {
+                // SAFETY: This requests a fresh non-fixed mapping; its owning buffer/stream retains the backing and controls all CPU views and unmapping.
+                let address = match unsafe {
+                    mapper.mmap(
+                        0,
+                        buffer_len,
+                        prot::READ | prot::WRITE,
+                        flags::SHARED,
+                        offset,
+                    )
+                } {
                     Ok(address) => address,
                     Err(_) => {
                         for (mapped_addr, mapped_size) in mapped_buffers.drain(..) {
-                            let _ = munmap(mapped_addr, mapped_size);
+                            // SAFETY: This teardown/rollback path owns the exact mapping; its borrowed CPU views have ended before releasing the virtual range.
+                            let _ = unsafe { munmap(mapped_addr, mapped_size) };
                         }
                         return Err(HandleError::SystemError(-1));
                     }
@@ -677,15 +688,17 @@ impl DisplaySurface {
             self.cached_info = Some(info);
             return Ok(());
         }
-        let mapped_addr = mapper
-            .mmap(
+        // SAFETY: This requests a fresh non-fixed mapping; its owning buffer/stream retains the backing and controls all CPU views and unmapping.
+        let mapped_addr = unsafe {
+            mapper.mmap(
                 0,
                 info.buffer_len as usize,
                 prot::READ | prot::WRITE,
                 flags::SHARED,
                 0,
             )
-            .map_err(|_| HandleError::SystemError(-1))?;
+        }
+        .map_err(|_| HandleError::SystemError(-1))?;
         self.mapped_buffer = Some((mapped_addr, info.buffer_len as usize));
         self.mapped_backing_id = info.backing_id;
         self.cached_info = Some(info);
@@ -899,10 +912,13 @@ impl DisplaySurface {
     /// Display surface information or HandleError on failure.
     pub fn get_info(&self) -> HandleResult<DisplayInfo> {
         let mut info = DisplayInfo::default();
-        self.file.as_handle().control(
-            display_commands::DISPLAY_GET_INFO,
-            &mut info as *mut DisplayInfo as usize,
-        )?;
+        // SAFETY: The initialized output record has this display query's exact ABI layout and stays exclusively borrowed until return.
+        unsafe {
+            self.file.as_handle().control(
+                display_commands::DISPLAY_GET_INFO,
+                &mut info as *mut DisplayInfo as usize,
+            )
+        }?;
         Ok(info)
     }
 
@@ -973,11 +989,13 @@ impl DisplaySurface {
 
         if self.swapchain_buffers.is_empty() {
             if let Some((mapped_addr, mapped_size)) = self.mapped_buffer.take() {
-                let _ = munmap(mapped_addr, mapped_size);
+                // SAFETY: This teardown/rollback path owns the exact mapping; its borrowed CPU views have ended before releasing the virtual range.
+                let _ = unsafe { munmap(mapped_addr, mapped_size) };
             }
         } else {
             for (mapped_addr, mapped_size) in self.swapchain_buffers.drain(..) {
-                let _ = munmap(mapped_addr, mapped_size);
+                // SAFETY: This teardown/rollback path owns the exact mapping; its borrowed CPU views have ended before releasing the virtual range.
+                let _ = unsafe { munmap(mapped_addr, mapped_size) };
             }
             self.swapchain_presented_at.clear();
             self.swapchain_pending_damage.clear();
@@ -1061,9 +1079,12 @@ impl DisplaySurface {
         if !self.swapchain_buffers.is_empty() {
             return self.present_swapchain_regions(&[]);
         }
-        self.file
-            .as_handle()
-            .control(display_commands::DISPLAY_PRESENT, 0)?;
+        // SAFETY: This fixed present operation takes no pointer and borrows the live display handle.
+        unsafe {
+            self.file
+                .as_handle()
+                .control(display_commands::DISPLAY_PRESENT, 0)
+        }?;
         Ok(())
     }
 
@@ -1135,10 +1156,13 @@ impl DisplaySurface {
                 ..DisplayPresentImage::default()
             },
         };
-        self.file.as_handle().control(
-            display_commands::DISPLAY_PRESENT_IMAGE,
-            &request as *const DisplayPresentImage as usize,
-        )?;
+        // SAFETY: The fixed present record and any nested damage storage remain valid through this synchronous control call.
+        unsafe {
+            self.file.as_handle().control(
+                display_commands::DISPLAY_PRESENT_IMAGE,
+                &request as *const DisplayPresentImage as usize,
+            )
+        }?;
         Ok(())
     }
 
@@ -1171,10 +1195,13 @@ impl DisplaySurface {
             damage_ptr: regions.as_ptr() as usize,
             ..DisplayPresentBuffer::default()
         };
-        self.file.as_handle().control(
-            display_commands::DISPLAY_PRESENT_BUFFER,
-            &request as *const DisplayPresentBuffer as usize,
-        )?;
+        // SAFETY: The fixed present record and any nested damage storage remain valid through this synchronous control call.
+        unsafe {
+            self.file.as_handle().control(
+                display_commands::DISPLAY_PRESENT_BUFFER,
+                &request as *const DisplayPresentBuffer as usize,
+            )
+        }?;
         self.present_sequence = self.present_sequence.saturating_add(1);
         self.swapchain_presented_at[self.draw_buffer] = Some(self.present_sequence);
         self.draw_buffer = (self.draw_buffer + 1) % self.swapchain_buffers.len();
@@ -1295,10 +1322,13 @@ impl DisplaySurface {
             width,
             height,
         };
-        self.file.as_handle().control(
-            display_commands::DISPLAY_PRESENT_REGION,
-            &region as *const DisplayPresentRegion as usize,
-        )?;
+        // SAFETY: The fixed present record and any nested damage storage remain valid through this synchronous control call.
+        unsafe {
+            self.file.as_handle().control(
+                display_commands::DISPLAY_PRESENT_REGION,
+                &region as *const DisplayPresentRegion as usize,
+            )
+        }?;
         Ok(())
     }
 
@@ -1591,13 +1621,16 @@ impl Framebuffer {
         // Try to map the framebuffer memory
         let handle = self.file.as_handle();
         let mapper = handle.as_memory_mapping()?;
-        match mapper.mmap(
-            0,                          // Let kernel choose address
-            fix_info.smem_len as usize, // Map entire framebuffer
-            prot::READ | prot::WRITE,   // Read/write permissions
-            flags::SHARED,              // Shared mapping
-            0,                          // Offset 0
-        ) {
+        // SAFETY: This requests a fresh non-fixed mapping; its owning buffer/stream retains the backing and controls all CPU views and unmapping.
+        match unsafe {
+            mapper.mmap(
+                0,                          // Let kernel choose address
+                fix_info.smem_len as usize, // Map entire framebuffer
+                prot::READ | prot::WRITE,   // Read/write permissions
+                flags::SHARED,              // Shared mapping
+                0,                          // Offset 0
+            )
+        } {
             Ok(mapped_addr) => {
                 self.mapped_buffer = Some((mapped_addr, fix_info.smem_len as usize));
                 self.mapped_physical_addr = Some(fix_info.smem_start);
@@ -1622,10 +1655,13 @@ impl Framebuffer {
     /// Variable screen information or HandleError on failure
     pub fn get_var_screen_info(&self) -> HandleResult<FbVarScreenInfo> {
         let mut var_info = FbVarScreenInfo::default();
-        self.file.as_handle().control(
-            commands::FBIOGET_VSCREENINFO,
-            &mut var_info as *mut _ as usize,
-        )?;
+        // SAFETY: var_info is an exclusive output record with the framebuffer variable-info ABI layout.
+        unsafe {
+            self.file.as_handle().control(
+                commands::FBIOGET_VSCREENINFO,
+                &mut var_info as *mut _ as usize,
+            )
+        }?;
         Ok(var_info)
     }
 
@@ -1639,9 +1675,12 @@ impl Framebuffer {
         if ptr.is_null() {
             return Err(HandleError::InvalidParameter);
         }
-        self.file
-            .as_handle()
-            .control(commands::FBIOGET_FSCREENINFO, ptr as usize)?;
+        // SAFETY: ptr points to the live aligned fixed-info buffer sized for the kernel's framebuffer ABI.
+        unsafe {
+            self.file
+                .as_handle()
+                .control(commands::FBIOGET_FSCREENINFO, ptr as usize)
+        }?;
         Ok(fix_info)
     }
 
@@ -1653,9 +1692,12 @@ impl Framebuffer {
     /// # Returns
     /// Success or HandleError on failure
     pub fn set_var_screen_info(&self, var_info: &FbVarScreenInfo) -> HandleResult<()> {
-        self.file
-            .as_handle()
-            .control(commands::FBIOPUT_VSCREENINFO, var_info as *const _ as usize)?;
+        // SAFETY: var_info is an initialized input record borrowed through this synchronous framebuffer configuration call.
+        unsafe {
+            self.file
+                .as_handle()
+                .control(commands::FBIOPUT_VSCREENINFO, var_info as *const _ as usize)
+        }?;
         Ok(())
     }
 
@@ -1679,7 +1721,8 @@ impl Framebuffer {
         }
 
         if let Some((mapped_addr, mapped_size)) = self.mapped_buffer.take() {
-            let _ = munmap(mapped_addr, mapped_size);
+            // SAFETY: This teardown/rollback path owns the exact mapping; its borrowed CPU views have ended before releasing the virtual range.
+            let _ = unsafe { munmap(mapped_addr, mapped_size) };
         }
         self.mapped_physical_addr = None;
 
@@ -1696,7 +1739,8 @@ impl Framebuffer {
     /// # Returns
     /// Success or HandleError on failure
     pub fn flush(&self) -> HandleResult<()> {
-        self.file.as_handle().control(commands::FBIO_FLUSH, 0)?;
+        // SAFETY: This fixed framebuffer flush takes no userspace pointer and borrows the live device handle.
+        unsafe { self.file.as_handle().control(commands::FBIO_FLUSH, 0) }?;
         Ok(())
     }
 
@@ -2336,7 +2380,8 @@ impl Drop for Framebuffer {
     fn drop(&mut self) {
         // Clean up memory mapping if it exists
         if let Some((mapped_addr, mapped_size)) = self.mapped_buffer {
-            let _ = munmap(mapped_addr, mapped_size);
+            // SAFETY: This teardown/rollback path owns the exact mapping; its borrowed CPU views have ended before releasing the virtual range.
+            let _ = unsafe { munmap(mapped_addr, mapped_size) };
         }
         self.mapped_physical_addr = None;
     }
@@ -2346,11 +2391,13 @@ impl Drop for DisplaySurface {
     fn drop(&mut self) {
         if self.swapchain_buffers.is_empty() {
             if let Some((mapped_addr, mapped_size)) = self.mapped_buffer {
-                let _ = munmap(mapped_addr, mapped_size);
+                // SAFETY: This teardown/rollback path owns the exact mapping; its borrowed CPU views have ended before releasing the virtual range.
+                let _ = unsafe { munmap(mapped_addr, mapped_size) };
             }
         } else {
             for (mapped_addr, mapped_size) in self.swapchain_buffers.drain(..) {
-                let _ = munmap(mapped_addr, mapped_size);
+                // SAFETY: This teardown/rollback path owns the exact mapping; its borrowed CPU views have ended before releasing the virtual range.
+                let _ = unsafe { munmap(mapped_addr, mapped_size) };
             }
         }
     }
@@ -2358,7 +2405,7 @@ impl Drop for DisplaySurface {
 
 #[cfg(test)]
 mod tests {
-    use super::{brightness_percent_from_control, HandleError};
+    use super::{HandleError, brightness_percent_from_control};
 
     #[test]
     fn brightness_control_result_accepts_inclusive_range() {

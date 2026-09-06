@@ -2802,13 +2802,16 @@ fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Ha
                         // Map SHM into server's address space for compositor access
                         let shm_mapped_addr = match shm.as_handle().as_memory_mapping() {
                             Ok(mapper) => {
-                                match mapper.mmap(
-                                    0,
-                                    buffer_size as usize,
-                                    permissions::READ_WRITE,
-                                    mmap_flags::SHARED,
-                                    0,
-                                ) {
+                                // SAFETY: This requests a fresh non-fixed mapping; its owning buffer/stream retains the backing and controls all CPU views and unmapping.
+                                match unsafe {
+                                    mapper.mmap(
+                                        0,
+                                        buffer_size as usize,
+                                        permissions::READ_WRITE,
+                                        mmap_flags::SHARED,
+                                        0,
+                                    )
+                                } {
                                     Ok(addr) => {
                                         println!(
                                             "[ClientThread {}] SHM mapped at 0x{:x}",
@@ -3059,13 +3062,16 @@ fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Ha
                             }
                         };
 
-                        let mapped_addr = match mapper.mmap(
-                            0,
-                            buffer_size as usize,
-                            permissions::READ_WRITE,
-                            mmap_flags::SHARED,
-                            0,
-                        ) {
+                        // SAFETY: This requests a fresh non-fixed mapping; its owning buffer/stream retains the backing and controls all CPU views and unmapping.
+                        let mapped_addr = match unsafe {
+                            mapper.mmap(
+                                0,
+                                buffer_size as usize,
+                                permissions::READ_WRITE,
+                                mmap_flags::SHARED,
+                                0,
+                            )
+                        } {
                             Ok(a) => a,
                             Err(_) => {
                                 println!("[ClientThread {}] ResizeWindow: mmap failed", client_id);
@@ -3287,13 +3293,16 @@ fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Ha
                     Ok(shm) => {
                         let shm_mapped_addr = match shm.as_handle().as_memory_mapping() {
                             Ok(mapper) => {
-                                match mapper.mmap(
-                                    0,
-                                    buffer_size as usize,
-                                    permissions::READ_WRITE,
-                                    mmap_flags::SHARED,
-                                    0,
-                                ) {
+                                // SAFETY: This requests a fresh non-fixed mapping; its owning buffer/stream retains the backing and controls all CPU views and unmapping.
+                                match unsafe {
+                                    mapper.mmap(
+                                        0,
+                                        buffer_size as usize,
+                                        permissions::READ_WRITE,
+                                        mmap_flags::SHARED,
+                                        0,
+                                    )
+                                } {
                                     Ok(addr) => {
                                         // SAFETY: `addr` is a newly created writable mapping
                                         // whose extent is exactly `buffer_size` bytes.
@@ -3407,13 +3416,16 @@ fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Ha
                 let result = if shm_size_usize > 0 {
                     match shm_handle.as_memory_mapping() {
                         Ok(mapper) => {
-                            match mapper.mmap(
-                                0,
-                                shm_size_usize,
-                                permissions::READ,
-                                mmap_flags::SHARED,
-                                0,
-                            ) {
+                            // SAFETY: This requests a fresh non-fixed mapping; its owning buffer/stream retains the backing and controls all CPU views and unmapping.
+                            match unsafe {
+                                mapper.mmap(
+                                    0,
+                                    shm_size_usize,
+                                    permissions::READ,
+                                    mmap_flags::SHARED,
+                                    0,
+                                )
+                            } {
                                 Ok(addr) => {
                                     // println!("[ClientThread {}]   Handle mapped at 0x{:x}", client_id, addr);
                                     Some(addr)

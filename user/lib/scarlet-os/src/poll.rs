@@ -55,11 +55,14 @@ pub fn poll(handles: &mut [PollHandle], timeout_ns: i64) -> Result<usize, i32> {
 }
 
 pub fn poll_with_options(handles: &mut [PollHandle], options: &PollOptions) -> Result<usize, i32> {
-    let res = syscall3(
-        Syscall::Poll,
-        handles.as_mut_ptr() as usize,
-        handles.len(),
-        options as *const PollOptions as usize,
-    );
+    // SAFETY: The handle array is exclusive output storage; options remains readable for this synchronous wait.
+    let res = unsafe {
+        syscall3(
+            Syscall::Poll,
+            handles.as_mut_ptr() as usize,
+            handles.len(),
+            options as *const PollOptions as usize,
+        )
+    };
     if res == usize::MAX { Err(-1) } else { Ok(res) }
 }

@@ -1,8 +1,9 @@
 //! Scarlet native sensor metadata and event-stream access.
 //!
 //! Sensor streams are independent from input `EV_ABS` streams. Applications
-//! read one fixed-size [`SensorEvent`] at a time from `/dev/sensorN` and query
-//! its physical metadata through [`SensorDevice::info`].
+//! read one fixed-size [`SensorEvent`](crate::sensor::SensorEvent) at a time
+//! from `/dev/sensorN` and query its physical metadata through
+//! [`SensorDevice::info`](crate::sensor::SensorDevice::info).
 
 use crate::handle::capability::{StreamError, StreamResult};
 use crate::handle::{Handle, HandleError, HandleResult};
@@ -312,8 +313,11 @@ impl SensorDevice {
     /// malformed kernel response.
     pub fn info(&self) -> HandleResult<SensorInfo> {
         let mut bytes = [0_u8; SENSOR_INFO_SIZE];
-        self.handle
-            .control(SCTL_SENSOR_GET_INFO, bytes.as_mut_ptr() as usize)?;
+        // SAFETY: bytes is exclusive storage of the sensor ABI's fixed output size and remains valid until return.
+        unsafe {
+            self.handle
+                .control(SCTL_SENSOR_GET_INFO, bytes.as_mut_ptr() as usize)
+        }?;
         parse_sensor_info(&bytes)
     }
 

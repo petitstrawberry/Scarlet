@@ -407,18 +407,21 @@ impl CaptureBuffer {
         let mapped_length = frame_length(stride, height)?;
         let shared_memory = SharedMemory::create(mapped_length, permissions::READ_WRITE)
             .map_err(|_| "Failed to create capture shared memory")?;
-        let mapped_address = shared_memory
-            .as_handle()
-            .as_memory_mapping()
-            .map_err(|_| "Capture shared memory cannot be mapped")?
-            .mmap(
-                0,
-                mapped_length,
-                permissions::READ_WRITE,
-                mmap_flags::SHARED,
-                0,
-            )
-            .map_err(|_| "Failed to map capture shared memory")?;
+        // SAFETY: This requests a fresh non-fixed mapping; its owning buffer/stream retains the backing and controls all CPU views and unmapping.
+        let mapped_address = unsafe {
+            shared_memory
+                .as_handle()
+                .as_memory_mapping()
+                .map_err(|_| "Capture shared memory cannot be mapped")?
+                .mmap(
+                    0,
+                    mapped_length,
+                    permissions::READ_WRITE,
+                    mmap_flags::SHARED,
+                    0,
+                )
+        }
+        .map_err(|_| "Failed to map capture shared memory")?;
         Ok(Self {
             buffer_id,
             width,
@@ -433,7 +436,8 @@ impl CaptureBuffer {
 
 impl Drop for CaptureBuffer {
     fn drop(&mut self) {
-        let _ = MemoryMappingOps::munmap(self.mapped_address, self.mapped_length);
+        // SAFETY: This teardown/rollback path owns the exact mapping; its borrowed CPU views have ended before releasing the virtual range.
+        let _ = unsafe { MemoryMappingOps::munmap(self.mapped_address, self.mapped_length) };
     }
 }
 

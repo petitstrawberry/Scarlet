@@ -79,7 +79,8 @@ impl ClientStream {
 
     fn unmap_ring(&mut self) {
         if let Some(ring_addr) = self.ring_addr.take() {
-            let _ = munmap(ring_addr, self.ring_size);
+            // SAFETY: This teardown/rollback path owns the exact mapping; its borrowed CPU views have ended before releasing the virtual range.
+            let _ = unsafe { munmap(ring_addr, self.ring_size) };
         }
         self.ring_size = 0;
     }
@@ -486,7 +487,8 @@ impl Drop for OutputDevice {
     fn drop(&mut self) {
         self.stop_stream();
         if self.mapped_bytes != 0 {
-            let _ = munmap(self.ring as usize, self.mapped_bytes);
+            // SAFETY: This teardown/rollback path owns the exact mapping; its borrowed CPU views have ended before releasing the virtual range.
+            let _ = unsafe { munmap(self.ring as usize, self.mapped_bytes) };
             self.mapped_bytes = 0;
         }
         let _ = self.audio.release();
@@ -1351,15 +1353,17 @@ fn handle_configure(
         .as_handle()
         .as_memory_mapping()
         .map_err(|_| "SAS shared ring is not mappable")?;
-    let ring_addr = mapper
-        .mmap(
+    // SAFETY: This requests a fresh non-fixed mapping; its owning buffer/stream retains the backing and controls all CPU views and unmapping.
+    let ring_addr = unsafe {
+        mapper.mmap(
             0,
             ring_size,
             prot::READ | prot::WRITE,
             mmap_flags::SHARED,
             0,
         )
-        .map_err(|_| "failed to map SAS shared ring")?;
+    }
+    .map_err(|_| "failed to map SAS shared ring")?;
 
     unsafe {
         init_ring_header(ring_addr, &config, buffer_frames as u32, frame_bytes as u32);

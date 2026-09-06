@@ -89,7 +89,10 @@ fn main() -> i32 {
                         exit(1);
                     }
                 };
-                match mapper.mmap(0, 4096, permissions::READ_WRITE, mmap_flags::SHARED, 0) {
+                // SAFETY: This requests a fresh non-fixed mapping; its owning buffer/stream retains the backing and controls all CPU views and unmapping.
+                match unsafe {
+                    mapper.mmap(0, 4096, permissions::READ_WRITE, mmap_flags::SHARED, 0)
+                } {
                     Ok(addr) => {
                         println!("[Child] Mapped shared memory at: {:#x}", addr);
 
@@ -195,7 +198,8 @@ fn main() -> i32 {
                 exit(1);
             }
         };
-        match mapper.mmap(0, 4096, permissions::READ_WRITE, mmap_flags::SHARED, 0) {
+        // SAFETY: This requests a fresh non-fixed mapping; its owning buffer/stream retains the backing and controls all CPU views and unmapping.
+        match unsafe { mapper.mmap(0, 4096, permissions::READ_WRITE, mmap_flags::SHARED, 0) } {
             Ok(addr) => {
                 println!("[Parent] Mapped shared memory at: {:#x}", addr);
 
@@ -241,7 +245,10 @@ fn main() -> i32 {
                 return 1;
             }
         };
-        if let Ok(addr) = mapper.mmap(0, 4096, permissions::READ_WRITE, mmap_flags::SHARED, 0) {
+        // SAFETY: This requests a fresh non-fixed mapping; its owning buffer/stream retains the backing and controls all CPU views and unmapping.
+        if let Ok(addr) =
+            unsafe { mapper.mmap(0, 4096, permissions::READ_WRITE, mmap_flags::SHARED, 0) }
+        {
             unsafe {
                 let ptr = addr as *const u8;
                 response_non_empty = *ptr.add(RESPONSE_OFFSET) != 0;

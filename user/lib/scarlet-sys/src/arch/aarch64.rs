@@ -2,11 +2,12 @@ use core::arch::asm;
 
 use scarlet_abi::Syscall;
 
-pub fn syscall0(syscall: Syscall) -> usize {
+pub(super) unsafe fn syscall0(syscall: Syscall) -> usize {
     let ret: usize;
     // SAFETY: Scarlet Native AArch64 syscalls use x8 for the syscall number,
     // x0-x5 for arguments, and return through x0. The inline asm does not
-    // access memory or the stack beyond the declared ABI clobbers.
+    // directly touch the stack; kernel memory/ownership effects are covered by
+    // the caller's raw-syscall safety contract.
     unsafe {
         asm!(
             "svc #0",
@@ -19,7 +20,7 @@ pub fn syscall0(syscall: Syscall) -> usize {
     ret
 }
 
-pub fn syscall1(syscall: Syscall, arg1: usize) -> usize {
+pub(super) unsafe fn syscall1(syscall: Syscall, arg1: usize) -> usize {
     let ret: usize;
     // SAFETY: See `syscall0`; this additionally places arg1 in x0.
     unsafe {
@@ -34,7 +35,7 @@ pub fn syscall1(syscall: Syscall, arg1: usize) -> usize {
     ret
 }
 
-pub fn syscall2(syscall: Syscall, arg1: usize, arg2: usize) -> usize {
+pub(super) unsafe fn syscall2(syscall: Syscall, arg1: usize, arg2: usize) -> usize {
     let ret: usize;
     // SAFETY: See `syscall0`; this additionally places arg1-arg2 in x0-x1.
     unsafe {
@@ -50,7 +51,7 @@ pub fn syscall2(syscall: Syscall, arg1: usize, arg2: usize) -> usize {
     ret
 }
 
-pub fn syscall3(syscall: Syscall, arg1: usize, arg2: usize, arg3: usize) -> usize {
+pub(super) unsafe fn syscall3(syscall: Syscall, arg1: usize, arg2: usize, arg3: usize) -> usize {
     let ret: usize;
     // SAFETY: See `syscall0`; this additionally places arg1-arg3 in x0-x2.
     unsafe {
@@ -67,7 +68,13 @@ pub fn syscall3(syscall: Syscall, arg1: usize, arg2: usize, arg3: usize) -> usiz
     ret
 }
 
-pub fn syscall4(syscall: Syscall, arg1: usize, arg2: usize, arg3: usize, arg4: usize) -> usize {
+pub(super) unsafe fn syscall4(
+    syscall: Syscall,
+    arg1: usize,
+    arg2: usize,
+    arg3: usize,
+    arg4: usize,
+) -> usize {
     let ret: usize;
     // SAFETY: See `syscall0`; this additionally places arg1-arg4 in x0-x3.
     unsafe {
@@ -85,7 +92,7 @@ pub fn syscall4(syscall: Syscall, arg1: usize, arg2: usize, arg3: usize, arg4: u
     ret
 }
 
-pub fn syscall5(
+pub(super) unsafe fn syscall5(
     syscall: Syscall,
     arg1: usize,
     arg2: usize,
@@ -111,7 +118,7 @@ pub fn syscall5(
     ret
 }
 
-pub fn syscall6(
+pub(super) unsafe fn syscall6(
     syscall: Syscall,
     arg1: usize,
     arg2: usize,

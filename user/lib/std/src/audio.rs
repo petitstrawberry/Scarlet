@@ -202,20 +202,26 @@ impl AudioDevice {
     /// Query playback capabilities.
     pub fn capabilities(&self) -> Result<AudioPcmCapabilities> {
         let mut caps = AudioPcmCapabilities::default();
-        self.file
-            .as_handle()
-            .control(commands::AUDIO_GET_CAPS, &mut caps as *mut _ as usize)
-            .map_err(|_| Error::new(ErrorKind::Other, "AUDIO_GET_CAPS failed"))?;
+        // SAFETY: The initialized output record matches this fixed audio control ABI and stays exclusively borrowed until return.
+        unsafe {
+            self.file
+                .as_handle()
+                .control(commands::AUDIO_GET_CAPS, &mut caps as *mut _ as usize)
+        }
+        .map_err(|_| Error::new(ErrorKind::Other, "AUDIO_GET_CAPS failed"))?;
         Ok(caps)
     }
 
     /// Query stable device identity and routing metadata.
     pub fn info(&self) -> Result<AudioDeviceInfo> {
         let mut info = AudioDeviceInfo::default();
-        self.file
-            .as_handle()
-            .control(commands::AUDIO_GET_INFO, &mut info as *mut _ as usize)
-            .map_err(|_| Error::new(ErrorKind::Other, "AUDIO_GET_INFO failed"))?;
+        // SAFETY: The initialized output record matches this fixed audio control ABI and stays exclusively borrowed until return.
+        unsafe {
+            self.file
+                .as_handle()
+                .control(commands::AUDIO_GET_INFO, &mut info as *mut _ as usize)
+        }
+        .map_err(|_| Error::new(ErrorKind::Other, "AUDIO_GET_INFO failed"))?;
         Ok(info)
     }
 
@@ -231,24 +237,26 @@ impl AudioDevice {
     /// curve, or an I/O error when the query fails.
     pub fn volume_curve(&self) -> Result<AudioVolumeCurve> {
         let mut curve = AudioVolumeCurve::default();
-        self.file
-            .as_handle()
-            .control(
+        // SAFETY: The initialized output record matches this fixed audio control ABI and stays exclusively borrowed until return.
+        unsafe {
+            self.file.as_handle().control(
                 commands::AUDIO_GET_VOLUME_CURVE,
                 &mut curve as *mut _ as usize,
             )
-            .map_err(|_| {
-                Error::new(ErrorKind::Unsupported, "AUDIO_GET_VOLUME_CURVE unsupported")
-            })?;
+        }
+        .map_err(|_| Error::new(ErrorKind::Unsupported, "AUDIO_GET_VOLUME_CURVE unsupported"))?;
         Ok(curve)
     }
 
     /// Configure the playback stream.
     pub fn set_params(&self, params: &AudioPcmParams) -> Result<()> {
-        self.file
-            .as_handle()
-            .control(commands::AUDIO_SET_PARAMS, params as *const _ as usize)
-            .map_err(|_| Error::new(ErrorKind::InvalidInput, "AUDIO_SET_PARAMS failed"))?;
+        // SAFETY: params is a live initialized audio-parameter ABI record borrowed until return.
+        unsafe {
+            self.file
+                .as_handle()
+                .control(commands::AUDIO_SET_PARAMS, params as *const _ as usize)
+        }
+        .map_err(|_| Error::new(ErrorKind::InvalidInput, "AUDIO_SET_PARAMS failed"))?;
         self.configured.set(true);
         Ok(())
     }
@@ -256,10 +264,13 @@ impl AudioDevice {
     /// Query the mmap ring buffer layout.
     pub fn buffer_info(&self) -> Result<AudioPcmBufferInfo> {
         let mut info = AudioPcmBufferInfo::default();
-        self.file
-            .as_handle()
-            .control(commands::AUDIO_GET_BUFFER, &mut info as *mut _ as usize)
-            .map_err(|_| Error::new(ErrorKind::Other, "AUDIO_GET_BUFFER failed"))?;
+        // SAFETY: The initialized output record matches this fixed audio control ABI and stays exclusively borrowed until return.
+        unsafe {
+            self.file
+                .as_handle()
+                .control(commands::AUDIO_GET_BUFFER, &mut info as *mut _ as usize)
+        }
+        .map_err(|_| Error::new(ErrorKind::Other, "AUDIO_GET_BUFFER failed"))?;
         Ok(info)
     }
 
@@ -270,41 +281,44 @@ impl AudioDevice {
             .as_handle()
             .as_memory_mapping()
             .map_err(|_| Error::new(ErrorKind::Unsupported, "audio mmap unsupported"))?;
-        let addr = mapper
-            .mmap(
+        // SAFETY: This requests a fresh non-fixed device mapping and returns only a raw pointer; dereferencing it requires separate unsafe access and device-lifetime guarantees.
+        let addr = unsafe {
+            mapper.mmap(
                 0,
                 info.buffer_bytes as usize,
                 prot::READ | prot::WRITE,
                 mmap_flags::SHARED,
                 info.mmap_offset as usize,
             )
-            .map_err(|_| Error::new(ErrorKind::Other, "audio mmap failed"))?;
+        }
+        .map_err(|_| Error::new(ErrorKind::Other, "audio mmap failed"))?;
         Ok(addr as *mut u8)
     }
 
     /// Commit frames written into the mmap ring.
     pub fn commit_frames(&self, frames: u32) -> Result<()> {
-        self.file
-            .as_handle()
-            .control(commands::AUDIO_COMMIT_FRAMES, frames as usize)
-            .map_err(|_| Error::new(ErrorKind::InvalidInput, "AUDIO_COMMIT_FRAMES failed"))?;
+        // SAFETY: This fixed audio control takes only a scalar value and borrows the live device handle.
+        unsafe {
+            self.file
+                .as_handle()
+                .control(commands::AUDIO_COMMIT_FRAMES, frames as usize)
+        }
+        .map_err(|_| Error::new(ErrorKind::InvalidInput, "AUDIO_COMMIT_FRAMES failed"))?;
         Ok(())
     }
 
     /// Start playback.
     pub fn start(&self) -> Result<()> {
-        self.file
-            .as_handle()
-            .control(commands::AUDIO_START, 0)
+        // SAFETY: This fixed audio control takes only a scalar value and borrows the live device handle.
+        unsafe { self.file.as_handle().control(commands::AUDIO_START, 0) }
             .map_err(|_| Error::new(ErrorKind::Other, "AUDIO_START failed"))?;
         Ok(())
     }
 
     /// Stop playback.
     pub fn stop(&self) -> Result<()> {
-        self.file
-            .as_handle()
-            .control(commands::AUDIO_STOP, 0)
+        // SAFETY: This fixed audio control takes only a scalar value and borrows the live device handle.
+        unsafe { self.file.as_handle().control(commands::AUDIO_STOP, 0) }
             .map_err(|_| Error::new(ErrorKind::Other, "AUDIO_STOP failed"))?;
         Ok(())
     }
@@ -314,9 +328,8 @@ impl AudioDevice {
         if !self.configured.get() {
             return Ok(());
         }
-        self.file
-            .as_handle()
-            .control(commands::AUDIO_RELEASE, 0)
+        // SAFETY: This fixed audio control takes only a scalar value and borrows the live device handle.
+        unsafe { self.file.as_handle().control(commands::AUDIO_RELEASE, 0) }
             .map_err(|_| Error::new(ErrorKind::Other, "AUDIO_RELEASE failed"))?;
         self.configured.set(false);
         Ok(())
@@ -325,10 +338,13 @@ impl AudioDevice {
     /// Query playback status.
     pub fn status(&self) -> Result<AudioPcmStatus> {
         let mut status = AudioPcmStatus::default();
-        self.file
-            .as_handle()
-            .control(commands::AUDIO_GET_STATUS, &mut status as *mut _ as usize)
-            .map_err(|_| Error::new(ErrorKind::Other, "AUDIO_GET_STATUS failed"))?;
+        // SAFETY: The initialized output record matches this fixed audio control ABI and stays exclusively borrowed until return.
+        unsafe {
+            self.file
+                .as_handle()
+                .control(commands::AUDIO_GET_STATUS, &mut status as *mut _ as usize)
+        }
+        .map_err(|_| Error::new(ErrorKind::Other, "AUDIO_GET_STATUS failed"))?;
         Ok(status)
     }
 
@@ -341,8 +357,10 @@ impl AudioDevice {
 impl Drop for AudioDevice {
     fn drop(&mut self) {
         if self.configured.get() {
-            let _ = self.file.as_handle().control(commands::AUDIO_STOP, 0);
-            let _ = self.file.as_handle().control(commands::AUDIO_RELEASE, 0);
+            // SAFETY: This fixed audio control takes only a scalar value and borrows the live device handle.
+            let _ = unsafe { self.file.as_handle().control(commands::AUDIO_STOP, 0) };
+            // SAFETY: This fixed audio control takes only a scalar value and borrows the live device handle.
+            let _ = unsafe { self.file.as_handle().control(commands::AUDIO_RELEASE, 0) };
         }
     }
 }

@@ -36,11 +36,14 @@ impl<'a> SharedMemoryObject<'a> {
 
     /// Resize the shared memory region
     pub fn resize(&self, new_size: usize) -> SharedMemoryObjectResult<()> {
-        let result = syscall2(
-            Syscall::SharedMemoryResize,
-            self.handle.as_raw() as usize,
-            new_size,
-        );
+        // SAFETY: The borrowed shared-memory handle remains live; the kernel validates the requested size.
+        let result = unsafe {
+            syscall2(
+                Syscall::SharedMemoryResize,
+                self.handle.as_raw() as usize,
+                new_size,
+            )
+        };
         if result == usize::MAX {
             return Err(SharedMemoryObjectError::SystemError(-1));
         }

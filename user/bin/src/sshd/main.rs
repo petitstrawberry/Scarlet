@@ -53,12 +53,15 @@ getrandom::register_custom_getrandom!(scarlet_getrandom);
 fn scarlet_getrandom(destination: &mut [u8]) -> Result<(), getrandom::Error> {
     let mut offset = 0usize;
     while offset < destination.len() {
-        let result = scarlet_sys::syscall3(
-            scarlet_sys::Syscall::GetRandom,
-            destination[offset..].as_mut_ptr() as usize,
-            destination.len() - offset,
-            scarlet_sys::GET_RANDOM_FLAG_REQUIRE_ENTROPY,
-        );
+        // SAFETY: The remaining destination slice is exclusively borrowed and writable for exactly the supplied length until return.
+        let result = unsafe {
+            scarlet_sys::syscall3(
+                scarlet_sys::Syscall::GetRandom,
+                destination[offset..].as_mut_ptr() as usize,
+                destination.len() - offset,
+                scarlet_sys::GET_RANDOM_FLAG_REQUIRE_ENTROPY,
+            )
+        };
         if result == usize::MAX || result == 0 || result > destination.len() - offset {
             let code = NonZeroU32::new(CUSTOM_RANDOM_ERROR)
                 .expect("custom getrandom error code must be non-zero");
@@ -189,7 +192,9 @@ struct ChildSession {
 impl Drop for ChildSession {
     fn drop(&mut self) {
         if !self.child_exited {
-            let _ = scarlet_sys::syscall2(scarlet_sys::Syscall::Kill, self.pid as usize, 15);
+            // SAFETY: The PID and signal are scalar inputs validated by the kernel; no userspace pointer is passed.
+            let _ =
+                unsafe { scarlet_sys::syscall2(scarlet_sys::Syscall::Kill, self.pid as usize, 15) };
             let _ = waitpid(self.pid, WAIT_NOHANG);
         }
     }

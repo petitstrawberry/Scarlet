@@ -50,7 +50,11 @@ fn run() -> u8 {
     };
 
     INTERRUPTED.store(false, Ordering::Relaxed);
-    if register_event_handler(event_types::PROCESS_CONTROL, interrupt_handler, false).is_err() {
+    // SAFETY: The static C-ABI handler reads only its borrowed event and sets an
+    // atomic flag; it does not retain the event, allocate, lock, or unwind.
+    if unsafe { register_event_handler(event_types::PROCESS_CONTROL, interrupt_handler, false) }
+        .is_err()
+    {
         println!("[ping] failed to register Ctrl-C handler");
         return 1;
     }

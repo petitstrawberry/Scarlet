@@ -200,7 +200,8 @@ impl InputDevice {
     /// The class reported by the kernel, or a handle error if metadata is
     /// unavailable or malformed.
     pub fn kind(&self) -> HandleResult<InputDeviceKind> {
-        let raw = self.handle.control(SCTL_INPUT_GET_KIND, 0)?;
+        // SAFETY: This fixed input query takes only a scalar code; the borrowed device handle remains live.
+        let raw = unsafe { self.handle.control(SCTL_INPUT_GET_KIND, 0) }?;
         InputDeviceKind::try_from(raw).map_err(|_| HandleError::InvalidParameter)
     }
 
@@ -211,7 +212,8 @@ impl InputDevice {
     /// The capability mask, or a handle error if metadata is unavailable or
     /// malformed.
     pub fn capabilities(&self) -> HandleResult<u32> {
-        let raw = self.handle.control(SCTL_INPUT_GET_CAPABILITIES, 0)?;
+        // SAFETY: This fixed input query takes only a scalar code; the borrowed device handle remains live.
+        let raw = unsafe { self.handle.control(SCTL_INPUT_GET_CAPABILITIES, 0) }?;
         u32::try_from(raw).map_err(|_| HandleError::InvalidParameter)
     }
 
@@ -229,12 +231,16 @@ impl InputDevice {
         if code > ABS_MAX {
             return Err(HandleError::InvalidParameter);
         }
-        let minimum = self
-            .handle
-            .control(SCTL_INPUT_GET_ABS_MIN, usize::from(code))?;
-        let maximum = self
-            .handle
-            .control(SCTL_INPUT_GET_ABS_MAX, usize::from(code))?;
+        // SAFETY: This fixed input query takes only a scalar code; the borrowed device handle remains live.
+        let minimum = unsafe {
+            self.handle
+                .control(SCTL_INPUT_GET_ABS_MIN, usize::from(code))
+        }?;
+        // SAFETY: This fixed input query takes only a scalar code; the borrowed device handle remains live.
+        let maximum = unsafe {
+            self.handle
+                .control(SCTL_INPUT_GET_ABS_MAX, usize::from(code))
+        }?;
         if minimum >= maximum {
             return Err(HandleError::InvalidParameter);
         }
@@ -252,7 +258,8 @@ impl InputDevice {
     /// The slot count, or a handle error if multitouch metadata is unavailable
     /// or malformed.
     pub fn multitouch_slot_count(&self) -> HandleResult<u16> {
-        let raw = self.handle.control(SCTL_INPUT_GET_MT_SLOT_COUNT, 0)?;
+        // SAFETY: This fixed input query takes only a scalar code; the borrowed device handle remains live.
+        let raw = unsafe { self.handle.control(SCTL_INPUT_GET_MT_SLOT_COUNT, 0) }?;
         let slot_count = u16::try_from(raw).map_err(|_| HandleError::InvalidParameter)?;
         if slot_count == 0 {
             return Err(HandleError::InvalidParameter);
@@ -267,7 +274,8 @@ impl InputDevice {
     /// The switch capability mask, or a handle error if metadata is unavailable
     /// or malformed.
     pub fn switch_capabilities(&self) -> HandleResult<u32> {
-        let raw = self.handle.control(SCTL_INPUT_GET_SWITCH_CAPABILITIES, 0)?;
+        // SAFETY: This fixed input query takes only a scalar code; the borrowed device handle remains live.
+        let raw = unsafe { self.handle.control(SCTL_INPUT_GET_SWITCH_CAPABILITIES, 0) }?;
         u32::try_from(raw).map_err(|_| HandleError::InvalidParameter)
     }
 
@@ -286,10 +294,11 @@ impl InputDevice {
         if code > switch_codes::SW_MAX {
             return Err(HandleError::InvalidParameter);
         }
-        match self
-            .handle
-            .control(SCTL_INPUT_GET_SWITCH_STATE, usize::from(code))?
-        {
+        // SAFETY: This fixed input query takes only a scalar code; the borrowed device handle remains live.
+        match unsafe {
+            self.handle
+                .control(SCTL_INPUT_GET_SWITCH_STATE, usize::from(code))
+        }? {
             0 => Ok(false),
             1 => Ok(true),
             _ => Err(HandleError::InvalidParameter),

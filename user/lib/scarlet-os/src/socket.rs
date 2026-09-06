@@ -156,12 +156,15 @@ impl Socket {
         socket_type: SocketType,
         protocol: SocketProtocol,
     ) -> Result<Self> {
-        let raw_handle = syscall3(
-            Syscall::SocketCreate,
-            domain as usize,
-            socket_type as usize,
-            protocol as usize,
-        );
+        // SAFETY: Domain, type and protocol are scalar inputs; success transfers a newly owned handle.
+        let raw_handle = unsafe {
+            syscall3(
+                Syscall::SocketCreate,
+                domain as usize,
+                socket_type as usize,
+                protocol as usize,
+            )
+        };
         if raw_handle == usize::MAX {
             return Err(SocketError::SyscallFailed);
         }
@@ -212,12 +215,15 @@ impl Socket {
         if interface.is_empty() {
             return Err(SocketError::InvalidAddress);
         }
-        let result = syscall3(
-            Syscall::SocketBindInterface,
-            self.handle.as_raw() as usize,
-            interface.as_ptr() as usize,
-            interface.len(),
-        );
+        // SAFETY: The interface name slice remains readable for its exact length until return.
+        let result = unsafe {
+            syscall3(
+                Syscall::SocketBindInterface,
+                self.handle.as_raw() as usize,
+                interface.as_ptr() as usize,
+                interface.len(),
+            )
+        };
         if result == usize::MAX {
             Err(SocketError::InvalidAddress)
         } else {
@@ -255,7 +261,16 @@ impl Socket {
     ///
     /// This performs a type check using the handle's cached kernel object info.
     /// If the handle does not represent a socket, this returns [`SocketError::InvalidHandle`]
-    /// and does **not** consume the handle.
+    /// The handle is consumed on both success and failure; failure drops and
+    /// closes it rather than returning ownership to the caller.
+    ///
+    /// # Arguments
+    ///
+    /// * `handle` - Owned handle transferred to this conversion.
+    ///
+    /// # Returns
+    ///
+    /// An owning socket wrapper, or an error after releasing the handle.
     pub fn from_handle(handle: Handle) -> Result<Self> {
         handle.as_socket().map_err(|_| SocketError::InvalidHandle)?;
         Ok(Self { handle })
@@ -265,6 +280,8 @@ impl Socket {
     ///
     /// # Safety
     /// The caller must ensure the handle is valid and represents a socket.
+    /// The caller must transfer exclusive ownership exactly once and must not
+    /// close or adopt `raw` again, including if validation panics.
     pub unsafe fn from_raw(raw: RawHandle) -> Self {
         let handle = unsafe { Handle::from_raw(raw) }.expect("invalid raw handle");
         Self { handle }
@@ -558,7 +575,8 @@ impl Socket {
     /// ```
     pub fn pair() -> Result<(Socket, Socket)> {
         let mut handles = [0usize; 2];
-        let result = syscall1(Syscall::Socketpair, handles.as_mut_ptr() as usize);
+        // SAFETY: handles is exclusive output storage for both newly transferred socket handles.
+        let result = unsafe { syscall1(Syscall::Socketpair, handles.as_mut_ptr() as usize) };
         if result == usize::MAX {
             return Err(SocketError::SyscallFailed);
         }
@@ -567,7 +585,8 @@ impl Socket {
             Err(_) => {
                 // from_raw consumed and closed handles[0]. The other endpoint
                 // has not been adopted, so close it explicitly to avoid a leak.
-                let _ = syscall1(Syscall::HandleClose, handles[1]);
+                // SAFETY: This path exclusively owns the raw handle and closes it once, without leaving an armed owning wrapper.
+                let _ = unsafe { syscall1(Syscall::HandleClose, handles[1]) };
                 return Err(SocketError::SyscallFailed);
             }
         };
@@ -646,12 +665,15 @@ impl Socket {
     /// socket.set_nonblocking(true).unwrap();
     /// ```
     pub fn set_nonblocking(&self, enabled: bool) -> Result<()> {
-        let result = syscall3(
-            Syscall::HandleControl,
-            self.handle.as_raw() as usize,
-            SCTL_SOCKET_SET_NONBLOCK as usize,
-            if enabled { 1 } else { 0 },
-        );
+        // SAFETY: This fixed socket control takes a scalar argument and borrows the live handle; it carries no raw pointer.
+        let result = unsafe {
+            syscall3(
+                Syscall::HandleControl,
+                self.handle.as_raw() as usize,
+                SCTL_SOCKET_SET_NONBLOCK as usize,
+                if enabled { 1 } else { 0 },
+            )
+        };
         if result == usize::MAX {
             return Err(SocketError::SyscallFailed);
         }
@@ -672,12 +694,15 @@ impl Socket {
     /// assert!(socket.is_nonblocking().unwrap());
     /// ```
     pub fn is_nonblocking(&self) -> Result<bool> {
-        let result = syscall3(
-            Syscall::HandleControl,
-            self.handle.as_raw() as usize,
-            SCTL_SOCKET_GET_NONBLOCK as usize,
-            0,
-        );
+        // SAFETY: This fixed socket control takes a scalar argument and borrows the live handle; it carries no raw pointer.
+        let result = unsafe {
+            syscall3(
+                Syscall::HandleControl,
+                self.handle.as_raw() as usize,
+                SCTL_SOCKET_GET_NONBLOCK as usize,
+                0,
+            )
+        };
         if result == usize::MAX {
             return Err(SocketError::SyscallFailed);
         }
@@ -766,13 +791,16 @@ impl DatagramOps for Socket {
         // Allocate space for address (8 bytes: 2 for family, 4 for IP, 2 for port)
         let mut addr_buf = [0u8; 8];
 
-        let result = syscall4(
-            Syscall::SocketRecvFrom,
-            self.handle.as_raw() as usize,
-            buf.as_mut_ptr() as usize,
-            buf.len(),
-            addr_buf.as_mut_ptr() as usize,
-        );
+        // SAFETY: buf and addr_buf are disjoint exclusive output buffers valid until the receive returns.
+        let result = unsafe {
+            syscall4(
+                Syscall::SocketRecvFrom,
+                self.handle.as_raw() as usize,
+                buf.as_mut_ptr() as usize,
+                buf.len(),
+                addr_buf.as_mut_ptr() as usize,
+            )
+        };
 
         let result = SocketObjectError::from_syscall_result(result).map_err(socket_object_error)?;
 
@@ -803,13 +831,16 @@ impl DatagramOps for Socket {
             _ => return Err(SocketError::InvalidAddress),
         }
 
-        let result = syscall4(
-            Syscall::SocketSendTo,
-            self.handle.as_raw() as usize,
-            buf.as_ptr() as usize,
-            buf.len(),
-            addr_buf.as_ptr() as usize,
-        );
+        // SAFETY: The data and encoded address buffers remain readable for the synchronous send.
+        let result = unsafe {
+            syscall4(
+                Syscall::SocketSendTo,
+                self.handle.as_raw() as usize,
+                buf.as_ptr() as usize,
+                buf.len(),
+                addr_buf.as_ptr() as usize,
+            )
+        };
 
         SocketObjectError::from_syscall_result(result).map_err(socket_object_error)
     }

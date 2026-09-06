@@ -84,8 +84,16 @@ impl Default for CloneFlags {
 /// - In the parent process: the ID of the child process
 /// - In the child process: 0
 /// - On error: -1
-pub fn clone(flags: CloneFlags) -> i32 {
-    syscall5(Syscall::Clone, flags.get_raw() as usize, 0, 0, 0, 0) as i32
+///
+/// # Safety
+///
+/// The selected sharing flags must preserve Rust ownership in both execution
+/// contexts. In particular, do not share a live Rust stack, TLS or unsynchronized
+/// memory between independently running contexts. Coordinate runtime/allocator
+/// state before cloning; ordinary process duplication should use [`fork`].
+pub unsafe fn clone(flags: CloneFlags) -> i32 {
+    // SAFETY: The caller guarantees that the selected sharing flags preserve stack, TLS and Rust ownership invariants.
+    (unsafe { syscall5(Syscall::Clone, flags.get_raw() as usize, 0, 0, 0, 0) }) as i32
 }
 
 /// Fork the current process.
@@ -97,7 +105,8 @@ pub fn clone(flags: CloneFlags) -> i32 {
 pub fn fork() -> i32 {
     let clone_flags = CloneFlags::default();
     crate::allocator::fork_prepare();
-    let result = clone(clone_flags);
+    // SAFETY: The default flags do not share VM/stack/TLS; fork_prepare coordinates the allocator across process duplication.
+    let result = unsafe { clone(clone_flags) };
     if result == 0 {
         crate::allocator::fork_child();
     } else {
@@ -132,7 +141,8 @@ pub fn fork() -> i32 {
 /// task::exit(0); // Terminates entire process
 /// ```
 pub fn exit(code: i32) -> ! {
-    syscall1(Syscall::ExitGroup, code as usize);
+    // SAFETY: This fixed operation terminates the process and cannot resume access through live Rust references.
+    unsafe { syscall1(Syscall::ExitGroup, code as usize) };
     unreachable!("exit syscall should not return");
 }
 
@@ -194,7 +204,8 @@ pub fn exit_thread(code: i32) -> ! {
 /// task::exit_group(0);
 /// ```
 pub fn exit_group(code: i32) -> ! {
-    syscall1(Syscall::ExitGroup, code as usize);
+    // SAFETY: This fixed operation terminates the process and cannot resume access through live Rust references.
+    unsafe { syscall1(Syscall::ExitGroup, code as usize) };
     unreachable!("exit_group syscall should not return");
 }
 
@@ -204,7 +215,8 @@ pub fn exit_group(code: i32) -> ! {
 /// - The process ID of the calling process
 ///
 pub fn getpid() -> u32 {
-    syscall0(Syscall::Getpid) as u32
+    // SAFETY: This fixed identity query takes no arguments and has no userspace pointer effects.
+    (unsafe { syscall0(Syscall::Getpid) }) as u32
 }
 
 /// Returns the parent process ID.
@@ -213,7 +225,8 @@ pub fn getpid() -> u32 {
 /// - The process ID of the parent process. If the process has no parent, returns own PID.
 ///
 pub fn getppid() -> u32 {
-    syscall0(Syscall::Getppid) as u32
+    // SAFETY: This fixed identity query takes no arguments and has no userspace pointer effects.
+    (unsafe { syscall0(Syscall::Getppid) }) as u32
 }
 
 /// Errors returned by native session/process-group operations.
@@ -252,7 +265,8 @@ fn task_control_result(value: usize) -> Result<usize, TaskControlError> {
 ///
 /// Namespace-local session ID on success.
 pub fn create_session() -> Result<u32, TaskControlError> {
-    task_control_result(syscall0(Syscall::CreateSession)).map(|id| id as u32)
+    // SAFETY: This fixed session operation takes no arguments or userspace pointers.
+    task_control_result(unsafe { syscall0(Syscall::CreateSession) }).map(|id| id as u32)
 }
 
 /// Return the session ID for a task.
@@ -266,7 +280,8 @@ pub fn create_session() -> Result<u32, TaskControlError> {
 /// Namespace-local session ID on success.
 pub fn session_id(pid: Option<u32>) -> Result<u32, TaskControlError> {
     let pid = pid.unwrap_or(0) as usize;
-    task_control_result(syscall1(Syscall::GetSessionId, pid)).map(|id| id as u32)
+    // SAFETY: The kernel validates the scalar task ID; no userspace pointer is passed.
+    task_control_result(unsafe { syscall1(Syscall::GetSessionId, pid) }).map(|id| id as u32)
 }
 
 /// Return the process group ID for a task.
@@ -280,7 +295,8 @@ pub fn session_id(pid: Option<u32>) -> Result<u32, TaskControlError> {
 /// Namespace-local process group ID on success.
 pub fn process_group_id(pid: Option<u32>) -> Result<u32, TaskControlError> {
     let pid = pid.unwrap_or(0) as usize;
-    task_control_result(syscall1(Syscall::GetProcessGroupId, pid)).map(|id| id as u32)
+    // SAFETY: The kernel validates the scalar task ID; no userspace pointer is passed.
+    task_control_result(unsafe { syscall1(Syscall::GetProcessGroupId, pid) }).map(|id| id as u32)
 }
 
 /// Set a task's process group.
@@ -300,7 +316,9 @@ pub fn set_process_group(
 ) -> Result<(), TaskControlError> {
     let pid = pid.unwrap_or(0) as usize;
     let process_group_id = process_group_id.unwrap_or(0) as usize;
-    task_control_result(syscall2(Syscall::SetProcessGroup, pid, process_group_id)).map(|_| ())
+    // SAFETY: Both IDs are scalar inputs; no userspace pointer is passed.
+    task_control_result(unsafe { syscall2(Syscall::SetProcessGroup, pid, process_group_id) })
+        .map(|_| ())
 }
 
 /// Executes a program, replacing the current process image.
@@ -334,13 +352,16 @@ pub fn execve(path: &str, argv: &[&str], envp: &[&str]) -> i32 {
     };
     let (envp_ptr_array, envp_len) = create_ptr_array_box(envp_ptrs);
 
-    let res = syscall4(
-        Syscall::Execve,
-        path_ptr,
-        argv_ptr_array as usize,
-        envp_ptr_array as usize,
-        0_usize,
-    );
+    // SAFETY: All NUL-terminated strings and pointer arrays stay live until failure returns; success never resumes this image.
+    let res = unsafe {
+        syscall4(
+            Syscall::Execve,
+            path_ptr,
+            argv_ptr_array as usize,
+            envp_ptr_array as usize,
+            0_usize,
+        )
+    };
 
     // If the syscall fails, we need to free the allocated memory
     // (On success, the context is switched, so this code is not reached)
@@ -396,14 +417,17 @@ pub fn execve_abi(path: &str, argv: &[&str], envp: &[&str], abi: &str) -> i32 {
     let abi_boxed_slice_len = abi_boxed_slice.len();
     let abi_ptr = Box::into_raw(abi_boxed_slice) as *const u8 as usize;
 
-    let res = syscall5(
-        Syscall::ExecveABI,
-        path_ptr,
-        argv_ptr_array as usize,
-        envp_ptr_array as usize,
-        abi_ptr,
-        0_usize,
-    );
+    // SAFETY: All NUL-terminated strings, ABI name and pointer arrays stay live until failure returns; success never resumes this image.
+    let res = unsafe {
+        syscall5(
+            Syscall::ExecveABI,
+            path_ptr,
+            argv_ptr_array as usize,
+            envp_ptr_array as usize,
+            abi_ptr,
+            0_usize,
+        )
+    };
 
     let _ = unsafe {
         Box::from_raw(core::ptr::slice_from_raw_parts_mut(
@@ -513,13 +537,16 @@ pub fn execve_with_flags(path: &str, argv: &[&str], envp: &[&str], flags: usize)
     };
     let (envp_ptr_array, envp_len) = create_ptr_array_box(envp_ptrs);
 
-    let res = syscall4(
-        Syscall::Execve,
-        path_ptr,
-        argv_ptr_array as usize,
-        envp_ptr_array as usize,
-        flags,
-    );
+    // SAFETY: All NUL-terminated strings and pointer arrays stay live until failure returns; success never resumes this image.
+    let res = unsafe {
+        syscall4(
+            Syscall::Execve,
+            path_ptr,
+            argv_ptr_array as usize,
+            envp_ptr_array as usize,
+            flags,
+        )
+    };
 
     // If the syscall fails, we need to free the allocated memory
     // (On success, the context is switched, so this code is not reached)
@@ -596,14 +623,17 @@ pub fn execve_abi_with_flags(
     let abi_boxed_slice_len = abi_boxed_slice.len();
     let abi_ptr = Box::into_raw(abi_boxed_slice) as *const u8 as usize;
 
-    let res = syscall5(
-        Syscall::ExecveABI,
-        path_ptr,
-        argv_ptr_array as usize,
-        envp_ptr_array as usize,
-        abi_ptr,
-        flags,
-    );
+    // SAFETY: All NUL-terminated strings, ABI name and pointer arrays stay live until failure returns; success never resumes this image.
+    let res = unsafe {
+        syscall5(
+            Syscall::ExecveABI,
+            path_ptr,
+            argv_ptr_array as usize,
+            envp_ptr_array as usize,
+            abi_ptr,
+            flags,
+        )
+    };
 
     let _ = unsafe {
         Box::from_raw(core::ptr::slice_from_raw_parts_mut(
@@ -659,12 +689,15 @@ pub const WAIT_STOPPED_STATUS: i32 = 0x7f;
 ///
 pub fn waitpid(pid: i32, options: i32) -> (i32, i32) {
     let mut status: i32 = 0;
-    let pid = syscall3(
-        Syscall::Waitpid,
-        pid as usize,
-        &mut status as *mut i32 as usize,
-        options as usize,
-    );
+    // SAFETY: status is an exclusive i32 output valid until return; pid and options are scalar values.
+    let pid = unsafe {
+        syscall3(
+            Syscall::Waitpid,
+            pid as usize,
+            &mut status as *mut i32 as usize,
+            options as usize,
+        )
+    };
     (pid as i32, status)
 }
 
@@ -697,11 +730,14 @@ pub fn wait() -> (i32, i32) {
 /// ```
 pub fn pipe() -> Result<(crate::handle::Handle, crate::handle::Handle), i32> {
     let mut pipefd = [0u32; 2];
-    let result = syscall2(
-        Syscall::Pipe,
-        pipefd.as_mut_ptr() as usize,
-        0, // flags (not used yet in sys_pipe)
-    );
+    // SAFETY: pipefd provides exclusive storage for both newly transferred endpoint handles.
+    let result = unsafe {
+        syscall2(
+            Syscall::Pipe,
+            pipefd.as_mut_ptr() as usize,
+            0, // flags (not used yet in sys_pipe)
+        )
+    };
 
     if result == usize::MAX {
         return Err(-1);
@@ -712,7 +748,8 @@ pub fn pipe() -> Result<(crate::handle::Handle, crate::handle::Handle), i32> {
         Err(_) => {
             // from_raw consumed and closed pipefd[0] after its query failed.
             // pipefd[1] has not been adopted yet and remains our responsibility.
-            let _ = syscall1(Syscall::HandleClose, pipefd[1] as usize);
+            // SAFETY: This path exclusively owns the raw handle and closes it once, without leaving an armed owning wrapper.
+            let _ = unsafe { syscall1(Syscall::HandleClose, pipefd[1] as usize) };
             return Err(-1);
         }
     };
@@ -759,7 +796,8 @@ pub enum ShutdownType {
 /// // shutdown(ShutdownType::Reboot);
 /// ```
 pub fn shutdown(shutdown_type: ShutdownType) -> ! {
-    syscall1(Syscall::Shutdown, shutdown_type as usize);
+    // SAFETY: This typed shutdown request has no pointer arguments and never resumes normal execution.
+    unsafe { syscall1(Syscall::Shutdown, shutdown_type as usize) };
     unreachable!("shutdown syscall should not return");
 }
 
@@ -1155,7 +1193,8 @@ pub fn info() -> crate::vec::Vec<TaskInfo> {
 /// Prefer [`info()`] for ergonomics. Use this when you need maximum
 /// performance or want to decode only a subset.
 pub fn info_raw() -> crate::vec::Vec<RawTaskInfo> {
-    let total = syscall0(Syscall::GetTaskInfoCount);
+    // SAFETY: This fixed query has no arguments or userspace memory effects.
+    let total = unsafe { syscall0(Syscall::GetTaskInfoCount) };
     let mut buf = crate::vec![RawTaskInfo {
         pid: 0, ppid: 0, state: 0, task_type: 0, cpu_id: 0,
         _reserved: 0, exit_status: 0, tgid: 0, name: [0; 64], cpu_time_ns: 0,
@@ -1163,11 +1202,14 @@ pub fn info_raw() -> crate::vec::Vec<RawTaskInfo> {
         core_preference: 0, _reserved2: [0; 3], sched_migration_count: 0,
         sched_nice: 0, sched_weight: 0, sched_vruntime: 0, sched_deadline: 0,
     }; total];
-    let n = syscall2(
-        Syscall::GetTaskInfoList,
-        buf.as_mut_ptr() as usize,
-        buf.len(),
-    );
+    // SAFETY: buf is exclusive output storage for the advertised count of fixed-layout task records.
+    let n = unsafe {
+        syscall2(
+            Syscall::GetTaskInfoList,
+            buf.as_mut_ptr() as usize,
+            buf.len(),
+        )
+    };
     buf.truncate(n);
     buf
 }
@@ -1186,10 +1228,13 @@ pub fn cpu_usage() -> Option<CpuUsageInfo> {
         usage_per_mille: 0,
         _reserved: 0,
     };
-    let ret = syscall1(
-        Syscall::GetCpuUsageInfo,
-        &mut raw as *mut RawCpuUsageInfo as usize,
-    );
+    // SAFETY: raw is an exclusive output record with the kernel's fixed CPU-usage layout.
+    let ret = unsafe {
+        syscall1(
+            Syscall::GetCpuUsageInfo,
+            &mut raw as *mut RawCpuUsageInfo as usize,
+        )
+    };
     if ret == usize::MAX {
         None
     } else {
@@ -1269,7 +1314,8 @@ pub fn task_nice() -> i32 {
         Ok(configured) => configured.fair_nice(),
         // This infallible legacy signature cannot expose a configuration-query
         // error, so preserve its historical raw-getter fallback.
-        Err(_) => syscall0(Syscall::GetTaskNice) as isize as i32,
+        // SAFETY: This fixed scheduler query takes no arguments or userspace pointers.
+        Err(_) => (unsafe { syscall0(Syscall::GetTaskNice) }) as isize as i32,
     }
 }
 
@@ -1313,7 +1359,8 @@ pub fn task_cpu_affinity() -> Option<usize> {
         // This infallible legacy signature cannot expose a configuration-query
         // error, so preserve its historical raw-getter fallback.
         Err(_) => {
-            let cpu_id = syscall0(Syscall::GetTaskCpuAffinity);
+            // SAFETY: This fixed scheduler query takes no arguments or userspace pointers.
+            let cpu_id = unsafe { syscall0(Syscall::GetTaskCpuAffinity) };
             (cpu_id != usize::MAX).then_some(cpu_id)
         }
     }

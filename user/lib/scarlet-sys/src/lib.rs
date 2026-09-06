@@ -3,8 +3,23 @@
 //! This crate is the raw syscall layer for Scarlet userland. It is deliberately
 //! small: syscall numbers and ABI types live in `scarlet-abi`, while safe
 //! object wrappers live above this crate.
+//!
+//! # Safety boundary
+//!
+//! These functions accept untyped arguments and do not validate Rust ownership,
+//! pointer validity, or aliasing. Kernel address checks do not establish Rust
+//! memory safety: an otherwise valid request can unmap a live reference, close
+//! an owning wrapper's handle, or overwrite borrowed memory. Prefer the typed
+//! operations in `scarlet-os`.
+//!
+//! Every call must use the selected operation's exact ABI and argument count.
+//! Input/output pointers must have the required layout, alignment, permissions
+//! and lifetime, including any period for which the kernel retains them.
+//! Writes require exclusive access; handle transfer, mapping replacement and
+//! thread/TLS operations must preserve all live Rust ownership invariants.
 
 #![no_std]
+#![deny(unsafe_op_in_unsafe_fn)]
 
 pub use scarlet_abi::{
     CPU_DEBUG_FLAG_CURRENT_TASK_VALID, CPU_DEBUG_FLAG_IDLE, CPU_DEBUG_FLAG_PENDING_RESCHEDULE,
@@ -36,32 +51,160 @@ mod arch;
 mod arch;
 
 /// Invoke a Scarlet Native syscall with no arguments.
-pub fn syscall0(syscall: Syscall) -> usize {
-    arch::syscall0(syscall)
+///
+/// # Arguments
+///
+/// * `syscall` - Operation whose ABI takes 0 arguments.
+///
+/// # Returns
+///
+/// The unmodified kernel result; error encoding depends on the operation.
+///
+/// # Safety
+///
+/// The caller must satisfy the crate's [safety boundary](crate#safety-boundary),
+/// including the operation-specific pointer, ownership and lifetime rules.
+///
+/// ```compile_fail,E0133
+/// scarlet_sys::syscall0(scarlet_sys::Syscall::Getpid);
+/// ```
+pub unsafe fn syscall0(syscall: Syscall) -> usize {
+    // SAFETY: The caller supplies the selected syscall's complete safety contract.
+    unsafe { arch::syscall0(syscall) }
 }
 
 /// Invoke a Scarlet Native syscall with one argument.
-pub fn syscall1(syscall: Syscall, arg1: usize) -> usize {
-    arch::syscall1(syscall, arg1)
+///
+/// # Arguments
+///
+/// * `syscall` - Operation whose ABI takes 1 argument.
+/// * `arg1` - Untyped argument 1, interpreted by the selected operation.
+///
+/// # Returns
+///
+/// The unmodified kernel result; error encoding depends on the operation.
+///
+/// # Safety
+///
+/// The caller must satisfy the crate's [safety boundary](crate#safety-boundary),
+/// including the operation-specific pointer, ownership and lifetime rules.
+///
+/// ```compile_fail,E0133
+/// scarlet_sys::syscall1(scarlet_sys::Syscall::Getpid, 0);
+/// ```
+pub unsafe fn syscall1(syscall: Syscall, arg1: usize) -> usize {
+    // SAFETY: The caller supplies the selected syscall's complete safety contract.
+    unsafe { arch::syscall1(syscall, arg1) }
 }
 
 /// Invoke a Scarlet Native syscall with two arguments.
-pub fn syscall2(syscall: Syscall, arg1: usize, arg2: usize) -> usize {
-    arch::syscall2(syscall, arg1, arg2)
+///
+/// # Arguments
+///
+/// * `syscall` - Operation whose ABI takes 2 arguments.
+/// * `arg1` - Untyped argument 1, interpreted by the selected operation.
+/// * `arg2` - Untyped argument 2, interpreted by the selected operation.
+///
+/// # Returns
+///
+/// The unmodified kernel result; error encoding depends on the operation.
+///
+/// # Safety
+///
+/// The caller must satisfy the crate's [safety boundary](crate#safety-boundary),
+/// including the operation-specific pointer, ownership and lifetime rules.
+///
+/// ```compile_fail,E0133
+/// scarlet_sys::syscall2(scarlet_sys::Syscall::Getpid, 0, 0);
+/// ```
+pub unsafe fn syscall2(syscall: Syscall, arg1: usize, arg2: usize) -> usize {
+    // SAFETY: The caller supplies the selected syscall's complete safety contract.
+    unsafe { arch::syscall2(syscall, arg1, arg2) }
 }
 
 /// Invoke a Scarlet Native syscall with three arguments.
-pub fn syscall3(syscall: Syscall, arg1: usize, arg2: usize, arg3: usize) -> usize {
-    arch::syscall3(syscall, arg1, arg2, arg3)
+///
+/// # Arguments
+///
+/// * `syscall` - Operation whose ABI takes 3 arguments.
+/// * `arg1` - Untyped argument 1, interpreted by the selected operation.
+/// * `arg2` - Untyped argument 2, interpreted by the selected operation.
+/// * `arg3` - Untyped argument 3, interpreted by the selected operation.
+///
+/// # Returns
+///
+/// The unmodified kernel result; error encoding depends on the operation.
+///
+/// # Safety
+///
+/// The caller must satisfy the crate's [safety boundary](crate#safety-boundary),
+/// including the operation-specific pointer, ownership and lifetime rules.
+///
+/// ```compile_fail,E0133
+/// scarlet_sys::syscall3(scarlet_sys::Syscall::Getpid, 0, 0, 0);
+/// ```
+pub unsafe fn syscall3(syscall: Syscall, arg1: usize, arg2: usize, arg3: usize) -> usize {
+    // SAFETY: The caller supplies the selected syscall's complete safety contract.
+    unsafe { arch::syscall3(syscall, arg1, arg2, arg3) }
 }
 
 /// Invoke a Scarlet Native syscall with four arguments.
-pub fn syscall4(syscall: Syscall, arg1: usize, arg2: usize, arg3: usize, arg4: usize) -> usize {
-    arch::syscall4(syscall, arg1, arg2, arg3, arg4)
+///
+/// # Arguments
+///
+/// * `syscall` - Operation whose ABI takes 4 arguments.
+/// * `arg1` - Untyped argument 1, interpreted by the selected operation.
+/// * `arg2` - Untyped argument 2, interpreted by the selected operation.
+/// * `arg3` - Untyped argument 3, interpreted by the selected operation.
+/// * `arg4` - Untyped argument 4, interpreted by the selected operation.
+///
+/// # Returns
+///
+/// The unmodified kernel result; error encoding depends on the operation.
+///
+/// # Safety
+///
+/// The caller must satisfy the crate's [safety boundary](crate#safety-boundary),
+/// including the operation-specific pointer, ownership and lifetime rules.
+///
+/// ```compile_fail,E0133
+/// scarlet_sys::syscall4(scarlet_sys::Syscall::Getpid, 0, 0, 0, 0);
+/// ```
+pub unsafe fn syscall4(
+    syscall: Syscall,
+    arg1: usize,
+    arg2: usize,
+    arg3: usize,
+    arg4: usize,
+) -> usize {
+    // SAFETY: The caller supplies the selected syscall's complete safety contract.
+    unsafe { arch::syscall4(syscall, arg1, arg2, arg3, arg4) }
 }
 
 /// Invoke a Scarlet Native syscall with five arguments.
-pub fn syscall5(
+///
+/// # Arguments
+///
+/// * `syscall` - Operation whose ABI takes 5 arguments.
+/// * `arg1` - Untyped argument 1, interpreted by the selected operation.
+/// * `arg2` - Untyped argument 2, interpreted by the selected operation.
+/// * `arg3` - Untyped argument 3, interpreted by the selected operation.
+/// * `arg4` - Untyped argument 4, interpreted by the selected operation.
+/// * `arg5` - Untyped argument 5, interpreted by the selected operation.
+///
+/// # Returns
+///
+/// The unmodified kernel result; error encoding depends on the operation.
+///
+/// # Safety
+///
+/// The caller must satisfy the crate's [safety boundary](crate#safety-boundary),
+/// including the operation-specific pointer, ownership and lifetime rules.
+///
+/// ```compile_fail,E0133
+/// scarlet_sys::syscall5(scarlet_sys::Syscall::Getpid, 0, 0, 0, 0, 0);
+/// ```
+pub unsafe fn syscall5(
     syscall: Syscall,
     arg1: usize,
     arg2: usize,
@@ -69,11 +212,35 @@ pub fn syscall5(
     arg4: usize,
     arg5: usize,
 ) -> usize {
-    arch::syscall5(syscall, arg1, arg2, arg3, arg4, arg5)
+    // SAFETY: The caller supplies the selected syscall's complete safety contract.
+    unsafe { arch::syscall5(syscall, arg1, arg2, arg3, arg4, arg5) }
 }
 
 /// Invoke a Scarlet Native syscall with six arguments.
-pub fn syscall6(
+///
+/// # Arguments
+///
+/// * `syscall` - Operation whose ABI takes 6 arguments.
+/// * `arg1` - Untyped argument 1, interpreted by the selected operation.
+/// * `arg2` - Untyped argument 2, interpreted by the selected operation.
+/// * `arg3` - Untyped argument 3, interpreted by the selected operation.
+/// * `arg4` - Untyped argument 4, interpreted by the selected operation.
+/// * `arg5` - Untyped argument 5, interpreted by the selected operation.
+/// * `arg6` - Untyped argument 6, interpreted by the selected operation.
+///
+/// # Returns
+///
+/// The unmodified kernel result; error encoding depends on the operation.
+///
+/// # Safety
+///
+/// The caller must satisfy the crate's [safety boundary](crate#safety-boundary),
+/// including the operation-specific pointer, ownership and lifetime rules.
+///
+/// ```compile_fail,E0133
+/// scarlet_sys::syscall6(scarlet_sys::Syscall::Getpid, 0, 0, 0, 0, 0, 0);
+/// ```
+pub unsafe fn syscall6(
     syscall: Syscall,
     arg1: usize,
     arg2: usize,
@@ -82,5 +249,6 @@ pub fn syscall6(
     arg5: usize,
     arg6: usize,
 ) -> usize {
-    arch::syscall6(syscall, arg1, arg2, arg3, arg4, arg5, arg6)
+    // SAFETY: The caller supplies the selected syscall's complete safety contract.
+    unsafe { arch::syscall6(syscall, arg1, arg2, arg3, arg4, arg5, arg6) }
 }

@@ -114,9 +114,8 @@ impl PtyMaster {
     }
 
     fn control(&self, command: u32, arg: usize) -> Result<i32> {
-        self.file
-            .as_handle()
-            .control(command, arg)
+        // SAFETY: Only the fixed scalar PTY lock/number queries above reach this private helper; no pointer-bearing command is forwarded.
+        unsafe { self.file.as_handle().control(command, arg) }
             .map_err(|_| Error::new(ErrorKind::Other, "PTY control failed"))
     }
 }

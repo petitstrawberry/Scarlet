@@ -99,12 +99,15 @@ impl<'a> StreamOps<'a> {
     /// # Returns
     /// Number of bytes actually read, or StreamError on failure
     pub fn read(&self, buffer: &mut [u8]) -> StreamResult<usize> {
-        let result = syscall3(
-            Syscall::StreamRead,
-            self.handle.as_raw() as usize,
-            buffer.as_mut_ptr() as usize,
-            buffer.len(),
-        );
+        // SAFETY: buffer is exclusively borrowed for its full length until the synchronous read returns.
+        let result = unsafe {
+            syscall3(
+                Syscall::StreamRead,
+                self.handle.as_raw() as usize,
+                buffer.as_mut_ptr() as usize,
+                buffer.len(),
+            )
+        };
 
         StreamError::from_syscall_result(result)
     }
@@ -117,12 +120,15 @@ impl<'a> StreamOps<'a> {
     /// # Returns
     /// Number of bytes actually written, or StreamError on failure
     pub fn write(&self, buffer: &[u8]) -> StreamResult<usize> {
-        let result = syscall3(
-            Syscall::StreamWrite,
-            self.handle.as_raw() as usize,
-            buffer.as_ptr() as usize,
-            buffer.len(),
-        );
+        // SAFETY: buffer is borrowed and readable for its full length until the synchronous write returns.
+        let result = unsafe {
+            syscall3(
+                Syscall::StreamWrite,
+                self.handle.as_raw() as usize,
+                buffer.as_ptr() as usize,
+                buffer.len(),
+            )
+        };
 
         StreamError::from_syscall_result(result)
     }

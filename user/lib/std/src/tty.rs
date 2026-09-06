@@ -474,9 +474,8 @@ impl<'a> Terminal<'a> {
     }
 
     fn control(&self, command: u32, arg: usize) -> Result<i32> {
-        self.handle
-            .control(command, arg)
-            .map_err(control_error_to_io_error)
+        // SAFETY: Only the fixed scalar TTY commands in this implementation reach this private helper; packed sizes/policies contain no pointers.
+        unsafe { self.handle.control(command, arg) }.map_err(control_error_to_io_error)
     }
 }
 

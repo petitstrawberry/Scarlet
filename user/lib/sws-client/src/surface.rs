@@ -52,18 +52,20 @@ impl Surface {
     ) -> Result<(*mut u8, usize, usize), Error> {
         let buffer_size = (width * height * 4) as usize;
 
-        let addr = shm
-            .as_handle()
-            .as_memory_mapping()
-            .map_err(|_| Error::ShmMapFailed)?
-            .mmap(
-                0,
-                buffer_size,
-                permissions::READ_WRITE,
-                mmap_flags::SHARED,
-                0,
-            )
-            .map_err(|_| Error::ShmMapFailed)?;
+        // SAFETY: This requests a fresh non-fixed mapping; its owning buffer/stream retains the backing and controls all CPU views and unmapping.
+        let addr = unsafe {
+            shm.as_handle()
+                .as_memory_mapping()
+                .map_err(|_| Error::ShmMapFailed)?
+                .mmap(
+                    0,
+                    buffer_size,
+                    permissions::READ_WRITE,
+                    mmap_flags::SHARED,
+                    0,
+                )
+        }
+        .map_err(|_| Error::ShmMapFailed)?;
 
         Ok((addr as *mut u8, buffer_size, addr))
     }
@@ -75,7 +77,8 @@ impl Surface {
         shm: SharedMemory,
     ) -> Result<(), Error> {
         let (buffer_ptr, buffer_len, _addr) = Self::map_shm(&shm, width, height)?;
-        let _ = munmap(self.buffer_ptr as usize, self.buffer_len);
+        // SAFETY: This teardown/rollback path owns the exact mapping; its borrowed CPU views have ended before releasing the virtual range.
+        let _ = unsafe { munmap(self.buffer_ptr as usize, self.buffer_len) };
         self.width = width;
         self.height = height;
         self.shm = shm;
@@ -188,6 +191,7 @@ impl Surface {
 
 impl Drop for Surface {
     fn drop(&mut self) {
-        let _ = munmap(self.buffer_ptr as usize, self.buffer_len);
+        // SAFETY: This teardown/rollback path owns the exact mapping; its borrowed CPU views have ended before releasing the virtual range.
+        let _ = unsafe { munmap(self.buffer_ptr as usize, self.buffer_len) };
     }
 }

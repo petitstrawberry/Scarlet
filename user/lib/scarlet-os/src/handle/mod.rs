@@ -12,7 +12,8 @@
 //! ## Introspection and Validation
 //!
 //! When a `Handle` is constructed (e.g. [`Handle::open`] or [`Handle::from_raw`]),
-//! user space queries the kernel for [`KernelObjectInfo`] via `Syscall::HandleQuery`.
+//! user space queries the kernel for [`KernelObjectInfo`](crate::handle::introspection::KernelObjectInfo)
+//! via `Syscall::HandleQuery`.
 //! The result is cached inside the `Handle` and used to validate conversions:
 //!
 //! - `Handle::as_stream` checks `info.capabilities.stream_ops`
@@ -86,11 +87,14 @@ impl Handle {
 
     fn query_info(raw: RawHandle) -> HandleResult<KernelObjectInfo> {
         let mut info = KernelObjectInfo::unknown();
-        let result = syscall2(
-            Syscall::HandleQuery,
-            raw as usize,
-            (&mut info as *mut KernelObjectInfo) as usize,
-        );
+        // SAFETY: info is an exclusive output record with the HandleQuery layout; the kernel validates raw.
+        let result = unsafe {
+            syscall2(
+                Syscall::HandleQuery,
+                raw as usize,
+                (&mut info as *mut KernelObjectInfo) as usize,
+            )
+        };
 
         if result == usize::MAX {
             Err(HandleError::InvalidHandle)
@@ -104,7 +108,8 @@ impl Handle {
             Ok(info) => info,
             Err(e) => {
                 // Best-effort cleanup to avoid leaking a handle when introspection fails.
-                let _ = syscall1(Syscall::HandleClose, raw as usize);
+                // SAFETY: This path exclusively owns the raw handle and closes it once, without leaving an armed owning wrapper.
+                let _ = unsafe { syscall1(Syscall::HandleClose, raw as usize) };
                 return Err(e);
             }
         };
@@ -126,12 +131,15 @@ impl Handle {
             Err(_) => return Err(HandleError::InvalidParameter),
         };
 
-        let result = syscall3(
-            Syscall::VfsOpen,
-            path_bytes.as_ptr() as usize,
-            flags,
-            0, // mode (unused for now)
-        );
+        // SAFETY: The NUL-terminated path storage remains readable until return; a successful result transfers a new handle.
+        let result = unsafe {
+            syscall3(
+                Syscall::VfsOpen,
+                path_bytes.as_ptr() as usize,
+                flags,
+                0, // mode (unused for now)
+            )
+        };
 
         HandleError::from_syscall_result(result).and_then(Handle::from_kernel_raw)
     }
@@ -164,7 +172,8 @@ impl Handle {
     ///
     /// After calling this method, the Handle becomes invalid
     pub fn close(self) -> HandleResult<()> {
-        self.close_with(|raw| syscall1(Syscall::HandleClose, raw as usize))
+        // SAFETY: This path exclusively owns the raw handle and closes it once, without leaving an armed owning wrapper.
+        self.close_with(|raw| unsafe { syscall1(Syscall::HandleClose, raw as usize) })
     }
 
     fn close_with<F>(mut self, close: F) -> HandleResult<()>
@@ -184,7 +193,8 @@ impl Handle {
     ///
     /// Creates a new Handle pointing to the same KernelObject
     pub fn duplicate(&self) -> HandleResult<Handle> {
-        let result = syscall1(Syscall::HandleDuplicate, self.raw as usize);
+        // SAFETY: The borrowed source handle remains live; duplication returns independent ownership.
+        let result = unsafe { syscall1(Syscall::HandleDuplicate, self.raw as usize) };
         HandleError::from_syscall_result(result).map(|raw| Handle {
             raw,
             info: self.info,
@@ -199,7 +209,8 @@ impl Handle {
     /// # Returns
     /// Success or HandleError on failure
     pub fn set_role(&self, role: u32) -> HandleResult<()> {
-        let result = syscall2(Syscall::HandleSetRole, self.raw as usize, role as usize);
+        // SAFETY: The borrowed handle remains live; role is scalar metadata, not a pointer.
+        let result = unsafe { syscall2(Syscall::HandleSetRole, self.raw as usize, role as usize) };
         HandleError::from_syscall_result(result).map(|_| ())
     }
 
@@ -275,13 +286,31 @@ impl Handle {
     ///
     /// # Returns
     /// Result of the control operation
-    pub fn control(&self, command: u32, arg: usize) -> HandleResult<i32> {
-        let result = syscall3(
-            Syscall::HandleControl,
-            self.raw as usize,
-            command as usize,
-            arg,
-        );
+    ///
+    /// # Safety
+    ///
+    /// `command` must match this object's control ABI. Every pointer encoded
+    /// by `arg`, including nested pointers in request records, must have the
+    /// required layout, bounds, mutability and lifetime. The caller must also
+    /// uphold command-specific handle/resource ownership and asynchronous
+    /// retention requirements; borrowing this Handle alone does not do so.
+    /// Prefer a typed operation such as [`Self::set_nonblocking`].
+    ///
+    /// ```compile_fail,E0133
+    /// fn raw_control(handle: &scarlet_os::Handle) {
+    ///     handle.control(0, 0);
+    /// }
+    /// ```
+    pub unsafe fn control(&self, command: u32, arg: usize) -> HandleResult<i32> {
+        // SAFETY: The caller supplies this raw control's pointer, ABI and resource-lifetime safety contract.
+        let result = unsafe {
+            syscall3(
+                Syscall::HandleControl,
+                self.raw as usize,
+                command as usize,
+                arg,
+            )
+        };
         HandleError::from_syscall_result(result)
     }
 
@@ -295,8 +324,8 @@ impl Handle {
     ///
     /// `Ok(())` when the kernel accepts the mode change, or a handle error.
     pub fn set_nonblocking(&self, enabled: bool) -> HandleResult<()> {
-        self.control(SCTL_SOCKET_SET_NONBLOCK, usize::from(enabled))
-            .map(|_| ())
+        // SAFETY: This fixed socket control takes a boolean scalar, not a pointer; the handle remains borrowed.
+        unsafe { self.control(SCTL_SOCKET_SET_NONBLOCK, usize::from(enabled)) }.map(|_| ())
     }
 }
 
@@ -306,7 +335,8 @@ impl Drop for Handle {
         // Ignore errors during drop
         if self.raw != INVALID_RAW_HANDLE {
             let raw = self.take_raw();
-            let _ = syscall1(Syscall::HandleClose, raw as usize);
+            // SAFETY: This path exclusively owns the raw handle and closes it once, without leaving an armed owning wrapper.
+            let _ = unsafe { syscall1(Syscall::HandleClose, raw as usize) };
         }
     }
 }

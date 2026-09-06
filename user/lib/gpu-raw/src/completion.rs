@@ -81,10 +81,13 @@ impl GpuCompletion {
     /// Failure does not authorize reuse of externally shared GPU backing.
     pub fn query(&self) -> HandleResult<GpuCompletionInfo> {
         let mut info = GpuCompletionInfo::new();
-        self.handle.control(
-            crate::commands::GPU_COMPLETION_QUERY,
-            &mut info as *mut _ as usize,
-        )?;
+        // SAFETY: The initialized request/query record matches this fixed GPU control ABI and remains exclusively borrowed until return.
+        unsafe {
+            self.handle.control(
+                crate::commands::GPU_COMPLETION_QUERY,
+                &mut info as *mut _ as usize,
+            )
+        }?;
         result_to_handle_error(info.result)?;
         Ok(info)
     }

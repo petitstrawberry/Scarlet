@@ -96,7 +96,18 @@ pub fn arch_tls_pointer() -> usize {
 /// This is typically only called during thread initialization. For most
 /// use cases, you should use the TLS pointer set by the kernel during
 /// thread creation.
-pub fn arch_set_tls_pointer(ptr: usize) {
+///
+/// # Returns
+///
+/// Nothing.
+///
+/// # Safety
+///
+/// `ptr` must identify the current thread's correctly initialized TLS block,
+/// valid until replacement or thread exit. Replacing TLS must not invalidate
+/// live thread-local references or the runtime's thread state.
+pub unsafe fn arch_set_tls_pointer(ptr: usize) {
     // Use syscall to set TLS pointer (kernel needs to update ABI state)
-    scarlet_sys::syscall1(scarlet_sys::Syscall::SetTls, ptr);
+    // SAFETY: The caller guarantees initialized, live TLS backing and safe replacement of the current thread's TLS.
+    unsafe { scarlet_sys::syscall1(scarlet_sys::Syscall::SetTls, ptr) };
 }

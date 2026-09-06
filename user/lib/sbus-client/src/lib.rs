@@ -40,7 +40,8 @@ fn monotonic_time_ns() -> u64 {
 fn monotonic_time_ns() -> u64 {
     use scarlet_std::syscall::{Syscall, syscall0};
 
-    syscall0(Syscall::MonotonicTime) as u64
+    // SAFETY: This fixed clock query has no arguments or userspace memory effects.
+    (unsafe { syscall0(Syscall::MonotonicTime) }) as u64
 }
 
 /// Connection error types

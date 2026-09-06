@@ -244,7 +244,8 @@ impl SasStream {
 impl Drop for SasStream {
     fn drop(&mut self) {
         if self.ring_addr != 0 && self.ring_size != 0 {
-            let _ = os::munmap(self.ring_addr, self.ring_size);
+            // SAFETY: This teardown/rollback path owns the exact mapping; its borrowed CPU views have ended before releasing the virtual range.
+            let _ = unsafe { os::munmap(self.ring_addr, self.ring_size) };
             self.ring_addr = 0;
             self.ring_size = 0;
         }

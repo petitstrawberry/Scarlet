@@ -112,19 +112,25 @@ impl IrqSink for VcpuIrqSink {
 
         // print!("[VcpuIrqSink] set_level({}) handle={}\n", level, self.vcpu_handle);
         if level {
-            let _ = syscall3(
-                Syscall::HandleControl,
-                self.vcpu_handle as usize,
-                VCPU_CTL_INJECT_INTERRUPT as usize,
-                IRQ_TYPE_EXTERNAL,
-            );
+            // SAFETY: This fixed vCPU interrupt command takes only a scalar interrupt type; no userspace pointer is passed.
+            let _ = unsafe {
+                syscall3(
+                    Syscall::HandleControl,
+                    self.vcpu_handle as usize,
+                    VCPU_CTL_INJECT_INTERRUPT as usize,
+                    IRQ_TYPE_EXTERNAL,
+                )
+            };
         } else {
-            let _ = syscall3(
-                Syscall::HandleControl,
-                self.vcpu_handle as usize,
-                VCPU_CTL_CLEAR_INTERRUPT as usize,
-                IRQ_TYPE_EXTERNAL,
-            );
+            // SAFETY: This fixed vCPU interrupt command takes only a scalar interrupt type; no userspace pointer is passed.
+            let _ = unsafe {
+                syscall3(
+                    Syscall::HandleControl,
+                    self.vcpu_handle as usize,
+                    VCPU_CTL_CLEAR_INTERRUPT as usize,
+                    IRQ_TYPE_EXTERNAL,
+                )
+            };
         }
     }
 }

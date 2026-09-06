@@ -169,10 +169,13 @@ impl GpuQueue {
     /// Older kernels may reject this additive query operation outright.
     pub fn query_async(&self) -> HandleResult<GpuQueueAsyncInfo> {
         let mut info = GpuQueueAsyncInfo::new();
-        self.handle.control(
-            commands::GPU_QUEUE_QUERY_ASYNC,
-            &mut info as *mut _ as usize,
-        )?;
+        // SAFETY: The initialized request/query record matches this fixed GPU control ABI and remains exclusively borrowed until return.
+        unsafe {
+            self.handle.control(
+                commands::GPU_QUEUE_QUERY_ASYNC,
+                &mut info as *mut _ as usize,
+            )
+        }?;
         result_to_handle_error(info.result)?;
         Ok(info)
     }
@@ -197,15 +200,17 @@ impl GpuQueue {
         // The async query advertises its own limit. Do not apply the cached
         // synchronous staging-buffer limit to an independently owned request;
         // the kernel validates the actual async bound before acceptance.
-        self.handle
-            .control(
+        // SAFETY: request is an exclusive initialized submit record; the commands slice stays borrowed until the kernel has copied it.
+        unsafe {
+            self.handle.control(
                 commands::GPU_QUEUE_SUBMIT_ASYNC,
                 &mut request as *mut _ as usize,
             )
-            .map_err(|error| GpuSubmitError::Failed {
-                error,
-                completion: None,
-            })?;
+        }
+        .map_err(|error| GpuSubmitError::Failed {
+            error,
+            completion: None,
+        })?;
         match classify_reply(&request) {
             Reply::Busy => Err(GpuSubmitError::Busy),
             Reply::Rejected(error) => Err(GpuSubmitError::Rejected(error)),

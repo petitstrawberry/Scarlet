@@ -1494,9 +1494,12 @@ impl Gpu {
     /// Fixed-width query information. Inspect `result` for request-level errors.
     pub fn query_info(&self) -> HandleResult<GpuQueryInfo> {
         let mut info = GpuQueryInfo::new();
-        self.file
-            .as_handle()
-            .control(commands::GPU_QUERY_INFO, &mut info as *mut _ as usize)?;
+        // SAFETY: The initialized request/query record matches this fixed GPU control ABI and remains exclusively borrowed until return.
+        unsafe {
+            self.file
+                .as_handle()
+                .control(commands::GPU_QUERY_INFO, &mut info as *mut _ as usize)
+        }?;
         Ok(info)
     }
 
@@ -1512,9 +1515,12 @@ impl Gpu {
     /// An owning buffer wrapper or a handle error.
     pub fn create_buffer(&self, size_bytes: u64, flags: u32) -> HandleResult<GpuBuffer> {
         let mut request = GpuCreateBuffer::new(size_bytes, flags);
-        self.file
-            .as_handle()
-            .control(commands::GPU_CREATE_BUFFER, &mut request as *mut _ as usize)?;
+        // SAFETY: The initialized request/query record matches this fixed GPU control ABI and remains exclusively borrowed until return.
+        unsafe {
+            self.file
+                .as_handle()
+                .control(commands::GPU_CREATE_BUFFER, &mut request as *mut _ as usize)
+        }?;
         result_to_handle_error(request.result)?;
         let handle = adopt_child_handle(request.buffer_handle)?;
         Ok(GpuBuffer {
@@ -1535,10 +1541,13 @@ impl Gpu {
     /// An owning timeline wrapper or a handle error.
     pub fn create_timeline(&self, initial_value: u64) -> HandleResult<GpuTimeline> {
         let mut request = GpuCreateTimeline::new(initial_value);
-        self.file.as_handle().control(
-            commands::GPU_CREATE_TIMELINE,
-            &mut request as *mut _ as usize,
-        )?;
+        // SAFETY: The initialized request/query record matches this fixed GPU control ABI and remains exclusively borrowed until return.
+        unsafe {
+            self.file.as_handle().control(
+                commands::GPU_CREATE_TIMELINE,
+                &mut request as *mut _ as usize,
+            )
+        }?;
         result_to_handle_error(request.result)?;
         Ok(GpuTimeline {
             handle: adopt_child_handle(request.timeline_handle)?,
@@ -1631,10 +1640,13 @@ impl Gpu {
             u32::try_from(shared_memory.as_raw()).map_err(|_| HandleError::InvalidHandle)?;
         let mut request =
             GpuCreateImportedImageBgra::new(shm_handle, width, height, shm_offset, source_stride);
-        self.file.as_handle().control(
-            commands::GPU_CREATE_IMPORTED_IMAGE_BGRA,
-            &mut request as *mut _ as usize,
-        )?;
+        // SAFETY: request has the import ABI layout; the source handle stays borrowed and the kernel pins accepted backing independently.
+        unsafe {
+            self.file.as_handle().control(
+                commands::GPU_CREATE_IMPORTED_IMAGE_BGRA,
+                &mut request as *mut _ as usize,
+            )
+        }?;
         result_to_handle_error(request.result)?;
         Ok(GpuImage {
             handle: adopt_child_handle(request.image_handle)?,
@@ -1643,9 +1655,12 @@ impl Gpu {
     }
 
     fn create_image_request(&self, request: &mut GpuCreateImage) -> HandleResult<GpuImage> {
-        self.file
-            .as_handle()
-            .control(commands::GPU_CREATE_IMAGE, request as *mut _ as usize)?;
+        // SAFETY: The initialized request/query record matches this fixed GPU control ABI and remains exclusively borrowed until return.
+        unsafe {
+            self.file
+                .as_handle()
+                .control(commands::GPU_CREATE_IMAGE, request as *mut _ as usize)
+        }?;
         result_to_handle_error(request.result)?;
         Ok(GpuImage {
             handle: adopt_child_handle(request.image_handle)?,
@@ -1664,9 +1679,12 @@ impl Gpu {
     /// An opaque dialect descriptor suitable for context creation.
     pub fn query_dialect(&self, dialect_index: u32) -> HandleResult<GpuDialect> {
         let mut request = GpuQueryDialect::new(dialect_index);
-        self.file
-            .as_handle()
-            .control(commands::GPU_QUERY_DIALECT, &mut request as *mut _ as usize)?;
+        // SAFETY: The initialized request/query record matches this fixed GPU control ABI and remains exclusively borrowed until return.
+        unsafe {
+            self.file
+                .as_handle()
+                .control(commands::GPU_QUERY_DIALECT, &mut request as *mut _ as usize)
+        }?;
         result_to_handle_error(request.result)?;
         Ok(GpuDialect {
             index: request.dialect_index,
@@ -1687,10 +1705,13 @@ impl Gpu {
     /// An owning execution context wrapper or a handle error.
     pub fn create_context(&self, dialect: &GpuDialect) -> HandleResult<GpuContext> {
         let mut request = GpuCreateContext::new(dialect.index, dialect.token);
-        self.file.as_handle().control(
-            commands::GPU_CREATE_CONTEXT,
-            &mut request as *mut _ as usize,
-        )?;
+        // SAFETY: The initialized request/query record matches this fixed GPU control ABI and remains exclusively borrowed until return.
+        unsafe {
+            self.file.as_handle().control(
+                commands::GPU_CREATE_CONTEXT,
+                &mut request as *mut _ as usize,
+            )
+        }?;
         result_to_handle_error(request.result)?;
         Ok(GpuContext {
             handle: adopt_child_handle(request.context_handle)?,
@@ -1761,8 +1782,11 @@ impl GpuContext {
     /// Current context information or a handle error.
     pub fn query(&self) -> HandleResult<GpuContextInfo> {
         let mut info = GpuContextInfo::new();
-        self.handle
-            .control(commands::GPU_CONTEXT_QUERY, &mut info as *mut _ as usize)?;
+        // SAFETY: The initialized request/query record matches this fixed GPU control ABI and remains exclusively borrowed until return.
+        unsafe {
+            self.handle
+                .control(commands::GPU_CONTEXT_QUERY, &mut info as *mut _ as usize)
+        }?;
         result_to_handle_error(info.result)?;
         Ok(info)
     }
@@ -1774,8 +1798,11 @@ impl GpuContext {
     /// An owning queue wrapper or a handle error.
     pub fn create_queue(&self) -> HandleResult<GpuQueue> {
         let mut request = GpuCreateQueue::new();
-        self.handle
-            .control(commands::GPU_CREATE_QUEUE, &mut request as *mut _ as usize)?;
+        // SAFETY: The initialized request/query record matches this fixed GPU control ABI and remains exclusively borrowed until return.
+        unsafe {
+            self.handle
+                .control(commands::GPU_CREATE_QUEUE, &mut request as *mut _ as usize)
+        }?;
         result_to_handle_error(request.result)?;
         Ok(GpuQueue {
             handle: adopt_child_handle(request.queue_handle)?,
@@ -1797,10 +1824,13 @@ impl GpuContext {
         let image_handle =
             u32::try_from(image.handle.as_raw()).map_err(|_| HandleError::InvalidHandle)?;
         let mut request = GpuContextAttachImage::new(image_handle);
-        self.handle.control(
-            commands::GPU_CONTEXT_ATTACH_IMAGE,
-            &mut request as *mut _ as usize,
-        )?;
+        // SAFETY: The initialized request/query record matches this fixed GPU control ABI and remains exclusively borrowed until return.
+        unsafe {
+            self.handle.control(
+                commands::GPU_CONTEXT_ATTACH_IMAGE,
+                &mut request as *mut _ as usize,
+            )
+        }?;
         result_to_handle_error(request.result)?;
         if request.command_resource_token == 0 {
             return Err(HandleError::SystemError(-1));
@@ -1821,10 +1851,13 @@ impl GpuContext {
         let image_handle =
             u32::try_from(image.handle.as_raw()).map_err(|_| HandleError::InvalidHandle)?;
         let mut request = GpuContextDetachImage::new(image_handle);
-        self.handle.control(
-            commands::GPU_CONTEXT_DETACH_IMAGE,
-            &mut request as *mut _ as usize,
-        )?;
+        // SAFETY: The initialized request/query record matches this fixed GPU control ABI and remains exclusively borrowed until return.
+        unsafe {
+            self.handle.control(
+                commands::GPU_CONTEXT_DETACH_IMAGE,
+                &mut request as *mut _ as usize,
+            )
+        }?;
         result_to_handle_error(request.result)
     }
 
@@ -1842,10 +1875,13 @@ impl GpuContext {
         let buffer_handle =
             u32::try_from(buffer.handle.as_raw()).map_err(|_| HandleError::InvalidHandle)?;
         let mut request = GpuContextAttachBuffer::new(buffer_handle);
-        self.handle.control(
-            commands::GPU_CONTEXT_ATTACH_BUFFER,
-            &mut request as *mut _ as usize,
-        )?;
+        // SAFETY: The initialized request/query record matches this fixed GPU control ABI and remains exclusively borrowed until return.
+        unsafe {
+            self.handle.control(
+                commands::GPU_CONTEXT_ATTACH_BUFFER,
+                &mut request as *mut _ as usize,
+            )
+        }?;
         result_to_handle_error(request.result)?;
         if request.command_resource_token == 0 {
             return Err(HandleError::SystemError(-1));
@@ -1866,10 +1902,13 @@ impl GpuContext {
         let buffer_handle =
             u32::try_from(buffer.handle.as_raw()).map_err(|_| HandleError::InvalidHandle)?;
         let mut request = GpuContextDetachBuffer::new(buffer_handle);
-        self.handle.control(
-            commands::GPU_CONTEXT_DETACH_BUFFER,
-            &mut request as *mut _ as usize,
-        )?;
+        // SAFETY: The initialized request/query record matches this fixed GPU control ABI and remains exclusively borrowed until return.
+        unsafe {
+            self.handle.control(
+                commands::GPU_CONTEXT_DETACH_BUFFER,
+                &mut request as *mut _ as usize,
+            )
+        }?;
         result_to_handle_error(request.result)
     }
 
@@ -1900,10 +1939,13 @@ impl GpuContext {
             u32::try_from(image.handle.as_raw()).map_err(|_| HandleError::InvalidHandle)?;
         let mut request =
             GpuContextUploadImageBgra::new(image_handle, pixels, source_stride, rect)?;
-        self.handle.control(
-            commands::GPU_CONTEXT_UPLOAD_IMAGE_BGRA,
-            &mut request as *mut _ as usize,
-        )?;
+        // SAFETY: request is an exclusive ABI record and its nested pixels pointer refers to the borrowed input slice until return.
+        unsafe {
+            self.handle.control(
+                commands::GPU_CONTEXT_UPLOAD_IMAGE_BGRA,
+                &mut request as *mut _ as usize,
+            )
+        }?;
         result_to_handle_error(request.result)
     }
 
@@ -1926,10 +1968,13 @@ impl GpuContext {
         let image_handle =
             u32::try_from(image.handle.as_raw()).map_err(|_| HandleError::InvalidHandle)?;
         let mut request = GpuContextTransferImportedImageBgra::new(image_handle, rect);
-        self.handle.control(
-            commands::GPU_CONTEXT_TRANSFER_IMPORTED_IMAGE_BGRA,
-            &mut request as *mut _ as usize,
-        )?;
+        // SAFETY: The initialized request/query record matches this fixed GPU control ABI and remains exclusively borrowed until return.
+        unsafe {
+            self.handle.control(
+                commands::GPU_CONTEXT_TRANSFER_IMPORTED_IMAGE_BGRA,
+                &mut request as *mut _ as usize,
+            )
+        }?;
         result_to_handle_error(request.result)
     }
 
@@ -1961,10 +2006,13 @@ impl GpuContext {
             u32::try_from(image.handle.as_raw()).map_err(|_| HandleError::InvalidHandle)?;
         let mut request =
             GpuContextReadbackImageBgra::new(image_handle, destination, destination_stride, rect)?;
-        self.handle.control(
-            commands::GPU_CONTEXT_READBACK_IMAGE_BGRA,
-            &mut request as *mut _ as usize,
-        )?;
+        // SAFETY: request and the referenced destination slice are disjoint exclusive output storage valid until readback returns.
+        unsafe {
+            self.handle.control(
+                commands::GPU_CONTEXT_READBACK_IMAGE_BGRA,
+                &mut request as *mut _ as usize,
+            )
+        }?;
         result_to_handle_error(request.result)
     }
 
@@ -2019,8 +2067,11 @@ impl GpuQueue {
     /// Current queue information or a handle error.
     pub fn query(&self) -> HandleResult<GpuQueueInfo> {
         let mut info = GpuQueueInfo::new();
-        self.handle
-            .control(commands::GPU_QUEUE_QUERY, &mut info as *mut _ as usize)?;
+        // SAFETY: The initialized request/query record matches this fixed GPU control ABI and remains exclusively borrowed until return.
+        unsafe {
+            self.handle
+                .control(commands::GPU_QUEUE_QUERY, &mut info as *mut _ as usize)
+        }?;
         result_to_handle_error(info.result)?;
         Ok(info)
     }
@@ -2102,8 +2153,11 @@ impl GpuQueue {
     }
 
     fn control_submission(&self, request: &mut GpuQueueSubmit) -> HandleResult<()> {
-        self.handle
-            .control(commands::GPU_QUEUE_SUBMIT, request as *mut _ as usize)?;
+        // SAFETY: Only callers with a live commands slice reach this helper; request stays exclusive through synchronous submission.
+        unsafe {
+            self.handle
+                .control(commands::GPU_QUEUE_SUBMIT, request as *mut _ as usize)
+        }?;
         result_to_handle_error(request.result)
     }
 }
@@ -2139,7 +2193,8 @@ impl GpuImage {
     /// not a valid GPU image.
     pub fn from_handle(handle: Handle) -> HandleResult<Self> {
         let mut info = GpuImageInfo::new();
-        handle.control(commands::GPU_IMAGE_QUERY_INFO, &mut info as *mut _ as usize)?;
+        // SAFETY: The initialized request/query record matches this fixed GPU control ABI and remains exclusively borrowed until return.
+        unsafe { handle.control(commands::GPU_IMAGE_QUERY_INFO, &mut info as *mut _ as usize) }?;
         result_to_handle_error(info.result)?;
         if info.command_resource_token == 0 {
             return Err(HandleError::InvalidHandle);
@@ -2157,8 +2212,11 @@ impl GpuImage {
     /// Fixed-width image information or a handle error.
     pub fn query(&self) -> HandleResult<GpuImageInfo> {
         let mut info = GpuImageInfo::new();
-        self.handle
-            .control(commands::GPU_IMAGE_QUERY_INFO, &mut info as *mut _ as usize)?;
+        // SAFETY: The initialized request/query record matches this fixed GPU control ABI and remains exclusively borrowed until return.
+        unsafe {
+            self.handle
+                .control(commands::GPU_IMAGE_QUERY_INFO, &mut info as *mut _ as usize)
+        }?;
         result_to_handle_error(info.result)?;
         Ok(info)
     }
@@ -2169,10 +2227,13 @@ impl GpuImage {
     /// The backend-selected image layout fixed at creation time.
     pub fn query_layout(&self) -> HandleResult<GpuImageLayout> {
         let mut layout = GpuImageLayout::new();
-        self.handle.control(
-            commands::GPU_IMAGE_QUERY_LAYOUT,
-            &mut layout as *mut _ as usize,
-        )?;
+        // SAFETY: The initialized request/query record matches this fixed GPU control ABI and remains exclusively borrowed until return.
+        unsafe {
+            self.handle.control(
+                commands::GPU_IMAGE_QUERY_LAYOUT,
+                &mut layout as *mut _ as usize,
+            )
+        }?;
         result_to_handle_error(layout.result)?;
         if layout.reserved != 0
             || layout.plane_count == 0
@@ -2224,10 +2285,13 @@ impl GpuBuffer {
     /// Fixed-width buffer information or a handle error.
     pub fn query_info(&self) -> HandleResult<GpuBufferInfo> {
         let mut info = GpuBufferInfo::new();
-        self.handle.control(
-            commands::GPU_BUFFER_QUERY_INFO,
-            &mut info as *mut _ as usize,
-        )?;
+        // SAFETY: The initialized request/query record matches this fixed GPU control ABI and remains exclusively borrowed until return.
+        unsafe {
+            self.handle.control(
+                commands::GPU_BUFFER_QUERY_INFO,
+                &mut info as *mut _ as usize,
+            )
+        }?;
         result_to_handle_error(info.result)?;
         Ok(info)
     }
@@ -2303,8 +2367,11 @@ impl GpuTimeline {
     /// Fixed-width timeline information or a handle error.
     pub fn query(&self) -> HandleResult<GpuTimelineInfo> {
         let mut info = GpuTimelineInfo::new();
-        self.handle
-            .control(commands::GPU_TIMELINE_QUERY, &mut info as *mut _ as usize)?;
+        // SAFETY: The initialized request/query record matches this fixed GPU control ABI and remains exclusively borrowed until return.
+        unsafe {
+            self.handle
+                .control(commands::GPU_TIMELINE_QUERY, &mut info as *mut _ as usize)
+        }?;
         result_to_handle_error(info.result)?;
         Ok(info)
     }
@@ -2319,10 +2386,13 @@ impl GpuTimeline {
     /// Fixed-width signal results or a handle error.
     pub fn signal(&self, value: u64) -> HandleResult<GpuTimelineSignal> {
         let mut request = GpuTimelineSignal::new(value);
-        self.handle.control(
-            commands::GPU_TIMELINE_SIGNAL,
-            &mut request as *mut _ as usize,
-        )?;
+        // SAFETY: The initialized request/query record matches this fixed GPU control ABI and remains exclusively borrowed until return.
+        unsafe {
+            self.handle.control(
+                commands::GPU_TIMELINE_SIGNAL,
+                &mut request as *mut _ as usize,
+            )
+        }?;
         result_to_handle_error(request.result)?;
         Ok(request)
     }
@@ -2333,8 +2403,11 @@ impl GpuTimeline {
     /// Fixed-width failure results or a handle error.
     pub fn fail(&self) -> HandleResult<GpuTimelineFail> {
         let mut request = GpuTimelineFail::new();
-        self.handle
-            .control(commands::GPU_TIMELINE_FAIL, &mut request as *mut _ as usize)?;
+        // SAFETY: The initialized request/query record matches this fixed GPU control ABI and remains exclusively borrowed until return.
+        unsafe {
+            self.handle
+                .control(commands::GPU_TIMELINE_FAIL, &mut request as *mut _ as usize)
+        }?;
         result_to_handle_error(request.result)?;
         Ok(request)
     }
@@ -2349,10 +2422,13 @@ impl GpuTimeline {
     /// An owning selectable point wrapper or a handle error.
     pub fn create_point(&self, target_value: u64) -> HandleResult<GpuTimelinePoint> {
         let mut request = GpuTimelineCreatePoint::new(target_value);
-        self.handle.control(
-            commands::GPU_TIMELINE_CREATE_POINT,
-            &mut request as *mut _ as usize,
-        )?;
+        // SAFETY: The initialized request/query record matches this fixed GPU control ABI and remains exclusively borrowed until return.
+        unsafe {
+            self.handle.control(
+                commands::GPU_TIMELINE_CREATE_POINT,
+                &mut request as *mut _ as usize,
+            )
+        }?;
         result_to_handle_error(request.result)?;
         Ok(GpuTimelinePoint {
             handle: adopt_child_handle(request.point_handle)?,

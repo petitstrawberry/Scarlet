@@ -23,7 +23,8 @@ fn main() -> ExitCode {
         }
     };
 
-    let ret = syscall1(Syscall::LsmUnload, module_id as usize);
+    // SAFETY: The module ID is a scalar; kernel module teardown does not dereference userspace arguments.
+    let ret = unsafe { syscall1(Syscall::LsmUnload, module_id as usize) };
     if ret != 0 {
         println!("failed to unload '{name}' (id={module_id}, error: {ret})");
         return ExitCode::from(1);
@@ -35,7 +36,8 @@ fn main() -> ExitCode {
 
 fn find_module_id_by_name(name: &str) -> Option<u64> {
     let mut buf = [0; LSM_LIST_ENTRY_SIZE * LSM_LIST_MAX_MODULES];
-    let count = syscall2(Syscall::LsmList, buf.as_mut_ptr() as usize, buf.len());
+    // SAFETY: buf is exclusive byte storage of the advertised length; LsmList writes complete serialized records synchronously.
+    let count = unsafe { syscall2(Syscall::LsmList, buf.as_mut_ptr() as usize, buf.len()) };
     if count == 0 {
         return None;
     }

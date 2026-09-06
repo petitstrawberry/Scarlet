@@ -23,21 +23,26 @@ const MUTEX_LOCKED: u32 = 1;
 const MUTEX_CONTENDED: u32 = 2;
 
 fn futex_wait(word: &AtomicU32, expected: u32) {
-    let result = syscall3(
-        Syscall::FutexWait,
-        word as *const AtomicU32 as usize,
-        expected as usize,
-        usize::MAX,
-    );
+    // SAFETY: The borrowed, aligned AtomicU32 remains live for the wait and is accessed through atomic operations.
+    let result = unsafe {
+        syscall3(
+            Syscall::FutexWait,
+            word as *const AtomicU32 as usize,
+            expected as usize,
+            usize::MAX,
+        )
+    };
     if result == usize::MAX {
         // Keep mixed old-kernel/new-userland images from turning lock
         // contention into a tight syscall loop.
-        let _ = syscall1(Syscall::Sleep, 10_000_000);
+        // SAFETY: This fixed sleep operation takes only a scalar duration and has no userspace pointer arguments.
+        let _ = unsafe { syscall1(Syscall::Sleep, 10_000_000) };
     }
 }
 
 fn futex_wake(word: &AtomicU32, count: usize) {
-    let _ = syscall2(Syscall::FutexWake, word as *const AtomicU32 as usize, count);
+    // SAFETY: The borrowed, aligned AtomicU32 remains live for the wake; the count is scalar.
+    let _ = unsafe { syscall2(Syscall::FutexWake, word as *const AtomicU32 as usize, count) };
 }
 
 /// Process-private sleeping mutex.

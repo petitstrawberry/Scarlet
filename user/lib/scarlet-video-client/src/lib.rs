@@ -1022,12 +1022,15 @@ impl ScarletVideoDecoder {
                 padding: 0,
                 timestamp,
             };
-            self.device
-                .control(SCARLET_VIDEO_SUBMIT_SESSION, &submit as *const _ as usize)
-                .map_err(|_| {
-                    let status = self.read_decoder_status();
-                    format!("hardware decoder mmap submit failed{status}")
-                })?;
+            // SAFETY: The fixed submit record stays readable until return; the decoder owns the mapped input and does not reuse it while its decode is pending.
+            unsafe {
+                self.device
+                    .control(SCARLET_VIDEO_SUBMIT_SESSION, &submit as *const _ as usize)
+            }
+            .map_err(|_| {
+                let status = self.read_decoder_status();
+                format!("hardware decoder mmap submit failed{status}")
+            })?;
             submitted_timestamp = timestamp;
         } else {
             self.last_decode_mode = Some(HardwareDecodeMode::Stateful);
@@ -1036,12 +1039,15 @@ impl ScarletVideoDecoder {
                 coded_format: format.coded_format(),
                 timestamp,
             };
-            self.device
-                .control(SCARLET_VIDEO_SUBMIT, &submit as *const _ as usize)
-                .map_err(|_| {
-                    let status = self.read_decoder_status();
-                    format!("hardware decoder mmap submit failed{status}")
-                })?;
+            // SAFETY: The fixed submit record stays readable until return; the decoder owns the mapped input and does not reuse it while its decode is pending.
+            unsafe {
+                self.device
+                    .control(SCARLET_VIDEO_SUBMIT, &submit as *const _ as usize)
+            }
+            .map_err(|_| {
+                let status = self.read_decoder_status();
+                format!("hardware decoder mmap submit failed{status}")
+            })?;
             submitted_timestamp = timestamp;
         }
         self.pending = Some(PendingDecode {
@@ -1110,16 +1116,21 @@ impl ScarletVideoDecoder {
                     stream_id: buffer.stream_id,
                     ..Default::default()
                 };
-                let result = self.device.control(
-                    SCARLET_VIDEO_DEQUEUE_SESSION,
-                    &mut session_frame as *mut _ as usize,
-                );
+                // SAFETY: The initialized record matches this fixed video control ABI and remains exclusively borrowed until return.
+                let result = unsafe {
+                    self.device.control(
+                        SCARLET_VIDEO_DEQUEUE_SESSION,
+                        &mut session_frame as *mut _ as usize,
+                    )
+                };
                 result.map(|value| (value, session_frame.frame))
             } else {
                 let mut frame = ScarletVideoDequeuedFrame::default();
-                let result = self
-                    .device
-                    .control(SCARLET_VIDEO_DEQUEUE, &mut frame as *mut _ as usize);
+                // SAFETY: The initialized record matches this fixed video control ABI and remains exclusively borrowed until return.
+                let result = unsafe {
+                    self.device
+                        .control(SCARLET_VIDEO_DEQUEUE, &mut frame as *mut _ as usize)
+                };
                 result.map(|value| (value, frame))
             };
             match dequeue_result {
@@ -1189,9 +1200,11 @@ impl ScarletVideoDecoder {
             padding: 0,
             buffer: ScarletVideoBufferInfo::default(),
         };
-        let _ = self
-            .device
-            .control(SCARLET_VIDEO_DESTROY_SESSION, &destroy as *const _ as usize);
+        // SAFETY: The initialized session identifier record remains borrowed through synchronous teardown; it contains no borrowed data pointers.
+        let _ = unsafe {
+            self.device
+                .control(SCARLET_VIDEO_DESTROY_SESSION, &destroy as *const _ as usize)
+        };
 
         let mut session_info = ScarletVideoSessionInfo {
             stream_id: 0,
@@ -1202,18 +1215,20 @@ impl ScarletVideoDecoder {
                 ..ScarletVideoBufferInfo::default()
             },
         };
-        self.device
-            .control(
+        // SAFETY: The initialized record matches this fixed video control ABI and remains exclusively borrowed until return.
+        unsafe {
+            self.device.control(
                 SCARLET_VIDEO_CREATE_SESSION,
                 &mut session_info as *mut _ as usize,
             )
-            .map_err(|_| {
-                let status = self.read_decoder_status();
-                format!(
-                    "hardware decoder failed to create {} session{status}",
-                    format.name()
-                )
-            })?;
+        }
+        .map_err(|_| {
+            let status = self.read_decoder_status();
+            format!(
+                "hardware decoder failed to create {} session{status}",
+                format.name()
+            )
+        })?;
         if session_info.buffer.mmap_len as usize != buffer.mmap_len {
             return Err(String::from(
                 "hardware decoder changed mmap layout while switching codec sessions",
@@ -1267,38 +1282,42 @@ impl ScarletVideoDecoder {
                 },
                 ..ScarletVideoSessionInfo::default()
             };
-            if device
-                .control(
+            // SAFETY: The initialized record matches this fixed video control ABI and remains exclusively borrowed until return.
+            if unsafe {
+                device.control(
                     SCARLET_VIDEO_CREATE_SESSION,
                     &mut session_info as *mut _ as usize,
                 )
-                .is_ok()
+            }
+            .is_ok()
             {
                 (session_info.stream_id, true, session_info.buffer)
             } else {
                 let mut info = ScarletVideoBufferInfo::default();
-                device
-                    .control(SCARLET_VIDEO_GET_BUFFER, &mut info as *mut _ as usize)
+                // SAFETY: The initialized record matches this fixed video control ABI and remains exclusively borrowed until return.
+                unsafe { device.control(SCARLET_VIDEO_GET_BUFFER, &mut info as *mut _ as usize) }
                     .ok()?;
                 (1, false, info)
             }
         } else {
             let mut info = ScarletVideoBufferInfo::default();
-            device
-                .control(SCARLET_VIDEO_GET_BUFFER, &mut info as *mut _ as usize)
+            // SAFETY: The initialized record matches this fixed video control ABI and remains exclusively borrowed until return.
+            unsafe { device.control(SCARLET_VIDEO_GET_BUFFER, &mut info as *mut _ as usize) }
                 .ok()?;
             (1, false, info)
         };
         let mapper = device.as_memory_mapping().ok()?;
-        let address = mapper
-            .mmap(
+        // SAFETY: This requests a fresh non-fixed mapping; its owning buffer/stream retains the backing and controls all CPU views and unmapping.
+        let address = unsafe {
+            mapper.mmap(
                 0,
                 info.mmap_len as usize,
                 prot::READ | prot::WRITE,
                 mmap_flags::SHARED,
                 info.mmap_offset as usize,
             )
-            .ok()?;
+        }
+        .ok()?;
         Some(MappedVideoBuffer {
             stream_id,
             session_commands,
@@ -1314,9 +1333,8 @@ impl ScarletVideoDecoder {
 
     fn query_capabilities(device: &Handle) -> Option<ScarletVideoCapabilities> {
         let mut caps = ScarletVideoCapabilities::default();
-        device
-            .control(SCARLET_VIDEO_GET_CAPS, &mut caps as *mut _ as usize)
-            .ok()?;
+        // SAFETY: The initialized record matches this fixed video control ABI and remains exclusively borrowed until return.
+        unsafe { device.control(SCARLET_VIDEO_GET_CAPS, &mut caps as *mut _ as usize) }.ok()?;
         (caps.version == SCARLET_VIDEO_CAPS_VERSION).then_some(caps)
     }
 
@@ -1341,11 +1359,14 @@ impl Drop for ScarletVideoDecoder {
                     padding: 0,
                     buffer: ScarletVideoBufferInfo::default(),
                 };
-                let _ = self
-                    .device
-                    .control(SCARLET_VIDEO_DESTROY_SESSION, &info as *const _ as usize);
+                // SAFETY: The initialized session identifier record remains borrowed through synchronous teardown; it contains no borrowed data pointers.
+                let _ = unsafe {
+                    self.device
+                        .control(SCARLET_VIDEO_DESTROY_SESSION, &info as *const _ as usize)
+                };
             }
-            let _ = munmap(buffer.ptr as usize, buffer.mmap_len);
+            // SAFETY: This teardown/rollback path owns the exact mapping; its borrowed CPU views have ended before releasing the virtual range.
+            let _ = unsafe { munmap(buffer.ptr as usize, buffer.mmap_len) };
         }
     }
 }

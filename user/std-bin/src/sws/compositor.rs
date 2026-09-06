@@ -2303,7 +2303,8 @@ struct ExtensionShmPool {
 impl Drop for ExtensionShmPool {
     fn drop(&mut self) {
         if self.mapped_addr != 0 && self.size != 0 {
-            let _ = munmap(self.mapped_addr, self.size);
+            // SAFETY: This teardown/rollback path owns the exact mapping; its borrowed CPU views have ended before releasing the virtual range.
+            let _ = unsafe { munmap(self.mapped_addr, self.size) };
         }
     }
 }
@@ -3649,7 +3650,8 @@ impl Compositor {
         // This is useful to see if heap grows towards the VRAM mapping.
         {
             use scarlet_sys::{Syscall, syscall1};
-            let brk_now = syscall1(Syscall::Sbrk, 0);
+            // SAFETY: The zero increment only queries the current break; it neither claims nor releases heap memory.
+            let brk_now = unsafe { syscall1(Syscall::Sbrk, 0) };
             println!("[Compositor] sbrk(0) -> 0x{:x}", brk_now);
         }
     }
@@ -7677,9 +7679,8 @@ impl Compositor {
             .as_memory_mapping()
             .ok()
             .and_then(|mapper| {
-                mapper
-                    .mmap(0, size, permissions::READ_WRITE, mmap_flags::SHARED, 0)
-                    .ok()
+                // SAFETY: This requests a fresh non-fixed mapping; its owning buffer/stream retains the backing and controls all CPU views and unmapping.
+                unsafe { mapper.mmap(0, size, permissions::READ_WRITE, mmap_flags::SHARED, 0) }.ok()
             })
             .unwrap_or(0);
         if mapped_addr == 0 {
@@ -7737,9 +7738,8 @@ impl Compositor {
             .as_memory_mapping()
             .ok()
             .and_then(|mapper| {
-                mapper
-                    .mmap(0, size, permissions::READ_WRITE, mmap_flags::SHARED, 0)
-                    .ok()
+                // SAFETY: This requests a fresh non-fixed mapping; its owning buffer/stream retains the backing and controls all CPU views and unmapping.
+                unsafe { mapper.mmap(0, size, permissions::READ_WRITE, mmap_flags::SHARED, 0) }.ok()
             })
             .unwrap_or(0);
         if mapped_addr == 0 {
@@ -7770,7 +7770,8 @@ impl Compositor {
             .iter()
             .any(|(_, _, _, view)| !Self::extension_shm_view_fits(size, *view))
         {
-            let _ = munmap(mapped_addr, size);
+            // SAFETY: This teardown/rollback path owns the exact mapping; its borrowed CPU views have ended before releasing the virtual range.
+            let _ = unsafe { munmap(mapped_addr, size) };
             self.send_extension_resource_error(
                 client_id,
                 request_id,
@@ -7805,7 +7806,8 @@ impl Compositor {
             }
         }
         if old_addr != 0 && old_size != 0 {
-            let _ = munmap(old_addr, old_size);
+            // SAFETY: This teardown/rollback path owns the exact mapping; its borrowed CPU views have ended before releasing the virtual range.
+            let _ = unsafe { munmap(old_addr, old_size) };
         }
         let payload = sws_protocol::payload_extension_shm_pool_state(pool_id, size as u64);
         send_response_to_client(
@@ -10722,7 +10724,8 @@ impl Compositor {
                     if let Some(address) = shm_mapped_addr
                         && shm_size != 0
                     {
-                        let _ = munmap(address, shm_size);
+                        // SAFETY: This teardown/rollback path owns the exact mapping; its borrowed CPU views have ended before releasing the virtual range.
+                        let _ = unsafe { munmap(address, shm_size) };
                     }
                     let payload = sws_protocol::payload_window_configure(
                         window_id,
@@ -11455,9 +11458,12 @@ impl Compositor {
                                 && old_size != 0
                                 && w.shm_mapping_owned
                             {
-                                let _ = scarlet_os::handle::capability::memory_mapping::munmap(
-                                    old_addr, old_size,
-                                );
+                                // SAFETY: This teardown/rollback path owns the exact mapping; its borrowed CPU views have ended before releasing the virtual range.
+                                let _ = unsafe {
+                                    scarlet_os::handle::capability::memory_mapping::munmap(
+                                        old_addr, old_size,
+                                    )
+                                };
                             }
                             w.shm = None;
                             w.width = width;

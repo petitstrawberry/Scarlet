@@ -34,7 +34,8 @@ struct RuntimeConsole;
 impl Write for RuntimeConsole {
     fn write_str(&mut self, value: &str) -> fmt::Result {
         for byte in value.bytes() {
-            let _ = scarlet_sys::syscall1(Syscall::Putchar, byte as usize);
+            // SAFETY: The character value is a scalar; this console operation takes no userspace pointer.
+            let _ = unsafe { scarlet_sys::syscall1(Syscall::Putchar, byte as usize) };
         }
         Ok(())
     }
@@ -46,13 +47,15 @@ impl Write for RuntimeConsole {
 ///
 /// * `code` - Process exit status.
 pub fn exit(code: i32) -> ! {
-    let _ = syscall1(Syscall::ExitGroup, code as usize);
+    // SAFETY: This fixed operation terminates the process and cannot resume access through live Rust references.
+    let _ = unsafe { syscall1(Syscall::ExitGroup, code as usize) };
 
     // ExitGroup must not return. If a mismatched or broken kernel does return,
     // stay quiescent instead of turning a failed process teardown into a
     // permanent 100% CPU task.
     loop {
-        let _ = syscall1(Syscall::Sleep, 1_000_000_000);
+        // SAFETY: This fixed sleep operation takes only a scalar duration and has no userspace pointer arguments.
+        let _ = unsafe { syscall1(Syscall::Sleep, 1_000_000_000) };
     }
 }
 

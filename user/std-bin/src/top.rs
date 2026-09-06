@@ -334,7 +334,8 @@ fn main() -> ExitCode {
 
 fn print_task_debug(pid: usize) -> ExitCode {
     let entry_size = core::mem::size_of::<RawTaskDebugInfoV1>();
-    let required = syscall4(Syscall::GetTaskDebugInfo, pid, 0, 0, entry_size);
+    // SAFETY: The versioned entry size matches the ABI; a zero count queries capacity, otherwise entries provides exclusive output storage.
+    let required = unsafe { syscall4(Syscall::GetTaskDebugInfo, pid, 0, 0, entry_size) };
     if required == usize::MAX {
         println!(
             "top: task debug information is unavailable (missing PID or kernel sync-debug feature)"
@@ -347,13 +348,16 @@ fn print_task_debug(pid: usize) -> ExitCode {
     }
 
     let mut entries = vec![RawTaskDebugInfoV1::default(); required];
-    let written = syscall4(
-        Syscall::GetTaskDebugInfo,
-        pid,
-        entries.as_mut_ptr() as usize,
-        entries.len(),
-        entry_size,
-    );
+    // SAFETY: The versioned entry size matches the ABI; a zero count queries capacity, otherwise entries provides exclusive output storage.
+    let written = unsafe {
+        syscall4(
+            Syscall::GetTaskDebugInfo,
+            pid,
+            entries.as_mut_ptr() as usize,
+            entries.len(),
+            entry_size,
+        )
+    };
     if written == usize::MAX {
         println!("top: failed to read task debug information for {pid}");
         return ExitCode::from(1);
@@ -484,12 +488,15 @@ fn print_cpu_debug(cpu_id: usize) -> ExitCode {
 fn print_cpu_debug_snapshot(cpu_id: usize) -> bool {
     let entry_size = core::mem::size_of::<RawCpuDebugInfoV1>();
     let mut entry = RawCpuDebugInfoV1::default();
-    let result = syscall3(
-        Syscall::GetCpuDebugInfo,
-        cpu_id,
-        &mut entry as *mut RawCpuDebugInfoV1 as usize,
-        entry_size,
-    );
+    // SAFETY: entry is exclusive output storage with the supplied versioned CPU-debug ABI size.
+    let result = unsafe {
+        syscall3(
+            Syscall::GetCpuDebugInfo,
+            cpu_id,
+            &mut entry as *mut RawCpuDebugInfoV1 as usize,
+            entry_size,
+        )
+    };
     if result == usize::MAX {
         println!(
             "top: CPU{cpu_id} debug information is unavailable (invalid CPU or missing kernel sync-debug feature)"
@@ -649,11 +656,13 @@ fn check_instant() {
 }
 
 fn monotonic_time_ns() -> u64 {
-    syscall0(Syscall::MonotonicTime) as u64
+    // SAFETY: This fixed clock query has no arguments or userspace memory effects.
+    (unsafe { syscall0(Syscall::MonotonicTime) }) as u64
 }
 
 fn task_info() -> Vec<TaskInfo> {
-    let total = syscall0(Syscall::GetTaskInfoCount);
+    // SAFETY: This fixed query has no arguments or userspace memory effects.
+    let total = unsafe { syscall0(Syscall::GetTaskInfoCount) };
     let mut raw = vec![
         RawTaskInfo {
             pid: 0,
@@ -679,11 +688,14 @@ fn task_info() -> Vec<TaskInfo> {
         };
         total
     ];
-    let written = syscall2(
-        Syscall::GetTaskInfoList,
-        raw.as_mut_ptr() as usize,
-        raw.len(),
-    );
+    // SAFETY: raw is exclusive output storage for the advertised count of fixed-layout task records.
+    let written = unsafe {
+        syscall2(
+            Syscall::GetTaskInfoList,
+            raw.as_mut_ptr() as usize,
+            raw.len(),
+        )
+    };
     if written == usize::MAX {
         return Vec::new();
     }
@@ -700,10 +712,13 @@ fn cpu_usage() -> Option<CpuUsageInfo> {
         usage_per_mille: 0,
         _reserved: 0,
     };
-    let result = syscall1(
-        Syscall::GetCpuUsageInfo,
-        &mut raw as *mut RawCpuUsageInfo as usize,
-    );
+    // SAFETY: raw is an exclusive output record with the kernel's fixed CPU-usage layout.
+    let result = unsafe {
+        syscall1(
+            Syscall::GetCpuUsageInfo,
+            &mut raw as *mut RawCpuUsageInfo as usize,
+        )
+    };
     if result == usize::MAX {
         None
     } else {

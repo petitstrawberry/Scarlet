@@ -132,10 +132,13 @@ pub fn configure_interface_ipv4(
         flags,
         metric,
     };
-    let result = syscall1(
-        Syscall::NetworkConfigureIpv4,
-        &request as *const NetworkConfigureIpv4Request as usize,
-    );
+    // SAFETY: request has the fixed network ABI layout and remains immutably borrowed until return.
+    let result = unsafe {
+        syscall1(
+            Syscall::NetworkConfigureIpv4,
+            &request as *const NetworkConfigureIpv4Request as usize,
+        )
+    };
     HandleError::from_syscall_result(result).map(|_| ())
 }
 
@@ -159,11 +162,14 @@ pub fn list_interface_configs() -> Result<Vec<NetworkInterfaceConfig>, HandleErr
         reserved: [0; 3],
         metric: 0,
     }; MAX_INTERFACES];
-    let result = syscall2(
-        Syscall::NetworkListInterfacesV2,
-        records.as_mut_ptr() as usize,
-        records.len(),
-    );
+    // SAFETY: records is exclusive output storage for exactly the supplied element count.
+    let result = unsafe {
+        syscall2(
+            Syscall::NetworkListInterfacesV2,
+            records.as_mut_ptr() as usize,
+            records.len(),
+        )
+    };
     HandleError::from_syscall_result(result)?;
 
     let count = result.min(records.len());

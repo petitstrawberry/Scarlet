@@ -153,12 +153,15 @@ impl<'a> FileObject<'a> {
     pub fn seek(&self, pos: SeekFrom) -> FileResult<u64> {
         let (offset, whence) = pos.to_syscall_args();
 
-        let result = syscall3(
-            Syscall::FileSeek,
-            self.handle.as_raw() as usize,
-            offset as usize,
-            whence as usize,
-        );
+        // SAFETY: The borrowed handle remains live; offset and whence are scalar seek arguments.
+        let result = unsafe {
+            syscall3(
+                Syscall::FileSeek,
+                self.handle.as_raw() as usize,
+                offset as usize,
+                whence as usize,
+            )
+        };
 
         FileError::from_syscall_result(result).map(|pos| pos as u64)
     }
@@ -171,11 +174,14 @@ impl<'a> FileObject<'a> {
     /// # Returns
     /// Success or FileError on failure
     pub fn truncate(&self, size: u64) -> FileResult<()> {
-        let result = syscall2(
-            Syscall::FileTruncate,
-            self.handle.as_raw() as usize,
-            size as usize,
-        );
+        // SAFETY: The borrowed file handle remains live; the kernel validates the scalar length.
+        let result = unsafe {
+            syscall2(
+                Syscall::FileTruncate,
+                self.handle.as_raw() as usize,
+                size as usize,
+            )
+        };
 
         FileError::from_syscall_result(result).map(|_| ())
     }
@@ -186,11 +192,14 @@ impl<'a> FileObject<'a> {
     /// FileMetadata structure or FileError on failure
     pub fn metadata(&self) -> FileResult<FileMetadata> {
         let mut metadata = RawFileMetadata::default();
-        let result = syscall2(
-            Syscall::FileMetadata,
-            self.handle.as_raw() as usize,
-            (&mut metadata as *mut RawFileMetadata) as usize,
-        );
+        // SAFETY: metadata is an exclusively borrowed, correctly laid-out output record for this synchronous call.
+        let result = unsafe {
+            syscall2(
+                Syscall::FileMetadata,
+                self.handle.as_raw() as usize,
+                (&mut metadata as *mut RawFileMetadata) as usize,
+            )
+        };
 
         FileError::from_syscall_result(result).map(|_| metadata.into())
     }

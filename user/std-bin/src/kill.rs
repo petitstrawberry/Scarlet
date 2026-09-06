@@ -70,7 +70,8 @@ fn main() -> ExitCode {
             failed = true;
             continue;
         };
-        if syscall2(Syscall::Kill, pid, signal) == usize::MAX {
+        // SAFETY: The PID and signal are scalar inputs validated by the kernel; no userspace pointer is passed.
+        if unsafe { syscall2(Syscall::Kill, pid, signal) } == usize::MAX {
             println!("kill: failed to signal {pid}");
             failed = true;
         }

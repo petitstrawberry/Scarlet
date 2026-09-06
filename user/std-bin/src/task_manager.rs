@@ -568,18 +568,22 @@ fn cpu_delta(previous: Option<RawCpuUsageInfo>, current: Option<RawCpuUsageInfo>
 }
 
 fn read_tasks() -> Vec<TaskInfo> {
-    let count = syscall0(Syscall::GetTaskInfoCount);
+    // SAFETY: This fixed query has no arguments or userspace memory effects.
+    let count = unsafe { syscall0(Syscall::GetTaskInfoCount) };
     if count == usize::MAX || count == 0 {
         return Vec::new();
     }
 
     let count = count.min(MAX_TASKS);
     let mut raw = vec![RawTaskInfo::default(); count];
-    let returned = syscall2(
-        Syscall::GetTaskInfoList,
-        raw.as_mut_ptr() as usize,
-        raw.len(),
-    );
+    // SAFETY: raw is exclusive output storage for the advertised count of fixed-layout task records.
+    let returned = unsafe {
+        syscall2(
+            Syscall::GetTaskInfoList,
+            raw.as_mut_ptr() as usize,
+            raw.len(),
+        )
+    };
     if returned == usize::MAX {
         return Vec::new();
     }
@@ -590,10 +594,13 @@ fn read_tasks() -> Vec<TaskInfo> {
 
 fn read_cpu_usage() -> Option<RawCpuUsageInfo> {
     let mut raw = RawCpuUsageInfo::default();
-    let result = syscall1(
-        Syscall::GetCpuUsageInfo,
-        &mut raw as *mut RawCpuUsageInfo as usize,
-    );
+    // SAFETY: raw is an exclusive output record with the kernel's fixed CPU-usage layout.
+    let result = unsafe {
+        syscall1(
+            Syscall::GetCpuUsageInfo,
+            &mut raw as *mut RawCpuUsageInfo as usize,
+        )
+    };
     (result != usize::MAX).then_some(raw)
 }
 

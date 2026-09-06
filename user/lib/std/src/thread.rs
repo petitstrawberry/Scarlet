@@ -51,19 +51,24 @@ struct ThreadStackMapping {
 
 fn allocate_thread_stack() -> Result<ThreadStackMapping, &'static str> {
     let mapping_len = STACK_SIZE + PAGE_SIZE;
-    let mapping_base = mmap_anonymous(0, mapping_len, prot::NONE, mmap_flags::PRIVATE)
+    // SAFETY: This allocates a fresh non-fixed range owned by the threading runtime, without replacing live memory.
+    let mapping_base = unsafe { mmap_anonymous(0, mapping_len, prot::NONE, mmap_flags::PRIVATE) }
         .map_err(|_| "Failed to allocate thread stack guard")?;
     let stack_base = mapping_base + PAGE_SIZE;
 
-    if mmap_anonymous(
-        stack_base,
-        STACK_SIZE,
-        prot::READ | prot::WRITE,
-        mmap_flags::PRIVATE | mmap_flags::FIXED,
-    )
+    // SAFETY: This replaces only the unused interior of the guard reservation just allocated above; no stack or reference has been placed there.
+    if unsafe {
+        mmap_anonymous(
+            stack_base,
+            STACK_SIZE,
+            prot::READ | prot::WRITE,
+            mmap_flags::PRIVATE | mmap_flags::FIXED,
+        )
+    }
     .is_err()
     {
-        let _ = munmap(mapping_base, mapping_len);
+        // SAFETY: This teardown/rollback path owns the exact mapping; its borrowed CPU views have ended before releasing the virtual range.
+        let _ = unsafe { munmap(mapping_base, mapping_len) };
         return Err("Failed to allocate thread stack");
     }
 
@@ -76,12 +81,15 @@ fn allocate_thread_stack() -> Result<ThreadStackMapping, &'static str> {
 }
 
 fn allocate_thread_tls() -> Result<usize, &'static str> {
-    mmap_anonymous(
-        0,
-        TLS_MAPPING_SIZE,
-        prot::READ | prot::WRITE,
-        mmap_flags::PRIVATE,
-    )
+    // SAFETY: This allocates a fresh non-fixed range owned by the threading runtime, without replacing live memory.
+    unsafe {
+        mmap_anonymous(
+            0,
+            TLS_MAPPING_SIZE,
+            prot::READ | prot::WRITE,
+            mmap_flags::PRIVATE,
+        )
+    }
     .map_err(|_| "Failed to allocate thread TLS")
 }
 
@@ -91,8 +99,10 @@ fn cleanup_thread_mappings(
     tls_mapping_base: usize,
     tls_mapping_len: usize,
 ) {
-    let _ = munmap(stack_mapping_base, stack_mapping_len);
-    let _ = munmap(tls_mapping_base, tls_mapping_len);
+    // SAFETY: This teardown/rollback path owns the exact mapping; its borrowed CPU views have ended before releasing the virtual range.
+    let _ = unsafe { munmap(stack_mapping_base, stack_mapping_len) };
+    // SAFETY: This teardown/rollback path owns the exact mapping; its borrowed CPU views have ended before releasing the virtual range.
+    let _ = unsafe { munmap(tls_mapping_base, tls_mapping_len) };
 }
 
 fn write_thread_cleanup_record(
@@ -165,19 +175,36 @@ pub unsafe fn init_main_thread_tls() {
 /// maintain ABI state synchronization.
 ///
 /// This is typically only called during thread initialization.
-pub fn set_tls_pointer(ptr: usize) {
-    crate::arch::arch_set_tls_pointer(ptr);
+///
+/// # Arguments
+///
+/// * `ptr` - Base address of the new TLS block.
+///
+/// # Returns
+///
+/// Nothing.
+///
+/// # Safety
+///
+/// The block must have the runtime's initialized TLS layout and remain valid
+/// until replacement or thread exit. Replacement must preserve all live
+/// thread-local references and the runtime's thread cleanup state.
+pub unsafe fn set_tls_pointer(ptr: usize) {
+    // SAFETY: The caller guarantees initialized live TLS storage and safe replacement of the current thread's runtime state.
+    unsafe { crate::arch::arch_set_tls_pointer(ptr) };
 }
 
 /// Thread sleep
 pub fn sleep(dur: Duration) -> i32 {
     let nanosecs = dur.as_nanos() as usize;
-    syscall1(Syscall::Sleep, nanosecs) as i32
+    // SAFETY: This fixed sleep operation takes only a scalar duration and has no userspace pointer arguments.
+    (unsafe { syscall1(Syscall::Sleep, nanosecs) }) as i32
 }
 
 /// Yield execution to the scheduler.
 pub fn yield_now() {
-    let _ = syscall0(Syscall::Yield);
+    // SAFETY: This fixed scheduling operation takes no arguments or userspace pointers.
+    let _ = unsafe { syscall0(Syscall::Yield) };
 }
 
 /// Thread builder (simplified)
@@ -288,7 +315,8 @@ impl JoinHandle {
 impl Drop for JoinHandle {
     fn drop(&mut self) {
         if let Some(thread_id) = self.thread_id.take() {
-            let _ = syscall1(Syscall::ThreadDetach, thread_id as usize);
+            // SAFETY: The owned join handle is disarmed before detaching this scalar thread ID.
+            let _ = unsafe { syscall1(Syscall::ThreadDetach, thread_id as usize) };
         }
     }
 }
@@ -314,7 +342,8 @@ where
     let tls_ptr = match allocate_thread_tls() {
         Ok(ptr) => ptr,
         Err(e) => {
-            let _ = munmap(stack.mapping_base, stack.mapping_len);
+            // SAFETY: This teardown/rollback path owns the exact mapping; its borrowed CPU views have ended before releasing the virtual range.
+            let _ = unsafe { munmap(stack.mapping_base, stack.mapping_len) };
             return Err(e);
         }
     };
@@ -372,14 +401,17 @@ where
 
     // Use a typed trampoline that knows about F.
     // Clone with: flags, stack, trampoline function, start packet, TLS pointer.
-    let result = syscall5(
-        Syscall::Clone,
-        flags.get_raw() as usize,
-        stack_top,
-        thread_typed_trampoline::<F> as *const () as usize,
-        start_ptr,
-        tls_ptr, // TLS pointer as 5th argument
-    );
+    // SAFETY: The child receives its own stack/TLS and a Send + 'static closure packet; ownership transfers to the typed trampoline only on success.
+    let result = unsafe {
+        syscall5(
+            Syscall::Clone,
+            flags.get_raw() as usize,
+            stack_top,
+            thread_typed_trampoline::<F> as *const () as usize,
+            start_ptr,
+            tls_ptr, // TLS pointer as 5th argument
+        )
+    };
 
     if let Some(previous) = previous_util_min {
         let _ = crate::task::set_sched_util_min(previous);
@@ -430,14 +462,17 @@ fn exit_thread_with_cleanup(
     tls_mapping_base: usize,
     tls_mapping_len: usize,
 ) -> ! {
-    syscall5(
-        Syscall::ThreadExitCleanup,
-        code as usize,
-        stack_mapping_base,
-        stack_mapping_len,
-        tls_mapping_base,
-        tls_mapping_len,
-    );
+    // SAFETY: Only the current thread's runtime-owned stack/TLS ranges reach this path; successful kernel cleanup exits without resuming them.
+    unsafe {
+        syscall5(
+            Syscall::ThreadExitCleanup,
+            code as usize,
+            stack_mapping_base,
+            stack_mapping_len,
+            tls_mapping_base,
+            tls_mapping_len,
+        )
+    };
     unreachable!("thread cleanup exit syscall should not return");
 }
 
@@ -459,7 +494,8 @@ pub(crate) fn exit_current_thread(code: i32) -> ! {
         }
     }
 
-    syscall1(Syscall::Exit, code as usize);
+    // SAFETY: This exits the current thread without resuming any of its live references.
+    unsafe { syscall1(Syscall::Exit, code as usize) };
     unreachable!("exit_thread syscall should not return");
 }
 

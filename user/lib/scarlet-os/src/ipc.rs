@@ -26,7 +26,8 @@ pub type PipeResult<T> = core::result::Result<T, PipeError>;
 /// An owning `(read_end, write_end)` handle pair, or a pipe creation error.
 pub fn pipe() -> PipeResult<(Handle, Handle)> {
     let mut pipe_handles = [0u32; 2];
-    let result = syscall2(Syscall::Pipe, pipe_handles.as_mut_ptr() as usize, 0);
+    // SAFETY: pipe_handles provides exclusive storage for both newly transferred endpoint handles.
+    let result = unsafe { syscall2(Syscall::Pipe, pipe_handles.as_mut_ptr() as usize, 0) };
     if result == usize::MAX {
         return Err(PipeError::SyscallFailed);
     }
@@ -38,7 +39,8 @@ pub fn pipe() -> PipeResult<(Handle, Handle)> {
         Err(_) => {
             // `from_raw` consumed the read endpoint. The write endpoint has not
             // been adopted yet, so close it explicitly before returning.
-            let _ = syscall1(Syscall::HandleClose, pipe_handles[1] as usize);
+            // SAFETY: This path exclusively owns the raw handle and closes it once, without leaving an armed owning wrapper.
+            let _ = unsafe { syscall1(Syscall::HandleClose, pipe_handles[1] as usize) };
             return Err(PipeError::InvalidHandle);
         }
     };
@@ -79,7 +81,8 @@ pub struct SharedMemory {
 impl SharedMemory {
     /// Create a shared memory region
     pub fn create(size: usize, permissions: usize) -> SharedMemoryResult<Self> {
-        let result = syscall2(Syscall::SharedMemoryCreate, size, permissions);
+        // SAFETY: Size and permissions are scalar inputs; a successful result transfers a new handle.
+        let result = unsafe { syscall2(Syscall::SharedMemoryCreate, size, permissions) };
         if result == usize::MAX {
             return Err(SharedMemoryError::SyscallFailed);
         }
@@ -92,7 +95,16 @@ impl SharedMemory {
     ///
     /// This performs a type check using the handle's cached kernel object info.
     /// If the handle does not represent a shared memory object, this returns
-    /// [`SharedMemoryError::InvalidHandle`] and does **not** consume the handle.
+    /// [`SharedMemoryError::InvalidHandle`]. The handle is consumed on both
+    /// success and failure; on failure it is dropped and closed.
+    ///
+    /// # Arguments
+    ///
+    /// * `handle` - Owned handle transferred to this conversion.
+    ///
+    /// # Returns
+    ///
+    /// An owning shared-memory wrapper, or an error after releasing the handle.
     pub fn from_handle(handle: Handle) -> SharedMemoryResult<Self> {
         handle
             .as_shared_memory()
@@ -289,13 +301,16 @@ pub fn send_process_control_with_priority(
 ) -> EventResult<()> {
     use scarlet_sys::{Syscall, syscall4};
 
-    let result = syscall4(
-        Syscall::EventSendDirect,
-        task_id as usize,
-        control as usize,
-        reliable as usize,
-        priority as usize,
-    );
+    // SAFETY: The typed control event carries only scalar task, reliability and priority values.
+    let result = unsafe {
+        syscall4(
+            Syscall::EventSendDirect,
+            task_id as usize,
+            control as usize,
+            reliable as usize,
+            priority as usize,
+        )
+    };
 
     if result == usize::MAX {
         Err(EventError::SyscallFailed)
@@ -340,13 +355,16 @@ pub fn send_process_control_to_group_with_priority(
 ) -> EventResult<()> {
     use scarlet_sys::{Syscall, syscall4};
 
-    let result = syscall4(
-        Syscall::EventSendGroup,
-        process_group_id.unwrap_or(0) as usize,
-        control as usize,
-        reliable as usize,
-        priority as usize,
-    );
+    // SAFETY: The typed control event carries only scalar group, reliability and priority values.
+    let result = unsafe {
+        syscall4(
+            Syscall::EventSendGroup,
+            process_group_id.unwrap_or(0) as usize,
+            control as usize,
+            reliable as usize,
+            priority as usize,
+        )
+    };
 
     if result == usize::MAX {
         Err(EventError::SyscallFailed)
@@ -376,7 +394,18 @@ pub mod mask_kinds {
 /// * `content_type` - Event content type (0=ProcessControl, 1=Message, 2=Notification, 3=Custom)
 /// * `handler` - Handler function address
 /// * `synchronous` - If true, handler is called synchronously
-pub fn register_event_handler(
+///
+/// # Returns
+///
+/// `Ok(())` after registration, or an event validation/syscall error.
+///
+/// # Safety
+///
+/// The handler must remain executable until unregistered and must not unwind
+/// across the event ABI. For asynchronous delivery, it must be safe to invoke
+/// while arbitrary application code is interrupted, including reentrancy and
+/// synchronization of any state it accesses. It must not retain `EventInfo`.
+pub unsafe fn register_event_handler(
     content_type: u8,
     handler: EventHandler,
     synchronous: bool,
@@ -393,14 +422,17 @@ pub fn register_event_handler(
         return Err(EventError::SyscallFailed);
     }
 
-    let result = syscall5(
-        Syscall::EventHandlerRegisterWithRestorer,
-        content_type as usize,
-        handler as usize,
-        synchronous as usize,
-        0, // is_default = false
-        restorer,
-    );
+    // SAFETY: The handler has the EventHandler ABI and the static restorer has the kernel return ABI; the caller upholds asynchronous callback safety.
+    let result = unsafe {
+        syscall5(
+            Syscall::EventHandlerRegisterWithRestorer,
+            content_type as usize,
+            handler as usize,
+            synchronous as usize,
+            0, // is_default = false
+            restorer,
+        )
+    };
 
     if result == usize::MAX {
         Err(EventError::SyscallFailed)
@@ -410,7 +442,24 @@ pub fn register_event_handler(
 }
 
 /// Register a default event handler for unhandled events
-pub fn register_default_handler(handler: EventHandler, synchronous: bool) -> EventResult<()> {
+///
+/// # Arguments
+///
+/// * `handler` - Handler with the native event ABI.
+/// * `synchronous` - Whether delivery is synchronous.
+///
+/// # Returns
+///
+/// `Ok(())` after registration, or an event syscall error.
+///
+/// # Safety
+///
+/// The caller must satisfy the handler lifetime, non-unwinding and asynchronous
+/// reentrancy requirements of [`register_event_handler`].
+pub unsafe fn register_default_handler(
+    handler: EventHandler,
+    synchronous: bool,
+) -> EventResult<()> {
     use scarlet_sys::{Syscall, syscall5};
 
     let restorer = event_return_trampoline();
@@ -418,14 +467,17 @@ pub fn register_default_handler(handler: EventHandler, synchronous: bool) -> Eve
         return Err(EventError::SyscallFailed);
     }
 
-    let result = syscall5(
-        Syscall::EventHandlerRegisterWithRestorer,
-        0, // content_type doesn't matter for default
-        handler as usize,
-        synchronous as usize,
-        1, // is_default = true
-        restorer,
-    );
+    // SAFETY: The handler has the EventHandler ABI and the static restorer has the kernel return ABI; the caller upholds asynchronous callback safety.
+    let result = unsafe {
+        syscall5(
+            Syscall::EventHandlerRegisterWithRestorer,
+            0, // content_type doesn't matter for default
+            handler as usize,
+            synchronous as usize,
+            1, // is_default = true
+            restorer,
+        )
+    };
 
     if result == usize::MAX {
         Err(EventError::SyscallFailed)
@@ -438,7 +490,8 @@ pub fn register_default_handler(handler: EventHandler, synchronous: bool) -> Eve
 pub fn unregister_event_handler(content_type: u8) -> EventResult<()> {
     use scarlet_sys::{Syscall, syscall1};
 
-    let result = syscall1(Syscall::EventHandlerUnregister, content_type as usize);
+    // SAFETY: The content type is scalar; removing the registration does not dereference a userspace argument.
+    let result = unsafe { syscall1(Syscall::EventHandlerUnregister, content_type as usize) };
 
     if result == usize::MAX {
         Err(EventError::SyscallFailed)
@@ -451,12 +504,15 @@ pub fn unregister_event_handler(content_type: u8) -> EventResult<()> {
 pub fn event_mask_block(kind: u32, subtype: u32) -> EventResult<()> {
     use scarlet_sys::{Syscall, syscall3};
 
-    let result = syscall3(
-        Syscall::EventMask,
-        mask_ops::BLOCK as usize,
-        kind as usize,
-        subtype as usize,
-    );
+    // SAFETY: The mask operation and event identifiers are scalar inputs validated by the kernel.
+    let result = unsafe {
+        syscall3(
+            Syscall::EventMask,
+            mask_ops::BLOCK as usize,
+            kind as usize,
+            subtype as usize,
+        )
+    };
 
     if result == usize::MAX {
         Err(EventError::SyscallFailed)
@@ -469,12 +525,15 @@ pub fn event_mask_block(kind: u32, subtype: u32) -> EventResult<()> {
 pub fn event_mask_unblock(kind: u32, subtype: u32) -> EventResult<()> {
     use scarlet_sys::{Syscall, syscall3};
 
-    let result = syscall3(
-        Syscall::EventMask,
-        mask_ops::UNBLOCK as usize,
-        kind as usize,
-        subtype as usize,
-    );
+    // SAFETY: The mask operation and event identifiers are scalar inputs validated by the kernel.
+    let result = unsafe {
+        syscall3(
+            Syscall::EventMask,
+            mask_ops::UNBLOCK as usize,
+            kind as usize,
+            subtype as usize,
+        )
+    };
 
     if result == usize::MAX {
         Err(EventError::SyscallFailed)
@@ -487,7 +546,8 @@ pub fn event_mask_unblock(kind: u32, subtype: u32) -> EventResult<()> {
 pub fn event_mask_block_all() -> EventResult<()> {
     use scarlet_sys::{Syscall, syscall1};
 
-    let result = syscall1(Syscall::EventMask, mask_ops::BLOCK_ALL as usize);
+    // SAFETY: The mask operation and event identifiers are scalar inputs validated by the kernel.
+    let result = unsafe { syscall1(Syscall::EventMask, mask_ops::BLOCK_ALL as usize) };
 
     if result == usize::MAX {
         Err(EventError::SyscallFailed)
@@ -500,7 +560,8 @@ pub fn event_mask_block_all() -> EventResult<()> {
 pub fn event_mask_clear_all() -> EventResult<()> {
     use scarlet_sys::{Syscall, syscall1};
 
-    let result = syscall1(Syscall::EventMask, mask_ops::CLEAR_ALL as usize);
+    // SAFETY: The mask operation and event identifiers are scalar inputs validated by the kernel.
+    let result = unsafe { syscall1(Syscall::EventMask, mask_ops::CLEAR_ALL as usize) };
 
     if result == usize::MAX {
         Err(EventError::SyscallFailed)
@@ -510,7 +571,19 @@ pub fn event_mask_clear_all() -> EventResult<()> {
 }
 
 /// Return from event handler (should be called by handler trampoline)
-pub fn event_return() {
+///
+/// # Returns
+///
+/// A successful return restores the interrupted context rather than returning
+/// normally to this Rust frame.
+///
+/// # Safety
+///
+/// Call only from the return path of a live native event frame, after ending
+/// every borrow and cleanup obligation belonging to the abandoned handler
+/// stack. Ordinary application code must not use this as a control transfer.
+pub unsafe fn event_return() {
     use scarlet_sys::Syscall;
-    scarlet_sys::syscall0(Syscall::EventReturn);
+    // SAFETY: The caller is returning from a live kernel-delivered event frame and will not resume this Rust frame.
+    unsafe { scarlet_sys::syscall0(Syscall::EventReturn) };
 }

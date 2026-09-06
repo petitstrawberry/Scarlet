@@ -195,7 +195,8 @@ pub fn monotonic_time_ns() -> u64 {
 pub fn monotonic_time_ns() -> u64 {
     use scarlet_std::syscall::{Syscall, syscall0};
 
-    syscall0(Syscall::MonotonicTime) as u64
+    // SAFETY: This fixed clock query has no arguments or userspace memory effects.
+    (unsafe { syscall0(Syscall::MonotonicTime) }) as u64
 }
 
 #[cfg(feature = "std")]
@@ -226,7 +227,10 @@ pub(crate) fn wait_for_input(
     wake: u32,
     timeout: core::time::Duration,
 ) -> Result<bool, Error> {
-    let mut handles = [PollHandle::new(socket, POLLIN), PollHandle::new(wake, POLLIN)];
+    let mut handles = [
+        PollHandle::new(socket, POLLIN),
+        PollHandle::new(wake, POLLIN),
+    ];
     let timeout_ns = timeout.as_nanos().min(i64::MAX as u128) as i64;
     poll(&mut handles, timeout_ns)
         .map(|ready| ready != 0)

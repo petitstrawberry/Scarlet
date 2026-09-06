@@ -282,11 +282,14 @@ impl OpenOptions {
 
             // For create_new, we should check if file exists first
             // For now, just attempt to create and handle errors
-            let result = syscall2(
-                Syscall::VfsCreateFile,
-                path_bytes.as_ptr() as usize,
-                0, // mode (unused for now)
-            );
+            // SAFETY: The NUL-terminated path remains readable until return; mode is a scalar.
+            let result = unsafe {
+                syscall2(
+                    Syscall::VfsCreateFile,
+                    path_bytes.as_ptr() as usize,
+                    0, // mode (unused for now)
+                )
+            };
 
             // For create_new, creation failure is an error
             // For create, we continue even if creation fails (file might already exist)
@@ -453,12 +456,15 @@ impl File {
 
     pub fn set_nonblocking(&self, enabled: bool) -> Result<()> {
         const HCTL_SET_NONBLOCKING: u32 = 0x5353_0007;
-        let result = crate::syscall::syscall3(
-            crate::syscall::Syscall::HandleControl,
-            self.handle.as_raw() as usize,
-            HCTL_SET_NONBLOCKING as usize,
-            if enabled { 1 } else { 0 },
-        );
+        // SAFETY: This fixed socket control takes a scalar argument and borrows the live handle; it carries no raw pointer.
+        let result = unsafe {
+            crate::syscall::syscall3(
+                crate::syscall::Syscall::HandleControl,
+                self.handle.as_raw() as usize,
+                HCTL_SET_NONBLOCKING as usize,
+                if enabled { 1 } else { 0 },
+            )
+        };
         if result == usize::MAX {
             return Err(Error::new(ErrorKind::Other, "set_nonblocking failed"));
         }
@@ -752,14 +758,17 @@ pub fn mount(
         0
     };
 
-    let result = syscall5(
-        Syscall::FsMount,
-        source_c.as_ptr() as usize,
-        target_c.as_ptr() as usize,
-        fstype_c.as_ptr() as usize,
-        flags as usize,
-        data_ptr,
-    );
+    // SAFETY: All paths, filesystem type and optional mount data are live NUL-terminated strings borrowed until return.
+    let result = unsafe {
+        syscall5(
+            Syscall::FsMount,
+            source_c.as_ptr() as usize,
+            target_c.as_ptr() as usize,
+            fstype_c.as_ptr() as usize,
+            flags as usize,
+            data_ptr,
+        )
+    };
 
     if result == usize::MAX {
         Err(Error::new(ErrorKind::Other, "mount failed"))
@@ -796,11 +805,14 @@ pub fn unmount(target: &str, flags: u32) -> Result<()> {
     let target_c = str_to_cstr_bytes(target)
         .map_err(|_| Error::new(ErrorKind::InvalidInput, "target contains null byte"))?;
 
-    let result = syscall2(
-        Syscall::FsUmount,
-        target_c.as_ptr() as usize,
-        flags as usize,
-    );
+    // SAFETY: The NUL-terminated mount path remains readable until return; flags is a scalar.
+    let result = unsafe {
+        syscall2(
+            Syscall::FsUmount,
+            target_c.as_ptr() as usize,
+            flags as usize,
+        )
+    };
 
     if result == usize::MAX {
         Err(Error::new(ErrorKind::Other, "unmount failed"))
@@ -845,11 +857,14 @@ pub fn pivot_root(new_root: &str, old_root: &str) -> Result<()> {
     let old_root_c = str_to_cstr_bytes(old_root)
         .map_err(|_| Error::new(ErrorKind::InvalidInput, "old_root contains null byte"))?;
 
-    let result = syscall2(
-        Syscall::FsPivotRoot,
-        new_root_c.as_ptr() as usize,
-        old_root_c.as_ptr() as usize,
-    );
+    // SAFETY: Both NUL-terminated paths remain readable until this synchronous operation returns.
+    let result = unsafe {
+        syscall2(
+            Syscall::FsPivotRoot,
+            new_root_c.as_ptr() as usize,
+            old_root_c.as_ptr() as usize,
+        )
+    };
 
     if result == usize::MAX {
         Err(Error::new(ErrorKind::Other, "pivot_root failed"))
@@ -872,7 +887,8 @@ pub fn create_directory<P: AsRef<str>>(path: P) -> Result<()> {
     let path_c = str_to_cstr_bytes(path.as_ref())
         .map_err(|_| Error::new(ErrorKind::InvalidInput, "path contains null byte"))?;
 
-    let result = syscall1(Syscall::VfsCreateDirectory, path_c.as_ptr() as usize);
+    // SAFETY: The NUL-terminated path remains readable until the synchronous directory operation returns.
+    let result = unsafe { syscall1(Syscall::VfsCreateDirectory, path_c.as_ptr() as usize) };
 
     if result == usize::MAX {
         Err(Error::new(ErrorKind::Other, "create directory failed"))
@@ -908,7 +924,8 @@ pub fn change_directory<P: AsRef<str>>(path: P) -> Result<()> {
     let path_c = str_to_cstr_bytes(path.as_ref())
         .map_err(|_| Error::new(ErrorKind::InvalidInput, "path contains null byte"))?;
 
-    let result = syscall1(Syscall::VfsChangeDirectory, path_c.as_ptr() as usize);
+    // SAFETY: The NUL-terminated path remains readable until the synchronous directory operation returns.
+    let result = unsafe { syscall1(Syscall::VfsChangeDirectory, path_c.as_ptr() as usize) };
 
     if result == usize::MAX {
         Err(Error::new(ErrorKind::Other, "change directory failed"))
@@ -945,7 +962,8 @@ pub fn remove_file<P: AsRef<str>>(path: P) -> Result<()> {
     let path_c = str_to_cstr_bytes(path.as_ref())
         .map_err(|_| Error::new(ErrorKind::InvalidInput, "path contains null byte"))?;
 
-    let result = syscall1(Syscall::VfsRemove, path_c.as_ptr() as usize);
+    // SAFETY: The NUL-terminated path remains readable until the synchronous removal returns.
+    let result = unsafe { syscall1(Syscall::VfsRemove, path_c.as_ptr() as usize) };
 
     if result == usize::MAX {
         Err(Error::new(ErrorKind::Other, "remove file failed"))
@@ -984,7 +1002,8 @@ pub fn remove_directory<P: AsRef<str>>(path: P) -> Result<()> {
     let path_c = str_to_cstr_bytes(path.as_ref())
         .map_err(|_| Error::new(ErrorKind::InvalidInput, "path contains null byte"))?;
 
-    let result = syscall1(Syscall::VfsRemove, path_c.as_ptr() as usize);
+    // SAFETY: The NUL-terminated path remains readable until the synchronous removal returns.
+    let result = unsafe { syscall1(Syscall::VfsRemove, path_c.as_ptr() as usize) };
 
     if result == usize::MAX {
         Err(Error::new(ErrorKind::Other, "remove directory failed"))
@@ -1262,13 +1281,16 @@ pub fn create_symlink(symlink_path: &str, target_path: &str) -> Result<()> {
     let target_path_c = str_to_cstr_bytes(target_path)
         .map_err(|_| Error::new(ErrorKind::InvalidInput, "target_path contains null byte"))?;
 
-    let result = syscall4(
-        Syscall::VfsCreateSymlink,
-        symlink_path_c.as_ptr() as usize,
-        target_path_c.as_ptr() as usize,
-        0,
-        0,
-    );
+    // SAFETY: Both NUL-terminated paths remain readable until the synchronous link operation returns.
+    let result = unsafe {
+        syscall4(
+            Syscall::VfsCreateSymlink,
+            symlink_path_c.as_ptr() as usize,
+            target_path_c.as_ptr() as usize,
+            0,
+            0,
+        )
+    };
 
     if result == usize::MAX {
         Err(Error::new(
@@ -1306,12 +1328,15 @@ pub fn read_link(symlink_path: &str) -> Result<String> {
     // Allocate buffer for target path (PATH_MAX = 4096)
     let mut buffer = [0u8; 4096];
 
-    let result = syscall3(
-        Syscall::VfsReadlink,
-        symlink_path_c.as_ptr() as usize,
-        buffer.as_mut_ptr() as usize,
-        buffer.len(),
-    );
+    // SAFETY: The NUL-terminated path and disjoint exclusive output buffer remain valid for the supplied output length.
+    let result = unsafe {
+        syscall3(
+            Syscall::VfsReadlink,
+            symlink_path_c.as_ptr() as usize,
+            buffer.as_mut_ptr() as usize,
+            buffer.len(),
+        )
+    };
 
     if result == usize::MAX {
         Err(Error::new(ErrorKind::Other, "Failed to read symbolic link"))
@@ -1365,11 +1390,14 @@ pub fn rename<P: AsRef<str>>(old_path: P, new_path: P) -> Result<()> {
     let new_path_c = str_to_cstr_bytes(new_path.as_ref())
         .map_err(|_| Error::new(ErrorKind::InvalidInput, "new_path contains null byte"))?;
 
-    let result = syscall2(
-        Syscall::VfsRename,
-        old_path_c.as_ptr() as usize,
-        new_path_c.as_ptr() as usize,
-    );
+    // SAFETY: Both NUL-terminated paths remain readable until the synchronous rename returns.
+    let result = unsafe {
+        syscall2(
+            Syscall::VfsRename,
+            old_path_c.as_ptr() as usize,
+            new_path_c.as_ptr() as usize,
+        )
+    };
 
     if result == usize::MAX {
         Err(Error::new(
@@ -1392,11 +1420,14 @@ pub fn get_cwd_path() -> Result<String> {
     // Allocate buffer for path (PATH_MAX = 4096)
     let mut buffer = [0u8; 4096];
 
-    let result = syscall2(
-        Syscall::VfsGetCwdPath,
-        buffer.as_mut_ptr() as usize,
-        buffer.len(),
-    );
+    // SAFETY: buffer is exclusive output storage for the advertised byte length until return.
+    let result = unsafe {
+        syscall2(
+            Syscall::VfsGetCwdPath,
+            buffer.as_mut_ptr() as usize,
+            buffer.len(),
+        )
+    };
 
     if result == usize::MAX {
         Err(Error::new(

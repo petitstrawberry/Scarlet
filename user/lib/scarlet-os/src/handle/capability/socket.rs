@@ -123,11 +123,14 @@ pub struct SocketObject<'a> {
 impl<'a> SocketObject<'a> {
     fn query_inet_address(&self, syscall: Syscall) -> SocketObjectResult<Inet4SocketAddress> {
         let mut address = [0u8; 8];
-        let result = syscall2(
-            syscall,
-            self.handle.as_raw() as usize,
-            address.as_mut_ptr() as usize,
-        );
+        // SAFETY: Only the fixed peer/local-address queries reach this helper; address is exclusive ABI-sized output storage.
+        let result = unsafe {
+            syscall2(
+                syscall,
+                self.handle.as_raw() as usize,
+                address.as_mut_ptr() as usize,
+            )
+        };
         SocketObjectError::from_syscall_result(result)?;
         if address[0] != SocketDomain::Inet4 as u8 {
             return Err(SocketObjectError::SystemError(-1));
@@ -152,12 +155,15 @@ impl<'a> SocketObject<'a> {
 
     /// Bind socket to a path
     pub fn bind(&self, path: &str) -> SocketObjectResult<()> {
-        let result = syscall3(
-            Syscall::SocketBind,
-            self.handle.as_raw() as usize,
-            path.as_ptr() as usize,
-            path.len(),
-        );
+        // SAFETY: The borrowed socket and address storage remain valid with the supplied byte length until return.
+        let result = unsafe {
+            syscall3(
+                Syscall::SocketBind,
+                self.handle.as_raw() as usize,
+                path.as_ptr() as usize,
+                path.len(),
+            )
+        };
         SocketObjectError::from_syscall_result(result).map(|_| ())
     }
 
@@ -180,44 +186,56 @@ impl<'a> SocketObject<'a> {
             return Err(SocketObjectError::SystemError(-1));
         }
         address[1..1 + name.len()].copy_from_slice(name.as_bytes());
-        let result = syscall3(
-            Syscall::SocketBind,
-            self.handle.as_raw() as usize,
-            address.as_ptr() as usize,
-            name.len() + 1,
-        );
+        // SAFETY: The borrowed socket and address storage remain valid with the supplied byte length until return.
+        let result = unsafe {
+            syscall3(
+                Syscall::SocketBind,
+                self.handle.as_raw() as usize,
+                address.as_ptr() as usize,
+                name.len() + 1,
+            )
+        };
         SocketObjectError::from_syscall_result(result).map(|_| ())
     }
 
     /// Bind socket to an IPv4 address
     pub fn bind_inet(&self, addr: &Inet4SocketAddress) -> SocketObjectResult<()> {
-        let result = syscall3(
-            Syscall::SocketBind,
-            self.handle.as_raw() as usize,
-            addr as *const Inet4SocketAddress as usize,
-            core::mem::size_of::<Inet4SocketAddress>(),
-        );
+        // SAFETY: The borrowed socket and address storage remain valid with the supplied byte length until return.
+        let result = unsafe {
+            syscall3(
+                Syscall::SocketBind,
+                self.handle.as_raw() as usize,
+                addr as *const Inet4SocketAddress as usize,
+                core::mem::size_of::<Inet4SocketAddress>(),
+            )
+        };
         SocketObjectError::from_syscall_result(result).map(|_| ())
     }
 
     /// Start listening for connections
     pub fn listen(&self, backlog: usize) -> SocketObjectResult<()> {
-        let result = syscall2(
-            Syscall::SocketListen,
-            self.handle.as_raw() as usize,
-            backlog,
-        );
+        // SAFETY: The borrowed socket remains live; backlog is a scalar checked by the kernel.
+        let result = unsafe {
+            syscall2(
+                Syscall::SocketListen,
+                self.handle.as_raw() as usize,
+                backlog,
+            )
+        };
         SocketObjectError::from_syscall_result(result).map(|_| ())
     }
 
     /// Connect to a named socket
     pub fn connect(&self, path: &str) -> SocketObjectResult<()> {
-        let result = syscall3(
-            Syscall::SocketConnect,
-            self.handle.as_raw() as usize,
-            path.as_ptr() as usize,
-            path.len(),
-        );
+        // SAFETY: The borrowed socket and address storage remain valid with the supplied byte length until return.
+        let result = unsafe {
+            syscall3(
+                Syscall::SocketConnect,
+                self.handle.as_raw() as usize,
+                path.as_ptr() as usize,
+                path.len(),
+            )
+        };
         SocketObjectError::from_syscall_result(result).map(|_| ())
     }
 
@@ -236,29 +254,36 @@ impl<'a> SocketObject<'a> {
             return Err(SocketObjectError::SystemError(-1));
         }
         address[1..1 + name.len()].copy_from_slice(name.as_bytes());
-        let result = syscall3(
-            Syscall::SocketConnect,
-            self.handle.as_raw() as usize,
-            address.as_ptr() as usize,
-            name.len() + 1,
-        );
+        // SAFETY: The borrowed socket and address storage remain valid with the supplied byte length until return.
+        let result = unsafe {
+            syscall3(
+                Syscall::SocketConnect,
+                self.handle.as_raw() as usize,
+                address.as_ptr() as usize,
+                name.len() + 1,
+            )
+        };
         SocketObjectError::from_syscall_result(result).map(|_| ())
     }
 
     /// Connect to an IPv4 address
     pub fn connect_inet(&self, addr: &Inet4SocketAddress) -> SocketObjectResult<()> {
-        let result = syscall3(
-            Syscall::SocketConnect,
-            self.handle.as_raw() as usize,
-            addr as *const Inet4SocketAddress as usize,
-            core::mem::size_of::<Inet4SocketAddress>(),
-        );
+        // SAFETY: The borrowed socket and address storage remain valid with the supplied byte length until return.
+        let result = unsafe {
+            syscall3(
+                Syscall::SocketConnect,
+                self.handle.as_raw() as usize,
+                addr as *const Inet4SocketAddress as usize,
+                core::mem::size_of::<Inet4SocketAddress>(),
+            )
+        };
         SocketObjectError::from_syscall_result(result).map(|_| ())
     }
 
     /// Accept an incoming connection
     pub fn accept(&self) -> SocketObjectResult<RawHandle> {
-        let result = syscall1(Syscall::SocketAccept, self.handle.as_raw() as usize);
+        // SAFETY: The borrowed listening socket remains live; a successful result transfers a new handle.
+        let result = unsafe { syscall1(Syscall::SocketAccept, self.handle.as_raw() as usize) };
         SocketObjectError::from_syscall_result(result).map(|h| h as RawHandle)
     }
 
@@ -289,39 +314,49 @@ impl<'a> SocketObject<'a> {
     /// A positive Scarlet errno when an error was pending, None when no error
     /// was pending, or an error when the handle does not support this query.
     pub fn take_error(&self) -> SocketObjectResult<Option<i32>> {
-        let result = syscall3(
-            Syscall::HandleControl,
-            self.handle.as_raw() as usize,
-            SCTL_SOCKET_TAKE_ERROR as usize,
-            0,
-        );
+        // SAFETY: This fixed socket control takes a scalar argument and borrows the live handle; it carries no raw pointer.
+        let result = unsafe {
+            syscall3(
+                Syscall::HandleControl,
+                self.handle.as_raw() as usize,
+                SCTL_SOCKET_TAKE_ERROR as usize,
+                0,
+            )
+        };
         SocketObjectError::from_syscall_result(result)
             .map(|errno| (errno != 0).then_some(errno as i32))
     }
 
     /// Shutdown socket
     pub fn shutdown(&self, how: ShutdownHow) -> SocketObjectResult<()> {
-        let result = syscall2(
-            Syscall::SocketShutdown,
-            self.handle.as_raw() as usize,
-            how as usize,
-        );
+        // SAFETY: The borrowed socket remains live and how is a typed shutdown direction.
+        let result = unsafe {
+            syscall2(
+                Syscall::SocketShutdown,
+                self.handle.as_raw() as usize,
+                how as usize,
+            )
+        };
         SocketObjectError::from_syscall_result(result).map(|_| ())
     }
 
     /// Send a kernel object handle through a socket
     pub fn send_handle(&self, object_handle: RawHandle) -> SocketObjectResult<()> {
-        let result = syscall2(
-            Syscall::SocketSendHandle,
-            self.handle.as_raw() as usize,
-            object_handle as usize,
-        );
+        // SAFETY: The socket is borrowed and the kernel duplicates the supplied capability without consuming the sender's handle.
+        let result = unsafe {
+            syscall2(
+                Syscall::SocketSendHandle,
+                self.handle.as_raw() as usize,
+                object_handle as usize,
+            )
+        };
         SocketObjectError::from_syscall_result(result).map(|_| ())
     }
 
     /// Receive a kernel object handle from a socket
     pub fn recv_handle(&self) -> SocketObjectResult<RawHandle> {
-        let result = syscall1(Syscall::SocketRecvHandle, self.handle.as_raw() as usize);
+        // SAFETY: The borrowed socket remains live; a successful result transfers a new handle to the caller.
+        let result = unsafe { syscall1(Syscall::SocketRecvHandle, self.handle.as_raw() as usize) };
         SocketObjectError::from_syscall_result(result).map(|h| h as RawHandle)
     }
 
@@ -344,13 +379,16 @@ impl<'a> SocketObject<'a> {
         object_handle: RawHandle,
         data: &[u8],
     ) -> SocketObjectResult<()> {
-        let result = syscall4(
-            Syscall::SocketSendHandleAndData,
-            self.handle.as_raw() as usize,
-            object_handle as usize,
-            data.as_ptr() as usize,
-            data.len(),
-        );
+        // SAFETY: The kernel duplicates the capability and copies the borrowed data slice before return.
+        let result = unsafe {
+            syscall4(
+                Syscall::SocketSendHandleAndData,
+                self.handle.as_raw() as usize,
+                object_handle as usize,
+                data.as_ptr() as usize,
+                data.len(),
+            )
+        };
         SocketObjectError::from_syscall_result(result).map(|_| ())
     }
 
@@ -374,14 +412,17 @@ impl<'a> SocketObject<'a> {
         data_out: &mut [u8],
     ) -> SocketObjectResult<usize> {
         let mut required_len = 0usize;
-        let result = syscall5(
-            Syscall::SocketRecvHandleAndData,
-            self.handle.as_raw() as usize,
-            handle_out as *mut RawHandle as usize,
-            data_out.as_mut_ptr() as usize,
-            data_out.len(),
-            &mut required_len as *mut usize as usize,
-        );
+        // SAFETY: The handle, length and data outputs are disjoint, exclusively borrowed storage valid for this call.
+        let result = unsafe {
+            syscall5(
+                Syscall::SocketRecvHandleAndData,
+                self.handle.as_raw() as usize,
+                handle_out as *mut RawHandle as usize,
+                data_out.as_mut_ptr() as usize,
+                data_out.len(),
+                &mut required_len as *mut usize as usize,
+            )
+        };
         match SocketObjectError::from_syscall_result(result) {
             Err(SocketObjectError::MessageTooLarge) => {
                 Err(SocketObjectError::ReceiveBufferTooSmall { required_len })

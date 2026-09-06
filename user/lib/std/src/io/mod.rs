@@ -214,12 +214,15 @@ impl Stdin {
     /// # Returns
     /// Number of bytes read or error
     pub fn read(&self, buffer: &mut [u8]) -> Result<usize> {
-        let result = syscall3(
-            Syscall::StreamRead,
-            0,
-            buffer.as_mut_ptr() as usize,
-            buffer.len(),
-        );
+        // SAFETY: The output buffer is exclusively borrowed for its advertised length until the synchronous read returns.
+        let result = unsafe {
+            syscall3(
+                Syscall::StreamRead,
+                0,
+                buffer.as_mut_ptr() as usize,
+                buffer.len(),
+            )
+        };
 
         stream_syscall_result(result, "Read from stdin failed")
     }
@@ -234,7 +237,9 @@ impl Stdout {
     /// # Returns
     /// Number of bytes written or error
     pub fn write(&self, data: &[u8]) -> Result<usize> {
-        let result = syscall3(Syscall::StreamWrite, 1, data.as_ptr() as usize, data.len());
+        // SAFETY: The input buffer is borrowed and readable for its advertised length until the synchronous write returns.
+        let result =
+            unsafe { syscall3(Syscall::StreamWrite, 1, data.as_ptr() as usize, data.len()) };
 
         if result == usize::MAX {
             Err(Error::new(ErrorKind::Other, "Write to stdout failed"))
@@ -279,7 +284,9 @@ impl Stderr {
     /// # Returns
     /// Number of bytes written or error
     pub fn write(&self, data: &[u8]) -> Result<usize> {
-        let result = syscall3(Syscall::StreamWrite, 2, data.as_ptr() as usize, data.len());
+        // SAFETY: The input buffer is borrowed and readable for its advertised length until the synchronous write returns.
+        let result =
+            unsafe { syscall3(Syscall::StreamWrite, 2, data.as_ptr() as usize, data.len()) };
 
         if result == usize::MAX {
             Err(Error::new(ErrorKind::Other, "Write to stderr failed"))

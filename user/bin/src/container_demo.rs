@@ -21,7 +21,8 @@ const NS_CREATE_VFS: usize = 0x02; // Create separate VFS namespace
 fn create_namespace(flags: usize, name: &str) -> Result<(), ()> {
     let name_cstr = std::ffi::str_to_cstr_bytes(name).map_err(|_| ())?;
     let name_ptr = name_cstr.as_ptr() as usize;
-    let result = syscall2(Syscall::CreateNamespace, flags, name_ptr);
+    // SAFETY: The NUL-terminated name remains readable until return; namespace flags are scalar inputs.
+    let result = unsafe { syscall2(Syscall::CreateNamespace, flags, name_ptr) };
 
     if result == usize::MAX {
         Err(())

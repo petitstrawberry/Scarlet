@@ -12,7 +12,8 @@ use scarlet_sys::{Syscall, syscall0};
 ///
 /// Nanoseconds elapsed since boot.
 pub fn monotonic_time_ns() -> u64 {
-    syscall0(Syscall::MonotonicTime) as u64
+    // SAFETY: This fixed clock query has no arguments or userspace memory effects.
+    (unsafe { syscall0(Syscall::MonotonicTime) }) as u64
 }
 
 /// Return boot-relative monotonic time as a [`Duration`].
@@ -31,7 +32,8 @@ pub fn monotonic_time() -> Duration {
 /// `Some(ns)` if an RTC source has initialized the wall clock, or `None` if
 /// wall-clock time is unavailable (e.g. no RTC present).
 pub fn system_time_ns() -> Option<u64> {
-    let ns = syscall0(Syscall::SystemTime) as u64;
+    // SAFETY: This fixed clock query has no arguments or userspace memory effects.
+    let ns = (unsafe { syscall0(Syscall::SystemTime) }) as u64;
     if ns == u64::MAX { None } else { Some(ns) }
 }
 
@@ -132,18 +134,23 @@ fn read_file(path: &str) -> Option<Vec<u8>> {
 fn read_file(path: &str) -> Option<Vec<u8>> {
     use scarlet_sys::{syscall1, syscall3};
     let path_c = alloc::format!("{}\0", path);
-    let handle = syscall3(Syscall::VfsOpen, path_c.as_ptr() as usize, 0, 0);
+    // SAFETY: The NUL-terminated path storage remains readable until return; a successful result transfers a new handle.
+    let handle = unsafe { syscall3(Syscall::VfsOpen, path_c.as_ptr() as usize, 0, 0) };
     if handle == usize::MAX {
         return None;
     }
     let mut buf = alloc::vec![0u8; 4096];
-    let n = syscall3(
-        Syscall::StreamRead,
-        handle,
-        buf.as_mut_ptr() as usize,
-        buf.len(),
-    );
-    syscall1(Syscall::HandleClose, handle);
+    // SAFETY: The output buffer is exclusively borrowed for its advertised length until the synchronous read returns.
+    let n = unsafe {
+        syscall3(
+            Syscall::StreamRead,
+            handle,
+            buf.as_mut_ptr() as usize,
+            buf.len(),
+        )
+    };
+    // SAFETY: This path exclusively owns the raw handle and closes it once, without leaving an armed owning wrapper.
+    unsafe { syscall1(Syscall::HandleClose, handle) };
     if n == usize::MAX || n == 0 {
         return None;
     }

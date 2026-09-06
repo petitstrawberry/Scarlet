@@ -233,7 +233,8 @@ fn run_worker(
     checksum: Arc<AtomicU64>,
 ) {
     if util_min != 0 {
-        let result = syscall1(Syscall::SetTaskUtilMin, util_min as usize);
+        // SAFETY: The utilization hint is a scalar scheduler parameter; no userspace pointer is passed.
+        let result = unsafe { syscall1(Syscall::SetTaskUtilMin, util_min as usize) };
         if result == usize::MAX {
             println!(
                 "[sched-bench] worker {} failed to set util_min={}",

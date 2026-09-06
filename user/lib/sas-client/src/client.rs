@@ -362,15 +362,17 @@ impl SasClient {
             .as_handle()
             .as_memory_mapping()
             .map_err(|_| Error::RingMapFailed)?;
-        let ring_addr = mapper
-            .mmap(
+        // SAFETY: This requests a fresh non-fixed mapping; its owning buffer/stream retains the backing and controls all CPU views and unmapping.
+        let ring_addr = unsafe {
+            mapper.mmap(
                 0,
                 ring_size,
                 os::prot::READ | os::prot::WRITE,
                 os::mmap_flags::SHARED,
                 0,
             )
-            .map_err(|_| Error::RingMapFailed)?;
+        }
+        .map_err(|_| Error::RingMapFailed)?;
         let stream = SasStream::new(ring_addr, ring_size, config);
         if should_cancel() {
             return Ok(None);

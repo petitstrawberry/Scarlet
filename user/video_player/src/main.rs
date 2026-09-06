@@ -163,12 +163,15 @@ impl MappedMediaFile {
         if length == 0 {
             return Err(format!("cannot map empty file: {path}"));
         }
-        let address = file
-            .as_handle()
-            .as_memory_mapping()
-            .map_err(|_| format!("file does not support mmap: {path}"))?
-            .mmap(0, length, prot::READ, mmap_flags::SHARED, 0)
-            .map_err(|_| format!("mmap failed: {path}"))?;
+        // SAFETY: This creates a fresh read-only mapping; MappedMediaFile keeps
+        // the file and mapping alive for its borrowed media views.
+        let address = unsafe {
+            file.as_handle()
+                .as_memory_mapping()
+                .map_err(|_| format!("file does not support mmap: {path}"))?
+                .mmap(0, length, prot::READ, mmap_flags::SHARED, 0)
+        }
+        .map_err(|_| format!("mmap failed: {path}"))?;
         Ok(Self {
             _file: file,
             address,
@@ -186,7 +189,8 @@ impl MappedMediaFile {
 
 impl Drop for MappedMediaFile {
     fn drop(&mut self) {
-        let _ = munmap(self.address, self.length);
+        // SAFETY: This owner is being dropped after its borrowed media views end.
+        let _ = unsafe { munmap(self.address, self.length) };
     }
 }
 const LOOP_BUTTON_HEIGHT: u32 = 22;
@@ -211,7 +215,8 @@ const VIDEO_HARDWARE_DISPLAY_UTIL_MIN: u32 = SCHED_UTIL_SCALE / 4;
 const VIDEO_SOFTWARE_DISPLAY_UTIL_MIN: u32 = SCHED_UTIL_SCALE * 3 / 4;
 
 fn monotonic_time_ns() -> u64 {
-    syscall0(Syscall::MonotonicTime) as u64
+    // SAFETY: This fixed clock query has no arguments or userspace memory effects.
+    (unsafe { syscall0(Syscall::MonotonicTime) }) as u64
 }
 
 struct VideoFrameStore {

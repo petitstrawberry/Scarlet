@@ -141,7 +141,8 @@ pub mod profiler {
     /// performance statistics collected during execution. Only available
     /// when the kernel is built with profiler support.
     pub fn dump_profiler_stats() {
-        syscall0(Syscall::ProfilerDump);
+        // SAFETY: This fixed diagnostic operation takes no arguments or userspace pointers.
+        unsafe { syscall0(Syscall::ProfilerDump) };
     }
 }
 

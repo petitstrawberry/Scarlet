@@ -94,10 +94,13 @@ pub fn cpu_usage() -> Option<CpuUsageInfo> {
         usage_per_mille: 0,
         reserved: 0,
     };
-    let result = syscall1(
-        Syscall::GetCpuUsageInfo,
-        &mut raw as *mut RawCpuUsageInfo as usize,
-    );
+    // SAFETY: raw is an exclusive output record with the kernel's fixed CPU-usage layout.
+    let result = unsafe {
+        syscall1(
+            Syscall::GetCpuUsageInfo,
+            &mut raw as *mut RawCpuUsageInfo as usize,
+        )
+    };
     (result != usize::MAX).then_some(CpuUsageInfo {
         online_cpus: raw.online_cpus,
         busy_time_ns: raw.busy_time_ns,
@@ -777,7 +780,8 @@ pub fn apply(config: SchedulerConfig<'_>) -> Result<(), SchedulerError> {
 /// A validated owning configuration snapshot, or a scheduler-control error.
 pub fn configured() -> Result<ConfiguredScheduler, SchedulerError> {
     let mut raw = RawSchedulerAttrV1::new();
-    match syscall_result(syscall1(Syscall::GetSchedulerAttr, raw_ptr(&mut raw)))? {
+    // SAFETY: raw is a live exclusive scheduler record with its version, size and reserved fields initialized.
+    match syscall_result(unsafe { syscall1(Syscall::GetSchedulerAttr, raw_ptr(&mut raw)) })? {
         SchedulerResult::Ok => decode_configured(raw, None),
         SchedulerResult::BufferTooSmall => {
             let mask_nbits = raw.cpu_mask_nbits;
@@ -787,7 +791,9 @@ pub fn configured() -> Result<ConfiguredScheduler, SchedulerError> {
             raw.cpu_mask_ptr = mask.as_mut_ptr() as u64;
             raw.cpu_mask_bytes = bytes as u32;
             raw.cpu_mask_nbits = mask_nbits;
-            match syscall_result(syscall1(Syscall::GetSchedulerAttr, raw_ptr(&mut raw)))? {
+            // SAFETY: raw is a live exclusive scheduler record with its version, size and reserved fields initialized.
+            match syscall_result(unsafe { syscall1(Syscall::GetSchedulerAttr, raw_ptr(&mut raw)) })?
+            {
                 SchedulerResult::Ok => decode_configured(raw, Some(mask)),
                 result => Err(SchedulerError::Kernel(result)),
             }
@@ -803,7 +809,8 @@ pub fn configured() -> Result<ConfiguredScheduler, SchedulerError> {
 /// A runtime-only scheduler snapshot, or a scheduler-control error.
 pub fn runtime_state() -> Result<RuntimeSchedulerState, SchedulerError> {
     let mut raw = RawSchedulerStateV1::new();
-    match syscall_result(syscall1(Syscall::GetSchedulerState, raw_ptr(&mut raw)))? {
+    // SAFETY: raw is a live exclusive scheduler record with its version, size and reserved fields initialized.
+    match syscall_result(unsafe { syscall1(Syscall::GetSchedulerState, raw_ptr(&mut raw)) })? {
         SchedulerResult::Ok => decode_runtime_state(raw),
         result => Err(SchedulerError::Kernel(result)),
     }
@@ -924,7 +931,8 @@ fn encode_configured(config: &ConfiguredScheduler) -> Result<RawSchedulerAttrV1,
 }
 
 fn apply_raw(mut raw: RawSchedulerAttrV1) -> Result<(), SchedulerError> {
-    match syscall_result(syscall1(Syscall::SetSchedulerAttr, raw_ptr(&mut raw)))? {
+    // SAFETY: raw is a live exclusive scheduler record with its version, size and reserved fields initialized.
+    match syscall_result(unsafe { syscall1(Syscall::SetSchedulerAttr, raw_ptr(&mut raw)) })? {
         SchedulerResult::Ok => Ok(()),
         result => Err(SchedulerError::Kernel(result)),
     }

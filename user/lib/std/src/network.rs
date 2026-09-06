@@ -119,17 +119,20 @@ pub fn set_interface_ipv4(name: &str, addr: Ipv4Address) -> Result<(), HandleErr
         return Err(HandleError::InvalidParameter);
     }
     let req = NetworkInterfaceAddress::new(name, addr);
-    let result = syscall1(Syscall::NetworkSetIpv4, &req as *const _ as usize);
+    // SAFETY: req has the network ABI layout and its nested name pointer remains borrowed for the full call.
+    let result = unsafe { syscall1(Syscall::NetworkSetIpv4, &req as *const _ as usize) };
     HandleError::from_syscall_result(result).map(|_| ())
 }
 
 pub fn set_default_gateway(addr: Ipv4Address) -> Result<(), HandleError> {
-    let result = syscall1(Syscall::NetworkSetGateway, addr.0.as_ptr() as usize);
+    // SAFETY: The four IPv4 octets remain readable for this synchronous configuration call.
+    let result = unsafe { syscall1(Syscall::NetworkSetGateway, addr.0.as_ptr() as usize) };
     HandleError::from_syscall_result(result).map(|_| ())
 }
 
 pub fn set_netmask(addr: Ipv4Address) -> Result<(), HandleError> {
-    let result = syscall1(Syscall::NetworkSetNetmask, addr.0.as_ptr() as usize);
+    // SAFETY: The four IPv4 octets remain readable for this synchronous configuration call.
+    let result = unsafe { syscall1(Syscall::NetworkSetNetmask, addr.0.as_ptr() as usize) };
     HandleError::from_syscall_result(result).map(|_| ())
 }
 
@@ -176,10 +179,13 @@ pub fn configure_interface_ipv4(
         flags,
         metric,
     };
-    let result = syscall1(
-        Syscall::NetworkConfigureIpv4,
-        &request as *const NetworkConfigureIpv4Request as usize,
-    );
+    // SAFETY: request has the fixed network ABI layout and remains immutably borrowed until return.
+    let result = unsafe {
+        syscall1(
+            Syscall::NetworkConfigureIpv4,
+            &request as *const NetworkConfigureIpv4Request as usize,
+        )
+    };
     HandleError::from_syscall_result(result).map(|_| ())
 }
 
@@ -203,11 +209,14 @@ pub fn list_interface_configs() -> Result<Vec<NetworkInterfaceConfig>, HandleErr
         reserved: [0; 3],
         metric: 0,
     }; MAX_INTERFACES];
-    let result = syscall2(
-        Syscall::NetworkListInterfacesV2,
-        records.as_mut_ptr() as usize,
-        records.len(),
-    );
+    // SAFETY: records is exclusive output storage for exactly the supplied element count.
+    let result = unsafe {
+        syscall2(
+            Syscall::NetworkListInterfacesV2,
+            records.as_mut_ptr() as usize,
+            records.len(),
+        )
+    };
     HandleError::from_syscall_result(result)?;
 
     let count = result.min(records.len());
@@ -228,11 +237,14 @@ pub fn clear_interface_ipv4(name: &str) -> Result<(), HandleError> {
     if name.is_empty() {
         return Err(HandleError::InvalidParameter);
     }
-    let result = syscall2(
-        Syscall::NetworkClearIpv4,
-        name.as_ptr() as usize,
-        name.len(),
-    );
+    // SAFETY: The interface name remains readable for exactly its supplied byte length until return.
+    let result = unsafe {
+        syscall2(
+            Syscall::NetworkClearIpv4,
+            name.as_ptr() as usize,
+            name.len(),
+        )
+    };
     HandleError::from_syscall_result(result).map(|_| ())
 }
 
@@ -241,12 +253,15 @@ pub fn list_interfaces() -> Result<(NetworkStatus, Vec<NetworkInterfaceInfo>), H
     const MAX_INTERFACES: usize = 16;
     let mut interfaces = [unsafe { core::mem::zeroed::<NetworkInterfaceInfo>() }; MAX_INTERFACES];
 
-    let result = syscall3(
-        Syscall::NetworkListInterfaces,
-        &mut status as *mut NetworkStatus as usize,
-        interfaces.as_mut_ptr() as usize,
-        MAX_INTERFACES,
-    );
+    // SAFETY: status and interfaces are disjoint exclusive fixed-layout outputs sized for the advertised count.
+    let result = unsafe {
+        syscall3(
+            Syscall::NetworkListInterfaces,
+            &mut status as *mut NetworkStatus as usize,
+            interfaces.as_mut_ptr() as usize,
+            MAX_INTERFACES,
+        )
+    };
 
     HandleError::from_syscall_result(result)?;
 

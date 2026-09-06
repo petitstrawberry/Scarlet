@@ -1,10 +1,11 @@
-//! Safe-ish Scarlet Native OS wrappers.
+//! Typed Scarlet Native OS wrappers and explicit unsafe low-level operations.
 //!
 //! This crate owns Scarlet-specific userland APIs that should remain available
 //! to `no_std` applications and to future Rust `std` applications through an
 //! explicit Scarlet crate.
 
 #![no_std]
+#![deny(unsafe_op_in_unsafe_fn)]
 
 #[cfg(feature = "std")]
 extern crate std;

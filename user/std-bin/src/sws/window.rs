@@ -734,15 +734,17 @@ impl Window {
             .as_handle()
             .as_memory_mapping()
             .map_err(|_| "SharedMemory does not support mapping")?;
-        let mapped_addr = mapper
-            .mmap(
+        // SAFETY: This requests a fresh non-fixed mapping; its owning buffer/stream retains the backing and controls all CPU views and unmapping.
+        let mapped_addr = unsafe {
+            mapper.mmap(
                 0,
                 buffer_size,
                 permissions::READ_WRITE,
                 mmap_flags::SHARED,
                 0,
             )
-            .map_err(|_| "Failed to mmap shared memory")?;
+        }
+        .map_err(|_| "Failed to mmap shared memory")?;
 
         println!(
             "[Window] Window #{} SHM created: size={} mapped_addr=0x{:x}",
@@ -1121,7 +1123,8 @@ impl Window {
             && let (Some(addr), size) = (self.shm_mapped_addr.take(), self.shm_size)
             && size != 0
         {
-            let _ = munmap(addr, size);
+            // SAFETY: This teardown/rollback path owns the exact mapping; its borrowed CPU views have ended before releasing the virtual range.
+            let _ = unsafe { munmap(addr, size) };
         } else {
             self.shm_mapped_addr = None;
         }
@@ -1229,7 +1232,8 @@ impl Drop for Window {
             && let (Some(addr), size) = (self.shm_mapped_addr.take(), self.shm_size)
             && size != 0
         {
-            let _ = munmap(addr, size);
+            // SAFETY: This teardown/rollback path owns the exact mapping; its borrowed CPU views have ended before releasing the virtual range.
+            let _ = unsafe { munmap(addr, size) };
         }
     }
 }
