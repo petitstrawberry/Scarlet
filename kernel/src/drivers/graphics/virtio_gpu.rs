@@ -329,6 +329,12 @@ fn virgl_image_bind(usage: u32) -> u32 {
     if usage & GPU_IMAGE_USAGE_PRESENTABLE != 0 {
         bind |= PIPE_BIND_SCANOUT;
     }
+    // VirGL interprets bind=0 as buffer storage and rejects PIPE_TEXTURE_2D.
+    // Transfer-only images still need a physical texture binding. This does
+    // not add SAMPLED authority to the generic image's advertised usage.
+    if bind == 0 {
+        bind = PIPE_BIND_SAMPLER_VIEW;
+    }
     bind
 }
 
@@ -2319,6 +2325,17 @@ mod tests {
             virgl_image_bind(GPU_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT),
             PIPE_BIND_DEPTH_STENCIL
         );
+    }
+
+    #[test_case]
+    fn virgl_transfer_only_images_use_texture_storage() {
+        for usage in [
+            GPU_IMAGE_USAGE_TRANSFER_SRC,
+            GPU_IMAGE_USAGE_TRANSFER_DST,
+            GPU_IMAGE_USAGE_TRANSFER_SRC | GPU_IMAGE_USAGE_TRANSFER_DST,
+        ] {
+            assert_eq!(virgl_image_bind(usage), PIPE_BIND_SAMPLER_VIEW);
+        }
     }
 
     #[test_case]
