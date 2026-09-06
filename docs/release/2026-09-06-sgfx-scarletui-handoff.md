@@ -369,3 +369,34 @@ kernel全体の検証は再開していない。ABI/wire fixtureの既存gateも
 現行SDK/ScarletUIの契約文書化と承認されたunsafe修正はローカルコミット済み。
 通常開発graphの依存追従、公開sourceによる候補lock固定、残る適合性・lint整理、
 release notes・版上げ・RC公開は別段階。push、issue投稿、タグ作成は行っていない。
+
+## 通常開発graphの依存追従を完了 — 2026-09-06
+
+上記の依存追従についてユーザーの追加承認を受け、`.cargo/Cargo.toml`へ兄弟
+Chromebook checkoutの`sgfx-backend-scarlet-adreno` patchを追加した。既存の
+Scarlet / SGFX / ScarletUI patchは維持し、一時lock・CLI patchを不要にした。
+
+`.cargo/Cargo.lock`の今回の変更は、Adreno backend / codegenと
+`adreno-a6xx-{layout,pm4,shader-pack,submit-wire}`の計6 packageについて、旧Git
+source行を取り除いてpath参照にすることだけ。package版・依存一覧は変えていない。
+既存stageのblobは`9d61059159d7e7af85a8c25d41f99b6e18376548`のままで、今回の
+6行削除だけを未stage差分として保持した。ユーザーのproject lockも変更していない。
+
+通常の設定・lockを使い、各package / targetを独立したCargo呼び出しで確認した:
+
+```sh
+cargo check --manifest-path .cargo/Cargo.toml --locked --offline \
+  -p <package> --bins --target <target>
+```
+
+- `scarlet-std-bin`、`userprogram`、`video_player`、`scarlet-websocket-demo`の
+  全4 packageを`aarch64-unknown-scarlet` / `riscv64gc-unknown-scarlet`で確認し、
+  **8構成すべて成功**。一時lockやCLI source overrideは使用していない。
+- std / legacyそれぞれの両targetで`cargo tree --locked --offline --invert sgfx-core`
+  を確認し、全4構成で同じ兄弟checkoutのcore一つに解決。Adrenoも兄弟checkoutを参照。
+- 既存stageの同一性、今回のlock差分が6 source行だけであること、project lockの
+  内容保持、変更ファイルのdiff whitespaceを確認した。
+
+これは通常の**ローカル開発graphでのcompile check**の完了であり、公開Gitだけの
+候補lock検証やリンク・実機実行の代用ではない。上記の既存warnings / Clippy残件は
+維持する。A618機能・実機作業、Boxcraft再検証、push・タグ・版上げは行っていない。

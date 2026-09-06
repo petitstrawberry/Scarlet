@@ -46,3 +46,6 @@ sgfx-core = { path = "../../sgfx/crates/sgfx-core" }
 sgfx-codegen-virgl = { path = "../../sgfx/crates/sgfx-codegen-virgl" }
 sgfx-backend-scarlet-virgl = { path = "../../sgfx/crates/sgfx-backend-scarlet-virgl" }
 sgfx-backend-wgpu = { path = "../../sgfx/crates/sgfx-backend-wgpu" }
+
+[patch."https://github.com/petitstrawberry/scarlet-project-chromebook"]
+sgfx-backend-scarlet-adreno = { path = "../../scarlet-project-chromebook/userspace/sgfx-backend-scarlet-adreno" }
