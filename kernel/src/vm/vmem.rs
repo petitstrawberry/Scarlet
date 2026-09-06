@@ -157,17 +157,17 @@ impl MemoryArea {
     /// # Arguments
     ///
     /// * `ptr` - Address to record; this constructor does not dereference it.
-    /// * `size` - Byte count. For nonzero sizes, `ptr as usize + size` must not
-    ///   overflow. The legacy zero-size case records `start == end`, which
-    ///   represents one byte under the inclusive-range convention, not an empty range.
+    /// * `size` - Nonzero byte count. The inclusive last address must fit in `usize`.
     ///
     /// # Returns
     ///
-    /// A descriptor of the supplied addresses, without retaining the allocation.
-    pub fn from_ptr(ptr: *const u8, size: usize) -> Self {
+    /// A descriptor of the supplied addresses, without retaining the allocation,
+    /// or `None` for zero bytes or address overflow. Inclusive ranges cannot
+    /// represent an empty allocation; a single byte at `usize::MAX` is valid.
+    pub fn from_ptr(ptr: *const u8, size: usize) -> Option<Self> {
         let start = ptr as usize;
-        let end = if size > 0 { start + size - 1 } else { start };
-        Self { start, end }
+        let end = start.checked_add(size.checked_sub(1)?)?;
+        Some(Self { start, end })
     }
 
     /// Returns the size of the memory area in bytes
@@ -234,6 +234,40 @@ impl MemoryArea {
     ///
     pub unsafe fn as_slice_mut(&self) -> &mut [u8] {
         unsafe { core::slice::from_raw_parts_mut(self.start as *mut u8, self.size()) }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::MemoryArea;
+
+    #[test_case]
+    fn memory_area_from_ptr_rejects_empty_ranges() {
+        for address in [0, 0x1000, usize::MAX] {
+            assert_eq!(MemoryArea::from_ptr(address as *const u8, 0), None);
+        }
+    }
+
+    #[test_case]
+    fn memory_area_from_ptr_preserves_inclusive_bounds() {
+        for (address, size) in [(0, 1), (0x1000, 4096), (usize::MAX, 1)] {
+            let area = MemoryArea::from_ptr(address as *const u8, size)
+                .expect("nonempty representable range");
+            assert_eq!(area.start, address);
+            assert_eq!(area.end, address + (size - 1));
+            assert_eq!(area.size(), size);
+        }
+    }
+
+    #[test_case]
+    fn memory_area_from_ptr_rejects_overflow() {
+        assert_eq!(MemoryArea::from_ptr(usize::MAX as *const u8, 2), None);
+        let address = (usize::MAX - 3) as *const u8;
+        assert_eq!(MemoryArea::from_ptr(address, 5), None);
+        assert_eq!(
+            MemoryArea::from_ptr(address, 4),
+            Some(MemoryArea::new(usize::MAX - 3, usize::MAX))
+        );
     }
 }
 
