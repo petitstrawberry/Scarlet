@@ -76,15 +76,20 @@ pub(crate) fn submit(
         flags: 0,
         padding: 0,
     };
-    device
-        .control(
+    // SAFETY: This video control reads the ABI submit record and copies all
+    // pointed-to H.264 parameter records before returning. `submit` and `h264`
+    // remain initialized and immutably borrowed for the entire call; the kernel
+    // retains owned parameter copies for asynchronous decoding, not these pointers.
+    unsafe {
+        device.control(
             SCARLET_VIDEO_SUBMIT_H264_STATELESS,
             &submit as *const _ as usize,
         )
-        .map_err(|_| {
-            let status = read_decoder_status(device);
-            format!("hardware decoder stateless H.264 submit failed{status}")
-        })?;
+    }
+    .map_err(|_| {
+        let status = read_decoder_status(device);
+        format!("hardware decoder stateless H.264 submit failed{status}")
+    })?;
     Ok(h264.timestamp)
 }
 

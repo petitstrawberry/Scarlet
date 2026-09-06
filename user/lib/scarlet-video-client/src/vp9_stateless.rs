@@ -145,15 +145,20 @@ pub(crate) fn submit(
             stream_id
         );
     }
-    device
-        .control(
+    // SAFETY: This video control reads the ABI submit record and copies all
+    // pointed-to VP9 parameter records before returning. `submit` and `vp9`
+    // remain initialized and immutably borrowed for the entire call; the kernel
+    // retains owned parameter copies for asynchronous decoding, not these pointers.
+    unsafe {
+        device.control(
             SCARLET_VIDEO_SUBMIT_VP9_STATELESS,
             &submit as *const _ as usize,
         )
-        .map_err(|_| {
-            let status = read_decoder_status(device);
-            format!("hardware decoder stateless VP9 submit failed{status}")
-        })?;
+    }
+    .map_err(|_| {
+        let status = read_decoder_status(device);
+        format!("hardware decoder stateless VP9 submit failed{status}")
+    })?;
     if log_submit {
         std::println!(
             "[scarlet-video-client] VP9 stateless submit ok ts={} stream={}",
