@@ -7,7 +7,7 @@
 
 Public source compatibility, Handle ownership and the distinction between
 CPU mappings and externally leased GPU frames follow the
-[Scarlet Native SDK contract](../release/1.0-sdk-contract.md).
+[Scarlet native API contract](../release/1.0-native-api-contract.md).
 
 This library is intentionally **not** a widget toolkit. It is the "Wayland client"-like layer that owns:
 

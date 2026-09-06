@@ -213,7 +213,10 @@ With the pinned `scarlet-rust-toolchain` (`scarlet-rust-nix` `2b4ddd55`):
   builds, and the complete AArch64 release image builds successfully. The user
   subsequently confirmed normal operation, closing the reported rendering
   regression. The seventh diagnostic's individual results were not separately
-  reported. Runtime verification remains user-operated.
+  reported. Runtime verification remains user-operated. The SGFX diagnostic
+  binary and its dedicated image fixture were removed at the user's request
+  on 2026-09-06; the results above are historical evidence, not a retained
+  installation or a request to rerun the smoke.
 - The opt-in [`gpu-async-smoke`](../../user/std-bin/src/gpu_async_smoke.rs) passes
   check and strict Clippy on both normal Scarlet std targets. Real AArch64 QEMU
   release-image runs pass with `virtio-gpu-gl-pci` (two CPUs) and

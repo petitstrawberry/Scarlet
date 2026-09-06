@@ -3,7 +3,7 @@
 更新日: 2026-09-06。引き継ぎ時点のローカルチェックアウトを確認して記載した。
 本文は引き継ぎ時点の記録。作業再開後の変更と確認結果は末尾の「再開後の進捗」と「SGFXの互換性境界を確定」を参照。後者の決定により、SGFXの全Rust公開APIを1.xで凍結する旧案と一律enum移行はRC条件から外れた。
 
-最新の作業対象: **A618はユーザー指示で保留、Boxcraftはユーザー確認済みで完了。ScarletUI・SDKの残る契約作業に集中する。** 詳細は末尾の「作業対象の更新」を優先し、本文の過去の「Boxcraft未報告」「A618へ着手」を現在の指示と混同しない。
+最新の訂正: **ユーザーの指すSDKは別repoの`scarlet-sdk`（`cargo-scarlet`とimage plugin）。native APIの整理をもってSDK契約完了とした報告は撤回した。ScarletUIの現行契約は記録済み、`scarlet-sdk`本体の契約整理は未完。** A618は保留、Boxcraftはユーザー確認済みで完了。ローカルpatchのコミット混入を撤回し、SGFX smokeはユーザー指示で削除した。末尾の「誤認・ローカル設定混入の撤回」を現在の状態として優先する。
 
 ## まず結論
 
@@ -210,10 +210,10 @@ cargo-clippy clippy --locked --offline -p scarlet-ui-renderer-sgfx --no-deps -- 
 
 **古いroadmap/API文書には「native SGFX/UI未接続」など、現在より前の時点の記述が残る。** それを理由に実装をやり直さない。今回の実装状態はこの引き継ぎ書と最新の完了／フレーム拒否契約を優先し、文書の時系列整合を通常の整理対象とする。
 
-ローカル接続:
+ローカル接続（当時の記録。以下のコミット混入・smoke組込みは末尾で撤回した）:
 
 - `Scarlet/.cargo/Cargo.toml` は兄弟 `scarlet-ui` と `sgfx` への明示的patchを保持している。これはユーザーがローカル修正を使うため指定したもの。
-- `Scarlet/bundles/experimental/bundle.toml` は `source = "../../../sgfx"`、package `sgfx`、bin `sgfx-native-completion-smoke` を `/system/scarlet/bin/sgfx-native-completion-smoke` に入れる。smokeはexperimentalに含める取り決め。新しい専用taskを作らない。
+- 当時はexperimental bundleから兄弟SGFXの診断を組み込んでいた。この取り決めは後の削除指示で廃止した。診断を復活させたり、新しい専用taskを作ったりしない。
 
 必要な変更を加えた場合の最小確認入口。**この一覧を次担当が無条件で全部走らせるためのチェックリストにはしない。**
 
@@ -279,13 +279,13 @@ issue #1 の構想と、SGFX段階で動的ロードは予定せず最終的に�
 
 - ユーザーはA618を一旦保留と指示した。実装・実機検証・submit-wire整理に着手しない。完了扱いやサポート範囲の削除ではなく、保留として管理する。
 - Boxcraftについてユーザーから「とっくに終わってる」と確認を受けた。修正とユーザー担当の動作確認は完了として扱い、過去の「未報告」を残件へ戻さない。エージェントが新しく実行したテスト、A618や故障時の根拠としては数えない。
-- 当面の本体作業はScarletUIとScarlet SDKの契約整理。候補lock・release notes・版上げ・RC公開はその後の手続きとして残る。
+- 当面の本体作業はScarletUIと`scarlet-sdk`の契約整理だった。候補lock・release notes・版上げ・RC公開はその後の手続きとして残る。
 - ScarletUIの契約全体が未着手だったわけではない。`docs/ARCHITECTURE.md`はView/Elementのidentity、State共有、再構築時の保持規則を既に規定し、`docs/FRAME_FAILURES.md`もv1.0の失敗・回復契約を定義している。これらを再設計せず、Scene/Windowの宣言と実体の寿命、起動・open/close、公開export/feature、拡張traitの互換性を具体的に整理する。
-- SDKも既存のHandle所有権Rustdoc、native ABI表現テスト、GPU完了・SWS lease契約を出発点とする。`scarlet-abi`/`scarlet-sys`/`scarlet-os`とclient APIの公開範囲、所有権移譲とエラー、mapping寿命、未対応capabilityの扱いを照合し、実際の不足だけを埋める。
+- この段階でエージェントが`scarlet-sdk`をnativeユーザーライブラリと取り違え、Handle所有権・mapping・GPU/SWS等の監査を進めてしまった。後に承認を得たunsafe修正とnative API文書化は別作業の実績として扱い、SDK本体の契約整理を済ませたとは扱わない。
 
 release scope / roadmapをこの作業対象と確認済み状態に更新した。この更新は文書のみで、APIの保証範囲を新たに確定したり、コード変更やruntime再検証を行ったりしていない。
 
-## 現行契約の規格化とunsafe境界修正 — 2026-09-06
+## native API / ScarletUIの現行契約とunsafe境界修正 — 2026-09-06
 
 ユーザーは「現行をそのまま規格化できる部分は進め、判断が必要なら知らせる」
 方針を承認した。監査で、生syscall・任意mapping解除・生control等がsafeな関数
@@ -293,19 +293,19 @@ release scope / roadmapをこの作業対象と確認済み状態に更新した
 
 ### 完了した変更
 
-- Scarlet `10e4db66`: [SDK契約](1.0-sdk-contract.md)を追加。
+- Scarlet `326b1d04`（メッセージ訂正前`10e4db66`）: [native API契約](1.0-native-api-contract.md)を追加。
   `scarlet-abi` / `scarlet-sys` / `scarlet-os` / runtime / legacy / clientの役割、
   feature構成、Handleの成功・失敗時の所有権、mapping寿命、部分成功・readiness、
   GPU完了とSWS leaseの独立性を現行実装に沿って規定した。
 - 同コミットで`syscall0..6`、map/unmap、生Handle/VM/vCPU control、break/TLS設定、
   生clone、guest-memory登録、event登録/returnを明示的なunsafe境界にした。
-  公開入口にSafety要件を追加し、型付きSDK、通常std/legacyアプリ、GPU/SWS/
+  公開入口にSafety要件を追加し、型付きnative API、通常std/legacyアプリ、GPU/SWS/
   audio/videoの呼び出し側を追従させた。syscall番号、引数ABI、GPU/SWSのrecordや
   wire、kernel実装は変更していない。
 - `SharedMemory::from_handle` / `Socket::from_handle`の「失敗時は消費しない」
   説明を訂正。実装は元から所有Handleを消費し、失敗時にもDrop/closeしていた。
   event-demoのハンドラではatomicフラグだけを更新し、表示と終了を通常ループへ
-  移した。SDK Rustdocの既存リンク切れ3件も修正した。
+  移した。native API Rustdocの既存リンク切れ3件も修正した。
 - ScarletUI `50eea74d`: [アプリ・拡張契約](../../../scarlet-ui/docs/1.0-contract.md)
   を追加。公開export/feature、Scene宣言とWindow実体、起動時の最初の対象1窓、
   openの重複抑止、newの別identity、dismissの全同一キー対象とveto回避、
@@ -320,7 +320,7 @@ release scope / roadmapをこの作業対象と確認済み状態に更新した
 | 確認 | 結果 |
 | --- | --- |
 | `scarlet-std-bin --bins` | AArch64 / RISC-Vとも成功 |
-| `userprogram --bins`（旧SDK消費側） | 両arch成功。今回は組込みScarlet targetでの確認であり、legacy JSON target全体の再検証ではない |
+| `userprogram --bins`（legacy native API消費側） | 両arch成功。今回は組込みScarlet targetでの確認であり、legacy JSON target全体の再検証ではない |
 | `video_player --bins` / `scarlet-websocket-demo --bins` | それぞれ独立したfeature構成で両arch成功 |
 | `scarlet-sys` host Rustdoc | unsafeなしの呼び出しを拒否するcompile-fail **7件成功**。syscallは実行しない |
 | `scarlet-os` AArch64 Rustdocの`memory_mapping` / `control`フィルタ | compile-fail **5件成功**（mapping 4 + control 1）、別途既存例1件のcompile-only成功 |
@@ -332,7 +332,7 @@ release scope / roadmapをこの作業対象と確認済み状態に更新した
 上のconsumer確認は、既存のScarlet→兄弟SGFX/UI patchに加え、**Adrenoの兄弟
 checkoutをCLI patchで選び、一時Cargo.lockを使用したローカル整合確認**である。
 公開Gitだけの元lockで通ったとは報告しない。元lockの旧Adrenoはsafe呼び出しの
-ままなので、新SDKとの通常ビルドには依存追従が必要。ユーザーの既存lock差分と
+ままなので、新native APIとの通常ビルドには依存追従が必要。ユーザーの既存lock差分と
 stageを保持するため、通常設定へのAdreno patch追加と該当lock追従は別途確認中。
 
 確認コマンドの形（各package / targetを独立して指定）:
@@ -362,15 +362,16 @@ source変更を解決したもの。ソースコピー・worktree・新しい専
   release時のlint dispositionとして残す。UI testにも既存23 warningsと
   preview-demoの重複target警告が残る。
 
-SDKの全機能安全性、故障/reset、実機の資源解放を今回のコンパイルだけで証明した
+native APIの全機能安全性、故障/reset、実機の資源解放を今回のコンパイルだけで証明した
 とは扱わない。Boxcraftはユーザー確認済みの完了状態を維持し、QEMU/GUI/Dockerや
 kernel全体の検証は再開していない。ABI/wire fixtureの既存gateも今回再実行していない。
 
-現行SDK/ScarletUIの契約文書化と承認されたunsafe修正はローカルコミット済み。
+現行native API/ScarletUIの契約文書化と承認されたunsafe修正はローカルコミット済み。
+これは別repoの`scarlet-sdk`の契約整理ではない。
 通常開発graphの依存追従、公開sourceによる候補lock固定、残る適合性・lint整理、
 release notes・版上げ・RC公開は別段階。push、issue投稿、タグ作成は行っていない。
 
-## 通常開発graphの依存追従を完了 — 2026-09-06
+## ローカル依存追従の確認（配布構成の完了ではない） — 2026-09-06
 
 上記の依存追従についてユーザーの追加承認を受け、`.cargo/Cargo.toml`へ兄弟
 Chromebook checkoutの`sgfx-backend-scarlet-adreno` patchを追加した。既存の
@@ -400,3 +401,26 @@ cargo check --manifest-path .cargo/Cargo.toml --locked --offline \
 これは通常の**ローカル開発graphでのcompile check**の完了であり、公開Gitだけの
 候補lock検証やリンク・実機実行の代用ではない。上記の既存warnings / Clippy残件は
 維持する。A618機能・実機作業、Boxcraft再検証、push・タグ・版上げは行っていない。
+
+## 誤認・ローカル設定混入の撤回 — 2026-09-06
+
+ユーザーからSDKの誤認とローカルpatchのコミット混入を指摘され、撤回と
+不要なSGFX smokeの削除を指示された。
+
+- `1.0-sdk-contract.md`を`1.0-native-api-contract.md`へ改名し、scope / roadmap /
+  本書からSDK本体の契約が完了したという扱いを撤回した。`scarlet-sdk`のCLI、
+  manifest / bundle、source / lock、image / plugin契約は未完として区別する。
+  承認済みのnative API unsafe修正、ScarletUIの契約・回帰テストは取り消していない。
+- Scarletの追跡設定からScarletUI 7件、SGFX 5件、Adreno 1件の兄弟path patchを
+  撤去した。手元の開発用設定だけを未stage差分として保持し、既存stageを維持した。
+  同じrepo内で完結するScarlet自身のpatchと、公開Gitのcrates.io置換は維持した。
+- `sgfx-native-completion-smoke`のソースとbin宣言、experimental組込み、
+  `projects/aarch64-sgfx-smoke`と`bundles/sgfx-smoke`の追跡ファイル、専用の
+  image/run taskを削除した。ユーザーの既存full-project lockからも該当layerだけ
+  除去し、残りの差分は保持した。生成済みのローカル画像・ログは削除していない。
+- 過去の検証結果は歴史的な根拠として残し、削除したfixtureへの現役リンク・
+  インストール指示・再実行要求は除去した。別のsmoke環境を作って置き換えない。
+
+この撤回だけで公開依存構成が完成したとはしない。必要な外部修正の公開、
+Cargo / project lockの整合、兄弟checkoutなしのNix / `cargo-scarlet`正規経路での
+構築確認はまだ残る。既存のローカル8構成checkをその代用にしない。
