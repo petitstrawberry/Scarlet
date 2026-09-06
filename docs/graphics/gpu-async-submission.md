@@ -10,8 +10,11 @@ This is not a performance claim or completion of the coordinated 1.0 release gat
 The user approved portable completion tracking and actual asynchronous Scarlet
 execution for 1.0; the portable semantics are recorded in the
 [SGFX completion contract](https://github.com/petitstrawberry/sgfx/blob/90eb0641cf3dbdb415db6c48d81f7bf224d99984/docs/completion-contract.md).
-SGFX core/WGPU/host facade are implemented at that revision. It is newer than
-Scarlet's consumer lockfile; this change does not update those dependencies.
+SGFX core/WGPU/host facade are implemented and included in ScarletUI and
+Scarlet's consumer lockfiles at SGFX `945c12724da2adc56269487afdbd3c900074a314`.
+SGFX's own lockfile also includes the asynchronous Scarlet GPU transport.
+Dependency adoption does not switch the native SGFX execution path to async;
+native receipts, chunk submission, and consumer lifetime integration remain open.
 
 ## Additive ABI
 
