@@ -33,7 +33,8 @@ composition is driven by `cargo-scarlet` from `scarlet-sdk` and the
 
 ## Highlights
 
-- Multi-architecture kernel work for RISC-V 64 and AArch64.
+- RISC-V 64 and AArch64 kernel support, with QEMU images and experimental
+  [real-hardware projects](#hardware-support).
 - Scarlet-native userland, xv6 support, and partial Linux ABI support over the
   same kernel objects.
 - Scarlet SDK and a Scarlet Rust toolchain for building Rust `std`
@@ -151,6 +152,19 @@ there are no separate tracked desktop project directories.
 See [Scarlet Distribution Model](docs/architecture/distro-model.md) and
 [Scarlet Build System](docs/build-system/README.md).
 
+## Hardware Support
+
+Alongside the in-tree QEMU images, Scarlet has experimental support for real
+hardware through standalone projects:
+
+- [Apple Silicon](https://github.com/petitstrawberry/scarlet-project-applesilicon):
+  Apple-specific BSP, drivers, and deployment tooling.
+- [Qualcomm SC7180 Chromebook](https://github.com/petitstrawberry/scarlet-project-chromebook):
+  Google CoachZ rev3 (Trogdor) board integration.
+
+See each project for supported models, device coverage, and build/deployment
+instructions.
+
 ## Media Codecs
 
 The in-tree `video-player` binary is built as its own user program crate under
@@ -226,22 +240,6 @@ kernel API.
   modules (`.lsm`) with per-architecture relocation support. See
   [kernel development](docs/kernel/README.md) and
   [Loadable Scarlet Module](docs/modules/lsm.md).
-
-## Development Status
-
-Scarlet is still a research and bring-up system. The useful parts are real, but
-many interfaces are intentionally changing while the kernel, userland, and
-hardware support are being developed together.
-
-| Area | Status |
-| --- | --- |
-| RISC-V 64 | Primary QEMU development target. Limine boot, kernel tests, userland, VirtIO devices, networking, and desktop-oriented images are maintained here first. |
-| AArch64 QEMU | Active target. Limine/UEFI boot, kernel tests, VirtIO devices, and full/microvm project recipes; desktop content is selected through bundles. |
-| ABI support | Scarlet native ABI works for the in-tree userland. xv6 RISC-V supports shell and common commands. Linux ABI is partial but already used for selected Buildroot/BusyBox userlands, Wayland GUI apps, and services such as Mozc. |
-| Desktop/UI | SWS, `sws-client`, ScarletUI, desktop shell, taskbar, terminal, settings, IME experiments, and selected Wayland bridge applications are in progress. |
-| Audio/media | `/dev/audioN`, VirtIO sound, Apple MCA/ADMAC playback, SAS, `sasctl`, `mplayer`, and `video-player` are available for current experiments. Audio design is still evolving around realtime and device-routing constraints. |
-| Storage/USB | VFS supports tmpfs, cpiofs, ext2, FAT32, overlay, bind mounts, and devfs. VirtIO block is the primary block path. xHCI/DWC3 USB is early; USB storage is not a supported path yet. |
-| Hypervisor | SHV provides Type-2 virtualization for RISC-V H-extension and AArch64 EL2/VHE. The Linux `/dev/kvm` compatibility layer is functional enough for current kvmtool/Firecracker-class workloads, while device models and multi-vCPU coverage are still evolving. |
 
 ## Development Commands
 
