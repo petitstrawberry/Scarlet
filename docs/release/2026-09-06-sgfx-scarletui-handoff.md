@@ -3,7 +3,7 @@
 更新日: 2026-09-06。引き継ぎ時点のローカルチェックアウトを確認して記載した。
 本文は引き継ぎ時点の記録。作業再開後の変更と確認結果は末尾の「再開後の進捗」と「SGFXの互換性境界を確定」を参照。後者の決定により、SGFXの全Rust公開APIを1.xで凍結する旧案と一律enum移行はRC条件から外れた。
 
-最新の訂正: **ユーザーの指すSDKは別repoの`scarlet-sdk`（`cargo-scarlet`とimage plugin）。native APIの整理をもってSDK契約完了とした報告は撤回した。ScarletUIの現行契約は記録済み、`scarlet-sdk`本体の契約整理は未完。** A618は保留、Boxcraftはユーザー確認済みで完了。ローカルpatchのコミット混入を撤回し、SGFX smokeはユーザー指示で削除した。末尾の「誤認・ローカル設定混入の撤回」を現在の状態として優先する。
+最新の状態: **SDKは別repoの`scarlet-sdk`（`cargo-scarlet`とimage plugin）。native APIの整理をもってSDK契約完了とした誤報は撤回済み。その後、SDK本体を確認して現行契約を別途記録し、未使用の部分的な`--offline`を廃止した。** カーネル・ユーザランドの入口文書を整理し、公開依存・lock整合は最後に残している。A618は保留、Boxcraftは完了、ローカルpatchはコミット外、SGFX smokeは削除済み。末尾の「SDK offline廃止とドキュメント整理」を優先し、以下の古い未完報告を現在の残件に戻さない。
 
 ## まず結論
 
@@ -424,3 +424,45 @@ cargo check --manifest-path .cargo/Cargo.toml --locked --offline \
 この撤回だけで公開依存構成が完成したとはしない。必要な外部修正の公開、
 Cargo / project lockの整合、兄弟checkoutなしのNix / `cargo-scarlet`正規経路での
 構築確認はまだ残る。既存のローカル8構成checkをその代用にしない。
+
+## SDK offline廃止とドキュメント整理 — 2026-09-06
+
+ユーザー指定の順序は、SDKのoffline実使用確認、使用がなければ廃止、
+カーネル・ユーザランド文書の整理、最後に公開依存・lockを揃える、である。
+
+- SDK `9455d87` でlocal TOMLのscalar/type overrideを修正し、
+  LSM専用引数を `--lsm` に統一済み。静的モジュールは普通のcrateを
+  `[modules]` に入れ、生成aggregationから `force_link()` する。
+- Scarlet / scarlet-sdk / ScarletUI / SGFX / Chromebookの追跡スクリプト・
+  CI・taskからSDKの `cargo scarlet ... --offline` 呼び出しは見つからなかった。
+  通常のCargoの `--offline` 使用はSDKオプションと区別した。
+- SDKのbuild/run/image/updateから `--offline` と内部の専用分岐を削除。
+  Git/URL/archiveキャッシュは保持し、archiveのcache miss取得、cache hit再利用、
+  checksum不一致拒否を確認。 `--locked` の既存挙動は変えていない。
+- SDKの `docs/1.0-contract.md` にCLI、schema 2、local merge、静的module/LSM、
+  layer/source/cache/lock、image/plugin、hook/runnerの現行境界を記録。
+  子Cargoや任意スクリプトへの一律flag伝播・ネットワーク遮断は保証しない。
+- Scarletには [kernel guide](../kernel/README.md) と
+  [userspace guide](../userspace/README.md) を追加。root/index、BSP/target/layer説明、
+  Limineの実際のFAT/GPT構成、sparse HHDMとarch別stack、stemdの設定パスを更新。
+  kernel/native facadeのRustdocも現状に合わせた。旧ScarletUI APIコピーは
+  historicalと明示し、現行契約は所有repoへ案内する。
+
+検証:
+
+- SDK: `cargo test --workspace --locked --offline --target-dir target/toolchain-9f9ef5a48648 -- --test-threads=1`
+  で **68 passed / 0 failed**（core 61 + plugin 7、ignored/filteredなし）。
+  ここでの `--offline` は通常のCargoのオプション。
+- SDK: 同じtarget-dirでworkspace/all-targetsのstrict Clippy
+  (`--no-deps -- -D warnings`) 通過。format / diff whitespaceも通過。
+- カーネル・ユーザランドの変更は文書/コメントのみ。実装・ABI・メモリ配置は
+  変更していない。QEMU/GUI/Docker・削除済みsmokeの再実行/再作成はしていない。
+- 更新/新規Markdown 18文書のローカルリンク261件を確認し、欠落なし。
+  Rust 3ファイルはコメント以外が変更前と同一で、対象ファイルのrustfmt checkも通過。
+  既存patch/Cargo lock/project lockの差分も作業前と同一であることを確認した。
+
+SDKを含む修正の公開とNix pin更新、Cargo/project lockの最終選定、
+兄弟checkoutなしの正規ビルド確認はまだ実施していない。
+ユーザー所有の既存lock差分・兄弟path patchは保持し、この作業には混ぜない。
+版上げ・タグ・RC公表も未実施。個別subsystem/boardの古い設計ノートをすべて
+再認証したという意味ではなく、現行の開発入口と主要な誤案内を整理した区切りである。

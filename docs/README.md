@@ -4,10 +4,22 @@ This directory contains design notes, subsystem references, and status documents
 for the current Scarlet integration tree. The root [README](../README.md)
 describes the repository at a high level; this page is the documentation map.
 
+## Start Here
+
+- [Kernel development map](kernel/README.md) - kernel library/BSP boundary,
+  source map, boot sequence, memory ownership, modules, and test scope.
+- [Userspace development map](userspace/README.md) - normal Rust std targets,
+  legacy no_std libraries, SDK tooling, image layers, and service startup.
+
+The entry, build, boot, and memory guides were reconciled with current source on
+2026-09-06. Dated experiments and subsystem design notes retain their own scope;
+this is not a claim that every historical document or device was revalidated.
+
 ## Release Preparation
 
 - [Coordinated 1.0 roadmap](release/1.0-roadmap.md) - Scarlet, SGFX, ScarletUI,
-  and Adreno compatibility decisions, dependency migration, CI, and release gates.
+  scarlet-sdk, and Adreno compatibility decisions, dependency migration, CI,
+  and release gates.
 - [1.0 scope and compatibility policy](release/1.0-scope.md) - Package membership,
   public API versus internal wire contracts, supported configurations, and RC1 gates.
 - [SGFX migration baseline](release/1.0-baseline.md) - Verified revisions,
@@ -31,8 +43,6 @@ describes the repository at a high level; this page is the documentation map.
   scheduling policy, hints, fairness, and preemption integration points.
 - [Scheduler benchmark scenarios](architecture/scheduler-benchmarks.md) -
   repeatable workloads for homogeneous and heterogeneous scheduler checks.
-- [Apple Silicon deployment](../projects/aarch64-apple-limine-full/DEPLOY.md) -
-  experimental m1n1/U-Boot/Limine deployment flow.
 
 ## ABI and Runtime Compatibility
 
@@ -72,9 +82,11 @@ describes the repository at a high level; this page is the documentation map.
 - [SWS IPC protocol](graphics/sws-ipc-protocol.md) - Scarlet Window Server wire
   protocol.
 - [sws-client](graphics/sws-client.md) - low-level SWS client library.
-- [ScarletUI design](graphics/scarletui/design.md) and
-  [ScarletUI API](graphics/scarletui/api.md) - UI framework architecture and
-  reference.
+- [ScarletUI repository](https://github.com/petitstrawberry/scarlet-ui) - owning
+  source, current architecture, application/extension contract, and examples.
+  Local [design](graphics/scarletui/design.md) and
+  [API](graphics/scarletui/api.md) pages are historical integration snapshots,
+  not current trait references.
 - [Wayland bridge](graphics/wayland-bridge.md) - Wayland-to-SWS bridge design.
 - [stemd](services/stemd.md) - service manager and desktop application registry.
 - [Scarlet SKK](services/scarlet-skk.md) and
@@ -99,6 +111,9 @@ describes the repository at a high level; this page is the documentation map.
 - [Hypervisor status](hypervisor/status.md)
 
 ## Status Notes
+
+- [Apple M1 SMP investigation](debug/logs/APPLE_M1_BARE_SMP_INVESTIGATION.md) -
+  dated experimental evidence, not a tracked Apple deployment project.
 
 The documentation tracks implementation direction as well as completed behavior.
 When code and docs disagree, treat the code and project manifests as the source

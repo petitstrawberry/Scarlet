@@ -19,9 +19,11 @@ The legacy display mmap remains available when direct scanout is unsupported.
 Swapchain-aware userspace maps each DCP scanout once and selects completed
 buffers explicitly with `DISPLAY_PRESENT_BUFFER`.
 
-The Apple project enables the driver in
-`projects/aarch64-apple-limine-full/scarlet.toml`. A successful probe logs a line
-like:
+The earlier Apple recipe enabled the driver in
+`projects/aarch64-apple-limine-full/scarlet.toml`; that project is no longer
+tracked in this repository. These are driver/handoff notes, not a current
+clone-and-run board recipe. An external BSP must supply the module and firmware
+configuration. A successful probe logs a line like:
 
 ```text
 [apple-dcp] native panel 2560x1600 @ 60.00 Hz, handoff maps dcp=... display=...

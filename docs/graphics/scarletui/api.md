@@ -1,4 +1,15 @@
-# ScarletUI API Reference
+# ScarletUI API notes (historical snapshot)
+
+This page preserves an earlier integration-era API description. Its examples
+and trait signatures are not maintained against the current ScarletUI release
+contract. For new code, use the owning
+[ScarletUI repository](https://github.com/petitstrawberry/scarlet-ui),
+its [application/extension contract](https://github.com/petitstrawberry/scarlet-ui/blob/main/docs/1.0-contract.md),
+and its examples/Rustdoc. Do not copy these signatures as today's API.
+
+Scarlet-specific build and startup guidance is in the
+[userspace development map](../../userspace/README.md). The
+[SWS wire protocol](../sws-ipc-protocol.md) remains maintained in this repository.
 
 ScarletUI is a declarative UI framework for Scarlet OS, inspired by Flutter and SwiftUI.
 
@@ -1476,6 +1487,5 @@ impl Application for TodoApp {
 
 ## See Also
 
-- [ScarletUI Design Document](./design.md) - Architecture and design decisions
-- [VIEWEXT_USAGE.md](../../../user/lib/scarlet-ui/VIEWEXT_USAGE.md) - ViewExt usage guide
-- [README.md](../../../user/lib/scarlet-ui/README.md) - Project overview
+- [Historical design notes](./design.md) - Earlier integration design
+- [Current ScarletUI overview and examples](https://github.com/petitstrawberry/scarlet-ui) - Owning repository; the old in-tree library path no longer exists

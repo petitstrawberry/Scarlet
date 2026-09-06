@@ -1,257 +1,127 @@
-# Multi-Architecture Support
+# Multi-architecture development
 
-Scarlet supports multiple target architectures, enabling execution of binaries across different CPU architectures through a transparent ABI conversion layer.
+Scarlet implements RISC-V 64 and AArch64 kernel ports. Its ABI layer translates
+operating-system interfaces over shared kernel objects; it does **not** translate
+CPU instructions. A Linux or Scarlet executable must match the machine's
+architecture. Linux ABI support is partial; see the
+[compatibility status](../abi/linux/status.md).
 
-## Supported Architectures
+This page describes the current repository layout, reviewed on 2026-09-06.
+Start with the [kernel development map](../kernel/README.md) for common code.
 
-### Currently Supported
+## Project and target selection
 
-- **RISC-V 64-bit (riscv64)** - Primary development architecture
-- **AArch64 (ARM 64-bit)** - In development, basic support available
+The project manifest selects a BSP, whose Cargo configuration selects the kernel
+target. The tracked reference projects are:
 
-### Architecture Selection
+| Project | Kernel target | Configuration |
+| --- | --- | --- |
+| [riscv64-limine-full](../../projects/riscv64-limine-full/scarlet.toml) | `riscv64gc-unknown-none-elf.json` | RISC-V QEMU full system |
+| [aarch64-limine-full](../../projects/aarch64-limine-full/scarlet.toml) | `aarch64-unknown-none-elf.json` | AArch64 QEMU full system; hypervisor explicitly disabled |
+| [aarch64-limine-microvm](../../projects/aarch64-limine-microvm/scarlet.toml) | `aarch64-unknown-none-elf.json` | AArch64 microvm configuration with hypervisor and `microvm-init` |
 
-The architecture is controlled via the `ARCH` environment variable throughout the build process:
+`ARCH` is used by some helper scripts; setting it is not a substitute for
+selecting a project. From the repository root in the Nix development shell:
 
-```bash
-# RISC-V 64 (default)
-cargo make build-riscv64
-cargo make test-riscv64
+```sh
+# Build the selected kernel/BSP.
+cargo scarlet build --project projects/riscv64-limine-full
+cargo scarlet build --project projects/aarch64-limine-full
 
-# AArch64
-cargo make build-aarch64
-cargo make test-aarch64
+# Compose the selected project's userspace and boot images.
+cargo scarlet image --project projects/riscv64-limine-full
+cargo scarlet image --project projects/aarch64-limine-full
 ```
 
-## Building for Multiple Architectures
+The `cargo make build-riscv64` / `build-aarch64` tasks build kernel and core
+user components. Image composition is a separate `image` operation; the
+`run` tasks compose images before invoking the project runner.
 
-### Kernel Build
+## Userspace is a separate target family
 
-The kernel build automatically selects the target based on the `ARCH` variable:
+Normal Rust `std` applications use `riscv64gc-unknown-scarlet` or
+`aarch64-unknown-scarlet` from the Scarlet Rust toolchain. For example:
 
-```bash
-# Build RISC-V kernel
-cargo make build-riscv64
-
-# Build AArch64 kernel
-cargo make build-aarch64
+```sh
+cd user/std-bin
+cargo check -p scarlet-std-bin --target riscv64gc-unknown-scarlet
+cargo check -p scarlet-std-bin --target aarch64-unknown-scarlet
 ```
 
-Target specifications are located in `kernel/targets/`:
-- `riscv64gc-unknown-none-elf.json`
-- `aarch64-unknown-none-elf.json`
+The JSON files in [user/targets](../../user/targets) ending in
+`-unknown-scarlet-elf.json` are retained for the legacy `no_std` userland,
+not aliases for the std-capable targets. Kernel JSON targets in
+[kernel/targets](../../kernel/targets) are bare-metal targets, not application
+targets. See the [userspace development map](../userspace/README.md).
 
-### User Space Build
+## Architecture boundary
 
-User-space programs follow the same convention:
+[kernel/src/arch/mod.rs](../../kernel/src/arch/mod.rs) selects and re-exports
+the active implementation. Common kernel code calls `crate::arch::*`; new
+architecture-specific logic belongs under `arch/riscv64/` or `arch/aarch64/`,
+not in scattered `#[cfg(target_arch)]` branches in common subsystems.
 
-```bash
-# Build for RISC-V
-cd user/bin
-cargo build --target riscv64gc-unknown-scarlet-elf
+Both ports provide corresponding public entry points. The implementation is
+organized around `boot/`, `context.rs`, `switch.rs`, `vcpu/`, `trap/`,
+`vm/`, `interrupt/`, `timer.rs`, `lsm/`, and optional `hv/`.
+There is not one trait whose implementation alone completes a port. Check both
+[port](../../kernel/src/arch/riscv64/mod.rs)
+[exports](../../kernel/src/arch/aarch64/mod.rs) when changing a common call.
 
-# Build for AArch64
-cd user/bin
-cargo build --target aarch64-unknown-scarlet-elf
-```
+The current RISC-V MMU implementation uses
+[Sv48](../../kernel/src/arch/riscv64/vm/mmu/sv48.rs); AArch64 uses
+[armv8_4k](../../kernel/src/arch/aarch64/vm/mmu/armv8_4k.rs).
+Both use the kernel's 4 KiB page size. CPU architecture capabilities are not
+automatically implemented kernel features. In particular, AArch64 hypervisor
+operation requires the project's EL2/VHE path; do not infer it from AArch64
+userspace support alone.
 
-Target specifications are in `user/targets/`:
-- `riscv64gc-unknown-scarlet-elf.json`
-- `aarch64-unknown-scarlet-elf.json`
+## Boot entries, linker scripts, and device trees
 
-## Linux Rootfs for Multiple Architectures
+Each reference project's executable lives in `projects/<project>/bsp/`:
 
-### Building Buildroot
+- `src/main.rs` links the generated module aggregation and enters the arch
+  boot adapter.
+- `.cargo/config.toml` selects a target JSON under `kernel/targets/`.
+- `build.rs` and `lds/` own the executable's link configuration.
+- `scarlet.toml`, one directory above the BSP, owns images and the runner.
 
-```bash
-# RISC-V (uses buildroot-riscv64 config)
-bash bundles/linux/tools/build_buildroot.sh
+The active full-project linker scripts are
+[RISC-V](../../projects/riscv64-limine-full/bsp/lds/riscv64_limine.ld) and
+[AArch64](../../projects/aarch64-limine-full/bsp/lds/aarch64_limine.ld).
+`kernel/lds/` and `kernel/tools/` also contain kernel test/legacy boot
+support; they are not the project image entry points.
 
-# AArch64 (uses buildroot-aarch64 config)
-ARCH=aarch64 bash bundles/linux/tools/build_buildroot.sh
-```
+Both current Limine adapters consume a device tree while constructing
+`BootInfo`. The AArch64 QEMU runner materializes a QEMU `virt` DTB for the
+boot image. See [Limine boot](../boot/limine.md) for the actual image layouts
+and [memory map](memory-map.md) for address and stack policy.
 
-Buildroot/userland artifact generation runs on Linux hosts. This can be
-`scarlet-dev`, a Linux VM, or a Linux Nix shell; macOS host execution is stopped
-with guidance by the helper scripts.
+## Linux artifacts
 
-### Building User Programs
+Buildroot and optional Linux application artifacts are built on a Linux host
+for the selected architecture. Their helper scripts under
+[bundles/linux/tools](../../bundles/linux/tools) use `ARCH` (`riscv64` or
+`aarch64`), unlike project selection above. macOS execution is rejected by
+those artifact-building helpers.
 
-Cross-compiled programs (like `zathura`, `green`, and `fbdoom`) for
-Linux:
+The [Linux userspace artifact guide](../abi/linux/userspace-artifacts.md) and
+[deployment guide](../abi/linux/deployment.md) describe toolchains and the
+`bundles/linux/rootfs/system/linux-<arch>/` destinations. Building a Linux
+binary does not establish that Scarlet implements every syscall it needs.
 
-```bash
-# RISC-V
-bash bundles/linux/tools/build_user_programs.sh
+## Running and tests
 
-# AArch64
-ARCH=aarch64 bash bundles/linux/tools/build_user_programs.sh
-```
+`cargo make run-riscv64`, `run-aarch64`, and `run-aarch64-microvm` launch
+the corresponding project through QEMU. `run-debug-*` selects debug builds;
+`debug-riscv64` / `debug-aarch64` enable the runner's GDB mode.
 
-This uses the appropriate toolchain:
-- RISC-V: `riscv64-buildroot-linux-musl-gcc`
-- AArch64: `aarch64-buildroot-linux-musl-gcc`
+Kernel tests use `cargo make test-riscv64` and `cargo make test-aarch64`.
+These invoke [test.sh](../../kernel/tools/test.sh) or
+[test_aarch64.sh](../../kernel/tools/test_aarch64.sh) under QEMU; they are not
+host unit tests or full desktop validation.
 
-### Deploying Rootfs
-
-```bash
-# Deploy RISC-V rootfs
-bash bundles/linux/tools/deploy_rootfs.sh
-
-# Deploy AArch64 rootfs
-ARCH=aarch64 bash bundles/linux/tools/deploy_rootfs.sh
-```
-
-After deployment, rootfs is organized by architecture:
-```
-bundles/linux/rootfs/
-  └── system/
-      ├── linux-riscv64/
-      └── linux-aarch64/
-```
-
-## Running on QEMU
-
-### RISC-V
-
-```bash
-cargo make debug-riscv64      # Debug mode
-cargo make debug-test-riscv64 # Test mode
-cargo make run-riscv64        # Limine-based boot path
-```
-
-Or manually:
-```bash
-bash kernel/tools/run.sh
-```
-
-### AArch64
-
-```bash
-cargo make debug-aarch64      # Debug mode
-cargo make debug-test-aarch64 # Test mode
-cargo make run-aarch64        # Limine-based boot path
-```
-
-Or manually:
-```bash
-bash kernel/tools/run_aarch64.sh
-```
-
-## Testing
-
-Tests are architecture-specific and run on QEMU:
-
-```bash
-# RISC-V tests
-cargo make test-riscv64
-
-# AArch64 tests
-cargo make test-aarch64
-```
-
-Test execution:
-- `kernel/tools/test.sh` - RISC-V test runner
-- `kernel/tools/test_aarch64.sh` - AArch64 test runner
-
-## Architecture-Specific Code
-
-### Directory Structure
-
-Architecture-specific code is organized as:
-
-```
-kernel/src/arch/
-  ├── mod.rs          # Common trait definitions
-  ├── riscv64/        # RISC-V implementation
-  │   ├── mod.rs
-  │   ├── context.rs
-  │   ├── switch.rs
-  │   ├── trap.rs
-  │   └── ...
-  └── aarch64/        # AArch64 implementation
-      ├── mod.rs
-      ├── context.rs
-      ├── switch.rs
-      ├── trap.rs
-      └── ...
-```
-
-### Conditional Compilation
-
-Architecture-specific features are selected via cfg attributes:
-
-```rust
-#[cfg(target_arch = "riscv64")]
-use arch::riscv64::*;
-
-#[cfg(target_arch = "aarch64")]
-use arch::aarch64::*;
-```
-
-## Linker Scripts
-
-Each architecture has dedicated linker scripts:
-
-**Kernel (legacy, in `kernel/lds/`):**
-- `riscv64_qemu_virt.ld`
-- `aarch64_qemu_virt.ld`
-
-**Kernel (project-based, in `projects/<project>/lds/`):**
-- `riscv64_limine.ld` (RISC-V Limine boot)
-- `aarch64_limine.ld` (AArch64 Limine boot)
-
-**User space (in `user/lds/`):**
-- `user.ld` (RISC-V)
-- `user_aarch64.ld` (AArch64)
-
-## Device Tree Files
-
-QEMU virt machine device trees:
-
-- `virt-riscv64.dts` / `virt-riscv64.dtb` - RISC-V device tree
-- `virt-aarch64.dts` - AArch64 device tree (generated on-the-fly by QEMU)
-
-The Limine AArch64 workflow materializes the generated QEMU `virt` DTB so Scarlet can keep using its existing FDT-based `BootInfo` handoff.
-
-## Key Differences Between Architectures
-
-> **Note**: For detailed virtual memory layout and HHDM design, see [memory-map.md](memory-map.md).
-
-### RISC-V 64
-
-- Register naming: `x0-x31`, `pc`, CSRs
-- Calling convention: `a0-a7` (args), `t0-t6` (temp), `s0-s11` (saved)
-- Privilege levels: M-mode, S-mode, U-mode
-- Page table: Sv48 (4-level paging, 48-bit VA)
-- Interrupt handling: PLIC (Platform-Level Interrupt Controller)
-
-### AArch64
-
-- Register naming: `x0-x30`, `sp`, `pc`, system registers
-- Calling convention: `x0-x7` (args), `x9-x15` (temp), `x19-x28` (saved), `x29` (FP), `x30` (LR)
-- Exception levels: EL0 (user), EL1 (kernel), EL2 (hypervisor), EL3 (secure monitor)
-- Page table: 4KB/16KB/64KB granules, up to 4-level paging
-- Interrupt handling: GIC (Generic Interrupt Controller)
-
-## Notes
-
-- Both architectures share the same high-level kernel logic (task scheduling, memory management, filesystem, etc.)
-- Low-level primitives (context switching, trap handling, MMU setup) are architecture-specific
-- User-space programs must be compiled for the target architecture
-- Cross-architecture binary execution is not supported (no dynamic translation)
-
-## Adding a New Architecture
-
-To add support for a new architecture:
-
-1. Create `kernel/src/arch/<new_arch>/` directory
-2. Implement required traits defined in `kernel/src/arch/mod.rs`
-3. Add target JSON specification to `kernel/targets/`
-4. Create linker script in `kernel/lds/`
-5. Add build/test/run scripts in `kernel/tools/`
-6. Update Makefile.toml with new targets
-7. Add Buildroot configuration for the architecture
-8. Test thoroughly with QEMU or real hardware
-
-Refer to the existing `riscv64` and `aarch64` implementations as reference.
+A new port needs arch entry points, target configuration, memory/trap/context
+support, a BSP and linker layout, device discovery, runners, and tests.
+Linux artifacts or hypervisor support are separate work where required, not
+automatic consequences of getting the kernel to boot.

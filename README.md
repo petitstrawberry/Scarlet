@@ -39,8 +39,8 @@ composition is driven by `cargo-scarlet` from `scarlet-sdk` and the
 - Scarlet SDK and a Scarlet Rust toolchain for building Rust `std`
   applications targeting Scarlet.
 - Bootable distribution projects composed from reusable filesystem bundles.
-- In-tree desktop stack with SWS, ScarletUI, terminal, taskbar, settings, and
-  IME/service experiments.
+- In-tree desktop services and applications with SWS, terminal, taskbar,
+  settings, and IME experiments, using the separate ScarletUI/SGFX repositories.
 - Wayland bridge support for running selected Linux GUI applications on the
   Scarlet desktop.
 - SHV Type-2 hypervisor support with Linux `/dev/kvm` compatibility, including
@@ -104,6 +104,9 @@ crate supports them.
 
 Scarlet SDK provides `cargo-scarlet` and image plugins used to build kernels,
 compose filesystem bundles, generate boot images, and run project manifests.
+It is distinct from `scarlet-os` and the legacy `scarlet-std` user libraries.
+See the [userspace development map](docs/userspace/README.md) for std/no_std
+build paths, native API boundaries, image installation, and service startup.
 
 ## Project Model
 
@@ -114,7 +117,7 @@ workspace.
 Scarlet/
   kernel/                         # kernel
   drivers/                        # loadable and in-tree driver crates
-  modules/                        # loadable Scarlet modules
+  modules/                        # static and loadable Scarlet module crates
   user/
     lib/                          # Scarlet user libraries
     bin/                          # core Scarlet user programs
@@ -129,14 +132,15 @@ Important project variants:
 | Project | Purpose |
 | --- | --- |
 | `projects/riscv64-limine-full` | Default RISC-V QEMU full system. |
-| `projects/riscv64-limine-desktop` | RISC-V desktop-focused image. |
 | `projects/aarch64-limine-full` | Default AArch64 QEMU full system. |
-| `projects/aarch64-limine-desktop` | AArch64 desktop-focused image. |
 | `projects/aarch64-limine-microvm` | AArch64 microvm-oriented project. |
 
 `scarlet.toml` is the source of truth for each project. It selects the BSP,
 kernel features, module set, ordered image layers, boot image format, and runner.
-`scarlet.lock` pins resolved layer inputs for reproducible image composition.
+The BSP executable lives in `projects/<project>/bsp/`; `kernel/` is a library.
+`scarlet.lock` records resolved image-layer inputs, separately from the BSP and
+userspace Cargo locks. Full images include desktop content through bundles;
+there are no separate tracked desktop project directories.
 See [Scarlet Distribution Model](docs/architecture/distro-model.md) and
 [Scarlet Build System](docs/build-system/README.md).
 
@@ -153,7 +157,7 @@ selected explicitly by crate or bundle features. See
 The `cargo make` tasks are convenience wrappers around `cargo scarlet`.
 
 ```bash
-# Build kernel, user libraries, user programs, and images.
+# Build kernel and core user components (image composition is separate).
 cargo make build-riscv64
 cargo make build-aarch64
 
@@ -211,8 +215,10 @@ kernel API.
   [Scarlet Audio System Design](docs/audio/design.md).
 - **Hypervisor**: SHV Type-2 virtualization with Scarlet-native APIs and Linux
   `/dev/kvm` compatibility for RISC-V and AArch64 guests.
-- **Modules**: loadable Scarlet modules (`.lsm`) with per-architecture
-  relocation support. See [Loadable Scarlet Module](docs/modules/lsm.md).
+- **Modules**: static crates selected by `[modules]` and loadable Scarlet
+  modules (`.lsm`) with per-architecture relocation support. See
+  [kernel development](docs/kernel/README.md) and
+  [Loadable Scarlet Module](docs/modules/lsm.md).
 
 ## Development Status
 
@@ -223,7 +229,7 @@ hardware support are being developed together.
 | Area | Status |
 | --- | --- |
 | RISC-V 64 | Primary QEMU development target. Limine boot, kernel tests, userland, VirtIO devices, networking, and desktop-oriented images are maintained here first. |
-| AArch64 QEMU | Active target. Limine/UEFI boot, kernel tests, VirtIO devices, and desktop/full projects are supported. |
+| AArch64 QEMU | Active target. Limine/UEFI boot, kernel tests, VirtIO devices, and full/microvm project recipes; desktop content is selected through bundles. |
 | ABI support | Scarlet native ABI works for the in-tree userland. xv6 RISC-V supports shell and common commands. Linux ABI is partial but already used for selected Buildroot/BusyBox userlands, Wayland GUI apps, and services such as Mozc. |
 | Desktop/UI | SWS, `sws-client`, ScarletUI, desktop shell, taskbar, terminal, settings, IME experiments, and selected Wayland bridge applications are in progress. |
 | Audio/media | `/dev/audioN`, VirtIO sound, Apple MCA/ADMAC playback, SAS, `sasctl`, `mplayer`, and `video-player` are available for current experiments. Audio design is still evolving around realtime and device-routing constraints. |
@@ -258,6 +264,8 @@ shell environment as normal runs. CI currently expects both `test-riscv64` and
 
 Start with the [documentation index](docs/README.md). Useful entry points:
 
+- [Kernel development map](docs/kernel/README.md)
+- [Userspace development map](docs/userspace/README.md)
 - [Build system](docs/build-system/README.md)
 - [Distribution model](docs/architecture/distro-model.md)
 - [Multi-architecture support](docs/architecture/multi-architecture.md)
@@ -266,7 +274,7 @@ Start with the [documentation index](docs/README.md). Useful entry points:
 - [Audio design](docs/audio/design.md)
 - [USB subsystem](docs/usb/README.md)
 - [SWS protocol](docs/graphics/sws-ipc-protocol.md)
-- [ScarletUI design](docs/graphics/scarletui/design.md)
+- [ScarletUI repository](https://github.com/petitstrawberry/scarlet-ui)
 - [Hypervisor status](docs/hypervisor/status.md)
 
 To generate Rust documentation:

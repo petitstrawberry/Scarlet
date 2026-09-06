@@ -9,8 +9,8 @@ Stem Daemon (`stemd`) is a systemd-like service manager for Scarlet OS. It provi
 ```text
 init
  └─> stemd
-      ├── Config parser (TOML: /etc/stemd.d/*.toml)
-      ├── Desktop file loader (/usr/share/applications/*.desktop)
+      ├── Config parser (TOML: /etc/stemd.d/services/*.toml)
+      ├── Desktop file loader (/etc/stemd.d/apps/*.desktop)
       ├── Dependency resolver (topological sort)
       ├── Service launcher (fork/exec with TTY or log pipe attachment)
       ├── IPC thread (Unix socket: /tmp/stemd.sock)
@@ -31,7 +31,11 @@ stemd consists of these modules:
 
 ## Configuration
 
-stemd reads TOML-based configuration from `/etc/stemd.d/` (or `/system/scarlet/etc/stemd.d/` on deployed images). If the directory is absent, it falls back to `/etc/stemd.toml`.
+stemd tries `/etc/stemd.d/services/`, then
+`/system/scarlet/etc/stemd.d/services/`. If directory loading fails, it tries
+`/etc/stemd.d/services.toml` and
+`/system/scarlet/etc/stemd.d/services.toml`, then its built-in defaults.
+The first successfully loaded service configuration is used.
 
 ### Service Definition
 
@@ -39,7 +43,7 @@ stemd reads TOML-based configuration from `/etc/stemd.d/` (or `/system/scarlet/e
 [service.login]
 exec = "/system/scarlet/bin/login"
 depends = []
-after = ["window_server"]
+after = ["sws"]
 tty = "/dev/tty0"
 
 [service.sws]
@@ -89,7 +93,10 @@ multi-boot storage is not implemented yet.
 
 ## .desktop Application Registry
 
-stemd loads XDG Desktop Entry files from `/usr/share/applications/` (or `/system/scarlet/usr/share/applications/`) at startup. Loaded apps are available for launch via the IPC `LAUNCH_OR_FOCUS` command.
+After service startup, stemd loads Desktop Entry files from
+`/etc/stemd.d/apps/` and `/system/scarlet/etc/stemd.d/apps/`.
+Loaded apps are available for launch via the IPC `LAUNCH_OR_FOCUS` command.
+The checked-in desktop bundle supplies these files under its `fs/` tree.
 
 ```text
 [Desktop Entry]
@@ -102,10 +109,10 @@ Type=Application
 ## Service Lifecycle
 
 1. **Config loading**: Parse all `.toml` files from config directory
-2. **App loading**: Parse all `.desktop` files from applications directory
-3. **Dependency resolution**: Topological sort respecting `depends`, `after`, and `order`
-4. **Service startup**: Fork/exec in resolved order; attach TTY if configured
-5. **Readiness wait**: If `ready_notify = true`, wait for `SERVICE_READY` IPC or timeout
+2. **Dependency resolution**: Topological sort respecting `depends`, `after`, and `order`
+3. **Service startup**: Fork/exec in resolved order; attach TTY if configured
+4. **Readiness wait**: If `ready_notify = true`, wait for `SERVICE_READY` IPC or timeout
+5. **App loading**: Parse `.desktop` files from the application directories
 6. **Process reaping**: Main thread calls `waitpid(-1, 0)` continuously
 7. **App tracking**: Running apps/services tracked in global state for focus management
 
@@ -153,4 +160,6 @@ When run from an interactive shell, stemd forks once and the parent exits immedi
 - Log query tool: `user/std-bin/src/logctl.rs`
 - Log wire protocol: `user/lib/log-protocol/src/lib.rs`
 - Init integration: `user/bin/src/init.rs`
-- Default config: `mkfs/initramfs/system/scarlet/etc/stemd.d/`
+- Base services: [bundles/base/fs/system/scarlet/etc/stemd.d/services](../../bundles/base/fs/system/scarlet/etc/stemd.d/services)
+- Desktop services/apps: [bundles/desktop/fs/system/scarlet/etc/stemd.d](../../bundles/desktop/fs/system/scarlet/etc/stemd.d)
+- Build and init handoff: [userspace development](../userspace/README.md)

@@ -1,74 +1,111 @@
-# Limine Boot
+# Limine boot
 
-Scarlet uses the [Limine](https://limine-bootloader.org/) boot protocol via UEFI on both supported architectures. The boot flow is unified: `cargo-scarlet` builds a FAT image containing the Limine UEFI loader, the kernel ELF, and an initramfs, then launches it under QEMU.
+The reference projects boot through UEFI and Limine on RISC-V 64 and AArch64.
+`cargo-scarlet` composes the declared images; the matching
+`cargo-scarlet-plugin-limine` packages the UEFI loader, kernel, configuration,
+and boot inputs. The project runner owns QEMU and firmware configuration.
 
-## Supported Architectures
+This describes the checked-in manifests on 2026-09-06, not every external BSP.
+See the [build-system guide](../build-system/README.md) for composition rules.
 
-| Architecture | Project | Boot image |
-|---|---|---|
-| RISC-V 64-bit | `projects/riscv64-limine-full` | `limine-riscv64-full.img` |
-| RISC-V 64-bit (desktop) | `projects/riscv64-limine-desktop` | `limine-riscv64-desktop.img` |
-| AArch64 | `projects/aarch64-limine-full` | `limine-aarch64-full.img` |
-| AArch64 (desktop) | `projects/aarch64-limine-desktop` | `limine-aarch64-desktop.img` |
-| AArch64 (microvm) | `projects/aarch64-limine-microvm` | `limine-aarch64-microvm.img` |
+## Reference image layouts
 
-All projects use `format = "limine-uefi"` in their `scarlet.toml`.
+All paths below are relative to the selected project's `.scarlet/images/`.
 
-## Boot Protocol
+| Project | Boot payload | Root filesystem and final disk |
+| --- | --- | --- |
+| [RISC-V full](../../projects/riscv64-limine-full/scarlet.toml) | `limine-riscv64-full.img`, a `limine-uefi` FAT image | Separate `rootfs-riscv64-full.ext2` |
+| [AArch64 full](../../projects/aarch64-limine-full/scarlet.toml) | `esp-aarch64-full.img`, a `limine-uefi` FAT image | `gpt` disk `limine-aarch64-full.img` combines the boot payload and `rootfs-aarch64-full.ext2` |
+| [AArch64 microvm](../../projects/aarch64-limine-microvm/scarlet.toml) | `limine-aarch64-microvm.img`, a `limine-uefi` FAT image | Separate `rootfs-aarch64-microvm.ext2` |
 
-Limine negotiates a higher-half boot with the kernel via the Limine boot protocol. On boot:
+There are no separate tracked `*-limine-desktop` projects. Full images select
+their desktop content through bundles. A FAT boot payload and a final GPT
+disk are different artifacts; do not substitute one for the other in a runner.
 
-1. UEFI firmware loads the Limine UEFI bootloader from the FAT image.
-2. Limine reads `limine.conf`, loads the kernel ELF, and applies relocations for higher-half placement.
-3. Limine passes a `BootInfo` structure containing memory map, framebuffer info, HHDM base address, and boot modules (initramfs).
-4. The kernel entry point runs in the higher-half with full HHDM-backed physical memory access.
+The AArch64 full project explicitly declares this dependency order:
 
-On RISC-V, a Device Tree Blob (DTB) is also passed and used to create the `BootInfo`. On AArch64, Limine provides the same information via its protocol.
+```text
+initramfs (newc) ──> boot (Limine FAT / ESP) ──┐
+                                             ├──> disk (GPT)
+rootfs (ext2) ────────────────────────────────┘
+```
 
-## Build and Run
+The microvm project replaces `/system/scarlet/bin/init` with
+`microvm-init`. It does not use the normal full desktop startup sequence.
 
-```bash
-# RISC-V
+## Protocol handoff
+
+1. UEFI firmware loads the architecture's Limine EFI executable.
+2. Limine reads its configuration and loads the kernel ELF and boot modules.
+3. The BSP enters Scarlet's architecture-specific adapter:
+   [RISC-V](../../kernel/src/arch/riscv64/boot/limine.rs) or
+   [AArch64](../../kernel/src/arch/aarch64/boot/limine.rs).
+4. That adapter reads Limine responses and the device tree, then constructs
+   Scarlet's [BootInfo](../../kernel/src/lib.rs). Limine does **not** pass
+   this Rust structure directly. The handoff includes usable memory regions,
+   kernel and initramfs locations, CPU count, and the secondary-CPU release hook.
+5. `start_kernel` establishes Scarlet-owned page tables and changes from
+   bootloader addressing to the kernel's sparse HHDM and heap layout before
+   completing device and task initialization.
+
+Both current adapters require the device-tree handoff. A Limine response or
+an HHDM offset is not permission to access every physical address. The
+[memory map](../architecture/memory-map.md) describes mapped-region membership
+and boot-time versus runtime address helpers.
+
+## Build and run
+
+From the repository root in the configured Nix shell:
+
+```sh
+# Compose images without starting QEMU.
+cargo scarlet image --project projects/riscv64-limine-full --release
+cargo scarlet image --project projects/aarch64-limine-full --release
+
+# Compose and run the selected project.
 cargo make run-riscv64
-
-# AArch64
 cargo make run-aarch64
-
-# AArch64 microvm
 cargo make run-aarch64-microvm
 ```
 
-These commands build the kernel, generate the initramfs and rootfs images, assemble the FAT boot image, and launch QEMU — all in one step.
+Use `cargo make run-debug-riscv64` or `run-debug-aarch64` for debug-profile
+images. `cargo make debug-riscv64` / `debug-aarch64` build debug images and
+invoke the runner's GDB mode. These commands start an emulator; image
+composition alone does not.
 
-For debug builds:
+## Boot payload contents and command line
 
-```bash
-cargo make run-debug-riscv64
-cargo make run-debug-aarch64
-```
+| FAT path | Input |
+| --- | --- |
+| `EFI/BOOT/BOOTRISCV64.EFI` or `EFI/BOOT/BOOTAA64.EFI` | Architecture-specific Limine loader |
+| `EFI/BOOT/limine.conf` | Generated Limine configuration |
+| `boot/kernel` | BSP kernel ELF |
+| `boot/initramfs-riscv64.cpio` or `boot/initramfs-aarch64.cpio` | Architecture-named copy of the declared initramfs input |
 
-For GDB debugging:
+The manifest's image layer uses `to = "/boot/initramfs"` to select the dedicated
+initramfs input. The plugin packages it under the architecture-specific name
+above and points Limine's `module_path` there; the manifest destination is not
+the literal final FAT filename.
 
-```bash
-cargo make debug-riscv64
-```
+The manifest's `[images.boot].cmdline` supplies the kernel command line.
+It is project policy, not a universal SDK default:
 
-## Image Layout
+- RISC-V full: `console=ttyS0 root=/dev/vblk1`.
+- AArch64 full: `console=ttyS0 root=/dev/vblk0p2 rootfstype=ext2`.
+- AArch64 microvm: `console=ttyAMA0`.
 
-The FAT boot image contains:
+The normal [init](../../user/bin/src/init.rs) interprets the root-device
+settings and mounts the persistent root before handing off to `stemd`.
+See [userspace startup](../userspace/README.md#startup-and-services).
 
-| Path | Description |
-|---|---|
-| `EFI/BOOT/BOOTRISCV64.EFI` | Limine UEFI loader (RISC-V) |
-| `EFI/BOOT/BOOTAA64.EFI` | Limine UEFI loader (AArch64) |
-| `EFI/BOOT/limine.conf` | Limine configuration |
-| `boot/kernel` | Higher-half-linked kernel ELF |
-| `boot/initramfs` | Initramfs CPIO archive |
+## Firmware and runner ownership
 
-The kernel command line is configured in `scarlet.toml` under `[images.boot].cmdline` (default: `console=ttyS0 root=/dev/vblk1`).
+The Nix shell supplies firmware paths through `SCARLET_EFI_*` environment
+variables. The project runners
+[RISC-V](../../projects/riscv64-limine-full/tools/run.sh),
+[AArch64 full](../../projects/aarch64-limine-full/tools/run_aarch64.sh), and
+[AArch64 microvm](../../projects/aarch64-limine-microvm/tools/run_aarch64.sh)
+select firmware, drives, device-tree preparation, and emulator options.
 
-## UEFI Firmware
-
-The Nix development shell provides the required UEFI firmware for QEMU via `SCARLET_EFI_*` environment variables. The runner script (`tools/run.sh`) uses these to point QEMU at the correct firmware files.
-
-For non-Nix setups, ensure the appropriate OVMF/EDK2 firmware is available for your target architecture.
+Use the selected runner and manifest together. External boards may need a
+different firmware/boot path; the QEMU recipe is not a hardware-support claim.

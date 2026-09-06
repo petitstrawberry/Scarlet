@@ -1,26 +1,36 @@
-# Scarlet Build System
+# Scarlet build system
 
-## Overview
+Scarlet uses project-rooted `scarlet.toml` manifests and `cargo-scarlet`
+from the separate [scarlet-sdk repository](https://github.com/petitstrawberry/scarlet-sdk).
+The SDK supplies build tooling and image plugins, not the native user libraries
+or the Scarlet Rust compiler.
 
-Scarlet uses a project-rooted build system centered on `scarlet.toml` manifests and the `cargo-scarlet` CLI tool.
+This is the integration guide, reviewed on 2026-09-06. The SDK's own
+[tooling contract](https://github.com/petitstrawberry/scarlet-sdk/blob/main/docs/1.0-contract.md)
+defines its CLI, manifest, lock, and plugin boundary. The package versions,
+manifest schema, Cargo locks, project locks, and kernel ABI are separate things.
 
-Each project is an independent kernel build target with its own `scarlet.toml`. The build tool reads the manifest, generates a module aggregation crate under `<project>/.scarlet/`, invokes Cargo for the kernel build, and composes bootable images from ordered layers.
+## Quick start
 
-## Quick Start
+From the Scarlet root in the Nix development shell:
 
-```bash
-# Build kernel + compose all images
+```sh
+# Kernel/BSP only.
+cargo scarlet build --project projects/riscv64-limine-full
+
+# Build kernel and compose the project's declared images.
 cargo scarlet image --project projects/riscv64-limine-full
 
-# Build and run
+# Compose release images, then launch the project runner.
 cargo scarlet run --project projects/riscv64-limine-full --release
-
-# Equivalent via cargo make
-cargo make build-riscv64
-cargo make run-riscv64
 ```
 
-## Cross C compiler selection
+`cargo make build-riscv64` / `build-aarch64` build kernel and core user
+components; they do not perform the full `image` operation.
+`cargo make run-riscv64` / `run-aarch64` wrap the release `run` commands.
+See [userspace development](../userspace/README.md) for application-only builds.
+
+### Cross C compiler selection
 
 The Nix development shell and Docker image provide unwrapped Clang as
 `TARGET_CC`, the cc-rs fallback for cross compilation. Native C builds keep
@@ -30,257 +40,169 @@ table, including `yt-for-scarlet`'s cross GCC selection.
 
 Applications can select a different cross compiler with `CC_<target>` in
 their own `.cargo/config.toml`; cc-rs checks that before `TARGET_CC`. This
-controls C headers and compilation only, not Rust `std` support. Run
-`cargo make test-cross-cc` in the Nix shell to check both Scarlet targets,
-application overrides, and native compiler selection. After updating the
-flake, reload direnv or re-enter the Nix shell to discard old environment
-variables.
+controls C headers and compilation only, not Rust `std` support. The existing
+`cargo make test-cross-cc` task checks Scarlet targets, application overrides,
+and native compiler selection in the Nix shell. After updating the flake,
+reload direnv or re-enter the shell to discard old environment variables.
 
-## Project Layout
+## Project layout
 
-```
-projects/
-├── riscv64-limine-full/
-│   ├── scarlet.toml              # Build manifest
-│   ├── Cargo.toml                # Auto-managed by cargo-scarlet
-│   ├── build.rs
-│   ├── src/main.rs               # Boot entry point
-│   ├── lds/                      # Linker scripts (BSP-managed)
-│   ├── .cargo/config.toml        # Cargo build config (BSP-managed)
-│   ├── .scarlet/
-│   │   ├── scarlet-modules/      # Generated module aggregation crate
-│   │   │   ├── Cargo.toml
-│   │   │   ├── src/lib.rs
-│   │   │   └── .cargo/config.toml # Cargo config (BSP-managed)
-│   │   ├── images/               # Generated image artifacts
-│   │   ├── staging/              # Temporary staging directories
-│   │   └── cache/                # Git/URL fetch cache
-│   └── scarlet.lock              # Pinned source revisions (auto-generated)
-├── riscv64-limine-desktop/
-├── aarch64-limine-full/
-├── aarch64-limine-desktop/
-├── aarch64-limine-microvm/
-└── aarch64-apple-limine-full/
+The tracked reference projects are
+[RISC-V full](../../projects/riscv64-limine-full/scarlet.toml),
+[AArch64 full](../../projects/aarch64-limine-full/scarlet.toml), and
+[AArch64 microvm](../../projects/aarch64-limine-microvm/scarlet.toml).
+Their layout is:
+
+```text
+projects/<project>/
+  scarlet.toml                  # Project, BSP, modules, images, runner
+  scarlet.lock                  # Resolved image/layer inputs
+  bsp/
+    Cargo.toml, Cargo.lock      # Executable BSP and its Rust dependencies
+    build.rs, src/main.rs       # Link configuration and boot entry
+    lds/                        # BSP linker scripts
+    .cargo/config.toml          # Bare-metal kernel target/build-std
+  tools/                        # Project runner and helpers
+  .scarlet/
+    scarlet-modules/            # Generated kernel/module aggregation crate
+    images/                    # Composed images and stamps
+    staging/                   # Intermediate filesystem trees
+    cache/                     # Git, downloads, child Cargo state and outputs
 ```
 
-## CLI Reference
+There are no separate tracked desktop or Apple Limine projects in this tree.
+External BSP repositories and historical board investigations have their own
+scope. Do not use their paths as checked-in reference project names.
 
-### Subcommands
+## CLI
 
-| Command | Description |
-|---------|-------------|
-| `build` | Build kernel binary and inject kernel symbol table |
-| `check` | Type-check without building |
-| `clippy` | Run clippy on the project |
-| `run` | Build images and launch via `[runner]` command |
-| `image` | Build kernel + compose all images |
-| `update` | Resolve git/URL sources and write `scarlet.lock` |
-| `new --project` | Scaffold a new project |
-| `new --lsm` | Scaffold a new loadable scarlet module (LSM) |
+| Command | Scope |
+| --- | --- |
+| `build --project <path>` | Generate module aggregation, build the BSP, attempt kernel-symbol sidecar injection |
+| `check --project <path>` | Type-check the BSP and its dependencies, not all image layers |
+| `clippy --project <path>` | Run Clippy for the BSP; trailing `-- ...` supplies child arguments |
+| `image --project <path>` | Build the kernel and compose declared images |
+| `run --project <path>` | Compose images and invoke `[runner].command`; trailing arguments go to the runner |
+| `update --project <path>` | Refresh BSP Cargo dependencies and resolve layer sources into `scarlet.lock` |
+| `new --project <name>` | Scaffold an editable project; not a ready-made board port |
+| `new --lsm <name>` | Scaffold a loadable Scarlet module |
+| `build --lsm <path>` | Build a loadable module, instead of a project |
 
-### Common Flags
+Project commands require `--project`; `build` does not default to the current
+directory. The LSM alternatives use `--lsm`, not `--module`.
 
-| Flag | Applies to | Description |
-|------|-----------|-------------|
-| `--project <path>` | most commands | Project directory (defaults to current directory for `build`) |
-| `--release` | build, check, clippy, run, image | Build in release mode |
-| `--target <triple>` | build, check, clippy, run, image | Override kernel target |
-| `--no-build` | image | Skip kernel build, only compose images |
-| `--no-image` | run | Skip image composition |
-| `--kernel-elf <path>` | image | Use a specific kernel ELF instead of building |
-| `--lsm <path>` | build | Build a loadable scarlet module (LSM) instead of a project |
+| Option | Applies to | Meaning |
+| --- | --- | --- |
+| `--release` | build, check, clippy, image, run | Select release profile |
+| `--target <target>` | build, check, clippy, image, run | Override the build target; LSM builds require a target JSON path |
+| `--locked` | project build, image, run | SDK project-lock behavior described below, not all Cargo flags |
+| `--no-build` | image | Skip kernel build; Cargo/script image layers can still execute |
+| `--kernel-elf <path>` | image | Select the kernel input; use with `--no-build` for a prebuilt kernel |
+| `--no-image` | run | Skip image composition and invoke the runner |
+| `--output <dir>` | LSM build | Copy the built module into this directory |
 
-### Usage
+`cargo scarlet --offline` has been removed. The SDK does not implement a
+network sandbox or forward every Cargo option to arbitrary child processes.
 
-```bash
-# Build
-cargo scarlet build --project projects/riscv64-limine-full
-cargo scarlet build --project projects/riscv64-limine-full --release
+## Project manifest (schema 2)
 
-# Check / Clippy
-cargo scarlet check --project projects/riscv64-limine-full
-cargo scarlet clippy --project projects/riscv64-limine-full
-
-# Image composition
-cargo scarlet image --project projects/riscv64-limine-full
-cargo scarlet image --project projects/riscv64-limine-full --no-build
-
-# Run
-cargo scarlet run --project projects/riscv64-limine-full --release
-
-# Resolve and pin sources
-cargo scarlet update --project projects/riscv64-limine-full
-
-# Scaffold
-cargo scarlet new --project my-board --target riscv64gc-unknown-none-elf
-cargo scarlet new --lsm my-module
-```
-
-## scarlet.toml Format
-
-Schema version: **2**
-
-### Full Example
+Current reference projects use `[bsp]`. For example, the BSP/module portion
+of a project under `projects/<name>/` is:
 
 ```toml
 schema_version = 2
 
 [project]
-name = "scarlet-riscv64-limine-full"
+name = "my-scarlet-project"
 
-[kernel]
+[bsp]
+path = "bsp"
 package = "scarlet"
-source = "../../kernel"
-target = "riscv64gc-unknown-none-elf"
-target_json = "../../kernel/targets/riscv64gc-unknown-none-elf.json"
 
-[kernel.features]
-network = true
-user-fpu = true
-user-vector = true
-hypervisor = true
-limine = true
+[bsp.kernel]
+source = { path = "../../kernel" }
+features = { network = true, user-fpu = true, user-vector = true, limine = true, hypervisor = false }
 
 [modules]
 "scarlet-module-prototype" = { path = "../../modules/scarlet-module-prototype", enabled = true }
-
-[images]
-
-[images.initramfs]
-format = "newc"
-output = ".scarlet/images/initramfs-riscv64-full.cpio"
-
-[[images.initramfs.layers]]
-kind = "bundle"
-path = "../../bundles/base/bundle.toml"
-
-[images.rootfs]
-format = "ext2"
-output = ".scarlet/images/rootfs-riscv64-full.ext2"
-
-[[images.rootfs.layers]]
-kind = "bundle"
-path = "../../bundles/full/bundle.toml"
-
-[images.boot]
-format = "limine-uefi"
-output = ".scarlet/images/limine-riscv64-full.img"
-cmdline = "console=ttyS0 root=/dev/vblk1"
-deps = ["initramfs"]
-
-[[images.boot.layers]]
-kind = "image"
-source = "initramfs"
-to = "/boot/initramfs"
-
-[runner]
-command = "tools/run.sh"
 ```
 
-### Top-Level Sections
+`[bsp].path` is relative to the project. The BSP's `.cargo/config.toml`
+must define `[build].target`; the reference BSPs point to JSON files in
+`kernel/targets/`. Kernel source paths remain relative to the project
+manifest, not to `bsp/`. Kernel features can be a list of enabled names or
+a table of boolean states. Explicit false states are checked against Cargo
+feature unification.
 
-| Section | Required | Purpose |
-|---------|----------|---------|
-| `[project]` | yes | Project name |
-| `[kernel]` | yes | Kernel crate source, target, features |
-| `[modules]` | no | Static module crates (linked into kernel via `force_link`) |
-| `[images]` | no | Image composition (initramfs, rootfs, boot) |
-| `[runner]` | no | Run command (script or binary) |
+The older `[kernel]` form remains accepted, with `package`, `source`,
+`target`, `target_json`, and a boolean `features` table. It uses the project
+root as the executable BSP root. It is distinct from the reference projects'
+current `bsp/` layout.
 
-### Kernel Section
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `package` | string | Kernel crate name in Cargo |
-| `source` | string or table | Path or git source for the kernel crate |
-| `target` | string | Rust target triple (e.g., `riscv64gc-unknown-none-elf`) |
-| `target_json` | string | Path to custom target JSON file |
-| `features` | table | Feature flags (key = name, value = bool) |
-
-#### Kernel Source
-
-The `source` field supports path or git references:
+Kernel sources accept paths or Git tables, for example:
 
 ```toml
-# Path source (local development)
-source = "../../kernel"
-
-# Git source
-source = { git = "https://github.com/petitstrawberry/scarlet-kernel", branch = "main" }
-source = { git = "https://github.com/petitstrawberry/scarlet-kernel", tag = "v0.17.0" }
-source = { git = "https://github.com/petitstrawberry/scarlet-kernel", rev = "abc123def456" }
+[bsp.kernel]
+source = { git = "https://github.com/petitstrawberry/Scarlet", branch = "dev" }
+features = ["network", "limine"]
 ```
 
-When using a git source, cargo-scarlet resolves the branch/tag to a commit revision and caches the checkout under `<project>/.scarlet/cache/git/`. The resolved revision is recorded in `scarlet.lock`.
+Kernel and static-module Git dependencies are rendered as Cargo dependencies
+in `scarlet-modules`; the BSP's `Cargo.lock` resolves them. Do not confuse
+that with SDK-managed Git image-layer checkouts and `scarlet.lock`.
 
-### Modules Section (Static)
+### Static modules versus LSMs
 
-Modules listed in `[modules]` are statically linked into the kernel via the generated `scarlet-modules` crate. Each enabled module's `force_link()` is called at boot. These are regular Cargo crates — not loadable scarlet modules (LSMs).
+Enabled `[modules]` entries are ordinary Rust library crates linked through
+the generated `scarlet-modules` crate. Each exposes `force_link()`; the BSP
+calls `scarlet_modules::force_link()` to retain module initialization.
 
-Module entries support Cargo-like dependency sources:
+Entries accept `path`, Cargo-like `git` with `rev`/`branch`/`tag`, or
+`version`/`registry`, plus `features`, `default-features`, and `enabled`.
+Disabled entries are omitted from aggregation. These are not `.lsm` files
+and do not require an LSM scaffold. See the
+[static prototype](../../modules/scarlet-module-prototype/src/lib.rs) and
+[loadable module guide](../modules/lsm.md).
+
+### Local overrides
+
+`scarlet.local.toml` merges over `scarlet.toml` before typed parsing:
 
 ```toml
-[modules]
-# Path dependency
-"my-module" = { path = "../../modules/my-module", enabled = true }
-
-# Git dependency
-"other-module" = { git = "https://github.com/...", branch = "main", enabled = true }
-"pinned-module" = { git = "https://github.com/...", rev = "abc123", enabled = true }
-
-# Registry dependency
-"published-module" = { version = "0.1.0", enabled = true }
-
-# With features
-"mod-with-features" = { path = "../mod", features = ["foo"], enabled = true }
-
-# Disabled (included but not linked)
-"optional-mod" = { path = "../opt", enabled = false }
+[bsp.kernel.features]
+hypervisor = true
 ```
 
-### Images Section
+Tables merge recursively; arrays append; other values are replaced by the local
+value, including a change of representation. This is not array deletion or a
+second lock file. Keep local overrides outside version control.
 
-Images are composed from ordered layers. Each image has a `format` and `output` path:
+## Images and ordered layers
 
-| Format | Description |
-|--------|-------------|
-| `newc` | CPIO newc format (initramfs) |
-| `ext2` | ext2 filesystem (rootfs) |
-| `limine-uefi` | Limine UEFI boot image (delegated to plugin) |
+Images use `[images.<name>]` with `format`, `output`, optional `deps`,
+and ordered `layers`. A consuming image must declare its dependencies;
+cycles and unknown dependency names are errors.
 
-Images can declare:
-- `deps` — list of other image names that must be built first (topological sort)
-- `layers` — ordered filesystem/image composition operations
-- `cmdline` — kernel command line (for boot images)
+| Format | Operation |
+| --- | --- |
+| `newc` | Compose a CPIO newc filesystem archive |
+| `ext2` | Compose an ext2 filesystem image |
+| `gpt-ext2` | Compose a single-ext2-partition GPT image |
+| `gpt` | Combine declared partition payload images |
+| `limine-uefi` | Invoke the matching Limine image plugin |
 
-### Runner Section
+Full boot/rootfs recipes are in the reference manifests, not an implicit global
+SDK image. In particular, AArch64 full composes a FAT ESP and ext2 rootfs into
+one GPT disk; RISC-V full uses separate boot/rootfs images. See
+[Limine boot](../boot/limine.md).
 
-```toml
-[runner]
-command = "tools/run.sh"
-```
+Layers are applied in declaration order. Local paths are relative to the file
+declaring the layer. Path templates include `{arch}`, `{target_triple}`, and
+`{project}`. Later filesystem layers may replace earlier files.
 
-The runner command is executed from the project directory. When `--release` is passed, the environment variable `SCARLET_RELEASE=1` is set.
+### Bundle
 
-### scarlet.local.toml (Override)
-
-A `scarlet.local.toml` file in the project directory is automatically merged on top of `scarlet.toml`. This allows per-developer overrides without modifying the tracked manifest:
-
-```toml
-# scarlet.local.toml
-[kernel]
-source = "../../my-fork/kernel"
-```
-
-The merge is deep: tables are merged recursively, arrays are appended. This file should be `.gitignore`d.
-
-## Layers
-
-Layers are applied in declaration order. Later layers can overwrite files created by earlier layers.
-
-### Bundle (`kind = "bundle"`)
-
-Expand another TOML file's `[[layers]]` at this exact position:
+A local bundle expands its `[[layers]]` at the point of declaration:
 
 ```toml
 [[images.rootfs.layers]]
@@ -288,9 +210,12 @@ kind = "bundle"
 path = "../../bundles/full/bundle.toml"
 ```
 
-### Copy (`kind = "copy"`)
+Git bundles use `source = { git = "...", rev = "<commit>" }`, optional
+`subdir`, and `bundle` (default `bundle.toml`). Nested bundle paths are
+relative to each declaring bundle. Pin a Git bundle revision when selecting
+release inputs; the expanded package lock does not itself lock the bundle.
 
-Copy files or directories into the image:
+### Copy and archive
 
 ```toml
 [[images.rootfs.layers]]
@@ -299,292 +224,149 @@ source = "rootfs"
 to = "/"
 ```
 
-### Cargo (`kind = "cargo"`)
+Copy sources can be local files/directories or URLs. Downloaded files are cached
+and checked against recorded hashes where available. `template = true` enables
+the existing copy-template processing.
 
-Build a binary from a Cargo package and install it:
+An `archive` layer requires `source`, `to`, `format` (`tar`, `tar-gz`,
+`tar-zst`, or `tar-xz`), and `sha256`, with optional `strip_components`.
+The hash can be a single value or an architecture-keyed table. Checksums are
+verified before extraction; unsupported/missing architecture hashes fail.
+The SDK tooling contract records the supported extraction inputs and limits.
 
-```toml
-[[images.initramfs.layers]]
-kind = "cargo"
-source = "../../user/bin"
-package = "user-bin"
-bin = "sh"
-to = "/system/scarlet/bin/sh"
-```
+### Cargo
 
-For a package below the root of a Git checkout, set a relative `subdir`:
-
-```toml
-[[layers]]
-kind = "cargo"
-source = { git = "https://github.com/petitstrawberry/scarlet-ui" }
-subdir = "examples/widget-factory"
-package = "scarlet-ui-widget-factory"
-bin = "scarlet-ui-widget-factory"
-to = "/system/scarlet/bin/widget-factory"
-```
-
-Cargo layers can also control Cargo feature selection for that one installed
-binary:
+A bundle can build and install a normal std application:
 
 ```toml
 [[layers]]
 kind = "cargo"
-source = "../../user/video_player"
-package = "video_player"
-bin = "video-player"
-default-features = false
-features = ["av1-stateful-hw", "h264-stateful-hw", "mp4-aac"]
-to = "/system/scarlet/bin/video-player"
+source = "../../user/std-bin"
+package = "scarlet-std-bin"
+bin = "hello"
+to = "/system/scarlet/bin/hello"
 ```
 
-| Field | Description |
-|-------|-------------|
-| `kind` | Must be `"cargo"` |
-| `source` | Path or git source of the Cargo workspace |
-| `subdir` | Optional package/workspace directory relative to the source root |
-| `package` | Cargo package name |
-| `bin` | Binary target name |
-| `default-features` | Optional Cargo default feature switch |
-| `features` | Optional Cargo feature list |
-| `replace` | Replace earlier cargo layers with the same `to` path |
-| `to` | Install path inside the image |
+For external applications, `source` can be a Git table and `subdir` selects
+a package below the checkout root. For example, ScarletUI's widget factory uses
+`subdir = "examples/widget-factory"`, `package = "scarlet-ui-widget-factory"`,
+and `bin = "scarlet-ui-widget-factory"`.
 
-### Script (`kind = "script"`)
+`features` and `default-features` control this layer's Cargo build.
+`replace = true` removes earlier **Cargo** layers with the same `to`;
+it does not remove unrelated layer kinds. Keep optional-application feature
+recipes with their bundles, such as
+[video-player](../../user/video_player/README.md).
 
-Run a script and install its output:
+### Script
 
-```toml
-[[images.rootfs.layers]]
-kind = "script"
-source = "tools/fetch_skk_dictionary.sh"
-output = ".scarlet/cache/skk/SKK-JISYO.L"
-to = "/system/scarlet/share/skk/SKK-JISYO.L"
-```
+A script layer invokes `sh <source> <output-path>` from the project directory,
+then installs the output at `to`. `output` may name a reusable output path;
+its recorded hash does not track every external input a script could read.
+Use trusted scripts only: they execute with host access.
 
-### Image (`kind = "image"`)
-
-Reference another image's output as input:
+### Image
 
 ```toml
+[images.boot]
+format = "limine-uefi"
+output = ".scarlet/images/boot.img"
+deps = ["initramfs"]
+
 [[images.boot.layers]]
 kind = "image"
 source = "initramfs"
 to = "/boot/initramfs"
 ```
 
-### Template Variables
+This references another declared image's output; the example assumes an
+`images.initramfs` section. GPT partitions similarly select named image
+payloads with explicit `deps`; see the AArch64 full manifest.
 
-Paths in `source`, `path`, `output`, and `to` support template expansion:
+## Locks, caches, and network access
 
-| Variable | Expands to |
-|----------|-----------|
-| `{target_triple}` | Kernel target triple (e.g., `riscv64gc-unknown-none-elf`) |
-| `{arch}` | Architecture shorthand (e.g., `riscv64`, `aarch64`) |
+`scarlet.lock` records resolved layer identities, package Git revisions, and
+input/output hashes under image sections. `update` and image composition write
+it; commit the selected distributable lock at release staging.
 
-### URL Sources
+- Matching Git Cargo layer entries reuse their recorded revisions. Missing or
+  changed entries can be resolved from the manifest.
+- Local source edits remain development inputs; a project lock does not hash
+  and freeze an entire local Cargo source tree.
+- A BSP `Cargo.lock` and each userspace Cargo workspace lock separately govern
+  transitive Rust dependencies.
+- Incremental image stamps/cache hits are not proof that arbitrary script or
+  host-tool inputs are reproducible.
 
-Copy layer sources can reference remote URLs. Fetched files are cached under `<project>/.scarlet/cache/files/` and verified against the lock file hash:
+`--locked` retains the SDK's project-lock semantics: archive-layer inputs
+must match the existing lock, and the explicit BSP `cargo update` before
+build is skipped. It does **not** reject every possible manifest change,
+make image composition read-only, or propagate Cargo's `--locked` everywhere.
+Missing/mismatched Git package entries may still resolve; composition still
+saves its resulting lock.
 
-```toml
-[[images.initramfs.layers]]
-kind = "copy"
-source = "https://example.com/firmware.bin"
-to = "/lib/firmware/example.bin"
+Build, check, image, and run can cause network access through Git bundle/layer
+resolution, Cargo, scripts, plugins, or runners. `update` is not the only
+network-using command. The former partial `--offline` restriction has been
+removed; caches and `--locked` are not network isolation.
+
+SDK-managed caches are project-local: `.scarlet/cache/git`, `files`,
+`target` (isolated by package source root), and `cargo-home`. Child Cargo uses
+that project-local `CARGO_HOME`, not the caller's normal Cargo cache. Retaining
+caches does not require an `--offline` mode.
+
+## Plugin and execution hooks
+
+`limine-uefi` invokes `cargo-scarlet-plugin-limine` through `PATH`.
+Other unknown formats are errors; the implementation does not discover
+arbitrary plugins by a format-name prefix. Install the CLI and plugin from a
+matching SDK revision, using the SDK README instructions.
+
+The CLI writes one JSON request to plugin stdin with `project_dir`,
+`section_name`, `format`, `arch`, `kernel_elf`, `initramfs`, `output`,
+and `section`. The section supplies `cmdline`, optional `dtb`, and resolved
+`packages` containing local source and absolute FAT destination paths.
+The plugin reports success/failure by exit status; there is no structured
+stdout result or protocol-version negotiation.
+
+`[hooks.post-image]` accepts `command` and optional `args`. It runs after
+successful image composition and lock saving, from the project directory,
+with `SCARLET_PROJECT_DIR`, `SCARLET_TARGET_TRIPLE`, and `SCARLET_PROFILE`
+(`debug` or `release`). A failing hook fails the operation; it does not
+roll back already written images or locks.
+
+`[runner].command` also runs from the project directory. Release runs set
+`SCARLET_RELEASE=1`, and trailing CLI arguments go to the runner. The runner
+owns emulator/device configuration. Neither hooks nor runners are sandboxed.
+
+## Generated files and scaffolding
+
+Aggregation `Cargo.toml` / `src/lib.rs`, staging trees, and images under
+`.scarlet/` are SDK-owned artifacts. Do not manually patch generated
+dependencies; change source manifests instead. Aggregation
+`.cargo/config.toml` is initialized only when missing, so existing
+project-specific configuration is retained.
+
+```sh
+cargo scarlet new --project my-board --target riscv64gc-unknown-none-elf --kernel-path kernel
+cargo scarlet new --lsm my-module --kernel-path kernel
 ```
 
-## Bundles (Layers)
+Run these from a checkout with the indicated kernel path, using new destination
+names. The current project scaffold uses the legacy project-root BSP layout:
+`Cargo.toml`, `build.rs`, `src/main.rs`, `lds/`, `.cargo/config.toml`,
+`scarlet.toml`, and `.scarlet/scarlet-modules/`. It does not clone a reference
+board or create the modern reference projects' `bsp/` subdirectory.
 
-Bundles are external TOML files containing ordered `[[layers]]` definitions. A `kind = "bundle"` layer expands a bundle in place:
+After scaffolding, configure actual target JSON paths (including the `.json`
+suffix), linker scripts, build-std, boot entry, images, and runner. The emitted
+boot entry is a placeholder. For a current Limine project, use the tracked
+reference BSPs as the implementation guide. LSM scaffolding instead emits
+`module.toml`, `src/lib.rs`, and its Cargo/build configuration.
 
-```toml
-# bundles/base/bundle.toml
-[[layers]]
-kind = "cargo"
-source = "../../user/bin"
-package = "user-bin"
-bin = "sh"
-to = "/system/scarlet/bin/sh"
-```
+## See also
 
-```toml
-# In scarlet.toml
-[[images.initramfs.layers]]
-kind = "bundle"
-path = "../../bundles/base/bundle.toml"
-```
-
-All relative paths in a bundle are resolved from the bundle file's directory. Layers are applied in declaration order; later entries override earlier ones on conflict.
-
-## Lock File (`scarlet.lock`)
-
-The lock file pins exact source revisions for reproducible builds. It is auto-generated and should be committed to version control.
-
-### Behavior
-
-| Command | Network access | Reads lock | Writes lock |
-|---------|---------------|------------|-------------|
-| `build` | no | no | no |
-| `image` | no | yes | yes (updates hash/git revs from lock) |
-| `run` | no | yes | yes (via image) |
-| `update` | **yes** | yes | **yes** |
-
-- `update` is the only command that performs network access (git ls-remote, URL fetches)
-- `image` reads the lock for cached git revisions but never resolves new ones
-- If no lock exists, `image` resolves git sources from the manifest directly
-
-### Format
-
-```toml
-# Generated by cargo-scarlet — do not edit
-
-[sections.initramfs]
-hash = "sha256:abc123..."
-
-[[sections.initramfs.layers]]
-kind = "copy"
-source = "https://example.com/firmware.bin"
-hash = "sha256:def456..."
-
-[[sections.initramfs.layers]]
-kind = "cargo"
-git = "https://github.com/example/module"
-resolved_rev = "abc123def456"
-hash = "sha256:789..."
-
-[sections.boot]
-hash = "sha256:fed789..."
-```
-
-### Verification Rules
-
-| Source type | Verification |
-|------------|-------------|
-| Local path | No hash verification (content changes during development) |
-| Git (pinned rev) | No hash verification (rev is content-addressed) |
-| URL fetch | Hash verified against lock; error on mismatch |
-
-## Plugin System
-
-Image formats that require external tools are handled via plugins. The core build tool resolves `format` to a plugin name and communicates via stdin JSON.
-
-### Protocol
-
-1. `cargo-scarlet` resolves `format` to plugin binary name: `cargo-scarlet-plugin-{format-prefix}`
-2. Core builds a `PluginRequest` JSON and writes it to the plugin's stdin
-3. Plugin reads the request, performs its work, and exits with code 0 on success
-
-### PluginRequest Schema
-
-```json
-{
-  "project_dir": "/path/to/project",
-  "section_name": "boot",
-  "format": "limine-uefi",
-  "arch": "riscv64",
-  "kernel_elf": "/path/to/kernel/elf",
-  "initramfs": "/path/to/initramfs.cpio",
-  "output": "/path/to/output.img",
-  "section": {
-    "cmdline": "console=ttyS0",
-    "packages": [...]
-  }
-}
-```
-
-The `section` field is a plugin-facing compatibility view containing the data a plugin needs after ordered layers have been resolved.
-
-### Plugin Discovery
-
-Plugins are discovered via `PATH`. Install them with:
-
-```bash
-cargo install --path cargo-scarlet-plugin-limine
-```
-
-### Available Plugins
-
-| Plugin | Format | Description |
-|--------|--------|-------------|
-| `cargo-scarlet-plugin-limine` | `limine-uefi` | Limine UEFI boot image generation |
-
-## Generated File Structure
-
-`cargo-scarlet` generates and manages files under `<project>/.scarlet/`:
-
-```
-.scarlet/
-├── scarlet-modules/           # Module aggregation crate (auto-generated — do not edit)
-│   ├── Cargo.toml             # Generated with kernel + module dependencies
-│   ├── src/lib.rs             # Re-exports kernel + calls module force_link()
-│   └── .cargo/config.toml     # Auto-generated template (do not edit)
-├── images/                    # Generated image artifacts
-├── staging/                   # Temporary staging for image composition
-└── cache/
-    ├── git/                   # Git checkout cache
-    └── files/                 # URL fetch cache
-```
-
-All files under `.scarlet/` are auto-generated by cargo-scarlet. Do not edit them manually.
-
-## Build Flow
-
-```
-cargo scarlet image --project projects/riscv64-limine-full
-     │
-     ├─ Read scarlet.toml + scarlet.local.toml
-     ├─ Resolve ordered layers and expand bundle layers in place
-     ├─ Generate .scarlet/scarlet-modules/
-     │   ├─ Cargo.toml (kernel + module deps with correct source specs)
-     │   ├─ src/lib.rs (force_link for enabled modules)
-     │   └─ .cargo/config.toml (auto-generated template)
-     ├─ cargo build --target <target_json>
-     ├─ Inject .ksym section into kernel ELF
-     ├─ Resolve git sources (from lock or fresh resolve)
-     ├─ Topological sort images by deps
-     └─ For each image:
-         ├─ newc/ext2: apply ordered layers to staging → generate image
-         └─ limine-uefi: run_plugin("limine", request) → generate image
-```
-
-## Scaffolding
-
-### New Project
-
-```bash
-cargo scarlet new --project my-board --target riscv64gc-unknown-none-elf
-```
-
-Creates:
-- `my-board/Cargo.toml`, `build.rs`, `src/main.rs`
-- `my-board/scarlet.toml` (with kernel source pointing to `../../kernel`)
-- `my-board/.cargo/config.toml` (with target, build-std)
-- `my-board/.scarlet/scarlet-modules/` (initial generated crate)
-- `my-board/lds/` (empty, for linker scripts)
-
-With git source:
-```bash
-cargo scarlet new --project my-board --target riscv64gc-unknown-none-elf --kernel-rev v0.17.0
-```
-
-With explicit kernel path:
-```bash
-cargo scarlet new --project my-board --target riscv64gc-unknown-none-elf --kernel-path /path/to/kernel
-```
-
-Post-scaffold, the user must:
-1. Edit `.cargo/config.toml` — set `build.target`, `unstable.build-std`, `runner`, and `rustflags`
-2. Add a linker script to `lds/`
-3. Implement the boot entry in `src/main.rs`
-
-### New Loadable Scarlet Module (LSM)
-
-```bash
-cargo scarlet new --lsm my-module
-```
-
-Creates a loadable scarlet module with `Cargo.toml`, `module.toml`, `build.rs`, `src/lib.rs`, and `.cargo/config.toml`.
-
-## See Also
-
-- [Distribution Model](../architecture/distro-model.md)
+- [Kernel development](../kernel/README.md)
+- [Userspace development](../userspace/README.md)
+- [Distribution model](../architecture/distro-model.md)
+- [LSM](../modules/lsm.md)

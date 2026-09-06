@@ -1,6 +1,6 @@
 pub const MAX_NUM_CPUS: usize = 16;
 
-pub const STACK_SIZE: usize = 0x80000; // 128KiB
+pub const STACK_SIZE: usize = 0x80000; // 512KiB
 pub const PAGE_SIZE: usize = 0x1000; // 4KB
 
 pub const KERNEL_VM_STACK_SIZE: usize = 0x10000; // 64KiB
@@ -19,9 +19,9 @@ pub const KERNEL_KSTACK_SLOTS: usize = 256;
 
 // Scarlet-owned HHDM base address.
 //
-// After boot, Scarlet builds its own page tables and direct-maps all physical
-// memory starting at this fixed virtual address, fully decoupled from whatever
-// offset the bootloader (Limine) originally chose.
+// After boot, Scarlet builds its own page tables and direct-maps the selected
+// sparse physical regions at this fixed offset, decoupled from the bootloader's
+// (Limine's) original offset. Holes in the region set are not mapped.
 //
 // Layout (upper canonical half):
 //   0xffff_8000_0000_0000  SCARLET_HHDM_BASE   (direct map)

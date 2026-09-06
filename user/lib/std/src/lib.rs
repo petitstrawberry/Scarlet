@@ -1,14 +1,18 @@
-//! # Scarlet Standard Library
+//! # Scarlet Legacy Standard-Library Facade
 //!
-//! This no_std library provides the core functionality for user-space programs
-//! running on the Scarlet.
+//! `scarlet-std` is the `no_std` compatibility facade used by legacy Scarlet
+//! programs, commonly imported as `extern crate scarlet_std as std`.
+//! It is not the Rust standard library supplied by `scarlet-rust-toolchain`
+//! for the normal `riscv64gc-unknown-scarlet` and `aarch64-unknown-scarlet` targets.
+//! New std-based applications use Rust `std` and, when needed, `scarlet-os`.
+//! See the repository's `docs/userspace/README.md` for the two build paths.
 //!
 //! ## Features
 //!
 //! - Re-exports of core and alloc library components for use in a no_std environment
-//! - System call interface for interacting with the Scarlet kernel
-//! - Architecture-specific functionality
-//! - Custom memory allocator implementation
+//! - Kernel interfaces shared with `scarlet-abi`, `scarlet-sys`, and `scarlet-os`
+//! - Architecture-specific runtime functionality through `scarlet-rt`
+//! - Legacy startup, panic, and allocator integration through the `legacy-no-std` runtime
 //!
 //! ## Handle Model (RawHandle / Handle / Capabilities)
 //!

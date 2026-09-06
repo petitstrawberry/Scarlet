@@ -1,9 +1,11 @@
 //! # Scarlet Kernel
 //!
-//! Scarlet is an operating system kernel written in Rust that implements a transparent ABI
-//! conversion layer for executing binaries across different operating systems and architectures.
-//! The kernel provides a universal container runtime environment with strong isolation capabilities,
-//! comprehensive filesystem support, dynamic linking, and modern graphics capabilities.
+//! Scarlet is a `no_std` Rust kernel for RISC-V 64 and AArch64. Its ABI modules
+//! execute supported Scarlet-native, Linux, and xv6 programs over shared kernel
+//! objects. ABI compatibility is not CPU instruction translation: a program must
+//! target the running architecture or use a separately configured userspace runtime.
+//! Filesystems, namespaces, devices, and GPU transport support the reference
+//! distribution; individual operations and hardware configurations have their own limits.
 //!
 //! ## Multi-ABI Execution System
 //!
@@ -12,15 +14,16 @@
 //!
 //! ### ABI Module Architecture
 //!
-//! - **Modular ABI Implementation**: Each ABI module implements its own complete syscall interface
+//! - **Modular ABI Implementation**: Each ABI module implements its supported syscall interface
 //!   using shared kernel APIs, rather than translating between syscalls
 //! - **Binary Detection**: Automatic identification of binary format and target ABI through
 //!   ELF header analysis and magic number detection
 //! - **Shared Kernel Resources**: All ABIs operate on common kernel objects (VFS, memory, devices)
 //!   ensuring consistent behavior and efficient resource utilization
-//! - **Native Implementation**: Each ABI provides full syscall implementation using underlying
-//!   kernel abstractions, enabling complete OS compatibility
-//! - **Dynamic Linking**: Native dynamic linker support for shared libraries and position-independent executables
+//! - **Native Implementation**: ABI-specific handlers use underlying kernel
+//!   abstractions; unsupported calls remain errors rather than a promise of full OS compatibility
+//! - **Dynamic Linking**: ELF/interpreter loading supports selected dynamic workloads;
+//!   this is separate from an independently loadable Rust library ABI
 //!
 //! ### Supported ABIs
 //!
@@ -31,16 +34,18 @@
 //!   - Container-native filesystem operations
 //!   - Dynamic linking support
 //!
-//! - **Linux Compatibility ABI** *(in development)*: Full POSIX syscall implementation
-//! - **xv6 Compatibility ABI** *(in development)*: Educational OS syscall implementation
+//! - **Linux Compatibility ABI**: Partial RISC-V/AArch64 syscall support used by
+//!   selected Linux userlands, services, and VMMs; see `docs/abi/linux/status.md`
+//! - **xv6 Compatibility ABI**: RISC-V educational OS syscall support
 //!
 //! ## Container Runtime Environment
 //!
-//! Scarlet provides enterprise-grade containerization features:
+//! Scarlet provides namespace and resource primitives for container-style use.
+//! Their presence does not certify isolation against arbitrary untrusted workloads:
 //!
 //! ### Filesystem Isolation
 //!
-//! - **Mount Namespace Isolation**: Per-task filesystem namespaces enabling complete isolation
+//! - **Mount Namespace Isolation**: Per-task filesystem views with explicit sharing rules
 //! - **Bind Mount Operations**: Selective resource sharing between containers
 //! - **Overlay Filesystem**: Copy-on-write semantics with whiteout support for efficient layering
 //! - **Device File Management**: Controlled access to hardware through DevFS integration
@@ -58,28 +63,30 @@
 //!
 //! ### Core Architecture
 //!
-//! - **VfsEntry**: Path hierarchy cache providing fast O(1) path resolution with automatic cleanup
+//! - **VfsEntry**: Cached path hierarchy used during component-by-component resolution
 //! - **VfsNode**: Abstract file entity interface with metadata access and clean downcasting
 //! - **FileSystemOperations**: Unified driver API consolidating all filesystem operations
-//! - **Mount Tree Management**: Hierarchical mount point management with O(log n) resolution
+//! - **Mount Tree Management**: Hierarchical mount points and per-task namespace views
 //!
 //! ### Filesystem Drivers
 //!
 //! - **TmpFS**: High-performance memory-based filesystem with configurable size limits
 //! - **CpioFS**: Read-only CPIO archive filesystem optimized for initramfs and embedded data
-//! - **ext2**: Full ext2 filesystem implementation with complete read/write support for persistent storage
-//! - **FAT32**: Complete FAT32 filesystem implementation with directory and file operations
+//! - **ext2**: Persistent-storage driver with directory, read, and write operations
+//! - **FAT32**: FAT filesystem driver with directory and file operations
 //! - **OverlayFS**: Advanced union filesystem with copy-up semantics and whiteout support
 //! - **DevFS**: Device file system providing controlled hardware access
 //!
-//! - **Memory Safety**: Prevention of use-after-free, double-free, and data races at compile time:
+//! - **Memory Safety**: Safe Rust helps prevent ownership and aliasing errors:
 //!   - The type system ensures resources are not used after being freed
 //!   - Mutable references are exclusive, preventing data races
 //!   - Lifetimes ensure references do not outlive the data they point to
+//!   - Unsafe code, DMA, mappings, and asynchronous device completion still need
+//!     explicit invariants; the type system alone does not validate hardware lifetime
 //!
 //! - **Trait-based Abstractions**: Common interfaces for device drivers and subsystems enabling modularity:
 //!   - The `BlockDevice` trait defines operations for block-based storage
-//!   - The `SerialDevice` trait provides a common interface for UART and console devices
+//!   - The `CharDevice` trait provides a common interface for character devices
 //!   - The `FileSystem` trait provides unified filesystem operations for VFS v2 integration
 //!
 //! ## Boot Process
@@ -90,37 +97,45 @@
 //! ### Architecture-Specific Boot Phase
 //!
 //! 1. **Low-level Initialization**: CPU feature detection, trap vector setup
-//! 2. **Hardware Discovery**: Parse firmware-provided hardware description (FDT/UEFI/ACPI)
+//! 2. **Hardware Discovery**: Read Limine responses and the supplied device tree
 //! 3. **Memory Layout**: Determine usable memory areas and relocate critical data
 //! 4. **BootInfo Creation**: Consolidate boot parameters into unified structure
 //! 5. **Kernel Handoff**: Call `start_kernel()` with complete BootInfo
 //!
 //! ### Unified Kernel Initialization
 //!
-//! 6. **Early Memory Setup**: Heap allocator initialization using BootInfo memory areas
+//! 6. **Early Memory Setup**: Initialize all PMM RAM regions, switch to Scarlet's
+//!    boot page table, fix HHDM references, and initialize the heap
 //! 7. **Early Subsystems**: Critical kernel subsystem initialization via early initcalls
 //! 8. **Driver Framework**: Device driver registration and basic driver initcalls
 //! 9. **Virtual Memory**: Kernel virtual memory management and address space setup
-//! 10. **Device Discovery**: Hardware enumeration from BootInfo device source
-//! 11. **Graphics Subsystem**: Framebuffer and graphics device initialization
-//! 12. **Interrupt Infrastructure**: Interrupt controller setup and handler registration
-//! 13. **Timer Subsystem**: Kernel timer initialization for scheduling and timekeeping
+//! 10. **Initial Task Reservation**: Register init before driver workers can consume PID 1
+//! 11. **Device Discovery**: Discover critical controllers, initialize interrupts,
+//!     then enumerate remaining platform/PCI devices and graphics
+//! 12. **Remaining Initcalls**: Run the kernel test entry when selected, complete
+//!     normal initcalls, and enable CPU interrupt reception
+//! 13. **Timer Subsystem**: Initialize the timer and available wall-clock source
 //! 14. **Virtual File System**: VFS initialization and root filesystem mounting
 //! 15. **Initial Filesystem**: Initramfs processing if provided in BootInfo
-//! 16. **Initial Process**: Create and load first userspace task (/system/scarlet/bin/init)
-//! 17. **Scheduler Activation**: Begin task scheduling and enter normal operation
+//! 16. **Initial Process**: Load `/system/scarlet/bin/init` into the reserved task,
+//!     with network/hypervisor initialization when configured
+//! 17. **Scheduler Activation**: Enqueue init, claim the boot CPU's first task,
+//!     release secondary CPUs through the boot hook, and enter the selected task
 //!
 //! ### BootInfo Integration Benefits
 //!
-//! - **Architecture Abstraction**: Unified interface across RISC-V, ARM, x86 platforms
+//! - **Architecture Abstraction**: Shared boot handoff for implemented RISC-V and AArch64 ports
 //! - **Modular Design**: Clean separation between arch-specific and generic initialization
-//! - **Memory Safety**: Structured memory area management prevents overlaps and corruption
-//! - **Extensibility**: Easy addition of new boot parameters without breaking existing code
+//! - **Memory Safety**: Structured memory regions make bounds and ownership
+//!   explicit; boot adapters must still validate the firmware information
+//! - **Extensibility**: Boot parameters have one shared handoff type; changes
+//!   require corresponding updates to its producers and consumers
 //! - **Debugging**: Centralized boot information for diagnostics and troubleshooting
 //!
-//! Each stage validates successful completion before proceeding, with comprehensive
-//! logging available through the early console interface. The BootInfo structure
-//! ensures all necessary information is available throughout the initialization process.
+//! Early console logging records progress. Some optional-device failures are
+//! logged and skipped, while required initialization can panic; boot is not a
+//! transactional operation. BootInfo carries the memory and device information
+//! needed by the selected boot path throughout initialization.
 //!
 //! ## System Integration
 //!
@@ -146,12 +161,16 @@
 //!
 //! ## Architecture Support
 //!
-//! Currently implemented for RISC-V 64-bit architecture with comprehensive hardware support:
+//! RISC-V 64 and AArch64 share the common kernel and have separate boot,
+//! trap/context, MMU, interrupt, timer, and virtualization implementations:
 //!
 //! - **Interrupt Handling**: Complete trap frame management with timer and external interrupts
 //! - **Memory Management**: Virtual memory with page tables and memory protection
 //! - **SBI Interface**: Supervisor Binary Interface for firmware communication
 //! - **Instruction Abstractions**: RISC-V specific optimizations with compressed instruction support
+//! - **AArch64 Execution**: EL1 or supported EL2/VHE host entry, with EL0 user tasks
+//! - **Support Boundaries**: QEMU reference projects and experimental board work
+//!   are distinct; see `docs/architecture/multi-architecture.md`
 //!
 //! ## Rust Language Features
 //!
@@ -163,7 +182,8 @@
 //! - **Ownership System**: Automatic memory management without garbage collection overhead
 //! - **Lifetime Validation**: Compile-time prevention of use-after-free and dangling pointer errors
 //! - **Borrowing Rules**: Exclusive mutable access prevents data races at compile time
-//! - **No Buffer Overflows**: Array bounds checking and safe pointer arithmetic
+//! - **Bounds Checking**: Safe slice/array access is checked; raw pointers,
+//!   assembly, and external device access require separate review
 //!
 //! ### Type System Features
 //!
@@ -189,17 +209,19 @@
 //!
 //! ```rust
 //! #[test_case]
-//! fn test_vfs_operations() {
+//! fn test_memory_area_size() {
 //!     // Kernel unit tests run in privileged mode
-//!     let vfs = VfsManager::new();
-//!     // ... test implementation
+//!     let area = scarlet::vm::vmem::MemoryArea::new(0x1000, 0x2000);
+//!     assert_eq!(area.start, 0x1000);
+//!     assert_eq!(area.end, 0x2000);
 //! }
 //! ```
 //!
 //! - **Custom Test Runner**: `#[test_case]` attribute for kernel-specific testing
 //! - **No-std Testing**: Tests run directly in kernel mode without standard library
-//! - **Integration Tests**: Full subsystem testing including multi-ABI scenarios
-//! - **Hardware-in-the-Loop**: Testing on real hardware and QEMU emulation
+//! - **Integration Tests**: Focused subsystem tests, including multi-ABI scenarios
+//! - **Hardware-in-the-Loop**: QEMU runners and separately recorded hardware checks;
+//!   compilation or a skipped test does not establish runtime support
 //! - **Performance Benchmarks**: Kernel performance measurement and regression testing
 //!
 //! ### Debugging Support
@@ -212,7 +234,8 @@
 //!
 //! ### Build System Integration
 //!
-//! The kernel integrates with `cargo-make` for streamlined development:
+//! Project BSPs link this kernel library through the SDK-generated
+//! `scarlet-modules` crate. `cargo-make` exposes convenience build/test tasks:
 //!
 //! - `cargo make build-debug-riscv64` / `cargo make build-debug-aarch64`: Full build with user programs
 //! - `cargo make test-riscv64` / `cargo make test-aarch64`: Run kernel tests
@@ -232,17 +255,26 @@
 //! Core kernel modules provide focused functionality:
 //!
 //! - **`abi/`**: Multi-ABI implementation modules (Scarlet Native, Linux, xv6)
-//! - **`arch/`**: Architecture-specific code (currently RISC-V 64-bit)
+//! - **`arch/`**: RISC-V 64 and AArch64 implementations, selected/re-exported at the arch boundary
 //! - **`drivers/`**: Hardware device drivers (UART, block devices, VirtIO)
 //! - **`fs/`**: Filesystem implementations and VFS v2 core
-//! - **`task/`**: Task management, scheduling, and process lifecycle
-//! - **`mem/`**: Memory management, allocators, and virtual memory
+//! - **`task/`**: Task state, ELF loading, and process lifecycle
+//! - **`sched/`**: Run queues, placement, accounting, and scheduling policy
+//! - **`mem/`**: Physical pages and heap allocation
+//! - **`vm/`**: Address spaces, sparse direct maps, mappings, and IOREMAP
 //! - **`syscall/`**: System call dispatch and implementation
 //! - **`object/`**: Kernel object system with handle management
 //! - **`interrupt/`**: Interrupt handling and controller support
+//! - **`device/`**: Device capabilities and managers used by drivers and kernel objects
+//! - **`sync/`**: Kernel synchronization, including IRQ-aware primitives
+//! - **`lsm/`**: Loadable module lifecycle, symbols, and relocation integration
+//! - **`hypervisor/`**: Optional SHV and guest-management infrastructure
 //!
-//! *Note: Currently, Scarlet Native ABI is fully implemented. Linux and xv6 ABI support
-//! are under development and will be available in future releases.*
+//! *Compatibility is operation- and configuration-specific. Native programs,
+//! selected Linux workloads, and RISC-V xv6 programs are already used; this does
+//! not imply complete compatibility with every binary of those systems. The
+//! repository's `docs/kernel/README.md` and `docs/userspace/README.md` provide
+//! the current source and development map.*
 
 #![no_std]
 #![cfg_attr(test, no_main)]
@@ -400,29 +432,29 @@ pub enum DeviceSource {
 ///
 /// Different architectures populate this structure from their respective
 /// boot protocols:
-/// - **RISC-V**: Created from FDT (Flattened Device Tree) data
-/// - **ARM/AArch64**: Created from FDT or UEFI
-/// - **x86/x86_64**: Created from ACPI tables or legacy BIOS structures
+/// - **RISC-V**: Limine responses plus FDT (Flattened Device Tree) data
+/// - **AArch64**: Limine responses plus FDT, with architecture-specific EL handling
+/// - **Other protocols/architectures**: DeviceSource has additional variants, but
+///   their presence does not establish a working x86 or ACPI boot implementation
 ///
 /// # Usage
 ///
 /// The BootInfo is passed to `start_kernel()` as the primary parameter
 /// and provides all essential information needed for kernel initialization:
 ///
-/// ```rust
-/// #[no_mangle]
-/// pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
-///     // Use boot_info for system initialization
+/// ```no_run
+/// fn boot_handoff(boot_info: &scarlet::BootInfo) -> ! {
+///     // Inspect parameters after architecture-specific initialization.
 ///     let memory = boot_info.usable_memory_paddr;
 ///     let cpu_id = boot_info.cpu_id;
-///     // ...
+///     scarlet::start_kernel(boot_info)
 /// }
 /// ```
 pub struct BootInfo {
     /// CPU/Hart ID of the boot processor
     /// Used for multicore initialization and per-CPU data structures
     pub cpu_id: usize,
-    /// Number of CPUs detected at runtime (from FDT)
+    /// Number of CPUs detected from the selected boot protocol and hardware description
     /// Used to drive SMP initialization and per-CPU resource sizing
     pub cpu_count: usize,
     /// Physical memory area available for PMM allocation (usable RAM excluding reserved regions)
@@ -463,6 +495,7 @@ impl BootInfo {
     /// # Arguments
     ///
     /// * `cpu_id` - ID of the boot processor/hart
+    /// * `cpu_count` - Number of CPUs reported by the boot path
     /// * `usable_memory_paddr` - Physical memory area for PMM allocation
     /// * `direct_map_regions` - Sparse physical regions to map into HHDM
     /// * `initramfs_paddr` - Optional initramfs physical memory area
@@ -470,6 +503,7 @@ impl BootInfo {
     /// * `cmdline` - Optional kernel command line parameters
     /// * `device_source` - Source of device information for hardware discovery
     /// * `framebuffer_paddr` - Optional framebuffer physical memory area
+    /// * `start_secondary_cpus_hook` - Optional hook to release secondary CPUs after global initialization
     ///
     /// # Returns
     ///
@@ -509,6 +543,18 @@ impl BootInfo {
     }
 
     /// Replace the default single PMM region with the complete firmware RAM set.
+    ///
+    /// # Arguments
+    ///
+    /// * `regions` - Nonempty set of usable physical RAM regions.
+    ///
+    /// # Returns
+    ///
+    /// This BootInfo with the PMM region set replaced; the primary scratch region is unchanged.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `regions` is empty.
     pub fn with_usable_memory_regions(mut self, regions: DirectMapRegions) -> Self {
         assert!(
             !regions.is_empty(),
@@ -586,18 +632,21 @@ impl BootInfo {
 /// The kernel initialization follows this structured sequence:
 ///
 /// 1. **Early System Setup**: Extract boot parameters from BootInfo
-/// 2. **Memory Initialization**: Set up heap allocator with usable memory
+/// 2. **Memory Initialization**: Initialize all PMM regions, switch boot page tables,
+///    fix direct-map references, and initialize the heap
 /// 3. **Early Initcalls**: Initialize critical early subsystems
 /// 4. **Driver Initcalls**: Load and initialize device drivers
 /// 5. **Virtual Memory**: Set up kernel virtual memory management
-/// 6. **Device Discovery**: Enumerate hardware from BootInfo device source
-/// 7. **Graphics Initialization**: Initialize graphics subsystem and framebuffer
-/// 8. **Interrupt System**: Set up interrupt controllers and handlers
+/// 6. **Initial Task Reservation**: Register init before driver workers start
+/// 7. **Device Discovery**: Initialize critical interrupt controllers, then other
+///    platform/PCI devices and graphics
+/// 8. **Interrupt System**: Run remaining initcalls and enable CPU interrupts
 /// 9. **Timer Subsystem**: Initialize kernel timer and scheduling infrastructure
 /// 10. **VFS Setup**: Initialize virtual filesystem and mount root
 /// 11. **Initramfs Processing**: Mount initramfs if provided in BootInfo
-/// 12. **Initial Task**: Create and load initial userspace process
-/// 13. **Scheduler Start**: Begin task scheduling and enter normal operation
+/// 12. **Initial Task**: Apply configured network/hypervisor setup and load init
+/// 13. **Scheduler Start**: Enqueue init, claim the first task, release secondary
+///     CPUs, and enter the selected task
 ///
 /// # Architecture Integration
 ///
@@ -610,7 +659,7 @@ impl BootInfo {
 ///
 /// * `boot_info` - Comprehensive boot information structure containing:
 ///   - CPU ID for multicore initialization
-///   - Usable memory area for heap allocation
+///   - Usable physical RAM regions and sparse direct-map regions
 ///   - Optional initramfs location and size
 ///   - Kernel command line parameters
 ///   - Device information source (FDT/UEFI/ACPI)
@@ -619,8 +668,8 @@ impl BootInfo {
 ///
 /// The function expects the following memory layout:
 /// - Kernel image loaded and executable
-/// - BootInfo.usable_memory available for allocation
-/// - Hardware description (FDT/ACPI) accessible via device_source
+/// - BootInfo.usable_memory_regions available for physical page allocation
+/// - The selected hardware description accessible via device_source (FDT on current Limine paths)
 /// - Optional initramfs data at specified location
 ///
 /// # Safety

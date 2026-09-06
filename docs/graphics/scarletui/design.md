@@ -1,4 +1,16 @@
-# ScarletUI Architecture
+# ScarletUI architecture notes (historical snapshot)
+
+This is an earlier Scarlet integration snapshot, not the current normative
+architecture. ScarletUI now owns its documentation in the separate
+[ScarletUI repository](https://github.com/petitstrawberry/scarlet-ui):
+[architecture](https://github.com/petitstrawberry/scarlet-ui/blob/main/docs/ARCHITECTURE.md),
+[application/extension contract](https://github.com/petitstrawberry/scarlet-ui/blob/main/docs/1.0-contract.md),
+and [frame failures](https://github.com/petitstrawberry/scarlet-ui/blob/main/docs/FRAME_FAILURES.md).
+The historical body below can contain obsolete traits and renderer choices.
+Use those owning documents and current examples for implementation work.
+
+For current integration, see [userspace development](../../userspace/README.md)
+and [GPU completion/presentation](../gpu-async-submission.md).
 
 ScarletUI is Scarlet's declarative UI framework. It is designed as a
 multi-platform UI layer: the same application code declares scenes and calls

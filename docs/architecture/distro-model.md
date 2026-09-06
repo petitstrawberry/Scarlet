@@ -1,7 +1,9 @@
 # Scarlet Distribution Model
 
-This is the current plan for issue #461. It supersedes the earlier
-BSP/Image/Distro split proposal.
+This records the project-centric direction from issue #461, reconciled with
+the current layout on 2026-09-06. It supersedes the earlier BSP/Image/Distro
+split proposal. For executable CLI/layer details, use the
+[build-system guide](../build-system/README.md).
 
 Scarlet is treated as the official reference distribution of the Scarlet OS
 platform. This repository keeps the known-good composition of kernel, modules,
@@ -18,8 +20,8 @@ The model is project-centric:
 - `schema_version = 2` is the active manifest schema.
 - Images are composed from ordered layers.
 - Bundles are reusable ordered layer collections.
-- `scarlet.lock` is per project and pins resolved git revisions and content
-  hashes for reproducible image composition.
+- `scarlet.lock` is per project and records resolved layer revisions and content
+  hashes; Cargo dependency locks and external script inputs remain separate.
 - `scarlet.local.toml` is a gitignored per-developer override file.
 
 The earlier `scarlet-config.toml`, `bsp.toml`, `kernel.toml`, standalone
@@ -37,9 +39,12 @@ petitstrawberry/scarlet-sdk
   Build, check, clippy, image, update, scaffold, and run tooling.
   Provides cargo-scarlet and image plugins through the development environment.
 
-Future split repositories
-  scarlet-kernel, scarlet-coreutils, scarlet-ui, apps, drivers, and modules can
-  become independent sources once their boundaries are stable.
+petitstrawberry/scarlet-ui and petitstrawberry/sgfx
+  Already separate UI/graphics sources, consumed through Cargo and bundle layers.
+
+Possible future splits
+  Kernel, core utilities, other libraries, apps, drivers, and modules can
+  become independent sources where their boundaries justify it.
 ```
 
 This keeps the convenient clone-and-run workflow while allowing the same
@@ -49,13 +54,13 @@ manifest format to consume path, git, URL, and generated sources.
 
 | Term | Meaning |
 |---|---|
-| Project | A directory with `scarlet.toml`, project Cargo files, boot entry, linker scripts, runner, generated `.scarlet/`, and optional project-local files. |
-| Project variant | A named project such as `aarch64-limine-full`, `aarch64-limine-desktop`, or `aarch64-limine-microvm`. |
-| BSP boundary | The project directory itself: target, boot entry, linker scripts, runner, and board/virtualization assumptions. |
+| Project | A directory with `scarlet.toml`, a selected BSP, image/runner configuration, generated `.scarlet/`, and optional project-local files. |
+| Project variant | A named project such as `riscv64-limine-full`, `aarch64-limine-full`, or `aarch64-limine-microvm`. |
+| BSP boundary | The executable Cargo package selected by `[bsp].path` (currently `bsp/`), with target, boot entry and linker scripts; image and runner policy remains in the project. |
 | Distro shape | The selected ordered layer composition for initramfs/rootfs/boot in a project manifest. |
-| Layer | One ordered composition operation such as `bundle`, `cargo`, `copy`, `script`, or `image`. |
+| Layer | One ordered composition operation: `bundle`, `cargo`, `copy`, `archive`, `script`, or `image`. |
 | Bundle | A reusable TOML file containing ordered `[[layers]]`. |
-| Boot image format | The boot packaging boundary, for example `limine-uefi`. Formats are handled by plugins. |
+| Boot image format | The packaging boundary: built-in filesystem/GPT formats or `limine-uefi` through the matching Limine plugin. |
 | Lock file | Project-local `scarlet.lock` with section hashes, layer hashes, and resolved git revisions. |
 
 `microvm` is not a QEMU machine name in this model. It is a project/distro
@@ -98,13 +103,17 @@ Scarlet/
     riscv64-limine-full/
       scarlet.toml
       scarlet.lock
+      bsp/
+        Cargo.toml
+        Cargo.lock
+        .cargo/config.toml
+        build.rs
+        src/main.rs
+        lds/
       tools/
       .scarlet/
-    riscv64-limine-desktop/
     aarch64-limine-full/
-    aarch64-limine-desktop/
     aarch64-limine-microvm/
-    aarch64-apple-limine-full/
   docs/
   flake.nix
 ```
@@ -114,7 +123,9 @@ directory in the current layout. The CLI is supplied by `scarlet-sdk`.
 
 ## Manifest Schema
 
-Every active project manifest uses schema version 2:
+Every active project manifest uses schema version 2. This microvm excerpt shows
+the BSP and boot composition; see the
+[complete manifest](../../projects/aarch64-limine-microvm/scarlet.toml) for all images:
 
 ```toml
 schema_version = 2
@@ -122,13 +133,14 @@ schema_version = 2
 [project]
 name = "scarlet-aarch64-limine-microvm"
 
-[kernel]
+[bsp]
+path = "bsp"
 package = "scarlet"
-source = "../../kernel"
-target = "aarch64-unknown-none-elf"
-target_json = "../../kernel/targets/aarch64-unknown-none-elf.json"
 
-[kernel.features]
+[bsp.kernel]
+source = { path = "../../kernel" }
+
+[bsp.kernel.features]
 network = true
 user-fpu = true
 user-vector = true
@@ -183,6 +195,7 @@ Supported layer kinds:
 | `bundle` | Expand another `bundle.toml` at this exact position. |
 | `cargo` | Build a Cargo binary and install it into the image. |
 | `copy` | Copy a file or directory into the image. |
+| `archive` | Verify a SHA-256-pinned archive and extract it into the image. |
 | `script` | Run a script and install its declared output. |
 | `image` | Include another image output, such as initramfs in a boot image. |
 
@@ -236,8 +249,13 @@ The current reference distro uses these bundle roles:
 `cargo scarlet image` and `cargo scarlet run` use the project lock while
 composing images. Lock files are committed per project so each project can pin
 the exact source revisions and content hashes that belong to that image shape.
+Composition can resolve missing/changed inputs and save the resulting lock.
+`--locked` is the SDK's archive-input check and BSP-refresh control, not a
+blanket Cargo flag or network restriction. `--offline` has been removed; see
+[lock/cache scope](../build-system/README.md#locks-caches-and-network-access).
 
-The active lock format is section-based:
+The active lock format is section-based. This illustrative excerpt uses
+placeholder hashes, not a usable lock:
 
 ```toml
 [sections.rootfs]
@@ -245,14 +263,19 @@ hash = "sha256:..."
 
 [[sections.rootfs.layers]]
 kind = "cargo"
-source = "../../user/bin"
 package = "user-bin"
 bin = "sh"
 to = "/system/scarlet/bin/sh"
 hash = "sha256:..."
+
+[sections.rootfs.layers.source]
+type = "path"
+path = "../../user/bin"
 ```
 
 External git sources record `resolved_rev`.
+Git bundle definitions need their own pinned selector, and the BSP/userspace
+Cargo locks separately select transitive Rust dependencies.
 
 ## CLI
 
