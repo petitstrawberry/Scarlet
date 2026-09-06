@@ -3,7 +3,7 @@
 
 [[layers]]
 kind = "cargo"
-source = { git = "https://github.com/petitstrawberry/sgfx" }
+source = "../../../sgfx"
 package = "sgfx"
 bin = "sgfx-native-completion-smoke"
 to = "/system/scarlet/bin/sgfx-native-completion-smoke"

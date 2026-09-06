@@ -6,7 +6,10 @@ use std::{error, fmt};
 
 use framebuffer::{DisplayPresentRegion, DisplaySurface};
 use scarlet_os::handle::Handle;
-use sgfx::backend::CommandExecutor;
+use scarlet_ui_renderer_sgfx::{
+    FrameError, FrameExecutor, FrameSubmissionError, MAX_UPLOAD_BYTES, upload_texture,
+};
+use sgfx::backend::{CommandExecutor, CompletionStatus};
 use sgfx::ir::{
     self, AddressMode, BlendState, BufferDesc, BufferId, BufferUsage, CommandEncoder, DrawUniforms,
     Extent2D, FilterMode, FragmentProgram, LoadOp, PixelRect, PrimitiveTopology, RasterState,
@@ -88,9 +91,14 @@ pub(crate) struct MappedTarget {
     pending_damage: Option<PixelRect>,
     session: MappedTargetSession,
     reusable_imports: Vec<ReusableImport>,
+    tracked_submission: bool,
 }
 
 impl MappedTarget {
+    pub(crate) fn supports_tracked_submission(&self) -> bool {
+        self.tracked_submission
+    }
+
     pub(crate) fn open(width: u32, height: u32) -> Result<Self, Error> {
         Self::open_with_target_count(width, height, 1, false)
     }
@@ -131,6 +139,7 @@ impl MappedTarget {
         height: u32,
         target_count: usize,
     ) -> Result<Self, Error> {
+        let tracked_submission = matches!(&context, Context::Virgl(_));
         let resources = Rc::new(ResourceTable::new());
         let extent = Extent2D::new(width, height)?;
         let define_target = || -> Result<TextureId, Error> {
@@ -170,6 +179,7 @@ impl MappedTarget {
             pending_damage: None,
             session,
             reusable_imports: Vec::new(),
+            tracked_submission,
         })
     }
 
@@ -373,20 +383,20 @@ pub(crate) struct TextureUpload<'a> {
 
 /// Failure while recording or executing one quad-composition submission.
 #[derive(Debug)]
-pub(crate) enum QuadSubmitError {
+pub(crate) enum QuadSubmitError<E = sgfx::Error> {
     /// Portable IR recording rejected the requested frame.
     Recording(&'static str),
     /// The selected SGFX backend failed while executing valid recorded IR.
-    Execution(sgfx::Error),
+    Execution(E),
 }
 
-impl From<&'static str> for QuadSubmitError {
+impl<E> From<&'static str> for QuadSubmitError<E> {
     fn from(error: &'static str) -> Self {
         Self::Recording(error)
     }
 }
 
-impl fmt::Display for QuadSubmitError {
+impl<E: fmt::Display> fmt::Display for QuadSubmitError<E> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Recording(error) => formatter.write_str(error),
@@ -494,17 +504,85 @@ impl QuadRenderer {
         uploads: &[TextureUpload<'_>],
         operations: &[Quad],
     ) -> Result<(), QuadSubmitError> {
+        self.encode_region_with_uploads(
+            &mut target.session.executor(),
+            Rc::clone(&target.resources),
+            target.texture,
+            target.width,
+            target.height,
+            area,
+            load,
+            uploads,
+            operations,
+        )
+    }
+
+    /// Queue the complete composition and observe it once before presentation.
+    pub(crate) fn submit_region_with_uploads_tracked(
+        &self,
+        target: &mut MappedTarget,
+        area: PixelRect,
+        load: LoadOp,
+        uploads: &[TextureUpload<'_>],
+        operations: &[Quad],
+    ) -> Result<(), QuadSubmitError<FrameSubmissionError<sgfx::Error, sgfx::Submission>>> {
+        let mut attempts = 0;
+        let mut executor = FrameExecutor::new(target.session.executor(), || {
+            attempts += 1;
+            if attempts > 1_000 {
+                return false;
+            }
+            std::thread::sleep(core::time::Duration::from_millis(1));
+            true
+        });
+        self.encode_region_with_uploads(
+            &mut executor,
+            Rc::clone(&target.resources),
+            target.texture,
+            target.width,
+            target.height,
+            area,
+            load,
+            uploads,
+            operations,
+        )?;
+        match executor.wait() {
+            Ok(CompletionStatus::Complete) => Ok(()),
+            Ok(_) => Err(QuadSubmitError::Execution(FrameSubmissionError::Pending)),
+            Err(error) => Err(QuadSubmitError::Execution(error)),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn encode_region_with_uploads<E: CommandExecutor>(
+        &self,
+        executor: &mut E,
+        resources: Rc<ResourceTable>,
+        texture: TextureId,
+        width: u32,
+        height: u32,
+        area: PixelRect,
+        load: LoadOp,
+        uploads: &[TextureUpload<'_>],
+        operations: &[Quad],
+    ) -> Result<(), QuadSubmitError<E::Error>> {
         if operations.len() > self.capacity {
             return Err(QuadSubmitError::Recording(
                 "SGFX composition operation capacity exceeded",
             ));
         }
-        if uploads.len().saturating_add(QUAD_BATCH_COMMAND_OVERHEAD) > ir::MAX_COMMANDS {
+        let separate_uploads = uploads.iter().fold(0u64, |bytes, upload| {
+            bytes.saturating_add(
+                u64::from(upload.destination.width()) * u64::from(upload.destination.height()) * 4,
+            )
+        }) > MAX_UPLOAD_BYTES as u64;
+        if !separate_uploads
+            && uploads.len().saturating_add(QUAD_BATCH_COMMAND_OVERHEAD) > ir::MAX_COMMANDS
+        {
             return Err(QuadSubmitError::Recording(
                 "SGFX texture upload command capacity exceeded",
             ));
         }
-        let resources = Rc::clone(&target.resources);
         let mut vertices = Vec::new();
         vertices
             .try_reserve_exact(
@@ -546,13 +624,28 @@ impl QuadRenderer {
                 &mut vertices,
                 destination,
                 source,
-                target.width,
-                target.height,
+                width,
+                height,
                 texture_width,
                 texture_height,
             );
         }
 
+        if separate_uploads {
+            for upload in uploads {
+                let write = TextureWrite::new(upload.destination, upload.stride, upload.bytes)
+                    .map_err(|_| QuadSubmitError::Recording("Invalid SGFX texture upload"))?;
+                upload_texture(executor, &resources, upload.texture, write).map_err(|error| {
+                    match error {
+                        FrameError::Lowering(_) => {
+                            QuadSubmitError::Recording("Invalid SGFX texture upload")
+                        }
+                        FrameError::Execution(error) => QuadSubmitError::Execution(error),
+                    }
+                })?;
+            }
+        }
+        let uploads = if separate_uploads { &[] } else { uploads };
         let mut batch_start = 0usize;
         let mut first_batch = true;
         loop {
@@ -604,7 +697,7 @@ impl QuadRenderer {
             self.record_operations(
                 &mut encoder,
                 resources.as_ref(),
-                target.texture,
+                texture,
                 area,
                 if first_batch { load } else { LoadOp::Load },
                 &operations[batch_start..batch_end],
@@ -613,7 +706,7 @@ impl QuadRenderer {
             let commands = encoder
                 .finish()
                 .map_err(|_| "Failed to finish SGFX composition commands")?;
-            target
+            executor
                 .execute(&commands)
                 .map_err(QuadSubmitError::Execution)?;
             if batch_end == operations.len() {

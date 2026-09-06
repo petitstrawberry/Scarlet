@@ -6,6 +6,7 @@ use framebuffer::{DisplayPresentRegion, DisplaySurface};
 use gpu_raw::{Gpu, GpuContext, GpuImage, GpuImageBgraRect};
 use scarlet_os::handle::Handle;
 use scarlet_os::ipc::SharedMemory;
+use scarlet_ui_renderer_sgfx::FrameSubmissionError;
 use sgfx::ir::{Color, LoadOp, PixelRect, TextureId};
 use std::env;
 use std::fmt;
@@ -27,17 +28,19 @@ pub(super) enum GpuCompositionError {
     Backend(&'static str),
     /// The SGFX backend rejected execution of a valid command buffer.
     Execution(sgfx::Error),
+    /// A tracked frame failed admission or completion; do not reuse its cache
+    /// or release imported client buffers as if the frame had completed.
+    TrackedExecution(FrameSubmissionError<sgfx::Error, sgfx::Submission>),
 }
 
 impl GpuCompositionError {
     /// Return whether shared client images must be invalidated.
     pub(super) const fn invalidates_shared_images(&self) -> bool {
-        // SGFX execution errors currently combine validation, unsupported IR,
-        // allocation, and transport failures. None is an explicit Vulkan-like
-        // DEVICE_LOST signal, so execution rejection alone must remain local
-        // to the frame. A mapped-target failure is the narrower point at which
-        // the compositor can no longer promise that imported images survive.
-        matches!(self, Self::Backend(_))
+        // Legacy execution rejection does not imply backend loss. A tracked
+        // frame, however, may have accepted earlier streams before failing;
+        // without successful completion its images cannot be reused/released.
+        // Backend failures also invalidate imported-image lifetime guarantees.
+        matches!(self, Self::Backend(_) | Self::TrackedExecution(_))
     }
 }
 
@@ -61,6 +64,9 @@ impl fmt::Display for GpuCompositionError {
         match self {
             Self::Frame(error) | Self::Backend(error) => formatter.write_str(error),
             Self::Execution(error) => write!(formatter, "SGFX execution failed: {error}"),
+            Self::TrackedExecution(error) => {
+                write!(formatter, "SGFX tracked frame failed: {error}")
+            }
         }
     }
 }
@@ -1063,13 +1069,35 @@ impl GpuCompositor {
         }
 
         super::trace::set_compositor_stage(super::trace::STAGE_GPU_SUBMIT);
-        self.quad_renderer.submit_region_with_uploads(
-            &mut self.target,
-            render_area,
-            LoadOp::Clear(clear_color),
-            &texture_uploads,
-            &operations,
-        )?;
+        if self.target.supports_tracked_submission() {
+            self.quad_renderer
+                .submit_region_with_uploads_tracked(
+                    &mut self.target,
+                    render_area,
+                    LoadOp::Clear(clear_color),
+                    &texture_uploads,
+                    &operations,
+                )
+                .map_err(|error| match error {
+                    // Recording can fail after an earlier batch was accepted.
+                    // Conservatively invalidate rather than reuse an uncertain
+                    // target or acknowledge release of its imported sources.
+                    QuadSubmitError::Recording(error) => GpuCompositionError::Backend(error),
+                    QuadSubmitError::Execution(error) => {
+                        GpuCompositionError::TrackedExecution(error)
+                    }
+                })?;
+        } else {
+            // Adreno's existing synchronous path remains explicit until its
+            // backend advertises tracked submission.
+            self.quad_renderer.submit_region_with_uploads(
+                &mut self.target,
+                render_area,
+                LoadOp::Clear(clear_color),
+                &texture_uploads,
+                &operations,
+            )?;
+        }
         for texture_index in uploaded_texture_indices {
             self.textures[texture_index].pending_damage = None;
         }
@@ -1339,6 +1367,18 @@ mod shared_frame_promotion_tests {
                 .invalidates_shared_images()
         );
         assert!(GpuCompositionError::Backend("device unavailable").invalidates_shared_images());
+    }
+
+    #[test]
+    fn tracked_failure_invalidates_shared_images_without_proving_retirement() {
+        for error in [
+            FrameSubmissionError::Pending,
+            FrameSubmissionError::Invalidated,
+            FrameSubmissionError::Completion(sgfx::Error::InvalidBackendPreference),
+            FrameSubmissionError::Submit(sgfx::backend::SubmitError::Busy),
+        ] {
+            assert!(GpuCompositionError::TrackedExecution(error).invalidates_shared_images());
+        }
     }
 
     fn token(buffer_id: u32, generation: u32, commit_serial: u64) -> SgfxCommitToken {

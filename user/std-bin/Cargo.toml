@@ -47,6 +47,7 @@ sws-remote-protocol = { path = "../lib/sws-remote-protocol", default-features = 
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
 getrandom = { version = "0.2.16", default-features = false, features = ["custom"] }
 gpu-raw = { path = "../lib/gpu-raw", default-features = false, features = ["std"] }
+scarlet-ui-renderer-sgfx = { git = "https://github.com/petitstrawberry/scarlet-ui", package = "scarlet-ui-renderer-sgfx" }
 reqwest = { version = "0.12.24", default-features = false, features = ["rustls-tls-webpki-roots"] }
 scarlet-os = { path = "../lib/scarlet-os", default-features = false, features = ["std"] }
 scarlet-ui = { git = "https://github.com/petitstrawberry/scarlet-ui", package = "scarlet-ui", default-features = false, features = ["std", "platform-sws"] }
