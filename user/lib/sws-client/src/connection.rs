@@ -319,6 +319,72 @@ struct EventMailbox {
     head: usize,
 }
 
+/// Whether the application event loop has work, including other windows on
+/// this connection. SGFX-only mailboxes belong to the frame sink and must not
+/// keep an otherwise idle application loop spinning.
+fn window_events_pending(
+    pending_head: usize,
+    pending_events: &[Event],
+    subscribers: &BTreeMap<u64, EventMailbox>,
+) -> bool {
+    pending_head < pending_events.len()
+        || subscribers.values().any(|mailbox| {
+            matches!(mailbox.filter, EventFilter::Window(_))
+                && mailbox.head < mailbox.events.len()
+        })
+}
+
+/// A coalesced, level-readable notification for concurrent transport readers.
+/// All reads, writes and rearming happen under the transport mutex. The two
+/// handles are allocated lazily once and remain owned by the connection.
+struct WindowEventWake {
+    read: Socket,
+    write: Socket,
+    signaled: bool,
+    error: Option<Error>,
+}
+
+impl WindowEventWake {
+    fn new() -> Result<Self, Error> {
+        let (read, write) = Socket::pair().map_err(|_| Error::SocketCreation)?;
+        read.set_nonblocking(true).map_err(|_| Error::SocketConfig)?;
+        write.set_nonblocking(true).map_err(|_| Error::SocketConfig)?;
+        Ok(Self {
+            read,
+            write,
+            signaled: false,
+            error: None,
+        })
+    }
+
+    fn signal(&mut self) {
+        if self.signaled || self.error.is_some() {
+            return;
+        }
+        match socket_write(&mut self.write, &[1]) {
+            Ok(1) | Err(Error::WouldBlock) => self.signaled = true,
+            Err(error) => self.error = Some(error),
+            _ => self.error = Some(Error::IoError),
+        }
+    }
+
+    fn rearm(&mut self) -> Result<(), Error> {
+        if let Some(error) = self.error {
+            return Err(error);
+        }
+        if self.signaled {
+            // Producers cannot write another byte while this mutex-protected
+            // notification is signaled. No unbounded drain loop is needed.
+            match socket_read(&mut self.read, &mut [0]) {
+                Ok(1) | Err(Error::WouldBlock) => self.signaled = false,
+                Err(error) => return Err(error),
+                _ => return Err(Error::IoError),
+            }
+        }
+        Ok(())
+    }
+}
+
 impl EventMailbox {
     fn new(filter: EventFilter) -> Self {
         Self {
@@ -507,6 +573,7 @@ struct TransportState {
     next_subscriber_id: u64,
     text_input_windows: BTreeMap<u32, u32>,
     terminal_error: Option<Error>,
+    window_event_wake: Option<WindowEventWake>,
 }
 
 impl TransportState {
@@ -524,6 +591,7 @@ impl TransportState {
             next_subscriber_id: 1,
             text_input_windows: BTreeMap::new(),
             terminal_error: None,
+            window_event_wake: None,
         }
     }
 
@@ -604,6 +672,9 @@ impl TransportState {
     fn fail_pending(&mut self, error: Error) {
         if self.terminal_error.is_none() {
             self.terminal_error = Some(error);
+        }
+        if let Some(wake) = &mut self.window_event_wake {
+            wake.signal();
         }
         self.responses.retain(|_, response| match response {
             PendingResponse::Cancelled => false,
@@ -987,6 +1058,11 @@ impl TransportState {
         }
         if !delivered {
             self.pending_events.push(event);
+        }
+        if let Some(wake) = &mut self.window_event_wake
+            && window_events_pending(self.pending_head, &self.pending_events, &self.subscribers)
+        {
+            wake.signal();
         }
     }
 }
@@ -2500,6 +2576,62 @@ impl Connection {
         Ok(count)
     }
 
+    /// Wait for application event activity on this shared connection.
+    ///
+    /// Queued ordinary events or events for **any** window subscription return
+    /// immediately without consuming them. Already-routed SGFX-only lifecycle
+    /// events do not prevent sleeping; those mailboxes are owned by the frame
+    /// sink. Newly arriving socket data can still wake the caller regardless
+    /// of message type, so callers must dispatch and recheck their own events.
+    ///
+    /// The transport mutex is released while waiting. If another connection
+    /// clone reads and routes a window event first, a coalesced notification
+    /// wakes this waiter even though the transport socket is now empty.
+    ///
+    /// # Arguments
+    ///
+    /// * `timeout` - Maximum wait. Zero only checks readiness. Durations beyond
+    ///   `i64::MAX` nanoseconds are saturated to the poll ABI's maximum.
+    ///
+    /// # Returns
+    ///
+    /// `true` for queued events or transport activity, `false` on timeout, or a
+    /// transport/wait error. Readiness is a hint, not a promise that a complete
+    /// event is available. Neither socket data nor queued events are consumed.
+    pub fn wait_for_window_events(&self, timeout: core::time::Duration) -> Result<bool, Error> {
+        let (socket, wake) = {
+            let mut transport = mutex_lock(&self.transport);
+            if let Some(error) = transport.terminal_error {
+                return Err(error);
+            }
+            if window_events_pending(
+                transport.pending_head,
+                &transport.pending_events,
+                &transport.subscribers,
+            ) {
+                return Ok(true);
+            }
+            if transport.window_event_wake.is_none() {
+                transport.window_event_wake = Some(WindowEventWake::new()?);
+            }
+            let socket = transport.socket.as_raw() as u32;
+            let wake = transport.window_event_wake.as_mut().ok_or(Error::IoError)?;
+            // Check mailboxes and rearm under the same lock used by event
+            // producers. A racing producer after unlock leaves a readable
+            // notification; one before this check leaves a queued event.
+            wake.rearm()?;
+            (socket, wake.read.as_raw() as u32)
+        };
+        // Both raw handles remain owned by the transport Arc borrowed through
+        // `self`; no connection operation removes or replaces either handle.
+        let ready = crate::os::wait_for_input(socket, wake, timeout)?;
+        let transport = mutex_lock(&self.transport);
+        if let Some(error) = transport.terminal_error {
+            return Err(error);
+        }
+        Ok(ready)
+    }
+
     /// Pop the next pending event.
     pub fn poll_event(&self) -> Option<Event> {
         let event = mutex_lock(&self.transport).poll_event();
@@ -3460,5 +3592,64 @@ impl Connection {
     pub fn has_events(&self) -> bool {
         let transport = mutex_lock(&self.transport);
         transport.pending_head < transport.pending_events.len()
+    }
+}
+
+#[cfg(test)]
+mod window_wait_tests {
+    use super::{EventFilter, EventMailbox, window_events_pending};
+    use crate::event::Event;
+    use crate::os::BTreeMap;
+
+    fn frame_done(window: u32) -> Event {
+        Event::FrameDone {
+            surface_id: window,
+            callback_id: 1,
+            presentation_time_ns: 1,
+        }
+    }
+
+    #[test]
+    fn queued_event_for_another_window_prevents_sleep_without_consuming_it() {
+        let mut subscribers = BTreeMap::new();
+        subscribers.insert(1, EventMailbox::new(EventFilter::Window(101)));
+        let mut second = EventMailbox::new(EventFilter::Window(102));
+        second.push(frame_done(102));
+        subscribers.insert(2, second);
+
+        assert!(window_events_pending(0, &[], &subscribers));
+        assert!(window_events_pending(0, &[], &subscribers));
+        assert_eq!(subscribers.get_mut(&2).unwrap().poll(), Some(frame_done(102)));
+        assert!(!window_events_pending(0, &[], &subscribers));
+    }
+
+    #[test]
+    fn consumed_events_do_not_keep_the_wait_ready() {
+        let mut subscribers = BTreeMap::new();
+        let mut mailbox = EventMailbox::new(EventFilter::Window(101));
+        mailbox.push(frame_done(101));
+        mailbox.head = 1;
+        subscribers.insert(1, mailbox);
+        let pending = [frame_done(101)];
+
+        assert!(window_events_pending(0, &pending, &subscribers));
+        assert!(!window_events_pending(1, &pending, &subscribers));
+    }
+
+    #[test]
+    fn retained_sgfx_events_do_not_spin_the_window_event_loop() {
+        let mut subscribers = BTreeMap::new();
+        let mut mailbox = EventMailbox::new(EventFilter::Sgfx(101));
+        mailbox.push(Event::SgfxBufferReleased {
+            window_id: 101,
+            buffer_id: 1,
+            generation: 1,
+            compositor_epoch: 1,
+            commit_serial: 1,
+        });
+        subscribers.insert(1, mailbox);
+
+        assert!(!window_events_pending(0, &[], &subscribers));
+        assert!(subscribers.get_mut(&1).unwrap().poll().is_some());
     }
 }

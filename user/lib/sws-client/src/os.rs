@@ -3,6 +3,11 @@
 use crate::Error;
 
 #[cfg(feature = "std")]
+use scarlet_os::poll::{POLLIN, PollHandle, poll};
+#[cfg(not(feature = "std"))]
+use scarlet_std::poll::{POLLIN, PollHandle, poll};
+
+#[cfg(feature = "std")]
 pub use scarlet_os::Handle;
 #[cfg(feature = "std")]
 pub use scarlet_os::handle::capability::memory_mapping::flags as mmap_flags;
@@ -201,4 +206,29 @@ pub fn sleep_briefly() {
 #[cfg(not(feature = "std"))]
 pub fn sleep_briefly() {
     scarlet_std::thread::sleep(core::time::Duration::from_millis(1));
+}
+
+/// Wait for socket input or a notification from another transport reader.
+///
+/// # Arguments
+///
+/// * `socket` - Borrowed raw transport handle, retained by the connection.
+/// * `wake` - Borrowed raw notification handle, retained by the connection.
+/// * `timeout` - Maximum wait; zero performs only a readiness check. Durations
+///   larger than the poll ABI permits are saturated to `i64::MAX` nanoseconds.
+///
+/// # Returns
+///
+/// Whether either handle became ready, including hangup/error readiness, or a
+/// polling error. This never consumes bytes from either handle.
+pub(crate) fn wait_for_input(
+    socket: u32,
+    wake: u32,
+    timeout: core::time::Duration,
+) -> Result<bool, Error> {
+    let mut handles = [PollHandle::new(socket, POLLIN), PollHandle::new(wake, POLLIN)];
+    let timeout_ns = timeout.as_nanos().min(i64::MAX as u128) as i64;
+    poll(&mut handles, timeout_ns)
+        .map(|ready| ready != 0)
+        .map_err(|_| Error::IoError)
 }
