@@ -2031,7 +2031,7 @@ pub fn sys_recvfrom(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 ///   - arg0: domain (address family, must be AF_UNIX)
 ///   - arg1: type (socket type, e.g., SOCK_STREAM)
 ///   - arg2: protocol (usually 0)
-///   - arg3: sv (pointer to int[2] to receive the file descriptors)
+///   - arg3: sv (pointer to `int[2]` to receive the file descriptors)
 ///
 /// Returns:
 /// - 0 on success

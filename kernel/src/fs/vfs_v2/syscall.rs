@@ -26,7 +26,7 @@
 //!
 //! ## VFS Namespace Isolation
 //!
-//! Each task can have its own VFS namespace (Option<Arc<VfsManager>>).
+//! Each task can have its own VFS namespace (`Option<Arc<VfsManager>>`).
 //! System calls operate within the task's namespace, enabling containerization
 //! and process isolation.
 //!

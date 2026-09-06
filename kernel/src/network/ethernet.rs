@@ -120,7 +120,7 @@ pub struct EthernetInterfaceInfo {
 pub struct EthernetLayer {
     /// Registered interfaces: name -> info
     interfaces: IrqRwSpinLock<BTreeMap<String, EthernetInterfaceInfo>>,
-    /// Interface devices: name -> device (kept separate for Arc<dyn> handling)
+    /// Interface devices: name -> device (kept separate for `Arc<dyn NetworkInterface>` handling)
     devices: IrqRwSpinLock<BTreeMap<String, Arc<dyn NetworkInterface>>>,
     /// Default interface name
     default_interface: IrqRwSpinLock<Option<String>>,

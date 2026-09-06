@@ -699,7 +699,7 @@ pub struct TmpNode {
     children: IrqRwSpinLock<BTreeMap<String, Arc<dyn VfsNode>>>,
     /// Parent node (weak reference to avoid cycles)
     parent: IrqRwSpinLock<Option<Weak<TmpNode>>>,
-    /// Reference to filesystem (Weak<dyn FileSystemOperations>)
+    /// Reference to filesystem (`Weak<dyn FileSystemOperations>`)
     filesystem: IrqRwSpinLock<Option<Weak<dyn FileSystemOperations>>>,
 }
 

@@ -29,7 +29,7 @@ const SYS_CNTKCTL_EL12: u32 = sys_reg(3, 5, 14, 1, 0);
 
 /// Build a system register encoding in the pre-shifted format used by
 /// read_sysreg / write_sysreg.  `value << 5` yields the instruction bits
-/// [20:5] per ARM DDI 0487 §C5.2.
+/// `[20:5]` per ARM DDI 0487 §C5.2.
 const fn sys_reg(op0: u32, op1: u32, crn: u32, crm: u32, op2: u32) -> u32 {
     (op0 << 14) | (op1 << 11) | (crn << 7) | (crm << 3) | op2
 }

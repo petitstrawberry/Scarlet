@@ -98,8 +98,9 @@ pub(crate) const SCHED_AFFINITY_KIND_MASK: u8 = 2;
 ///
 /// Independently derived from the EEVDF/CFS proportional-share principle:
 /// each nice level changes the weight by a factor of approximately 1.25,
-/// giving roughly a 9.3× spread between nice −20 and nice +19. The values
-/// are computed at compile time via [`compute_weight_table`]; they are
+/// giving approximately a `1.25^39` spread between nice −20 and nice +19 before
+/// integer rounding. The values are computed at compile time via
+/// `compute_weight_table`; they are
 /// **not** copied from any other operating system source.
 pub const SCHED_PRIO_TO_WEIGHT: [u32; 40] = compute_weight_table();
 

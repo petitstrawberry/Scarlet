@@ -59,7 +59,7 @@ fn get_esr_el1() -> u64 {
     val
 }
 
-/// Exception Class (ESR_EL1[31:26])
+/// Exception Class (`ESR_EL1[31:26]`)
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[repr(u8)]
 pub enum ExceptionClass {

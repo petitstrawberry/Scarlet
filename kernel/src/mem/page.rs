@@ -1,3 +1,10 @@
+//! Page-sized storage and owned PMM allocations.
+//!
+//! PMM helpers return kernel direct-map pointers to physical allocations;
+//! deprecated boxed helpers use the kernel heap instead. Raw pointers do not
+//! retain an allocation. Keep its owner alive until all CPU and device accesses
+//! have finished, and do not pass PMM storage to the global heap allocator.
+
 extern crate alloc;
 
 use alloc::boxed::Box;
@@ -28,7 +35,9 @@ impl Page {
 /// * `num_of_pages` - The number of pages to allocate
 ///
 /// # Returns
-/// A pointer to the allocated pages, or null if allocation failed.
+/// A kernel direct-map pointer to zeroed, physically contiguous pages, or null
+/// if the count is zero or allocation fails. The caller owns the allocation and
+/// must release it once with [`free_raw_pages`] and the original page count.
 pub fn allocate_raw_pages(num_of_pages: usize) -> *mut Page {
     if num_of_pages == 0 {
         return core::ptr::null_mut();
@@ -39,7 +48,7 @@ pub fn allocate_raw_pages(num_of_pages: usize) -> *mut Page {
         None => return core::ptr::null_mut(),
     };
 
-    // Identity mapping: VA = PA
+    // Access the physical allocation through its current kernel HHDM alias.
     let vaddr = phys_to_virt(paddr) as *mut Page;
 
     // Zero-initialize the pages
@@ -56,10 +65,13 @@ pub fn allocate_raw_pages(num_of_pages: usize) -> *mut Page {
 ///
 /// # Arguments
 /// * `num_of_pages` - The number of pages to allocate
-/// * `align` - The alignment in bytes (must be a power of 2 and >= PAGE_SIZE)
+/// * `align` - Required physical alignment in bytes (must be a power of two and
+///   at least `PAGE_SIZE`; this wrapper does not validate that requirement).
 ///
 /// # Returns
-/// A pointer to the allocated pages with the specified alignment.
+/// A kernel direct-map pointer to zeroed, physically contiguous pages with the
+/// requested physical alignment, or null for a zero count or allocation failure.
+/// Ownership and release requirements are the same as [`allocate_raw_pages`].
 pub fn allocate_raw_pages_aligned(num_of_pages: usize, align: usize) -> *mut Page {
     if num_of_pages == 0 {
         return core::ptr::null_mut();
@@ -85,8 +97,20 @@ pub fn allocate_raw_pages_aligned(num_of_pages: usize, align: usize) -> *mut Pag
 /// Frees a number of pages back to PMM.
 ///
 /// # Arguments
-/// * `pages` - A pointer to the pages to free
-/// * `num_of_pages` - The number of pages to free
+/// * `pages` - The original kernel direct-map pointer returned by a PMM allocation.
+/// * `num_of_pages` - The original requested page count, not a rounded buddy size.
+///
+/// # Returns
+///
+/// No value. A null pointer or zero count is a no-op.
+///
+/// # Caller requirements
+///
+/// The caller must exclusively own this live allocation, restore any retagged
+/// direct-map range to `Normal`, and finish all CPU/DMA accesses before freeing.
+/// This legacy safe signature does not enforce ownership or validate that the
+/// pointer and count belong together; misuse can invalidate live memory. Prefer
+/// [`ContiguousPages`], whose drop path retains the count and restores the attribute.
 pub fn free_raw_pages(pages: *mut Page, num_of_pages: usize) {
     if pages.is_null() || num_of_pages == 0 {
         return;
@@ -107,7 +131,13 @@ pub fn free_raw_pages(pages: *mut Page, num_of_pages: usize) {
 /// A boxed slice of the allocated pages.
 ///
 /// # Panics
-/// Panics if allocation fails.
+/// Panics if the array layout cannot be represented. Allocation failure invokes
+/// the global allocation-error handler.
+///
+/// # Known limitation
+///
+/// The implementation passes zero-sized layouts to `alloc_zeroed`, which requires
+/// a nonzero allocation size. Do not call this deprecated helper with zero pages.
 #[deprecated(
     since = "0.1.0",
     note = "This function uses the global heap allocator. Use ContiguousPages::new() for PMM-backed allocations instead."
@@ -142,7 +172,16 @@ pub fn allocate_boxed_pages(num_of_pages: usize) -> Box<[Page]> {
 /// A boxed slice of the allocated pages.
 ///
 /// # Panics
-/// Panics if allocation fails.
+/// Panics if the layout is invalid, or if size arithmetic overflows with overflow
+/// checks enabled. Allocation failure invokes the global allocation-error handler.
+///
+/// # Known limitation
+///
+/// The allocation layout must match the layout used by `Box<[Page]>` on drop.
+/// This implementation does not enforce that: an `align` other than
+/// `align_of::<Page>()` produces a mismatched allocation/deallocation layout, and
+/// zero pages is invalid for `alloc_zeroed`. Do not use this deprecated helper
+/// for custom alignment; use an owned PMM allocation for physical alignment.
 #[deprecated(
     since = "0.1.0",
     note = "This function uses the global heap allocator. Use allocate_raw_pages_aligned() with ContiguousPages for PMM-backed allocations instead."
@@ -182,6 +221,10 @@ pub fn free_boxed_page(_page: Box<Page>) {
 }
 
 /// PMM-backed contiguous pages with an owned direct-map memory attribute.
+///
+/// Dropping the owner restores its direct-map attribute to `Normal` and returns
+/// the pages to PMM. It does not wait for DMA or outstanding raw-pointer users;
+/// callers must keep the owner alive until those accesses have finished.
 pub struct ContiguousPages {
     ptr: *mut Page,
     count: usize,
@@ -189,6 +232,15 @@ pub struct ContiguousPages {
 }
 
 impl ContiguousPages {
+    /// Allocate zeroed, physically contiguous pages with the `Normal` attribute.
+    ///
+    /// # Arguments
+    ///
+    /// * `count` - Number of pages to allocate.
+    ///
+    /// # Returns
+    ///
+    /// An owning allocation, or `None` for zero pages or allocation failure.
     pub fn new(count: usize) -> Option<Self> {
         if count == 0 {
             return None;
@@ -212,11 +264,11 @@ impl ContiguousPages {
     ///
     /// * `count` - Number of pages to allocate.
     /// * `align` - Physical alignment in bytes. Values below `PAGE_SIZE` are
-    ///   rounded up to `PAGE_SIZE`.
+    ///   rounded up to `PAGE_SIZE`; larger values must be powers of two.
     ///
     /// # Returns
     ///
-    /// Aligned contiguous pages, or `None` when allocation fails.
+    /// Aligned contiguous pages, or `None` for a zero count or allocation failure.
     pub fn new_aligned(count: usize, align: usize) -> Option<Self> {
         if count == 0 {
             return None;
@@ -334,9 +386,21 @@ impl ContiguousPages {
 
     /// Create from raw parts.
     ///
+    /// # Arguments
+    ///
+    /// * `ptr` - Original kernel direct-map pointer to a live PMM allocation.
+    /// * `count` - Original nonzero requested page count.
+    ///
     /// # Safety
-    /// `ptr` must point to a valid allocation of `count` pages
-    /// that was previously obtained from PMM.
+    /// `ptr` must point to a valid allocation of `count` pages that was previously
+    /// obtained from PMM, with the direct-map attribute set to `Normal`. The caller
+    /// must transfer exclusive ownership: no other owner may free these pages,
+    /// and any outstanding CPU/DMA accesses must finish before this owner is
+    /// dropped or retagged. Heap allocations are not accepted.
+    ///
+    /// # Returns
+    ///
+    /// An owner that will restore the attribute and free the allocation on drop.
     pub unsafe fn from_raw(ptr: *mut Page, count: usize) -> Self {
         debug_assert!(!ptr.is_null());
         debug_assert!(count > 0);

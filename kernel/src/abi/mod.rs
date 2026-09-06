@@ -31,6 +31,8 @@ pub const MAX_ABI_LENGTH: usize = 64;
 /// a userland runtime instead of being loaded directly by the kernel.
 ///
 /// # Examples
+///
+/// Possible uses of this delegation mechanism, not a list of bundled runtimes:
 /// - MS-DOS binaries executed via DOSBox (Linux ABI)
 /// - Wasm binaries executed via a Scarlet-native Wasm runtime
 /// - Java bytecode executed via a JVM
@@ -54,25 +56,63 @@ pub struct RuntimeConfig {
 /// ABI modules are responsible for handling system calls and providing
 /// the necessary functionality for different application binary interfaces.
 ///
-/// Each ABI module must implement Clone to support task cloning with
-/// independent ABI state per task.
+/// Each ABI module supplies [`AbiModule::clone_boxed`] for task cloning; the
+/// trait does not require Rust's `Clone` trait. Separate ABI instances may still
+/// share process-wide state through owned references where the ABI requires it.
 ///
 pub trait AbiModule: Send + Sync + 'static {
+    /// Return the name used to register this concrete ABI implementation.
+    ///
+    /// # Arguments
+    /// No arguments; callable for a concrete `Self` type.
+    ///
+    /// # Returns
+    /// The static registry name.
     fn name() -> &'static str
     where
         Self: Sized;
 
+    /// Return this instance's ABI name.
+    ///
+    /// # Arguments
+    /// * `self` - ABI instance to inspect.
+    ///
+    /// # Returns
+    /// An owned name corresponding to its registry entry.
     fn get_name(&self) -> String;
 
     /// Clone this ABI module into a boxed trait object
     ///
     /// This method enables cloning ABI modules as trait objects,
-    /// allowing each task to have its own independent ABI instance.
+    /// allowing each task to have its own ABI instance. This need not deeply
+    /// copy process-shared state; sharing must follow the ABI's cloning semantics.
+    ///
+    /// # Arguments
+    /// * `self` - ABI instance whose state is to be cloned.
+    ///
+    /// # Returns
+    /// A boxed ABI instance for the child task.
     fn clone_boxed(&self) -> Box<dyn AbiModule + Send + Sync>;
 
+    /// Dispatch a system call according to this ABI's register and error conventions.
+    ///
+    /// # Arguments
+    /// * `trapframe` - Saved user context containing the syscall number and arguments.
+    ///
+    /// # Returns
+    /// The ABI-encoded return value, or a kernel-side dispatch error. An `Ok`
+    /// value can itself encode an ABI-level error such as a negative errno.
     fn handle_syscall(&mut self, trapframe: &mut Trapframe) -> Result<usize, &'static str>;
 
     /// Hook invoked after Task::clone_task creates the child
+    ///
+    /// # Arguments
+    /// * `parent_task` - Source task for the clone.
+    /// * `child_task` - Newly created child task.
+    /// * `flags` - Requested resource-sharing and thread-creation flags.
+    ///
+    /// # Returns
+    /// `Ok(())` after ABI-specific child setup, or an error. The default is a no-op.
     fn on_task_cloned(
         &mut self,
         _parent_task: &crate::task::Task,
@@ -86,6 +126,12 @@ pub trait AbiModule: Send + Sync + 'static {
     ///
     /// ABI modules can perform per-ABI teardown such as waking futex waiters,
     /// clearing TLS/robust-list pointers, or delivering exit-related signals.
+    ///
+    /// # Arguments
+    /// * `task` - Exiting task whose ABI-local state is being torn down.
+    ///
+    /// # Returns
+    /// No value. The default implementation performs no teardown.
     fn on_task_exit(&mut self, _task: &crate::task::Task) {}
 
     /// Hook invoked by the current task before it terminates its thread group.
@@ -105,6 +151,9 @@ pub trait AbiModule: Send + Sync + 'static {
     /// This allows each ABI to have its own namespace for task IDs.
     /// By default, returns the root namespace.
     ///
+    /// # Arguments
+    /// * `self` - ABI instance whose task-ID namespace is requested.
+    ///
     /// # Returns
     /// The task namespace for this ABI
     fn get_task_namespace(&self) -> Arc<crate::task::namespace::TaskNamespace> {
@@ -116,6 +165,8 @@ pub trait AbiModule: Send + Sync + 'static {
     /// This method reads binary content directly from the file object and
     /// executes ABI-specific detection logic (magic bytes, header structure,
     /// entry point validation, etc.).
+    /// A detection score is not a substitute for loader validation: explicit ABI
+    /// selection bypasses detection, and the file may change before loading.
     ///
     /// # Arguments
     /// * `file_object` - Binary file to check (in KernelObject format)
@@ -142,7 +193,11 @@ pub trait AbiModule: Send + Sync + 'static {
     /// - 81-100: Perfect match (+ same ABI inheritance, full validation)
     ///
     /// # Example Scoring Strategy
-    /// ```rust
+    ///
+    /// Pseudocode with illustrative format-checking helpers, not methods provided
+    /// by this trait:
+    ///
+    /// ```text
     /// let mut confidence = 0;
     ///
     /// // Basic format check
@@ -198,11 +253,15 @@ pub trait AbiModule: Send + Sync + 'static {
     /// It should convert ABI-specific environment variables to a canonical
     /// Scarlet format that can then be converted to the target ABI.
     ///
-    /// Uses in-place modification to avoid expensive allocations.
+    /// Reuses the supplied vector. Implementations may still allocate while
+    /// rewriting strings or changing its length; this is not allocation-free.
     ///
     /// # Arguments
     /// * `envp` - Mutable reference to environment variables in "KEY=VALUE" format,
     ///            will be modified to contain Scarlet canonical format
+    ///
+    /// # Returns
+    /// No value. The default implementation leaves the environment unchanged.
     ///
     /// # Implementation Guidelines
     /// - Convert paths to absolute Scarlet namespace paths
@@ -220,20 +279,27 @@ pub trait AbiModule: Send + Sync + 'static {
     /// It should convert canonical Scarlet environment variables to this ABI's
     /// specific format and namespace.
     ///
-    /// Uses in-place modification to avoid expensive allocations.
+    /// Reuses the supplied vector, but rewriting strings or adding entries may
+    /// still allocate.
     ///
     /// # Arguments
     /// * `envp` - Mutable reference to environment variables in Scarlet canonical format,
     ///            will be modified to contain this ABI's format
+    ///
+    /// # Returns
+    /// No value. The default implementation leaves the environment unchanged.
     fn denormalize_env_from_scarlet(&self, _envp: &mut Vec<String>) {
         // Default: no conversion needed (assuming target is Scarlet format)
     }
 
     /// Binary execution (each ABI supports its own binary format)
     ///
-    /// This method actually executes a binary that has already been verified
-    /// by can_execute_binary. Use file_object.as_file() to access FileObject,
-    /// and call ABI-specific loaders (ELF, PE, etc.) to load and execute the binary.
+    /// This method loads a binary and prepares its execution context. Use
+    /// `file_object.as_file()` to access `FileObject`, and invoke the appropriate
+    /// ABI-specific loader. The loader must validate the format, bounds, and CPU
+    /// architecture itself: `can_execute_binary` is a detection heuristic and is
+    /// not called when an ABI is selected explicitly. Returning success does not
+    /// itself enter userspace; the caller resumes the prepared context later.
     ///
     /// Environment variables are passed directly as envp array, not stored in task.
     ///
@@ -243,6 +309,10 @@ pub trait AbiModule: Send + Sync + 'static {
     /// * `envp` - Environment variables in "KEY=VALUE" format
     /// * `task` - Target task (modified by this method)
     /// * `trapframe` - Execution context (modified by this method)
+    ///
+    /// # Returns
+    /// `Ok(())` after preparing the new image and registers, or a loader error.
+    /// An error does not by itself guarantee rollback of partially modified state.
     ///
     /// # Implementation Notes
     /// - Use file_object.as_file() to get FileObject
@@ -254,11 +324,15 @@ pub trait AbiModule: Send + Sync + 'static {
     ///
     /// # Return Value Handling in Syscall Context
     /// The Scarlet syscall mechanism works as follows:
-    /// 1. sys_execve() calls this method
+    /// 1. sys_execve() calls this method through TransparentExecutor
     /// 2. sys_execve() returns usize to syscall_handler()
     /// 3. syscall_handler() returns Ok(usize) to syscall_dispatcher()
     /// 4. syscall_dispatcher() returns Ok(usize) to trap handler
     /// 5. Trap handler calls trapframe.set_return_value(usize) automatically
+    ///
+    /// On success, the native `sys_execve()` preserves the return-value register
+    /// prepared by the loader by returning `trapframe.get_return_value()`, rather
+    /// than overwriting a new program's initial register value with zero.
     fn execute_binary(
         &self,
         file_object: &crate::object::KernelObject,
@@ -318,6 +392,8 @@ pub trait AbiModule: Send + Sync + 'static {
     /// * `None` - No runtime delegation, execute directly
     ///
     /// # Example Use Cases
+    ///
+    /// These are extension possibilities, not claims that the runtimes are bundled:
     /// - MS-DOS binaries via DOSBox (Linux ABI runtime)
     /// - Wasm binaries via Scarlet-native Wasm runtime
     /// - Java bytecode via JVM
@@ -331,23 +407,35 @@ pub trait AbiModule: Send + Sync + 'static {
     }
 
     /// Get default working directory for this ABI
+    ///
+    /// # Arguments
+    /// * `self` - ABI instance whose initial working directory is requested.
+    ///
+    /// # Returns
+    /// A path in the ABI's namespace; the default is `/`.
     fn get_default_cwd(&self) -> &str {
         "/" // Default: root directory
     }
 
     /// Setup overlay environment for this ABI (read-only base + writable layer)
     ///
-    /// Creates overlay filesystem with provided base VFS and paths.
+    /// Hook for creating an overlay filesystem with the provided base VFS and paths.
     /// The TransparentExecutor is responsible for providing base_vfs, paths,
     /// and verifying that directories exist. This method assumes that required
     /// directories (/system/{abi}, /data/config/{abi}) have been prepared
     /// by the user/administrator as part of system setup.
+    /// The default implementation does not create an overlay: it returns an error
+    /// because the cross-VFS operation used by this hook is not implemented in VFS v2.
     ///
     /// # Arguments
     /// * `target_vfs` - VfsManager to configure with overlay filesystem
     /// * `base_vfs` - Base VFS containing system and config directories
     /// * `system_path` - Path to read-only base layer (e.g., "/system/scarlet")
     /// * `config_path` - Path to writable persistence layer (e.g., "/data/config/scarlet")
+    ///
+    /// # Returns
+    /// `Ok(())` after an override installs the environment, or an error. The
+    /// default always returns the unsupported cross-VFS operation error.
     fn setup_overlay_environment(
         &self,
         _target_vfs: &Arc<VfsManager>,
@@ -371,12 +459,17 @@ pub trait AbiModule: Send + Sync + 'static {
 
     /// Setup shared resources accessible across all ABIs
     ///
-    /// Bind mounts common directories that should be shared from base VFS.
+    /// Hook for bind-mounting common directories that should be shared from base VFS.
     /// The TransparentExecutor is responsible for providing base_vfs.
+    /// The default implementation succeeds without creating any mounts.
     ///
     /// # Arguments
     /// * `target_vfs` - VfsManager to configure
     /// * `base_vfs` - Base VFS containing shared directories
+    ///
+    /// # Returns
+    /// `Ok(())` after setup, or an override's error. With the default no-op this
+    /// does not imply that `/home`, `/data/shared`, or `/scarlet` was mounted.
     fn setup_shared_resources(
         &self,
         _target_vfs: &Arc<VfsManager>,
@@ -397,7 +490,8 @@ pub trait AbiModule: Send + Sync + 'static {
     /// Handle incoming event from EventManager
     ///
     /// This method is called when an event is delivered to a task using this ABI.
-    /// Each ABI can implement its own event handling strategy:
+    /// Each ABI can implement its own event handling strategy. Possible strategies
+    /// include the following; they are not guarantees made by this default hook:
     /// - Scarlet ABI: Handle-based queuing with EventSubscription objects
     /// - xv6 ABI: POSIX-like signals and pipe notifications
     /// - Other ABIs: Custom event processing mechanisms
@@ -409,6 +503,8 @@ pub trait AbiModule: Send + Sync + 'static {
     /// # Returns
     /// * `Ok(outcome)` describing how event processing should proceed
     /// * `Err(message)` if event delivery failed
+    ///
+    /// The default ignores the event and returns `Ok(EventProcessOutcome::Continue)`.
     fn handle_event(
         &mut self,
         _event: crate::ipc::Event,
@@ -422,6 +518,12 @@ pub trait AbiModule: Send + Sync + 'static {
     ///
     /// Default implementation does nothing - ABIs that support TLS
     /// should override this method.
+    ///
+    /// # Arguments
+    /// * `ptr` - ABI-specific user TLS pointer to record for this task.
+    ///
+    /// # Returns
+    /// No value. Recording a pointer does not validate its user memory.
     fn set_tls_pointer(&mut self, _ptr: usize) {
         // Default: do nothing
     }
@@ -430,14 +532,26 @@ pub trait AbiModule: Send + Sync + 'static {
     ///
     /// Default implementation returns None - ABIs that support TLS
     /// should override this method.
+    ///
+    /// # Arguments
+    /// * `self` - ABI instance whose recorded TLS pointer is requested.
+    ///
+    /// # Returns
+    /// The recorded pointer, or `None` when unavailable; this is not a memory-access check.
     fn get_tls_pointer(&self) -> Option<usize> {
         None
     }
 
     /// Set the clear_child_tid pointer for thread exit notification
     ///
-    /// Default implementation does nothing - ABIs that support TLS
-    /// should override this method.
+    /// Default implementation does nothing - ABIs that support clear-child-TID
+    /// exit notifications should override this method.
+    ///
+    /// # Arguments
+    /// * `ptr` - User address used by the ABI for thread-exit notification.
+    ///
+    /// # Returns
+    /// No value. An override must validate user memory when accessing the address.
     fn set_clear_child_tid(&mut self, _ptr: usize) {
         // Default: do nothing
     }
@@ -446,6 +560,15 @@ pub trait AbiModule: Send + Sync + 'static {
     ///
     /// This allows code to downcast the AbiModule to a concrete type
     /// to access ABI-specific functionality.
+    ///
+    /// # Arguments
+    /// * `self` - ABI instance to inspect.
+    ///
+    /// # Returns
+    /// A type-erased shared borrow when implemented by the ABI.
+    ///
+    /// # Panics
+    /// The default implementation always panics; ABIs supporting downcasting must override it.
     fn as_any(&self) -> &dyn core::any::Any {
         panic!("as_any not implemented for this ABI")
     }
@@ -454,6 +577,15 @@ pub trait AbiModule: Send + Sync + 'static {
     ///
     /// This allows code to downcast the AbiModule to a concrete type
     /// to access ABI-specific functionality.
+    ///
+    /// # Arguments
+    /// * `self` - Exclusively borrowed ABI instance.
+    ///
+    /// # Returns
+    /// A type-erased exclusive borrow when implemented by the ABI.
+    ///
+    /// # Panics
+    /// The default implementation always panics; ABIs supporting downcasting must override it.
     fn as_any_mut(&mut self) -> &mut dyn core::any::Any {
         panic!("as_any_mut not implemented for this ABI")
     }

@@ -70,8 +70,8 @@ pub trait CdcNcmTransport: Send + Sync {
     /// # Returns
     ///
     /// `Ok(())` once the host controller accepts the request. Completion is
-    /// reported asynchronously through [`CdcNcmDevice::handle_transmit_complete`]
-    /// or [`CdcNcmDevice::handle_transmit_error`].
+    /// reported asynchronously through `CdcNcmDevice::handle_transmit_complete`
+    /// or `CdcNcmDevice::handle_transmit_error`.
     fn enqueue_ntb(&self, ntb: Vec<u8>, frame_len: usize) -> Result<(), &'static str>;
 
     /// Program the CDC Ethernet packet filter on the control interface.

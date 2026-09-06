@@ -168,9 +168,15 @@ impl PageTableEntry {
         self.entry & 1 == 1
     }
 
-    /// Check if this is a table descriptor (not a block/page leaf)
-    /// For L0-L2: bits[1:0] = 0b11 means table, 0b01 means block
-    /// For L3: always page descriptor (bits[1:0] = 0b11)
+    /// Check whether the low descriptor bits are `0b11`.
+    ///
+    /// At a non-leaf table level this pattern identifies a table descriptor;
+    /// at L3 it identifies a page descriptor instead. This method does not take
+    /// a level argument, so callers must not use it alone to distinguish a
+    /// next-level table from an L3 page leaf.
+    ///
+    /// # Returns
+    /// `true` when bits `[1:0]` are `0b11`, including for L3 pages.
     pub fn is_table(&self) -> bool {
         self.is_valid() && (self.entry & 0x3) == 0x3
     }
@@ -195,13 +201,13 @@ impl PageTableEntry {
         self
     }
 
-    /// Set as table descriptor (L0-L2): bits[1:0] = 0b11
+    /// Set as table descriptor (L0-L2): bits `[1:0]` = `0b11`
     pub fn set_table(&mut self) -> &mut Self {
         self.entry |= 0x3;
         self
     }
 
-    /// Set as page descriptor (L3): bits[1:0] = 0b11, AF=1
+    /// Set as page descriptor (L3): bits `[1:0]` = `0b11`, AF=1
     pub fn set_page(&mut self) -> &mut Self {
         self.entry |= 0x3;
         self.entry |= 1 << 10; // AF (Access Flag)

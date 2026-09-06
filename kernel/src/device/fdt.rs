@@ -219,8 +219,8 @@ impl<'a> FdtManager<'a> {
     /// in the /chosen node.
     ///
     /// # Returns
-    /// Option<MemoryArea>: If the initramfs region is found, returns Some(MemoryArea),
-    /// otherwise returns None.
+    /// `Option<MemoryArea>`: If the initramfs region is found, returns `Some(MemoryArea)`,
+    /// otherwise returns `None`.
     pub fn get_initramfs(&self) -> Option<MemoryArea> {
         let fdt = self.get_fdt()?;
 

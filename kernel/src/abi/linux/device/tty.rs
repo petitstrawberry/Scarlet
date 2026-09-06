@@ -84,7 +84,7 @@ struct Winsize {
 
 /// Minimal Linux termios (asm-generic) layout for TCGETS.
 /// This mirrors asm-generic: 4x tcflag_t (u32), 1x cc line (u8),
-/// c_cc[19] (u8), and ispeed/ospeed (u32 each).
+/// `c_cc: [u8; 19]`, and ispeed/ospeed (u32 each).
 #[repr(C)]
 struct LinuxTermios {
     c_iflag: u32,

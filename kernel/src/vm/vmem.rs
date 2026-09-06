@@ -1,3 +1,6 @@
+//! Memory-range and mapping descriptors; constructing one does not allocate memory
+//! or install page-table entries. [`MemoryArea`] uses inclusive end addresses.
+
 use crate::object::capability::memory_mapping::MemoryMappingOps;
 use alloc::sync::Arc;
 use core::fmt;
@@ -61,15 +64,20 @@ impl Default for VirtualMemoryMap {
 impl VirtualMemoryMap {
     /// Creates a new virtual memory map with the given physical and virtual memory areas.
     ///
+    /// This only constructs a descriptor. It does not validate the ranges or
+    /// install a mapping in a page table.
+    ///
     /// # Arguments
     /// * `pmarea` - The physical memory area to map
     /// * `vmarea` - The virtual memory area to map to
     /// * `permissions` - The permissions to set for the virtual memory area
     /// * `is_shared` - Whether this memory map should be shared between tasks
-    /// * `owner` - Optional weak reference to the object that created this mapping (None for anonymous mappings)
+    /// * `owner` - Optional strong reference retained by this descriptor. `None`
+    ///   means that no object supplies owner-based fault resolution for the mapping.
     ///
     /// # Returns
-    /// A new virtual memory map with the given physical and virtual memory areas.
+    /// A new virtual memory map with the given physical and virtual memory areas,
+    /// `vm_start` set to `vmarea.start`, and the `Normal` memory attribute.
     pub fn new(
         pmarea: MemoryArea,
         vmarea: MemoryArea,
@@ -117,19 +125,45 @@ pub enum MemoryAttribute {
     Device,
 }
 
+/// An inclusive address range, without ownership or mapping validation.
+///
+/// The caller determines whether the addresses are physical or virtual. Copying
+/// this descriptor does not copy, retain, or map the underlying memory.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MemoryArea {
+    /// First address in the range.
     pub start: usize,
+    /// Last address in the range, inclusive.
     pub end: usize,
 }
 
 impl MemoryArea {
     /// Creates a new memory area with the given start and end addresses
+    ///
+    /// # Arguments
+    ///
+    /// * `start` - First address in the range.
+    /// * `end` - Inclusive last address; not an exclusive bound.
+    ///
+    /// # Returns
+    ///
+    /// An unchecked range descriptor. No memory is allocated or accessed.
     pub fn new(start: usize, end: usize) -> Self {
         Self { start, end }
     }
 
     /// Creates a new memory area from a pointer and size
+    ///
+    /// # Arguments
+    ///
+    /// * `ptr` - Address to record; this constructor does not dereference it.
+    /// * `size` - Byte count. For nonzero sizes, `ptr as usize + size` must not
+    ///   overflow. The legacy zero-size case records `start == end`, which
+    ///   represents one byte under the inclusive-range convention, not an empty range.
+    ///
+    /// # Returns
+    ///
+    /// A descriptor of the supplied addresses, without retaining the allocation.
     pub fn from_ptr(ptr: *const u8, size: usize) -> Self {
         let start = ptr as usize;
         let end = if size > 0 { start + size - 1 } else { start };
@@ -137,6 +171,15 @@ impl MemoryArea {
     }
 
     /// Returns the size of the memory area in bytes
+    ///
+    /// # Returns
+    ///
+    /// `end - start + 1`. The inclusive byte count must fit in `usize`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `start > end`, or on arithmetic overflow when overflow checks
+    /// are enabled.
     pub fn size(&self) -> usize {
         if self.start > self.end {
             panic!(
@@ -149,10 +192,17 @@ impl MemoryArea {
 
     /// Returns a slice reference to the memory area
     ///
+    /// # Arguments
+    ///
+    /// * `self` - An inclusive range of kernel virtual addresses, not physical addresses.
+    ///
     /// # Safety
-    /// This function assumes that the start and end of MemoryArea point to valid memory ranges.
-    /// If not, undefined behavior may occur.
-    /// Therefore, make sure that MemoryArea points to a valid range before using this function.
+    /// The entire range must be non-null, readable, initialized memory within a
+    /// single live allocation, with a representable length no greater than
+    /// `isize::MAX`. It must remain mapped and allocated for the returned borrow.
+    /// No writes, including concurrent CPU or DMA writes, may occur during that
+    /// borrow. The descriptor itself does not establish any of these conditions;
+    /// violating them can cause undefined behavior.
     ///
     /// # Returns
     ///
@@ -164,10 +214,19 @@ impl MemoryArea {
 
     /// Returns a mutable slice reference to the memory area
     ///
+    /// # Arguments
+    ///
+    /// * `self` - An inclusive range of kernel virtual addresses, not physical addresses.
+    ///
     /// # Safety
-    /// This function assumes that the start and end of MemoryArea point to valid memory ranges.
-    /// If not, undefined behavior may occur.
-    /// Therefore, make sure that MemoryArea points to a valid range before using this function.
+    /// The entire range must be non-null, readable and writable, initialized
+    /// memory within a single live allocation, with a representable length no
+    /// greater than `isize::MAX`. It must remain mapped and allocated for the
+    /// returned borrow. The caller must guarantee exclusive access for that
+    /// lifetime: no overlapping references or concurrent CPU/DMA accesses are
+    /// allowed, including accesses through copies of this descriptor. A shared
+    /// borrow of `MemoryArea` does not enforce this exclusivity. Violating these
+    /// conditions can cause undefined behavior.
     ///
     /// # Returns
     ///

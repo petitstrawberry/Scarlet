@@ -20,8 +20,10 @@ use core::sync::atomic::Ordering;
 
 /// Task state backup for exec rollback
 ///
-/// This structure contains a complete backup of task state that can be
-/// restored if execve fails. Includes memory state, metadata, and trapframe.
+/// This structure retains the previous page allocations and mappings, selected
+/// task metadata, VCPU state, VFS reference, and trapframe for a restoration
+/// attempt if execve fails. It is not a complete task snapshot: handle state,
+/// ABI-internal state, and side effects within shared objects are not copied.
 struct TaskStateBackup {
     page_allocations: Vec<ContiguousPages>,
     task_pages: Vec<TaskPages>,
@@ -135,11 +137,11 @@ impl TransparentExecutor {
     /// Execute a binary with automatic ABI detection
     ///
     /// This method:
-    /// 1. Backs up current task state (including trapframe) for potential rollback
+    /// 1. Retains the old image and selected task state, including the trapframe
     /// 2. Opens the binary file and detects the appropriate ABI
     /// 3. Sets up VFS environment and working directory for the target ABI
     /// 4. Delegates execution to the detected ABI module
-    /// 5. Restores original state (including trapframe) on failure
+    /// 5. Attempts to restore the retained state on failure
     ///
     /// # Arguments
     /// * `path` - Path to the binary to execute
@@ -151,7 +153,15 @@ impl TransparentExecutor {
     ///
     /// # Returns
     /// * `Ok(())` on successful execution setup
-    /// * `Err(ExecutorError)` if execution setup fails (with task state and trapframe restored)
+    /// * `Err(ExecutorError)` if execution setup fails
+    ///
+    /// # Failure semantics
+    ///
+    /// Restoration is best-effort and covers only the backed-up fields. A failure
+    /// to restore mappings is logged while the original execution error is returned;
+    /// callers must not interpret `Err` as proof of a complete rollback. Changes
+    /// inside shared VFS objects or other ABI-owned resources are not transactional.
+    /// Success prepares the new context; entering userspace happens separately.
     ///
     pub fn execute_binary(
         path: &str,
@@ -168,6 +178,8 @@ impl TransparentExecutor {
     ///
     /// This method extends `execute_binary()` to support additional flags,
     /// particularly for forcing ABI environment reconstruction.
+    /// Explicit selection skips confidence-based ABI detection; the selected
+    /// loader must still validate the binary.
     ///
     /// # Arguments
     /// * `path` - Path to the binary to execute
@@ -180,7 +192,12 @@ impl TransparentExecutor {
     ///
     /// # Returns
     /// * `Ok(())` on successful execution setup
-    /// * `Err(ExecutorError)` if execution setup fails (with task state and trapframe restored)
+    /// * `Err(ExecutorError)` if execution setup fails
+    ///
+    /// # Failure semantics
+    ///
+    /// Uses the same best-effort, partial-state restoration as [`Self::execute_binary`].
+    /// An error is not a guarantee that all task or shared-resource state is unchanged.
     ///
     pub fn execute_with_abi(
         path: &str,
@@ -229,7 +246,7 @@ impl TransparentExecutor {
             force_abi_rebuild,
         );
 
-        // If execution failed, restore original state
+        // If execution failed, attempt to restore the backed-up state.
         if result.is_err() {
             if let Err(restore_err) = backup.restore_to_task(task, trapframe) {
                 // Log restore error but don't override original error

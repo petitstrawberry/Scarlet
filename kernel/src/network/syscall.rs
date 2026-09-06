@@ -351,7 +351,7 @@ pub fn sys_network_list_interfaces(tf: &mut Trapframe) -> usize {
 ///
 /// # Arguments
 ///
-/// The first trapframe argument points to a [`NetworkConfigureIpv4Request`]
+/// The first trapframe argument points to a `NetworkConfigureIpv4Request`
 /// in user memory.
 ///
 /// # Returns
@@ -415,7 +415,7 @@ pub fn sys_network_configure_ipv4(tf: &mut Trapframe) -> usize {
 /// # Arguments
 ///
 /// * Trapframe argument 0 - User pointer to an array of
-///   [`NetworkInterfaceInfoV2`] records.
+///   `NetworkInterfaceInfoV2` records.
 /// * Trapframe argument 1 - Maximum number of records in the array.
 ///
 /// # Returns
@@ -1043,7 +1043,7 @@ pub fn sys_socket_accept(tf: &mut Trapframe) -> usize {
 ///
 /// # Arguments (via trapframe)
 ///
-/// - `a0`: Pointer to array[2] for storing handle IDs
+/// - `a0`: Pointer to a two-element array for storing handle IDs
 ///
 /// # Returns
 ///

@@ -1,4 +1,10 @@
 //! Address translation utilities backed by the kernel memory layout.
+//!
+//! These helpers translate recorded kernel-image, heap, and direct-map ranges;
+//! they do not walk arbitrary page tables or translate userspace/IOREMAP mappings.
+//! Bootloader translation checks broad bounds, while the kernel-owned direct map
+//! checks sparse regions. Neither check establishes ownership, access permissions,
+//! or the safety of dereferencing the returned integer address.
 
 use core::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 
@@ -358,6 +364,9 @@ fn layout() -> &'static KernelMemoryLayout {
 /// This must be called early in the boot process
 /// before any address translation is performed. It records the HHDM offset
 /// and kernel image layout provided by the bootloader.
+/// This records metadata only: it does not install page tables. Boot direct-map
+/// bounds must also be supplied with [`init_bootloader_direct_map_bound`] before
+/// translating direct-map addresses. Boot initialization must serialize these updates.
 ///
 /// # Arguments
 ///
@@ -365,6 +374,10 @@ fn layout() -> &'static KernelMemoryLayout {
 /// * `kernel_phys_base` - Physical base address of the kernel image
 /// * `kernel_virt_base` - Virtual base address of the kernel image
 /// * `kernel_image_size` - Size of the kernel image in bytes
+///
+/// # Returns
+///
+/// No value. Records the boot layout and selects the bootloader translation phase.
 pub fn init_boot_addressing(
     hhdm_offset: usize,
     kernel_phys_base: usize,
@@ -390,6 +403,10 @@ pub fn init_boot_addressing(
 /// * `kernel_phys_base` - Physical base address of the kernel image
 /// * `kernel_virt_base` - Virtual base address of the kernel image
 /// * `kernel_image_size` - Size of the kernel image in bytes
+///
+/// # Returns
+///
+/// No value. Has the same metadata-only effect as [`init_boot_addressing`].
 pub fn init_limine_addressing(
     hhdm_offset: usize,
     kernel_phys_base: usize,
@@ -404,10 +421,13 @@ pub fn init_limine_addressing(
     );
 }
 
-/// Check if address translation is initialized and ready to use.
+/// Check whether the layout phase has left its uninitialized state.
 ///
-/// Returns `true` after `init_boot_addressing()` has been called,
-/// indicating that address translation functions can be safely used.
+/// # Returns
+///
+/// `true` after boot layout initialization in the normal boot sequence. This
+/// checks only the phase flag, not the direct-map bounds, active page tables,
+/// or whether any particular address is safe to access.
 #[inline(always)]
 pub fn address_translation_ready() -> bool {
     layout().phase() != KernelMemoryPhase::Uninitialized
@@ -415,14 +435,18 @@ pub fn address_translation_ready() -> bool {
 
 /// Set the bootloader-only direct-map physical bounds.
 ///
-/// This records Limine's active page-table coverage for early translation.
+/// This records the bootloader's broad bounds for early translation.
 /// The bounds can include reserved ranges and holes, so Scarlet must not use
-/// them for its runtime sparse direct map.
+/// them for its runtime sparse direct map or as proof that every byte is mapped RAM.
 ///
 /// # Arguments
 ///
-/// * `start` - Start of Limine's broad direct-map physical bounds.
-/// * `end` - Inclusive end of Limine's broad direct-map physical bounds.
+/// * `start` - Start of the bootloader's broad direct-map physical bounds.
+/// * `end` - Inclusive end of the bootloader's broad direct-map physical bounds.
+///
+/// # Returns
+///
+/// No value. Updates metadata without changing page tables.
 pub fn init_bootloader_direct_map_bound(start: usize, end: usize) {
     layout().set_bootloader_direct_map_bound(start, end);
 }
@@ -432,6 +456,9 @@ pub fn init_bootloader_direct_map_bound(start: usize, end: usize) {
 /// This should be called after switching from the bootloader's page tables
 /// to Scarlet's own page tables. It updates the direct-map and heap
 /// layout information for runtime address translation.
+/// The boot path must serialize this publication; the region table is installed
+/// only once. This selects the `BootKernel` phase, not the final `Runtime` phase,
+/// and does not itself switch page tables or invalidate TLB entries.
 ///
 /// # Arguments
 ///
@@ -440,6 +467,14 @@ pub fn init_bootloader_direct_map_bound(start: usize, end: usize) {
 /// * `heap_phys_base` - Physical base address of the kernel heap
 /// * `heap_virt_base` - Virtual base address of the kernel heap
 /// * `heap_size` - Size of the kernel heap in bytes
+///
+/// # Returns
+///
+/// No value. Publishes the kernel-owned translation metadata.
+///
+/// # Panics
+///
+/// Panics if `direct_map_regions` is empty.
 pub fn transition_kernel_memory_layout(
     direct_map_offset: usize,
     direct_map_regions: DirectMapRegions,
@@ -458,9 +493,14 @@ pub fn transition_kernel_memory_layout(
 
 /// Finalize the memory layout for full runtime operation.
 ///
-/// Marks the memory layout as fully initialized. After this call,
-/// the system is in the Runtime phase and all address translation
-/// functions operate in their final configuration.
+/// Marks the memory layout as being in the `Runtime` phase after the boot path
+/// has published the kernel-owned layout. This only changes the phase flag;
+/// it does not validate the layout or modify page tables. Boot-specific helpers
+/// still use bootloader metadata, and runtime memory attributes can still change.
+///
+/// # Returns
+///
+/// No value.
 pub fn finalize_runtime_memory_layout() {
     layout().finalize_runtime();
 }
@@ -544,11 +584,21 @@ pub fn get_heap_phys_layout() -> Option<(usize, usize, usize)> {
 /// Set the HHDM (Higher Half Direct Map) offset for address translation.
 ///
 /// This updates the offset used for converting between physical and virtual
-/// addresses in the direct-mapped region.
+/// addresses in the direct-mapped region. It is a boot-layout compatibility
+/// helper, not a remapping operation: callers must coordinate the matching page
+/// tables and serialize the update. It reselects the `BootKernel` phase.
 ///
 /// # Arguments
 ///
 /// * `new_offset` - The new HHDM offset value
+///
+/// # Returns
+///
+/// No value. Changes metadata only, without moving memory or flushing TLBs.
+///
+/// # Panics
+///
+/// Panics if the runtime direct-map regions have not been published.
 pub fn set_hhdm_offset(new_offset: usize) {
     let direct_map_regions = runtime_direct_map_regions()
         .expect("cannot update the HHDM offset before the runtime direct map is published");
@@ -569,7 +619,10 @@ pub fn set_hhdm_offset(new_offset: usize) {
 
 /// Get the current HHDM (Higher Half Direct Map) offset.
 ///
-/// Returns the offset used for the current runtime address translation.
+/// # Returns
+///
+/// The bootloader offset during the bootloader phase, otherwise the kernel-owned
+/// offset. This does not establish that a particular physical address is mapped.
 #[inline(always)]
 pub fn get_hhdm_offset() -> usize {
     layout().current_direct_map_bound().offset
@@ -588,19 +641,38 @@ pub fn get_boot_hhdm_offset() -> usize {
 ///
 /// Uses the bootloader-provided HHDM offset. This should only be called
 /// during early boot before transitioning to kernel-owned page tables.
+/// The broad bound check does not exclude holes or verify access permissions.
+///
+/// # Arguments
+///
+/// * `paddr` - Physical address within the recorded boot direct-map bounds.
+///
+/// # Returns
+///
+/// The bootloader direct-map virtual address, without dereferencing it.
 ///
 /// # Panics
 ///
-/// Panics if the physical address is outside the boot direct-map range.
+/// Panics if the boot layout is unavailable, the physical address is outside
+/// its direct-map bounds, or adding the offset overflows.
 #[inline(always)]
 pub fn boot_phys_to_virt(paddr: usize) -> usize {
     layout().phys_to_boot_virt(paddr)
 }
 
-/// Convert a virtual address to physical address (runtime).
+/// Convert a kernel virtual address using the currently selected layout.
 ///
-/// Uses the current runtime memory layout. This should be called after
-/// the kernel has transitioned to its own page tables.
+/// Recognizes the kernel image, the recorded heap, and the current direct map.
+/// It is not a general page-table walk: use the relevant address-space/page-table
+/// API for userspace, IOREMAP, and other mappings outside these recorded ranges.
+///
+/// # Arguments
+///
+/// * `vaddr` - Kernel virtual address in one of the recorded ranges.
+///
+/// # Returns
+///
+/// The corresponding physical address. No memory is accessed or retained.
 ///
 /// # Panics
 ///
@@ -625,6 +697,14 @@ pub fn virt_to_phys(vaddr: usize) -> usize {
 /// Uses the bootloader-provided memory layout. This should be called
 /// during early boot for addresses provided by the bootloader.
 ///
+/// # Arguments
+///
+/// * `vaddr` - Address in the recorded kernel image or broad boot direct-map bounds.
+///
+/// # Returns
+///
+/// The physical address calculated from boot metadata, without checking page tables.
+///
 /// # Panics
 ///
 /// Panics with caller information if the virtual address cannot be mapped
@@ -643,13 +723,24 @@ pub fn boot_virt_to_phys(vaddr: usize) -> usize {
     })
 }
 
-/// Convert a physical address to virtual address (runtime).
+/// Convert a physical address to its current direct-map virtual address.
 ///
-/// Uses the current runtime memory layout (HHDM offset).
+/// Uses broad bounds during the bootloader phase and sparse region membership
+/// after the kernel-owned layout is published. This does not prove the memory is
+/// allocated, readable, writable, or suitable for ordinary rather than MMIO access.
+///
+/// # Arguments
+///
+/// * `paddr` - Physical address covered by the selected direct-map metadata.
+///
+/// # Returns
+///
+/// `paddr` plus the current HHDM offset, without dereferencing it.
 ///
 /// # Panics
 ///
-/// Panics if the physical address is outside a current sparse direct-map region.
+/// Panics if the layout is unavailable, the address is outside the selected
+/// direct map, or adding the offset overflows.
 #[inline(always)]
 pub fn phys_to_virt(paddr: usize) -> usize {
     layout().phys_to_current_virt(paddr)
@@ -693,8 +784,14 @@ pub fn phys_to_kernel_image_virt(paddr: usize) -> usize {
 
 /// Check if a virtual address is in the direct-mapped region.
 ///
-/// Returns `true` if the address can be translated to physical
-/// via simple HHDM offset subtraction.
+/// # Arguments
+///
+/// * `vaddr` - Virtual address to check against the current direct-map metadata.
+///
+/// # Returns
+///
+/// `true` for a recorded sparse region, or for the broad bootloader bounds during
+/// the bootloader phase. This is a metadata membership test, not an access-safety check.
 #[inline(always)]
 pub fn is_direct_mapped(vaddr: usize) -> bool {
     let direct_map = layout().current_direct_map_bound();
@@ -712,6 +809,8 @@ pub fn is_direct_mapped(vaddr: usize) -> bool {
 }
 
 /// A wrapper type representing a physical address.
+///
+/// Construction does not validate the address, allocate memory, or retain ownership.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PhysAddr(pub usize);
 
@@ -759,6 +858,8 @@ impl PhysAddr {
 }
 
 /// A wrapper type representing a virtual address.
+///
+/// Construction does not validate a mapping, permissions, or pointer provenance.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct VirtAddr(pub usize);
 

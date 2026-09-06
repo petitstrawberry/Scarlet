@@ -377,8 +377,8 @@ fn write_u64_le(ptr: *mut u8, val: u64) {
 ///
 /// ADRP encodes: result = page(S + A) - page(P)
 /// The 21-bit signed immediate is split across two bit fields:
-///   - immlo: bits [1:0] of (result >> 12)
-///   - immhi: bits [20:2] of (result >> 12)
+///   - immlo: bits `[1:0]` of `result >> 12`, written to instruction bits `[30:29]`
+///   - immhi: bits `[20:2]` of `result >> 12`, written to instruction bits `[23:5]`
 fn patch_adrp(ptr: *mut u8, page_offset: i64) -> Result<(), &'static str> {
     let value = page_offset >> 12;
     if !fits_signed(value, 21) {
@@ -410,7 +410,7 @@ fn patch_adr(ptr: *mut u8, offset: i64) -> Result<(), &'static str> {
 
 /// Patch the 12-bit immediate field of LDR/STR/ADD (unsigned offset) instructions.
 ///
-/// Bits [21:10] of the instruction = imm12.
+/// Bits `[21:10]` of the instruction = `imm12`.
 fn patch_ldst_add_imm12(ptr: *mut u8, imm12: i64) {
     let imm = (imm12 as u32) & 0xFFF;
     let instruction = read_u32_le(ptr.cast_const());
@@ -418,9 +418,12 @@ fn patch_ldst_add_imm12(ptr: *mut u8, imm12: i64) {
     write_u32_le(ptr, patched);
 }
 
-/// Patch B/BL instruction with a 26-bit signed offset.
+/// Patch B/BL with a byte offset encoded in a 26-bit signed immediate.
 ///
-/// Bits [31:26] = imm26 where imm26 = offset >> 2.
+/// Instruction bits `[25:0]` receive `imm26 = offset >> 2`;
+/// the opcode in bits `[31:26]` is preserved.
+/// The caller must supply a four-byte-aligned offset. Current validation rejects
+/// odd offsets but does not reject bit 1; a two-byte-only alignment is truncated.
 fn patch_b26(ptr: *mut u8, offset: i64) -> Result<(), &'static str> {
     if offset & 1 != 0 {
         return Err("B/BL offset is not 2-byte aligned");
@@ -437,9 +440,10 @@ fn patch_b26(ptr: *mut u8, offset: i64) -> Result<(), &'static str> {
 
 /// Patch MOVZ or MOVK instruction with a 16-bit immediate.
 ///
-/// MOVZ: load zero with 16-bit immediate at given shift
-/// MOVK: keep bits and OR in 16-bit immediate at given shift
-/// Bits [21:5] = imm16, bits [20:5] are shared between MOVZ and MOVK.
+/// MOVZ replaces the destination with the shifted immediate and zeros elsewhere;
+/// MOVK replaces the selected 16-bit field while keeping the other destination bits.
+/// This helper patches instruction bits `[20:5]` with `imm16`, preserving the
+/// instruction's opcode and shift fields.
 fn patch_movz_movk(ptr: *mut u8, imm16: u32) {
     let instruction = read_u32_le(ptr.cast_const());
     let patched = (instruction & !(0xFFFF << 5)) | ((imm16 & 0xFFFF) << 5);

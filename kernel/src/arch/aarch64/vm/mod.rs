@@ -695,7 +695,7 @@ pub fn setup_trampoline_for_user(_manager: &VirtualMemoryManager) {}
 /// Issue a single inner-shareable broadcast TLB invalidation for the current
 /// EL1 stage-1 translations.
 ///
-/// This is the counterpart to [`RootPageTableGuard::unmap_all_no_flush`]:
+/// This is the counterpart to `RootPageTableGuard::unmap_all_no_flush`:
 /// batched page-table rebuild callers (e.g. `exec`) clear the old address
 /// space without flushing, install fresh mappings, then call this once to
 /// publish the entire set of changes to all PEs.

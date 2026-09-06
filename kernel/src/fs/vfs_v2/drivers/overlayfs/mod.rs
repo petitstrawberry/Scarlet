@@ -199,7 +199,7 @@ impl OverlayFS {
     ///
     /// # Returns
     ///
-    /// Returns an Arc<OverlayFS> on success, or FileSystemError on failure
+    /// Returns an `Arc<OverlayFS>` on success, or `FileSystemError` on failure
     ///
     /// # Example
     ///

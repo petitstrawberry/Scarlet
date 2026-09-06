@@ -36,8 +36,8 @@ fn socket_ipc_error_result(error: crate::ipc::IpcError) -> usize {
 ///
 /// Arguments:
 /// - pipefd: Pointer to an array of 2 integers where file descriptors will be stored
-///   - pipefd[0] will contain the read end file descriptor
-///   - pipefd[1] will contain the write end file descriptor
+///   - `pipefd[0]` will contain the read end file descriptor
+///   - `pipefd[1]` will contain the write end file descriptor
 ///
 /// Returns:
 /// - 0 on success

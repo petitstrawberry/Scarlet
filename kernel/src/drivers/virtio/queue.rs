@@ -171,7 +171,7 @@ impl<'a> VirtQueue<'a> {
     ///
     /// # Returns
     ///
-    /// Option<usize>: The index of the allocated descriptor, or None if no descriptors are available.
+    /// `Option<usize>`: The index of the allocated descriptor, or `None` if no descriptors are available.
     ///
     pub fn alloc_desc(&mut self) -> Option<usize> {
         let desc = self.free_descriptors.pop();
@@ -213,7 +213,7 @@ impl<'a> VirtQueue<'a> {
     ///
     /// # Returns
     ///
-    /// Option<usize>: The index of the first descriptor in the chain, or None if no descriptors are available.
+    /// `Option<usize>`: The index of the first descriptor in the chain, or `None` if the chain cannot be allocated.
     ///
     pub fn alloc_desc_chain(&mut self, length: usize) -> Option<usize> {
         let desc_idx = self.alloc_desc();
@@ -405,7 +405,7 @@ impl<'a> VirtQueue<'a> {
     ///
     /// # Returns
     ///
-    /// Option<usize>: The index of the descriptor that was used, or None if no descriptors are available.
+    /// `Option<usize>`: The index of the used descriptor chain, or `None` if no completed chain is available.
     ///
     pub fn pop(&mut self) -> Option<usize> {
         self.pop_used().map(|(desc_idx, _)| desc_idx)

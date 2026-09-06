@@ -5569,7 +5569,7 @@ pub fn cleanup_zombie(task_id: usize) {
 ///
 /// A task with no CPU owner can be finalized immediately. A task still owned
 /// by another CPU must remain in the pool until that CPU switches away and
-/// [`release_deferred_prev`] releases its `running_cpu` claim.
+/// `release_deferred_prev` releases its `running_cpu` claim.
 ///
 /// # Arguments
 ///

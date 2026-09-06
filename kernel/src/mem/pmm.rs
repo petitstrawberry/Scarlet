@@ -1,3 +1,10 @@
+//! Multi-region buddy allocator for physical pages.
+//!
+//! Allocation results are physical addresses, not dereferenceable kernel pointers.
+//! Metadata lives in reserved pages within each region and is accessed through
+//! the current HHDM. Callers retain ownership until returning pages to PMM; raw
+//! allocation/free helpers do not track Rust borrows or outstanding DMA accesses.
+
 use crate::sync::IrqSpinLock;
 use alloc::vec::Vec;
 
@@ -147,7 +154,7 @@ impl BuddyRegion {
     /// # Embedded metadata design
     ///
     /// The `Page` metadata array is placed at the **beginning** of the region itself
-    /// (i.e., `self.pages = self.mem_start as *mut Page`).  The first `pages_needed`
+    /// (accessed via `phys_to_virt(self.mem_start) as *mut Page`). The first `pages_needed`
     /// pages (PFNs 0 .. pages_needed - 1) are **implicitly reserved**: they hold the
     /// metadata and are never inserted into a free list.  Only PFNs starting at
     /// `pages_needed` are made available to the allocator.
@@ -590,6 +597,24 @@ impl PmmInner {
 
 static PMM: IrqSpinLock<PmmInner> = IrqSpinLock::new(PmmInner::new());
 
+/// Register an initial physical RAM region with the buddy allocator.
+///
+/// # Arguments
+///
+/// * `area` - Inclusive physical range; its page-aligned interior is registered.
+///   The bounds and alignment arithmetic must be representable in `usize`.
+///
+/// # Safety
+///
+/// The range must be writable RAM reachable through the current direct map,
+/// exclusively available to PMM, and disjoint from all existing PMM regions and
+/// live allocations. Metadata initialization overwrites the start of the region.
+/// Boot code must exclude the kernel, boot data still in use, MMIO, and reserved RAM.
+///
+/// # Returns
+///
+/// No value. Logs and skips an unusable region or a registration failure; it does
+/// not reset existing allocator state.
 pub unsafe fn init(area: MemoryArea) {
     early_println!(
         "[PMM] Initializing buddy system with region: {:#x} - {:#x}",
@@ -631,12 +656,34 @@ pub fn add_region(area: MemoryArea) -> Result<(), &'static str> {
 }
 
 /// Allocate contiguous physical pages.
-/// Required for DMA, kernel stacks, and other hardware-visible buffers.
+/// Used for DMA, kernel stacks, and other buffers requiring physical contiguity.
+/// DMA users still need device-appropriate addressability and cache handling.
+///
+/// # Arguments
+///
+/// * `pages` - Requested page count.
+///
+/// # Returns
+///
+/// The starting physical address of an owned allocation, or `None` if it cannot
+/// be allocated. Contents are not zeroed here. Free with the original page count.
 pub fn alloc_contiguous_pages(pages: usize) -> Option<usize> {
     PMM.lock().alloc(pages)
 }
 
 /// Allocate aligned contiguous physical pages.
+///
+/// # Arguments
+///
+/// * `pages` - Requested page count.
+/// * `align_pages` - Physical alignment in pages; zero or one means page alignment,
+///   and larger values are rounded up to a power of two.
+///
+/// # Returns
+///
+/// The starting physical address of an owned, uninitialized allocation, or `None`
+/// if sizing, allocation, or aligned-allocation tracking fails. Release with
+/// [`free_contiguous_pages`] using the returned address and original `pages` count.
 pub fn alloc_contiguous_pages_aligned(pages: usize, align_pages: usize) -> Option<usize> {
     if align_pages == 0 || align_pages == 1 {
         return alloc_contiguous_pages(pages);

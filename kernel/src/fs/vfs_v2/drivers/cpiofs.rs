@@ -113,7 +113,7 @@ impl CpioNode {
             .map(|p| p.file_id as u64)
     }
 
-    /// Helper to convert from Arc<dyn VfsNode> to Arc<CpioNode>
+    /// Helper to convert from `Arc<dyn VfsNode>` to `Arc<CpioNode>`
     pub fn from_vfsnode_arc(node: &Arc<dyn VfsNode>) -> Option<Arc<CpioNode>> {
         match Arc::downcast::<CpioNode>(node.clone()) {
             Ok(cpio_node) => Some(cpio_node),

@@ -495,7 +495,7 @@ pub fn setup_trampoline_for_user(manager: &VirtualMemoryManager) {
 
 /// Issue a synchronous TLB shootdown for the given ASID across all harts.
 ///
-/// This is the counterpart to [`RootPageTableGuard::unmap_all_no_flush`]:
+/// This is the counterpart to `RootPageTableGuard::unmap_all_no_flush`:
 /// batched page-table rebuild callers clear the old address space without
 /// flushing, install fresh mappings, then call this once.
 pub fn flush_all_tlb(asid: u16) {

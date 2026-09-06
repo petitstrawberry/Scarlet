@@ -58,10 +58,39 @@ pub enum DeviceCapability {
     Sensor,
 }
 
+/// Discovery information supplied to a device driver during matching and probing.
 pub trait DeviceInfo {
+    /// Return the discovered device's name.
+    ///
+    /// # Arguments
+    /// * `self` - Discovery descriptor to inspect.
+    ///
+    /// # Returns
+    /// The descriptor's static name.
     fn name(&self) -> &'static str;
+    /// Return the identifier supplied by this discovery descriptor.
+    ///
+    /// # Arguments
+    /// * `self` - Discovery descriptor to inspect.
+    ///
+    /// # Returns
+    /// A descriptor-specific identifier, not necessarily a registered-device ID.
     fn id(&self) -> usize;
+    /// Return compatible strings used for driver matching.
+    ///
+    /// # Arguments
+    /// * `self` - Discovery descriptor to inspect.
+    ///
+    /// # Returns
+    /// An owned list of static compatible strings.
     fn compatible(&self) -> Vec<&'static str>;
+    /// Borrow the concrete descriptor for downcasting.
+    ///
+    /// # Arguments
+    /// * `self` - Discovery descriptor to inspect.
+    ///
+    /// # Returns
+    /// A type-erased borrow with the same lifetime as `self`.
     fn as_any(&self) -> &dyn Any;
 }
 
@@ -73,9 +102,38 @@ pub trait DeviceInfo {
 ///
 /// All device drivers must be Send + Sync to be stored in global DeviceManager.
 pub trait DeviceDriver: Send + Sync {
+    /// Return the driver's diagnostic name.
+    ///
+    /// # Arguments
+    /// * `self` - Driver to inspect.
+    ///
+    /// # Returns
+    /// The driver's static name.
     fn name(&self) -> &'static str;
+    /// Return the compatible strings recognized by this driver.
+    ///
+    /// # Arguments
+    /// * `self` - Driver whose match table is requested.
+    ///
+    /// # Returns
+    /// An owned list used to match discovery descriptors.
     fn match_table(&self) -> Vec<&'static str>;
+    /// Probe and initialize a discovered device.
+    ///
+    /// # Arguments
+    /// * `device` - Discovery information for the device to probe.
+    ///
+    /// # Returns
+    /// `Ok(())` on successful initialization, or a driver-provided error. The
+    /// driver is responsible for cleaning up any partially initialized resources.
     fn probe(&self, device: &dyn DeviceInfo) -> Result<(), &'static str>;
+    /// Tear down a device previously handled by this driver.
+    ///
+    /// # Arguments
+    /// * `device` - Discovery information identifying the device to remove.
+    ///
+    /// # Returns
+    /// `Ok(())` on successful removal, or a driver-provided error.
     fn remove(&self, device: &dyn DeviceInfo) -> Result<(), &'static str>;
 }
 
@@ -100,11 +158,16 @@ pub enum DeviceType {
 ///
 /// This trait defines the interface for devices in the kernel.
 /// Device IDs are assigned by DeviceManager when devices are registered.
-/// All devices must support control operations through the ControlOps trait
-/// and memory mapping operations through the MemoryMappingOps trait.
+/// All devices must implement the `ControlOps`, `MemoryMappingOps`, and
+/// `Selectable` interfaces. Implementing an interface does not imply every
+/// operation is supported; individual operations may report unsupported behavior.
 ///
 pub trait Device: Send + Sync + ControlOps + MemoryMappingOps + Selectable {
     /// Called when a device file object is opened.
+    ///
+    /// # Arguments
+    ///
+    /// * `self` - Owned reference to the device backing the new endpoint.
     ///
     /// # Returns
     ///
@@ -120,73 +183,169 @@ pub trait Device: Send + Sync + ControlOps + MemoryMappingOps + Selectable {
 
     /// Called when a device file object is closed.
     ///
+    /// # Arguments
+    ///
+    /// * `self` - Device notified that an open endpoint is being released.
+    ///
+    /// # Returns
+    ///
+    /// No value. This hook does not itself unregister the device.
+    ///
     /// # Behavior
     ///
     /// Implementations may release per-open resources. The default implementation
     /// does nothing.
     fn close(&self) {}
 
+    /// Return the device's broad category.
+    ///
+    /// # Arguments
+    /// * `self` - Device to inspect.
+    ///
+    /// # Returns
+    /// The category advertised by this implementation.
     fn device_type(&self) -> DeviceType;
+    /// Return the device's diagnostic name.
+    ///
+    /// # Arguments
+    /// * `self` - Device to inspect.
+    ///
+    /// # Returns
+    /// A static name; use the manager's ID when a registration identity is needed.
     fn name(&self) -> &'static str;
+    /// Borrow the concrete device for downcasting.
+    ///
+    /// # Arguments
+    /// * `self` - Device to inspect.
+    ///
+    /// # Returns
+    /// A type-erased shared borrow tied to `self`.
     fn as_any(&self) -> &dyn Any;
+    /// Mutably borrow the concrete device for downcasting.
+    ///
+    /// # Arguments
+    /// * `self` - Exclusively borrowed device.
+    ///
+    /// # Returns
+    /// A type-erased exclusive borrow tied to `self`.
     fn as_any_mut(&mut self) -> &mut dyn Any;
 
     /// Optional capabilities exposed by this device (default: none)
+    ///
+    /// # Arguments
+    /// * `self` - Device to inspect.
+    ///
+    /// # Returns
+    /// Static discovery flags; the default implementation returns an empty slice.
     fn capabilities(&self) -> &'static [DeviceCapability] {
         &[]
     }
 
     /// Cast to EventCapableDevice if this device can emit events
+    ///
+    /// # Arguments
+    /// * `self` - Device to borrow through an event interface.
+    ///
+    /// # Returns
+    /// A borrowed event interface, or `None` by default.
     fn as_event_capable(&self) -> Option<&dyn EventCapableDevice> {
         None
     }
 
     /// Cast to CharDevice if this device is a character device
+    ///
+    /// # Arguments
+    /// * `self` - Device to borrow through a character interface.
+    ///
+    /// # Returns
+    /// A borrowed character interface, or `None` by default.
     fn as_char_device(&self) -> Option<&dyn char::CharDevice> {
         None
     }
 
-    /// Cast to BlockDevice if this device is a block device  
+    /// Cast to BlockDevice if this device is a block device
+    ///
+    /// # Arguments
+    /// * `self` - Device to borrow through a block interface.
+    ///
+    /// # Returns
+    /// A borrowed block interface, or `None` by default.
     fn as_block_device(&self) -> Option<&dyn block::BlockDevice> {
         None
     }
 
     /// Cast to GraphicsDevice if this device is a graphics device
+    ///
+    /// # Arguments
+    /// * `self` - Device to borrow through a graphics interface.
+    ///
+    /// # Returns
+    /// A borrowed graphics interface, or `None` by default.
     fn as_graphics_device(&self) -> Option<&dyn graphics::GraphicsDevice> {
         None
     }
 
     /// Cast to NetworkDevice if this device is a network device
+    ///
+    /// # Arguments
+    /// * `self` - Device to borrow through a network interface.
+    ///
+    /// # Returns
+    /// A borrowed network interface, or `None` by default.
     fn as_network_device(&self) -> Option<&dyn network::NetworkDevice> {
         None
     }
 
-    /// Cast Arc<Self> to Arc<dyn BlockDevice> if this device is a block device
+    /// Cast `Arc<Self>` to `Arc<dyn BlockDevice>` if this device is a block device
     /// This allows direct ownership of the block device for efficient I/O operations
+    ///
+    /// # Arguments
+    /// * `self` - Owned reference consumed by the conversion, including on failure.
+    ///
+    /// # Returns
+    /// An owned block interface, or `None` by default, releasing the supplied reference.
     fn into_block_device(
         self: alloc::sync::Arc<Self>,
     ) -> Option<alloc::sync::Arc<dyn block::BlockDevice>> {
         None
     }
 
-    /// Cast Arc<Self> to Arc<dyn CharDevice> if this device is a character device
+    /// Cast `Arc<Self>` to `Arc<dyn CharDevice>` if this device is a character device
     /// This allows direct ownership of the char device for efficient I/O operations
+    ///
+    /// # Arguments
+    /// * `self` - Owned reference consumed by the conversion, including on failure.
+    ///
+    /// # Returns
+    /// An owned character interface, or `None` by default, releasing the supplied reference.
     fn into_char_device(
         self: alloc::sync::Arc<Self>,
     ) -> Option<alloc::sync::Arc<dyn char::CharDevice>> {
         None
     }
 
-    /// Cast Arc<Self> to Arc<dyn GraphicsDevice> if this device is a graphics device
+    /// Cast `Arc<Self>` to `Arc<dyn GraphicsDevice>` if this device is a graphics device
     /// This allows direct ownership of the graphics device for efficient operations
+    ///
+    /// # Arguments
+    /// * `self` - Owned reference consumed by the conversion, including on failure.
+    ///
+    /// # Returns
+    /// An owned graphics interface, or `None` by default, releasing the supplied reference.
     fn into_graphics_device(
         self: alloc::sync::Arc<Self>,
     ) -> Option<alloc::sync::Arc<dyn graphics::GraphicsDevice>> {
         None
     }
 
-    /// Cast Arc<Self> to Arc<dyn NetworkDevice> if this device is a network device
+    /// Cast `Arc<Self>` to `Arc<dyn NetworkDevice>` if this device is a network device
     /// This allows direct ownership of the network device for efficient operations
+    ///
+    /// # Arguments
+    /// * `self` - Owned reference consumed by the conversion, including on failure.
+    ///
+    /// # Returns
+    /// An owned network interface, or `None` by default, releasing the supplied reference.
     fn into_network_device(
         self: alloc::sync::Arc<Self>,
     ) -> Option<alloc::sync::Arc<dyn network::NetworkDevice>> {

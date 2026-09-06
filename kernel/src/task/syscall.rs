@@ -1931,20 +1931,24 @@ pub fn sys_create_namespace(trapframe: &mut Trapframe) -> usize {
     0
 }
 
-/// System call to shutdown the system gracefully
+/// Request final platform poweroff or reboot from the init thread group.
 ///
-/// This system call initiates a graceful shutdown sequence:
-/// 1. Terminate all user tasks
-/// 2. Sync all filesystems to ensure data is written to disk
-/// 3. Unmount all filesystems
+/// The current kernel fallback performs these steps:
+/// 1. Retire other tasks without waiting for application-level graceful cleanup
+/// 2. Enumerate mounted filesystems for diagnostics, without syncing their data
+/// 3. Skip unmounting (the shutdown unmount phase is not implemented)
 /// 4. Request platform shutdown via SBI (RISC-V) or PSCI (AArch64)
+///
+/// This is not a data-durability barrier. Userspace must coordinate orderly
+/// shutdown before the final request; logging filesystem names does not flush them.
 ///
 /// # Arguments
 /// * `trapframe.get_arg(0)` - Shutdown type: 0 = poweroff, 1 = reboot
+///   (other values currently fall back to poweroff).
 ///
 /// # Returns
 /// This function does not return on success (system shuts down)
-/// Returns error code on failure
+/// Returns `SYSCALL_ERROR` if the caller's thread-group ID is not 1.
 #[allow(unreachable_code)]
 pub fn sys_shutdown(trapframe: &mut Trapframe) -> usize {
     use crate::arch::shutdown;
@@ -2020,9 +2024,9 @@ pub fn sys_shutdown(trapframe: &mut Trapframe) -> usize {
     // NOTE: Actual filesystem unmount logic is not yet implemented.
     // The shutdown sequence currently enumerates all known filesystems
     // (global and task-specific) but leaves the mounts in place. This is
-    // sufficient for the current platforms where the underlying firmware
-    // or hypervisor tears down any remaining state on poweroff/reboot.
-    // When proper unmount support is added to the VFS layer, it should be
+    // not a guarantee of clean filesystems or durable buffered writes;
+    // firmware/hypervisor teardown cannot replace filesystem synchronization.
+    // When shutdown-time unmount support is added, it should be
     // invoked from here in a dependency-safe order (e.g. leaves first).
 
     crate::println!("[SHUTDOWN] Step 4: Requesting platform shutdown...");
@@ -2063,7 +2067,7 @@ pub fn sys_get_task_info_count(trapframe: &mut Trapframe) -> usize {
     get_all_task_ids().len()
 }
 
-/// Populate a user-supplied buffer with [`TaskInfo`] snapshots.
+/// Populate a user-supplied buffer with [`crate::task::TaskInfo`] snapshots.
 ///
 /// # Arguments
 /// * `trapframe.get_arg(0)` — pointer to a user buffer of `TaskInfo` slots.

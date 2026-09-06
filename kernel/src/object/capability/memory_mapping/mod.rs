@@ -63,6 +63,9 @@ impl MemoryMappingInfo {
 /// and receive notifications about mapping lifecycle events.
 /// Objects that support memory mapping (like files and devices) should implement
 /// this trait to provide mmap/munmap functionality.
+/// An owner-backed `VirtualMemoryMap` retains a strong `Arc` to its owner, so
+/// closing the originating handle does not by itself release that owner. These
+/// hooks supply backing/lifecycle behavior; they do not install PTEs themselves.
 pub trait MemoryMappingOps: Send + Sync {
     /// Get mapping information for a region of the object
     ///
@@ -110,9 +113,14 @@ pub trait MemoryMappingOps: Send + Sync {
     ///
     /// # Arguments
     /// * `vaddr` - Virtual address where the mapping was created
-    /// * `paddr` - Physical address that was mapped
+    /// * `paddr` - Physical backing address, or zero for a private mapping whose
+    ///   pages will be supplied later through fault resolution.
     /// * `length` - Length of the mapping in bytes
     /// * `offset` - Offset within the object that was mapped
+    ///
+    /// # Returns
+    /// No value. The default does not track mappings. A notification can describe
+    /// a reserved VMA whose individual pages have not yet been faulted in.
     fn on_mapped(&self, vaddr: usize, paddr: usize, length: usize, offset: usize) {}
 
     /// Notification that a mapping has been removed
@@ -124,12 +132,20 @@ pub trait MemoryMappingOps: Send + Sync {
     /// # Arguments
     /// * `vaddr` - Virtual address where the mapping was removed
     /// * `length` - Length of the mapping that was removed
+    ///
+    /// # Returns
+    /// No value. The default is a no-op; implementations must account for partial
+    /// unmaps and other mappings still retaining the owner.
     fn on_unmapped(&self, vaddr: usize, length: usize) {}
 
     /// Check if memory mapping is supported
     ///
+    /// # Arguments
+    /// * `self` - Object whose mapping capability is queried.
+    ///
     /// # Returns
-    /// * `bool` - true if this object supports memory mapping
+    /// * `bool` - true if this object advertises memory mapping (the default).
+    ///   A particular range can still be rejected by `get_mapping_info`.
     fn supports_mmap(&self) -> bool {
         true
     }
@@ -139,8 +155,11 @@ pub trait MemoryMappingOps: Send + Sync {
     /// Objects whose mappings must preserve shared device-memory semantics can
     /// reject `MAP_PRIVATE` without affecting their shared mapping capability.
     ///
+    /// # Arguments
+    /// * `self` - Object whose private-mapping support is queried.
+    ///
     /// # Returns
-    /// `true` when private mappings are supported.
+    /// `true` when private mappings are advertised (the default).
     fn supports_private_mmap(&self) -> bool {
         true
     }
@@ -150,6 +169,9 @@ pub trait MemoryMappingOps: Send + Sync {
     /// Default implementation returns a generic "object" string. Implementers
     /// (e.g. VfsFileObject) should override to provide more meaningful names
     /// such as file paths.
+    ///
+    /// # Arguments
+    /// * `self` - Mapping owner to describe.
     ///
     /// # Returns
     /// A short diagnostic name for this mapping owner.
@@ -164,9 +186,12 @@ pub trait MemoryMappingOps: Send + Sync {
     /// the VMA was created, and faults beyond the current VMA should make the
     /// VMA cover the newly valid backing range.
     ///
+    /// # Arguments
+    /// * `self` - Owner whose growth policy is queried.
+    ///
     /// # Returns
     /// `true` when the virtual memory manager may extend the VMA after a
-    /// successful out-of-range fault resolution.
+    /// successful out-of-range fault resolution. The default is `false`.
     fn can_extend_vma_on_fault(&self) -> bool {
         false
     }
@@ -176,10 +201,12 @@ pub trait MemoryMappingOps: Send + Sync {
     /// # Arguments
     /// * `access` - Access that caused the fault
     /// * `page_idx` - Page index within the original mapping
-    /// * `vm_start` - Original virtual start address for the mapping
+    /// * `vm_start` - Original virtual start address for the mapping, retained
+    ///   across VMA splits rather than replaced with a surviving fragment's start.
     ///
     /// # Returns
-    /// The resolved backing page, or an error describing why the fault cannot be resolved.
+    /// The resolved backing page, or an error describing why the fault cannot be
+    /// resolved. The default returns `ResolveFaultError::Unmapped`.
     fn resolve_fault(
         &self,
         access: &crate::object::capability::memory_mapping::AccessKind,
@@ -242,12 +269,20 @@ pub trait MemoryMappingOps: Send + Sync {
     /// # Arguments
     /// * `start_page_idx` - First page index to release
     /// * `page_count` - Number of pages to release
+    ///
+    /// # Returns
+    /// No value. The default is a no-op; implementations must preserve pages
+    /// still needed by other mappings or owners.
     fn release_pages(&self, _start_page_idx: usize, _page_count: usize) {}
 
     /// Clone this mapping owner for a forked task.
     ///
+    /// # Arguments
+    /// * `self` - Existing owner from which to derive child-specific state.
+    ///
     /// # Returns
-    /// A cloned mapping owner when the object supports fork-specific ownership.
+    /// A cloned mapping owner when the object supports fork-specific ownership,
+    /// or `None` by default. `None` is not itself a request to drop the parent's owner.
     fn fork_clone(&self) -> Option<alloc::sync::Arc<dyn MemoryMappingOps>> {
         None
     }

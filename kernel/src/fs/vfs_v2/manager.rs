@@ -1048,7 +1048,7 @@ impl VfsManager {
         }
     }
 
-    /// Resolve a path to mount point (returns VfsEntryRef instead of Arc<VfsEntry>)
+    /// Resolve a path to mount point (returns `VfsEntryRef` instead of `Arc<VfsEntry>`)
     ///
     /// This is useful for operations that need to work with mount point information
     /// but don't necessarily need strong references to entries.
@@ -1057,7 +1057,7 @@ impl VfsManager {
     /// * `path` - The path to resolve
     ///
     /// # Returns
-    /// Returns a tuple of (VfsEntryRef, Arc<MountPoint>) on success
+    /// Returns a tuple of `(VfsEntryRef, Arc<MountPoint>)` on success
     pub fn resolve_mount_point(&self, path: &str) -> VfsResult<(VfsEntryRef, Arc<MountPoint>)> {
         self.resolve_mount_point_with_options(path, &PathResolutionOptions::default())
     }
