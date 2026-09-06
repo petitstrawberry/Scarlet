@@ -22,8 +22,6 @@ this is not a claim that every historical document or device was revalidated.
   and release gates.
 - [1.0 scope and compatibility policy](release/1.0-scope.md) - Package membership,
   public API versus internal wire contracts, supported configurations, and RC1 gates.
-- [SGFX migration baseline](release/1.0-baseline.md) - Verified revisions,
-  toolchains, CI results, and remaining release gates.
 - [1.0 package inventory](release/1.0-packages.md) - First-party crates,
   development fixtures, and vendored code before version alignment.
 
@@ -109,11 +107,6 @@ this is not a claim that every historical document or device was revalidated.
 - [SHV overview](hypervisor/README.md)
 - [Type-2 hypervisor design](hypervisor/type2-design.md)
 - [Hypervisor status](hypervisor/status.md)
-
-## Status Notes
-
-- [Apple M1 SMP investigation](debug/logs/APPLE_M1_BARE_SMP_INVESTIGATION.md) -
-  dated experimental evidence, not a tracked Apple deployment project.
 
 The documentation tracks implementation direction as well as completed behavior.
 When code and docs disagree, treat the code and project manifests as the source

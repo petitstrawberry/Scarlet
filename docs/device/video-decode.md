@@ -208,8 +208,7 @@ The kernel does not parse VP9 bitstream headers or maintain the VP9 frame
 context as codec state. Userspace demuxes frames, parses the uncompressed and
 compressed headers, updates probability state, constructs the tile table, and
 tracks reference timestamps. The backend validates the AVD-supported subset and
-lowers the request to hardware commands. Apple AVD's VP9-specific direct submit
-sequence is tracked in [`apple-avd-vp9.md`](apple-avd-vp9.md).
+lowers the request to hardware commands.
 
 For Apple AVD VP9 bring-up, `video-player` can dump the userspace stateless
 request before ioctl submission:
@@ -219,9 +218,7 @@ video-player --hwdc --dump-vp9-stateless root/vp9-dump root/example.webm
 ```
 
 The dump contains Scarlet's generic VP9 ABI structures, not Apple/macOS
-`frame_params`. Use the trace workflow in
-[`apple-avd-vp9-re.md`](apple-avd-vp9-re.md) to compare those structures against
-m1n1 captures and `eiln/avd`.
+`frame_params`.
 
 ## Typical Mapped Decode Sequence
 
