@@ -422,11 +422,11 @@ fn patch_ldst_add_imm12(ptr: *mut u8, imm12: i64) {
 ///
 /// Instruction bits `[25:0]` receive `imm26 = offset >> 2`;
 /// the opcode in bits `[31:26]` is preserved.
-/// The caller must supply a four-byte-aligned offset. Current validation rejects
-/// odd offsets but does not reject bit 1; a two-byte-only alignment is truncated.
+/// Rejects offsets that are not four-byte aligned or do not fit the signed
+/// 28-bit byte range, without modifying the instruction on failure.
 fn patch_b26(ptr: *mut u8, offset: i64) -> Result<(), &'static str> {
-    if offset & 1 != 0 {
-        return Err("B/BL offset is not 2-byte aligned");
+    if offset & 3 != 0 {
+        return Err("B/BL offset is not 4-byte aligned");
     }
     if !fits_signed(offset, 28) {
         return Err("B/BL offset out of range (±128MB)");
@@ -448,4 +448,52 @@ fn patch_movz_movk(ptr: *mut u8, imm16: u32) {
     let instruction = read_u32_le(ptr.cast_const());
     let patched = (instruction & !(0xFFFF << 5)) | ((imm16 & 0xFFFF) << 5);
     write_u32_le(ptr, patched);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::patch_b26;
+
+    #[test_case]
+    fn branch_relocation_rejects_unaligned_offsets_without_writing() {
+        for offset in [1, 2, 3, -1, -2, -3] {
+            let original = 0x9400_1234_u32.to_le_bytes();
+            let mut instruction = original;
+            assert_eq!(
+                patch_b26(instruction.as_mut_ptr(), offset),
+                Err("B/BL offset is not 4-byte aligned")
+            );
+            assert_eq!(instruction, original);
+        }
+    }
+
+    #[test_case]
+    fn branch_relocation_rejects_out_of_range_offsets_without_writing() {
+        for offset in [1_i64 << 27, -(1_i64 << 27) - 4] {
+            let original = 0x1400_1234_u32.to_le_bytes();
+            let mut instruction = original;
+            assert_eq!(
+                patch_b26(instruction.as_mut_ptr(), offset),
+                Err("B/BL offset out of range (±128MB)")
+            );
+            assert_eq!(instruction, original);
+        }
+    }
+
+    #[test_case]
+    fn branch_relocation_encodes_boundaries_and_preserves_opcode() {
+        for opcode in [0x1400_0000_u32, 0x9400_0000] {
+            for (offset, immediate) in [
+                (0, 0),
+                (4, 1),
+                (-4, 0x03ff_ffff),
+                (-(1_i64 << 27), 0x0200_0000),
+                ((1_i64 << 27) - 4, 0x01ff_ffff),
+            ] {
+                let mut instruction = (opcode | 0x1234).to_le_bytes();
+                assert_eq!(patch_b26(instruction.as_mut_ptr(), offset), Ok(()));
+                assert_eq!(u32::from_le_bytes(instruction), opcode | immediate);
+            }
+        }
+    }
 }
