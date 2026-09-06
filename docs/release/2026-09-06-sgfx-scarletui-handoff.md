@@ -517,7 +517,7 @@ Rust側の変更はドキュメントコメント・通常コメントのみで�
   Cargo lock・project lock差分の同一性も確認。
   Kernelのdoctest設定は変更せず、QEMU/GUI/Docker・全体実行テストも起動していない。
 
-照合時点で見つかった実装側の問題（旧TLSは後述の廃止で対応済み）。
+照合時点で見つかった実装側の問題（旧TLSの廃止と、末尾の承認済み実装修正で対応済み）。
 以下を既存仕様として安全性まで承認した扱いにしない:
 
 1. [旧TLS](../../user/lib/std/src/thread.rs)（廃止済み）: 旧 `thread_local!` がinitializerを捨て、
@@ -537,7 +537,8 @@ Rust側の変更はドキュメントコメント・通常コメントのみで�
    B/BLのoffsetチェックがbit 0しか検査せず、4 byte境界でない2 byte刻みのoffsetを
    shift時に切り捨て得る。命令bit位置の誤記修正と区別し、実装変更はしていない。
 
-旧TLS以外の修正・廃止・互換性判断は引き続きユーザーに提示する。
+この照合時点では、旧TLS以外の修正・廃止・互換性判断もユーザーへの提示事項とした。
+その後の承認と実装結果は末尾に記録する。
 今回の文書修正でv1.0全体の準備完了や全公開APIの安全性検証完了を宣言しない。
 
 ## 旧TLS変数APIの廃止 — 2026-09-06
@@ -569,5 +570,68 @@ Rust側の変更はドキュメントコメント・通常コメントのみで�
   ユーザー所有のpatch / Cargo lock / project lock差分も作業前と同一。
   QEMU/GUI/Dockerや実行テストは起動していない。
 
-この対応は上記の実装課題1だけを閉じる。課題2〜5、公開依存・lockの最終整理、
+このTLS廃止の対応は上記の実装課題1だけを閉じる。課題2〜5、公開依存・lockの最終整理、
 v1.0全体の準備完了は別であり、ローカルpatchと既存lock差分はこの変更に含めない。
+
+## 承認済みの実装課題2〜5を修正 — 2026-09-06
+
+ユーザーの承認に基づき、文書照合で見つかった残り4項目を修正した。
+作業ブランチは `feature/arch-armv5te` のまま。以下はローカルコミットであり、
+push・タグ作成・リリース公表はしていない。
+
+| コミット | 修正 |
+| --- | --- |
+| `ddf160f0` | 未使用の `kmalloc` / `kfree` とdeprecated boxed page allocator 2個を削除。`free_raw_pages` をunsafe化し、所有権・元のpage数・CPU/DMAアクセス終了・属性復元の条件を明記。全呼び出し側を追従。 |
+| `ba26f6f6` | `MemoryArea::from_ptr` を `Option<MemoryArea>` に変更。ゼロ長・inclusive終端のoverflowを `None` とし、末尾アドレスの1 byteは許可。変更前に追跡コード内の利用箇所なし。 |
+| `5666608e` | AArch64 LSMのB/BL relocationで4 byte alignmentを検査。未整列・範囲外は命令を書き換える前に拒否。 |
+| `1b0ec2b6` | 旧 `OpenOptions` のread+appendをread/write accessに修正。`create_new` を既存 `VfsOpen` の `O_CREAT | O_EXCL` にまとめ、作成後に別syscallでpathを開き直す競合を除去。 |
+
+ファイル作成の変更範囲:
+
+- 排他的作成は親を解決し、最終entryをdriverで確認し、作成したnodeを保持してopenする。
+  既存ファイル・directory・最終symlink（danglingを含む）・overlay lowerの既存entryを拒否。
+  native syscall側でも、相対pathの末尾slashやsymlink後の `..` を先に消さない。
+- 同じfilesystemを別VFS namespaceから使う場合もあるため、VFSの作成・削除・hardlink・
+  renameと、overlay copy-upを起こし得る書き込み用openを共通のsleepable mutexで直列化。
+  開いたhandleのread/writeにはこのlockを追加しない。プリエンプション禁止中の競合は
+  `Busy` とし、待機・panicを避ける。driver callbackからこのlockを再取得しない。
+- 旧facadeでは `create_new` 時の `create` / `truncate` を無視する。
+  通常の `create` は従来のcreate→open経路を維持。open失敗時の作成rollbackと
+  native errnoの細分化は追加していない。syscall番号・wire record・package版は変更なし。
+- この排他的作成の対象はnative `VfsOpen` と旧facade。Linuxのopenat作成経路を
+  改修した扱いにはしない。低水準driverの直接呼び出しや、カーネル全体のteardownを
+  含む安全性を、このAPI境界変更だけで再認証したという意味でもない。
+
+検証:
+
+- Kernelのdefault featuresで両JSON targetの `cargo check --locked --offline --tests`、
+  `cargo test --no-run --locked --offline --lib` が通過。回帰テストはVFS 7件、
+  MemoryArea 3件、AArch64 branch 3件を追加（RISC-Vは前者10件）。
+  **テストバイナリの生成までで、これらのassertionは実行していない。**
+- `cargo check --manifest-path .cargo/Cargo.toml --locked --offline -p userprogram --bins`
+  を両Scarlet targetで通過。これは既存の兄弟path patchを使った確認であり、
+  公開依存だけの最終buildとは区別する。
+- 旧facadeの掲載例を両targetで各 **31 passed / 0 failed / 0 ignored**。
+  `RUSTDOCFLAGS='-Z unstable-options --no-run --merge-doctests=no'` を使用し、
+  既存例28件はcompile-only、削除済みTLS APIの3件はcompile-fail確認。
+- Kernel（private itemsを含む）と旧facadeの両targetのRustdocで、前述の4 lintを
+  error指定して通過。変更Rustファイルのrustfmt check、diff whitespaceも通過。
+  既存のkernel・UI・userspace warningsとtoolchain future-incompat通知は残る。
+- ユーザー所有の `.cargo/Cargo.toml`、`.cargo/Cargo.lock`、
+  `projects/aarch64-limine-full/scarlet.lock` の差分は作業開始時と同一。
+  `test-kernel` も保持。QEMU/GUI/Docker、新しいsmokeや検証wrapperは作成・起動していない。
+
+### 公開依存・lockの次の前提
+
+read-onlyの `git ls-remote` で確認した公開mainとローカル候補:
+
+| repo | 公開main | ローカル候補 | 未push |
+| --- | --- | --- | --- |
+| scarlet-sdk | `10a17cc` | `e6d7f1f` | 2コミット（override/lsm修正、部分offline廃止） |
+| sgfx | `456dde7` | `0800d97` | 4コミット（契約文書、unsafe境界追従、不要smoke撤去） |
+| scarlet-ui | `d1632b87` | `50eea74d` | 3コミット（契約文書、renderer lint修正） |
+
+Scarletの `flake.lock` はSDK `10a17cc` のままで、上記SDK修正をまだ含まない。
+これらの公開状態を揃えてからNix pin・Cargo/project lockを最終選定し、
+兄弟checkoutに依存しない正規buildを確認する。版上げ・タグ・release notes・
+依存更新PRの自動化はこの4修正に含めていない。A618は合意どおり保留、Boxcraftは完了扱いを維持する。
