@@ -35,8 +35,8 @@ composition is driven by `cargo-scarlet` from `scarlet-sdk` and the
 
 - RISC-V 64 and AArch64 kernel support, with QEMU images and experimental
   [real-hardware projects](#hardware-support).
-- Scarlet-native userland, xv6 support, and partial Linux ABI support over the
-  same kernel objects.
+- Scarlet-native userland, xv6 support, and
+  [partial Linux ABI support](#abi-model) over the same kernel objects.
 - Scarlet SDK and a Scarlet Rust toolchain for building Rust `std`
   applications targeting Scarlet.
 - Bootable distribution projects composed from reusable filesystem bundles.
