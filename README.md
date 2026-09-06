@@ -10,7 +10,7 @@
 [![AArch64](https://img.shields.io/badge/arch-AArch64-orange)](https://www.arm.com/)
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/petitstrawberry/Scarlet)
 
-<img src="docs/assets/screenshots/scarlet-desktop.png" alt="Scarlet desktop running terminal, settings, clock, YouTube, and video player windows" width="900">
+<img src="docs/assets/screenshots/scarlet-desktop.png" alt="Scarlet desktop running Myrica, Files, Boxcraft, a terminal, and a video player" width="900">
 
 </div>
 
@@ -47,6 +47,20 @@ composition is driven by `cargo-scarlet` from `scarlet-sdk` and the
   Firecracker-class AArch64 microVM workloads.
 - Device work covering VirtIO, networking, display presentation, audio, video
   decode.
+
+## Desktop
+
+### Virtual desktops
+
+The workspace overview shows virtual desktops and their open windows.
+
+<img src="docs/assets/screenshots/scarlet-virtual-desktops.png" alt="Scarlet workspace overview with virtual desktop thumbnails and open application windows" width="900">
+
+### Application launcher
+
+Open installed desktop applications from the launcher.
+
+<img src="docs/assets/screenshots/scarlet-launcher.png" alt="Scarlet application launcher with a search field and application grid" width="900">
 
 ## Quick Start
 
