@@ -7,6 +7,8 @@
 
 追記: ソースのドキュメントコメントも現実装と照合した。修正範囲と、説明の変更だけでは
 解決しない旧TLS・メモリ解放API等の問題は末尾の「Rustdocの照合と残る実装課題」を参照。
+そのうち旧 `thread_local!` / `LocalKey` はユーザー承認により廃止済み。
+スレッド管理用TLSは維持しており、詳細は末尾の「旧TLS変数APIの廃止」を参照。
 
 ## まず結論
 
@@ -515,9 +517,10 @@ Rust側の変更はドキュメントコメント・通常コメントのみで�
   Cargo lock・project lock差分の同一性も確認。
   Kernelのdoctest設定は変更せず、QEMU/GUI/Docker・全体実行テストも起動していない。
 
-実装側の問題は未修正。以下を既存仕様として安全性まで承認した扱いにしない:
+照合時点で見つかった実装側の問題（旧TLSは後述の廃止で対応済み）。
+以下を既存仕様として安全性まで承認した扱いにしない:
 
-1. [旧TLS](../../user/lib/std/src/thread.rs): `thread_local!` がinitializerを捨て、
+1. [旧TLS](../../user/lib/std/src/thread.rs)（廃止済み）: 旧 `thread_local!` がinitializerを捨て、
    名前hashのslot衝突・型のsize/alignment・初期化を管理しない。`with_mut`系も
    再入時の別名参照を防がず、safe APIとして安全性が成立していない。
    このrepoの追跡コードには、定義・掲載例・reexport以外の利用箇所は見つからなかった。
@@ -534,5 +537,37 @@ Rust側の変更はドキュメントコメント・通常コメントのみで�
    B/BLのoffsetチェックがbit 0しか検査せず、4 byte境界でない2 byte刻みのoffsetを
    shift時に切り捨て得る。命令bit位置の誤記修正と区別し、実装変更はしていない。
 
-これらの修正・廃止・互換性判断は次の作業としてユーザーに提示する。
+旧TLS以外の修正・廃止・互換性判断は引き続きユーザーに提示する。
 今回の文書修正でv1.0全体の準備完了や全公開APIの安全性検証完了を宣言しない。
+
+## 旧TLS変数APIの廃止 — 2026-09-06
+
+ユーザーに未使用の旧APIと現役のスレッド管理用TLSの違いを説明し、廃止の承認を受けた。
+
+- `scarlet_std::thread_local!`、`thread::LocalKey` とroot reexport、専用の
+  `__tls_offset_from_hash` / `__TLS_ALIGN` を削除。非推奨として残すのではなく、
+  これらを使うコードはコンパイル時に拒否する。追跡コードに実利用箇所はなかった。
+- スレッド用TLS mapping、cleanup record、CloneのTLS設定、終了時のstack/TLS解放、
+  TLS pointer APIとmain-thread fallbackの実装は変更していない。
+- 通常Rust `std::thread_local!` はtoolchain側の別実装で、今回の廃止対象ではない。
+  legacy facadeに代替TLS変数APIは追加せず、per-thread stateは `spawn` のclosureへ渡す。
+  残すAPIの説明とuserspace guideを更新し、旧マクロと型の両exportを拒否する
+  `compile_fail,E0432` のRustdoc例を3件追加した。
+
+検証:
+
+- 既存ローカル依存設定のまま `cargo check --manifest-path .cargo/Cargo.toml
+  --locked --offline -p userprogram --bins --target <target>` が
+  AArch64 / RISC-Vの両Scarlet targetで通過。既存のunused/dead-code警告は残る。
+- 旧facadeの `cargo test --doc --locked --offline` に
+  `RUSTDOCFLAGS='-Z unstable-options --no-run --merge-doctests=no'` を指定し、
+  両targetで **各31 passed / 0 failed / 0 ignored**。
+  内訳は既存例28件のcompile-onlyと、削除済みAPIのcompile-fail 3件。
+- 両targetのRustdocを既存と同じ4 lintのerror指定で生成し、リンク等の検査も通過。
+  対象Rustファイルのrustfmt / diff whitespaceも通過。
+- 残したthread runtimeのコードはコメント・空白を除いて変更前と同一。
+  ユーザー所有のpatch / Cargo lock / project lock差分も作業前と同一。
+  QEMU/GUI/Dockerや実行テストは起動していない。
+
+この対応は上記の実装課題1だけを閉じる。課題2〜5、公開依存・lockの最終整理、
+v1.0全体の準備完了は別であり、ローカルpatchと既存lock差分はこの変更に含めない。

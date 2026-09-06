@@ -131,10 +131,6 @@ pub mod env {
     pub use scarlet_rt::env::*;
 }
 
-// Re-export LocalKey type for convenience
-// Note: thread_local! macro is automatically exported at crate root by #[macro_export]
-pub use thread::LocalKey;
-
 /// Debug/profiler utilities
 pub mod profiler {
     use crate::syscall::{Syscall, syscall0};

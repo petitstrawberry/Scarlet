@@ -23,6 +23,13 @@ ownership, fallible operations, raw unsafe boundaries, mappings, and GPU/SWS
 lifetimes. Use typed wrappers where possible; syscall completion, GPU
 completion, and window presentation are distinct events.
 
+The legacy `scarlet_std::thread_local!` macro and `LocalKey` type have been
+removed: their initialization, storage layout, and borrowing were unsound.
+Normal Rust `std` applications use the toolchain's separate `std::thread_local!`
+implementation. Legacy `no_std` programs should pass per-thread state into
+their `thread::spawn` closures; there is no replacement typed TLS API in the
+legacy facade. Runtime TLS allocation and thread-exit cleanup remain unchanged.
+
 ## In-tree builds
 
 The root is not a single Cargo workspace. [.cargo/Cargo.toml](../../.cargo/Cargo.toml)
