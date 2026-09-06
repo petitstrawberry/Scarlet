@@ -6,6 +6,8 @@ describes the repository at a high level; this page is the documentation map.
 
 ## Start Here
 
+- [Build and development guide](build-system/README.md) - Nix environment,
+  QEMU images, build/run commands, formatting, tests, and Rustdoc.
 - [Kernel development map](kernel/README.md) - kernel library/BSP boundary,
   source map, boot sequence, memory ownership, modules, and test scope.
 - [Userspace development map](userspace/README.md) - normal Rust std targets,
@@ -44,6 +46,8 @@ this is not a claim that every historical document or device was revalidated.
 
 ## ABI and Runtime Compatibility
 
+- [ABI model and compatibility](abi/README.md) - shared kernel objects,
+  Scarlet-native, xv6, and Linux ABI layers, and implementation references.
 - [Linux ABI demo](abi/linux/demo.md) - building and running the partial Linux
   userspace demo.
 - [Linux ABI status](abi/linux/status.md) - syscall and feature compatibility
@@ -59,6 +63,8 @@ this is not a claim that every historical document or device was revalidated.
 
 ## Kernel and Device Subsystems
 
+- [VFS and filesystem source map](kernel/README.md#source-map) - shared
+  filesystem and mount-namespace implementation.
 - [PCI/PCIe](device/pci.md) - ECAM discovery and PCI device model.
 - [Input event devices](device/input-event.md) - Scarlet input event interface.
 - [VirtIO input](device/virtio-input.md) and [VirtIO RNG](device/virtio-rng.md)

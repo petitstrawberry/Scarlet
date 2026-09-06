@@ -47,6 +47,9 @@ cargo check --manifest-path .cargo/Cargo.toml -p scarlet-std-bin --bins \
   --target riscv64gc-unknown-scarlet
 ```
 
+To produce application binaries instead of only type-checking, use `cargo build`
+with the same manifest, package, and target arguments.
+
 These compile the std-based in-tree applications; they neither install the
 binaries into an image nor launch the desktop. For the latter, use the chosen
 project's `cargo scarlet image` / `run` workflow. During release staging,
