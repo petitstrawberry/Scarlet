@@ -16,8 +16,10 @@ Scarlet currently patches SGFX and ScarletUI to the sibling local checkouts
 while repairing the consumer rendering regression. The experimental diagnostic
 also builds the sibling SGFX checkout so it exercises the same repair.
 SGFX's own lockfile includes the asynchronous Scarlet GPU transport at
-`f7adec91`. The native adapter stages each bounded logical stream before a
-single admission and restores CPU initialization/revision state on rejection.
+`f7adec91`. The native adapter stages each bounded logical stream before queue
+acceptance and restores CPU initialization/revision state on rejection.
+SGFX's context-owned worker now partitions and dispatches that stream; the
+kernel's 2 MiB native-request limit is not a UI mesh-size limit.
 
 ## Additive ABI
 
@@ -70,13 +72,27 @@ finite waits use a deadline, not an unbounded GPU wait.
 ## SWS and ScarletUI handoff
 
 On VirGL, the paint encoder and SWS quad compositor use a frame-scoped tracked
-executor. It retains up to 16 receipts, waits for the oldest only at capacity
-pressure, and retries only a proven `Busy` rejection of the current stream.
-The consumer retry policy is bounded; no accepted frame or failed prefix is
-replayed. Large texture uploads are split into bounded row strips before native
-lowering. SGFX itself never waits to make submission capacity available.
+executor. It retains up to 16 receipts and waits for its oldest accepted work
+at logical capacity pressure. It never replays accepted work or failed prefixes.
+Timed transport retries and 512 KiB texture splitting have been removed from
+ScarletUI and the SWS compositor: native scheduling belongs to SGFX.
+
+The native SGFX dispatcher admits up to 16 logical streams and 64 MiB of owned
+command bytes, then drives native packets from a dedicated context-owned worker.
+Transport Busy or reuse of an in-flight upload arena delays only that worker's
+next packet. Following streams do not overtake it. Receipts cover all chunks,
+remain valid after session drop, and are failed if later dispatch/observation
+fails. Synchronous execution/readback/transfer/detach drain this logical queue
+before using the existing kernel operations. No kernel ABI change is needed.
 
 ScarletUI observes the whole frame before committing its shared image to SWS.
+Recoverable client-frame rejection now drains the accepted prefix, discards the
+incomplete target, preserves the previous SWS commit, and forces a full redraw
+on the next attempt. `Application::on_render_error` receives Busy, Rejected, or
+RecoveryRequired plus the cause. Busy retries on a later event-loop tick;
+Rejected waits for new scene invalidation. Failed-prefix or completion errors
+remain fatal and do not authorize target reuse. This does not remove SGFX's
+64 MiB logical-stream limit; oversized-frame streaming is separate work.
 SWS observes its composition before display presentation and only then promotes
 the presented frame and acknowledges eligible old commit tokens. SWS release
 is still a separate requirement before a producer reuses its slot. There is no
@@ -214,9 +230,15 @@ With the pinned `scarlet-rust-toolchain` (`scarlet-rust-nix` `2b4ddd55`):
   the new code does not waive them. Native-only ELF assembly prevents running
   the `gpu-raw` crate's test harness on macOS without additional platform work.
 
-The reported gear/swarm/UI regression is closed by the user's normal-operation
-confirmation. The seventh diagnostic is available for user-operated regression
-checks. A618 staging/fence retirement remains separate.
+The reported gear/swarm/UI regression was closed by the user's normal-operation
+confirmation. The subsequent Boxcraft failure exposed the native 2 MiB bound
+being applied to a 2.4 MB logical mesh upload. The SGFX dispatcher repair keeps
+that mesh intact and schedules its native chunks through four retained upload
+arenas. Deterministic dispatcher/packet tests and the ScarletUI 60,000-vertex
+mesh regression cover the boundary. The native diagnostic now includes a >2 MiB
+texture, a 9.6 MB persistent vertex buffer with arena reuse, and >64 MiB logical
+rejection. Runtime verification of this new repair remains user-operated.
+A618 staging/fence retirement remains separate.
 Driver fault/reset and A618 hardware
 evidence remain required. Preserve the user's accepted current QEMU runtime
 baseline; the historical debug-build delay is not reopened here.

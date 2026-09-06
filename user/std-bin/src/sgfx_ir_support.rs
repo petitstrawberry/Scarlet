@@ -6,9 +6,7 @@ use std::{error, fmt};
 
 use framebuffer::{DisplayPresentRegion, DisplaySurface};
 use scarlet_os::handle::Handle;
-use scarlet_ui_renderer_sgfx::{
-    FrameError, FrameExecutor, FrameSubmissionError, MAX_UPLOAD_BYTES, upload_texture,
-};
+use scarlet_ui_renderer_sgfx::{FrameExecutor, FrameSubmissionError};
 use sgfx::backend::{CommandExecutor, CompletionStatus};
 use sgfx::ir::{
     self, AddressMode, BlendState, BufferDesc, BufferId, BufferUsage, CommandEncoder, DrawUniforms,
@@ -526,15 +524,7 @@ impl QuadRenderer {
         uploads: &[TextureUpload<'_>],
         operations: &[Quad],
     ) -> Result<(), QuadSubmitError<FrameSubmissionError<sgfx::Error, sgfx::Submission>>> {
-        let mut attempts = 0;
-        let mut executor = FrameExecutor::new(target.session.executor(), || {
-            attempts += 1;
-            if attempts > 1_000 {
-                return false;
-            }
-            std::thread::sleep(core::time::Duration::from_millis(1));
-            true
-        });
+        let mut executor = FrameExecutor::new(target.session.executor());
         self.encode_region_with_uploads(
             &mut executor,
             Rc::clone(&target.resources),
@@ -571,14 +561,7 @@ impl QuadRenderer {
                 "SGFX composition operation capacity exceeded",
             ));
         }
-        let separate_uploads = uploads.iter().fold(0u64, |bytes, upload| {
-            bytes.saturating_add(
-                u64::from(upload.destination.width()) * u64::from(upload.destination.height()) * 4,
-            )
-        }) > MAX_UPLOAD_BYTES as u64;
-        if !separate_uploads
-            && uploads.len().saturating_add(QUAD_BATCH_COMMAND_OVERHEAD) > ir::MAX_COMMANDS
-        {
+        if uploads.len().saturating_add(QUAD_BATCH_COMMAND_OVERHEAD) > ir::MAX_COMMANDS {
             return Err(QuadSubmitError::Recording(
                 "SGFX texture upload command capacity exceeded",
             ));
@@ -631,21 +614,6 @@ impl QuadRenderer {
             );
         }
 
-        if separate_uploads {
-            for upload in uploads {
-                let write = TextureWrite::new(upload.destination, upload.stride, upload.bytes)
-                    .map_err(|_| QuadSubmitError::Recording("Invalid SGFX texture upload"))?;
-                upload_texture(executor, &resources, upload.texture, write).map_err(|error| {
-                    match error {
-                        FrameError::Lowering(_) => {
-                            QuadSubmitError::Recording("Invalid SGFX texture upload")
-                        }
-                        FrameError::Execution(error) => QuadSubmitError::Execution(error),
-                    }
-                })?;
-            }
-        }
-        let uploads = if separate_uploads { &[] } else { uploads };
         let mut batch_start = 0usize;
         let mut first_batch = true;
         loop {
