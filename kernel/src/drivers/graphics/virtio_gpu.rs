@@ -2043,6 +2043,13 @@ impl GpuBackendQueue for VirtioGpuBackendQueue {
         }
     }
 
+    fn async_command_limit(&self) -> u32 {
+        // Async requests own their DMA allocation; they do not use the legacy
+        // 64 KiB staging buffer. A complete bounded IR stream can therefore be
+        // admitted once, instead of racing admission between its packets.
+        crate::device::gpu::GPU_MAX_OPAQUE_COMMAND_SIZE
+    }
+
     fn enqueue(&self, submission: GpuSubmission) -> Result<(), GpuBackendEnqueueError> {
         // A concurrent legacy control operation may wait for GPU execution.
         // Async admission reports pressure instead of joining that wait.

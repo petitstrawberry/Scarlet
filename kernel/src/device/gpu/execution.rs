@@ -82,7 +82,9 @@ impl GpuContext {
     /// if the backend cannot create a queue.
     pub fn create_queue(&self) -> Result<GpuQueue, &'static str> {
         let backend_queue = self.backend_context.create_queue()?;
-        let async_command_limit = bounded_command_limit(backend_queue.query_info());
+        let async_command_limit = backend_queue
+            .async_command_limit()
+            .min(GPU_MAX_OPAQUE_COMMAND_SIZE);
         if async_command_limit == 0 {
             return Err("GPU backend queue has no usable command limit");
         }

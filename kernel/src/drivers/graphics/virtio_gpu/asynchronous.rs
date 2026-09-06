@@ -16,7 +16,8 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::device::events::InterruptCapableDevice;
 use crate::device::gpu::{
-    GpuBackendEnqueueError, GpuBackendSubmitError, GpuCompletionFailure, GpuSubmission,
+    GPU_MAX_OPAQUE_COMMAND_SIZE, GpuBackendEnqueueError, GpuBackendSubmitError,
+    GpuCompletionFailure, GpuSubmission,
 };
 use crate::drivers::virtio::{device::Register, pci::VirtioPciTransport};
 use crate::interrupt::{InterruptClaim, InterruptId, InterruptResult};
@@ -24,9 +25,8 @@ use crate::sync::{IrqSpinLock, Once, Waker};
 
 use super::control::{ControlEnqueueError, ControlQueue, ControlRequest, ControlStatus};
 use super::{
-    VIRTIO_GPU_CMD_SUBMIT_3D, VIRTIO_GPU_FLAG_FENCE, VIRTIO_GPU_MAX_OPAQUE_COMMAND_SIZE,
-    VirtioGpuCmdSubmit3d, VirtioGpuCtrlHdr, VirtioGpuDevice, VirtioGpuDeviceCore, append_pod_bytes,
-    validate_execution_response,
+    VIRTIO_GPU_CMD_SUBMIT_3D, VIRTIO_GPU_FLAG_FENCE, VirtioGpuCmdSubmit3d, VirtioGpuCtrlHdr,
+    VirtioGpuDevice, VirtioGpuDeviceCore, append_pod_bytes, validate_execution_response,
 };
 
 // Two descriptor chains (four descriptors) per nonempty submission, shared
@@ -117,7 +117,7 @@ impl AsyncSubmissions {
         }
         let commands = submission.commands();
         if !commands.len().is_multiple_of(4)
-            || commands.len() > VIRTIO_GPU_MAX_OPAQUE_COMMAND_SIZE as usize
+            || commands.len() > GPU_MAX_OPAQUE_COMMAND_SIZE as usize
         {
             return Err(GpuBackendEnqueueError::Rejected(
                 GpuBackendSubmitError::Rejected("VirGL commands must be bounded complete dwords"),

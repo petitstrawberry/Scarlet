@@ -4,7 +4,8 @@ Status (2026-09-06): generic kernel admission, read-only completion capabilities
 `gpu-raw` wrappers, and **real VirtIO/VirGL asynchronous execution** are implemented.
 VirtIO queues advertise 16 retained submissions, with a shared device-wide bound
 of 16; existing synchronous operations remain available. **A618 still reports
-zero async capacity.** Native SGFX/facade and consumer integration remain open.
+zero async capacity.** Native SGFX/facade receipts are implemented; SWS/ScarletUI
+consumer integration is in progress.
 This is not a performance claim or completion of the coordinated 1.0 release gate.
 
 The user approved portable completion tracking and actual asynchronous Scarlet
@@ -26,6 +27,14 @@ timelines, record layouts, and result meanings are unchanged. New operations:
 | `GPU_COMPLETION_QUERY` | `0x4769` | `GpuCompletionInfo`, 24 bytes | Read pending, complete, or failed state; no userspace signal operation |
 | `GPU_QUEUE_QUERY_ASYNC` | `0x476a` | `GpuQueueAsyncInfo`, 24 bytes | Query implemented per-queue async limits; zero capacity means unsupported |
 | `GPU_QUEUE_SUBMIT_ASYNC` | `0x476b` | `GpuQueueSubmitAsync`, 40 bytes | Copy and enqueue owned commands; return after acceptance, without waiting for GPU completion |
+
+The async command limit is independent of the legacy synchronous staging limit.
+VirtIO accepts up to the existing generic **2 MiB** bound in one owned async
+request, while synchronous submits retain their **64 KiB** limit. This lets
+SGFX lower multiple native packets into one admission operation: contention
+rejects the entire stream before acceptance, instead of stranding an uploaded
+prefix between separate admissions. The DMA allocation and the read-only
+completion still belong to the kernel until retirement.
 
 Async submission separates `accepted` from `result`:
 

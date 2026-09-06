@@ -194,9 +194,9 @@ impl GpuQueue {
     /// This method never falls back to [`Self::submit`].
     pub fn submit_async(&self, commands: &[u8]) -> Result<GpuCompletion, GpuSubmitError> {
         let mut request = GpuQueueSubmitAsync::new(commands).map_err(GpuSubmitError::Rejected)?;
-        if request.command_size > self.max_opaque_command_size {
-            return Err(GpuSubmitError::Rejected(HandleError::InvalidParameter));
-        }
+        // The async query advertises its own limit. Do not apply the cached
+        // synchronous staging-buffer limit to an independently owned request;
+        // the kernel validates the actual async bound before acceptance.
         self.handle
             .control(
                 commands::GPU_QUEUE_SUBMIT_ASYNC,

@@ -98,6 +98,29 @@ fn release_unaccepted(error: GpuBackendEnqueueError) {
 }
 
 #[test_case]
+fn async_admits_packets_larger_than_the_legacy_staging_buffer_as_one_request() {
+    let mut control = ControlQueue::new();
+    let mut state = AsyncSubmissions::default();
+    let drops = Arc::new(AtomicUsize::new(0));
+    let lock = Arc::new(IrqSpinLock::new(()));
+    let bytes = alloc::vec![0; VIRTIO_GPU_MAX_OPAQUE_COMMAND_SIZE as usize * 3];
+    let (completion, request) = submission(&bytes, &drops, &lock);
+    state
+        .enqueue(&mut control, 1, 1, request, 0)
+        .expect("one admission");
+    assert_eq!(
+        *control.ring.avail.idx, 2,
+        "one payload plus one checkpoint"
+    );
+    assert_eq!(completion.state(), GpuCompletionState::Pending);
+    control.test_respond(head(&control, 0), response(None, false));
+    control.test_respond(head(&control, 1), response(Some(1), false));
+    state.poll_one(&mut control, 1).expect("retired").retire();
+    assert_eq!(completion.state(), GpuCompletionState::Complete);
+    assert_eq!(drops.load(Ordering::Relaxed), 1);
+}
+
+#[test_case]
 fn async_submit_returns_pending_and_retires_out_of_order_responses_in_order() {
     let mut control = ControlQueue::new();
     let mut state = AsyncSubmissions::default();

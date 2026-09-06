@@ -957,6 +957,16 @@ pub trait GpuBackendQueue: Send + Sync {
         0
     }
 
+    /// Query the maximum bytes owned by one asynchronous submission.
+    ///
+    /// # Returns
+    ///
+    /// A bounded command length. Backends with separately allocated async
+    /// storage may support a larger stream than their legacy staging buffer.
+    fn async_command_limit(&self) -> u32 {
+        self.query_info().max_opaque_command_size
+    }
+
     /// Enqueue owned work without waiting for its GPU completion or a free slot.
     ///
     /// # Arguments
