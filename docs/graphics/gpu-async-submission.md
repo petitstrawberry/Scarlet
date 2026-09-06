@@ -4,18 +4,20 @@ Status (2026-09-06): generic kernel admission, read-only completion capabilities
 `gpu-raw` wrappers, and **real VirtIO/VirGL asynchronous execution** are implemented.
 VirtIO queues advertise 16 retained submissions, with a shared device-wide bound
 of 16; existing synchronous operations remain available. **A618 still reports
-zero async capacity.** Native SGFX/facade receipts are implemented; SWS/ScarletUI
-consumer integration is in progress.
+zero async capacity.** Native SGFX/facade receipts and the SWS/ScarletUI VirGL
+consumer paths are implemented. On 2026-09-06 the user confirmed normal rendering
+after the local vertex-storage repair described below.
 This is not a performance claim or completion of the coordinated 1.0 release gate.
 
 The user approved portable completion tracking and actual asynchronous Scarlet
 execution for 1.0; the portable semantics are recorded in the
-[SGFX completion contract](https://github.com/petitstrawberry/sgfx/blob/90eb0641cf3dbdb415db6c48d81f7bf224d99984/docs/completion-contract.md).
-SGFX core/WGPU/host facade are implemented and included in ScarletUI and
-Scarlet's consumer lockfiles at SGFX `945c12724da2adc56269487afdbd3c900074a314`.
-SGFX's own lockfile also includes the asynchronous Scarlet GPU transport.
-Dependency adoption does not switch the native SGFX execution path to async;
-native receipts, chunk submission, and consumer lifetime integration remain open.
+[SGFX completion contract](https://github.com/petitstrawberry/sgfx/blob/main/docs/completion-contract.md).
+Scarlet currently patches SGFX and ScarletUI to the sibling local checkouts
+while repairing the consumer rendering regression. The experimental diagnostic
+also builds the sibling SGFX checkout so it exercises the same repair.
+SGFX's own lockfile includes the asynchronous Scarlet GPU transport at
+`f7adec91`. The native adapter stages each bounded logical stream before a
+single admission and restores CPU initialization/revision state on rejection.
 
 ## Additive ABI
 
@@ -49,7 +51,7 @@ Async submission separates `accepted` from `result`:
   response cannot be published, the kernel closes its undelivered handle while
   the driver continues to own accepted work. `gpu-raw::GpuSubmitError::Failed`
   can have `completion: None` when observation could not be delivered/adopted.
-  A future SGFX adapter must propagate that uncertainty as a failed observation,
+  The SGFX adapter propagates that uncertainty as a failed observation,
   not certify the unknown work using only an older chunk's successful receipt.
 
 Completion is terminal and read-only. Read/exception readiness means a terminal
@@ -64,6 +66,28 @@ The selectable wait rechecks readiness after registration. This also covers
 multiple observers that race a broadcast after another observer has consumed
 the Waker's single coalesced notification. Timeout zero is a readiness query;
 finite waits use a deadline, not an unbounded GPU wait.
+
+## SWS and ScarletUI handoff
+
+On VirGL, the paint encoder and SWS quad compositor use a frame-scoped tracked
+executor. It retains up to 16 receipts, waits for the oldest only at capacity
+pressure, and retries only a proven `Busy` rejection of the current stream.
+The consumer retry policy is bounded; no accepted frame or failed prefix is
+replayed. Large texture uploads are split into bounded row strips before native
+lowering. SGFX itself never waits to make submission capacity available.
+
+ScarletUI observes the whole frame before committing its shared image to SWS.
+SWS observes its composition before display presentation and only then promotes
+the presented frame and acknowledges eligible old commit tokens. SWS release
+is still a separate requirement before a producer reuses its slot. There is no
+new cross-process GPU fence transfer protocol: this is a frame-handoff wait,
+not a claim that the entire render loop is nonblocking.
+
+Admission/observation failure prevents image handoff and future reuse of the
+uncertain frame's cache. SWS invalidates shared-image epochs instead of sending
+a successful release; accepted resources remain independently retained by the
+kernel. Adreno retains its explicit synchronous consumer path while it reports
+zero async capacity; no already-complete receipt or silent fallback is used.
 
 ## Kernel ownership and driver obligations
 
@@ -150,14 +174,30 @@ when a legacy operation owns the core; it does not wait behind that GPU operatio
 
 With the pinned `scarlet-rust-toolchain` (`scarlet-rust-nix` `2b4ddd55`):
 
-- Kernel suites pass 1,187 RISC-V and 1,158 AArch64 tests. New deterministic cases
+- Kernel suites pass 1,189 RISC-V and 1,160 AArch64 tests. New deterministic cases
   cover read-only authority, producer loss, readiness races, bounded admission,
   partial acceptance, detached backing, failed response publication, full handle
   tables, and unretired-request quarantine. The VirtIO additions exercise owned
   DMA, out-of-order used entries, atomic paired admission, duplicate publication,
-  failed payload retirement, malformed checkpoints and autonomous-owner teardown.
-- Both full builds pass in the clean verification tree; source copies preserve
-  the user's modified project lock in the working checkout. Root formatting passes.
+  failed payload retirement, malformed checkpoints, autonomous-owner teardown,
+  and a 192 KiB owned stream admitted atomically beyond the legacy staging limit.
+- ScarletUI's renderer passes 35 host tests, including frame-wide observation,
+  bounded receipts, Busy-only retry, permanent observation-failure invalidation,
+  and padded texture strips. Its SWS platform checks on both normal Scarlet std
+  targets and AArch64 legacy std. Native SGFX builds on both architectures;
+  the native VirGL harness compiles but has not run for this revision.
+- The user ran the six-scenario `sgfx-native-completion-smoke` successfully
+  15 times, including oversized rejection and initialization rollback. Gears,
+  mesh swarm, and ordinary UI nevertheless showed rendering corruption.
+  Native inline vertex uploads were reusing storage while earlier draws could
+  still read it. The local SGFX repair uses completion-retained upload arenas
+  and ordered GPU copies; it does not restore per-submit waits. A seventh
+  diagnostic checks all intermediate colored strips across scratch-buffer
+  and persistent-buffer reuse, not only the last draw's color. The new binary
+  builds, and the complete AArch64 release image builds successfully. The user
+  subsequently confirmed normal operation, closing the reported rendering
+  regression. The seventh diagnostic's individual results were not separately
+  reported. Runtime verification remains user-operated.
 - The opt-in [`gpu-async-smoke`](../../user/std-bin/src/gpu_async_smoke.rs) passes
   check and strict Clippy on both normal Scarlet std targets. Real AArch64 QEMU
   release-image runs pass with `virtio-gpu-gl-pci` (two CPUs) and
@@ -174,7 +214,9 @@ With the pinned `scarlet-rust-toolchain` (`scarlet-rust-nix` `2b4ddd55`):
   the new code does not waive them. Native-only ELF assembly prevents running
   the `gpu-raw` crate's test harness on macOS without additional platform work.
 
-Next: implement A618 staging/fence retirement, native SGFX receipts and chunk failure
-tracking, and SWS/UI resource lifetime integration. Driver fault/reset and A618
-hardware evidence remain required. Preserve the user's accepted current QEMU
-runtime baseline; the historical debug-build delay is not reopened here.
+The reported gear/swarm/UI regression is closed by the user's normal-operation
+confirmation. The seventh diagnostic is available for user-operated regression
+checks. A618 staging/fence retirement remains separate.
+Driver fault/reset and A618 hardware
+evidence remain required. Preserve the user's accepted current QEMU runtime
+baseline; the historical debug-build delay is not reopened here.
