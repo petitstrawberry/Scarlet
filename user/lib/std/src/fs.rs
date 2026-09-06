@@ -201,7 +201,7 @@ impl OpenOptions {
     /// This option requests `O_APPEND`, so supporting file implementations place
     /// writes at the end instead of overwriting bytes at the current cursor.
     /// For append-only access, `.append(true)` is sufficient. To read as well,
-    /// this legacy flag encoder requires `.read(true).write(true).append(true)`.
+    /// use `.read(true).append(true)`; append mode also enables write access.
     ///
     /// This wrapper does not make a sequence of writes atomic or prevent readers
     /// from observing partial content. Individual writes may be short; concurrent
@@ -315,24 +315,20 @@ impl OpenOptions {
 
     /// Sets the option to create a new file, failing if it already exists
     ///
-    /// The legacy implementation first calls `VfsCreateFile` and treats a creation
-    /// failure as an error, then opens the path in a separate operation. Creation
-    /// errors are reported as `ErrorKind::Other` with a generic "File already exists"
-    /// message even when the cause is not an existing file.
+    /// This requests `O_CREAT | O_EXCL` in one `VfsOpen` operation. The kernel
+    /// excludes VFS namespace mutations while creating and opening the new node;
+    /// an existing final component, including a dangling symlink, is rejected.
+    /// There is no separate userspace create followed by a path-based reopen.
+    /// Creation/open errors are still reported as `ErrorKind::Other`: the native
+    /// syscall does not preserve a distinct already-exists error here.
     ///
-    /// Unlike Rust `std::fs::OpenOptions::create_new`, this is not an atomic
-    /// create-and-open operation. Another task can replace the path between those
-    /// calls, so the returned handle is not guaranteed to refer to the newly
-    /// created file. Do not use it as a TOCTOU-safe exclusive-creation primitive.
-    ///
-    /// With `.create_new(true)`, [`.create()`] is redundant, but [`.truncate()`]
-    /// is still passed to the subsequent open; it is not ignored.
+    /// With `.create_new(true)`, [`.create()`] and [`.truncate()`] are ignored.
     ///
     /// The file must be opened with write or append access in order to create
     /// a new file.
     ///
     /// # Arguments
-    /// * `create_new` - Whether failure of the preliminary creation should abort open.
+    /// * `create_new` - Whether to require exclusive creation of a new file.
     ///
     /// # Returns
     /// The same builder for chaining; no file is created yet.
@@ -368,8 +364,8 @@ impl OpenOptions {
     /// * `path` - File path in the current task's VFS namespace.
     ///
     /// # Returns
-    /// An owning file wrapper, or an I/O error. A preliminary creation can leave
-    /// a file behind even if the later open fails; there is no rollback.
+    /// An owning file wrapper, or an I/O error. Creation can leave a file behind
+    /// if opening or wrapping it fails; there is no rollback.
     ///
     /// # Errors
     ///
@@ -380,8 +376,8 @@ impl OpenOptions {
     ///
     /// * [`InvalidInput`]: Creation was requested without write/append access,
     ///   or a creation path contains an interior NUL byte.
-    /// * [`Other`]: The preliminary `create_new` operation or subsequent handle
-    ///   open failed. Missing files or directory components and denied access
+    /// * [`Other`]: Handle open or exclusive creation failed. Missing files or
+    ///   directory components, existing files, namespace contention, and denied access
     ///   are not distinguished as [`NotFound`] or [`PermissionDenied`] here.
     /// * [`Unsupported`]: The opened handle does not expose file operations.
     ///
@@ -416,52 +412,58 @@ impl OpenOptions {
         use crate::ffi::str_to_cstr_bytes;
         use crate::syscall::{Syscall, syscall2};
 
-        // If we need to create the file, use VfsCreateFile first
-        if self.create || self.create_new {
-            // Check if we have write access
-            if !self.write && !self.append {
-                return Err(Error::new(
-                    ErrorKind::InvalidInput,
-                    "Cannot create file without write access",
-                ));
-            }
+        let writable = self.write || self.append;
+        if (self.create || self.create_new) && !writable {
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
+                "Cannot create file without write access",
+            ));
+        }
+        if (self.create || self.create_new) && path.as_ref().as_bytes().contains(&0) {
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
+                "path contains null byte",
+            ));
+        }
 
+        // Ordinary create retains its compatibility path. Exclusive creation
+        // must instead be a single VfsOpen operation below.
+        if self.create && !self.create_new {
             // Convert path to null-terminated C string
             let path_bytes = str_to_cstr_bytes(path.as_ref())
                 .map_err(|_| Error::new(ErrorKind::InvalidInput, "path contains null byte"))?;
 
-            // For create_new, we should check if file exists first
-            // For now, just attempt to create and handle errors
+            // Existing files are allowed by ordinary create.
             // SAFETY: The NUL-terminated path remains readable until return; mode is a scalar.
-            let result = unsafe {
+            let _ = unsafe {
                 syscall2(
                     Syscall::VfsCreateFile,
                     path_bytes.as_ptr() as usize,
                     0, // mode (unused for now)
                 )
             };
-
-            // For create_new, creation failure is an error
-            // For create, we continue even if creation fails (file might already exist)
-            if self.create_new && result == usize::MAX {
-                return Err(Error::new(ErrorKind::Other, "File already exists"));
-            }
         }
 
         // Construct open flags from options
         // Flag values match POSIX-style constants used by the kernel:
         //   O_RDONLY = 0x0, O_WRONLY = 0x1, O_RDWR = 0x2
         //   O_APPEND = 0x400, O_TRUNC = 0x200
-        let flags = if self.read && self.write {
+        let flags = if self.read && writable {
             0x2 // O_RDWR
-        } else if self.write || self.append {
+        } else if writable {
             0x1 // O_WRONLY
         } else {
             0x0 // O_RDONLY
         };
 
         let flags = if self.append { flags | 0x400 } else { flags };
-        let flags = if self.truncate { flags | 0x200 } else { flags };
+        let flags = if self.create_new {
+            flags | 0x40 | 0x80 // O_CREAT | O_EXCL; do not truncate an existing file
+        } else if self.truncate {
+            flags | 0x200
+        } else {
+            flags
+        };
 
         // Use Handle::open and wrap in File
         let handle = Handle::open(path.as_ref(), flags)

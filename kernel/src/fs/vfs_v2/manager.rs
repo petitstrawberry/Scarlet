@@ -4,7 +4,7 @@
 //! built on the improved VFS v2 architecture with enhanced mount tree management,
 //! VfsEntry-based caching, and better isolation support.
 
-use crate::sync::{IrqRwSpinLock, Once};
+use crate::sync::{IrqRwSpinLock, Mutex, MutexGuard, Once};
 use alloc::{
     string::{String, ToString},
     sync::Arc,
@@ -24,6 +24,31 @@ use super::{
 
 /// Filesystem ID type
 pub type FSId = u64;
+
+const O_CREAT: u32 = 0x40;
+const O_EXCL: u32 = 0x80;
+
+// Filesystems can be shared by independent mount namespaces, so a per-manager
+// lock would not exclude their create/unlink/rename operations. This sleepable
+// lock covers VFS namespace mutations through opening the newly created node.
+// Write-mode opens participate because OverlayFS may create upper-layer entries.
+// Do not reacquire it from driver callbacks or from delegating VFS helpers.
+static NAMESPACE_MUTATIONS: Mutex<()> = Mutex::new(());
+
+fn lock_namespace_mutations() -> Result<MutexGuard<'static, ()>, FileSystemError> {
+    if let Some(guard) = NAMESPACE_MUTATIONS.try_lock() {
+        return Ok(guard);
+    }
+    // Some kernel callers retain an IRQ/preemption guard. They must not sleep
+    // behind an I/O operation; report contention instead of deadlocking/panicking.
+    if !crate::sync::preemptible() {
+        return Err(vfs_error(
+            FileSystemErrorKind::Busy,
+            "VFS namespace mutation would block with preemption disabled",
+        ));
+    }
+    Ok(NAMESPACE_MUTATIONS.lock())
+}
 
 /// Path resolution options for VFS operations
 #[derive(Debug, Clone)]
@@ -571,17 +596,37 @@ impl VfsManager {
     ///
     /// This will resolve the path using the MountTreeV2 and open the file
     /// using the filesystem associated with the resolved VfsEntry.
+    /// With `O_CREAT | O_EXCL`, it instead creates a new regular file and opens
+    /// that node while excluding VFS create/remove/link/rename operations across
+    /// mount namespaces. Existing final components, including dangling symlinks,
+    /// are rejected rather than followed. Creation is not rolled back if open fails.
     ///
     /// # Arguments
     /// * `path` - The path of the file to open.
-    /// * `flags` - Flags for opening the file (e.g., read, write
-    /// * `O_CREAT`, etc.).
+    /// * `flags` - File access flags, optionally `O_CREAT | O_EXCL` for exclusive
+    ///   creation. `O_CREAT` alone retains the existing open-only behavior.
+    ///
+    /// # Returns
+    /// An owning file object with its VFS entry and mount retained.
     ///
     /// # Errors
     /// Returns an error if the path does not exist, is not a file, or if
     /// the filesystem cannot be resolved.
+    /// Exclusive creation also rejects existing entries, invalid final names,
+    /// creation failures, and namespace contention in non-preemptible context.
+    /// Write-mode opens also report `Busy` on that contention, since overlay
+    /// copy-up can mutate the namespace. Reads and writes on open handles do not
+    /// acquire this namespace lock.
     ///
     pub fn open(&self, path: &str, flags: u32) -> Result<KernelObject, FileSystemError> {
+        if flags & (O_CREAT | O_EXCL) == (O_CREAT | O_EXCL) {
+            return self.create_new_and_open(path, flags);
+        }
+        let _namespace_guard = if flags & 0x3 != 0 {
+            Some(lock_namespace_mutations()?)
+        } else {
+            None
+        };
         // Use MountTreeV2 to resolve filesystem and relative path, then open
         let (entry, mount_point) = self.resolve_path(path)?;
         let node = entry.node();
@@ -599,6 +644,58 @@ impl VfsManager {
         Ok(KernelObject::File(Arc::new(vfs_file_obj)))
     }
 
+    fn create_new_and_open(&self, path: &str, flags: u32) -> Result<KernelObject, FileSystemError> {
+        let _namespace_guard = lock_namespace_mutations()?;
+        if path.is_empty() || path.ends_with('/') {
+            return Err(vfs_error(
+                FileSystemErrorKind::InvalidPath,
+                "Invalid new file path",
+            ));
+        }
+        let (parent_path, filename) = self.split_parent_child(path)?;
+        if filename == "." || filename == ".." {
+            return Err(vfs_error(
+                FileSystemErrorKind::AlreadyExists,
+                "Directory already exists",
+            ));
+        }
+        let (parent_entry, mount_point) = self.resolve_path(&parent_path)?;
+        let parent_node = parent_entry.node();
+        let filesystem = parent_node
+            .filesystem()
+            .and_then(|w| w.upgrade())
+            .ok_or_else(|| {
+                vfs_error(FileSystemErrorKind::NotSupported, "No filesystem reference")
+            })?;
+
+        // Ask the driver directly rather than relying on a possibly unpopulated
+        // entry cache. Lookup does not follow the final symlink, and also finds
+        // files that exist only in an overlay's lower layer.
+        match filesystem.lookup(&parent_node, &filename) {
+            Ok(_) => {
+                return Err(vfs_error(
+                    FileSystemErrorKind::AlreadyExists,
+                    "File already exists",
+                ));
+            }
+            Err(error) if error.kind == FileSystemErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        let node = filesystem.create(&parent_node, &filename, FileType::RegularFile, 0o644)?;
+        let entry = VfsEntry::new(
+            Some(Arc::downgrade(&parent_entry)),
+            filename.clone(),
+            node.clone(),
+        );
+        parent_entry.add_child(filename, entry.clone());
+
+        // Retain the created node; do not resolve the caller's path again.
+        // The namespace guard also protects path-based overlay driver callbacks.
+        let inner = filesystem.open(&node, flags)?;
+        let file = super::core::VfsFileObject::new(inner, entry, mount_point, path.to_string());
+        Ok(KernelObject::File(Arc::new(file)))
+    }
+
     /// Create a file at the specified path
     ///
     /// This will create a new file in the filesystem at the given path.
@@ -611,8 +708,10 @@ impl VfsManager {
     /// # Errors
     /// Returns an error if the parent directory does not exist, the filesystem cannot be resolved,
     /// or if the file cannot be created.
+    /// Returns `Busy` if namespace mutation would block with preemption disabled.
     ///
     pub fn create_file(&self, path: &str, file_type: FileType) -> Result<(), FileSystemError> {
+        let _namespace_guard = lock_namespace_mutations()?;
         // Split path into parent and filename
         let (parent_path, filename) = self.split_parent_child(path)?;
 
@@ -661,6 +760,7 @@ impl VfsManager {
     /// # Errors
     /// Returns an error if the parent directory does not exist, the filesystem cannot be resolved,
     /// or if the directory cannot be created.
+    /// Returns `Busy` if namespace mutation would block with preemption disabled.
     ///
     pub fn create_dir(&self, path: &str) -> Result<(), FileSystemError> {
         self.create_file(path, FileType::Directory)
@@ -678,6 +778,7 @@ impl VfsManager {
     /// # Errors
     /// Returns an error if the parent directory does not exist, the filesystem cannot be resolved,
     /// or if the symbolic link cannot be created.
+    /// Returns `Busy` if namespace mutation would block with preemption disabled.
     ///
     pub fn create_symlink(&self, path: &str, target_path: &str) -> Result<(), FileSystemError> {
         self.create_file(path, FileType::SymbolicLink(target_path.to_string()))
@@ -693,8 +794,10 @@ impl VfsManager {
     /// # Errors
     /// Returns an error if the path does not exist, is not a file, or if
     /// the filesystem cannot be resolved.
+    /// Returns `Busy` if namespace mutation would block with preemption disabled.
     ///
     pub fn remove(&self, path: &str) -> Result<(), FileSystemError> {
+        let _namespace_guard = lock_namespace_mutations()?;
         // Resolve the entry to be removed - use no_follow to follow intermediate symlinks
         // but not the final component (like POSIX rm behavior)
         let options = PathResolutionOptions::no_follow();
@@ -738,6 +841,10 @@ impl VfsManager {
 
         // Remove from parent cache
         let _ = parent_entry.remove_child(&filename);
+
+        // Socket cleanup can run subsystem callbacks; namespace mutation is
+        // complete, so do not retain this lock across those callbacks.
+        drop(_namespace_guard);
 
         #[cfg(feature = "network")]
         if let Some(socket_id) = socket_id {
@@ -948,6 +1055,7 @@ impl VfsManager {
     /// # Errors
     /// Returns an error if the parent directory does not exist, the filesystem cannot be resolved,
     /// or if the device file cannot be created.
+    /// Returns `Busy` if namespace mutation would block with preemption disabled.
     ///
     pub fn create_device_file(
         &self,
@@ -1132,12 +1240,14 @@ impl VfsManager {
     /// # Errors
     /// Returns an error if the source doesn't exist, target already exists,
     /// filesystems don't match, or hard links aren't supported.
+    /// Returns `Busy` if namespace mutation would block with preemption disabled.
     ///
     pub fn create_hardlink(
         &self,
         source_path: &str,
         target_path: &str,
     ) -> Result<(), FileSystemError> {
+        let _namespace_guard = lock_namespace_mutations()?;
         // Resolve source file
         let (source_entry, _source_mount) = self.resolve_path(source_path)?;
 
@@ -1243,7 +1353,9 @@ impl VfsManager {
     /// * `NotADirectory`    - Source is a directory but destination is a non-directory
     /// * `DirectoryNotEmpty`- Destination is a non-empty directory
     /// * `NotSupported`     - Underlying filesystem does not support rename
+    /// * `Busy`             - Namespace mutation would block with preemption disabled
     pub fn rename(&self, old_path: &str, new_path: &str) -> Result<(), FileSystemError> {
+        let _namespace_guard = lock_namespace_mutations()?;
         // Resolve old path (do not follow the final symlink, like POSIX rename)
         let options = PathResolutionOptions::no_follow();
         let (old_entry, _old_mount) = self.resolve_path_with_options(old_path, &options)?;
@@ -1349,11 +1461,18 @@ impl VfsManager {
     /// * `flags` - Open flags
     ///
     /// # Returns
-    /// KernelObject::File(VfsFileObject)
-    /// Open a file with optional base directory (unified openat implementation)
+    /// `KernelObject::File(VfsFileObject)`, retaining the resolved entry and mount.
     ///
-    /// If base_entry and base_mount are None, behaves like regular open().
-    /// If base is provided, resolves relative paths from that base (for *at syscalls).
+    /// Relative paths are resolved from the supplied base; absolute paths ignore
+    /// the base and start at the namespace root. This is an open-only helper for
+    /// *at syscall callers: unlike [`Self::open`], it does not perform exclusive
+    /// creation when `O_CREAT | O_EXCL` is supplied. Creation remains the caller's
+    /// responsibility in this path.
+    ///
+    /// # Errors
+    /// Returns path resolution or filesystem open errors. Write-mode opens also
+    /// return `Busy` if namespace mutation would block with preemption disabled;
+    /// overlay copy-up must be serialized with exclusive creation.
     pub fn open_from(
         &self,
         base_entry: &Arc<VfsEntry>,
@@ -1361,6 +1480,11 @@ impl VfsManager {
         path: &str,
         flags: u32,
     ) -> Result<KernelObject, FileSystemError> {
+        let _namespace_guard = if flags & 0x3 != 0 {
+            Some(lock_namespace_mutations()?)
+        } else {
+            None
+        };
         let (entry, mount_point) = self.resolve_path_from(base_entry, base_mount, path)?;
         let node = entry.node();
         let filesystem = node.filesystem().and_then(|w| w.upgrade()).ok_or_else(|| {
@@ -1428,4 +1552,165 @@ pub fn get_global_vfs_manager() -> Arc<VfsManager> {
 /// Retrieve the global VFS manager safely (returns None if not initialized)
 pub fn get_global_vfs_manager_safe() -> Option<Arc<VfsManager>> {
     GLOBAL_VFS_MANAGER.get().map(|mgr| mgr.clone())
+}
+
+#[cfg(test)]
+mod exclusive_create_tests {
+    use super::{O_CREAT, O_EXCL, VfsManager, lock_namespace_mutations};
+    use crate::fs::{FileSystemErrorKind, FileType, SeekFrom};
+    use alloc::sync::Arc;
+
+    const CREATE_NEW: u32 = 0x2 | O_CREAT | O_EXCL;
+
+    fn assert_open_error(vfs: &VfsManager, path: &str, flags: u32, kind: FileSystemErrorKind) {
+        match vfs.open(path, flags) {
+            Err(error) => assert_eq!(error.kind, kind, "{path}"),
+            Ok(_) => panic!("unexpectedly opened {path}"),
+        }
+    }
+
+    #[test_case]
+    fn exclusive_create_opens_new_read_write_file() {
+        let vfs = VfsManager::new();
+        let handle = vfs.open("/new", CREATE_NEW).unwrap();
+        let file = handle.as_file().unwrap();
+        assert_eq!(file.write(b"new contents").unwrap(), 12);
+        file.seek(SeekFrom::Start(0)).unwrap();
+        let mut bytes = [0; 12];
+        assert_eq!(file.read(&mut bytes).unwrap(), bytes.len());
+        assert_eq!(&bytes, b"new contents");
+    }
+
+    #[test_case]
+    fn exclusive_create_rejects_existing_entries_without_truncating() {
+        let vfs = VfsManager::new();
+        let handle = vfs.open("/existing", CREATE_NEW).unwrap();
+        let file = handle.as_file().unwrap();
+        file.write(b"keep").unwrap();
+        vfs.create_dir("/dir").unwrap();
+        vfs.create_symlink("/dangling", "/absent").unwrap();
+        vfs.create_symlink("/link", "/existing").unwrap();
+
+        for path in ["/existing", "/dir", "/dangling", "/link"] {
+            assert_open_error(
+                &vfs,
+                path,
+                CREATE_NEW | 0x200,
+                FileSystemErrorKind::AlreadyExists,
+            );
+        }
+        assert!(vfs.resolve_path("/absent").is_err());
+        file.seek(SeekFrom::Start(0)).unwrap();
+        let mut bytes = [0; 4];
+        assert_eq!(file.read(&mut bytes).unwrap(), bytes.len());
+        assert_eq!(&bytes, b"keep");
+    }
+
+    #[test_case]
+    fn exclusive_create_rejects_invalid_paths() {
+        let vfs = VfsManager::new();
+        for path in ["", "/", "/new/"] {
+            assert_open_error(&vfs, path, CREATE_NEW, FileSystemErrorKind::InvalidPath);
+        }
+        for path in [".", "..", "/.", "/.."] {
+            assert_open_error(&vfs, path, CREATE_NEW, FileSystemErrorKind::AlreadyExists);
+        }
+        assert_open_error(
+            &vfs,
+            "/absent/new",
+            CREATE_NEW,
+            FileSystemErrorKind::NotFound,
+        );
+        assert!(vfs.resolve_path("/new").is_err());
+    }
+
+    #[test_case]
+    fn exclusive_create_resolves_parent_symlinks_and_cwd() {
+        let vfs = VfsManager::new();
+        vfs.create_dir("/dir").unwrap();
+        vfs.create_symlink("/alias", "/dir").unwrap();
+        vfs.open("/alias/first", CREATE_NEW).unwrap();
+        assert!(vfs.resolve_path("/dir/first").is_ok());
+        vfs.set_cwd_by_path("/dir").unwrap();
+        vfs.open("second", CREATE_NEW).unwrap();
+        assert!(vfs.resolve_path("/dir/second").is_ok());
+        assert_open_error(&vfs, "third/", CREATE_NEW, FileSystemErrorKind::InvalidPath);
+        assert!(vfs.resolve_path("/dir/third").is_err());
+        vfs.create_dir("/dir/child").unwrap();
+        vfs.create_symlink("/nested", "/dir/child").unwrap();
+        vfs.open("../nested/../third", CREATE_NEW).unwrap();
+        assert!(vfs.resolve_path("/dir/third").is_ok());
+        assert!(vfs.resolve_path("/third").is_err());
+    }
+
+    #[test_case]
+    fn exclusive_create_handle_retains_created_file_after_path_replacement() {
+        let vfs = VfsManager::new();
+        let original = vfs.open("/file", CREATE_NEW).unwrap();
+        original.as_file().unwrap().write(b"original").unwrap();
+        vfs.rename("/file", "/renamed").unwrap();
+        let replacement = vfs.open("/file", CREATE_NEW).unwrap();
+        replacement.as_file().unwrap().write(b"replaced").unwrap();
+
+        let file = original.as_file().unwrap();
+        file.seek(SeekFrom::Start(0)).unwrap();
+        let mut bytes = [0; 8];
+        assert_eq!(file.read(&mut bytes).unwrap(), bytes.len());
+        assert_eq!(&bytes, b"original");
+    }
+
+    #[test_case]
+    fn namespace_mutations_exclude_other_managers_without_blocking_in_atomic_context() {
+        let filesystem = super::super::drivers::tmpfs::TmpFS::new(0);
+        let original = Arc::new(VfsManager::new_with_root(filesystem.clone()));
+        original
+            .create_file("/existing", FileType::RegularFile)
+            .unwrap();
+        let shared = VfsManager::clone_with_shared_mount_namespace(&original);
+        let independent = Arc::new(VfsManager::new_with_root(filesystem));
+        let (base, mount) = original.resolve_path("/").unwrap();
+
+        {
+            let _namespace_guard = lock_namespace_mutations().unwrap();
+            let _preempt_guard = crate::sync::PreemptGuard::new();
+            assert!(!crate::sync::preemptible());
+            for vfs in [&shared, &independent] {
+                assert_open_error(vfs, "/new", CREATE_NEW, FileSystemErrorKind::Busy);
+                assert_eq!(
+                    vfs.create_file("/ordinary", FileType::RegularFile)
+                        .unwrap_err()
+                        .kind,
+                    FileSystemErrorKind::Busy,
+                );
+                assert_eq!(
+                    vfs.remove("/existing").unwrap_err().kind,
+                    FileSystemErrorKind::Busy
+                );
+                assert_eq!(
+                    vfs.rename("/existing", "/moved").unwrap_err().kind,
+                    FileSystemErrorKind::Busy
+                );
+                assert_eq!(
+                    vfs.create_hardlink("/existing", "/linked")
+                        .unwrap_err()
+                        .kind,
+                    FileSystemErrorKind::Busy
+                );
+                // A write-mode open may perform overlay copy-up. Read-only
+                // opens do not need to wait for the namespace mutation lock.
+                assert_open_error(vfs, "/existing", 0x2, FileSystemErrorKind::Busy);
+                assert!(vfs.open("/existing", 0).is_ok());
+            }
+            assert!(matches!(
+                shared.open_from(&base, &mount, "existing", 0x2),
+                Err(error) if error.kind == FileSystemErrorKind::Busy
+            ));
+        }
+
+        assert!(original.resolve_path("/existing").is_ok());
+        for path in ["/new", "/ordinary", "/moved", "/linked"] {
+            assert!(original.resolve_path(path).is_err());
+        }
+        original.open("/new", CREATE_NEW).unwrap();
+    }
 }

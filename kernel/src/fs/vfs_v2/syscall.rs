@@ -48,18 +48,25 @@ use crate::fs::{MAX_PATH_LENGTH, SeekFrom, VfsManager};
 
 const VFS_O_WRONLY: i32 = 0x1;
 const VFS_O_RDWR: i32 = 0x2;
+const VFS_O_CREAT: i32 = 0x40;
+const VFS_O_EXCL: i32 = 0x80;
 const VFS_O_TRUNC: i32 = 0x200;
 const VFS_O_APPEND: i32 = 0x400;
 
 /// Open a file or directory using VFS (VfsOpen)
 ///
 /// This system call opens a file or directory at the specified path using the VFS layer.
+/// `O_CREAT | O_EXCL` creates and opens a new regular file in one VFS operation,
+/// rejecting existing final entries, including dangling symlinks. `O_CREAT`
+/// alone does not create a file. Failed open/handle insertion does not roll back
+/// creation, and errors are not distinguished by errno in this native syscall.
 ///
 /// # Arguments
 ///
 /// * `trapframe.get_arg(0)` - Pointer to the null-terminated path string
 /// * `trapframe.get_arg(1)` - Open flags (O_RDONLY, O_WRONLY, O_RDWR, etc.)
-/// * `trapframe.get_arg(2)` - File mode for creation (if applicable)
+/// * `trapframe.get_arg(2)` - Reserved mode argument; currently ignored. Exclusive
+///   creation passes mode `0o644` to the filesystem.
 ///
 /// # Returns
 ///
@@ -75,6 +82,10 @@ pub fn sys_vfs_open(trapframe: &mut Trapframe) -> usize {
     trapframe.increment_pc_next(&task);
 
     let path_str = match parse_c_string_from_userspace(&task, path_ptr, MAX_PATH_LENGTH) {
+        // Exclusive creation resolves the original path under the VFS namespace
+        // lock. Lexical normalization would erase trailing slashes or `..`
+        // after a symlink before the VFS can validate/resolve them.
+        Ok(s) if _flags & (VFS_O_CREAT | VFS_O_EXCL) == (VFS_O_CREAT | VFS_O_EXCL) => s,
         Ok(s) => match to_absolute_path_v2(&task, &s) {
             Ok(abs) => abs,
             Err(_) => return usize::MAX,
