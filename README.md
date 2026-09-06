@@ -50,17 +50,10 @@ composition is driven by `cargo-scarlet` from `scarlet-sdk` and the
 
 ## Desktop
 
-### Virtual desktops
-
-The workspace overview shows virtual desktops and their open windows.
-
-<img src="docs/assets/screenshots/scarlet-virtual-desktops.png" alt="Scarlet workspace overview with virtual desktop thumbnails and open application windows" width="900">
-
-### Application launcher
-
-Open installed desktop applications from the launcher.
-
-<img src="docs/assets/screenshots/scarlet-launcher.png" alt="Scarlet application launcher with a search field and application grid" width="900">
+| Virtual desktops | Application launcher |
+| :---: | :---: |
+| [<img src="docs/assets/screenshots/scarlet-virtual-desktops.png" alt="Scarlet workspace overview with virtual desktop thumbnails and open application windows" width="440">](docs/assets/screenshots/scarlet-virtual-desktops.png) | [<img src="docs/assets/screenshots/scarlet-launcher.png" alt="Scarlet application launcher with a search field and application grid" width="440">](docs/assets/screenshots/scarlet-launcher.png) |
+| The workspace overview shows virtual desktops and their open windows. | Open installed desktop applications from the launcher. |
 
 ## Quick Start
 
