@@ -2,6 +2,13 @@
 # Experimental features and applications for testing and development.
 
 [[layers]]
+kind = "cargo"
+source = { git = "https://github.com/petitstrawberry/sgfx" }
+package = "sgfx"
+bin = "sgfx-native-completion-smoke"
+to = "/system/scarlet/bin/sgfx-native-completion-smoke"
+
+[[layers]]
 kind = "copy"
 source = "fs"
 to = "/"
