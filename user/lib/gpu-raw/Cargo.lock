@@ -22,7 +22,7 @@ checksum = "d9c4f5dac5e15c24eb999c26181a6ca40b39fe946cbe4c263c7209467bc83af2"
 
 [[package]]
 name = "gpu-raw"
-version = "0.16.0"
+version = "1.0.0"
 dependencies = [
  "scarlet-os",
  "scarlet-std",
@@ -50,11 +50,11 @@ dependencies = [
 
 [[package]]
 name = "scarlet-abi"
-version = "0.16.0"
+version = "1.0.0"
 
 [[package]]
 name = "scarlet-os"
-version = "0.16.0"
+version = "1.0.0"
 dependencies = [
  "scarlet-abi",
  "scarlet-rt",
@@ -63,7 +63,7 @@ dependencies = [
 
 [[package]]
 name = "scarlet-rt"
-version = "0.16.0"
+version = "1.0.0"
 dependencies = [
  "lock_api",
  "scarlet-sys",
@@ -73,7 +73,7 @@ dependencies = [
 
 [[package]]
 name = "scarlet-std"
-version = "0.16.0"
+version = "1.0.0"
 dependencies = [
  "hashbrown",
  "scarlet-abi",
@@ -85,7 +85,7 @@ dependencies = [
 
 [[package]]
 name = "scarlet-sys"
-version = "0.16.0"
+version = "1.0.0"
 dependencies = [
  "scarlet-abi",
 ]

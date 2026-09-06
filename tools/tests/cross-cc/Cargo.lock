@@ -14,7 +14,7 @@ dependencies = [
 
 [[package]]
 name = "cross-cc-regression-test"
-version = "0.0.0"
+version = "1.0.0"
 dependencies = [
  "cc",
 ]

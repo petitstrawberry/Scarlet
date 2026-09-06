@@ -23,7 +23,7 @@ fn main() {
     let info = SystemInfo {
         hostname: "scarlet".into(),
         arch: "riscv64".into(),
-        kernel_version: "0.16.0".into(),
+        kernel_version: "1.0.0".into(),
         processes: vec![
             Process {
                 pid: 1,

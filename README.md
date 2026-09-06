@@ -4,7 +4,7 @@
 
 **A Rust operating system kernel and reference distribution for multi-ABI systems.**
 
-[![Version](https://img.shields.io/badge/version-0.16.0-blue.svg)](https://github.com/petitstrawberry/Scarlet)
+[![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)](https://github.com/petitstrawberry/Scarlet)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![RISC-V](https://img.shields.io/badge/arch-RISC--V%2064-green)](https://riscv.org/)
 [![AArch64](https://img.shields.io/badge/arch-AArch64-orange)](https://www.arm.com/)

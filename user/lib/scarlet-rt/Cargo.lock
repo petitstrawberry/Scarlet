@@ -13,11 +13,11 @@ dependencies = [
 
 [[package]]
 name = "scarlet-abi"
-version = "0.16.0"
+version = "1.0.0"
 
 [[package]]
 name = "scarlet-rt"
-version = "0.16.0"
+version = "1.0.0"
 dependencies = [
  "lock_api",
  "scarlet-sys",
@@ -27,7 +27,7 @@ dependencies = [
 
 [[package]]
 name = "scarlet-sys"
-version = "0.16.0"
+version = "1.0.0"
 dependencies = [
  "scarlet-abi",
 ]

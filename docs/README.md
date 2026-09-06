@@ -23,7 +23,7 @@ this is not a claim that every historical document or device was revalidated.
   scarlet-sdk, and Adreno compatibility decisions, dependency migration, CI,
   and release gates.
 - [1.0 scope and compatibility policy](release/1.0-scope.md) - Package membership,
-  public API versus internal wire contracts, supported configurations, and RC1 gates.
+  public API versus internal wire contracts, supported configurations, and release gates.
 - [1.0 package inventory](release/1.0-packages.md) - First-party crates,
   development fixtures, and vendored code before version alignment.
 

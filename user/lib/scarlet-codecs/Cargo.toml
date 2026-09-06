@@ -1,6 +1,6 @@
 [package]
 name = "scarlet-codecs"
-version = "0.16.0"
+version = "1.0.0"
 edition = "2024"
 description = "Userspace codec request builders for Scarlet stateless video decode"
 readme = "README.md"
