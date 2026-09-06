@@ -3,7 +3,7 @@
 更新日: 2026-09-06。引き継ぎ時点のローカルチェックアウトを確認して記載した。
 本文は引き継ぎ時点の記録。作業再開後の変更と確認結果は末尾の「再開後の進捗」と「SGFXの互換性境界を確定」を参照。後者の決定により、SGFXの全Rust公開APIを1.xで凍結する旧案と一律enum移行はRC条件から外れた。
 
-最新の状態: **SDKは別repoの`scarlet-sdk`（`cargo-scarlet`とimage plugin）。native APIの整理をもってSDK契約完了とした誤報は撤回済み。その後、SDK本体を確認して現行契約を別途記録し、未使用の部分的な`--offline`を廃止した。** カーネル・ユーザランドの入口文書を整理し、公開依存・lock整合は最後に残している。A618は保留、Boxcraftは完了、ローカルpatchはコミット外、SGFX smokeは削除済み。末尾の「SDK offline廃止とドキュメント整理」を優先し、以下の古い未完報告を現在の残件に戻さない。
+最新の状態: **ScarletUI・SDKの現行契約の整理は完了。SDKは別repoの`scarlet-sdk`（`cargo-scarlet`とimage plugin）であり、native APIやRust toolchainとは別物。SDKの未使用の部分的な`--offline`は廃止済み。** カーネル・ユーザランドの入口文書と主要Rustdocを整理し、承認済みの実装課題も修正した。SDK・SGFX・ScarletUIの修正と、Chromebookのunsafe API追従修正を公開済み。公開依存・lockの最終確認は末尾の「公開依存の統合確認」を参照。A618は保留、Boxcraftは完了、ローカルpatchはコミット外、SGFX smokeは削除済み。以下の古い未完報告を現在の残件に戻さない。
 
 追記: ソースのドキュメントコメントも現実装と照合した。修正範囲と、説明の変更だけでは
 解決しない旧TLS・メモリ解放API等の問題は末尾の「Rustdocの照合と残る実装課題」を参照。
@@ -24,7 +24,7 @@
 2. メインのチェックアウトを直接操作する。新しいworktree、ソースコピー、独自taskラッパー、追加の作業管理機構を作らない。
 3. **QEMU・GUIの動作確認はユーザーが行う。** ユーザーのQEMUを起動・停止しない。Dockerを起動しない。`cargo make`も使わない。古いAGENTS/roadmapの一般的なコマンド例より、この会話での具体的な指示を優先する。
 4. Nixの既存環境と `scarlet-rust-toolchain` を使う。環境の正当性を毎回調べ直さない。通常のScarletユーザー空間ターゲットはRust `std` 対応であり、Scarlet target = `no_std` ではない。
-5. Git依存更新は通常の `cargo update`。不必要に `--precise` や手作業のハッシュ差し替えを持ち込まない。
+5. Git依存更新は通常の `cargo update`、project lockは `cargo scarlet update` / `image`、Nix pinは `nix flake update`。lockは復元も含め手編集しない。不必要に `--precise` や手作業のハッシュ差し替えを持ち込まない。
 6. 当面Scarletは `dev` 直で進めてよい。コミットは小さく行う。タグ作成・リリース公表・実験機能の範囲変更は別の判断。
 7. ユーザー所有の差分を巻き戻したり、無断で混ぜてコミットしたりしない。以下に実際の残存差分を明記している。
 8. QEMUが快適に動くというユーザーの確認済み前提を尊重する。過去のdebugビルド時の遅延を再び未解決課題にしない。showcaseのFPSにはSWS側の制限も関係していた。
@@ -621,7 +621,7 @@ push・タグ作成・リリース公表はしていない。
   `projects/aarch64-limine-full/scarlet.lock` の差分は作業開始時と同一。
   `test-kernel` も保持。QEMU/GUI/Docker、新しいsmokeや検証wrapperは作成・起動していない。
 
-### 公開依存・lockの次の前提
+### 公開前の依存・lock状態（次節で更新）
 
 read-onlyの `git ls-remote` で確認した公開mainとローカル候補:
 
@@ -635,3 +635,45 @@ Scarletの `flake.lock` はSDK `10a17cc` のままで、上記SDK修正をまだ
 これらの公開状態を揃えてからNix pin・Cargo/project lockを最終選定し、
 兄弟checkoutに依存しない正規buildを確認する。版上げ・タグ・release notes・
 依存更新PRの自動化はこの4修正に含めていない。A618は合意どおり保留、Boxcraftは完了扱いを維持する。
+
+## 公開依存の統合確認 — 2026-09-06
+
+ユーザー承認に基づき、既存コミットを各repoの `origin/main` に公開した。
+Scarlet本体のpush・タグ作成・リリース公表は、この承認に含めていない。
+
+| repo | 公開main | 公開した既存コミット数 |
+| --- | --- | --- |
+| scarlet-sdk | `e6d7f1f037cbe2683362ee52e512884b69fcd02a` | 2 |
+| sgfx | `0800d976d065b2585ec873dca8ce29e17c9fe61d` | 4 |
+| scarlet-ui | `50eea74d5316220021ad05227eba2171df6ff716` | 3 |
+| scarlet-project-chromebook | `fcff35b4b01ef71631f163d44302460abb3a4f00` | 1 |
+
+- SDK pinを `nix flake update scarlet-sdk` で上記公開版へ更新。
+  新しい `cargo-scarlet` とLimine pluginをNixで生成し、使用できることを確認した。
+- 最初の公開依存ビルドは、両archのkernel releaseビルド後にAdreno backendで停止。
+  公開前の `0508d00` には `syscall0` 1箇所、`mmap` 1箇所、`munmap` 3箇所の
+  unsafe境界への追従漏れがあった。兄弟checkoutには既存修正 `fcff35b` があり、
+  その公開を追加承認してもらった。A618の機能開発を再開したものではない。
+- 検証中は兄弟repoへの開発用path patchを外し、公開Git依存を使用する。
+  Scarlet workspaceのCargo metadataでrepo外のlocal dependencyがないこと、`sgfx-core` が1つであること、
+  SGFX・ScarletUI・Adrenoの参照が上記公開版であることを確認した。
+  外部アプリは各repo自身のCargo lockでビルドするため、全アプリ内のSGFX等が
+  同じcommitになるという意味ではない。SDKのproject lockと子Cargoのlockを区別する。
+- `cargo update --manifest-path .cargo/Cargo.toml -p sgfx -p scarlet-ui
+  -p sgfx-backend-scarlet-adreno` と、3つのreference projectの
+  `cargo scarlet update --project <project>` を実行。
+  既存Cargo lockのregistry依存530件は、version・checksumとも変更していない。
+- `nix develop . --command cargo scarlet image --project <full-project>
+  --release --locked` を両archで実行。AArch64は通常のfull bundle全体を通過し、
+  initramfs・rootfs・ESP・2 partitionのGPTディスクとproject lockをSDKが生成した。
+  RISC-Vはkernel・SWS・UI・Carmine・Vellum・Boxcraft・Moonlight・video-player・
+  yt/yt-gui・通信デモ・Blitzを通過。最後のMyricaのビルド中に、検証を止める
+  ユーザー指示を受けて中断した（exit 130）。コンパイルエラーによる停止ではない。
+  **RISC-Vのfull image完成は未確認であり、その出力hashを最終生成した扱いにしない。**
+  RISC-V / microvmのproject lockはSDKの `update` による参照・layer更新まで。
+- 通常のfull bundleを使用し、実験bundleやAdreno backendを除外していない。
+  QEMU・GUI・Docker、追加のsmokeや検証wrapperは起動・作成していない。
+  ユーザーの停止指示後は追加ビルド・テストを行わない。
+- 公開依存用の生成済みlockをコミットし、開発用path patchはコミット外に保つ。
+  path patchを戻した手元のCargo lockはCargoの正規処理で再解決する。
+  lockを手編集してGit参照や出力hashを差し替えたり、手作業で復元したりしない。

@@ -53,6 +53,28 @@ path = "../../user/std-bin"
 
 [[sections.initramfs.layers]]
 kind = "cargo"
+package = "scarlet-std-bin"
+bin = "logd"
+to = "/system/scarlet/bin/logd"
+hash = ""
+
+[sections.initramfs.layers.source]
+type = "path"
+path = "../../user/std-bin"
+
+[[sections.initramfs.layers]]
+kind = "cargo"
+package = "scarlet-std-bin"
+bin = "logctl"
+to = "/system/scarlet/bin/logctl"
+hash = ""
+
+[sections.initramfs.layers.source]
+type = "path"
+path = "../../user/std-bin"
+
+[[sections.initramfs.layers]]
+kind = "cargo"
 package = "user-bin"
 bin = "sbusd"
 to = "/system/scarlet/bin/sbusd"
@@ -210,6 +232,28 @@ kind = "cargo"
 package = "scarlet-std-bin"
 bin = "stemd"
 to = "/system/scarlet/bin/stemd"
+hash = ""
+
+[sections.rootfs.layers.source]
+type = "path"
+path = "../../user/std-bin"
+
+[[sections.rootfs.layers]]
+kind = "cargo"
+package = "scarlet-std-bin"
+bin = "logd"
+to = "/system/scarlet/bin/logd"
+hash = ""
+
+[sections.rootfs.layers.source]
+type = "path"
+path = "../../user/std-bin"
+
+[[sections.rootfs.layers]]
+kind = "cargo"
+package = "scarlet-std-bin"
+bin = "logctl"
+to = "/system/scarlet/bin/logctl"
 hash = ""
 
 [sections.rootfs.layers.source]

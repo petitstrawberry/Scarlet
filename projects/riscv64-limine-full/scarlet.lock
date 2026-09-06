@@ -53,6 +53,28 @@ path = "../../user/std-bin"
 
 [[sections.initramfs.layers]]
 kind = "cargo"
+package = "scarlet-std-bin"
+bin = "logd"
+to = "/system/scarlet/bin/logd"
+hash = ""
+
+[sections.initramfs.layers.source]
+type = "path"
+path = "../../user/std-bin"
+
+[[sections.initramfs.layers]]
+kind = "cargo"
+package = "scarlet-std-bin"
+bin = "logctl"
+to = "/system/scarlet/bin/logctl"
+hash = ""
+
+[sections.initramfs.layers.source]
+type = "path"
+path = "../../user/std-bin"
+
+[[sections.initramfs.layers]]
+kind = "cargo"
 package = "user-bin"
 bin = "sbusd"
 to = "/system/scarlet/bin/sbusd"
@@ -132,6 +154,17 @@ package = "user-bin"
 bin = "netcfgd"
 to = "/system/scarlet/bin/netcfgd"
 hash = "sha256:2b81fe6fc53dbe41de5e0ea02f05d1c87942feacce28916bbcb304ac6cf4d2c9"
+
+[sections.initramfs.layers.source]
+type = "path"
+path = "../../user/bin"
+
+[[sections.initramfs.layers]]
+kind = "cargo"
+package = "user-bin"
+bin = "sshd"
+to = "/system/scarlet/bin/sshd"
+hash = ""
 
 [sections.initramfs.layers.source]
 type = "path"
@@ -296,6 +329,28 @@ path = "../../user/std-bin"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
+package = "scarlet-std-bin"
+bin = "logd"
+to = "/system/scarlet/bin/logd"
+hash = ""
+
+[sections.rootfs.layers.source]
+type = "path"
+path = "../../user/std-bin"
+
+[[sections.rootfs.layers]]
+kind = "cargo"
+package = "scarlet-std-bin"
+bin = "logctl"
+to = "/system/scarlet/bin/logctl"
+hash = ""
+
+[sections.rootfs.layers.source]
+type = "path"
+path = "../../user/std-bin"
+
+[[sections.rootfs.layers]]
+kind = "cargo"
 package = "user-bin"
 bin = "sbusd"
 to = "/system/scarlet/bin/sbusd"
@@ -375,6 +430,17 @@ package = "user-bin"
 bin = "netcfgd"
 to = "/system/scarlet/bin/netcfgd"
 hash = "sha256:2b81fe6fc53dbe41de5e0ea02f05d1c87942feacce28916bbcb304ac6cf4d2c9"
+
+[sections.rootfs.layers.source]
+type = "path"
+path = "../../user/bin"
+
+[[sections.rootfs.layers]]
+kind = "cargo"
+package = "user-bin"
+bin = "sshd"
+to = "/system/scarlet/bin/sshd"
+hash = ""
 
 [sections.rootfs.layers.source]
 type = "path"
@@ -504,17 +570,6 @@ path = "../../user/bin"
 [[sections.rootfs.layers]]
 kind = "cargo"
 package = "user-bin"
-bin = "desktop-background"
-to = "/system/scarlet/bin/desktop-background"
-hash = "sha256:d0b51ddfe0451ed8704e3611d110b2585e5a9944c312c246dc3190456b06652f"
-
-[sections.rootfs.layers.source]
-type = "path"
-path = "../../user/bin"
-
-[[sections.rootfs.layers]]
-kind = "cargo"
-package = "user-bin"
 bin = "desktop-settings"
 to = "/system/scarlet/bin/desktop-settings"
 hash = "sha256:8aee64dcb76f6308cedf7e30705887b55355f03e6cf62a8130e618c85e56d08c"
@@ -537,17 +592,6 @@ path = "../../user/std-bin"
 [[sections.rootfs.layers]]
 kind = "cargo"
 package = "scarlet-std-bin"
-bin = "launcher"
-to = "/system/scarlet/bin/launcher"
-hash = "sha256:69b43c4b1c309e0d7bbd632bbd152fd1db26f4591fc30e1f04ed2039f32a6229"
-
-[sections.rootfs.layers.source]
-type = "path"
-path = "../../user/std-bin"
-
-[[sections.rootfs.layers]]
-kind = "cargo"
-package = "scarlet-std-bin"
 bin = "notepad"
 to = "/system/scarlet/bin/notepad"
 hash = "sha256:bc4969bcd459002e7a702ed881246197728b212def5ebc4a62b54f5b03cef0ce"
@@ -558,14 +602,14 @@ path = "../../user/std-bin"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
-package = "user-bin"
-bin = "taskbar"
-to = "/system/scarlet/bin/taskbar"
-hash = "sha256:3f95d75581e3601eaf39969d0e4ccd0eb73538cd69a6c7b678cdc560ad990470"
+package = "scarlet-std-bin"
+bin = "scarlet-shell"
+to = "/system/scarlet/bin/scarlet-shell"
+hash = ""
 
 [sections.rootfs.layers.source]
 type = "path"
-path = "../../user/bin"
+path = "../../user/std-bin"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
@@ -646,7 +690,7 @@ path = "../../user/bin"
 [[sections.rootfs.layers]]
 kind = "cargo"
 git = "https://github.com/petitstrawberry/scarlet-ui"
-resolved_rev = "6cecb4606f489f190b0a221d01868de1117d161d"
+resolved_rev = "50eea74d5316220021ad05227eba2171df6ff716"
 package = "scarlet-ui-widget-factory"
 bin = "scarlet-ui-widget-factory"
 subdir = "examples/widget-factory"
@@ -656,7 +700,7 @@ hash = ""
 [sections.rootfs.layers.source]
 type = "git"
 url = "https://github.com/petitstrawberry/scarlet-ui"
-rev = "6cecb4606f489f190b0a221d01868de1117d161d"
+rev = "50eea74d5316220021ad05227eba2171df6ff716"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
@@ -845,6 +889,36 @@ path = "../../user/std-bin"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
+bin = "displayctl"
+to = "/system/scarlet/bin/displayctl"
+hash = ""
+
+[sections.rootfs.layers.source]
+type = "path"
+path = "../../user/std-bin"
+
+[[sections.rootfs.layers]]
+kind = "cargo"
+bin = "sensor-dump"
+to = "/system/scarlet/bin/sensor-dump"
+hash = ""
+
+[sections.rootfs.layers.source]
+type = "path"
+path = "../../user/std-bin"
+
+[[sections.rootfs.layers]]
+kind = "cargo"
+bin = "tabletctl"
+to = "/system/scarlet/bin/tabletctl"
+hash = ""
+
+[sections.rootfs.layers.source]
+type = "path"
+path = "../../user/std-bin"
+
+[[sections.rootfs.layers]]
+kind = "cargo"
 bin = "mozc-server"
 to = "/system/scarlet/bin/mozc-server"
 hash = ""
@@ -878,7 +952,7 @@ path = "../../user/bin"
 [[sections.rootfs.layers]]
 kind = "cargo"
 git = "https://github.com/petitstrawberry/carmine"
-resolved_rev = "3f6b90db673cb07094507eddd1a069d8a2b76626"
+resolved_rev = "0e4802552761d4cc8d56b21f76f0e17d4dbc5357"
 package = "carmine"
 bin = "carmine"
 to = "/system/scarlet/bin/carmine"
@@ -887,27 +961,26 @@ hash = "sha256:e11e6cbcaea5603adcf13227b29512dd8893a1ab076fdc23706b8006d93aed2e"
 [sections.rootfs.layers.source]
 type = "git"
 url = "https://github.com/petitstrawberry/carmine"
-rev = "3f6b90db673cb07094507eddd1a069d8a2b76626"
+rev = "0e4802552761d4cc8d56b21f76f0e17d4dbc5357"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
 git = "https://github.com/petitstrawberry/vellum"
-git_ref = "c2755acf5f6aa301700449c30c2f4f7b02c5dbd5"
-resolved_rev = "c2755acf5f6aa301700449c30c2f4f7b02c5dbd5"
+resolved_rev = "cd7c4b080fd326de640e6f320b0ffd93d4858743"
 package = "vellum"
 bin = "vellum"
 to = "/system/scarlet/bin/vellum"
-hash = "sha256:c29ca1d17824ef9866e4c1f11736889b2ff842cc39c2809cedbabb41a4de44fd"
+hash = ""
 
 [sections.rootfs.layers.source]
 type = "git"
 url = "https://github.com/petitstrawberry/vellum"
-rev = "c2755acf5f6aa301700449c30c2f4f7b02c5dbd5"
+rev = "cd7c4b080fd326de640e6f320b0ffd93d4858743"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
 git = "https://github.com/petitstrawberry/boxcraft"
-resolved_rev = "884d12d7d429bac735cd4200812cd549f0e386ce"
+resolved_rev = "360668bf91fd863f6cf883d78955e3c8daafb0d9"
 package = "boxcraft"
 bin = "boxcraft"
 to = "/system/scarlet/bin/boxcraft"
@@ -916,7 +989,7 @@ hash = "sha256:c62576205f84fc50dddfa3226fd1c4d30a2e398d856479870e5801c881a98a51"
 [sections.rootfs.layers.source]
 type = "git"
 url = "https://github.com/petitstrawberry/boxcraft"
-rev = "884d12d7d429bac735cd4200812cd549f0e386ce"
+rev = "360668bf91fd863f6cf883d78955e3c8daafb0d9"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
@@ -954,6 +1027,21 @@ sha256 = "sha256:72458aa767224fa7bd87a324a47faeeb524aad109b8c98aaaf83d304829eb5e
 
 [[sections.rootfs.layers]]
 kind = "cargo"
+git = "https://github.com/petitstrawberry/moonlight-scarlet.git"
+git_ref = "0a0a263b8b1538d0f98d9ad7820a589230228c6b"
+resolved_rev = "0a0a263b8b1538d0f98d9ad7820a589230228c6b"
+package = "moonlight"
+bin = "moonlight"
+to = "/system/scarlet/bin/moonlight"
+hash = ""
+
+[sections.rootfs.layers.source]
+type = "git"
+url = "https://github.com/petitstrawberry/moonlight-scarlet.git"
+rev = "0a0a263b8b1538d0f98d9ad7820a589230228c6b"
+
+[[sections.rootfs.layers]]
+kind = "cargo"
 package = "video_player"
 bin = "video-player"
 features = [
@@ -973,7 +1061,7 @@ path = "../../user/video_player"
 [[sections.rootfs.layers]]
 kind = "cargo"
 git = "https://github.com/petitstrawberry/yt-for-scarlet"
-resolved_rev = "423063441fa52c8ecef52d40564264619b213899"
+resolved_rev = "4c92409083251093faf0c31a0dad2c8b581242b1"
 package = "yt"
 bin = "yt"
 to = "/system/scarlet/bin/yt"
@@ -982,12 +1070,12 @@ hash = "sha256:117e20bd7e0dc98480e001dc29340386915f2f5f942d45349142f3570a458f05"
 [sections.rootfs.layers.source]
 type = "git"
 url = "https://github.com/petitstrawberry/yt-for-scarlet"
-rev = "423063441fa52c8ecef52d40564264619b213899"
+rev = "4c92409083251093faf0c31a0dad2c8b581242b1"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
 git = "https://github.com/petitstrawberry/yt-for-scarlet"
-resolved_rev = "423063441fa52c8ecef52d40564264619b213899"
+resolved_rev = "4c92409083251093faf0c31a0dad2c8b581242b1"
 package = "yt-gui"
 bin = "yt-gui"
 to = "/system/scarlet/bin/yt-gui"
@@ -996,4 +1084,101 @@ hash = "sha256:6141c692a09c70fcb67d5f4defd7bb7637eaf84eaf23cfc8e81f4519992406d5"
 [sections.rootfs.layers.source]
 type = "git"
 url = "https://github.com/petitstrawberry/yt-for-scarlet"
-rev = "423063441fa52c8ecef52d40564264619b213899"
+rev = "4c92409083251093faf0c31a0dad2c8b581242b1"
+
+[[sections.rootfs.layers]]
+kind = "cargo"
+package = "scarlet-std-bin"
+bin = "axum-demo"
+to = "/system/scarlet/bin/axum-demo"
+hash = ""
+
+[sections.rootfs.layers.source]
+type = "path"
+path = "../../user/std-bin"
+
+[[sections.rootfs.layers]]
+kind = "cargo"
+package = "scarlet-std-bin"
+bin = "reqwest-demo"
+to = "/system/scarlet/bin/reqwest-demo"
+hash = ""
+
+[sections.rootfs.layers.source]
+type = "path"
+path = "../../user/std-bin"
+
+[[sections.rootfs.layers]]
+kind = "cargo"
+package = "scarlet-tonic-demo"
+bin = "tonic-server"
+to = "/system/scarlet/bin/tonic-server"
+hash = ""
+
+[sections.rootfs.layers.source]
+type = "path"
+path = "../../user/tonic-demo"
+
+[[sections.rootfs.layers]]
+kind = "cargo"
+package = "scarlet-tonic-demo"
+bin = "tonic-client"
+to = "/system/scarlet/bin/tonic-client"
+hash = ""
+
+[sections.rootfs.layers.source]
+type = "path"
+path = "../../user/tonic-demo"
+
+[[sections.rootfs.layers]]
+kind = "cargo"
+package = "scarlet-websocket-demo"
+bin = "ws-server"
+to = "/system/scarlet/bin/ws-server"
+hash = ""
+
+[sections.rootfs.layers.source]
+type = "path"
+path = "../../user/websocket-demo"
+
+[[sections.rootfs.layers]]
+kind = "cargo"
+package = "scarlet-websocket-demo"
+bin = "ws-client"
+to = "/system/scarlet/bin/ws-client"
+hash = ""
+
+[sections.rootfs.layers.source]
+type = "path"
+path = "../../user/websocket-demo"
+
+[[sections.rootfs.layers]]
+kind = "cargo"
+git = "https://github.com/petitstrawberry/blitz"
+git_ref = "c26e20dfff971941486ca9f50c8dcd332ec404da"
+resolved_rev = "c26e20dfff971941486ca9f50c8dcd332ec404da"
+package = "blitz-scarlet-browser"
+bin = "blitz"
+subdir = "apps/scarlet-browser"
+to = "/system/scarlet/bin/blitz"
+hash = ""
+
+[sections.rootfs.layers.source]
+type = "git"
+url = "https://github.com/petitstrawberry/blitz"
+rev = "c26e20dfff971941486ca9f50c8dcd332ec404da"
+
+[[sections.rootfs.layers]]
+kind = "cargo"
+git = "https://github.com/petitstrawberry/myrica"
+git_ref = "6deb1dbd582e56393db3958e00873d15a1312c5e"
+resolved_rev = "6deb1dbd582e56393db3958e00873d15a1312c5e"
+package = "myrica"
+bin = "myrica"
+to = "/system/scarlet/bin/myrica"
+hash = ""
+
+[sections.rootfs.layers.source]
+type = "git"
+url = "https://github.com/petitstrawberry/myrica"
+rev = "6deb1dbd582e56393db3958e00873d15a1312c5e"
