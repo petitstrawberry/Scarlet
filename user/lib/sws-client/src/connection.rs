@@ -2006,7 +2006,18 @@ impl Connection {
 
     /// Set per-window size constraints (raw values).
     ///
-    /// Prefer [`set_window_size_limits`] with [`WindowSizeLimits`].
+    /// Prefer [`Self::set_window_size_limits`] with [`WindowSizeLimits`].
+    ///
+    /// # Arguments
+    /// * `surface_id` - Surface tracked by this connection.
+    /// * `min_width` - Minimum width in pixels, or zero for unset.
+    /// * `min_height` - Minimum height in pixels, or zero for unset.
+    /// * `max_width` - Maximum width in pixels, or zero for unset.
+    /// * `max_height` - Maximum height in pixels, or zero for unset.
+    ///
+    /// # Returns
+    /// `Ok(())` after sending the request, not after server-side application.
+    /// Returns `SurfaceNotFound` for an unknown local surface or `SendFailed` on send failure.
     pub fn set_window_size_limits_raw(
         &self,
         surface_id: u32,
@@ -2209,7 +2220,15 @@ impl Connection {
 
     /// Configure transient behavior flags for a window (raw bits).
     ///
-    /// Prefer [`set_window_transient_flags`] with [`TransientFlags`].
+    /// Prefer [`Self::set_window_transient_flags`] with [`TransientFlags`].
+    ///
+    /// # Arguments
+    /// * `surface_id` - Surface ID to include in the request.
+    /// * `flags` - Raw transient-behavior bitmask understood by the matched server.
+    ///
+    /// # Returns
+    /// `Ok(())` after sending the request, or `SendFailed`. This does not validate
+    /// the surface ID locally or acknowledge that the server applied the flags.
     pub fn set_window_transient_flags_raw(&self, surface_id: u32, flags: u32) -> Result<(), Error> {
         let payload = protocol::payload_set_window_transient_flags(surface_id, flags);
         self.send_message(protocol::client_msg::SET_WINDOW_TRANSIENT_FLAGS, &payload)

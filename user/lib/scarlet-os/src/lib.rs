@@ -1,8 +1,11 @@
 //! Typed Scarlet Native OS wrappers and explicit unsafe low-level operations.
 //!
 //! This crate owns Scarlet-specific userland APIs that should remain available
-//! to `no_std` applications and to future Rust `std` applications through an
-//! explicit Scarlet crate.
+//! to both `no_std` applications and applications using the Scarlet Rust `std`
+//! targets, through an explicit Scarlet crate rather than portable `std` APIs.
+//! The crate itself is `no_std`; its `std` feature selects integration with an
+//! application's standard library. The default `rt-env` feature separately
+//! enables the `scarlet-rt` environment dependency.
 
 #![no_std]
 #![deny(unsafe_op_in_unsafe_fn)]

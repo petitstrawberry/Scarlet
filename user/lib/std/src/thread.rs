@@ -502,18 +502,38 @@ pub(crate) fn exit_current_thread(code: i32) -> ! {
 /// Thread Local Storage key
 ///
 /// This type represents a key for thread-local storage. Each key
-/// can be associated with a value that is unique to each thread.
+/// identifies an offset in the current thread's TLS area; the key does not
+/// allocate storage or establish that a value has been initialized there.
+///
+/// # Known limitations
+///
+/// This legacy API does not enforce the invariants required by its safe access
+/// methods. The caller must arrange a live, correctly aligned, initialized `T`
+/// in a non-overlapping TLS slot before access. Mutable callbacks must not be
+/// reentrant or overlap any other reference to that slot. The macro's name hash
+/// does not guarantee distinct slots, and neither it nor `with` runs an initializer.
+/// These are implementation safety gaps, not guarantees provided by this type.
+/// New Rust `std` applications should use Rust `std::thread_local!` instead.
 ///
 /// # Example
 ///
-/// ```rust
+/// ```no_run
+/// #![no_std]
+/// #![no_main]
+/// # #[unsafe(no_mangle)]
+/// # extern "C" fn main() -> i32 {
+/// use scarlet_std::cell::Cell;
+/// use scarlet_std::thread_local;
 /// thread_local! {
 ///     static FOO: Cell<i32> = Cell::new(5);
 /// }
 ///
+/// // Requires initialized, non-overlapping TLS storage; see the limitations above.
 /// FOO.with(|value| {
 ///     value.set(10);
 /// });
+/// # 0
+/// # }
 /// ```
 #[derive(Debug, Clone, Copy)]
 pub struct LocalKey<T> {
@@ -524,10 +544,10 @@ pub struct LocalKey<T> {
     _phantom: core::marker::PhantomData<T>,
 }
 
-// SAFETY: `LocalKey<T>` is `Sync` for all `T` because accessing thread-local
-// storage through `LocalKey` is thread-safe: each thread has its own copy of
-// the TLS value, and `LocalKey` is just a handle to access that storage.
-// The `offset` and `align` fields are constant and can be safely shared.
+// SAFETY: The key holds only constant offset/alignment metadata, not a T value
+// that would be shared between threads. This does not establish the separate
+// initialization and aliasing invariants missing from the legacy access methods;
+// see LocalKey's documented limitations.
 unsafe impl<T> Sync for LocalKey<T> {}
 
 // SAFETY: `LocalKey<T>` is `Send` for all `T` because it only contains constant
@@ -536,6 +556,13 @@ unsafe impl<T> Send for LocalKey<T> {}
 
 impl<T> LocalKey<T> {
     /// Create a new LocalKey with the given offset and alignment
+    ///
+    /// # Arguments
+    /// * `offset` - Byte offset from the current thread's TLS base.
+    /// * `align` - Recorded alignment; this constructor does not verify it against `T`.
+    ///
+    /// # Returns
+    /// An unchecked key. No storage is reserved and no value is initialized.
     #[inline]
     pub const fn new(offset: usize, align: usize) -> Self {
         Self {
@@ -554,12 +581,25 @@ impl<T> LocalKey<T> {
     /// Initialize this thread-local value with the given initializer
     ///
     /// This function should be called once per thread to initialize the value.
-    /// Subsequent calls will have no effect if the value is already initialized.
+    /// There is no initialization flag: subsequent calls overwrite the previous
+    /// value without dropping it rather than becoming no-ops.
+    ///
+    /// # Arguments
+    /// * `value` - Value to move into this key's TLS slot.
     ///
     /// # Safety
     ///
     /// This function should only be called once per thread for each LocalKey.
-    /// The caller must ensure the TLS area is large enough for this value.
+    /// The caller must ensure the TLS area is live and large enough for this
+    /// value, the resulting pointer satisfies `align_of::<T>()`, and the slot
+    /// does not overlap another live TLS object. No reference to the overwritten
+    /// storage may be live, and the address arithmetic must not overflow.
+    ///
+    /// # Returns
+    /// No value. Writes `value` directly; it does not register a destructor.
+    ///
+    /// # Panics
+    /// Panics if the current thread's TLS base pointer is zero.
     pub unsafe fn initialize(self, value: T)
     where
         T: 'static,
@@ -577,12 +617,20 @@ impl<T> LocalKey<T> {
 
     /// Execute a closure with access to this thread-local value
     ///
-    /// This function provides safe access to thread-local storage by
-    /// executing the provided closure with a reference to the value.
+    /// Executes the closure with a shared reference to the value. Despite the
+    /// safe signature, initialization and slot validity are not checked; see
+    /// [`LocalKey`]'s known limitations. This method does not initialize the value.
+    ///
+    /// # Arguments
+    /// * `f` - Callback borrowing the already initialized TLS value.
+    ///
+    /// # Returns
+    /// The callback's result.
     ///
     /// # Panics
     ///
-    /// Panics if the TLS pointer is not set for the current thread.
+    /// Panics if the TLS pointer is not set, or the recorded alignment check
+    /// fails. Those checks do not validate `T`, allocation bounds, or initialization.
     pub fn with<F, R>(&self, f: F) -> R
     where
         T: 'static,
@@ -608,7 +656,18 @@ impl<T> LocalKey<T> {
 
     /// Execute a closure with mutable access to this thread-local value
     ///
-    /// This function provides safe mutable access to thread-local storage.
+    /// The safe signature does not enforce exclusive borrowing. Nested accesses
+    /// to this key, an aliasing key, or a live shared borrow can violate Rust's
+    /// aliasing rules; see [`LocalKey`]'s known limitations.
+    ///
+    /// # Arguments
+    /// * `f` - Callback requiring exclusive access to an initialized TLS value.
+    ///
+    /// # Returns
+    /// The callback's result; exclusivity is not tracked at runtime.
+    ///
+    /// # Panics
+    /// Panics if the TLS base is zero or the recorded alignment check fails.
     pub fn with_mut<F, R>(&self, f: F) -> R
     where
         T: 'static,
@@ -633,8 +692,15 @@ impl<T> LocalKey<T> {
 
     /// Try to execute a closure with access to this thread-local value
     ///
-    /// Returns `None` if TLS is not initialized, otherwise returns the
-    /// result of the closure.
+    /// Tests only whether the TLS base pointer is nonzero. It does not verify
+    /// that this particular value has been initialized, aligned, or allocated.
+    /// The same caller obligations as [`Self::with`] apply.
+    ///
+    /// # Arguments
+    /// * `f` - Callback borrowing the already initialized TLS value.
+    ///
+    /// # Returns
+    /// `None` for a zero TLS base; otherwise the callback's result in `Some`.
     pub fn try_with<F, R>(&self, f: F) -> Option<R>
     where
         T: 'static,
@@ -651,8 +717,15 @@ impl<T> LocalKey<T> {
 
     /// Try to execute a closure with mutable access to this thread-local value
     ///
-    /// Returns `None` if TLS is not initialized, otherwise returns the
-    /// result of the closure.
+    /// Tests only whether the TLS base pointer is nonzero. It does not verify
+    /// initialization, alignment, allocation bounds, or exclusive access.
+    /// The same caller obligations as [`Self::with_mut`] apply.
+    ///
+    /// # Arguments
+    /// * `f` - Callback requiring exclusive access to an initialized TLS value.
+    ///
+    /// # Returns
+    /// `None` for a zero TLS base; otherwise the callback's result in `Some`.
     pub fn try_with_mut<F, R>(&self, f: F) -> Option<R>
     where
         T: 'static,
@@ -688,21 +761,38 @@ pub const __TLS_ALIGN: usize = 8;
 
 /// Thread local storage variable
 ///
-/// This macro defines a thread-local variable with the given type and
-/// initializer. The variable is unique to each thread and is initialized
-/// lazily on first access.
+/// This legacy macro declares [`LocalKey`] metadata using a hash of the variable
+/// name. Although its syntax accepts an initializer, the current expansion does
+/// not evaluate or store that expression and does not lazily initialize a value.
+///
+/// # Known limitations
+///
+/// Hashed offsets can collide and do not reserve space based on each value's size
+/// or alignment. Before access, callers must independently establish all storage,
+/// initialization, and aliasing invariants described by [`LocalKey`]. The examples
+/// below show the syntax only and must not be treated as a complete TLS setup.
 ///
 /// # Example
 ///
-/// ```rust
+/// ```no_run
+/// #![no_std]
+/// #![no_main]
+/// # #[unsafe(no_mangle)]
+/// # extern "C" fn main() -> i32 {
+/// use scarlet_std::cell::{Cell, RefCell};
+/// use scarlet_std::string::String;
+/// use scarlet_std::thread_local;
 /// thread_local! {
 ///     static FOO: Cell<i32> = Cell::new(5);
 ///     static BAR: RefCell<String> = RefCell::new(String::new());
 /// }
 ///
+/// // Requires initialized, non-overlapping TLS storage; see the limitations above.
 /// FOO.with(|value| {
 ///     value.set(10);
 /// });
+/// # 0
+/// # }
 /// ```
 #[macro_export]
 macro_rules! thread_local {

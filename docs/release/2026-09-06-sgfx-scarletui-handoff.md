@@ -5,6 +5,9 @@
 
 最新の状態: **SDKは別repoの`scarlet-sdk`（`cargo-scarlet`とimage plugin）。native APIの整理をもってSDK契約完了とした誤報は撤回済み。その後、SDK本体を確認して現行契約を別途記録し、未使用の部分的な`--offline`を廃止した。** カーネル・ユーザランドの入口文書を整理し、公開依存・lock整合は最後に残している。A618は保留、Boxcraftは完了、ローカルpatchはコミット外、SGFX smokeは削除済み。末尾の「SDK offline廃止とドキュメント整理」を優先し、以下の古い未完報告を現在の残件に戻さない。
 
+追記: ソースのドキュメントコメントも現実装と照合した。修正範囲と、説明の変更だけでは
+解決しない旧TLS・メモリ解放API等の問題は末尾の「Rustdocの照合と残る実装課題」を参照。
+
 ## まず結論
 
 - 今回の **SGFX完了API・ネイティブ投入スケジューリング・ScarletUIの安全なフレーム拒否処理は、実装修正完了として区切る**。ユーザーもこの区切りを了承している。
@@ -466,3 +469,70 @@ SDKを含む修正の公開とNix pin更新、Cargo/project lockの最終選定�
 ユーザー所有の既存lock差分・兄弟path patchは保持し、この作業には混ぜない。
 版上げ・タグ・RC公表も未実施。個別subsystem/boardの古い設計ノートをすべて
 再認証したという意味ではなく、現行の開発入口と主要な誤案内を整理した区切りである。
+
+## Rustdocの照合と残る実装課題 — 2026-09-06
+
+ユーザーの追加依頼に基づき、カーネルとユーザランドの主要APIの説明を実装と照合した。
+Rust側の変更はドキュメントコメント・通常コメントのみで、公開シグネチャ、実行コード、ABI、
+依存・lockは変更していない。未実装の保証を文書で既成事実にしないことを優先した。
+
+- VM ownerの説明を `Weak` から実装どおりの強い `Arc` へ修正。
+  inclusiveな範囲の終端、slice化に必要な寿命・排他性、PMMとheapの所有権を明記した。
+- 「VA = PA」や、アドレス変換の初期化フラグがアクセス安全性を保証する説明を修正。
+  bootloaderの広い境界、runtimeのsparse HHDM、メタデータ更新とPTE更新を区別した。
+- ABIのclone・default hook・明示ABI選択時の検証責任、exec失敗時の部分的な復元、
+  shutdownがsync/unmountを実行しない現状を記録した。
+- 旧 `scarlet-std` のcreate/open・append・directory read・flushの説明を修正。
+  掲載例の古いcrate名、通常のRust `std`との混同、必要なimport/entry設定を直した。
+- 両archのRustdocリンク切れ・型名のHTML誤解釈、AArch64の命令bit位置の誤記を修正。
+  Native crateの役割説明、SWSクライアントのメソッドリンク、builder例の戻り値型と
+  必須項目の説明も更新した。
+
+検証の区切り:
+
+- Kernel: default featuresでRISC-V/AArch64の `cargo doc --locked --offline --no-deps`。
+  private itemsを含む生成も確認し、`broken_intra_doc_links`、`invalid_html_tags`、
+  `private_intra_doc_links`、`invalid_codeblock_attributes` をerror扱いにして通過。
+  AArch64の既存 `unused_parens` 警告とtoolchain `core` のfuture-incompat通知は未修正。
+- `scarlet-abi` / `scarlet-sys` / `scarlet-rt` / `scarlet-os` / `scarlet-std`:
+  両Scarlet targetで同じRustdoc lint検査を通過。
+- `scarlet-os` / `gpu-raw` / `sws-client` / `sws-protocol`:
+  `std`構成のAArch64 Rustdocも通過。通常stdの確認はrepo rootから `--manifest-path`
+  で行い、各legacy crateディレクトリの `build-std=core,alloc` 設定と混在させない。
+  混在させた最初のGPU doc試行は `core::sized` 重複で失敗し、設定や依存を改造せず
+  この正規の呼び出し位置で確認した。
+- 旧facadeのdoctestは初回30件すべてコンパイル失敗。修正後は
+  `RUSTDOCFLAGS='-Z unstable-options --no-run' cargo test --doc --locked --offline`
+  に各Scarlet targetを指定して、**各30 passed / 0 failed / 0 ignored**。
+  これは掲載例のコンパイル確認であり、syscall・TLS・ファイル操作を実行していない。
+- SWSクライアントの `std` / AArch64掲載例も **4 passed / 0 failed / 0 ignored**。
+  `--no-run --merge-doctests=no` をRustdocへ渡してコンパイルのみ確認した。
+  自動mergeの試行はターゲット用harnessをhostで起動しようとして形式エラーになったため、
+  CLIでmergeを無効にした。harnessやSWS操作は実行されていない。
+- RustfmtはSWS `connection.rs` 以外の変更ファイルで通過。同ファイルは既存の
+  実行コード3箇所にformat差分があり、作業前と同じ指摘であることを比較確認して保持した。
+  diff whitespace、コメントを除いたコードの同一性、作業前のローカルpatch・
+  Cargo lock・project lock差分の同一性も確認。
+  Kernelのdoctest設定は変更せず、QEMU/GUI/Docker・全体実行テストも起動していない。
+
+実装側の問題は未修正。以下を既存仕様として安全性まで承認した扱いにしない:
+
+1. [旧TLS](../../user/lib/std/src/thread.rs): `thread_local!` がinitializerを捨て、
+   名前hashのslot衝突・型のsize/alignment・初期化を管理しない。`with_mut`系も
+   再入時の別名参照を防がず、safe APIとして安全性が成立していない。
+   このrepoの追跡コードには、定義・掲載例・reexport以外の利用箇所は見つからなかった。
+2. [heap解放](../../kernel/src/mem/mod.rs) / [PMM page helper](../../kernel/src/mem/page.rs):
+   `kfree` / `free_raw_pages` が所有権を要するraw入力をsafe関数として受け取る。
+   deprecatedなboxed helperにはゼロ長allocation、aligned版にはBox解放時のlayout不一致もある。
+   `kfree`とdeprecated boxed allocatorは追跡kernel内に呼び出し箇所がない。
+3. [旧OpenOptions](../../user/lib/std/src/fs.rs): `create_new` は作成とopenが別操作で、
+   path差し替え競合に対する不可分性がない。`read(true).append(true)` だけでは
+   write-onlyになる。エラー分類も通常Rust `std::fs`と同じではない。
+4. [MemoryArea](../../kernel/src/vm/vmem.rs): `from_ptr(ptr, 0)` がinclusiveな1 byte範囲に
+   なる。今回はゼロ長を空範囲として使えない現状を明記しただけで、表現は変更していない。
+5. [AArch64 LSM branch relocation](../../kernel/src/arch/aarch64/lsm/mod.rs):
+   B/BLのoffsetチェックがbit 0しか検査せず、4 byte境界でない2 byte刻みのoffsetを
+   shift時に切り捨て得る。命令bit位置の誤記修正と区別し、実装変更はしていない。
+
+これらの修正・廃止・互換性判断は次の作業としてユーザーに提示する。
+今回の文書修正でv1.0全体の準備完了や全公開APIの安全性検証完了を宣言しない。

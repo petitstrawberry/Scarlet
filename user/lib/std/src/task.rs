@@ -130,15 +130,20 @@ pub fn fork() -> i32 {
 /// - All threads in the process are terminated
 ///
 /// # Example
-/// ```rust
-/// use std::task;
-/// use std::thread;
+/// ```no_run
+/// #![no_std]
+/// #![no_main]
+/// # #[unsafe(no_mangle)]
+/// # extern "C" fn main() -> i32 {
+/// use scarlet_std::task;
+/// use scarlet_std::thread;
 ///
 /// thread::spawn(|| {
 ///     loop {} // This thread will be terminated
 /// });
 ///
 /// task::exit(0); // Terminates entire process
+/// # }
 /// ```
 pub fn exit(code: i32) -> ! {
     // SAFETY: This fixed operation terminates the process and cannot resume access through live Rust references.
@@ -161,9 +166,13 @@ pub fn exit(code: i32) -> ! {
 /// - If this is the last thread in the process, the process exits
 ///
 /// # Example
-/// ```rust
-/// use std::task;
-/// use std::thread;
+/// ```no_run
+/// #![no_std]
+/// #![no_main]
+/// # #[unsafe(no_mangle)]
+/// # extern "C" fn main() -> i32 {
+/// use scarlet_std::task;
+/// use scarlet_std::thread;
 ///
 /// thread::spawn(|| {
 ///     task::exit_thread(0); // Only this thread exits
@@ -171,6 +180,7 @@ pub fn exit(code: i32) -> ! {
 ///
 /// // Main thread continues running
 /// loop {}
+/// # }
 /// ```
 pub fn exit_thread(code: i32) -> ! {
     crate::thread::exit_current_thread(code);
@@ -191,9 +201,13 @@ pub fn exit_thread(code: i32) -> ! {
 /// - This function does not return on success
 ///
 /// # Example
-/// ```rust
-/// use std::task;
-/// use std::thread;
+/// ```no_run
+/// #![no_std]
+/// #![no_main]
+/// # #[unsafe(no_mangle)]
+/// # extern "C" fn main() -> i32 {
+/// use scarlet_std::task;
+/// use scarlet_std::thread;
 ///
 /// thread::spawn(|| {
 ///     // This thread will be terminated when main calls exit_group
@@ -202,6 +216,7 @@ pub fn exit_thread(code: i32) -> ! {
 ///
 /// // This will terminate both main and the spawned thread
 /// task::exit_group(0);
+/// # }
 /// ```
 pub fn exit_group(code: i32) -> ! {
     // SAFETY: This fixed operation terminates the process and cannot resume access through live Rust references.
@@ -722,11 +737,17 @@ pub fn wait() -> (i32, i32) {
 ///
 /// # Example
 /// ```no_run
+/// #![no_std]
+/// #![no_main]
+/// # #[unsafe(no_mangle)]
+/// # extern "C" fn main() -> i32 {
 /// use scarlet_std::task::pipe;
 /// use scarlet_std::handle::Handle;
 ///
 /// let (read_end, write_end) = pipe().expect("Failed to create pipe");
 /// // Use read_end and write_end for IPC
+/// # 0
+/// # }
 /// ```
 pub fn pipe() -> Result<(crate::handle::Handle, crate::handle::Handle), i32> {
     let mut pipefd = [0u32; 2];
@@ -774,19 +795,32 @@ pub enum ShutdownType {
     Reboot = 1,
 }
 
-/// Shutdown the system gracefully
+/// Request final platform poweroff or reboot.
 ///
-/// This function initiates a graceful shutdown sequence:
-/// 1. Terminate all tasks
-/// 2. Sync all filesystems
-/// 3. Unmount all filesystems
+/// The current kernel fallback:
+/// 1. Retires other tasks without waiting for their graceful cleanup
+/// 2. Enumerates filesystems for diagnostics, without syncing their data
+/// 3. Skips the unimplemented shutdown-time unmount phase
 /// 4. Request platform shutdown
+///
+/// Only the init thread group (TGID 1) is authorized. This is the final operation
+/// after userspace coordinates shutdown, not a guarantee of flushed or durable data.
 ///
 /// # Arguments
 /// * `shutdown_type` - Type of shutdown (PowerOff or Reboot)
 ///
+/// # Returns
+/// Never returns normally.
+///
+/// # Panics
+/// Panics if the kernel returns, including when it rejects an unauthorized caller.
+///
 /// # Example
 /// ```no_run
+/// #![no_std]
+/// #![no_main]
+/// # #[unsafe(no_mangle)]
+/// # extern "C" fn main() -> i32 {
 /// use scarlet_std::task::{shutdown, ShutdownType};
 ///
 /// // Power off the system
@@ -794,6 +828,7 @@ pub enum ShutdownType {
 ///
 /// // Or reboot
 /// // shutdown(ShutdownType::Reboot);
+/// # }
 /// ```
 pub fn shutdown(shutdown_type: ShutdownType) -> ! {
     // SAFETY: This typed shutdown request has no pointer arguments and never resumes normal execution.
@@ -938,16 +973,23 @@ impl core::fmt::Display for TaskCorePreference {
 /// Snapshot of a single task's metadata.
 ///
 /// This is the user-space mirror of `kernel::task::TaskInfo`.
-/// Obtained via [`task::info()`] or the lower-level [`task::info_raw()`].
+/// Obtained via [`info()`] or the lower-level [`info_raw()`].
 ///
 /// # Examples
 ///
 /// ```no_run
-/// use std::task;
+/// #![no_std]
+/// #![no_main]
+/// # #[unsafe(no_mangle)]
+/// # extern "C" fn main() -> i32 {
+/// use scarlet_std::println;
+/// use scarlet_std::task;
 ///
 /// for t in task::info() {
 ///     println!("{} {} {} CPU{}", t.pid(), t.name(), t.state(), t.cpu());
 /// }
+/// # 0
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct TaskInfo {
@@ -1177,11 +1219,18 @@ impl RawCpuUsageInfo {
 /// # Examples
 ///
 /// ```no_run
-/// use std::task;
+/// #![no_std]
+/// #![no_main]
+/// # #[unsafe(no_mangle)]
+/// # extern "C" fn main() -> i32 {
+/// use scarlet_std::println;
+/// use scarlet_std::task;
 ///
 /// for t in task::info() {
 ///     println!("{:>4} {:>4} {:>8} {} CPU{}", t.pid(), t.ppid(), t.state(), t.name(), t.cpu());
 /// }
+/// # 0
+/// # }
 /// ```
 pub fn info() -> crate::vec::Vec<TaskInfo> {
     let raw = info_raw();

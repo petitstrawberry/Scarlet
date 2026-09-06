@@ -1,7 +1,7 @@
 //! Scarlet Native ABI definitions.
 //!
 //! This crate contains raw ABI definitions shared by Scarlet userland
-//! libraries and, eventually, Rust `std`'s Scarlet PAL. It intentionally avoids
+//! libraries and the Scarlet Rust `std` integration. It intentionally avoids
 //! syscall assembly or safe wrappers so it can stay `no_std` and dependency-free.
 
 #![no_std]

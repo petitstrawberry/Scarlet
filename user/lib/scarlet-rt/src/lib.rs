@@ -3,8 +3,8 @@
 //! This crate owns the pieces that make Scarlet Native executables start and
 //! stop correctly.
 //!
-//! The default feature set is intentionally empty so Rust's upstream `std`
-//! port can reuse argument/environment and exit glue without importing a global
+//! The default feature set is intentionally empty so Scarlet's Rust `std`
+//! integration can reuse argument/environment and exit glue without importing a global
 //! allocator, entry symbol, panic handler, or allocation error handler.
 
 #![no_std]
@@ -43,9 +43,17 @@ impl Write for RuntimeConsole {
 
 /// Exit the current process using Scarlet Native `ExitGroup`.
 ///
+/// This terminates the process without unwinding Rust stacks or running local
+/// destructors. Finish any application-level cleanup before calling it.
+///
 /// # Arguments
 ///
 /// * `code` - Process exit status.
+///
+/// # Returns
+///
+/// Never returns. If a broken or incompatible kernel returns from `ExitGroup`,
+/// this function remains in a sleep loop rather than resuming application code.
 pub fn exit(code: i32) -> ! {
     // SAFETY: This fixed operation terminates the process and cannot resume access through live Rust references.
     let _ = unsafe { syscall1(Syscall::ExitGroup, code as usize) };
