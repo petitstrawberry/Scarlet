@@ -89,6 +89,20 @@ MMIO, set `SCARLET_QEMU_GPU=virtio-gpu-gl-device` before running the image.
 
 ### Desktop scenarios
 
+The image also installs `/bin/sws-event-wait-smoke`, a native regression probe
+with a private protocol peer and no visible windows. Require its
+`[sws-event-wait-smoke] ALL PASS` marker and exit status zero. It checks zero
+and finite timeouts, queued events for another window, socket-driven wakeups,
+concurrent dispatch, SGFX lifecycle mailbox isolation, and disconnection.
+It does not start automatically.
+
+For frame-rate comparisons, retain the same QEMU acceleration, CPU count,
+display/Retina mode, GPU, memory, audio and video devices. SWS currently grants
+frames at approximately 60 Hz on its timer-paced display path. The showcase
+HUD counts application paint calls, not physical display refreshes; older
+unpaced HUD rates above 100 fps are not directly comparable. See
+[SWS event waiting](../../docs/graphics/sws-event-waiting.md).
+
 1. Confirm SWS readiness and
    `[ScarletUI] platform-sws renderer=sgfx backend=scarlet-virgl` in the
    `ui-smoke` UART output. Treat an application error as a failure even if

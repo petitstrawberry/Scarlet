@@ -62,6 +62,10 @@ name = "gpu-async-smoke"
 path = "src/gpu_async_smoke.rs"
 
 [[bin]]
+name = "sws-event-wait-smoke"
+path = "src/sws_event_wait_smoke.rs"
+
+[[bin]]
 name = "hello"
 path = "src/hello.rs"
 

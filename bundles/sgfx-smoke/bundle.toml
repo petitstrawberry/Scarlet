@@ -7,6 +7,12 @@ bin = "gpu-async-smoke"
 to = "/system/scarlet/bin/gpu-async-smoke"
 
 [[layers]]
+kind = "cargo"
+source = "../../user/std-bin"
+bin = "sws-event-wait-smoke"
+to = "/system/scarlet/bin/sws-event-wait-smoke"
+
+[[layers]]
 kind = "bundle"
 path = "../base/bundle.toml"
 
