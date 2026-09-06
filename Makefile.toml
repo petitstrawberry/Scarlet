@@ -583,16 +583,6 @@ description = "Build boot image for debugging (AArch64)"
 command = "cargo"
 args = ["scarlet", "image", "--project", "projects/aarch64-limine-full"]
 
-[tasks.image-sgfx-smoke-aarch64]
-description = "Build the focused SWS/ScarletUI/SGFX integration image"
-command = "cargo"
-args = ["scarlet", "image", "--project", "projects/aarch64-sgfx-smoke"]
-
-[tasks.run-sgfx-smoke-aarch64]
-description = "Boot the focused desktop integration image (build it first)"
-command = "bash"
-args = ["projects/aarch64-sgfx-smoke/tools/run_aarch64.sh"]
-
 [tasks.qmp]
 description = "Send QMP_COMMAND with JSON QMP_ARGUMENTS to SCARLET_QEMU_QMP"
 script = '''
