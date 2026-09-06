@@ -15,8 +15,8 @@ From the Scarlet repository root, use the pinned Scarlet Rust dev shell:
 
 ```sh
 nix develop .#default
-cargo make image-sgfx-smoke-aarch64
-cargo make run-sgfx-smoke-aarch64
+cargo scarlet image --project projects/aarch64-sgfx-smoke --release
+cargo scarlet run --project projects/aarch64-sgfx-smoke --release --no-image
 ```
 
 The runner defaults to `virtio-gpu-gl-pci`, snapshot disk writes, and no
