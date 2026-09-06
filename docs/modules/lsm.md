@@ -151,7 +151,7 @@ unstable-options = true
 ### cargo-scarlet
 
 ```sh
-cargo scarlet build --module modules/loadable/lsm-test \
+cargo scarlet build --lsm modules/loadable/lsm-test \
   --target kernel/targets/riscv64gc-unknown-none-elf.json
 ```
 

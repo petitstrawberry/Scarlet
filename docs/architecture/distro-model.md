@@ -266,7 +266,7 @@ cargo scarlet image --project projects/riscv64-limine-full
 cargo scarlet run --project projects/riscv64-limine-full --release
 cargo scarlet update --project projects/riscv64-limine-full
 cargo scarlet new --project my-board --target riscv64gc-unknown-none-elf
-cargo scarlet new --module my-module
+cargo scarlet new --lsm my-module
 ```
 
 The standalone `scarlet` CLI can still be added later, but the current
