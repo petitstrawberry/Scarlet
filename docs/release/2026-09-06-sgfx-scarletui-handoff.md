@@ -1,7 +1,7 @@
 # Scarlet / SGFX / ScarletUI v1.0 作業引き継ぎ
 
 更新日: 2026-09-06。引き継ぎ時点のローカルチェックアウトを確認して記載した。
-本文は引き継ぎ時点の記録。作業再開後の変更と確認結果は末尾の「再開後の進捗」を参照。
+本文は引き継ぎ時点の記録。作業再開後の変更と確認結果は末尾の「再開後の進捗」と「SGFXの互換性境界を確定」を参照。後者の決定により、SGFXの全Rust公開APIを1.xで凍結する旧案と一律enum移行はRC条件から外れた。
 
 ## まず結論
 
@@ -251,4 +251,24 @@ cargo check --locked --offline --manifest-path .cargo/Cargo.toml -p scarlet-std-
 
 既存のNix / Scarlet Rustを使用した。QEMU・GUI・Dockerは起動せず、完了済みの全環境検証は再実行していない。2つのユーザー所有lockファイルの内容は開始時と同一で、ユーザーのstage状態も保持した。
 
-この再開分はローカルコミットまで。push、issueの投稿・close、タグ・リリース作成は行っていない。公開Rust APIの凍結範囲と拡張方針、その他未承認契約、A618非同期化、最新Boxcraft修正のユーザー動作確認、最終候補の依存固定・リリース作業は引き続き残る。
+この再開分はローカルコミットまで。push、issueの投稿・close、タグ・リリース作成は行っていない。この時点では公開Rust APIの凍結範囲と拡張方針も未決定だったが、下記の方針確定で更新した。その他未承認契約、A618非同期化、最新Boxcraft修正のユーザー動作確認、最終候補の依存固定・リリース作業は引き続き残る。
+
+## SGFXの互換性境界を確定 — 2026-09-06
+
+issue #1 の構想と、SGFX段階で動的ロードは予定せず最終的にアプリ側はVulkanへ移行するというユーザーの説明・承認に基づく。今回確定したのは構成とRust更新方針であり、描画・import・presentation等の残る意味契約やv1.0公開の一括承認ではない。
+
+- SGFXはドライバ内部の実行IR。`sgfx-core`、facade、各backend、codegenとそれらを直接使うfrontend/rendererは、互換なsource・lockの組を選んで同時更新・再ビルドする。
+- アプリとの将来の安定境界はVulkan C ABI。`vulkan-sgfx + sgfx-core + 選択したbackend + 必要なcodegen` を一つのICD/libraryへリンクできる。SGFXのRust部品を独立に動的ロードするABIは設けない。Vulkan frontend実装済みという意味ではない。
+- 全Rust `pub`の1.x固定、全enumの一律`#[non_exhaustive]`化、恒久的なclosed enum一覧はRC条件にしない。enum、trait、公開フィールド、feature、外部依存型を変える場合は、影響する実装・利用側・説明・必要なテストを一緒に更新する。現在のexportや注釈を一括で除去する作業でもない。
+- IRの意味、資源保持、投入順序、有界な受付、完了、安全な拒否・失敗の契約は維持する。Rust型が内部実装だからといって、backendが異なる意味で受理したり未対応処理を黙って成功にしたりしてよいわけではない。
+- ScarletUIの直接SGFX rendererは引き続き使える。将来のVulkan rendererへの移行も妨げない。ScarletUIのアプリ向けAPI、Scarletのsyscall/GPU ABI、SWS wire契約は、それぞれ別の保証範囲を保つ。
+
+反映内容:
+
+- SGFX `a1b9168`: `1.0-contract.md`のRust方針を置換し、architecture・API棚卸し・README・実行／完了契約への導線を統一。構成図はMermaidではなく通常のテキスト図にした。
+- ScarletUI `b0cd4e71`: READMEの依存説明に、rendererとSGFXの協調更新、アプリ向けAPIとの境界を追記。
+- Scarletの本改訂: release scope / roadmapからSGFXの一律Rust API凍結・enum移行ゲートを除き、実行意味と対応する依存セットの整合を確認する方針へ更新。この引き継ぎにも新しい決定を記録した。
+
+今回の変更はMarkdownのみ。3 repositoryで`git diff --check`が通過し、SGFXの`1.0-contract.md`第3〜8節（資源・描画・実行・失敗・import・presentation）は変更前と同一であることを確認した。コード・wire形式・package版・lockは変更せず、build・runtimeテストを再実行していない。上の再開時テスト結果とは区別する。
+
+この方針反映もローカルコミットまでで、push・issue投稿・タグ作成は行っていない。SGFXのRust凍結方針を未決定として再開したり、一律enum移行を残件に戻したりしない。残る本体作業は、未承認の描画・lifecycle契約と対応する適合性、A618の非同期化、最終候補の依存固定・リリース準備である。
