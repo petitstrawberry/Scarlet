@@ -275,6 +275,13 @@ to = "/system/scarlet/bin/carmine"
 
 [[layers]]
 kind = "cargo"
+source = { git = "https://github.com/petitstrawberry/myrica", rev = "6deb1dbd582e56393db3958e00873d15a1312c5e" }
+package = "myrica"
+bin = "myrica"
+to = "/system/scarlet/bin/myrica"
+
+[[layers]]
+kind = "cargo"
 source = { git = "https://github.com/petitstrawberry/vellum" }
 package = "vellum"
 bin = "vellum"

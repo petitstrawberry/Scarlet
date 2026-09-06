@@ -969,6 +969,21 @@ rev = "0e4802552761d4cc8d56b21f76f0e17d4dbc5357"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
+git = "https://github.com/petitstrawberry/myrica"
+git_ref = "6deb1dbd582e56393db3958e00873d15a1312c5e"
+resolved_rev = "6deb1dbd582e56393db3958e00873d15a1312c5e"
+package = "myrica"
+bin = "myrica"
+to = "/system/scarlet/bin/myrica"
+hash = "sha256:131b6195333eb1e15ffe6c9bc018c8068a7f0f29d93d50fce7bdb03c7b7dc943"
+
+[sections.rootfs.layers.source]
+type = "git"
+url = "https://github.com/petitstrawberry/myrica"
+rev = "6deb1dbd582e56393db3958e00873d15a1312c5e"
+
+[[sections.rootfs.layers]]
+kind = "cargo"
 git = "https://github.com/petitstrawberry/vellum"
 resolved_rev = "cd7c4b080fd326de640e6f320b0ffd93d4858743"
 package = "vellum"
@@ -1171,18 +1186,3 @@ hash = "sha256:d2604a8689c0aa98c7b212d091c5823470527cc296efaa03d8a37dd3b25bcd87"
 type = "git"
 url = "https://github.com/petitstrawberry/blitz"
 rev = "c26e20dfff971941486ca9f50c8dcd332ec404da"
-
-[[sections.rootfs.layers]]
-kind = "cargo"
-git = "https://github.com/petitstrawberry/myrica"
-git_ref = "6deb1dbd582e56393db3958e00873d15a1312c5e"
-resolved_rev = "6deb1dbd582e56393db3958e00873d15a1312c5e"
-package = "myrica"
-bin = "myrica"
-to = "/system/scarlet/bin/myrica"
-hash = "sha256:131b6195333eb1e15ffe6c9bc018c8068a7f0f29d93d50fce7bdb03c7b7dc943"
-
-[sections.rootfs.layers.source]
-type = "git"
-url = "https://github.com/petitstrawberry/myrica"
-rev = "6deb1dbd582e56393db3958e00873d15a1312c5e"
