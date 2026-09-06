@@ -19,9 +19,8 @@ this is not a claim that every historical document or device was revalidated.
 
 ## Release Preparation
 
-- [Coordinated 1.0 roadmap](release/1.0-roadmap.md) - Scarlet, SGFX, ScarletUI,
-  scarlet-sdk, and Adreno compatibility decisions, dependency migration, CI,
-  and release gates.
+- [1.0 release roadmap](release/1.0-roadmap.md) - Scarlet and its SGFX,
+  ScarletUI, and scarlet-sdk release set; dependency integration and release gates.
 - [1.0 scope and compatibility policy](release/1.0-scope.md) - Package membership,
   public API versus internal wire contracts, supported configurations, and release gates.
 - [1.0 package inventory](release/1.0-packages.md) - First-party crates,
