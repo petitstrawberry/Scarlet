@@ -577,7 +577,9 @@ pub fn free_vcpu_run_page(vcpu: &dyn VcpuObject) {
     if let Some(i) = idx {
         use crate::mem::page::free_raw_pages;
         let entry = pages.remove(i);
-        free_raw_pages(entry.page.vaddr as *mut crate::mem::page::Page, 1);
+        // SAFETY: vCPU teardown owns this run page, removed from the registry
+        // under its write lock, and releases the original one-page allocation.
+        unsafe { free_raw_pages(entry.page.vaddr as *mut crate::mem::page::Page, 1) };
     }
 }
 

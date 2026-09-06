@@ -950,7 +950,9 @@ impl DmaPageTables {
         let mut pages = Vec::new();
         let mut dirty_pages = Vec::new();
         if pages.try_reserve_exact(1).is_err() || dirty_pages.try_reserve_exact(1).is_err() {
-            free_raw_pages(phys_to_virt(root) as *mut Page, 1);
+            // SAFETY: Allocation rollback owns this one-page root; it has not
+            // been installed in an SMMU context or published to a walker.
+            unsafe { free_raw_pages(phys_to_virt(root) as *mut Page, 1) };
             return Err(IommuError::DomainAllocationFailed);
         }
         pages.push(DmaTablePage {
@@ -995,7 +997,9 @@ impl DmaPageTables {
                     .unwrap_or(u64::MAX),
                 table_address_limit,
             );
-            free_raw_pages(page, 1);
+            // SAFETY: This rejected one-page allocation is still exclusively
+            // owned here and has not been published to the SMMU.
+            unsafe { free_raw_pages(page, 1) };
             return Err(IommuError::DomainAllocationFailed);
         }
         #[cfg(debug_assertions)]
@@ -1170,7 +1174,9 @@ impl DmaPageTables {
 impl Drop for DmaPageTables {
     fn drop(&mut self) {
         for table in self.pages.drain(..) {
-            free_raw_pages(phys_to_virt(table.paddr) as *mut Page, 1);
+            // SAFETY: The domain retires its context before dropping these
+            // owned pages, and leaks them instead if hardware teardown fails.
+            unsafe { free_raw_pages(phys_to_virt(table.paddr) as *mut Page, 1) };
         }
     }
 }

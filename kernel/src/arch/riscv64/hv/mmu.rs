@@ -43,14 +43,20 @@ pub fn init_stage2(vmid: u16) -> Result<(), &'static str> {
 pub fn free_stage2(vmid: u16) {
     if let Some(tables) = get_stage2_tables().write().remove(&vmid) {
         for addr in tables {
-            free_raw_pages(addr as *mut crate::mem::page::Page, 1);
+            // SAFETY: Stage-2 teardown has retired this VM's translation context
+            // and removed these owned one-page tables from its registry.
+            unsafe { free_raw_pages(addr as *mut crate::mem::page::Page, 1) };
         }
     }
     if let Some(root) = get_stage2_roots().write().remove(&vmid) {
-        free_raw_pages(
-            root as *mut crate::mem::page::Page,
-            STAGE2_ROOT_SIZE / PAGE_SIZE,
-        );
+        // SAFETY: The retired root is no longer registered; this is its original
+        // PMM pointer and the page count used by allocate_stage2_root.
+        unsafe {
+            free_raw_pages(
+                root as *mut crate::mem::page::Page,
+                STAGE2_ROOT_SIZE / PAGE_SIZE,
+            )
+        };
     }
 }
 

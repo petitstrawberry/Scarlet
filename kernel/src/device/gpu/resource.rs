@@ -1326,7 +1326,9 @@ impl Drop for GpuBufferBacking {
         let page_count = self.allocation_size / PAGE_SIZE;
         if page_count != 0 {
             let pages = phys_to_virt(self.paddr) as *mut Page;
-            free_raw_pages(pages, page_count);
+            // SAFETY: Buffers and in-flight attachments retain this backing
+            // owner; its final drop releases the original PMM allocation.
+            unsafe { free_raw_pages(pages, page_count) };
         }
     }
 }

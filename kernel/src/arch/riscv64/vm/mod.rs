@@ -241,7 +241,9 @@ fn new_pagetable() -> *mut PageTable {
 
 fn free_pagetable(ptr: *mut PageTable) {
     if !ptr.is_null() {
-        free_raw_pages(ptr as *mut Page, 1);
+        // SAFETY: Page-table teardown owns this retired table allocated by
+        // new_pagetable as exactly one PMM page.
+        unsafe { free_raw_pages(ptr as *mut Page, 1) };
     }
 }
 

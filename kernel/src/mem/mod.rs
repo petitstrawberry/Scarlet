@@ -8,8 +8,6 @@ pub mod page;
 pub mod page_cache;
 pub mod pmm;
 
-use alloc::{boxed::Box, vec};
-
 use crate::environment::{MAX_NUM_CPUS, STACK_SIZE};
 
 /// Page-aligned backing storage for all bootstrap CPU stacks.
@@ -51,52 +49,6 @@ impl Stack {
 pub static mut KERNEL_STACK: Stack = Stack {
     data: [0xdeadbeef; STACK_SIZE / 4 * MAX_NUM_CPUS],
 };
-
-/// Allocates a block of memory of the specified size from the kernel heap.
-///
-/// The block is zero-initialized and aligned for bytes only. This is not a PMM
-/// allocator and does not promise page alignment or physical contiguity. Prefer
-/// an owning `Box` or `Vec` when a raw allocation is unnecessary.
-///
-/// # Arguments
-///
-/// * `size` - The size of the memory block to allocate.
-///
-/// # Returns
-///
-/// A kernel virtual pointer owned by the caller, to be released once with
-/// [`kfree`] using the exact original size. For zero bytes the pointer is
-/// non-null but must not be dereferenced. Allocation failure follows the global
-/// allocation-error path rather than returning null.
-///
-pub fn kmalloc(size: usize) -> *mut u8 {
-    Box::into_raw(vec![0u8; size].into_boxed_slice()) as *mut u8
-}
-
-/// Frees a block of memory previously allocated with `kmalloc`.
-///
-/// # Arguments
-///
-/// * `ptr` - The original live pointer returned by [`kmalloc`], including for zero bytes.
-/// * `size` - The exact original byte count passed to [`kmalloc`].
-///
-/// # Returns
-///
-/// No value. Releases the allocation to the kernel heap.
-///
-/// # Caller requirements
-///
-/// The caller must exclusively own the allocation and end all accesses before
-/// freeing it. Null, interior, already freed, and PMM pointers are not accepted.
-/// This legacy safe signature does not enforce those requirements: invalid inputs
-/// can cause undefined behavior. Documentation is not a substitute for an unsafe
-/// or ownership-enforcing API; new code should retain an owning `Box` or `Vec`.
-///
-pub fn kfree(ptr: *mut u8, size: usize) {
-    unsafe {
-        let _ = Box::<[u8]>::from_raw(core::slice::from_raw_parts_mut(ptr, size));
-    }
-}
 
 /// Zero the linker-defined BSS during early boot.
 ///

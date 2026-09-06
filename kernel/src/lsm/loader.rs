@@ -297,7 +297,9 @@ fn rollback_mappings_and_pages(
         let _ = kernel_vm.remove_memory_map_by_addr(vaddr);
     }
     for (&ptr, &num_pages) in pages_ptrs.iter().zip(pages_counts.iter()) {
-        free_raw_pages(ptr, num_pages);
+        // SAFETY: Loading rollback removed the mappings above; the unpublished
+        // module still owns each allocation with its original page count.
+        unsafe { free_raw_pages(ptr, num_pages) };
     }
 }
 
@@ -326,7 +328,9 @@ pub fn unload_module(module_id: u64) -> Result<(), LsmError> {
         deallocate_module_va(vaddr, size);
     }
     for (&ptr, &(_, size)) in module.pages_ptrs.iter().zip(module.mapped_ranges.iter()) {
-        free_raw_pages(ptr, size / PAGE_SIZE);
+        // SAFETY: Module unload owns these section allocations after symbol and
+        // mapping removal; the stored mapped size is the original page count.
+        unsafe { free_raw_pages(ptr, size / PAGE_SIZE) };
     }
 
     Ok(())
@@ -410,13 +414,17 @@ pub fn load_module(data: &[u8]) -> Result<u64, LsmError> {
         let overwritten = kernel_vm
             .add_memory_map_fixed(memory_map.clone())
             .map_err(|_| {
-                free_raw_pages(pages_ptr, num_pages);
+                // SAFETY: This unpublished section allocation was not installed
+                // successfully and remains owned by the failed load operation.
+                unsafe { free_raw_pages(pages_ptr, num_pages) };
                 rollback_mappings_and_pages(&mapped_ranges, &pages_ptrs, &pages_counts);
                 LsmError::NoMemory
             })?;
         if !overwritten.is_empty() {
             let _ = kernel_vm.remove_memory_map_by_addr(base_vaddr);
-            free_raw_pages(pages_ptr, num_pages);
+            // SAFETY: This failed, unpublished section mapping was removed;
+            // pages_ptr and num_pages describe its owned PMM allocation.
+            unsafe { free_raw_pages(pages_ptr, num_pages) };
             rollback_mappings_and_pages(&mapped_ranges, &pages_ptrs, &pages_counts);
             return Err(LsmError::NoMemory);
         }
@@ -425,7 +433,9 @@ pub fn load_module(data: &[u8]) -> Result<u64, LsmError> {
             Some(pt) => pt,
             None => {
                 let _ = kernel_vm.remove_memory_map_by_addr(base_vaddr);
-                free_raw_pages(pages_ptr, num_pages);
+                // SAFETY: The section was never published and its mapping was
+                // removed; this load still owns the exact allocation.
+                unsafe { free_raw_pages(pages_ptr, num_pages) };
                 rollback_mappings_and_pages(&mapped_ranges, &pages_ptrs, &pages_counts);
                 return Err(LsmError::NoMemory);
             }
@@ -434,7 +444,9 @@ pub fn load_module(data: &[u8]) -> Result<u64, LsmError> {
         drop(root_page_table);
         if map_result.is_err() {
             let _ = kernel_vm.remove_memory_map_by_addr(base_vaddr);
-            free_raw_pages(pages_ptr, num_pages);
+            // SAFETY: The failed section mapping was removed before releasing
+            // its unpublished allocation with the original page count.
+            unsafe { free_raw_pages(pages_ptr, num_pages) };
             rollback_mappings_and_pages(&mapped_ranges, &pages_ptrs, &pages_counts);
             return Err(LsmError::NoMemory);
         }

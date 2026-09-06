@@ -283,7 +283,9 @@ impl SharedMemoryObject for SharedMemory {
                 state.stale_pages.push((old_paddr, old_pages));
             } else {
                 let old_ptr = phys_to_virt(old_paddr) as *mut crate::mem::page::Page;
-                free_raw_pages(old_ptr, old_pages);
+                // SAFETY: The state lock protects the owned old allocation;
+                // copying is complete and no mapping still refers to it.
+                unsafe { free_raw_pages(old_ptr, old_pages) };
             }
         }
 
@@ -405,7 +407,9 @@ impl MemoryMappingOps for SharedMemory {
                     continue;
                 }
                 let ptr = phys_to_virt(paddr) as *mut crate::mem::page::Page;
-                free_raw_pages(ptr, pages);
+                // SAFETY: The last mapping was removed, and these retired
+                // allocations were taken out of the owned stale-page list.
+                unsafe { free_raw_pages(ptr, pages) };
             }
         }
     }
@@ -483,13 +487,17 @@ impl Drop for SharedMemory {
         if state.owns_memory {
             let num_pages = (state.capacity + PAGE_SIZE - 1) / PAGE_SIZE;
             let pages_ptr = phys_to_virt(state.paddr) as *mut crate::mem::page::Page;
-            free_raw_pages(pages_ptr, num_pages);
+            // SAFETY: Final drop owns this allocation and the check above
+            // excludes live mappings; capacity records the original page count.
+            unsafe { free_raw_pages(pages_ptr, num_pages) };
             for (paddr, pages) in &state.stale_pages {
                 if *pages == 0 {
                     continue;
                 }
                 let pages_ptr = phys_to_virt(*paddr) as *mut crate::mem::page::Page;
-                free_raw_pages(pages_ptr, *pages);
+                // SAFETY: These are distinct owned retired allocations, with
+                // their original counts, and no mappings remain at final drop.
+                unsafe { free_raw_pages(pages_ptr, *pages) };
             }
         }
     }

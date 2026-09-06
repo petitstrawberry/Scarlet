@@ -33,7 +33,9 @@ impl Drop for AnonymousPageOwner {
     fn drop(&mut self) {
         let pages = core::mem::take(&mut *self.pages.write());
         for (_, paddr) in pages {
-            free_raw_pages(phys_to_virt(paddr) as *mut _, 1);
+            // SAFETY: The final owner drop follows mapping teardown and owns
+            // every one-page allocation removed from this page map.
+            unsafe { free_raw_pages(phys_to_virt(paddr) as *mut _, 1) };
         }
     }
 }
@@ -79,6 +81,8 @@ impl MemoryMappingOps for AnonymousPageOwner {
         let mut pages = self.pages.write();
         for idx in start_page_idx..start_page_idx + page_count {
             if let Some(paddr) = pages.remove(&idx) {
+                // SAFETY: The VM removed this mapping before releasing its
+                // exclusively owned page, now removed from the owner's map.
                 unsafe {
                     free_raw_pages(phys_to_virt(paddr) as *mut _, 1);
                 }
@@ -98,6 +102,8 @@ pub fn fork_clone_owner(owner: &AnonymousPageOwner) -> Option<Arc<dyn MemoryMapp
         let new_ptr = allocate_raw_pages(1);
         if new_ptr.is_null() {
             for (_, &old_paddr) in new_pages.iter() {
+                // SAFETY: These one-page allocations belong to the unpublished
+                // clone being rolled back, not the original mapped owner.
                 unsafe {
                     free_raw_pages(phys_to_virt(old_paddr) as *mut _, 1);
                 }
