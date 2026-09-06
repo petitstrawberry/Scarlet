@@ -284,3 +284,88 @@ issue #1 の構想と、SGFX段階で動的ロードは予定せず最終的に�
 - SDKも既存のHandle所有権Rustdoc、native ABI表現テスト、GPU完了・SWS lease契約を出発点とする。`scarlet-abi`/`scarlet-sys`/`scarlet-os`とclient APIの公開範囲、所有権移譲とエラー、mapping寿命、未対応capabilityの扱いを照合し、実際の不足だけを埋める。
 
 release scope / roadmapをこの作業対象と確認済み状態に更新した。この更新は文書のみで、APIの保証範囲を新たに確定したり、コード変更やruntime再検証を行ったりしていない。
+
+## 現行契約の規格化とunsafe境界修正 — 2026-09-06
+
+ユーザーは「現行をそのまま規格化できる部分は進め、判断が必要なら知らせる」
+方針を承認した。監査で、生syscall・任意mapping解除・生control等がsafeな関数
+として公開されている点を報告し、unsafe境界へ移す修正について追加承認を受けた。
+
+### 完了した変更
+
+- Scarlet `10e4db66`: [SDK契約](1.0-sdk-contract.md)を追加。
+  `scarlet-abi` / `scarlet-sys` / `scarlet-os` / runtime / legacy / clientの役割、
+  feature構成、Handleの成功・失敗時の所有権、mapping寿命、部分成功・readiness、
+  GPU完了とSWS leaseの独立性を現行実装に沿って規定した。
+- 同コミットで`syscall0..6`、map/unmap、生Handle/VM/vCPU control、break/TLS設定、
+  生clone、guest-memory登録、event登録/returnを明示的なunsafe境界にした。
+  公開入口にSafety要件を追加し、型付きSDK、通常std/legacyアプリ、GPU/SWS/
+  audio/videoの呼び出し側を追従させた。syscall番号、引数ABI、GPU/SWSのrecordや
+  wire、kernel実装は変更していない。
+- `SharedMemory::from_handle` / `Socket::from_handle`の「失敗時は消費しない」
+  説明を訂正。実装は元から所有Handleを消費し、失敗時にもDrop/closeしていた。
+  event-demoのハンドラではatomicフラグだけを更新し、表示と終了を通常ループへ
+  移した。SDK Rustdocの既存リンク切れ3件も修正した。
+- ScarletUI `50eea74d`: [アプリ・拡張契約](../../../scarlet-ui/docs/1.0-contract.md)
+  を追加。公開export/feature、Scene宣言とWindow実体、起動時の最初の対象1窓、
+  openの重複抑止、newの別identity、dismissの全同一キー対象とveto回避、
+  WindowGroupのkey/launch規則、platform/paint拡張責任を現行のまま明文化。
+  既存ARCHITECTURE / FRAME_FAILURESは維持し、対応Rustdocと4件の回帰テストを追加。
+- SGFX `ec744ae`: legacy VirGLの時計取得1箇所を新しい生syscall署名へ追従。
+- Chromebook `fcff35b`: Adrenoのmap/unmap 4箇所とlegacy時計取得1箇所のみ追従。
+  **A618の非同期化・submit-wire変更・実機作業ではない。保留方針は維持した。**
+
+### 今回の確認と限界
+
+| 確認 | 結果 |
+| --- | --- |
+| `scarlet-std-bin --bins` | AArch64 / RISC-Vとも成功 |
+| `userprogram --bins`（旧SDK消費側） | 両arch成功。今回は組込みScarlet targetでの確認であり、legacy JSON target全体の再検証ではない |
+| `video_player --bins` / `scarlet-websocket-demo --bins` | それぞれ独立したfeature構成で両arch成功 |
+| `scarlet-sys` host Rustdoc | unsafeなしの呼び出しを拒否するcompile-fail **7件成功**。syscallは実行しない |
+| `scarlet-os` AArch64 Rustdocの`memory_mapping` / `control`フィルタ | compile-fail **5件成功**（mapping 4 + control 1）、別途既存例1件のcompile-only成功 |
+| ScarletUI `application::tests`、1 thread | **17 passed / 0 failed / 0 ignored / 299 filtered**。新規4件を含む。全CoreテストやGPU実機テストの再実行ではない |
+| `scarlet-sys` AArch64 strict Clippy | 成功 |
+| `scarlet-os` AArch64 Rustdoc、`RUSTDOCFLAGS='-D warnings'` | 成功 |
+| 変更Rustファイルのrustfmt / 各repoのdiff whitespace | 成功 |
+
+上のconsumer確認は、既存のScarlet→兄弟SGFX/UI patchに加え、**Adrenoの兄弟
+checkoutをCLI patchで選び、一時Cargo.lockを使用したローカル整合確認**である。
+公開Gitだけの元lockで通ったとは報告しない。元lockの旧Adrenoはsafe呼び出しの
+ままなので、新SDKとの通常ビルドには依存追従が必要。ユーザーの既存lock差分と
+stageを保持するため、通常設定へのAdreno patch追加と該当lock追従は別途確認中。
+
+確認コマンドの形（各package / targetを独立して指定）:
+
+```sh
+cargo check --manifest-path .cargo/Cargo.toml --offline \
+  --lockfile-path <temporary-directory>/Cargo.lock -Z unstable-options \
+  --config 'patch."https://github.com/petitstrawberry/scarlet-project-chromebook".sgfx-backend-scarlet-adreno.path="<absolute-adreno-crate-path>"' \
+  -p <package> --bins --target <target> --keep-going
+```
+
+packageは`scarlet-std-bin` / `userprogram` / `video_player` /
+`scarlet-websocket-demo`、targetは`aarch64-unknown-scarlet` /
+`riscv64gc-unknown-scarlet`。一時lockは元の`.cargo/Cargo.lock`を基にCLI patchの
+source変更を解決したもの。ソースコピー・worktree・新しい専用taskは作っていない。
+
+失敗した試行も成功扱いにしない:
+
+- stdとlegacyを同じCargo呼び出しへ混ぜた試行は`panic_impl`重複等で失敗。
+  依存feature構成を分けて上表の消費側確認を完了した。混在をサポートしたわけではない。
+- `scarlet-os`のhost doctestビルドは既存event trampolineのELF `.type` directiveが
+  Darwin assemblerに拒否された。環境やtrampolineを改造せず、AArch64 Scarlet
+  targetでcompile-fail / compile-only例を確認した。
+- `scarlet-os` strict Clippyは**既存の`result_unit_err` 19件と
+  `PollOptions::new`の`new_without_default` 1件**で失敗。エラー型の置換や一括lint
+  無効化はしていない。今回の契約は現行`Result<_, ()>`も明記して維持したため、
+  release時のlint dispositionとして残す。UI testにも既存23 warningsと
+  preview-demoの重複target警告が残る。
+
+SDKの全機能安全性、故障/reset、実機の資源解放を今回のコンパイルだけで証明した
+とは扱わない。Boxcraftはユーザー確認済みの完了状態を維持し、QEMU/GUI/Dockerや
+kernel全体の検証は再開していない。ABI/wire fixtureの既存gateも今回再実行していない。
+
+現行SDK/ScarletUIの契約文書化と承認されたunsafe修正はローカルコミット済み。
+通常開発graphの依存追従、公開sourceによる候補lock固定、残る適合性・lint整理、
+release notes・版上げ・RC公開は別段階。push、issue投稿、タグ作成は行っていない。
