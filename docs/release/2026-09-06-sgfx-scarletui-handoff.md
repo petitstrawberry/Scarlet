@@ -3,6 +3,8 @@
 更新日: 2026-09-06。引き継ぎ時点のローカルチェックアウトを確認して記載した。
 本文は引き継ぎ時点の記録。作業再開後の変更と確認結果は末尾の「再開後の進捗」と「SGFXの互換性境界を確定」を参照。後者の決定により、SGFXの全Rust公開APIを1.xで凍結する旧案と一律enum移行はRC条件から外れた。
 
+最新の作業対象: **A618はユーザー指示で保留、Boxcraftはユーザー確認済みで完了。ScarletUI・SDKの残る契約作業に集中する。** 詳細は末尾の「作業対象の更新」を優先し、本文の過去の「Boxcraft未報告」「A618へ着手」を現在の指示と混同しない。
+
 ## まず結論
 
 - 今回の **SGFX完了API・ネイティブ投入スケジューリング・ScarletUIの安全なフレーム拒否処理は、実装修正完了として区切る**。ユーザーもこの区切りを了承している。
@@ -272,3 +274,13 @@ issue #1 の構想と、SGFX段階で動的ロードは予定せず最終的に�
 今回の変更はMarkdownのみ。3 repositoryで`git diff --check`が通過し、SGFXの`1.0-contract.md`第3〜8節（資源・描画・実行・失敗・import・presentation）は変更前と同一であることを確認した。コード・wire形式・package版・lockは変更せず、build・runtimeテストを再実行していない。上の再開時テスト結果とは区別する。
 
 この方針反映もローカルコミットまでで、push・issue投稿・タグ作成は行っていない。SGFXのRust凍結方針を未決定として再開したり、一律enum移行を残件に戻したりしない。残る本体作業は、未承認の描画・lifecycle契約と対応する適合性、A618の非同期化、最終候補の依存固定・リリース準備である。
+
+## 作業対象の更新 — 2026-09-06
+
+- ユーザーはA618を一旦保留と指示した。実装・実機検証・submit-wire整理に着手しない。完了扱いやサポート範囲の削除ではなく、保留として管理する。
+- Boxcraftについてユーザーから「とっくに終わってる」と確認を受けた。修正とユーザー担当の動作確認は完了として扱い、過去の「未報告」を残件へ戻さない。エージェントが新しく実行したテスト、A618や故障時の根拠としては数えない。
+- 当面の本体作業はScarletUIとScarlet SDKの契約整理。候補lock・release notes・版上げ・RC公開はその後の手続きとして残る。
+- ScarletUIの契約全体が未着手だったわけではない。`docs/ARCHITECTURE.md`はView/Elementのidentity、State共有、再構築時の保持規則を既に規定し、`docs/FRAME_FAILURES.md`もv1.0の失敗・回復契約を定義している。これらを再設計せず、Scene/Windowの宣言と実体の寿命、起動・open/close、公開export/feature、拡張traitの互換性を具体的に整理する。
+- SDKも既存のHandle所有権Rustdoc、native ABI表現テスト、GPU完了・SWS lease契約を出発点とする。`scarlet-abi`/`scarlet-sys`/`scarlet-os`とclient APIの公開範囲、所有権移譲とエラー、mapping寿命、未対応capabilityの扱いを照合し、実際の不足だけを埋める。
+
+release scope / roadmapをこの作業対象と確認済み状態に更新した。この更新は文書のみで、APIの保証範囲を新たに確定したり、コード変更やruntime再検証を行ったりしていない。
