@@ -20,6 +20,7 @@
 //!   - exec_path_len (u32, little-endian)
 //!   - exec_path_bytes (variable)
 //! - If exec_path is empty, stemd will look up the app from registered .desktop files
+//! - Desktop entries with X-Scarlet-NewInstance=true always start a new process
 //! - Response: "OK: Launched or focused\n" or "ERROR: <message>\n"
 //!
 //! ### LAUNCH (0x05)

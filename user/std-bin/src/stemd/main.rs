@@ -721,6 +721,7 @@ fn focus_window_id(conn: &mut sws_client::Connection, window_id: u32) -> Result<
 
 /// Launch an application or focus an existing window
 /// If exec_path is empty, look up the app from the registry
+/// Desktop entries with `X-Scarlet-NewInstance=true` always launch a new process.
 fn launch_or_focus(app_id: &str, exec_path: Option<&str>) -> Result<(), &'static str> {
     let _activation_guard = APP_ACTIVATION_LOCK.lock().expect("stemd mutex poisoned");
     println!(
@@ -728,9 +729,11 @@ fn launch_or_focus(app_id: &str, exec_path: Option<&str>) -> Result<(), &'static
         app_id, exec_path
     );
 
-    // First, look up exec_path from registry if needed (before holding RUNNING_APPS lock)
+    // Look up the launch policy and command before holding the RUNNING_APPS lock.
     // This avoids potential lock ordering issues
     println!("stemd: Looking up app in registry...");
+    let entry = lookup_app(app_id);
+    let new_instance = entry.as_ref().is_some_and(|entry| entry.new_instance);
     let exec_path_resolved = match exec_path {
         Some(path) if !path.is_empty() => {
             println!("stemd: Using provided exec_path: {}", path);
@@ -738,7 +741,7 @@ fn launch_or_focus(app_id: &str, exec_path: Option<&str>) -> Result<(), &'static
         }
         _ => {
             println!("stemd: Looking up {} from .desktop files...", app_id);
-            let result = lookup_app(app_id).map(|entry| {
+            let result = entry.map(|entry| {
                 println!("stemd: Found app: {} -> {}", entry.name, entry.exec);
                 entry.exec
             });
@@ -751,7 +754,7 @@ fn launch_or_focus(app_id: &str, exec_path: Option<&str>) -> Result<(), &'static
 
     // Now check if app is already running (acquire RUNNING_APPS lock separately)
     println!("stemd: Checking if app is already running...");
-    if let Some(app) = find_running_app(app_id) {
+    if !new_instance && let Some(app) = find_running_app(app_id) {
         // App is running, try to focus its window
         println!(
             "stemd: App '{}' is already running (PID={}), focusing window",
@@ -782,14 +785,14 @@ fn launch_or_focus(app_id: &str, exec_path: Option<&str>) -> Result<(), &'static
         }
     }
 
-    if focus_window_by_app_id(app_id).is_ok() {
+    if !new_instance && focus_window_by_app_id(app_id).is_ok() {
         println!("stemd: Found existing window for '{}'", app_id);
         return Ok(());
     }
 
-    println!("stemd: App is not running, preparing to launch...");
+    println!("stemd: Preparing to launch a new process...");
 
-    // App is not running, determine exec_path
+    // Resolve exec_path for the new process.
     let exec_path = match exec_path_resolved {
         Some(path) => path,
         None => {
@@ -803,7 +806,7 @@ fn launch_or_focus(app_id: &str, exec_path: Option<&str>) -> Result<(), &'static
         app_id, exec_path
     );
 
-    // App is not running, launch it
+    // Launch a new process.
     println!("stemd: Launching app '{}' with exec: {}", app_id, exec_path);
 
     let argv: Vec<String> = exec_path.split_whitespace().map(String::from).collect();
@@ -1599,9 +1602,10 @@ fn handle_sbus_message(
 
                     let _activation_guard =
                         APP_ACTIVATION_LOCK.lock().expect("stemd mutex poisoned");
+                    let new_instance = lookup_app(app_id).is_some_and(|entry| entry.new_instance);
 
-                    // Check if the app is already running
-                    if let Some(running_app) = find_running_app(app_id) {
+                    // New-instance entries bypass focus and use the normal launch path.
+                    if !new_instance && let Some(running_app) = find_running_app(app_id) {
                         // Focus the existing window
                         match focus_window_by_app_id(app_id) {
                             Ok(_) => {

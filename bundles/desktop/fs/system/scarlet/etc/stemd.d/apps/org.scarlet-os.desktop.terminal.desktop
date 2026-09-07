@@ -4,3 +4,4 @@ Exec=/bin/terminal
 Icon=utilities-terminal
 Type=Application
 Terminal=false
+X-Scarlet-NewInstance=true

@@ -13,6 +13,9 @@
 //! Type=Application
 //! Terminal=false
 //! ```
+//!
+//! Launcher activation focuses an existing window by default. Set
+//! `X-Scarlet-NewInstance=true` to start a new process on every activation.
 
 use std::format;
 use std::fs::{self, File};
@@ -30,6 +33,9 @@ pub struct DesktopEntry {
     pub exec: String,
     pub icon: Option<String>,
     pub terminal: bool,
+    /// Start a new process for each activation instead of focusing an existing
+    /// window. Set by `X-Scarlet-NewInstance`; defaults to false.
+    pub new_instance: bool,
     pub mime_types: Vec<String>,
 }
 
@@ -54,6 +60,7 @@ impl DesktopParser {
         let mut exec = None;
         let mut icon = None;
         let mut terminal = false;
+        let mut new_instance = false;
         let mut mime_types = Vec::new();
 
         for line in lines {
@@ -89,6 +96,7 @@ impl DesktopParser {
                     "Exec" => exec = Some(Self::unquote(value)),
                     "Icon" => icon = Some(Self::unquote(value)),
                     "Terminal" => terminal = value == "true" || value == "1",
+                    "X-Scarlet-NewInstance" => new_instance = value == "true" || value == "1",
                     "MimeType" => {
                         for mime_type in value.split(';') {
                             let mime_type = Self::unquote(mime_type.trim());
@@ -112,6 +120,7 @@ impl DesktopParser {
             exec,
             icon,
             terminal,
+            new_instance,
             mime_types,
         })
     }
@@ -481,6 +490,52 @@ mod tests {
     use super::{DesktopParser, expand_exec, mime_type_for_path};
     use std::string::String;
     use std::vec;
+
+    #[test]
+    fn new_instance_launch_requires_an_explicit_opt_in() {
+        for (setting, expected) in [
+            ("", false),
+            ("X-Scarlet-NewInstance=false\n", false),
+            ("X-Scarlet-NewInstance=0\n", false),
+            ("X-Scarlet-NewInstance=invalid\n", false),
+            ("X-Scarlet-NewInstance=true\n", true),
+            ("X-Scarlet-NewInstance=1\n", true),
+        ] {
+            let entry = DesktopParser::new(std::format!(
+                "[Desktop Entry]\nName=Example\nExec=/bin/example\n{setting}"
+            ))
+            .parse("example.desktop")
+            .expect("desktop entry should parse");
+
+            assert_eq!(entry.new_instance, expected, "setting: {setting:?}");
+        }
+    }
+
+    #[test]
+    fn terminal_desktop_entry_requests_a_new_instance() {
+        let entry = DesktopParser::new(String::from(include_str!(
+            "../../../../bundles/desktop/fs/system/scarlet/etc/stemd.d/apps/org.scarlet-os.desktop.terminal.desktop"
+        )))
+        .parse("org.scarlet-os.desktop.terminal.desktop")
+        .expect("Terminal desktop entry should parse");
+
+        assert!(entry.new_instance);
+        assert_eq!(
+            expand_exec(&entry.exec, &[]).expect("Terminal launch should expand"),
+            vec!["/bin/terminal"]
+        );
+    }
+
+    #[test]
+    fn settings_desktop_entry_keeps_focus_existing_as_the_default() {
+        let entry = DesktopParser::new(String::from(include_str!(
+            "../../../../bundles/desktop/fs/system/scarlet/etc/stemd.d/apps/org.scarlet-os.desktop.settings.desktop"
+        )))
+        .parse("org.scarlet-os.desktop.settings.desktop")
+        .expect("Settings desktop entry should parse");
+
+        assert!(!entry.new_instance);
+    }
 
     #[test]
     fn parses_mime_types() {

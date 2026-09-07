@@ -101,10 +101,20 @@ The checked-in desktop bundle supplies these files under its `fs/` tree.
 ```text
 [Desktop Entry]
 Name=Terminal
-Exec=/bin/sh
-Icon=terminal
+Exec=/bin/terminal
+Icon=utilities-terminal
 Type=Application
+Terminal=false
+X-Scarlet-NewInstance=true
 ```
+
+Launcher activation focuses an existing instance by default. Set the optional
+`X-Scarlet-NewInstance=true` key in `[Desktop Entry]` to start a new process on
+every activation. Omitting the key or setting it to `false` keeps the default;
+the desktop bundle opts in only Terminal. This policy applies to both sbus
+`LaunchOrFocus` and the Unix-socket `LAUNCH_OR_FOCUS` command. Explicit `LAUNCH`
+requests and file-opening requests still start a new process independently of
+this setting.
 
 ## Service Lifecycle
 
