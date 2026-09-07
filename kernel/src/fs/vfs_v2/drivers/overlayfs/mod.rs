@@ -1360,7 +1360,15 @@ impl StreamOps for OverlayDirectoryObject {
         let fs_entry = &all_entries[position];
 
         // Convert to binary format
-        let dir_entry = crate::fs::DirectoryEntry::from_internal(fs_entry);
+        let mut dir_entry = crate::fs::DirectoryEntry::from_internal(fs_entry);
+        if fs_entry.name != "." && fs_entry.name != ".." {
+            let path = format!("{}/{}", self.path.trim_end_matches('/'), fs_entry.name);
+            dir_entry.size = self
+                .overlay_fs
+                .get_metadata_for_path(&path)
+                .map_err(StreamError::from)?
+                .size as u64;
+        }
 
         // Calculate actual entry size
         let entry_size = dir_entry.entry_size();

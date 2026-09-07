@@ -110,11 +110,17 @@ impl PageCacheEntry {
 pub struct PageCacheManager {
     /// Map from (CacheId, PageIndex) to cached page entry
     entries: IrqRwSpinLock<BTreeMap<(CacheId, PageIndex), PageCacheEntry>>,
-    /// Best-known object sizes for dirty page-cache-backed files.
-    object_sizes: IrqRwSpinLock<BTreeMap<CacheId, usize>>,
+    /// Live metadata shared by all handles to page-cache-backed files.
+    object_metadata: IrqRwSpinLock<BTreeMap<CacheId, CachedObjectMetadata>>,
     /// Object-level lock counts for eviction prevention
     /// Maps CacheId to lock count (>0 means object is unevictable)
     object_locks: IrqRwSpinLock<BTreeMap<CacheId, usize>>,
+}
+
+#[derive(Clone, Copy)]
+struct CachedObjectMetadata {
+    size: usize,
+    modified_time: Option<u64>,
 }
 
 impl PageCacheManager {
@@ -122,7 +128,7 @@ impl PageCacheManager {
     pub const fn new() -> Self {
         Self {
             entries: IrqRwSpinLock::new(BTreeMap::new()),
-            object_sizes: IrqRwSpinLock::new(BTreeMap::new()),
+            object_metadata: IrqRwSpinLock::new(BTreeMap::new()),
             object_locks: IrqRwSpinLock::new(BTreeMap::new()),
         }
     }
@@ -220,12 +226,51 @@ impl PageCacheManager {
 
     /// Record the current cached size for an object.
     pub fn record_object_size(&self, id: CacheId, size: usize) {
-        self.object_sizes.write().insert(id, size);
+        self.object_metadata
+            .write()
+            .entry(id)
+            .or_insert(CachedObjectMetadata {
+                size,
+                modified_time: None,
+            })
+            .size = size;
     }
 
     /// Return the current cached size for an object if one has been recorded.
     pub fn cached_object_size(&self, id: CacheId) -> Option<usize> {
-        self.object_sizes.read().get(&id).copied()
+        self.object_metadata.read().get(&id).map(|meta| meta.size)
+    }
+
+    /// Record a completed write without shrinking the file on an overwrite.
+    ///
+    /// `write_end` is the first byte after the written range. `stored_size` is
+    /// used only when no live size has been recorded, so stale on-disk metadata
+    /// cannot undo a cached truncation. `modified_time` is Unix time in seconds;
+    /// `None` preserves the previous timestamp when the wall clock is unavailable.
+    pub fn record_object_write(
+        &self,
+        id: CacheId,
+        write_end: usize,
+        stored_size: usize,
+        modified_time: Option<u64>,
+    ) {
+        let mut objects = self.object_metadata.write();
+        let metadata = objects.entry(id).or_insert(CachedObjectMetadata {
+            size: stored_size,
+            modified_time: None,
+        });
+        metadata.size = metadata.size.max(write_end);
+        if let Some(time) = modified_time {
+            metadata.modified_time = Some(time);
+        }
+    }
+
+    /// Return the last cached write time in seconds since the Unix epoch.
+    pub fn cached_object_modified_time(&self, id: CacheId) -> Option<u64> {
+        self.object_metadata
+            .read()
+            .get(&id)
+            .and_then(|metadata| metadata.modified_time)
     }
 
     /// Set object-level lock (prevents eviction of all pages for this object)
@@ -364,14 +409,13 @@ impl PageCacheManager {
                 }
             }
         }
-        if to_remove.is_empty() {
-            return;
+        if !to_remove.is_empty() {
+            let mut map = self.entries.write();
+            for key in to_remove.into_iter() {
+                map.remove(&key);
+            }
         }
-        let mut map = self.entries.write();
-        for key in to_remove.into_iter() {
-            map.remove(&key);
-        }
-        self.object_sizes.write().remove(&id);
+        self.object_metadata.write().remove(&id);
     }
 }
 
@@ -427,3 +471,43 @@ pub static GLOBAL_PAGE_CACHE: PageCacheManager = PageCacheManager::new();
 // - Each shard: IrqSpinLock/PageCacheShard { entries }
 // - object_locks separated or distributed
 // Instance methods remain the stable API; callers use PageCacheManager::global().
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test_case]
+    fn overwrite_preserves_size_and_updates_timestamp() {
+        let cache = PageCacheManager::new();
+        let id = CacheId::new(1);
+        cache.record_object_write(id, 20, 100, Some(123));
+        assert_eq!(cache.cached_object_size(id), Some(100));
+        assert_eq!(cache.cached_object_modified_time(id), Some(123));
+
+        cache.record_object_write(id, 200, 100, Some(124));
+        cache.record_object_write(id, 50, 100, None);
+        assert_eq!(cache.cached_object_size(id), Some(200));
+        assert_eq!(cache.cached_object_modified_time(id), Some(124));
+    }
+
+    #[test_case]
+    fn write_after_truncate_ignores_stale_stored_size() {
+        let cache = PageCacheManager::new();
+        let id = CacheId::new(1);
+        cache.record_object_write(id, 200, 100, Some(123));
+        cache.record_object_size(id, 10);
+        cache.record_object_write(id, 20, 200, Some(124));
+        assert_eq!(cache.cached_object_size(id), Some(20));
+        assert_eq!(cache.cached_object_modified_time(id), Some(124));
+    }
+
+    #[test_case]
+    fn invalidate_removes_metadata_without_cached_pages() {
+        let cache = PageCacheManager::new();
+        let id = CacheId::new(1);
+        cache.record_object_write(id, 20, 100, Some(123));
+        cache.invalidate(id);
+        assert_eq!(cache.cached_object_size(id), None);
+        assert_eq!(cache.cached_object_modified_time(id), None);
+    }
+}

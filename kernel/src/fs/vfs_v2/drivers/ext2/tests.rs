@@ -355,6 +355,63 @@ fn test_ext2_file_object_operations() {
     // println!("[Test] ✓ ext2 file object operations test passed");
 }
 
+#[test_case]
+fn test_ext2_directory_size_and_metadata_follow_cached_writes() {
+    use crate::fs::vfs_v2::cache::CacheId;
+    use crate::fs::{DirectoryEntry, SeekFrom};
+    use crate::mem::page_cache::PageCacheManager;
+
+    let fs = Ext2FileSystem::new(Arc::new(create_test_ext2_device())).unwrap();
+    let mut directory_inode = Ext2Inode::empty();
+    directory_inode.mode = (EXT2_S_IFDIR | 0o755).to_le();
+    directory_inode.size = 1024_u32.to_le();
+    directory_inode.block[0] = 16_u32.to_le();
+    fs.inode_cache
+        .write()
+        .insert(EXT2_ROOT_INO, directory_inode);
+
+    let mut file_inode = Ext2Inode::empty();
+    file_inode.mode = (EXT2_S_IFREG | 0o644).to_le();
+    file_inode.size = 123_u32.to_le();
+    file_inode.atime = 100_u32.to_le();
+    file_inode.mtime = 101_u32.to_le();
+    file_inode.ctime = 101_u32.to_le();
+    file_inode.links_count = 1_u16.to_le();
+    fs.inode_cache.write().insert(11, file_inode);
+
+    let mut directory_block = vec![0; 1024];
+    directory_block[..4].copy_from_slice(&11_u32.to_le_bytes());
+    directory_block[4..6].copy_from_slice(&1024_u16.to_le_bytes());
+    directory_block[6] = 4;
+    directory_block[7] = 1; // EXT2_FT_REG_FILE
+    directory_block[8..12].copy_from_slice(b"file");
+    fs.block_cache.write().insert(16, directory_block);
+
+    let directory = fs.open(&fs.root_node(), 0).unwrap();
+    let mut buffer = [0; core::mem::size_of::<DirectoryEntry>()];
+    assert_eq!(directory.read(&mut buffer).unwrap(), buffer.len());
+    assert_eq!(u64::from_ne_bytes(buffer[8..16].try_into().unwrap()), 123);
+
+    let file = fs.lookup(&fs.root_node(), &"file".to_string()).unwrap();
+    assert_eq!(file.metadata().unwrap().modified_time, 101);
+    assert_eq!(file.metadata().unwrap().accessed_time, 100);
+    let cache_id = CacheId::new((fs.fs_id().get() << 32) | 11);
+    PageCacheManager::global().record_object_write(cache_id, 200, 123, Some(102));
+
+    // The parent directory has not changed; the cached listing must still
+    // return the child's current size, including unflushed writes.
+    directory.seek(SeekFrom::Start(0)).unwrap();
+    assert_eq!(directory.read(&mut buffer).unwrap(), buffer.len());
+    assert_eq!(u64::from_ne_bytes(buffer[8..16].try_into().unwrap()), 200);
+    assert_eq!(file.metadata().unwrap().size, 200);
+    assert_eq!(file.metadata().unwrap().modified_time, 102);
+    let opened_file = fs.open(&file, 0).unwrap();
+    assert_eq!(opened_file.metadata().unwrap().size, 200);
+    assert_eq!(opened_file.metadata().unwrap().modified_time, 102);
+
+    PageCacheManager::global().invalidate(cache_id);
+}
+
 // Helper function to create a mock ext2 device with proper structure
 fn create_test_ext2_device() -> MockBlockDevice {
     let sector_size = 512;

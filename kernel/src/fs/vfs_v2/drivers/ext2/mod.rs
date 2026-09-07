@@ -66,6 +66,11 @@ pub use driver::Ext2Driver;
 pub use node::{Ext2CharDeviceFileObject, Ext2DirectoryObject, Ext2FileObject, Ext2Node};
 pub use structures::*;
 
+/// Current Unix time representable by an ext2 timestamp, if an RTC is available.
+fn current_timestamp() -> Option<u32> {
+    crate::time::system_time_s().map(|seconds| seconds.min(u32::MAX as u64) as u32)
+}
+
 /// ext2 filesystem parameters for mount options
 ///
 /// This struct holds the parameters parsed from mount option strings
@@ -1400,7 +1405,16 @@ impl Ext2FileSystem {
             (file_size + block_size - 1) / block_size
         };
         inode.size = file_size_u32;
-        inode.mtime = 0;
+        let cache_id =
+            crate::fs::vfs_v2::cache::CacheId::new((self.fs_id().get() << 32) | inode_num as u64);
+        let modified_time = crate::mem::page_cache::PageCacheManager::global()
+            .cached_object_modified_time(cache_id)
+            .map(|seconds| seconds as u32)
+            .or_else(current_timestamp);
+        if let Some(time) = modified_time {
+            inode.mtime = time.to_le();
+            inode.ctime = time.to_le();
+        }
         inode.blocks = u32::try_from(blocks_needed)
             .unwrap_or(u32::MAX)
             .saturating_mul(self.block_size / 512);
@@ -3137,7 +3151,10 @@ impl Ext2FileSystem {
 
         // Update inode size, block count, and modification time
         inode.size = content.len() as u32;
-        inode.mtime = 0; // TODO: Use proper timestamp when available
+        if let Some(time) = current_timestamp() {
+            inode.mtime = time.to_le();
+            inode.ctime = time.to_le();
+        }
 
         // Update i_blocks field (count in 512-byte sectors)
         inode.blocks = blocks_needed * (self.block_size / 512);
@@ -4820,13 +4837,14 @@ impl FileSystemOperations for Ext2FileSystem {
         } else {
             1
         }; // Directory gets "." and initial link
+        let timestamp = current_timestamp().unwrap_or(0).to_le();
         let mut new_inode = Ext2Inode {
             mode: mode.to_le(),
             uid: 0_u16.to_le(),
             size: 0_u32.to_le(),
-            atime: 0_u32.to_le(),
-            ctime: 0_u32.to_le(),
-            mtime: 0_u32.to_le(),
+            atime: timestamp,
+            ctime: timestamp,
+            mtime: timestamp,
             dtime: 0_u32.to_le(),
             gid: 0_u16.to_le(),
             links_count: initial_nlinks.to_le(),

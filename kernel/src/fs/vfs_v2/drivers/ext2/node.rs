@@ -124,16 +124,17 @@ impl VfsNode for Ext2Node {
         let size = PageCacheManager::global()
             .cached_object_size(cache_id)
             .unwrap_or_else(|| inode.get_size() as usize);
+        let modified_time = PageCacheManager::global().cached_object_modified_time(cache_id);
 
         Ok(FileMetadata {
             file_type: self.file_type.clone(),
             size,
             permissions,
-            created_time: inode.get_ctime() as u64,
-            modified_time: inode.get_mtime() as u64,
-            accessed_time: 0,
+            created_time: modified_time.unwrap_or(inode.get_ctime() as u64),
+            modified_time: modified_time.unwrap_or(inode.get_mtime() as u64),
+            accessed_time: inode.get_atime() as u64,
             file_id: self.file_id,
-            link_count: 1,
+            link_count: inode.get_links_count() as u32,
         })
     }
 
@@ -255,12 +256,10 @@ impl Ext2FileObject {
                 StreamError::IoError
             })?
             .size as usize;
-        let eff_size = match *self.size_override.lock() {
-            Some(ov) => core::cmp::max(on_disk, ov),
-            None => on_disk,
-        };
-
         let cache_id = self.cache_id();
+        let eff_size = PageCacheManager::global()
+            .cached_object_size(cache_id)
+            .unwrap_or_else(|| self.effective_size(on_disk));
         PageCacheManager::global()
             .flush_batch(cache_id, |pages| {
                 ext2_fs
@@ -285,6 +284,9 @@ impl Ext2FileObject {
     }
 
     fn effective_size(&self, inode_size: usize) -> usize {
+        if let Some(size) = PageCacheManager::global().cached_object_size(self.cache_id()) {
+            return size;
+        }
         let mut file_size = inode_size;
         if let Some(override_size) = *self.size_override.lock() {
             if override_size > file_size {
@@ -376,14 +378,7 @@ impl StreamOps for Ext2FileObject {
             .read_inode(self.inode_number)
             .map_err(|_| StreamError::IoError)?;
         let cache_id = self.cache_id();
-        let mut file_size = PageCacheManager::global()
-            .cached_object_size(cache_id)
-            .unwrap_or(inode.size as usize);
-        if let Some(override_size) = *self.size_override.lock() {
-            if override_size > file_size {
-                file_size = override_size;
-            }
-        }
+        let file_size = self.effective_size(inode.get_size() as usize);
 
         if buffer.is_empty() {
             return Ok(0);
@@ -559,7 +554,12 @@ impl StreamOps for Ext2FileObject {
             .read_inode(self.inode_number)
             .map_err(|_| StreamError::IoError)?
             .size as usize;
-        PageCacheManager::global().record_object_size(cache_id, self.effective_size(inode_size));
+        PageCacheManager::global().record_object_write(
+            cache_id,
+            end_pos,
+            inode_size,
+            super::current_timestamp().map(u64::from),
+        );
 
         Ok(bytes_to_write)
     }
@@ -854,13 +854,14 @@ impl FileObject for Ext2FileObject {
         let size = PageCacheManager::global()
             .cached_object_size(self.cache_id())
             .unwrap_or_else(|| self.effective_size(inode_size));
+        let modified_time = PageCacheManager::global().cached_object_modified_time(self.cache_id());
 
         Ok(FileMetadata {
             file_type,
             size,
             permissions,
-            created_time: inode.ctime as u64,
-            modified_time: inode.mtime as u64,
+            created_time: modified_time.unwrap_or(inode.get_ctime() as u64),
+            modified_time: modified_time.unwrap_or(inode.get_mtime() as u64),
             accessed_time: inode.atime as u64,
             file_id: self.file_id,
             link_count: inode.links_count as u32,
@@ -940,6 +941,9 @@ impl FileObject for Ext2FileObject {
             return Ok(0);
         }
         let off = usize::try_from(offset).map_err(|_| StreamError::InvalidArgument)?;
+        off.checked_add(buffer.len())
+            .ok_or(StreamError::InvalidArgument)?;
+        let stored_size = self.metadata()?.size;
         let mut written = 0usize;
         let cache_id = self.cache_id();
 
@@ -990,12 +994,14 @@ impl FileObject for Ext2FileObject {
                 *size_override = Some(new_end);
             }
         }
-        // `effective_size` reads `size_override` itself.  Do not call it
-        // while the guard above is alive: `IrqSpinLock` is not re-entrant,
-        // so that used to leave the CPU spinning forever with IRQs masked on
-        // every non-empty write.
+        // Release the per-handle lock before updating shared metadata.
         drop(size_override);
-        PageCacheManager::global().record_object_size(cache_id, self.effective_size(new_end));
+        PageCacheManager::global().record_object_write(
+            cache_id,
+            new_end,
+            stored_size,
+            super::current_timestamp().map(u64::from),
+        );
 
         *self.dirty.lock() = true;
 
@@ -1328,7 +1334,7 @@ impl Ext2DirectoryObject {
             all_entries.push(crate::fs::DirectoryEntryInternal {
                 name: entry.name,
                 file_type,
-                size: 0,                   // Size not immediately available
+                size: 0, // Refreshed from inode/page-cache metadata when returned to the caller.
                 file_id: inode_num as u64, // Use copied inode number
                 metadata: None,
             });
@@ -1365,7 +1371,17 @@ impl StreamOps for Ext2DirectoryObject {
         let internal_entry = &all_entries[position];
 
         // Convert to binary format
-        let dir_entry = crate::fs::DirectoryEntry::from_internal(internal_entry);
+        let mut dir_entry = crate::fs::DirectoryEntry::from_internal(internal_entry);
+        // Directory membership can be cached, but file sizes can change without
+        // modifying the parent directory. Refresh only the entry being returned.
+        let filesystem = self.filesystem.read().clone().ok_or(StreamError::Closed)?;
+        let node = Ext2Node::new(
+            internal_entry.file_id as u32,
+            internal_entry.file_type.clone(),
+            internal_entry.file_id,
+        );
+        node.set_filesystem(filesystem);
+        dir_entry.size = node.metadata().map_err(StreamError::from)?.size as u64;
 
         // Calculate actual entry size
         let entry_size = dir_entry.entry_size();

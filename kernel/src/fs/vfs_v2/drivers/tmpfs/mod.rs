@@ -720,6 +720,7 @@ impl Debug for TmpNode {
 impl TmpNode {
     /// Create a new regular file node
     pub fn new_file(name: String, file_id: u64) -> Self {
+        let now = crate::time::system_time_s().unwrap_or(0);
         Self {
             name: IrqRwSpinLock::new(name),
             file_type: IrqRwSpinLock::new(FileType::RegularFile),
@@ -731,9 +732,9 @@ impl TmpNode {
                     write: true,
                     execute: false,
                 },
-                created_time: 0, // TODO: actual timestamp
-                modified_time: 0,
-                accessed_time: 0,
+                created_time: now,
+                modified_time: now,
+                accessed_time: now,
                 file_id,
                 link_count: 1,
             }),
@@ -746,6 +747,7 @@ impl TmpNode {
 
     /// Create a new directory node
     pub fn new_directory(name: String, file_id: u64) -> Self {
+        let now = crate::time::system_time_s().unwrap_or(0);
         Self {
             name: IrqRwSpinLock::new(name),
             file_type: IrqRwSpinLock::new(FileType::Directory),
@@ -757,9 +759,9 @@ impl TmpNode {
                     write: true,
                     execute: true,
                 },
-                created_time: 0,
-                modified_time: 0,
-                accessed_time: 0,
+                created_time: now,
+                modified_time: now,
+                accessed_time: now,
                 file_id,
                 link_count: 1,
             }),
@@ -772,6 +774,7 @@ impl TmpNode {
 
     /// Create a new device file node
     pub fn new_device(name: String, file_type: FileType, file_id: u64) -> Self {
+        let now = crate::time::system_time_s().unwrap_or(0);
         Self {
             name: IrqRwSpinLock::new(name),
             file_type: IrqRwSpinLock::new(file_type.clone()),
@@ -783,9 +786,9 @@ impl TmpNode {
                     write: true,
                     execute: false,
                 },
-                created_time: 0,
-                modified_time: 0,
-                accessed_time: 0,
+                created_time: now,
+                modified_time: now,
+                accessed_time: now,
                 file_id,
                 link_count: 1,
             }),
@@ -798,6 +801,7 @@ impl TmpNode {
 
     /// Create a new symbolic link node
     pub fn new_symlink(name: String, target: String, file_id: u64) -> Self {
+        let now = crate::time::system_time_s().unwrap_or(0);
         Self {
             name: IrqRwSpinLock::new(name),
             file_type: IrqRwSpinLock::new(FileType::SymbolicLink(target.clone())),
@@ -809,9 +813,9 @@ impl TmpNode {
                     write: true,
                     execute: false,
                 },
-                created_time: 0, // TODO: actual timestamp
-                modified_time: 0,
-                accessed_time: 0,
+                created_time: now,
+                modified_time: now,
+                accessed_time: now,
                 file_id,
                 link_count: 1,
             }),
@@ -830,9 +834,20 @@ impl TmpNode {
 
     /// Update file size in metadata
     pub fn update_size(&self, new_size: u64) {
-        let mut metadata = self.metadata.write();
-        metadata.size = new_size as usize;
-        metadata.modified_time = 0; // TODO: actual timestamp
+        self.metadata.write().size = new_size as usize;
+        self.record_modified();
+    }
+
+    fn record_modified(&self) {
+        if let Some(now) = crate::time::system_time_s() {
+            self.metadata.write().modified_time = now;
+        }
+    }
+
+    fn record_accessed(&self) {
+        if let Some(now) = crate::time::system_time_s() {
+            self.metadata.write().accessed_time = now;
+        }
     }
 
     /// Set parent reference for this node
@@ -1218,6 +1233,9 @@ impl TmpFileObject {
         }
 
         *self.position.write() = pos;
+        if total_read != 0 {
+            self.node.record_accessed();
+        }
         Ok(total_read)
     }
 
@@ -1348,6 +1366,7 @@ impl TmpFileObject {
             PageCacheManager::global().record_object_size(cache_id, meta.size);
         }
 
+        self.node.record_modified();
         Ok(written)
     }
 
@@ -1685,6 +1704,9 @@ impl FileObject for TmpFileObject {
             }
         }
 
+        if total_read != 0 {
+            self.node.record_accessed();
+        }
         Ok(total_read)
     }
 
@@ -1746,6 +1768,7 @@ impl FileObject for TmpFileObject {
             PageCacheManager::global().record_object_size(cache_id, meta.size);
         }
 
+        self.node.record_modified();
         Ok(written)
     }
 
@@ -1850,6 +1873,7 @@ impl FileObject for TmpFileObject {
             self.subtract_memory_usage(old_size - new_size)
                 .map_err(StreamError::from)?;
         }
+        self.node.record_modified();
         Ok(())
     }
 

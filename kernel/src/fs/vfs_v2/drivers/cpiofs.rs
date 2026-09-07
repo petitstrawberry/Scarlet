@@ -14,6 +14,7 @@ use alloc::{
     vec::Vec,
 };
 use core::any::Any;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::fs::{
     FileMetadata, FileObject, FilePermission, FileSystemError, FileSystemErrorKind, FileType,
@@ -53,6 +54,9 @@ pub struct CpioNode {
     /// File content (for regular files)
     content: Vec<u8>,
 
+    /// Unix modification time from the archive header, set during parsing.
+    modified_time: AtomicU64,
+
     /// Child nodes (for directories)
     children: IrqRwSpinLock<BTreeMap<String, Arc<CpioNode>>>,
 
@@ -73,6 +77,7 @@ impl CpioNode {
             name,
             file_type,
             content,
+            modified_time: AtomicU64::new(0),
             children: IrqRwSpinLock::new(BTreeMap::new()),
             filesystem: IrqRwSpinLock::new(None),
             file_id,
@@ -139,7 +144,7 @@ impl VfsNode for CpioNode {
             file_type: self.file_type.clone(),
             size: self.content.len(),
             created_time: 0,
-            modified_time: 0,
+            modified_time: self.modified_time.load(Ordering::Relaxed),
             accessed_time: 0,
             permissions: FilePermission {
                 read: true,
@@ -231,6 +236,12 @@ impl CpioFS {
                     ));
                 }
             };
+            let modified_time = core::str::from_utf8(&data[offset + 46..offset + 54])
+                .ok()
+                .and_then(|value| u64::from_str_radix(value, 16).ok())
+                .ok_or_else(|| {
+                    FileSystemError::new(FileSystemErrorKind::InvalidData, "Invalid mtime value")
+                })?;
             let namesize = match core::str::from_utf8(&data[offset + 94..offset + 102]) {
                 Ok(s) => usize::from_str_radix(s, 16).map_err(|_| {
                     FileSystemError::new(FileSystemErrorKind::InvalidData, "Invalid namesize value")
@@ -291,11 +302,17 @@ impl CpioFS {
 
             // Skip "." and ".." entries as they are handled automatically by the VFS
             if base_name == "." || base_name == ".." {
+                if name_str == "." && file_type == FileType::Directory {
+                    self.root_node
+                        .modified_time
+                        .store(modified_time, Ordering::Relaxed);
+                }
                 offset = (file_end + 3) & !3;
                 continue;
             }
 
             let node = CpioNode::new(base_name.to_string(), file_type, content, file_id);
+            node.modified_time.store(modified_time, Ordering::Relaxed);
             {
                 let mut fs_guard = node.filesystem.write();
                 *fs_guard = Some(Arc::clone(self));
