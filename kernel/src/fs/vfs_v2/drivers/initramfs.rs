@@ -11,7 +11,6 @@ use crate::device::fdt::FdtManager;
 use crate::fs::FileSystemError;
 use crate::fs::VfsManager;
 use crate::println;
-use crate::println;
 use crate::vm::vmem::MemoryArea;
 use alloc::format;
 use alloc::string::{String, ToString};
