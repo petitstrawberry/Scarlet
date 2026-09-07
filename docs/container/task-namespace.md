@@ -75,10 +75,11 @@ int create_namespace(unsigned long flags, const char *name);
 |------|-------|--------|
 | `NS_CREATE_TASK` | 0x01 | Create separate task namespace |
 | `NS_CREATE_VFS` | 0x02 | Create separate VFS namespace |
-| `NS_CREATE_NET` | 0x04 | Network namespace (stub) |
-| `NS_CREATE_IPC` | 0x08 | IPC namespace (stub) |
+| `NS_CREATE_NET` | 0x04 | Unsupported; request fails |
+| `NS_CREATE_IPC` | 0x08 | Unsupported; request fails |
 
-Flags can be OR'd together. The `name` parameter is optional (NULL for auto-generated).
+Supported flags can be OR'd together. Unsupported or unknown bits are rejected
+before any namespace is created. The `name` parameter is optional (NULL for auto-generated).
 
 ## ABI Integration
 

@@ -894,8 +894,10 @@ pub fn sys_openat(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 
     // crate::println!("sys_openat: epc={:#x}, dirfd={}, path='{}', flags={:#o}", trapframe.epc, dirfd, path_str, flags);
 
-    let vfs_guard = task.vfs.read();
-    let vfs = vfs_guard.as_deref().unwrap();
+    let vfs = match task.get_vfs() {
+        Some(vfs) => vfs,
+        None => return errno::to_result(errno::EIO),
+    };
 
     // Determine base directory (entry and mount) for path resolution
     use crate::fs::vfs_v2::core::VfsFileObject;
@@ -1008,8 +1010,10 @@ pub fn sys_openat(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                     Ok(_) => {
                         // File created successfully, now try to open it
                         // Get immutable VFS reference again for opening
-                        let vfs_guard = task.vfs.read();
-                        let vfs = vfs_guard.as_deref().unwrap();
+                        let vfs = match task.get_vfs() {
+                            Some(vfs) => vfs,
+                            None => return errno::to_result(errno::EIO),
+                        };
                         match vfs.open_from(&base_entry, &base_mount, &mapped_path, flags as u32) {
                             Ok(obj) => obj,
                             Err(err) => return errno::to_result(errno::from_fs_error(&err)),
@@ -1023,8 +1027,10 @@ pub fn sys_openat(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                             return errno::to_result(errno::EEXIST); // File exists and O_EXCL is set
                         }
                         // Try to open the existing file
-                        let vfs_guard = task.vfs.read();
-                        let vfs = vfs_guard.as_deref().unwrap();
+                        let vfs = match task.get_vfs() {
+                            Some(vfs) => vfs,
+                            None => return errno::to_result(errno::EIO),
+                        };
                         let reopen_flags = (flags as u32) & !((O_CREAT | O_EXCL) as u32);
                         match vfs.open_from(&base_entry, &base_mount, &mapped_path, reopen_flags) {
                             Ok(obj) => obj,
@@ -2036,8 +2042,7 @@ pub fn sys_newfstatat(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         return 0;
     }
 
-    let vfs_guard = task.vfs.read();
-    let vfs = match vfs_guard.as_deref() {
+    let vfs = match task.get_vfs() {
         Some(vfs) => vfs,
         None => return errno::to_result(errno::EIO),
     };
@@ -2326,8 +2331,10 @@ pub fn sys_link(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         Err(_) => return usize::MAX, // Invalid path
     };
 
-    let vfs_guard = task.vfs.read();
-    let vfs = vfs_guard.as_deref().unwrap();
+    let vfs = match task.get_vfs() {
+        Some(vfs) => vfs,
+        None => return errno::to_result(errno::EIO),
+    };
     match vfs.create_hardlink(&src_path, &dst_path) {
         Ok(_) => 0, // Success
         Err(err) => {
@@ -2337,190 +2344,17 @@ pub fn sys_link(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     }
 }
 
-/// Linux sys_linkat implementation for Scarlet VFS v2
+/// Linux linkat is not implemented yet.
 ///
-/// Creates a hard link to an existing file. Both oldpath and newpath
-/// can be relative to their respective directory file descriptors.
-///
-/// Arguments:
-/// - abi: LinuxAbi context
-/// - trapframe: Trapframe containing syscall arguments
-///   - arg0: olddirfd (old directory file descriptor)
-///   - arg1: oldpath_ptr (pointer to source path string)
-///   - arg2: newdirfd (new directory file descriptor)
-///   - arg3: newpath_ptr (pointer to destination path string)
-///   - arg4: flags (link flags)
-///
-/// Returns:
-/// - 0 on success
-/// - usize::MAX (Linux -1) on error
-pub fn sys_linkat(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
+/// Report ENOSYS instead of claiming that a hard link was created. In
+/// particular, do not validate paths and then return success without mutation.
+pub fn sys_linkat(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = match mytask() {
-        Some(t) => t,
+        Some(task) => task,
         None => return errno::to_result(errno::EIO),
     };
-
-    let olddirfd = trapframe.get_arg(0) as i32;
-    let oldpath_ptr = match task.vm_manager.translate_to_kva(trapframe.get_arg(1)) {
-        Some(ptr) => ptr as *const u8,
-        None => return usize::MAX,
-    };
-    let newdirfd = trapframe.get_arg(2) as i32;
-    let newpath_ptr = match task.vm_manager.translate_to_kva(trapframe.get_arg(3)) {
-        Some(ptr) => ptr as *const u8,
-        None => return usize::MAX,
-    };
-    let flags = trapframe.get_arg(4) as i32;
-
-    // Increment PC to avoid infinite loop
     trapframe.increment_pc_next(&task);
-
-    // Parse paths from user space
-    let oldpath_str = match cstring_to_string(oldpath_ptr, MAX_PATH_LENGTH) {
-        Ok((path, _)) => path,
-        Err(_) => return usize::MAX, // Invalid UTF-8
-    };
-
-    let newpath_str = match cstring_to_string(newpath_ptr, MAX_PATH_LENGTH) {
-        Ok((path, _)) => path,
-        Err(_) => return usize::MAX, // Invalid UTF-8
-    };
-
-    // Linux constants for linkat
-    const AT_FDCWD: i32 = -100;
-    const AT_SYMLINK_FOLLOW: i32 = 0x400;
-    const AT_EMPTY_PATH: i32 = 0x1000;
-
-    let vfs = match task.vfs.read().clone() {
-        Some(v) => v,
-        None => return usize::MAX,
-    };
-
-    // Determine base directory for old path resolution
-    use crate::fs::vfs_v2::core::VfsFileObject;
-
-    let (old_base_entry, old_base_mount) = if olddirfd == AT_FDCWD {
-        // Use current working directory as base
-        vfs.get_cwd().unwrap_or_else(|| {
-            let root_mount = vfs.mount_tree.root_mount.read().clone();
-            (root_mount.root.clone(), root_mount)
-        })
-    } else {
-        // Use directory file descriptor as base
-        let handle = match abi.get_handle(olddirfd as usize) {
-            Some(h) => h,
-            None => return usize::MAX,
-        };
-        let kernel_obj = match task.handle_table.get(handle) {
-            Some(obj) => obj,
-            None => return usize::MAX,
-        };
-        let file_obj = match kernel_obj.as_file() {
-            Some(f) => f,
-            None => return usize::MAX,
-        };
-        let vfs_file_obj = file_obj
-            .as_any()
-            .downcast_ref::<VfsFileObject>()
-            .ok_or(())
-            .unwrap();
-        (
-            vfs_file_obj.get_vfs_entry().clone(),
-            vfs_file_obj.get_mount_point().clone(),
-        )
-    };
-
-    // Determine base directory for new path resolution
-    let (_new_base_entry, _new_base_mount) = if newdirfd == AT_FDCWD {
-        // Use current working directory as base
-        vfs.get_cwd().unwrap_or_else(|| {
-            let root_mount = vfs.mount_tree.root_mount.read().clone();
-            (root_mount.root.clone(), root_mount)
-        })
-    } else {
-        // Use directory file descriptor as base
-        let handle = match abi.get_handle(newdirfd as usize) {
-            Some(h) => h,
-            None => return usize::MAX,
-        };
-        let kernel_obj = match task.handle_table.get(handle) {
-            Some(obj) => obj,
-            None => return usize::MAX,
-        };
-        let file_obj = match kernel_obj.as_file() {
-            Some(f) => f,
-            None => return usize::MAX,
-        };
-        let vfs_file_obj = file_obj
-            .as_any()
-            .downcast_ref::<VfsFileObject>()
-            .ok_or(())
-            .unwrap();
-        (
-            vfs_file_obj.get_vfs_entry().clone(),
-            vfs_file_obj.get_mount_point().clone(),
-        )
-    };
-
-    // Resolve the source path to verify it exists
-    let _source_entry = match vfs.resolve_path_from(&old_base_entry, &old_base_mount, &oldpath_str)
-    {
-        Ok((entry, _mount_point)) => entry,
-        Err(_) => return usize::MAX, // Source file doesn't exist
-    };
-
-    // For now, we'll implement a simplified version using absolute paths
-    // since VFS v2 may not have direct hard link support yet
-
-    // Convert paths to absolute paths
-    let _old_absolute_path = if oldpath_str.starts_with('/') {
-        oldpath_str.to_string()
-    } else {
-        match to_absolute_path_v2(&task, &oldpath_str) {
-            Ok(p) => p,
-            Err(_) => return usize::MAX,
-        }
-    };
-
-    let _new_absolute_path = if newpath_str.starts_with('/') {
-        newpath_str.to_string()
-    } else {
-        match to_absolute_path_v2(&task, &newpath_str) {
-            Ok(p) => p,
-            Err(_) => return usize::MAX,
-        }
-    };
-
-    // Get mutable VFS reference for link creation
-    let _vfs_mut = match task.vfs.write().clone() {
-        Some(v) => v,
-        None => return usize::MAX,
-    };
-
-    // TODO: Handle flags properly
-    // AT_SYMLINK_FOLLOW: follow symbolic links in oldpath
-    // AT_EMPTY_PATH: allow empty oldpath if olddirfd refers to a file
-    let _follow_symlinks = (flags & AT_SYMLINK_FOLLOW) != 0;
-    let _empty_path = (flags & AT_EMPTY_PATH) != 0;
-
-    // Try to create the hard link
-    // Note: This is a simplified implementation. A full implementation would:
-    // 1. Check if source and destination are on the same filesystem
-    // 2. Verify the source is not a directory (unless allowed)
-    // 3. Handle proper hard link semantics
-    // 4. Update inode reference counts
-
-    // For now, we'll return success as a stub implementation
-    // since VFS v2 might not support true hard links yet.
-    // Real hard link functionality would require:
-    // - Filesystem-level support for hard links
-    // - Inode reference counting
-    // - Cross-filesystem link prevention
-
-    // Stub implementation: just return success
-    // This prevents applications from crashing when they use linkat
-    // but doesn't provide true hard link semantics
-    0 // Success (stub implementation)
+    errno::to_result(errno::ENOSYS)
 }
 
 /// VFS v2 helper function for path absolutization using VfsManager
@@ -2528,8 +2362,7 @@ fn to_absolute_path_v2(task: &crate::task::Task, path: &str) -> Result<String, (
     if path.starts_with('/') {
         Ok(path.to_string())
     } else {
-        let vfs_guard = task.vfs.read();
-        let vfs = vfs_guard.as_ref().ok_or(())?;
+        let vfs = task.get_vfs().ok_or(())?;
         Ok(vfs.resolve_path_to_absolute(path))
     }
 }

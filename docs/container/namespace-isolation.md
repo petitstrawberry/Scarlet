@@ -26,10 +26,11 @@ int create_namespace(unsigned long flags, const char *name);
 ### Flags
 - `NS_CREATE_TASK` (0x01): Create separate task namespace (PIDs)
 - `NS_CREATE_VFS` (0x02): Create separate VFS namespace (filesystem view)
-- `NS_CREATE_NET` (0x04): Create separate network namespace (future)
-- `NS_CREATE_IPC` (0x08): Create separate IPC namespace (future)
+- `NS_CREATE_NET` (0x04): Unsupported; the request is rejected
+- `NS_CREATE_IPC` (0x08): Unsupported; the request is rejected
 
-Flags can be combined with bitwise OR.
+Supported flags can be combined with bitwise OR. Unsupported or unknown bits
+cause the request to fail before any namespace is created.
 
 ### Parameters
 - `flags`: Bitfield specifying which namespaces to create
@@ -145,8 +146,8 @@ When `NS_CREATE_VFS` is specified:
 Multiple flags can be combined:
 
 ```rust
-// Create task, VFS, and (future) network isolation
-let flags = NS_CREATE_TASK | NS_CREATE_VFS | NS_CREATE_NET;
+// Create task and VFS isolation
+let flags = NS_CREATE_TASK | NS_CREATE_VFS;
 syscall2(Syscall::CreateNamespace, flags, name);
 ```
 

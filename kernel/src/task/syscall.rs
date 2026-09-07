@@ -1832,8 +1832,8 @@ pub fn sys_unregister_abi_zone(trapframe: &mut Trapframe) -> usize {
 // Namespace creation flags (bit flags for smart control)
 pub const NS_CREATE_TASK: usize = 0x01; // Create separate task namespace
 pub const NS_CREATE_VFS: usize = 0x02; // Create separate VFS namespace
-pub const NS_CREATE_NET: usize = 0x04; // Create separate network namespace (future)
-pub const NS_CREATE_IPC: usize = 0x08; // Create separate IPC namespace (future)
+pub const NS_CREATE_NET: usize = 0x04; // Not supported; requests are rejected
+pub const NS_CREATE_IPC: usize = 0x08; // Not supported; requests are rejected
 
 // Syscall error return value
 const SYSCALL_ERROR: usize = usize::MAX;
@@ -1846,7 +1846,7 @@ const SYSCALL_ERROR: usize = usize::MAX;
 ///
 /// # Returns
 /// * `0` on success
-/// * `SYSCALL_ERROR` (-1) on failure
+/// * `SYSCALL_ERROR` (-1) on failure, including unsupported namespace flags
 ///
 /// # Example
 /// ```rust
@@ -1863,6 +1863,12 @@ pub fn sys_create_namespace(trapframe: &mut Trapframe) -> usize {
 
     trapframe.increment_pc_next(&task);
 
+    // Never claim isolation for namespace types that are not implemented.
+    // Validate before creating any of the requested namespaces.
+    if flags & !(NS_CREATE_TASK | NS_CREATE_VFS) != 0 {
+        return SYSCALL_ERROR;
+    }
+
     // Parse namespace name (optional)
     let name = if name_ptr == 0 {
         alloc::format!("ns_{}", task.get_id())
@@ -1876,17 +1882,10 @@ pub fn sys_create_namespace(trapframe: &mut Trapframe) -> usize {
         }
     };
 
-    crate::println!(
-        "[syscall] Creating namespace '{}' with flags={:#x}",
-        name,
-        flags
-    );
-
     // Create task namespace if requested
     if flags & NS_CREATE_TASK != 0 {
         let new_task_ns = TaskNamespace::new_child(task.get_namespace().clone(), name.clone());
         task.set_namespace(new_task_ns);
-        crate::println!("[syscall] Created task namespace '{}'", name);
     }
 
     // Create VFS namespace if requested
@@ -1915,17 +1914,6 @@ pub fn sys_create_namespace(trapframe: &mut Trapframe) -> usize {
         let _ = new_vfs.set_cwd_by_path(&cwd_path);
 
         task.set_vfs(new_vfs);
-        crate::println!("[syscall] Created VFS namespace '{}'", name);
-    }
-
-    // Future: Network namespace
-    if flags & NS_CREATE_NET != 0 {
-        crate::println!("[syscall] Network namespace not yet implemented");
-    }
-
-    // Future: IPC namespace
-    if flags & NS_CREATE_IPC != 0 {
-        crate::println!("[syscall] IPC namespace not yet implemented");
     }
 
     0
