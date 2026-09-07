@@ -62,8 +62,7 @@ BOOT_IMAGE="$PROJECT_DIR/.scarlet/images/limine-aarch64-full.img"
 ROOTFS_IMAGE="$PROJECT_DIR/.scarlet/images/rootfs-aarch64-full.ext2"
 
 QEMU_DEBUG_ARGS=""
-source "$PROJECT_ROOT/tools/qemu-accel.sh" || exit 1
-QEMU_ACCEL="$(scarlet_qemu_accel qemu-system-aarch64 aarch64)" || exit 1
+QEMU_ACCEL="${SCARLET_QEMU_ACCEL:-tcg}"
 QEMU_ACCEL_TYPE="${QEMU_ACCEL%%,*}"
 QEMU_SMP="${SCARLET_QEMU_SMP:-1}"
 QEMU_MEMORY="${SCARLET_QEMU_MEMORY:-8G}"

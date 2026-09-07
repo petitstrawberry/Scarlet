@@ -62,8 +62,7 @@ BOOT_IMAGE="$PROJECT_DIR/.scarlet/images/limine-riscv64-full.img"
 ROOTFS_IMAGE="$PROJECT_DIR/.scarlet/images/rootfs-riscv64-full.ext2"
 
 QEMU_DEBUG_ARGS=""
-source "$PROJECT_ROOT/tools/qemu-accel.sh" || exit 1
-QEMU_ACCEL="$(scarlet_qemu_accel qemu-system-riscv64 riscv64)" || exit 1
+QEMU_ACCEL="${SCARLET_QEMU_ACCEL:-tcg}"
 QEMU_CPU_ARGS=()
 if [ "${QEMU_ACCEL%%,*}" = "kvm" ]; then
     QEMU_CPU_ARGS=(-cpu host)

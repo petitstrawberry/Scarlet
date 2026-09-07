@@ -28,6 +28,8 @@ this is not a claim that every historical document or device was revalidated.
 
 ## Build, Boot, and Project Layout
 
+- [QEMU runner configuration](development/qemu.md) - explicit KVM/HVF setup,
+  display options, and project-runner environment variables.
 - [Build system](build-system/README.md) - `cargo-scarlet`, project manifests,
   image layers, and generated artifacts.
 - [Distribution model](architecture/distro-model.md) - repository role,
