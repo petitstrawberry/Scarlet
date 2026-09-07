@@ -11,7 +11,7 @@ scarlet_qemu_display() {
 
     case "$(uname -s)" in
         Darwin)
-            printf '%s\n' 'cocoa,gl=on'
+            printf '%s\n' 'cocoa,gl=on,retina=on'
             return 0
             ;;
         Linux)

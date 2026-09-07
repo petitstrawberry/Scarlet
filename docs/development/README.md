@@ -73,7 +73,8 @@ runner checks which backends the selected QEMU supports. Without a local GUI
 session or supported GUI backend, it keeps the VNC display (`vnc=:0`). Serial
 output stays in the terminal. The same selection applies to debug runs.
 Local GUI defaults include `gl=on` and `virtio-gpu-gl-pci`, independently of
-whether the CPU uses TCG, KVM, or HVF. VNC and non-GL displays keep
+whether the CPU uses TCG, KVM, or HVF. Cocoa also enables `retina=on` by
+default. VNC and non-GL displays keep
 `virtio-gpu-pci`. The GPU-less microvm project remains headless by default.
 
 `SCARLET_QEMU_DISPLAY` overrides automatic selection, including display options.
@@ -91,7 +92,7 @@ SCARLET_QEMU_DISPLAY='vnc=:0' cargo make run-riscv64
 to explicitly disable GL on macOS:
 
 ```sh
-SCARLET_QEMU_DISPLAY='cocoa,gl=off' \
+SCARLET_QEMU_DISPLAY='cocoa,gl=off,retina=on' \
 SCARLET_QEMU_GPU=virtio-gpu-pci \
 cargo make run-aarch64
 ```
