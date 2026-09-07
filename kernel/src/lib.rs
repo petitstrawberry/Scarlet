@@ -310,6 +310,7 @@ pub mod random;
 pub mod sched;
 pub mod sync;
 pub mod syscall;
+pub mod system;
 pub mod task;
 pub mod time;
 pub mod timer;

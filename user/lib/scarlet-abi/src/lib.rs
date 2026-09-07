@@ -19,6 +19,24 @@ pub type Tid = u32;
 /// non-cryptographic emergency fallback.
 pub const GET_RANDOM_FLAG_REQUIRE_ENTROPY: usize = 1 << 0;
 
+/// Running-kernel identity returned by [`Syscall::GetKernelInfo`].
+///
+/// Every field contains a NUL-terminated UTF-8 string. This record describes
+/// the running kernel, not the distribution or its release codename.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RawKernelInfo {
+    /// Kernel name, such as `Scarlet`.
+    pub name: [u8; 32],
+    /// Version compiled from the kernel package's Cargo manifest.
+    pub version: [u8; 64],
+    /// Cargo target used to build the running kernel.
+    pub target: [u8; 64],
+}
+
+const _: [(); 160] = [(); core::mem::size_of::<RawKernelInfo>()];
+const _: [(); 1] = [(); core::mem::align_of::<RawKernelInfo>()];
+
 /// Version of the task-debug snapshot ABI implemented by Scarlet.
 pub const TASK_DEBUG_INFO_VERSION_V1: u16 = 1;
 /// The snapshot contains a valid last-observed instruction address.
@@ -694,6 +712,11 @@ pub enum Syscall {
     GetSchedulerState = 48,
     FutexWait = 49,
     FutexWake = 50,
+    /// Copy [`RawKernelInfo`] to the writable buffer in argument 0.
+    /// Argument 1 is its capacity in bytes. Returns the record size on success,
+    /// or `usize::MAX` for a null, undersized, or unwritable buffer. The kernel
+    /// does not retain the pointer; output must be ignored on failure.
+    GetKernelInfo = 51,
 
     // Process information
     GetTaskInfoCount = 24,

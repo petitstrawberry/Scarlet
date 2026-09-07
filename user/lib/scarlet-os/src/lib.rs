@@ -48,6 +48,9 @@ pub mod sensor;
 /// Scarlet time APIs.
 pub mod time;
 
+/// Running-kernel identification APIs.
+pub mod system;
+
 pub use handle::{Handle, RawHandle};
 pub use input::InputDevice;
 pub use ipc::SharedMemory;
