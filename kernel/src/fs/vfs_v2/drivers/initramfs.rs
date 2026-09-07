@@ -8,9 +8,9 @@
 //! at the root ("/") mount point.
 
 use crate::device::fdt::FdtManager;
-use crate::early_println;
 use crate::fs::FileSystemError;
 use crate::fs::VfsManager;
+use crate::println;
 use crate::println;
 use crate::vm::vmem::MemoryArea;
 use alloc::format;
@@ -81,8 +81,8 @@ fn mount_initramfs(
     manager: &Arc<VfsManager>,
     initramfs: MemoryArea,
 ) -> Result<(), FileSystemError> {
-    early_println!("[InitRamFS] Initializing initramfs");
-    early_println!(
+    println!("[InitRamFS] Initializing initramfs");
+    println!(
         "[InitRamFS] Using initramfs at address: {:#x}, size: {} bytes",
         initramfs.start,
         initramfs.size()

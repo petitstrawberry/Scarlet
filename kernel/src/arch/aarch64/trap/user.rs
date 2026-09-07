@@ -350,7 +350,7 @@ pub extern "C" fn arch_user_trap_handler(trapframe: &mut Trapframe, trap_kind: u
         let task_asid = crate::sched::scheduler::get_task_by_id(task_id)
             .map(|task| task.vm_manager.get_asid())
             .unwrap_or(0);
-        crate::early_println!(
+        crate::println!(
             "[fork-trace] child_task_id={} first-user-trap cpu={} kind={} elr={:#x} esr={:#x} far={:#x} task_asid={} user_ttbr={:#x}",
             task_id,
             cpu_id,
@@ -381,7 +381,7 @@ pub extern "C" fn arch_user_trap_handler(trapframe: &mut Trapframe, trap_kind: u
     }
 
     if let Some(task_id) = first_traced_user_trap {
-        crate::early_println!(
+        crate::println!(
             "[fork-trace] child_task_id={} first-user-trap-done cpu={} current={:?} elr={:#x} user_ttbr={:#x}",
             task_id,
             cpu_id,

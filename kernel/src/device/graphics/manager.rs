@@ -197,13 +197,13 @@ impl GraphicsManager {
 
             if device.device_type() == DeviceType::Graphics {
                 if let Err(e) = self.register_framebuffer_from_device(device_id, device) {
-                    crate::early_println!(
+                    crate::println!(
                         "[GraphicsManager] Failed to register framebuffer from device {}: {}",
                         device_id,
                         e
                     );
                 } else {
-                    crate::early_println!(
+                    crate::println!(
                         "[GraphicsManager] Successfully registered framebuffer from device {}",
                         device_id
                     );
@@ -296,21 +296,21 @@ impl GraphicsManager {
             None
         };
 
-        crate::early_println!(
+        crate::println!(
             "[GraphicsManager] Initializing graphics device {}",
             device_id
         );
 
         // Initialize the graphics device if needed via trait (no downcast)
         graphics_device.init_graphics()?;
-        crate::early_println!(
+        crate::println!(
             "[GraphicsManager] Graphics device {} initialized",
             device_id
         );
 
         // Extract framebuffer configuration
         let config = graphics_device.get_framebuffer_config()?;
-        crate::early_println!(
+        crate::println!(
             "[GraphicsManager] Graphics device {} config {}x{}",
             device_id,
             config.width,
@@ -322,7 +322,7 @@ impl GraphicsManager {
         if retire_boot_framebuffers && physical_addr == 0 {
             return Err("Graphics device framebuffer address is null");
         }
-        crate::early_println!(
+        crate::println!(
             "[GraphicsManager] Graphics device {} framebuffer paddr={:#x}",
             device_id,
             physical_addr
@@ -341,7 +341,7 @@ impl GraphicsManager {
             match *takeover_state {
                 FramebufferTakeoverState::BootAllowed => {
                     if is_registered {
-                        crate::early_println!(
+                        crate::println!(
                             "[GraphicsManager] Graphics device {} is already registered",
                             device_id
                         );
@@ -352,7 +352,7 @@ impl GraphicsManager {
                 FramebufferTakeoverState::NativeClaiming
                 | FramebufferTakeoverState::NativeActive => {
                     if is_registered {
-                        crate::early_println!(
+                        crate::println!(
                             "[GraphicsManager] Graphics device {} is already registered",
                             device_id
                         );
@@ -362,7 +362,7 @@ impl GraphicsManager {
                 }
             }
         } else if self.is_source_device_registered(device_id) {
-            crate::early_println!(
+            crate::println!(
                 "[GraphicsManager] Graphics device {} is already registered",
                 device_id
             );
@@ -396,7 +396,7 @@ impl GraphicsManager {
         map.insert(logical_name.clone(), resource);
         drop(framebuffers);
 
-        crate::early_println!(
+        crate::println!(
             "[GraphicsManager] Registered framebuffer resource: {} -> {}",
             device_id,
             logical_name
@@ -435,28 +435,28 @@ impl GraphicsManager {
         } else {
             // Keep ordinary framebuffer registration best-effort. Native
             // takeover uses the transactional branch above instead.
-            crate::early_println!(
+            crate::println!(
                 "[GraphicsManager] Creating framebuffer char device for {}",
                 logical_name
             );
             if let Err(error) =
                 self.create_framebuffer_char_device_with_manager(&logical_name, device_manager)
             {
-                crate::early_println!(
+                crate::println!(
                     "[GraphicsManager] Warning: Failed to create character device for {}: {}",
                     logical_name,
                     error
                 );
             }
 
-            crate::early_println!(
+            crate::println!(
                 "[GraphicsManager] Creating display char device for {}",
                 logical_name
             );
             if let Err(error) =
                 self.create_display_char_device_with_manager(&logical_name, device_manager)
             {
-                crate::early_println!(
+                crate::println!(
                     "[GraphicsManager] Warning: Failed to create display device for {}: {}",
                     logical_name,
                     error
@@ -733,7 +733,7 @@ impl GraphicsManager {
             return Err(error);
         }
 
-        crate::early_println!(
+        crate::println!(
             "[GraphicsManager] Created framebuffer character device: /dev/{}",
             fb_name
         );
@@ -828,7 +828,7 @@ impl GraphicsManager {
             return Err(error);
         }
 
-        crate::early_println!(
+        crate::println!(
             "[GraphicsManager] Created display character device: /dev/{}",
             display_name
         );
@@ -1037,7 +1037,7 @@ impl GraphicsManager {
                 match output.present(&fb.config, fb.physical_addr) {
                     Ok(()) => presented += 1,
                     Err(e) => {
-                        crate::early_println!(
+                        crate::println!(
                             "[GraphicsManager] mirror failed on '{}': {}",
                             output.name(),
                             e

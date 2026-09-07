@@ -71,7 +71,7 @@ Every module must export these `#[unsafe(no_mangle)]` symbols:
 ```rust
 #![no_std]
 
-use scarlet::early_println;
+use scarlet::println;
 
 #[unsafe(no_mangle)]
 pub static SCARLET_LSM_NAME: [u8; 9] = *b"lsm-test\0";
@@ -104,7 +104,7 @@ pub static SCARLET_LSM_DEPENDS: [u8; 256] = {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn scarlet_lsm_init() -> Result<(), &'static str> {
-    early_println!("[lsm-test] loaded!");
+    println!("[lsm-test] loaded!");
     Ok(())
 }
 ```

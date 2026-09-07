@@ -231,7 +231,7 @@ fn map_physical_memory(
 
     let vaddr = alloc_va + offset;
 
-    crate::early_println!(
+    crate::println!(
         "[ioremap] paddr={:#x} -> vaddr={:#x} (size={:#x})",
         paddr,
         vaddr,

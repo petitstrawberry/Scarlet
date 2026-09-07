@@ -1,7 +1,7 @@
 #![no_std]
 
 fn register_prototype() {
-    scarlet::early_println!("[scarlet-module-prototype] Hello from external module!");
+    scarlet::println!("[scarlet-module-prototype] Hello from external module!");
 }
 
 scarlet::driver_initcall!(register_prototype);

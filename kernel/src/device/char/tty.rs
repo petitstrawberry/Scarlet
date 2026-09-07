@@ -191,7 +191,7 @@ impl TtyBackend for DeviceTtyBackend {
 fn init_tty_subsystem() {
     let result = try_init_tty_subsystem();
     if let Err(e) = result {
-        crate::early_println!("Failed to initialize TTY subsystem: {}", e);
+        crate::println!("Failed to initialize TTY subsystem: {}", e);
     }
 }
 
@@ -224,14 +224,14 @@ fn try_init_tty_subsystem() -> Result<(), &'static str> {
     if let Some(ec) = uart_device.as_event_capable() {
         let weak_tty = Arc::downgrade(&tty_device);
         ec.register_event_listener(weak_tty);
-        crate::early_println!("TTY registered as UART event listener");
+        crate::println!("TTY registered as UART event listener");
     }
 
     // Register TTY device with device manager under name tty0
     let _tty_id =
         device_manager.register_device_with_name(alloc::string::String::from("tty0"), tty_device);
 
-    crate::early_println!("TTY subsystem initialized successfully");
+    crate::println!("TTY subsystem initialized successfully");
     Ok(())
 }
 

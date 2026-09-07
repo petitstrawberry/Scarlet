@@ -351,7 +351,7 @@ fn register_uart() {
 
 /// Probe function for UART devices
 fn uart_probe(device_info: &PlatformDeviceInfo) -> Result<(), &'static str> {
-    crate::early_println!("Probing UART device: {}", device_info.name());
+    crate::println!("Probing UART device: {}", device_info.name());
 
     // Get memory resource (base address)
     let memory_resource = device_info
@@ -362,14 +362,14 @@ fn uart_probe(device_info: &PlatformDeviceInfo) -> Result<(), &'static str> {
 
     let paddr = memory_resource.start;
     let size = memory_resource.end - memory_resource.start + 1;
-    crate::early_println!("UART paddr: {:#x}, size: {:#x}", paddr, size);
+    crate::println!("UART paddr: {:#x}, size: {:#x}", paddr, size);
 
     // Map the UART's physical MMIO region into the kernel virtual address space.
     let base_addr = crate::vm::ioremap(paddr, size).map_err(|e| {
-        crate::early_println!("UART ioremap({:#x}, {:#x}) failed: {}", paddr, size, e);
+        crate::println!("UART ioremap({:#x}, {:#x}) failed: {}", paddr, size, e);
         e
     })?;
-    crate::early_println!("UART base address (virt): {:#x}", base_addr);
+    crate::println!("UART base address (virt): {:#x}", base_addr);
 
     // Create UART instance
     let uart = Arc::new(Uart::new(base_addr));
@@ -389,23 +389,23 @@ fn uart_probe(device_info: &PlatformDeviceInfo) -> Result<(), &'static str> {
             crate::arch::get_cpu().get_cpuid() as u32,
         )
         .map_err(|_| "Failed to register UART interrupt")?;
-        crate::early_println!("UART interrupt ID: {}", uart_interrupt_id);
+        crate::println!("UART interrupt ID: {}", uart_interrupt_id);
 
         // Enable UART interrupts
         if let Err(e) = uart.enable_interrupts(uart_interrupt_id) {
-            crate::early_println!("Failed to enable UART interrupts: {}", e);
+            crate::println!("Failed to enable UART interrupts: {}", e);
             // Continue without interrupts - polling mode will work
         } else {
-            crate::early_println!("UART interrupts enabled (ID: {})", uart_interrupt_id);
-            crate::early_println!("UART interrupt device registered");
+            crate::println!("UART interrupts enabled (ID: {})", uart_interrupt_id);
+            crate::println!("UART interrupt device registered");
         }
     } else {
-        crate::early_println!("No interrupt resource found for UART, using polling mode");
+        crate::println!("No interrupt resource found for UART, using polling mode");
     }
 
     // Register the UART device with the device manager
     let device_id = DeviceManager::get_manager().register_device(uart);
-    crate::early_println!("UART device registered with ID: {}", device_id);
+    crate::println!("UART device registered with ID: {}", device_id);
 
     // Publish the UART base address for the emergency console and register it.
     EMERGENCY_UART_BASE.store(base_addr, AtomicOrdering::Release);

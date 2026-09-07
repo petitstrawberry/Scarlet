@@ -93,7 +93,7 @@ fn cache_cmdline(cmdline: &str) -> Option<&'static str> {
     let bytes = cmdline.as_bytes();
     let len = bytes.len().min(CMDLINE_BUFFER_SIZE - 1);
     if len < bytes.len() {
-        crate::early_println!(
+        crate::println!(
             "[boot] Limine cmdline truncated from {} to {} bytes",
             bytes.len(),
             len
@@ -126,13 +126,13 @@ pub fn boot_cmdline(fdt_cmdline: Option<&'static str>) -> Option<&'static str> {
 /// bootloader provided no response.
 pub fn capture_date_at_boot() {
     let Some(resp) = DATE_AT_BOOT_REQUEST.response() else {
-        crate::early_println!(
+        crate::println!(
             "[boot] Limine Date at Boot: no response (request unfulfilled by bootloader)"
         );
         return;
     };
     let secs = resp.timestamp;
-    crate::early_println!(
+    crate::println!(
         "[boot] Limine Date at Boot: timestamp = {} (0x{:x})",
         secs,
         secs
@@ -141,12 +141,12 @@ pub fn capture_date_at_boot() {
         if let Some(ns) = (secs as u64).checked_mul(1_000_000_000) {
             DATE_AT_BOOT_NS.store(ns, Ordering::SeqCst);
         } else {
-            crate::early_println!("[boot] Limine Date at Boot: timestamp overflow, ignored");
+            crate::println!("[boot] Limine Date at Boot: timestamp overflow, ignored");
         }
     } else if secs == 0 {
-        crate::early_println!("[boot] Limine Date at Boot: zero timestamp, ignored");
+        crate::println!("[boot] Limine Date at Boot: zero timestamp, ignored");
     } else {
-        crate::early_println!("[boot] Limine Date at Boot: negative timestamp, ignored");
+        crate::println!("[boot] Limine Date at Boot: negative timestamp, ignored");
     }
 }
 

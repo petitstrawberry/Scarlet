@@ -7,9 +7,9 @@ fn map_fat32_blk() -> usize {
     crate::vm::ioremap(0x10001000, crate::environment::PAGE_SIZE)
         .expect("ioremap should succeed for fat32 virtio-blk test device")
 }
-use crate::early_println;
 use crate::fs::FileSystemType;
 use crate::fs::get_fs_driver_manager;
+use crate::println;
 use crate::{device::block::mockblk::MockBlockDevice, fs::FileSystemDriver};
 use alloc::{boxed::Box, format, sync::Arc, vec::Vec};
 
@@ -486,19 +486,19 @@ fn create_test_fat32_device() -> MockBlockDevice {
 #[cfg(target_arch = "riscv64")]
 fn test_fat32_virtio_blk_filesystem() {
     use crate::drivers::block::virtio_blk::VirtioBlockDevice;
-    use crate::early_println;
+    use crate::println;
 
-    early_println!("[Test] Testing FAT32 with virtio-blk...");
+    println!("[Test] Testing FAT32 with virtio-blk...");
 
     // Create a VirtioBlockDevice directly (test environment)
     let base_addr = map_fat32_blk();
     let virtio_device = VirtioBlockDevice::new(base_addr);
 
-    early_println!(
+    println!(
         "[Test] Created virtio-blk device: {}",
         virtio_device.get_disk_name()
     );
-    early_println!(
+    println!(
         "[Test] Device size: {} bytes",
         virtio_device.get_disk_size()
     );
@@ -522,7 +522,7 @@ fn test_fat32_virtio_blk_filesystem() {
 
     match &result.result {
         Ok(_) => {
-            early_println!("[Test] Successfully read boot sector from virtio-blk device");
+            println!("[Test] Successfully read boot sector from virtio-blk device");
 
             let buffer = &result.request.buffer;
             assert_eq!(buffer.len(), sector_size);
@@ -530,31 +530,31 @@ fn test_fat32_virtio_blk_filesystem() {
             // Check for valid boot sector signature
             assert_eq!(buffer[510], 0x55);
             assert_eq!(buffer[511], 0xAA);
-            early_println!("[Test] Valid boot sector signature found");
+            println!("[Test] Valid boot sector signature found");
 
             // Try to verify FAT32 driver availability
             let fs_driver_manager = get_fs_driver_manager();
             if fs_driver_manager.has_driver("fat32") {
-                early_println!("[Test] FAT32 driver is registered and available");
+                println!("[Test] FAT32 driver is registered and available");
 
                 // Check if this looks like a FAT32 filesystem
                 let fat32_identifier = &buffer[82..90];
                 let fat32_str = core::str::from_utf8(fat32_identifier).unwrap_or("INVALID");
-                early_println!("[Test] Filesystem identifier: '{}'", fat32_str);
+                println!("[Test] Filesystem identifier: '{}'", fat32_str);
 
                 if fat32_str.trim() == "FAT32" {
-                    early_println!(
+                    println!(
                         "[Test] Successfully identified FAT32 filesystem on virtio-blk device"
                     );
                 } else {
-                    early_println!(
+                    println!(
                         "[Test] Warning: Filesystem type identifier is '{}', expected 'FAT32'",
                         fat32_str
                     );
                     // Still consider this a success since we can read the device
                 }
             } else {
-                early_println!("[Test] Warning: FAT32 driver not found in filesystem manager");
+                println!("[Test] Warning: FAT32 driver not found in filesystem manager");
             }
         }
         Err(e) => {
@@ -562,28 +562,28 @@ fn test_fat32_virtio_blk_filesystem() {
         }
     }
 
-    early_println!("[Test] FAT32 virtio-blk integration test completed successfully");
+    println!("[Test] FAT32 virtio-blk integration test completed successfully");
 }
 
 #[test_case]
 #[cfg(target_arch = "riscv64")]
 fn test_fat32_virtio_blk_file_operations() {
     use crate::drivers::block::virtio_blk::VirtioBlockDevice;
-    use crate::early_println;
+    use crate::println;
     use alloc::string::String;
     use alloc::sync::Arc;
 
-    early_println!("[Test] Testing FAT32 file operations with virtio-blk...");
+    println!("[Test] Testing FAT32 file operations with virtio-blk...");
 
     // Create a VirtioBlockDevice directly (test environment)
     let base_addr = map_fat32_blk();
     let virtio_device = VirtioBlockDevice::new(base_addr);
 
-    early_println!(
+    println!(
         "[Test] Created virtio-blk device: {}",
         virtio_device.get_disk_name()
     );
-    early_println!(
+    println!(
         "[Test] Device size: {} bytes",
         virtio_device.get_disk_size()
     );
@@ -594,22 +594,21 @@ fn test_fat32_virtio_blk_file_operations() {
 
     match fs_driver_manager.create_from_block("fat32", block_device_arc, 512) {
         Ok(fs) => {
-            early_println!("[Test] Successfully created FAT32 filesystem from virtio-blk device");
+            println!("[Test] Successfully created FAT32 filesystem from virtio-blk device");
 
             // Get the root node
             let root_node = fs.root_node();
-            early_println!("[Test] Got root node with ID: {}", root_node.id());
+            println!("[Test] Got root node with ID: {}", root_node.id());
 
             // Test 1: Read root directory
-            early_println!("[Test] Testing root directory listing...");
+            println!("[Test] Testing root directory listing...");
             match fs.readdir(&root_node) {
                 Ok(entries) => {
-                    early_println!("[Test] Root directory contains {} entries", entries.len());
+                    println!("[Test] Root directory contains {} entries", entries.len());
                     for entry in &entries {
-                        early_println!(
+                        println!(
                             "[Test] Found entry: {} (type: {:?})",
-                            entry.name,
-                            entry.file_type
+                            entry.name, entry.file_type
                         );
                     }
 
@@ -620,7 +619,7 @@ fn test_fat32_virtio_blk_file_operations() {
                     assert!(has_hello, "hello.txt should exist in root directory");
                     assert!(has_readme, "readme.txt should exist in root directory");
 
-                    early_println!("[Test] ✓ Root directory listing successful");
+                    println!("[Test] ✓ Root directory listing successful");
                 }
                 Err(e) => {
                     panic!("Failed to read root directory: {:?}", e);
@@ -628,24 +627,23 @@ fn test_fat32_virtio_blk_file_operations() {
             }
 
             // Test 2: Look up and read hello.txt file
-            early_println!("[Test] Testing file lookup and read operation...");
+            println!("[Test] Testing file lookup and read operation...");
             match fs.lookup(&root_node, &String::from("hello.txt")) {
                 Ok(hello_node) => {
-                    early_println!("[Test] Successfully looked up hello.txt node");
+                    println!("[Test] Successfully looked up hello.txt node");
 
                     // Get metadata
                     match hello_node.metadata() {
                         Ok(metadata) => {
-                            early_println!(
+                            println!(
                                 "[Test] hello.txt metadata - size: {}, type: {:?}",
-                                metadata.size,
-                                metadata.file_type
+                                metadata.size, metadata.file_type
                             );
                             assert_eq!(metadata.size, 16, "hello.txt should be 16 bytes");
                             assert_eq!(metadata.file_type, crate::fs::FileType::RegularFile);
                         }
                         Err(e) => {
-                            early_println!("[Test] Warning: Could not get metadata: {:?}", e);
+                            println!("[Test] Warning: Could not get metadata: {:?}", e);
                         }
                     }
 
@@ -656,21 +654,18 @@ fn test_fat32_virtio_blk_file_operations() {
                             let mut buffer = vec![0u8; 32]; // Enough for "Hello, Scarlet!"
                             match file_obj.read(&mut buffer) {
                                 Ok(bytes_read) => {
-                                    early_println!(
-                                        "[Test] Read {} bytes from hello.txt",
-                                        bytes_read
-                                    );
+                                    println!("[Test] Read {} bytes from hello.txt", bytes_read);
 
                                     // Convert to string and verify content
                                     let content = core::str::from_utf8(&buffer[..bytes_read])
                                         .unwrap_or("INVALID_UTF8");
-                                    early_println!("[Test] File content: '{}'", content);
+                                    println!("[Test] File content: '{}'", content);
 
                                     assert_eq!(
                                         content, "Hello, Scarlet!\n",
                                         "File content should match expected text"
                                     );
-                                    early_println!("[Test] ✓ File read operation successful");
+                                    println!("[Test] ✓ File read operation successful");
                                 }
                                 Err(e) => {
                                     panic!("Failed to read from hello.txt: {:?}", e);
@@ -688,10 +683,10 @@ fn test_fat32_virtio_blk_file_operations() {
             }
 
             // Test 3: Look up and read readme.txt file
-            early_println!("[Test] Testing second file lookup and read operation...");
+            println!("[Test] Testing second file lookup and read operation...");
             match fs.lookup(&root_node, &String::from("readme.txt")) {
                 Ok(readme_node) => {
-                    early_println!("[Test] Successfully looked up readme.txt node");
+                    println!("[Test] Successfully looked up readme.txt node");
 
                     // Open and read the file
                     match fs.open(&readme_node, 0) {
@@ -700,24 +695,19 @@ fn test_fat32_virtio_blk_file_operations() {
                             let mut buffer = vec![0u8; 128]; // Enough for longer content
                             match file_obj.read(&mut buffer) {
                                 Ok(bytes_read) => {
-                                    early_println!(
-                                        "[Test] Read {} bytes from readme.txt",
-                                        bytes_read
-                                    );
+                                    println!("[Test] Read {} bytes from readme.txt", bytes_read);
 
                                     // Convert to string and verify content
                                     let content = core::str::from_utf8(&buffer[..bytes_read])
                                         .unwrap_or("INVALID_UTF8");
-                                    early_println!("[Test] File content: '{}'", content);
+                                    println!("[Test] File content: '{}'", content);
 
                                     let expected = "This is a test file for FAT32 filesystem implementation.\n";
                                     assert_eq!(
                                         content, expected,
                                         "readme.txt content should match expected text"
                                     );
-                                    early_println!(
-                                        "[Test] ✓ Second file read operation successful"
-                                    );
+                                    println!("[Test] ✓ Second file read operation successful");
                                 }
                                 Err(e) => {
                                     panic!("Failed to read from readme.txt: {:?}", e);
@@ -735,27 +725,26 @@ fn test_fat32_virtio_blk_file_operations() {
             }
 
             // Test 4: Test directory operations
-            early_println!("[Test] Testing directory operations...");
+            println!("[Test] Testing directory operations...");
             match fs.lookup(&root_node, &String::from("test_files")) {
                 Ok(dir_node) => {
-                    early_println!("[Test] Successfully looked up test_files directory");
+                    println!("[Test] Successfully looked up test_files directory");
                     match fs.readdir(&dir_node) {
                         Ok(entries) => {
-                            early_println!(
+                            println!(
                                 "[Test] test_files directory contains {} entries",
                                 entries.len()
                             );
                             for entry in &entries {
-                                early_println!(
+                                println!(
                                     "[Test] Found in test_files: {} (type: {:?})",
-                                    entry.name,
-                                    entry.file_type
+                                    entry.name, entry.file_type
                                 );
                             }
-                            early_println!("[Test] ✓ Directory read operation successful");
+                            println!("[Test] ✓ Directory read operation successful");
                         }
                         Err(e) => {
-                            early_println!(
+                            println!(
                                 "[Test] Warning: Could not read test_files directory: {:?}",
                                 e
                             );
@@ -763,14 +752,14 @@ fn test_fat32_virtio_blk_file_operations() {
                     }
                 }
                 Err(e) => {
-                    early_println!(
+                    println!(
                         "[Test] Warning: Could not lookup test_files directory: {:?}",
                         e
                     );
                 }
             }
 
-            early_println!("[Test] All FAT32 file operations completed successfully!");
+            println!("[Test] All FAT32 file operations completed successfully!");
         }
         Err(e) => {
             panic!(
@@ -780,13 +769,13 @@ fn test_fat32_virtio_blk_file_operations() {
         }
     }
 
-    early_println!("[Test] FAT32 virtio-blk file operations test completed successfully");
+    println!("[Test] FAT32 virtio-blk file operations test completed successfully");
 }
 
 #[test_case]
 #[cfg(target_arch = "riscv64")]
 fn test_fat32_virtio_blk_write_operations() {
-    early_println!("[Test] Starting FAT32 virtio-blk write operations test...");
+    println!("[Test] Starting FAT32 virtio-blk write operations test...");
 
     // Create a virtio-blk device for testing
     let base_addr = map_fat32_blk();
@@ -799,15 +788,15 @@ fn test_fat32_virtio_blk_write_operations() {
     // Create a FAT32 filesystem instance using the virtio-blk device
     match fs_driver_manager.create_from_block("fat32", Arc::new(virtio_dev), 512) {
         Ok(fs) => {
-            early_println!("[Test] Successfully created FAT32 filesystem from virtio-blk device");
+            println!("[Test] Successfully created FAT32 filesystem from virtio-blk device");
 
             // Get the root node
             let root_node = fs.root_node();
-            early_println!("[Test] Got root node for write operations");
+            println!("[Test] Got root node for write operations");
 
             // Test 1: Try to create a new file in the root directory
             // Note: With LFN support, long filenames are now properly supported
-            early_println!("[Test] Testing file creation...");
+            println!("[Test] Testing file creation...");
             let new_filename = String::from("test_write.txt");
             match fs.create(
                 &root_node,
@@ -816,7 +805,7 @@ fn test_fat32_virtio_blk_write_operations() {
                 0o644,
             ) {
                 Ok(new_file_node) => {
-                    early_println!("[Test] Successfully created new file: {}", new_filename);
+                    println!("[Test] Successfully created new file: {}", new_filename);
 
                     // Test 2: Write data to the new file
                     match fs.open(&new_file_node, 0x01) {
@@ -825,10 +814,9 @@ fn test_fat32_virtio_blk_write_operations() {
                             let test_data = b"Hello, this is a test write to FAT32 filesystem!";
                             match file_obj.write(test_data) {
                                 Ok(bytes_written) => {
-                                    early_println!(
+                                    println!(
                                         "[Test] Successfully wrote {} bytes to {}",
-                                        bytes_written,
-                                        new_filename
+                                        bytes_written, new_filename
                                     );
                                     assert_eq!(
                                         bytes_written,
@@ -839,7 +827,7 @@ fn test_fat32_virtio_blk_write_operations() {
                                     // Sync the file to ensure data is written to disk
                                     file_obj.sync().expect("File sync should succeed");
 
-                                    early_println!("[Test] ✓ File write operation successful");
+                                    println!("[Test] ✓ File write operation successful");
                                 }
                                 Err(e) => {
                                     panic!("File write failed: {:?}", e);
@@ -857,7 +845,7 @@ fn test_fat32_virtio_blk_write_operations() {
             }
 
             // Test 3: Try to modify an existing file
-            early_println!("[Test] Testing file modification...");
+            println!("[Test] Testing file modification...");
             match fs.lookup(&root_node, &String::from("hello.txt")) {
                 Ok(hello_node) => {
                     match fs.open(&hello_node, 0x01) {
@@ -866,12 +854,12 @@ fn test_fat32_virtio_blk_write_operations() {
                             let append_data = b"\nAppended text for testing!";
                             // First seek to the end of the file (if seek is implemented)
                             if let Ok(_) = file_obj.seek(crate::fs::SeekFrom::End(0)) {
-                                early_println!("[Test] Positioned at end of file for append");
+                                println!("[Test] Positioned at end of file for append");
                             }
 
                             match file_obj.write(append_data) {
                                 Ok(bytes_written) => {
-                                    early_println!(
+                                    println!(
                                         "[Test] Successfully appended {} bytes to hello.txt",
                                         bytes_written
                                     );
@@ -879,9 +867,7 @@ fn test_fat32_virtio_blk_write_operations() {
                                     // Sync the file
                                     file_obj.sync().expect("File sync should succeed");
 
-                                    early_println!(
-                                        "[Test] ✓ File modification operation successful"
-                                    );
+                                    println!("[Test] ✓ File modification operation successful");
                                 }
                                 Err(e) => {
                                     panic!("File append failed: {:?}", e);
@@ -900,10 +886,10 @@ fn test_fat32_virtio_blk_write_operations() {
 
             // Test 4: Verify written data by reading it back
             // Note: With LFN support, we can now use the original long filename
-            early_println!("[Test] Testing read-back of written data...");
+            println!("[Test] Testing read-back of written data...");
             match fs.lookup(&root_node, &String::from("test_write.txt")) {
                 Ok(test_file_node) => {
-                    early_println!("[Test] Successfully found written file: test_write.txt");
+                    println!("[Test] Successfully found written file: test_write.txt");
 
                     match fs.open(&test_file_node, 0) {
                         // 0 = read-only
@@ -911,13 +897,13 @@ fn test_fat32_virtio_blk_write_operations() {
                             let mut buffer = vec![0u8; 64];
                             match file_obj.read(&mut buffer) {
                                 Ok(bytes_read) => {
-                                    early_println!(
+                                    println!(
                                         "[Test] Read {} bytes from test_write.txt",
                                         bytes_read
                                     );
                                     let content = core::str::from_utf8(&buffer[..bytes_read])
                                         .unwrap_or("INVALID_UTF8");
-                                    early_println!("[Test] Read content: '{}'", content);
+                                    println!("[Test] Read content: '{}'", content);
 
                                     // Verify the content matches what we wrote
                                     let expected =
@@ -926,7 +912,7 @@ fn test_fat32_virtio_blk_write_operations() {
                                         content, expected,
                                         "File content should match what was written"
                                     );
-                                    early_println!("[Test] ✓ Read-back verification successful");
+                                    println!("[Test] ✓ Read-back verification successful");
                                 }
                                 Err(e) => {
                                     panic!("Failed to read from test_write.txt: {:?}", e);
@@ -947,7 +933,7 @@ fn test_fat32_virtio_blk_write_operations() {
             }
 
             // Test 5: Create nested directory structure
-            early_println!("[Test] Testing comprehensive write operations...");
+            println!("[Test] Testing comprehensive write operations...");
 
             // Define variables for the entire test scope
             let top_dir = "test_dir";
@@ -962,7 +948,7 @@ fn test_fat32_virtio_blk_write_operations() {
                 0o755,
             ) {
                 Ok(top_dir_node) => {
-                    early_println!("[Test] ✓ Created top-level directory: {}", top_dir);
+                    println!("[Test] ✓ Created top-level directory: {}", top_dir);
 
                     // Create subdirectory inside the top-level directory
                     match fs.create(
@@ -972,11 +958,7 @@ fn test_fat32_virtio_blk_write_operations() {
                         0o755,
                     ) {
                         Ok(sub_dir_node) => {
-                            early_println!(
-                                "[Test] ✓ Created subdirectory: {}/{}",
-                                top_dir,
-                                sub_dir
-                            );
+                            println!("[Test] ✓ Created subdirectory: {}/{}", top_dir, sub_dir);
 
                             // Create a file in the subdirectory
                             match fs.create(
@@ -986,11 +968,9 @@ fn test_fat32_virtio_blk_write_operations() {
                                 0o644,
                             ) {
                                 Ok(nested_file_node) => {
-                                    early_println!(
+                                    println!(
                                         "[Test] ✓ Created file in nested directory: {}/{}/{}",
-                                        top_dir,
-                                        sub_dir,
-                                        file_in_nested_dir
+                                        top_dir, sub_dir, file_in_nested_dir
                                     );
 
                                     // Write data to the file in nested directory
@@ -999,7 +979,7 @@ fn test_fat32_virtio_blk_write_operations() {
                                             let nested_content = b"File in nested directory!";
                                             match nested_file_obj.write(nested_content) {
                                                 Ok(_bytes_written) => {
-                                                    early_println!(
+                                                    println!(
                                                         "[Test] ✓ Written data to file in nested directory"
                                                     );
                                                 }
@@ -1034,46 +1014,42 @@ fn test_fat32_virtio_blk_write_operations() {
                 }
             }
 
-            early_println!("[Test] ✓ Comprehensive write operations completed");
+            println!("[Test] ✓ Comprehensive write operations completed");
 
             // Test 6: Read back and verify nested directory and file
-            early_println!("[Test] Verifying nested directory and file...");
+            println!("[Test] Verifying nested directory and file...");
             match fs.lookup(&root_node, &String::from(top_dir)) {
                 Ok(top_dir_node) => {
                     match fs.readdir(&top_dir_node) {
                         Ok(entries) => {
-                            early_println!(
+                            println!(
                                 "[Test] Top-level directory contains {} entries",
                                 entries.len()
                             );
                             for entry in &entries {
-                                early_println!(
+                                println!(
                                     "[Test] Found in top dir: {} (type: {:?})",
-                                    entry.name,
-                                    entry.file_type
+                                    entry.name, entry.file_type
                                 );
                             }
-                            early_println!("[Test] ✓ Top-level directory listing successful");
+                            println!("[Test] ✓ Top-level directory listing successful");
 
                             // Now look for the subdirectory
                             match fs.lookup(&top_dir_node, &String::from(sub_dir)) {
                                 Ok(sub_dir_node) => {
                                     match fs.readdir(&sub_dir_node) {
                                         Ok(sub_entries) => {
-                                            early_println!(
+                                            println!(
                                                 "[Test] Subdirectory contains {} entries",
                                                 sub_entries.len()
                                             );
                                             for entry in &sub_entries {
-                                                early_println!(
+                                                println!(
                                                     "[Test] Found in subdir: {} (type: {:?})",
-                                                    entry.name,
-                                                    entry.file_type
+                                                    entry.name, entry.file_type
                                                 );
                                             }
-                                            early_println!(
-                                                "[Test] ✓ Subdirectory listing successful"
-                                            );
+                                            println!("[Test] ✓ Subdirectory listing successful");
                                         }
                                         Err(e) => {
                                             panic!("Failed to read subdirectory: {:?}", e);
@@ -1093,10 +1069,9 @@ fn test_fat32_virtio_blk_write_operations() {
                                                             &buffer[..bytes_read],
                                                         )
                                                         .unwrap_or("INVALID_UTF8");
-                                                        early_println!(
+                                                        println!(
                                                             "[Test] ✓ Verified file in nested directory: '{}' ({} bytes)",
-                                                            content,
-                                                            bytes_read
+                                                            content, bytes_read
                                                         );
                                                     }
                                                     Err(e) => {
@@ -1137,7 +1112,7 @@ fn test_fat32_virtio_blk_write_operations() {
                 }
             }
 
-            early_println!("[Test] ✓ All comprehensive disk operations completed successfully!");
+            println!("[Test] ✓ All comprehensive disk operations completed successfully!");
         }
         Err(e) => {
             panic!(
@@ -1147,12 +1122,12 @@ fn test_fat32_virtio_blk_write_operations() {
         }
     }
 
-    early_println!("[Test] Comprehensive FAT32 disk operations test completed");
+    println!("[Test] Comprehensive FAT32 disk operations test completed");
 }
 
 #[test_case]
 fn test_fat32_duplicate_file_creation() {
-    early_println!("[Test] Testing duplicate file creation handling...");
+    println!("[Test] Testing duplicate file creation handling...");
 
     // Create a mock device with proper FAT32 structure
     let mock_device = create_test_fat32_device();
@@ -1170,7 +1145,7 @@ fn test_fat32_duplicate_file_creation() {
         0o644,
     ) {
         Ok(_file_node) => {
-            early_println!("[Test] Successfully created first file: {}", filename);
+            println!("[Test] Successfully created first file: {}", filename);
 
             // Try to create the same file again - should fail
             match fat32_fs.create(
@@ -1183,9 +1158,9 @@ fn test_fat32_duplicate_file_creation() {
                     panic!("Expected error when creating duplicate file, but succeeded");
                 }
                 Err(e) => {
-                    early_println!("[Test] Got expected error for duplicate file: {:?}", e);
+                    println!("[Test] Got expected error for duplicate file: {:?}", e);
                     assert_eq!(e.kind, crate::fs::FileSystemErrorKind::AlreadyExists);
-                    early_println!("[Test] ✓ Duplicate file creation correctly rejected");
+                    println!("[Test] ✓ Duplicate file creation correctly rejected");
                 }
             }
         }
@@ -1194,12 +1169,12 @@ fn test_fat32_duplicate_file_creation() {
         }
     }
 
-    early_println!("[Test] Duplicate file creation test completed successfully");
+    println!("[Test] Duplicate file creation test completed successfully");
 }
 
 #[test_case]
 fn test_fat32_file_deletion() {
-    early_println!("[Test] Testing file deletion operations...");
+    println!("[Test] Testing file deletion operations...");
 
     // Create a mock device with proper FAT32 structure
     let mock_device = create_test_fat32_device();
@@ -1219,7 +1194,7 @@ fn test_fat32_file_deletion() {
         )
         .expect("Failed to create file for deletion test");
 
-    early_println!("[Test] Created file for deletion: {}", filename);
+    println!("[Test] Created file for deletion: {}", filename);
 
     // Write some content to the file
     match fat32_fs.open(&file_node, 0x01) {
@@ -1228,7 +1203,7 @@ fn test_fat32_file_deletion() {
             let test_data = b"This file will be deleted";
             file_obj.write(test_data).expect("Failed to write to file");
             file_obj.sync().expect("Failed to sync file");
-            early_println!("[Test] Wrote {} bytes to file", test_data.len());
+            println!("[Test] Wrote {} bytes to file", test_data.len());
         }
         Err(e) => {
             panic!("Failed to open file for writing: {:?}", e);
@@ -1238,7 +1213,7 @@ fn test_fat32_file_deletion() {
     // Verify file exists by looking it up
     match fat32_fs.lookup(&root_node, &filename) {
         Ok(_) => {
-            early_println!("[Test] File exists before deletion");
+            println!("[Test] File exists before deletion");
         }
         Err(e) => {
             panic!("File should exist before deletion: {:?}", e);
@@ -1248,7 +1223,7 @@ fn test_fat32_file_deletion() {
     // Delete the file
     match fat32_fs.remove(&root_node, &filename) {
         Ok(()) => {
-            early_println!("[Test] Successfully deleted file: {}", filename);
+            println!("[Test] Successfully deleted file: {}", filename);
         }
         Err(e) => {
             panic!("Failed to delete file: {:?}", e);
@@ -1261,18 +1236,18 @@ fn test_fat32_file_deletion() {
             panic!("File should not exist after deletion");
         }
         Err(e) => {
-            early_println!("[Test] Got expected error after deletion: {:?}", e);
+            println!("[Test] Got expected error after deletion: {:?}", e);
             assert_eq!(e.kind, crate::fs::FileSystemErrorKind::NotFound);
-            early_println!("[Test] ✓ File correctly removed from filesystem");
+            println!("[Test] ✓ File correctly removed from filesystem");
         }
     }
 
-    early_println!("[Test] File deletion test completed successfully");
+    println!("[Test] File deletion test completed successfully");
 }
 
 #[test_case]
 fn test_fat32_delete_and_recreate() {
-    early_println!("[Test] Testing delete and recreate cycle...");
+    println!("[Test] Testing delete and recreate cycle...");
 
     // Create a mock device with proper FAT32 structure
     let mock_device = create_test_fat32_device();
@@ -1284,7 +1259,7 @@ fn test_fat32_delete_and_recreate() {
 
     // Create -> Delete -> Recreate cycle
     for cycle in 1..=3 {
-        early_println!("[Test] Cycle {}: Creating file", cycle);
+        println!("[Test] Cycle {}: Creating file", cycle);
 
         // Create file
         let file_node = fat32_fs
@@ -1304,7 +1279,7 @@ fn test_fat32_delete_and_recreate() {
                     .write(test_data.as_bytes())
                     .expect("Failed to write");
                 file_obj.sync().expect("Failed to sync");
-                early_println!("[Test] Cycle {}: Wrote content", cycle);
+                println!("[Test] Cycle {}: Wrote content", cycle);
             }
             Err(e) => {
                 panic!("Cycle {}: Failed to open file for writing: {:?}", cycle, e);
@@ -1321,7 +1296,7 @@ fn test_fat32_delete_and_recreate() {
                             let content = core::str::from_utf8(&buffer[..bytes_read]).unwrap();
                             let expected = format!("Content from cycle {}", cycle);
                             assert_eq!(content, expected);
-                            early_println!("[Test] Cycle {}: Verified content", cycle);
+                            println!("[Test] Cycle {}: Verified content", cycle);
                         }
                         Err(e) => panic!("Cycle {}: Failed to read: {:?}", cycle, e),
                     }
@@ -1336,22 +1311,22 @@ fn test_fat32_delete_and_recreate() {
             fat32_fs
                 .remove(&root_node, &filename)
                 .expect(&format!("Failed to delete file in cycle {}", cycle));
-            early_println!("[Test] Cycle {}: Deleted file", cycle);
+            println!("[Test] Cycle {}: Deleted file", cycle);
 
             // Verify it's gone
             match fat32_fs.lookup(&root_node, &filename) {
                 Ok(_) => panic!("Cycle {}: File should not exist after deletion", cycle),
-                Err(_) => early_println!("[Test] Cycle {}: Confirmed file deleted", cycle),
+                Err(_) => println!("[Test] Cycle {}: Confirmed file deleted", cycle),
             }
         }
     }
 
-    early_println!("[Test] Delete and recreate cycle test completed successfully");
+    println!("[Test] Delete and recreate cycle test completed successfully");
 }
 
 #[test_case]
 fn test_fat32_delete_nonexistent_file() {
-    early_println!("[Test] Testing deletion of non-existent file...");
+    println!("[Test] Testing deletion of non-existent file...");
 
     // Create a mock device with proper FAT32 structure
     let mock_device = create_test_fat32_device();
@@ -1367,18 +1342,18 @@ fn test_fat32_delete_nonexistent_file() {
             panic!("Expected error when deleting non-existent file, but succeeded");
         }
         Err(e) => {
-            early_println!("[Test] Got expected error for non-existent file: {:?}", e);
+            println!("[Test] Got expected error for non-existent file: {:?}", e);
             assert_eq!(e.kind, crate::fs::FileSystemErrorKind::NotFound);
-            early_println!("[Test] ✓ Non-existent file deletion correctly rejected");
+            println!("[Test] ✓ Non-existent file deletion correctly rejected");
         }
     }
 
-    early_println!("[Test] Non-existent file deletion test completed successfully");
+    println!("[Test] Non-existent file deletion test completed successfully");
 }
 
 #[test_case]
 fn test_fat32_directory_deletion() {
-    early_println!("[Test] Testing directory deletion operations...");
+    println!("[Test] Testing directory deletion operations...");
 
     // Create a mock device with proper FAT32 structure
     let mock_device = create_test_fat32_device();
@@ -1393,13 +1368,13 @@ fn test_fat32_directory_deletion() {
         .create(&root_node, &dirname, crate::fs::FileType::Directory, 0o755)
         .expect("Failed to create directory");
 
-    early_println!("[Test] Created directory: {}", dirname);
+    println!("[Test] Created directory: {}", dirname);
 
     // Verify directory exists
     match fat32_fs.lookup(&root_node, &dirname) {
         Ok(lookup_node) => match lookup_node.file_type() {
             Ok(crate::fs::FileType::Directory) => {
-                early_println!("[Test] Directory correctly identified as directory type");
+                println!("[Test] Directory correctly identified as directory type");
             }
             Ok(other_type) => {
                 panic!("Expected directory, got {:?}", other_type);
@@ -1416,7 +1391,7 @@ fn test_fat32_directory_deletion() {
     // Delete the directory
     match fat32_fs.remove(&root_node, &dirname) {
         Ok(()) => {
-            early_println!("[Test] Successfully deleted directory: {}", dirname);
+            println!("[Test] Successfully deleted directory: {}", dirname);
         }
         Err(e) => {
             panic!("Failed to delete directory: {:?}", e);
@@ -1429,21 +1404,21 @@ fn test_fat32_directory_deletion() {
             panic!("Directory should not exist after deletion");
         }
         Err(e) => {
-            early_println!(
+            println!(
                 "[Test] Got expected error after directory deletion: {:?}",
                 e
             );
             assert_eq!(e.kind, crate::fs::FileSystemErrorKind::NotFound);
-            early_println!("[Test] ✓ Directory correctly removed from filesystem");
+            println!("[Test] ✓ Directory correctly removed from filesystem");
         }
     }
 
-    early_println!("[Test] Directory deletion test completed successfully");
+    println!("[Test] Directory deletion test completed successfully");
 }
 
 #[test_case]
 fn test_fat32_mixed_operations() {
-    early_println!("[Test] Testing mixed file and directory operations...");
+    println!("[Test] Testing mixed file and directory operations...");
 
     // Create a mock device with proper FAT32 structure
     let mock_device = create_test_fat32_device();
@@ -1466,7 +1441,7 @@ fn test_fat32_mixed_operations() {
                 0o644,
             )
             .expect(&format!("Failed to create {}", filename));
-        early_println!("[Test] Created file: {}", filename);
+        println!("[Test] Created file: {}", filename);
     }
 
     // Create directories
@@ -1479,13 +1454,13 @@ fn test_fat32_mixed_operations() {
                 0o755,
             )
             .expect(&format!("Failed to create directory {}", dirname));
-        early_println!("[Test] Created directory: {}", dirname);
+        println!("[Test] Created directory: {}", dirname);
     }
 
     // Verify all exist via readdir
     match fat32_fs.readdir(&root_node) {
         Ok(entries) => {
-            early_println!("[Test] Root directory contains {} entries", entries.len());
+            println!("[Test] Root directory contains {} entries", entries.len());
 
             // Check that all our files and directories are present
             for filename in &files {
@@ -1502,7 +1477,7 @@ fn test_fat32_mixed_operations() {
                 );
             }
 
-            early_println!("[Test] ✓ All created files and directories found in listing");
+            println!("[Test] ✓ All created files and directories found in listing");
         }
         Err(e) => {
             panic!("Failed to read root directory: {:?}", e);
@@ -1515,19 +1490,19 @@ fn test_fat32_mixed_operations() {
         fat32_fs
             .remove(&root_node, &String::from(*filename))
             .expect(&format!("Failed to delete {}", filename));
-        early_println!("[Test] Deleted file: {}", filename);
+        println!("[Test] Deleted file: {}", filename);
     }
 
     // Delete one directory
     fat32_fs
         .remove(&root_node, &String::from(dirs[0]))
         .expect(&format!("Failed to delete directory {}", dirs[0]));
-    early_println!("[Test] Deleted directory: {}", dirs[0]);
+    println!("[Test] Deleted directory: {}", dirs[0]);
 
     // Verify deletions via readdir
     match fat32_fs.readdir(&root_node) {
         Ok(entries) => {
-            early_println!(
+            println!(
                 "[Test] After deletions, root directory contains {} entries",
                 entries.len()
             );
@@ -1548,19 +1523,19 @@ fn test_fat32_mixed_operations() {
             let found = entries.iter().any(|e| e.name == dirs[1]);
             assert!(found, "Remaining directory {} should still exist", dirs[1]);
 
-            early_println!("[Test] ✓ Directory listing correctly reflects deletions");
+            println!("[Test] ✓ Directory listing correctly reflects deletions");
         }
         Err(e) => {
             panic!("Failed to read root directory after deletions: {:?}", e);
         }
     }
 
-    early_println!("[Test] Mixed operations test completed successfully");
+    println!("[Test] Mixed operations test completed successfully");
 }
 
 #[test_case]
 fn test_sfn_duplicate_handling() {
-    early_println!("[Test] Starting SFN duplicate handling test");
+    println!("[Test] Starting SFN duplicate handling test");
 
     let mock_device = create_test_fat32_device();
     let fat32_fs =
@@ -1569,7 +1544,7 @@ fn test_sfn_duplicate_handling() {
     let root_node = fat32_fs.root_node();
 
     // Test case 1: Create files with long names that should generate similar SFNs
-    early_println!("[Test] Testing SFN collision handling with long filenames");
+    println!("[Test] Testing SFN collision handling with long filenames");
 
     let long_filenames = vec![
         "verylongfilename.txt",  // Should become VERYLO~1.TXT
@@ -1579,7 +1554,7 @@ fn test_sfn_duplicate_handling() {
     ];
 
     for (i, filename) in long_filenames.iter().enumerate() {
-        early_println!("[Test] Creating file {}: {}", i + 1, filename);
+        println!("[Test] Creating file {}: {}", i + 1, filename);
 
         let file_node = fat32_fs
             .create(
@@ -1597,7 +1572,7 @@ fn test_sfn_duplicate_handling() {
             Ok(file_obj) => match file_obj.write(content.as_bytes()) {
                 Ok(_) => {
                     file_obj.sync().expect("Failed to sync file");
-                    early_println!("[Test] ✓ Created file: {}", filename);
+                    println!("[Test] ✓ Created file: {}", filename);
                 }
                 Err(e) => {
                     panic!("Failed to write to file {}: {:?}", filename, e);
@@ -1610,7 +1585,7 @@ fn test_sfn_duplicate_handling() {
     }
 
     // Verify all files were created and are accessible
-    early_println!("[Test] Verifying all long filename files");
+    println!("[Test] Verifying all long filename files");
     let entries = fat32_fs
         .readdir(&root_node)
         .expect("Failed to list directory");
@@ -1629,7 +1604,7 @@ fn test_sfn_duplicate_handling() {
                         match file_obj.read(&mut buffer) {
                             Ok(bytes_read) => {
                                 assert!(bytes_read > 0, "File {} should have content", filename);
-                                early_println!("[Test] ✓ Successfully read file: {}", filename);
+                                println!("[Test] ✓ Successfully read file: {}", filename);
                             }
                             Err(e) => {
                                 panic!("Failed to read content of file {}: {:?}", filename, e);
@@ -1647,13 +1622,13 @@ fn test_sfn_duplicate_handling() {
         }
     }
 
-    early_println!(
+    println!(
         "[Test] ✓ All {} long filename files verified",
         long_filenames.len()
     );
 
     // Test case 2: Create files with different extensions but same base name
-    early_println!("[Test] Testing extension variation handling");
+    println!("[Test] Testing extension variation handling");
 
     let extension_variants = vec![
         "testfile.txt",
@@ -1664,7 +1639,7 @@ fn test_sfn_duplicate_handling() {
     ];
 
     for filename in &extension_variants {
-        early_println!("[Test] Creating extension variant: {}", filename);
+        println!("[Test] Creating extension variant: {}", filename);
 
         let file_node = fat32_fs
             .create(
@@ -1682,7 +1657,7 @@ fn test_sfn_duplicate_handling() {
             Ok(file_obj) => match file_obj.write(content.as_bytes()) {
                 Ok(_) => {
                     file_obj.sync().expect("Failed to sync file");
-                    early_println!("[Test] ✓ Created extension variant: {}", filename);
+                    println!("[Test] ✓ Created extension variant: {}", filename);
                 }
                 Err(e) => {
                     panic!("Failed to write to extension variant {}: {:?}", filename, e);
@@ -1698,7 +1673,7 @@ fn test_sfn_duplicate_handling() {
     }
 
     // Test case 3: Create files with case variations that should generate different SFNs
-    early_println!("[Test] Testing case variation handling");
+    println!("[Test] Testing case variation handling");
 
     let case_variants = vec![
         "CaseTest.TXT",
@@ -1709,7 +1684,7 @@ fn test_sfn_duplicate_handling() {
 
     // These should all conflict with each other because FAT32 SFN is case-insensitive
     for (i, filename) in case_variants.iter().enumerate() {
-        early_println!("[Test] Creating case variant {}: {}", i + 1, filename);
+        println!("[Test] Creating case variant {}: {}", i + 1, filename);
 
         let file_node = fat32_fs
             .create(
@@ -1727,7 +1702,7 @@ fn test_sfn_duplicate_handling() {
             Ok(file_obj) => match file_obj.write(content.as_bytes()) {
                 Ok(_) => {
                     file_obj.sync().expect("Failed to sync file");
-                    early_println!("[Test] ✓ Created case variant: {}", filename);
+                    println!("[Test] ✓ Created case variant: {}", filename);
                 }
                 Err(e) => {
                     panic!("Failed to write to case variant {}: {:?}", filename, e);
@@ -1743,7 +1718,7 @@ fn test_sfn_duplicate_handling() {
     }
 
     // Test case 4: Create files with special characters that should be converted
-    early_println!("[Test] Testing special character name handling");
+    println!("[Test] Testing special character name handling");
 
     let special_char_names = vec![
         "file with spaces.txt",      // Should convert spaces
@@ -1754,7 +1729,7 @@ fn test_sfn_duplicate_handling() {
     ];
 
     for filename in &special_char_names {
-        early_println!("[Test] Creating special char file: {}", filename);
+        println!("[Test] Creating special char file: {}", filename);
         let content = format!("Content for special char file: {}", filename);
 
         let file_node = fat32_fs
@@ -1771,7 +1746,7 @@ fn test_sfn_duplicate_handling() {
             Ok(file_obj) => match file_obj.write(content.as_bytes()) {
                 Ok(_) => {
                     file_obj.sync().expect("Failed to sync file");
-                    early_println!("[Test] ✓ Created file with special chars: {}", filename);
+                    println!("[Test] ✓ Created file with special chars: {}", filename);
                 }
                 Err(e) => {
                     panic!("Failed to write to file {}: {:?}", filename, e);
@@ -1784,7 +1759,7 @@ fn test_sfn_duplicate_handling() {
     }
 
     // Test case 5: Create many files with similar base names to test numeric suffix generation
-    early_println!("[Test] Testing extensive numeric suffix generation");
+    println!("[Test] Testing extensive numeric suffix generation");
 
     let base_name = "similar_name_test";
     let num_duplicates = 5;
@@ -1807,7 +1782,7 @@ fn test_sfn_duplicate_handling() {
             Ok(file_obj) => match file_obj.write(content.as_bytes()) {
                 Ok(_) => {
                     file_obj.sync().expect("Failed to sync file");
-                    early_println!("[Test] ✓ Created similar name file: {}", filename);
+                    println!("[Test] ✓ Created similar name file: {}", filename);
                 }
                 Err(e) => {
                     panic!("Failed to write to similar name file {}: {:?}", filename, e);
@@ -1823,7 +1798,7 @@ fn test_sfn_duplicate_handling() {
     }
 
     // Verify all files were created and can be read back
-    early_println!("[Test] Verifying all created files");
+    println!("[Test] Verifying all created files");
 
     let mut all_test_files = Vec::new();
     all_test_files.extend(long_filenames.iter().map(|s| s.to_string()));
@@ -1854,7 +1829,7 @@ fn test_sfn_duplicate_handling() {
                         match file_obj.read(&mut buffer) {
                             Ok(bytes_read) => {
                                 assert!(bytes_read > 0, "File {} should have content", filename);
-                                early_println!("[Test] ✓ Successfully read file: {}", filename);
+                                println!("[Test] ✓ Successfully read file: {}", filename);
                             }
                             Err(e) => {
                                 panic!("Failed to read content of file {}: {:?}", filename, e);
@@ -1872,17 +1847,17 @@ fn test_sfn_duplicate_handling() {
         }
     }
 
-    early_println!(
+    println!(
         "[Test] ✓ All {} files verified successfully",
         all_test_files.len()
     );
 
-    early_println!("[Test] SFN duplicate handling test completed successfully");
+    println!("[Test] SFN duplicate handling test completed successfully");
 }
 
 #[test_case]
 fn test_sfn_generation_edge_cases() {
-    early_println!("[Test] Starting SFN generation edge cases test");
+    println!("[Test] Starting SFN generation edge cases test");
 
     let mock_device = create_test_fat32_device();
     let fat32_fs =
@@ -1909,10 +1884,10 @@ fn test_sfn_generation_edge_cases() {
         ("file(paren).txt", "Parentheses"),
     ];
 
-    early_println!("[Test] Creating files with edge case names");
+    println!("[Test] Creating files with edge case names");
 
     for (filename, description) in &edge_case_names {
-        early_println!("[Test] Testing: {} ({})", filename, description);
+        println!("[Test] Testing: {} ({})", filename, description);
 
         let file_node = fat32_fs
             .create(
@@ -1932,7 +1907,7 @@ fn test_sfn_generation_edge_cases() {
             Ok(file_obj) => match file_obj.write(content.as_bytes()) {
                 Ok(_) => {
                     file_obj.sync().expect("Failed to sync file");
-                    early_println!("[Test] ✓ Successfully created: {}", filename);
+                    println!("[Test] ✓ Successfully created: {}", filename);
                 }
                 Err(e) => {
                     panic!("Failed to write to edge case file {}: {:?}", filename, e);
@@ -1974,10 +1949,7 @@ fn test_sfn_generation_edge_cases() {
                                     "Edge case file {} should have content",
                                     filename
                                 );
-                                early_println!(
-                                    "[Test] ✓ Successfully read edge case file: {}",
-                                    filename
-                                );
+                                println!("[Test] ✓ Successfully read edge case file: {}", filename);
                             }
                             Err(e) => {
                                 panic!("Failed to read edge case file {}: {:?}", filename, e);
@@ -1998,17 +1970,17 @@ fn test_sfn_generation_edge_cases() {
         }
     }
 
-    early_println!(
+    println!(
         "[Test] ✓ All {} edge case files verified",
         edge_case_names.len()
     );
 
-    early_println!("[Test] SFN generation edge cases test completed successfully");
+    println!("[Test] SFN generation edge cases test completed successfully");
 }
 
 #[test_case]
 fn test_true_sfn_collision() {
-    early_println!("[Test] Starting true SFN collision test");
+    println!("[Test] Starting true SFN collision test");
 
     let mock_device = create_test_fat32_device();
     let fat32_fs =
@@ -2017,7 +1989,7 @@ fn test_true_sfn_collision() {
     let root_node = fat32_fs.root_node();
 
     // Test files that should generate the exact same SFN base and require numeric suffixes
-    early_println!("[Test] Testing true SFN collision with identical base names");
+    println!("[Test] Testing true SFN collision with identical base names");
 
     let collision_filenames = vec![
         "verylongfilename.txt",    // Should become VERYLO~1.TXT
@@ -2027,7 +1999,7 @@ fn test_true_sfn_collision() {
     ];
 
     for (i, filename) in collision_filenames.iter().enumerate() {
-        early_println!("[Test] Creating collision file {}: {}", i + 1, filename);
+        println!("[Test] Creating collision file {}: {}", i + 1, filename);
 
         let file_node = fat32_fs
             .create(
@@ -2039,17 +2011,17 @@ fn test_true_sfn_collision() {
             .expect(&format!("Failed to create collision file {}", filename));
 
         let content = format!("Content for collision file {}: {}", i + 1, filename);
-        early_println!("[Test] Writing content to {}: '{}'", filename, content);
+        println!("[Test] Writing content to {}: '{}'", filename, content);
 
         match fat32_fs.open(&file_node, 0x01) {
             // Write mode
             Ok(file_obj) => {
-                early_println!("[Test] Successfully opened {} for writing", filename);
+                println!("[Test] Successfully opened {} for writing", filename);
                 match file_obj.write(content.as_bytes()) {
                     Ok(bytes_written) => {
-                        early_println!("[Test] Wrote {} bytes to {}", bytes_written, filename);
+                        println!("[Test] Wrote {} bytes to {}", bytes_written, filename);
                         file_obj.sync().expect("Failed to sync file");
-                        early_println!("[Test] ✓ Created collision file: {}", filename);
+                        println!("[Test] ✓ Created collision file: {}", filename);
                     }
                     Err(e) => {
                         panic!("Failed to write to collision file {}: {:?}", filename, e);
@@ -2066,7 +2038,7 @@ fn test_true_sfn_collision() {
     }
 
     // Verify all collision files were created and are accessible
-    early_println!("[Test] Verifying all collision files");
+    println!("[Test] Verifying all collision files");
     let entries = fat32_fs
         .readdir(&root_node)
         .expect("Failed to list directory");
@@ -2080,41 +2052,34 @@ fn test_true_sfn_collision() {
         );
 
         // Try to access the file to ensure it's properly created with unique SFN
-        early_println!("[Test] Verifying collision file: {}", filename);
+        println!("[Test] Verifying collision file: {}", filename);
         match fat32_fs.lookup(&root_node, &filename.to_string()) {
             Ok(file_node) => {
-                early_println!("[Test] Successfully looked up file: {}", filename);
+                println!("[Test] Successfully looked up file: {}", filename);
                 match fat32_fs.open(&file_node, 0x00) {
                     // Read mode
                     Ok(file_obj) => {
-                        early_println!("[Test] Successfully opened file for reading: {}", filename);
+                        println!("[Test] Successfully opened file for reading: {}", filename);
                         let mut buffer = alloc::vec![0u8; 1024];
                         match file_obj.read(&mut buffer) {
                             Ok(bytes_read) => {
-                                early_println!(
+                                println!(
                                     "[Test] Read {} bytes from file: {}",
-                                    bytes_read,
-                                    filename
+                                    bytes_read, filename
                                 );
                                 if bytes_read > 0 {
                                     let content = core::str::from_utf8(&buffer[..bytes_read])
                                         .unwrap_or("<invalid utf8>");
-                                    early_println!("[Test] File content: '{}'", content);
+                                    println!("[Test] File content: '{}'", content);
                                 } else {
-                                    early_println!(
-                                        "[Test] ERROR: File {} has no content!",
-                                        filename
-                                    );
+                                    println!("[Test] ERROR: File {} has no content!", filename);
                                 }
                                 assert!(
                                     bytes_read > 0,
                                     "Collision file {} should have content",
                                     filename
                                 );
-                                early_println!(
-                                    "[Test] ✓ Successfully read collision file: {}",
-                                    filename
-                                );
+                                println!("[Test] ✓ Successfully read collision file: {}", filename);
                             }
                             Err(e) => {
                                 panic!(
@@ -2138,13 +2103,13 @@ fn test_true_sfn_collision() {
         }
     }
 
-    early_println!(
+    println!(
         "[Test] ✓ All {} collision files verified",
         collision_filenames.len()
     );
 
     // Test creating many files with the same 8.3 pattern to force high numeric suffixes
-    early_println!("[Test] Testing high numeric suffix generation");
+    println!("[Test] Testing high numeric suffix generation");
 
     let base_pattern = "samename";
     let num_files = 10;
@@ -2167,7 +2132,7 @@ fn test_true_sfn_collision() {
             Ok(file_obj) => match file_obj.write(content.as_bytes()) {
                 Ok(_) => {
                     file_obj.sync().expect("Failed to sync file");
-                    early_println!("[Test] ✓ Created suffix test file: {}", filename);
+                    println!("[Test] ✓ Created suffix test file: {}", filename);
                 }
                 Err(e) => {
                     panic!("Failed to write to suffix test file {}: {:?}", filename, e);
@@ -2226,14 +2191,14 @@ fn test_true_sfn_collision() {
         }
     }
 
-    early_println!("[Test] ✓ All {} suffix test files verified", num_files);
+    println!("[Test] ✓ All {} suffix test files verified", num_files);
 
-    early_println!("[Test] True SFN collision test completed successfully");
+    println!("[Test] True SFN collision test completed successfully");
 }
 
 #[test_case]
 fn test_sfn_explicit_collision_handling() {
-    early_println!("[Test] Starting explicit SFN collision handling test");
+    println!("[Test] Starting explicit SFN collision handling test");
 
     let mock_device = create_test_fat32_device();
     let fat32_fs =
@@ -2242,7 +2207,7 @@ fn test_sfn_explicit_collision_handling() {
     let root_node = fat32_fs.root_node();
 
     // Test explicit SFN collisions with predictable patterns
-    early_println!("[Test] Testing explicit SFN collisions");
+    println!("[Test] Testing explicit SFN collisions");
 
     // These should all generate the same base SFN "LONGFI~X.TXT"
     let collision_files = vec![
@@ -2254,7 +2219,7 @@ fn test_sfn_explicit_collision_handling() {
     ];
 
     for (i, filename) in collision_files.iter().enumerate() {
-        early_println!("[Test] Creating collision file {}: {}", i + 1, filename);
+        println!("[Test] Creating collision file {}: {}", i + 1, filename);
 
         let file_node = fat32_fs
             .create(
@@ -2272,7 +2237,7 @@ fn test_sfn_explicit_collision_handling() {
             Ok(file_obj) => match file_obj.write(content.as_bytes()) {
                 Ok(_) => {
                     file_obj.sync().expect("Failed to sync file");
-                    early_println!("[Test] ✓ Created collision file: {}", filename);
+                    println!("[Test] ✓ Created collision file: {}", filename);
                 }
                 Err(e) => {
                     panic!("Failed to write to collision file {}: {:?}", filename, e);
@@ -2288,7 +2253,7 @@ fn test_sfn_explicit_collision_handling() {
     }
 
     // Verify all collision files exist and are readable
-    early_println!("[Test] Verifying all collision files");
+    println!("[Test] Verifying all collision files");
     let entries = fat32_fs
         .readdir(&root_node)
         .expect("Failed to list directory");
@@ -2320,7 +2285,7 @@ fn test_sfn_explicit_collision_handling() {
                                     content.contains(filename),
                                     "Content should contain filename"
                                 );
-                                early_println!(
+                                println!(
                                     "[Test] ✓ Successfully verified collision file: {}",
                                     filename
                                 );
@@ -2344,20 +2309,20 @@ fn test_sfn_explicit_collision_handling() {
         }
     }
 
-    early_println!(
+    println!(
         "[Test] ✓ All {} collision files verified",
         collision_files.len()
     );
 
     // Test case 2: Test maximum numeric suffix handling
-    early_println!("[Test] Testing maximum numeric suffix handling");
+    println!("[Test] Testing maximum numeric suffix handling");
 
     let base_pattern = "samename";
     let max_duplicates = 10;
 
     for i in 1..=max_duplicates {
         let filename = format!("{}{}.txt", base_pattern, i);
-        early_println!("[Test] Creating duplicate {}: {}", i, filename);
+        println!("[Test] Creating duplicate {}: {}", i, filename);
 
         let file_node = fat32_fs
             .create(
@@ -2375,7 +2340,7 @@ fn test_sfn_explicit_collision_handling() {
             Ok(file_obj) => match file_obj.write(content.as_bytes()) {
                 Ok(_) => {
                     file_obj.sync().expect("Failed to sync file");
-                    early_println!("[Test] ✓ Created duplicate: {}", filename);
+                    println!("[Test] ✓ Created duplicate: {}", filename);
                 }
                 Err(e) => {
                     panic!("Failed to write to duplicate {}: {:?}", filename, e);
@@ -2398,14 +2363,14 @@ fn test_sfn_explicit_collision_handling() {
         assert!(found, "Duplicate file {} should exist", filename);
     }
 
-    early_println!("[Test] ✓ All {} duplicate files verified", max_duplicates);
+    println!("[Test] ✓ All {} duplicate files verified", max_duplicates);
 
-    early_println!("[Test] Explicit SFN collision handling test completed successfully");
+    println!("[Test] Explicit SFN collision handling test completed successfully");
 }
 
 #[test_case]
 fn test_fat32_case_insensitive_behavior() {
-    early_println!("[Test] Starting FAT32 case insensitive behavior test");
+    println!("[Test] Starting FAT32 case insensitive behavior test");
 
     let mock_device = create_test_fat32_device();
     let fat32_fs =
@@ -2414,7 +2379,7 @@ fn test_fat32_case_insensitive_behavior() {
     let root_node = fat32_fs.root_node();
 
     // Test 1: Create a file with lowercase name
-    early_println!("[Test] Creating file with lowercase name: testfile.txt");
+    println!("[Test] Creating file with lowercase name: testfile.txt");
     let file_node = fat32_fs
         .create(
             &root_node,
@@ -2432,13 +2397,13 @@ fn test_fat32_case_insensitive_behavior() {
                 .write(content.as_bytes())
                 .expect("Failed to write content");
             file_obj.sync().expect("Failed to sync file");
-            early_println!("[Test] ✓ Created and wrote to testfile.txt");
+            println!("[Test] ✓ Created and wrote to testfile.txt");
         }
         Err(e) => panic!("Failed to open testfile.txt for writing: {:?}", e),
     }
 
     // Test 2: Try to create the same file with different case - should fail
-    early_println!("[Test] Attempting to create TESTFILE.TXT (should fail)");
+    println!("[Test] Attempting to create TESTFILE.TXT (should fail)");
     match fat32_fs.create(
         &root_node,
         &"TESTFILE.TXT".to_string(),
@@ -2447,7 +2412,7 @@ fn test_fat32_case_insensitive_behavior() {
     ) {
         Ok(_) => panic!("Should not be able to create TESTFILE.TXT - case insensitive duplicate"),
         Err(e) => {
-            early_println!(
+            println!(
                 "[Test] ✓ Correctly rejected case insensitive duplicate: {:?}",
                 e
             );
@@ -2459,10 +2424,10 @@ fn test_fat32_case_insensitive_behavior() {
     }
 
     // Test 3: Try to lookup with different case - should succeed
-    early_println!("[Test] Looking up TestFile.TXT (different case)");
+    println!("[Test] Looking up TestFile.TXT (different case)");
     match fat32_fs.lookup(&root_node, &"TestFile.TXT".to_string()) {
         Ok(found_node) => {
-            early_println!("[Test] ✓ Successfully looked up file with different case");
+            println!("[Test] ✓ Successfully looked up file with different case");
 
             // Read content to verify it's the same file
             match fat32_fs.open(&found_node, 0x00) {
@@ -2473,9 +2438,9 @@ fn test_fat32_case_insensitive_behavior() {
                         Ok(bytes_read) => {
                             let content = core::str::from_utf8(&buffer[..bytes_read])
                                 .unwrap_or("INVALID_UTF8");
-                            early_println!("[Test] File content: '{}'", content);
+                            println!("[Test] File content: '{}'", content);
                             assert_eq!(content, content, "Content should match original");
-                            early_println!("[Test] ✓ Content matches: '{}'", content);
+                            println!("[Test] ✓ Content matches: '{}'", content);
                         }
                         Err(e) => panic!("Failed to read from case-different lookup: {:?}", e),
                     }
@@ -2487,7 +2452,7 @@ fn test_fat32_case_insensitive_behavior() {
     }
 
     // Test 4: Test mixed case scenarios
-    early_println!("[Test] Testing various case combinations");
+    println!("[Test] Testing various case combinations");
     let test_cases = vec![
         "testfile.txt",
         "TESTFILE.TXT",
@@ -2498,7 +2463,7 @@ fn test_fat32_case_insensitive_behavior() {
 
     for test_case in test_cases {
         match fat32_fs.lookup(&root_node, &test_case.to_string()) {
-            Ok(_) => early_println!("[Test] ✓ Successfully found '{}'", test_case),
+            Ok(_) => println!("[Test] ✓ Successfully found '{}'", test_case),
             Err(_) => panic!(
                 "Should be able to find file with case variation: '{}'",
                 test_case
@@ -2506,15 +2471,15 @@ fn test_fat32_case_insensitive_behavior() {
         }
     }
 
-    early_println!("[Test] ✓ All case insensitive lookups successful");
-    early_println!("[Test] FAT32 case insensitive behavior test completed successfully");
+    println!("[Test] ✓ All case insensitive lookups successful");
+    println!("[Test] FAT32 case insensitive behavior test completed successfully");
 }
 
 // ========== FAT32 Rename Tests ==========
 
 #[test_case]
 fn test_fat32_rename_file_same_dir() {
-    early_println!("[Test] Testing FAT32 rename file within same directory...");
+    println!("[Test] Testing FAT32 rename file within same directory...");
 
     let mock_device = create_test_fat32_device();
     let fat32_fs =
@@ -2545,12 +2510,12 @@ fn test_fat32_rename_file_same_dir() {
         .lookup(&root_node, &dst_name)
         .expect("[Test] Destination file not found after rename");
 
-    early_println!("[Test] ✓ FAT32 rename file same dir passed");
+    println!("[Test] ✓ FAT32 rename file same dir passed");
 }
 
 #[test_case]
 fn test_fat32_rename_file_cross_dir() {
-    early_println!("[Test] Testing FAT32 rename file across directories...");
+    println!("[Test] Testing FAT32 rename file across directories...");
 
     let mock_device = create_test_fat32_device();
     let fat32_fs =
@@ -2598,12 +2563,12 @@ fn test_fat32_rename_file_cross_dir() {
         .lookup(&dst_dir, &file_name)
         .expect("[Test] File not found in destination dir after move");
 
-    early_println!("[Test] ✓ FAT32 rename file cross dir passed");
+    println!("[Test] ✓ FAT32 rename file cross dir passed");
 }
 
 #[test_case]
 fn test_fat32_rename_same_path() {
-    early_println!("[Test] Testing FAT32 rename with same source and destination...");
+    println!("[Test] Testing FAT32 rename with same source and destination...");
 
     let mock_device = create_test_fat32_device();
     let fat32_fs =
@@ -2624,12 +2589,12 @@ fn test_fat32_rename_same_path() {
         .lookup(&root_node, &name)
         .expect("[Test] File should still exist after same-path rename");
 
-    early_println!("[Test] ✓ FAT32 rename same path passed");
+    println!("[Test] ✓ FAT32 rename same path passed");
 }
 
 #[test_case]
 fn test_fat32_rename_replace_existing_file() {
-    early_println!("[Test] Testing FAT32 rename replacing an existing destination file...");
+    println!("[Test] Testing FAT32 rename replacing an existing destination file...");
 
     let mock_device = create_test_fat32_device();
     let fat32_fs =
@@ -2668,12 +2633,12 @@ fn test_fat32_rename_replace_existing_file() {
         .lookup(&root_node, &dst_name)
         .expect("[Test] Destination file not found after rename");
 
-    early_println!("[Test] ✓ FAT32 rename replace existing file passed");
+    println!("[Test] ✓ FAT32 rename replace existing file passed");
 }
 
 #[test_case]
 fn test_fat32_rename_missing_source() {
-    early_println!("[Test] Testing FAT32 rename of non-existent source...");
+    println!("[Test] Testing FAT32 rename of non-existent source...");
 
     let mock_device = create_test_fat32_device();
     let fat32_fs =
@@ -2692,5 +2657,5 @@ fn test_fat32_rename_missing_source() {
         "[Test] Rename of missing source should fail"
     );
 
-    early_println!("[Test] ✓ FAT32 rename missing source passed");
+    println!("[Test] ✓ FAT32 rename missing source passed");
 }

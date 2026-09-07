@@ -445,7 +445,7 @@ pub fn drop_cpu(cpu_id: usize, phase: u64, aux: u64) {
 ///
 /// Formats the whole dump into a stack buffer and emits it through
 /// `earlyfb::write_raw`, which holds `EARLY_CONSOLE` across the entire string.
-/// This avoids the per-byte locking of `early_println!` that would interleave
+/// This avoids the per-byte locking of `println!` that would interleave
 /// the dump with concurrent heartbeat output from other CPUs. No allocation,
 /// so it is safe from the timer-FIQ context.
 pub fn dump_all() {

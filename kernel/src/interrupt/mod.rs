@@ -386,7 +386,7 @@ impl InterruptManager {
     }
 
     pub fn init_controllers(&self) {
-        crate::early_println!("[interrupt] init: external controller...");
+        crate::println!("[interrupt] init: external controller...");
 
         let enabled_external_interrupts: Vec<_> = self
             .irq_descs
@@ -409,14 +409,14 @@ impl InterruptManager {
         {
             Ok(()) => {}
             Err(e) => {
-                crate::early_println!("Failed to initialize external controller: {}", e);
+                crate::println!("Failed to initialize external controller: {}", e);
             }
         }
         if let Some(controller) = controllers.external_controller() {
             let reenable_count = enabled_external_interrupts.len();
             for pending in enabled_external_interrupts {
                 if let Err(e) = controller.enable_interrupt(pending.mapping.hwirq, pending.cpu_id) {
-                    crate::early_println!(
+                    crate::println!(
                         "[interrupt] failed to re-enable IRQ {} for CPU {} after controller init: {}",
                         pending.mapping.virq,
                         pending.cpu_id,
@@ -424,40 +424,40 @@ impl InterruptManager {
                     );
                 }
             }
-            crate::early_println!(
+            crate::println!(
                 "[interrupt] re-enabled {} external IRQs after controller init",
                 reenable_count
             );
         }
 
-        crate::early_println!("[interrupt] init: external controller done");
+        crate::println!("[interrupt] init: external controller done");
     }
 
     pub fn init_controllers_for_cpu(&self, cpu_id: CpuId) {
-        crate::early_println!("[interrupt] CPU {}: per-CPU controller init begin", cpu_id);
+        crate::println!("[interrupt] CPU {}: per-CPU controller init begin", cpu_id);
         disable_interrupts();
-        crate::early_println!("[interrupt] CPU {}: interrupts disabled", cpu_id);
+        crate::println!("[interrupt] CPU {}: interrupts disabled", cpu_id);
 
         let mut controllers = self.controllers().write();
-        crate::early_println!("[interrupt] CPU {}: controller registry locked", cpu_id);
+        crate::println!("[interrupt] CPU {}: controller registry locked", cpu_id);
 
         if let Some(controller) = controllers.timer_controller_mut_for_cpu(cpu_id) {
-            crate::early_println!("[interrupt] CPU {}: timer controller init begin", cpu_id);
+            crate::println!("[interrupt] CPU {}: timer controller init begin", cpu_id);
             if let Err(e) = controller.init(
                 cpu_id,
                 controllers::InterruptControllerInitMode::ColdBootReset,
             ) {
-                crate::early_println!(
+                crate::println!(
                     "[interrupt] AP {}: failed to init timer controller: {}",
                     cpu_id,
                     e
                 );
             }
-            crate::early_println!("[interrupt] CPU {}: timer controller init done", cpu_id);
+            crate::println!("[interrupt] CPU {}: timer controller init done", cpu_id);
         }
 
         if let Some(controller) = controllers.software_interrupt_controller_mut_for_cpu(cpu_id) {
-            crate::early_println!(
+            crate::println!(
                 "[interrupt] CPU {}: software interrupt controller init begin",
                 cpu_id
             );
@@ -465,20 +465,20 @@ impl InterruptManager {
                 cpu_id,
                 controllers::InterruptControllerInitMode::ColdBootReset,
             ) {
-                crate::early_println!(
+                crate::println!(
                     "[interrupt] AP {}: failed to init software interrupt controller: {}",
                     cpu_id,
                     e
                 );
             }
-            crate::early_println!(
+            crate::println!(
                 "[interrupt] CPU {}: software interrupt controller init done",
                 cpu_id
             );
         }
 
         if let Some(controller) = controllers.external_controller_mut() {
-            crate::early_println!(
+            crate::println!(
                 "[interrupt] CPU {}: external controller per-CPU init begin",
                 cpu_id
             );
@@ -486,18 +486,18 @@ impl InterruptManager {
                 cpu_id,
                 controllers::InterruptControllerInitMode::ColdBootReset,
             ) {
-                crate::early_println!(
+                crate::println!(
                     "[interrupt] AP {}: failed to init external controller: {}",
                     cpu_id,
                     e
                 );
             }
-            crate::early_println!(
+            crate::println!(
                 "[interrupt] CPU {}: external controller per-CPU init done",
                 cpu_id
             );
         }
-        crate::early_println!("[interrupt] CPU {}: per-CPU controller init done", cpu_id);
+        crate::println!("[interrupt] CPU {}: per-CPU controller init done", cpu_id);
     }
 
     pub fn resolve_platform_irq(
@@ -759,7 +759,7 @@ impl InterruptManager {
             } else {
                 let count = self.record_unhandled_external_interrupt(interrupt_id);
                 if count == 1 || count.is_power_of_two() {
-                    crate::early_println!(
+                    crate::println!(
                         "[interrupt] IRQ {} was not claimed by any registered source (count={})",
                         interrupt_id,
                         count
@@ -804,7 +804,7 @@ impl InterruptManager {
                 } else {
                     let count = self.record_unhandled_external_interrupt(interrupt_id);
                     if count == 1 || count.is_power_of_two() {
-                        crate::early_println!(
+                        crate::println!(
                             "[interrupt] IRQ {} was not claimed by its registered handler (count={})",
                             interrupt_id,
                             count

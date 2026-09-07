@@ -15,7 +15,7 @@ use crate::environment::{PAGE_SIZE, STACK_SIZE};
 use crate::mem::{KERNEL_STACK, init_bss};
 use crate::vm::addr::{init_bootloader_direct_map_bound, init_limine_addressing, phys_to_virt};
 use crate::vm::vmem::{MemoryArea, MemoryAttribute};
-use crate::{BootInfo, DeviceSource, early_println, start_ap, start_kernel, wait_for_ap_release};
+use crate::{BootInfo, DeviceSource, println, start_ap, start_kernel, wait_for_ap_release};
 
 static mut EARLY_BOOTINFO: MaybeUninit<BootInfo> = MaybeUninit::uninit();
 
@@ -307,13 +307,13 @@ fn bootstrap_aps() {
     let mp_resp = match MP_REQUEST.response() {
         Some(resp) => resp,
         None => {
-            early_println!("[aarch64] No Limine MP response, single-CPU mode");
+            println!("[aarch64] No Limine MP response, single-CPU mode");
             return;
         }
     };
 
     let bsp_mpidr = mp_resp.bsp_mpidr;
-    early_println!(
+    println!(
         "[aarch64] BSP mpidr={:#x}, {} CPU(s) detected by Limine",
         bsp_mpidr,
         mp_resp.cpus().len()
@@ -323,10 +323,9 @@ fn bootstrap_aps() {
         if mpidr_affinity(cpu.mpidr) == mpidr_affinity(bsp_mpidr) {
             continue;
         }
-        early_println!(
+        println!(
             "[aarch64] Bootstrapping CPU {} mpidr={:#x}...",
-            cpu_id,
-            cpu.mpidr
+            cpu_id, cpu.mpidr
         );
         cpu.bootstrap(limine_ap_entry, cpu_id as u64);
     }
@@ -378,7 +377,7 @@ fn register_cpu_topology_from_fdt() {
 
         match crate::sched::scheduler::register_cpu_topology(cpu_id, core_class, scheduler_capacity)
         {
-            Ok(()) => early_println!(
+            Ok(()) => println!(
                 "[aarch64] CPU topology: cpu={} class={:?} capacity={}",
                 cpu_id,
                 core_class,
@@ -386,20 +385,18 @@ fn register_cpu_topology_from_fdt() {
                     .map(|topology| topology.capacity)
                     .unwrap_or(0)
             ),
-            Err(err) => early_println!(
+            Err(err) => println!(
                 "[aarch64] Failed to register CPU topology for cpu={}: {}",
-                cpu_id,
-                err
+                cpu_id, err
             ),
         }
 
         if let Some(domain) = cpu_performance_domain_id(&cpu) {
             if let Err(err) = crate::sched::scheduler::register_cpu_topology_domain(cpu_id, domain)
             {
-                early_println!(
+                println!(
                     "[aarch64] Failed to register CPU topology domain for cpu={}: {}",
-                    cpu_id,
-                    err
+                    cpu_id, err
                 );
             }
             crate::device::cpufreq::register_cpu_performance_domain(cpu_id, domain);
@@ -614,10 +611,9 @@ extern "C" fn limine_entry_after_el_drop(_arg0: usize, inherited_sctlr: u64) -> 
     crate::arch::aarch64::early_console_init();
 
     if let Some((old_hcr, new_hcr)) = hcr_transition {
-        early_println!(
+        println!(
             "[aarch64] BSP: HCR_EL2 VHE host control {:#x} -> {:#x}",
-            old_hcr,
-            new_hcr
+            old_hcr, new_hcr
         );
     }
     // log_el1_memory_state("handoff", _arg0, inherited_sctlr);
@@ -701,9 +697,9 @@ extern "C" fn limine_entry_after_el_drop(_arg0: usize, inherited_sctlr: u64) -> 
         el >> 2
     };
     if vhe {
-        early_println!("Current EL: EL{} (VHE enabled)", current_el);
+        println!("Current EL: EL{} (VHE enabled)", current_el);
     } else {
-        early_println!("Current EL: EL{}", current_el);
+        println!("Current EL: EL{}", current_el);
     }
 
     unsafe {
@@ -876,7 +872,7 @@ fn log_el1_memory_state(stage: &str, cpu_id: usize, inherited_sctlr: u64) {
             options(nomem, nostack, preserves_flags),
         );
     }
-    early_println!(
+    println!(
         "[aarch64] CPU {} {} memory state: EL={} inherited_SCTLR={:#x} SCTLR={:#x} M={} C={} I={} TCR={:#x} MAIR={:#x}",
         cpu_id,
         stage,
@@ -905,15 +901,14 @@ fn diagnose_limine_mair_compatibility() {
 
     let attr_index_zero = mair & 0xff;
     if attr_index_zero == LIMINE_MAIR_ATTR_INDEX_NORMAL_WRITE_BACK {
-        early_println!(
+        println!(
             "[aarch64] Limine MAIR AttrIndx0={:#x} Normal WB; Scarlet preserves it during TTBR handoff",
             attr_index_zero,
         );
     } else {
-        early_println!(
+        println!(
             "[aarch64] WARNING: Limine MAIR AttrIndx0={:#x}, expected Normal WB {:#x}; Scarlet will preserve AttrIndx0 as Normal WB before replacing TTBRs",
-            attr_index_zero,
-            LIMINE_MAIR_ATTR_INDEX_NORMAL_WRITE_BACK,
+            attr_index_zero, LIMINE_MAIR_ATTR_INDEX_NORMAL_WRITE_BACK,
         );
     }
 }

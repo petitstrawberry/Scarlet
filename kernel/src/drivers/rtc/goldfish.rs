@@ -36,7 +36,7 @@ fn goldfish_rtc_probe(device_info: &PlatformDeviceInfo) -> Result<(), &'static s
     let paddr = memory_resource.start;
     let size = memory_resource.end - memory_resource.start + 1;
     let base = crate::vm::ioremap(paddr, size).inspect_err(|e| {
-        crate::early_println!(
+        crate::println!(
             "goldfish-rtc: ioremap({:#x}, {:#x}) failed: {}",
             paddr,
             size,
@@ -53,10 +53,10 @@ fn goldfish_rtc_probe(device_info: &PlatformDeviceInfo) -> Result<(), &'static s
 
     crate::time::initialize_wall_clock_from_rtc_sample(rtc_epoch_ns, mono_before, mono_after)
         .inspect_err(|e| {
-            crate::early_println!("goldfish-rtc: failed to seed wall clock: {}", e);
+            crate::println!("goldfish-rtc: failed to seed wall clock: {}", e);
         })?;
 
-    crate::early_println!("goldfish-rtc: seeded wall clock");
+    crate::println!("goldfish-rtc: seeded wall clock");
 
     Ok(())
 }

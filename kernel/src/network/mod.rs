@@ -66,10 +66,10 @@ pub use socket::{
 };
 
 use crate::device::network::{DevicePacket, MacAddress};
-use crate::early_println;
 use crate::network::arp::ArpCacheEntry;
 use crate::network::ipv4::Ipv4Address;
 use crate::object::KernelObject;
+use crate::println;
 
 const LOG_IPV4_PACKET_TRACE: bool = false;
 
@@ -545,7 +545,7 @@ impl NetworkManager {
         }
 
         let eth_type = u16::from_be_bytes([packet.data[12], packet.data[13]]);
-        // early_println!(
+        // println!(
         //     "[net] recv frame len={} eth_type=0x{:04X}",
         //     packet.len,
         //     eth_type
@@ -585,7 +585,7 @@ impl NetworkManager {
         };
 
         if LOG_IPV4_PACKET_TRACE {
-            early_println!(
+            println!(
                 "[IPv4] Recv frame: ip_len={} src={}.{}.{}.{} dst={}.{}.{}.{} proto={}",
                 ip_bytes.len(),
                 header.source_ip[0],

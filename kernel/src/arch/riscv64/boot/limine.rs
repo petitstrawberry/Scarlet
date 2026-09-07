@@ -10,7 +10,7 @@ use crate::device::fdt::{FdtManager, init_fdt, relocate_fdt};
 use crate::environment::STACK_SIZE;
 use crate::mem::{KERNEL_STACK, init_bss};
 use crate::vm::addr::{init_bootloader_direct_map_bound, init_limine_addressing, phys_to_virt};
-use crate::{BootInfo, DeviceSource, early_println, start_ap, start_kernel, wait_for_ap_release};
+use crate::{BootInfo, DeviceSource, println, start_ap, start_kernel, wait_for_ap_release};
 use limine::paging;
 use limine::request::{BspHartidRequest, PagingModeRequest};
 
@@ -47,13 +47,13 @@ fn bootstrap_aps() {
     let mp_resp = match MP_REQUEST.response() {
         Some(resp) => resp,
         None => {
-            early_println!("[riscv64] No Limine MP response, single-CPU mode");
+            println!("[riscv64] No Limine MP response, single-CPU mode");
             return;
         }
     };
 
     let bsp_hartid = mp_resp.bsp_hartid;
-    early_println!(
+    println!(
         "[riscv64] BSP hart={}, {} CPU(s) detected by Limine",
         bsp_hartid,
         mp_resp.cpus().len()
@@ -63,7 +63,7 @@ fn bootstrap_aps() {
         if cpu.hartid == bsp_hartid {
             continue;
         }
-        early_println!("[riscv64] Bootstrapping hart {}...", cpu.hartid);
+        println!("[riscv64] Bootstrapping hart {}...", cpu.hartid);
         cpu.bootstrap(limine_ap_entry, cpu.hartid);
     }
 }

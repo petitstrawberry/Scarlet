@@ -223,7 +223,7 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
 
     // Map the CLINT's physical MMIO region into the kernel virtual address space.
     let base_addr = crate::vm::ioremap(paddr, size).map_err(|e| {
-        crate::early_println!(
+        crate::println!(
             "[interrupt] CLINT ioremap({:#x}, {:#x}) failed: {}",
             paddr,
             size,
@@ -256,13 +256,13 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         0..(crate::environment::MAX_NUM_CPUS as CpuId),
     ) {
         Ok(_) => {
-            crate::early_println!(
+            crate::println!(
                 "[interrupt] CLINT registered at base address: {:#x}",
                 base_addr
             );
         }
         Err(e) => {
-            crate::early_println!("[interrupt] Failed to register CLINT: {}", e);
+            crate::println!("[interrupt] Failed to register CLINT: {}", e);
             return Err("Failed to register CLINT");
         }
     }
@@ -273,7 +273,7 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         ) {
         Ok(_) => {}
         Err(e) => {
-            crate::early_println!(
+            crate::println!(
                 "[interrupt] Failed to register CLINT software interrupt: {}",
                 e
             );

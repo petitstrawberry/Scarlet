@@ -2,7 +2,7 @@ use crate::sync::IrqSpinLock;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use crate::early_println;
+use crate::println;
 
 unsafe extern "C" {
     static __SCARLET_KSYMS_START: u8;
@@ -87,7 +87,7 @@ pub fn init_kernel_symbols() {
     let end = unsafe { core::ptr::addr_of!(__SCARLET_KSYMS_END) as usize };
 
     if start == 0 || end == 0 || start >= end {
-        early_println!("[lsm] symbol table: no ksym section found, skipping");
+        println!("[lsm] symbol table: no ksym section found, skipping");
         return;
     }
 
@@ -97,7 +97,7 @@ pub fn init_kernel_symbols() {
     let mut offset = 0usize;
 
     if data.len() < 8 {
-        early_println!("[lsm] symbol table: ksym section too small, skipping");
+        println!("[lsm] symbol table: ksym section too small, skipping");
         return;
     }
 
@@ -141,10 +141,9 @@ pub fn init_kernel_symbols() {
         }
     }
 
-    early_println!(
+    println!(
         "[lsm] symbol table: {} symbol(s) registered ({} errors)",
-        loaded,
-        errors
+        loaded, errors
     );
 }
 

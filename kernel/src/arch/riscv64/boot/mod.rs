@@ -11,9 +11,9 @@ use crate::{
         riscv64::CPUS,
         trap::kernel::{_kernel_trap_entry, arch_kernel_trap_handler},
     },
-    early_println,
     environment::STACK_SIZE,
     mem::KERNEL_STACK,
+    println,
 };
 
 /// Initialize the current RISC-V CPU's per-CPU trap state.
@@ -27,10 +27,9 @@ pub fn init_cpu(cpu_id: usize) {
     let riscv = unsafe { &mut *(&raw mut CPUS[cpu_id]) };
     riscv.hartid = cpu_id as u64;
     trap_init(riscv);
-    early_println!(
+    println!(
         "[riscv64] init_cpu: cpu_id={} cpu struct={:#x} done",
-        cpu_id,
-        riscv as *mut _ as usize
+        cpu_id, riscv as *mut _ as usize
     );
 }
 
@@ -61,23 +60,21 @@ pub(crate) fn trap_init(riscv: &mut Riscv64) {
         );
     }
 
-    early_println!(
+    println!(
         "[riscv64] trap_init: hart={} trap_stack={:#x} scratch={:#x} trap CSRs installed",
-        riscv.hartid,
-        trap_stack,
-        scratch_addr
+        riscv.hartid, trap_stack, scratch_addr
     );
 
     // Enable FPU for user-space and kernel access
     fpu::enable_fpu();
-    early_println!("[riscv64] trap_init: FPU enabled");
+    println!("[riscv64] trap_init: FPU enabled");
 
     // Enable Vector extension for user-space and kernel access
     fpu::enable_vector();
-    early_println!("[riscv64] trap_init: Vector enabled");
+    println!("[riscv64] trap_init: Vector enabled");
 
-    // early_println!("Trap stack area    : {:#x} - {:#x}", trap_stack - stack_size, trap_stack - 1);
-    // early_println!("Trap stack size    : {:#x}", stack_size);
-    // early_println!("Trap stack pointer : {:#x}", trap_stack);
-    // early_println!("Scratch address    : {:#x}", scratch_addr);
+    // println!("Trap stack area    : {:#x} - {:#x}", trap_stack - stack_size, trap_stack - 1);
+    // println!("Trap stack size    : {:#x}", stack_size);
+    // println!("Trap stack pointer : {:#x}", trap_stack);
+    // println!("Scratch address    : {:#x}", scratch_addr);
 }

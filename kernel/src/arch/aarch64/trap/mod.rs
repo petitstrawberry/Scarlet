@@ -5,7 +5,7 @@
 use core::arch::asm;
 
 use crate::arch::Trapframe;
-use crate::early_println;
+use crate::println;
 
 pub mod exception;
 pub mod interrupt;
@@ -28,9 +28,9 @@ pub fn print_traplog(tf: &Trapframe) {
         asm!("mrs {0}, spsr_el1", out(reg) spsr, options(nostack));
     }
 
-    early_println!("[aarch64] trapframe:\n{:#x?}", tf);
-    early_println!("[aarch64] esr_el1: {:#x}", esr);
-    early_println!("[aarch64] far_el1: {:#x}", far);
-    early_println!("[aarch64] elr_el1: {:#x}", elr);
-    early_println!("[aarch64] spsr_el1: {:#x}", spsr);
+    println!("[aarch64] trapframe:\n{:#x?}", tf);
+    println!("[aarch64] esr_el1: {:#x}", esr);
+    println!("[aarch64] far_el1: {:#x}", far);
+    println!("[aarch64] elr_el1: {:#x}", elr);
+    println!("[aarch64] spsr_el1: {:#x}", spsr);
 }

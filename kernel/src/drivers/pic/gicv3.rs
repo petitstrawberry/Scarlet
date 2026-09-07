@@ -308,7 +308,7 @@ impl GicV3 {
             }
             core::hint::spin_loop();
         }
-        crate::early_println!("[interrupt] GICv3 distributor RWP timeout");
+        crate::println!("[interrupt] GICv3 distributor RWP timeout");
         Err(InterruptError::HardwareError)
     }
 
@@ -320,7 +320,7 @@ impl GicV3 {
             }
             core::hint::spin_loop();
         }
-        crate::early_println!("[interrupt] GICv3 CPU {} redistributor RWP timeout", cpu_id);
+        crate::println!("[interrupt] GICv3 CPU {} redistributor RWP timeout", cpu_id);
         Err(InterruptError::HardwareError)
     }
 
@@ -392,7 +392,7 @@ impl GicV3 {
         }
         unsafe { asm!("dsb sy", options(nostack, preserves_flags)) };
 
-        crate::early_println!(
+        crate::println!(
             "[interrupt] GICv3 dist cold-reset: SPIs=32..={} priority={:#04x} route_cpu={}",
             self.max_interrupts,
             GIC_DEFAULT_PRIORITY,
@@ -415,7 +415,7 @@ impl GicV3 {
             core::hint::spin_loop();
         }
         if unsafe { mmio::read32(waker) } & (1 << 2) != 0 {
-            crate::early_println!(
+            crate::println!(
                 "[interrupt] GICv3 CPU {} redistributor wake timeout",
                 cpu_id
             );
@@ -490,7 +490,7 @@ impl GicV3 {
 impl ExternalInterruptController for GicV3 {
     fn init(&mut self, mode: InterruptControllerInitMode) -> InterruptResult<()> {
         debug_assert_eq!(mode, InterruptControllerInitMode::ColdBootReset);
-        crate::early_println!(
+        crate::println!(
             "[interrupt] GICv3 init: dist={:#x} redist={:#x}",
             self.dist_base_addr,
             self.redist_base_addr
@@ -766,7 +766,7 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
 
     // Map distributor and redistributor MMIO regions into the kernel virtual address space.
     let dist_base_addr = crate::vm::ioremap(dist_paddr, dist_size).map_err(|e| {
-        crate::early_println!(
+        crate::println!(
             "[interrupt] GICv3 dist ioremap({:#x}, {:#x}) failed: {}",
             dist_paddr,
             dist_size,
@@ -775,7 +775,7 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         e
     })?;
     let redist_base_addr = crate::vm::ioremap(redist_paddr, redist_size).map_err(|e| {
-        crate::early_println!(
+        crate::println!(
             "[interrupt] GICv3 redist ioremap({:#x}, {:#x}) failed: {}",
             redist_paddr,
             redist_size,
@@ -788,7 +788,7 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
     let max_interrupts = gicd_max_interrupt_id(dist_base_addr);
     let max_cpus = crate::environment::MAX_NUM_CPUS as u32;
 
-    crate::early_println!(
+    crate::println!(
         "[interrupt] GICv3 selected: dist={:#x} redist={:#x} max_intid={} max_cpus={}",
         dist_base_addr,
         redist_base_addr,

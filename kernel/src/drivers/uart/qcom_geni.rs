@@ -477,7 +477,7 @@ fn register_qcom_geni_uart() {
 }
 
 fn qcom_geni_probe(device_info: &PlatformDeviceInfo) -> Result<(), &'static str> {
-    crate::early_println!("Probing Qualcomm GENI UART device: {}", device_info.name());
+    crate::println!("Probing Qualcomm GENI UART device: {}", device_info.name());
 
     let memory_resource = device_info
         .get_resources()
@@ -488,7 +488,7 @@ fn qcom_geni_probe(device_info: &PlatformDeviceInfo) -> Result<(), &'static str>
     let size = memory_resource.end - memory_resource.start + 1;
 
     let base = crate::vm::ioremap(paddr, size).map_err(|e| {
-        crate::early_println!("GENI UART ioremap({:#x}, {:#x}) failed: {}", paddr, size, e);
+        crate::println!("GENI UART ioremap({:#x}, {:#x}) failed: {}", paddr, size, e);
         e
     })?;
 
@@ -508,16 +508,16 @@ fn qcom_geni_probe(device_info: &PlatformDeviceInfo) -> Result<(), &'static str>
         .map_err(|_| "Failed to register GENI UART interrupt")?;
 
         uart.enable_interrupts(interrupt_id)?;
-        crate::early_println!("GENI UART interrupts enabled (ID: {})", interrupt_id);
+        crate::println!("GENI UART interrupts enabled (ID: {})", interrupt_id);
     } else {
-        crate::early_println!("No interrupt resource found for GENI UART, output only");
+        crate::println!("No interrupt resource found for GENI UART, output only");
     }
 
     #[cfg(target_arch = "aarch64")]
     crate::arch::aarch64::earlycon::register_runtime_qcom_geni(base);
 
     let device_id = DeviceManager::get_manager().register_device(uart);
-    crate::early_println!("GENI UART device registered with ID: {}", device_id);
+    crate::println!("GENI UART device registered with ID: {}", device_id);
 
     Ok(())
 }

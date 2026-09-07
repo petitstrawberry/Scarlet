@@ -35,7 +35,7 @@ pub use self::profiler_impl::*;
 
 #[cfg(feature = "profiler")]
 mod profiler_impl {
-    use crate::early_println;
+    use crate::println;
     use crate::sync::IrqSpinLock;
     use crate::sync::Lazy;
     use crate::timer::get_time_ns;
@@ -155,20 +155,15 @@ mod profiler_impl {
     pub fn print_profiling_results() {
         let root = PROFILER_ROOT.lock();
 
-        early_println!("--- Tree-based Profiling Results ---");
-        early_println!(
+        println!("--- Tree-based Profiling Results ---");
+        println!(
             "{:<50} | {:>10} | {:>15} | {:>15} | {:>15} | {:>12}",
-            "Function",
-            "Count",
-            "Total (ms)",
-            "Self (ms)",
-            "Average (μs)",
-            "% of Parent"
+            "Function", "Count", "Total (ms)", "Self (ms)", "Average (μs)", "% of Parent"
         );
-        early_println!("{}", "-".repeat(140));
+        println!("{}", "-".repeat(140));
 
         print_node(&root, 0, root.total_time_ns);
-        early_println!("{}", "-".repeat(25));
+        println!("{}", "-".repeat(25));
     }
 
     fn print_node(node: &ProfileNode, depth: usize, parent_total_time: u64) {
@@ -198,7 +193,7 @@ mod profiler_impl {
         let base_width: usize = 50;
         let available_width = base_width.saturating_sub(indent.len());
 
-        early_println!(
+        println!(
             "{}{:<width$} | {:>10} | {:>15.3} | {:>15.3} | {:>15.3} | {:>11.2}%",
             indent,
             node.name,

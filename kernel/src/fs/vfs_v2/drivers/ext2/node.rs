@@ -716,7 +716,7 @@ impl MemoryMappingOps for Ext2FileObject {
         let range = match self.mmap_ranges.read().get(&vm_start).copied() {
             Some(r) => r,
             None => {
-                crate::early_println!(
+                crate::println!(
                     "[ext2] resolve_fault: no mmap_range for vm_start={:#x} vaddr={:#x}",
                     vm_start,
                     access.vaddr
@@ -725,7 +725,7 @@ impl MemoryMappingOps for Ext2FileObject {
             }
         };
         if access.vaddr < range.vaddr_start || access.vaddr > range.vaddr_end {
-            crate::early_println!(
+            crate::println!(
                 "[ext2] resolve_fault: vaddr={:#x} outside range={:#x}-{:#x}",
                 access.vaddr,
                 range.vaddr_start,

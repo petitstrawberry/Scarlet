@@ -21,10 +21,10 @@ use crate::device::input::event_device::EventDevice;
 use crate::device::manager::DeviceManager;
 use crate::drivers::virtio::device::{DeviceStatus, Register, VirtioDevice};
 use crate::drivers::virtio::queue::{DescriptorFlag, VirtQueue};
-use crate::early_println;
 use crate::environment::PAGE_SIZE;
 use crate::interrupt::InterruptClaim;
 use crate::mem::page::ContiguousPages;
+use crate::println;
 
 /// VirtIO Input event structure (matches Linux virtio_input_event)
 #[repr(C)]
@@ -163,17 +163,16 @@ impl VirtioInputDevice {
         // Determine device type
         let device_type = Self::determine_device_type(&virtio_name);
 
-        early_println!(
+        println!(
             "[virtio-input] Device at {:#x}: \"{}\"",
-            base_addr,
-            virtio_name
+            base_addr, virtio_name
         );
 
         // Create the EventDevice with the device type (it will assign the name)
         let event_device = Arc::new(EventDevice::new(device_type));
         let device_name = event_device.get_name();
 
-        early_println!("[virtio-input] Registered as /dev/{}", device_name);
+        println!("[virtio-input] Registered as /dev/{}", device_name);
 
         let mut device = Self {
             base_addr,
@@ -194,7 +193,7 @@ impl VirtioInputDevice {
         DeviceManager::get_manager()
             .register_device_with_name(device_name.to_string(), event_device);
 
-        early_println!("[virtio-input] Device initialized successfully");
+        println!("[virtio-input] Device initialized successfully");
 
         device
     }
@@ -378,7 +377,7 @@ impl VirtioInputDevice {
             let length = eventq.desc[desc_idx].len;
 
             if length != VirtioInputEvent::size() as u32 {
-                early_println!("[virtio-input] Warning: unexpected event size {}", length);
+                println!("[virtio-input] Warning: unexpected event size {}", length);
                 eventq.free_desc(desc_idx);
                 continue;
             }
@@ -397,7 +396,7 @@ impl VirtioInputDevice {
 
             // Re-add to available ring
             if let Err(e) = eventq.push(desc_idx) {
-                early_println!("[virtio-input] Failed to re-add buffer: {:?}", e);
+                println!("[virtio-input] Failed to re-add buffer: {:?}", e);
                 eventq.free_desc(desc_idx);
             }
         }

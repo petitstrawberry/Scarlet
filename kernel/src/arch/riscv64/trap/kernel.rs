@@ -137,7 +137,7 @@ fn arch_kernel_exception_handler(trapframe: &mut Trapframe, cause: usize) {
         /* Instruction page fault */
         12 => {
             let vaddr = trapframe.epc as usize;
-            crate::early_println!("[kernel trap] inst page fault at {:#x}", vaddr);
+            crate::println!("[kernel trap] inst page fault at {:#x}", vaddr);
             let manager = get_kernel_vm_manager();
             match manager.search_memory_map(vaddr) {
                 Some(mmap) => match manager.get_root_page_table() {

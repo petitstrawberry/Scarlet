@@ -11,10 +11,10 @@ use trap::user::arch_user_trap_handler;
 
 use crate::arch::instruction::Instruction;
 use crate::arch::vm::get_root_pagetable;
-use crate::early_println;
 use crate::environment::MAX_NUM_CPUS;
 use crate::environment::STACK_SIZE;
 use crate::mem::KERNEL_STACK;
+use crate::println;
 use crate::sched::scheduler::get_task_by_id;
 use crate::task::Task;
 
@@ -593,9 +593,7 @@ impl Trapframe {
         let len = instruction.len();
         if len == 0 {
             debug_assert!(len > 0, "Invalid instruction length: {}", len);
-            early_println!(
-                "Warning: Invalid instruction length encountered. Defaulting to 4 bytes."
-            );
+            println!("Warning: Invalid instruction length encountered. Defaulting to 4 bytes.");
             self.epc += 4; // Default to 4 bytes for invalid instruction length
         } else {
             self.epc += len as u64;

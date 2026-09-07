@@ -246,7 +246,7 @@ impl Gic {
             mmio::write32(self.dist_reg_addr(GICD_CTLR), 0x1);
         }
 
-        crate::early_println!(
+        crate::println!(
             "[interrupt] GICv2 dist cold-reset: SPIs=32..={} priority={:#04x} target={:#04x}",
             self.max_interrupts,
             GIC_DEFAULT_PRIORITY,
@@ -565,7 +565,7 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
 
     // Map GIC distributor MMIO region.
     let dist_base_addr = crate::vm::ioremap(dist_paddr, dist_size).map_err(|e| {
-        crate::early_println!(
+        crate::println!(
             "[interrupt] GIC dist ioremap({:#x}, {:#x}) failed: {}",
             dist_paddr,
             dist_size,
@@ -580,7 +580,7 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         let cpu_paddr = cpu_res.start;
         let cpu_size = cpu_res.end - cpu_res.start + 1;
         crate::vm::ioremap(cpu_paddr, cpu_size).map_err(|e| {
-            crate::early_println!(
+            crate::println!(
                 "[interrupt] GIC cpu ioremap({:#x}, {:#x}) failed: {}",
                 cpu_paddr,
                 cpu_size,
@@ -593,7 +593,7 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         let cpu_paddr = dist_paddr + 0x10000;
         let cpu_size = 0x10000;
         crate::vm::ioremap(cpu_paddr, cpu_size).map_err(|e| {
-            crate::early_println!(
+            crate::println!(
                 "[interrupt] GIC cpu fallback ioremap({:#x}, {:#x}) failed: {}",
                 cpu_paddr,
                 cpu_size,

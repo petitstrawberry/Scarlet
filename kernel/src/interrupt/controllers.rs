@@ -607,7 +607,7 @@ impl InterruptControllers {
                 self.cpu_to_timer_controller
                     .insert(cpu_id, controller_index);
             } else {
-                crate::early_println!(
+                crate::println!(
                     "[interrupt] Timer controller already registered for CPU {}, keeping existing mapping",
                     cpu_id
                 );
@@ -656,7 +656,7 @@ impl InterruptControllers {
                 self.cpu_to_software_interrupt_controller
                     .insert(cpu_id, controller_index);
             } else {
-                crate::early_println!(
+                crate::println!(
                     "[interrupt] Software interrupt controller already registered for CPU {}, keeping existing mapping",
                     cpu_id
                 );
@@ -764,16 +764,12 @@ impl InterruptControllers {
         mode: InterruptControllerInitMode,
     ) -> InterruptResult<()> {
         if let Some(controller) = self.external_controller.as_mut() {
-            crate::early_println!(
-                "[interrupt] init_external_controller: calling controller.init()"
-            );
+            crate::println!("[interrupt] init_external_controller: calling controller.init()");
             controller.init(mode)?;
-            crate::early_println!(
-                "[interrupt] init_external_controller: controller.init() returned"
-            );
+            crate::println!("[interrupt] init_external_controller: controller.init() returned");
             Ok(())
         } else {
-            crate::early_println!(
+            crate::println!(
                 "[interrupt] init_external_controller: no external controller registered"
             );
             Err(InterruptError::ControllerNotFound)

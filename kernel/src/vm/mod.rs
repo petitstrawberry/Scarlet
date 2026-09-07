@@ -26,7 +26,6 @@ use crate::arch::get_kernel_trapvector_paddr;
 use crate::arch::set_trapvector;
 use crate::arch::vm::alloc_virtual_address_space;
 use crate::arch::vm::get_root_pagetable;
-use crate::early_println;
 use crate::environment::KERNEL_VM_STACK_SIZE;
 use crate::environment::KERNEL_VM_STACK_START;
 use crate::environment::MAX_NUM_CPUS;
@@ -37,6 +36,7 @@ use crate::environment::{
     KERNEL_HEAP_SIZE, KERNEL_KSTACK_REGION_END, KERNEL_KSTACK_REGION_START,
     KERNEL_KSTACK_SLOT_SIZE, KERNEL_KSTACK_SLOTS, TASK_KERNEL_STACK_SIZE,
 };
+use crate::println;
 use crate::sched::scheduler::current_task;
 use crate::sync::{IrqSpinLock, Once};
 use crate::task::Task;
@@ -150,7 +150,7 @@ pub fn kernel_vm_init(
     let manager = get_kernel_vm_manager();
 
     #[cfg(any(debug_assertions, test))]
-    early_println!("[vm] kernel_vm_init: start");
+    println!("[vm] kernel_vm_init: start");
 
     let asid = alloc_virtual_address_space(); /* Kernel ASID */
     manager.set_asid(asid);
@@ -325,39 +325,37 @@ pub fn kernel_vm_init(
     }
     drop(root_page_table);
 
-    early_println!(
+    println!(
         "Kernel space mapped       : {:#018x} - {:#018x}",
-        kernel_area.start,
-        kernel_area.end
+        kernel_area.start, kernel_area.end
     );
     for index in 0..direct_map_regions.len() {
         let region = direct_map_regions
             .get(index)
             .expect("direct-map region index must be valid");
         let area = region.area();
-        early_println!(
+        println!(
             "HHDM mapped               : {:#018x} - {:#018x} ({:?})",
             SCARLET_HHDM_BASE + area.start,
             SCARLET_HHDM_BASE + area.end,
             region.memory_attribute(),
         );
     }
-    early_println!(
+    println!(
         "Kernel heap mapped        : {:#018x} - {:#018x}",
-        kernel_heap_area.start,
-        kernel_heap_area.end
+        kernel_heap_area.start, kernel_heap_area.end
     );
 
     #[cfg(any(debug_assertions, test))]
-    early_println!("[vm] kernel_vm_init: setup_trampoline_for_kernel...");
+    println!("[vm] kernel_vm_init: setup_trampoline_for_kernel...");
 
     crate::arch::vm::setup_trampoline_for_kernel(get_kernel_vm_manager());
 
     #[cfg(any(debug_assertions, test))]
-    early_println!("[vm] kernel_vm_init: trampoline ok");
+    println!("[vm] kernel_vm_init: trampoline ok");
 
     #[cfg(any(debug_assertions, test))]
-    early_println!("[vm] kernel_vm_init: switch (ttbr0/arch-dependent)...");
+    println!("[vm] kernel_vm_init: switch (ttbr0/arch-dependent)...");
     get_root_pagetable(asid)
         .expect("Kernel root page table is not set")
         .switch();
@@ -368,14 +366,14 @@ pub fn kernel_vm_init(
     // dynamically instead of relying on a static identity mapping.
     ioremap::ioremap_init();
 
-    early_println!(
+    println!(
         "IOREMAP region            : {:#018x} - {:#018x}",
         crate::environment::IOREMAP_START,
         crate::environment::IOREMAP_END,
     );
 
     #[cfg(any(debug_assertions, test))]
-    early_println!("[vm] kernel_vm_init: done");
+    println!("[vm] kernel_vm_init: done");
 
     finalize_runtime_memory_layout();
 }
@@ -706,9 +704,9 @@ pub fn setup_trampoline_for_task_kstack_window(task: &Task) -> Result<(), &'stat
     #[cfg(any(debug_assertions, test))]
     {
         if verify_task_kernel_stack_guard(task) {
-            early_println!("Kernel stack guard OK (slot {})", slot_idx);
+            println!("Kernel stack guard OK (slot {})", slot_idx);
         } else {
-            early_println!(
+            println!(
                 "WARN: Kernel stack guard mapping anomaly (slot {})",
                 slot_idx
             );
@@ -764,7 +762,7 @@ pub fn verify_task_kernel_stack_guard(task: &Task) -> bool {
         .unwrap_or(false);
 
     if !(guard_ok && stack_ok) {
-        early_println!(
+        println!(
             "[verify_kstack_guard] slot {} guard_ok={} stack_ok={} guard_map_start={:?}",
             slot_idx,
             guard_ok,

@@ -318,7 +318,7 @@ fn register_pl011() {
 }
 
 fn pl011_probe(device_info: &PlatformDeviceInfo) -> Result<(), &'static str> {
-    crate::early_println!("Probing PL011 UART device: {}", device_info.name());
+    crate::println!("Probing PL011 UART device: {}", device_info.name());
 
     let memory_resource = device_info
         .get_resources()
@@ -328,14 +328,14 @@ fn pl011_probe(device_info: &PlatformDeviceInfo) -> Result<(), &'static str> {
 
     let paddr = memory_resource.start;
     let size = memory_resource.end - memory_resource.start + 1;
-    crate::early_println!("PL011 paddr: {:#x}, size: {:#x}", paddr, size);
+    crate::println!("PL011 paddr: {:#x}, size: {:#x}", paddr, size);
 
     // Map the PL011's physical MMIO region into the kernel virtual address space.
     let base_addr = crate::vm::ioremap(paddr, size).map_err(|e| {
-        crate::early_println!("PL011 ioremap({:#x}, {:#x}) failed: {}", paddr, size, e);
+        crate::println!("PL011 ioremap({:#x}, {:#x}) failed: {}", paddr, size, e);
         e
     })?;
-    crate::early_println!("PL011 base address (virt): {:#x}", base_addr);
+    crate::println!("PL011 base address (virt): {:#x}", base_addr);
 
     let uart = Arc::new(Pl011Uart::new(base_addr));
 
@@ -355,20 +355,20 @@ fn pl011_probe(device_info: &PlatformDeviceInfo) -> Result<(), &'static str> {
         )
         .map_err(|_| "Failed to register PL011 interrupt")?;
 
-        crate::early_println!("PL011 interrupt ID: {}", uart_interrupt_id);
+        crate::println!("PL011 interrupt ID: {}", uart_interrupt_id);
 
         if let Err(e) = uart.enable_interrupts(uart_interrupt_id) {
-            crate::early_println!("Failed to enable PL011 interrupts: {}", e);
+            crate::println!("Failed to enable PL011 interrupts: {}", e);
         } else {
-            crate::early_println!("PL011 interrupts enabled (ID: {})", uart_interrupt_id);
-            crate::early_println!("PL011 interrupt device registered");
+            crate::println!("PL011 interrupts enabled (ID: {})", uart_interrupt_id);
+            crate::println!("PL011 interrupt device registered");
         }
     } else {
-        crate::early_println!("No interrupt resource found for PL011, using polling mode");
+        crate::println!("No interrupt resource found for PL011, using polling mode");
     }
 
     let device_id = DeviceManager::get_manager().register_device(uart);
-    crate::early_println!("PL011 UART device registered with ID: {}", device_id);
+    crate::println!("PL011 UART device registered with ID: {}", device_id);
 
     Ok(())
 }

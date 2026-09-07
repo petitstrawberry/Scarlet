@@ -207,11 +207,11 @@ fn linux_local_sockaddr_from_user(
             name_len -= 1;
         }
         if name_len == 0 || name_len > 107 {
-            crate::early_println!("[linux socket] invalid abstract socket length {}", name_len);
+            crate::println!("[linux socket] invalid abstract socket length {}", name_len);
             return Err(errno::EINVAL);
         }
         let name = core::str::from_utf8(&path_bytes[1..1 + name_len]).map_err(|_| {
-            crate::early_println!("[linux socket] abstract socket name utf8 error");
+            crate::println!("[linux socket] abstract socket name utf8 error");
             errno::EINVAL
         })?;
         let addr = crate::network::LocalSocketAddress::from_abstract(name)
@@ -230,11 +230,11 @@ fn linux_local_sockaddr_from_user(
             path_len += 1;
         }
         if path_len == 0 || path_len > 108 {
-            crate::early_println!("[linux socket] invalid socket path length {}", path_len);
+            crate::println!("[linux socket] invalid socket path length {}", path_len);
             return Err(errno::EINVAL);
         }
         let path = core::str::from_utf8(&path_bytes[..path_len]).map_err(|_| {
-            crate::early_println!("[linux socket] socket path utf8 error");
+            crate::println!("[linux socket] socket path utf8 error");
             errno::EINVAL
         })?;
         let addr =
@@ -307,7 +307,7 @@ pub fn sys_socket(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         AF_INET => SocketDomain::Inet4,
         AF_INET6 => SocketDomain::Inet6,
         _ => {
-            crate::early_println!("[linux socket] unsupported domain {}", domain);
+            crate::println!("[linux socket] unsupported domain {}", domain);
             return usize::MAX;
         }
     };
@@ -319,7 +319,7 @@ pub fn sys_socket(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         SOCK_RAW => SocketType::Raw,
         SOCK_SEQPACKET => SocketType::SeqPacket,
         _ => {
-            crate::early_println!("[linux socket] unsupported type {}", socket_type);
+            crate::println!("[linux socket] unsupported type {}", socket_type);
             return usize::MAX;
         }
     };
@@ -381,7 +381,7 @@ pub fn sys_socket(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
             match socket {
                 Some(socket) => socket,
                 None => {
-                    crate::early_println!(
+                    crate::println!(
                         "[linux socket] failed to create INET socket protocol={:?}",
                         scarlet_protocol
                     );
@@ -390,7 +390,7 @@ pub fn sys_socket(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
             }
         }
         _ => {
-            crate::early_println!("[linux socket] unsupported domain {:?}", scarlet_domain);
+            crate::println!("[linux socket] unsupported domain {:?}", scarlet_domain);
             return usize::MAX;
         }
     };
@@ -398,7 +398,7 @@ pub fn sys_socket(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         .allocate_socket_id(Arc::clone(&socket_obj))
         .is_err()
     {
-        crate::early_println!("[linux socket] allocate_socket_id failed");
+        crate::println!("[linux socket] allocate_socket_id failed");
     }
 
     if set_nonblock {
@@ -432,7 +432,7 @@ pub fn sys_socket(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
             }
         }
         Err(_) => {
-            crate::early_println!("[linux socket] handle table insert failed");
+            crate::println!("[linux socket] handle table insert failed");
             usize::MAX
         }
     }
@@ -470,7 +470,7 @@ pub fn sys_bind(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let handle_id = match abi.get_handle(sockfd as usize) {
         Some(h) => h,
         None => {
-            crate::early_println!("[linux socket] bind invalid fd {}", sockfd);
+            crate::println!("[linux socket] bind invalid fd {}", sockfd);
             return usize::MAX;
         }
     };
@@ -479,7 +479,7 @@ pub fn sys_bind(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let socket_arc = match task.handle_table.get_arc_clone(handle_id) {
         Some(KernelObject::Socket(socket)) => socket,
         _ => {
-            crate::early_println!("[linux socket] bind fd {} not socket", sockfd);
+            crate::println!("[linux socket] bind fd {} not socket", sockfd);
             return usize::MAX;
         }
     };
@@ -488,7 +488,7 @@ pub fn sys_bind(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let addr_paddr = match task.vm_manager.translate_to_kva(addr_ptr) {
         Some(addr) => addr,
         None => {
-            crate::early_println!("[linux socket] bind bad addr {:x}", addr_ptr);
+            crate::println!("[linux socket] bind bad addr {:x}", addr_ptr);
             return usize::MAX;
         }
     };
@@ -515,7 +515,7 @@ pub fn sys_bind(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                     };
 
                 if socket_arc.bind(&socket_addr).is_err() {
-                    crate::early_println!("[linux socket] bind failed for AF_UNIX");
+                    crate::println!("[linux socket] bind failed for AF_UNIX");
                     return usize::MAX;
                 }
 
@@ -530,7 +530,7 @@ pub fn sys_bind(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                     .register_named_socket(&registry_name, Arc::clone(socket_arc.as_arc()))
                     .is_err()
                 {
-                    crate::early_println!("[linux socket] register_named_socket failed");
+                    crate::println!("[linux socket] register_named_socket failed");
                     return usize::MAX;
                 }
 
@@ -548,7 +548,7 @@ pub fn sys_bind(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                     match NetworkManager::get_manager().get_socket_id(socket_arc.as_arc()) {
                         Some(id) => id,
                         None => {
-                            crate::early_println!("[linux socket] get_socket_id failed {}", path);
+                            crate::println!("[linux socket] get_socket_id failed {}", path);
                             return usize::MAX;
                         }
                     };
@@ -569,7 +569,7 @@ pub fn sys_bind(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 
                 // Attempt to create the socket file - log on failure but don't fail the bind
                 if let Err(e) = vfs.create_file(path, socket_file_type) {
-                    crate::early_println!(
+                    crate::println!(
                         "[sys_bind] Warning: Failed to create VFS socket file at '{}': {:?}",
                         path,
                         e
@@ -587,14 +587,14 @@ pub fn sys_bind(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                 );
 
                 if socket_arc.bind(&socket_addr).is_err() {
-                    crate::early_println!("[linux socket] bind failed for INET address");
+                    crate::println!("[linux socket] bind failed for INET address");
                     return usize::MAX;
                 }
 
                 0
             }
             _ => {
-                crate::early_println!("[linux socket] bind unsupported family {}", sa_family);
+                crate::println!("[linux socket] bind unsupported family {}", sa_family);
                 usize::MAX
             }
         }
@@ -630,7 +630,7 @@ pub fn sys_listen(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let handle_id = match abi.get_handle(sockfd as usize) {
         Some(h) => h,
         None => {
-            crate::early_println!("[linux socket] listen invalid fd {}", sockfd);
+            crate::println!("[linux socket] listen invalid fd {}", sockfd);
             return usize::MAX;
         }
     };
@@ -642,7 +642,7 @@ pub fn sys_listen(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     {
         Some(socket) => socket,
         None => {
-            crate::early_println!("[linux socket] listen fd {} not socket", sockfd);
+            crate::println!("[linux socket] listen fd {} not socket", sockfd);
             return usize::MAX;
         }
     };
@@ -685,7 +685,7 @@ fn accept_with_flags(abi: &mut LinuxAbi, trapframe: &mut Trapframe, flags: i32) 
     let handle_id = match abi.get_handle(sockfd as usize) {
         Some(h) => h,
         None => {
-            crate::early_println!("[linux socket] accept invalid fd {}", sockfd);
+            crate::println!("[linux socket] accept invalid fd {}", sockfd);
             return usize::MAX;
         }
     };
@@ -697,7 +697,7 @@ fn accept_with_flags(abi: &mut LinuxAbi, trapframe: &mut Trapframe, flags: i32) 
     {
         Some(socket) => socket,
         None => {
-            crate::early_println!("[linux socket] accept fd {} not socket", sockfd);
+            crate::println!("[linux socket] accept fd {} not socket", sockfd);
             return usize::MAX;
         }
     };
@@ -711,14 +711,14 @@ fn accept_with_flags(abi: &mut LinuxAbi, trapframe: &mut Trapframe, flags: i32) 
         {
             tcp_socket.accept_blocking(task.get_id(), trapframe)
         } else {
-            crate::early_println!("[linux socket] accept not supported socket type");
+            crate::println!("[linux socket] accept not supported socket type");
             return usize::MAX;
         };
 
     let accepted_socket = match accepted_socket {
         Ok(socket) => socket,
         Err(_) => {
-            crate::early_println!("[linux socket] accept_blocking failed");
+            crate::println!("[linux socket] accept_blocking failed");
             return usize::MAX;
         }
     };
@@ -806,7 +806,7 @@ pub fn sys_connect(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let handle_id = match abi.get_handle(sockfd as usize) {
         Some(h) => h,
         None => {
-            crate::early_println!("[linux socket] connect invalid fd {}", sockfd);
+            crate::println!("[linux socket] connect invalid fd {}", sockfd);
             return usize::MAX;
         }
     };
@@ -818,7 +818,7 @@ pub fn sys_connect(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     {
         Some(socket) => socket,
         None => {
-            crate::early_println!("[linux socket] connect fd {} not socket", sockfd);
+            crate::println!("[linux socket] connect fd {} not socket", sockfd);
             return usize::MAX;
         }
     };
@@ -826,7 +826,7 @@ pub fn sys_connect(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let addr_paddr = match task.vm_manager.translate_to_kva(addr_ptr) {
         Some(addr) => addr,
         None => {
-            crate::early_println!("[linux socket] connect bad addr {:x}", addr_ptr);
+            crate::println!("[linux socket] connect bad addr {:x}", addr_ptr);
             return usize::MAX;
         }
     };
@@ -890,7 +890,7 @@ pub fn sys_connect(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                 );
 
                 if let Err(error) = socket_arc.connect(&socket_addr) {
-                    crate::early_println!(
+                    crate::println!(
                         "[linux socket] connect failed for INET address: {:?}",
                         error
                     );
@@ -898,7 +898,7 @@ pub fn sys_connect(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                 }
             }
             _ => {
-                crate::early_println!("[linux socket] connect unsupported family {}", sa_family);
+                crate::println!("[linux socket] connect unsupported family {}", sa_family);
                 return usize::MAX;
             }
         }
@@ -937,7 +937,7 @@ pub fn sys_getsockname(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let handle_id = match abi.get_handle(sockfd as usize) {
         Some(h) => h,
         None => {
-            crate::early_println!("[linux socket] getsockname invalid fd {}", sockfd);
+            crate::println!("[linux socket] getsockname invalid fd {}", sockfd);
             return usize::MAX;
         }
     };
@@ -949,7 +949,7 @@ pub fn sys_getsockname(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     {
         Some(socket) => socket,
         None => {
-            crate::early_println!("[linux socket] getsockname fd {} not socket", sockfd);
+            crate::println!("[linux socket] getsockname fd {} not socket", sockfd);
             return usize::MAX;
         }
     };
@@ -961,14 +961,14 @@ pub fn sys_getsockname(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         ),
         (Some(_), Some(_))
     ) {
-        crate::early_println!("[linux socket] getsockname invalid pointers");
+        crate::println!("[linux socket] getsockname invalid pointers");
         return usize::MAX;
     }
 
     let socket_addr = match socket_arc.getsockname() {
         Ok(addr) => addr,
         Err(_) => {
-            crate::early_println!("[linux socket] getsockname failed");
+            crate::println!("[linux socket] getsockname failed");
             return usize::MAX;
         }
     };
@@ -1007,7 +1007,7 @@ pub fn sys_getpeername(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let handle_id = match abi.get_handle(sockfd as usize) {
         Some(h) => h,
         None => {
-            crate::early_println!("[linux socket] getpeername invalid fd {}", sockfd);
+            crate::println!("[linux socket] getpeername invalid fd {}", sockfd);
             return usize::MAX;
         }
     };
@@ -1019,7 +1019,7 @@ pub fn sys_getpeername(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     {
         Some(socket) => socket,
         None => {
-            crate::early_println!("[linux socket] getpeername fd {} not socket", sockfd);
+            crate::println!("[linux socket] getpeername fd {} not socket", sockfd);
             return usize::MAX;
         }
     };
@@ -1031,14 +1031,14 @@ pub fn sys_getpeername(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         ),
         (Some(_), Some(_))
     ) {
-        crate::early_println!("[linux socket] getpeername invalid pointers");
+        crate::println!("[linux socket] getpeername invalid pointers");
         return usize::MAX;
     }
 
     let socket_addr = match socket_arc.getpeername() {
         Ok(addr) => addr,
         Err(_) => {
-            crate::early_println!("[linux socket] getpeername failed");
+            crate::println!("[linux socket] getpeername failed");
             return usize::MAX;
         }
     };
@@ -1214,7 +1214,7 @@ pub fn sys_sendmsg(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let handle = match abi.get_handle(sockfd) {
         Some(h) => h,
         None => {
-            crate::early_println!("[linux socket] sendmsg bad fd {}", sockfd);
+            crate::println!("[linux socket] sendmsg bad fd {}", sockfd);
             return errno::to_result(errno::EBADF);
         }
     };
@@ -1222,7 +1222,7 @@ pub fn sys_sendmsg(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let kernel_obj = match task.handle_table.get(handle) {
         Some(obj) => obj,
         None => {
-            crate::early_println!("[linux socket] sendmsg missing handle {}", sockfd);
+            crate::println!("[linux socket] sendmsg missing handle {}", sockfd);
             return errno::to_result(errno::EBADF);
         }
     };
@@ -1230,7 +1230,7 @@ pub fn sys_sendmsg(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let stream = match kernel_obj.as_stream() {
         Some(stream) => stream,
         None => {
-            crate::early_println!("[linux socket] sendmsg not a stream");
+            crate::println!("[linux socket] sendmsg not a stream");
             return errno::to_result(errno::ENOTSOCK);
         }
     };
@@ -1244,13 +1244,13 @@ pub fn sys_sendmsg(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let msg_addr = match task.vm_manager.translate_to_kva(msg_ptr) {
         Some(addr) => addr as *const LinuxMsghdr,
         None => {
-            crate::early_println!("[linux socket] sendmsg bad msg ptr {:x}", msg_ptr);
+            crate::println!("[linux socket] sendmsg bad msg ptr {:x}", msg_ptr);
             return errno::to_result(errno::EFAULT);
         }
     };
 
     if msg_addr.is_null() {
-        crate::early_println!("[linux socket] sendmsg null msg ptr");
+        crate::println!("[linux socket] sendmsg null msg ptr");
         return errno::to_result(errno::EFAULT);
     }
 
@@ -1268,13 +1268,13 @@ pub fn sys_sendmsg(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let iovec_addr = match task.vm_manager.translate_to_kva(msg.msg_iov as usize) {
         Some(addr) => addr as *const IoVec,
         None => {
-            crate::early_println!("[linux socket] sendmsg bad iov ptr {:x}", msg.msg_iov);
+            crate::println!("[linux socket] sendmsg bad iov ptr {:x}", msg.msg_iov);
             return errno::to_result(errno::EFAULT);
         }
     };
 
     if iovec_addr.is_null() {
-        crate::early_println!("[linux socket] sendmsg null iov ptr");
+        crate::println!("[linux socket] sendmsg null iov ptr");
         return errno::to_result(errno::EFAULT);
     }
 
@@ -1330,14 +1330,14 @@ pub fn sys_sendmsg(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                     let send_handle = match abi.get_handle(fd as usize) {
                         Some(handle) => handle,
                         None => {
-                            crate::early_println!("[linux socket] sendmsg bad fd in cmsg {}", fd);
+                            crate::println!("[linux socket] sendmsg bad fd in cmsg {}", fd);
                             return errno::to_result(errno::EBADF);
                         }
                     };
                     let entry = match task.handle_table.clone_for_dup(send_handle) {
                         Some(entry) => entry,
                         None => {
-                            crate::early_println!("[linux socket] sendmsg clone_for_dup failed");
+                            crate::println!("[linux socket] sendmsg clone_for_dup failed");
                             return errno::to_result(errno::EBADF);
                         }
                     };
@@ -1429,7 +1429,7 @@ pub fn sys_sendmsg(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         let mut buffer = Vec::new();
         buffer.resize(iovec.iov_len, 0);
         if copy_from_user(&task, iovec.iov_base as usize, &mut buffer).is_err() {
-            crate::early_println!(
+            crate::println!(
                 "[linux socket] sendmsg bad buf ptr {:x}",
                 iovec.iov_base as usize
             );
@@ -1445,7 +1445,7 @@ pub fn sys_sendmsg(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
             }
             Err(StreamError::WouldBlock) => {
                 if nonblocking {
-                    crate::early_println!("[linux socket] sendmsg would block");
+                    crate::println!("[linux socket] sendmsg would block");
                     return if total_written == 0 {
                         errno::to_result(errno::EAGAIN)
                     } else {
@@ -1456,7 +1456,7 @@ pub fn sys_sendmsg(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                 return usize::MAX;
             }
             Err(_) => {
-                crate::early_println!("[linux socket] sendmsg write error");
+                crate::println!("[linux socket] sendmsg write error");
                 return errno::to_result(errno::EIO);
             }
         }
@@ -1475,7 +1475,7 @@ pub fn sys_recvmsg(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let sockfd = trapframe.get_arg(0);
     let msg_ptr = trapframe.get_arg(1);
     let flags = trapframe.get_arg(2) as i32;
-    // crate::early_println!(
+    // crate::println!(
     //     "[linux recvmsg] fd={} msg_ptr={:#x} flags={:#x}",
     //     sockfd,
     //     msg_ptr,
@@ -1487,17 +1487,17 @@ pub fn sys_recvmsg(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let handle = match abi.get_handle(sockfd) {
         Some(h) => h,
         None => {
-            crate::early_println!("[linux socket] recvmsg bad fd {}", sockfd);
+            crate::println!("[linux socket] recvmsg bad fd {}", sockfd);
             return errno::to_result(errno::EBADF);
         }
     };
 
-    // crate::early_println!("[linux recvmsg] handle={}", handle);
+    // crate::println!("[linux recvmsg] handle={}", handle);
 
     let kernel_obj = match task.handle_table.get(handle) {
         Some(obj) => obj,
         None => {
-            crate::early_println!("[linux socket] recvmsg missing handle {}", sockfd);
+            crate::println!("[linux socket] recvmsg missing handle {}", sockfd);
             return errno::to_result(errno::EBADF);
         }
     };
@@ -1505,7 +1505,7 @@ pub fn sys_recvmsg(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let stream = match kernel_obj.as_stream() {
         Some(stream) => stream,
         None => {
-            crate::early_println!("[linux socket] recvmsg not a stream");
+            crate::println!("[linux socket] recvmsg not a stream");
             return errno::to_result(errno::ENOTSOCK);
         }
     };
@@ -1519,18 +1519,18 @@ pub fn sys_recvmsg(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let msg_addr = match task.vm_manager.translate_to_kva(msg_ptr) {
         Some(addr) => addr as *mut LinuxMsghdr,
         None => {
-            crate::early_println!("[linux socket] recvmsg bad msg ptr {:x}", msg_ptr);
+            crate::println!("[linux socket] recvmsg bad msg ptr {:x}", msg_ptr);
             return errno::to_result(errno::EFAULT);
         }
     };
 
     if msg_addr.is_null() {
-        crate::early_println!("[linux socket] recvmsg null msg ptr");
+        crate::println!("[linux socket] recvmsg null msg ptr");
         return errno::to_result(errno::EFAULT);
     }
 
     let msg = unsafe { *msg_addr };
-    // crate::early_println!(
+    // crate::println!(
     //     "[linux recvmsg] iov_ptr={:#x} iovlen={} control_ptr={:#x} controllen={}",
     //     msg.msg_iov,
     //     msg.msg_iovlen,
@@ -1550,18 +1550,18 @@ pub fn sys_recvmsg(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let iovec_addr = match task.vm_manager.translate_to_kva(msg.msg_iov as usize) {
         Some(addr) => addr as *const IoVec,
         None => {
-            crate::early_println!("[linux socket] recvmsg bad iov ptr {:x}", msg.msg_iov);
+            crate::println!("[linux socket] recvmsg bad iov ptr {:x}", msg.msg_iov);
             return errno::to_result(errno::EFAULT);
         }
     };
 
     if iovec_addr.is_null() {
-        crate::early_println!("[linux socket] recvmsg null iov ptr");
+        crate::println!("[linux socket] recvmsg null iov ptr");
         return errno::to_result(errno::EFAULT);
     }
 
     let iovecs = unsafe { core::slice::from_raw_parts(iovec_addr, iovcnt) };
-    // crate::early_println!("[linux recvmsg] iovcnt={}", iovecs.len());
+    // crate::println!("[linux recvmsg] iovcnt={}", iovecs.len());
     let mut total_read = 0usize;
     let mut pending_fd: Option<i32> = None;
     let mut msg_controllen = 0usize;

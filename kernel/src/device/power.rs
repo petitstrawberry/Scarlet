@@ -263,7 +263,7 @@ impl PowerManager {
             {
                 Some(provider) => provider,
                 None => {
-                    crate::early_println!(
+                    crate::println!(
                         "[power] domain phandle={:#x} not found for {}",
                         phandle,
                         device.name()
@@ -291,7 +291,7 @@ impl PowerManager {
             let domain = provider.get_domain(specifier)?;
 
             if domain.requires_external_clock() {
-                crate::early_println!(
+                crate::println!(
                     "[power] deferring externally-clocked domain '{}' for {}",
                     domain.label(),
                     device.name()
@@ -300,13 +300,13 @@ impl PowerManager {
             }
 
             if !domain.is_enabled() {
-                crate::early_println!(
+                crate::println!(
                     "[power] enabling domain '{}' for {}",
                     domain.label(),
                     device.name()
                 );
                 if let Err(e) = domain.enable() {
-                    crate::early_println!(
+                    crate::println!(
                         "[power] failed to enable domain '{}': {} (continuing)",
                         domain.label(),
                         e

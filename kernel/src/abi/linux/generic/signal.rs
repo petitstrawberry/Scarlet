@@ -692,20 +692,20 @@ pub fn process_pending_signals_with_setup(
 
         match action {
             SignalAction::Terminate | SignalAction::ForceTerminate => {
-                crate::early_println!("Signal {}: Terminating task", signal as u32);
+                crate::println!("Signal {}: Terminating task", signal as u32);
                 true
             }
             SignalAction::Ignore => false,
             SignalAction::Stop => {
-                crate::early_println!("Signal {}: Stopping task", signal as u32);
+                crate::println!("Signal {}: Stopping task", signal as u32);
                 true
             }
             SignalAction::Continue => {
-                crate::early_println!("Signal {}: Continuing task", signal as u32);
+                crate::println!("Signal {}: Continuing task", signal as u32);
                 false
             }
             SignalAction::Custom(handler_addr) => {
-                crate::early_println!(
+                crate::println!(
                     "Signal {}: Calling custom handler at {:#x}",
                     signal as u32,
                     handler_addr
@@ -741,7 +741,7 @@ pub fn handle_fatal_signal_immediately(signal: LinuxSignal) -> Result<(), &'stat
             _ => return Err("Not a fatal signal"),
         };
 
-        crate::early_println!(
+        crate::println!(
             "Signal {}: Immediately terminating task {} with exit code {}",
             signal as u32,
             task.get_id(),

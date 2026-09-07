@@ -166,7 +166,7 @@ pub extern "C" fn linux_image_entry(dtb_paddr: usize) -> ! {
     // Formatting and FDT initialization both acquire IRQ/preemption guards.
     // Publish the boot CPU's per-CPU identity before either path can log.
     crate::arch::aarch64::init_arch(0);
-    crate::early_println!(
+    crate::println!(
         "[linux-boot] temporary identity/HHDM page table active; DTB at {:#x}",
         dtb_paddr
     );

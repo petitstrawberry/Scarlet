@@ -111,7 +111,7 @@ fn read_sip() -> usize {
 
 fn register_driver() {
     if crate::arch::riscv64::fdt::all_cpus_have_isa_extension_from_fdt("sstc").unwrap_or(false) {
-        crate::early_println!("[interrupt] RISC-V timer: skipping SBI TIME, Sstc is available");
+        crate::println!("[interrupt] RISC-V timer: skipping SBI TIME, Sstc is available");
         return;
     }
 
@@ -128,10 +128,10 @@ fn register_driver() {
         0..(crate::environment::MAX_NUM_CPUS as CpuId),
     ) {
         Ok(_) => {
-            crate::early_println!("[interrupt] RISC-V timer: using SBI TIME");
+            crate::println!("[interrupt] RISC-V timer: using SBI TIME");
         }
         Err(e) => {
-            crate::early_println!("[interrupt] Failed to register SBI timer: {}", e);
+            crate::println!("[interrupt] Failed to register SBI timer: {}", e);
         }
     }
 }

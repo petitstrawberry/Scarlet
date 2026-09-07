@@ -9,7 +9,6 @@ use alloc::string::String;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 
-use crate::early_println;
 use crate::network::Ipv4Address;
 use crate::network::protocol_stack::get_network_manager;
 use crate::network::protocol_stack::{LayerContext, NetworkLayer, NetworkLayerStats, SocketConfig};
@@ -18,6 +17,7 @@ use crate::network::socket::{
     SocketState, SocketType,
 };
 use crate::object::capability::{ControlOps, selectable::Selectable};
+use crate::println;
 use crate::sched::scheduler::current_task_id;
 
 const MAX_SOCKET_TIMEOUT_MS: usize = i32::MAX as usize;
@@ -903,7 +903,7 @@ impl UdpLayer {
             ip_context.set("interface", interface.as_bytes());
         }
 
-        early_println!(
+        println!(
             "[UDP] Send: {} bytes (src port: {}, dst: {}.{}.{}.{})",
             udp_packet.len(),
             src_port,

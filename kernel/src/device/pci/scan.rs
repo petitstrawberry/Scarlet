@@ -15,7 +15,7 @@ use crate::device::iommu::IommuSpec;
 use crate::device::platform::resource::{
     IrqMetadata, PlatformDeviceResource, PlatformDeviceResourceType,
 };
-use crate::{early_println, println};
+use crate::println;
 
 /// PCI scanner
 ///
@@ -346,12 +346,9 @@ impl<'a> PciScanner<'a> {
         match crate::interrupt::resolve_platform_irq(&resource) {
             Ok(irq) => Some(irq),
             Err(e) => {
-                early_println!(
+                println!(
                     "[PCI] Failed to translate routed IRQ for {:02x}:{:02x}.{}: {}",
-                    addr.bus,
-                    addr.device,
-                    addr.function,
-                    e
+                    addr.bus, addr.device, addr.function, e
                 );
                 None
             }
@@ -483,24 +480,16 @@ impl<'a> PciScanner<'a> {
             .config
             .read_u8(&addr, super::config::offset::SUBORDINATE_BUS_NUMBER);
         if secondary == 0 || secondary > subordinate {
-            early_println!(
+            println!(
                 "PCI: bridge {:02x}:{:02x}.{} has invalid bus range secondary={} subordinate={}",
-                addr.bus,
-                addr.device,
-                addr.function,
-                secondary,
-                subordinate
+                addr.bus, addr.device, addr.function, secondary, subordinate
             );
             return;
         }
 
-        early_println!(
+        println!(
             "PCI: scanning bridge {:02x}:{:02x}.{} secondary bus {} subordinate {}",
-            addr.bus,
-            addr.device,
-            addr.function,
-            secondary,
-            subordinate
+            addr.bus, addr.device, addr.function, secondary, subordinate
         );
         self.scan_bus(secondary, devices, id_counter, visited_buses);
     }
@@ -895,16 +884,16 @@ mod tests {
         // This test actually scans for PCI devices in the QEMU environment
         // It should discover virtio-pci devices when run with virtio-pci in QEMU
         use crate::device::fdt::FdtManager;
-        use crate::early_println;
+        use crate::println;
 
-        early_println!("[PCI Test] Starting real PCI device discovery test");
+        println!("[PCI Test] Starting real PCI device discovery test");
 
         // Get FDT to find PCI host bridge
         let fdt_manager = unsafe { FdtManager::get_mut_manager() };
         let fdt = fdt_manager.get_fdt();
 
         if fdt.is_none() {
-            early_println!("[PCI Test] No FDT available, skipping test");
+            println!("[PCI Test] No FDT available, skipping test");
             return;
         }
 
@@ -918,7 +907,7 @@ mod tests {
         // Check common PCI node names
         for node_name in &["/soc/pci", "/soc/pcie", "/pci", "/pcie"] {
             if let Some(pci_node) = fdt.find_node(node_name) {
-                early_println!("[PCI Test] Found PCI node: {}", node_name);
+                println!("[PCI Test] Found PCI node: {}", node_name);
 
                 // Get reg property for ECAM base and size
                 if let Some(reg) = pci_node.reg() {
@@ -927,10 +916,9 @@ mod tests {
                         if let Some(size) = region.size {
                             ecam_size = size;
                             pci_found = true;
-                            early_println!(
+                            println!(
                                 "[PCI Test] ECAM base: {:#x}, size: {:#x}",
-                                ecam_base,
-                                ecam_size
+                                ecam_base, ecam_size
                             );
                             break;
                         }
@@ -943,8 +931,8 @@ mod tests {
         }
 
         if !pci_found {
-            early_println!("[PCI Test] No PCI host bridge found in device tree");
-            early_println!("[PCI Test] This is expected if not running with PCI support");
+            println!("[PCI Test] No PCI host bridge found in device tree");
+            println!("[PCI Test] This is expected if not running with PCI support");
             return;
         }
 
@@ -955,16 +943,13 @@ mod tests {
         // 2. ECAM base and size are extracted correctly
         // 3. PCI infrastructure can be initialized
 
-        early_println!("[PCI Test] ✓ PCI host bridge detected in device tree");
-        early_println!(
+        println!("[PCI Test] ✓ PCI host bridge detected in device tree");
+        println!(
             "[PCI Test] ✓ ECAM configuration: base={:#x}, size={:#x}",
-            ecam_base,
-            ecam_size
+            ecam_base, ecam_size
         );
-        early_println!(
-            "[PCI Test] Note: Actual device scanning requires ECAM virtual memory mapping"
-        );
-        early_println!("[PCI Test] Test passed: PCI infrastructure initialized successfully");
+        println!("[PCI Test] Note: Actual device scanning requires ECAM virtual memory mapping");
+        println!("[PCI Test] Test passed: PCI infrastructure initialized successfully");
 
         // For now, we consider it a success if we found the PCI node
         // Full scanning will work when ECAM is properly mapped in the kernel

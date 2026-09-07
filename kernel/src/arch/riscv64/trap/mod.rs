@@ -1,6 +1,6 @@
 use core::arch::asm;
 
-use crate::early_println;
+use crate::println;
 
 use super::Trapframe;
 
@@ -33,21 +33,21 @@ pub fn print_traplog(tf: &Trapframe) {
     }
     let spp = (status >> 8) & 0b1;
 
-    early_println!("trapframe:\n{:#x?}", tf);
-    early_println!("cause: {}", cause);
-    early_println!("tval: 0x{:x}", tval);
-    early_println!("status: 0x{:x}", status);
-    early_println!("spp: {}", spp);
-    early_println!("sepc: 0x{:x}", sepc);
-    early_println!("stvec: 0x{:x}", stvec);
-    early_println!("satp: 0x{:x}", satp);
-    early_println!("sscratch: 0x{:x}", sscratch);
+    println!("trapframe:\n{:#x?}", tf);
+    println!("cause: {}", cause);
+    println!("tval: 0x{:x}", tval);
+    println!("status: 0x{:x}", status);
+    println!("spp: {}", spp);
+    println!("sepc: 0x{:x}", sepc);
+    println!("stvec: 0x{:x}", stvec);
+    println!("satp: 0x{:x}", satp);
+    println!("sscratch: 0x{:x}", sscratch);
     #[cfg(feature = "hypervisor")]
     {
         use crate::initcall::early;
 
-        early_println!("hstatus: 0x{:x}", hstatus);
-        early_println!(
+        println!("hstatus: 0x{:x}", hstatus);
+        println!(
             "HSTATUS_SPV: {}",
             (hstatus & crate::arch::hv::trap::HSTATUS_SPV as usize) != 0
         );

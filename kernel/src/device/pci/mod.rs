@@ -57,8 +57,8 @@ extern crate alloc;
 use crate::sync::IrqSpinLock;
 use alloc::vec::Vec;
 
+use crate::println;
 use crate::vm;
-use crate::{early_println, println};
 
 /// PCI device address components
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -141,10 +141,9 @@ impl PciBus {
 
     pub fn ecam_vaddr(&self) -> Result<usize, &'static str> {
         if let Some(vaddr) = *self.ecam_vaddr.lock() {
-            early_println!(
+            println!(
                 "[PCI] Reusing ECAM mapping {:#x} for paddr {:#x}",
-                vaddr,
-                self.ecam_base
+                vaddr, self.ecam_base
             );
             return Ok(vaddr);
         }

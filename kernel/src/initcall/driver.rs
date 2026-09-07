@@ -1,6 +1,6 @@
 use core::ptr::read_volatile;
 
-use crate::early_println;
+use crate::println;
 
 /// A macro used to register driver initialization functions to be called during the system boot process.
 ///
@@ -44,7 +44,7 @@ pub fn driver_initcall_call() {
     unsafe {
         let size = core::mem::size_of::<fn()>();
 
-        early_println!("Running driver initcalls... ");
+        println!("Running driver initcalls... ");
         let mut func_addr = &__INITCALL_DRIVER_START as *const usize as usize;
         let end_addr = &__INITCALL_DRIVER_END as *const usize as usize;
 

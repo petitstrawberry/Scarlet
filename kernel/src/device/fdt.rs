@@ -98,7 +98,7 @@ use core::result::Result;
 
 use fdt::{Fdt, FdtError};
 
-use crate::early_println;
+use crate::println;
 use crate::vm::vmem::MemoryArea;
 use crate::{BootInfo, DeviceSource};
 
@@ -204,7 +204,7 @@ impl<'a> FdtManager<'a> {
         match self.init(ptr) {
             Ok(_) => {
                 self.relocated = true;
-                early_println!("FDT relocated to address: {:#x}", ptr as usize);
+                println!("FDT relocated to address: {:#x}", ptr as usize);
             }
             Err(e) => {
                 panic!("Failed to relocate FDT: {:?}", e);
@@ -402,21 +402,21 @@ pub fn init_fdt(addr: usize) {
     let fdt_ptr = addr as *const u8;
     match fdt_manager.init(fdt_ptr) {
         Ok(_) => {
-            early_println!("FDT initialized");
+            println!("FDT initialized");
             let fdt = fdt_manager.get_fdt().unwrap();
 
             match fdt.chosen().bootargs() {
-                Some(bootargs) => early_println!("Bootargs: {}", bootargs),
-                None => early_println!("No bootargs found"),
+                Some(bootargs) => println!("Bootargs: {}", bootargs),
+                None => println!("No bootargs found"),
             }
             let model = fdt.root().model();
-            early_println!("Model: {}", model);
+            println!("Model: {}", model);
 
             // Mark initialization as complete to establish happens-before relationship
             MANAGER_INITIALIZED.call_once(|| {});
         }
         Err(e) => {
-            early_println!("FDT error: {:?}", e);
+            println!("FDT error: {:?}", e);
         }
     }
 }
@@ -518,7 +518,7 @@ pub fn create_bootinfo_from_fdt(cpu_id: usize, relocated_fdt_addr: usize) -> Boo
     let mut usable_memory = MemoryArea::new(kernel_end, dram_area.end);
 
     // Relocate initramfs
-    crate::early_println!("Relocating initramfs...");
+    crate::println!("Relocating initramfs...");
 
     let relocated_initramfs =
         match crate::fs::vfs_v2::drivers::initramfs::relocate_initramfs(&mut usable_memory) {

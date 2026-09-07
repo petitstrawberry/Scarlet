@@ -373,14 +373,14 @@ impl VirtioNetDevice {
         // Debug: Print negotiated features in test builds
         #[cfg(test)]
         {
-            use crate::{drivers::virtio::device::Register, early_println};
+            use crate::{drivers::virtio::device::Register, println};
             // Also read device features for debugging
             let device_features = self.read32_register(Register::DeviceFeatures);
-            early_println!(
+            println!(
                 "[virtio-net] Device offers features: 0x{:x}",
                 device_features
             );
-            early_println!(
+            println!(
                 "[virtio-net] Negotiated features: 0x{:x}",
                 negotiated_features
             );
@@ -759,25 +759,25 @@ impl VirtioDevice for VirtioNetDevice {
         // Debug: Print detailed feature analysis
         #[cfg(test)]
         {
-            use crate::early_println;
-            early_println!(
+            use crate::println;
+            println!(
                 "[virtio-net] Analyzing device features: 0x{:x}",
                 device_features
             );
             if device_features & (1u64 << VIRTIO_NET_F_MAC) != 0 {
-                early_println!(
+                println!(
                     "[virtio-net] Device supports MAC (bit {})",
                     VIRTIO_NET_F_MAC
                 );
             }
             if device_features & (1u64 << VIRTIO_NET_F_STATUS) != 0 {
-                early_println!(
+                println!(
                     "[virtio-net] Device supports STATUS (bit {})",
                     VIRTIO_NET_F_STATUS
                 );
             }
             if device_features & (1u64 << VIRTIO_NET_F_MTU) != 0 {
-                early_println!(
+                println!(
                     "[virtio-net] Device supports MTU (bit {})",
                     VIRTIO_NET_F_MTU
                 );
@@ -799,8 +799,8 @@ impl VirtioDevice for VirtioNetDevice {
 
         #[cfg(test)]
         {
-            use crate::early_println;
-            early_println!("[virtio-net] Using all device features: 0x{:x}", result);
+            use crate::println;
+            println!("[virtio-net] Using all device features: 0x{:x}", result);
         }
 
         result

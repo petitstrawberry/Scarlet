@@ -8,8 +8,8 @@
 use crate::sync::IrqSpinLock;
 use alloc::vec::Vec;
 
-use crate::early_println;
 use crate::environment::PAGE_SIZE;
+use crate::println;
 use crate::vm::phys_to_virt;
 use crate::vm::vmem::MemoryArea;
 
@@ -616,27 +616,26 @@ static PMM: IrqSpinLock<PmmInner> = IrqSpinLock::new(PmmInner::new());
 /// No value. Logs and skips an unusable region or a registration failure; it does
 /// not reset existing allocator state.
 pub unsafe fn init(area: MemoryArea) {
-    early_println!(
+    println!(
         "[PMM] Initializing buddy system with region: {:#x} - {:#x}",
-        area.start,
-        area.end
+        area.start, area.end
     );
 
     let start = align_up(area.start, PAGE_SIZE);
     let size = align_down(area.end + 1 - start, PAGE_SIZE);
 
     if size == 0 {
-        early_println!("[PMM] Region too small, skipping");
+        println!("[PMM] Region too small, skipping");
         return;
     }
 
     if let Err(e) = PMM.lock().add_region(start, size) {
-        early_println!("[PMM] Failed to add region: {}", e);
+        println!("[PMM] Failed to add region: {}", e);
         return;
     }
 
     let (total_pages, free_pages) = PMM.lock().stats();
-    early_println!(
+    println!(
         "[PMM] Buddy system initialized: {} pages ({} MB) available",
         free_pages,
         free_pages * PAGE_SIZE / 1024 / 1024

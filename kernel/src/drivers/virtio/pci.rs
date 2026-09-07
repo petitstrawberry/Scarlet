@@ -27,8 +27,8 @@ use crate::drivers::virtio::{next_block_device_name, next_net_device_name};
 use crate::drivers::virtio_snd::{VirtioSndDevice, register_audio_device};
 use crate::drivers::virtio_video::VirtioVideoDevice;
 use crate::interrupt::{InterruptId, InterruptManager};
+use crate::println;
 use crate::vm;
-use crate::{early_println, println};
 
 const VIRTIO_PCI_CAP_COMMON_CFG: u8 = 1;
 const VIRTIO_PCI_CAP_NOTIFY_CFG: u8 = 2;
@@ -191,14 +191,9 @@ fn map_cap(device: &PciDeviceInfo, cap: VirtioPciCap) -> Result<MappedCap, &'sta
         .ok_or("VirtIO PCI capability address overflow")?;
     let vaddr = vm::ioremap(paddr, cap.length as usize)?;
 
-    early_println!(
+    println!(
         "[virtio-pci] cap type={} bar={} base={:#x} offset={:#x} len={:#x} vaddr={:#x}",
-        cap.cfg_type,
-        cap.bar,
-        bar.base,
-        cap.offset,
-        cap.length,
-        vaddr
+        cap.cfg_type, cap.bar, bar.base, cap.offset, cap.length, vaddr
     );
 
     Ok(MappedCap {
@@ -296,7 +291,7 @@ fn register_legacy_intx(
     if let Err(e) = manager
         .register_and_enable_interrupt_source(source, crate::arch::get_cpu().get_cpuid() as u32)
     {
-        early_println!(
+        println!(
             "[virtio-pci] Failed to register and enable INTx IRQ {} for {:02x}:{:02x}.{}: {:?}",
             interrupt_id,
             device.address().bus,
@@ -307,7 +302,7 @@ fn register_legacy_intx(
         return None;
     }
 
-    early_println!(
+    println!(
         "[virtio-pci] Registered INTx IRQ {} pin {} for {:02x}:{:02x}.{}",
         interrupt_id,
         device.interrupt_pin(),
@@ -321,7 +316,7 @@ fn register_legacy_intx(
 fn log_pci_interrupt_capabilities(device: &PciDeviceInfo, transport: &VirtioPciTransport) {
     let caps = device.interrupt_capabilities();
     if let Some(msix) = caps.msix {
-        early_println!(
+        println!(
             "[virtio-pci] MSI-X present for {:02x}:{:02x}.{}: entries={} table_bar={} table_offset={:#x} queues={}",
             device.address().bus,
             device.address().device,
@@ -333,7 +328,7 @@ fn log_pci_interrupt_capabilities(device: &PciDeviceInfo, transport: &VirtioPciT
         );
 
         if !transport.disable_msix_vectors() {
-            early_println!(
+            println!(
                 "[virtio-pci] Device did not accept MSI-X disable vectors; keeping INTx fallback"
             );
         }
@@ -353,20 +348,20 @@ fn log_pci_interrupt_capabilities(device: &PciDeviceInfo, transport: &VirtioPciT
 
         match crate::interrupt::allocate_msi_vectors(request) {
             Ok(allocation) => {
-                early_println!(
+                println!(
                     "[virtio-pci] MSI allocation available: {} vector(s); MSI-X programming is not wired to device handlers yet",
                     allocation.vectors.len()
                 );
             }
             Err(e) => {
-                early_println!(
+                println!(
                     "[virtio-pci] MSI allocation unavailable ({:?}); using INTx fallback when an interrupt handler is needed",
                     e
                 );
             }
         }
     } else if let Some(msi) = caps.msi {
-        early_println!(
+        println!(
             "[virtio-pci] MSI present for {:02x}:{:02x}.{}: vectors={} 64bit={} pvm={}; using INTx fallback",
             device.address().bus,
             device.address().device,
@@ -399,10 +394,10 @@ fn probe_virtio_pci(device: &PciDeviceInfo) -> Result<(), &'static str> {
 
             if let Some(interrupt_id) = register_legacy_intx(device, dev.clone()) {
                 if let Err(e) = dev.enable_interrupts(interrupt_id) {
-                    early_println!("[virtio-pci] Failed to enable net INTx: {}", e);
+                    println!("[virtio-pci] Failed to enable net INTx: {}", e);
                 }
             } else {
-                early_println!(
+                println!(
                     "[virtio-pci] No usable INTx routing for net device {}",
                     name
                 );
@@ -444,10 +439,10 @@ fn probe_virtio_pci(device: &PciDeviceInfo) -> Result<(), &'static str> {
             let dev = Arc::new(VirtioVideoDevice::new_pci(transport));
             if let Some(interrupt_id) = register_legacy_intx(device, dev.clone()) {
                 if let Err(e) = dev.enable_interrupts(interrupt_id) {
-                    early_println!("[virtio-pci] Failed to enable video INTx: {}", e);
+                    println!("[virtio-pci] Failed to enable video INTx: {}", e);
                 }
             } else {
-                early_println!("[virtio-pci] No usable INTx routing for video decoder device");
+                println!("[virtio-pci] No usable INTx routing for video decoder device");
             }
 
             let backend: Arc<dyn VideoDecodeBackend> = dev.clone();

@@ -1750,7 +1750,7 @@ pub fn sys_memfd_create(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize 
     let shm = match SharedMemory::new(DEFAULT_SHM_SIZE, 0x3 /* READ | WRITE */) {
         Ok(shm) => shm,
         Err(e) => {
-            crate::early_println!("[sys_memfd_create] Failed to create shared memory: {:?}", e);
+            crate::println!("[sys_memfd_create] Failed to create shared memory: {:?}", e);
             return usize::MAX;
         }
     };
@@ -1762,7 +1762,7 @@ pub fn sys_memfd_create(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize 
     {
         Ok(h) => h,
         Err(_) => {
-            crate::early_println!("[sys_memfd_create] Failed to insert handle into table");
+            crate::println!("[sys_memfd_create] Failed to insert handle into table");
             return usize::MAX;
         }
     };
@@ -1773,7 +1773,7 @@ pub fn sys_memfd_create(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize 
         Err(_) => {
             // Clean up on error
             let _ = task.handle_table.remove(handle);
-            crate::early_println!("[sys_memfd_create] Failed to allocate fd");
+            crate::println!("[sys_memfd_create] Failed to allocate fd");
             return usize::MAX;
         }
     };

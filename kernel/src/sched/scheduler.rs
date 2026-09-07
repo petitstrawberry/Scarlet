@@ -880,7 +880,7 @@ impl TaskPool {
             }
             crate::breadcrumb::drop(crate::breadcrumb::REAPER_DROP_BEGIN, task_id as u64, 0);
             if trace_fork_exit {
-                crate::early_println!(
+                crate::println!(
                     "[fork-trace] child_task_id={} reaper-drop-enter cpu={}",
                     task_id,
                     get_cpu().get_cpuid(),
@@ -889,7 +889,7 @@ impl TaskPool {
             drop(retired_task);
             crate::breadcrumb::drop(crate::breadcrumb::REAPER_DROP_DONE, task_id as u64, 0);
             if trace_fork_exit {
-                crate::early_println!(
+                crate::println!(
                     "[fork-trace] child_task_id={} reaper-drop-done cpu={}",
                     task_id,
                     get_cpu().get_cpuid(),
@@ -1771,7 +1771,7 @@ fn release_deferred_prev(cpu_id: usize) {
     // The lock-free breadcrumb above retains release diagnostics without
     // serializing every traced task switch through the early-console lock.
     // if is_fork_trace_task(prev_id) {
-    //     crate::early_println!(
+    //     crate::println!(
     //         "[fork-trace] child_task_id={} release-prev-enter cpu={}",
     //         prev_id,
     //         cpu_id,
@@ -1851,7 +1851,7 @@ fn release_deferred_prev(cpu_id: usize) {
             },
         );
         // if is_fork_trace_task(prev_id) {
-        //     crate::early_println!(
+        //     crate::println!(
         //         "[fork-trace] child_task_id={} release-prev-done cpu={} state={:?}",
         //         prev_id,
         //         cpu_id,
@@ -4861,7 +4861,7 @@ fn pick_next(cpu: &Arch) -> (Option<usize>, Option<usize>) {
                                 continue;
                             }
                             // if take_fork_trace_first_pick(task_id) {
-                            //     crate::early_println!(
+                            //     crate::println!(
                             //         "[fork-trace] child_task_id={} picked cpu={}",
                             //         task_id,
                             //         cpu_id

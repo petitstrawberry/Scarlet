@@ -14,32 +14,28 @@
 //!
 //! ## Implementation Details
 //!
-//! The module initializes a UART writer lazily when first used and provides the
-//! core implementation of the `Write` trait for the UART device. It automatically
-//! handles CR+LF conversion for newlines.
+//! Output uses earlycon until device initialization enables the normal console.
+//! Callers use the same macros throughout boot and normal operation. UART writers
+//! implement the `Write` trait and handle CR+LF conversion for newlines.
 
-/// Implements core printing functionality by writing formatted text to the UART.
-/// This function is called by the `print!` macro and handles lazy initialization
-/// of the UART writer if it doesn't exist.
-///
-/// # Arguments
-///
-/// * `args` - Formatted arguments to print
-///
-/// # Note
-///
-/// This function is not meant to be called directly. Use the `print!` or
-/// `println!` macros instead.
-///
-/// Wraps a UART device to implement the `core::fmt::Write` trait.
-///
-/// This allows the UART to be used with the standard formatting macros.
 use core::fmt;
 use core::fmt::Write;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::device::char::CharDevice;
 use crate::device::manager::DeviceManager;
 use crate::device::{DeviceCapability, DeviceType};
+
+static NORMAL_CONSOLE_READY: AtomicBool = AtomicBool::new(false);
+
+/// Switch subsequent kernel prints to the normal console after device initialization.
+///
+/// # Returns
+///
+/// No value. Publishes normal-console readiness to all CPUs.
+pub(crate) fn enable_normal_console() {
+    NORMAL_CONSOLE_READY.store(true, Ordering::Release);
+}
 
 #[macro_export]
 macro_rules! print {
@@ -68,7 +64,32 @@ macro_rules! emergency_println {
     ($fmt:expr, $($arg:tt)*) => ($crate::emergency_print!(concat!($fmt, "\n"), $($arg)*));
 }
 
+/// Implements core printing functionality by writing formatted text to the console.
+/// This function is called by the `print!` macro and selects earlycon until the
+/// normal console is enabled after device initialization.
+///
+/// # Arguments
+///
+/// * `args` - Formatted arguments to print
+///
+/// # Returns
+///
+/// No value. Writes the message through the selected console path.
+///
+/// # Note
+///
+/// This function is not meant to be called directly. Use the `print!` or
+/// `println!` macros instead.
+///
+/// Wraps a UART device to implement the `core::fmt::Write` trait.
+///
+/// This allows the UART to be used with the standard formatting macros.
 pub fn _print(args: fmt::Arguments) {
+    if !NORMAL_CONSOLE_READY.load(Ordering::Acquire) {
+        crate::earlycon::print(args);
+        return;
+    }
+
     let _guard = crate::log::PrintGuard::acquire();
 
     struct LogWriter;

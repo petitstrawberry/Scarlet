@@ -241,17 +241,17 @@ impl VirtioVideoDevice {
         let negotiated_features = match device.init() {
             Ok(features) => features,
             Err(e) => {
-                crate::early_println!("[virtio-video] Failed to initialize: {}", e);
+                crate::println!("[virtio-video] Failed to initialize: {}", e);
                 0
             }
         };
         *device.features.write() = negotiated_features;
 
         if let Err(e) = device.bootstrap_decoder() {
-            crate::early_println!("[virtio-video] Decoder bootstrap skipped: {}", e);
+            crate::println!("[virtio-video] Decoder bootstrap skipped: {}", e);
         }
 
-        crate::early_println!(
+        crate::println!(
             "[virtio-video] Prototype device initialized, features=0x{:x}",
             negotiated_features
         );
@@ -275,7 +275,7 @@ impl VirtioVideoDevice {
         *session.stream_created.write() = true;
         *session.stream_coded_format.write() = VIRTIO_VIDEO_FORMAT_H264;
 
-        crate::early_println!(
+        crate::println!(
             "[virtio-video] H.264 decoder bootstrap ok: input_descs={} output_descs={}",
             input_descs,
             output_descs

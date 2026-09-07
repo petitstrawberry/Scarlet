@@ -248,7 +248,7 @@ fn platform_timer_probe(device: &PlatformDeviceInfo) -> Result<(), &'static str>
     // bypasses its normal IRQ domain. In that case the firmware cells describe
     // a fast-interrupt source, not an external line that this probe may remap.
     if !needs_external_timer_irq(configured_route) {
-        crate::early_println!(
+        crate::println!(
             "[interrupt] ARM generic timer: preserving preconfigured {:?} route",
             configured_route
         );
@@ -291,7 +291,7 @@ fn platform_timer_probe(device: &PlatformDeviceInfo) -> Result<(), &'static str>
         crate::arch::interrupt::TimerInterruptRoute::ExternalControllerIrq,
         Some(interrupt_id),
     );
-    crate::early_println!(
+    crate::println!(
         "[interrupt] ARM generic timer: using {} PPI {} from firmware",
         irq_name,
         interrupt_id

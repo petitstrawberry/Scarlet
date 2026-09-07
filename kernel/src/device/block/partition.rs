@@ -282,7 +282,7 @@ pub fn scan_and_register_partitions(
 ) -> Result<usize, &'static str> {
     let sector_size = parent.get_sector_size();
     if sector_size != 512 {
-        crate::early_println!(
+        crate::println!(
             "[partition] Skipping {}: unsupported logical sector size {}",
             parent_name,
             sector_size
@@ -313,7 +313,7 @@ fn scan_gpt(
     }
 
     if !has_protective_mbr(&mbr) {
-        crate::early_println!(
+        crate::println!(
             "[partition] {} has GPT signature without protective MBR",
             parent_name
         );
@@ -366,7 +366,7 @@ fn scan_gpt(
         };
 
         if !entry.is_inside_parent(&header, total_lbas) {
-            crate::early_println!(
+            crate::println!(
                 "[partition] Skipping {}p{}: invalid GPT range first_lba={} last_lba={}",
                 parent_name,
                 index + 1,
@@ -383,7 +383,7 @@ fn scan_gpt(
             .ok_or("GPT partition size overflow")?;
         let partition_name = format!("{}p{}", parent_name, index + 1);
         let size_bytes = lba_count.saturating_mul(sector_size as u64);
-        crate::early_println!(
+        crate::println!(
             "[partition] {}: type={} unique={} name=\"{}\" first_lba={} last_lba={} size={} bytes",
             partition_name,
             entry.partition_type_guid,

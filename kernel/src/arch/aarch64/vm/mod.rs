@@ -20,8 +20,8 @@ use crate::mem::page::{allocate_raw_pages, free_raw_pages};
 use crate::arch::Arch;
 use crate::arch::get_cpu;
 use crate::arch::get_user_trapvector_paddr;
-use crate::early_println;
 use crate::environment::{KERNEL_KSTACK_REGION_END, KERNEL_KSTACK_REGION_START, TRAMPOLINE_VA_END};
+use crate::println;
 use crate::vm::addr::kernel_virt_to_phys;
 use crate::vm::manager::VirtualMemoryManager;
 use crate::vm::vmem::{MemoryArea, MemoryAttribute, VirtualMemoryMap, VirtualMemoryPermission};
@@ -559,20 +559,18 @@ fn setup_trampoline_at_end(manager: &VirtualMemoryManager, trampoline_vaddr_end:
 
     #[cfg(any(debug_assertions, test))]
     {
-        early_println!(
+        println!(
             "Trampoline space planned  : {:#x} - {:#x}",
-            trampoline_vaddr_start,
-            trampoline_vaddr_end
+            trampoline_vaddr_start, trampoline_vaddr_end
         );
-        early_println!(
+        println!(
             "  Trampoline paddr        : {:#x} - {:#x}",
-            trampoline_start,
-            trampoline_end
+            trampoline_start, trampoline_end
         );
-        early_println!("  Trap entry paddr        : {:#x}", trap_entry_paddr);
-        early_println!("  Arch paddr              : {:#x}", arch_paddr);
-        early_println!("  Trap entry vaddr        : {:#x}", trap_entry_vaddr);
-        early_println!("  Arch vaddr              : {:#x}", arch_vaddr);
+        println!("  Trap entry paddr        : {:#x}", trap_entry_paddr);
+        println!("  Arch paddr              : {:#x}", arch_paddr);
+        println!("  Trap entry vaddr        : {:#x}", trap_entry_vaddr);
+        println!("  Arch vaddr              : {:#x}", arch_vaddr);
     }
 
     let trampoline_map = VirtualMemoryMap {
@@ -596,29 +594,27 @@ fn setup_trampoline_at_end(manager: &VirtualMemoryManager, trampoline_vaddr_end:
     if let Err(e) = manager.add_memory_map(trampoline_map.clone()) {
         #[cfg(any(debug_assertions, test))]
         {
-            early_println!("[vm] add trampoline map failed: {}", e);
+            println!("[vm] add trampoline map failed: {}", e);
             if let Some(m) = manager.search_memory_map(trampoline_vaddr_start) {
-                early_println!(
+                println!(
                     "[vm] map@trampoline_start: {:#x}-{:#x}",
-                    m.vmarea.start,
-                    m.vmarea.end
+                    m.vmarea.start, m.vmarea.end
                 );
             } else {
-                early_println!("[vm] map@trampoline_start: <none>");
+                println!("[vm] map@trampoline_start: <none>");
             }
             if let Some(m) = manager.search_memory_map(trampoline_vaddr_end) {
-                early_println!(
+                println!(
                     "[vm] map@trampoline_end  : {:#x}-{:#x}",
-                    m.vmarea.start,
-                    m.vmarea.end
+                    m.vmarea.start, m.vmarea.end
                 );
             } else {
-                early_println!("[vm] map@trampoline_end  : <none>");
+                println!("[vm] map@trampoline_end  : <none>");
             }
             manager.with_memmaps(|mm| {
-                early_println!("[vm] current VMA count   : {}", mm.len());
+                println!("[vm] current VMA count   : {}", mm.len());
                 for (_k, m) in mm.iter() {
-                    early_println!("[vm]   VMA {:#x}-{:#x}", m.vmarea.start, m.vmarea.end);
+                    println!("[vm]   VMA {:#x}-{:#x}", m.vmarea.start, m.vmarea.end);
                 }
             });
         }
@@ -645,13 +641,13 @@ pub fn setup_trampoline_for_kernel(manager: &VirtualMemoryManager) {
             .and_then(|mut root| root.leaf_entry_bits(console_vaddr));
 
         match leaf {
-            Some(bits) => crate::early_println!(
+            Some(bits) => crate::println!(
                 "[vm] {} EARLY_CONSOLE leaf bits: {:#x} (va={:#x})",
                 stage,
                 bits,
                 console_vaddr
             ),
-            None => crate::early_println!(
+            None => crate::println!(
                 "[vm] {} EARLY_CONSOLE leaf missing (va={:#x})",
                 stage,
                 console_vaddr
@@ -665,7 +661,7 @@ pub fn setup_trampoline_for_kernel(manager: &VirtualMemoryManager) {
     // (trampoline-managed) TTBR1 address space.
     #[cfg(any(debug_assertions, test))]
     {
-        crate::early_println!(
+        crate::println!(
             "[vm] aarch64 high-va(kstack) region: {:#x}-{:#x}",
             KERNEL_KSTACK_REGION_START,
             KERNEL_KSTACK_REGION_END
@@ -676,7 +672,7 @@ pub fn setup_trampoline_for_kernel(manager: &VirtualMemoryManager) {
 
     // Keep TTBR1 fixed to the kernel page table (trampoline/high-VA live there).
     #[cfg(any(debug_assertions, test))]
-    crate::early_println!("[vm] setup_trampoline_for_kernel: switch_ttbr1...");
+    crate::println!("[vm] setup_trampoline_for_kernel: switch_ttbr1...");
     #[cfg(any(debug_assertions, test))]
     log_early_console_pte("pre-switch", manager);
     mmu::sync_el1_translation_registers_if_needed();
@@ -687,7 +683,7 @@ pub fn setup_trampoline_for_kernel(manager: &VirtualMemoryManager) {
     #[cfg(any(debug_assertions, test))]
     log_early_console_pte("post-switch", manager);
     #[cfg(any(debug_assertions, test))]
-    crate::early_println!("[vm] setup_trampoline_for_kernel: switch_ttbr1 ok");
+    crate::println!("[vm] setup_trampoline_for_kernel: switch_ttbr1 ok");
 }
 
 /// AArch64: trampoline/high-VA live in the fixed TTBR1 kernel mapping.

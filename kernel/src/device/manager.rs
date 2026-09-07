@@ -54,8 +54,8 @@ use crate::device::platform::PlatformDeviceInfo;
 use crate::device::platform::PlatformDeviceProperty;
 use crate::device::platform::resource::PlatformDeviceResource;
 use crate::device::platform::resource::PlatformDeviceResourceType;
-use crate::early_println;
 use crate::interrupt::msi::MsiController;
+use crate::println;
 
 use super::Device;
 use super::DeviceDriver;
@@ -1204,7 +1204,7 @@ impl DeviceManager {
             block_device,
             self,
         ) {
-            crate::early_println!(
+            crate::println!(
                 "[partition] Failed to scan {} for partitions: {}",
                 scan_name,
                 error
@@ -2710,7 +2710,7 @@ impl DeviceManager {
                     controller.set_function(pin, func);
                 }
 
-                early_println!(
+                println!(
                     "[pinctrl] applied device={} state phandle={:#x} controller={:#x} pins={}",
                     device.name(),
                     state_phandle,
@@ -2761,7 +2761,7 @@ impl DeviceManager {
                         Ok(()) => {}
                         Err(PinctrlError::Unsupported) => {
                             *apply = false;
-                            early_println!(
+                            println!(
                                 "[pinctrl] provider {:#x} does not support state {} for {}; preserving firmware state",
                                 controller_phandle,
                                 node.name,
@@ -2786,7 +2786,7 @@ impl DeviceManager {
                             let func = ((mux >> 16) & 0xff) as u8;
                             controller.set_function(pin, func);
                         }
-                        early_println!(
+                        println!(
                             "[pinctrl] applied device={} state phandle={:#x} controller={:#x} pins={}",
                             device.name(),
                             state_phandle,
@@ -2802,7 +2802,7 @@ impl DeviceManager {
                             return Err(PROBE_DEFER);
                         };
                         match controller.apply_state(&state) {
-                            Ok(applied) => early_println!(
+                            Ok(applied) => println!(
                                 "[pinctrl] applied device={} state phandle={:#x} controller={:#x} function={} pins={}",
                                 device.name(),
                                 state_phandle,
@@ -2810,7 +2810,7 @@ impl DeviceManager {
                                 state.function.unwrap_or("<unchanged>"),
                                 applied
                             ),
-                            Err(PinctrlError::Unsupported) => early_println!(
+                            Err(PinctrlError::Unsupported) => println!(
                                 "[pinctrl] provider {:#x} does not support state {} for {}; preserving firmware state",
                                 controller_phandle,
                                 node.name,
@@ -2886,7 +2886,7 @@ impl DeviceManager {
     pub fn ping_all_watchdogs(&self) {
         self.for_each_watchdog(|watchdog| {
             if let Err(error) = watchdog.ping() {
-                early_println!("watchdog: failed to ping {}: {:?}", watchdog.name(), error);
+                println!("watchdog: failed to ping {}: {:?}", watchdog.name(), error);
             }
         });
     }
@@ -2906,7 +2906,7 @@ impl DeviceManager {
         let fdt_manager = unsafe { FdtManager::get_mut_manager() };
         let fdt = fdt_manager.get_fdt();
         if fdt.is_none() {
-            early_println!("FDT not initialized");
+            println!("FDT not initialized");
             return;
         }
 
@@ -2926,19 +2926,19 @@ impl DeviceManager {
     ) {
         match device_source {
             DeviceSource::Fdt(_addr) => {
-                early_println!("Populating devices from FDT...");
+                println!("Populating devices from FDT...");
                 self.populate_devices_from_fdt(priorities);
             }
             DeviceSource::Uefi => {
-                early_println!("Populating devices from UEFI...");
+                println!("Populating devices from UEFI...");
                 self.populate_devices_from_uefi(priorities);
             }
             DeviceSource::Acpi => {
-                early_println!("Populating devices from ACPI...");
+                println!("Populating devices from ACPI...");
                 self.populate_devices_from_acpi(priorities);
             }
             DeviceSource::None => {
-                early_println!("No device source available - skipping device population");
+                println!("No device source available - skipping device population");
             }
         }
     }
@@ -2950,7 +2950,7 @@ impl DeviceManager {
         let fdt_manager = unsafe { FdtManager::get_mut_manager() };
         let fdt = fdt_manager.get_fdt();
         if fdt.is_none() {
-            early_println!("FDT not initialized");
+            println!("FDT not initialized");
             return;
         }
         let fdt = fdt.unwrap();
@@ -2968,7 +2968,7 @@ impl DeviceManager {
 
     /// Process devices for a single priority level - reduces stack nesting
     fn process_priority_level(&self, fdt: &fdt::Fdt, priority: DriverPriority) {
-        early_println!(
+        println!(
             "Populating devices with {} drivers from FDT...",
             priority.description()
         );
@@ -2978,7 +2978,7 @@ impl DeviceManager {
         let root_node = match fdt.find_node("/") {
             Some(node) => node,
             None => {
-                early_println!("No device tree root found");
+                println!("No device tree root found");
                 return;
             }
         };
@@ -3356,7 +3356,7 @@ impl DeviceManager {
     }
 
     fn defer_platform_device(&self, priority: DriverPriority, device: Arc<PlatformDeviceInfo>) {
-        early_println!(
+        println!(
             "[probe] deferred {} device: {}",
             priority.description(),
             device.name()
@@ -3391,7 +3391,7 @@ impl DeviceManager {
                 if is_probe_defer(e) {
                     return ProbeOutcome::Deferred;
                 }
-                crate::early_println!(
+                crate::println!(
                     "Failed to enable power domains for {} device {}: {}",
                     priority.description(),
                     device.name(),
@@ -3402,14 +3402,14 @@ impl DeviceManager {
                 if is_probe_defer(e) {
                     return ProbeOutcome::Deferred;
                 }
-                early_println!("[clk] failed to apply assigned clocks: {}", e);
+                println!("[clk] failed to apply assigned clocks: {}", e);
                 return ProbeOutcome::Failed;
             }
             if let Err(e) = self.deassert_device_resets(device) {
                 if is_probe_defer(e) {
                     return ProbeOutcome::Deferred;
                 }
-                early_println!("[reset] failed to deassert device resets: {}", e);
+                println!("[reset] failed to deassert device resets: {}", e);
                 return ProbeOutcome::Failed;
             }
 
@@ -3417,7 +3417,7 @@ impl DeviceManager {
                 if is_probe_defer(e) {
                     return ProbeOutcome::Deferred;
                 }
-                early_println!("[pinctrl] failed to apply default state: {}", e);
+                println!("[pinctrl] failed to apply default state: {}", e);
                 return ProbeOutcome::Failed;
             }
 
@@ -3425,7 +3425,7 @@ impl DeviceManager {
                 if is_probe_defer(e) {
                     return ProbeOutcome::Deferred;
                 }
-                early_println!("[iommu] failed to resolve IOMMU: {}", e);
+                println!("[iommu] failed to resolve IOMMU: {}", e);
                 return ProbeOutcome::Failed;
             }
 
@@ -3433,7 +3433,7 @@ impl DeviceManager {
                 if is_probe_defer(e) {
                     return ProbeOutcome::Deferred;
                 }
-                early_println!("[dma] failed to resolve DMA: {}", e);
+                println!("[dma] failed to resolve DMA: {}", e);
                 return ProbeOutcome::Failed;
             }
 
@@ -3441,7 +3441,7 @@ impl DeviceManager {
                 if is_probe_defer(e) {
                     return ProbeOutcome::Deferred;
                 }
-                early_println!("[mailbox] failed to resolve mailbox: {}", e);
+                println!("[mailbox] failed to resolve mailbox: {}", e);
                 return ProbeOutcome::Failed;
             }
 
@@ -3449,7 +3449,7 @@ impl DeviceManager {
                 if is_probe_defer(e) {
                     return ProbeOutcome::Deferred;
                 }
-                early_println!("[nvmem] failed to resolve NVMEM cell: {}", e);
+                println!("[nvmem] failed to resolve NVMEM cell: {}", e);
                 return ProbeOutcome::Failed;
             }
 
@@ -3457,13 +3457,13 @@ impl DeviceManager {
                 if is_probe_defer(e) {
                     return ProbeOutcome::Deferred;
                 }
-                early_println!("[phy] failed to resolve PHY: {}", e);
+                println!("[phy] failed to resolve PHY: {}", e);
                 return ProbeOutcome::Failed;
             }
 
             match driver.probe(device) {
                 Ok(_) => {
-                    early_println!(
+                    println!(
                         "Successfully probed {} device: {}",
                         priority.description(),
                         device.name()
@@ -3474,7 +3474,7 @@ impl DeviceManager {
                     if is_probe_defer(e) {
                         return ProbeOutcome::Deferred;
                     }
-                    early_println!(
+                    println!(
                         "Failed to probe {} device {}: {}",
                         priority.description(),
                         device.name(),
@@ -3514,7 +3514,7 @@ impl DeviceManager {
             let mut made_progress = false;
             let mut still_deferred = Vec::new();
             for item in retry_batch {
-                early_println!(
+                println!(
                     "[probe] retrying deferred {} device: {}",
                     item.priority.description(),
                     item.device.name()
@@ -3549,7 +3549,7 @@ impl DeviceManager {
     /// This is currently a stub implementation. UEFI device discovery will be implemented
     /// when UEFI boot support is added.
     fn populate_devices_from_uefi(&self, _priorities: Option<&[DriverPriority]>) {
-        early_println!("UEFI device discovery not yet implemented");
+        println!("UEFI device discovery not yet implemented");
         // TODO: Implement UEFI device discovery
         // - Enumerate UEFI protocols
         // - Create PlatformDeviceInfo from UEFI device handles
@@ -3567,7 +3567,7 @@ impl DeviceManager {
     /// This is currently a stub implementation. ACPI device discovery will be implemented
     /// when x86 support is added.
     fn populate_devices_from_acpi(&self, _priorities: Option<&[DriverPriority]>) {
-        early_println!("ACPI device discovery not yet implemented");
+        println!("ACPI device discovery not yet implemented");
         // TODO: Implement ACPI device discovery
         // - Parse ACPI tables (DSDT, etc.)
         // - Create PlatformDeviceInfo from ACPI device objects
@@ -3644,7 +3644,7 @@ impl DeviceManager {
         }
 
         let count = discovered.len();
-        early_println!("Probing {} discovered PCI devices...", count);
+        println!("Probing {} discovered PCI devices...", count);
 
         let drivers: Vec<Vec<Arc<dyn DeviceDriver>>> = {
             let registered = self.drivers.lock();
@@ -3670,7 +3670,7 @@ impl DeviceManager {
 
                     if let Ok(()) = driver.probe(&**device) {
                         claimed_ids.push(device.id());
-                        early_println!(
+                        println!(
                             "Successfully probed PCI device {} with driver {}",
                             device.name(),
                             driver.name()

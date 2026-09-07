@@ -690,45 +690,43 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
     let cpu_count = boot_info.cpu_count;
     crate::sched::scheduler::register_boot_cpu(cpu_id);
 
-    early_println!("[Scarlet Kernel] Hello, I'm Scarlet kernel!");
-    early_println!("[Scarlet Kernel] Boot on CPU {}", cpu_id);
-    early_println!("[Scarlet Kernel] Detected {} CPU(s)", cpu_count);
+    println!("[Scarlet Kernel] Hello, I'm Scarlet kernel!");
+    println!("[Scarlet Kernel] Boot on CPU {}", cpu_id);
+    println!("[Scarlet Kernel] Detected {} CPU(s)", cpu_count);
     let usable_memory_paddr = boot_info.usable_memory_paddr;
     let usable_memory_regions = boot_info.usable_memory_regions;
     let direct_map_regions = boot_info.direct_map_regions;
     let hhdm_offset = boot_info.hhdm_offset;
-    early_println!(
+    println!(
         "[Scarlet Kernel] Usable memory (PA) : {:#x} - {:#x}",
-        usable_memory_paddr.start,
-        usable_memory_paddr.end
+        usable_memory_paddr.start, usable_memory_paddr.end
     );
-    early_println!(
+    println!(
         "[Scarlet Kernel] PMM usable regions : {}",
         usable_memory_regions.len()
     );
     let direct_map_bounds = direct_map_regions
         .bounding_area()
         .expect("BootInfo direct-map regions must not be empty");
-    early_println!(
+    println!(
         "[Scarlet Kernel] Direct-map bounds   : {:#x} - {:#x} ({} sparse regions)",
         direct_map_bounds.start,
         direct_map_bounds.end,
         direct_map_regions.len(),
     );
-    early_println!("[Scarlet Kernel] HHDM offset       : {:#x}", hhdm_offset);
+    println!("[Scarlet Kernel] HHDM offset       : {:#x}", hhdm_offset);
 
     /* Handle initramfs if available in BootInfo */
     if let Some(initramfs_paddr) = boot_info.initramfs_paddr {
-        early_println!(
+        println!(
             "[Scarlet Kernel] InitramFS (PA)    : {:#x} - {:#x}",
-            initramfs_paddr.start,
-            initramfs_paddr.end
+            initramfs_paddr.start, initramfs_paddr.end
         );
     } else {
-        early_println!("[Scarlet Kernel] No initramfs found");
+        println!("[Scarlet Kernel] No initramfs found");
     }
 
-    early_println!("[Scarlet Kernel] Initializing PMM...");
+    println!("[Scarlet Kernel] Initializing PMM...");
     for index in 0..usable_memory_regions.len() {
         let region = usable_memory_regions
             .get(index)
@@ -742,7 +740,7 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
         }
     }
 
-    early_println!("[Scarlet Kernel] Allocating initial heap from PMM...");
+    println!("[Scarlet Kernel] Allocating initial heap from PMM...");
     let heap_size = KERNEL_HEAP_SIZE;
     let heap_pages = heap_size / PAGE_SIZE;
     let heap_start_phys =
@@ -750,12 +748,12 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
     let heap_end_phys = heap_start_phys + heap_size - 1;
     let heap_paddr = MemoryArea::new(heap_start_phys, heap_end_phys);
 
-    early_println!("[Scarlet Kernel] Building Scarlet boot page table...");
+    println!("[Scarlet Kernel] Building Scarlet boot page table...");
     // crate::earlyfb::deactivate();
     switch_to_boot_page_table(direct_map_regions, boot_info.initramfs_paddr, heap_paddr);
     #[cfg(target_arch = "aarch64")]
     if crate::arch::aarch64::earlycon::activate_after_boot_page_table_switch() {
-        early_println!("[earlycon] Qualcomm GENI UART active after page-table handoff");
+        println!("[earlycon] Qualcomm GENI UART active after page-table handoff");
     }
 
     // Fix PMM metadata pointers immediately after page table switch
@@ -781,11 +779,11 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
         crate::device::fdt::init_fdt(phys_to_virt(relocated_fdt_paddr));
     }
 
-    early_println!("[Scarlet Kernel] Initializing heap...");
+    println!("[Scarlet Kernel] Initializing heap...");
     unsafe { init_heap(KERNEL_HEAP_BASE, heap_size) };
 
     fence(Ordering::SeqCst);
-    early_println!(
+    println!(
         "[Scarlet Kernel] Heap initialized at {:#x} - {:#x}",
         KERNEL_HEAP_BASE,
         KERNEL_HEAP_BASE + heap_size - 1
@@ -794,7 +792,7 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
     {
         let test_vec = alloc::vec::Vec::<u8>::with_capacity(1024);
         drop(test_vec);
-        early_println!("[Scarlet Kernel] Heap allocation test passed");
+        println!("[Scarlet Kernel] Heap allocation test passed");
     }
 
     fence(Ordering::Release);
@@ -804,7 +802,7 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
     fence(Ordering::SeqCst); // Ensure early initcalls are completed before proceeding
     driver_initcall_call();
 
-    early_println!("[Scarlet Kernel] Initializing Virtual Memory...");
+    println!("[Scarlet Kernel] Initializing Virtual Memory...");
     kernel_vm_init(direct_map_regions, boot_info.initramfs_paddr, heap_paddr);
     /* After this point, we can use the heap and virtual memory */
     /* We will also be restricted to the kernel address space */
@@ -812,13 +810,13 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
     lsm::symbol::init_kernel_symbols();
 
     /* Create and register init before driver workers can consume PID 1. */
-    early_println!("[boot] Creating initial user task...");
+    println!("[boot] Creating initial user task...");
     let mut init_task = new_user_task("init".to_string(), 0);
     init_task.init();
     let init_task_id = register_task(init_task);
 
     /* Populate devices from BootInfo device source */
-    early_println!("[Scarlet Kernel] Populating devices...");
+    println!("[Scarlet Kernel] Populating devices...");
     let device_manager = DeviceManager::get_manager();
     // Two-phase interrupt bring-up:
     // 1) Discover critical interrupt controllers (PLIC/CLINT) first.
@@ -829,7 +827,7 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
     fence(Ordering::SeqCst); // Ensure device population is complete before proceeding
 
     /* Initialize interrupt controllers (stage 1) */
-    early_println!("[Scarlet Kernel] Initializing interrupt controllers...");
+    println!("[Scarlet Kernel] Initializing interrupt controllers...");
     crate::interrupt::InterruptManager::global().init_controllers();
     crate::interrupt::InterruptManager::global()
         .init_controllers_for_cpu(get_cpu().get_cpuid() as u32);
@@ -839,13 +837,13 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
     /* Initialize NetworkManager before device discovery so protocol layers are ready */
     #[cfg(feature = "network")]
     {
-        early_println!("[NetworkManager] Initializing NetworkLayers...");
+        println!("[NetworkManager] Initializing NetworkLayers...");
         let _network_manager = crate::network::NetworkManager::init();
         fence(Ordering::SeqCst);
     }
 
     /* Discover remaining devices */
-    early_println!("[Scarlet Kernel] Populating remaining devices...");
+    println!("[Scarlet Kernel] Populating remaining devices...");
     device_manager.populate_devices_from_source(
         &boot_info.device_source,
         Some(&[
@@ -875,7 +873,7 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
     fence(Ordering::SeqCst);
 
     /* After this point, we can use the device manager */
-    /* Serial console also works not earlyconsole, so we can use normal println! from here on */
+    library::std::print::enable_normal_console();
 
     /* Initialize Graphics Manager and discover graphics devices */
     println!("[Scarlet Kernel] Initializing graphics subsystem...");

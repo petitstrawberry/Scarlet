@@ -16,7 +16,7 @@ use crate::device::pci::driver::{PciDeviceDriver, PciDeviceId};
 use crate::driver_initcall;
 use crate::drivers::mmc::core::EmmcBlockDevice;
 use crate::environment::PAGE_SIZE;
-use crate::{early_println, println, vm};
+use crate::{println, vm};
 
 use super::SdhciHost;
 
@@ -55,7 +55,7 @@ fn probe_sdhci_pci(device: &PciDeviceInfo) -> Result<(), &'static str> {
         Ok(block_device) => block_device,
         Err(error) => {
             vm::iounmap(mmio_base);
-            early_println!(
+            println!(
                 "[mmc] Failed to identify eMMC at {:02x}:{:02x}.{}: {}",
                 device.address().bus,
                 device.address().device,

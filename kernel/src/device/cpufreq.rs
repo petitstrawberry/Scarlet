@@ -607,7 +607,7 @@ fn process_pending_request() -> bool {
     };
     let first = CPUFREQ_FIRST_WORKER_REQUEST.swap(false, Ordering::SeqCst);
     if first {
-        crate::early_println!(
+        crate::println!(
             "[cpufreq] deferred transition begin domain={:#x} pstate={} freq_khz={}",
             request.domain,
             request.opp.pstate,
@@ -617,12 +617,12 @@ fn process_pending_request() -> bool {
 
     match apply_deferred_target_request(request) {
         Ok(TargetRequestOutcome::Applied) if first => {
-            crate::early_println!("[cpufreq] deferred transition complete")
+            crate::println!("[cpufreq] deferred transition complete")
         }
         Ok(TargetRequestOutcome::Superseded) if first => {
-            crate::early_println!("[cpufreq] deferred transition superseded")
+            crate::println!("[cpufreq] deferred transition superseded")
         }
-        Err(err) => crate::early_println!(
+        Err(err) => crate::println!(
             "[cpufreq] deferred transition failed domain={:#x} pstate={}: {}",
             request.domain,
             request.opp.pstate,

@@ -44,7 +44,7 @@ fn pl031_rtc_probe(device_info: &PlatformDeviceInfo) -> Result<(), &'static str>
     let paddr = memory_resource.start;
     let size = memory_resource.end - memory_resource.start + 1;
     let base = crate::vm::ioremap(paddr, size).inspect_err(|e| {
-        crate::early_println!(
+        crate::println!(
             "pl031-rtc: ioremap({:#x}, {:#x}) failed: {}",
             paddr,
             size,
@@ -59,10 +59,10 @@ fn pl031_rtc_probe(device_info: &PlatformDeviceInfo) -> Result<(), &'static str>
 
     crate::time::initialize_wall_clock_from_rtc_sample(rtc_epoch_ns, mono_before, mono_after)
         .inspect_err(|e| {
-            crate::early_println!("pl031-rtc: failed to seed wall clock: {}", e);
+            crate::println!("pl031-rtc: failed to seed wall clock: {}", e);
         })?;
 
-    crate::early_println!("pl031-rtc: seeded wall clock");
+    crate::println!("pl031-rtc: seeded wall clock");
 
     Ok(())
 }

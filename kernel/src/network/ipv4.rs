@@ -17,11 +17,11 @@ use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use crate::early_println;
 use crate::network::protocol_stack::{
     LayerContext, NetworkLayer, NetworkLayerStats, get_network_manager,
 };
 use crate::network::socket::SocketError;
+use crate::println;
 
 const LOG_IPV4_PACKET_TRACE: bool = false;
 
@@ -741,7 +741,7 @@ impl NetworkLayer for Ipv4Layer {
         ip_packet.extend_from_slice(packet);
 
         if LOG_IPV4_PACKET_TRACE {
-            early_println!(
+            println!(
                 "[IPv4] Send: {} bytes (src: {}.{}.{}.{}, dst: {}.{}.{}.{}, proto: {}, iface: {})",
                 ip_packet.len(),
                 src_ip_bytes[0],
@@ -803,7 +803,7 @@ impl NetworkLayer for Ipv4Layer {
         }
 
         if LOG_IPV4_PACKET_TRACE {
-            early_println!(
+            println!(
                 "[IPv4] RX: total_len={} src={}.{}.{}.{} dst={}.{}.{}.{} proto={}",
                 total_length,
                 header.source_ip[0],
@@ -822,10 +822,9 @@ impl NetworkLayer for Ipv4Layer {
         let calculated_checksum = checksum_from_bytes(&packet[..header_len]);
         let header_checksum = unsafe { core::ptr::addr_of!(header.checksum).read_unaligned() };
         if calculated_checksum != header_checksum {
-            early_println!(
+            println!(
                 "[IPv4] Checksum mismatch: calculated=0x{:04X}, header=0x{:04X}",
-                calculated_checksum,
-                header_checksum
+                calculated_checksum, header_checksum
             );
             let mut stats = self.stats.write();
             stats.protocol_errors += 1;
@@ -835,7 +834,7 @@ impl NetworkLayer for Ipv4Layer {
         let payload = &packet[header_len..total_length];
 
         if LOG_IPV4_PACKET_TRACE {
-            early_println!(
+            println!(
                 "[IPv4] Recv: {} bytes (src: {}.{}.{}.{}, dst: {}.{}.{}.{}, proto: {})",
                 packet.len(),
                 header.source_ip[0],

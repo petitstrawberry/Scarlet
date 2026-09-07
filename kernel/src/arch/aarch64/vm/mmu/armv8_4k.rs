@@ -877,7 +877,7 @@ impl PageTable {
 
         #[cfg(any(debug_assertions, test))]
         if vaddr == DEBUG_DEVICE_FAULT_VA {
-            crate::early_println!(
+            crate::println!(
                 "[vm-map] target va={:#x} paddr={:#x} perms={:#x} is_user={} is_device={} entry={:#x}",
                 vaddr,
                 paddr,

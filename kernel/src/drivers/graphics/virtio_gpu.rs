@@ -565,11 +565,11 @@ impl VirtioGpuDeviceCore {
                 *device.transport_ready.write() = true;
             }
             Err(_) => {
-                crate::early_println!("[Virtio GPU] Warning: Failed to initialize VirtIO device");
+                crate::println!("[Virtio GPU] Warning: Failed to initialize VirtIO device");
             }
         }
 
-        // crate::early_println!("[Virtio GPU] Device created and initialized at {:#x}", base_addr);
+        // crate::println!("[Virtio GPU] Device created and initialized at {:#x}", base_addr);
         device
     }
 
@@ -1336,7 +1336,7 @@ impl VirtioGpuDeviceCore {
                 && new_width != 0
                 && new_height != 0
             {
-                crate::early_println!(
+                crate::println!(
                     "[virtio-gpu] display resize: {}x{} -> {}x{}",
                     old_width,
                     old_height,
@@ -2284,23 +2284,23 @@ impl GraphicsDevice for VirtioGpuDevice {
             let core = self.core.lock();
             let mut initialized = core.initialized.lock();
             if *initialized {
-                crate::early_println!("[virtio-gpu] init_graphics: already initialized");
+                crate::println!("[virtio-gpu] init_graphics: already initialized");
                 return Ok(());
             }
             *initialized = true;
         }
 
-        crate::early_println!("[virtio-gpu] init_graphics: get_display_info");
+        crate::println!("[virtio-gpu] init_graphics: get_display_info");
 
         // Get display information
         self.core.lock().get_display_info_internal()?;
 
-        crate::early_println!("[virtio-gpu] init_graphics: setup_framebuffer");
+        crate::println!("[virtio-gpu] init_graphics: setup_framebuffer");
 
         // Set up framebuffer
         self.core.lock().setup_framebuffer()?;
 
-        crate::early_println!("[virtio-gpu] init_graphics: done");
+        crate::println!("[virtio-gpu] init_graphics: done");
         Ok(())
     }
 }
@@ -2813,13 +2813,13 @@ mod tests {
         let mut device = VirtioGpuDevice::new(vaddr);
 
         // Test device initialization and command flow
-        crate::early_println!("[Test] Starting VirtIO GPU command flow verification");
+        crate::println!("[Test] Starting VirtIO GPU command flow verification");
         device.init_graphics().unwrap();
 
         let config = device.get_framebuffer_config().unwrap();
         let fb_addr = device.get_framebuffer_address().unwrap();
 
-        crate::early_println!(
+        crate::println!(
             "[Test] Framebuffer initialized at {:#x}, config: {}x{}",
             fb_addr,
             config.width,
@@ -2844,7 +2844,7 @@ mod tests {
             }
         }
 
-        crate::early_println!("[Test] Written checkerboard pattern to framebuffer");
+        crate::println!("[Test] Written checkerboard pattern to framebuffer");
 
         // Test presenting different regions
         device
@@ -2857,7 +2857,7 @@ mod tests {
             .present_current_framebuffer_region(DisplayRegion::full(&config))
             .unwrap();
 
-        crate::early_println!("[Test] VirtIO GPU command flow verification completed");
+        crate::println!("[Test] VirtIO GPU command flow verification completed");
     }
 
     #[cfg(target_arch = "riscv64")]
@@ -2871,8 +2871,8 @@ mod tests {
         let config = device.get_framebuffer_config().unwrap();
         let fb_addr = device.get_framebuffer_address().unwrap();
 
-        crate::early_println!("[Test] Testing VirtIO GPU resource management");
-        crate::early_println!("[Test] Primary framebuffer resource should be ID 1");
+        crate::println!("[Test] Testing VirtIO GPU resource management");
+        crate::println!("[Test] Primary framebuffer resource should be ID 1");
 
         // The framebuffer should be associated with resource ID 1
         // (as set up in setup_framebuffer)
@@ -2897,6 +2897,6 @@ mod tests {
             ))
             .unwrap();
 
-        crate::early_println!("[Test] Resource management test completed");
+        crate::println!("[Test] Resource management test completed");
     }
 }

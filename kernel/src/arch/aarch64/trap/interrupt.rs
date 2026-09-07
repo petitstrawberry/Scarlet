@@ -196,7 +196,7 @@ fn report_timer_fiq_irq_liveness(cpu_id: usize, trapframe: &Trapframe) {
     let current_task = crate::sched::scheduler::current_task_id(cpu_id);
     let current_is_idle = crate::sched::scheduler::current_task_is_idle(cpu_id);
 
-    crate::early_println!(
+    crate::println!(
         "[irq-liveness] cpu={} timer={} task={:?} idle={} irq_pending={} isr={:#x} daif={:#x} spsr={:#x} hcr={:#x} ich_hcr={:#x} ich_misr={:#x}",
         cpu_id,
         count,
@@ -215,7 +215,7 @@ fn report_timer_fiq_irq_liveness(cpu_id: usize, trapframe: &Trapframe) {
 fn report_post_claim_timer(cpu_id: usize) {
     let count = POST_CLAIM_TIMER_COUNTS[cpu_id].fetch_add(1, Ordering::Relaxed) + 1;
     if count <= 3 || count.is_power_of_two() {
-        crate::early_println!(
+        crate::println!(
             "[aarch64][fiq] timer became pending during fast claim cpu={} count={}",
             cpu_id,
             count

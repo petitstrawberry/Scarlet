@@ -318,7 +318,7 @@ fn initialize_emmc(host: &mut dyn MmcHost, bus_width: MmcBusWidth) -> MmcResult<
     ) as u64;
     if sector_count == 0 {
         let nonzero_bytes = ext_csd.iter().filter(|&&byte| byte != 0).count();
-        crate::early_println!(
+        crate::println!(
             "[mmc] EXT_CSD has zero sector count: nonzero={} rev={:#04x} device={:#04x} first={:02x?} identity={:02x?} last={:02x?}",
             nonzero_bytes,
             ext_csd[EXT_CSD_REVISION],

@@ -381,7 +381,7 @@ pub fn sys_clone(trapframe: &mut Trapframe) -> usize {
     let is_process_child = !clone_flags.is_set(CloneFlagsDef::Thread);
 
     // if is_process_fork {
-    //     crate::early_println!(
+    //     crate::println!(
     //         "[fork-trace] enter parent_task_id={} cpu={} flags={:#x}",
     //         parent_task.get_id(),
     //         crate::arch::get_cpu().get_cpuid(),
@@ -395,7 +395,7 @@ pub fn sys_clone(trapframe: &mut Trapframe) -> usize {
     match parent_task.clone_task(clone_flags) {
         Ok(mut child_task) => {
             if is_process_fork {
-                // crate::early_println!("[fork-trace] address-space clone complete");
+                // crate::println!("[fork-trace] address-space clone complete");
                 crate::sched::scheduler::apply_fork_child_diagnostic_affinity(
                     &mut child_task,
                     crate::arch::get_cpu().get_cpuid(),
@@ -455,7 +455,7 @@ pub fn sys_clone(trapframe: &mut Trapframe) -> usize {
             };
             if is_process_fork && crate::sched::scheduler::DEBUG_FORK_TRACE_LOGGING {
                 crate::sched::scheduler::mark_fork_trace_task(child_id);
-                crate::early_println!(
+                crate::println!(
                     "[fork-trace] child_task_id={} registered target_cpu={}",
                     child_id,
                     cpu_id
@@ -480,11 +480,11 @@ pub fn sys_clone(trapframe: &mut Trapframe) -> usize {
                 .unwrap_or(0);
 
             if is_process_fork && crate::sched::scheduler::DEBUG_FORK_TRACE_LOGGING {
-                crate::early_println!("[fork-trace] enqueue child_task_id={}", child_id);
+                crate::println!("[fork-trace] enqueue child_task_id={}", child_id);
             }
             enqueue_task(child_id, cpu_id);
             if is_process_fork && crate::sched::scheduler::DEBUG_FORK_TRACE_LOGGING {
-                crate::early_println!("[fork-trace] return child_ns_pid={}", child_ns_pid);
+                crate::println!("[fork-trace] return child_ns_pid={}", child_ns_pid);
             }
 
             crate::breadcrumb::drop(

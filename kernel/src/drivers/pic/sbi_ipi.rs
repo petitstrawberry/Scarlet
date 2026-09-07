@@ -103,10 +103,10 @@ fn register_driver() {
             0..(crate::environment::MAX_NUM_CPUS as CpuId),
         ) {
         Ok(_) => {
-            crate::early_println!("[interrupt] RISC-V IPI: using SBI IPI");
+            crate::println!("[interrupt] RISC-V IPI: using SBI IPI");
         }
         Err(e) => {
-            crate::early_println!("[interrupt] Failed to register SBI IPI: {}", e);
+            crate::println!("[interrupt] Failed to register SBI IPI: {}", e);
         }
     }
 }

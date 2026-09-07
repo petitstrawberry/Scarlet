@@ -20,10 +20,10 @@ use alloc::vec::Vec;
 
 use crate::device::network::DevicePacket;
 use crate::device::network::MacAddress;
-use crate::early_println;
 use crate::network::NetworkInterface;
 use crate::network::protocol_stack::{LayerContext, NetworkLayer, NetworkLayerStats};
 use crate::network::socket::SocketError;
+use crate::println;
 
 const LOG_ETHERNET_PACKET_TRACE: bool = false;
 
@@ -290,13 +290,9 @@ impl EthernetLayer {
                         }
 
                         // Not in cache - trigger ARP request
-                        early_println!(
+                        println!(
                             "[Ethernet] ARP cache miss for {}.{}.{}.{} on {}, need resolution",
-                            ip_bytes[0],
-                            ip_bytes[1],
-                            ip_bytes[2],
-                            ip_bytes[3],
-                            interface
+                            ip_bytes[0], ip_bytes[1], ip_bytes[2], ip_bytes[3], interface
                         );
 
                         // Trigger ARP request with interface info
@@ -311,7 +307,7 @@ impl EthernetLayer {
         }
 
         // No way to determine destination MAC
-        early_println!("[Ethernet] Cannot resolve destination MAC: no dst_ip or eth_dst_mac");
+        println!("[Ethernet] Cannot resolve destination MAC: no dst_ip or eth_dst_mac");
         Err(SocketError::NoRoute)
     }
 
@@ -328,7 +324,7 @@ impl EthernetLayer {
             .ok_or(SocketError::InvalidPacket)?;
 
         if LOG_ETHERNET_PACKET_TRACE {
-            early_println!(
+            println!(
                 "[Ethernet] RX on {}: {} bytes (type=0x{:04X})",
                 interface,
                 frame.len(),
@@ -404,7 +400,7 @@ impl NetworkLayer for EthernetLayer {
                                 .as_any()
                                 .downcast_ref::<crate::network::arp::ArpLayer>()
                             {
-                                early_println!(
+                                println!(
                                     "[Ethernet] Queuing packet ({} bytes) for ARP resolution of {}.{}.{}.{}",
                                     packet.len(),
                                     ip_bytes[0],
@@ -454,7 +450,7 @@ impl NetworkLayer for EthernetLayer {
         // Send through device
         if let Some(device) = self.get_device(&interface_name) {
             if LOG_ETHERNET_PACKET_TRACE {
-                early_println!(
+                println!(
                     "[Ethernet] Sending {} bytes via {} to {:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X} (type=0x{:04X})",
                     frame_len,
                     interface_name,
@@ -469,14 +465,14 @@ impl NetworkLayer for EthernetLayer {
             }
             let pkt = DevicePacket::with_data(frame);
             device.send(pkt).map_err(|e| {
-                early_println!("[Ethernet] Send failed: {}", e);
+                println!("[Ethernet] Send failed: {}", e);
                 SocketError::Other("send failed".into())
             })?;
             if LOG_ETHERNET_PACKET_TRACE {
-                early_println!("[Ethernet] Send succeeded");
+                println!("[Ethernet] Send succeeded");
             }
         } else {
-            early_println!("[Ethernet] No device for interface {}", interface_name);
+            println!("[Ethernet] No device for interface {}", interface_name);
             return Err(SocketError::NoRoute);
         }
 
@@ -507,7 +503,7 @@ impl NetworkLayer for EthernetLayer {
                 .ok_or(SocketError::InvalidPacket)?;
 
             if LOG_ETHERNET_PACKET_TRACE {
-                early_println!(
+                println!(
                     "[Ethernet] RX: {} bytes (type=0x{:04X})",
                     frame.len(),
                     header.ether_type

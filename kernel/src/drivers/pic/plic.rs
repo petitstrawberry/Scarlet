@@ -171,7 +171,7 @@ impl ExternalInterruptController for Plic {
     /// Initialize the PLIC
     fn init(&mut self, mode: InterruptControllerInitMode) -> InterruptResult<()> {
         debug_assert_eq!(mode, InterruptControllerInitMode::ColdBootReset);
-        crate::early_println!(
+        crate::println!(
             "[PLIC] init: max_cpus={}, max_interrupts={}, s_mode_contexts={:?}",
             self.max_cpus,
             self.max_interrupts,
@@ -204,7 +204,7 @@ impl ExternalInterruptController for Plic {
             let addr = self.base_addr + PLIC_ENABLE_BASE + context_offset + (word * 4);
             let verify = Self::mmio_write32_with_readback(addr, 0);
             if verify != 0 {
-                crate::early_println!(
+                crate::println!(
                     "PLIC init_for_cpu: clear enable verify failed: cpu={}, context={}, addr={:#x}, read={}",
                     cpu_id,
                     context_id,
@@ -232,7 +232,7 @@ impl ExternalInterruptController for Plic {
             let new_value = current | (1 << bit_offset);
             let verify = Self::mmio_write32_with_readback(addr, new_value);
             if verify != new_value {
-                crate::early_println!(
+                crate::println!(
                     "PLIC enable_interrupt verify failed: irq={}, cpu={}, context={}, addr={:#x}, bit={}, wrote={}, read={}",
                     interrupt_id,
                     cpu_id,
@@ -291,7 +291,7 @@ impl ExternalInterruptController for Plic {
         if verify != priority {
             // Verification failed: MMIO write did not persist the expected value.
             // Return an InterruptError instead of panicking for consistent error handling.
-            crate::early_println!(
+            crate::println!(
                 "PLIC set_priority verify failed: irq={}, addr={:#x}, wrote={}, read={}",
                 interrupt_id,
                 addr,
@@ -328,7 +328,7 @@ impl ExternalInterruptController for Plic {
         if verify != threshold {
             // Verification failed: MMIO write did not persist the expected value.
             // Return an InterruptError instead of panicking for consistent error handling.
-            crate::early_println!(
+            crate::println!(
                 "PLIC set_threshold verify failed: cpu={}, addr={:#x}, wrote={}, read={}",
                 cpu_id,
                 addr,
@@ -438,7 +438,7 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
 
     // Map the PLIC's physical MMIO region into the kernel virtual address space.
     let base_addr = crate::vm::ioremap(paddr, size).map_err(|e| {
-        crate::early_println!(
+        crate::println!(
             "[interrupt] PLIC ioremap({:#x}, {:#x}) failed: {}",
             paddr,
             size,
@@ -450,7 +450,7 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
     // Try to get PLIC configuration from FDT for proper context mapping
     let controller =
         if let Some((max_interrupts, s_mode_contexts)) = get_plic_config_from_fdt(device.name()) {
-            crate::early_println!(
+            crate::println!(
                 "[interrupt] PLIC: FDT config found - ndev={}, contexts={:?}",
                 max_interrupts,
                 s_mode_contexts
@@ -462,7 +462,7 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
             ))
         } else {
             // Fallback to hardcoded values (TCG-style: M+S per hart)
-            crate::early_println!(
+            crate::println!(
                 "[interrupt] PLIC: Using default config (1023 interrupts, MAX_NUM_CPUS contexts)"
             );
             Box::new(Plic::new(
@@ -474,13 +474,13 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
 
     match crate::interrupt::InterruptManager::global().register_external_controller(controller) {
         Ok(_) => {
-            crate::early_println!(
+            crate::println!(
                 "[interrupt] PLIC registered at base address: {:#x}",
                 base_addr
             );
         }
         Err(e) => {
-            crate::early_println!("[interrupt] Failed to register PLIC: {}", e);
+            crate::println!("[interrupt] Failed to register PLIC: {}", e);
             return Err("Failed to register PLIC");
         }
     }

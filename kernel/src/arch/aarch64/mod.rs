@@ -2,10 +2,10 @@ use core::arch::asm;
 use core::mem::transmute;
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use crate::early_println;
 use crate::environment::MAX_NUM_CPUS;
 use crate::environment::STACK_SIZE;
 use crate::mem::KERNEL_STACK;
+use crate::println;
 use crate::task::Task;
 
 pub mod boot;
@@ -173,7 +173,7 @@ pub fn init_arch(cpu_id: usize) {
     aarch64.cpuid = cpu_id as u64;
 
     trap_init(aarch64);
-    early_println!("[aarch64] CPU {}: Initializing core....", cpu_id);
+    println!("[aarch64] CPU {}: Initializing core....", cpu_id);
 }
 
 /// Initialize AArch64 per-CPU state for a secondary CPU.
@@ -947,12 +947,12 @@ pub fn shutdown() -> ! {
         ret
     }
 
-    early_println!("[aarch64] Shutdown requested (PSCI SYSTEM_OFF)");
+    println!("[aarch64] Shutdown requested (PSCI SYSTEM_OFF)");
     unsafe {
         let _ = psci_hvc(PSCI_SYSTEM_OFF, 0, 0, 0);
     }
 
-    early_println!("[aarch64] Shutdown requested - entering infinite loop");
+    println!("[aarch64] Shutdown requested - entering infinite loop");
     loop {
         unsafe {
             asm!("wfi");
@@ -961,7 +961,7 @@ pub fn shutdown() -> ! {
 }
 
 pub fn shutdown_with_code(exit_code: u32) -> ! {
-    early_println!("[aarch64] Shutdown with exit code {} requested", exit_code);
+    println!("[aarch64] Shutdown with exit code {} requested", exit_code);
     shutdown()
 }
 
@@ -984,12 +984,12 @@ pub fn reboot() -> ! {
         ret
     }
 
-    early_println!("[aarch64] Reboot requested (PSCI SYSTEM_RESET)");
+    println!("[aarch64] Reboot requested (PSCI SYSTEM_RESET)");
     unsafe {
         let _ = psci_hvc(PSCI_SYSTEM_RESET, 0, 0, 0);
     }
 
-    early_println!("[aarch64] Reboot requested - entering infinite loop");
+    println!("[aarch64] Reboot requested - entering infinite loop");
     loop {
         unsafe {
             asm!("wfi");

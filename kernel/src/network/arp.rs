@@ -9,11 +9,11 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use crate::early_println;
 use crate::network::ipv4::Ipv4Address;
 use crate::network::protocol_stack::get_network_manager;
 use crate::network::protocol_stack::{LayerContext, NetworkLayer, NetworkLayerStats};
 use crate::network::socket::SocketError;
+use crate::println;
 
 /// ARP operation types
 pub mod operation {
@@ -416,7 +416,7 @@ impl ArpLayer {
         arp_packet.sender_mac = local_mac;
 
         let target_ip_bytes = target_ip.0;
-        early_println!(
+        println!(
             "[ARP] Sending request for {}.{}.{}.{} via {}",
             target_ip_bytes[0],
             target_ip_bytes[1],
@@ -548,7 +548,7 @@ impl ArpLayer {
                     );
 
                     let sender_ip_bytes = sender_ip.0;
-                    early_println!(
+                    println!(
                         "[ARP] Received request from {}.{}.{}.{} on {}, replying",
                         sender_ip_bytes[0],
                         sender_ip_bytes[1],
@@ -590,7 +590,7 @@ impl ArpLayer {
                     self.add_entry_on_interface(&iface, sender_ip, arp_packet.sender_mac);
 
                     let sender_ip_bytes = sender_ip.0;
-                    early_println!(
+                    println!(
                         "[ARP] Received reply for {}.{}.{}.{} -> {:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X} on {}",
                         sender_ip_bytes[0],
                         sender_ip_bytes[1],
@@ -612,7 +612,7 @@ impl ArpLayer {
                     };
                     let queued_count = queued_packets.len();
                     if queued_count > 0 {
-                        early_println!(
+                        println!(
                             "[ARP] Flushing {} queued packet(s) to {:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
                             queued_count,
                             arp_packet.sender_mac[0],
@@ -636,7 +636,7 @@ impl ArpLayer {
                                     &crate::network::ethernet::ether_type::IPV4.to_be_bytes(),
                                 );
 
-                                early_println!(
+                                println!(
                                     "[ARP] Sending queued packet ({} bytes) via {}",
                                     packet_bytes.len(),
                                     iface
@@ -648,7 +648,7 @@ impl ArpLayer {
                 } else {
                     // Not in pending list, but cache the reply anyway
                     let sender_ip_bytes = sender_ip.0;
-                    early_println!(
+                    println!(
                         "[ARP] Received unsolicited reply for {}.{}.{}.{} on {}",
                         sender_ip_bytes[0],
                         sender_ip_bytes[1],
@@ -692,12 +692,9 @@ impl ArpLayer {
             // Pending entry doesn't exist yet - create one with this packet
             // This can happen due to timing issues
             let ip_bytes = ip_address.0;
-            early_println!(
+            println!(
                 "[ARP] Creating pending entry for {}.{}.{}.{} to queue packet",
-                ip_bytes[0],
-                ip_bytes[1],
-                ip_bytes[2],
-                ip_bytes[3]
+                ip_bytes[0], ip_bytes[1], ip_bytes[2], ip_bytes[3]
             );
             let mut queue = Vec::new();
             queue.push(packet);

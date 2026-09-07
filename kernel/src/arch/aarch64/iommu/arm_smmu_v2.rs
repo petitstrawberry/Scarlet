@@ -22,9 +22,10 @@ use crate::{
             PlatformDeviceDriver, PlatformDeviceInfo, resource::PlatformDeviceResourceType,
         },
     },
-    driver_initcall, early_println,
+    driver_initcall,
     environment::PAGE_SIZE,
     mem::page::{Page, allocate_raw_pages, free_raw_pages},
+    println,
     sync::IrqSpinLock,
     vm::{
         self,
@@ -340,16 +341,13 @@ impl SmmuHardware {
             // it does not establish ownership. Reinitializing this bank is safe
             // because no valid SMR selects it and SCTLR.M is clear.
             allocated[index] = true;
-            early_println!(
+            println!(
                 "[arm-smmu-v2] context lease stage=reserved CB {}: cbar={:#010x} cba2r={:#010x} sctlr={:#010x}",
-                index,
-                snapshot.cbar,
-                snapshot.cba2r,
-                snapshot.sctlr,
+                index, snapshot.cbar, snapshot.cba2r, snapshot.sctlr,
             );
             return Ok(ContextLease { index, snapshot });
         }
-        early_println!(
+        println!(
             "[arm-smmu-v2] domain alloc failed stage=context: range={}..{} software-reserved={} firmware-routed={} enabled={}",
             self.stage1_context_start,
             self.context_bank_count,
@@ -364,7 +362,7 @@ impl SmmuHardware {
         let _guard = self.lock.lock();
         let context = lease.index;
         if self.context_is_routed(context) {
-            early_println!(
+            println!(
                 "[arm-smmu-v2] context lease stage=quarantined CB {}: stream route remains attached",
                 context,
             );
@@ -376,7 +374,7 @@ impl SmmuHardware {
             .invalidate_context(context, context_asid(context))
             .is_err()
         {
-            early_println!(
+            println!(
                 "[arm-smmu-v2] context lease stage=quarantined CB {}: context TLBI sync failed",
                 context,
             );
@@ -396,7 +394,7 @@ impl SmmuHardware {
         self.context_write(context, CONTEXT_MAIR1, lease.snapshot.mair1);
         arch::io_wmb();
         if self.invalidate_global().is_err() {
-            early_println!(
+            println!(
                 "[arm-smmu-v2] context lease stage=quarantined CB {}: global TLBI sync failed; SCTLR remains disabled",
                 context,
             );
@@ -405,7 +403,7 @@ impl SmmuHardware {
         self.context_write(context, CONTEXT_CONTROL, lease.snapshot.sctlr);
         arch::io_wmb();
         self.allocated_contexts.lock()[context] = false;
-        early_println!(
+        println!(
             "[arm-smmu-v2] context lease stage=released CB {}: firmware snapshot restored",
             context,
         );
@@ -443,7 +441,7 @@ impl SmmuHardware {
             );
             arch::io_wmb();
 
-            early_println!(
+            println!(
                 "[arm-smmu-v2] identity context {} ready: cbar={:#010x} sctlr={:#010x}",
                 index,
                 self.global_page_1_read(attribute_offset),
@@ -472,7 +470,7 @@ impl SmmuHardware {
             );
             arch::io_wmb();
             if self.registers.read(GLOBAL_CONTROL) & GLOBAL_CONTROL_CLIENT_POWER_DOWN != 0 {
-                early_println!(
+                println!(
                     "[arm-smmu-v2] domain alloc failed stage=client-power: scr0-before={:#010x} scr0-after={:#010x}",
                     global_control,
                     self.registers.read(GLOBAL_CONTROL),
@@ -563,11 +561,9 @@ impl SmmuHardware {
         let global_control = self.registers.read(GLOBAL_CONTROL);
         let global_fault = self.registers.read(GLOBAL_FAULT_STATUS);
         let Some(group) = self.matching_stream_group(stream_id) else {
-            early_println!(
+            println!(
                 "[arm-smmu-v2] SID {:#x} has no firmware SMR: scr0={:#010x} gfsr={:#010x}",
-                stream_id,
-                global_control,
-                global_fault,
+                stream_id, global_control, global_fault,
             );
             return Ok(());
         };
@@ -575,14 +571,9 @@ impl SmmuHardware {
         let stream_match = self.registers.read(STREAM_MATCH_BASE + group * 4);
         let stream_context = self.registers.read(STREAM_CONTEXT_BASE + group * 4);
         if stream_context & STREAM_CONTEXT_TYPE_MASK != STREAM_CONTEXT_TRANSLATE {
-            early_println!(
+            println!(
                 "[arm-smmu-v2] SID {:#x} firmware route: SMR {} smr={:#010x} s2cr={:#010x} scr0={:#010x} gfsr={:#010x}",
-                stream_id,
-                group,
-                stream_match,
-                stream_context,
-                global_control,
-                global_fault,
+                stream_id, group, stream_match, stream_context, global_control, global_fault,
             );
             return if stream_context & STREAM_CONTEXT_TYPE_MASK == STREAM_CONTEXT_BYPASS {
                 Ok(())
@@ -593,18 +584,14 @@ impl SmmuHardware {
 
         let context = (stream_context & STREAM_CONTEXT_BANK) as usize;
         if context >= self.context_bank_count {
-            early_println!(
+            println!(
                 "[arm-smmu-v2] SID {:#x} firmware route has invalid context {}: SMR {} smr={:#010x} s2cr={:#010x}",
-                stream_id,
-                context,
-                group,
-                stream_match,
-                stream_context,
+                stream_id, context, group, stream_match, stream_context,
             );
             return Err(IommuError::AttachFailed);
         }
         let context_control = self.context_read(context, CONTEXT_CONTROL);
-        early_println!(
+        println!(
             "[arm-smmu-v2] SID {:#x} firmware route: SMR {} smr={:#010x} s2cr={:#010x} CB {} cbar={:#010x} sctlr={:#010x} fsr={:#010x} scr0={:#010x} gfsr={:#010x}",
             stream_id,
             group,
@@ -639,11 +626,9 @@ impl SmmuHardware {
         {
             return Err(IommuError::AttachFailed);
         }
-        early_println!(
+        println!(
             "[arm-smmu-v2] SID {:#x} identity DMA enabled through unmatched bypass: scr0 {:#010x} -> {:#010x}",
-            stream_id,
-            inherited,
-            current,
+            stream_id, inherited, current,
         );
         Ok(())
     }
@@ -729,7 +714,7 @@ impl SmmuHardware {
         arch::io_wmb();
         claimed_streams.insert(stream_id, group);
 
-        early_println!(
+        println!(
             "[arm-smmu-v2] SID {:#x} routed by SMR {}: smr={:#010x} s2cr={:#010x}",
             stream_id,
             group,
@@ -891,7 +876,7 @@ impl IommuDomain for IdentityDomain {
                     .context_read(lease.index, CONTEXT_FAULT_STATUS)
             })
             .unwrap_or(0);
-        early_println!(
+        println!(
             "[arm-smmu-v2] identity domain synchronized: gfsr={:#010x} fsr={:#010x}",
             self.hardware.registers.read(GLOBAL_FAULT_STATUS),
             context_fault,
@@ -907,7 +892,7 @@ impl Drop for IdentityDomain {
         for (stream, route) in streams {
             if self.hardware.detach_stream(route, stream.id).is_err() {
                 restored_all = false;
-                early_println!(
+                println!(
                     "[arm-smmu-v2] failed to restore identity route for SID {:#x} during drop",
                     stream.id,
                 );
@@ -916,13 +901,13 @@ impl Drop for IdentityDomain {
         if let Some(lease) = self.context.as_ref() {
             if restored_all {
                 if !self.hardware.release_context(lease) {
-                    early_println!(
+                    println!(
                         "[arm-smmu-v2] retaining identity CB {} after context restore failure",
                         lease.index,
                     );
                 }
             } else {
-                early_println!(
+                println!(
                     "[arm-smmu-v2] retaining identity CB {} after route teardown failure",
                     lease.index,
                 );
@@ -971,7 +956,7 @@ impl DmaPageTables {
     fn allocate_table(table_address_limit: u64) -> Result<usize, IommuError> {
         let page = allocate_raw_pages(1);
         if page.is_null() {
-            early_println!(
+            println!(
                 "[arm-smmu-v2] domain alloc failed stage=table-pmm: pages=1 limit={:#x}",
                 table_address_limit,
             );
@@ -988,7 +973,7 @@ impl DmaPageTables {
             .checked_add(PAGE_SIZE as u64)
             .is_none_or(|end| end > table_address_limit)
         {
-            early_println!(
+            println!(
                 "[arm-smmu-v2] domain alloc failed stage=table-address: vaddr={:#x} paddr={:#x} end={:#x} limit={:#x}",
                 page as usize,
                 paddr,
@@ -1003,11 +988,9 @@ impl DmaPageTables {
             return Err(IommuError::DomainAllocationFailed);
         }
         #[cfg(debug_assertions)]
-        early_println!(
+        println!(
             "[arm-smmu-v2] domain alloc stage=table ready: vaddr={:#x} paddr={:#x} limit={:#x}",
-            page as usize,
-            paddr,
-            table_address_limit,
+            page as usize, paddr, table_address_limit,
         );
         Ok(paddr)
     }
@@ -1236,7 +1219,7 @@ impl IommuDomain for DmaDomain {
         flags: IommuMapFlags,
     ) -> Result<(), IommuError> {
         if let Err(error) = self.validate_range(iova, len) {
-            early_println!(
+            println!(
                 "[arm-smmu-v2] DMA map rejected reason=iova-range iova={:#x} paddr={:#x} len={:#x} flags={:#x}",
                 iova,
                 paddr,
@@ -1246,7 +1229,7 @@ impl IommuDomain for DmaDomain {
             return Err(error);
         }
         if paddr & (PAGE_SIZE - 1) != 0 {
-            early_println!(
+            println!(
                 "[arm-smmu-v2] DMA map rejected reason=paddr-alignment iova={:#x} paddr={:#x} len={:#x} flags={:#x}",
                 iova,
                 paddr,
@@ -1259,7 +1242,7 @@ impl IommuDomain for DmaDomain {
             .checked_add(len as u64)
             .is_none_or(|end| end > self.output_address_limit)
         {
-            early_println!(
+            println!(
                 "[arm-smmu-v2] DMA map rejected reason=paddr-range iova={:#x} paddr={:#x} len={:#x} flags={:#x} limit={:#x}",
                 iova,
                 paddr,
@@ -1270,7 +1253,7 @@ impl IommuDomain for DmaDomain {
             return Err(IommuError::MapFailed);
         }
         if !dma_permissions_valid(flags) {
-            early_println!(
+            println!(
                 "[arm-smmu-v2] DMA map rejected reason=permissions iova={:#x} paddr={:#x} len={:#x} flags={:#x}",
                 iova,
                 paddr,
@@ -1365,7 +1348,7 @@ impl Drop for DmaDomain {
         for (stream, route) in streams {
             if self.hardware.detach_stream(route, stream.id).is_err() {
                 restored_all = false;
-                early_println!(
+                println!(
                     "[arm-smmu-v2] failed to restore translated route for SID {:#x} during drop",
                     stream.id,
                 );
@@ -1380,7 +1363,7 @@ impl Drop for DmaDomain {
             if let Some(tables) = self.tables.lock().take() {
                 core::mem::forget(tables);
             }
-            early_println!(
+            println!(
                 "[arm-smmu-v2] retaining translated CB {} and page tables after teardown or restore failure",
                 self.context.index,
             );
@@ -1440,7 +1423,7 @@ impl IommuController for ArmSmmuV2 {
 
     fn alloc_domain(&self, config: IommuDomainConfig) -> Result<Arc<dyn IommuDomain>, IommuError> {
         if config.domain_type == IommuDomainType::Dma {
-            early_println!(
+            println!(
                 "[arm-smmu-v2] domain alloc begin type=DMA iova={:#x} size={:#x} table-limit={:#x} output-limit={:#x}",
                 config.iova_base,
                 config.iova_size,
@@ -1452,10 +1435,9 @@ impl IommuController for ArmSmmuV2 {
             }
             let iova_address_bits = required_iova_address_bits(config.iova_base, config.iova_size)?;
             if iova_address_bits > self.hardware.dma_iova_address_bits {
-                early_println!(
+                println!(
                     "[arm-smmu-v2] domain alloc failed stage=iova-width: requested={}b supported={}b",
-                    iova_address_bits,
-                    self.hardware.dma_iova_address_bits,
+                    iova_address_bits, self.hardware.dma_iova_address_bits,
                 );
                 return Err(IommuError::MapFailed);
             }
@@ -1473,14 +1455,12 @@ impl IommuController for ArmSmmuV2 {
                 self.hardware
                     .configure_dma_context(&context, tables.root, iova_address_bits)
             {
-                early_println!(
+                println!(
                     "[arm-smmu-v2] domain alloc failed stage=context-config CB {} root={:#x}: {:?}",
-                    context.index,
-                    tables.root,
-                    error,
+                    context.index, tables.root, error,
                 );
                 if !self.hardware.release_context(&context) {
-                    early_println!(
+                    println!(
                         "[arm-smmu-v2] domain alloc rollback quarantined CB {} and page tables",
                         context.index,
                     );
@@ -1491,11 +1471,9 @@ impl IommuController for ArmSmmuV2 {
                 }
                 return Err(error);
             }
-            early_println!(
+            println!(
                 "[arm-smmu-v2] domain alloc complete type=DMA CB {} root={:#x} iova={}b",
-                context.index,
-                tables.root,
-                iova_address_bits,
+                context.index, tables.root, iova_address_bits,
             );
             return Ok(Arc::new(DmaDomain {
                 hardware: Arc::clone(&self.hardware),
@@ -1627,7 +1605,7 @@ fn probe(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
     let id2 = registers.read(ID_REGISTER_2);
     if (id0 == 0 && id1 == 0 && id2 == 0) || (id0 == u32::MAX && id1 == u32::MAX && id2 == u32::MAX)
     {
-        early_println!("[arm-smmu-v2] controller is not powered yet, deferring");
+        println!("[arm-smmu-v2] controller is not powered yet, deferring");
         return probe_defer();
     }
     let register_page_shift = if id1 & ID1_LARGE_REGISTER_PAGE != 0 {
@@ -1677,7 +1655,7 @@ fn probe(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         && dma_iova_address_bits >= MIN_DMA_IOVA_BITS
         && stage1_context_start < context_bank_count;
 
-    early_println!(
+    println!(
         "[arm-smmu-v2] capabilities: id0={:#010x} id1={:#010x} id2={:#010x} S1={} 4K={} VA={}b DMA-VA={}b IPA={}b PA={}b NUMS2CB={} NUMCB={} DMA={}",
         id0,
         id1,
@@ -1734,7 +1712,7 @@ fn probe(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
     let controller = Arc::new(ArmSmmuV2 { hardware });
     manager.register_iommu_controller(phandle, controller as Arc<dyn IommuController>);
 
-    early_println!(
+    println!(
         "[arm-smmu-v2] registered phandle={:#x} paddr={:#x} page={} SMRs={} CBs={} S1-CBs={} DMA={} identity={} gfsr={:#010x}",
         phandle,
         resource.start,

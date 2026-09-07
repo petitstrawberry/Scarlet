@@ -1,7 +1,8 @@
 //! Early console for generic architecture.
 //!
 //! This module provides a simple early console interface for the kernel. It is
-//! used to print messages before the kernel heap is initialized.
+//! used by `print!` and `println!` until the normal console is enabled, including
+//! before the kernel heap is initialized. Callers do not select the backend.
 //!
 //! The early console is architecture-specific and must be implemented for each
 //! architecture.
@@ -9,17 +10,6 @@
 use core::fmt::Write;
 
 use crate::arch::early_putc;
-
-#[macro_export]
-macro_rules! early_print {
-    ($($arg:tt)*) => ($crate::earlycon::print(format_args!($($arg)*)));
-}
-
-#[macro_export]
-macro_rules! early_println {
-    ($fmt:expr) => ($crate::early_print!(concat!($fmt, "\n")));
-    ($fmt:expr, $($arg:tt)*) => ($crate::early_print!(concat!($fmt, "\n"), $($arg)*));
-}
 
 pub struct EarlyConsole;
 

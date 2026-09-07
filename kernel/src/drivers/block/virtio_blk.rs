@@ -174,8 +174,8 @@ impl VirtioBlockDevice {
         // Debug: Check actual negotiated features after init
         #[cfg(test)]
         {
-            use crate::early_println;
-            early_println!(
+            use crate::println;
+            println!(
                 "[virtio-blk] Final negotiated features (after init): 0x{:x}",
                 negotiated_features
             );

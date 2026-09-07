@@ -11,7 +11,7 @@ use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU16, Ordering};
 
-use crate::early_println;
+use crate::println;
 
 use crate::network::ipv4::Ipv4Address;
 use crate::network::protocol_stack::get_network_manager;
@@ -286,7 +286,7 @@ impl IcmpLayer {
         ip_context.set("ip_protocol", &[1]); // ICMP protocol
 
         let dest_ip_bytes = dest_ip.0;
-        early_println!(
+        println!(
             "[ICMP] Ping {}.{}.{}.{} (id={}, seq={}, data_len={})",
             dest_ip_bytes[0],
             dest_ip_bytes[1],
@@ -358,7 +358,7 @@ impl IcmpLayer {
         }
 
         let dest_ip_bytes = dest_ip.0;
-        early_println!(
+        println!(
             "[ICMP] Pong {}.{}.{}.{} (id={}, seq={}, data_len={})",
             dest_ip_bytes[0],
             dest_ip_bytes[1],
@@ -403,7 +403,7 @@ impl IcmpLayer {
             return Err(SocketError::InvalidPacket);
         }
 
-        early_println!(
+        println!(
             "[ICMP] RX: {} bytes src={}.{}.{}.{} dst={}.{}.{}.{}",
             packet.len(),
             src_ip.0[0],
@@ -421,7 +421,7 @@ impl IcmpLayer {
 
         let data = &packet[8..];
 
-        early_println!(
+        println!(
             "[ICMP] Recv: type={}, code={}, len={}",
             header.message_type,
             header.code,
@@ -443,10 +443,9 @@ impl IcmpLayer {
                 // Handle ping request - send reply
                 let identifier = u16::from_be_bytes([header.rest[0], header.rest[1]]);
                 let sequence = u16::from_be_bytes([header.rest[2], header.rest[3]]);
-                early_println!(
+                println!(
                     "[ICMP] Ping request from (id={}, seq={})",
-                    identifier,
-                    sequence
+                    identifier, sequence
                 );
 
                 if let Some(ip_layer) = get_network_manager().get_layer("ip") {
@@ -596,7 +595,7 @@ impl SocketObject for IcmpSocket {
                 // Route selection also chooses the correct source interface.
                 let has_ip = ipv4.select_source(dest_ip).is_some();
                 if !has_ip {
-                    early_println!("[ICMP] send blocked: local IP unset");
+                    println!("[ICMP] send blocked: local IP unset");
                     return Err(SocketError::NotConnected);
                 }
             }
@@ -616,10 +615,10 @@ impl SocketObject for IcmpSocket {
                     Err(e) => return Err(e),
                 }
             } else {
-                early_println!("[ICMP] send failed: ICMP layer unavailable");
+                println!("[ICMP] send failed: ICMP layer unavailable");
             }
         } else {
-            early_println!("[ICMP] send failed: IP layer unavailable");
+            println!("[ICMP] send failed: IP layer unavailable");
         }
 
         Err(SocketError::NoRoute)

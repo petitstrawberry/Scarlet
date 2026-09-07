@@ -3397,7 +3397,7 @@ impl Task {
         if crate::sched::scheduler::DEBUG_FORK_TRACE_LOGGING
             && crate::sched::scheduler::is_fork_trace_task(self.id)
         {
-            crate::early_println!(
+            crate::println!(
                 "[fork-trace] child_task_id={} {} cpu={} detail={}",
                 self.id,
                 phase,
@@ -4185,7 +4185,7 @@ pub fn task_initial_kernel_entrypoint() -> ! {
         if crate::sched::scheduler::DEBUG_FORK_TRACE_LOGGING
             && crate::sched::scheduler::is_fork_trace_task(current_task.get_id())
         {
-            crate::early_println!(
+            crate::println!(
                 "[fork-trace] child_task_id={} kernel-entry cpu={}",
                 current_task.get_id(),
                 cpu.get_cpuid()
@@ -4244,7 +4244,7 @@ pub fn task_initial_kernel_entrypoint() -> ! {
         if crate::sched::scheduler::DEBUG_FORK_TRACE_LOGGING
             && crate::sched::scheduler::is_fork_trace_task(current_task.get_id())
         {
-            crate::early_println!(
+            crate::println!(
                 "[fork-trace] child_task_id={} user-return cpu={}",
                 current_task.get_id(),
                 cpu.get_cpuid()
