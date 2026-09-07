@@ -504,16 +504,18 @@ impl TransparentExecutor {
         }
 
         // Setup ABI-specific environment with the clean VFS
-        if let Some(ref vfs_arc) = *task.vfs.read() {
+        // get_vfs() clones the Arc and releases the task's IRQ read lock before
+        // ABI callbacks run. VFS mutations may need to sleep on contention.
+        if let Some(vfs_arc) = task.get_vfs() {
             // Step 1: Overlay environment setup with prepared paths
-            abi.setup_overlay_environment(vfs_arc, &base_vfs, &system_path, &config_path)
+            abi.setup_overlay_environment(&vfs_arc, &base_vfs, &system_path, &config_path)
                 .map_err(|e| ExecutorError::ExecutionFailed(e.to_string()))?;
 
             // Step 2: Shared resources setup with base VFS
-            match abi.setup_shared_resources(vfs_arc, &base_vfs) {
+            match abi.setup_shared_resources(&vfs_arc, &base_vfs) {
                 Ok(()) => {}
                 Err(e) => {
-                    // Log error but do not fail execution - shared resources are optional
+                    // Log the shared-resource setup error and propagate the failure.
                     crate::println!(
                         "Warning: Failed to setup shared resources for ABI {}: {}",
                         abi_name,
@@ -529,7 +531,7 @@ impl TransparentExecutor {
         }
 
         // Set default working directory for the ABI via VfsManager
-        if let Some(vfs) = task.vfs.read().clone() {
+        if let Some(vfs) = task.get_vfs() {
             let _ = vfs.set_cwd_by_path(abi.get_default_cwd());
         }
 
