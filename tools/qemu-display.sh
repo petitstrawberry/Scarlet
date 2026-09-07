@@ -11,7 +11,7 @@ scarlet_qemu_display() {
 
     case "$(uname -s)" in
         Darwin)
-            printf '%s\n' cocoa
+            printf '%s\n' 'cocoa,gl=on'
             return 0
             ;;
         Linux)
@@ -23,7 +23,7 @@ scarlet_qemu_display() {
                 fi
                 for backend in gtk sdl; do
                     if printf '%s\n' "$available_displays" | grep -Fxq "$backend"; then
-                        printf '%s\n' "$backend"
+                        printf '%s,gl=on\n' "$backend"
                         return 0
                     fi
                 done
@@ -33,4 +33,23 @@ scarlet_qemu_display() {
 
     # Preserve remote access when there is no local GUI session or backend.
     printf '%s\n' 'vnc=:0'
+}
+
+# Match the full project's GPU to the selected display's GL mode.
+# Arguments: selected QEMU display (including options).
+# SCARLET_QEMU_GPU always takes precedence over display selection.
+scarlet_qemu_gpu() {
+    if [ -n "${SCARLET_QEMU_GPU:-}" ]; then
+        printf '%s\n' "$SCARLET_QEMU_GPU"
+        return 0
+    fi
+
+    case ",$1," in
+        *,gl=on,*|*,gl=core,*|*,gl=es,*)
+            printf '%s\n' virtio-gpu-gl-pci
+            ;;
+        *)
+            printf '%s\n' virtio-gpu-pci
+            ;;
+    esac
 }

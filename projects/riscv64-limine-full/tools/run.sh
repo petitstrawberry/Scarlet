@@ -62,13 +62,18 @@ BOOT_IMAGE="$PROJECT_DIR/.scarlet/images/limine-riscv64-full.img"
 ROOTFS_IMAGE="$PROJECT_DIR/.scarlet/images/rootfs-riscv64-full.ext2"
 
 QEMU_DEBUG_ARGS=""
-QEMU_ACCEL="${SCARLET_QEMU_ACCEL:-tcg}"
+source "$PROJECT_ROOT/tools/qemu-accel.sh" || exit 1
+QEMU_ACCEL="$(scarlet_qemu_accel qemu-system-riscv64 riscv64)" || exit 1
+QEMU_CPU_ARGS=()
+if [ "${QEMU_ACCEL%%,*}" = "kvm" ]; then
+    QEMU_CPU_ARGS=(-cpu host)
+fi
 QEMU_SMP="${SCARLET_QEMU_SMP:-1}"
 QEMU_MEMORY="${SCARLET_QEMU_MEMORY:-8G}"
 QEMU_MACHINE="${SCARLET_QEMU_MACHINE_RV64:-virt,acpi=off}"
 source "$PROJECT_ROOT/tools/qemu-display.sh" || exit 1
 QEMU_DISPLAY="$(scarlet_qemu_display qemu-system-riscv64)" || exit 1
-QEMU_GPU="${SCARLET_QEMU_GPU:-virtio-gpu-pci}"
+QEMU_GPU="$(scarlet_qemu_gpu "$QEMU_DISPLAY")" || exit 1
 QEMU_NET="${SCARLET_QEMU_NET:-1}"
 QEMU_USB_NCM="${SCARLET_QEMU_USB_NCM:-0}"
 QEMU_INPUT="${SCARLET_QEMU_INPUT:-1}"
@@ -430,6 +435,7 @@ fi
 
 QEMU_CMD=(qemu-system-riscv64
     -machine "$QEMU_MACHINE" \
+    "${QEMU_CPU_ARGS[@]}" \
     -accel "$QEMU_ACCEL" \
     "${QEMU_MEMORY_ARGS[@]}" \
     -smp "$QEMU_SMP" \

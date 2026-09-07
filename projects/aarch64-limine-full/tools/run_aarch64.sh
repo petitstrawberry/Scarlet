@@ -62,20 +62,29 @@ BOOT_IMAGE="$PROJECT_DIR/.scarlet/images/limine-aarch64-full.img"
 ROOTFS_IMAGE="$PROJECT_DIR/.scarlet/images/rootfs-aarch64-full.ext2"
 
 QEMU_DEBUG_ARGS=""
-QEMU_ACCEL="${SCARLET_QEMU_ACCEL:-tcg}"
+source "$PROJECT_ROOT/tools/qemu-accel.sh" || exit 1
+QEMU_ACCEL="$(scarlet_qemu_accel qemu-system-aarch64 aarch64)" || exit 1
+QEMU_ACCEL_TYPE="${QEMU_ACCEL%%,*}"
 QEMU_SMP="${SCARLET_QEMU_SMP:-1}"
 QEMU_MEMORY="${SCARLET_QEMU_MEMORY:-8G}"
 QEMU_MACHINE="${SCARLET_QEMU_MACHINE_AARCH64:-virt,gic-version=3,acpi=off}"
+QEMU_VIRTUALIZATION_DEFAULT=1
+case "$QEMU_ACCEL_TYPE" in
+    kvm|hvf)
+        # Hardware acceleration does not imply support for nested guests.
+        QEMU_VIRTUALIZATION_DEFAULT=0
+        ;;
+esac
 if [ -n "${SCARLET_QEMU_CPU_AARCH64:-}" ]; then
     QEMU_CPU="$SCARLET_QEMU_CPU_AARCH64"
-elif [ "$QEMU_ACCEL" = "hvf" ]; then
+elif [ "$QEMU_ACCEL_TYPE" = "hvf" ] || [ "$QEMU_ACCEL_TYPE" = "kvm" ]; then
     QEMU_CPU="host"
 else
     QEMU_CPU="max"
 fi
 source "$PROJECT_ROOT/tools/qemu-display.sh" || exit 1
 QEMU_DISPLAY="$(scarlet_qemu_display qemu-system-aarch64)" || exit 1
-QEMU_GPU="${SCARLET_QEMU_GPU:-virtio-gpu-pci}"
+QEMU_GPU="$(scarlet_qemu_gpu "$QEMU_DISPLAY")" || exit 1
 QEMU_NET="${SCARLET_QEMU_NET:-1}"
 QEMU_USB_NCM="${SCARLET_QEMU_USB_NCM:-0}"
 QEMU_INPUT="${SCARLET_QEMU_INPUT:-1}"
@@ -131,7 +140,7 @@ case ",$QEMU_MACHINE," in
     *,virtualization=*)
         ;;
     *)
-        if { [ "${SCARLET_QEMU_VIRTUALIZATION:-1}" = "1" ] || [ "${SCARLET_QEMU_VIRTUALIZATION:-}" = "true" ]; } && [ "$QEMU_ACCEL" != "hvf" ]; then
+        if { [ "${SCARLET_QEMU_VIRTUALIZATION:-$QEMU_VIRTUALIZATION_DEFAULT}" = "1" ] || [ "${SCARLET_QEMU_VIRTUALIZATION:-}" = "true" ]; } && [ "$QEMU_ACCEL_TYPE" != "hvf" ]; then
             QEMU_MACHINE="${QEMU_MACHINE},virtualization=on"
         fi
         ;;
@@ -191,7 +200,7 @@ cleanup() {
 trap cleanup EXIT
 
 find_efi_code() {
-    if [ "$QEMU_ACCEL" = "hvf" ] && [ -n "${SCARLET_EFI_CODE_ARM64_HVF:-}" ] && [ -f "${SCARLET_EFI_CODE_ARM64_HVF}" ]; then
+    if [ "$QEMU_ACCEL_TYPE" = "hvf" ] && [ -n "${SCARLET_EFI_CODE_ARM64_HVF:-}" ] && [ -f "${SCARLET_EFI_CODE_ARM64_HVF}" ]; then
         printf '%s\n' "${SCARLET_EFI_CODE_ARM64_HVF}"
         return 0
     fi
@@ -217,7 +226,7 @@ find_efi_code() {
 }
 
 find_efi_vars_template() {
-    if [ "$QEMU_ACCEL" = "hvf" ] && [ -n "${SCARLET_EFI_VARS_ARM64_HVF:-}" ] && [ -f "${SCARLET_EFI_VARS_ARM64_HVF}" ]; then
+    if [ "$QEMU_ACCEL_TYPE" = "hvf" ] && [ -n "${SCARLET_EFI_VARS_ARM64_HVF:-}" ] && [ -f "${SCARLET_EFI_VARS_ARM64_HVF}" ]; then
         printf '%s\n' "${SCARLET_EFI_VARS_ARM64_HVF}"
         return 0
     fi

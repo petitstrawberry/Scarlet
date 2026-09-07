@@ -84,9 +84,11 @@ cargo make run-riscv64
 cargo make run-aarch64
 ```
 
-On desktop hosts, full images open a QEMU window automatically (Cocoa on macOS;
-GTK or SDL on Linux). Serial logs remain in the terminal. For environment setup,
-headless/VNC options, builds, and development commands, see the
+On desktop hosts, full images open a GL-enabled QEMU window automatically
+(Cocoa on macOS; GTK or SDL on Linux). Matching host/guest architectures use
+KVM or HVF when available; other environments use TCG. Serial logs remain in
+the terminal. For environment setup, headless/VNC options, builds, and
+development commands, see the
 [development guide](docs/development/README.md).
 For physical devices, follow the relevant [hardware project](#hardware-support).
 

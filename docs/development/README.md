@@ -45,6 +45,26 @@ debug build. The `debug-riscv64` and `debug-aarch64` tasks start QEMU paused
 with a GDB server. See [userspace development](../userspace/README.md) for
 application-only builds.
 
+## QEMU acceleration
+
+Full projects automatically select hardware acceleration when the host and
+guest CPU architectures match: HVF on Apple Silicon macOS, or KVM on Linux.
+The runner checks QEMU's supported accelerators and the host's HVF support
+or read/write access to `/dev/kvm`. Otherwise it uses TCG, including when
+running AArch64 or RISC-V Scarlet on an x86 host. KVM and HVF use `-cpu host`.
+
+`SCARLET_QEMU_ACCEL` overrides this selection. For example, to force CPU
+emulation:
+
+```sh
+SCARLET_QEMU_ACCEL=tcg cargo make run-aarch64
+```
+
+The AArch64 full project exposes guest virtualization extensions by default
+only under TCG. KVM/HVF acceleration does not by itself provide nested
+virtualization for Scarlet's hypervisor. The microvm project retains its
+TCG default because it runs guests inside Scarlet.
+
 ## QEMU display
 
 Full projects open a QEMU GUI by default: Cocoa on macOS, or GTK (with SDL as
@@ -52,7 +72,9 @@ the fallback) on Linux when `DISPLAY` or `WAYLAND_DISPLAY` is set. The Linux
 runner checks which backends the selected QEMU supports. Without a local GUI
 session or supported GUI backend, it keeps the VNC display (`vnc=:0`). Serial
 output stays in the terminal. The same selection applies to debug runs.
-The GPU-less microvm project remains headless by default.
+Local GUI defaults include `gl=on` and `virtio-gpu-gl-pci`, independently of
+whether the CPU uses TCG, KVM, or HVF. VNC and non-GL displays keep
+`virtio-gpu-pci`. The GPU-less microvm project remains headless by default.
 
 `SCARLET_QEMU_DISPLAY` overrides automatic selection, including display options.
 For example:
@@ -65,11 +87,12 @@ SCARLET_QEMU_DISPLAY=none cargo make run-aarch64
 SCARLET_QEMU_DISPLAY='vnc=:0' cargo make run-riscv64
 ```
 
-Full projects use `virtio-gpu-pci` by default. To enable the GL GPU on macOS:
+`SCARLET_QEMU_GPU` overrides the display-based GPU selection. For example,
+to explicitly disable GL on macOS:
 
 ```sh
-SCARLET_QEMU_DISPLAY='cocoa,gl=on,retina=on' \
-SCARLET_QEMU_GPU=virtio-gpu-gl-pci \
+SCARLET_QEMU_DISPLAY='cocoa,gl=off' \
+SCARLET_QEMU_GPU=virtio-gpu-pci \
 cargo make run-aarch64
 ```
 
