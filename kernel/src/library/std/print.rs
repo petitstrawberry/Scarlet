@@ -17,6 +17,9 @@
 //! Output uses earlycon until device initialization enables the normal console.
 //! Callers use the same macros throughout boot and normal operation. UART writers
 //! implement the `Write` trait and handle CR+LF conversion for newlines.
+//! Normal-console discovery does not allocate a device snapshot or wait for the
+//! device registry lock. If no console can be reached, output falls back to earlycon.
+//! The print lock still serializes messages, and UART drivers retain their TX locks.
 
 use core::fmt;
 use core::fmt::Write;
@@ -105,6 +108,13 @@ pub fn _print(args: fmt::Arguments) {
     let mut log = LogWriter;
     let _ = log.write_fmt(args);
 
+    if !write_to_normal_console(args) {
+        // The message is already in the ring. The architecture early console
+        // also handles framebuffer fallback, so do not mirror it a second time.
+        let _ = crate::earlycon::ConsoleOutput.write_fmt(args);
+        return;
+    }
+
     if crate::earlyfb::is_redirection_enabled() && crate::earlyfb::is_initialized() {
         struct EarlyFramebufferWriter;
 
@@ -118,7 +128,9 @@ pub fn _print(args: fmt::Arguments) {
         let mut early_framebuffer = EarlyFramebufferWriter;
         let _ = early_framebuffer.write_fmt(args);
     }
+}
 
+fn write_to_normal_console(args: fmt::Arguments) -> bool {
     let manager = DeviceManager::get_manager();
 
     struct CharDeviceWriter<'a>(&'a dyn CharDevice);
@@ -130,38 +142,33 @@ pub fn _print(args: fmt::Arguments) {
         }
     }
 
-    // 1) Prefer devices that advertise Serial capability (raw UART-like)
-    let devices = manager.get_devices_with_ids();
-    for (_, dev) in &devices {
-        if dev.device_type() == DeviceType::Char
-            && dev.capabilities().contains(&DeviceCapability::Serial)
-            && dev.name() != "null"
-        {
+    // Prefer Serial devices, then other non-TTY character devices. Never use
+    // the null sink as a console. Each lookup releases the registry lock before
+    // invoking any device methods; a busy registry leads back to earlycon.
+    for serial_only in [true, false] {
+        let mut after = None;
+        while let Some((id, dev)) = manager.try_get_next_device(after) {
+            after = Some(id);
+            if dev.device_type() != DeviceType::Char || dev.name() == "null" {
+                continue;
+            }
+            let capabilities = dev.capabilities();
+            if serial_only {
+                if !capabilities.contains(&DeviceCapability::Serial) {
+                    continue;
+                }
+            } else if capabilities.contains(&DeviceCapability::Tty) {
+                continue;
+            }
+
             if let Some(char_dev) = dev.as_char_device() {
                 let mut writer = CharDeviceWriter(char_dev);
                 if writer.write_fmt(args).is_ok() {
-                    return;
+                    return true;
                 }
             }
         }
     }
 
-    // 2) Otherwise choose any Char device that is NOT TTY-capable and NOT the null sink
-    for (_, dev) in &devices {
-        if dev.device_type() == DeviceType::Char
-            && !dev.capabilities().contains(&DeviceCapability::Tty)
-        {
-            if let Some(char_dev) = dev.as_char_device() {
-                let mut writer = CharDeviceWriter(char_dev);
-                if writer.write_fmt(args).is_ok() {
-                    return;
-                }
-            }
-        }
-    }
-
-    if !crate::earlyfb::is_initialized() {
-        let mut early = crate::earlycon::EarlyConsole::new();
-        let _ = early.write_fmt(args);
-    }
+    false
 }
