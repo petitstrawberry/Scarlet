@@ -6,7 +6,7 @@ describes the repository at a high level; this page is the documentation map.
 
 ## Start Here
 
-- [Build and development guide](build-system/README.md) - Nix environment,
+- [Development guide](development/README.md) - Nix environment,
   QEMU images, build/run commands, formatting, tests, and Rustdoc.
 - [Kernel development map](kernel/README.md) - kernel library/BSP boundary,
   source map, boot sequence, memory ownership, modules, and test scope.

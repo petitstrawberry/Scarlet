@@ -10,28 +10,13 @@ This is the integration guide, reviewed on 2026-09-06. The SDK's own
 defines its CLI, manifest, lock, and plugin boundary. The package versions,
 manifest schema, Cargo locks, project locks, and kernel ABI are separate things.
 
-## Development environment
-
-Use the Nix development shell from the Scarlet repository root:
-
-```sh
-nix develop
-```
-
-With `direnv` and `nix-direnv`, entering the checkout can be reduced to:
-
-```sh
-direnv allow
-```
-
-Manual setup is not the supported path. It must provide an equivalent Scarlet
-Rust toolchain, `cargo-make`, `cargo-scarlet`, QEMU, cross tools, filesystem
-image tools, firmware paths, fontconfig, and the other tools described in
-[flake.nix](../../flake.nix).
+Repository setup, build/run tasks, and emulator settings are covered separately
+in the [development guide](../development/README.md).
 
 ## Quick start
 
-From the Scarlet root in the Nix development shell:
+From the Scarlet root in the
+[development environment](../development/README.md#development-environment):
 
 ```sh
 # Kernel/BSP only.
@@ -44,70 +29,7 @@ cargo scarlet image --project projects/riscv64-limine-full
 cargo scarlet run --project projects/riscv64-limine-full --release
 ```
 
-`cargo make build-riscv64` / `build-aarch64` build kernel and core user
-components; they do not perform the full `image` operation.
-`cargo make run-riscv64` / `run-aarch64` wrap the release `run` commands.
 See [userspace development](../userspace/README.md) for application-only builds.
-
-### Build and run with cargo-make
-
-The `cargo make` tasks are convenience wrappers around `cargo scarlet`:
-
-```sh
-# Build kernel and core user components (image composition is separate).
-cargo make build-riscv64
-cargo make build-aarch64
-
-# Build images and run through the project runner.
-cargo make run-riscv64
-cargo make run-aarch64
-cargo make run-aarch64-microvm
-```
-
-Full projects open a QEMU GUI by default: Cocoa on macOS, or GTK (with SDL as
-the fallback) on Linux when `DISPLAY` or `WAYLAND_DISPLAY` is set. The Linux
-runner checks which backends the selected QEMU supports. Without a local GUI
-session or supported GUI backend, it keeps the VNC display (`vnc=:0`). Serial
-output stays in the terminal. This also applies to `run-debug-*`, `debug-*`,
-and direct `cargo scarlet run` commands for full projects. The GPU-less microvm
-project remains headless by default.
-
-`SCARLET_QEMU_DISPLAY` overrides automatic selection, including display options.
-For example:
-
-```sh
-# Serial console only, without a graphical display or VNC server.
-SCARLET_QEMU_DISPLAY=none cargo make run-aarch64
-
-# Use VNC explicitly instead of a local window.
-SCARLET_QEMU_DISPLAY='vnc=:0' cargo make run-riscv64
-```
-
-GPU selection is unchanged. To enable the GL GPU explicitly on macOS:
-
-```sh
-SCARLET_QEMU_DISPLAY='cocoa,gl=on,retina=on' \
-SCARLET_QEMU_GPU=virtio-gpu-gl-pci \
-cargo make run-aarch64
-```
-
-See [QEMU display options](https://www.qemu.org/docs/master/system/invocation.html#display-options)
-for backend-specific settings.
-
-### Cross C compiler selection
-
-The Nix development shell and Docker image provide unwrapped Clang as
-`TARGET_CC`, the cc-rs fallback for cross compilation. Native C builds keep
-using `HOST_CC`/`CC` and the Nix compiler wrapper. Avoid exporting global
-`CC_<target>` defaults: they override application settings in Cargo's `[env]`
-table, including `yt-for-scarlet`'s cross GCC selection.
-
-Applications can select a different cross compiler with `CC_<target>` in
-their own `.cargo/config.toml`; cc-rs checks that before `TARGET_CC`. This
-controls C headers and compilation only, not Rust `std` support. The existing
-`cargo make test-cross-cc` task checks Scarlet targets, application overrides,
-and native compiler selection in the Nix shell. After updating the flake,
-reload direnv or re-enter the shell to discard old environment variables.
 
 ## Project layout
 
@@ -428,45 +350,9 @@ boot entry is a placeholder. For a current Limine project, use the tracked
 reference BSPs as the implementation guide. LSM scaffolding instead emits
 `module.toml`, `src/lib.rs`, and its Cargo/build configuration.
 
-## Development commands
-
-Run these from the repository root in the Nix development shell:
-
-```sh
-# Formatting
-cargo make fmt
-cargo make fmt-check
-
-# Clippy
-cargo make clippy-riscv64
-cargo make clippy-aarch64
-
-# Kernel tests
-cargo make test-riscv64
-cargo make test-aarch64
-```
-
-The root test tasks run the kernel tests under QEMU and require the same Nix
-shell environment as normal runs. CI currently expects both `test-riscv64` and
-`test-aarch64` to pass. To run an individual kernel test:
-
-```sh
-cd kernel
-cargo test --target targets/riscv64gc-unknown-none-elf.json test_name
-```
-
-## Rust documentation
-
-From the repository root:
-
-```sh
-cargo make doc-riscv64
-cargo make doc-kernel
-cargo make doc-userlib
-```
-
 ## See also
 
+- [Repository development](../development/README.md)
 - [Kernel development](../kernel/README.md)
 - [Userspace development](../userspace/README.md)
 - [Distribution model](../architecture/distro-model.md)

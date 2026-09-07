@@ -87,7 +87,7 @@ cargo make run-aarch64
 On desktop hosts, full images open a QEMU window automatically (Cocoa on macOS;
 GTK or SDL on Linux). Serial logs remain in the terminal. For environment setup,
 headless/VNC options, builds, and development commands, see the
-[build and development guide](docs/build-system/README.md).
+[development guide](docs/development/README.md).
 For physical devices, follow the relevant [hardware project](#hardware-support).
 
 ## Documentation
@@ -95,7 +95,7 @@ For physical devices, follow the relevant [hardware project](#hardware-support).
 The [documentation index](docs/README.md) maps subsystem designs, API references,
 and compatibility details. Developer entry points:
 
-- [Build and development guide](docs/build-system/README.md): environment,
+- [Development guide](docs/development/README.md): environment,
   images, runners, tests, formatting, and Rustdoc.
 - [Kernel development](docs/kernel/README.md): source map, boot, memory,
   filesystems, drivers, and modules.
