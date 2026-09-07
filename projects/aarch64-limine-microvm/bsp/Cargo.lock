@@ -68,6 +68,7 @@ dependencies = [
 [[package]]
 name = "scarlet"
 version = "1.0.0"
+source = "git+https://github.com/petitstrawberry/Scarlet?tag=kernel-v1.0.0#c0f334b76abeac27b5d02ad6ae07593498e7b8ae"
 dependencies = [
  "fdt",
  "font8x8",
