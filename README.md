@@ -84,8 +84,10 @@ cargo make run-riscv64
 cargo make run-aarch64
 ```
 
-For environment setup, QEMU display options, builds, and development commands,
-see the [build and development guide](docs/build-system/README.md).
+On desktop hosts, full images open a QEMU window automatically (Cocoa on macOS;
+GTK or SDL on Linux). Serial logs remain in the terminal. For environment setup,
+headless/VNC options, builds, and development commands, see the
+[build and development guide](docs/build-system/README.md).
 For physical devices, follow the relevant [hardware project](#hardware-support).
 
 ## Documentation

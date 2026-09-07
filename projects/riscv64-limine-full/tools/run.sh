@@ -66,7 +66,8 @@ QEMU_ACCEL="${SCARLET_QEMU_ACCEL:-tcg}"
 QEMU_SMP="${SCARLET_QEMU_SMP:-1}"
 QEMU_MEMORY="${SCARLET_QEMU_MEMORY:-8G}"
 QEMU_MACHINE="${SCARLET_QEMU_MACHINE_RV64:-virt,acpi=off}"
-QEMU_DISPLAY="${SCARLET_QEMU_DISPLAY:-vnc=:0}"
+source "$PROJECT_ROOT/tools/qemu-display.sh" || exit 1
+QEMU_DISPLAY="$(scarlet_qemu_display qemu-system-riscv64)" || exit 1
 QEMU_GPU="${SCARLET_QEMU_GPU:-virtio-gpu-pci}"
 QEMU_NET="${SCARLET_QEMU_NET:-1}"
 QEMU_USB_NCM="${SCARLET_QEMU_USB_NCM:-0}"

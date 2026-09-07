@@ -73,7 +73,8 @@ elif [ "$QEMU_ACCEL" = "hvf" ]; then
 else
     QEMU_CPU="max"
 fi
-QEMU_DISPLAY="${SCARLET_QEMU_DISPLAY:-vnc=:0}"
+source "$PROJECT_ROOT/tools/qemu-display.sh" || exit 1
+QEMU_DISPLAY="$(scarlet_qemu_display qemu-system-aarch64)" || exit 1
 QEMU_GPU="${SCARLET_QEMU_GPU:-virtio-gpu-pci}"
 QEMU_NET="${SCARLET_QEMU_NET:-1}"
 QEMU_USB_NCM="${SCARLET_QEMU_USB_NCM:-0}"

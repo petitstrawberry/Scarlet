@@ -64,13 +64,35 @@ cargo make run-aarch64
 cargo make run-aarch64-microvm
 ```
 
-Pass QEMU display and GPU arguments through explicitly. For example, on macOS:
+Full projects open a QEMU GUI by default: Cocoa on macOS, or GTK (with SDL as
+the fallback) on Linux when `DISPLAY` or `WAYLAND_DISPLAY` is set. The Linux
+runner checks which backends the selected QEMU supports. Without a local GUI
+session or supported GUI backend, it keeps the VNC display (`vnc=:0`). Serial
+output stays in the terminal. This also applies to `run-debug-*`, `debug-*`,
+and direct `cargo scarlet run` commands for full projects. The GPU-less microvm
+project remains headless by default.
+
+`SCARLET_QEMU_DISPLAY` overrides automatic selection, including display options.
+For example:
+
+```sh
+# Serial console only, without a graphical display or VNC server.
+SCARLET_QEMU_DISPLAY=none cargo make run-aarch64
+
+# Use VNC explicitly instead of a local window.
+SCARLET_QEMU_DISPLAY='vnc=:0' cargo make run-riscv64
+```
+
+GPU selection is unchanged. To enable the GL GPU explicitly on macOS:
 
 ```sh
 SCARLET_QEMU_DISPLAY='cocoa,gl=on,retina=on' \
 SCARLET_QEMU_GPU=virtio-gpu-gl-pci \
 cargo make run-aarch64
 ```
+
+See [QEMU display options](https://www.qemu.org/docs/master/system/invocation.html#display-options)
+for backend-specific settings.
 
 ### Cross C compiler selection
 
