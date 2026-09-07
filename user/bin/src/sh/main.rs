@@ -15,7 +15,7 @@ use std::{
     vec::Vec,
 };
 
-// New modules for enhanced shell
+// Interactive shell modules
 mod history;
 mod line_editor;
 mod parser;
@@ -851,10 +851,10 @@ fn execute_pipeline(pipeline: &Pipeline) -> i32 {
     last_status
 }
 
-/// Interactive shell mode (enhanced version with line editing and history)
+/// Interactive shell mode with line editing and history.
 fn interactive_shell() -> i32 {
     print_motd();
-    println!("Scarlet Shell (Enhanced Interactive Mode)");
+    println!("Scarlet Shell");
 
     // Initialize job list
     init_jobs();
