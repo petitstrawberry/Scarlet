@@ -119,6 +119,10 @@ name = "date"
 path = "src/date.rs"
 
 [[bin]]
+name = "kernel-info"
+path = "src/kernel_info.rs"
+
+[[bin]]
 name = "env-test"
 path = "src/env_test.rs"
 

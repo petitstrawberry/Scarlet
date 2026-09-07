@@ -41,6 +41,9 @@ Use `scarlet_os::system::kernel_info()` to query the running kernel's `name`,
 independently of the distribution metadata. Linux-compatible `uname` values
 remain separate compatibility information, not the native kernel version.
 
+The base bundle includes `kernel-info`, a native command that calls this API
+and prints the kernel name, version, and build target on one line.
+
 ## In-tree builds
 
 The root is not a single Cargo workspace. [.cargo/Cargo.toml](../../.cargo/Cargo.toml)

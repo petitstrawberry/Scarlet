@@ -63,6 +63,13 @@ to = "/system/scarlet/bin/hello"
 
 [[layers]]
 kind = "cargo"
+source = "../../user/std-bin"
+package = "scarlet-std-bin"
+bin = "kernel-info"
+to = "/system/scarlet/bin/kernel-info"
+
+[[layers]]
+kind = "cargo"
 source = "../../user/bin"
 package = "user-bin"
 bin = "ps"
