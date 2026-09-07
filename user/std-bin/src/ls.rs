@@ -1,6 +1,7 @@
 use std::env;
 use std::fs;
 use std::io;
+use std::path::Path;
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
@@ -30,8 +31,19 @@ fn main() -> ExitCode {
 
 fn list_path(path: &str) -> io::Result<()> {
     let mut rows = Vec::new();
+    let entries = fs::read_dir(path)?;
 
-    for entry in fs::read_dir(path)? {
+    // read_dir omits these entries; preserve Scarlet ls's directory listing.
+    for name in [".", ".."] {
+        let metadata = fs::metadata(Path::new(path).join(name))?;
+        rows.push(Row {
+            kind: kind_name(metadata.file_type()),
+            size: metadata.len(),
+            name: name.to_owned(),
+        });
+    }
+
+    for entry in entries {
         let entry = entry?;
         let file_name = entry.file_name();
         let name = file_name.to_string_lossy().into_owned();
