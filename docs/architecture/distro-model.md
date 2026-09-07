@@ -166,7 +166,7 @@ kind = "cargo"
 source = "../../user/bin"
 package = "user-bin"
 bin = "microvm-init"
-to = "/system/scarlet/bin/init"
+to = "/init"
 
 [images.boot]
 format = "limine-uefi"
@@ -211,15 +211,15 @@ contain ordered layers, not packages:
 # bundles/base/bundle.toml
 [[layers]]
 kind = "copy"
-source = "fs"
-to = "/"
+source = "fs/system"
+to = "/roots"
 
 [[layers]]
 kind = "cargo"
 source = "../../user/bin"
 package = "user-bin"
 bin = "sh"
-to = "/system/scarlet/bin/sh"
+to = "/roots/scarlet/bin/sh"
 ```
 
 Projects reference bundles through image layers:
@@ -265,7 +265,7 @@ hash = "sha256:..."
 kind = "cargo"
 package = "user-bin"
 bin = "sh"
-to = "/system/scarlet/bin/sh"
+to = "/roots/scarlet/bin/sh"
 hash = "sha256:..."
 
 [sections.rootfs.layers.source]

@@ -94,7 +94,7 @@ kind = "cargo"
 source = "../../user/std-bin"
 package = "scarlet-std-bin"
 bin = "hello"
-to = "/system/scarlet/bin/hello"
+to = "/roots/scarlet/bin/hello"
 ```
 
 The `source` path is relative to the declaring bundle, not the shell's current
@@ -110,11 +110,14 @@ from the image to hide a dependency integration failure. See the
 
 ## Startup and services
 
-The kernel loads `/system/scarlet/bin/init` from the initramfs and passes the
+The kernel loads `/init` from the initramfs (overridable with `init=`) and passes the
 kernel command line. The default [init](../../user/bin/src/init.rs) honors
-`root=` / `rootfstype=`, prepares the filesystem layout, and execs
-`/system/scarlet/bin/stemd`. The microvm manifest instead installs its own
-`microvm-init` at the same initial-program path.
+`root=` / `rootfstype=`, constructs and seals the ABI filesystem views, and
+execs `/bin/stemd` inside that Environment while retaining PID 1.
+The microvm manifest instead installs `microvm-init` at `/init` and enters
+the Linux view to run Firecracker. See
+[Execution Environments](../abi/execution-environments.md) for the API,
+inheritance rules and userspace-owned backing layout.
 
 [stemd](../services/stemd.md) owns service ordering, readiness, child reaping,
 and the desktop application registry. The source configuration lives in

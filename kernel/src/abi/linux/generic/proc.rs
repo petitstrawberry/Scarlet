@@ -121,8 +121,11 @@ pub fn sys_unshare(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 
     trapframe.increment_pc_next(&task);
 
-    crate::println!("[linux] unshare: flags={:#x} (stub)", flags);
-    0
+    if flags == 0 {
+        0
+    } else {
+        errno::to_result(errno::ENOSYS)
+    }
 }
 
 const LINUX_CPU_MASK_SIZE: usize = core::mem::size_of::<usize>();

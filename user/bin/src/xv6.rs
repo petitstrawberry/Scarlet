@@ -2,18 +2,13 @@
 #![no_main]
 
 extern crate scarlet_std as std;
+mod abi_exec;
 
-use std::{println, task::execve_abi};
+use std::println;
 
 #[unsafe(no_mangle)]
 fn main() -> i32 {
-    println!("xv6 container");
-    println!("Preparing to execute xv6 init...");
-
-    if execve_abi("/scarlet/system/xv6-riscv64/init", &[], &[], "xv6-riscv64") != 0 {
-        println!("Failed to execve xv6 init");
-        return -1;
-    }
-
-    0
+    let result = abi_exec::exec("xv6-riscv64", "/init", &["/init"], &[], "/", None);
+    println!("xv6: cannot start /init in xv6-riscv64 view ({:?})", result);
+    127
 }

@@ -25,10 +25,7 @@ use std::{
     socket::{Inet4SocketAddress, Socket, SocketDomain, SocketProtocol, SocketType},
     string::String,
     sync::Arc,
-    task::{
-        EXECVE_FORCE_ABI_REBUILD, WAIT_NOHANG, create_session, execve_with_flags, exit, fork,
-        process_group_id, waitpid,
-    },
+    task::{WAIT_NOHANG, create_session, execve, exit, fork, process_group_id, waitpid},
     thread, vec,
     vec::Vec,
 };
@@ -690,28 +687,14 @@ fn spawn_session(
         setup_child_stdio(slave);
 
         let environment_refs: Vec<&str> = environment.iter().map(String::as_str).collect();
-        let shell_candidates = [
-            "/bin/sh",
-            "/scarlet/system/scarlet/bin/sh",
-            "/old_root/bin/sh",
-        ];
+        let shell_candidates = ["/bin/sh"];
         for shell in shell_candidates {
             let result = if let Some(command) = command {
                 let arguments = [shell, "-c", command];
-                execve_with_flags(
-                    shell,
-                    &arguments,
-                    &environment_refs,
-                    EXECVE_FORCE_ABI_REBUILD,
-                )
+                execve(shell, &arguments, &environment_refs)
             } else {
                 let arguments = ["-sh"];
-                execve_with_flags(
-                    shell,
-                    &arguments,
-                    &environment_refs,
-                    EXECVE_FORCE_ABI_REBUILD,
-                )
+                execve(shell, &arguments, &environment_refs)
             };
             if result == 0 {
                 break;
@@ -745,7 +728,7 @@ fn shell_environment(requested: &[(String, String)], pty_term: Option<&str>) -> 
         String::from("LOGNAME=root"),
         String::from("HOME=/root"),
         String::from("SHELL=/bin/sh"),
-        String::from("PATH=/scarlet/system/scarlet/bin:/bin:/usr/bin"),
+        String::from("PATH=/bin:/usr/bin"),
     ];
     let mut term = pty_term;
 

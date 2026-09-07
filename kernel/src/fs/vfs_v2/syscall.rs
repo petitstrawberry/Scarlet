@@ -444,6 +444,16 @@ pub fn sys_fs_mount(trapframe: &mut Trapframe) -> usize {
     };
 
     // Handle different mount types
+    let _composition = crate::executor::syscall::lock_composition();
+    if !crate::executor::syscall::may_manage_view(&task, &vfs.view())
+        || fstype_str == "overlay"
+        || (crate::executor::syscall::is_root_path(&vfs, &target_str)
+            && !task
+                .bootstrap_environment
+                .load(core::sync::atomic::Ordering::Acquire))
+    {
+        return usize::MAX;
+    }
     match fstype_str.as_str() {
         "bind" => {
             // Handle bind mount - this is a special case handled by VFS
@@ -543,6 +553,12 @@ pub fn sys_fs_umount(trapframe: &mut Trapframe) -> usize {
     };
 
     // Perform umount operation
+    let _composition = crate::executor::syscall::lock_composition();
+    if !crate::executor::syscall::may_manage_view(&task, &vfs.view())
+        || crate::executor::syscall::is_root_path(&vfs, &target_str)
+    {
+        return usize::MAX;
+    }
     match vfs.unmount(&target_str) {
         Ok(_) => 0,
         Err(_) => usize::MAX,
@@ -596,6 +612,14 @@ pub fn sys_fs_pivot_root(trapframe: &mut Trapframe) -> usize {
     let old_root_ptr = trapframe.get_arg(1);
 
     trapframe.increment_pc_next(&task);
+    // A regular process changes roots by executing in a newly built Environment.
+    // In-place pivot is restricted to the pre-Environment bootstrap.
+    if !task
+        .bootstrap_environment
+        .load(core::sync::atomic::Ordering::Acquire)
+    {
+        return usize::MAX;
+    }
 
     let new_root_str: String =
         match parse_c_string_from_userspace(&task, new_root_ptr, MAX_PATH_LENGTH) {

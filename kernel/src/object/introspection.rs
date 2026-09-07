@@ -43,6 +43,8 @@ pub enum KernelObjectType {
     Timer = 10,
     /// GPU child capability object
     Gpu = 11,
+    Environment = 12,
+    VfsView = 13,
     /// Unknown or unsupported type
     Unknown = 0,
 }
@@ -78,6 +80,25 @@ pub enum HandleRole {
 }
 
 impl KernelObjectInfo {
+    pub fn for_environment(view: bool, writable: bool) -> Self {
+        Self {
+            object_type: if view {
+                KernelObjectType::VfsView
+            } else {
+                KernelObjectType::Environment
+            },
+            capabilities: ObjectCapabilities {
+                stream_ops: false,
+                file_ops: false,
+                pipe_ops: false,
+                event_ops: false,
+                clone_ops: false,
+                reserved: [false; 3],
+            },
+            handle_role: HandleRole::Regular,
+            access_mode: Self::encode_access_mode(true, writable),
+        }
+    }
     /// Create info for a File KernelObject
     pub fn for_file(handle_role: HandleRole, readable: bool, writable: bool) -> Self {
         Self {

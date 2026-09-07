@@ -19,7 +19,7 @@ cargo make run-debug-riscv64
 
 ```
 # lsm-load lsm-test
-loading module: /scarlet/system/scarlet/modules/lsm-test.lsm
+loading module: /modules/lsm-test.lsm
 [lsm-test] Loadable Scarlet Module loaded successfully!
 module loaded successfully
 
@@ -175,7 +175,9 @@ Output: `<project>/.scarlet/modules/<triple>/<name>.lsm`
 
 ### Initramfs
 
-Initramfs generation copies all `*.lsm` from the project's module output directory to `initramfs/system/scarlet/modules/`.
+Include loadable module outputs in the image at `/roots/scarlet/modules/`.
+They are visible as `/modules/` in the native view. Bundle/image layers choose
+the backing location; the module loader does not search the global root.
 
 ## Userspace Tools
 
@@ -186,13 +188,13 @@ lsm-load <path_or_name>
 ```
 
 Path resolution order:
-1. Absolute path (`/scarlet/system/scarlet/modules/lsm-test.lsm`) — used as-is
+1. Absolute path (`/modules/lsm-test.lsm`) — used as-is
 2. Relative path that exists on filesystem (`modules/lsm-test.lsm`) — resolved to absolute
 3. Module name without extension (`lsm-test`) — searched in module directories with `.lsm` appended
 
 Module directories (searched in order):
-- `$LSM_MODULES_PATH` directories (colon-separated, e.g. `/scarlet/modules:/extra/modules`)
-- Default: `/scarlet/system/scarlet/modules`
+- `$LSM_MODULES_PATH` directories (colon-separated, e.g. `/modules:/extra/modules`)
+- Default: `/modules`
 
 Dependency resolution:
 - Parses `SCARLET_LSM_DEPENDS` from module ELF

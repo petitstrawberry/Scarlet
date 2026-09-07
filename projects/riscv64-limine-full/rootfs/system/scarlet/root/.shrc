@@ -2,8 +2,8 @@
 # Scarlet Shell Initialization Script
 
 # Set environment variables
-export LD_LIBRARY_PATH=/scarlet/system/linux-riscv64/usr/lib:/scarlet/system/linux-riscv64/lib
-export PATH=/bin:/scarlet/system/linux-riscv64/bin:/scarlet/system/linux-riscv64/usr/bin
+export LD_LIBRARY_PATH=/usr/lib:/lib
+export PATH=/bin:/usr/bin
 
 export XDG_RUNTIME_DIR=/tmp
 export WAYLAND_DISPLAY=wayland-0

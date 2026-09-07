@@ -946,7 +946,7 @@ fn print_motd() {
         return;
     }
 
-    for path in ["/system/scarlet/etc/motd", "/etc/motd"] {
+    for path in ["/etc/motd"] {
         let Ok(mut file) = File::open(path) else {
             continue;
         };
@@ -1389,7 +1389,6 @@ fn execute_shrc() {
     // Add standard paths
     shrc_paths.push(String::from("/.shrc"));
     shrc_paths.push(String::from("/etc/shrc"));
-    shrc_paths.push(String::from("/system/scarlet/etc/shrc"));
     shrc_paths.push(String::from("./.shrc"));
 
     for shrc_path in &shrc_paths {

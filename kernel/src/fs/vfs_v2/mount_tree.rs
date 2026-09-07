@@ -32,7 +32,7 @@ fn vfs_error(kind: FileSystemErrorKind, message: &str) -> FileSystemError {
 pub struct MountId(u64);
 
 impl MountId {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         static COUNTER: AtomicU64 = AtomicU64::new(1);
         Self(COUNTER.fetch_add(1, Ordering::Relaxed))
     }

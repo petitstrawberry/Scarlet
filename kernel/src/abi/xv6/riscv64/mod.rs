@@ -28,9 +28,7 @@ use crate::{
         },
     },
     arch::{self, IntRegisters},
-    fs::{
-        FileSystemError, FileSystemErrorKind, SeekFrom, VfsManager, drivers::overlayfs::OverlayFS,
-    },
+    fs::SeekFrom,
     ipc::{Event, EventContent, event::ProcessControlType},
     late_initcall, register_abi,
     task::elf_loader::load_elf_into_task,
@@ -170,6 +168,35 @@ impl AbiModule for Xv6Riscv64Abi {
         syscall_handler(self, trapframe)
     }
 
+    fn prepare_exec_handles(
+        &mut self,
+        source: Option<&dyn AbiModule>,
+        image: &crate::task::Task,
+    ) -> Result<(), &'static str> {
+        self.namespace = image.get_namespace();
+        self.fd_to_handle.clear();
+        if let Some(source) = source.filter(|abi| abi.get_name() == Self::name()) {
+            // SAFETY: the registry has exactly one concrete implementation per ABI name.
+            let source = unsafe { &*(source as *const dyn AbiModule as *const Self) };
+            for (&fd, &handle) in &source.fd_to_handle {
+                if image.handle_table.is_valid_handle(handle) {
+                    self.fd_to_handle.insert(fd, handle);
+                }
+            }
+        } else {
+            for handle in image.handle_table.active_handles() {
+                if (handle as usize) < MAX_FDS {
+                    self.fd_to_handle.insert(handle as usize, handle);
+                }
+            }
+        }
+        self.free_fds = (0..MAX_FDS)
+            .rev()
+            .filter(|fd| !self.fd_to_handle.contains_key(fd))
+            .collect();
+        Ok(())
+    }
+
     fn can_execute_binary(
         &self,
         file_object: &crate::object::KernelObject,
@@ -250,7 +277,7 @@ impl AbiModule for Xv6Riscv64Abi {
                         // Setup the trapframe
                         arch::vm::setup_trampoline_for_user(&task.vm_manager);
                         // Setup the stack
-                        let (_, stack_top) = setup_user_stack(task);
+                        let (_, stack_top) = setup_user_stack(task)?;
                         let mut stack_pointer = stack_top as usize;
 
                         let mut arg_ptrs: Vec<u64> = Vec::new();
@@ -309,112 +336,6 @@ impl AbiModule for Xv6Riscv64Abi {
         }
     }
 
-    fn get_default_cwd(&self) -> &str {
-        "/" // XV6 uses root as default working directory
-    }
-
-    fn setup_overlay_environment(
-        &self,
-        target_vfs: &Arc<VfsManager>,
-        base_vfs: &Arc<VfsManager>,
-        system_path: &str,
-        config_path: &str,
-    ) -> Result<(), &'static str> {
-        // crate::println!("Setting up XV6 overlay environment with system path: {} and config path: {}", system_path, config_path);
-        // XV6 ABI uses overlay mount with system XV6 tools and config persistence
-        let lower_vfs_list = alloc::vec![(base_vfs, system_path)];
-        let upper_vfs = base_vfs;
-        let fs = match OverlayFS::new_from_paths_and_vfs(
-            Some((upper_vfs, config_path)),
-            lower_vfs_list,
-            "/",
-        ) {
-            Ok(fs) => fs,
-            Err(e) => {
-                crate::println!(
-                    "Failed to create overlay filesystem for XV6 ABI: {}",
-                    e.message
-                );
-                return Err("Failed to create XV6 overlay environment");
-            }
-        };
-        match target_vfs.mount(fs, "/", 0) {
-            Ok(()) => Ok(()),
-            Err(e) => {
-                crate::println!(
-                    "Failed to create cross-VFS overlay for XV6 ABI: {}",
-                    e.message
-                );
-                Err("Failed to create XV6 overlay environment")
-            }
-        }
-    }
-
-    fn setup_shared_resources(
-        &self,
-        target_vfs: &Arc<VfsManager>,
-        base_vfs: &Arc<VfsManager>,
-    ) -> Result<(), &'static str> {
-        // crate::println!("Setting up XV6 shared resources with base VFS");
-        // XV6 shared resource setup: bind mount common directories and Scarlet gateway
-        match create_dir_if_not_exists(target_vfs, "/home") {
-            Ok(()) => {}
-            Err(e) => {
-                // crate::println!("Failed to create /home directory for XV6: {}", e.message);
-                return Err("Failed to create /home directory for XV6");
-            }
-        }
-
-        match target_vfs.bind_mount_from(base_vfs, "/home", "/home") {
-            Ok(()) => {}
-            Err(e) => {
-                // crate::println!("Failed to bind mount /home for XV6: {}", e.message);
-            }
-        }
-
-        match create_dir_if_not_exists(target_vfs, "/data") {
-            Ok(()) => {}
-            Err(e) => {
-                crate::println!("Failed to create /data directory for XV6: {}", e.message);
-                return Err("Failed to create /data directory for XV6");
-            }
-        }
-
-        match target_vfs.bind_mount_from(base_vfs, "/data/shared", "/data/shared") {
-            Ok(()) => {}
-            Err(e) => {
-                // crate::println!("Failed to bind mount /data/shared for XV6: {}", e.message);
-            }
-        }
-
-        // Setup gateway to native Scarlet environment (read-only for security)
-        match create_dir_if_not_exists(target_vfs, "/scarlet") {
-            Ok(()) => {}
-            Err(e) => {
-                crate::println!("Failed to create /scarlet directory for XV6: {}", e.message);
-                return Err("Failed to create /scarlet directory for XV6");
-            }
-        }
-        match target_vfs.bind_mount_from(base_vfs, "/", "/scarlet") {
-            Ok(()) => Ok(()),
-            Err(e) => {
-                crate::println!(
-                    "Failed to bind mount native Scarlet root to /scarlet for XV6: {}",
-                    e.message
-                );
-                return Err("Failed to bind mount native Scarlet root to /scarlet for XV6");
-            }
-        }
-    }
-
-    fn initialize_from_existing_handles(
-        &mut self,
-        task: &crate::task::Task,
-    ) -> Result<(), &'static str> {
-        task.handle_table.close_all();
-        Ok(())
-    }
-
     fn choose_load_address(
         &self,
         _elf_type: u16,
@@ -423,13 +344,6 @@ impl AbiModule for Xv6Riscv64Abi {
         // xv6 ABI does not support dynamic linking - all binaries should be static
         // Return None to use kernel default (which will only work for static ELF files)
         None
-    }
-
-    fn get_interpreter_path(&self, _requested_interpreter: &str) -> String {
-        // xv6 ABI does not support dynamic linking
-        // This should never be called since xv6 binaries should not have PT_INTERP
-        // But if it happens, we'll return an error path
-        "/dev/null".to_string() // Invalid path to ensure failure
     }
 
     fn get_task_namespace(&self) -> Arc<crate::task::namespace::TaskNamespace> {
@@ -490,19 +404,6 @@ syscall_table! {
     Link = 19 => sys_link,
     Mkdir = 20 => sys_mkdir,
     Close = 21 => sys_close,
-}
-
-fn create_dir_if_not_exists(vfs: &Arc<VfsManager>, path: &str) -> Result<(), FileSystemError> {
-    match vfs.create_dir(path) {
-        Ok(()) => Ok(()),
-        Err(e) => {
-            if e.kind == FileSystemErrorKind::AlreadyExists {
-                Ok(()) // Directory already exists, nothing to do
-            } else {
-                Err(e) // Some other error occurred
-            }
-        }
-    }
 }
 
 fn register_xv6_abi() {

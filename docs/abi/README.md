@@ -26,6 +26,8 @@ kernel API. See the [SHV overview](../hypervisor/README.md).
 
 ## Guides and references
 
+- [Execution Environments and filesystem views](execution-environments.md)
+
 - [Native application development](../userspace/README.md)
 - [Linux ABI status](linux/status.md)
 - [Linux userspace artifacts](linux/userspace-artifacts.md)

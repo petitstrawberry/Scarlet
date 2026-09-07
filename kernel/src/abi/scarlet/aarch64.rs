@@ -7,18 +7,14 @@
 use alloc::{
     boxed::Box,
     collections::btree_map::BTreeMap,
-    format,
     string::{String, ToString},
-    sync::Arc,
     vec::Vec,
 };
 use core::sync::atomic::Ordering;
 
 use crate::{
     arch::{Trapframe, vm},
-    fs::{
-        FileSystemError, FileSystemErrorKind, SeekFrom, VfsManager, drivers::overlayfs::OverlayFS,
-    },
+    fs::SeekFrom,
     ipc::event::{Event, EventContent, EventPriority, ProcessControlType},
     late_initcall,
     library::std::usercopy::{copy_from_user, copy_to_user},
@@ -762,7 +758,7 @@ impl AbiModule for ScarletAbi {
         if is_wasm {
             // Delegate to Scarlet-native Wasm runtime
             Some(crate::abi::RuntimeConfig {
-                runtime_path: "/system/scarlet/bin/wasm-runtime".to_string(),
+                runtime_path: "/bin/wasm-runtime".to_string(),
                 runtime_abi: None, // Auto-detect (will be Scarlet native)
                 runtime_args: alloc::vec!["--wasm".to_string()],
             })
@@ -823,7 +819,7 @@ impl AbiModule for ScarletAbi {
 
                         // Setup the new memory environment
                         vm::setup_trampoline_for_user(&task.vm_manager);
-                        let stack_pointer = setup_user_stack(task).1;
+                        let stack_pointer = setup_user_stack(task)?.1;
 
                         // Handle different execution modes
                         match elf_result.mode {
@@ -924,212 +920,6 @@ impl AbiModule for ScarletAbi {
             }
         } else {
             None // Use kernel default for ET_EXEC and other types
-        }
-    }
-
-    fn normalize_env_to_scarlet(&self, envp: &mut Vec<String>) {
-        // Scarlet ABI is already in canonical format, but ensure all paths are absolute
-        // Modify in-place to avoid allocations
-
-        for env_var in envp.iter_mut() {
-            if let Some(eq_pos) = env_var.find('=') {
-                let key = &env_var[..eq_pos];
-                let value = &env_var[eq_pos + 1..];
-
-                let normalized_value = match key {
-                    "PATH" | "LD_LIBRARY_PATH" => {
-                        // Ensure all paths are in absolute Scarlet namespace format
-                        self.normalize_path_to_absolute_scarlet(value)
-                    }
-                    "HOME" => {
-                        // Ensure home directory is absolute
-                        if value.starts_with('/') {
-                            value.to_string()
-                        } else {
-                            format!("/home/{}", value)
-                        }
-                    }
-                    _ => value.to_string(), // Most variables pass through unchanged
-                };
-
-                // Update in-place if value changed
-                let new_env_var = format!("{}={}", key, normalized_value);
-                if new_env_var != *env_var {
-                    *env_var = new_env_var;
-                }
-            }
-        }
-    }
-
-    fn denormalize_env_from_scarlet(&self, envp: &mut Vec<String>) {
-        // For Scarlet ABI, canonical format is the native format
-        // But ensure proper Scarlet-specific defaults exist
-
-        // Convert to temporary map for easier processing
-        let mut env_map = BTreeMap::new();
-        for env_var in envp.iter() {
-            if let Some(eq_pos) = env_var.find('=') {
-                let key = env_var[..eq_pos].to_string();
-                let value = env_var[eq_pos + 1..].to_string();
-                env_map.insert(key, value);
-            }
-        }
-
-        // Add defaults if they don't exist
-        if !env_map.contains_key("PATH") {
-            env_map.insert(
-                "PATH".to_string(),
-                "/system/scarlet/bin:/bin:/usr/bin".to_string(),
-            );
-        }
-
-        if !env_map.contains_key("SHELL") {
-            env_map.insert("SHELL".to_string(), "/system/scarlet/bin/sh".to_string());
-        }
-
-        // Convert back to Vec<String> format
-        envp.clear();
-        for (key, value) in env_map.iter() {
-            envp.push(format!("{}={}", key, value));
-        }
-    }
-
-    fn setup_overlay_environment(
-        &self,
-        target_vfs: &Arc<VfsManager>,
-        base_vfs: &Arc<VfsManager>,
-        system_path: &str,
-        config_path: &str,
-    ) -> Result<(), &'static str> {
-        // Scarlet ABI uses overlay mount with system Scarlet tools and config persistence
-        let lower_vfs_list = alloc::vec![(base_vfs, system_path)];
-        let upper_vfs = base_vfs;
-        let fs = match OverlayFS::new_from_paths_and_vfs(
-            Some((upper_vfs, config_path)),
-            lower_vfs_list,
-            "/",
-        ) {
-            Ok(fs) => fs,
-            Err(e) => {
-                crate::println!(
-                    "Failed to create overlay filesystem for Scarlet ABI: {}",
-                    e.message
-                );
-                return Err("Failed to create Scarlet overlay environment");
-            }
-        };
-
-        match target_vfs.mount(fs, "/", 0) {
-            Ok(()) => Ok(()),
-            Err(e) => {
-                crate::println!(
-                    "Failed to create cross-VFS overlay for Scarlet ABI: {}",
-                    e.message
-                );
-                Err("Failed to create Scarlet overlay environment")
-            }
-        }
-    }
-
-    fn setup_shared_resources(
-        &self,
-        target_vfs: &Arc<VfsManager>,
-        base_vfs: &Arc<VfsManager>,
-    ) -> Result<(), &'static str> {
-        // Scarlet shared resource setup: bind mount common directories and Scarlet gateway
-        match create_dir_if_not_exists(target_vfs, "/home") {
-            Ok(()) => {}
-            Err(e) => {
-                crate::println!(
-                    "Failed to create /home directory for Scarlet: {}",
-                    e.message
-                );
-                return Err("Failed to create /home directory for Scarlet");
-            }
-        }
-
-        match target_vfs.bind_mount_from(base_vfs, "/home", "/home") {
-            Ok(()) => {}
-            Err(_e) => {}
-        }
-
-        match create_dir_if_not_exists(target_vfs, "/data") {
-            Ok(()) => {}
-            Err(e) => {
-                crate::println!(
-                    "Failed to create /data directory for Scarlet: {}",
-                    e.message
-                );
-                return Err("Failed to create /data directory for Scarlet");
-            }
-        }
-
-        match target_vfs.bind_mount_from(base_vfs, "/data/shared", "/data/shared") {
-            Ok(()) => {}
-            Err(_e) => {}
-        }
-
-        // Bind mount /dev for device access
-        match create_dir_if_not_exists(target_vfs, "/dev") {
-            Ok(()) => {}
-            Err(e) => {
-                crate::println!("Failed to create /dev directory for Scarlet: {}", e.message);
-                return Err("Failed to create /dev directory for Scarlet");
-            }
-        }
-        match target_vfs.bind_mount_from(base_vfs, "/dev", "/dev") {
-            Ok(()) => {}
-            Err(e) => {
-                crate::println!("Failed to bind mount /dev for Scarlet: {}", e.message);
-                return Err("Failed to bind mount /dev for Scarlet");
-            }
-        }
-        if base_vfs.resolve_path("/dev/pts/ptmx").is_ok() {
-            let _ = create_dir_if_not_exists(target_vfs, "/dev/pts");
-            match target_vfs.bind_mount_from(base_vfs, "/dev/pts", "/dev/pts") {
-                Ok(()) => {}
-                Err(e) => {
-                    crate::println!("Failed to bind mount /dev/pts for Scarlet: {}", e.message);
-                }
-            }
-        }
-
-        // Bind moutt /tmp for temporary files
-        match create_dir_if_not_exists(target_vfs, "/tmp") {
-            Ok(()) => {}
-            Err(e) => {
-                crate::println!("Failed to create /tmp directory for Scarlet: {}", e.message);
-                return Err("Failed to create /tmp directory for Scarlet");
-            }
-        }
-        match target_vfs.bind_mount_from(base_vfs, "/tmp", "/tmp") {
-            Ok(()) => {}
-            Err(e) => {
-                crate::println!("Failed to bind mount /tmp for Scarlet: {}", e.message);
-                return Err("Failed to bind mount /tmp for Scarlet");
-            }
-        }
-
-        // Setup gateway to native Scarlet environment (read-only for security)
-        match create_dir_if_not_exists(target_vfs, "/scarlet") {
-            Ok(()) => {}
-            Err(e) => {
-                crate::println!(
-                    "Failed to create /scarlet directory for Scarlet: {}",
-                    e.message
-                );
-                return Err("Failed to create /scarlet directory for Scarlet");
-            }
-        }
-        match target_vfs.bind_mount_from(base_vfs, "/", "/scarlet") {
-            Ok(()) => Ok(()),
-            Err(e) => {
-                crate::println!(
-                    "Failed to bind mount native Scarlet root to /scarlet for Scarlet: {}",
-                    e.message
-                );
-                return Err("Failed to bind mount native Scarlet root to /scarlet for Scarlet");
-            }
         }
     }
 
@@ -1317,57 +1107,6 @@ impl ScarletAbi {
         // Write null terminator
         self.write_to_stack_memory(task, vaddr + string.len(), &[0u8])?;
         Ok(())
-    }
-
-    /// Normalize path string to absolute Scarlet namespace format
-    ///
-    /// This ensures all paths in PATH-like variables are absolute and
-    /// in the proper Scarlet namespace format.
-    fn normalize_path_to_absolute_scarlet(&self, path_value: &str) -> String {
-        let paths: Vec<&str> = path_value.split(':').collect();
-        let mut normalized_paths = Vec::new();
-
-        for path in paths {
-            if path.starts_with('/') {
-                // Already absolute - ensure it's in proper Scarlet namespace
-                if path.starts_with("/system/scarlet/") || path.starts_with("/scarlet/") {
-                    normalized_paths.push(path.to_string());
-                } else {
-                    // Map standard paths to Scarlet namespace
-                    let mapped_path = match path {
-                        "/bin" => "/system/scarlet/bin",
-                        "/usr/bin" => "/system/scarlet/usr/bin",
-                        "/usr/local/bin" => "/system/scarlet/usr/local/bin",
-                        "/sbin" => "/system/scarlet/sbin",
-                        "/usr/sbin" => "/system/scarlet/usr/sbin",
-                        "/lib" => "/system/scarlet/lib",
-                        "/usr/lib" => "/system/scarlet/usr/lib",
-                        "/usr/local/lib" => "/system/scarlet/usr/local/lib",
-                        _ => path, // Keep other absolute paths as-is
-                    };
-                    normalized_paths.push(mapped_path.to_string());
-                }
-            } else if !path.is_empty() {
-                // Relative paths - prefix with current working directory or make absolute
-                normalized_paths.push(format!("/{}", path));
-            }
-            // Skip empty paths
-        }
-
-        normalized_paths.join(":")
-    }
-}
-
-fn create_dir_if_not_exists(vfs: &Arc<VfsManager>, path: &str) -> Result<(), FileSystemError> {
-    match vfs.create_dir(path) {
-        Ok(()) => Ok(()),
-        Err(e) => {
-            if e.kind == FileSystemErrorKind::AlreadyExists {
-                Ok(()) // Directory already exists, nothing to do
-            } else {
-                Err(e) // Some other error occurred
-            }
-        }
     }
 }
 

@@ -29,10 +29,7 @@ use std::io::Read;
 use std::ipc::{ProcessControl, send_process_control};
 use std::pty::{PtyMaster, PtyPair, PtySlave};
 use std::sync::Mutex;
-use std::task::{
-    EXECVE_FORCE_ABI_REBUILD, WAIT_NOHANG, create_session, execve_with_flags, exit, fork,
-    process_group_id, waitpid,
-};
+use std::task::{WAIT_NOHANG, create_session, execve, exit, fork, process_group_id, waitpid};
 use std::{format, println, thread};
 use vt::VtScreen;
 
@@ -511,16 +508,12 @@ fn spawn_shell(slave: PtySlave, inherited_master_handle: i32, inherited_writer_h
             close_inherited_handle(inherited_writer_handle);
             let _ = create_session();
             setup_child_stdio(slave);
-            let candidates = [
-                "/bin/sh",
-                "/scarlet/system/scarlet/bin/sh",
-                "/old_root/bin/sh",
-            ];
+            let candidates = ["/bin/sh"];
             let env_strings = shell_environment();
             let env_refs: Vec<&str> = env_strings.iter().map(|s| s.as_str()).collect();
             for path in candidates {
                 let argv = ["-sh"];
-                let rc = execve_with_flags(path, &argv, &env_refs, EXECVE_FORCE_ABI_REBUILD);
+                let rc = execve(path, &argv, &env_refs);
                 if rc == 0 {
                     break;
                 }

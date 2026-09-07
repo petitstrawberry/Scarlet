@@ -8,27 +8,20 @@
 #![no_main]
 
 extern crate scarlet_std as std;
+mod abi_exec;
 
 use std::string::String;
-use std::task::{EXECVE_FORCE_ABI_REBUILD, execve_abi_with_flags};
 use std::vec::Vec;
 use std::{env, fs, println};
 
-#[cfg(target_arch = "aarch64")]
-const SERVER_PATH: &str = "/scarlet/system/linux-aarch64/usr/lib/mozc/mozc_server";
-#[cfg(target_arch = "aarch64")]
-const SERVER_ARG0: &str = "/usr/lib/mozc/mozc_server";
+const SERVER_PATH: &str = "/usr/lib/mozc/mozc_server";
 #[cfg(target_arch = "aarch64")]
 const LINUX_ABI: &str = "linux-aarch64";
 
 #[cfg(target_arch = "riscv64")]
-const SERVER_PATH: &str = "/scarlet/system/linux-riscv64/usr/lib/mozc/mozc_server";
-#[cfg(target_arch = "riscv64")]
-const SERVER_ARG0: &str = "/usr/lib/mozc/mozc_server";
-#[cfg(target_arch = "riscv64")]
 const LINUX_ABI: &str = "linux-riscv64";
 
-const MOZC_PROFILE_DIR: &str = "/scarlet/system/scarlet/root/.config/mozc";
+const MOZC_PROFILE_DIR: &str = "/root/.config/mozc";
 
 #[unsafe(no_mangle)]
 fn main() -> i32 {
@@ -36,7 +29,7 @@ fn main() -> i32 {
 
     let args: Vec<String> = env::args().collect();
     let mut server_args: Vec<String> = Vec::new();
-    server_args.push(String::from(SERVER_ARG0));
+    server_args.push(String::from(SERVER_PATH));
     // Preserve Mozc's fatal diagnostic on the service's inherited stderr.
     // Otherwise only musl's final abort trap is visible from Scarlet.
     server_args.push(String::from("--logtostderr"));
@@ -46,28 +39,22 @@ fn main() -> i32 {
     let envp = [
         "LD_LIBRARY_PATH=/usr/lib:/lib",
         "PATH=/bin:/usr/bin",
-        "HOME=/scarlet/system/scarlet/root",
-        "XDG_CONFIG_HOME=/scarlet/system/scarlet/root/.config",
+        "HOME=/root",
+        "XDG_CONFIG_HOME=/root/.config",
         "TMPDIR=/tmp",
         "XDG_RUNTIME_DIR=/tmp",
     ];
 
-    let result = execve_abi_with_flags(
-        SERVER_PATH,
-        &argv,
-        &envp,
-        LINUX_ABI,
-        EXECVE_FORCE_ABI_REBUILD,
-    );
+    let result = abi_exec::exec(LINUX_ABI, SERVER_PATH, &argv, &envp, "/", None);
 
     println!(
-        "mozc-server: failed to launch {} via {} (rc={})",
+        "mozc-server: failed to launch {} via {} ({:?})",
         SERVER_PATH, LINUX_ABI, result
     );
     127
 }
 
 fn ensure_mozc_profile_dir() {
-    let _ = fs::create_directory("/scarlet/system/scarlet/root/.config");
+    let _ = fs::create_directory("/root/.config");
     let _ = fs::create_directory(MOZC_PROFILE_DIR);
 }

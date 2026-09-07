@@ -6,6 +6,10 @@ workspace = "../../.cargo"
 
 # User-facing executable names use kebab-case. Rust source paths stay snake_case.
 
+[[bin]]
+name = "abi-run"
+path = "src/abi_run.rs"
+
 [features]
 default = ["mp4-aac"]
 mp4-aac = ["dep:symphonia-core", "dep:symphonia-codec-aac"]

@@ -15,7 +15,7 @@ const ELF64_SYM_SIZE: usize = 24;
 
 const LSM_LIST_ENTRY_SIZE: usize = 264;
 const LSM_LIST_MAX_MODULES: usize = 128;
-const DEFAULT_MODULES_DIR: &str = "/scarlet/system/scarlet/modules";
+const DEFAULT_MODULES_DIR: &str = "/modules";
 
 fn main() -> ExitCode {
     println!("lsm-load: Rust std version");

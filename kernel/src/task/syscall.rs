@@ -253,7 +253,6 @@ fn write_scheduler_mask_metadata(
 }
 
 // Flags for execve system calls
-pub const EXECVE_FORCE_ABI_REBUILD: usize = 0x1; // Force ABI environment reconstruction
 
 use super::mytask;
 
@@ -692,20 +691,14 @@ pub fn sys_execve(trapframe: &mut Trapframe) -> usize {
     let argv_refs: Vec<&str> = argv_strings.iter().map(|s| s.as_str()).collect();
     let envp_refs: Vec<&str> = envp_strings.iter().map(|s| s.as_str()).collect();
 
-    // Check if force ABI rebuild is requested
-    let force_abi_rebuild = (flags & EXECVE_FORCE_ABI_REBUILD) != 0;
+    if flags != 0 {
+        return usize::MAX;
+    }
 
     // crate::println!("[EXECVE] Task {}: Starting TransparentExecutor::execute_binary", task.get_id());
 
     // Use TransparentExecutor for cross-ABI execution
-    match TransparentExecutor::execute_binary(
-        &path_str,
-        &argv_refs,
-        &envp_refs,
-        &task,
-        trapframe,
-        force_abi_rebuild,
-    ) {
+    match TransparentExecutor::execute_binary(&path_str, &argv_refs, &envp_refs, &task, trapframe) {
         Ok(_) => {
             // crate::println!("[EXECVE] Task {}: execute_binary succeeded", task.get_id());
             // execve normally should not return on success - the process is replaced
@@ -769,18 +762,13 @@ pub fn sys_execve_abi(trapframe: &mut Trapframe) -> usize {
     let argv_refs: Vec<&str> = argv_strings.iter().map(|s| s.as_str()).collect();
     let envp_refs: Vec<&str> = envp_strings.iter().map(|s| s.as_str()).collect();
 
-    // Check if force ABI rebuild is requested
-    let force_abi_rebuild = (flags & EXECVE_FORCE_ABI_REBUILD) != 0;
+    if flags != 0 {
+        return usize::MAX;
+    }
 
     // Use TransparentExecutor for ABI-aware execution
     match TransparentExecutor::execute_with_abi(
-        &path_str,
-        &argv_refs,
-        &envp_refs,
-        &abi_str,
-        &task,
-        trapframe,
-        force_abi_rebuild,
+        &path_str, &argv_refs, &envp_refs, &abi_str, &task, trapframe,
     ) {
         Ok(()) => {
             // execve normally should not return on success - the process is replaced
@@ -1882,38 +1870,38 @@ pub fn sys_create_namespace(trapframe: &mut Trapframe) -> usize {
         }
     };
 
-    // Create task namespace if requested
+    let prepared_fs = if flags & NS_CREATE_VFS != 0 {
+        let Some(source) = task.get_vfs() else {
+            return SYSCALL_ERROR;
+        };
+        let Some(environment) = task.execution_environment.read().clone() else {
+            return SYSCALL_ERROR;
+        };
+        let cloned = match environment.clone_mount_namespaces() {
+            Ok(environment) => environment,
+            Err(_) => return SYSCALL_ERROR,
+        };
+        let abi = task.with_default_abi(|abi| abi.get_name());
+        let root = match cloned.root(&abi) {
+            Ok(root) => root,
+            Err(_) => return SYSCALL_ERROR,
+        };
+        let fs = VfsManager::from_view(root);
+        if fs.set_cwd_by_path(&source.get_cwd_path()).is_err() {
+            return SYSCALL_ERROR;
+        }
+        Some((cloned, fs))
+    } else {
+        None
+    };
+
     if flags & NS_CREATE_TASK != 0 {
-        let new_task_ns = TaskNamespace::new_child(task.get_namespace().clone(), name.clone());
+        let new_task_ns = TaskNamespace::new_child(task.get_namespace().clone(), name);
         task.set_namespace(new_task_ns);
     }
-
-    // Create VFS namespace if requested
-    if flags & NS_CREATE_VFS != 0 {
-        // Deep-clone the current mount topology so the initial view is the same,
-        // but future mount operations are isolated.
-        let source_vfs = match task.get_vfs() {
-            Some(vfs) => vfs,
-            None => return SYSCALL_ERROR,
-        };
-
-        let new_vfs = match VfsManager::clone_mount_namespace_deep(&source_vfs) {
-            Ok(vfs) => vfs,
-            Err(e) => {
-                crate::println!(
-                    "[syscall] Failed to clone VFS namespace '{}': {}",
-                    name,
-                    e.message
-                );
-                return SYSCALL_ERROR;
-            }
-        };
-
-        // Preserve current working directory when possible.
-        let cwd_path = source_vfs.get_cwd_path();
-        let _ = new_vfs.set_cwd_by_path(&cwd_path);
-
-        task.set_vfs(new_vfs);
+    if let Some((environment, fs)) = prepared_fs {
+        *task.execution_environment.write() = Some(environment);
+        task.set_vfs(fs);
     }
 
     0

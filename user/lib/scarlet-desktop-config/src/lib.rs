@@ -763,10 +763,7 @@ pub fn read_config_dir(dir_path: &str) -> Result<String, &'static str> {
 }
 
 pub fn load_desktop_config() -> DesktopConfig {
-    let config_dirs = [
-        "/etc/scarlet-desktop.d",
-        "/system/scarlet/etc/scarlet-desktop.d",
-    ];
+    let config_dirs = ["/etc/scarlet-desktop.d"];
 
     for dir in &config_dirs {
         if let Ok(content) = read_config_dir(dir) {

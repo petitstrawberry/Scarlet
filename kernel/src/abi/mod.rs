@@ -9,7 +9,6 @@
 use crate::sync::{IrqSpinLock, Once};
 use crate::{
     arch::Trapframe,
-    fs::VfsManager,
     task::{CloneFlags, mytask},
 };
 use alloc::{
@@ -228,9 +227,9 @@ pub trait AbiModule: Send + Sync + 'static {
 
     /// Convert inherited handles when switching ABIs.
     ///
-    /// The executor calls this after the new binary image has loaded but before
-    /// installing this ABI as the task's default ABI. Implementations that
-    /// mutate task state must leave it unchanged when returning an error.
+    /// The executor calls this on an unpublished image before loading its
+    /// binary. Implementations may change that image but must not mutate the
+    /// calling process or close its descriptors.
     ///
     /// # Arguments
     ///
@@ -247,49 +246,13 @@ pub trait AbiModule: Send + Sync + 'static {
         Ok(()) // Default: no conversion needed
     }
 
-    /// Convert environment variables from this ABI to Scarlet canonical format (in-place)
-    ///
-    /// This method is called when switching from this ABI to another ABI.
-    /// It should convert ABI-specific environment variables to a canonical
-    /// Scarlet format that can then be converted to the target ABI.
-    ///
-    /// Reuses the supplied vector. Implementations may still allocate while
-    /// rewriting strings or changing its length; this is not allocation-free.
-    ///
-    /// # Arguments
-    /// * `envp` - Mutable reference to environment variables in "KEY=VALUE" format,
-    ///            will be modified to contain Scarlet canonical format
-    ///
-    /// # Returns
-    /// No value. The default implementation leaves the environment unchanged.
-    ///
-    /// # Implementation Guidelines
-    /// - Convert paths to absolute Scarlet namespace paths
-    /// - Normalize variable names to Scarlet conventions
-    /// - Remove ABI-specific variables that don't translate
-    /// - Ensure all paths are absolute and start with /
-    /// - Modify the vector in-place for efficiency
-    fn normalize_env_to_scarlet(&self, _envp: &mut Vec<String>) {
-        // Default: no conversion needed (assuming already in Scarlet format)
-    }
-
-    /// Convert environment variables from Scarlet canonical format to this ABI's format (in-place)
-    ///
-    /// This method is called when switching to this ABI from another ABI.
-    /// It should convert canonical Scarlet environment variables to this ABI's
-    /// specific format and namespace.
-    ///
-    /// Reuses the supplied vector, but rewriting strings or adding entries may
-    /// still allocate.
-    ///
-    /// # Arguments
-    /// * `envp` - Mutable reference to environment variables in Scarlet canonical format,
-    ///            will be modified to contain this ABI's format
-    ///
-    /// # Returns
-    /// No value. The default implementation leaves the environment unchanged.
-    fn denormalize_env_from_scarlet(&self, _envp: &mut Vec<String>) {
-        // Default: no conversion needed (assuming target is Scarlet format)
+    /// Prepare ABI-owned descriptor state against an unpublished exec image.
+    fn prepare_exec_handles(
+        &mut self,
+        _source: Option<&dyn AbiModule>,
+        image: &crate::task::Task,
+    ) -> Result<(), &'static str> {
+        self.initialize_from_existing_handles(image)
     }
 
     /// Binary execution (each ABI supports its own binary format)
@@ -363,20 +326,6 @@ pub trait AbiModule: Send + Sync + 'static {
         None // Default: use kernel default strategy
     }
 
-    /// Override interpreter path (for ABI compatibility)
-    ///
-    /// This method allows each ABI to specify which dynamic linker should
-    /// be used when a binary requires dynamic linking (has PT_INTERP).
-    ///
-    /// # Arguments
-    /// * `requested_interpreter` - Interpreter path from PT_INTERP segment
-    ///
-    /// # Returns
-    /// The interpreter path to actually use (may be different from requested)
-    fn get_interpreter_path(&self, requested_interpreter: &str) -> String {
-        requested_interpreter.to_string() // Default: use requested interpreter as-is
-    }
-
     /// Get userland runtime configuration for executing binaries
     ///
     /// This method allows ABI modules to delegate binary execution to userland runtimes.
@@ -404,87 +353,6 @@ pub trait AbiModule: Send + Sync + 'static {
         _file_path: &str,
     ) -> Option<RuntimeConfig> {
         None // Default: no runtime delegation
-    }
-
-    /// Get default working directory for this ABI
-    ///
-    /// # Arguments
-    /// * `self` - ABI instance whose initial working directory is requested.
-    ///
-    /// # Returns
-    /// A path in the ABI's namespace; the default is `/`.
-    fn get_default_cwd(&self) -> &str {
-        "/" // Default: root directory
-    }
-
-    /// Setup overlay environment for this ABI (read-only base + writable layer)
-    ///
-    /// Hook for creating an overlay filesystem with the provided base VFS and paths.
-    /// The TransparentExecutor is responsible for providing base_vfs, paths,
-    /// and verifying that directories exist. This method assumes that required
-    /// directories (/system/{abi}, /data/config/{abi}) have been prepared
-    /// by the user/administrator as part of system setup.
-    /// The default implementation does not create an overlay: it returns an error
-    /// because the cross-VFS operation used by this hook is not implemented in VFS v2.
-    ///
-    /// # Arguments
-    /// * `target_vfs` - VfsManager to configure with overlay filesystem
-    /// * `base_vfs` - Base VFS containing system and config directories
-    /// * `system_path` - Path to read-only base layer (e.g., "/system/scarlet")
-    /// * `config_path` - Path to writable persistence layer (e.g., "/data/config/scarlet")
-    ///
-    /// # Returns
-    /// `Ok(())` after an override installs the environment, or an error. The
-    /// default always returns the unsupported cross-VFS operation error.
-    fn setup_overlay_environment(
-        &self,
-        _target_vfs: &Arc<VfsManager>,
-        _base_vfs: &Arc<VfsManager>,
-        _system_path: &str,
-        _config_path: &str,
-    ) -> Result<(), &'static str> {
-        // cross-vfs overlay_mount_from is not supported in v2, commented out for now
-        // let lower_vfs_list = alloc::vec![(base_vfs, system_path)];
-        // target_vfs.overlay_mount_from(
-        //     Some(base_vfs),             // upper_vfs (base VFS)
-        //     config_path,                // upperdir (read-write persistent layer)
-        //     lower_vfs_list,             // lowerdir (read-only base system)
-        //     "/"                         // target mount point in task VFS
-        // ).map_err(|e| {
-        //     crate::println!("Failed to create cross-VFS overlay for ABI: {}", e.message);
-        //     "Failed to create overlay environment"
-        // })
-        Err("overlay_mount_from (cross-vfs) is not supported in v2")
-    }
-
-    /// Setup shared resources accessible across all ABIs
-    ///
-    /// Hook for bind-mounting common directories that should be shared from base VFS.
-    /// The TransparentExecutor is responsible for providing base_vfs.
-    /// The default implementation succeeds without creating any mounts.
-    ///
-    /// # Arguments
-    /// * `target_vfs` - VfsManager to configure
-    /// * `base_vfs` - Base VFS containing shared directories
-    ///
-    /// # Returns
-    /// `Ok(())` after setup, or an override's error. With the default no-op this
-    /// does not imply that `/home`, `/data/shared`, or `/scarlet` was mounted.
-    fn setup_shared_resources(
-        &self,
-        _target_vfs: &Arc<VfsManager>,
-        _base_vfs: &Arc<VfsManager>,
-    ) -> Result<(), &'static str> {
-        // TODO: VFS v2 migration - update bind_mount_from API usage
-        // Current limitation: function signature uses VFS v1 types
-        // Bind mount shared directories from base VFS
-        // target_vfs.bind_mount_from(&base_vfs, "/home", "/home")
-        //     .map_err(|_| "Failed to bind mount /home")?;
-        // target_vfs.bind_mount_from(&base_vfs, "/data/shared", "/data/shared")
-        //     .map_err(|_| "Failed to bind mount /data/shared")?;
-        // target_vfs.bind_mount_from(&base_vfs, "/", "/scarlet") // Read-only is not supported
-        //     .map_err(|_| "Failed to bind mount native Scarlet root to /scarlet")
-        Ok(())
     }
 
     /// Handle incoming event from EventManager
@@ -626,12 +494,8 @@ impl AbiRegistry {
     }
 
     pub fn instantiate(name: &str) -> Option<Box<dyn AbiModule + Send + Sync>> {
-        let registry = Self::global().lock();
-        if let Some(factory) = registry.factories.get(name) {
-            let abi = factory();
-            return Some(abi);
-        }
-        None
+        let factory = Self::global().lock().factories.get(name).copied();
+        factory.map(|factory| factory())
     }
 
     /// Detect the best ABI for a binary from all registered ABI modules
@@ -651,7 +515,14 @@ impl AbiRegistry {
         file_object: &crate::object::KernelObject,
         file_path: &str,
     ) -> Option<(String, u8)> {
-        let registry = Self::global().lock();
+        // Detection reads executable data. Never retain an IRQ/preemption lock
+        // across ABI callbacks or backing-filesystem I/O.
+        let factories: Vec<_> = Self::global()
+            .lock()
+            .factories
+            .iter()
+            .map(|(name, factory)| (name.clone(), *factory))
+            .collect();
 
         // Get current task's ABI reference for inheritance consideration
         let _task = mytask();
@@ -664,8 +535,7 @@ impl AbiRegistry {
         // - Inheritance bonus from current ABI
         if let Some(ref task) = _task {
             task.with_default_abi(|current_abi| {
-                registry
-                    .factories
+                factories
                     .iter()
                     .filter_map(|(name, factory)| {
                         let abi = factory();
@@ -675,8 +545,7 @@ impl AbiRegistry {
                     .max_by_key(|(_, confidence)| *confidence)
             })
         } else {
-            registry
-                .factories
+            factories
                 .iter()
                 .filter_map(|(name, factory)| {
                     let abi = factory();
@@ -739,6 +608,7 @@ pub fn syscall_dispatcher(trapframe: &mut Trapframe) -> Result<usize, &'static s
         task.get_id() as u64,
         syscall_number as u64,
     );
+    task.finish_exec_dispatch();
     task.process_deferred_exit_request();
     task.record_syscall_exit();
     crate::breadcrumb::drop(crate::breadcrumb::SYSCALL_EXIT, syscall_number as u64, 0);

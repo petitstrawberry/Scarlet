@@ -46,7 +46,8 @@ toolchain and rootfs tarball under `$BUILDROOT_DIR` and
 `prepare_prebuilt.sh` copies the guest artifacts into
 `projects/aarch64-limine-microvm/prebuilt` and downloads Firecracker if the
 project-local copy is missing. The actual binaries under `prebuilt/system/` are
-ignored by git.
+ignored by git. The image layer maps this source directory to `/roots`;
+`microvm-init` starts Firecracker at `/usr/bin/firecracker` in the Linux view.
 
 After this setup, `cargo scarlet image` and `cargo scarlet run` use the
 project-local prebuilt artifacts and do not need to fetch Firecracker during

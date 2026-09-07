@@ -86,13 +86,15 @@ of adding conditional branches throughout common code. See
    available wall-clock setup follow.
 6. VFS/initramfs, network command-line configuration, and optional hypervisor
    setup are prepared.
-   `TransparentExecutor` loads `/system/scarlet/bin/init` into the reserved task.
+   `TransparentExecutor` loads `/init` (or the `init=` override) into the reserved
+   bootstrap task.
 7. On successful loading, init is enqueued. The boot CPU claims its first
    runnable task before the boot hook releases secondary CPUs, then enters the
    selected task. `start_ap` performs per-CPU setup for secondary processors.
 
 The default [init program](../../user/bin/src/init.rs) mounts the selected
-root filesystem and execs `stemd`; the microvm project replaces that binary
+root filesystem, constructs a sealed [Environment](../abi/execution-environments.md),
+and execs `/bin/stemd` in its native view; the microvm project replaces init
 with `microvm-init`. Root-device policy and service startup are userspace work,
 not the kernel bootloader. See [Limine boot](../boot/limine.md) and
 [userspace startup](../userspace/README.md#startup-and-services).

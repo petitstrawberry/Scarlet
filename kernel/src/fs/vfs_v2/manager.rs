@@ -1,8 +1,4 @@
-//! VFS Manager v2 - Enhanced Virtual File System Management
-//!
-//! This module provides the next-generation VFS management system for Scarlet,
-//! built on the improved VFS v2 architecture with enhanced mount tree management,
-//! VfsEntry-based caching, and better isolation support.
+//! Filesystem views and per-process filesystem contexts.
 
 use crate::sync::{IrqRwSpinLock, Mutex, MutexGuard, Once};
 use alloc::{
@@ -17,9 +13,7 @@ use crate::object::KernelObject;
 
 use super::{
     core::{DirectoryEntryInternal, FileSystemOperations, VfsEntry},
-    mount_tree::{
-        MountOptionsV2, MountPoint, MountTree, MountType, VfsEntryRef, VfsManagerId, VfsResult,
-    },
+    mount_tree::{MountOptionsV2, MountPoint, MountTree, VfsEntryRef, VfsManagerId, VfsResult},
 };
 
 /// Filesystem ID type
@@ -75,19 +69,28 @@ fn vfs_error(kind: FileSystemErrorKind, message: &str) -> FileSystemError {
     FileSystemError::new(kind, message)
 }
 
-/// VFS Manager v2 - Enhanced VFS architecture implementation
-///
-/// This manager provides advanced VFS functionality with proper mount tree
-/// management, enhanced caching, and better support for containerization.
-pub struct VfsManager {
-    /// Unique identifier for this VfsManager instance
+/// A shared filesystem view. Working directories do not belong to the view.
+pub struct VfsView {
     pub id: VfsManagerId,
-    /// Mount tree for hierarchical mount point management
     pub mount_tree: Arc<MountTree>,
-    /// Current working directory: (VfsEntry, MountPoint) pair
-    pub cwd: IrqRwSpinLock<Option<(Arc<VfsEntry>, Arc<MountPoint>)>>,
-    /// Strong references to all currently mounted filesystems
     pub mounted_filesystems: Arc<IrqRwSpinLock<Vec<Arc<dyn FileSystemOperations>>>>,
+    /// Non-owning construction dependencies used to reject backing-view cycles.
+    pub(crate) dependencies: IrqRwSpinLock<Vec<alloc::sync::Weak<VfsView>>>,
+}
+
+/// A process filesystem context. CLONE_FS explicitly shares this whole object;
+/// ordinary fork shares only its view and copies its working directory.
+pub struct VfsManager {
+    view: Arc<VfsView>,
+    pub cwd: IrqRwSpinLock<Option<(Arc<VfsEntry>, Arc<MountPoint>)>>,
+}
+
+impl core::ops::Deref for VfsManager {
+    type Target = VfsView;
+
+    fn deref(&self) -> &VfsView {
+        &self.view
+    }
 }
 
 static GLOBAL_VFS_MANAGER: Once<Arc<VfsManager>> = Once::new();
@@ -104,10 +107,13 @@ impl VfsManager {
         let mount_tree = Arc::new(MountTree::new(dummy_root_entry.clone(), root_fs.clone()));
 
         Self {
-            id: VfsManagerId::new(),
-            mount_tree,
+            view: Arc::new(VfsView {
+                id: VfsManagerId::new(),
+                mount_tree,
+                mounted_filesystems: Arc::new(IrqRwSpinLock::new(vec![root_fs.clone()])),
+                dependencies: IrqRwSpinLock::new(Vec::new()),
+            }),
             cwd: IrqRwSpinLock::new(None),
-            mounted_filesystems: Arc::new(IrqRwSpinLock::new(vec![root_fs.clone()])),
         }
     }
 
@@ -117,10 +123,13 @@ impl VfsManager {
         let dummy_root_entry = VfsEntry::new(None, "/".to_string(), root_node);
         let mount_tree = Arc::new(MountTree::new(dummy_root_entry.clone(), root_fs.clone()));
         Self {
-            id: VfsManagerId::new(),
-            mount_tree,
+            view: Arc::new(VfsView {
+                id: VfsManagerId::new(),
+                mount_tree,
+                mounted_filesystems: Arc::new(IrqRwSpinLock::new(vec![root_fs.clone()])),
+                dependencies: IrqRwSpinLock::new(Vec::new()),
+            }),
             cwd: IrqRwSpinLock::new(None),
-            mounted_filesystems: Arc::new(IrqRwSpinLock::new(vec![root_fs.clone()])),
         }
     }
 
@@ -128,10 +137,22 @@ impl VfsManager {
     /// while copying filesystem context such as the current working directory.
     pub fn clone_with_shared_mount_namespace(source: &Arc<VfsManager>) -> Arc<VfsManager> {
         Arc::new(Self {
-            id: VfsManagerId::new(),
-            mount_tree: source.mount_tree.clone(),
+            view: source.view.clone(),
             cwd: IrqRwSpinLock::new(source.cwd.read().clone()),
-            mounted_filesystems: source.mounted_filesystems.clone(),
+        })
+    }
+
+    pub fn view(&self) -> Arc<VfsView> {
+        self.view.clone()
+    }
+
+    /// Create a fresh filesystem context at the root of an existing view.
+    pub fn from_view(view: Arc<VfsView>) -> Arc<Self> {
+        let root = view.mount_tree.root_mount.read().clone();
+        let cwd = (root.root.clone(), root);
+        Arc::new(Self {
+            view,
+            cwd: IrqRwSpinLock::new(Some(cwd)),
         })
     }
 
@@ -331,239 +352,71 @@ impl VfsManager {
         )
     }
 
-    /// Create a new VFS manager that starts with the same mount tree as `source`,
-    /// but does not share mount tree structures (deep copy of mount topology).
-    ///
-    /// Notes:
-    /// - Underlying filesystem objects may still be shared (same backing FS),
-    ///   but mount/unmount/bind mount operations will be isolated between namespaces.
-    /// - This intentionally reconstructs mounts by replaying mount/bind-mount operations.
+    /// Copy mount objects and parent links, sharing filesystem nodes/data only.
+    /// This also works for bind sources outside the source namespace. Replaying
+    /// path-based mounts would lose those sources and could mutate filesystem data.
     pub fn clone_mount_namespace_deep(
         source: &Arc<VfsManager>,
     ) -> Result<Arc<VfsManager>, FileSystemError> {
-        fn with_context(e: FileSystemError, ctx: &str) -> FileSystemError {
-            FileSystemError::new(e.kind, alloc::format!("{}: {}", ctx, e.message))
-        }
-
-        fn collect_mounts(mount: &Arc<MountPoint>, out: &mut Vec<Arc<MountPoint>>) {
-            out.push(mount.clone());
-            let children = mount.children.read();
-            for child in children.values() {
-                collect_mounts(child, out);
-            }
-        }
-
-        fn mount_namespace_path(mount: &Arc<MountPoint>) -> Result<String, FileSystemError> {
-            if mount.is_root_mount() {
-                return Ok("/".to_string());
-            }
-
-            let parent_mount = mount.get_parent().ok_or_else(|| {
-                FileSystemError::new(
+        fn copy_mount(
+            old: &Arc<MountPoint>,
+            depth: usize,
+        ) -> Result<Arc<MountPoint>, FileSystemError> {
+            if depth > 256 {
+                return Err(vfs_error(
                     FileSystemErrorKind::InvalidPath,
-                    "deep-clone: orphan mount (missing parent)",
-                )
-            })?;
-            let parent_entry = mount.parent_entry.read().clone().ok_or_else(|| {
-                FileSystemError::new(
-                    FileSystemErrorKind::InvalidPath,
-                    "deep-clone: orphan mount (missing parent_entry)",
-                )
-            })?;
-
-            namespace_path_of_entry(&parent_mount, &parent_entry)
-        }
-
-        fn namespace_path_of_entry(
-            mount: &Arc<MountPoint>,
-            entry: &Arc<VfsEntry>,
-        ) -> Result<String, FileSystemError> {
-            let base = mount_namespace_path(mount)?;
-
-            if Arc::ptr_eq(entry, &mount.root) {
-                return Ok(base);
+                    "mount tree too deep",
+                ));
             }
-
-            let mut components: Vec<String> = Vec::new();
-            let mut current = Some(entry.clone());
-            while let Some(e) = current {
-                if Arc::ptr_eq(&e, &mount.root) {
-                    break;
-                }
-                components.push(e.name().clone());
-                current = e.parent();
-            }
-            components.reverse();
-
-            if components.is_empty() {
-                Ok(base)
-            } else if base == "/" {
-                Ok(alloc::format!("/{}", components.join("/")))
-            } else {
-                Ok(alloc::format!("{}/{}", base, components.join("/")))
-            }
-        }
-
-        fn find_containing_mount(
-            all_mounts: &[Arc<MountPoint>],
-            entry: &Arc<VfsEntry>,
-        ) -> Option<Arc<MountPoint>> {
-            let mut root = entry.clone();
-            while let Some(parent) = root.parent() {
-                root = parent;
-            }
-
-            all_mounts
-                .iter()
-                .find(|m| Arc::ptr_eq(&m.root, &root))
-                .cloned()
-        }
-
-        fn ensure_dir_path(vfs: &Arc<VfsManager>, path: &str) -> Result<(), FileSystemError> {
-            if path == "/" {
-                return Ok(());
-            }
-
-            // If it already exists, we're done.
-            if vfs.resolve_path(path).is_ok() {
-                return Ok(());
-            }
-
-            // Create intermediate directories one by one: /a, /a/b, ...
-            let mut current = String::new();
-            for part in path.split('/').filter(|p| !p.is_empty()) {
-                if current.is_empty() {
-                    current.push('/');
-                    current.push_str(part);
-                } else {
-                    current.push('/');
-                    current.push_str(part);
-                }
-
-                if vfs.resolve_path(&current).is_ok() {
-                    continue;
-                }
-
-                match vfs.create_dir(&current) {
-                    Ok(()) => {}
-                    Err(e) if e.kind == FileSystemErrorKind::AlreadyExists => {}
-                    Err(e) => return Err(e),
-                }
-            }
-
-            Ok(())
-        }
-
-        let source_root_mount = source.mount_tree.root_mount.read().clone();
-        let source_root_fs = source_root_mount
-            .filesystem
-            .clone()
-            .or_else(|| {
-                source_root_mount
-                    .root
-                    .node()
-                    .filesystem()
-                    .and_then(|w| w.upgrade())
-            })
-            .ok_or_else(|| {
-                FileSystemError::new(
-                    FileSystemErrorKind::NotSupported,
-                    "deep-clone root mount: no filesystem reference",
-                )
-            })?;
-
-        let new_vfs = Arc::new(VfsManager::new_with_root(source_root_fs));
-
-        let mut all_mounts: Vec<Arc<MountPoint>> = Vec::new();
-        collect_mounts(&source_root_mount, &mut all_mounts);
-
-        // 1) Recreate regular mounts (excluding the root mount).
-        let mut regular_mounts: Vec<(usize, String, Arc<dyn FileSystemOperations>)> = Vec::new();
-        for mount in &all_mounts {
-            if mount.is_root_mount() {
-                continue;
-            }
-            if !matches!(mount.mount_type, MountType::Regular) {
-                continue;
-            }
-
-            let target_path = mount_namespace_path(mount)?;
-            let depth = target_path.matches('/').count();
-            let fs = mount
-                .filesystem
-                .clone()
-                .or_else(|| mount.root.node().filesystem().and_then(|w| w.upgrade()))
-                .ok_or_else(|| {
-                    FileSystemError::new(
-                        FileSystemErrorKind::NotSupported,
-                        alloc::format!(
-                            "deep-clone mount replay: no filesystem reference for '{}'",
-                            target_path
-                        ),
-                    )
+            let new = Arc::new(MountPoint {
+                id: super::mount_tree::MountId::new(),
+                mount_type: old.mount_type.clone(),
+                path: IrqRwSpinLock::new(old.path.read().clone()),
+                root: old.root.clone(),
+                filesystem: old.filesystem.clone(),
+                parent: IrqRwSpinLock::new(None),
+                parent_entry: IrqRwSpinLock::new(None),
+                children: Arc::new(IrqRwSpinLock::new(alloc::collections::BTreeMap::new())),
+            });
+            let children: Vec<_> = old.children.read().values().cloned().collect();
+            for child in children {
+                let entry = child.parent_entry.read().clone().ok_or_else(|| {
+                    vfs_error(FileSystemErrorKind::InvalidPath, "orphan child mount")
                 })?;
-            regular_mounts.push((depth, target_path, fs));
-        }
-        regular_mounts.sort_by_key(|(depth, path, _)| (*depth, path.clone()));
-        for (_depth, target_path, fs) in regular_mounts {
-            // Some mount points may not exist as directories in the underlying FS.
-            // Ensure the target directory exists before mounting.
-            let _ = ensure_dir_path(&new_vfs, &target_path);
-            new_vfs.mount(fs, &target_path, 0).map_err(|e| {
-                with_context(
-                    e,
-                    &alloc::format!("deep-clone mount replay at '{}'", target_path),
-                )
-            })?;
-        }
-
-        // 2) Recreate bind mounts after regular mounts are in place.
-        let mut bind_mounts: Vec<(usize, String, Arc<VfsEntry>, Arc<MountPoint>)> = Vec::new();
-        for mount in &all_mounts {
-            if mount.is_root_mount() {
-                continue;
+                let copy = copy_mount(&child, depth + 1)?;
+                new.add_child(&entry, copy)?;
             }
-            if !matches!(mount.mount_type, MountType::Bind) {
-                continue;
-            }
-
-            let target_path = mount_namespace_path(mount)?;
-            let depth = target_path.matches('/').count();
-
-            let source_entry = mount.root.clone();
-            let containing_mount =
-                find_containing_mount(&all_mounts, &source_entry).ok_or_else(|| {
-                    FileSystemError::new(
-                        FileSystemErrorKind::InvalidPath,
-                        "Bind source mount not found",
-                    )
-                })?;
-
-            bind_mounts.push((depth, target_path, source_entry, containing_mount));
+            Ok(new)
         }
-        bind_mounts.sort_by_key(|(depth, target_path, _, _)| (*depth, target_path.clone()));
-        for (_depth, target_path, source_entry, source_mount) in bind_mounts {
-            // Ensure bind target exists before creating the bind mount.
-            let _ = ensure_dir_path(&new_vfs, &target_path);
-            match new_vfs.bind_mount_from_entry(source_entry, source_mount, &target_path) {
-                Ok(()) => {}
-                Err(e)
-                    if e.kind == FileSystemErrorKind::InvalidPath
-                        && e.message.contains("Target path is already a mount point") =>
-                {
-                    // Unsupported to stack a bind mount over an existing mount in this VFS.
-                    // Keep going to provide best-effort deep clone.
-                }
-                Err(e) => {
-                    return Err(with_context(
-                        e,
-                        &alloc::format!("deep-clone bind-mount replay at '{}'", target_path),
-                    ));
-                }
-            }
-        }
+        let root = source.mount_tree.root_mount.read().clone();
+        let root = copy_mount(&root, 0)?;
+        let new = Arc::new(Self::new());
+        new.mount_tree.replace_root(root);
+        *new.mounted_filesystems.write() = source.mounted_filesystems.read().clone();
+        *new.dependencies.write() = source.dependencies.read().clone();
+        new.set_cwd_by_path(&source.get_cwd_path())?;
+        Ok(new)
+    }
 
-        Ok(new_vfs)
+    /// Build an independent view rooted at a directory from a supplied view.
+    /// Child mounts are not recursive; callers explicitly select shared mounts.
+    pub fn view_rooted_at(
+        source: &Arc<VfsManager>,
+        path: &str,
+    ) -> Result<Arc<VfsManager>, FileSystemError> {
+        let (entry, _) = source.resolve_path(path)?;
+        if entry.node().metadata()?.file_type != FileType::Directory {
+            return Err(vfs_error(
+                FileSystemErrorKind::NotADirectory,
+                "view root must be a directory",
+            ));
+        }
+        let new = Arc::new(Self::new());
+        new.mount_tree
+            .replace_root(MountPoint::new_bind("/".to_string(), entry));
+        *new.mounted_filesystems.write() = source.mounted_filesystems.read().clone();
+        new.set_cwd_by_path("/")?;
+        Ok(new)
     }
 
     /// Create a bind mount from source_entry to target_entry
@@ -583,6 +436,19 @@ impl VfsManager {
         // Cloning `MountPoint` children across VFS instances leaves their `parent` weak refs
         // pointing at the source tree, which can later be dropped (e.g. during pivot_root),
         // producing orphan mounts and panics in mount-tree traversal.
+        // Nodes refer weakly to their filesystem. The destination view must
+        // retain the backing filesystem after the source view handle is closed.
+        if let Some(fs) = bind_mount
+            .root
+            .node()
+            .filesystem()
+            .and_then(|fs| fs.upgrade())
+        {
+            let mut mounted = self.mounted_filesystems.write();
+            if !mounted.iter().any(|old| Arc::ptr_eq(old, &fs)) {
+                mounted.push(fs);
+            }
+        }
         let _ = source_mount_point;
         // Add as child to target_mount_point
         target_mount_point

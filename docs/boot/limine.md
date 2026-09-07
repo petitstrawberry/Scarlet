@@ -30,7 +30,7 @@ initramfs (newc) ──> boot (Limine FAT / ESP) ──┐
 rootfs (ext2) ────────────────────────────────┘
 ```
 
-The microvm project replaces `/system/scarlet/bin/init` with
+The microvm project replaces `/init` with
 `microvm-init`. It does not use the normal full desktop startup sequence.
 
 ## Protocol handoff

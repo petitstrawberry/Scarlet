@@ -819,9 +819,8 @@ pub fn sys_exec(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let argv_refs: Vec<&str> = argv_strings.iter().map(|s| s.as_str()).collect();
 
     // Use TransparentExecutor for cross-ABI execution
-    match TransparentExecutor::execute_binary(&path_str, &argv_refs, &[], &task, trapframe, false) {
+    match TransparentExecutor::execute_binary(&path_str, &argv_refs, &[], &task, trapframe) {
         Ok(_) => {
-            _abi.close_on_exec_fds();
             crate::task::wake_task_waiters(task.get_id());
             // execve normally should not return on success - the process is replaced
             // However, if ABI module sets trapframe return value and returns here,
@@ -846,16 +845,11 @@ enum OpenMode {
     Truncate = 0x400,
 }
 
-/// Linux sys_mount compatibility stub.
-///
-/// Firecracker may isolate its process with mount namespace operations before
-/// opening the KVM device. Scarlet does not yet implement Linux mount
-/// namespaces, so this syscall currently accepts the request without mutating
-/// VFS state.
+/// Linux mount namespaces are not implemented; do not claim successful isolation.
 pub fn sys_mount(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     trapframe.increment_pc_next(&task);
-    0
+    errno::to_result(errno::ENOSYS)
 }
 
 /// Linux sys_openat implementation for Scarlet VFS v2
@@ -2631,11 +2625,8 @@ pub fn sys_execve(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let envp_refs: Vec<&str> = envp_strings.iter().map(|s| s.as_str()).collect();
 
     // Use TransparentExecutor for cross-ABI execution
-    match TransparentExecutor::execute_binary(
-        &path_str, &argv_refs, &envp_refs, &task, trapframe, false,
-    ) {
+    match TransparentExecutor::execute_binary(&path_str, &argv_refs, &envp_refs, &task, trapframe) {
         Ok(_) => {
-            _abi.close_on_exec_fds();
             crate::task::wake_task_waiters(task.get_id());
             // execve normally should not return on success - the process is replaced
             // However, if ABI module sets trapframe return value and returns here,

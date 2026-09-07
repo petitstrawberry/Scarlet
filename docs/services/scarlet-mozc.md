@@ -19,7 +19,7 @@ The conversion engine must stay outside SWS. SWS continues to broker text-input 
 Current implemented path:
 
 - registers as the `scarlet-mozc` SWS input method
-- loads Mozc's IPC key file from `/scarlet/system/scarlet/root/.config/mozc/.session.ipc`
+- loads Mozc's IPC key file from `/root/.config/mozc/.session.ipc`
 - reconstructs the Linux abstract socket name as `tmp/.mozc.<key>.mozc_server`
 - sends minimal Mozc `Command` protobuf requests:
   - `CREATE_SESSION`
@@ -38,17 +38,19 @@ mozc-server &
 scarlet-mozc
 ```
 
-The `mozc-server` command is a Scarlet-native launcher. On AArch64 it expects a
-musl-linked Linux server at
-`/scarlet/system/linux-aarch64/usr/lib/mozc/mozc_server`. Build it with the same
-Buildroot toolchain used by the Linux rootfs, then deploy the staged root
-overlay:
+The `mozc-server` command is a Scarlet-native launcher. It queries the current
+Environment's Linux view, opens `/usr/lib/mozc/mozc_server` there, then execs
+the opened image with explicitly mapped standard streams. No backing-root
+path is consulted.
 
-The launcher creates `/scarlet/system/scarlet/root/.config/mozc` and runs the
-Linux server with `HOME=/scarlet/system/scarlet/root`. Linux ABI processes see
-the native Scarlet tree at `/scarlet`, so Mozc writes its profile files,
-including `.session.ipc`, into the same native profile directory that
-`scarlet-mozc` reads.
+The launcher creates `/root/.config/mozc` in its own view and runs the Linux
+server with `HOME=/root`. Init explicitly shares `/root` between the native
+and Linux views, so both services see the same profile and `.session.ipc`.
+Custom Environments must arrange an equivalent shared profile.
+See [Execution Environments](../abi/execution-environments.md).
+
+To build a local server, use the same Buildroot toolchain as the Linux rootfs,
+then deploy the staged overlay:
 
 ```sh
 ARCH=aarch64 \

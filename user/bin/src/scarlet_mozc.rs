@@ -24,9 +24,9 @@ use sws_protocol::{ime_capabilities, ime_state, ime_status_flags, ime_trigger, w
 
 const IME_NAME: &str = "scarlet-mozc";
 const MOZC_IPC_NAME: &str = "session";
-const MOZC_PROFILE_DIR: &str = "/scarlet/system/scarlet/root/.config/mozc";
-const MOZC_LEGACY_PROFILE_DIR: &str = "/scarlet/system/scarlet/root/.mozc";
-const MOZC_HOME_DIR: &str = "/scarlet/system/scarlet/root";
+const MOZC_PROFILE_DIR: &str = "/root/.config/mozc";
+const MOZC_LEGACY_PROFILE_DIR: &str = "/root/.mozc";
+const MOZC_HOME_DIR: &str = "/root";
 const MODE_DIRECT_ID: u32 = 0;
 const MODE_MOZC_HIRAGANA_ID: u32 = 1;
 const MODE_MOZC_KATAKANA_ID: u32 = 2;

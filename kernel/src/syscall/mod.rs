@@ -175,6 +175,24 @@ fn sys_shv_vcpu_run(tf: &mut Trapframe) -> usize {
 }
 
 syscall_table! {
+    VfsViewCreate = 520 => crate::executor::syscall::sys_vfs_view_create,
+    VfsViewCurrent = 521 => crate::executor::syscall::sys_vfs_view_current,
+    VfsViewClone = 522 => crate::executor::syscall::sys_vfs_view_clone,
+    VfsViewOpen = 523 => crate::executor::syscall::sys_vfs_view_open,
+    VfsViewMount = 524 => crate::executor::syscall::sys_vfs_view_mount,
+    VfsViewBind = 525 => crate::executor::syscall::sys_vfs_view_bind,
+    VfsViewOverlay = 526 => crate::executor::syscall::sys_vfs_view_overlay,
+    VfsViewUnmount = 527 => crate::executor::syscall::sys_vfs_view_unmount,
+    VfsViewCreateDirectory = 528 => crate::executor::syscall::sys_vfs_view_mkdir,
+    VfsViewRoot = 529 => crate::executor::syscall::sys_vfs_view_root,
+    EnvironmentCreate = 1300 => crate::executor::syscall::sys_environment_create,
+    EnvironmentSetRoot = 1301 => crate::executor::syscall::sys_environment_set_root,
+    EnvironmentRemoveRoot = 1302 => crate::executor::syscall::sys_environment_remove_root,
+    EnvironmentSeal = 1303 => crate::executor::syscall::sys_environment_seal,
+    EnvironmentCurrent = 1304 => crate::executor::syscall::sys_environment_current,
+    EnvironmentGetRoot = 1305 => crate::executor::syscall::sys_environment_get_root,
+    EnvironmentSpawn = 1306 => crate::executor::syscall::sys_environment_spawn,
+    EnvironmentExec = 1307 => crate::executor::syscall::sys_environment_exec,
     Invalid = 0 => |_: &mut Trapframe| {
         0
     },

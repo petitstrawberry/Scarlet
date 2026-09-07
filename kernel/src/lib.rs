@@ -117,7 +117,7 @@
 //! 13. **Timer Subsystem**: Initialize the timer and available wall-clock source
 //! 14. **Virtual File System**: VFS initialization and root filesystem mounting
 //! 15. **Initial Filesystem**: Initramfs processing if provided in BootInfo
-//! 16. **Initial Process**: Load `/system/scarlet/bin/init` into the reserved task,
+//! 16. **Initial Process**: Load `/init` (or `init=`) into the reserved bootstrap task,
 //!     with network/hypervisor initialization when configured
 //! 17. **Scheduler Activation**: Enqueue init, claim the boot CPU's first task,
 //!     release secondary CPUs through the boot hook, and enter the selected task
@@ -1005,8 +1005,13 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
         .set_cwd_by_path("/")
         .expect("Failed to set initial working directory");
     let init_cmdline = boot_info.get_cmdline();
-    let init_argv_default = ["/system/scarlet/bin/init"];
-    let init_argv_with_cmdline = ["/system/scarlet/bin/init", init_cmdline];
+    task.bootstrap_environment.store(true, Ordering::Release);
+    let init_path = init_cmdline
+        .split_whitespace()
+        .find_map(|word| word.strip_prefix("init="))
+        .unwrap_or("/init");
+    let init_argv_default = [init_path];
+    let init_argv_with_cmdline = [init_path, init_cmdline];
     let init_argv: &[&str] = if init_cmdline.is_empty() {
         &init_argv_default
     } else {
@@ -1014,12 +1019,11 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
     };
 
     match TransparentExecutor::execute_binary(
-        "/system/scarlet/bin/init",
+        init_path,
         init_argv,
         &[],
         &task,
         task.get_trapframe(),
-        false,
     ) {
         Ok(()) => {
             task.vm_manager.memmaps_iter_with(|maps| {

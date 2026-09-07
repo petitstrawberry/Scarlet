@@ -31,23 +31,21 @@ stemd consists of these modules:
 
 ## Configuration
 
-stemd tries `/etc/stemd.d/services/`, then
-`/system/scarlet/etc/stemd.d/services/`. If directory loading fails, it tries
-`/etc/stemd.d/services.toml` and
-`/system/scarlet/etc/stemd.d/services.toml`, then its built-in defaults.
+stemd reads `/etc/stemd.d/services/` in its own view. If directory loading
+fails, it tries `/etc/stemd.d/services.toml`, then its built-in defaults.
 The first successfully loaded service configuration is used.
 
 ### Service Definition
 
 ```toml
 [service.login]
-exec = "/system/scarlet/bin/login"
+exec = "/bin/login"
 depends = []
 after = ["sws"]
 tty = "/dev/tty0"
 
 [service.sws]
-exec = "/system/scarlet/bin/sws"
+exec = "/bin/sws"
 depends = []
 ready_notify = true
 ready_timeout_ms = 10000
@@ -94,7 +92,7 @@ multi-boot storage is not implemented yet.
 ## .desktop Application Registry
 
 After service startup, stemd loads Desktop Entry files from
-`/etc/stemd.d/apps/` and `/system/scarlet/etc/stemd.d/apps/`.
+`/etc/stemd.d/apps/` in its own view.
 Loaded apps are available for launch via the IPC `LAUNCH_OR_FOCUS` command.
 The checked-in desktop bundle supplies these files under its `fs/` tree.
 

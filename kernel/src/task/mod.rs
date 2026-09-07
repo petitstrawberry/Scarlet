@@ -986,6 +986,13 @@ pub struct Task {
     /// VfsManager is thread-safe and can be shared between tasks using Arc.
     /// All internal operations use `IrqRwSpinLock` for concurrent access protection.
     pub vfs: IrqRwSpinLock<Option<Arc<VfsManager>>>,
+    /// Ordinary processes belong to a sealed execution environment.
+    pub execution_environment:
+        IrqRwSpinLock<Option<Arc<crate::executor::environment::Environment>>>,
+    /// Granted only to the initial bootstrap process; never inherited by clone.
+    pub bootstrap_environment: AtomicBool,
+    /// Keep the dispatched ABI alive until its syscall handler has returned.
+    retired_exec_abi: TaskLocal<Option<Box<dyn AbiModule + Send + Sync>>>,
     /// Pending task-owned timer callbacks and handles, cancelled together when
     /// the task wakes or is dropped.
     software_timers: IrqSpinLock<Vec<SoftwareTimerRegistration>>,
@@ -1130,7 +1137,7 @@ impl CloneFlags {
 
 impl Default for CloneFlags {
     fn default() -> Self {
-        let raw = CloneFlagsDef::Fs as u64 | CloneFlagsDef::Files as u64;
+        let raw = 0;
         CloneFlags { raw }
     }
 }
@@ -1239,6 +1246,9 @@ impl Task {
             page_allocations: vm_manager.page_allocations_handle(),
             task_pages: vm_manager.task_pages_handle(),
             vfs: IrqRwSpinLock::new(None),
+            execution_environment: IrqRwSpinLock::new(None),
+            bootstrap_environment: AtomicBool::new(false),
+            retired_exec_abi: TaskLocal::new(None),
             software_timers: IrqSpinLock::new(Vec::new()),
             software_timer_count: AtomicUsize::new(0),
             deadline: IrqSpinLock::new(TaskDeadlineState::new()),
@@ -1877,6 +1887,13 @@ impl Task {
     /// * `path` - Path that should be exposed as the task's executable image.
     pub(crate) fn set_executable_path(&self, path: &str) {
         *self.executable_path.write() = Some(path.to_string());
+    }
+
+    pub(crate) fn exchange_executable_path(&self, image: &Task) {
+        core::mem::swap(
+            &mut *self.executable_path.write(),
+            &mut *image.executable_path.write(),
+        );
     }
 
     /// Return the executable path installed by the most recent successful exec.
@@ -3295,6 +3312,7 @@ impl Task {
         } else if let Some(vfs) = self.vfs.read().clone() {
             *child.vfs.write() = Some(VfsManager::clone_with_shared_mount_namespace(&vfs));
         }
+        *child.execution_environment.write() = self.execution_environment.read().clone();
 
         // Ensure the cloned task has its own high-VA kernel stack window.
         // Task::new() already allocates a per-task kernel stack (KernelContext), but clone paths
@@ -3766,6 +3784,64 @@ impl Task {
     /// Get a reference to the VFS
     pub fn get_vfs(&self) -> Option<Arc<VfsManager>> {
         self.vfs.read().clone()
+    }
+
+    /// Allocate an unpublished image with this process's identity, but no
+    /// shared address space, handles, filesystem context or scheduler state.
+    pub(crate) fn new_exec_image(&self) -> Self {
+        let mut image = Self::new_with_namespace(
+            self.name.read().clone(),
+            0,
+            TaskType::User,
+            self.get_namespace().clone(),
+        );
+        image.id = self.id;
+        image
+            .namespace_id
+            .store(self.try_get_namespace_id().unwrap_or(0), Ordering::Relaxed);
+        image.thread_group_id = self.thread_group_id;
+        image.max_stack_size = self.max_stack_size;
+        image.max_data_size = self.max_data_size;
+        image.max_text_size = self.max_text_size;
+        image.vm_manager.set_asid(alloc_virtual_address_space());
+        image.vm_manager.set_owner_task_id_if_unset(self.id);
+        image
+    }
+
+    pub(crate) fn can_replace_exec_image(&self) -> bool {
+        if !self.vm_manager.is_exclusive() || !self.handle_table.is_sole_owner() {
+            return false;
+        }
+        if self.id != 0
+            && get_all_task_ids().into_iter().any(|id| {
+                id != self.id
+                    && get_task_by_id(id).is_some_and(|other| {
+                        other.get_thread_group_id() == self.get_thread_group_id()
+                            && !matches!(
+                                other.state.load(Ordering::Acquire),
+                                TaskState::Zombie | TaskState::Terminated
+                            )
+                    })
+            })
+        {
+            return false;
+        }
+        // SAFETY: Only the executing task inspects its ABI zones here.
+        unsafe { self.abi_zones.get().is_empty() }
+    }
+
+    pub(crate) fn install_exec_abi(&self, abi: Box<dyn AbiModule + Send + Sync>) {
+        // SAFETY: Called only by this task's exec commit. Retaining the old box
+        // keeps an in-flight syscall's ABI borrow alive until dispatch returns.
+        unsafe {
+            *self.retired_exec_abi.get_mut() = self.default_abi.get_mut().replace(abi);
+        }
+    }
+
+    pub(crate) fn finish_exec_dispatch(&self) {
+        // SAFETY: Called after with_resolve_abi_mut has returned.
+        let retired = unsafe { self.retired_exec_abi.get_mut().take() };
+        drop(retired);
     }
 
     /// Register an armed task-owned timer with its callback.

@@ -1851,19 +1851,11 @@ fn main() {
     println!("stemd: PID={}", std::process::id());
 
     // Read configuration.
-    // Note: current filesystem layout copies userland under `/system/scarlet`,
-    // so configs may live under `/system/scarlet/etc` instead of `/etc`.
     // Directory structure:
     //   /etc/stemd.d/services/*.toml  - Service definitions
     //   /etc/stemd.d/apps/*.desktop   - Application definitions
-    let config_dirs = [
-        "/etc/stemd.d/services",
-        "/system/scarlet/etc/stemd.d/services",
-    ];
-    let config_files = [
-        "/etc/stemd.d/services.toml",
-        "/system/scarlet/etc/stemd.d/services.toml",
-    ];
+    let config_dirs = ["/etc/stemd.d/services"];
+    let config_files = ["/etc/stemd.d/services.toml"];
 
     let mut config_content: Option<String> = None;
 
@@ -2073,7 +2065,7 @@ tty = "/dev/tty0"
     // Load .desktop files for application definitions
     println!("stemd: Loading application definitions...");
     // Unified directory structure: /etc/stemd.d/apps/*.desktop
-    let desktop_dirs = ["/etc/stemd.d/apps", "/system/scarlet/etc/stemd.d/apps"];
+    let desktop_dirs = ["/etc/stemd.d/apps"];
     let mut total_apps = 0;
     for dir in &desktop_dirs {
         match load_desktop_files(dir) {

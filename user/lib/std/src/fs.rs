@@ -872,6 +872,11 @@ pub mod mount_flags {
 
 /// Mount a filesystem
 ///
+/// Requires bootstrap authority or a management handle for the current view.
+/// Ordinary programs cannot obtain that authority from a current-view query.
+/// Use `environment::VfsView` for capability-scoped construction; replacing
+/// the root of an established Environment is not supported by this syscall.
+///
 /// # Arguments
 ///
 /// * `source` - Source device or filesystem name (e.g., "/dev/sda1", "tmpfs")
@@ -1027,6 +1032,8 @@ pub fn unmount(target: &str, flags: u32) -> Result<()> {
 /// This system call moves the old root filesystem to `old_root` and makes
 /// `new_root` the new root filesystem. This is typically used during system
 /// initialization to switch from an initramfs to the real root filesystem.
+/// Only the bootstrap process may call this operation. Established processes
+/// select a new root through an explicit Environment exec or spawn instead.
 ///
 /// # Arguments
 ///

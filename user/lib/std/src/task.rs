@@ -23,9 +23,6 @@ pub struct TaskDeadlineParams {
     pub period_ns: u64,
 }
 
-// Flags for execve system calls
-pub const EXECVE_FORCE_ABI_REBUILD: usize = 0x1; // Force ABI environment reconstruction
-
 #[repr(u64)]
 pub enum CloneFlagsDef {
     Vm = 0b00000001,     // Clone the VM
@@ -67,10 +64,9 @@ impl CloneFlags {
 }
 
 impl Default for CloneFlags {
-    /// Returns default CloneFlags with FS flag set
-    /// This mimics the behavior of fork(), where the filesystem context is shared.
+    /// Fork defaults: share the Environment and views, copy cwd and handles.
     fn default() -> Self {
-        let raw = CloneFlagsDef::Fs as u64;
+        let raw = 0;
         CloneFlags { raw }
     }
 }
@@ -526,7 +522,7 @@ fn create_ptr_array_box(ptrs: Vec<usize>) -> (*const usize, usize) {
 /// * `path` - Path to the executable
 /// * `argv` - Command line arguments
 /// * `envp` - Environment variables
-/// * `flags` - Execution flags (e.g., EXECVE_FORCE_ABI_REBUILD)
+/// * `flags` - Reserved; must be zero.
 ///
 /// # Return Value
 /// - Returns only if an error occurred
@@ -602,7 +598,7 @@ pub fn execve_with_flags(path: &str, argv: &[&str], envp: &[&str], flags: usize)
 /// * `argv` - Command line arguments
 /// * `envp` - Environment variables
 /// * `abi` - Target ABI name
-/// * `flags` - Execution flags (e.g., EXECVE_FORCE_ABI_REBUILD)
+/// * `flags` - Reserved; must be zero.
 ///
 /// # Return Value
 /// - Returns only if an error occurred

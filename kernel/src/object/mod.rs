@@ -30,6 +30,8 @@ use crate::hypervisor;
 /// Note: Debug is not implemented for KernelObject because it contains
 /// trait objects that may not implement Debug. Use introspection methods instead.
 pub enum KernelObject {
+    Environment(crate::executor::environment::EnvironmentHandle),
+    VfsView(crate::executor::environment::ViewHandle),
     File(Arc<dyn FileObject>),
     Pipe(Arc<dyn PipeObject>),
     Counter(Arc<dyn CounterObject>),
@@ -286,6 +288,8 @@ impl<'a> KernelObjectRef<'a> {
             KernelObject::EventSubscription(_) => "EventSubscription",
             KernelObject::SharedMemory(_) => "SharedMemory",
             KernelObject::Gpu(_) => "Gpu",
+            KernelObject::Environment(_) => "Environment",
+            KernelObject::VfsView(_) => "VfsView",
             #[cfg(feature = "network")]
             KernelObject::Socket(_) => "Socket",
             #[cfg(feature = "hypervisor")]
@@ -479,6 +483,8 @@ impl KernelObject {
             KernelObject::EventSubscription(_) => "EventSubscription",
             KernelObject::SharedMemory(_) => "SharedMemory",
             KernelObject::Gpu(_) => "Gpu",
+            KernelObject::Environment(_) => "Environment",
+            KernelObject::VfsView(_) => "VfsView",
             #[cfg(feature = "network")]
             KernelObject::Socket(_) => "Socket",
             #[cfg(feature = "hypervisor")]
@@ -628,6 +634,7 @@ impl KernelObject {
                 None
             }
             KernelObject::Gpu(_) => None,
+            KernelObject::Environment(_) | KernelObject::VfsView(_) => None,
             #[cfg(feature = "hypervisor")]
             KernelObject::HypervisorVm(_) => None,
             #[cfg(feature = "hypervisor")]
@@ -671,6 +678,7 @@ impl KernelObject {
                 None
             }
             KernelObject::Gpu(_) => None,
+            KernelObject::Environment(_) | KernelObject::VfsView(_) => None,
             #[cfg(feature = "hypervisor")]
             KernelObject::HypervisorVm(_) => None,
             #[cfg(feature = "hypervisor")]
@@ -713,6 +721,7 @@ impl KernelObject {
                 None
             }
             KernelObject::Gpu(_) => None,
+            KernelObject::Environment(_) | KernelObject::VfsView(_) => None,
             #[cfg(feature = "hypervisor")]
             KernelObject::HypervisorVm(_) => None,
             #[cfg(feature = "hypervisor")]
@@ -754,6 +763,7 @@ impl KernelObject {
                 None
             }
             KernelObject::Gpu(_) => None,
+            KernelObject::Environment(_) | KernelObject::VfsView(_) => None,
             #[cfg(feature = "hypervisor")]
             KernelObject::HypervisorVm(_) => None,
             #[cfg(feature = "hypervisor")]
@@ -833,6 +843,7 @@ impl KernelObject {
                 None
             }
             KernelObject::Gpu(_) => None,
+            KernelObject::Environment(_) | KernelObject::VfsView(_) => None,
             #[cfg(feature = "hypervisor")]
             KernelObject::HypervisorVm(_) => None,
             #[cfg(feature = "hypervisor")]
@@ -875,6 +886,7 @@ impl KernelObject {
                 None
             }
             KernelObject::Gpu(gpu) => gpu.as_control_ops(),
+            KernelObject::Environment(_) | KernelObject::VfsView(_) => None,
             #[cfg(feature = "hypervisor")]
             KernelObject::HypervisorVm(vm) => {
                 let control_ops: &dyn ControlOps = vm.as_ref();
@@ -924,6 +936,7 @@ impl KernelObject {
                 Some(memory_mapping_ops)
             }
             KernelObject::Gpu(gpu) => gpu.as_memory_mappable(),
+            KernelObject::Environment(_) | KernelObject::VfsView(_) => None,
             #[cfg(feature = "hypervisor")]
             KernelObject::HypervisorVm(_) => None,
             #[cfg(feature = "hypervisor")]
@@ -969,6 +982,7 @@ impl KernelObject {
                 Some(weak_shmem)
             }
             KernelObject::Gpu(_) => None,
+            KernelObject::Environment(_) | KernelObject::VfsView(_) => None,
             #[cfg(feature = "hypervisor")]
             KernelObject::HypervisorVm(_) => None,
             #[cfg(feature = "hypervisor")]
@@ -992,6 +1006,7 @@ impl KernelObject {
             KernelObject::SharedMemory(shared_memory) => {
                 Some(Arc::clone(shared_memory) as Arc<dyn MemoryMappingOps>)
             }
+            KernelObject::Environment(_) | KernelObject::VfsView(_) => None,
             KernelObject::Gpu(gpu) => gpu.as_memory_mappable().map(|_| {
                 Arc::new(GpuMemoryMappingOwner {
                     gpu: Arc::clone(gpu),
@@ -1072,6 +1087,7 @@ impl KernelObject {
             KernelObject::EventSubscription(_) => None,
             KernelObject::SharedMemory(_) => None,
             KernelObject::Gpu(gpu) => gpu.as_selectable(),
+            KernelObject::Environment(_) | KernelObject::VfsView(_) => None,
             #[cfg(feature = "hypervisor")]
             KernelObject::HypervisorVm(_) => None,
             #[cfg(feature = "hypervisor")]
@@ -1106,6 +1122,8 @@ impl KernelObject {
                 KernelObject::SharedMemory(Arc::clone(shared_memory))
             }
             KernelObject::Gpu(gpu) => KernelObject::Gpu(Arc::clone(gpu)),
+            KernelObject::Environment(env) => KernelObject::Environment(env.clone()),
+            KernelObject::VfsView(view) => KernelObject::VfsView(view.clone()),
             #[cfg(feature = "hypervisor")]
             KernelObject::HypervisorVm(vm) => KernelObject::HypervisorVm(Arc::clone(vm)),
             #[cfg(feature = "hypervisor")]
@@ -1138,6 +1156,8 @@ impl Clone for KernelObject {
                     KernelObject::SharedMemory(Arc::clone(shared_memory))
                 }
                 KernelObject::Gpu(gpu) => KernelObject::Gpu(Arc::clone(gpu)),
+                KernelObject::Environment(env) => KernelObject::Environment(env.clone()),
+                KernelObject::VfsView(view) => KernelObject::VfsView(view.clone()),
                 #[cfg(feature = "hypervisor")]
                 KernelObject::HypervisorVm(vm) => KernelObject::HypervisorVm(Arc::clone(vm)),
                 #[cfg(feature = "hypervisor")]

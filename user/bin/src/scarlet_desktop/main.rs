@@ -10,7 +10,7 @@ extern crate sws_client;
 
 use core::time::Duration;
 use std::println;
-use std::task::{EXECVE_FORCE_ABI_REBUILD, execve_with_flags, exit, fork, waitpid};
+use std::task::{execve, exit, fork, waitpid};
 use std::thread;
 
 const SWS_READY_RETRIES: usize = 100;
@@ -42,11 +42,7 @@ fn wait_for_sws_ready() -> bool {
 fn spawn_component(name: &str, args: &[&str]) -> i32 {
     match fork() {
         0 => {
-            let candidates = [
-                "/bin",
-                "/scarlet/system/scarlet/bin",
-                "/old_root/system/scarlet/bin",
-            ];
+            let candidates = ["/bin"];
 
             for base in &candidates {
                 let mut path_buf = std::string::String::new();
@@ -60,7 +56,7 @@ fn spawn_component(name: &str, args: &[&str]) -> i32 {
                 argv.extend_from_slice(args);
 
                 // If exec succeeds, it never returns.
-                let rc = execve_with_flags(argv0, &argv, &[], EXECVE_FORCE_ABI_REBUILD);
+                let rc = execve(argv0, &argv, &[]);
                 if rc == 0 {
                     break;
                 }

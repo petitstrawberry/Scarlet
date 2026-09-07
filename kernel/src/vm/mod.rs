@@ -773,19 +773,17 @@ pub fn verify_task_kernel_stack_guard(task: &Task) -> bool {
     guard_ok && stack_ok
 }
 
-pub fn setup_user_stack(task: &Task) -> (usize, usize) {
+pub fn setup_user_stack(task: &Task) -> Result<(usize, usize), &'static str> {
     /* User stack page */
     let num_of_stack_page = 256; // 1MB user stack (4KB pages)
     let stack_base = USER_STACK_END - num_of_stack_page * PAGE_SIZE;
     task.allocate_stack_pages(stack_base, num_of_stack_page)
-        .map_err(|e| panic!("Failed to allocate user stack pages: {}", e))
-        .unwrap();
+        .map_err(|_| "Failed to allocate user stack pages")?;
     /* Guard page */
     task.allocate_guard_pages(stack_base - PAGE_SIZE, 1)
-        .map_err(|e| panic!("Failed to allocate guard page: {}", e))
-        .unwrap();
+        .map_err(|_| "Failed to allocate guard page")?;
 
-    (stack_base, USER_STACK_END)
+    Ok((stack_base, USER_STACK_END))
 }
 
 static TRAMPOLINE_TRAP_VECTOR: Once<usize> = Once::new();

@@ -15,6 +15,33 @@ pub type Pid = u32;
 /// Raw thread identifier exposed by Scarlet Native thread syscalls.
 pub type Tid = u32;
 
+/// Explicit descriptor transfer for an Environment spawn/exec.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct RawEnvironmentHandleMapping {
+    pub source: u32,
+    pub target: u32,
+}
+
+/// Arguments for EnvironmentSpawn/EnvironmentExec. Pointers refer to the caller:
+/// argv/envp are NUL-terminated arrays of NUL-terminated UTF-8 strings; cwd is
+/// absolute in the target view (NULL means "/"). Only mapped handles survive.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct RawEnvironmentExec {
+    pub size: u32,
+    pub flags: u32,
+    pub argv: usize,
+    pub envp: usize,
+    pub cwd: usize,
+    pub handles: usize,
+    pub handle_count: usize,
+}
+
+#[cfg(target_pointer_width = "64")]
+const _: [(); 48] = [(); core::mem::size_of::<RawEnvironmentExec>()];
+const _: [(); 8] = [(); core::mem::size_of::<RawEnvironmentHandleMapping>()];
+
 /// Require `GetRandom` to use a registered entropy source instead of the
 /// non-cryptographic emergency fallback.
 pub const GET_RANDOM_FLAG_REQUIRE_ENTROPY: usize = 1 << 0;
@@ -676,6 +703,24 @@ pub struct RawFileMetadata {
 #[repr(usize)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Syscall {
+    VfsViewCreate = 520,
+    VfsViewCurrent = 521,
+    VfsViewClone = 522,
+    VfsViewOpen = 523,
+    VfsViewMount = 524,
+    VfsViewBind = 525,
+    VfsViewOverlay = 526,
+    VfsViewUnmount = 527,
+    VfsViewCreateDirectory = 528,
+    VfsViewRoot = 529,
+    EnvironmentCreate = 1300,
+    EnvironmentSetRoot = 1301,
+    EnvironmentRemoveRoot = 1302,
+    EnvironmentSeal = 1303,
+    EnvironmentCurrent = 1304,
+    EnvironmentGetRoot = 1305,
+    EnvironmentSpawn = 1306,
+    EnvironmentExec = 1307,
     Invalid = 0,
     Exit = 1,
     Clone = 2,

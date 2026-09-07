@@ -13,6 +13,7 @@
 #[cfg(feature = "std")]
 extern crate std;
 
+pub mod environment;
 pub mod ffi;
 
 /// Handle ownership and capability views.

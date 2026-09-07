@@ -121,6 +121,34 @@ struct InnerVmm {
 }
 
 impl VirtualMemoryManager {
+    pub(crate) fn is_exclusive(&self) -> bool {
+        Arc::strong_count(&self.inner) == 1
+    }
+
+    /// Exchange already prepared images. The caller excludes shared-VM
+    /// execution and performs no fallible work after this commit.
+    pub(crate) fn exchange_exec_image(&self, other: &Self) {
+        assert!(self.is_exclusive() && other.is_exclusive());
+        core::mem::swap(&mut *self.inner.write(), &mut *other.inner.write());
+        core::mem::swap(
+            &mut *self.page_allocations.write(),
+            &mut *other.page_allocations.write(),
+        );
+        core::mem::swap(
+            &mut *self.task_pages.write(),
+            &mut *other.task_pages.write(),
+        );
+        use core::sync::atomic::Ordering;
+        let old_brk = self
+            .brk
+            .swap(other.brk.load(Ordering::Relaxed), Ordering::Relaxed);
+        other.brk.store(old_brk, Ordering::Relaxed);
+        let old_size = self
+            .data_size
+            .swap(other.data_size.load(Ordering::Relaxed), Ordering::Relaxed);
+        other.data_size.store(old_size, Ordering::Relaxed);
+    }
+
     #[inline(always)]
     fn record_inner_writer(&self, site: u64) {
         crate::breadcrumb::drop(

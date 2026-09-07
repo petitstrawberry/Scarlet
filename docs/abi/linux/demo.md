@@ -60,16 +60,15 @@ bash bundles/linux/tools/deploy_rootfs.sh
 Build the kernel and the root filesystem image, then run Scarlet:
 
 ```bash
-cargo make build-riscv64
-cargo make run-riscv64
+cargo scarlet image --project projects/riscv64-limine-full --release
+./projects/riscv64-limine-full/tools/run_riscv64.sh
 ```
 
 ### 5. Execute Linux Binaries
 
-Once dropped into the Scarlet shell, you can execute the Linux binaries. From
-the Scarlet shell, the deployed Linux root filesystem is visible under
-`/scarlet/system/linux-riscv64`. After a Linux ABI process starts, that tree is
-used as the Linux process root.
+Use `abi-run` from the Scarlet shell to open a program in the current
+Environment's Linux view. It does not rely on a global rootfs path.
+Replace `linux-riscv64` with `linux-aarch64` on AArch64.
 
 **Basic Utilities (BusyBox):**
 
@@ -77,13 +76,13 @@ You can run standard Linux commands provided by BusyBox:
 
 ```bash
 # List files in the Linux rootfs
-/scarlet/system/linux-riscv64/bin/busybox ls -l /
+abi-run linux-riscv64 /bin/busybox ls -l /
 
 # Print working directory
-/scarlet/system/linux-riscv64/bin/busybox pwd
+abi-run linux-riscv64 /bin/busybox pwd
 
 # Cat a file
-/scarlet/system/linux-riscv64/bin/busybox cat /etc/passwd
+abi-run linux-riscv64 /bin/busybox cat /etc/passwd
 ```
 
 **Advanced Demos:**
@@ -96,16 +95,17 @@ Other demo binaries are available but require specific arguments or setup:
 
 ```bash
 # Example: Running fbdoom (if you have a WAD file)
-/scarlet/system/linux-riscv64/usr/bin/fbdoom -iwad /usr/share/games/doom/doom1.wad
+abi-run linux-riscv64 /usr/bin/fbdoom -iwad /usr/share/games/doom/doom1.wad
 ```
 
 **KVM Guest (Nested Virtualization):**
 
-If you built the guest image, lkvm (kvmtool) is available. The `.shrc` will auto-start a Linux guest on boot. To run it manually:
+If you built the guest image and enabled Scarlet's hypervisor, run lkvm
+(kvmtool) explicitly in the Linux view:
 
 ```bash
-lkvm run -k /scarlet/system/linux-riscv64/usr/bin/guest-Image \
-    -i /scarlet/system/linux-riscv64/usr/bin/guest-initramfs.cpio.gz \
+abi-run linux-riscv64 /usr/bin/lkvm run -k /usr/bin/guest-Image \
+    -i /usr/bin/guest-initramfs.cpio.gz \
     -p "console=ttyS0 rdinit=/sbin/init" \
     --console serial -n mode=none -m 512
 ```
@@ -117,10 +117,12 @@ This runs a nested Linux guest inside Scarlet using the KVM hypervisor.
 The Scarlet shell environment (`.shrc`) automatically sets `LD_LIBRARY_PATH` to ensure dynamic linking works for Linux binaries:
 
 ```bash
-export LD_LIBRARY_PATH=/scarlet/system/linux-riscv64/usr/lib:/scarlet/system/linux-riscv64/lib
+export LD_LIBRARY_PATH=/usr/lib:/lib
 ```
 
-This path points to the libraries within the Linux rootfs (accessed via the `/scarlet` gateway mount). If you need to use `LD_PRELOAD`, ensure the paths are also absolute and accessible within the Linux ABI environment.
+These paths are resolved in the target Linux view, just like `PT_INTERP` and
+`LD_PRELOAD`. No prefix conversion takes place.
+See [Execution Environments](../execution-environments.md).
 
 ## Troubleshooting
 

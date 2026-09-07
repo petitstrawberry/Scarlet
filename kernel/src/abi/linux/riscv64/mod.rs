@@ -1,13 +1,11 @@
-use alloc::{boxed::Box, format, string::ToString, sync::Arc, vec::Vec};
+use alloc::{boxed::Box, string::ToString, sync::Arc, vec::Vec};
 use core::sync::atomic::Ordering;
 
 use crate::abi::linux::generic;
 use crate::{
     abi::{AbiModule, EventProcessOutcome},
     arch::{self, IntRegisters},
-    fs::{
-        FileSystemError, FileSystemErrorKind, SeekFrom, VfsManager, drivers::overlayfs::OverlayFS,
-    },
+    fs::SeekFrom,
     late_initcall, register_abi,
     task::elf_loader::{
         ExecutionMode, LoadStrategy, LoadTarget, analyze_and_load_elf_with_strategy,
@@ -225,15 +223,7 @@ impl AbiModule for LinuxRiscv64Abi {
                             (LoadTarget::Interpreter, _) => 0x40000000,
                             (LoadTarget::SharedLib, _) => 0x50000000,
                         },
-                        resolve_interpreter: |requested| {
-                            requested.map(|path| {
-                                if path.starts_with("/lib/ld-") || path.starts_with("/lib64/ld-") {
-                                    format!("/scarlet/system/linux-riscv64{}", path)
-                                } else {
-                                    path.to_string()
-                                }
-                            })
-                        },
+                        resolve_interpreter: |requested| requested.map(ToString::to_string),
                     },
                 ) {
                     Ok(load_result) => {
@@ -245,7 +235,7 @@ impl AbiModule for LinuxRiscv64Abi {
                         root_page_table.unmap_all_no_flush();
                         drop(root_page_table);
                         arch::vm::setup_trampoline_for_user(&task.vm_manager);
-                        let (_, stack_top) = setup_user_stack(task);
+                        let (_, stack_top) = setup_user_stack(task)?;
                         let mut sp = stack_top as usize;
 
                         if let ExecutionMode::Dynamic { .. } = &load_result.mode {
@@ -367,114 +357,16 @@ impl AbiModule for LinuxRiscv64Abi {
         }
     }
 
-    fn get_default_cwd(&self) -> &str {
-        "/"
-    }
-
-    fn setup_overlay_environment(
-        &self,
-        target_vfs: &Arc<VfsManager>,
-        base_vfs: &Arc<VfsManager>,
-        system_path: &str,
-        config_path: &str,
+    fn prepare_exec_handles(
+        &mut self,
+        source: Option<&dyn AbiModule>,
+        image: &crate::task::Task,
     ) -> Result<(), &'static str> {
-        let lower_vfs_list = alloc::vec![(base_vfs, system_path)];
-        let upper_vfs = base_vfs;
-        let fs = match OverlayFS::new_from_paths_and_vfs(
-            Some((upper_vfs, config_path)),
-            lower_vfs_list,
-            "/",
-        ) {
-            Ok(fs) => fs,
-            Err(e) => {
-                crate::println!(
-                    "Failed to create overlay filesystem for Linux ABI: {}",
-                    e.message
-                );
-                return Err("Failed to create Linux overlay environment");
-            }
-        };
-        match target_vfs.mount(fs, "/", 0) {
-            Ok(()) => Ok(()),
-            Err(e) => {
-                crate::println!(
-                    "Failed to create cross-VFS overlay for Linux ABI: {}",
-                    e.message
-                );
-                Err("Failed to create Linux overlay environment")
-            }
-        }
-    }
-
-    fn setup_shared_resources(
-        &self,
-        target_vfs: &Arc<VfsManager>,
-        base_vfs: &Arc<VfsManager>,
-    ) -> Result<(), &'static str> {
-        match create_dir_if_not_exists(target_vfs, "/home") {
-            Ok(()) => {}
-            Err(_e) => {
-                return Err("Failed to create /home directory for Linux");
-            }
-        }
-
-        let _ = target_vfs.bind_mount_from(base_vfs, "/home", "/home");
-
-        match create_dir_if_not_exists(target_vfs, "/data") {
-            Ok(()) => {}
-            Err(e) => {
-                crate::println!("Failed to create /data directory for Linux: {}", e.message);
-                return Err("Failed to create /data directory for Linux");
-            }
-        }
-
-        let _ = target_vfs.bind_mount_from(base_vfs, "/data/shared", "/data/shared");
-
-        match create_dir_if_not_exists(target_vfs, "/dev") {
-            Ok(()) => {}
-            Err(_e) => {
-                return Err("Failed to create /dev directory for Linux");
-            }
-        }
-        match target_vfs.bind_mount_from(base_vfs, "/dev", "/dev") {
-            Ok(()) => {}
-            Err(_e) => {
-                return Err("Failed to bind mount /dev for Linux");
-            }
-        }
-        if base_vfs.resolve_path("/dev/pts/ptmx").is_ok() {
-            let _ = create_dir_if_not_exists(target_vfs, "/dev/pts");
-            if target_vfs
-                .bind_mount_from(base_vfs, "/dev/pts", "/dev/pts")
-                .is_err()
-            {
-                crate::println!("Failed to bind mount /dev/pts for Linux");
-            }
-        }
-
-        match create_dir_if_not_exists(target_vfs, "/tmp") {
-            Ok(()) => {}
-            Err(_e) => {
-                return Err("Failed to create /tmp directory for Linux");
-            }
-        }
-        match target_vfs.bind_mount_from(base_vfs, "/tmp", "/tmp") {
-            Ok(()) => {}
-            Err(_e) => {
-                return Err("Failed to bind mount /tmp for Linux");
-            }
-        }
-
-        match create_dir_if_not_exists(target_vfs, "/scarlet") {
-            Ok(()) => {}
-            Err(_e) => {
-                return Err("Failed to create /scarlet directory for Linux");
-            }
-        }
-        match target_vfs.bind_mount_from(base_vfs, "/", "/scarlet") {
-            Ok(()) => Ok(()),
-            Err(_e) => Err("Failed to bind mount native Scarlet root to /scarlet for Linux"),
-        }
+        let old = source
+            .filter(|abi| abi.get_name() == self.get_name())
+            .and_then(|abi| abi.as_any().downcast_ref::<Self>());
+        self.0.prepare_exec_fds(old.map(|abi| &abi.0), image);
+        Ok(())
     }
 
     fn initialize_from_existing_handles(
@@ -492,19 +384,6 @@ impl AbiModule for LinuxRiscv64Abi {
 
     fn as_any_mut(&mut self) -> &mut dyn core::any::Any {
         self
-    }
-}
-
-fn create_dir_if_not_exists(vfs: &Arc<VfsManager>, path: &str) -> Result<(), FileSystemError> {
-    match vfs.create_dir(path) {
-        Ok(()) => Ok(()),
-        Err(e) => {
-            if e.kind == FileSystemErrorKind::AlreadyExists {
-                Ok(())
-            } else {
-                Err(e)
-            }
-        }
     }
 }
 

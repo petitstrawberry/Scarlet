@@ -46,7 +46,7 @@ impl AbiModule for MsDosAbi {
         // Check if this is an MS-DOS executable
         if self.is_msdos_binary(file_object) {
             Some(RuntimeConfig {
-                runtime_path: "/system/linux/bin/dosbox".to_string(),
+                runtime_path: "/usr/bin/dosbox".to_string(),
                 runtime_abi: Some("linux-riscv64".to_string()),
                 runtime_args: vec![],
             })
@@ -75,7 +75,7 @@ impl AbiModule for WasmAbi {
         // Check if this is a Wasm binary
         if file_path.ends_with(".wasm") {
             Some(RuntimeConfig {
-                runtime_path: "/system/scarlet/bin/wasm-runtime".to_string(),
+                runtime_path: "/bin/wasm-runtime".to_string(),
                 runtime_abi: None, // Auto-detect (likely Scarlet native)
                 runtime_args: vec!["--wasm".to_string()],
             })
@@ -105,7 +105,7 @@ impl AbiModule for X86LinuxAbi {
         #[cfg(target_arch = "riscv64")]
         if self.is_x86_64_binary(file_object) {
             return Some(RuntimeConfig {
-                runtime_path: "/system/linux/bin/qemu-x86_64".to_string(),
+                runtime_path: "/usr/bin/qemu-x86_64".to_string(),
                 runtime_abi: Some("linux-riscv64".to_string()),
                 runtime_args: vec![],
             });

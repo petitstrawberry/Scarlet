@@ -44,6 +44,7 @@
 #![feature(new_range_api)]
 
 extern crate scarlet_rt;
+pub use scarlet_os::environment;
 
 mod core_exports {
     extern crate core;

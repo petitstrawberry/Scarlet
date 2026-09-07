@@ -27,6 +27,17 @@ fn native_identifiers_and_file_metadata_layout() {
 }
 
 #[test]
+fn environment_exec_record_layouts() {
+    assert_layout!(abi::RawEnvironmentExec, 48, 8, {
+        size: 0, flags: 4, argv: 8, envp: 16, cwd: 24,
+        handles: 32, handle_count: 40,
+    });
+    assert_layout!(abi::RawEnvironmentHandleMapping, 8, 4, {
+        source: 0, target: 4,
+    });
+}
+
+#[test]
 fn scheduler_v1_field_layouts() {
     assert_layout!(abi::RawTaskDeadlineParams, 24, 8, {
         runtime_ns: 0, deadline_ns: 8, period_ns: 16,
@@ -192,7 +203,12 @@ fn native_syscall_numbers() {
         VfsGetCwdPath = 408, VfsRename = 409, VfsMetadata = 410,
         VfsCreateHardlink = 411, VfsSymlinkMetadata = 412,
         FsMount = 500, FsUmount = 501,
-        FsPivotRoot = 502, Pipe = 600, EventSendDirect = 615,
+        FsPivotRoot = 502,
+        VfsViewCreate = 520, VfsViewCurrent = 521, VfsViewClone = 522,
+        VfsViewOpen = 523, VfsViewMount = 524, VfsViewBind = 525,
+        VfsViewOverlay = 526, VfsViewUnmount = 527,
+        VfsViewCreateDirectory = 528, VfsViewRoot = 529,
+        Pipe = 600, EventSendDirect = 615,
         EventSendGroup = 616, SharedMemoryCreate = 620, SharedMemoryResize = 621,
         SocketSendHandle = 630, SocketRecvHandle = 631,
         SocketSendHandleAndData = 632, SocketRecvHandleAndData = 633,
@@ -209,5 +225,9 @@ fn native_syscall_numbers() {
         GetCpuDebugInfo = 997, GetTaskDebugInfo = 998, ProfilerDump = 999,
         Shutdown = 1000, ShvVmCreate = 1100, ShvVcpuCreate = 1101,
         ShvVcpuRun = 1102, LsmLoad = 1200, LsmUnload = 1201, LsmList = 1202,
+        EnvironmentCreate = 1300, EnvironmentSetRoot = 1301,
+        EnvironmentRemoveRoot = 1302, EnvironmentSeal = 1303,
+        EnvironmentCurrent = 1304, EnvironmentGetRoot = 1305,
+        EnvironmentSpawn = 1306, EnvironmentExec = 1307,
     }
 }

@@ -154,7 +154,9 @@ impl HandleTable {
                 HandleType::IpcChannel
             }
             KernelObject::Timer(_) => HandleType::IpcChannel,
-            KernelObject::Gpu(_) => HandleType::Regular,
+            KernelObject::Gpu(_) | KernelObject::Environment(_) | KernelObject::VfsView(_) => {
+                HandleType::Regular
+            }
             #[cfg(feature = "hypervisor")]
             KernelObject::HypervisorVm(_) => HandleType::Regular,
             #[cfg(feature = "hypervisor")]
@@ -365,6 +367,45 @@ impl HandleTable {
         Arc::strong_count(&self.inner) == 1
     }
 
+    pub(crate) fn exchange_exec_table(&self, other: &Self) {
+        assert!(self.is_sole_owner() && other.is_sole_owner());
+        core::mem::swap(&mut *self.inner.write(), &mut *other.inner.write());
+    }
+
+    /// Install an explicitly mapped handle into an unpublished exec table.
+    pub(crate) fn insert_exec_handle(
+        &self,
+        handle: Handle,
+        mut object: KernelObject,
+        metadata: HandleMetadata,
+    ) -> Result<(), &'static str> {
+        if handle as usize >= Self::MAX_HANDLES {
+            return Err("invalid target handle");
+        }
+        object.ensure_handle_ownership();
+        let mut inner = self.inner.write();
+        if inner.handles[handle as usize].is_some() {
+            return Err("duplicate target handle");
+        }
+        inner.free_handles.retain(|&free| free != handle);
+        inner.handles[handle as usize] = Some(object);
+        inner.metadata[handle as usize] = Some(metadata);
+        Ok(())
+    }
+
+    pub(crate) fn remove_close_on_exec(&self) {
+        for handle in self.active_handles() {
+            if self.get_metadata(handle).is_some_and(|metadata| {
+                matches!(
+                    metadata.special_semantics,
+                    Some(SpecialSemantics::CloseOnExec)
+                )
+            }) {
+                drop(self.remove(handle));
+            }
+        }
+    }
+
     /// Close all handles (for process termination)
     pub fn close_all(&self) {
         // Some kernel objects perform synchronous teardown from `Drop`. Detach
@@ -443,6 +484,13 @@ impl HandleTable {
         let (readable, writable) = metadata.access_mode.into();
 
         match kernel_obj {
+            KernelObject::Environment(cap) => Some(
+                introspection::KernelObjectInfo::for_environment(false, cap.writable),
+            ),
+            KernelObject::VfsView(cap) => Some(introspection::KernelObjectInfo::for_environment(
+                true,
+                cap.writable,
+            )),
             KernelObject::File(_) => Some(introspection::KernelObjectInfo::for_file(
                 handle_role,
                 readable,

@@ -9,6 +9,10 @@ creation.
 - `system/linux-aarch64/usr/bin/guest-Image`: AArch64 Linux guest kernel.
 - `system/linux-aarch64/usr/bin/guest-initramfs.cpio.gz`: AArch64 guest initramfs.
 
+These are source-tree paths. The project copies `prebuilt/system` to
+`/roots` in the image. Microvm init opens the binaries as `/usr/bin/...`
+through the Linux Environment view, not through a global backing path.
+
 Refresh `guest-Image` and `guest-initramfs.cpio.gz` from
 `bundles/linux/tools/build_guest_image.sh` output when the guest payload changes.
 

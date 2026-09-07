@@ -124,6 +124,61 @@ impl Default for LinuxAbi {
 }
 
 impl LinuxAbi {
+    /// Prepare an independent fd table without closing any handle in the caller.
+    pub fn prepare_exec_fds(&mut self, source: Option<&Self>, image: &crate::task::Task) {
+        if let Some(source) = source {
+            let mut signals = source.signal_state.lock().clone();
+            for (signal, action) in signals.handlers.iter_mut() {
+                if matches!(action, signal::SignalAction::Custom(_)) {
+                    *action = signal.default_action();
+                }
+            }
+            self.signal_state = Arc::new(IrqSpinLock::new(signals));
+        }
+        let mut table = source
+            .map(|old| old.fd_table.read().clone())
+            .unwrap_or_default();
+        if source.is_none() {
+            for handle in image.handle_table.active_handles() {
+                if (handle as usize) < MAX_FDS {
+                    table.fd_to_handle[handle as usize] = Some(handle);
+                    if image
+                        .handle_table
+                        .get_metadata(handle)
+                        .is_some_and(|metadata| {
+                            matches!(
+                                metadata.special_semantics,
+                                Some(crate::object::handle::SpecialSemantics::CloseOnExec)
+                            )
+                        })
+                    {
+                        // An explicit mapping retains this descriptor now, but
+                        // its flag still applies to the next ordinary exec.
+                        table.fd_flags[handle as usize] = fs::FD_CLOEXEC;
+                    }
+                }
+            }
+        }
+        for fd in 0..MAX_FDS {
+            if let Some(handle) = table.fd_to_handle[fd] {
+                if (source.is_some() && table.fd_flags[fd] & fs::FD_CLOEXEC != 0)
+                    || !image.handle_table.is_valid_handle(handle)
+                {
+                    drop(image.handle_table.remove(handle));
+                    table.fd_to_handle[fd] = None;
+                    table.fd_flags[fd] = 0;
+                    table.file_status_flags[fd] = 0;
+                }
+            }
+        }
+        table.free_fds = (0..MAX_FDS)
+            .rev()
+            .filter(|&fd| table.fd_to_handle[fd].is_none())
+            .collect();
+        self.fd_table = Arc::new(IrqRwSpinLock::new(table));
+        self.namespace = image.get_namespace().clone();
+        self.thread_state.tgid = image.try_get_namespace_id().unwrap_or(0);
+    }
     pub fn thread_state(&self) -> &LinuxThreadState {
         &self.thread_state
     }
@@ -307,40 +362,6 @@ impl LinuxAbi {
             .enumerate()
             .filter_map(|(fd, &handle)| if handle.is_some() { Some(fd) } else { None })
             .collect()
-    }
-
-    pub fn close_on_exec_fds(&mut self) {
-        use crate::task::mytask;
-
-        let close_fds: Vec<(usize, u32)> = {
-            let table = self.fd_table.read();
-            table
-                .fd_to_handle
-                .iter()
-                .zip(table.fd_flags.iter())
-                .enumerate()
-                .filter_map(|(fd, (&handle, &flags))| {
-                    if flags & fs::FD_CLOEXEC != 0 {
-                        handle.map(|handle| (fd, handle))
-                    } else {
-                        None
-                    }
-                })
-                .collect()
-        };
-
-        let Some(task) = mytask() else {
-            return;
-        };
-
-        for (fd, handle) in close_fds {
-            let removed = self.remove_fd(fd);
-            if removed == Some(handle) {
-                if let Some(object) = task.handle_table.remove(handle) {
-                    close_kernel_object_for_linux(&object);
-                }
-            }
-        }
     }
 
     pub fn process_signals(&self, trapframe: &mut Trapframe) -> bool {

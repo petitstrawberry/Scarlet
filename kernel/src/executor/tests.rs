@@ -1,7 +1,7 @@
-//! TransparentExecutor backup/restore tests
+//! TransparentExecutor failure-preservation tests
 //!
-//! These tests verify that task and trapframe state can be backed up
-//! and correctly restored when exec fails.
+//! These tests verify that task and trapframe state remain unchanged when
+//! opening or preparing an executable fails.
 
 use alloc::string::ToString;
 use alloc::vec::Vec;
@@ -11,9 +11,9 @@ use crate::arch::Trapframe;
 use crate::sched::scheduler::{add_task, get_task_by_id, reset};
 use crate::task::new_user_task;
 
-/// Test that TransparentExecutor can backup and restore task state on exec failure
+/// Test that TransparentExecutor preserves task state on exec failure
 #[test_case]
-fn test_exec_backup_restore() {
+fn test_exec_failure_preserves_state() {
     // Reset scheduler state before test
     reset();
 
@@ -36,53 +36,55 @@ fn test_exec_backup_restore() {
     let original_sp = trapframe.regs.reg[2];
     let original_a0 = trapframe.regs.reg[10];
 
-    // Try to execute a non-existent binary (should fail and restore state)
+    // Try to execute a non-existent binary (should fail without changing state)
     let result = TransparentExecutor::execute_binary(
         "/nonexistent/binary",
         &["arg1", "arg2"],
         &["ENV=test"],
         &task,
         &mut trapframe,
-        true,
     );
 
     // Verify the exec failed as expected
     assert!(result.is_err(), "Exec should fail for non-existent binary");
 
-    // Verify that all state was restored to original values
+    // Verify that all state still has its original values
     assert_eq!(
         *task.name.read(),
         original_name,
-        "Task name should be restored"
+        "Task name should be unchanged"
     );
     assert_eq!(
         task.text_size.load(core::sync::atomic::Ordering::SeqCst),
         original_text_size,
-        "Text size should be restored"
+        "Text size should be unchanged"
     );
     assert_eq!(
         task.data_size.load(core::sync::atomic::Ordering::SeqCst),
         original_data_size,
-        "Data size should be restored"
+        "Data size should be unchanged"
     );
     assert_eq!(
         task.stack_size.load(core::sync::atomic::Ordering::SeqCst),
         original_stack_size,
-        "Stack size should be restored"
+        "Stack size should be unchanged"
     );
     assert_eq!(
         task.page_allocations.read().len(),
         original_page_allocations_count,
-        "Page allocations count should be restored"
+        "Page allocations count should be unchanged"
     );
     assert_eq!(
         task.vm_manager.memmap_len(),
         original_vm_mappings_count,
-        "VM mappings count should be restored"
+        "VM mappings count should be unchanged"
     );
-    assert_eq!(trapframe.epc, original_pc, "PC should be restored");
-    assert_eq!(trapframe.regs.reg[2], original_sp, "SP should be restored");
-    assert_eq!(trapframe.regs.reg[10], original_a0, "A0 should be restored");
+    assert_eq!(trapframe.epc, original_pc, "PC should be unchanged");
+    assert_eq!(trapframe.regs.reg[2], original_sp, "SP should be unchanged");
+    assert_eq!(
+        trapframe.regs.reg[10], original_a0,
+        "A0 should be unchanged"
+    );
 }
 
 /// Test TransparentExecutor basic functionality with valid parameters
@@ -100,14 +102,8 @@ fn test_exec_parameter_validation() {
     let mut trapframe = Trapframe::new();
 
     // Test with empty arguments
-    let result = TransparentExecutor::execute_binary(
-        "/nonexistent/binary",
-        &[],
-        &[],
-        &task,
-        &mut trapframe,
-        true,
-    );
+    let result =
+        TransparentExecutor::execute_binary("/nonexistent/binary", &[], &[], &task, &mut trapframe);
 
     // Should fail but not panic
     assert!(
@@ -122,7 +118,6 @@ fn test_exec_parameter_validation() {
         &["PATH=/bin:/usr/bin", "HOME=/root", "VAR=value"],
         &task,
         &mut trapframe,
-        true,
     );
 
     // Should fail but handle arguments correctly
@@ -162,7 +157,6 @@ fn test_argv_array_handling() {
             &["TEST=1"],
             &task,
             &mut trapframe,
-            true,
         );
 
         // Should fail gracefully regardless of argument content
@@ -206,7 +200,6 @@ fn test_envp_array_handling() {
             &envp,
             &task,
             &mut trapframe,
-            true,
         );
 
         // Should fail gracefully regardless of environment content
@@ -232,7 +225,7 @@ fn test_runtime_delegation_config() {
     let scarlet_abi = ScarletAbi::default();
 
     // Test 1: Non-Wasm file should not require runtime delegation
-    let non_wasm_path = "/system/scarlet/bin/hello";
+    let non_wasm_path = "/bin/hello";
     // Note: We can't easily create a real file object in tests without VFS,
     // but we can verify the method signature and basic logic
 
@@ -242,12 +235,12 @@ fn test_runtime_delegation_config() {
 
     // Test 3: Verify RuntimeConfig structure can be created
     let test_config = RuntimeConfig {
-        runtime_path: "/system/scarlet/bin/test-runtime".to_string(),
+        runtime_path: "/bin/test-runtime".to_string(),
         runtime_abi: Some("scarlet".to_string()),
         runtime_args: alloc::vec!["--test".to_string(), "--verbose".to_string()],
     };
 
-    assert_eq!(test_config.runtime_path, "/system/scarlet/bin/test-runtime");
+    assert_eq!(test_config.runtime_path, "/bin/test-runtime");
     assert_eq!(test_config.runtime_abi, Some("scarlet".to_string()));
     assert_eq!(test_config.runtime_args.len(), 2);
     assert_eq!(test_config.runtime_args[0], "--test");
@@ -261,7 +254,7 @@ fn test_runtime_argument_construction() {
     // Simulate runtime argument construction
     let target_path = "/data/apps/program.wasm";
     let target_argv = &["program.wasm", "arg1", "arg2"];
-    let runtime_path = "/system/scarlet/bin/wasm-runtime";
+    let runtime_path = "/bin/wasm-runtime";
     let runtime_args = alloc::vec!["--wasm"];
 
     // Construct runtime argv as TransparentExecutor::execute_via_runtime does
@@ -276,7 +269,7 @@ fn test_runtime_argument_construction() {
     }
 
     // Verify argument order
-    assert_eq!(runtime_argv[0], "/system/scarlet/bin/wasm-runtime");
+    assert_eq!(runtime_argv[0], "/bin/wasm-runtime");
     assert_eq!(runtime_argv[1], "--wasm");
     assert_eq!(runtime_argv[2], "/data/apps/program.wasm");
     assert_eq!(runtime_argv[3], "arg1");

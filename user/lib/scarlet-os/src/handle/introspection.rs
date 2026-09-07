@@ -54,6 +54,8 @@ pub enum KernelObjectType {
     Timer = 10,
     /// GPU child capability object
     Gpu = 11,
+    Environment = 12,
+    VfsView = 13,
     /// Unknown or unsupported type
     Unknown = 0,
 }

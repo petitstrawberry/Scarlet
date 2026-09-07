@@ -16,13 +16,13 @@
 //! - **ABI Modules**: Handle their own binary formats and conversions
 //! - **No ABI knowledge in core**: Core does not know about specific ABIs
 
+pub mod environment;
+#[cfg(test)]
+mod environment_tests;
 pub mod executor;
+pub mod syscall;
 
 #[cfg(all(test, target_arch = "riscv64"))]
 mod tests;
-
-// TODO: Update VFS tests to use new API after refactoring
-//#[cfg(test)]
-//mod vfs_tests;
 
 pub use executor::TransparentExecutor;
