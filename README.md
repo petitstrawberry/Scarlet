@@ -10,7 +10,7 @@
 [![AArch64](https://img.shields.io/badge/arch-AArch64-orange)](https://www.arm.com/)
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/petitstrawberry/Scarlet)
 
-<img src="docs/assets/screenshots/scarlet-desktop.png" alt="Scarlet desktop running Myrica, Files, Boxcraft, a terminal, and a video player" width="900">
+<img src="docs/assets/screenshots/scarlet-desktop.png" alt="Scarlet 1.0.0 Akane desktop with Boxcraft, Files, Terminal, Clock, and Video Player" width="900">
 
 </div>
 
