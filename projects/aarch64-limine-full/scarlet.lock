@@ -999,8 +999,8 @@ path = "../../user/bin"
 [[sections.rootfs.layers]]
 kind = "cargo"
 git = "https://github.com/petitstrawberry/carmine"
-git_ref = "f4ce2db5820c733608e1be4eacae3e3ef5cfebb2"
-resolved_rev = "f4ce2db5820c733608e1be4eacae3e3ef5cfebb2"
+git_ref = "ab5b679b92e141b345549bba11e43555b6bf3eb3"
+resolved_rev = "ab5b679b92e141b345549bba11e43555b6bf3eb3"
 package = "carmine"
 bin = "carmine"
 to = "/bin/carmine"
@@ -1009,13 +1009,13 @@ hash = ""
 [sections.rootfs.layers.source]
 type = "git"
 url = "https://github.com/petitstrawberry/carmine"
-rev = "f4ce2db5820c733608e1be4eacae3e3ef5cfebb2"
+rev = "ab5b679b92e141b345549bba11e43555b6bf3eb3"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
 git = "https://github.com/petitstrawberry/myrica"
-git_ref = "50f650a56b3e1bf8d79bd52bf2f6a556b952cffb"
-resolved_rev = "50f650a56b3e1bf8d79bd52bf2f6a556b952cffb"
+git_ref = "9e3e904ad7117162adc5bd3b9415bef8aec59c83"
+resolved_rev = "9e3e904ad7117162adc5bd3b9415bef8aec59c83"
 package = "myrica"
 bin = "myrica"
 to = "/bin/myrica"
@@ -1024,7 +1024,7 @@ hash = ""
 [sections.rootfs.layers.source]
 type = "git"
 url = "https://github.com/petitstrawberry/myrica"
-rev = "50f650a56b3e1bf8d79bd52bf2f6a556b952cffb"
+rev = "9e3e904ad7117162adc5bd3b9415bef8aec59c83"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
@@ -1044,8 +1044,8 @@ rev = "48e9d9886b1c21c4f33a0433f7f4183d9d3ecb7e"
 [[sections.rootfs.layers]]
 kind = "cargo"
 git = "https://github.com/petitstrawberry/boxcraft"
-git_ref = "31a725c42b6c706645ea70491c34665002cbe3df"
-resolved_rev = "31a725c42b6c706645ea70491c34665002cbe3df"
+git_ref = "e50a70d77e8c23152a2efff2e0ac11ccafea972f"
+resolved_rev = "e50a70d77e8c23152a2efff2e0ac11ccafea972f"
 package = "boxcraft"
 bin = "boxcraft"
 to = "/bin/boxcraft"
@@ -1054,7 +1054,7 @@ hash = ""
 [sections.rootfs.layers.source]
 type = "git"
 url = "https://github.com/petitstrawberry/boxcraft"
-rev = "31a725c42b6c706645ea70491c34665002cbe3df"
+rev = "e50a70d77e8c23152a2efff2e0ac11ccafea972f"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
@@ -1093,8 +1093,8 @@ sha256 = "sha256:727f20be6a009329e0be7c627f4dd07904588825077e4c431c943d9555499c2
 [[sections.rootfs.layers]]
 kind = "cargo"
 git = "https://github.com/petitstrawberry/moonlight-scarlet.git"
-git_ref = "05035ee9cfaa886b4359dba51edf8b0254a8308b"
-resolved_rev = "05035ee9cfaa886b4359dba51edf8b0254a8308b"
+git_ref = "7e9708be295aa1b03a4a6737d7e2208635cc599c"
+resolved_rev = "7e9708be295aa1b03a4a6737d7e2208635cc599c"
 package = "moonlight"
 bin = "moonlight"
 to = "/bin/moonlight"
@@ -1103,7 +1103,7 @@ hash = ""
 [sections.rootfs.layers.source]
 type = "git"
 url = "https://github.com/petitstrawberry/moonlight-scarlet.git"
-rev = "05035ee9cfaa886b4359dba51edf8b0254a8308b"
+rev = "7e9708be295aa1b03a4a6737d7e2208635cc599c"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
@@ -1126,8 +1126,8 @@ path = "../../user/video_player"
 [[sections.rootfs.layers]]
 kind = "cargo"
 git = "https://github.com/petitstrawberry/yt-for-scarlet"
-git_ref = "56cafc70b13218b42013814720213c869b1e2a6a"
-resolved_rev = "56cafc70b13218b42013814720213c869b1e2a6a"
+git_ref = "5b12d06fb86157829b653d9204bf465114814a0a"
+resolved_rev = "5b12d06fb86157829b653d9204bf465114814a0a"
 package = "yt"
 bin = "yt"
 to = "/bin/yt"
@@ -1136,13 +1136,13 @@ hash = ""
 [sections.rootfs.layers.source]
 type = "git"
 url = "https://github.com/petitstrawberry/yt-for-scarlet"
-rev = "56cafc70b13218b42013814720213c869b1e2a6a"
+rev = "5b12d06fb86157829b653d9204bf465114814a0a"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
 git = "https://github.com/petitstrawberry/yt-for-scarlet"
-git_ref = "56cafc70b13218b42013814720213c869b1e2a6a"
-resolved_rev = "56cafc70b13218b42013814720213c869b1e2a6a"
+git_ref = "5b12d06fb86157829b653d9204bf465114814a0a"
+resolved_rev = "5b12d06fb86157829b653d9204bf465114814a0a"
 package = "yt-gui"
 bin = "yt-gui"
 to = "/bin/yt-gui"
@@ -1151,7 +1151,7 @@ hash = ""
 [sections.rootfs.layers.source]
 type = "git"
 url = "https://github.com/petitstrawberry/yt-for-scarlet"
-rev = "56cafc70b13218b42013814720213c869b1e2a6a"
+rev = "5b12d06fb86157829b653d9204bf465114814a0a"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
