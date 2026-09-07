@@ -15,6 +15,7 @@
 //! - `sys_vfs_truncate()`: Truncate files by path (VfsTruncate 405)
 //! - `sys_vfs_metadata()`: Get metadata for a filesystem path (VfsMetadata 410)
 //! - `sys_vfs_create_hardlink()`: Create a hard link (VfsCreateHardlink 411)
+//! - `sys_vfs_symlink_metadata()`: Get metadata without following the final link (VfsSymlinkMetadata 412)
 //!
 //! ### Filesystem Operations (500-series)
 //! - `sys_fs_mount()`: Mount filesystems (FsMount 500)
@@ -199,7 +200,7 @@ pub fn sys_vfs_truncate(trapframe: &mut Trapframe) -> usize {
     }
 }
 
-/// Get metadata for a filesystem path (VfsMetadata).
+/// Get metadata for a filesystem path, following symbolic links (VfsMetadata).
 ///
 /// # Arguments
 ///
@@ -211,17 +212,27 @@ pub fn sys_vfs_truncate(trapframe: &mut Trapframe) -> usize {
 /// * `0` on success
 /// * `usize::MAX` on error (file not found, invalid pointer, etc.)
 pub fn sys_vfs_metadata(trapframe: &mut Trapframe) -> usize {
+    vfs_metadata(trapframe, false)
+}
+
+/// Get metadata without following the final symbolic link (VfsSymlinkMetadata).
+///
+/// Arguments and return values are identical to [`sys_vfs_metadata`]. Links in
+/// parent components are followed; a dangling final link can be queried.
+pub fn sys_vfs_symlink_metadata(trapframe: &mut Trapframe) -> usize {
+    vfs_metadata(trapframe, true)
+}
+
+fn vfs_metadata(trapframe: &mut Trapframe, no_follow: bool) -> usize {
     let task = mytask().unwrap();
     let path_ptr = trapframe.get_arg(0);
     let metadata_ptr = trapframe.get_arg(1);
 
     trapframe.increment_pc_next(&task);
 
+    // Let VFS resolve relative paths and `..` after symbolic links.
     let path_str = match parse_c_string_from_userspace(&task, path_ptr, MAX_PATH_LENGTH) {
-        Ok(s) => match to_absolute_path_v2(&task, &s) {
-            Ok(abs) => abs,
-            Err(_) => return usize::MAX,
-        },
+        Ok(s) => s,
         Err(_) => return usize::MAX,
     };
 
@@ -230,7 +241,12 @@ pub fn sys_vfs_metadata(trapframe: &mut Trapframe) -> usize {
         None => return usize::MAX,
     };
 
-    let metadata = match vfs.metadata(&path_str) {
+    let result = if no_follow {
+        vfs.symlink_metadata(&path_str)
+    } else {
+        vfs.metadata(&path_str)
+    };
+    let metadata = match result {
         Ok(metadata) => AbiFileMetadata::from_metadata(&metadata),
         Err(_) => return usize::MAX,
     };

@@ -770,6 +770,8 @@ pub enum Syscall {
     VfsRename = 409,
     VfsMetadata = 410,
     VfsCreateHardlink = 411,
+    /// Query path metadata without following the final symbolic link.
+    VfsSymlinkMetadata = 412,
 
     // Filesystem operations
     FsMount = 500,

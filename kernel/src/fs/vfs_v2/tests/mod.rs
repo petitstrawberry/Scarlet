@@ -80,6 +80,38 @@ fn test_rename_no_replace_preserves_existing_entries() {
     assert_eq!(vfs.metadata("/new").unwrap().file_id, source_id);
 }
 
+#[test_case]
+fn test_symlink_metadata_does_not_follow_the_final_link() {
+    use crate::fs::{FileSystemErrorKind, FileType};
+
+    let vfs = VfsManager::new();
+    vfs.create_dir("/dir").unwrap();
+    vfs.create_file("/dir/file", FileType::RegularFile).unwrap();
+    vfs.create_symlink("/dir/link", "file").unwrap();
+    vfs.create_symlink("/dir/dangling", "missing").unwrap();
+    vfs.create_symlink("/alias", "/dir").unwrap();
+
+    let file_id = vfs.metadata("/dir/file").unwrap().file_id;
+    assert_eq!(vfs.metadata("/alias/link").unwrap().file_id, file_id);
+    let link = vfs.symlink_metadata("/alias/link").unwrap();
+    assert_ne!(link.file_id, file_id);
+    assert!(matches!(link.file_type, FileType::SymbolicLink(_)));
+    let dangling = vfs.symlink_metadata("/alias/dangling").unwrap();
+    assert!(matches!(dangling.file_type, FileType::SymbolicLink(_)));
+    assert_eq!(
+        vfs.metadata("/alias/dangling").unwrap_err().kind,
+        FileSystemErrorKind::NotFound
+    );
+
+    vfs.set_cwd_by_path("/dir").unwrap();
+    assert_eq!(vfs.symlink_metadata("link").unwrap().file_id, link.file_id);
+    assert_eq!(vfs.symlink_metadata("file").unwrap().file_id, file_id);
+    assert_eq!(
+        vfs.symlink_metadata("missing").unwrap_err().kind,
+        FileSystemErrorKind::NotFound
+    );
+}
+
 /// Test basic mount tree operations
 #[test_case]
 fn test_mount_tree_basic() {

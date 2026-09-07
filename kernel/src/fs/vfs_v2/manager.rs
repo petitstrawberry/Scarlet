@@ -876,6 +876,15 @@ impl VfsManager {
         node.metadata()
     }
 
+    /// Get metadata without following the final symbolic link.
+    /// Symbolic links in parent components are still followed.
+    pub fn symlink_metadata(&self, path: &str) -> Result<FileMetadata, FileSystemError> {
+        let entry = self
+            .resolve_path_with_options(path, &PathResolutionOptions::no_follow())?
+            .0;
+        entry.node().metadata()
+    }
+
     /// Read directory entries at the specified path
     ///
     /// This will resolve the path using the MountTreeV2 and return a list of
