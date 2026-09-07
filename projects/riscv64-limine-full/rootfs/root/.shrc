@@ -3,7 +3,7 @@
 
 # Set environment variables
 export LD_LIBRARY_PATH=/usr/lib:/lib
-export PATH=/bin:/usr/bin
+export PATH=/bin:/usr/bin:/systems/linux-riscv64/bin:/systems/linux-riscv64/sbin:/systems/linux-riscv64/usr/bin:/systems/linux-riscv64/usr/sbin
 
 export XDG_RUNTIME_DIR=/tmp
 export WAYLAND_DISPLAY=wayland-0

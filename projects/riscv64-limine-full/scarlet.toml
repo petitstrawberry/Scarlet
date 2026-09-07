@@ -36,6 +36,11 @@ output = ".scarlet/images/rootfs-riscv64-full.ext2"
 kind = "bundle"
 path = "../../bundles/full/bundle.toml"
 
+[[images.rootfs.layers]]
+kind = "copy"
+source = "rootfs/root"
+to = "/root"
+
 [images.boot]
 format = "limine-uefi"
 output = ".scarlet/images/limine-riscv64-full.img"
