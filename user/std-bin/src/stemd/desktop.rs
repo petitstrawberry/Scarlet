@@ -514,7 +514,7 @@ mod tests {
     #[test]
     fn terminal_desktop_entry_requests_a_new_instance() {
         let entry = DesktopParser::new(String::from(include_str!(
-            "../../../../bundles/desktop/fs/systems/scarlet/etc/stemd.d/apps/org.scarlet-os.desktop.terminal.desktop"
+            "../../../../bundles/desktop/fs/etc/stemd.d/apps/org.scarlet-os.desktop.terminal.desktop"
         )))
         .parse("org.scarlet-os.desktop.terminal.desktop")
         .expect("Terminal desktop entry should parse");
@@ -529,7 +529,7 @@ mod tests {
     #[test]
     fn settings_desktop_entry_keeps_focus_existing_as_the_default() {
         let entry = DesktopParser::new(String::from(include_str!(
-            "../../../../bundles/desktop/fs/systems/scarlet/etc/stemd.d/apps/org.scarlet-os.desktop.settings.desktop"
+            "../../../../bundles/desktop/fs/etc/stemd.d/apps/org.scarlet-os.desktop.settings.desktop"
         )))
         .parse("org.scarlet-os.desktop.settings.desktop")
         .expect("Settings desktop entry should parse");
@@ -562,7 +562,7 @@ mod tests {
     #[test]
     fn notepad_desktop_entry_preserves_the_selected_path() {
         let entry = DesktopParser::new(String::from(include_str!(
-            "../../../../bundles/desktop/fs/systems/scarlet/etc/stemd.d/apps/org.scarlet-os.desktop.notepad.desktop"
+            "../../../../bundles/desktop/fs/etc/stemd.d/apps/org.scarlet-os.desktop.notepad.desktop"
         )))
         .parse("org.scarlet-os.desktop.notepad.desktop")
         .expect("Notepad desktop entry should parse");

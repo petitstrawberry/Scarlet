@@ -2,64 +2,64 @@
 kind = "cargo"
 source = "../../user/std-bin"
 bin = "abi-run"
-to = "/systems/scarlet/bin/abi-run"
+to = "/bin/abi-run"
 
 [[layers]]
 kind = "cargo"
 source = "../../user/std-bin"
 bin = "ls"
-to = "/systems/scarlet/bin/ls"
+to = "/bin/ls"
 
 [[layers]]
 kind = "cargo"
 source = "../../user/std-bin"
 bin = "cat"
-to = "/systems/scarlet/bin/cat"
+to = "/bin/cat"
 
 [[layers]]
 kind = "cargo"
 source = "../../user/std-bin"
 bin = "rm"
-to = "/systems/scarlet/bin/rm"
+to = "/bin/rm"
 
 [[layers]]
 kind = "cargo"
 source = "../../user/std-bin"
 bin = "resolve"
-to = "/systems/scarlet/bin/resolve"
+to = "/bin/resolve"
 
 [[layers]]
 kind = "cargo"
 source = "../../user/std-bin"
 bin = "nc"
-to = "/systems/scarlet/bin/nc"
+to = "/bin/nc"
 
 [[layers]]
 kind = "cargo"
 source = "../../user/std-bin"
 bin = "ping"
-to = "/systems/scarlet/bin/ping"
+to = "/bin/ping"
 
 [[layers]]
 kind = "cargo"
 source = "../../user/std-bin"
 bin = "netcfg"
-to = "/systems/scarlet/bin/netcfg"
+to = "/bin/netcfg"
 
 [[layers]]
 kind = "cargo"
 source = "../../user/std-bin"
 bin = "watch"
-to = "/systems/scarlet/bin/watch"
+to = "/bin/watch"
 
 [[layers]]
 kind = "cargo"
 source = "../../user/std-bin"
 bin = "date"
-to = "/systems/scarlet/bin/date"
+to = "/bin/date"
 
 [[layers]]
 kind = "cargo"
 source = "../../user/std-bin"
 bin = "fb-test"
-to = "/systems/scarlet/bin/fb-test"
+to = "/bin/fb-test"

@@ -37,12 +37,12 @@ rm -rf "$STAGE_DIR"
 mkdir -p "$STAGE_DIR"
 cp -a "$ROOTFS_BASE"/. "$STAGE_DIR"/
 
-mkdir -p "$STAGE_DIR/systems/scarlet/bin"
-find "$SCARLET_BIN_DIR" -maxdepth 1 -type f ! -name '*.debug' -exec cp -a {} "$STAGE_DIR/systems/scarlet/bin/" \;
+mkdir -p "$STAGE_DIR/bin"
+find "$SCARLET_BIN_DIR" -maxdepth 1 -type f ! -name '*.debug' -exec cp -a {} "$STAGE_DIR/bin/" \;
 
 if [ -d "$MODULES_DIR" ]; then
-    mkdir -p "$STAGE_DIR/systems/scarlet/modules"
-    cp -a "$MODULES_DIR"/. "$STAGE_DIR/systems/scarlet/modules"/
+    mkdir -p "$STAGE_DIR/modules"
+    cp -a "$MODULES_DIR"/. "$STAGE_DIR/modules"/
 fi
 
 if [ -n "$PROJECT_PREBUILT_DIR" ] && [ -d "$PROJECT_PREBUILT_DIR" ]; then

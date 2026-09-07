@@ -3,15 +3,15 @@
 
 [[layers]]
 kind = "copy"
-source = "fs/systems"
-to = "/systems"
+source = "fs"
+to = "/"
 
 [[layers]]
 kind = "cargo"
 source = { git = "https://github.com/petitstrawberry/moonlight-scarlet.git", rev = "0a0a263b8b1538d0f98d9ad7820a589230228c6b" }
 package = "moonlight"
 bin = "moonlight"
-to = "/systems/scarlet/bin/moonlight"
+to = "/bin/moonlight"
 
 [[layers]]
 kind = "cargo"
@@ -21,63 +21,63 @@ bin = "video-player"
 default-features = false
 features = ["av1-stateful-hw", "h264-stateful-hw", "h264-stateless-hw", "mp4-aac"]
 replace = true
-to = "/systems/scarlet/bin/video-player"
+to = "/bin/video-player"
 
 [[layers]]
 kind = "cargo"
 source = { git = "https://github.com/petitstrawberry/yt-for-scarlet" }
 package = "yt"
 bin = "yt"
-to = "/systems/scarlet/bin/yt"
+to = "/bin/yt"
 
 [[layers]]
 kind = "cargo"
 source = { git = "https://github.com/petitstrawberry/yt-for-scarlet" }
 package = "yt-gui"
 bin = "yt-gui"
-to = "/systems/scarlet/bin/yt-gui"
+to = "/bin/yt-gui"
 
 [[layers]]
 kind = "cargo"
 source = "../../user/std-bin"
 package = "scarlet-std-bin"
 bin = "axum-demo"
-to = "/systems/scarlet/bin/axum-demo"
+to = "/bin/axum-demo"
 
 [[layers]]
 kind = "cargo"
 source = "../../user/std-bin"
 package = "scarlet-std-bin"
 bin = "reqwest-demo"
-to = "/systems/scarlet/bin/reqwest-demo"
+to = "/bin/reqwest-demo"
 
 [[layers]]
 kind = "cargo"
 source = "../../user/tonic-demo"
 package = "scarlet-tonic-demo"
 bin = "tonic-server"
-to = "/systems/scarlet/bin/tonic-server"
+to = "/bin/tonic-server"
 
 [[layers]]
 kind = "cargo"
 source = "../../user/tonic-demo"
 package = "scarlet-tonic-demo"
 bin = "tonic-client"
-to = "/systems/scarlet/bin/tonic-client"
+to = "/bin/tonic-client"
 
 [[layers]]
 kind = "cargo"
 source = "../../user/websocket-demo"
 package = "scarlet-websocket-demo"
 bin = "ws-server"
-to = "/systems/scarlet/bin/ws-server"
+to = "/bin/ws-server"
 
 [[layers]]
 kind = "cargo"
 source = "../../user/websocket-demo"
 package = "scarlet-websocket-demo"
 bin = "ws-client"
-to = "/systems/scarlet/bin/ws-client"
+to = "/bin/ws-client"
 
 [[layers]]
 kind = "cargo"
@@ -85,4 +85,4 @@ source = { git = "https://github.com/petitstrawberry/blitz", rev = "c26e20dfff97
 subdir = "apps/scarlet-browser"
 package = "blitz-scarlet-browser"
 bin = "blitz"
-to = "/systems/scarlet/bin/blitz"
+to = "/bin/blitz"

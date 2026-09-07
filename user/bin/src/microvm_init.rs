@@ -11,7 +11,7 @@ fn boot() -> Result<core::convert::Infallible, &'static str> {
     let args = std::env::args_vec();
     let cmdline = args.get(1).map(|s| s.as_str()).unwrap_or("");
     let backing = bootstrap::backing(cmdline, true)?;
-    let (environment, _views) = bootstrap::environment(&backing)?;
+    let (environment, _views) = bootstrap::environment(backing)?;
     let linux = environment
         .root("linux-aarch64")
         .map_err(|_| "Linux view is unavailable")?;

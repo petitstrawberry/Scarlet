@@ -94,7 +94,7 @@ kind = "cargo"
 source = "../../user/std-bin"
 package = "scarlet-std-bin"
 bin = "hello"
-to = "/systems/scarlet/bin/hello"
+to = "/bin/hello"
 ```
 
 The `source` path is relative to the declaring bundle, not the shell's current
@@ -121,8 +121,8 @@ inheritance rules and userspace-owned backing layout.
 
 [stemd](../services/stemd.md) owns service ordering, readiness, child reaping,
 and the desktop application registry. The source configuration lives in
-[base services](../../bundles/base/fs/systems/scarlet/etc/stemd.d/services) and
-[desktop services/apps](../../bundles/desktop/fs/systems/scarlet/etc/stemd.d),
+[base services](../../bundles/base/fs/etc/stemd.d/services) and
+[desktop services/apps](../../bundles/desktop/fs/etc/stemd.d),
 not the removed `mkfs/initramfs` tree. `logd` / `logctl` provide the current
 volatile service log. The shell, SWS, SAS, input methods, and other services
 are userspace processes, not kernel subsystems.

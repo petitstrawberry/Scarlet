@@ -38,8 +38,8 @@ path = "../../bundles/full/bundle.toml"
 
 [[images.rootfs.layers]]
 kind = "copy"
-source = "rootfs/systems"
-to = "/systems"
+source = "rootfs/root"
+to = "/root"
 
 [images.boot]
 format = "limine-uefi"

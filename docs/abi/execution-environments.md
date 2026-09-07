@@ -128,31 +128,39 @@ The bundles use this **userspace-owned** backing layout:
 
 ```text
 /init                       bootstrap program
-/systems/<abi>/             each ABI's filesystem data
-/home, /shared, /tmp, /dev    explicitly shared resources
+/bin, /etc, /lib, /usr, ...  Scarlet userspace in the global root
+/systems/<abi>/             additional ABI filesystem roots
+/home, /root, /shared, /tmp, /dev  explicitly shared resources
 ```
 
-Disk-backed boot roots each ABI view directly at `/systems/<abi>`; file writes
-modify that filesystem without an overlay or separate upper-layer directory.
-Diskless boot uses the same bundle layout, but adds an anonymous tmpfs upper
-layer to each ABI view because CpioFS is read-only. Those writes are volatile.
+The `scarlet` slot uses the global root directly. Additional ABI slots use
+views rooted at `/systems/<abi>`, such as `/systems/linux-aarch64`. There is no
+separate native root directory. Custom Environments may still register an
+independent filesystem root for Scarlet.
+
+Disk-backed boot writes directly to the filesystem without an overlay or
+separate upper-layer directory. Diskless boot adds one anonymous tmpfs upper
+layer to the entire initramfs because CpioFS is read-only. All ABI views are
+derived from that writable global tree, and those writes are volatile.
 
 The default views share `/home`, `/shared`, `/tmp`, `/dev` and `/dev/pts`;
 Linux also shares the native
 `/root`. Thus Mozc's launcher opens `/usr/lib/mozc/mozc_server` in the Linux
 view, and both sides use `/root/.config/mozc` for its profile.
 
-The default init also exposes a non-recursive backing-root bind at `/scarlet`
-for explicit administrative access. It is not a kernel feature, an application
+Additional ABI views expose a non-recursive global-root bind at `/scarlet`
+for explicit administrative access. Scarlet itself already uses the global
+root and needs no such bind. This is not a kernel feature, an application
 search path, or an ABI path-conversion convention. Applications use their
 visible view, query another ABI view when launching its program, or explicitly
 transfer open handles. PDFview, for example, opens a document in the caller's
 view and passes it to zathura through stdin. Custom Environments may omit
 `/scarlet` entirely.
 
-In-tree bundle and project source directories use the same `systems/<abi>`
-layout, such as `bundles/base/fs/systems/scarlet`. This remains an init policy,
-not a kernel-defined path convention.
+In-tree bundle and project source directories mirror their image paths:
+native files live directly under `fs/` or `rootfs/`, while additional ABI trees
+remain under `systems/<abi>`. This remains an init policy, not a kernel-defined
+path convention.
 
 Environment isolation covers filesystem views and explicit handle transfer.
 It does not isolate networks, PIDs, IPC registries or users and is not a complete

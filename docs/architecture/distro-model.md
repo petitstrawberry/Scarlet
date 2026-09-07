@@ -211,15 +211,15 @@ contain ordered layers, not packages:
 # bundles/base/bundle.toml
 [[layers]]
 kind = "copy"
-source = "fs/systems"
-to = "/systems"
+source = "fs"
+to = "/"
 
 [[layers]]
 kind = "cargo"
 source = "../../user/bin"
 package = "user-bin"
 bin = "sh"
-to = "/systems/scarlet/bin/sh"
+to = "/bin/sh"
 ```
 
 Projects reference bundles through image layers:
@@ -265,7 +265,7 @@ hash = "sha256:..."
 kind = "cargo"
 package = "user-bin"
 bin = "sh"
-to = "/systems/scarlet/bin/sh"
+to = "/bin/sh"
 hash = "sha256:..."
 
 [sections.rootfs.layers.source]

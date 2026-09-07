@@ -168,6 +168,6 @@ When run from an interactive shell, stemd forks once and the parent exits immedi
 - Log query tool: `user/std-bin/src/logctl.rs`
 - Log wire protocol: `user/lib/log-protocol/src/lib.rs`
 - Init integration: `user/bin/src/init.rs`
-- Base services: [bundles/base/fs/systems/scarlet/etc/stemd.d/services](../../bundles/base/fs/systems/scarlet/etc/stemd.d/services)
-- Desktop services/apps: [bundles/desktop/fs/systems/scarlet/etc/stemd.d](../../bundles/desktop/fs/systems/scarlet/etc/stemd.d)
+- Base services: [bundles/base/fs/etc/stemd.d/services](../../bundles/base/fs/etc/stemd.d/services)
+- Desktop services/apps: [bundles/desktop/fs/etc/stemd.d](../../bundles/desktop/fs/etc/stemd.d)
 - Build and init handoff: [userspace development](../userspace/README.md)

@@ -175,7 +175,7 @@ Output: `<project>/.scarlet/modules/<triple>/<name>.lsm`
 
 ### Initramfs
 
-Include loadable module outputs in the image at `/systems/scarlet/modules/`.
+Include loadable module outputs in the image at `/modules/`.
 They are visible as `/modules/` in the native view. Bundle/image layers choose
 the backing location; the module loader does not search the global root.
 

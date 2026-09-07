@@ -41,14 +41,9 @@ pub fn console() -> Result<[Handle; 3], &'static str> {
     Ok([input, output, error])
 }
 
-pub struct Backing {
-    pub view: VfsView,
-    disk_backed: bool,
-}
-
-/// Select backing storage while still in the bootstrap view. Disk roots are
-/// writable directly; diskless boot keeps the read-only initramfs as lower data.
-pub fn backing(cmdline: &str, require_disk: bool) -> Result<Backing, &'static str> {
+/// Select the global root while still in bootstrap. Disk roots are writable
+/// directly; diskless boot adds one volatile upper layer to the whole initramfs.
+pub fn backing(cmdline: &str, require_disk: bool) -> Result<VfsView, &'static str> {
     directory("/mnt")?;
     directory("/mnt/newroot")?;
     let fstype = cmdline_value(cmdline, "rootfstype=").unwrap_or("ext2");
@@ -70,61 +65,59 @@ pub fn backing(cmdline: &str, require_disk: bool) -> Result<Backing, &'static st
         fs::pivot_root("/mnt/newroot", "/mnt/newroot/old_root")
             .map_err(|_| "cannot switch to backing disk")?;
         devfs()?;
+    } else if require_disk || root.is_some() {
+        return Err("configured root disk is unavailable");
+    }
+    let base = VfsView::current_admin().map_err(|_| "bootstrap view authority unavailable")?;
+    let global = if mounted {
+        base
     } else {
-        if require_disk || root.is_some() {
-            return Err("configured root disk is unavailable");
+        // CpioFS is read-only. All ABI views share this writable global tree.
+        let upper = VfsView::create("tmpfs", "size=128M")
+            .map_err(|_| "cannot create volatile root storage")?;
+        let global = VfsView::overlay(&base, "/", Some((&upper, "/")))
+            .map_err(|_| "cannot construct volatile root view")?;
+        for path in ["/dev", "/dev/pts"] {
+            view_directory(&global, path)?;
+            global
+                .bind(path, &base, path)
+                .map_err(|_| "cannot bind bootstrap devices")?;
         }
-        for path in ["/home", "/shared"] {
-            directory(path)?;
-            fs::mount("tmpfs", path, "tmpfs", 0, Some("size=128M"))
-                .map_err(|_| "cannot mount volatile backing storage")?;
-        }
-    }
+        global
+    };
     for path in ["/home", "/shared", "/tmp"] {
-        directory(path)?;
+        view_directory(&global, path)?;
     }
-    fs::mount("tmpfs", "/tmp", "tmpfs", 0, Some("size=128M"))
+    global
+        .mount("/tmp", "tmpfs", "size=128M")
         .map_err(|_| "cannot mount shared temporary storage")?;
-    Ok(Backing {
-        view: VfsView::current_admin().map_err(|_| "bootstrap view authority unavailable")?,
-        disk_backed: mounted,
-    })
+    Ok(global)
 }
 
-fn abi_view(base: &Backing, abi: &str) -> Result<VfsView, &'static str> {
-    let root = format!("/systems/{}", abi);
-    let view = if base.disk_backed {
-        base.view
-            .rooted_at(&root)
-            .map_err(|_| "cannot construct ABI root view")?
-    } else {
-        // CpioFS is read-only. Keep this upper layer anonymous and volatile,
-        // without a separate backing directory or persistent overlay layout.
-        let upper = VfsView::create("tmpfs", "size=128M")
-            .map_err(|_| "cannot create volatile ABI storage")?;
-        VfsView::overlay(&base.view, &root, Some((&upper, "/")))
-            .map_err(|_| "cannot construct volatile ABI view")?
-    };
+fn abi_view(global: &VfsView, root: &str) -> Result<VfsView, &'static str> {
+    let view = global
+        .rooted_at(root)
+        .map_err(|_| "cannot construct ABI root view")?;
     for (target, source) in [
         ("/dev", "/dev"),
         ("/dev/pts", "/dev/pts"),
         ("/tmp", "/tmp"),
         ("/home", "/home"),
         ("/shared", "/shared"),
+        ("/root", "/root"),
         ("/scarlet", "/"),
     ] {
         view_directory(&view, target)?;
-        view.bind(target, &base.view, source)
+        view.bind(target, global, source)
             .map_err(|_| "cannot bind shared directory")?;
     }
     Ok(view)
 }
 
-/// Scarlet's default Environment. /scarlet is an ordinary, non-recursive
-/// backing-root gateway chosen here. Custom/isolated environments can omit it.
-pub fn environment(base: &Backing) -> Result<(Environment, Vec<VfsView>), &'static str> {
+/// Scarlet uses the global root; additional ABIs use roots under /systems.
+/// Only additional ABI views expose the global tree at /scarlet.
+pub fn environment(native: VfsView) -> Result<(Environment, Vec<VfsView>), &'static str> {
     let env = Environment::create().map_err(|_| "cannot create Environment")?;
-    let native = abi_view(base, "scarlet")?;
     env.set_root("scarlet", &native)
         .map_err(|_| "cannot register Scarlet view")?;
     #[cfg(target_arch = "aarch64")]
@@ -133,14 +126,11 @@ pub fn environment(base: &Backing) -> Result<(Environment, Vec<VfsView>), &'stat
     const OTHER_ABIS: &[&str] = &["linux-riscv64", "xv6-riscv64"];
     let mut views = Vec::new();
     for abi in OTHER_ABIS {
-        if fs::list_directory(&format!("/systems/{}", abi)).is_err() {
+        let root = format!("/systems/{}", abi);
+        if native.open(&root, 0).is_err() {
             continue;
         }
-        let view = abi_view(base, abi)?;
-        // Keep the administrator's home coherent across native/Linux tools.
-        view_directory(&view, "/root")?;
-        view.bind("/root", &native, "/root")
-            .map_err(|_| "cannot share root home")?;
+        let view = abi_view(&native, &root)?;
         env.set_root(abi, &view)
             .map_err(|_| "cannot register ABI view")?;
         views.push(view);

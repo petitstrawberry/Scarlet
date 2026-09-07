@@ -230,7 +230,7 @@ kind = "cargo"
 source = "../../user/std-bin"
 package = "scarlet-std-bin"
 bin = "hello"
-to = "/systems/scarlet/bin/hello"
+to = "/bin/hello"
 ```
 
 For external applications, `source` can be a Git table and `subdir` selects

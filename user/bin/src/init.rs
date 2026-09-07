@@ -11,7 +11,7 @@ fn boot() -> Result<core::convert::Infallible, &'static str> {
     let args = std::env::args_vec();
     let cmdline = args.get(1).map(|s| s.as_str()).unwrap_or("");
     let backing = bootstrap::backing(cmdline, false)?;
-    let (environment, views) = bootstrap::environment(&backing)?;
+    let (environment, views) = bootstrap::environment(backing)?;
     let executable = views[0]
         .open("/bin/stemd", 0)
         .map_err(|_| "cannot open /bin/stemd")?;
@@ -25,13 +25,9 @@ fn boot() -> Result<core::convert::Infallible, &'static str> {
         .collect();
     // Retain construction authority in PID 1. These handles remain CLOEXEC, so
     // ordinary service execs do not inherit them.
-    handles.push(HandleMapping {
-        source: backing.view.as_handle(),
-        target: 3,
-    });
     handles.extend(views.iter().enumerate().map(|(index, view)| HandleMapping {
         source: view.as_handle(),
-        target: index as u32 + 4,
+        target: index as u32 + 3,
     }));
     println!("init: starting stemd in the default Environment");
     environment
