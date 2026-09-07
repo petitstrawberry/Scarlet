@@ -58,6 +58,10 @@ whether the CPU uses TCG, KVM, or HVF. Cocoa also enables `retina=on` and
 while the pointer is over the guest display. VNC and non-GL displays keep
 `virtio-gpu-pci`. The GPU-less microvm project remains headless by default.
 
+Full projects use 4 vCPUs by default; microvm uses 1. `SCARLET_QEMU_SMP`
+overrides either default. These are fixed defaults, not based on the host's
+CPU count.
+
 CPU acceleration defaults to TCG on every host. Select KVM or HVF explicitly
 when your host supports running the guest architecture:
 

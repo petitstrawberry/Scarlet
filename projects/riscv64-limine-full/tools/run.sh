@@ -67,7 +67,7 @@ QEMU_CPU_ARGS=()
 if [ "${QEMU_ACCEL%%,*}" = "kvm" ]; then
     QEMU_CPU_ARGS=(-cpu host)
 fi
-QEMU_SMP="${SCARLET_QEMU_SMP:-1}"
+QEMU_SMP="${SCARLET_QEMU_SMP:-4}"
 QEMU_MEMORY="${SCARLET_QEMU_MEMORY:-8G}"
 QEMU_MACHINE="${SCARLET_QEMU_MACHINE_RV64:-virt,acpi=off}"
 source "$PROJECT_ROOT/tools/qemu-display.sh" || exit 1

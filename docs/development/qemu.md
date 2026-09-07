@@ -74,7 +74,7 @@ for the distinction between hardware virtualization and TCG emulation.
 | Variable | Scope | Default | Effect |
 | --- | --- | --- | --- |
 | `SCARLET_QEMU_ACCEL` | All | `tcg` | Passed to `-accel`; explicitly select `tcg`, `kvm`, or `hvf` as appropriate. |
-| `SCARLET_QEMU_SMP` | All | `1` | Passed to `-smp` to configure virtual CPUs. |
+| `SCARLET_QEMU_SMP` | All | Full: `4`; microvm: `1` | Passed to `-smp` to configure virtual CPUs. Defaults are fixed, not derived from the host CPU count. |
 | `SCARLET_QEMU_MEMORY` | All | `8G` | Guest RAM size, passed to `-m`. Also sizes shared memory when vhost-user video is enabled. |
 | `SCARLET_QEMU_MACHINE_AARCH64` | AArch64 full, microvm | `virt,gic-version=3,acpi=off` | Replaces the `-machine` string, including machine options. |
 | `SCARLET_QEMU_MACHINE_RV64` | RISC-V full | `virt,acpi=off` | Replaces the `-machine` string, including machine options. |
