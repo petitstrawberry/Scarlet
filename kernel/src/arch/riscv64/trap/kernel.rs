@@ -1,12 +1,16 @@
 use core::arch::naked_asm;
 use core::{arch::asm, mem::transmute};
 
+use crate::arch::trap::interrupt::arch_interrupt_handler;
 use crate::arch::trap::print_traplog;
 use crate::arch::{Trapframe, get_cpu};
 use crate::environment::PAGE_SIZE;
 use crate::object::capability::memory_mapping::{AccessKind, AccessOp};
-use crate::sched::scheduler::get_scheduler;
-use crate::vm::get_kernel_vm_manager;
+use crate::sched::scheduler::current_task;
+use crate::vm::{
+    get_kernel_vm_manager,
+    vmem::{MemoryAttribute, VirtualMemoryPermission},
+};
 
 #[unsafe(export_name = "_kernel_trap_entry")]
 #[unsafe(naked)]
@@ -122,7 +126,7 @@ pub extern "C" fn arch_kernel_trap_handler(addr: usize) {
 
     let interrupt = cause & 0x8000000000000000 != 0;
     if interrupt {
-        panic!("Interrupt is not supported in kernel mode");
+        arch_interrupt_handler(trapframe, cause & !0x8000000000000000);
     } else {
         arch_kernel_exception_handler(trapframe, cause & !0x8000000000000000);
     }
@@ -133,16 +137,17 @@ fn arch_kernel_exception_handler(trapframe: &mut Trapframe, cause: usize) {
         /* Instruction page fault */
         12 => {
             let vaddr = trapframe.epc as usize;
+            crate::println!("[kernel trap] inst page fault at {:#x}", vaddr);
             let manager = get_kernel_vm_manager();
             match manager.search_memory_map(vaddr) {
                 Some(mmap) => match manager.get_root_page_table() {
-                    Some(root_page_table) => {
-                        let paddr = mmap.get_paddr(vaddr).unwrap();
+                    Some(mut root_page_table) => {
+                        let paddr = mmap.pmarea.start + (vaddr - mmap.vmarea.start);
                         root_page_table.map(
-                            manager.get_asid(),
                             vaddr,
                             paddr,
                             mmap.permissions,
+                            mmap.memory_attribute,
                             true,
                             false,
                         );
@@ -160,14 +165,42 @@ fn arch_kernel_exception_handler(trapframe: &mut Trapframe, cause: usize) {
             }
 
             // Detect kernel stack overflow via guard-page hit
-            if let Some(task) = get_scheduler().get_current_task(get_cpu().get_cpuid()) {
+            // Also handle kstack window accesses that might not have VMA
+            if let Some(task) = current_task(get_cpu().get_cpuid()) {
                 if let Some((_slot, base)) = task.get_kernel_stack_window_base() {
-                    if vaddr >= base && vaddr < base + PAGE_SIZE {
+                    let kstack_start = base + crate::environment::PAGE_SIZE;
+                    let kstack_end = kstack_start + crate::environment::TASK_KERNEL_STACK_SIZE;
+
+                    // Guard page hit
+                    if vaddr >= base && vaddr < kstack_start {
                         print_traplog(trapframe);
                         panic!(
                             "Kernel stack overflow detected: guard page hit at vaddr={:#x} (base={:#x})",
                             vaddr, base
                         );
+                    }
+
+                    // Kstack window access - map it directly
+                    // Also handle kernel_sp (one past end) since trap entry might touch it
+                    if vaddr >= kstack_start && vaddr <= kstack_end {
+                        let manager = get_kernel_vm_manager();
+                        if let Some(mut root_page_table) = manager.get_root_page_table() {
+                            let kernel_stack_area = task.get_kernel_stack_memory_area_paddr();
+                            let page_offset =
+                                (vaddr - kstack_start) & !(crate::environment::PAGE_SIZE - 1);
+                            let page_paddr = kernel_stack_area.start + page_offset;
+                            let page_vaddr = vaddr & !(crate::environment::PAGE_SIZE - 1);
+                            root_page_table.map(
+                                page_vaddr,
+                                page_paddr,
+                                VirtualMemoryPermission::Read as usize
+                                    | VirtualMemoryPermission::Write as usize,
+                                MemoryAttribute::Normal,
+                                true,
+                                false,
+                            );
+                            return;
+                        }
                     }
                 }
             }
@@ -175,8 +208,6 @@ fn arch_kernel_exception_handler(trapframe: &mut Trapframe, cause: usize) {
             // For kernel addresses, check if they are valid
             let manager = get_kernel_vm_manager();
             loop {
-                crate::println!("[kernel] Handling page fault at vaddr: {:#x}", vaddr);
-
                 // Additional validation for suspicious addresses
                 if vaddr == 0 || vaddr == usize::MAX {
                     print_traplog(trapframe);
@@ -204,7 +235,6 @@ fn arch_kernel_exception_handler(trapframe: &mut Trapframe, cause: usize) {
                         );
                     }
                 }
-                crate::println!("Mapped page at vaddr: {:#x}", vaddr);
 
                 if vaddr & 0b11 == 0 {
                     // If the address is aligned, we can stop

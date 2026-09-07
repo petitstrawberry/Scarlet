@@ -1,0 +1,11 @@
+[build]
+target = "riscv64gc-unknown-scarlet"
+
+[target.aarch64-unknown-scarlet]
+linker = "rust-lld"
+
+[target.riscv64gc-unknown-scarlet]
+linker = "rust-lld"
+
+[unstable]
+unstable-options = true

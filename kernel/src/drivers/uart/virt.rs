@@ -1,9 +1,8 @@
 // UART driver for QEMU virt machine
 
+use crate::sync::{IrqRwSpinLock, IrqSpinLock};
 use alloc::{boxed::Box, collections::VecDeque, sync::Arc};
-use core::fmt::Write;
-use core::{any::Any, fmt};
-use spin::{Mutex, RwLock};
+use core::any::Any;
 
 use crate::{
     device::{
@@ -19,17 +18,20 @@ use crate::{
         },
     },
     driver_initcall,
-    interrupt::{InterruptId, InterruptManager},
+    interrupt::{InterruptClaim, InterruptId},
     object::capability::{ControlOps, MemoryMappingOps, Selectable},
-    traits::serial::Serial,
 };
 
+const TX_PACE_BYTES: usize = 64;
+
 pub struct Uart {
-    // inner: Arc<Mutex<UartInner>>,
+    // inner: Arc<IrqSpinLock<UartInner>>,
     base: usize,
-    interrupt_id: RwLock<Option<InterruptId>>,
-    rx_buffer: Mutex<VecDeque<u8>>,
-    event_emitter: Mutex<DeviceEventEmitter>,
+    interrupt_id: IrqRwSpinLock<Option<InterruptId>>,
+    rx_buffer: IrqSpinLock<VecDeque<u8>>,
+    event_emitter: IrqSpinLock<DeviceEventEmitter>,
+    // Serializes TX access across all callers (kernel _print, TTY write, echo).
+    tx_lock: IrqSpinLock<()>,
 }
 
 pub const RHR_OFFSET: usize = 0x00;
@@ -41,17 +43,16 @@ pub const LCR_OFFSET: usize = 0x03; // Line Control Register
 pub const LSR_OFFSET: usize = 0x05;
 
 pub const LSR_THRE: u8 = 0x20;
+pub const LSR_TEMT: u8 = 0x40;
 pub const LSR_DR: u8 = 0x01;
 
 // IER bits
 pub const IER_RDA: u8 = 0x01; // Received Data Available
-pub const IER_THRE: u8 = 0x02; // Transmit Holding Register Empty
 pub const IER_RLS: u8 = 0x04; // Receiver Line Status
 
 // IIR bits
 pub const IIR_PENDING: u8 = 0x01; // 0=interrupt pending, 1=no interrupt
 pub const IIR_RDA: u8 = 0x04; // Received Data Available
-pub const IIR_THRE: u8 = 0x02; // Transmit Holding Register Empty
 
 // FCR bits
 pub const FCR_ENABLE: u8 = 0x01; // FIFO enable
@@ -64,9 +65,10 @@ impl Uart {
     pub fn new(base: usize) -> Self {
         Uart {
             base,
-            interrupt_id: RwLock::new(None),
-            rx_buffer: Mutex::new(VecDeque::new()),
-            event_emitter: Mutex::new(DeviceEventEmitter::new()),
+            interrupt_id: IrqRwSpinLock::new(None),
+            rx_buffer: IrqSpinLock::new(VecDeque::new()),
+            event_emitter: IrqSpinLock::new(DeviceEventEmitter::new()),
+            tx_lock: IrqSpinLock::new(()),
         }
     }
 
@@ -90,17 +92,11 @@ impl Uart {
         self.reg_write(FCR_OFFSET, FCR_ENABLE | FCR_CLEAR_RX | FCR_CLEAR_TX);
     }
 
-    /// Enable UART interrupts
+    /// Enable UART-side interrupts after the controller line has been registered.
     pub fn enable_interrupts(&self, interrupt_id: InterruptId) -> Result<(), &'static str> {
         self.interrupt_id.write().replace(interrupt_id);
         // Enable receive data available interrupt
         self.reg_write(IER_OFFSET, IER_RDA);
-
-        // Register interrupt with interrupt manager
-        InterruptManager::with_manager(|mgr| {
-            mgr.enable_external_interrupt(interrupt_id, 0) // Enable for CPU 0
-        })
-        .map_err(|_| "Failed to enable interrupt")?;
 
         Ok(())
     }
@@ -116,8 +112,16 @@ impl Uart {
     }
 
     fn write_byte_internal(&self, c: u8) {
-        while self.reg_read(LSR_OFFSET) & LSR_THRE == 0 {}
+        while self.reg_read(LSR_OFFSET) & LSR_THRE == 0 {
+            core::hint::spin_loop();
+        }
         self.reg_write(THR_OFFSET, c);
+    }
+
+    fn wait_tx_idle(&self) {
+        while self.reg_read(LSR_OFFSET) & LSR_TEMT == 0 {
+            core::hint::spin_loop();
+        }
     }
 
     fn read_byte_internal(&self) -> u8 {
@@ -134,43 +138,15 @@ impl Uart {
     fn can_write(&self) -> bool {
         self.reg_read(LSR_OFFSET) & LSR_THRE != 0
     }
-}
 
-impl Serial for Uart {
-    /// Writes a character to the UART. (blocking)
-    ///
-    /// This function will block until the UART is ready to accept the character.
-    ///
-    /// # Arguments
-    /// * `c` - The character to write to the UART
-    ///
-    /// # Returns
-    /// A `fmt::Result` indicating success or failure.
-    ///
-    fn put(&self, c: char) -> fmt::Result {
-        self.write_byte_internal(c as u8); // Block until ready
-        Ok(())
-    }
-
-    /// Reads a character from the UART. (non-blocking)
-    ///
-    /// Returns `Some(char)` if a character is available, or `None` if not.
-    /// If interrupts are enabled, reads from the interrupt buffer.
-    /// Otherwise, falls back to polling mode.
-    ///
-    fn get(&self) -> Option<char> {
-        let mut buffer = self.rx_buffer.lock();
-        // Try to read from interrupt buffer
-        if let Some(byte) = buffer.pop_front() {
-            return Some(byte as char);
+    fn drain_rx(&self) {
+        // Drain all available RX bytes. Reading only one byte can leave the
+        // FIFO non-empty without producing a new edge, which loses interactive
+        // input such as "ls\n" after the first interrupt.
+        while self.can_read() {
+            let c = self.read_byte_internal();
+            self.emit_event(&InputEvent { data: c });
         }
-
-        None
-    }
-
-    /// Get a mutable reference to Any for downcasting
-    fn as_any_mut(&mut self) -> &mut dyn Any {
-        self
     }
 }
 
@@ -179,7 +155,7 @@ impl MemoryMappingOps for Uart {
         &self,
         _offset: usize,
         _length: usize,
-    ) -> Result<(usize, usize, bool), &'static str> {
+    ) -> Result<crate::object::capability::MemoryMappingInfo, &'static str> {
         Err("Memory mapping not supported for UART")
     }
 
@@ -195,6 +171,35 @@ impl MemoryMappingOps for Uart {
         false
     }
 }
+
+// =============================================================================
+// Emergency console registration
+// =============================================================================
+
+use core::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+
+static EMERGENCY_UART_BASE: AtomicUsize = AtomicUsize::new(0);
+
+fn emergency_putc(byte: u8) {
+    let base = EMERGENCY_UART_BASE.load(AtomicOrdering::Acquire);
+    if base == 0 {
+        return;
+    }
+    for _ in 0..EMERGENCY_TX_RETRY_LIMIT {
+        let lsr = unsafe { crate::arch::mmio::read8(base + LSR_OFFSET) };
+        if lsr & LSR_THRE != 0 {
+            unsafe { crate::arch::mmio::write8(base + THR_OFFSET, byte) };
+            return;
+        }
+        core::hint::spin_loop();
+    }
+}
+
+const EMERGENCY_TX_RETRY_LIMIT: usize = 256;
+
+// =============================================================================
+// Emergency console
+// =============================================================================
 
 static UART_CAPS: [crate::device::DeviceCapability; 1] = [crate::device::DeviceCapability::Serial];
 
@@ -231,13 +236,36 @@ impl Device for Uart {
 impl CharDevice for Uart {
     fn read_byte(&self) -> Option<u8> {
         let mut buffer = self.rx_buffer.lock();
-        // Try to read from interrupt buffer
         buffer.pop_front()
     }
 
     fn write_byte(&self, byte: u8) -> Result<(), &'static str> {
-        self.write_byte_internal(byte); // Block until ready
+        let _lock = self.tx_lock.lock();
+
+        self.write_byte_internal(byte);
+        if byte == b'\n' {
+            self.wait_tx_idle();
+        }
         Ok(())
+    }
+
+    fn write(&self, buffer: &[u8]) -> Result<usize, &'static str> {
+        if buffer.is_empty() {
+            return Ok(0);
+        }
+        let _lock = self.tx_lock.lock();
+
+        let mut paced = 0;
+        for &byte in buffer {
+            self.write_byte_internal(byte);
+            paced += 1;
+            if byte == b'\n' || paced >= TX_PACE_BYTES {
+                self.wait_tx_idle();
+                paced = 0;
+            }
+        }
+
+        Ok(buffer.len())
     }
 
     fn can_read(&self) -> bool {
@@ -253,18 +281,6 @@ impl ControlOps for Uart {
     // UART devices don't support control operations by default
     fn control(&self, _command: u32, _arg: usize) -> Result<i32, &'static str> {
         Err("Control operations not supported")
-    }
-}
-
-impl Write for Uart {
-    fn write_str(&mut self, s: &str) -> fmt::Result {
-        for c in s.chars() {
-            if c == '\n' {
-                self.put('\r')?; // Convert newline to carriage return + newline
-            }
-            self.put(c)?;
-        }
-        Ok(())
     }
 }
 
@@ -284,26 +300,25 @@ impl EventCapableDevice for Uart {
 
 impl InterruptCapableDevice for Uart {
     fn handle_interrupt(&self) -> crate::interrupt::InterruptResult<()> {
-        // let inner = self.inner.lock();
-        // Check interrupt identification register
-        let iir = self.reg_read(IIR_OFFSET);
-
-        if iir & IIR_PENDING == 0 {
-            let c = self.read_byte_internal();
-            if c != 0 {
-                // Emit received character event
-                self.emit_event(&InputEvent { data: c as u8 });
-            } else {
-                // No data available, return Ok
-                return Ok(());
-            }
-        }
-
+        let _ = self.claim_interrupt()?;
         Ok(())
     }
 
     fn interrupt_id(&self) -> Option<InterruptId> {
         self.interrupt_id.read().clone()
+    }
+
+    fn claim_interrupt(&self) -> crate::interrupt::InterruptResult<InterruptClaim> {
+        let iir = self.reg_read(IIR_OFFSET);
+        if iir & IIR_PENDING != 0 {
+            return Ok(InterruptClaim::NotMine);
+        }
+
+        let cause = iir & 0x0E;
+        if cause == IIR_RDA {
+            self.drain_rx();
+        }
+        Ok(InterruptClaim::Handled)
     }
 }
 
@@ -313,6 +328,7 @@ impl Selectable for Uart {
         _interest: crate::object::capability::selectable::ReadyInterest,
         _trapframe: &mut crate::arch::Trapframe,
         _timeout_ticks: Option<u64>,
+        _min_wait_ticks: u64,
     ) -> crate::object::capability::selectable::SelectWaitOutcome {
         crate::object::capability::selectable::SelectWaitOutcome::Ready
     }
@@ -335,7 +351,7 @@ fn register_uart() {
 
 /// Probe function for UART devices
 fn uart_probe(device_info: &PlatformDeviceInfo) -> Result<(), &'static str> {
-    crate::early_println!("Probing UART device: {}", device_info.name());
+    crate::println!("Probing UART device: {}", device_info.name());
 
     // Get memory resource (base address)
     let memory_resource = device_info
@@ -344,8 +360,16 @@ fn uart_probe(device_info: &PlatformDeviceInfo) -> Result<(), &'static str> {
         .find(|r| r.res_type == PlatformDeviceResourceType::MEM)
         .ok_or("No memory resource found for UART")?;
 
-    let base_addr = memory_resource.start;
-    crate::early_println!("UART base address: 0x{:x}", base_addr);
+    let paddr = memory_resource.start;
+    let size = memory_resource.end - memory_resource.start + 1;
+    crate::println!("UART paddr: {:#x}, size: {:#x}", paddr, size);
+
+    // Map the UART's physical MMIO region into the kernel virtual address space.
+    let base_addr = crate::vm::ioremap(paddr, size).map_err(|e| {
+        crate::println!("UART ioremap({:#x}, {:#x}) failed: {}", paddr, size, e);
+        e
+    })?;
+    crate::println!("UART base address (virt): {:#x}", base_addr);
 
     // Create UART instance
     let uart = Arc::new(Uart::new(base_addr));
@@ -359,32 +383,33 @@ fn uart_probe(device_info: &PlatformDeviceInfo) -> Result<(), &'static str> {
         .iter()
         .find(|r| r.res_type == PlatformDeviceResourceType::IRQ)
     {
-        let uart_interrupt_id = irq_resource.start as u32;
-        crate::early_println!("UART interrupt ID: {}", uart_interrupt_id);
+        let uart_interrupt_id = crate::interrupt::register_and_enable_platform_irq_device(
+            irq_resource,
+            uart.clone(),
+            crate::arch::get_cpu().get_cpuid() as u32,
+        )
+        .map_err(|_| "Failed to register UART interrupt")?;
+        crate::println!("UART interrupt ID: {}", uart_interrupt_id);
 
         // Enable UART interrupts
         if let Err(e) = uart.enable_interrupts(uart_interrupt_id) {
-            crate::early_println!("Failed to enable UART interrupts: {}", e);
+            crate::println!("Failed to enable UART interrupts: {}", e);
             // Continue without interrupts - polling mode will work
         } else {
-            crate::early_println!("UART interrupts enabled (ID: {})", uart_interrupt_id);
-
-            // Register interrupt handler
-            if let Err(e) = InterruptManager::with_manager(|mgr| {
-                mgr.register_interrupt_device(uart_interrupt_id, uart.clone())
-            }) {
-                crate::early_println!("Failed to register UART interrupt device: {}", e);
-            } else {
-                crate::early_println!("UART interrupt device registered");
-            }
+            crate::println!("UART interrupts enabled (ID: {})", uart_interrupt_id);
+            crate::println!("UART interrupt device registered");
         }
     } else {
-        crate::early_println!("No interrupt resource found for UART, using polling mode");
+        crate::println!("No interrupt resource found for UART, using polling mode");
     }
 
     // Register the UART device with the device manager
     let device_id = DeviceManager::get_manager().register_device(uart);
-    crate::early_println!("UART device registered with ID: {}", device_id);
+    crate::println!("UART device registered with ID: {}", device_id);
+
+    // Publish the UART base address for the emergency console and register it.
+    EMERGENCY_UART_BASE.store(base_addr, AtomicOrdering::Release);
+    crate::log::register_emergency_putc(emergency_putc);
 
     Ok(())
 }

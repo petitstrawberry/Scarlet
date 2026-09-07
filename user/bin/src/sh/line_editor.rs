@@ -11,19 +11,12 @@
 extern crate scarlet_std as std;
 
 use std::handle::Handle;
-use std::{print, string::String, vec::Vec};
-
-// TTY control opcodes (from kernel investigation)
-const SCTL_TTY_SET_ECHO: u32 = 0x5354_0001;
-const SCTL_TTY_SET_CANONICAL: u32 = 0x5354_0003;
-const SCTL_TTY_SET_READ_POLICY: u32 = 0x5354_0007;
-const SCTL_TTY_FLUSH_INPUT: u32 = 0x5354_0009;
-const SCTL_TTY_SET_KBMODE: u32 = 0x5354_000C;
-
-// Keyboard modes
-const KB_XLATE: usize = 0; // Translated mode (ASCII)
-const KB_MEDIUMRAW: usize = 1; // Linux keycodes (1 byte)
-const KB_RAW: usize = 2; // Raw scan codes
+use std::{
+    print,
+    string::String,
+    tty::{KeyboardMode, ReadPolicy, Terminal},
+    vec::Vec,
+};
 
 // Linux keycodes for special keys (from TTY device)
 const KEY_UP: u32 = 103;
@@ -51,8 +44,13 @@ pub struct LineEditor {
     prompt: String,
     raw_mode_enabled: bool,
     stdin_handle: Option<Handle>,
-    // Escape sequence parsing state (0=none, 1=got ESC, 2=got ESC [)
+    saved_signal_chars_enabled: Option<bool>,
+    rendered_cells: usize,
+    rendered_cursor_cell: usize,
+    // Escape sequence parsing state (0=none, 1=got ESC, 2=got ESC [, 4=got ESC O)
     esc_state: u8,
+    utf8_codepoint: u32,
+    utf8_remaining: u8,
 }
 
 impl LineEditor {
@@ -64,7 +62,12 @@ impl LineEditor {
             prompt: String::from(prompt),
             raw_mode_enabled: false,
             stdin_handle: None,
+            saved_signal_chars_enabled: None,
+            rendered_cells: 0,
+            rendered_cursor_cell: 0,
             esc_state: 0,
+            utf8_codepoint: 0,
+            utf8_remaining: 0,
         }
     }
 
@@ -77,52 +80,42 @@ impl LineEditor {
         }
 
         if let Some(ref handle) = self.stdin_handle {
-            // Set canonical mode (opposite of raw mode)
-            let canonical_value = if enabled { 0 } else { 1 };
-            if handle
-                .control(SCTL_TTY_SET_CANONICAL, canonical_value)
+            let terminal = Terminal::from_handle(handle);
+
+            if terminal.set_canonical(!enabled).is_err() {
+                return Err(());
+            }
+            if terminal.set_echo(!enabled).is_err() {
+                return Err(());
+            }
+            if enabled && self.saved_signal_chars_enabled.is_none() {
+                self.saved_signal_chars_enabled = terminal.signal_chars_enabled().ok();
+            }
+            let signal_chars_enabled = if enabled {
+                false
+            } else {
+                self.saved_signal_chars_enabled.take().unwrap_or(true)
+            };
+            if terminal
+                .set_signal_chars_enabled(signal_chars_enabled)
                 .is_err()
             {
                 return Err(());
             }
 
-            // Set echo (off in raw mode, on in canonical mode)
-            let echo_value = if enabled { 0 } else { 1 };
-            if handle.control(SCTL_TTY_SET_ECHO, echo_value).is_err() {
-                return Err(());
-            }
-
-            // Set keyboard mode
-            // 0=XLATE (ASCII passthrough), 1=MEDIUMRAW (Linux keycodes), 2=RAW (scan codes)
             // Use XLATE mode so all ASCII characters (including symbols) pass through
-            if handle.control(SCTL_TTY_SET_KBMODE, KB_XLATE).is_err() {
+            if terminal.set_keyboard_mode(KeyboardMode::Xlate).is_err() {
                 print!("DEBUG: Failed to set keyboard mode!\n");
                 return Err(());
             }
 
-            // Set read policy for raw mode
-            // Format: ((timeout_ms as u32) << 16) | (min_ready_bytes as u32)
-            if enabled {
-                // Raw mode: min=1 byte, timeout=0ms (return immediately when data available)
-                let read_policy = 1;
-                if handle
-                    .control(SCTL_TTY_SET_READ_POLICY, read_policy as usize)
-                    .is_err()
-                {
+            if terminal.set_read_policy(ReadPolicy::new(1, 0)).is_err() {
+                if enabled {
                     print!("DEBUG: Failed to set read policy!\n");
-                    return Err(());
                 }
-                // Raw mode enabled successfully
-            } else {
-                // Canonical mode: restore default policy
-                // min=1, timeout=0 is reasonable for canonical too
-                let read_policy = 1;
-                if handle
-                    .control(SCTL_TTY_SET_READ_POLICY, read_policy as usize)
-                    .is_err()
-                {
-                    return Err(());
-                }
+                return Err(());
+            }
+            if !enabled {
                 print!("DEBUG: Canonical mode restored\n");
             }
 
@@ -141,15 +134,17 @@ impl LineEditor {
 
         // Display prompt
         print!("{}", self.prompt);
+        self.rendered_cells = self.prompt_cells();
+        self.rendered_cursor_cell = self.rendered_cells;
 
         loop {
-            let c = std::io::get_char();
+            let byte = self.read_input_byte()?;
 
-            // In raw mode, we get keycodes; in canonical mode, we get ASCII
+            // In raw mode, we receive terminal input bytes.
             let action = if self.raw_mode_enabled {
-                self.handle_raw_key(c as u32)
+                self.handle_raw_byte(byte)
             } else {
-                self.handle_canonical_char(c)
+                self.handle_input_byte(byte)
             };
 
             match action {
@@ -189,15 +184,17 @@ impl LineEditor {
 
         // Display prompt
         print!("{}", self.prompt);
+        self.rendered_cells = self.prompt_cells();
+        self.rendered_cursor_cell = self.rendered_cells;
 
         loop {
-            let c = std::io::get_char();
+            let byte = self.read_input_byte()?;
 
-            // In raw mode, we get keycodes; in canonical mode, we get ASCII
+            // In raw mode, we receive terminal input bytes.
             let action = if self.raw_mode_enabled {
-                self.handle_raw_key(c as u32)
+                self.handle_raw_byte(byte)
             } else {
-                self.handle_canonical_char(c)
+                self.handle_input_byte(byte)
             };
 
             match action {
@@ -252,7 +249,7 @@ impl LineEditor {
                 // Ctrl-C
                 EditorAction::Interrupt
             }
-            c if ('\x20'..='\x7e').contains(&c) => {
+            c if !c.is_control() => {
                 // Printable character
                 self.buffer.insert(self.cursor, c);
                 self.cursor += 1;
@@ -263,12 +260,25 @@ impl LineEditor {
         }
     }
 
-    /// Handle a character in raw mode (XLATE mode - ASCII + escape sequences)
-    fn handle_raw_key(&mut self, byte: u32) -> EditorAction {
-        let ch = byte as u8 as char;
+    fn handle_input_byte(&mut self, byte: u8) -> EditorAction {
+        if let Some(c) = self.decode_input_byte(byte) {
+            self.handle_canonical_char(c)
+        } else {
+            EditorAction::Continue
+        }
+    }
+
+    /// Handle a byte in raw mode (XLATE mode - UTF-8 text + escape sequences)
+    fn handle_raw_byte(&mut self, byte: u8) -> EditorAction {
+        if self.utf8_remaining != 0 {
+            if let Some(c) = self.decode_input_byte(byte) {
+                self.insert_char(c);
+            }
+            return EditorAction::Continue;
+        }
 
         // Handle escape sequences for arrow keys
-        match (self.esc_state, byte as u8) {
+        match (self.esc_state, byte) {
             (0, 0x1B) => {
                 // ESC pressed - start escape sequence
                 self.esc_state = 1;
@@ -277,6 +287,39 @@ impl LineEditor {
             (1, b'[') => {
                 // ESC [ - CSI sequence
                 self.esc_state = 2;
+                return EditorAction::Continue;
+            }
+            (1, b'O') => {
+                // ESC O - SS3 sequence
+                self.esc_state = 4;
+                return EditorAction::Continue;
+            }
+            (4, b'A') => {
+                self.esc_state = 0;
+                return EditorAction::HistoryPrev;
+            }
+            (4, b'B') => {
+                self.esc_state = 0;
+                return EditorAction::HistoryNext;
+            }
+            (4, b'C') => {
+                self.esc_state = 0;
+                self.move_cursor_right();
+                return EditorAction::Continue;
+            }
+            (4, b'D') => {
+                self.esc_state = 0;
+                self.move_cursor_left();
+                return EditorAction::Continue;
+            }
+            (4, b'H') => {
+                self.esc_state = 0;
+                self.move_cursor_home();
+                return EditorAction::Continue;
+            }
+            (4, b'F') => {
+                self.esc_state = 0;
+                self.move_cursor_end();
                 return EditorAction::Continue;
             }
             (2, b'A') => {
@@ -313,15 +356,32 @@ impl LineEditor {
                 self.move_cursor_end();
                 return EditorAction::Continue;
             }
-            (2, b'3') => {
-                // ESC [ 3 - might be Delete (ESC [ 3 ~)
-                self.esc_state = 3;
+            (2, b'1' | b'2' | b'3' | b'4' | b'5' | b'6' | b'7' | b'8') => {
+                // ESC [ n - might be Home/End/Delete (ESC [ n ~)
+                self.esc_state = byte;
                 return EditorAction::Continue;
             }
-            (3, b'~') => {
+            (b'1', b'~') | (b'7', b'~') => {
+                // ESC [ 1 ~ / ESC [ 7 ~ - Home
+                self.esc_state = 0;
+                self.move_cursor_home();
+                return EditorAction::Continue;
+            }
+            (b'4', b'~') | (b'8', b'~') => {
+                // ESC [ 4 ~ / ESC [ 8 ~ - End
+                self.esc_state = 0;
+                self.move_cursor_end();
+                return EditorAction::Continue;
+            }
+            (b'3', b'~') => {
                 // ESC [ 3 ~ - Delete
                 self.esc_state = 0;
                 self.delete_char();
+                return EditorAction::Continue;
+            }
+            (b'2', b'~') | (b'5', b'~') | (b'6', b'~') => {
+                // ESC [ 2 ~/5~/6~ - Insert/PageUp/PageDown. Consume for now.
+                self.esc_state = 0;
                 return EditorAction::Continue;
             }
             _ if self.esc_state != 0 => {
@@ -331,6 +391,17 @@ impl LineEditor {
             }
             _ => {}
         }
+
+        if let Some(c) = self.decode_input_byte(byte) {
+            if !c.is_ascii() {
+                self.insert_char(c);
+                return EditorAction::Continue;
+            }
+        } else {
+            return EditorAction::Continue;
+        }
+
+        let ch = byte as char;
 
         // Handle regular ASCII characters
         match ch {
@@ -357,26 +428,61 @@ impl LineEditor {
         }
     }
 
+    fn read_input_byte(&self) -> Result<u8, ()> {
+        let mut buf = [0u8; 1];
+        loop {
+            match std::io::stdin().read(&mut buf) {
+                Ok(bytes_read) if bytes_read > 0 => return Ok(buf[0]),
+                Ok(_) => return Err(()),
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => return Err(()),
+            }
+        }
+    }
+
+    fn decode_input_byte(&mut self, byte: u8) -> Option<char> {
+        if byte < 0x80 {
+            self.utf8_codepoint = 0;
+            self.utf8_remaining = 0;
+            return Some(byte as char);
+        }
+
+        if self.utf8_remaining == 0 {
+            if (0xC2..=0xDF).contains(&byte) {
+                self.utf8_codepoint = (byte & 0x1F) as u32;
+                self.utf8_remaining = 1;
+            } else if (0xE0..=0xEF).contains(&byte) {
+                self.utf8_codepoint = (byte & 0x0F) as u32;
+                self.utf8_remaining = 2;
+            } else if (0xF0..=0xF4).contains(&byte) {
+                self.utf8_codepoint = (byte & 0x07) as u32;
+                self.utf8_remaining = 3;
+            }
+            return None;
+        }
+
+        if (byte & 0xC0) != 0x80 {
+            self.utf8_codepoint = 0;
+            self.utf8_remaining = 0;
+            return None;
+        }
+
+        self.utf8_codepoint = (self.utf8_codepoint << 6) | (byte & 0x3F) as u32;
+        self.utf8_remaining -= 1;
+        if self.utf8_remaining == 0 {
+            let codepoint = self.utf8_codepoint;
+            self.utf8_codepoint = 0;
+            char::from_u32(codepoint)
+        } else {
+            None
+        }
+    }
+
     /// Insert a character at the cursor position
     fn insert_char(&mut self, c: char) {
         self.buffer.insert(self.cursor, c);
-
-        // In raw mode, manually output the character and everything after it
-        // Print from current cursor position to end
-        for i in self.cursor..self.buffer.len() {
-            print!("{}", self.buffer[i]);
-        }
-
-        // If we inserted in the middle, move cursor back to correct position
-        let chars_after = self.buffer.len() - self.cursor - 1;
-        if chars_after > 0 {
-            // Move cursor left by the number of characters we printed after insertion
-            for _ in 0..chars_after {
-                print!("\x1b[D");
-            }
-        }
-
         self.cursor += 1;
+        self.redraw_line();
     }
 
     /// Delete character before cursor (backspace)
@@ -384,21 +490,7 @@ impl LineEditor {
         if self.cursor > 0 {
             self.buffer.remove(self.cursor - 1);
             self.cursor -= 1;
-
-            // Move cursor left
-            print!("\x1b[D");
-
-            // Print remaining characters and clear to end
-            for i in self.cursor..self.buffer.len() {
-                print!("{}", self.buffer[i]);
-            }
-            print!(" \x1b[K"); // Space to clear the last char, then clear to EOL
-
-            // Move cursor back to correct position
-            let chars_after = self.buffer.len() - self.cursor;
-            for _ in 0..=chars_after {
-                print!("\x1b[D");
-            }
+            self.redraw_line();
         }
     }
 
@@ -406,18 +498,7 @@ impl LineEditor {
     fn delete_char(&mut self) {
         if self.cursor < self.buffer.len() {
             self.buffer.remove(self.cursor);
-
-            // Print remaining characters and clear to end
-            for i in self.cursor..self.buffer.len() {
-                print!("{}", self.buffer[i]);
-            }
-            print!(" \x1b[K"); // Space to clear the last char, then clear to EOL
-
-            // Move cursor back to correct position
-            let chars_after = self.buffer.len() - self.cursor;
-            for _ in 0..=chars_after {
-                print!("\x1b[D");
-            }
+            self.redraw_line();
         }
     }
 
@@ -425,8 +506,7 @@ impl LineEditor {
     fn move_cursor_left(&mut self) {
         if self.cursor > 0 {
             self.cursor -= 1;
-            // ANSI escape: move cursor left
-            print!("\x1b[D");
+            self.redraw_line();
         }
     }
 
@@ -434,24 +514,23 @@ impl LineEditor {
     fn move_cursor_right(&mut self) {
         if self.cursor < self.buffer.len() {
             self.cursor += 1;
-            // ANSI escape: move cursor right
-            print!("\x1b[C");
+            self.redraw_line();
         }
     }
 
     /// Move cursor to beginning of line
     fn move_cursor_home(&mut self) {
-        while self.cursor > 0 {
-            self.cursor -= 1;
-            print!("\x1b[D");
+        if self.cursor > 0 {
+            self.cursor = 0;
+            self.redraw_line();
         }
     }
 
     /// Move cursor to end of line
     fn move_cursor_end(&mut self) {
-        while self.cursor < self.buffer.len() {
-            self.cursor += 1;
-            print!("\x1b[C");
+        if self.cursor < self.buffer.len() {
+            self.cursor = self.buffer.len();
+            self.redraw_line();
         }
     }
 
@@ -473,22 +552,68 @@ impl LineEditor {
     }
 
     /// Redraw the entire line
-    fn redraw_line(&self) {
-        // Move to beginning of line
+    fn redraw_line(&mut self) {
+        let columns = self.terminal_columns();
+        let previous_rows = rendered_rows(self.rendered_cells, columns);
+        let current_row = self.rendered_cursor_cell / columns;
+        if current_row > 0 {
+            print!("\x1b[{}A", current_row);
+        }
+        print!("\r");
+        for row in 0..previous_rows {
+            print!("\x1b[2K");
+            if row + 1 < previous_rows {
+                print!("\x1b[B\r");
+            }
+        }
+        if previous_rows > 1 {
+            print!("\x1b[{}A", previous_rows - 1);
+        }
         print!("\r");
 
-        // Print prompt and buffer
         print!("{}", self.prompt);
         for c in &self.buffer {
             print!("{}", c);
         }
 
-        // Clear to end of line
-        print!("\x1b[K");
+        let total_cells = self.prompt_cells() + self.buffer_cells();
+        let current_rows = rendered_rows(total_cells, columns);
+        if current_rows > 1 {
+            print!("\x1b[{}A", current_rows - 1);
+        }
+        print!("\r");
+        let cursor_cell = self.prompt_cells() + self.buffer_prefix_cells(self.cursor);
+        let cursor_row = cursor_cell / columns;
+        let cursor_col = cursor_cell % columns;
+        if cursor_row > 0 {
+            print!("\x1b[{}B", cursor_row);
+        }
+        if cursor_col > 0 {
+            print!("\x1b[{}C", cursor_col);
+        }
+        self.rendered_cells = total_cells;
+        self.rendered_cursor_cell = cursor_cell;
+    }
 
-        // Move cursor to correct position
-        let cursor_col = self.prompt.len() + self.cursor;
-        print!("\r\x1b[{}G", cursor_col + 1);
+    fn prompt_cells(&self) -> usize {
+        display_cells(&self.prompt)
+    }
+
+    fn buffer_cells(&self) -> usize {
+        self.buffer.iter().copied().map(char_cells).sum()
+    }
+
+    fn buffer_prefix_cells(&self, end: usize) -> usize {
+        self.buffer.iter().take(end).copied().map(char_cells).sum()
+    }
+
+    fn terminal_columns(&self) -> usize {
+        self.stdin_handle
+            .as_ref()
+            .and_then(|handle| Terminal::from_handle(handle).winsize().ok())
+            .map(|size| size.columns as usize)
+            .filter(|columns| *columns > 0)
+            .unwrap_or(80)
     }
 
     /// Handle tab completion
@@ -511,21 +636,17 @@ impl LineEditor {
 
     /// Get the word at the cursor position
     fn get_word_at_cursor(&self) -> (usize, String) {
-        let line: String = self.buffer.iter().collect();
-        let bytes = line.as_bytes();
-
-        // Find word boundaries
         let mut start = self.cursor;
-        while start > 0 && bytes[start - 1] != b' ' && bytes[start - 1] != b'\t' {
+        while start > 0 && !self.buffer[start - 1].is_whitespace() {
             start -= 1;
         }
 
         let mut end = self.cursor;
-        while end < bytes.len() && bytes[end] != b' ' && bytes[end] != b'\t' {
+        while end < self.buffer.len() && !self.buffer[end].is_whitespace() {
             end += 1;
         }
 
-        let word = String::from(&line[start..end]);
+        let word = self.buffer[start..end].iter().collect();
         (start, word)
     }
 
@@ -550,7 +671,7 @@ impl LineEditor {
         matches.sort();
         matches.dedup();
 
-        self.apply_completion(matches, prefix.len(), word_start);
+        self.apply_completion(matches, prefix.chars().count(), word_start);
     }
 
     /// Complete filename from current directory or specified path
@@ -610,7 +731,7 @@ impl LineEditor {
 
         matches.sort();
 
-        self.apply_completion(matches, prefix.len(), word_start);
+        self.apply_completion(matches, prefix.chars().count(), word_start);
     }
 
     /// Apply completion based on matches
@@ -622,8 +743,6 @@ impl LineEditor {
 
         if matches.len() == 1 {
             // Single match - complete it
-            let _completion = &matches[0][prefix_len..];
-
             // Remove old word and insert new completion
             for _ in 0..prefix_len {
                 if word_start < self.buffer.len() {
@@ -656,10 +775,10 @@ impl LineEditor {
 
             // Find common prefix
             let common_prefix = self.find_common_prefix(&matches);
-            if common_prefix.len() > prefix_len {
+            let common_prefix_len = common_prefix.chars().count();
+            if common_prefix_len > prefix_len {
                 // Complete to common prefix
-                let completion = &common_prefix[prefix_len..];
-                for ch in completion.chars() {
+                for ch in common_prefix.chars().skip(prefix_len) {
                     self.buffer.insert(self.cursor, ch);
                     self.cursor += 1;
                 }
@@ -670,6 +789,8 @@ impl LineEditor {
             for c in &self.buffer {
                 print!("{}", c);
             }
+            self.rendered_cells = self.prompt_cells() + self.buffer_cells();
+            self.rendered_cursor_cell = self.rendered_cells;
         }
     }
 
@@ -708,6 +829,36 @@ impl LineEditor {
     /// Get current buffer content
     pub fn buffer_content(&self) -> String {
         self.buffer.iter().collect()
+    }
+}
+
+fn rendered_rows(cells: usize, columns: usize) -> usize {
+    let columns = columns.max(1);
+    cells / columns + 1
+}
+
+fn display_cells(text: &str) -> usize {
+    text.chars().map(char_cells).sum()
+}
+
+fn char_cells(ch: char) -> usize {
+    let code = ch as u32;
+    if matches!(
+        code,
+        0x1100..=0x115f
+            | 0x2329..=0x232a
+            | 0x2e80..=0xa4cf
+            | 0xac00..=0xd7a3
+            | 0xf900..=0xfaff
+            | 0xfe10..=0xfe19
+            | 0xfe30..=0xfe6f
+            | 0xff00..=0xff60
+            | 0xffe0..=0xffe6
+            | 0x20000..=0x3fffd
+    ) {
+        2
+    } else {
+        1
     }
 }
 

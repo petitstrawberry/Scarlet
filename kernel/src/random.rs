@@ -21,18 +21,31 @@
 //! RandomManager::get_random_bytes(&mut buffer);
 //! ```
 
+use crate::sync::{IrqSpinLock, Once};
 use alloc::collections::VecDeque;
+use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::any::Any;
-use spin::{Mutex, Once};
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::device::char::CharDevice;
+use crate::device::manager::DeviceManager;
 use crate::device::{Device, DeviceType};
+use crate::driver_initcall;
+use crate::library::std::usercopy::copy_to_user;
 use crate::object::capability::{ControlOps, MemoryMappingOps, Selectable};
+use crate::task::mytask;
 
 /// Size of the internal random pool buffer
 const RANDOM_POOL_SIZE: usize = 4096;
+const RANDOM_SYSCALL_CHUNK_SIZE: usize = 256;
+const FALLBACK_RANDOM_SEED: u64 = 0x4f1b_bcdc_b7a4_3413;
+// Kept in sync with scarlet_abi::GET_RANDOM_FLAG_REQUIRE_ENTROPY. The kernel
+// intentionally does not depend on user-space ABI crates.
+const GET_RANDOM_FLAG_REQUIRE_ENTROPY: usize = 1 << 0;
+
+static FALLBACK_RANDOM_STATE: AtomicU64 = AtomicU64::new(0);
 
 /// Trait for entropy sources that can provide random data
 pub trait EntropySource: Send + Sync {
@@ -60,17 +73,17 @@ pub trait EntropySource: Send + Sync {
 /// random numbers to the rest of the kernel.
 pub struct RandomManager {
     /// Registered entropy sources
-    sources: Mutex<Vec<Arc<dyn EntropySource>>>,
+    sources: IrqSpinLock<Vec<Arc<dyn EntropySource>>>,
     /// Internal random pool buffer
-    pool: Mutex<VecDeque<u8>>,
+    pool: IrqSpinLock<VecDeque<u8>>,
 }
 
 impl RandomManager {
     /// Create a new RandomManager
     fn new() -> Self {
         Self {
-            sources: Mutex::new(Vec::new()),
-            pool: Mutex::new(VecDeque::with_capacity(RANDOM_POOL_SIZE)),
+            sources: IrqSpinLock::new(Vec::new()),
+            pool: IrqSpinLock::new(VecDeque::with_capacity(RANDOM_POOL_SIZE)),
         }
     }
 
@@ -88,13 +101,16 @@ impl RandomManager {
     pub fn register_entropy_source(source: Arc<dyn EntropySource>) {
         let manager = Self::instance();
         let mut sources = manager.sources.lock();
-        crate::early_println!("[Random] Registering entropy source: {}", source.name());
+        crate::println!("[Random] Registering entropy source: {}", source.name());
         sources.push(source);
     }
 
     /// Fill the internal pool with entropy from available sources
     fn fill_pool(&self) -> Result<usize, &'static str> {
-        let sources = self.sources.lock();
+        // Entropy reads may sleep or perform slow device I/O. Clone the Arc
+        // registry under the short IRQ-safe lock, then release it before
+        // calling providers.
+        let sources = self.sources.lock().clone();
 
         if sources.is_empty() {
             return Err("No entropy sources available");
@@ -116,7 +132,7 @@ impl RandomManager {
                 let bytes_to_add = bytes_read.min(available_space);
 
                 if bytes_to_add < bytes_read {
-                    crate::early_println!(
+                    crate::println!(
                         "[Random] Pool full, discarding {} entropy bytes",
                         bytes_read - bytes_to_add
                     );
@@ -190,12 +206,125 @@ impl RandomManager {
     }
 }
 
+fn next_fallback_random_u64() -> u64 {
+    loop {
+        let state = FALLBACK_RANDOM_STATE.load(Ordering::Relaxed);
+
+        // Lazily transition the atomic out of its initial 0. The xorshift
+        // advance below uses CAS(current, next), which can never succeed while
+        // the atomic is still 0, so we must install a seed first. xorshift64 is
+        // a bijection with 0 as its sole fixed point, so once nonzero the state
+        // can never become 0 again.
+        let current = if state == 0 {
+            let seed = crate::time::current_time()
+                ^ crate::timer::get_time_ns().rotate_left(17)
+                ^ FALLBACK_RANDOM_SEED;
+            let seed = if seed == 0 {
+                FALLBACK_RANDOM_SEED
+            } else {
+                seed
+            };
+            match FALLBACK_RANDOM_STATE.compare_exchange(
+                0,
+                seed,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => seed,
+                // Lost the race to another CPU; adopt the value they installed.
+                Err(actual) => actual,
+            }
+        } else {
+            state
+        };
+
+        let mut next = current;
+        next ^= next << 13;
+        next ^= next >> 7;
+        next ^= next << 17;
+
+        if FALLBACK_RANDOM_STATE
+            .compare_exchange(current, next, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
+            return next;
+        }
+    }
+}
+
+fn fill_fallback_random(buffer: &mut [u8]) {
+    let mut offset = 0usize;
+    while offset < buffer.len() {
+        let bytes = next_fallback_random_u64().to_le_bytes();
+        let count = core::cmp::min(bytes.len(), buffer.len() - offset);
+        buffer[offset..offset + count].copy_from_slice(&bytes[..count]);
+        offset += count;
+    }
+}
+
+/// Fill a user-space buffer with random bytes.
+///
+/// # Arguments
+///
+/// * `trapframe.arg(0)` - User-space buffer pointer.
+/// * `trapframe.arg(1)` - Number of bytes to fill.
+/// * `trapframe.arg(2)` - Zero, or `GET_RANDOM_FLAG_REQUIRE_ENTROPY` to fail
+///   instead of using the non-cryptographic emergency fallback.
+///
+/// # Returns
+///
+/// Number of bytes written, or `usize::MAX` on error.
+pub fn sys_get_random(trapframe: &mut crate::arch::Trapframe) -> usize {
+    let task = match mytask() {
+        Some(task) => task,
+        None => return usize::MAX,
+    };
+
+    let buffer_ptr = trapframe.get_arg(0);
+    let buffer_len = trapframe.get_arg(1);
+    let flags = trapframe.get_arg(2);
+
+    trapframe.increment_pc_next(&task);
+
+    if flags & !GET_RANDOM_FLAG_REQUIRE_ENTROPY != 0 {
+        return usize::MAX;
+    }
+    if buffer_len == 0 {
+        return 0;
+    }
+
+    let mut total_written = 0usize;
+    let mut chunk = [0u8; RANDOM_SYSCALL_CHUNK_SIZE];
+    while total_written < buffer_len {
+        let chunk_len = core::cmp::min(chunk.len(), buffer_len - total_written);
+        let bytes_read = RandomManager::get_random_bytes(&mut chunk[..chunk_len]);
+        if bytes_read < chunk_len {
+            if flags & GET_RANDOM_FLAG_REQUIRE_ENTROPY != 0 {
+                return usize::MAX;
+            }
+            fill_fallback_random(&mut chunk[bytes_read..chunk_len]);
+        }
+
+        if copy_to_user(&task, buffer_ptr + total_written, &chunk[..chunk_len]).is_err() {
+            return usize::MAX;
+        }
+        total_written += chunk_len;
+    }
+
+    total_written
+}
+
 /// Character device interface for /dev/random
 ///
 /// This provides the /dev/random device that userspace can read from.
 pub struct RandomCharDevice;
 
 impl RandomCharDevice {
+    /// Create a random character device.
+    ///
+    /// # Returns
+    ///
+    /// A new random character device instance.
     pub fn new() -> Self {
         Self
     }
@@ -225,18 +354,29 @@ impl Device for RandomCharDevice {
 
 impl CharDevice for RandomCharDevice {
     fn read_byte(&self) -> Option<u8> {
-        RandomManager::get_random_byte()
+        let mut buffer = [0u8; 1];
+        self.read(&mut buffer);
+        Some(buffer[0])
+    }
+
+    fn read(&self, buffer: &mut [u8]) -> usize {
+        let bytes_read = RandomManager::get_random_bytes(buffer);
+        if bytes_read < buffer.len() {
+            fill_fallback_random(&mut buffer[bytes_read..]);
+        }
+        buffer.len()
     }
 
     fn write_byte(&self, _byte: u8) -> Result<(), &'static str> {
         Err("Write not supported for random device")
     }
 
+    fn write(&self, _buffer: &[u8]) -> Result<usize, &'static str> {
+        Err("Write not supported for random device")
+    }
+
     fn can_read(&self) -> bool {
-        // Check if we have any entropy sources available
-        let manager = RandomManager::instance();
-        let sources = manager.sources.lock();
-        !sources.is_empty() && sources.iter().any(|s| s.is_available())
+        true
     }
 
     fn can_write(&self) -> bool {
@@ -255,7 +395,7 @@ impl MemoryMappingOps for RandomCharDevice {
         &self,
         _offset: usize,
         _length: usize,
-    ) -> Result<(usize, usize, bool), &'static str> {
+    ) -> Result<crate::object::capability::MemoryMappingInfo, &'static str> {
         Err("Memory mapping not supported for random device")
     }
 }
@@ -266,7 +406,17 @@ impl Selectable for RandomCharDevice {
         _interest: crate::object::capability::selectable::ReadyInterest,
         _trapframe: &mut crate::arch::Trapframe,
         _timeout_ticks: Option<u64>,
+        _min_wait_ticks: u64,
     ) -> crate::object::capability::selectable::SelectWaitOutcome {
         crate::object::capability::selectable::SelectWaitOutcome::Ready
     }
 }
+
+fn register_random_devices() {
+    let dm = DeviceManager::get_manager();
+    let random_char_dev: Arc<dyn Device> = Arc::new(RandomCharDevice::new());
+    dm.register_device_with_name(String::from("random"), random_char_dev.clone());
+    dm.register_device_with_name(String::from("urandom"), random_char_dev);
+}
+
+driver_initcall!(register_random_devices);

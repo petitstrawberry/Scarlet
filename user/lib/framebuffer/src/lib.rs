@@ -3,20 +3,59 @@
 //! This library provides user-space APIs for framebuffer control operations,
 //! including device access, drawing primitives, and display management.
 
-#![no_std]
+#![cfg_attr(not(feature = "std"), no_std)]
 
 extern crate alloc;
+#[cfg(not(feature = "std"))]
 extern crate scarlet_std as std;
 
-use alloc::vec;
+use alloc::{format, vec};
+#[cfg(feature = "std")]
+use scarlet_os::handle::capability::SeekFrom;
+#[cfg(feature = "std")]
+use scarlet_os::handle::capability::memory_mapping::{flags, munmap, prot};
+#[cfg(feature = "std")]
+use scarlet_os::handle::{Handle, HandleError, HandleResult};
+#[cfg(not(feature = "std"))]
 use std::{
     fs::File,
     handle::{
+        Handle, HandleError, HandleResult,
         capability::memory_mapping::{flags, munmap, prot},
-        HandleError, HandleResult,
     },
     io::SeekFrom,
 };
+#[cfg(feature = "std")]
+pub struct File {
+    handle: Handle,
+}
+
+#[cfg(feature = "std")]
+impl File {
+    fn open(path: &str) -> Result<Self, HandleError> {
+        Handle::open(path, 0).map(|handle| Self { handle })
+    }
+
+    fn as_handle(&self) -> &Handle {
+        &self.handle
+    }
+
+    fn seek(&self, position: SeekFrom) -> Result<u64, HandleError> {
+        self.handle
+            .as_file()
+            .map_err(|_| HandleError::Unsupported)?
+            .seek(position)
+            .map_err(|_| HandleError::SystemError(-1))
+    }
+
+    fn write(&self, buffer: &[u8]) -> Result<usize, HandleError> {
+        self.handle
+            .as_stream()
+            .map_err(|_| HandleError::Unsupported)?
+            .write(buffer)
+            .map_err(|_| HandleError::SystemError(-1))
+    }
+}
 
 /// Linux framebuffer ioctl command constants
 /// These provide compatibility with Linux framebuffer applications
@@ -30,6 +69,148 @@ pub mod commands {
     /// Flush framebuffer to display
     pub const FBIO_FLUSH: u32 = 0x4620;
 }
+
+/// Scarlet display surface control command constants.
+pub mod display_commands {
+    /// Get display surface information.
+    pub const DISPLAY_GET_INFO: u32 = 0x5000;
+    /// Present the whole display surface.
+    pub const DISPLAY_PRESENT: u32 = 0x5001;
+    /// Present a display surface region.
+    pub const DISPLAY_PRESENT_REGION: u32 = 0x5002;
+    /// Get direct scanout swapchain information.
+    pub const DISPLAY_GET_SWAPCHAIN: u32 = 0x5003;
+    /// Present one direct scanout buffer.
+    pub const DISPLAY_PRESENT_BUFFER: u32 = 0x5004;
+    /// Present one GPU image capability through this display device.
+    pub const DISPLAY_PRESENT_IMAGE: u32 = 0x5005;
+    /// Get the display backlight level as an integer percentage in `0..=100`.
+    ///
+    /// The command returns the percentage directly as the successful control
+    /// result and ignores its argument.
+    pub const DISPLAY_GET_BRIGHTNESS: u32 = 0x5006;
+    /// Set the display backlight level from an integer percentage in `0..=100`.
+    ///
+    /// The requested percentage is passed as the scalar control argument.
+    pub const DISPLAY_SET_BRIGHTNESS: u32 = 0x5007;
+}
+
+/// 32-bit RGBA pixel layout.
+pub const DISPLAY_PIXEL_FORMAT_RGBA8888: u32 = 1;
+/// 32-bit BGRA pixel layout.
+pub const DISPLAY_PIXEL_FORMAT_BGRA8888: u32 = 2;
+/// 32-bit XRGB pixel layout.
+pub const DISPLAY_PIXEL_FORMAT_XRGB8888: u32 = 3;
+/// 32-bit XBGR pixel layout.
+pub const DISPLAY_PIXEL_FORMAT_XBGR8888: u32 = 4;
+/// 32-bit XRGB2101010 pixel layout.
+pub const DISPLAY_PIXEL_FORMAT_XRGB2101010: u32 = 5;
+/// 24-bit RGB pixel layout.
+pub const DISPLAY_PIXEL_FORMAT_RGB888: u32 = 6;
+/// 16-bit RGB565 pixel layout.
+pub const DISPLAY_PIXEL_FORMAT_RGB565: u32 = 7;
+/// 16-bit ARGB1555 pixel layout.
+pub const DISPLAY_PIXEL_FORMAT_ARGB1555: u32 = 8;
+/// 16-bit XRGB1555 pixel layout.
+pub const DISPLAY_PIXEL_FORMAT_XRGB1555: u32 = 9;
+
+/// Maximum number of damage rectangles carried by one present request.
+pub const DISPLAY_MAX_DAMAGE_RECTS: usize = 32;
+
+/// Display surface information.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DisplayInfo {
+    /// Width in pixels.
+    pub width: u32,
+    /// Height in pixels.
+    pub height: u32,
+    /// Bytes per row.
+    pub stride: u32,
+    /// Pixel format, one of `DISPLAY_PIXEL_FORMAT_*`.
+    pub format: u32,
+    /// Page-aligned size of the mappable display backing store.
+    pub buffer_len: u32,
+    /// Opaque identifier for the current mappable backing store.
+    ///
+    /// This value changes when the display surface's mapped backing changes,
+    /// even if `buffer_len` remains the same.
+    pub backing_id: usize,
+}
+
+/// Region argument for DISPLAY_PRESENT_REGION.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DisplayPresentRegion {
+    /// Left edge in pixels.
+    pub x: u32,
+    /// Top edge in pixels.
+    pub y: u32,
+    /// Width in pixels.
+    pub width: u32,
+    /// Height in pixels.
+    pub height: u32,
+}
+
+/// Direct scanout swapchain information.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DisplaySwapchainInfo {
+    /// Number of scanout buffers.
+    pub buffer_count: u32,
+    /// Bytes in each mappable buffer.
+    pub buffer_len: u32,
+    /// Scanout buffer currently displayed by the hardware.
+    pub front_buffer: u32,
+    /// Reserved for ABI alignment and future flags.
+    pub reserved: u32,
+    /// mmap offset of the first direct scanout buffer.
+    pub first_buffer_offset: usize,
+}
+
+/// Argument for `DISPLAY_PRESENT_BUFFER`.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DisplayPresentBuffer {
+    /// Direct scanout buffer index.
+    pub index: u32,
+    /// Reserved for future fence flags.
+    pub flags: u32,
+    /// Number of valid entries in `damage`.
+    ///
+    /// Zero means the complete buffer was modified.
+    pub damage_count: u32,
+    /// Reserved for ABI alignment.
+    pub reserved: u32,
+    /// User pointer to `damage_count` [`DisplayPresentRegion`] entries.
+    pub damage_ptr: usize,
+}
+
+/// Argument for `DISPLAY_PRESENT_IMAGE`.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DisplayPresentImage {
+    /// GPU image capability handle owned by the current task.
+    pub image_handle: u32,
+    /// `DISPLAY_PRESENT_IMAGE_FLAG_*` values.
+    pub flags: u32,
+    /// Left edge in pixels when not presenting the full image.
+    pub x: u32,
+    /// Top edge in pixels when not presenting the full image.
+    pub y: u32,
+    /// Region width in pixels when not presenting the full image.
+    pub width: u32,
+    /// Region height in pixels when not presenting the full image.
+    pub height: u32,
+}
+
+/// Present the full GPU image and require zero region fields.
+pub const DISPLAY_PRESENT_IMAGE_FLAG_FULL_FRAME: u32 = 1 << 0;
+/// The producer will not rewrite this image until another image is presented.
+pub const DISPLAY_PRESENT_IMAGE_FLAG_SWAPCHAIN_BUFFER: u32 = 1 << 1;
+/// All currently defined GPU image presentation flags.
+pub const DISPLAY_PRESENT_IMAGE_FLAGS_VALID: u32 =
+    DISPLAY_PRESENT_IMAGE_FLAG_FULL_FRAME | DISPLAY_PRESENT_IMAGE_FLAG_SWAPCHAIN_BUFFER;
 
 /// Color bit field information
 #[repr(C)]
@@ -203,9 +384,1204 @@ pub struct Framebuffer {
     file: File,
     /// Memory-mapped framebuffer buffer (address, size)
     mapped_buffer: Option<(usize, usize)>,
+    mapped_physical_addr: Option<usize>,
+}
+
+/// Modern display surface wrapper.
+///
+/// This type opens `/dev/displayX` scanout endpoints. The current
+/// implementation is CPU-composited and mappable, but presentation is explicit
+/// and region-based instead of relying on legacy `/dev/fbX` semantics.
+pub struct DisplaySurface {
+    file: File,
+    mapped_buffer: Option<(usize, usize)>,
+    mapped_backing_id: usize,
+    scratch_line: alloc::vec::Vec<u8>,
+    cached_info: Option<DisplayInfo>,
+    swapchain_buffers: alloc::vec::Vec<(usize, usize)>,
+    swapchain_presented_at: alloc::vec::Vec<Option<u64>>,
+    swapchain_pending_damage: alloc::vec::Vec<alloc::vec::Vec<DisplayPresentRegion>>,
+    present_sequence: u64,
+    draw_buffer: usize,
+}
+
+/// Lightweight display control wrapper.
+///
+/// Unlike [`DisplaySurface`], this type only keeps the display handle and does
+/// not map scanout memory or initialize a swapchain. It is intended for
+/// display controls such as backlight changes from settings and hotkey
+/// handlers.
+pub struct DisplayControl {
+    file: File,
+}
+
+fn brightness_percent_from_control(value: i32) -> HandleResult<u8> {
+    if !(0..=100).contains(&value) {
+        return Err(HandleError::InvalidParameter);
+    }
+    Ok(value as u8)
+}
+
+fn validate_brightness_percent(percent: u8) -> HandleResult<()> {
+    if percent > 100 {
+        return Err(HandleError::InvalidParameter);
+    }
+    Ok(())
+}
+
+fn get_brightness_percent(file: &File) -> HandleResult<u8> {
+    // SAFETY: This fixed brightness control takes only a scalar value and borrows a live display handle.
+    let value = unsafe {
+        file.as_handle()
+            .control(display_commands::DISPLAY_GET_BRIGHTNESS, 0)
+    }?;
+    brightness_percent_from_control(value)
+}
+
+fn set_brightness_percent(file: &File, percent: u8) -> HandleResult<()> {
+    validate_brightness_percent(percent)?;
+    // SAFETY: This fixed brightness control takes only a scalar value and borrows a live display handle.
+    unsafe {
+        file.as_handle()
+            .control(display_commands::DISPLAY_SET_BRIGHTNESS, percent as usize)
+    }?;
+    Ok(())
+}
+
+impl DisplayControl {
+    const PRIMARY_DISPLAY_SCAN_LIMIT: usize = 16;
+
+    /// Open a display control endpoint by path without mapping its scanout.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - Display character-device path, typically `/dev/display0`.
+    ///
+    /// # Returns
+    ///
+    /// A lightweight display control wrapper or a handle error.
+    pub fn open(path: &str) -> HandleResult<Self> {
+        Ok(Self {
+            file: File::open(path).map_err(|_| HandleError::NotFound)?,
+        })
+    }
+
+    /// Open the first display endpoint that supports brightness control.
+    ///
+    /// The probe issues only `DISPLAY_GET_BRIGHTNESS`; it never maps scanout
+    /// memory. This keeps settings and other control-only clients from
+    /// consuming framebuffer mappings merely to change the backlight.
+    ///
+    /// # Returns
+    ///
+    /// The first compatible display control wrapper or [`HandleError::NotFound`]
+    /// when no display endpoint accepts the brightness query.
+    pub fn open_primary() -> HandleResult<Self> {
+        for index in 0..Self::PRIMARY_DISPLAY_SCAN_LIMIT {
+            let path = format!("/dev/display{}", index);
+            let Ok(file) = File::open(&path) else {
+                continue;
+            };
+            // SAFETY: This fixed brightness control takes only a scalar value and borrows a live display handle.
+            if unsafe {
+                file.as_handle()
+                    .control(display_commands::DISPLAY_GET_BRIGHTNESS, 0)
+            }
+            .is_ok()
+            {
+                return Ok(Self { file });
+            }
+        }
+        Err(HandleError::NotFound)
+    }
+
+    /// Get the current display backlight level.
+    ///
+    /// # Returns
+    ///
+    /// The backlight level as a percentage in `0..=100`, or a handle error.
+    /// A malformed kernel response outside that range is reported as
+    /// [`HandleError::InvalidParameter`].
+    pub fn get_brightness_percent(&self) -> HandleResult<u8> {
+        get_brightness_percent(&self.file)
+    }
+
+    /// Set the display backlight level.
+    ///
+    /// # Arguments
+    ///
+    /// * `percent` - Requested backlight level in `0..=100`.
+    ///
+    /// # Returns
+    ///
+    /// Success or a handle error. Values above `100` are rejected locally as
+    /// [`HandleError::InvalidParameter`].
+    pub fn set_brightness_percent(&self, percent: u8) -> HandleResult<()> {
+        set_brightness_percent(&self.file, percent)
+    }
+}
+
+impl DisplaySurface {
+    const PRIMARY_DISPLAY_SCAN_LIMIT: usize = 16;
+
+    fn scale_component_to_field(value: u8, field: FbBitfield) -> u32 {
+        if field.length == 0 {
+            return 0;
+        }
+
+        let max = (1u32 << field.length) - 1;
+        let scaled = ((value as u32) * max + 127) / 255;
+
+        if field.msb_right == 0 {
+            scaled
+        } else {
+            scaled.reverse_bits() >> (u32::BITS - field.length)
+        }
+    }
+
+    fn pack_bgra_pixel(color: [u8; 4], var_info: &FbVarScreenInfo) -> u32 {
+        (Self::scale_component_to_field(color[2], var_info.red) << var_info.red.offset)
+            | (Self::scale_component_to_field(color[1], var_info.green) << var_info.green.offset)
+            | (Self::scale_component_to_field(color[0], var_info.blue) << var_info.blue.offset)
+            | (Self::scale_component_to_field(color[3], var_info.transp) << var_info.transp.offset)
+    }
+
+    fn write_packed_pixel_bytes(dst: &mut [u8], color: [u8; 4], var_info: &FbVarScreenInfo) {
+        let bytes_per_pixel = Self::display_bytes_per_pixel_from_var(var_info);
+        let pixel = Self::pack_bgra_pixel(color, var_info).to_le_bytes();
+        dst[..bytes_per_pixel].copy_from_slice(&pixel[..bytes_per_pixel]);
+    }
+
+    fn display_bytes_per_pixel_from_var(var_info: &FbVarScreenInfo) -> usize {
+        (var_info.bits_per_pixel as usize).div_ceil(8)
+    }
+
+    fn expand_8_to_10(value: u8) -> u32 {
+        let value = value as u32;
+        (value << 2) | (value >> 6)
+    }
+
+    fn convert_bgra_to_xrgb2101010_line(src: &[u8], dst: &mut [u8], width: usize) {
+        for pixel in 0..width {
+            let src_off = pixel * 4;
+            let b10 = Self::expand_8_to_10(src[src_off]);
+            let g10 = Self::expand_8_to_10(src[src_off + 1]);
+            let r10 = Self::expand_8_to_10(src[src_off + 2]);
+            let packed = (r10 << 20) | (g10 << 10) | b10;
+            dst[pixel * 4..pixel * 4 + 4].copy_from_slice(&packed.to_le_bytes());
+        }
+    }
+
+    /// Open the primary display surface.
+    ///
+    /// # Returns
+    ///
+    /// Display surface instance or HandleError on failure.
+    pub fn open_primary() -> HandleResult<Self> {
+        let mut fallback = None;
+        for index in 0..Self::PRIMARY_DISPLAY_SCAN_LIMIT {
+            let path = format!("/dev/display{}", index);
+            let Ok(display) = Self::open(&path) else {
+                continue;
+            };
+            if display.has_swapchain() {
+                return Ok(display);
+            }
+            if fallback.is_none() {
+                fallback = Some(display);
+            }
+        }
+
+        fallback.ok_or(HandleError::NotFound)
+    }
+
+    /// Open a display surface.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - Path to the display device (e.g., "/dev/display0").
+    ///
+    /// # Returns
+    ///
+    /// Display surface instance or HandleError on failure.
+    pub fn open(path: &str) -> HandleResult<Self> {
+        let file = File::open(path).map_err(|_| HandleError::NotFound)?;
+        let mut display = Self {
+            file,
+            mapped_buffer: None,
+            mapped_backing_id: 0,
+            scratch_line: alloc::vec::Vec::new(),
+            cached_info: None,
+            swapchain_buffers: alloc::vec::Vec::new(),
+            swapchain_presented_at: alloc::vec::Vec::new(),
+            swapchain_pending_damage: alloc::vec::Vec::new(),
+            present_sequence: 0,
+            draw_buffer: 0,
+        };
+        let _ = display.setup_mmap();
+        Ok(display)
+    }
+
+    fn setup_mmap(&mut self) -> HandleResult<()> {
+        let info = self.get_info()?;
+        if info.buffer_len == 0 {
+            return Err(HandleError::InvalidParameter);
+        }
+
+        let handle = self.file.as_handle();
+        let mapper = handle.as_memory_mapping()?;
+        let mut swapchain = DisplaySwapchainInfo::default();
+        // SAFETY: The initialized output record has this display query's exact ABI layout and stays exclusively borrowed until return.
+        if unsafe {
+            self.file.as_handle().control(
+                display_commands::DISPLAY_GET_SWAPCHAIN,
+                &mut swapchain as *mut DisplaySwapchainInfo as usize,
+            )
+        }
+        .is_ok()
+            && swapchain.buffer_count >= 2
+            && swapchain.buffer_len != 0
+            && swapchain.front_buffer < swapchain.buffer_count
+        {
+            let buffer_len = swapchain.buffer_len as usize;
+            let buffer_count = swapchain.buffer_count as usize;
+            let mut offsets = alloc::vec::Vec::with_capacity(buffer_count);
+            for index in 0..swapchain.buffer_count as usize {
+                let offset = index
+                    .checked_mul(buffer_len)
+                    .and_then(|relative| swapchain.first_buffer_offset.checked_add(relative))
+                    .ok_or(HandleError::InvalidParameter)?;
+                offsets.push(offset);
+            }
+
+            let mut mapped_buffers = alloc::vec::Vec::with_capacity(buffer_count);
+            for offset in offsets {
+                // SAFETY: This requests a fresh non-fixed mapping; its owning buffer/stream retains the backing and controls all CPU views and unmapping.
+                let address = match unsafe {
+                    mapper.mmap(
+                        0,
+                        buffer_len,
+                        prot::READ | prot::WRITE,
+                        flags::SHARED,
+                        offset,
+                    )
+                } {
+                    Ok(address) => address,
+                    Err(_) => {
+                        for (mapped_addr, mapped_size) in mapped_buffers.drain(..) {
+                            // SAFETY: This teardown/rollback path owns the exact mapping; its borrowed CPU views have ended before releasing the virtual range.
+                            let _ = unsafe { munmap(mapped_addr, mapped_size) };
+                        }
+                        return Err(HandleError::SystemError(-1));
+                    }
+                };
+                mapped_buffers.push((address, buffer_len));
+            }
+            self.swapchain_buffers = mapped_buffers;
+            self.swapchain_presented_at
+                .resize(self.swapchain_buffers.len(), None);
+            self.swapchain_pending_damage
+                .resize_with(self.swapchain_buffers.len(), alloc::vec::Vec::new);
+            self.draw_buffer = (swapchain.front_buffer as usize + 1) % self.swapchain_buffers.len();
+            self.mapped_buffer = Some(self.swapchain_buffers[self.draw_buffer]);
+            self.mapped_backing_id = info.backing_id;
+            self.cached_info = Some(info);
+            return Ok(());
+        }
+        // SAFETY: This requests a fresh non-fixed mapping; its owning buffer/stream retains the backing and controls all CPU views and unmapping.
+        let mapped_addr = unsafe {
+            mapper.mmap(
+                0,
+                info.buffer_len as usize,
+                prot::READ | prot::WRITE,
+                flags::SHARED,
+                0,
+            )
+        }
+        .map_err(|_| HandleError::SystemError(-1))?;
+        self.mapped_buffer = Some((mapped_addr, info.buffer_len as usize));
+        self.mapped_backing_id = info.backing_id;
+        self.cached_info = Some(info);
+        Ok(())
+    }
+
+    fn display_bytes_per_pixel(format: u32) -> usize {
+        match format {
+            DISPLAY_PIXEL_FORMAT_RGBA8888
+            | DISPLAY_PIXEL_FORMAT_BGRA8888
+            | DISPLAY_PIXEL_FORMAT_XRGB8888
+            | DISPLAY_PIXEL_FORMAT_XBGR8888
+            | DISPLAY_PIXEL_FORMAT_XRGB2101010 => 4,
+            DISPLAY_PIXEL_FORMAT_RGB888 => 3,
+            DISPLAY_PIXEL_FORMAT_RGB565
+            | DISPLAY_PIXEL_FORMAT_ARGB1555
+            | DISPLAY_PIXEL_FORMAT_XRGB1555 => 2,
+            _ => 0,
+        }
+    }
+
+    fn display_info_to_var_info(info: DisplayInfo) -> FbVarScreenInfo {
+        let mut var_info = FbVarScreenInfo {
+            xres: info.width,
+            yres: info.height,
+            xres_virtual: info.width,
+            yres_virtual: info.height,
+            bits_per_pixel: (Self::display_bytes_per_pixel(info.format) * 8) as u32,
+            ..FbVarScreenInfo::default()
+        };
+
+        match info.format {
+            DISPLAY_PIXEL_FORMAT_RGBA8888 => {
+                var_info.red = FbBitfield {
+                    offset: 0,
+                    length: 8,
+                    msb_right: 0,
+                };
+                var_info.green = FbBitfield {
+                    offset: 8,
+                    length: 8,
+                    msb_right: 0,
+                };
+                var_info.blue = FbBitfield {
+                    offset: 16,
+                    length: 8,
+                    msb_right: 0,
+                };
+                var_info.transp = FbBitfield {
+                    offset: 24,
+                    length: 8,
+                    msb_right: 0,
+                };
+            }
+            DISPLAY_PIXEL_FORMAT_BGRA8888 | DISPLAY_PIXEL_FORMAT_XBGR8888 => {
+                var_info.blue = FbBitfield {
+                    offset: 0,
+                    length: 8,
+                    msb_right: 0,
+                };
+                var_info.green = FbBitfield {
+                    offset: 8,
+                    length: 8,
+                    msb_right: 0,
+                };
+                var_info.red = FbBitfield {
+                    offset: 16,
+                    length: 8,
+                    msb_right: 0,
+                };
+                var_info.transp = FbBitfield {
+                    offset: 24,
+                    length: if info.format == DISPLAY_PIXEL_FORMAT_BGRA8888 {
+                        8
+                    } else {
+                        0
+                    },
+                    msb_right: 0,
+                };
+            }
+            DISPLAY_PIXEL_FORMAT_XRGB8888 => {
+                var_info.red = FbBitfield {
+                    offset: 0,
+                    length: 8,
+                    msb_right: 0,
+                };
+                var_info.green = FbBitfield {
+                    offset: 8,
+                    length: 8,
+                    msb_right: 0,
+                };
+                var_info.blue = FbBitfield {
+                    offset: 16,
+                    length: 8,
+                    msb_right: 0,
+                };
+                var_info.transp = FbBitfield {
+                    offset: 24,
+                    length: 0,
+                    msb_right: 0,
+                };
+            }
+            DISPLAY_PIXEL_FORMAT_XRGB2101010 => {
+                var_info.red = FbBitfield {
+                    offset: 20,
+                    length: 10,
+                    msb_right: 0,
+                };
+                var_info.green = FbBitfield {
+                    offset: 10,
+                    length: 10,
+                    msb_right: 0,
+                };
+                var_info.blue = FbBitfield {
+                    offset: 0,
+                    length: 10,
+                    msb_right: 0,
+                };
+                var_info.transp = FbBitfield {
+                    offset: 30,
+                    length: 0,
+                    msb_right: 0,
+                };
+            }
+            DISPLAY_PIXEL_FORMAT_RGB888 => {
+                var_info.red = FbBitfield {
+                    offset: 0,
+                    length: 8,
+                    msb_right: 0,
+                };
+                var_info.green = FbBitfield {
+                    offset: 8,
+                    length: 8,
+                    msb_right: 0,
+                };
+                var_info.blue = FbBitfield {
+                    offset: 16,
+                    length: 8,
+                    msb_right: 0,
+                };
+            }
+            DISPLAY_PIXEL_FORMAT_RGB565 => {
+                var_info.red = FbBitfield {
+                    offset: 11,
+                    length: 5,
+                    msb_right: 0,
+                };
+                var_info.green = FbBitfield {
+                    offset: 5,
+                    length: 6,
+                    msb_right: 0,
+                };
+                var_info.blue = FbBitfield {
+                    offset: 0,
+                    length: 5,
+                    msb_right: 0,
+                };
+            }
+            DISPLAY_PIXEL_FORMAT_ARGB1555 | DISPLAY_PIXEL_FORMAT_XRGB1555 => {
+                var_info.red = FbBitfield {
+                    offset: 10,
+                    length: 5,
+                    msb_right: 0,
+                };
+                var_info.green = FbBitfield {
+                    offset: 5,
+                    length: 5,
+                    msb_right: 0,
+                };
+                var_info.blue = FbBitfield {
+                    offset: 0,
+                    length: 5,
+                    msb_right: 0,
+                };
+                var_info.transp = FbBitfield {
+                    offset: 15,
+                    length: if info.format == DISPLAY_PIXEL_FORMAT_ARGB1555 {
+                        1
+                    } else {
+                        0
+                    },
+                    msb_right: 0,
+                };
+            }
+            _ => {}
+        }
+
+        var_info
+    }
+
+    fn ensure_info(&mut self) -> HandleResult<DisplayInfo> {
+        let info = match self.cached_info {
+            Some(info) => info,
+            None => {
+                let info = self.get_info()?;
+                self.cached_info = Some(info);
+                info
+            }
+        };
+        let line_bytes = info.width as usize * Self::display_bytes_per_pixel(info.format);
+        if self.scratch_line.len() < line_bytes {
+            self.scratch_line.resize(line_bytes, 0);
+        }
+        Ok(info)
+    }
+
+    /// Get display surface information.
+    ///
+    /// # Returns
+    ///
+    /// Display surface information or HandleError on failure.
+    pub fn get_info(&self) -> HandleResult<DisplayInfo> {
+        let mut info = DisplayInfo::default();
+        // SAFETY: The initialized output record has this display query's exact ABI layout and stays exclusively borrowed until return.
+        unsafe {
+            self.file.as_handle().control(
+                display_commands::DISPLAY_GET_INFO,
+                &mut info as *mut DisplayInfo as usize,
+            )
+        }?;
+        Ok(info)
+    }
+
+    /// Get the current display backlight level.
+    ///
+    /// # Returns
+    ///
+    /// The backlight level as a percentage in `0..=100`, or a handle error.
+    /// A malformed kernel response outside that range is reported as
+    /// [`HandleError::InvalidParameter`].
+    pub fn get_brightness_percent(&self) -> HandleResult<u8> {
+        get_brightness_percent(&self.file)
+    }
+
+    /// Set the display backlight level.
+    ///
+    /// # Arguments
+    ///
+    /// * `percent` - Requested backlight level in `0..=100`.
+    ///
+    /// # Returns
+    ///
+    /// Success or a handle error. Values above `100` are rejected locally as
+    /// [`HandleError::InvalidParameter`].
+    pub fn set_brightness_percent(&self, percent: u8) -> HandleResult<()> {
+        set_brightness_percent(&self.file, percent)
+    }
+
+    /// Get variable screen information from the display surface.
+    ///
+    /// # Returns
+    ///
+    /// Variable screen information or HandleError on failure.
+    pub fn get_var_screen_info(&self) -> HandleResult<FbVarScreenInfo> {
+        Ok(Self::display_info_to_var_info(self.get_info()?))
+    }
+
+    /// Get fixed screen information from the display surface.
+    ///
+    /// # Returns
+    ///
+    /// Fixed screen information or HandleError on failure.
+    pub fn get_fix_screen_info(&self) -> HandleResult<FbFixScreenInfo> {
+        let info = self.get_info()?;
+        let mut fix_info = FbFixScreenInfo::default();
+        let id = b"display";
+        fix_info.id[..id.len()].copy_from_slice(id);
+        fix_info.smem_len = info.buffer_len;
+        fix_info.line_length = info.stride;
+        fix_info.type_ = 0;
+        fix_info.visual = 2;
+        Ok(fix_info)
+    }
+
+    /// Refresh the display memory mapping if the kernel reports a new backing store.
+    ///
+    /// # Returns
+    ///
+    /// Success or HandleError on failure.
+    pub fn refresh_mapping(&mut self) -> HandleResult<()> {
+        let info = self.get_info()?;
+        let new_size = info.buffer_len as usize;
+        if matches!(self.mapped_buffer, Some((_, mapped_size)) if mapped_size == new_size)
+            && self.mapped_backing_id == info.backing_id
+        {
+            return Ok(());
+        }
+
+        if self.swapchain_buffers.is_empty() {
+            if let Some((mapped_addr, mapped_size)) = self.mapped_buffer.take() {
+                // SAFETY: This teardown/rollback path owns the exact mapping; its borrowed CPU views have ended before releasing the virtual range.
+                let _ = unsafe { munmap(mapped_addr, mapped_size) };
+            }
+        } else {
+            for (mapped_addr, mapped_size) in self.swapchain_buffers.drain(..) {
+                // SAFETY: This teardown/rollback path owns the exact mapping; its borrowed CPU views have ended before releasing the virtual range.
+                let _ = unsafe { munmap(mapped_addr, mapped_size) };
+            }
+            self.swapchain_presented_at.clear();
+            self.swapchain_pending_damage.clear();
+            self.present_sequence = 0;
+            self.draw_buffer = 0;
+            self.mapped_buffer = None;
+        }
+        self.mapped_backing_id = 0;
+        self.cached_info = None;
+
+        match self.setup_mmap() {
+            Ok(()) => Ok(()),
+            Err(_) => Ok(()),
+        }
+    }
+
+    /// Get memory mapping information if available.
+    ///
+    /// # Returns
+    ///
+    /// Mapping address and size if memory mapping is active.
+    pub fn get_mapping_info(&self) -> Option<(usize, usize)> {
+        self.mapped_buffer
+    }
+
+    /// Return whether this surface uses directly mapped scanout buffers.
+    ///
+    /// # Returns
+    ///
+    /// `true` when presentation swaps between mapped scanout buffers.
+    pub fn has_swapchain(&self) -> bool {
+        !self.swapchain_buffers.is_empty()
+    }
+
+    /// Return the number of directly mapped scanout buffers.
+    ///
+    /// # Returns
+    ///
+    /// The scanout buffer count, or zero when swap is unavailable.
+    pub fn swapchain_buffer_count(&self) -> usize {
+        self.swapchain_buffers.len()
+    }
+
+    /// Return the scanout buffer currently available for drawing.
+    ///
+    /// # Returns
+    ///
+    /// The draw buffer index, or `None` when direct scanout is unavailable.
+    pub fn draw_buffer_index(&self) -> Option<usize> {
+        if self.swapchain_buffers.is_empty() {
+            None
+        } else {
+            Some(self.draw_buffer)
+        }
+    }
+
+    /// Return how many completed presents occurred since the current draw buffer was shown.
+    ///
+    /// Zero means the buffer has never been presented and requires a full copy.
+    ///
+    /// # Returns
+    ///
+    /// The current draw buffer age, or `None` when swap is unavailable.
+    pub fn buffer_age(&self) -> Option<u64> {
+        if self.swapchain_buffers.is_empty() {
+            return None;
+        }
+
+        Some(match self.swapchain_presented_at[self.draw_buffer] {
+            Some(sequence) => self.present_sequence.saturating_sub(sequence),
+            None => 0,
+        })
+    }
+
+    /// Present the whole display surface.
+    ///
+    /// # Returns
+    ///
+    /// Success or HandleError on failure.
+    pub fn present(&mut self) -> HandleResult<()> {
+        if !self.swapchain_buffers.is_empty() {
+            return self.present_swapchain_regions(&[]);
+        }
+        // SAFETY: This fixed present operation takes no pointer and borrows the live display handle.
+        unsafe {
+            self.file
+                .as_handle()
+                .control(display_commands::DISPLAY_PRESENT, 0)
+        }?;
+        Ok(())
+    }
+
+    /// Present a GPU image capability through this display surface.
+    ///
+    /// The borrowed handle avoids a dependency on the GPU library while the
+    /// kernel still resolves the capability in the current task and verifies
+    /// that it is a presentable image owned by this display's graphics device.
+    ///
+    /// # Arguments
+    ///
+    /// * `image` - Borrowed GPU image capability handle.
+    /// * `region` - `None` for a full-frame present, otherwise the modified image region.
+    ///
+    /// # Returns
+    ///
+    /// Success or a handle error.
+    pub fn present_image(
+        &self,
+        image: &Handle,
+        region: Option<DisplayPresentRegion>,
+    ) -> HandleResult<()> {
+        self.present_gpu_image_with_flags(image, region, 0)
+    }
+
+    /// Present one image from a producer-managed swapchain.
+    ///
+    /// After this call succeeds, the producer must not write `image` again
+    /// until a different swapchain image has been presented successfully.
+    /// This guarantee lets a capable display driver scan out the image
+    /// directly while drivers without that support retain their normal path.
+    pub fn present_swapchain_image(
+        &self,
+        image: &Handle,
+        region: Option<DisplayPresentRegion>,
+    ) -> HandleResult<()> {
+        self.present_gpu_image_with_flags(
+            image,
+            region,
+            DISPLAY_PRESENT_IMAGE_FLAG_SWAPCHAIN_BUFFER,
+        )
+    }
+
+    fn present_gpu_image_with_flags(
+        &self,
+        image: &Handle,
+        region: Option<DisplayPresentRegion>,
+        flags: u32,
+    ) -> HandleResult<()> {
+        let image_handle = u32::try_from(image.as_raw()).map_err(|_| HandleError::InvalidHandle)?;
+        let request = match region {
+            Some(region) => {
+                if region.width == 0 || region.height == 0 {
+                    return Err(HandleError::InvalidParameter);
+                }
+                DisplayPresentImage {
+                    image_handle,
+                    flags,
+                    x: region.x,
+                    y: region.y,
+                    width: region.width,
+                    height: region.height,
+                    ..DisplayPresentImage::default()
+                }
+            }
+            None => DisplayPresentImage {
+                image_handle,
+                flags: flags | DISPLAY_PRESENT_IMAGE_FLAG_FULL_FRAME,
+                ..DisplayPresentImage::default()
+            },
+        };
+        // SAFETY: The fixed present record and any nested damage storage remain valid through this synchronous control call.
+        unsafe {
+            self.file.as_handle().control(
+                display_commands::DISPLAY_PRESENT_IMAGE,
+                &request as *const DisplayPresentImage as usize,
+            )
+        }?;
+        Ok(())
+    }
+
+    /// Present the current scanout buffer with the regions copied by the producer.
+    ///
+    /// An empty slice denotes a complete-buffer update.
+    ///
+    /// # Arguments
+    ///
+    /// * `regions` - Updated display regions, or an empty slice for a full update.
+    ///
+    /// # Returns
+    ///
+    /// Success or HandleError on failure.
+    pub fn present_regions(&mut self, regions: &[DisplayPresentRegion]) -> HandleResult<()> {
+        if self.swapchain_buffers.is_empty() {
+            return self.present();
+        }
+        self.present_swapchain_regions(regions)
+    }
+
+    fn present_swapchain_regions(&mut self, regions: &[DisplayPresentRegion]) -> HandleResult<()> {
+        if regions.len() > DISPLAY_MAX_DAMAGE_RECTS {
+            return Err(HandleError::InvalidParameter);
+        }
+
+        let request = DisplayPresentBuffer {
+            index: self.draw_buffer as u32,
+            damage_count: regions.len() as u32,
+            damage_ptr: regions.as_ptr() as usize,
+            ..DisplayPresentBuffer::default()
+        };
+        // SAFETY: The fixed present record and any nested damage storage remain valid through this synchronous control call.
+        unsafe {
+            self.file.as_handle().control(
+                display_commands::DISPLAY_PRESENT_BUFFER,
+                &request as *const DisplayPresentBuffer as usize,
+            )
+        }?;
+        self.present_sequence = self.present_sequence.saturating_add(1);
+        self.swapchain_presented_at[self.draw_buffer] = Some(self.present_sequence);
+        self.draw_buffer = (self.draw_buffer + 1) % self.swapchain_buffers.len();
+        self.mapped_buffer = Some(self.swapchain_buffers[self.draw_buffer]);
+        Ok(())
+    }
+
+    fn copy_presented_region_to_buffer(
+        &self,
+        presented_index: usize,
+        destination_index: usize,
+        region: DisplayPresentRegion,
+    ) -> HandleResult<()> {
+        let info = self.cached_info.ok_or(HandleError::InvalidParameter)?;
+        let bytes_per_pixel = Self::display_bytes_per_pixel(info.format);
+        let x = region.x.min(info.width) as usize;
+        let y = region.y.min(info.height) as usize;
+        let width = region.width.min(info.width.saturating_sub(region.x)) as usize;
+        let height = region.height.min(info.height.saturating_sub(region.y)) as usize;
+        if width == 0 || height == 0 {
+            return Ok(());
+        }
+
+        let (source, source_len) = *self
+            .swapchain_buffers
+            .get(presented_index)
+            .ok_or(HandleError::InvalidParameter)?;
+        let (destination, destination_len) = *self
+            .swapchain_buffers
+            .get(destination_index)
+            .ok_or(HandleError::InvalidParameter)?;
+        let stride = info.stride as usize;
+        let row_bytes = width
+            .checked_mul(bytes_per_pixel)
+            .ok_or(HandleError::InvalidParameter)?;
+        let x_bytes = x
+            .checked_mul(bytes_per_pixel)
+            .ok_or(HandleError::InvalidParameter)?;
+
+        for row in 0..height {
+            let offset = y
+                .checked_add(row)
+                .and_then(|line| line.checked_mul(stride))
+                .and_then(|line| line.checked_add(x_bytes))
+                .ok_or(HandleError::InvalidParameter)?;
+            let end = offset
+                .checked_add(row_bytes)
+                .ok_or(HandleError::InvalidParameter)?;
+            if end > source_len || end > destination_len {
+                return Err(HandleError::InvalidParameter);
+            }
+            // SAFETY: Category 10 (out-of-bounds access) is prevented by the
+            // checked row range above. Distinct swapchain mmaps do not overlap.
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    (source as *const u8).add(offset),
+                    (destination as *mut u8).add(offset),
+                    row_bytes,
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// Present a display surface region.
+    ///
+    /// # Arguments
+    ///
+    /// * `x` - Left edge in pixels.
+    /// * `y` - Top edge in pixels.
+    /// * `width` - Width in pixels.
+    /// * `height` - Height in pixels.
+    ///
+    /// # Returns
+    ///
+    /// Success or HandleError on failure.
+    pub fn present_region(&mut self, x: u32, y: u32, width: u32, height: u32) -> HandleResult<()> {
+        if width == 0 || height == 0 {
+            return Ok(());
+        }
+
+        if !self.swapchain_buffers.is_empty() {
+            let region = DisplayPresentRegion {
+                x,
+                y,
+                width,
+                height,
+            };
+            let presented_index = self.draw_buffer;
+            let mut regions = core::mem::take(
+                self.swapchain_pending_damage
+                    .get_mut(presented_index)
+                    .ok_or(HandleError::InvalidParameter)?,
+            );
+            regions.push(region);
+            let present_result = if regions.len() > DISPLAY_MAX_DAMAGE_RECTS {
+                self.present()
+            } else {
+                self.present_regions(&regions)
+            };
+            if let Err(error) = present_result {
+                self.swapchain_pending_damage[presented_index] = regions;
+                return Err(error);
+            }
+            for destination_index in 0..self.swapchain_buffers.len() {
+                if destination_index == presented_index {
+                    continue;
+                }
+                self.copy_presented_region_to_buffer(presented_index, destination_index, region)?;
+                self.swapchain_pending_damage[destination_index].push(region);
+            }
+            return Ok(());
+        }
+
+        let region = DisplayPresentRegion {
+            x,
+            y,
+            width,
+            height,
+        };
+        // SAFETY: The fixed present record and any nested damage storage remain valid through this synchronous control call.
+        unsafe {
+            self.file.as_handle().control(
+                display_commands::DISPLAY_PRESENT_REGION,
+                &region as *const DisplayPresentRegion as usize,
+            )
+        }?;
+        Ok(())
+    }
+
+    /// Write BGRA source data into a display surface region.
+    ///
+    /// # Arguments
+    ///
+    /// * `x` - Destination left edge in pixels.
+    /// * `y` - Destination top edge in pixels.
+    /// * `width` - Region width in pixels.
+    /// * `height` - Region height in pixels.
+    /// * `data` - Source BGRA pixel bytes.
+    /// * `src_stride_bytes` - Source row stride in bytes.
+    ///
+    /// # Returns
+    ///
+    /// Success or HandleError on failure.
+    pub fn write_bgra_strided(
+        &mut self,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        data: &[u8],
+        src_stride_bytes: usize,
+    ) -> HandleResult<()> {
+        if width == 0 || height == 0 {
+            return Ok(());
+        }
+
+        let info = self.ensure_info()?;
+        if x >= info.width || y >= info.height {
+            return Err(HandleError::InvalidParameter);
+        }
+        if x.saturating_add(width) > info.width || y.saturating_add(height) > info.height {
+            return Err(HandleError::InvalidParameter);
+        }
+
+        let line_length = info.stride as usize;
+        let dst_bytes_per_pixel = Self::display_bytes_per_pixel(info.format);
+        if dst_bytes_per_pixel == 0 {
+            return Err(HandleError::InvalidParameter);
+        }
+        let src_line_bytes = width as usize * 4;
+        if src_stride_bytes < src_line_bytes {
+            return Err(HandleError::InvalidParameter);
+        }
+        let required = (height as usize - 1)
+            .saturating_mul(src_stride_bytes)
+            .saturating_add(src_line_bytes);
+        if required > data.len() {
+            return Err(HandleError::InvalidParameter);
+        }
+
+        if info.format == DISPLAY_PIXEL_FORMAT_XRGB2101010 {
+            let line_bytes = width as usize * 4;
+            let mapped_buffer = self.mapped_buffer;
+
+            for row in 0..height as usize {
+                let src_off = row.saturating_mul(src_stride_bytes);
+                let src_row = &data[src_off..src_off + src_line_bytes];
+                {
+                    let converted_line = &mut self.scratch_line[..line_bytes];
+                    Self::convert_bgra_to_xrgb2101010_line(src_row, converted_line, width as usize);
+                }
+
+                let dst_off = (y as usize + row)
+                    .saturating_mul(line_length)
+                    .saturating_add(x as usize * 4);
+                if let Some((mapped_addr, mapped_size)) = mapped_buffer {
+                    if dst_off.saturating_add(line_bytes) > mapped_size {
+                        return Err(HandleError::InvalidParameter);
+                    }
+                    unsafe {
+                        core::ptr::copy_nonoverlapping(
+                            self.scratch_line.as_ptr(),
+                            (mapped_addr + dst_off) as *mut u8,
+                            line_bytes,
+                        );
+                    }
+                } else {
+                    self.file
+                        .seek(SeekFrom::Start(dst_off as u64))
+                        .map_err(|_| HandleError::SystemError(-1))?;
+                    self.file
+                        .write(&self.scratch_line[..line_bytes])
+                        .map_err(|_| HandleError::SystemError(-1))?;
+                }
+            }
+
+            return Ok(());
+        }
+
+        if info.format != DISPLAY_PIXEL_FORMAT_BGRA8888 {
+            let var_info = Self::display_info_to_var_info(info);
+            let line_bytes = width as usize * dst_bytes_per_pixel;
+            let mapped_buffer = self.mapped_buffer;
+
+            for row in 0..height as usize {
+                let src_off = row.saturating_mul(src_stride_bytes);
+                let src_row = &data[src_off..src_off + src_line_bytes];
+
+                {
+                    let converted_line = &mut self.scratch_line[..line_bytes];
+                    for pixel in 0..width as usize {
+                        let src_pixel_offset = pixel * 4;
+                        let dst_pixel_offset = pixel * dst_bytes_per_pixel;
+                        let color = [
+                            src_row[src_pixel_offset],
+                            src_row[src_pixel_offset + 1],
+                            src_row[src_pixel_offset + 2],
+                            src_row[src_pixel_offset + 3],
+                        ];
+                        Self::write_packed_pixel_bytes(
+                            &mut converted_line
+                                [dst_pixel_offset..dst_pixel_offset + dst_bytes_per_pixel],
+                            color,
+                            &var_info,
+                        );
+                    }
+                }
+
+                let dst_off = (y as usize + row)
+                    .saturating_mul(line_length)
+                    .saturating_add(x as usize * dst_bytes_per_pixel);
+                if let Some((mapped_addr, mapped_size)) = mapped_buffer {
+                    if dst_off.saturating_add(line_bytes) > mapped_size {
+                        return Err(HandleError::InvalidParameter);
+                    }
+                    unsafe {
+                        core::ptr::copy_nonoverlapping(
+                            self.scratch_line.as_ptr(),
+                            (mapped_addr + dst_off) as *mut u8,
+                            line_bytes,
+                        );
+                    }
+                } else {
+                    self.file
+                        .seek(SeekFrom::Start(dst_off as u64))
+                        .map_err(|_| HandleError::SystemError(-1))?;
+                    self.file
+                        .write(&self.scratch_line[..line_bytes])
+                        .map_err(|_| HandleError::SystemError(-1))?;
+                }
+            }
+
+            return Ok(());
+        }
+
+        if let Some((mapped_addr, mapped_size)) = self.mapped_buffer {
+            for row in 0..height as usize {
+                let dst_off = (y as usize + row)
+                    .saturating_mul(line_length)
+                    .saturating_add(x as usize * dst_bytes_per_pixel);
+                let src_off = row.saturating_mul(src_stride_bytes);
+                if dst_off.saturating_add(src_line_bytes) > mapped_size {
+                    return Err(HandleError::InvalidParameter);
+                }
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        data[src_off..src_off + src_line_bytes].as_ptr(),
+                        (mapped_addr + dst_off) as *mut u8,
+                        src_line_bytes,
+                    );
+                }
+            }
+        } else {
+            for row in 0..height as usize {
+                let dst_off = (y as usize + row)
+                    .saturating_mul(line_length)
+                    .saturating_add(x as usize * dst_bytes_per_pixel);
+                let src_off = row.saturating_mul(src_stride_bytes);
+                self.file
+                    .seek(SeekFrom::Start(dst_off as u64))
+                    .map_err(|_| HandleError::SystemError(-1))?;
+                self.file
+                    .write(&data[src_off..src_off + src_line_bytes])
+                    .map_err(|_| HandleError::SystemError(-1))?;
+            }
+        }
+
+        Ok(())
+    }
 }
 
 impl Framebuffer {
+    fn bytes_per_pixel(var_info: &FbVarScreenInfo) -> usize {
+        (var_info.bits_per_pixel as usize).div_ceil(8)
+    }
+
+    fn scale_component_to_field(value: u8, field: FbBitfield) -> u32 {
+        if field.length == 0 {
+            return 0;
+        }
+
+        let max = (1u32 << field.length) - 1;
+        let scaled = ((value as u32) * max + 127) / 255;
+
+        if field.msb_right == 0 {
+            scaled
+        } else {
+            scaled.reverse_bits() >> (u32::BITS - field.length)
+        }
+    }
+
+    fn pack_bgra_pixel(color: [u8; 4], var_info: &FbVarScreenInfo) -> u32 {
+        (Self::scale_component_to_field(color[2], var_info.red) << var_info.red.offset)
+            | (Self::scale_component_to_field(color[1], var_info.green) << var_info.green.offset)
+            | (Self::scale_component_to_field(color[0], var_info.blue) << var_info.blue.offset)
+            | (Self::scale_component_to_field(color[3], var_info.transp) << var_info.transp.offset)
+    }
+
+    fn write_packed_pixel_bytes(dst: &mut [u8], color: [u8; 4], var_info: &FbVarScreenInfo) {
+        let bytes_per_pixel = Self::bytes_per_pixel(var_info);
+        let pixel = Self::pack_bgra_pixel(color, var_info).to_le_bytes();
+        dst[..bytes_per_pixel].copy_from_slice(&pixel[..bytes_per_pixel]);
+    }
+
+    fn is_native_bgra8888(var_info: &FbVarScreenInfo) -> bool {
+        var_info.bits_per_pixel == 32
+            && var_info.red.offset == 16
+            && var_info.red.length == 8
+            && var_info.red.msb_right == 0
+            && var_info.green.offset == 8
+            && var_info.green.length == 8
+            && var_info.green.msb_right == 0
+            && var_info.blue.offset == 0
+            && var_info.blue.length == 8
+            && var_info.blue.msb_right == 0
+            && var_info.transp.offset == 24
+            && var_info.transp.length == 8
+            && var_info.transp.msb_right == 0
+    }
+
+    fn populate_line_with_color(
+        line: &mut [u8],
+        width: usize,
+        color: [u8; 4],
+        var_info: &FbVarScreenInfo,
+    ) {
+        let bytes_per_pixel = Self::bytes_per_pixel(var_info);
+        for x in 0..width {
+            let pixel_offset = x * bytes_per_pixel;
+            if pixel_offset + bytes_per_pixel <= line.len() {
+                Self::write_packed_pixel_bytes(
+                    &mut line[pixel_offset..pixel_offset + bytes_per_pixel],
+                    color,
+                    var_info,
+                );
+            }
+        }
+    }
+
     /// Open a framebuffer device
     ///
     /// # Arguments
@@ -220,6 +1596,7 @@ impl Framebuffer {
         let mut framebuffer = Self {
             file,
             mapped_buffer: None,
+            mapped_physical_addr: None,
         };
 
         // Attempt to set up memory mapping
@@ -244,15 +1621,19 @@ impl Framebuffer {
         // Try to map the framebuffer memory
         let handle = self.file.as_handle();
         let mapper = handle.as_memory_mapping()?;
-        match mapper.mmap(
-            0,                          // Let kernel choose address
-            fix_info.smem_len as usize, // Map entire framebuffer
-            prot::READ | prot::WRITE,   // Read/write permissions
-            flags::SHARED,              // Shared mapping
-            0,                          // Offset 0
-        ) {
+        // SAFETY: This requests a fresh non-fixed mapping; its owning buffer/stream retains the backing and controls all CPU views and unmapping.
+        match unsafe {
+            mapper.mmap(
+                0,                          // Let kernel choose address
+                fix_info.smem_len as usize, // Map entire framebuffer
+                prot::READ | prot::WRITE,   // Read/write permissions
+                flags::SHARED,              // Shared mapping
+                0,                          // Offset 0
+            )
+        } {
             Ok(mapped_addr) => {
                 self.mapped_buffer = Some((mapped_addr, fix_info.smem_len as usize));
+                self.mapped_physical_addr = Some(fix_info.smem_start);
                 Ok(())
             }
             Err(e) => {
@@ -274,10 +1655,13 @@ impl Framebuffer {
     /// Variable screen information or HandleError on failure
     pub fn get_var_screen_info(&self) -> HandleResult<FbVarScreenInfo> {
         let mut var_info = FbVarScreenInfo::default();
-        self.file.as_handle().control(
-            commands::FBIOGET_VSCREENINFO,
-            &mut var_info as *mut _ as usize,
-        )?;
+        // SAFETY: var_info is an exclusive output record with the framebuffer variable-info ABI layout.
+        unsafe {
+            self.file.as_handle().control(
+                commands::FBIOGET_VSCREENINFO,
+                &mut var_info as *mut _ as usize,
+            )
+        }?;
         Ok(var_info)
     }
 
@@ -291,9 +1675,12 @@ impl Framebuffer {
         if ptr.is_null() {
             return Err(HandleError::InvalidParameter);
         }
-        self.file
-            .as_handle()
-            .control(commands::FBIOGET_FSCREENINFO, ptr as usize)?;
+        // SAFETY: ptr points to the live aligned fixed-info buffer sized for the kernel's framebuffer ABI.
+        unsafe {
+            self.file
+                .as_handle()
+                .control(commands::FBIOGET_FSCREENINFO, ptr as usize)
+        }?;
         Ok(fix_info)
     }
 
@@ -305,10 +1692,44 @@ impl Framebuffer {
     /// # Returns
     /// Success or HandleError on failure
     pub fn set_var_screen_info(&self, var_info: &FbVarScreenInfo) -> HandleResult<()> {
-        self.file
-            .as_handle()
-            .control(commands::FBIOPUT_VSCREENINFO, var_info as *const _ as usize)?;
+        // SAFETY: var_info is an initialized input record borrowed through this synchronous framebuffer configuration call.
+        unsafe {
+            self.file
+                .as_handle()
+                .control(commands::FBIOPUT_VSCREENINFO, var_info as *const _ as usize)
+        }?;
         Ok(())
+    }
+
+    /// Refresh the framebuffer memory mapping if the kernel reports a new backing store.
+    ///
+    /// # Returns
+    /// Success or HandleError on failure
+    pub fn refresh_mapping(&mut self) -> HandleResult<()> {
+        let fix_info = self.get_fix_screen_info()?;
+        let new_size = fix_info.smem_len as usize;
+        let mapping_changed = match (self.mapped_buffer, self.mapped_physical_addr) {
+            (Some((_, mapped_size)), Some(mapped_phys)) => {
+                mapped_size != new_size || mapped_phys != fix_info.smem_start
+            }
+            (None, _) => true,
+            (_, None) => true,
+        };
+
+        if !mapping_changed {
+            return Ok(());
+        }
+
+        if let Some((mapped_addr, mapped_size)) = self.mapped_buffer.take() {
+            // SAFETY: This teardown/rollback path owns the exact mapping; its borrowed CPU views have ended before releasing the virtual range.
+            let _ = unsafe { munmap(mapped_addr, mapped_size) };
+        }
+        self.mapped_physical_addr = None;
+
+        match self.setup_mmap() {
+            Ok(()) => Ok(()),
+            Err(_) => Ok(()),
+        }
     }
 
     /// Flush framebuffer to display
@@ -318,7 +1739,8 @@ impl Framebuffer {
     /// # Returns
     /// Success or HandleError on failure
     pub fn flush(&self) -> HandleResult<()> {
-        self.file.as_handle().control(commands::FBIO_FLUSH, 0)?;
+        // SAFETY: This fixed framebuffer flush takes no userspace pointer and borrows the live device handle.
+        unsafe { self.file.as_handle().control(commands::FBIO_FLUSH, 0) }?;
         Ok(())
     }
 
@@ -356,8 +1778,10 @@ impl Framebuffer {
         let var_info = self.get_var_screen_info()?;
         let fix_info = self.get_fix_screen_info()?;
 
-        let bytes_per_pixel = (var_info.bits_per_pixel / 8) as usize;
+        let bytes_per_pixel = Self::bytes_per_pixel(&var_info);
         let line_length = fix_info.line_length as usize;
+        let mut packed_pixel = [0u8; 4];
+        Self::write_packed_pixel_bytes(&mut packed_pixel[..bytes_per_pixel], color, &var_info);
 
         // Calculate pixel offset
         let offset = y as usize * line_length + x as usize * bytes_per_pixel;
@@ -370,8 +1794,7 @@ impl Framebuffer {
 
             unsafe {
                 let pixel_ptr = (mapped_addr + offset) as *mut u8;
-                let write_len = bytes_per_pixel.min(4);
-                core::ptr::copy_nonoverlapping(color.as_ptr(), pixel_ptr, write_len);
+                core::ptr::copy_nonoverlapping(packed_pixel.as_ptr(), pixel_ptr, bytes_per_pixel);
             }
         } else {
             // Fallback to file I/O if mmap is not available
@@ -379,9 +1802,8 @@ impl Framebuffer {
                 .seek(SeekFrom::Start(offset as u64))
                 .map_err(|_| HandleError::SystemError(-1))?;
 
-            let write_len = bytes_per_pixel.min(4);
             self.file
-                .write(&color[..write_len])
+                .write(&packed_pixel[..bytes_per_pixel])
                 .map_err(|_| HandleError::SystemError(-1))?;
         }
 
@@ -451,7 +1873,7 @@ impl Framebuffer {
         let var_info = self.get_var_screen_info()?;
         let fix_info = self.get_fix_screen_info()?;
 
-        let bytes_per_pixel = (var_info.bits_per_pixel / 8) as usize;
+        let bytes_per_pixel = Self::bytes_per_pixel(&var_info);
         let line_length = fix_info.line_length as usize;
         let block_line_bytes = width as usize * bytes_per_pixel;
 
@@ -535,7 +1957,7 @@ impl Framebuffer {
         let var_info = self.get_var_screen_info()?;
         let fix_info = self.get_fix_screen_info()?;
 
-        let bytes_per_pixel = (var_info.bits_per_pixel / 8) as usize;
+        let bytes_per_pixel = Self::bytes_per_pixel(&var_info);
         let line_length = fix_info.line_length as usize;
         let block_line_bytes = width as usize * bytes_per_pixel;
 
@@ -593,6 +2015,93 @@ impl Framebuffer {
         Ok(())
     }
 
+    pub fn write_block_bgra_strided(
+        &mut self,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        data: &[u8],
+        src_stride_bytes: usize,
+    ) -> HandleResult<()> {
+        if width == 0 || height == 0 {
+            return Ok(());
+        }
+
+        let var_info = self.get_var_screen_info()?;
+        let fix_info = self.get_fix_screen_info()?;
+        let dst_bytes_per_pixel = Self::bytes_per_pixel(&var_info);
+        let line_length = fix_info.line_length as usize;
+        let src_line_bytes = width as usize * 4;
+
+        if Self::is_native_bgra8888(&var_info) {
+            return self.write_block_strided(x, y, width, height, data, src_stride_bytes);
+        }
+
+        if src_stride_bytes < src_line_bytes {
+            return Err(HandleError::InvalidParameter);
+        }
+
+        let required = (height as usize - 1)
+            .saturating_mul(src_stride_bytes)
+            .saturating_add(src_line_bytes);
+        if required > data.len() {
+            return Err(HandleError::InvalidParameter);
+        }
+
+        let mut converted_line = vec![0u8; width as usize * dst_bytes_per_pixel];
+
+        for row in 0..height {
+            let src_off = row as usize * src_stride_bytes;
+            let src_row = &data[src_off..src_off + src_line_bytes];
+
+            for pixel in 0..width as usize {
+                let src_pixel_offset = pixel * 4;
+                let dst_pixel_offset = pixel * dst_bytes_per_pixel;
+                let color = [
+                    src_row[src_pixel_offset],
+                    src_row[src_pixel_offset + 1],
+                    src_row[src_pixel_offset + 2],
+                    src_row[src_pixel_offset + 3],
+                ];
+                Self::write_packed_pixel_bytes(
+                    &mut converted_line[dst_pixel_offset..dst_pixel_offset + dst_bytes_per_pixel],
+                    color,
+                    &var_info,
+                );
+            }
+
+            let dst_y = y + row;
+            let dst_off = (dst_y as usize)
+                .saturating_mul(line_length)
+                .saturating_add((x as usize).saturating_mul(dst_bytes_per_pixel));
+
+            if let Some((mapped_addr, mapped_size)) = self.mapped_buffer {
+                if dst_off.saturating_add(converted_line.len()) > mapped_size {
+                    return Err(HandleError::InvalidParameter);
+                }
+
+                unsafe {
+                    let dst_ptr = (mapped_addr + dst_off) as *mut u8;
+                    core::ptr::copy_nonoverlapping(
+                        converted_line.as_ptr(),
+                        dst_ptr,
+                        converted_line.len(),
+                    );
+                }
+            } else {
+                self.file
+                    .seek(SeekFrom::Start(dst_off as u64))
+                    .map_err(|_| HandleError::SystemError(-1))?;
+                self.file
+                    .write(&converted_line)
+                    .map_err(|_| HandleError::SystemError(-1))?;
+            }
+        }
+
+        Ok(())
+    }
+
     /// Fill the entire screen with a solid color
     ///
     /// # Arguments
@@ -606,20 +2115,11 @@ impl Framebuffer {
 
         let width = var_info.xres as usize;
         let height = var_info.yres as usize;
-        let bytes_per_pixel = (var_info.bits_per_pixel / 8) as usize;
         let line_length = fix_info.line_length as usize;
 
         // Create a line buffer filled with the color
         let mut line_buffer = vec![0u8; line_length];
-
-        // Fill line buffer with repeated color pattern
-        for x in 0..width {
-            let pixel_offset = x * bytes_per_pixel;
-            if pixel_offset + bytes_per_pixel <= line_buffer.len() {
-                line_buffer[pixel_offset..pixel_offset + bytes_per_pixel.min(4)]
-                    .copy_from_slice(&color[..bytes_per_pixel.min(4)]);
-            }
-        }
+        Self::populate_line_with_color(&mut line_buffer, width, color, &var_info);
 
         // Write the same line to all rows
         for y in 0..height {
@@ -655,21 +2155,14 @@ impl Framebuffer {
         let var_info = self.get_var_screen_info()?;
         let fix_info = self.get_fix_screen_info()?;
 
-        let bytes_per_pixel = (var_info.bits_per_pixel / 8) as usize;
+        let bytes_per_pixel = Self::bytes_per_pixel(&var_info);
         let line_length = fix_info.line_length as usize;
 
         // Create a single-line buffer for the rectangle width.
         let line_bytes = width as usize * bytes_per_pixel;
         let mut line_buffer = vec![0u8; line_bytes];
 
-        // Fill line buffer with repeated color pattern
-        for pixel in 0..width as usize {
-            let pixel_offset = pixel * bytes_per_pixel;
-            if pixel_offset + bytes_per_pixel <= line_buffer.len() {
-                line_buffer[pixel_offset..pixel_offset + bytes_per_pixel.min(4)]
-                    .copy_from_slice(&color[..bytes_per_pixel.min(4)]);
-            }
-        }
+        Self::populate_line_with_color(&mut line_buffer, width as usize, color, &var_info);
 
         if let Some((mapped_addr, mapped_size)) = self.mapped_buffer {
             for row in 0..height {
@@ -719,7 +2212,7 @@ impl Framebuffer {
         let var_info = self.get_var_screen_info()?;
         let width = var_info.xres as usize;
         let height = var_info.yres as usize;
-        let bytes_per_pixel = (var_info.bits_per_pixel / 8) as usize;
+        let bytes_per_pixel = Self::bytes_per_pixel(&var_info);
 
         // Create line buffer with horizontal gradient
         let line_bytes = width * bytes_per_pixel;
@@ -742,8 +2235,11 @@ impl Framebuffer {
 
             let pixel_offset = x * bytes_per_pixel;
             if pixel_offset + bytes_per_pixel <= line_buffer.len() {
-                line_buffer[pixel_offset..pixel_offset + bytes_per_pixel.min(4)]
-                    .copy_from_slice(&color[..bytes_per_pixel.min(4)]);
+                Self::write_packed_pixel_bytes(
+                    &mut line_buffer[pixel_offset..pixel_offset + bytes_per_pixel],
+                    color,
+                    &var_info,
+                );
             }
         }
 
@@ -771,7 +2267,7 @@ impl Framebuffer {
         let var_info = self.get_var_screen_info()?;
         let width = var_info.xres as usize;
         let height = var_info.yres as usize;
-        let bytes_per_pixel = (var_info.bits_per_pixel / 8) as usize;
+        let bytes_per_pixel = Self::bytes_per_pixel(&var_info);
 
         // Create line buffer filled with this color
         let line_bytes = width * bytes_per_pixel;
@@ -794,8 +2290,11 @@ impl Framebuffer {
             for x in 0..width {
                 let pixel_offset = x * bytes_per_pixel;
                 if pixel_offset + bytes_per_pixel <= line_buffer.len() {
-                    line_buffer[pixel_offset..pixel_offset + bytes_per_pixel.min(4)]
-                        .copy_from_slice(&color[..bytes_per_pixel.min(4)]);
+                    Self::write_packed_pixel_bytes(
+                        &mut line_buffer[pixel_offset..pixel_offset + bytes_per_pixel],
+                        color,
+                        &var_info,
+                    );
                 }
             }
 
@@ -829,7 +2328,7 @@ impl Framebuffer {
         horizontal: bool,
     ) -> HandleResult<()> {
         let var_info = self.get_var_screen_info()?;
-        let bytes_per_pixel = (var_info.bits_per_pixel / 8) as usize;
+        let bytes_per_pixel = Self::bytes_per_pixel(&var_info);
 
         if horizontal {
             // Horizontal gradient: create one line buffer and reuse it
@@ -847,8 +2346,11 @@ impl Framebuffer {
 
                 let pixel_offset = px * bytes_per_pixel;
                 if pixel_offset + bytes_per_pixel <= line_buffer.len() {
-                    line_buffer[pixel_offset..pixel_offset + bytes_per_pixel.min(4)]
-                        .copy_from_slice(&color[..bytes_per_pixel.min(4)]);
+                    Self::write_packed_pixel_bytes(
+                        &mut line_buffer[pixel_offset..pixel_offset + bytes_per_pixel],
+                        color,
+                        &var_info,
+                    );
                 }
             }
 
@@ -878,7 +2380,48 @@ impl Drop for Framebuffer {
     fn drop(&mut self) {
         // Clean up memory mapping if it exists
         if let Some((mapped_addr, mapped_size)) = self.mapped_buffer {
-            let _ = munmap(mapped_addr, mapped_size);
+            // SAFETY: This teardown/rollback path owns the exact mapping; its borrowed CPU views have ended before releasing the virtual range.
+            let _ = unsafe { munmap(mapped_addr, mapped_size) };
+        }
+        self.mapped_physical_addr = None;
+    }
+}
+
+impl Drop for DisplaySurface {
+    fn drop(&mut self) {
+        if self.swapchain_buffers.is_empty() {
+            if let Some((mapped_addr, mapped_size)) = self.mapped_buffer {
+                // SAFETY: This teardown/rollback path owns the exact mapping; its borrowed CPU views have ended before releasing the virtual range.
+                let _ = unsafe { munmap(mapped_addr, mapped_size) };
+            }
+        } else {
+            for (mapped_addr, mapped_size) in self.swapchain_buffers.drain(..) {
+                // SAFETY: This teardown/rollback path owns the exact mapping; its borrowed CPU views have ended before releasing the virtual range.
+                let _ = unsafe { munmap(mapped_addr, mapped_size) };
+            }
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{HandleError, brightness_percent_from_control};
+
+    #[test]
+    fn brightness_control_result_accepts_inclusive_range() {
+        assert_eq!(brightness_percent_from_control(0).unwrap(), 0);
+        assert_eq!(brightness_percent_from_control(100).unwrap(), 100);
+    }
+
+    #[test]
+    fn brightness_control_result_rejects_out_of_range_values() {
+        for value in [-1, 101, i32::MAX, i32::MIN] {
+            assert_eq!(
+                brightness_percent_from_control(value),
+                Err(HandleError::InvalidParameter)
+            );
+        }
+    }
+}
+
+const _: [(); 24] = [(); core::mem::size_of::<DisplayPresentImage>()];

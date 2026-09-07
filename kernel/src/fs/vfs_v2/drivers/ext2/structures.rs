@@ -325,7 +325,7 @@ pub struct Ext2Inode {
     pub size: u32,
     /// Access time
     pub atime: u32,
-    /// Creation time
+    /// Inode status-change time (not a file birth timestamp)
     pub ctime: u32,
     /// Modification time
     pub mtime: u32,
@@ -413,7 +413,7 @@ impl Ext2Inode {
         u32::from_le(self.atime)
     }
 
-    /// Get creation time
+    /// Get inode status-change time
     pub fn get_ctime(&self) -> u32 {
         u32::from_le(self.ctime)
     }

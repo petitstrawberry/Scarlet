@@ -3,6 +3,7 @@
 //! This is a simplified read-only filesystem for handling CPIO archives
 //! used as initramfs. It implements the VFS v2 architecture.
 
+use crate::sync::IrqRwSpinLock;
 use alloc::sync::Weak;
 use alloc::{
     boxed::Box,
@@ -13,7 +14,7 @@ use alloc::{
     vec::Vec,
 };
 use core::any::Any;
-use spin::RwLock;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::fs::{
     FileMetadata, FileObject, FilePermission, FileSystemError, FileSystemErrorKind, FileType,
@@ -53,17 +54,20 @@ pub struct CpioNode {
     /// File content (for regular files)
     content: Vec<u8>,
 
+    /// Unix modification time from the archive header, set during parsing.
+    modified_time: AtomicU64,
+
     /// Child nodes (for directories)
-    children: RwLock<BTreeMap<String, Arc<CpioNode>>>,
+    children: IrqRwSpinLock<BTreeMap<String, Arc<CpioNode>>>,
 
     /// Reference to filesystem
-    filesystem: RwLock<Option<Arc<CpioFS>>>,
+    filesystem: IrqRwSpinLock<Option<Arc<CpioFS>>>,
 
     /// File ID
     file_id: usize,
 
     /// Parent node (weak reference)
-    parent: RwLock<Option<Weak<CpioNode>>>,
+    parent: IrqRwSpinLock<Option<Weak<CpioNode>>>,
 }
 
 impl CpioNode {
@@ -73,10 +77,11 @@ impl CpioNode {
             name,
             file_type,
             content,
-            children: RwLock::new(BTreeMap::new()),
-            filesystem: RwLock::new(None),
+            modified_time: AtomicU64::new(0),
+            children: IrqRwSpinLock::new(BTreeMap::new()),
+            filesystem: IrqRwSpinLock::new(None),
             file_id,
-            parent: RwLock::new(None),
+            parent: IrqRwSpinLock::new(None),
         })
     }
 
@@ -113,7 +118,7 @@ impl CpioNode {
             .map(|p| p.file_id as u64)
     }
 
-    /// Helper to convert from Arc<dyn VfsNode> to Arc<CpioNode>
+    /// Helper to convert from `Arc<dyn VfsNode>` to `Arc<CpioNode>`
     pub fn from_vfsnode_arc(node: &Arc<dyn VfsNode>) -> Option<Arc<CpioNode>> {
         match Arc::downcast::<CpioNode>(node.clone()) {
             Ok(cpio_node) => Some(cpio_node),
@@ -139,7 +144,7 @@ impl VfsNode for CpioNode {
             file_type: self.file_type.clone(),
             size: self.content.len(),
             created_time: 0,
-            modified_time: 0,
+            modified_time: self.modified_time.load(Ordering::Relaxed),
             accessed_time: 0,
             permissions: FilePermission {
                 read: true,
@@ -231,6 +236,12 @@ impl CpioFS {
                     ));
                 }
             };
+            let modified_time = core::str::from_utf8(&data[offset + 46..offset + 54])
+                .ok()
+                .and_then(|value| u64::from_str_radix(value, 16).ok())
+                .ok_or_else(|| {
+                    FileSystemError::new(FileSystemErrorKind::InvalidData, "Invalid mtime value")
+                })?;
             let namesize = match core::str::from_utf8(&data[offset + 94..offset + 102]) {
                 Ok(s) => usize::from_str_radix(s, 16).map_err(|_| {
                     FileSystemError::new(FileSystemErrorKind::InvalidData, "Invalid namesize value")
@@ -291,11 +302,17 @@ impl CpioFS {
 
             // Skip "." and ".." entries as they are handled automatically by the VFS
             if base_name == "." || base_name == ".." {
+                if name_str == "." && file_type == FileType::Directory {
+                    self.root_node
+                        .modified_time
+                        .store(modified_time, Ordering::Relaxed);
+                }
                 offset = (file_end + 3) & !3;
                 continue;
             }
 
             let node = CpioNode::new(base_name.to_string(), file_type, content, file_id);
+            node.modified_time.store(modified_time, Ordering::Relaxed);
             {
                 let mut fs_guard = node.filesystem.write();
                 *fs_guard = Some(Arc::clone(self));
@@ -492,14 +509,14 @@ impl FileSystemOperations for CpioFS {
 /// File object for CPIO regular files
 pub struct CpioFileObject {
     node: Arc<dyn VfsNode>,
-    position: RwLock<u64>,
+    position: IrqRwSpinLock<u64>,
 }
 
 impl CpioFileObject {
     pub fn new(node: Arc<dyn VfsNode>) -> Self {
         Self {
             node,
-            position: RwLock::new(0),
+            position: IrqRwSpinLock::new(0),
         }
     }
 }
@@ -544,7 +561,7 @@ impl MemoryMappingOps for CpioFileObject {
         &self,
         _offset: usize,
         _length: usize,
-    ) -> Result<(usize, usize, bool), &'static str> {
+    ) -> Result<crate::object::capability::MemoryMappingInfo, &'static str> {
         Err("Memory mapping not supported for CPIO files")
     }
 
@@ -653,6 +670,7 @@ impl crate::object::capability::selectable::Selectable for CpioFileObject {
         _interest: crate::object::capability::selectable::ReadyInterest,
         _trapframe: &mut crate::arch::Trapframe,
         _timeout_ticks: Option<u64>,
+        _min_wait_ticks: u64,
     ) -> crate::object::capability::selectable::SelectWaitOutcome {
         crate::object::capability::selectable::SelectWaitOutcome::Ready
     }
@@ -665,14 +683,14 @@ impl crate::object::capability::selectable::Selectable for CpioFileObject {
 /// Directory object for CPIO directories
 pub struct CpioDirectoryObject {
     node: Arc<dyn VfsNode>,
-    position: RwLock<u64>,
+    position: IrqRwSpinLock<u64>,
 }
 
 impl CpioDirectoryObject {
     pub fn new(node: Arc<dyn VfsNode>) -> Self {
         Self {
             node,
-            position: RwLock::new(0),
+            position: IrqRwSpinLock::new(0),
         }
     }
 }
@@ -752,7 +770,7 @@ impl MemoryMappingOps for CpioDirectoryObject {
         &self,
         _offset: usize,
         _length: usize,
-    ) -> Result<(usize, usize, bool), &'static str> {
+    ) -> Result<crate::object::capability::MemoryMappingInfo, &'static str> {
         Err("Memory mapping not supported for directories")
     }
 
@@ -814,6 +832,7 @@ impl crate::object::capability::selectable::Selectable for CpioDirectoryObject {
         _interest: crate::object::capability::selectable::ReadyInterest,
         _trapframe: &mut crate::arch::Trapframe,
         _timeout_ticks: Option<u64>,
+        _min_wait_ticks: u64,
     ) -> crate::object::capability::selectable::SelectWaitOutcome {
         crate::object::capability::selectable::SelectWaitOutcome::Ready
     }
@@ -826,14 +845,14 @@ impl crate::object::capability::selectable::Selectable for CpioDirectoryObject {
 /// Symbolic link object for CPIO symbolic links
 pub struct CpioSymlinkObject {
     node: Arc<dyn VfsNode>,
-    position: RwLock<u64>,
+    position: IrqRwSpinLock<u64>,
 }
 
 impl CpioSymlinkObject {
     pub fn new(node: Arc<dyn VfsNode>) -> Self {
         Self {
             node,
-            position: RwLock::new(0),
+            position: IrqRwSpinLock::new(0),
         }
     }
 }
@@ -881,7 +900,7 @@ impl MemoryMappingOps for CpioSymlinkObject {
         &self,
         _offset: usize,
         _length: usize,
-    ) -> Result<(usize, usize, bool), &'static str> {
+    ) -> Result<crate::object::capability::MemoryMappingInfo, &'static str> {
         Err("Memory mapping not supported for symbolic links")
     }
 
@@ -969,6 +988,7 @@ impl crate::object::capability::selectable::Selectable for CpioSymlinkObject {
         _interest: crate::object::capability::selectable::ReadyInterest,
         _trapframe: &mut crate::arch::Trapframe,
         _timeout_ticks: Option<u64>,
+        _min_wait_ticks: u64,
     ) -> crate::object::capability::selectable::SelectWaitOutcome {
         crate::object::capability::selectable::SelectWaitOutcome::Ready
     }

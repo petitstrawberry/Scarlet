@@ -12,7 +12,7 @@ use crate::object::capability::stream::{StreamError, StreamOps};
 
 pub mod syscall;
 
-pub use syscall::{sys_file_seek, sys_file_truncate};
+pub use syscall::{sys_file_metadata, sys_file_seek, sys_file_truncate};
 
 /// Seek operations for file positioning
 #[derive(Debug, Clone, Copy)]
@@ -27,15 +27,28 @@ pub enum SeekFrom {
 
 /// Trait for file objects
 ///
-/// This trait represents a file-like object that supports stream operations,
+/// This trait represents a file-like object exposing stream operations,
 /// file-specific operations like seeking and metadata access, control
-/// operations for device-specific functionality, and memory mapping operations.
-/// Directory reading is handled through normal read() operations.
+/// operations for device-specific functionality, and memory mapping interfaces.
+/// Individual operations may be unsupported. Directory reading is handled
+/// through normal `read()` operations.
 pub trait FileObject: StreamOps + ControlOps + MemoryMappingOps + Selectable {
     /// Seek to a position in the file stream
+    ///
+    /// # Arguments
+    /// * `whence` - Absolute position or signed displacement relative to the cursor or EOF.
+    ///
+    /// # Returns
+    /// The resulting absolute byte position, or an error if seeking fails or is unsupported.
     fn seek(&self, whence: SeekFrom) -> Result<u64, StreamError>;
 
     /// Get metadata about the file
+    ///
+    /// # Arguments
+    /// * `self` - File object to inspect.
+    ///
+    /// # Returns
+    /// A metadata snapshot, or a stream error if it cannot be obtained.
     fn metadata(&self) -> Result<crate::fs::FileMetadata, StreamError>;
 
     /// Read data from a specific offset without changing internal position
@@ -43,6 +56,14 @@ pub trait FileObject: StreamOps + ControlOps + MemoryMappingOps + Selectable {
     /// This method performs a random-access read operation that must not
     /// modify the file's current seek position. Filesystems that cannot
     /// support position-independent reads may return `StreamError::NotSupported`.
+    ///
+    /// # Arguments
+    /// * `offset` - Absolute byte offset to read from.
+    /// * `buffer` - Destination for the bytes read.
+    ///
+    /// # Returns
+    /// The byte count, possibly shorter than `buffer.len()`, or an error.
+    /// The default implementation returns `StreamError::NotSupported`.
     fn read_at(&self, offset: u64, buffer: &mut [u8]) -> Result<usize, StreamError> {
         let _ = (offset, buffer);
         Err(StreamError::NotSupported)
@@ -50,9 +71,17 @@ pub trait FileObject: StreamOps + ControlOps + MemoryMappingOps + Selectable {
 
     /// Write data to a specific offset without changing internal position
     ///
-    /// Similar to [`read_at`], this operation must not adjust the file's
+    /// Similar to [`Self::read_at`], this operation must not adjust the file's
     /// internal cursor. Implementations can default to returning
     /// `StreamError::NotSupported` when random-access writes are unavailable.
+    ///
+    /// # Arguments
+    /// * `offset` - Absolute byte offset to write to.
+    /// * `buffer` - Source bytes; successful writes may consume only a prefix.
+    ///
+    /// # Returns
+    /// The byte count written, or an error. The default implementation returns
+    /// `StreamError::NotSupported`; success does not itself guarantee durability.
     fn write_at(&self, offset: u64, buffer: &[u8]) -> Result<usize, StreamError> {
         let _ = (offset, buffer);
         Err(StreamError::NotSupported)
@@ -82,9 +111,15 @@ pub trait FileObject: StreamOps + ControlOps + MemoryMappingOps + Selectable {
 
     /// Synchronize file content to storage
     ///
-    /// This method ensures that any buffered changes to the file are written
-    /// to the underlying storage device. This is important for filesystems
-    /// that cache file content in memory.
+    /// Implementations that cache file content must override this hook to write
+    /// buffered changes to their backing storage, or report that synchronization
+    /// is unsupported. The default implementation returns success without doing
+    /// I/O; it is intended for objects with no pending content to flush, not as
+    /// a general guarantee of storage-device durability.
+    ///
+    /// # Arguments
+    ///
+    /// * `self` - File object whose buffered content is to be synchronized.
     ///
     /// # Returns
     ///
@@ -99,5 +134,12 @@ pub trait FileObject: StreamOps + ControlOps + MemoryMappingOps + Selectable {
         Ok(())
     }
 
+    /// Borrow the concrete file object for downcasting.
+    ///
+    /// # Arguments
+    /// * `self` - File object to inspect.
+    ///
+    /// # Returns
+    /// A type-erased borrow with the same lifetime as `self`.
     fn as_any(&self) -> &dyn Any;
 }

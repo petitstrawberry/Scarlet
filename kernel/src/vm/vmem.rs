@@ -1,5 +1,9 @@
+//! Memory-range and mapping descriptors; constructing one does not allocate memory
+//! or install page-table entries. [`MemoryArea`] uses inclusive end addresses.
+
 use crate::object::capability::memory_mapping::MemoryMappingOps;
-use alloc::sync::Weak;
+use alloc::sync::Arc;
+use core::fmt;
 
 /// Represents a mapping between physical and virtual memory areas.
 ///
@@ -10,83 +14,172 @@ use alloc::sync::Weak;
 ///
 /// * `pmarea` - The physical memory area that is being mapped
 /// * `vmarea` - The virtual memory area where the physical memory is mapped to
+/// * `vm_start` - The original virtual address where this mapping was first created.
+///   Preserved across split operations so that owner-based page fault resolution can
+///   compute correct page indices even after partial unmapping.
 /// * `permissions` - The access permissions for this mapping
 /// * `is_shared` - Whether this mapping is shared between processes
-/// * `owner` - Optional weak reference to the object that created this mapping (None for anonymous mappings)
-#[derive(Debug, Clone)]
+/// * `memory_attribute` - Cacheability/device attribute requested for this mapping
+/// * `owner` - Optional strong reference to the object that provides page fault resolution.
+///   The mapping owns this reference, so the owner stays alive as long as the mapping exists.
+#[derive(Clone)]
 pub struct VirtualMemoryMap {
     pub pmarea: MemoryArea,
     pub vmarea: MemoryArea,
+    pub vm_start: usize,
     pub permissions: usize,
     pub is_shared: bool,
-    pub owner: Option<Weak<dyn MemoryMappingOps>>,
+    pub memory_attribute: MemoryAttribute,
+    pub owner: Option<Arc<dyn MemoryMappingOps>>,
+}
+
+impl fmt::Debug for VirtualMemoryMap {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("VirtualMemoryMap")
+            .field("pmarea", &self.pmarea)
+            .field("vmarea", &self.vmarea)
+            .field("vm_start", &self.vm_start)
+            .field("permissions", &self.permissions)
+            .field("is_shared", &self.is_shared)
+            .field("memory_attribute", &self.memory_attribute)
+            .field("has_owner", &self.owner.is_some())
+            .finish()
+    }
+}
+
+impl Default for VirtualMemoryMap {
+    fn default() -> Self {
+        Self {
+            pmarea: MemoryArea::new(0, 0),
+            vmarea: MemoryArea::new(0, 0),
+            vm_start: 0,
+            permissions: 0,
+            is_shared: false,
+            memory_attribute: MemoryAttribute::Normal,
+            owner: None,
+        }
+    }
 }
 
 impl VirtualMemoryMap {
     /// Creates a new virtual memory map with the given physical and virtual memory areas.
+    ///
+    /// This only constructs a descriptor. It does not validate the ranges or
+    /// install a mapping in a page table.
     ///
     /// # Arguments
     /// * `pmarea` - The physical memory area to map
     /// * `vmarea` - The virtual memory area to map to
     /// * `permissions` - The permissions to set for the virtual memory area
     /// * `is_shared` - Whether this memory map should be shared between tasks
-    /// * `owner` - Optional weak reference to the object that created this mapping (None for anonymous mappings)
+    /// * `owner` - Optional strong reference retained by this descriptor. `None`
+    ///   means that no object supplies owner-based fault resolution for the mapping.
     ///
     /// # Returns
-    /// A new virtual memory map with the given physical and virtual memory areas.
+    /// A new virtual memory map with the given physical and virtual memory areas,
+    /// `vm_start` set to `vmarea.start`, and the `Normal` memory attribute.
     pub fn new(
         pmarea: MemoryArea,
         vmarea: MemoryArea,
         permissions: usize,
         is_shared: bool,
-        owner: Option<Weak<dyn MemoryMappingOps>>,
+        owner: Option<Arc<dyn MemoryMappingOps>>,
     ) -> Self {
         VirtualMemoryMap {
             pmarea,
             vmarea,
+            vm_start: vmarea.start,
             permissions,
             is_shared,
+            memory_attribute: MemoryAttribute::Normal,
             owner,
         }
     }
 
-    /// Returns the physical address corresponding to the given virtual address.
+    /// Returns this mapping with the requested memory attribute.
     ///
     /// # Arguments
-    /// * `vaddr` - The virtual address to translate
+    /// * `memory_attribute` - Cacheability/device attribute to apply when installing the mapping
     ///
     /// # Returns
-    /// The physical address corresponding to the given virtual address, if it exists.
-    /// If the virtual address is not part of the memory map, `None` is returned.
-    pub fn get_paddr(&self, vaddr: usize) -> Option<usize> {
-        if self.vmarea.start <= vaddr && vaddr <= self.vmarea.end {
-            Some(self.pmarea.start + (vaddr - self.vmarea.start))
-        } else {
-            None
-        }
+    /// The mapping descriptor with the supplied memory attribute.
+    pub fn with_memory_attribute(mut self, memory_attribute: MemoryAttribute) -> Self {
+        self.memory_attribute = memory_attribute;
+        self
     }
 }
 
+/// Cacheability and device attributes for a virtual memory mapping.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoryAttribute {
+    /// Normal cacheable memory.
+    Normal,
+    /// Normal memory without CPU cache allocation.
+    NonCacheable,
+    /// Device memory for bulk write windows where writes may be gathered.
+    ///
+    /// This is intended for device-backed buffers such as framebuffers or VRAM.
+    /// Use [`MemoryAttribute::Device`] for MMIO registers with side effects.
+    DeviceBurstable,
+    /// Device memory for MMIO regions.
+    Device,
+}
+
+/// An inclusive address range, without ownership or mapping validation.
+///
+/// The caller determines whether the addresses are physical or virtual. Copying
+/// this descriptor does not copy, retain, or map the underlying memory.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MemoryArea {
+    /// First address in the range.
     pub start: usize,
+    /// Last address in the range, inclusive.
     pub end: usize,
 }
 
 impl MemoryArea {
     /// Creates a new memory area with the given start and end addresses
+    ///
+    /// # Arguments
+    ///
+    /// * `start` - First address in the range.
+    /// * `end` - Inclusive last address; not an exclusive bound.
+    ///
+    /// # Returns
+    ///
+    /// An unchecked range descriptor. No memory is allocated or accessed.
     pub fn new(start: usize, end: usize) -> Self {
         Self { start, end }
     }
 
     /// Creates a new memory area from a pointer and size
-    pub fn from_ptr(ptr: *const u8, size: usize) -> Self {
+    ///
+    /// # Arguments
+    ///
+    /// * `ptr` - Address to record; this constructor does not dereference it.
+    /// * `size` - Nonzero byte count. The inclusive last address must fit in `usize`.
+    ///
+    /// # Returns
+    ///
+    /// A descriptor of the supplied addresses, without retaining the allocation,
+    /// or `None` for zero bytes or address overflow. Inclusive ranges cannot
+    /// represent an empty allocation; a single byte at `usize::MAX` is valid.
+    pub fn from_ptr(ptr: *const u8, size: usize) -> Option<Self> {
         let start = ptr as usize;
-        let end = if size > 0 { start + size - 1 } else { start };
-        Self { start, end }
+        let end = start.checked_add(size.checked_sub(1)?)?;
+        Some(Self { start, end })
     }
 
     /// Returns the size of the memory area in bytes
+    ///
+    /// # Returns
+    ///
+    /// `end - start + 1`. The inclusive byte count must fit in `usize`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `start > end`, or on arithmetic overflow when overflow checks
+    /// are enabled.
     pub fn size(&self) -> usize {
         if self.start > self.end {
             panic!(
@@ -99,10 +192,17 @@ impl MemoryArea {
 
     /// Returns a slice reference to the memory area
     ///
+    /// # Arguments
+    ///
+    /// * `self` - An inclusive range of kernel virtual addresses, not physical addresses.
+    ///
     /// # Safety
-    /// This function assumes that the start and end of MemoryArea point to valid memory ranges.
-    /// If not, undefined behavior may occur.
-    /// Therefore, make sure that MemoryArea points to a valid range before using this function.
+    /// The entire range must be non-null, readable, initialized memory within a
+    /// single live allocation, with a representable length no greater than
+    /// `isize::MAX`. It must remain mapped and allocated for the returned borrow.
+    /// No writes, including concurrent CPU or DMA writes, may occur during that
+    /// borrow. The descriptor itself does not establish any of these conditions;
+    /// violating them can cause undefined behavior.
     ///
     /// # Returns
     ///
@@ -114,10 +214,19 @@ impl MemoryArea {
 
     /// Returns a mutable slice reference to the memory area
     ///
+    /// # Arguments
+    ///
+    /// * `self` - An inclusive range of kernel virtual addresses, not physical addresses.
+    ///
     /// # Safety
-    /// This function assumes that the start and end of MemoryArea point to valid memory ranges.
-    /// If not, undefined behavior may occur.
-    /// Therefore, make sure that MemoryArea points to a valid range before using this function.
+    /// The entire range must be non-null, readable and writable, initialized
+    /// memory within a single live allocation, with a representable length no
+    /// greater than `isize::MAX`. It must remain mapped and allocated for the
+    /// returned borrow. The caller must guarantee exclusive access for that
+    /// lifetime: no overlapping references or concurrent CPU/DMA accesses are
+    /// allowed, including accesses through copies of this descriptor. A shared
+    /// borrow of `MemoryArea` does not enforce this exclusivity. Violating these
+    /// conditions can cause undefined behavior.
     ///
     /// # Returns
     ///
@@ -125,6 +234,40 @@ impl MemoryArea {
     ///
     pub unsafe fn as_slice_mut(&self) -> &mut [u8] {
         unsafe { core::slice::from_raw_parts_mut(self.start as *mut u8, self.size()) }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::MemoryArea;
+
+    #[test_case]
+    fn memory_area_from_ptr_rejects_empty_ranges() {
+        for address in [0, 0x1000, usize::MAX] {
+            assert_eq!(MemoryArea::from_ptr(address as *const u8, 0), None);
+        }
+    }
+
+    #[test_case]
+    fn memory_area_from_ptr_preserves_inclusive_bounds() {
+        for (address, size) in [(0, 1), (0x1000, 4096), (usize::MAX, 1)] {
+            let area = MemoryArea::from_ptr(address as *const u8, size)
+                .expect("nonempty representable range");
+            assert_eq!(area.start, address);
+            assert_eq!(area.end, address + (size - 1));
+            assert_eq!(area.size(), size);
+        }
+    }
+
+    #[test_case]
+    fn memory_area_from_ptr_rejects_overflow() {
+        assert_eq!(MemoryArea::from_ptr(usize::MAX as *const u8, 2), None);
+        let address = (usize::MAX - 3) as *const u8;
+        assert_eq!(MemoryArea::from_ptr(address, 5), None);
+        assert_eq!(
+            MemoryArea::from_ptr(address, 4),
+            Some(MemoryArea::new(usize::MAX - 3, usize::MAX))
+        );
     }
 }
 

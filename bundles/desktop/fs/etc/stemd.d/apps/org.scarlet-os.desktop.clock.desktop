@@ -1,0 +1,6 @@
+[Desktop Entry]
+Name=Clock
+Exec=/bin/clock
+Icon=preferences-system-time
+Type=Application
+Terminal=false

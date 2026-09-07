@@ -1,0 +1,12 @@
+# Default network configuration. Files in this directory are read in lexical
+# order, and later exact interface entries override this wildcard.
+
+[network]
+dhcp_timeout_ms = 1500
+dhcp_attempts = 3
+
+[[interface]]
+name = "*"
+method = "dhcp"
+metric = 100
+required = false

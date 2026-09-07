@@ -1,0 +1,6 @@
+# External applications such as yt select their cross compilers this way.
+# Do not use force=true: the development shell must respect these defaults.
+[env]
+CC_riscv64gc_unknown_scarlet = "riscv64-unknown-linux-gnu-gcc"
+CFLAGS_riscv64gc_unknown_scarlet = "-march=rv64gc -mabi=lp64d"
+CC_aarch64_unknown_scarlet = "aarch64-unknown-linux-gnu-gcc"

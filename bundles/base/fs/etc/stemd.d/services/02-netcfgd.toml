@@ -1,0 +1,7 @@
+# Stem Daemon Configuration File
+
+[service.netcfgd]
+exec = "/bin/netcfgd"
+depends = ["sbusd"]
+ready_notify = true
+ready_timeout_ms = 120000

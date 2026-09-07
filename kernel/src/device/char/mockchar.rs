@@ -1,6 +1,6 @@
+use crate::sync::IrqSpinLock;
 use alloc::vec::Vec;
 use core::any::Any;
-use spin::Mutex;
 
 use super::{
     super::{Device, DeviceType},
@@ -15,8 +15,8 @@ use crate::object::capability::{ControlOps, MemoryMappingOps};
 pub struct MockCharDevice {
     name: &'static str,
     read_buffer: Vec<u8>,
-    write_buffer: Mutex<Vec<u8>>,
-    read_index: Mutex<usize>,
+    write_buffer: IrqSpinLock<Vec<u8>>,
+    read_index: IrqSpinLock<usize>,
 }
 
 impl MockCharDevice {
@@ -24,8 +24,8 @@ impl MockCharDevice {
         Self {
             name,
             read_buffer: Vec::new(),
-            write_buffer: Mutex::new(Vec::new()),
-            read_index: Mutex::new(0),
+            write_buffer: IrqSpinLock::new(Vec::new()),
+            read_index: IrqSpinLock::new(0),
         }
     }
 
@@ -90,6 +90,11 @@ impl CharDevice for MockCharDevice {
         Ok(())
     }
 
+    fn write(&self, buffer: &[u8]) -> Result<usize, &'static str> {
+        self.write_buffer.lock().extend_from_slice(buffer);
+        Ok(buffer.len())
+    }
+
     fn can_read(&self) -> bool {
         *self.read_index.lock() < self.read_buffer.len()
     }
@@ -111,7 +116,7 @@ impl MemoryMappingOps for MockCharDevice {
         &self,
         _offset: usize,
         _length: usize,
-    ) -> Result<(usize, usize, bool), &'static str> {
+    ) -> Result<crate::object::capability::MemoryMappingInfo, &'static str> {
         Err("Memory mapping not supported by mock character device")
     }
 
@@ -148,6 +153,7 @@ impl Selectable for MockCharDevice {
         _interest: ReadyInterest,
         _trapframe: &mut crate::arch::Trapframe,
         _timeout_ticks: Option<u64>,
+        _min_wait_ticks: u64,
     ) -> SelectWaitOutcome {
         // Mock: do not actually block
         SelectWaitOutcome::Ready

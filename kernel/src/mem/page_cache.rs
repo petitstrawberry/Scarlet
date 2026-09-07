@@ -32,12 +32,12 @@
 //! PageCacheManager::global().unpin(cache_id, page_index);
 //! ```
 
+use crate::sync::IrqRwSpinLock;
 use alloc::collections::BTreeMap;
 use core::sync::atomic::{AtomicUsize, Ordering};
-use spin::RwLock;
 
 use crate::fs::vfs_v2::cache::CacheId;
-use crate::mem::page::allocate_boxed_pages;
+use crate::mem::page::ContiguousPages;
 
 /// Page index within a file (0, 1, 2, ...)
 pub type PageIndex = u64;
@@ -47,8 +47,8 @@ pub type PhysicalAddress = usize;
 
 /// Entry in the page cache representing a single cached page
 pub struct PageCacheEntry {
-    /// Physical address of the cached page
-    paddr: PhysicalAddress,
+    /// Page allocation from PMM (owns the memory)
+    allocation: ContiguousPages,
     /// Pin count - number of active short-term accesses
     /// Pages with pin_count > 0 cannot be evicted
     pin_count: AtomicUsize,
@@ -58,9 +58,9 @@ pub struct PageCacheEntry {
 
 impl PageCacheEntry {
     /// Create a new page cache entry
-    fn new(paddr: PhysicalAddress) -> Self {
+    fn new(allocation: ContiguousPages) -> Self {
         Self {
-            paddr,
+            allocation,
             pin_count: AtomicUsize::new(0),
             is_dirty: AtomicUsize::new(0),
         }
@@ -69,7 +69,7 @@ impl PageCacheEntry {
     /// Get the physical address
     #[inline]
     pub fn paddr(&self) -> PhysicalAddress {
-        self.paddr
+        self.allocation.as_paddr()
     }
 
     /// Increment pin count
@@ -109,18 +109,27 @@ impl PageCacheEntry {
 /// as the key to uniquely identify pages across the entire system.
 pub struct PageCacheManager {
     /// Map from (CacheId, PageIndex) to cached page entry
-    entries: RwLock<BTreeMap<(CacheId, PageIndex), PageCacheEntry>>,
+    entries: IrqRwSpinLock<BTreeMap<(CacheId, PageIndex), PageCacheEntry>>,
+    /// Live metadata shared by all handles to page-cache-backed files.
+    object_metadata: IrqRwSpinLock<BTreeMap<CacheId, CachedObjectMetadata>>,
     /// Object-level lock counts for eviction prevention
     /// Maps CacheId to lock count (>0 means object is unevictable)
-    object_locks: RwLock<BTreeMap<CacheId, usize>>,
+    object_locks: IrqRwSpinLock<BTreeMap<CacheId, usize>>,
+}
+
+#[derive(Clone, Copy)]
+struct CachedObjectMetadata {
+    size: usize,
+    modified_time: Option<u64>,
 }
 
 impl PageCacheManager {
     /// Create a new empty page cache manager
     pub const fn new() -> Self {
         Self {
-            entries: RwLock::new(BTreeMap::new()),
-            object_locks: RwLock::new(BTreeMap::new()),
+            entries: IrqRwSpinLock::new(BTreeMap::new()),
+            object_metadata: IrqRwSpinLock::new(BTreeMap::new()),
+            object_locks: IrqRwSpinLock::new(BTreeMap::new()),
         }
     }
 
@@ -160,10 +169,10 @@ impl PageCacheManager {
             return Ok(entry.paddr());
         }
 
-        // Slow path: allocate new page and load content (may race; acceptable)
-        let mut boxed_pages = allocate_boxed_pages(1);
-        let page_ptr = boxed_pages.as_mut_ptr();
-        let paddr = page_ptr as PhysicalAddress;
+        // Slow path: allocate new page from PMM and load content (may race; acceptable)
+        let allocation =
+            ContiguousPages::new(1).ok_or("Failed to allocate page from PMM for cache")?;
+        let paddr = allocation.as_paddr();
 
         // Call loader to fill the page with content
         loader(paddr)?;
@@ -177,12 +186,9 @@ impl PageCacheManager {
         }
 
         // Create cache entry with pin_count = 1 and insert
-        let entry = PageCacheEntry::new(paddr);
+        let entry = PageCacheEntry::new(allocation);
         entry.pin();
         map.insert(key, entry);
-
-        // Leak the box to prevent deallocation - we manage it manually now
-        core::mem::forget(boxed_pages);
 
         Ok(paddr)
     }
@@ -216,6 +222,55 @@ impl PageCacheManager {
         if let Some(entry) = self.entries.read().get(&(id, index)) {
             entry.mark_dirty();
         }
+    }
+
+    /// Record the current cached size for an object.
+    pub fn record_object_size(&self, id: CacheId, size: usize) {
+        self.object_metadata
+            .write()
+            .entry(id)
+            .or_insert(CachedObjectMetadata {
+                size,
+                modified_time: None,
+            })
+            .size = size;
+    }
+
+    /// Return the current cached size for an object if one has been recorded.
+    pub fn cached_object_size(&self, id: CacheId) -> Option<usize> {
+        self.object_metadata.read().get(&id).map(|meta| meta.size)
+    }
+
+    /// Record a completed write without shrinking the file on an overwrite.
+    ///
+    /// `write_end` is the first byte after the written range. `stored_size` is
+    /// used only when no live size has been recorded, so stale on-disk metadata
+    /// cannot undo a cached truncation. `modified_time` is Unix time in seconds;
+    /// `None` preserves the previous timestamp when the wall clock is unavailable.
+    pub fn record_object_write(
+        &self,
+        id: CacheId,
+        write_end: usize,
+        stored_size: usize,
+        modified_time: Option<u64>,
+    ) {
+        let mut objects = self.object_metadata.write();
+        let metadata = objects.entry(id).or_insert(CachedObjectMetadata {
+            size: stored_size,
+            modified_time: None,
+        });
+        metadata.size = metadata.size.max(write_end);
+        if let Some(time) = modified_time {
+            metadata.modified_time = Some(time);
+        }
+    }
+
+    /// Return the last cached write time in seconds since the Unix epoch.
+    pub fn cached_object_modified_time(&self, id: CacheId) -> Option<u64> {
+        self.object_metadata
+            .read()
+            .get(&id)
+            .and_then(|metadata| metadata.modified_time)
     }
 
     /// Set object-level lock (prevents eviction of all pages for this object)
@@ -274,6 +329,48 @@ impl PageCacheManager {
         Ok(())
     }
 
+    /// Flush all currently unpinned dirty pages for one object in a single
+    /// filesystem transaction.
+    ///
+    /// Filesystems that need to allocate block maps or update inode metadata
+    /// should prefer this over [`Self::flush`]. The batch callback can retain a
+    /// bounded write buffer and commit the inode once instead of rebuilding
+    /// whole-file state for every page.
+    pub fn flush_batch<F>(&self, id: CacheId, writer: F) -> Result<(), &'static str>
+    where
+        F: FnOnce(&[(PageIndex, PhysicalAddress)]) -> Result<(), &'static str>,
+    {
+        let targets = {
+            let map = self.entries.read();
+            map.iter()
+                .filter_map(|(&(cache_id, page_index), entry)| {
+                    (cache_id == id && entry.is_dirty() && entry.pin_count() == 0)
+                        .then_some((page_index, entry.paddr()))
+                })
+                .collect::<alloc::vec::Vec<_>>()
+        };
+
+        if targets.is_empty() {
+            return Ok(());
+        }
+        writer(&targets)?;
+        let map = self.entries.read();
+        for (page_index, _) in targets {
+            if let Some(entry) = map.get(&(id, page_index)) {
+                entry.is_dirty.store(0, Ordering::SeqCst);
+            }
+        }
+        Ok(())
+    }
+
+    /// Return whether an object still owns any dirty cache page.
+    pub fn has_dirty_pages(&self, id: CacheId) -> bool {
+        self.entries
+            .read()
+            .iter()
+            .any(|(&(cache_id, _), entry)| cache_id == id && entry.is_dirty())
+    }
+
     /// Get or load a page and return an RAII guard that unpins on drop.
     #[inline]
     pub fn pin_or_load<F>(
@@ -312,13 +409,13 @@ impl PageCacheManager {
                 }
             }
         }
-        if to_remove.is_empty() {
-            return;
+        if !to_remove.is_empty() {
+            let mut map = self.entries.write();
+            for key in to_remove.into_iter() {
+                map.remove(&key);
+            }
         }
-        let mut map = self.entries.write();
-        for key in to_remove.into_iter() {
-            map.remove(&key);
-        }
+        self.object_metadata.write().remove(&id);
     }
 }
 
@@ -371,6 +468,46 @@ pub static GLOBAL_PAGE_CACHE: PageCacheManager = PageCacheManager::new();
 
 // TODO (Phase 2): Replace single global structure with sharded structure:
 // - Hash (CacheId, PageIndex) -> shard index (e.g. 16 or 32 shards)
-// - Each shard: Mutex/PageCacheShard { entries }
+// - Each shard: IrqSpinLock/PageCacheShard { entries }
 // - object_locks separated or distributed
 // Instance methods remain the stable API; callers use PageCacheManager::global().
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test_case]
+    fn overwrite_preserves_size_and_updates_timestamp() {
+        let cache = PageCacheManager::new();
+        let id = CacheId::new(1);
+        cache.record_object_write(id, 20, 100, Some(123));
+        assert_eq!(cache.cached_object_size(id), Some(100));
+        assert_eq!(cache.cached_object_modified_time(id), Some(123));
+
+        cache.record_object_write(id, 200, 100, Some(124));
+        cache.record_object_write(id, 50, 100, None);
+        assert_eq!(cache.cached_object_size(id), Some(200));
+        assert_eq!(cache.cached_object_modified_time(id), Some(124));
+    }
+
+    #[test_case]
+    fn write_after_truncate_ignores_stale_stored_size() {
+        let cache = PageCacheManager::new();
+        let id = CacheId::new(1);
+        cache.record_object_write(id, 200, 100, Some(123));
+        cache.record_object_size(id, 10);
+        cache.record_object_write(id, 20, 200, Some(124));
+        assert_eq!(cache.cached_object_size(id), Some(20));
+        assert_eq!(cache.cached_object_modified_time(id), Some(124));
+    }
+
+    #[test_case]
+    fn invalidate_removes_metadata_without_cached_pages() {
+        let cache = PageCacheManager::new();
+        let id = CacheId::new(1);
+        cache.record_object_write(id, 20, 100, Some(123));
+        cache.invalidate(id);
+        assert_eq!(cache.cached_object_size(id), None);
+        assert_eq!(cache.cached_object_modified_time(id), None);
+    }
+}

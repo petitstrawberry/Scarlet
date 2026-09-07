@@ -1,8 +1,27 @@
 //! HandleTable tests
 
-use super::super::{Handle, HandleTable, KernelObject};
-use super::mock::MockFileObject;
+use super::super::{AccessMode, Handle, HandleMetadata, HandleTable, HandleType, KernelObject};
+use super::mock::{MockFileObject, MockPipeObject};
+use crate::device::gpu::GpuObject;
+use crate::ipc::pipe::PipeObject;
 use alloc::{format, sync::Arc, vec::Vec};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+struct ReentrantDropGpuObject {
+    table: HandleTable,
+    dropped: Arc<AtomicBool>,
+    observed_open_count: Arc<AtomicUsize>,
+}
+
+impl GpuObject for ReentrantDropGpuObject {}
+
+impl Drop for ReentrantDropGpuObject {
+    fn drop(&mut self) {
+        self.observed_open_count
+            .store(self.table.open_count(), Ordering::SeqCst);
+        self.dropped.store(true, Ordering::SeqCst);
+    }
+}
 
 #[test_case]
 fn test_handle_table_creation() {
@@ -30,6 +49,137 @@ fn test_handle_table_insert_and_get() {
     // Verify handle validity
     assert!(table.is_valid_handle(handle));
     assert!(!table.is_valid_handle(9999)); // Invalid handle
+}
+
+#[test_case]
+fn test_handle_table_get_pins_object_across_shared_close() {
+    let table = HandleTable::new();
+    let shared_table = table.clone();
+    let mock_file = Arc::new(MockFileObject::new(b"pinned".to_vec()));
+    let handle = table.insert(KernelObject::File(mock_file.clone())).unwrap();
+
+    let object = table.get(handle).unwrap();
+    assert_eq!(Arc::strong_count(&mock_file), 3);
+
+    drop(shared_table.remove(handle).unwrap());
+    assert!(table.get(handle).is_none());
+    assert_eq!(Arc::strong_count(&mock_file), 2);
+
+    let replacement = Arc::new(MockFileObject::new(b"newest".to_vec()));
+    let reused_handle = shared_table
+        .insert(KernelObject::File(replacement.clone()))
+        .unwrap();
+    assert_eq!(reused_handle, handle);
+
+    let replacement_object = table.get(reused_handle).unwrap();
+    let mut old_bytes = [0u8; 6];
+    let mut new_bytes = [0u8; 6];
+    assert_eq!(object.as_stream().unwrap().read(&mut old_bytes).unwrap(), 6);
+    assert_eq!(
+        replacement_object
+            .as_stream()
+            .unwrap()
+            .read(&mut new_bytes)
+            .unwrap(),
+        6
+    );
+    assert_eq!(&old_bytes, b"pinned");
+    assert_eq!(&new_bytes, b"newest");
+
+    drop(object);
+    assert_eq!(Arc::strong_count(&mock_file), 1);
+}
+
+#[test_case]
+fn test_handle_table_get_uses_arc_clone_not_dup_semantics() {
+    let table = HandleTable::new();
+    let pipe: Arc<dyn PipeObject> = Arc::new(MockPipeObject::new());
+    let handle = table.insert(KernelObject::Pipe(Arc::clone(&pipe))).unwrap();
+
+    let object = table.get(handle).unwrap();
+    let retrieved_pipe = match object {
+        KernelObject::Pipe(pipe) => pipe,
+        _ => panic!("get should retain the pipe object type"),
+    };
+
+    assert!(Arc::ptr_eq(&pipe, &retrieved_pipe));
+}
+
+#[test_case]
+fn test_handle_table_with_object_ref_does_not_clone_arc() {
+    let table = HandleTable::new();
+    let mock_file = Arc::new(MockFileObject::new(b"borrowed".to_vec()));
+    let kernel_obj = KernelObject::File(mock_file.clone());
+
+    let handle = table.insert(kernel_obj).unwrap();
+    let count_before = Arc::strong_count(&mock_file);
+
+    let has_stream = table
+        .with_object_ref(handle, |object| object.as_stream().is_some())
+        .unwrap();
+
+    assert!(has_stream);
+    assert_eq!(Arc::strong_count(&mock_file), count_before);
+    assert!(table.with_object_ref(999, |_| true).is_none());
+}
+
+#[test_case]
+fn test_handle_table_get_arc_clone_with_metadata() {
+    let table = HandleTable::new();
+    let mock_file: Arc<dyn crate::fs::FileObject> =
+        Arc::new(MockFileObject::new(b"paired lookup".to_vec()));
+    let metadata = HandleMetadata {
+        handle_type: HandleType::IpcChannel,
+        access_mode: AccessMode::ReadOnly,
+        special_semantics: None,
+    };
+    let handle = table
+        .insert_with_metadata(KernelObject::File(Arc::clone(&mock_file)), metadata)
+        .unwrap();
+    let count_before = Arc::strong_count(&mock_file);
+
+    let (object, metadata) = table.get_arc_clone_with_metadata(handle).unwrap();
+    assert!(matches!(&object, KernelObject::File(_)));
+    assert_eq!(metadata.handle_type, HandleType::IpcChannel);
+    assert_eq!(metadata.access_mode, AccessMode::ReadOnly);
+    assert_eq!(Arc::strong_count(&mock_file), count_before + 1);
+
+    drop(object);
+    assert_eq!(Arc::strong_count(&mock_file), count_before);
+    assert!(
+        table
+            .get_arc_clone_with_metadata(HandleTable::MAX_HANDLES as Handle)
+            .is_none()
+    );
+    table.remove(handle);
+    assert!(table.get_arc_clone_with_metadata(handle).is_none());
+}
+
+#[test_case]
+fn test_handle_table_clone_for_dup_preserves_metadata() {
+    let table = HandleTable::new();
+    let pipe: Arc<dyn PipeObject> = Arc::new(MockPipeObject::new());
+    let metadata = HandleMetadata {
+        handle_type: HandleType::IpcChannel,
+        access_mode: AccessMode::WriteOnly,
+        special_semantics: None,
+    };
+    let handle = table
+        .insert_with_metadata(KernelObject::Pipe(Arc::clone(&pipe)), metadata)
+        .unwrap();
+
+    let (object, duplicated_metadata) = table.clone_for_dup(handle).unwrap();
+
+    let duplicated_pipe = match object {
+        KernelObject::Pipe(pipe) => pipe,
+        _ => panic!("clone_for_dup should retain the pipe object type"),
+    };
+    assert!(
+        !Arc::ptr_eq(&pipe, &duplicated_pipe),
+        "clone_for_dup must use the pipe's custom clone semantics"
+    );
+    assert_eq!(duplicated_metadata.handle_type, HandleType::IpcChannel);
+    assert_eq!(duplicated_metadata.access_mode, AccessMode::WriteOnly);
 }
 
 #[test_case]
@@ -101,6 +251,25 @@ fn test_handle_table_close_all() {
     assert_eq!(table.open_count(), 0);
     assert_eq!(table.active_handles().len(), 0);
     assert_eq!(table.free_handles_len(), HandleTable::MAX_HANDLES);
+}
+
+#[test_case]
+fn test_handle_table_close_all_drops_objects_after_unlock() {
+    let table = HandleTable::new();
+    let dropped = Arc::new(AtomicBool::new(false));
+    let observed_open_count = Arc::new(AtomicUsize::new(usize::MAX));
+    let object: Arc<dyn GpuObject> = Arc::new(ReentrantDropGpuObject {
+        table: table.clone(),
+        dropped: Arc::clone(&dropped),
+        observed_open_count: Arc::clone(&observed_open_count),
+    });
+
+    table.insert(KernelObject::Gpu(object)).unwrap();
+    table.close_all();
+
+    assert!(dropped.load(Ordering::SeqCst));
+    assert_eq!(observed_open_count.load(Ordering::SeqCst), 0);
+    assert_eq!(table.open_count(), 0);
 }
 
 #[test_case]
@@ -357,4 +526,91 @@ fn test_handle_table_deep_clone() {
     assert!(!table2.is_valid_handle(handle)); // table2 no longer has it
     assert_eq!(table1.open_count(), 1);
     assert_eq!(table2.open_count(), 0);
+}
+
+#[cfg(feature = "network")]
+#[test_case]
+fn close_all_closes_named_socket_while_inflight_clone_survives() {
+    use crate::network::local::LocalSocket;
+    use crate::network::{
+        LocalSocketAddress, NetworkManager, SocketAddress, SocketError, SocketObject,
+        SocketProtocol, SocketState, SocketType,
+    };
+
+    let table = HandleTable::new();
+    let path = "/handle-table-close-retained-socket";
+    let socket: Arc<dyn SocketObject> = Arc::new(LocalSocket::new(
+        SocketType::Stream,
+        SocketProtocol::Default,
+    ));
+    socket
+        .bind(&SocketAddress::Local(
+            LocalSocketAddress::from_path(path).unwrap(),
+        ))
+        .unwrap();
+    socket.listen(1).unwrap();
+
+    let manager = NetworkManager::get_manager();
+    manager.allocate_socket_id(Arc::clone(&socket)).unwrap();
+    manager
+        .register_named_socket(path, Arc::clone(&socket))
+        .unwrap();
+    let handle = table
+        .insert(KernelObject::from_socket_object(Arc::clone(&socket)))
+        .unwrap();
+    let in_flight = table.get(handle).unwrap();
+
+    table.close_all();
+
+    assert_eq!(socket.state(), SocketState::Closed);
+    assert!(matches!(
+        manager.lookup_named_socket(path),
+        Err(SocketError::ConnectionRefused)
+    ));
+    assert_eq!(table.open_count(), 0);
+    drop(in_flight);
+}
+
+#[cfg(feature = "network")]
+#[test_case]
+fn duplicated_socket_reference_defers_final_listener_close() {
+    use crate::network::local::LocalSocket;
+    use crate::network::{
+        LocalSocketAddress, NetworkManager, SocketAddress, SocketObject, SocketProtocol,
+        SocketState, SocketType,
+    };
+
+    let table = HandleTable::new();
+    let path = "/duplicated-socket-defers-close";
+    let socket: Arc<dyn SocketObject> = Arc::new(LocalSocket::new(
+        SocketType::Stream,
+        SocketProtocol::Default,
+    ));
+    socket
+        .bind(&SocketAddress::Local(
+            LocalSocketAddress::from_path(path).unwrap(),
+        ))
+        .unwrap();
+    socket.listen(1).unwrap();
+
+    let manager = NetworkManager::get_manager();
+    manager.allocate_socket_id(Arc::clone(&socket)).unwrap();
+    manager
+        .register_named_socket(path, Arc::clone(&socket))
+        .unwrap();
+    let handle = table
+        .insert(KernelObject::from_socket_object(Arc::clone(&socket)))
+        .unwrap();
+    let (duplicate, _) = table.clone_for_dup(handle).unwrap();
+
+    table.close_all();
+    assert_eq!(socket.state(), SocketState::Listening);
+    assert!(Arc::ptr_eq(
+        &manager.lookup_named_socket(path).unwrap(),
+        &socket
+    ));
+
+    drop(duplicate);
+    assert_eq!(socket.state(), SocketState::Closed);
+    assert!(manager.lookup_named_socket(path).is_err());
 }

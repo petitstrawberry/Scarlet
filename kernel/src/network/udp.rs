@@ -3,13 +3,12 @@
 //! This module provides UDP datagram handling for the network stack.
 //! It implements the NetworkLayer trait and provides UDP socket functionality.
 
+use crate::sync::{IrqRwSpinLock, IrqSpinLock};
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
-use spin::{Mutex, RwLock};
 
-use crate::early_println;
 use crate::network::Ipv4Address;
 use crate::network::protocol_stack::get_network_manager;
 use crate::network::protocol_stack::{LayerContext, NetworkLayer, NetworkLayerStats, SocketConfig};
@@ -17,24 +16,58 @@ use crate::network::socket::{
     Inet4SocketAddress, SocketAddress, SocketControl, SocketError, SocketObject, SocketProtocol,
     SocketState, SocketType,
 };
-use crate::object::capability::selectable::Selectable;
+use crate::object::capability::{ControlOps, selectable::Selectable};
+use crate::println;
+use crate::sched::scheduler::current_task_id;
 
-/// Helper function to get local IP address bytes from the default interface
-fn get_local_ip_bytes() -> [u8; 4] {
+const MAX_SOCKET_TIMEOUT_MS: usize = i32::MAX as usize;
+
+/// Select a source address and interface for a UDP destination.
+fn select_local_endpoint(
+    bound_interface: Option<&str>,
+    bound_address: Option<[u8; 4]>,
+    destination: [u8; 4],
+) -> ([u8; 4], Option<String>) {
     let manager = get_network_manager();
-    if let Some(default_iface) = manager.get_default_interface() {
-        if let Some(ip_layer) = manager.get_layer("ip") {
-            if let Some(ipv4_layer) = ip_layer
-                .as_any()
-                .downcast_ref::<crate::network::ipv4::Ipv4Layer>()
-            {
-                if let Some(addr) = ipv4_layer.get_primary_ip(default_iface.name()) {
-                    return addr.as_bytes();
-                }
-            }
-        }
+    let ip_layer = manager.get_layer("ip");
+    let ipv4 = ip_layer.as_ref().and_then(|layer| {
+        layer
+            .as_any()
+            .downcast_ref::<crate::network::ipv4::Ipv4Layer>()
+    });
+
+    if let Some(interface) = bound_interface {
+        let address = match bound_address {
+            Some(address) if address != [0; 4] => address,
+            _ => ipv4
+                .and_then(|layer| layer.get_primary_ip(interface))
+                .map_or([0; 4], |address| address.as_bytes()),
+        };
+        return (address, Some(interface.into()));
     }
-    [0u8; 4]
+
+    if let Some(address) = bound_address
+        && address != [0; 4]
+    {
+        let interface =
+            ipv4.and_then(|layer| layer.interface_for_address(Ipv4Address::from_bytes(address)));
+        return (address, interface);
+    }
+
+    if let Some((interface, address, _)) =
+        ipv4.and_then(|layer| layer.select_source(Ipv4Address::from_bytes(destination)))
+    {
+        return (address.as_bytes(), Some(interface));
+    }
+
+    if let Some(interface) = manager.get_default_interface() {
+        let address = ipv4
+            .and_then(|layer| layer.get_primary_ip(interface.name()))
+            .map_or([0; 4], |address| address.as_bytes());
+        return (address, Some(interface.name().into()));
+    }
+
+    ([0; 4], None)
 }
 
 /// UDP header (8 bytes)
@@ -137,41 +170,50 @@ impl UdpHeader {
 /// Implements SocketObject for UDP datagram communication.
 pub struct UdpSocket {
     /// Local address
-    local_addr: RwLock<Option<SocketAddress>>,
+    local_addr: IrqRwSpinLock<Option<SocketAddress>>,
     /// Remote address (for connected sockets)
-    remote_addr: RwLock<Option<SocketAddress>>,
+    remote_addr: IrqRwSpinLock<Option<SocketAddress>>,
+    /// Interface selected for outgoing datagrams
+    bound_interface: IrqRwSpinLock<Option<String>>,
     /// Send buffer
-    send_buffer: Mutex<Vec<Vec<u8>>>,
+    send_buffer: IrqSpinLock<Vec<Vec<u8>>>,
     /// Receive buffer
-    recv_buffer: Mutex<Vec<Vec<u8>>>,
+    recv_buffer: IrqSpinLock<Vec<Vec<u8>>>,
     /// Socket state
-    state: RwLock<SocketState>,
+    state: IrqRwSpinLock<SocketState>,
     /// Reference to UDP layer
     udp_layer: Arc<UdpLayer>,
     /// Weak self reference for registration
     self_weak: Weak<UdpSocket>,
     /// Receive waker for blocking I/O
-    recv_waker: Mutex<Option<alloc::sync::Arc<crate::sync::Waker>>>,
+    recv_waker: IrqSpinLock<Option<alloc::sync::Arc<crate::sync::Waker>>>,
     /// Send waker for blocking I/O
-    send_waker: Mutex<Option<alloc::sync::Arc<crate::sync::Waker>>>,
+    send_waker: IrqSpinLock<Option<alloc::sync::Arc<crate::sync::Waker>>>,
     /// Blocking mode (default: true)
-    blocking_mode: spin::Mutex<bool>,
+    blocking_mode: IrqSpinLock<bool>,
+    /// Read timeout in milliseconds. Zero means no timeout.
+    read_timeout_ms: IrqSpinLock<u64>,
+    /// Write timeout in milliseconds. Zero means no timeout.
+    write_timeout_ms: IrqSpinLock<u64>,
 }
 
 impl UdpSocket {
     /// Create a new UDP socket
     pub fn new(udp_layer: Arc<UdpLayer>) -> Arc<Self> {
         Arc::new_cyclic(|weak| Self {
-            local_addr: RwLock::new(None),
-            remote_addr: RwLock::new(None),
-            send_buffer: Mutex::new(Vec::new()),
-            recv_buffer: Mutex::new(Vec::new()),
-            state: RwLock::new(SocketState::Unconnected),
+            local_addr: IrqRwSpinLock::new(None),
+            remote_addr: IrqRwSpinLock::new(None),
+            bound_interface: IrqRwSpinLock::new(None),
+            send_buffer: IrqSpinLock::new(Vec::new()),
+            recv_buffer: IrqSpinLock::new(Vec::new()),
+            state: IrqRwSpinLock::new(SocketState::Unconnected),
             udp_layer,
             self_weak: weak.clone(),
-            recv_waker: Mutex::new(None),
-            send_waker: Mutex::new(None),
-            blocking_mode: spin::Mutex::new(true),
+            recv_waker: IrqSpinLock::new(None),
+            send_waker: IrqSpinLock::new(None),
+            blocking_mode: IrqSpinLock::new(true),
+            read_timeout_ms: IrqSpinLock::new(0),
+            write_timeout_ms: IrqSpinLock::new(0),
         })
     }
 
@@ -182,6 +224,112 @@ impl UdpSocket {
         if let Some(waker) = self.recv_waker.lock().as_ref() {
             waker.wake_one();
         }
+    }
+
+    /// Bind outgoing datagrams to a network interface.
+    ///
+    /// # Arguments
+    ///
+    /// * `interface` - Registered interface name to use for transmission.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` if the interface exists, otherwise
+    /// [`SocketError::AddressNotAvailable`].
+    pub fn bind_interface(&self, interface: &str) -> Result<(), SocketError> {
+        if get_network_manager().get_interface(interface).is_none() {
+            return Err(SocketError::AddressNotAvailable);
+        }
+        *self.bound_interface.write() = Some(interface.into());
+        Ok(())
+    }
+
+    fn accepts_interface(&self, interface: Option<&str>) -> bool {
+        let bound = self.bound_interface.read();
+        match (bound.as_deref(), interface) {
+            (Some(expected), Some(actual)) => expected == actual,
+            (Some(_), None) => false,
+            (None, _) => true,
+        }
+    }
+
+    fn timeout_ms_to_ns(timeout_ms: u64) -> Option<u64> {
+        if timeout_ms == 0 {
+            None
+        } else {
+            Some(timeout_ms.saturating_mul(crate::timer::NANOSECONDS_PER_MILLISECOND))
+        }
+    }
+
+    fn read_timeout_ns(&self) -> Option<u64> {
+        Self::timeout_ms_to_ns(*self.read_timeout_ms.lock())
+    }
+
+    fn set_read_timeout_ms(&self, timeout_ms: usize) -> Result<(), SocketError> {
+        if timeout_ms > MAX_SOCKET_TIMEOUT_MS {
+            return Err(SocketError::InvalidArgument);
+        }
+        *self.read_timeout_ms.lock() = timeout_ms as u64;
+        Ok(())
+    }
+
+    fn set_write_timeout_ms(&self, timeout_ms: usize) -> Result<(), SocketError> {
+        if timeout_ms > MAX_SOCKET_TIMEOUT_MS {
+            return Err(SocketError::InvalidArgument);
+        }
+        *self.write_timeout_ms.lock() = timeout_ms as u64;
+        Ok(())
+    }
+
+    fn bind_for_connected_peer(&self, destination: [u8; 4]) -> Result<(), SocketError> {
+        let current = self.local_addr.read().clone();
+        let bound_address = match current {
+            Some(SocketAddress::Inet(address)) => Some(address.addr),
+            _ => None,
+        };
+        let requested_interface = self.bound_interface.read().clone();
+        let (source_address, selected_interface) =
+            select_local_endpoint(requested_interface.as_deref(), bound_address, destination);
+        if source_address == [0; 4] {
+            return Err(SocketError::NoRoute);
+        }
+
+        let port = match current {
+            Some(SocketAddress::Inet(address)) => address.port,
+            _ => {
+                let port = self.udp_layer.allocate_port();
+                self.udp_layer.register_port(port, self.self_weak.clone())?;
+                port
+            }
+        };
+        *self.local_addr.write() = Some(SocketAddress::Inet(Inet4SocketAddress::new(
+            source_address,
+            port,
+        )));
+        if requested_interface.is_none() {
+            *self.bound_interface.write() = selected_interface;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for UdpSocket {
+    fn drop(&mut self) {
+        if let Some(SocketAddress::Inet(inet)) = self.local_addr.read().clone() {
+            self.udp_layer.unregister_socket(inet.port, &self.self_weak);
+        }
+
+        *self.state.write() = SocketState::Closed;
+
+        if let Some(waker) = self.recv_waker.lock().as_ref() {
+            waker.wake_all();
+        }
+        if let Some(waker) = self.send_waker.lock().as_ref() {
+            waker.wake_all();
+        }
+
+        crate::network::NetworkManager::get_manager()
+            .remove_socket_by_ptr(self as *const Self as usize);
     }
 }
 
@@ -202,6 +350,14 @@ impl SocketObject for UdpSocket {
         self
     }
 
+    fn as_selectable(&self) -> Option<&dyn crate::object::capability::Selectable> {
+        Some(self)
+    }
+
+    fn as_control_ops(&self) -> Option<&dyn crate::object::capability::ControlOps> {
+        Some(self)
+    }
+
     fn sendto(
         &self,
         data: &[u8],
@@ -213,9 +369,11 @@ impl SocketObject for UdpSocket {
                 let addr = inet.addr;
                 let port = inet.port;
                 // Queue the datagram for sending
-                let mut buffer = self.send_buffer.lock();
                 let datagram = data.to_vec();
-                buffer.push(datagram.clone());
+                {
+                    let mut buffer = self.send_buffer.lock();
+                    buffer.push(datagram.clone());
+                }
 
                 // Update state
                 *self.remote_addr.write() = Some(address.clone());
@@ -245,7 +403,19 @@ impl SocketObject for UdpSocket {
             let task = crate::task::mytask();
             if let Some(t) = task {
                 let trapframe = t.get_trapframe();
-                Selectable::wait_until_ready(self, interest, trapframe, None);
+                let outcome = Selectable::wait_until_ready(
+                    self,
+                    interest,
+                    trapframe,
+                    self.read_timeout_ns(),
+                    0,
+                );
+                if matches!(
+                    outcome,
+                    crate::object::capability::selectable::SelectWaitOutcome::TimedOut
+                ) {
+                    return Err(SocketError::WouldBlock);
+                }
             }
         }
 
@@ -274,7 +444,11 @@ impl SocketControl for UdpSocket {
         match address {
             SocketAddress::Inet(inet) => {
                 let addr = inet.addr;
-                let port = inet.port;
+                let port = if inet.port == 0 {
+                    self.udp_layer.allocate_port()
+                } else {
+                    inet.port
+                };
                 let mut config = SocketConfig::new();
                 config.set("udp_local_port", &port.to_be_bytes());
                 config.set("ip_local", &addr);
@@ -283,7 +457,8 @@ impl SocketControl for UdpSocket {
                 self.udp_layer
                     .configure_socket(self.self_weak.clone(), &config)?;
 
-                *self.local_addr.write() = Some(address.clone());
+                *self.local_addr.write() =
+                    Some(SocketAddress::Inet(Inet4SocketAddress::new(addr, port)));
                 *self.state.write() = SocketState::Bound;
                 Ok(())
             }
@@ -293,7 +468,11 @@ impl SocketControl for UdpSocket {
 
     fn connect(&self, address: &SocketAddress) -> Result<(), SocketError> {
         match address {
-            SocketAddress::Inet(_) => {
+            SocketAddress::Inet(inet) => {
+                // POSIX UDP connect implicitly binds an unbound socket and
+                // selects the route's source address. Callers rely on
+                // getsockname() immediately after connect() to discover it.
+                self.bind_for_connected_peer(inet.addr)?;
                 *self.remote_addr.write() = Some(address.clone());
                 *self.state.write() = SocketState::Connected;
                 Ok(())
@@ -358,22 +537,6 @@ impl crate::ipc::StreamIpcOps for UdpSocket {
 
 impl crate::object::capability::StreamOps for UdpSocket {
     fn read(&self, buffer: &mut [u8]) -> Result<usize, crate::object::capability::StreamError> {
-        use crate::object::capability::selectable::Selectable;
-
-        if !Selectable::is_nonblocking(self) {
-            // Blocking mode: wait for data
-            let task = crate::task::mytask();
-            if let Some(t) = task {
-                let trapframe = t.get_trapframe();
-                let interest = crate::object::capability::selectable::ReadyInterest {
-                    read: true,
-                    write: false,
-                    except: false,
-                };
-                Selectable::wait_until_ready(self, interest, trapframe, None);
-            }
-        }
-
         let (len, _) = self.recvfrom(buffer, 0).map_err(|e| match e {
             SocketError::WouldBlock => crate::object::capability::StreamError::WouldBlock,
             _ => crate::object::capability::StreamError::Other("udp recv error".into()),
@@ -388,14 +551,22 @@ impl crate::object::capability::StreamOps for UdpSocket {
             .clone()
             .unwrap_or(SocketAddress::Unspecified);
         self.sendto(data, &remote_addr, 0)
-            .map_err(|_| crate::object::capability::StreamError::Other("udp send error".into()))?;
+            .map_err(|err| match err {
+                SocketError::WouldBlock => crate::object::capability::StreamError::WouldBlock,
+                SocketError::InvalidAddress => {
+                    crate::object::capability::StreamError::InvalidArgument
+                }
+                SocketError::NotConnected => crate::object::capability::StreamError::BrokenPipe,
+                SocketError::NotSupported => crate::object::capability::StreamError::NotSupported,
+                _ => crate::object::capability::StreamError::Other("udp send error".into()),
+            })?;
         Ok(data.len())
     }
 }
 
 impl crate::object::capability::CloneOps for UdpSocket {
     fn custom_clone(&self) -> crate::object::KernelObject {
-        crate::object::KernelObject::Socket(UdpSocket::new(self.udp_layer.clone()))
+        crate::object::KernelObject::from_socket_object(UdpSocket::new(self.udp_layer.clone()))
     }
 }
 
@@ -423,7 +594,8 @@ impl crate::object::capability::Selectable for UdpSocket {
         &self,
         interest: crate::object::capability::selectable::ReadyInterest,
         trapframe: &mut crate::arch::Trapframe,
-        timeout_ticks: Option<u64>,
+        timeout_ns: Option<u64>,
+        _min_wait_ns: u64,
     ) -> crate::object::capability::selectable::SelectWaitOutcome {
         let current = self.current_ready(interest);
         if (interest.read && current.read) || (interest.write && current.write) {
@@ -432,9 +604,8 @@ impl crate::object::capability::Selectable for UdpSocket {
 
         let task_id = {
             use crate::arch::get_cpu;
-            use crate::sched::scheduler::get_scheduler;
             let cpu_id = get_cpu().get_cpuid();
-            get_scheduler().get_current_task_id(cpu_id).unwrap_or(0)
+            current_task_id(cpu_id).unwrap_or(0)
         };
 
         let woke = if interest.read {
@@ -446,12 +617,12 @@ impl crate::object::capability::Selectable for UdpSocket {
                     })
                     .clone()
             };
-            waker.wait_with_timeout(task_id, trapframe, timeout_ticks)
+            waker.wait_with_timeout(task_id, trapframe, timeout_ns)
         } else {
             true
         };
 
-        if timeout_ticks.is_some() && !woke {
+        if timeout_ns.is_some() && !woke {
             let after = self.current_ready(interest);
             if (interest.read && !after.read) && (interest.write && !after.write) {
                 return crate::object::capability::selectable::SelectWaitOutcome::TimedOut;
@@ -470,16 +641,76 @@ impl crate::object::capability::Selectable for UdpSocket {
     }
 }
 
+impl ControlOps for UdpSocket {
+    fn control(&self, command: u32, arg: usize) -> Result<i32, &'static str> {
+        match command {
+            crate::network::socket::socket_ctl::SCTL_SOCKET_SET_NONBLOCK => {
+                self.set_nonblocking(arg != 0);
+                Ok(0)
+            }
+            crate::network::socket::socket_ctl::SCTL_SOCKET_GET_NONBLOCK => {
+                Ok(if self.is_nonblocking() { 1 } else { 0 })
+            }
+            crate::network::socket::socket_ctl::SCTL_SOCKET_SET_READ_TIMEOUT_MS => {
+                self.set_read_timeout_ms(arg)
+                    .map_err(|_| "Invalid read timeout")?;
+                Ok(0)
+            }
+            crate::network::socket::socket_ctl::SCTL_SOCKET_SET_WRITE_TIMEOUT_MS => {
+                self.set_write_timeout_ms(arg)
+                    .map_err(|_| "Invalid write timeout")?;
+                Ok(0)
+            }
+            crate::network::socket::socket_ctl::SCTL_SOCKET_GET_READ_TIMEOUT_MS => {
+                Ok(*self.read_timeout_ms.lock() as i32)
+            }
+            crate::network::socket::socket_ctl::SCTL_SOCKET_GET_WRITE_TIMEOUT_MS => {
+                Ok(*self.write_timeout_ms.lock() as i32)
+            }
+            _ => Err("Unknown control command"),
+        }
+    }
+
+    fn supported_control_commands(&self) -> alloc::vec::Vec<(u32, &'static str)> {
+        alloc::vec![
+            (
+                crate::network::socket::socket_ctl::SCTL_SOCKET_SET_NONBLOCK,
+                "Set non-blocking mode",
+            ),
+            (
+                crate::network::socket::socket_ctl::SCTL_SOCKET_GET_NONBLOCK,
+                "Get non-blocking mode",
+            ),
+            (
+                crate::network::socket::socket_ctl::SCTL_SOCKET_SET_READ_TIMEOUT_MS,
+                "Set read timeout",
+            ),
+            (
+                crate::network::socket::socket_ctl::SCTL_SOCKET_SET_WRITE_TIMEOUT_MS,
+                "Set write timeout",
+            ),
+            (
+                crate::network::socket::socket_ctl::SCTL_SOCKET_GET_READ_TIMEOUT_MS,
+                "Get read timeout",
+            ),
+            (
+                crate::network::socket::socket_ctl::SCTL_SOCKET_GET_WRITE_TIMEOUT_MS,
+                "Get write timeout",
+            ),
+        ]
+    }
+}
+
 /// UDP layer
 ///
 /// Manages UDP port bindings and handles UDP datagrams.
 pub struct UdpLayer {
     /// Port-to-socket mapping for receiving datagrams
-    port_map: RwLock<BTreeMap<u16, alloc::sync::Weak<UdpSocket>>>,
+    port_map: IrqRwSpinLock<BTreeMap<u16, alloc::sync::Weak<UdpSocket>>>,
     /// Port allocation (ephemeral ports start from 49152)
-    next_ephemeral_port: Mutex<u16>,
+    next_ephemeral_port: IrqSpinLock<u16>,
     /// Statistics
-    stats: RwLock<NetworkLayerStats>,
+    stats: IrqRwSpinLock<NetworkLayerStats>,
     self_weak: Weak<UdpLayer>,
 }
 
@@ -487,9 +718,9 @@ impl UdpLayer {
     /// Create a new UDP layer
     pub fn new() -> Arc<Self> {
         Arc::new_cyclic(|weak| Self {
-            port_map: RwLock::new(BTreeMap::new()),
-            next_ephemeral_port: Mutex::new(49152),
-            stats: RwLock::new(NetworkLayerStats::default()),
+            port_map: IrqRwSpinLock::new(BTreeMap::new()),
+            next_ephemeral_port: IrqSpinLock::new(49152),
+            stats: IrqRwSpinLock::new(NetworkLayerStats::default()),
             self_weak: weak.clone(),
         })
     }
@@ -524,17 +755,51 @@ impl UdpLayer {
 
     /// Allocate an ephemeral port
     pub fn allocate_port(&self) -> u16 {
+        const EPHEMERAL_START: u16 = 49152;
+        const EPHEMERAL_END: u16 = 65535;
+        const EPHEMERAL_COUNT: usize = (EPHEMERAL_END - EPHEMERAL_START + 1) as usize;
+
         let mut next_port = self.next_ephemeral_port.lock();
-        let port = *next_port;
+        for _ in 0..EPHEMERAL_COUNT {
+            let port = *next_port;
+            *next_port = if port == EPHEMERAL_END {
+                EPHEMERAL_START
+            } else {
+                port + 1
+            };
 
-        *next_port = if port == 65535 { 49152 } else { port + 1 };
+            if !self.port_map.read().contains_key(&port) {
+                return port;
+            }
+        }
 
-        port
+        EPHEMERAL_START
     }
 
     /// Register a socket for a specific port
-    pub fn register_port(&self, port: u16, socket: alloc::sync::Weak<UdpSocket>) {
-        self.port_map.write().insert(port, socket);
+    ///
+    /// # Arguments
+    ///
+    /// * `port` - UDP local port to register.
+    /// * `socket` - Weak reference to the socket that owns the port.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` if the port was registered, or [`SocketError::AddressInUse`] if another live
+    /// socket already owns the port.
+    pub fn register_port(
+        &self,
+        port: u16,
+        socket: alloc::sync::Weak<UdpSocket>,
+    ) -> Result<(), SocketError> {
+        let mut map = self.port_map.write();
+        if let Some(existing) = map.get(&port) {
+            if existing.upgrade().is_some() && !existing.ptr_eq(&socket) {
+                return Err(SocketError::AddressInUse);
+            }
+        }
+        map.insert(port, socket);
+        Ok(())
     }
 
     /// Unregister a specific socket from a port
@@ -568,7 +833,7 @@ impl UdpLayer {
             .ok_or(SocketError::InvalidAddress)?;
 
         // Register the port
-        self.register_port(port, socket);
+        self.register_port(port, socket)?;
 
         // TODO: Configure IP layer with local address
         Ok(())
@@ -582,26 +847,45 @@ impl UdpLayer {
         dest_port: u16,
         data: Vec<u8>,
     ) -> Result<(), SocketError> {
-        let (src_ip_bytes, src_port) = match socket.local_addr.read().clone() {
-            Some(SocketAddress::Inet(inet)) => {
-                if inet.addr == [0, 0, 0, 0] {
-                    let ip = get_local_ip_bytes();
-                    (ip, inet.port)
-                } else {
-                    (inet.addr, inet.port)
-                }
-            }
+        let bound_interface = socket.bound_interface.read().clone();
+        let (bound_address, src_port) = match socket.local_addr.read().clone() {
+            Some(SocketAddress::Inet(inet)) => (Some(inet.addr), inet.port),
             _ => {
-                // Get local IP from IPv4 layer if not bound
-                let ip = get_local_ip_bytes();
                 // Allocate ephemeral port for unbound socket
                 let port = self.allocate_port();
-                self.register_port(port, socket.self_weak.clone());
-                (ip, port)
+                self.register_port(port, socket.self_weak.clone())?;
+                *socket.local_addr.write() = Some(SocketAddress::Inet(Inet4SocketAddress::new(
+                    [0, 0, 0, 0],
+                    port,
+                )));
+                (None, port)
             }
         };
+        let (src_ip_bytes, selected_interface) =
+            select_local_endpoint(bound_interface.as_deref(), bound_address, dest_ip);
 
         let total_length = (8 + data.len()) as u16;
+
+        if dest_ip[0] == 127 {
+            let data_len = data.len() as u64;
+            {
+                let mut stats = self.stats.write();
+                stats.packets_sent += 1;
+                stats.bytes_sent += (8 + data_len) as u64;
+            }
+            self.receive_datagram(
+                Ipv4Address::new(
+                    src_ip_bytes[0],
+                    src_ip_bytes[1],
+                    src_ip_bytes[2],
+                    src_ip_bytes[3],
+                ),
+                src_port,
+                dest_port,
+                data,
+            );
+            return Ok(());
+        }
 
         let mut header = UdpHeader::new(src_port, dest_port, total_length);
 
@@ -615,8 +899,11 @@ impl UdpLayer {
         ip_context.set("ip_src", &src_ip_bytes);
         ip_context.set("ip_dst", &dest_ip);
         ip_context.set("ip_protocol", &[17]);
+        if let Some(interface) = selected_interface.as_deref() {
+            ip_context.set("interface", interface.as_bytes());
+        }
 
-        early_println!(
+        println!(
             "[UDP] Send: {} bytes (src port: {}, dst: {}.{}.{}.{})",
             udp_packet.len(),
             src_port,
@@ -627,7 +914,10 @@ impl UdpLayer {
         );
 
         if let Some(ip_layer) = get_network_manager().get_layer("ip") {
-            ip_layer.send(&udp_packet, &ip_context, &[])?;
+            match ip_layer.send(&udp_packet, &ip_context, &[]) {
+                Ok(()) | Err(SocketError::WouldBlock) => {}
+                Err(err) => return Err(err),
+            }
         }
 
         let mut stats = self.stats.write();
@@ -637,7 +927,18 @@ impl UdpLayer {
         Ok(())
     }
 
-    /// Receive a UDP datagram
+    /// Receive a UDP datagram when its incoming interface is unknown.
+    ///
+    /// # Arguments
+    ///
+    /// * `src_ip` - Source IPv4 address.
+    /// * `src_port` - Source UDP port.
+    /// * `dst_port` - Destination UDP port.
+    /// * `data` - Datagram payload.
+    ///
+    /// # Returns
+    ///
+    /// This method does not return a value.
     pub fn receive_datagram(
         &self,
         src_ip: Ipv4Address,
@@ -645,11 +946,37 @@ impl UdpLayer {
         dst_port: u16,
         data: Vec<u8>,
     ) {
+        self.receive_datagram_on_interface(src_ip, src_port, dst_port, data, None);
+    }
+
+    /// Receive a UDP datagram on a known network interface.
+    ///
+    /// # Arguments
+    ///
+    /// * `src_ip` - Source IPv4 address.
+    /// * `src_port` - Source UDP port.
+    /// * `dst_port` - Destination UDP port.
+    /// * `data` - Datagram payload.
+    /// * `interface` - Interface on which the datagram arrived, when known.
+    ///
+    /// # Returns
+    ///
+    /// This method does not return a value.
+    pub fn receive_datagram_on_interface(
+        &self,
+        src_ip: Ipv4Address,
+        src_port: u16,
+        dst_port: u16,
+        data: Vec<u8>,
+        interface: Option<&str>,
+    ) {
         let mut stats = self.stats.write();
         stats.packets_received += 1;
         stats.bytes_received += (8 + data.len()) as u64;
 
-        if let Some(socket) = self.find_socket(dst_port) {
+        if let Some(socket) = self.find_socket(dst_port)
+            && socket.accepts_interface(interface)
+        {
             socket.deliver_datagram(data);
             let mut remote_lock = socket.remote_addr.write();
             if remote_lock.is_none() {
@@ -679,6 +1006,7 @@ impl NetworkLayer for UdpLayer {
     fn receive(&self, packet: &[u8], context: Option<&LayerContext>) -> Result<(), SocketError> {
         let mut src_ip = Ipv4Address::new(0, 0, 0, 0);
         let mut dst_ip = Ipv4Address::new(0, 0, 0, 0);
+        let mut interface = None;
         if let Some(ctx) = context {
             if let Some(raw) = ctx.get("ip_src") {
                 if raw.len() >= 4 {
@@ -690,8 +1018,11 @@ impl NetworkLayer for UdpLayer {
                     dst_ip = Ipv4Address::new(raw[0], raw[1], raw[2], raw[3]);
                 }
             }
+            interface = ctx
+                .get("interface")
+                .and_then(|raw| core::str::from_utf8(raw).ok());
         }
-        self.receive_packet(src_ip, dst_ip, packet)
+        self.receive_packet_on_interface(src_ip, dst_ip, packet, interface)
     }
 
     fn name(&self) -> &'static str {
@@ -708,12 +1039,45 @@ impl NetworkLayer for UdpLayer {
 }
 
 impl UdpLayer {
-    /// Receive a UDP datagram
+    /// Receive a UDP packet when its incoming interface is unknown.
+    ///
+    /// # Arguments
+    ///
+    /// * `src_ip` - Source IPv4 address.
+    /// * `dst_ip` - Destination IPv4 address.
+    /// * `packet` - Complete UDP packet, including its header.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` after validation and dispatch, or a socket error if malformed.
     pub fn receive_packet(
         &self,
         src_ip: Ipv4Address,
         _dst_ip: Ipv4Address,
         packet: &[u8],
+    ) -> Result<(), SocketError> {
+        self.receive_packet_on_interface(src_ip, _dst_ip, packet, None)
+    }
+
+    /// Receive and dispatch a UDP packet from a known network interface.
+    ///
+    /// # Arguments
+    ///
+    /// * `src_ip` - Source IPv4 address.
+    /// * `dst_ip` - Destination IPv4 address.
+    /// * `packet` - Complete UDP packet, including its header.
+    /// * `interface` - Interface on which the packet arrived, when known.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` after the packet is validated and dispatched, or a socket error
+    /// if the packet is malformed.
+    pub fn receive_packet_on_interface(
+        &self,
+        src_ip: Ipv4Address,
+        _dst_ip: Ipv4Address,
+        packet: &[u8],
+        interface: Option<&str>,
     ) -> Result<(), SocketError> {
         if packet.len() < 8 {
             return Err(SocketError::InvalidPacket);
@@ -730,7 +1094,13 @@ impl UdpLayer {
         let data = &packet[8..data_offset];
 
         // Receive the datagram
-        self.receive_datagram(src_ip, header.src_port, header.dst_port, data.to_vec());
+        self.receive_datagram_on_interface(
+            src_ip,
+            header.src_port,
+            header.dst_port,
+            data.to_vec(),
+            interface,
+        );
 
         Ok(())
     }
@@ -808,5 +1178,42 @@ mod tests {
         assert!(port1 >= 49152 && port1 <= 65535);
         assert!(port2 >= 49152 && port2 <= 65535);
         assert_ne!(port1, port2);
+    }
+
+    #[test_case]
+    fn test_udp_bind_zero_allocates_ephemeral_port() {
+        let udp_layer = UdpLayer::new();
+        let socket = UdpSocket::new(udp_layer.clone());
+
+        socket
+            .bind(&SocketAddress::Inet(Inet4SocketAddress::new(
+                [0, 0, 0, 0],
+                0,
+            )))
+            .unwrap();
+
+        let local = socket.getsockname().unwrap();
+        let SocketAddress::Inet(inet) = local else {
+            panic!("UDP socket should have an IPv4 local address");
+        };
+
+        assert!(inet.port >= 49152);
+        assert!(udp_layer.find_socket(inet.port).is_some());
+    }
+
+    #[test_case]
+    fn test_udp_register_port_rejects_live_duplicate() {
+        let udp_layer = UdpLayer::new();
+        let socket1 = UdpSocket::new(udp_layer.clone());
+        let socket2 = UdpSocket::new(udp_layer.clone());
+
+        udp_layer
+            .register_port(53000, socket1.self_weak.clone())
+            .unwrap();
+
+        assert_eq!(
+            udp_layer.register_port(53000, socket2.self_weak.clone()),
+            Err(SocketError::AddressInUse)
+        );
     }
 }

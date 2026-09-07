@@ -3,15 +3,15 @@
 //! This module provides ICMP handling for network stack.
 //! It implements NetworkLayer trait for ICMP messages.
 
+use crate::sync::{IrqRwSpinLock, IrqSpinLock};
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::format;
 use alloc::string::String;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU16, Ordering};
-use spin::{Mutex, RwLock};
 
-use crate::early_println;
+use crate::println;
 
 use crate::network::ipv4::Ipv4Address;
 use crate::network::protocol_stack::get_network_manager;
@@ -184,9 +184,9 @@ impl IcmpEcho {
 /// Handles ICMP messages for network diagnostics.
 pub struct IcmpLayer {
     /// Statistics
-    stats: RwLock<NetworkLayerStats>,
+    stats: IrqRwSpinLock<NetworkLayerStats>,
     /// ICMP sockets by identifier
-    sockets: RwLock<BTreeMap<u16, Weak<IcmpSocket>>>,
+    sockets: IrqRwSpinLock<BTreeMap<u16, Weak<IcmpSocket>>>,
     /// Identifier allocator
     next_identifier: AtomicU16,
     self_weak: Weak<IcmpLayer>,
@@ -222,8 +222,8 @@ impl IcmpLayer {
     /// Create a new ICMP layer
     pub fn new() -> Arc<Self> {
         Arc::new_cyclic(|weak| Self {
-            stats: RwLock::new(NetworkLayerStats::default()),
-            sockets: RwLock::new(BTreeMap::new()),
+            stats: IrqRwSpinLock::new(NetworkLayerStats::default()),
+            sockets: IrqRwSpinLock::new(BTreeMap::new()),
             next_identifier: AtomicU16::new(1),
             self_weak: weak.clone(),
         })
@@ -286,7 +286,7 @@ impl IcmpLayer {
         ip_context.set("ip_protocol", &[1]); // ICMP protocol
 
         let dest_ip_bytes = dest_ip.0;
-        early_println!(
+        println!(
             "[ICMP] Ping {}.{}.{}.{} (id={}, seq={}, data_len={})",
             dest_ip_bytes[0],
             dest_ip_bytes[1],
@@ -323,6 +323,18 @@ impl IcmpLayer {
         data: &[u8],
         next_layers: &[Arc<dyn NetworkLayer>],
     ) -> Result<(), SocketError> {
+        self.send_ping_reply_from(None, dest_ip, identifier, sequence, data, next_layers)
+    }
+
+    fn send_ping_reply_from(
+        &self,
+        source_ip: Option<Ipv4Address>,
+        dest_ip: Ipv4Address,
+        identifier: u16,
+        sequence: u16,
+        data: &[u8],
+        next_layers: &[Arc<dyn NetworkLayer>],
+    ) -> Result<(), SocketError> {
         // Build ICMP Echo Reply header
         let echo = IcmpEcho::new(identifier, sequence);
         let mut header = IcmpHeader::new(message_type::ECHO_REPLY, code::NO_CODE);
@@ -341,9 +353,12 @@ impl IcmpLayer {
         let mut ip_context = LayerContext::new();
         ip_context.set("ip_dst", &dest_ip.0);
         ip_context.set("ip_protocol", &[1]); // ICMP protocol
+        if let Some(source_ip) = source_ip {
+            ip_context.set("ip_src", &source_ip.0);
+        }
 
         let dest_ip_bytes = dest_ip.0;
-        early_println!(
+        println!(
             "[ICMP] Pong {}.{}.{}.{} (id={}, seq={}, data_len={})",
             dest_ip_bytes[0],
             dest_ip_bytes[1],
@@ -388,7 +403,7 @@ impl IcmpLayer {
             return Err(SocketError::InvalidPacket);
         }
 
-        early_println!(
+        println!(
             "[ICMP] RX: {} bytes src={}.{}.{}.{} dst={}.{}.{}.{}",
             packet.len(),
             src_ip.0[0],
@@ -406,7 +421,7 @@ impl IcmpLayer {
 
         let data = &packet[8..];
 
-        early_println!(
+        println!(
             "[ICMP] Recv: type={}, code={}, len={}",
             header.message_type,
             header.code,
@@ -414,9 +429,11 @@ impl IcmpLayer {
         );
 
         // Update statistics
-        let mut stats = self.stats.write();
-        stats.packets_received += 1;
-        stats.bytes_received += packet.len() as u64;
+        {
+            let mut stats = self.stats.write();
+            stats.packets_received += 1;
+            stats.bytes_received += packet.len() as u64;
+        }
 
         match header.message_type {
             message_type::ECHO_REQUEST => {
@@ -426,18 +443,20 @@ impl IcmpLayer {
                 // Handle ping request - send reply
                 let identifier = u16::from_be_bytes([header.rest[0], header.rest[1]]);
                 let sequence = u16::from_be_bytes([header.rest[2], header.rest[3]]);
-                early_println!(
+                println!(
                     "[ICMP] Ping request from (id={}, seq={})",
-                    identifier,
-                    sequence
+                    identifier, sequence
                 );
 
                 if let Some(ip_layer) = get_network_manager().get_layer("ip") {
-                    let mut ctx = LayerContext::new();
-                    ctx.set("ip_dst", &src_ip.0);
-                    ctx.set("ip_src", &dst_ip.0);
-                    ctx.set("ip_protocol", &[1]);
-                    let _ = self.send_ping_reply(src_ip, identifier, sequence, data, &[ip_layer]);
+                    let _ = self.send_ping_reply_from(
+                        Some(dst_ip),
+                        src_ip,
+                        identifier,
+                        sequence,
+                        data,
+                        &[ip_layer],
+                    );
                 }
             }
             message_type::ECHO_REPLY => {
@@ -478,11 +497,11 @@ pub struct IcmpSocket {
     identifier: u16,
     sequence: AtomicU16,
     expected_sequence: AtomicU16,
-    local_addr: Mutex<Option<SocketAddress>>,
-    remote_addr: RwLock<Option<SocketAddress>>,
-    recv_queue: Mutex<VecDeque<(Vec<u8>, SocketAddress)>>,
+    local_addr: IrqSpinLock<Option<SocketAddress>>,
+    remote_addr: IrqRwSpinLock<Option<SocketAddress>>,
+    recv_queue: IrqSpinLock<VecDeque<(Vec<u8>, SocketAddress)>>,
     recv_waker: crate::sync::waker::Waker,
-    nonblocking: RwLock<bool>,
+    nonblocking: IrqRwSpinLock<bool>,
 }
 
 impl IcmpSocket {
@@ -492,11 +511,11 @@ impl IcmpSocket {
             identifier,
             sequence: AtomicU16::new(0),
             expected_sequence: AtomicU16::new(0),
-            local_addr: Mutex::new(None),
-            remote_addr: RwLock::new(None),
-            recv_queue: Mutex::new(VecDeque::new()),
+            local_addr: IrqSpinLock::new(None),
+            remote_addr: IrqRwSpinLock::new(None),
+            recv_queue: IrqSpinLock::new(VecDeque::new()),
             recv_waker: crate::sync::waker::Waker::new_interruptible("icmp_recv"),
-            nonblocking: RwLock::new(false),
+            nonblocking: IrqRwSpinLock::new(false),
         })
     }
 
@@ -508,6 +527,23 @@ impl IcmpSocket {
         let addr = SocketAddress::Inet(Inet4SocketAddress::new(src_ip.0, 0));
         self.recv_queue.lock().push_back((payload, addr));
         self.recv_waker.wake_one();
+    }
+}
+
+impl Drop for IcmpSocket {
+    fn drop(&mut self) {
+        if let Some(layer) = self.icmp_layer.upgrade() {
+            let mut sockets = layer.sockets.write();
+            if let Some(existing) = sockets.get(&self.identifier)
+                && existing.as_ptr() == self as *const Self
+            {
+                sockets.remove(&self.identifier);
+            }
+        }
+
+        self.recv_waker.wake_all();
+        crate::network::NetworkManager::get_manager()
+            .remove_socket_by_ptr(self as *const Self as usize);
     }
 }
 
@@ -556,14 +592,10 @@ impl SocketObject for IcmpSocket {
                 .as_any()
                 .downcast_ref::<crate::network::ipv4::Ipv4Layer>()
             {
-                // Check if we have a configured IP on any interface
-                let has_ip = get_network_manager()
-                    .get_default_interface()
-                    .and_then(|iface| ipv4.get_primary_ip(iface.name()))
-                    .map(|ip| ip.0 != [0, 0, 0, 0])
-                    .unwrap_or(false);
+                // Route selection also chooses the correct source interface.
+                let has_ip = ipv4.select_source(dest_ip).is_some();
                 if !has_ip {
-                    early_println!("[ICMP] send blocked: local IP unset");
+                    println!("[ICMP] send blocked: local IP unset");
                     return Err(SocketError::NotConnected);
                 }
             }
@@ -583,10 +615,10 @@ impl SocketObject for IcmpSocket {
                     Err(e) => return Err(e),
                 }
             } else {
-                early_println!("[ICMP] send failed: ICMP layer unavailable");
+                println!("[ICMP] send failed: ICMP layer unavailable");
             }
         } else {
-            early_println!("[ICMP] send failed: IP layer unavailable");
+            println!("[ICMP] send failed: IP layer unavailable");
         }
 
         Err(SocketError::NoRoute)

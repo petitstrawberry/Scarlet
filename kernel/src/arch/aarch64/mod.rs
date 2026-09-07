@@ -2,19 +2,33 @@ use core::arch::asm;
 use core::mem::transmute;
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use crate::early_println;
 use crate::environment::MAX_NUM_CPUS;
 use crate::environment::STACK_SIZE;
 use crate::mem::KERNEL_STACK;
+use crate::println;
 use crate::task::Task;
 
 pub mod boot;
+#[cfg(feature = "limine")]
+pub use boot::limine::{is_hv_available, is_vhe_enabled};
+#[cfg(not(feature = "limine"))]
+pub const fn is_hv_available() -> bool {
+    false
+}
+#[cfg(not(feature = "limine"))]
+pub const fn is_vhe_enabled() -> bool {
+    false
+}
 pub mod context;
 pub mod earlycon;
 pub mod fpu;
+#[cfg(feature = "hypervisor")]
+pub mod hv;
 pub mod instruction;
 pub mod interrupt;
+pub(crate) mod iommu;
 pub mod kernel;
+pub mod lsm;
 pub mod mmio;
 pub mod registers;
 pub mod switch;
@@ -31,6 +45,70 @@ use crate::arch::vm::get_root_pagetable;
 use crate::vm::vmem::MemoryArea;
 
 pub type Arch = Aarch64;
+
+const USER_BACKTRACE_MAX_FRAMES: usize = 16;
+const USER_BACKTRACE_MAX_FRAME_DISTANCE: usize = 8 * 1024 * 1024;
+
+/// Log an AArch64 userspace frame-pointer chain from a saved trapframe.
+///
+/// This is a diagnostic helper for fatal userspace signals. Each reported
+/// return PC is adjusted to the call instruction so it can be passed directly
+/// to `addr2line` or `objdump`.
+///
+/// # Arguments
+///
+/// * `task` - Task whose user address space contains the stack frames.
+/// * `trapframe` - Saved userspace register state at the diagnostic point.
+///
+/// # Returns
+///
+/// This function returns after logging the valid prefix of the frame chain.
+pub fn log_user_backtrace(task: &Task, trapframe: &Trapframe) {
+    let mut frame_pointer = trapframe.regs.reg[29] as usize;
+    crate::println!(
+        "[user-bt] #0 pc={:#x} lr={:#x} fp={:#x}",
+        trapframe.elr,
+        trapframe.regs.reg[30],
+        frame_pointer
+    );
+
+    for depth in 1..=USER_BACKTRACE_MAX_FRAMES {
+        if frame_pointer == 0 || !frame_pointer.is_multiple_of(16) {
+            break;
+        }
+
+        let mut frame = [0u8; 16];
+        if crate::library::std::usercopy::copy_from_user(task, frame_pointer, &mut frame).is_err() {
+            crate::println!("[user-bt] stopped: unreadable fp={:#x}", frame_pointer);
+            break;
+        }
+
+        let previous_frame_pointer = u64::from_ne_bytes([
+            frame[0], frame[1], frame[2], frame[3], frame[4], frame[5], frame[6], frame[7],
+        ]) as usize;
+        let saved_link_register = u64::from_ne_bytes([
+            frame[8], frame[9], frame[10], frame[11], frame[12], frame[13], frame[14], frame[15],
+        ]) as usize;
+        if saved_link_register == 0 {
+            break;
+        }
+
+        crate::println!(
+            "[user-bt] #{} pc={:#x} lr={:#x} fp={:#x}",
+            depth,
+            saved_link_register.saturating_sub(4),
+            saved_link_register,
+            frame_pointer
+        );
+
+        if previous_frame_pointer <= frame_pointer
+            || previous_frame_pointer - frame_pointer > USER_BACKTRACE_MAX_FRAME_DISTANCE
+        {
+            break;
+        }
+        frame_pointer = previous_frame_pointer;
+    }
+}
 
 // Common scheduler code enables interrupts before calling timer.start().
 // On AArch64 we must keep global interrupts masked until the timer has been
@@ -65,11 +143,61 @@ pub fn get_device_memory_areas() -> alloc::vec::Vec<MemoryArea> {
 #[unsafe(link_section = ".trampoline.data")]
 static mut CPUS: [Aarch64; MAX_NUM_CPUS] = [const { Aarch64::new(0) }; MAX_NUM_CPUS];
 
+/// Return the per-CPU architecture state during that CPU's one-time boot.
+///
+/// # Arguments
+///
+/// * `cpu_id` - Logical CPU ID assigned exclusively to the calling CPU.
+///
+/// # Safety
+///
+/// The caller must invoke this only during the one-time initialization of
+/// `cpu_id`. No other reference to the same `CPUS[cpu_id]` entry may be active.
+unsafe fn cpu_state_for_init(cpu_id: usize) -> &'static mut Aarch64 {
+    assert!(cpu_id < MAX_NUM_CPUS, "CPU ID exceeds per-CPU state table");
+
+    // SAFETY: The caller guarantees exclusive one-time access to this array
+    // element, and the bounds check above makes the pointer addition valid.
+    unsafe { &mut *(&raw mut CPUS).cast::<Aarch64>().add(cpu_id) }
+}
+
+/// Initialize the current AArch64 CPU's per-CPU trap state.
+///
+/// # Arguments
+///
+/// * `cpu_id` - Logical CPU ID assigned to the current CPU.
 pub fn init_arch(cpu_id: usize) {
-    early_println!("[aarch64] CPU {}: Initializing core....", cpu_id);
-    // Get raw Aarch64 struct
-    let aarch64: &mut Aarch64 = unsafe { transmute(&CPUS[cpu_id] as *const _ as usize) };
+    // SAFETY: The bootstrap CPU initializes its uniquely assigned slot once,
+    // before the slot is exposed through TPIDR_EL1.
+    let aarch64 = unsafe { cpu_state_for_init(cpu_id) };
     aarch64.cpuid = cpu_id as u64;
+
+    trap_init(aarch64);
+    println!("[aarch64] CPU {}: Initializing core....", cpu_id);
+}
+
+/// Initialize AArch64 per-CPU state for a secondary CPU.
+///
+/// # Arguments
+///
+/// * `cpu_id` - Logical CPU ID assigned by the boot protocol.
+pub fn init_ap_cpu(cpu_id: usize) {
+    // SAFETY: Each released secondary CPU initializes only its boot-protocol
+    // assigned slot, exactly once, before entering the scheduler.
+    let aarch64 = unsafe { cpu_state_for_init(cpu_id) };
+    aarch64.cpuid = cpu_id as u64;
+
+    let kernel_ttbr0: u64;
+    // SAFETY: Secondary CPUs enter here at the privileged kernel exception
+    // level after switching to the saved kernel translation regime.
+    unsafe {
+        asm!(
+            "mrs {0}, ttbr0_el1",
+            out(reg) kernel_ttbr0,
+        );
+    }
+    aarch64.initialize_ttbr0_context(kernel_ttbr0);
+
     trap_init(aarch64);
 }
 
@@ -82,7 +210,7 @@ pub fn init_arch(cpu_id: usize) {
 /// - Chooses the task-provided kernel stack (SP_EL1) for the upcoming EL0->EL1 traps.
 /// - Programs per-CPU trampoline-visible state (kernel stack top, trap handler, TTBR0).
 /// - Performs a direct transition via the trampoline exit path.
-pub fn first_switch_to_user(task: &mut Task) -> ! {
+pub fn first_switch_to_user(task: &Task) -> ! {
     // Prefer the high-VA kernel stack window if available.
     let kernel_sp = if let Some((_slot, base)) = task.get_kernel_stack_window_base() {
         (base + crate::environment::PAGE_SIZE + crate::environment::TASK_KERNEL_STACK_SIZE) as u64
@@ -90,47 +218,47 @@ pub fn first_switch_to_user(task: &mut Task) -> ! {
         panic!("Task has no kernel stack window");
     };
 
-    crate::early_println!(
+    // Update trampoline-visible CPU struct.
+    let cpu = crate::arch::get_cpu();
+    crate::println!(
         "[aarch64] CPU {}: First switch to user task PID {} with kernel SP {:#x}",
-        crate::arch::get_current_cpu_id(),
+        cpu.get_cpuid(),
         task.get_id(),
         kernel_sp,
     );
-
-    // Update trampoline-visible CPU struct.
-    let cpu = crate::arch::get_cpu();
     cpu.set_kernel_stack(kernel_sp);
     cpu.set_trap_handler(get_user_trap_handler());
     cpu.set_next_address_space(task.vm_manager.get_asid());
 
-    // Populate the trapframe from the task VCPU state.
-    // Use a raw pointer to avoid borrow checker conflicts with get_trapframe().
-    let task_ptr = task as *mut Task;
-    unsafe {
-        let trapframe = (*task_ptr).get_trapframe();
-        (*task_ptr).vcpu.lock().switch(trapframe);
+    let task_mode = task.vcpu.lock().get_mode();
+    let trapframe = task.get_trapframe();
+    task.vcpu.lock().switch(trapframe);
 
-        // Ensure IRQs are unmasked in the user PSTATE after `eret`.
-        crate::arch::configure_user_entry(
-            trapframe,
-            crate::arch::UserEntryOptions {
-                irq_policy: crate::arch::UserReturnIrqPolicy::Enable,
-            },
-        );
-    }
+    trapframe.spsr = target_spsr_for_mode(task_mode);
+
+    crate::arch::configure_user_entry(
+        trapframe,
+        crate::arch::UserEntryOptions {
+            irq_policy: crate::arch::UserReturnIrqPolicy::Enable,
+        },
+    );
 
     // Compute trampoline exit target.
-    let trap_exit_offset = crate::arch::aarch64::trap::user::_user_trap_exit as usize
-        - crate::arch::aarch64::trap::user::_user_trap_entry as usize;
+    let trap_exit_offset = (crate::arch::aarch64::trap::user::_switch_to_user as usize)
+        .wrapping_sub(crate::arch::aarch64::trap::user::_user_trap_entry as usize);
     let trampoline_base = crate::vm::get_trampoline_trap_vector();
-    let trap_exit_addr = trampoline_base + trap_exit_offset;
+    let trap_exit_addr = trampoline_base.wrapping_add(trap_exit_offset);
 
-    // Program per-CPU arch pointer and VBAR to the trampoline right before the jump.
-    let cpu_id = get_current_cpu_id();
+    // Program per-CPU arch pointer and the target trap vector right before the jump.
+    let cpu_id = cpu.get_cpuid();
     set_arch(crate::vm::get_trampoline_arch(cpu_id));
-    set_trapvector(trampoline_base);
+    if is_privileged_return_mode(task.get_trapframe().spsr) {
+        set_trapvector(get_kernel_trapvector_paddr());
+    } else {
+        set_trapvector(trampoline_base);
+    }
 
-    let trapframe_addr = kernel_sp as usize - core::mem::size_of::<Trapframe>();
+    let trapframe_addr = (kernel_sp as usize).wrapping_sub(core::mem::size_of::<Trapframe>());
 
     // Final transition must not touch the stack after switching SP.
     unsafe {
@@ -163,6 +291,11 @@ pub struct Aarch64 {
     trap_kind: u64,    // offset: 48
 }
 
+const _: () = {
+    assert!(core::mem::offset_of!(Aarch64, ttbr0) == 16);
+    assert!(core::mem::offset_of!(Aarch64, kernel_ttbr0) == 40);
+};
+
 impl Aarch64 {
     pub const fn new(cpu_id: usize) -> Self {
         Aarch64 {
@@ -174,6 +307,12 @@ impl Aarch64 {
             kernel_ttbr0: 0,
             trap_kind: 0,
         }
+    }
+
+    fn initialize_ttbr0_context(&mut self, kernel_ttbr0: u64) {
+        assert_ne!(kernel_ttbr0, 0, "kernel TTBR0 must be initialized");
+        self.ttbr0 = kernel_ttbr0;
+        self.kernel_ttbr0 = kernel_ttbr0;
     }
 
     pub fn get_cpuid(&self) -> usize {
@@ -205,10 +344,26 @@ impl Aarch64 {
     }
 
     pub fn set_next_address_space(&mut self, asid: u16) {
+        crate::breadcrumb::drop_cpu(
+            self.cpuid as usize,
+            crate::breadcrumb::PT_LOCK_WAIT,
+            asid as u64,
+        );
         let root_pagetable =
             get_root_pagetable(asid).expect("No root page table found for ASID (aarch64)");
-        let ttbr_val_raw = root_pagetable.get_val_for_ttbr(asid);
+        crate::breadcrumb::drop_cpu(
+            self.cpuid as usize,
+            crate::breadcrumb::PT_LOCK_DONE,
+            asid as u64,
+        );
+        let ttbr_val_raw = root_pagetable.get_val_for_ttbr();
+        drop(root_pagetable);
         self.ttbr0 = ttbr_val_raw;
+        crate::breadcrumb::drop_cpu(
+            self.cpuid as usize,
+            crate::breadcrumb::SETAS_ROOT_DONE,
+            asid as u64,
+        );
 
         // Clean this CPU struct from D-cache so that the trampoline assembly
         // (which may read via a different VA alias) sees the updated ttbr0.
@@ -232,6 +387,13 @@ impl Aarch64 {
 
     pub fn set_kernel_ttbr0(&mut self, val: u64) {
         self.kernel_ttbr0 = val;
+
+        // The user trampoline may observe this CPU struct through a different
+        // VA alias, so push the update to PoC before returning to EL0.
+        crate::arch::aarch64::clean_dcache_to_poc_range(
+            self as *const _ as usize,
+            core::mem::size_of::<Aarch64>(),
+        );
     }
 
     pub fn get_kernel_ttbr0(&self) -> u64 {
@@ -256,6 +418,7 @@ pub struct Trapframe {
     pub tpidrro_el0: u64,
     // exception information
     pub esr_el1: u64,
+    pub far_el1: u64,
 }
 
 impl Trapframe {
@@ -268,6 +431,7 @@ impl Trapframe {
             tpidr_el0: 0,
             tpidrro_el0: 0,
             esr_el1: 0,
+            far_el1: 0,
         }
     }
 
@@ -285,6 +449,10 @@ impl Trapframe {
 
     pub fn set_return_value(&mut self, value: usize) {
         self.regs.reg[0] = value; // X0
+    }
+
+    pub fn set_tls_pointer(&mut self, ptr: usize) {
+        self.tpidr_el0 = ptr as u64;
     }
 
     pub fn get_arg(&self, index: usize) -> usize {
@@ -313,6 +481,10 @@ impl Trapframe {
         }
     }
 
+    pub fn set_pc(&mut self, pc: u64) {
+        self.elr = pc;
+    }
+
     /// Increment the program counter (epc) to the next instruction
     /// This is typically used after handling a trap or syscall to continue execution.
     ///
@@ -327,6 +499,16 @@ impl Trapframe {
 
 pub fn get_user_trapvector_paddr() -> usize {
     trap::user::_user_trap_entry as usize
+}
+
+pub fn get_guest_trapvector_paddr() -> usize {
+    #[cfg(feature = "hypervisor")]
+    {
+        return hv::switch::guest_exit_vector_base();
+    }
+
+    #[allow(unreachable_code)]
+    0
 }
 
 pub fn get_kernel_trapvector_paddr() -> usize {
@@ -354,6 +536,8 @@ fn trap_init(aarch64: &mut Aarch64) {
     let scratch_addr = aarch64 as *const _ as usize;
 
     // Set up thread pointer registers to point to our aarch64 struct
+    // SAFETY: `aarch64` is this CPU's initialized per-CPU state and must be
+    // published through TPIDR_EL1 before lock-backed operations can run.
     unsafe {
         asm!(
             "msr tpidr_el1, {0}",
@@ -364,6 +548,9 @@ fn trap_init(aarch64: &mut Aarch64) {
     // Allow EL1 to use FP/SIMD (for save/restore), but trap EL0 by default.
     // Tasks that actually use FP/SIMD will enable EL0 access on-demand.
     fpu::set_user_fpu_enabled(false);
+
+    // Linux AArch64 user code may read CNTVCT_EL0 directly for timekeeping.
+    timer::enable_el0_counter_access();
 
     // Default to kernel vector while executing in EL1.
     set_trapvector(get_kernel_trapvector_paddr());
@@ -381,29 +568,45 @@ pub fn set_trapvector(addr: usize) {
     }
 }
 
+pub fn get_trapvector() -> usize {
+    let vbar: usize;
+    unsafe {
+        asm!(
+            "mrs {0}, vbar_el1",
+            out(reg) vbar,
+            options(nostack)
+        );
+    }
+    vbar
+}
+
 /// Apply user-entry options for the upcoming `eret`.
 ///
 /// This only affects the user PSTATE restored from `trapframe.spsr`.
 pub fn configure_user_entry(trapframe: &mut Trapframe, options: crate::arch::UserEntryOptions) {
     use crate::arch::UserReturnIrqPolicy;
 
-    // DAIF bits in PSTATE/SPSR: D=9, A=8, I=7, F=6. 1 means masked.
     const DAIF_I: u64 = 1 << 7;
-    match options.irq_policy {
-        UserReturnIrqPolicy::Inherit => {}
-        UserReturnIrqPolicy::Enable => {
-            trapframe.spsr &= !DAIF_I;
-        }
-        UserReturnIrqPolicy::Disable => {
-            trapframe.spsr |= DAIF_I;
-        }
-    }
+    const DAIF_F: u64 = 1 << 6;
+    const DAIF_MASK: u64 = DAIF_I | DAIF_F;
+    const SPSR_MODE_MASK: u64 = 0xF;
 
-    // Configure EL0 FP/SIMD access for the next user return.
-    // DTB-driven runtime gating complements the build-time feature.
+    let el = if let Some(task) = crate::sched::scheduler::current_task(get_cpu().get_cpuid()) {
+        target_spsr_for_mode(task.vcpu.lock().get_mode())
+    } else {
+        target_spsr_for_mode(crate::arch::Mode::User)
+    };
+
+    let daif = match options.irq_policy {
+        UserReturnIrqPolicy::Inherit => trapframe.spsr & DAIF_MASK,
+        UserReturnIrqPolicy::Enable => 0,
+        UserReturnIrqPolicy::Disable => DAIF_MASK,
+    };
+    trapframe.spsr = el | daif | (trapframe.spsr & !(SPSR_MODE_MASK | DAIF_MASK));
+
     if crate::arch::user_fpu_enabled() {
-        let cpu_id = crate::arch::get_current_cpu_id();
-        if let Some(task) = crate::sched::scheduler::get_scheduler().get_current_task(cpu_id) {
+        let cpu_id = get_cpu().get_cpuid();
+        if let Some(task) = crate::sched::scheduler::current_task(cpu_id) {
             crate::arch::fpu::set_user_fpu_enabled(task.vcpu.lock().fpu_used);
         } else {
             crate::arch::fpu::set_user_fpu_enabled(false);
@@ -442,6 +645,22 @@ pub fn disable_interrupt() {
     }
 }
 
+/// Send a hardware reschedule IPI to a scheduler CPU.
+///
+/// # Arguments
+///
+/// * `target_cpu` - Logical CPU that should receive the reschedule request.
+///
+/// # Returns
+///
+/// `true` when the interrupt controller accepted the IPI request.
+pub fn send_reschedule_ipi(target_cpu: usize) -> bool {
+    use crate::interrupt::controllers::LocalInterruptType;
+    crate::interrupt::InterruptManager::global()
+        .send_ipi(target_cpu as u32, LocalInterruptType::Software)
+        .is_ok()
+}
+
 pub fn get_cpu() -> &'static mut Aarch64 {
     // Prefer the EL1 thread pointer (kept at the kernel-mapped Arch address).
     let tpidr_el1: usize;
@@ -456,24 +675,59 @@ pub fn get_cpu() -> &'static mut Aarch64 {
     return unsafe { transmute(tpidr_el1) };
 }
 
-/// Get current CPU core ID from MPIDR_EL1 register
-pub fn get_current_cpu_id() -> usize {
-    let mpidr: u64;
+/// Return the current CPU's ID if its per-CPU pointer is published.
+///
+/// Reads `TPIDR_EL1` directly. Boot entry code explicitly clears
+/// `TPIDR_EL1` to zero, so a zero value deterministically means "before
+/// init_arch/init_ap_cpu". `trap_init` publishes the per-CPU pointer in
+/// `TPIDR_EL1` last, after `cpuid` has been stored.
+///
+/// # Returns
+///
+/// `Some(cpu_id)` when `TPIDR_EL1` is non-zero (initialized), otherwise
+/// `None`.
+#[inline]
+pub fn try_get_cpuid() -> Option<usize> {
+    let tpidr_el1: usize;
     unsafe {
         asm!(
-            "mrs {0}, MPIDR_EL1",
-            out(reg) mpidr,
+            "mrs {0}, tpidr_el1",
+            out(reg) tpidr_el1,
+            options(nostack, preserves_flags),
         );
     }
-    // Extract Aff0 field (bits 7:0) which contains the core ID
-    (mpidr & 0xFF) as usize
+    if tpidr_el1 == 0 {
+        return None;
+    }
+    // SAFETY: Non-zero `TPIDR_EL1` is published only by `trap_init` after
+    // `cpuid` is set. Boot entry code zeroes `TPIDR_EL1` first, so any
+    // non-zero value here is the per-CPU pointer.
+    let aarch64 = unsafe { &*(tpidr_el1 as *const Aarch64) };
+    Some(aarch64.cpuid as usize)
 }
 
-pub fn set_next_mode(mode: vcpu::Mode) {
-    // AArch64 return mode is currently chosen in the trampoline (`_user_trap_exit`).
-    // Keep this as a no-op so shared scheduler code can call it without
-    // architecture-specific branching or noisy TODO logs.
-    let _ = mode;
+pub fn set_next_mode(mode: crate::arch::Mode) {
+    let spsr = target_spsr_for_mode(mode);
+    // SAFETY: writing SPSR_EL1 only affects the exception-return EL.
+    unsafe {
+        core::arch::asm!("msr spsr_el1, {0}", in(reg) spsr);
+    }
+}
+
+pub fn is_privileged_return_mode(spsr: u64) -> bool {
+    matches!(spsr & 0xF, 0x5 | 0x9)
+}
+
+fn target_spsr_for_mode(mode: crate::arch::Mode) -> u64 {
+    const SPSR_EL0T: u64 = 0x0;
+    const SPSR_EL1H: u64 = 0x5;
+    const SPSR_EL2H: u64 = 0x9;
+
+    match mode {
+        crate::arch::Mode::Kernel if is_vhe_enabled() => SPSR_EL2H,
+        crate::arch::Mode::Kernel | crate::arch::Mode::GuestKernel => SPSR_EL1H,
+        _ => SPSR_EL0T,
+    }
 }
 
 /// Memory barrier for device/MMIO (I/O) operations.
@@ -548,8 +802,13 @@ fn cache_line_bytes_dcache() -> usize {
 
 /// Clean D-cache to Point of Coherency (PoC) for the given virtual address range.
 ///
-/// This is primarily useful for ensuring page-table updates become visible to the
-/// hardware table walker during bring-up/debugging.
+/// This is useful for ensuring page-table updates and CPU-written DMA buffers
+/// become visible to hardware.
+///
+/// # Arguments
+///
+/// * `start_vaddr` - Kernel virtual address at the start of the range.
+/// * `len` - Number of bytes to clean.
 #[inline(always)]
 pub fn clean_dcache_to_poc_range(start_vaddr: usize, len: usize) {
     if len == 0 {
@@ -566,6 +825,58 @@ pub fn clean_dcache_to_poc_range(start_vaddr: usize, len: usize) {
             addr = addr.saturating_add(line);
         }
         // Ensure the clean completes before subsequent operations (e.g. TLBI).
+        asm!("dsb sy", options(nostack));
+    }
+}
+
+/// Clean and invalidate D-cache to Point of Coherency (PoC) for a virtual range.
+///
+/// Use this before reading memory that may have been modified through another
+/// virtual alias, such as a userspace mapping of a kernel-owned shared page.
+#[inline(always)]
+pub fn clean_invalidate_dcache_to_poc_range(start_vaddr: usize, len: usize) {
+    if len == 0 {
+        return;
+    }
+
+    let line = cache_line_bytes_dcache();
+    let mut addr = start_vaddr & !(line - 1);
+    let end = start_vaddr.saturating_add(len);
+
+    unsafe {
+        while addr < end {
+            asm!("dc civac, {0}", in(reg) addr, options(nostack));
+            addr = addr.saturating_add(line);
+        }
+        asm!("dsb sy", options(nostack));
+    }
+}
+
+/// Invalidate D-cache to Point of Coherency (PoC) for a virtual range.
+///
+/// Use this after device-written DMA has completed and before the CPU reads the
+/// target memory. Dirty CPU lines for the range must already have been cleaned
+/// before device ownership was granted.
+///
+/// # Arguments
+///
+/// * `start_vaddr` - Kernel virtual address at the start of the range.
+/// * `len` - Number of bytes to invalidate.
+#[inline(always)]
+pub fn invalidate_dcache_to_poc_range(start_vaddr: usize, len: usize) {
+    if len == 0 {
+        return;
+    }
+
+    let line = cache_line_bytes_dcache();
+    let mut addr = start_vaddr & !(line - 1);
+    let end = start_vaddr.saturating_add(len);
+
+    unsafe {
+        while addr < end {
+            asm!("dc ivac, {0}", in(reg) addr, options(nostack));
+            addr = addr.saturating_add(line);
+        }
         asm!("dsb sy", options(nostack));
     }
 }
@@ -598,6 +909,23 @@ pub fn clean_dcache_to_pou_range(start_vaddr: usize, len: usize) {
     }
 }
 
+/// Synchronize instruction fetch after writing executable memory.
+///
+/// # Arguments
+///
+/// * `start_vaddr` - Kernel virtual address used to write the executable bytes.
+/// * `len` - Number of bytes written.
+pub fn sync_icache_for_execution(start_vaddr: usize, len: usize) {
+    if len == 0 {
+        return;
+    }
+
+    clean_dcache_to_pou_range(start_vaddr, len);
+    unsafe {
+        asm!("ic ialluis", "dsb ish", "isb", options(nostack));
+    }
+}
+
 pub fn shutdown() -> ! {
     // Prefer PSCI to power off the machine. QEMU virt advertises PSCI and will
     // terminate the emulator on SYSTEM_OFF.
@@ -619,12 +947,12 @@ pub fn shutdown() -> ! {
         ret
     }
 
-    early_println!("[aarch64] Shutdown requested (PSCI SYSTEM_OFF)");
+    println!("[aarch64] Shutdown requested (PSCI SYSTEM_OFF)");
     unsafe {
         let _ = psci_hvc(PSCI_SYSTEM_OFF, 0, 0, 0);
     }
 
-    early_println!("[aarch64] Shutdown requested - entering infinite loop");
+    println!("[aarch64] Shutdown requested - entering infinite loop");
     loop {
         unsafe {
             asm!("wfi");
@@ -633,7 +961,7 @@ pub fn shutdown() -> ! {
 }
 
 pub fn shutdown_with_code(exit_code: u32) -> ! {
-    early_println!("[aarch64] Shutdown with exit code {} requested", exit_code);
+    println!("[aarch64] Shutdown with exit code {} requested", exit_code);
     shutdown()
 }
 
@@ -656,12 +984,12 @@ pub fn reboot() -> ! {
         ret
     }
 
-    early_println!("[aarch64] Reboot requested (PSCI SYSTEM_RESET)");
+    println!("[aarch64] Reboot requested (PSCI SYSTEM_RESET)");
     unsafe {
         let _ = psci_hvc(PSCI_SYSTEM_RESET, 0, 0, 0);
     }
 
-    early_println!("[aarch64] Reboot requested - entering infinite loop");
+    println!("[aarch64] Reboot requested - entering infinite loop");
     loop {
         unsafe {
             asm!("wfi");
@@ -669,21 +997,54 @@ pub fn reboot() -> ! {
     }
 }
 
+pub struct ArchCpuState {
+    kernel_stack: u64,
+    kernel_trap: u64,
+    ttbr0: u64,
+}
+
+impl ArchCpuState {
+    pub fn save(cpu: &Aarch64) -> Self {
+        ArchCpuState {
+            kernel_stack: cpu.kernel_stack,
+            kernel_trap: cpu.kernel_trap,
+            ttbr0: cpu.ttbr0,
+        }
+    }
+
+    pub fn restore(&self, cpu: &mut Aarch64) {
+        cpu.kernel_stack = self.kernel_stack;
+        cpu.kernel_trap = self.kernel_trap;
+        cpu.ttbr0 = self.ttbr0;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    #[test_case]
+    fn test_initialize_ttbr0_context_sets_user_and_kernel_slots() {
+        let mut cpu = Aarch64::new(1);
+        let kernel_ttbr0 = 0x8_1234_5000;
+
+        cpu.initialize_ttbr0_context(kernel_ttbr0);
+
+        assert_eq!(cpu.get_ttbr0(), kernel_ttbr0);
+        assert_eq!(cpu.get_kernel_ttbr0(), kernel_ttbr0);
+    }
+
     /// Test architecture-specific features for AArch64
     #[test_case]
     fn test_aarch64_specific_features() {
-        use crate::arch::aarch64::vcpu::Mode;
+        use crate::arch::Mode;
 
         // Test mode switching
         set_next_mode(Mode::Kernel);
         set_next_mode(Mode::User);
 
         // Test AArch64-specific CPU ID retrieval
-        let cpu_id = get_current_cpu_id();
+        let cpu_id = get_cpu().get_cpuid();
         assert!(
             cpu_id < crate::environment::MAX_NUM_CPUS,
             "AArch64 CPU ID should be within valid range"

@@ -2,7 +2,7 @@
 //!
 //! Tests for ELF binary loading and execution, including integration with VFS manager for filesystem-based executable loading in isolated namespaces.
 
-use crate::fs::{FileType, SeekFrom, TmpFSParams, VfsManager, drivers::tmpfs::TmpFS};
+use crate::fs::{FileType, SeekFrom, VfsManager, drivers::tmpfs::TmpFS};
 use crate::task::new_user_task;
 
 use super::*;
@@ -198,8 +198,7 @@ fn test_load_elf() {
     use crate::task::elf_loader::load_elf_into_task;
 
     let manager = VfsManager::new();
-    let params = TmpFSParams::with_memory_limit(1024 * 1024); // 1MB
-    let fs = TmpFS::new(params.memory_limit);
+    let fs = TmpFS::new(0);
     manager
         .mount(fs.clone(), "/", 0)
         .expect("Failed to mount test filesystem");
@@ -222,10 +221,9 @@ fn test_load_elf() {
     // Load the ELF file into the task
     let entry_point = load_elf_into_task(file, &mut task).expect("Failed to load ELF file");
 
-    // Translate the entry point virtual address to a physical address
-    let paddr = task
+    let kaddr = task
         .vm_manager
-        .translate_vaddr(entry_point as usize)
+        .translate_to_kva(entry_point as usize)
         .expect(
             format!(
                 "Failed to translate entry point address: {:#x}",
@@ -237,7 +235,7 @@ fn test_load_elf() {
     // Read the instruction at the entry point
     let instruction: u32;
     unsafe {
-        instruction = core::ptr::read(paddr as *const u32);
+        instruction = core::ptr::read(kaddr as *const u32);
     }
 
     // Expected instruction at the entry point (e.g., a jump instruction)
@@ -255,8 +253,7 @@ fn test_load_elf_invalid_magic() {
     use crate::task::elf_loader::load_elf_into_task;
 
     let manager = VfsManager::new();
-    let params = TmpFSParams::with_memory_limit(1024 * 1024); // 1MB
-    let fs = TmpFS::new(params.memory_limit);
+    let fs = TmpFS::new(0);
     manager
         .mount(fs.clone(), "/", 0)
         .expect("Failed to mount test filesystem");
@@ -292,8 +289,7 @@ fn test_load_elf_invalid_alignment() {
     use crate::task::elf_loader::load_elf_into_task;
 
     let manager = VfsManager::new();
-    let params = TmpFSParams::with_memory_limit(1024 * 1024); // 1MB
-    let fs = TmpFS::new(params.memory_limit);
+    let fs = TmpFS::new(0);
     manager
         .mount(fs.clone(), "/", 0)
         .expect("Failed to mount test filesystem");
@@ -354,8 +350,7 @@ fn test_load_elf_bss_zeroed() {
     use crate::task::elf_loader::load_elf_into_task;
 
     let manager = VfsManager::new();
-    let params = TmpFSParams::with_memory_limit(1024 * 1024); // 1MB
-    let fs = TmpFS::new(params.memory_limit);
+    let fs = TmpFS::new(0);
     manager
         .mount(fs.clone(), "/", 0)
         .expect("Failed to mount test filesystem");
@@ -380,7 +375,8 @@ fn test_load_elf_bss_zeroed() {
     elf_data[16] = 0x2; // e_type
     elf_data[18] = 0xF3; // e_machine
     elf_data[20] = 0x1; // e_version
-    elf_data[24] = 0x0; // e_entry
+    elf_data[24] = 0x00;
+    elf_data[25] = 0x10; // e_entry = 0x1000 (start of .bss section)
     elf_data[32] = 0x40; // e_phoff
     elf_data[54] = 0x38; // e_phentsize
     elf_data[56] = 0x1; // e_phnum
@@ -406,15 +402,15 @@ fn test_load_elf_bss_zeroed() {
     // Verify that the .bss section is zeroed
     let bss_start = 0x1000; // Virtual address of .bss section (aligned to PAGE_SIZE)
     let bss_size = 0x2000; // Size of .bss section (2 * PAGE_SIZE)
-    let paddr = task
+    let kaddr = task
         .vm_manager
-        .translate_vaddr(bss_start)
+        .translate_to_kva(bss_start)
         .expect("Failed to translate .bss start address");
 
     for i in 0..bss_size {
         let byte: u8;
         unsafe {
-            byte = core::ptr::read((paddr + i) as *const u8);
+            byte = core::ptr::read((kaddr + i) as *const u8);
         }
         assert_eq!(
             byte, 0,

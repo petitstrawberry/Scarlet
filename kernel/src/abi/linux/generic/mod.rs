@@ -1,0 +1,635 @@
+#[macro_use]
+mod macros;
+pub mod errno;
+pub mod fs;
+pub mod futex;
+pub mod mm;
+pub mod pipe;
+pub mod proc;
+pub mod signal;
+pub mod socket;
+pub mod time;
+
+use alloc::{collections::BTreeMap, sync::Arc, vec, vec::Vec};
+
+use self::time::PosixTimer;
+use crate::arch::Trapframe;
+use crate::sync::{IrqRwSpinLock, IrqSpinLock};
+
+const MAX_FDS: usize = 1024;
+/// Maximum POSIX timers owned by one Linux process/thread group.
+pub const MAX_POSIX_TIMERS: usize = 1024;
+
+struct PosixTimerTable {
+    timers: BTreeMap<u64, Arc<PosixTimer>>,
+    next_timer_id: u64,
+}
+
+impl PosixTimerTable {
+    fn new() -> Self {
+        Self {
+            timers: BTreeMap::new(),
+            next_timer_id: 1,
+        }
+    }
+
+    fn reserve_id(&mut self) -> Option<u64> {
+        if self.timers.len() >= MAX_POSIX_TIMERS {
+            return None;
+        }
+
+        let mut id = self.next_timer_id.max(1);
+        for _ in 0..MAX_POSIX_TIMERS {
+            if !self.timers.contains_key(&id) {
+                self.next_timer_id = id.wrapping_add(1).max(1);
+                return Some(id);
+            }
+            id = id.wrapping_add(1).max(1);
+        }
+        None
+    }
+}
+
+impl Drop for PosixTimerTable {
+    fn drop(&mut self) {
+        for timer in self.timers.values() {
+            timer.cancel();
+        }
+    }
+}
+
+#[derive(Clone, Default)]
+pub struct LinuxThreadState {
+    pub parent_tid_ptr: Option<usize>,
+    pub child_tid_ptr: Option<usize>,
+    pub clear_child_tid_ptr: Option<usize>,
+    pub robust_list_head: Option<usize>,
+    pub robust_list_len: usize,
+    pub tls_pointer: Option<usize>,
+    pub sigaltstack_sp: usize,
+    pub sigaltstack_size: usize,
+    pub sigaltstack_flags: u32,
+    /// Linux-visible, namespace-local thread-group ID.
+    ///
+    /// Kernel task relationships use global task IDs. Keeping the ABI-facing
+    /// TGID in the namespace domain prevents `getpid`, `SO_PEERCRED`, and
+    /// `/proc/<pid>` from describing the same process with different numbers.
+    pub tgid: usize,
+    pub pending_clone_is_thread: bool,
+}
+
+#[derive(Clone)]
+pub struct LinuxFdTable {
+    fd_to_handle: Vec<Option<u32>>,
+    fd_flags: Vec<u32>,
+    file_status_flags: Vec<u32>,
+    free_fds: Vec<usize>,
+}
+
+impl Default for LinuxFdTable {
+    fn default() -> Self {
+        let mut free_fds: Vec<usize> = (0..MAX_FDS).collect();
+        free_fds.reverse();
+
+        Self {
+            fd_to_handle: vec![None; MAX_FDS],
+            fd_flags: vec![0; MAX_FDS],
+            file_status_flags: vec![0; MAX_FDS],
+            free_fds,
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct LinuxAbi {
+    pub namespace: Arc<crate::task::namespace::TaskNamespace>,
+    fd_table: Arc<IrqRwSpinLock<LinuxFdTable>>,
+    pub signal_state: Arc<IrqSpinLock<signal::SignalState>>,
+    pub thread_state: LinuxThreadState,
+    posix_timers: Arc<IrqSpinLock<PosixTimerTable>>,
+}
+
+impl Default for LinuxAbi {
+    fn default() -> Self {
+        let namespace = crate::task::namespace::get_root_namespace().clone();
+
+        Self {
+            namespace,
+            fd_table: Arc::new(IrqRwSpinLock::new(LinuxFdTable::default())),
+            signal_state: Arc::new(IrqSpinLock::new(signal::SignalState::new())),
+            thread_state: LinuxThreadState::default(),
+            posix_timers: Arc::new(IrqSpinLock::new(PosixTimerTable::new())),
+        }
+    }
+}
+
+impl LinuxAbi {
+    /// Prepare an independent fd table without closing any handle in the caller.
+    pub fn prepare_exec_fds(&mut self, source: Option<&Self>, image: &crate::task::Task) {
+        if let Some(source) = source {
+            let mut signals = source.signal_state.lock().clone();
+            for (signal, action) in signals.handlers.iter_mut() {
+                if matches!(action, signal::SignalAction::Custom(_)) {
+                    *action = signal.default_action();
+                }
+            }
+            self.signal_state = Arc::new(IrqSpinLock::new(signals));
+        }
+        let mut table = source
+            .map(|old| old.fd_table.read().clone())
+            .unwrap_or_default();
+        if source.is_none() {
+            for handle in image.handle_table.active_handles() {
+                if (handle as usize) < MAX_FDS {
+                    table.fd_to_handle[handle as usize] = Some(handle);
+                    if image
+                        .handle_table
+                        .get_metadata(handle)
+                        .is_some_and(|metadata| {
+                            matches!(
+                                metadata.special_semantics,
+                                Some(crate::object::handle::SpecialSemantics::CloseOnExec)
+                            )
+                        })
+                    {
+                        // An explicit mapping retains this descriptor now, but
+                        // its flag still applies to the next ordinary exec.
+                        table.fd_flags[handle as usize] = fs::FD_CLOEXEC;
+                    }
+                }
+            }
+        }
+        for fd in 0..MAX_FDS {
+            if let Some(handle) = table.fd_to_handle[fd] {
+                if (source.is_some() && table.fd_flags[fd] & fs::FD_CLOEXEC != 0)
+                    || !image.handle_table.is_valid_handle(handle)
+                {
+                    drop(image.handle_table.remove(handle));
+                    table.fd_to_handle[fd] = None;
+                    table.fd_flags[fd] = 0;
+                    table.file_status_flags[fd] = 0;
+                }
+            }
+        }
+        table.free_fds = (0..MAX_FDS)
+            .rev()
+            .filter(|&fd| table.fd_to_handle[fd].is_none())
+            .collect();
+        self.fd_table = Arc::new(IrqRwSpinLock::new(table));
+        self.namespace = image.get_namespace().clone();
+        self.thread_state.tgid = image.try_get_namespace_id().unwrap_or(0);
+    }
+    pub fn thread_state(&self) -> &LinuxThreadState {
+        &self.thread_state
+    }
+    pub fn thread_state_mut(&mut self) -> &mut LinuxThreadState {
+        &mut self.thread_state
+    }
+
+    /// Return the Linux-visible thread-group ID for a task.
+    ///
+    /// A newly forked process cannot store its own TGID until it has been
+    /// registered and assigned a namespace-local ID, so zero means to use the
+    /// task's namespace ID. Threads inherit the leader's stored TGID.
+    ///
+    /// # Arguments
+    ///
+    /// * `task` - Task whose process ID should be exposed to Linux userspace.
+    ///
+    /// # Returns
+    ///
+    /// The namespace-local Linux process ID.
+    pub(crate) fn visible_thread_group_id(&self, task: &crate::task::Task) -> usize {
+        if self.thread_state.tgid != 0 {
+            self.thread_state.tgid
+        } else {
+            task.get_namespace_id()
+        }
+    }
+
+    pub fn unshare_fd_table(&mut self) {
+        let snapshot = self.fd_table.read().clone();
+        self.fd_table = Arc::new(IrqRwSpinLock::new(snapshot));
+    }
+
+    pub fn allocate_fd(&mut self, handle: u32) -> Result<usize, &'static str> {
+        let mut table = self.fd_table.write();
+        let fd = if let Some(freed_fd) = table.free_fds.pop() {
+            freed_fd
+        } else {
+            return Err("Too many open files");
+        };
+        table.fd_to_handle[fd] = Some(handle);
+        Ok(fd)
+    }
+
+    pub fn allocate_specific_fd(&mut self, fd: usize, handle: u32) -> Result<(), &'static str> {
+        if fd >= MAX_FDS {
+            return Err("File descriptor out of range");
+        }
+        let mut table = self.fd_table.write();
+        if table.fd_to_handle[fd].is_some() {
+            return Err("File descriptor already in use");
+        }
+        if let Some(pos) = table.free_fds.iter().position(|&x| x == fd) {
+            table.free_fds.remove(pos);
+        }
+        table.fd_to_handle[fd] = Some(handle);
+        Ok(())
+    }
+
+    pub fn get_handle(&self, fd: usize) -> Option<u32> {
+        if fd < MAX_FDS {
+            self.fd_table.read().fd_to_handle[fd]
+        } else {
+            None
+        }
+    }
+
+    pub fn remove_fd(&mut self, fd: usize) -> Option<u32> {
+        if fd < MAX_FDS {
+            let mut table = self.fd_table.write();
+            if let Some(handle) = table.fd_to_handle[fd].take() {
+                table.fd_flags[fd] = 0;
+                table.file_status_flags[fd] = 0;
+                table.free_fds.push(fd);
+                Some(handle)
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    }
+
+    pub fn find_fd_by_handle(&self, handle: u32) -> Option<usize> {
+        let table = self.fd_table.read();
+        for (fd, &mapped_handle) in table.fd_to_handle.iter().enumerate() {
+            if let Some(h) = mapped_handle {
+                if h == handle {
+                    return Some(fd);
+                }
+            }
+        }
+        None
+    }
+
+    pub fn init_std_fds(&mut self, stdin_handle: u32, stdout_handle: u32, stderr_handle: u32) {
+        let mut table = self.fd_table.write();
+        table.fd_to_handle[0] = Some(stdin_handle);
+        table.fd_to_handle[1] = Some(stdout_handle);
+        table.fd_to_handle[2] = Some(stderr_handle);
+        table.free_fds.retain(|&fd| fd != 0 && fd != 1 && fd != 2);
+    }
+
+    pub fn get_fd_flags(&self, fd: usize) -> Option<u32> {
+        let table = self.fd_table.read();
+        if fd < MAX_FDS && table.fd_to_handle[fd].is_some() {
+            Some(table.fd_flags[fd])
+        } else {
+            None
+        }
+    }
+
+    pub fn set_fd_flags(&mut self, fd: usize, flags: u32) -> Result<(), &'static str> {
+        use crate::{object::handle::SpecialSemantics, task::mytask};
+
+        let handle = {
+            let mut table = self.fd_table.write();
+            if fd >= MAX_FDS || table.fd_to_handle[fd].is_none() {
+                return Err("Invalid file descriptor");
+            }
+            let handle = table.fd_to_handle[fd].unwrap();
+            table.fd_flags[fd] = flags;
+            handle
+        };
+
+        if let Some(task) = mytask() {
+            if let Some(current_metadata) = task.handle_table.get_metadata(handle) {
+                let mut new_metadata = current_metadata.clone();
+
+                if flags & fs::FD_CLOEXEC != 0 {
+                    new_metadata.special_semantics = Some(SpecialSemantics::CloseOnExec);
+                } else {
+                    if matches!(
+                        new_metadata.special_semantics,
+                        Some(SpecialSemantics::CloseOnExec)
+                    ) {
+                        new_metadata.special_semantics = None;
+                    }
+                }
+
+                let _ = task.handle_table.update_metadata(handle, new_metadata);
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn get_file_status_flags(&self, fd: usize) -> Option<u32> {
+        let table = self.fd_table.read();
+        if fd < MAX_FDS && table.fd_to_handle[fd].is_some() {
+            Some(table.file_status_flags[fd])
+        } else {
+            None
+        }
+    }
+
+    pub fn set_file_status_flags(&mut self, fd: usize, flags: u32) -> Result<(), &'static str> {
+        let mut table = self.fd_table.write();
+        if fd < MAX_FDS && table.fd_to_handle[fd].is_some() {
+            table.file_status_flags[fd] = flags;
+            Ok(())
+        } else {
+            Err("Invalid file descriptor")
+        }
+    }
+
+    pub fn fd_count(&self) -> usize {
+        self.fd_table
+            .read()
+            .fd_to_handle
+            .iter()
+            .filter(|&&h| h.is_some())
+            .count()
+    }
+
+    pub fn allocated_fds(&self) -> Vec<usize> {
+        self.fd_table
+            .read()
+            .fd_to_handle
+            .iter()
+            .enumerate()
+            .filter_map(|(fd, &handle)| if handle.is_some() { Some(fd) } else { None })
+            .collect()
+    }
+
+    pub fn process_signals(&self, trapframe: &mut Trapframe) -> bool {
+        let mut signal_state = self.signal_state.lock();
+        signal::process_pending_signals_with_state(&mut *signal_state, trapframe)
+    }
+
+    pub fn handle_event_direct(&self, event: &crate::ipc::event::Event) {
+        if let Some(signal) = signal::handle_event_to_signal(event) {
+            let mut signal_state = self.signal_state.lock();
+            signal_state.add_pending(signal);
+        }
+    }
+
+    pub fn has_pending_signals(&self) -> bool {
+        let signal_state = self.signal_state.lock();
+        signal_state.next_deliverable_signal().is_some()
+    }
+
+    pub fn create_posix_timer<F>(&self, create: F) -> Result<u64, ()>
+    where
+        F: FnOnce(u64) -> Arc<PosixTimer>,
+    {
+        let mut table = self.posix_timers.lock();
+        let id = table.reserve_id().ok_or(())?;
+        table.timers.insert(id, create(id));
+        Ok(id)
+    }
+
+    pub fn get_posix_timer(&self, id: u64) -> Option<Arc<PosixTimer>> {
+        self.posix_timers.lock().timers.get(&id).cloned()
+    }
+
+    pub fn remove_posix_timer(&self, id: u64) -> Option<Arc<PosixTimer>> {
+        self.posix_timers.lock().timers.remove(&id)
+    }
+
+    pub fn reset_posix_timers(&mut self) {
+        self.posix_timers = Arc::new(IrqSpinLock::new(PosixTimerTable::new()));
+    }
+
+    /// Release this ABI instance's reference to its process-shared timer table.
+    ///
+    /// A thread exit must not cancel timers still shared by sibling threads; the
+    /// final reference releases the table and its Drop implementation cancels any
+    /// remaining timers.
+    pub fn release_posix_timers_on_task_exit(&mut self) {
+        self.reset_posix_timers();
+    }
+
+    /// Cancel all timers in the process-shared timer table.
+    ///
+    /// This is idempotent and is used by exit_group before sibling tasks retain
+    /// the shared table through their zombie lifetime.
+    pub fn cancel_posix_timers_on_process_exit(&self) {
+        let table = self.posix_timers.lock();
+        for timer in table.timers.values() {
+            timer.cancel();
+        }
+    }
+}
+
+pub(crate) fn close_kernel_object_for_linux(_object: &crate::object::KernelObject) {
+    // Socket finalization is tied to KernelObject logical ownership rather
+    // than Linux descriptor-table scans. Dropping the removed object releases
+    // exactly one owning reference, including fork/dup and queued IPC rights.
+}
+
+syscall_table! {
+    dispatch_common_syscall,
+    Invalid = 0 => |_abi: &mut crate::abi::linux::generic::LinuxAbi, _trapframe: &mut crate::arch::Trapframe| {
+        0
+    },
+    Getcwd = 17 => fs::sys_getcwd,
+    Eventfd2 = 19 => fs::sys_eventfd2,
+    EpollCtl = 21 => fs::sys_epoll_ctl,
+    EpollPwait = 22 => fs::sys_epoll_pwait,
+    EpollCreate1 = 20 => fs::sys_epoll_create1,
+    Flock = 32 => fs::sys_flock,
+    Dup = 23 => fs::sys_dup,
+    Dup3 = 24 => fs::sys_dup3,
+    Fcntl = 25 => fs::sys_fcntl,
+    InotifyInit1 = 26 => fs::sys_inotify_init1,
+    Ioctl = 29 => fs::sys_ioctl,
+    MkdirAt = 34 => fs::sys_mkdirat,
+    UnlinkAt = 35 => fs::sys_unlinkat,
+    RenameAt = 38 => fs::sys_renameat,
+    Mount = 40 => fs::sys_mount,
+    Statfs = 43 => fs::sys_statfs,
+    Fstatfs = 44 => fs::sys_fstatfs,
+    Ftruncate = 46 => fs::sys_ftruncate,
+    Fallocate = 47 => fs::sys_fallocate,
+    LinkAt = 37 => fs::sys_linkat,
+    FaccessAt = 48 => fs::sys_faccessat,
+    Chdir = 49 => fs::sys_chdir,
+    Fchmod = 52 => fs::sys_fchmod,
+    FchmodAt = 53 => fs::sys_fchmodat,
+    OpenAt = 56 => fs::sys_openat,
+    Close = 57 => fs::sys_close,
+    Pipe2 = 59 => pipe::sys_pipe2,
+    GetDents64 = 61 => fs::sys_getdents64,
+    Lseek = 62 => fs::sys_lseek,
+    Read = 63 => fs::sys_read,
+    Write = 64 => fs::sys_write,
+    Readv = 65 => fs::sys_readv,
+    Writev = 66 => fs::sys_writev,
+    Pread64 = 67 => fs::sys_pread64,
+    Pwrite64 = 68 => fs::sys_pwrite64,
+    Pselect6 = 72 => fs::sys_pselect6,
+    Ppoll = 73 => fs::sys_ppoll,
+    NewFstAtAt = 79 => fs::sys_newfstatat,
+    NewFstat = 80 => fs::sys_newfstat,
+    ReadLinkAt = 78 => fs::sys_readlinkat,
+    Fsync = 82 => fs::sys_fsync,
+    TimerfdCreate = 85 => time::sys_timerfd_create,
+    TimerfdSettime = 86 => time::sys_timerfd_settime,
+    TimerfdGettime = 87 => time::sys_timerfd_gettime,
+    Exit = 93 => proc::sys_exit,
+    ExitGroup = 94 => proc::sys_exit_group,
+    SetTidAddress = 96 => proc::sys_set_tid_address,
+    Waitid = 95 => proc::sys_waitid,
+    Unshare = 97 => proc::sys_unshare,
+    Futex = 98 => futex::sys_futex,
+    SetRobustList = 99 => proc::sys_set_robust_list,
+    Nanosleep = 101 => time::sys_nanosleep,
+    TimerCreate = 107 => time::sys_timer_create,
+    TimerGettime = 108 => time::sys_timer_gettime,
+    TimerGetoverrun = 109 => time::sys_timer_getoverrun,
+    TimerSettime = 110 => time::sys_timer_settime,
+    TimerDelete = 111 => time::sys_timer_delete,
+    ClockGettime = 113 => time::sys_clock_gettime,
+    ClockGetres = 114 => time::sys_clock_getres,
+    SchedGetscheduler = 120 => proc::sys_sched_getscheduler,
+    SchedGetparam = 121 => proc::sys_sched_getparam,
+    SchedSetaffinity = 122 => proc::sys_sched_setaffinity,
+    SchedGetaffinity = 123 => proc::sys_sched_getaffinity,
+    SchedYield = 124 => proc::sys_sched_yield,
+    Sigaltstack = 132 => signal::sys_sigaltstack,
+    RtSigaction = 134 => signal::sys_rt_sigaction,
+    RtSigprocmask = 135 => signal::sys_rt_sigprocmask,
+    Setpriority = 140 => proc::sys_setpriority,
+    Getpriority = 141 => proc::sys_getpriority,
+    SetGid = 144 => proc::sys_setgid,
+    SetUid = 146 => proc::sys_setuid,
+    GetResUid = 148 => proc::sys_getresuid,
+    GetResGid = 150 => proc::sys_getresgid,
+    SetPgid = 154 => proc::sys_setpgid,
+    GetPgid = 155 => proc::sys_getpgid,
+    GetSid = 156 => proc::sys_getsid,
+    SetSid = 157 => proc::sys_setsid,
+    Uname = 160 => proc::sys_uname,
+    Umask = 166 => fs::sys_umask,
+    Prctl = 167 => proc::sys_prctl,
+    GetPid = 172 => proc::sys_getpid,
+    GetPpid = 173 => proc::sys_getppid,
+    GetUid = 174 => proc::sys_getuid,
+    GetEuid = 175 => proc::sys_geteuid,
+    GetGid = 176 => proc::sys_getgid,
+    GetEgid = 177 => proc::sys_getegid,
+    GetTid = 178 => proc::sys_gettid,
+    Sysinfo = 179 => proc::sys_sysinfo,
+    Kill = 129 => proc::sys_kill,
+    Tkill = 130 => signal::sys_tkill,
+    Tgkill = 131 => signal::sys_tgkill,
+    Brk = 214 => proc::sys_brk,
+    Munmap = 215 => mm::sys_munmap,
+    Mremap = 216 => mm::sys_mremap,
+    Clone = 220 => proc::sys_clone,
+    Execve = 221 => fs::sys_execve,
+    Mmap = 222 => mm::sys_mmap,
+    Mprotect = 226 => mm::sys_mprotect,
+    Msync = 227 => mm::sys_msync,
+    Mlock = 228 => mm::sys_mlock,
+    Munlock = 229 => mm::sys_munlock,
+    Mlockall = 230 => mm::sys_mlockall,
+    Munlockall = 231 => mm::sys_munlockall,
+    Mincore = 232 => mm::sys_mincore,
+    Madvise = 233 => mm::sys_madvise,
+    Mlock2 = 284 => mm::sys_mlock2,
+    Accept4 = 242 => socket::sys_accept4,
+    Getrandom = 278 => fs::sys_getrandom,
+    MemfdCreate = 279 => proc::sys_memfd_create,
+    PidfdOpen = 434 => proc::sys_pidfd_open,
+    Wait4 = 260 => proc::sys_wait4,
+    Prlimit64 = 261 => proc::sys_prlimit64,
+    Socket = 198 => socket::sys_socket,
+    Socketpair = 199 => socket::sys_socketpair,
+    Bind = 200 => socket::sys_bind,
+    Listen = 201 => socket::sys_listen,
+    Accept = 202 => socket::sys_accept,
+    Connect = 203 => socket::sys_connect,
+    GetSockname = 204 => socket::sys_getsockname,
+    GetPeerName = 205 => socket::sys_getpeername,
+    Sendto = 206 => socket::sys_sendto,
+    Recvfrom = 207 => socket::sys_recvfrom,
+    SetSockopt = 208 => socket::sys_setsockopt,
+    GetSockopt = 209 => socket::sys_getsockopt,
+    Shutdown = 210 => socket::sys_shutdown,
+    Sendmsg = 211 => socket::sys_sendmsg,
+    Recvmsg = 212 => socket::sys_recvmsg,
+    Statx = 291 => fs::sys_statx,
+    RenameAt2 = 276 => fs::sys_renameat2,
+    Membarrier = 283 => proc::sys_membarrier,
+    FaccessAt2 = 439 => fs::sys_faccessat2,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn posix_timer(id: u64) -> Arc<PosixTimer> {
+        Arc::new(PosixTimer::new(
+            id,
+            0,
+            0,
+            0,
+            0,
+            0,
+            Arc::new(IrqSpinLock::new(signal::SignalState::new())),
+        ))
+    }
+
+    #[test_case]
+    fn posix_timer_table_rejects_capacity_exhaustion() {
+        let mut table = PosixTimerTable::new();
+        for id in 1..=MAX_POSIX_TIMERS as u64 {
+            table.timers.insert(id, posix_timer(id));
+        }
+
+        assert_eq!(table.reserve_id(), None);
+    }
+
+    #[test_case]
+    fn posix_timer_table_skips_collisions_across_id_wrap() {
+        let mut table = PosixTimerTable::new();
+        table.next_timer_id = u64::MAX;
+        table.timers.insert(u64::MAX, posix_timer(u64::MAX));
+        table.timers.insert(1, posix_timer(1));
+
+        assert_eq!(table.reserve_id(), Some(2));
+        assert_eq!(table.next_timer_id, 3);
+    }
+
+    #[test_case]
+    fn dropping_posix_timer_table_cancels_retained_timers() {
+        let timer = posix_timer(1);
+        timer.state().active = true;
+
+        {
+            let mut table = PosixTimerTable::new();
+            table.timers.insert(1, timer.clone());
+        }
+
+        assert!(!timer.state().active);
+    }
+
+    #[test_case]
+    fn task_exit_releases_only_its_posix_timer_table_reference() {
+        let mut exiting = LinuxAbi::default();
+        let mut sibling = exiting.clone();
+        let timer = posix_timer(1);
+        timer.state().active = true;
+        exiting.posix_timers.lock().timers.insert(1, timer.clone());
+
+        exiting.release_posix_timers_on_task_exit();
+        assert!(timer.state().active);
+
+        sibling.cancel_posix_timers_on_process_exit();
+        assert!(!timer.state().active);
+    }
+}

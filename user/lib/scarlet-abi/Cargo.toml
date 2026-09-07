@@ -1,0 +1,8 @@
+[package]
+name = "scarlet-abi"
+version = "1.0.0"
+edition = "2024"
+
+[lib]
+name = "scarlet_abi"
+path = "src/lib.rs"

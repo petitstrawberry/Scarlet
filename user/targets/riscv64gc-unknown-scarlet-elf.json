@@ -12,6 +12,7 @@
     "llvm-abiname": "lp64d",
     "llvm-target": "riscv64",
     "max-atomic-width": 64,
+    "os": "scarlet",
     "metadata": {
       "description": "Scarlet user program RISC-V (RV64IMAFDC ISA)",
       "host_tools": false,

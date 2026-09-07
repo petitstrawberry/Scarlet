@@ -1,0 +1,7 @@
+[Desktop Entry]
+Name=Vellum
+Exec=/bin/vellum %f
+Icon=image
+Type=Application
+Terminal=false
+MimeType=application/pdf;image/png;image/jpeg;image/gif;image/bmp;image/x-icon;image/webp;image/x-tga;image/qoi;

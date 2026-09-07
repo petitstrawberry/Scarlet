@@ -1,0 +1,7 @@
+# Resident SBUS endpoints for desktop applications. Their normal windows run
+# in separate application processes launched or focused through stemd.
+
+[service.desktop-files]
+exec = "/bin/files --service"
+order = 03
+depends = ["sws"]

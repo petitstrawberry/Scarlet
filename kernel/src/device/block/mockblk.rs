@@ -1,9 +1,10 @@
 use core::any::Any;
 
+use crate::sync::IrqSpinLock;
 use alloc::boxed::Box;
+use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
-use spin::Mutex;
 
 use super::request::BlockIORequestType;
 use super::*;
@@ -16,8 +17,8 @@ use crate::object::capability::{ControlOps, MemoryMappingOps};
 pub struct MockBlockDevice {
     disk_name: &'static str,
     disk_size: usize,
-    data: Mutex<Vec<Vec<u8>>>,
-    request_queue: Mutex<Vec<Box<BlockIORequest>>>,
+    data: IrqSpinLock<Vec<Vec<u8>>>,
+    request_queue: IrqSpinLock<Vec<Box<BlockIORequest>>>,
 }
 
 impl MockBlockDevice {
@@ -30,8 +31,8 @@ impl MockBlockDevice {
         Self {
             disk_name,
             disk_size: sector_size * sector_count,
-            data: Mutex::new(data),
-            request_queue: Mutex::new(Vec::new()),
+            data: IrqSpinLock::new(data),
+            request_queue: IrqSpinLock::new(Vec::new()),
         }
     }
 }
@@ -54,6 +55,10 @@ impl Device for MockBlockDevice {
     }
 
     fn as_block_device(&self) -> Option<&dyn BlockDevice> {
+        Some(self)
+    }
+
+    fn into_block_device(self: Arc<Self>) -> Option<Arc<dyn BlockDevice>> {
         Some(self)
     }
 }
@@ -87,14 +92,17 @@ impl BlockDevice for MockBlockDevice {
     /// # Returns
     /// Vector of `BlockIOResult` containing completed requests and their results
     fn process_requests(&self) -> Vec<BlockIOResult> {
-        let mut results = Vec::new();
-
         // Extract all requests at once to minimize lock time
         let requests = {
             let mut queue = self.request_queue.lock();
             core::mem::replace(&mut *queue, Vec::new())
         }; // request_queue lock is automatically released here
 
+        self.submit_requests(requests)
+    }
+
+    fn submit_requests(&self, requests: Vec<Box<BlockIORequest>>) -> Vec<BlockIOResult> {
+        let mut results = Vec::with_capacity(requests.len());
         // Process all requests without holding the request_queue lock
         for mut request in requests {
             let result = match request.request_type {
@@ -147,7 +155,7 @@ impl MemoryMappingOps for MockBlockDevice {
         &self,
         _offset: usize,
         _length: usize,
-    ) -> Result<(usize, usize, bool), &'static str> {
+    ) -> Result<crate::object::capability::MemoryMappingInfo, &'static str> {
         Err("Memory mapping not supported")
     }
 
@@ -170,6 +178,7 @@ impl Selectable for MockBlockDevice {
         _interest: crate::object::capability::selectable::ReadyInterest,
         _trapframe: &mut crate::arch::Trapframe,
         _timeout_ticks: Option<u64>,
+        _min_wait_ticks: u64,
     ) -> crate::object::capability::selectable::SelectWaitOutcome {
         crate::object::capability::selectable::SelectWaitOutcome::Ready
     }

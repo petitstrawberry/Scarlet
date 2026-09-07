@@ -1,0 +1,173 @@
+# Stem Daemon (stemd)
+
+## Overview
+
+Stem Daemon (`stemd`) is a systemd-like service manager for Scarlet OS. It provides centralized process management with dependency resolution, .desktop application registry, service readiness tracking, and IPC-based control via both Unix-domain socket and sbus.
+
+## Architecture
+
+```text
+init
+ └─> stemd
+      ├── Config parser (TOML: /etc/stemd.d/services/*.toml)
+      ├── Desktop file loader (/etc/stemd.d/apps/*.desktop)
+      ├── Dependency resolver (topological sort)
+      ├── Service launcher (fork/exec with TTY or log pipe attachment)
+      ├── IPC thread (Unix socket: /tmp/stemd.sock)
+      ├── sbus listener (org.scarlet-os.stem method calls)
+      ├── stdout/stderr forwarders (local socket: /tmp/logd.sock)
+      └── Process reaper (waitpid)
+```
+
+stemd consists of these modules:
+
+| Module | File | Responsibility |
+|--------|------|----------------|
+| Main | `user/std-bin/src/stemd/main.rs` | Config parsing, service lifecycle, process reaping |
+| Protocol | `user/std-bin/src/stemd/protocol.rs` | IPC command definitions and payload builders |
+| Desktop | `user/std-bin/src/stemd/desktop.rs` | XDG .desktop file parser and app registry |
+| Log daemon | `user/std-bin/src/logd.rs` | Bounded journal, filtering, and live queries |
+| Log protocol | `user/lib/log-protocol/src/lib.rs` | Shared framed wire types and limits |
+
+## Configuration
+
+stemd reads `/etc/stemd.d/services/` in its own view. If directory loading
+fails, it tries `/etc/stemd.d/services.toml`, then its built-in defaults.
+The first successfully loaded service configuration is used.
+
+### Service Definition
+
+```toml
+[service.login]
+exec = "/bin/login"
+depends = []
+after = ["sws"]
+tty = "/dev/tty0"
+
+[service.sws]
+exec = "/bin/sws"
+depends = []
+ready_notify = true
+ready_timeout_ms = 10000
+```
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `exec` | Yes | Full path to the executable |
+| `depends` | No | Hard dependencies (must start first) |
+| `after` | No | Ordering hints (soft, ignored if target missing) |
+| `tty` | No | TTY device path for stdio attachment |
+| `order` | No | Integer ordering hint (default 0) |
+| `ready_notify` | No | Expect `SERVICE_READY` from this service (default false) |
+| `ready_timeout_ms` | No | Timeout for readiness notification (default 5000 ms) |
+
+## Central Logging
+
+`logd` is an early `stemd` dependency. After `logd` reports ready, `stemd`
+connects stdout and stderr of every non-TTY service and desktop application to
+native pipes. Dedicated readers split output at newline or NUL boundaries and
+forward framed records to `/tmp/logd.sock`. `logd` tags each record with a unit,
+PID, stream, priority, sequence, boot-journal identifier, and monotonic and
+realtime timestamps.
+
+The current journal is intentionally volatile. It retains at most 8,192 records
+and 4 MiB of record data, evicting the oldest entries first. A single record is
+limited to 48 KiB. TTY services retain their configured terminal streams, and
+`logd` itself is excluded from capture to prevent a logging recursion.
+
+Use `logctl` to inspect or follow the journal:
+
+```text
+logctl -u sws
+logctl -u sws -f
+logctl -u sws -n 200
+logctl -p warning
+logctl --pid 42
+```
+
+`-p LEVEL` follows syslog ordering and includes the selected level and all more
+important records. `-b` selects the active in-memory boot journal; persistent
+multi-boot storage is not implemented yet.
+
+## .desktop Application Registry
+
+After service startup, stemd loads Desktop Entry files from
+`/etc/stemd.d/apps/` in its own view.
+Loaded apps are available for launch via the IPC `LAUNCH_OR_FOCUS` command.
+The checked-in desktop bundle supplies these files under its `fs/` tree.
+
+```text
+[Desktop Entry]
+Name=Terminal
+Exec=/bin/terminal
+Icon=utilities-terminal
+Type=Application
+Terminal=false
+X-Scarlet-NewInstance=true
+```
+
+Launcher activation focuses an existing instance by default. Set the optional
+`X-Scarlet-NewInstance=true` key in `[Desktop Entry]` to start a new process on
+every activation. Omitting the key or setting it to `false` keeps the default;
+the desktop bundle opts in only Terminal. This policy applies to both sbus
+`LaunchOrFocus` and the Unix-socket `LAUNCH_OR_FOCUS` command. Explicit `LAUNCH`
+requests and file-opening requests still start a new process independently of
+this setting.
+
+## Service Lifecycle
+
+1. **Config loading**: Parse all `.toml` files from config directory
+2. **Dependency resolution**: Topological sort respecting `depends`, `after`, and `order`
+3. **Service startup**: Fork/exec in resolved order; attach TTY if configured
+4. **Readiness wait**: If `ready_notify = true`, wait for `SERVICE_READY` IPC or timeout
+5. **App loading**: Parse `.desktop` files from the application directories
+6. **Process reaping**: Main thread calls `waitpid(-1, 0)` continuously
+7. **App tracking**: Running apps/services tracked in global state for focus management
+
+## IPC Protocol
+
+stemd listens on `/tmp/stemd.sock`. All messages start with a 1-byte command type.
+
+| Command | Code | Payload | Description |
+|---------|------|---------|-------------|
+| `STATUS` | 0x00 | empty | Query daemon status |
+| `LAUNCH_OR_FOCUS` | 0x01 | app_id + exec_path | Launch app or focus existing window |
+| `REGISTER_APP` | 0x02 | app definition | Register application dynamically |
+| `UNREGISTER_APP` | 0x03 | app_id | Remove application from registry |
+| `SHUTDOWN` | 0x04 | empty | Shut down stemd |
+| `LAUNCH` | 0x05 | app_id + exec_path | Always start a new process |
+| `SERVICE_READY` | 0x06 | service_name | Service notifies readiness |
+
+### Launch Payload Format
+
+Variable-length payload for `LAUNCH_OR_FOCUS` and `LAUNCH`:
+
+| Offset | Size | Field |
+|--------|------|-------|
+| 0 | 4 | `app_id_len` (u32 LE) |
+| 4 | N | `app_id` (bytes) |
+| 4+N | 4 | `exec_path_len` (u32 LE) |
+| 8+N | M | `exec_path` (bytes) |
+
+If `exec_path` is empty, stemd looks up the app from registered .desktop files.
+
+## sbus Integration
+
+stemd connects to sbus (Scarlet's D-Bus-like service bus) and registers as `org.scarlet-os.stem`. External processes can call methods over sbus for app launching and status queries.
+
+## Manual Invocation
+
+When run from an interactive shell, stemd forks once and the parent exits immediately. In this mode, stdio is detached to `/dev/null` and services with `tty` configured are skipped to avoid stealing the terminal.
+
+## Source Code
+
+- Main: `user/std-bin/src/stemd/main.rs`
+- Protocol: `user/std-bin/src/stemd/protocol.rs`
+- Desktop parser: `user/std-bin/src/stemd/desktop.rs`
+- Log daemon: `user/std-bin/src/logd.rs`
+- Log query tool: `user/std-bin/src/logctl.rs`
+- Log wire protocol: `user/lib/log-protocol/src/lib.rs`
+- Init integration: `user/bin/src/init.rs`
+- Base services: [bundles/base/fs/etc/stemd.d/services](../../bundles/base/fs/etc/stemd.d/services)
+- Desktop services/apps: [bundles/desktop/fs/etc/stemd.d](../../bundles/desktop/fs/etc/stemd.d)
+- Build and init handoff: [userspace development](../userspace/README.md)

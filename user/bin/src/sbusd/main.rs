@@ -5,20 +5,23 @@
 #![no_std]
 #![no_main]
 
-extern crate alloc;
-
 extern crate scarlet_std as std;
 
-use alloc::collections::BTreeMap;
-use alloc::string::{String, ToString};
-use alloc::sync::Arc;
-use alloc::vec::Vec;
-use sbus::{DEFAULT_SOCKET_PATH, Message, ServiceInfo};
-use std::io::{Read, Write};
+mod pending;
+
+use pending::{
+    PendingCall, oldest_pending_id_for_destination, remove_pending_calls_for_disconnected_client,
+};
+use sbus::{Argument, DEFAULT_SOCKET_PATH, Message, ServiceInfo};
+use std::collections::BTreeMap;
+use std::io::{ErrorKind, Read, Write};
+use std::poll::{POLLERR, POLLHUP, POLLIN, POLLNVAL, POLLOUT, PollHandle, poll};
 use std::println;
-use std::socket::Socket;
-use std::sync::Mutex;
+use std::socket::{ShutdownHow, Socket};
+use std::string::{String, ToString};
+use std::sync::{Arc, Mutex};
 use std::thread;
+use std::vec::Vec;
 
 /// Service registry
 static SERVICES: Mutex<BTreeMap<String, ServiceInfo>> = Mutex::new(BTreeMap::new());
@@ -27,20 +30,36 @@ static SERVICES: Mutex<BTreeMap<String, ServiceInfo>> = Mutex::new(BTreeMap::new
 /// Wrapped in Arc<Mutex<>> so it can be shared between threads
 static CLIENTS: Mutex<BTreeMap<usize, Arc<Mutex<Socket>>>> = Mutex::new(BTreeMap::new());
 
-/// Pending method calls: caller_client_id -> PendingCall
-/// Tracks in-flight method calls so we can route responses back to callers
-/// Key is caller_client_id, value contains which service they called
-static PENDING_CALLS: Mutex<BTreeMap<usize, PendingCall>> = Mutex::new(BTreeMap::new());
+/// Pending method calls ordered by their forwarding sequence.
+///
+/// Services currently reply with serial 0, so per-destination insertion order
+/// is the only wire-compatible way to correlate concurrent calls.
+static PENDING_CALLS: Mutex<BTreeMap<u64, PendingCall>> = Mutex::new(BTreeMap::new());
+static NEXT_PENDING_ID: Mutex<u64> = Mutex::new(1);
 
-/// Serial number generator for method calls
-static NEXT_SERIAL: Mutex<u32> = Mutex::new(1);
+const CLIENT_WRITE_TIMEOUT_MS: u64 = 1_000;
+const MAX_MESSAGE_SIZE_BYTES: usize = 64 * 1024;
+const MAX_MESSAGE_PAYLOAD_BYTES: usize = MAX_MESSAGE_SIZE_BYTES - sbus::MessageHeader::SIZE;
 
-/// Pending method call information
-#[derive(Clone, Debug)]
-struct PendingCall {
-    caller_client_id: usize,
-    destination: String,
-}
+// When a service disconnects, sbusd broadcasts this signal so callers waiting
+// on that service can abort instead of hanging forever.
+const SBUS_SELF_BUS_NAME: &str = "org.scarlet.sbus";
+const SBUS_SELF_OBJECT_PATH: &str = "/org/scarlet/sbus";
+const SBUS_SELF_INTERFACE: &str = "org.scarlet.sbus";
+const SBUS_SERVICE_UNREGISTERED_SIGNAL: &str = "ServiceUnregistered";
+
+/// How long `poll` blocks waiting for a client socket to become readable.
+/// Long enough that an idle handler thread sleeps instead of spinning, short
+/// enough to stay responsive. This replaces the previous 1 ms busy-poll.
+const CLIENT_READ_POLL_TIMEOUT_NS: i64 = 250_000_000;
+/// Delay after `poll` reports readability but a non-blocking read cannot progress.
+const CLIENT_SPURIOUS_READ_BACKOFF_MS: u64 = 10;
+/// Consecutive false readiness reports tolerated before dropping a broken client.
+const MAX_CONSECUTIVE_SPURIOUS_READS: usize = 16;
+/// Total deadline for a single `write_all` call when the peer stops draining.
+const CLIENT_WRITE_TIMEOUT_NS: u64 = CLIENT_WRITE_TIMEOUT_MS * 1_000_000;
+/// Slice size for write-backoff polling so the total timeout is still enforced.
+const CLIENT_WRITE_POLL_SLICE_NS: u64 = 100_000_000;
 
 /// Connected clients
 struct Client {
@@ -85,19 +104,56 @@ fn main() -> i32 {
 
                 println!("sbusd: Accepted client {}", client_id);
 
-                // Wrap socket in Arc<Mutex<>> so it can be shared
-                let client_socket = Arc::new(Mutex::new(client_socket));
+                if let Err(error) = client_socket.set_nonblocking(true) {
+                    println!(
+                        "sbusd: Failed to enable non-blocking mode for client {}: {:?}",
+                        client_id, error
+                    );
+                    continue;
+                }
+
+                // Keep reads and writes on duplicated handles. Writers still
+                // share one mutex so complete sbus messages cannot interleave,
+                // while an outbound retry cannot prevent the handler from
+                // draining inbound messages on the read handle.
+                let write_handle = match client_socket.as_handle().duplicate() {
+                    Ok(handle) => handle,
+                    Err(error) => {
+                        println!(
+                            "sbusd: Failed to duplicate client {} socket: {:?}",
+                            client_id, error
+                        );
+                        continue;
+                    }
+                };
+                let write_socket = match Socket::from_handle(write_handle) {
+                    Ok(socket) => Arc::new(Mutex::new(socket)),
+                    Err(error) => {
+                        println!(
+                            "sbusd: Failed to create client {} write socket: {:?}",
+                            client_id, error
+                        );
+                        continue;
+                    }
+                };
 
                 // Register client
                 {
                     let mut clients = CLIENTS.lock();
-                    clients.insert(client_id, client_socket.clone());
+                    clients.insert(client_id, write_socket.clone());
                 }
 
-                // Spawn client handler thread
-                thread::spawn(move || {
-                    handle_client(client_id, client_socket);
-                });
+                // A transient task-allocation failure must reject only this
+                // connection, not panic and terminate the system bus daemon.
+                if thread::Builder::new()
+                    .spawn(move || {
+                        handle_client(client_id, client_socket, write_socket);
+                    })
+                    .is_err()
+                {
+                    CLIENTS.lock().remove(&client_id);
+                    println!("sbusd: Failed to start handler for client {}", client_id);
+                }
             }
             Err(e) => {
                 println!("sbusd: Accept failed: {:?}", e);
@@ -108,27 +164,48 @@ fn main() -> i32 {
     }
 }
 
-fn handle_client(client_id: usize, socket: Arc<Mutex<Socket>>) {
-    println!("[Client {}] Handler started", client_id);
-
-    // Set non-blocking mode
-    {
-        let sock = socket.lock();
-        if let Err(e) = sock.set_nonblocking(true) {
-            println!("[Client {}] Failed to set non-blocking: {:?}", client_id, e);
-            return;
-        }
-    }
+fn handle_client(client_id: usize, mut read_socket: Socket, write_socket: Arc<Mutex<Socket>>) {
+    println!("[Client {}] Handler started (non-blocking mode)", client_id);
 
     let mut buffer = [0u8; 4096];
     let mut read_buffer = Vec::new();
+    let raw_read_handle = read_socket.as_raw() as u32;
+    let mut consecutive_spurious_reads = 0usize;
 
-    loop {
-        // Try to read data
-        let read_result = {
-            let mut sock = socket.lock();
-            sock.read(&mut buffer)
+    'client: loop {
+        // Block until the socket is readable instead of busy-polling. A
+        // duplicated read handle that never returns EOF (a known risk with
+        // the handle-table duplication path) previously turned the 1 ms sleep
+        // into a full-core spin. `poll` sleeps in the kernel until there is
+        // genuine work, eliminating that failure mode entirely.
+        let mut poll_handles = [PollHandle::new(raw_read_handle, POLLIN)];
+        let revents = match poll(&mut poll_handles, CLIENT_READ_POLL_TIMEOUT_NS) {
+            Ok(0) => continue,
+            Ok(_) => {
+                let revents = poll_handles[0].revents;
+                if revents & POLLNVAL != 0 {
+                    println!("[Client {}] Poll returned POLLNVAL", client_id);
+                    break;
+                }
+                // POLLIN, POLLHUP, and POLLERR may all coexist with pending
+                // data. Attempt a read in every case and let the read result
+                // decide whether the connection is truly gone.
+                if revents & POLLIN == 0 && revents & (POLLHUP | POLLERR) != 0 {
+                    println!(
+                        "[Client {}] Poll reported terminal socket event: {:#x}",
+                        client_id, revents
+                    );
+                    break;
+                }
+                revents
+            }
+            Err(code) => {
+                println!("[Client {}] Poll error: {}", client_id, code);
+                break;
+            }
         };
+
+        let read_result = read_socket.read(&mut buffer);
 
         match read_result {
             Ok(0) => {
@@ -136,29 +213,34 @@ fn handle_client(client_id: usize, socket: Arc<Mutex<Socket>>) {
                 break;
             }
             Ok(n) => {
-                println!("[Client {}] Read {} bytes", client_id, n);
+                consecutive_spurious_reads = 0;
                 read_buffer.extend_from_slice(&buffer[..n]);
 
-                // Try to parse complete messages
-                while read_buffer.len() >= 16 {
-                    // Check if we have a complete message
-                    let mut header_bytes = [0u8; 16];
-                    header_bytes.copy_from_slice(&read_buffer[0..16]);
+                while read_buffer.len() >= sbus::MessageHeader::SIZE {
+                    let mut header_bytes = [0u8; sbus::MessageHeader::SIZE];
+                    header_bytes.copy_from_slice(&read_buffer[..sbus::MessageHeader::SIZE]);
                     let header = sbus::MessageHeader::from_le_bytes(header_bytes);
 
-                    let total_len = 16 + header.payload_length as usize;
+                    let payload_len = header.payload_length as usize;
+                    if payload_len > MAX_MESSAGE_PAYLOAD_BYTES {
+                        println!(
+                            "[Client {}] Closing connection with oversized sbus payload: {} bytes",
+                            client_id, payload_len
+                        );
+                        let _ = read_socket.shutdown(ShutdownHow::Both);
+                        break 'client;
+                    }
+
+                    let total_len = sbus::MessageHeader::SIZE + payload_len;
                     if read_buffer.len() < total_len {
-                        // Need more data
                         break;
                     }
 
-                    // Extract complete message
                     let msg_bytes = read_buffer.drain(..total_len).collect::<Vec<_>>();
 
-                    // Parse and handle message
                     match sbus::from_bytes(msg_bytes) {
                         Ok(msg) => {
-                            if let Err(e) = handle_message(client_id, &socket, &msg) {
+                            if let Err(e) = handle_message(client_id, &write_socket, &msg) {
                                 println!("[Client {}] Error handling message: {:?}", client_id, e);
                             }
                         }
@@ -168,31 +250,80 @@ fn handle_client(client_id: usize, socket: Arc<Mutex<Socket>>) {
                     }
                 }
             }
-            Err(_) => {
-                // WouldBlock - no data available
-                let _ = std::thread::sleep(core::time::Duration::from_millis(10));
+            Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                if revents & (POLLHUP | POLLERR) != 0 {
+                    println!(
+                        "[Client {}] Closing after terminal poll event returned WouldBlock: {:#x}",
+                        client_id, revents
+                    );
+                    break;
+                }
+
+                // A selectable implementation must not repeatedly report
+                // POLLIN while a read would block. Bound this failure mode so
+                // one malformed or stale socket cannot consume a whole CPU.
+                consecutive_spurious_reads = consecutive_spurious_reads.saturating_add(1);
+                if consecutive_spurious_reads >= MAX_CONSECUTIVE_SPURIOUS_READS {
+                    println!(
+                        "[Client {}] Closing after {} consecutive false POLLIN wakeups",
+                        client_id, consecutive_spurious_reads
+                    );
+                    let _ = read_socket.shutdown(ShutdownHow::Both);
+                    break;
+                }
+                thread::sleep(core::time::Duration::from_millis(
+                    CLIENT_SPURIOUS_READ_BACKOFF_MS,
+                ));
+                continue;
+            }
+            Err(e) => {
+                println!("[Client {}] Read error: {:?}", client_id, e);
+                break;
             }
         }
     }
 
-    // Cleanup: unregister services from this client
-    let mut services = SERVICES.lock();
-    let mut to_remove = Vec::new();
-    for (bus_name, service) in services.iter() {
-        if service.client_id == client_id {
-            to_remove.push(bus_name.clone());
+    // Cleanup registries without holding one global lock while acquiring
+    // another or while writing a failure response.
+    let removed_services = {
+        let mut services = SERVICES.lock();
+        let to_remove: Vec<String> = services
+            .iter()
+            .filter(|(_, service)| service.client_id == client_id)
+            .map(|(bus_name, _)| bus_name.clone())
+            .collect();
+        for bus_name in &to_remove {
+            services.remove(bus_name);
         }
-    }
-    for bus_name in to_remove {
+        to_remove
+    };
+    for bus_name in &removed_services {
         println!("[Client {}] Unregistering service: {}", client_id, bus_name);
-        services.remove(&bus_name);
     }
-    drop(services);
 
     // Remove client from registry
-    let mut clients = CLIENTS.lock();
-    clients.remove(&client_id);
+    {
+        let mut clients = CLIENTS.lock();
+        clients.remove(&client_id);
+    }
     println!("[Client {}] Removed from client registry", client_id);
+
+    // Broadcast ServiceUnregistered for each removed service so callers
+    // waiting on them can abort their wait instead of hanging forever.
+    for bus_name in &removed_services {
+        broadcast_service_unregistered(bus_name);
+    }
+
+    let failed_calls = {
+        let mut pending_calls = PENDING_CALLS.lock();
+        remove_pending_calls_for_disconnected_client(&mut pending_calls, client_id)
+    };
+
+    notify_failed_calls(
+        failed_calls,
+        "org.scarlet.sbus.Disconnected",
+        "Destination service disconnected",
+    );
 }
 
 fn handle_message(
@@ -208,6 +339,29 @@ fn handle_message(
         Message::RegisterService { bus_name } => {
             println!("[Client {}] Registering service: {}", client_id, bus_name);
 
+            let name_taken_by_other = {
+                let services = SERVICES.lock();
+                services
+                    .get(bus_name)
+                    .is_some_and(|existing| existing.client_id != client_id)
+            };
+            if name_taken_by_other {
+                println!(
+                    "sbusd: Rejecting duplicate registration of {} by client {}",
+                    bus_name, client_id
+                );
+                let mut message = String::from("Service '");
+                message.push_str(bus_name);
+                message.push_str("' is already registered");
+                let reply = Message::MethodError {
+                    serial: 0,
+                    error_name: "org.scarlet.sbus.NameTaken".to_string(),
+                    message,
+                };
+                send_message(socket, &reply)?;
+                return Ok(());
+            }
+
             // TODO: Get actual PID
             let service_info = ServiceInfo {
                 bus_name: bus_name.clone(),
@@ -215,8 +369,10 @@ fn handle_message(
                 client_id,
             };
 
-            let mut services = SERVICES.lock();
-            services.insert(bus_name.clone(), service_info);
+            {
+                let mut services = SERVICES.lock();
+                services.insert(bus_name.clone(), service_info);
+            }
 
             println!(
                 "sbusd: Service registered: {} (client {})",
@@ -237,49 +393,63 @@ fn handle_message(
         } => {
             println!("[Client {}] CallMethod: {}", client_id, destination);
 
-            // Look up destination service
-            let services = SERVICES.lock();
-            if let Some(service) = services.get(destination) {
+            // Snapshot routing information under short, non-nested registry
+            // locks. No global registry lock may be held across socket I/O.
+            let destination_client_id = {
+                let services = SERVICES.lock();
+                services.get(destination).map(|service| service.client_id)
+            };
+            if let Some(destination_client_id) = destination_client_id {
                 println!(
                     "sbusd: Routing to service {} (client {})",
-                    destination, service.client_id
+                    destination, destination_client_id
                 );
 
-                // Get destination client socket
-                let clients = CLIENTS.lock();
-                if let Some(dest_socket) = clients.get(&service.client_id) {
-                    // Generate a serial number for this call
-                    let _serial = {
-                        let mut s = NEXT_SERIAL.lock();
-                        let serial = *s;
-                        *s = s.wrapping_add(1);
-                        serial
-                    };
-
-                    // Track this pending call
-                    // Note: Services like stemd don't read the serial from the message header,
-                    // so they always respond with serial=0. We track by caller_id.
+                if let Some(dest_socket) = get_client_socket(destination_client_id) {
                     let pending = PendingCall {
                         caller_client_id: client_id,
                         destination: destination.clone(),
+                        destination_client_id,
                     };
-                    {
-                        let mut pending_calls = PENDING_CALLS.lock();
-                        pending_calls.insert(client_id, pending);
-                    }
+                    let msg_bytes = msg.to_bytes()?;
 
                     // Forward the message to the destination service
                     println!(
                         "sbusd: Forwarding CALL_METHOD to client {}",
-                        service.client_id
+                        destination_client_id
                     );
-                    let msg_bytes = msg.to_bytes()?;
-
-                    {
+                    // The destination write mutex defines request order on the
+                    // wire. Allocate and insert the FIFO key only after taking
+                    // it so reply correlation follows that same order.
+                    let (pending_id, forward_result) = {
                         let mut sock = dest_socket.lock();
-                        write_all(&mut sock, &msg_bytes)?;
+                        let pending_id = register_pending_call(pending);
+                        let result = write_all(&mut sock, &msg_bytes);
+                        if result.is_err() {
+                            // A partial stream write makes subsequent framing
+                            // unknowable. Tear down both duplicated handles so
+                            // this route cannot be reused.
+                            let _ = sock.shutdown(ShutdownHow::Both);
+                        }
+                        (pending_id, result)
+                    };
+                    if let Err(error) = forward_result {
+                        println!(
+                            "sbusd: Failed to forward call to client {}: {}",
+                            destination_client_id, error
+                        );
+                        let mut failed_calls = Vec::new();
+                        if let Some(pending) = remove_pending_call(pending_id) {
+                            failed_calls.push(pending);
+                        }
+                        failed_calls.extend(quarantine_client(destination_client_id));
+                        notify_failed_calls(
+                            failed_calls,
+                            "org.scarlet.sbus.Unavailable",
+                            "Destination service is not accepting messages",
+                        );
+                        return Ok(());
                     }
-                    drop(clients);
 
                     // Don't send response yet - wait for the actual response from the service
                     // The response will be handled when we receive MethodReturn or MethodError
@@ -288,7 +458,7 @@ fn handle_message(
                 } else {
                     println!(
                         "sbusd: Destination client {} socket not found",
-                        service.client_id
+                        destination_client_id
                     );
                     let reply = Message::MethodError {
                         serial: 0,
@@ -331,33 +501,7 @@ fn handle_message(
                 result.len()
             );
 
-            // Look up the pending call by finding one where destination matches this service
-            // We need to find which caller called this service
-            let pending = {
-                let mut pending_calls = PENDING_CALLS.lock();
-                let mut found_key = None;
-                for (caller_id, pending_call) in pending_calls.iter() {
-                    // Check if this service is the destination
-                    // We need to look up which service has this client_id
-                    let services = SERVICES.lock();
-                    for (bus_name, service_info) in services.iter() {
-                        if service_info.client_id == client_id
-                            && pending_call.destination == *bus_name
-                        {
-                            found_key = Some(*caller_id);
-                            break;
-                        }
-                    }
-                    if found_key.is_some() {
-                        break;
-                    }
-                }
-                if let Some(key) = found_key {
-                    pending_calls.remove(&key)
-                } else {
-                    None
-                }
-            };
+            let pending = take_pending_call(client_id);
 
             if let Some(pending) = pending {
                 println!(
@@ -365,9 +509,7 @@ fn handle_message(
                     pending.caller_client_id, pending.destination
                 );
 
-                // Get the caller's socket
-                let clients = CLIENTS.lock();
-                if let Some(caller_socket) = clients.get(&pending.caller_client_id) {
+                if let Some(caller_socket) = get_client_socket(pending.caller_client_id) {
                     // Forward the MethodReturn back to the caller
                     println!(
                         "sbusd: Forwarding MethodReturn to caller {}",
@@ -406,31 +548,7 @@ fn handle_message(
                 client_id, serial, error_name, message
             );
 
-            // Look up the pending call by finding one where destination matches this service
-            let pending = {
-                let mut pending_calls = PENDING_CALLS.lock();
-                let mut found_key = None;
-                for (caller_id, pending_call) in pending_calls.iter() {
-                    // Check if this service is the destination
-                    let services = SERVICES.lock();
-                    for (bus_name, service_info) in services.iter() {
-                        if service_info.client_id == client_id
-                            && pending_call.destination == *bus_name
-                        {
-                            found_key = Some(*caller_id);
-                            break;
-                        }
-                    }
-                    if found_key.is_some() {
-                        break;
-                    }
-                }
-                if let Some(key) = found_key {
-                    pending_calls.remove(&key)
-                } else {
-                    None
-                }
-            };
+            let pending = take_pending_call(client_id);
 
             if let Some(pending) = pending {
                 println!(
@@ -438,9 +556,7 @@ fn handle_message(
                     pending.caller_client_id, pending.destination
                 );
 
-                // Get the caller's socket
-                let clients = CLIENTS.lock();
-                if let Some(caller_socket) = clients.get(&pending.caller_client_id) {
+                if let Some(caller_socket) = get_client_socket(pending.caller_client_id) {
                     // Forward the MethodError back to the caller
                     println!(
                         "sbusd: Forwarding MethodError to caller {}",
@@ -469,6 +585,36 @@ fn handle_message(
 
             Ok(())
         }
+        Message::Signal { .. } => {
+            // Signals are broadcast to every other connected client. The
+            // payload already carries the sender/path/interface metadata, so
+            // clients can ignore signals they do not subscribe to.
+            let bytes = msg.to_bytes()?;
+            let destinations: Vec<(usize, Arc<Mutex<Socket>>)> = {
+                let clients = CLIENTS.lock();
+                clients
+                    .iter()
+                    .filter(|(destination_id, _)| **destination_id != client_id)
+                    .map(|(destination_id, destination_socket)| {
+                        (*destination_id, destination_socket.clone())
+                    })
+                    .collect()
+            };
+            for (destination_id, destination_socket) in destinations {
+                if destination_id == client_id {
+                    continue;
+                }
+
+                let mut destination_socket = destination_socket.lock();
+                if let Err(error) = write_all_best_effort(&mut destination_socket, &bytes) {
+                    println!(
+                        "sbusd: Failed to broadcast signal to client {}: {}",
+                        destination_id, error
+                    );
+                }
+            }
+            Ok(())
+        }
         _ => {
             println!(
                 "[Client {}] Unhandled message type: {:?}",
@@ -476,6 +622,139 @@ fn handle_message(
                 msg.msg_type()
             );
             Ok(())
+        }
+    }
+}
+
+fn get_client_socket(client_id: usize) -> Option<Arc<Mutex<Socket>>> {
+    let clients = CLIENTS.lock();
+    clients.get(&client_id).cloned()
+}
+
+/// Broadcast a ServiceUnregistered signal to every connected client.
+///
+/// Callers that are blocked waiting on a reply from the vanished service can
+/// observe this signal and abort their wait, preventing an indefinite hang
+/// when the service process crashes mid-operation (e.g. Files crashing while
+/// its picker window is open).
+fn broadcast_service_unregistered(bus_name: &str) {
+    let mut args = Vec::new();
+    args.push(Argument::String(String::from(bus_name)));
+    let signal = Message::Signal {
+        sender: String::from(SBUS_SELF_BUS_NAME),
+        path: String::from(SBUS_SELF_OBJECT_PATH),
+        interface: String::from(SBUS_SELF_INTERFACE),
+        signal: String::from(SBUS_SERVICE_UNREGISTERED_SIGNAL),
+        args,
+    };
+    let Ok(bytes) = signal.to_bytes() else {
+        return;
+    };
+
+    let destinations: Vec<(usize, Arc<Mutex<Socket>>)> = {
+        let clients = CLIENTS.lock();
+        clients
+            .iter()
+            .map(|(id, sock)| (*id, sock.clone()))
+            .collect()
+    };
+    for (destination_id, destination_socket) in destinations {
+        let mut sock = destination_socket.lock();
+        if let Err(error) = write_all_best_effort(&mut sock, &bytes) {
+            println!(
+                "sbusd: Failed to broadcast ServiceUnregistered({}) to client {}: {}",
+                bus_name, destination_id, error
+            );
+        }
+    }
+}
+
+fn register_pending_call(pending: PendingCall) -> u64 {
+    let pending_id = {
+        let mut next_pending_id = NEXT_PENDING_ID.lock();
+        let pending_id = *next_pending_id;
+        *next_pending_id = next_pending_id.wrapping_add(1);
+        if *next_pending_id == 0 {
+            *next_pending_id = 1;
+        }
+        pending_id
+    };
+
+    let mut pending_calls = PENDING_CALLS.lock();
+    pending_calls.insert(pending_id, pending);
+    pending_id
+}
+
+fn remove_pending_call(pending_id: u64) -> Option<PendingCall> {
+    let mut pending_calls = PENDING_CALLS.lock();
+    pending_calls.remove(&pending_id)
+}
+
+fn take_pending_call(destination_client_id: usize) -> Option<PendingCall> {
+    let mut pending_calls = PENDING_CALLS.lock();
+    let pending_id = oldest_pending_id_for_destination(&pending_calls, destination_client_id)?;
+    pending_calls.remove(&pending_id)
+}
+
+fn quarantine_client(client_id: usize) -> Vec<PendingCall> {
+    {
+        let mut clients = CLIENTS.lock();
+        clients.remove(&client_id);
+    }
+
+    let removed_services = {
+        let mut services = SERVICES.lock();
+        let to_remove: Vec<String> = services
+            .iter()
+            .filter(|(_, service)| service.client_id == client_id)
+            .map(|(bus_name, _)| bus_name.clone())
+            .collect();
+        for bus_name in &to_remove {
+            services.remove(bus_name);
+        }
+        to_remove
+    };
+    for bus_name in &removed_services {
+        println!(
+            "sbusd: Quarantined service {} after client {} write failure",
+            bus_name, client_id
+        );
+    }
+
+    for bus_name in &removed_services {
+        broadcast_service_unregistered(bus_name);
+    }
+
+    let mut pending_calls = PENDING_CALLS.lock();
+    let to_remove: Vec<u64> = pending_calls
+        .iter()
+        .filter(|(_, pending)| pending.destination_client_id == client_id)
+        .map(|(pending_id, _)| *pending_id)
+        .collect();
+    let mut failed = Vec::new();
+    for pending_id in to_remove {
+        if let Some(pending) = pending_calls.remove(&pending_id) {
+            failed.push(pending);
+        }
+    }
+    failed
+}
+
+fn notify_failed_calls(failed_calls: Vec<PendingCall>, error_name: &str, message: &str) {
+    for pending in failed_calls {
+        let Some(caller_socket) = get_client_socket(pending.caller_client_id) else {
+            continue;
+        };
+        let reply = Message::MethodError {
+            serial: 0,
+            error_name: error_name.to_string(),
+            message: message.to_string(),
+        };
+        if let Err(error) = send_message(&caller_socket, &reply) {
+            println!(
+                "sbusd: Failed to notify caller {}: {}",
+                pending.caller_client_id, error
+            );
         }
     }
 }
@@ -503,21 +782,90 @@ fn send_message(socket: &Arc<Mutex<Socket>>, msg: &Message) -> Result<(), &'stat
     Ok(())
 }
 
-/// Write all bytes to socket
+/// Read the monotonic clock used for write-stall deadlines.
+fn monotonic_time_ns() -> u64 {
+    use std::syscall::{Syscall, syscall0};
+
+    // SAFETY: This fixed clock query has no arguments or userspace memory effects.
+    (unsafe { syscall0(Syscall::MonotonicTime) }) as u64
+}
+
+/// Write all bytes to socket.
 fn write_all(socket: &mut Socket, bytes: &[u8]) -> Result<(), &'static str> {
+    write_all_inner(socket, bytes, true)
+}
+
+/// Write all bytes to socket without tearing the connection down on failure.
+///
+/// Used for broadcasts: a slow peer (e.g. an application still loading from
+/// disk at startup) must not lose its sbus connection just because it could
+/// not drain its socket within the write timeout. The message is dropped, but
+/// the connection stays usable.
+fn write_all_best_effort(socket: &mut Socket, bytes: &[u8]) -> Result<(), &'static str> {
+    write_all_inner(socket, bytes, false)
+}
+
+fn write_all_inner(
+    socket: &mut Socket,
+    bytes: &[u8],
+    teardown_on_failure: bool,
+) -> Result<(), &'static str> {
     let mut written = 0;
+    let raw_handle = socket.as_raw() as u32;
+    let mut stall_deadline_ns = monotonic_time_ns().saturating_add(CLIENT_WRITE_TIMEOUT_NS);
+
     while written < bytes.len() {
         match socket.write(&bytes[written..]) {
             Ok(0) => {
                 println!("[write_all] Write returned 0 (disconnected)");
+                if teardown_on_failure {
+                    let _ = socket.shutdown(ShutdownHow::Both);
+                }
                 return Err("Failed to send: disconnected");
             }
             Ok(n) => {
                 written += n;
+                stall_deadline_ns = monotonic_time_ns().saturating_add(CLIENT_WRITE_TIMEOUT_NS);
                 println!("[write_all] Wrote {} bytes (total: {})", n, written);
+            }
+            Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                let now_ns = monotonic_time_ns();
+                if now_ns >= stall_deadline_ns {
+                    println!(
+                        "[write_all] Timed out after {}ms (wrote {} of {} bytes)",
+                        CLIENT_WRITE_TIMEOUT_MS,
+                        written,
+                        bytes.len()
+                    );
+                    if teardown_on_failure {
+                        let _ = socket.shutdown(ShutdownHow::Both);
+                    }
+                    return Err("Failed to send: timed out");
+                }
+
+                // A readiness wait may return spuriously. Derive the
+                // timeout from the monotonic deadline instead of adding
+                // the requested poll slice to a synthetic elapsed counter.
+                let remaining_ns = stall_deadline_ns.saturating_sub(now_ns);
+                let slice_ns = remaining_ns.min(CLIENT_WRITE_POLL_SLICE_NS) as i64;
+                let mut poll_handles = [PollHandle::new(raw_handle, POLLOUT)];
+                if let Err(code) = poll(&mut poll_handles, slice_ns) {
+                    println!("[write_all] Poll error while waiting to write: {}", code);
+                    if teardown_on_failure {
+                        let _ = socket.shutdown(ShutdownHow::Both);
+                    }
+                    return Err("Failed to wait for writable socket");
+                }
+                if poll_handles[0].revents & (POLLERR | POLLHUP | POLLNVAL) != 0 {
+                    // Retry once so the socket operation reports the
+                    // precise disconnect/broken-pipe condition.
+                }
             }
             Err(e) => {
                 println!("[write_all] Write error: {:?}", e);
+                if teardown_on_failure {
+                    let _ = socket.shutdown(ShutdownHow::Both);
+                }
                 return Err("Failed to send");
             }
         }

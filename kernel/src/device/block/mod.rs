@@ -1,13 +1,14 @@
 use core::any::Any;
 
-use alloc::{boxed::Box, vec::Vec};
+use crate::sync::IrqSpinLock;
+use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use request::{BlockIORequest, BlockIOResult};
-use spin::Mutex;
 
 use super::Device;
 use crate::object::capability::selectable::Selectable;
 use crate::object::capability::{ControlOps, MemoryMappingOps};
 
+pub mod partition;
 pub mod request;
 
 extern crate alloc;
@@ -18,13 +19,35 @@ extern crate alloc;
 /// It provides methods for querying device information and handling I/O requests.
 pub trait BlockDevice: Device {
     /// Get the disk name
+    ///
+    /// # Returns
+    ///
+    /// Static disk name used for diagnostics.
     fn get_disk_name(&self) -> &'static str;
 
     /// Get the disk size in bytes
+    ///
+    /// # Returns
+    ///
+    /// Total device size in bytes.
     fn get_disk_size(&self) -> usize;
 
     /// Enqueue a block I/O request
+    ///
+    /// # Arguments
+    ///
+    /// * `request` - Request to enqueue for later processing.
     fn enqueue_request(&self, request: Box<BlockIORequest>);
+
+    /// Get the logical sector size in bytes.
+    ///
+    /// # Returns
+    ///
+    /// Logical sector size in bytes. Devices that do not report a size default
+    /// to 512-byte sectors.
+    fn get_sector_size(&self) -> usize {
+        512
+    }
 
     /// Process all queued requests
     ///
@@ -32,14 +55,30 @@ pub trait BlockDevice: Device {
     ///
     /// A vector of results for all processed requests
     fn process_requests(&self) -> Vec<BlockIOResult>;
+
+    /// Submit and process a caller-owned batch of block I/O requests
+    ///
+    /// Unlike the legacy enqueue/process pair, this method does not consume
+    /// requests submitted by other callers. Results are returned in the same
+    /// order as the supplied requests.
+    ///
+    /// # Arguments
+    ///
+    /// * `requests` - Requests owned by this submission.
+    ///
+    /// # Returns
+    ///
+    /// One result for each supplied request, in input order.
+    fn submit_requests(&self, requests: Vec<Box<BlockIORequest>>) -> Vec<BlockIOResult>;
 }
 
 /// A generic implementation of a block device
+#[allow(clippy::vec_box)]
 pub struct GenericBlockDevice {
     disk_name: &'static str,
     disk_size: usize,
     request_fn: fn(&mut BlockIORequest) -> Result<(), &'static str>,
-    request_queue: Mutex<Vec<Box<BlockIORequest>>>,
+    request_queue: IrqSpinLock<Vec<Box<BlockIORequest>>>,
 }
 
 impl GenericBlockDevice {
@@ -52,7 +91,7 @@ impl GenericBlockDevice {
             disk_name,
             disk_size,
             request_fn,
-            request_queue: Mutex::new(Vec::new()),
+            request_queue: IrqSpinLock::new(Vec::new()),
         }
     }
 }
@@ -77,6 +116,10 @@ impl Device for GenericBlockDevice {
     fn as_block_device(&self) -> Option<&dyn BlockDevice> {
         Some(self)
     }
+
+    fn into_block_device(self: Arc<Self>) -> Option<Arc<dyn BlockDevice>> {
+        Some(self)
+    }
 }
 
 impl ControlOps for GenericBlockDevice {
@@ -91,7 +134,7 @@ impl MemoryMappingOps for GenericBlockDevice {
         &self,
         _offset: usize,
         _length: usize,
-    ) -> Result<(usize, usize, bool), &'static str> {
+    ) -> Result<crate::object::capability::MemoryMappingInfo, &'static str> {
         Err("Memory mapping not supported by this block device")
     }
 
@@ -114,6 +157,7 @@ impl Selectable for GenericBlockDevice {
         _interest: crate::object::capability::selectable::ReadyInterest,
         _trapframe: &mut crate::arch::Trapframe,
         _timeout_ticks: Option<u64>,
+        _min_wait_ticks: u64,
     ) -> crate::object::capability::selectable::SelectWaitOutcome {
         crate::object::capability::selectable::SelectWaitOutcome::Ready
     }
@@ -129,7 +173,7 @@ impl BlockDevice for GenericBlockDevice {
     }
 
     fn enqueue_request(&self, request: Box<BlockIORequest>) {
-        // Use Mutex for internal mutability
+        // Use an IRQ spin lock for internal mutability.
         self.request_queue.lock().push(request);
     }
 
@@ -150,18 +194,21 @@ impl BlockDevice for GenericBlockDevice {
     /// # Returns
     /// Vector of `BlockIOResult` containing completed requests and their results
     fn process_requests(&self) -> Vec<BlockIOResult> {
-        let mut results = Vec::new();
-
         // Extract all requests at once to minimize lock time
         let requests = {
             let mut queue = self.request_queue.lock();
-            core::mem::replace(&mut *queue, Vec::new())
+            core::mem::take(&mut *queue)
         }; // Lock is automatically released here
 
+        self.submit_requests(requests)
+    }
+
+    fn submit_requests(&self, requests: Vec<Box<BlockIORequest>>) -> Vec<BlockIOResult> {
+        let mut results = Vec::with_capacity(requests.len());
         // Process all requests without holding any locks
         for mut request in requests {
             // Process the request using the function pointer
-            let result = (self.request_fn)(&mut *request);
+            let result = (self.request_fn)(&mut request);
 
             // Add the result to the results vector
             results.push(BlockIOResult { request, result });

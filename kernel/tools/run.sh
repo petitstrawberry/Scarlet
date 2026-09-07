@@ -1,5 +1,7 @@
 #!/bin/bash
 
+set -o pipefail
+
 # Check for debug mode environment variable or command line argument
 DEBUG_MODE=${SCARLET_DEBUG_MODE:-false}
 KERNEL_PATH=""
@@ -44,10 +46,15 @@ else
     DEBUG_FLAGS=""
 fi
 
-# Find the project root by looking for Makefile.toml
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR" && cd .. && cd .. && pwd)"
-INITRAMFS_PATH="$PROJECT_ROOT/mkfs/dist/initramfs-riscv64.cpio"
+RUN_DIR="$SCRIPT_DIR/../.run"
+mkdir -p "$RUN_DIR"
+BOOT_IMAGE="$RUN_DIR/limine-riscv64-boot.img"
+ROOTFS_IMAGE="$RUN_DIR/rootfs.img"
+EFI_CODE="/usr/share/qemu-efi-riscv64/RISCV_VIRT_CODE.fd"
+EFI_VARS_TEMPLATE="/usr/share/qemu-efi-riscv64/RISCV_VIRT_VARS.fd"
+EFI_VARS_PERSISTENT="$RUN_DIR/RISCV_VIRT_VARS.fd"
 
 QEMU_DEBUG_ARGS=""
 
@@ -71,40 +78,108 @@ if [ -n "$QEMU_DEBUG_FLAGS" ]; then
     QEMU_DEBUG_ARGS="-d $QEMU_DEBUG_FLAGS -D $QEMU_DEBUG_LOG"
 fi
 
-CMDLINE_ARGS=()
-if [ -n "${SCARLET_CMDLINE:-}" ]; then
-    CMDLINE_ARGS=(-append "${SCARLET_CMDLINE}")
-fi
-
-# Create temporary file for capturing output
 TEMP_OUTPUT=$(mktemp)
 
-# Run QEMU and capture output
+if [ ! -f "$BOOT_IMAGE" ]; then
+    echo "Error: Limine boot image not found at $BOOT_IMAGE"
+    exit 1
+fi
+
+if [ ! -f "$ROOTFS_IMAGE" ]; then
+    echo "Error: rootfs image not found at $ROOTFS_IMAGE"
+    exit 1
+fi
+
+if [ ! -f "$EFI_CODE" ]; then
+    echo "Error: RISC-V EFI firmware not found at $EFI_CODE"
+    exit 1
+fi
+
+if [ ! -f "$EFI_VARS_TEMPLATE" ]; then
+    echo "Error: RISC-V EFI VARS template not found at $EFI_VARS_TEMPLATE"
+    exit 1
+fi
+
+if [ "${SCARLET_EFI_VARS_PERSIST:-0}" = "1" ] || [ "${SCARLET_EFI_VARS_PERSIST:-}" = "true" ]; then
+    EFI_VARS_RUNTIME="$EFI_VARS_PERSISTENT"
+    if [ ! -f "$EFI_VARS_RUNTIME" ]; then
+        cp "$EFI_VARS_TEMPLATE" "$EFI_VARS_RUNTIME"
+    fi
+else
+    EFI_VARS_RUNTIME="$(mktemp "$RUN_DIR/RISCV_VIRT_VARS.run.XXXXXX.fd")"
+    cp "$EFI_VARS_TEMPLATE" "$EFI_VARS_RUNTIME"
+    trap 'rm -f "$EFI_VARS_RUNTIME"' EXIT
+fi
+
+QEMU_MEMORY_SIZE="${SCARLET_QEMU_MEMORY:-8G}"
+QEMU_MEMORY_ARGS=(-m "$QEMU_MEMORY_SIZE")
+QEMU_VHOST_USER_VIDEO_ARGS=()
+if [ "${SCARLET_VHOST_USER_VIDEO:-0}" = "1" ] || [ "${SCARLET_VHOST_USER_VIDEO:-}" = "true" ]; then
+    VHOST_USER_VIDEO_SOCKET="${SCARLET_VHOST_USER_VIDEO_SOCKET:-/private/tmp/scarlet-video.sock}"
+    VHOST_USER_VIDEO_ID="${SCARLET_VHOST_USER_VIDEO_ID:-31}"
+    VHOST_USER_VIDEO_QUEUES="${SCARLET_VHOST_USER_VIDEO_QUEUES:-2}"
+    VHOST_USER_VIDEO_QUEUE_SIZE="${SCARLET_VHOST_USER_VIDEO_QUEUE_SIZE:-256}"
+    VHOST_USER_VIDEO_CONFIG_SIZE="${SCARLET_VHOST_USER_VIDEO_CONFIG_SIZE:-64}"
+
+    QEMU_MEMORY_ARGS=(
+        -m "$QEMU_MEMORY_SIZE"
+        -object memory-backend-shm,id=scarlet-mem,size="$QEMU_MEMORY_SIZE",share=on
+        -numa node,memdev=scarlet-mem
+    )
+    QEMU_VHOST_USER_VIDEO_ARGS=(
+        -chardev socket,id=vuvid,path="$VHOST_USER_VIDEO_SOCKET"
+        -device vhost-user-test-device-pci,bus=pcie.0,chardev=vuvid,virtio-id="$VHOST_USER_VIDEO_ID",num_vqs="$VHOST_USER_VIDEO_QUEUES",vq_size="$VHOST_USER_VIDEO_QUEUE_SIZE",config_size="$VHOST_USER_VIDEO_CONFIG_SIZE"
+    )
+fi
+
+QEMU_USB_ARGS=(
+    -device qemu-xhci,id=xhci,bus=pcie.0
+    -device usb-kbd,bus=xhci.0
+    -device usb-mouse,bus=xhci.0
+)
+QEMU_NETWORK_ARGS=(
+    -netdev user,id=net0,hostfwd=tcp::8080-:8080,hostfwd=udp::8080-:8080,hostfwd=udp::1234-:1234
+    -device virtio-net-pci,netdev=net0,bus=pcie.0
+)
+if [ "${SCARLET_QEMU_USB_NCM:-0}" = "1" ] || [ "${SCARLET_QEMU_USB_NCM:-}" = "true" ]; then
+    USB_NCM_MAC="${SCARLET_QEMU_USB_NCM_MAC:-52:54:00:12:34:57}"
+    USB_NCM_PCAP="${SCARLET_QEMU_USB_NCM_PCAP-$RUN_DIR/usb-ncm-riscv64.pcap}"
+    USB_NCM_DEVICE="usb-ncm,id=ncm0,bus=xhci.0,netdev=net0,mac=$USB_NCM_MAC"
+    if [ -n "$USB_NCM_PCAP" ]; then
+        USB_NCM_DEVICE="$USB_NCM_DEVICE,pcap=$USB_NCM_PCAP"
+        echo "QEMU CDC-NCM USB capture: $USB_NCM_PCAP"
+    fi
+    echo "Using QEMU CDC-NCM network device (MAC $USB_NCM_MAC)"
+    QEMU_NETWORK_ARGS=(-netdev user,id=net0,hostfwd=tcp::8080-:8080,hostfwd=udp::8080-:8080,hostfwd=udp::1234-:1234)
+    QEMU_USB_ARGS+=(-device "$USB_NCM_DEVICE")
+fi
+
 qemu-system-riscv64 \
-    -machine virt \
-    -bios default \
-    -m 4G \
+    -machine virt,acpi=off \
+    "${QEMU_MEMORY_ARGS[@]}" \
     -nographic \
     -serial mon:stdio \
     --no-reboot \
+    -bios default \
+    -drive if=pflash,format=raw,unit=0,file="$EFI_CODE",readonly=on \
+    -drive if=pflash,format=raw,unit=1,file="$EFI_VARS_RUNTIME" \
     -global virtio-mmio.force-legacy=false \
-    -drive id=x0,file=../mkfs/dist/rootfs.img,format=raw,if=none \
-    -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+    -drive id=boot,file="$BOOT_IMAGE",format=raw,if=none \
+    -device virtio-blk-pci,drive=boot,bus=pcie.0 \
+    -drive id=rootfs,file="$ROOTFS_IMAGE",format=raw,if=none \
+    -device virtio-blk-device,drive=rootfs,bus=virtio-mmio-bus.0 \
     -display vnc=:0 \
     -device virtio-gpu-device,bus=virtio-mmio-bus.1 \
-    -netdev user,id=net0,hostfwd=tcp::8080-:8080,hostfwd=udp::8080-:8080,hostfwd=udp::1234-:1234 \
-    -device virtio-net-device,netdev=net0,bus=virtio-mmio-bus.2 \
+    "${QEMU_VHOST_USER_VIDEO_ARGS[@]}" \
+    "${QEMU_NETWORK_ARGS[@]}" \
     -device virtio-keyboard-device,bus=virtio-mmio-bus.3 \
     -device virtio-mouse-device,bus=virtio-mmio-bus.4 \
     -device virtio-rng-device,bus=virtio-mmio-bus.5 \
-    "${CMDLINE_ARGS[@]}" \
+    "${QEMU_USB_ARGS[@]}" \
     $QEMU_DEBUG_ARGS \
-    $DEBUG_FLAGS \
-    -initrd "$INITRAMFS_PATH" \
-    -kernel "$KERNEL_PATH" | tee "$TEMP_OUTPUT"
+    $DEBUG_FLAGS | tee "$TEMP_OUTPUT"
 
-# Capture QEMU exit code
-QEMU_EXIT_CODE=$?
+QEMU_EXIT_CODE=${PIPESTATUS[0]}
 
 # In debug mode, don't check for test patterns since we're debugging
 if [ "$DEBUG_MODE" = "true" ]; then

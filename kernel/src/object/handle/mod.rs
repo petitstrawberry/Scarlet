@@ -1,7 +1,7 @@
+use crate::sync::IrqRwSpinLock;
 use alloc::{boxed::Box, sync::Arc, vec, vec::Vec};
-use spin::RwLock;
 
-use crate::object::{KernelObject, introspection};
+use crate::object::{KernelObject, KernelObjectRef, introspection};
 
 pub mod syscall;
 
@@ -12,7 +12,7 @@ mod tests;
 pub type Handle = u32;
 
 /// Internal structure containing the actual handle table data.
-/// This is wrapped in Arc<RwLock<...>> to enable sharing between tasks.
+/// This is wrapped in Arc<IrqRwSpinLock<...>> to enable sharing between tasks.
 struct HandleTableInner {
     /// Fixed-size handle table allocated on heap to avoid stack overflow
     handles: Box<[Option<KernelObject>; HandleTable::MAX_HANDLES]>,
@@ -24,12 +24,12 @@ struct HandleTableInner {
 
 /// Handle table for managing kernel objects with support for sharing between tasks.
 ///
-/// This structure uses interior mutability via `Arc<RwLock<...>>` to enable
+/// This structure uses interior mutability via `Arc<IrqRwSpinLock<...>>` to enable
 /// sharing between parent and child tasks when using CLONE_FILES flag.
 /// The `Clone` implementation creates a shallow copy (Arc clone) that shares
 /// the same underlying data. Use `deep_clone()` for an independent copy.
 pub struct HandleTable {
-    inner: Arc<RwLock<HandleTableInner>>,
+    inner: Arc<IrqRwSpinLock<HandleTableInner>>,
 }
 
 impl HandleTable {
@@ -54,7 +54,7 @@ impl HandleTable {
             .unwrap_or_else(|_| panic!("Failed to create boxed slice for metadata"));
 
         Self {
-            inner: Arc::new(RwLock::new(HandleTableInner {
+            inner: Arc::new(IrqRwSpinLock::new(HandleTableInner {
                 handles,
                 metadata,
                 free_handles,
@@ -83,7 +83,7 @@ impl HandleTable {
         };
 
         Self {
-            inner: Arc::new(RwLock::new(HandleTableInner {
+            inner: Arc::new(IrqRwSpinLock::new(HandleTableInner {
                 handles: handles_clone,
                 metadata: metadata_clone,
                 free_handles: inner.free_handles.clone(),
@@ -100,9 +100,10 @@ impl HandleTable {
     /// O(1) allocation with explicit metadata
     pub fn insert_with_metadata(
         &self,
-        obj: KernelObject,
+        mut obj: KernelObject,
         metadata: HandleMetadata,
     ) -> Result<Handle, &'static str> {
+        obj.ensure_handle_ownership();
         let mut inner = self.inner.write();
         if let Some(handle) = inner.free_handles.pop() {
             inner.handles[handle as usize] = Some(obj);
@@ -152,6 +153,14 @@ impl HandleTable {
                 // Counter is used for event notification (IPC)
                 HandleType::IpcChannel
             }
+            KernelObject::Timer(_) => HandleType::IpcChannel,
+            KernelObject::Gpu(_) | KernelObject::Environment(_) | KernelObject::VfsView(_) => {
+                HandleType::Regular
+            }
+            #[cfg(feature = "hypervisor")]
+            KernelObject::HypervisorVm(_) => HandleType::Regular,
+            #[cfg(feature = "hypervisor")]
+            KernelObject::HypervisorVcpu(_) => HandleType::Regular,
         };
 
         HandleMetadata {
@@ -163,7 +172,7 @@ impl HandleTable {
 
     /// O(1) access - executes a closure with a reference to the KernelObject
     ///
-    /// Since the internal data is protected by RwLock, we cannot return a direct
+    /// Since the internal data is protected by an IRQ reader-writer spin lock, we cannot return a direct
     /// reference. Instead, use this method to access the object within a closure.
     pub fn with_object<F, R>(&self, handle: Handle, f: F) -> Option<R>
     where
@@ -176,14 +185,20 @@ impl HandleTable {
         inner.handles[handle as usize].as_ref().map(f)
     }
 
-    /// O(1) access - returns an Arc-level clone of the KernelObject if it exists
+    /// O(1) access that keeps the object alive independently of the table slot.
     ///
-    /// This method returns an Arc-level clone of the KernelObject. Unlike the Clone
-    /// trait which may have side effects (e.g., incrementing Pipe reader/writer counts),
-    /// this performs a simple Arc reference count increment without modifying object state.
+    /// The returned wrapper contains an Arc-level clone of the object. Closing
+    /// or replacing the handle from another task sharing this table therefore
+    /// cannot invalidate an operation already in progress. This is not dup
+    /// semantics and does not invoke custom clone hooks.
     ///
-    /// For cases where you need dup() semantics (creating a new logical file descriptor
-    /// with proper reference counting), use `clone_for_dup()` instead.
+    /// # Arguments
+    ///
+    /// * `handle` - Handle number to access
+    ///
+    /// # Returns
+    ///
+    /// Arc-level object clone if the handle exists, otherwise `None`.
     pub fn get(&self, handle: Handle) -> Option<KernelObject> {
         if handle as usize >= Self::MAX_HANDLES {
             return None;
@@ -191,20 +206,96 @@ impl HandleTable {
         let inner = self.inner.read();
         inner.handles[handle as usize]
             .as_ref()
-            .map(|obj| obj.arc_clone())
+            .map(KernelObject::arc_clone)
     }
 
-    /// O(1) access - returns a full clone with dup() semantics
+    /// O(1) borrowed access that hides `Arc` ownership from the caller.
     ///
-    /// This method uses the KernelObject's Clone trait which may invoke custom_clone()
-    /// for objects like Pipes. This is appropriate when duplicating a file descriptor
-    /// (dup/dup2 syscalls) where the new descriptor should be tracked separately.
-    pub fn clone_for_dup(&self, handle: Handle) -> Option<KernelObject> {
+    /// Since the internal data is protected by an IRQ reader-writer spin lock, the borrowed view is
+    /// available only for the duration of the closure. Use this for ordinary
+    /// handle operations that should not extend object lifetime beyond the
+    /// owning handle table.
+    ///
+    /// # Arguments
+    ///
+    /// * `handle` - Handle number to access
+    /// * `f` - Closure executed with a borrowed kernel object view
+    ///
+    /// # Returns
+    ///
+    /// The closure result if the handle exists, otherwise `None`.
+    pub fn with_object_ref<F, R>(&self, handle: Handle, f: F) -> Option<R>
+    where
+        F: for<'a> FnOnce(KernelObjectRef<'a>) -> R,
+    {
         if handle as usize >= Self::MAX_HANDLES {
             return None;
         }
         let inner = self.inner.read();
-        inner.handles[handle as usize].clone()
+        inner.handles[handle as usize]
+            .as_ref()
+            .map(|object| f(KernelObjectRef::new(object)))
+    }
+
+    /// O(1) access - returns an Arc-level clone of the KernelObject if it exists.
+    ///
+    /// This method returns an Arc-level clone of the KernelObject. Unlike the Clone
+    /// trait which may have side effects (e.g., incrementing Pipe reader/writer counts),
+    /// this performs a simple Arc reference count increment without modifying object state.
+    ///
+    /// This is an explicit-name alias for [`HandleTable::get`].
+    pub fn get_arc_clone(&self, handle: Handle) -> Option<KernelObject> {
+        self.get(handle)
+    }
+
+    /// Return Arc-level clones of a handle's object and metadata from one table snapshot.
+    ///
+    /// The object and metadata are read while holding the same inner read lock, so the
+    /// returned pair always describes the same handle-table slot state.
+    ///
+    /// # Arguments
+    ///
+    /// * `handle` - Handle number to access.
+    ///
+    /// # Returns
+    ///
+    /// An Arc-level object clone and metadata clone when both exist for `handle`, otherwise
+    /// `None`.
+    pub fn get_arc_clone_with_metadata(
+        &self,
+        handle: Handle,
+    ) -> Option<(KernelObject, HandleMetadata)> {
+        if handle as usize >= Self::MAX_HANDLES {
+            return None;
+        }
+        let inner = self.inner.read();
+        let object = inner.handles[handle as usize].as_ref()?;
+        let metadata = inner.metadata[handle as usize].as_ref()?;
+        Some((object.arc_clone(), metadata.clone()))
+    }
+
+    /// O(1) access - returns a full clone and metadata with dup() semantics.
+    ///
+    /// This method uses the KernelObject's Clone trait which may invoke custom_clone()
+    /// for objects like Pipes. The object and metadata are cloned under the same read
+    /// lock so duplication cannot widen or otherwise reconstruct handle-scoped rights.
+    ///
+    /// # Arguments
+    ///
+    /// * `handle` - Handle number to duplicate.
+    ///
+    /// # Returns
+    ///
+    /// The duplicated object and exact handle metadata when the handle exists,
+    /// otherwise `None`.
+    pub fn clone_for_dup(&self, handle: Handle) -> Option<(KernelObject, HandleMetadata)> {
+        if handle as usize >= Self::MAX_HANDLES {
+            return None;
+        }
+        let inner = self.inner.read();
+        let object = inner.handles[handle as usize].as_ref()?;
+        let metadata = inner.metadata[handle as usize].as_ref()?;
+        Some((object.clone(), metadata.clone()))
     }
 
     /// O(1) removal
@@ -276,16 +367,62 @@ impl HandleTable {
         Arc::strong_count(&self.inner) == 1
     }
 
-    /// Close all handles (for process termination)
-    pub fn close_all(&self) {
+    pub(crate) fn exchange_exec_table(&self, other: &Self) {
+        assert!(self.is_sole_owner() && other.is_sole_owner());
+        core::mem::swap(&mut *self.inner.write(), &mut *other.inner.write());
+    }
+
+    /// Install an explicitly mapped handle into an unpublished exec table.
+    pub(crate) fn insert_exec_handle(
+        &self,
+        handle: Handle,
+        mut object: KernelObject,
+        metadata: HandleMetadata,
+    ) -> Result<(), &'static str> {
+        if handle as usize >= Self::MAX_HANDLES {
+            return Err("invalid target handle");
+        }
+        object.ensure_handle_ownership();
         let mut inner = self.inner.write();
-        for i in 0..Self::MAX_HANDLES {
-            if let Some(_obj) = inner.handles[i].take() {
-                // obj is automatically dropped, calling its Drop implementation
-                inner.metadata[i] = None; // Clear metadata too
-                inner.free_handles.push(i as Handle);
+        if inner.handles[handle as usize].is_some() {
+            return Err("duplicate target handle");
+        }
+        inner.free_handles.retain(|&free| free != handle);
+        inner.handles[handle as usize] = Some(object);
+        inner.metadata[handle as usize] = Some(metadata);
+        Ok(())
+    }
+
+    pub(crate) fn remove_close_on_exec(&self) {
+        for handle in self.active_handles() {
+            if self.get_metadata(handle).is_some_and(|metadata| {
+                matches!(
+                    metadata.special_semantics,
+                    Some(SpecialSemantics::CloseOnExec)
+                )
+            }) {
+                drop(self.remove(handle));
             }
         }
+    }
+
+    /// Close all handles (for process termination)
+    pub fn close_all(&self) {
+        // Some kernel objects perform synchronous teardown from `Drop`. Detach
+        // every object while holding the table lock, then run those destructors
+        // after the lock (and its IRQ/preemption guard) has been released.
+        let mut removed_objects = Vec::with_capacity(Self::MAX_HANDLES);
+        {
+            let mut inner = self.inner.write();
+            for i in 0..Self::MAX_HANDLES {
+                if let Some(obj) = inner.handles[i].take() {
+                    inner.metadata[i] = None; // Clear metadata too
+                    inner.free_handles.push(i as Handle);
+                    removed_objects.push(obj);
+                }
+            }
+        }
+        drop(removed_objects);
     }
 
     /// Check if a handle is valid
@@ -347,6 +484,13 @@ impl HandleTable {
         let (readable, writable) = metadata.access_mode.into();
 
         match kernel_obj {
+            KernelObject::Environment(cap) => Some(
+                introspection::KernelObjectInfo::for_environment(false, cap.writable),
+            ),
+            KernelObject::VfsView(cap) => Some(introspection::KernelObjectInfo::for_environment(
+                true,
+                cap.writable,
+            )),
             KernelObject::File(_) => Some(introspection::KernelObjectInfo::for_file(
                 handle_role,
                 readable,
@@ -377,6 +521,23 @@ impl HandleTable {
                 readable,
                 writable,
             )),
+            KernelObject::Timer(_) => Some(introspection::KernelObjectInfo::for_timer(
+                handle_role,
+                readable,
+                writable,
+            )),
+            KernelObject::Gpu(gpu) => Some(introspection::KernelObjectInfo::for_gpu(
+                handle_role,
+                readable,
+                writable,
+                gpu.as_memory_mappable().is_some(),
+                gpu.as_selectable().is_some(),
+                gpu.as_control_ops().is_some(),
+            )),
+            #[cfg(feature = "hypervisor")]
+            KernelObject::HypervisorVm(_) => None,
+            #[cfg(feature = "hypervisor")]
+            KernelObject::HypervisorVcpu(_) => None,
         }
     }
 

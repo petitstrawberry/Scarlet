@@ -1,63 +1,199 @@
-//! AArch64 early console implementation
-//!
-//! Provides early console output functionality for AArch64 architecture.
-//! Uses direct UART register access for early boot output before proper
-//! driver initialization.
+use core::sync::atomic::{AtomicUsize, Ordering};
 
-use core::ptr::{read_volatile, write_volatile};
+#[repr(usize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum EarlyUartKind {
+    None = 0,
+    Pl011 = 1,
+    QcomGeni = 2,
+}
 
-// QEMU virt machine PL011 UART base address
-// This is the standard address for UART0 on QEMU's virt machine
-const UART_BASE: usize = 0x0900_0000;
-
-// PL011 UART register offsets
-const UART_DR: usize = 0x000; // Data Register
-const UART_FR: usize = 0x018; // Flag Register
-
-// Flag Register bits
-const UART_FR_TXFF: u32 = 1 << 5; // Transmit FIFO Full
-
-/// Early console putchar function for AArch64
-///
-/// This function provides character output during early boot before
-/// the full UART driver is initialized. It directly accesses PL011
-/// UART registers on QEMU virt machine.
-///
-/// # Arguments
-/// * `c` - Character to output
-///
-/// # Safety
-/// This function performs raw memory access to UART registers.
-/// It should only be used during early boot when no other console
-/// driver is available.
-pub fn early_putc(c: u8) {
-    unsafe {
-        // Wait until transmit FIFO is not full
-        while (read_volatile((UART_BASE + UART_FR) as *const u32) & UART_FR_TXFF) != 0 {
-            core::hint::spin_loop();
+impl EarlyUartKind {
+    fn from_raw(value: usize) -> Self {
+        match value {
+            1 => Self::Pl011,
+            2 => Self::QcomGeni,
+            _ => Self::None,
         }
-
-        // Write character to data register
-        write_volatile((UART_BASE + UART_DR) as *mut u32, c as u32);
     }
 }
 
-/// Initialize early console (currently a no-op)
-///
-/// On QEMU virt machine, the PL011 UART is typically pre-configured
-/// by the firmware/bootloader, so no additional initialization is
-/// usually required for basic character output.
-pub fn early_console_init() {
-    // QEMU's PL011 UART is usually pre-configured by firmware
-    // No additional initialization required for early output
+static EARLY_UART_KIND: AtomicUsize = AtomicUsize::new(EarlyUartKind::None as usize);
+static EARLY_UART_VADDR: AtomicUsize = AtomicUsize::new(0);
+#[cfg(feature = "limine")]
+static PENDING_QCOM_GENI_PADDR: AtomicUsize = AtomicUsize::new(0);
+
+fn publish_uart(kind: EarlyUartKind, vaddr: usize) {
+    EARLY_UART_VADDR.store(vaddr, Ordering::Relaxed);
+    EARLY_UART_KIND.store(kind as usize, Ordering::Release);
+    crate::log::register_emergency_putc(emergency_uart_putc);
 }
 
-/// Write a string to early console
+fn try_uart_putc(c: u8) -> bool {
+    let kind = EarlyUartKind::from_raw(EARLY_UART_KIND.load(Ordering::Acquire));
+    let uart = EARLY_UART_VADDR.load(Ordering::Relaxed);
+    if kind == EarlyUartKind::None || uart == 0 {
+        return false;
+    }
+
+    match kind {
+        EarlyUartKind::None => return false,
+        EarlyUartKind::Pl011 => {
+            const UART_DR: usize = 0x000;
+            const UART_FR: usize = 0x018;
+            const UART_FR_TXFF: u32 = 1 << 5;
+
+            // SAFETY: registration publishes an FDT-validated PL011 MMIO page
+            // only after its Device mapping is active in Scarlet's HHDM.
+            unsafe {
+                while ((uart + UART_FR) as *const u32).read_volatile() & UART_FR_TXFF != 0 {
+                    core::hint::spin_loop();
+                }
+                ((uart + UART_DR) as *mut u32).write_volatile(c as u32);
+            }
+        }
+        EarlyUartKind::QcomGeni => {
+            return crate::drivers::uart::qcom_geni::early_write_byte(uart, c);
+        }
+    }
+
+    true
+}
+
+fn emergency_uart_putc(c: u8) {
+    let kind = EarlyUartKind::from_raw(EARLY_UART_KIND.load(Ordering::Acquire));
+    let uart = EARLY_UART_VADDR.load(Ordering::Relaxed);
+    if kind == EarlyUartKind::None || uart == 0 {
+        return;
+    }
+
+    match kind {
+        EarlyUartKind::None => {}
+        EarlyUartKind::Pl011 => {
+            let _ = try_uart_putc(c);
+        }
+        EarlyUartKind::QcomGeni => {
+            let _ = crate::drivers::uart::qcom_geni::try_emergency_write_byte(uart, c);
+        }
+    }
+}
+
+/// Write one byte to the active early UART or framebuffer fallback.
 ///
 /// # Arguments
-/// * `s` - String to write
+///
+/// * `c` - Byte to emit.
+pub fn early_putc(c: u8) {
+    if try_uart_putc(c) {
+        return;
+    }
+
+    crate::earlyfb::putc(c);
+}
+
+/// Registers an FDT-validated PL011 physical address for early output.
+///
+/// # Arguments
+///
+/// * `paddr` - Physical base of the PL011 register window.
+#[cfg(feature = "linux-boot")]
+pub(crate) fn register_linux_boot_pl011(paddr: usize) {
+    publish_uart(
+        EarlyUartKind::Pl011,
+        crate::environment::SCARLET_HHDM_BASE + paddr,
+    );
+}
+
+/// Prepare an FDT-selected Qualcomm GENI UART for the Limine page-table handoff.
+///
+/// The UART remains inactive until [`activate_after_boot_page_table_switch`]
+/// confirms that Scarlet's Device-typed HHDM mapping is live.
+///
+/// # Arguments
+///
+/// * `paddr` - Physical base of the GENI serial-engine register window.
+#[cfg(feature = "limine")]
+pub(crate) fn prepare_limine_qcom_geni(paddr: usize) {
+    PENDING_QCOM_GENI_PADDR.store(paddr, Ordering::Release);
+}
+
+/// Activate a prepared early UART after Scarlet installs its boot page table.
+///
+/// # Returns
+///
+/// `true` when a pending Qualcomm GENI UART was activated.
+pub(crate) fn activate_after_boot_page_table_switch() -> bool {
+    #[cfg(feature = "limine")]
+    {
+        let paddr = PENDING_QCOM_GENI_PADDR.load(Ordering::Acquire);
+        if paddr != 0 {
+            crate::earlyfb::deactivate();
+            publish_uart(
+                EarlyUartKind::QcomGeni,
+                crate::environment::SCARLET_HHDM_BASE + paddr,
+            );
+            for &byte in b"\x1b[2J\x1b[H" {
+                emergency_uart_putc(byte);
+            }
+            return true;
+        }
+    }
+
+    false
+}
+
+/// Move Qualcomm GENI early output to the runtime driver's ioremap address.
+///
+/// # Arguments
+///
+/// * `vaddr` - Device-typed virtual base returned by `ioremap`.
+pub(crate) fn register_runtime_qcom_geni(vaddr: usize) {
+    crate::earlyfb::deactivate();
+    publish_uart(EarlyUartKind::QcomGeni, vaddr);
+}
+
+/// Initialize the framebuffer fallback when no early UART is active.
+pub fn early_console_init() {
+    if EarlyUartKind::from_raw(EARLY_UART_KIND.load(Ordering::Acquire)) != EarlyUartKind::None {
+        return;
+    }
+    if crate::earlyfb::is_initialized() {
+        return;
+    }
+
+    #[cfg(feature = "limine")]
+    {
+        let Some(response) = crate::boot::limine::FRAMEBUFFER_REQUEST.response() else {
+            return;
+        };
+        let Some(framebuffer) = response.framebuffers().iter().next() else {
+            return;
+        };
+
+        crate::earlyfb::init(framebuffer);
+    }
+}
+
+/// Write a string through the architecture early console.
+///
+/// # Arguments
+///
+/// * `s` - String to emit.
 pub fn early_console_write(s: &str) {
     for byte in s.bytes() {
         early_putc(byte);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::EarlyUartKind;
+
+    #[test_case]
+    fn unknown_uart_kind_is_safely_disabled() {
+        assert_eq!(EarlyUartKind::from_raw(0), EarlyUartKind::None);
+        assert_eq!(EarlyUartKind::from_raw(usize::MAX), EarlyUartKind::None);
+        assert_eq!(EarlyUartKind::from_raw(1), EarlyUartKind::Pl011);
+        assert_eq!(EarlyUartKind::from_raw(2), EarlyUartKind::QcomGeni);
     }
 }

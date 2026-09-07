@@ -1,0 +1,6 @@
+# Stem Daemon Configuration File
+
+[service.sshd]
+exec = "/bin/sshd"
+depends = ["netcfgd"]
+order = 04

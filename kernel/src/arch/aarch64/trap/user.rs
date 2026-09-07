@@ -13,9 +13,7 @@ use core::arch::{asm, naked_asm};
 
 use super::exception::arch_exception_handler;
 use super::interrupt::arch_irq_handler;
-use crate::arch::{
-    Trapframe, get_current_cpu_id, get_kernel_trapvector_paddr, set_arch, set_trapvector,
-};
+use crate::arch::{Trapframe, get_cpu, get_kernel_trapvector_paddr, set_trapvector};
 use crate::vm::get_trampoline_trap_vector;
 
 #[unsafe(export_name = "aarch64_first_switch_to_user_naked")]
@@ -34,13 +32,12 @@ pub unsafe extern "C" fn aarch64_first_switch_to_user_naked(
     );
 }
 
-#[unsafe(link_section = ".trampoline.text")]
+#[unsafe(link_section = ".trampoline.text.0")]
 #[unsafe(export_name = "_user_trap_entry")]
 #[unsafe(naked)]
 pub extern "C" fn _user_trap_entry() {
-    unsafe {
-        naked_asm!(
-            r#"
+    naked_asm!(
+        r#"
         .align 11
         // -----------------------------------------------------------------
         // VBAR_EL1 Vector Table
@@ -149,9 +146,11 @@ pub extern "C" fn _user_trap_entry() {
             mrs x10, tpidrro_el0 // load user TPIDRRO_EL0
             str x10, [sp, #280] // Trapframe.tpidrro_el0 = user TPIDRRO_EL0
 
-            // Save ESR_EL1
+            // Save ESR_EL1/FAR_EL1 before any kernel-side fault can overwrite them.
             mrs x10, esr_el1 // load user ESR_EL1
             str x10, [sp, #288] // Trapframe.esr_el1 = user ESR_EL1
+            mrs x10, far_el1 // load user FAR_EL1
+            str x10, [sp, #296] // Trapframe.far_el1 = user FAR_EL1
 
             // 2. Switch TTBR (User -> Kernel)
             mrs x10, tpidr_el1    // x10 = CPU struct ptr
@@ -162,8 +161,8 @@ pub extern "C" fn _user_trap_entry() {
             msr ttbr0_el1, x11 // Switch to kernel TTBR
 
             isb
-            tlbi vmalle1is
-            dsb ish
+            tlbi vmalle1
+            dsb nsh
             isb
 
             // 3. Call Handler
@@ -174,17 +173,15 @@ pub extern "C" fn _user_trap_entry() {
             ldr x10, [x10, #32] // arch_user_trap_handler (trampoline target)
             br  x10
         "#
-        );
-    }
+    );
 }
 
-#[unsafe(link_section = ".trampoline.text")]
-#[unsafe(export_name = "_user_trap_exit")]
+#[unsafe(link_section = ".trampoline.text.1")]
+#[unsafe(export_name = "_switch_to_user")]
 #[unsafe(naked)]
-pub extern "C" fn _user_trap_exit(_trapframe: &mut Trapframe) -> ! {
-    unsafe {
-        naked_asm!(
-            r#"
+pub extern "C" fn _switch_to_user(_trapframe: &mut Trapframe) -> ! {
+    naked_asm!(
+        r#"
         // x0 = trapframe pointer --> sp = trapframe pointer
         mov sp, x0 // Set SP to trapframe pointer for easy access
 
@@ -197,26 +194,38 @@ pub extern "C" fn _user_trap_exit(_trapframe: &mut Trapframe) -> ! {
         //   272:    tpidr_el0 (TLS)
         //   280:    tpidrro_el0 (read-only at EL0)
         //   288:    esr_el1 (not restore)
+        //   296:    far_el1 (not restore)
 
-        // Switch TTBR back to user
+        // Check SPSR mode bits [3:0] to decide TTBR switch
+        ldr x9, [sp, #264]  // Load Trapframe.spsr
+        and x9, x9, #0xF    // Extract mode bits
+        cmp x9, #0x5        // EL1h?
+        b.eq 2f             // Skip TTBR switch for kernel tasks
+        cmp x9, #0x9        // EL2h?
+        b.eq 2f             // Skip TTBR switch for VHE host kernel tasks
+
+        // --- User task path: switch TTBR back to user ---
         mrs x10, tpidr_el1 // x10 = CPU struct ptr
         ldr x9, [x10, #16]  // user ttbr0
         msr ttbr0_el1, x9   // Switch to user TTBR
         isb
-        tlbi vmalle1is
-        dsb ish
+        tlbi vmalle1
+        dsb nsh
         isb
+        b   3f
 
-        // Restore user SP/PC/SPSR
+        2: // --- Kernel task path: no TTBR switch needed ---
+
+        3:
+        // Restore SP/PC/SPSR
         ldr x9, [sp, #248]  // Load Trapframe.sp
-        msr sp_el0, x9    // Restore user SP
-        ldr x9, [sp, #256]   // Load Trapframe.epc
-        msr elr_el1, x9     // Restore user PC
+        msr sp_el0, x9      // Restore SP_EL0
+        ldr x9, [sp, #256]  // Load Trapframe.epc
+        msr elr_el1, x9     // Restore ELR_EL1
         ldr x9, [sp, #264]  // Load Trapframe.spsr
-        msr spsr_el1, x9
-    
+        msr spsr_el1, x9    // Restore SPSR_EL1
 
-        // Restore user TLS
+        // Restore TLS
         ldr x9, [sp, #272]
         msr tpidr_el0, x9
         ldr x9, [sp, #280]
@@ -245,12 +254,25 @@ pub extern "C" fn _user_trap_exit(_trapframe: &mut Trapframe) -> ! {
 
         eret
         "#
-        );
-    }
+    );
 }
 
-#[unsafe(export_name = "arch_switch_to_user_space")]
-pub fn arch_switch_to_user_space(trapframe: &mut Trapframe) -> ! {
+#[unsafe(export_name = "arch_switch_to_user")]
+pub fn arch_switch_to_user(trapframe: &mut Trapframe) -> ! {
+    // This is the actual EL0 return boundary. `schedule()` can resume in the
+    // middle of a blocking operation with owned values still on its stack, so
+    // fatal events must not be consumed until those kernel frames unwind.
+    if !crate::arch::is_privileged_return_mode(trapframe.spsr) {
+        crate::sched::scheduler::process_pending_events_before_user_return(trapframe);
+    }
+    let cpu_id = crate::arch::get_cpu().get_cpuid();
+    crate::breadcrumb::drop(
+        crate::breadcrumb::SWITCH_TO_USER,
+        crate::sched::scheduler::current_task_id(cpu_id)
+            .map(|t| t as u64)
+            .unwrap_or(0),
+        trapframe.elr,
+    );
     let addr = trapframe as *mut Trapframe as usize;
 
     crate::arch::configure_user_entry(
@@ -260,11 +282,32 @@ pub fn arch_switch_to_user_space(trapframe: &mut Trapframe) -> ! {
         },
     );
 
-    // Calculate the address of _user_trap_exit in the trampoline
-    let trap_exit_offset = _user_trap_exit as usize - _user_trap_entry as usize;
+    // Calculate the address of _switch_to_user in the trampoline
+    let trap_exit_offset = (_switch_to_user as *const () as usize)
+        .wrapping_sub(_user_trap_entry as *const () as usize);
     let trampoline_base = get_trampoline_trap_vector();
-    let trap_exit_addr = trampoline_base + trap_exit_offset;
-    set_trapvector(trampoline_base);
+    let trap_exit_addr = trampoline_base.wrapping_add(trap_exit_offset);
+
+    // Determine VBAR based on target EL:
+    // - EL0 (user task): trampoline vector (handles Lower EL traps)
+    // - EL1 (kernel task like idle): kernel vector (handles Current EL traps)
+    if crate::arch::is_privileged_return_mode(trapframe.spsr) {
+        // EL1h/EL2h — kernel task: use kernel vector so privileged traps are handled
+        set_trapvector(get_kernel_trapvector_paddr());
+    } else {
+        // EL0t — user task: use trampoline vector
+        set_trapvector(trampoline_base);
+    }
+
+    crate::timer::publish_arch_timer_diagnostic(
+        cpu_id,
+        crate::arch::timer::diagnostic_snapshot(trapframe.spsr, trapframe.elr),
+    );
+    crate::breadcrumb::drop(
+        crate::breadcrumb::USER_RETURN_READY,
+        trapframe.elr,
+        trapframe.spsr,
+    );
 
     unsafe {
         asm!(
@@ -280,17 +323,79 @@ pub fn arch_switch_to_user_space(trapframe: &mut Trapframe) -> ! {
 // TrapKindを引数で受け取るように変更
 #[unsafe(export_name = "arch_user_trap_handler")]
 pub extern "C" fn arch_user_trap_handler(trapframe: &mut Trapframe, trap_kind: usize) -> ! {
+    crate::breadcrumb::drop(
+        crate::breadcrumb::USER_TRAP_ENTER,
+        trap_kind as u64,
+        trapframe.elr,
+    );
     // We are now executing in EL1; switch VBAR_EL1 to the kernel vector so that
     // any exceptions/IRQs that occur while in kernel mode are handled by the
     // simple kernel trap routine.
     set_trapvector(get_kernel_trapvector_paddr());
+    crate::breadcrumb::drop(
+        crate::breadcrumb::USER_TRAP_VECTOR_READY,
+        trap_kind as u64,
+        trapframe.elr,
+    );
+
+    let cpu_id = get_cpu().get_cpuid();
+    let first_traced_user_trap = if crate::sched::scheduler::DEBUG_FORK_TRACE_LOGGING {
+        crate::sched::scheduler::current_task_id(cpu_id).filter(|&task_id| {
+            crate::sched::scheduler::take_fork_trace_first_user_trap(cpu_id, task_id)
+        })
+    } else {
+        None
+    };
+    if let Some(task_id) = first_traced_user_trap {
+        let task_asid = crate::sched::scheduler::get_task_by_id(task_id)
+            .map(|task| task.vm_manager.get_asid())
+            .unwrap_or(0);
+        crate::println!(
+            "[fork-trace] child_task_id={} first-user-trap cpu={} kind={} elr={:#x} esr={:#x} far={:#x} task_asid={} user_ttbr={:#x}",
+            task_id,
+            cpu_id,
+            trap_kind,
+            trapframe.elr,
+            trapframe.esr_el1,
+            trapframe.far_el1,
+            task_asid,
+            get_cpu().get_ttbr0(),
+        );
+    }
 
     // trap_kind is now passed in x1 (argument 2), so no need to read from memory!
-    if trap_kind == 1 {
-        arch_irq_handler(trapframe);
+    if trap_kind == 1 || trap_kind == 2 {
+        crate::breadcrumb::drop(
+            crate::breadcrumb::USER_IRQ_DISPATCH,
+            trap_kind as u64,
+            trapframe.elr,
+        );
+        arch_irq_handler(trapframe, trap_kind);
+        crate::breadcrumb::drop(
+            crate::breadcrumb::IRQ_DISPATCH_DONE,
+            trap_kind as u64,
+            trapframe.elr,
+        );
     } else {
         arch_exception_handler(trapframe, trap_kind);
     }
 
-    arch_switch_to_user_space(trapframe);
+    if let Some(task_id) = first_traced_user_trap {
+        crate::println!(
+            "[fork-trace] child_task_id={} first-user-trap-done cpu={} current={:?} elr={:#x} user_ttbr={:#x}",
+            task_id,
+            cpu_id,
+            crate::sched::scheduler::current_task_id(cpu_id),
+            trapframe.elr,
+            get_cpu().get_ttbr0(),
+        );
+    }
+
+    if crate::sched::scheduler::may_schedule_from_interrupt(cpu_id)
+        && crate::sched::scheduler::take_deferred_reschedule(cpu_id)
+    {
+        crate::sched::scheduler::schedule(trapframe);
+    }
+
+    arch_switch_to_user(trapframe);
 }

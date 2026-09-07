@@ -8,6 +8,18 @@ use super::interrupt::arch_irq_handler;
 use crate::arch::Trapframe;
 use core::arch::naked_asm;
 
+fn kernel_interrupt_breadcrumb(trap_kind: usize, spsr: u64, current_is_idle: bool) -> Option<u64> {
+    if current_is_idle || !crate::arch::is_privileged_return_mode(spsr) {
+        return None;
+    }
+
+    match trap_kind {
+        1 => Some(crate::breadcrumb::KERNEL_IRQ_ENTER),
+        2 => Some(crate::breadcrumb::KERNEL_FIQ_ENTER),
+        _ => None,
+    }
+}
+
 // -------------------------------------------------------------------------
 // Kernel Trap Vector
 // -------------------------------------------------------------------------
@@ -15,9 +27,8 @@ use core::arch::naked_asm;
 #[unsafe(export_name = "_kernel_trap_entry")]
 #[unsafe(naked)]
 pub extern "C" fn _kernel_trap_entry() {
-    unsafe {
-        naked_asm!(
-            r#"
+    naked_asm!(
+        r#"
         .align 11
         // -----------------------------------------------------------------
         // VBAR_EL1 Kernel Vector Table (2048 bytes)
@@ -71,32 +82,28 @@ pub extern "C" fn _kernel_trap_entry() {
         
         30: // Sync
             msr daifset, #0xf       // Mask interrupts
-            mov x20, sp             // Capture current SP (SP_EL1)
-            sub sp, sp, #288        // Alloc Trapframe
+            sub sp, sp, #304        // Alloc Trapframe
             stp x0, x1, [sp, #0]    // Save x0, x1 first
             mov x1, #0              // x1 (Arg2) = Kind: Sync
             b   40f
 
         31: // IRQ
             msr daifset, #0xf
-            mov x20, sp             // Capture current SP (SP_EL1)
-            sub sp, sp, #288
+            sub sp, sp, #304
             stp x0, x1, [sp, #0]
             mov x1, #1              // x1 (Arg2) = Kind: IRQ
             b   40f
 
         32: // FIQ
             msr daifset, #0xf
-            mov x20, sp             // Capture current SP (SP_EL1)
-            sub sp, sp, #288
+            sub sp, sp, #304
             stp x0, x1, [sp, #0]
             mov x1, #2              // x1 (Arg2) = Kind: FIQ
             b   40f
 
         33: // SError
             msr daifset, #0xf
-            mov x20, sp             // Capture current SP (SP_EL1)
-            sub sp, sp, #288
+            sub sp, sp, #304
             stp x0, x1, [sp, #0]
             mov x1, #3              // x1 (Arg2) = Kind: SError
             b   40f
@@ -124,6 +131,7 @@ pub extern "C" fn _kernel_trap_entry() {
 
             // Save captured kernel SP (SP_EL1 at exception entry)
             // Reuse Trapframe.tpidrro_el0 field for kernel traps (unused here).
+            add x20, sp, #304
             str x20, [sp, #280]
 
             // Save System Registers
@@ -133,6 +141,10 @@ pub extern "C" fn _kernel_trap_entry() {
             str x19, [sp, #248]
             mrs x19, spsr_el1
             str x19, [sp, #264]
+            mrs x19, esr_el1
+            str x19, [sp, #288]
+            mrs x19, far_el1
+            str x19, [sp, #296]
 
             // Call Rust Handler
             // fn arch_kernel_trap_handler(tf: &mut Trapframe, kind: usize)
@@ -174,23 +186,64 @@ pub extern "C" fn _kernel_trap_entry() {
 
             // Restore x0, x1 and Free Stack
             ldp x0, x1, [sp, #0]
-            add sp, sp, #288
+            add sp, sp, #304
 
             eret
         "#
-        );
-    }
+    );
 }
 
 // Rust側ハンドラ
 // 戻り値なし(void)にする = 普通に関数から戻る
 #[unsafe(export_name = "arch_kernel_trap_handler")]
 pub extern "C" fn arch_kernel_trap_handler(trapframe: &mut Trapframe, trap_kind: usize) {
-    if trap_kind == 1 {
-        // IRQ
-        arch_irq_handler(trapframe);
+    let cpu_id = crate::arch::get_cpu().get_cpuid();
+    if let Some(phase) = kernel_interrupt_breadcrumb(
+        trap_kind,
+        trapframe.spsr,
+        crate::sched::scheduler::current_task_is_idle(cpu_id),
+    ) {
+        crate::breadcrumb::drop(phase, trapframe.elr, trapframe.spsr);
+    }
+
+    if trap_kind == 1 || trap_kind == 2 {
+        arch_irq_handler(trapframe, trap_kind);
     } else {
         // Exception (Sync/SError/FIQ)
         arch_exception_handler(trapframe, trap_kind);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::kernel_interrupt_breadcrumb;
+
+    #[test_case]
+    fn kernel_interrupt_breadcrumb_records_only_busy_privileged_interrupts() {
+        assert_eq!(
+            kernel_interrupt_breadcrumb(1, 0x9, false),
+            Some(crate::breadcrumb::KERNEL_IRQ_ENTER)
+        );
+        assert_eq!(
+            kernel_interrupt_breadcrumb(2, 0x9, false),
+            Some(crate::breadcrumb::KERNEL_FIQ_ENTER)
+        );
+        assert_eq!(kernel_interrupt_breadcrumb(2, 0, false), None);
+        assert_eq!(kernel_interrupt_breadcrumb(2, 0x9, true), None);
+        assert_eq!(kernel_interrupt_breadcrumb(0, 0x9, false), None);
+    }
+
+    #[test_case]
+    fn kernel_trap_prologue_saves_x20_before_scratch_use() {
+        let source = include_str!("kernel.rs");
+        let save = source
+            .find("stp x20, x21, [sp, #160]")
+            .expect("kernel trap entry must save x20");
+        let scratch = source
+            .find("add x20, sp, #304")
+            .expect("kernel trap entry must recover the pre-trap stack pointer");
+
+        assert!(save < scratch);
+        assert!(!source.contains("mov x20,\u{20}sp"));
     }
 }

@@ -2,6 +2,10 @@
 //!
 //! This module provides a Rust standard library-like file system interface
 //! using the OpenOptions builder pattern and high-level convenience functions.
+//! It belongs to the legacy `scarlet-std` facade, not Rust `std::fs`; similar
+//! method names do not imply identical atomicity or error-reporting guarantees.
+//! Examples target legacy `no_std` executables and are compile-only: mounting,
+//! removing files, and other system operations must not run as host doctests.
 //!
 //! ## Core Functions
 //!
@@ -28,38 +32,72 @@
 
 use crate::handle::Handle;
 use crate::handle::capability::SeekFrom as ScarletSeekFrom;
+use crate::handle::capability::StreamError;
 use crate::io::{Error, ErrorKind, Read, Result, Seek, SeekFrom, Write};
 use crate::string::String;
+
+fn stream_error_to_io(error: StreamError, message: &'static str) -> Error {
+    let kind = match error {
+        StreamError::Interrupted => ErrorKind::Interrupted,
+        StreamError::WouldBlock => ErrorKind::WouldBlock,
+        StreamError::EndOfStream => ErrorKind::UnexpectedEof,
+        StreamError::PermissionDenied => ErrorKind::PermissionDenied,
+        StreamError::InvalidParameter => ErrorKind::InvalidInput,
+        StreamError::Unsupported => ErrorKind::Unsupported,
+        _ => ErrorKind::Other,
+    };
+    Error::new(kind, message)
+}
 
 /// Options and flags which can be used to configure how a file is opened
 ///
 /// This builder exposes the ability to configure how a [`File`] is opened
 /// and what operations are permitted on the open file. The [`File::open`]
-/// and [`File::create`] methods are aliases for commonly used options
+/// and [`File::create`] methods provide commonly used options
 /// using this builder.
 ///
 /// # Examples
 ///
 /// Opening a file to read:
 ///
-/// ```
-/// use scarlet::fs::OpenOptions;
+/// ```no_run
+/// #![no_std]
+/// #![no_main]
+/// # #[unsafe(no_mangle)]
+/// # extern "C" fn main() -> i32 {
+/// #     example().expect("filesystem operation failed");
+/// #     0
+/// # }
+/// # fn example() -> scarlet_std::io::Result<()> {
+/// use scarlet_std::fs::OpenOptions;
 ///
 /// let file = OpenOptions::new()
 ///     .read(true)
 ///     .open("foo.txt")?;
+/// # Ok(())
+/// # }
 /// ```
 ///
 /// Opening a file for both reading and writing, creating it if it doesn't exist:
 ///
-/// ```
-/// use scarlet::fs::OpenOptions;
+/// ```no_run
+/// #![no_std]
+/// #![no_main]
+/// # #[unsafe(no_mangle)]
+/// # extern "C" fn main() -> i32 {
+/// #     example().expect("filesystem operation failed");
+/// #     0
+/// # }
+/// # fn example() -> scarlet_std::io::Result<()> {
+/// use scarlet_std::fs::OpenOptions;
 ///
 /// let file = OpenOptions::new()
 ///     .read(true)
 ///     .write(true)
 ///     .create(true)
 ///     .open("foo.txt")?;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct OpenOptions {
@@ -75,6 +113,11 @@ impl OpenOptions {
     /// Creates a blank new set of options ready for configuration
     ///
     /// All options are initially set to `false`.
+    /// The legacy flag encoder treats an unset access mode as read-only, unlike
+    /// Rust `std::fs::OpenOptions`, which requires an explicit access mode.
+    ///
+    /// # Returns
+    /// An options builder; no file is opened yet.
     pub fn new() -> Self {
         Self {
             read: false,
@@ -90,13 +133,27 @@ impl OpenOptions {
     ///
     /// This option, when true, will indicate that the file should be
     /// readable if opened.
+    /// When combining reading with append in this legacy implementation, also
+    /// set `.write(true)`; `.read(true).append(true)` alone encodes write-only access.
+    ///
+    /// # Arguments
+    /// * `read` - Whether to request read access.
+    ///
+    /// # Returns
+    /// The same builder for chaining; no I/O is performed.
     ///
     /// # Examples
     ///
-    /// ```
-    /// use scarlet::fs::OpenOptions;
+    /// ```no_run
+    /// #![no_std]
+    /// #![no_main]
+    /// use scarlet_std::fs::OpenOptions;
     ///
+    /// # #[unsafe(no_mangle)]
+    /// # extern "C" fn main() -> i32 {
     /// let file = OpenOptions::new().read(true).open("foo.txt");
+    /// # 0
+    /// # }
     /// ```
     pub fn read(&mut self, read: bool) -> &mut Self {
         self.read = read;
@@ -108,15 +165,31 @@ impl OpenOptions {
     /// This option, when true, will indicate that the file should be
     /// writable if opened.
     ///
-    /// If the file already exists, any write calls on it will overwrite
-    /// its contents, without truncating it.
+    /// Without append mode, writes overwrite bytes at the current cursor. Setting
+    /// this flag alone does not truncate an existing file.
+    ///
+    /// # Arguments
+    /// * `write` - Whether to request write access.
+    ///
+    /// # Returns
+    /// The same builder for chaining; no I/O is performed.
     ///
     /// # Examples
     ///
-    /// ```
-    /// use scarlet::fs::OpenOptions;
+    /// ```no_run
+    /// #![no_std]
+    /// #![no_main]
+    /// # #[unsafe(no_mangle)]
+    /// # extern "C" fn main() -> i32 {
+    /// #     example().expect("filesystem operation failed");
+    /// #     0
+    /// # }
+    /// # fn example() -> scarlet_std::io::Result<()> {
+    /// use scarlet_std::fs::OpenOptions;
     ///
     /// let file = OpenOptions::new().write(true).open("foo.txt");
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn write(&mut self, write: bool) -> &mut Self {
         self.write = write;
@@ -125,13 +198,20 @@ impl OpenOptions {
 
     /// Sets the option for the append mode
     ///
-    /// This option, when true, means that writes will append to a file instead
-    /// of overwriting previous contents.
-    /// Note that setting `.write(true).append(true)` has the same effect as
-    /// setting only `.append(true)`.
+    /// This option requests `O_APPEND`, so supporting file implementations place
+    /// writes at the end instead of overwriting bytes at the current cursor.
+    /// For append-only access, `.append(true)` is sufficient. To read as well,
+    /// use `.read(true).append(true)`; append mode also enables write access.
     ///
-    /// For most filesystems, the operating system guarantees that all writes are
-    /// atomic: no reads-in-progress will see a half-written file.
+    /// This wrapper does not make a sequence of writes atomic or prevent readers
+    /// from observing partial content. Individual writes may be short; concurrent
+    /// append behavior depends on the kernel file implementation.
+    ///
+    /// # Arguments
+    /// * `append` - Whether to request append mode.
+    ///
+    /// # Returns
+    /// The same builder for chaining; no I/O is performed.
     ///
     /// ## Note
     ///
@@ -140,10 +220,20 @@ impl OpenOptions {
     ///
     /// # Examples
     ///
-    /// ```
-    /// use scarlet::fs::OpenOptions;
+    /// ```no_run
+    /// #![no_std]
+    /// #![no_main]
+    /// # #[unsafe(no_mangle)]
+    /// # extern "C" fn main() -> i32 {
+    /// #     example().expect("filesystem operation failed");
+    /// #     0
+    /// # }
+    /// # fn example() -> scarlet_std::io::Result<()> {
+    /// use scarlet_std::fs::OpenOptions;
     ///
     /// let file = OpenOptions::new().append(true).open("foo.txt");
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn append(&mut self, append: bool) -> &mut Self {
         self.append = append;
@@ -156,13 +246,31 @@ impl OpenOptions {
     /// the file to 0 length if it already exists.
     ///
     /// The file must be opened with write access for truncate to work.
+    /// This builder passes `O_TRUNC` through and does not validate its combination
+    /// with the access mode; the kernel file implementation decides the outcome.
+    ///
+    /// # Arguments
+    /// * `truncate` - Whether to request truncation when opening the file.
+    ///
+    /// # Returns
+    /// The same builder for chaining; truncation is deferred until open.
     ///
     /// # Examples
     ///
-    /// ```
-    /// use scarlet::fs::OpenOptions;
+    /// ```no_run
+    /// #![no_std]
+    /// #![no_main]
+    /// # #[unsafe(no_mangle)]
+    /// # extern "C" fn main() -> i32 {
+    /// #     example().expect("filesystem operation failed");
+    /// #     0
+    /// # }
+    /// # fn example() -> scarlet_std::io::Result<()> {
+    /// use scarlet_std::fs::OpenOptions;
     ///
     /// let file = OpenOptions::new().write(true).truncate(true).open("foo.txt");
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn truncate(&mut self, truncate: bool) -> &mut Self {
         self.truncate = truncate;
@@ -173,13 +281,32 @@ impl OpenOptions {
     ///
     /// In order for the file to be created, [`OpenOptions::write`] or
     /// [`OpenOptions::append`] access must be used.
+    /// Creation is attempted before a separate open operation. A creation error
+    /// is ignored for this option so that an existing file can still be opened;
+    /// this is not an atomic create-and-open operation.
+    ///
+    /// # Arguments
+    /// * `create` - Whether to attempt creation before opening.
+    ///
+    /// # Returns
+    /// The same builder for chaining; no file is created yet.
     ///
     /// # Examples
     ///
-    /// ```
-    /// use scarlet::fs::OpenOptions;
+    /// ```no_run
+    /// #![no_std]
+    /// #![no_main]
+    /// # #[unsafe(no_mangle)]
+    /// # extern "C" fn main() -> i32 {
+    /// #     example().expect("filesystem operation failed");
+    /// #     0
+    /// # }
+    /// # fn example() -> scarlet_std::io::Result<()> {
+    /// use scarlet_std::fs::OpenOptions;
     ///
     /// let file = OpenOptions::new().write(true).create(true).open("foo.txt");
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn create(&mut self, create: bool) -> &mut Self {
         self.create = create;
@@ -188,28 +315,43 @@ impl OpenOptions {
 
     /// Sets the option to create a new file, failing if it already exists
     ///
-    /// No file is allowed to exist at the target location, also no (dangling) symlink.
-    /// In this way, if the call succeeds, the file returned is guaranteed to be new.
+    /// This requests `O_CREAT | O_EXCL` in one `VfsOpen` operation. The kernel
+    /// excludes VFS namespace mutations while creating and opening the new node;
+    /// an existing final component, including a dangling symlink, is rejected.
+    /// There is no separate userspace create followed by a path-based reopen.
+    /// Creation/open errors are still reported as `ErrorKind::Other`: the native
+    /// syscall does not preserve a distinct already-exists error here.
     ///
-    /// This option is useful because it is atomic. Otherwise between checking
-    /// whether a file exists and creating a new one, the file may have been
-    /// created by another process (a TOCTOU race condition / attack).
-    ///
-    /// If `.create_new(true)` is set, [`.create()`] and [`.truncate()`] are
-    /// ignored.
+    /// With `.create_new(true)`, [`.create()`] and [`.truncate()`] are ignored.
     ///
     /// The file must be opened with write or append access in order to create
     /// a new file.
+    ///
+    /// # Arguments
+    /// * `create_new` - Whether to require exclusive creation of a new file.
+    ///
+    /// # Returns
+    /// The same builder for chaining; no file is created yet.
     ///
     /// [`.create()`]: OpenOptions::create
     /// [`.truncate()`]: OpenOptions::truncate
     ///
     /// # Examples
     ///
-    /// ```
-    /// use scarlet::fs::OpenOptions;
+    /// ```no_run
+    /// #![no_std]
+    /// #![no_main]
+    /// # #[unsafe(no_mangle)]
+    /// # extern "C" fn main() -> i32 {
+    /// #     example().expect("filesystem operation failed");
+    /// #     0
+    /// # }
+    /// # fn example() -> scarlet_std::io::Result<()> {
+    /// use scarlet_std::fs::OpenOptions;
     ///
     /// let file = OpenOptions::new().write(true).create_new(true).open("foo.txt");
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn create_new(&mut self, create_new: bool) -> &mut Self {
         self.create_new = create_new;
@@ -218,71 +360,110 @@ impl OpenOptions {
 
     /// Opens a file at `path` with the options specified by `self`
     ///
+    /// # Arguments
+    /// * `path` - File path in the current task's VFS namespace.
+    ///
+    /// # Returns
+    /// An owning file wrapper, or an I/O error. Creation can leave a file behind
+    /// if opening or wrapping it fails; there is no rollback.
+    ///
     /// # Errors
     ///
     /// This function will return an error under a number of different
     /// circumstances. Some of these error conditions are listed here, together
-    /// with their [`ErrorKind`]. The mapping to [`ErrorKind`]s is not part of
-    /// the compatibility contract of the function.
+    /// with their [`ErrorKind`]. This legacy wrapper does not preserve detailed
+    /// kernel errors and must not be used to distinguish all path/permission failures.
     ///
-    /// * [`NotFound`]: The specified file does not exist and neither `create`
-    ///   or `create_new` is set.
-    /// * [`NotFound`]: One of the directory components of the file path does
-    ///   not exist.
-    /// * [`PermissionDenied`]: The user lacks permission to get the specified
-    ///   access rights for the file.
-    /// * [`PermissionDenied`]: The user lacks permission to open one of the
-    ///   directory components of the specified path.
-    /// * [`InvalidInput`]: Invalid combinations of open options (truncate
-    ///   without write access, no access mode set, etc.).
+    /// * [`InvalidInput`]: Creation was requested without write/append access,
+    ///   or a creation path contains an interior NUL byte.
+    /// * [`Other`]: Handle open or exclusive creation failed. Missing files or
+    ///   directory components, existing files, namespace contention, and denied access
+    ///   are not distinguished as [`NotFound`] or [`PermissionDenied`] here.
+    /// * [`Unsupported`]: The opened handle does not expose file operations.
     ///
-    /// [`ErrorKind`]: Error
+    /// An unset access mode is encoded as read-only, and truncate/access-mode
+    /// combinations are passed to the kernel rather than rejected by this builder.
+    ///
+    /// [`ErrorKind`]: crate::io::ErrorKind
     /// [`InvalidInput`]: ErrorKind::InvalidInput
+    /// [`Other`]: ErrorKind::Other
+    /// [`Unsupported`]: ErrorKind::Unsupported
     /// [`NotFound`]: ErrorKind::NotFound
     /// [`PermissionDenied`]: ErrorKind::PermissionDenied
     ///
     /// # Examples
     ///
-    /// ```
-    /// use scarlet::fs::OpenOptions;
+    /// ```no_run
+    /// #![no_std]
+    /// #![no_main]
+    /// # #[unsafe(no_mangle)]
+    /// # extern "C" fn main() -> i32 {
+    /// #     example().expect("filesystem operation failed");
+    /// #     0
+    /// # }
+    /// # fn example() -> scarlet_std::io::Result<()> {
+    /// use scarlet_std::fs::OpenOptions;
     ///
     /// let file = OpenOptions::new().read(true).open("foo.txt");
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn open<P: AsRef<str>>(&self, path: P) -> Result<File> {
         use crate::ffi::str_to_cstr_bytes;
         use crate::syscall::{Syscall, syscall2};
 
-        // If we need to create the file, use VfsCreateFile first
-        if self.create || self.create_new {
-            // Check if we have write access
-            if !self.write && !self.append {
-                return Err(Error::new(
-                    ErrorKind::InvalidInput,
-                    "Cannot create file without write access",
-                ));
-            }
+        let writable = self.write || self.append;
+        if (self.create || self.create_new) && !writable {
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
+                "Cannot create file without write access",
+            ));
+        }
+        if (self.create || self.create_new) && path.as_ref().as_bytes().contains(&0) {
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
+                "path contains null byte",
+            ));
+        }
 
+        // Ordinary create retains its compatibility path. Exclusive creation
+        // must instead be a single VfsOpen operation below.
+        if self.create && !self.create_new {
             // Convert path to null-terminated C string
             let path_bytes = str_to_cstr_bytes(path.as_ref())
                 .map_err(|_| Error::new(ErrorKind::InvalidInput, "path contains null byte"))?;
 
-            // For create_new, we should check if file exists first
-            // For now, just attempt to create and handle errors
-            let result = syscall2(
-                Syscall::VfsCreateFile,
-                path_bytes.as_ptr() as usize,
-                0, // mode (unused for now)
-            );
-
-            // For create_new, creation failure is an error
-            // For create, we continue even if creation fails (file might already exist)
-            if self.create_new && result == usize::MAX {
-                return Err(Error::new(ErrorKind::Other, "File already exists"));
-            }
+            // Existing files are allowed by ordinary create.
+            // SAFETY: The NUL-terminated path remains readable until return; mode is a scalar.
+            let _ = unsafe {
+                syscall2(
+                    Syscall::VfsCreateFile,
+                    path_bytes.as_ptr() as usize,
+                    0, // mode (unused for now)
+                )
+            };
         }
 
-        // Currently, we don't support any flags that require special handling
-        let flags = 0;
+        // Construct open flags from options
+        // Flag values match POSIX-style constants used by the kernel:
+        //   O_RDONLY = 0x0, O_WRONLY = 0x1, O_RDWR = 0x2
+        //   O_APPEND = 0x400, O_TRUNC = 0x200
+        let flags = if self.read && writable {
+            0x2 // O_RDWR
+        } else if writable {
+            0x1 // O_WRONLY
+        } else {
+            0x0 // O_RDONLY
+        };
+
+        let flags = if self.append { flags | 0x400 } else { flags };
+        let flags = if self.create_new {
+            flags | 0x40 | 0x80 // O_CREAT | O_EXCL; do not truncate an existing file
+        } else if self.truncate {
+            flags | 0x200
+        } else {
+            flags
+        };
 
         // Use Handle::open and wrap in File
         let handle = Handle::open(path.as_ref(), flags)
@@ -320,14 +501,14 @@ impl File {
     /// This is used internally by OpenOptions and other high-level APIs.
     ///
     /// # Arguments
-    /// * `handle` - The handle to wrap
+    /// * `handle` - Owned handle to consume, including when validation fails.
     ///
     /// # Returns
     /// A `File` on success.
     ///
     /// This performs a type check using the handle's cached kernel object info.
     /// If the handle does not represent a file-like object, this returns
-    /// `ErrorKind::Unsupported`.
+    /// `ErrorKind::Unsupported` and drops the consumed handle, closing it.
     pub fn from_handle(handle: Handle) -> Result<Self> {
         handle.as_file().map_err(|_| {
             Error::new(
@@ -366,28 +547,9 @@ impl File {
     /// # Returns
     /// File instance or error
     pub fn create<P: AsRef<str>>(path: P) -> Result<Self> {
-        use crate::ffi::str_to_cstr_bytes;
-        use crate::syscall::{Syscall, syscall2};
-
-        // Convert path to null-terminated C string
-        let path_bytes = str_to_cstr_bytes(path.as_ref())
-            .map_err(|_| Error::new(ErrorKind::InvalidInput, "path contains null byte"))?;
-
-        // Use VfsCreateFile syscall to create the file
-        let result = syscall2(
-            Syscall::VfsCreateFile,
-            path_bytes.as_ptr() as usize,
-            0, // mode (unused for now)
-        );
-
-        if result == usize::MAX {
-            return Err(Error::new(ErrorKind::Other, "Failed to create file"));
-        }
-
-        // Open the created file for writing
-        let handle = Handle::open(path.as_ref(), 0x1) // O_WRONLY
-            .map_err(|_| Error::new(ErrorKind::Other, "Failed to open created file"))?;
-        File::from_handle(handle)
+        let mut options = OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        options.open(path)
     }
 
     /// Open a file with specific flags (low-level interface)
@@ -428,8 +590,9 @@ impl File {
 
     /// Clone the underlying handle via duplication
     ///
-    /// This creates a new Handle that duplicates the underlying kernel object.
-    /// This requires a syscall and creates an independent handle.
+    /// This requires a syscall and creates an independently closeable handle to
+    /// the same kernel object. It does not copy the file contents or guarantee an
+    /// independent seek cursor or open-file state.
     ///
     /// # Returns
     /// Cloned Handle instance or error
@@ -443,6 +606,23 @@ impl File {
     pub fn as_raw(&self) -> i32 {
         self.handle.as_raw()
     }
+
+    pub fn set_nonblocking(&self, enabled: bool) -> Result<()> {
+        const HCTL_SET_NONBLOCKING: u32 = 0x5353_0007;
+        // SAFETY: This fixed socket control takes a scalar argument and borrows the live handle; it carries no raw pointer.
+        let result = unsafe {
+            crate::syscall::syscall3(
+                crate::syscall::Syscall::HandleControl,
+                self.handle.as_raw() as usize,
+                HCTL_SET_NONBLOCKING as usize,
+                if enabled { 1 } else { 0 },
+            )
+        };
+        if result == usize::MAX {
+            return Err(Error::new(ErrorKind::Other, "set_nonblocking failed"));
+        }
+        Ok(())
+    }
 }
 
 // Implement Rust standard library-like methods
@@ -453,7 +633,8 @@ impl File {
     /// * `buf` - Buffer to read data into
     ///
     /// # Returns
-    /// Number of bytes read or error
+    /// Number of bytes read, which can be shorter than `buf.len()`, or an I/O
+    /// error. A zero-byte read can indicate EOF or an empty destination buffer.
     pub fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
         let stream = self.handle.as_stream().map_err(|_| {
             Error::new(
@@ -464,16 +645,25 @@ impl File {
 
         stream
             .read(buf)
-            .map_err(|_| Error::new(ErrorKind::Other, "Read operation failed"))
+            .map_err(|error| stream_error_to_io(error, "Read operation failed"))
     }
 
     /// Read directory entries from a directory file
     ///
-    /// This method reads an entry from a directory file and returns a DirectoryEntry
+    /// This method reads one serialized entry from the directory stream. Use
+    /// [`list_directory`] to collect all entries into a vector.
+    ///
+    /// # Arguments
+    /// * `self` - An open directory file; the stream position advances on a read.
     ///
     /// # Returns
-    /// * `Ok(entries)` - Vector of directory entries on success
-    /// * `Err(errno)` - Error code on failure
+    /// * `Ok(Some(entry))` - One parsed directory entry.
+    /// * `Ok(None)` - End of the directory stream.
+    /// * `Err(error)` - I/O failure or an invalid serialized entry, not a raw errno.
+    ///
+    /// # Panics
+    /// Panics if the underlying handle does not expose stream operations; this
+    /// legacy implementation does not turn that capability failure into an I/O error.
     pub fn read_dir(&mut self) -> Result<Option<DirectoryEntry>> {
         // let file_handle = self.handle.as_file()
         //     .map_err(|_| Error::new(ErrorKind::Unsupported, "Object does not support file operations"))?;
@@ -518,7 +708,8 @@ impl File {
     /// * `buf` - Data to write
     ///
     /// # Returns
-    /// Number of bytes written or error
+    /// Number of bytes written, which can be shorter than `buf.len()`, or an I/O
+    /// error. Success does not imply that the bytes have reached persistent storage.
     pub fn write(&mut self, buf: &[u8]) -> Result<usize> {
         let stream = self.handle.as_stream().map_err(|_| {
             Error::new(
@@ -529,12 +720,14 @@ impl File {
 
         stream
             .write(buf)
-            .map_err(|_| Error::new(ErrorKind::Other, "Write operation failed"))
+            .map_err(|error| stream_error_to_io(error, "Write operation failed"))
     }
 
     /// Write all data to the file
     ///
-    /// This is a convenience method that ensures all data is written.
+    /// This convenience method retries short writes until all bytes have been
+    /// accepted or an error occurs. On error, an already written prefix remains;
+    /// it does not roll back partial writes or guarantee persistence.
     ///
     /// # Arguments
     /// * `buf` - Data to write
@@ -551,7 +744,7 @@ impl File {
 
         stream
             .write_all(buf)
-            .map_err(|_| Error::new(ErrorKind::Other, "Write all operation failed"))
+            .map_err(|error| stream_error_to_io(error, "Write all operation failed"))
     }
 
     /// Seek to a position in the file
@@ -633,6 +826,11 @@ impl Write for File {
         File::write(self, buf)
     }
 
+    /// Complete a flush request without issuing a kernel storage operation.
+    ///
+    /// # Returns
+    /// `Ok(())`. This wrapper has no userspace write buffer, but the no-op does
+    /// not flush kernel or device caches and is not a durability guarantee.
     fn flush(&mut self) -> Result<()> {
         // For now, we don't have explicit flush capability
         // This could be added as a future enhancement
@@ -674,6 +872,11 @@ pub mod mount_flags {
 
 /// Mount a filesystem
 ///
+/// Requires bootstrap authority or a management handle for the current view.
+/// Ordinary programs cannot obtain that authority from a current-view query.
+/// Use `environment::VfsView` for capability-scoped construction; replacing
+/// the root of an established Environment is not supported by this syscall.
+///
 /// # Arguments
 ///
 /// * `source` - Source device or filesystem name (e.g., "/dev/sda1", "tmpfs")
@@ -685,17 +888,37 @@ pub mod mount_flags {
 /// # Examples
 ///
 /// Mount a tmpfs:
-/// ```
-/// use scarlet::fs;
+/// ```no_run
+/// #![no_std]
+/// #![no_main]
+/// # #[unsafe(no_mangle)]
+/// # extern "C" fn main() -> i32 {
+/// #     example().expect("filesystem operation failed");
+/// #     0
+/// # }
+/// # fn example() -> scarlet_std::io::Result<()> {
+/// use scarlet_std::fs;
 ///
 /// fs::mount("tmpfs", "/tmp", "tmpfs", 0, Some("size=100M"))?;
+/// # Ok(())
+/// # }
 /// ```
 ///
 /// Bind mount:
-/// ```
-/// use scarlet::fs::{mount, mount_flags};
+/// ```no_run
+/// #![no_std]
+/// #![no_main]
+/// # #[unsafe(no_mangle)]
+/// # extern "C" fn main() -> i32 {
+/// #     example().expect("filesystem operation failed");
+/// #     0
+/// # }
+/// # fn example() -> scarlet_std::io::Result<()> {
+/// use scarlet_std::fs::{mount, mount_flags};
 ///
 /// mount("/source/dir", "/target/dir", "bind", mount_flags::MS_BIND, None)?;
+/// # Ok(())
+/// # }
 /// ```
 ///
 /// # Errors
@@ -731,14 +954,17 @@ pub fn mount(
         0
     };
 
-    let result = syscall5(
-        Syscall::FsMount,
-        source_c.as_ptr() as usize,
-        target_c.as_ptr() as usize,
-        fstype_c.as_ptr() as usize,
-        flags as usize,
-        data_ptr,
-    );
+    // SAFETY: All paths, filesystem type and optional mount data are live NUL-terminated strings borrowed until return.
+    let result = unsafe {
+        syscall5(
+            Syscall::FsMount,
+            source_c.as_ptr() as usize,
+            target_c.as_ptr() as usize,
+            fstype_c.as_ptr() as usize,
+            flags as usize,
+            data_ptr,
+        )
+    };
 
     if result == usize::MAX {
         Err(Error::new(ErrorKind::Other, "mount failed"))
@@ -756,10 +982,20 @@ pub fn mount(
 ///
 /// # Examples
 ///
-/// ```
-/// use scarlet::fs::unmount;
+/// ```no_run
+/// #![no_std]
+/// #![no_main]
+/// # #[unsafe(no_mangle)]
+/// # extern "C" fn main() -> i32 {
+/// #     example().expect("filesystem operation failed");
+/// #     0
+/// # }
+/// # fn example() -> scarlet_std::io::Result<()> {
+/// use scarlet_std::fs::unmount;
 ///
 /// unmount("/mnt/data", 0)?;
+/// # Ok(())
+/// # }
 /// ```
 ///
 /// # Errors
@@ -775,11 +1011,14 @@ pub fn unmount(target: &str, flags: u32) -> Result<()> {
     let target_c = str_to_cstr_bytes(target)
         .map_err(|_| Error::new(ErrorKind::InvalidInput, "target contains null byte"))?;
 
-    let result = syscall2(
-        Syscall::FsUmount,
-        target_c.as_ptr() as usize,
-        flags as usize,
-    );
+    // SAFETY: The NUL-terminated mount path remains readable until return; flags is a scalar.
+    let result = unsafe {
+        syscall2(
+            Syscall::FsUmount,
+            target_c.as_ptr() as usize,
+            flags as usize,
+        )
+    };
 
     if result == usize::MAX {
         Err(Error::new(ErrorKind::Other, "unmount failed"))
@@ -793,6 +1032,8 @@ pub fn unmount(target: &str, flags: u32) -> Result<()> {
 /// This system call moves the old root filesystem to `old_root` and makes
 /// `new_root` the new root filesystem. This is typically used during system
 /// initialization to switch from an initramfs to the real root filesystem.
+/// Only the bootstrap process may call this operation. Established processes
+/// select a new root through an explicit Environment exec or spawn instead.
 ///
 /// # Arguments
 ///
@@ -801,11 +1042,21 @@ pub fn unmount(target: &str, flags: u32) -> Result<()> {
 ///
 /// # Examples
 ///
-/// ```
-/// use scarlet::fs::pivot_root;
+/// ```no_run
+/// #![no_std]
+/// #![no_main]
+/// # #[unsafe(no_mangle)]
+/// # extern "C" fn main() -> i32 {
+/// #     example().expect("filesystem operation failed");
+/// #     0
+/// # }
+/// # fn example() -> scarlet_std::io::Result<()> {
+/// use scarlet_std::fs::pivot_root;
 ///
 /// // Switch to new root, moving old root to /old_root
 /// pivot_root("/mnt/newroot", "/mnt/newroot/old_root")?;
+/// # Ok(())
+/// # }
 /// ```
 ///
 /// # Errors
@@ -824,11 +1075,14 @@ pub fn pivot_root(new_root: &str, old_root: &str) -> Result<()> {
     let old_root_c = str_to_cstr_bytes(old_root)
         .map_err(|_| Error::new(ErrorKind::InvalidInput, "old_root contains null byte"))?;
 
-    let result = syscall2(
-        Syscall::FsPivotRoot,
-        new_root_c.as_ptr() as usize,
-        old_root_c.as_ptr() as usize,
-    );
+    // SAFETY: Both NUL-terminated paths remain readable until this synchronous operation returns.
+    let result = unsafe {
+        syscall2(
+            Syscall::FsPivotRoot,
+            new_root_c.as_ptr() as usize,
+            old_root_c.as_ptr() as usize,
+        )
+    };
 
     if result == usize::MAX {
         Err(Error::new(ErrorKind::Other, "pivot_root failed"))
@@ -851,7 +1105,8 @@ pub fn create_directory<P: AsRef<str>>(path: P) -> Result<()> {
     let path_c = str_to_cstr_bytes(path.as_ref())
         .map_err(|_| Error::new(ErrorKind::InvalidInput, "path contains null byte"))?;
 
-    let result = syscall1(Syscall::VfsCreateDirectory, path_c.as_ptr() as usize);
+    // SAFETY: The NUL-terminated path remains readable until the synchronous directory operation returns.
+    let result = unsafe { syscall1(Syscall::VfsCreateDirectory, path_c.as_ptr() as usize) };
 
     if result == usize::MAX {
         Err(Error::new(ErrorKind::Other, "create directory failed"))
@@ -868,10 +1123,20 @@ pub fn create_directory<P: AsRef<str>>(path: P) -> Result<()> {
 ///
 /// # Examples
 ///
-/// ```
-/// use scarlet::fs::change_directory;
+/// ```no_run
+/// #![no_std]
+/// #![no_main]
+/// # #[unsafe(no_mangle)]
+/// # extern "C" fn main() -> i32 {
+/// #     example().expect("filesystem operation failed");
+/// #     0
+/// # }
+/// # fn example() -> scarlet_std::io::Result<()> {
+/// use scarlet_std::fs::change_directory;
 ///
 /// change_directory("/tmp")?;
+/// # Ok(())
+/// # }
 /// ```
 ///
 /// # Errors
@@ -887,7 +1152,8 @@ pub fn change_directory<P: AsRef<str>>(path: P) -> Result<()> {
     let path_c = str_to_cstr_bytes(path.as_ref())
         .map_err(|_| Error::new(ErrorKind::InvalidInput, "path contains null byte"))?;
 
-    let result = syscall1(Syscall::VfsChangeDirectory, path_c.as_ptr() as usize);
+    // SAFETY: The NUL-terminated path remains readable until the synchronous directory operation returns.
+    let result = unsafe { syscall1(Syscall::VfsChangeDirectory, path_c.as_ptr() as usize) };
 
     if result == usize::MAX {
         Err(Error::new(ErrorKind::Other, "change directory failed"))
@@ -905,10 +1171,20 @@ pub fn change_directory<P: AsRef<str>>(path: P) -> Result<()> {
 ///
 /// # Examples
 ///
-/// ```
-/// use scarlet::fs::remove_file;
+/// ```no_run
+/// #![no_std]
+/// #![no_main]
+/// # #[unsafe(no_mangle)]
+/// # extern "C" fn main() -> i32 {
+/// #     example().expect("filesystem operation failed");
+/// #     0
+/// # }
+/// # fn example() -> scarlet_std::io::Result<()> {
+/// use scarlet_std::fs::remove_file;
 ///
 /// remove_file("old_file.txt")?;
+/// # Ok(())
+/// # }
 /// ```
 ///
 /// # Errors
@@ -924,7 +1200,8 @@ pub fn remove_file<P: AsRef<str>>(path: P) -> Result<()> {
     let path_c = str_to_cstr_bytes(path.as_ref())
         .map_err(|_| Error::new(ErrorKind::InvalidInput, "path contains null byte"))?;
 
-    let result = syscall1(Syscall::VfsRemove, path_c.as_ptr() as usize);
+    // SAFETY: The NUL-terminated path remains readable until the synchronous removal returns.
+    let result = unsafe { syscall1(Syscall::VfsRemove, path_c.as_ptr() as usize) };
 
     if result == usize::MAX {
         Err(Error::new(ErrorKind::Other, "remove file failed"))
@@ -943,10 +1220,20 @@ pub fn remove_file<P: AsRef<str>>(path: P) -> Result<()> {
 ///
 /// # Examples
 ///
-/// ```
-/// use scarlet::fs::remove_directory;
+/// ```no_run
+/// #![no_std]
+/// #![no_main]
+/// # #[unsafe(no_mangle)]
+/// # extern "C" fn main() -> i32 {
+/// #     example().expect("filesystem operation failed");
+/// #     0
+/// # }
+/// # fn example() -> scarlet_std::io::Result<()> {
+/// use scarlet_std::fs::remove_directory;
 ///
 /// remove_directory("empty_dir")?;
+/// # Ok(())
+/// # }
 /// ```
 ///
 /// # Errors
@@ -963,7 +1250,8 @@ pub fn remove_directory<P: AsRef<str>>(path: P) -> Result<()> {
     let path_c = str_to_cstr_bytes(path.as_ref())
         .map_err(|_| Error::new(ErrorKind::InvalidInput, "path contains null byte"))?;
 
-    let result = syscall1(Syscall::VfsRemove, path_c.as_ptr() as usize);
+    // SAFETY: The NUL-terminated path remains readable until the synchronous removal returns.
+    let result = unsafe { syscall1(Syscall::VfsRemove, path_c.as_ptr() as usize) };
 
     if result == usize::MAX {
         Err(Error::new(ErrorKind::Other, "remove directory failed"))
@@ -1121,7 +1409,11 @@ pub fn parse_dir_entry(buf: &[u8]) -> Option<DirectoryEntryRaw> {
         return None;
     }
 
-    unsafe { Some(*(buf.as_ptr() as *const DirectoryEntryRaw)) }
+    unsafe {
+        Some(core::ptr::read_unaligned(
+            buf.as_ptr() as *const DirectoryEntryRaw
+        ))
+    }
 }
 
 /// List all files and directories in a directory
@@ -1138,13 +1430,24 @@ pub fn parse_dir_entry(buf: &[u8]) -> Option<DirectoryEntryRaw> {
 ///
 /// # Examples
 ///
-/// ```
-/// use scarlet::fs;
+/// ```no_run
+/// #![no_std]
+/// #![no_main]
+/// # #[unsafe(no_mangle)]
+/// # extern "C" fn main() -> i32 {
+/// #     example().expect("filesystem operation failed");
+/// #     0
+/// # }
+/// # fn example() -> scarlet_std::io::Result<()> {
+/// use scarlet_std::println;
+/// use scarlet_std::fs;
 ///
 /// let entries = fs::list_directory("/tmp")?;
 /// for entry in entries {
 ///     println!("{}: {} bytes", entry.name, entry.size);
 /// }
+/// # Ok(())
+/// # }
 /// ```
 ///
 pub fn list_directory(path: &str) -> Result<crate::vec::Vec<DirectoryEntry>> {
@@ -1188,11 +1491,22 @@ pub fn list_directory(path: &str) -> Result<crate::vec::Vec<DirectoryEntry>> {
 ///
 /// # Examples
 ///
-/// ```
-/// use scarlet::fs;
+/// ```no_run
+/// #![no_std]
+/// #![no_main]
+/// # #[unsafe(no_mangle)]
+/// # extern "C" fn main() -> i32 {
+/// #     example().expect("filesystem operation failed");
+/// #     0
+/// # }
+/// # fn example() -> scarlet_std::io::Result<()> {
+/// use scarlet_std::println;
+/// use scarlet_std::fs;
 ///
 /// let (files, dirs) = fs::count_directory_entries("/home")?;
 /// println!("Found {} files and {} directories", files, dirs);
+/// # Ok(())
+/// # }
 /// ```
 ///
 pub fn count_directory_entries(path: &str) -> Result<(usize, usize)> {
@@ -1223,10 +1537,20 @@ pub fn count_directory_entries(path: &str) -> Result<(usize, usize)> {
 /// * `Err(Error)` - If the symbolic link could not be created
 ///
 /// # Example
-/// ```
-/// use scarlet::fs::create_symlink;
+/// ```no_run
+/// #![no_std]
+/// #![no_main]
+/// # #[unsafe(no_mangle)]
+/// # extern "C" fn main() -> i32 {
+/// #     example().expect("filesystem operation failed");
+/// #     0
+/// # }
+/// # fn example() -> scarlet_std::io::Result<()> {
+/// use scarlet_std::fs::create_symlink;
 ///
 /// create_symlink("/path/to/symlink", "/path/to/target")?;
+/// # Ok(())
+/// # }
 /// ```
 pub fn create_symlink(symlink_path: &str, target_path: &str) -> Result<()> {
     use crate::ffi::str_to_cstr_bytes;
@@ -1237,13 +1561,16 @@ pub fn create_symlink(symlink_path: &str, target_path: &str) -> Result<()> {
     let target_path_c = str_to_cstr_bytes(target_path)
         .map_err(|_| Error::new(ErrorKind::InvalidInput, "target_path contains null byte"))?;
 
-    let result = syscall4(
-        Syscall::VfsCreateSymlink,
-        symlink_path_c.as_ptr() as usize,
-        target_path_c.as_ptr() as usize,
-        0,
-        0,
-    );
+    // SAFETY: Both NUL-terminated paths remain readable until the synchronous link operation returns.
+    let result = unsafe {
+        syscall4(
+            Syscall::VfsCreateSymlink,
+            symlink_path_c.as_ptr() as usize,
+            target_path_c.as_ptr() as usize,
+            0,
+            0,
+        )
+    };
 
     if result == usize::MAX {
         Err(Error::new(
@@ -1265,11 +1592,22 @@ pub fn create_symlink(symlink_path: &str, target_path: &str) -> Result<()> {
 /// * `Err(Error)` - If the symbolic link could not be read
 ///
 /// # Example
-/// ```
-/// use scarlet::fs::read_link;
+/// ```no_run
+/// #![no_std]
+/// #![no_main]
+/// # #[unsafe(no_mangle)]
+/// # extern "C" fn main() -> i32 {
+/// #     example().expect("filesystem operation failed");
+/// #     0
+/// # }
+/// # fn example() -> scarlet_std::io::Result<()> {
+/// use scarlet_std::println;
+/// use scarlet_std::fs::read_link;
 ///
 /// let target = read_link("/path/to/symlink")?;
 /// println!("Symbolic link points to: {}", target);
+/// # Ok(())
+/// # }
 /// ```
 pub fn read_link(symlink_path: &str) -> Result<String> {
     use crate::ffi::str_to_cstr_bytes;
@@ -1281,12 +1619,15 @@ pub fn read_link(symlink_path: &str) -> Result<String> {
     // Allocate buffer for target path (PATH_MAX = 4096)
     let mut buffer = [0u8; 4096];
 
-    let result = syscall3(
-        Syscall::VfsReadlink,
-        symlink_path_c.as_ptr() as usize,
-        buffer.as_mut_ptr() as usize,
-        buffer.len(),
-    );
+    // SAFETY: The NUL-terminated path and disjoint exclusive output buffer remain valid for the supplied output length.
+    let result = unsafe {
+        syscall3(
+            Syscall::VfsReadlink,
+            symlink_path_c.as_ptr() as usize,
+            buffer.as_mut_ptr() as usize,
+            buffer.len(),
+        )
+    };
 
     if result == usize::MAX {
         Err(Error::new(ErrorKind::Other, "Failed to read symbolic link"))
@@ -1305,6 +1646,70 @@ pub fn read_link(symlink_path: &str) -> Result<String> {
     }
 }
 
+/// Rename or move a file or directory
+///
+/// This function renames a file or directory, moving it to a new path if the
+/// paths reside in the same filesystem.
+///
+/// # Arguments
+/// * `old_path` - Current path of the file or directory
+/// * `new_path` - New path after the rename/move
+///
+/// # Examples
+///
+/// ```no_run
+/// #![no_std]
+/// #![no_main]
+/// # #[unsafe(no_mangle)]
+/// # extern "C" fn main() -> i32 {
+/// #     example().expect("filesystem operation failed");
+/// #     0
+/// # }
+/// # fn example() -> scarlet_std::io::Result<()> {
+/// use scarlet_std::fs::rename;
+///
+/// rename("old_name.txt", "new_name.txt")?;
+/// rename("src/file.txt", "dst/file.txt")?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # Errors
+///
+/// Returns `Err` if the rename operation fails, such as:
+/// - Source path not found
+/// - Destination directory not found
+/// - Cross-filesystem move (not supported)
+/// - Destination is a non-empty directory
+/// - Permission denied
+pub fn rename<P: AsRef<str>>(old_path: P, new_path: P) -> Result<()> {
+    use crate::ffi::str_to_cstr_bytes;
+    use crate::syscall::{Syscall, syscall2};
+
+    let old_path_c = str_to_cstr_bytes(old_path.as_ref())
+        .map_err(|_| Error::new(ErrorKind::InvalidInput, "old_path contains null byte"))?;
+    let new_path_c = str_to_cstr_bytes(new_path.as_ref())
+        .map_err(|_| Error::new(ErrorKind::InvalidInput, "new_path contains null byte"))?;
+
+    // SAFETY: Both NUL-terminated paths remain readable until the synchronous rename returns.
+    let result = unsafe {
+        syscall2(
+            Syscall::VfsRename,
+            old_path_c.as_ptr() as usize,
+            new_path_c.as_ptr() as usize,
+        )
+    };
+
+    if result == usize::MAX {
+        Err(Error::new(
+            ErrorKind::Other,
+            "rename failed: source not found, cross-filesystem move, or permission denied",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
 /// Get current working directory as a path string
 ///
 /// # Returns
@@ -1316,11 +1721,14 @@ pub fn get_cwd_path() -> Result<String> {
     // Allocate buffer for path (PATH_MAX = 4096)
     let mut buffer = [0u8; 4096];
 
-    let result = syscall2(
-        Syscall::VfsGetCwdPath,
-        buffer.as_mut_ptr() as usize,
-        buffer.len(),
-    );
+    // SAFETY: buffer is exclusive output storage for the advertised byte length until return.
+    let result = unsafe {
+        syscall2(
+            Syscall::VfsGetCwdPath,
+            buffer.as_mut_ptr() as usize,
+            buffer.len(),
+        )
+    };
 
     if result == usize::MAX {
         Err(Error::new(

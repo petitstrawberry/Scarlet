@@ -14,8 +14,11 @@ use crate::{
     },
     early_initcall,
     interrupt::{
-        CpuId, InterruptError, InterruptId, InterruptManager, InterruptResult, Priority,
-        controllers::ExternalInterruptController,
+        CpuId, InterruptError, InterruptId, InterruptResult, Priority,
+        controllers::{
+            ExternalInterruptController, InterruptControllerInitMode, IrqFlow, IrqMapping,
+            PendingIrq,
+        },
     },
 };
 use alloc::{boxed::Box, vec, vec::Vec};
@@ -166,44 +169,18 @@ impl Plic {
 
 impl ExternalInterruptController for Plic {
     /// Initialize the PLIC
-    fn init(&mut self) -> InterruptResult<()> {
-        crate::early_println!(
+    fn init(&mut self, mode: InterruptControllerInitMode) -> InterruptResult<()> {
+        debug_assert_eq!(mode, InterruptControllerInitMode::ColdBootReset);
+        crate::println!(
             "[PLIC] init: max_cpus={}, max_interrupts={}, s_mode_contexts={:?}",
             self.max_cpus,
             self.max_interrupts,
             self.s_mode_contexts
         );
 
-        // Establish a known baseline:
-        // - Disable all interrupts for all contexts first.
-        //   This prevents any firmware/previous-stage configuration from leaking into the kernel.
-        //   Device drivers will later enable only what they need.
-        let word_count = ((self.max_interrupts as usize) + 31) / 32;
-        for cpu_id in 0..self.max_cpus {
-            let context_id = self.context_id_for_cpu(cpu_id);
-            let context_offset = context_id * PLIC_ENABLE_CONTEXT_STRIDE;
-            for word in 0..word_count {
-                let addr = self.base_addr + PLIC_ENABLE_BASE + context_offset + (word * 4);
-                let verify = Self::mmio_write32_with_readback(addr, 0);
-                if verify != 0 {
-                    crate::early_println!(
-                        "PLIC init: clear enable verify failed: cpu={}, context={}, addr={:#x}, read={}",
-                        cpu_id,
-                        context_id,
-                        addr,
-                        verify
-                    );
-                    return Err(InterruptError::HardwareError);
-                }
-            }
-        }
-
-        // Set threshold to 0 for all CPUs (allow all priorities)
-        for cpu_id in 0..self.max_cpus {
-            self.set_threshold(cpu_id, 0)?;
-        }
-
-        // Set all interrupt priorities to 1 (lowest non-zero priority)
+        // Linux assigns every PLIC source priority 1 and separately clears all
+        // enables in each owned hart context. Priority 0 is the mask state used
+        // by the per-IRQ runtime path, not the controller's cold baseline.
         for interrupt_id in 1..=self.max_interrupts {
             self.set_priority(interrupt_id, 1)?;
         }
@@ -211,12 +188,38 @@ impl ExternalInterruptController for Plic {
         Ok(())
     }
 
-    /// Enable a specific interrupt for a CPU
-    fn enable_interrupt(
+    fn init_for_cpu(
         &mut self,
-        interrupt_id: InterruptId,
         cpu_id: CpuId,
+        mode: InterruptControllerInitMode,
     ) -> InterruptResult<()> {
+        debug_assert_eq!(mode, InterruptControllerInitMode::ColdBootReset);
+        self.validate_cpu_id(cpu_id)?;
+
+        let word_count = (self.max_interrupts as usize + 1).div_ceil(32);
+        let context_id = self.context_id_for_cpu(cpu_id);
+        let context_offset = context_id * PLIC_ENABLE_CONTEXT_STRIDE;
+
+        for word in 0..word_count {
+            let addr = self.base_addr + PLIC_ENABLE_BASE + context_offset + (word * 4);
+            let verify = Self::mmio_write32_with_readback(addr, 0);
+            if verify != 0 {
+                crate::println!(
+                    "PLIC init_for_cpu: clear enable verify failed: cpu={}, context={}, addr={:#x}, read={}",
+                    cpu_id,
+                    context_id,
+                    addr,
+                    verify
+                );
+                return Err(InterruptError::HardwareError);
+            }
+        }
+
+        self.set_threshold(cpu_id, 0)
+    }
+
+    /// Enable a specific interrupt for a CPU
+    fn enable_interrupt(&self, interrupt_id: InterruptId, cpu_id: CpuId) -> InterruptResult<()> {
         self.validate_interrupt_id(interrupt_id)?;
         self.validate_cpu_id(cpu_id)?;
 
@@ -229,7 +232,7 @@ impl ExternalInterruptController for Plic {
             let new_value = current | (1 << bit_offset);
             let verify = Self::mmio_write32_with_readback(addr, new_value);
             if verify != new_value {
-                crate::early_println!(
+                crate::println!(
                     "PLIC enable_interrupt verify failed: irq={}, cpu={}, context={}, addr={:#x}, bit={}, wrote={}, read={}",
                     interrupt_id,
                     cpu_id,
@@ -247,11 +250,7 @@ impl ExternalInterruptController for Plic {
     }
 
     /// Disable a specific interrupt for a CPU
-    fn disable_interrupt(
-        &mut self,
-        interrupt_id: InterruptId,
-        cpu_id: CpuId,
-    ) -> InterruptResult<()> {
+    fn disable_interrupt(&self, interrupt_id: InterruptId, cpu_id: CpuId) -> InterruptResult<()> {
         self.validate_interrupt_id(interrupt_id)?;
         self.validate_cpu_id(cpu_id)?;
 
@@ -265,6 +264,14 @@ impl ExternalInterruptController for Plic {
         }
 
         Ok(())
+    }
+
+    fn mask_irq(&self, irq: &PendingIrq) -> InterruptResult<()> {
+        self.disable_interrupt(irq.mapping.hwirq, irq.cpu_id)
+    }
+
+    fn unmask_irq(&self, irq: &PendingIrq) -> InterruptResult<()> {
+        self.enable_interrupt(irq.mapping.hwirq, irq.cpu_id)
     }
 
     /// Set priority for a specific interrupt
@@ -284,7 +291,7 @@ impl ExternalInterruptController for Plic {
         if verify != priority {
             // Verification failed: MMIO write did not persist the expected value.
             // Return an InterruptError instead of panicking for consistent error handling.
-            crate::early_println!(
+            crate::println!(
                 "PLIC set_priority verify failed: irq={}, addr={:#x}, wrote={}, read={}",
                 interrupt_id,
                 addr,
@@ -321,7 +328,7 @@ impl ExternalInterruptController for Plic {
         if verify != threshold {
             // Verification failed: MMIO write did not persist the expected value.
             // Return an InterruptError instead of panicking for consistent error handling.
-            crate::early_println!(
+            crate::println!(
                 "PLIC set_threshold verify failed: cpu={}, addr={:#x}, wrote={}, read={}",
                 cpu_id,
                 addr,
@@ -345,7 +352,7 @@ impl ExternalInterruptController for Plic {
     }
 
     /// Claim an interrupt (acknowledge and get the interrupt ID)
-    fn claim_interrupt(&mut self, cpu_id: CpuId) -> InterruptResult<Option<InterruptId>> {
+    fn claim_interrupt(&self, cpu_id: CpuId) -> InterruptResult<Option<InterruptId>> {
         self.validate_cpu_id(cpu_id)?;
 
         let addr = self.claim_addr(cpu_id);
@@ -358,12 +365,17 @@ impl ExternalInterruptController for Plic {
         }
     }
 
+    fn claim_pending_irq(&self, cpu_id: CpuId) -> InterruptResult<Option<PendingIrq>> {
+        Ok(self
+            .claim_interrupt(cpu_id)?
+            .map(|interrupt_id| PendingIrq {
+                mapping: IrqMapping::legacy(interrupt_id, IrqFlow::Level),
+                cpu_id,
+            }))
+    }
+
     /// Complete an interrupt (signal that handling is finished)
-    fn complete_interrupt(
-        &mut self,
-        cpu_id: CpuId,
-        interrupt_id: InterruptId,
-    ) -> InterruptResult<()> {
+    fn complete_interrupt(&self, cpu_id: CpuId, interrupt_id: InterruptId) -> InterruptResult<()> {
         self.validate_cpu_id(cpu_id)?;
         self.validate_interrupt_id(interrupt_id)?;
 
@@ -374,6 +386,10 @@ impl ExternalInterruptController for Plic {
         }
 
         Ok(())
+    }
+
+    fn eoi_irq(&self, irq: &PendingIrq) -> InterruptResult<()> {
+        self.complete_interrupt(irq.cpu_id, irq.mapping.hwirq)
     }
 
     /// Check if a specific interrupt is pending
@@ -417,12 +433,24 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         .find(|r| r.res_type == PlatformDeviceResourceType::MEM)
         .ok_or("Memory resource not found")?;
 
-    let base_addr = mem_res.start as usize;
+    let paddr = mem_res.start;
+    let size = mem_res.end - mem_res.start + 1;
+
+    // Map the PLIC's physical MMIO region into the kernel virtual address space.
+    let base_addr = crate::vm::ioremap(paddr, size).map_err(|e| {
+        crate::println!(
+            "[interrupt] PLIC ioremap({:#x}, {:#x}) failed: {}",
+            paddr,
+            size,
+            e
+        );
+        e
+    })?;
 
     // Try to get PLIC configuration from FDT for proper context mapping
     let controller =
         if let Some((max_interrupts, s_mode_contexts)) = get_plic_config_from_fdt(device.name()) {
-            crate::early_println!(
+            crate::println!(
                 "[interrupt] PLIC: FDT config found - ndev={}, contexts={:?}",
                 max_interrupts,
                 s_mode_contexts
@@ -434,24 +462,25 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
             ))
         } else {
             // Fallback to hardcoded values (TCG-style: M+S per hart)
-            crate::early_println!(
-                "[interrupt] PLIC: Using default config (1023 interrupts, 4 contexts)"
+            crate::println!(
+                "[interrupt] PLIC: Using default config (1023 interrupts, MAX_NUM_CPUS contexts)"
             );
-            Box::new(Plic::new(base_addr, 1023, 4))
+            Box::new(Plic::new(
+                base_addr,
+                1023,
+                crate::environment::MAX_NUM_CPUS as CpuId,
+            ))
         };
 
-    match InterruptManager::global()
-        .lock()
-        .register_external_controller(controller)
-    {
+    match crate::interrupt::InterruptManager::global().register_external_controller(controller) {
         Ok(_) => {
-            crate::early_println!(
+            crate::println!(
                 "[interrupt] PLIC registered at base address: {:#x}",
                 base_addr
             );
         }
         Err(e) => {
-            crate::early_println!("[interrupt] Failed to register PLIC: {}", e);
+            crate::println!("[interrupt] Failed to register PLIC: {}", e);
             return Err("Failed to register PLIC");
         }
     }

@@ -1,0 +1,9 @@
+[package]
+name = "test-pkg"
+version = "1.0.0"
+description = "Test package for SCPM"
+author = "Scarlet Team"
+architecture = "any"
+binaries = []
+libraries = []
+dependencies = []

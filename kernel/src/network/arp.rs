@@ -3,17 +3,17 @@
 //! This module provides ARP implementation for resolving IP addresses to MAC addresses.
 //! It implements the NetworkLayer trait and manages an ARP cache.
 
+use crate::sync::{IrqRwSpinLock, IrqSpinLock};
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, Ordering};
-use spin::{Mutex, RwLock};
 
-use crate::early_println;
 use crate::network::ipv4::Ipv4Address;
 use crate::network::protocol_stack::get_network_manager;
 use crate::network::protocol_stack::{LayerContext, NetworkLayer, NetworkLayerStats};
 use crate::network::socket::SocketError;
+use crate::println;
 
 /// ARP operation types
 pub mod operation {
@@ -84,12 +84,28 @@ impl ArpPacket {
     }
 
     /// Create an ARP reply
-    pub fn reply(sender_mac: [u8; 6], sender_ip: [u8; 4], target_mac: [u8; 6]) -> Self {
+    ///
+    /// # Arguments
+    ///
+    /// * `sender_mac` - Hardware address being advertised by the reply.
+    /// * `sender_ip` - Protocol address being advertised by the reply.
+    /// * `target_mac` - Hardware address of the host that sent the request.
+    /// * `target_ip` - Protocol address of the host that sent the request.
+    ///
+    /// # Returns
+    ///
+    /// An ARP reply addressed to the requesting host.
+    pub fn reply(
+        sender_mac: [u8; 6],
+        sender_ip: [u8; 4],
+        target_mac: [u8; 6],
+        target_ip: [u8; 4],
+    ) -> Self {
         let mut packet = Self::new(operation::REPLY);
         packet.sender_mac = sender_mac;
         packet.sender_ip = sender_ip;
         packet.target_mac = target_mac;
-        packet.target_ip = sender_ip; // Target IP = sender IP in reply
+        packet.target_ip = target_ip;
         packet
     }
 
@@ -202,7 +218,7 @@ struct ArpPendingEntry {
     /// Cache entry
     entry: ArpCacheEntry,
     /// Packets waiting for this ARP resolution
-    packet_queue: Mutex<Vec<Vec<u8>>>,
+    packet_queue: IrqSpinLock<Vec<Vec<u8>>>,
 }
 
 /// ARP cache key: (interface_name, IP as u32)
@@ -224,15 +240,15 @@ type ArpPendingKey = (alloc::string::String, u32);
 /// - MAC/IP addresses are obtained from EthernetLayer/Ipv4Layer
 pub struct ArpLayer {
     /// ARP cache: (interface_name, IP) -> entry
-    cache: RwLock<BTreeMap<ArpCacheKey, ArpCacheEntry>>,
+    cache: IrqRwSpinLock<BTreeMap<ArpCacheKey, ArpCacheEntry>>,
     /// Pending ARP resolutions: (interface_name, IP) -> pending entry
-    pending: RwLock<BTreeMap<ArpPendingKey, ArpPendingEntry>>,
+    pending: IrqRwSpinLock<BTreeMap<ArpPendingKey, ArpPendingEntry>>,
     /// Packet timeout (in ticks)
     timeout_ticks: u64,
     /// Cache timeout (in ticks)
     cache_timeout: u64,
     /// Statistics
-    stats: RwLock<NetworkLayerStats>,
+    stats: IrqRwSpinLock<NetworkLayerStats>,
     /// Counter for packet queueing
     packet_counter: AtomicU32,
 }
@@ -241,11 +257,11 @@ impl ArpLayer {
     /// Create a new ARP layer
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
-            cache: RwLock::new(BTreeMap::new()),
-            pending: RwLock::new(BTreeMap::new()),
+            cache: IrqRwSpinLock::new(BTreeMap::new()),
+            pending: IrqRwSpinLock::new(BTreeMap::new()),
             timeout_ticks: 1000,  // 1 second
             cache_timeout: 60000, // 1 minute
-            stats: RwLock::new(NetworkLayerStats::default()),
+            stats: IrqRwSpinLock::new(NetworkLayerStats::default()),
             packet_counter: AtomicU32::new(0),
         })
     }
@@ -400,7 +416,7 @@ impl ArpLayer {
         arp_packet.sender_mac = local_mac;
 
         let target_ip_bytes = target_ip.0;
-        early_println!(
+        println!(
             "[ARP] Sending request for {}.{}.{}.{} via {}",
             target_ip_bytes[0],
             target_ip_bytes[1],
@@ -416,7 +432,7 @@ impl ArpLayer {
             pending_key,
             ArpPendingEntry {
                 entry: ArpCacheEntry::pending(target_ip),
-                packet_queue: Mutex::new(Vec::new()),
+                packet_queue: IrqSpinLock::new(Vec::new()),
             },
         );
         drop(pending);
@@ -499,12 +515,15 @@ impl ArpLayer {
 
             // If we had queued packets for this sender, flush them now
             let pending_key = (iface.clone(), u32::from_be_bytes(sender_ip.0));
-            let mut pending = self.pending.write();
-            if let Some(pending_entry) = pending.remove(&pending_key) {
-                let mut queue = pending_entry.packet_queue.lock();
+            let pending_entry = self.pending.write().remove(&pending_key);
+            if let Some(pending_entry) = pending_entry {
+                let queued_packets = {
+                    let mut queue = pending_entry.packet_queue.lock();
+                    core::mem::take(&mut *queue)
+                };
                 if let Some(eth_layer) = get_network_manager().get_layer("ethernet") {
                     if let Some(src_mac) = local_mac {
-                        for packet_bytes in queue.drain(..) {
+                        for packet_bytes in queued_packets {
                             let mut eth_context = LayerContext::new();
                             eth_context.set("eth_dst_mac", &arp_packet.sender_mac);
                             eth_context.set("eth_src_mac", &src_mac);
@@ -514,7 +533,6 @@ impl ArpLayer {
                     }
                 }
             }
-            drop(pending);
 
             // Check if target IP is one of our local IPs on this interface
             let is_for_us = local_ip.map(|ip| ip == target_ip).unwrap_or(false);
@@ -522,10 +540,15 @@ impl ArpLayer {
             if is_for_us {
                 if let (Some(my_mac), Some(my_ip)) = (local_mac, local_ip) {
                     // Request is for us - send reply
-                    let reply = ArpPacket::reply(my_mac, my_ip.0, arp_packet.sender_mac);
+                    let reply = ArpPacket::reply(
+                        my_mac,
+                        my_ip.0,
+                        arp_packet.sender_mac,
+                        arp_packet.sender_ip,
+                    );
 
                     let sender_ip_bytes = sender_ip.0;
-                    early_println!(
+                    println!(
                         "[ARP] Received request from {}.{}.{}.{} on {}, replying",
                         sender_ip_bytes[0],
                         sender_ip_bytes[1],
@@ -560,14 +583,14 @@ impl ArpLayer {
             if !is_from_us {
                 // Check if we have a pending request for this IP on this interface
                 let pending_key = (iface.clone(), u32::from_be_bytes(sender_ip.0));
-                let mut pending = self.pending.write();
+                let pending_entry = self.pending.write().remove(&pending_key);
 
-                if let Some(pending_entry) = pending.remove(&pending_key) {
+                if let Some(pending_entry) = pending_entry {
                     // Update cache with resolved MAC
                     self.add_entry_on_interface(&iface, sender_ip, arp_packet.sender_mac);
 
                     let sender_ip_bytes = sender_ip.0;
-                    early_println!(
+                    println!(
                         "[ARP] Received reply for {}.{}.{}.{} -> {:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X} on {}",
                         sender_ip_bytes[0],
                         sender_ip_bytes[1],
@@ -583,10 +606,13 @@ impl ArpLayer {
                     );
 
                     // Send queued packets
-                    let mut queue = pending_entry.packet_queue.lock();
-                    let queued_count = queue.len();
+                    let queued_packets = {
+                        let mut queue = pending_entry.packet_queue.lock();
+                        core::mem::take(&mut *queue)
+                    };
+                    let queued_count = queued_packets.len();
                     if queued_count > 0 {
-                        early_println!(
+                        println!(
                             "[ARP] Flushing {} queued packet(s) to {:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
                             queued_count,
                             arp_packet.sender_mac[0],
@@ -599,7 +625,7 @@ impl ArpLayer {
                     }
                     if let Some(eth_layer) = get_network_manager().get_layer("ethernet") {
                         if let Some(src_mac) = local_mac {
-                            for packet_bytes in queue.drain(..) {
+                            for packet_bytes in queued_packets {
                                 let mut eth_context = LayerContext::new();
                                 eth_context.set("eth_dst_mac", &arp_packet.sender_mac);
                                 eth_context.set("eth_src_mac", &src_mac);
@@ -610,7 +636,7 @@ impl ArpLayer {
                                     &crate::network::ethernet::ether_type::IPV4.to_be_bytes(),
                                 );
 
-                                early_println!(
+                                println!(
                                     "[ARP] Sending queued packet ({} bytes) via {}",
                                     packet_bytes.len(),
                                     iface
@@ -622,7 +648,7 @@ impl ArpLayer {
                 } else {
                     // Not in pending list, but cache the reply anyway
                     let sender_ip_bytes = sender_ip.0;
-                    early_println!(
+                    println!(
                         "[ARP] Received unsolicited reply for {}.{}.{}.{} on {}",
                         sender_ip_bytes[0],
                         sender_ip_bytes[1],
@@ -632,8 +658,6 @@ impl ArpLayer {
                     );
                     self.add_entry_on_interface(&iface, sender_ip, arp_packet.sender_mac);
                 }
-
-                drop(pending);
 
                 let mut stats = self.stats.write();
                 stats.packets_received += 1;
@@ -668,12 +692,9 @@ impl ArpLayer {
             // Pending entry doesn't exist yet - create one with this packet
             // This can happen due to timing issues
             let ip_bytes = ip_address.0;
-            early_println!(
+            println!(
                 "[ARP] Creating pending entry for {}.{}.{}.{} to queue packet",
-                ip_bytes[0],
-                ip_bytes[1],
-                ip_bytes[2],
-                ip_bytes[3]
+                ip_bytes[0], ip_bytes[1], ip_bytes[2], ip_bytes[3]
             );
             let mut queue = Vec::new();
             queue.push(packet);
@@ -681,7 +702,7 @@ impl ArpLayer {
                 pending_key,
                 ArpPendingEntry {
                     entry: ArpCacheEntry::pending(ip_address),
-                    packet_queue: Mutex::new(queue),
+                    packet_queue: IrqSpinLock::new(queue),
                 },
             );
         }
@@ -728,9 +749,11 @@ impl NetworkLayer for ArpLayer {
     }
 
     fn receive(&self, packet: &[u8], _context: Option<&LayerContext>) -> Result<(), SocketError> {
-        let mut stats = self.stats.write();
-        stats.packets_received += 1;
-        stats.bytes_received += packet.len() as u64;
+        {
+            let mut stats = self.stats.write();
+            stats.packets_received += 1;
+            stats.bytes_received += packet.len() as u64;
+        }
 
         self.receive_packet(packet)
     }
@@ -771,13 +794,17 @@ mod tests {
     fn test_arp_packet_reply() {
         let sender_mac = [0x00, 0x11, 0x22, 0x33, 0x44, 0x55];
         let sender_ip = [192, 168, 1, 1];
+        let target_mac = [0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb];
+        let target_ip = [192, 168, 1, 100];
 
-        let packet = ArpPacket::reply(sender_mac, sender_ip, sender_mac);
+        let packet = ArpPacket::reply(sender_mac, sender_ip, target_mac, target_ip);
 
         assert!(!packet.is_request());
         assert!(packet.is_reply());
         assert_eq!(packet.sender_mac, sender_mac);
-        assert_eq!(packet.target_mac, sender_mac);
+        assert_eq!(packet.sender_ip, sender_ip);
+        assert_eq!(packet.target_mac, target_mac);
+        assert_eq!(packet.target_ip, target_ip);
         let operation_value = unsafe { core::ptr::addr_of!(packet.operation).read_unaligned() };
         assert_eq!(operation_value, operation::REPLY);
     }
@@ -786,9 +813,10 @@ mod tests {
     fn test_arp_packet_serialization() {
         let sender_mac = [0x00, 0x11, 0x22, 0x33, 0x44, 0x55];
         let sender_ip = [192, 168, 1, 1];
+        let target_mac = [0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb];
         let target_ip = [192, 168, 1, 2];
 
-        let packet = ArpPacket::reply(sender_mac, sender_ip, sender_mac);
+        let packet = ArpPacket::reply(sender_mac, sender_ip, target_mac, target_ip);
         let bytes = packet.to_bytes();
 
         assert_eq!(bytes.len(), 28);
@@ -799,16 +827,18 @@ mod tests {
         assert_eq!(&bytes[6..8], operation::REPLY.to_be_bytes()); // operation
         assert_eq!(&bytes[8..14], &sender_mac); // sender_mac
         assert_eq!(&bytes[14..18], &sender_ip); // sender_ip
-        assert_eq!(&bytes[18..24], &sender_mac); // target_mac
-        assert_eq!(&bytes[24..28], &sender_ip); // target_ip
+        assert_eq!(&bytes[18..24], &target_mac); // target_mac
+        assert_eq!(&bytes[24..28], &target_ip); // target_ip
     }
 
     #[test_case]
     fn test_arp_packet_parsing() {
         let sender_mac = [0x00, 0x11, 0x22, 0x33, 0x44, 0x55];
         let sender_ip = [192, 168, 1, 1];
+        let target_mac = [0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb];
+        let target_ip = [192, 168, 1, 100];
 
-        let original = ArpPacket::reply(sender_mac, sender_ip, sender_mac);
+        let original = ArpPacket::reply(sender_mac, sender_ip, target_mac, target_ip);
         let bytes = original.to_bytes();
 
         let parsed = ArpPacket::from_bytes(&bytes).unwrap();

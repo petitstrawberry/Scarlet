@@ -7,10 +7,10 @@
 //! - Subscription: Channel-based pub/sub delivery
 //! - Group: Broadcast delivery to multiple targets
 
+use crate::sync::{IrqSpinLock, Once};
 use alloc::collections::BTreeMap;
 use alloc::{collections::VecDeque, format, string::String, sync::Arc, vec::Vec};
 use hashbrown::HashMap;
-use spin::Mutex;
 
 /// Type alias for task identifiers
 pub type TaskId = u32;
@@ -106,19 +106,40 @@ pub enum EventContent {
 /// different operating systems (Linux signals, Windows events, etc.)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProcessControlType {
-    Terminate,  // Graceful termination
-    Kill,       // Force termination
-    Stop,       // Suspend execution
-    Continue,   // Resume execution
-    Interrupt,  // User interrupt (Ctrl+C)
-    Quit,       // Quit with core dump
-    Hangup,     // Terminal hangup
-    ChildExit,  // Child process exited
-    PipeBroken, // Broken pipe
-    Alarm,      // Timer alarm
-    IoReady,    // I/O ready
-    User(u32),  // User-defined control signal (0-65535)
-                // Add more as needed
+    Terminate,      // Graceful termination
+    Kill,           // Force termination
+    Stop,           // Suspend execution
+    Continue,       // Resume execution
+    Interrupt,      // User interrupt (Ctrl+C)
+    Quit,           // Quit with core dump
+    TerminalStop,   // Interactive terminal stop (Ctrl+Z)
+    TerminalInput,  // Background terminal read
+    TerminalOutput, // Background terminal write
+    WindowChange,   // Terminal window size changed
+    Hangup,         // Terminal hangup
+    ChildExit,      // Child process exited
+    PipeBroken,     // Broken pipe
+    Alarm,          // Timer alarm
+    IoReady,        // I/O ready
+    User(u32),      // User-defined control signal (0-65535)
+                    // Add more as needed
+}
+
+impl ProcessControlType {
+    /// Return whether this control type stops task execution until continued.
+    ///
+    /// Stop-class controls share job-control semantics: a later Continue
+    /// cancels a pending stop, and a later stop cancels a pending Continue.
+    ///
+    /// # Returns
+    ///
+    /// `true` for Stop, TerminalStop, TerminalInput, and TerminalOutput.
+    pub const fn is_stop_class(self) -> bool {
+        matches!(
+            self,
+            Self::Stop | Self::TerminalStop | Self::TerminalInput | Self::TerminalOutput
+        )
+    }
 }
 
 /// Message categories (for structured communication)
@@ -280,6 +301,11 @@ impl EventFilter {
                                         ProcessControlType::Stop => 3,
                                         ProcessControlType::Continue => 4,
                                         ProcessControlType::Interrupt => 7,
+                                        ProcessControlType::Quit => 8,
+                                        ProcessControlType::TerminalStop => 9,
+                                        ProcessControlType::TerminalInput => 10,
+                                        ProcessControlType::TerminalOutput => 11,
+                                        ProcessControlType::WindowChange => 12,
                                         _ => 0,
                                     };
                                     type_id == *content_id
@@ -492,10 +518,55 @@ impl TaskEventQueue {
         }
     }
 
-    /// Add event to queue, returns true if this was the first event (0->1 transition)
-    fn enqueue(&mut self, event: Event) -> bool {
+    /// Return whether adding `event` would exceed `capacity` after coalescing.
+    ///
+    /// # Arguments
+    ///
+    /// * `capacity` - Maximum number of events permitted in the queue.
+    /// * `event` - Event that may replace conflicting job-control events.
+    ///
+    /// # Returns
+    ///
+    /// `true` if the queue would exceed `capacity` after the event is added.
+    pub fn would_exceed_capacity(&self, capacity: usize, event: &Event) -> bool {
+        let retained_count = self.total_count - self.superseded_event_count(event);
+        retained_count.saturating_add(1) > capacity
+    }
+
+    /// Return whether a Continue event is queued for this task.
+    ///
+    /// Stop handlers hold the event-queue lock while checking this so a
+    /// concurrent Continue either cancels the stop before it blocks the task,
+    /// or observes the blocked state and wakes the task.
+    pub(crate) fn has_pending_continue(&self) -> bool {
+        self.events.values().any(|queue| {
+            queue.iter().any(|event| {
+                matches!(
+                    event.content,
+                    EventContent::ProcessControl(ProcessControlType::Continue)
+                )
+            })
+        })
+    }
+
+    /// Return whether any process-control event is queued for this task.
+    ///
+    /// Interruptible wait registration checks this while holding the event
+    /// queue lock so delivery cannot race a running task into a missed sleep.
+    pub(crate) fn has_pending_process_control(&self) -> bool {
+        self.events.values().any(|queue| {
+            queue
+                .iter()
+                .any(|event| matches!(event.content, EventContent::ProcessControl(_)))
+        })
+    }
+
+    /// Add event to queue, returning whether this was the first event (0->1 transition).
+    pub fn enqueue(&mut self, event: Event) -> bool {
         let was_empty = self.total_count == 0;
         let priority = event.metadata.priority;
+
+        self.remove_superseded_events(&event);
 
         self.events
             .entry(priority)
@@ -541,48 +612,89 @@ impl TaskEventQueue {
     pub fn len(&self) -> usize {
         self.total_count
     }
+
+    fn superseded_event_count(&self, incoming: &Event) -> usize {
+        self.events
+            .values()
+            .map(|queue| {
+                queue
+                    .iter()
+                    .filter(|queued| Self::is_superseded_by(incoming, queued))
+                    .count()
+            })
+            .sum()
+    }
+
+    fn remove_superseded_events(&mut self, incoming: &Event) {
+        let mut removed_count = 0;
+        self.events.retain(|_, queue| {
+            let previous_len = queue.len();
+            queue.retain(|queued| !Self::is_superseded_by(incoming, queued));
+            removed_count += previous_len - queue.len();
+            !queue.is_empty()
+        });
+        self.total_count -= removed_count;
+    }
+
+    fn is_superseded_by(incoming: &Event, queued: &Event) -> bool {
+        let (
+            EventContent::ProcessControl(incoming_type),
+            EventContent::ProcessControl(queued_type),
+        ) = (&incoming.content, &queued.content)
+        else {
+            return false;
+        };
+
+        match incoming_type {
+            ProcessControlType::Continue => queued_type.is_stop_class(),
+            control_type if control_type.is_stop_class() => {
+                *queued_type == ProcessControlType::Continue
+            }
+            _ => false,
+        }
+    }
 }
 
 /// Event Manager - Main implementation of the event system
 pub struct EventManager {
     /// Task group memberships
-    groups: Mutex<HashMap<GroupId, Vec<u32>>>,
+    groups: IrqSpinLock<HashMap<GroupId, Vec<u32>>>,
     /// Session memberships
-    sessions: Mutex<HashMap<SessionId, Vec<u32>>>,
+    sessions: IrqSpinLock<HashMap<SessionId, Vec<u32>>>,
     /// Named/custom group memberships
-    named_groups: Mutex<HashMap<String, Vec<u32>>>,
+    named_groups: IrqSpinLock<HashMap<String, Vec<u32>>>,
 
     /// Delivery configurations per task
-    configs: Mutex<HashMap<u32, DeliveryConfig>>,
+    configs: IrqSpinLock<HashMap<u32, DeliveryConfig>>,
 
     /// Task-specific event filters (handler_id, filter)
-    task_filters: Mutex<HashMap<u32, Vec<(usize, EventFilter)>>>,
+    task_filters: IrqSpinLock<HashMap<u32, Vec<(usize, EventFilter)>>>,
 
     /// Next event ID
     #[allow(dead_code)]
-    next_event_id: Mutex<u64>,
+    next_event_id: IrqSpinLock<u64>,
 
     /// Channel registry - EventManager only manages channels, channels manage their own subscriptions
-    channels: Mutex<HashMap<String, Arc<EventChannelObject>>>,
+    channels: IrqSpinLock<HashMap<String, Arc<EventChannelObject>>>,
 }
 
 impl EventManager {
     /// Create a new EventManager
     pub fn new() -> Self {
         Self {
-            groups: Mutex::new(HashMap::new()),
-            sessions: Mutex::new(HashMap::new()),
-            named_groups: Mutex::new(HashMap::new()),
-            configs: Mutex::new(HashMap::new()),
-            task_filters: Mutex::new(HashMap::new()),
-            next_event_id: Mutex::new(1),
-            channels: Mutex::new(HashMap::new()),
+            groups: IrqSpinLock::new(HashMap::new()),
+            sessions: IrqSpinLock::new(HashMap::new()),
+            named_groups: IrqSpinLock::new(HashMap::new()),
+            configs: IrqSpinLock::new(HashMap::new()),
+            task_filters: IrqSpinLock::new(HashMap::new()),
+            next_event_id: IrqSpinLock::new(1),
+            channels: IrqSpinLock::new(HashMap::new()),
         }
     }
 
     /// Get the global EventManager instance
     pub fn get_manager() -> &'static EventManager {
-        static INSTANCE: spin::once::Once<EventManager> = spin::once::Once::new();
+        static INSTANCE: Once<EventManager> = Once::new();
         INSTANCE.call_once(|| EventManager::new())
     }
 
@@ -597,8 +709,7 @@ impl EventManager {
         {
             let cpu = crate::arch::get_cpu();
             let cpu_id = cpu.get_cpuid();
-            let sched = crate::sched::scheduler::get_scheduler();
-            if let Some(task) = sched.get_current_task(cpu_id) {
+            if let Some(task) = crate::sched::scheduler::current_task(cpu_id) {
                 return Some(task.get_id() as u32);
             }
             None
@@ -649,7 +760,7 @@ impl EventManager {
             event.metadata.sender = self.get_current_task_id();
         }
         // Use kernel timer tick as timestamp source
-        event.metadata.timestamp = crate::timer::get_tick();
+        event.metadata.timestamp = crate::timer::get_time_ns();
 
         match event.delivery.clone() {
             EventDelivery::Direct {
@@ -873,7 +984,7 @@ impl EventManager {
         match policy {
             FailurePolicy::Ignore => { /* do nothing */ }
             FailurePolicy::Log => {
-                crate::early_println!(
+                crate::println!(
                     "[EventManager] Delivery failure: {:?}, sender={:?}, delivery={:?}",
                     err,
                     sender,
@@ -894,15 +1005,12 @@ impl EventManager {
                     let _ = self.deliver_to_task(sid, notice);
                 } else {
                     // Fall back to logging when there is no sender
-                    crate::early_println!(
-                        "[EventManager] Delivery failure without sender: {:?}",
-                        err
-                    );
+                    crate::println!("[EventManager] Delivery failure without sender: {:?}", err);
                 }
             }
             FailurePolicy::SystemEvent => {
                 // For now, log the failure to avoid recursive broadcasts. Can be expanded later.
-                crate::early_println!(
+                crate::println!(
                     "[EventManager] SystemEvent policy: delivery failure: {:?}, sender={:?}",
                     err,
                     sender
@@ -996,24 +1104,38 @@ impl EventManager {
     ) -> Result<(), EventError> {
         match group_target {
             GroupTarget::TaskGroup(group_id) => {
+                let mut targets = alloc::vec::Vec::new();
+
                 let groups = self.groups.lock();
                 if let Some(members) = groups.get(group_id) {
-                    let targets: alloc::vec::Vec<u32> = members.iter().cloned().collect();
-                    drop(groups);
-                    for &task_id in &targets {
-                        if let Err(e) = self.deliver_to_task(task_id, event.clone()) {
-                            self.handle_delivery_failure(event.metadata.sender, &e, &event);
+                    targets.extend(members.iter().copied());
+                }
+                drop(groups);
+
+                for task_id in crate::sched::scheduler::get_all_task_ids() {
+                    if let Some(task) = crate::sched::scheduler::get_task_by_id(task_id) {
+                        if task.get_process_group_id() == *group_id as usize {
+                            let task_id = task_id as u32;
+                            if !targets.contains(&task_id) {
+                                targets.push(task_id);
+                            }
                         }
                     }
-                    Ok(())
-                } else {
-                    Err(EventError::GroupNotFound)
                 }
+
+                if targets.is_empty() {
+                    return Err(EventError::GroupNotFound);
+                }
+
+                for &task_id in &targets {
+                    if let Err(e) = self.deliver_to_task(task_id, event.clone()) {
+                        self.handle_delivery_failure(event.metadata.sender, &e, &event);
+                    }
+                }
+                Ok(())
             }
             GroupTarget::AllTasks => {
-                let sched = crate::sched::scheduler::get_scheduler();
-                let all_ids: alloc::vec::Vec<u32> = sched
-                    .get_all_task_ids()
+                let all_ids: alloc::vec::Vec<u32> = crate::sched::scheduler::get_all_task_ids()
                     .into_iter()
                     .map(|x| x as u32)
                     .collect();
@@ -1065,9 +1187,7 @@ impl EventManager {
         _reliable: bool,
     ) -> Result<(), EventError> {
         // broadcast to every task in the system
-        let sched = crate::sched::scheduler::get_scheduler();
-        let all_ids: alloc::vec::Vec<u32> = sched
-            .get_all_task_ids()
+        let all_ids: alloc::vec::Vec<u32> = crate::sched::scheduler::get_all_task_ids()
             .into_iter()
             .map(|x| x as u32)
             .collect();
@@ -1082,9 +1202,13 @@ impl EventManager {
     /// Deliver event to a specific task
     #[cfg(not(test))]
     pub fn deliver_to_task(&self, task_id: u32, event: Event) -> Result<(), EventError> {
+        let is_force_kill = matches!(
+            event.content,
+            EventContent::ProcessControl(ProcessControlType::Kill)
+        );
         // Check if the event matches any of the task's filters
         let task_filters = self.task_filters.lock();
-        if let Some(filters) = task_filters.get(&task_id) {
+        if !is_force_kill && let Some(filters) = task_filters.get(&task_id) {
             // If task has filters, check if event matches any of them
             if !filters.is_empty() {
                 let matches = filters.iter().any(|(_, filter)| filter.matches(&event));
@@ -1098,17 +1222,29 @@ impl EventManager {
         drop(task_filters); // Release the lock early
 
         // Get the task and deliver event to its local queue
-        if let Some(task) =
-            crate::sched::scheduler::get_scheduler().get_task_by_id(task_id as usize)
-        {
+        if let Some(task) = crate::sched::scheduler::get_task_by_id(task_id as usize) {
+            // Kill is unmaskable. Re-enable event dispatch before queueing it
+            // so a task cannot make itself immune with disable_events().
+            if is_force_kill {
+                task.enable_events();
+            }
             // Enforce buffer size from the target task's config
             let cfg = self.get_task_config_or_default(task_id);
             let mut queue = task.event_queue.lock();
-            if queue.len() >= cfg.buffer_size {
+            if !is_force_kill && queue.would_exceed_capacity(cfg.buffer_size, &event) {
                 return Err(EventError::BufferFull);
             }
             // Enqueue the event since it passed filtering and buffer check
+            let should_wake = matches!(event.content, EventContent::ProcessControl(_))
+                && matches!(
+                    task.get_state(),
+                    crate::task::TaskState::Blocked(crate::task::BlockedType::Interruptible)
+                );
             queue.enqueue(event);
+            drop(queue);
+            if should_wake {
+                crate::sched::scheduler::wake_task(task_id as usize);
+            }
             Ok(())
         } else {
             Err(EventError::TargetNotFound)
@@ -1125,9 +1261,7 @@ impl EventManager {
     /// This method is deprecated - tasks now process events directly via process_pending_events()
     #[deprecated(note = "Use Task.process_pending_events() instead")]
     pub fn dequeue_event_for_task(&self, task_id: u32) -> Option<Event> {
-        if let Some(task) =
-            crate::sched::scheduler::get_scheduler().get_task_by_id(task_id as usize)
-        {
+        if let Some(task) = crate::sched::scheduler::get_task_by_id(task_id as usize) {
             let mut queue = task.event_queue.lock();
             queue.dequeue()
         } else {
@@ -1137,9 +1271,7 @@ impl EventManager {
 
     /// Get the number of pending events for a task
     pub fn get_pending_event_count(&self, task_id: u32) -> usize {
-        if let Some(task) =
-            crate::sched::scheduler::get_scheduler().get_task_by_id(task_id as usize)
-        {
+        if let Some(task) = crate::sched::scheduler::get_task_by_id(task_id as usize) {
             let queue = task.event_queue.lock();
             queue.len()
         } else {
@@ -1149,9 +1281,7 @@ impl EventManager {
 
     /// Check if a task has any pending events
     pub fn has_pending_events(&self, task_id: u32) -> bool {
-        if let Some(task) =
-            crate::sched::scheduler::get_scheduler().get_task_by_id(task_id as usize)
-        {
+        if let Some(task) = crate::sched::scheduler::get_task_by_id(task_id as usize) {
             let queue = task.event_queue.lock();
             !queue.is_empty()
         } else {
@@ -1352,7 +1482,7 @@ impl Event {
 pub struct EventChannelObject {
     name: String,
     /// Channel manages its own subscriptions as EventSubscriptionObjects
-    subscriptions: Mutex<HashMap<String, Arc<EventSubscriptionObject>>>,
+    subscriptions: IrqSpinLock<HashMap<String, Arc<EventSubscriptionObject>>>,
     #[allow(dead_code)]
     manager_ref: &'static EventManager,
 }
@@ -1361,7 +1491,7 @@ impl EventChannelObject {
     pub fn new(name: String) -> Self {
         Self {
             name,
-            subscriptions: Mutex::new(HashMap::new()),
+            subscriptions: IrqSpinLock::new(HashMap::new()),
             manager_ref: EventManager::get_manager(),
         }
     }
@@ -1445,7 +1575,7 @@ pub struct EventSubscriptionObject {
     channel_name: String,
     task_id: u32,
     /// Local registry of filters keyed by handler ID for this subscription
-    filters: Mutex<HashMap<usize, EventFilter>>,
+    filters: IrqSpinLock<HashMap<usize, EventFilter>>,
 }
 
 impl EventSubscriptionObject {
@@ -1454,7 +1584,7 @@ impl EventSubscriptionObject {
             subscription_id,
             channel_name,
             task_id,
-            filters: Mutex::new(HashMap::new()),
+            filters: IrqSpinLock::new(HashMap::new()),
         }
     }
 
@@ -1485,9 +1615,7 @@ impl crate::object::capability::EventReceiver for EventChannelObject {
         // Check if any subscriber task has pending events for THIS channel specifically
         let subscriber_ids = self.get_subscribers();
         for tid in subscriber_ids {
-            if let Some(task) =
-                crate::sched::scheduler::get_scheduler().get_task_by_id(tid as usize)
-            {
+            if let Some(task) = crate::sched::scheduler::get_task_by_id(tid as usize) {
                 let queue = task.event_queue.lock();
                 for (_prio, q) in queue.events.iter() {
                     for ev in q.iter() {
@@ -1507,9 +1635,7 @@ impl crate::object::capability::EventReceiver for EventChannelObject {
 impl crate::object::capability::EventReceiver for EventSubscriptionObject {
     fn has_pending_events(&self) -> bool {
         // Only consider events delivered to this subscription's channel and matching its local filters
-        if let Some(task) =
-            crate::sched::scheduler::get_scheduler().get_task_by_id(self.task_id as usize)
-        {
+        if let Some(task) = crate::sched::scheduler::get_task_by_id(self.task_id as usize) {
             let queue = task.event_queue.lock();
             let channel_name = self.channel_name.as_str();
             // Take a snapshot of local filters
@@ -1596,7 +1722,7 @@ impl crate::object::capability::CloneOps for EventSubscriptionObject {
 
 /// Generate unique event ID
 fn generate_event_id() -> u64 {
-    static COUNTER: Mutex<u64> = Mutex::new(1);
+    static COUNTER: IrqSpinLock<u64> = IrqSpinLock::new(1);
     let mut counter = COUNTER.lock();
     let id = *counter;
     *counter += 1;
@@ -1608,6 +1734,10 @@ mod tests {
     use super::*;
     use crate::object::capability::EventSubscriber;
     use alloc::string::ToString; // bring trait into scope
+
+    fn process_control_event(ptype: ProcessControlType, priority: EventPriority) -> Event {
+        Event::direct_process_control(123, ptype, priority, true)
+    }
 
     #[test_case]
     fn test_event_creation() {
@@ -1881,7 +2011,7 @@ mod tests {
 
         // Add events in non-priority order
         let low_event =
-            Event::direct_process_control(1, ProcessControlType::Stop, EventPriority::Low, true);
+            Event::direct_process_control(1, ProcessControlType::Alarm, EventPriority::Low, true);
         let critical_event = Event::direct_process_control(
             2,
             ProcessControlType::Kill,
@@ -1896,7 +2026,7 @@ mod tests {
         );
         let normal_event = Event::direct_process_control(
             4,
-            ProcessControlType::Continue,
+            ProcessControlType::WindowChange,
             EventPriority::Normal,
             true,
         );
@@ -1925,6 +2055,101 @@ mod tests {
     }
 
     #[test_case]
+    fn test_task_event_queue_continue_supersedes_pending_stop_class_events() {
+        let mut queue = TaskEventQueue::new();
+
+        for control_type in [
+            ProcessControlType::Stop,
+            ProcessControlType::TerminalStop,
+            ProcessControlType::TerminalInput,
+            ProcessControlType::TerminalOutput,
+        ] {
+            queue.enqueue(process_control_event(control_type, EventPriority::Low));
+        }
+        queue.enqueue(process_control_event(
+            ProcessControlType::Interrupt,
+            EventPriority::Critical,
+        ));
+
+        let continue_event =
+            process_control_event(ProcessControlType::Continue, EventPriority::Normal);
+        assert!(!queue.would_exceed_capacity(2, &continue_event));
+        queue.enqueue(continue_event);
+
+        assert_eq!(queue.len(), 2);
+        assert!(matches!(
+            queue.dequeue().unwrap().content,
+            EventContent::ProcessControl(ProcessControlType::Interrupt)
+        ));
+        assert!(matches!(
+            queue.dequeue().unwrap().content,
+            EventContent::ProcessControl(ProcessControlType::Continue)
+        ));
+    }
+
+    #[test_case]
+    fn test_task_event_queue_stop_class_supersedes_pending_continue() {
+        for control_type in [
+            ProcessControlType::Stop,
+            ProcessControlType::TerminalStop,
+            ProcessControlType::TerminalInput,
+            ProcessControlType::TerminalOutput,
+        ] {
+            let mut queue = TaskEventQueue::new();
+            queue.enqueue(process_control_event(
+                ProcessControlType::Continue,
+                EventPriority::Critical,
+            ));
+            queue.enqueue(process_control_event(control_type, EventPriority::Low));
+
+            assert_eq!(queue.len(), 1);
+            assert!(matches!(
+                queue.dequeue().unwrap().content,
+                EventContent::ProcessControl(ptype) if ptype == control_type
+            ));
+        }
+    }
+
+    #[test_case]
+    fn test_task_event_queue_latches_continue_after_stop_is_dequeued() {
+        let mut queue = TaskEventQueue::new();
+        queue.enqueue(process_control_event(
+            ProcessControlType::Stop,
+            EventPriority::High,
+        ));
+        assert!(matches!(
+            queue.dequeue().unwrap().content,
+            EventContent::ProcessControl(ProcessControlType::Stop)
+        ));
+
+        queue.enqueue(process_control_event(
+            ProcessControlType::Continue,
+            EventPriority::High,
+        ));
+
+        assert!(queue.has_pending_continue());
+        assert!(matches!(
+            queue.dequeue().unwrap().content,
+            EventContent::ProcessControl(ProcessControlType::Continue)
+        ));
+    }
+
+    #[test_case]
+    fn test_task_event_queue_reports_pending_process_control() {
+        let mut queue = TaskEventQueue::new();
+        assert!(!queue.has_pending_process_control());
+
+        queue.enqueue(process_control_event(
+            ProcessControlType::Interrupt,
+            EventPriority::High,
+        ));
+        assert!(queue.has_pending_process_control());
+
+        let _ = queue.dequeue();
+        assert!(!queue.has_pending_process_control());
+    }
+
+    #[test_case]
     fn test_event_manager_creation() {
         let manager = EventManager::new();
         assert!(manager.channels.lock().is_empty());
@@ -1940,6 +2165,10 @@ mod tests {
             ProcessControlType::Continue,
             ProcessControlType::Interrupt,
             ProcessControlType::Quit,
+            ProcessControlType::TerminalStop,
+            ProcessControlType::TerminalInput,
+            ProcessControlType::TerminalOutput,
+            ProcessControlType::WindowChange,
             ProcessControlType::Hangup,
             ProcessControlType::ChildExit,
             ProcessControlType::User(0),
@@ -2052,6 +2281,10 @@ mod tests {
             ProcessControlType::Continue,
             ProcessControlType::Interrupt,
             ProcessControlType::Quit,
+            ProcessControlType::TerminalStop,
+            ProcessControlType::TerminalInput,
+            ProcessControlType::TerminalOutput,
+            ProcessControlType::WindowChange,
             ProcessControlType::Hangup,
             ProcessControlType::User(0),
             ProcessControlType::PipeBroken,
@@ -2299,7 +2532,7 @@ mod tests {
         for i in 0..2 {
             let task =
                 crate::task::Task::new(format!("g_sess_{}", i), 1, crate::task::TaskType::Kernel);
-            crate::sched::scheduler::get_scheduler().add_task(task, 0);
+            crate::sched::scheduler::add_task(task, crate::sched::scheduler::select_cpu());
         }
 
         // For tests, get_current_task_id() returns Some(1), so join operations will add task 1

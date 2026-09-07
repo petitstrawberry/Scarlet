@@ -1,0 +1,44 @@
+pub mod reg {
+    pub const X0: u32 = 0;
+    pub const X1: u32 = 1;
+    pub const X2: u32 = 2;
+    pub const X3: u32 = 3;
+    pub const X4: u32 = 4;
+    pub const X5: u32 = 5;
+    pub const X6: u32 = 6;
+    pub const X7: u32 = 7;
+    pub const X8: u32 = 8;
+    pub const X9: u32 = 9;
+    pub const X10: u32 = 10;
+    pub const X11: u32 = 11;
+    pub const X12: u32 = 12;
+    pub const X13: u32 = 13;
+    pub const X14: u32 = 14;
+    pub const X15: u32 = 15;
+    pub const X16: u32 = 16;
+    pub const X17: u32 = 17;
+    pub const X18: u32 = 18;
+    pub const X19: u32 = 19;
+    pub const X20: u32 = 20;
+    pub const X21: u32 = 21;
+    pub const X22: u32 = 22;
+    pub const X23: u32 = 23;
+    pub const X24: u32 = 24;
+    pub const X25: u32 = 25;
+    pub const X26: u32 = 26;
+    pub const X27: u32 = 27;
+    pub const X28: u32 = 28;
+    pub const X29: u32 = 29;
+    pub const X30: u32 = 30;
+    pub const X31: u32 = 31;
+    pub const PC: u32 = 32;
+
+    pub const A0: u32 = X10;
+    pub const A1: u32 = X11;
+    pub const A2: u32 = X12;
+    pub const A3: u32 = X13;
+    pub const A4: u32 = X14;
+    pub const A5: u32 = X15;
+    pub const A6: u32 = X16;
+    pub const A7: u32 = X17;
+}

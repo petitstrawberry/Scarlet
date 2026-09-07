@@ -34,6 +34,10 @@ pub struct XdgToplevel {
     pub min_size: Option<(i32, i32)>,
     /// Maximum size
     pub max_size: Option<(i32, i32)>,
+    /// Whether the compositor has configured maximized state.
+    pub maximized: bool,
+    /// Whether the compositor has configured fullscreen state.
+    pub fullscreen: bool,
 }
 
 impl XdgToplevel {
@@ -44,6 +48,8 @@ impl XdgToplevel {
             app_id: None,
             min_size: None,
             max_size: None,
+            maximized: false,
+            fullscreen: false,
         }
     }
 }
@@ -207,4 +213,12 @@ pub mod xdg_toplevel_request {
 pub mod xdg_toplevel_event {
     pub const CONFIGURE: u16 = 0;
     pub const CLOSE: u16 = 1;
+}
+
+/// Values serialized in the `xdg_toplevel.configure` state array.
+pub mod xdg_toplevel_state {
+    /// The surface is maximized within the compositor workarea.
+    pub const MAXIMIZED: u32 = 1;
+    /// The surface occupies the complete output.
+    pub const FULLSCREEN: u32 = 2;
 }

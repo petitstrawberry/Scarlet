@@ -1,0 +1,18 @@
+[Icon Theme]
+Name=Default
+Comment=Scarlet default desktop icon theme
+Directories=scalable/mimetypes,scalable/places
+
+[scalable/mimetypes]
+Size=48
+Type=Scalable
+MinSize=1
+MaxSize=512
+Context=MimeTypes
+
+[scalable/places]
+Size=48
+Type=Scalable
+MinSize=1
+MaxSize=512
+Context=FileSystems

@@ -1,17 +1,15 @@
 //! Virtio device driver interface module.
 //!
 
-use core::{
-    result::Result,
-    sync::atomic::{AtomicUsize, Ordering},
-};
+use core::{result::Result, sync::atomic::AtomicUsize};
 
-use alloc::{boxed::Box, format, string::ToString, sync::Arc, vec};
+use alloc::{boxed::Box, sync::Arc, vec};
 
 use crate::{
     arch::io_mb,
     device::{
         Device,
+        gpu::{GpuBackend, register_gpu_control_device},
         manager::{DeviceManager, DriverPriority},
         platform::{
             PlatformDeviceDriver, PlatformDeviceInfo, resource::PlatformDeviceResourceType,
@@ -19,19 +17,20 @@ use crate::{
     },
     driver_initcall,
     drivers::{
-        block::virtio_blk::VirtioBlockDevice, graphics::virtio_gpu::VirtioGpuDevice,
-        network::virtio_net::VirtioNetDevice, virtio_input::VirtioInputDevice,
+        block::virtio_blk::VirtioBlockDevice,
+        graphics::virtio_gpu::VirtioGpuDevice,
+        network::virtio_net::VirtioNetDevice,
+        virtio::pci::VirtioPciTransport,
+        virtio::{next_block_device_name, next_net_device_name},
+        virtio_input::VirtioInputDevice,
         virtio_rng::VirtioRngDevice,
+        virtio_snd::{VirtioSndDevice, register_audio_device},
     },
-    early_println,
+    println,
 };
 
-// Static counters for device naming
-static BLOCK_COUNTER: AtomicUsize = AtomicUsize::new(0);
-static NET_COUNTER: AtomicUsize = AtomicUsize::new(0);
-static GPU_COUNTER: AtomicUsize = AtomicUsize::new(0);
+// Static counter for input device naming.
 static INPUT_COUNTER: AtomicUsize = AtomicUsize::new(0);
-static RNG_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 /// Register enum for Virtio devices
 ///
@@ -218,6 +217,12 @@ impl DeviceStatus {
 /// It provides methods for initializing the device, accessing registers,
 /// and performing device operations according to the VirtIO specification.
 pub trait VirtioDevice {
+    /// Return the mapped PCI transport regions when this device is using
+    /// VirtIO PCI instead of VirtIO MMIO.
+    fn pci_transport(&self) -> Option<VirtioPciTransport> {
+        None
+    }
+
     #[cfg(not(debug_assertions))]
     #[inline(never)]
     fn write32_register_slowpath(&self, addr: usize, value: u32) {
@@ -246,7 +251,7 @@ pub trait VirtioDevice {
             let status = self.read32_register(Register::Status);
             let isr = self.read32_register(Register::InterruptStatus);
 
-            crate::early_println!(
+            crate::println!(
                 "[virtio][{}] base={:#x} magic=0x{:08x} ver={} dev_id={} vendor=0x{:08x} status=0x{:02x} isr=0x{:02x}",
                 tag,
                 base,
@@ -268,7 +273,7 @@ pub trait VirtioDevice {
     fn debug_log_status_transition(&self, tag: &'static str, old: u32, new: u32, readback: u32) {
         #[cfg(debug_assertions)]
         {
-            crate::early_println!(
+            crate::println!(
                 "[virtio][{}] status: old=0x{:02x} -> write=0x{:02x} -> readback=0x{:02x}",
                 tag,
                 old,
@@ -297,7 +302,7 @@ pub trait VirtioDevice {
             }
         }
         let final_status = self.read32_register(Register::Status) & 0xff;
-        crate::early_println!(
+        crate::println!(
             "[virtio][{}] reset wait timeout: status=0x{:02x}",
             tag,
             final_status
@@ -319,20 +324,22 @@ pub trait VirtioDevice {
     ///
     /// Returns Ok(negotiated_features) if initialization was successful,
     /// Err message otherwise
-    fn init(&mut self) -> Result<u32, &'static str> {
+    fn init(&mut self) -> Result<u64, &'static str> {
         self.debug_dump_mmio_state("init:entry");
 
-        // Verify device (Magic Value should be "virt")
-        if self.read32_register(Register::MagicValue) != 0x74726976 {
-            self.set_failed();
-            return Err("Invalid Magic Value");
-        }
+        if self.pci_transport().is_none() {
+            // Verify device (Magic Value should be "virt")
+            if self.read32_register(Register::MagicValue) != 0x74726976 {
+                self.set_failed();
+                return Err("Invalid Magic Value");
+            }
 
-        // Check device version
-        let version = self.read32_register(Register::Version);
-        if version != 2 {
-            self.set_failed();
-            return Err("Invalid Version");
+            // Check device version
+            let version = self.read32_register(Register::Version);
+            if version != 2 {
+                self.set_failed();
+                return Err("Invalid Version");
+            }
         }
 
         // Reset device
@@ -374,14 +381,21 @@ pub trait VirtioDevice {
     }
 
     fn is_modern_device(&self) -> bool {
-        self.read32_register(Register::Version) == 2
+        self.pci_transport().is_some() || self.read32_register(Register::Version) == 2
     }
 
     fn supports_feature(&self, feature: u32) -> bool {
         let selector = feature / 32;
         let bit = feature % 32;
-        self.write32_register(Register::DeviceFeaturesSel, selector);
-        let device_features = self.read32_register(Register::DeviceFeatures);
+        let device_features = if let Some(transport) = self.pci_transport() {
+            unsafe {
+                crate::arch::mmio::write32(transport.common_cfg + 0x00, selector);
+                crate::arch::mmio::read32(transport.common_cfg + 0x04)
+            }
+        } else {
+            self.write32_register(Register::DeviceFeaturesSel, selector);
+            self.read32_register(Register::DeviceFeatures)
+        };
         (device_features & (1u32 << bit)) != 0
     }
 
@@ -400,7 +414,7 @@ pub trait VirtioDevice {
         // Spec: wait until the device reports status==0.
         // Use a bounded loop so we never hang permanently.
         if cfg!(debug_assertions) {
-            early_println!("[virtio][reset] waiting for reset completion...");
+            println!("[virtio][reset] waiting for reset completion...");
         }
         self.wait_for_status_zero("reset", 100_000)?;
 
@@ -461,29 +475,40 @@ pub trait VirtioDevice {
     ///
     /// Returns Ok(negotiated_features) if feature negotiation was successful,
     /// Err message otherwise
-    fn negotiate_features(&mut self) -> Result<u32, &'static str> {
+    fn negotiate_features(&mut self) -> Result<u64, &'static str> {
         // Read device features
-        let device_features = self.read32_register(Register::DeviceFeatures);
+        self.write32_register(Register::DeviceFeaturesSel, 0);
+        let device_features0 = self.read32_register(Register::DeviceFeatures);
+        self.write32_register(Register::DeviceFeaturesSel, 1);
+        let device_features1 = self.read32_register(Register::DeviceFeatures);
+        let device_features = u64::from(device_features0) | (u64::from(device_features1) << 32);
+
         // Select supported features
-        let driver_features = self.get_supported_features(device_features);
-        crate::early_println!(
-            "[virtio][feat] device_features=0x{:08x} driver_features=0x{:08x}",
-            device_features,
-            driver_features
+        let driver_features = self.get_supported_features(device_features) & device_features;
+        let driver_features0 = driver_features as u32;
+        let driver_features1 = (driver_features >> 32) as u32;
+        crate::println!(
+            "[virtio][feat] device_features=0x{:08x}:{:08x} driver_features=0x{:08x}:{:08x}",
+            device_features1,
+            device_features0,
+            driver_features1,
+            driver_features0
         );
 
         #[cfg(test)]
         {
-            use crate::early_println;
-            early_println!(
+            use crate::println;
+            println!(
                 "[virtio] Negotiating features: device=0x{:x}, driver=0x{:x}",
-                device_features,
-                driver_features
+                device_features, driver_features
             );
         }
 
         // Write driver features
-        self.write32_register(Register::DriverFeatures, driver_features);
+        self.write32_register(Register::DriverFeaturesSel, 0);
+        self.write32_register(Register::DriverFeatures, driver_features0);
+        self.write32_register(Register::DriverFeaturesSel, 1);
+        self.write32_register(Register::DriverFeatures, driver_features1);
 
         // Set FEATURES_OK status bit
         let mut status = self.read32_register(Register::Status);
@@ -496,11 +521,10 @@ pub trait VirtioDevice {
 
         #[cfg(test)]
         {
-            use crate::early_println;
-            early_println!(
+            use crate::println;
+            println!(
                 "[virtio] Feature negotiation result: success={}, status=0x{:x}",
-                success,
-                final_status
+                success, final_status
             );
         }
 
@@ -523,10 +547,12 @@ pub trait VirtioDevice {
     /// # Returns
     ///
     /// The features supported by the driver
-    fn get_supported_features(&self, device_features: u32) -> u32 {
-        // By default, accept all device features
+    fn get_supported_features(&self, device_features: u64) -> u64 {
+        // By default, preserve the legacy behavior of accepting only the
+        // first 32 feature bits. Device-specific implementations should opt in
+        // to any additional feature bits they actually support.
         // Device-specific implementations should override this
-        device_features
+        device_features & u64::from(u32::MAX)
     }
 
     fn allow_ring_features(&self) -> bool {
@@ -549,6 +575,40 @@ pub trait VirtioDevice {
     fn setup_queue(&mut self, queue_idx: usize, queue_size: usize) -> bool {
         if queue_idx >= self.get_virtqueue_count() {
             return false;
+        }
+
+        if let Some(transport) = self.pci_transport() {
+            let common = transport.common_cfg;
+            unsafe {
+                crate::arch::mmio::write16(common + 0x16, queue_idx as u16);
+                if crate::arch::mmio::read16(common + 0x1c) != 0 {
+                    return false;
+                }
+
+                let queue_size_max = crate::arch::mmio::read16(common + 0x18) as usize;
+                if queue_size == 0 || queue_size > queue_size_max {
+                    return false;
+                }
+
+                let Some(desc_addr) = self.get_queue_desc_addr(queue_idx) else {
+                    return false;
+                };
+                let Some(driver_addr) = self.get_queue_driver_addr(queue_idx) else {
+                    return false;
+                };
+                let Some(device_addr) = self.get_queue_device_addr(queue_idx) else {
+                    return false;
+                };
+
+                crate::arch::mmio::write16(common + 0x18, queue_size as u16);
+                crate::arch::mmio::write64(common + 0x20, desc_addr);
+                crate::arch::mmio::write64(common + 0x28, driver_addr);
+                crate::arch::mmio::write64(common + 0x30, device_addr);
+                crate::arch::mmio::write16(common + 0x1c, 1);
+                crate::arch::io_mb();
+            }
+
+            return !DeviceStatus::Failed.is_set(self.read32_register(Register::Status));
         }
 
         // Select the queue
@@ -629,7 +689,10 @@ pub trait VirtioDevice {
     ///
     /// The configuration value of type T
     fn read_config<T: Sized>(&self, offset: usize) -> T {
-        let addr = self.get_base_addr() + Register::DeviceConfig.offset() + offset;
+        let addr = self
+            .pci_transport()
+            .map(|transport| transport.device_cfg + offset)
+            .unwrap_or_else(|| self.get_base_addr() + Register::DeviceConfig.offset() + offset);
         // Prefer single-instruction sized accesses for MMIO on AArch64/HVF.
         // Fall back to byte-wise access for unusual sizes.
         unsafe {
@@ -672,7 +735,10 @@ pub trait VirtioDevice {
     /// * `offset` - The offset within the configuration space
     /// * `value` - The value to write
     fn write_config<T: Sized>(&self, offset: usize, value: T) {
-        let addr = self.get_base_addr() + Register::DeviceConfig.offset() + offset;
+        let addr = self
+            .pci_transport()
+            .map(|transport| transport.device_cfg + offset)
+            .unwrap_or_else(|| self.get_base_addr() + Register::DeviceConfig.offset() + offset);
         // Prefer single-instruction sized accesses for MMIO on AArch64/HVF.
         // Fall back to byte-wise access for unusual sizes.
         unsafe {
@@ -762,6 +828,19 @@ pub trait VirtioDevice {
         if virtqueue_idx >= self.get_virtqueue_count() {
             panic!("Invalid virtqueue index");
         }
+        if let Some(transport) = self.pci_transport() {
+            io_mb();
+            unsafe {
+                crate::arch::mmio::write16(
+                    transport
+                        .notify_addr(virtqueue_idx)
+                        .unwrap_or(transport.notify_cfg),
+                    virtqueue_idx as u16,
+                );
+            }
+            io_mb();
+            return;
+        }
         // Insert memory barrier before notification
         io_mb();
         self.write32_register(Register::QueueNotify, virtqueue_idx as u32);
@@ -778,6 +857,37 @@ pub trait VirtioDevice {
     ///
     /// The 32-bit value read from the register
     fn read32_register(&self, register: Register) -> u32 {
+        if let Some(transport) = self.pci_transport() {
+            io_mb();
+            let value = unsafe {
+                match register {
+                    Register::MagicValue => 0x74726976,
+                    Register::Version => 2,
+                    Register::DeviceFeatures => {
+                        crate::arch::mmio::read32(transport.common_cfg + 0x04)
+                    }
+                    Register::DriverFeatures => {
+                        crate::arch::mmio::read32(transport.common_cfg + 0x0c)
+                    }
+                    Register::QueueNumMax | Register::QueueNum => {
+                        u32::from(crate::arch::mmio::read16(transport.common_cfg + 0x18))
+                    }
+                    Register::QueueReady => {
+                        u32::from(crate::arch::mmio::read16(transport.common_cfg + 0x1c))
+                    }
+                    Register::InterruptStatus => {
+                        u32::from(crate::arch::mmio::read8(transport.isr_cfg))
+                    }
+                    Register::Status => {
+                        u32::from(crate::arch::mmio::read8(transport.common_cfg + 0x14))
+                    }
+                    Register::DeviceId | Register::VendorId => 0,
+                    _ => 0,
+                }
+            };
+            io_mb();
+            return value;
+        }
         let addr = self.get_base_addr() + register.offset();
         io_mb();
         let val = unsafe { crate::arch::mmio::read32(addr) };
@@ -792,6 +902,38 @@ pub trait VirtioDevice {
     /// * `register` - The register to write to
     /// * `value` - The 32-bit value to write
     fn write32_register(&self, register: Register, value: u32) {
+        if let Some(transport) = self.pci_transport() {
+            io_mb();
+            unsafe {
+                match register {
+                    Register::DeviceFeaturesSel => {
+                        crate::arch::mmio::write32(transport.common_cfg + 0x00, value);
+                    }
+                    Register::DriverFeaturesSel => {
+                        crate::arch::mmio::write32(transport.common_cfg + 0x08, value);
+                    }
+                    Register::DriverFeatures => {
+                        crate::arch::mmio::write32(transport.common_cfg + 0x0c, value);
+                    }
+                    Register::QueueSel => {
+                        crate::arch::mmio::write16(transport.common_cfg + 0x16, value as u16);
+                    }
+                    Register::QueueNum => {
+                        crate::arch::mmio::write16(transport.common_cfg + 0x18, value as u16);
+                    }
+                    Register::QueueReady => {
+                        crate::arch::mmio::write16(transport.common_cfg + 0x1c, value as u16);
+                    }
+                    Register::Status => {
+                        crate::arch::mmio::write8(transport.common_cfg + 0x14, value as u8);
+                    }
+                    Register::InterruptAck => {}
+                    _ => {}
+                }
+            }
+            io_mb();
+            return;
+        }
         let addr = self.get_base_addr() + register.offset();
         // NOTE: Release builds on some environments have shown sensitivity to MMIO
         // sequencing/posted writes. Use a non-inlined slowpath with a readback flush
@@ -809,7 +951,7 @@ pub trait VirtioDevice {
         }
 
         if register == Register::Status && (value & !0xff) != 0 {
-            crate::early_println!(
+            crate::println!(
                 "[virtio][WARN] writing non-8bit value to Status: 0x{:08x} (base={:#x})",
                 value,
                 self.get_base_addr()
@@ -876,6 +1018,7 @@ pub enum VirtioDeviceType {
     Rng = 4,
     GPU = 16,
     Input = 18,
+    Sound = 25,
 }
 
 impl VirtioDeviceType {
@@ -899,6 +1042,7 @@ impl VirtioDeviceType {
             4 => VirtioDeviceType::Rng,
             16 => VirtioDeviceType::GPU,
             18 => VirtioDeviceType::Input,
+            25 => VirtioDeviceType::Sound,
             _ => panic!("Not supported device type"),
         }
     }
@@ -929,7 +1073,7 @@ impl VirtioDeviceCommon {
 }
 
 impl VirtioDevice for VirtioDeviceCommon {
-    fn init(&mut self) -> Result<u32, &'static str> {
+    fn init(&mut self) -> Result<u64, &'static str> {
         // Initialization is not required for the common device
         Ok(0)
     }
@@ -976,7 +1120,14 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         .find(|r| r.res_type == PlatformDeviceResourceType::MEM)
         .ok_or("Memory resource not found")?;
 
-    let base_addr = mem_res.start as usize;
+    let paddr = mem_res.start;
+    let size = mem_res.end - mem_res.start + 1;
+
+    // Map the device's physical MMIO region into the kernel virtual address space.
+    let base_addr = crate::vm::ioremap(paddr, size).map_err(|e| {
+        crate::println!("[Virtio] ioremap({:#x}, {:#x}) failed: {}", paddr, size, e);
+        e
+    })?;
 
     // Create a new Virtio device
     let virtio_device = VirtioDeviceCommon::new(base_addr);
@@ -985,9 +1136,8 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
 
     match device_type {
         VirtioDeviceType::Block => {
-            let id = BLOCK_COUNTER.fetch_add(1, Ordering::SeqCst);
-            let name = format!("vblk{}", id);
-            crate::early_println!(
+            let name = next_block_device_name();
+            crate::println!(
                 "[Virtio] Detected Virtio Block Device at {:#x}, registering as {}",
                 base_addr,
                 name
@@ -996,9 +1146,8 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
             DeviceManager::get_manager().register_device_with_name(name, dev);
         }
         VirtioDeviceType::Net => {
-            let id = NET_COUNTER.fetch_add(1, Ordering::SeqCst);
-            let name = format!("veth{}", id);
-            crate::early_println!(
+            let name = next_net_device_name();
+            crate::println!(
                 "[Virtio] Detected Virtio Network Device at {:#x}, registering as {}",
                 base_addr,
                 name
@@ -1012,40 +1161,57 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
                 .iter()
                 .find(|r| r.res_type == PlatformDeviceResourceType::IRQ)
             {
-                let interrupt_id = irq_resource.start as u32;
-                crate::early_println!("[Virtio] Net device interrupt ID: {}", interrupt_id);
+                let interrupt_id = crate::interrupt::register_and_enable_platform_irq_device(
+                    irq_resource,
+                    dev.clone(),
+                    crate::arch::get_cpu().get_cpuid() as u32,
+                )
+                .map_err(|_| "Failed to register net interrupt")?;
+                crate::println!("[Virtio] Net device interrupt ID: {}", interrupt_id);
 
                 if let Err(e) = dev.enable_interrupts(interrupt_id) {
-                    crate::early_println!("[Virtio] Failed to enable net interrupts: {}", e);
-                } else if let Err(e) = crate::interrupt::InterruptManager::with_manager(|mgr| {
-                    mgr.register_interrupt_device(interrupt_id, dev.clone())
-                }) {
-                    crate::early_println!(
-                        "[Virtio] Failed to register net interrupt device: {}",
-                        e
-                    );
+                    crate::println!("[Virtio] Failed to enable net interrupts: {}", e);
                 } else {
-                    crate::early_println!("[Virtio] Net interrupt device registered");
+                    crate::println!("[Virtio] Net interrupt device registered");
                 }
             } else {
-                crate::early_println!("[Virtio] No interrupt resource found for net device");
+                crate::println!("[Virtio] No interrupt resource found for net device");
             }
 
             DeviceManager::get_manager().register_device_with_name(name, dev);
         }
         VirtioDeviceType::GPU => {
-            let id = GPU_COUNTER.fetch_add(1, Ordering::SeqCst);
-            let name = format!("vfb{}", id);
-            crate::early_println!(
-                "[Virtio] Detected Virtio GPU Device at {:#x}, registering as {}",
+            let dev = Arc::new(VirtioGpuDevice::new(base_addr));
+            if let Some(irq_resource) = device
+                .get_resources()
+                .iter()
+                .find(|resource| resource.res_type == PlatformDeviceResourceType::IRQ)
+            {
+                match crate::interrupt::register_and_enable_platform_irq_device(
+                    irq_resource,
+                    dev.clone(),
+                    crate::arch::get_cpu().get_cpuid() as u32,
+                ) {
+                    Ok(interrupt_id) => dev.enable_interrupts(interrupt_id),
+                    Err(_) => crate::println!(
+                        "[Virtio] GPU IRQ unavailable; using timed completion progress"
+                    ),
+                }
+            }
+            let graphics_dev: Arc<dyn Device> = dev.clone();
+            DeviceManager::get_manager().register_device(graphics_dev);
+
+            let gpu_backend: Arc<dyn GpuBackend> =
+                Arc::new(crate::drivers::graphics::virtio_gpu::VirtioGpuBackend::from_device(&dev));
+            let (_, gpu_name) = register_gpu_control_device(gpu_backend)?;
+            crate::println!(
+                "[Virtio] Detected Virtio GPU Device at {:#x}, registered as {}",
                 base_addr,
-                name
+                gpu_name
             );
-            let dev: Arc<dyn Device> = Arc::new(VirtioGpuDevice::new(base_addr));
-            DeviceManager::get_manager().register_device_with_name(name, dev);
         }
         VirtioDeviceType::Input => {
-            crate::early_println!("[Virtio] Detected Virtio Input Device at {:#x}", base_addr);
+            crate::println!("[Virtio] Detected Virtio Input Device at {:#x}", base_addr);
             // Create VirtIO Input device
             let dev = Arc::new(VirtioInputDevice::new(base_addr));
 
@@ -1055,53 +1221,41 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
                 .iter()
                 .find(|r| r.res_type == PlatformDeviceResourceType::IRQ)
             {
-                let interrupt_id = irq_resource.start as u32;
-                crate::early_println!("[Virtio] Input device interrupt ID: {}", interrupt_id);
+                let interrupt_id = crate::interrupt::register_and_enable_platform_irq_device(
+                    irq_resource,
+                    dev.clone(),
+                    crate::arch::get_cpu().get_cpuid() as u32,
+                )
+                .map_err(|_| "Failed to register input interrupt")?;
+                crate::println!("[Virtio] Input device interrupt ID: {}", interrupt_id);
 
                 // Enable interrupts
                 if let Err(e) = dev.enable_interrupts(interrupt_id) {
-                    crate::early_println!("[Virtio] Failed to enable input interrupts: {}", e);
+                    crate::println!("[Virtio] Failed to enable input interrupts: {}", e);
                 } else {
-                    crate::early_println!(
-                        "[Virtio] Input interrupts enabled (ID: {})",
-                        interrupt_id
-                    );
+                    crate::println!("[Virtio] Input interrupts enabled (ID: {})", interrupt_id);
 
-                    // Register interrupt handler
-                    if let Err(e) = crate::interrupt::InterruptManager::with_manager(|mgr| {
-                        mgr.register_interrupt_device(interrupt_id, dev.clone())
-                    }) {
-                        crate::early_println!(
-                            "[Virtio] Failed to register input interrupt device: {}",
-                            e
-                        );
-                    } else {
-                        crate::early_println!("[Virtio] Input interrupt device registered");
-                    }
+                    crate::println!("[Virtio] Input interrupt device registered");
                 }
             } else {
-                crate::early_println!("[Virtio] No interrupt resource found for input device");
+                crate::println!("[Virtio] No interrupt resource found for input device");
             }
 
             // Keep device alive by registering with DeviceManager
             DeviceManager::get_manager().register_device(dev);
         }
         VirtioDeviceType::Rng => {
-            let id = RNG_COUNTER.fetch_add(1, Ordering::SeqCst);
-            crate::early_println!("[Virtio] Detected Virtio RNG Device at {:#x}", base_addr);
+            crate::println!("[Virtio] Detected Virtio RNG Device at {:#x}", base_addr);
 
             // Create and register the VirtIO RNG device as an entropy source
             let rng_device = Arc::new(VirtioRngDevice::new(base_addr));
             crate::random::RandomManager::register_entropy_source(rng_device);
-
-            // Register the RandomCharDevice as /dev/random (only for the first RNG device)
-            if id == 0 {
-                let random_char_dev: Arc<dyn Device> =
-                    Arc::new(crate::random::RandomCharDevice::new());
-                DeviceManager::get_manager()
-                    .register_device_with_name("random".to_string(), random_char_dev);
-                crate::early_println!("[Virtio] Registered /dev/random character device");
-            }
+        }
+        VirtioDeviceType::Sound => {
+            crate::println!("[Virtio] Detected Virtio Sound Device at {:#x}", base_addr);
+            let backend = Arc::new(VirtioSndDevice::new(base_addr));
+            let name = register_audio_device(backend);
+            crate::println!("[Virtio] Registered sound device {}", name);
         }
         _ => {
             // Unsupported device type

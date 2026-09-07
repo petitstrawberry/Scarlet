@@ -8,33 +8,45 @@ pub mod syscall;
 
 extern crate alloc;
 
+use crate::sync::{IrqRwSpinLock, IrqSpinLock, Mutex};
 use alloc::{
     boxed::Box,
     string::{String, ToString},
-    sync::Arc,
+    sync::{Arc, Weak},
     vec::Vec,
 };
-use core::{cell::UnsafeCell, sync::atomic};
-use spin::{Mutex, RwLock};
+use core::{cell::UnsafeCell, marker::PhantomData, ops::Deref, ptr::NonNull, sync::atomic};
 
-use crate::abi::{AbiModule, scarlet::ScarletAbi};
+use crate::abi::{AbiModule, EventProcessOutcome, scarlet::ScarletAbi};
+use crate::device::char::tty::TtyDevice;
+use crate::sync::Once;
 use crate::sync::waker::Waker;
 use crate::{
     arch::{
-        KernelContext, Trapframe, get_cpu, trap::user::arch_switch_to_user_space, vcpu::Vcpu,
+        Trapframe, context::KernelContext, get_cpu, trap::user::arch_switch_to_user, vcpu::Vcpu,
         vm::alloc_virtual_address_space,
     },
     environment::{
         DEAFAULT_MAX_TASK_DATA_SIZE, DEAFAULT_MAX_TASK_STACK_SIZE, DEAFAULT_MAX_TASK_TEXT_SIZE,
-        KERNEL_VM_STACK_END, PAGE_SIZE, USER_STACK_END,
+        DEFAULT_TIME_SLICE, KERNEL_VM_STACK_END, PAGE_SIZE, USER_STACK_END,
     },
     fs::VfsManager,
     ipc::{EventContent, event::ProcessControlType},
-    mem::page::{Page, allocate_raw_pages, free_boxed_page},
-    object::handle::HandleTable,
-    sched::scheduler::{Scheduler, get_scheduler},
-    timer::{TimerHandler, add_timer, get_tick},
+    mem::page::ContiguousPages,
+    object::{
+        capability::memory_mapping::{
+            anon_owner::ForkCowPageOwner, syscall::reclaim_private_removed_mapping,
+        },
+        handle::HandleTable,
+    },
+    sched::scheduler::{
+        cleanup_zombie, complete_non_current_task_exit, current_task, finalize_zombie,
+        get_all_task_ids, get_task_by_id, release_task_deadline, remove_from_ready_queues,
+        schedule, setup_task_execution, unmark_blocked,
+    },
+    timer::{TimerHandle, TimerHandler, add_timer, get_time_ns, ms_to_ns},
     vm::{
+        addr::{phys_to_virt, virt_to_phys},
         manager::VirtualMemoryManager,
         user_kernel_vm_init, user_vm_init,
         vmem::{MemoryArea, VirtualMemoryMap, VirtualMemoryRegion},
@@ -42,27 +54,322 @@ use crate::{
 };
 use alloc::collections::BTreeMap;
 use core::ops::Range;
-use core::sync::atomic::{AtomicI32, AtomicU8, AtomicU32, AtomicUsize, Ordering};
-use spin::Once;
+use core::sync::atomic::{
+    AtomicBool, AtomicI32, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering,
+};
+
+pub(crate) const INIT_TASK_ID: usize = 1;
+const LOG_EXIT_GROUP_SIBLINGS: bool = false;
+// Keep process heaps virtually contiguous without requiring one equally large
+// physically contiguous PMM allocation. Large image and video buffers can
+// otherwise fail after physical memory becomes fragmented.
+const BRK_PHYSICAL_CHUNK_PAGES: usize = 256;
+// Copy private page allocations eagerly to isolate fork COW ownership and
+// parent page-table invalidation from the Apple SMP hang.
+const DIAGNOSTIC_DISABLE_FORK_COW: bool = false;
+/// Scheduler utilization scale used for task placement hints.
+pub const SCHED_UTIL_SCALE: u32 = 1024;
+const SCHED_UTIL_DECAY_INTERVAL_NS: u64 = 10_000_000;
+const SCHED_UTIL_DECAY_NUM: u32 = 7;
+const SCHED_UTIL_DECAY_DEN: u32 = 8;
+const TASK_CPU_HOG_WINDOW_NS: u64 = 1_000_000_000;
+const TASK_CPU_HOG_THRESHOLD_PER_MILLE: u32 = 990;
+
+/// Load weight for a task at nice 0 (CFS/EEVDF proportional-share base unit).
+///
+/// Combined with [`SCHED_PRIO_TO_WEIGHT`], this drives the EEVDF fair
+/// scheduler's weighted proportional-share invariant: a task at nice `n`
+/// receives `SCHED_PRIO_TO_WEIGHT[(n + 20) as usize] / NICE_0_LOAD` times
+/// the CPU time of a nice-0 peer under equal contention.
+///
+/// The value 1024 is a convention shared with CFS-class schedulers, chosen so
+/// that the smallest weight (nice +19, weight 14) is well above 1 and the
+/// weight ratios are representable with small-integer arithmetic.
+pub const NICE_0_LOAD: u32 = 1024;
+
+/// Nice bounds (inclusive) honoured by [`Task::set_nice`] and the scheduler.
+pub const SCHED_NICE_MIN: i32 = -20;
+pub const SCHED_NICE_MAX: i32 = 19;
+pub(crate) const SCHED_AFFINITY_KIND_ANY: u8 = 0;
+pub(crate) const SCHED_AFFINITY_KIND_SINGLE: u8 = 1;
+pub(crate) const SCHED_AFFINITY_KIND_MASK: u8 = 2;
+
+/// Load weight table indexed by `nice + 20` (i.e. `0..=39`).
+///
+/// Independently derived from the EEVDF/CFS proportional-share principle:
+/// each nice level changes the weight by a factor of approximately 1.25,
+/// giving approximately a `1.25^39` spread between nice −20 and nice +19 before
+/// integer rounding. The values are computed at compile time via
+/// `compute_weight_table`; they are
+/// **not** copied from any other operating system source.
+pub const SCHED_PRIO_TO_WEIGHT: [u32; 40] = compute_weight_table();
+
+/// Independently compute the nice-to-weight mapping from the recurrence:
+///
+/// ```text
+/// weight[nice + 1] = (weight[nice] × 4 + 2) / 5    (toward +19)
+/// weight[nice − 1] = (weight[nice] × 5 + 2) / 4    (toward −20)
+/// ```
+///
+/// starting from `weight[nice = 0] = NICE_0_LOAD = 1024`. The rounding
+/// constant +2 yields round-to-nearest for positive integers.
+///
+/// The recurrence realises the well-known CFS design principle that each
+/// nice priority step corresponds to approximately 25 % change in CPU
+/// entitlement (1.25 = 5/4). No external source code was consulted or
+/// copied in constructing this table.
+const fn compute_weight_table() -> [u32; 40] {
+    let mut table = [0u32; 40];
+    // nice 0 → index 20.
+    table[20] = NICE_0_LOAD;
+
+    // Ascend toward nicer (-1 … -20): multiply by ≈5/4 each step.
+    // Indices 19 … 0.
+    let mut i = 20;
+    while i > 0 {
+        let prev = table[i] as u64;
+        table[i - 1] = ((prev * 5 + 2) / 4) as u32;
+        i -= 1;
+    }
+
+    // Descend toward less nice (+1 … +19): multiply by ≈4/5 each step.
+    // Indices 21 … 39.
+    let mut i = 20;
+    while i < 39 {
+        let prev = table[i] as u64;
+        table[i + 1] = ((prev * 4 + 2) / 5) as u32;
+        i += 1;
+    }
+
+    table
+}
+
+/// Map a nice value in `[SCHED_NICE_MIN..=SCHED_NICE_MAX]` to its load weight.
+///
+/// Values outside the supported range are clamped to the nearest bound, which
+/// matches Linux's behaviour for out-of-range `setpriority` arguments.
+pub const fn nice_to_weight(nice: i32) -> u32 {
+    let idx = if nice < SCHED_NICE_MIN {
+        0
+    } else if nice > SCHED_NICE_MAX {
+        SCHED_PRIO_TO_WEIGHT.len() - 1
+    } else {
+        (nice + SCHED_NICE_MAX + 1) as usize
+    };
+    SCHED_PRIO_TO_WEIGHT[idx]
+}
+
+/// IRQ-masking spin lock type used for the architecture kernel context.
+///
+/// The scheduler needs a stable raw pointer to this context while performing
+/// low-level context switches. `IrqSpinLock` exposes an unsafe `as_mut_ptr()`
+/// for that scheduler-only path, while normal setup code still uses `lock()`.
+pub type KernelContextIrqSpinLock = IrqSpinLock<KernelContext>;
+
+/// Snapshot of task state exposed to user space via the `GetTaskInfo` syscall.
+///
+/// This is a fixed-size, `#[repr(C)]` structure so that the kernel and user
+/// library can agree on the layout without sharing a header.
+///
+/// Kernel and user space must agree on this layout because
+/// `GetTaskInfoList` does not take a per-entry size argument. Append fields
+/// only as part of a coordinated kernel/user ABI update.
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub struct TaskInfo {
+    /// Namespace-local PID visible to user space.
+    pub pid: usize,
+    /// Namespace-local parent PID (0 if none).
+    pub ppid: usize,
+    /// Task state as a discriminant (see `TaskState::to_u8`):
+    ///   0 = NotInitialized, 1 = Ready, 2 = Running,
+    ///   3 = Blocked(Interruptible), 4 = Blocked(Uninterruptible),
+    ///   5 = Zombie, 6 = Terminated.
+    pub state: u8,
+    /// Task type: 0 = Kernel, 1 = User.
+    pub task_type: u8,
+    /// Scheduler CPU where the task is running or queued.
+    ///
+    /// For sleeping tasks, this remains the last scheduler CPU associated with
+    /// the task. `u8::MAX` means no CPU is currently known.
+    pub cpu_id: u8,
+    /// Reserved for future use.
+    pub _reserved: u8,
+    /// Exit status (meaningful only when `state == Zombie`).
+    pub exit_status: i32,
+    /// Thread-group ID (process ID for multi-threaded tasks).
+    pub tgid: usize,
+    /// Null-terminated task name (truncated to fit).
+    pub name: [u8; 64],
+    /// Cumulative CPU time consumed by this task, in nanoseconds.
+    pub cpu_time_ns: u64,
+    /// Measured scheduler utilization in capacity units.
+    pub sched_util_avg: u32,
+    /// Minimum scheduler utilization requested by this task.
+    pub sched_util_min: u32,
+    /// Effective CPU capacity required for placement.
+    pub sched_required_capacity: u32,
+    /// Scheduler core preference hint as a `TaskCorePreference` discriminant.
+    pub core_preference: u8,
+    /// Reserved for future use.
+    pub _reserved2: [u8; 3],
+    /// Number of scheduler-directed migrations for this task.
+    pub sched_migration_count: u64,
+    /// EEVDF nice value in the range -20 through +19.
+    pub sched_nice: i32,
+    /// EEVDF load weight derived from `sched_nice`.
+    pub sched_weight: u32,
+    /// Current EEVDF virtual runtime.
+    pub sched_vruntime: u64,
+    /// Current EEVDF virtual deadline.
+    pub sched_deadline: u64,
+}
+
+impl TaskInfo {
+    /// Maximum task name length (excluding null terminator).
+    pub const NAME_CAP: usize = 63;
+}
+
+/// Version of the task-debug snapshot ABI implemented by the kernel.
+pub const TASK_DEBUG_INFO_VERSION_V1: u16 = 1;
+/// The snapshot contains a valid last-observed instruction address.
+pub const TASK_DEBUG_FLAG_PC_VALID: u32 = 1 << 0;
+/// The last-observed instruction address was sampled in privileged mode.
+pub const TASK_DEBUG_FLAG_PC_PRIVILEGED: u32 = 1 << 1;
+/// The snapshot contains information about a system call entered by the task.
+pub const TASK_DEBUG_FLAG_SYSCALL_VALID: u32 = 1 << 2;
+/// The task has not yet returned from the reported system call.
+pub const TASK_DEBUG_FLAG_SYSCALL_ACTIVE: u32 = 1 << 3;
+/// The task is configured for periodic deadline scheduling.
+pub const TASK_DEBUG_FLAG_DEADLINE: u32 = 1 << 4;
+/// The deadline task has exhausted its current runtime budget.
+pub const TASK_DEBUG_FLAG_DEADLINE_THROTTLED: u32 = 1 << 5;
+/// At least one task-owned software timer is currently registered.
+pub const TASK_DEBUG_FLAG_SOFTWARE_TIMER_ARMED: u32 = 1 << 6;
+/// Deadline state could not be sampled without waiting for its lock.
+pub const TASK_DEBUG_FLAG_DEADLINE_UNAVAILABLE: u32 = 1 << 7;
+
+/// Fixed-layout diagnostic snapshot returned by `GetTaskDebugInfo`.
+///
+/// The debug syscall is available only when the kernel is built with the
+/// `sync-debug` feature. Its caller supplies the expected entry size, allowing
+/// future versions to reject incompatible user-space layouts safely.
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub struct TaskDebugInfo {
+    /// Size of this entry in bytes.
+    pub size: u32,
+    /// ABI version, currently [`TASK_DEBUG_INFO_VERSION_V1`].
+    pub version: u16,
+    /// Task state encoded with [`TaskState::to_u8`].
+    pub state: u8,
+    /// Task type: 0 = kernel, 1 = user.
+    pub task_type: u8,
+    /// Combination of `TASK_DEBUG_FLAG_*` values.
+    pub flags: u32,
+    /// Last scheduler CPU, or `u32::MAX` when unknown.
+    pub cpu_id: u32,
+    /// Namespace-local thread ID.
+    pub pid: usize,
+    /// Namespace-local thread-group ID.
+    pub tgid: usize,
+    /// Most recent instruction address sampled by a timer interrupt.
+    pub observed_pc: u64,
+    /// Most recent system-call number, or `u64::MAX` when unavailable.
+    pub syscall_number: u64,
+    /// User instruction address from which `syscall_number` was entered.
+    pub syscall_pc: u64,
+    /// Cumulative task CPU time in nanoseconds.
+    pub cpu_time_ns: u64,
+}
+
+const _: [(); 64] = [(); core::mem::size_of::<TaskDebugInfo>()];
+
+/// Version of the per-CPU debug snapshot ABI implemented by the kernel.
+pub const CPU_DEBUG_INFO_VERSION_V1: u16 = 1;
+/// The snapshot contains a namespace-visible current task ID.
+pub const CPU_DEBUG_FLAG_CURRENT_TASK_VALID: u16 = 1 << 0;
+/// The CPU's published current task is its idle task.
+pub const CPU_DEBUG_FLAG_IDLE: u16 = 1 << 1;
+/// The CPU has a deferred reschedule request pending.
+pub const CPU_DEBUG_FLAG_PENDING_RESCHEDULE: u16 = 1 << 2;
+/// The CPU's local hardware timer has a programmed deadline.
+pub const CPU_DEBUG_FLAG_TIMER_ARMED: u16 = 1 << 3;
+
+/// Fixed-layout lock-free diagnostic snapshot returned by `GetCpuDebugInfo`.
+///
+/// The debug syscall is available only when the kernel is built with the
+/// `sync-debug` feature. All sampled fields are atomic so a surviving CPU can
+/// inspect a stalled CPU without acquiring scheduler or timer locks.
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub struct CpuDebugInfo {
+    /// Size of this entry in bytes.
+    pub size: u32,
+    /// ABI version, currently [`CPU_DEBUG_INFO_VERSION_V1`].
+    pub version: u16,
+    /// Combination of `CPU_DEBUG_FLAG_*` values.
+    pub flags: u16,
+    /// Logical CPU ID represented by this snapshot.
+    pub cpu_id: u32,
+    /// Low 32 bits of the breadcrumb commit sequence.
+    pub reserved: u32,
+    /// Namespace-local current task ID, or zero when unavailable.
+    pub current_task_id: usize,
+    /// Number of local timer interrupts observed by this CPU.
+    pub timer_irq_count: u64,
+    /// Last lock-free kernel execution breadcrumb phase.
+    pub breadcrumb_phase: u64,
+    /// First context value associated with `breadcrumb_phase`.
+    pub breadcrumb_aux: u64,
+    /// Second context value associated with `breadcrumb_phase`.
+    pub breadcrumb_aux2: u64,
+    /// Last requested local timer deadline, or zero when stopped.
+    pub timer_deadline_ns: u64,
+}
+
+const _: [(); 64] = [(); core::mem::size_of::<CpuDebugInfo>()];
+
+/// Snapshot of system-wide CPU usage exposed to user space.
+///
+/// All time fields are cumulative nanoseconds since scheduler accounting
+/// started. `busy_time_ns + idle_time_ns` is the accounted CPU capacity across
+/// all online CPUs.
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub struct CpuUsageInfo {
+    /// Number of CPUs currently known to the scheduler.
+    pub online_cpus: usize,
+    /// Cumulative non-idle CPU time in nanoseconds.
+    pub busy_time_ns: u64,
+    /// Cumulative idle task CPU time in nanoseconds.
+    pub idle_time_ns: u64,
+    /// Total accounted CPU time in nanoseconds.
+    pub total_time_ns: u64,
+    /// Busy percentage in permille (1000 = 100.0%).
+    pub usage_per_mille: u32,
+    /// Reserved for future use.
+    pub _reserved: u32,
+}
 
 /// Global registry of task-specific wakers for waitpid
-static WAITPID_WAKERS: Once<Mutex<BTreeMap<usize, Waker>>> = Once::new();
+static WAITPID_WAKERS: Once<IrqSpinLock<BTreeMap<usize, Arc<Waker>>>> = Once::new();
 
-/// Note: TASK_ID has been moved to TaskPool::next_id for better ID management
-/// including recycling of freed task IDs. Use TaskPool::allocate_id() instead.
+/// Note: task ID counters live in `TaskPool` for better ID management,
+/// with stable, never-reused global task IDs.
 ///
 /// Global registry of parent task wakers for waitpid(-1) operations
 /// Each parent task has a waker that gets triggered when any of its children exit
-static PARENT_WAITPID_WAKERS: Once<Mutex<BTreeMap<usize, Waker>>> = Once::new();
+static PARENT_WAITPID_WAKERS: Once<IrqSpinLock<BTreeMap<usize, Arc<Waker>>>> = Once::new();
 
 /// Initialize the waitpid wakers registry
-fn init_waitpid_wakers() -> Mutex<BTreeMap<usize, Waker>> {
-    Mutex::new(BTreeMap::new())
+fn init_waitpid_wakers() -> IrqSpinLock<BTreeMap<usize, Arc<Waker>>> {
+    IrqSpinLock::new(BTreeMap::new())
 }
 
 /// Initialize the parent waitpid waker registry
-fn init_parent_waitpid_wakers() -> Mutex<BTreeMap<usize, Waker>> {
-    Mutex::new(BTreeMap::new())
+fn init_parent_waitpid_wakers() -> IrqSpinLock<BTreeMap<usize, Arc<Waker>>> {
+    IrqSpinLock::new(BTreeMap::new())
 }
 
 /// Get or create a waker for waitpid/wait operations for a specific task
@@ -77,22 +384,15 @@ fn init_parent_waitpid_wakers() -> Mutex<BTreeMap<usize, Waker>> {
 ///
 /// # Returns
 ///
-/// A reference to the waker for the specified task
-pub fn get_waitpid_waker(task_id: usize) -> &'static Waker {
+/// An owned reference to the waker for the specified task
+pub fn get_waitpid_waker(task_id: usize) -> Arc<Waker> {
     let wakers_mutex = WAITPID_WAKERS.call_once(init_waitpid_wakers);
     let mut wakers = wakers_mutex.lock();
-    if !wakers.contains_key(&task_id) {
-        let waker_name = alloc::format!("task_{}", task_id);
-        // We need to create a static string for the waker name
-        let static_name = Box::leak(waker_name.into_boxed_str());
-        wakers.insert(task_id, Waker::new_interruptible(static_name));
-    }
-    // This is safe because we know the waker exists and won't be removed
-    // until the task is cleaned up
-    unsafe {
-        let waker_ptr = wakers.get(&task_id).unwrap() as *const Waker;
-        &*waker_ptr
-    }
+    Arc::clone(
+        wakers
+            .entry(task_id)
+            .or_insert_with(|| Arc::new(Waker::new_interruptible("waitpid-task"))),
+    )
 }
 
 // pub fn get_select_waker(...) was removed; use object-level Selectable::wait_until_ready
@@ -109,25 +409,44 @@ pub fn get_waitpid_waker(task_id: usize) -> &'static Waker {
 ///
 /// # Returns
 ///
-/// A reference to the parent waker
-pub fn get_parent_waitpid_waker(parent_id: usize) -> &'static Waker {
+/// An owned reference to the parent waker
+pub fn get_parent_waitpid_waker(parent_id: usize) -> Arc<Waker> {
     let wakers_mutex = PARENT_WAITPID_WAKERS.call_once(init_parent_waitpid_wakers);
     let mut wakers = wakers_mutex.lock();
+    Arc::clone(
+        wakers
+            .entry(parent_id)
+            .or_insert_with(|| Arc::new(Waker::new_interruptible("waitpid-parent"))),
+    )
+}
 
-    // Create a new waker if it doesn't exist
-    if !wakers.contains_key(&parent_id) {
-        let waker_name = alloc::format!("parent_waker_{}", parent_id);
-        // We need to leak the string to make it 'static
-        let static_name = alloc::boxed::Box::leak(waker_name.into_boxed_str());
-        wakers.insert(parent_id, Waker::new_interruptible(static_name));
-    }
+/// Resolve the actual parent task which owns a child visible to this process.
+///
+/// Process children are normally attached to the thread-group leader, while
+/// joinable threads remain attached to the thread which spawned them. A
+/// specific `waitpid` from any sibling therefore has to resolve the real owner
+/// instead of assuming either the caller or leader owns every child.
+pub(crate) fn get_thread_group_wait_owner(caller: &Task, child_id: usize) -> Option<Arc<Task>> {
+    let child = get_task_by_id(child_id)?;
+    let parent = get_task_by_id(child.get_parent_id()?)?;
+    (parent.get_thread_group_id() == caller.get_thread_group_id()).then_some(parent)
+}
 
-    // Return a reference to the waker
-    // This is safe because the BTreeMap is never dropped and the Waker is never moved
-    unsafe {
-        let waker_ptr = wakers.get(&parent_id).unwrap() as *const Waker;
-        &*waker_ptr
-    }
+/// List process children waitable by any thread in the caller's process.
+///
+/// Thread children are intentionally excluded from wait-any: their JoinHandle
+/// uses a specific PID and must not be consumed by an unrelated process reaper.
+pub(crate) fn get_waitable_process_children(caller: &Task) -> Vec<usize> {
+    get_all_task_ids()
+        .into_iter()
+        .filter(|child_id| {
+            let Some(child) = get_task_by_id(*child_id) else {
+                return false;
+            };
+            child.get_thread_group_id() == child.get_id()
+                && get_thread_group_wait_owner(caller, *child_id).is_some()
+        })
+        .collect()
 }
 
 /// Wake up any processes waiting for a specific task
@@ -139,11 +458,7 @@ pub fn get_parent_waitpid_waker(parent_id: usize) -> &'static Waker {
 ///
 /// * `task_id` - The ID of the task that has exited
 pub fn wake_task_waiters(task_id: usize) {
-    let wakers_mutex = WAITPID_WAKERS.call_once(init_waitpid_wakers);
-    let wakers = wakers_mutex.lock();
-    if let Some(waker) = wakers.get(&task_id) {
-        waker.wake_all();
-    }
+    get_waitpid_waker(task_id).wake_all();
 }
 
 /// Wake up a parent process waiting for any child (waitpid(-1))
@@ -154,11 +469,7 @@ pub fn wake_task_waiters(task_id: usize) {
 ///
 /// * `parent_id` - The ID of the parent task
 pub fn wake_parent_waiters(parent_id: usize) {
-    let wakers_mutex = PARENT_WAITPID_WAKERS.call_once(init_parent_waitpid_wakers);
-    let wakers = wakers_mutex.lock();
-    if let Some(waker) = wakers.get(&parent_id) {
-        waker.wake_all();
-    }
+    get_parent_waitpid_waker(parent_id).wake_all();
 }
 
 /// Clean up the waker for a specific task
@@ -283,10 +594,57 @@ pub enum TaskType {
     User,
 }
 
+/// Scheduler hint for heterogeneous CPU placement.
+#[derive(Debug, PartialEq, Clone, Copy)]
+#[repr(u8)]
+pub enum TaskCorePreference {
+    /// No explicit core-class preference.
+    Any = 0,
+    /// Prefer energy-efficient cores when load permits.
+    Efficiency = 1,
+    /// Prefer higher-capacity cores.
+    Performance = 2,
+}
+
+impl TaskCorePreference {
+    pub(crate) const fn to_u8(self) -> u8 {
+        self as u8
+    }
+
+    pub(crate) const fn from_u8(value: u8) -> Self {
+        match value {
+            1 => TaskCorePreference::Efficiency,
+            2 => TaskCorePreference::Performance,
+            _ => TaskCorePreference::Any,
+        }
+    }
+}
+
 /// ABI Zone structure holding a memory range with an owned ABI module.
 pub struct AbiZone {
     pub range: Range<usize>,
     pub abi: Box<dyn AbiModule + Send + Sync>,
+}
+
+/// Exit work requested by an ABI syscall while its ABI state is mutably borrowed.
+///
+/// The request stays owned by the task until the syscall dispatcher releases the
+/// ABI borrow, at which point task exit may safely invoke ABI exit hooks again.
+#[derive(Debug)]
+enum DeferredExitRequest {
+    Exit {
+        status: i32,
+    },
+    ThreadExitCleanup {
+        status: i32,
+        stack_mapping_base: usize,
+        stack_mapping_len: usize,
+        tls_mapping_base: usize,
+        tls_mapping_len: usize,
+    },
+    ExitGroup {
+        status: i32,
+    },
 }
 
 /// A cell type for task-local data that is only accessed by the hart currently
@@ -329,7 +687,7 @@ impl<T> TaskLocal<T> {
     #[inline]
     pub unsafe fn get(&self) -> &T {
         // SAFETY: Upheld by caller (single-hart-per-task invariant).
-        &*self.inner.get()
+        unsafe { &*self.inner.get() }
     }
 
     /// Get a mutable reference to the contained value.
@@ -342,8 +700,121 @@ impl<T> TaskLocal<T> {
     #[allow(clippy::mut_from_ref)]
     pub unsafe fn get_mut(&self) -> &mut T {
         // SAFETY: Upheld by caller (single-hart-per-task invariant).
-        &mut *self.inner.get()
+        unsafe { &mut *self.inner.get() }
     }
+}
+
+struct SoftwareTimerRegistration {
+    handle: crate::timer::TimerHandle,
+    handler: Arc<dyn TimerHandler>,
+}
+
+/// Parameters for a periodic deadline reservation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TaskDeadlineParams {
+    /// CPU runtime available during each period, in nanoseconds.
+    pub runtime_ns: u64,
+    /// Relative completion deadline, in nanoseconds.
+    pub deadline_ns: u64,
+    /// Reservation period, in nanoseconds.
+    pub period_ns: u64,
+}
+
+/// Observable state of a task's deadline reservation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TaskDeadlineSnapshot {
+    /// Configured reservation parameters.
+    pub params: TaskDeadlineParams,
+    /// Runtime remaining in the current period, in nanoseconds.
+    pub remaining_ns: u64,
+    /// Current absolute deadline on the monotonic clock.
+    pub absolute_deadline_ns: u64,
+    /// Start of the next reservation period on the monotonic clock.
+    pub next_replenishment_ns: u64,
+    /// CPU that owns this partitioned reservation.
+    pub cpu_id: usize,
+    /// Whether execution is suspended until replenishment.
+    pub throttled: bool,
+    /// Number of periods observed after their absolute deadline.
+    pub deadline_misses: u64,
+    /// Number of times the task exhausted its runtime budget.
+    pub budget_overruns: u64,
+    /// Deadline bandwidth admission reserved for this task.
+    pub admission_units: u32,
+}
+
+pub(crate) struct TaskDeadlineState {
+    pub(crate) params: Option<TaskDeadlineParams>,
+    pub(crate) remaining_ns: u64,
+    pub(crate) absolute_deadline_ns: u64,
+    pub(crate) next_replenishment_ns: u64,
+    pub(crate) cpu_id: usize,
+    pub(crate) throttled: bool,
+    pub(crate) deadline_misses: u64,
+    pub(crate) budget_overruns: u64,
+    pub(crate) admission_units: u32,
+    pub(crate) generation: u64,
+    pub(crate) replenishment_timer: Option<TimerHandle>,
+    pub(crate) replenishment_token: Option<usize>,
+}
+
+impl TaskDeadlineState {
+    const fn new() -> Self {
+        Self {
+            params: None,
+            remaining_ns: 0,
+            absolute_deadline_ns: 0,
+            next_replenishment_ns: 0,
+            cpu_id: usize::MAX,
+            throttled: false,
+            deadline_misses: 0,
+            budget_overruns: 0,
+            admission_units: 0,
+            generation: 0,
+            replenishment_timer: None,
+            replenishment_token: None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// Lock-free task CPU-hog observation completed by the periodic watchdog.
+pub(crate) struct TaskCpuHogSnapshot {
+    /// Task CPU consumption in permille of the elapsed wall-clock window.
+    pub usage_per_mille: u32,
+    /// Elapsed wall-clock time covered by this sample.
+    pub window_ns: u64,
+    /// Task CPU runtime consumed during this sample.
+    pub runtime_ns: u64,
+    /// Instruction address observed at the beginning of this sample.
+    pub start_pc: u64,
+    /// Whether `start_pc` was sampled from privileged execution.
+    pub start_pc_privileged: bool,
+    /// Most recently observed instruction address.
+    pub current_pc: u64,
+    /// Whether `current_pc` was sampled from privileged execution.
+    pub current_pc_privileged: bool,
+    /// Most recent system-call number entered by this task.
+    pub last_syscall_number: u64,
+    /// User instruction address that entered `last_syscall_number`.
+    pub last_syscall_pc: u64,
+    /// Whether the task was still inside that system call when sampled.
+    pub syscall_active: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// Lock-free task execution state used by the task-debug syscall.
+pub(crate) struct TaskExecutionDebugSnapshot {
+    /// Most recently sampled instruction address.
+    pub observed_pc: u64,
+    /// Whether `observed_pc` was sampled from privileged execution.
+    pub observed_pc_privileged: bool,
+    /// Most recently entered system-call number.
+    pub syscall_number: u64,
+    /// User instruction address that entered `syscall_number`.
+    pub syscall_pc: u64,
+    /// Whether the task is still executing that system call.
+    pub syscall_active: bool,
 }
 
 pub struct Task {
@@ -352,12 +823,31 @@ pub struct Task {
     /// Task ID within the task's namespace (may differ from global ID)
     namespace_id: atomic::AtomicUsize,
     /// Task namespace for ID management
-    namespace: RwLock<Arc<namespace::TaskNamespace>>,
+    namespace: IrqRwSpinLock<Arc<namespace::TaskNamespace>>,
     pub task_type: TaskType,
     pub entry: usize,
-    parent_id: Option<usize>,
-    /// Thread Group ID (TGID)
-    tgid: usize,
+    parent_id: AtomicUsize,
+    /// Thread group of the task that most recently adopted this task.
+    ///
+    /// This survives direct-parent removal so zombie finalization can wake a
+    /// waitpid sibling in the same process.
+    parent_thread_group_id: AtomicUsize,
+    /// Thread Group ID (TGID) - identifies tasks in the same thread group
+    thread_group_id: usize,
+    /// Legacy task group ID mirror.
+    ///
+    /// New job-control code should use `process_group_id`; this field is kept
+    /// during the migration so older Scarlet-private controls continue to see
+    /// the same value.
+    task_group_id: AtomicUsize,
+    /// POSIX session ID (SID), stored as a global task ID.
+    session_id: AtomicUsize,
+    /// POSIX process group ID (PGID), stored as a global task ID.
+    process_group_id: AtomicUsize,
+    /// Controlling terminal for this task, if any.
+    controlling_tty: IrqRwSpinLock<Option<Weak<TtyDevice>>>,
+    /// Whether this task is the leader of its POSIX session.
+    is_session_leader: AtomicBool,
     pub max_stack_size: usize,
     pub max_data_size: usize,
     pub max_text_size: usize,
@@ -367,26 +857,123 @@ pub struct Task {
     pub state: AtomicTaskState,
     /// Task priority
     pub priority: AtomicU32,
-    /// Time slice for scheduling
-    pub time_slice: AtomicU32,
+    /// Scheduler hint for heterogeneous CPU placement.
+    core_preference: AtomicU8,
+    /// Minimum scheduler utilization required by this task.
+    sched_util_min: AtomicU32,
+    /// Measured scheduler utilization for this task.
+    sched_util_avg: AtomicU32,
+    /// Last timestamp at which measured scheduler utilization was updated.
+    sched_util_last_update_ns: AtomicU64,
+    /// CPU runtime accumulated for the current scheduler utilization window.
+    sched_util_window_runtime_ns: AtomicU64,
+    /// Last timestamp charged into the scheduler utilization window.
+    sched_util_accounted_until_ns: AtomicU64,
+    /// Last timestamp at which the scheduler migrated this task.
+    ///
+    /// Used to rate-limit scheduler-driven cross-CPU movement.
+    sched_last_migration_ns: AtomicU64,
+    /// Number of scheduler-directed migrations for this task.
+    sched_migration_count: AtomicU64,
+    /// First timestamp at which this task was observed below its current CPU capacity.
+    ///
+    /// Used to avoid demoting a task after only one low-utilization sample.
+    sched_low_util_since_ns: AtomicU64,
+    /// Scheduler time-slice duration in absolute nanoseconds.
+    pub time_slice_duration_ns: AtomicU64,
+    /// Nice value used by the EEVDF fair scheduler (Linux parity, -20..+19).
+    ///
+    /// 0 is the default. Higher values lower the task's load weight and the
+    /// proportion of CPU it receives under contention. Mutated only via
+    /// [`Task::set_nice`], which keeps `sched_weight` in sync.
+    pub sched_nice: AtomicI32,
+    /// Load weight derived from [`Task::sched_nice`] via [`nice_to_weight`].
+    pub(crate) sched_weight: AtomicU32,
+    /// EEVDF virtual runtime. Advances with consumed CPU time scaled by
+    /// `NICE_0_LOAD / sched_weight` so heavier tasks run longer per virtual
+    /// unit. Owned by the scheduler; updated under the per-CPU fair queue
+    /// lock or via `account_*` paths.
+    pub sched_vruntime: AtomicU64,
+    /// EEVDF virtual deadline of the form `vruntime + slice / weight`.
+    ///
+    /// The fair scheduler picks the eligible entity with the smallest
+    /// deadline, so this field drives both fairness and latency.
+    pub sched_deadline: AtomicU64,
+    /// Current fair-scheduler quantum in nanoseconds.
+    ///
+    /// Recomputed by the scheduler when a new request is placed as
+    /// `sched_period(nr_running) * weight / total_weight`, clamped to
+    /// `SCHED_MIN_GRANULARITY_NS`.
+    pub(crate) sched_slice_ns: AtomicU64,
+    /// True while the task is currently inserted in a per-CPU fair run queue.
+    pub(crate) sched_on_rq: AtomicBool,
+    /// True while the task is inserted in its partitioned deadline run queue.
+    pub(crate) deadline_on_rq: AtomicBool,
+    /// Monotonic timestamp from which the current EEVDF execution interval is charged.
+    pub(crate) sched_exec_start_ns: AtomicU64,
+    /// Cumulative CPU time charged to this task, in nanoseconds.
+    pub cpu_time_ns: AtomicU64,
+    /// Monotonic timestamp at which the current CPU run began.
+    cpu_run_start_ns: AtomicU64,
+    /// Most recent instruction address sampled while this task was running.
+    last_observed_pc: AtomicU64,
+    /// Whether `last_observed_pc` was sampled from privileged execution.
+    last_observed_pc_privileged: AtomicBool,
+    /// Most recent system-call number entered by this task.
+    last_syscall_number: AtomicU64,
+    /// User instruction address that entered `last_syscall_number`.
+    last_syscall_pc: AtomicU64,
+    /// Whether this task is currently executing its system-call dispatcher.
+    syscall_active: AtomicBool,
+    /// Start of the current CPU-hog diagnostic wall-clock window.
+    cpu_hog_window_start_ns: AtomicU64,
+    /// Cumulative task CPU time at the start of the diagnostic window.
+    cpu_hog_window_start_runtime_ns: AtomicU64,
+    /// Sampled instruction address at the start of the diagnostic window.
+    cpu_hog_window_start_pc: AtomicU64,
+    /// Privilege mode associated with `cpu_hog_window_start_pc`.
+    cpu_hog_window_start_pc_privileged: AtomicBool,
     /// Stack size in bytes
     pub stack_size: AtomicUsize,
     /// Data segment size in bytes
-    pub data_size: AtomicUsize,
+    pub data_size: Arc<AtomicUsize>,
     /// Text segment size in bytes
     pub text_size: AtomicUsize,
     /// Exit status (i32::MIN represents None)
     pub exit_status: AtomicI32,
-    /// Program break (already thread-safe)
+    /// Published before an exit snapshots `children`.
+    exiting: AtomicBool,
+    /// Set when a process-control stop should be observable by waitpid.
+    process_control_stopped: AtomicBool,
+    /// Set after the current process-control stop has been reported once.
+    process_control_stop_reported: AtomicBool,
+    /// Program break shared by every task using this address space.
     pub brk: Arc<AtomicUsize>,
+    /// Serializes compound brk updates, including page map/unmap changes.
+    brk_transaction: Arc<Mutex<()>>,
 
-    // === RwLock fields (frequent reads) ===
+    // === IRQ reader-writer spin lock fields (frequent reads) ===
     /// Task name
-    pub name: RwLock<String>,
+    pub name: IrqRwSpinLock<String>,
+    /// Executable path reported through process-introspection interfaces.
+    ///
+    /// Unlike `name`, this value is not changed by `prctl(PR_SET_NAME)` and is
+    /// inherited by forked processes and threads until a successful exec.
+    executable_path: IrqRwSpinLock<Option<String>>,
     /// List of child task IDs
-    pub children: RwLock<Vec<usize>>,
-    /// Managed pages (auto-freed on termination)
-    pub managed_pages: RwLock<Vec<ManagedPage>>,
+    pub children: IrqRwSpinLock<Vec<usize>>,
+    /// Contiguous page allocations (PMM-backed, auto-freed on drop).
+    ///
+    /// Each entry is a `ContiguousPages` RAII wrapper that returns its pages to the
+    /// buddy-system PMM when dropped. Used for ELF segment and anonymous mappings
+    /// that require physically contiguous memory.
+    pub page_allocations: Arc<IrqRwSpinLock<Vec<ContiguousPages>>>,
+    /// Non-contiguous individual page allocations (PMM-backed, auto-freed on drop).
+    ///
+    /// Each entry is a `TaskPages` RAII wrapper holding a list of individual
+    /// physical page addresses. Used for anonymous private mappings where
+    /// physical contiguity is not required and partial reclaim on unmap is needed.
+    pub task_pages: Arc<IrqRwSpinLock<Vec<crate::mem::page::TaskPages>>>,
     /// Virtual File System Manager
     ///
     /// # Usage Patterns
@@ -397,48 +984,124 @@ pub struct Task {
     /// # Thread Safety
     ///
     /// VfsManager is thread-safe and can be shared between tasks using Arc.
-    /// All internal operations use RwLock for concurrent access protection.
-    pub vfs: RwLock<Option<Arc<VfsManager>>>,
-    /// Software timer handlers
-    pub software_timers_handlers: RwLock<Vec<Arc<dyn TimerHandler>>>,
+    /// All internal operations use `IrqRwSpinLock` for concurrent access protection.
+    pub vfs: IrqRwSpinLock<Option<Arc<VfsManager>>>,
+    /// Ordinary processes belong to a sealed execution environment.
+    pub execution_environment:
+        IrqRwSpinLock<Option<Arc<crate::executor::environment::Environment>>>,
+    /// Granted only to the initial bootstrap process; never inherited by clone.
+    pub bootstrap_environment: AtomicBool,
+    /// Keep the dispatched ABI alive until its syscall handler has returned.
+    retired_exec_abi: TaskLocal<Option<Box<dyn AbiModule + Send + Sync>>>,
+    /// Pending task-owned timer callbacks and handles, cancelled together when
+    /// the task wakes or is dropped.
+    software_timers: IrqSpinLock<Vec<SoftwareTimerRegistration>>,
+    /// Lock-free mirror of `software_timers.len()` for diagnostics.
+    software_timer_count: AtomicUsize,
+    /// Periodic deadline reservation state.
+    pub(crate) deadline: IrqSpinLock<TaskDeadlineState>,
 
-    // === Mutex fields (complex operations) ===
+    // === IRQ spin lock fields (complex operations) ===
     /// VCPU state for context switching
-    pub vcpu: Mutex<Vcpu>,
+    pub vcpu: IrqSpinLock<Vcpu>,
     /// Kernel context for context switching
-    pub kernel_context: Mutex<KernelContext>,
+    pub kernel_context: KernelContextIrqSpinLock,
     /// Virtual memory manager (already thread-safe internally)
     pub vm_manager: VirtualMemoryManager,
     /// Default ABI module (task-local: only accessed by the executing hart)
     pub default_abi: TaskLocal<Option<Box<dyn AbiModule + Send + Sync>>>,
     /// ABI zones map (task-local: only accessed by the executing hart)
     pub abi_zones: TaskLocal<BTreeMap<usize, AbiZone>>,
+    /// Exit request deferred until the active ABI mutable borrow is released.
+    deferred_exit_request: IrqSpinLock<Option<DeferredExitRequest>>,
+    /// Linux CLONE_CHILD_CLEARTID state kept outside task-local ABI storage.
+    clear_child_tid: IrqSpinLock<Option<usize>>,
     /// Handle table for kernel objects (already thread-safe internally)
     pub handle_table: HandleTable,
-    /// Waker for sleep operations (already thread-safe internally)
-    pub sleep_waker: Waker,
     /// Kernel stack window base (slot_index, base_vaddr)
-    pub kernel_stack_window_base: Mutex<Option<(usize, usize)>>,
+    pub kernel_stack_window_base: IrqSpinLock<Option<(usize, usize)>>,
+    /// CPUs on which this task may run. Each set bit is one scheduler CPU.
+    cpu_affinity_mask: AtomicUsize,
+    /// Encoding used to configure [`Task::cpu_affinity_mask`].
+    scheduler_affinity_kind: AtomicU8,
+    pub last_cpu: atomic::AtomicUsize,
+    /// CPU that currently "owns" this task (has saved its context or is
+    /// actively running it). `usize::MAX` means unowned / available.
+    /// Used as a CAS claim token to prevent double-scheduling on SMP.
+    pub running_cpu: atomic::AtomicUsize,
 
     // === Already protected fields ===
     /// Task-local event queue with priority ordering
-    pub event_queue: Mutex<crate::ipc::event::TaskEventQueue>,
+    pub event_queue: IrqSpinLock<crate::ipc::event::TaskEventQueue>,
     /// Event processing enabled flag
-    pub events_enabled: Mutex<bool>,
+    pub events_enabled: IrqSpinLock<bool>,
 }
 
-#[derive(Debug, Clone)]
-pub struct ManagedPage {
-    pub vaddr: usize,
-    pub page: Box<Page>,
+/// A non-owning reference to the task executing on the current CPU.
+///
+/// Unlike an [`Arc<Task>`], this guard does not increase the task's strong
+/// count. It is therefore safe to leave on a suspended kernel stack: when an
+/// exiting task never resumes that stack, the guard cannot keep the task or its
+/// kernel stack window alive.
+///
+/// The scheduler constructs this guard only for the CPU executing the task and
+/// only after checking that `Task::running_cpu` belongs to that CPU. A task
+/// with a running-CPU owner cannot be removed from `TaskPool`; removal requires
+/// both `TaskState::Terminated` and `running_cpu == NO_CPU`. Consequently the
+/// pool's registered owner keeps the pointed-to `Task` alive while this CPU is
+/// executing it. The guard is deliberately neither `Clone` nor `Copy`, and is
+/// not `Send` or `Sync`, so it cannot be promoted into a general-purpose task
+/// handle. Use `get_task_by_id()` for an owned handle to an arbitrary task.
+#[must_use = "current-task guards must be kept while accessing the current task"]
+pub struct CurrentTaskRef {
+    task: NonNull<Task>,
+    _not_send_or_sync: PhantomData<*mut ()>,
+}
+
+impl CurrentTaskRef {
+    /// Create a current-task guard after the scheduler has checked local CPU
+    /// ownership.
+    pub(crate) fn from_running_task(task: &Task, cpu_id: usize) -> Option<Self> {
+        if get_cpu().get_cpuid() != cpu_id || task.running_cpu.load(Ordering::SeqCst) != cpu_id {
+            return None;
+        }
+
+        Some(Self {
+            task: NonNull::from(task),
+            _not_send_or_sync: PhantomData,
+        })
+    }
+
+    #[cfg(test)]
+    fn from_mock_task(task: &Task) -> Self {
+        Self {
+            task: NonNull::from(task),
+            _not_send_or_sync: PhantomData,
+        }
+    }
+}
+
+impl Deref for CurrentTaskRef {
+    type Target = Task;
+
+    fn deref(&self) -> &Self::Target {
+        // SAFETY: The scheduler creates this guard only for the task owned by
+        // the executing CPU. Its `running_cpu` token prevents TaskPool removal,
+        // which additionally requires `Terminated && running_cpu == NO_CPU`.
+        // Test guards point into MOCK_CURRENT_TASK, which keeps an owning Arc
+        // alive for the guard's use. The raw pointer is private and the guard
+        // cannot be cloned or sent to another CPU.
+        unsafe { self.task.as_ref() }
+    }
 }
 
 pub enum CloneFlagsDef {
-    Vm = 0b00000001,      // Clone the VM
-    Fs = 0b00000010,      // Clone the filesystem
-    Files = 0b00000100,   // Clone the file descriptors
-    Thread = 0b00001000,  // Join thread group (share TGID) - Linux CLONE_THREAD semantics
-    SetTls = 0b000010000, // Set TLS pointer for cloned task
+    Vm = 0b00000001,             // Clone the VM
+    Fs = 0b00000010,             // Clone the filesystem
+    Files = 0b00000100,          // Clone the file descriptors
+    Thread = 0b00001000,         // Join thread group (share TGID) - Linux CLONE_THREAD semantics
+    SetTls = 0b000010000,        // Set TLS pointer for cloned task
+    ClearChildTid = 0b000100000, // Clear and futex-wake child TID on exit
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -474,7 +1137,7 @@ impl CloneFlags {
 
 impl Default for CloneFlags {
     fn default() -> Self {
-        let raw = CloneFlagsDef::Fs as u64 | CloneFlagsDef::Files as u64;
+        let raw = 0;
         CloneFlags { raw }
     }
 }
@@ -514,48 +1177,101 @@ impl Task {
         task_type: TaskType,
         ns: Arc<namespace::TaskNamespace>,
     ) -> Self {
+        let vm_manager = VirtualMemoryManager::new();
         Task {
             // Read-only fields
             id: 0,
             namespace_id: AtomicUsize::new(0),
-            namespace: RwLock::new(ns),
+            namespace: IrqRwSpinLock::new(ns),
             task_type,
             entry: 0,
-            parent_id: None,
-            tgid: 0,
+            parent_id: AtomicUsize::new(0),
+            parent_thread_group_id: AtomicUsize::new(0),
+            thread_group_id: 0,
+            task_group_id: AtomicUsize::new(0),
+            session_id: AtomicUsize::new(0),
+            process_group_id: AtomicUsize::new(0),
+            controlling_tty: IrqRwSpinLock::new(None),
+            is_session_leader: AtomicBool::new(false),
             max_stack_size: DEAFAULT_MAX_TASK_STACK_SIZE,
             max_data_size: DEAFAULT_MAX_TASK_DATA_SIZE,
             max_text_size: DEAFAULT_MAX_TASK_TEXT_SIZE,
             // Atomic fields
             state: AtomicTaskState::new(TaskState::NotInitialized),
             priority: AtomicU32::new(priority),
-            time_slice: AtomicU32::new(10),
+            core_preference: AtomicU8::new(TaskCorePreference::Any.to_u8()),
+            sched_util_min: AtomicU32::new(0),
+            sched_util_avg: AtomicU32::new(0),
+            sched_util_last_update_ns: AtomicU64::new(0),
+            sched_util_window_runtime_ns: AtomicU64::new(0),
+            sched_util_accounted_until_ns: AtomicU64::new(0),
+            sched_last_migration_ns: AtomicU64::new(0),
+            sched_migration_count: AtomicU64::new(0),
+            sched_low_util_since_ns: AtomicU64::new(0),
+            time_slice_duration_ns: AtomicU64::new(
+                (DEFAULT_TIME_SLICE as u64).saturating_mul(ms_to_ns(10)),
+            ),
+            sched_nice: AtomicI32::new(0),
+            sched_weight: AtomicU32::new(NICE_0_LOAD),
+            sched_vruntime: AtomicU64::new(0),
+            sched_deadline: AtomicU64::new(0),
+            sched_slice_ns: AtomicU64::new(0),
+            sched_on_rq: AtomicBool::new(false),
+            deadline_on_rq: AtomicBool::new(false),
+            sched_exec_start_ns: AtomicU64::new(0),
+            cpu_time_ns: AtomicU64::new(0),
+            cpu_run_start_ns: AtomicU64::new(0),
+            last_observed_pc: AtomicU64::new(0),
+            last_observed_pc_privileged: AtomicBool::new(false),
+            last_syscall_number: AtomicU64::new(u64::MAX),
+            last_syscall_pc: AtomicU64::new(0),
+            syscall_active: AtomicBool::new(false),
+            cpu_hog_window_start_ns: AtomicU64::new(0),
+            cpu_hog_window_start_runtime_ns: AtomicU64::new(0),
+            cpu_hog_window_start_pc: AtomicU64::new(0),
+            cpu_hog_window_start_pc_privileged: AtomicBool::new(false),
             stack_size: AtomicUsize::new(0),
-            data_size: AtomicUsize::new(0),
+            data_size: vm_manager.data_size_handle(),
             text_size: AtomicUsize::new(0),
-            exit_status: AtomicI32::new(i32::MIN), // i32::MIN represents None
-            brk: Arc::new(AtomicUsize::new(usize::MAX)),
-            // RwLock fields
-            name: RwLock::new(name),
-            children: RwLock::new(Vec::new()),
-            managed_pages: RwLock::new(Vec::new()),
-            vfs: RwLock::new(None),
-            software_timers_handlers: RwLock::new(Vec::new()),
-            // Mutex fields
-            vcpu: Mutex::new(Vcpu::new(match task_type {
-                TaskType::Kernel => crate::arch::vcpu::Mode::Kernel,
-                TaskType::User => crate::arch::vcpu::Mode::User,
+            exit_status: AtomicI32::new(i32::MIN),
+            exiting: AtomicBool::new(false),
+            process_control_stopped: AtomicBool::new(false),
+            process_control_stop_reported: AtomicBool::new(false),
+            brk: vm_manager.brk_handle(),
+            brk_transaction: vm_manager.brk_transaction_handle(),
+            // IRQ reader-writer spin lock fields
+            name: IrqRwSpinLock::new(name),
+            executable_path: IrqRwSpinLock::new(None),
+            children: IrqRwSpinLock::new(Vec::new()),
+            page_allocations: vm_manager.page_allocations_handle(),
+            task_pages: vm_manager.task_pages_handle(),
+            vfs: IrqRwSpinLock::new(None),
+            execution_environment: IrqRwSpinLock::new(None),
+            bootstrap_environment: AtomicBool::new(false),
+            retired_exec_abi: TaskLocal::new(None),
+            software_timers: IrqSpinLock::new(Vec::new()),
+            software_timer_count: AtomicUsize::new(0),
+            deadline: IrqSpinLock::new(TaskDeadlineState::new()),
+            // IRQ spin lock fields
+            vcpu: IrqSpinLock::new(Vcpu::new(match task_type {
+                TaskType::Kernel => crate::arch::Mode::Kernel,
+                TaskType::User => crate::arch::Mode::User,
             })),
-            kernel_context: Mutex::new(KernelContext::new()),
-            vm_manager: VirtualMemoryManager::new(),
+            kernel_context: KernelContextIrqSpinLock::new(KernelContext::new()),
+            vm_manager,
             default_abi: TaskLocal::new(Some(Box::new(ScarletAbi::default()))),
             abi_zones: TaskLocal::new(BTreeMap::new()),
+            deferred_exit_request: IrqSpinLock::new(None),
+            clear_child_tid: IrqSpinLock::new(None),
             handle_table: HandleTable::new(),
-            sleep_waker: Waker::new_interruptible("task_sleep_waker"),
-            kernel_stack_window_base: Mutex::new(None),
+            kernel_stack_window_base: IrqSpinLock::new(None),
+            cpu_affinity_mask: AtomicUsize::new(usize::MAX),
+            scheduler_affinity_kind: AtomicU8::new(SCHED_AFFINITY_KIND_ANY),
+            last_cpu: atomic::AtomicUsize::new(0),
+            running_cpu: atomic::AtomicUsize::new(usize::MAX),
             // Already protected
-            event_queue: Mutex::new(crate::ipc::event::TaskEventQueue::new()),
-            events_enabled: Mutex::new(true),
+            event_queue: IrqSpinLock::new(crate::ipc::event::TaskEventQueue::new()),
+            events_enabled: IrqSpinLock::new(true),
         }
     }
 
@@ -582,7 +1298,578 @@ impl Task {
 
         /* Set the task state to Ready */
         self.state.store(TaskState::Ready, Ordering::SeqCst);
-        self.time_slice.store(1, Ordering::SeqCst);
+    }
+
+    /// Return the scheduler core preference hint.
+    ///
+    /// # Returns
+    ///
+    /// The current heterogeneous CPU placement preference.
+    pub fn core_preference(&self) -> TaskCorePreference {
+        TaskCorePreference::from_u8(self.core_preference.load(Ordering::SeqCst))
+    }
+
+    /// Set the scheduler core preference hint.
+    ///
+    /// # Arguments
+    ///
+    /// * `preference` - Core class preference used for future CPU placement.
+    pub fn set_core_preference(&self, preference: TaskCorePreference) {
+        self.core_preference
+            .store(preference.to_u8(), Ordering::SeqCst);
+    }
+
+    /// Return the CPU to which this task is pinned.
+    ///
+    /// # Returns
+    ///
+    /// The pinned CPU ID, or `None` when the task may run on any online CPU.
+    pub fn pinned_cpu(&self) -> Option<usize> {
+        let mask = self.cpu_affinity_mask();
+        mask.is_power_of_two()
+            .then_some(mask.trailing_zeros() as usize)
+    }
+
+    /// Set or clear this task's single-CPU affinity pin.
+    ///
+    /// # Arguments
+    ///
+    /// * `cpu_id` - Destination CPU ID, or `None` to allow any online CPU.
+    pub fn set_pinned_cpu(&self, cpu_id: Option<usize>) {
+        let mask = cpu_id
+            .and_then(|cpu_id| 1usize.checked_shl(cpu_id as u32))
+            .unwrap_or_else(|| if cpu_id.is_none() { usize::MAX } else { 0 });
+        let kind = if cpu_id.is_some() {
+            SCHED_AFFINITY_KIND_SINGLE
+        } else {
+            SCHED_AFFINITY_KIND_ANY
+        };
+        self.set_scheduler_affinity_config(kind, mask);
+    }
+
+    /// Return the task's allowed CPU mask.
+    ///
+    /// # Returns
+    ///
+    /// A bit mask in which bit `n` permits execution on scheduler CPU `n`.
+    pub fn cpu_affinity_mask(&self) -> usize {
+        self.cpu_affinity_mask.load(Ordering::SeqCst)
+    }
+
+    /// Replace the task's allowed CPU mask.
+    ///
+    /// Callers must ensure the mask contains at least one online CPU before
+    /// publishing it for a runnable task.
+    ///
+    /// # Arguments
+    ///
+    /// * `mask` - Bit mask in which bit `n` permits scheduler CPU `n`.
+    pub fn set_cpu_affinity_mask(&self, mask: usize) {
+        self.set_scheduler_affinity_config(SCHED_AFFINITY_KIND_MASK, mask);
+    }
+
+    /// Return the encoding used to configure this task's CPU affinity.
+    pub(crate) fn scheduler_affinity_kind(&self) -> u8 {
+        self.scheduler_affinity_kind.load(Ordering::SeqCst)
+    }
+
+    /// Publish a scheduler affinity encoding and its CPU mask together.
+    pub(crate) fn set_scheduler_affinity_config(&self, kind: u8, mask: usize) {
+        self.cpu_affinity_mask.store(mask, Ordering::SeqCst);
+        self.scheduler_affinity_kind.store(kind, Ordering::SeqCst);
+    }
+
+    /// Return whether this task has an active deadline reservation.
+    ///
+    /// # Returns
+    ///
+    /// `true` when the deadline scheduler class is enabled for this task.
+    pub fn deadline_enabled(&self) -> bool {
+        self.deadline.lock().params.is_some()
+    }
+
+    /// Return the task's deadline reservation state.
+    ///
+    /// # Returns
+    ///
+    /// A consistent snapshot, or `None` when deadline scheduling is disabled.
+    pub fn deadline_snapshot(&self) -> Option<TaskDeadlineSnapshot> {
+        let state = self.deadline.lock();
+        let params = state.params?;
+        Some(TaskDeadlineSnapshot {
+            params,
+            remaining_ns: state.remaining_ns,
+            absolute_deadline_ns: state.absolute_deadline_ns,
+            next_replenishment_ns: state.next_replenishment_ns,
+            cpu_id: state.cpu_id,
+            throttled: state.throttled,
+            deadline_misses: state.deadline_misses,
+            budget_overruns: state.budget_overruns,
+            admission_units: state.admission_units,
+        })
+    }
+
+    /// Try to sample deadline enablement and throttling without spinning.
+    ///
+    /// # Returns
+    ///
+    /// `Some((enabled, throttled))` when the deadline lock was immediately
+    /// available, or `None` when diagnostic code must not wait for it.
+    pub(crate) fn try_deadline_debug_state(&self) -> Option<(bool, bool)> {
+        let state = self.deadline.try_lock()?;
+        Some((state.params.is_some(), state.throttled))
+    }
+
+    /// Return whether this task may execute on a scheduler CPU.
+    ///
+    /// # Arguments
+    ///
+    /// * `cpu_id` - Scheduler CPU ID to test.
+    ///
+    /// # Returns
+    ///
+    /// `true` when the CPU's bit is set in the task's affinity mask.
+    pub fn cpu_allowed(&self, cpu_id: usize) -> bool {
+        1usize
+            .checked_shl(cpu_id as u32)
+            .is_some_and(|bit| self.cpu_affinity_mask() & bit != 0)
+    }
+
+    /// Return the minimum scheduler utilization requested by this task.
+    ///
+    /// # Returns
+    ///
+    /// Minimum utilization in scheduler capacity units, where
+    /// [`SCHED_UTIL_SCALE`] represents a full-capacity CPU.
+    pub fn sched_util_min(&self) -> u32 {
+        self.sched_util_min.load(Ordering::SeqCst)
+    }
+
+    /// Set the minimum scheduler utilization requested by this task.
+    ///
+    /// # Arguments
+    ///
+    /// * `util_min` - Minimum utilization in scheduler capacity units.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` on success, or an error if `util_min` is outside the supported
+    /// range.
+    pub fn set_sched_util_min(&self, util_min: u32) -> Result<(), &'static str> {
+        if util_min > SCHED_UTIL_SCALE {
+            return Err("scheduler util_min out of range");
+        }
+        self.sched_util_min.store(util_min, Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn decay_sched_util_avg(avg: u32, elapsed_ns: u64) -> u32 {
+        let mut periods = elapsed_ns / SCHED_UTIL_DECAY_INTERVAL_NS;
+        if periods == 0 {
+            return avg;
+        }
+
+        let mut next = avg as u64;
+        periods = periods.min(64);
+        for _ in 0..periods {
+            next = next.saturating_mul(SCHED_UTIL_DECAY_NUM as u64) / SCHED_UTIL_DECAY_DEN as u64;
+            if next == 0 {
+                break;
+            }
+        }
+
+        next.min(SCHED_UTIL_SCALE as u64) as u32
+    }
+
+    /// Return the measured scheduler utilization for this task.
+    ///
+    /// # Returns
+    ///
+    /// Measured utilization in scheduler capacity units, where
+    /// [`SCHED_UTIL_SCALE`] represents a full-capacity CPU.
+    pub fn sched_util_avg(&self) -> u32 {
+        self.sched_util_avg.load(Ordering::SeqCst)
+    }
+
+    /// Return a decayed measured scheduler utilization snapshot.
+    ///
+    /// # Arguments
+    ///
+    /// * `now_ns` - Current monotonic timestamp in nanoseconds.
+    ///
+    /// # Returns
+    ///
+    /// Measured utilization in scheduler capacity units after applying sleep
+    /// decay since the last update.
+    pub fn sched_util_avg_snapshot(&self, now_ns: u64) -> u32 {
+        let avg = self.sched_util_avg();
+        let last_update_ns = self.sched_util_last_update_ns.load(Ordering::SeqCst);
+        if avg == 0 || last_update_ns == 0 {
+            return avg;
+        }
+
+        Self::decay_sched_util_avg(avg, now_ns.saturating_sub(last_update_ns))
+    }
+
+    /// Account scheduler utilization runtime while this task is running.
+    ///
+    /// Utilization is based on CPU runtime accumulated over a sampling window,
+    /// not merely on whether the task ran at least once. This keeps short
+    /// wakeups from looking like full-capacity CPU-bound work.
+    ///
+    /// # Arguments
+    ///
+    /// * `now_ns` - Current monotonic timestamp in nanoseconds.
+    ///
+    /// # Returns
+    ///
+    /// Updated measured utilization in scheduler capacity units.
+    pub fn account_sched_util_running(&self, now_ns: u64) -> u32 {
+        let last_accounted_ns = self
+            .sched_util_accounted_until_ns
+            .swap(now_ns, Ordering::SeqCst);
+        if last_accounted_ns != 0 {
+            let delta_ns = now_ns.saturating_sub(last_accounted_ns);
+            self.sched_util_window_runtime_ns
+                .fetch_add(delta_ns, Ordering::SeqCst);
+        }
+
+        let last_update_ns = self.sched_util_last_update_ns.load(Ordering::SeqCst);
+        if last_update_ns == 0 {
+            self.sched_util_last_update_ns
+                .store(now_ns, Ordering::SeqCst);
+            return self.sched_util_avg();
+        }
+
+        let elapsed_ns = now_ns.saturating_sub(last_update_ns);
+        if elapsed_ns < SCHED_UTIL_DECAY_INTERVAL_NS {
+            return self.sched_util_avg();
+        }
+
+        let runtime_ns = self.sched_util_window_runtime_ns.swap(0, Ordering::SeqCst);
+        let sample = ((runtime_ns as u128 * SCHED_UTIL_SCALE as u128) / elapsed_ns as u128)
+            .min(SCHED_UTIL_SCALE as u128) as u32;
+        let avg = self.sched_util_avg_snapshot(now_ns);
+        let next = if sample > avg {
+            avg.saturating_add(sample.saturating_sub(avg).saturating_add(1) / 2)
+        } else {
+            avg.saturating_mul(7).saturating_add(sample) / 8
+        }
+        .min(SCHED_UTIL_SCALE);
+        self.sched_util_avg.store(next, Ordering::SeqCst);
+        self.sched_util_last_update_ns
+            .store(now_ns, Ordering::SeqCst);
+        next
+    }
+
+    /// Return the last scheduler migration timestamp for this task.
+    ///
+    /// # Returns
+    ///
+    /// Monotonic timestamp in nanoseconds, or `0` if this task has not been
+    /// migrated by the scheduler.
+    pub fn sched_last_migration_ns(&self) -> u64 {
+        self.sched_last_migration_ns.load(Ordering::SeqCst)
+    }
+
+    /// Return the task's current nice value (`-20..=19`).
+    pub fn nice(&self) -> i32 {
+        self.sched_nice.load(Ordering::SeqCst)
+    }
+
+    /// Return the task's current load weight derived from [`Task::nice`].
+    pub fn sched_weight(&self) -> u32 {
+        self.sched_weight.load(Ordering::SeqCst)
+    }
+
+    /// Return the task's current fair-scheduler virtual runtime.
+    pub fn sched_vruntime(&self) -> u64 {
+        self.sched_vruntime.load(Ordering::SeqCst)
+    }
+
+    /// Return the task's current fair-scheduler virtual deadline.
+    pub fn sched_deadline(&self) -> u64 {
+        self.sched_deadline.load(Ordering::SeqCst)
+    }
+
+    /// Return the task's current fair-scheduler quantum in nanoseconds.
+    pub fn sched_slice_ns(&self) -> u64 {
+        self.sched_slice_ns.load(Ordering::SeqCst)
+    }
+
+    /// Invalidate the active EEVDF request after its weight changes.
+    ///
+    /// The scheduler will derive a new slice and virtual deadline when the task
+    /// is next placed on a fair queue.
+    pub(crate) fn reset_sched_request(&self) {
+        self.sched_slice_ns.store(0, Ordering::SeqCst);
+        self.sched_deadline.store(0, Ordering::SeqCst);
+    }
+
+    /// Return whether the task is currently inserted in a fair run queue.
+    pub fn sched_on_rq(&self) -> bool {
+        self.sched_on_rq.load(Ordering::SeqCst)
+    }
+
+    /// Set the task's nice value, clamping to `[SCHED_NICE_MIN..=SCHED_NICE_MAX]`
+    /// and recomputing the corresponding load weight.
+    ///
+    /// `weight` is published before `nice` so a concurrent reader never observes
+    /// a stale weight paired with the new nice value.
+    ///
+    /// # Arguments
+    ///
+    /// * `nice` - Requested nice value; clamped if outside the supported range.
+    pub fn set_nice(&self, nice: i32) {
+        let clamped = nice.clamp(SCHED_NICE_MIN, SCHED_NICE_MAX);
+        let weight = nice_to_weight(clamped);
+        self.sched_weight.store(weight, Ordering::SeqCst);
+        self.sched_nice.store(clamped, Ordering::SeqCst);
+    }
+
+    /// Return the number of scheduler-directed migrations for this task.
+    ///
+    /// # Returns
+    ///
+    /// Count of scheduler placement moves, including work steals.
+    pub fn sched_migration_count(&self) -> u64 {
+        self.sched_migration_count.load(Ordering::SeqCst)
+    }
+
+    /// Record that the scheduler migrated this task.
+    ///
+    /// # Arguments
+    ///
+    /// * `now_ns` - Current monotonic timestamp in nanoseconds.
+    pub fn mark_sched_migrated(&self, now_ns: u64) {
+        self.sched_last_migration_ns.store(now_ns, Ordering::SeqCst);
+        self.sched_migration_count.fetch_add(1, Ordering::SeqCst);
+        self.clear_sched_low_util();
+    }
+
+    /// Return the timestamp at which this task first looked eligible for demotion.
+    ///
+    /// # Returns
+    ///
+    /// Monotonic timestamp in nanoseconds, or `0` if no low-utilization window
+    /// is currently being tracked.
+    pub fn sched_low_util_since_ns(&self) -> u64 {
+        self.sched_low_util_since_ns.load(Ordering::SeqCst)
+    }
+
+    /// Record that this task is still below its current CPU capacity.
+    ///
+    /// # Arguments
+    ///
+    /// * `now_ns` - Current monotonic timestamp in nanoseconds.
+    ///
+    /// # Returns
+    ///
+    /// The first timestamp in the current low-utilization window.
+    pub fn note_sched_low_util(&self, now_ns: u64) -> u64 {
+        let observed_ns = now_ns.max(1);
+        match self.sched_low_util_since_ns.compare_exchange(
+            0,
+            observed_ns,
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        ) {
+            Ok(_) => observed_ns,
+            Err(since_ns) => since_ns,
+        }
+    }
+
+    /// Clear the tracked low-utilization demotion window for this task.
+    pub fn clear_sched_low_util(&self) {
+        self.sched_low_util_since_ns.store(0, Ordering::SeqCst);
+    }
+
+    /// Mark the task as running for CPU accounting.
+    ///
+    /// # Arguments
+    ///
+    /// * `now_ns` - Current monotonic timestamp in nanoseconds.
+    pub fn start_cpu_accounting(&self, now_ns: u64) {
+        self.cpu_run_start_ns.store(now_ns, Ordering::SeqCst);
+        self.sched_exec_start_ns.store(now_ns, Ordering::SeqCst);
+        self.sched_util_accounted_until_ns
+            .store(now_ns, Ordering::SeqCst);
+    }
+
+    /// Stop charging CPU time to this task and return the elapsed delta.
+    ///
+    /// # Arguments
+    ///
+    /// * `now_ns` - Current monotonic timestamp in nanoseconds.
+    ///
+    /// # Returns
+    ///
+    /// The nanoseconds charged by this stop operation.
+    pub fn stop_cpu_accounting(&self, now_ns: u64) -> u64 {
+        let start_ns = self.cpu_run_start_ns.swap(0, Ordering::SeqCst);
+        self.sched_exec_start_ns.store(0, Ordering::SeqCst);
+        if start_ns == 0 {
+            return 0;
+        }
+        let delta_ns = now_ns.saturating_sub(start_ns);
+        self.cpu_time_ns.fetch_add(delta_ns, Ordering::SeqCst);
+        delta_ns
+    }
+
+    /// Return the current CPU time snapshot for this task.
+    ///
+    /// # Arguments
+    ///
+    /// * `now_ns` - Current monotonic timestamp in nanoseconds.
+    ///
+    /// # Returns
+    ///
+    /// Cumulative CPU time, including the current running interval if any.
+    pub fn cpu_time_snapshot_ns(&self, now_ns: u64) -> u64 {
+        self.cpu_time_ns
+            .load(Ordering::SeqCst)
+            .saturating_add(self.current_cpu_delta_ns(now_ns))
+    }
+
+    /// Record the most recent instruction address observed for this task.
+    ///
+    /// This is lock-free because it is called from local timer-interrupt
+    /// context, including when the interrupted kernel path may already hold
+    /// unrelated scheduler or task-pool locks.
+    ///
+    /// # Arguments
+    ///
+    /// * `pc` - Saved instruction address from the interrupt trapframe.
+    /// * `privileged` - Whether the interrupted context was privileged.
+    pub(crate) fn record_observed_pc(&self, pc: u64, privileged: bool) {
+        self.last_observed_pc.store(pc, Ordering::Relaxed);
+        self.last_observed_pc_privileged
+            .store(privileged, Ordering::Relaxed);
+    }
+
+    /// Record entry into a system call for CPU-hog diagnostics.
+    ///
+    /// This retains the originating userspace PC even when a later timer
+    /// interrupt samples the task while it is executing inside the kernel.
+    ///
+    /// # Arguments
+    ///
+    /// * `syscall_number` - ABI-specific system-call number.
+    /// * `user_pc` - User instruction address that entered the kernel.
+    pub(crate) fn record_syscall_entry(&self, syscall_number: usize, user_pc: usize) {
+        self.last_syscall_pc
+            .store(user_pc as u64, Ordering::Relaxed);
+        self.last_syscall_number
+            .store(syscall_number as u64, Ordering::Release);
+        self.syscall_active.store(true, Ordering::Release);
+    }
+
+    /// Mark completion of the current system call for diagnostics.
+    pub(crate) fn record_syscall_exit(&self) {
+        self.syscall_active.store(false, Ordering::Release);
+    }
+
+    /// Read the task's lock-free execution diagnostics.
+    ///
+    /// # Returns
+    ///
+    /// The most recent timer PC sample and system-call state. A zero PC or a
+    /// `u64::MAX` system-call number indicates that no corresponding sample has
+    /// been recorded yet.
+    pub(crate) fn execution_debug_snapshot(&self) -> TaskExecutionDebugSnapshot {
+        TaskExecutionDebugSnapshot {
+            observed_pc: self.last_observed_pc.load(Ordering::Relaxed),
+            observed_pc_privileged: self.last_observed_pc_privileged.load(Ordering::Relaxed),
+            syscall_number: self.last_syscall_number.load(Ordering::Acquire),
+            syscall_pc: self.last_syscall_pc.load(Ordering::Relaxed),
+            syscall_active: self.syscall_active.load(Ordering::Acquire),
+        }
+    }
+
+    /// Complete a CPU-hog sampling window when enough wall time has elapsed.
+    ///
+    /// # Arguments
+    ///
+    /// * `now_ns` - Current monotonic timestamp in nanoseconds.
+    ///
+    /// # Returns
+    ///
+    /// A diagnostic snapshot when this task consumed at least 99 percent of
+    /// one sampling window, or `None` otherwise.
+    pub(crate) fn sample_cpu_hog(&self, now_ns: u64) -> Option<TaskCpuHogSnapshot> {
+        let runtime_ns = self.cpu_time_snapshot_ns(now_ns);
+        let current_pc = self.last_observed_pc.load(Ordering::Relaxed);
+        let current_pc_privileged = self.last_observed_pc_privileged.load(Ordering::Relaxed);
+        let last_syscall_number = self.last_syscall_number.load(Ordering::Acquire);
+        let last_syscall_pc = self.last_syscall_pc.load(Ordering::Relaxed);
+        let syscall_active = self.syscall_active.load(Ordering::Acquire);
+        let window_start_ns = self.cpu_hog_window_start_ns.load(Ordering::Acquire);
+
+        if window_start_ns == 0 {
+            self.cpu_hog_window_start_runtime_ns
+                .store(runtime_ns, Ordering::Relaxed);
+            self.cpu_hog_window_start_pc
+                .store(current_pc, Ordering::Relaxed);
+            self.cpu_hog_window_start_pc_privileged
+                .store(current_pc_privileged, Ordering::Relaxed);
+            self.cpu_hog_window_start_ns
+                .store(now_ns, Ordering::Release);
+            return None;
+        }
+
+        let window_ns = now_ns.saturating_sub(window_start_ns);
+        if window_ns < TASK_CPU_HOG_WINDOW_NS {
+            return None;
+        }
+
+        let window_start_runtime_ns = self.cpu_hog_window_start_runtime_ns.load(Ordering::Relaxed);
+        let start_pc = self.cpu_hog_window_start_pc.load(Ordering::Relaxed);
+        let start_pc_privileged = self
+            .cpu_hog_window_start_pc_privileged
+            .load(Ordering::Relaxed);
+        let consumed_runtime_ns = runtime_ns.saturating_sub(window_start_runtime_ns);
+        let usage_per_mille =
+            ((consumed_runtime_ns as u128 * 1_000) / window_ns as u128).min(1_000) as u32;
+
+        self.cpu_hog_window_start_runtime_ns
+            .store(runtime_ns, Ordering::Relaxed);
+        self.cpu_hog_window_start_pc
+            .store(current_pc, Ordering::Relaxed);
+        self.cpu_hog_window_start_pc_privileged
+            .store(current_pc_privileged, Ordering::Relaxed);
+        self.cpu_hog_window_start_ns
+            .store(now_ns, Ordering::Release);
+
+        (usage_per_mille >= TASK_CPU_HOG_THRESHOLD_PER_MILLE).then_some(TaskCpuHogSnapshot {
+            usage_per_mille,
+            window_ns,
+            runtime_ns: consumed_runtime_ns,
+            start_pc,
+            start_pc_privileged,
+            current_pc,
+            current_pc_privileged,
+            last_syscall_number,
+            last_syscall_pc,
+            syscall_active,
+        })
+    }
+
+    /// Return the current uncommitted running interval for this task.
+    ///
+    /// # Arguments
+    ///
+    /// * `now_ns` - Current monotonic timestamp in nanoseconds.
+    ///
+    /// # Returns
+    ///
+    /// Nanoseconds elapsed since the task was last scheduled in.
+    pub fn current_cpu_delta_ns(&self, now_ns: u64) -> u64 {
+        let start_ns = self.cpu_run_start_ns.load(Ordering::SeqCst);
+        if start_ns == 0 {
+            0
+        } else {
+            now_ns.saturating_sub(start_ns)
+        }
     }
 
     pub fn get_id(&self) -> usize {
@@ -593,14 +1880,153 @@ impl Task {
         self.id
     }
 
+    /// Record the executable path installed by a successful exec operation.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - Path that should be exposed as the task's executable image.
+    pub(crate) fn set_executable_path(&self, path: &str) {
+        *self.executable_path.write() = Some(path.to_string());
+    }
+
+    pub(crate) fn exchange_executable_path(&self, image: &Task) {
+        core::mem::swap(
+            &mut *self.executable_path.write(),
+            &mut *image.executable_path.write(),
+        );
+    }
+
+    /// Return the executable path installed by the most recent successful exec.
+    ///
+    /// # Returns
+    ///
+    /// The executable path, or `None` before the task has executed an image.
+    pub(crate) fn executable_path(&self) -> Option<String> {
+        self.executable_path.read().clone()
+    }
+
+    /// Return the task ID if this task has been registered with the scheduler.
+    ///
+    /// # Returns
+    ///
+    /// `Some(task_id)` for scheduler-visible tasks, or `None` for freshly
+    /// constructed tasks that have not been inserted into the task pool yet.
+    pub(crate) fn registered_id(&self) -> Option<usize> {
+        (self.id != 0).then_some(self.id)
+    }
+
     /// Set the task ID (used by TaskPool during task addition)
     pub fn set_id(&mut self, id: usize) {
         self.id = id;
-        // For new tasks, initialize TGID to equal ID (thread group leader)
-        // This will be overridden in clone_task for CLONE_VM threads
-        if self.tgid == 0 {
-            self.tgid = id;
+        if self.thread_group_id == 0 {
+            self.thread_group_id = id;
         }
+        if self.task_group_id.load(Ordering::SeqCst) == 0 {
+            self.task_group_id.store(id, Ordering::SeqCst);
+        }
+        if self.process_group_id.load(Ordering::SeqCst) == 0 {
+            self.process_group_id.store(id, Ordering::SeqCst);
+        }
+        if self.session_id.load(Ordering::SeqCst) == 0 {
+            self.session_id.store(id, Ordering::SeqCst);
+            self.is_session_leader.store(true, Ordering::SeqCst);
+        }
+    }
+
+    pub fn get_task_group_id(&self) -> usize {
+        self.get_process_group_id()
+    }
+
+    pub fn set_task_group_id(&self, task_group_id: usize) {
+        self.set_process_group_id(task_group_id);
+    }
+
+    /// Get the POSIX process group ID (PGID).
+    ///
+    /// # Returns
+    /// The global task ID that names this task's process group.
+    pub fn get_process_group_id(&self) -> usize {
+        let pgid = self.process_group_id.load(Ordering::SeqCst);
+        if pgid == 0 {
+            self.task_group_id.load(Ordering::SeqCst)
+        } else {
+            pgid
+        }
+    }
+
+    /// Set the POSIX process group ID (PGID).
+    ///
+    /// # Arguments
+    /// * `task_group_id` - Global task ID that names the target process group.
+    pub fn set_process_group_id(&self, task_group_id: usize) {
+        self.process_group_id.store(task_group_id, Ordering::SeqCst);
+        self.task_group_id.store(task_group_id, Ordering::SeqCst);
+    }
+
+    /// Get the POSIX session ID (SID).
+    ///
+    /// # Returns
+    /// The global task ID that names this task's session.
+    pub fn get_session_id(&self) -> usize {
+        self.session_id.load(Ordering::SeqCst)
+    }
+
+    /// Set the POSIX session ID (SID).
+    ///
+    /// # Arguments
+    /// * `session_id` - Global task ID that names the session.
+    pub fn set_session_id(&self, session_id: usize) {
+        self.session_id.store(session_id, Ordering::SeqCst);
+        self.is_session_leader
+            .store(session_id == self.id && self.id != 0, Ordering::SeqCst);
+    }
+
+    /// Returns true if this task is a POSIX session leader.
+    pub fn is_session_leader(&self) -> bool {
+        self.is_session_leader.load(Ordering::SeqCst)
+    }
+
+    /// Create a new POSIX session led by this task.
+    ///
+    /// This implements the kernel-side part of `setsid(2)`: the caller must
+    /// not already be a process group leader, and on success SID and PGID both
+    /// become the caller's task ID while the controlling terminal is dropped.
+    ///
+    /// # Returns
+    /// The new global SID on success.
+    pub fn create_session(&self) -> Result<usize, &'static str> {
+        let id = self.get_id();
+        if self.get_process_group_id() == id {
+            return Err("process group leader cannot create a new session");
+        }
+
+        self.session_id.store(id, Ordering::SeqCst);
+        self.set_process_group_id(id);
+        *self.controlling_tty.write() = None;
+        self.is_session_leader.store(true, Ordering::SeqCst);
+        Ok(id)
+    }
+
+    /// Set the task's controlling terminal.
+    ///
+    /// # Arguments
+    /// * `tty` - Weak reference to the controlling terminal, or `None` to
+    ///   detach from any controlling terminal.
+    pub fn set_controlling_tty(&self, tty: Option<Weak<TtyDevice>>) {
+        *self.controlling_tty.write() = tty;
+    }
+
+    /// Get the task's controlling terminal, if it is still alive.
+    ///
+    /// # Returns
+    /// Strong reference to the controlling TTY, or `None`.
+    pub fn get_controlling_tty(&self) -> Option<Arc<TtyDevice>> {
+        self.controlling_tty.read().as_ref().and_then(Weak::upgrade)
+    }
+
+    /// Detach the task from its controlling terminal.
+    pub fn clear_controlling_tty(&self) {
+        *self.controlling_tty.write() = None;
     }
 
     /// Set the namespace ID (used by TaskPool during task addition)
@@ -625,6 +2051,20 @@ impl Task {
         namespace_id
     }
 
+    /// Return the task's namespace ID if it has been registered yet.
+    ///
+    /// Unlike `get_namespace_id()`, this never panics for tasks that have
+    /// not joined a namespace yet (for example kernel service tasks).
+    ///
+    /// # Returns
+    ///
+    /// The namespace ID, or `None` when the task is not registered with a
+    /// namespace.
+    pub fn try_get_namespace_id(&self) -> Option<usize> {
+        let namespace_id = self.namespace_id.load(atomic::Ordering::SeqCst);
+        (namespace_id != 0).then_some(namespace_id)
+    }
+
     /// Get the task's namespace.
     ///
     /// # Returns
@@ -646,12 +2086,15 @@ impl Task {
     /// # Arguments
     /// * `ns` - New namespace for the task
     pub fn set_namespace(&self, ns: Arc<namespace::TaskNamespace>) {
-        *self.namespace.write() = ns;
-        // Allocate a new namespace-local ID (and register translation mapping)
-        self.namespace_id.store(
-            self.namespace.write().allocate_task_id_for(self.id),
-            atomic::Ordering::SeqCst,
-        );
+        let previous_namespace = {
+            let mut namespace = self.namespace.write();
+            core::mem::replace(&mut *namespace, ns.clone())
+        };
+        if self.id != 0 {
+            previous_namespace.unregister_mapping_for_global(self.id);
+            self.namespace_id
+                .store(ns.allocate_task_id_for(self.id), atomic::Ordering::SeqCst);
+        }
     }
 
     /// Get the Thread Group ID (TGID)
@@ -661,20 +2104,12 @@ impl Task {
     /// For standalone tasks (no CLONE_VM), TGID equals the task ID.
     ///
     /// # Returns
-    /// The thread group ID
-    pub fn get_tgid(&self) -> usize {
-        self.tgid
+    pub fn get_thread_group_id(&self) -> usize {
+        self.thread_group_id
     }
 
-    /// Set the Thread Group ID (TGID)
-    ///
-    /// This is used internally when cloning tasks with CLONE_VM to make
-    /// the child thread share the parent's thread group.
-    ///
-    /// # Arguments
-    /// * `tgid` - New thread group ID
-    pub fn set_tgid(&mut self, tgid: usize) {
-        self.tgid = tgid;
+    pub fn set_thread_group_id(&mut self, thread_group_id: usize) {
+        self.thread_group_id = thread_group_id;
     }
 
     /// Set the task state
@@ -693,6 +2128,30 @@ impl Task {
     ///
     pub fn get_state(&self) -> TaskState {
         self.state.load(Ordering::SeqCst)
+    }
+
+    /// Mark this task as stopped by a process-control event.
+    pub fn mark_process_control_stopped(&self) {
+        self.process_control_stopped.store(true, Ordering::SeqCst);
+        self.process_control_stop_reported
+            .store(false, Ordering::SeqCst);
+    }
+
+    /// Clear process-control stopped state after a continue event.
+    pub fn clear_process_control_stopped(&self) {
+        self.process_control_stopped.store(false, Ordering::SeqCst);
+        self.process_control_stop_reported
+            .store(false, Ordering::SeqCst);
+    }
+
+    /// Return whether this task has an unreported process-control stop.
+    pub fn take_process_control_stop_report(&self) -> bool {
+        if !self.process_control_stopped.load(Ordering::SeqCst) {
+            return false;
+        }
+        self.process_control_stop_reported
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
     }
 
     /// Get the size of the task.
@@ -728,19 +2187,62 @@ impl Task {
     /// # Returns
     /// If successful, returns Ok(()), otherwise returns an error.
     pub fn set_brk(&self, brk: usize) -> Result<(), &'static str> {
+        let _transaction = self.brk_transaction.lock();
+        self.set_brk_locked(brk)
+    }
+
+    /// Atomically adjust the program break and return `(old_brk, new_brk)`.
+    ///
+    /// The transaction lock covers the current-value read, checked arithmetic,
+    /// page-table changes, ownership tracking, and final brk publication.  A
+    /// plain atomic brk value is insufficient because CLONE_VM callers can
+    /// otherwise calculate two updates from the same stale value.
+    pub fn adjust_brk(&self, increment: isize) -> Result<(usize, usize), &'static str> {
+        let _transaction = self.brk_transaction.lock();
+        let prev_brk = self.get_brk();
+        if increment == 0 {
+            return Ok((prev_brk, prev_brk));
+        }
+
+        let brk = if increment > 0 {
+            prev_brk.checked_add(increment as usize)
+        } else {
+            increment
+                .checked_abs()
+                .and_then(|magnitude| prev_brk.checked_sub(magnitude as usize))
+        }
+        .ok_or("Program break adjustment overflows")?;
+
+        self.set_brk_locked(brk)?;
+        Ok((prev_brk, brk))
+    }
+
+    fn set_brk_locked(&self, brk: usize) -> Result<(), &'static str> {
         let prev_brk = self.get_brk();
         if brk < prev_brk {
             /* Free pages */
             /* Round address to the page boundary */
-            let prev_addr = (prev_brk + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
-            let addr = (brk + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+            let prev_addr = prev_brk
+                .checked_add(PAGE_SIZE - 1)
+                .ok_or("Program break page alignment overflows")?
+                & !(PAGE_SIZE - 1);
+            let addr = brk
+                .checked_add(PAGE_SIZE - 1)
+                .ok_or("Program break page alignment overflows")?
+                & !(PAGE_SIZE - 1);
             let num_of_pages = (prev_addr - addr) / PAGE_SIZE;
             self.free_data_pages(addr, num_of_pages);
         } else if brk > prev_brk {
             /* Allocate pages */
             /* Round address to the page boundary */
-            let prev_addr = (prev_brk + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
-            let addr = (brk + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+            let prev_addr = prev_brk
+                .checked_add(PAGE_SIZE - 1)
+                .ok_or("Program break page alignment overflows")?
+                & !(PAGE_SIZE - 1);
+            let addr = brk
+                .checked_add(PAGE_SIZE - 1)
+                .ok_or("Program break page alignment overflows")?
+                & !(PAGE_SIZE - 1);
             let num_of_pages = (addr - prev_addr) / PAGE_SIZE;
 
             // crate::println!("[set_brk] Expanding: prev_brk={:#x} -> brk={:#x}", prev_brk, brk);
@@ -756,20 +2258,48 @@ impl Task {
                     None => {
                         // crate::println!("[set_brk] No existing mapping, allocating {} pages at {:#x}",
                         //     num_of_pages, prev_addr);
-                        match self.allocate_data_pages(prev_addr, num_of_pages) {
-                            Ok(_) => {
-                                // crate::println!("[set_brk] Successfully allocated {} pages", num_of_pages);
-                            }
-                            Err(_e) => {
-                                // crate::println!("[set_brk] Failed to allocate pages: {}", e);
-                                return Err("Failed to allocate pages");
-                            }
-                        }
+                        self.allocate_brk_pages(prev_addr, num_of_pages)?;
                     }
                 }
             }
         }
         self.brk.store(brk, Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn allocate_brk_pages(&self, vaddr: usize, num_of_pages: usize) -> Result<(), &'static str> {
+        let mut allocated_pages = 0usize;
+
+        while allocated_pages < num_of_pages {
+            let remaining_pages = num_of_pages - allocated_pages;
+            let mut chunk_pages = remaining_pages.min(BRK_PHYSICAL_CHUNK_PAGES);
+
+            loop {
+                let offset = allocated_pages
+                    .checked_mul(PAGE_SIZE)
+                    .ok_or("Program break allocation offset overflows")?;
+                let chunk_vaddr = vaddr
+                    .checked_add(offset)
+                    .ok_or("Program break allocation address overflows")?;
+
+                match self.allocate_data_pages(chunk_vaddr, chunk_pages) {
+                    Ok(_) => {
+                        allocated_pages += chunk_pages;
+                        break;
+                    }
+                    Err(_) if chunk_pages > 1 => {
+                        chunk_pages /= 2;
+                    }
+                    Err(error) => {
+                        if allocated_pages > 0 {
+                            self.free_data_pages(vaddr, allocated_pages);
+                        }
+                        return Err(error);
+                    }
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -800,9 +2330,9 @@ impl Task {
             return Err("Address is not page aligned");
         }
 
-        let pages = allocate_raw_pages(num_of_pages);
+        let page_alloc = ContiguousPages::new(num_of_pages).ok_or("Failed to allocate pages")?;
         let size = num_of_pages * PAGE_SIZE;
-        let paddr = pages as usize;
+        let paddr = virt_to_phys(page_alloc.as_ptr() as usize);
         let mmap = VirtualMemoryMap {
             pmarea: MemoryArea {
                 start: paddr,
@@ -812,19 +2342,15 @@ impl Task {
                 start: vaddr,
                 end: vaddr + size - 1,
             },
+            vm_start: vaddr,
             permissions,
-            is_shared: false, // Default to not shared for task-allocated pages
+            is_shared: false,
+            memory_attribute: crate::vm::vmem::MemoryAttribute::Normal,
             owner: None,
         };
-        self.vm_manager
-            .add_memory_map(mmap.clone())
-            .map_err(|e| panic!("Failed to add memory map: {}", e))?;
+        self.vm_manager.add_memory_map(mmap.clone())?;
 
-        for i in 0..num_of_pages {
-            let page = unsafe { Box::from_raw(pages.wrapping_add(i)) };
-            let vaddr = mmap.vmarea.start + i * PAGE_SIZE;
-            self.add_managed_page(ManagedPage { vaddr, page });
-        }
+        self.page_allocations.write().push(page_alloc);
 
         Ok(mmap)
     }
@@ -835,77 +2361,19 @@ impl Task {
     /// * `vaddr` - The virtual address to free pages (NOTE: The address must be page aligned)
     /// * `num_of_pages` - The number of pages to free
     pub fn free_pages(&self, vaddr: usize, num_of_pages: usize) {
-        let page = vaddr / PAGE_SIZE;
-        for p in 0..num_of_pages {
-            let vaddr = (page + p) * PAGE_SIZE;
-            match self.vm_manager.remove_memory_map_by_addr(vaddr) {
-                Some(mmap) => {
-                    if p == 0 && mmap.vmarea.start < vaddr {
-                        /* Re add the first part of the memory map */
-                        let size = vaddr - mmap.vmarea.start;
-                        let paddr = mmap.pmarea.start;
-                        let mmap1 = VirtualMemoryMap {
-                            pmarea: MemoryArea {
-                                start: paddr,
-                                end: paddr + size - 1,
-                            },
-                            vmarea: MemoryArea {
-                                start: mmap.vmarea.start,
-                                end: vaddr - 1,
-                            },
-                            permissions: mmap.permissions,
-                            is_shared: mmap.is_shared,
-                            owner: mmap.owner.clone(),
-                        };
-                        self.vm_manager
-                            .add_memory_map(mmap1)
-                            .map_err(|e| panic!("Failed to add memory map: {}", e))
-                            .unwrap();
-                        // println!("Removed map : {:#x} - {:#x}", mmap.vmarea.start, mmap.vmarea.end);
-                        // println!("Re added map: {:#x} - {:#x}", mmap1.vmarea.start, mmap1.vmarea.end);
-                    }
-                    if p == num_of_pages - 1 && mmap.vmarea.end > vaddr + PAGE_SIZE - 1 {
-                        /* Re add the second part of the memory map */
-                        let size = mmap.vmarea.end - (vaddr + PAGE_SIZE) + 1;
-                        let paddr = mmap.pmarea.start + (vaddr + PAGE_SIZE - mmap.vmarea.start);
-                        let mmap2 = VirtualMemoryMap {
-                            pmarea: MemoryArea {
-                                start: paddr,
-                                end: paddr + size - 1,
-                            },
-                            vmarea: MemoryArea {
-                                start: vaddr + PAGE_SIZE,
-                                end: mmap.vmarea.end,
-                            },
-                            permissions: mmap.permissions,
-                            is_shared: mmap.is_shared,
-                            owner: mmap.owner.clone(),
-                        };
-                        self.vm_manager
-                            .add_memory_map(mmap2)
-                            .map_err(|e| panic!("Failed to add memory map: {}", e))
-                            .unwrap();
-                        // println!("Removed map : {:#x} - {:#x}", mmap.vmarea.start, mmap.vmarea.end);
-                        // println!("Re added map: {:#x} - {:#x}", mmap2.vmarea.start, mmap2.vmarea.end);
-                    }
-                    // let offset = vaddr - mmap.vmarea.start;
-                    // free_raw_pages((mmap.pmarea.start + offset) as *mut Page, 1);
-
-                    if let Some(free_page) = self.remove_managed_page(vaddr) {
-                        free_boxed_page(free_page.page);
-                    }
-
-                    // println!("Freed pages : {:#x} - {:#x}", vaddr, vaddr + PAGE_SIZE - 1);
-                }
-                None => {}
-            }
+        let Some(length) = num_of_pages.checked_mul(PAGE_SIZE) else {
+            return;
+        };
+        if length == 0 || vaddr.checked_add(length).is_none() {
+            return;
         }
-        /* Unmap pages */
-        let asid = self.vm_manager.get_asid();
-        let root_pagetable = self.vm_manager.get_root_page_table().unwrap();
-        for p in 0..num_of_pages {
-            let vaddr = (page + p) * PAGE_SIZE;
-            root_pagetable.unmap(asid, vaddr);
+
+        let removed_maps = self.vm_manager.remove_memory_map_range(vaddr, length);
+        for removed_map in &removed_maps {
+            if let Some(owner) = &removed_map.owner {
+                owner.on_unmapped(removed_map.vmarea.start, removed_map.vmarea.size());
+            }
+            reclaim_private_removed_mapping(self, removed_map);
         }
     }
 
@@ -1047,64 +2515,25 @@ impl Task {
                 start: vaddr,
                 end: vaddr + num_of_pages * PAGE_SIZE - 1,
             },
+            vm_start: vaddr,
             permissions,
             is_shared: VirtualMemoryRegion::Guard.is_shareable(), // Guard pages can be shared
+            memory_attribute: crate::vm::vmem::MemoryAttribute::Normal,
             owner: None,
         };
         Ok(mmap)
     }
 
-    /// Add pages to the task
-    ///
-    /// # Arguments
-    /// * `pages` - The managed page to add
-    ///
-    /// # Note
-    /// Pages added as ManagedPage of the Task will be automatically freed when the Task is terminated.
-    /// So, you must not free them by calling free_raw_pages/free_boxed_pages manually.
-    ///
-    pub fn add_managed_page(&self, pages: ManagedPage) {
-        self.managed_pages.write().push(pages);
-    }
-
-    /// Get managed page
-    ///
-    /// # Arguments
-    /// * `vaddr` - The virtual address of the page
-    ///
-    /// # Returns
-    /// The managed page if found, otherwise None
-    ///
-    fn get_managed_page(&self, vaddr: usize) -> Option<ManagedPage> {
-        let pages = self.managed_pages.read();
-        for page in pages.iter() {
-            if page.vaddr == vaddr {
-                return Some(ManagedPage {
-                    vaddr: page.vaddr,
-                    page: page.page.clone(),
-                });
-            }
-        }
-        None
-    }
-
-    /// Remove managed page
-    ///
-    /// # Arguments
-    /// * `vaddr` - The virtual address of the page
-    ///
-    /// # Returns
-    /// The removed managed page if found, otherwise None
-    ///
-    pub fn remove_managed_page(&self, vaddr: usize) -> Option<crate::task::ManagedPage> {
-        let mut pages = self.managed_pages.write();
-        for i in 0..pages.len() {
-            if pages[i].vaddr == vaddr {
-                let page = pages.remove(i);
-                return Some(page);
-            }
-        }
-        None
+    fn take_exact_page_allocation(
+        &self,
+        paddr: usize,
+        page_count: usize,
+    ) -> Option<ContiguousPages> {
+        let mut allocations = self.page_allocations.write();
+        let index = allocations
+            .iter()
+            .position(|alloc| alloc.as_paddr() == paddr && alloc.len() == page_count)?;
+        Some(allocations.swap_remove(index))
     }
 
     // Set the entry point
@@ -1117,25 +2546,177 @@ impl Task {
     /// # Returns
     /// The parent task ID, or None if there is no parent
     pub fn get_parent_id(&self) -> Option<usize> {
-        self.parent_id
+        match self.parent_id.load(Ordering::SeqCst) {
+            0 => None,
+            id => Some(id),
+        }
     }
 
-    /// Set the parent task
+    /// Clear the parent task relationship.
     ///
-    /// # Arguments
-    /// * `parent_id` - The ID of the parent task
-    pub fn set_parent_id(&mut self, parent_id: usize) {
-        self.parent_id = Some(parent_id);
+    /// # Returns
+    ///
+    /// This function does not return a value.
+    pub fn clear_parent_id(&self) {
+        self.parent_id.store(0, Ordering::SeqCst);
+        self.parent_thread_group_id.store(0, Ordering::SeqCst);
     }
 
-    /// Add a child task
+    /// Return the thread group which owns this task's parent relationship.
     ///
-    /// # Arguments
-    /// * `child_id` - The ID of the child task
-    pub fn add_child(&self, child_id: usize) {
+    /// # Returns
+    ///
+    /// The parent thread-group ID, or `None` when this task has no parent.
+    pub(crate) fn get_parent_thread_group_id(&self) -> Option<usize> {
+        match self.parent_thread_group_id.load(Ordering::SeqCst) {
+            0 => None,
+            id => Some(id),
+        }
+    }
+
+    fn begin_exit(&self) {
+        {
+            let _children = self.children.write();
+            self.exiting.store(true, Ordering::Release);
+        }
+        self.cancel_software_timers();
+        crate::sync::futex::remove_task_waiter(self.id, self.thread_group_id);
+        crate::abi::linux::generic::futex::remove_task_waiter(self.id);
+        release_task_deadline(self);
+    }
+
+    fn try_adopt_child(&self, child: &Task, expected_parent_id: Option<usize>) -> bool {
         let mut children = self.children.write();
-        if !children.contains(&child_id) {
-            children.push(child_id);
+        if self.exiting.load(Ordering::Acquire) || child.get_parent_id() != expected_parent_id {
+            return false;
+        }
+
+        if !children.contains(&child.id) {
+            children.push(child.id);
+        }
+        child
+            .parent_thread_group_id
+            .store(self.thread_group_id, Ordering::SeqCst);
+        child.parent_id.store(self.id, Ordering::SeqCst);
+        true
+    }
+
+    /// Adopt a registered child or leave it parentless if no stable reaper exists.
+    ///
+    /// The preferred parent is checked under its child-list lock. If it has
+    /// begun exit, init is tried under the same protocol instead.
+    pub(crate) fn adopt_registered_child(&self, child: &Task) -> bool {
+        if self.try_adopt_child(child, None) {
+            return true;
+        }
+
+        if self.id != INIT_TASK_ID
+            && let Some(init) = get_task_by_id(INIT_TASK_ID)
+        {
+            return init.try_adopt_child(child, None);
+        }
+
+        false
+    }
+
+    /// Adopt a process child through this task's thread-group leader.
+    ///
+    /// A process may call `fork` from any of its threads, but process children
+    /// belong to the process-wide wait set. Keeping those children on the
+    /// thread-group leader makes them visible to the process reaper even when
+    /// the worker thread which issued `fork` exits or never calls `waitpid`.
+    pub(crate) fn adopt_registered_process_child(&self, child: &Task) -> bool {
+        if self.thread_group_id != self.id {
+            if let Some(leader) = get_task_by_id(self.thread_group_id)
+                && leader.try_adopt_child(child, None)
+            {
+                return true;
+            }
+
+            // A process can outlive its original leader. Keep a fork made by
+            // a surviving worker in that process's wait set instead of letting
+            // the leader's generic fallback immediately reparent it to init.
+            if self.try_adopt_child(child, None) {
+                return true;
+            }
+
+            if self.id != INIT_TASK_ID
+                && let Some(init) = get_task_by_id(INIT_TASK_ID)
+            {
+                return init.try_adopt_child(child, None);
+            }
+
+            return false;
+        }
+
+        self.adopt_registered_child(child)
+    }
+
+    fn orphan_reaper(&self) -> Option<Arc<Task>> {
+        if self.thread_group_id != self.id
+            && let Some(leader) = get_task_by_id(self.thread_group_id)
+            && !matches!(
+                leader.get_state(),
+                TaskState::Zombie | TaskState::Terminated
+            )
+            && !leader.exiting.load(Ordering::Acquire)
+        {
+            return Some(leader);
+        }
+
+        if self.id != INIT_TASK_ID {
+            get_task_by_id(INIT_TASK_ID)
+        } else {
+            None
+        }
+    }
+
+    fn reparent_children(&self) {
+        let child_ids = {
+            let mut children = self.children.write();
+            self.exiting.store(true, Ordering::Release);
+            core::mem::take(&mut *children)
+        };
+
+        let reaper = self.orphan_reaper();
+
+        for child_id in child_ids {
+            let Some(child) = get_task_by_id(child_id) else {
+                continue;
+            };
+            if child.get_parent_id() != Some(self.id) {
+                continue;
+            }
+
+            let mut new_parent_id = None;
+            if let Some(reaper) = &reaper
+                && reaper.try_adopt_child(&child, Some(self.id))
+            {
+                new_parent_id = Some(reaper.get_id());
+            }
+
+            if new_parent_id.is_none()
+                && self.id != INIT_TASK_ID
+                && reaper
+                    .as_ref()
+                    .is_none_or(|reaper| reaper.id != INIT_TASK_ID)
+                && let Some(init) = get_task_by_id(INIT_TASK_ID)
+                && init.try_adopt_child(&child, Some(self.id))
+            {
+                new_parent_id = Some(INIT_TASK_ID);
+            }
+
+            if let Some(reaper_id) = new_parent_id {
+                if child.get_state() == TaskState::Zombie {
+                    finalize_zombie(child_id, Some(reaper_id));
+                }
+            } else if child.get_parent_id() == Some(self.id) {
+                child.clear_parent_id();
+                if child.get_state() == TaskState::Zombie {
+                    child.set_state(TaskState::Terminated);
+                    cleanup_zombie(child_id);
+                }
+            }
         }
     }
 
@@ -1182,6 +2763,132 @@ impl Task {
             None
         } else {
             Some(status)
+        }
+    }
+
+    /// Request exit after the current ABI mutable borrow has been released.
+    ///
+    /// # Arguments
+    ///
+    /// * `status` - Exit status to report for this task.
+    ///
+    /// # Returns
+    ///
+    /// This method does not return a value. The syscall dispatcher consumes the
+    /// request after the ABI syscall handler returns.
+    pub(crate) fn request_deferred_exit(&self, status: i32) {
+        *self.deferred_exit_request.lock() = Some(DeferredExitRequest::Exit { status });
+    }
+
+    /// Request thread exit with user stack and TLS mapping cleanup after the ABI borrow.
+    ///
+    /// # Arguments
+    ///
+    /// * `status` - Exit status to report for this thread.
+    /// * `stack_mapping_base` - Base address of the thread stack mapping.
+    /// * `stack_mapping_len` - Length of the thread stack mapping in bytes.
+    /// * `tls_mapping_base` - Base address of the thread TLS mapping.
+    /// * `tls_mapping_len` - Length of the thread TLS mapping in bytes.
+    ///
+    /// # Returns
+    ///
+    /// This method does not return a value. The syscall dispatcher releases the
+    /// active ABI borrow before performing the requested cleanup and exit.
+    pub(crate) fn request_deferred_thread_exit_cleanup(
+        &self,
+        status: i32,
+        stack_mapping_base: usize,
+        stack_mapping_len: usize,
+        tls_mapping_base: usize,
+        tls_mapping_len: usize,
+    ) {
+        *self.deferred_exit_request.lock() = Some(DeferredExitRequest::ThreadExitCleanup {
+            status,
+            stack_mapping_base,
+            stack_mapping_len,
+            tls_mapping_base,
+            tls_mapping_len,
+        });
+    }
+
+    /// Request thread-group exit after the current ABI mutable borrow is released.
+    ///
+    /// # Arguments
+    ///
+    /// * `status` - Exit status to apply to the thread group.
+    ///
+    /// # Returns
+    ///
+    /// This method does not return a value. The syscall dispatcher consumes the
+    /// request after the ABI syscall handler returns.
+    pub(crate) fn request_deferred_exit_group(&self, status: i32) {
+        *self.deferred_exit_request.lock() = Some(DeferredExitRequest::ExitGroup { status });
+    }
+
+    /// Record the Linux clear-child-tid address for one exit cleanup.
+    ///
+    /// # Arguments
+    ///
+    /// * `ptr` - The optional user address to clear and wake during exit.
+    pub(crate) fn set_linux_clear_child_tid(&self, ptr: Option<usize>) {
+        *self.clear_child_tid.lock() = ptr;
+    }
+
+    fn take_linux_clear_child_tid(&self) -> Option<usize> {
+        self.clear_child_tid.lock().take()
+    }
+
+    /// Perform Linux clear-child-tid cleanup without touching task-local ABI state.
+    ///
+    /// The address is consumed before access, so both a current-task ABI hook
+    /// and a remote exit-group path can invoke this safely without double wakeups.
+    pub(crate) fn clear_linux_child_tid_on_exit(&self) {
+        let Some(ptr) = self.take_linux_clear_child_tid() else {
+            return;
+        };
+        let Some(paddr) = self.vm_manager.translate_to_kva(ptr) else {
+            return;
+        };
+
+        // SAFETY: `translate_to_kva` validated this user address in this task's
+        // address space; exit owns the one-time clear-child-tid transition.
+        unsafe {
+            core::ptr::write_volatile(paddr as *mut i32, 0);
+        }
+        let _ = crate::abi::linux::generic::futex::wake_task_address(self, ptr, 1);
+    }
+
+    fn take_deferred_exit_request(&self) -> Option<DeferredExitRequest> {
+        self.deferred_exit_request.lock().take()
+    }
+
+    /// Perform one deferred ABI exit request after its ABI mutable borrow has ended.
+    ///
+    /// # Returns
+    ///
+    /// This method does not return a value. It does nothing when no deferred exit
+    /// request is pending.
+    pub(crate) fn process_deferred_exit_request(&self) {
+        let Some(request) = self.take_deferred_exit_request() else {
+            return;
+        };
+
+        match request {
+            DeferredExitRequest::Exit { status } => self.exit(status),
+            DeferredExitRequest::ThreadExitCleanup {
+                status,
+                stack_mapping_base,
+                stack_mapping_len,
+                tls_mapping_base,
+                tls_mapping_len,
+            } => self.exit_with_thread_cleanup(
+                status,
+                stack_mapping_base,
+                stack_mapping_len,
+                tls_mapping_base,
+                tls_mapping_len,
+            ),
+            DeferredExitRequest::ExitGroup { status } => self.exit_group(status),
         }
     }
 
@@ -1261,6 +2968,11 @@ impl Task {
     /// If the task cannot be cloned, an error is returned.
     ///
     pub fn clone_task(&self, flags: CloneFlags) -> Result<Task, &'static str> {
+        crate::breadcrumb::drop(
+            crate::breadcrumb::CLONE_ENTER,
+            self.registered_id().unwrap_or(0) as u64,
+            flags.get_raw() as u64,
+        );
         // Create a new task in the same namespace as the parent
         let mut child = Task::new_with_namespace(
             self.name.read().clone(),
@@ -1284,93 +2996,215 @@ impl Task {
                 } else {
                     // CLONE_VM: share the same address space via Arc<VirtualMemoryManager>
                     child.vm_manager = self.vm_manager.clone();
+                    child.page_allocations = self.page_allocations.clone();
+                    child.task_pages = self.task_pages.clone();
+                    child.brk = self.brk.clone();
+                    child.data_size = self.data_size.clone();
+                    child.brk_transaction = self.brk_transaction.clone();
                 }
             }
         }
 
         if !flags.is_set(CloneFlagsDef::Vm) {
             // Copy or share memory maps from parent to child without cloning lists
-            self.vm_manager.memmaps_iter_with(|iter| {
-                for mmap in iter {
-                    let num_pages =
-                        (mmap.vmarea.end - mmap.vmarea.start + 1 + PAGE_SIZE - 1) / PAGE_SIZE;
-                    if num_pages == 0 {
-                        continue;
+            let memmaps = self
+                .vm_manager
+                .with_memmaps(|maps| maps.values().cloned().collect::<Vec<_>>());
+            for mmap in memmaps {
+                let num_pages =
+                    (mmap.vmarea.end - mmap.vmarea.start + 1 + PAGE_SIZE - 1) / PAGE_SIZE;
+                if num_pages == 0 {
+                    continue;
+                }
+
+                let vaddr = mmap.vmarea.start;
+                if mmap.is_shared {
+                    // Shared memory regions: just reference the same physical pages
+                    let shared_mmap = VirtualMemoryMap {
+                        pmarea: mmap.pmarea,
+                        vmarea: mmap.vmarea,
+                        vm_start: mmap.vm_start,
+                        permissions: mmap.permissions,
+                        is_shared: true,
+                        memory_attribute: mmap.memory_attribute,
+                        owner: mmap.owner.clone(),
+                    };
+                    child
+                        .vm_manager
+                        .add_memory_map(shared_mmap.clone())
+                        .map_err(|_| "Failed to add shared memory map to child task")?;
+                    if let Some(owner) = &shared_mmap.owner {
+                        owner.on_mapped(
+                            shared_mmap.vmarea.start,
+                            shared_mmap.pmarea.start,
+                            shared_mmap.vmarea.size(),
+                            shared_mmap.vmarea.start - shared_mmap.vm_start,
+                        );
                     }
 
-                    let vaddr = mmap.vmarea.start;
-                    if mmap.is_shared {
-                        // Shared memory regions: just reference the same physical pages
-                        let shared_mmap = VirtualMemoryMap {
-                            pmarea: mmap.pmarea,
-                            vmarea: mmap.vmarea,
-                            permissions: mmap.permissions,
-                            is_shared: true,
-                            owner: mmap.owner.clone(),
-                        };
-                        child
-                            .vm_manager
-                            .add_memory_map(shared_mmap.clone())
-                            .map_err(|_| "Failed to add shared memory map to child task")?;
-
-                        // Pre-map trampoline page if applicable
-                        if mmap.vmarea.start == 0xffff_ffff_ffff_f000 {
-                            if let Some(root_pagetable) = child.vm_manager.get_root_page_table() {
-                                root_pagetable
-                                    .map_memory_area(
-                                        child.vm_manager.get_asid(),
-                                        shared_mmap,
-                                        true,
-                                        true,
-                                    )
-                                    .map_err(|_| "Failed to map trampoline page")?;
-                            }
+                    // Pre-map trampoline page if applicable
+                    if mmap.vmarea.start == 0xffff_ffff_ffff_f000 {
+                        if let Some(mut root_pagetable) = child.vm_manager.get_root_page_table() {
+                            root_pagetable
+                                .map_memory_area(shared_mmap, true, true)
+                                .map_err(|_| "Failed to map trampoline page")?;
                         }
-                    } else {
-                        // Private memory regions: allocate new pages and copy contents
-                        let permissions = mmap.permissions;
-                        let pages = allocate_raw_pages(num_pages);
-                        let size = num_pages * PAGE_SIZE;
-                        let paddr = pages as usize;
+                    }
+                } else if let Some(owner) = &mmap.owner {
+                    if let Some(cloned_owner) = owner.fork_clone() {
                         let new_mmap = VirtualMemoryMap {
-                            pmarea: MemoryArea {
-                                start: paddr,
-                                end: paddr + (size - 1),
-                            },
-                            vmarea: MemoryArea {
-                                start: vaddr,
-                                end: vaddr + (size - 1),
-                            },
-                            permissions,
+                            pmarea: MemoryArea { start: 0, end: 0 },
+                            vmarea: mmap.vmarea,
+                            vm_start: mmap.vm_start,
+                            permissions: mmap.permissions,
                             is_shared: false,
-                            owner: mmap.owner.clone(),
+                            memory_attribute: mmap.memory_attribute,
+                            owner: Some(cloned_owner),
                         };
-
-                        // Copy original contents page-by-page
-                        for i in 0..num_pages {
-                            let src_page_addr = mmap.pmarea.start + i * PAGE_SIZE;
-                            let dst_page_addr = new_mmap.pmarea.start + i * PAGE_SIZE;
-                            unsafe {
-                                core::ptr::copy_nonoverlapping(
-                                    src_page_addr as *const u8,
-                                    dst_page_addr as *mut u8,
-                                    PAGE_SIZE,
-                                );
-                            }
-                            child.add_managed_page(ManagedPage {
-                                vaddr: new_mmap.vmarea.start + i * PAGE_SIZE,
-                                page: unsafe { Box::from_raw(pages.wrapping_add(i)) },
-                            });
-                        }
-
                         child
                             .vm_manager
                             .add_memory_map(new_mmap)
-                            .map_err(|_| "Failed to add memory map to child task")?;
+                            .map_err(|_| "Failed to add owner-based map to child task")?;
+                    } else {
+                        if mmap.pmarea.start == 0 {
+                            // Lazy: clone Arc, child COWs independently on fault
+                            let new_mmap = VirtualMemoryMap {
+                                pmarea: MemoryArea { start: 0, end: 0 },
+                                vmarea: mmap.vmarea,
+                                vm_start: mmap.vm_start,
+                                permissions: mmap.permissions,
+                                is_shared: false,
+                                memory_attribute: mmap.memory_attribute,
+                                owner: Some(Arc::clone(owner)),
+                            };
+                            child
+                                .vm_manager
+                                .add_memory_map(new_mmap)
+                                .map_err(|_| "Failed to add owner-based map to child task")?;
+                        } else {
+                            // Eager: copy physical pages
+                            let permissions = mmap.permissions;
+                            let page_alloc = ContiguousPages::new(num_pages)
+                                .ok_or("Failed to allocate pages for clone")?;
+                            let size = num_pages * PAGE_SIZE;
+                            let paddr = virt_to_phys(page_alloc.as_ptr() as usize);
+                            let new_mmap = VirtualMemoryMap {
+                                pmarea: MemoryArea {
+                                    start: paddr,
+                                    end: paddr + (size - 1),
+                                },
+                                vmarea: MemoryArea {
+                                    start: vaddr,
+                                    end: vaddr + (size - 1),
+                                },
+                                vm_start: vaddr,
+                                permissions,
+                                is_shared: false,
+                                memory_attribute: mmap.memory_attribute,
+                                owner: None,
+                            };
+                            // SAFETY: src/dst are valid page-aligned ranges of `size` bytes.
+                            unsafe {
+                                let src_start = phys_to_virt(mmap.pmarea.start);
+                                let dst_start = phys_to_virt(paddr);
+                                core::ptr::copy_nonoverlapping(
+                                    src_start as *const u8,
+                                    dst_start as *mut u8,
+                                    size,
+                                );
+                            }
+                            child.page_allocations.write().push(page_alloc);
+                            child
+                                .vm_manager
+                                .add_memory_map(new_mmap)
+                                .map_err(|_| "Failed to add memory map to child task")?;
+                        }
                     }
+                } else if mmap.pmarea.start != 0 {
+                    if !DIAGNOSTIC_DISABLE_FORK_COW
+                        && let Some(page_alloc) =
+                            self.take_exact_page_allocation(mmap.pmarea.start, num_pages)
+                    {
+                        let base_page_idx = (mmap.vmarea.start - mmap.vm_start) / PAGE_SIZE;
+                        let cow_owner = Arc::new(ForkCowPageOwner::new(base_page_idx, page_alloc));
+                        let cow_map = VirtualMemoryMap {
+                            pmarea: MemoryArea { start: 0, end: 0 },
+                            vmarea: mmap.vmarea,
+                            vm_start: mmap.vm_start,
+                            permissions: mmap.permissions,
+                            is_shared: false,
+                            memory_attribute: mmap.memory_attribute,
+                            owner: Some(cow_owner),
+                        };
+                        self.vm_manager.with_memmaps_mut(|maps| {
+                            if let Some(parent_map) = maps.get_mut(&mmap.vmarea.start) {
+                                *parent_map = cow_map.clone();
+                            }
+                        });
+                        self.vm_manager
+                            .unmap_range_from_mmu(mmap.vmarea.start, mmap.vmarea.end);
+                        child
+                            .vm_manager
+                            .add_memory_map(cow_map)
+                            .map_err(|_| "Failed to add COW memory map to child task")?;
+                        continue;
+                    }
+
+                    // Private memory regions: allocate new pages and copy contents
+                    let permissions = mmap.permissions;
+                    let page_alloc = ContiguousPages::new(num_pages)
+                        .ok_or("Failed to allocate pages for clone")?;
+                    let size = num_pages * PAGE_SIZE;
+                    let paddr = virt_to_phys(page_alloc.as_ptr() as usize);
+                    let new_mmap = VirtualMemoryMap {
+                        pmarea: MemoryArea {
+                            start: paddr,
+                            end: paddr + (size - 1),
+                        },
+                        vmarea: MemoryArea {
+                            start: vaddr,
+                            end: vaddr + (size - 1),
+                        },
+                        vm_start: vaddr,
+                        permissions,
+                        is_shared: false,
+                        memory_attribute: mmap.memory_attribute,
+                        owner: None,
+                    };
+
+                    // Copy original contents
+                    unsafe {
+                        let src_start = phys_to_virt(mmap.pmarea.start);
+                        let dst_start = phys_to_virt(paddr);
+                        core::ptr::copy_nonoverlapping(
+                            src_start as *const u8,
+                            dst_start as *mut u8,
+                            size,
+                        );
+                    }
+
+                    child.page_allocations.write().push(page_alloc);
+
+                    child
+                        .vm_manager
+                        .add_memory_map(new_mmap)
+                        .map_err(|_| "Failed to add memory map to child task")?;
+                } else {
+                    let new_mmap = VirtualMemoryMap {
+                        pmarea: mmap.pmarea,
+                        vmarea: mmap.vmarea,
+                        vm_start: mmap.vm_start,
+                        permissions: mmap.permissions,
+                        is_shared: false,
+                        memory_attribute: mmap.memory_attribute,
+                        owner: None,
+                    };
+                    child
+                        .vm_manager
+                        .add_memory_map(new_mmap)
+                        .map_err(|_| "Failed to add unbacked memory map to child task")?;
                 }
-                Ok::<(), &'static str>(())
-            })?;
+            }
         }
 
         // Copy register states (architecture-specific VCPU state)
@@ -1414,20 +3248,47 @@ impl Task {
         child.max_stack_size = self.max_stack_size;
         child.max_data_size = self.max_data_size;
         child.max_text_size = self.max_text_size;
-        // Program break must be shared when CLONE_VM is set, because the heap lives in the shared
-        // address space. If not shared, the child gets an independent copy of the current brk.
-        if flags.is_set(CloneFlagsDef::Vm) {
-            child.brk = self.brk.clone();
-        } else {
+        *child.executable_path.write() = self.executable_path.read().clone();
+        // A fork-style child owns a fresh VMM resource set initialized to the
+        // parent's current break. CLONE_VM already shared the complete set
+        // above, including backing-page ownership and the brk transaction lock.
+        if !flags.is_set(CloneFlagsDef::Vm) {
             let parent_brk = self.brk.load(Ordering::SeqCst);
-            child.brk = Arc::new(AtomicUsize::new(parent_brk));
+            child.brk.store(parent_brk, Ordering::SeqCst);
         }
 
-        // Copy scheduling and event handling state
+        // POSIX job-control identity.  A fork/clone inherits SID, PGID, and
+        // controlling TTY.  Session leadership itself is not inherited because
+        // the child will receive a distinct task ID when it is registered.
         child
-            .time_slice
-            .store(self.time_slice.load(Ordering::SeqCst), Ordering::SeqCst);
-        // Note: software_timers_handlers, sleep_waker, event_queue are NOT copied
+            .session_id
+            .store(self.get_session_id(), Ordering::SeqCst);
+        child.set_process_group_id(self.get_process_group_id());
+        *child.controlling_tty.write() = self.controlling_tty.read().clone();
+        child.is_session_leader.store(false, Ordering::SeqCst);
+
+        // Copy scheduling and event handling state
+        child.time_slice_duration_ns.store(
+            self.time_slice_duration_ns.load(Ordering::SeqCst),
+            Ordering::SeqCst,
+        );
+        // Fair-scheduler state: nice/weight are inherited, but vruntime and
+        // deadline must start fresh. The child will be `place`-d against the
+        // destination CPU's avg_vruntime when it is first enqueued.
+        let nice = self.sched_nice.load(Ordering::SeqCst);
+        child.sched_nice.store(nice, Ordering::SeqCst);
+        child
+            .sched_weight
+            .store(nice_to_weight(nice), Ordering::SeqCst);
+        child.set_core_preference(self.core_preference());
+        child.set_scheduler_affinity_config(
+            self.scheduler_affinity_kind(),
+            self.cpu_affinity_mask(),
+        );
+        child
+            .sched_util_min
+            .store(self.sched_util_min(), Ordering::SeqCst);
+        // Note: software_timers and event_queue are NOT copied
         // as they are task-specific runtime state that should start fresh
 
         // Set the same entry point
@@ -1443,14 +3304,15 @@ impl Task {
         }
 
         if flags.is_set(CloneFlagsDef::Fs) {
-            // Clone the filesystem manager
             if let Some(vfs) = self.vfs.read().clone() {
-                *child.vfs.write() = Some(vfs.clone());
-                // Current working directory is managed within VfsManager
+                *child.vfs.write() = Some(vfs);
             } else {
                 *child.vfs.write() = None;
             }
+        } else if let Some(vfs) = self.vfs.read().clone() {
+            *child.vfs.write() = Some(VfsManager::clone_with_shared_mount_namespace(&vfs));
         }
+        *child.execution_environment.write() = self.execution_environment.read().clone();
 
         // Ensure the cloned task has its own high-VA kernel stack window.
         // Task::new() already allocates a per-task kernel stack (KernelContext), but clone paths
@@ -1459,25 +3321,25 @@ impl Task {
         if child.get_kernel_stack_window_base().is_none() {
             crate::vm::setup_trampoline_for_task_kstack_window(&mut child)?;
         }
-        // Set the state to Ready
-        child
-            .state
-            .store(self.state.load(Ordering::SeqCst), Ordering::SeqCst);
+        crate::breadcrumb::drop(crate::breadcrumb::CLONE_KSTACK_DONE, 0, 0);
+        // Cloned task starts as Ready regardless of parent's current state
+        child.state.store(TaskState::Ready, Ordering::SeqCst);
 
-        // NOTE: Parent-child relationship will be established AFTER add_task()
-        // when the child has a valid ID. The caller is responsible for calling:
-        //   child.set_parent_id(self.id);
-        //   self.add_child(child.get_id());
-        // after adding the child to the scheduler.
+        // NOTE: Parent-child relationship is established after registration,
+        // once the child has a valid ID. Callers must use the appropriate
+        // registered-child adoption helper before enqueueing it.
 
         // Set TGID: if CLONE_THREAD, share parent's TGID (join thread group)
         // Otherwise, child becomes a new thread group leader (TGID will be set to its own ID)
         // This matches Linux CLONE_THREAD semantics
         if flags.is_set(CloneFlagsDef::Thread) {
-            // Thread: share parent's TGID (join existing thread group)
-            child.tgid = self.tgid;
-        } // else: new process, TGID will be set to child's ID in set_id()
+            // Thread: share parent's thread group ID
+            child.thread_group_id = self.thread_group_id;
+        } else {
+            child.thread_group_id = 0;
+        }
 
+        crate::breadcrumb::drop(crate::breadcrumb::CLONE_RETURN, 0, 0);
         Ok(child)
     }
 
@@ -1487,6 +3349,93 @@ impl Task {
     /// * `status` - The exit status
     ///
     pub fn exit(&self, status: i32) {
+        self.exit_with_cleanup(status, |_| {});
+    }
+
+    fn unmap_thread_cleanup_range(&self, vaddr: usize, length: usize) {
+        if length == 0 || vaddr % PAGE_SIZE != 0 {
+            return;
+        }
+
+        let removed_maps = self.vm_manager.remove_memory_map_range(vaddr, length);
+        for removed_map in &removed_maps {
+            if let Some(owner) = &removed_map.owner {
+                owner.on_unmapped(removed_map.vmarea.start, removed_map.vmarea.size());
+            }
+            reclaim_private_removed_mapping(self, removed_map);
+        }
+    }
+
+    fn exit_with_thread_cleanup(
+        &self,
+        status: i32,
+        stack_mapping_base: usize,
+        stack_mapping_len: usize,
+        tls_mapping_base: usize,
+        tls_mapping_len: usize,
+    ) {
+        self.exit_with_cleanup(status, |task| {
+            task.unmap_thread_cleanup_range(stack_mapping_base, stack_mapping_len);
+            task.unmap_thread_cleanup_range(tls_mapping_base, tls_mapping_len);
+        });
+    }
+
+    fn release_all_memory_maps_for_exit(&self) {
+        let map_count = self.vm_manager.memmap_len();
+        self.trace_fork_exit_phase("exit-vm-begin", map_count);
+        crate::breadcrumb::drop(
+            crate::breadcrumb::EXIT_VM_BEGIN,
+            self.id as u64,
+            map_count as u64,
+        );
+        let removed_maps: Vec<_> = self.vm_manager.remove_all_memory_maps().collect();
+        self.trace_fork_exit_phase("exit-vm-unmapped", removed_maps.len());
+        crate::breadcrumb::drop(
+            crate::breadcrumb::EXIT_VM_UNMAPPED,
+            self.id as u64,
+            removed_maps.len() as u64,
+        );
+        for removed_map in &removed_maps {
+            if let Some(owner) = &removed_map.owner {
+                owner.on_unmapped(removed_map.vmarea.start, removed_map.vmarea.size());
+            }
+            reclaim_private_removed_mapping(self, removed_map);
+        }
+        crate::breadcrumb::drop(crate::breadcrumb::EXIT_VM_DONE, self.id as u64, 0);
+        self.trace_fork_exit_phase("exit-vm-done", removed_maps.len());
+    }
+
+    fn release_process_memory_maps_if_sole_owner(&self) {
+        if self.vm_manager.is_sole_owner() {
+            self.release_all_memory_maps_for_exit();
+        }
+    }
+
+    fn trace_fork_exit_phase(&self, phase: &'static str, detail: usize) {
+        if crate::sched::scheduler::DEBUG_FORK_TRACE_LOGGING
+            && crate::sched::scheduler::is_fork_trace_task(self.id)
+        {
+            crate::println!(
+                "[fork-trace] child_task_id={} {} cpu={} detail={}",
+                self.id,
+                phase,
+                get_cpu().get_cpuid(),
+                detail,
+            );
+        }
+    }
+
+    pub(crate) fn exit_with_cleanup<F>(&self, status: i32, cleanup: F)
+    where
+        F: FnOnce(&Task),
+    {
+        crate::breadcrumb::drop(
+            crate::breadcrumb::EXIT_ENTER,
+            self.id as u64,
+            status as u32 as u64,
+        );
+        self.trace_fork_exit_phase("exit-enter", status as u32 as usize);
+        self.begin_exit();
         // Close all open handles only if this task is the sole owner of the
         // handle table.  When CLONE_FILES is used (thread::spawn), multiple
         // tasks share the same Arc<HandleTableInner>.  Closing all handles
@@ -1494,20 +3443,34 @@ impl Task {
         if self.handle_table.is_sole_owner() {
             self.handle_table.close_all();
         }
+        crate::breadcrumb::drop(crate::breadcrumb::EXIT_HANDLES_DONE, self.id as u64, 0);
+        self.trace_fork_exit_phase("exit-handles-done", 0);
+        self.clear_process_control_stopped();
         // Let current ABI perform exit-time cleanup (Linux: clear_child_tid, robust list, etc.)
         // Use take/restore to avoid aliasing &mut self and &mut field
         self.with_default_abi_mut(|abi, task| abi.on_task_exit(task));
+        crate::breadcrumb::drop(crate::breadcrumb::EXIT_ABI_DONE, self.id as u64, 0);
+        self.trace_fork_exit_phase("exit-abi-done", 0);
+        self.release_process_memory_maps_if_sole_owner();
+        cleanup(self);
+        self.reparent_children();
+        crate::breadcrumb::drop(crate::breadcrumb::EXIT_REPARENT_DONE, self.id as u64, 0);
+        self.trace_fork_exit_phase("exit-reparent-done", 0);
 
-        match self.parent_id {
+        match self.get_parent_id() {
             Some(parent_id) => {
-                if get_scheduler().get_task_by_id(parent_id).is_none() {
+                if get_task_by_id(parent_id).is_none() {
                     // crate::println!("Task {}: Parent {} not found, terminating", self.id, parent_id);
                     self.state.store(TaskState::Terminated, Ordering::SeqCst);
-                    return;
+                    crate::breadcrumb::drop(crate::breadcrumb::EXIT_STATE_DONE, self.id as u64, 6);
+                    self.trace_fork_exit_phase("exit-state", 6);
+                } else {
+                    /* Set the exit status */
+                    self.set_exit_status(status);
+                    self.state.store(TaskState::Zombie, Ordering::SeqCst);
+                    crate::breadcrumb::drop(crate::breadcrumb::EXIT_STATE_DONE, self.id as u64, 5);
+                    self.trace_fork_exit_phase("exit-state", 5);
                 }
-                /* Set the exit status */
-                self.set_exit_status(status);
-                self.state.store(TaskState::Zombie, Ordering::SeqCst);
 
                 // TODO: Notify parent via ABI-specific mechanism
                 // crate::println!("Task {}: Set to Zombie state, parent {}", self.id, parent_id);
@@ -1516,20 +3479,47 @@ impl Task {
                 /* If the task has no parent, it is terminated */
                 // crate::println!("Task {}: No parent, terminating", self.id);
                 self.state.store(TaskState::Terminated, Ordering::SeqCst);
+                crate::breadcrumb::drop(crate::breadcrumb::EXIT_STATE_DONE, self.id as u64, 6);
+                self.trace_fork_exit_phase("exit-state", 6);
             }
         }
 
         // Task cleanup completed - ABI module handles event cleanup
 
-        if mytask().is_none() || mytask().unwrap().get_id() != self.id {
-            // Not the current task, nothing more to do
+        if !mytask().is_some_and(|task| task.get_id() == self.id) {
+            // A non-current task can publish either Zombie or Terminated when
+            // its parent disappears during exit. Complete both states through
+            // the scheduler's running-CPU ownership protocol.
+            complete_non_current_task_exit(self.id);
             return;
         }
 
         // The scheduler will handle saving the current task state internally
         if let Some(current_task) = mytask() {
-            get_scheduler().schedule(current_task.get_trapframe());
+            crate::breadcrumb::drop(crate::breadcrumb::EXIT_SCHEDULE, self.id as u64, 0);
+            self.trace_fork_exit_phase("exit-schedule", 0);
+            schedule(current_task.get_trapframe());
         }
+    }
+
+    fn exit_non_current_thread_group_member(&self, status: i32, waitable: bool) {
+        self.begin_exit();
+        self.handle_table.close_all();
+        self.clear_process_control_stopped();
+        self.clear_linux_child_tid_on_exit();
+        self.reparent_children();
+        self.set_exit_status(status);
+
+        let has_parent = self
+            .get_parent_id()
+            .is_some_and(|parent_id| get_task_by_id(parent_id).is_some());
+        let state = if waitable && has_parent {
+            TaskState::Zombie
+        } else {
+            TaskState::Terminated
+        };
+        self.state.store(state, Ordering::SeqCst);
+        complete_non_current_task_exit(self.id);
     }
 
     /// Exit all tasks in the thread group
@@ -1541,50 +3531,97 @@ impl Task {
     /// * `status` - The exit status for all tasks in the group
     ///
     /// # Behavior
-    /// - Terminates all tasks with the same TGID
+    /// - Terminates all tasks with the same thread group ID
     /// - The calling task is set to Zombie/Terminated
     /// - Other tasks in the group are forcefully terminated
     pub fn exit_group(&self, status: i32) {
-        let tgid = self.tgid;
+        self.begin_exit();
+        let thread_group_id = self.thread_group_id;
         let my_id = self.id;
+        let leader_id = thread_group_id;
+        let is_current = mytask().is_some_and(|task| task.get_id() == my_id);
 
-        // Get all task IDs in the system
-        let scheduler = get_scheduler();
-        let all_task_ids = scheduler.get_all_task_ids();
+        if is_current {
+            self.with_default_abi_mut(|abi, task| abi.on_process_exit(task));
+        }
 
-        // Terminate all tasks with the same TGID (except self)
+        // The process is exiting, so shared file tables must be closed even
+        // while sibling Task objects still hold HandleTable Arc references.
+        self.handle_table.close_all();
+
+        let all_task_ids = get_all_task_ids();
+        let mut leader_finalized = false;
+
+        // Terminate all tasks with the same thread group ID (except self).
+        // The thread-group leader is the process wait target, so keep it as
+        // the observable zombie even when another thread initiates exit_group.
         for task_id in all_task_ids {
             if task_id == my_id {
-                continue; // Skip self
+                continue;
             }
 
-            if let Some(task) = scheduler.get_task_by_id(task_id) {
-                if task.get_tgid() == tgid {
-                    // Terminate this thread group member
-                    crate::println!(
-                        "[exit_group] Task {} terminating sibling task {} (TGD={})",
-                        my_id,
-                        task_id,
-                        tgid
-                    );
-                    // Set state to Terminated directly (bypass normal exit)
-                    // Use unsafe to modify state through immutable reference
-                    // This is safe because we're in a termination context
-                    let task_ptr = task as *const Task as *mut Task;
-                    unsafe {
-                        (*task_ptr)
-                            .state
-                            .store(TaskState::Terminated, Ordering::SeqCst);
-                        (*task_ptr).exit_status.store(status, Ordering::SeqCst);
-                        // Close handles to prevent resource leaks
-                        (*task_ptr).handle_table.close_all();
+            if let Some(task) = get_task_by_id(task_id) {
+                if task.get_thread_group_id() == thread_group_id {
+                    if task_id == leader_id {
+                        leader_finalized = true;
+                        task.exit_non_current_thread_group_member(status, true);
+                        continue;
                     }
+
+                    if LOG_EXIT_GROUP_SIBLINGS {
+                        crate::println!(
+                            "[exit_group] Task {} terminating sibling task {} (thread_group_id={})",
+                            my_id,
+                            task_id,
+                            thread_group_id
+                        );
+                    }
+                    task.exit_non_current_thread_group_member(status, false);
                 }
             }
         }
 
-        // Now exit the current task normally
-        self.exit(status);
+        if my_id == leader_id {
+            if is_current {
+                // Sibling threads can still be executing on remote CPUs after
+                // complete_non_current_task_exit() requests their reschedule.
+                // Keep their shared address space mapped until the final VMM
+                // owner exits instead of invalidating code beneath them.
+                self.exit_with_cleanup(status, |_| {});
+            } else {
+                self.exit_non_current_thread_group_member(status, true);
+            }
+            return;
+        }
+
+        if !leader_finalized
+            && let Some(leader) = get_task_by_id(leader_id)
+            && leader.get_thread_group_id() == thread_group_id
+            && !matches!(
+                leader.get_state(),
+                TaskState::Zombie | TaskState::Terminated
+            )
+        {
+            leader.exit_non_current_thread_group_member(status, true);
+        }
+
+        if !is_current {
+            self.exit_non_current_thread_group_member(status, false);
+            return;
+        }
+
+        self.clear_process_control_stopped();
+        self.with_default_abi_mut(|abi, task| abi.on_task_exit(task));
+        self.release_process_memory_maps_if_sole_owner();
+        self.reparent_children();
+        self.set_exit_status(status);
+        self.state.store(TaskState::Terminated, Ordering::SeqCst);
+        remove_from_ready_queues(my_id);
+        unmark_blocked(my_id);
+
+        if let Some(current_task) = mytask() {
+            schedule(current_task.get_trapframe());
+        }
     }
 
     /// Wait for a child task to exit and collect its status
@@ -1595,68 +3632,143 @@ impl Task {
     /// # Returns
     /// The exit status of the child task, or an error if the child is not found or not in Zombie state
     pub fn wait(&self, child_id: usize) -> Result<i32, WaitError> {
-        if !self.children.read().contains(&child_id) {
+        // Take a stable task reference before the parent lock. A successful
+        // reap still requires membership under that lock, so another waiter
+        // cannot claim the same child through this Arc.
+        let child_task = get_task_by_id(child_id);
+        // Serialize membership validation, zombie claiming, and removal under
+        // one parent lock. Process-wide wait permits multiple sibling threads
+        // to reap concurrently; splitting these steps lets two waiters both
+        // observe the same Zombie child and clean it up twice.
+        let mut children = self.children.write();
+        let Some(child_index) = children.iter().position(|&id| id == child_id) else {
+            drop(children);
             crate::println!("[Task {}] wait: No such child task: {}", self.id, child_id);
             return Err(WaitError::NoSuchChild("No such child task".to_string()));
-        }
+        };
 
-        if let Some(child_task) = get_scheduler().get_task_by_id(child_id) {
+        if let Some(child_task) = child_task {
             if child_task.get_state() == TaskState::Zombie {
                 let status = child_task.get_exit_status().unwrap_or(-1);
                 child_task.set_state(TaskState::Terminated);
-                self.remove_child(child_id);
+                children.remove(child_index);
+                drop(children);
+                crate::sched::scheduler::cleanup_zombie(child_id);
                 Ok(status)
             } else {
+                drop(children);
                 Err(WaitError::ChildNotExited(
                     "Child has not exited or is not a zombie".to_string(),
                 ))
             }
         } else {
+            // Do not leave an impossible child id in the process-wide wait set.
+            children.remove(child_index);
+            drop(children);
             Err(WaitError::ChildTaskNotFound(
                 "Child task not found".to_string(),
             ))
         }
     }
 
-    /// Sleep the current task for the specified number of ticks.
+    /// Sleep the current task for the specified duration.
     /// This blocks the task and registers a timer to wake it up.
     ///
     /// # Arguments
     /// * `trapframe` - The trapframe of the current CPU state
-    /// * `ticks` - The number of ticks to sleep
+    /// * `duration_ns` - Relative sleep duration in nanoseconds.
     ///
-    pub fn sleep(&self, trapframe: &mut Trapframe, ticks: u64) {
+    pub fn sleep(&self, trapframe: &mut Trapframe, duration_ns: u64) {
+        self.sleep_with_precision(trapframe, duration_ns, crate::timer::TimerPrecision::Normal);
+    }
+
+    /// Sleep the current task for the specified duration with explicit timer precision.
+    /// This blocks the task and registers a timer to wake it up.
+    ///
+    /// # Arguments
+    ///
+    /// * `trapframe` - The trapframe of the current CPU state.
+    /// * `duration_ns` - Relative sleep duration in nanoseconds.
+    /// * `precision` - Permitted delivery range for the wake timer.
+    ///
+    /// # Returns
+    ///
+    /// This function does not return a value.
+    pub fn sleep_with_precision(
+        &self,
+        trapframe: &mut Trapframe,
+        duration_ns: u64,
+        precision: crate::timer::TimerPrecision,
+    ) {
+        if duration_ns == 0 {
+            return;
+        }
+
         struct SleepWakerHandler {
             task_id: usize,
-            _start_tick: u64,
+            timer_handle: IrqSpinLock<Option<crate::timer::TimerHandle>>,
+            waker: Arc<Waker>,
         }
 
         impl TimerHandler for SleepWakerHandler {
             fn on_timer_expired(self: Arc<Self>, _context: usize) {
-                if let Some(task) = get_scheduler().get_task_by_id(self.task_id) {
-                    let handler: Arc<dyn TimerHandler> = self.clone();
-                    task.remove_software_timer_handler(&handler);
+                if let Some(task) = get_task_by_id(self.task_id) {
+                    if let Some(timer_handle) = self.timer_handle.lock().take() {
+                        task.finish_software_timer(timer_handle);
+                    }
                     // Memory barrier to ensure state change is visible
                     core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
-                    // crate::println!("Task {} woke up after {} ticks", self.task_id, get_tick() - self.start_tick);
-                    let waker = get_waitpid_waker(self.task_id);
-                    waker.wake_all();
+                    self.waker.wake_all();
                 }
             }
         }
 
-        let wake_tick = get_tick() + ticks;
-        let handler: Arc<dyn crate::timer::TimerHandler> = Arc::new(SleepWakerHandler {
-            task_id: self.id,
-            _start_tick: get_tick(),
-        });
-        add_timer(wake_tick, &handler, 0);
+        let wake_deadline_ns = get_time_ns().saturating_add(duration_ns);
+        loop {
+            if get_time_ns() >= wake_deadline_ns {
+                return;
+            }
 
-        self.add_software_timer_handler(handler);
-        // Memory barrier to ensure timer handler registration is visible
-        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
-        let waker = get_waitpid_waker(self.id);
-        waker.wait(self.get_id(), trapframe);
+            // A sleep notification belongs to exactly one timer instance.
+            // Reusing a task-wide Waker allows a late callback or interrupted
+            // sleep to leave a pending notification that makes a later,
+            // unrelated sleep return immediately.
+            let sleep_waker = Arc::new(Waker::new_interruptible("task_sleep_waker"));
+            let handler = Arc::new(SleepWakerHandler {
+                task_id: self.id,
+                timer_handle: IrqSpinLock::new(None),
+                waker: sleep_waker.clone(),
+            });
+            let handler_ref: Arc<dyn crate::timer::TimerHandler> = handler.clone();
+
+            // Keep a strong reference visible to the callback before arming
+            // it. A wake that races the first wait is retained by
+            // Waker::pending_wakes.
+            #[cfg(feature = "sync-debug")]
+            crate::breadcrumb::drop(
+                crate::breadcrumb::SLEEP_ARM,
+                self.id as u64,
+                wake_deadline_ns,
+            );
+            let timer_handle = add_timer(wake_deadline_ns, precision, &handler_ref, 0);
+            *handler.timer_handle.lock() = Some(timer_handle);
+            self.register_software_timer(timer_handle, handler_ref.clone());
+            drop(handler_ref);
+            drop(handler);
+            sleep_waker.wait_owned(self.get_id(), trapframe);
+            #[cfg(feature = "sync-debug")]
+            crate::breadcrumb::drop(
+                crate::breadcrumb::SLEEP_RESUME,
+                self.id as u64,
+                get_time_ns(),
+            );
+            self.finish_software_timer(timer_handle);
+
+            // Interruptible task events and wake-before-schedule races may
+            // resume this task without the sleep timer having expired. Native
+            // Sleep has no EINTR/remaining-time result, so it must not report
+            // success before the requested monotonic deadline.
+        }
     }
 
     // VFS Helper Methods
@@ -1674,14 +3786,146 @@ impl Task {
         self.vfs.read().clone()
     }
 
-    pub fn add_software_timer_handler(&self, timer: Arc<dyn TimerHandler>) {
-        self.software_timers_handlers.write().push(timer);
+    /// Allocate an unpublished image with this process's identity, but no
+    /// shared address space, handles, filesystem context or scheduler state.
+    pub(crate) fn new_exec_image(&self) -> Self {
+        let mut image = Self::new_with_namespace(
+            self.name.read().clone(),
+            0,
+            TaskType::User,
+            self.get_namespace().clone(),
+        );
+        image.id = self.id;
+        image
+            .namespace_id
+            .store(self.try_get_namespace_id().unwrap_or(0), Ordering::Relaxed);
+        image.thread_group_id = self.thread_group_id;
+        image.max_stack_size = self.max_stack_size;
+        image.max_data_size = self.max_data_size;
+        image.max_text_size = self.max_text_size;
+        image.vm_manager.set_asid(alloc_virtual_address_space());
+        image.vm_manager.set_owner_task_id_if_unset(self.id);
+        image
     }
 
-    pub fn remove_software_timer_handler(&self, timer: &Arc<dyn TimerHandler>) {
-        let mut handlers = self.software_timers_handlers.write();
-        if let Some(pos) = handlers.iter().position(|x| Arc::ptr_eq(x, timer)) {
-            handlers.remove(pos);
+    pub(crate) fn can_replace_exec_image(&self) -> bool {
+        if !self.vm_manager.is_exclusive() || !self.handle_table.is_sole_owner() {
+            return false;
+        }
+        if self.id != 0
+            && get_all_task_ids().into_iter().any(|id| {
+                id != self.id
+                    && get_task_by_id(id).is_some_and(|other| {
+                        other.get_thread_group_id() == self.get_thread_group_id()
+                            && !matches!(
+                                other.state.load(Ordering::Acquire),
+                                TaskState::Zombie | TaskState::Terminated
+                            )
+                    })
+            })
+        {
+            return false;
+        }
+        // SAFETY: Only the executing task inspects its ABI zones here.
+        unsafe { self.abi_zones.get().is_empty() }
+    }
+
+    pub(crate) fn install_exec_abi(&self, abi: Box<dyn AbiModule + Send + Sync>) {
+        // SAFETY: Called only by this task's exec commit. Retaining the old box
+        // keeps an in-flight syscall's ABI borrow alive until dispatch returns.
+        unsafe {
+            *self.retired_exec_abi.get_mut() = self.default_abi.get_mut().replace(abi);
+        }
+    }
+
+    pub(crate) fn finish_exec_dispatch(&self) {
+        // SAFETY: Called after with_resolve_abi_mut has returned.
+        let retired = unsafe { self.retired_exec_abi.get_mut().take() };
+        drop(retired);
+    }
+
+    /// Register an armed task-owned timer with its callback.
+    ///
+    /// # Arguments
+    ///
+    /// * `timer_handle` - Handle for the armed timer.
+    /// * `timer` - Strong callback reference retained until cleanup.
+    ///
+    /// # Returns
+    ///
+    /// This function does not return a value.
+    pub(crate) fn register_software_timer(
+        &self,
+        timer_handle: crate::timer::TimerHandle,
+        timer: Arc<dyn TimerHandler>,
+    ) {
+        let mut timers = self.software_timers.lock();
+        timers.push(SoftwareTimerRegistration {
+            handle: timer_handle,
+            handler: timer,
+        });
+        self.software_timer_count
+            .store(timers.len(), Ordering::Release);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_software_timer(&self, timer_handle: crate::timer::TimerHandle) -> bool {
+        self.software_timers
+            .lock()
+            .iter()
+            .any(|registration| registration.handle == timer_handle)
+    }
+
+    /// Return whether this task currently owns any registered software timer.
+    ///
+    /// # Returns
+    ///
+    /// `true` when at least one timer is pending or running.
+    pub(crate) fn has_software_timers(&self) -> bool {
+        self.software_timer_count.load(Ordering::Acquire) != 0
+    }
+
+    /// Complete cleanup for a task-owned timer from its callback or caller.
+    ///
+    /// # Arguments
+    ///
+    /// * `timer_handle` - Handle for the timer registration to remove.
+    ///
+    /// # Returns
+    ///
+    /// `true` when cancellation changed a pending timer to cancelled, which
+    /// means an event wake beat timer expiration. `false` means the timer had
+    /// already expired, was not registered, or could not be cancelled.
+    pub(crate) fn finish_software_timer(&self, timer_handle: crate::timer::TimerHandle) -> bool {
+        let registration = {
+            let mut timers = self.software_timers.lock();
+            let position = timers
+                .iter()
+                .position(|registration| registration.handle == timer_handle);
+            let registration = position.map(|position| timers.swap_remove(position));
+            self.software_timer_count
+                .store(timers.len(), Ordering::Release);
+            registration
+        };
+
+        let Some(registration) = registration else {
+            return false;
+        };
+        let cancelled = crate::timer::cancel_timer(registration.handle);
+        drop(registration.handler);
+        cancelled
+    }
+
+    fn cancel_software_timers(&self) {
+        let timers = {
+            let mut registrations = self.software_timers.lock();
+            let timers = core::mem::take(&mut *registrations);
+            self.software_timer_count.store(0, Ordering::Release);
+            timers
+        };
+        for registration in timers {
+            let _ = crate::timer::cancel_timer(registration.handle);
+            drop(registration.handler);
         }
     }
 
@@ -1702,6 +3946,19 @@ impl Task {
         *self.events_enabled.lock()
     }
 
+    /// Check whether any process-control event (Kill, Terminate, Interrupt,
+    /// etc.) is queued for this task.
+    ///
+    /// Kernel-space blocking loops (poll, select, futex, etc.) must check
+    /// this before re-entering a wait. Process-control events are only
+    /// consumed at the user-space return boundary
+    /// (`process_pending_events_before_user_return`), so a task that spins
+    /// in a kernel loop without yielding to user space would otherwise starve
+    /// signal delivery indefinitely.
+    pub fn has_pending_process_control(&self) -> bool {
+        self.event_queue.lock().has_pending_process_control()
+    }
+
     /// Process pending events if events are enabled
     /// This should be called by the scheduler before resuming the task
     ///
@@ -1709,14 +3966,14 @@ impl Task {
     /// - Process a limited number of events per scheduler cycle to avoid starvation
     /// - Critical events (like KILL) are processed immediately
     /// - Normal events are batched and processed in priority order
-    pub fn process_pending_events(&self) -> Result<(), &'static str> {
+    pub fn process_pending_events(&self) -> Result<EventProcessOutcome, &'static str> {
         // Check if events are enabled
         if !self.events_enabled() {
-            return Ok(()); // Events disabled, skip processing
+            return Ok(EventProcessOutcome::Continue); // Events disabled, skip processing
         }
 
         // Delegate to ABI module for event processing
-        self.with_default_abi_mut(|abi, _| {
+        let outcome = self.with_default_abi_mut(|abi, _| {
             const MAX_EVENTS_PER_CYCLE: usize = 8; // Prevent scheduler starvation
             let mut processed_count = 0;
 
@@ -1735,7 +3992,13 @@ impl Task {
                         let is_critical = self.is_critical_event(&event);
 
                         // Let ABI handle the event
-                        abi.handle_event(event, self.id as u32)?;
+                        let outcome = abi.handle_event(event, self.id)?;
+                        match outcome {
+                            EventProcessOutcome::Continue | EventProcessOutcome::Pending => {}
+                            EventProcessOutcome::UserHandlerArmed
+                            | EventProcessOutcome::NeedReschedule
+                            | EventProcessOutcome::Exited(_) => return Ok(outcome),
+                        }
 
                         // Check if events were disabled during handling
                         if !self.events_enabled() {
@@ -1758,13 +4021,21 @@ impl Task {
                 let queue = self.event_queue.lock();
                 if !queue.is_empty() {
                     // Log that we're deferring events to next cycle
-                    // crate::early_println!("Task {}: Deferring {} events to next scheduler cycle",
+                    // crate::println!("Task {}: Deferring {} events to next scheduler cycle",
                     //                      self.id, queue.len());
                 }
             }
 
-            Ok(())
-        })
+            Ok(EventProcessOutcome::Continue)
+        })?;
+
+        if let EventProcessOutcome::Exited(status) = outcome {
+            // `with_default_abi_mut` has returned, so `exit_group` can safely
+            // re-enter ABI exit hooks without recursive mutable borrowing.
+            self.exit_group(status);
+        }
+
+        Ok(outcome)
     }
 
     /// Check if an event is critical and should be processed immediately
@@ -1881,7 +4152,8 @@ impl WaitError {
 
 impl Drop for Task {
     fn drop(&mut self) {
-        // Best-effort teardown of kernel stack window mapping
+        self.cancel_software_timers();
+        release_task_deadline(self);
         crate::vm::teardown_trampoline_for_task_kstack_window(self);
     }
 }
@@ -1914,7 +4186,7 @@ pub fn new_user_task(name: String, priority: u32) -> Task {
 }
 
 #[cfg(test)]
-static mut MOCK_CURRENT_TASK: Option<*mut Task> = None;
+static MOCK_CURRENT_TASK: IrqSpinLock<Option<Arc<Task>>> = IrqSpinLock::new(None);
 
 #[cfg(test)]
 /// Set a mock current task for testing purposes
@@ -1925,43 +4197,36 @@ static mut MOCK_CURRENT_TASK: Option<*mut Task> = None;
 /// # Arguments
 /// * `task` - The task to return from mytask()
 ///
-/// # Safety
-/// The caller must ensure the task pointer remains valid for the duration
-/// of the test and that clear_mock_current_task() is called when done.
 /// This function is only safe to call in single-threaded test environments.
-pub unsafe fn set_mock_current_task(task: &'static mut Task) {
-    unsafe {
-        MOCK_CURRENT_TASK = Some(task as *mut Task);
-    }
+pub fn set_mock_current_task(task: Arc<Task>) {
+    *MOCK_CURRENT_TASK.lock() = Some(task);
 }
 
 #[cfg(test)]
 /// Clear the mock current task, reverting to normal scheduler behavior
 ///
-/// # Safety
 /// This function is only safe to call in single-threaded test environments.
-pub unsafe fn clear_mock_current_task() {
-    unsafe {
-        MOCK_CURRENT_TASK = None;
-    }
+pub fn clear_mock_current_task() {
+    *MOCK_CURRENT_TASK.lock() = None;
 }
 
-/// Get the current task.
+/// Get a non-owning guard for the current task.
 ///
 /// # Returns
 /// The current task if it exists.
-pub fn mytask() -> Option<&'static Task> {
+pub fn mytask() -> Option<CurrentTaskRef> {
     #[cfg(test)]
     {
-        unsafe {
-            if let Some(task_ptr) = MOCK_CURRENT_TASK {
-                return Some(&*task_ptr);
-            }
+        if let Some(task) = MOCK_CURRENT_TASK.lock().as_ref() {
+            // MOCK_CURRENT_TASK retains the owning Arc for the entire guard
+            // lifetime in tests, matching the scheduler pool ownership used in
+            // normal kernel execution without cloning the Arc here.
+            return Some(CurrentTaskRef::from_mock_task(task));
         }
     }
 
     let cpu = get_cpu();
-    get_scheduler().get_current_task(cpu.get_cpuid())
+    current_task(cpu.get_cpuid())
 }
 
 /// Set the current working directory for the current task via VfsManager
@@ -1991,22 +4256,345 @@ pub fn set_current_task_cwd(path: String) -> bool {
 /// This function is called when a task is first scheduled.
 pub fn task_initial_kernel_entrypoint() -> ! {
     let cpu = get_cpu();
-    let current_task = unsafe {
-        get_scheduler()
-            .get_current_task_mut(cpu.get_cpuid())
-            .unwrap()
-    };
-    Scheduler::setup_task_execution(cpu, current_task);
-    arch_switch_to_user_space(current_task.get_trapframe());
+    crate::sched::scheduler::complete_deferred_context_switch(cpu.get_cpuid());
+    if let Some(current_task) = current_task(cpu.get_cpuid()) {
+        if crate::sched::scheduler::DEBUG_FORK_TRACE_LOGGING
+            && crate::sched::scheduler::is_fork_trace_task(current_task.get_id())
+        {
+            crate::println!(
+                "[fork-trace] child_task_id={} kernel-entry cpu={}",
+                current_task.get_id(),
+                cpu.get_cpuid()
+            );
+        }
+        if crate::sched::scheduler::DEBUG_SMP_TASK_FLOW {
+            let vcpu = current_task.vcpu.lock();
+            crate::println!(
+                "[SMPDBG task-entry] cpu={} task={} name={} type={:?} state={:?} running_cpu={} last_cpu={} pc={:#x} mode={:?}",
+                cpu.get_cpuid(),
+                current_task.get_id(),
+                current_task.name.read().as_str(),
+                current_task.task_type,
+                current_task.state.load(Ordering::SeqCst),
+                current_task.running_cpu.load(Ordering::SeqCst),
+                current_task.last_cpu.load(Ordering::SeqCst),
+                vcpu.get_pc(),
+                vcpu.get_mode(),
+            );
+        }
+        if current_task.task_type == TaskType::Kernel {
+            let entry = current_task.vcpu.lock().get_pc();
+            // SAFETY: `new_kernel_task` stores a valid `fn()` entry pointer in
+            // the kernel-mode VCPU PC before the task is made runnable.
+            let entry: fn() = unsafe { core::mem::transmute(entry as usize) };
+            if crate::sched::scheduler::DEBUG_SMP_TASK_FLOW {
+                crate::println!(
+                    "[SMPDBG task-entry-kernel-jump] cpu={} task={} entry={:#x}",
+                    cpu.get_cpuid(),
+                    current_task.get_id(),
+                    entry as usize,
+                );
+            }
+            // The low-level kernel context switch runs with CPU-global
+            // interrupts masked. A newly-created kernel task has no suspended
+            // schedule() frame that could restore its own prior state, so its
+            // normal execution contract begins with interrupts enabled here,
+            // after deferred scheduler cleanup is complete.
+            crate::arch::interrupt::enable_interrupts();
+            entry();
+            current_task.exit(0);
+            loop {
+                crate::arch::instruction::idle();
+            }
+        }
+
+        if crate::sched::scheduler::DEBUG_SMP_TASK_FLOW {
+            crate::println!(
+                "[SMPDBG task-entry-user-jump] cpu={} task={} name={}",
+                cpu.get_cpuid(),
+                current_task.get_id(),
+                current_task.name.read().as_str(),
+            );
+        }
+        setup_task_execution(cpu, &current_task);
+        if crate::sched::scheduler::DEBUG_FORK_TRACE_LOGGING
+            && crate::sched::scheduler::is_fork_trace_task(current_task.get_id())
+        {
+            crate::println!(
+                "[fork-trace] child_task_id={} user-return cpu={}",
+                current_task.get_id(),
+                cpu.get_cpuid()
+            );
+        }
+        arch_switch_to_user(current_task.get_trapframe());
+    }
+
+    loop {
+        crate::arch::instruction::idle();
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use alloc::string::ToString;
     use alloc::sync::Arc;
-    use core::sync::atomic::Ordering;
+    use core::sync::atomic::{AtomicUsize, Ordering};
 
-    use crate::task::CloneFlags;
+    use super::{
+        DeferredExitRequest, INIT_TASK_ID, Task, TaskType, clear_mock_current_task,
+        get_thread_group_wait_owner, get_waitable_process_children, mytask, set_mock_current_task,
+    };
+    use crate::object::capability::memory_mapping::{
+        AccessOp, MemoryMappingInfo, MemoryMappingOps,
+    };
+    use crate::sched::scheduler::{
+        add_task, finalize_zombie, get_task_by_id, register_online_cpu, reset,
+    };
+    use crate::task::{CloneFlags, CloneFlagsDef, TaskDeadlineParams, TaskState};
+    use crate::timer::{TimerHandle, TimerHandler};
+    use crate::vm::addr::{phys_to_virt, virt_to_phys};
+
+    struct MappingCountOwner {
+        mappings: AtomicUsize,
+    }
+
+    struct TestTimerHandler;
+
+    impl TimerHandler for TestTimerHandler {
+        fn on_timer_expired(self: Arc<Self>, _context: usize) {}
+    }
+
+    impl MemoryMappingOps for MappingCountOwner {
+        fn get_mapping_info(
+            &self,
+            _offset: usize,
+            _length: usize,
+        ) -> Result<MemoryMappingInfo, &'static str> {
+            Err("mapping info is not used by this test")
+        }
+
+        fn on_mapped(&self, _vaddr: usize, _paddr: usize, _length: usize, _offset: usize) {
+            self.mappings.fetch_add(1, Ordering::SeqCst);
+        }
+
+        fn on_unmapped(&self, _vaddr: usize, _length: usize) {
+            self.mappings.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    #[test_case]
+    fn test_mytask_guard_does_not_clone_mock_arc() {
+        clear_mock_current_task();
+        let task = Arc::new(Task::new(
+            "CurrentTaskRefMock".to_string(),
+            1,
+            TaskType::Kernel,
+        ));
+        set_mock_current_task(task.clone());
+        let strong_count = Arc::strong_count(&task);
+
+        let current_task = mytask().expect("mock current task must be available");
+        assert!(core::ptr::eq::<Task>(&*current_task, &*task));
+        assert_eq!(Arc::strong_count(&task), strong_count);
+
+        drop(current_task);
+        assert_eq!(Arc::strong_count(&task), strong_count);
+        clear_mock_current_task();
+        assert_eq!(Arc::strong_count(&task), 1);
+    }
+
+    #[test_case]
+    fn task_timer_cleanup_releases_retained_callback() {
+        let task = Task::new("TimerOwner".to_string(), 1, TaskType::Kernel);
+        let handler: Arc<dyn TimerHandler> = Arc::new(TestTimerHandler);
+        let weak_handler = Arc::downgrade(&handler);
+        let timer_handle = TimerHandle {
+            owner_cpu: crate::environment::MAX_NUM_CPUS,
+            id: 1,
+        };
+
+        task.register_software_timer(timer_handle, handler.clone());
+        drop(handler);
+        assert!(weak_handler.upgrade().is_some());
+        assert!(task.has_software_timer(timer_handle));
+
+        assert!(!task.finish_software_timer(timer_handle));
+        assert!(!task.has_software_timer(timer_handle));
+        assert!(weak_handler.upgrade().is_none());
+    }
+
+    #[test_case]
+    fn task_drop_releases_paired_timer_registration() {
+        let weak_handler = {
+            let task = Task::new("TimerDropOwner".to_string(), 1, TaskType::Kernel);
+            let handler: Arc<dyn TimerHandler> = Arc::new(TestTimerHandler);
+            let weak_handler = Arc::downgrade(&handler);
+            task.register_software_timer(
+                TimerHandle {
+                    owner_cpu: crate::environment::MAX_NUM_CPUS,
+                    id: 2,
+                },
+                handler.clone(),
+            );
+            drop(handler);
+            assert!(weak_handler.upgrade().is_some());
+            weak_handler
+        };
+
+        assert!(weak_handler.upgrade().is_none());
+    }
+
+    #[test_case]
+    fn begin_exit_cancels_task_owned_timer_registrations_idempotently() {
+        let task = Task::new("ExitTimerOwner".to_string(), 1, TaskType::Kernel);
+        let handler: Arc<dyn TimerHandler> = Arc::new(TestTimerHandler);
+        let weak_handler = Arc::downgrade(&handler);
+        let timer_handle = TimerHandle {
+            owner_cpu: crate::environment::MAX_NUM_CPUS,
+            id: 3,
+        };
+
+        task.register_software_timer(timer_handle, handler.clone());
+        drop(handler);
+        task.begin_exit();
+        assert!(!task.has_software_timer(timer_handle));
+        assert!(weak_handler.upgrade().is_none());
+
+        task.begin_exit();
+        assert!(!task.has_software_timer(timer_handle));
+    }
+
+    #[test_case]
+    fn test_deferred_exit_request_is_consumed_once() {
+        let task = Task::new("DeferredExit".to_string(), 1, TaskType::Kernel);
+
+        task.request_deferred_thread_exit_cleanup(7, 0x1000, 0x2000, 0x4000, 0x1000);
+        assert!(matches!(
+            task.take_deferred_exit_request(),
+            Some(DeferredExitRequest::ThreadExitCleanup {
+                status: 7,
+                stack_mapping_base: 0x1000,
+                stack_mapping_len: 0x2000,
+                tls_mapping_base: 0x4000,
+                tls_mapping_len: 0x1000,
+            })
+        ));
+        assert!(task.take_deferred_exit_request().is_none());
+
+        task.request_deferred_exit(3);
+        assert!(matches!(
+            task.take_deferred_exit_request(),
+            Some(DeferredExitRequest::Exit { status: 3 })
+        ));
+
+        task.request_deferred_exit_group(11);
+        assert!(matches!(
+            task.take_deferred_exit_request(),
+            Some(DeferredExitRequest::ExitGroup { status: 11 })
+        ));
+    }
+
+    #[test_case]
+    fn test_linux_clear_child_tid_record_is_consumed_once() {
+        let task = Task::new("ClearChildTid".to_string(), 1, TaskType::Kernel);
+
+        task.set_linux_clear_child_tid(Some(0x4000));
+        assert_eq!(task.take_linux_clear_child_tid(), Some(0x4000));
+        assert_eq!(task.take_linux_clear_child_tid(), None);
+    }
+
+    #[test_case]
+    fn test_free_pages_reclaims_full_contiguous_allocation() {
+        reset();
+        let task = super::new_user_task("FullPageReclaim".to_string(), 1);
+        task.init();
+        let vaddr = 0x40_0000;
+        let mapping = task.allocate_data_pages(vaddr, 2).unwrap();
+        let paddr = mapping.pmarea.start;
+
+        task.free_data_pages(vaddr, 2);
+
+        assert!(task.vm_manager.search_memory_map(vaddr).is_none());
+        assert!(
+            !task
+                .page_allocations
+                .read()
+                .iter()
+                .any(|allocation| allocation.as_paddr() == paddr)
+        );
+    }
+
+    #[test_case]
+    fn test_free_pages_retains_partially_unmapped_contiguous_allocation() {
+        reset();
+        let task = super::new_user_task("PartialPageReclaim".to_string(), 1);
+        task.init();
+        let vaddr = 0x50_0000;
+        let mapping = task.allocate_data_pages(vaddr, 2).unwrap();
+        let paddr = mapping.pmarea.start;
+
+        task.free_pages(vaddr, 1);
+
+        assert!(task.vm_manager.search_memory_map(vaddr).is_none());
+        assert!(
+            task.vm_manager
+                .search_memory_map(vaddr + crate::environment::PAGE_SIZE)
+                .is_some()
+        );
+        assert!(
+            task.page_allocations
+                .read()
+                .iter()
+                .any(|allocation| allocation.as_paddr() == paddr && allocation.len() == 2)
+        );
+    }
+
+    #[test_case]
+    fn test_overlapping_page_allocation_returns_error_without_replacing_mapping() {
+        reset();
+        let task = super::new_user_task("OverlappingPageAllocation".to_string(), 1);
+        task.init();
+        let vaddr = 0x60_0000;
+        let mapping = task.allocate_data_pages(vaddr, 1).unwrap();
+        let initial_allocations = task.page_allocations.read().len();
+
+        assert!(task.allocate_data_pages(vaddr, 1).is_err());
+
+        let retained_mapping = task
+            .vm_manager
+            .search_memory_map(vaddr)
+            .expect("the original mapping must remain installed");
+        assert_eq!(retained_mapping.pmarea.start, mapping.pmarea.start);
+        assert_eq!(task.page_allocations.read().len(), initial_allocations);
+    }
+
+    #[test_case]
+    fn test_waitpid_waker_latches_early_wake_and_releases_registry_arc() {
+        let task_id = usize::MAX - 1024;
+        super::cleanup_task_waker(task_id);
+
+        super::wake_task_waiters(task_id);
+        let waker = super::get_waitpid_waker(task_id);
+        assert_eq!(waker.pending_wake_count_for_test(), 1);
+        assert_eq!(Arc::strong_count(&waker), 2);
+
+        super::cleanup_task_waker(task_id);
+        assert_eq!(Arc::strong_count(&waker), 1);
+    }
+
+    #[test_case]
+    fn test_parent_waitpid_waker_latches_early_wake_and_releases_registry_arc() {
+        let parent_id = usize::MAX - 1025;
+        super::cleanup_parent_waker(parent_id);
+
+        super::wake_parent_waiters(parent_id);
+        let waker = super::get_parent_waitpid_waker(parent_id);
+        assert_eq!(waker.pending_wake_count_for_test(), 1);
+        assert_eq!(Arc::strong_count(&waker), 2);
+
+        super::cleanup_parent_waker(parent_id);
+        assert_eq!(Arc::strong_count(&waker), 1);
+    }
 
     #[test_case]
     fn test_set_brk() {
@@ -2021,13 +4609,118 @@ mod tests {
         assert_eq!(task.get_brk(), 0x1008);
         task.set_brk(0x1000).unwrap();
         assert_eq!(task.get_brk(), 0x1000);
+        assert_eq!(task.adjust_brk(0).unwrap(), (0x1000, 0x1000));
+        assert_eq!(task.adjust_brk(0x100).unwrap(), (0x1000, 0x1100));
+        assert_eq!(task.adjust_brk(-0x80).unwrap(), (0x1100, 0x1080));
+        assert!(task.set_brk(usize::MAX).is_err());
+        assert_eq!(task.get_brk(), 0x1080);
+    }
+
+    #[test_case]
+    fn test_large_brk_growth_uses_bounded_physical_chunks() {
+        reset();
+        let task = super::new_user_task("ChunkedBrk".to_string(), 0);
+        task.init();
+        let initial_allocations = task.page_allocations.read().len();
+        let page_count = super::BRK_PHYSICAL_CHUNK_PAGES + 1;
+
+        task.set_brk(page_count * crate::environment::PAGE_SIZE)
+            .unwrap();
+
+        let allocations = task.page_allocations.read();
+        let heap_allocations = &allocations[initial_allocations..];
+        assert!(heap_allocations.len() >= 2);
+        assert_eq!(
+            heap_allocations
+                .iter()
+                .map(|allocation| allocation.len())
+                .sum::<usize>(),
+            page_count
+        );
+        assert!(
+            heap_allocations
+                .iter()
+                .all(|allocation| allocation.len() <= super::BRK_PHYSICAL_CHUNK_PAGES)
+        );
+    }
+
+    #[test_case]
+    fn test_sched_util_short_bursts_track_runtime_fraction() {
+        let task = super::Task::new("BurstyTask".to_string(), 1, super::TaskType::Kernel);
+        const MS: u64 = 1_000_000;
+
+        task.start_cpu_accounting(1 * MS);
+        assert_eq!(task.account_sched_util_running(2 * MS), 0);
+
+        task.start_cpu_accounting(101 * MS);
+        let util = task.account_sched_util_running(102 * MS);
+        assert!(util < 64, "short burst util should stay low: {}", util);
+    }
+
+    #[test_case]
+    fn test_sched_util_sustained_runtime_rises() {
+        let task = super::Task::new("CpuTask".to_string(), 1, super::TaskType::Kernel);
+        const MS: u64 = 1_000_000;
+
+        task.start_cpu_accounting(1 * MS);
+        assert_eq!(
+            task.account_sched_util_running(1 * MS + super::SCHED_UTIL_DECAY_INTERVAL_NS),
+            0
+        );
+        let util =
+            task.account_sched_util_running(1 * MS + super::SCHED_UTIL_DECAY_INTERVAL_NS * 2);
+        assert!(
+            util >= super::SCHED_UTIL_SCALE / 2,
+            "sustained util={}",
+            util
+        );
+    }
+
+    #[test_case]
+    fn test_cpu_hog_sampling_reports_only_near_full_runtime_windows() {
+        const MS: u64 = 1_000_000;
+        let task = Task::new("CpuHog".to_string(), 1, TaskType::User);
+
+        task.record_observed_pc(0x1000, false);
+        task.record_syscall_entry(20, 0x0ffc);
+        assert!(task.sample_cpu_hog(1).is_none());
+
+        task.cpu_time_ns.store(995 * MS, Ordering::SeqCst);
+        task.record_observed_pc(0x1010, false);
+        let sample = task
+            .sample_cpu_hog(1_000 * MS + 1)
+            .expect("99.5 percent runtime must trigger the CPU-hog diagnostic");
+        assert_eq!(sample.usage_per_mille, 995);
+        assert_eq!(sample.runtime_ns, 995 * MS);
+        assert_eq!(sample.window_ns, 1_000 * MS);
+        assert_eq!(sample.start_pc, 0x1000);
+        assert_eq!(sample.current_pc, 0x1010);
+        assert!(!sample.start_pc_privileged);
+        assert!(!sample.current_pc_privileged);
+        assert_eq!(sample.last_syscall_number, 20);
+        assert_eq!(sample.last_syscall_pc, 0x0ffc);
+        assert!(sample.syscall_active);
+        assert_eq!(
+            task.execution_debug_snapshot(),
+            super::TaskExecutionDebugSnapshot {
+                observed_pc: 0x1010,
+                observed_pc_privileged: false,
+                syscall_number: 20,
+                syscall_pc: 0x0ffc,
+                syscall_active: true,
+            }
+        );
+
+        task.cpu_time_ns.store(1_495 * MS, Ordering::SeqCst);
+        task.record_syscall_exit();
+        task.record_observed_pc(0xffff_ffff_8000_1000, true);
+        assert!(task.sample_cpu_hog(2_000 * MS + 1).is_none());
     }
 
     #[test_case]
     fn test_task_parent_child_relationship() {
         // Reset scheduler state before test
-        let scheduler = crate::sched::scheduler::get_scheduler();
-        scheduler.reset();
+        reset();
 
         let mut parent_task = super::new_user_task("ParentTask".to_string(), 0);
         parent_task.init();
@@ -2036,36 +4729,497 @@ mod tests {
         child_task.init();
 
         // Add tasks to scheduler to allocate IDs
-        let parent_id = scheduler.add_task(parent_task, 0);
-        let child_id = scheduler.add_task(child_task, 0);
+        let parent_id = add_task(parent_task, 0);
+        let child_id = add_task(child_task, 0);
 
-        // Set parent-child relationship using allocated IDs
-        // We need to do this sequentially due to borrow checker
-        {
-            let child_task = scheduler.get_task_by_id(child_id).unwrap();
-            child_task.set_parent_id(parent_id);
-        }
-        {
-            let parent_task = scheduler.get_task_by_id(parent_id).unwrap();
-            parent_task.add_child(child_id);
-        }
+        // Adoption updates the child and the parent's list under one protocol.
+        let child_task = get_task_by_id(child_id).unwrap();
+        let parent_task = get_task_by_id(parent_id).unwrap();
+        assert!(parent_task.try_adopt_child(&child_task, None));
 
         // Verify parent-child relationship
         {
-            let child_task = scheduler.get_task_by_id(child_id).unwrap();
+            let child_task = get_task_by_id(child_id).unwrap();
             assert_eq!(child_task.get_parent_id(), Some(parent_id));
         }
         {
-            let parent_task = scheduler.get_task_by_id(parent_id).unwrap();
+            let parent_task = get_task_by_id(parent_id).unwrap();
             assert!(parent_task.get_children().contains(&child_id));
         }
 
         // Remove child and verify
         {
-            let parent_task = scheduler.get_task_by_id(parent_id).unwrap();
+            let parent_task = get_task_by_id(parent_id).unwrap();
             assert!(parent_task.remove_child(child_id));
             assert!(!parent_task.get_children().contains(&child_id));
         }
+    }
+
+    #[test_case]
+    fn test_task_reparents_children_to_init_on_exit() {
+        reset();
+
+        let mut init_task = super::new_user_task("InitTask".to_string(), 0);
+        init_task.init();
+        let init_id = add_task(init_task, 0);
+        assert_eq!(init_id, INIT_TASK_ID);
+
+        let mut parent_task = super::new_user_task("ParentTask".to_string(), 0);
+        parent_task.init();
+        let parent_id = add_task(parent_task, 0);
+
+        let mut child_task = super::new_user_task("ChildTask".to_string(), 0);
+        child_task.init();
+        let child_id = add_task(child_task, 0);
+
+        let parent = get_task_by_id(parent_id).unwrap();
+        let child = get_task_by_id(child_id).unwrap();
+        assert!(parent.try_adopt_child(&child, None));
+
+        parent.exit(0);
+
+        let init = get_task_by_id(init_id).unwrap();
+        let child = get_task_by_id(child_id).unwrap();
+        assert_eq!(child.get_parent_id(), Some(init_id));
+        assert!(init.get_children().contains(&child_id));
+        assert!(!parent.get_children().contains(&child_id));
+    }
+
+    #[test_case]
+    fn test_exit_snapshot_rejects_late_child_adoption() {
+        reset();
+
+        let mut init_task = super::new_user_task("InitTask".to_string(), 0);
+        init_task.init();
+        let init_id = add_task(init_task, 0);
+        assert_eq!(init_id, INIT_TASK_ID);
+
+        let mut parent_task = super::new_user_task("ExitingParent".to_string(), 0);
+        parent_task.init();
+        let parent_id = add_task(parent_task, 0);
+
+        let mut existing_child = super::new_user_task("ExistingChild".to_string(), 0);
+        existing_child.init();
+        let existing_child_id = add_task(existing_child, 0);
+
+        let mut late_child = super::new_user_task("LateChild".to_string(), 0);
+        late_child.init();
+        let late_child_id = add_task(late_child, 0);
+
+        let parent = get_task_by_id(parent_id).unwrap();
+        let existing_child = get_task_by_id(existing_child_id).unwrap();
+        let late_child = get_task_by_id(late_child_id).unwrap();
+        assert!(parent.try_adopt_child(&existing_child, None));
+
+        parent.reparent_children();
+
+        assert_eq!(existing_child.get_parent_id(), Some(init_id));
+        assert!(!parent.try_adopt_child(&late_child, None));
+        assert_eq!(late_child.get_parent_id(), None);
+        assert!(!parent.get_children().contains(&late_child_id));
+    }
+
+    #[test_case]
+    fn test_reparent_retries_init_when_thread_group_leader_is_exiting() {
+        reset();
+
+        let mut init_task = super::new_user_task("InitTask".to_string(), 0);
+        init_task.init();
+        let init_id = add_task(init_task, 0);
+
+        let mut leader_task = super::new_user_task("Leader".to_string(), 0);
+        leader_task.init();
+        let leader_id = add_task(leader_task, 0);
+
+        let mut worker_task = super::new_user_task("Worker".to_string(), 0);
+        worker_task.init();
+        worker_task.set_thread_group_id(leader_id);
+        let worker_id = add_task(worker_task, 0);
+
+        let mut child_task = super::new_user_task("Orphan".to_string(), 0);
+        child_task.init();
+        let child_id = add_task(child_task, 0);
+
+        let leader = get_task_by_id(leader_id).unwrap();
+        let worker = get_task_by_id(worker_id).unwrap();
+        let child = get_task_by_id(child_id).unwrap();
+        assert!(worker.try_adopt_child(&child, None));
+
+        leader.reparent_children();
+        assert!(!leader.try_adopt_child(&child, Some(worker_id)));
+
+        worker.reparent_children();
+
+        let init = get_task_by_id(init_id).unwrap();
+        assert_eq!(child.get_parent_id(), Some(init_id));
+        assert!(init.get_children().contains(&child_id));
+        assert!(!leader.get_children().contains(&child_id));
+    }
+
+    #[test_case]
+    fn test_task_reparents_zombie_children_to_init_on_exit() {
+        reset();
+
+        let mut init_task = super::new_user_task("InitTask".to_string(), 0);
+        init_task.init();
+        let init_id = add_task(init_task, 0);
+        assert_eq!(init_id, INIT_TASK_ID);
+
+        let mut parent_task = super::new_user_task("ParentTask".to_string(), 0);
+        parent_task.init();
+        let parent_id = add_task(parent_task, 0);
+
+        let mut child_task = super::new_user_task("ChildTask".to_string(), 0);
+        child_task.init();
+        let child_id = add_task(child_task, 0);
+
+        let parent = get_task_by_id(parent_id).unwrap();
+        let child = get_task_by_id(child_id).unwrap();
+        assert!(parent.try_adopt_child(&child, None));
+        child.set_exit_status(7);
+        child.set_state(TaskState::Zombie);
+        finalize_zombie(child_id, Some(parent_id));
+
+        parent.exit(0);
+
+        let init = get_task_by_id(init_id).unwrap();
+        let child = get_task_by_id(child_id).unwrap();
+        assert_eq!(child.get_parent_id(), Some(init_id));
+        assert_eq!(child.get_state(), TaskState::Zombie);
+        assert!(init.get_children().contains(&child_id));
+
+        match init.wait(child_id) {
+            Ok(status) => assert_eq!(status, 7),
+            Err(error) => panic!("wait failed: {:?}", error),
+        }
+        assert!(get_task_by_id(child_id).is_none());
+    }
+
+    #[test_case]
+    fn test_task_session_and_process_group_defaults() {
+        reset();
+
+        let mut task = super::new_user_task("SessionDefaults".to_string(), 0);
+        task.init();
+        let task_id = add_task(task, 0);
+
+        let task = get_task_by_id(task_id).unwrap();
+        assert_eq!(task.get_session_id(), task_id);
+        assert_eq!(task.get_process_group_id(), task_id);
+        assert_eq!(task.get_task_group_id(), task_id);
+        assert!(task.is_session_leader());
+        assert!(task.get_controlling_tty().is_none());
+    }
+
+    #[test_case]
+    fn test_clone_inherits_session_and_process_group() {
+        reset();
+
+        let mut parent = super::new_user_task("SessionParent".to_string(), 0);
+        parent.init();
+        let parent_id = add_task(parent, 0);
+
+        let parent = get_task_by_id(parent_id).unwrap();
+        let child = parent.clone_task(CloneFlags::default()).unwrap();
+        let child_id = add_task(child, 0);
+
+        let child = get_task_by_id(child_id).unwrap();
+        assert_eq!(child.get_session_id(), parent.get_session_id());
+        assert_eq!(child.get_process_group_id(), parent.get_process_group_id());
+        assert_eq!(child.get_task_group_id(), parent.get_process_group_id());
+        assert!(!child.is_session_leader());
+        assert!(child.get_controlling_tty().is_none());
+    }
+
+    #[test_case]
+    fn test_clone_does_not_inherit_deadline_reservation() {
+        reset();
+
+        let parent = super::new_user_task("DeadlineParent".to_string(), 0);
+        parent.init();
+        let parent_id = add_task(parent, 0);
+        let parent = get_task_by_id(parent_id).unwrap();
+        {
+            let mut state = parent.deadline.lock();
+            state.params = Some(TaskDeadlineParams {
+                runtime_ns: 5,
+                deadline_ns: 20,
+                period_ns: 20,
+            });
+            state.remaining_ns = 5;
+            state.absolute_deadline_ns = 20;
+            state.next_replenishment_ns = 20;
+            state.cpu_id = 0;
+        }
+
+        let child = parent.clone_task(CloneFlags::default()).unwrap();
+        assert!(!child.deadline_enabled());
+        assert!(child.deadline_snapshot().is_none());
+
+        crate::sched::scheduler::release_task_deadline(&parent);
+    }
+
+    #[test_case]
+    fn test_fork_clone_becomes_new_thread_group_leader() {
+        reset();
+
+        let mut parent = super::new_user_task("ThreadGroupParent".to_string(), 0);
+        parent.init();
+        let parent_id = add_task(parent, 0);
+
+        let parent = get_task_by_id(parent_id).unwrap();
+        let child = parent.clone_task(CloneFlags::default()).unwrap();
+        assert_eq!(child.thread_group_id, 0);
+
+        let child_id = add_task(child, 0);
+        let child = get_task_by_id(child_id).unwrap();
+        assert_eq!(child.get_thread_group_id(), child_id);
+    }
+
+    #[test_case]
+    fn test_thread_clone_inherits_thread_group() {
+        reset();
+
+        let mut parent = super::new_user_task("ThreadGroupParent".to_string(), 0);
+        parent.init();
+        let parent_id = add_task(parent, 0);
+
+        let parent = get_task_by_id(parent_id).unwrap();
+        let mut flags = CloneFlags::default();
+        flags.set(CloneFlagsDef::Thread);
+        let child = parent.clone_task(flags).unwrap();
+        assert_eq!(child.get_thread_group_id(), parent.get_thread_group_id());
+
+        let child_id = add_task(child, 0);
+        let child = get_task_by_id(child_id).unwrap();
+        assert_eq!(child.get_thread_group_id(), parent.get_thread_group_id());
+    }
+
+    #[test_case]
+    fn test_process_child_created_by_worker_is_waitable_by_group_leader() {
+        reset();
+
+        let mut init = super::new_user_task("Init".to_string(), 0);
+        init.init();
+        assert_eq!(add_task(init, 0), INIT_TASK_ID);
+
+        let mut leader = super::new_user_task("ProcessLeader".to_string(), 0);
+        leader.init();
+        let leader_id = add_task(leader, 0);
+        let leader = get_task_by_id(leader_id).unwrap();
+
+        let mut thread_flags = CloneFlags::default();
+        thread_flags.set(CloneFlagsDef::Thread);
+        let worker = leader.clone_task(thread_flags).unwrap();
+        let worker_id = add_task(worker, 0);
+        let worker = get_task_by_id(worker_id).unwrap();
+        assert!(leader.adopt_registered_child(&worker));
+
+        let child = worker.clone_task(CloneFlags::default()).unwrap();
+        let child_id = add_task(child, 0);
+        let child = get_task_by_id(child_id).unwrap();
+
+        assert!(worker.adopt_registered_process_child(&child));
+        assert_eq!(child.get_parent_id(), Some(leader_id));
+        assert_eq!(child.get_parent_thread_group_id(), Some(leader_id));
+        assert!(leader.get_children().contains(&child_id));
+        assert!(!worker.get_children().contains(&child_id));
+
+        child.set_exit_status(0);
+        child.set_state(TaskState::Zombie);
+        finalize_zombie(child_id, Some(leader_id));
+        match leader.wait(child_id) {
+            Ok(status) => assert_eq!(status, 0),
+            Err(error) => panic!("wait failed: {:?}", error),
+        }
+        assert!(get_task_by_id(child_id).is_none());
+    }
+
+    #[test_case]
+    fn test_vm_sharing_process_child_uses_group_wait_set() {
+        reset();
+        register_online_cpu(0);
+
+        let mut init = super::new_user_task("Init".to_string(), 0);
+        init.init();
+        assert_eq!(add_task(init, 0), INIT_TASK_ID);
+
+        let mut leader = super::new_user_task("VmProcessLeader".to_string(), 0);
+        leader.init();
+        let leader_id = add_task(leader, 0);
+        let leader = get_task_by_id(leader_id).unwrap();
+
+        let mut thread_flags = CloneFlags::default();
+        thread_flags.set(CloneFlagsDef::Thread);
+        let worker = leader.clone_task(thread_flags).unwrap();
+        let worker_id = add_task(worker, 0);
+        let worker = get_task_by_id(worker_id).unwrap();
+        assert!(leader.adopt_registered_child(&worker));
+
+        let mut process_flags = CloneFlags::default();
+        process_flags.set(CloneFlagsDef::Vm);
+        let child = worker.clone_task(process_flags).unwrap();
+        let child_id = add_task(child, 0);
+        let child = get_task_by_id(child_id).unwrap();
+        assert_eq!(child.get_thread_group_id(), child_id);
+        assert!(worker.adopt_registered_process_child(&child));
+        assert_eq!(child.get_parent_id(), Some(leader_id));
+        assert!(get_waitable_process_children(&worker).contains(&child_id));
+    }
+
+    #[test_case]
+    fn test_worker_waitpid_uses_thread_group_leader_wait_set() {
+        reset();
+        register_online_cpu(0);
+
+        let mut init = super::new_user_task("Init".to_string(), 0);
+        init.init();
+        assert_eq!(add_task(init, 0), INIT_TASK_ID);
+
+        let mut leader = super::new_user_task("WaitLeader".to_string(), 0);
+        leader.init();
+        let leader_id = add_task(leader, 0);
+        let leader = get_task_by_id(leader_id).unwrap();
+
+        let mut thread_flags = CloneFlags::default();
+        thread_flags.set(CloneFlagsDef::Thread);
+        let worker = leader.clone_task(thread_flags).unwrap();
+        let worker_id = add_task(worker, 0);
+        let worker = get_task_by_id(worker_id).unwrap();
+        assert!(leader.adopt_registered_child(&worker));
+
+        let mut child = super::new_user_task("WorkerProcessChild".to_string(), 0);
+        child.init();
+        let child_id = add_task(child, 0);
+        let child = get_task_by_id(child_id).unwrap();
+        assert!(worker.adopt_registered_process_child(&child));
+
+        let wait_owner = get_thread_group_wait_owner(&worker, child_id).unwrap();
+        assert_eq!(wait_owner.get_id(), leader_id);
+        assert!(wait_owner.get_children().contains(&child_id));
+        assert!(!worker.get_children().contains(&child_id));
+        assert!(get_waitable_process_children(&worker).contains(&child_id));
+
+        child.set_exit_status(23);
+        child.set_state(TaskState::Zombie);
+        finalize_zombie(child_id, Some(leader_id));
+        match wait_owner.wait(child_id) {
+            Ok(status) => assert_eq!(status, 23),
+            Err(error) => panic!("wait failed: {:?}", error),
+        }
+        assert!(get_task_by_id(child_id).is_none());
+    }
+
+    #[test_case]
+    fn test_thread_child_remains_joinable_by_specific_pid() {
+        reset();
+        register_online_cpu(0);
+
+        let mut init = super::new_user_task("Init".to_string(), 0);
+        init.init();
+        assert_eq!(add_task(init, 0), INIT_TASK_ID);
+
+        let mut leader = super::new_user_task("ThreadJoinLeader".to_string(), 0);
+        leader.init();
+        let leader_id = add_task(leader, 0);
+        let leader = get_task_by_id(leader_id).unwrap();
+
+        let mut thread_flags = CloneFlags::default();
+        thread_flags.set(CloneFlagsDef::Thread);
+        let worker = leader.clone_task(thread_flags).unwrap();
+        let worker_id = add_task(worker, 0);
+        let worker = get_task_by_id(worker_id).unwrap();
+        assert!(leader.adopt_registered_child(&worker));
+
+        let thread_child = worker.clone_task(thread_flags).unwrap();
+        let thread_child_id = add_task(thread_child, 0);
+        let thread_child = get_task_by_id(thread_child_id).unwrap();
+        assert!(worker.adopt_registered_child(&thread_child));
+        assert_eq!(thread_child.get_parent_id(), Some(worker_id));
+
+        let wait_owner = get_thread_group_wait_owner(&leader, thread_child_id).unwrap();
+        assert_eq!(wait_owner.get_id(), worker_id);
+        assert!(!get_waitable_process_children(&leader).contains(&thread_child_id));
+
+        thread_child.set_exit_status(17);
+        thread_child.set_state(TaskState::Zombie);
+        finalize_zombie(thread_child_id, Some(worker_id));
+        match wait_owner.wait(thread_child_id) {
+            Ok(status) => assert_eq!(status, 17),
+            Err(error) => panic!("thread join failed: {:?}", error),
+        }
+        assert!(get_task_by_id(thread_child_id).is_none());
+    }
+
+    #[test_case]
+    fn test_exit_group_from_non_leader_makes_leader_waitable() {
+        reset();
+        register_online_cpu(0);
+
+        let mut parent = super::new_user_task("WaitParent".to_string(), 0);
+        parent.init();
+        let parent_id = add_task(parent, 0);
+
+        let mut leader = super::new_user_task("ProcessLeader".to_string(), 0);
+        leader.init();
+        let leader_id = add_task(leader, 0);
+
+        let parent = get_task_by_id(parent_id).unwrap();
+        let leader = get_task_by_id(leader_id).unwrap();
+        assert!(parent.try_adopt_child(&leader, None));
+
+        let mut flags = CloneFlags::default();
+        flags.set(CloneFlagsDef::Thread);
+        let worker = leader.clone_task(flags).unwrap();
+        let worker_id = add_task(worker, 0);
+
+        let worker = get_task_by_id(worker_id).unwrap();
+        worker.exit_group(130);
+
+        let leader = get_task_by_id(leader_id).unwrap();
+        assert_eq!(leader.get_state(), TaskState::Zombie);
+        assert_eq!(worker.get_state(), TaskState::Terminated);
+        assert!(get_task_by_id(worker_id).is_none());
+
+        match parent.wait(leader_id) {
+            Ok(status) => assert_eq!(status, 130),
+            Err(error) => panic!("wait failed: {:?}", error),
+        }
+        assert!(get_task_by_id(leader_id).is_none());
+    }
+
+    #[test_case]
+    fn test_create_session_requires_non_process_group_leader() {
+        reset();
+
+        let mut task = super::new_user_task("SetsidTask".to_string(), 0);
+        task.init();
+        let task_id = add_task(task, 0);
+
+        let task = get_task_by_id(task_id).unwrap();
+        assert!(task.create_session().is_err());
+
+        task.set_process_group_id(task_id + 1);
+        assert_eq!(task.create_session(), Ok(task_id));
+        assert_eq!(task.get_session_id(), task_id);
+        assert_eq!(task.get_process_group_id(), task_id);
+        assert!(task.is_session_leader());
+        assert!(task.get_controlling_tty().is_none());
+    }
+
+    #[test_case]
+    fn test_process_control_stop_report_latches_once() {
+        let mut task = super::new_user_task("StopReportTask".to_string(), 0);
+        task.init();
+
+        assert!(!task.take_process_control_stop_report());
+
+        task.mark_process_control_stopped();
+        assert!(task.take_process_control_stop_report());
+        assert!(!task.take_process_control_stop_report());
+
+        task.clear_process_control_stopped();
+        assert!(!task.take_process_control_stop_report());
     }
 
     #[test_case]
@@ -2087,8 +5241,7 @@ mod tests {
     #[test_case]
     fn test_clone_task_memory_copy() {
         // Reset scheduler state before test
-        let scheduler = crate::sched::scheduler::get_scheduler();
-        scheduler.reset();
+        reset();
 
         let mut parent_task = super::new_user_task("ParentTask".to_string(), 0);
         parent_task.init();
@@ -2107,20 +5260,38 @@ mod tests {
         // Write test data to parent's memory
         let test_data: [u8; 8] = [0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0];
         unsafe {
-            let dst_ptr = mmap.pmarea.start as *mut u8;
+            let dst_ptr = phys_to_virt(mmap.pmarea.start) as *mut u8;
             core::ptr::copy_nonoverlapping(test_data.as_ptr(), dst_ptr, test_data.len());
         }
 
         // Get parent memory map count before cloning
         let parent_memmap_count = parent_task.vm_manager.memmap_len();
 
-        // Clone the parent task
+        // Cloning an unpublished task must not require a scheduler ID.
+        assert_eq!(parent_task.registered_id(), None);
         let child_task = parent_task.clone_task(CloneFlags::default()).unwrap();
+        assert_eq!(child_task.registered_id(), None);
 
         // For fork-like clones (no CLONE_VM), brk must NOT be shared.
         assert!(
             !Arc::ptr_eq(&child_task.brk, &parent_task.brk),
             "Child should not share brk with parent unless CLONE_VM is set"
+        );
+        assert!(
+            !Arc::ptr_eq(&child_task.brk_transaction, &parent_task.brk_transaction),
+            "Fork-style children must own an independent brk transaction lock"
+        );
+        assert!(
+            !Arc::ptr_eq(&child_task.data_size, &parent_task.data_size),
+            "Fork-style children must own independent data-size accounting"
+        );
+        assert!(
+            !Arc::ptr_eq(&child_task.page_allocations, &parent_task.page_allocations),
+            "Fork-style children must own independent contiguous backing"
+        );
+        assert!(
+            !Arc::ptr_eq(&child_task.task_pages, &parent_task.task_pages),
+            "Fork-style children must own independent non-contiguous backing"
         );
 
         // Get child memory map count after cloning
@@ -2140,56 +5311,49 @@ mod tests {
         let child_pc = child_task.vcpu.lock().get_pc();
         let child_entry = child_task.entry;
         let child_state = child_task.state.load(Ordering::SeqCst);
-        let child_managed_pages_len = child_task.managed_pages.read().len();
 
         // Add both tasks to scheduler to establish parent-child relationship
-        let scheduler = crate::sched::scheduler::get_scheduler();
-        let parent_id = scheduler.add_task(parent_task, 0);
-        let child_id = scheduler.add_task(child_task, 0);
+        let parent_id = add_task(parent_task, 0);
+        let child_id = add_task(child_task, 0);
 
-        // Establish parent-child relationship
-        {
-            let child = scheduler.get_task_by_id(child_id).unwrap();
-            child.set_parent_id(parent_id);
-        }
-        {
-            let parent = scheduler.get_task_by_id(parent_id).unwrap();
-            parent.add_child(child_id);
-        }
+        // Establish parent-child relationship through the synchronized protocol.
+        let child = get_task_by_id(child_id).unwrap();
+        let parent = get_task_by_id(parent_id).unwrap();
+        assert!(parent.try_adopt_child(&child, None));
 
         // Verify parent-child relationship was established (in separate scopes)
         {
-            let child = scheduler.get_task_by_id(child_id).unwrap();
+            let child = get_task_by_id(child_id).unwrap();
             assert_eq!(child.get_parent_id(), Some(parent_id));
         }
         {
-            let parent = scheduler.get_task_by_id(parent_id).unwrap();
+            let parent = get_task_by_id(parent_id).unwrap();
             assert!(parent.get_children().contains(&child_id));
         }
 
         // Get references for further verification (in separate scopes)
         let child_stack_size = {
-            let child = scheduler.get_task_by_id(child_id).unwrap();
+            let child = get_task_by_id(child_id).unwrap();
             child.stack_size.load(Ordering::SeqCst)
         };
         let child_data_size = {
-            let child = scheduler.get_task_by_id(child_id).unwrap();
+            let child = get_task_by_id(child_id).unwrap();
             child.data_size.load(Ordering::SeqCst)
         };
         let child_text_size = {
-            let child = scheduler.get_task_by_id(child_id).unwrap();
+            let child = get_task_by_id(child_id).unwrap();
             child.text_size.load(Ordering::SeqCst)
         };
         let parent_stack_size = {
-            let parent = scheduler.get_task_by_id(parent_id).unwrap();
+            let parent = get_task_by_id(parent_id).unwrap();
             parent.stack_size.load(Ordering::SeqCst)
         };
         let parent_data_size = {
-            let parent = scheduler.get_task_by_id(parent_id).unwrap();
+            let parent = get_task_by_id(parent_id).unwrap();
             parent.data_size.load(Ordering::SeqCst)
         };
         let parent_text_size = {
-            let parent = scheduler.get_task_by_id(parent_id).unwrap();
+            let parent = get_task_by_id(parent_id).unwrap();
             parent.text_size.load(Ordering::SeqCst)
         };
 
@@ -2198,10 +5362,25 @@ mod tests {
         assert_eq!(child_data_size, parent_data_size);
         assert_eq!(child_text_size, parent_text_size);
 
-        // Find the corresponding memory map in child that matches our test allocation
+        // Find the corresponding memory maps that match our test allocation.
+        let parent_mmap_after_fork = {
+            let mut found = None;
+            let parent = get_task_by_id(parent_id).unwrap();
+            parent.vm_manager.with_memmaps(|mm| {
+                for m in mm.values() {
+                    if m.vmarea.start == vaddr
+                        && m.vmarea.end == vaddr + num_pages * crate::environment::PAGE_SIZE - 1
+                    {
+                        found = Some(m.clone());
+                        break;
+                    }
+                }
+            });
+            found.expect("Test memory map not found in parent task")
+        };
         let child_mmap = {
             let mut found = None;
-            let child = scheduler.get_task_by_id(child_id).unwrap();
+            let child = get_task_by_id(child_id).unwrap();
             child.vm_manager.with_memmaps(|mm| {
                 for m in mm.values() {
                     if m.vmarea.start == vaddr
@@ -2219,39 +5398,66 @@ mod tests {
         assert_eq!(child_mmap.vmarea.start, parent_vaddr_start);
         assert_eq!(child_mmap.vmarea.end, parent_vaddr_end);
         assert_eq!(child_mmap.permissions, parent_perms);
+        assert_eq!(parent_mmap_after_fork.pmarea.start, 0);
+        assert!(parent_mmap_after_fork.owner.is_some());
+        assert_eq!(child_mmap.pmarea.start, 0);
+        assert!(child_mmap.owner.is_some());
 
-        // Verify the data was copied correctly
+        use crate::object::capability::memory_mapping::{AccessKind, AccessOp};
+        let parent = get_task_by_id(parent_id).unwrap();
+        let child = get_task_by_id(child_id).unwrap();
+        parent
+            .vm_manager
+            .lazy_map_page_with(AccessKind {
+                op: AccessOp::Load,
+                vaddr,
+                size: None,
+            })
+            .unwrap();
+        child
+            .vm_manager
+            .lazy_map_page_with(AccessKind {
+                op: AccessOp::Load,
+                vaddr,
+                size: None,
+            })
+            .unwrap();
+
+        assert_eq!(
+            parent.vm_manager.translate_to_phys(vaddr),
+            Some(parent_paddr)
+        );
+        assert_eq!(
+            child.vm_manager.translate_to_phys(vaddr),
+            Some(parent_paddr)
+        );
+
+        child
+            .vm_manager
+            .lazy_map_page_with(AccessKind {
+                op: AccessOp::Store,
+                vaddr,
+                size: None,
+            })
+            .unwrap();
+        let child_private_paddr = child.vm_manager.translate_to_phys(vaddr).unwrap();
+        assert_ne!(
+            child_private_paddr, parent_paddr,
+            "Child store fault should allocate a private page"
+        );
+
+        // Verify that modifying child's private page doesn't affect parent's COW backing.
         unsafe {
-            let parent_ptr = parent_paddr as *const u8;
-            let child_ptr = child_mmap.pmarea.start as *const u8;
-
-            // Check that physical addresses are different (separate memory)
-            assert_ne!(
-                parent_ptr, child_ptr,
-                "Parent and child should have different physical memory"
-            );
-
-            // Check that the data content is identical
-            for i in 0..test_data.len() {
-                let parent_byte = *parent_ptr.offset(i as isize);
-                let child_byte = *child_ptr.offset(i as isize);
-                assert_eq!(parent_byte, child_byte, "Data mismatch at offset {}", i);
-            }
-        }
-
-        // Verify that modifying parent's memory doesn't affect child's memory
-        unsafe {
-            let parent_ptr = mmap.pmarea.start as *mut u8;
+            let parent_ptr = phys_to_virt(mmap.pmarea.start) as *mut u8;
             let original_value = *parent_ptr;
-            *parent_ptr = 0xFF; // Modify first byte in parent
 
-            let child_ptr = child_mmap.pmarea.start as *const u8;
-            let child_first_byte = *child_ptr;
+            let child_ptr = phys_to_virt(child_private_paddr) as *mut u8;
+            *child_ptr = 0xFF;
 
-            // Child's first byte should still be the original value
+            let parent_first_byte = *parent_ptr;
             assert_eq!(
-                child_first_byte, original_value,
-                "Child memory should be independent from parent"
+                parent_first_byte, original_value,
+                "Child private write should not modify parent backing"
             );
         }
 
@@ -2264,18 +5470,23 @@ mod tests {
         // Verify state was copied
         assert_eq!(child_state, parent_state);
 
-        // Verify that both tasks have the correct number of managed pages
+        let child_private_mmap = child.vm_manager.search_memory_map(vaddr).unwrap();
+        assert_eq!(child_private_mmap.pmarea.start, child_private_paddr);
+        assert!(child_private_mmap.owner.is_none());
         assert!(
-            child_managed_pages_len >= num_pages,
-            "Child should have at least the test pages in managed pages"
+            child
+                .page_allocations
+                .read()
+                .iter()
+                .any(|alloc| { alloc.as_paddr() == child_private_paddr && alloc.len() == 1 }),
+            "Child COW private page should be tracked for reclaim"
         );
     }
 
     #[test_case]
     fn test_clone_task_stack_copy() {
         // Reset scheduler state before test
-        let scheduler = crate::sched::scheduler::get_scheduler();
-        scheduler.reset();
+        reset();
 
         let mut parent_task = super::new_user_task("ParentWithStack".to_string(), 0);
         parent_task.init();
@@ -2298,13 +5509,17 @@ mod tests {
             found.expect("Stack memory map not found in parent task")
         };
 
-        // Write test data to parent's stack
+        let stack_data_vaddr = stack_mmap.vmarea.start + crate::environment::PAGE_SIZE;
+
+        // Write test data to parent's stack before clone. At this point the
+        // parent owns the physical stack allocation directly.
         let stack_test_data: [u8; 16] = [
             0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
             0x99, 0x00,
         ];
         unsafe {
-            let stack_ptr = (stack_mmap.pmarea.start + crate::environment::PAGE_SIZE) as *mut u8;
+            let stack_ptr =
+                phys_to_virt(stack_mmap.pmarea.start + crate::environment::PAGE_SIZE) as *mut u8;
             core::ptr::copy_nonoverlapping(
                 stack_test_data.as_ptr(),
                 stack_ptr,
@@ -2333,18 +5548,33 @@ mod tests {
             found.expect("Stack memory map not found in child task")
         };
 
-        // Verify that stack content was copied correctly
-        unsafe {
-            let parent_stack_ptr =
-                (stack_mmap.pmarea.start + crate::environment::PAGE_SIZE) as *const u8;
-            let child_stack_ptr =
-                (child_stack_mmap.pmarea.start + crate::environment::PAGE_SIZE) as *const u8;
+        // Fork converts private stack pages to a COW owner. Reads in parent and
+        // child should resolve to the same backing page until one side stores.
+        let parent_shared_paddr = parent_task
+            .vm_manager
+            .translate_to_phys(stack_data_vaddr)
+            .expect("Parent stack COW backing not resolved");
+        let child_shared_paddr = child_task
+            .vm_manager
+            .translate_to_phys(stack_data_vaddr)
+            .expect("Child stack COW backing not resolved");
+        assert_eq!(
+            parent_shared_paddr, child_shared_paddr,
+            "Parent and child should share stack backing before a COW store"
+        );
+        assert_eq!(
+            child_stack_mmap.pmarea.start, 0,
+            "Child COW stack map should not expose a direct physical range"
+        );
+        assert!(
+            child_stack_mmap.owner.is_some(),
+            "Child COW stack map should keep an owner for fault resolution"
+        );
 
-            // Check that physical addresses are different (separate memory)
-            assert_ne!(
-                parent_stack_ptr, child_stack_ptr,
-                "Parent and child should have different stack physical memory"
-            );
+        // Verify that stack content is visible through the COW backing.
+        unsafe {
+            let parent_stack_ptr = phys_to_virt(parent_shared_paddr) as *const u8;
+            let child_stack_ptr = phys_to_virt(child_shared_paddr) as *const u8;
 
             // Check that the stack data content is identical
             for i in 0..stack_test_data.len() {
@@ -2358,15 +5588,26 @@ mod tests {
             }
         }
 
-        // Verify that modifying parent's stack doesn't affect child's stack
+        // Verify that modifying parent's stack triggers COW and doesn't affect child's stack.
+        let parent_private_paddr = parent_task
+            .vm_manager
+            .translate_to_phys_with_access(stack_data_vaddr, AccessOp::Store)
+            .expect("Parent stack store COW did not allocate a private page");
+        assert_ne!(
+            parent_private_paddr, child_shared_paddr,
+            "Parent store should allocate a private stack page"
+        );
+
         unsafe {
-            let parent_stack_ptr =
-                (stack_mmap.pmarea.start + crate::environment::PAGE_SIZE) as *mut u8;
+            let parent_stack_ptr = phys_to_virt(parent_private_paddr) as *mut u8;
             let original_value = *parent_stack_ptr;
             *parent_stack_ptr = 0xFE; // Modify first byte in parent stack
 
-            let child_stack_ptr =
-                (child_stack_mmap.pmarea.start + crate::environment::PAGE_SIZE) as *const u8;
+            let child_stack_paddr = child_task
+                .vm_manager
+                .translate_to_phys(stack_data_vaddr)
+                .expect("Child stack backing disappeared after parent COW");
+            let child_stack_ptr = phys_to_virt(child_stack_paddr) as *const u8;
             let child_first_byte = *child_stack_ptr;
 
             // Child's first byte should still be the original value
@@ -2387,8 +5628,7 @@ mod tests {
     #[test_case]
     fn test_clone_task_shared_memory() {
         // Reset scheduler state before test
-        let scheduler = crate::sched::scheduler::get_scheduler();
-        scheduler.reset();
+        reset();
 
         use crate::environment::PAGE_SIZE;
         use crate::mem::page::allocate_raw_pages;
@@ -2401,7 +5641,7 @@ mod tests {
         let shared_vaddr = 0x5000;
         let num_pages = 1;
         let pages = allocate_raw_pages(num_pages);
-        let paddr = pages as usize;
+        let paddr = virt_to_phys(pages as usize);
 
         let shared_mmap = VirtualMemoryMap {
             pmarea: MemoryArea {
@@ -2412,9 +5652,11 @@ mod tests {
                 start: shared_vaddr,
                 end: shared_vaddr + PAGE_SIZE - 1,
             },
+            vm_start: shared_vaddr,
             permissions: VirtualMemoryPermission::Read as usize
                 | VirtualMemoryPermission::Write as usize,
             is_shared: true, // This should be shared between parent and child
+            memory_attribute: crate::vm::vmem::MemoryAttribute::Normal,
             owner: None,
         };
 
@@ -2427,7 +5669,7 @@ mod tests {
         // Write test data to shared memory
         let test_data: [u8; 8] = [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x11, 0x22];
         unsafe {
-            let shared_ptr = paddr as *mut u8;
+            let shared_ptr = phys_to_virt(paddr) as *mut u8;
             core::ptr::copy_nonoverlapping(test_data.as_ptr(), shared_ptr, test_data.len());
         }
 
@@ -2466,11 +5708,11 @@ mod tests {
 
         // Verify that modifying shared memory from child affects parent
         unsafe {
-            let child_shared_ptr = child_shared_mmap.pmarea.start as *mut u8;
+            let child_shared_ptr = phys_to_virt(child_shared_mmap.pmarea.start) as *mut u8;
             let original_value = *child_shared_ptr;
             *child_shared_ptr = 0xFF; // Modify first byte through child reference
 
-            let parent_shared_ptr = shared_mmap.pmarea.start as *const u8;
+            let parent_shared_ptr = phys_to_virt(shared_mmap.pmarea.start) as *const u8;
             let parent_first_byte = *parent_shared_ptr;
 
             // Parent should see the change made by child (shared memory)
@@ -2485,8 +5727,8 @@ mod tests {
 
         // Verify that the shared data content is accessible from both
         unsafe {
-            let child_ptr = child_shared_mmap.pmarea.start as *const u8;
-            let parent_ptr = shared_mmap.pmarea.start as *const u8;
+            let child_ptr = phys_to_virt(child_shared_mmap.pmarea.start) as *const u8;
+            let parent_ptr = phys_to_virt(shared_mmap.pmarea.start) as *const u8;
 
             // Check that the data content is identical and accessible from both
             for i in 0..test_data.len() {
@@ -2501,10 +5743,58 @@ mod tests {
     }
 
     #[test_case]
+    fn test_clone_task_notifies_shared_mapping_owner() {
+        reset();
+
+        use crate::environment::PAGE_SIZE;
+        use crate::vm::vmem::{MemoryArea, VirtualMemoryMap, VirtualMemoryPermission};
+
+        let mut parent = super::new_user_task("ParentWithOwnedShared".to_string(), 0);
+        parent.init();
+
+        let owner = Arc::new(MappingCountOwner {
+            mappings: AtomicUsize::new(1),
+        });
+        let owner_ops: Arc<dyn MemoryMappingOps> = owner.clone();
+        let shared_vaddr = 0x9000;
+        parent
+            .vm_manager
+            .add_memory_map(VirtualMemoryMap {
+                pmarea: MemoryArea {
+                    start: 0x8000_0000,
+                    end: 0x8000_0000 + PAGE_SIZE - 1,
+                },
+                vmarea: MemoryArea {
+                    start: shared_vaddr,
+                    end: shared_vaddr + PAGE_SIZE - 1,
+                },
+                vm_start: shared_vaddr,
+                permissions: VirtualMemoryPermission::Read as usize,
+                is_shared: true,
+                memory_attribute: crate::vm::vmem::MemoryAttribute::Normal,
+                owner: Some(owner_ops),
+            })
+            .unwrap();
+
+        let child = parent.clone_task(CloneFlags::default()).unwrap();
+        assert_eq!(
+            owner.mappings.load(Ordering::SeqCst),
+            2,
+            "fork must notify the owner about the child's shared mapping"
+        );
+
+        drop(child);
+        assert_eq!(
+            owner.mappings.load(Ordering::SeqCst),
+            1,
+            "dropping the child must retain the parent's mapping"
+        );
+    }
+
+    #[test_case]
     fn test_clone_task_with_clone_vm_shares_address_space() {
         // Reset scheduler state before test
-        let scheduler = crate::sched::scheduler::get_scheduler();
-        scheduler.reset();
+        reset();
 
         use crate::environment::PAGE_SIZE;
 
@@ -2526,32 +5816,82 @@ mod tests {
             Arc::ptr_eq(&child.brk, &parent.brk),
             "CLONE_VM tasks must share brk"
         );
+        assert!(
+            Arc::ptr_eq(&child.brk_transaction, &parent.brk_transaction),
+            "CLONE_VM tasks must serialize compound brk updates"
+        );
+        assert!(
+            Arc::ptr_eq(&child.data_size, &parent.data_size),
+            "CLONE_VM tasks must share data-size accounting"
+        );
+        assert!(
+            Arc::ptr_eq(&child.page_allocations, &parent.page_allocations),
+            "CLONE_VM tasks must share contiguous backing ownership"
+        );
+        assert!(
+            Arc::ptr_eq(&child.task_pages, &parent.task_pages),
+            "CLONE_VM tasks must share non-contiguous backing ownership"
+        );
 
         // Indirectly verify that both share the same ASID/address space
         assert_eq!(child.vm_manager.get_asid(), parent.vm_manager.get_asid());
         assert_eq!(child.vm_manager.memmap_len(), parent_len_before);
 
-        // Adding another page in the parent should be immediately visible to the child
-        parent
+        // A page allocated by the child belongs to the shared address space,
+        // and must remain owned after the child Task is reaped.
+        let child_mapping = child
             .allocate_data_pages(base_vaddr + PAGE_SIZE, 1)
             .unwrap();
+        let child_paddr = child_mapping.pmarea.start;
         assert_eq!(
             child.vm_manager.memmap_len(),
             parent.vm_manager.memmap_len()
         );
+        drop(child);
 
-        // Managed pages are per-task; child should not acquire new managed pages
-        // when sharing VM (physical memory isn't privately managed by the child)
-        assert!(child.managed_pages.read().len() <= parent.managed_pages.read().len());
+        assert!(
+            parent
+                .page_allocations
+                .read()
+                .iter()
+                .any(|allocation| allocation.as_paddr() == child_paddr),
+            "reaping a CLONE_VM worker must not free shared address-space backing"
+        );
+        assert!(
+            parent
+                .vm_manager
+                .search_memory_map(base_vaddr + PAGE_SIZE)
+                .is_some(),
+            "reaping a CLONE_VM worker must retain its shared mapping"
+        );
+    }
+
+    #[test_case]
+    fn test_process_memory_release_waits_for_last_clone_vm_owner() {
+        reset();
+
+        let mut leader = super::new_user_task("ExitGroupLeader".to_string(), 0);
+        leader.init();
+        leader.allocate_data_pages(0x4000, 1).unwrap();
+
+        let mut flags = super::CloneFlags::new();
+        flags.set(super::CloneFlagsDef::Vm);
+        flags.set(super::CloneFlagsDef::Thread);
+        let worker = leader.clone_task(flags).unwrap();
+        let map_count = leader.vm_manager.memmap_len();
+
+        leader.release_process_memory_maps_if_sole_owner();
+        assert_eq!(leader.vm_manager.memmap_len(), map_count);
+
+        drop(worker);
+        leader.release_process_memory_maps_if_sole_owner();
+        assert_eq!(leader.vm_manager.memmap_len(), 0);
     }
 
     #[test_case]
     fn test_task_namespace_creation() {
         // Reset scheduler state before test
-        let scheduler = crate::sched::scheduler::get_scheduler();
-        scheduler.reset();
-
-        use super::namespace;
+        reset();
 
         // Create task in root namespace
         let task = super::new_user_task("TestTask".to_string(), 0);
@@ -2559,23 +5899,17 @@ mod tests {
         assert!(task.get_namespace().is_root());
 
         // Add task to scheduler to allocate namespace ID
-        let task_id = scheduler.add_task(task, 0);
+        let task_id = add_task(task, 0);
 
         // Verify namespace-local ID was allocated
-        let ns_id = scheduler
-            .get_task_by_id(task_id)
-            .unwrap()
-            .get_namespace_id();
+        let ns_id = get_task_by_id(task_id).unwrap().get_namespace_id();
         assert!(ns_id >= 1); // Should start from 1
     }
 
     #[test_case]
     fn test_task_namespace_inheritance() {
         // Reset scheduler state before test
-        let scheduler = crate::sched::scheduler::get_scheduler();
-        scheduler.reset();
-
-        use super::namespace;
+        reset();
 
         let mut parent = super::new_user_task("Parent".to_string(), 0);
         parent.init();
@@ -2590,27 +5924,19 @@ mod tests {
         );
 
         // Add both to scheduler to allocate namespace IDs
-        let scheduler = crate::sched::scheduler::get_scheduler();
-        let parent_id = scheduler.add_task(parent, 0);
-        let child_id = scheduler.add_task(child, 0);
+        let parent_id = add_task(parent, 0);
+        let child_id = add_task(child, 0);
 
         // But should have different namespace-local IDs
-        let parent_ns_id = scheduler
-            .get_task_by_id(parent_id)
-            .unwrap()
-            .get_namespace_id();
-        let child_ns_id = scheduler
-            .get_task_by_id(child_id)
-            .unwrap()
-            .get_namespace_id();
+        let parent_ns_id = get_task_by_id(parent_id).unwrap().get_namespace_id();
+        let child_ns_id = get_task_by_id(child_id).unwrap().get_namespace_id();
         assert_ne!(parent_ns_id, child_ns_id);
     }
 
     #[test_case]
     fn test_task_namespace_id_allocation() {
         // Reset scheduler state before test
-        let scheduler = crate::sched::scheduler::get_scheduler();
-        scheduler.reset();
+        reset();
 
         use super::namespace;
 
@@ -2646,15 +5972,14 @@ mod tests {
         task3.init();
 
         // Add tasks to scheduler to allocate IDs
-        let scheduler = crate::sched::scheduler::get_scheduler();
-        let id1 = scheduler.add_task(task1, 0);
-        let id2 = scheduler.add_task(task2, 0);
-        let id3 = scheduler.add_task(task3, 0);
+        let id1 = add_task(task1, 0);
+        let id2 = add_task(task2, 0);
+        let id3 = add_task(task3, 0);
 
         // All should have sequential namespace-local IDs
-        let ns_id1 = scheduler.get_task_by_id(id1).unwrap().get_namespace_id();
-        let ns_id2 = scheduler.get_task_by_id(id2).unwrap().get_namespace_id();
-        let ns_id3 = scheduler.get_task_by_id(id3).unwrap().get_namespace_id();
+        let ns_id1 = get_task_by_id(id1).unwrap().get_namespace_id();
+        let ns_id2 = get_task_by_id(id2).unwrap().get_namespace_id();
+        let ns_id3 = get_task_by_id(id3).unwrap().get_namespace_id();
         assert_eq!(ns_id1, 1);
         assert_eq!(ns_id2, 2);
         assert_eq!(ns_id3, 3);
@@ -2691,11 +6016,7 @@ mod tests {
     #[test_case]
     fn test_all_abis_share_root_namespace_by_default() {
         // Reset scheduler state before test
-        let scheduler = crate::sched::scheduler::get_scheduler();
-        scheduler.reset();
-
-        use super::namespace;
-        use alloc::vec::Vec;
+        reset();
 
         // Create tasks using default Task::new (which uses root namespace)
         let mut task1 = super::new_user_task("Task1".to_string(), 0);
@@ -2708,9 +6029,9 @@ mod tests {
         task3.init();
 
         // Add tasks to scheduler to allocate namespace IDs
-        let id1 = scheduler.add_task(task1, 0);
-        let id2 = scheduler.add_task(task2, 0);
-        let id3 = scheduler.add_task(task3, 0);
+        let id1 = add_task(task1, 0);
+        let id2 = add_task(task2, 0);
+        let id3 = add_task(task3, 0);
 
         // Verify all tasks have valid IDs after being added to scheduler
         assert_ne!(id1, 0, "Task ID should be non-zero after add_task");
@@ -2718,13 +6039,13 @@ mod tests {
         assert_ne!(id3, 0, "Task ID should be non-zero after add_task");
 
         // Get namespace IDs to verify (in separate scopes to avoid borrow issues)
-        let ns_id1 = scheduler.get_task_by_id(id1).unwrap().get_namespace_id();
+        let ns_id1 = get_task_by_id(id1).unwrap().get_namespace_id();
         assert_ne!(ns_id1, 0, "Namespace ID should be non-zero after add_task");
 
-        let ns_id2 = scheduler.get_task_by_id(id2).unwrap().get_namespace_id();
+        let ns_id2 = get_task_by_id(id2).unwrap().get_namespace_id();
         assert_ne!(ns_id2, 0, "Namespace ID should be non-zero after add_task");
 
-        let ns_id3 = scheduler.get_task_by_id(id3).unwrap().get_namespace_id();
+        let ns_id3 = get_task_by_id(id3).unwrap().get_namespace_id();
         assert_ne!(ns_id3, 0, "Namespace ID should be non-zero after add_task");
 
         // Verify namespace IDs are unique
@@ -2733,35 +6054,66 @@ mod tests {
 
         // Verify all tasks are in root namespace (in separate scopes)
         {
-            let task1 = scheduler.get_task_by_id(id1).unwrap();
+            let task1 = get_task_by_id(id1).unwrap();
             assert_eq!(task1.get_namespace().get_name(), "root");
         }
         {
-            let task2 = scheduler.get_task_by_id(id2).unwrap();
+            let task2 = get_task_by_id(id2).unwrap();
             assert_eq!(task2.get_namespace().get_name(), "root");
         }
         {
-            let task3 = scheduler.get_task_by_id(id3).unwrap();
+            let task3 = get_task_by_id(id3).unwrap();
             assert_eq!(task3.get_namespace().get_name(), "root");
         }
 
         // Verify all tasks share the same namespace instance
-        let ns1_id = scheduler
-            .get_task_by_id(id1)
-            .unwrap()
-            .get_namespace()
-            .get_id();
-        let ns2_id = scheduler
-            .get_task_by_id(id2)
-            .unwrap()
-            .get_namespace()
-            .get_id();
-        let ns3_id = scheduler
-            .get_task_by_id(id3)
-            .unwrap()
-            .get_namespace()
-            .get_id();
+        let ns1_id = get_task_by_id(id1).unwrap().get_namespace().get_id();
+        let ns2_id = get_task_by_id(id2).unwrap().get_namespace().get_id();
+        let ns3_id = get_task_by_id(id3).unwrap().get_namespace().get_id();
         assert_eq!(ns1_id, ns2_id, "All tasks should share root namespace");
         assert_eq!(ns2_id, ns3_id, "All tasks should share root namespace");
+    }
+
+    #[test_case]
+    fn test_task_cpu_affinity_round_trip() {
+        let task = Task::new("AffinityTask".to_string(), 0, TaskType::Kernel);
+
+        assert_eq!(task.pinned_cpu(), None);
+        assert!(task.cpu_allowed(0));
+        task.set_pinned_cpu(Some(3));
+        assert_eq!(task.pinned_cpu(), Some(3));
+        assert_eq!(task.cpu_affinity_mask(), 1 << 3);
+        assert!(task.cpu_allowed(3));
+        assert!(!task.cpu_allowed(2));
+        task.set_cpu_affinity_mask((1 << 1) | (1 << 3));
+        assert_eq!(task.pinned_cpu(), None);
+        assert!(task.cpu_allowed(1));
+        assert!(task.cpu_allowed(3));
+        assert!(!task.cpu_allowed(0));
+        task.set_pinned_cpu(None);
+        assert_eq!(task.pinned_cpu(), None);
+        assert_eq!(task.cpu_affinity_mask(), usize::MAX);
+    }
+
+    #[test_case]
+    fn test_task_nice_updates_weight_and_clamps() {
+        let task = Task::new("NiceTask".to_string(), 0, TaskType::Kernel);
+
+        task.set_nice(-5);
+        assert_eq!(task.nice(), -5);
+        assert_eq!(task.sched_weight(), super::nice_to_weight(-5));
+
+        task.set_nice(super::SCHED_NICE_MAX + 1);
+        assert_eq!(task.nice(), super::SCHED_NICE_MAX);
+        assert_eq!(
+            task.sched_weight(),
+            super::nice_to_weight(super::SCHED_NICE_MAX)
+        );
+
+        task.sched_slice_ns.store(1_000, Ordering::SeqCst);
+        task.sched_deadline.store(2_000, Ordering::SeqCst);
+        task.reset_sched_request();
+        assert_eq!(task.sched_slice_ns(), 0);
+        assert_eq!(task.sched_deadline(), 0);
     }
 }

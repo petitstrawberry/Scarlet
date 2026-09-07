@@ -4,49 +4,181 @@
 
 use core::arch::asm;
 
-use crate::{
-    arch::get_cpu,
-    arch::interrupt,
-    interrupt::{InterruptManager, controllers::LocalInterruptType},
-};
+use crate::arch::interrupt;
+
+#[inline(always)]
+fn read_counter() -> u64 {
+    let value: u64;
+    unsafe {
+        if crate::arch::aarch64::is_vhe_enabled() {
+            asm!(
+                "mrs {value}, cntpct_el0",
+                value = out(reg) value,
+                options(nomem, nostack, preserves_flags)
+            );
+        } else {
+            asm!(
+                "mrs {value}, cntvct_el0",
+                value = out(reg) value,
+                options(nomem, nostack, preserves_flags)
+            );
+        }
+    }
+    value
+}
+
+#[inline(always)]
+fn read_counter_frequency_hz() -> u64 {
+    let value: u64;
+    unsafe {
+        asm!(
+            "mrs {value}, cntfrq_el0",
+            value = out(reg) value,
+            options(nomem, nostack, preserves_flags)
+        );
+    }
+    value
+}
+
+#[inline(always)]
+fn read_timer_control() -> u64 {
+    let value: u64;
+    // SAFETY: Scarlet reads the CPU-local control register for the same timer
+    // bank selected by `set_timer`; this operation has no side effects.
+    unsafe {
+        if crate::arch::aarch64::is_vhe_enabled() {
+            asm!(
+                "mrs {value}, cntp_ctl_el0",
+                value = out(reg) value,
+                options(nomem, nostack, preserves_flags)
+            );
+        } else {
+            asm!(
+                "mrs {value}, cntv_ctl_el0",
+                value = out(reg) value,
+                options(nomem, nostack, preserves_flags)
+            );
+        }
+    }
+    value
+}
+
+#[inline(always)]
+fn read_timer_compare() -> u64 {
+    let value: u64;
+    // SAFETY: Scarlet reads the CPU-local compare register for the same timer
+    // bank selected by `set_timer`; this operation has no side effects.
+    unsafe {
+        if crate::arch::aarch64::is_vhe_enabled() {
+            asm!(
+                "mrs {value}, cntp_cval_el0",
+                value = out(reg) value,
+                options(nomem, nostack, preserves_flags)
+            );
+        } else {
+            asm!(
+                "mrs {value}, cntv_cval_el0",
+                value = out(reg) value,
+                options(nomem, nostack, preserves_flags)
+            );
+        }
+    }
+    value
+}
+
+/// Capture the selected CPU-local timer registers at a user-return boundary.
+///
+/// # Arguments
+///
+/// * `return_spsr` - PSTATE value that the upcoming `eret` will restore.
+/// * `return_pc` - Instruction address that the upcoming `eret` will resume.
+///
+/// # Returns
+///
+/// A side-effect-free timer-register snapshot suitable for lock-free publication.
+pub(crate) fn diagnostic_snapshot(
+    return_spsr: u64,
+    return_pc: u64,
+) -> crate::timer::ArchTimerDiagnosticSnapshot {
+    crate::timer::ArchTimerDiagnosticSnapshot {
+        control: read_timer_control(),
+        counter: read_counter(),
+        compare: read_timer_compare(),
+        return_spsr,
+        return_pc,
+    }
+}
 
 pub fn timer_init() {
     // Local controller registration happens via early initcall.
 }
 
-pub fn get_time() -> u64 {
-    InterruptManager::with_manager(|mgr| {
-        let cpu_id = get_cpu().get_cpuid() as u32;
-        mgr.get_time(cpu_id).unwrap_or(0)
-    })
+/// Allow EL0 code to read architectural counter registers.
+///
+/// Linux AArch64 userspace commonly reads `CNTVCT_EL0` directly for fast time
+/// sampling. Keep timer control registers trapped, but expose virtual and
+/// physical counter reads so libc/runtime code does not fault on `mrs`.
+pub fn enable_el0_counter_access() {
+    const CNTKCTL_EL1_EL0PCTEN: u64 = 1 << 0;
+    const CNTKCTL_EL1_EL0VCTEN: u64 = 1 << 1;
+
+    let mut cntkctl: u64;
+    unsafe {
+        asm!("mrs {0}, cntkctl_el1", out(reg) cntkctl, options(nostack));
+        cntkctl |= CNTKCTL_EL1_EL0PCTEN | CNTKCTL_EL1_EL0VCTEN;
+        asm!(
+            "msr cntkctl_el1, {0}",
+            "isb",
+            in(reg) cntkctl,
+            options(nostack)
+        );
+    }
 }
 
-pub fn set_timer(_time: u64) {
-    InterruptManager::with_manager(|mgr| {
-        let cpu_id = get_cpu().get_cpuid() as u32;
-        let _ = mgr.set_timer(cpu_id, _time);
-    });
+pub fn get_time() -> u64 {
+    read_counter()
+}
+
+pub fn set_timer(time: u64) {
+    // SAFETY: The selected comparator is CPU-local. Scarlet uses the physical
+    // host timer while running as a VHE host and the virtual timer at EL1.
+    unsafe {
+        if crate::arch::aarch64::is_vhe_enabled() {
+            asm!(
+                "msr cntp_cval_el0, {time}",
+                time = in(reg) time,
+                options(nostack)
+            );
+        } else {
+            asm!(
+                "msr cntv_cval_el0, {time}",
+                time = in(reg) time,
+                options(nostack)
+            );
+        }
+        asm!("isb", options(nostack));
+    }
+}
+
+#[inline]
+fn saturating_u128_to_u64(value: u128) -> u64 {
+    value.min(u64::MAX as u128) as u64
 }
 
 pub struct ArchTimer {
     next_event: u64,
     running: bool,
     frequency: u64,
-    initialized: bool,
 }
 
 impl ArchTimer {
     pub fn new() -> Self {
-        let freq = InterruptManager::with_manager(|mgr| {
-            let cpu_id = get_cpu().get_cpuid() as u32;
-            mgr.get_timer_frequency_hz(cpu_id).unwrap_or(0)
-        });
+        let freq = read_counter_frequency_hz();
 
         ArchTimer {
             next_event: 0,
             running: false,
             frequency: freq,
-            initialized: false,
         }
     }
 
@@ -55,20 +187,15 @@ impl ArchTimer {
     }
 
     pub fn get_time(&self) -> u64 {
-        InterruptManager::with_manager(|mgr| {
-            let cpu_id = get_cpu().get_cpuid() as u32;
-            mgr.get_time(cpu_id).unwrap_or(0)
-        })
+        read_counter()
     }
 
     pub fn set_timer(&self, time: u64) {
-        InterruptManager::with_manager(|mgr| {
-            let cpu_id = get_cpu().get_cpuid() as u32;
-            let _ = mgr.set_timer(cpu_id, time);
-        });
+        set_timer(time);
     }
 
     pub fn start(&mut self) {
+        let was_running = self.running;
         self.running = true;
 
         // The common scheduler code enables interrupts *before* calling timer.start().
@@ -87,51 +214,26 @@ impl ArchTimer {
         // Program the next event before unmasking interrupts.
         self.set_timer(next);
 
-        // Only perform GIC configuration on first start
-        if !self.initialized {
-            // CRITICAL: Mask IRQs before configuring the interrupt controller to avoid deadlock
-            // (an interrupt firing during InterruptManager access could try to re-lock it).
-            interrupt::disable_external_interrupts();
-
-            // Enable timer at two levels:
-            // - core-local interrupt (InterruptManager local controller)
-            // - external PPI line in the GIC distributor
-            interrupt::enable_core_local_interrupt(LocalInterruptType::Timer)
-                .unwrap_or_else(|e| panic!("Failed to enable local timer interrupt: {e}"));
-
-            interrupt::enable_external_interrupt_line(
-                crate::drivers::pic::arm_generic_timer::CNTV_PPI_IRQ,
-            )
-            .unwrap_or_else(|e| panic!("Failed to enable timer PPI in GIC: {e}"));
-
-            // CRITICAL: Set initialized flag BEFORE unmasking interrupts
-            // Otherwise, if an interrupt fires immediately after unmask, it will
-            // see initialized=false and reconfigure GIC again
-            self.initialized = true;
-
-            // Ensure IRQ is unmasked at CPU level (first time only)
-            interrupt::enable_external_interrupts();
+        if was_running {
+            // Rearming an already-active architected timer only needs the
+            // CPU-local source unmasked. Avoid taking the global controller
+            // registry lock from every software-timer update and timer FIQ.
+            interrupt::enable_timer_source_interrupt();
+        } else {
+            // The first start after stop must restore the external PPI route
+            // on GIC systems. Apple fast-timer delivery has no external route.
+            interrupt::enable_arch_timer_interrupt()
+                .unwrap_or_else(|e| panic!("Failed to enable timer interrupt: {e}"));
+            interrupt::enable_timer_source_interrupt();
         }
-
-        // Finally, unmask the timer interrupt at the timer source itself.
-        // (This is analogous to a per-source enable bit like RISC-V STIE.)
-        interrupt::enable_timer_source_interrupt();
-        // Note: Subsequent calls just update CVAL, no DAIF/GIC manipulation
-        // This prevents nested interrupts during tick handling
     }
 
     pub fn stop(&mut self) {
         self.running = false;
 
-        InterruptManager::with_manager(|mgr| {
-            let cpu_id = get_cpu().get_cpuid() as u32;
-            let _ = mgr.disable_local_interrupt(cpu_id, LocalInterruptType::Timer);
-            let _ = mgr.disable_external_interrupt(
-                crate::drivers::pic::arm_generic_timer::CNTV_PPI_IRQ,
-                cpu_id,
-            );
-            let _ = mgr.set_timer(cpu_id, u64::MAX);
-        });
+        let _ = interrupt::disable_arch_timer_interrupt();
+
+        self.set_timer(u64::MAX);
     }
 
     pub fn set_interval_us(&mut self, interval_us: u64) {
@@ -147,6 +249,33 @@ impl ArchTimer {
         self.set_next_event(current.saturating_add(delta));
     }
 
+    /// Program the next timer event at an absolute hardware-counter deadline.
+    ///
+    /// # Arguments
+    ///
+    /// * `deadline` - Absolute hardware-counter value to fire at.
+    pub fn set_deadline(&mut self, deadline: u64) {
+        self.set_next_event(deadline);
+    }
+
+    /// Program an absolute monotonic nanosecond deadline.
+    ///
+    /// Expired or very-near deadlines are moved at least one microsecond into
+    /// the future so a stale queue head cannot create an interrupt storm.
+    pub fn set_deadline_ns(&mut self, deadline_ns: u64) {
+        let now = self.get_time();
+        if self.frequency == 0 {
+            self.set_next_event(now.saturating_add(1));
+            return;
+        }
+
+        let deadline = saturating_u128_to_u64(
+            (deadline_ns as u128).saturating_mul(self.frequency as u128) / 1_000_000_000,
+        );
+        let minimum_delta = self.frequency.div_ceil(1_000_000).max(1);
+        self.set_next_event(deadline.max(now.saturating_add(minimum_delta)));
+    }
+
     pub fn get_time_us(&self) -> u64 {
         let now = self.get_time();
         if self.frequency == 0 {
@@ -155,11 +284,31 @@ impl ArchTimer {
         (now.saturating_mul(1_000_000)) / self.frequency
     }
 
+    pub fn get_time_ns(&self) -> u64 {
+        if self.frequency == 0 {
+            return 0;
+        }
+        saturating_u128_to_u64(
+            (self.get_time() as u128).saturating_mul(1_000_000_000) / self.frequency as u128,
+        )
+    }
+
     fn get_next_event(&self) -> u64 {
         self.next_event
     }
 
     fn set_next_event(&mut self, next_event: u64) {
         self.next_event = next_event;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::saturating_u128_to_u64;
+
+    #[test_case]
+    fn counter_conversion_saturates_instead_of_truncating() {
+        assert_eq!(saturating_u128_to_u64(u64::MAX as u128), u64::MAX);
+        assert_eq!(saturating_u128_to_u64((u64::MAX as u128) + 1), u64::MAX);
     }
 }

@@ -65,10 +65,6 @@ impl VirtioDevice for TestVirtioDevice {
         }
     }
 
-    fn get_supported_features(&self, device_features: u32) -> u32 {
-        device_features
-    }
-
     fn read32_register(&self, register: Register) -> u32 {
         let idx = register.offset() / 4;
         let regs = unsafe { &*self.regs.get() };
@@ -156,7 +152,7 @@ fn test_feature_negotiation() {
 
     // Perform negotiation
     let negotiated = device.negotiate_features().unwrap();
-    assert_eq!(negotiated, device_features);
+    assert_eq!(negotiated, u64::from(device_features));
 
     // Verify that the FeaturesOK status bit is set
     let status = device.read32_register(Register::Status);

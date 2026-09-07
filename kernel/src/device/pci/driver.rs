@@ -185,6 +185,7 @@ mod tests {
         let addr = PciAddress::new(0, 0, 1, 0);
         let device = PciDeviceInfo::new(
             addr,
+            0,
             0x8086, // Intel
             0x1234,
             0x020000, // Network controller
@@ -193,6 +194,7 @@ mod tests {
             0x0000,
             0x0B,
             0x01,
+            None,
             "pci_device",
             1,
         );
@@ -227,6 +229,7 @@ mod tests {
         let addr = PciAddress::new(0, 0, 1, 0);
         let device = PciDeviceInfo::new(
             addr,
+            0,
             0x8086,
             0x1234,
             0x020000,
@@ -235,6 +238,7 @@ mod tests {
             0x0000,
             0x0B,
             0x01,
+            None,
             "pci_device",
             1,
         );
@@ -255,6 +259,7 @@ mod tests {
         let addr = PciAddress::new(0, 0, 1, 0);
         let device = PciDeviceInfo::new(
             addr,
+            0,
             0x8086,
             0x1234,
             0x020000,
@@ -263,6 +268,7 @@ mod tests {
             0x0000,
             0x0B,
             0x01,
+            None,
             "pci_device",
             1,
         );
@@ -338,6 +344,7 @@ mod tests {
         let addr = PciAddress::new(0, 0, 1, 0);
         let virtio_net = PciDeviceInfo::new(
             addr,
+            0,
             0x1AF4,   // Red Hat vendor
             0x1000,   // VirtIO net (legacy)
             0x020000, // Network controller
@@ -346,6 +353,7 @@ mod tests {
             0x0001,
             0x0B,
             0x01,
+            None,
             "virtio_pci_device",
             1,
         );
@@ -359,6 +367,7 @@ mod tests {
         let addr = PciAddress::new(0, 0, 2, 0);
         let virtio_blk = PciDeviceInfo::new(
             addr,
+            0,
             0x1AF4,   // Red Hat vendor
             0x1001,   // VirtIO block (legacy)
             0x010000, // Storage controller
@@ -367,6 +376,7 @@ mod tests {
             0x0002,
             0x0B,
             0x01,
+            None,
             "virtio_pci_device",
             2,
         );
@@ -380,6 +390,7 @@ mod tests {
         let addr = PciAddress::new(0, 0, 3, 0);
         let intel_device = PciDeviceInfo::new(
             addr,
+            0,
             0x8086, // Intel vendor
             0x1234,
             0x020000,
@@ -388,6 +399,7 @@ mod tests {
             0x0000,
             0x0B,
             0x01,
+            None,
             "intel_device",
             3,
         );
@@ -425,6 +437,7 @@ mod tests {
         let addr = PciAddress::new(0, 0, 1, 0);
         let virtio_net = PciDeviceInfo::new(
             addr,
+            0,
             0x1AF4,
             0x1000,
             0x020000, // Network controller
@@ -433,6 +446,7 @@ mod tests {
             0x0001,
             0x0B,
             0x01,
+            None,
             "virtio_net",
             1,
         );

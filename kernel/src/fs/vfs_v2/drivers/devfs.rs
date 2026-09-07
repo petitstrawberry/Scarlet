@@ -24,6 +24,7 @@
 //! let tty_file = vfs.open("/dev/tty0", O_RDWR)?;
 //! ```
 
+use crate::sync::IrqRwSpinLock;
 use alloc::{
     boxed::Box,
     collections::BTreeMap,
@@ -33,7 +34,6 @@ use alloc::{
     vec::Vec,
 };
 use core::any::Any;
-use spin::RwLock;
 
 use crate::device::{Device, DeviceType, manager::DeviceManager};
 use crate::object::capability::{ControlOps, StreamError, StreamOps};
@@ -49,6 +49,10 @@ use crate::{
 
 use super::super::core::{DirectoryEntryInternal, FileSystemId, FileSystemOperations, VfsNode};
 
+const DEVPTS_MOUNT_NODE_ID: u64 = 1024;
+const PTMX_SYMLINK_NODE_ID: u64 = 1025;
+const DEVFS_BLOCK_SECTOR_SIZE: usize = 512;
+
 /// DevFS - Device filesystem implementation
 ///
 /// This filesystem automatically exposes all devices registered in the global
@@ -58,9 +62,11 @@ pub struct DevFS {
     /// Unique filesystem identifier
     fs_id: FileSystemId,
     /// Root directory node
-    root: RwLock<Arc<DevNode>>,
+    root: IrqRwSpinLock<Arc<DevNode>>,
     /// Filesystem name
     name: String,
+    #[cfg(test)]
+    device_manager_addr: Option<usize>,
 }
 
 impl DevFS {
@@ -69,36 +75,82 @@ impl DevFS {
         let root = Arc::new(DevNode::new_directory("/".to_string()));
         let fs = Arc::new(Self {
             fs_id: FileSystemId::new(),
-            root: RwLock::new(Arc::clone(&root)),
+            root: IrqRwSpinLock::new(Arc::clone(&root)),
             name: "devfs".to_string(),
+            #[cfg(test)]
+            device_manager_addr: None,
         });
         let fs_weak = Arc::downgrade(&(fs.clone() as Arc<dyn FileSystemOperations>));
         root.set_filesystem(fs_weak);
         fs
     }
 
+    #[cfg(test)]
+    pub fn new_with_device_manager(device_manager: &DeviceManager) -> Arc<Self> {
+        let root = Arc::new(DevNode::new_directory("/".to_string()));
+        root.set_device_manager(device_manager);
+        let fs = Arc::new(Self {
+            fs_id: FileSystemId::new(),
+            root: IrqRwSpinLock::new(Arc::clone(&root)),
+            name: "devfs".to_string(),
+            device_manager_addr: Some(device_manager as *const DeviceManager as usize),
+        });
+        let fs_weak = Arc::downgrade(&(fs.clone() as Arc<dyn FileSystemOperations>));
+        root.set_filesystem(fs_weak);
+        fs
+    }
+
+    #[cfg(test)]
+    fn device_manager(&self) -> &DeviceManager {
+        match self.device_manager_addr {
+            Some(device_manager_addr) => unsafe { &*(device_manager_addr as *const DeviceManager) },
+            None => DeviceManager::get_manager(),
+        }
+    }
+
+    #[cfg(not(test))]
+    fn device_manager(&self) -> &DeviceManager {
+        DeviceManager::get_manager()
+    }
+
     /// Populate the filesystem with current devices from DeviceManager
     fn populate_devices(&self) -> Result<(), FileSystemError> {
-        let device_manager = DeviceManager::get_manager();
+        let device_manager = self.device_manager();
         let root = self.root.read();
 
         // Clear existing devices (for dynamic updates)
         root.clear_children();
 
-        // Get all devices that were registered with explicit names
-        let named_devices = device_manager.get_named_devices();
+        let pts_node = Arc::new(DevNode::new_directory_with_id(
+            "pts".to_string(),
+            DEVPTS_MOUNT_NODE_ID,
+        ));
+        if let Some(fs_ref) = root.filesystem() {
+            pts_node.set_filesystem(fs_ref);
+        }
+        root.add_child("pts".to_string(), pts_node)?;
 
-        for (device_name, device) in named_devices {
+        let ptmx_node = Arc::new(DevNode::new_symlink(
+            "ptmx".to_string(),
+            "pts/ptmx".to_string(),
+            PTMX_SYMLINK_NODE_ID,
+        ));
+        if let Some(fs_ref) = root.filesystem() {
+            ptmx_node.set_filesystem(fs_ref);
+        }
+        root.add_child("ptmx".to_string(), ptmx_node)?;
+
+        // Get coherent name, ID, and device snapshots while the manager holds
+        // all device registries. This prevents a concurrent unregister from
+        // pairing a surviving name with a stale or fabricated device ID.
+        let named_devices = device_manager.get_named_devices_with_ids();
+
+        for (device_name, device_id, device) in named_devices {
             let device_type = device.device_type();
 
             // Only add char and block devices to devfs
             match device_type {
                 DeviceType::Char | DeviceType::Block => {
-                    // Get the actual device ID from the name
-                    let device_id = device_manager
-                        .get_device_id_by_name(&device_name)
-                        .unwrap_or(0); // fallback to 0 if not found
-
                     let device_file_info = DeviceFileInfo {
                         device_id,
                         device_type,
@@ -120,6 +172,8 @@ impl DevFS {
                     if let Some(fs_ref) = root.filesystem() {
                         device_node.set_filesystem(fs_ref);
                     }
+                    #[cfg(test)]
+                    device_node.set_device_manager(device_manager);
 
                     root.add_child(device_name, device_node)?;
                 }
@@ -242,9 +296,11 @@ pub struct DevNode {
     /// File ID
     file_id: u64,
     /// Child nodes (for directories)
-    children: RwLock<BTreeMap<String, Arc<DevNode>>>,
+    children: IrqRwSpinLock<BTreeMap<String, Arc<DevNode>>>,
     /// Reference to filesystem
-    filesystem: RwLock<Option<Weak<dyn FileSystemOperations>>>,
+    filesystem: IrqRwSpinLock<Option<Weak<dyn FileSystemOperations>>>,
+    #[cfg(test)]
+    device_manager_addr: IrqRwSpinLock<Option<usize>>,
 }
 
 impl Clone for DevNode {
@@ -253,8 +309,10 @@ impl Clone for DevNode {
             name: self.name.clone(),
             file_type: self.file_type.clone(),
             file_id: self.file_id,
-            children: RwLock::new(self.children.read().clone()),
-            filesystem: RwLock::new(self.filesystem.read().clone()),
+            children: IrqRwSpinLock::new(self.children.read().clone()),
+            filesystem: IrqRwSpinLock::new(self.filesystem.read().clone()),
+            #[cfg(test)]
+            device_manager_addr: IrqRwSpinLock::new(*self.device_manager_addr.read()),
         }
     }
 }
@@ -262,12 +320,18 @@ impl Clone for DevNode {
 impl DevNode {
     /// Create a new directory node
     pub fn new_directory(name: String) -> Self {
+        Self::new_directory_with_id(name, 0)
+    }
+
+    fn new_directory_with_id(name: String, file_id: u64) -> Self {
         Self {
             name,
             file_type: FileType::Directory,
-            file_id: 0, // Root directory ID
-            children: RwLock::new(BTreeMap::new()),
-            filesystem: RwLock::new(None),
+            file_id,
+            children: IrqRwSpinLock::new(BTreeMap::new()),
+            filesystem: IrqRwSpinLock::new(None),
+            #[cfg(test)]
+            device_manager_addr: IrqRwSpinLock::new(None),
         }
     }
 
@@ -277,14 +341,34 @@ impl DevNode {
             name,
             file_type,
             file_id,
-            children: RwLock::new(BTreeMap::new()),
-            filesystem: RwLock::new(None),
+            children: IrqRwSpinLock::new(BTreeMap::new()),
+            filesystem: IrqRwSpinLock::new(None),
+            #[cfg(test)]
+            device_manager_addr: IrqRwSpinLock::new(None),
+        }
+    }
+
+    /// Create a symbolic link node.
+    fn new_symlink(name: String, target: String, file_id: u64) -> Self {
+        Self {
+            name,
+            file_type: FileType::SymbolicLink(target),
+            file_id,
+            children: IrqRwSpinLock::new(BTreeMap::new()),
+            filesystem: IrqRwSpinLock::new(None),
+            #[cfg(test)]
+            device_manager_addr: IrqRwSpinLock::new(None),
         }
     }
 
     /// Set filesystem reference
     pub fn set_filesystem(&self, fs: Weak<dyn FileSystemOperations>) {
         *self.filesystem.write() = Some(fs);
+    }
+
+    #[cfg(test)]
+    pub fn set_device_manager(&self, device_manager: &DeviceManager) {
+        *self.device_manager_addr.write() = Some(device_manager as *const DeviceManager as usize);
     }
 
     /// Add a child node
@@ -357,6 +441,15 @@ impl DevNode {
         match self.file_type {
             FileType::CharDevice(device_info) | FileType::BlockDevice(device_info) => {
                 // Create a device file object that can handle device operations
+                #[cfg(test)]
+                if let Some(device_manager_addr) = *self.device_manager_addr.read() {
+                    return Ok(Arc::new(DevFileObject::new_with_device_manager(
+                        Arc::new(self.clone()),
+                        device_info.device_id,
+                        device_info.device_type,
+                        unsafe { &*(device_manager_addr as *const DeviceManager) },
+                    )?));
+                }
                 Ok(Arc::new(DevFileObject::new(
                     Arc::new(self.clone()),
                     device_info.device_id,
@@ -404,6 +497,16 @@ impl VfsNode for DevNode {
     fn as_any(&self) -> &dyn Any {
         self
     }
+
+    fn read_link(&self) -> Result<String, FileSystemError> {
+        match &self.file_type {
+            FileType::SymbolicLink(target) => Ok(target.clone()),
+            _ => Err(FileSystemError::new(
+                FileSystemErrorKind::NotSupported,
+                "Not a symbolic link",
+            )),
+        }
+    }
 }
 
 /// DevFS filesystem driver
@@ -417,15 +520,15 @@ pub struct DevFileObject {
     /// Reference to the DevNode
     node: Arc<DevNode>,
     /// Current file position (for seekable devices)
-    position: RwLock<u64>,
+    position: IrqRwSpinLock<u64>,
     /// Device ID for lookup in DeviceManager
     #[allow(dead_code)]
     device_id: usize,
     /// Device type
     #[allow(dead_code)]
     device_type: DeviceType,
-    /// Optional device guard for device files
-    device_guard: Option<Arc<dyn Device>>,
+    /// Per-open device endpoint for device files
+    device_open: Option<Arc<dyn Device>>,
 }
 
 impl DevFileObject {
@@ -435,15 +538,32 @@ impl DevFileObject {
         device_id: usize,
         device_type: DeviceType,
     ) -> Result<Self, FileSystemError> {
+        Self::new_with_manager(node, device_id, device_type, DeviceManager::get_manager())
+    }
+
+    fn new_with_manager(
+        node: Arc<DevNode>,
+        device_id: usize,
+        device_type: DeviceType,
+        device_manager: &DeviceManager,
+    ) -> Result<Self, FileSystemError> {
         // Try to get the device from DeviceManager by ID
-        match DeviceManager::get_manager().get_device(device_id) {
-            Some(device_guard) => Ok(Self {
-                node,
-                position: RwLock::new(0),
-                device_id,
-                device_type,
-                device_guard: Some(device_guard),
-            }),
+        match device_manager.get_device(device_id) {
+            Some(device_guard) => {
+                let device_open = device_guard.open().map_err(|e| {
+                    FileSystemError::new(
+                        FileSystemErrorKind::DeviceError,
+                        format!("Device open failed: {}", e),
+                    )
+                })?;
+                Ok(Self {
+                    node,
+                    position: IrqRwSpinLock::new(0),
+                    device_id,
+                    device_type,
+                    device_open: Some(device_open),
+                })
+            }
             None => Err(FileSystemError::new(
                 FileSystemErrorKind::DeviceError,
                 format!("Device with ID {} not found in DeviceManager", device_id),
@@ -451,44 +571,70 @@ impl DevFileObject {
         }
     }
 
+    #[cfg(test)]
+    pub fn new_with_device_manager(
+        node: Arc<DevNode>,
+        device_id: usize,
+        device_type: DeviceType,
+        device_manager: &DeviceManager,
+    ) -> Result<Self, FileSystemError> {
+        Self::new_with_manager(node, device_id, device_type, device_manager)
+    }
+
     /// Read from the underlying device at current position
-    fn read_device(&self, buffer: &mut [u8]) -> Result<usize, FileSystemError> {
-        if let Some(ref device_guard) = self.device_guard {
-            let device_guard_ref = device_guard.as_ref();
+    fn read_device(&self, buffer: &mut [u8]) -> Result<usize, StreamError> {
+        if let Some(ref device_open) = self.device_open {
+            let device_open_ref = device_open.as_ref();
             let position = *self.position.read();
 
-            match device_guard_ref.device_type() {
+            match device_open_ref.device_type() {
                 DeviceType::Char => {
-                    if let Some(char_device) = device_guard_ref.as_char_device() {
+                    if let Some(char_device) = device_open_ref.as_char_device() {
                         // Use read_at for position-based read
-                        match char_device.read_at(position, buffer) {
+                        match char_device.try_read_at(position, buffer) {
                             Ok(bytes_read) => {
                                 // Update position after successful read
                                 *self.position.write() += bytes_read as u64;
                                 Ok(bytes_read)
                             }
-                            Err(e) => Err(FileSystemError::new(
-                                FileSystemErrorKind::IoError,
-                                format!("Character device read failed: {}", e),
-                            )),
+                            Err(error) => Err(error),
                         }
                     } else {
                         return Err(FileSystemError::new(
                             FileSystemErrorKind::DeviceError,
                             "Device does not support character operations",
-                        ));
+                        )
+                        .into());
                     }
                 }
                 DeviceType::Block => {
-                    if let Some(block_device) = device_guard_ref.as_block_device() {
-                        // For block devices, we read sectors using the request system
+                    if let Some(block_device) = device_open_ref.as_block_device() {
+                        let disk_size = block_device.get_disk_size();
+                        let position = if position > usize::MAX as u64 {
+                            return Ok(0);
+                        } else {
+                            position as usize
+                        };
+                        if buffer.is_empty() || position >= disk_size {
+                            return Ok(0);
+                        }
+
+                        let bytes_to_read = core::cmp::min(buffer.len(), disk_size - position);
+                        let sector_offset = position % DEVFS_BLOCK_SECTOR_SIZE;
+                        let sector = position / DEVFS_BLOCK_SECTOR_SIZE;
+                        let sector_count =
+                            (sector_offset + bytes_to_read).div_ceil(DEVFS_BLOCK_SECTOR_SIZE);
+                        let request_len = sector_count * DEVFS_BLOCK_SECTOR_SIZE;
+                        let mut request_buffer = Vec::new();
+                        request_buffer.resize(request_len, 0);
+
                         let request = Box::new(crate::device::block::request::BlockIORequest {
                             request_type: crate::device::block::request::BlockIORequestType::Read,
-                            sector: 0,
-                            sector_count: 1,
+                            sector,
+                            sector_count,
                             head: 0,
                             cylinder: 0,
-                            buffer: buffer.to_vec(),
+                            buffer: request_buffer,
                         });
 
                         block_device.enqueue_request(request);
@@ -497,18 +643,22 @@ impl DevFileObject {
                         if let Some(result) = results.first() {
                             match &result.result {
                                 Ok(_) => {
-                                    // Copy the data back to the buffer
-                                    let bytes_to_copy =
-                                        core::cmp::min(buffer.len(), result.request.buffer.len());
-                                    buffer[..bytes_to_copy]
-                                        .copy_from_slice(&result.request.buffer[..bytes_to_copy]);
+                                    let available =
+                                        result.request.buffer.len().saturating_sub(sector_offset);
+                                    let bytes_to_copy = core::cmp::min(bytes_to_read, available);
+                                    buffer[..bytes_to_copy].copy_from_slice(
+                                        &result.request.buffer
+                                            [sector_offset..sector_offset + bytes_to_copy],
+                                    );
+                                    *self.position.write() += bytes_to_copy as u64;
                                     return Ok(bytes_to_copy);
                                 }
                                 Err(e) => {
                                     return Err(FileSystemError::new(
                                         FileSystemErrorKind::IoError,
                                         format!("Block device read failed: {}", e),
-                                    ));
+                                    )
+                                    .into());
                                 }
                             }
                         }
@@ -517,33 +667,36 @@ impl DevFileObject {
                         return Err(FileSystemError::new(
                             FileSystemErrorKind::DeviceError,
                             "Device does not support block operations",
-                        ));
+                        )
+                        .into());
                     }
                 }
                 _ => {
                     return Err(FileSystemError::new(
                         FileSystemErrorKind::DeviceError,
                         "Unsupported device type",
-                    ));
+                    )
+                    .into());
                 }
             }
         } else {
             Err(FileSystemError::new(
                 FileSystemErrorKind::DeviceError,
                 "No device guard available",
-            ))
+            )
+            .into())
         }
     }
 
     /// Write to the underlying device at current position
     fn write_device(&self, buffer: &[u8]) -> Result<usize, FileSystemError> {
-        if let Some(ref device_guard) = self.device_guard {
-            let device_guard_ref = device_guard.as_ref();
+        if let Some(ref device_open) = self.device_open {
+            let device_open_ref = device_open.as_ref();
             let position = *self.position.read();
 
-            match device_guard_ref.device_type() {
+            match device_open_ref.device_type() {
                 DeviceType::Char => {
-                    if let Some(char_device) = device_guard_ref.as_char_device() {
+                    if let Some(char_device) = device_open_ref.as_char_device() {
                         // Use write_at for position-based write
                         match char_device.write_at(position, buffer) {
                             Ok(bytes_written) => {
@@ -564,14 +717,66 @@ impl DevFileObject {
                     }
                 }
                 DeviceType::Block => {
-                    if let Some(block_device) = device_guard_ref.as_block_device() {
+                    if let Some(block_device) = device_open_ref.as_block_device() {
+                        let disk_size = block_device.get_disk_size();
+                        let position = if position > usize::MAX as u64 {
+                            return Ok(0);
+                        } else {
+                            position as usize
+                        };
+                        if buffer.is_empty() || position >= disk_size {
+                            return Ok(0);
+                        }
+
+                        let bytes_to_write = core::cmp::min(buffer.len(), disk_size - position);
+                        let sector_offset = position % DEVFS_BLOCK_SECTOR_SIZE;
+                        let sector = position / DEVFS_BLOCK_SECTOR_SIZE;
+                        let sector_count =
+                            (sector_offset + bytes_to_write).div_ceil(DEVFS_BLOCK_SECTOR_SIZE);
+                        let request_len = sector_count * DEVFS_BLOCK_SECTOR_SIZE;
+                        let mut request_buffer = Vec::new();
+                        request_buffer.resize(request_len, 0);
+
+                        if sector_offset != 0 || bytes_to_write != request_len {
+                            let read_request =
+                                Box::new(crate::device::block::request::BlockIORequest {
+                                    request_type:
+                                        crate::device::block::request::BlockIORequestType::Read,
+                                    sector,
+                                    sector_count,
+                                    head: 0,
+                                    cylinder: 0,
+                                    buffer: request_buffer,
+                                });
+                            block_device.enqueue_request(read_request);
+                            let results = block_device.process_requests();
+                            let result = results.first().ok_or_else(|| {
+                                FileSystemError::new(
+                                    FileSystemErrorKind::IoError,
+                                    "Block device read-modify-write produced no result",
+                                )
+                            })?;
+                            if let Err(e) = &result.result {
+                                return Err(FileSystemError::new(
+                                    FileSystemErrorKind::IoError,
+                                    format!("Block device read-modify-write failed: {}", e),
+                                ));
+                            }
+                            request_buffer = result.request.buffer.clone();
+                            if request_buffer.len() < request_len {
+                                request_buffer.resize(request_len, 0);
+                            }
+                        }
+
+                        request_buffer[sector_offset..sector_offset + bytes_to_write]
+                            .copy_from_slice(&buffer[..bytes_to_write]);
                         let request = Box::new(crate::device::block::request::BlockIORequest {
                             request_type: crate::device::block::request::BlockIORequestType::Write,
-                            sector: 0,
-                            sector_count: 1,
+                            sector,
+                            sector_count,
                             head: 0,
                             cylinder: 0,
-                            buffer: buffer.to_vec(),
+                            buffer: request_buffer,
                         });
 
                         block_device.enqueue_request(request);
@@ -579,7 +784,10 @@ impl DevFileObject {
 
                         if let Some(result) = results.first() {
                             match &result.result {
-                                Ok(_) => return Ok(buffer.len()),
+                                Ok(_) => {
+                                    *self.position.write() += bytes_to_write as u64;
+                                    return Ok(bytes_to_write);
+                                }
                                 Err(e) => {
                                     return Err(FileSystemError::new(
                                         FileSystemErrorKind::IoError,
@@ -614,7 +822,7 @@ impl DevFileObject {
 
 impl StreamOps for DevFileObject {
     fn read(&self, buffer: &mut [u8]) -> Result<usize, StreamError> {
-        self.read_device(buffer).map_err(StreamError::from)
+        self.read_device(buffer)
     }
 
     fn write(&self, buffer: &[u8]) -> Result<usize, StreamError> {
@@ -625,8 +833,8 @@ impl StreamOps for DevFileObject {
 impl ControlOps for DevFileObject {
     fn control(&self, command: u32, arg: usize) -> Result<i32, &'static str> {
         // For device files, delegate control operations to the underlying device
-        if let Some(ref device_guard) = self.device_guard {
-            let device_guard_ref = device_guard.as_ref();
+        if let Some(ref device_open) = self.device_open {
+            let device_guard_ref = device_open.as_ref();
             // Device trait now inherits from ControlOps, so we can delegate directly
             device_guard_ref.control(command, arg)
         } else {
@@ -636,8 +844,8 @@ impl ControlOps for DevFileObject {
 
     fn supported_control_commands(&self) -> alloc::vec::Vec<(u32, &'static str)> {
         // For device files, delegate to the underlying device
-        if let Some(ref device_guard) = self.device_guard {
-            let device_guard_ref = device_guard.as_ref();
+        if let Some(ref device_open) = self.device_open {
+            let device_guard_ref = device_open.as_ref();
             device_guard_ref.supported_control_commands()
         } else {
             alloc::vec![]
@@ -650,10 +858,10 @@ impl MemoryMappingOps for DevFileObject {
         &self,
         offset: usize,
         length: usize,
-    ) -> Result<(usize, usize, bool), &'static str> {
+    ) -> Result<crate::object::capability::MemoryMappingInfo, &'static str> {
         // For device files, delegate to the underlying device if it supports memory mapping
-        if let Some(ref device_guard) = self.device_guard {
-            let device_guard_ref = device_guard.as_ref();
+        if let Some(ref device_open) = self.device_open {
+            let device_guard_ref = device_open.as_ref();
             device_guard_ref.get_mapping_info(offset, length)
         } else {
             Err("No device associated with this DevFileObject")
@@ -661,22 +869,22 @@ impl MemoryMappingOps for DevFileObject {
     }
 
     fn on_mapped(&self, vaddr: usize, paddr: usize, length: usize, offset: usize) {
-        if let Some(ref device_guard) = self.device_guard {
-            let device_guard_ref = device_guard.as_ref();
+        if let Some(ref device_open) = self.device_open {
+            let device_guard_ref = device_open.as_ref();
             device_guard_ref.on_mapped(vaddr, paddr, length, offset);
         }
     }
 
     fn on_unmapped(&self, vaddr: usize, length: usize) {
-        if let Some(ref device_guard) = self.device_guard {
-            let device_guard_ref = device_guard.as_ref();
+        if let Some(ref device_open) = self.device_open {
+            let device_guard_ref = device_open.as_ref();
             device_guard_ref.on_unmapped(vaddr, length);
         }
     }
 
     fn supports_mmap(&self) -> bool {
-        if let Some(ref device_guard) = self.device_guard {
-            let device_guard_ref = device_guard.as_ref();
+        if let Some(ref device_open) = self.device_open {
+            let device_guard_ref = device_open.as_ref();
             device_guard_ref.supports_mmap()
         } else {
             false
@@ -697,7 +905,7 @@ impl FileObject for DevFileObject {
                     position.saturating_sub((-offset) as u64)
                 }
             }
-            SeekFrom::End(offset) => {
+            SeekFrom::End(_offset) => {
                 // For devices, we can't easily determine the "end" position
                 // Most devices don't have a fixed size, so seeking from end is not meaningful
                 // We'll treat this as an error for now
@@ -717,7 +925,14 @@ impl FileObject for DevFileObject {
     }
 
     fn truncate(&self, _size: u64) -> Result<(), StreamError> {
-        // Device files cannot be truncated
+        // Opening a character device through shell redirection uses O_TRUNC.
+        // Treat truncate-to-zero as a no-op for device special files, matching
+        // the way byte-stream devices such as /dev/null are commonly used.
+        if _size == 0 {
+            return Ok(());
+        }
+
+        // Device files cannot be resized.
         Err(StreamError::from(FileSystemError::new(
             FileSystemErrorKind::NotSupported,
             "Cannot truncate device files",
@@ -735,8 +950,8 @@ impl crate::object::capability::selectable::Selectable for DevFileObject {
         interest: crate::object::capability::selectable::ReadyInterest,
     ) -> crate::object::capability::selectable::ReadySet {
         // Delegate to underlying Device's Selectable; fallback to default
-        if let Some(ref device_guard) = self.device_guard {
-            return device_guard.as_ref().current_ready(interest);
+        if let Some(ref device_open) = self.device_open {
+            return device_open.as_ref().current_ready(interest);
         }
         crate::object::capability::selectable::Selectable::current_ready(self, interest)
     }
@@ -746,25 +961,29 @@ impl crate::object::capability::selectable::Selectable for DevFileObject {
         interest: crate::object::capability::selectable::ReadyInterest,
         trapframe: &mut crate::arch::Trapframe,
         timeout_ticks: Option<u64>,
+        min_wait_ticks: u64,
     ) -> crate::object::capability::selectable::SelectWaitOutcome {
-        if let Some(ref device_guard) = self.device_guard {
-            return device_guard
-                .as_ref()
-                .wait_until_ready(interest, trapframe, timeout_ticks);
+        if let Some(ref device_open) = self.device_open {
+            return device_open.as_ref().wait_until_ready(
+                interest,
+                trapframe,
+                timeout_ticks,
+                min_wait_ticks,
+            );
         }
-        let _ = (interest, trapframe, timeout_ticks);
+        let _ = (interest, trapframe, timeout_ticks, min_wait_ticks);
         crate::object::capability::selectable::SelectWaitOutcome::Ready
     }
 
     fn set_nonblocking(&self, enabled: bool) {
-        if let Some(ref device_guard) = self.device_guard {
-            device_guard.as_ref().set_nonblocking(enabled);
+        if let Some(ref device_open) = self.device_open {
+            device_open.as_ref().set_nonblocking(enabled);
         }
     }
 
     fn is_nonblocking(&self) -> bool {
-        if let Some(ref device_guard) = self.device_guard {
-            return device_guard.as_ref().is_nonblocking();
+        if let Some(ref device_open) = self.device_open {
+            return device_open.as_ref().is_nonblocking();
         }
         crate::object::capability::selectable::Selectable::is_nonblocking(self)
     }
@@ -778,7 +997,7 @@ pub struct DevDirectoryObject {
     /// Reference to the DevNode
     node: Arc<DevNode>,
     /// Current position in directory entries (entry index)
-    position: RwLock<usize>,
+    position: IrqRwSpinLock<usize>,
 }
 
 impl DevDirectoryObject {
@@ -786,7 +1005,7 @@ impl DevDirectoryObject {
     pub fn new(node: Arc<DevNode>) -> Self {
         Self {
             node,
-            position: RwLock::new(0),
+            position: IrqRwSpinLock::new(0),
         }
     }
 }
@@ -852,7 +1071,7 @@ impl MemoryMappingOps for DevDirectoryObject {
         &self,
         _offset: usize,
         _length: usize,
-    ) -> Result<(usize, usize, bool), &'static str> {
+    ) -> Result<crate::object::capability::MemoryMappingInfo, &'static str> {
         Err("Memory mapping not supported for directories")
     }
 
@@ -938,6 +1157,7 @@ impl crate::object::capability::selectable::Selectable for DevDirectoryObject {
         _interest: crate::object::capability::selectable::ReadyInterest,
         _trapframe: &mut crate::arch::Trapframe,
         _timeout_ticks: Option<u64>,
+        _min_wait_ticks: u64,
     ) -> crate::object::capability::selectable::SelectWaitOutcome {
         crate::object::capability::selectable::SelectWaitOutcome::Ready
     }
@@ -973,6 +1193,7 @@ impl FileSystemDriver for DevFSDriver {
 fn register_driver() {
     let fs_driver_manager = get_fs_driver_manager();
     fs_driver_manager.register_driver(Box::new(DevFSDriver));
+    super::devpts::register_driver();
 }
 
 driver_initcall!(register_driver);
@@ -997,6 +1218,19 @@ mod tests {
 
         let metadata = root.metadata().unwrap();
         assert_eq!(metadata.file_type, FileType::Directory);
+    }
+
+    #[test_case]
+    fn test_devfs_ptmx_relative_symlink() {
+        let devfs = DevFS::new();
+        let root = devfs.root_node();
+
+        let ptmx = devfs.lookup(&root, &"ptmx".to_string()).unwrap();
+        assert_eq!(
+            ptmx.metadata().unwrap().file_type,
+            FileType::SymbolicLink("pts/ptmx".to_string())
+        );
+        assert_eq!(ptmx.read_link().unwrap(), "pts/ptmx");
     }
 
     #[test_case]
@@ -1189,6 +1423,120 @@ mod tests {
             truncate_result.is_err(),
             "Truncate should fail for device files"
         );
+    }
+
+    #[test_case]
+    fn test_devfs_unregistered_device_disappears_while_open_file_remains_usable() {
+        use crate::device::char::mockchar::MockCharDevice;
+
+        let device_manager = DeviceManager::new_for_test();
+        let char_device = Arc::new(MockCharDevice::new("test_unregister_devfs"));
+        let device_id = device_manager
+            .register_device_with_name("test_unregister_devfs".to_string(), char_device.clone());
+        let retained = device_manager
+            .get_device(device_id)
+            .expect("registered device should be available by ID");
+        let devfs = DevFS::new_with_device_manager(&device_manager);
+        let root = devfs.root_node();
+        let device_node = devfs
+            .lookup(&root, &"test_unregister_devfs".to_string())
+            .expect("registered device should be visible in devfs");
+        assert_eq!(device_node.id(), device_id as u64);
+        let file = devfs
+            .open(&device_node, 0)
+            .expect("registered device should open through devfs");
+
+        let removed = device_manager
+            .unregister_device(device_id)
+            .expect("registered device should be removed");
+        assert!(Arc::ptr_eq(&removed, &retained));
+        assert_eq!(retained.name(), "test_unregister_devfs");
+
+        let entries = devfs.readdir(&root).expect("devfs readdir should succeed");
+        assert!(
+            !entries
+                .iter()
+                .any(|entry| entry.name == "test_unregister_devfs"),
+            "unregistered device should not appear in devfs"
+        );
+        assert!(
+            devfs
+                .lookup(&root, &"test_unregister_devfs".to_string())
+                .is_err(),
+            "unregistered device lookup should fail"
+        );
+
+        assert_eq!(file.write(b"still usable").unwrap(), b"still usable".len());
+        assert_eq!(char_device.get_written_data(), b"still usable");
+    }
+
+    #[test_case]
+    fn test_devfs_block_device_read_advances_position() {
+        use crate::device::block::{
+            BlockDevice,
+            mockblk::MockBlockDevice,
+            request::{BlockIORequest, BlockIORequestType},
+        };
+
+        let device_manager = DeviceManager::get_manager();
+        let block_device = Arc::new(MockBlockDevice::new(
+            "test_devfs_block_position",
+            DEVFS_BLOCK_SECTOR_SIZE,
+            2,
+        ));
+
+        let mut sector0 = Vec::new();
+        sector0.resize(DEVFS_BLOCK_SECTOR_SIZE, b'A');
+        block_device.enqueue_request(Box::new(BlockIORequest {
+            request_type: BlockIORequestType::Write,
+            sector: 0,
+            sector_count: 1,
+            head: 0,
+            cylinder: 0,
+            buffer: sector0,
+        }));
+
+        let mut sector1 = Vec::new();
+        sector1.resize(DEVFS_BLOCK_SECTOR_SIZE, b'B');
+        block_device.enqueue_request(Box::new(BlockIORequest {
+            request_type: BlockIORequestType::Write,
+            sector: 1,
+            sector_count: 1,
+            head: 0,
+            cylinder: 0,
+            buffer: sector1,
+        }));
+        let results = block_device.process_requests();
+        assert_eq!(results.len(), 2);
+        assert!(results.iter().all(|result| result.result.is_ok()));
+
+        device_manager.register_device_with_name(
+            "test_devfs_block_position".to_string(),
+            block_device.clone(),
+        );
+
+        let devfs = DevFS::new();
+        let root = devfs.root_node();
+        let device_node = devfs
+            .lookup(&root, &"test_devfs_block_position".to_string())
+            .expect("block device should be visible in devfs");
+        let file = devfs
+            .open(&device_node, 0)
+            .expect("block device should open through devfs");
+
+        let mut first = [0u8; DEVFS_BLOCK_SECTOR_SIZE];
+        let first_len = file
+            .read(&mut first)
+            .expect("first sector read should work");
+        assert_eq!(first_len, DEVFS_BLOCK_SECTOR_SIZE);
+        assert!(first.iter().all(|byte| *byte == b'A'));
+
+        let mut second = [0u8; DEVFS_BLOCK_SECTOR_SIZE];
+        let second_len = file
+            .read(&mut second)
+            .expect("second sector read should work");
+        assert_eq!(second_len, DEVFS_BLOCK_SECTOR_SIZE);
+        assert!(second.iter().all(|byte| *byte == b'B'));
     }
 
     #[test_case]

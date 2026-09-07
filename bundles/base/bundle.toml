@@ -1,0 +1,123 @@
+# Scarlet Base Bundle
+# Essential system directories and binaries for boot and basic shell access.
+
+[[layers]]
+kind = "copy"
+source = "fs"
+to = "/"
+
+[[layers]]
+kind = "cargo"
+source = "../../user/bin"
+package = "user-bin"
+bin = "init"
+to = "/init"
+
+[[layers]]
+kind = "cargo"
+source = "../../user/bin"
+package = "user-bin"
+bin = "sh"
+to = "/bin/sh"
+
+[[layers]]
+kind = "cargo"
+source = "../../user/bin"
+package = "user-bin"
+bin = "login"
+to = "/bin/login"
+
+[[layers]]
+kind = "cargo"
+source = "../../user/std-bin"
+package = "scarlet-std-bin"
+bin = "stemd"
+to = "/bin/stemd"
+
+[[layers]]
+kind = "cargo"
+source = "../../user/std-bin"
+package = "scarlet-std-bin"
+bin = "logd"
+to = "/bin/logd"
+
+[[layers]]
+kind = "cargo"
+source = "../../user/std-bin"
+package = "scarlet-std-bin"
+bin = "logctl"
+to = "/bin/logctl"
+
+[[layers]]
+kind = "cargo"
+source = "../../user/bin"
+package = "user-bin"
+bin = "sbusd"
+to = "/bin/sbusd"
+
+[[layers]]
+kind = "cargo"
+source = "../../user/std-bin"
+bin = "hello"
+to = "/bin/hello"
+
+[[layers]]
+kind = "cargo"
+source = "../../user/std-bin"
+package = "scarlet-std-bin"
+bin = "kernel-info"
+to = "/bin/kernel-info"
+
+[[layers]]
+kind = "cargo"
+source = "../../user/bin"
+package = "user-bin"
+bin = "ps"
+to = "/bin/ps"
+
+[[layers]]
+kind = "cargo"
+source = "../../user/std-bin"
+bin = "shutdown"
+to = "/bin/shutdown"
+
+[[layers]]
+kind = "cargo"
+source = "../../user/std-bin"
+package = "scarlet-std-bin"
+bin = "top"
+to = "/bin/top"
+
+[[layers]]
+kind = "cargo"
+source = "../../user/std-bin"
+package = "scarlet-std-bin"
+bin = "kill"
+to = "/bin/kill"
+
+[[layers]]
+kind = "cargo"
+source = "../../user/bin"
+package = "user-bin"
+bin = "scpm"
+to = "/bin/scpm"
+
+[[layers]]
+kind = "cargo"
+source = "../../user/bin"
+package = "user-bin"
+bin = "netcfgd"
+to = "/bin/netcfgd"
+
+[[layers]]
+kind = "cargo"
+source = "../../user/bin"
+package = "user-bin"
+bin = "sshd"
+to = "/bin/sshd"
+
+[[layers]]
+kind = "cargo"
+source = "../../user/std-bin"
+bin = "resolverd"
+to = "/bin/resolverd"

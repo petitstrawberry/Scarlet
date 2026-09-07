@@ -21,6 +21,7 @@
 //! ABI modules implement SocketObject trait and register socket implementations
 //! with the NetworkManager.
 
+use crate::sync::{IrqRwSpinLock, Once};
 use alloc::{
     collections::BTreeMap,
     string::{String, ToString},
@@ -28,8 +29,6 @@ use alloc::{
     vec::Vec,
 };
 use core::sync::atomic::{AtomicUsize, Ordering};
-use spin::Once;
-
 pub mod arp;
 pub mod config;
 pub mod ethernet;
@@ -67,10 +66,12 @@ pub use socket::{
 };
 
 use crate::device::network::{DevicePacket, MacAddress};
-use crate::early_println;
 use crate::network::arp::ArpCacheEntry;
 use crate::network::ipv4::Ipv4Address;
 use crate::object::KernelObject;
+use crate::println;
+
+const LOG_IPV4_PACKET_TRACE: bool = false;
 
 /// Unique socket identifier
 pub type SocketId = usize;
@@ -97,7 +98,6 @@ pub struct InterfaceStats {
 pub struct NetworkConfig {
     pub default_gateway: Option<Ipv4Address>,
     pub gateway_mac: Option<MacAddress>,
-    pub dns_server: Option<Ipv4Address>,
     pub subnet_mask: Ipv4Address,
 }
 
@@ -106,74 +106,133 @@ impl Default for NetworkConfig {
         Self {
             default_gateway: None,
             gateway_mac: None,
-            dns_server: None,
-            subnet_mask: Ipv4Address::new(255, 255, 255, 0),
+            subnet_mask: Ipv4Address::new(0, 0, 0, 0),
         }
     }
 }
 
 /// Network interface trait
 pub trait NetworkInterface: Send + Sync {
+    /// Get the stable interface name.
+    ///
+    /// # Returns
+    ///
+    /// The interface name used by routing and configuration APIs.
     fn name(&self) -> &str;
+
+    /// Get the interface MAC address.
+    ///
+    /// # Returns
+    ///
+    /// The current link-layer address.
     fn mac_address(&self) -> MacAddress;
+
+    /// Get the configured primary IPv4 address.
+    ///
+    /// # Returns
+    ///
+    /// The primary address, or `None` while the interface is unconfigured.
     fn ip_address(&self) -> Option<Ipv4Address>;
+
+    /// Set the interface's primary IPv4 address cache.
+    ///
+    /// # Arguments
+    ///
+    /// * `ip` - Primary IPv4 address to cache on the interface.
+    ///
+    /// # Returns
+    ///
+    /// This method does not return a value.
     fn set_ip_address(&self, ip: Ipv4Address);
+
+    /// Clear the interface's primary IPv4 address cache.
+    ///
+    /// # Returns
+    ///
+    /// This method does not return a value.
+    fn clear_ip_address(&self);
+
+    /// Send a link-layer packet.
+    ///
+    /// # Arguments
+    ///
+    /// * `packet` - Complete device packet to transmit.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` after submission, or a driver error.
     fn send(&self, packet: DevicePacket) -> Result<(), &'static str>;
+
+    /// Poll the interface for received packets.
+    ///
+    /// # Returns
+    ///
+    /// All currently available packets, or a driver error.
     fn poll(&self) -> Result<Vec<DevicePacket>, &'static str>;
+
+    /// Read interface statistics.
+    ///
+    /// # Returns
+    ///
+    /// A snapshot of packet, byte, drop, and error counters.
     fn stats(&self) -> InterfaceStats;
 }
 
 /// Network Manager - Global socket and connection manager
 pub struct NetworkManager {
     /// Socket factories per domain (registered by ABI modules)
-    socket_factories: spin::RwLock<BTreeMap<SocketDomain, SocketFactory>>,
+    socket_factories: IrqRwSpinLock<BTreeMap<SocketDomain, SocketFactory>>,
 
     /// Protocol stacks for network protocols (TCP/IP, UDP, etc.)
     protocol_stacks: protocol_stack::ProtocolStackManager,
 
     /// Protocol layers registry (shared instances like VFS filesystems)
-    protocol_layers: spin::RwLock<BTreeMap<String, Arc<dyn NetworkLayer>>>,
+    protocol_layers: IrqRwSpinLock<BTreeMap<String, Arc<dyn NetworkLayer>>>,
 
     /// Named sockets namespace (path/name -> socket)
-    named_sockets: spin::RwLock<BTreeMap<String, Weak<dyn SocketObject>>>,
+    named_sockets: IrqRwSpinLock<BTreeMap<String, Weak<dyn SocketObject>>>,
 
     /// Active socket connections by ID
-    connections: spin::RwLock<BTreeMap<SocketId, Arc<dyn SocketObject>>>,
+    connections: IrqRwSpinLock<BTreeMap<SocketId, Weak<dyn SocketObject>>>,
 
     /// Reverse mapping: socket pointer address -> socket ID for O(1) lookups
-    socket_to_id: spin::RwLock<BTreeMap<usize, SocketId>>,
+    socket_to_id: IrqRwSpinLock<BTreeMap<usize, SocketId>>,
+
+    /// Logical owning references carried by socket kernel objects.
+    socket_handle_references: IrqRwSpinLock<BTreeMap<usize, usize>>,
 
     /// Next socket ID counter
     next_socket_id: AtomicUsize,
 
     /// Registered network interfaces
-    interfaces: spin::RwLock<BTreeMap<String, Arc<dyn NetworkInterface>>>,
+    interfaces: IrqRwSpinLock<BTreeMap<String, Arc<dyn NetworkInterface>>>,
 
     /// Default interface name
-    default_interface: spin::RwLock<Option<String>>,
+    default_interface: IrqRwSpinLock<Option<String>>,
 
     /// ARP cache
-    arp_cache: spin::RwLock<BTreeMap<u32, ArpCacheEntry>>,
+    arp_cache: IrqRwSpinLock<BTreeMap<u32, ArpCacheEntry>>,
 
     /// Network configuration
-    network_config: spin::RwLock<NetworkConfig>,
+    network_config: IrqRwSpinLock<NetworkConfig>,
 }
 
 impl NetworkManager {
     /// Create a new NetworkManager instance
     fn new() -> Self {
         Self {
-            socket_factories: spin::RwLock::new(BTreeMap::new()),
+            socket_factories: IrqRwSpinLock::new(BTreeMap::new()),
             protocol_stacks: protocol_stack::ProtocolStackManager::new(),
-            protocol_layers: spin::RwLock::new(BTreeMap::new()),
-            named_sockets: spin::RwLock::new(BTreeMap::new()),
-            connections: spin::RwLock::new(BTreeMap::new()),
-            socket_to_id: spin::RwLock::new(BTreeMap::new()),
+            protocol_layers: IrqRwSpinLock::new(BTreeMap::new()),
+            named_sockets: IrqRwSpinLock::new(BTreeMap::new()),
+            connections: IrqRwSpinLock::new(BTreeMap::new()),
+            socket_to_id: IrqRwSpinLock::new(BTreeMap::new()),
+            socket_handle_references: IrqRwSpinLock::new(BTreeMap::new()),
             next_socket_id: AtomicUsize::new(1),
-            interfaces: spin::RwLock::new(BTreeMap::new()),
-            default_interface: spin::RwLock::new(None),
-            arp_cache: spin::RwLock::new(BTreeMap::new()),
-            network_config: spin::RwLock::new(NetworkConfig::default()),
+            interfaces: IrqRwSpinLock::new(BTreeMap::new()),
+            default_interface: IrqRwSpinLock::new(None),
+            arp_cache: IrqRwSpinLock::new(BTreeMap::new()),
+            network_config: IrqRwSpinLock::new(NetworkConfig::default()),
         }
     }
 
@@ -211,6 +270,16 @@ impl NetworkManager {
     // Interface Management
     // ===================================================================
 
+    /// Register an interface with the network and protocol managers.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - Stable interface name.
+    /// * `interface` - Interface implementation to register.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` after registration, or an error if registration fails.
     pub fn register_interface(
         &self,
         name: &str,
@@ -226,16 +295,46 @@ impl NetworkManager {
             .write()
             .insert(String::from(name), interface);
 
-        // Configure protocol layers when first interface is registered
-        if self.interfaces.read().len() == 1 {
-            self.configure_protocol_layers_with_interface(interface_clone);
-        }
+        self.configure_protocol_layers_with_interface(interface_clone);
 
         Ok(())
     }
 
     pub fn get_interface(&self, name: &str) -> Option<Arc<dyn NetworkInterface>> {
         self.interfaces.read().get(name).cloned()
+    }
+
+    /// Remove a registered network interface.
+    ///
+    /// If the removed interface was the default, the lexicographically first
+    /// remaining interface becomes the new default.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - Interface name to remove.
+    ///
+    /// # Returns
+    ///
+    /// The removed interface, or `None` when `name` was not registered.
+    pub fn unregister_interface(&self, name: &str) -> Option<Arc<dyn NetworkInterface>> {
+        let mut default = self.default_interface.write();
+        let mut interfaces = self.interfaces.write();
+        let removed = interfaces.remove(name);
+        if default.as_deref() == Some(name) {
+            *default = interfaces.keys().next().cloned();
+        }
+        drop(interfaces);
+        drop(default);
+
+        if removed.is_some()
+            && let Some(ip_layer) = self.get_layer("ip")
+            && let Some(ipv4) = ip_layer
+                .as_any()
+                .downcast_ref::<crate::network::ipv4::Ipv4Layer>()
+        {
+            ipv4.remove_interface(name);
+        }
+        removed
     }
 
     pub fn get_default_interface(&self) -> Option<Arc<dyn NetworkInterface>> {
@@ -245,8 +344,39 @@ impl NetworkManager {
             .and_then(|name| self.get_interface(name))
     }
 
+    /// Select the interface preferred by otherwise-unbound sockets.
+    ///
+    /// Unknown interface names are ignored.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - Registered interface name to select.
+    ///
+    /// # Returns
+    ///
+    /// This method does not return a value.
     pub fn set_default_interface(&self, name: &str) {
+        if self.get_interface(name).is_none() {
+            return;
+        }
+
         *self.default_interface.write() = Some(String::from(name));
+        if let Some(ethernet_layer) = self.get_layer("ethernet")
+            && let Some(ethernet) = ethernet_layer
+                .as_any()
+                .downcast_ref::<crate::network::ethernet::EthernetLayer>()
+        {
+            ethernet.set_default_interface(name);
+        }
+    }
+
+    /// Get the name of the default network interface.
+    ///
+    /// # Returns
+    ///
+    /// The default interface name, or `None` if no interface is registered.
+    pub fn default_interface_name(&self) -> Option<String> {
+        self.default_interface.read().clone()
     }
 
     pub fn list_interfaces(&self) -> Vec<String> {
@@ -364,29 +494,70 @@ impl NetworkManager {
         }
     }
 
+    /// Set or clear the default gateway for one interface.
+    ///
+    /// # Arguments
+    ///
+    /// * `interface` - Interface that owns the default route.
+    /// * `gateway` - Gateway to install, or `None` to remove the route.
+    /// * `metric` - Route metric; lower values are preferred.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` if the interface and IPv4 layer exist, otherwise an error.
+    pub fn set_default_gateway_for_interface(
+        &self,
+        interface: &str,
+        gateway: Option<Ipv4Address>,
+        metric: u32,
+    ) -> Result<(), &'static str> {
+        if self.get_interface(interface).is_none() {
+            return Err("Network interface not found");
+        }
+
+        let ip_layer = self.get_layer("ip").ok_or("IPv4 layer not initialized")?;
+        let ipv4 = ip_layer
+            .as_any()
+            .downcast_ref::<crate::network::ipv4::Ipv4Layer>()
+            .ok_or("IPv4 layer type mismatch")?;
+
+        if let Some(gateway) = gateway {
+            ipv4.set_default_gateway_for_interface(gateway, interface, metric);
+        } else {
+            ipv4.clear_default_gateway_for_interface(interface);
+        }
+
+        if self.default_interface_name().as_deref() == Some(interface) {
+            let mut config = self.network_config.write();
+            config.default_gateway = gateway;
+            config.gateway_mac = None;
+        }
+        Ok(())
+    }
+
     pub fn get_default_gateway(&self) -> Option<Ipv4Address> {
         self.network_config.read().default_gateway
     }
 
-    pub fn handle_received_packet(&self, _interface_name: &str, packet: &DevicePacket) {
+    pub fn handle_received_packet(&self, interface_name: &str, packet: &DevicePacket) {
         if packet.len < 14 {
             return;
         }
 
         let eth_type = u16::from_be_bytes([packet.data[12], packet.data[13]]);
-        early_println!(
-            "[net] recv frame len={} eth_type=0x{:04X}",
-            packet.len,
-            eth_type
-        );
+        // println!(
+        //     "[net] recv frame len={} eth_type=0x{:04X}",
+        //     packet.len,
+        //     eth_type
+        // );
         match eth_type {
-            0x0806 => self.handle_arp_packet(packet),
-            0x0800 => self.handle_ipv4_packet(packet),
+            0x0806 => self.handle_arp_packet(interface_name, packet),
+            0x0800 => self.handle_ipv4_packet(interface_name, packet),
             _ => {}
         }
     }
 
-    fn handle_arp_packet(&self, packet: &DevicePacket) {
+    fn handle_arp_packet(&self, interface_name: &str, packet: &DevicePacket) {
         if packet.len < 14 + 28 {
             return;
         }
@@ -397,12 +568,12 @@ impl NetworkManager {
                 .as_any()
                 .downcast_ref::<crate::network::arp::ArpLayer>()
             {
-                let _ = arp.receive_packet(arp_data);
+                let _ = arp.receive_packet_on_interface(arp_data, Some(interface_name));
             }
         }
     }
 
-    fn handle_ipv4_packet(&self, packet: &DevicePacket) {
+    fn handle_ipv4_packet(&self, interface_name: &str, packet: &DevicePacket) {
         if packet.len < 14 + 20 {
             return;
         }
@@ -413,19 +584,21 @@ impl NetworkManager {
             None => return,
         };
 
-        early_println!(
-            "[IPv4] Recv frame: ip_len={} src={}.{}.{}.{} dst={}.{}.{}.{} proto={}",
-            ip_bytes.len(),
-            header.source_ip[0],
-            header.source_ip[1],
-            header.source_ip[2],
-            header.source_ip[3],
-            header.dest_ip[0],
-            header.dest_ip[1],
-            header.dest_ip[2],
-            header.dest_ip[3],
-            header.protocol
-        );
+        if LOG_IPV4_PACKET_TRACE {
+            println!(
+                "[IPv4] Recv frame: ip_len={} src={}.{}.{}.{} dst={}.{}.{}.{} proto={}",
+                ip_bytes.len(),
+                header.source_ip[0],
+                header.source_ip[1],
+                header.source_ip[2],
+                header.source_ip[3],
+                header.dest_ip[0],
+                header.dest_ip[1],
+                header.dest_ip[2],
+                header.dest_ip[3],
+                header.protocol
+            );
+        }
 
         let header_len = header.header_length();
         let total_length = usize::from(header.total_length);
@@ -459,7 +632,14 @@ impl NetworkManager {
                         crate::network::ipv4::protocol::UDP => handler
                             .as_any()
                             .downcast_ref::<crate::network::udp::UdpLayer>()
-                            .map(|udp| udp.receive_packet(src_ip, dst_ip, payload)),
+                            .map(|udp| {
+                                udp.receive_packet_on_interface(
+                                    src_ip,
+                                    dst_ip,
+                                    payload,
+                                    Some(interface_name),
+                                )
+                            }),
                         _ => Some(handler.receive(payload, None)),
                     };
                 }
@@ -485,16 +665,16 @@ impl NetworkManager {
         if let Some(factory) = factories.get(&domain) {
             let socket = factory(socket_type, protocol)?;
             let socket_id = self.next_socket_id.fetch_add(1, Ordering::SeqCst);
-            self.connections.write().insert(socket_id, socket.clone());
-            return Ok(KernelObject::Socket(socket));
+            self.register_socket_with_id(socket_id, Arc::clone(&socket))?;
+            return Ok(KernelObject::from_socket_object(socket));
         }
         drop(factories);
 
         if let Some(stack) = self.protocol_stacks.get_stack(domain) {
             let socket = stack.create_socket(socket_type, protocol)?;
             let socket_id = self.next_socket_id.fetch_add(1, Ordering::SeqCst);
-            self.connections.write().insert(socket_id, socket.clone());
-            return Ok(KernelObject::Socket(socket));
+            self.register_socket_with_id(socket_id, Arc::clone(&socket))?;
+            return Ok(KernelObject::from_socket_object(socket));
         }
 
         Err(SocketError::NotSupported)
@@ -551,12 +731,150 @@ impl NetworkManager {
         }
     }
 
-    pub fn unregister_named_socket(&self, name: &str) {
-        self.named_sockets.write().remove(name);
+    /// Unregister a named socket when the caller still owns the registration.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - Registry name to remove.
+    /// * `socket` - Socket requesting removal. A registration owned by another
+    ///   socket is left intact.
+    ///
+    /// # Returns
+    ///
+    /// This function returns no value. A missing or differently owned
+    /// registration is left unchanged.
+    pub fn unregister_named_socket(&self, name: &str, socket: &dyn SocketObject) {
+        let socket_ptr = socket as *const dyn SocketObject;
+        let mut sockets = self.named_sockets.write();
+        let owns_registration = sockets
+            .get(name)
+            .is_some_and(|registered| core::ptr::addr_eq(registered.as_ptr(), socket_ptr));
+        if owns_registration {
+            sockets.remove(name);
+        }
+    }
+
+    /// Apply final handle-close side effects to a socket.
+    ///
+    /// This is separate from `Drop` because forced process exit can abandon an
+    /// in-flight syscall's socket clone on a sibling kernel stack.
+    ///
+    /// # Arguments
+    ///
+    /// * `socket` - Socket whose owning handle is being closed.
+    pub(crate) fn close_socket_handle(&self, socket: &Arc<dyn SocketObject>) {
+        self.unregister_bound_socket_handle(socket);
+        socket.close_handle();
+        if let Some(socket_id) = self.get_socket_id(socket) {
+            self.remove_socket(socket_id);
+        }
+    }
+
+    /// Retain one logical owning reference to a socket.
+    ///
+    /// Temporary kernel `Arc` clones are deliberately not registered here.
+    /// Owning references include handle-table slots, fork/dup copies, and
+    /// handles queued for IPC transfer.
+    ///
+    /// # Arguments
+    ///
+    /// * `socket` - Socket receiving a logical owning reference.
+    pub(crate) fn retain_socket_handle_reference(&self, socket: &Arc<dyn SocketObject>) {
+        let socket_ptr = Arc::as_ptr(socket) as *const () as usize;
+        let mut references = self.socket_handle_references.write();
+        let count = references.entry(socket_ptr).or_insert(0);
+        *count = count
+            .checked_add(1)
+            .expect("socket handle reference count overflow");
+    }
+
+    /// Release one logical owning reference and close the final socket owner.
+    ///
+    /// The count is removed before close side effects run, so socket teardown
+    /// never occurs while the reference-count lock is held.
+    ///
+    /// # Arguments
+    ///
+    /// * `socket` - Socket losing a logical owning reference.
+    pub(crate) fn release_socket_handle_reference(&self, socket: &Arc<dyn SocketObject>) {
+        let socket_ptr = Arc::as_ptr(socket) as *const () as usize;
+        let should_close = {
+            let mut references = self.socket_handle_references.write();
+            let Some(count) = references.get_mut(&socket_ptr) else {
+                debug_assert!(false, "untracked socket handle reference released");
+                return;
+            };
+            if *count > 1 {
+                *count -= 1;
+                false
+            } else {
+                references.remove(&socket_ptr);
+                true
+            }
+        };
+
+        if should_close {
+            self.close_socket_handle(socket);
+        }
+    }
+
+    /// Release the bound name owned by a socket during final handle close.
+    ///
+    /// Logical socket-reference tracking ensures this helper is reached only
+    /// after inherited, duplicated, and IPC-queued owners have been released.
+    ///
+    /// # Arguments
+    ///
+    /// * `socket` - Socket whose handle-table entry is being discarded.
+    pub(crate) fn unregister_bound_socket_handle(&self, socket: &Arc<dyn SocketObject>) {
+        let state = socket.state();
+        if matches!(state, SocketState::Bound | SocketState::Listening)
+            && let Ok(SocketAddress::Local(address)) = socket.getsockname()
+            && !address.path().is_empty()
+        {
+            let name = if address.is_abstract() {
+                let mut name = String::new();
+                name.push('\0');
+                name.push_str(address.path());
+                name
+            } else {
+                address.path().to_string()
+            };
+            self.unregister_named_socket(&name, socket.as_ref());
+        }
+    }
+
+    /// Unregister the named socket represented by a removed VFS socket file.
+    ///
+    /// The socket ID and object identity are both checked, so an unlink racing
+    /// with a new owner cannot remove the replacement registration.
+    ///
+    /// # Arguments
+    ///
+    /// * socket_id - Socket ID stored in the removed VFS node.
+    pub(crate) fn unregister_socket_file(&self, socket_id: SocketId) {
+        let Some(socket) = self.get_socket(socket_id) else {
+            return;
+        };
+        let Ok(SocketAddress::Local(address)) = socket.getsockname() else {
+            return;
+        };
+        let name = if address.is_abstract() {
+            let mut name = String::new();
+            name.push('\0');
+            name.push_str(address.path());
+            name
+        } else {
+            address.path().to_string()
+        };
+        self.unregister_named_socket(&name, socket.as_ref());
     }
 
     pub fn get_socket(&self, socket_id: SocketId) -> Option<Arc<dyn SocketObject>> {
-        self.connections.read().get(&socket_id).cloned()
+        self.connections
+            .read()
+            .get(&socket_id)
+            .and_then(|socket| socket.upgrade())
     }
 
     pub fn register_socket_with_id(
@@ -565,23 +883,31 @@ impl NetworkManager {
         socket: Arc<dyn SocketObject>,
     ) -> Result<(), SocketError> {
         let mut connections = self.connections.write();
-        if connections.contains_key(&socket_id) {
-            return Err(SocketError::AddressInUse);
+        if let Some(existing) = connections.get(&socket_id) {
+            if existing.upgrade().is_some() {
+                return Err(SocketError::AddressInUse);
+            }
+            connections.remove(&socket_id);
         }
         let socket_ptr = Arc::as_ptr(&socket) as *const () as usize;
-        connections.insert(socket_id, socket);
+        connections.insert(socket_id, Arc::downgrade(&socket));
         drop(connections);
         self.socket_to_id.write().insert(socket_ptr, socket_id);
         Ok(())
     }
 
     pub fn remove_socket(&self, socket_id: SocketId) {
-        let mut connections = self.connections.write();
-        if let Some(socket) = connections.get(&socket_id) {
-            let socket_ptr = Arc::as_ptr(socket) as *const () as usize;
-            drop(connections);
-            self.connections.write().remove(&socket_id);
+        let socket = self.connections.write().remove(&socket_id);
+        if let Some(socket) = socket {
+            let socket_ptr = socket.as_ptr() as *const () as usize;
             self.socket_to_id.write().remove(&socket_ptr);
+        }
+    }
+
+    pub(crate) fn remove_socket_by_ptr(&self, socket_ptr: usize) {
+        let socket_id = self.socket_to_id.write().remove(&socket_ptr);
+        if let Some(socket_id) = socket_id {
+            self.connections.write().remove(&socket_id);
         }
     }
 
@@ -634,7 +960,11 @@ impl NetworkManager {
     }
 
     pub fn connection_count(&self) -> usize {
-        self.connections.read().len()
+        self.connections
+            .read()
+            .values()
+            .filter(|socket| socket.upgrade().is_some())
+            .count()
     }
 
     pub fn named_socket_count(&self) -> usize {
@@ -649,4 +979,44 @@ static GLOBAL_NETWORK_MANAGER: Once<NetworkManager> = Once::new();
 /// Get the global network manager
 pub fn get_network_manager() -> &'static NetworkManager {
     NetworkManager::get_manager()
+}
+
+#[cfg(test)]
+mod tests {
+    use alloc::sync::Arc;
+
+    use super::*;
+    use crate::network::local::LocalSocket;
+
+    #[test_case]
+    fn unregister_named_socket_preserves_a_different_live_owner() {
+        let manager = NetworkManager::new();
+        let owner: Arc<dyn SocketObject> = Arc::new(LocalSocket::new(
+            SocketType::Stream,
+            SocketProtocol::Default,
+        ));
+        let duplicate: Arc<dyn SocketObject> = Arc::new(LocalSocket::new(
+            SocketType::Stream,
+            SocketProtocol::Default,
+        ));
+        let name = "/tmp/named-socket-owner-test";
+
+        manager
+            .register_named_socket(name, Arc::clone(&owner))
+            .unwrap();
+        assert_eq!(
+            manager.register_named_socket(name, Arc::clone(&duplicate)),
+            Err(SocketError::AddressInUse)
+        );
+
+        manager.unregister_named_socket(name, duplicate.as_ref());
+        let registered = manager.lookup_named_socket(name).unwrap();
+        assert!(Arc::ptr_eq(&registered, &owner));
+
+        manager.unregister_named_socket(name, owner.as_ref());
+        assert!(matches!(
+            manager.lookup_named_socket(name),
+            Err(SocketError::ConnectionRefused)
+        ));
+    }
 }

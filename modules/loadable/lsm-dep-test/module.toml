@@ -1,0 +1,3 @@
+[module]
+name = "lsm-dep-test"
+depends = ["lsm-test"]

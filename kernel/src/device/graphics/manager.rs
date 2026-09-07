@@ -19,6 +19,7 @@
 
 extern crate alloc;
 
+use crate::sync::{IrqRwSpinLock, IrqSpinLock};
 use alloc::{
     format,
     string::{String, ToString},
@@ -26,13 +27,14 @@ use alloc::{
     vec::Vec,
 };
 use hashbrown::HashMap;
-use spin::{Mutex, RwLock};
 
+use super::output::DisplayOutput;
 use crate::device::{
     DeviceType,
-    graphics::{FramebufferConfig, GraphicsDevice},
+    graphics::FramebufferConfig,
     manager::{DeviceManager, SharedDevice},
 };
+use crate::vm::addr::phys_to_virt;
 
 /// Framebuffer resource extracted from graphics devices
 #[derive(Debug)]
@@ -52,7 +54,9 @@ pub struct FramebufferResource {
     /// For the logical pixel data size, use config.size() instead.
     pub size: usize,
     /// ID of the created /dev/fbX character device (if any)
-    pub created_char_device_id: RwLock<Option<usize>>,
+    pub created_char_device_id: IrqRwSpinLock<Option<usize>>,
+    /// ID of the created /dev/displayX character device (if any)
+    pub created_display_device_id: IrqRwSpinLock<Option<usize>>,
 }
 
 impl FramebufferResource {
@@ -70,7 +74,8 @@ impl FramebufferResource {
             config,
             physical_addr,
             size,
-            created_char_device_id: RwLock::new(None),
+            created_char_device_id: IrqRwSpinLock::new(None),
+            created_display_device_id: IrqRwSpinLock::new(None),
         }
     }
 }
@@ -106,22 +111,53 @@ pub struct MmapRegion {
 /// Graphics Manager - singleton for managing graphics resources
 pub struct GraphicsManager {
     /// Framebuffer resources mapped by logical name
-    framebuffers: Mutex<Option<HashMap<String, Arc<FramebufferResource>>>>,
+    framebuffers: IrqSpinLock<Option<HashMap<String, Arc<FramebufferResource>>>>,
+    /// Coordinates firmware boot framebuffer publication with native takeover.
+    takeover_state: IrqSpinLock<FramebufferTakeoverState>,
     /// Multi-display configuration (future use)
-    display_configs: Mutex<Vec<DisplayConfiguration>>,
+    #[allow(dead_code)]
+    display_configs: IrqSpinLock<Vec<DisplayConfiguration>>,
     /// Active mmap regions (future use)
-    active_mappings: Mutex<Vec<MmapRegion>>,
+    #[allow(dead_code)]
+    active_mappings: IrqSpinLock<Vec<MmapRegion>>,
+    #[cfg(test)]
+    endpoint_publication_failure: IrqSpinLock<Option<EndpointPublicationFailure>>,
 }
 
 static MANAGER: GraphicsManager = GraphicsManager::new();
+
+struct RetiredBootFramebuffer {
+    name: String,
+    display_name: String,
+    resource: Arc<FramebufferResource>,
+    framebuffer_endpoint: Option<SharedDevice>,
+    display_endpoint: Option<SharedDevice>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FramebufferTakeoverState {
+    BootAllowed,
+    NativeClaiming,
+    NativeActive,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum EndpointPublicationFailure {
+    Framebuffer,
+    Display,
+}
 
 impl GraphicsManager {
     /// Create a new GraphicsManager instance
     pub const fn new() -> Self {
         Self {
-            framebuffers: Mutex::new(None),
-            display_configs: Mutex::new(Vec::new()),
-            active_mappings: Mutex::new(Vec::new()),
+            framebuffers: IrqSpinLock::new(None),
+            takeover_state: IrqSpinLock::new(FramebufferTakeoverState::BootAllowed),
+            display_configs: IrqSpinLock::new(Vec::new()),
+            active_mappings: IrqSpinLock::new(Vec::new()),
+            #[cfg(test)]
+            endpoint_publication_failure: IrqSpinLock::new(None),
         }
     }
 
@@ -130,34 +166,44 @@ impl GraphicsManager {
         &MANAGER
     }
 
+    #[cfg(test)]
+    fn fail_endpoint_publication_for_test(&self, endpoint: EndpointPublicationFailure) {
+        *self.endpoint_publication_failure.lock() = Some(endpoint);
+    }
+
+    #[cfg(test)]
+    fn fail_endpoint_publication_if_requested(
+        &self,
+        endpoint: EndpointPublicationFailure,
+    ) -> Result<(), &'static str> {
+        let mut failure = self.endpoint_publication_failure.lock();
+        if *failure == Some(endpoint) {
+            *failure = None;
+            return Err("Injected endpoint publication failure");
+        }
+
+        Ok(())
+    }
+
     /// Discover and register graphics devices from DeviceManager
     ///
     /// This method scans all devices in the DeviceManager for graphics devices
     /// and extracts their framebuffer resources for management.
     pub fn discover_graphics_devices(&self) {
         let device_manager = DeviceManager::get_manager();
-        let device_count = device_manager.get_devices_count();
 
-        for device_id in 0..device_count {
+        for (device_id, device) in device_manager.get_devices_with_ids() {
             core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
-
-            let device = match device_manager.get_device(device_id) {
-                Some(device) => device,
-                None => {
-                    crate::early_println!("[GraphicsManager] Device not found: {}", device_id);
-                    continue;
-                }
-            };
 
             if device.device_type() == DeviceType::Graphics {
                 if let Err(e) = self.register_framebuffer_from_device(device_id, device) {
-                    crate::early_println!(
+                    crate::println!(
                         "[GraphicsManager] Failed to register framebuffer from device {}: {}",
                         device_id,
                         e
                     );
                 } else {
-                    crate::early_println!(
+                    crate::println!(
                         "[GraphicsManager] Successfully registered framebuffer from device {}",
                         device_id
                     );
@@ -175,25 +221,112 @@ impl GraphicsManager {
     ///
     /// # Returns
     ///
-    /// Result indicating success or failure
+    /// Result indicating success or failure. A boot framebuffer discovered
+    /// after native takeover has begun is unpublished without creating
+    /// framebuffer or display endpoints.
     pub fn register_framebuffer_from_device(
         &self,
         device_id: usize,
         device: SharedDevice,
     ) -> Result<(), &'static str> {
+        self.register_framebuffer_from_device_with_manager(
+            device_id,
+            device,
+            DeviceManager::get_manager(),
+            false,
+        )
+    }
+
+    /// Register a native graphics device and retire firmware boot framebuffers.
+    ///
+    /// The native device is initialized and its framebuffer metadata is
+    /// validated before any boot framebuffer is unpublished. Once validated,
+    /// boot framebuffer resources and their `/dev/fbX` and `/dev/displayX`
+    /// endpoints are staged for retirement, allowing the native device to
+    /// claim the primary slot. Endpoint publication failures unpublish the
+    /// partial native state and restore the boot resources and endpoints; boot
+    /// source devices are unpublished only after successful publication.
+    ///
+    /// # Arguments
+    ///
+    /// * `device_id` - DeviceManager ID of the native graphics device.
+    /// * `device` - Native graphics device to register.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` after native registration. Validation and endpoint-publication
+    /// failures leave the boot framebuffer resource and endpoints published.
+    /// Re-registering the same native source is idempotent; a different native
+    /// source cannot replace an in-progress or active takeover.
+    pub fn register_native_framebuffer_from_device(
+        &self,
+        device_id: usize,
+        device: SharedDevice,
+    ) -> Result<(), &'static str> {
+        self.register_framebuffer_from_device_with_manager(
+            device_id,
+            device,
+            DeviceManager::get_manager(),
+            true,
+        )
+    }
+
+    fn register_framebuffer_from_device_with_manager(
+        &self,
+        device_id: usize,
+        device: SharedDevice,
+        device_manager: &DeviceManager,
+        retire_boot_framebuffers: bool,
+    ) -> Result<(), &'static str> {
         // Cast to graphics device
         let graphics_device = device
             .as_graphics_device()
             .ok_or("Device is not a graphics device")?;
+        let is_boot_framebuffer = graphics_device.is_boot_framebuffer();
+
+        let _boot_registration_guard = if !retire_boot_framebuffers && is_boot_framebuffer {
+            let takeover_state = self.takeover_state.lock();
+            if *takeover_state != FramebufferTakeoverState::BootAllowed {
+                drop(takeover_state);
+                device_manager.unregister_device(device_id);
+                return Ok(());
+            }
+            Some(takeover_state)
+        } else {
+            None
+        };
+
+        crate::println!(
+            "[GraphicsManager] Initializing graphics device {}",
+            device_id
+        );
 
         // Initialize the graphics device if needed via trait (no downcast)
         graphics_device.init_graphics()?;
+        crate::println!(
+            "[GraphicsManager] Graphics device {} initialized",
+            device_id
+        );
 
         // Extract framebuffer configuration
         let config = graphics_device.get_framebuffer_config()?;
+        crate::println!(
+            "[GraphicsManager] Graphics device {} config {}x{}",
+            device_id,
+            config.width,
+            config.height
+        );
 
         // Extract framebuffer address
         let physical_addr = graphics_device.get_framebuffer_address()?;
+        if retire_boot_framebuffers && physical_addr == 0 {
+            return Err("Graphics device framebuffer address is null");
+        }
+        crate::println!(
+            "[GraphicsManager] Graphics device {} framebuffer paddr={:#x}",
+            device_id,
+            physical_addr
+        );
 
         // Calculate framebuffer size
         // The logical size is what the pixels actually use
@@ -202,16 +335,57 @@ impl GraphicsManager {
         let physical_size = (logical_size + crate::environment::PAGE_SIZE - 1)
             & !(crate::environment::PAGE_SIZE - 1);
 
-        // Generate logical name (fb0, fb1, etc.)
+        if retire_boot_framebuffers {
+            let mut takeover_state = self.takeover_state.lock();
+            let is_registered = self.is_source_device_registered(device_id);
+            match *takeover_state {
+                FramebufferTakeoverState::BootAllowed => {
+                    if is_registered {
+                        crate::println!(
+                            "[GraphicsManager] Graphics device {} is already registered",
+                            device_id
+                        );
+                        return Ok(());
+                    }
+                    *takeover_state = FramebufferTakeoverState::NativeClaiming;
+                }
+                FramebufferTakeoverState::NativeClaiming
+                | FramebufferTakeoverState::NativeActive => {
+                    if is_registered {
+                        crate::println!(
+                            "[GraphicsManager] Graphics device {} is already registered",
+                            device_id
+                        );
+                        return Ok(());
+                    }
+                    return Err("A native framebuffer takeover is already in progress or active");
+                }
+            }
+        } else if self.is_source_device_registered(device_id) {
+            crate::println!(
+                "[GraphicsManager] Graphics device {} is already registered",
+                device_id
+            );
+            return Ok(());
+        }
+
+        let mut retired_boot_framebuffers = if retire_boot_framebuffers {
+            self.prepare_boot_framebuffer_retirement_with_manager(device_manager)
+        } else {
+            Vec::new()
+        };
+
+        // Generate and publish the resource only after boot resources have
+        // been staged for retirement, so a native takeover claims fb0.
         let mut framebuffers = self.framebuffers.lock();
         if framebuffers.is_none() {
             *framebuffers = Some(HashMap::new());
         }
-        let map = framebuffers.as_ref().unwrap();
-        let logical_name = format!("fb{}", map.len());
-        drop(framebuffers);
-
-        // Create framebuffer resource with page-aligned physical size
+        let map = framebuffers.as_mut().unwrap();
+        let index = (0usize..)
+            .find(|index| !map.contains_key(&format!("fb{}", index)))
+            .expect("framebuffer index space exhausted");
+        let logical_name = format!("fb{}", index);
         let resource = Arc::new(FramebufferResource::new(
             device_id,
             logical_name.clone(),
@@ -219,34 +393,252 @@ impl GraphicsManager {
             physical_addr,
             physical_size,
         ));
-
-        // Store the resource
-        let mut framebuffers = self.framebuffers.lock();
-        if framebuffers.is_none() {
-            *framebuffers = Some(HashMap::new());
-        }
-        framebuffers
-            .as_mut()
-            .unwrap()
-            .insert(logical_name.clone(), resource);
+        map.insert(logical_name.clone(), resource);
         drop(framebuffers);
 
-        crate::early_println!(
+        crate::println!(
             "[GraphicsManager] Registered framebuffer resource: {} -> {}",
             device_id,
             logical_name
         );
 
-        // Automatically create and register the character device
-        if let Err(e) = self.create_framebuffer_char_device(&logical_name) {
-            crate::early_println!(
-                "[GraphicsManager] Warning: Failed to create character device for {}: {}",
-                logical_name,
-                e
+        if retire_boot_framebuffers {
+            if let Err(error) =
+                self.create_framebuffer_char_device_with_manager(&logical_name, device_manager)
+            {
+                self.rollback_native_framebuffer_publication_with_manager(
+                    &logical_name,
+                    &mut retired_boot_framebuffers,
+                    device_manager,
+                );
+                *self.takeover_state.lock() = FramebufferTakeoverState::BootAllowed;
+                return Err(error);
+            }
+
+            if let Err(error) =
+                self.create_display_char_device_with_manager(&logical_name, device_manager)
+            {
+                self.rollback_native_framebuffer_publication_with_manager(
+                    &logical_name,
+                    &mut retired_boot_framebuffers,
+                    device_manager,
+                );
+                *self.takeover_state.lock() = FramebufferTakeoverState::BootAllowed;
+                return Err(error);
+            }
+
+            *self.takeover_state.lock() = FramebufferTakeoverState::NativeActive;
+            self.finalize_boot_framebuffer_retirement_with_manager(
+                &retired_boot_framebuffers,
+                device_manager,
             );
+        } else {
+            // Keep ordinary framebuffer registration best-effort. Native
+            // takeover uses the transactional branch above instead.
+            crate::println!(
+                "[GraphicsManager] Creating framebuffer char device for {}",
+                logical_name
+            );
+            if let Err(error) =
+                self.create_framebuffer_char_device_with_manager(&logical_name, device_manager)
+            {
+                crate::println!(
+                    "[GraphicsManager] Warning: Failed to create character device for {}: {}",
+                    logical_name,
+                    error
+                );
+            }
+
+            crate::println!(
+                "[GraphicsManager] Creating display char device for {}",
+                logical_name
+            );
+            if let Err(error) =
+                self.create_display_char_device_with_manager(&logical_name, device_manager)
+            {
+                crate::println!(
+                    "[GraphicsManager] Warning: Failed to create display device for {}: {}",
+                    logical_name,
+                    error
+                );
+            }
         }
 
         Ok(())
+    }
+
+    fn is_source_device_registered(&self, device_id: usize) -> bool {
+        self.framebuffers.lock().as_ref().is_some_and(|map| {
+            map.values()
+                .any(|resource| resource.source_device_id == device_id)
+        })
+    }
+
+    #[cfg(test)]
+    pub fn register_framebuffer_from_device_with_device_manager(
+        &self,
+        device_id: usize,
+        device: SharedDevice,
+        device_manager: &DeviceManager,
+    ) -> Result<(), &'static str> {
+        self.register_framebuffer_from_device_with_manager(device_id, device, device_manager, false)
+    }
+
+    #[cfg(test)]
+    /// Register a native graphics device with an explicit test DeviceManager.
+    ///
+    /// # Arguments
+    ///
+    /// * `device_id` - Test DeviceManager ID of the native graphics device.
+    /// * `device` - Native graphics device to register.
+    /// * `device_manager` - Isolated DeviceManager used by the test.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` after validated takeover and registration. A failure leaves
+    /// the boot framebuffer resource and endpoints published.
+    pub fn register_native_framebuffer_from_device_with_device_manager(
+        &self,
+        device_id: usize,
+        device: SharedDevice,
+        device_manager: &DeviceManager,
+    ) -> Result<(), &'static str> {
+        self.register_framebuffer_from_device_with_manager(device_id, device, device_manager, true)
+    }
+
+    fn prepare_boot_framebuffer_retirement_with_manager(
+        &self,
+        device_manager: &DeviceManager,
+    ) -> Vec<RetiredBootFramebuffer> {
+        let candidates: Vec<(String, Arc<FramebufferResource>)> = self
+            .framebuffers
+            .lock()
+            .as_ref()
+            .map(|framebuffers| {
+                framebuffers
+                    .iter()
+                    .map(|(name, resource)| (name.clone(), resource.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let boot_names: Vec<String> = candidates
+            .iter()
+            .filter_map(|(name, resource)| {
+                let device = device_manager.get_device(resource.source_device_id)?;
+                device
+                    .as_graphics_device()
+                    .filter(|graphics| graphics.is_boot_framebuffer())
+                    .map(|_| name.clone())
+            })
+            .collect();
+
+        let retired: Vec<(String, Arc<FramebufferResource>)> = {
+            let mut framebuffers = self.framebuffers.lock();
+            let Some(framebuffers) = framebuffers.as_mut() else {
+                return Vec::new();
+            };
+            boot_names
+                .iter()
+                .filter_map(|name| {
+                    framebuffers
+                        .remove(name)
+                        .map(|resource| (name.clone(), resource))
+                })
+                .collect()
+        };
+
+        retired
+            .into_iter()
+            .map(|(name, resource)| {
+                let framebuffer_endpoint = resource
+                    .created_char_device_id
+                    .write()
+                    .take()
+                    .and_then(|device_id| device_manager.unregister_device(device_id));
+                let display_endpoint = resource
+                    .created_display_device_id
+                    .write()
+                    .take()
+                    .and_then(|device_id| device_manager.unregister_device(device_id));
+
+                RetiredBootFramebuffer {
+                    display_name: format!(
+                        "display{}",
+                        name.strip_prefix("fb").unwrap_or(name.as_str())
+                    ),
+                    name,
+                    resource,
+                    framebuffer_endpoint,
+                    display_endpoint,
+                }
+            })
+            .collect()
+    }
+
+    fn rollback_native_framebuffer_publication_with_manager(
+        &self,
+        native_framebuffer_name: &str,
+        retired_boot_framebuffers: &mut [RetiredBootFramebuffer],
+        device_manager: &DeviceManager,
+    ) {
+        let native_resource = self
+            .framebuffers
+            .lock()
+            .as_mut()
+            .and_then(|framebuffers| framebuffers.remove(native_framebuffer_name));
+
+        if let Some(resource) = native_resource {
+            if let Some(device_id) = resource.created_char_device_id.write().take() {
+                device_manager.unregister_device(device_id);
+            }
+            if let Some(device_id) = resource.created_display_device_id.write().take() {
+                device_manager.unregister_device(device_id);
+            }
+        }
+
+        self.restore_boot_framebuffers_with_manager(retired_boot_framebuffers, device_manager);
+    }
+
+    fn restore_boot_framebuffers_with_manager(
+        &self,
+        retired_boot_framebuffers: &mut [RetiredBootFramebuffer],
+        device_manager: &DeviceManager,
+    ) {
+        {
+            let mut framebuffers = self.framebuffers.lock();
+            if framebuffers.is_none() {
+                *framebuffers = Some(HashMap::new());
+            }
+            let framebuffers = framebuffers.as_mut().unwrap();
+            for retired in retired_boot_framebuffers.iter() {
+                framebuffers.insert(retired.name.clone(), retired.resource.clone());
+            }
+        }
+
+        for retired in retired_boot_framebuffers.iter_mut() {
+            if let Some(endpoint) = retired.framebuffer_endpoint.take() {
+                let device_id =
+                    device_manager.register_device_with_name(retired.name.clone(), endpoint);
+                *retired.resource.created_char_device_id.write() = Some(device_id);
+            }
+
+            if let Some(endpoint) = retired.display_endpoint.take() {
+                let device_id = device_manager
+                    .register_device_with_name(retired.display_name.clone(), endpoint);
+                *retired.resource.created_display_device_id.write() = Some(device_id);
+            }
+        }
+    }
+
+    fn finalize_boot_framebuffer_retirement_with_manager(
+        &self,
+        retired_boot_framebuffers: &[RetiredBootFramebuffer],
+        device_manager: &DeviceManager,
+    ) {
+        for retired in retired_boot_framebuffers {
+            device_manager.unregister_device(retired.resource.source_device_id);
+        }
     }
 
     /// Get a framebuffer resource by logical name
@@ -301,9 +693,15 @@ impl GraphicsManager {
     ///
     /// Result indicating success or failure
     pub fn create_framebuffer_char_device(&self, fb_name: &str) -> Result<(), &'static str> {
-        use crate::device::{
-            graphics::framebuffer_device::FramebufferCharDevice, manager::DeviceManager,
-        };
+        self.create_framebuffer_char_device_with_manager(fb_name, DeviceManager::get_manager())
+    }
+
+    fn create_framebuffer_char_device_with_manager(
+        &self,
+        fb_name: &str,
+        device_manager: &DeviceManager,
+    ) -> Result<(), &'static str> {
+        use crate::device::graphics::framebuffer_device::FramebufferCharDevice;
         use alloc::sync::Arc;
 
         // Get framebuffer resource
@@ -317,21 +715,38 @@ impl GraphicsManager {
         };
 
         // Create the character device
+        #[cfg(test)]
+        let fb_char_device =
+            FramebufferCharDevice::new_with_device_manager(fb_resource, device_manager);
+        #[cfg(not(test))]
         let fb_char_device = FramebufferCharDevice::new(fb_resource);
 
         // Register with DeviceManager (this will automatically publish to DevFS)
-        let device_manager = DeviceManager::get_manager();
+        #[cfg(test)]
+        self.fail_endpoint_publication_if_requested(EndpointPublicationFailure::Framebuffer)?;
         let device_id =
             device_manager.register_device_with_name(fb_name.to_string(), Arc::new(fb_char_device));
 
         // Update the framebuffer resource with the device ID
-        self.set_char_device_id(fb_name, device_id)?;
+        if let Err(error) = self.set_char_device_id(fb_name, device_id) {
+            device_manager.unregister_device(device_id);
+            return Err(error);
+        }
 
-        crate::early_println!(
+        crate::println!(
             "[GraphicsManager] Created framebuffer character device: /dev/{}",
             fb_name
         );
         Ok(())
+    }
+
+    #[cfg(test)]
+    pub fn create_framebuffer_char_device_with_device_manager(
+        &self,
+        fb_name: &str,
+        device_manager: &DeviceManager,
+    ) -> Result<(), &'static str> {
+        self.create_framebuffer_char_device_with_manager(fb_name, device_manager)
     }
 
     /// Update the character device ID for a framebuffer resource
@@ -362,6 +777,101 @@ impl GraphicsManager {
         }
     }
 
+    /// Create a DisplayCharDevice and register it with DeviceManager.
+    ///
+    /// # Arguments
+    ///
+    /// * `fb_name` - The logical framebuffer name backing the display.
+    ///
+    /// # Returns
+    ///
+    /// Result indicating success or failure.
+    pub fn create_display_char_device(&self, fb_name: &str) -> Result<(), &'static str> {
+        self.create_display_char_device_with_manager(fb_name, DeviceManager::get_manager())
+    }
+
+    fn create_display_char_device_with_manager(
+        &self,
+        fb_name: &str,
+        device_manager: &DeviceManager,
+    ) -> Result<(), &'static str> {
+        use crate::device::graphics::display_device::DisplayCharDevice;
+        use alloc::sync::Arc;
+
+        let fb_resource = {
+            let framebuffers = self.framebuffers.lock();
+            framebuffers
+                .as_ref()
+                .and_then(|map| map.get(fb_name))
+                .cloned()
+                .ok_or("Framebuffer not found")?
+        };
+
+        let display_index = fb_name
+            .strip_prefix("fb")
+            .ok_or("Invalid framebuffer name")?;
+        let display_name = format!("display{}", display_index);
+
+        #[cfg(test)]
+        let display_device =
+            DisplayCharDevice::new_with_device_manager(fb_resource, device_manager);
+        #[cfg(not(test))]
+        let display_device = DisplayCharDevice::new(fb_resource);
+
+        #[cfg(test)]
+        self.fail_endpoint_publication_if_requested(EndpointPublicationFailure::Display)?;
+        let device_id = device_manager
+            .register_device_with_name(display_name.clone(), Arc::new(display_device));
+
+        if let Err(error) = self.set_display_device_id(fb_name, device_id) {
+            device_manager.unregister_device(device_id);
+            return Err(error);
+        }
+
+        crate::println!(
+            "[GraphicsManager] Created display character device: /dev/{}",
+            display_name
+        );
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub fn create_display_char_device_with_device_manager(
+        &self,
+        fb_name: &str,
+        device_manager: &DeviceManager,
+    ) -> Result<(), &'static str> {
+        self.create_display_char_device_with_manager(fb_name, device_manager)
+    }
+
+    /// Update the display character device ID for a framebuffer resource.
+    ///
+    /// # Arguments
+    ///
+    /// * `fb_name` - The logical framebuffer name.
+    /// * `display_device_id` - The character device ID from DeviceManager.
+    ///
+    /// # Returns
+    ///
+    /// Result indicating success or failure.
+    pub fn set_display_device_id(
+        &self,
+        fb_name: &str,
+        display_device_id: usize,
+    ) -> Result<(), &'static str> {
+        let mut framebuffers = self.framebuffers.lock();
+        if let Some(map) = framebuffers.as_mut() {
+            if let Some(resource) = map.get_mut(fb_name) {
+                *resource.created_display_device_id.write() = Some(display_device_id);
+                Ok(())
+            } else {
+                Err("Framebuffer not found")
+            }
+        } else {
+            Err("Framebuffer not found")
+        }
+    }
+
     /// Read a single byte from the specified framebuffer
     ///
     /// # Arguments
@@ -381,7 +891,7 @@ impl GraphicsManager {
 
         // Read byte from framebuffer memory
         unsafe {
-            let fb_ptr = fb_resource.physical_addr as *const u8;
+            let fb_ptr = phys_to_virt(fb_resource.physical_addr) as *const u8;
             Some(*fb_ptr.add(position))
         }
     }
@@ -413,7 +923,7 @@ impl GraphicsManager {
 
         // Write byte to framebuffer memory
         unsafe {
-            let fb_ptr = fb_resource.physical_addr as *mut u8;
+            let fb_ptr = phys_to_virt(fb_resource.physical_addr) as *mut u8;
             *fb_ptr.add(position) = byte;
         }
 
@@ -449,7 +959,7 @@ impl GraphicsManager {
         // NOTE: For QEMU+HVF, avoid memcpy-style accesses that may VM-exit as
         // EC_DATAABORT without ISV and abort the host (assert(isv)).
         unsafe {
-            let fb_ptr = fb_resource.physical_addr as *const u8;
+            let fb_ptr = phys_to_virt(fb_resource.physical_addr) as *const u8;
             let src = fb_ptr.add(position);
             for i in 0..bytes_to_read {
                 buffer[i] = core::ptr::read_volatile(src.add(i));
@@ -490,7 +1000,7 @@ impl GraphicsManager {
         // Write bytes to framebuffer memory.
         // See note in read_framebuffer() about QEMU+HVF and ISV.
         unsafe {
-            let fb_ptr = fb_resource.physical_addr as *mut u8;
+            let fb_ptr = phys_to_virt(fb_resource.physical_addr) as *mut u8;
             let dst = fb_ptr.add(position);
             for i in 0..bytes_to_write {
                 core::ptr::write_volatile(dst.add(i), buffer[i]);
@@ -500,6 +1010,76 @@ impl GraphicsManager {
         Ok(bytes_to_write)
     }
 
+    /// Present a framebuffer on all connected outputs across all graphics devices.
+    ///
+    /// This is the "mirror" operation — every connected display gets the same content.
+    pub fn mirror_all(&self, fb_name: &str) -> Result<(), &'static str> {
+        let fb = self
+            .get_framebuffer(fb_name)
+            .ok_or("mirror: framebuffer not found")?;
+
+        let device_manager = DeviceManager::get_manager();
+
+        let mut presented = 0u32;
+        let mut last_error: Option<&'static str> = None;
+
+        for (_, device) in device_manager.get_devices_with_ids() {
+            let graphics = match device.as_graphics_device() {
+                Some(g) => g,
+                None => continue,
+            };
+
+            let outputs: Vec<&dyn DisplayOutput> = graphics.get_outputs();
+            for output in outputs {
+                if !output.is_connected() {
+                    continue;
+                }
+                match output.present(&fb.config, fb.physical_addr) {
+                    Ok(()) => presented += 1,
+                    Err(e) => {
+                        crate::println!(
+                            "[GraphicsManager] mirror failed on '{}': {}",
+                            output.name(),
+                            e
+                        );
+                        last_error = Some(e);
+                    }
+                }
+            }
+        }
+
+        if presented == 0 {
+            return Err(last_error.unwrap_or("mirror: no connected outputs"));
+        }
+
+        Ok(())
+    }
+
+    /// Present a framebuffer on a specific output by name.
+    pub fn mirror_to(&self, fb_name: &str, output_name: &str) -> Result<(), &'static str> {
+        let fb = self
+            .get_framebuffer(fb_name)
+            .ok_or("mirror: framebuffer not found")?;
+
+        let device_manager = DeviceManager::get_manager();
+
+        for (_, device) in device_manager.get_devices_with_ids() {
+            let graphics = match device.as_graphics_device() {
+                Some(g) => g,
+                None => continue,
+            };
+
+            let outputs: Vec<&dyn DisplayOutput> = graphics.get_outputs();
+            for output in outputs {
+                if output.name() == output_name {
+                    return output.present(&fb.config, fb.physical_addr);
+                }
+            }
+        }
+
+        Err("mirror: output not found")
+    }
+
     /// Clear all framebuffers (for testing only)
     /// This allows tests to start with a clean GraphicsManager state
     #[cfg(test)]
@@ -507,8 +1087,11 @@ impl GraphicsManager {
         use crate::device::manager::DeviceManager;
 
         // Clear GraphicsManager state
-        let mut framebuffers = self.framebuffers.lock();
-        *framebuffers = None;
+        {
+            let mut framebuffers = self.framebuffers.lock();
+            *framebuffers = None;
+        }
+        *self.takeover_state.lock() = FramebufferTakeoverState::BootAllowed;
 
         let mut display_configs = self.display_configs.lock();
         display_configs.clear();
@@ -530,25 +1113,13 @@ mod test_utils {
     pub fn create_test_graphics_manager() -> GraphicsManager {
         GraphicsManager::new()
     }
-
-    /// Setup a clean GraphicsManager for testing
-    /// This clears the global singleton and returns a reference to it
-    /// ensuring each test starts with a clean state
-    pub fn setup_clean_global_graphics_manager() -> &'static GraphicsManager {
-        let manager = GraphicsManager::get_manager();
-        manager.clear_for_test();
-        manager
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::device::{
-        Device,
-        graphics::{
-            FramebufferConfig, GenericGraphicsDevice, PixelFormat, manager::GraphicsManager,
-        },
+    use crate::device::graphics::{
+        FramebufferConfig, GenericGraphicsDevice, PixelFormat, manager::GraphicsManager,
     };
     use alloc::{string::ToString, sync::Arc};
 
@@ -590,7 +1161,8 @@ mod tests {
 
     #[test_case]
     fn test_framebuffer_registration() {
-        let mut manager = test_utils::create_test_graphics_manager();
+        let manager = test_utils::create_test_graphics_manager();
+        let device_manager = DeviceManager::new_for_test();
 
         // Create a test graphics device
         let mut device = GenericGraphicsDevice::new("test-gpu");
@@ -601,7 +1173,11 @@ mod tests {
         let shared_device: SharedDevice = Arc::new(device);
 
         // Register the device
-        let result = manager.register_framebuffer_from_device(0, shared_device);
+        let result = manager.register_framebuffer_from_device_with_device_manager(
+            0,
+            shared_device,
+            &device_manager,
+        );
         assert!(result.is_ok());
 
         // Check that framebuffer was registered
@@ -623,8 +1199,458 @@ mod tests {
     }
 
     #[test_case]
+    fn test_duplicate_source_device_registration_is_idempotent() {
+        let manager = test_utils::create_test_graphics_manager();
+        let device_manager = DeviceManager::new_for_test();
+        let mut device = GenericGraphicsDevice::new("test-gpu");
+        device.set_framebuffer_config(FramebufferConfig::new(640, 480, PixelFormat::BGRA8888));
+        device.set_framebuffer_address(0x90000000);
+        let shared_device: SharedDevice = Arc::new(device);
+
+        assert!(
+            manager
+                .register_framebuffer_from_device_with_device_manager(
+                    7,
+                    shared_device.clone(),
+                    &device_manager,
+                )
+                .is_ok()
+        );
+        assert!(
+            manager
+                .register_framebuffer_from_device_with_device_manager(
+                    7,
+                    shared_device,
+                    &device_manager,
+                )
+                .is_ok()
+        );
+        assert_eq!(manager.get_framebuffer_count(), 1);
+    }
+
+    #[test_case]
+    fn test_native_framebuffer_takeover_retires_boot_framebuffer() {
+        let manager = test_utils::create_test_graphics_manager();
+        let device_manager = DeviceManager::new_for_test();
+
+        let mut boot = GenericGraphicsDevice::new("boot-gpu");
+        boot.set_boot_framebuffer(true);
+        boot.set_framebuffer_config(FramebufferConfig::new(640, 480, PixelFormat::BGRA8888));
+        boot.set_framebuffer_address(0x80000000);
+        let boot: SharedDevice = Arc::new(boot);
+        let boot_id =
+            device_manager.register_device_with_name("boot-gpu".to_string(), boot.clone());
+        manager
+            .register_framebuffer_from_device_with_device_manager(
+                boot_id,
+                boot.clone(),
+                &device_manager,
+            )
+            .unwrap();
+
+        let boot_resource = manager.get_framebuffer("fb0").unwrap();
+        let boot_fb_id = boot_resource.created_char_device_id.read().unwrap();
+        let boot_display_id = boot_resource.created_display_device_id.read().unwrap();
+        let retained_boot_endpoint = device_manager
+            .get_device(boot_fb_id)
+            .expect("boot framebuffer endpoint should be published");
+
+        let mut native = GenericGraphicsDevice::new("native-gpu");
+        native.set_framebuffer_config(FramebufferConfig::new(1920, 1080, PixelFormat::BGRA8888));
+        native.set_framebuffer_address(0x90000000);
+        let native: SharedDevice = Arc::new(native);
+        let native_id =
+            device_manager.register_device_with_name("native-gpu".to_string(), native.clone());
+        manager
+            .register_native_framebuffer_from_device_with_device_manager(
+                native_id,
+                native,
+                &device_manager,
+            )
+            .unwrap();
+
+        assert_eq!(manager.get_framebuffer_count(), 1);
+        assert_eq!(
+            manager.get_framebuffer("fb0").unwrap().source_device_id,
+            native_id
+        );
+        assert!(device_manager.get_device(boot_id).is_none());
+        assert!(device_manager.get_device(boot_fb_id).is_none());
+        assert!(device_manager.get_device(boot_display_id).is_none());
+        assert_eq!(boot.name(), "boot-gpu");
+        assert_eq!(retained_boot_endpoint.name(), "framebuffer");
+        assert!(
+            retained_boot_endpoint.clone().open().is_ok(),
+            "unpublished boot endpoint Arc should remain usable"
+        );
+        assert!(device_manager.get_device(native_id).is_some());
+        let native_resource = manager.get_framebuffer("fb0").unwrap();
+        let native_fb_id = native_resource.created_char_device_id.read().unwrap();
+        let native_display_id = native_resource.created_display_device_id.read().unwrap();
+        assert!(device_manager.get_device(native_fb_id).is_some());
+        assert!(device_manager.get_device(native_display_id).is_some());
+        assert_eq!(
+            device_manager.get_device_id_by_name("fb0"),
+            Some(native_fb_id)
+        );
+        assert_eq!(
+            device_manager.get_device_id_by_name("display0"),
+            Some(native_display_id)
+        );
+    }
+
+    #[test_case]
+    fn test_native_framebuffer_validation_failures_preserve_boot_framebuffer() {
+        let manager = test_utils::create_test_graphics_manager();
+        let device_manager = DeviceManager::new_for_test();
+
+        let mut boot = GenericGraphicsDevice::new("boot-gpu");
+        boot.set_boot_framebuffer(true);
+        boot.set_framebuffer_config(FramebufferConfig::new(640, 480, PixelFormat::BGRA8888));
+        boot.set_framebuffer_address(0x80000000);
+        let boot: SharedDevice = Arc::new(boot);
+        let boot_id =
+            device_manager.register_device_with_name("boot-gpu".to_string(), boot.clone());
+        manager
+            .register_framebuffer_from_device_with_device_manager(boot_id, boot, &device_manager)
+            .unwrap();
+        let boot_resource = manager.get_framebuffer("fb0").unwrap();
+        let boot_fb_id = boot_resource.created_char_device_id.read().unwrap();
+        let boot_display_id = boot_resource.created_display_device_id.read().unwrap();
+
+        let native_without_config: SharedDevice =
+            Arc::new(GenericGraphicsDevice::new("native-without-config"));
+        let native_without_config_id = device_manager.register_device_with_name(
+            "native-without-config".to_string(),
+            native_without_config.clone(),
+        );
+        assert!(
+            manager
+                .register_native_framebuffer_from_device_with_device_manager(
+                    native_without_config_id,
+                    native_without_config,
+                    &device_manager,
+                )
+                .is_err()
+        );
+
+        let mut native_without_address = GenericGraphicsDevice::new("native-without-address");
+        native_without_address.set_framebuffer_config(FramebufferConfig::new(
+            1920,
+            1080,
+            PixelFormat::BGRA8888,
+        ));
+        let native_without_address: SharedDevice = Arc::new(native_without_address);
+        let native_without_address_id = device_manager.register_device_with_name(
+            "native-without-address".to_string(),
+            native_without_address.clone(),
+        );
+        assert!(
+            manager
+                .register_native_framebuffer_from_device_with_device_manager(
+                    native_without_address_id,
+                    native_without_address,
+                    &device_manager,
+                )
+                .is_err()
+        );
+
+        assert_eq!(manager.get_framebuffer_count(), 1);
+        assert_eq!(
+            manager.get_framebuffer("fb0").unwrap().source_device_id,
+            boot_id
+        );
+        assert!(device_manager.get_device(boot_id).is_some());
+        assert!(device_manager.get_device(boot_fb_id).is_some());
+        assert!(device_manager.get_device(boot_display_id).is_some());
+        assert_eq!(
+            device_manager.get_device_id_by_name("fb0"),
+            Some(boot_fb_id)
+        );
+        assert_eq!(
+            device_manager.get_device_id_by_name("display0"),
+            Some(boot_display_id)
+        );
+    }
+
+    #[test_case]
+    fn test_native_takeover_rejects_late_boot_framebuffer_registration() {
+        let manager = test_utils::create_test_graphics_manager();
+        let device_manager = DeviceManager::new_for_test();
+
+        let mut native = GenericGraphicsDevice::new("native-gpu");
+        native.set_framebuffer_config(FramebufferConfig::new(1920, 1080, PixelFormat::BGRA8888));
+        native.set_framebuffer_address(0x90000000);
+        let native: SharedDevice = Arc::new(native);
+        let native_id =
+            device_manager.register_device_with_name("native-gpu".to_string(), native.clone());
+        manager
+            .register_native_framebuffer_from_device_with_device_manager(
+                native_id,
+                native.clone(),
+                &device_manager,
+            )
+            .unwrap();
+        manager
+            .register_native_framebuffer_from_device_with_device_manager(
+                native_id,
+                native,
+                &device_manager,
+            )
+            .unwrap();
+
+        let mut other_native = GenericGraphicsDevice::new("other-native-gpu");
+        other_native.set_framebuffer_config(FramebufferConfig::new(
+            1024,
+            768,
+            PixelFormat::BGRA8888,
+        ));
+        other_native.set_framebuffer_address(0x91000000);
+        let other_native: SharedDevice = Arc::new(other_native);
+        let other_native_id = device_manager
+            .register_device_with_name("other-native-gpu".to_string(), other_native.clone());
+        assert!(
+            manager
+                .register_native_framebuffer_from_device_with_device_manager(
+                    other_native_id,
+                    other_native,
+                    &device_manager,
+                )
+                .is_err()
+        );
+
+        let mut boot = GenericGraphicsDevice::new("late-boot-gpu");
+        boot.set_boot_framebuffer(true);
+        boot.set_framebuffer_config(FramebufferConfig::new(640, 480, PixelFormat::BGRA8888));
+        boot.set_framebuffer_address(0x80000000);
+        let boot: SharedDevice = Arc::new(boot);
+        let boot_id =
+            device_manager.register_device_with_name("late-boot-gpu".to_string(), boot.clone());
+        manager
+            .register_framebuffer_from_device_with_device_manager(boot_id, boot, &device_manager)
+            .unwrap();
+
+        assert_eq!(manager.get_framebuffer_count(), 1);
+        assert_eq!(
+            manager.get_framebuffer("fb0").unwrap().source_device_id,
+            native_id
+        );
+        assert!(device_manager.get_device(boot_id).is_none());
+        assert!(device_manager.get_device_id_by_name("fb1").is_none());
+        assert!(device_manager.get_device_id_by_name("display1").is_none());
+    }
+
+    #[test_case]
+    fn test_native_framebuffer_failure_reopens_boot_registration() {
+        let manager = test_utils::create_test_graphics_manager();
+        let device_manager = DeviceManager::new_for_test();
+
+        let mut native = GenericGraphicsDevice::new("native-gpu");
+        native.set_framebuffer_config(FramebufferConfig::new(1920, 1080, PixelFormat::BGRA8888));
+        native.set_framebuffer_address(0x90000000);
+        let native: SharedDevice = Arc::new(native);
+        let native_id =
+            device_manager.register_device_with_name("native-gpu".to_string(), native.clone());
+        manager.fail_endpoint_publication_for_test(EndpointPublicationFailure::Framebuffer);
+        assert!(
+            manager
+                .register_native_framebuffer_from_device_with_device_manager(
+                    native_id,
+                    native,
+                    &device_manager,
+                )
+                .is_err()
+        );
+
+        let mut boot = GenericGraphicsDevice::new("boot-gpu");
+        boot.set_boot_framebuffer(true);
+        boot.set_framebuffer_config(FramebufferConfig::new(640, 480, PixelFormat::BGRA8888));
+        boot.set_framebuffer_address(0x80000000);
+        let boot: SharedDevice = Arc::new(boot);
+        let boot_id =
+            device_manager.register_device_with_name("boot-gpu".to_string(), boot.clone());
+        manager
+            .register_framebuffer_from_device_with_device_manager(boot_id, boot, &device_manager)
+            .unwrap();
+
+        let boot_resource = manager.get_framebuffer("fb0").unwrap();
+        assert_eq!(boot_resource.source_device_id, boot_id);
+        assert!(
+            device_manager
+                .get_device(boot_resource.created_char_device_id.read().unwrap())
+                .is_some()
+        );
+        assert!(
+            device_manager
+                .get_device(boot_resource.created_display_device_id.read().unwrap())
+                .is_some()
+        );
+    }
+
+    #[test_case]
+    fn test_native_framebuffer_takeover_rolls_back_after_framebuffer_publication_failure() {
+        let manager = test_utils::create_test_graphics_manager();
+        let device_manager = DeviceManager::new_for_test();
+
+        let mut boot = GenericGraphicsDevice::new("boot-gpu");
+        boot.set_boot_framebuffer(true);
+        boot.set_framebuffer_config(FramebufferConfig::new(640, 480, PixelFormat::BGRA8888));
+        boot.set_framebuffer_address(0x80000000);
+        let boot: SharedDevice = Arc::new(boot);
+        let boot_id =
+            device_manager.register_device_with_name("boot-gpu".to_string(), boot.clone());
+        manager
+            .register_framebuffer_from_device_with_device_manager(
+                boot_id,
+                boot.clone(),
+                &device_manager,
+            )
+            .unwrap();
+
+        let boot_resource = manager.get_framebuffer("fb0").unwrap();
+        let boot_fb_id = boot_resource.created_char_device_id.read().unwrap();
+        let boot_display_id = boot_resource.created_display_device_id.read().unwrap();
+        let retained_boot_endpoint = device_manager
+            .get_device(boot_fb_id)
+            .expect("boot framebuffer endpoint should be published");
+
+        let mut native = GenericGraphicsDevice::new("native-gpu");
+        native.set_framebuffer_config(FramebufferConfig::new(1920, 1080, PixelFormat::BGRA8888));
+        native.set_framebuffer_address(0x90000000);
+        let native: SharedDevice = Arc::new(native);
+        let native_id =
+            device_manager.register_device_with_name("native-gpu".to_string(), native.clone());
+        manager.fail_endpoint_publication_for_test(EndpointPublicationFailure::Framebuffer);
+
+        assert!(
+            manager
+                .register_native_framebuffer_from_device_with_device_manager(
+                    native_id,
+                    native,
+                    &device_manager,
+                )
+                .is_err()
+        );
+
+        let restored_boot_resource = manager.get_framebuffer("fb0").unwrap();
+        let restored_boot_fb_id = restored_boot_resource
+            .created_char_device_id
+            .read()
+            .unwrap();
+        let restored_boot_display_id = restored_boot_resource
+            .created_display_device_id
+            .read()
+            .unwrap();
+        assert!(Arc::ptr_eq(&restored_boot_resource, &boot_resource));
+        assert_eq!(restored_boot_resource.source_device_id, boot_id);
+        assert!(device_manager.get_device(boot_id).is_some());
+        assert!(device_manager.get_device(boot_fb_id).is_none());
+        assert!(device_manager.get_device(boot_display_id).is_none());
+        assert!(device_manager.get_device(restored_boot_fb_id).is_some());
+        assert!(
+            device_manager
+                .get_device(restored_boot_display_id)
+                .is_some()
+        );
+        assert_eq!(
+            device_manager.get_device_id_by_name("fb0"),
+            Some(restored_boot_fb_id)
+        );
+        assert_eq!(
+            device_manager.get_device_id_by_name("display0"),
+            Some(restored_boot_display_id)
+        );
+        assert_eq!(retained_boot_endpoint.name(), "framebuffer");
+        assert_eq!(device_manager.get_devices_count(), 4);
+    }
+
+    #[test_case]
+    fn test_native_framebuffer_takeover_rolls_back_after_display_publication_failure() {
+        let manager = test_utils::create_test_graphics_manager();
+        let device_manager = DeviceManager::new_for_test();
+
+        let mut boot = GenericGraphicsDevice::new("boot-gpu");
+        boot.set_boot_framebuffer(true);
+        boot.set_framebuffer_config(FramebufferConfig::new(640, 480, PixelFormat::BGRA8888));
+        boot.set_framebuffer_address(0x80000000);
+        let boot: SharedDevice = Arc::new(boot);
+        let boot_id =
+            device_manager.register_device_with_name("boot-gpu".to_string(), boot.clone());
+        manager
+            .register_framebuffer_from_device_with_device_manager(
+                boot_id,
+                boot.clone(),
+                &device_manager,
+            )
+            .unwrap();
+
+        let boot_resource = manager.get_framebuffer("fb0").unwrap();
+        let boot_fb_id = boot_resource.created_char_device_id.read().unwrap();
+        let boot_display_id = boot_resource.created_display_device_id.read().unwrap();
+        let retained_boot_endpoint = device_manager
+            .get_device(boot_fb_id)
+            .expect("boot framebuffer endpoint should be published");
+
+        let mut native = GenericGraphicsDevice::new("native-gpu");
+        native.set_framebuffer_config(FramebufferConfig::new(1920, 1080, PixelFormat::BGRA8888));
+        native.set_framebuffer_address(0x90000000);
+        let native: SharedDevice = Arc::new(native);
+        let native_id =
+            device_manager.register_device_with_name("native-gpu".to_string(), native.clone());
+        manager.fail_endpoint_publication_for_test(EndpointPublicationFailure::Display);
+
+        assert!(
+            manager
+                .register_native_framebuffer_from_device_with_device_manager(
+                    native_id,
+                    native,
+                    &device_manager,
+                )
+                .is_err()
+        );
+
+        let restored_boot_resource = manager.get_framebuffer("fb0").unwrap();
+        let restored_boot_fb_id = restored_boot_resource
+            .created_char_device_id
+            .read()
+            .unwrap();
+        let restored_boot_display_id = restored_boot_resource
+            .created_display_device_id
+            .read()
+            .unwrap();
+        assert_eq!(manager.get_framebuffer_count(), 1);
+        assert!(Arc::ptr_eq(&restored_boot_resource, &boot_resource));
+        assert_eq!(restored_boot_resource.source_device_id, boot_id);
+        assert!(device_manager.get_device(boot_id).is_some());
+        assert!(device_manager.get_device(native_id).is_some());
+        assert!(device_manager.get_device(boot_fb_id).is_none());
+        assert!(device_manager.get_device(boot_display_id).is_none());
+        assert!(device_manager.get_device(restored_boot_fb_id).is_some());
+        assert!(
+            device_manager
+                .get_device(restored_boot_display_id)
+                .is_some()
+        );
+        assert_eq!(
+            device_manager.get_device_id_by_name("fb0"),
+            Some(restored_boot_fb_id)
+        );
+        assert_eq!(
+            device_manager.get_device_id_by_name("display0"),
+            Some(restored_boot_display_id)
+        );
+        assert_eq!(retained_boot_endpoint.name(), "framebuffer");
+        assert!(matches!(
+            *manager.takeover_state.lock(),
+            FramebufferTakeoverState::BootAllowed
+        ));
+        assert_eq!(device_manager.get_devices_count(), 4);
+    }
+
+    #[test_case]
     fn test_multiple_framebuffer_registration() {
-        let mut manager = test_utils::create_test_graphics_manager();
+        let manager = test_utils::create_test_graphics_manager();
+        let device_manager = DeviceManager::new_for_test();
 
         // Create first device
         let mut device1 = GenericGraphicsDevice::new("test-gpu1");
@@ -643,12 +1669,20 @@ mod tests {
         // Register both devices
         assert!(
             manager
-                .register_framebuffer_from_device(1, shared_device1)
+                .register_framebuffer_from_device_with_device_manager(
+                    1,
+                    shared_device1,
+                    &device_manager,
+                )
                 .is_ok()
         );
         assert!(
             manager
-                .register_framebuffer_from_device(2, shared_device2)
+                .register_framebuffer_from_device_with_device_manager(
+                    2,
+                    shared_device2,
+                    &device_manager,
+                )
                 .is_ok()
         );
 
@@ -670,7 +1704,8 @@ mod tests {
 
     #[test_case]
     fn test_char_device_id_assignment() {
-        let mut manager = test_utils::create_test_graphics_manager();
+        let manager = test_utils::create_test_graphics_manager();
+        let device_manager = DeviceManager::new_for_test();
 
         // Create and register a device
         let mut device = GenericGraphicsDevice::new("test-gpu");
@@ -680,7 +1715,7 @@ mod tests {
         let shared_device: SharedDevice = Arc::new(device);
 
         manager
-            .register_framebuffer_from_device(0, shared_device)
+            .register_framebuffer_from_device_with_device_manager(0, shared_device, &device_manager)
             .unwrap();
 
         // Set character device ID

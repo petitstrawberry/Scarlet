@@ -5,6 +5,8 @@
 
 use super::SeekFrom;
 use crate::arch::Trapframe;
+use crate::fs::AbiFileMetadata;
+use crate::library::std::usercopy::copy_to_user;
 use crate::task::mytask;
 
 /// System call for seeking within a file
@@ -28,7 +30,7 @@ pub fn sys_file_seek(trapframe: &mut Trapframe) -> usize {
     let whence = trapframe.get_arg(2) as i32;
 
     // Increment PC to avoid infinite loop if seek fails
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     // Get KernelObject from handle table
     let kernel_obj = match task.handle_table.get(handle) {
@@ -76,7 +78,7 @@ pub fn sys_file_truncate(trapframe: &mut Trapframe) -> usize {
     let length = trapframe.get_arg(1) as u64;
 
     // Increment PC to avoid infinite loop if truncate fails
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     // Get KernelObject from handle table
     let kernel_obj = match task.handle_table.get(handle) {
@@ -97,54 +99,57 @@ pub fn sys_file_truncate(trapframe: &mut Trapframe) -> usize {
     }
 }
 
-// /// System call for getting file metadata
-// ///
-// /// # Arguments
-// /// - handle: Handle to the KernelObject (must support FileObject)
-// /// - metadata_ptr: Pointer to FileMetadata structure to fill
-// ///
-// /// # Returns
-// /// - On success: 0
-// /// - On error: usize::MAX
-// pub fn sys_file_metadata(trapframe: &mut Trapframe) -> usize {
-//     let task = match mytask() {
-//         Some(task) => task,
-//         None => return usize::MAX,
-//     };
+/// System call for getting file metadata.
+///
+/// # Arguments
+///
+/// - `handle`: Handle to the KernelObject (must support FileObject)
+/// - `metadata_ptr`: Pointer to an `AbiFileMetadata` structure to fill
+///
+/// # Returns
+///
+/// - On success: `0`
+/// - On error: `usize::MAX`
+pub fn sys_file_metadata(trapframe: &mut Trapframe) -> usize {
+    let task = match mytask() {
+        Some(task) => task,
+        None => return usize::MAX,
+    };
 
-//     let handle = trapframe.get_arg(0) as u32;
-//     let metadata_ptr = trapframe.get_arg(1);
+    let handle = trapframe.get_arg(0) as u32;
+    let metadata_ptr = trapframe.get_arg(1);
 
-//     // Increment PC to avoid infinite loop if metadata fails
-//     trapframe.increment_pc_next(task);
+    // Increment PC to avoid infinite loop if metadata fails
+    trapframe.increment_pc_next(&task);
 
-//     // Translate the pointer to get access to the metadata structure
-//     let metadata_vaddr = match task.vm_manager.translate_vaddr(metadata_ptr) {
-//         Some(addr) => addr as *mut crate::fs::FileMetadata,
-//         None => return usize::MAX, // Invalid pointer
-//     };
+    // Get KernelObject from handle table
+    let kernel_obj = match task.handle_table.get(handle) {
+        Some(obj) => obj,
+        None => return usize::MAX, // Invalid handle
+    };
 
-//     // Get KernelObject from handle table
-//     let kernel_obj = match task.handle_table.get(handle) {
-//         Some(obj) => obj,
-//         None => return usize::MAX, // Invalid handle
-//     };
+    // Check if object supports FileObject operations
+    let file = match kernel_obj.as_file() {
+        Some(file) => file,
+        None => return usize::MAX, // Object doesn't support file operations
+    };
 
-//     // Check if object supports FileObject operations
-//     let file = match kernel_obj.as_file() {
-//         Some(file) => file,
-//         None => return usize::MAX, // Object doesn't support file operations
-//     };
+    let metadata = match file.metadata() {
+        Ok(metadata) => AbiFileMetadata::from_metadata(&metadata),
+        Err(_) => return usize::MAX,
+    };
 
-//     // Get metadata
-//     match file.metadata() {
-//         Ok(metadata) => {
-//             // Write the metadata to user space
-//             unsafe {
-//                 *metadata_vaddr = metadata;
-//             }
-//             0 // Success
-//         }
-//         Err(_) => usize::MAX, // Metadata error
-//     }
-// }
+    // SAFETY: `metadata` is a plain `repr(C)` byte record and is only read for
+    // the duration of this copy into the caller-provided buffer.
+    let bytes = unsafe {
+        core::slice::from_raw_parts(
+            (&metadata as *const AbiFileMetadata).cast::<u8>(),
+            core::mem::size_of::<AbiFileMetadata>(),
+        )
+    };
+
+    match copy_to_user(&task, metadata_ptr, bytes) {
+        Ok(()) => 0,
+        Err(_) => usize::MAX,
+    }
+}

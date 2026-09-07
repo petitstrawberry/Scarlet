@@ -1,0 +1,28 @@
+# AArch64 MicroVM Prebuilt Artifacts
+
+This directory contains project-local artifacts used by the AArch64 microVM
+image builder. Keeping these files here avoids depending on transient files in
+the deployed Linux bundle rootfs or on network downloads during normal image
+creation.
+
+- `systems/linux-aarch64/usr/bin/firecracker`: Firecracker v1.15.1 aarch64.
+- `systems/linux-aarch64/usr/bin/guest-Image`: AArch64 Linux guest kernel.
+- `systems/linux-aarch64/usr/bin/guest-initramfs.cpio.gz`: AArch64 guest initramfs.
+
+These are source-tree paths. The project copies `prebuilt/systems` to
+`/systems` in the image. Microvm init opens the binaries as `/usr/bin/...`
+through the Linux Environment view, not through a global backing path.
+
+Refresh `guest-Image` and `guest-initramfs.cpio.gz` from
+`bundles/linux/tools/build_guest_image.sh` output when the guest payload changes.
+
+Run `../tools/prepare_prebuilt.sh` from this project, or
+`projects/aarch64-limine-microvm/tools/prepare_prebuilt.sh` from the repository
+root, to populate the ignored artifact tree. The script first checks
+`bundles/linux/prebuilt/aarch64/bin`, then the deployed Linux bundle rootfs, and
+finally the legacy `/opt/prebuilt/aarch64/bin` location. It downloads
+Firecracker only when `firecracker` is missing.
+
+For local development, set `PREBUILT_DIR` when running the Linux guest builders
+and set `SCARLET_MICROVM_GUEST_BIN_DIR` when preparing this directory if the
+guest artifacts are outside those locations.

@@ -9,6 +9,17 @@ fn dummy_request_fn(_request: &mut BlockIORequest) -> Result<(), &'static str> {
     Ok(())
 }
 
+fn read_request(sector: usize) -> Box<BlockIORequest> {
+    Box::new(BlockIORequest {
+        request_type: request::BlockIORequestType::Read,
+        sector,
+        sector_count: 1,
+        head: 0,
+        cylinder: 0,
+        buffer: vec![0; 512],
+    })
+}
+
 #[test_case]
 fn test_block_device_creation() {
     let device = GenericBlockDevice::new("test_disk", 1024, dummy_request_fn);
@@ -47,6 +58,24 @@ fn test_block_device_process_requests() {
     let results = device.process_requests();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].result, Ok(()));
+}
+
+#[test_case]
+fn test_submit_requests_does_not_consume_queued_requests() {
+    let device = GenericBlockDevice::new("test_disk", 4096, dummy_request_fn);
+    device.enqueue_request(read_request(7));
+
+    let submitted = device.submit_requests(vec![read_request(1), read_request(2)]);
+    assert_eq!(submitted.len(), 2);
+    assert_eq!(submitted[0].request.sector, 1);
+    assert_eq!(submitted[1].request.sector, 2);
+    assert_eq!(submitted[0].result, Ok(()));
+    assert_eq!(submitted[1].result, Ok(()));
+
+    let queued = device.process_requests();
+    assert_eq!(queued.len(), 1);
+    assert_eq!(queued[0].request.sector, 7);
+    assert_eq!(queued[0].result, Ok(()));
 }
 
 #[test_case]

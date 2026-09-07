@@ -7,18 +7,17 @@
 use alloc::{
     boxed::Box,
     collections::btree_map::BTreeMap,
-    format,
     string::{String, ToString},
-    sync::Arc,
     vec::Vec,
 };
+use core::sync::atomic::Ordering;
 
 use crate::{
     arch::{Trapframe, vm},
-    early_initcall,
-    fs::{
-        FileSystemError, FileSystemErrorKind, SeekFrom, VfsManager, drivers::overlayfs::OverlayFS,
-    },
+    fs::SeekFrom,
+    ipc::event::{Event, EventContent, EventPriority, ProcessControlType},
+    late_initcall,
+    library::std::usercopy::{copy_from_user, copy_to_user},
     register_abi,
     syscall::syscall_handler,
     task::elf_loader::{
@@ -28,14 +27,145 @@ use crate::{
     vm::setup_user_stack,
 };
 
-use crate::abi::AbiModule;
+use crate::abi::{AbiModule, EventProcessOutcome};
 
-#[derive(Clone, Copy)]
+/// Maximum number of pending events that can be queued
+/// When this limit is reached, oldest events are dropped
+const MAX_PENDING_EVENTS: usize = 1024;
+
+/// Size of the user-visible `EventInfo` passed to Scarlet event handlers.
+const EVENT_INFO_SIZE: usize = 40;
+
+/// Size of the saved AArch64 event/signal frame on the user stack.
+const SIGNAL_FRAME_SIZE: usize = 8 + 8 + 8 + (31 * 8) + 8 + 8;
+
+/// Event handler function pointer type (user-space address)
+pub type EventHandler = usize;
+
+/// Event handler registration entry
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EventHandlerEntry {
+    /// Handler function address in user space
+    pub handler: EventHandler,
+    /// Executable user-space stub that invokes the event-return syscall.
+    /// `None` preserves the legacy stack-trampoline ABI.
+    pub restorer: Option<usize>,
+    /// Whether this handler should be called synchronously
+    pub synchronous: bool,
+}
+
+/// Event mask for filtering/blocking events
+#[derive(Debug, Clone, Default)]
+pub struct EventMask {
+    /// Blocked event content types (ProcessControl types)
+    pub blocked_process_control: u64,
+    /// Blocked notification types
+    pub blocked_notifications: u64,
+    /// Blocked custom event namespaces
+    pub blocked_namespaces: Vec<String>,
+    /// Block all events flag
+    pub block_all: bool,
+}
+
+impl EventMask {
+    /// Create a new empty event mask (no events blocked)
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Block all events
+    pub fn block_all(&mut self) {
+        self.block_all = true;
+    }
+
+    /// Unblock all events
+    pub fn unblock_all(&mut self) {
+        self.block_all = false;
+        self.blocked_process_control = 0;
+        self.blocked_notifications = 0;
+        self.blocked_namespaces.clear();
+    }
+
+    /// Block a specific ProcessControlType
+    pub fn block_process_control(&mut self, ptype: ProcessControlType) {
+        let bit = Self::process_control_bit(ptype);
+        self.blocked_process_control |= 1u64 << bit;
+    }
+
+    /// Unblock a specific ProcessControlType
+    pub fn unblock_process_control(&mut self, ptype: ProcessControlType) {
+        let bit = Self::process_control_bit(ptype);
+        self.blocked_process_control &= !(1u64 << bit);
+    }
+
+    /// Check if a ProcessControlType is blocked
+    pub fn is_process_control_blocked(&self, ptype: ProcessControlType) -> bool {
+        if self.block_all {
+            return true;
+        }
+        let bit = Self::process_control_bit(ptype);
+        (self.blocked_process_control & (1u64 << bit)) != 0
+    }
+
+    fn process_control_bit(ptype: ProcessControlType) -> u32 {
+        match ptype {
+            ProcessControlType::Terminate => 0,
+            ProcessControlType::Kill => 1,
+            ProcessControlType::Stop => 2,
+            ProcessControlType::Continue => 3,
+            ProcessControlType::Interrupt => 4,
+            ProcessControlType::Quit => 5,
+            ProcessControlType::TerminalStop => 6,
+            ProcessControlType::TerminalInput => 7,
+            ProcessControlType::TerminalOutput => 8,
+            ProcessControlType::WindowChange => 9,
+            ProcessControlType::Hangup => 10,
+            ProcessControlType::ChildExit => 11,
+            ProcessControlType::PipeBroken => 12,
+            ProcessControlType::Alarm => 13,
+            ProcessControlType::IoReady => 14,
+            ProcessControlType::User(n) => {
+                // Constrain user signals to 0-20 to avoid collisions
+                // User signals beyond 20 are treated as 20
+                15 + n.min(20)
+            }
+        }
+    }
+
+    /// Check if an event content is blocked
+    pub fn is_blocked(&self, content: &EventContent) -> bool {
+        if self.block_all {
+            return true;
+        }
+        match content {
+            EventContent::ProcessControl(ptype) => self.is_process_control_blocked(*ptype),
+            EventContent::Notification(ntype) => {
+                let bit = *ntype as u64;
+                (self.blocked_notifications & (1 << bit)) != 0
+            }
+            EventContent::Custom { namespace, .. } => {
+                self.blocked_namespaces.iter().any(|ns| ns == namespace)
+            }
+            _ => false,
+        }
+    }
+}
+
+/// Scarlet Native ABI state
+#[derive(Clone)]
 pub struct ScarletAbi {
     /// TLS (Thread Local Storage) pointer for this task
     pub tls_pointer: Option<usize>,
     /// clear_child_tid pointer for thread exit notification (Linux-compatible)
     pub clear_child_tid_ptr: Option<usize>,
+    /// Event handler table: EventContent discriminant -> handler entry
+    pub event_handlers: BTreeMap<u8, EventHandlerEntry>,
+    /// Default handler for unhandled events (None = ignore)
+    pub default_event_handler: Option<EventHandlerEntry>,
+    /// Event mask for blocking events
+    pub event_mask: EventMask,
+    /// Pending events that were blocked (stored for later delivery)
+    pub pending_events: Vec<Event>,
 }
 
 impl Default for ScarletAbi {
@@ -43,8 +173,472 @@ impl Default for ScarletAbi {
         Self {
             tls_pointer: None,
             clear_child_tid_ptr: None,
+            event_handlers: BTreeMap::new(),
+            default_event_handler: None,
+            event_mask: EventMask::new(),
+            pending_events: Vec::new(),
         }
     }
+}
+
+impl ScarletAbi {
+    /// Get the TLS pointer for this task
+    pub fn tls_pointer(&self) -> Option<usize> {
+        self.tls_pointer
+    }
+
+    /// Set the TLS pointer for this task
+    pub fn set_tls_pointer(&mut self, ptr: usize) {
+        self.tls_pointer = Some(ptr);
+    }
+
+    /// Clear the TLS pointer for this task
+    pub fn clear_tls_pointer(&mut self) {
+        self.tls_pointer = None;
+    }
+
+    /// Set the clear_child_tid pointer for thread exit notification
+    pub fn set_clear_child_tid(&mut self, ptr: usize) {
+        self.clear_child_tid_ptr = Some(ptr);
+    }
+
+    /// Handle task exit with TLS cleanup (Linux-compatible)
+    pub fn on_task_exit(&mut self, task: &crate::task::Task) {
+        // Linux-compatible behavior: write 0 to clear_child_tid and futex wake
+        if let Some(ptr) = self.clear_child_tid_ptr {
+            let _ = copy_to_user(&task, ptr, &0i32.to_ne_bytes());
+            // Note: Futex wake for clear_child_tid is handled by the Linux ABI's
+            // on_task_exit implementation. For Scarlet Native, we just clear the value.
+        }
+    }
+
+    /// Register an event handler for a specific event content type
+    pub fn register_event_handler(
+        &mut self,
+        content_type: u8,
+        handler: EventHandler,
+        synchronous: bool,
+        restorer: Option<usize>,
+    ) {
+        self.event_handlers.insert(
+            content_type,
+            EventHandlerEntry {
+                handler,
+                restorer,
+                synchronous,
+            },
+        );
+    }
+
+    /// Unregister an event handler for a specific event content type
+    pub fn unregister_event_handler(&mut self, content_type: u8) {
+        self.event_handlers.remove(&content_type);
+    }
+
+    /// Set the default event handler for unhandled events
+    pub fn set_default_event_handler(
+        &mut self,
+        handler: EventHandler,
+        synchronous: bool,
+        restorer: Option<usize>,
+    ) {
+        self.default_event_handler = Some(EventHandlerEntry {
+            handler,
+            restorer,
+            synchronous,
+        });
+    }
+
+    /// Clear the default event handler
+    pub fn clear_default_event_handler(&mut self) {
+        self.default_event_handler = None;
+    }
+
+    /// Get the event handler for a specific event content type
+    fn get_event_handler(&self, content: &EventContent) -> Option<EventHandlerEntry> {
+        let content_type = content_type_discriminant(content);
+        self.event_handlers
+            .get(&content_type)
+            .copied()
+            .or(self.default_event_handler)
+    }
+
+    /// Handle an incoming event (called by EventManager)
+    pub fn handle_incoming_event(
+        &mut self,
+        event: Event,
+        task: &crate::task::Task,
+    ) -> Result<EventProcessOutcome, &'static str> {
+        // Check if event is blocked by mask
+        if self.event_mask.is_blocked(&event.content) {
+            // Store in pending queue for later delivery when unblocked
+            // Enforce maximum queue length to prevent unbounded memory growth
+            if self.pending_events.len() >= MAX_PENDING_EVENTS {
+                // Drop oldest event (FIFO overflow policy)
+                self.pending_events.remove(0);
+                crate::println!(
+                    "[ScarletAbi] Warning: Pending event queue overflow, dropping oldest event"
+                );
+            }
+            self.pending_events.push(event);
+            return Ok(EventProcessOutcome::Pending);
+        }
+
+        // Process the event immediately
+        self.process_event(event, task)
+    }
+
+    /// Process a single event
+    fn process_event(
+        &self,
+        event: Event,
+        task: &crate::task::Task,
+    ) -> Result<EventProcessOutcome, &'static str> {
+        match &event.content {
+            EventContent::ProcessControl(ptype) => self.handle_process_control_event(*ptype, task),
+            EventContent::Message { .. } => {
+                // Message events require a handler
+                if let Some(handler) = self.get_event_handler(&event.content) {
+                    self.invoke_user_handler(handler, event, task)
+                } else {
+                    Ok(EventProcessOutcome::Continue) // No handler, ignore
+                }
+            }
+            EventContent::Notification(ntype) => self.handle_notification_event(*ntype, task),
+            EventContent::Custom { .. } => {
+                if let Some(handler) = self.get_event_handler(&event.content) {
+                    self.invoke_user_handler(handler, event, task)
+                } else {
+                    Ok(EventProcessOutcome::Continue)
+                }
+            }
+        }
+    }
+
+    /// Handle process control events
+    fn handle_process_control_event(
+        &self,
+        ptype: ProcessControlType,
+        task: &crate::task::Task,
+    ) -> Result<EventProcessOutcome, &'static str> {
+        match ptype {
+            ProcessControlType::Terminate | ProcessControlType::Kill | ProcessControlType::Quit => {
+                // Exit the task with appropriate status
+                let exit_code = match ptype {
+                    ProcessControlType::Kill => 128 + 9,       // SIGKILL-like
+                    ProcessControlType::Terminate => 128 + 15, // SIGTERM-like
+                    ProcessControlType::Quit => 128 + 3,       // SIGQUIT-like
+                    _ => 1,
+                };
+                Ok(EventProcessOutcome::Exited(exit_code))
+            }
+            ProcessControlType::Stop
+            | ProcessControlType::TerminalStop
+            | ProcessControlType::TerminalInput
+            | ProcessControlType::TerminalOutput => {
+                let event_queue = task.event_queue.lock();
+                if event_queue.has_pending_continue() {
+                    drop(event_queue);
+                    Ok(EventProcessOutcome::Continue)
+                } else {
+                    task.mark_process_control_stopped();
+                    task.set_state(crate::task::TaskState::Blocked(
+                        crate::task::BlockedType::Interruptible,
+                    ));
+                    crate::sched::scheduler::mark_blocked(task.get_id());
+                    crate::sched::scheduler::remove_from_ready_queues(task.get_id());
+                    drop(event_queue);
+                    crate::task::wake_task_waiters(task.get_id());
+                    if let Some(parent_id) = task.get_parent_id() {
+                        crate::task::wake_parent_waiters(parent_id);
+                    }
+                    Ok(EventProcessOutcome::NeedReschedule)
+                }
+            }
+            ProcessControlType::Continue => {
+                task.clear_process_control_stopped();
+                let current_state = task.get_state();
+                if matches!(current_state, crate::task::TaskState::Blocked(_)) {
+                    task.set_state(crate::task::TaskState::Ready);
+                    crate::sched::scheduler::unmark_blocked(task.get_id());
+                    crate::sched::scheduler::push_ready_task(
+                        crate::arch::get_cpu().get_cpuid(),
+                        task.get_id(),
+                    );
+                }
+                Ok(EventProcessOutcome::Continue)
+            }
+            ProcessControlType::Interrupt => {
+                // Call handler if registered, otherwise default action
+                if let Some(handler) = self.get_event_handler(&EventContent::ProcessControl(ptype))
+                {
+                    self.invoke_user_handler(
+                        handler,
+                        Event::direct_process_control(
+                            task.get_id() as u32,
+                            ptype,
+                            EventPriority::High,
+                            true,
+                        ),
+                        task,
+                    )
+                } else {
+                    // Default: terminate with SIGINT-like exit code
+                    Ok(EventProcessOutcome::Exited(128 + 2))
+                }
+            }
+            _ => {
+                // Other control types: call handler if registered
+                if let Some(handler) = self.get_event_handler(&EventContent::ProcessControl(ptype))
+                {
+                    self.invoke_user_handler(
+                        handler,
+                        Event::direct_process_control(
+                            task.get_id() as u32,
+                            ptype,
+                            EventPriority::Normal,
+                            false,
+                        ),
+                        task,
+                    )
+                } else {
+                    Ok(EventProcessOutcome::Continue)
+                }
+            }
+        }
+    }
+
+    /// Handle notification events
+    fn handle_notification_event(
+        &self,
+        ntype: crate::ipc::event::NotificationType,
+        task: &crate::task::Task,
+    ) -> Result<EventProcessOutcome, &'static str> {
+        // Check if there's a handler registered
+        if let Some(handler) = self.get_event_handler(&EventContent::Notification(ntype)) {
+            self.invoke_user_handler(
+                handler,
+                Event::notification_to_task(task.get_id() as u32, ntype),
+                task,
+            )
+        } else {
+            // Default handling for specific notifications
+            match ntype {
+                crate::ipc::event::NotificationType::TaskCompleted => {
+                    // Wake up parent if waiting
+                    if let Some(parent_id) = task.get_parent_id() {
+                        crate::task::wake_task_waiters(task.get_id());
+                        crate::task::wake_parent_waiters(parent_id);
+                    }
+                }
+                _ => {}
+            }
+            Ok(EventProcessOutcome::Continue)
+        }
+    }
+
+    /// Invoke a user-space event handler
+    ///
+    /// Sets up the user stack with a signal frame that preserves the interrupted
+    /// context, then modifies the trapframe to jump to the registered handler.
+    /// New registrations return through a validated executable `event_return`
+    /// restorer. Legacy syscall-640 registrations retain the stack trampoline.
+    ///
+    /// # Signal frame layout on user stack (high to low):
+    ///
+    /// ```text
+    /// +--------------------------+  <- original SP
+    /// |   EventInfo              |  (40 bytes)
+    /// |   saved sp (8 bytes)     |
+    /// |   saved elr (8 bytes)    |
+    /// |   saved regs[0..30]      |  (31 × 8 = 248 bytes)
+    /// |   event content type (8) |
+    /// |   event subtype    (8)   |
+    /// |   reserved         (8)   |
+    /// +--------------------------+  <- new SP (16-byte aligned)
+    /// ```
+    ///
+    /// # Arguments passed to handler
+    /// - x0: pointer to EventInfo
+    /// - x1: event subtype
+    /// - x2: pointer to saved context on stack
+    fn invoke_user_handler(
+        &self,
+        handler: EventHandlerEntry,
+        event: Event,
+        task: &crate::task::Task,
+    ) -> Result<EventProcessOutcome, &'static str> {
+        let trapframe = task.get_trapframe();
+
+        let (content_type, subtype) = match &event.content {
+            EventContent::ProcessControl(ptype) => {
+                let sub = match ptype {
+                    ProcessControlType::Terminate => 0,
+                    ProcessControlType::Kill => 1,
+                    ProcessControlType::Stop => 2,
+                    ProcessControlType::Continue => 3,
+                    ProcessControlType::Interrupt => 4,
+                    ProcessControlType::Quit => 5,
+                    ProcessControlType::Hangup => 6,
+                    ProcessControlType::ChildExit => 7,
+                    ProcessControlType::PipeBroken => 8,
+                    ProcessControlType::Alarm => 9,
+                    ProcessControlType::IoReady => 10,
+                    ProcessControlType::TerminalStop => 11,
+                    ProcessControlType::TerminalInput => 12,
+                    ProcessControlType::TerminalOutput => 13,
+                    ProcessControlType::WindowChange => 14,
+                    ProcessControlType::User(id) => 256 + *id as usize,
+                };
+                (0usize, sub)
+            }
+            EventContent::Message { .. } => (1usize, 0usize),
+            EventContent::Notification(ntype) => (2usize, *ntype as usize),
+            EventContent::Custom { event_id, .. } => (3usize, *event_id as usize),
+        };
+
+        let mut sp = trapframe.sp as usize;
+
+        // trampoline(8) + subtype(8) + content_type(8) + regs(31×8) + elr(8) + sp(8) = 288
+        sp -= SIGNAL_FRAME_SIZE + EVENT_INFO_SIZE;
+        sp &= !0xF;
+
+        let frame_base = sp;
+        let event_info_addr = frame_base + SIGNAL_FRAME_SIZE;
+
+        let mut frame = [0u8; SIGNAL_FRAME_SIZE];
+        if handler.restorer.is_none() {
+            // Legacy syscall-640 registrations did not supply a restorer and
+            // therefore retain their historical stack trampoline behavior.
+            let trampoline_instr_0: u32 = 0xd2805068;
+            let trampoline_instr_1: u32 = 0xd4000001;
+            frame[0..4].copy_from_slice(&trampoline_instr_0.to_ne_bytes());
+            frame[4..8].copy_from_slice(&trampoline_instr_1.to_ne_bytes());
+        }
+        frame[8..16].copy_from_slice(&subtype.to_ne_bytes());
+        frame[16..24].copy_from_slice(&content_type.to_ne_bytes());
+        for i in 0..31 {
+            let offset = 24 + i * 8;
+            frame[offset..offset + 8].copy_from_slice(&trapframe.regs.reg[i].to_ne_bytes());
+        }
+        frame[272..280].copy_from_slice(&trapframe.elr.to_ne_bytes());
+        frame[280..288].copy_from_slice(&trapframe.sp.to_ne_bytes());
+        if copy_to_user(&task, frame_base, &frame).is_err() {
+            return Err("Failed to write signal frame");
+        }
+
+        write_event_info(task, event_info_addr, content_type, subtype)?;
+
+        trapframe.elr = handler.handler as u64;
+        trapframe.sp = sp as u64;
+        trapframe.regs.reg[0] = event_info_addr;
+        trapframe.regs.reg[1] = subtype;
+        trapframe.regs.reg[2] = frame_base + 24;
+        trapframe.regs.reg[30] = handler.restorer.unwrap_or(frame_base); // LR = event-return restorer
+
+        Ok(EventProcessOutcome::UserHandlerArmed)
+    }
+
+    /// Restore context saved by `invoke_user_handler` (syscall 643 — event_return).
+    ///
+    /// # Signal frame layout (AArch64)
+    /// ```text
+    ///   [sp + 0]:   reserved         (8 bytes)
+    ///   [sp + 8]:   event subtype    (8 bytes)
+    ///   [sp + 16]:  content type     (8 bytes)
+    ///   [sp + 24]:  saved regs[0..30] (248 bytes)
+    ///   [sp + 272]: saved elr        (8 bytes)
+    ///   [sp + 280]: saved sp         (8 bytes)
+    /// ```
+    pub fn event_return(
+        trapframe: &mut crate::arch::Trapframe,
+        task: &crate::task::Task,
+    ) -> Result<(), &'static str> {
+        let frame_base = trapframe.sp as usize; // SP points to signal frame
+
+        let mut frame = [0u8; SIGNAL_FRAME_SIZE];
+        copy_from_user(&task, frame_base, &mut frame).map_err(|_| "Failed to read signal frame")?;
+
+        for i in 0..31 {
+            let offset = 24 + i * 8;
+            let mut bytes = [0u8; 8];
+            bytes.copy_from_slice(&frame[offset..offset + 8]);
+            trapframe.regs.reg[i] = usize::from_ne_bytes(bytes);
+        }
+
+        let mut elr_bytes = [0u8; 8];
+        elr_bytes.copy_from_slice(&frame[272..280]);
+        trapframe.elr = u64::from_ne_bytes(elr_bytes);
+
+        let mut sp_bytes = [0u8; 8];
+        sp_bytes.copy_from_slice(&frame[280..288]);
+        trapframe.sp = u64::from_ne_bytes(sp_bytes);
+
+        Ok(())
+    }
+
+    /// Process any pending events (called when mask changes)
+    pub fn process_pending_events(
+        &mut self,
+        task: &crate::task::Task,
+    ) -> Result<EventProcessOutcome, &'static str> {
+        // We must not drop events that are still blocked; they should remain pending
+        // until the event mask allows them to be delivered.
+        let pending_events = core::mem::take(&mut self.pending_events);
+        let mut pending_iter = pending_events.into_iter();
+
+        while let Some(event) = pending_iter.next() {
+            if self.event_mask.is_blocked(&event.content) {
+                self.pending_events.push(event);
+                continue;
+            }
+
+            let outcome = self.process_event(event, task)?;
+            match outcome {
+                EventProcessOutcome::Continue | EventProcessOutcome::Pending => {}
+                EventProcessOutcome::UserHandlerArmed
+                | EventProcessOutcome::NeedReschedule
+                | EventProcessOutcome::Exited(_) => {
+                    self.pending_events.extend(pending_iter);
+                    return Ok(outcome);
+                }
+            }
+        }
+
+        Ok(EventProcessOutcome::Continue)
+    }
+}
+
+/// Get the discriminant value for an EventContent variant
+fn content_type_discriminant(content: &EventContent) -> u8 {
+    match content {
+        EventContent::ProcessControl(_) => 0,
+        EventContent::Message { .. } => 1,
+        EventContent::Notification(_) => 2,
+        EventContent::Custom { .. } => 3,
+    }
+}
+
+/// Write the user-visible EventInfo structure for a Scarlet event handler.
+fn write_event_info(
+    task: &crate::task::Task,
+    event_info_addr: usize,
+    content_type: usize,
+    subtype: usize,
+) -> Result<(), &'static str> {
+    let mut event_info = [0u8; EVENT_INFO_SIZE];
+    event_info[0..8].copy_from_slice(&(content_type as u8 as u64).to_ne_bytes());
+    for i in 0..4 {
+        let value = if i == 0 { subtype as u64 } else { 0 };
+        let offset = 8 + i * 8;
+        event_info[offset..offset + 8].copy_from_slice(&value.to_ne_bytes());
+    }
+
+    if copy_to_user(&task, event_info_addr, &event_info).is_err() {
+        return Err("Failed to write event info");
+    }
+
+    Ok(())
 }
 
 impl AbiModule for ScarletAbi {
@@ -57,7 +651,7 @@ impl AbiModule for ScarletAbi {
     }
 
     fn clone_boxed(&self) -> Box<dyn AbiModule + Send + Sync> {
-        Box::new(*self) // ScarletAbi is Copy, so we can dereference and copy
+        Box::new(self.clone()) // ScarletAbi is Copy, so we can dereference and copy
     }
 
     fn handle_syscall(&mut self, trapframe: &mut Trapframe) -> Result<usize, &'static str> {
@@ -164,7 +758,7 @@ impl AbiModule for ScarletAbi {
         if is_wasm {
             // Delegate to Scarlet-native Wasm runtime
             Some(crate::abi::RuntimeConfig {
-                runtime_path: "/system/scarlet/bin/wasm-runtime".to_string(),
+                runtime_path: "/bin/wasm-runtime".to_string(),
                 runtime_abi: None, // Auto-detect (will be Scarlet native)
                 runtime_args: alloc::vec!["--wasm".to_string()],
             })
@@ -185,12 +779,9 @@ impl AbiModule for ScarletAbi {
         // Get file object from KernelObject::File
         match file_object.as_file() {
             Some(file_obj) => {
-                task.text_size
-                    .store(0, core::sync::atomic::Ordering::SeqCst);
-                task.data_size
-                    .store(0, core::sync::atomic::Ordering::SeqCst);
-                task.stack_size
-                    .store(0, core::sync::atomic::Ordering::SeqCst);
+                task.text_size.store(0, Ordering::SeqCst);
+                task.data_size.store(0, Ordering::SeqCst);
+                task.stack_size.store(0, Ordering::SeqCst);
                 task.brk
                     .store(usize::MAX, core::sync::atomic::Ordering::SeqCst);
 
@@ -217,13 +808,18 @@ impl AbiModule for ScarletAbi {
                             .get(0)
                             .map_or("Unnamed Task".to_string(), |s| s.to_string());
 
-                        // Clear old page table entries
-                        let root_page_table =
+                        // Clear old page table entries without flushing the TLB.
+                        // New mappings are installed immediately after; a single
+                        // broadcast TLBI is issued once all mappings are in place,
+                        // converting N broadcast TLBIs into one at the end.
+                        let mut root_page_table =
                             vm::get_root_pagetable(task.vm_manager.get_asid()).unwrap();
-                        root_page_table.unmap_all();
+                        root_page_table.unmap_all_no_flush();
+                        drop(root_page_table);
 
                         // Setup the new memory environment
-                        let stack_pointer = setup_user_stack(task).1;
+                        vm::setup_trampoline_for_user(&task.vm_manager);
+                        let stack_pointer = setup_user_stack(task)?.1;
 
                         // Handle different execution modes
                         match elf_result.mode {
@@ -265,9 +861,11 @@ impl AbiModule for ScarletAbi {
 
                         // Reset task's registers for clean start
                         task.vcpu.lock().reset_iregs();
+                        task.vcpu.lock().set_tls_pointer(0);
+                        task.vcpu.lock().set_tpidrro_el0(0);
                         task.vcpu.lock().set_sp(stack_pointer);
 
-                        // Setup argv/envp on stack following Unix conventions
+                        // Setup argv/envp on stack following Unix and AArch64 conventions
                         let (adjusted_sp, argv_ptr) =
                             self.setup_arguments_on_stack(task, argv, envp, stack_pointer)?;
                         task.vcpu.lock().set_sp(adjusted_sp);
@@ -277,6 +875,10 @@ impl AbiModule for ScarletAbi {
                         // x1 (reg[1]) = argv pointer
                         task.vcpu.lock().iregs.reg[0] = argv.len(); // argc
                         task.vcpu.lock().iregs.reg[1] = argv_ptr; // argv array pointer
+
+                        // Publish all deferred page-table changes with one broadcast
+                        // TLB invalidation before switching to the new context.
+                        crate::arch::vm::flush_all_tlb();
 
                         // Switch to the new task
                         task.vcpu.lock().switch(trapframe);
@@ -321,206 +923,9 @@ impl AbiModule for ScarletAbi {
         }
     }
 
-    fn normalize_env_to_scarlet(&self, envp: &mut Vec<String>) {
-        // Scarlet ABI is already in canonical format, but ensure all paths are absolute
-        // Modify in-place to avoid allocations
-
-        for env_var in envp.iter_mut() {
-            if let Some(eq_pos) = env_var.find('=') {
-                let key = &env_var[..eq_pos];
-                let value = &env_var[eq_pos + 1..];
-
-                let normalized_value = match key {
-                    "PATH" | "LD_LIBRARY_PATH" => {
-                        // Ensure all paths are in absolute Scarlet namespace format
-                        self.normalize_path_to_absolute_scarlet(value)
-                    }
-                    "HOME" => {
-                        // Ensure home directory is absolute
-                        if value.starts_with('/') {
-                            value.to_string()
-                        } else {
-                            format!("/home/{}", value)
-                        }
-                    }
-                    _ => value.to_string(), // Most variables pass through unchanged
-                };
-
-                // Update in-place if value changed
-                let new_env_var = format!("{}={}", key, normalized_value);
-                if new_env_var != *env_var {
-                    *env_var = new_env_var;
-                }
-            }
-        }
-    }
-
-    fn denormalize_env_from_scarlet(&self, envp: &mut Vec<String>) {
-        // For Scarlet ABI, canonical format is the native format
-        // But ensure proper Scarlet-specific defaults exist
-
-        // Convert to temporary map for easier processing
-        let mut env_map = BTreeMap::new();
-        for env_var in envp.iter() {
-            if let Some(eq_pos) = env_var.find('=') {
-                let key = env_var[..eq_pos].to_string();
-                let value = env_var[eq_pos + 1..].to_string();
-                env_map.insert(key, value);
-            }
-        }
-
-        // Add defaults if they don't exist
-        if !env_map.contains_key("PATH") {
-            env_map.insert(
-                "PATH".to_string(),
-                "/system/scarlet/bin:/bin:/usr/bin".to_string(),
-            );
-        }
-
-        if !env_map.contains_key("SHELL") {
-            env_map.insert("SHELL".to_string(), "/system/scarlet/bin/sh".to_string());
-        }
-
-        // Convert back to Vec<String> format
-        envp.clear();
-        for (key, value) in env_map.iter() {
-            envp.push(format!("{}={}", key, value));
-        }
-    }
-
-    fn setup_overlay_environment(
-        &self,
-        target_vfs: &Arc<VfsManager>,
-        base_vfs: &Arc<VfsManager>,
-        system_path: &str,
-        config_path: &str,
-    ) -> Result<(), &'static str> {
-        // Scarlet ABI uses overlay mount with system Scarlet tools and config persistence
-        let lower_vfs_list = alloc::vec![(base_vfs, system_path)];
-        let upper_vfs = base_vfs;
-        let fs = match OverlayFS::new_from_paths_and_vfs(
-            Some((upper_vfs, config_path)),
-            lower_vfs_list,
-            "/",
-        ) {
-            Ok(fs) => fs,
-            Err(e) => {
-                crate::println!(
-                    "Failed to create overlay filesystem for Scarlet ABI: {}",
-                    e.message
-                );
-                return Err("Failed to create Scarlet overlay environment");
-            }
-        };
-
-        match target_vfs.mount(fs, "/", 0) {
-            Ok(()) => Ok(()),
-            Err(e) => {
-                crate::println!(
-                    "Failed to create cross-VFS overlay for Scarlet ABI: {}",
-                    e.message
-                );
-                Err("Failed to create Scarlet overlay environment")
-            }
-        }
-    }
-
-    fn setup_shared_resources(
-        &self,
-        target_vfs: &Arc<VfsManager>,
-        base_vfs: &Arc<VfsManager>,
-    ) -> Result<(), &'static str> {
-        // Scarlet shared resource setup: bind mount common directories and Scarlet gateway
-        match create_dir_if_not_exists(target_vfs, "/home") {
-            Ok(()) => {}
-            Err(e) => {
-                crate::println!(
-                    "Failed to create /home directory for Scarlet: {}",
-                    e.message
-                );
-                return Err("Failed to create /home directory for Scarlet");
-            }
-        }
-
-        match target_vfs.bind_mount_from(base_vfs, "/home", "/home") {
-            Ok(()) => {}
-            Err(_e) => {}
-        }
-
-        match create_dir_if_not_exists(target_vfs, "/data") {
-            Ok(()) => {}
-            Err(e) => {
-                crate::println!(
-                    "Failed to create /data directory for Scarlet: {}",
-                    e.message
-                );
-                return Err("Failed to create /data directory for Scarlet");
-            }
-        }
-
-        match target_vfs.bind_mount_from(base_vfs, "/data/shared", "/data/shared") {
-            Ok(()) => {}
-            Err(_e) => {}
-        }
-
-        // Bind mount /dev for device access
-        match create_dir_if_not_exists(target_vfs, "/dev") {
-            Ok(()) => {}
-            Err(e) => {
-                crate::println!("Failed to create /dev directory for Scarlet: {}", e.message);
-                return Err("Failed to create /dev directory for Scarlet");
-            }
-        }
-        match target_vfs.bind_mount_from(base_vfs, "/dev", "/dev") {
-            Ok(()) => {}
-            Err(e) => {
-                crate::println!("Failed to bind mount /dev for Scarlet: {}", e.message);
-                return Err("Failed to bind mount /dev for Scarlet");
-            }
-        }
-
-        // Bind moutt /tmp for temporary files
-        match create_dir_if_not_exists(target_vfs, "/tmp") {
-            Ok(()) => {}
-            Err(e) => {
-                crate::println!("Failed to create /tmp directory for Scarlet: {}", e.message);
-                return Err("Failed to create /tmp directory for Scarlet");
-            }
-        }
-        match target_vfs.bind_mount_from(base_vfs, "/tmp", "/tmp") {
-            Ok(()) => {}
-            Err(e) => {
-                crate::println!("Failed to bind mount /tmp for Scarlet: {}", e.message);
-                return Err("Failed to bind mount /tmp for Scarlet");
-            }
-        }
-
-        // Setup gateway to native Scarlet environment (read-only for security)
-        match create_dir_if_not_exists(target_vfs, "/scarlet") {
-            Ok(()) => {}
-            Err(e) => {
-                crate::println!(
-                    "Failed to create /scarlet directory for Scarlet: {}",
-                    e.message
-                );
-                return Err("Failed to create /scarlet directory for Scarlet");
-            }
-        }
-        match target_vfs.bind_mount_from(base_vfs, "/", "/scarlet") {
-            Ok(()) => Ok(()),
-            Err(e) => {
-                crate::println!(
-                    "Failed to bind mount native Scarlet root to /scarlet for Scarlet: {}",
-                    e.message
-                );
-                return Err("Failed to bind mount native Scarlet root to /scarlet for Scarlet");
-            }
-        }
-    }
-
-    fn on_task_exit(&mut self, _task: &crate::task::Task) {
+    fn on_task_exit(&mut self, task: &crate::task::Task) {
         // Delegate to the implementation method
-        self.handle_task_exit(_task);
+        self.on_task_exit(task);
     }
 
     fn set_tls_pointer(&mut self, ptr: usize) {
@@ -534,23 +939,30 @@ impl AbiModule for ScarletAbi {
     fn set_clear_child_tid(&mut self, ptr: usize) {
         self.clear_child_tid_ptr = Some(ptr);
     }
-}
 
-impl ScarletAbi {
-    /// Handle task exit with TLS cleanup (Linux-compatible)
-    pub fn handle_task_exit(&mut self, task: &crate::task::Task) {
-        // Linux-compatible behavior: write 0 to clear_child_tid and futex wake
-        if let Some(ptr) = self.clear_child_tid_ptr {
-            if let Some(paddr) = task.vm_manager.translate_vaddr(ptr) {
-                unsafe {
-                    *(paddr as *mut i32) = 0;
-                }
-            }
-            // Note: Futex wake for clear_child_tid is handled by the Linux ABI's
-            // on_task_exit implementation. For Scarlet Native, we just clear the value.
+    fn handle_event(
+        &mut self,
+        event: crate::ipc::Event,
+        _target_task_id: usize,
+    ) -> Result<EventProcessOutcome, &'static str> {
+        // Get the current task to process the event
+        if let Some(task) = crate::task::mytask() {
+            self.handle_incoming_event(event, &task)
+        } else {
+            Err("No current task to handle event")
         }
     }
 
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn core::any::Any {
+        self
+    }
+}
+
+impl ScarletAbi {
     /// Setup argc, argv, and envp on the user stack following Unix conventions
     ///
     /// Standard Unix stack layout (from high to low addresses):
@@ -663,15 +1075,24 @@ impl ScarletAbi {
         vaddr: usize,
         data: &[u8],
     ) -> Result<(), &'static str> {
-        match task.vm_manager.translate_vaddr(vaddr) {
-            Some(paddr) => {
-                unsafe {
-                    core::ptr::copy_nonoverlapping(data.as_ptr(), paddr as *mut u8, data.len());
+        let mut written = 0usize;
+        while written < data.len() {
+            let current_vaddr = vaddr + written;
+            let page_off = current_vaddr & (crate::environment::PAGE_SIZE - 1);
+            let chunk_len = core::cmp::min(
+                data.len() - written,
+                crate::environment::PAGE_SIZE - page_off,
+            );
+
+            match copy_to_user(&task, current_vaddr, &data[written..written + chunk_len]) {
+                Ok(()) => {
+                    written += chunk_len;
                 }
-                Ok(())
+                Err(_) => return Err("Failed to translate virtual address for stack write"),
             }
-            None => Err("Failed to translate virtual address for stack write"),
         }
+
+        Ok(())
     }
 
     /// Write a null-terminated string to stack memory
@@ -687,61 +1108,10 @@ impl ScarletAbi {
         self.write_to_stack_memory(task, vaddr + string.len(), &[0u8])?;
         Ok(())
     }
-
-    /// Normalize path string to absolute Scarlet namespace format
-    ///
-    /// This ensures all paths in PATH-like variables are absolute and
-    /// in the proper Scarlet namespace format.
-    fn normalize_path_to_absolute_scarlet(&self, path_value: &str) -> String {
-        let paths: Vec<&str> = path_value.split(':').collect();
-        let mut normalized_paths = Vec::new();
-
-        for path in paths {
-            if path.starts_with('/') {
-                // Already absolute - ensure it's in proper Scarlet namespace
-                if path.starts_with("/system/scarlet/") || path.starts_with("/scarlet/") {
-                    normalized_paths.push(path.to_string());
-                } else {
-                    // Map standard paths to Scarlet namespace
-                    let mapped_path = match path {
-                        "/bin" => "/system/scarlet/bin",
-                        "/usr/bin" => "/system/scarlet/usr/bin",
-                        "/usr/local/bin" => "/system/scarlet/usr/local/bin",
-                        "/sbin" => "/system/scarlet/sbin",
-                        "/usr/sbin" => "/system/scarlet/usr/sbin",
-                        "/lib" => "/system/scarlet/lib",
-                        "/usr/lib" => "/system/scarlet/usr/lib",
-                        "/usr/local/lib" => "/system/scarlet/usr/local/lib",
-                        _ => path, // Keep other absolute paths as-is
-                    };
-                    normalized_paths.push(mapped_path.to_string());
-                }
-            } else if !path.is_empty() {
-                // Relative paths - prefix with current working directory or make absolute
-                normalized_paths.push(format!("/{}", path));
-            }
-            // Skip empty paths
-        }
-
-        normalized_paths.join(":")
-    }
-}
-
-fn create_dir_if_not_exists(vfs: &Arc<VfsManager>, path: &str) -> Result<(), FileSystemError> {
-    match vfs.create_dir(path) {
-        Ok(()) => Ok(()),
-        Err(e) => {
-            if e.kind == FileSystemErrorKind::AlreadyExists {
-                Ok(()) // Directory already exists, nothing to do
-            } else {
-                Err(e) // Some other error occurred
-            }
-        }
-    }
 }
 
 fn register_scarlet_abi() {
     register_abi!(ScarletAbi);
 }
 
-early_initcall!(register_scarlet_abi);
+late_initcall!(register_scarlet_abi);

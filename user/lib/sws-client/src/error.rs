@@ -15,6 +15,8 @@ pub enum Error {
     SocketConfig,
     /// I/O operation would block (non-blocking mode)
     WouldBlock,
+    /// Timed out waiting for a server response
+    TimedOut,
     /// Connection closed by remote
     Disconnected,
     /// General I/O error
@@ -23,8 +25,19 @@ pub enum Error {
     SendFailed,
     /// Failed to receive message
     ReceiveFailed,
+    /// The destination is too small for the next atomic handle record
+    ReceiveBufferTooSmall {
+        /// Exact number of bytes required by the queued record
+        required_len: usize,
+    },
     /// Invalid server response
     InvalidResponse,
+    /// The connected server does not advertise input-environment support.
+    InputEnvironmentUnsupported,
+    /// The connected server does not allow system-wide mode overrides.
+    SystemModeOverrideUnsupported,
+    /// The connected server does not implement exclusive workspace-shell control.
+    WorkspaceShellUnsupported,
     /// Failed to receive shared memory handle
     ShmHandleFailed,
     /// Failed to map shared memory
@@ -35,6 +48,10 @@ pub enum Error {
     ProtocolError,
     /// Invalid request (e.g., missing required field in builder)
     InvalidRequest,
+    /// All non-zero request identifiers are currently in use
+    RequestIdExhausted,
+    /// Error response returned by SWS
+    ServerError(u32),
 }
 
 impl Error {
@@ -47,16 +64,23 @@ impl Error {
             Error::NotConnected => "not connected",
             Error::SocketConfig => "failed to configure socket",
             Error::WouldBlock => "operation would block",
+            Error::TimedOut => "timed out waiting for server response",
             Error::Disconnected => "connection closed",
             Error::IoError => "I/O error",
             Error::SendFailed => "failed to send message",
             Error::ReceiveFailed => "failed to receive message",
+            Error::ReceiveBufferTooSmall { .. } => "receive buffer is too small",
             Error::InvalidResponse => "invalid server response",
+            Error::InputEnvironmentUnsupported => "input environment is not supported",
+            Error::SystemModeOverrideUnsupported => "system mode overrides are not supported",
+            Error::WorkspaceShellUnsupported => "workspace shell control is not supported",
             Error::ShmHandleFailed => "failed to receive shared memory handle",
             Error::ShmMapFailed => "failed to map shared memory",
             Error::SurfaceNotFound => "surface not found",
             Error::ProtocolError => "protocol error",
             Error::InvalidRequest => "invalid request (missing required field)",
+            Error::RequestIdExhausted => "all request identifiers are in use",
+            Error::ServerError(_) => "server rejected the request",
         }
     }
 }

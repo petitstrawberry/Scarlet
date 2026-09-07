@@ -193,8 +193,7 @@ use alloc::{
     vec::Vec,
 };
 
-use spin::RwLock;
-
+use crate::sync::{IrqRwSpinLock, Once};
 extern crate alloc;
 
 pub const MAX_PATH_LENGTH: usize = 1024;
@@ -222,7 +221,7 @@ pub enum FileSystemErrorKind {
     FileExists,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct FileSystemError {
     pub kind: FileSystemErrorKind,
     pub message: String,
@@ -354,6 +353,90 @@ pub struct FileMetadata {
     /// Number of hard links pointing to this file
     /// File data is only deleted when link_count reaches zero
     pub link_count: u32,
+}
+
+pub const ABI_FILE_TYPE_REGULAR: u32 = 0;
+pub const ABI_FILE_TYPE_DIRECTORY: u32 = 1;
+pub const ABI_FILE_TYPE_SYMLINK: u32 = 2;
+pub const ABI_FILE_TYPE_CHAR_DEVICE: u32 = 3;
+pub const ABI_FILE_TYPE_BLOCK_DEVICE: u32 = 4;
+pub const ABI_FILE_TYPE_PIPE: u32 = 5;
+pub const ABI_FILE_TYPE_SOCKET: u32 = 6;
+pub const ABI_FILE_TYPE_UNKNOWN: u32 = 7;
+
+pub const ABI_FILE_PERMISSION_READ: u32 = 1 << 0;
+pub const ABI_FILE_PERMISSION_WRITE: u32 = 1 << 1;
+pub const ABI_FILE_PERMISSION_EXECUTE: u32 = 1 << 2;
+
+/// Binary representation of file metadata for the Scarlet Native ABI.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct AbiFileMetadata {
+    /// File size in bytes.
+    pub size: u64,
+    /// File type encoded as one of the `ABI_FILE_TYPE_*` constants.
+    pub file_type: u32,
+    /// Permission bits encoded as `ABI_FILE_PERMISSION_*` flags.
+    pub permissions: u32,
+    /// Creation timestamp in seconds.
+    pub created: u64,
+    /// Last modification timestamp in seconds.
+    pub modified: u64,
+    /// Last access timestamp in seconds.
+    pub accessed: u64,
+    /// Filesystem-local stable file identifier.
+    pub file_id: u64,
+    /// Number of hard links to this file.
+    pub link_count: u32,
+    /// Reserved for future ABI expansion.
+    pub _reserved: u32,
+}
+
+impl AbiFileMetadata {
+    /// Create an ABI metadata record from the kernel's internal metadata.
+    ///
+    /// # Arguments
+    ///
+    /// * `metadata` - Internal metadata returned by the VFS or file object.
+    ///
+    /// # Returns
+    ///
+    /// Fixed-layout metadata suitable for copying to user space.
+    pub fn from_metadata(metadata: &FileMetadata) -> Self {
+        let file_type = match &metadata.file_type {
+            FileType::RegularFile => ABI_FILE_TYPE_REGULAR,
+            FileType::Directory => ABI_FILE_TYPE_DIRECTORY,
+            FileType::SymbolicLink(_) => ABI_FILE_TYPE_SYMLINK,
+            FileType::CharDevice(_) => ABI_FILE_TYPE_CHAR_DEVICE,
+            FileType::BlockDevice(_) => ABI_FILE_TYPE_BLOCK_DEVICE,
+            FileType::Pipe => ABI_FILE_TYPE_PIPE,
+            FileType::Socket(_) => ABI_FILE_TYPE_SOCKET,
+            FileType::Unknown => ABI_FILE_TYPE_UNKNOWN,
+        };
+
+        let mut permissions = 0;
+        if metadata.permissions.read {
+            permissions |= ABI_FILE_PERMISSION_READ;
+        }
+        if metadata.permissions.write {
+            permissions |= ABI_FILE_PERMISSION_WRITE;
+        }
+        if metadata.permissions.execute {
+            permissions |= ABI_FILE_PERMISSION_EXECUTE;
+        }
+
+        Self {
+            size: metadata.size as u64,
+            file_type,
+            permissions,
+            created: metadata.created_time,
+            modified: metadata.modified_time,
+            accessed: metadata.accessed_time,
+            file_id: metadata.file_id,
+            link_count: metadata.link_count,
+            _reserved: 0,
+        }
+    }
 }
 
 /// Structure representing a directory entry (internal representation)
@@ -621,7 +704,7 @@ pub trait FileSystemDriver: Send + Sync {
 }
 
 /// Singleton for global access to the FileSystemDriverManager
-static FS_DRIVER_MANAGER: spin::Once<FileSystemDriverManager> = spin::Once::new();
+static FS_DRIVER_MANAGER: Once<FileSystemDriverManager> = Once::new();
 
 /// Global filesystem driver manager singleton
 ///
@@ -665,7 +748,7 @@ pub fn get_fs_driver_manager() -> &'static FileSystemDriverManager {
 /// - **Driver Registration**: Register filesystem drivers for system-wide use
 /// - **Type-Safe Creation**: Create filesystems with structured parameter validation
 /// - **Multi-Source Support**: Support for block device, memory, and virtual filesystems
-/// - **Thread Safety**: All operations are thread-safe using RwLock protection
+/// - **Thread Safety**: All operations are thread-safe using IRQ reader-writer spin-lock protection
 /// - **Future Extensibility**: Designed for dynamic filesystem module loading
 ///
 /// # Architecture
@@ -691,7 +774,7 @@ pub fn get_fs_driver_manager() -> &'static FileSystemDriverManager {
 /// ```
 pub struct FileSystemDriverManager {
     /// Registered file system drivers indexed by name
-    drivers: RwLock<BTreeMap<String, Box<dyn FileSystemDriver>>>,
+    drivers: IrqRwSpinLock<BTreeMap<String, Box<dyn FileSystemDriver>>>,
 }
 
 impl FileSystemDriverManager {
@@ -706,7 +789,7 @@ impl FileSystemDriverManager {
     /// A new FileSystemDriverManager instance
     pub fn new() -> Self {
         Self {
-            drivers: RwLock::new(BTreeMap::new()),
+            drivers: IrqRwSpinLock::new(BTreeMap::new()),
         }
     }
 

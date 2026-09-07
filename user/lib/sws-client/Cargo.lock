@@ -41,12 +41,45 @@ dependencies = [
 ]
 
 [[package]]
-name = "scarlet_std"
-version = "0.15.0"
+name = "scarlet-abi"
+version = "1.0.0"
+
+[[package]]
+name = "scarlet-os"
+version = "1.0.0"
 dependencies = [
- "hashbrown",
+ "scarlet-abi",
+ "scarlet-rt",
+ "scarlet-sys",
+]
+
+[[package]]
+name = "scarlet-rt"
+version = "1.0.0"
+dependencies = [
+ "lock_api",
+ "scarlet-sys",
  "spin",
  "talc",
+]
+
+[[package]]
+name = "scarlet-std"
+version = "1.0.0"
+dependencies = [
+ "hashbrown",
+ "scarlet-abi",
+ "scarlet-os",
+ "scarlet-rt",
+ "scarlet-sys",
+ "spin",
+]
+
+[[package]]
+name = "scarlet-sys"
+version = "1.0.0"
+dependencies = [
+ "scarlet-abi",
 ]
 
 [[package]]
@@ -66,17 +99,18 @@ dependencies = [
 
 [[package]]
 name = "sws-client"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
- "scarlet_std",
- "sws_protocol",
+ "scarlet-os",
+ "scarlet-std",
+ "sws-protocol",
 ]
 
 [[package]]
-name = "sws_protocol"
-version = "0.15.0"
+name = "sws-protocol"
+version = "1.0.0"
 dependencies = [
- "scarlet_std",
+ "scarlet-std",
 ]
 
 [[package]]

@@ -8,9 +8,9 @@
 //! at the root ("/") mount point.
 
 use crate::device::fdt::FdtManager;
-use crate::early_println;
 use crate::fs::FileSystemError;
 use crate::fs::VfsManager;
+use crate::println;
 use crate::vm::vmem::MemoryArea;
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -33,10 +33,8 @@ pub fn relocate_initramfs(usable_area: &mut MemoryArea) -> Result<MemoryArea, &'
         return Err("Invalid initramfs source address");
     }
 
-    // Ensure proper 8-byte alignment for destination
-    let raw_ptr = usable_area.start as *mut u8;
-    let aligned_ptr = ((raw_ptr as usize + 7) & !7) as *mut u8;
-    let aligned_addr = aligned_ptr as usize;
+    let page_size = crate::environment::PAGE_SIZE;
+    let aligned_addr = (usable_area.start + page_size - 1) & !(page_size - 1);
 
     // Validate destination memory bounds
     if aligned_addr + size > usable_area.end {
@@ -51,8 +49,8 @@ pub fn relocate_initramfs(usable_area: &mut MemoryArea) -> Result<MemoryArea, &'
 
     // Use a safer approach: copy in smaller chunks to avoid stack issues
     let chunk_size = 4096; // 4KB chunks
-    let mut src_addr = original_area.start as *const u8;
-    let mut dst_addr = aligned_ptr;
+    let mut src_addr = crate::vm::addr::phys_to_virt(original_area.start) as *const u8;
+    let mut dst_addr = crate::vm::addr::phys_to_virt(aligned_addr) as *mut u8;
     let mut remaining = size;
 
     unsafe {
@@ -73,8 +71,7 @@ pub fn relocate_initramfs(usable_area: &mut MemoryArea) -> Result<MemoryArea, &'
         }
     }
 
-    // Update usable_area start AFTER copying, with alignment
-    usable_area.start = (aligned_addr + size + 7) & !7;
+    usable_area.start = (aligned_addr + size + page_size - 1) & !(page_size - 1);
 
     Ok(new_area)
 }
@@ -83,8 +80,8 @@ fn mount_initramfs(
     manager: &Arc<VfsManager>,
     initramfs: MemoryArea,
 ) -> Result<(), FileSystemError> {
-    early_println!("[InitRamFS] Initializing initramfs");
-    early_println!(
+    println!("[InitRamFS] Initializing initramfs");
+    println!(
         "[InitRamFS] Using initramfs at address: {:#x}, size: {} bytes",
         initramfs.start,
         initramfs.size()
@@ -94,7 +91,7 @@ fn mount_initramfs(
         unsafe { core::slice::from_raw_parts(initramfs.start as *const u8, initramfs.size()) };
     let fs = crate::fs::vfs_v2::drivers::cpiofs::CpioFS::new("initramfs".to_string(), cpio_data)?;
     manager.mount(fs, "/", 0)?;
-    early_println!("[InitRamFS] Successfully mounted initramfs at root directory");
+    println!("[InitRamFS] Successfully mounted initramfs at root directory");
     Ok(())
 }
 

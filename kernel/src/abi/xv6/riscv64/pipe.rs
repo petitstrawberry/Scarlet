@@ -5,11 +5,11 @@ pub fn sys_pipe(
     trapframe: &mut Trapframe,
 ) -> usize {
     let task = mytask().unwrap();
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     let pipefd_ptr = task
         .vm_manager
-        .translate_vaddr(trapframe.get_arg(0))
+        .translate_to_kva(trapframe.get_arg(0))
         .expect("Invalid pipefd pointer");
     let pipefd = unsafe { &mut *(pipefd_ptr as *mut [u32; 2]) };
 

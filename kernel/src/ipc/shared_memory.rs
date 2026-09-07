@@ -4,16 +4,67 @@
 //! Shared memory allows multiple processes to access the same physical memory region,
 //! providing efficient data sharing without copying.
 
+use crate::sync::IrqRwSpinLock;
 use alloc::{format, string::String, sync::Arc, vec::Vec};
-use spin::RwLock;
 
 use crate::mem::page::{allocate_raw_pages, free_raw_pages};
 use crate::object::capability::memory_mapping::{
     AccessKind, MemoryMappingOps, ResolveFaultError, ResolveFaultResult,
 };
+use crate::vm::addr::{phys_to_virt, virt_to_phys};
 use crate::vm::vmem::VirtualMemoryMap;
 
-const LOG_SHARED_MEMORY_RESIZE: bool = false;
+pub(super) const LOG_SHARED_MEMORY_RESIZE: bool = false;
+
+/// Kernel-only description of stable shared-memory backing.
+///
+/// This is returned only after a shared-memory range has been pinned. Its
+/// physical address is never exposed through a userspace ABI.
+#[derive(Debug, Clone, Copy)]
+pub struct SharedMemoryBacking {
+    paddr: usize,
+    size: usize,
+}
+
+impl SharedMemoryBacking {
+    pub(crate) const fn paddr(&self) -> usize {
+        self.paddr
+    }
+
+    pub(crate) const fn size(&self) -> usize {
+        self.size
+    }
+}
+
+/// Strong shared-memory pin retained by a kernel importer.
+///
+/// The owner Arc keeps the SharedMemory object alive until after the pin is
+/// released, so a consumer never relies on a raw physical address alone.
+pub(crate) struct SharedMemoryPin {
+    owner: Arc<dyn SharedMemoryObject>,
+    backing: SharedMemoryBacking,
+}
+
+impl SharedMemoryPin {
+    pub(crate) fn new(
+        owner: Arc<dyn SharedMemoryObject>,
+        offset: usize,
+        length: usize,
+    ) -> Result<Self, &'static str> {
+        let backing = owner.pin_range(offset, length)?;
+        Ok(Self { owner, backing })
+    }
+
+    pub(crate) const fn backing(&self) -> SharedMemoryBacking {
+        self.backing
+    }
+}
+
+impl Drop for SharedMemoryPin {
+    fn drop(&mut self) {
+        self.owner.unpin_range();
+    }
+}
 
 /// Shared memory operations
 ///
@@ -30,6 +81,28 @@ pub trait SharedMemoryObject: MemoryMappingOps + Send + Sync {
 
     /// Check if the shared memory is still valid
     fn is_valid(&self) -> bool;
+
+    /// Pin a live range so its backing cannot change while imported.
+    ///
+    /// # Arguments
+    ///
+    /// * `offset` - Byte offset of the range to validate.
+    /// * `length` - Non-zero byte length of the range to validate.
+    ///
+    /// # Returns
+    ///
+    /// Kernel-only metadata for the stable backing, or an error when the
+    /// object is invalid or the range is outside its current size. Each
+    /// successful call must be paired with [`SharedMemoryObject::unpin_range`].
+    fn pin_range(&self, offset: usize, length: usize) -> Result<SharedMemoryBacking, &'static str>;
+
+    /// Release one prior shared-memory backing pin.
+    ///
+    /// # Returns
+    ///
+    /// Nothing. Calls without a corresponding pin are ignored so importer drop
+    /// paths remain safe during error cleanup.
+    fn unpin_range(&self);
 }
 
 /// Internal state of a shared memory object
@@ -46,6 +119,8 @@ struct SharedMemoryState {
     valid: bool,
     /// Number of active mappings
     mapping_count: usize,
+    /// Number of active kernel imports retaining this backing.
+    pin_count: usize,
     /// Old allocations kept alive while mappings still exist
     stale_pages: Vec<(usize, usize)>,
     /// Whether this object owns the physical memory (should free on drop)
@@ -61,6 +136,7 @@ impl SharedMemoryState {
             permissions,
             valid: true,
             mapping_count: 0,
+            pin_count: 0,
             stale_pages: Vec::new(),
             owns_memory,
         }
@@ -73,7 +149,7 @@ impl SharedMemoryState {
 /// processes' address spaces, allowing efficient data sharing without copying.
 pub struct SharedMemory {
     /// Shared state of the memory object
-    state: Arc<RwLock<SharedMemoryState>>,
+    state: Arc<IrqRwSpinLock<SharedMemoryState>>,
     /// Unique identifier for debugging
     id: String,
 }
@@ -103,13 +179,13 @@ impl SharedMemory {
         if pages.is_null() {
             return Err("Failed to allocate physical memory for shared memory");
         }
-        let paddr = pages as usize;
+        let paddr = virt_to_phys(pages as usize);
 
         let state = SharedMemoryState::new(paddr, aligned_size, permissions, true);
         let id = format!("shmem_{:#x}", paddr);
 
         Ok(Self {
-            state: Arc::new(RwLock::new(state)),
+            state: Arc::new(IrqRwSpinLock::new(state)),
             id,
         })
     }
@@ -134,7 +210,7 @@ impl SharedMemory {
         let id = format!("shmem_{:#x}", paddr);
 
         Self {
-            state: Arc::new(RwLock::new(state)),
+            state: Arc::new(IrqRwSpinLock::new(state)),
             id,
         }
     }
@@ -165,6 +241,10 @@ impl SharedMemoryObject for SharedMemory {
             num_pages * PAGE_SIZE
         };
 
+        if state.pin_count != 0 && aligned_size != state.size {
+            return Err("Shared memory cannot resize while imported");
+        }
+
         // 容量内であればサイズ更新のみ
         if aligned_size <= state.capacity {
             state.size = aligned_size;
@@ -189,7 +269,7 @@ impl SharedMemoryObject for SharedMemory {
         if copy_size > 0 {
             unsafe {
                 core::ptr::copy_nonoverlapping(
-                    state.paddr as *const u8,
+                    phys_to_virt(state.paddr) as *const u8,
                     pages as *mut u8,
                     copy_size,
                 );
@@ -202,12 +282,14 @@ impl SharedMemoryObject for SharedMemory {
             if state.mapping_count > 0 {
                 state.stale_pages.push((old_paddr, old_pages));
             } else {
-                let old_ptr = old_paddr as *mut crate::mem::page::Page;
-                free_raw_pages(old_ptr, old_pages);
+                let old_ptr = phys_to_virt(old_paddr) as *mut crate::mem::page::Page;
+                // SAFETY: The state lock protects the owned old allocation;
+                // copying is complete and no mapping still refers to it.
+                unsafe { free_raw_pages(old_ptr, old_pages) };
             }
         }
 
-        state.paddr = pages as usize;
+        state.paddr = virt_to_phys(pages as usize);
         state.size = aligned_size;
         state.capacity = aligned_size;
 
@@ -239,6 +321,37 @@ impl SharedMemoryObject for SharedMemory {
     fn is_valid(&self) -> bool {
         self.state.read().valid
     }
+
+    fn pin_range(&self, offset: usize, length: usize) -> Result<SharedMemoryBacking, &'static str> {
+        if length == 0 {
+            return Err("Shared memory import range must be non-empty");
+        }
+        let mut state = self.state.write();
+        if !state.valid || state.paddr == 0 {
+            return Err("Shared memory backing is not live");
+        }
+        let end = offset
+            .checked_add(length)
+            .ok_or("Shared memory import range overflows")?;
+        if end > state.size {
+            return Err("Shared memory import range exceeds backing");
+        }
+        state.pin_count = state
+            .pin_count
+            .checked_add(1)
+            .ok_or("Shared memory import pin count overflows")?;
+        Ok(SharedMemoryBacking {
+            paddr: state.paddr,
+            size: state.size,
+        })
+    }
+
+    fn unpin_range(&self) {
+        let mut state = self.state.write();
+        if state.pin_count != 0 {
+            state.pin_count -= 1;
+        }
+    }
 }
 
 impl MemoryMappingOps for SharedMemory {
@@ -246,7 +359,7 @@ impl MemoryMappingOps for SharedMemory {
         &self,
         offset: usize,
         length: usize,
-    ) -> Result<(usize, usize, bool), &'static str> {
+    ) -> Result<crate::object::capability::MemoryMappingInfo, &'static str> {
         let state = self.state.read();
 
         if !state.valid {
@@ -264,13 +377,17 @@ impl MemoryMappingOps for SharedMemory {
             return Err("Mapping request exceeds shared memory size");
         }
 
-        // Return physical address (base + offset), permissions, and shared flag
+        // Return physical address (base + offset), permissions, and shared flag.
         let paddr = state
             .paddr
             .checked_add(offset)
             .ok_or("Physical address overflow in shared memory mapping")?;
 
-        Ok((paddr, state.permissions, true))
+        Ok(crate::object::capability::MemoryMappingInfo::new(
+            paddr,
+            state.permissions,
+            true,
+        ))
     }
 
     fn on_mapped(&self, _vaddr: usize, _paddr: usize, _length: usize, _offset: usize) {
@@ -289,8 +406,10 @@ impl MemoryMappingOps for SharedMemory {
                 if pages == 0 {
                     continue;
                 }
-                let ptr = paddr as *mut crate::mem::page::Page;
-                free_raw_pages(ptr, pages);
+                let ptr = phys_to_virt(paddr) as *mut crate::mem::page::Page;
+                // SAFETY: The last mapping was removed, and these retired
+                // allocations were taken out of the owned stale-page list.
+                unsafe { free_raw_pages(ptr, pages) };
             }
         }
     }
@@ -303,10 +422,15 @@ impl MemoryMappingOps for SharedMemory {
         self.id.clone()
     }
 
+    fn can_extend_vma_on_fault(&self) -> bool {
+        true
+    }
+
     fn resolve_fault(
         &self,
         access: &AccessKind,
-        map: &VirtualMemoryMap,
+        _page_idx: usize,
+        vm_start: usize,
     ) -> Result<ResolveFaultResult, ResolveFaultError> {
         let state = self.state.read();
 
@@ -320,11 +444,11 @@ impl MemoryMappingOps for SharedMemory {
         // vmarea範囲チェック（マッピング時のサイズ）
         // NOTE: ftruncateでリサイズされた場合、vmarea.endは古いままなので、
         //       SharedMemoryの現在のsizeも確認する必要がある
-        if page_vaddr < map.vmarea.start {
+        if page_vaddr < vm_start {
             return Err(ResolveFaultError::Unmapped);
         }
 
-        let offset_in_mapping = page_vaddr - map.vmarea.start;
+        let offset_in_mapping = page_vaddr - vm_start;
 
         // 現在のSharedMemoryサイズを確認（動的に拡張された可能性がある）
         if offset_in_mapping >= state.size {
@@ -351,22 +475,29 @@ impl Drop for SharedMemory {
 
         let state = self.state.read();
         if state.mapping_count > 0 {
-            // Note: In a real implementation, we should ensure all mappings are
-            // unmapped before freeing the physical memory.
-            // Warning: SharedMemory dropped with active mappings
+            crate::println!(
+                "[SharedMemory::drop] leaking {} pages for {} active mapping(s)",
+                (state.capacity + PAGE_SIZE - 1) / PAGE_SIZE,
+                state.mapping_count
+            );
+            return;
         }
 
         // Only free the physical pages if this object owns them
         if state.owns_memory {
             let num_pages = (state.capacity + PAGE_SIZE - 1) / PAGE_SIZE;
-            let pages_ptr = state.paddr as *mut crate::mem::page::Page;
-            free_raw_pages(pages_ptr, num_pages);
+            let pages_ptr = phys_to_virt(state.paddr) as *mut crate::mem::page::Page;
+            // SAFETY: Final drop owns this allocation and the check above
+            // excludes live mappings; capacity records the original page count.
+            unsafe { free_raw_pages(pages_ptr, num_pages) };
             for (paddr, pages) in &state.stale_pages {
                 if *pages == 0 {
                     continue;
                 }
-                let pages_ptr = *paddr as *mut crate::mem::page::Page;
-                free_raw_pages(pages_ptr, *pages);
+                let pages_ptr = phys_to_virt(*paddr) as *mut crate::mem::page::Page;
+                // SAFETY: These are distinct owned retired allocations, with
+                // their original counts, and no mappings remain at final drop.
+                unsafe { free_raw_pages(pages_ptr, *pages) };
             }
         }
     }
@@ -421,20 +552,20 @@ mod tests {
 
         // Test valid mapping request
         match shmem.get_mapping_info(0, 4096) {
-            Ok((mapped_paddr, mapped_perms, is_shared)) => {
-                assert_eq!(mapped_paddr, paddr);
-                assert_eq!(mapped_perms, permissions);
-                assert!(is_shared); // Shared memory should always be shared
+            Ok(info) => {
+                assert_eq!(info.paddr, paddr);
+                assert_eq!(info.permissions, permissions);
+                assert!(info.is_shared); // Shared memory should always be shared
             }
             Err(e) => panic!("Mapping info failed: {}", e),
         }
 
         // Test mapping with offset
         match shmem.get_mapping_info(1024, 2048) {
-            Ok((mapped_paddr, mapped_perms, is_shared)) => {
-                assert_eq!(mapped_paddr, paddr + 1024);
-                assert_eq!(mapped_perms, permissions);
-                assert!(is_shared);
+            Ok(info) => {
+                assert_eq!(info.paddr, paddr + 1024);
+                assert_eq!(info.permissions, permissions);
+                assert!(info.is_shared);
             }
             Err(e) => panic!("Mapping info with offset failed: {}", e),
         }
@@ -490,6 +621,36 @@ mod tests {
 
         shmem.on_unmapped(0x20000000, 4096);
         assert_eq!(shmem.state.read().mapping_count, 0);
+    }
+
+    #[test_case]
+    fn test_shared_memory_pin_blocks_all_size_changes() {
+        let paddr = 0x80000000;
+        let size = 8192;
+        let permissions = 0x3;
+        let shmem = unsafe { SharedMemory::from_paddr(paddr, size, permissions) };
+
+        assert!(shmem.pin_range(0, size).is_ok());
+        assert_eq!(shmem.state.read().pin_count, 1);
+        assert!(shmem.resize(4096).is_err());
+        assert!(shmem.resize(12288).is_err());
+        assert_eq!(shmem.resize(size), Ok(()));
+        shmem.unpin_range();
+        assert_eq!(shmem.state.read().pin_count, 0);
+        assert_eq!(shmem.resize(4096), Ok(()));
+    }
+
+    #[test_case]
+    fn test_shared_memory_pin_validates_import_range() {
+        let paddr = 0x80000000;
+        let size = 8192;
+        let permissions = 0x3;
+        let shmem = unsafe { SharedMemory::from_paddr(paddr, size, permissions) };
+
+        assert!(shmem.pin_range(0, 0).is_err());
+        assert!(shmem.pin_range(size, 1).is_err());
+        assert!(shmem.pin_range(size - 1, 2).is_err());
+        assert_eq!(shmem.state.read().pin_count, 0);
     }
 
     #[test_case]

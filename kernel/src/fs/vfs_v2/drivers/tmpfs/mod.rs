@@ -4,6 +4,7 @@
 //! It implements FileSystemOperations directly and uses VfsNode for internal
 //! structure representation.
 
+use crate::sync::{IrqRwSpinLock, IrqSpinLock};
 use alloc::{
     boxed::Box,
     collections::BTreeMap,
@@ -14,7 +15,6 @@ use alloc::{
     vec::Vec,
 };
 use core::{any::Any, fmt::Debug};
-use spin::{Mutex, rwlock::RwLock};
 
 use crate::device::manager::DeviceManager;
 use crate::environment::PAGE_SIZE;
@@ -28,8 +28,9 @@ use crate::{
         FileSystemError, FileSystemErrorKind, FileType, SocketFileInfo, get_fs_driver_manager,
         vfs_v2::cache::PageCacheCapable,
     },
-    mem::{page::allocate_boxed_pages, page_cache::PageCacheManager},
+    mem::{page::ContiguousPages, page_cache::PageCacheManager},
     object::capability::MemoryMappingOps,
+    vm::addr::phys_to_virt,
 };
 
 use super::super::core::{DirectoryEntryInternal, FileSystemId, FileSystemOperations, VfsNode};
@@ -44,13 +45,13 @@ pub struct TmpFS {
     /// Unique filesystem identifier
     fs_id: FileSystemId,
     /// Root directory node
-    root: RwLock<Arc<TmpNode>>,
+    root: IrqRwSpinLock<Arc<TmpNode>>,
     /// Memory limit (0 = unlimited)
     memory_limit: usize,
     /// Current memory usage
-    current_memory: Mutex<usize>,
+    current_memory: IrqSpinLock<usize>,
     /// Next file ID generator
-    next_file_id: Mutex<u64>,
+    next_file_id: IrqSpinLock<u64>,
     /// Filesystem name
     name: String,
 }
@@ -61,10 +62,10 @@ impl TmpFS {
         let root = Arc::new(TmpNode::new_directory("/".to_string(), 1));
         let fs = Arc::new(Self {
             fs_id: FileSystemId::new(),
-            root: RwLock::new(Arc::clone(&root)),
+            root: IrqRwSpinLock::new(Arc::clone(&root)),
             memory_limit,
-            current_memory: Mutex::new(0),
-            next_file_id: Mutex::new(2), // Start from 2, root is 1
+            current_memory: IrqSpinLock::new(0),
+            next_file_id: IrqSpinLock::new(2), // Start from 2, root is 1
             name: "tmpfs_v2".to_string(),
         });
         let fs_weak = Arc::downgrade(&(fs.clone() as Arc<dyn FileSystemOperations>));
@@ -101,28 +102,27 @@ impl TmpFS {
         id
     }
 
-    /// Check memory limit
-    fn check_memory_limit(&self, additional_bytes: usize) -> Result<(), FileSystemError> {
-        if self.memory_limit == 0 {
-            return Ok(()); // Unlimited
+    /// Reserve memory usage.
+    fn reserve_memory_usage(&self, bytes: usize) -> Result<(), FileSystemError> {
+        if self.memory_limit == 0 || bytes == 0 {
+            return Ok(());
         }
 
-        let current = *self.current_memory.lock();
-        if current + additional_bytes > self.memory_limit {
+        let mut current = self.current_memory.lock();
+        let Some(next) = current.checked_add(bytes) else {
+            return Err(FileSystemError::new(
+                FileSystemErrorKind::NoSpace,
+                "TmpFS memory limit exceeded",
+            ));
+        };
+        if next > self.memory_limit {
             return Err(FileSystemError::new(
                 FileSystemErrorKind::NoSpace,
                 "TmpFS memory limit exceeded",
             ));
         }
-
+        *current = next;
         Ok(())
-    }
-
-    /// Add to memory usage
-    fn add_memory_usage(&self, bytes: usize) {
-        if self.memory_limit > 0 {
-            *self.current_memory.lock() += bytes;
-        }
     }
 
     /// Subtract from memory usage
@@ -259,6 +259,20 @@ impl FileSystemOperations for TmpFS {
         }
         // Generate file ID
         let file_id = self.generate_file_id();
+        // Validate the parent filesystem reference before reserving memory.
+        let fs_ref = parent_node.filesystem().ok_or_else(|| {
+            FileSystemError::new(
+                FileSystemErrorKind::NotSupported,
+                "Parent node does not have a filesystem reference",
+            )
+        })?;
+        if fs_ref.upgrade().is_none() {
+            return Err(FileSystemError::new(
+                FileSystemErrorKind::NotSupported,
+                "Parent node's filesystem reference is dead (cannot upgrade)",
+            ));
+        }
+
         let new_node = match file_type {
             FileType::RegularFile => Arc::new(TmpNode::new_file(name.clone().to_string(), file_id)),
             FileType::Directory => {
@@ -266,7 +280,7 @@ impl FileSystemOperations for TmpFS {
             }
             FileType::SymbolicLink(target_path) => {
                 // Account for memory usage (target path length)
-                self.add_memory_usage(target_path.len());
+                self.reserve_memory_usage(target_path.len())?;
                 Arc::new(TmpNode::new_symlink(
                     name.clone().to_string(),
                     target_path,
@@ -283,19 +297,7 @@ impl FileSystemOperations for TmpFS {
                 ));
             }
         };
-        // After creation, set the filesystem reference (always check if upgrade is possible)
-        let fs_ref = parent_node.filesystem().ok_or_else(|| {
-            FileSystemError::new(
-                FileSystemErrorKind::NotSupported,
-                "Parent node does not have a filesystem reference",
-            )
-        })?;
-        if fs_ref.upgrade().is_none() {
-            return Err(FileSystemError::new(
-                FileSystemErrorKind::NotSupported,
-                "Parent node's filesystem reference is dead (cannot upgrade)",
-            ));
-        }
+        // After creation, set the filesystem reference.
         if let Some(tmp_node) = new_node.as_any().downcast_ref::<TmpNode>() {
             tmp_node.set_filesystem(fs_ref);
         }
@@ -386,6 +388,185 @@ impl FileSystemOperations for TmpFS {
         Ok(Arc::clone(target_node))
     }
 
+    fn rename(
+        &self,
+        old_parent: &Arc<dyn VfsNode>,
+        old_name: &String,
+        new_parent: &Arc<dyn VfsNode>,
+        new_name: &String,
+    ) -> Result<(), FileSystemError> {
+        let tmp_old_parent = old_parent
+            .as_any()
+            .downcast_ref::<TmpNode>()
+            .ok_or_else(|| {
+                FileSystemError::new(
+                    FileSystemErrorKind::NotSupported,
+                    "Invalid old parent node type for TmpFS",
+                )
+            })?;
+
+        let tmp_new_parent = new_parent
+            .as_any()
+            .downcast_ref::<TmpNode>()
+            .ok_or_else(|| {
+                FileSystemError::new(
+                    FileSystemErrorKind::NotSupported,
+                    "Invalid new parent node type for TmpFS",
+                )
+            })?;
+
+        // Both parents must be directories
+        if tmp_old_parent.file_type() != FileType::Directory {
+            return Err(FileSystemError::new(
+                FileSystemErrorKind::NotADirectory,
+                "Source parent is not a directory",
+            ));
+        }
+        if tmp_new_parent.file_type() != FileType::Directory {
+            return Err(FileSystemError::new(
+                FileSystemErrorKind::NotADirectory,
+                "Destination parent is not a directory",
+            ));
+        }
+
+        let same_parent = Arc::ptr_eq(old_parent, new_parent);
+
+        // No-op: same parent and same name
+        if same_parent && old_name == new_name {
+            return Ok(());
+        }
+
+        if same_parent {
+            // Rename within the same directory — one lock covers everything
+            let mut children = tmp_old_parent.children.write();
+
+            let node = children.remove(old_name).ok_or_else(|| {
+                FileSystemError::new(FileSystemErrorKind::NotFound, "Source not found")
+            })?;
+
+            // Validate compatibility with an existing destination entry
+            if let Some(existing) = children.get(new_name) {
+                let src_is_dir = node
+                    .as_any()
+                    .downcast_ref::<TmpNode>()
+                    .map(|n| n.file_type() == FileType::Directory)
+                    .unwrap_or(false);
+                let dst_is_dir = existing
+                    .as_any()
+                    .downcast_ref::<TmpNode>()
+                    .map(|n| n.file_type() == FileType::Directory)
+                    .unwrap_or(false);
+
+                if src_is_dir && !dst_is_dir {
+                    // Restore and fail
+                    children.insert(old_name.clone(), node);
+                    return Err(FileSystemError::new(
+                        FileSystemErrorKind::NotADirectory,
+                        "Destination exists and is not a directory",
+                    ));
+                }
+                if !src_is_dir && dst_is_dir {
+                    children.insert(old_name.clone(), node);
+                    return Err(FileSystemError::new(
+                        FileSystemErrorKind::IsADirectory,
+                        "Destination is a directory",
+                    ));
+                }
+                if dst_is_dir {
+                    let existing_tmp = existing
+                        .as_any()
+                        .downcast_ref::<TmpNode>()
+                        .expect("Destination node should be TmpNode");
+                    if !existing_tmp.children.read().is_empty() {
+                        children.insert(old_name.clone(), node);
+                        return Err(FileSystemError::new(
+                            FileSystemErrorKind::DirectoryNotEmpty,
+                            "Destination directory is not empty",
+                        ));
+                    }
+                }
+            }
+
+            // Update internal name stored in the node
+            if let Some(tmp_node) = node.as_any().downcast_ref::<TmpNode>() {
+                *tmp_node.name.write() = new_name.clone();
+            }
+
+            // Insert under the new name (atomically replaces any existing entry)
+            children.insert(new_name.clone(), node);
+        } else {
+            // Moving to a different directory
+            // Read the source node first (no locks held yet)
+            let node = {
+                let old_children = tmp_old_parent.children.read();
+                old_children.get(old_name).cloned().ok_or_else(|| {
+                    FileSystemError::new(FileSystemErrorKind::NotFound, "Source not found")
+                })?
+            };
+
+            // Validate destination compatibility
+            {
+                let new_children = tmp_new_parent.children.read();
+                if let Some(existing) = new_children.get(new_name) {
+                    let src_is_dir = node
+                        .as_any()
+                        .downcast_ref::<TmpNode>()
+                        .map(|n| n.file_type() == FileType::Directory)
+                        .unwrap_or(false);
+                    let dst_is_dir = existing
+                        .as_any()
+                        .downcast_ref::<TmpNode>()
+                        .map(|n| n.file_type() == FileType::Directory)
+                        .unwrap_or(false);
+
+                    if src_is_dir && !dst_is_dir {
+                        return Err(FileSystemError::new(
+                            FileSystemErrorKind::NotADirectory,
+                            "Destination exists and is not a directory",
+                        ));
+                    }
+                    if !src_is_dir && dst_is_dir {
+                        return Err(FileSystemError::new(
+                            FileSystemErrorKind::IsADirectory,
+                            "Destination is a directory",
+                        ));
+                    }
+                    if dst_is_dir {
+                        let existing_tmp = existing
+                            .as_any()
+                            .downcast_ref::<TmpNode>()
+                            .expect("Destination node should be TmpNode");
+                        if !existing_tmp.children.read().is_empty() {
+                            return Err(FileSystemError::new(
+                                FileSystemErrorKind::DirectoryNotEmpty,
+                                "Destination directory is not empty",
+                            ));
+                        }
+                    }
+                }
+            }
+
+            // Update internal node name
+            if let Some(tmp_node) = node.as_any().downcast_ref::<TmpNode>() {
+                *tmp_node.name.write() = new_name.clone();
+            }
+
+            // Remove from old parent
+            {
+                let mut old_children = tmp_old_parent.children.write();
+                old_children.remove(old_name);
+            }
+
+            // Insert into new parent (replaces any existing destination entry)
+            {
+                let mut new_children = tmp_new_parent.children.write();
+                new_children.insert(new_name.clone(), node);
+            }
+        }
+
+        Ok(())
+    }
+
     fn remove(&self, parent_node: &Arc<dyn VfsNode>, name: &String) -> Result<(), FileSystemError> {
         let tmp_parent = parent_node
             .as_any()
@@ -423,13 +604,18 @@ impl FileSystemOperations for TmpFS {
                 // Update memory usage for regular files and symbolic links
                 match tmp_node.file_type() {
                     FileType::RegularFile => {
-                        let size = tmp_node.metadata.read().size;
-                        self.subtract_memory_usage(size);
-                        let fs_id = self.fs_id().get();
-                        let file_id = tmp_node.metadata.read().file_id;
-                        let cache_key = (fs_id << 32) | (file_id & 0xFFFF_FFFF);
-                        PageCacheManager::global()
-                            .invalidate(crate::fs::vfs_v2::cache::CacheId::new(cache_key));
+                        let mut metadata = tmp_node.metadata.write();
+                        if metadata.link_count > 1 {
+                            metadata.link_count -= 1;
+                        } else {
+                            let size = metadata.size;
+                            self.subtract_memory_usage(size);
+                            let fs_id = self.fs_id().get();
+                            let file_id = metadata.file_id;
+                            let cache_key = (fs_id << 32) | (file_id & 0xFFFF_FFFF);
+                            PageCacheManager::global()
+                                .invalidate(crate::fs::vfs_v2::cache::CacheId::new(cache_key));
+                        }
                     }
                     FileType::SymbolicLink(target) => {
                         self.subtract_memory_usage(target.len());
@@ -502,19 +688,19 @@ impl FileSystemOperations for TmpFS {
 /// and references to its parent and filesystem. All fields are protected by locks for thread safety.
 pub struct TmpNode {
     /// File name
-    name: RwLock<String>,
+    name: IrqRwSpinLock<String>,
     /// File type
-    file_type: RwLock<FileType>,
+    file_type: IrqRwSpinLock<FileType>,
     /// File metadata
-    metadata: RwLock<FileMetadata>,
+    metadata: IrqRwSpinLock<FileMetadata>,
     /// File content (for symlinks)
-    content: RwLock<Vec<u8>>,
+    content: IrqRwSpinLock<Vec<u8>>,
     /// Child nodes (for directories)
-    children: RwLock<BTreeMap<String, Arc<dyn VfsNode>>>,
+    children: IrqRwSpinLock<BTreeMap<String, Arc<dyn VfsNode>>>,
     /// Parent node (weak reference to avoid cycles)
-    parent: RwLock<Option<Weak<TmpNode>>>,
-    /// Reference to filesystem (Weak<dyn FileSystemOperations>)
-    filesystem: RwLock<Option<Weak<dyn FileSystemOperations>>>,
+    parent: IrqRwSpinLock<Option<Weak<TmpNode>>>,
+    /// Reference to filesystem (`Weak<dyn FileSystemOperations>`)
+    filesystem: IrqRwSpinLock<Option<Weak<dyn FileSystemOperations>>>,
 }
 
 impl Debug for TmpNode {
@@ -534,10 +720,11 @@ impl Debug for TmpNode {
 impl TmpNode {
     /// Create a new regular file node
     pub fn new_file(name: String, file_id: u64) -> Self {
+        let now = crate::time::system_time_s().unwrap_or(0);
         Self {
-            name: RwLock::new(name),
-            file_type: RwLock::new(FileType::RegularFile),
-            metadata: RwLock::new(FileMetadata {
+            name: IrqRwSpinLock::new(name),
+            file_type: IrqRwSpinLock::new(FileType::RegularFile),
+            metadata: IrqRwSpinLock::new(FileMetadata {
                 file_type: FileType::RegularFile,
                 size: 0,
                 permissions: FilePermission {
@@ -545,25 +732,26 @@ impl TmpNode {
                     write: true,
                     execute: false,
                 },
-                created_time: 0, // TODO: actual timestamp
-                modified_time: 0,
-                accessed_time: 0,
+                created_time: now,
+                modified_time: now,
+                accessed_time: now,
                 file_id,
                 link_count: 1,
             }),
-            content: RwLock::new(Vec::new()),
-            children: RwLock::new(BTreeMap::new()),
-            parent: RwLock::new(None), // No parent initially
-            filesystem: RwLock::new(None),
+            content: IrqRwSpinLock::new(Vec::new()),
+            children: IrqRwSpinLock::new(BTreeMap::new()),
+            parent: IrqRwSpinLock::new(None), // No parent initially
+            filesystem: IrqRwSpinLock::new(None),
         }
     }
 
     /// Create a new directory node
     pub fn new_directory(name: String, file_id: u64) -> Self {
+        let now = crate::time::system_time_s().unwrap_or(0);
         Self {
-            name: RwLock::new(name),
-            file_type: RwLock::new(FileType::Directory),
-            metadata: RwLock::new(FileMetadata {
+            name: IrqRwSpinLock::new(name),
+            file_type: IrqRwSpinLock::new(FileType::Directory),
+            metadata: IrqRwSpinLock::new(FileMetadata {
                 file_type: FileType::Directory,
                 size: 0,
                 permissions: FilePermission {
@@ -571,25 +759,26 @@ impl TmpNode {
                     write: true,
                     execute: true,
                 },
-                created_time: 0,
-                modified_time: 0,
-                accessed_time: 0,
+                created_time: now,
+                modified_time: now,
+                accessed_time: now,
                 file_id,
                 link_count: 1,
             }),
-            content: RwLock::new(Vec::new()),
-            children: RwLock::new(BTreeMap::new()),
-            parent: RwLock::new(None), // No parent initially
-            filesystem: RwLock::new(None),
+            content: IrqRwSpinLock::new(Vec::new()),
+            children: IrqRwSpinLock::new(BTreeMap::new()),
+            parent: IrqRwSpinLock::new(None), // No parent initially
+            filesystem: IrqRwSpinLock::new(None),
         }
     }
 
     /// Create a new device file node
     pub fn new_device(name: String, file_type: FileType, file_id: u64) -> Self {
+        let now = crate::time::system_time_s().unwrap_or(0);
         Self {
-            name: RwLock::new(name),
-            file_type: RwLock::new(file_type.clone()),
-            metadata: RwLock::new(FileMetadata {
+            name: IrqRwSpinLock::new(name),
+            file_type: IrqRwSpinLock::new(file_type.clone()),
+            metadata: IrqRwSpinLock::new(FileMetadata {
                 file_type,
                 size: 0,
                 permissions: FilePermission {
@@ -597,25 +786,26 @@ impl TmpNode {
                     write: true,
                     execute: false,
                 },
-                created_time: 0,
-                modified_time: 0,
-                accessed_time: 0,
+                created_time: now,
+                modified_time: now,
+                accessed_time: now,
                 file_id,
                 link_count: 1,
             }),
-            content: RwLock::new(Vec::new()),
-            children: RwLock::new(BTreeMap::new()),
-            parent: RwLock::new(None), // No parent initially
-            filesystem: RwLock::new(None),
+            content: IrqRwSpinLock::new(Vec::new()),
+            children: IrqRwSpinLock::new(BTreeMap::new()),
+            parent: IrqRwSpinLock::new(None), // No parent initially
+            filesystem: IrqRwSpinLock::new(None),
         }
     }
 
     /// Create a new symbolic link node
     pub fn new_symlink(name: String, target: String, file_id: u64) -> Self {
+        let now = crate::time::system_time_s().unwrap_or(0);
         Self {
-            name: RwLock::new(name),
-            file_type: RwLock::new(FileType::SymbolicLink(target.clone())),
-            metadata: RwLock::new(FileMetadata {
+            name: IrqRwSpinLock::new(name),
+            file_type: IrqRwSpinLock::new(FileType::SymbolicLink(target.clone())),
+            metadata: IrqRwSpinLock::new(FileMetadata {
                 file_type: FileType::SymbolicLink(target.clone()),
                 size: target.len(),
                 permissions: FilePermission {
@@ -623,17 +813,17 @@ impl TmpNode {
                     write: true,
                     execute: false,
                 },
-                created_time: 0, // TODO: actual timestamp
-                modified_time: 0,
-                accessed_time: 0,
+                created_time: now,
+                modified_time: now,
+                accessed_time: now,
                 file_id,
                 link_count: 1,
             }),
             // Store symlink target in content as UTF-8 bytes
-            content: RwLock::new(target.into_bytes()),
-            children: RwLock::new(BTreeMap::new()),
-            parent: RwLock::new(None), // No parent initially
-            filesystem: RwLock::new(None),
+            content: IrqRwSpinLock::new(target.into_bytes()),
+            children: IrqRwSpinLock::new(BTreeMap::new()),
+            parent: IrqRwSpinLock::new(None), // No parent initially
+            filesystem: IrqRwSpinLock::new(None),
         }
     }
 
@@ -644,9 +834,20 @@ impl TmpNode {
 
     /// Update file size in metadata
     pub fn update_size(&self, new_size: u64) {
-        let mut metadata = self.metadata.write();
-        metadata.size = new_size as usize;
-        metadata.modified_time = 0; // TODO: actual timestamp
+        self.metadata.write().size = new_size as usize;
+        self.record_modified();
+    }
+
+    fn record_modified(&self) {
+        if let Some(now) = crate::time::system_time_s() {
+            self.metadata.write().modified_time = now;
+        }
+    }
+
+    fn record_accessed(&self) {
+        if let Some(now) = crate::time::system_time_s() {
+            self.metadata.write().accessed_time = now;
+        }
     }
 
     /// Set parent reference for this node
@@ -690,7 +891,18 @@ impl VfsNode for TmpNode {
     }
 
     fn metadata(&self) -> Result<FileMetadata, FileSystemError> {
-        Ok(self.metadata.read().clone())
+        let mut metadata = self.metadata.read().clone();
+        if matches!(metadata.file_type, FileType::RegularFile)
+            && let Some(fs) = self.filesystem().and_then(|weak| weak.upgrade())
+        {
+            let cache_id = crate::fs::vfs_v2::cache::CacheId::new(
+                (fs.fs_id().get() << 32) | (metadata.file_id & 0xFFFF_FFFF),
+            );
+            if let Some(size) = PageCacheManager::global().cached_object_size(cache_id) {
+                metadata.size = size;
+            }
+        }
+        Ok(metadata)
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -720,7 +932,7 @@ pub struct TmpFileObject {
     node: Arc<TmpNode>,
 
     /// Current file position
-    position: RwLock<u64>,
+    position: IrqRwSpinLock<u64>,
 
     /// Optional device guard for device files
     device_guard: Option<Arc<dyn Device>>,
@@ -728,11 +940,11 @@ pub struct TmpFileObject {
     /// Optional socket reference for socket files
     socket_ref: Option<Arc<dyn crate::network::SocketObject>>,
     /// Page-aligned backing for private mmap operations
-    mmap_backing: RwLock<Option<Box<[crate::mem::page::Page]>>>,
+    mmap_backing: IrqRwSpinLock<Option<ContiguousPages>>,
     /// Byte length of the mmap backing (file size snapshot)
-    mmap_backing_len: Mutex<usize>,
+    mmap_backing_len: IrqSpinLock<usize>,
     /// Active mmap ranges keyed by starting virtual address
-    mmap_ranges: RwLock<BTreeMap<usize, MmapRange>>,
+    mmap_ranges: IrqRwSpinLock<BTreeMap<usize, MmapRange>>,
 }
 
 impl TmpFileObject {
@@ -740,12 +952,12 @@ impl TmpFileObject {
     pub fn new_regular(node: Arc<TmpNode>) -> Self {
         Self {
             node,
-            position: RwLock::new(0),
+            position: IrqRwSpinLock::new(0),
             device_guard: None,
             socket_ref: None,
-            mmap_backing: RwLock::new(None),
-            mmap_backing_len: Mutex::new(0),
-            mmap_ranges: RwLock::new(BTreeMap::new()),
+            mmap_backing: IrqRwSpinLock::new(None),
+            mmap_backing_len: IrqSpinLock::new(0),
+            mmap_ranges: IrqRwSpinLock::new(BTreeMap::new()),
         }
     }
 
@@ -753,12 +965,12 @@ impl TmpFileObject {
     pub fn new_directory(node: Arc<TmpNode>) -> Self {
         Self {
             node,
-            position: RwLock::new(0),
+            position: IrqRwSpinLock::new(0),
             device_guard: None,
             socket_ref: None,
-            mmap_backing: RwLock::new(None),
-            mmap_backing_len: Mutex::new(0),
-            mmap_ranges: RwLock::new(BTreeMap::new()),
+            mmap_backing: IrqRwSpinLock::new(None),
+            mmap_backing_len: IrqSpinLock::new(0),
+            mmap_ranges: IrqRwSpinLock::new(BTreeMap::new()),
         }
     }
 
@@ -768,12 +980,12 @@ impl TmpFileObject {
         match DeviceManager::get_manager().get_device(info.device_id) {
             Some(device_guard) => Self {
                 node,
-                position: RwLock::new(0),
+                position: IrqRwSpinLock::new(0),
                 device_guard: Some(device_guard),
                 socket_ref: None,
-                mmap_backing: RwLock::new(None),
-                mmap_backing_len: Mutex::new(0),
-                mmap_ranges: RwLock::new(BTreeMap::new()),
+                mmap_backing: IrqRwSpinLock::new(None),
+                mmap_backing_len: IrqSpinLock::new(0),
+                mmap_ranges: IrqRwSpinLock::new(BTreeMap::new()),
             },
             None => {
                 // If borrowing fails, return an error
@@ -788,12 +1000,12 @@ impl TmpFileObject {
         match NetworkManager::get_manager().get_socket(info.socket_id) {
             Some(socket) => Self {
                 node,
-                position: RwLock::new(0),
+                position: IrqRwSpinLock::new(0),
                 device_guard: None,
                 socket_ref: Some(socket),
-                mmap_backing: RwLock::new(None),
-                mmap_backing_len: Mutex::new(0),
-                mmap_ranges: RwLock::new(BTreeMap::new()),
+                mmap_backing: IrqRwSpinLock::new(None),
+                mmap_backing_len: IrqSpinLock::new(0),
+                mmap_ranges: IrqRwSpinLock::new(BTreeMap::new()),
             },
             None => {
                 // Socket not found in NetworkManager. This can happen in legitimate
@@ -803,12 +1015,12 @@ impl TmpFileObject {
                 // operations can fail gracefully with a FileSystemError.
                 Self {
                     node,
-                    position: RwLock::new(0),
+                    position: IrqRwSpinLock::new(0),
                     device_guard: None,
                     socket_ref: None,
-                    mmap_backing: RwLock::new(None),
-                    mmap_backing_len: Mutex::new(0),
-                    mmap_ranges: RwLock::new(BTreeMap::new()),
+                    mmap_backing: IrqRwSpinLock::new(None),
+                    mmap_backing_len: IrqSpinLock::new(0),
+                    mmap_ranges: IrqRwSpinLock::new(BTreeMap::new()),
                 }
             }
         }
@@ -830,32 +1042,79 @@ impl TmpFileObject {
             .map(|buf| buf.len() < num_pages)
             .unwrap_or(true);
         if needs_alloc {
-            *backing_guard = Some(allocate_boxed_pages(num_pages));
+            *backing_guard = Some(ContiguousPages::new(num_pages).ok_or(StreamError::IoError)?);
         }
 
         let backing = backing_guard.as_mut().expect("mmap backing missing");
         *self.mmap_backing_len.lock() = file_size;
 
         let cache_id = self.cache_id();
-        let backing_ptr = backing.as_mut_ptr() as *mut u8;
+        let backing_ptr = backing.as_ptr() as *mut u8;
         for page_index in 0..num_pages {
             let pinned = PageCacheManager::global()
                 .pin_or_load(cache_id, page_index as u64, |paddr| {
                     unsafe {
-                        core::ptr::write_bytes(paddr as *mut u8, 0, PAGE_SIZE);
+                        core::ptr::write_bytes(phys_to_virt(paddr) as *mut u8, 0, PAGE_SIZE);
                     }
                     Ok(())
                 })
                 .map_err(|_| StreamError::IoError)?;
             unsafe {
                 core::ptr::copy_nonoverlapping(
-                    pinned.paddr() as *const u8,
+                    phys_to_virt(pinned.paddr()) as *const u8,
                     backing_ptr.add(page_index * PAGE_SIZE),
                     PAGE_SIZE,
                 );
             }
         }
 
+        Ok(())
+    }
+
+    fn tmpfs(&self) -> Result<Arc<dyn FileSystemOperations>, FileSystemError> {
+        self.node
+            .filesystem()
+            .and_then(|weak| weak.upgrade())
+            .ok_or_else(|| FileSystemError::new(FileSystemErrorKind::IoError, "tmpfs is gone"))
+    }
+
+    fn reserve_growth(&self, old_size: usize, new_size: usize) -> Result<usize, FileSystemError> {
+        let growth = new_size.saturating_sub(old_size);
+        if growth == 0 {
+            return Ok(0);
+        }
+
+        let fs = self.tmpfs()?;
+        let tmpfs = fs.as_any().downcast_ref::<TmpFS>().ok_or_else(|| {
+            FileSystemError::new(FileSystemErrorKind::IoError, "node is not on tmpfs")
+        })?;
+        tmpfs.reserve_memory_usage(growth)?;
+        Ok(growth)
+    }
+
+    fn release_memory_usage(&self, bytes: usize) {
+        if bytes == 0 {
+            return;
+        }
+
+        let Ok(fs) = self.tmpfs() else {
+            return;
+        };
+        if let Some(tmpfs) = fs.as_any().downcast_ref::<TmpFS>() {
+            tmpfs.subtract_memory_usage(bytes);
+        }
+    }
+
+    fn subtract_memory_usage(&self, bytes: usize) -> Result<(), FileSystemError> {
+        if bytes == 0 {
+            return Ok(());
+        }
+
+        let fs = self.tmpfs()?;
+        let tmpfs = fs.as_any().downcast_ref::<TmpFS>().ok_or_else(|| {
+            FileSystemError::new(FileSystemErrorKind::IoError, "node is not on tmpfs")
+        })?;
+        tmpfs.subtract_memory_usage(bytes);
         Ok(())
     }
 
@@ -935,20 +1194,22 @@ impl TmpFileObject {
 
     fn read_regular_file(&self, buffer: &mut [u8]) -> Result<usize, FileSystemError> {
         let mut pos = *self.position.read();
-        let file_size = self.node.metadata.read().size as u64;
+        let cache_id = self.cache_id();
+        let file_size = PageCacheManager::global()
+            .cached_object_size(cache_id)
+            .unwrap_or_else(|| self.node.metadata.read().size) as u64;
         if pos >= file_size {
             return Ok(0);
         }
 
         let mut total_read = 0usize;
-        let cache_id = self.cache_id();
         while total_read < buffer.len() && pos < file_size {
             let page_index = (pos as usize / PAGE_SIZE) as u64;
             let offset_in_page = (pos as usize) % PAGE_SIZE;
             let pinned = PageCacheManager::global()
                 .pin_or_load(cache_id, page_index, |paddr| {
                     unsafe {
-                        core::ptr::write_bytes(paddr as *mut u8, 0, PAGE_SIZE);
+                        core::ptr::write_bytes(phys_to_virt(paddr) as *mut u8, 0, PAGE_SIZE);
                     }
                     Ok(())
                 })
@@ -957,7 +1218,7 @@ impl TmpFileObject {
                 })?;
 
             unsafe {
-                let src = (pinned.paddr() as *const u8).add(offset_in_page);
+                let src = (phys_to_virt(pinned.paddr()) as *const u8).add(offset_in_page);
                 let remaining_in_page = PAGE_SIZE - offset_in_page;
                 let remaining_file = (file_size - pos) as usize;
                 let remaining_buf = buffer.len() - total_read;
@@ -972,6 +1233,9 @@ impl TmpFileObject {
         }
 
         *self.position.write() = pos;
+        if total_read != 0 {
+            self.node.record_accessed();
+        }
         Ok(total_read)
     }
 
@@ -1046,7 +1310,16 @@ impl TmpFileObject {
     }
 
     fn write_regular_file(&self, buffer: &[u8]) -> Result<usize, FileSystemError> {
+        if buffer.is_empty() {
+            return Ok(0);
+        }
+
         let mut pos = *self.position.read() as usize;
+        let old_size = self.node.metadata.read().size;
+        let requested_end = pos.checked_add(buffer.len()).ok_or_else(|| {
+            FileSystemError::new(FileSystemErrorKind::InvalidOperation, "write overflow")
+        })?;
+        let reserved_growth = self.reserve_growth(old_size, requested_end)?;
         let mut written = 0usize;
         let cache_id = self.cache_id();
 
@@ -1056,19 +1329,25 @@ impl TmpFileObject {
             let remain_in_page = PAGE_SIZE - page_off;
             let chunk = core::cmp::min(buffer.len() - written, remain_in_page);
 
-            let pinned = PageCacheManager::global()
-                .pin_or_load(cache_id, page_index, |paddr| {
+            let pinned =
+                match PageCacheManager::global().pin_or_load(cache_id, page_index, |paddr| {
                     unsafe {
-                        core::ptr::write_bytes(paddr as *mut u8, 0, PAGE_SIZE);
+                        core::ptr::write_bytes(phys_to_virt(paddr) as *mut u8, 0, PAGE_SIZE);
                     }
                     Ok(())
-                })
-                .map_err(|_| {
-                    FileSystemError::new(FileSystemErrorKind::IoError, "tmpfs page load error")
-                })?;
+                }) {
+                    Ok(pinned) => pinned,
+                    Err(_) => {
+                        self.release_memory_usage(reserved_growth);
+                        return Err(FileSystemError::new(
+                            FileSystemErrorKind::IoError,
+                            "tmpfs page load error",
+                        ));
+                    }
+                };
 
             unsafe {
-                let dst = (pinned.paddr() as *mut u8).add(page_off);
+                let dst = (phys_to_virt(pinned.paddr()) as *mut u8).add(page_off);
                 let src = buffer.as_ptr().add(written);
                 core::ptr::copy_nonoverlapping(src, dst, chunk);
             }
@@ -1084,8 +1363,10 @@ impl TmpFileObject {
             if pos > meta.size {
                 meta.size = pos;
             }
+            PageCacheManager::global().record_object_size(cache_id, meta.size);
         }
 
+        self.node.record_modified();
         Ok(written)
     }
 
@@ -1235,12 +1516,15 @@ impl MemoryMappingOps for TmpFileObject {
         &self,
         offset: usize,
         length: usize,
-    ) -> Result<(usize, usize, bool), &'static str> {
+    ) -> Result<crate::object::capability::MemoryMappingInfo, &'static str> {
         if offset % PAGE_SIZE != 0 {
             return Err("Offset not page aligned");
         }
 
-        let file_size = self.node.metadata.read().size;
+        let cache_id = self.cache_id();
+        let file_size = PageCacheManager::global()
+            .cached_object_size(cache_id)
+            .unwrap_or_else(|| self.node.metadata.read().size);
         if file_size == 0 || offset >= file_size {
             return Err("Offset beyond file size");
         }
@@ -1257,7 +1541,9 @@ impl MemoryMappingOps for TmpFileObject {
             return Err("Backing address not aligned");
         }
 
-        Ok((paddr, 0x3, false))
+        Ok(crate::object::capability::MemoryMappingInfo::new(
+            paddr, 0x3, false,
+        ))
     }
 
     fn get_mapping_info_with(
@@ -1265,7 +1551,7 @@ impl MemoryMappingOps for TmpFileObject {
         offset: usize,
         length: usize,
         is_shared: bool,
-    ) -> Result<(usize, usize, bool), &'static str> {
+    ) -> Result<crate::object::capability::MemoryMappingInfo, &'static str> {
         if is_shared {
             if offset % PAGE_SIZE != 0 {
                 return Err("Offset not page aligned");
@@ -1277,7 +1563,9 @@ impl MemoryMappingOps for TmpFileObject {
             }
 
             let _ = length;
-            return Ok((0, 0x3, true));
+            return Ok(crate::object::capability::MemoryMappingInfo::new(
+                0, 0x3, true,
+            ));
         }
 
         self.get_mapping_info(offset, length)
@@ -1307,7 +1595,8 @@ impl MemoryMappingOps for TmpFileObject {
     fn resolve_fault(
         &self,
         access: &crate::object::capability::memory_mapping::AccessKind,
-        map: &crate::vm::vmem::VirtualMemoryMap,
+        _page_idx: usize,
+        vm_start: usize,
     ) -> core::result::Result<
         crate::object::capability::memory_mapping::ResolveFaultResult,
         crate::object::capability::memory_mapping::ResolveFaultError,
@@ -1315,7 +1604,7 @@ impl MemoryMappingOps for TmpFileObject {
         let range = self
             .mmap_ranges
             .read()
-            .get(&map.vmarea.start)
+            .get(&vm_start)
             .copied()
             .ok_or(crate::object::capability::memory_mapping::ResolveFaultError::Invalid)?;
         if access.vaddr < range.vaddr_start || access.vaddr > range.vaddr_end {
@@ -1326,19 +1615,34 @@ impl MemoryMappingOps for TmpFileObject {
         let file_offset = range
             .offset
             .saturating_add(access.vaddr.saturating_sub(range.vaddr_start));
-        if file_size == 0 || file_offset >= file_size {
-            return Err(crate::object::capability::memory_mapping::ResolveFaultError::Invalid);
-        }
 
         let page_index = (file_offset / PAGE_SIZE) as u64;
+
         let pinned = PageCacheManager::global()
             .pin_or_load(self.cache_id(), page_index, |paddr| {
+                // SAFETY: paddr is a freshly-allocated page from the page cache.
                 unsafe {
-                    core::ptr::write_bytes(paddr as *mut u8, 0, PAGE_SIZE);
+                    core::ptr::write_bytes(phys_to_virt(paddr) as *mut u8, 0, PAGE_SIZE);
                 }
                 Ok(())
             })
             .map_err(|_| crate::object::capability::memory_mapping::ResolveFaultError::Invalid)?;
+
+        if file_offset < file_size {
+            let page_start = (file_offset / PAGE_SIZE) * PAGE_SIZE;
+            let page_end = page_start + PAGE_SIZE;
+            if page_end > file_size {
+                let zero_start = file_size - page_start;
+                // SAFETY: paddr is a valid page-cache page; zero_start < PAGE_SIZE.
+                unsafe {
+                    core::ptr::write_bytes(
+                        (phys_to_virt(pinned.paddr()) as *mut u8).add(zero_start),
+                        0,
+                        PAGE_SIZE - zero_start,
+                    );
+                }
+            }
+        }
 
         if matches!(
             access.op,
@@ -1363,13 +1667,15 @@ impl FileObject for TmpFileObject {
         }
 
         let offset = usize::try_from(offset).map_err(|_| StreamError::InvalidArgument)?;
-        let file_size = self.node.metadata.read().size;
+        let cache_id = self.cache_id();
+        let file_size = PageCacheManager::global()
+            .cached_object_size(cache_id)
+            .unwrap_or_else(|| self.node.metadata.read().size);
         if offset >= file_size {
             return Ok(0);
         }
 
         let mut total_read = 0usize;
-        let cache_id = self.cache_id();
         while total_read < buffer.len() && offset + total_read < file_size {
             let absolute = offset + total_read;
             let page_index = (absolute / PAGE_SIZE) as u64;
@@ -1378,14 +1684,14 @@ impl FileObject for TmpFileObject {
             let pinned = PageCacheManager::global()
                 .pin_or_load(cache_id, page_index, |paddr| {
                     unsafe {
-                        core::ptr::write_bytes(paddr as *mut u8, 0, PAGE_SIZE);
+                        core::ptr::write_bytes(phys_to_virt(paddr) as *mut u8, 0, PAGE_SIZE);
                     }
                     Ok(())
                 })
                 .map_err(|_| StreamError::IoError)?;
 
             unsafe {
-                let src = (pinned.paddr() as *const u8).add(offset_in_page);
+                let src = (phys_to_virt(pinned.paddr()) as *const u8).add(offset_in_page);
                 let remaining_in_page = PAGE_SIZE - offset_in_page;
                 let remaining_file = file_size - (offset + total_read);
                 let remaining_buf = buffer.len() - total_read;
@@ -1398,6 +1704,9 @@ impl FileObject for TmpFileObject {
             }
         }
 
+        if total_read != 0 {
+            self.node.record_accessed();
+        }
         Ok(total_read)
     }
 
@@ -1407,6 +1716,16 @@ impl FileObject for TmpFileObject {
         }
 
         let offset = usize::try_from(offset).map_err(|_| StreamError::InvalidArgument)?;
+        if buffer.is_empty() {
+            return Ok(0);
+        }
+        let old_size = self.node.metadata.read().size;
+        let requested_end = offset
+            .checked_add(buffer.len())
+            .ok_or(StreamError::InvalidArgument)?;
+        let reserved_growth = self
+            .reserve_growth(old_size, requested_end)
+            .map_err(StreamError::from)?;
         let mut written = 0usize;
         let cache_id = self.cache_id();
 
@@ -1417,17 +1736,22 @@ impl FileObject for TmpFileObject {
             let remain_in_page = PAGE_SIZE - page_off;
             let chunk = core::cmp::min(buffer.len() - written, remain_in_page);
 
-            let pinned = PageCacheManager::global()
-                .pin_or_load(cache_id, page_index, |paddr| {
+            let pinned =
+                match PageCacheManager::global().pin_or_load(cache_id, page_index, |paddr| {
                     unsafe {
-                        core::ptr::write_bytes(paddr as *mut u8, 0, PAGE_SIZE);
+                        core::ptr::write_bytes(phys_to_virt(paddr) as *mut u8, 0, PAGE_SIZE);
                     }
                     Ok(())
-                })
-                .map_err(|_| StreamError::IoError)?;
+                }) {
+                    Ok(pinned) => pinned,
+                    Err(_) => {
+                        self.release_memory_usage(reserved_growth);
+                        return Err(StreamError::IoError);
+                    }
+                };
 
             unsafe {
-                let dst = (pinned.paddr() as *mut u8).add(page_off);
+                let dst = (phys_to_virt(pinned.paddr()) as *mut u8).add(page_off);
                 let src = buffer.as_ptr().add(written);
                 core::ptr::copy_nonoverlapping(src, dst, chunk);
             }
@@ -1441,8 +1765,10 @@ impl FileObject for TmpFileObject {
             if new_end > meta.size {
                 meta.size = new_end;
             }
+            PageCacheManager::global().record_object_size(cache_id, meta.size);
         }
 
+        self.node.record_modified();
         Ok(written)
     }
 
@@ -1484,7 +1810,11 @@ impl FileObject for TmpFileObject {
     }
 
     fn metadata(&self) -> Result<FileMetadata, StreamError> {
-        self.node.metadata().map_err(StreamError::from)
+        let mut metadata = self.node.metadata().map_err(StreamError::from)?;
+        if let Some(size) = PageCacheManager::global().cached_object_size(self.cache_id()) {
+            metadata.size = size;
+        }
+        Ok(metadata)
     }
 
     fn truncate(&self, size: u64) -> Result<(), StreamError> {
@@ -1500,6 +1830,10 @@ impl FileObject for TmpFileObject {
         if new_size == old_size {
             return Ok(());
         }
+        if new_size > old_size {
+            self.reserve_growth(old_size, new_size)
+                .map_err(StreamError::from)?;
+        }
 
         let cache_id = self.cache_id();
         if new_size == 0 {
@@ -1512,14 +1846,14 @@ impl FileObject for TmpFileObject {
                 let pinned = PageCacheManager::global()
                     .pin_or_load(cache_id, page_index as u64, |paddr| {
                         unsafe {
-                            core::ptr::write_bytes(paddr as *mut u8, 0, PAGE_SIZE);
+                            core::ptr::write_bytes(phys_to_virt(paddr) as *mut u8, 0, PAGE_SIZE);
                         }
                         Ok(())
                     })
                     .map_err(|_| StreamError::IoError)?;
 
                 unsafe {
-                    let base = pinned.paddr() as *mut u8;
+                    let base = phys_to_virt(pinned.paddr()) as *mut u8;
                     if page_index == start_page && tail_offset != 0 {
                         core::ptr::write_bytes(base.add(tail_offset), 0, PAGE_SIZE - tail_offset);
                     } else {
@@ -1533,7 +1867,13 @@ impl FileObject for TmpFileObject {
         {
             let mut meta = self.node.metadata.write();
             meta.size = new_size;
+            PageCacheManager::global().record_object_size(cache_id, meta.size);
         }
+        if new_size < old_size {
+            self.subtract_memory_usage(old_size - new_size)
+                .map_err(StreamError::from)?;
+        }
+        self.node.record_modified();
         Ok(())
     }
 
@@ -1562,6 +1902,7 @@ impl crate::object::capability::selectable::Selectable for TmpFileObject {
         _interest: crate::object::capability::selectable::ReadyInterest,
         _trapframe: &mut crate::arch::Trapframe,
         _timeout_ticks: Option<u64>,
+        _min_wait_ticks: u64,
     ) -> crate::object::capability::selectable::SelectWaitOutcome {
         crate::object::capability::selectable::SelectWaitOutcome::Ready
     }

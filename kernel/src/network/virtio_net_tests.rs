@@ -66,9 +66,13 @@ const TEST_TIMEOUT_MS: u64 = 5000;
 /// them with the network interface manager.
 fn init_test_interfaces()
 -> Result<(Arc<dyn NetworkInterface>, Arc<dyn NetworkInterface>), &'static str> {
-    // Create VirtIO network interfaces at known MMIO addresses
-    let net0_device = Arc::new(VirtioNetDevice::new(NET0_MMIO_ADDR));
-    let net1_device = Arc::new(VirtioNetDevice::new(NET1_MMIO_ADDR));
+    // Create VirtIO network interfaces at known MMIO addresses (ioremap physical to virtual)
+    let net0_vaddr = crate::vm::ioremap(NET0_MMIO_ADDR, crate::environment::PAGE_SIZE)
+        .map_err(|_| "ioremap failed for net0")?;
+    let net1_vaddr = crate::vm::ioremap(NET1_MMIO_ADDR, crate::environment::PAGE_SIZE)
+        .map_err(|_| "ioremap failed for net1")?;
+    let net0_device = Arc::new(VirtioNetDevice::new(net0_vaddr));
+    let net1_device = Arc::new(VirtioNetDevice::new(net1_vaddr));
     let net0_interface = Arc::new(EthernetNetworkInterface::new("eth0", net0_device));
     let net1_interface = Arc::new(EthernetNetworkInterface::new("eth1", net1_device));
 

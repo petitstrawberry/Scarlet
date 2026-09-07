@@ -1,0 +1,1078 @@
+use std::cmp::Ordering;
+use std::env;
+use std::fmt;
+use std::process::ExitCode;
+use std::thread;
+use std::time::{Duration, Instant};
+
+use scarlet_sys::{
+    CPU_DEBUG_FLAG_CURRENT_TASK_VALID, CPU_DEBUG_FLAG_IDLE, CPU_DEBUG_FLAG_PENDING_RESCHEDULE,
+    CPU_DEBUG_FLAG_TIMER_ARMED, CPU_DEBUG_INFO_VERSION_V1, RawCpuDebugInfoV1, RawTaskDebugInfoV1,
+    Syscall, TASK_DEBUG_FLAG_DEADLINE, TASK_DEBUG_FLAG_DEADLINE_THROTTLED,
+    TASK_DEBUG_FLAG_DEADLINE_UNAVAILABLE, TASK_DEBUG_FLAG_PC_PRIVILEGED, TASK_DEBUG_FLAG_PC_VALID,
+    TASK_DEBUG_FLAG_SOFTWARE_TIMER_ARMED, TASK_DEBUG_FLAG_SYSCALL_ACTIVE,
+    TASK_DEBUG_FLAG_SYSCALL_VALID, TASK_DEBUG_INFO_VERSION_V1, syscall0, syscall1, syscall2,
+    syscall3, syscall4,
+};
+
+const SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
+const TASK_NAME_CAP: usize = 64;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TaskState {
+    NotInitialized,
+    Ready,
+    Running,
+    BlockedInterruptible,
+    BlockedUninterruptible,
+    Zombie,
+    Terminated,
+}
+
+impl TaskState {
+    fn from_u8(value: u8) -> Self {
+        match value {
+            1 => Self::Ready,
+            2 => Self::Running,
+            3 => Self::BlockedInterruptible,
+            4 => Self::BlockedUninterruptible,
+            5 => Self::Zombie,
+            6 => Self::Terminated,
+            _ => Self::NotInitialized,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TaskType {
+    Kernel,
+    User,
+}
+
+impl TaskType {
+    fn from_u8(value: u8) -> Self {
+        match value {
+            1 => Self::User,
+            _ => Self::Kernel,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+struct RawTaskInfo {
+    pid: usize,
+    ppid: usize,
+    state: u8,
+    task_type: u8,
+    cpu_id: u8,
+    _reserved: u8,
+    exit_status: i32,
+    tgid: usize,
+    name: [u8; 64],
+    cpu_time_ns: u64,
+    sched_util_avg: u32,
+    sched_util_min: u32,
+    sched_required_capacity: u32,
+    core_preference: u8,
+    _reserved2: [u8; 3],
+    sched_migration_count: u64,
+    sched_nice: i32,
+    sched_weight: u32,
+    sched_vruntime: u64,
+    sched_deadline: u64,
+}
+
+#[derive(Debug, Clone)]
+struct TaskInfo {
+    pid: usize,
+    state: TaskState,
+    task_type: TaskType,
+    cpu: u8,
+    tgid: usize,
+    name: TaskName,
+    cpu_time_ns: u64,
+    sched_util_avg: u32,
+    sched_util_min: u32,
+    sched_required_capacity: u32,
+    core_preference: u8,
+    sched_migration_count: u64,
+    sched_nice: i32,
+    sched_weight: u32,
+    sched_vruntime: u64,
+    sched_deadline: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TaskName {
+    bytes: [u8; TASK_NAME_CAP],
+    len: usize,
+}
+
+impl TaskName {
+    fn from_raw(raw: &[u8; TASK_NAME_CAP]) -> Self {
+        let len = raw.iter().position(|&byte| byte == 0).unwrap_or(raw.len());
+        let mut bytes = [0; TASK_NAME_CAP];
+        bytes[..len].copy_from_slice(&raw[..len]);
+        Self { bytes, len }
+    }
+
+    fn as_str(&self) -> &str {
+        std::str::from_utf8(&self.bytes[..self.len]).unwrap_or("<invalid>")
+    }
+
+    fn len(&self) -> usize {
+        self.as_str().len()
+    }
+
+    fn starts_with(&self, prefix: &str) -> bool {
+        self.as_str().starts_with(prefix)
+    }
+}
+
+impl Ord for TaskName {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.as_str().cmp(other.as_str())
+    }
+}
+
+impl PartialOrd for TaskName {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl fmt::Display for TaskName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl RawTaskInfo {
+    fn decode(&self) -> TaskInfo {
+        TaskInfo {
+            pid: self.pid,
+            state: TaskState::from_u8(self.state),
+            task_type: TaskType::from_u8(self.task_type),
+            cpu: self.cpu_id,
+            tgid: self.tgid,
+            name: TaskName::from_raw(&self.name),
+            cpu_time_ns: self.cpu_time_ns,
+            sched_util_avg: self.sched_util_avg,
+            sched_util_min: self.sched_util_min,
+            sched_required_capacity: self.sched_required_capacity,
+            core_preference: self.core_preference,
+            sched_migration_count: self.sched_migration_count,
+            sched_nice: self.sched_nice,
+            sched_weight: self.sched_weight,
+            sched_vruntime: self.sched_vruntime,
+            sched_deadline: self.sched_deadline,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+struct RawCpuUsageInfo {
+    online_cpus: usize,
+    busy_time_ns: u64,
+    idle_time_ns: u64,
+    total_time_ns: u64,
+    usage_per_mille: u32,
+    _reserved: u32,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CpuUsageInfo {
+    online_cpus: usize,
+    busy_time_ns: u64,
+    idle_time_ns: u64,
+}
+
+#[derive(Clone, Copy)]
+enum SortKey {
+    Pid,
+    PercentCpu,
+    Cpu,
+    Name,
+    State,
+    Type,
+}
+
+#[derive(Clone)]
+struct TaskSample {
+    task: TaskInfo,
+    cpu_per_mille: u64,
+}
+
+fn main() -> ExitCode {
+    let args: Vec<String> = env::args().collect();
+    if args.iter().any(|arg| arg == "--check-instant") {
+        check_instant();
+        return ExitCode::SUCCESS;
+    }
+    if let Some(index) = args.iter().position(|arg| arg == "--debug-cpu") {
+        let Some(value) = args.get(index + 1) else {
+            println!("top: --debug-cpu requires a logical CPU ID");
+            return ExitCode::from(2);
+        };
+        let Ok(cpu_id) = value.parse::<usize>() else {
+            println!("top: invalid logical CPU ID: {value}");
+            return ExitCode::from(2);
+        };
+        return print_cpu_debug(cpu_id);
+    }
+    if let Some(index) = args
+        .iter()
+        .position(|arg| matches!(arg.as_str(), "--debug" | "--debug-pid"))
+    {
+        let Some(value) = args.get(index + 1) else {
+            println!("top: --debug-pid requires a PID or TID");
+            return ExitCode::from(2);
+        };
+        let Ok(pid) = value.parse::<usize>() else {
+            println!("top: invalid PID or TID: {value}");
+            return ExitCode::from(2);
+        };
+        return print_task_debug(pid);
+    }
+
+    let mut sort_key = SortKey::PercentCpu;
+    let show_idle = args.iter().any(|arg| arg == "--idle");
+
+    for (index, arg) in args.iter().enumerate() {
+        match arg.as_str() {
+            "-p" => sort_key = SortKey::Pid,
+            "-n" => sort_key = SortKey::Name,
+            "-c" => sort_key = SortKey::Cpu,
+            "-s" => sort_key = SortKey::State,
+            "-m" => sort_key = SortKey::Pid,
+            "--sort" => {
+                if let Some(value) = args.get(index + 1) {
+                    sort_key = parse_sort_key(value);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let before_tasks = task_info();
+    let before_cpu = cpu_usage();
+    let sample_started_at = Instant::now();
+    thread::sleep(SAMPLE_INTERVAL);
+    let elapsed = sample_started_at.elapsed();
+    let mut tasks = task_info();
+    let after_cpu = cpu_usage();
+
+    if !show_idle {
+        tasks.retain(|task| !is_idle_task(task));
+    }
+
+    if tasks.is_empty() {
+        println!("No tasks found.");
+        return ExitCode::SUCCESS;
+    }
+
+    let total = tasks.len();
+    let running = tasks
+        .iter()
+        .filter(|task| task.state == TaskState::Running)
+        .count();
+    let sleeping = tasks
+        .iter()
+        .filter(|task| task.state == TaskState::BlockedInterruptible)
+        .count();
+    let stopped = tasks
+        .iter()
+        .filter(|task| task.state == TaskState::Terminated)
+        .count();
+    let zombies = tasks
+        .iter()
+        .filter(|task| task.state == TaskState::Zombie)
+        .count();
+    let user_tasks = tasks
+        .iter()
+        .filter(|task| task.task_type == TaskType::User)
+        .count();
+    let kernel_tasks = tasks
+        .iter()
+        .filter(|task| task.task_type == TaskType::Kernel)
+        .count();
+
+    let (busy_per_mille, idle_per_mille) = cpu_per_mille(before_cpu, after_cpu);
+    let elapsed_ns = elapsed.as_nanos().max(1);
+
+    println!(
+        "Tasks: {:>3} total, {:>3} running, {:>3} sleeping, {:>3} stopped, {:>3} zombie",
+        total, running, sleeping, stopped, zombies
+    );
+    println!("       {:>3} user,  {:>3} kernel", user_tasks, kernel_tasks);
+    println!(
+        "%Cpu(s): {:>5} busy, {:>5} idle",
+        Percent(busy_per_mille),
+        Percent(idle_per_mille),
+    );
+    println!();
+
+    let mut sorted: Vec<TaskSample> = tasks
+        .into_iter()
+        .map(|task| {
+            let previous = previous_cpu_time(&before_tasks, &task).unwrap_or(task.cpu_time_ns);
+            let delta = task.cpu_time_ns.saturating_sub(previous);
+            let cpu_per_mille = ((delta as u128 * 1000) / elapsed_ns) as u64;
+            TaskSample {
+                task,
+                cpu_per_mille,
+            }
+        })
+        .collect();
+    apply_sort(&mut sorted, sort_key);
+    print_table(&sorted);
+
+    ExitCode::SUCCESS
+}
+
+fn print_task_debug(pid: usize) -> ExitCode {
+    let entry_size = core::mem::size_of::<RawTaskDebugInfoV1>();
+    // SAFETY: The versioned entry size matches the ABI; a zero count queries capacity, otherwise entries provides exclusive output storage.
+    let required = unsafe { syscall4(Syscall::GetTaskDebugInfo, pid, 0, 0, entry_size) };
+    if required == usize::MAX {
+        println!(
+            "top: task debug information is unavailable (missing PID or kernel sync-debug feature)"
+        );
+        return ExitCode::from(1);
+    }
+    if required == 0 {
+        println!("top: no threads found for PID or TID {pid}");
+        return ExitCode::from(1);
+    }
+
+    let mut entries = vec![RawTaskDebugInfoV1::default(); required];
+    // SAFETY: The versioned entry size matches the ABI; a zero count queries capacity, otherwise entries provides exclusive output storage.
+    let written = unsafe {
+        syscall4(
+            Syscall::GetTaskDebugInfo,
+            pid,
+            entries.as_mut_ptr() as usize,
+            entries.len(),
+            entry_size,
+        )
+    };
+    if written == usize::MAX {
+        println!("top: failed to read task debug information for {pid}");
+        return ExitCode::from(1);
+    }
+    entries.truncate(written.min(entries.len()));
+    entries.sort_by_key(|entry| entry.pid);
+    if entries.iter().any(|entry| {
+        entry.size as usize != entry_size || entry.version != TASK_DEBUG_INFO_VERSION_V1
+    }) {
+        println!("top: kernel returned an incompatible task debug ABI");
+        return ExitCode::from(1);
+    }
+
+    let tasks = task_info();
+    println!("Task debug snapshot for PID/TID {pid}:");
+    println!(
+        "{:>5} {:>5} {:>4} {:>5} {:>6} {:>6} {:>5} {:>18} {:>8} {:>6} {:>18} {:>12} COMMAND",
+        "PID",
+        "TGID",
+        "STAT",
+        "CPU",
+        "SCHED",
+        "TIMER",
+        "MODE",
+        "LAST_PC",
+        "SYSCALL",
+        "ACTIVE",
+        "SYSCALL_PC",
+        "TIME_NS"
+    );
+    for entry in &entries {
+        let state = TaskState::from_u8(entry.state);
+        let pc_valid = entry.flags & TASK_DEBUG_FLAG_PC_VALID != 0;
+        let syscall_valid = entry.flags & TASK_DEBUG_FLAG_SYSCALL_VALID != 0;
+        let mode = if !pc_valid {
+            "-"
+        } else if entry.flags & TASK_DEBUG_FLAG_PC_PRIVILEGED != 0 {
+            "kernel"
+        } else {
+            "user"
+        };
+        let pc = if pc_valid {
+            format!("{:#x}", entry.observed_pc)
+        } else {
+            String::from("-")
+        };
+        let syscall = if syscall_valid {
+            format_syscall(entry.syscall_number)
+        } else {
+            String::from("-")
+        };
+        let active = if !syscall_valid {
+            "-"
+        } else if entry.flags & TASK_DEBUG_FLAG_SYSCALL_ACTIVE != 0 {
+            "yes"
+        } else {
+            "no"
+        };
+        let syscall_pc = if syscall_valid {
+            format!("{:#x}", entry.syscall_pc)
+        } else {
+            String::from("-")
+        };
+        let cpu = if entry.cpu_id == u32::MAX {
+            String::from("-")
+        } else {
+            format!("CPU{}", entry.cpu_id)
+        };
+        let scheduler = if entry.flags & TASK_DEBUG_FLAG_DEADLINE_UNAVAILABLE != 0 {
+            "?"
+        } else if entry.flags & TASK_DEBUG_FLAG_DEADLINE == 0 {
+            "fair"
+        } else if entry.flags & TASK_DEBUG_FLAG_DEADLINE_THROTTLED != 0 {
+            "dl/thr"
+        } else {
+            "dl"
+        };
+        let timer = if entry.flags & TASK_DEBUG_FLAG_SOFTWARE_TIMER_ARMED != 0 {
+            "yes"
+        } else {
+            "no"
+        };
+        let command = tasks
+            .iter()
+            .find(|task| task.pid == entry.pid)
+            .map(|task| task.name.as_str())
+            .unwrap_or("<exited>");
+        println!(
+            "{:>5} {:>5} {:>4} {:>5} {:>6} {:>6} {:>5} {:>18} {:>8} {:>6} {:>18} {:>12} {}",
+            entry.pid,
+            entry.tgid,
+            format_stat(state),
+            cpu,
+            scheduler,
+            timer,
+            mode,
+            pc,
+            syscall,
+            active,
+            syscall_pc,
+            entry.cpu_time_ns,
+            command,
+        );
+    }
+
+    let mut cpu_ids = Vec::new();
+    for entry in &entries {
+        if entry.cpu_id != u32::MAX && !cpu_ids.contains(&entry.cpu_id) {
+            cpu_ids.push(entry.cpu_id);
+        }
+    }
+    cpu_ids.sort_unstable();
+    for cpu_id in cpu_ids {
+        println!();
+        let _ = print_cpu_debug_snapshot(cpu_id as usize);
+    }
+    ExitCode::SUCCESS
+}
+
+fn print_cpu_debug(cpu_id: usize) -> ExitCode {
+    if print_cpu_debug_snapshot(cpu_id) {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
+    }
+}
+
+fn print_cpu_debug_snapshot(cpu_id: usize) -> bool {
+    let entry_size = core::mem::size_of::<RawCpuDebugInfoV1>();
+    let mut entry = RawCpuDebugInfoV1::default();
+    // SAFETY: entry is exclusive output storage with the supplied versioned CPU-debug ABI size.
+    let result = unsafe {
+        syscall3(
+            Syscall::GetCpuDebugInfo,
+            cpu_id,
+            &mut entry as *mut RawCpuDebugInfoV1 as usize,
+            entry_size,
+        )
+    };
+    if result == usize::MAX {
+        println!(
+            "top: CPU{cpu_id} debug information is unavailable (invalid CPU or missing kernel sync-debug feature)"
+        );
+        return false;
+    }
+    if entry.size as usize != entry_size || entry.version != CPU_DEBUG_INFO_VERSION_V1 {
+        println!("top: kernel returned an incompatible CPU debug ABI");
+        return false;
+    }
+
+    let current = if entry.flags & CPU_DEBUG_FLAG_CURRENT_TASK_VALID != 0 {
+        entry.current_task_id.to_string()
+    } else {
+        String::from("-")
+    };
+    let idle = if entry.flags & CPU_DEBUG_FLAG_IDLE != 0 {
+        "yes"
+    } else {
+        "no"
+    };
+    let reschedule = if entry.flags & CPU_DEBUG_FLAG_PENDING_RESCHEDULE != 0 {
+        "yes"
+    } else {
+        "no"
+    };
+    let timer_deadline = if entry.flags & CPU_DEBUG_FLAG_TIMER_ARMED != 0 {
+        entry.timer_deadline_ns.to_string()
+    } else {
+        String::from("stopped")
+    };
+    let now_ns = monotonic_time_ns();
+    println!("CPU debug snapshot for CPU{}:", entry.cpu_id);
+    println!(
+        "  timer_irq={} timer_deadline={} now={} current={} idle={} resched={}",
+        entry.timer_irq_count, timer_deadline, now_ns, current, idle, reschedule
+    );
+    println!(
+        "  breadcrumb={:#x} ({}) seq={} aux={:#x} aux2={:#x}",
+        entry.breadcrumb_phase,
+        breadcrumb_name(entry.breadcrumb_phase),
+        entry.reserved,
+        entry.breadcrumb_aux,
+        entry.breadcrumb_aux2,
+    );
+    true
+}
+
+fn breadcrumb_name(phase: u64) -> &'static str {
+    match phase {
+        0x0000 => "none",
+        0x5355 => "switch-to-user",
+        0x5552 => "user-return-ready",
+        0x5554 => "user-trap-enter",
+        0x5556 => "user-trap-vector-ready",
+        0x5544 => "user-irq-dispatch",
+        0x4952 => "irq-route-ready",
+        0x4957 => "irq-controller-wait",
+        0x4943 => "irq-controller-ready",
+        0x494e => "irq-claim-done",
+        0x4845 => "irq-handle-enter",
+        0x4844 => "irq-handle-done",
+        0x4853 => "irq-source-lookup",
+        0x4843 => "irq-source-call",
+        0x4852 => "irq-source-done",
+        0x484f => "irq-eoi-enter",
+        0x4858 => "irq-eoi-done",
+        0x494f => "irq-dispatch-done",
+        0x5849 => "xhci-irq-status",
+        0x584a => "xhci-irq-ack-done",
+        0x584e => "xhci-irq-drain",
+        0x584b => "xhci-irq-drain-done",
+        0x5850 => "xhci-irq-port",
+        0x5851 => "xhci-irq-done",
+        0x5857 => "xhci-port-work",
+        0x5859 => "xhci-port-work-done",
+        0x5343 => "schedule-enter",
+        0x504e => "pick-next-enter",
+        0x5047 => "pick-guard-done",
+        0x5052 => "pick-release-done",
+        0x504f => "pick-old-done",
+        0x5051 => "pick-queue-done",
+        0x5053 => "pick-steal-begin",
+        0x5044 => "pick-steal-done",
+        0x4b45 => "kernel-context-enter",
+        0x4b53 => "kernel-context-switch-to",
+        0x4b52 => "kernel-context-resume",
+        0x5454 => "timer-tick",
+        0x5453 => "timer-software-timers",
+        0x5450 => "timer-program",
+        0x5452 => "timer-program-done",
+        0x5443 => "timer-callback-enter",
+        0x544f => "timer-callback-done",
+        0x5750 => "waker-prepare",
+        0x5757 => "waker-wake",
+        0x5754 => "waker-timeout",
+        0x534c => "sleep-arm",
+        0x5352 => "sleep-resume",
+        0x5359 => "syscall-enter",
+        0x5354 => "syscall-task-done",
+        0x534f => "syscall-abi-done",
+        0x5358 => "syscall-exit",
+        0x4951 => "kernel-irq-enter",
+        0x4651 => "kernel-fiq-enter",
+        0x4653 => "fast-claim-done",
+        0x4259 => "publication-in-progress",
+        _ => "unknown",
+    }
+}
+
+fn format_syscall(number: u64) -> String {
+    let name = match number {
+        5 => "waitpid",
+        6 => "kill",
+        20 => "sleep",
+        21 => "yield",
+        49 => "futex_wait",
+        50 => "futex_wake",
+        100 => "handle_query",
+        102 => "handle_close",
+        110 => "handle_control",
+        200 => "read",
+        201 => "write",
+        202 => "poll",
+        400 => "open",
+        620 => "shm_create",
+        630 => "send_handle",
+        700 => "mmap",
+        701 => "munmap",
+        900 => "socket",
+        903 => "connect",
+        904 => "accept",
+        997 => "cpu_debug",
+        998 => "task_debug",
+        _ => return number.to_string(),
+    };
+    format!("{number}:{name}")
+}
+
+fn check_instant() {
+    let mono_start = monotonic_time_ns();
+    let instant_start = Instant::now();
+    thread::sleep(SAMPLE_INTERVAL);
+    let instant_elapsed = instant_start.elapsed();
+    let mono_elapsed = monotonic_time_ns().saturating_sub(mono_start);
+
+    println!(
+        "Instant elapsed: {} ns ({} ms)",
+        instant_elapsed.as_nanos(),
+        instant_elapsed.as_millis()
+    );
+    println!(
+        "Monotonic elapsed: {} ns ({} ms)",
+        mono_elapsed,
+        mono_elapsed / 1_000_000
+    );
+}
+
+fn monotonic_time_ns() -> u64 {
+    // SAFETY: This fixed clock query has no arguments or userspace memory effects.
+    (unsafe { syscall0(Syscall::MonotonicTime) }) as u64
+}
+
+fn task_info() -> Vec<TaskInfo> {
+    // SAFETY: This fixed query has no arguments or userspace memory effects.
+    let total = unsafe { syscall0(Syscall::GetTaskInfoCount) };
+    let mut raw = vec![
+        RawTaskInfo {
+            pid: 0,
+            ppid: 0,
+            state: 0,
+            task_type: 0,
+            cpu_id: 0,
+            _reserved: 0,
+            exit_status: 0,
+            tgid: 0,
+            name: [0; 64],
+            cpu_time_ns: 0,
+            sched_util_avg: 0,
+            sched_util_min: 0,
+            sched_required_capacity: 0,
+            core_preference: 0,
+            _reserved2: [0; 3],
+            sched_migration_count: 0,
+            sched_nice: 0,
+            sched_weight: 0,
+            sched_vruntime: 0,
+            sched_deadline: 0,
+        };
+        total
+    ];
+    // SAFETY: raw is exclusive output storage for the advertised count of fixed-layout task records.
+    let written = unsafe {
+        syscall2(
+            Syscall::GetTaskInfoList,
+            raw.as_mut_ptr() as usize,
+            raw.len(),
+        )
+    };
+    if written == usize::MAX {
+        return Vec::new();
+    }
+    raw.truncate(written.min(raw.len()));
+    raw.iter().map(RawTaskInfo::decode).collect()
+}
+
+fn cpu_usage() -> Option<CpuUsageInfo> {
+    let mut raw = RawCpuUsageInfo {
+        online_cpus: 0,
+        busy_time_ns: 0,
+        idle_time_ns: 0,
+        total_time_ns: 0,
+        usage_per_mille: 0,
+        _reserved: 0,
+    };
+    // SAFETY: raw is an exclusive output record with the kernel's fixed CPU-usage layout.
+    let result = unsafe {
+        syscall1(
+            Syscall::GetCpuUsageInfo,
+            &mut raw as *mut RawCpuUsageInfo as usize,
+        )
+    };
+    if result == usize::MAX {
+        None
+    } else {
+        Some(CpuUsageInfo {
+            online_cpus: raw.online_cpus,
+            busy_time_ns: raw.busy_time_ns,
+            idle_time_ns: raw.idle_time_ns,
+        })
+    }
+}
+
+fn cpu_per_mille(before: Option<CpuUsageInfo>, after: Option<CpuUsageInfo>) -> (u64, u64) {
+    let (Some(before), Some(after)) = (before, after) else {
+        return (0, 0);
+    };
+    let _online_cpus = after.online_cpus;
+    let busy_delta = after.busy_time_ns.saturating_sub(before.busy_time_ns);
+    let idle_delta = after.idle_time_ns.saturating_sub(before.idle_time_ns);
+    let total_delta = busy_delta.saturating_add(idle_delta);
+    if total_delta == 0 {
+        return (0, 0);
+    }
+
+    let busy = ((busy_delta as u128 * 1000) / total_delta as u128) as u64;
+    let idle = ((idle_delta as u128 * 1000) / total_delta as u128) as u64;
+    (busy, idle)
+}
+
+fn previous_cpu_time(tasks: &[TaskInfo], task: &TaskInfo) -> Option<u64> {
+    tasks
+        .iter()
+        .find(|previous| {
+            previous.pid == task.pid && previous.tgid == task.tgid && previous.name == task.name
+        })
+        .map(|previous| previous.cpu_time_ns)
+}
+
+fn print_table(samples: &[TaskSample]) {
+    let widths = TableWidths::from_samples(samples);
+
+    println!(
+        "{:>pid$} {:>tgid$} {:>user$} {:>priority$} {:>nice$} {:>weight$} {:>state$} {:>cpu$} {:>percent$} {:>util$} {:>util_min$} {:>required$} {:>preference$} {:>migrations$} {:>vruntime$} {:>deadline$} {:>time$} {:<command$}",
+        "PID",
+        "TGID",
+        "USER",
+        "PR",
+        "NI",
+        "WEIGHT",
+        "STAT",
+        "CPU",
+        "%CPU",
+        "UTIL",
+        "MIN",
+        "REQ",
+        "PREF",
+        "MIG",
+        "VRUNTIME",
+        "DEADLINE",
+        "TIME+",
+        "COMMAND",
+        pid = widths.pid,
+        tgid = widths.tgid,
+        user = widths.user,
+        priority = widths.priority,
+        nice = widths.nice,
+        weight = widths.weight,
+        state = widths.state,
+        cpu = widths.cpu,
+        percent = widths.percent,
+        util = widths.util,
+        util_min = widths.util_min,
+        required = widths.required,
+        preference = widths.preference,
+        migrations = widths.migrations,
+        vruntime = widths.vruntime,
+        deadline = widths.deadline,
+        time = widths.time,
+        command = widths.command,
+    );
+
+    for sample in samples {
+        let task = &sample.task;
+        let user = match task.task_type {
+            TaskType::Kernel => "K",
+            TaskType::User => "U",
+        };
+        println!(
+            "{:>pid$} {:>tgid$} {:>user$} {:>priority$} {:>nice$} {:>weight$} {:>state$} {:>cpu$} {:>percent$} {:>util$} {:>util_min$} {:>required$} {:>preference$} {:>migrations$} {:>vruntime$} {:>deadline$} {:>time$} {:<command$}",
+            task.pid,
+            task.tgid,
+            user,
+            "-",
+            task.sched_nice,
+            task.sched_weight,
+            format_stat(task.state),
+            CpuLabel(task.cpu),
+            Percent(sample.cpu_per_mille),
+            task.sched_util_avg,
+            task.sched_util_min,
+            task.sched_required_capacity,
+            format_core_preference(task.core_preference),
+            task.sched_migration_count,
+            task.sched_vruntime,
+            task.sched_deadline,
+            TimeNs(task.cpu_time_ns),
+            task.name,
+            pid = widths.pid,
+            tgid = widths.tgid,
+            user = widths.user,
+            priority = widths.priority,
+            nice = widths.nice,
+            weight = widths.weight,
+            state = widths.state,
+            cpu = widths.cpu,
+            percent = widths.percent,
+            util = widths.util,
+            util_min = widths.util_min,
+            required = widths.required,
+            preference = widths.preference,
+            migrations = widths.migrations,
+            vruntime = widths.vruntime,
+            deadline = widths.deadline,
+            time = widths.time,
+            command = widths.command,
+        );
+    }
+}
+
+struct TableWidths {
+    pid: usize,
+    user: usize,
+    priority: usize,
+    nice: usize,
+    weight: usize,
+    state: usize,
+    cpu: usize,
+    percent: usize,
+    util: usize,
+    util_min: usize,
+    required: usize,
+    preference: usize,
+    migrations: usize,
+    vruntime: usize,
+    deadline: usize,
+    time: usize,
+    command: usize,
+    tgid: usize,
+}
+
+impl TableWidths {
+    fn from_samples(samples: &[TaskSample]) -> Self {
+        let mut widths = Self {
+            pid: "PID".len(),
+            user: "USER".len(),
+            priority: "PR".len(),
+            nice: "NI".len(),
+            weight: "WEIGHT".len(),
+            state: "STAT".len(),
+            cpu: "CPU".len(),
+            percent: "%CPU".len(),
+            util: "UTIL".len(),
+            util_min: "MIN".len(),
+            required: "REQ".len(),
+            preference: "PREF".len(),
+            migrations: "MIG".len(),
+            vruntime: "VRUNTIME".len(),
+            deadline: "DEADLINE".len(),
+            time: "TIME+".len(),
+            command: "COMMAND".len(),
+            tgid: "TGID".len(),
+        };
+
+        for sample in samples {
+            let task = &sample.task;
+            widths.pid = widths.pid.max(decimal_digits_usize(task.pid));
+            widths.nice = widths.nice.max(signed_decimal_width_i32(task.sched_nice));
+            widths.weight = widths
+                .weight
+                .max(decimal_digits_u64(u64::from(task.sched_weight)));
+            widths.state = widths.state.max(format_stat(task.state).len());
+            widths.cpu = widths.cpu.max(cpu_label_width(task.cpu));
+            widths.percent = widths.percent.max(percent_width(sample.cpu_per_mille));
+            widths.util = widths
+                .util
+                .max(decimal_digits_u64(u64::from(task.sched_util_avg)));
+            widths.util_min = widths
+                .util_min
+                .max(decimal_digits_u64(u64::from(task.sched_util_min)));
+            widths.required = widths
+                .required
+                .max(decimal_digits_u64(u64::from(task.sched_required_capacity)));
+            widths.preference = widths
+                .preference
+                .max(format_core_preference(task.core_preference).len());
+            widths.migrations = widths
+                .migrations
+                .max(decimal_digits_u64(task.sched_migration_count));
+            widths.vruntime = widths.vruntime.max(decimal_digits_u64(task.sched_vruntime));
+            widths.deadline = widths.deadline.max(decimal_digits_u64(task.sched_deadline));
+            widths.time = widths.time.max(time_width_ns(task.cpu_time_ns));
+            widths.command = widths.command.max(task.name.len());
+            widths.tgid = widths.tgid.max(decimal_digits_usize(task.tgid));
+        }
+
+        widths
+    }
+}
+
+fn parse_sort_key(value: &str) -> SortKey {
+    match value {
+        "pid" => SortKey::Pid,
+        "pcpu" | "%cpu" | "cpu%" => SortKey::PercentCpu,
+        "cpu" | "c" => SortKey::Cpu,
+        "name" | "n" => SortKey::Name,
+        "state" | "s" => SortKey::State,
+        "type" => SortKey::Type,
+        _ => SortKey::PercentCpu,
+    }
+}
+
+fn apply_sort(tasks: &mut [TaskSample], key: SortKey) {
+    tasks.sort_by(|a, b| {
+        let primary = match key {
+            SortKey::Pid => a.task.pid.cmp(&b.task.pid),
+            SortKey::PercentCpu => b.cpu_per_mille.cmp(&a.cpu_per_mille),
+            SortKey::Cpu => a.task.cpu.cmp(&b.task.cpu),
+            SortKey::Name => a.task.name.cmp(&b.task.name),
+            SortKey::State => state_rank(a.task.state).cmp(&state_rank(b.task.state)),
+            SortKey::Type => type_rank(a.task.task_type).cmp(&type_rank(b.task.task_type)),
+        };
+        primary.then_with(|| a.task.pid.cmp(&b.task.pid))
+    });
+}
+
+fn format_stat(state: TaskState) -> &'static str {
+    match state {
+        TaskState::Running => "R",
+        TaskState::Ready => "R<",
+        TaskState::BlockedInterruptible => "S",
+        TaskState::BlockedUninterruptible => "D",
+        TaskState::Zombie => "Z",
+        TaskState::Terminated => "T",
+        TaskState::NotInitialized => "?",
+    }
+}
+
+fn format_core_preference(preference: u8) -> &'static str {
+    match preference {
+        1 => "E",
+        2 => "P",
+        _ => "-",
+    }
+}
+
+fn state_rank(state: TaskState) -> u8 {
+    match state {
+        TaskState::NotInitialized => 0,
+        TaskState::Ready => 1,
+        TaskState::Running => 2,
+        TaskState::BlockedInterruptible => 3,
+        TaskState::BlockedUninterruptible => 4,
+        TaskState::Zombie => 5,
+        TaskState::Terminated => 6,
+    }
+}
+
+fn type_rank(task_type: TaskType) -> u8 {
+    match task_type {
+        TaskType::Kernel => 0,
+        TaskType::User => 1,
+    }
+}
+
+fn is_idle_task(task: &TaskInfo) -> bool {
+    task.task_type == TaskType::Kernel && task.name.starts_with("idle")
+}
+
+struct Percent(u64);
+
+impl fmt::Display for Percent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.pad(&format!("{}.{:01}", self.0 / 10, self.0 % 10))
+    }
+}
+
+struct CpuLabel(u8);
+
+impl fmt::Display for CpuLabel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.pad(&format!("CPU{}", self.0))
+    }
+}
+
+struct TimeNs(u64);
+
+impl fmt::Display for TimeNs {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let (hours, mins, secs, ms) = split_time_ns(self.0);
+        let rendered = if hours > 0 {
+            format!("{}:{:02}:{:02}.{:03}", hours, mins, secs, ms)
+        } else {
+            format!("{:02}:{:02}.{:03}", mins, secs, ms)
+        };
+        f.pad(&rendered)
+    }
+}
+
+fn split_time_ns(ns: u64) -> (u64, u64, u64, u64) {
+    let total_ms = ns / 1_000_000;
+    let ms = total_ms % 1000;
+    let total_secs = total_ms / 1000;
+    let secs = total_secs % 60;
+    let mins = (total_secs / 60) % 60;
+    let hours = total_secs / 3600;
+
+    (hours, mins, secs, ms)
+}
+
+fn time_width_ns(ns: u64) -> usize {
+    let (hours, _, _, _) = split_time_ns(ns);
+    if hours > 0 {
+        decimal_digits_u64(hours) + 10
+    } else {
+        9
+    }
+}
+
+fn cpu_label_width(cpu: u8) -> usize {
+    3 + decimal_digits_usize(usize::from(cpu))
+}
+
+fn percent_width(per_mille: u64) -> usize {
+    decimal_digits_u64(per_mille / 10) + 2
+}
+
+fn signed_decimal_width_i32(value: i32) -> usize {
+    let sign = usize::from(value.is_negative());
+    sign + decimal_digits_u64(u64::from(value.unsigned_abs()))
+}
+
+fn decimal_digits_usize(mut value: usize) -> usize {
+    let mut digits = 1;
+    while value >= 10 {
+        value /= 10;
+        digits += 1;
+    }
+    digits
+}
+
+fn decimal_digits_u64(mut value: u64) -> usize {
+    let mut digits = 1;
+    while value >= 10 {
+        value /= 10;
+        digits += 1;
+    }
+    digits
+}

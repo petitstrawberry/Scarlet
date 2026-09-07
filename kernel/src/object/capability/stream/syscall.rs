@@ -4,7 +4,19 @@
 //! with StreamOps capability (read/write operations).
 
 use crate::arch::Trapframe;
+use crate::library::std::usercopy::copy_from_user;
 use crate::task::mytask;
+
+const EAGAIN: i32 = 11;
+const EINTR: i32 = 4;
+
+fn stream_read_error_result(error: super::StreamError) -> usize {
+    match error {
+        super::StreamError::WouldBlock => (-EAGAIN) as usize,
+        super::StreamError::Interrupted => (-EINTR) as usize,
+        _ => usize::MAX,
+    }
+}
 
 /// System call for reading from a KernelObject with StreamOps capability
 ///
@@ -15,7 +27,8 @@ use crate::task::mytask;
 ///
 /// # Returns
 /// - On success: number of bytes read
-/// - On error: usize::MAX
+/// - On a recognized stream error: a negative errno encoded as `usize`
+/// - On any other error: `usize::MAX`
 pub fn sys_stream_read(trapframe: &mut Trapframe) -> usize {
     let task = match mytask() {
         Some(task) => task,
@@ -23,14 +36,11 @@ pub fn sys_stream_read(trapframe: &mut Trapframe) -> usize {
     };
 
     let handle = trapframe.get_arg(0) as u32;
-    let buf_ptr = match task.vm_manager.translate_vaddr(trapframe.get_arg(1)) {
-        Some(ptr) => ptr as *mut u8,
-        None => return usize::MAX, // Invalid buffer pointer
-    };
+    let buf_vaddr = trapframe.get_arg(1);
     let count = trapframe.get_arg(2) as usize;
 
     // Increment PC to avoid infinite loop if read fails
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     // Get KernelObject from handle table
     let kernel_obj = match task.handle_table.get(handle) {
@@ -44,16 +54,22 @@ pub fn sys_stream_read(trapframe: &mut Trapframe) -> usize {
         None => return usize::MAX, // Object doesn't support stream operations
     };
 
-    // Perform read operation (may block)
-    let buffer = unsafe { core::slice::from_raw_parts_mut(buf_ptr, count) };
-    match stream.read(buffer) {
+    // Allocate kernel buffer and read into it
+    let mut kernel_buf = alloc::vec![0u8; count];
+    let bytes_read = match stream.read(&mut kernel_buf) {
         Ok(n) => n,
-        Err(super::StreamError::WouldBlock) => {
-            // Return EAGAIN error code (negative value indicates error)
-            (-(11i32)) as usize
+        Err(error) => return stream_read_error_result(error),
+    };
+
+    // Copy to user space using copy_to_user (handles page boundaries)
+    if bytes_read > 0 {
+        use crate::library::std::usercopy::copy_to_user;
+        if copy_to_user(&task, buf_vaddr, &kernel_buf[..bytes_read]).is_err() {
+            return usize::MAX;
         }
-        Err(_) => usize::MAX,
     }
+
+    bytes_read
 }
 
 /// System call for writing to a KernelObject with StreamOps capability
@@ -73,14 +89,11 @@ pub fn sys_stream_write(trapframe: &mut Trapframe) -> usize {
     };
 
     let handle = trapframe.get_arg(0) as u32;
-    let buf_ptr = match task.vm_manager.translate_vaddr(trapframe.get_arg(1)) {
-        Some(ptr) => ptr as *const u8,
-        None => return usize::MAX, // Invalid buffer pointer
-    };
+    let buf_vaddr = trapframe.get_arg(1);
     let count = trapframe.get_arg(2) as usize;
 
     // Increment PC to avoid infinite loop if write fails
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     // Get KernelObject from handle table
     let kernel_obj = match task.handle_table.get(handle) {
@@ -94,10 +107,35 @@ pub fn sys_stream_write(trapframe: &mut Trapframe) -> usize {
         None => return usize::MAX, // Object doesn't support stream operations
     };
 
-    // Perform write operation
-    let buffer = unsafe { core::slice::from_raw_parts(buf_ptr, count) };
-    match stream.write(buffer) {
+    // Copy from user space before writing so buffers crossing page boundaries
+    // are handled correctly.
+    let mut buffer = alloc::vec![0u8; count];
+    if copy_from_user(&task, buf_vaddr, &mut buffer).is_err() {
+        return usize::MAX;
+    }
+
+    match stream.write(&buffer) {
         Ok(bytes_written) => bytes_written,
+        Err(super::StreamError::WouldBlock) => (-(11i32)) as usize,
         Err(_) => usize::MAX, // Write error
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{EAGAIN, EINTR, stream_read_error_result};
+    use crate::object::capability::StreamError;
+
+    #[test_case]
+    fn stream_error_result_preserves_retryable_errors() {
+        assert_eq!(
+            stream_read_error_result(StreamError::WouldBlock),
+            (-EAGAIN) as usize
+        );
+        assert_eq!(
+            stream_read_error_result(StreamError::Interrupted),
+            (-EINTR) as usize
+        );
+        assert_eq!(stream_read_error_result(StreamError::IoError), usize::MAX);
     }
 }

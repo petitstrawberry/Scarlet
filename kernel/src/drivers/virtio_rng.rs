@@ -18,13 +18,16 @@
 //! from the host. Random bytes are fetched in batches and buffered internally
 //! to minimize virtqueue operations when requests are made.
 
+use crate::sync::{IrqRwSpinLock, IrqSpinLock};
+use crate::vm::addr::virt_to_phys;
 use alloc::{boxed::Box, collections::VecDeque, vec};
-use spin::{Mutex, RwLock};
 
 use crate::drivers::virtio::{
     device::VirtioDevice,
     queue::{DescriptorFlag, VirtQueue},
 };
+use crate::environment::PAGE_SIZE;
+use crate::mem::page::ContiguousPages;
 use crate::random::EntropySource;
 
 // Default buffer size for random data
@@ -38,13 +41,13 @@ pub struct VirtioRngDevice {
     /// Base memory address for MMIO access
     base_addr: usize,
     /// VirtIO queue for random number requests
-    virtqueues: Mutex<[VirtQueue<'static>; 1]>,
+    virtqueues: IrqSpinLock<[VirtQueue<'static>; 1]>,
     /// Internal buffer for random data
-    buffer: Mutex<VecDeque<u8>>,
+    buffer: IrqSpinLock<VecDeque<u8>>,
     /// Negotiated features
-    features: RwLock<u32>,
+    features: IrqRwSpinLock<u64>,
     /// Device initialization status
-    initialized: RwLock<bool>,
+    initialized: IrqRwSpinLock<bool>,
 }
 
 impl VirtioRngDevice {
@@ -60,10 +63,10 @@ impl VirtioRngDevice {
     pub fn new(base_addr: usize) -> Self {
         let mut device = Self {
             base_addr,
-            virtqueues: Mutex::new([VirtQueue::new(8)]), // Small queue is sufficient for RNG
-            buffer: Mutex::new(VecDeque::with_capacity(RNG_BUFFER_SIZE)),
-            features: RwLock::new(0),
-            initialized: RwLock::new(false),
+            virtqueues: IrqSpinLock::new([VirtQueue::new(8)]), // Small queue is sufficient for RNG
+            buffer: IrqSpinLock::new(VecDeque::with_capacity(RNG_BUFFER_SIZE)),
+            features: IrqRwSpinLock::new(0),
+            initialized: IrqRwSpinLock::new(false),
         };
 
         // Initialize the device
@@ -73,7 +76,7 @@ impl VirtioRngDevice {
                 features
             }
             Err(e) => {
-                crate::early_println!("[VirtIO RNG] Failed to initialize: {}", e);
+                crate::println!("[VirtIO RNG] Failed to initialize: {}", e);
                 0
             }
         };
@@ -81,7 +84,7 @@ impl VirtioRngDevice {
         // Store negotiated features
         *device.features.write() = negotiated_features;
 
-        crate::early_println!(
+        crate::println!(
             "[VirtIO RNG] Device initialized with features: 0x{:x}",
             negotiated_features
         );
@@ -101,20 +104,16 @@ impl VirtioRngDevice {
         let mut virtqueues = self.virtqueues.lock();
         let queue = &mut virtqueues[0];
 
-        // Allocate a buffer to receive random data
-        let mut data_buffer: Box<[u8]> = vec![0u8; RNG_BUFFER_SIZE].into_boxed_slice();
-        let data_ptr = data_buffer.as_mut_ptr();
-
-        // Get physical address
-        let data_phys = crate::vm::get_kernel_vm_manager()
-            .translate_vaddr(data_ptr as usize)
-            .ok_or("Failed to translate data vaddr")?;
+        // Allocate buffer from PMM for DMA
+        let buffer_alloc =
+            ContiguousPages::new(1).ok_or("Failed to allocate RNG buffer from PMM")?;
+        let data_ptr = buffer_alloc.as_ptr() as *mut u8;
 
         // Allocate descriptor for the data buffer (device writable)
         let desc_idx = queue.alloc_desc().ok_or("No available descriptors")?;
 
         // Set up the descriptor
-        queue.desc[desc_idx].addr = data_phys as u64;
+        queue.desc[desc_idx].addr = buffer_alloc.as_paddr() as u64;
         queue.desc[desc_idx].len = RNG_BUFFER_SIZE as u32;
         queue.desc[desc_idx].flags = DescriptorFlag::Write as u16;
         queue.desc[desc_idx].next = 0;
@@ -148,17 +147,17 @@ impl VirtioRngDevice {
         }
 
         // Copy data to internal buffer
-        // Note: Using descriptor length as fallback. The VirtIO spec indicates
-        // the used ring's len field contains the actual bytes written, but the
-        // current VirtQueue API doesn't expose it from pop().
         let bytes_received = queue.desc[desc_idx].len as usize;
         let mut buffer = self.buffer.lock();
-        for i in 0..bytes_received.min(RNG_BUFFER_SIZE) {
-            buffer.push_back(data_buffer[i]);
+        unsafe {
+            for i in 0..bytes_received.min(RNG_BUFFER_SIZE) {
+                buffer.push_back(*data_ptr.add(i));
+            }
         }
 
         // Free the descriptor
         queue.free_desc(desc_idx);
+        // buffer_alloc is automatically dropped here
 
         Ok(bytes_received)
     }
@@ -175,7 +174,7 @@ impl VirtioRngDevice {
         if buffer.is_empty() {
             drop(buffer); // Release lock before filling
             if let Err(e) = self.fill_buffer() {
-                crate::early_println!("[VirtIO RNG] Failed to fill buffer: {}", e);
+                crate::println!("[VirtIO RNG] Failed to fill buffer: {}", e);
                 return None;
             }
             buffer = self.buffer.lock();
@@ -238,7 +237,7 @@ impl VirtioDevice for VirtioRngDevice {
             return None;
         }
         let virtqueues = self.virtqueues.lock();
-        Some(virtqueues[queue_idx].get_raw_ptr() as u64)
+        Some(virt_to_phys(virtqueues[queue_idx].get_raw_ptr() as usize) as u64)
     }
 
     fn get_queue_driver_addr(&self, queue_idx: usize) -> Option<u64> {
@@ -246,7 +245,7 @@ impl VirtioDevice for VirtioRngDevice {
             return None;
         }
         let virtqueues = self.virtqueues.lock();
-        Some(virtqueues[queue_idx].avail.flags as *const _ as u64)
+        Some(virt_to_phys(virtqueues[queue_idx].avail.flags as *const _ as usize) as u64)
     }
 
     fn get_queue_device_addr(&self, queue_idx: usize) -> Option<u64> {
@@ -254,10 +253,10 @@ impl VirtioDevice for VirtioRngDevice {
             return None;
         }
         let virtqueues = self.virtqueues.lock();
-        Some(virtqueues[queue_idx].used.flags as *const _ as u64)
+        Some(virt_to_phys(virtqueues[queue_idx].used.flags as *const _ as usize) as u64)
     }
 
-    fn get_supported_features(&self, _device_features: u32) -> u32 {
+    fn get_supported_features(&self, _device_features: u64) -> u64 {
         // VirtIO RNG doesn't have device-specific features in the base spec
         // Return 0 to indicate no additional features are requested
         0

@@ -2,14 +2,9 @@
 
 set -o pipefail
 
-# Test runner for Scarlet kernel (aarch64)
-# This script is called by cargo test and can also be used for debugging tests
-
-# Default values
 DEBUG_MODE=false
 KERNEL_BINARY=""
 
-# Parse command line arguments
 while [[ $# -gt 0 ]]; do
     case $1 in
         --debug)
@@ -17,38 +12,31 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         *)
-            # This should be the kernel binary path from cargo test
             KERNEL_BINARY="$1"
             shift
             ;;
     esac
 done
 
-# Find the project root by looking for Makefile.toml
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd "$SCRIPT_DIR" && cd .. && cd .. && pwd)"
-INITRAMFS_PATH="$PROJECT_ROOT/mkfs/dist/initramfs-aarch64.cpio"
+KERNEL_DIR="$(dirname "$SCRIPT_DIR")"
+PROJECT_ROOT="$(cd "$KERNEL_DIR" && cd .. && pwd)"
+TEST_DIR="$KERNEL_DIR/.test"
+
+BOOT_IMAGE="$TEST_DIR/limine-aarch64-boot.img"
+LIMINE_CACHE="$TEST_DIR/.cache"
+
+mkdir -p "$TEST_DIR"
 
 echo "Test runner starting (aarch64)..."
 
-# Ensure initramfs exists
-if [ ! -f "$INITRAMFS_PATH" ]; then
-    echo "Error: initramfs not found at $INITRAMFS_PATH"
-    echo "Please build it explicitly before running tests. Example:"
-    echo "  cargo make build-initramfs-aarch64"
-    exit 1
-fi
-
-# Generate fresh FAT32 test image before each test run
 echo "Generating fresh FAT32 test image..."
-KERNEL_DIR="$(dirname "$SCRIPT_DIR")"
 "$KERNEL_DIR/tools/create-fat32-image.sh"
 if [ $? -ne 0 ]; then
     echo "Error: Failed to create FAT32 test image"
     exit 1
 fi
 
-# Generate fresh ext2 test image before each test run
 echo "Generating fresh ext2 test image..."
 "$KERNEL_DIR/tools/create-ext2-image.sh"
 if [ $? -ne 0 ]; then
@@ -56,11 +44,43 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
-# Create symbolic link for VSCode debugging
 if [ -n "$KERNEL_BINARY" ]; then
     LINK_PATH="$(dirname "$KERNEL_BINARY")/../test-kernel"
     ln -sf "$KERNEL_BINARY" "$LINK_PATH"
     echo "Created symbolic link: $LINK_PATH -> $KERNEL_BINARY"
+
+    INITRAMFS="$TEST_DIR/initramfs-test.cpio"
+    echo "test" > "$TEST_DIR/test-marker"
+    (cd "$TEST_DIR" && echo "test-marker" | cpio -o -H newc > "$INITRAMFS" 2>/dev/null)
+
+    LIMINE_PLUGIN="$PROJECT_ROOT/cargo-scarlet-plugin-limine/target/release/cargo-scarlet-plugin-limine"
+    if [ ! -f "$LIMINE_PLUGIN" ]; then
+        LIMINE_PLUGIN="$PROJECT_ROOT/cargo-scarlet-plugin-limine/target/debug/cargo-scarlet-plugin-limine"
+    fi
+    if [ ! -f "$LIMINE_PLUGIN" ]; then
+        LIMINE_PLUGIN="$PROJECT_ROOT/target/release/cargo-scarlet-plugin-limine"
+    fi
+    if [ ! -f "$LIMINE_PLUGIN" ]; then
+        LIMINE_PLUGIN="$PROJECT_ROOT/target/debug/cargo-scarlet-plugin-limine"
+    fi
+    if [ ! -f "$LIMINE_PLUGIN" ]; then
+        LIMINE_PLUGIN="$(command -v cargo-scarlet-plugin-limine || true)"
+    fi
+    if [ ! -f "$LIMINE_PLUGIN" ]; then
+        echo "Error: cargo-scarlet-plugin-limine not found. If you are not using nix develop, install it with: cargo install --path cargo-scarlet-plugin-limine"
+        exit 1
+    fi
+
+    "$LIMINE_PLUGIN" \
+        --arch aarch64 \
+        --kernel "$KERNEL_BINARY" \
+        --initramfs "$INITRAMFS" \
+        --output "$BOOT_IMAGE" \
+        --cache-dir "$LIMINE_CACHE"
+    if [ $? -ne 0 ]; then
+        echo "Error: Failed to create limine boot image"
+        exit 1
+    fi
 fi
 
 if [ "$DEBUG_MODE" = true ]; then
@@ -68,23 +88,7 @@ if [ "$DEBUG_MODE" = true ]; then
     echo "Connect with: gdb $KERNEL_BINARY -ex 'target remote :12345'"
 fi
 
-# Create temporary file for capturing output
 TEMP_OUTPUT=$(mktemp)
-
-# U-Boot binary path (built from source, see Dockerfile)
-UBOOT_BIN="/opt/u-boot-aarch64.bin"
-
-if [ ! -f "$UBOOT_BIN" ]; then
-    echo "Error: U-Boot binary not found at $UBOOT_BIN"
-    echo "Please build U-Boot first (see Dockerfile for instructions)"
-    exit 1
-fi
-
-# Convert ELF kernel to raw binary for U-Boot booti
-# The kernel already includes Linux arm64 Image header in .head.text section
-KERNEL_BIN="${KERNEL_BINARY}.bin"
-echo "Converting kernel ELF to raw binary..."
-aarch64-linux-gnu-objcopy -O binary "$KERNEL_BINARY" "$KERNEL_BIN"
 
 if [ "$DEBUG_MODE" = true ]; then
     DEBUG_FLAGS="-gdb tcp::12345 -S"
@@ -93,10 +97,6 @@ else
 fi
 
 QEMU_DEBUG_ARGS=""
-
-# Optional QEMU debug logging
-# - Enable guest errors: SCARLET_QEMU_GUEST_ERRORS=1
-# - Or pass explicit QEMU -d flags: SCARLET_QEMU_DEBUG_FLAGS=virtio (comma-separated)
 QEMU_DEBUG_FLAGS=""
 if [ -n "${SCARLET_QEMU_DEBUG_FLAGS:-}" ]; then
     QEMU_DEBUG_FLAGS="${SCARLET_QEMU_DEBUG_FLAGS}"
@@ -114,63 +114,129 @@ if [ -n "$QEMU_DEBUG_FLAGS" ]; then
     QEMU_DEBUG_ARGS="-d $QEMU_DEBUG_FLAGS -D $QEMU_DEBUG_LOG"
 fi
 
-# Run QEMU with U-Boot as BIOS
-# Use gic-version=3 to match run_aarch64.sh configuration
-# Add Virtio devices for comprehensive testing
+if [ ! -f "$BOOT_IMAGE" ]; then
+    echo "Error: Limine boot image not found at $BOOT_IMAGE"
+    exit 1
+fi
+
+find_efi_code() {
+    if [ -n "${SCARLET_EFI_CODE_ARM64_EL2:-}" ] && [ -f "${SCARLET_EFI_CODE_ARM64_EL2}" ]; then
+        printf '%s\n' "${SCARLET_EFI_CODE_ARM64_EL2}"
+        return 0
+    fi
+    if [ -n "${SCARLET_EFI_CODE_ARM64:-}" ] && [ -f "${SCARLET_EFI_CODE_ARM64}" ]; then
+        printf '%s\n' "${SCARLET_EFI_CODE_ARM64}"
+        return 0
+    fi
+    local candidate
+    for candidate in \
+        /usr/share/AAVMF/AAVMF_CODE.fd \
+        /usr/share/AAVMF/AAVMF_CODE.no-secboot.fd \
+        /usr/share/qemu-efi-aarch64/QEMU_EFI.fd; do
+        if [ -f "$candidate" ]; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
+find_efi_vars_template() {
+    if [ -n "${SCARLET_EFI_VARS_ARM64_EL2:-}" ] && [ -f "${SCARLET_EFI_VARS_ARM64_EL2}" ]; then
+        printf '%s\n' "${SCARLET_EFI_VARS_ARM64_EL2}"
+        return 0
+    fi
+    if [ -n "${SCARLET_EFI_VARS_ARM64:-}" ] && [ -f "${SCARLET_EFI_VARS_ARM64}" ]; then
+        printf '%s\n' "${SCARLET_EFI_VARS_ARM64}"
+        return 0
+    fi
+    local candidate
+    for candidate in \
+        /usr/share/AAVMF/AAVMF_VARS.fd \
+        /usr/share/AAVMF/AAVMF_VARS.ms.fd \
+        /usr/share/AAVMF/AAVMF_VARS.snakeoil.fd; do
+        if [ -f "$candidate" ]; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
+ensure_efi_vars_writable() {
+    local vars_file="$1"
+
+    if ! chmod u+w "$vars_file" 2>/dev/null || [ ! -w "$vars_file" ]; then
+        echo "Error: AArch64 EFI vars runtime file is not writable: $vars_file"
+        exit 1
+    fi
+}
+
+EFI_CODE="$(find_efi_code || true)"
+EFI_VARS_TEMPLATE="$(find_efi_vars_template || true)"
+EFI_VARS_RUNTIME="$(mktemp "$TEST_DIR/AAVMF_VARS.run.XXXXXX.fd")"
+
+if [ -z "$EFI_CODE" ]; then
+    echo "Error: AArch64 EFI firmware code image not found."
+    exit 1
+fi
+
+if [ -z "$EFI_VARS_TEMPLATE" ]; then
+    echo "Error: AArch64 EFI vars template not found."
+    exit 1
+fi
+
+cp "$EFI_VARS_TEMPLATE" "$EFI_VARS_RUNTIME"
+ensure_efi_vars_writable "$EFI_VARS_RUNTIME"
+trap 'rm -f "$EFI_VARS_RUNTIME" "$TEMP_OUTPUT"' EXIT
+
 qemu-system-aarch64 \
-    -machine virt,gic-version=3 \
-    -cpu cortex-a57 \
+    -machine virt,gic-version=3,acpi=off \
+    -cpu max \
     -m 2G \
     -nographic \
     -serial mon:stdio \
     --no-reboot \
-    -bios "$UBOOT_BIN" \
+    -drive if=pflash,format=raw,unit=0,file="$EFI_CODE",readonly=on \
+    -drive if=pflash,format=raw,unit=1,file="$EFI_VARS_RUNTIME" \
     -global virtio-mmio.force-legacy=false \
+    -drive id=boot,file="$BOOT_IMAGE",format=raw,if=none \
+    -device virtio-blk-device,drive=boot,bus=virtio-mmio-bus.0 \
     -drive id=x0,file="$KERNEL_DIR/fat32-test.img",format=raw,if=none \
-    -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+    -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.1 \
     -drive id=x1,file="$KERNEL_DIR/ext2-test.img",format=raw,if=none \
-    -device virtio-blk-device,drive=x1,bus=virtio-mmio-bus.5 \
-    -display vnc=:0 \
-    -device virtio-gpu-device,bus=virtio-mmio-bus.1 \
+    -device virtio-blk-device,drive=x1,bus=virtio-mmio-bus.2 \
+    -display none \
+    -device virtio-gpu-device,bus=virtio-mmio-bus.3 \
     -netdev user,id=net0 \
     -netdev hubport,id=net1,hubid=0 \
     -netdev hubport,id=net2,hubid=0 \
-    -device virtio-net-device,netdev=net0,mac=52:54:00:12:34:56,bus=virtio-mmio-bus.2 \
-    -device virtio-net-device,netdev=net1,mac=52:54:00:12:34:57,bus=virtio-mmio-bus.3 \
-    -device virtio-net-device,netdev=net2,mac=52:54:00:12:34:58,bus=virtio-mmio-bus.4 \
-    -device virtio-keyboard-device,bus=virtio-mmio-bus.6 \
-    -device virtio-mouse-device,bus=virtio-mmio-bus.7 \
-    -initrd "$INITRAMFS_PATH" \
-    -kernel "$KERNEL_BIN" \
+    -device virtio-net-device,netdev=net0,mac=52:54:00:12:34:56,bus=virtio-mmio-bus.4 \
+    -device virtio-net-device,netdev=net1,mac=52:54:00:12:34:57,bus=virtio-mmio-bus.5 \
+    -device virtio-net-device,netdev=net2,mac=52:54:00:12:34:58,bus=virtio-mmio-bus.6 \
+    -device virtio-keyboard-device,bus=virtio-mmio-bus.7 \
+    -device virtio-mouse-device,bus=virtio-mmio-bus.8 \
     $QEMU_DEBUG_ARGS \
     $DEBUG_FLAGS | tee "$TEMP_OUTPUT"
 
-# Capture pipeline exit codes (qemu is element 0, tee is element 1)
 QEMU_EXIT_CODE=${PIPESTATUS[0]}
 TEE_EXIT_CODE=${PIPESTATUS[1]}
 
-# In debug mode, don't check for test patterns since we're debugging
 if [ "$DEBUG_MODE" = true ]; then
     echo "Debug session ended"
-    rm -f "$TEMP_OUTPUT" "$KERNEL_BIN"
     exit 0
 fi
 
-# Check for test failure patterns in output
 if grep -q "\[Test Runner\] Test failed" "$TEMP_OUTPUT"; then
     echo "Test failure detected in output"
-    rm -f "$TEMP_OUTPUT" "$KERNEL_BIN"
     exit 1
 elif grep -q "\[Test Runner\] All .* tests passed" "$TEMP_OUTPUT"; then
     echo "All tests passed"
-    rm -f "$TEMP_OUTPUT" "$KERNEL_BIN"
     exit 0
 elif grep -q "running 0 tests" "$TEMP_OUTPUT"; then
     echo "No tests were run"
-    rm -f "$TEMP_OUTPUT" "$KERNEL_BIN"
     exit 0
 else
     echo "Could not determine test result, QEMU exit code: $QEMU_EXIT_CODE (tee: $TEE_EXIT_CODE)"
-    rm -f "$TEMP_OUTPUT" "$KERNEL_BIN"
-    exit $QEMU_EXIT_CODE
+    exit 1
 fi

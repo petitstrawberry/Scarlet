@@ -21,6 +21,7 @@
 //! - `Ext2Driver`: Filesystem driver for registration
 //! - Data structures for ext2 format (superblock, inode, directory entries, etc.)
 
+use crate::sync::{IrqRwSpinLock, IrqSpinLock};
 use alloc::{
     boxed::Box,
     collections::BTreeMap,
@@ -30,9 +31,9 @@ use alloc::{
     vec,
     vec::Vec,
 };
+use core::sync::atomic::{AtomicU64, Ordering};
 use core::{any::Any, mem};
 use hashbrown::HashMap;
-use spin::{Mutex, rwlock::RwLock};
 
 use crate::{
     DeviceManager,
@@ -64,6 +65,11 @@ pub mod char_device_tests;
 pub use driver::Ext2Driver;
 pub use node::{Ext2CharDeviceFileObject, Ext2DirectoryObject, Ext2FileObject, Ext2Node};
 pub use structures::*;
+
+/// Current Unix time representable by an ext2 timestamp, if an RTC is available.
+fn current_timestamp() -> Option<u32> {
+    crate::time::system_time_s().map(|seconds| seconds.min(u32::MAX as u64) as u32)
+}
 
 /// ext2 filesystem parameters for mount options
 ///
@@ -198,45 +204,45 @@ impl Ext2Params {
 
     /// Create ext2 filesystem from these parameters
     pub fn create_filesystem(&mut self) -> Result<Arc<Ext2FileSystem>, FileSystemError> {
-        // crate::early_println!("[EXT2] Creating filesystem from parameters");
+        // crate::println!("[EXT2] Creating filesystem from parameters");
 
         // First resolve device path to device_id if not already resolved
         if self.device_id.is_none() {
-            // crate::early_println!("[EXT2] Resolving device path: {:?}", self.device_path);
+            // crate::println!("[EXT2] Resolving device path: {:?}", self.device_path);
             self.resolve_device()?;
         }
 
         // Get device_id (should be resolved by now)
         let device_id = self.device_id.ok_or_else(|| {
-            // crate::early_println!("[EXT2] Error: Device ID not resolved");
+            // crate::println!("[EXT2] Error: Device ID not resolved");
             FileSystemError::new(FileSystemErrorKind::DeviceError, "Device ID not resolved")
         })?;
 
-        // crate::early_println!("[EXT2] Using device ID: {}", device_id);
+        // crate::println!("[EXT2] Using device ID: {}", device_id);
 
         // Get device from DeviceManager
         let device = DeviceManager::get_manager()
             .get_device(device_id)
             .ok_or_else(|| {
-                // crate::early_println!("[EXT2] Error: Device with ID {} not found", device_id);
+                // crate::println!("[EXT2] Error: Device with ID {} not found", device_id);
                 FileSystemError::new(
                     FileSystemErrorKind::DeviceError,
                     format!("Device with ID {} not found", device_id),
                 )
             })?;
 
-        // crate::early_println!("[EXT2] Found device, converting to block device");
+        // crate::println!("[EXT2] Found device, converting to block device");
 
         // Convert to block device using the new into_block_device() method
         let block_device = device.into_block_device().ok_or_else(|| {
-            // crate::early_println!("[EXT2] Error: Device is not a block device");
+            // crate::println!("[EXT2] Error: Device is not a block device");
             FileSystemError::new(
                 FileSystemErrorKind::DeviceError,
                 "Device is not a block device",
             )
         })?;
 
-        // crate::early_println!("[EXT2] Successfully converted to block device, creating filesystem");
+        // crate::println!("[EXT2] Successfully converted to block device, creating filesystem");
 
         // Create ext2 filesystem using existing method
         Ext2FileSystem::new(block_device)
@@ -294,15 +300,20 @@ pub struct Ext2FileSystem {
     /// Root directory inode
     root_inode: u32,
     /// Root directory node
-    root: RwLock<Arc<Ext2Node>>,
+    root: IrqRwSpinLock<Arc<Ext2Node>>,
     /// Filesystem name
     name: String,
     /// Next file ID generator
-    next_file_id: Mutex<u64>,
+    next_file_id: IrqSpinLock<u64>,
     /// LRU cached inodes
-    inode_cache: Mutex<InodeLruCache>,
+    inode_cache: IrqRwSpinLock<InodeLruCache>,
     /// LRU cached blocks
-    block_cache: Mutex<BlockLruCache>,
+    block_cache: IrqRwSpinLock<BlockLruCache>,
+    /// Per-inode locks to serialize directory-mutating operations on the same inode,
+    /// preventing concurrent read-modify-write races on directory blocks
+    inode_locks: IrqRwSpinLock<BTreeMap<u32, Arc<IrqSpinLock<()>>>>,
+    /// Global lock to serialize block allocation operations
+    allocation_lock: IrqSpinLock<()>,
 }
 
 /// Node in doubly-linked list for O(1) LRU operations for inodes
@@ -310,9 +321,7 @@ pub struct Ext2FileSystem {
 struct InodeLruNode {
     inode_num: u32,
     inode: Ext2Inode,
-    access_count: u64,
-    prev: Option<NodeId>,
-    next: Option<NodeId>,
+    access_count: AtomicU64,
 }
 
 /// O(1) LRU cache implementation for inodes using HashMap + doubly-linked list
@@ -321,19 +330,10 @@ struct InodeLruCache {
     map: HashMap<u32, NodeId>,
     /// Storage for all nodes
     nodes: HashMap<NodeId, InodeLruNode>,
-    /// Head of doubly-linked list (most recently used)
-    head: Option<NodeId>,
-    /// Tail of doubly-linked list (least recently used)  
-    tail: Option<NodeId>,
     /// Next available node ID
     next_id: NodeId,
     /// Maximum cache size
     max_size: usize,
-    /// Cache statistics
-    hits: u64,
-    misses: u64,
-    /// Access counter for approximate LRU
-    access_counter: u64,
 }
 
 impl InodeLruCache {
@@ -341,47 +341,63 @@ impl InodeLruCache {
         Self {
             map: HashMap::new(),
             nodes: HashMap::new(),
-            head: None,
-            tail: None,
             next_id: 0,
             max_size,
-            hits: 0,
-            misses: 0,
-            access_counter: 0,
         }
     }
 
     /// O(1) get operation with LRU update
-    fn get(&mut self, inode_num: u32) -> Option<Ext2Inode> {
+    /// O(1) get with atomic access-count bump (no list mutation).
+    /// Safe to call through a shared (`&self`) reference.
+    fn get(&self, inode_num: u32) -> Option<Ext2Inode> {
         if let Some(&node_id) = self.map.get(&inode_num) {
-            self.hits += 1;
-            // Move to head (most recently used) - O(1)
-            self.move_to_head(node_id);
-            // Return copy of inode
-            self.nodes.get(&node_id).map(|node| node.inode.clone())
-        } else {
-            self.misses += 1;
+            if let Some(node) = self.nodes.get(&node_id) {
+                node.access_count.fetch_add(1, Ordering::Relaxed);
+                return Some(node.inode.clone());
+            }
             None
+        } else {
+            None
+        }
+    }
+
+    /// O(n) eviction of the node with the lowest access count.
+    /// Called only on insert when the cache is full.
+    fn evict_lru(&mut self) {
+        if let Some((&lru_id, _)) = self
+            .nodes
+            .iter()
+            .min_by_key(|(_, node)| node.access_count.load(Ordering::Relaxed))
+        {
+            if let Some(node) = self.nodes.remove(&lru_id) {
+                self.map.remove(&node.inode_num);
+            }
+        }
+    }
+
+    /// Remove and insert with access-count-based eviction.
+    fn remove(&mut self, inode_num: u32) {
+        if let Some(&node_id) = self.map.get(&inode_num) {
+            self.nodes.remove(&node_id);
+            // Return copy of inode
+            self.map.remove(&inode_num);
         }
     }
 
     /// O(1) insert operation with LRU eviction
     fn insert(&mut self, inode_num: u32, inode: Ext2Inode) {
-        self.access_counter += 1;
-
         // If already exists, update and move to head - O(1)
         if let Some(&node_id) = self.map.get(&inode_num) {
             if let Some(node) = self.nodes.get_mut(&node_id) {
                 node.inode = inode;
-                node.access_count = self.access_counter;
+                node.access_count.fetch_add(1, Ordering::Relaxed);
             }
-            self.move_to_head(node_id);
             return;
         }
 
         // If cache is full, remove LRU (tail) item - O(1)
         if self.nodes.len() >= self.max_size {
-            self.remove_tail();
+            self.evict_lru();
         }
 
         // Create new node and add to head - O(1)
@@ -391,110 +407,11 @@ impl InodeLruCache {
         let new_node = InodeLruNode {
             inode_num,
             inode,
-            access_count: self.access_counter,
-            prev: None,
-            next: self.head,
+            access_count: AtomicU64::new(1),
         };
 
         self.nodes.insert(new_node_id, new_node);
         self.map.insert(inode_num, new_node_id);
-
-        // Update existing head's prev pointer
-        if let Some(old_head) = self.head {
-            if let Some(old_head_node) = self.nodes.get_mut(&old_head) {
-                old_head_node.prev = Some(new_node_id);
-            }
-        }
-
-        // Update head/tail pointers
-        self.head = Some(new_node_id);
-        if self.tail.is_none() {
-            self.tail = Some(new_node_id);
-        }
-    }
-
-    /// O(1) remove operation
-    fn remove(&mut self, inode_num: u32) {
-        if let Some(&node_id) = self.map.get(&inode_num) {
-            self.remove_node(node_id);
-            self.map.remove(&inode_num);
-        }
-    }
-
-    /// O(1) move node to head of LRU list
-    fn move_to_head(&mut self, node_id: NodeId) {
-        // If already head, nothing to do
-        if self.head == Some(node_id) {
-            return;
-        }
-
-        // Remove from current position
-        self.remove_node_from_list(node_id);
-
-        // Add to head
-        if let Some(node) = self.nodes.get_mut(&node_id) {
-            node.prev = None;
-            node.next = self.head;
-        }
-
-        // Update old head's prev pointer
-        if let Some(old_head) = self.head {
-            if let Some(old_head_node) = self.nodes.get_mut(&old_head) {
-                old_head_node.prev = Some(node_id);
-            }
-        }
-
-        self.head = Some(node_id);
-
-        // If this was the only node, it's also the tail
-        if self.tail.is_none() {
-            self.tail = Some(node_id);
-        }
-    }
-
-    /// O(1) remove tail (LRU) node
-    fn remove_tail(&mut self) {
-        if let Some(tail_id) = self.tail {
-            if let Some(tail_node) = self.nodes.get(&tail_id) {
-                let inode_num = tail_node.inode_num;
-                self.map.remove(&inode_num);
-            }
-            self.remove_node(tail_id);
-        }
-    }
-
-    /// O(1) remove node completely
-    fn remove_node(&mut self, node_id: NodeId) {
-        self.remove_node_from_list(node_id);
-        self.nodes.remove(&node_id);
-    }
-
-    /// O(1) remove node from doubly-linked list (but keep in nodes map)
-    fn remove_node_from_list(&mut self, node_id: NodeId) {
-        if let Some(node) = self.nodes.get(&node_id) {
-            let prev_id = node.prev;
-            let next_id = node.next;
-
-            // Update prev node's next pointer
-            if let Some(prev_id) = prev_id {
-                if let Some(prev_node) = self.nodes.get_mut(&prev_id) {
-                    prev_node.next = next_id;
-                }
-            } else {
-                // This was the head
-                self.head = next_id;
-            }
-
-            // Update next node's prev pointer
-            if let Some(next_id) = next_id {
-                if let Some(next_node) = self.nodes.get_mut(&next_id) {
-                    next_node.prev = prev_id;
-                }
-            } else {
-                // This was the tail
-                self.tail = prev_id;
-            }
-        }
     }
 
     fn len(&self) -> usize {
@@ -503,24 +420,15 @@ impl InodeLruCache {
 
     /// Get cache statistics for debugging and performance analysis
     fn get_stats(&self) -> (u64, u64, usize) {
-        (self.hits, self.misses, self.nodes.len())
+        (0, 0, self.nodes.len())
     }
 
     /// Print cache statistics
     fn print_stats(&self, cache_name: &str) {
-        let total = self.hits + self.misses;
-        let hit_rate = if total > 0 {
-            (self.hits * 100) / total
-        } else {
-            0
-        };
-        crate::early_println!(
-            "[ext2] {} Cache Stats: hits={}, misses={}, size={}, hit_rate={}%",
+        crate::println!(
+            "[ext2] {} Cache Stats: size={}",
             cache_name,
-            self.hits,
-            self.misses,
             self.nodes.len(),
-            hit_rate
         );
     }
 }
@@ -533,8 +441,7 @@ type NodeId = u32;
 struct LruNode {
     block_num: u64,
     data: Vec<u8>,
-    prev: Option<NodeId>,
-    next: Option<NodeId>,
+    access_count: AtomicU64,
 }
 
 /// O(1) LRU cache implementation using HashMap + doubly-linked list
@@ -544,17 +451,10 @@ struct BlockLruCache {
     map: HashMap<u64, NodeId>,
     /// Storage for all nodes
     nodes: HashMap<NodeId, LruNode>,
-    /// Head of doubly-linked list (most recently used)
-    head: Option<NodeId>,
-    /// Tail of doubly-linked list (least recently used)  
-    tail: Option<NodeId>,
     /// Next available node ID
     next_id: NodeId,
     /// Maximum cache size
     max_size: usize,
-    /// Cache statistics
-    hits: u64,
-    misses: u64,
 }
 
 impl BlockLruCache {
@@ -562,86 +462,45 @@ impl BlockLruCache {
         Self {
             map: HashMap::new(),
             nodes: HashMap::new(),
-            head: None,
-            tail: None,
             next_id: 0,
             max_size,
-            hits: 0,
-            misses: 0,
         }
     }
 
-    fn get(&mut self, block_num: u64) -> Option<Vec<u8>> {
+    /// O(1) get with atomic access-count bump (no list mutation).
+    /// Safe to call through a shared (`&self`) reference.
+    fn get(&self, block_num: u64) -> Option<Vec<u8>> {
         if let Some(&node_id) = self.map.get(&block_num) {
-            self.hits += 1;
-            // Move to head (most recently used)
-            self.move_to_head(node_id);
-            // Return cloned data
-            self.nodes.get(&node_id).map(|node| node.data.clone())
+            if let Some(node) = self.nodes.get(&node_id) {
+                node.access_count.fetch_add(1, Ordering::Relaxed);
+                return Some(node.data.clone());
+            }
+            None
         } else {
-            self.misses += 1;
             None
         }
     }
 
-    /// Move node to head of LRU list (O(1))
-    fn move_to_head(&mut self, node_id: NodeId) {
-        if Some(node_id) == self.head {
-            return; // Already at head
-        }
-
-        // Remove from current position
-        self.remove_from_list(node_id);
-
-        // Add to head
-        self.add_to_head(node_id);
-    }
-
-    /// Remove node from doubly-linked list (O(1))
-    fn remove_from_list(&mut self, node_id: NodeId) {
-        if let Some(node) = self.nodes.get(&node_id) {
-            let prev = node.prev;
-            let next = node.next;
-
-            // Update prev node's next pointer
-            if let Some(prev_id) = prev {
-                if let Some(prev_node) = self.nodes.get_mut(&prev_id) {
-                    prev_node.next = next;
-                }
-            } else {
-                // This was the head
-                self.head = next;
-            }
-
-            // Update next node's prev pointer
-            if let Some(next_id) = next {
-                if let Some(next_node) = self.nodes.get_mut(&next_id) {
-                    next_node.prev = prev;
-                }
-            } else {
-                // This was the tail
-                self.tail = prev;
+    /// O(n) eviction of the node with the lowest access count.
+    /// Called only on insert when the cache is full.
+    fn evict_lru(&mut self) {
+        if let Some((&lru_id, _)) = self
+            .nodes
+            .iter()
+            .min_by_key(|(_, node)| node.access_count.load(Ordering::Relaxed))
+        {
+            if let Some(node) = self.nodes.remove(&lru_id) {
+                self.map.remove(&node.block_num);
             }
         }
     }
 
-    /// Add node to head of list (O(1))
-    fn add_to_head(&mut self, node_id: NodeId) {
-        if let Some(node) = self.nodes.get_mut(&node_id) {
-            node.prev = None;
-            node.next = self.head;
+    fn remove(&mut self, block_num: u64) {
+        if let Some(&node_id) = self.map.get(&block_num) {
+            self.nodes.remove(&node_id);
+            // Return cloned data
+            self.map.remove(&block_num);
         }
-
-        if let Some(old_head) = self.head {
-            if let Some(old_head_node) = self.nodes.get_mut(&old_head) {
-                old_head_node.prev = Some(node_id);
-            }
-        } else {
-            // List was empty
-            self.tail = Some(node_id);
-        }
-
-        self.head = Some(node_id);
     }
 
     fn insert(&mut self, block_num: u64, block_data: Vec<u8>) {
@@ -649,21 +508,14 @@ impl BlockLruCache {
         if let Some(&existing_id) = self.map.get(&block_num) {
             if let Some(existing_node) = self.nodes.get_mut(&existing_id) {
                 existing_node.data = block_data;
+                existing_node.access_count.fetch_add(1, Ordering::Relaxed);
             }
-            self.move_to_head(existing_id);
             return;
         }
 
         // If cache is full, remove LRU (tail) item
         if self.nodes.len() >= self.max_size {
-            if let Some(tail_id) = self.tail {
-                if let Some(tail_node) = self.nodes.get(&tail_id) {
-                    let tail_block_num = tail_node.block_num;
-                    self.map.remove(&tail_block_num);
-                }
-                self.remove_from_list(tail_id);
-                self.nodes.remove(&tail_id);
-            }
+            self.evict_lru();
         }
 
         // Create new node
@@ -673,24 +525,12 @@ impl BlockLruCache {
         let new_node = LruNode {
             block_num,
             data: block_data,
-            prev: None,
-            next: None,
+            access_count: AtomicU64::new(1),
         };
 
         // Insert into data structures
         self.nodes.insert(node_id, new_node);
         self.map.insert(block_num, node_id);
-
-        // Add to head of list
-        self.add_to_head(node_id);
-    }
-
-    fn remove(&mut self, block_num: u64) {
-        if let Some(&node_id) = self.map.get(&block_num) {
-            self.map.remove(&block_num);
-            self.remove_from_list(node_id);
-            self.nodes.remove(&node_id);
-        }
     }
 
     fn len(&self) -> usize {
@@ -699,24 +539,15 @@ impl BlockLruCache {
 
     /// Get cache statistics for debugging and performance analysis
     fn get_stats(&self) -> (u64, u64, usize) {
-        (self.hits, self.misses, self.nodes.len())
+        (0, 0, self.nodes.len())
     }
 
     /// Print cache statistics
     fn print_stats(&self, cache_name: &str) {
-        let total = self.hits + self.misses;
-        let hit_rate = if total > 0 {
-            (self.hits * 100) / total
-        } else {
-            0
-        };
-        crate::early_println!(
-            "[ext2] {} Cache Stats: hits={}, misses={}, size={}, hit_rate={}%",
+        crate::println!(
+            "[ext2] {} Cache Stats: size={}",
             cache_name,
-            self.hits,
-            self.misses,
             self.nodes.len(),
-            hit_rate
         );
     }
 }
@@ -773,11 +604,13 @@ impl Ext2FileSystem {
             superblock,
             block_size,
             root_inode,
-            root: RwLock::new(Arc::new(root)),
+            root: IrqRwSpinLock::new(Arc::new(root)),
             name: "ext2".to_string(),
-            next_file_id: Mutex::new(2), // Start from 2, root is 1
-            inode_cache: Mutex::new(InodeLruCache::new(8192)),
-            block_cache: Mutex::new(BlockLruCache::new(8192)),
+            next_file_id: IrqSpinLock::new(2), // Start from 2, root is 1
+            inode_cache: IrqRwSpinLock::new(InodeLruCache::new(8192)),
+            block_cache: IrqRwSpinLock::new(BlockLruCache::new(8192)),
+            inode_locks: IrqRwSpinLock::new(BTreeMap::new()),
+            allocation_lock: IrqSpinLock::new(()),
         });
 
         // Set filesystem reference in root node
@@ -823,12 +656,31 @@ impl Ext2FileSystem {
         }
     }
 
+    fn get_inode_lock(&self, inode_num: u32) -> Arc<IrqSpinLock<()>> {
+        let mut locks = self.inode_locks.write();
+        locks
+            .entry(inode_num)
+            .or_insert_with(|| Arc::new(IrqSpinLock::new(())))
+            .clone()
+    }
+
+    /// Execute a closure while holding the allocation lock.
+    /// This ensures bitmap read-modify-write operations are atomic.
+    #[inline]
+    fn with_allocation_lock<F, T>(&self, f: F) -> T
+    where
+        F: FnOnce() -> T,
+    {
+        let _guard = self.allocation_lock.lock();
+        f()
+    }
+
     /// Read an inode from disk
     pub fn read_inode(&self, inode_num: u32) -> Result<Ext2Inode, FileSystemError> {
         profile_scope!("ext2::read_inode");
         // Check cache first
         {
-            let mut cache = self.inode_cache.lock();
+            let cache = self.inode_cache.read();
             if let Some(inode) = cache.get(inode_num) {
                 return Ok(inode);
             }
@@ -856,8 +708,7 @@ impl Ext2FileSystem {
             buffer: vec![0u8; self.block_size as usize],
         });
 
-        self.block_device.enqueue_request(request);
-        let results = self.block_device.process_requests();
+        let results = self.block_device.submit_requests(vec![request]);
 
         let bgd_data = if let Some(result) = results.first() {
             match &result.result {
@@ -886,7 +737,7 @@ impl Ext2FileSystem {
         let inode_offset = (local_inode * inode_size) % self.block_size;
 
         #[cfg(test)]
-        crate::early_println!(
+        crate::println!(
             "[ext2] read_inode: Reading inode {} from block {}, offset {}, inode_size={}",
             inode_num,
             inode_block,
@@ -905,8 +756,7 @@ impl Ext2FileSystem {
             buffer: vec![0u8; self.block_size as usize],
         });
 
-        self.block_device.enqueue_request(request);
-        let results = self.block_device.process_requests();
+        let results = self.block_device.submit_requests(vec![request]);
 
         let inode_data = if let Some(result) = results.first() {
             match &result.result {
@@ -929,7 +779,7 @@ impl Ext2FileSystem {
 
         // Cache the inode with LRU eviction
         {
-            let mut cache = self.inode_cache.lock();
+            let mut cache = self.inode_cache.write();
             cache.insert(inode_num, inode);
         }
 
@@ -939,7 +789,7 @@ impl Ext2FileSystem {
             INODE_CALL_COUNT += 1;
             // Print inode cache stats periodically (every 50th call)
             if INODE_CALL_COUNT % 50 == 0 {
-                let cache = self.inode_cache.lock();
+                let cache = self.inode_cache.read();
                 cache.print_stats("Inode");
             }
         }
@@ -988,10 +838,8 @@ impl Ext2FileSystem {
                 }
 
                 let entry = Ext2DirectoryEntry::from_bytes(&block_data[offset..])?;
-                if entry.entry.inode == 0 {
-                    // In ext2, an inode of 0 can mean an unused entry, but not necessarily the end.
-                    // The record length should still be valid.
-                    let rec_len = entry.entry.rec_len;
+                if entry.entry.get_inode() == 0 {
+                    let rec_len = entry.entry.get_rec_len();
                     if rec_len == 0 {
                         break;
                     }
@@ -999,7 +847,7 @@ impl Ext2FileSystem {
                     continue;
                 }
 
-                let rec_len = entry.entry.rec_len;
+                let rec_len = entry.entry.get_rec_len();
                 entries.push(entry);
                 offset += rec_len as usize;
 
@@ -1326,16 +1174,22 @@ impl Ext2FileSystem {
         paddr: usize,
     ) -> Result<(), FileSystemError> {
         use crate::environment::PAGE_SIZE;
+        use crate::vm::addr::phys_to_virt;
 
         profile_scope!("ext2::read_page_content");
 
         let inode = self.read_inode(inode_num)?;
         let file_size = inode.size as u64;
-        let page_offset = page_index * PAGE_SIZE as u64;
+        let page_offset = page_index.checked_mul(PAGE_SIZE as u64).ok_or_else(|| {
+            FileSystemError::new(
+                FileSystemErrorKind::InvalidData,
+                "Page offset overflow while reading ext2 file",
+            )
+        })?;
 
         // Clear the page first
         unsafe {
-            core::ptr::write_bytes(paddr as *mut u8, 0, PAGE_SIZE);
+            core::ptr::write_bytes(phys_to_virt(paddr) as *mut u8, 0, PAGE_SIZE);
         }
 
         // If page is beyond EOF, return zeros
@@ -1344,7 +1198,8 @@ impl Ext2FileSystem {
         }
 
         // Calculate how many bytes to read from this page
-        let bytes_in_page = if page_offset + PAGE_SIZE as u64 > file_size {
+        let page_end = page_offset.saturating_add(PAGE_SIZE as u64);
+        let bytes_in_page = if page_end > file_size {
             (file_size - page_offset) as usize
         } else {
             PAGE_SIZE
@@ -1352,8 +1207,16 @@ impl Ext2FileSystem {
 
         // Calculate block range for this page
         let start_block = page_offset / self.block_size as u64;
-        let end_block = (page_offset + bytes_in_page as u64 + self.block_size as u64 - 1)
-            / self.block_size as u64;
+        let end_offset = page_offset
+            .checked_add(bytes_in_page as u64)
+            .and_then(|end| end.checked_add(self.block_size as u64 - 1))
+            .ok_or_else(|| {
+                FileSystemError::new(
+                    FileSystemErrorKind::InvalidData,
+                    "Block range overflow while reading ext2 page",
+                )
+            })?;
+        let end_block = end_offset / self.block_size as u64;
         let num_blocks = end_block - start_block;
 
         if num_blocks == 0 {
@@ -1363,7 +1226,7 @@ impl Ext2FileSystem {
         // Get block numbers
         let block_nums = self.get_inode_blocks(&inode, start_block, num_blocks)?;
 
-        let mut page_ptr = paddr as *mut u8;
+        let mut page_ptr = phys_to_virt(paddr) as *mut u8;
         let mut bytes_written = 0usize;
 
         for (i, &block_num) in block_nums.iter().enumerate() {
@@ -1414,23 +1277,150 @@ impl Ext2FileSystem {
         Ok(())
     }
 
-    /// Write a single page (4096 bytes) of file content from physical memory.
+    /// Write dirty page-cache pages without constructing a full-file buffer.
     ///
-    /// This is used by the page cache manager for writeback.
-    pub fn write_page_content(
+    /// The old close path copied the complete file into one `Vec` before
+    /// writing it. A growing video spool therefore needed a second contiguous
+    /// allocation as large as the stream. This routine retains at most 64 ext2
+    /// blocks (normally 256 KiB) and commits the inode once per flush.
+    pub fn write_cached_pages(
         &self,
         inode_num: u32,
-        page_index: u64,
-        paddr: usize,
+        file_size: usize,
+        pages: &[(u64, usize)],
     ) -> Result<(), FileSystemError> {
-        profile_scope!("ext2::write_page_content");
+        profile_scope!("ext2::write_cached_pages");
 
-        // TODO: Phase 2 - Implement page writeback
-        let _ = (inode_num, page_index, paddr);
-        Err(FileSystemError::new(
-            FileSystemErrorKind::NotSupported,
-            "Page writeback not yet implemented",
-        ))
+        if pages.is_empty() {
+            return Ok(());
+        }
+        let file_size_u32 = u32::try_from(file_size).map_err(|_| {
+            FileSystemError::new(
+                FileSystemErrorKind::InvalidData,
+                "ext2 file is too large for 32-bit inode size",
+            )
+        })?;
+        let block_size = self.block_size as usize;
+        if block_size == 0 || crate::environment::PAGE_SIZE % block_size != 0 {
+            return Err(FileSystemError::new(
+                FileSystemErrorKind::InvalidData,
+                "ext2 block size is incompatible with page cache",
+            ));
+        }
+
+        let mut inode = self.read_inode(inode_num)?;
+        let mut write_blocks = BTreeMap::new();
+        const WRITEBACK_BLOCK_BATCH: usize = 64;
+
+        for &(page_index, paddr) in pages {
+            let page_offset = usize::try_from(page_index)
+                .ok()
+                .and_then(|index| index.checked_mul(crate::environment::PAGE_SIZE))
+                .ok_or_else(|| {
+                    FileSystemError::new(
+                        FileSystemErrorKind::InvalidData,
+                        "ext2 page writeback offset overflow",
+                    )
+                })?;
+            if page_offset >= file_size {
+                continue;
+            }
+            let page_end = page_offset
+                .saturating_add(crate::environment::PAGE_SIZE)
+                .min(file_size);
+            let first_logical_block = page_offset / block_size;
+            let block_count = (page_end - page_offset + block_size - 1) / block_size;
+            let mut blocks =
+                self.get_inode_blocks(&inode, first_logical_block as u64, block_count as u64)?;
+            blocks.resize(block_count, 0);
+
+            let mut assignments = Vec::new();
+            let mut index = 0usize;
+            while index < blocks.len() {
+                if blocks[index] != 0 {
+                    index += 1;
+                    continue;
+                }
+                let range_start = index;
+                while index < blocks.len() && blocks[index] == 0 {
+                    index += 1;
+                }
+                let count = index - range_start;
+                let allocated = if count >= 3 {
+                    self.allocate_blocks_contiguous(count as u32)?
+                } else {
+                    let mut allocated = Vec::with_capacity(count);
+                    for _ in 0..count {
+                        allocated.push(self.allocate_block()?);
+                    }
+                    allocated
+                };
+                for (relative, block) in allocated.into_iter().enumerate() {
+                    let slot = range_start + relative;
+                    blocks[slot] = block;
+                    assignments.push((
+                        (first_logical_block + slot) as u64,
+                        u32::try_from(block).map_err(|_| {
+                            FileSystemError::new(
+                                FileSystemErrorKind::InvalidData,
+                                "ext2 allocated block number overflow",
+                            )
+                        })?,
+                    ));
+                }
+            }
+            if !assignments.is_empty() {
+                self.set_inode_blocks_simple_batch(&mut inode, &assignments)?;
+            }
+
+            for (relative, &block) in blocks.iter().enumerate() {
+                let block_file_offset = page_offset + relative * block_size;
+                let bytes_to_write = (page_end - block_file_offset).min(block_size);
+                let mut block_data = vec![0u8; block_size];
+                // SAFETY: every supplied physical address owns one pinned page
+                // for the duration of PageCacheManager::flush_batch.
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        (crate::vm::addr::phys_to_virt(paddr) as *const u8)
+                            .add(relative * block_size),
+                        block_data.as_mut_ptr(),
+                        bytes_to_write,
+                    );
+                }
+                write_blocks.insert(block, block_data);
+                if write_blocks.len() >= WRITEBACK_BLOCK_BATCH {
+                    self.write_blocks_cached(&write_blocks)?;
+                    write_blocks.clear();
+                }
+            }
+        }
+
+        if !write_blocks.is_empty() {
+            self.write_blocks_cached(&write_blocks)?;
+        }
+
+        let blocks_needed = if file_size == 0 {
+            0
+        } else {
+            (file_size + block_size - 1) / block_size
+        };
+        inode.size = file_size_u32;
+        let cache_id =
+            crate::fs::vfs_v2::cache::CacheId::new((self.fs_id().get() << 32) | inode_num as u64);
+        let modified_time = crate::mem::page_cache::PageCacheManager::global()
+            .cached_object_modified_time(cache_id)
+            .map(|seconds| seconds as u32)
+            .or_else(current_timestamp);
+        if let Some(time) = modified_time {
+            inode.mtime = time.to_le();
+            inode.ctime = time.to_le();
+        }
+        inode.blocks = u32::try_from(blocks_needed)
+            .unwrap_or(u32::MAX)
+            .saturating_mul(self.block_size / 512);
+        self.write_inode(inode_num, &inode)?;
+        self.inode_cache.write().insert(inode_num, inode);
+        Ok(())
     }
 
     /// Write an inode to disk
@@ -1565,15 +1555,26 @@ impl Ext2FileSystem {
         if let Some(result) = write_results.first() {
             match &result.result {
                 Ok(_) => {
-                    // Also update the cache
-                    let mut cache = self.inode_cache.lock();
-                    cache.insert(inode_number, inode.clone());
+                    // Invalidate block cache and update inode cache
+                    // Do this AFTER successful write to ensure consistency
+                    let mut cache = self.block_cache.write();
+                    cache.remove(target_block.into());
+                    let mut inode_cache = self.inode_cache.write();
+                    inode_cache.insert(inode_number, inode.clone());
                     Ok(())
                 }
-                Err(_) => Err(FileSystemError::new(
-                    FileSystemErrorKind::IoError,
-                    "Failed to write inode to disk",
-                )),
+                Err(e) => {
+                    crate::println!(
+                        "[ext2] write_inode: Failed to write inode {} to block {}: {:?}",
+                        inode_number,
+                        target_block,
+                        e
+                    );
+                    Err(FileSystemError::new(
+                        FileSystemErrorKind::IoError,
+                        "Failed to write inode to disk",
+                    ))
+                }
             }
         } else {
             Err(FileSystemError::new(
@@ -1583,108 +1584,59 @@ impl Ext2FileSystem {
         }
     }
 
-    /// Initialize a new directory with . and .. entries
-    fn initialize_directory(
-        &self,
-        dir_inode_number: u32,
-        parent_inode_number: u32,
-    ) -> Result<(), FileSystemError> {
-        profile_scope!("ext2::initialize_directory");
-
-        // Allocate a block for the directory
-        let block_number = self.allocate_block()?;
-
-        // Create directory entries for . and ..
-        let block_size = self.block_size as usize;
-        let mut block_data = vec![0u8; block_size];
-
-        // Create "." entry
-        let dot_entry_size = 12; // 4 (inode) + 2 (rec_len) + 1 (name_len) + 1 (file_type) + 1 (name) + 3 (padding)
-        let dot_inode = dir_inode_number.to_le_bytes();
-        let dot_rec_len = dot_entry_size as u16;
-        let dot_name_len = 1u8;
-        let dot_file_type = 2u8; // Directory
-
-        block_data[0..4].copy_from_slice(&dot_inode);
-        block_data[4..6].copy_from_slice(&dot_rec_len.to_le_bytes());
-        block_data[6] = dot_name_len;
-        block_data[7] = dot_file_type;
-        block_data[8] = b'.';
-
-        // Create ".." entry - takes up the rest of the block
-        let dotdot_offset = dot_entry_size;
-        let dotdot_rec_len = (block_size - dotdot_offset) as u16;
-        let dotdot_name_len = 2u8;
-        let dotdot_file_type = 2u8; // Directory
-        let dotdot_inode = parent_inode_number.to_le_bytes();
-
-        block_data[dotdot_offset..dotdot_offset + 4].copy_from_slice(&dotdot_inode);
-        block_data[dotdot_offset + 4..dotdot_offset + 6]
-            .copy_from_slice(&dotdot_rec_len.to_le_bytes());
-        block_data[dotdot_offset + 6] = dotdot_name_len;
-        block_data[dotdot_offset + 7] = dotdot_file_type;
-        block_data[dotdot_offset + 8] = b'.';
-        block_data[dotdot_offset + 9] = b'.';
-
-        // Write the block to disk
-        let block_sector = self.block_to_sector(block_number as u64);
-        let request = Box::new(crate::device::block::request::BlockIORequest {
-            request_type: crate::device::block::request::BlockIORequestType::Write,
-            sector: block_sector as usize,
-            sector_count: (self.block_size / 512) as usize,
-            head: 0,
-            cylinder: 0,
-            buffer: block_data,
-        });
-
-        // Submit write request
-        self.block_device.enqueue_request(request);
-        let results = self.block_device.process_requests();
-
-        if results.is_empty() || results[0].result.is_err() {
-            return Err(FileSystemError::new(
-                FileSystemErrorKind::InvalidData,
-                "Failed to write directory block",
-            ));
-        }
-
-        // Update the directory inode to point to this block and set size
-        let mut dir_inode = self.read_inode(dir_inode_number)?;
-        dir_inode.block[0] = block_number as u32;
-        dir_inode.size = block_size as u32;
-        dir_inode.blocks = (self.block_size / 512).to_le(); // Number of 512-byte sectors
-
-        self.write_inode(dir_inode_number, &dir_inode)?;
-
-        Ok(())
-    }
-
     /// Allocate a new data block using proper bitmap management
     fn allocate_block(&self) -> Result<u64, FileSystemError> {
         profile_scope!("ext2::allocate_block");
 
-        // Try to allocate from any available group
-        let total_groups = (self.superblock.blocks_count + self.superblock.blocks_per_group - 1)
-            / self.superblock.blocks_per_group;
+        self.with_allocation_lock(|| {
+            // Try to allocate from any available group
+            let total_groups = (self.superblock.blocks_count + self.superblock.blocks_per_group
+                - 1)
+                / self.superblock.blocks_per_group;
 
-        for group in 0..total_groups {
-            match self.allocate_block_in_group(group) {
-                Ok(block_num) => return Ok(block_num),
-                Err(FileSystemError {
-                    kind: FileSystemErrorKind::NoSpace,
-                    ..
-                }) => {
-                    // Try next group
-                    continue;
-                }
-                Err(e) => return Err(e),
+            #[cfg(test)]
+            {
+                let blocks_count = self.superblock.blocks_count;
+                let blocks_per_group = self.superblock.blocks_per_group;
+
+                crate::println!(
+                    "[ext2] allocate_block: total_groups={}, blocks_count={}, blocks_per_group={}",
+                    total_groups,
+                    blocks_count,
+                    blocks_per_group
+                );
             }
-        }
 
-        Err(FileSystemError::new(
-            FileSystemErrorKind::NoSpace,
-            "No free blocks available in any group",
-        ))
+            for group in 0..total_groups {
+                #[cfg(test)]
+                crate::println!("[ext2] allocate_block: trying group {}", group);
+
+                match self.allocate_block_in_group(group) {
+                    Ok(block_num) => {
+                        return Ok(block_num);
+                    }
+                    Err(FileSystemError {
+                        kind: FileSystemErrorKind::NoSpace,
+                        ..
+                    }) => {
+                        // Try next group
+                        #[cfg(test)]
+                        crate::println!("[ext2] allocate_block: group {} full, trying next", group);
+                        continue;
+                    }
+                    Err(e) => {
+                        #[cfg(test)]
+                        crate::println!("[ext2] allocate_block: group {} error: {:?}", group, e);
+                        return Err(e);
+                    }
+                }
+            }
+
+            Err(FileSystemError::new(
+                FileSystemErrorKind::NoSpace,
+                "No free blocks available in any group",
+            ))
+        })
     }
 
     /// Allocate a block in a specific group - OPTIMIZED VERSION  
@@ -1692,13 +1644,16 @@ impl Ext2FileSystem {
         profile_scope!("ext2::allocate_block_in_group");
 
         #[cfg(test)]
-        crate::early_println!(
+        crate::println!(
             "[ext2] allocate_block_in_group: Starting OPTIMIZED allocation for group {}",
             group
         );
 
-        // Read block group descriptor
-        let bgd_block = if self.block_size == 1024 { 2 } else { 1 };
+        // Read block group descriptor (descriptor table can span multiple blocks)
+        let bgd_table_start_block = if self.block_size == 1024 { 2u64 } else { 1u64 };
+        let bgd_entry_size = core::mem::size_of::<Ext2BlockGroupDescriptor>() as u64;
+        let bgd_entry_offset_bytes = group as u64 * bgd_entry_size;
+        let bgd_block = bgd_table_start_block + (bgd_entry_offset_bytes / self.block_size as u64);
         let bgd_sector = self.block_to_sector(bgd_block);
 
         let request = Box::new(crate::device::block::request::BlockIORequest {
@@ -1730,8 +1685,7 @@ impl Ext2FileSystem {
             ));
         };
 
-        let bgd_offset = (group * core::mem::size_of::<Ext2BlockGroupDescriptor>() as u32
-            % self.block_size) as usize;
+        let bgd_offset = (bgd_entry_offset_bytes % self.block_size as u64) as usize;
         let bgd = Ext2BlockGroupDescriptor::from_bytes(&bgd_data[bgd_offset..])?;
 
         // Check if there are free blocks
@@ -1743,7 +1697,13 @@ impl Ext2FileSystem {
         }
 
         // Read block bitmap
-        let bitmap_sector = self.block_to_sector(bgd.block_bitmap as u64);
+        let bitmap_block = u32::from_le(bgd.block_bitmap);
+        let bitmap_sector = self.block_to_sector(bitmap_block as u64);
+        // crate::println!(
+        //     "[ext2] allocate_block_in_group: Reading bitmap from block {} (sector {})",
+        //     bitmap_block,
+        //     bitmap_sector
+        // );
         let request = Box::new(crate::device::block::request::BlockIORequest {
             request_type: crate::device::block::request::BlockIORequestType::Read,
             sector: bitmap_sector as usize,
@@ -1758,7 +1718,15 @@ impl Ext2FileSystem {
 
         let mut bitmap_data = if let Some(result) = results.first() {
             match &result.result {
-                Ok(_) => result.request.buffer.clone(),
+                Ok(_) => {
+                    let data = result.request.buffer.clone();
+                    // crate::println!(
+                    //     "[ext2] allocate_block_in_group: Read bitmap[738]={:02x} from sector {}",
+                    //     data[738],
+                    //     bitmap_sector
+                    // );
+                    data
+                }
                 Err(_) => {
                     return Err(FileSystemError::new(
                         FileSystemErrorKind::IoError,
@@ -1774,17 +1742,20 @@ impl Ext2FileSystem {
         };
 
         // Find first free block in bitmap
-        let group_start_block = group * self.superblock.blocks_per_group;
-        let data_start_block = if group == 0 {
-            810.max(group_start_block)
-        } else {
-            let blocks_for_metadata = 3
-                + (self.superblock.inodes_per_group * 128 + self.block_size - 1) / self.block_size;
-            group_start_block + blocks_for_metadata
-        };
+        let blocks_per_group = self.superblock.get_blocks_per_group();
+        let first_data_block = self.superblock.get_first_data_block();
+        let group_start_block = first_data_block + group * blocks_per_group;
 
-        let group_end_block = (group + 1) * self.superblock.blocks_per_group;
-        let search_end = core::cmp::min(group_end_block, self.superblock.blocks_count as u32);
+        // Start scanning from the first block after the inode table to avoid allocating metadata.
+        let inode_size = self.superblock.get_inode_size() as u32;
+        let inodes_per_group = self.superblock.get_inodes_per_group();
+        let inode_table_blocks =
+            (inodes_per_group * inode_size + self.block_size - 1) / self.block_size;
+        let inode_table_start_block = bgd.get_inode_table();
+        let data_start_block = inode_table_start_block.saturating_add(inode_table_blocks);
+
+        let group_end_block = group_start_block.saturating_add(blocks_per_group);
+        let search_end = core::cmp::min(group_end_block, self.superblock.get_blocks_count());
 
         for block_num in data_start_block..search_end {
             let bit = block_num - group_start_block;
@@ -1797,16 +1768,32 @@ impl Ext2FileSystem {
 
             // Check if bit is free (0)
             if (bitmap_data[byte_index] & (1 << bit_index)) == 0 {
+                // crate::println!(
+                //     "[ext2] allocate_block_in_group: Found free block {} (byte={}, bit={}, bitmap[byte]={:02x})",
+                //     block_num,
+                //     byte_index,
+                //     bit_index,
+                //     bitmap_data[byte_index]
+                // );
                 // OPTIMIZATION: Batch bitmap + BGD updates
                 bitmap_data[byte_index] |= 1 << bit_index;
+                // crate::println!(
+                //     "[ext2] allocate_block_in_group: After set, bitmap[byte]={:02x}",
+                //     bitmap_data[byte_index]
+                // );
 
                 #[cfg(test)]
-                crate::early_println!(
+                crate::println!(
                     "[ext2] allocate_block_in_group: Found free block {}, batching metadata updates",
                     block_num
                 );
 
                 // Enqueue bitmap write
+                // crate::println!(
+                //     "[ext2] allocate_block_in_group: Writing bitmap[738]={:02x} to sector {}",
+                //     bitmap_data[738],
+                //     bitmap_sector
+                // );
                 let bitmap_write = Box::new(crate::device::block::request::BlockIORequest {
                     request_type: crate::device::block::request::BlockIORequestType::Write,
                     sector: bitmap_sector as usize,
@@ -1837,24 +1824,59 @@ impl Ext2FileSystem {
                 self.block_device.enqueue_request(bgd_write);
 
                 // Process both writes in one batch
-                #[cfg(test)]
-                crate::early_println!(
-                    "[ext2] allocate_block_in_group: Processing 2 writes in batch (bitmap + BGD)"
-                );
+                // crate::println!(
+                //     "[ext2] allocate_block_in_group: Writing bitmap+BGD for block {}",
+                //     block_num
+                // );
                 let write_results = self.block_device.process_requests();
+                // crate::println!(
+                //     "[ext2] allocate_block_in_group: Processed {} requests",
+                //     write_results.len()
+                // );
+                // for (i, r) in write_results.iter().enumerate() {
+                //     crate::println!(
+                //         "[ext2] allocate_block_in_group: Request {} result: {:?}",
+                //         i,
+                //         r.result
+                //     );
+                // }
 
-                if write_results.len() != 2 || write_results.iter().any(|r| r.result.is_err()) {
+                // Check each result individually to detect partial failures
+                if write_results.len() != 2 {
                     return Err(FileSystemError::new(
                         FileSystemErrorKind::IoError,
-                        "Failed to write bitmap or BGD",
+                        "Expected 2 write requests (bitmap and BGD)",
                     ));
+                }
+                if write_results[0].result.is_err() {
+                    return Err(FileSystemError::new(
+                        FileSystemErrorKind::IoError,
+                        "Failed to write bitmap",
+                    ));
+                }
+                if write_results[1].result.is_err() {
+                    return Err(FileSystemError::new(
+                        FileSystemErrorKind::IoError,
+                        "Failed to write BGD",
+                    ));
+                }
+
+                // crate::println!(
+                //     "[ext2] allocate_block_in_group: Write complete for block {}",
+                //     block_num
+                // );
+
+                {
+                    let mut cache = self.block_cache.write();
+                    cache.remove(bitmap_block as u64);
+                    cache.remove(bgd_block);
                 }
 
                 // Update superblock (separate for now - could be batched too)
                 self.update_superblock_counts(-1, 0, 0)?;
 
                 #[cfg(test)]
-                crate::early_println!(
+                crate::println!(
                     "[ext2] allocate_block_in_group: Successfully allocated block {} (OPTIMIZED: reduced I/O ops)",
                     block_num
                 );
@@ -1877,14 +1899,17 @@ impl Ext2FileSystem {
         profile_scope!("ext2::allocate_blocks_contiguous_in_group");
 
         #[cfg(test)]
-        crate::early_println!(
+        crate::println!(
             "[ext2] allocate_blocks_contiguous_in_group: Starting allocation for {} blocks in group {}",
             count,
             group
         );
 
-        // Read block group descriptor
-        let bgd_block = if self.block_size == 1024 { 2 } else { 1 };
+        // Read block group descriptor (descriptor table can span multiple blocks)
+        let bgd_table_start_block = if self.block_size == 1024 { 2u64 } else { 1u64 };
+        let bgd_entry_size = core::mem::size_of::<Ext2BlockGroupDescriptor>() as u64;
+        let bgd_entry_offset_bytes = group as u64 * bgd_entry_size;
+        let bgd_block = bgd_table_start_block + (bgd_entry_offset_bytes / self.block_size as u64);
         let bgd_sector = self.block_to_sector(bgd_block);
 
         let request = Box::new(crate::device::block::request::BlockIORequest {
@@ -1916,8 +1941,7 @@ impl Ext2FileSystem {
             ));
         };
 
-        let bgd_offset = (group * core::mem::size_of::<Ext2BlockGroupDescriptor>() as u32
-            % self.block_size) as usize;
+        let bgd_offset = (bgd_entry_offset_bytes % self.block_size as u64) as usize;
         let bgd = Ext2BlockGroupDescriptor::from_bytes(&bgd_data[bgd_offset..])?;
 
         // Check if there are enough free blocks
@@ -1964,17 +1988,19 @@ impl Ext2FileSystem {
         };
 
         // Find contiguous free blocks in bitmap
-        let group_start_block = group * self.superblock.blocks_per_group;
-        let data_start_block = if group == 0 {
-            810.max(group_start_block)
-        } else {
-            let blocks_for_metadata = 3
-                + (self.superblock.inodes_per_group * 128 + self.block_size - 1) / self.block_size;
-            group_start_block + blocks_for_metadata
-        };
+        let blocks_per_group = self.superblock.get_blocks_per_group();
+        let first_data_block = self.superblock.get_first_data_block();
+        let group_start_block = first_data_block + group * blocks_per_group;
 
-        let group_end_block = (group + 1) * self.superblock.blocks_per_group;
-        let search_end = core::cmp::min(group_end_block, self.superblock.blocks_count as u32);
+        let inode_size = self.superblock.get_inode_size() as u32;
+        let inodes_per_group = self.superblock.get_inodes_per_group();
+        let inode_table_blocks =
+            (inodes_per_group * inode_size + self.block_size - 1) / self.block_size;
+        let inode_table_start_block = bgd.get_inode_table();
+        let data_start_block = inode_table_start_block.saturating_add(inode_table_blocks);
+
+        let group_end_block = group_start_block.saturating_add(blocks_per_group);
+        let search_end = core::cmp::min(group_end_block, self.superblock.get_blocks_count());
 
         // Search for contiguous free blocks
         for start_block in data_start_block..(search_end.saturating_sub(count - 1)) {
@@ -2013,7 +2039,7 @@ impl Ext2FileSystem {
                 }
 
                 #[cfg(test)]
-                crate::early_println!(
+                crate::println!(
                     "[ext2] allocate_blocks_contiguous_in_group: Found {} contiguous blocks starting at {}, batching updates",
                     count,
                     start_block
@@ -2054,7 +2080,7 @@ impl Ext2FileSystem {
 
                 // Process both writes in one batch
                 #[cfg(test)]
-                crate::early_println!(
+                crate::println!(
                     "[ext2] allocate_blocks_contiguous_in_group: Processing 2 writes in batch for {} blocks",
                     count
                 );
@@ -2067,11 +2093,17 @@ impl Ext2FileSystem {
                     ));
                 }
 
+                {
+                    let mut cache = self.block_cache.write();
+                    cache.remove(bgd.get_block_bitmap() as u64);
+                    cache.remove(bgd_block);
+                }
+
                 // Update superblock (batch this in the future)
                 self.update_superblock_counts(-(count as i32), 0, 0)?;
 
                 #[cfg(test)]
-                crate::early_println!(
+                crate::println!(
                     "[ext2] allocate_blocks_contiguous_in_group: Successfully allocated {} blocks starting at {} (MAJOR OPTIMIZATION: reduced from {} to ~3 I/O ops)",
                     count,
                     start_block,
@@ -2097,96 +2129,106 @@ impl Ext2FileSystem {
             return Ok(Vec::new());
         }
 
-        // If only one block is needed, use regular allocation
-        if count == 1 {
-            let block = self.allocate_block()?;
-            return Ok(vec![block]);
-        }
+        self.with_allocation_lock(|| {
+            if count == 1 {
+                let total_groups = (self.superblock.blocks_count + self.superblock.blocks_per_group - 1)
+                    / self.superblock.blocks_per_group;
 
-        // Calculate number of groups
-        let group_count = (self.superblock.blocks_count + self.superblock.blocks_per_group - 1)
-            / self.superblock.blocks_per_group;
+                for group in 0..total_groups {
+                    if let Ok(block) = self.allocate_block_in_group(group) {
+                        return Ok(vec![block]);
+                    }
+                }
+                return Err(FileSystemError::new(
+                    FileSystemErrorKind::NoSpace,
+                    "No free blocks available",
+                ));
+            }
 
-        // Strategy 1: Try to allocate full contiguous blocks in each group
-        for group in 0..group_count {
-            match self.allocate_blocks_contiguous_in_group(group, count) {
-                Ok(blocks) => {
-                    #[cfg(test)]
-                    crate::early_println!(
-                        "ext2: Allocated {} contiguous blocks starting at {} in group {}",
-                        count,
-                        blocks[0],
-                        group
-                    );
-                    return Ok(blocks);
-                }
-                Err(FileSystemError {
-                    kind: crate::fs::FileSystemErrorKind::NoSpace,
-                    ..
-                }) => {
-                    // Continue to next group
-                    continue;
-                }
-                Err(e) => {
-                    // Other errors should be propagated
-                    return Err(e);
+            // Calculate number of groups
+            let group_count = (self.superblock.blocks_count + self.superblock.blocks_per_group - 1)
+                / self.superblock.blocks_per_group;
+
+            // Strategy 1: Try to allocate full contiguous blocks in each group
+            for group in 0..group_count {
+                match self.allocate_blocks_contiguous_in_group(group, count) {
+                    Ok(blocks) => {
+                        #[cfg(test)]
+                        crate::println!(
+                            "ext2: Allocated {} contiguous blocks starting at {} in group {}",
+                            count,
+                            blocks[0],
+                            group
+                        );
+                        return Ok(blocks);
+                    }
+                    Err(FileSystemError {
+                        kind: crate::fs::FileSystemErrorKind::NoSpace,
+                        ..
+                    }) => {
+                        // Continue to next group
+                        continue;
+                    }
+                    Err(e) => {
+                        // Other errors should be propagated
+                        return Err(e);
+                    }
                 }
             }
-        }
 
-        // Strategy 2: Try partial contiguous allocation (split into chunks)
-        if count >= 6 {
-            // Restored to original threshold for stability
-            crate::early_println!(
-                "ext2: Full contiguous allocation failed, trying partial contiguous allocation"
-            );
-            let mut allocated_blocks = Vec::new();
-            let mut remaining = count;
+            // Strategy 2: Try partial contiguous allocation (split into chunks)
+            if count >= 6 {
+                // Restored to original threshold for stability
+                crate::println!(
+                    "ext2: Full contiguous allocation failed, trying partial contiguous allocation"
+                );
+                let mut allocated_blocks = Vec::new();
+                let mut remaining = count;
 
-            // Try to allocate in decreasing chunk sizes
-            let chunk_sizes = [count / 2, count / 3, count / 4, 8, 4]; // Reasonable chunk sizes
+                // Try to allocate in decreasing chunk sizes
+                let chunk_sizes = [count / 2, count / 3, count / 4, 8, 4]; // Reasonable chunk sizes
 
-            for &chunk_size in &chunk_sizes {
-                if chunk_size == 0 || chunk_size >= remaining {
-                    continue;
-                }
+                for &chunk_size in &chunk_sizes {
+                    if chunk_size == 0 || chunk_size >= remaining {
+                        continue;
+                    }
 
-                while remaining >= chunk_size {
-                    let mut allocated_chunk = false;
+                    while remaining >= chunk_size {
+                        let mut allocated_chunk = false;
 
-                    // Try each group for this chunk size
-                    for group in 0..group_count {
-                        match self.allocate_blocks_contiguous_in_group(group, chunk_size) {
-                            Ok(mut chunk_blocks) => {
-                                #[cfg(test)]
-                                crate::early_println!(
-                                    "ext2: Allocated {} contiguous blocks (chunk) starting at {} in group {}",
-                                    chunk_size,
-                                    chunk_blocks[0],
-                                    group
-                                );
-                                allocated_blocks.append(&mut chunk_blocks);
-                                remaining -= chunk_size;
-                                allocated_chunk = true;
-                                break;
-                            }
-                            Err(FileSystemError {
-                                kind: crate::fs::FileSystemErrorKind::NoSpace,
-                                ..
-                            }) => {
-                                continue; // Try next group
-                            }
-                            Err(e) => {
-                                // Cleanup and return error
-                                for &block in &allocated_blocks {
-                                    if let Err(free_err) = self.free_block(block as u32) {
-                                        crate::early_println!(
-                                            "ext2: Failed to free block {} during cleanup: {:?}",
-                                            block,
-                                            free_err
-                                        );
-                                    }
+                        // Try each group for this chunk size
+                        for group in 0..group_count {
+                            match self.allocate_blocks_contiguous_in_group(group, chunk_size) {
+                                Ok(mut chunk_blocks) => {
+                                    #[cfg(test)]
+                                    crate::println!(
+                                        "ext2: Allocated {} contiguous blocks (chunk) starting at {} in group {}",
+                                        chunk_size,
+                                        chunk_blocks[0],
+                                        group
+                                    );
+                                    allocated_blocks.append(&mut chunk_blocks);
+                                    remaining -= chunk_size;
+                                    allocated_chunk = true;
+                                    break;
                                 }
+                                Err(FileSystemError {
+                                    kind: crate::fs::FileSystemErrorKind::NoSpace,
+                                    ..
+                                }) => {
+                                    continue; // Try next group
+                                }
+                                Err(e) => {
+                                    // Cleanup and return error
+                                    for &block in &allocated_blocks {
+                                        if let Err(free_err) = self.free_block_unlocked(block as u32) {
+                                            crate::println!(
+                                                "ext2: Failed to free block {} during cleanup: {:?}",
+                                                block,
+                                                free_err
+                                            );
+                                        }
+                                    }
                                 return Err(e);
                             }
                         }
@@ -2198,30 +2240,30 @@ impl Ext2FileSystem {
                 }
 
                 if remaining == 0 {
-                    crate::early_println!(
-                        "ext2: Successfully allocated {} blocks using partial contiguous strategy",
-                        count
-                    );
+                    // crate::println!(
+                    //     "ext2: Successfully allocated {} blocks using partial contiguous strategy",
+                    //     count
+                    // );
                     return Ok(allocated_blocks);
                 }
             }
 
             // If we have some blocks allocated but not all, continue with individual allocation for remainder
             if !allocated_blocks.is_empty() && remaining > 0 {
-                crate::early_println!(
-                    "ext2: Partial contiguous allocation successful ({} blocks), using individual allocation for remaining {} blocks",
-                    allocated_blocks.len(),
-                    remaining
-                );
+                // crate::println!(
+                //     "ext2: Partial contiguous allocation successful ({} blocks), using individual allocation for remaining {} blocks",
+                //     allocated_blocks.len(),
+                //     remaining
+                // );
 
                 for _ in 0..remaining {
-                    match self.allocate_block() {
+                    match self.allocate_block_in_group(0) {
                         Ok(block) => allocated_blocks.push(block),
                         Err(e) => {
                             // Cleanup all allocated blocks
                             for &allocated_block in &allocated_blocks {
-                                if let Err(free_err) = self.free_block(allocated_block as u32) {
-                                    crate::early_println!(
+                                if let Err(free_err) = self.free_block_unlocked(allocated_block as u32) {
+                                    crate::println!(
                                         "ext2: Failed to free block {} during cleanup: {:?}",
                                         allocated_block,
                                         free_err
@@ -2233,17 +2275,17 @@ impl Ext2FileSystem {
                     }
                 }
 
-                crate::early_println!(
-                    "ext2: Hybrid allocation completed: {} blocks total",
-                    allocated_blocks.len()
-                );
+                // crate::println!(
+                //     "ext2: Hybrid allocation completed: {} blocks total",
+                //     allocated_blocks.len()
+                // );
                 return Ok(allocated_blocks);
             }
 
             // Cleanup partial allocations if we couldn't complete
             for &block in &allocated_blocks {
-                if let Err(free_err) = self.free_block(block as u32) {
-                    crate::early_println!(
+                if let Err(free_err) = self.free_block_unlocked(block as u32) {
+                    crate::println!(
                         "ext2: Failed to free block {} during cleanup: {:?}",
                         block,
                         free_err
@@ -2253,19 +2295,19 @@ impl Ext2FileSystem {
         }
 
         // Strategy 3: Fall back to individual block allocation as last resort
-        crate::early_println!(
-            "ext2: All contiguous strategies failed for {} blocks, falling back to individual allocation",
-            count
-        );
+        // crate::println!(
+        //     "ext2: All contiguous strategies failed for {} blocks, falling back to individual allocation",
+        //     count
+        // );
         let mut blocks = Vec::new();
         for _ in 0..count {
-            match self.allocate_block() {
+            match self.allocate_block_in_group(0) {
                 Ok(block) => blocks.push(block),
                 Err(e) => {
                     // If individual allocation fails, we need to free the blocks we already allocated
                     for &allocated_block in &blocks {
-                        if let Err(free_err) = self.free_block(allocated_block as u32) {
-                            crate::early_println!(
+                        if let Err(free_err) = self.free_block_unlocked(allocated_block as u32) {
+                            crate::println!(
                                 "ext2: Failed to free block {} during cleanup: {:?}",
                                 allocated_block,
                                 free_err
@@ -2278,156 +2320,163 @@ impl Ext2FileSystem {
         }
 
         #[cfg(test)]
-        crate::early_println!("ext2: Allocated {} blocks individually as fallback", count);
+        crate::println!("ext2: Allocated {} blocks individually as fallback", count);
         Ok(blocks)
+        })
     }
 
     /// Allocate a new inode using proper bitmap management
     fn allocate_inode(&self) -> Result<u32, FileSystemError> {
         profile_scope!("ext2::allocate_inode");
-        // For now, allocate from Group 0
-        // Based on dumpe2fs: Group 0 free inodes: 30-2048
-        let group = 0;
 
-        // Read block group descriptor for group 0
-        let bgd_block = if self.block_size == 1024 { 2 } else { 1 }; // BGD in block 1 or 2
-        let bgd_block_sector = self.block_to_sector(bgd_block);
+        self.with_allocation_lock(|| {
+            // For now, allocate from Group 0
+            // Based on dumpe2fs: Group 0 free inodes: 30-2048
+            let group = 0;
 
-        let request = Box::new(crate::device::block::request::BlockIORequest {
-            request_type: crate::device::block::request::BlockIORequestType::Read,
-            sector: bgd_block_sector,
-            sector_count: (self.block_size / 512) as usize,
-            head: 0,
-            cylinder: 0,
-            buffer: vec![0u8; self.block_size as usize],
-        });
+            // Read block group descriptor for group 0
+            let bgd_block = if self.block_size == 1024 { 2 } else { 1 }; // BGD in block 1 or 2
+            let bgd_block_sector = self.block_to_sector(bgd_block);
 
-        self.block_device.enqueue_request(request);
-        let results = self.block_device.process_requests();
+            let request = Box::new(crate::device::block::request::BlockIORequest {
+                request_type: crate::device::block::request::BlockIORequestType::Read,
+                sector: bgd_block_sector,
+                sector_count: (self.block_size / 512) as usize,
+                head: 0,
+                cylinder: 0,
+                buffer: vec![0u8; self.block_size as usize],
+            });
 
-        let bgd_data = if let Some(result) = results.first() {
-            match &result.result {
-                Ok(_) => result.request.buffer.clone(),
-                Err(_) => {
-                    return Err(FileSystemError::new(
-                        FileSystemErrorKind::IoError,
-                        "Failed to read block group descriptor",
-                    ));
-                }
-            }
-        } else {
-            return Err(FileSystemError::new(
-                FileSystemErrorKind::IoError,
-                "No result from block device read",
-            ));
-        };
+            self.block_device.enqueue_request(request);
+            let results = self.block_device.process_requests();
 
-        let bgd = Ext2BlockGroupDescriptor::from_bytes(&bgd_data)?;
-
-        // Check if there are free inodes
-        if bgd.free_inodes_count == 0 {
-            return Err(FileSystemError::new(
-                FileSystemErrorKind::NoSpace,
-                "No free inodes in group 0",
-            ));
-        }
-
-        // Read inode bitmap
-        let bitmap_sector = self.block_to_sector(bgd.inode_bitmap as u64);
-        let request = Box::new(crate::device::block::request::BlockIORequest {
-            request_type: crate::device::block::request::BlockIORequestType::Read,
-            sector: bitmap_sector as usize,
-            sector_count: (self.block_size / 512) as usize,
-            head: 0,
-            cylinder: 0,
-            buffer: vec![0u8; self.block_size as usize],
-        });
-
-        self.block_device.enqueue_request(request);
-        let results = self.block_device.process_requests();
-
-        let mut bitmap_data = if let Some(result) = results.first() {
-            match &result.result {
-                Ok(_) => result.request.buffer.clone(),
-                Err(_) => {
-                    return Err(FileSystemError::new(
-                        FileSystemErrorKind::IoError,
-                        "Failed to read inode bitmap",
-                    ));
-                }
-            }
-        } else {
-            return Err(FileSystemError::new(
-                FileSystemErrorKind::IoError,
-                "No result from block device read",
-            ));
-        };
-
-        // Find first free inode in bitmap
-        // Start from inode 30 (which corresponds to bit 29 since inodes are 1-based but bitmap is 0-based)
-        let start_inode = 30;
-        let start_bit = start_inode - 1; // Convert to 0-based bit index
-
-        for bit in start_bit..self.superblock.inodes_per_group {
-            let byte_index = (bit / 8) as usize;
-            let bit_index = bit % 8;
-
-            if byte_index >= bitmap_data.len() {
-                break;
-            }
-
-            // Check if bit is free (0)
-            if (bitmap_data[byte_index] & (1 << bit_index)) == 0 {
-                // Mark inode as used (set bit to 1)
-                bitmap_data[byte_index] |= 1 << bit_index;
-
-                // Write back bitmap
-                let request = Box::new(crate::device::block::request::BlockIORequest {
-                    request_type: crate::device::block::request::BlockIORequestType::Write,
-                    sector: bitmap_sector as usize,
-                    sector_count: (self.block_size / 512) as usize,
-                    head: 0,
-                    cylinder: 0,
-                    buffer: bitmap_data,
-                });
-
-                self.block_device.enqueue_request(request);
-                let results = self.block_device.process_requests();
-
-                if let Some(result) = results.first() {
-                    match &result.result {
-                        Ok(_) => {
-                            // Update group descriptor to reflect one less free inode
-                            let mut bgd = Ext2BlockGroupDescriptor::from_bytes(&bgd_data)?;
-                            let current_free_inodes = u16::from_le(bgd.free_inodes_count);
-                            bgd.free_inodes_count = (current_free_inodes.saturating_sub(1)).to_le();
-                            self.update_group_descriptor(group, &bgd)?;
-
-                            // Update superblock free inodes count
-                            self.update_superblock_counts(0, -1, 0)?;
-                        }
-                        Err(_) => {
-                            return Err(FileSystemError::new(
-                                FileSystemErrorKind::IoError,
-                                "Failed to write inode bitmap",
-                            ));
-                        }
+            let bgd_data = if let Some(result) = results.first() {
+                match &result.result {
+                    Ok(_) => result.request.buffer.clone(),
+                    Err(_) => {
+                        return Err(FileSystemError::new(
+                            FileSystemErrorKind::IoError,
+                            "Failed to read block group descriptor",
+                        ));
                     }
                 }
+            } else {
+                return Err(FileSystemError::new(
+                    FileSystemErrorKind::IoError,
+                    "No result from block device read",
+                ));
+            };
 
-                let allocated_inode = bit + 1; // Convert back to 1-based inode number
+            let bgd = Ext2BlockGroupDescriptor::from_bytes(&bgd_data)?;
 
-                // Debug: Allocated inode (disabled to reduce log noise)
-                // crate::early_println!("EXT2: Allocated inode {} (bit {})", allocated_inode, bit);
-
-                return Ok(allocated_inode);
+            // Check if there are free inodes
+            if bgd.free_inodes_count == 0 {
+                return Err(FileSystemError::new(
+                    FileSystemErrorKind::NoSpace,
+                    "No free inodes in group 0",
+                ));
             }
-        }
 
-        Err(FileSystemError::new(
-            FileSystemErrorKind::NoSpace,
-            "No free inodes found",
-        ))
+            // Read inode bitmap
+            let bitmap_sector = self.block_to_sector(bgd.inode_bitmap as u64);
+            let request = Box::new(crate::device::block::request::BlockIORequest {
+                request_type: crate::device::block::request::BlockIORequestType::Read,
+                sector: bitmap_sector as usize,
+                sector_count: (self.block_size / 512) as usize,
+                head: 0,
+                cylinder: 0,
+                buffer: vec![0u8; self.block_size as usize],
+            });
+
+            self.block_device.enqueue_request(request);
+            let results = self.block_device.process_requests();
+
+            let mut bitmap_data = if let Some(result) = results.first() {
+                match &result.result {
+                    Ok(_) => result.request.buffer.clone(),
+                    Err(_) => {
+                        return Err(FileSystemError::new(
+                            FileSystemErrorKind::IoError,
+                            "Failed to read inode bitmap",
+                        ));
+                    }
+                }
+            } else {
+                return Err(FileSystemError::new(
+                    FileSystemErrorKind::IoError,
+                    "No result from block device read",
+                ));
+            };
+
+            // Find first free inode in bitmap
+            // Start from inode 30 (which corresponds to bit 29 since inodes are 1-based but bitmap is 0-based)
+            let start_inode = 30;
+            let start_bit = start_inode - 1; // Convert to 0-based bit index
+
+            for bit in start_bit..self.superblock.inodes_per_group {
+                let byte_index = (bit / 8) as usize;
+                let bit_index = bit % 8;
+
+                if byte_index >= bitmap_data.len() {
+                    break;
+                }
+
+                // Check if bit is free (0)
+                if (bitmap_data[byte_index] & (1 << bit_index)) == 0 {
+                    // Mark inode as used (set bit to 1)
+                    bitmap_data[byte_index] |= 1 << bit_index;
+
+                    // Write back bitmap
+                    let request = Box::new(crate::device::block::request::BlockIORequest {
+                        request_type: crate::device::block::request::BlockIORequestType::Write,
+                        sector: bitmap_sector as usize,
+                        sector_count: (self.block_size / 512) as usize,
+                        head: 0,
+                        cylinder: 0,
+                        buffer: bitmap_data,
+                    });
+
+                    self.block_device.enqueue_request(request);
+                    let results = self.block_device.process_requests();
+
+                    if let Some(result) = results.first() {
+                        match &result.result {
+                            Ok(_) => {
+                                self.block_cache.write().remove(bgd.inode_bitmap as u64);
+
+                                // Update group descriptor to reflect one less free inode
+                                let mut bgd = Ext2BlockGroupDescriptor::from_bytes(&bgd_data)?;
+                                let current_free_inodes = u16::from_le(bgd.free_inodes_count);
+                                bgd.free_inodes_count =
+                                    (current_free_inodes.saturating_sub(1)).to_le();
+                                self.update_group_descriptor(group, &bgd)?;
+
+                                // Update superblock free inodes count
+                                self.update_superblock_counts(0, -1, 0)?;
+                            }
+                            Err(_) => {
+                                return Err(FileSystemError::new(
+                                    FileSystemErrorKind::IoError,
+                                    "Failed to write inode bitmap",
+                                ));
+                            }
+                        }
+                    }
+
+                    let allocated_inode = bit + 1; // Convert back to 1-based inode number
+
+                    // Debug: Allocated inode (disabled to reduce log noise)
+                    // crate::println!("EXT2: Allocated inode {} (bit {})", allocated_inode, bit);
+
+                    return Ok(allocated_inode);
+                }
+            }
+
+            Err(FileSystemError::new(
+                FileSystemErrorKind::NoSpace,
+                "No free inodes found",
+            ))
+        })
     }
 
     /// Check if a file/directory already exists in the parent directory
@@ -2515,6 +2564,7 @@ impl Ext2FileSystem {
             let mut offset = 0;
             let mut last_entry_offset = 0;
             let mut last_entry_rec_len = 0;
+            let mut found_entries = false;
 
             while offset < self.block_size as usize {
                 if offset + 8 > block_data.len() {
@@ -2528,30 +2578,66 @@ impl Ext2FileSystem {
                     break; // Invalid entry
                 }
 
+                // Validate rec_len: must be 4-byte aligned, at least 8 bytes,
+                // and must not extend beyond the block boundary
+                if rec_len < 8
+                    || (rec_len & 3) != 0
+                    || offset + rec_len as usize > self.block_size as usize
+                {
+                    // Corrupted directory entry detected — skip this block
+                    break;
+                }
+
                 last_entry_offset = offset;
                 last_entry_rec_len = rec_len as usize;
+                found_entries = true;
 
                 offset += rec_len as usize;
             }
 
             // Calculate actual space used by the last entry
-            if last_entry_offset > 0 {
+            if found_entries {
+                // Re-validate last_entry_rec_len before using it for slice arithmetic
+                if last_entry_rec_len > self.block_size as usize
+                    || last_entry_offset + last_entry_rec_len > self.block_size as usize
+                {
+                    // Corrupted: rec_len exceeds block boundary — skip this block
+                    continue;
+                }
+
                 let last_entry =
                     Ext2DirectoryEntryRaw::from_bytes(&block_data[last_entry_offset..])?;
-                let actual_last_entry_len = ((8 + last_entry.get_name_len() as usize + 3) / 4) * 4;
+                let actual_last_entry_len = if last_entry.get_inode() == 0 {
+                    // ext2: inode=0 marks a deleted entry whose entire rec_len is reclaimable
+                    0
+                } else {
+                    ((8 + last_entry.get_name_len() as usize + 3) / 4) * 4
+                };
+
+                // Guard: actual_last_entry_len must not exceed last_entry_rec_len
+                if actual_last_entry_len > last_entry_rec_len {
+                    continue; // Corrupted entry — skip this block
+                }
+
                 let available_space = last_entry_rec_len - actual_last_entry_len;
 
                 if available_space >= entry_total_len {
                     // We have space! Adjust the last entry's rec_len and add our entry
 
-                    // Update last entry's rec_len to its actual size
-                    let actual_rec_len_bytes = (actual_last_entry_len as u16).to_le_bytes();
-                    block_data[last_entry_offset + 4] = actual_rec_len_bytes[0];
-                    block_data[last_entry_offset + 5] = actual_rec_len_bytes[1];
+                    if actual_last_entry_len > 0 {
+                        // Update last entry's rec_len to its actual size
+                        let actual_rec_len_bytes = (actual_last_entry_len as u16).to_le_bytes();
+                        block_data[last_entry_offset + 4] = actual_rec_len_bytes[0];
+                        block_data[last_entry_offset + 5] = actual_rec_len_bytes[1];
+                    }
 
                     // Add our new entry
                     let new_entry_offset = last_entry_offset + actual_last_entry_len;
                     let remaining_space = last_entry_rec_len - actual_last_entry_len;
+
+                    // Zero the entire region first to prevent stale data from
+                    // deleted entries being parsed as phantom directory entries
+                    block_data[new_entry_offset..new_entry_offset + remaining_space].fill(0);
 
                     // Write new entry header
                     let child_inode_bytes = child_inode.to_le_bytes();
@@ -2577,11 +2663,27 @@ impl Ext2FileSystem {
         }
 
         // If we get here, we couldn't find space in existing blocks
-        // In a full implementation, we would allocate a new block for the directory
-        Err(FileSystemError::new(
-            FileSystemErrorKind::NoSpace,
-            "No space available in directory for new entry",
-        ))
+        let new_block_num = self.allocate_block()?;
+        let mut new_block_data = vec![0u8; self.block_size as usize];
+
+        let child_inode_bytes = child_inode.to_le_bytes();
+        let rec_len_bytes = (self.block_size as u16).to_le_bytes();
+        new_block_data[0..4].copy_from_slice(&child_inode_bytes);
+        new_block_data[4..6].copy_from_slice(&rec_len_bytes);
+        new_block_data[6] = entry_name_len;
+        new_block_data[7] = ext2_file_type;
+        new_block_data[8..8 + entry_name_len as usize].copy_from_slice(name.as_bytes());
+
+        self.write_block_cached(new_block_num, &new_block_data)?;
+
+        let mut parent_dir_inode = self.read_inode(parent_inode)?;
+        let logical_block = parent_dir_inode.get_size() as u64 / self.block_size as u64;
+        self.set_inode_block(&mut parent_dir_inode, logical_block, new_block_num as u32)?;
+        parent_dir_inode.size += self.block_size;
+        parent_dir_inode.blocks += (self.block_size / 512).to_le();
+        self.write_inode(parent_inode, &parent_dir_inode)?;
+
+        Ok(())
     }
 
     /// Remove a directory entry from a parent directory
@@ -2628,8 +2730,12 @@ impl Ext2FileSystem {
                 };
 
                 let rec_len = entry.get_rec_len();
-                if rec_len == 0 {
-                    break; // Invalid entry
+                if rec_len == 0
+                    || rec_len < 8
+                    || (rec_len & 3) != 0
+                    || offset + rec_len as usize > self.block_size as usize
+                {
+                    break;
                 }
 
                 let name_len = entry.get_name_len() as usize;
@@ -2637,9 +2743,7 @@ impl Ext2FileSystem {
                     let entry_name_bytes = &block_data[offset + 8..offset + 8 + name_len];
                     if let Ok(entry_name) = core::str::from_utf8(entry_name_bytes) {
                         if entry_name == *name {
-                            // Found the entry to remove!
                             if let Some(prev_offset) = prev_entry_offset {
-                                // Extend the previous entry's rec_len to cover this entry
                                 let prev_entry =
                                     Ext2DirectoryEntryRaw::from_bytes(&block_data[prev_offset..])?;
                                 let new_rec_len = prev_entry.get_rec_len() + rec_len;
@@ -2648,11 +2752,13 @@ impl Ext2FileSystem {
                                 block_data[prev_offset + 4] = new_rec_len_bytes[0];
                                 block_data[prev_offset + 5] = new_rec_len_bytes[1];
                             } else {
-                                // This is the first entry in the block, mark it as free by setting inode to 0
                                 block_data[offset..offset + 4].fill(0);
                             }
 
-                            // Write the updated block back to disk using cached method
+                            block_data[offset..offset + 4].fill(0);
+                            block_data[offset + 6] = 0;
+                            block_data[offset + 7] = 0;
+
                             self.write_block_cached(block_num, &block_data)?;
                             return Ok(());
                         }
@@ -2673,187 +2779,195 @@ impl Ext2FileSystem {
 
     /// Free an inode and update bitmaps and metadata
     fn free_inode(&self, inode_number: u32) -> Result<(), FileSystemError> {
-        // Read the inode first to get its data blocks and determine if it's a directory
-        let inode = self.read_inode(inode_number)?;
-        let is_directory = inode.is_dir();
-        let blocks_to_free = self.get_inode_data_blocks(&inode)?;
+        self.with_allocation_lock(|| {
+            // Read the inode first to get its data blocks and determine if it's a directory
+            let inode = self.read_inode(inode_number)?;
+            let is_directory = inode.is_dir();
+            let blocks_to_free = self.get_inode_data_blocks(&inode)?;
 
-        // Free all data blocks used by this inode
-        for block_num in blocks_to_free {
-            // Debug: Freeing data block (disabled to reduce log noise)
-            // crate::early_println!("EXT2: Freeing data block {}", block_num);
-            self.free_block(block_num)?;
-        }
-
-        // Calculate which block group contains this inode
-        let group = (inode_number - 1) / self.superblock.get_inodes_per_group();
-        let local_inode = (inode_number - 1) % self.superblock.get_inodes_per_group();
-
-        // Read block group descriptor to find inode bitmap location
-        let bgd_block = (group * mem::size_of::<Ext2BlockGroupDescriptor>() as u32)
-            / self.block_size
-            + if self.block_size == 1024 { 2 } else { 1 };
-        let bgd_block_sector = self.block_to_sector(bgd_block as u64);
-
-        let request = Box::new(crate::device::block::request::BlockIORequest {
-            request_type: crate::device::block::request::BlockIORequestType::Read,
-            sector: bgd_block_sector as usize,
-            sector_count: (self.block_size / 512) as usize,
-            head: 0,
-            cylinder: 0,
-            buffer: vec![0u8; self.block_size as usize],
-        });
-
-        self.block_device.enqueue_request(request);
-        let results = self.block_device.process_requests();
-
-        let mut bgd_data = if let Some(result) = results.first() {
-            match &result.result {
-                Ok(_) => result.request.buffer.clone(),
-                Err(_) => {
-                    return Err(FileSystemError::new(
-                        FileSystemErrorKind::IoError,
-                        "Failed to read block group descriptor",
-                    ));
-                }
+            // Free all data blocks used by this inode
+            for block_num in blocks_to_free {
+                // Debug: Freeing data block (disabled to reduce log noise)
+                // crate::println!("EXT2: Freeing data block {}", block_num);
+                self.free_block_unlocked(block_num)?;
             }
-        } else {
-            return Err(FileSystemError::new(
-                FileSystemErrorKind::IoError,
-                "No result from block device read",
-            ));
-        };
 
-        let bgd_offset =
-            (group * mem::size_of::<Ext2BlockGroupDescriptor>() as u32) % self.block_size;
-        let mut bgd = Ext2BlockGroupDescriptor::from_bytes(&bgd_data[bgd_offset as usize..])?;
+            // Calculate which block group contains this inode
+            let group = (inode_number - 1) / self.superblock.get_inodes_per_group();
+            let local_inode = (inode_number - 1) % self.superblock.get_inodes_per_group();
 
-        // Read the inode bitmap
-        let inode_bitmap_block = bgd.get_inode_bitmap();
-        let bitmap_sector = self.block_to_sector(inode_bitmap_block as u64);
+            // Read block group descriptor to find inode bitmap location
+            let bgd_block = (group * mem::size_of::<Ext2BlockGroupDescriptor>() as u32)
+                / self.block_size
+                + if self.block_size == 1024 { 2 } else { 1 };
+            let bgd_block_sector = self.block_to_sector(bgd_block as u64);
 
-        let request = Box::new(crate::device::block::request::BlockIORequest {
-            request_type: crate::device::block::request::BlockIORequestType::Read,
-            sector: bitmap_sector as usize,
-            sector_count: (self.block_size / 512) as usize,
-            head: 0,
-            cylinder: 0,
-            buffer: vec![0u8; self.block_size as usize],
-        });
+            let request = Box::new(crate::device::block::request::BlockIORequest {
+                request_type: crate::device::block::request::BlockIORequestType::Read,
+                sector: bgd_block_sector as usize,
+                sector_count: (self.block_size / 512) as usize,
+                head: 0,
+                cylinder: 0,
+                buffer: vec![0u8; self.block_size as usize],
+            });
 
-        self.block_device.enqueue_request(request);
-        let results = self.block_device.process_requests();
+            self.block_device.enqueue_request(request);
+            let results = self.block_device.process_requests();
 
-        let mut bitmap_data = if let Some(result) = results.first() {
-            match &result.result {
-                Ok(_) => result.request.buffer.clone(),
-                Err(_) => {
-                    return Err(FileSystemError::new(
-                        FileSystemErrorKind::IoError,
-                        "Failed to read inode bitmap",
-                    ));
+            let mut bgd_data = if let Some(result) = results.first() {
+                match &result.result {
+                    Ok(_) => result.request.buffer.clone(),
+                    Err(_) => {
+                        return Err(FileSystemError::new(
+                            FileSystemErrorKind::IoError,
+                            "Failed to read block group descriptor",
+                        ));
+                    }
                 }
-            }
-        } else {
-            return Err(FileSystemError::new(
-                FileSystemErrorKind::IoError,
-                "No result from block device read",
-            ));
-        };
+            } else {
+                return Err(FileSystemError::new(
+                    FileSystemErrorKind::IoError,
+                    "No result from block device read",
+                ));
+            };
 
-        // Clear the bit for this inode (mark as free)
-        let byte_index = (local_inode / 8) as usize;
-        let bit_index = (local_inode % 8) as u8;
+            let bgd_offset =
+                (group * mem::size_of::<Ext2BlockGroupDescriptor>() as u32) % self.block_size;
+            let mut bgd = Ext2BlockGroupDescriptor::from_bytes(&bgd_data[bgd_offset as usize..])?;
 
-        if byte_index >= bitmap_data.len() {
-            return Err(FileSystemError::new(
-                FileSystemErrorKind::InvalidData,
-                "Inode bitmap index out of bounds",
-            ));
-        }
+            // Read the inode bitmap
+            let inode_bitmap_block = bgd.get_inode_bitmap();
+            let bitmap_sector = self.block_to_sector(inode_bitmap_block as u64);
 
-        // Clear the bit (0 = free, 1 = used in ext2)
-        bitmap_data[byte_index] &= !(1 << bit_index);
+            let request = Box::new(crate::device::block::request::BlockIORequest {
+                request_type: crate::device::block::request::BlockIORequestType::Read,
+                sector: bitmap_sector as usize,
+                sector_count: (self.block_size / 512) as usize,
+                head: 0,
+                cylinder: 0,
+                buffer: vec![0u8; self.block_size as usize],
+            });
 
-        // Write the updated bitmap back to disk
-        let write_request = Box::new(crate::device::block::request::BlockIORequest {
-            request_type: crate::device::block::request::BlockIORequestType::Write,
-            sector: bitmap_sector as usize,
-            sector_count: (self.block_size / 512) as usize,
-            head: 0,
-            cylinder: 0,
-            buffer: bitmap_data,
-        });
+            self.block_device.enqueue_request(request);
+            let results = self.block_device.process_requests();
 
-        self.block_device.enqueue_request(write_request);
-        let write_results = self.block_device.process_requests();
-
-        if let Some(write_result) = write_results.first() {
-            match &write_result.result {
-                Ok(_) => {}
-                Err(_) => {
-                    return Err(FileSystemError::new(
-                        FileSystemErrorKind::IoError,
-                        "Failed to write inode to disk",
-                    ));
+            let mut bitmap_data = if let Some(result) = results.first() {
+                match &result.result {
+                    Ok(_) => result.request.buffer.clone(),
+                    Err(_) => {
+                        return Err(FileSystemError::new(
+                            FileSystemErrorKind::IoError,
+                            "Failed to read inode bitmap",
+                        ));
+                    }
                 }
+            } else {
+                return Err(FileSystemError::new(
+                    FileSystemErrorKind::IoError,
+                    "No result from block device read",
+                ));
+            };
+
+            // Clear the bit for this inode (mark as free)
+            let byte_index = (local_inode / 8) as usize;
+            let bit_index = (local_inode % 8) as u8;
+
+            if byte_index >= bitmap_data.len() {
+                return Err(FileSystemError::new(
+                    FileSystemErrorKind::InvalidData,
+                    "Inode bitmap index out of bounds",
+                ));
             }
-        } else {
-            return Err(FileSystemError::new(
-                FileSystemErrorKind::IoError,
-                "No result from inode write",
-            ));
-        }
 
-        // Update block group descriptor statistics
-        bgd.set_free_inodes_count(bgd.get_free_inodes_count() + 1);
-        if is_directory {
-            bgd.set_used_dirs_count(bgd.get_used_dirs_count().saturating_sub(1));
-        }
+            // Clear the bit (0 = free, 1 = used in ext2)
+            bitmap_data[byte_index] &= !(1 << bit_index);
 
-        // Write updated block group descriptor
-        bgd.write_to_bytes(&mut bgd_data[bgd_offset as usize..]);
-        let write_bgd_request = Box::new(crate::device::block::request::BlockIORequest {
-            request_type: crate::device::block::request::BlockIORequestType::Write,
-            sector: bgd_block_sector as usize,
-            sector_count: (self.block_size / 512) as usize,
-            head: 0,
-            cylinder: 0,
-            buffer: bgd_data,
-        });
+            // Write the updated bitmap back to disk
+            let write_request = Box::new(crate::device::block::request::BlockIORequest {
+                request_type: crate::device::block::request::BlockIORequestType::Write,
+                sector: bitmap_sector as usize,
+                sector_count: (self.block_size / 512) as usize,
+                head: 0,
+                cylinder: 0,
+                buffer: bitmap_data,
+            });
 
-        self.block_device.enqueue_request(write_bgd_request);
-        let bgd_write_results = self.block_device.process_requests();
+            self.block_device.enqueue_request(write_request);
+            let write_results = self.block_device.process_requests();
 
-        if let Some(bgd_write_result) = bgd_write_results.first() {
-            match &bgd_write_result.result {
-                Ok(_) => {}
-                Err(_) => {
-                    return Err(FileSystemError::new(
-                        FileSystemErrorKind::IoError,
-                        "Failed to write updated block group descriptor",
-                    ));
+            if let Some(write_result) = write_results.first() {
+                match &write_result.result {
+                    Ok(_) => {}
+                    Err(_) => {
+                        return Err(FileSystemError::new(
+                            FileSystemErrorKind::IoError,
+                            "Failed to write inode to disk",
+                        ));
+                    }
                 }
+            } else {
+                return Err(FileSystemError::new(
+                    FileSystemErrorKind::IoError,
+                    "No result from inode write",
+                ));
             }
-        } else {
-            return Err(FileSystemError::new(
-                FileSystemErrorKind::IoError,
-                "No response from BGD write",
-            ));
-        }
 
-        self.clear_inode_on_disk(inode_number)?;
+            // Invalidate cached inode bitmap block so subsequent reads see updated bitmap
+            self.block_cache.write().remove(inode_bitmap_block as u64);
 
-        // Update superblock statistics
-        self.update_superblock_free_counts(0, 1)?;
+            // Update block group descriptor statistics
+            bgd.set_free_inodes_count(bgd.get_free_inodes_count() + 1);
+            if is_directory {
+                bgd.set_used_dirs_count(bgd.get_used_dirs_count().saturating_sub(1));
+            }
 
-        // Remove from inode cache if present
-        {
-            let mut cache = self.inode_cache.lock();
-            cache.remove(inode_number);
-        }
+            // Write updated block group descriptor
+            bgd.write_to_bytes(&mut bgd_data[bgd_offset as usize..]);
+            let write_bgd_request = Box::new(crate::device::block::request::BlockIORequest {
+                request_type: crate::device::block::request::BlockIORequestType::Write,
+                sector: bgd_block_sector as usize,
+                sector_count: (self.block_size / 512) as usize,
+                head: 0,
+                cylinder: 0,
+                buffer: bgd_data,
+            });
 
-        Ok(())
+            self.block_device.enqueue_request(write_bgd_request);
+            let bgd_write_results = self.block_device.process_requests();
+
+            if let Some(bgd_write_result) = bgd_write_results.first() {
+                match &bgd_write_result.result {
+                    Ok(_) => {}
+                    Err(_) => {
+                        return Err(FileSystemError::new(
+                            FileSystemErrorKind::IoError,
+                            "Failed to write updated block group descriptor",
+                        ));
+                    }
+                }
+            } else {
+                return Err(FileSystemError::new(
+                    FileSystemErrorKind::IoError,
+                    "No response from BGD write",
+                ));
+            }
+
+            // Invalidate cached BGD block
+            self.block_cache.write().remove(bgd_block as u64);
+
+            self.clear_inode_on_disk(inode_number)?;
+
+            // Update superblock statistics
+            self.update_superblock_free_counts(0, 1)?;
+
+            // Remove from inode cache if present
+            {
+                let mut cache = self.inode_cache.write();
+                cache.remove(inode_number);
+            }
+
+            Ok(())
+        })
     }
 
     fn clear_inode_on_disk(&self, inode_number: u32) -> Result<(), FileSystemError> {
@@ -2872,7 +2986,7 @@ impl Ext2FileSystem {
         profile_scope!("ext2::write_file_content");
 
         #[cfg(test)]
-        crate::early_println!(
+        crate::println!(
             "[ext2] write_file_content: inode={}, content_len={}",
             inode_num,
             content.len()
@@ -2889,7 +3003,7 @@ impl Ext2FileSystem {
         };
 
         #[cfg(test)]
-        crate::early_println!("[ext2] write_file_content: blocks_needed={}", blocks_needed);
+        crate::println!("[ext2] write_file_content: blocks_needed={}", blocks_needed);
 
         // Allocate blocks as needed
         let mut block_list = Vec::new();
@@ -2920,7 +3034,7 @@ impl Ext2FileSystem {
                         current_count = 0;
                     }
                     #[cfg(test)]
-                    crate::early_println!(
+                    crate::println!(
                         "[ext2] write_file_content: reusing existing block {} for logical block {}",
                         existing_block,
                         block_idx
@@ -2939,7 +3053,7 @@ impl Ext2FileSystem {
                 if count >= 3 {
                     // Use multi-block allocation for 3+ blocks for better efficiency
                     #[cfg(test)]
-                    crate::early_println!(
+                    crate::println!(
                         "[ext2] write_file_content: using multi-block allocation for {} blocks starting at logical block {}",
                         count,
                         start_idx
@@ -2958,7 +3072,7 @@ impl Ext2FileSystem {
                         block_list[logical_idx] = block_num;
 
                         #[cfg(test)]
-                        crate::early_println!(
+                        crate::println!(
                             "[ext2] write_file_content: multi-allocated block {} for logical block {}",
                             block_num,
                             logical_idx
@@ -2971,7 +3085,7 @@ impl Ext2FileSystem {
                         let new_block = self.allocate_block()?;
 
                         #[cfg(test)]
-                        crate::early_println!(
+                        crate::println!(
                             "[ext2] write_file_content: individually allocated block {} for logical block {}",
                             new_block,
                             logical_idx
@@ -3012,7 +3126,7 @@ impl Ext2FileSystem {
                 .copy_from_slice(&content[content_offset..content_offset + bytes_to_write]);
 
             #[cfg(test)]
-            crate::early_println!(
+            crate::println!(
                 "[ext2] write_file_content: preparing block {} ({} bytes) for batch write",
                 block_num,
                 bytes_to_write
@@ -3028,7 +3142,7 @@ impl Ext2FileSystem {
         // Write all content blocks in one batch
         if !write_blocks.is_empty() {
             #[cfg(test)]
-            crate::early_println!(
+            crate::println!(
                 "[ext2] write_file_content: batch writing {} content blocks",
                 write_blocks.len()
             );
@@ -3037,7 +3151,10 @@ impl Ext2FileSystem {
 
         // Update inode size, block count, and modification time
         inode.size = content.len() as u32;
-        inode.mtime = 0; // TODO: Use proper timestamp when available
+        if let Some(time) = current_timestamp() {
+            inode.mtime = time.to_le();
+            inode.ctime = time.to_le();
+        }
 
         // Update i_blocks field (count in 512-byte sectors)
         inode.blocks = blocks_needed * (self.block_size / 512);
@@ -3047,7 +3164,7 @@ impl Ext2FileSystem {
 
         // Update inode cache with LRU eviction
         {
-            let mut cache = self.inode_cache.lock();
+            let mut cache = self.inode_cache.write();
             cache.insert(inode_num, inode);
         }
 
@@ -3167,21 +3284,42 @@ impl Ext2FileSystem {
         Ok(blocks)
     }
 
-    /// Free a block and update bitmaps
-    fn free_block(&self, block_number: u32) -> Result<(), FileSystemError> {
+    /// Free a block and update bitmaps (internal, assumes lock is held)
+    fn free_block_unlocked(&self, block_number: u32) -> Result<(), FileSystemError> {
         if block_number == 0 {
             return Ok(()); // Block 0 is not a valid block
         }
 
-        // Calculate which block group contains this block
-        let group = (block_number - 1) / self.superblock.get_blocks_per_group();
-        let local_block = (block_number - 1) % self.superblock.get_blocks_per_group();
+        let first_data_block = self.superblock.get_first_data_block();
+        if block_number < first_data_block {
+            return Err(FileSystemError::new(
+                FileSystemErrorKind::InvalidData,
+                "Attempted to free a reserved block",
+            ));
+        }
 
-        // Read block group descriptor
-        let bgd_block = (group * mem::size_of::<Ext2BlockGroupDescriptor>() as u32)
-            / self.block_size
-            + if self.block_size == 1024 { 2 } else { 1 };
-        let bgd_block_sector = self.block_to_sector(bgd_block as u64);
+        let blocks_count = self.superblock.get_blocks_count();
+        if block_number >= blocks_count {
+            return Err(FileSystemError::new(
+                FileSystemErrorKind::InvalidData,
+                "Attempted to free an out-of-range block",
+            ));
+        }
+
+        // Calculate which block group contains this block
+        // IMPORTANT: ext2 block bitmap bit 0 corresponds to the first block of the group.
+        // Do NOT subtract 1 here, otherwise free() and allocate() will disagree and corrupt the bitmap.
+        let blocks_per_group = self.superblock.get_blocks_per_group();
+        let adjusted_block = block_number - first_data_block;
+        let group = adjusted_block / blocks_per_group;
+        let local_block = adjusted_block % blocks_per_group;
+
+        // Read block group descriptor (descriptor table can span multiple blocks)
+        let bgd_table_start_block = if self.block_size == 1024 { 2u64 } else { 1u64 };
+        let bgd_entry_size = mem::size_of::<Ext2BlockGroupDescriptor>() as u64;
+        let bgd_entry_offset_bytes = group as u64 * bgd_entry_size;
+        let bgd_block = bgd_table_start_block + (bgd_entry_offset_bytes / self.block_size as u64);
+        let bgd_block_sector = self.block_to_sector(bgd_block);
 
         let request = Box::new(crate::device::block::request::BlockIORequest {
             request_type: crate::device::block::request::BlockIORequestType::Read,
@@ -3212,8 +3350,7 @@ impl Ext2FileSystem {
             ));
         };
 
-        let bgd_offset =
-            (group * mem::size_of::<Ext2BlockGroupDescriptor>() as u32) % self.block_size;
+        let bgd_offset = (bgd_entry_offset_bytes % self.block_size as u64) as u32;
         let mut bgd = Ext2BlockGroupDescriptor::from_bytes(&bgd_data[bgd_offset as usize..])?;
 
         // Read the block bitmap
@@ -3293,6 +3430,9 @@ impl Ext2FileSystem {
             ));
         }
 
+        // Invalidate cached block bitmap so subsequent reads see updated bitmap
+        self.block_cache.write().remove(block_bitmap_block as u64);
+
         // Update block group descriptor
         bgd.set_free_blocks_count(bgd.get_free_blocks_count() + 1);
 
@@ -3330,7 +3470,15 @@ impl Ext2FileSystem {
             ));
         }
 
+        // Invalidate cached BGD block
+        self.block_cache.write().remove(bgd_block);
+
         Ok(())
+    }
+
+    /// Free a block and update bitmaps
+    fn free_block(&self, block_number: u32) -> Result<(), FileSystemError> {
+        self.with_allocation_lock(|| self.free_block_unlocked(block_number))
     }
 
     /// Set the block number for a logical block within an inode
@@ -3620,7 +3768,7 @@ impl Ext2FileSystem {
         // Batch allocate all needed indirect blocks
         let allocated_indirect_blocks = if needed_indirect_blocks > 0 {
             #[cfg(test)]
-            crate::early_println!(
+            crate::println!(
                 "[ext2] set_inode_blocks_simple_batch: Pre-allocating {} indirect blocks",
                 needed_indirect_blocks
             );
@@ -3632,7 +3780,7 @@ impl Ext2FileSystem {
         let mut indirect_block_index = 0;
 
         for &(logical_block, block_number) in assignments {
-            // crate::early_println!("[ext2] DEBUG: Processing assignment: logical_block={}, block_number={}", logical_block, block_number);
+            // crate::println!("[ext2] DEBUG: Processing assignment: logical_block={}, block_number={}", logical_block, block_number);
 
             if logical_block < 12 {
                 // Direct blocks - immediate update
@@ -3670,7 +3818,7 @@ impl Ext2FileSystem {
                             .insert(indirect_block, vec![0u8; self.block_size as usize]);
                     } else {
                         // Existing block, read from disk
-                        // crate::early_println!("[ext2] DEBUG: Reading indirect block {} for caching", indirect_block);
+                        // crate::println!("[ext2] DEBUG: Reading indirect block {} for caching", indirect_block);
                         let data = self.read_block_cached(indirect_block as u64)?;
                         indirect_blocks_cache.insert(indirect_block, data);
                     }
@@ -3692,7 +3840,7 @@ impl Ext2FileSystem {
 
                 // Check for underflow before calculation
                 if logical_block < double_base {
-                    crate::early_println!(
+                    crate::println!(
                         "[ext2] ERROR: Double indirect block calculation would underflow: logical_block={}, double_base={}",
                         logical_block,
                         double_base
@@ -3707,7 +3855,7 @@ impl Ext2FileSystem {
                 let first_indirect_index = double_offset / blocks_per_indirect as u64;
                 let second_indirect_index = double_offset % blocks_per_indirect as u64;
 
-                // crate::early_println!("[ext2] DEBUG: Double indirect calculation: logical_block={}, double_offset={}, first_idx={}, second_idx={}",
+                // crate::println!("[ext2] DEBUG: Double indirect calculation: logical_block={}, double_offset={}, first_idx={}, second_idx={}",
                 //                       logical_block, double_offset, first_indirect_index, second_indirect_index);
 
                 // Ensure double indirect block exists
@@ -3738,7 +3886,7 @@ impl Ext2FileSystem {
                         double_indirect_cache
                             .insert(double_indirect_block, vec![0u8; self.block_size as usize]);
                     } else {
-                        // crate::early_println!("[ext2] DEBUG: Reading double indirect block {} for caching", double_indirect_block);
+                        // crate::println!("[ext2] DEBUG: Reading double indirect block {} for caching", double_indirect_block);
                         let data = self.read_block_cached(double_indirect_block as u64)?;
                         double_indirect_cache.insert(double_indirect_block, data);
                     }
@@ -3794,7 +3942,7 @@ impl Ext2FileSystem {
                         indirect_blocks_cache
                             .insert(first_indirect_block, vec![0u8; self.block_size as usize]);
                     } else {
-                        // crate::early_println!("[ext2] DEBUG: Reading first-level indirect block {} for caching", first_indirect_block);
+                        // crate::println!("[ext2] DEBUG: Reading first-level indirect block {} for caching", first_indirect_block);
                         let data = self.read_block_cached(first_indirect_block as u64)?;
                         indirect_blocks_cache.insert(first_indirect_block, data);
                     }
@@ -3809,7 +3957,7 @@ impl Ext2FileSystem {
                 }
             } else {
                 // Triple indirect and beyond - fall back to individual calls
-                // crate::early_println!("[ext2] DEBUG: Fallback to individual set_inode_block for logical_block {} (triple indirect)", logical_block);
+                // crate::println!("[ext2] DEBUG: Fallback to individual set_inode_block for logical_block {} (triple indirect)", logical_block);
                 self.set_inode_block(inode, logical_block, block_number)?;
             }
         }
@@ -3821,9 +3969,9 @@ impl Ext2FileSystem {
 
             // Add single and first-level indirect blocks
             for (block_num, data) in indirect_blocks_cache {
-                // crate::early_println!("[ext2] DEBUG: Adding indirect block {} to write batch", block_num);
+                // crate::println!("[ext2] DEBUG: Adding indirect block {} to write batch", block_num);
                 if block_num as u64 > (1u64 << 32) {
-                    // crate::early_println!("[ext2] ERROR: Invalid indirect block number: {}", block_num);
+                    // crate::println!("[ext2] ERROR: Invalid indirect block number: {}", block_num);
                     return Err(FileSystemError::new(
                         FileSystemErrorKind::InvalidData,
                         "Invalid indirect block number",
@@ -3834,9 +3982,9 @@ impl Ext2FileSystem {
 
             // Add double indirect blocks
             for (block_num, data) in double_indirect_cache {
-                // crate::early_println!("[ext2] DEBUG: Adding double indirect block {} to write batch", block_num);
+                // crate::println!("[ext2] DEBUG: Adding double indirect block {} to write batch", block_num);
                 if block_num as u64 > (1u64 << 32) {
-                    // crate::early_println!("[ext2] ERROR: Invalid double indirect block number: {}", block_num);
+                    // crate::println!("[ext2] ERROR: Invalid double indirect block number: {}", block_num);
                     return Err(FileSystemError::new(
                         FileSystemErrorKind::InvalidData,
                         "Invalid double indirect block number",
@@ -3845,11 +3993,11 @@ impl Ext2FileSystem {
                 write_blocks.insert(block_num as u64, data);
             }
 
-            // crate::early_println!("[ext2] DEBUG: Batch writing {} indirect blocks (single + double indirect)", write_blocks.len());
+            // crate::println!("[ext2] DEBUG: Batch writing {} indirect blocks (single + double indirect)", write_blocks.len());
             self.write_blocks_cached(&write_blocks)?;
         }
 
-        // crate::early_println!("[ext2] set_inode_blocks_simple_batch: completed {} assignments, {} batched writes",
+        // crate::println!("[ext2] set_inode_blocks_simple_batch: completed {} assignments, {} batched writes",
         //     assignments.len(), batched_writes);
         Ok(())
     }
@@ -3980,7 +4128,7 @@ impl Ext2FileSystem {
             superblock_data[12..16].copy_from_slice(&bytes);
 
             // Debug: Updated free_blocks_count (disabled to reduce log noise)
-            // crate::early_println!("EXT2: Updated free_blocks_count: {} -> {} (delta: {})",
+            // crate::println!("EXT2: Updated free_blocks_count: {} -> {} (delta: {})",
             //                       current, new_count, block_delta);
         }
 
@@ -4000,7 +4148,7 @@ impl Ext2FileSystem {
             superblock_data[16..20].copy_from_slice(&bytes);
 
             // Debug: Updated free_inodes_count (disabled to reduce log noise)
-            // crate::early_println!("EXT2: Updated free_inodes_count: {} -> {} (delta: {})",
+            // crate::println!("EXT2: Updated free_inodes_count: {} -> {} (delta: {})",
             //                       current, new_count, inode_delta);
         }
 
@@ -4021,7 +4169,7 @@ impl Ext2FileSystem {
             match &write_result.result {
                 Ok(_) => {
                     // Debug: Superblock successfully updated (disabled to reduce log noise)
-                    // crate::early_println!("EXT2: Superblock successfully updated");
+                    // crate::println!("EXT2: Superblock successfully updated");
                     Ok(())
                 }
                 Err(_) => Err(FileSystemError::new(
@@ -4054,7 +4202,7 @@ impl Ext2FileSystem {
         // Fast path: if only one block, try cache-only first
         if block_nums.len() == 1 {
             let block_num = block_nums[0];
-            let mut cache = self.block_cache.lock();
+            let cache = self.block_cache.read();
             if let Some(data) = cache.get(block_num) {
                 return Ok(vec![data]);
             }
@@ -4064,7 +4212,7 @@ impl Ext2FileSystem {
         // Slower path: multiple blocks or cache miss
         let mut results = Vec::with_capacity(block_nums.len());
         let mut missing_blocks = Vec::new();
-        let mut cache = self.block_cache.lock();
+        let cache = self.block_cache.read();
 
         // Check cache for existing blocks, maintain order
         for &block_num in block_nums {
@@ -4090,6 +4238,7 @@ impl Ext2FileSystem {
 
             // Store information about each request range for later processing
             let mut request_ranges = Vec::new();
+            let mut requests = Vec::new();
 
             let mut i = 0;
             while i < missing_blocks.len() {
@@ -4098,14 +4247,34 @@ impl Ext2FileSystem {
 
                 // Count consecutive blocks
                 while i + count < missing_blocks.len()
-                    && missing_blocks[i + count] == start_block + count as u64
+                    && start_block
+                        .checked_add(count as u64)
+                        .is_some_and(|next| missing_blocks[i + count] == next)
                 {
                     count += 1;
                 }
 
                 let start_sector = self.block_to_sector(start_block);
-                let num_sectors = count * self.sectors_per_block() as usize;
-                let buffer_size = count * self.block_size as usize;
+                let sectors_per_block =
+                    usize::try_from(self.sectors_per_block()).map_err(|_| {
+                        FileSystemError::new(
+                            FileSystemErrorKind::DeviceError,
+                            "Sector count does not fit the platform address size",
+                        )
+                    })?;
+                let block_size = self.block_size as usize;
+                let num_sectors = count.checked_mul(sectors_per_block).ok_or_else(|| {
+                    FileSystemError::new(
+                        FileSystemErrorKind::DeviceError,
+                        "Block request sector count overflow",
+                    )
+                })?;
+                let buffer_size = count.checked_mul(block_size).ok_or_else(|| {
+                    FileSystemError::new(
+                        FileSystemErrorKind::DeviceError,
+                        "Block request byte count overflow",
+                    )
+                })?;
 
                 let request = Box::new(crate::device::block::request::BlockIORequest {
                     request_type: crate::device::block::request::BlockIORequestType::Read,
@@ -4119,13 +4288,12 @@ impl Ext2FileSystem {
                 // Store range info for later processing
                 request_ranges.push((start_block, count));
 
-                // Enqueue the request but don't process yet
-                self.block_device.enqueue_request(request);
+                requests.push(request);
                 i += count; // Move to the next non-consecutive block
             }
 
-            // Process all enqueued requests in one batch
-            let read_results = self.block_device.process_requests();
+            // Submit only this caller's requests as one isolated batch.
+            let read_results = self.block_device.submit_requests(requests);
 
             // Validate that we got the expected number of results
             if read_results.len() != request_ranges.len() {
@@ -4136,7 +4304,7 @@ impl Ext2FileSystem {
             }
 
             // Process results and update cache
-            let mut cache = self.block_cache.lock();
+            let mut cache = self.block_cache.write();
             let mut missing_data = HashMap::new();
 
             for (result_idx, result) in read_results.iter().enumerate() {
@@ -4150,41 +4318,45 @@ impl Ext2FileSystem {
                 let (start_block, count) = request_ranges[result_idx];
                 let data = &result.request.buffer;
 
-                // Validate buffer size matches expectations
-                let expected_size = count * self.block_size as usize;
+                // A successful block request must return exactly the requested
+                // bytes. Padding a short transfer fabricates filesystem data
+                // and then makes that corruption persistent in the cache.
+                let expected_size =
+                    count.checked_mul(self.block_size as usize).ok_or_else(|| {
+                        FileSystemError::new(
+                            FileSystemErrorKind::DeviceError,
+                            "Block result byte count overflow",
+                        )
+                    })?;
                 if data.len() != expected_size {
-                    // Try to handle gracefully - truncate or pad buffer to expected size
-                    let mut corrected_data = data.clone();
-                    if data.len() > expected_size {
-                        corrected_data.truncate(expected_size);
-                    } else {
-                        corrected_data.resize(expected_size, 0);
-                    }
-
-                    // Process with corrected data
-                    for j in 0..count {
-                        let current_block = start_block + j as u64;
-                        let offset = j * self.block_size as usize;
-                        let end_offset = offset + self.block_size as usize;
-
-                        if end_offset <= corrected_data.len() {
-                            let block_data = corrected_data[offset..end_offset].to_vec();
-                            missing_data.insert(current_block, block_data.clone());
-                            cache.insert(current_block, block_data);
-                        } else {
-                            return Err(FileSystemError::new(
-                                FileSystemErrorKind::DeviceError,
-                                "Buffer corruption detected",
-                            ));
-                        }
-                    }
-                    continue; // Skip normal processing for this result
+                    return Err(FileSystemError::new(
+                        FileSystemErrorKind::DeviceError,
+                        "Block device returned an incorrect byte count",
+                    ));
                 }
 
                 for j in 0..count {
-                    let current_block = start_block + j as u64;
-                    let offset = j * self.block_size as usize;
-                    let end_offset = offset + self.block_size as usize;
+                    let current_block = start_block.checked_add(j as u64).ok_or_else(|| {
+                        FileSystemError::new(
+                            FileSystemErrorKind::DeviceError,
+                            "Block number overflow while filling cache",
+                        )
+                    })?;
+                    let offset = j.checked_mul(self.block_size as usize).ok_or_else(|| {
+                        FileSystemError::new(
+                            FileSystemErrorKind::DeviceError,
+                            "Block buffer offset overflow",
+                        )
+                    })?;
+                    let end_offset =
+                        offset
+                            .checked_add(self.block_size as usize)
+                            .ok_or_else(|| {
+                                FileSystemError::new(
+                                    FileSystemErrorKind::DeviceError,
+                                    "Block buffer end offset overflow",
+                                )
+                            })?;
 
                     let block_data = data[offset..end_offset].to_vec();
                     missing_data.insert(current_block, block_data.clone());
@@ -4213,7 +4385,7 @@ impl Ext2FileSystem {
             CALL_COUNT += 1;
             // Print cache stats periodically (every 100th call)
             if CALL_COUNT % 100 == 0 {
-                let cache = self.block_cache.lock();
+                let cache = self.block_cache.read();
                 cache.print_stats("Block");
             }
         }
@@ -4230,21 +4402,25 @@ impl Ext2FileSystem {
         }
 
         #[cfg(test)]
-        crate::early_println!(
+        crate::println!(
             "[ext2] write_blocks_cached: {} blocks to write",
             blocks.len()
         );
 
-        // Debug: Check for invalid block numbers
-        for (block_num, _) in blocks.iter() {
-            if *block_num > (1u64 << 32) {
-                // Check for very large values that could be negative casts
-                crate::early_println!(
-                    "[ext2] ERROR: Invalid block number detected: {} (0x{:x})",
-                    block_num,
-                    block_num
-                );
-                panic!("Invalid block number: {} (0x{:x})", block_num, block_num);
+        // Validate every write before constructing a device request. Filesystem
+        // metadata must never turn into a kernel panic or a short block write.
+        for (block_num, data) in blocks.iter() {
+            if *block_num >= (1u64 << 32) {
+                return Err(FileSystemError::new(
+                    FileSystemErrorKind::DeviceError,
+                    "Invalid block number in write request",
+                ));
+            }
+            if data.len() != self.block_size as usize {
+                return Err(FileSystemError::new(
+                    FileSystemErrorKind::DeviceError,
+                    "Write buffer does not contain exactly one filesystem block",
+                ));
             }
         }
 
@@ -4253,6 +4429,7 @@ impl Ext2FileSystem {
 
         // Store information about each request range for later processing
         let mut request_ranges = Vec::new();
+        let mut requests = Vec::new();
 
         let mut i = 0;
         while i < sorted_blocks.len() {
@@ -4262,14 +4439,27 @@ impl Ext2FileSystem {
 
             // Count consecutive blocks and combine their data
             while i + count < sorted_blocks.len()
-                && *sorted_blocks[i + count].0 == start_block + count as u64
+                && start_block
+                    .checked_add(count as u64)
+                    .is_some_and(|next| *sorted_blocks[i + count].0 == next)
             {
                 data_to_write.extend_from_slice(sorted_blocks[i + count].1);
                 count += 1;
             }
 
             let start_sector = self.block_to_sector(start_block);
-            let num_sectors = count * self.sectors_per_block() as usize;
+            let sectors_per_block = usize::try_from(self.sectors_per_block()).map_err(|_| {
+                FileSystemError::new(
+                    FileSystemErrorKind::DeviceError,
+                    "Sector count does not fit the platform address size",
+                )
+            })?;
+            let num_sectors = count.checked_mul(sectors_per_block).ok_or_else(|| {
+                FileSystemError::new(
+                    FileSystemErrorKind::DeviceError,
+                    "Block write sector count overflow",
+                )
+            })?;
 
             let request = Box::new(crate::device::block::request::BlockIORequest {
                 request_type: crate::device::block::request::BlockIORequestType::Write,
@@ -4283,18 +4473,17 @@ impl Ext2FileSystem {
             // Store range info for later processing
             request_ranges.push((start_block, count));
 
-            // Enqueue the request but don't process yet
-            self.block_device.enqueue_request(request);
+            requests.push(request);
             i += count; // Move to the next non-consecutive block
         }
 
         // Process all enqueued requests in one batch
         #[cfg(test)]
-        crate::early_println!(
+        crate::println!(
             "[ext2] write_blocks_cached: Processing {} requests in batch",
             request_ranges.len()
         );
-        let write_results = self.block_device.process_requests();
+        let write_results = self.block_device.submit_requests(requests);
 
         // Validate that we got the expected number of results
         if write_results.len() != request_ranges.len() {
@@ -4305,7 +4494,7 @@ impl Ext2FileSystem {
         }
 
         // Check for any write errors and update cache
-        let mut cache = self.block_cache.lock();
+        let mut cache = self.block_cache.write();
         for (result_idx, result) in write_results.iter().enumerate() {
             if result.result.is_err() {
                 return Err(FileSystemError::new(
@@ -4319,7 +4508,12 @@ impl Ext2FileSystem {
             // Invalidate cache for successfully written blocks (write-through cache)
             // No need to update cache with written data since it's already on disk
             for j in 0..count {
-                let current_block = start_block + j as u64;
+                let current_block = start_block.checked_add(j as u64).ok_or_else(|| {
+                    FileSystemError::new(
+                        FileSystemErrorKind::DeviceError,
+                        "Block number overflow while invalidating cache",
+                    )
+                })?;
                 cache.remove(current_block);
             }
         }
@@ -4334,29 +4528,13 @@ impl Ext2FileSystem {
 
     /// Convert ext2 block number to starting sector index
     fn block_to_sector(&self, block_num: u64) -> usize {
-        // Validate block number range
-        if block_num > (1u64 << 32) {
-            crate::early_println!(
-                "[ext2] ERROR: block_to_sector called with invalid block_num: {} (0x{:x})",
-                block_num,
-                block_num
-            );
-            panic!(
-                "block_to_sector: invalid block_num: {} (0x{:x})",
-                block_num, block_num
-            );
+        if block_num >= (1u64 << 32) {
+            return usize::MAX;
         }
-
-        // Check for reasonable upper bound (e.g., filesystem shouldn't have more than 2^30 blocks)
-        if block_num > (1u64 << 30) {
-            #[cfg(test)]
-            crate::early_println!(
-                "[ext2] WARNING: block_to_sector called with very large block_num: {}",
-                block_num
-            );
-        }
-
-        (block_num * self.sectors_per_block()) as usize
+        block_num
+            .checked_mul(self.sectors_per_block())
+            .and_then(|sector| usize::try_from(sector).ok())
+            .unwrap_or(usize::MAX)
     }
 
     /// Read one filesystem block with LRU cache
@@ -4382,11 +4560,11 @@ impl Ext2FileSystem {
 
     /// Print cache statistics for debugging
     pub fn print_cache_stats(&self) {
-        let inode_cache = self.inode_cache.lock();
-        let block_cache = self.block_cache.lock();
+        let inode_cache = self.inode_cache.read();
+        let block_cache = self.block_cache.read();
 
-        inode_cache.print_stats("Inode");
-        block_cache.print_stats("Block");
+        // inode_cache.print_stats("Inode");
+        // block_cache.print_stats("Block");
     }
 }
 
@@ -4504,17 +4682,17 @@ impl FileSystemOperations for Ext2FileSystem {
         _flags: u32,
     ) -> Result<Arc<dyn FileObject>, FileSystemError> {
         #[cfg(test)]
-        crate::early_println!("[ext2] open: Starting open operation");
+        crate::println!("[ext2] open: Starting open operation");
 
         let file_type = node.file_type()?;
 
         #[cfg(test)]
-        crate::early_println!("[ext2] open: File type = {:?}", file_type);
+        crate::println!("[ext2] open: File type = {:?}", file_type);
 
         match file_type {
             FileType::RegularFile => {
                 #[cfg(test)]
-                crate::early_println!("[ext2] open: Opening regular file");
+                crate::println!("[ext2] open: Opening regular file");
 
                 let ext2_node = node.as_any().downcast_ref::<Ext2Node>().ok_or_else(|| {
                     FileSystemError::new(
@@ -4536,7 +4714,7 @@ impl FileSystemOperations for Ext2FileSystem {
             }
             FileType::Directory => {
                 #[cfg(test)]
-                crate::early_println!("[ext2] open: Opening directory");
+                crate::println!("[ext2] open: Opening directory");
 
                 let ext2_node = node.as_any().downcast_ref::<Ext2Node>().ok_or_else(|| {
                     FileSystemError::new(
@@ -4558,7 +4736,7 @@ impl FileSystemOperations for Ext2FileSystem {
             }
             FileType::CharDevice(device_info) => {
                 #[cfg(test)]
-                crate::early_println!(
+                crate::println!(
                     "[ext2] Opening character device file: device_id={}",
                     device_info.device_id
                 );
@@ -4578,13 +4756,13 @@ impl FileSystemOperations for Ext2FileSystem {
                 }
 
                 #[cfg(test)]
-                crate::early_println!("[ext2] Character device file object created successfully");
+                crate::println!("[ext2] Character device file object created successfully");
 
                 Ok(char_device_obj)
             }
             _ => {
                 #[cfg(test)]
-                crate::early_println!("[ext2] open: Unsupported file type: {:?}", file_type);
+                crate::println!("[ext2] open: Unsupported file type: {:?}", file_type);
 
                 Err(FileSystemError::new(
                     FileSystemErrorKind::NotSupported,
@@ -4619,6 +4797,10 @@ impl FileSystemOperations for Ext2FileSystem {
             }
             Err(e) => return Err(e),
         }
+
+        // Acquire per-inode lock to serialize directory mutations on this parent
+        let inode_lock = self.get_inode_lock(ext2_parent.inode_number());
+        let _guard = inode_lock.lock();
 
         // Check if the entry already exists
         if self.check_entry_exists(ext2_parent.inode_number(), name)? {
@@ -4655,13 +4837,14 @@ impl FileSystemOperations for Ext2FileSystem {
         } else {
             1
         }; // Directory gets "." and initial link
+        let timestamp = current_timestamp().unwrap_or(0).to_le();
         let mut new_inode = Ext2Inode {
             mode: mode.to_le(),
             uid: 0_u16.to_le(),
             size: 0_u32.to_le(),
-            atime: 0_u32.to_le(),
-            ctime: 0_u32.to_le(),
-            mtime: 0_u32.to_le(),
+            atime: timestamp,
+            ctime: timestamp,
+            mtime: timestamp,
             dtime: 0_u32.to_le(),
             gid: 0_u16.to_le(),
             links_count: initial_nlinks.to_le(),
@@ -4752,7 +4935,59 @@ impl FileSystemOperations for Ext2FileSystem {
             new_inode.size = 0_u32.to_le(); // Device files have no size
         }
 
-        // Write the inode to disk
+        // Initialize directory contents BEFORE writing inode to avoid race condition
+        // This ensures the inode is written with the correct block pointer from the start
+        if matches!(file_type, FileType::Directory) {
+            // Allocate a block for the directory
+            let block_number = self.allocate_block()?;
+            // crate::println!(
+            //     "[ext2] create: allocated block {} for new dir inode {}",
+            //     block_number,
+            //     new_inode_number
+            // );
+
+            // Create directory entries for . and ..
+            let block_size = self.block_size as usize;
+            let mut block_data = vec![0u8; block_size];
+
+            // Create "." entry
+            let dot_entry_size = 12;
+            let dot_inode = new_inode_number.to_le_bytes();
+            let dot_rec_len = dot_entry_size as u16;
+            let dot_name_len = 1u8;
+            let dot_file_type = 2u8; // Directory
+
+            block_data[0..4].copy_from_slice(&dot_inode);
+            block_data[4..6].copy_from_slice(&dot_rec_len.to_le_bytes());
+            block_data[6] = dot_name_len;
+            block_data[7] = dot_file_type;
+            block_data[8] = b'.';
+
+            // Create ".." entry - takes up the rest of block
+            let dotdot_offset = dot_entry_size;
+            let dotdot_rec_len = (block_size - dotdot_offset) as u16;
+            let dotdot_name_len = 2u8;
+            let dotdot_file_type = 2u8; // Directory
+            let dotdot_inode = ext2_parent.inode_number().to_le_bytes();
+
+            block_data[dotdot_offset..dotdot_offset + 4].copy_from_slice(&dotdot_inode);
+            block_data[dotdot_offset + 4..dotdot_offset + 6]
+                .copy_from_slice(&dotdot_rec_len.to_le_bytes());
+            block_data[dotdot_offset + 6] = dotdot_name_len;
+            block_data[dotdot_offset + 7] = dotdot_file_type;
+            block_data[dotdot_offset + 8] = b'.';
+            block_data[dotdot_offset + 9] = b'.';
+
+            // Write block to disk
+            self.write_block_cached(block_number as u64, &block_data)?;
+
+            // Set block pointer and size in new_inode BEFORE writing
+            new_inode.block[0] = block_number as u32;
+            new_inode.size = block_size as u32;
+            new_inode.blocks = (self.block_size / 512).to_le();
+        }
+
+        // Write the inode to disk (now with correct block pointer if directory)
         self.write_inode(new_inode_number, &new_inode)?;
 
         // Add directory entry to parent directory
@@ -4763,10 +4998,7 @@ impl FileSystemOperations for Ext2FileSystem {
             file_type.clone(),
         )?;
 
-        // Initialize directory contents if it's a directory
         if matches!(file_type, FileType::Directory) {
-            self.initialize_directory(new_inode_number, ext2_parent.inode_number())?;
-
             // Update parent directory's nlinks count (removing ".." entry)
             let mut parent_inode = self.read_inode(ext2_parent.inode_number())?;
             parent_inode.links_count = (u16::from_le(parent_inode.links_count) + 1).to_le();
@@ -4869,6 +5101,10 @@ impl FileSystemOperations for Ext2FileSystem {
             Err(e) => return Err(e),
         }
 
+        // Acquire per-inode lock to serialize directory mutations on this parent
+        let inode_lock = self.get_inode_lock(ext2_parent.inode_number());
+        let _guard = inode_lock.lock();
+
         // Try to lookup the file to ensure it exists and get its inode number
         let node = self.lookup(parent, name)?;
         let ext2_node = node.as_any().downcast_ref::<Ext2Node>().ok_or_else(|| {
@@ -4910,6 +5146,153 @@ impl FileSystemOperations for Ext2FileSystem {
             let fs_id = self.fs_id().get();
             let cache_id = CacheId::new((fs_id << 32) | (inode_number as u64));
             PageCacheManager::global().invalidate(cache_id);
+        }
+
+        Ok(())
+    }
+
+    fn rename(
+        &self,
+        old_parent: &Arc<dyn VfsNode>,
+        old_name: &String,
+        new_parent: &Arc<dyn VfsNode>,
+        new_name: &String,
+    ) -> Result<(), FileSystemError> {
+        let ext2_old_parent = old_parent
+            .as_any()
+            .downcast_ref::<Ext2Node>()
+            .ok_or_else(|| {
+                FileSystemError::new(
+                    FileSystemErrorKind::NotSupported,
+                    "Invalid old parent node type for ext2",
+                )
+            })?;
+
+        let ext2_new_parent = new_parent
+            .as_any()
+            .downcast_ref::<Ext2Node>()
+            .ok_or_else(|| {
+                FileSystemError::new(
+                    FileSystemErrorKind::NotSupported,
+                    "Invalid new parent node type for ext2",
+                )
+            })?;
+
+        // Both parents must be directories
+        match ext2_old_parent.file_type() {
+            Ok(FileType::Directory) => {}
+            Ok(_) => {
+                return Err(FileSystemError::new(
+                    FileSystemErrorKind::NotADirectory,
+                    "Source parent is not a directory",
+                ));
+            }
+            Err(e) => return Err(e),
+        }
+        match ext2_new_parent.file_type() {
+            Ok(FileType::Directory) => {}
+            Ok(_) => {
+                return Err(FileSystemError::new(
+                    FileSystemErrorKind::NotADirectory,
+                    "Destination parent is not a directory",
+                ));
+            }
+            Err(e) => return Err(e),
+        }
+
+        let old_parent_ino = ext2_old_parent.inode_number();
+        let new_parent_ino = ext2_new_parent.inode_number();
+        let same_parent = old_parent_ino == new_parent_ino;
+
+        // No-op when both parent and name are identical
+        if same_parent && old_name == new_name {
+            return Ok(());
+        }
+
+        // Look up the source entry
+        let src_node = self.lookup(old_parent, old_name)?;
+        let src_ext2 = src_node
+            .as_any()
+            .downcast_ref::<Ext2Node>()
+            .ok_or_else(|| {
+                FileSystemError::new(
+                    FileSystemErrorKind::NotSupported,
+                    "Source node is not an Ext2Node",
+                )
+            })?;
+        let src_inode_num = src_ext2.inode_number();
+        let src_file_type = src_ext2.file_type()?;
+        let src_is_dir = src_file_type == FileType::Directory;
+
+        // Validate against an existing destination entry (if present)
+        if let Ok(dst_node) = self.lookup(new_parent, new_name) {
+            let dst_ext2 = dst_node
+                .as_any()
+                .downcast_ref::<Ext2Node>()
+                .ok_or_else(|| {
+                    FileSystemError::new(
+                        FileSystemErrorKind::NotSupported,
+                        "Destination node is not an Ext2Node",
+                    )
+                })?;
+            let dst_is_dir = dst_ext2.file_type()? == FileType::Directory;
+
+            if src_is_dir && !dst_is_dir {
+                return Err(FileSystemError::new(
+                    FileSystemErrorKind::NotADirectory,
+                    "Destination exists and is not a directory",
+                ));
+            }
+            if !src_is_dir && dst_is_dir {
+                return Err(FileSystemError::new(
+                    FileSystemErrorKind::IsADirectory,
+                    "Destination is a directory",
+                ));
+            }
+            if dst_is_dir {
+                // Destination directory must be empty
+                let dst_entries =
+                    self.read_directory_entries(&self.read_inode(dst_ext2.inode_number())?)?;
+                let non_dot = dst_entries
+                    .iter()
+                    .filter(|e| e.name_str().map(|n| n != "." && n != "..").unwrap_or(false))
+                    .count();
+                if non_dot > 0 {
+                    return Err(FileSystemError::new(
+                        FileSystemErrorKind::DirectoryNotEmpty,
+                        "Destination directory is not empty",
+                    ));
+                }
+                // Remove the destination entry first
+                self.remove(new_parent, new_name)?;
+            } else {
+                // Remove the destination file entry
+                self.remove(new_parent, new_name)?;
+            }
+        }
+
+        // Add new directory entry in new_parent pointing to the source inode
+        self.add_directory_entry(new_parent_ino, new_name, src_inode_num, src_file_type)?;
+
+        // Remove old directory entry from old_parent (without freeing the inode)
+        self.remove_directory_entry(old_parent_ino, old_name)?;
+
+        // If source is a directory and parents differ, update link counts:
+        // The ".." entry inside src_inode now points to new_parent instead of old_parent.
+        if src_is_dir && !same_parent {
+            // Decrement old_parent link count (losing one ".." back-reference)
+            let mut old_parent_inode = self.read_inode(old_parent_ino)?;
+            let links = u16::from_le(old_parent_inode.links_count);
+            if links > 0 {
+                old_parent_inode.links_count = (links - 1).to_le();
+                self.write_inode(old_parent_ino, &old_parent_inode)?;
+            }
+
+            // Increment new_parent link count (gaining one ".." back-reference)
+            let mut new_parent_inode = self.read_inode(new_parent_ino)?;
+            let links = u16::from_le(new_parent_inode.links_count);
+            new_parent_inode.links_count = (links + 1).to_le();
+            self.write_inode(new_parent_ino, &new_parent_inode)?;
         }
 
         Ok(())

@@ -1,0 +1,1159 @@
+//! # Scarlet Kernel
+//!
+//! Scarlet is a `no_std` Rust kernel for RISC-V 64 and AArch64. Its ABI modules
+//! execute supported Scarlet-native, Linux, and xv6 programs over shared kernel
+//! objects. ABI compatibility is not CPU instruction translation: a program must
+//! target the running architecture or use a separately configured userspace runtime.
+//! Filesystems, namespaces, devices, and GPU transport support the reference
+//! distribution; individual operations and hardware configurations have their own limits.
+//!
+//! ## Multi-ABI Execution System
+//!
+//! The core innovation of Scarlet is its ability to run binaries from different operating systems
+//! transparently within the same runtime environment:
+//!
+//! ### ABI Module Architecture
+//!
+//! - **Modular ABI Implementation**: Each ABI module implements its supported syscall interface
+//!   using shared kernel APIs, rather than translating between syscalls
+//! - **Binary Detection**: Automatic identification of binary format and target ABI through
+//!   ELF header analysis and magic number detection
+//! - **Shared Kernel Resources**: All ABIs operate on common kernel objects (VFS, memory, devices)
+//!   ensuring consistent behavior and efficient resource utilization
+//! - **Native Implementation**: ABI-specific handlers use underlying kernel
+//!   abstractions; unsupported calls remain errors rather than a promise of full OS compatibility
+//! - **Dynamic Linking**: ELF/interpreter loading supports selected dynamic workloads;
+//!   this is separate from an independently loadable Rust library ABI
+//!
+//! ### Supported ABIs
+//!
+//! - **Scarlet Native ABI**: Direct kernel interface with optimal performance, featuring:
+//!   - Handle-based resource management with capability-based security
+//!   - Modern VFS operations with namespace isolation
+//!   - Advanced IPC mechanisms including pipes and event-driven communication
+//!   - Container-native filesystem operations
+//!   - Dynamic linking support
+//!
+//! - **Linux Compatibility ABI**: Partial RISC-V/AArch64 syscall support used by
+//!   selected Linux userlands, services, and VMMs; see `docs/abi/linux/status.md`
+//! - **xv6 Compatibility ABI**: RISC-V educational OS syscall support
+//!
+//! ## Container Runtime Environment
+//!
+//! Scarlet provides namespace and resource primitives for container-style use.
+//! Their presence does not certify isolation against arbitrary untrusted workloads:
+//!
+//! ### Filesystem Isolation
+//!
+//! - **Mount Namespace Isolation**: Per-task filesystem views with explicit sharing rules
+//! - **Bind Mount Operations**: Selective resource sharing between containers
+//! - **Overlay Filesystem**: Copy-on-write semantics with whiteout support for efficient layering
+//! - **Device File Management**: Controlled access to hardware through DevFS integration
+//!
+//! ### Resource Management
+//!
+//! - **Handle-Based Security**: Capability-based access control with fine-grained permissions
+//! - **Memory Isolation**: Per-task memory spaces with controlled sharing mechanisms
+//! - **Task Lifecycle Management**: Complete process management with environment variable support
+//! - **IPC Mechanisms**: Pipes, shared memory, and other inter-process communication primitives
+//!
+//! ## Virtual File System v2
+//!
+//! Scarlet implements a modern VFS architecture designed for container environments:
+//!
+//! ### Core Architecture
+//!
+//! - **VfsEntry**: Cached path hierarchy used during component-by-component resolution
+//! - **VfsNode**: Abstract file entity interface with metadata access and clean downcasting
+//! - **FileSystemOperations**: Unified driver API consolidating all filesystem operations
+//! - **Mount Tree Management**: Hierarchical mount points and per-task namespace views
+//!
+//! ### Filesystem Drivers
+//!
+//! - **TmpFS**: High-performance memory-based filesystem with configurable size limits
+//! - **CpioFS**: Read-only CPIO archive filesystem optimized for initramfs and embedded data
+//! - **ext2**: Persistent-storage driver with directory, read, and write operations
+//! - **FAT32**: FAT filesystem driver with directory and file operations
+//! - **OverlayFS**: Advanced union filesystem with copy-up semantics and whiteout support
+//! - **DevFS**: Device file system providing controlled hardware access
+//!
+//! - **Memory Safety**: Safe Rust helps prevent ownership and aliasing errors:
+//!   - The type system ensures resources are not used after being freed
+//!   - Mutable references are exclusive, preventing data races
+//!   - Lifetimes ensure references do not outlive the data they point to
+//!   - Unsafe code, DMA, mappings, and asynchronous device completion still need
+//!     explicit invariants; the type system alone does not validate hardware lifetime
+//!
+//! - **Trait-based Abstractions**: Common interfaces for device drivers and subsystems enabling modularity:
+//!   - The `BlockDevice` trait defines operations for block-based storage
+//!   - The `CharDevice` trait provides a common interface for character devices
+//!   - The `FileSystem` trait provides unified filesystem operations for VFS v2 integration
+//!
+//! ## Boot Process
+//!
+//! Scarlet follows a structured, architecture-agnostic initialization sequence
+//! built around the BootInfo structure for unified system startup:
+//!
+//! ### Architecture-Specific Boot Phase
+//!
+//! 1. **Low-level Initialization**: CPU feature detection, trap vector setup
+//! 2. **Hardware Discovery**: Read Limine responses and the supplied device tree
+//! 3. **Memory Layout**: Determine usable memory areas and relocate critical data
+//! 4. **BootInfo Creation**: Consolidate boot parameters into unified structure
+//! 5. **Kernel Handoff**: Call `start_kernel()` with complete BootInfo
+//!
+//! ### Unified Kernel Initialization
+//!
+//! 6. **Early Memory Setup**: Initialize all PMM RAM regions, switch to Scarlet's
+//!    boot page table, fix HHDM references, and initialize the heap
+//! 7. **Early Subsystems**: Critical kernel subsystem initialization via early initcalls
+//! 8. **Driver Framework**: Device driver registration and basic driver initcalls
+//! 9. **Virtual Memory**: Kernel virtual memory management and address space setup
+//! 10. **Initial Task Reservation**: Register init before driver workers can consume PID 1
+//! 11. **Device Discovery**: Discover critical controllers, initialize interrupts,
+//!     then enumerate remaining platform/PCI devices and graphics
+//! 12. **Remaining Initcalls**: Run the kernel test entry when selected, complete
+//!     normal initcalls, and enable CPU interrupt reception
+//! 13. **Timer Subsystem**: Initialize the timer and available wall-clock source
+//! 14. **Virtual File System**: VFS initialization and root filesystem mounting
+//! 15. **Initial Filesystem**: Initramfs processing if provided in BootInfo
+//! 16. **Initial Process**: Load `/init` (or `init=`) into the reserved bootstrap task,
+//!     with network/hypervisor initialization when configured
+//! 17. **Scheduler Activation**: Enqueue init, claim the boot CPU's first task,
+//!     release secondary CPUs through the boot hook, and enter the selected task
+//!
+//! ### BootInfo Integration Benefits
+//!
+//! - **Architecture Abstraction**: Shared boot handoff for implemented RISC-V and AArch64 ports
+//! - **Modular Design**: Clean separation between arch-specific and generic initialization
+//! - **Memory Safety**: Structured memory regions make bounds and ownership
+//!   explicit; boot adapters must still validate the firmware information
+//! - **Extensibility**: Boot parameters have one shared handoff type; changes
+//!   require corresponding updates to its producers and consumers
+//! - **Debugging**: Centralized boot information for diagnostics and troubleshooting
+//!
+//! Early console logging records progress. Some optional-device failures are
+//! logged and skipped, while required initialization can panic; boot is not a
+//! transactional operation. BootInfo carries the memory and device information
+//! needed by the selected boot path throughout initialization.
+//!
+//! ## System Integration
+//!
+//! ### Core Subsystems
+//!
+//! - **Task Management**: Complete process lifecycle with environment variables and IPC
+//! - **Memory Management**: Virtual memory with per-task address spaces and shared regions
+//! - **Device Framework**: Unified device interface supporting block, character, and platform devices
+//! - **Interrupt Handling**: Event-driven architecture with proper context switching
+//! - **Handle System**: Capability-based resource access with fine-grained permissions
+//!
+//! ### ABI Module Integration
+//!
+//! Each ABI module integrates with the kernel through standardized interfaces:
+//!
+//! - **Binary Loading**: ELF loader with format detection and validation
+//! - **Syscall Dispatch**: Per-ABI syscall tables with transparent routing
+//! - **Resource Management**: Shared kernel object access through common APIs
+//! - **Environment Setup**: ABI-specific process initialization and cleanup
+//! - **Mount Operations**: `mount()`, `umount()`, `pivot_root()` for dynamic filesystem management
+//! - **Process Management**: `execve()`, `fork()`, `wait()`, `exit()` with proper cleanup
+//! - **IPC Operations**: Pipe creation, communication, and resource sharing
+//!
+//! ## Architecture Support
+//!
+//! RISC-V 64 and AArch64 share the common kernel and have separate boot,
+//! trap/context, MMU, interrupt, timer, and virtualization implementations:
+//!
+//! - **Interrupt Handling**: Complete trap frame management with timer and external interrupts
+//! - **Memory Management**: Virtual memory with page tables and memory protection
+//! - **SBI Interface**: Supervisor Binary Interface for firmware communication
+//! - **Instruction Abstractions**: RISC-V specific optimizations with compressed instruction support
+//! - **AArch64 Execution**: EL1 or supported EL2/VHE host entry, with EL0 user tasks
+//! - **Support Boundaries**: QEMU reference projects and experimental board work
+//!   are distinct; see `docs/architecture/multi-architecture.md`
+//!
+//! ## Rust Language Features
+//!
+//! Scarlet leverages Rust's advanced features for safe and efficient kernel development:
+//!
+//! ### Memory Safety
+//!
+//! - **Zero-cost Abstractions**: High-level constructs compile to efficient machine code
+//! - **Ownership System**: Automatic memory management without garbage collection overhead
+//! - **Lifetime Validation**: Compile-time prevention of use-after-free and dangling pointer errors
+//! - **Borrowing Rules**: Exclusive mutable access prevents data races at compile time
+//! - **Bounds Checking**: Safe slice/array access is checked; raw pointers,
+//!   assembly, and external device access require separate review
+//!
+//! ### Type System Features
+//!
+//! - **Trait-based Design**: Generic programming with zero-cost abstractions for device drivers
+//! - **Pattern Matching**: Exhaustive matching prevents unhandled error cases
+//! - **Option/Result Types**: Explicit error handling without exceptions or null pointer errors
+//! - **Custom Test Framework**: `#[test_case]` attribute for no-std kernel testing
+//! - **Const Generics**: Compile-time array sizing and type-level programming
+//!
+//! ### No-std Environment
+//!
+//! - **Embedded-first Design**: No standard library dependency for minimal kernel footprint
+//! - **Custom Allocators**: Direct control over memory allocation strategies
+//! - **Inline Assembly**: Direct hardware access when needed with type safety
+//! - **Custom Panic Handler**: Controlled kernel panic behavior for debugging
+//! - **Boot-time Initialization**: Static initialization and controlled startup sequence
+//!
+//! ## Development Framework
+//!
+//! ### Testing Infrastructure
+//!
+//! Scarlet provides a comprehensive testing framework designed for kernel development:
+//!
+//! ```rust
+//! #[test_case]
+//! fn test_memory_area_size() {
+//!     // Kernel unit tests run in privileged mode
+//!     let area = scarlet::vm::vmem::MemoryArea::new(0x1000, 0x2000);
+//!     assert_eq!(area.start, 0x1000);
+//!     assert_eq!(area.end, 0x2000);
+//! }
+//! ```
+//!
+//! - **Custom Test Runner**: `#[test_case]` attribute for kernel-specific testing
+//! - **No-std Testing**: Tests run directly in kernel mode without standard library
+//! - **Integration Tests**: Focused subsystem tests, including multi-ABI scenarios
+//! - **Hardware-in-the-Loop**: QEMU runners and separately recorded hardware checks;
+//!   compilation or a skipped test does not establish runtime support
+//! - **Performance Benchmarks**: Kernel performance measurement and regression testing
+//!
+//! ### Debugging Support
+//!
+//! - **Early Console**: Serial output available from early boot stages
+//! - **Panic Handler**: Detailed panic information with stack traces
+//! - **GDB Integration**: Full debugging support through QEMU's GDB stub
+//! - **Memory Debugging**: Allocation tracking and leak detection
+//! - **Tracing**: Event tracing for performance analysis and debugging
+//!
+//! ### Build System Integration
+//!
+//! Project BSPs link this kernel library through the SDK-generated
+//! `scarlet-modules` crate. `cargo-make` exposes convenience build/test tasks:
+//!
+//! - `cargo make build-debug-riscv64` / `cargo make build-debug-aarch64`: Full build with user programs
+//! - `cargo make test-riscv64` / `cargo make test-aarch64`: Run kernel tests
+//! - `cargo make debug-riscv64` / `cargo make debug-aarch64`: Launch kernel with GDB support
+//! - `cargo make run-riscv64` / `cargo make run-aarch64`: Quick development cycle execution
+//!
+//! ## Entry Points
+//!
+//! The kernel provides multiple entry points for different scenarios:
+//!
+//! - **`start_kernel()`**: Main bootstrap processor initialization
+//! - **`start_ap()`**: Application processor startup for multicore systems
+//! - **`test_main()`**: Test framework entry point when built with testing enabled
+//!
+//! ## Module Organization
+//!
+//! Core kernel modules provide focused functionality:
+//!
+//! - **`abi/`**: Multi-ABI implementation modules (Scarlet Native, Linux, xv6)
+//! - **`arch/`**: RISC-V 64 and AArch64 implementations, selected/re-exported at the arch boundary
+//! - **`drivers/`**: Hardware device drivers (UART, block devices, VirtIO)
+//! - **`fs/`**: Filesystem implementations and VFS v2 core
+//! - **`task/`**: Task state, ELF loading, and process lifecycle
+//! - **`sched/`**: Run queues, placement, accounting, and scheduling policy
+//! - **`mem/`**: Physical pages and heap allocation
+//! - **`vm/`**: Address spaces, sparse direct maps, mappings, and IOREMAP
+//! - **`syscall/`**: System call dispatch and implementation
+//! - **`object/`**: Kernel object system with handle management
+//! - **`interrupt/`**: Interrupt handling and controller support
+//! - **`device/`**: Device capabilities and managers used by drivers and kernel objects
+//! - **`sync/`**: Kernel synchronization, including IRQ-aware primitives
+//! - **`lsm/`**: Loadable module lifecycle, symbols, and relocation integration
+//! - **`hypervisor/`**: Optional SHV and guest-management infrastructure
+//!
+//! *Compatibility is operation- and configuration-specific. Native programs,
+//! selected Linux workloads, and RISC-V xv6 programs are already used; this does
+//! not imply complete compatibility with every binary of those systems. The
+//! repository's `docs/kernel/README.md` and `docs/userspace/README.md` provide
+//! the current source and development map.*
+
+#![no_std]
+#![cfg_attr(test, no_main)]
+#![feature(custom_test_frameworks)]
+#![test_runner(crate::test::test_runner)]
+#![reexport_test_harness_main = "test_main"]
+
+pub mod abi;
+pub mod arch;
+pub mod boot;
+pub mod breadcrumb;
+pub mod device;
+pub mod drivers;
+pub mod earlycon;
+pub mod earlyfb;
+pub mod environment;
+pub mod executor;
+pub mod fs;
+#[cfg(feature = "hypervisor")]
+pub mod hypervisor;
+pub mod initcall;
+pub mod interrupt;
+pub mod ipc;
+pub mod library;
+pub mod log;
+pub mod lsm;
+pub mod mem;
+#[cfg(feature = "network")]
+pub mod network;
+pub mod object;
+pub mod profiler;
+pub mod random;
+pub mod sched;
+pub mod sync;
+pub mod syscall;
+pub mod system;
+pub mod task;
+pub mod time;
+pub mod timer;
+pub mod traits;
+pub mod vm;
+
+#[cfg(test)]
+pub mod test;
+
+extern crate alloc;
+use alloc::string::ToString;
+use device::fdt::FdtManager;
+use device::manager::{DeviceManager, DriverPriority};
+use device::pci::PciBus;
+use environment::{KERNEL_HEAP_BASE, KERNEL_HEAP_SIZE, PAGE_SIZE, SCARLET_HHDM_BASE};
+use initcall::{call_initcalls, driver::driver_initcall_call, early::early_initcall_call};
+
+const MIN_HEAP_SIZE: usize = 32 * 1024;
+
+use crate::{
+    device::graphics::manager::GraphicsManager,
+    executor::executor::TransparentExecutor,
+    fs::{drivers::initramfs::init_initramfs, vfs_v2::manager::init_global_vfs_manager},
+};
+use arch::get_cpu;
+use core::sync::atomic::{Ordering, compiler_fence, fence};
+use mem::allocator::init_heap;
+use sched::scheduler::{enqueue_task, get_task_by_id, register_task, start_scheduler};
+use task::new_user_task;
+use timer::get_kernel_timer;
+use vm::{
+    boot::switch_to_boot_page_table, direct_map::DirectMapRegions, kernel_vm_init, phys_to_virt,
+    transition_kernel_memory_layout, vmem::MemoryArea,
+};
+
+fn is_pci_host_node(node: &fdt::node::FdtNode<'_, '_>) -> bool {
+    node.name.starts_with("pci@")
+        || node.name.starts_with("pcie@")
+        || node
+            .compatible()
+            .map(|compat| compat.all().any(|entry| entry == "pci-host-ecam-generic"))
+            .unwrap_or(false)
+}
+
+fn find_pci_ecam(fdt: &fdt::Fdt<'_>) -> Option<(usize, usize)> {
+    for parent_path in ["/soc", "/"] {
+        let Some(parent) = fdt.find_node(parent_path) else {
+            continue;
+        };
+
+        for child in parent.children() {
+            if !is_pci_host_node(&child) {
+                continue;
+            }
+
+            if let Some(regions) = child.reg() {
+                for region in regions {
+                    if let Some(size) = region.size {
+                        return Some((region.starting_address as usize, size));
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
+/// A panic handler is required in Rust, this is probably the most basic one possible
+#[cfg(not(test))]
+#[panic_handler]
+fn panic(info: &core::panic::PanicInfo) -> ! {
+    use arch::instruction::idle;
+
+    crate::emergency_println!(
+        "[Scarlet Kernel] panic: cpu={:?} preempt_count={} {}",
+        crate::arch::try_get_cpuid(),
+        crate::sync::preempt_count(),
+        info,
+    );
+    crate::sync::dump_active_preempt_guards();
+
+    // if let Some(task) = get_scheduler().get_current_task(get_cpu().get_cpuid()) {
+    //     task.exit(1); // Exit the task with error code 1
+    //     get_scheduler().schedule(get_cpu());
+    // }
+
+    loop {
+        idle();
+    }
+}
+
+/// Represents the source of device information during boot
+///
+/// Different boot protocols provide hardware information through various mechanisms.
+/// This enum captures the source and relevant parameters for device discovery.
+#[derive(Debug, Clone, Copy)]
+pub enum DeviceSource {
+    /// Flattened Device Tree (FDT) source
+    /// Used by RISC-V, ARM, and other architectures that support device trees
+    Fdt(usize),
+    /// Unified Extensible Firmware Interface (UEFI) source
+    /// Modern firmware interface providing comprehensive hardware information
+    Uefi,
+    /// Advanced Configuration and Power Interface (ACPI) source
+    /// x86/x86_64 standard for hardware configuration and power management
+    Acpi,
+    /// No device information available
+    /// Fallback when no hardware description is provided by firmware
+    None,
+}
+
+/// Boot information structure containing essential system parameters
+///
+/// This structure is created during the early boot process and contains
+/// all necessary information for kernel initialization. It abstracts
+/// architecture-specific boot protocols into a common interface.
+///
+/// # Architecture Integration
+///
+/// Different architectures populate this structure from their respective
+/// boot protocols:
+/// - **RISC-V**: Limine responses plus FDT (Flattened Device Tree) data
+/// - **AArch64**: Limine responses plus FDT, with architecture-specific EL handling
+/// - **Other protocols/architectures**: DeviceSource has additional variants, but
+///   their presence does not establish a working x86 or ACPI boot implementation
+///
+/// # Usage
+///
+/// The BootInfo is passed to `start_kernel()` as the primary parameter
+/// and provides all essential information needed for kernel initialization:
+///
+/// ```no_run
+/// fn boot_handoff(boot_info: &scarlet::BootInfo) -> ! {
+///     // Inspect parameters after architecture-specific initialization.
+///     let memory = boot_info.usable_memory_paddr;
+///     let cpu_id = boot_info.cpu_id;
+///     scarlet::start_kernel(boot_info)
+/// }
+/// ```
+pub struct BootInfo {
+    /// CPU/Hart ID of the boot processor
+    /// Used for multicore initialization and per-CPU data structures
+    pub cpu_id: usize,
+    /// Number of CPUs detected from the selected boot protocol and hardware description
+    /// Used to drive SMP initialization and per-CPU resource sizing
+    pub cpu_count: usize,
+    /// Physical memory area available for PMM allocation (usable RAM excluding reserved regions)
+    pub usable_memory_paddr: MemoryArea,
+    /// Every physical RAM region available to the PMM.
+    ///
+    /// `usable_memory_paddr` remains the primary boot-time scratch region for
+    /// compatibility, while this set prevents fragmented firmware memory maps
+    /// from silently discarding otherwise usable RAM.
+    pub usable_memory_regions: DirectMapRegions,
+    /// Sparse physical regions mapped into Scarlet's HHDM (direct map).
+    pub direct_map_regions: DirectMapRegions,
+    /// Optional initramfs physical memory area
+    pub initramfs_paddr: Option<MemoryArea>,
+    /// HHDM offset: hhdm_va = paddr + hhdm_offset
+    pub hhdm_offset: usize,
+    /// Optional kernel command line parameters
+    /// Boot arguments passed by bootloader for kernel configuration
+    pub cmdline: Option<&'static str>,
+    /// Source of device information for hardware discovery
+    /// Determines how the kernel will enumerate and initialize devices
+    pub device_source: DeviceSource,
+    /// Optional framebuffer physical memory area
+    /// Used for early console output before graphics subsystem initialization
+    pub framebuffer_paddr: Option<MemoryArea>,
+    /// Optional BSP hook to start secondary CPUs.
+    ///
+    /// Called by `start_kernel()` after all global one-time init is complete.
+    /// The BSP implementation wakes each secondary CPU and makes it call
+    /// `start_ap()` with the appropriate CPU ID. `None` for single-CPU or
+    /// test configurations.
+    pub start_secondary_cpus_hook: Option<fn()>,
+}
+
+impl BootInfo {
+    /// Creates a new BootInfo instance with the specified parameters
+    ///
+    /// # Arguments
+    ///
+    /// * `cpu_id` - ID of the boot processor/hart
+    /// * `cpu_count` - Number of CPUs reported by the boot path
+    /// * `usable_memory_paddr` - Physical memory area for PMM allocation
+    /// * `direct_map_regions` - Sparse physical regions to map into HHDM
+    /// * `initramfs_paddr` - Optional initramfs physical memory area
+    /// * `hhdm_offset` - HHDM offset for VA = PA + offset
+    /// * `cmdline` - Optional kernel command line parameters
+    /// * `device_source` - Source of device information for hardware discovery
+    /// * `framebuffer_paddr` - Optional framebuffer physical memory area
+    /// * `start_secondary_cpus_hook` - Optional hook to release secondary CPUs after global initialization
+    ///
+    /// # Returns
+    ///
+    /// A new BootInfo instance containing the specified boot parameters
+    pub fn new(
+        cpu_id: usize,
+        cpu_count: usize,
+        usable_memory_paddr: MemoryArea,
+        direct_map_regions: DirectMapRegions,
+        initramfs_paddr: Option<MemoryArea>,
+        hhdm_offset: usize,
+        cmdline: Option<&'static str>,
+        device_source: DeviceSource,
+        framebuffer_paddr: Option<MemoryArea>,
+        start_secondary_cpus_hook: Option<fn()>,
+    ) -> Self {
+        let mut usable_memory_regions = DirectMapRegions::new();
+        usable_memory_regions
+            .insert(
+                usable_memory_paddr,
+                crate::vm::vmem::MemoryAttribute::Normal,
+            )
+            .expect("primary usable memory region is invalid");
+        Self {
+            cpu_id,
+            cpu_count,
+            usable_memory_paddr,
+            usable_memory_regions,
+            direct_map_regions,
+            initramfs_paddr,
+            hhdm_offset,
+            cmdline,
+            device_source,
+            framebuffer_paddr,
+            start_secondary_cpus_hook,
+        }
+    }
+
+    /// Replace the default single PMM region with the complete firmware RAM set.
+    ///
+    /// # Arguments
+    ///
+    /// * `regions` - Nonempty set of usable physical RAM regions.
+    ///
+    /// # Returns
+    ///
+    /// This BootInfo with the PMM region set replaced; the primary scratch region is unchanged.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `regions` is empty.
+    pub fn with_usable_memory_regions(mut self, regions: DirectMapRegions) -> Self {
+        assert!(
+            !regions.is_empty(),
+            "usable memory region set must not be empty"
+        );
+        self.usable_memory_regions = regions;
+        self
+    }
+
+    /// Returns the kernel command line arguments
+    ///
+    /// Provides access to boot parameters passed by the bootloader.
+    /// Returns an empty string if no command line was provided.
+    ///
+    /// # Returns
+    ///
+    /// Command line string slice, or empty string if none available
+    pub fn get_cmdline(&self) -> &str {
+        if let Some(cmdline) = self.cmdline {
+            cmdline
+        } else {
+            ""
+        }
+    }
+
+    /// Returns the initramfs memory area if available
+    ///
+    /// Uses the sparse Normal direct map when the initramfs belongs to it. If
+    /// boot supplied an initramfs outside those regions, the boot and runtime
+    /// page-table setup install an explicit Normal fallback at the same HHDM
+    /// arithmetic address so the archive remains accessible without widening
+    /// the sparse direct-map membership set.
+    ///
+    /// # Returns
+    ///
+    /// The virtual initramfs area when one was supplied, or `None` otherwise.
+    pub fn get_initramfs_vaddr(&self) -> Option<MemoryArea> {
+        self.initramfs_paddr
+            .map(|area| match crate::vm::addr::runtime_direct_map_regions() {
+                Some(regions)
+                    if regions.contains_area_with_attribute(
+                        area,
+                        crate::vm::vmem::MemoryAttribute::Normal,
+                    ) =>
+                {
+                    MemoryArea::new(
+                        crate::vm::addr::phys_to_virt(area.start),
+                        crate::vm::addr::phys_to_virt(area.end),
+                    )
+                }
+                Some(_) => MemoryArea::new(
+                    SCARLET_HHDM_BASE
+                        .checked_add(area.start)
+                        .expect("initramfs HHDM virtual start overflows"),
+                    SCARLET_HHDM_BASE
+                        .checked_add(area.end)
+                        .expect("initramfs HHDM virtual end overflows"),
+                ),
+                None => MemoryArea::new(
+                    crate::vm::addr::phys_to_virt(area.start),
+                    crate::vm::addr::phys_to_virt(area.end),
+                ),
+            })
+    }
+}
+
+/// Main kernel entry point for the boot processor
+///
+/// This function is called by architecture-specific boot code and performs
+/// the complete kernel initialization sequence using information provided
+/// in the BootInfo structure.
+///
+/// # Boot Sequence
+///
+/// The kernel initialization follows this structured sequence:
+///
+/// 1. **Early System Setup**: Extract boot parameters from BootInfo
+/// 2. **Memory Initialization**: Initialize all PMM regions, switch boot page tables,
+///    fix direct-map references, and initialize the heap
+/// 3. **Early Initcalls**: Initialize critical early subsystems
+/// 4. **Driver Initcalls**: Load and initialize device drivers
+/// 5. **Virtual Memory**: Set up kernel virtual memory management
+/// 6. **Initial Task Reservation**: Register init before driver workers start
+/// 7. **Device Discovery**: Initialize critical interrupt controllers, then other
+///    platform/PCI devices and graphics
+/// 8. **Interrupt System**: Run remaining initcalls and enable CPU interrupts
+/// 9. **Timer Subsystem**: Initialize kernel timer and scheduling infrastructure
+/// 10. **VFS Setup**: Initialize virtual filesystem and mount root
+/// 11. **Initramfs Processing**: Mount initramfs if provided in BootInfo
+/// 12. **Initial Task**: Apply configured network/hypervisor setup and load init
+/// 13. **Scheduler Start**: Enqueue init, claim the first task, release secondary
+///     CPUs, and enter the selected task
+///
+/// # Architecture Integration
+///
+/// This function is architecture-agnostic and relies on the BootInfo structure
+/// to abstract hardware-specific details. Architecture-specific boot code is
+/// responsible for creating a properly initialized BootInfo before calling
+/// this function.
+///
+/// # Arguments
+///
+/// * `boot_info` - Comprehensive boot information structure containing:
+///   - CPU ID for multicore initialization
+///   - Usable physical RAM regions and sparse direct-map regions
+///   - Optional initramfs location and size
+///   - Kernel command line parameters
+///   - Device information source (FDT/UEFI/ACPI)
+///
+/// # Memory Layout
+///
+/// The function expects the following memory layout:
+/// - Kernel image loaded and executable
+/// - BootInfo.usable_memory_regions available for physical page allocation
+/// - The selected hardware description accessible via device_source (FDT on current Limine paths)
+/// - Optional initramfs data at specified location
+///
+/// # Safety
+///
+/// This function assumes:
+/// - Architecture-specific initialization has completed successfully
+/// - BootInfo contains valid memory areas and addresses
+/// - Basic CPU features (MMU, interrupts) are available
+/// - Memory protection allows kernel operation
+///
+/// # Returns
+///
+/// This function never returns - it transitions to the scheduler and
+/// enters normal kernel operation mode.
+#[unsafe(no_mangle)]
+pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
+    let cpu_id = boot_info.cpu_id;
+    let cpu_count = boot_info.cpu_count;
+    crate::sched::scheduler::register_boot_cpu(cpu_id);
+
+    println!("[Scarlet Kernel] Hello, I'm Scarlet kernel!");
+    println!("[Scarlet Kernel] Boot on CPU {}", cpu_id);
+    println!("[Scarlet Kernel] Detected {} CPU(s)", cpu_count);
+    let usable_memory_paddr = boot_info.usable_memory_paddr;
+    let usable_memory_regions = boot_info.usable_memory_regions;
+    let direct_map_regions = boot_info.direct_map_regions;
+    let hhdm_offset = boot_info.hhdm_offset;
+    println!(
+        "[Scarlet Kernel] Usable memory (PA) : {:#x} - {:#x}",
+        usable_memory_paddr.start, usable_memory_paddr.end
+    );
+    println!(
+        "[Scarlet Kernel] PMM usable regions : {}",
+        usable_memory_regions.len()
+    );
+    let direct_map_bounds = direct_map_regions
+        .bounding_area()
+        .expect("BootInfo direct-map regions must not be empty");
+    println!(
+        "[Scarlet Kernel] Direct-map bounds   : {:#x} - {:#x} ({} sparse regions)",
+        direct_map_bounds.start,
+        direct_map_bounds.end,
+        direct_map_regions.len(),
+    );
+    println!("[Scarlet Kernel] HHDM offset       : {:#x}", hhdm_offset);
+
+    /* Handle initramfs if available in BootInfo */
+    if let Some(initramfs_paddr) = boot_info.initramfs_paddr {
+        println!(
+            "[Scarlet Kernel] InitramFS (PA)    : {:#x} - {:#x}",
+            initramfs_paddr.start, initramfs_paddr.end
+        );
+    } else {
+        println!("[Scarlet Kernel] No initramfs found");
+    }
+
+    println!("[Scarlet Kernel] Initializing PMM...");
+    for index in 0..usable_memory_regions.len() {
+        let region = usable_memory_regions
+            .get(index)
+            .expect("usable memory region index must be valid")
+            .area();
+        let pmm_start_aligned = (region.start + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+        if pmm_start_aligned < region.end {
+            unsafe {
+                mem::pmm::init(MemoryArea::new(pmm_start_aligned, region.end));
+            }
+        }
+    }
+
+    println!("[Scarlet Kernel] Allocating initial heap from PMM...");
+    let heap_size = KERNEL_HEAP_SIZE;
+    let heap_pages = heap_size / PAGE_SIZE;
+    let heap_start_phys =
+        mem::pmm::alloc_contiguous_pages(heap_pages).expect("Failed to allocate heap from PMM");
+    let heap_end_phys = heap_start_phys + heap_size - 1;
+    let heap_paddr = MemoryArea::new(heap_start_phys, heap_end_phys);
+
+    println!("[Scarlet Kernel] Building Scarlet boot page table...");
+    // crate::earlyfb::deactivate();
+    switch_to_boot_page_table(direct_map_regions, boot_info.initramfs_paddr, heap_paddr);
+    #[cfg(target_arch = "aarch64")]
+    if crate::arch::aarch64::earlycon::activate_after_boot_page_table_switch() {
+        println!("[earlycon] Qualcomm GENI UART active after page-table handoff");
+    }
+
+    // Fix PMM metadata pointers immediately after page table switch
+    // Must be done before any operation that might touch PMM data structures
+    mem::pmm::fixup_hhdm_offset(hhdm_offset, SCARLET_HHDM_BASE);
+
+    fence(Ordering::SeqCst);
+    compiler_fence(Ordering::SeqCst); // Ensure PMM fixup is visible before proceeding
+
+    crate::earlyfb::fixup_hhdm_offset(hhdm_offset, SCARLET_HHDM_BASE);
+
+    transition_kernel_memory_layout(
+        SCARLET_HHDM_BASE,
+        direct_map_regions,
+        heap_paddr.start,
+        KERNEL_HEAP_BASE,
+        heap_size,
+    );
+
+    fence(Ordering::SeqCst);
+
+    if let DeviceSource::Fdt(relocated_fdt_paddr) = boot_info.device_source {
+        crate::device::fdt::init_fdt(phys_to_virt(relocated_fdt_paddr));
+    }
+
+    println!("[Scarlet Kernel] Initializing heap...");
+    unsafe { init_heap(KERNEL_HEAP_BASE, heap_size) };
+
+    fence(Ordering::SeqCst);
+    println!(
+        "[Scarlet Kernel] Heap initialized at {:#x} - {:#x}",
+        KERNEL_HEAP_BASE,
+        KERNEL_HEAP_BASE + heap_size - 1
+    );
+
+    {
+        let test_vec = alloc::vec::Vec::<u8>::with_capacity(1024);
+        drop(test_vec);
+        println!("[Scarlet Kernel] Heap allocation test passed");
+    }
+
+    fence(Ordering::Release);
+
+    /* After this point, we can use the heap */
+    early_initcall_call();
+    fence(Ordering::SeqCst); // Ensure early initcalls are completed before proceeding
+    driver_initcall_call();
+
+    println!("[Scarlet Kernel] Initializing Virtual Memory...");
+    kernel_vm_init(direct_map_regions, boot_info.initramfs_paddr, heap_paddr);
+    /* After this point, we can use the heap and virtual memory */
+    /* We will also be restricted to the kernel address space */
+
+    lsm::symbol::init_kernel_symbols();
+
+    /* Create and register init before driver workers can consume PID 1. */
+    println!("[boot] Creating initial user task...");
+    let mut init_task = new_user_task("init".to_string(), 0);
+    init_task.init();
+    let init_task_id = register_task(init_task);
+
+    /* Populate devices from BootInfo device source */
+    println!("[Scarlet Kernel] Populating devices...");
+    let device_manager = DeviceManager::get_manager();
+    // Two-phase interrupt bring-up:
+    // 1) Discover critical interrupt controllers (PLIC/CLINT) first.
+    // 2) Initialize interrupt controllers.
+    // 3) Discover remaining devices (which may enable specific IRQ lines).
+    device_manager
+        .populate_devices_from_source(&boot_info.device_source, Some(&[DriverPriority::Critical]));
+    fence(Ordering::SeqCst); // Ensure device population is complete before proceeding
+
+    /* Initialize interrupt controllers (stage 1) */
+    println!("[Scarlet Kernel] Initializing interrupt controllers...");
+    crate::interrupt::InterruptManager::global().init_controllers();
+    crate::interrupt::InterruptManager::global()
+        .init_controllers_for_cpu(get_cpu().get_cpuid() as u32);
+
+    fence(Ordering::SeqCst); // Ensure interrupt controllers are initialized before proceeding
+
+    /* Initialize NetworkManager before device discovery so protocol layers are ready */
+    #[cfg(feature = "network")]
+    {
+        println!("[NetworkManager] Initializing NetworkLayers...");
+        let _network_manager = crate::network::NetworkManager::init();
+        fence(Ordering::SeqCst);
+    }
+
+    /* Discover remaining devices */
+    println!("[Scarlet Kernel] Populating remaining devices...");
+    device_manager.populate_devices_from_source(
+        &boot_info.device_source,
+        Some(&[
+            DriverPriority::Core,
+            DriverPriority::Standard,
+            DriverPriority::Late,
+        ]),
+    );
+
+    if let Some(fdt) = FdtManager::get_manager().get_fdt() {
+        if let Some((ecam_base, ecam_size)) = find_pci_ecam(fdt) {
+            println!(
+                "[PCI] ECAM discovered from FDT paddr={:#x} size={:#x}",
+                ecam_base, ecam_size
+            );
+            let pci_bus = PciBus::new(ecam_base, ecam_size);
+            if let Err(error) = pci_bus.scan_and_register() {
+                println!("[Scarlet Kernel] PCI scan skipped: {}", error);
+            }
+        } else {
+            println!("[PCI] no PCI ECAM found in FDT");
+        }
+    } else {
+        println!("[PCI] no FDT available, skipping PCI scan");
+    }
+    DeviceManager::get_manager().probe_pci_devices();
+    fence(Ordering::SeqCst);
+
+    /* After this point, we can use the device manager */
+    library::std::print::enable_normal_console();
+
+    /* Initialize Graphics Manager and discover graphics devices */
+    println!("[Scarlet Kernel] Initializing graphics subsystem...");
+
+    // Add extra safety measures for optimized builds
+    fence(Ordering::SeqCst); // Ensure device population is complete before proceeding
+
+    // Verify that devices are actually registered before attempting graphics initialization
+    let device_count = DeviceManager::get_manager().get_devices_count();
+    println!(
+        "[Scarlet Kernel] Found {} devices before graphics initialization",
+        device_count
+    );
+
+    if device_count > 0 {
+        GraphicsManager::get_manager().discover_graphics_devices();
+    } else {
+        println!("[Scarlet Kernel] Warning: No devices found, skipping graphics initialization");
+    }
+
+    fence(Ordering::SeqCst); // Ensure graphics devices are discovered before proceeding
+
+    #[cfg(test)]
+    test_main();
+
+    /* Initcalls */
+    println!("[boot] entering initcalls");
+    call_initcalls();
+    println!("[boot] leaving initcalls");
+
+    let device_manager = DeviceManager::get_manager();
+    println!(
+        "[boot] pre-init devices: count={} tty0={}",
+        device_manager.get_devices_count(),
+        device_manager.get_device_by_name("tty0").is_some()
+    );
+    for (id, device) in device_manager.get_devices_with_ids() {
+        println!(
+            "[boot] pre-init device: id={} name={} type={:?} capabilities={:?}",
+            id,
+            device.name(),
+            device.device_type(),
+            device.capabilities()
+        );
+    }
+
+    fence(Ordering::SeqCst); // Ensure all initcalls are completed before proceeding
+
+    /* Enable CPU interrupt reception (stage 2) */
+    println!("[Scarlet Kernel] Enabling CPU interrupts...");
+    crate::interrupt::enable_cpu_interrupts();
+
+    fence(Ordering::SeqCst); // Ensure interrupt manager is initialized before proceeding
+
+    /* Initialize timer */
+    println!("[boot] Initializing timer...");
+    // Initialize timer for the boot CPU (from BootInfo)
+    get_kernel_timer().init(boot_info.cpu_id);
+
+    fence(Ordering::SeqCst); // Ensure timer is initialized before proceeding
+
+    // Seed the wall clock from Limine's "Date at Boot" (EFI/UEFI boot path).
+    // The arch counter's absolute zero is VM-start, not kernel boot, so we
+    // cannot treat the snapshot as "wall at timer zero". Instead capture the
+    // counter at the seed instant, anchor that instant to the boot RTC value,
+    // and let the wall clock advance by the monotonic counter delta from there.
+    // RTC drivers remain a fallback for non-EFI boots (first-wins).
+    #[cfg(feature = "limine")]
+    {
+        if let Some(epoch_ns) = crate::boot::limine::date_at_boot_ns() {
+            let mono = crate::time::current_time_ns();
+            match crate::time::initialize_wall_clock_from_rtc_sample(epoch_ns, mono, mono) {
+                Ok(()) => println!("[boot] wall clock seeded from Limine Date at Boot"),
+                Err(e) => println!("[boot] Date at Boot wall clock seed failed: {}", e),
+            }
+        }
+    }
+
+    /* Initialize scheduler */
+    println!("[boot] Initializing scheduler...");
+    fence(Ordering::SeqCst); // Ensure scheduler is initialized before proceeding
+
+    /* Initialize global VFS */
+    println!("[boot] Initializing global VFS...");
+    let manager = init_global_vfs_manager();
+
+    /* Initialize initramfs from BootInfo if available */
+    if let Some(initramfs_paddr) = boot_info.initramfs_paddr {
+        println!("[Scarlet Kernel] Initializing initramfs from BootInfo...");
+        let initramfs_vaddr = MemoryArea::new(
+            phys_to_virt(initramfs_paddr.start),
+            phys_to_virt(initramfs_paddr.end),
+        );
+        if let Err(e) = init_initramfs(&manager, initramfs_vaddr) {
+            println!(
+                "[Scarlet Kernel] Warning: Failed to initialize initramfs: {}",
+                e
+            );
+        }
+    } else {
+        println!("[Scarlet Kernel] No initramfs found in BootInfo");
+    }
+
+    fence(Ordering::SeqCst); // Ensure VFS and initramfs are initialized before proceeding
+
+    /* Apply network configuration from cmdline */
+    #[cfg(feature = "network")]
+    {
+        let cmdline = boot_info.get_cmdline();
+        if !cmdline.is_empty() {
+            crate::network::config::apply_cmdline_config(cmdline);
+        }
+    }
+
+    #[cfg(feature = "hypervisor")]
+    {
+        crate::hypervisor::init_hv();
+        crate::hypervisor::init_hv_per_cpu(cpu_id);
+    }
+
+    /* Set up init task */
+    let task = get_task_by_id(init_task_id).expect("init task must be registered");
+    *task.vfs.write() = Some(manager.clone());
+    task.vfs
+        .read()
+        .as_ref()
+        .unwrap()
+        .set_cwd_by_path("/")
+        .expect("Failed to set initial working directory");
+    let init_cmdline = boot_info.get_cmdline();
+    task.bootstrap_environment.store(true, Ordering::Release);
+    let init_path = init_cmdline
+        .split_whitespace()
+        .find_map(|word| word.strip_prefix("init="))
+        .unwrap_or("/init");
+    let init_argv_default = [init_path];
+    let init_argv_with_cmdline = [init_path, init_cmdline];
+    let init_argv: &[&str] = if init_cmdline.is_empty() {
+        &init_argv_default
+    } else {
+        &init_argv_with_cmdline
+    };
+
+    match TransparentExecutor::execute_binary(
+        init_path,
+        init_argv,
+        &[],
+        &task,
+        task.get_trapframe(),
+    ) {
+        Ok(()) => {
+            task.vm_manager.memmaps_iter_with(|maps| {
+                for map in maps {
+                    println!(
+                        "[Scarlet Kernel] Task memory map: {:#x} - {:#x}",
+                        map.vmarea.start, map.vmarea.end
+                    );
+                }
+            });
+            println!(
+                "[Scarlet Kernel] Init ELF loaded with entry point at {:#x}",
+                task.vcpu.lock().get_pc()
+            );
+            println!("[Scarlet Kernel] Successfully loaded init ELF into task");
+            println!("[Scarlet Kernel] Adding init task to scheduler...");
+            let cpu_id = get_cpu().get_cpuid();
+            println!("[Scarlet Kernel] cpu_id for init task: {}", cpu_id);
+            enqueue_task(init_task_id, cpu_id);
+            println!("[Scarlet Kernel] Init task added to scheduler");
+        }
+        Err(e) => println!("[Scarlet Kernel] Error loading ELF into task: {:?}", e),
+    }
+
+    // println!("[Scarlet Kernel] About to fence before scheduler start...");
+    fence(Ordering::SeqCst); // Ensure task is added to scheduler before proceeding
+    // println!("[Scarlet Kernel] Fence complete; about to print scheduler start...");
+
+    crate::sched::scheduler::register_online_cpu(cpu_id);
+    crate::sched::scheduler::spawn_idle_task(cpu_id);
+
+    // println!("[Scarlet Kernel] Scheduler will start...");
+    // println!("[Scarlet Kernel] Calling start_scheduler()...");
+
+    let next_task_id = start_scheduler();
+    // println!("[boot] start_scheduler returned next={:?}", next_task_id);
+    // Keep APs behind the release barrier until the BSP has claimed the
+    // first runnable task. Otherwise a fast AP can steal the init task from
+    // the BSP's ready queue before the boot CPU enters it, which makes early
+    // userspace startup nondeterministic on SMP systems. The BSP is not
+    // assumed to have CPU ID 0.
+    if let Some(hook) = boot_info.start_secondary_cpus_hook {
+        // println!("[boot] releasing secondary CPUs");
+        hook();
+        fence(Ordering::SeqCst);
+        // println!("[boot] secondary CPUs released");
+    }
+    if let Some(next_task_id) = next_task_id {
+        let next_task = get_task_by_id(next_task_id).expect("First runnable task must exist");
+        // println!(
+        //     "[boot] first switch: task={} type={:?}",
+        //     next_task_id, next_task.task_type
+        // );
+        if next_task.task_type == crate::task::TaskType::Kernel {
+            drop(next_task);
+            crate::sched::scheduler::first_switch_to_kernel_task(next_task_id);
+        } else {
+            let task_ptr = &*next_task as *const crate::task::Task;
+            drop(next_task);
+            // SAFETY: start_scheduler() selected and claimed this task for the
+            // current CPU. Its running_cpu token prevents TaskPool removal,
+            // which requires Terminated && running_cpu == NO_CPU, until the
+            // first user transition owns the task's execution.
+            unsafe { crate::arch::first_switch_to_user(&*task_ptr) };
+        }
+    }
+
+    println!("[Scarlet Kernel] No runnable task; entering idle loop");
+    loop {
+        crate::arch::instruction::idle();
+    }
+}
+
+use core::sync::atomic::AtomicBool;
+static AP_BARRIER: AtomicBool = AtomicBool::new(false);
+
+pub fn release_aps() {
+    AP_BARRIER.store(true, core::sync::atomic::Ordering::Release);
+}
+
+pub fn wait_for_ap_release() {
+    while !AP_BARRIER.load(core::sync::atomic::Ordering::Acquire) {
+        core::hint::spin_loop();
+    }
+}
+
+/// Start a secondary CPU after the bootstrap CPU releases the AP barrier.
+///
+/// # Arguments
+///
+/// * `cpu_id` - Logical CPU ID assigned by the architecture boot code.
+#[unsafe(no_mangle)]
+pub extern "C" fn start_ap(cpu_id: usize) -> ! {
+    use core::sync::atomic::Ordering;
+
+    crate::arch::vm::switch_to_kernel_page_table();
+    crate::arch::init_ap_cpu(cpu_id);
+    crate::arch::vm::register_trampoline_for_ap();
+
+    crate::interrupt::InterruptManager::global().init_controllers_for_cpu(cpu_id as u32);
+    crate::interrupt::enable_cpu_interrupts();
+    fence(Ordering::SeqCst);
+
+    #[cfg(feature = "hypervisor")]
+    {
+        crate::hypervisor::init_hv_per_cpu(cpu_id);
+    }
+
+    crate::sched::scheduler::spawn_idle_task(cpu_id);
+
+    let next_task_id = crate::sched::scheduler::start_scheduler();
+    if let Some(next_task_id) = next_task_id {
+        let next_task = crate::sched::scheduler::get_task_by_id(next_task_id)
+            .expect("AP: first runnable task must exist");
+        if next_task.task_type == crate::task::TaskType::Kernel {
+            drop(next_task);
+            crate::sched::scheduler::first_switch_to_kernel_task(next_task_id);
+        } else {
+            let task_ptr = &*next_task as *const crate::task::Task;
+            drop(next_task);
+            // SAFETY: start_scheduler() selected and claimed this task for the
+            // current CPU. Its running_cpu token prevents TaskPool removal,
+            // which requires Terminated && running_cpu == NO_CPU, until the
+            // first user transition owns the task's execution.
+            unsafe { crate::arch::first_switch_to_user(&*task_ptr) };
+        }
+    }
+
+    println!("[Scarlet Kernel] AP {}: idle", cpu_id);
+    loop {
+        crate::arch::instruction::idle();
+    }
+}

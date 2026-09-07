@@ -9,13 +9,15 @@ extern crate alloc;
 extern crate scarlet_std;
 extern crate scarlet_ui_macros;
 
+use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec;
+use alloc::vec::Vec;
 use core::f32;
 
 use scarlet_std::format;
 use scarlet_std::println;
-use scarlet_ui::{MenuBarModel, MenuEntry, MenuItemModel};
+use scarlet_ui::{MenuBarModel, MenuEntry, MenuItemModel, PlatformWindow};
 use scarlet_ui::{hstack, prelude::*, vstack};
 use scarlet_ui_macros::View;
 
@@ -24,6 +26,9 @@ struct DemoApp {
     toggle_state: State<bool>,
     counter: State<i32>,
     slider_value: State<f32>,
+    input_text: State<String>,
+    fullscreen: State<bool>,
+    fullscreen_request_sent: State<bool>,
 }
 
 impl DemoApp {
@@ -33,13 +38,30 @@ impl DemoApp {
 }
 
 impl Application for DemoApp {
-    fn body(&self) -> impl View {
-        Window::new("ScarletUI Demo",
+    fn scenes(&self) -> impl Scene {
+        WindowGroup::new("main", Window::new("ScarletUI Demo",
         vstack! {
             Text::new("Hello ScarletUI!")
                 .font_size(40.0),
             Text::new("ScarletUIの世界からこんにちは!")
                 .font_size(24.0),
+            Button::new(if self.fullscreen.get() { "Exit Fullscreen" } else { "Enter Fullscreen" })
+                .on_click({
+                    let fullscreen = self.fullscreen.clone();
+                    move || {
+                        fullscreen.set(!fullscreen.get());
+                    }
+                }),
+            vstack! {
+                Text::new("TextField")
+                    .font_size(18.0),
+                TextField::new(self.input_text.clone())
+                    .placeholder("IME input")
+                    .frame_width(360.0),
+                Text::new(format!("Input: {}", self.input_text.get()))
+                    .font_size(16.0),
+            }
+            .frame_width(380.0),
             hstack! {
                 Text::new(format!("Toggle State: {}", if self.toggle_state.get() { "ON" } else { "OFF" }))
                     .font_size(20.0),
@@ -127,7 +149,22 @@ impl Application for DemoApp {
                 println!("[ui_demo] Menu: Help");
             })),
         ]))
-        .size(Size::new(800.0, 600.0))
+        .decorated(!self.fullscreen.get())
+        .size(Size::new(480.0, 480.0)))
+    }
+
+    fn on_window_sync(&mut self, _ctx: &WindowContext, window: &mut dyn PlatformWindow) {
+        let desired = self.fullscreen.get();
+        if desired == self.fullscreen_request_sent.get() {
+            return;
+        }
+        match window.set_fullscreen(desired) {
+            Ok(()) => self.fullscreen_request_sent.set(desired),
+            Err(error) => {
+                println!("[ui_demo] Failed to change fullscreen state: {:?}", error);
+                self.fullscreen.set(self.fullscreen_request_sent.get());
+            }
+        }
     }
 
     fn debug_logging(&self) -> bool {

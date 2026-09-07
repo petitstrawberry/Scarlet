@@ -93,38 +93,68 @@ impl FpuContext {
     /// enabled (CPACR_EL1.FPEN = 0b11) before calling this function.
     #[inline]
     pub unsafe fn restore(&self) {
+        // SAFETY: The caller guarantees that FP/SIMD access is enabled.
+        unsafe {
+            self.restore_control();
+            self.restore_vectors();
+        }
+    }
+
+    /// Restore the floating-point control and status registers.
+    ///
+    /// # Safety
+    ///
+    /// FP/SIMD access must be enabled for the current exception level.
+    #[inline]
+    pub(crate) unsafe fn restore_control(&self) {
         // Restore FPCR and FPSR first
-        asm!(
-            ".arch armv8-a+fp+simd",
-            "msr fpcr, {0}",
-            "msr fpsr, {1}",
-            in(reg) self.fpcr,
-            in(reg) self.fpsr,
-            options(nomem, nostack),
-        );
+        // SAFETY: Guaranteed by the caller.
+        unsafe {
+            asm!(
+                ".arch armv8-a+fp+simd",
+                "msr fpcr, {0}",
+                "msr fpsr, {1}",
+                in(reg) self.fpcr,
+                in(reg) self.fpsr,
+                options(nomem, nostack),
+            );
+        }
+    }
+
+    /// Restore the 32 architectural FP/SIMD vector registers.
+    ///
+    /// # Safety
+    ///
+    /// FP/SIMD access must be enabled for the current exception level.
+    #[inline]
+    pub(crate) unsafe fn restore_vectors(&self) {
         let ptr = self.v.as_ptr() as *const u8;
-        asm!(
-            ".arch armv8-a+fp+simd",
-            // Restore all 32 vector registers using LDP for Q registers
-            "ldp q0, q1, [{0}, #0*32]",
-            "ldp q2, q3, [{0}, #1*32]",
-            "ldp q4, q5, [{0}, #2*32]",
-            "ldp q6, q7, [{0}, #3*32]",
-            "ldp q8, q9, [{0}, #4*32]",
-            "ldp q10, q11, [{0}, #5*32]",
-            "ldp q12, q13, [{0}, #6*32]",
-            "ldp q14, q15, [{0}, #7*32]",
-            "ldp q16, q17, [{0}, #8*32]",
-            "ldp q18, q19, [{0}, #9*32]",
-            "ldp q20, q21, [{0}, #10*32]",
-            "ldp q22, q23, [{0}, #11*32]",
-            "ldp q24, q25, [{0}, #12*32]",
-            "ldp q26, q27, [{0}, #13*32]",
-            "ldp q28, q29, [{0}, #14*32]",
-            "ldp q30, q31, [{0}, #15*32]",
-            in(reg) ptr,
-            options(nostack),
-        );
+        // SAFETY: Guaranteed by the caller; `FpuContext` is 16-byte aligned
+        // and owns the complete 512-byte vector-register image.
+        unsafe {
+            asm!(
+                ".arch armv8-a+fp+simd",
+                // Restore all 32 vector registers using LDP for Q registers
+                "ldp q0, q1, [{0}, #0*32]",
+                "ldp q2, q3, [{0}, #1*32]",
+                "ldp q4, q5, [{0}, #2*32]",
+                "ldp q6, q7, [{0}, #3*32]",
+                "ldp q8, q9, [{0}, #4*32]",
+                "ldp q10, q11, [{0}, #5*32]",
+                "ldp q12, q13, [{0}, #6*32]",
+                "ldp q14, q15, [{0}, #7*32]",
+                "ldp q16, q17, [{0}, #8*32]",
+                "ldp q18, q19, [{0}, #9*32]",
+                "ldp q20, q21, [{0}, #10*32]",
+                "ldp q22, q23, [{0}, #11*32]",
+                "ldp q24, q25, [{0}, #12*32]",
+                "ldp q26, q27, [{0}, #13*32]",
+                "ldp q28, q29, [{0}, #14*32]",
+                "ldp q30, q31, [{0}, #15*32]",
+                in(reg) ptr,
+                options(nostack),
+            );
+        }
     }
 }
 

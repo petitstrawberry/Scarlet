@@ -4,7 +4,7 @@ use super::Device;
 use crate::object::capability::selectable::{
     ReadyInterest, ReadySet, SelectWaitOutcome, Selectable,
 };
-use crate::object::capability::{ControlOps, MemoryMappingOps};
+use crate::object::capability::{ControlOps, MemoryMappingOps, StreamError};
 
 extern crate alloc;
 
@@ -50,6 +50,14 @@ pub enum SeekFrom {
 /// This trait defines the interface for character devices.
 /// It provides methods for querying device information and handling character I/O operations.
 /// Uses internal mutability for thread-safe shared access.
+///
+/// # Atomicity contract
+///
+/// Implementors MUST guarantee that `write()` is atomic: the entire buffer
+/// is written without interleaving with writes from other CPUs/tasks.
+/// `write_byte()` is atomic for that single byte only; consecutive calls
+/// are NOT guaranteed to be atomic.  Callers that need multi-byte
+/// atomicity must use `write()`.
 pub trait CharDevice: Device {
     /// Read a single byte from the device
     ///
@@ -62,6 +70,9 @@ pub trait CharDevice: Device {
     fn read_byte(&self) -> Option<u8>;
 
     /// Write a single byte to the device
+    ///
+    /// The byte itself is atomic, but consecutive calls are NOT guaranteed
+    /// to be atomic — use `write()` for multi-byte atomicity.
     ///
     /// # Arguments
     ///
@@ -94,7 +105,28 @@ pub trait CharDevice: Device {
         bytes_read
     }
 
+    /// Read multiple bytes while preserving structured stream errors.
+    ///
+    /// The default implementation delegates to [`CharDevice::read`]. Blocking
+    /// devices should override this method when an asynchronous event can
+    /// interrupt their wait.
+    ///
+    /// # Arguments
+    ///
+    /// * `buffer` - The buffer to read data into.
+    ///
+    /// # Returns
+    ///
+    /// The number of bytes read, or the stream error which ended the operation.
+    fn try_read(&self, buffer: &mut [u8]) -> Result<usize, StreamError> {
+        Ok(self.read(buffer))
+    }
+
     /// Write multiple bytes to the device
+    ///
+    /// Implementors MUST ensure the whole buffer is written without
+    /// interleaving from other writers (e.g. by holding a device-level
+    /// lock for the duration).
     ///
     /// # Arguments
     ///
@@ -103,14 +135,7 @@ pub trait CharDevice: Device {
     /// # Returns
     ///
     /// Result containing the number of bytes written or an error
-    fn write(&self, buffer: &[u8]) -> Result<usize, &'static str> {
-        let mut bytes_written = 0;
-        for &byte in buffer {
-            self.write_byte(byte)?;
-            bytes_written += 1;
-        }
-        Ok(bytes_written)
-    }
+    fn write(&self, buffer: &[u8]) -> Result<usize, &'static str>;
 
     /// Check if the device is ready for reading
     fn can_read(&self) -> bool;
@@ -134,6 +159,24 @@ pub trait CharDevice: Device {
     fn read_at(&self, _position: u64, buffer: &mut [u8]) -> Result<usize, &'static str> {
         // Default: use sequential read for stream devices
         Ok(self.read(buffer))
+    }
+
+    /// Read from a position while preserving structured stream errors.
+    ///
+    /// The default implementation delegates to [`CharDevice::read_at`] and
+    /// converts its legacy string error into [`StreamError::Other`].
+    ///
+    /// # Arguments
+    ///
+    /// * `position` - Byte offset to read from.
+    /// * `buffer` - The buffer to read data into.
+    ///
+    /// # Returns
+    ///
+    /// The number of bytes read, or the stream error which ended the operation.
+    fn try_read_at(&self, position: u64, buffer: &mut [u8]) -> Result<usize, StreamError> {
+        self.read_at(position, buffer)
+            .map_err(|error| StreamError::Other(error.into()))
     }
 
     /// Write data to a specific position in the device
@@ -225,6 +268,13 @@ impl CharDevice for GenericCharDevice {
         (self.write_fn)(byte)
     }
 
+    fn write(&self, buffer: &[u8]) -> Result<usize, &'static str> {
+        for &byte in buffer {
+            (self.write_fn)(byte)?;
+        }
+        Ok(buffer.len())
+    }
+
     fn can_read(&self) -> bool {
         (self.can_read_fn)()
     }
@@ -246,7 +296,7 @@ impl MemoryMappingOps for GenericCharDevice {
         &self,
         _offset: usize,
         _length: usize,
-    ) -> Result<(usize, usize, bool), &'static str> {
+    ) -> Result<crate::object::capability::MemoryMappingInfo, &'static str> {
         Err("Memory mapping not supported by this character device")
     }
 
@@ -283,6 +333,7 @@ impl Selectable for GenericCharDevice {
         _interest: ReadyInterest,
         _trapframe: &mut crate::arch::Trapframe,
         _timeout_ticks: Option<u64>,
+        _min_wait_ticks: u64,
     ) -> SelectWaitOutcome {
         SelectWaitOutcome::Ready
     }
@@ -298,4 +349,5 @@ mod tests;
 #[cfg(test)]
 pub mod mockchar;
 
+pub mod pty;
 pub mod tty;

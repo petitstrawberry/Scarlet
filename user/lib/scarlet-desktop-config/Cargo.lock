@@ -41,19 +41,52 @@ dependencies = [
 ]
 
 [[package]]
+name = "scarlet-abi"
+version = "1.0.0"
+
+[[package]]
 name = "scarlet-desktop-config"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
- "scarlet_std",
+ "scarlet-std",
 ]
 
 [[package]]
-name = "scarlet_std"
-version = "0.16.0"
+name = "scarlet-os"
+version = "1.0.0"
 dependencies = [
- "hashbrown",
+ "scarlet-abi",
+ "scarlet-rt",
+ "scarlet-sys",
+]
+
+[[package]]
+name = "scarlet-rt"
+version = "1.0.0"
+dependencies = [
+ "lock_api",
+ "scarlet-sys",
  "spin",
  "talc",
+]
+
+[[package]]
+name = "scarlet-std"
+version = "1.0.0"
+dependencies = [
+ "hashbrown",
+ "scarlet-abi",
+ "scarlet-os",
+ "scarlet-rt",
+ "scarlet-sys",
+ "spin",
+]
+
+[[package]]
+name = "scarlet-sys"
+version = "1.0.0"
+dependencies = [
+ "scarlet-abi",
 ]
 
 [[package]]

@@ -23,9 +23,9 @@
 //! Requests are processed through the VirtIO descriptor chain mechanism, with proper
 //! memory management using Box allocations to ensure data remains valid during transfers.
 
+use crate::sync::{IrqRwSpinLock, IrqSpinLock};
 use alloc::vec;
 use alloc::{boxed::Box, collections::VecDeque, vec::Vec};
-use spin::{Mutex, RwLock};
 
 use core::{mem, ptr};
 
@@ -34,7 +34,10 @@ use crate::device::{Device, DeviceType};
 use crate::drivers::virtio::features::{
     VIRTIO_F_ANY_LAYOUT, VIRTIO_RING_F_EVENT_IDX, VIRTIO_RING_F_INDIRECT_DESC,
 };
+use crate::environment::PAGE_SIZE;
+use crate::mem::page::ContiguousPages;
 use crate::object::capability::{MemoryMappingOps, Selectable};
+use crate::vm::addr::virt_to_phys;
 use crate::{
     device::block::{
         BlockDevice,
@@ -42,6 +45,7 @@ use crate::{
     },
     drivers::virtio::{
         device::VirtioDevice,
+        pci::VirtioPciTransport,
         queue::{DescriptorFlag, VirtQueue},
     },
     object::capability::ControlOps,
@@ -111,29 +115,48 @@ pub struct VirtioBlkReqHeader {
 
 pub struct VirtioBlockDevice {
     base_addr: usize,
-    virtqueues: Mutex<[VirtQueue<'static>; 1]>, // Only one queue for request/response
-    capacity: RwLock<u64>,
-    sector_size: RwLock<u32>,
-    features: RwLock<u32>,
-    read_only: RwLock<bool>,
-    request_queue: Mutex<VecDeque<Box<BlockIORequest>>>,
+    pci_transport: Option<VirtioPciTransport>,
+    virtqueues: IrqSpinLock<[VirtQueue<'static>; 1]>, // Only one queue for request/response
+    capacity: IrqRwSpinLock<u64>,
+    sector_size: IrqRwSpinLock<u32>,
+    features: IrqRwSpinLock<u64>,
+    read_only: IrqRwSpinLock<bool>,
+    request_queue: IrqSpinLock<VecDeque<Box<BlockIORequest>>>,
 }
 
 impl VirtioBlockDevice {
     pub fn new(base_addr: usize) -> Self {
+        Self::new_with_transport(base_addr, None)
+    }
+
+    /// Create a VirtIO block device backed by the PCI transport.
+    ///
+    /// # Arguments
+    ///
+    /// * `transport` - Mapped VirtIO PCI configuration regions
+    ///
+    /// # Returns
+    ///
+    /// A new initialized block device.
+    pub fn new_pci(transport: VirtioPciTransport) -> Self {
+        Self::new_with_transport(transport.common_cfg, Some(transport))
+    }
+
+    fn new_with_transport(base_addr: usize, pci_transport: Option<VirtioPciTransport>) -> Self {
         let mut device = Self {
             base_addr,
+            pci_transport,
             // Minimal but sufficient queue size based on real usage:
             // - Average batch: 1.15 requests (85.2% are single requests)
             // - Observed max: <5 requests per batch typically
             // - Each request uses 3 descriptors (header + data + status)
             // 32 descriptors = ~10 concurrent requests (5x typical usage)
-            virtqueues: Mutex::new([VirtQueue::new(32)]),
-            capacity: RwLock::new(0),
-            sector_size: RwLock::new(512), // Default sector size
-            features: RwLock::new(0),
-            read_only: RwLock::new(false),
-            request_queue: Mutex::new(VecDeque::new()),
+            virtqueues: IrqSpinLock::new([VirtQueue::new(32)]),
+            capacity: IrqRwSpinLock::new(0),
+            sector_size: IrqRwSpinLock::new(512), // Default sector size
+            features: IrqRwSpinLock::new(0),
+            read_only: IrqRwSpinLock::new(false),
+            request_queue: IrqSpinLock::new(VecDeque::new()),
         };
 
         // Initialize the device
@@ -151,20 +174,20 @@ impl VirtioBlockDevice {
         // Debug: Check actual negotiated features after init
         #[cfg(test)]
         {
-            use crate::early_println;
-            early_println!(
+            use crate::println;
+            println!(
                 "[virtio-blk] Final negotiated features (after init): 0x{:x}",
                 negotiated_features
             );
         }
 
         // Check if block size feature is supported
-        if negotiated_features & (1 << VIRTIO_BLK_F_BLK_SIZE) != 0 {
+        if negotiated_features & (1u64 << VIRTIO_BLK_F_BLK_SIZE) != 0 {
             *device.sector_size.write() = device.read_config::<u32>(20); // blk_size at offset 20
         }
 
         // Check if device is read-only
-        *device.read_only.write() = negotiated_features & (1 << VIRTIO_BLK_F_RO) != 0;
+        *device.read_only.write() = negotiated_features & (1u64 << VIRTIO_BLK_F_RO) != 0;
 
         device
     }
@@ -180,19 +203,21 @@ impl VirtioBlockDevice {
             reserved: 0,
             sector: req.sector as u64,
         });
-        let data = vec![0u8; req.buffer.len()].into_boxed_slice();
+
+        // Allocate data buffer from PMM for DMA
+        let data_pages = (req.buffer.len() + PAGE_SIZE - 1) / PAGE_SIZE;
+        let data_alloc =
+            ContiguousPages::new(data_pages).ok_or("Failed to allocate data buffer")?;
+
         let status = Box::new(0u8);
 
-        // Cast pages to appropriate types
         let header_ptr = Box::into_raw(header);
-        let data_ptr = Box::into_raw(data) as *mut [u8];
+        let data_ptr = data_alloc.as_ptr() as *mut u8;
         let status_ptr = Box::into_raw(status);
 
         defer! {
-            // Deallocate memory after use
             unsafe {
                 drop(Box::from_raw(header_ptr));
-                drop(Box::from_raw(data_ptr));
                 drop(Box::from_raw(status_ptr));
             }
         }
@@ -234,7 +259,7 @@ impl VirtioBlockDevice {
 
         // Set up header descriptor
         let header_phys = crate::vm::get_kernel_vm_manager()
-            .translate_vaddr(header_ptr as usize)
+            .translate_to_phys(header_ptr as usize)
             .ok_or("Failed to translate header vaddr")?;
         virtqueues[0].desc[header_desc].addr = header_phys as u64;
         virtqueues[0].desc[header_desc].len = mem::size_of::<VirtioBlkReqHeader>() as u32;
@@ -242,9 +267,7 @@ impl VirtioBlockDevice {
         virtqueues[0].desc[header_desc].next = data_desc as u16;
 
         // Set up data descriptor
-        let data_phys = crate::vm::get_kernel_vm_manager()
-            .translate_vaddr(data_ptr as *mut u8 as usize)
-            .ok_or("Failed to translate data vaddr")?;
+        let data_phys = data_alloc.as_paddr();
         virtqueues[0].desc[data_desc].addr = data_phys as u64;
         virtqueues[0].desc[data_desc].len = req.buffer.len() as u32;
 
@@ -263,7 +286,7 @@ impl VirtioBlockDevice {
 
         // Set up status descriptor
         let status_phys = crate::vm::get_kernel_vm_manager()
-            .translate_vaddr(status_ptr as usize)
+            .translate_to_phys(status_ptr as usize)
             .ok_or("Failed to translate status vaddr")?;
         virtqueues[0].desc[status_desc].addr = status_phys as u64;
         virtqueues[0].desc[status_desc].len = 1;
@@ -352,7 +375,7 @@ impl VirtioBlockDevice {
         const MAX_BATCH_SIZE: usize = 10;
 
         if requests.len() > MAX_BATCH_SIZE {
-            crate::early_println!(
+            crate::println!(
                 "[virtio_blk] WARNING: Batch size {} exceeds safe limit {}, processing in chunks",
                 requests.len(),
                 MAX_BATCH_SIZE
@@ -383,9 +406,9 @@ impl VirtioBlockDevice {
         #[cfg(test)]
         {
             // Add batch size tracking for debugging
-            static BATCH_SIZES: spin::Mutex<alloc::vec::Vec<usize>> =
-                spin::Mutex::new(alloc::vec::Vec::new());
-            static CALL_COUNT: spin::Mutex<usize> = spin::Mutex::new(0);
+            static BATCH_SIZES: IrqSpinLock<alloc::vec::Vec<usize>> =
+                IrqSpinLock::new(alloc::vec::Vec::new());
+            static CALL_COUNT: IrqSpinLock<usize> = IrqSpinLock::new(0);
             let mut sizes = BATCH_SIZES.lock();
             let mut count = CALL_COUNT.lock();
             sizes.push(requests.len());
@@ -396,7 +419,7 @@ impl VirtioBlockDevice {
                 let total_requests: usize = sizes.iter().sum();
                 let avg_batch_size = total_requests as f64 / sizes.len() as f64;
                 let single_requests = sizes.iter().filter(|&&size| size == 1).count();
-                crate::early_println!(
+                crate::println!(
                     "[virtio_blk] Batch stats: {} calls, avg_batch={:.2}, single_req={}/{} ({:.1}%)",
                     sizes.len(),
                     avg_batch_size,
@@ -409,7 +432,15 @@ impl VirtioBlockDevice {
 
         let batch_size = requests.len();
         let mut results = vec![Err("Not processed"); batch_size];
-        let mut request_data = Vec::new();
+        let mut request_data: Vec<(
+            usize,
+            usize,
+            usize,
+            usize,
+            *mut VirtioBlkReqHeader,
+            ContiguousPages,
+            ContiguousPages,
+        )> = Vec::new();
 
         // Lock the virtqueues for the entire batch
         let mut virtqueues = self.virtqueues.lock();
@@ -425,21 +456,34 @@ impl VirtioBlockDevice {
                 reserved: 0,
                 sector: req.sector as u64,
             });
-            let data = vec![0u8; req.buffer.len()].into_boxed_slice();
-            let status = Box::new(0u8);
+
+            // Allocate data buffer from PMM for DMA
+            let data_pages = (req.buffer.len() + PAGE_SIZE - 1) / PAGE_SIZE;
+            let data_alloc = match ContiguousPages::new(data_pages) {
+                Some(alloc) => alloc,
+                None => {
+                    results[idx] = Err("Failed to allocate data buffer");
+                    continue;
+                }
+            };
+
+            // Allocate status buffer from PMM (1 page is plenty for a single byte)
+            let status_alloc = match ContiguousPages::new(1) {
+                Some(alloc) => alloc,
+                None => {
+                    results[idx] = Err("Failed to allocate status buffer");
+                    continue;
+                }
+            };
 
             let header_ptr = Box::into_raw(header);
-            let data_ptr = Box::into_raw(data) as *mut [u8];
-            let status_ptr = Box::into_raw(status);
+            let data_ptr = data_alloc.as_ptr() as *mut u8;
+            let status_ptr = status_alloc.as_ptr() as *mut u8;
 
             // Copy data for write requests
             if let BlockIORequestType::Write = req.request_type {
                 unsafe {
-                    core::ptr::copy_nonoverlapping(
-                        req.buffer.as_ptr(),
-                        data_ptr as *mut u8,
-                        req.buffer.len(),
-                    );
+                    core::ptr::copy_nonoverlapping(req.buffer.as_ptr(), data_ptr, req.buffer.len());
                 }
             }
 
@@ -450,34 +494,25 @@ impl VirtioBlockDevice {
                 virtqueues[0].alloc_desc(),
             ) {
                 // Set up descriptors
-                let header_phys =
-                    match crate::vm::get_kernel_vm_manager().translate_vaddr(header_ptr as usize) {
-                        Some(phys) => phys,
-                        None => {
-                            virtqueues[0].free_desc(status_desc);
-                            virtqueues[0].free_desc(data_desc);
-                            virtqueues[0].free_desc(header_desc);
-                            results[idx] = Err("Failed to translate header vaddr");
-                            continue;
-                        }
-                    };
-                virtqueues[0].desc[header_desc].addr = header_phys as u64;
-                virtqueues[0].desc[header_desc].len = mem::size_of::<VirtioBlkReqHeader>() as u32;
-                virtqueues[0].desc[header_desc].flags = DescriptorFlag::Next as u16;
-                virtqueues[0].desc[header_desc].next = data_desc as u16;
-
-                let data_phys = match crate::vm::get_kernel_vm_manager()
-                    .translate_vaddr(data_ptr as *mut u8 as usize)
+                let header_phys = match crate::vm::get_kernel_vm_manager()
+                    .translate_to_phys(header_ptr as usize)
                 {
                     Some(phys) => phys,
                     None => {
                         virtqueues[0].free_desc(status_desc);
                         virtqueues[0].free_desc(data_desc);
                         virtqueues[0].free_desc(header_desc);
-                        results[idx] = Err("Failed to translate data vaddr");
+                        results[idx] = Err("Failed to translate header vaddr");
                         continue;
                     }
                 };
+                virtqueues[0].desc[header_desc].addr = header_phys as u64;
+                virtqueues[0].desc[header_desc].len = mem::size_of::<VirtioBlkReqHeader>() as u32;
+                virtqueues[0].desc[header_desc].flags = DescriptorFlag::Next as u16;
+                virtqueues[0].desc[header_desc].next = data_desc as u16;
+
+                // Use physical address directly from ContiguousPages for DMA
+                let data_phys = data_alloc.as_paddr();
                 virtqueues[0].desc[data_desc].addr = data_phys as u64;
                 virtqueues[0].desc[data_desc].len = req.buffer.len() as u32;
 
@@ -493,67 +528,46 @@ impl VirtioBlockDevice {
 
                 virtqueues[0].desc[data_desc].next = status_desc as u16;
 
-                let status_phys =
-                    match crate::vm::get_kernel_vm_manager().translate_vaddr(status_ptr as usize) {
-                        Some(phys) => phys,
-                        None => {
-                            virtqueues[0].free_desc(status_desc);
-                            virtqueues[0].free_desc(data_desc);
-                            virtqueues[0].free_desc(header_desc);
-                            results[idx] = Err("Failed to translate status vaddr");
-                            continue;
-                        }
-                    };
+                // Use physical address directly from ContiguousPages for DMA
+                let status_phys = status_alloc.as_paddr();
                 virtqueues[0].desc[status_desc].addr = status_phys as u64;
                 virtqueues[0].desc[status_desc].len = 1;
                 virtqueues[0].desc[status_desc].flags |= DescriptorFlag::Write as u16;
 
                 // Submit the request
                 if virtqueues[0].push(header_desc).is_ok() {
-                    // use crate::early_println;
-                    // early_println!("[virtio-blk] Submitting request: req_idx={}, header_desc={}, data_desc={}, status_desc={}",
-                    //     idx, header_desc, data_desc, status_desc);
-                    // early_println!("[virtio-blk]   h_addr=0x{:x}, h_len={}, h_flags=0x{:x}",
-                    //     virtqueues[0].desc[header_desc].addr, virtqueues[0].desc[header_desc].len, virtqueues[0].desc[header_desc].flags);
-                    // early_println!("[virtio-blk]   d_addr=0x{:x}, d_len={}, d_flags=0x{:x}",
-                    //     virtqueues[0].desc[data_desc].addr, virtqueues[0].desc[data_desc].len, virtqueues[0].desc[data_desc].flags);
-                    // early_println!("[virtio-blk]   s_addr=0x{:x}, s_len={}, s_flags=0x{:x}",
-                    //     virtqueues[0].desc[status_desc].addr, virtqueues[0].desc[status_desc].len, virtqueues[0].desc[status_desc].flags);
-
+                    // Store ContiguousPagess to keep them alive until completion
+                    // The allocations will be dropped when removed from request_data
                     request_data.push((
                         idx,
                         header_desc,
                         data_desc,
                         status_desc,
                         header_ptr,
-                        data_ptr,
-                        status_ptr,
+                        data_alloc,
+                        status_alloc,
                     ));
                 } else {
-                    // Clean up on push failure
+                    // Clean up on push failure - descriptors freed, ContiguousPagess dropped automatically
                     virtqueues[0].free_desc(status_desc);
                     virtqueues[0].free_desc(data_desc);
                     virtqueues[0].free_desc(header_desc);
                     unsafe {
                         drop(Box::from_raw(header_ptr));
-                        drop(Box::from_raw(data_ptr));
-                        drop(Box::from_raw(status_ptr));
                     }
                     results[idx] = Err("Failed to submit request");
                 }
             } else {
                 // Descriptor allocation failure - should be very rare with 256 queue size
-                crate::early_println!(
+                crate::println!(
                     "[virtio_blk] ERROR: Failed to allocate descriptors for request {} (batch size: {})",
                     idx,
                     batch_size
                 );
 
-                // Clean up on descriptor allocation failure
+                // Clean up on descriptor allocation failure - ContiguousPagess dropped automatically
                 unsafe {
                     drop(Box::from_raw(header_ptr));
-                    drop(Box::from_raw(data_ptr));
-                    drop(Box::from_raw(status_ptr));
                 }
                 results[idx] = Err("Virtqueue descriptor allocation failed - queue may be full");
             }
@@ -561,59 +575,39 @@ impl VirtioBlockDevice {
 
         // Notify the device once for all requests
         if !request_data.is_empty() {
-            // crate::early_println!("[virtio-blk] Notifying queue 0 for {} requests", request_data.len());
+            // crate::println!("[virtio-blk] Notifying queue 0 for {} requests", request_data.len());
             self.notify(0);
         }
 
         // Second pass: Wait for all completions (true batch processing)
+        // Build a map from header_desc to index in request_data for O(1) lookup
         use alloc::collections::BTreeMap;
-        let mut pending_requests: BTreeMap<
-            usize,
-            (
-                usize,
-                usize,
-                usize,
-                *mut VirtioBlkReqHeader,
-                *mut [u8],
-                *mut u8,
-            ),
-        > = BTreeMap::new();
-
-        // Map descriptor IDs to request data
-        for (req_idx, header_desc, data_desc, status_desc, header_ptr, data_ptr, status_ptr) in
-            request_data
-        {
-            pending_requests.insert(
-                header_desc,
-                (
-                    req_idx,
-                    data_desc,
-                    status_desc,
-                    header_ptr,
-                    data_ptr,
-                    status_ptr,
-                ),
-            );
+        let mut pending_requests: BTreeMap<usize, usize> = BTreeMap::new();
+        for (index, request) in request_data.iter().enumerate() {
+            let header_desc = request.1;
+            pending_requests.insert(header_desc, index);
         }
+
+        // Track which indices have been processed for cleanup
+        let mut processed_indices = Vec::new();
 
         // Process all completions until everything is done
         while !pending_requests.is_empty() {
             // Read status before polling to check if device entered a FAILED state
             let status = self.read32_register(crate::drivers::virtio::device::Register::Status);
-            // crate::early_println!("[virtio-blk] Polling for completion. Device status = 0x{:x}", status);
 
             // Wait for something to complete, but also check for device failure.
             while virtqueues[0].is_busy() {
                 let status = self.read32_register(crate::drivers::virtio::device::Register::Status);
                 if crate::drivers::virtio::device::DeviceStatus::DeviceNeedReset.is_set(status) {
-                    crate::early_println!(
+                    crate::println!(
                         "[virtio-blk] ERROR: Device entered NEEDS_RESET state during poll. Aborting. Status=0x{:x}",
                         status
                     );
                     break;
                 }
                 if crate::drivers::virtio::device::DeviceStatus::Failed.is_set(status) {
-                    crate::early_println!(
+                    crate::println!(
                         "[virtio-blk] ERROR: Device entered FAILED state during poll. Aborting. Status=0x{:x}",
                         status
                     );
@@ -623,9 +617,27 @@ impl VirtioBlockDevice {
 
             // Process all completed requests in this round
             while let Some(desc_idx) = virtqueues[0].pop() {
-                if let Some((req_idx, data_desc, status_desc, header_ptr, data_ptr, status_ptr)) =
-                    pending_requests.remove(&desc_idx)
-                {
+                if let Some(data_index) = pending_requests.remove(&desc_idx) {
+                    let (
+                        req_idx,
+                        _header_desc,
+                        data_desc,
+                        status_desc,
+                        header_ptr,
+                        ref data_alloc,
+                        ref status_alloc,
+                    ): (
+                        usize,
+                        usize,
+                        usize,
+                        usize,
+                        *mut VirtioBlkReqHeader,
+                        ContiguousPages,
+                        ContiguousPages,
+                    ) = request_data[data_index];
+                    let status_ptr = status_alloc.as_ptr() as *mut u8;
+                    let data_ptr = data_alloc.as_ptr() as *mut u8;
+
                     // Check status
                     let status_val = unsafe { core::ptr::read_volatile(status_ptr) };
                     results[req_idx] = match status_val {
@@ -649,23 +661,30 @@ impl VirtioBlockDevice {
                         _ => Err("Unknown error"),
                     };
 
-                    // Clean up descriptors and memory for this completed request
+                    // Clean up descriptors for this completed request
                     virtqueues[0].free_desc(status_desc);
                     virtqueues[0].free_desc(data_desc);
                     virtqueues[0].free_desc(desc_idx); // header_desc
                     unsafe {
                         drop(Box::from_raw(header_ptr));
-                        drop(Box::from_raw(data_ptr));
-                        drop(Box::from_raw(status_ptr));
                     }
+                    // ContiguousPagess will be dropped when we remove from request_data
+                    processed_indices.push(data_index);
                 } else {
                     // Unexpected descriptor - this shouldn't happen but handle gracefully
-                    crate::early_println!(
+                    crate::println!(
                         "[virtio-blk] Warning: Unexpected descriptor completion: {}",
                         desc_idx
                     );
                 }
             }
+        }
+
+        // Clean up request_data - remove processed entries to drop ContiguousPagess
+        // Sort in reverse order so we can remove without affecting other indices
+        processed_indices.sort_unstable_by(|a: &usize, b: &usize| b.cmp(a));
+        for index in processed_indices {
+            request_data.remove(index);
         }
 
         results
@@ -677,7 +696,7 @@ impl MemoryMappingOps for VirtioBlockDevice {
         &self,
         _offset: usize,
         _length: usize,
-    ) -> Result<(usize, usize, bool), &'static str> {
+    ) -> Result<crate::object::capability::MemoryMappingInfo, &'static str> {
         Err("Memory mapping not supported by VirtIO block device")
     }
 
@@ -728,12 +747,17 @@ impl Selectable for VirtioBlockDevice {
         _interest: crate::object::capability::selectable::ReadyInterest,
         _trapframe: &mut crate::arch::Trapframe,
         _timeout_ticks: Option<u64>,
+        _min_wait_ticks: u64,
     ) -> crate::object::capability::selectable::SelectWaitOutcome {
         crate::object::capability::selectable::SelectWaitOutcome::Ready
     }
 }
 
 impl VirtioDevice for VirtioBlockDevice {
+    fn pci_transport(&self) -> Option<VirtioPciTransport> {
+        self.pci_transport
+    }
+
     fn get_base_addr(&self) -> usize {
         self.base_addr
     }
@@ -751,17 +775,22 @@ impl VirtioDevice for VirtioBlockDevice {
         virtqueues[queue_idx].get_queue_size()
     }
 
-    fn get_supported_features(&self, device_features: u32) -> u32 {
+    fn get_supported_features(&self, device_features: u64) -> u64 {
         // Accept most features but we might want to be selective
-        let mut result = device_features
-            & !(1 << VIRTIO_BLK_F_RO
-                | 1 << VIRTIO_BLK_F_SCSI
-                | 1 << VIRTIO_BLK_F_CONFIG_WCE
-                | 1 << VIRTIO_BLK_F_MQ
-                | 1 << VIRTIO_F_ANY_LAYOUT);
+        let mut result = (device_features & u64::from(u32::MAX))
+            & !(1u64 << VIRTIO_BLK_F_RO
+                | 1u64 << VIRTIO_BLK_F_SCSI
+                | 1u64 << VIRTIO_BLK_F_CONFIG_WCE
+                | 1u64 << VIRTIO_BLK_F_MQ
+                | 1u64 << VIRTIO_F_ANY_LAYOUT);
 
         if !self.allow_ring_features() {
-            result &= !(1 << VIRTIO_RING_F_EVENT_IDX | 1 << VIRTIO_RING_F_INDIRECT_DESC);
+            result &= !(1u64 << VIRTIO_RING_F_EVENT_IDX | 1u64 << VIRTIO_RING_F_INDIRECT_DESC);
+        }
+
+        if self.pci_transport().is_some() {
+            result |=
+                device_features & (1u64 << crate::drivers::virtio::features::VIRTIO_F_VERSION_1);
         }
 
         result
@@ -773,7 +802,7 @@ impl VirtioDevice for VirtioBlockDevice {
         }
 
         let virtqueues = self.virtqueues.lock();
-        Some(virtqueues[queue_idx].get_raw_ptr() as u64)
+        Some(virt_to_phys(virtqueues[queue_idx].get_raw_ptr() as usize) as u64)
     }
 
     fn get_queue_driver_addr(&self, queue_idx: usize) -> Option<u64> {
@@ -782,7 +811,7 @@ impl VirtioDevice for VirtioBlockDevice {
         }
 
         let virtqueues = self.virtqueues.lock();
-        Some(virtqueues[queue_idx].avail.flags as *const _ as u64)
+        Some(virt_to_phys(virtqueues[queue_idx].avail.flags as *const _ as usize) as u64)
     }
 
     fn get_queue_device_addr(&self, queue_idx: usize) -> Option<u64> {
@@ -791,7 +820,7 @@ impl VirtioDevice for VirtioBlockDevice {
         }
 
         let virtqueues = self.virtqueues.lock();
-        Some(virtqueues[queue_idx].used.flags as *const _ as u64)
+        Some(virt_to_phys(virtqueues[queue_idx].used.flags as *const _ as usize) as u64)
     }
 }
 
@@ -804,6 +833,10 @@ impl BlockDevice for VirtioBlockDevice {
         let capacity = *self.capacity.read();
         let sector_size = *self.sector_size.read();
         (capacity * sector_size as u64) as usize
+    }
+
+    fn get_sector_size(&self) -> usize {
+        *self.sector_size.read() as usize
     }
 
     fn enqueue_request(&self, request: Box<BlockIORequest>) {
@@ -822,6 +855,11 @@ impl BlockDevice for VirtioBlockDevice {
         }
         drop(queue); // Release the lock early
 
+        self.submit_requests(requests)
+    }
+
+    fn submit_requests(&self, mut requests: Vec<Box<BlockIORequest>>) -> Vec<BlockIOResult> {
+        crate::profile_scope!("virtio_blk::submit_requests");
         if requests.is_empty() {
             return Vec::new();
         }
@@ -850,22 +888,32 @@ pub mod tests {
     use super::*;
     use alloc::vec;
 
+    /// Physical address of the VirtIO Block device on QEMU RISC-V virt.
+    const VIRTIO_BLK_PADDR: usize = 0x10001000;
+
+    /// Map the VirtIO Block MMIO region for use in tests.
+    fn map_blk() -> usize {
+        crate::vm::ioremap(VIRTIO_BLK_PADDR, crate::environment::PAGE_SIZE)
+            .expect("ioremap should succeed for VirtIO Block test device")
+    }
+
     #[test_case]
     fn test_virtio_block_device_init() {
-        let base_addr = 0x10001000; // Example base address
-        let device = VirtioBlockDevice::new(base_addr);
+        let vaddr = map_blk();
+        let device = VirtioBlockDevice::new(vaddr);
 
         assert_eq!(device.get_disk_name(), "virtio-blk");
         assert_eq!(
             device.get_disk_size(),
             (*device.capacity.read() * *device.sector_size.read() as u64) as usize
         );
+        crate::vm::iounmap(vaddr);
     }
 
     #[test_case]
     fn test_virtio_block_device() {
-        let base_addr = 0x10001000; // Example base address
-        let device = VirtioBlockDevice::new(base_addr);
+        let vaddr = map_blk();
+        let device = VirtioBlockDevice::new(vaddr);
 
         assert_eq!(device.get_disk_name(), "virtio-blk");
         assert_eq!(
@@ -901,5 +949,6 @@ pub mod tests {
             assert_eq!(buffer[510], 0x55);
             assert_eq!(buffer[511], 0xAA);
         }
+        crate::vm::iounmap(vaddr);
     }
 }

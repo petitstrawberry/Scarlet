@@ -10,6 +10,66 @@ fn test_pixel_format_bytes_per_pixel() {
     assert_eq!(PixelFormat::RGB888.bytes_per_pixel(), 3);
     assert_eq!(PixelFormat::RGB565.bytes_per_pixel(), 2);
 }
+#[test_case]
+fn linear_gpu_display_resource_validates_layout_and_retains_owner() {
+    let owner = alloc::sync::Arc::new(());
+    let weak = alloc::sync::Arc::downgrade(&owner);
+    let owner: alloc::sync::Arc<dyn GpuDisplayBackingOwner> = owner;
+    let resource =
+        GpuDisplayResource::new_linear(0x1000, 4096, 16, 8, 64, PixelFormat::BGRA8888, owner)
+            .expect("valid linear display layout should succeed");
+    let backing = resource
+        .linear_backing()
+        .expect("linear resource should expose its backing");
+    assert_eq!(backing.physical_addr(), 0x1000);
+    assert_eq!(
+        backing.physical_segments(),
+        &[GpuBackingSegment::new(0x1000, 4096)]
+    );
+    assert_eq!(backing.stride(), 64);
+    assert_eq!(resource.width(), 16);
+    assert_eq!(resource.height(), 8);
+    drop(backing);
+    assert!(weak.upgrade().is_some());
+    drop(resource);
+    assert!(weak.upgrade().is_none());
+
+    assert!(
+        GpuDisplayResource::new_linear(
+            0x1000,
+            4096,
+            16,
+            8,
+            63,
+            PixelFormat::BGRA8888,
+            alloc::sync::Arc::new(()),
+        )
+        .is_err()
+    );
+}
+
+#[test_case]
+fn segmented_gpu_display_resource_preserves_logical_extent_order() {
+    let segments: alloc::sync::Arc<[GpuBackingSegment]> = alloc::sync::Arc::from([
+        GpuBackingSegment::new(0x1000, 4096),
+        GpuBackingSegment::new(0x9000, 4096),
+    ]);
+    let resource = GpuDisplayResource::new_linear_segments(
+        alloc::sync::Arc::clone(&segments),
+        8192,
+        16,
+        8,
+        64,
+        PixelFormat::BGRA8888,
+        alloc::sync::Arc::new(()),
+    )
+    .expect("segmented linear display layout should succeed");
+    let backing = resource
+        .linear_backing()
+        .expect("segmented resource should expose its backing");
+    assert_eq!(backing.physical_addr(), 0x1000);
+    assert_eq!(backing.physical_segments(), segments.as_ref());
+}
 
 #[test_case]
 fn test_framebuffer_config() {
@@ -40,8 +100,21 @@ fn test_generic_graphics_device() {
     device.set_framebuffer_address(0x80000000);
     assert_eq!(device.get_framebuffer_address().unwrap(), 0x80000000);
 
-    // Test flush operation
-    assert!(device.flush_framebuffer(0, 0, 100, 100).is_ok());
+    // Test present operation
+    assert!(
+        device
+            .present_current_framebuffer_region(DisplayRegion::new(0, 0, 100, 100))
+            .is_ok()
+    );
+
+    assert!(
+        device
+            .present_gpu_resource_region(
+                GpuDisplayResource::new(1, 100, 100, 1),
+                DisplayRegion::new(0, 0, 100, 100),
+            )
+            .is_err()
+    );
 }
 
 #[test_case]
@@ -135,10 +208,10 @@ fn test_framebuffer_drawing_operations() {
         }
     }
 
-    // Flush the framebuffer
+    // Present the framebuffer
     assert!(
         device
-            .flush_framebuffer(0, 0, config.width, config.height)
+            .present_current_framebuffer_region(DisplayRegion::full(&config))
             .is_ok()
     );
 
@@ -180,8 +253,13 @@ fn test_pixel_format_operations() {
     let formats = [
         PixelFormat::RGBA8888,
         PixelFormat::BGRA8888,
+        PixelFormat::XRGB8888,
+        PixelFormat::XBGR8888,
+        PixelFormat::XRGB2101010,
         PixelFormat::RGB888,
         PixelFormat::RGB565,
+        PixelFormat::ARGB1555,
+        PixelFormat::XRGB1555,
     ];
 
     for format in formats {
@@ -189,11 +267,7 @@ fn test_pixel_format_operations() {
         device.set_framebuffer_config(config.clone());
 
         let fb_size = config.size();
-        let expected_size = match format {
-            PixelFormat::RGBA8888 | PixelFormat::BGRA8888 => 100 * 100 * 4,
-            PixelFormat::RGB888 => 100 * 100 * 3,
-            PixelFormat::RGB565 => 100 * 100 * 2,
-        };
+        let expected_size = 100 * 100 * format.bytes_per_pixel();
         assert_eq!(fb_size, expected_size);
 
         // Allocate and set framebuffer
@@ -202,23 +276,41 @@ fn test_pixel_format_operations() {
         device.set_framebuffer_address(fb_addr);
 
         // Test pixel writing based on format
-        match format {
-            PixelFormat::RGBA8888 => {
-                unsafe {
+        // SAFETY: fb_addr is a valid pointer to allocated framebuffer memory with sufficient size
+        // for the configured pixel format. The pointer arithmetic stays within bounds.
+        unsafe {
+            match format {
+                PixelFormat::RGBA8888 => {
                     let fb_ptr = fb_addr as *mut u32;
                     *fb_ptr = 0xFF00FF80; // Semi-transparent red-green
                     assert_eq!(*fb_ptr, 0xFF00FF80);
                 }
-            }
-            PixelFormat::BGRA8888 => {
-                unsafe {
+                PixelFormat::BGRA8888 => {
                     let fb_ptr = fb_addr as *mut u32;
                     *fb_ptr = 0x80FF0080; // Semi-transparent in BGRA
                     assert_eq!(*fb_ptr, 0x80FF0080);
                 }
-            }
-            PixelFormat::RGB888 => {
-                unsafe {
+                PixelFormat::XRGB8888 => {
+                    let fb_ptr = fb_addr as *mut u32;
+                    // XRGB8888: bits 0-7 Blue, 8-15 Green, 16-23 Red, 24-31 unused (X)
+                    *fb_ptr = 0x00FF8040; // Red=0xFF, Green=0x80, Blue=0x40, X=0x00
+                    assert_eq!(*fb_ptr, 0x00FF8040);
+                }
+                PixelFormat::XBGR8888 => {
+                    let fb_ptr = fb_addr as *mut u32;
+                    // XBGR8888: bits 0-7 Red, 8-15 Green, 16-23 Blue, 24-31 unused (X)
+                    *fb_ptr = 0x004080FF; // Blue=0xFF, Green=0x80, Red=0x40, X=0x00
+                    assert_eq!(*fb_ptr, 0x004080FF);
+                }
+                PixelFormat::XRGB2101010 => {
+                    let fb_ptr = fb_addr as *mut u32;
+                    // XRGB2101010: 2-bit X, 10-bit R, 10-bit G, 10-bit B (MSB to LSB)
+                    // Red=0x3FF (1023), Green=0x200 (512), Blue=0x100 (256)
+                    let pixel: u32 = (0x3FF << 20) | (0x200 << 10) | 0x100;
+                    *fb_ptr = pixel;
+                    assert_eq!(*fb_ptr, pixel);
+                }
+                PixelFormat::RGB888 => {
                     let fb_ptr = fb_addr as *mut u8;
                     *fb_ptr = 0xFF; // R
                     *fb_ptr.add(1) = 0x80; // G
@@ -227,17 +319,34 @@ fn test_pixel_format_operations() {
                     assert_eq!(*fb_ptr.add(1), 0x80);
                     assert_eq!(*fb_ptr.add(2), 0x40);
                 }
-            }
-            PixelFormat::RGB565 => {
-                unsafe {
+                PixelFormat::RGB565 => {
                     let fb_ptr = fb_addr as *mut u16;
-                    *fb_ptr = 0xF800; // Red in RGB565 format
+                    // RGB565: 5-bit R, 6-bit G, 5-bit B
+                    *fb_ptr = 0xF800; // Red=0x1F (31), Green=0x00, Blue=0x00
                     assert_eq!(*fb_ptr, 0xF800);
+                }
+                PixelFormat::ARGB1555 => {
+                    let fb_ptr = fb_addr as *mut u16;
+                    // ARGB1555: 1-bit A, 5-bit R, 5-bit G, 5-bit B
+                    // A=1 (opaque), R=0x1F (31), G=0x00, B=0x00
+                    *fb_ptr = 0xFC00; // Opaque red
+                    assert_eq!(*fb_ptr, 0xFC00);
+                }
+                PixelFormat::XRGB1555 => {
+                    let fb_ptr = fb_addr as *mut u16;
+                    // XRGB1555: 1-bit X (unused), 5-bit R, 5-bit G, 5-bit B
+                    // X=0, R=0x1F (31), G=0x00, B=0x00
+                    *fb_ptr = 0x7C00; // Red with unused bit = 0
+                    assert_eq!(*fb_ptr, 0x7C00);
                 }
             }
         }
 
-        // Test flushing
-        assert!(device.flush_framebuffer(0, 0, 100, 100).is_ok());
+        // Test presenting
+        assert!(
+            device
+                .present_current_framebuffer_region(DisplayRegion::new(0, 0, 100, 100))
+                .is_ok()
+        );
     }
 }

@@ -1,0 +1,88 @@
+# Scarlet Experimental Bundle
+# Experimental features and applications for testing and development.
+
+[[layers]]
+kind = "copy"
+source = "fs"
+to = "/"
+
+[[layers]]
+kind = "cargo"
+source = { git = "https://github.com/petitstrawberry/moonlight-scarlet.git", rev = "7e9708be295aa1b03a4a6737d7e2208635cc599c" }
+package = "moonlight"
+bin = "moonlight"
+to = "/bin/moonlight"
+
+[[layers]]
+kind = "cargo"
+source = "../../user/video_player"
+package = "video_player"
+bin = "video-player"
+default-features = false
+features = ["av1-stateful-hw", "h264-stateful-hw", "h264-stateless-hw", "mp4-aac"]
+replace = true
+to = "/bin/video-player"
+
+[[layers]]
+kind = "cargo"
+source = { git = "https://github.com/petitstrawberry/yt-for-scarlet", rev = "5b12d06fb86157829b653d9204bf465114814a0a" }
+package = "yt"
+bin = "yt"
+to = "/bin/yt"
+
+[[layers]]
+kind = "cargo"
+source = { git = "https://github.com/petitstrawberry/yt-for-scarlet", rev = "5b12d06fb86157829b653d9204bf465114814a0a" }
+package = "yt-gui"
+bin = "yt-gui"
+to = "/bin/yt-gui"
+
+[[layers]]
+kind = "cargo"
+source = "../../user/std-bin"
+package = "scarlet-std-bin"
+bin = "axum-demo"
+to = "/bin/axum-demo"
+
+[[layers]]
+kind = "cargo"
+source = "../../user/std-bin"
+package = "scarlet-std-bin"
+bin = "reqwest-demo"
+to = "/bin/reqwest-demo"
+
+[[layers]]
+kind = "cargo"
+source = "../../user/tonic-demo"
+package = "scarlet-tonic-demo"
+bin = "tonic-server"
+to = "/bin/tonic-server"
+
+[[layers]]
+kind = "cargo"
+source = "../../user/tonic-demo"
+package = "scarlet-tonic-demo"
+bin = "tonic-client"
+to = "/bin/tonic-client"
+
+[[layers]]
+kind = "cargo"
+source = "../../user/websocket-demo"
+package = "scarlet-websocket-demo"
+bin = "ws-server"
+to = "/bin/ws-server"
+
+[[layers]]
+kind = "cargo"
+source = "../../user/websocket-demo"
+package = "scarlet-websocket-demo"
+bin = "ws-client"
+to = "/bin/ws-client"
+
+[[layers]]
+kind = "cargo"
+source = { git = "https://github.com/petitstrawberry/blitz", rev = "c26e20dfff971941486ca9f50c8dcd332ec404da" }
+subdir = "apps/scarlet-browser"
+package = "blitz-scarlet-browser"
+bin = "blitz"
+to = "/bin/blitz"

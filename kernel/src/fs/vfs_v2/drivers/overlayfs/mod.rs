@@ -38,11 +38,11 @@
 //! - Upper layer is required for write operations
 //! - Whiteout files follow the `.wh.filename` convention
 
+use crate::sync::IrqRwSpinLock;
 use alloc::boxed::Box;
 use alloc::string::ToString;
 use alloc::{collections::BTreeSet, format, string::String, sync::Arc, vec::Vec};
 use core::any::Any;
-use spin::RwLock;
 
 use crate::driver_initcall;
 use crate::fs::vfs_v2::core::{
@@ -105,7 +105,7 @@ pub struct OverlayNode {
     /// Node name
     name: String,
     /// Reference to overlay filesystem
-    overlay_fs: RwLock<Option<Arc<OverlayFS>>>,
+    overlay_fs: IrqRwSpinLock<Option<Arc<OverlayFS>>>,
     /// Path in the overlay
     path: String,
     /// File type (resolved from layers)
@@ -118,7 +118,7 @@ impl OverlayNode {
     pub fn new(name: String, path: String, file_type: FileType, file_id: u64) -> Arc<Self> {
         Arc::new(Self {
             name,
-            overlay_fs: RwLock::new(None),
+            overlay_fs: IrqRwSpinLock::new(None),
             path,
             file_type,
             file_id,
@@ -134,7 +134,7 @@ impl Clone for OverlayNode {
     fn clone(&self) -> Self {
         let cloned = Self {
             name: self.name.clone(),
-            overlay_fs: RwLock::new(None),
+            overlay_fs: IrqRwSpinLock::new(None),
             path: self.path.clone(),
             file_type: self.file_type.clone(),
             file_id: self.file_id,
@@ -199,7 +199,7 @@ impl OverlayFS {
     ///
     /// # Returns
     ///
-    /// Returns an Arc<OverlayFS> on success, or FileSystemError on failure
+    /// Returns an `Arc<OverlayFS>` on success, or `FileSystemError` on failure
     ///
     /// # Example
     ///
@@ -778,11 +778,22 @@ impl FileSystemOperations for OverlayFS {
                 "/"
             };
             let parent_name = parent_path.split('/').last().unwrap_or("/");
+            let parent_file_id = self
+                .get_metadata_for_path(parent_path)
+                .map(|m| m.file_id)
+                .unwrap_or_else(|_| {
+                    // Deterministic fallback from path hash
+                    let mut hash: u64 = 5381;
+                    for byte in parent_path.bytes() {
+                        hash = hash.wrapping_mul(33).wrapping_add(byte as u64);
+                    }
+                    hash
+                });
             let node = OverlayNode::new(
                 parent_name.to_string(),
                 parent_path.to_string(),
                 FileType::Directory,
-                0,
+                parent_file_id,
             );
             if let Some(ref fs) = *overlay_parent.overlay_fs.read() {
                 node.set_overlay_fs(Arc::clone(fs));
@@ -1135,8 +1146,9 @@ impl FileSystemOperations for OverlayFS {
                     })?;
                 if let Ok(lower_entries) = fs.readdir(&lower_node) {
                     for entry in lower_entries {
-                        // Skip . .. entries
-                        if entry.name == "." || entry.name == ".." {
+                        // Skip . .. entries and whiteout files
+                        if entry.name == "." || entry.name == ".." || entry.name.starts_with(".wh.")
+                        {
                             continue;
                         }
                         let entry_full_path = if overlay_node.path == "/" {
@@ -1170,7 +1182,7 @@ impl FileSystemOperations for OverlayFS {
 pub struct OverlayDirectoryObject {
     overlay_fs: Arc<OverlayFS>,
     path: String, // Store path instead of node
-    position: RwLock<u64>,
+    position: IrqRwSpinLock<u64>,
 }
 
 impl OverlayDirectoryObject {
@@ -1178,7 +1190,7 @@ impl OverlayDirectoryObject {
         Self {
             overlay_fs,
             path,
-            position: RwLock::new(0),
+            position: IrqRwSpinLock::new(0),
         }
     }
 
@@ -1348,7 +1360,15 @@ impl StreamOps for OverlayDirectoryObject {
         let fs_entry = &all_entries[position];
 
         // Convert to binary format
-        let dir_entry = crate::fs::DirectoryEntry::from_internal(fs_entry);
+        let mut dir_entry = crate::fs::DirectoryEntry::from_internal(fs_entry);
+        if fs_entry.name != "." && fs_entry.name != ".." {
+            let path = format!("{}/{}", self.path.trim_end_matches('/'), fs_entry.name);
+            dir_entry.size = self
+                .overlay_fs
+                .get_metadata_for_path(&path)
+                .map_err(StreamError::from)?
+                .size as u64;
+        }
 
         // Calculate actual entry size
         let entry_size = dir_entry.entry_size();
@@ -1392,7 +1412,7 @@ impl MemoryMappingOps for OverlayDirectoryObject {
         &self,
         _offset: usize,
         _length: usize,
-    ) -> Result<(usize, usize, bool), &'static str> {
+    ) -> Result<crate::object::capability::MemoryMappingInfo, &'static str> {
         Err("Memory mapping not supported for directories")
     }
 
@@ -1440,6 +1460,7 @@ impl crate::object::capability::selectable::Selectable for OverlayDirectoryObjec
         _interest: crate::object::capability::selectable::ReadyInterest,
         _trapframe: &mut crate::arch::Trapframe,
         _timeout_ticks: Option<u64>,
+        _min_wait_ticks: u64,
     ) -> crate::object::capability::selectable::SelectWaitOutcome {
         crate::object::capability::selectable::SelectWaitOutcome::Ready
     }

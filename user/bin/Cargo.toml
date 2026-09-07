@@ -1,17 +1,18 @@
 [package]
 name = "userprogram"
-version = "0.16.0"
+version = "1.0.0"
 edition = "2024"
+workspace = "../../.cargo"
 
-[profile.dev]
-panic = "abort"
-
-[profile.release]
-panic = "abort"
+# User-facing executable names use kebab-case. Rust source paths stay snake_case.
 
 [[bin]]
 name = "init"
 path = "src/init.rs"
+
+[[bin]]
+name = "microvm-init"
+path = "src/microvm_init.rs"
 
 [[bin]]
 name = "login"
@@ -22,18 +23,6 @@ name = "sh"
 path = "src/sh/main.rs"
 
 [[bin]]
-name = "ls"
-path = "src/ls.rs"
-
-[[bin]]
-name = "rm"
-path = "src/rm.rs"
-
-[[bin]]
-name = "hello"
-path = "src/hello.rs"
-
-[[bin]]
 name = "test"
 path = "src/test.rs"
 
@@ -42,35 +31,27 @@ name = "xv6"
 path = "src/xv6.rs"
 
 [[bin]]
-name = "env_test"
-path = "src/env_test.rs"
-
-[[bin]]
-name = "cat"
-path = "src/cat.rs"
-
-[[bin]]
-name = "fb_test"
+name = "fb-test"
 path = "src/fb_test.rs"
 
- [[bin]]
- name = "socket_server"
- path = "src/socket_server.rs"
-
- [[bin]]
- name = "udp_server"
- path = "src/udp_server.rs"
-
- [[bin]]
- name = "udp_client"
- path = "src/udp_client.rs"
+[[bin]]
+name = "sgfx-probe"
+path = "src/sgfx_probe.rs"
 
 [[bin]]
-name = "socket_client"
+name = "dcp-flip-test"
+path = "src/dcp_flip_test.rs"
+
+[[bin]]
+name = "socket-server"
+path = "src/socket_server.rs"
+
+[[bin]]
+name = "socket-client"
 path = "src/socket_client.rs"
 
 [[bin]]
-name = "socket_pair"
+name = "socket-pair"
 path = "src/socket_pair.rs"
 
 [[bin]]
@@ -78,93 +59,135 @@ name = "ping"
 path = "src/ping.rs"
 
 [[bin]]
+name = "pdfview"
+path = "src/pdfview.rs"
+
+[[bin]]
 name = "netcfg"
 path = "src/netcfg.rs"
 
 [[bin]]
-name = "tcp_client"
-path = "src/tcp_client.rs"
+name = "netcfgd"
+path = "src/netcfgd/main.rs"
 
 [[bin]]
-name = "tcp_server"
-path = "src/tcp_server.rs"
-
-[[bin]]
-name = "httpd"
-path = "src/httpd.rs"
-
-[[bin]]
-name = "sws"
-path = "src/sws/main.rs"
-
-[[bin]]
-name = "container_demo"
+name = "container-demo"
 path = "src/container_demo.rs"
 
 [[bin]]
-name = "socket_handle_transfer_demo"
+name = "socket-handle-transfer-demo"
 path = "src/socket_handle_transfer_demo.rs"
 test = false
 
 # [[bin]]
-# name = "ui_demo"
+# name = "ui-demo"
 # path = "src/ui_demo.rs"
-
-[[bin]]
-name = "stemd"
-path = "src/stemd/main.rs"
 
 [[bin]]
 name = "sbusd"
 path = "src/sbusd/main.rs"
 
 [[bin]]
-name = "slint_demo"
-path = "src/slint_demo.rs"
-
-[[bin]]
-name = "scarlet_desktop"
+name = "scarlet-desktop"
 path = "src/scarlet_desktop/main.rs"
 
 [[bin]]
-name = "scarlet_desktop_background"
-path = "src/scarlet_desktop/background/main.rs"
+name = "desktop-settings"
+path = "src/scarlet_desktop/settingsd.rs"
 
 [[bin]]
-name = "scarlet_desktop_taskbar"
-path = "src/scarlet_desktop/taskbar/scarlet_ui.rs"
+name = "terminal"
+path = "src/terminal/main.rs"
 
 [[bin]]
 name = "ui-demo"
 path = "src/ui_demo.rs"
 
 [[bin]]
-name = "wayland_bridge"
+name = "ui-benchmark"
+path = "src/ui_benchmark.rs"
+
+[[bin]]
+name = "wayland-bridge"
 path = "src/wayland_bridge/main.rs"
+
+[[bin]]
+name = "event-demo"
+path = "src/event_demo.rs"
+
+[[bin]]
+name = "scarlet-skk"
+path = "src/scarlet_skk.rs"
+
+[[bin]]
+name = "scarlet-mozc"
+path = "src/scarlet_mozc.rs"
+
+[[bin]]
+name = "mozc-server"
+path = "src/mozc_server.rs"
 
 [[bin]]
 name = "settings"
 path = "src/settings.rs"
 
+[[bin]]
+name = "shutdown"
+path = "src/shutdown.rs"
+
+[[bin]]
+name = "scpm"
+path = "src/scpm.rs"
+
+[[bin]]
+name = "ushv"
+path = "src/ushv/main.rs"
+
+[[bin]]
+name = "ps"
+path = "src/ps.rs"
+
+[[bin]]
+name = "pty-smoke"
+path = "src/pty_smoke.rs"
+
+[[bin]]
+name = "sshd"
+path = "src/sshd/main.rs"
+
+[[bin]]
+name = "mplayer"
+path = "src/mplayer.rs"
+
+[[bin]]
+name = "sas"
+path = "src/sas/main.rs"
+
 [dependencies]
-scarlet_std = { path = "../lib/std", features = ["alloc_debug"] }
+scarlet-std = { path = "../lib/std", features = ["alloc_debug"] }
+scpm = { path = "../lib/scpm" }
 framebuffer = { path = "../lib/framebuffer" }
-sws_protocol = { path = "../lib/sws_protocol" }
+sgfx = { git = "https://github.com/petitstrawberry/sgfx", default-features = false, features = ["legacy-scarlet-std"] }
+sws-protocol = { path = "../lib/sws-protocol" }
 sws-client = { path = "../lib/sws-client" }
-scarlet-ui = { path = "../lib/scarlet-ui" }
-scarlet-ui-macros = { path = "../lib/scarlet-ui-macros" }
-slint-scarlet = { path = "../lib/slint-scarlet" }
+scarlet-os = { path = "../lib/scarlet-os" }
+scarlet-ui = { git = "https://github.com/petitstrawberry/scarlet-ui", package = "scarlet-ui", default-features = false, features = ["legacy-scarlet-std", "platform-sws"] }
+scarlet-ui-macros = { git = "https://github.com/petitstrawberry/scarlet-ui", package = "scarlet-ui-macros" }
 scarlet-desktop-config = { path = "../lib/scarlet-desktop-config" }
+scarlet-sys = { path = "../lib/scarlet-sys" }
+sunset = { path = "../lib/sunset", default-features = false, features = ["larger", "mlkem", "openssh-key", "rsa"] }
+getrandom = { version = "0.2.16", default-features = false, features = ["custom"] }
+ssh-key = { version = "0.6.7", default-features = false, features = ["ed25519", "rsa"] }
+rand_core = { version = "0.6.4", default-features = false, features = ["getrandom"] }
+bcrypt = { version = "0.15.1", default-features = false }
+hmac = { version = "0.12.1", default-features = false }
+sha2 = { version = "0.10.9", default-features = false }
+subtle = { version = "2.6.1", default-features = false }
 sbus = { path = "../lib/sbus" }
 sbus-client = { path = "../lib/sbus-client" }
+sas-protocol = { path = "../lib/sas-protocol", default-features = false, features = ["legacy-scarlet-std"] }
+sas-client = { path = "../lib/sas-client", default-features = false, features = ["legacy-scarlet-std"] }
+vm-fdt = { version = "0.3", default-features = false, features = ["alloc"] }
 serde = { version = "1.0", default-features = false, features = ["alloc", "derive"] }
 serde-json-core = { package = "serde-json-core", version = "0.6", default-features = false }
-slint = { version = "1.14", default-features = false, features = [
-    "unsafe-single-threaded",
-    "renderer-software",
-    "libm",
-    "compat-1-2"
-] }
-
-[build-dependencies]
-slint-build = "1.14"
+libm = { version = "0.2", default-features = false }

@@ -43,6 +43,16 @@ pub mod socket_ctl {
     pub const SCTL_SOCKET_GET_STATE: u32 = 0x5353_0008;
     /// Get socket non-blocking mode (returns 0 or 1)
     pub const SCTL_SOCKET_GET_NONBLOCK: u32 = 0x5353_000B;
+    /// Set socket read timeout in milliseconds (arg: 0=disabled)
+    pub const SCTL_SOCKET_SET_READ_TIMEOUT_MS: u32 = 0x5353_000C;
+    /// Set socket write timeout in milliseconds (arg: 0=disabled)
+    pub const SCTL_SOCKET_SET_WRITE_TIMEOUT_MS: u32 = 0x5353_000D;
+    /// Get socket read timeout in milliseconds (returns 0 if disabled)
+    pub const SCTL_SOCKET_GET_READ_TIMEOUT_MS: u32 = 0x5353_000E;
+    /// Get socket write timeout in milliseconds (returns 0 if disabled)
+    pub const SCTL_SOCKET_GET_WRITE_TIMEOUT_MS: u32 = 0x5353_000F;
+    /// Take the pending socket error (returns zero or a positive native errno)
+    pub const SCTL_SOCKET_TAKE_ERROR: u32 = 0x5353_0010;
     /// Get socket type (returns SocketType value)
     pub const SCTL_SOCKET_GET_TYPE: u32 = 0x5353_0009;
     /// Check if connected (returns 0 or 1)
@@ -287,6 +297,10 @@ pub enum SocketError {
     NoConnections,
     /// Operation would block
     WouldBlock,
+    /// Operation was interrupted by asynchronous task event delivery
+    Interrupted,
+    /// Operation timed out
+    TimedOut,
     /// Invalid argument
     InvalidArgument,
     /// Not supported
@@ -299,6 +313,28 @@ pub enum SocketError {
     InvalidPacket,
     /// Custom error message
     Other(String),
+}
+
+/// Convert a socket error into the positive errno used by Scarlet Native.
+pub(crate) fn socket_error_to_native_errno(error: &SocketError) -> i32 {
+    match error {
+        SocketError::InvalidAddress | SocketError::InvalidArgument => 22,
+        SocketError::AddressInUse => 98,
+        SocketError::AddressNotAvailable => 99,
+        SocketError::ConnectionRefused => 111,
+        SocketError::ConnectionReset => 104,
+        SocketError::ConnectionAborted => 103,
+        SocketError::NotConnected => 107,
+        SocketError::AlreadyConnected => 106,
+        SocketError::InvalidOperation | SocketError::NotListening => 22,
+        SocketError::NoConnections | SocketError::WouldBlock => 11,
+        SocketError::Interrupted => 4,
+        SocketError::TimedOut => 110,
+        SocketError::NotSupported => 95,
+        SocketError::NoRoute => 101,
+        SocketError::ProtocolNotSupported => 93,
+        SocketError::InvalidPacket | SocketError::Other(_) => 5,
+    }
 }
 
 /// Socket control operations trait
@@ -333,6 +369,24 @@ pub trait SocketControl {
 
     /// Get socket state
     fn state(&self) -> SocketState;
+
+    /// Check whether the socket has a deferred asynchronous error.
+    ///
+    /// # Returns
+    ///
+    /// `true` when [`SocketControl::take_pending_error`] would return an error.
+    fn has_pending_error(&self) -> bool {
+        false
+    }
+
+    /// Take and clear a deferred asynchronous socket error.
+    ///
+    /// # Returns
+    ///
+    /// The pending error, or `None` when no asynchronous error is pending.
+    fn take_pending_error(&self) -> Option<SocketError> {
+        None
+    }
 }
 
 /// Socket operations trait
@@ -343,6 +397,20 @@ pub trait SocketControl {
 ///
 /// Similar to how TtyDeviceEndpoint combines CharDevice + TtyControl.
 pub trait SocketObject: StreamIpcOps + SocketControl + Send + Sync {
+    /// Apply the side effects of closing the final owning handle.
+    ///
+    /// The default implementation performs a best-effort full shutdown.
+    /// Socket implementations with states that cannot be closed through
+    /// [`SocketControl::shutdown`] must override this method.
+    ///
+    /// # Returns
+    ///
+    /// This method returns no value. Closing an already-closed socket is
+    /// expected to be harmless.
+    fn close_handle(&self) {
+        let _ = self.shutdown(ShutdownHow::Both);
+    }
+
     /// Get socket type (Stream, Datagram, etc.)
     fn socket_type(&self) -> SocketType;
 
@@ -352,10 +420,12 @@ pub trait SocketObject: StreamIpcOps + SocketControl + Send + Sync {
     /// Get socket protocol
     fn socket_protocol(&self) -> SocketProtocol;
 
-    /// Cast to Any for safe downcasting
-    fn as_any(&self) -> &dyn core::any::Any
-    where
-        Self: 'static;
+    /// Cast to Any for safe downcasting.
+    ///
+    /// # Returns
+    ///
+    /// Borrowed [`core::any::Any`] view of this socket object.
+    fn as_any(&self) -> &dyn core::any::Any;
 
     /// Send data to a specific address (for datagram sockets)
     /// For stream sockets, address is ignored and data is sent to connected peer

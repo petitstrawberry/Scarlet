@@ -3,6 +3,35 @@
 version = 4
 
 [[package]]
+name = "allocator-api2"
+version = "0.2.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
+
+[[package]]
+name = "equivalent"
+version = "1.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "877a4ace8713b0bcf2a4e7eec82529c029f1d0619886d18145fea96c3ffe5c0f"
+
+[[package]]
+name = "foldhash"
+version = "0.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d9c4f5dac5e15c24eb999c26181a6ca40b39fe946cbe4c263c7209467bc83af2"
+
+[[package]]
+name = "hashbrown"
+version = "0.15.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9229cfe53dfd69f0609a49f65461bd93001ea1ef889cd5529dd176593f5338a1"
+dependencies = [
+ "allocator-api2",
+ "equivalent",
+ "foldhash",
+]
+
+[[package]]
 name = "lock_api"
 version = "0.4.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -13,25 +42,57 @@ dependencies = [
 
 [[package]]
 name = "sbus"
-version = "0.1.0"
-dependencies = [
- "scarlet_std",
-]
+version = "1.0.0"
 
 [[package]]
 name = "sbus-client"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "sbus",
- "scarlet_std",
+ "scarlet-os",
+ "scarlet-std",
 ]
 
 [[package]]
-name = "scarlet_std"
-version = "0.15.0"
+name = "scarlet-abi"
+version = "1.0.0"
+
+[[package]]
+name = "scarlet-os"
+version = "1.0.0"
 dependencies = [
+ "scarlet-abi",
+ "scarlet-rt",
+ "scarlet-sys",
+]
+
+[[package]]
+name = "scarlet-rt"
+version = "1.0.0"
+dependencies = [
+ "lock_api",
+ "scarlet-sys",
  "spin",
  "talc",
+]
+
+[[package]]
+name = "scarlet-std"
+version = "1.0.0"
+dependencies = [
+ "hashbrown",
+ "scarlet-abi",
+ "scarlet-os",
+ "scarlet-rt",
+ "scarlet-sys",
+ "spin",
+]
+
+[[package]]
+name = "scarlet-sys"
+version = "1.0.0"
+dependencies = [
+ "scarlet-abi",
 ]
 
 [[package]]

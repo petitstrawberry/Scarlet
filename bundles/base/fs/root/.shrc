@@ -1,0 +1,9 @@
+#!/bin/sh
+# Scarlet Shell Initialization Script
+
+# Set environment variables
+export PATH=/bin
+export HOME=/root
+
+echo "Welcome to Scarlet Shell!"
+echo "PATH is set to: $PATH"

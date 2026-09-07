@@ -1,19 +1,21 @@
+use super::Mode;
 use core::arch::asm;
-use core::mem::transmute;
+use core::arch::naked_asm;
+use core::panic;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use instruction::sbi::sbi_system_reset;
 use trap::kernel::_kernel_trap_entry;
 use trap::kernel::arch_kernel_trap_handler;
 use trap::user::_user_trap_entry;
 use trap::user::arch_user_trap_handler;
-use vcpu::Mode;
 
 use crate::arch::instruction::Instruction;
 use crate::arch::vm::get_root_pagetable;
-use crate::early_println;
 use crate::environment::MAX_NUM_CPUS;
 use crate::environment::STACK_SIZE;
 use crate::mem::KERNEL_STACK;
+use crate::println;
+use crate::sched::scheduler::get_task_by_id;
 use crate::task::Task;
 
 pub mod boot;
@@ -21,9 +23,12 @@ pub mod context;
 pub mod earlycon;
 pub mod fdt;
 pub mod fpu;
+#[cfg(feature = "hypervisor")]
+pub mod hv;
 pub mod instruction;
 pub mod interrupt;
 pub mod kernel;
+pub mod lsm;
 pub mod mmio;
 pub mod registers;
 pub mod switch;
@@ -38,6 +43,141 @@ pub use registers::IntRegisters;
 use crate::vm::vmem::MemoryArea;
 
 pub type Arch = Riscv64;
+
+const USER_BACKTRACE_MAX_FRAMES: usize = 16;
+const USER_BACKTRACE_MAX_FRAME_DISTANCE: usize = 8 * 1024 * 1024;
+
+/// Log a RISC-V userspace frame-pointer chain from a saved trapframe.
+///
+/// This follows the standard frame record where the previous frame pointer is
+/// stored at `fp - 16` and the return address at `fp - 8`.
+///
+/// # Arguments
+///
+/// * `task` - Task whose user address space contains the stack frames.
+/// * `trapframe` - Saved userspace register state at the diagnostic point.
+///
+/// # Returns
+///
+/// This function returns after logging the valid prefix of the frame chain.
+pub fn log_user_backtrace(task: &Task, trapframe: &Trapframe) {
+    let mut frame_pointer = trapframe.regs.reg[8] as usize;
+    crate::println!(
+        "[user-bt] #0 pc={:#x} ra={:#x} fp={:#x}",
+        trapframe.epc,
+        trapframe.regs.reg[1],
+        frame_pointer
+    );
+
+    for depth in 1..=USER_BACKTRACE_MAX_FRAMES {
+        if frame_pointer == 0 || !frame_pointer.is_multiple_of(16) {
+            break;
+        }
+        let Some(frame_address) = frame_pointer.checked_sub(16) else {
+            break;
+        };
+
+        let mut frame = [0u8; 16];
+        if crate::library::std::usercopy::copy_from_user(task, frame_address, &mut frame).is_err() {
+            crate::println!("[user-bt] stopped: unreadable fp={:#x}", frame_pointer);
+            break;
+        }
+
+        let previous_frame_pointer = u64::from_ne_bytes([
+            frame[0], frame[1], frame[2], frame[3], frame[4], frame[5], frame[6], frame[7],
+        ]) as usize;
+        let saved_return_address = u64::from_ne_bytes([
+            frame[8], frame[9], frame[10], frame[11], frame[12], frame[13], frame[14], frame[15],
+        ]) as usize;
+        if saved_return_address == 0 {
+            break;
+        }
+
+        crate::println!(
+            "[user-bt] #{} pc={:#x} ra={:#x} fp={:#x}",
+            depth,
+            saved_return_address.saturating_sub(4),
+            saved_return_address,
+            frame_pointer
+        );
+
+        if previous_frame_pointer <= frame_pointer
+            || previous_frame_pointer - frame_pointer > USER_BACKTRACE_MAX_FRAME_DISTANCE
+        {
+            break;
+        }
+        frame_pointer = previous_frame_pointer;
+    }
+}
+
+/// Synchronize instruction fetch after writing executable memory.
+///
+/// # Arguments
+///
+/// * `start_vaddr` - Kernel virtual address used to write the executable bytes.
+/// * `len` - Number of bytes written.
+pub fn sync_icache_for_execution(start_vaddr: usize, len: usize) {
+    let _ = start_vaddr;
+    if len == 0 {
+        return;
+    }
+
+    unsafe {
+        asm!("fence.i", options(nostack));
+    }
+}
+
+/// Clean D-cache to Point of Coherency (PoC) for the given virtual address range.
+///
+/// RISC-V targets supported by Scarlet currently do not require explicit data
+/// cache maintenance for coherent DMA, so this is a no-op API counterpart to
+/// AArch64.
+///
+/// # Arguments
+///
+/// * `start_vaddr` - Kernel virtual address at the start of the range.
+/// * `len` - Number of bytes to clean.
+pub fn clean_dcache_to_poc_range(start_vaddr: usize, len: usize) {
+    let _ = start_vaddr;
+    let _ = len;
+}
+
+/// Clean and invalidate D-cache to Point of Coherency (PoC) for the given virtual address range.
+///
+/// RISC-V targets supported by Scarlet currently do not require explicit data
+/// cache maintenance for coherent DMA, so this is a no-op API counterpart to
+/// AArch64.
+///
+/// # Arguments
+///
+/// * `start_vaddr` - Kernel virtual address at the start of the range.
+/// * `len` - Number of bytes to clean and invalidate.
+pub fn clean_invalidate_dcache_to_poc_range(start_vaddr: usize, len: usize) {
+    let _ = start_vaddr;
+    let _ = len;
+}
+
+/// Invalidate D-cache to Point of Coherency (PoC) for the given virtual address range.
+///
+/// RISC-V targets supported by Scarlet currently do not require explicit data
+/// cache maintenance for coherent DMA, so this is a no-op API counterpart to
+/// AArch64.
+///
+/// # Arguments
+///
+/// * `start_vaddr` - Kernel virtual address at the start of the range.
+/// * `len` - Number of bytes to invalidate.
+pub fn invalidate_dcache_to_poc_range(start_vaddr: usize, len: usize) {
+    let _ = start_vaddr;
+    let _ = len;
+}
+
+/// Per-CPU initialization for secondary CPUs.
+///
+/// Configures trap vectors, FPU, and vector extension for the given hart.
+pub fn init_ap_cpu(cpu_id: usize) {
+    boot::init_cpu(cpu_id);
+}
 
 /// Per-hart ownership of the live Vector register file.
 ///
@@ -67,6 +207,14 @@ pub(crate) fn set_vector_owner(cpu_id: usize, owner: usize) {
     VECTOR_OWNER[cpu_id].store(owner, Ordering::Relaxed)
 }
 
+/// Clear ownership of a hart's live vector register file after its owner has
+/// switched out. A later return must restore from the task-owned context.
+#[inline]
+pub(crate) fn clear_vector_owner(cpu_id: usize) {
+    set_vector_owner_dirty(cpu_id, false);
+    set_vector_owner(cpu_id, NO_VECTOR_OWNER);
+}
+
 #[inline]
 pub(crate) fn get_vector_owner_dirty(cpu_id: usize) -> bool {
     VECTOR_OWNER_DIRTY[cpu_id].load(Ordering::Relaxed)
@@ -75,6 +223,63 @@ pub(crate) fn get_vector_owner_dirty(cpu_id: usize) -> bool {
 #[inline]
 pub(crate) fn set_vector_owner_dirty(cpu_id: usize, dirty: bool) {
     VECTOR_OWNER_DIRTY[cpu_id].store(dirty, Ordering::Relaxed)
+}
+
+/// Decide whether switching out a task requires saving live vector registers.
+///
+/// A dirty vector file must belong to the outgoing task. Clean ownership still
+/// needs invalidation so a later migration cannot reuse stale hart registers.
+#[inline]
+const fn vector_switch_out_owner_is_valid(owner: usize, task_id: usize, dirty: bool) -> bool {
+    !dirty || owner == task_id
+}
+
+#[inline]
+pub(crate) fn vector_switch_out_requires_save(owner: usize, task_id: usize, dirty: bool) -> bool {
+    assert!(
+        vector_switch_out_owner_is_valid(owner, task_id, dirty),
+        "dirty vector state must belong to the outgoing task"
+    );
+    owner == task_id && dirty
+}
+
+#[cfg(test)]
+mod vector_owner_tests {
+    use super::*;
+
+    #[test_case]
+    fn test_vector_switch_out_owner_bookkeeping() {
+        let cpu_id = 0;
+        let previous_owner = get_vector_owner(cpu_id);
+        let previous_dirty = get_vector_owner_dirty(cpu_id);
+
+        // A clean owner has no live state to save, but must be invalidated so
+        // a later return restores from the task's VCPU context.
+        set_vector_owner(cpu_id, 42);
+        set_vector_owner_dirty(cpu_id, false);
+        assert!(!vector_switch_out_requires_save(42, 42, false));
+        clear_vector_owner(cpu_id);
+        assert_eq!(get_vector_owner(cpu_id), NO_VECTOR_OWNER);
+        assert!(!get_vector_owner_dirty(cpu_id));
+
+        // A dirty owner must save before the same invalidation.
+        set_vector_owner(cpu_id, 42);
+        set_vector_owner_dirty(cpu_id, true);
+        assert!(vector_switch_out_requires_save(42, 42, true));
+        clear_vector_owner(cpu_id);
+        assert_eq!(get_vector_owner(cpu_id), NO_VECTOR_OWNER);
+        assert!(!get_vector_owner_dirty(cpu_id));
+
+        set_vector_owner(cpu_id, previous_owner);
+        set_vector_owner_dirty(cpu_id, previous_dirty);
+    }
+
+    #[test_case]
+    fn test_dirty_vector_switch_out_requires_current_owner() {
+        assert!(!vector_switch_out_owner_is_valid(7, 42, true));
+        assert!(vector_switch_out_owner_is_valid(42, 42, true));
+        assert!(vector_switch_out_owner_is_valid(7, 42, false));
+    }
 }
 
 /// Apply user-entry options for the upcoming `sret`.
@@ -107,37 +312,20 @@ pub fn configure_user_entry(_trapframe: &mut Trapframe, options: crate::arch::Us
     // When an illegal-instruction trap is raised by a FP/Vector instruction,
     // the trap handler will mark the task as used and re-enable the extension.
     let cpu_id = crate::arch::get_cpu().get_cpuid();
-    let (current_task_ptr, current_task_id, owner_task_ptr, owner_id, owner_dirty) = {
-        let sched = crate::sched::scheduler::get_scheduler();
-        let Some(current_task_id) = sched.get_current_task_id(cpu_id) else {
-            return;
-        };
-        let Some(current_task_ptr) = sched
-            .get_task_by_id(current_task_id)
-            .map(|t| t as *mut Task)
-        else {
-            return;
-        };
-
-        let owner_id = get_vector_owner(cpu_id);
-        let owner_dirty = get_vector_owner_dirty(cpu_id);
-        let owner_task_ptr =
-            if owner_dirty && owner_id != NO_VECTOR_OWNER && owner_id != current_task_id {
-                sched.get_task_by_id(owner_id).map(|t| t as *mut Task)
-            } else {
-                None
-            };
-
-        (
-            current_task_ptr,
-            current_task_id,
-            owner_task_ptr,
-            owner_id,
-            owner_dirty,
-        )
+    let Some(current_task_id) = crate::sched::scheduler::current_task_id(cpu_id) else {
+        return;
+    };
+    let Some(task) = get_task_by_id(current_task_id) else {
+        return;
     };
 
-    let task = unsafe { &mut *current_task_ptr };
+    let owner_id = get_vector_owner(cpu_id);
+    let owner_dirty = get_vector_owner_dirty(cpu_id);
+    let owner_task = if owner_dirty && owner_id != NO_VECTOR_OWNER && owner_id != current_task_id {
+        get_task_by_id(owner_id)
+    } else {
+        None
+    };
 
     if !crate::arch::user_fpu_enabled() || !task.vcpu.lock().fpu_used {
         crate::arch::riscv64::fpu::disable_fpu();
@@ -148,32 +336,25 @@ pub fn configure_user_entry(_trapframe: &mut Trapframe, options: crate::arch::Us
         return;
     }
 
-    // Ensure the task has a backing context (allocated lazily).
+    // The first-use trap allocates vector state before publishing `vector_used`.
+    // A missing context here would otherwise lose live state during a migration.
     if task.vcpu.lock().vector.is_none() {
-        task.vcpu.lock().vector = Some(alloc::boxed::Box::new(
-            crate::arch::riscv64::fpu::VectorContext::new(),
-        ));
+        panic!("vector task is marked used without a vector context");
     }
 
     // If another task currently owns the live vregs and its live state hasn't
     // been saved, save it now before we clobber vregs with our restore.
     if owner_dirty && owner_id != NO_VECTOR_OWNER && owner_id != current_task_id {
-        if let Some(owner_ptr) = owner_task_ptr {
-            let owner_task = unsafe { &mut *owner_ptr };
-            if owner_task.vcpu.lock().vector.is_none() {
-                owner_task.vcpu.lock().vector = Some(alloc::boxed::Box::new(
-                    crate::arch::riscv64::fpu::VectorContext::new(),
-                ));
-                owner_task.vcpu.lock().vector_used = true;
-            }
-            crate::arch::riscv64::fpu::enable_vector();
-            unsafe { owner_task.vcpu.lock().vector.as_mut().unwrap().save() };
-            crate::arch::riscv64::fpu::mark_vector_clean();
-            set_vector_owner_dirty(cpu_id, false);
-        } else {
-            // Owner task disappeared; drop the dirty flag to avoid repeated work.
-            set_vector_owner_dirty(cpu_id, false);
-        }
+        let owner_task = owner_task.expect("dirty vector owner must remain registered");
+        let mut owner_vcpu = owner_task.vcpu.lock();
+        let vector = owner_vcpu
+            .vector
+            .as_mut()
+            .expect("dirty vector owner must have a vector context");
+        crate::arch::riscv64::fpu::enable_vector();
+        unsafe { vector.save() };
+        crate::arch::riscv64::fpu::mark_vector_clean();
+        set_vector_owner_dirty(cpu_id, false);
     }
 
     // Vector hot-path:
@@ -181,7 +362,14 @@ pub fn configure_user_entry(_trapframe: &mut Trapframe, options: crate::arch::Us
     // - Otherwise just re-enable access without a full restore.
     if owner_id != current_task_id {
         crate::arch::riscv64::fpu::enable_vector();
-        unsafe { task.vcpu.lock().vector.as_ref().unwrap().restore() };
+        unsafe {
+            task.vcpu
+                .lock()
+                .vector
+                .as_ref()
+                .expect("vector task is marked used without a vector context")
+                .restore()
+        };
         crate::arch::riscv64::fpu::mark_vector_clean();
         set_vector_owner(cpu_id, current_task_id);
         set_vector_owner_dirty(cpu_id, false);
@@ -197,7 +385,7 @@ pub fn configure_user_entry(_trapframe: &mut Trapframe, options: crate::arch::Us
 /// This avoids bootstrapping the first user entry via a timer IRQ.
 /// The function prepares trampoline-visible per-CPU state and then
 /// jumps to the trampoline exit path which performs `sret` into user mode.
-pub fn first_switch_to_user(task: &mut Task) -> ! {
+pub fn first_switch_to_user(task: &Task) -> ! {
     // Prefer the high-VA kernel stack window if available.
     let kernel_sp = if let Some((_slot, base)) = task.get_kernel_stack_window_base() {
         (base + crate::environment::PAGE_SIZE + crate::environment::TASK_KERNEL_STACK_SIZE) as u64
@@ -205,7 +393,7 @@ pub fn first_switch_to_user(task: &mut Task) -> ! {
         panic!("Task has no kernel stack window");
     };
 
-    crate::early_println!(
+    crate::println!(
         "[riscv64] CPU {}: First switch to user task PID {} with kernel SP {:#x}",
         crate::arch::get_cpu().get_cpuid(),
         task.get_id(),
@@ -223,11 +411,8 @@ pub fn first_switch_to_user(task: &mut Task) -> ! {
     cpu.set_next_address_space(task.vm_manager.get_asid());
 
     // Populate the trapframe from the task VCPU state.
-    let task_ptr = task as *mut Task;
-    unsafe {
-        let trapframe = (*task_ptr).get_trapframe();
-        (*task_ptr).vcpu.lock().switch(trapframe);
-    }
+    let trapframe = task.get_trapframe();
+    task.vcpu.lock().switch(trapframe);
 
     // Ensure the next return is to the correct privilege mode.
     set_next_mode(task.vcpu.lock().get_mode());
@@ -236,7 +421,7 @@ pub fn first_switch_to_user(task: &mut Task) -> ! {
     set_trapvector(crate::vm::get_trampoline_trap_vector());
 
     // Final transition via trampoline exit path.
-    crate::arch::riscv64::trap::user::arch_switch_to_user_space(task.get_trapframe())
+    crate::arch::riscv64::trap::user::arch_switch_to_user(task.get_trapframe())
 }
 
 /// Returns the device memory areas for RISC-V QEMU virt platform.
@@ -259,11 +444,12 @@ static mut CPUS: [Riscv64; MAX_NUM_CPUS] = [const { Riscv64::new(0) }; MAX_NUM_C
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct Riscv64 {
-    scratch: u64,      // offeset: 0
-    pub hartid: u64,   // offset: 8
-    satp: u64,         // offset: 16
-    kernel_stack: u64, // offset: 24
-    kernel_trap: u64,  // offset: 32
+    scratch: u64,             // offeset: 0
+    pub hartid: u64,          // offset: 8
+    satp: u64,                // offset: 16
+    kernel_stack: u64,        // offset: 24
+    kernel_trap: u64,         // offset: 32
+    guest_trapframe_ptr: u64, // offset: 40
 }
 
 impl Riscv64 {
@@ -274,6 +460,7 @@ impl Riscv64 {
             kernel_stack: 0,
             kernel_trap: 0,
             satp: 0,
+            guest_trapframe_ptr: 0,
         }
     }
 
@@ -287,9 +474,21 @@ impl Riscv64 {
         addr
     }
 
+    pub fn get_kernel_stack(&self) -> u64 {
+        self.kernel_stack
+    }
+
     pub fn set_kernel_stack(&mut self, initial_top: u64) {
         self.kernel_stack = initial_top;
     }
+
+    // pub fn get_satp(&self) -> u64 {
+    //     self.satp
+    // }
+
+    // pub fn set_satp(&mut self, val: u64) {
+    //     self.satp = val;
+    // }
 
     pub fn set_trap_handler(&mut self, addr: usize) {
         self.kernel_trap = addr as u64;
@@ -298,12 +497,37 @@ impl Riscv64 {
     pub fn set_next_address_space(&mut self, asid: u16) {
         let root_pagetable = get_root_pagetable(asid).expect("No root page table found for ASID");
 
-        let satp = root_pagetable.get_val_for_satp(asid);
+        let satp = root_pagetable.get_val_for_satp();
         self.satp = satp as u64;
     }
 
     pub fn as_paddr_cpu(&mut self) -> &mut Riscv64 {
         unsafe { &mut CPUS[self.hartid as usize] }
+    }
+}
+
+pub struct ArchCpuState {
+    kernel_stack: u64,
+    trap_handler: u64,
+    satp: u64,
+    guest_trapframe_ptr: u64,
+}
+
+impl ArchCpuState {
+    pub fn save(cpu: &Riscv64) -> Self {
+        ArchCpuState {
+            kernel_stack: cpu.kernel_stack,
+            trap_handler: cpu.kernel_trap,
+            satp: cpu.satp,
+            guest_trapframe_ptr: cpu.guest_trapframe_ptr,
+        }
+    }
+
+    pub fn restore(&self, cpu: &mut Riscv64) {
+        cpu.kernel_stack = self.kernel_stack;
+        cpu.kernel_trap = self.trap_handler;
+        cpu.satp = self.satp;
+        cpu.guest_trapframe_ptr = self.guest_trapframe_ptr;
     }
 }
 
@@ -340,6 +564,10 @@ impl Trapframe {
         self.regs.reg[10] = value; // a0
     }
 
+    pub fn set_tls_pointer(&mut self, ptr: usize) {
+        self.regs.set_tp(ptr);
+    }
+
     pub fn get_arg(&self, index: usize) -> usize {
         self.regs.reg[index + 10] // a0 - a7
     }
@@ -352,18 +580,20 @@ impl Trapframe {
         self.epc
     }
 
+    pub fn set_pc(&mut self, pc: u64) {
+        self.epc = pc;
+    }
+
     /// Increment the program counter (epc) to the next instruction
     /// This is typically used after handling a trap or syscall to continue execution.
     ///
     pub fn increment_pc_next(&mut self, task: &Task) {
         let instruction =
-            Instruction::fetch(task.vm_manager.translate_vaddr(self.epc as usize).unwrap());
+            Instruction::fetch(task.vm_manager.translate_to_kva(self.epc as usize).unwrap());
         let len = instruction.len();
         if len == 0 {
             debug_assert!(len > 0, "Invalid instruction length: {}", len);
-            early_println!(
-                "Warning: Invalid instruction length encountered. Defaulting to 4 bytes."
-            );
+            println!("Warning: Invalid instruction length encountered. Defaulting to 4 bytes.");
             self.epc += 4; // Default to 4 bytes for invalid instruction length
         } else {
             self.epc += len as u64;
@@ -373,6 +603,10 @@ impl Trapframe {
 
 pub fn get_user_trapvector_paddr() -> usize {
     _user_trap_entry as usize
+}
+
+pub fn get_guest_trapvector_paddr() -> usize {
+    trap::user::_guest_trap_entry as usize
 }
 
 pub fn get_kernel_trapvector_paddr() -> usize {
@@ -387,40 +621,13 @@ pub fn get_user_trap_handler() -> usize {
     arch_user_trap_handler as usize
 }
 
-#[allow(static_mut_refs)]
-fn trap_init(riscv: &mut Riscv64) {
-    let trap_stack_start = unsafe { KERNEL_STACK.start() };
-    let stack_size = STACK_SIZE;
-
-    let trap_stack = trap_stack_start + stack_size * (riscv.hartid + 1) as usize;
-    riscv.kernel_stack = trap_stack as u64;
-    riscv.kernel_trap = arch_kernel_trap_handler as u64;
-    let scratch_addr = riscv as *const _ as usize;
-
-    let sie: usize = 0x20;
-    unsafe {
-        asm!("
-        csrci sstatus, 0x2 // Disable interrupts
-        csrw  sie, {0}
-        csrw  stvec, {1}
-        csrw  sscratch, {2}
-        ",
-        in(reg) sie,
-        in(reg) _kernel_trap_entry as usize,
-        in(reg) scratch_addr,
-        );
-    }
-
-    // Enable FPU for user-space and kernel access
-    fpu::enable_fpu();
-
-    // Enable Vector extension for user-space and kernel access
-    fpu::enable_vector();
-
-    // early_println!("Trap stack area    : {:#x} - {:#x}", trap_stack - stack_size, trap_stack - 1);
-    // early_println!("Trap stack size    : {:#x}", stack_size);
-    // early_println!("Trap stack pointer : {:#x}", trap_stack);
-    // early_println!("Scratch address    : {:#x}", scratch_addr);
+#[unsafe(naked)]
+pub unsafe extern "C" fn switch_stack_and_jump(
+    _entry: usize,
+    _arg0: usize,
+    _stack_top: usize,
+) -> ! {
+    naked_asm!("mv t0, a0", "mv a0, a1", "mv sp, a2", "jr t0",);
 }
 
 pub fn set_trapvector(addr: usize) {
@@ -431,6 +638,14 @@ pub fn set_trapvector(addr: usize) {
         in(reg) addr,
         );
     }
+}
+
+pub fn get_trapvector() -> usize {
+    let stvec: usize;
+    unsafe {
+        asm!("csrr {}, stvec", out(reg) stvec);
+    }
+    stvec
 }
 
 pub fn set_arch(addr: usize) {
@@ -461,6 +676,21 @@ pub fn disable_interrupt() {
         "
         );
     }
+}
+
+/// Send a hardware reschedule IPI to a scheduler CPU.
+///
+/// # Arguments
+///
+/// * `target_cpu` - Logical CPU that should receive the reschedule request.
+///
+/// # Returns
+///
+/// `true` when the interrupt controller accepted the IPI request.
+pub fn send_reschedule_ipi(target_cpu: usize) -> bool {
+    crate::interrupt::InterruptManager::global()
+        .send_software_interrupt(target_cpu as u32)
+        .is_ok()
 }
 
 /// Full memory barrier for normal memory (RAM).
@@ -532,41 +762,105 @@ pub fn get_cpu() -> &'static mut Riscv64 {
         out(reg) scratch,
         );
     }
-    unsafe { transmute(scratch) }
+
+    unsafe { &mut *(scratch as *mut Riscv64) }
+}
+
+/// Return the current CPU's ID if its per-CPU pointer is published.
+///
+/// Reads `sscratch` directly. Boot entry code explicitly clears `sscratch`
+/// to zero, so a zero value deterministically means "before init_cpu".
+/// `init_cpu` publishes the per-CPU pointer in `sscratch` last, after
+/// `hartid` has been stored.
+///
+/// # Returns
+///
+/// `Some(cpu_id)` when `sscratch` is non-zero (initialized), otherwise
+/// `None`.
+#[inline]
+pub fn try_get_cpuid() -> Option<usize> {
+    let scratch: usize;
+    unsafe {
+        asm!(
+            "csrr {0}, sscratch",
+            out(reg) scratch,
+            options(nostack, preserves_flags),
+        );
+    }
+    if scratch == 0 {
+        return None;
+    }
+    // SAFETY: Non-zero `sscratch` is published only by `init_cpu` after
+    // `hartid` is set. Boot entry code zeroes `sscratch` first, so any
+    // non-zero value here is the per-CPU pointer.
+    let riscv = unsafe { &*(scratch as *const Riscv64) };
+    Some(riscv.hartid as usize)
 }
 
 pub fn set_next_mode(mode: Mode) {
     match mode {
-        Mode::User => {
-            unsafe {
-                // sstatus.spp = 0 (U-mode)
+        Mode::User => unsafe {
+            let mut sstatus: usize;
+            asm!(
+                "csrr {sstatus}, sstatus",
+                sstatus = out(reg) sstatus,
+            );
+            sstatus &= !(1 << 8);
+            asm!(
+                "csrw sstatus, {sstatus}",
+                sstatus = in(reg) sstatus,
+            );
+            #[cfg(feature = "hypervisor")]
+            asm!("csrc hstatus, {0}", in(reg) (1u64 << 7));
+        },
+        Mode::Kernel => unsafe {
+            let mut sstatus: usize;
+            asm!(
+                "csrr {sstatus}, sstatus",
+                sstatus = out(reg) sstatus,
+            );
+            sstatus |= 1 << 8;
+            asm!(
+                "csrw sstatus, {sstatus}",
+                sstatus = in(reg) sstatus,
+            );
+            #[cfg(feature = "hypervisor")]
+            asm!("csrc hstatus, {0}", in(reg) (1u64 << 7));
+        },
+        Mode::GuestUser => unsafe {
+            if cfg!(feature = "hypervisor") {
                 let mut sstatus: usize;
                 asm!(
                     "csrr {sstatus}, sstatus",
                     sstatus = out(reg) sstatus,
                 );
-                sstatus &= !(1 << 8); // Clear SPP bit
+                sstatus &= !(1 << 8);
                 asm!(
                     "csrw sstatus, {sstatus}",
                     sstatus = in(reg) sstatus,
                 );
+                asm!("csrs hstatus, {0}", in(reg) (1u64 << 7));
+            } else {
+                panic!("Guest mode not supported without hypervisor feature");
             }
-        }
-        Mode::Kernel => {
-            unsafe {
-                // sstatus.spp = 1 (S-mode)
+        },
+        Mode::GuestKernel => unsafe {
+            if cfg!(feature = "hypervisor") {
                 let mut sstatus: usize;
                 asm!(
                     "csrr {sstatus}, sstatus",
                     sstatus = out(reg) sstatus,
                 );
-                sstatus |= 1 << 8; // Set SPP bit
+                sstatus |= 1 << 8;
                 asm!(
                     "csrw sstatus, {sstatus}",
                     sstatus = in(reg) sstatus,
                 );
+                asm!("csrs hstatus, {0}", in(reg) (1u64 << 7));
+            } else {
+                panic!("Guest mode not supported without hypervisor feature");
             }
-        }
+        },
     }
 }
 

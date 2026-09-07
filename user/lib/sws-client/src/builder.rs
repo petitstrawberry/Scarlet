@@ -10,7 +10,7 @@ use crate::error::Error;
 /// ```no_run
 /// use sws_client::{Connection, SurfaceBuilder};
 ///
-/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// # fn main() -> Result<(), sws_client::Error> {
 /// let mut conn = Connection::connect_default()?;
 ///
 /// // Simple window with defaults
@@ -55,7 +55,12 @@ impl<'a> SurfaceBuilder<'a> {
     /// Required fields that must be set before calling `build()`:
     /// - `app_id`
     /// - `app_name`
-    /// - `size` (or `width` + `height` separately)
+    ///
+    /// The size defaults to 800 x 600 pixels; override it with `size`, or with
+    /// `width` and `height` separately. An explicit size is not required.
+    ///
+    /// # Returns
+    /// A builder with no connection or server-side window allocated yet.
     pub fn new() -> Self {
         Self {
             app_id: None,
@@ -150,7 +155,7 @@ impl<'a> SurfaceBuilder<'a> {
     /// - Required fields are missing
     /// - The connection fails
     /// - The server returns an error
-    pub fn build(self, conn: &mut Connection) -> Result<u32, Error> {
+    pub fn build(self, conn: &Connection) -> Result<u32, Error> {
         // Validate required fields
         let app_id = self.app_id.ok_or(Error::InvalidRequest)?;
         let app_name = self.app_name.ok_or(Error::InvalidRequest)?;

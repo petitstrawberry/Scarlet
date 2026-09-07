@@ -28,8 +28,9 @@ fn main() -> i32 {
     match std::task::fork() {
         0 => {
             let shell_path = std::env::var("SHELL").unwrap_or("/bin/sh".to_string());
+            let shell_name = format!("-{}", shell_path.rsplit('/').next().unwrap_or("sh"));
             // Child process: Execute the shell program
-            if std::task::execve(&shell_path, &[&shell_path], &env) != 0 {
+            if std::task::execve(&shell_path, &[&shell_name], &env) != 0 {
                 println!("Failed to execve /bin/sh");
                 return -1; // Exit with error}
             }

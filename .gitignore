@@ -1,11 +1,35 @@
 /kernel/target
+/kernel/.test/
+/kernel/.run/
 /user/lib/*/target
 /user/bin/target
-/mkfs/rootfs/system/*
-/mkfs/initramfs/bin/*
-/mkfs/initramfs/system/scarlet/bin/*
-/mkfs/*.cpio
+/user/std-bin/target
 dist/
 /kernel/fat32-test.img
 /kernel/ext2-test.img
 opencode.json
+scarlet.local.toml
+/tools/scpm-pack/target
+/.build
+/.scarlet/
+/drivers/*/target
+/drivers/*/*/target
+/modules/*/target
+
+# Auto-generated LSM symbol table
+kernel/src/lsm/generated_symbols.rs
+/bsp/*/target
+/bsp/*/.scarlet
+/bundles/linux/cache/
+/bundles/linux/prebuilt/
+
+# Build artifacts
+tools/guest/*.o
+tools/guest/*.elf
+target/
+
+# Nix
+.direnv/
+result
+test-media/
+.DS_Store

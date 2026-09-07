@@ -1,11 +1,9 @@
 // PL011 UART driver for ARM platforms (QEMU virt, etc.)
 
+use crate::sync::{IrqRwSpinLock, IrqSpinLock};
 use alloc::{boxed::Box, collections::VecDeque, sync::Arc};
-use core::fmt::Write;
-use core::{any::Any, fmt};
-use spin::{Mutex, RwLock};
+use core::any::Any;
 
-use crate::arch::early_putc;
 use crate::initcall::early;
 use crate::{
     device::{
@@ -21,9 +19,8 @@ use crate::{
         },
     },
     driver_initcall,
-    interrupt::{InterruptId, InterruptManager},
+    interrupt::{InterruptClaim, InterruptId},
     object::capability::{ControlOps, MemoryMappingOps, Selectable},
-    traits::serial::Serial,
 };
 
 // PL011 UART register offsets
@@ -56,21 +53,26 @@ const LCR_H_FEN: u32 = 1 << 4; // Enable FIFOs
 
 // Interrupt bits
 const IMSC_RXIM: u32 = 1 << 4; // Receive interrupt mask
+const RIS_RXRIS: u32 = 1 << 4; // Receive raw interrupt status
+
+const TX_PACE_BYTES: usize = 64;
 
 pub struct Pl011Uart {
     base: usize,
-    interrupt_id: RwLock<Option<InterruptId>>,
-    rx_buffer: Mutex<VecDeque<u8>>,
-    event_emitter: Mutex<DeviceEventEmitter>,
+    interrupt_id: IrqRwSpinLock<Option<InterruptId>>,
+    rx_buffer: IrqSpinLock<VecDeque<u8>>,
+    event_emitter: IrqSpinLock<DeviceEventEmitter>,
+    tx_lock: IrqSpinLock<()>,
 }
 
 impl Pl011Uart {
     pub fn new(base: usize) -> Self {
         Pl011Uart {
             base,
-            interrupt_id: RwLock::new(None),
-            rx_buffer: Mutex::new(VecDeque::new()),
-            event_emitter: Mutex::new(DeviceEventEmitter::new()),
+            interrupt_id: IrqRwSpinLock::new(None),
+            rx_buffer: IrqSpinLock::new(VecDeque::new()),
+            event_emitter: IrqSpinLock::new(DeviceEventEmitter::new()),
+            tx_lock: IrqSpinLock::new(()),
         }
     }
 
@@ -100,18 +102,12 @@ impl Pl011Uart {
         self.reg_write(UARTCR, CR_UARTEN | CR_TXE | CR_RXE);
     }
 
-    /// Enable UART interrupts
+    /// Enable UART-side interrupts after the controller line has been registered.
     pub fn enable_interrupts(&self, interrupt_id: InterruptId) -> Result<(), &'static str> {
         self.interrupt_id.write().replace(interrupt_id);
 
         // Enable receive interrupt
         self.reg_write(UARTIMSC, IMSC_RXIM);
-
-        // Register interrupt with interrupt manager
-        InterruptManager::with_manager(|mgr| {
-            mgr.enable_external_interrupt(interrupt_id, 0) // Enable for CPU 0
-        })
-        .map_err(|_| "Failed to enable interrupt")?;
 
         Ok(())
     }
@@ -128,16 +124,19 @@ impl Pl011Uart {
     }
 
     fn write_byte_internal(&self, c: u8) {
-        // // Wait until transmit FIFO is not full
         while self.reg_read(UARTFR) & FR_TXFF != 0 {
             core::hint::spin_loop();
         }
         self.reg_write(UARTDR, c as u32);
-        // early_putc(c);
+    }
+
+    fn wait_tx_idle(&self) {
+        while self.reg_read(UARTFR) & FR_BUSY != 0 {
+            core::hint::spin_loop();
+        }
     }
 
     fn read_byte_internal(&self) -> Option<u8> {
-        // Check if receive FIFO is empty
         if self.reg_read(UARTFR) & FR_RXFE != 0 {
             return None;
         }
@@ -145,32 +144,11 @@ impl Pl011Uart {
     }
 
     fn can_read(&self) -> bool {
-        // RX FIFO is not empty
         self.reg_read(UARTFR) & FR_RXFE == 0
     }
 
     fn can_write(&self) -> bool {
-        // TX FIFO is not full
         self.reg_read(UARTFR) & FR_TXFF == 0
-    }
-}
-
-impl Serial for Pl011Uart {
-    fn put(&self, c: char) -> fmt::Result {
-        self.write_byte_internal(c as u8);
-        Ok(())
-    }
-
-    fn get(&self) -> Option<char> {
-        let mut buffer = self.rx_buffer.lock();
-        if let Some(byte) = buffer.pop_front() {
-            return Some(byte as char);
-        }
-        None
-    }
-
-    fn as_any_mut(&mut self) -> &mut dyn Any {
-        self
     }
 }
 
@@ -179,7 +157,7 @@ impl MemoryMappingOps for Pl011Uart {
         &self,
         _offset: usize,
         _length: usize,
-    ) -> Result<(usize, usize, bool), &'static str> {
+    ) -> Result<crate::object::capability::MemoryMappingInfo, &'static str> {
         Err("Memory mapping not supported for UART")
     }
 
@@ -229,8 +207,32 @@ impl CharDevice for Pl011Uart {
     }
 
     fn write_byte(&self, byte: u8) -> Result<(), &'static str> {
+        let _lock = self.tx_lock.lock();
+
         self.write_byte_internal(byte);
+        if byte == b'\n' {
+            self.wait_tx_idle();
+        }
         Ok(())
+    }
+
+    fn write(&self, buffer: &[u8]) -> Result<usize, &'static str> {
+        if buffer.is_empty() {
+            return Ok(0);
+        }
+        let _lock = self.tx_lock.lock();
+
+        let mut paced = 0;
+        for &byte in buffer {
+            self.write_byte_internal(byte);
+            paced += 1;
+            if byte == b'\n' || paced >= TX_PACE_BYTES {
+                self.wait_tx_idle();
+                paced = 0;
+            }
+        }
+
+        Ok(buffer.len())
     }
 
     fn can_read(&self) -> bool {
@@ -248,18 +250,6 @@ impl ControlOps for Pl011Uart {
     }
 }
 
-impl Write for Pl011Uart {
-    fn write_str(&mut self, s: &str) -> fmt::Result {
-        for c in s.chars() {
-            if c == '\n' {
-                self.put('\r')?;
-            }
-            self.put(c)?;
-        }
-        Ok(())
-    }
-}
-
 impl EventCapableDevice for Pl011Uart {
     fn register_event_listener(&self, listener: alloc::sync::Weak<dyn DeviceEventListener>) {
         self.event_emitter.lock().register_listener(listener);
@@ -274,37 +264,30 @@ impl EventCapableDevice for Pl011Uart {
 
 impl InterruptCapableDevice for Pl011Uart {
     fn handle_interrupt(&self) -> crate::interrupt::InterruptResult<()> {
-        // Read and clear interrupt status
-        let ris = self.reg_read(UARTRIS);
-
-        // Clear ALL interrupts first to prevent re-triggering
-        self.reg_write(UARTICR, 0x7FF);
-
-        if ris & IMSC_RXIM != 0 {
-            // Receive interrupt - read all available data
-            let mut count = 0;
-            while let Some(c) = self.read_byte_internal() {
-                // Emit received character event
-                self.emit_event(&InputEvent { data: c });
-                // Also store in buffer
-                self.rx_buffer.lock().push_back(c);
-                count += 1;
-
-                // Safety limit to prevent infinite loop
-                if count > 128 {
-                    crate::early_println!(
-                        "[PL011] Warning: read limit reached in interrupt handler"
-                    );
-                    break;
-                }
-            }
-        }
-
+        let _ = self.claim_interrupt()?;
         Ok(())
     }
 
     fn interrupt_id(&self) -> Option<InterruptId> {
         self.interrupt_id.read().clone()
+    }
+
+    fn claim_interrupt(&self) -> crate::interrupt::InterruptResult<InterruptClaim> {
+        let ris = self.reg_read(UARTRIS);
+        if ris == 0 {
+            return Ok(InterruptClaim::NotMine);
+        }
+
+        self.reg_write(UARTICR, 0x7FF);
+
+        if ris & RIS_RXRIS != 0 {
+            while let Some(c) = self.read_byte_internal() {
+                self.emit_event(&InputEvent { data: c });
+                self.rx_buffer.lock().push_back(c);
+            }
+        }
+
+        Ok(InterruptClaim::Handled)
     }
 }
 
@@ -314,6 +297,7 @@ impl Selectable for Pl011Uart {
         _interest: crate::object::capability::selectable::ReadyInterest,
         _trapframe: &mut crate::arch::Trapframe,
         _timeout_ticks: Option<u64>,
+        _min_wait_ticks: u64,
     ) -> crate::object::capability::selectable::SelectWaitOutcome {
         crate::object::capability::selectable::SelectWaitOutcome::Ready
     }
@@ -334,7 +318,7 @@ fn register_pl011() {
 }
 
 fn pl011_probe(device_info: &PlatformDeviceInfo) -> Result<(), &'static str> {
-    crate::early_println!("Probing PL011 UART device: {}", device_info.name());
+    crate::println!("Probing PL011 UART device: {}", device_info.name());
 
     let memory_resource = device_info
         .get_resources()
@@ -342,8 +326,16 @@ fn pl011_probe(device_info: &PlatformDeviceInfo) -> Result<(), &'static str> {
         .find(|r| r.res_type == PlatformDeviceResourceType::MEM)
         .ok_or("No memory resource found for PL011")?;
 
-    let base_addr = memory_resource.start;
-    crate::early_println!("PL011 base address: 0x{:x}", base_addr);
+    let paddr = memory_resource.start;
+    let size = memory_resource.end - memory_resource.start + 1;
+    crate::println!("PL011 paddr: {:#x}, size: {:#x}", paddr, size);
+
+    // Map the PL011's physical MMIO region into the kernel virtual address space.
+    let base_addr = crate::vm::ioremap(paddr, size).map_err(|e| {
+        crate::println!("PL011 ioremap({:#x}, {:#x}) failed: {}", paddr, size, e);
+        e
+    })?;
+    crate::println!("PL011 base address (virt): {:#x}", base_addr);
 
     let uart = Arc::new(Pl011Uart::new(base_addr));
 
@@ -356,39 +348,27 @@ fn pl011_probe(device_info: &PlatformDeviceInfo) -> Result<(), &'static str> {
         .iter()
         .find(|r| r.res_type == PlatformDeviceResourceType::IRQ)
     {
-        // Translate interrupt ID using metadata if available (for ARM GIC)
-        let uart_interrupt_id = if let Some(ref metadata) = irq_resource.irq_metadata {
-            // ARM GIC 3-cell format: translate type + number to actual IRQ
-            // Type 0 = SPI (Shared Peripheral Interrupt): base 32
-            // Type 1 = PPI (Private Peripheral Interrupt): base 16
-            let base = if metadata.irq_type == 0 { 32 } else { 16 };
-            base + metadata.irq_number
-        } else {
-            // No metadata: use raw interrupt number (RISC-V PLIC, etc.)
-            irq_resource.start as u32
-        };
+        let uart_interrupt_id = crate::interrupt::register_and_enable_platform_irq_device(
+            irq_resource,
+            uart.clone(),
+            crate::arch::get_cpu().get_cpuid() as u32,
+        )
+        .map_err(|_| "Failed to register PL011 interrupt")?;
 
-        crate::early_println!("PL011 interrupt ID: {}", uart_interrupt_id);
+        crate::println!("PL011 interrupt ID: {}", uart_interrupt_id);
 
         if let Err(e) = uart.enable_interrupts(uart_interrupt_id) {
-            crate::early_println!("Failed to enable PL011 interrupts: {}", e);
+            crate::println!("Failed to enable PL011 interrupts: {}", e);
         } else {
-            crate::early_println!("PL011 interrupts enabled (ID: {})", uart_interrupt_id);
-
-            if let Err(e) = InterruptManager::with_manager(|mgr| {
-                mgr.register_interrupt_device(uart_interrupt_id, uart.clone())
-            }) {
-                crate::early_println!("Failed to register PL011 interrupt device: {}", e);
-            } else {
-                crate::early_println!("PL011 interrupt device registered");
-            }
+            crate::println!("PL011 interrupts enabled (ID: {})", uart_interrupt_id);
+            crate::println!("PL011 interrupt device registered");
         }
     } else {
-        crate::early_println!("No interrupt resource found for PL011, using polling mode");
+        crate::println!("No interrupt resource found for PL011, using polling mode");
     }
 
     let device_id = DeviceManager::get_manager().register_device(uart);
-    crate::early_println!("PL011 UART device registered with ID: {}", device_id);
+    crate::println!("PL011 UART device registered with ID: {}", device_id);
 
     Ok(())
 }

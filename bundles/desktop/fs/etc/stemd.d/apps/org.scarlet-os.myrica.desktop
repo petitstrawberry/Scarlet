@@ -1,0 +1,7 @@
+[Desktop Entry]
+Name=Myrica
+Comment=Browse the web
+Exec=/bin/myrica
+Icon=apps
+Type=Application
+Terminal=false

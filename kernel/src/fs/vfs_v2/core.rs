@@ -5,6 +5,7 @@
 //! - VfsNode: Abstract interface for file entities
 //! - FileSystemOperations: Driver API for filesystem operations
 
+use crate::sync::IrqRwSpinLock;
 use alloc::{
     collections::BTreeMap,
     string::{String, ToString},
@@ -14,7 +15,6 @@ use alloc::{
 use core::fmt;
 use core::sync::atomic::{AtomicU64, Ordering};
 use core::{any::Any, fmt::Debug};
-use spin::RwLock;
 
 use super::mount_tree::MountPoint;
 use crate::fs::{
@@ -64,8 +64,9 @@ pub type FileSystemRef = Arc<dyn FileSystemOperations>;
 ///
 /// VfsEntry is designed to be thread-safe and can be shared across threads.
 pub struct VfsEntry {
-    /// Weak reference to parent VfsEntry (prevents circular references)
-    parent: RwLock<Weak<VfsEntry>>,
+    /// Keep ancestors alive while this entry is in use (for cwd, openat, etc.).
+    /// The reverse child-cache links are weak, so this does not form a cycle.
+    parent: IrqRwSpinLock<Option<Arc<VfsEntry>>>,
 
     /// Name of this VfsEntry (e.g., "user", "file.txt")
     name: String,
@@ -74,7 +75,7 @@ pub struct VfsEntry {
     node: Arc<dyn VfsNode>,
 
     /// Cache of child VfsEntries for fast lookup (using Weak to prevent memory leaks)
-    children: RwLock<BTreeMap<String, Weak<VfsEntry>>>,
+    children: IrqRwSpinLock<BTreeMap<String, Weak<VfsEntry>>>,
 }
 
 impl VfsEntry {
@@ -93,10 +94,10 @@ impl VfsEntry {
         );
 
         Arc::new(Self {
-            parent: RwLock::new(parent.unwrap_or_else(|| Weak::new())),
+            parent: IrqRwSpinLock::new(parent.and_then(|parent| parent.upgrade())),
             name,
             node,
-            children: RwLock::new(BTreeMap::new()),
+            children: IrqRwSpinLock::new(BTreeMap::new()),
         })
     }
 
@@ -112,11 +113,11 @@ impl VfsEntry {
 
     /// Get parent VfsEntry if it exists
     pub fn parent(&self) -> Option<Arc<VfsEntry>> {
-        self.parent.read().upgrade()
+        self.parent.read().clone()
     }
 
     pub fn set_parent(&self, parent: Weak<VfsEntry>) {
-        *self.parent.write() = parent;
+        *self.parent.write() = parent.upgrade();
     }
 
     /// Add a child to the cache
@@ -163,10 +164,10 @@ impl VfsEntry {
 impl Clone for VfsEntry {
     fn clone(&self) -> Self {
         Self {
-            parent: RwLock::new(self.parent.read().clone()),
+            parent: IrqRwSpinLock::new(self.parent.read().clone()),
             name: self.name.clone(),
             node: Arc::clone(&self.node),
-            children: RwLock::new(self.children.read().clone()),
+            children: IrqRwSpinLock::new(self.children.read().clone()),
         }
     }
 }
@@ -328,11 +329,50 @@ pub trait FileSystemOperations: Send + Sync {
         link_name: &String,
         target_node: &Arc<dyn VfsNode>,
     ) -> Result<Arc<dyn VfsNode>, FileSystemError> {
-        // Default implementation: not supported
+        // TODO(scarlet): implement hard links in filesystems that have stable
+        // inode/link-count mutation support. TmpFS overrides this today.
         let _ = (link_parent, link_name, target_node);
         Err(FileSystemError::new(
             FileSystemErrorKind::NotSupported,
             "Hard links not supported by this filesystem",
+        ))
+    }
+
+    /// Rename or move a file or directory within the same filesystem
+    ///
+    /// Moves the entry named `old_name` in `old_parent` to be named `new_name` in
+    /// `new_parent`. If an entry already exists at the destination it is atomically
+    /// replaced, subject to the following POSIX-compatible rules:
+    /// - A file may replace another file.
+    /// - A directory may replace another **empty** directory.
+    /// - A file may not replace a directory, and vice-versa.
+    ///
+    /// # Arguments
+    /// * `old_parent` - Parent directory containing the source entry
+    /// * `old_name`   - Name of the source entry in `old_parent`
+    /// * `new_parent` - Parent directory where the entry should be placed
+    /// * `new_name`   - Name for the entry in `new_parent`
+    ///
+    /// # Returns
+    /// `Ok(())` on success.
+    ///
+    /// # Errors
+    /// * `NotSupported`     - This filesystem does not support rename
+    /// * `NotFound`         - `old_name` does not exist in `old_parent`
+    /// * `IsADirectory`     - Source is a non-directory but destination is a directory
+    /// * `NotADirectory`    - Source is a directory but destination is a non-directory
+    /// * `DirectoryNotEmpty`- Destination is a non-empty directory
+    fn rename(
+        &self,
+        old_parent: &Arc<dyn VfsNode>,
+        old_name: &String,
+        new_parent: &Arc<dyn VfsNode>,
+        new_name: &String,
+    ) -> Result<(), FileSystemError> {
+        let _ = (old_parent, old_name, new_parent, new_name);
+        Err(FileSystemError::new(
+            FileSystemErrorKind::NotSupported,
+            "Rename not supported by this filesystem",
         ))
     }
 }
@@ -392,6 +432,15 @@ impl VfsFileObject {
         &self.original_path
     }
 
+    /// Get the filesystem-specific file object wrapped by this VFS object.
+    ///
+    /// # Returns
+    ///
+    /// Shared reference to the inner file object.
+    pub fn inner(&self) -> &Arc<dyn FileObject> {
+        &self.inner
+    }
+
     /// Enable downcasting for VfsFileObject detection
     pub fn as_any(&self) -> &dyn Any {
         self
@@ -419,8 +468,17 @@ impl MemoryMappingOps for VfsFileObject {
         &self,
         offset: usize,
         length: usize,
-    ) -> Result<(usize, usize, bool), &'static str> {
+    ) -> Result<crate::object::capability::MemoryMappingInfo, &'static str> {
         self.inner.get_mapping_info(offset, length)
+    }
+
+    fn get_mapping_info_with(
+        &self,
+        offset: usize,
+        length: usize,
+        is_shared: bool,
+    ) -> Result<crate::object::capability::MemoryMappingInfo, &'static str> {
+        self.inner.get_mapping_info_with(offset, length, is_shared)
     }
 
     fn on_mapped(&self, vaddr: usize, paddr: usize, length: usize, offset: usize) {
@@ -437,6 +495,18 @@ impl MemoryMappingOps for VfsFileObject {
 
     fn mmap_owner_name(&self) -> alloc::string::String {
         alloc::format!("vfs:{}", self.get_original_path())
+    }
+
+    fn resolve_fault(
+        &self,
+        access: &crate::object::capability::memory_mapping::AccessKind,
+        page_idx: usize,
+        vm_start: usize,
+    ) -> core::result::Result<
+        crate::object::capability::memory_mapping::ResolveFaultResult,
+        crate::object::capability::memory_mapping::ResolveFaultError,
+    > {
+        self.inner.resolve_fault(access, page_idx, vm_start)
     }
 }
 
@@ -461,6 +531,10 @@ impl FileObject for VfsFileObject {
         self.inner.truncate(size)
     }
 
+    fn sync(&self) -> Result<(), StreamError> {
+        self.inner.sync()
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -476,9 +550,10 @@ impl Selectable for VfsFileObject {
         interest: ReadyInterest,
         trapframe: &mut crate::arch::Trapframe,
         timeout_ticks: Option<u64>,
+        min_wait_ticks: u64,
     ) -> SelectWaitOutcome {
         self.inner
-            .wait_until_ready(interest, trapframe, timeout_ticks)
+            .wait_until_ready(interest, trapframe, timeout_ticks, min_wait_ticks)
     }
 
     fn set_nonblocking(&self, enabled: bool) {

@@ -1,7 +1,7 @@
 [env]
 # Environment variable settings for build
 CARGO_MAKE_EXTEND_WORKSPACE_MAKEFILE = true
-CARGO_MAKE_WORKSPACE_INCLUDE_MEMBERS = ["kernel", "user/lib/std", "user/bin"]
+CARGO_MAKE_WORKSPACE_INCLUDE_MEMBERS = ["kernel", "projects/riscv64-limine-full/bsp", "projects/aarch64-limine-full/bsp", "projects/aarch64-limine-microvm/bsp", "user/lib/std", "user/bin", "user/video_player", "user/std-bin"]
 
 [config]
 default_task = "build-riscv64"
@@ -9,15 +9,94 @@ skip_core_tasks = true
 
 [tasks.fmt]
 description = "Format all code"
-dependencies = ["fmt-kernel", "fmt-userlib", "fmt-userbin"]
+dependencies = ["fmt-kernel", "fmt-project-riscv64", "fmt-project-aarch64", "fmt-project-aarch64-microvm", "fmt-userlib", "fmt-userbin", "fmt-video-player", "fmt-userbin-std", "fmt-drivers", "fmt-modules", "fmt-cross-cc"]
 
 [tasks.fmt-check]
 description = "Check formatting (no changes)"
-dependencies = ["fmt-kernel-check", "fmt-userlib-check", "fmt-userbin-check"]
+dependencies = ["fmt-kernel-check", "fmt-project-riscv64-check", "fmt-project-aarch64-check", "fmt-project-aarch64-microvm-check", "fmt-userlib-check", "fmt-userbin-check", "fmt-video-player-check", "fmt-userbin-std-check", "fmt-drivers-check", "fmt-modules-check", "fmt-cross-cc-check"]
+
+[tasks.test-cross-cc]
+description = "Check Nix cross C defaults, application overrides, and native compiler selection"
+script = '''
+set -eu
+: "${TARGET_CC:?Run this test in the Scarlet Nix development shell}"
+cross_cc_host=$(rustc -vV | sed -n 's/^host: //p')
+test -n "$cross_cc_host"
+cross_cc_manifest=tools/tests/cross-cc/Cargo.toml
+for cross_cc_arch in riscv64gc aarch64; do
+    cross_cc_target="${cross_cc_arch}-unknown-scarlet"
+    case "$cross_cc_arch" in
+        riscv64gc) cross_cc_gcc=riscv64-unknown-linux-gnu-gcc ;;
+        aarch64) cross_cc_gcc=aarch64-unknown-linux-gnu-gcc ;;
+    esac
+    cargo run --quiet --locked --manifest-path "$cross_cc_manifest" --target "$cross_cc_host" -- "$cross_cc_target" "$cross_cc_host" "$TARGET_CC"
+    cargo run --quiet --locked --manifest-path "$cross_cc_manifest" --target "$cross_cc_host" --config tools/tests/cross-cc/app-config.toml -- "$cross_cc_target" "$cross_cc_host" "$cross_cc_gcc"
+done
+cargo run --quiet --locked --manifest-path "$cross_cc_manifest" --target "$cross_cc_host" -- "$cross_cc_host" "$cross_cc_host" "${HOST_CC:-${CC:-cc}}"
+'''
+
+[tasks.fmt-cross-cc]
+command = "cargo"
+args = ["fmt", "--manifest-path", "tools/tests/cross-cc/Cargo.toml"]
+
+[tasks.fmt-cross-cc-check]
+command = "cargo"
+args = ["fmt", "--manifest-path", "tools/tests/cross-cc/Cargo.toml", "--", "--check"]
+
+[tasks.check-sgfx-riscv64]
+description = "Check all std binaries and legacy probes against one SGFX core (RISC-V)"
+env = { SGFX_STD_TARGET = "riscv64gc-unknown-scarlet", SGFX_LEGACY_TARGET = "../targets/riscv64gc-unknown-scarlet-elf.json" }
+run_task = "check-sgfx-integration"
+
+[tasks.check-sgfx-aarch64]
+description = "Check all std binaries and legacy probes against one SGFX core (AArch64)"
+env = { SGFX_STD_TARGET = "aarch64-unknown-scarlet", SGFX_LEGACY_TARGET = "../targets/aarch64-unknown-scarlet-elf.json" }
+run_task = "check-sgfx-integration"
+
+[tasks.check-sgfx-integration]
+private = true
+script = '''
+set -eu
+cd user/std-bin
+cargo tree --locked --invert sgfx-core --target "${SGFX_STD_TARGET}"
+cargo check --locked --target "${SGFX_STD_TARGET}" --bins
+cd ../bin
+cargo tree --locked --invert sgfx-core --target "${SGFX_LEGACY_TARGET}"
+cargo check --locked --target "${SGFX_LEGACY_TARGET}" --bin sgfx-probe --bin ui-demo
+'''
+
+[tasks.test-release-contracts]
+description = "Run host-native ABI representation and SWS wire contract tests"
+script = '''
+set -eu
+# Stay at the repository root: crate-local configs select legacy bare targets.
+contract_host=$(rustc -vV | sed -n 's/^host: //p')
+test -n "$contract_host"
+cargo test --locked --manifest-path user/lib/scarlet-abi/Cargo.toml --target "$contract_host"
+cargo test --locked --manifest-path user/lib/sws-protocol/Cargo.toml --target "$contract_host" --no-default-features --features std
+'''
 
 [tasks.fmt-kernel-check]
 description = "Check kernel formatting"
 cwd = "kernel"
+command = "cargo"
+args = ["fmt", "--", "--check"]
+
+[tasks.fmt-project-riscv64-check]
+description = "Check RISC-V project formatting"
+cwd = "projects/riscv64-limine-full/bsp"
+command = "cargo"
+args = ["fmt", "--", "--check"]
+
+[tasks.fmt-project-aarch64-check]
+description = "Check AArch64 project formatting"
+cwd = "projects/aarch64-limine-full/bsp"
+command = "cargo"
+args = ["fmt", "--", "--check"]
+
+[tasks.fmt-project-aarch64-microvm-check]
+description = "Check AArch64 microvm project formatting"
+cwd = "projects/aarch64-limine-microvm/bsp"
 command = "cargo"
 args = ["fmt", "--", "--check"]
 
@@ -33,19 +112,64 @@ cwd = "user/bin"
 command = "cargo"
 args = ["make", "fmt-check"]
 
+[tasks.fmt-video-player-check]
+description = "Check video-player formatting"
+cwd = "user/video_player"
+command = "cargo"
+args = ["make", "fmt-check"]
+
+[tasks.fmt-userbin-std-check]
+description = "Check Rust std user program formatting"
+cwd = "user/std-bin"
+command = "cargo"
+args = ["make", "fmt-check"]
+
+[tasks.fmt-drivers-check]
+description = "Check external driver formatting"
+script = '''
+for dir in $(find drivers -name Cargo.toml -exec dirname {} \;); do
+  echo "Checking $dir"
+  cargo fmt --manifest-path "$dir/Cargo.toml" -- --check || exit 1
+done
+'''
+
+[tasks.fmt-modules-check]
+description = "Check external module formatting"
+script = '''
+for dir in $(find modules -name Cargo.toml -exec dirname {} \;); do
+  echo "Checking $dir"
+  cargo fmt --manifest-path "$dir/Cargo.toml" -- --check || exit 1
+done
+'''
+
 [tasks.clippy-riscv64]
 description = "Run clippy for all components (RISC-V)"
-dependencies = ["clippy-kernel", "clippy-userlib", "clippy-userbin"]
+dependencies = ["clippy-kernel", "clippy-project-riscv64", "clippy-userlib", "clippy-userbin", "clippy-video-player"]
 
 [tasks.clippy-aarch64]
 description = "Run clippy for all components (AArch64)"
-dependencies = ["clippy-kernel", "clippy-userlib", "clippy-userbin"]
+dependencies = ["clippy-kernel", "clippy-project-aarch64", "clippy-userlib", "clippy-userbin", "clippy-video-player"]
 
 [tasks.clippy-kernel]
 description = "Run clippy for kernel"
 cwd = "kernel"
 command = "cargo"
 args = ["clippy", "--", "-D", "warnings"]
+
+[tasks.clippy-project-riscv64]
+description = "Run clippy for RISC-V project"
+command = "cargo"
+args = ["scarlet", "clippy", "--project", "projects/riscv64-limine-full"]
+
+[tasks.clippy-project-aarch64]
+description = "Run clippy for AArch64 project"
+command = "cargo"
+args = ["scarlet", "clippy", "--project", "projects/aarch64-limine-full"]
+
+[tasks.clippy-project-aarch64-microvm]
+description = "Run clippy for AArch64 microvm project"
+command = "cargo"
+args = ["scarlet", "clippy", "--project", "projects/aarch64-limine-microvm"]
 
 [tasks.clippy-userlib]
 description = "Run clippy for user libraries by calling sub Makefile.toml"
@@ -58,9 +182,33 @@ description = "Run clippy for user programs by calling sub Makefile.toml"
 cwd = "user/bin"
 command = "cargo"
 args = ["make", "clippy"]
+
+[tasks.clippy-video-player]
+description = "Run clippy for video-player"
+cwd = "user/video_player"
+command = "cargo"
+args = ["make", "clippy"]
 [tasks.fmt-kernel]
 description = "Format kernel code"
 cwd = "kernel"
+command = "cargo"
+args = ["fmt"]
+
+[tasks.fmt-project-riscv64]
+description = "Format RISC-V project code"
+cwd = "projects/riscv64-limine-full/bsp"
+command = "cargo"
+args = ["fmt"]
+
+[tasks.fmt-project-aarch64]
+description = "Format AArch64 project code"
+cwd = "projects/aarch64-limine-full/bsp"
+command = "cargo"
+args = ["fmt"]
+
+[tasks.fmt-project-aarch64-microvm]
+description = "Format AArch64 microvm project code"
+cwd = "projects/aarch64-limine-microvm/bsp"
 command = "cargo"
 args = ["fmt"]
 
@@ -76,6 +224,36 @@ cwd = "user/bin"
 command = "cargo"
 args = ["make", "fmt"]
 
+[tasks.fmt-video-player]
+description = "Format video-player code"
+cwd = "user/video_player"
+command = "cargo"
+args = ["make", "fmt"]
+
+[tasks.fmt-userbin-std]
+description = "Format Rust std user program code"
+cwd = "user/std-bin"
+command = "cargo"
+args = ["make", "fmt"]
+
+[tasks.fmt-drivers]
+description = "Format external driver code"
+script = '''
+for dir in $(find drivers -name Cargo.toml -exec dirname {} \;); do
+  echo "Formatting $dir"
+  cargo fmt --manifest-path "$dir/Cargo.toml"
+done
+'''
+
+[tasks.fmt-modules]
+description = "Format external module code"
+script = '''
+for dir in $(find modules -name Cargo.toml -exec dirname {} \;); do
+  echo "Formatting $dir"
+  cargo fmt --manifest-path "$dir/Cargo.toml"
+done
+'''
+
 [tasks.build-riscv64]
 description = "Build all components (RISC-V, debug)"
 dependencies = ["build-debug-riscv64"]
@@ -84,21 +262,45 @@ dependencies = ["build-debug-riscv64"]
 description = "Build all components (AArch64, debug)"
 dependencies = ["build-debug-aarch64"]
 
+[tasks.build-host-tools]
+description = "Build host-side helper tools"
+dependencies = ["build-vhost-video-videotoolbox"]
+
+[tasks.build-vhost-video-videotoolbox]
+description = "Build the macOS VideoToolbox vhost-user video daemon"
+cwd = "tools/vhost-video-videotoolbox"
+script_runner = "@shell"
+script = '''
+mkdir -p .build/clang-module-cache
+env -u DEVELOPER_DIR -u SDKROOT CLANG_MODULE_CACHE_PATH=.build/clang-module-cache /usr/bin/xcrun swift build --disable-sandbox -c release --product vhost-video-videotoolbox
+mkdir -p ../../dist/host
+cp .build/release/vhost-video-videotoolbox ../../dist/host/vhost_video_videotoolbox
+'''
+
+[tasks.run-vhost-video-videotoolbox]
+description = "Run the macOS VideoToolbox vhost-user video daemon"
+cwd = "tools/vhost-video-videotoolbox"
+script_runner = "@shell"
+script = '''
+mkdir -p .build/clang-module-cache
+env -u DEVELOPER_DIR -u SDKROOT CLANG_MODULE_CACHE_PATH=.build/clang-module-cache /usr/bin/xcrun swift run --disable-sandbox vhost-video-videotoolbox --socket "${SCARLET_VHOST_USER_VIDEO_SOCKET:-/private/tmp/scarlet-video.sock}"
+'''
+
 [tasks.build-debug-riscv64]
 description = "Build all components in debug mode (RISC-V)"
-dependencies = ["build-kernel-debug-riscv64", "build-userlib-debug-riscv64", "build-userbin-debug-riscv64", "build-initramfs-debug-riscv64", "build-rootfs-riscv64"]
+dependencies = ["build-kernel-debug-riscv64", "build-userlib-debug-riscv64", "build-userbin-debug-riscv64"]
 
 [tasks.build-release-riscv64]
 description = "Build all components in release mode (RISC-V)"
-dependencies = ["build-kernel-release-riscv64", "build-userlib-release-riscv64", "build-userbin-release-riscv64", "build-initramfs-release-riscv64", "build-rootfs-riscv64"]
+dependencies = ["build-kernel-release-riscv64", "build-userlib-release-riscv64", "build-userbin-release-riscv64"]
 
 [tasks.build-debug-aarch64]
 description = "Build all components in debug mode (AArch64)"
-dependencies = ["build-kernel-debug-aarch64", "build-userlib-debug-aarch64", "build-userbin-debug-aarch64", "build-initramfs-debug-aarch64", "build-rootfs-aarch64"]
+dependencies = ["build-kernel-debug-aarch64", "build-userlib-debug-aarch64", "build-userbin-debug-aarch64"]
 
 [tasks.build-release-aarch64]
 description = "Build all components in release mode (AArch64)"
-dependencies = ["build-kernel-release-aarch64", "build-userlib-release-aarch64", "build-userbin-release-aarch64", "build-initramfs-release-aarch64", "build-rootfs-aarch64"]
+dependencies = ["build-kernel-release-aarch64", "build-userlib-release-aarch64", "build-userbin-release-aarch64"]
 
 [tasks.build-kernel-riscv64]
 description = "Build the kernel (RISC-V, debug)"
@@ -109,28 +311,67 @@ description = "Build the kernel (AArch64, debug)"
 dependencies = ["build-kernel-debug-aarch64"]
 
 [tasks.build-kernel-debug-riscv64]
-description = "Build the kernel in debug mode (RISC-V)"
-cwd = "kernel"
-command = "cargo"
-args = ["build", "--target", "targets/riscv64gc-unknown-none-elf.json"]
+description = "Build the kernel in debug mode (RISC-V) with post-link ksym injection"
+script_runner = "@shell"
+script = '''
+cargo scarlet build --project projects/riscv64-limine-full
+'''
 
 [tasks.build-kernel-debug-aarch64]
-description = "Build the kernel in debug mode (AArch64)"
-cwd = "kernel"
-command = "cargo"
-args = ["build", "--target", "targets/aarch64-unknown-none-elf.json"]
+description = "Build the kernel in debug mode (AArch64) with post-link ksym injection"
+script_runner = "@shell"
+script = '''
+cargo scarlet build --project projects/aarch64-limine-full
+'''
+
+[tasks.build-kernel-debug-aarch64-microvm]
+description = "Build the kernel in debug mode (AArch64 microvm) with post-link ksym injection"
+script_runner = "@shell"
+script = '''
+cargo scarlet build --project projects/aarch64-limine-microvm
+'''
 
 [tasks.build-kernel-release-riscv64]
-description = "Build the kernel in release mode (RISC-V)"
-cwd = "kernel"
-command = "cargo"
-args = ["build", "--release", "--target", "targets/riscv64gc-unknown-none-elf.json"]
+description = "Build the kernel in release mode (RISC-V) with post-link ksym injection"
+script_runner = "@shell"
+script = '''
+cargo scarlet build --project projects/riscv64-limine-full --release
+'''
 
 [tasks.build-kernel-release-aarch64]
-description = "Build the kernel in release mode (AArch64)"
-cwd = "kernel"
+description = "Build the kernel in release mode (AArch64) with post-link ksym injection"
+script_runner = "@shell"
+script = '''
+cargo scarlet build --project projects/aarch64-limine-full --release
+'''
+
+[tasks.build-kernel-release-aarch64-microvm]
+description = "Build the kernel in release mode (AArch64 microvm) with post-link ksym injection"
+script_runner = "@shell"
+script = '''
+cargo scarlet build --project projects/aarch64-limine-microvm --release
+'''
+
+[tasks.generate-project-riscv64]
+description = "Validate and refresh project-local scarlet-modules for RISC-V"
 command = "cargo"
-args = ["build", "--release", "--target", "targets/aarch64-unknown-none-elf.json"]
+args = ["scarlet", "check", "--project", "projects/riscv64-limine-full"]
+
+[tasks.generate-project-aarch64]
+description = "Validate and refresh project-local scarlet-modules for AArch64"
+command = "cargo"
+args = ["scarlet", "check", "--project", "projects/aarch64-limine-full"]
+
+[tasks.generate-project-aarch64-microvm]
+description = "Validate and refresh project-local scarlet-modules for AArch64 microvm"
+command = "cargo"
+args = ["scarlet", "check", "--project", "projects/aarch64-limine-microvm"]
+
+[tasks.image-aarch64-microvm]
+description = "Build AArch64 microvm project image from project-local image recipe"
+command = "cargo"
+args = ["scarlet", "image", "--project", "projects/aarch64-limine-microvm", "--release"]
+dependencies = ["build-userbin-release-aarch64"]
 
 [tasks.build-userlib-debug-riscv64]
 description = "Build user libraries for RISC-V in debug mode"
@@ -166,31 +407,59 @@ dependencies = ["build-userlib-debug-aarch64"]
 
 [tasks.build-userbin-debug-riscv64]
 description = "Build user programs for RISC-V in debug mode"
-cwd = "user/bin"
-command = "cargo"
-args = ["make", "build"]
 dependencies = ["build-userlib-debug-riscv64"]
+script = [
+    "(cd user/bin && cargo make build)",
+    "(cd user/video_player && cargo make build)"
+]
 
 [tasks.build-userbin-debug-aarch64]
 description = "Build user programs for AArch64 in debug mode"
-cwd = "user/bin"
-command = "cargo"
-args = ["make", "build-aarch64"]
 dependencies = ["build-userlib-debug-aarch64"]
+script = [
+    "(cd user/bin && cargo make build-aarch64)",
+    "(cd user/video_player && cargo make build-aarch64)"
+]
 
 [tasks.build-userbin-release-riscv64]
 description = "Build user programs for RISC-V in release mode"
-cwd = "user/bin"
-command = "cargo"
-args = ["make", "build-release"]
 dependencies = ["build-userlib-release-riscv64"]
+script = [
+    "(cd user/bin && cargo make build-release)",
+    "(cd user/video_player && cargo make build-release)"
+]
 
 [tasks.build-userbin-release-aarch64]
 description = "Build user programs for AArch64 in release mode"
-cwd = "user/bin"
+dependencies = ["build-userlib-release-aarch64"]
+script = [
+    "(cd user/bin && cargo make build-release-aarch64)",
+    "(cd user/video_player && cargo make build-release-aarch64)"
+]
+
+[tasks.build-userbin-std-debug-riscv64]
+description = "Build Rust std user programs for RISC-V in debug mode"
+cwd = "user/std-bin"
+command = "cargo"
+args = ["make", "build"]
+
+[tasks.build-userbin-std-debug-aarch64]
+description = "Build Rust std user programs for AArch64 in debug mode"
+cwd = "user/std-bin"
+command = "cargo"
+args = ["make", "build-aarch64"]
+
+[tasks.build-userbin-std-release-riscv64]
+description = "Build Rust std user programs for RISC-V in release mode"
+cwd = "user/std-bin"
+command = "cargo"
+args = ["make", "build-release"]
+
+[tasks.build-userbin-std-release-aarch64]
+description = "Build Rust std user programs for AArch64 in release mode"
+cwd = "user/std-bin"
 command = "cargo"
 args = ["make", "build-release-aarch64"]
-dependencies = ["build-userlib-release-aarch64"]
 
 [tasks.build-userbin-riscv64]
 description = "Build user programs (RISC-V, debug)"
@@ -202,11 +471,29 @@ dependencies = ["build-userbin-debug-aarch64"]
 
 [tasks.clean]
 description = "Clean all build artifacts"
-dependencies = ["clean-kernel", "clean-userlib", "clean-userbin", "clean-initramfs", "clean-rootfs"]
+dependencies = ["clean-kernel", "clean-project-riscv64", "clean-project-aarch64", "clean-project-aarch64-microvm", "clean-userlib", "clean-userbin", "clean-video-player", "clean-userbin-std"]
 
 [tasks.clean-kernel]
 description = "Clean kernel build artifacts"
 cwd = "kernel"
+command = "cargo"
+args = ["clean"]
+
+[tasks.clean-project-riscv64]
+description = "Clean RISC-V project build artifacts"
+cwd = "projects/riscv64-limine-full/bsp"
+command = "cargo"
+args = ["clean"]
+
+[tasks.clean-project-aarch64]
+description = "Clean AArch64 project build artifacts"
+cwd = "projects/aarch64-limine-full/bsp"
+command = "cargo"
+args = ["clean"]
+
+[tasks.clean-project-aarch64-microvm]
+description = "Clean AArch64 microvm project build artifacts"
+cwd = "projects/aarch64-limine-microvm/bsp"
 command = "cargo"
 args = ["clean"]
 
@@ -219,6 +506,18 @@ args = ["make", "clean"]
 [tasks.clean-userbin]
 description = "Clean user program build artifacts"
 cwd = "user/bin"
+command = "cargo"
+args = ["clean"]
+
+[tasks.clean-video-player]
+description = "Clean video-player build artifacts"
+cwd = "user/video_player"
+command = "cargo"
+args = ["clean"]
+
+[tasks.clean-userbin-std]
+description = "Clean Rust std user program build artifacts"
+cwd = "user/std-bin"
 command = "cargo"
 args = ["clean"]
 
@@ -236,7 +535,6 @@ cwd = "kernel"
 env = { "CARGO_TARGET_RISCV64GC_UNKNOWN_NONE_ELF_RUNNER" = "tools/test.sh" }
 command = "cargo"
 args = ["test", "--target", "targets/riscv64gc-unknown-none-elf.json"]
-dependencies = ["build-initramfs-debug-riscv64"]
 
 [tasks.test-kernel-aarch64]
 description = "Run kernel tests (AArch64)"
@@ -244,49 +542,77 @@ cwd = "kernel"
 env = { "CARGO_TARGET_AARCH64_UNKNOWN_NONE_ELF_RUNNER" = "tools/test_aarch64.sh" }
 command = "cargo"
 args = ["test", "--target", "targets/aarch64-unknown-none-elf.json"]
-dependencies = ["build-initramfs-debug-aarch64"]
 
 [tasks.run-riscv64]
 description = "Run the kernel in release mode (RISC-V)"
-cwd = "kernel"
 command = "cargo"
-args = ["run", "--release", "--target", "targets/riscv64gc-unknown-none-elf.json"]
-dependencies = ["build-release-riscv64"]
+args = ["scarlet", "run", "--project", "projects/riscv64-limine-full", "--release"]
 
 [tasks.run-aarch64]
 description = "Run the kernel in release mode (AArch64)"
-cwd = "kernel"
 command = "cargo"
-args = ["run", "--release", "--target", "targets/aarch64-unknown-none-elf.json"]
-dependencies = ["build-release-aarch64"]
+args = ["scarlet", "run", "--project", "projects/aarch64-limine-full", "--release"]
+
+[tasks.run-aarch64-microvm]
+description = "Run the kernel in release mode (AArch64 microvm)"
+command = "cargo"
+args = ["scarlet", "run", "--project", "projects/aarch64-limine-microvm", "--release"]
 
 [tasks.run-debug-riscv64]
 description = "Run the kernel in debug mode (RISC-V)"
-cwd = "kernel"
 command = "cargo"
-args = ["run", "--target", "targets/riscv64gc-unknown-none-elf.json"]
-dependencies = ["build-debug-riscv64"]
+args = ["scarlet", "run", "--project", "projects/riscv64-limine-full"]
 
 [tasks.run-debug-aarch64]
 description = "Run the kernel in debug mode (AArch64)"
-cwd = "kernel"
 command = "cargo"
-args = ["run", "--target", "targets/aarch64-unknown-none-elf.json"]
-dependencies = ["build-debug-aarch64"]
+args = ["scarlet", "run", "--project", "projects/aarch64-limine-full"]
+
+[tasks.run-debug-aarch64-microvm]
+description = "Run the kernel in debug mode (AArch64 microvm)"
+command = "cargo"
+args = ["scarlet", "run", "--project", "projects/aarch64-limine-microvm"]
+
+[tasks.image-debug-riscv64]
+description = "Build boot image for debugging (RISC-V)"
+command = "cargo"
+args = ["scarlet", "image", "--project", "projects/riscv64-limine-full"]
+
+[tasks.image-debug-aarch64]
+description = "Build boot image for debugging (AArch64)"
+command = "cargo"
+args = ["scarlet", "image", "--project", "projects/aarch64-limine-full"]
+
+[tasks.qmp]
+description = "Send QMP_COMMAND with JSON QMP_ARGUMENTS to SCARLET_QEMU_QMP"
+script = '''
+set -eu
+qmp_arguments="${QMP_ARGUMENTS:-}"
+if [ -z "$qmp_arguments" ]; then
+    qmp_arguments='{}'
+fi
+PYTHONDONTWRITEBYTECODE=1 python3 tools/qmp.py --socket "${SCARLET_QEMU_QMP:?Set the Unix QMP socket path}" "${QMP_COMMAND:-query-status}" "$qmp_arguments"
+'''
+
+[tasks.test-qmp]
+description = "Test the local QMP control helper without booting QEMU"
+env = { PYTHONDONTWRITEBYTECODE = "1" }
+command = "python3"
+args = ["-m", "unittest", "discover", "-s", "tools", "-p", "test_qmp.py", "-v"]
 
 [tasks.debug-riscv64]
 description = "Run the kernel in debug mode (RISC-V)"
-cwd = "kernel"
+cwd = "projects/riscv64-limine-full"
 command = "./tools/run.sh"
-args = ["--debug", "target/riscv64gc-unknown-none-elf/debug/kernel"]
-dependencies = ["build-debug-riscv64"]
+args = ["--debug", "bsp/target/riscv64gc-unknown-none-elf/debug/scarlet"]
+dependencies = ["image-debug-riscv64"]
 
 [tasks.debug-aarch64]
 description = "Run the kernel in debug mode (AArch64)"
-cwd = "kernel"
+cwd = "projects/aarch64-limine-full"
 command = "./tools/run_aarch64.sh"
-args = ["--debug", "target/aarch64-unknown-none-elf/debug/kernel"]
-dependencies = ["build-debug-aarch64"]
+args = ["--debug", "bsp/target/aarch64-unknown-none-elf/debug/scarlet"]
+dependencies = ["image-debug-aarch64"]
 
 [tasks.debug-test-riscv64]
 description = "Run kernel tests in debug mode with gdb (RISC-V)"
@@ -294,7 +620,6 @@ cwd = "kernel"
 env = { "CARGO_TARGET_RISCV64GC_UNKNOWN_NONE_ELF_RUNNER" = "tools/test.sh" }
 command = "cargo"
 args = ["test", "--", "--debug"]
-dependencies = ["build-initramfs-debug-riscv64"]
 
 [tasks.debug-test-aarch64]
 description = "Run kernel tests in debug mode with gdb (AArch64)"
@@ -302,7 +627,6 @@ cwd = "kernel"
 env = { "CARGO_TARGET_AARCH64_UNKNOWN_NONE_ELF_RUNNER" = "tools/test_aarch64.sh" }
 command = "cargo"
 args = ["test", "--target", "targets/aarch64-unknown-none-elf.json", "--", "--debug"]
-dependencies = ["build-initramfs-debug-aarch64"]
 
 [tasks.doc-riscv64]
 description = "Generate documentation for all components (RISC-V)"
@@ -324,81 +648,31 @@ cwd = "user/lib"
 command = "cargo"
 args = ["make", "doc"]
 
-[tasks.build-initramfs-debug-aarch64]
-description = "Create AArch64 initramfs archive (debug)"
-cwd = "mkfs"
-command = "sh"
-args = ["make_initramfs.sh", "aarch64"]
-dependencies = ["build-userbin-debug-aarch64"]
-
-[tasks.build-initramfs-aarch64]
-description = "Create AArch64 initramfs archive (debug)"
-dependencies = ["build-initramfs-debug-aarch64"]
-
-[tasks.build-initramfs-debug-riscv64]
-description = "Create RISC-V initramfs archive (debug)"
-cwd = "mkfs"
-command = "sh"
-args = ["make_initramfs.sh", "riscv64"]
-dependencies = ["build-userbin-debug-riscv64"]
-
-[tasks.build-initramfs-riscv64]
-description = "Create RISC-V initramfs archive (debug)"
-dependencies = ["build-initramfs-debug-riscv64"]
-
-[tasks.build-initramfs-release-aarch64]
-description = "Create AArch64 initramfs archive (release)"
-cwd = "mkfs"
-command = "sh"
-args = ["make_initramfs.sh", "aarch64"]
-dependencies = ["build-userbin-release-aarch64"]
-
-[tasks.build-initramfs-release-riscv64]
-description = "Create RISC-V initramfs archive (release)"
-cwd = "mkfs"
-command = "sh"
-args = ["make_initramfs.sh", "riscv64"]
-dependencies = ["build-userbin-release-riscv64"]
-
-[tasks.clean-initramfs]
-description = "Clean initramfs archive"
-cwd = "mkfs"
-command = "sh"
-args = ["clean_initramfs.sh"]
-
-[tasks.build-rootfs-riscv64]
-description = "Create rootfs.img if it doesn't exist (RISC-V)"
-cwd = "mkfs"
-command = "sh"
-args = ["make_rootfs.sh"]
-condition = { files_not_exist = ["dist/rootfs.img"] }
-
-[tasks.build-rootfs-aarch64]
-description = "Create rootfs.img if it doesn't exist (AArch64)"
-cwd = "mkfs"
-command = "sh"
-args = ["make_rootfs.sh"]
-condition = { files_not_exist = ["dist/rootfs.img"] }
-
-[tasks.clean-rootfs]
-description = "Clean rootfs.img"
-cwd = "mkfs"
-command = "sh"
-args = ["clean_rootfs.sh"]
-
 [tasks.clippy-fix-riscv64]
 description = "Run clippy with auto-fix for all components (RISC-V)"
-dependencies = ["clippy-fix-kernel", "clippy-fix-userlib", "clippy-fix-userbin"]
+dependencies = ["clippy-fix-kernel", "clippy-fix-project-riscv64", "clippy-fix-userlib", "clippy-fix-userbin"]
 
 [tasks.clippy-fix-aarch64]
 description = "Run clippy with auto-fix for all components (AArch64)"
-dependencies = ["clippy-fix-kernel", "clippy-fix-userlib", "clippy-fix-userbin"]
+dependencies = ["clippy-fix-kernel", "clippy-fix-project-aarch64", "clippy-fix-userlib", "clippy-fix-userbin"]
 
 [tasks.clippy-fix-kernel]
 description = "Run clippy with auto-fix for kernel"
 cwd = "kernel"
 command = "cargo"
 args = ["clippy", "--fix", "--allow-dirty", "--allow-staged", "--", "-D", "warnings", "-W", "unused_imports", "-W", "empty_line_after_doc_comments"]
+
+[tasks.clippy-fix-project-riscv64]
+description = "Run clippy with auto-fix for RISC-V project"
+cwd = "projects/riscv64-limine-full/bsp"
+command = "cargo"
+args = ["clippy", "--fix", "--target", "../../../kernel/targets/riscv64gc-unknown-none-elf.json", "--allow-dirty", "--allow-staged", "--", "-D", "warnings"]
+
+[tasks.clippy-fix-project-aarch64]
+description = "Run clippy with auto-fix for AArch64 project"
+cwd = "projects/aarch64-limine-full/bsp"
+command = "cargo"
+args = ["clippy", "--fix", "--target", "../../../kernel/targets/aarch64-unknown-none-elf.json", "--allow-dirty", "--allow-staged", "--", "-D", "warnings"]
 
 [tasks.clippy-fix-userlib]
 description = "Run clippy with auto-fix for user libraries"

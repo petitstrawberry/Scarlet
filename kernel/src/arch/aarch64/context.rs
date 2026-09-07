@@ -8,6 +8,7 @@ use alloc::boxed::Box;
 use core::arch::naked_asm;
 
 use crate::arch::Trapframe;
+use crate::mem::page::{ContiguousPages, Page};
 use crate::vm::vmem::MemoryArea;
 
 /// Kernel context for AArch64
@@ -16,7 +17,7 @@ use crate::vm::vmem::MemoryArea;
 /// function calls and context switches in kernel mode, as well as
 /// the kernel stack information.
 #[repr(C)]
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct KernelContext {
     /// Stack pointer (SP)
     pub sp: u64,
@@ -26,9 +27,8 @@ pub struct KernelContext {
     pub fp: u64,
     /// Callee-saved registers X19-X28
     pub x: [u64; 10],
-    /// Kernel stack for this context
-    /// Using Box<[u8]> to directly allocate on heap without stack overflow
-    pub kernel_stack: Box<[u8]>,
+    /// Kernel stack for this context (page-aligned, allocated from PMM)
+    pub kernel_stack: ContiguousPages,
 }
 
 impl KernelContext {
@@ -37,10 +37,12 @@ impl KernelContext {
     /// # Returns
     /// A new KernelContext with allocated kernel stack ready for scheduling
     pub fn new() -> Self {
-        // Directly allocate on heap to avoid stack overflow
+        // Allocate page-aligned kernel stack from PMM
+        let num_pages = crate::environment::TASK_KERNEL_STACK_SIZE / crate::environment::PAGE_SIZE;
         let kernel_stack =
-            alloc::vec![0u8; crate::environment::TASK_KERNEL_STACK_SIZE].into_boxed_slice();
-        let stack_top = kernel_stack.as_ptr() as u64 + kernel_stack.len() as u64;
+            ContiguousPages::new(num_pages).expect("Failed to allocate kernel stack");
+        let stack_top = kernel_stack.as_ptr() as u64
+            + (kernel_stack.len() * crate::environment::PAGE_SIZE) as u64;
 
         Self {
             sp: stack_top - core::mem::size_of::<Trapframe>() as u64, // Reserve space for trapframe
@@ -53,18 +55,21 @@ impl KernelContext {
 
     /// Get the bottom of the kernel stack
     pub fn get_kernel_stack_bottom_paddr(&self) -> u64 {
-        self.kernel_stack.as_ptr() as u64 + self.kernel_stack.len() as u64
+        (self.kernel_stack.as_ptr() as u64)
+            + (self.kernel_stack.len() as u64 * crate::environment::PAGE_SIZE as u64)
     }
 
     pub fn get_kernel_stack_memory_area_paddr(&self) -> MemoryArea {
         MemoryArea::new(
-            self.kernel_stack.as_ptr() as usize,
-            self.get_kernel_stack_bottom_paddr() as usize - 1,
+            self.kernel_stack.as_paddr(),
+            self.kernel_stack.as_paddr()
+                + (self.kernel_stack.len() * crate::environment::PAGE_SIZE)
+                - 1,
         )
     }
 
     pub fn get_kernel_stack_paddr(&self) -> *const u8 {
-        self.kernel_stack.as_ptr()
+        self.kernel_stack.as_ptr() as *const u8
     }
 
     /// Set stack pointer for this context (VA)

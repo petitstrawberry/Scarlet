@@ -12,16 +12,18 @@
 //!
 //! This design supports multiple network interfaces with multiple IP addresses each.
 
+use crate::sync::IrqRwSpinLock;
 use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
-use spin::RwLock;
 
-use crate::early_println;
 use crate::network::protocol_stack::{
     LayerContext, NetworkLayer, NetworkLayerStats, get_network_manager,
 };
 use crate::network::socket::SocketError;
+use crate::println;
+
+const LOG_IPV4_PACKET_TRACE: bool = false;
 
 /// IPv4 address
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -232,13 +234,13 @@ pub struct RouteEntry {
 /// Manages multiple addresses per interface and routing table.
 pub struct Ipv4Layer {
     /// Interface name -> list of IPv4 addresses
-    addresses: RwLock<BTreeMap<String, Vec<Ipv4AddressInfo>>>,
+    addresses: IrqRwSpinLock<BTreeMap<String, Vec<Ipv4AddressInfo>>>,
     /// Routing table (ordered by specificity)
-    routing_table: RwLock<Vec<RouteEntry>>,
+    routing_table: IrqRwSpinLock<Vec<RouteEntry>>,
     /// Protocol handlers registered by protocol number
-    protocols: RwLock<BTreeMap<u8, alloc::sync::Arc<dyn NetworkLayer>>>,
+    protocols: IrqRwSpinLock<BTreeMap<u8, alloc::sync::Arc<dyn NetworkLayer>>>,
     /// Statistics
-    stats: RwLock<NetworkLayerStats>,
+    stats: IrqRwSpinLock<NetworkLayerStats>,
     /// Default TTL
     default_ttl: u8,
 }
@@ -247,10 +249,10 @@ impl Ipv4Layer {
     /// Create a new IPv4 layer
     pub fn new() -> alloc::sync::Arc<Self> {
         alloc::sync::Arc::new(Self {
-            addresses: RwLock::new(BTreeMap::new()),
-            routing_table: RwLock::new(Vec::new()),
-            protocols: RwLock::new(BTreeMap::new()),
-            stats: RwLock::new(NetworkLayerStats::default()),
+            addresses: IrqRwSpinLock::new(BTreeMap::new()),
+            routing_table: IrqRwSpinLock::new(Vec::new()),
+            protocols: IrqRwSpinLock::new(BTreeMap::new()),
+            stats: IrqRwSpinLock::new(NetworkLayerStats::default()),
             default_ttl: 64,
         })
     }
@@ -283,6 +285,27 @@ impl Ipv4Layer {
             .push(info);
     }
 
+    /// Replace the primary IPv4 address of an interface.
+    ///
+    /// Secondary addresses are preserved. Any previous primary address is
+    /// removed before the new address is installed.
+    ///
+    /// # Arguments
+    ///
+    /// * `interface` - Interface whose primary address should be replaced.
+    /// * `info` - Address information to install as the new primary address.
+    ///
+    /// # Returns
+    ///
+    /// This method does not return a value.
+    pub fn set_primary_address(&self, interface: &str, mut info: Ipv4AddressInfo) {
+        info.is_primary = true;
+        let mut addrs = self.addresses.write();
+        let interface_addrs = addrs.entry(interface.to_string()).or_insert_with(Vec::new);
+        interface_addrs.retain(|address| !address.is_primary);
+        interface_addrs.push(info);
+    }
+
     /// Remove an IPv4 address from an interface
     pub fn remove_address(&self, interface: &str, ip: Ipv4Address) {
         let mut addrs = self.addresses.write();
@@ -310,6 +333,62 @@ impl Ipv4Layer {
             .map(|a| a.address)
     }
 
+    /// Get the primary IPv4 address information for an interface.
+    ///
+    /// # Arguments
+    ///
+    /// * `interface` - Interface name to query.
+    ///
+    /// # Returns
+    ///
+    /// A copy of the primary address information, or `None` if the interface
+    /// has no primary IPv4 address.
+    pub fn get_primary_address_info(&self, interface: &str) -> Option<Ipv4AddressInfo> {
+        self.addresses
+            .read()
+            .get(interface)?
+            .iter()
+            .find(|address| address.is_primary)
+            .cloned()
+    }
+
+    /// Find the interface that owns an IPv4 address.
+    ///
+    /// # Arguments
+    ///
+    /// * `address` - Local IPv4 address to locate.
+    ///
+    /// # Returns
+    ///
+    /// The owning interface name, or `None` if the address is not configured.
+    pub fn interface_for_address(&self, address: Ipv4Address) -> Option<String> {
+        self.addresses
+            .read()
+            .iter()
+            .find_map(|(interface, addresses)| {
+                addresses
+                    .iter()
+                    .any(|candidate| candidate.address == address)
+                    .then(|| interface.clone())
+            })
+    }
+
+    /// Remove all IPv4 addresses and routes associated with an interface.
+    ///
+    /// # Arguments
+    ///
+    /// * `interface` - Interface name whose IPv4 state should be removed.
+    ///
+    /// # Returns
+    ///
+    /// This method does not return a value.
+    pub fn remove_interface(&self, interface: &str) {
+        self.addresses.write().remove(interface);
+        self.routing_table
+            .write()
+            .retain(|route| route.interface != interface);
+    }
+
     /// Add a route to the routing table
     pub fn add_route(&self, entry: RouteEntry) {
         let mut table = self.routing_table.write();
@@ -328,15 +407,168 @@ impl Ipv4Layer {
         table.retain(|r| r.destination != destination || r.netmask != netmask);
     }
 
-    /// Set default gateway
+    /// Set the default gateway, replacing any previously installed default.
+    ///
+    /// # Arguments
+    ///
+    /// * `gateway` - Next-hop IPv4 address.
+    /// * `interface` - Interface used to reach the gateway.
+    ///
+    /// # Returns
+    ///
+    /// This method does not return a value.
     pub fn set_default_gateway(&self, gateway: Ipv4Address, interface: &str) {
+        self.routing_table
+            .write()
+            .retain(|route| !route.destination.is_any() || !route.netmask.is_any());
+        self.set_default_gateway_for_interface(gateway, interface, 100);
+    }
+
+    /// Set a default gateway for one interface.
+    ///
+    /// Other interfaces' default routes are preserved. An existing default
+    /// route on the same interface is replaced.
+    ///
+    /// # Arguments
+    ///
+    /// * `gateway` - Next-hop IPv4 address.
+    /// * `interface` - Interface used to reach the gateway.
+    /// * `metric` - Route metric; lower values are preferred.
+    ///
+    /// # Returns
+    ///
+    /// This method does not return a value.
+    pub fn set_default_gateway_for_interface(
+        &self,
+        gateway: Ipv4Address,
+        interface: &str,
+        metric: u32,
+    ) {
+        {
+            let mut routes = self.routing_table.write();
+            routes.retain(|route| {
+                !route.destination.is_any()
+                    || !route.netmask.is_any()
+                    || route.interface != interface
+            });
+        }
         self.add_route(RouteEntry {
             destination: Ipv4Address::new(0, 0, 0, 0),
             netmask: Ipv4Address::new(0, 0, 0, 0),
             gateway: Some(gateway),
             interface: interface.to_string(),
-            metric: 100,
+            metric,
         });
+    }
+
+    /// Remove the default route associated with one interface.
+    ///
+    /// # Arguments
+    ///
+    /// * `interface` - Interface whose default route should be removed.
+    ///
+    /// # Returns
+    ///
+    /// This method does not return a value.
+    pub fn clear_default_gateway_for_interface(&self, interface: &str) {
+        self.routing_table.write().retain(|route| {
+            !route.destination.is_any() || !route.netmask.is_any() || route.interface != interface
+        });
+    }
+
+    /// Get the default route installed for an interface.
+    ///
+    /// # Arguments
+    ///
+    /// * `interface` - Interface name to query.
+    ///
+    /// # Returns
+    ///
+    /// The interface's default route, or `None` if no route is installed.
+    pub fn get_default_route(&self, interface: &str) -> Option<RouteEntry> {
+        self.routing_table
+            .read()
+            .iter()
+            .find(|route| {
+                route.destination.is_any() && route.netmask.is_any() && route.interface == interface
+            })
+            .cloned()
+    }
+
+    /// Get the most preferred installed default route.
+    ///
+    /// # Returns
+    ///
+    /// The lowest-metric default route, or `None` if no default route exists.
+    pub fn preferred_default_route(&self) -> Option<RouteEntry> {
+        self.routing_table
+            .read()
+            .iter()
+            .filter(|route| route.destination.is_any() && route.netmask.is_any())
+            .min_by_key(|route| route.metric)
+            .cloned()
+    }
+
+    /// Get the first interface with a configured primary address.
+    ///
+    /// # Returns
+    ///
+    /// A deterministic interface name, or `None` if no primary address exists.
+    pub fn first_configured_interface(&self) -> Option<String> {
+        self.addresses
+            .read()
+            .iter()
+            .find_map(|(interface, addresses)| {
+                addresses
+                    .iter()
+                    .any(|address| address.is_primary)
+                    .then(|| interface.clone())
+            })
+    }
+
+    fn next_hop_on_interface(
+        &self,
+        destination: Ipv4Address,
+        interface: &str,
+    ) -> Option<Option<Ipv4Address>> {
+        if destination.is_broadcast() {
+            return Some(None);
+        }
+
+        if let Some(next_hop) = {
+            let routes = self.routing_table.read();
+            routes
+                .iter()
+                .find(|route| {
+                    route.interface == interface
+                        && (!route.destination.is_any() || !route.netmask.is_any())
+                        && self.ip_matches_route(destination, route)
+                })
+                .map(|route| route.gateway)
+        } {
+            return Some(next_hop);
+        }
+
+        if self
+            .addresses
+            .read()
+            .get(interface)
+            .is_some_and(|addresses| {
+                addresses
+                    .iter()
+                    .any(|address| self.same_subnet(destination, address.address, address.netmask))
+            })
+        {
+            return Some(None);
+        }
+
+        self.routing_table
+            .read()
+            .iter()
+            .find(|route| {
+                route.interface == interface && route.destination.is_any() && route.netmask.is_any()
+            })
+            .map(|route| route.gateway)
     }
 
     /// Select source IP and interface for a destination
@@ -346,10 +578,14 @@ impl Ipv4Layer {
         &self,
         dest: Ipv4Address,
     ) -> Option<(String, Ipv4Address, Option<Ipv4Address>)> {
-        let table = self.routing_table.read();
+        let routes = self.routing_table.read().clone();
 
-        // Find matching route
-        for route in table.iter() {
+        // Prefer explicit routes. An implicit connected route is checked
+        // separately below, before the catch-all default route.
+        for route in routes
+            .iter()
+            .filter(|route| !route.destination.is_any() || !route.netmask.is_any())
+        {
             if self.ip_matches_route(dest, route) {
                 if let Some(src_ip) = self.get_primary_ip(&route.interface) {
                     return Some((route.interface.clone(), src_ip, route.gateway));
@@ -359,18 +595,33 @@ impl Ipv4Layer {
 
         // Fallback: check if destination is on a directly connected network
         let addrs = self.addresses.read();
+        let mut connected = None;
         for (iface, ips) in addrs.iter() {
             for ip_info in ips {
                 if self.same_subnet(dest, ip_info.address, ip_info.netmask) {
-                    return Some((iface.clone(), ip_info.address, None));
+                    let prefix_length = ip_info.netmask.to_u32_be().count_ones();
+                    if connected.as_ref().is_none_or(
+                        |(best_prefix, _, _): &(u32, String, Ipv4Address)| {
+                            prefix_length > *best_prefix
+                        },
+                    ) {
+                        connected = Some((prefix_length, iface.clone(), ip_info.address));
+                    }
                 }
             }
         }
+        drop(addrs);
+        if let Some((_, interface, address)) = connected {
+            return Some((interface, address, None));
+        }
 
-        // Last resort: use any available primary IP
-        for (iface, ips) in addrs.iter() {
-            if let Some(primary) = ips.iter().find(|a| a.is_primary) {
-                return Some((iface.clone(), primary.address, None));
+        // A default route must not hide an implicit directly connected route.
+        for route in routes
+            .iter()
+            .filter(|route| route.destination.is_any() && route.netmask.is_any())
+        {
+            if let Some(src_ip) = self.get_primary_ip(&route.interface) {
+                return Some((route.interface.clone(), src_ip, route.gateway));
             }
         }
 
@@ -441,10 +692,13 @@ impl NetworkLayer for Ipv4Layer {
         let (interface_name, src_ip_bytes, gateway) = if let Some(ip_src) = context.get("ip_src") {
             if ip_src.len() >= 4 {
                 // Source IP explicitly set - still need to check routing for gateway
+                let source_address =
+                    Ipv4Address::from_bytes([ip_src[0], ip_src[1], ip_src[2], ip_src[3]]);
                 let iface = context
                     .get("interface")
                     .and_then(|b| core::str::from_utf8(b).ok())
                     .map(String::from)
+                    .or_else(|| self.interface_for_address(source_address))
                     .or_else(|| {
                         get_network_manager()
                             .get_default_interface()
@@ -452,8 +706,9 @@ impl NetworkLayer for Ipv4Layer {
                     })
                     .ok_or(SocketError::NoRoute)?;
 
-                // Look up gateway from routing table for this destination
-                let gateway = self.select_source(dest_ip).and_then(|(_, _, gw)| gw);
+                let gateway = self
+                    .next_hop_on_interface(dest_ip, &iface)
+                    .ok_or(SocketError::NoRoute)?;
 
                 (iface, [ip_src[0], ip_src[1], ip_src[2], ip_src[3]], gateway)
             } else {
@@ -485,20 +740,22 @@ impl NetworkLayer for Ipv4Layer {
         // Create IP packet: header + payload
         ip_packet.extend_from_slice(packet);
 
-        early_println!(
-            "[IPv4] Send: {} bytes (src: {}.{}.{}.{}, dst: {}.{}.{}.{}, proto: {}, iface: {})",
-            ip_packet.len(),
-            src_ip_bytes[0],
-            src_ip_bytes[1],
-            src_ip_bytes[2],
-            src_ip_bytes[3],
-            dest_ip_bytes[0],
-            dest_ip_bytes[1],
-            dest_ip_bytes[2],
-            dest_ip_bytes[3],
-            protocol,
-            interface_name
-        );
+        if LOG_IPV4_PACKET_TRACE {
+            println!(
+                "[IPv4] Send: {} bytes (src: {}.{}.{}.{}, dst: {}.{}.{}.{}, proto: {}, iface: {})",
+                ip_packet.len(),
+                src_ip_bytes[0],
+                src_ip_bytes[1],
+                src_ip_bytes[2],
+                src_ip_bytes[3],
+                dest_ip_bytes[0],
+                dest_ip_bytes[1],
+                dest_ip_bytes[2],
+                dest_ip_bytes[3],
+                protocol,
+                interface_name
+            );
+        }
 
         // Prepare context for Ethernet layer
         let mut eth_context = context.clone();
@@ -531,7 +788,7 @@ impl NetworkLayer for Ipv4Layer {
         Ok(())
     }
 
-    fn receive(&self, packet: &[u8], _context: Option<&LayerContext>) -> Result<(), SocketError> {
+    fn receive(&self, packet: &[u8], context: Option<&LayerContext>) -> Result<(), SocketError> {
         // Parse IPv4 header
         let header = Ipv4Header::from_bytes(packet).ok_or(SocketError::InvalidPacket)?;
 
@@ -545,28 +802,29 @@ impl NetworkLayer for Ipv4Layer {
             return Err(SocketError::InvalidPacket);
         }
 
-        early_println!(
-            "[IPv4] RX: total_len={} src={}.{}.{}.{} dst={}.{}.{}.{} proto={}",
-            total_length,
-            header.source_ip[0],
-            header.source_ip[1],
-            header.source_ip[2],
-            header.source_ip[3],
-            header.dest_ip[0],
-            header.dest_ip[1],
-            header.dest_ip[2],
-            header.dest_ip[3],
-            header.protocol
-        );
+        if LOG_IPV4_PACKET_TRACE {
+            println!(
+                "[IPv4] RX: total_len={} src={}.{}.{}.{} dst={}.{}.{}.{} proto={}",
+                total_length,
+                header.source_ip[0],
+                header.source_ip[1],
+                header.source_ip[2],
+                header.source_ip[3],
+                header.dest_ip[0],
+                header.dest_ip[1],
+                header.dest_ip[2],
+                header.dest_ip[3],
+                header.protocol
+            );
+        }
 
         // Verify checksum (header.checksum is already in host order)
         let calculated_checksum = checksum_from_bytes(&packet[..header_len]);
         let header_checksum = unsafe { core::ptr::addr_of!(header.checksum).read_unaligned() };
         if calculated_checksum != header_checksum {
-            early_println!(
+            println!(
                 "[IPv4] Checksum mismatch: calculated=0x{:04X}, header=0x{:04X}",
-                calculated_checksum,
-                header_checksum
+                calculated_checksum, header_checksum
             );
             let mut stats = self.stats.write();
             stats.protocol_errors += 1;
@@ -575,31 +833,38 @@ impl NetworkLayer for Ipv4Layer {
 
         let payload = &packet[header_len..total_length];
 
-        early_println!(
-            "[IPv4] Recv: {} bytes (src: {}.{}.{}.{}, dst: {}.{}.{}.{}, proto: {})",
-            packet.len(),
-            header.source_ip[0],
-            header.source_ip[1],
-            header.source_ip[2],
-            header.source_ip[3],
-            header.dest_ip[0],
-            header.dest_ip[1],
-            header.dest_ip[2],
-            header.dest_ip[3],
-            header.protocol
-        );
+        if LOG_IPV4_PACKET_TRACE {
+            println!(
+                "[IPv4] Recv: {} bytes (src: {}.{}.{}.{}, dst: {}.{}.{}.{}, proto: {})",
+                packet.len(),
+                header.source_ip[0],
+                header.source_ip[1],
+                header.source_ip[2],
+                header.source_ip[3],
+                header.dest_ip[0],
+                header.dest_ip[1],
+                header.dest_ip[2],
+                header.dest_ip[3],
+                header.protocol
+            );
+        }
 
         // Update statistics
-        let mut stats = self.stats.write();
-        stats.packets_received += 1;
-        stats.bytes_received += total_length as u64;
+        {
+            let mut stats = self.stats.write();
+            stats.packets_received += 1;
+            stats.bytes_received += total_length as u64;
+        }
 
         // Route to protocol handler based on protocol field
-        let protocols = self.protocols.read();
-        if let Some(handler) = protocols.get(&header.protocol) {
+        let handler = self.protocols.read().get(&header.protocol).cloned();
+        if let Some(handler) = handler {
             let mut proto_context = LayerContext::new();
             proto_context.set("ip_src", &header.source_ip);
             proto_context.set("ip_dst", &header.dest_ip);
+            if let Some(interface) = context.and_then(|value| value.get("interface")) {
+                proto_context.set("interface", interface);
+            }
             handler.receive(payload, Some(&proto_context))
         } else {
             // No handler for this protocol - log and drop
@@ -852,6 +1117,178 @@ mod tests {
         assert_eq!(iface, "eth0");
         assert_eq!(src_ip, Ipv4Address::new(192, 168, 1, 100));
         assert_eq!(gw, Some(Ipv4Address::new(192, 168, 1, 1)));
+    }
+
+    #[test_case]
+    fn usb_ncm_regression_connected_subnet_precedes_default() {
+        let ip_layer = Ipv4Layer::new();
+        ip_layer.set_default_gateway(Ipv4Address::new(10, 0, 2, 254), "usbnet0");
+        ip_layer.add_address(
+            "usbnet0",
+            Ipv4AddressInfo {
+                address: Ipv4Address::new(10, 0, 2, 2),
+                netmask: Ipv4Address::new(255, 255, 255, 0),
+                broadcast: Some(Ipv4Address::new(10, 0, 2, 255)),
+                is_primary: true,
+            },
+        );
+
+        let (interface, source, gateway) = ip_layer
+            .select_source(Ipv4Address::new(10, 0, 2, 1))
+            .expect("connected destination should be routable");
+        assert_eq!(interface, "usbnet0");
+        assert_eq!(source, Ipv4Address::new(10, 0, 2, 2));
+        assert_eq!(gateway, None);
+    }
+
+    #[test_case]
+    fn usb_ncm_regression_gateway_update_replaces_old_route() {
+        let ip_layer = Ipv4Layer::new();
+        ip_layer.add_address(
+            "usbnet0",
+            Ipv4AddressInfo {
+                address: Ipv4Address::new(10, 0, 2, 2),
+                netmask: Ipv4Address::new(255, 255, 255, 0),
+                broadcast: Some(Ipv4Address::new(10, 0, 2, 255)),
+                is_primary: true,
+            },
+        );
+        ip_layer.set_default_gateway(Ipv4Address::new(10, 0, 2, 2), "usbnet0");
+        ip_layer.set_default_gateway(Ipv4Address::new(10, 0, 2, 1), "usbnet0");
+
+        let (_, _, gateway) = ip_layer
+            .select_source(Ipv4Address::new(203, 0, 113, 1))
+            .expect("default route should remain installed");
+        assert_eq!(gateway, Some(Ipv4Address::new(10, 0, 2, 1)));
+    }
+
+    #[test_case]
+    fn primary_address_reconfiguration_replaces_the_old_primary() {
+        let ip_layer = Ipv4Layer::new();
+        ip_layer.set_primary_address(
+            "eth0",
+            Ipv4AddressInfo {
+                address: Ipv4Address::new(192, 168, 1, 10),
+                netmask: Ipv4Address::new(255, 255, 255, 0),
+                broadcast: Some(Ipv4Address::new(192, 168, 1, 255)),
+                is_primary: true,
+            },
+        );
+        ip_layer.set_primary_address(
+            "eth0",
+            Ipv4AddressInfo {
+                address: Ipv4Address::new(192, 168, 1, 20),
+                netmask: Ipv4Address::new(255, 255, 255, 0),
+                broadcast: Some(Ipv4Address::new(192, 168, 1, 255)),
+                is_primary: true,
+            },
+        );
+
+        let addresses = ip_layer.get_addresses("eth0");
+        assert_eq!(addresses.len(), 1);
+        assert_eq!(
+            ip_layer.get_primary_ip("eth0"),
+            Some(Ipv4Address::new(192, 168, 1, 20))
+        );
+    }
+
+    #[test_case]
+    fn multiple_default_routes_prefer_the_lowest_metric() {
+        let ip_layer = Ipv4Layer::new();
+        for (interface, address) in [
+            ("eth0", Ipv4Address::new(192, 168, 1, 20)),
+            ("eth1", Ipv4Address::new(10, 20, 30, 40)),
+        ] {
+            ip_layer.set_primary_address(
+                interface,
+                Ipv4AddressInfo {
+                    address,
+                    netmask: Ipv4Address::new(255, 255, 255, 0),
+                    broadcast: None,
+                    is_primary: true,
+                },
+            );
+        }
+        ip_layer.set_default_gateway_for_interface(Ipv4Address::new(192, 168, 1, 1), "eth0", 200);
+        ip_layer.set_default_gateway_for_interface(Ipv4Address::new(10, 20, 30, 1), "eth1", 50);
+
+        let (interface, source, gateway) = ip_layer
+            .select_source(Ipv4Address::new(203, 0, 113, 1))
+            .expect("a default route should be selected");
+        assert_eq!(interface, "eth1");
+        assert_eq!(source, Ipv4Address::new(10, 20, 30, 40));
+        assert_eq!(gateway, Some(Ipv4Address::new(10, 20, 30, 1)));
+
+        ip_layer.clear_default_gateway_for_interface("eth1");
+        let (interface, _, _) = ip_layer
+            .select_source(Ipv4Address::new(203, 0, 113, 1))
+            .expect("the remaining default route should be selected");
+        assert_eq!(interface, "eth0");
+    }
+
+    #[test_case]
+    fn explicit_interface_uses_its_own_default_gateway() {
+        let ip_layer = Ipv4Layer::new();
+        ip_layer.set_default_gateway_for_interface(Ipv4Address::new(192, 168, 1, 1), "eth0", 200);
+        ip_layer.set_default_gateway_for_interface(Ipv4Address::new(10, 0, 0, 1), "eth1", 10);
+
+        assert_eq!(
+            ip_layer.next_hop_on_interface(Ipv4Address::new(203, 0, 113, 10), "eth0"),
+            Some(Some(Ipv4Address::new(192, 168, 1, 1)))
+        );
+    }
+
+    #[test_case]
+    fn connected_routes_prefer_the_longest_prefix() {
+        let ip_layer = Ipv4Layer::new();
+        for (interface, address, netmask) in [
+            (
+                "eth0",
+                Ipv4Address::new(10, 0, 0, 2),
+                Ipv4Address::new(255, 0, 0, 0),
+            ),
+            (
+                "eth1",
+                Ipv4Address::new(10, 20, 30, 2),
+                Ipv4Address::new(255, 255, 255, 0),
+            ),
+        ] {
+            ip_layer.set_primary_address(
+                interface,
+                Ipv4AddressInfo {
+                    address,
+                    netmask,
+                    broadcast: None,
+                    is_primary: true,
+                },
+            );
+        }
+
+        let (interface, address, gateway) = ip_layer
+            .select_source(Ipv4Address::new(10, 20, 30, 99))
+            .expect("a connected route should be selected");
+        assert_eq!(interface, "eth1");
+        assert_eq!(address, Ipv4Address::new(10, 20, 30, 2));
+        assert_eq!(gateway, None);
+    }
+
+    #[test_case]
+    fn configured_address_without_a_route_is_not_a_catch_all() {
+        let ip_layer = Ipv4Layer::new();
+        ip_layer.set_primary_address(
+            "eth0",
+            Ipv4AddressInfo {
+                address: Ipv4Address::new(192, 168, 1, 2),
+                netmask: Ipv4Address::new(255, 255, 255, 0),
+                broadcast: None,
+                is_primary: true,
+            },
+        );
+
+        assert_eq!(
+            ip_layer.select_source(Ipv4Address::new(203, 0, 113, 10)),
+            None
+        );
     }
 
     #[test_case]

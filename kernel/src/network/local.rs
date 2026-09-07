@@ -17,6 +17,7 @@
 //! 3. **Listening**: Server socket accepting connections
 //! 4. **Connected**: Client socket or accepted connection
 
+use crate::sync::IrqRwSpinLock;
 use alloc::{
     collections::VecDeque,
     format,
@@ -24,18 +25,22 @@ use alloc::{
     sync::{Arc, Weak},
     vec::Vec,
 };
-use core::any::Any;
-use spin::RwLock;
+use core::{
+    any::Any,
+    sync::atomic::{AtomicUsize, Ordering},
+};
+
+use crate::sched::scheduler::{current_task_id, get_task_by_id};
 
 use super::{
     LocalSocketAddress, NetworkManager, ShutdownHow, SocketAddress, SocketControl, SocketDomain,
     SocketError, SocketObject, SocketProtocol, SocketState, SocketType,
 };
 use crate::ipc::StreamIpcOps;
-use crate::object::KernelObject;
 use crate::object::capability::{
     ControlOps, ReadyInterest, ReadySet, SelectWaitOutcome, Selectable, StreamError, StreamOps,
 };
+use crate::object::{KernelObject, handle::HandleMetadata};
 use crate::sync::Waker;
 
 const LOCALSOCKET_LOG: bool = false;
@@ -48,26 +53,212 @@ macro_rules! localsocket_log {
     };
 }
 
-/// Maximum buffer size per socket (64 KB)
-const MAX_BUFFER_SIZE: usize = 65536;
+/// Maximum queued byte-stream data per socket (64 KiB).
+const MAX_STREAM_BUFFER_SIZE: usize = 64 * 1024;
+
+/// Maximum size of one handle-and-data record.
+///
+/// SWS permits a 1 MiB payload behind its 8-byte frame header. Keeping the
+/// complete frame in one record preserves the protocol frame boundary.
+pub const MAX_HANDLE_DATA_RECORD_SIZE: usize = 1024 * 1024 + 8;
+
+/// Maximum total handle-and-data payload queued per socket.
+const MAX_HANDLE_DATA_QUEUE_SIZE: usize = MAX_HANDLE_DATA_RECORD_SIZE;
 
 /// Maximum number of handles that can be queued for transfer
 /// This prevents unbounded memory growth from DoS attacks
-const MAX_HANDLE_QUEUE_SIZE: usize = 64;
+pub(crate) const MAX_HANDLE_QUEUE_SIZE: usize = 64;
 
-/// Shared buffer structure for socket data
+fn local_socket_registry_name(addr: &LocalSocketAddress) -> String {
+    if addr.is_abstract() {
+        let mut name = String::new();
+        name.push('\0');
+        name.push_str(addr.path());
+        name
+    } else {
+        addr.path().to_string()
+    }
+}
+
+fn local_socket_address_from_registry_name(name: &str) -> LocalSocketAddress {
+    if let Some(abstract_name) = name.strip_prefix('\0') {
+        LocalSocketAddress::from_abstract(abstract_name)
+            .unwrap_or_else(|_| LocalSocketAddress::unnamed())
+    } else {
+        LocalSocketAddress::from_path(name).unwrap_or_else(|_| LocalSocketAddress::unnamed())
+    }
+}
+
+enum SocketSegment {
+    Bytes(VecDeque<u8>),
+    Handle(KernelObject, HandleMetadata),
+    HandleData {
+        object: KernelObject,
+        metadata: HandleMetadata,
+        data: Vec<u8>,
+    },
+}
+
+struct SocketQueue {
+    segments: VecDeque<SocketSegment>,
+    stream_bytes: usize,
+    record_bytes: usize,
+    handles: usize,
+}
+
+impl SocketQueue {
+    fn new() -> Self {
+        Self {
+            segments: VecDeque::new(),
+            stream_bytes: 0,
+            record_bytes: 0,
+            handles: 0,
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.segments.is_empty()
+    }
+
+    fn push_bytes(&mut self, data: &[u8]) -> Result<(), StreamError> {
+        if self.stream_bytes.saturating_add(data.len()) > MAX_STREAM_BUFFER_SIZE {
+            return Err(StreamError::WouldBlock);
+        }
+
+        if let Some(SocketSegment::Bytes(bytes)) = self.segments.back_mut() {
+            bytes.extend(data.iter().copied());
+        } else {
+            self.segments
+                .push_back(SocketSegment::Bytes(data.iter().copied().collect()));
+        }
+        self.stream_bytes += data.len();
+        Ok(())
+    }
+
+    fn read_bytes(&mut self, output: &mut [u8]) -> Option<usize> {
+        let SocketSegment::Bytes(bytes) = self.segments.front_mut()? else {
+            return None;
+        };
+
+        let bytes_to_read = output.len().min(bytes.len());
+        for slot in output.iter_mut().take(bytes_to_read) {
+            if let Some(byte) = bytes.pop_front() {
+                *slot = byte;
+            }
+        }
+        self.stream_bytes -= bytes_to_read;
+
+        if bytes.is_empty() {
+            self.segments.pop_front();
+        }
+        Some(bytes_to_read)
+    }
+
+    fn push_handle(
+        &mut self,
+        object: KernelObject,
+        metadata: HandleMetadata,
+    ) -> Result<(), crate::ipc::IpcError> {
+        if self.handles >= MAX_HANDLE_QUEUE_SIZE {
+            return Err(crate::ipc::IpcError::ChannelFull);
+        }
+
+        self.segments
+            .push_back(SocketSegment::Handle(object, metadata));
+        self.handles += 1;
+        Ok(())
+    }
+
+    fn push_handles_data(
+        &mut self,
+        mut handles: Vec<(KernelObject, HandleMetadata)>,
+        data: &[u8],
+    ) -> Result<(), crate::ipc::IpcError> {
+        use crate::ipc::IpcError;
+
+        if handles.is_empty() {
+            return Err(IpcError::InvalidState);
+        }
+        if data.len() > MAX_HANDLE_DATA_RECORD_SIZE {
+            return Err(IpcError::BufferTooSmall {
+                required: data.len(),
+            });
+        }
+        let handle_count = handles.len();
+        if self.handles.saturating_add(handle_count) > MAX_HANDLE_QUEUE_SIZE
+            || self.record_bytes.saturating_add(data.len()) > MAX_HANDLE_DATA_QUEUE_SIZE
+        {
+            return Err(IpcError::ChannelFull);
+        }
+
+        let (last_object, last_metadata) = handles.pop().ok_or(IpcError::InvalidState)?;
+        for (object, metadata) in handles {
+            self.segments
+                .push_back(SocketSegment::Handle(object, metadata));
+        }
+        self.segments.push_back(SocketSegment::HandleData {
+            object: last_object,
+            metadata: last_metadata,
+            data: data.to_vec(),
+        });
+        self.record_bytes += data.len();
+        self.handles += handle_count;
+        Ok(())
+    }
+
+    fn pop_handle(&mut self) -> Option<(KernelObject, HandleMetadata)> {
+        if !matches!(self.segments.front(), Some(SocketSegment::Handle(_, _))) {
+            return None;
+        }
+
+        let Some(SocketSegment::Handle(object, metadata)) = self.segments.pop_front() else {
+            return None;
+        };
+        self.handles -= 1;
+        Some((object, metadata))
+    }
+
+    fn pop_handle_data(
+        &mut self,
+        capacity: usize,
+    ) -> Result<(KernelObject, HandleMetadata, Vec<u8>), crate::ipc::IpcError> {
+        use crate::ipc::IpcError;
+
+        let required = match self.segments.front() {
+            Some(SocketSegment::HandleData { data, .. }) => data.len(),
+            _ => return Err(IpcError::ChannelEmpty),
+        };
+        if required > capacity {
+            return Err(IpcError::BufferTooSmall { required });
+        }
+
+        let Some(SocketSegment::HandleData {
+            object,
+            metadata,
+            data,
+        }) = self.segments.pop_front()
+        else {
+            return Err(IpcError::ChannelEmpty);
+        };
+        self.record_bytes -= data.len();
+        self.handles -= 1;
+        Ok((object, metadata, data))
+    }
+}
+
+/// Shared ordered receive queue for socket data and transferred handles.
 struct SocketBuffer {
-    /// Data buffer
-    data: RwLock<VecDeque<u8>>,
+    /// Ordered byte, handle, and handle-with-data segments.
+    queue: IrqRwSpinLock<SocketQueue>,
     /// Flag indicating this buffer has been closed (peer shutdown)
-    closed: RwLock<bool>,
+    closed: IrqRwSpinLock<bool>,
 }
 
 impl SocketBuffer {
     fn new() -> Arc<Self> {
         Arc::new(Self {
-            data: RwLock::new(VecDeque::with_capacity(MAX_BUFFER_SIZE)),
-            closed: RwLock::new(false),
+            queue: IrqRwSpinLock::new(SocketQueue::new()),
+            closed: IrqRwSpinLock::new(false),
         })
     }
 }
@@ -85,36 +276,45 @@ pub struct LocalSocket {
     ///
     /// This is used to establish peer relationships in methods that only
     /// have `&self` (e.g., connect()), where we still need an `Arc<Self>`.
-    self_weak: RwLock<Weak<LocalSocket>>,
+    self_weak: IrqRwSpinLock<Weak<LocalSocket>>,
 
     /// Socket protocol
     protocol: SocketProtocol,
 
     /// Current socket state
-    state: RwLock<SocketState>,
+    state: IrqRwSpinLock<SocketState>,
 
     /// Local address (if bound)
-    local_addr: RwLock<Option<String>>,
+    local_addr: IrqRwSpinLock<Option<String>>,
 
     /// Peer address (if connected)
-    peer_addr: RwLock<Option<String>>,
+    peer_addr: IrqRwSpinLock<Option<String>>,
+
+    /// Global thread-group leader ID whose credentials own this endpoint.
+    ///
+    /// For connection-oriented sockets this is captured by `listen()` or
+    /// `connect()`, matching the point where Linux snapshots peer credentials.
+    owner_process_id: AtomicUsize,
+
+    /// Global thread-group leader ID at the other end of the connection.
+    peer_process_id: AtomicUsize,
 
     /// Read buffer: data received from peer (shared with peer for writing)
-    read_buffer: RwLock<Arc<SocketBuffer>>,
+    read_buffer: IrqRwSpinLock<Arc<SocketBuffer>>,
 
     /// Write buffer reference: shared with peer socket for writing
     /// When we write, we push to peer's read_buffer
-    peer_read_buffer: RwLock<Option<Arc<SocketBuffer>>>,
+    peer_read_buffer: IrqRwSpinLock<Option<Arc<SocketBuffer>>>,
 
     /// Peer socket reference (for waking read waiters)
-    peer_socket: RwLock<Option<Weak<LocalSocket>>>,
+    peer_socket: IrqRwSpinLock<Option<Weak<LocalSocket>>>,
 
     /// Backlog queue for listening sockets
     /// Contains pending connections waiting to be accepted
-    backlog: RwLock<Vec<Arc<LocalSocket>>>,
+    backlog: IrqRwSpinLock<Vec<Arc<LocalSocket>>>,
 
     /// Maximum backlog size (set by listen())
-    max_backlog: RwLock<usize>,
+    max_backlog: IrqRwSpinLock<usize>,
 
     /// Waker for blocking accept() operations
     accept_waker: Waker,
@@ -125,12 +325,11 @@ pub struct LocalSocket {
     /// Waker for blocking recv_handle() operations
     handle_waker: Waker,
 
-    /// Queue of handles (KernelObjects) received from peer
-    /// This allows passing file descriptors / kernel objects between tasks
-    handle_queue: RwLock<VecDeque<KernelObject>>,
+    /// Waker for writers blocked on peer receive-buffer capacity.
+    write_waker: Waker,
 
     /// Nonblocking I/O flag
-    nonblocking: RwLock<bool>,
+    nonblocking: IrqRwSpinLock<bool>,
 }
 
 impl LocalSocket {
@@ -138,11 +337,22 @@ impl LocalSocket {
         *this.self_weak.write() = Arc::downgrade(this);
     }
 
+    fn upgrade_peer(&self) -> Option<Arc<Self>> {
+        let peer = self.peer_socket.read();
+        peer.as_ref().and_then(Weak::upgrade)
+    }
+
+    fn wake_peer_writer(&self) {
+        if let Some(peer) = self.upgrade_peer() {
+            peer.write_waker.wake_all();
+        }
+    }
+
     /// Safely downcast a SocketObject to LocalSocket using Any trait
     ///
     /// Returns None if the socket is not a LocalSocket.
     /// This is completely safe and does not use any unsafe code.
-    pub fn from_socket_object(socket: &Arc<dyn SocketObject>) -> Option<&Self> {
+    pub fn from_socket_object(socket: &dyn SocketObject) -> Option<&Self> {
         // Use SocketObject's as_any() to get &dyn Any
         socket.as_any().downcast_ref::<LocalSocket>()
     }
@@ -161,27 +371,63 @@ impl LocalSocket {
         Self {
             socket_type,
             protocol,
-            state: RwLock::new(SocketState::Unconnected),
-            local_addr: RwLock::new(None),
-            peer_addr: RwLock::new(None),
-            read_buffer: RwLock::new(SocketBuffer::new()),
-            peer_read_buffer: RwLock::new(None),
-            peer_socket: RwLock::new(None),
-            backlog: RwLock::new(Vec::new()),
-            max_backlog: RwLock::new(0),
+            state: IrqRwSpinLock::new(SocketState::Unconnected),
+            local_addr: IrqRwSpinLock::new(None),
+            peer_addr: IrqRwSpinLock::new(None),
+            owner_process_id: AtomicUsize::new(0),
+            peer_process_id: AtomicUsize::new(0),
+            read_buffer: IrqRwSpinLock::new(SocketBuffer::new()),
+            peer_read_buffer: IrqRwSpinLock::new(None),
+            peer_socket: IrqRwSpinLock::new(None),
+            backlog: IrqRwSpinLock::new(Vec::new()),
+            max_backlog: IrqRwSpinLock::new(0),
             accept_waker: Waker::new_interruptible("socket_accept"),
             read_waker: Waker::new_interruptible("socket_read"),
             handle_waker: Waker::new_interruptible("socket_handle"),
-            handle_queue: RwLock::new(VecDeque::new()),
-            self_weak: RwLock::new(Weak::new()),
-            nonblocking: RwLock::new(false),
+            write_waker: Waker::new_interruptible("socket_write"),
+            self_weak: IrqRwSpinLock::new(Weak::new()),
+            nonblocking: IrqRwSpinLock::new(false),
         }
+    }
+
+    /// Return the global thread-group leader ID captured for the connected peer.
+    ///
+    /// # Returns
+    ///
+    /// The peer process ID, or `None` for a socket that has no credential
+    /// snapshot yet.
+    pub fn peer_process_id(&self) -> Option<usize> {
+        let process_id = self.peer_process_id.load(Ordering::Acquire);
+        (process_id != 0).then_some(process_id)
+    }
+
+    fn current_process_id() -> Option<usize> {
+        let cpu_id = crate::arch::get_cpu().get_cpuid();
+        let task_id = current_task_id(cpu_id)?;
+        Some(
+            get_task_by_id(task_id)
+                .map(|task| task.get_thread_group_id())
+                .unwrap_or(task_id),
+        )
     }
 
     /// Send a KernelObject handle through this socket
     ///
     /// This is LocalSocket-only (SCM_RIGHTS equivalent) and uses dup() semantics.
-    pub fn send_handle(&self, object: KernelObject) -> Result<(), crate::ipc::IpcError> {
+    ///
+    /// # Arguments
+    ///
+    /// * `object` - Duplicated kernel object to transfer.
+    /// * `metadata` - Exact handle-scoped metadata to preserve for the receiver.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` when queued, otherwise an IPC error.
+    pub fn send_handle(
+        &self,
+        object: KernelObject,
+        metadata: HandleMetadata,
+    ) -> Result<(), crate::ipc::IpcError> {
         use crate::ipc::IpcError;
 
         // Verify socket is connected
@@ -189,136 +435,131 @@ impl LocalSocket {
             return Err(IpcError::InvalidState);
         }
 
-        // Get peer socket reference
-        let peer_weak = self.peer_socket.read();
-        let peer_weak_ref = peer_weak.as_ref().ok_or(IpcError::PeerClosed)?;
-        let peer = peer_weak_ref.upgrade().ok_or(IpcError::PeerClosed)?;
+        let peer = self.upgrade_peer().ok_or(IpcError::PeerClosed)?;
 
-        // Check if peer's handle queue is full to prevent DoS attacks
-        let mut peer_queue = peer.handle_queue.write();
-        if peer_queue.len() >= MAX_HANDLE_QUEUE_SIZE {
-            return Err(IpcError::ChannelFull);
+        let peer_buffer = peer.read_buffer.read();
+        if *peer_buffer.closed.read() {
+            return Err(IpcError::PeerClosed);
         }
-
-        // Add handle to peer's receive queue
-        peer_queue.push_back(object);
+        let mut peer_queue = peer_buffer.queue.write();
+        let became_readable = peer_queue.is_empty();
+        peer_queue.push_handle(object, metadata)?;
         drop(peer_queue);
+        drop(peer_buffer);
 
-        // Wake one task potentially blocked on recv_handle
-        peer.handle_waker.wake_one();
+        // Readiness is level-triggered by the queue state. Wake only on the
+        // empty-to-nonempty edge so stale Waker credits cannot accumulate.
+        // Read waiters are non-exclusive: wake all of them so a waiter that
+        // loses userspace's read arbitration cannot strand the actual reader.
+        if became_readable {
+            peer.handle_waker.wake_one();
+            peer.read_waker.wake_all();
+        }
 
         Ok(())
     }
 
-    /// Send a handle and data together atomically for Wayland protocol
+    /// Send one ordered handle-and-data record.
     ///
-    /// This method ensures that both the handle and data are available before
-    /// waking the peer, preventing race conditions where recvmsg might get
-    /// the handle but not the data (or vice versa).
+    /// The record occupies one segment in the same receive queue as ordinary
+    /// byte writes and handle-only transfers. This preserves causal ordering
+    /// across all three operation types as well as the record boundary.
     ///
-    /// This is needed for Wayland protocol messages with file descriptors,
-    /// where the client expects both the FD and message data in a single recvmsg call.
+    /// # Arguments
+    ///
+    /// * `object` - Duplicated kernel object transferred with the record
+    /// * `metadata` - Exact handle-scoped metadata for the receiver
+    /// * `data` - Complete record payload
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` when the complete record is queued. Oversized records and full
+    /// queues return an IPC error without queueing a handle or any payload bytes.
     pub fn send_handle_and_data(
         &self,
         object: KernelObject,
+        metadata: HandleMetadata,
+        data: &[u8],
+    ) -> Result<(), crate::ipc::IpcError> {
+        let handles = alloc::vec![(object, metadata)];
+        self.send_handles_and_data(handles, data)
+    }
+
+    /// Send multiple ordered handles and one data record atomically.
+    ///
+    /// Earlier handles are queued as handle-only segments and the final handle
+    /// carries the data record. All capacity checks complete before any segment
+    /// is published, so receivers cannot observe a partial `SCM_RIGHTS` batch.
+    ///
+    /// # Arguments
+    ///
+    /// * `handles` - Duplicated kernel objects and their exact handle metadata,
+    ///   in ancillary-data order.
+    /// * `data` - Complete byte payload from the same send operation.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` when the complete batch is queued, or an IPC error without
+    /// queueing a partial batch.
+    pub(crate) fn send_handles_and_data(
+        &self,
+        handles: Vec<(KernelObject, HandleMetadata)>,
         data: &[u8],
     ) -> Result<(), crate::ipc::IpcError> {
         use crate::ipc::IpcError;
 
         localsocket_log!(
-            "[LocalSocket] send_handle_and_data: self={:p}, data_len={}",
+            "[LocalSocket] send_handles_and_data: self={:p}, handle_count={}, data_len={}",
             self as *const _,
+            handles.len(),
             data.len()
         );
 
         // Verify socket is connected
         if *self.state.read() != SocketState::Connected {
-            localsocket_log!("[LocalSocket] send_handle_and_data: not connected");
+            localsocket_log!("[LocalSocket] send_handles_and_data: not connected");
             return Err(IpcError::InvalidState);
         }
 
-        // Get peer socket reference
-        let peer_weak = self.peer_socket.read();
-        let peer_weak_ref = peer_weak.as_ref().ok_or(IpcError::PeerClosed)?;
-        let peer = peer_weak_ref.upgrade().ok_or(IpcError::PeerClosed)?;
+        let peer = self.upgrade_peer().ok_or(IpcError::PeerClosed)?;
 
-        localsocket_log!(
-            "[LocalSocket] send_handle_and_data: peer={:p}",
-            peer.as_ref() as *const _
-        );
-
-        // Check if peer's handle queue is full to prevent DoS attacks
-        let mut peer_handle_queue = peer.handle_queue.write();
-        if peer_handle_queue.len() >= MAX_HANDLE_QUEUE_SIZE {
-            localsocket_log!("[LocalSocket] send_handle_and_data: handle queue full");
-            return Err(IpcError::ChannelFull);
+        let peer_buffer = peer.read_buffer.read();
+        if *peer_buffer.closed.read() {
+            return Err(IpcError::PeerClosed);
         }
-
-        // Get peer's data buffer through peer_read_buffer
-        let peer_buffer_option = peer.peer_read_buffer.read();
-        let peer_sock_buffer = peer_buffer_option.as_ref().ok_or(IpcError::PeerClosed)?;
-
-        // Check if peer's data buffer has space
-        let mut peer_buffer = peer_sock_buffer.data.write();
-        if peer_buffer.len() + data.len() > MAX_BUFFER_SIZE {
-            localsocket_log!(
-                "[LocalSocket] send_handle_and_data: buffer full, current_len={}, adding_len={}",
-                peer_buffer.len(),
-                data.len()
-            );
-            drop(peer_buffer);
-            drop(peer_buffer_option);
-            drop(peer_handle_queue);
-            return Err(IpcError::ChannelFull);
-        }
-
-        localsocket_log!(
-            "[LocalSocket] send_handle_and_data: before send - handle_queue_len={}, buffer_len={}",
-            peer_handle_queue.len(),
-            peer_buffer.len()
-        );
-
-        // Add handle to peer's receive queue
-        peer_handle_queue.push_back(object);
-        let queue_len = peer_handle_queue.len();
-        drop(peer_handle_queue);
-
-        // Add data to peer's buffer
-        peer_buffer.extend(data.iter().copied());
-        let buffer_len = peer_buffer.len();
+        let mut peer_queue = peer_buffer.queue.write();
+        let became_readable = peer_queue.is_empty();
+        peer_queue.push_handles_data(handles, data)?;
+        drop(peer_queue);
         drop(peer_buffer);
-        drop(peer_buffer_option);
 
-        localsocket_log!(
-            "[LocalSocket] send_handle_and_data: after send - handle_queue_len={}, buffer_len={}",
-            queue_len,
-            buffer_len
-        );
-
-        // Wake the peer after BOTH handle and data are available
-        peer.handle_waker.wake_one();
-        peer.read_waker.wake_one();
+        // Wake after the complete record becomes the first readable item.
+        if became_readable {
+            peer.handle_waker.wake_one();
+            peer.read_waker.wake_all();
+        }
 
         Ok(())
     }
 
-    /// Receive a handle and data together atomically for Wayland protocol
+    /// Receive one ordered handle-and-data record.
     ///
     /// Returns both a handle and data in a single atomic operation.
     /// This is the counterpart to send_handle_and_data().
     ///
     /// # Arguments
     ///
-    /// * `max_data_len` - Maximum amount of data to read
+    /// * `max_data_len` - Capacity of the destination buffer
     ///
     /// # Returns
     ///
-    /// * `(KernelObject, Vec<u8>)` - Handle and data on success
-    /// * `IpcError` - Error if no handle/data available or other error
+    /// * `(KernelObject, HandleMetadata, Vec<u8>)` - Handle, metadata, and data on success
+    /// * `IpcError::ChannelEmpty` - The queue is empty or another segment type is first
+    /// * `IpcError::BufferTooSmall` - The first record does not fit and remains queued
     pub fn recv_handle_and_data(
         &self,
         max_data_len: usize,
-    ) -> Result<(KernelObject, Vec<u8>), crate::ipc::IpcError> {
+    ) -> Result<(KernelObject, HandleMetadata, Vec<u8>), crate::ipc::IpcError> {
         use crate::ipc::IpcError;
 
         localsocket_log!(
@@ -333,52 +574,18 @@ impl LocalSocket {
             return Err(IpcError::InvalidState);
         }
 
-        // Try to get a handle from the queue
-        let mut queue = self.handle_queue.write();
-        localsocket_log!(
-            "[LocalSocket] recv_handle_and_data: handle_queue_len={}",
-            queue.len()
-        );
-
-        let handle = match queue.pop_front() {
-            Some(h) => h,
-            None => {
-                localsocket_log!(
-                    "[LocalSocket] recv_handle_and_data: handle queue empty - returning ChannelEmpty"
-                );
-                return Err(IpcError::ChannelEmpty);
-            }
-        };
-        drop(queue);
-
-        // Read data from read buffer
         let read_buffer = self.read_buffer.read();
-        let mut buffer_data = read_buffer.data.write();
-        localsocket_log!(
-            "[LocalSocket] recv_handle_and_data: buffer_len={}, max_data_len={}",
-            buffer_data.len(),
-            max_data_len
-        );
-
-        // Read up to max_data_len bytes
-        let actual_len = buffer_data.len().min(max_data_len);
-        let mut data = Vec::with_capacity(actual_len);
-        for _ in 0..actual_len {
-            data.push(buffer_data.pop_front().unwrap());
-        }
-        drop(buffer_data);
+        let result = read_buffer.queue.write().pop_handle_data(max_data_len);
         drop(read_buffer);
-
-        localsocket_log!(
-            "[LocalSocket] recv_handle_and_data: returning handle and {} bytes of data",
-            data.len()
-        );
-
-        Ok((handle, data))
+        result
     }
 
-    /// Receive a KernelObject handle from this socket (non-blocking)
-    pub fn recv_handle(&self) -> Result<KernelObject, crate::ipc::IpcError> {
+    /// Receive a KernelObject handle and its metadata from this socket (non-blocking).
+    ///
+    /// # Returns
+    ///
+    /// The transferred object and exact handle metadata, or an IPC error.
+    pub fn recv_handle(&self) -> Result<(KernelObject, HandleMetadata), crate::ipc::IpcError> {
         use crate::ipc::IpcError;
 
         // Verify socket is connected
@@ -386,9 +593,14 @@ impl LocalSocket {
             return Err(IpcError::InvalidState);
         }
 
-        // Try to get a handle from the queue
-        let mut queue = self.handle_queue.write();
-        queue.pop_front().ok_or(IpcError::ChannelEmpty)
+        let read_buffer = self.read_buffer.read();
+        let result = read_buffer
+            .queue
+            .write()
+            .pop_handle()
+            .ok_or(IpcError::ChannelEmpty);
+        drop(read_buffer);
+        result
     }
 
     /// Accept a connection with blocking behavior
@@ -424,6 +636,10 @@ impl LocalSocket {
                 }
             } // Release backlog lock
 
+            if *self.state.read() != SocketState::Listening {
+                return Err(SocketError::NotListening);
+            }
+
             // No connection available, block the task
             self.accept_waker.wait(task_id, trapframe);
 
@@ -445,6 +661,7 @@ impl LocalSocket {
     ///
     /// A tuple of (local_socket, peer_socket) that are connected
     pub fn create_connected_pair(local_addr: String, peer_addr: String) -> (Arc<Self>, Arc<Self>) {
+        let owner_process_id = Self::current_process_id().unwrap_or(0);
         // Create shared buffers for bidirectional communication
         let local_read_buffer = SocketBuffer::new();
         let peer_read_buffer = SocketBuffer::new();
@@ -454,20 +671,22 @@ impl LocalSocket {
         let local_socket = Arc::new(Self {
             socket_type: SocketType::Stream,
             protocol: SocketProtocol::Default,
-            state: RwLock::new(SocketState::Connected),
-            local_addr: RwLock::new(Some(local_addr.clone())),
-            peer_addr: RwLock::new(Some(peer_addr.clone())),
-            read_buffer: RwLock::new(local_read_buffer.clone()),
-            peer_read_buffer: RwLock::new(Some(peer_read_buffer.clone())),
-            peer_socket: RwLock::new(None),
-            backlog: RwLock::new(Vec::new()),
-            max_backlog: RwLock::new(0),
+            state: IrqRwSpinLock::new(SocketState::Connected),
+            local_addr: IrqRwSpinLock::new(Some(local_addr.clone())),
+            peer_addr: IrqRwSpinLock::new(Some(peer_addr.clone())),
+            owner_process_id: AtomicUsize::new(owner_process_id),
+            peer_process_id: AtomicUsize::new(owner_process_id),
+            read_buffer: IrqRwSpinLock::new(local_read_buffer.clone()),
+            peer_read_buffer: IrqRwSpinLock::new(Some(peer_read_buffer.clone())),
+            peer_socket: IrqRwSpinLock::new(None),
+            backlog: IrqRwSpinLock::new(Vec::new()),
+            max_backlog: IrqRwSpinLock::new(0),
             accept_waker: Waker::new_interruptible("socket_accept"),
             read_waker: Waker::new_interruptible("socket_read"),
             handle_waker: Waker::new_interruptible("socket_handle"),
-            handle_queue: RwLock::new(VecDeque::new()),
-            self_weak: RwLock::new(Weak::new()),
-            nonblocking: RwLock::new(false),
+            write_waker: Waker::new_interruptible("socket_write"),
+            self_weak: IrqRwSpinLock::new(Weak::new()),
+            nonblocking: IrqRwSpinLock::new(false),
         });
 
         // Create peer socket (client side)
@@ -475,20 +694,22 @@ impl LocalSocket {
         let peer_socket = Arc::new(Self {
             socket_type: SocketType::Stream,
             protocol: SocketProtocol::Default,
-            state: RwLock::new(SocketState::Connected),
-            local_addr: RwLock::new(Some(peer_addr)),
-            peer_addr: RwLock::new(Some(local_addr)),
-            read_buffer: RwLock::new(peer_read_buffer.clone()),
-            peer_read_buffer: RwLock::new(Some(local_read_buffer.clone())),
-            peer_socket: RwLock::new(None),
-            backlog: RwLock::new(Vec::new()),
-            max_backlog: RwLock::new(0),
+            state: IrqRwSpinLock::new(SocketState::Connected),
+            local_addr: IrqRwSpinLock::new(Some(peer_addr)),
+            peer_addr: IrqRwSpinLock::new(Some(local_addr)),
+            owner_process_id: AtomicUsize::new(owner_process_id),
+            peer_process_id: AtomicUsize::new(owner_process_id),
+            read_buffer: IrqRwSpinLock::new(peer_read_buffer.clone()),
+            peer_read_buffer: IrqRwSpinLock::new(Some(local_read_buffer.clone())),
+            peer_socket: IrqRwSpinLock::new(None),
+            backlog: IrqRwSpinLock::new(Vec::new()),
+            max_backlog: IrqRwSpinLock::new(0),
             accept_waker: Waker::new_interruptible("socket_accept"),
             read_waker: Waker::new_interruptible("socket_read"),
             handle_waker: Waker::new_interruptible("socket_handle"),
-            handle_queue: RwLock::new(VecDeque::new()),
-            self_weak: RwLock::new(Weak::new()),
-            nonblocking: RwLock::new(false),
+            write_waker: Waker::new_interruptible("socket_write"),
+            self_weak: IrqRwSpinLock::new(Weak::new()),
+            nonblocking: IrqRwSpinLock::new(false),
         });
 
         Self::init_self_weak(&local_socket);
@@ -503,13 +724,14 @@ impl LocalSocket {
 
     /// Blocking handle receive operation
     ///
-    /// This method blocks the calling task until a handle is available in the
-    /// handle queue, or the peer is closed.
+    /// This method blocks while the ordered receive queue is empty. It returns
+    /// `ChannelEmpty` when a byte or handle-and-data segment is first so the
+    /// caller cannot skip that segment.
     pub fn recv_handle_blocking(
         &self,
         task_id: usize,
         trapframe: &mut crate::arch::Trapframe,
-    ) -> Result<KernelObject, crate::ipc::IpcError> {
+    ) -> Result<(KernelObject, HandleMetadata), crate::ipc::IpcError> {
         use crate::ipc::IpcError;
 
         loop {
@@ -521,11 +743,15 @@ impl LocalSocket {
                 }
             }
 
-            // Fast path: handle already queued
+            // Fast path: a handle-only segment is first in receive order.
             {
-                let mut queue = self.handle_queue.write();
-                if let Some(obj) = queue.pop_front() {
+                let read_buffer = self.read_buffer.read();
+                let mut queue = read_buffer.queue.write();
+                if let Some(obj) = queue.pop_handle() {
                     return Ok(obj);
+                }
+                if !queue.is_empty() {
+                    return Err(IpcError::ChannelEmpty);
                 }
             }
 
@@ -564,131 +790,139 @@ impl StreamOps for LocalSocket {
     fn read(&self, buffer: &mut [u8]) -> Result<usize, StreamError> {
         use crate::task::mytask;
 
-        // Debug: count read attempts
-        static READ_ATTEMPT_COUNTER: core::sync::atomic::AtomicUsize =
-            core::sync::atomic::AtomicUsize::new(0);
-        let attempt = READ_ATTEMPT_COUNTER.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        if buffer.is_empty() {
+            return Ok(0);
+        }
 
         loop {
-            {
+            let (bytes_to_read, blocked_by_ordered_segment, freed_full_buffer) = {
                 let read_buf_arc = self.read_buffer.read();
-                let mut read_data = read_buf_arc.data.write();
-                let is_nonblocking = *self.nonblocking.read();
-                let has_data = !read_data.is_empty();
+                let mut queue = read_buf_arc.queue.write();
+                let was_full = queue.stream_bytes == MAX_STREAM_BUFFER_SIZE;
+                let bytes_to_read = queue.read_bytes(buffer);
+                let blocked_by_ordered_segment = bytes_to_read.is_none() && !queue.is_empty();
+                let freed_full_buffer =
+                    was_full && matches!(bytes_to_read, Some(bytes) if bytes > 0);
+                (bytes_to_read, blocked_by_ordered_segment, freed_full_buffer)
+            };
 
-                // // Log every 100 attempts or first 5 attempts
-                // if attempt < 5 || attempt % 100 == 0 {
-                //     crate::println!(
-                //         "[LocalSocket::read] self={:p} attempt={} nonblocking={} has_data={} data_len={}",
-                //         self as *const _,
-                //         attempt,
-                //         is_nonblocking,
-                //         has_data,
-                //         read_data.len()
-                //     );
-                // }
-
-                if !read_data.is_empty() {
-                    let bytes_to_read = buffer.len().min(read_data.len());
-                    for i in 0..bytes_to_read {
-                        buffer[i] = read_data.pop_front().unwrap();
-                    }
-
-                    // if attempt < 5 || attempt % 100 == 0 {
-                    //     crate::println!(
-                    //         "[LocalSocket::read] attempt={} returning {} bytes",
-                    //         attempt,
-                    //         bytes_to_read
-                    //     );
-                    // }
-                    return Ok(bytes_to_read);
+            if let Some(bytes_to_read) = bytes_to_read {
+                // Writers wait only while the byte queue is full. Wake them on
+                // the full-to-not-full transition, not after every read, so the
+                // Waker cannot collect stale readiness credits.
+                if freed_full_buffer {
+                    self.wake_peer_writer();
                 }
-            } // Release locks before checking nonblocking/EOF
+                return Ok(bytes_to_read);
+            }
 
-            // Check nonblocking mode before blocking
-            if *self.nonblocking.read() {
-                // // Nonblocking mode: return WouldBlock error immediately
-                // if attempt < 5 || attempt % 100 == 0 {
-                //     crate::println!(
-                //         "[LocalSocket::read] attempt={} returning WouldBlock",
-                //         attempt
-                //     );
-                // }
+            // A different ordered segment is first. Let the protocol
+            // dispatcher select recv_handle/recv_handle_and_data instead.
+            if blocked_by_ordered_segment {
                 return Err(StreamError::WouldBlock);
             }
 
             {
                 let read_buf_arc = self.read_buffer.read();
 
-                // Check if socket is closed (peer shutdown)
-                // Return 0 to indicate EOF (not an error)
+                // EOF is a completed read condition, including on a
+                // non-blocking socket.
                 let my_state = *self.state.read();
                 if my_state == SocketState::Closed {
                     return Ok(0);
                 }
 
-                // Check if peer is closed (they called shutdown)
-                if let Some(peer_weak) = self.peer_socket.read().as_ref() {
-                    if let Some(peer) = peer_weak.upgrade() {
-                        let peer_state = *peer.state.read();
-                        if peer_state == SocketState::Closed {
-                            return Ok(0); // Peer closed, return EOF
-                        }
-                    } else {
-                        return Ok(0); // Peer dropped, treat as EOF
+                if my_state == SocketState::Connected {
+                    let peer_closed = match self.peer_socket.read().as_ref() {
+                        Some(peer_weak) => match peer_weak.upgrade() {
+                            Some(peer) => *peer.state.read() == SocketState::Closed,
+                            None => true,
+                        },
+                        None => true,
+                    };
+                    if peer_closed {
+                        return Ok(0);
                     }
                 }
 
-                // Check if this read buffer has been closed by peer's shutdown()
                 if *read_buf_arc.closed.read() {
                     return Ok(0);
                 }
+            }
 
-                // Register this task as waiting to read
-                if let Some(task) = mytask() {
-                    drop(read_buf_arc);
+            if *self.nonblocking.read() {
+                return Err(StreamError::WouldBlock);
+            }
 
-                    // Block the task
-                    self.read_waker.wait(task.get_id(), task.get_trapframe());
-                } else {
-                    return Err(StreamError::WouldBlock);
-                }
-            } // Release lock
-            // When woken, loop back to check for data or shutdown
+            if let Some(task) = mytask() {
+                self.read_waker.wait(task.get_id(), task.get_trapframe());
+            } else {
+                return Err(StreamError::WouldBlock);
+            }
         }
     }
 
     fn write(&self, data: &[u8]) -> Result<usize, StreamError> {
-        let peer_buffer = self.peer_read_buffer.read();
-        match peer_buffer.as_ref() {
-            Some(peer_sock_buffer) => {
-                let mut peer_data = peer_sock_buffer.data.write();
+        use crate::task::mytask;
 
-                // Check if buffer has space
-                if peer_data.len() + data.len() > MAX_BUFFER_SIZE {
-                    return Err(StreamError::WouldBlock);
-                }
+        if data.is_empty() {
+            return Ok(0);
+        }
 
-                // Write data to peer's read buffer
-                peer_data.extend(data.iter().copied());
-                let bytes_written = data.len();
-
-                drop(peer_data); // Release data lock
-
-                // Wake tasks waiting on read/select/poll.
-                if let Some(peer_weak) = self.peer_socket.read().as_ref() {
-                    if let Some(peer) = peer_weak.upgrade() {
-                        peer.read_waker.wake_one();
-                    }
-                }
-
-                drop(peer_buffer); // Release peer_buffer lock
-
-                Ok(bytes_written)
+        loop {
+            if *self.state.read() == SocketState::Closed {
+                return Err(StreamError::Closed);
             }
-            None => {
-                // crate::println!("[LocalSocket] write: peer buffer is None (closed)");
-                Err(StreamError::Closed)
+
+            let peer = self.upgrade_peer().ok_or(StreamError::Closed)?;
+            let peer_buffer = self
+                .peer_read_buffer
+                .read()
+                .as_ref()
+                .cloned()
+                .ok_or(StreamError::Closed)?;
+            if *peer_buffer.closed.read() {
+                return Err(StreamError::Closed);
+            }
+
+            let (bytes_written, became_readable) = {
+                let mut peer_queue = peer_buffer.queue.write();
+                let available = MAX_STREAM_BUFFER_SIZE.saturating_sub(peer_queue.stream_bytes);
+                if available == 0 {
+                    (0, false)
+                } else {
+                    let bytes_written = available.min(data.len());
+                    let became_readable = peer_queue.is_empty();
+                    peer_queue.push_bytes(&data[..bytes_written])?;
+                    (bytes_written, became_readable)
+                }
+            };
+
+            if bytes_written > 0 {
+                // Queue state carries level readiness. Only publish the
+                // empty-to-nonempty transition to avoid stale wake credits.
+                // All poll/read waiters must recheck the level condition;
+                // waking just one can select a non-reading toolkit thread and
+                // leave the designated reader asleep indefinitely.
+                if became_readable {
+                    peer.read_waker.wake_all();
+                }
+                return Ok(bytes_written);
+            }
+
+            // Do not retain an Arc to the peer while sleeping. The last
+            // peer handle must be able to run Drop and wake this writer.
+            drop(peer_buffer);
+            drop(peer);
+
+            if *self.nonblocking.read() {
+                return Err(StreamError::WouldBlock);
+            }
+
+            if let Some(task) = mytask() {
+                self.write_waker.wait(task.get_id(), task.get_trapframe());
+            } else {
+                return Err(StreamError::WouldBlock);
             }
         }
     }
@@ -714,6 +948,66 @@ impl StreamIpcOps for LocalSocket {
     }
 }
 
+impl LocalSocket {
+    /// Apply idempotent endpoint-close side effects.
+    ///
+    /// This path is used both by `Drop` and by final handle-table cleanup. The
+    /// latter must not wait for transient `Arc` clones retained by an abandoned
+    /// blocking syscall stack.
+    fn close_internal(&self) {
+        let state = *self.state.read();
+
+        if matches!(state, SocketState::Bound | SocketState::Listening)
+            && let Some(path) = self.local_addr.read().as_ref()
+            && !path.is_empty()
+        {
+            NetworkManager::get_manager().unregister_named_socket(path, self);
+        }
+
+        // Publish closure before waking either endpoint.
+        *self.state.write() = SocketState::Closed;
+
+        // Never acquire locks inside the peer while retaining one of this
+        // endpoint's peer-reference locks. Concurrent endpoint teardown on
+        // different CPUs otherwise forms A.peer_socket -> B.peer_socket and
+        // B.peer_socket -> A.peer_socket lock inversion.
+        let own_read_buffer = self.read_buffer.read().clone();
+        let peer_read_buffer = self.peer_read_buffer.write().take();
+        let peer = self
+            .peer_socket
+            .write()
+            .take()
+            .and_then(|peer| peer.upgrade());
+
+        // The peer writes into our read buffer, while we write into the
+        // peer read buffer. Closing both shared buffers communicates EOF
+        // and broken-pipe state without mutating the peer's link fields.
+        *own_read_buffer.closed.write() = true;
+        if let Some(peer_read_buffer) = peer_read_buffer.as_ref() {
+            *peer_read_buffer.closed.write() = true;
+        }
+
+        if let Some(peer) = peer {
+            peer.read_waker.wake_all();
+            peer.handle_waker.wake_all();
+            peer.write_waker.wake_all();
+        }
+
+        self.accept_waker.wake_all();
+        self.read_waker.wake_all();
+        self.handle_waker.wake_all();
+        self.write_waker.wake_all();
+
+        NetworkManager::get_manager().remove_socket_by_ptr(self as *const Self as usize);
+    }
+}
+
+impl Drop for LocalSocket {
+    fn drop(&mut self) {
+        self.close_internal();
+    }
+}
+
 impl SocketControl for LocalSocket {
     fn bind(&self, address: &SocketAddress) -> Result<(), SocketError> {
         // Check socket is unconnected
@@ -722,16 +1016,16 @@ impl SocketControl for LocalSocket {
             return Err(SocketError::AlreadyConnected);
         }
 
-        // Extract path from address
-        let path = match address {
-            SocketAddress::Local(addr) => addr.path(),
+        // Extract registry name from address.
+        let name = match address {
+            SocketAddress::Local(addr) => local_socket_registry_name(addr),
             _ => return Err(SocketError::InvalidAddress),
         };
 
         // Update state
         // Note: NetworkManager registration is done by the syscall layer
         // to ensure the same Arc<Self> is registered that's in the handle table
-        *self.local_addr.write() = Some(path.to_string());
+        *self.local_addr.write() = Some(name);
         *state = SocketState::Bound;
 
         Ok(())
@@ -743,7 +1037,12 @@ impl SocketControl for LocalSocket {
             return Err(SocketError::InvalidOperation);
         }
 
-        *self.max_backlog.write() = backlog;
+        // Some Linux applications pass backlog=0 and still expect at least one
+        // pending connection to be accepted. Keep the internal queue usable.
+        *self.max_backlog.write() = backlog.max(1);
+        if let Some(process_id) = Self::current_process_id() {
+            self.owner_process_id.store(process_id, Ordering::Release);
+        }
         *state = SocketState::Listening;
 
         Ok(())
@@ -773,15 +1072,15 @@ impl SocketControl for LocalSocket {
         }
         drop(state);
 
-        // Extract path from address
-        let path = match address {
-            SocketAddress::Local(addr) => addr.path(),
+        // Extract registry name from address.
+        let name = match address {
+            SocketAddress::Local(addr) => local_socket_registry_name(addr),
             _ => return Err(SocketError::InvalidAddress),
         };
 
         // Lookup listening socket in NetworkManager
         let manager = NetworkManager::get_manager();
-        let server_socket = match manager.lookup_named_socket(path) {
+        let server_socket = match manager.lookup_named_socket(&name) {
             Ok(socket) => socket,
             Err(e) => return Err(e),
         };
@@ -790,6 +1089,13 @@ impl SocketControl for LocalSocket {
         if server_socket.state() != SocketState::Listening {
             return Err(SocketError::ConnectionRefused);
         }
+
+        let server_local = match Self::from_socket_object(server_socket.as_ref()) {
+            Some(socket) => socket,
+            None => return Err(SocketError::InvalidOperation),
+        };
+        let client_process_id = Self::current_process_id().unwrap_or(0);
+        let server_process_id = server_local.owner_process_id.load(Ordering::Acquire);
 
         // We need to create a proper Arc to self to be able to store a Weak reference in the peer
         // Since we're in &self, we don't have access to the Arc. We'll need to store the
@@ -806,20 +1112,22 @@ impl SocketControl for LocalSocket {
         let server_conn = Arc::new(Self {
             socket_type: SocketType::Stream,
             protocol: SocketProtocol::Default,
-            state: RwLock::new(SocketState::Connected),
-            local_addr: RwLock::new(Some(path.to_string())),
-            peer_addr: RwLock::new(Some(local_addr.clone())),
-            read_buffer: RwLock::new(server_read_buffer.clone()),
-            peer_read_buffer: RwLock::new(Some(client_read_buffer.clone())),
-            peer_socket: RwLock::new(None), // Will be set below
-            backlog: RwLock::new(Vec::new()),
-            max_backlog: RwLock::new(0),
+            state: IrqRwSpinLock::new(SocketState::Connected),
+            local_addr: IrqRwSpinLock::new(Some(name.clone())),
+            peer_addr: IrqRwSpinLock::new(Some(local_addr.clone())),
+            owner_process_id: AtomicUsize::new(server_process_id),
+            peer_process_id: AtomicUsize::new(client_process_id),
+            read_buffer: IrqRwSpinLock::new(server_read_buffer.clone()),
+            peer_read_buffer: IrqRwSpinLock::new(Some(client_read_buffer.clone())),
+            peer_socket: IrqRwSpinLock::new(None), // Will be set below
+            backlog: IrqRwSpinLock::new(Vec::new()),
+            max_backlog: IrqRwSpinLock::new(0),
             accept_waker: Waker::new_interruptible("socket_accept"),
             read_waker: Waker::new_interruptible("socket_read"),
             handle_waker: Waker::new_interruptible("socket_handle"),
-            handle_queue: RwLock::new(VecDeque::new()),
-            self_weak: RwLock::new(Weak::new()),
-            nonblocking: RwLock::new(false),
+            write_waker: Waker::new_interruptible("socket_write"),
+            self_weak: IrqRwSpinLock::new(Weak::new()),
+            nonblocking: IrqRwSpinLock::new(false),
         });
 
         Self::init_self_weak(&server_conn);
@@ -828,7 +1136,11 @@ impl SocketControl for LocalSocket {
         *self.read_buffer.write() = client_read_buffer.clone();
         *self.peer_read_buffer.write() = Some(server_read_buffer.clone());
         *self.local_addr.write() = Some(local_addr);
-        *self.peer_addr.write() = Some(path.to_string());
+        *self.peer_addr.write() = Some(name.clone());
+        self.owner_process_id
+            .store(client_process_id, Ordering::Release);
+        self.peer_process_id
+            .store(server_process_id, Ordering::Release);
         *self.state.write() = SocketState::Connected;
 
         // Set peer_socket references - IMPORTANT for shutdown()
@@ -845,10 +1157,6 @@ impl SocketControl for LocalSocket {
         *server_conn.peer_socket.write() = Some(Arc::downgrade(&client_arc));
 
         // Add server connection to server's backlog
-        let server_local = match Self::from_socket_object(&server_socket) {
-            Some(socket) => socket,
-            None => return Err(SocketError::InvalidOperation), // Not a LocalSocket
-        };
         let mut server_backlog = server_local.backlog.write();
         let max_backlog = *server_local.max_backlog.read();
 
@@ -860,6 +1168,8 @@ impl SocketControl for LocalSocket {
             *self.peer_addr.write() = None;
             *self.peer_read_buffer.write() = None;
             *self.peer_socket.write() = None;
+            self.owner_process_id.store(0, Ordering::Release);
+            self.peer_process_id.store(0, Ordering::Release);
             return Err(SocketError::ConnectionRefused);
         }
         server_backlog.push(server_conn);
@@ -872,42 +1182,51 @@ impl SocketControl for LocalSocket {
     }
 
     fn shutdown(&self, how: ShutdownHow) -> Result<(), SocketError> {
-        let mut state = self.state.write();
-        if *state != SocketState::Connected {
+        if *self.state.read() != SocketState::Connected {
             return Err(SocketError::NotConnected);
         }
 
-        // crate::println!("[LocalSocket] shutdown({:?}) called", how);
-
         match how {
-            ShutdownHow::Read | ShutdownHow::Write | ShutdownHow::Both => {
-                *state = SocketState::Closed;
+            ShutdownHow::Read => {
+                let read_buffer = self.read_buffer.read().clone();
+                *read_buffer.closed.write() = true;
+                self.read_waker.wake_all();
+                self.handle_waker.wake_all();
+                if let Some(peer) = self.upgrade_peer() {
+                    peer.write_waker.wake_all();
+                }
+                Ok(())
+            }
+            ShutdownHow::Write => {
+                let peer_read_buffer = self.peer_read_buffer.read().as_ref().cloned();
+                if let Some(peer_read_buffer) = peer_read_buffer {
+                    *peer_read_buffer.closed.write() = true;
+                }
+                if let Some(peer) = self.upgrade_peer() {
+                    peer.read_waker.wake_all();
+                    peer.handle_waker.wake_all();
+                }
+                self.write_waker.wake_all();
+                Ok(())
+            }
+            ShutdownHow::Both => {
+                *self.state.write() = SocketState::Closed;
 
-                // Mark peer's read buffer as closed so they detect EOF
-                if let Some(peer_buf) = self.peer_read_buffer.read().as_ref() {
-                    // crate::println!("[LocalSocket] shutdown: marking peer_read_buffer as closed");
-                    *peer_buf.closed.write() = true;
+                let read_buffer = self.read_buffer.read().clone();
+                *read_buffer.closed.write() = true;
+                let peer_read_buffer = self.peer_read_buffer.read().as_ref().cloned();
+                if let Some(peer_read_buffer) = peer_read_buffer {
+                    *peer_read_buffer.closed.write() = true;
                 }
 
-                // Wake up peer's read_waker so it can detect the shutdown
-                if let Some(peer_weak) = self.peer_socket.read().as_ref() {
-                    if let Some(peer) = peer_weak.upgrade() {
-                        // crate::println!("[LocalSocket] shutdown: waking peer's read_waker");
-                        peer.read_waker.wake_one();
-                        // Also wake any tasks waiting for handle transfer
-                        peer.handle_waker.wake_all();
-                    } else {
-                        // crate::println!("[LocalSocket] shutdown: peer already dropped");
-                    }
-                } else {
-                    // No direct peer reference - wake via waker
-                    // crate::println!(
-                    //     "[LocalSocket] shutdown: no peer_socket, waking via read_waker"
-                    // );
-                    self.read_waker.wake_all(); // Wake any waiting readers
-                    self.handle_waker.wake_all(); // Wake any waiting handle receivers
+                if let Some(peer) = self.upgrade_peer() {
+                    peer.read_waker.wake_all();
+                    peer.handle_waker.wake_all();
+                    peer.write_waker.wake_all();
                 }
-
+                self.read_waker.wake_all();
+                self.handle_waker.wake_all();
+                self.write_waker.wake_all();
                 Ok(())
             }
         }
@@ -925,8 +1244,7 @@ impl SocketControl for LocalSocket {
         let peer = self.peer_addr.read();
         match peer.as_ref() {
             Some(path) => Ok(SocketAddress::Local(
-                LocalSocketAddress::from_path(path)
-                    .unwrap_or_else(|_| LocalSocketAddress::unnamed()),
+                local_socket_address_from_registry_name(path),
             )),
             None => Err(SocketError::NotConnected),
         }
@@ -936,8 +1254,7 @@ impl SocketControl for LocalSocket {
         let local = self.local_addr.read();
         match local.as_ref() {
             Some(path) => Ok(SocketAddress::Local(
-                LocalSocketAddress::from_path(path)
-                    .unwrap_or_else(|_| LocalSocketAddress::unnamed()),
+                local_socket_address_from_registry_name(path),
             )),
             None => Err(SocketError::InvalidOperation),
         }
@@ -945,6 +1262,10 @@ impl SocketControl for LocalSocket {
 }
 
 impl SocketObject for LocalSocket {
+    fn close_handle(&self) {
+        self.close_internal();
+    }
+
     fn socket_type(&self) -> SocketType {
         self.socket_type
     }
@@ -992,16 +1313,16 @@ impl Selectable for LocalSocket {
                 // Connected sockets: readable when data available
                 if interest.read {
                     let read_buffer = self.read_buffer.read();
-                    let data = read_buffer.data.read();
+                    let queue = read_buffer.queue.read();
                     let closed = *read_buffer.closed.read();
-                    ready.read = !data.is_empty() || closed;
+                    ready.read = !queue.is_empty() || closed;
                 }
                 // Connected sockets: writable when peer buffer not full
                 if interest.write {
                     if let Some(peer_buffer) = self.peer_read_buffer.read().as_ref() {
-                        let data = peer_buffer.data.read();
+                        let queue = peer_buffer.queue.read();
                         let closed = *peer_buffer.closed.read();
-                        ready.write = data.len() < MAX_BUFFER_SIZE && !closed;
+                        ready.write = queue.stream_bytes < MAX_STREAM_BUFFER_SIZE && !closed;
                     } else {
                         ready.write = false;
                     }
@@ -1022,8 +1343,8 @@ impl Selectable for LocalSocket {
         interest: ReadyInterest,
         trapframe: &mut crate::arch::Trapframe,
         timeout_ticks: Option<u64>,
+        min_wait_ticks: u64,
     ) -> SelectWaitOutcome {
-        // Check if already ready
         let current = self.current_ready(interest);
         if (interest.read && current.read) || (interest.write && current.write) {
             return SelectWaitOutcome::Ready;
@@ -1031,94 +1352,85 @@ impl Selectable for LocalSocket {
 
         let state = *self.state.read();
 
-        // Get current task ID
         let task_id = {
             use crate::arch::get_cpu;
-            use crate::sched::scheduler::get_scheduler;
             let cpu_id = get_cpu().get_cpuid();
-            get_scheduler().get_current_task_id(cpu_id).unwrap_or(0)
+            current_task_id(cpu_id).unwrap_or(0)
         };
 
-        // Wait based on state and interest
-        // Note: timeout is not yet implemented - always blocks until ready
         let woke = match state {
             SocketState::Listening if interest.read => {
-                // Wait for incoming connections
-                self.accept_waker
-                    .wait_with_timeout(task_id, trapframe, timeout_ticks)
+                if min_wait_ticks > 0 {
+                    self.accept_waker.wait_with_min_timeout(
+                        task_id,
+                        trapframe,
+                        timeout_ticks,
+                        min_wait_ticks,
+                    )
+                } else {
+                    self.accept_waker
+                        .wait_with_timeout(task_id, trapframe, timeout_ticks)
+                }
             }
             SocketState::Connected if interest.read => {
-                // Wait for data to arrive
-                self.read_waker
-                    .wait_with_timeout(task_id, trapframe, timeout_ticks)
+                if min_wait_ticks > 0 {
+                    self.read_waker.wait_with_min_timeout(
+                        task_id,
+                        trapframe,
+                        timeout_ticks,
+                        min_wait_ticks,
+                    )
+                } else {
+                    self.read_waker
+                        .wait_with_timeout(task_id, trapframe, timeout_ticks)
+                }
             }
             SocketState::Connected if interest.write => {
-                // For write readiness, treat as immediately ready (optimistic)
-                // Most sockets are writable most of the time
-                true
+                if min_wait_ticks > 0 {
+                    self.write_waker.wait_with_min_timeout(
+                        task_id,
+                        trapframe,
+                        timeout_ticks,
+                        min_wait_ticks,
+                    )
+                } else {
+                    self.write_waker
+                        .wait_with_timeout(task_id, trapframe, timeout_ticks)
+                }
             }
-            _ => {
-                // Other states: immediately return as not ready
-                true
-            }
+            _ => true,
         };
 
         if timeout_ticks.is_some() && !woke {
             let after = self.current_ready(interest);
-            if (interest.read && !after.read) && (interest.write && !after.write) {
+            let any_ready = (interest.read && after.read) || (interest.write && after.write);
+            if !any_ready {
                 return SelectWaitOutcome::TimedOut;
             }
         }
 
-        // After waking, consider it ready
-        // TODO: properly check timeout and return TimedOut if needed
         SelectWaitOutcome::Ready
     }
 
     fn set_nonblocking(&self, enabled: bool) {
-        // crate::println!(
-        //     "[LocalSocket::set_nonblocking] self={:p} enabled={}",
-        //     self as *const _,
-        //     enabled
-        // );
         *self.nonblocking.write() = enabled;
-        let verify = *self.nonblocking.read();
-        // crate::println!(
-        //     "[LocalSocket::set_nonblocking] self={:p} after write, read back={}",
-        //     self as *const _,
-        //     verify
-        // );
     }
 
     fn is_nonblocking(&self) -> bool {
-        let value = *self.nonblocking.read();
-        // crate::println!(
-        //     "[LocalSocket::is_nonblocking] self={:p} returning={}",
-        //     self as *const _,
-        //     value
-        // );
-        value
+        *self.nonblocking.read()
     }
 }
 
 impl ControlOps for LocalSocket {
     fn control(&self, command: u32, arg: usize) -> Result<i32, &'static str> {
-        // crate::println!("[LocalSocket::control] command={} arg={}", command, arg);
         match command {
             crate::network::socket::socket_ctl::SCTL_SOCKET_SET_NONBLOCK => {
                 let enabled = arg != 0;
-                // crate::println!("[LocalSocket::control] Setting nonblocking={}", enabled);
                 self.set_nonblocking(enabled);
-                let verify = self.is_nonblocking();
-                // crate::println!("[LocalSocket::control] Verified nonblocking={}", verify);
                 Ok(0)
             }
             crate::network::socket::socket_ctl::SCTL_SOCKET_GET_NONBLOCK => {
                 let is_nonblocking = self.is_nonblocking();
-                // crate::println!(
-                // "[LocalSocket::control] Getting nonblocking={}",
-                // is_nonblocking
-                // );
                 Ok(if is_nonblocking { 1 } else { 0 })
             }
             _ => {
@@ -1215,8 +1527,112 @@ mod tests {
     }
 
     #[test_case]
+    fn test_peer_observes_close_when_socket_is_dropped() {
+        let (sock1, sock2) =
+            LocalSocket::create_connected_pair("server".to_string(), "client".to_string());
+
+        drop(sock1);
+
+        let mut buffer = [0u8; 8];
+        let read = sock2.read(&mut buffer).unwrap();
+        assert_eq!(read, 0, "peer read should observe EOF");
+        assert!(
+            sock2.write(b"closed").is_err(),
+            "peer write should fail after remote drop"
+        );
+    }
+
+    #[test_case]
+    fn test_shutdown_write_rejects_later_writes() {
+        let (sock1, sock2) =
+            LocalSocket::create_connected_pair("server".to_string(), "client".to_string());
+
+        sock1.shutdown(ShutdownHow::Write).unwrap();
+
+        let mut buffer = [0u8; 8];
+        let read = sock2.read(&mut buffer).unwrap();
+        assert_eq!(read, 0, "peer read should observe EOF after SHUT_WR");
+        assert!(
+            sock1.write(b"after-shutdown").is_err(),
+            "write should fail after SHUT_WR"
+        );
+        assert!(
+            !sock1
+                .current_ready(ReadyInterest {
+                    read: false,
+                    write: true,
+                    except: false,
+                })
+                .write,
+            "socket should not report writable after SHUT_WR"
+        );
+    }
+
+    #[test_case]
+    fn test_request_response_survives_half_close() {
+        let (client, server) =
+            LocalSocket::create_connected_pair("client".to_string(), "server".to_string());
+
+        assert_eq!(client.write(b"request").unwrap(), 7);
+        client.shutdown(ShutdownHow::Write).unwrap();
+
+        let mut request = [0u8; 16];
+        assert_eq!(server.read(&mut request).unwrap(), 7);
+        assert_eq!(&request[..7], b"request");
+        assert_eq!(server.read(&mut request).unwrap(), 0);
+
+        assert_eq!(server.write(b"response").unwrap(), 8);
+        server.shutdown(ShutdownHow::Write).unwrap();
+
+        let mut response = [0u8; 16];
+        assert_eq!(client.read(&mut response).unwrap(), 8);
+        assert_eq!(&response[..8], b"response");
+        assert_eq!(client.read(&mut response).unwrap(), 0);
+    }
+
+    #[test_case]
+    fn test_nonblocking_peer_drop_returns_eof() {
+        let (sock1, sock2) =
+            LocalSocket::create_connected_pair("server".to_string(), "client".to_string());
+
+        sock2.set_nonblocking(true);
+        drop(sock1);
+
+        let mut buffer = [0u8; 8];
+        let read = sock2.read(&mut buffer).unwrap();
+        assert_eq!(read, 0, "non-blocking peer read should observe EOF");
+    }
+
+    #[test_case]
+    fn test_nonblocking_write_backpressure_recovers_after_peer_read() {
+        let (writer, reader) =
+            LocalSocket::create_connected_pair("server".to_string(), "client".to_string());
+        writer.set_nonblocking(true);
+
+        let payload = alloc::vec![0x5a; MAX_STREAM_BUFFER_SIZE + 1];
+        assert_eq!(writer.write(&payload).unwrap(), MAX_STREAM_BUFFER_SIZE);
+        assert!(matches!(
+            writer.write(&payload[MAX_STREAM_BUFFER_SIZE..]),
+            Err(StreamError::WouldBlock)
+        ));
+        assert!(
+            !writer.current_ready(ReadyInterest::write()).write,
+            "a full peer buffer must not report POLLOUT"
+        );
+
+        let mut byte = [0u8; 1];
+        assert_eq!(reader.read(&mut byte).unwrap(), 1);
+        assert!(
+            writer.current_ready(ReadyInterest::write()).write,
+            "peer consumption must restore POLLOUT"
+        );
+        assert_eq!(writer.write(&payload[..1]).unwrap(), 1);
+    }
+
+    #[test_case]
     fn test_handle_transfer_send_recv() {
         use crate::ipc::SharedMemory;
+        use crate::object::handle::{AccessMode, HandleType};
         use alloc::sync::Arc;
 
         // Create a connected socket pair
@@ -1235,7 +1651,13 @@ mod tests {
         let shmem_obj = KernelObject::from_shared_memory_object(Arc::new(shmem));
 
         // Send handle from sock1 to sock2
-        let result = sock1.send_handle(shmem_obj);
+        let metadata = HandleMetadata {
+            handle_type: HandleType::IpcChannel,
+            access_mode: AccessMode::WriteOnly,
+            special_semantics: Some(crate::object::handle::SpecialSemantics::CloseOnExec),
+        };
+        let expected_metadata = metadata.clone();
+        let result = sock1.send_handle(shmem_obj, metadata);
         assert!(result.is_ok(), "send_handle should succeed");
 
         // Receive handle at sock2
@@ -1243,10 +1665,16 @@ mod tests {
         assert!(received.is_ok(), "recv_handle should succeed");
 
         // Verify it's a SharedMemory object
-        let received_obj = received.unwrap();
+        let (received_obj, received_metadata) = received.unwrap();
         assert!(
             received_obj.as_shared_memory().is_some(),
             "Received object should be SharedMemory"
+        );
+        assert_eq!(received_metadata.handle_type, expected_metadata.handle_type);
+        assert_eq!(received_metadata.access_mode, AccessMode::WriteOnly);
+        assert_eq!(
+            received_metadata.special_semantics,
+            expected_metadata.special_semantics
         );
     }
 
@@ -1263,7 +1691,11 @@ mod tests {
         for i in 0..3 {
             if let Ok(shmem) = SharedMemory::new(4096 * (i + 1), 0x3) {
                 let shmem_obj = KernelObject::from_shared_memory_object(Arc::new(shmem));
-                assert!(sock1.send_handle(shmem_obj).is_ok());
+                assert!(
+                    sock1
+                        .send_handle(shmem_obj, HandleMetadata::default())
+                        .is_ok()
+                );
             }
         }
 
@@ -1272,7 +1704,7 @@ mod tests {
             let received = sock2.recv_handle();
             assert!(received.is_ok(), "recv_handle should succeed");
             assert!(
-                received.unwrap().as_shared_memory().is_some(),
+                received.unwrap().0.as_shared_memory().is_some(),
                 "Received object should be SharedMemory"
             );
         }
@@ -1297,7 +1729,7 @@ mod tests {
         if let Ok(shmem) = SharedMemory::new(4096, 0x3) {
             // READ | WRITE
             let shmem_obj = KernelObject::from_shared_memory_object(Arc::new(shmem));
-            let result = sock.send_handle(shmem_obj);
+            let result = sock.send_handle(shmem_obj, HandleMetadata::default());
             assert!(
                 result.is_err(),
                 "send_handle should fail on disconnected socket"
@@ -1324,5 +1756,136 @@ mod tests {
             result.is_err(),
             "recv_handle should fail when queue is empty"
         );
+    }
+
+    #[test_case]
+    fn test_handle_data_record_is_retained_when_receive_buffer_is_too_small() {
+        use crate::ipc::{IpcError, SharedMemory};
+        use alloc::sync::Arc;
+
+        let (sender, receiver) =
+            LocalSocket::create_connected_pair("server".to_string(), "client".to_string());
+        let shared_memory = match SharedMemory::new(4096, 0x3) {
+            Ok(shared_memory) => shared_memory,
+            Err(_) => return,
+        };
+        let object = KernelObject::from_shared_memory_object(Arc::new(shared_memory));
+        let second_memory = match SharedMemory::new(4096, 0x3) {
+            Ok(shared_memory) => shared_memory,
+            Err(_) => return,
+        };
+        let second_object = KernelObject::from_shared_memory_object(Arc::new(second_memory));
+
+        sender
+            .send_handle_and_data(object, HandleMetadata::default(), b"record")
+            .unwrap();
+        sender
+            .send_handle_and_data(second_object, HandleMetadata::default(), b"two")
+            .unwrap();
+
+        assert!(matches!(
+            receiver.recv_handle_and_data(3),
+            Err(IpcError::BufferTooSmall { required: 6 })
+        ));
+
+        let (_, _, data) = receiver.recv_handle_and_data(6).unwrap();
+        assert_eq!(data.as_slice(), b"record");
+        let (_, _, second_data) = receiver.recv_handle_and_data(3).unwrap();
+        assert_eq!(second_data.as_slice(), b"two");
+        assert!(matches!(
+            receiver.recv_handle_and_data(6),
+            Err(IpcError::ChannelEmpty)
+        ));
+    }
+
+    #[test_case]
+    fn test_multiple_handles_and_data_keep_ancillary_order() {
+        use crate::ipc::{IpcError, SharedMemory};
+        use alloc::sync::Arc;
+
+        let (sender, receiver) =
+            LocalSocket::create_connected_pair("server".to_string(), "client".to_string());
+        let mut handles = Vec::new();
+        for size in [4096, 8192, 12288] {
+            let shared_memory = match SharedMemory::new(size, 0x3) {
+                Ok(shared_memory) => shared_memory,
+                Err(_) => return,
+            };
+            handles.push((
+                KernelObject::from_shared_memory_object(Arc::new(shared_memory)),
+                HandleMetadata::default(),
+            ));
+        }
+
+        sender.send_handles_and_data(handles, b"batch").unwrap();
+
+        assert!(matches!(
+            receiver.recv_handle_and_data(5),
+            Err(IpcError::ChannelEmpty)
+        ));
+        let (first, _) = receiver.recv_handle().unwrap();
+        let (second, _) = receiver.recv_handle().unwrap();
+        assert_eq!(first.as_shared_memory().unwrap().size(), 4096);
+        assert_eq!(second.as_shared_memory().unwrap().size(), 8192);
+
+        let (third, _, data) = receiver.recv_handle_and_data(5).unwrap();
+        assert_eq!(third.as_shared_memory().unwrap().size(), 12288);
+        assert_eq!(data.as_slice(), b"batch");
+    }
+
+    #[test_case]
+    fn test_stream_and_handle_data_records_keep_send_order() {
+        use crate::ipc::{IpcError, SharedMemory};
+        use alloc::sync::Arc;
+
+        let (sender, receiver) =
+            LocalSocket::create_connected_pair("server".to_string(), "client".to_string());
+        let shared_memory = match SharedMemory::new(4096, 0x3) {
+            Ok(shared_memory) => shared_memory,
+            Err(_) => return,
+        };
+        let object = KernelObject::from_shared_memory_object(Arc::new(shared_memory));
+        let handle_only_memory = match SharedMemory::new(4096, 0x3) {
+            Ok(shared_memory) => shared_memory,
+            Err(_) => return,
+        };
+        let handle_only_object =
+            KernelObject::from_shared_memory_object(Arc::new(handle_only_memory));
+
+        sender.write(b"before").unwrap();
+        sender
+            .send_handle_and_data(object, HandleMetadata::default(), b"record")
+            .unwrap();
+        sender
+            .send_handle(handle_only_object, HandleMetadata::default())
+            .unwrap();
+        sender.write(b"after").unwrap();
+
+        assert!(receiver.current_ready(ReadyInterest::read()).read);
+        assert!(matches!(
+            receiver.recv_handle_and_data(6),
+            Err(IpcError::ChannelEmpty)
+        ));
+
+        let mut before = [0u8; 6];
+        assert_eq!(receiver.read(&mut before).unwrap(), before.len());
+        assert_eq!(&before, b"before");
+        assert!(matches!(
+            receiver.read(&mut before),
+            Err(StreamError::WouldBlock)
+        ));
+
+        let (_, _, record) = receiver.recv_handle_and_data(6).unwrap();
+        assert_eq!(record.as_slice(), b"record");
+
+        assert!(matches!(
+            receiver.read(&mut before),
+            Err(StreamError::WouldBlock)
+        ));
+        assert!(receiver.recv_handle().is_ok());
+
+        let mut after = [0u8; 5];
+        assert_eq!(receiver.read(&mut after).unwrap(), after.len());
+        assert_eq!(&after, b"after");
     }
 }

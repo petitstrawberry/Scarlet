@@ -42,8 +42,8 @@
 
 use crate::environment::PAGE_SIZE;
 use crate::fs::{FileObject, SeekFrom};
-use crate::mem::page::{allocate_raw_pages, free_raw_pages};
-use crate::task::{ManagedPage, Task};
+use crate::task::Task;
+use crate::vm::addr::{phys_to_virt, virt_to_phys};
 use crate::vm::vmem::{MemoryArea, VirtualMemoryMap, VirtualMemoryPermission, VirtualMemoryRegion};
 use alloc::boxed::Box;
 use alloc::string::{String, ToString};
@@ -1053,13 +1053,16 @@ fn load_elf_into_task_static(
                 //     crate::println!("  data: {}", hex_str);
                 // }
 
-                match task.vm_manager.translate_vaddr(target_vaddr) {
-                    Some(paddr) => unsafe {
+                match task.vm_manager.translate_to_kva(target_vaddr) {
+                    Some(kaddr) => unsafe {
                         core::ptr::copy_nonoverlapping(
                             segment_data.as_ptr(),
-                            paddr as *mut u8,
+                            kaddr as *mut u8,
                             ph.p_filesz as usize,
                         );
+                        if ph.p_flags & PF_X != 0 {
+                            crate::arch::sync_icache_for_execution(kaddr, ph.p_filesz as usize);
+                        }
                     },
                     None => {
                         return Err(ElfLoaderError {
@@ -1076,11 +1079,60 @@ fn load_elf_into_task_static(
     })?;
 
     // Return entry point adjusted for base address
+    // crate::println!(
+    //     "[ELF Loader] base_address={:#x}, e_entry={:#x}, needs_relocation={}",
+    //     base_address,
+    //     header.e_entry,
+    //     needs_relocation
+    // );
     let final_entry_point = if needs_relocation {
         base_address + header.e_entry
     } else {
         header.e_entry
     };
+    // crate::println!(
+    //     "[ELF Loader] final_entry_point before validation: {:#x}",
+    //     final_entry_point
+    // );
+
+    // Validate that the entry point is actually mapped
+    let entry_vaddr = final_entry_point as usize;
+    if task.vm_manager.translate_to_kva(entry_vaddr).is_none() {
+        // Entry point is not mapped - try to fix it by checking if e_entry
+        // falls within a PT_LOAD segment
+        let mut fixed_entry = None;
+        for_each_program_header(header, file_obj, |_i, ph| {
+            if ph.p_type == PT_LOAD {
+                let seg_start = ph.p_vaddr;
+                let seg_end = ph.p_vaddr.saturating_add(ph.p_memsz);
+                if header.e_entry >= seg_start && header.e_entry < seg_end {
+                    // Entry point is inside this segment - calculate the actual virtual address
+                    let seg_load_addr = base_address + ph.p_vaddr;
+                    let entry_offset = header.e_entry - ph.p_vaddr;
+                    fixed_entry = Some((seg_load_addr + entry_offset) as u64);
+                    return Ok(false); // Stop iteration
+                }
+            }
+            Ok(true) // Continue iteration
+        })?;
+
+        if let Some(fixed) = fixed_entry {
+            // crate::println!(
+            //     "[ELF Loader] Fixed entry point from {:#x} to {:#x}",
+            //     final_entry_point,
+            //     fixed
+            // );
+            return Ok(fixed);
+        } else {
+            return Err(ElfLoaderError {
+                message: format!(
+                    "Entry point {:#x} is not mapped and not within any loaded segment",
+                    final_entry_point
+                ),
+            });
+        }
+    }
+
     Ok(final_entry_point)
 }
 
@@ -1148,11 +1200,11 @@ fn load_program_headers_into_memory(
     })?;
 
     // Copy program headers to task memory
-    match task.vm_manager.translate_vaddr(phdr_vaddr as usize) {
-        Some(paddr) => unsafe {
+    match task.vm_manager.translate_to_kva(phdr_vaddr as usize) {
+        Some(kaddr) => unsafe {
             core::ptr::copy_nonoverlapping(
                 phdr_data.as_ptr(),
-                paddr as *mut u8,
+                kaddr as *mut u8,
                 phdr_table_size as usize,
             );
         },
@@ -1223,40 +1275,31 @@ fn map_elf_segment(
         return Err("Memory area overlaps with existing mapping");
     }
 
-    // Allocate physical memory
     let num_of_pages = (size + PAGE_SIZE - 1) / PAGE_SIZE;
-    let pages = allocate_raw_pages(num_of_pages);
-    let ptr = pages as *mut u8;
-    if ptr.is_null() {
-        return Err("Failed to allocate memory");
-    }
+    let page_alloc =
+        crate::mem::page::ContiguousPages::new(num_of_pages).ok_or("Failed to allocate memory")?;
+    let ptr = page_alloc.as_ptr() as *mut u8;
+    let pm_start = virt_to_phys(ptr as usize);
     let pmarea = MemoryArea {
-        start: ptr as usize,
-        end: (ptr as usize) + size - 1,
+        start: pm_start,
+        end: pm_start + size - 1,
     };
 
-    // Create memory mapping
     let map = VirtualMemoryMap {
         vmarea,
         pmarea,
+        vm_start: vmarea.start,
         permissions,
-        is_shared: false, // User program memory should not be shared
+        is_shared: false,
+        memory_attribute: crate::vm::vmem::MemoryAttribute::Normal,
         owner: None,
     };
 
-    // Add to VM manager
     if let Err(e) = task.vm_manager.add_memory_map(map) {
-        free_raw_pages(pages, num_of_pages);
         return Err(e);
     }
 
-    // Manage segment page in the task
-    for i in 0..num_of_pages {
-        task.add_managed_page(ManagedPage {
-            vaddr: vaddr + i * PAGE_SIZE,
-            page: unsafe { Box::from_raw(pages.wrapping_add(i)) },
-        });
-    }
+    task.page_allocations.write().push(page_alloc);
 
     Ok(())
 }
@@ -1339,9 +1382,9 @@ pub fn setup_auxiliary_vector_on_stack(
         let vaddr = auxv_start + offset;
 
         // Translate to physical address and write
-        match task.vm_manager.translate_vaddr(vaddr) {
-            Some(paddr) => unsafe {
-                let ptr = paddr as *mut AuxVec;
+        match task.vm_manager.translate_to_kva(vaddr) {
+            Some(kaddr) => unsafe {
+                let ptr = kaddr as *mut AuxVec;
                 ptr.write(*entry);
             },
             None => {
@@ -1412,13 +1455,16 @@ fn load_elf_segment_at_address(
         let data_offset = (segment_addr as usize) - mapping_start;
         let target_vaddr = mapping_start + data_offset;
 
-        match task.vm_manager.translate_vaddr(target_vaddr) {
+        match task.vm_manager.translate_to_kva(target_vaddr) {
             Some(paddr) => unsafe {
                 core::ptr::copy_nonoverlapping(
                     segment_data.as_ptr(),
                     paddr as *mut u8,
                     ph.p_filesz as usize,
                 );
+                if ph.p_flags & PF_X != 0 {
+                    crate::arch::sync_icache_for_execution(paddr, ph.p_filesz as usize);
+                }
             },
             None => {
                 return Err(ElfLoaderError {

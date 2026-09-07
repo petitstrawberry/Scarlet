@@ -12,10 +12,10 @@ If the image is not available, you can build it using the provided Dockerfile in
 
 ❗️ Before installing additional package such as cargo-make, qemu, etc., please **make sure** that the scarlet-dev image is available in your environment!
 If the image is available, use the following command
-- docker run -it --rm -v $(pwd):/workspaces/Scarlet scarlet-dev cargo make build`.
+- docker run -it --rm -v $(pwd):/workspaces/Scarlet scarlet-dev cargo make build-riscv64`.
 
 Executing commands in the Docker container at the root of the repository:
-- Build: `cargo make build`
+- Build: `cargo make build-riscv64`
 
 #### Testing
 Use the root workspace tasks to run the full test suite:

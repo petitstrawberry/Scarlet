@@ -45,8 +45,8 @@
 //! - Send packets to multiple lower layers
 //! - Route based on protocol numbers
 
+use crate::sync::IrqRwSpinLock;
 use alloc::{collections::BTreeMap, string::String, sync::Arc, vec, vec::Vec};
-use spin::RwLock;
 
 use super::socket::{SocketDomain, SocketError, SocketObject, SocketProtocol, SocketType};
 use crate::device::network::DevicePacket;
@@ -271,9 +271,9 @@ impl SocketConfig {
 ///
 /// ```rust,ignore
 /// struct IpLayer {
-///     protocols: RwLock<BTreeMap<u16, Arc<dyn NetworkLayer>>>, // Shared
-///     routing_table: RwLock<RoutingTable>,  // Shared
-///     arp_cache: RwLock<ArpCache>,          // Shared
+///     protocols: IrqRwSpinLock<BTreeMap<u16, Arc<dyn NetworkLayer>>>, // Shared
+///     routing_table: IrqRwSpinLock<RoutingTable>,  // Shared
+///     arp_cache: IrqRwSpinLock<ArpCache>,          // Shared
 /// }
 ///
 /// impl NetworkLayer for IpLayer {
@@ -613,14 +613,14 @@ pub trait ProtocolStack: Send + Sync {
 /// Manages registered protocol stacks and routes packets to appropriate stacks.
 pub struct ProtocolStackManager {
     /// Registered protocol stacks by domain
-    stacks: spin::RwLock<alloc::collections::BTreeMap<SocketDomain, Arc<dyn ProtocolStack>>>,
+    stacks: IrqRwSpinLock<alloc::collections::BTreeMap<SocketDomain, Arc<dyn ProtocolStack>>>,
 }
 
 impl ProtocolStackManager {
     /// Create a new protocol stack manager
     pub const fn new() -> Self {
         Self {
-            stacks: spin::RwLock::new(alloc::collections::BTreeMap::new()),
+            stacks: IrqRwSpinLock::new(alloc::collections::BTreeMap::new()),
         }
     }
 
@@ -756,9 +756,9 @@ pub fn get_network_manager() -> &'static crate::network::NetworkManager {
 mod tests {
     use super::*;
     use crate::network::NetworkManager;
+    use crate::sync::IrqRwSpinLock;
     use alloc::{string::ToString, sync::Arc};
     use core::sync::atomic::{AtomicU64, Ordering};
-    use spin::RwLock;
 
     #[test_case]
     fn test_protocol_stack_manager_creation() {
@@ -992,11 +992,11 @@ mod tests {
     struct MockEthernetLayer {
         name: &'static str,
         mac_address: [u8; 6],
-        arp_table: RwLock<BTreeMap<[u8; 4], [u8; 6]>>, // IP -> MAC mapping
-        protocols: RwLock<BTreeMap<u16, Arc<dyn NetworkLayer>>>, // EtherType -> Handler
+        arp_table: IrqRwSpinLock<BTreeMap<[u8; 4], [u8; 6]>>, // IP -> MAC mapping
+        protocols: IrqRwSpinLock<BTreeMap<u16, Arc<dyn NetworkLayer>>>, // EtherType -> Handler
         packets_sent: AtomicU64,
         packets_received: AtomicU64,
-        last_sent_frame: RwLock<Vec<u8>>,
+        last_sent_frame: IrqRwSpinLock<Vec<u8>>,
     }
 
     impl MockEthernetLayer {
@@ -1004,11 +1004,11 @@ mod tests {
             let layer = Self {
                 name,
                 mac_address: mac,
-                arp_table: RwLock::new(BTreeMap::new()),
-                protocols: RwLock::new(BTreeMap::new()),
+                arp_table: IrqRwSpinLock::new(BTreeMap::new()),
+                protocols: IrqRwSpinLock::new(BTreeMap::new()),
                 packets_sent: AtomicU64::new(0),
                 packets_received: AtomicU64::new(0),
-                last_sent_frame: RwLock::new(Vec::new()),
+                last_sent_frame: IrqRwSpinLock::new(Vec::new()),
             };
             // Pre-populate some ARP entries for testing
             layer
@@ -1124,7 +1124,7 @@ mod tests {
     struct MockIpLayer {
         name: &'static str,
         local_ip: [u8; 4],
-        protocols: RwLock<BTreeMap<u16, Arc<dyn NetworkLayer>>>,
+        protocols: IrqRwSpinLock<BTreeMap<u16, Arc<dyn NetworkLayer>>>,
         packets_sent: AtomicU64,
         packets_received: AtomicU64,
     }
@@ -1134,7 +1134,7 @@ mod tests {
             Self {
                 name,
                 local_ip: ip,
-                protocols: RwLock::new(BTreeMap::new()),
+                protocols: IrqRwSpinLock::new(BTreeMap::new()),
                 packets_sent: AtomicU64::new(0),
                 packets_received: AtomicU64::new(0),
             }
@@ -1257,8 +1257,8 @@ mod tests {
         name: &'static str,
         packets_sent: AtomicU64,
         packets_received: AtomicU64,
-        last_received_payload: RwLock<Vec<u8>>,
-        received_payloads: RwLock<Vec<Vec<u8>>>, // Store all received payloads
+        last_received_payload: IrqRwSpinLock<Vec<u8>>,
+        received_payloads: IrqRwSpinLock<Vec<Vec<u8>>>, // Store all received payloads
     }
 
     impl MockTcpLayer {
@@ -1267,8 +1267,8 @@ mod tests {
                 name,
                 packets_sent: AtomicU64::new(0),
                 packets_received: AtomicU64::new(0),
-                last_received_payload: RwLock::new(Vec::new()),
-                received_payloads: RwLock::new(Vec::new()),
+                last_received_payload: IrqRwSpinLock::new(Vec::new()),
+                received_payloads: IrqRwSpinLock::new(Vec::new()),
             }
         }
 

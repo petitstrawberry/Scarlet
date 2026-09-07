@@ -6,10 +6,9 @@
 
 extern crate alloc;
 
+use crate::sync::{IrqSpinLock, Once};
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
-use spin::Mutex;
-
 /// Task namespace for managing task IDs within a specific context.
 ///
 /// Each namespace maintains its own task ID counter and can be used by
@@ -24,14 +23,14 @@ pub struct TaskNamespace {
     /// Unique identifier for this namespace
     id: usize,
     /// Next task ID to allocate in this namespace
-    next_task_id: Mutex<usize>,
+    next_task_id: IrqSpinLock<usize>,
     /// Mapping from namespace-local task IDs to global task IDs.
     ///
     /// This enables syscall boundary translation (PID namespace semantics)
     /// while keeping kernel internals globally-addressed.
-    local_to_global: Mutex<BTreeMap<usize, usize>>,
+    local_to_global: IrqSpinLock<BTreeMap<usize, usize>>,
     /// Reverse mapping from global task IDs to namespace-local task IDs.
-    global_to_local: Mutex<BTreeMap<usize, usize>>,
+    global_to_local: IrqSpinLock<BTreeMap<usize, usize>>,
     /// Parent namespace (None for root namespace)
     parent: Option<Arc<TaskNamespace>>,
     /// Name/description of this namespace (for debugging)
@@ -49,9 +48,9 @@ impl TaskNamespace {
     pub fn new_root(name: alloc::string::String) -> Arc<Self> {
         Arc::new(TaskNamespace {
             id: 0,
-            next_task_id: Mutex::new(1), // Start from 1 (0 is often reserved)
-            local_to_global: Mutex::new(BTreeMap::new()),
-            global_to_local: Mutex::new(BTreeMap::new()),
+            next_task_id: IrqSpinLock::new(1), // Start from 1 (0 is often reserved)
+            local_to_global: IrqSpinLock::new(BTreeMap::new()),
+            global_to_local: IrqSpinLock::new(BTreeMap::new()),
             parent: None,
             name,
         })
@@ -66,7 +65,7 @@ impl TaskNamespace {
     /// # Returns
     /// A new child namespace
     pub fn new_child(parent: Arc<TaskNamespace>, name: alloc::string::String) -> Arc<Self> {
-        static NEXT_NS_ID: Mutex<usize> = Mutex::new(1);
+        static NEXT_NS_ID: IrqSpinLock<usize> = IrqSpinLock::new(1);
         let ns_id = {
             let mut id = NEXT_NS_ID.lock();
             let current = *id;
@@ -76,9 +75,9 @@ impl TaskNamespace {
 
         Arc::new(TaskNamespace {
             id: ns_id,
-            next_task_id: Mutex::new(1),
-            local_to_global: Mutex::new(BTreeMap::new()),
-            global_to_local: Mutex::new(BTreeMap::new()),
+            next_task_id: IrqSpinLock::new(1),
+            local_to_global: IrqSpinLock::new(BTreeMap::new()),
+            global_to_local: IrqSpinLock::new(BTreeMap::new()),
             parent: Some(parent),
             name,
         })
@@ -107,8 +106,25 @@ impl TaskNamespace {
 
     /// Register an existing namespace-local ID mapping for a global task ID.
     pub fn register_mapping(&self, local_id: usize, global_task_id: usize) {
-        self.local_to_global.lock().insert(local_id, global_task_id);
-        self.global_to_local.lock().insert(global_task_id, local_id);
+        // Keep the two maps consistent under a single, documented lock order.
+        let mut local_to_global = self.local_to_global.lock();
+        let mut global_to_local = self.global_to_local.lock();
+        local_to_global.insert(local_id, global_task_id);
+        global_to_local.insert(global_task_id, local_id);
+    }
+
+    /// Remove the namespace-local and global mappings for a task.
+    ///
+    /// # Arguments
+    ///
+    /// * `global_task_id` - The global task identity to unregister.
+    pub fn unregister_mapping_for_global(&self, global_task_id: usize) {
+        // Match `register_mapping`'s local-to-global then global-to-local order.
+        let mut local_to_global = self.local_to_global.lock();
+        let mut global_to_local = self.global_to_local.lock();
+        if let Some(local_id) = global_to_local.remove(&global_task_id) {
+            local_to_global.remove(&local_id);
+        }
     }
 
     /// Resolve a namespace-local task ID to a global task ID.
@@ -146,7 +162,7 @@ impl TaskNamespace {
 ///
 /// This is the default namespace used by all tasks unless explicitly
 /// assigned to a different namespace.
-static ROOT_NAMESPACE: spin::Once<Arc<TaskNamespace>> = spin::Once::new();
+static ROOT_NAMESPACE: Once<Arc<TaskNamespace>> = Once::new();
 
 /// Get the global root task namespace.
 pub fn get_root_namespace() -> &'static Arc<TaskNamespace> {
@@ -214,5 +230,16 @@ mod tests {
 
         // Should return the same instance
         assert_eq!(Arc::as_ptr(root1), Arc::as_ptr(root2));
+    }
+
+    #[test_case]
+    fn test_unregister_mapping_removes_both_directions() {
+        let ns = TaskNamespace::new_root("test".to_string());
+        ns.register_mapping(7, 42);
+
+        ns.unregister_mapping_for_global(42);
+
+        assert_eq!(ns.resolve_global_id(7), None);
+        assert_eq!(ns.resolve_local_id(42), None);
     }
 }

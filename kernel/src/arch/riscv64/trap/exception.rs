@@ -2,11 +2,19 @@ use core::arch::asm;
 use core::panic;
 
 use crate::abi::syscall_dispatcher;
-use crate::arch::trap::print_traplog;
+use crate::arch::trap::{PRIV_U_MODE, prev_mode, print_traplog};
 use crate::arch::{Trapframe, get_cpu};
 use crate::println;
-use crate::sched::scheduler::get_scheduler;
+use crate::sched::scheduler::{current_task, schedule};
 use crate::task::mytask;
+
+const USER_PAGE_FAULT_EXIT_STATUS: i32 = 139;
+const USER_ILLEGAL_INSTRUCTION_EXIT_STATUS: i32 = 132;
+const USER_BREAKPOINT_EXIT_STATUS: i32 = 133;
+
+fn trap_from_user() -> bool {
+    prev_mode() == PRIV_U_MODE
+}
 
 fn log_fatal_page_fault_context(
     trapframe: &Trapframe,
@@ -16,7 +24,7 @@ fn log_fatal_page_fault_context(
     task_name: &str,
     asid: u16,
 ) {
-    use crate::arch::vm::{get_root_pagetable_ptr, is_asid_used};
+    use crate::arch::vm::{get_root_pagetable, is_asid_used};
 
     let cpu_id = get_cpu().get_cpuid();
     let epc = trapframe.epc as usize;
@@ -26,10 +34,12 @@ fn log_fatal_page_fault_context(
     let fp = trapframe.regs.reg[8] as usize;
 
     let asid_used = is_asid_used(asid);
-    let root_pt = get_root_pagetable_ptr(asid).unwrap_or(core::ptr::null_mut());
+    let root_pt = get_root_pagetable(asid)
+        .map(|root| root.root_address())
+        .unwrap_or(0);
 
     println!(
-        "[Trap] fatal page fault map failed: cpu={} cause={} task_id={} name={} asid={} asid_used={} root_pt={:p}",
+        "[Trap] fatal page fault map failed: cpu={} cause={} task_id={} name={} asid={} asid_used={} root_pt={:#x}",
         cpu_id, cause, task_id, task_name, asid, asid_used, root_pt
     );
     println!(
@@ -38,13 +48,78 @@ fn log_fatal_page_fault_context(
     );
 }
 
+fn terminate_current_user_exception(
+    trapframe: &mut Trapframe,
+    cause: usize,
+    event_kind: &str,
+    vaddr: usize,
+    exit_status: i32,
+) {
+    print_traplog(trapframe);
+    if let Some(task) = current_task(get_cpu().get_cpuid()) {
+        println!(
+            "Task {} (PID {}) caused {} at vaddr: {:#x} from PC: {:#x}",
+            task.name.read(),
+            task.get_id(),
+            event_kind,
+            vaddr,
+            trapframe.epc
+        );
+        log_fatal_page_fault_context(
+            trapframe,
+            cause,
+            vaddr,
+            task.get_id(),
+            &task.name.read(),
+            task.vm_manager.get_asid(),
+        );
+        crate::arch::log_user_backtrace(&task, trapframe);
+        task.vcpu.lock().store(trapframe);
+        task.exit_group(exit_status);
+        schedule(trapframe);
+        return;
+    }
+
+    panic!(
+        "Unhandled user {} at vaddr: {:#x} from PC: {:#x}",
+        event_kind, vaddr, trapframe.epc
+    );
+}
+
+const INSTRUCTION_ADDRESS_MISALIGNED: usize = 0;
+const INSTRUCTION_ACCESS_FAULT: usize = 1;
+const ILLEGAL_INSTRUCTION: usize = 2;
+const BREAKPOINT: usize = 3;
+const LOAD_ADDRESS_MISALIGNED: usize = 4;
+const LOAD_ACCESS_FAULT: usize = 5;
+const STORE_ADDRESS_MISALIGNED: usize = 6;
+const STORE_ACCESS_FAULT: usize = 7;
+const ECALL_FROM_U_MODE: usize = 8;
+const ECALL_FROM_HS_MODE: usize = 9;
+const ECALL_FROM_VS_MODE: usize = 10;
+const ECALL_FROM_M_MODE: usize = 11;
+const INSTRUCTION_PAGE_FAULT: usize = 12;
+const LOAD_PAGE_FAULT: usize = 13;
+const STORE_PAGE_FAULT: usize = 15;
+const INSTRUCTION_GUEST_PAGE_FAULT: usize = 20;
+const LOAD_GUEST_PAGE_FAULT: usize = 21;
+const VIRTUAL_INSTRUCTION: usize = 22;
+const STORE_GUEST_PAGE_FAULT: usize = 23;
+
 pub fn arch_exception_handler(trapframe: &mut Trapframe, cause: usize) {
     match cause {
         /* Illegal instruction (used for lazy FP/Vector enable) */
-        2 => {
-            let task = get_scheduler()
-                .get_current_task(get_cpu().get_cpuid())
-                .unwrap();
+        ILLEGAL_INSTRUCTION => {
+            #[cfg(all(feature = "hypervisor", target_arch = "riscv64"))]
+            if crate::arch::hv::trap::is_from_guest() {
+                use crate::arch::hv::switch::arch_guest_trap_exit;
+                unsafe {
+                    arch_guest_trap_exit();
+                }
+                unreachable!();
+            }
+
+            let task = current_task(get_cpu().get_cpuid()).unwrap();
 
             let user_fpu_allowed = crate::arch::user_fpu_enabled();
             let user_vec_allowed = crate::arch::user_vector_enabled();
@@ -64,7 +139,7 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, cause: usize) {
             // If stval doesn't contain the instruction, try to fetch it from the task's
             // mapped user code via the VM translation.
             if inst == 0 {
-                if let Some(paddr) = task.vm_manager.translate_vaddr(trapframe.epc as usize) {
+                if let Some(paddr) = task.vm_manager.translate_to_kva(trapframe.epc as usize) {
                     inst = crate::arch::instruction::Instruction::fetch(paddr).raw as usize;
                 }
             }
@@ -117,15 +192,21 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, cause: usize) {
             // This avoids panicking if stval is 0 or if we cannot classify the instruction.
             #[cfg(feature = "user-vector")]
             if user_vec_allowed && vs_off && is_vector_insn {
-                task.vcpu.lock().vector_used = true;
-                crate::arch::riscv64::fpu::enable_vector();
-                if task.vcpu.lock().vector.is_none() {
-                    task.vcpu.lock().vector = Some(alloc::boxed::Box::new(
-                        crate::arch::riscv64::fpu::VectorContext::new(),
-                    ));
+                {
+                    let mut vcpu = task.vcpu.lock();
+                    if vcpu.vector.is_none() {
+                        vcpu.vector = Some(alloc::boxed::Box::new(
+                            crate::arch::riscv64::fpu::VectorContext::new(),
+                        ));
+                    }
+                    vcpu.vector_used = true;
                 }
+                crate::arch::riscv64::fpu::enable_vector();
                 unsafe { task.vcpu.lock().vector.as_ref().unwrap().restore() };
                 crate::arch::riscv64::fpu::mark_vector_clean();
+                let cpu_id = crate::arch::get_cpu().get_cpuid();
+                crate::arch::riscv64::set_vector_owner(cpu_id, task.get_id());
+                crate::arch::riscv64::set_vector_owner_dirty(cpu_id, false);
                 return;
             }
 
@@ -151,45 +232,84 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, cause: usize) {
 
             #[cfg(feature = "user-vector")]
             if user_vec_allowed && vs_off {
-                task.vcpu.lock().vector_used = true;
-                crate::arch::riscv64::fpu::enable_vector();
-                if task.vcpu.lock().vector.is_none() {
-                    task.vcpu.lock().vector = Some(alloc::boxed::Box::new(
-                        crate::arch::riscv64::fpu::VectorContext::new(),
-                    ));
+                {
+                    let mut vcpu = task.vcpu.lock();
+                    if vcpu.vector.is_none() {
+                        vcpu.vector = Some(alloc::boxed::Box::new(
+                            crate::arch::riscv64::fpu::VectorContext::new(),
+                        ));
+                    }
+                    vcpu.vector_used = true;
                 }
+                crate::arch::riscv64::fpu::enable_vector();
                 unsafe { task.vcpu.lock().vector.as_ref().unwrap().restore() };
                 crate::arch::riscv64::fpu::mark_vector_clean();
+                let cpu_id = crate::arch::get_cpu().get_cpuid();
+                crate::arch::riscv64::set_vector_owner(cpu_id, task.get_id());
+                crate::arch::riscv64::set_vector_owner_dirty(cpu_id, false);
                 return;
             }
 
+            if trap_from_user() {
+                terminate_current_user_exception(
+                    trapframe,
+                    cause,
+                    "illegal instruction",
+                    trapframe.epc as usize,
+                    USER_ILLEGAL_INSTRUCTION_EXIT_STATUS,
+                );
+                return;
+            }
             print_traplog(trapframe);
             panic!(
                 "Unhandled illegal instruction: inst={:#x} epc={:#x}",
                 raw32, trapframe.epc
             );
         }
+        BREAKPOINT => {
+            #[cfg(all(feature = "hypervisor", target_arch = "riscv64"))]
+            if crate::arch::hv::trap::is_from_guest() {
+                use crate::arch::hv::switch::arch_guest_trap_exit;
+                unsafe {
+                    arch_guest_trap_exit();
+                }
+                unreachable!();
+            }
+
+            if trap_from_user() {
+                terminate_current_user_exception(
+                    trapframe,
+                    cause,
+                    "breakpoint",
+                    trapframe.epc as usize,
+                    USER_BREAKPOINT_EXIT_STATUS,
+                );
+                return;
+            }
+            print_traplog(trapframe);
+            panic!("Unhandled breakpoint: epc={:#x}", trapframe.epc);
+        }
         /* Environment call from U-mode */
-        8 => {
+        ECALL_FROM_U_MODE => {
             /* Execute SystemCall */
             match syscall_dispatcher(trapframe) {
                 Ok(ret) => {
                     trapframe.set_return_value(ret);
+                    crate::sched::scheduler::process_pending_events_before_user_return(trapframe);
                 }
                 Err(msg) => {
                     // panic!("Syscall error: {}", msg);
-                    println!("Syscall error: {}", msg);
+                    // println!("Syscall error: {}", msg);
                     trapframe.set_return_value(usize::MAX); // Set error code: -1
-                    trapframe.increment_pc_next(mytask().unwrap());
+                    trapframe.increment_pc_next(&mytask().unwrap());
+                    crate::sched::scheduler::process_pending_events_before_user_return(trapframe);
                 }
             }
         }
         /* Instruction page fault */
-        12 => {
+        INSTRUCTION_PAGE_FAULT => {
             let mut vaddr = trapframe.epc as usize;
-            let task = get_scheduler()
-                .get_current_task(get_cpu().get_cpuid())
-                .unwrap();
+            let task = current_task(get_cpu().get_cpuid()).unwrap();
             use crate::object::capability::memory_mapping::{AccessKind, AccessOp};
             loop {
                 let access = AccessKind {
@@ -200,6 +320,16 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, cause: usize) {
                 match task.vm_manager.lazy_map_page_with(access) {
                     Ok(_) => (),
                     Err(_) => {
+                        if trap_from_user() {
+                            terminate_current_user_exception(
+                                trapframe,
+                                cause,
+                                "instruction page fault",
+                                vaddr,
+                                USER_PAGE_FAULT_EXIT_STATUS,
+                            );
+                            return;
+                        }
                         print_traplog(trapframe);
                         log_fatal_page_fault_context(
                             trapframe,
@@ -224,17 +354,15 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, cause: usize) {
             }
         }
         /* Load/Store page fault */
-        13 | 15 => {
+        LOAD_PAGE_FAULT | STORE_PAGE_FAULT => {
             let mut vaddr;
             unsafe {
                 asm!("csrr {}, stval", out(reg) vaddr);
             }
-            let task = get_scheduler()
-                .get_current_task(get_cpu().get_cpuid())
-                .unwrap();
+            let task = current_task(get_cpu().get_cpuid()).unwrap();
             use crate::object::capability::memory_mapping::{AccessKind, AccessOp};
             loop {
-                let op = if cause == 13 {
+                let op = if cause == LOAD_PAGE_FAULT {
                     AccessOp::Load
                 } else {
                     AccessOp::Store
@@ -246,7 +374,22 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, cause: usize) {
                 };
                 match task.vm_manager.lazy_map_page_with(access) {
                     Ok(_) => (),
-                    Err(_) => {
+                    Err(e) => {
+                        if trap_from_user() {
+                            let event_kind = if cause == LOAD_PAGE_FAULT {
+                                "load page fault"
+                            } else {
+                                "store page fault"
+                            };
+                            terminate_current_user_exception(
+                                trapframe,
+                                cause,
+                                event_kind,
+                                vaddr,
+                                USER_PAGE_FAULT_EXIT_STATUS,
+                            );
+                            return;
+                        }
                         print_traplog(trapframe);
                         log_fatal_page_fault_context(
                             trapframe,
@@ -256,10 +399,7 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, cause: usize) {
                             &task.name.read(),
                             task.vm_manager.get_asid(),
                         );
-                        panic!(
-                            "Failed to map page for load/store page fault at vaddr: {:#x}",
-                            vaddr
-                        );
+                        panic!("lazy_map_page_with failed for vaddr={:#x}: {}", vaddr, e);
                     }
                 }
 
@@ -267,10 +407,30 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, cause: usize) {
                     // If the address is aligned, we can stop
                     break;
                 }
-                vaddr = (vaddr + 4) & !0b11; // Align to the next 4-byte boundary
+                vaddr = (vaddr + 4) & !0b11;
+            }
+        }
+        #[cfg(all(feature = "hypervisor", target_arch = "riscv64"))]
+        INSTRUCTION_GUEST_PAGE_FAULT
+        | LOAD_GUEST_PAGE_FAULT
+        | STORE_GUEST_PAGE_FAULT
+        | ECALL_FROM_VS_MODE => {
+            use crate::arch::hv::switch::arch_guest_trap_exit;
+            unsafe {
+                arch_guest_trap_exit();
             }
         }
         _ => {
+            if trap_from_user() {
+                terminate_current_user_exception(
+                    trapframe,
+                    cause,
+                    "unhandled exception",
+                    trapframe.epc as usize,
+                    USER_ILLEGAL_INSTRUCTION_EXIT_STATUS,
+                );
+                return;
+            }
             print_traplog(trapframe);
             panic!("Unhandled exception: {}", cause);
         }

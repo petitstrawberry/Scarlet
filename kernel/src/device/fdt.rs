@@ -98,12 +98,12 @@ use core::result::Result;
 
 use fdt::{Fdt, FdtError};
 
-use crate::early_println;
+use crate::println;
 use crate::vm::vmem::MemoryArea;
 use crate::{BootInfo, DeviceSource};
 
+use crate::sync::Once;
 use core::cell::UnsafeCell;
-use spin::Once;
 
 struct SyncUnsafeCell<T>(UnsafeCell<T>);
 
@@ -204,7 +204,7 @@ impl<'a> FdtManager<'a> {
         match self.init(ptr) {
             Ok(_) => {
                 self.relocated = true;
-                early_println!("FDT relocated to address: {:#x}", ptr as usize);
+                println!("FDT relocated to address: {:#x}", ptr as usize);
             }
             Err(e) => {
                 panic!("Failed to relocate FDT: {:?}", e);
@@ -219,8 +219,8 @@ impl<'a> FdtManager<'a> {
     /// in the /chosen node.
     ///
     /// # Returns
-    /// Option<MemoryArea>: If the initramfs region is found, returns Some(MemoryArea),
-    /// otherwise returns None.
+    /// `Option<MemoryArea>`: If the initramfs region is found, returns `Some(MemoryArea)`,
+    /// otherwise returns `None`.
     pub fn get_initramfs(&self) -> Option<MemoryArea> {
         let fdt = self.get_fdt()?;
 
@@ -402,21 +402,21 @@ pub fn init_fdt(addr: usize) {
     let fdt_ptr = addr as *const u8;
     match fdt_manager.init(fdt_ptr) {
         Ok(_) => {
-            early_println!("FDT initialized");
+            println!("FDT initialized");
             let fdt = fdt_manager.get_fdt().unwrap();
 
             match fdt.chosen().bootargs() {
-                Some(bootargs) => early_println!("Bootargs: {}", bootargs),
-                None => early_println!("No bootargs found"),
+                Some(bootargs) => println!("Bootargs: {}", bootargs),
+                None => println!("No bootargs found"),
             }
             let model = fdt.root().model();
-            early_println!("Model: {}", model);
+            println!("Model: {}", model);
 
             // Mark initialization as complete to establish happens-before relationship
             MANAGER_INITIALIZED.call_once(|| {});
         }
         Err(e) => {
-            early_println!("FDT error: {:?}", e);
+            println!("FDT error: {:?}", e);
         }
     }
 }
@@ -518,7 +518,7 @@ pub fn create_bootinfo_from_fdt(cpu_id: usize, relocated_fdt_addr: usize) -> Boo
     let mut usable_memory = MemoryArea::new(kernel_end, dram_area.end);
 
     // Relocate initramfs
-    crate::early_println!("Relocating initramfs...");
+    crate::println!("Relocating initramfs...");
 
     let relocated_initramfs =
         match crate::fs::vfs_v2::drivers::initramfs::relocate_initramfs(&mut usable_memory) {
@@ -533,13 +533,23 @@ pub fn create_bootinfo_from_fdt(cpu_id: usize, relocated_fdt_addr: usize) -> Boo
 
     let cpu_count = fdt_manager.get_cpu_count().unwrap_or(1);
 
+    let hhdm_offset = 0xffff_8000_0000_0000_usize;
+    let mut direct_map_regions = crate::vm::direct_map::DirectMapRegions::new();
+    direct_map_regions
+        .insert(dram_area, crate::vm::vmem::MemoryAttribute::Normal)
+        .expect("FDT DRAM direct-map region is invalid");
+
     BootInfo::new(
         cpu_id,
         cpu_count,
         usable_memory,
+        direct_map_regions,
         relocated_initramfs,
+        hhdm_offset,
         cmdline,
         DeviceSource::Fdt(relocated_fdt_addr),
+        None,
+        None,
     )
 }
 

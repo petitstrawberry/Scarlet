@@ -1,0 +1,301 @@
+# Scarlet Desktop Bundle
+# GUI and desktop environment components.
+# Composes base + cli-utils + desktop-specific packages.
+
+[[layers]]
+kind = "bundle"
+path = "../base/bundle.toml"
+
+[[layers]]
+kind = "bundle"
+path = "../cli-utils/bundle.toml"
+
+[[layers]]
+kind = "copy"
+source = "fs"
+to = "/"
+
+[[layers]]
+kind = "cargo"
+source = "../../user/bin"
+package = "user-bin"
+bin = "scarlet-desktop"
+to = "/bin/scarlet-desktop"
+
+[[layers]]
+kind = "cargo"
+source = "../../user/bin"
+package = "user-bin"
+bin = "desktop-settings"
+to = "/bin/desktop-settings"
+
+[[layers]]
+kind = "cargo"
+source = "../../user/std-bin"
+package = "scarlet-std-bin"
+bin = "files"
+to = "/bin/files"
+
+[[layers]]
+kind = "cargo"
+source = "../../user/std-bin"
+package = "scarlet-std-bin"
+bin = "notepad"
+to = "/bin/notepad"
+
+[[layers]]
+kind = "cargo"
+source = "../../user/std-bin"
+package = "scarlet-std-bin"
+bin = "scarlet-shell"
+to = "/bin/scarlet-shell"
+
+[[layers]]
+kind = "cargo"
+source = "../../user/bin"
+package = "user-bin"
+bin = "terminal"
+to = "/bin/terminal"
+
+[[layers]]
+kind = "cargo"
+source = "../../user/std-bin"
+package = "scarlet-std-bin"
+bin = "sws"
+to = "/bin/sws"
+
+[[layers]]
+kind = "cargo"
+source = "../../user/bin"
+package = "user-bin"
+bin = "sas"
+to = "/bin/sas"
+
+[[layers]]
+kind = "cargo"
+source = "../../user/std-bin"
+bin = "sasctl"
+to = "/bin/sasctl"
+
+[[layers]]
+kind = "cargo"
+source = "../../user/bin"
+package = "user-bin"
+bin = "mplayer"
+to = "/bin/mplayer"
+
+[[layers]]
+kind = "cargo"
+source = "../../user/bin"
+package = "user-bin"
+bin = "ui-demo"
+to = "/bin/ui-demo"
+
+[[layers]]
+kind = "cargo"
+source = "../../user/bin"
+package = "user-bin"
+bin = "ui-benchmark"
+to = "/bin/ui-benchmark"
+
+[[layers]]
+kind = "cargo"
+source = { git = "https://github.com/petitstrawberry/scarlet-ui", rev = "c980c960b073b6a7c71a2ab501210e3b3a570e77" }
+subdir = "examples/widget-factory"
+package = "scarlet-ui-widget-factory"
+bin = "scarlet-ui-widget-factory"
+to = "/bin/widget-factory"
+
+[[layers]]
+kind = "cargo"
+source = "../../user/std-bin"
+bin = "ui-sgfx-showcase"
+to = "/bin/ui-sgfx-showcase"
+
+[[layers]]
+kind = "cargo"
+source = "../../user/bin"
+package = "user-bin"
+bin = "settings"
+to = "/bin/settings"
+
+[[layers]]
+kind = "cargo"
+source = "../../user/std-bin"
+bin = "task-manager"
+to = "/bin/task-manager"
+
+[[layers]]
+kind = "cargo"
+source = "../../user/bin"
+package = "user-bin"
+bin = "scarlet-skk"
+to = "/bin/scarlet-skk"
+
+[[layers]]
+kind = "script"
+source = "tools/fetch_skk_dictionary.sh"
+output = ".scarlet/cache/skk/SKK-JISYO.L"
+to = "/share/skk/SKK-JISYO.L"
+
+[[layers]]
+kind = "cargo"
+source = "../../user/bin"
+package = "user-bin"
+bin = "wayland-bridge"
+to = "/bin/wayland-bridge"
+
+[[layers]]
+kind = "cargo"
+source = "../../user/std-bin"
+bin = "ansi-banner"
+to = "/bin/ansi-banner"
+
+[[layers]]
+kind = "cargo"
+source = "../../user/video_player"
+package = "video_player"
+bin = "video-player"
+default-features = false
+features = ["av1-stateful-hw", "h264-stateful-hw", "mp4-aac"]
+to = "/bin/video-player"
+
+[[layers]]
+kind = "cargo"
+source = "../../user/bin"
+package = "user-bin"
+bin = "sgfx-probe"
+to = "/bin/sgfx-probe"
+
+[[layers]]
+kind = "cargo"
+source = "../../user/std-bin"
+bin = "sgfx-cube"
+to = "/bin/sgfx-cube"
+
+[[layers]]
+kind = "cargo"
+source = "../../user/std-bin"
+bin = "sgfx-texture"
+to = "/bin/sgfx-texture"
+
+[[layers]]
+kind = "cargo"
+source = "../../user/std-bin"
+bin = "sgfx-showcase"
+to = "/bin/sgfx-showcase"
+
+[[layers]]
+kind = "cargo"
+source = "../../user/std-bin"
+bin = "httpd"
+to = "/bin/httpd"
+
+[[layers]]
+kind = "cargo"
+source = "../../user/bin"
+package = "user-bin"
+bin = "ushv"
+to = "/bin/ushv"
+
+[[layers]]
+kind = "cargo"
+source = "../../user/std-bin"
+bin = "lsm-list"
+to = "/bin/lsm-list"
+
+[[layers]]
+kind = "cargo"
+source = "../../user/std-bin"
+bin = "clock"
+to = "/bin/clock"
+
+[[layers]]
+kind = "cargo"
+source = "../../user/std-bin"
+bin = "lsm-load"
+to = "/bin/lsm-load"
+
+[[layers]]
+kind = "cargo"
+source = "../../user/std-bin"
+bin = "lsm-unload"
+to = "/bin/lsm-unload"
+
+[[layers]]
+kind = "cargo"
+source = "../../user/std-bin"
+bin = "input-dump"
+to = "/bin/input-dump"
+
+[[layers]]
+kind = "cargo"
+source = "../../user/std-bin"
+bin = "displayctl"
+to = "/bin/displayctl"
+
+[[layers]]
+kind = "cargo"
+source = "../../user/std-bin"
+bin = "sensor-dump"
+to = "/bin/sensor-dump"
+
+[[layers]]
+kind = "cargo"
+source = "../../user/std-bin"
+bin = "tabletctl"
+to = "/bin/tabletctl"
+
+[[layers]]
+kind = "cargo"
+source = "../../user/bin"
+bin = "mozc-server"
+to = "/bin/mozc-server"
+
+[[layers]]
+kind = "cargo"
+source = "../../user/bin"
+package = "user-bin"
+bin = "scarlet-mozc"
+to = "/bin/scarlet-mozc"
+
+[[layers]]
+kind = "cargo"
+source = "../../user/bin"
+package = "user-bin"
+bin = "dcp-flip-test"
+to = "/bin/dcp-flip-test"
+
+[[layers]]
+kind = "cargo"
+source = { git = "https://github.com/petitstrawberry/carmine", rev = "ab5b679b92e141b345549bba11e43555b6bf3eb3" }
+package = "carmine"
+bin = "carmine"
+to = "/bin/carmine"
+
+[[layers]]
+kind = "cargo"
+source = { git = "https://github.com/petitstrawberry/myrica", rev = "9e3e904ad7117162adc5bd3b9415bef8aec59c83" }
+package = "myrica"
+bin = "myrica"
+to = "/bin/myrica"
+
+[[layers]]
+kind = "cargo"
+source = { git = "https://github.com/petitstrawberry/vellum", rev = "48e9d9886b1c21c4f33a0433f7f4183d9d3ecb7e" }
+package = "vellum"
+bin = "vellum"
+to = "/bin/vellum"
+
+[[layers]]
+kind = "cargo"
+source = { git = "https://github.com/petitstrawberry/boxcraft", rev = "e50a70d77e8c23152a2efff2e0ac11ccafea972f" }
+package = "boxcraft"
+bin = "boxcraft"
+to = "/bin/boxcraft"
+
+[[layers]]
+kind = "cargo"
+source = "../../user/std-bin"
+bin = "remote-desktop"
+to = "/bin/remote-desktop"

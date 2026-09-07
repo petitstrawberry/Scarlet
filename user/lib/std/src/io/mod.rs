@@ -134,6 +134,23 @@ pub enum SeekFrom {
 
 use crate::syscall::{Syscall, syscall3};
 
+const EINTR: i32 = 4;
+const EAGAIN: i32 = 11;
+
+fn stream_syscall_result(result: usize, message: &'static str) -> Result<usize> {
+    if result <= isize::MAX as usize {
+        return Ok(result);
+    }
+
+    let errno = result.wrapping_neg() as i32;
+    let kind = match errno {
+        EINTR => ErrorKind::Interrupted,
+        EAGAIN => ErrorKind::WouldBlock,
+        _ => ErrorKind::Other,
+    };
+    Err(Error::new(kind, message))
+}
+
 /// A handle to the standard input stream of a process
 ///
 /// This handle is created from the global file descriptor 0. This is similar
@@ -197,18 +214,17 @@ impl Stdin {
     /// # Returns
     /// Number of bytes read or error
     pub fn read(&self, buffer: &mut [u8]) -> Result<usize> {
-        let result = syscall3(
-            Syscall::StreamRead,
-            0,
-            buffer.as_mut_ptr() as usize,
-            buffer.len(),
-        );
+        // SAFETY: The output buffer is exclusively borrowed for its advertised length until the synchronous read returns.
+        let result = unsafe {
+            syscall3(
+                Syscall::StreamRead,
+                0,
+                buffer.as_mut_ptr() as usize,
+                buffer.len(),
+            )
+        };
 
-        if result == usize::MAX {
-            Err(Error::new(ErrorKind::Other, "Read from stdin failed"))
-        } else {
-            Ok(result)
-        }
+        stream_syscall_result(result, "Read from stdin failed")
     }
 }
 
@@ -221,7 +237,9 @@ impl Stdout {
     /// # Returns
     /// Number of bytes written or error
     pub fn write(&self, data: &[u8]) -> Result<usize> {
-        let result = syscall3(Syscall::StreamWrite, 1, data.as_ptr() as usize, data.len());
+        // SAFETY: The input buffer is borrowed and readable for its advertised length until the synchronous write returns.
+        let result =
+            unsafe { syscall3(Syscall::StreamWrite, 1, data.as_ptr() as usize, data.len()) };
 
         if result == usize::MAX {
             Err(Error::new(ErrorKind::Other, "Write to stdout failed"))
@@ -266,7 +284,9 @@ impl Stderr {
     /// # Returns
     /// Number of bytes written or error
     pub fn write(&self, data: &[u8]) -> Result<usize> {
-        let result = syscall3(Syscall::StreamWrite, 2, data.as_ptr() as usize, data.len());
+        // SAFETY: The input buffer is borrowed and readable for its advertised length until the synchronous write returns.
+        let result =
+            unsafe { syscall3(Syscall::StreamWrite, 2, data.as_ptr() as usize, data.len()) };
 
         if result == usize::MAX {
             Err(Error::new(ErrorKind::Other, "Write to stderr failed"))
@@ -354,21 +374,35 @@ pub fn puts(s: &str) -> usize {
 
 /// Print implementation for Scarlet
 pub fn _print(args: fmt::Arguments) {
-    use fmt::Write;
+    extern crate alloc;
+    use alloc::fmt::format as fmt_format;
 
-    let mut writer = StdoutWriter;
-    let _ = writer.write_fmt(args);
+    static LOCK: crate::sync::Mutex<()> = crate::sync::Mutex::new(());
+    let _lock = LOCK.lock();
+
+    let output = fmt_format(args);
+    let _ = stdout().write_all(output.as_bytes());
 }
 
-/// A simple writer that outputs to stdout
-struct StdoutWriter;
+#[cfg(test)]
+mod tests {
+    use super::{EAGAIN, EINTR, ErrorKind, stream_syscall_result};
 
-impl fmt::Write for StdoutWriter {
-    fn write_str(&mut self, s: &str) -> fmt::Result {
-        match stdout().write(s.as_bytes()) {
-            Ok(_) => Ok(()),
-            Err(_) => Err(fmt::Error),
-        }
+    #[test]
+    fn stream_syscall_result_preserves_retryable_errors() {
+        assert_eq!(
+            stream_syscall_result((-EINTR) as usize, "read failed")
+                .unwrap_err()
+                .kind(),
+            ErrorKind::Interrupted
+        );
+        assert_eq!(
+            stream_syscall_result((-EAGAIN) as usize, "read failed")
+                .unwrap_err()
+                .kind(),
+            ErrorKind::WouldBlock
+        );
+        assert_eq!(stream_syscall_result(3, "read failed").unwrap(), 3);
     }
 }
 

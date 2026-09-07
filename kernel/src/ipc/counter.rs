@@ -8,15 +8,21 @@
 //!   (or decrements by 1 in semaphore mode)
 //! - write(8 bytes): Adds value to counter
 
-use alloc::{string::String, string::ToString, sync::Arc};
-use spin::Mutex;
+use crate::sync::IrqSpinLock;
+use alloc::{string::String, string::ToString, sync::Arc, vec::Vec};
 
 use crate::object::KernelObject;
 use crate::object::capability::selectable::{
     ReadyInterest, ReadySet, SelectWaitOutcome, Selectable,
 };
 use crate::object::capability::{CloneOps, StreamError, StreamOps};
+use crate::sched::scheduler::current_task_id;
 use crate::sync::waker::Waker;
+
+/// Observer notified when a counter is written.
+pub trait CounterWriteListener: Send + Sync {
+    fn on_counter_write(&self, value: u64);
+}
 
 /// Internal state of a counter
 struct CounterState {
@@ -29,22 +35,25 @@ struct CounterState {
 /// Shared counter data including state and wakers
 struct SharedCounterData {
     /// Protected state
-    state: Mutex<CounterState>,
+    state: IrqSpinLock<CounterState>,
     /// Waker for tasks waiting to read
     read_waker: Waker,
     /// Waker for tasks waiting to write
     write_waker: Waker,
+    /// Listeners notified after successful writes
+    write_listeners: IrqSpinLock<Vec<Arc<dyn CounterWriteListener>>>,
 }
 
 impl SharedCounterData {
     fn new(initval: u32, semaphore: bool) -> Arc<Self> {
         Arc::new(Self {
-            state: Mutex::new(CounterState {
+            state: IrqSpinLock::new(CounterState {
                 counter: initval as u64,
                 semaphore,
             }),
             read_waker: Waker::new_interruptible("counter_read"),
             write_waker: Waker::new_interruptible("counter_write"),
+            write_listeners: IrqSpinLock::new(Vec::new()),
         })
     }
 }
@@ -193,8 +202,20 @@ impl Counter {
             // Wake up any waiting readers
             self.data.read_waker.wake_all();
 
+            if add_value != 0 {
+                let listeners = self.data.write_listeners.lock().clone();
+                for listener in listeners {
+                    listener.on_counter_write(add_value);
+                }
+            }
+
             return Ok(8);
         }
+    }
+
+    /// Add an observer notified after successful writes.
+    pub fn add_write_listener(&self, listener: Arc<dyn CounterWriteListener>) {
+        self.data.write_listeners.lock().push(listener);
     }
 }
 
@@ -254,6 +275,7 @@ impl Selectable for Counter {
         interest: ReadyInterest,
         trapframe: &mut crate::arch::Trapframe,
         timeout_ticks: Option<u64>,
+        min_wait_ticks: u64,
     ) -> SelectWaitOutcome {
         let current = self.current_ready(interest);
         if (interest.read && current.read) || (interest.write && current.write) {
@@ -262,19 +284,36 @@ impl Selectable for Counter {
 
         let task_id = {
             use crate::arch::get_cpu;
-            use crate::sched::scheduler::get_scheduler;
             let cpu_id = get_cpu().get_cpuid();
-            get_scheduler().get_current_task_id(cpu_id).unwrap_or(0)
+            current_task_id(cpu_id).unwrap_or(0)
         };
 
         let woke = if interest.read {
-            self.data
-                .read_waker
-                .wait_with_timeout(task_id, trapframe, timeout_ticks)
+            if min_wait_ticks > 0 {
+                self.data.read_waker.wait_with_min_timeout(
+                    task_id,
+                    trapframe,
+                    timeout_ticks,
+                    min_wait_ticks,
+                )
+            } else {
+                self.data
+                    .read_waker
+                    .wait_with_timeout(task_id, trapframe, timeout_ticks)
+            }
         } else if interest.write {
-            self.data
-                .write_waker
-                .wait_with_timeout(task_id, trapframe, timeout_ticks)
+            if min_wait_ticks > 0 {
+                self.data.write_waker.wait_with_min_timeout(
+                    task_id,
+                    trapframe,
+                    timeout_ticks,
+                    min_wait_ticks,
+                )
+            } else {
+                self.data
+                    .write_waker
+                    .wait_with_timeout(task_id, trapframe, timeout_ticks)
+            }
         } else {
             false
         };
@@ -301,10 +340,17 @@ impl Selectable for Counter {
 pub trait CounterObject: StreamOps + Selectable + CloneOps {
     /// Check if this is a semaphore mode counter
     fn is_semaphore(&self) -> bool;
+
+    /// Add an observer notified after successful writes.
+    fn add_write_listener(&self, listener: Arc<dyn CounterWriteListener>);
 }
 
 impl CounterObject for Counter {
     fn is_semaphore(&self) -> bool {
         self.data.state.lock().semaphore
+    }
+
+    fn add_write_listener(&self, listener: Arc<dyn CounterWriteListener>) {
+        self.add_write_listener(listener);
     }
 }

@@ -6,16 +6,29 @@
 use crate::{
     arch::Trapframe,
     ipc::event::{
-        Event, EventContent, EventManager, EventPayload, EventPriority, ProcessControlType,
+        Event, EventContent, EventManager, EventPayload, EventPriority, GroupTarget,
+        ProcessControlType,
     },
     ipc::pipe::UnidirectionalPipe,
     ipc::shared_memory::SharedMemory,
     library::std::string::parse_c_string_from_userspace,
+    library::std::usercopy::{copy_from_user, copy_to_user},
     object::KernelObject,
-    object::capability::EventSubscriber,
+    object::capability::{EventSubscriber, Selectable},
     task::mytask,
 };
-use alloc::{string::ToString, sync::Arc};
+use alloc::{string::ToString, sync::Arc, vec};
+
+const NATIVE_EAGAIN: usize = (-(11isize)) as usize;
+const NATIVE_EMSGSIZE: usize = (-(90isize)) as usize;
+
+fn socket_ipc_error_result(error: crate::ipc::IpcError) -> usize {
+    match error {
+        crate::ipc::IpcError::ChannelEmpty | crate::ipc::IpcError::ChannelFull => NATIVE_EAGAIN,
+        crate::ipc::IpcError::BufferTooSmall { .. } => NATIVE_EMSGSIZE,
+        _ => usize::MAX,
+    }
+}
 
 /// sys_pipe - Create a pipe pair
 ///
@@ -23,8 +36,8 @@ use alloc::{string::ToString, sync::Arc};
 ///
 /// Arguments:
 /// - pipefd: Pointer to an array of 2 integers where file descriptors will be stored
-///   - pipefd[0] will contain the read end file descriptor
-///   - pipefd[1] will contain the write end file descriptor
+///   - `pipefd[0]` will contain the read end file descriptor
+///   - `pipefd[1]` will contain the write end file descriptor
 ///
 /// Returns:
 /// - 0 on success
@@ -38,13 +51,7 @@ pub fn sys_pipe(trapframe: &mut Trapframe) -> usize {
     let pipefd_ptr = trapframe.get_arg(0);
 
     // Increment PC to avoid infinite loop if pipe creation fails
-    trapframe.increment_pc_next(task);
-
-    // Translate the pointer to get access to the pipefd array
-    let pipefd_vaddr = match task.vm_manager.translate_vaddr(pipefd_ptr) {
-        Some(addr) => addr as *mut u32,
-        None => return usize::MAX, // Invalid pointer
-    };
+    trapframe.increment_pc_next(&task);
 
     // Create pipe pair with default buffer size (4KB)
     const DEFAULT_PIPE_BUFFER_SIZE: usize = 4096;
@@ -85,10 +92,13 @@ pub fn sys_pipe(trapframe: &mut Trapframe) -> usize {
         }
     };
 
-    // Write the handles to user space
-    unsafe {
-        *pipefd_vaddr = read_handle;
-        *pipefd_vaddr.add(1) = write_handle;
+    let mut out = [0u8; core::mem::size_of::<u32>() * 2];
+    out[..core::mem::size_of::<u32>()].copy_from_slice(&read_handle.to_le_bytes());
+    out[core::mem::size_of::<u32>()..].copy_from_slice(&write_handle.to_le_bytes());
+    if copy_to_user(&task, pipefd_ptr, &out).is_err() {
+        let _ = task.handle_table.remove(read_handle);
+        let _ = task.handle_table.remove(write_handle);
+        return usize::MAX;
     }
 
     0 // Success
@@ -122,9 +132,9 @@ pub fn sys_event_channel_create(trapframe: &mut Trapframe) -> usize {
     };
 
     let name_ptr = trapframe.get_arg(0);
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
-    let name = match parse_c_string_from_userspace(task, name_ptr, 256) {
+    let name = match parse_c_string_from_userspace(&task, name_ptr, 256) {
         Ok(s) => s,
         Err(_) => return usize::MAX,
     };
@@ -150,9 +160,9 @@ pub fn sys_event_subscribe(trapframe: &mut Trapframe) -> usize {
     };
 
     let name_ptr = trapframe.get_arg(0);
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
-    let name = match parse_c_string_from_userspace(task, name_ptr, 256) {
+    let name = match parse_c_string_from_userspace(&task, name_ptr, 256) {
         Ok(s) => s,
         Err(_) => return usize::MAX,
     };
@@ -181,15 +191,19 @@ pub fn sys_event_unsubscribe(trapframe: &mut Trapframe) -> usize {
     };
 
     let handle = trapframe.get_arg(0) as u32;
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     // Get the object first to extract identifiers
-    let (channel_name, subscription_id) = match task.handle_table.get(handle) {
-        Some(KernelObject::EventSubscription(sub)) => (
+    let (channel_name, subscription_id) = match task
+        .handle_table
+        .get(handle)
+        .and_then(KernelObject::into_event_subscription_arc)
+    {
+        Some(sub) => (
             sub.channel_name().to_string(),
             sub.subscription_id().to_string(),
         ),
-        _ => return usize::MAX,
+        None => return usize::MAX,
     };
 
     // Remove from channel registry via EventManager helper
@@ -220,7 +234,7 @@ pub fn sys_event_publish(trapframe: &mut Trapframe) -> usize {
     let channel_handle = trapframe.get_arg(0) as u32;
     let event_id = trapframe.get_arg(1) as u32;
     let payload_val = trapframe.get_arg(2) as isize as i64;
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     let ko = match task.handle_table.get(channel_handle) {
         Some(obj) => obj,
@@ -270,7 +284,7 @@ pub fn sys_event_handler_register(trapframe: &mut Trapframe) -> usize {
     let handler_id = trapframe.get_arg(1);
     let filter_kind = trapframe.get_arg(2) as u32;
     let param0 = trapframe.get_arg(3) as u32;
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     let ko = match task.handle_table.get(sub_handle) {
         Some(obj) => obj,
@@ -300,7 +314,10 @@ pub fn sys_event_handler_register(trapframe: &mut Trapframe) -> usize {
 ///
 /// Arguments:
 /// - target_tid: u32
-/// - kind: u32 (0=Terminate,1=Kill,2=Stop,3=Continue,4=Interrupt,5=Quit,6=Hangup,7=ChildExit,8=PipeBroken,9=Alarm,10=IoReady,1000+=User(kind-1000))
+/// - kind: u32 (0=Terminate,1=Kill,2=Stop,3=Continue,4=Interrupt,5=Quit,
+///   6=Hangup,7=ChildExit,8=PipeBroken,9=Alarm,10=IoReady,
+///   11=TerminalStop,12=TerminalInput,13=TerminalOutput,14=WindowChange,
+///   1000+=Custom("user", kind-1000))
 /// - reliable: u32 (0/1)
 /// - priority: u32 (1=Low,2=Normal,3=High,4=Critical)
 pub fn sys_event_send_direct(trapframe: &mut Trapframe) -> usize {
@@ -308,11 +325,11 @@ pub fn sys_event_send_direct(trapframe: &mut Trapframe) -> usize {
         Some(task) => task,
         None => return usize::MAX,
     };
-    let target = trapframe.get_arg(0) as u32;
+    let target_id = trapframe.get_arg(0);
     let kind = trapframe.get_arg(1) as u32;
     let reliable = trapframe.get_arg(2) as u32 != 0;
     let prio_raw = trapframe.get_arg(3) as u32;
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     let priority = match prio_raw {
         1 => EventPriority::Low,
@@ -320,6 +337,11 @@ pub fn sys_event_send_direct(trapframe: &mut Trapframe) -> usize {
         4 => EventPriority::Critical,
         _ => EventPriority::Normal,
     };
+
+    let Some(target) = task.get_namespace().resolve_global_id(target_id) else {
+        return usize::MAX;
+    };
+    let target = target as u32;
 
     let event = if kind >= 1000 {
         Event::direct_custom(
@@ -343,10 +365,92 @@ pub fn sys_event_send_direct(trapframe: &mut Trapframe) -> usize {
             8 => ProcessControlType::PipeBroken,
             9 => ProcessControlType::Alarm,
             10 => ProcessControlType::IoReady,
+            11 => ProcessControlType::TerminalStop,
+            12 => ProcessControlType::TerminalInput,
+            13 => ProcessControlType::TerminalOutput,
+            14 => ProcessControlType::WindowChange,
             _ => ProcessControlType::Terminate,
         };
         Event::direct_process_control(target, ptype, priority, reliable)
     };
+
+    let mgr = EventManager::get_manager();
+    match mgr.send_event(event) {
+        Ok(()) => 0,
+        Err(_) => usize::MAX,
+    }
+}
+
+/// Send a process-control event to a process group.
+///
+/// Arguments:
+/// - group_id: Namespace-local process group ID. 0 means the caller's group.
+/// - kind: Process-control event kind.
+/// - reliable: Non-zero requests reliable delivery.
+/// - priority: 1=low, 2=normal, 3=high, 4=critical.
+///
+/// Returns:
+/// - 0 on success
+/// - usize::MAX on error
+pub fn sys_event_send_group(trapframe: &mut Trapframe) -> usize {
+    let task = match mytask() {
+        Some(task) => task,
+        None => return usize::MAX,
+    };
+    let group_id = trapframe.get_arg(0);
+    let kind = trapframe.get_arg(1) as u32;
+    let reliable = trapframe.get_arg(2) as u32 != 0;
+    let prio_raw = trapframe.get_arg(3) as u32;
+    trapframe.increment_pc_next(&task);
+
+    let priority = match prio_raw {
+        1 => EventPriority::Low,
+        3 => EventPriority::High,
+        4 => EventPriority::Critical,
+        _ => EventPriority::Normal,
+    };
+
+    let ptype = match kind {
+        0 => ProcessControlType::Terminate,
+        1 => ProcessControlType::Kill,
+        2 => ProcessControlType::Stop,
+        3 => ProcessControlType::Continue,
+        4 => ProcessControlType::Interrupt,
+        5 => ProcessControlType::Quit,
+        6 => ProcessControlType::Hangup,
+        7 => ProcessControlType::ChildExit,
+        8 => ProcessControlType::PipeBroken,
+        9 => ProcessControlType::Alarm,
+        10 => ProcessControlType::IoReady,
+        11 => ProcessControlType::TerminalStop,
+        12 => ProcessControlType::TerminalInput,
+        13 => ProcessControlType::TerminalOutput,
+        14 => ProcessControlType::WindowChange,
+        _ => return usize::MAX,
+    };
+
+    let global_group_id = if group_id == 0 {
+        task.get_process_group_id()
+    } else {
+        let Some(global_task_id) = task.get_namespace().resolve_global_id(group_id) else {
+            return usize::MAX;
+        };
+        let Some(group_leader) = crate::sched::scheduler::get_task_by_id(global_task_id) else {
+            return usize::MAX;
+        };
+        if group_leader.get_process_group_id() != global_task_id {
+            return usize::MAX;
+        }
+        global_task_id
+    };
+
+    let event = Event::group(
+        GroupTarget::TaskGroup(global_group_id as u32),
+        EventContent::ProcessControl(ptype),
+        priority,
+        reliable,
+        EventPayload::Empty,
+    );
 
     let mgr = EventManager::get_manager();
     match mgr.send_event(event) {
@@ -379,7 +483,7 @@ pub fn sys_shared_memory_create(trapframe: &mut Trapframe) -> usize {
     let permissions = trapframe.get_arg(1);
 
     // Increment PC to avoid infinite loop if creation fails
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     // Validate size (must be non-zero and reasonable)
     if size == 0 || size > 1024 * 1024 * 1024 {
@@ -421,13 +525,13 @@ pub fn sys_shared_memory_create(trapframe: &mut Trapframe) -> usize {
 
 /// sys_shared_memory_resize - Resize a shared memory object
 ///
-/// Arguments:
-/// - handle: Handle to the shared memory object
-/// - size: New size in bytes (will be page-aligned in kernel)
+/// # Arguments
 ///
-/// Returns:
-/// - 0 on success
-/// - usize::MAX on error
+/// * `trapframe` - Register state containing the shared-memory handle and new size.
+///
+/// # Returns
+///
+/// Zero on success or `usize::MAX` on error.
 pub fn sys_shared_memory_resize(trapframe: &mut Trapframe) -> usize {
     let task = match mytask() {
         Some(task) => task,
@@ -437,14 +541,18 @@ pub fn sys_shared_memory_resize(trapframe: &mut Trapframe) -> usize {
     let handle = trapframe.get_arg(0) as u32;
     let size = trapframe.get_arg(1);
 
-    crate::println!("[sys_shared_memory_resize] handle={} size={}", handle, size);
+    if super::shared_memory::LOG_SHARED_MEMORY_RESIZE {
+        crate::println!("[sys_shared_memory_resize] handle={} size={}", handle, size);
+    }
 
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     let kernel_obj = match task.handle_table.get(handle) {
         Some(obj) => obj,
         None => {
-            crate::println!("[sys_shared_memory_resize] handle not found");
+            if super::shared_memory::LOG_SHARED_MEMORY_RESIZE {
+                crate::println!("[sys_shared_memory_resize] handle not found");
+            }
             return usize::MAX;
         }
     };
@@ -452,20 +560,26 @@ pub fn sys_shared_memory_resize(trapframe: &mut Trapframe) -> usize {
     let shared_memory = match kernel_obj.as_shared_memory() {
         Some(obj) => obj,
         None => {
-            crate::println!("[sys_shared_memory_resize] not a shared memory object");
+            if super::shared_memory::LOG_SHARED_MEMORY_RESIZE {
+                crate::println!("[sys_shared_memory_resize] not a shared memory object");
+            }
             return usize::MAX;
         }
     };
 
     if let Err(e) = shared_memory.resize(size) {
-        crate::println!("[sys_shared_memory_resize] resize failed: {}", e);
+        if super::shared_memory::LOG_SHARED_MEMORY_RESIZE {
+            crate::println!("[sys_shared_memory_resize] resize failed: {}", e);
+        }
         return usize::MAX;
     }
 
-    crate::println!(
-        "[sys_shared_memory_resize] SUCCESS new_size={}",
-        shared_memory.size()
-    );
+    if super::shared_memory::LOG_SHARED_MEMORY_RESIZE {
+        crate::println!(
+            "[sys_shared_memory_resize] SUCCESS new_size={}",
+            shared_memory.size()
+        );
+    }
     0
 }
 
@@ -493,32 +607,36 @@ pub fn sys_socket_send_handle(trapframe: &mut Trapframe) -> usize {
     let object_handle = trapframe.get_arg(1) as u32;
 
     // Increment PC to avoid infinite loop
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     // Get the socket object (LocalSocket-only)
-    let socket_obj = match task.handle_table.get(socket_handle) {
-        Some(KernelObject::Socket(socket)) => socket.clone(),
-        _ => return usize::MAX, // Invalid socket handle
+    let socket_obj = match task
+        .handle_table
+        .get(socket_handle)
+        .and_then(KernelObject::into_socket_arc)
+    {
+        Some(socket) => socket,
+        None => return usize::MAX, // Invalid socket handle
     };
 
     use crate::network::local::LocalSocket;
-    let local_socket = match LocalSocket::from_socket_object(&socket_obj) {
+    let local_socket = match LocalSocket::from_socket_object(socket_obj.as_ref()) {
         Some(s) => s,
         None => return usize::MAX, // Not a LocalSocket
     };
 
     // Get the kernel object to send with dup semantics
     // Use clone_for_dup() to properly increment reference counts for objects like Pipes
-    let object = match task.handle_table.clone_for_dup(object_handle) {
-        Some(obj) => obj,
+    let (object, metadata) = match task.handle_table.clone_for_dup(object_handle) {
+        Some(entry) => entry,
         None => return usize::MAX, // Invalid object handle
     };
 
     // Send the handle through the socket
-    match local_socket.send_handle(object) {
-        Ok(()) => 0,
-        Err(_) => usize::MAX,
-    }
+    local_socket
+        .send_handle(object, metadata)
+        .map(|()| 0)
+        .unwrap_or_else(socket_ipc_error_result)
 }
 
 /// sys_socket_recv_handle - Receive a kernel object handle from a socket
@@ -531,6 +649,7 @@ pub fn sys_socket_send_handle(trapframe: &mut Trapframe) -> usize {
 ///
 /// Returns:
 /// - Handle to the received kernel object on success
+/// - `-EAGAIN` if the socket is non-blocking and no handle is first in order
 /// - usize::MAX on error (no handle available or other error)
 pub fn sys_socket_recv_handle(trapframe: &mut Trapframe) -> usize {
     let task = match mytask() {
@@ -541,29 +660,38 @@ pub fn sys_socket_recv_handle(trapframe: &mut Trapframe) -> usize {
     let socket_handle = trapframe.get_arg(0) as u32;
 
     // Increment PC to avoid infinite loop
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     // Get the socket object (LocalSocket-only)
-    let socket_obj = match task.handle_table.get(socket_handle) {
-        Some(KernelObject::Socket(socket)) => socket.clone(),
-        _ => return usize::MAX, // Invalid socket handle
+    let socket_obj = match task
+        .handle_table
+        .get(socket_handle)
+        .and_then(KernelObject::into_socket_arc)
+    {
+        Some(socket) => socket,
+        None => return usize::MAX, // Invalid socket handle
     };
 
-    // For LocalSocket, we provide blocking semantics: if the handle queue is empty,
-    // block the task until a handle arrives or the peer is closed.
+    // Block only while the ordered receive queue is empty. If another segment
+    // type is first, recv_handle_blocking returns EAGAIN instead of skipping it.
     use crate::network::local::LocalSocket;
-    let local_socket = match LocalSocket::from_socket_object(&socket_obj) {
+    let local_socket = match LocalSocket::from_socket_object(socket_obj.as_ref()) {
         Some(s) => s,
         None => return usize::MAX, // Not a LocalSocket
     };
 
-    let object = match local_socket.recv_handle_blocking(task.get_id(), trapframe) {
-        Ok(obj) => obj,
-        Err(_) => return usize::MAX,
+    let received = if local_socket.is_nonblocking() {
+        local_socket.recv_handle()
+    } else {
+        local_socket.recv_handle_blocking(task.get_id(), trapframe)
+    };
+    let (object, metadata) = match received {
+        Ok(entry) => entry,
+        Err(error) => return socket_ipc_error_result(error),
     };
 
     // Insert the received object into this task's handle table
-    match task.handle_table.insert(object) {
+    match task.handle_table.insert_with_metadata(object, metadata) {
         Ok(handle) => handle as usize,
         Err(_) => usize::MAX, // Too many open handles
     }
@@ -571,9 +699,9 @@ pub fn sys_socket_recv_handle(trapframe: &mut Trapframe) -> usize {
 
 /// sys_socket_send_handle_and_data - Send a kernel object handle and data atomically
 ///
-/// Sends a kernel object handle through a connected socket, along with data.
-/// This ensures both the handle and data are available before waking the peer,
-/// preventing race conditions in protocols like Wayland.
+/// Sends one boundary-preserving record containing a duplicated kernel object
+/// handle and its associated bytes. The record is ordered with ordinary byte
+/// writes and handle-only transfers on the same local socket.
 ///
 /// Arguments:
 /// - socket_handle: Handle to the connected socket
@@ -583,7 +711,9 @@ pub fn sys_socket_recv_handle(trapframe: &mut Trapframe) -> usize {
 ///
 /// Returns:
 /// - 0 on success
-/// - usize::MAX on error
+/// - `-EAGAIN` if the peer queue is full
+/// - `-EMSGSIZE` if the record exceeds the supported maximum
+/// - usize::MAX on other errors
 pub fn sys_socket_send_handle_and_data(trapframe: &mut Trapframe) -> usize {
     let task = match mytask() {
         Some(task) => task,
@@ -596,52 +726,43 @@ pub fn sys_socket_send_handle_and_data(trapframe: &mut Trapframe) -> usize {
     let data_len = trapframe.get_arg(3);
 
     // Increment PC to avoid infinite loop
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     // Get the socket object (LocalSocket-only)
-    let socket_obj = match task.handle_table.get(socket_handle) {
-        Some(KernelObject::Socket(socket)) => socket.clone(),
-        _ => return usize::MAX, // Invalid socket handle
+    let socket_obj = match task
+        .handle_table
+        .get(socket_handle)
+        .and_then(KernelObject::into_socket_arc)
+    {
+        Some(socket) => socket,
+        None => return usize::MAX, // Invalid socket handle
     };
 
     use crate::network::local::LocalSocket;
-    let local_socket = match LocalSocket::from_socket_object(&socket_obj) {
+    let local_socket = match LocalSocket::from_socket_object(socket_obj.as_ref()) {
         Some(s) => s,
         None => return usize::MAX, // Not a LocalSocket
     };
 
     // Get the kernel object to send with dup semantics
-    let object = match task.handle_table.clone_for_dup(object_handle) {
-        Some(obj) => obj,
+    let (object, metadata) = match task.handle_table.clone_for_dup(object_handle) {
+        Some(entry) => entry,
         None => return usize::MAX, // Invalid object handle
     };
 
-    // Validate and translate data pointer
-    if data_len == 0 {
-        // No data to send, just send the handle
-        match local_socket.send_handle(object) {
-            Ok(()) => return 0,
-            Err(_) => return usize::MAX,
-        }
+    if data_len > crate::network::local::MAX_HANDLE_DATA_RECORD_SIZE {
+        return NATIVE_EMSGSIZE;
     }
 
-    let data_addr = match task.vm_manager.translate_vaddr(data_ptr) {
-        Some(addr) => addr,
-        None => return usize::MAX, // Invalid pointer
-    };
-
-    // Limit data size to prevent DoS attacks
-    const MAX_SEND_SIZE: usize = 65536; // 64 KB max
-    let data_len = data_len.min(MAX_SEND_SIZE);
-
-    // Read data from userspace
-    let data = unsafe { core::slice::from_raw_parts(data_addr as *const u8, data_len) };
-
-    // Send the handle and data atomically
-    match local_socket.send_handle_and_data(object, data) {
-        Ok(()) => 0,
-        Err(_) => usize::MAX,
+    let mut data = vec![0u8; data_len];
+    if data_len != 0 && copy_from_user(&task, data_ptr, &mut data).is_err() {
+        return usize::MAX;
     }
+
+    local_socket
+        .send_handle_and_data(object, metadata, &data)
+        .map(|()| 0)
+        .unwrap_or_else(socket_ipc_error_result)
 }
 
 /// sys_socket_recv_handle_and_data - Receive a kernel object handle and data atomically
@@ -653,11 +774,14 @@ pub fn sys_socket_send_handle_and_data(trapframe: &mut Trapframe) -> usize {
 /// - socket_handle: Handle to the connected socket
 /// - handle_ptr: Pointer to store the received handle (output)
 /// - data_ptr: Pointer to store the received data (output)
-/// - max_data_len: Maximum amount of data to receive
+/// - max_data_len: Capacity of the destination buffer
+/// - required_len_ptr: Optional pointer receiving the complete record length
 ///
 /// Returns:
 /// - Number of bytes received on success
-/// - usize::MAX on error
+/// - `-EAGAIN` if no handle-and-data record is first in receive order
+/// - `-EMSGSIZE` if the destination is too small; the record remains queued
+/// - usize::MAX on other errors
 pub fn sys_socket_recv_handle_and_data(trapframe: &mut Trapframe) -> usize {
     let task = match mytask() {
         Some(task) => task,
@@ -668,59 +792,379 @@ pub fn sys_socket_recv_handle_and_data(trapframe: &mut Trapframe) -> usize {
     let handle_ptr = trapframe.get_arg(1);
     let data_ptr = trapframe.get_arg(2);
     let max_data_len = trapframe.get_arg(3);
+    let required_len_ptr = trapframe.get_arg(4);
 
     // Increment PC to avoid infinite loop
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     // Get the socket object (LocalSocket-only)
-    let socket_obj = match task.handle_table.get(socket_handle) {
-        Some(KernelObject::Socket(socket)) => socket.clone(),
-        _ => return usize::MAX, // Invalid socket handle
+    let socket_obj = match task
+        .handle_table
+        .get(socket_handle)
+        .and_then(KernelObject::into_socket_arc)
+    {
+        Some(socket) => socket,
+        None => return usize::MAX, // Invalid socket handle
     };
 
     use crate::network::local::LocalSocket;
-    let local_socket = match LocalSocket::from_socket_object(&socket_obj) {
+    let local_socket = match LocalSocket::from_socket_object(socket_obj.as_ref()) {
         Some(s) => s,
         None => return usize::MAX, // Not a LocalSocket
     };
 
-    // Limit data size to prevent DoS attacks
-    const MAX_RECV_SIZE: usize = 65536; // 64 KB max
-    let max_data_len = max_data_len.min(MAX_RECV_SIZE);
+    if handle_ptr == 0 || (max_data_len != 0 && data_ptr == 0) {
+        return usize::MAX;
+    }
 
     // Receive handle and data atomically
-    let (object, data) = match local_socket.recv_handle_and_data(max_data_len) {
-        Ok((h, d)) => (h, d),
-        Err(_) => return usize::MAX,
+    let (object, metadata, data) = match local_socket.recv_handle_and_data(max_data_len) {
+        Ok(entry) => entry,
+        Err(crate::ipc::IpcError::BufferTooSmall { required }) => {
+            if required_len_ptr != 0
+                && copy_to_user(&task, required_len_ptr, &required.to_le_bytes()).is_err()
+            {
+                return usize::MAX;
+            }
+            return NATIVE_EMSGSIZE;
+        }
+        Err(error) => return socket_ipc_error_result(error),
     };
 
+    if required_len_ptr != 0
+        && copy_to_user(&task, required_len_ptr, &data.len().to_le_bytes()).is_err()
+    {
+        return usize::MAX;
+    }
+
     // Insert the received object into this task's handle table
-    let new_handle = match task.handle_table.insert(object) {
+    let new_handle = match task.handle_table.insert_with_metadata(object, metadata) {
         Ok(h) => h,
         Err(_) => return usize::MAX, // Too many open handles
     };
 
     // Write the handle value to userspace
-    if handle_ptr != 0 {
-        let handle_addr = match task.vm_manager.translate_vaddr(handle_ptr) {
-            Some(addr) => addr as *mut u32,
-            None => return usize::MAX,
-        };
-        unsafe {
-            *handle_addr = new_handle;
+    // Write the data to userspace
+    if !data.is_empty() {
+        if copy_to_user(&task, data_ptr, &data).is_err() {
+            let _ = task.handle_table.remove(new_handle);
+            return usize::MAX;
         }
     }
 
-    // Write the data to userspace
-    if !data.is_empty() && data_ptr != 0 {
-        let data_addr = match task.vm_manager.translate_vaddr(data_ptr) {
-            Some(addr) => addr as *mut u8,
-            None => return usize::MAX,
-        };
-        unsafe {
-            core::ptr::copy_nonoverlapping(data.as_ptr(), data_addr, data.len());
-        }
+    // Publish the handle only after the complete record payload is copied.
+    if copy_to_user(&task, handle_ptr, &new_handle.to_le_bytes()).is_err() {
+        let _ = task.handle_table.remove(new_handle);
+        return usize::MAX;
     }
 
     data.len()
+}
+
+// === Scarlet Native Event Handling System Calls ===
+
+/// Register a user-space event handler for Scarlet Native ABI
+///
+/// Arguments:
+/// - content_type: u8 (0=ProcessControl, 1=Message, 2=Notification, 3=Custom)
+/// - handler_addr: usize (user-space function address)
+/// - synchronous: u32 (0=async, 1=sync)
+/// - is_default: u32 (0=specific handler, 1=default handler)
+///
+/// Returns:
+/// - 0 on success
+/// - usize::MAX on error
+pub fn sys_event_handler_register_native(trapframe: &mut Trapframe) -> usize {
+    let task = match mytask() {
+        Some(task) => task,
+        None => return usize::MAX,
+    };
+
+    let content_type = trapframe.get_arg(0) as u8;
+    let handler_addr = trapframe.get_arg(1);
+    let synchronous = trapframe.get_arg(2) != 0;
+    let is_default = trapframe.get_arg(3) != 0;
+
+    if content_type > 3 || handler_addr == 0 {
+        trapframe.increment_pc_next(&task);
+        return usize::MAX;
+    }
+
+    trapframe.increment_pc_next(&task);
+
+    let result = task.with_default_abi_mut(|abi, _task| {
+        if let Some(scarlet_abi) = abi
+            .as_any_mut()
+            .downcast_mut::<crate::abi::scarlet::ScarletAbi>()
+        {
+            if is_default {
+                scarlet_abi.set_default_event_handler(handler_addr, synchronous, None);
+            } else {
+                // Legacy registrations cannot name an executable restorer.
+                scarlet_abi.register_event_handler(content_type, handler_addr, synchronous, None);
+            }
+            Ok(())
+        } else {
+            Err("Not a Scarlet Native ABI")
+        }
+    });
+
+    match result {
+        Ok(()) => 0,
+        Err(_) => usize::MAX,
+    }
+}
+
+/// Register a user-space event handler with an executable event-return restorer.
+///
+/// Arguments:
+/// - content_type: u8 (0=ProcessControl, 1=Message, 2=Notification, 3=Custom)
+/// - handler_addr: usize (user-space function address)
+/// - synchronous: u32 (0=async, 1=sync)
+/// - is_default: u32 (0=specific handler, 1=default handler)
+/// - restorer_addr: usize (executable user-space `event_return` trampoline)
+///
+/// Returns:
+/// - 0 on success
+/// - usize::MAX on error
+pub fn sys_event_handler_register_native_with_restorer(trapframe: &mut Trapframe) -> usize {
+    let task = match mytask() {
+        Some(task) => task,
+        None => return usize::MAX,
+    };
+
+    let content_type = trapframe.get_arg(0) as u8;
+    let handler_addr = trapframe.get_arg(1);
+    let synchronous = trapframe.get_arg(2) != 0;
+    let is_default = trapframe.get_arg(3) != 0;
+    let restorer_addr = trapframe.get_arg(4);
+
+    if content_type > 3
+        || handler_addr == 0
+        || restorer_addr == 0
+        || task
+            .vm_manager
+            .translate_to_phys_with_access(
+                restorer_addr,
+                crate::object::capability::memory_mapping::AccessOp::Instruction,
+            )
+            .is_none()
+    {
+        trapframe.increment_pc_next(&task);
+        return usize::MAX;
+    }
+
+    trapframe.increment_pc_next(&task);
+
+    let result = task.with_default_abi_mut(|abi, _task| {
+        if let Some(scarlet_abi) = abi
+            .as_any_mut()
+            .downcast_mut::<crate::abi::scarlet::ScarletAbi>()
+        {
+            if is_default {
+                scarlet_abi.set_default_event_handler(
+                    handler_addr,
+                    synchronous,
+                    Some(restorer_addr),
+                );
+            } else {
+                scarlet_abi.register_event_handler(
+                    content_type,
+                    handler_addr,
+                    synchronous,
+                    Some(restorer_addr),
+                );
+            }
+            Ok(())
+        } else {
+            Err("Not a Scarlet Native ABI")
+        }
+    });
+
+    match result {
+        Ok(()) => 0,
+        Err(_) => usize::MAX,
+    }
+}
+
+/// Unregister a user-space event handler
+///
+/// Arguments:
+/// - content_type: u8 (handler to unregister)
+///
+/// Returns:
+/// - 0 on success
+/// - usize::MAX on error
+pub fn sys_event_handler_unregister_native(trapframe: &mut Trapframe) -> usize {
+    let task = match mytask() {
+        Some(task) => task,
+        None => return usize::MAX,
+    };
+
+    let content_type = trapframe.get_arg(0) as u8;
+    trapframe.increment_pc_next(&task);
+
+    let result = task.with_default_abi_mut(|abi, _task| {
+        if let Some(scarlet_abi) = abi
+            .as_any_mut()
+            .downcast_mut::<crate::abi::scarlet::ScarletAbi>()
+        {
+            scarlet_abi.unregister_event_handler(content_type);
+            Ok(())
+        } else {
+            Err("Not a Scarlet Native ABI")
+        }
+    });
+
+    match result {
+        Ok(()) => 0,
+        Err(_) => usize::MAX,
+    }
+}
+
+/// Set event mask for blocking events
+///
+/// Arguments:
+/// - operation: u32 (0=block, 1=unblock, 2=set_all, 3=clear_all)
+/// - event_kind: u32 (0=ProcessControl, 1=Notification, 2=All)
+/// - event_subtype: u32 (specific ProcessControl type; interpreted as a concrete
+///   `ProcessControlType` value when `event_kind == 0`)
+///
+/// Notes:
+/// - To affect all events, use `event_kind = 2` (All) and/or operations 2/3
+///   (`set_all` / `clear_all`). There is no special "0 for all" subtype value.
+///
+/// Returns:
+/// - 0 on success
+/// - usize::MAX on error
+pub fn sys_event_mask(trapframe: &mut Trapframe) -> usize {
+    let task = match mytask() {
+        Some(task) => task,
+        None => return usize::MAX,
+    };
+
+    let operation = trapframe.get_arg(0) as u32;
+    let event_kind = trapframe.get_arg(1) as u32;
+    let event_subtype = trapframe.get_arg(2) as u32;
+    trapframe.increment_pc_next(&task);
+
+    let result = task.with_default_abi_mut(|abi, _task| {
+        if let Some(scarlet_abi) = abi
+            .as_any_mut()
+            .downcast_mut::<crate::abi::scarlet::ScarletAbi>()
+        {
+            match operation {
+                0 => {
+                    // Block
+                    match event_kind {
+                        0 => {
+                            // ProcessControl
+                            let ptype = subtype_to_process_control(event_subtype);
+                            scarlet_abi.event_mask.block_process_control(ptype);
+                        }
+                        2 => {
+                            // All
+                            scarlet_abi.event_mask.block_all();
+                        }
+                        1 => {
+                            // Notification masking not yet implemented
+                            return Err("Notification masking not implemented");
+                        }
+                        _ => {
+                            // Unknown event kind
+                            return Err("Invalid event_kind");
+                        }
+                    }
+                }
+                1 => {
+                    // Unblock
+                    match event_kind {
+                        0 => {
+                            // ProcessControl
+                            let ptype = subtype_to_process_control(event_subtype);
+                            scarlet_abi.event_mask.unblock_process_control(ptype);
+                        }
+                        2 => {
+                            // All
+                            scarlet_abi.event_mask.unblock_all();
+                        }
+                        1 => {
+                            // Notification unmasking not yet implemented
+                            return Err("Notification masking not implemented");
+                        }
+                        _ => {
+                            // Unknown event kind
+                            return Err("Invalid event_kind");
+                        }
+                    }
+                    // Pending events are delivered by the common user-return hook after
+                    // syscall return-value finalization.
+                }
+                2 => {
+                    // Set all (block all)
+                    scarlet_abi.event_mask.block_all();
+                }
+                3 => {
+                    // Clear all (unblock all)
+                    scarlet_abi.event_mask.unblock_all();
+                    // Pending events are delivered by the common user-return hook after
+                    // syscall return-value finalization.
+                }
+                _ => return Err("Invalid operation"),
+            }
+            Ok(())
+        } else {
+            Err("Not a Scarlet Native ABI")
+        }
+    });
+
+    match result {
+        Ok(()) => 0,
+        Err(_) => usize::MAX,
+    }
+}
+
+/// Return from event handler (restores saved context)
+///
+/// This should be called by the event handler trampoline
+/// to return control to the interrupted code.
+///
+/// Returns:
+/// - Does not return normally (switches context)
+/// - usize::MAX on error
+/// Restore context saved by `ScarletAbi::invoke_user_handler` and resume
+/// the interrupted code.  Delegates to the arch-specific `ScarletAbi::event_return`.
+pub fn sys_event_return(trapframe: &mut Trapframe) -> usize {
+    let task = match mytask() {
+        Some(task) => task,
+        None => return usize::MAX,
+    };
+
+    match crate::abi::scarlet::ScarletAbi::event_return(trapframe, &task) {
+        Ok(()) => trapframe.get_arg(0),
+        Err(_) => usize::MAX,
+    }
+}
+
+/// Helper function to convert subtype number to ProcessControlType
+fn subtype_to_process_control(subtype: u32) -> ProcessControlType {
+    match subtype {
+        0 => ProcessControlType::Terminate,
+        1 => ProcessControlType::Kill,
+        2 => ProcessControlType::Stop,
+        3 => ProcessControlType::Continue,
+        4 => ProcessControlType::Interrupt,
+        5 => ProcessControlType::Quit,
+        6 => ProcessControlType::Hangup,
+        7 => ProcessControlType::ChildExit,
+        8 => ProcessControlType::PipeBroken,
+        9 => ProcessControlType::Alarm,
+        10 => ProcessControlType::IoReady,
+        11 => ProcessControlType::TerminalStop,
+        12 => ProcessControlType::TerminalInput,
+        13 => ProcessControlType::TerminalOutput,
+        14 => ProcessControlType::WindowChange,
+        n if n >= 256 => ProcessControlType::User(n - 256),
+        n => ProcessControlType::User(n - 15),
+    }
 }

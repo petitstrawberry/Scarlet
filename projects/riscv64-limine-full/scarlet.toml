@@ -1,0 +1,56 @@
+schema_version = 2
+
+[project]
+name = "scarlet-riscv64-limine-full"
+
+[bsp]
+path = "bsp"
+package = "scarlet"
+
+[bsp.kernel]
+source = { git = "https://github.com/petitstrawberry/Scarlet", tag = "kernel-v1.0.0" }
+features = ["network", "user-fpu", "user-vector", "hypervisor", "limine"]
+
+[modules]
+"scarlet-module-prototype" = { git = "https://github.com/petitstrawberry/Scarlet", tag = "kernel-v1.0.0", enabled = true }
+
+[images]
+
+[images.initramfs]
+format = "newc"
+output = ".scarlet/images/initramfs-riscv64-full.cpio"
+
+[[images.initramfs.layers]]
+kind = "bundle"
+path = "../../bundles/base/bundle.toml"
+
+[[images.initramfs.layers]]
+kind = "bundle"
+path = "../../bundles/cli-utils/bundle.toml"
+
+[images.rootfs]
+format = "ext2"
+output = ".scarlet/images/rootfs-riscv64-full.ext2"
+
+[[images.rootfs.layers]]
+kind = "bundle"
+path = "../../bundles/full/bundle.toml"
+
+[[images.rootfs.layers]]
+kind = "copy"
+source = "rootfs/root"
+to = "/root"
+
+[images.boot]
+format = "limine-uefi"
+output = ".scarlet/images/limine-riscv64-full.img"
+cmdline = "console=ttyS0 root=/dev/vblk1"
+deps = ["initramfs"]
+
+[[images.boot.layers]]
+kind = "image"
+source = "initramfs"
+to = "/boot/initramfs"
+
+[runner]
+command = "tools/run.sh"

@@ -39,6 +39,12 @@ pub enum KernelObjectType {
     SharedMemory = 8,
     /// Counter for event notification (like eventfd)
     Counter = 9,
+    /// Timer object
+    Timer = 10,
+    /// GPU child capability object
+    Gpu = 11,
+    Environment = 12,
+    VfsView = 13,
     /// Unknown or unsupported type
     Unknown = 0,
 }
@@ -74,6 +80,25 @@ pub enum HandleRole {
 }
 
 impl KernelObjectInfo {
+    pub fn for_environment(view: bool, writable: bool) -> Self {
+        Self {
+            object_type: if view {
+                KernelObjectType::VfsView
+            } else {
+                KernelObjectType::Environment
+            },
+            capabilities: ObjectCapabilities {
+                stream_ops: false,
+                file_ops: false,
+                pipe_ops: false,
+                event_ops: false,
+                clone_ops: false,
+                reserved: [false; 3],
+            },
+            handle_role: HandleRole::Regular,
+            access_mode: Self::encode_access_mode(true, writable),
+        }
+    }
     /// Create info for a File KernelObject
     pub fn for_file(handle_role: HandleRole, readable: bool, writable: bool) -> Self {
         Self {
@@ -118,6 +143,23 @@ impl KernelObjectInfo {
                 pipe_ops: false,
                 event_ops: false,
                 clone_ops: true,
+                reserved: [false; 3],
+            },
+            handle_role,
+            access_mode: Self::encode_access_mode(readable, writable),
+        }
+    }
+
+    /// Create info for a Timer KernelObject
+    pub fn for_timer(handle_role: HandleRole, readable: bool, writable: bool) -> Self {
+        Self {
+            object_type: KernelObjectType::Timer,
+            capabilities: ObjectCapabilities {
+                stream_ops: true,
+                file_ops: false,
+                pipe_ops: false,
+                event_ops: false,
+                clone_ops: false,
                 reserved: [false; 3],
             },
             handle_role,
@@ -189,6 +231,34 @@ impl KernelObjectInfo {
                 event_ops: false,
                 clone_ops: false, // Uses Arc::clone directly
                 reserved: [false; 3],
+            },
+            handle_role,
+            access_mode: Self::encode_access_mode(readable, writable),
+        }
+    }
+
+    /// Create info for a GPU child KernelObject.
+    ///
+    /// The three reserved capability bits are assigned, in order, to mapping,
+    /// selectable readiness, and control because this ABI predates dedicated
+    /// fields for those optional capabilities.
+    pub fn for_gpu(
+        handle_role: HandleRole,
+        readable: bool,
+        writable: bool,
+        memory_mapping: bool,
+        selectable: bool,
+        control: bool,
+    ) -> Self {
+        Self {
+            object_type: KernelObjectType::Gpu,
+            capabilities: ObjectCapabilities {
+                stream_ops: false,
+                file_ops: false,
+                pipe_ops: false,
+                event_ops: false,
+                clone_ops: false,
+                reserved: [memory_mapping, selectable, control],
             },
             handle_role,
             access_mode: Self::encode_access_mode(readable, writable),

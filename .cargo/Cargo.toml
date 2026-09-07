@@ -1,0 +1,32 @@
+[workspace]
+resolver = "2"
+members = [
+    "../user/bin",
+    "../user/std-bin",
+    "../user/tonic-demo",
+    "../user/websocket-demo",
+    "../user/video_player",
+]
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+
+[patch.crates-io]
+ring = { git = "https://github.com/petitstrawberry/ring.git", branch = "scarlet" }
+socket2 = { git = "https://github.com/petitstrawberry/socket2.git", branch = "scarlet" }
+tokio = { git = "https://github.com/petitstrawberry/tokio.git", branch = "scarlet" }
+tonic = { git = "https://github.com/petitstrawberry/grpc-rust.git", branch = "scarlet" }
+
+[patch."https://github.com/petitstrawberry/Scarlet"]
+scarlet-abi = { path = "../user/lib/scarlet-abi" }
+scarlet-os = { path = "../user/lib/scarlet-os" }
+scarlet-rt = { path = "../user/lib/scarlet-rt" }
+scarlet-std = { path = "../user/lib/std" }
+scarlet-sys = { path = "../user/lib/scarlet-sys" }
+gpu-raw = { path = "../user/lib/gpu-raw" }
+sws-client = { path = "../user/lib/sws-client" }
+sws-protocol = { path = "../user/lib/sws-protocol" }
+sws-remote-protocol = { path = "../user/lib/sws-remote-protocol" }

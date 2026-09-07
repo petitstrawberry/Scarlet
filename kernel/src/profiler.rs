@@ -35,14 +35,14 @@ pub use self::profiler_impl::*;
 
 #[cfg(feature = "profiler")]
 mod profiler_impl {
-    use crate::early_println;
+    use crate::println;
+    use crate::sync::IrqSpinLock;
+    use crate::sync::Lazy;
     use crate::timer::get_time_ns;
     use alloc::collections::BTreeMap;
     use alloc::string::{String, ToString};
     use alloc::sync::Arc;
     use alloc::vec::Vec;
-    use lazy_static::lazy_static;
-    use spin::Mutex;
 
     /// Tree node for hierarchical profiling
     #[derive(Clone)]
@@ -84,15 +84,13 @@ mod profiler_impl {
         pub start_time: u64,
     }
 
-    lazy_static! {
-        /// Global profiling tree root
-        pub static ref PROFILER_ROOT: Arc<Mutex<ProfileNode>> =
-            Arc::new(Mutex::new(ProfileNode::new("ROOT".to_string())));
+    /// Global profiling tree root
+    pub static PROFILER_ROOT: Lazy<Arc<IrqSpinLock<ProfileNode>>> =
+        Lazy::new(|| Arc::new(IrqSpinLock::new(ProfileNode::new("ROOT".to_string()))));
 
-        /// Call stack for tracking current execution path
-        pub static ref CALL_STACK: Arc<Mutex<Vec<CallStackEntry>>> =
-            Arc::new(Mutex::new(Vec::new()));
-    }
+    /// Call stack for tracking current execution path
+    pub static CALL_STACK: Lazy<Arc<IrqSpinLock<Vec<CallStackEntry>>>> =
+        Lazy::new(|| Arc::new(IrqSpinLock::new(Vec::new())));
 
     /// A RAII guard that records the execution time of its scope.
     ///
@@ -157,20 +155,15 @@ mod profiler_impl {
     pub fn print_profiling_results() {
         let root = PROFILER_ROOT.lock();
 
-        early_println!("--- Tree-based Profiling Results ---");
-        early_println!(
+        println!("--- Tree-based Profiling Results ---");
+        println!(
             "{:<50} | {:>10} | {:>15} | {:>15} | {:>15} | {:>12}",
-            "Function",
-            "Count",
-            "Total (ms)",
-            "Self (ms)",
-            "Average (μs)",
-            "% of Parent"
+            "Function", "Count", "Total (ms)", "Self (ms)", "Average (μs)", "% of Parent"
         );
-        early_println!("{}", "-".repeat(140));
+        println!("{}", "-".repeat(140));
 
         print_node(&root, 0, root.total_time_ns);
-        early_println!("{}", "-".repeat(25));
+        println!("{}", "-".repeat(25));
     }
 
     fn print_node(node: &ProfileNode, depth: usize, parent_total_time: u64) {
@@ -200,7 +193,7 @@ mod profiler_impl {
         let base_width: usize = 50;
         let available_width = base_width.saturating_sub(indent.len());
 
-        early_println!(
+        println!(
             "{}{:<width$} | {:>10} | {:>15.3} | {:>15.3} | {:>15.3} | {:>11.2}%",
             indent,
             node.name,

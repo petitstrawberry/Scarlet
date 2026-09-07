@@ -1,0 +1,75 @@
+schema_version = 2
+
+[project]
+name = "scarlet-aarch64-limine-microvm"
+
+[bsp]
+path = "bsp"
+package = "scarlet"
+
+[bsp.kernel]
+source = { git = "https://github.com/petitstrawberry/Scarlet", tag = "kernel-v1.0.0" }
+features = ["network", "user-fpu", "user-vector", "hypervisor", "limine"]
+
+[modules]
+"scarlet-module-prototype" = { git = "https://github.com/petitstrawberry/Scarlet", tag = "kernel-v1.0.0", enabled = false }
+
+[images]
+
+[images.initramfs]
+format = "newc"
+output = ".scarlet/images/initramfs-aarch64-microvm.cpio"
+
+[[images.initramfs.layers]]
+kind = "bundle"
+path = "../../bundles/base/bundle.toml"
+
+[[images.initramfs.layers]]
+kind = "cargo"
+source = "../../user/bin"
+package = "user-bin"
+bin = "microvm-init"
+to = "/init"
+
+[images.rootfs]
+format = "ext2"
+output = ".scarlet/images/rootfs-aarch64-microvm.ext2"
+
+[[images.rootfs.layers]]
+kind = "bundle"
+path = "../../bundles/base/bundle.toml"
+
+[[images.rootfs.layers]]
+kind = "cargo"
+source = "../../user/bin"
+package = "user-bin"
+bin = "microvm-init"
+to = "/init"
+
+[[images.rootfs.layers]]
+kind = "bundle"
+path = "../../bundles/linux/bundle.toml"
+
+[[images.rootfs.layers]]
+kind = "copy"
+source = "prebuilt/systems"
+to = "/systems"
+
+[[images.rootfs.layers]]
+kind = "copy"
+source = "rootfs/systems"
+to = "/systems"
+
+[images.boot]
+format = "limine-uefi"
+output = ".scarlet/images/limine-aarch64-microvm.img"
+cmdline = "console=ttyAMA0"
+deps = ["initramfs"]
+
+[[images.boot.layers]]
+kind = "image"
+source = "initramfs"
+to = "/boot/initramfs"
+
+[runner]
+command = "tools/run_aarch64.sh"

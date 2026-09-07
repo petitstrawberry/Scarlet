@@ -1,8 +1,7 @@
 //! Surface (window buffer) management
 
 use crate::Error;
-use scarlet_std::ipc::SharedMemory;
-use scarlet_std::handle::capability::memory_mapping::flags as mmap_flags;
+use crate::os::{SharedMemory, mmap_flags, munmap, permissions};
 
 /// A surface represents a drawable window buffer
 ///
@@ -25,14 +24,14 @@ pub struct Surface {
     dirty: bool,
 }
 
+// SAFETY: `Surface` owns its mapping and never exposes the raw pointer without
+// borrowing itself. Shared connections guard every surface with a mutex, so a
+// surface can be transferred between threads without concurrent mutable access.
+unsafe impl Send for Surface {}
+
 impl Surface {
     /// Create a new surface from server-provided resources
-    pub(crate) fn new(
-        id: u32,
-        width: u32,
-        height: u32,
-        shm: SharedMemory,
-    ) -> Result<Self, Error> {
+    pub(crate) fn new(id: u32, width: u32, height: u32, shm: SharedMemory) -> Result<Self, Error> {
         let (buffer_ptr, buffer_len, _addr) = Self::map_shm(&shm, width, height)?;
 
         Ok(Self {
@@ -53,24 +52,33 @@ impl Surface {
     ) -> Result<(*mut u8, usize, usize), Error> {
         let buffer_size = (width * height * 4) as usize;
 
-        let addr = shm
-            .as_handle()
-            .as_memory_mapping()
-            .map_err(|_| Error::ShmMapFailed)?
-            .mmap(
-                0,
-                buffer_size,
-                scarlet_std::ipc::permissions::READ_WRITE,
-                mmap_flags::SHARED,
-                0,
-            )
-            .map_err(|_| Error::ShmMapFailed)?;
+        // SAFETY: This requests a fresh non-fixed mapping; its owning buffer/stream retains the backing and controls all CPU views and unmapping.
+        let addr = unsafe {
+            shm.as_handle()
+                .as_memory_mapping()
+                .map_err(|_| Error::ShmMapFailed)?
+                .mmap(
+                    0,
+                    buffer_size,
+                    permissions::READ_WRITE,
+                    mmap_flags::SHARED,
+                    0,
+                )
+        }
+        .map_err(|_| Error::ShmMapFailed)?;
 
         Ok((addr as *mut u8, buffer_size, addr))
     }
 
-    pub(crate) fn remap(&mut self, width: u32, height: u32, shm: SharedMemory) -> Result<(), Error> {
+    pub(crate) fn remap(
+        &mut self,
+        width: u32,
+        height: u32,
+        shm: SharedMemory,
+    ) -> Result<(), Error> {
         let (buffer_ptr, buffer_len, _addr) = Self::map_shm(&shm, width, height)?;
+        // SAFETY: This teardown/rollback path owns the exact mapping; its borrowed CPU views have ended before releasing the virtual range.
+        let _ = unsafe { munmap(self.buffer_ptr as usize, self.buffer_len) };
         self.width = width;
         self.height = height;
         self.shm = shm;
@@ -137,6 +145,10 @@ impl Surface {
         self.dirty = false;
     }
 
+    pub(crate) fn mark_dirty(&mut self) {
+        self.dirty = true;
+    }
+
     /// Get pixel at (x, y) as BGRA
     pub fn get_pixel(&self, x: u32, y: u32) -> Option<(u8, u8, u8, u8)> {
         if x >= self.width || y >= self.height {
@@ -174,5 +186,12 @@ impl Surface {
             chunk[3] = a;
         }
         self.dirty = true;
+    }
+}
+
+impl Drop for Surface {
+    fn drop(&mut self) {
+        // SAFETY: This teardown/rollback path owns the exact mapping; its borrowed CPU views have ended before releasing the virtual range.
+        let _ = unsafe { munmap(self.buffer_ptr as usize, self.buffer_len) };
     }
 }

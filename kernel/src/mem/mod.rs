@@ -6,25 +6,40 @@
 pub mod allocator;
 pub mod page;
 pub mod page_cache;
-
-use alloc::{boxed::Box, vec};
+pub mod pmm;
 
 use crate::environment::{MAX_NUM_CPUS, STACK_SIZE};
 
+/// Page-aligned backing storage for all bootstrap CPU stacks.
 #[repr(C, align(4096))]
 pub struct Stack {
     pub data: [u32; (STACK_SIZE / 4) * MAX_NUM_CPUS],
 }
 
 impl Stack {
+    /// Return the first kernel virtual address of the complete stack array.
+    ///
+    /// # Returns
+    ///
+    /// The inclusive start address, not an individual CPU's initial stack pointer.
     pub fn start(&self) -> usize {
         self.data.as_ptr() as usize
     }
 
+    /// Return the address immediately after the complete stack array.
+    ///
+    /// # Returns
+    ///
+    /// The exclusive end address, unlike the inclusive end used by `MemoryArea`.
     pub fn end(&self) -> usize {
         self.start() + self.size()
     }
 
+    /// Return the total backing-storage size for all bootstrap CPU stacks.
+    ///
+    /// # Returns
+    ///
+    /// `STACK_SIZE * MAX_NUM_CPUS` bytes, not the size of one CPU's stack.
     pub fn size(&self) -> usize {
         STACK_SIZE * MAX_NUM_CPUS
     }
@@ -35,33 +50,17 @@ pub static mut KERNEL_STACK: Stack = Stack {
     data: [0xdeadbeef; STACK_SIZE / 4 * MAX_NUM_CPUS],
 };
 
-/// Allocates a block of memory of the specified size from the kernel heap.
-///
-/// # Arguments
-///
-/// * `size` - The size of the memory block to allocate.
+/// Zero the linker-defined BSS during early boot.
 ///
 /// # Returns
 ///
-/// * A pointer to the allocated memory block.
+/// No value. Overwrites the complete half-open range `__BSS_START..__BSS_END`.
 ///
-pub fn kmalloc(size: usize) -> *mut u8 {
-    Box::into_raw(vec![0u8; size].into_boxed_slice()) as *mut u8
-}
-
-/// Frees a block of memory previously allocated with `kmalloc`.
+/// # Boot ordering
 ///
-/// # Arguments
-///
-/// * `ptr` - A pointer to the memory block to free.
-/// * `size` - The size of the memory block to free.
-///
-pub fn kfree(ptr: *mut u8, size: usize) {
-    unsafe {
-        let _ = Box::<[u8]>::from_raw(core::slice::from_raw_parts_mut(ptr, size));
-    }
-}
-
+/// This is an early-entry operation, not a runtime reset API. The boot path must
+/// arrange writable mappings and call it before BSS-backed state is initialized
+/// or accessed concurrently; calling it later can corrupt live kernel state.
 pub fn init_bss() {
     unsafe extern "C" {
         static mut __BSS_START: u8;

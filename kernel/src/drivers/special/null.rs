@@ -27,6 +27,7 @@ impl Selectable for NullDevice {
         _interest: crate::object::capability::selectable::ReadyInterest,
         _trapframe: &mut crate::arch::Trapframe,
         _timeout_ticks: Option<u64>,
+        _min_wait_ticks: u64,
     ) -> crate::object::capability::selectable::SelectWaitOutcome {
         crate::object::capability::selectable::SelectWaitOutcome::Ready
     }
@@ -65,6 +66,10 @@ impl CharDevice for NullDevice {
         Ok(())
     }
 
+    fn write(&self, buffer: &[u8]) -> Result<usize, &'static str> {
+        Ok(buffer.len())
+    }
+
     fn can_read(&self) -> bool {
         // Always readable (immediate EOF)
         true
@@ -86,7 +91,7 @@ impl MemoryMappingOps for NullDevice {
         &self,
         _offset: usize,
         _length: usize,
-    ) -> Result<(usize, usize, bool), &'static str> {
+    ) -> Result<crate::object::capability::MemoryMappingInfo, &'static str> {
         Err("Memory mapping not supported by null device")
     }
 
@@ -99,8 +104,7 @@ fn register_null_device() {
     let dm = DeviceManager::get_manager();
     let dev: Arc<dyn Device> = Arc::new(NullDevice);
     // Register with explicit name: "null"
-    let id = dm.register_device_with_name(String::from("null"), dev);
-    crate::early_println!("Null device registered as 'null' with ID: {}", id);
+    let _id = dm.register_device_with_name(String::from("null"), dev);
 }
 
 driver_initcall!(register_null_device);

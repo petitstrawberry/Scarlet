@@ -3,6 +3,7 @@
 //! This module implements the VfsNode trait for FAT32 filesystem nodes.
 //! It provides the interface between the VFS layer and FAT32-specific node data.
 
+use crate::sync::{IrqRwSpinLock, IrqSpinLock};
 use alloc::{
     boxed::Box,
     collections::BTreeMap,
@@ -12,7 +13,6 @@ use alloc::{
     vec::Vec,
 };
 use core::{any::Any, fmt::Debug};
-use spin::{Mutex, rwlock::RwLock};
 
 use crate::fs::{
     FileMetadata, FileObject, FilePermission, FileSystemError, FileSystemErrorKind, FileType,
@@ -23,7 +23,8 @@ use crate::object::capability::{ControlOps, MemoryMappingOps, StreamError, Strea
 use crate::environment::PAGE_SIZE;
 use crate::fs::vfs_v2::cache::PageCacheCapable;
 use crate::fs::vfs_v2::core::{FileSystemOperations, VfsNode};
-use crate::mem::{page::allocate_boxed_pages, page_cache::PageCacheManager};
+use crate::mem::{page::ContiguousPages, page_cache::PageCacheManager};
+use crate::vm::addr::phys_to_virt;
 
 /// FAT32 filesystem node
 ///
@@ -32,21 +33,21 @@ use crate::mem::{page::allocate_boxed_pages, page_cache::PageCacheManager};
 /// Content is read/written directly from/to the block device, not stored in memory.
 pub struct Fat32Node {
     /// Node name
-    pub name: RwLock<String>,
+    pub name: IrqRwSpinLock<String>,
     /// File type (file or directory)
-    pub file_type: RwLock<FileType>,
+    pub file_type: IrqRwSpinLock<FileType>,
     /// File metadata
-    pub metadata: RwLock<FileMetadata>,
+    pub metadata: IrqRwSpinLock<FileMetadata>,
     /// Child nodes (for directories) - cached, but loaded from disk on demand
-    pub children: RwLock<BTreeMap<String, Arc<dyn VfsNode>>>,
+    pub children: IrqRwSpinLock<BTreeMap<String, Arc<dyn VfsNode>>>,
     /// Parent node (weak reference to avoid cycles)
-    pub parent: RwLock<Option<Weak<Fat32Node>>>,
+    pub parent: IrqRwSpinLock<Option<Weak<Fat32Node>>>,
     /// Reference to filesystem
-    pub filesystem: RwLock<Option<Weak<dyn FileSystemOperations>>>,
+    pub filesystem: IrqRwSpinLock<Option<Weak<dyn FileSystemOperations>>>,
     /// Starting cluster number in FAT32
-    pub cluster: RwLock<u32>,
+    pub cluster: IrqRwSpinLock<u32>,
     /// Directory entries loaded flag (for directories)
-    pub children_loaded: RwLock<bool>,
+    pub children_loaded: IrqRwSpinLock<bool>,
 }
 
 impl Debug for Fat32Node {
@@ -69,9 +70,9 @@ impl Fat32Node {
     /// Create a new regular file node
     pub fn new_file(name: String, file_id: u64, cluster: u32) -> Self {
         Self {
-            name: RwLock::new(name),
-            file_type: RwLock::new(FileType::RegularFile),
-            metadata: RwLock::new(FileMetadata {
+            name: IrqRwSpinLock::new(name),
+            file_type: IrqRwSpinLock::new(FileType::RegularFile),
+            metadata: IrqRwSpinLock::new(FileMetadata {
                 file_type: FileType::RegularFile,
                 size: 0,
                 permissions: FilePermission {
@@ -85,20 +86,20 @@ impl Fat32Node {
                 file_id,
                 link_count: 1,
             }),
-            children: RwLock::new(BTreeMap::new()),
-            parent: RwLock::new(None),
-            filesystem: RwLock::new(None),
-            cluster: RwLock::new(cluster),
-            children_loaded: RwLock::new(false),
+            children: IrqRwSpinLock::new(BTreeMap::new()),
+            parent: IrqRwSpinLock::new(None),
+            filesystem: IrqRwSpinLock::new(None),
+            cluster: IrqRwSpinLock::new(cluster),
+            children_loaded: IrqRwSpinLock::new(false),
         }
     }
 
     /// Create a new directory node
     pub fn new_directory(name: String, file_id: u64, cluster: u32) -> Self {
         Self {
-            name: RwLock::new(name),
-            file_type: RwLock::new(FileType::Directory),
-            metadata: RwLock::new(FileMetadata {
+            name: IrqRwSpinLock::new(name),
+            file_type: IrqRwSpinLock::new(FileType::Directory),
+            metadata: IrqRwSpinLock::new(FileMetadata {
                 file_type: FileType::Directory,
                 size: 0,
                 permissions: FilePermission {
@@ -112,11 +113,11 @@ impl Fat32Node {
                 file_id,
                 link_count: 1,
             }),
-            children: RwLock::new(BTreeMap::new()),
-            parent: RwLock::new(None),
-            filesystem: RwLock::new(None),
-            cluster: RwLock::new(cluster),
-            children_loaded: RwLock::new(false),
+            children: IrqRwSpinLock::new(BTreeMap::new()),
+            parent: IrqRwSpinLock::new(None),
+            filesystem: IrqRwSpinLock::new(None),
+            cluster: IrqRwSpinLock::new(cluster),
+            children_loaded: IrqRwSpinLock::new(false),
         }
     }
 
@@ -166,14 +167,14 @@ impl VfsNode for Fat32Node {
 impl Clone for Fat32Node {
     fn clone(&self) -> Self {
         Self {
-            name: RwLock::new(self.name.read().clone()),
-            file_type: RwLock::new(self.file_type.read().clone()),
-            metadata: RwLock::new(self.metadata.read().clone()),
-            children: RwLock::new(self.children.read().clone()),
-            parent: RwLock::new(self.parent.read().clone()),
-            filesystem: RwLock::new(self.filesystem.read().clone()),
-            cluster: RwLock::new(*self.cluster.read()),
-            children_loaded: RwLock::new(*self.children_loaded.read()),
+            name: IrqRwSpinLock::new(self.name.read().clone()),
+            file_type: IrqRwSpinLock::new(self.file_type.read().clone()),
+            metadata: IrqRwSpinLock::new(self.metadata.read().clone()),
+            children: IrqRwSpinLock::new(self.children.read().clone()),
+            parent: IrqRwSpinLock::new(self.parent.read().clone()),
+            filesystem: IrqRwSpinLock::new(self.filesystem.read().clone()),
+            cluster: IrqRwSpinLock::new(*self.cluster.read()),
+            children_loaded: IrqRwSpinLock::new(*self.children_loaded.read()),
         }
     }
 }
@@ -183,29 +184,29 @@ pub struct Fat32FileObject {
     /// Reference to the FAT32 node
     node: Arc<Fat32Node>,
     /// Current file position
-    position: RwLock<usize>,
+    position: IrqRwSpinLock<usize>,
     /// Parent directory cluster (for directory entry updates)
     parent_cluster: u32,
     /// File-level dirty flag to avoid unnecessary writeback
-    dirty: Mutex<bool>,
+    dirty: IrqSpinLock<bool>,
     /// Page-aligned backing for mmap operations (lazy initialized)
-    mmap_backing: RwLock<Option<Box<[crate::mem::page::Page]>>>,
+    mmap_backing: IrqRwSpinLock<Option<ContiguousPages>>,
     /// Byte length of the mmap backing (file size snapshot)
-    mmap_backing_len: Mutex<usize>,
+    mmap_backing_len: IrqSpinLock<usize>,
     /// Active mmap ranges keyed by starting virtual address
-    mmap_ranges: RwLock<BTreeMap<usize, MmapRange>>,
+    mmap_ranges: IrqRwSpinLock<BTreeMap<usize, MmapRange>>,
 }
 
 impl Fat32FileObject {
     pub fn new(node: Arc<Fat32Node>, parent_cluster: u32) -> Self {
         Self {
             node,
-            position: RwLock::new(0),
+            position: IrqRwSpinLock::new(0),
             parent_cluster,
-            dirty: Mutex::new(false),
-            mmap_backing: RwLock::new(None),
-            mmap_backing_len: Mutex::new(0),
-            mmap_ranges: RwLock::new(BTreeMap::new()),
+            dirty: IrqSpinLock::new(false),
+            mmap_backing: IrqRwSpinLock::new(None),
+            mmap_backing_len: IrqSpinLock::new(0),
+            mmap_ranges: IrqRwSpinLock::new(BTreeMap::new()),
         }
     }
 
@@ -268,7 +269,11 @@ impl Fat32FileObject {
                         let current_cluster = self.node.cluster();
                         if current_cluster == 0 {
                             unsafe {
-                                core::ptr::write_bytes(paddr as *mut u8, 0, PAGE_SIZE);
+                                core::ptr::write_bytes(
+                                    phys_to_virt(paddr) as *mut u8,
+                                    0,
+                                    PAGE_SIZE,
+                                );
                             }
                             return Ok(());
                         }
@@ -278,11 +283,12 @@ impl Fat32FileObject {
                         let start = page_index as usize * PAGE_SIZE;
                         let len = core::cmp::min(PAGE_SIZE, data.len().saturating_sub(start));
                         unsafe {
-                            core::ptr::write_bytes(paddr as *mut u8, 0, PAGE_SIZE);
+                            let page_ptr = phys_to_virt(paddr) as *mut u8;
+                            core::ptr::write_bytes(page_ptr, 0, PAGE_SIZE);
                             if len > 0 {
                                 core::ptr::copy_nonoverlapping(
                                     data.as_ptr().add(start),
-                                    paddr as *mut u8,
+                                    page_ptr,
                                     len,
                                 );
                             }
@@ -294,7 +300,7 @@ impl Fat32FileObject {
 
             unsafe {
                 core::ptr::copy_nonoverlapping(
-                    pinned.paddr() as *const u8,
+                    phys_to_virt(pinned.paddr()) as *const u8,
                     buffer.as_mut_ptr().add(start),
                     len,
                 );
@@ -354,7 +360,7 @@ impl Fat32FileObject {
             .map(|buf| buf.len() < num_pages)
             .unwrap_or(true);
         if needs_alloc {
-            *backing_guard = Some(allocate_boxed_pages(num_pages));
+            *backing_guard = Some(ContiguousPages::new(num_pages).ok_or(StreamError::IoError)?);
         }
 
         let backing = backing_guard.as_mut().expect("mmap backing missing");
@@ -373,7 +379,7 @@ impl Fat32FileObject {
             .ok_or(StreamError::NotSupported)?;
 
         let cache_id = self.cache_id();
-        let backing_ptr = backing.as_mut_ptr() as *mut u8;
+        let backing_ptr = backing.as_ptr() as *mut u8;
         for page_index in 0..num_pages {
             let pinned = PageCacheManager::global()
                 .pin_or_load(cache_id, page_index as u64, |paddr| {
@@ -384,7 +390,7 @@ impl Fat32FileObject {
                 .map_err(|_| StreamError::IoError)?;
             unsafe {
                 core::ptr::copy_nonoverlapping(
-                    pinned.paddr() as *const u8,
+                    phys_to_virt(pinned.paddr()) as *const u8,
                     backing_ptr.add(page_index * PAGE_SIZE),
                     PAGE_SIZE,
                 );
@@ -409,12 +415,12 @@ impl Fat32FileObject {
             self.parent_cluster
         };
 
-        // crate::early_println!("[FAT32] Debug: parent_cluster={}, actual_parent_cluster={}, updating file with cluster={}, size={}",
+        // crate::println!("[FAT32] Debug: parent_cluster={}, actual_parent_cluster={}, updating file with cluster={}, size={}",
         //                        self.parent_cluster, actual_parent_cluster, cluster, size);
 
         // Create updated directory entry
         let filename = self.node.name.read().clone();
-        // crate::early_println!("[FAT32] Debug: Updating directory entry for filename: '{}'", filename);
+        // crate::println!("[FAT32] Debug: Updating directory entry for filename: '{}'", filename);
 
         let dir_entry =
             crate::fs::vfs_v2::drivers::fat32::structures::Fat32DirectoryEntry::new_file(
@@ -426,11 +432,11 @@ impl Fat32FileObject {
         // Write the updated directory entry
         match fat32_fs.update_directory_entry(actual_parent_cluster, &filename, &dir_entry) {
             Ok(()) => {
-                // crate::early_println!("[FAT32] Debug: Successfully updated directory entry");
+                // crate::println!("[FAT32] Debug: Successfully updated directory entry");
                 Ok(())
             }
             Err(e) => {
-                crate::early_println!("[FAT32] Error: Failed to update directory entry: {:?}", e);
+                crate::println!("[FAT32] Error: Failed to update directory entry: {:?}", e);
                 Err(StreamError::IoError)
             }
         }
@@ -489,7 +495,7 @@ impl StreamOps for Fat32FileObject {
                 .map_err(|_| StreamError::IoError)?;
 
             unsafe {
-                let src = (pinned.paddr() as *const u8).add(offset_in_page);
+                let src = (phys_to_virt(pinned.paddr()) as *const u8).add(offset_in_page);
                 let remaining_in_page = PAGE_SIZE - offset_in_page;
                 let remaining_file = file_size - pos;
                 let remaining_buf = buffer.len() - total_read;
@@ -542,7 +548,7 @@ impl StreamOps for Fat32FileObject {
                 .map_err(|_| StreamError::IoError)?;
 
             unsafe {
-                let dst = (pinned.paddr() as *mut u8).add(page_off);
+                let dst = (phys_to_virt(pinned.paddr()) as *mut u8).add(page_off);
                 let src = buffer.as_ptr().add(written);
                 core::ptr::copy_nonoverlapping(src, dst, chunk);
             }
@@ -582,7 +588,7 @@ impl MemoryMappingOps for Fat32FileObject {
         &self,
         offset: usize,
         length: usize,
-    ) -> Result<(usize, usize, bool), &'static str> {
+    ) -> Result<crate::object::capability::MemoryMappingInfo, &'static str> {
         if offset % PAGE_SIZE != 0 {
             return Err("Offset not page aligned");
         }
@@ -604,7 +610,9 @@ impl MemoryMappingOps for Fat32FileObject {
             return Err("Backing address not aligned");
         }
 
-        Ok((paddr, 0x3, true))
+        Ok(crate::object::capability::MemoryMappingInfo::new(
+            paddr, 0x3, true,
+        ))
     }
 
     fn get_mapping_info_with(
@@ -612,7 +620,7 @@ impl MemoryMappingOps for Fat32FileObject {
         offset: usize,
         length: usize,
         is_shared: bool,
-    ) -> Result<(usize, usize, bool), &'static str> {
+    ) -> Result<crate::object::capability::MemoryMappingInfo, &'static str> {
         if is_shared {
             if offset % PAGE_SIZE != 0 {
                 return Err("Offset not page aligned");
@@ -624,7 +632,9 @@ impl MemoryMappingOps for Fat32FileObject {
             }
 
             let _ = length;
-            return Ok((0, 0x3, true));
+            return Ok(crate::object::capability::MemoryMappingInfo::new(
+                0, 0x3, true,
+            ));
         }
 
         self.get_mapping_info(offset, length)
@@ -689,7 +699,8 @@ impl MemoryMappingOps for Fat32FileObject {
     fn resolve_fault(
         &self,
         access: &crate::object::capability::memory_mapping::AccessKind,
-        map: &crate::vm::vmem::VirtualMemoryMap,
+        _page_idx: usize,
+        vm_start: usize,
     ) -> core::result::Result<
         crate::object::capability::memory_mapping::ResolveFaultResult,
         crate::object::capability::memory_mapping::ResolveFaultError,
@@ -697,7 +708,7 @@ impl MemoryMappingOps for Fat32FileObject {
         let range = self
             .mmap_ranges
             .read()
-            .get(&map.vmarea.start)
+            .get(&vm_start)
             .copied()
             .ok_or(crate::object::capability::memory_mapping::ResolveFaultError::Invalid)?;
         if access.vaddr < range.vaddr_start || access.vaddr > range.vaddr_end {
@@ -708,30 +719,59 @@ impl MemoryMappingOps for Fat32FileObject {
         let file_offset = range
             .offset
             .saturating_add(access.vaddr.saturating_sub(range.vaddr_start));
-        if file_size == 0 || file_offset >= file_size {
-            return Err(crate::object::capability::memory_mapping::ResolveFaultError::Invalid);
-        }
-
-        let fs = self
-            .node
-            .filesystem
-            .read()
-            .as_ref()
-            .and_then(|weak| weak.upgrade())
-            .ok_or(crate::object::capability::memory_mapping::ResolveFaultError::Invalid)?;
-        let fat32_fs = fs
-            .as_any()
-            .downcast_ref::<crate::fs::vfs_v2::drivers::fat32::Fat32FileSystem>()
-            .ok_or(crate::object::capability::memory_mapping::ResolveFaultError::Invalid)?;
 
         let page_index = (file_offset / PAGE_SIZE) as u64;
-        let pinned = PageCacheManager::global()
-            .pin_or_load(self.cache_id(), page_index, |paddr| {
-                fat32_fs
-                    .read_page_content(self.node.cluster(), page_index, paddr)
-                    .map_err(|_| "fat32: read_page_content failed")
-            })
-            .map_err(|_| crate::object::capability::memory_mapping::ResolveFaultError::Invalid)?;
+
+        let pinned = if file_size == 0 || file_offset >= file_size {
+            PageCacheManager::global()
+                .pin_or_load(self.cache_id(), page_index, |paddr| {
+                    // SAFETY: paddr is a freshly-allocated page from the page cache.
+                    unsafe {
+                        core::ptr::write_bytes(phys_to_virt(paddr) as *mut u8, 0, PAGE_SIZE);
+                    }
+                    Ok(())
+                })
+                .map_err(|_| {
+                    crate::object::capability::memory_mapping::ResolveFaultError::Invalid
+                })?
+        } else {
+            let fs = self
+                .node
+                .filesystem
+                .read()
+                .as_ref()
+                .and_then(|weak| weak.upgrade())
+                .ok_or(crate::object::capability::memory_mapping::ResolveFaultError::Invalid)?;
+            let fat32_fs = fs
+                .as_any()
+                .downcast_ref::<crate::fs::vfs_v2::drivers::fat32::Fat32FileSystem>()
+                .ok_or(crate::object::capability::memory_mapping::ResolveFaultError::Invalid)?;
+
+            let pinned = PageCacheManager::global()
+                .pin_or_load(self.cache_id(), page_index, |paddr| {
+                    fat32_fs
+                        .read_page_content(self.node.cluster(), page_index, paddr)
+                        .map_err(|_| "fat32: read_page_content failed")
+                })
+                .map_err(|_| {
+                    crate::object::capability::memory_mapping::ResolveFaultError::Invalid
+                })?;
+
+            let page_start = (file_offset / PAGE_SIZE) * PAGE_SIZE;
+            let page_end = page_start + PAGE_SIZE;
+            if page_end > file_size {
+                let zero_start = file_size - page_start;
+                // SAFETY: paddr is a valid page-cache page; zero_start < PAGE_SIZE.
+                unsafe {
+                    core::ptr::write_bytes(
+                        (phys_to_virt(pinned.paddr()) as *mut u8).add(zero_start),
+                        0,
+                        PAGE_SIZE - zero_start,
+                    );
+                }
+            }
+            pinned
+        };
 
         if matches!(
             access.op,
@@ -785,7 +825,7 @@ impl FileObject for Fat32FileObject {
                 .map_err(|_| StreamError::IoError)?;
 
             unsafe {
-                let src = (pinned.paddr() as *const u8).add(offset_in_page);
+                let src = (phys_to_virt(pinned.paddr()) as *const u8).add(offset_in_page);
                 let remaining_in_page = PAGE_SIZE - offset_in_page;
                 let remaining_file = file_size - (off + total_read);
                 let remaining_buf = buffer.len() - total_read;
@@ -836,7 +876,7 @@ impl FileObject for Fat32FileObject {
                 .map_err(|_| StreamError::IoError)?;
 
             unsafe {
-                let dst = (pinned.paddr() as *mut u8).add(page_off);
+                let dst = (phys_to_virt(pinned.paddr()) as *mut u8).add(page_off);
                 let src = buffer.as_ptr().add(written);
                 core::ptr::copy_nonoverlapping(src, dst, chunk);
             }
@@ -904,7 +944,7 @@ impl FileObject for Fat32FileObject {
                     .map_err(|_| StreamError::IoError)?;
                 unsafe {
                     core::ptr::copy_nonoverlapping(
-                        pinned.paddr() as *const u8,
+                        phys_to_virt(pinned.paddr()) as *const u8,
                         buffer.as_mut_ptr().add(start),
                         len,
                     );
@@ -1038,6 +1078,7 @@ impl crate::object::capability::selectable::Selectable for Fat32FileObject {
         _interest: crate::object::capability::selectable::ReadyInterest,
         _trapframe: &mut crate::arch::Trapframe,
         _timeout_ticks: Option<u64>,
+        _min_wait_ticks: u64,
     ) -> crate::object::capability::selectable::SelectWaitOutcome {
         crate::object::capability::selectable::SelectWaitOutcome::Ready
     }
@@ -1058,14 +1099,14 @@ pub struct Fat32DirectoryObject {
     /// Reference to the FAT32 node
     node: Arc<Fat32Node>,
     /// Current position in directory listing
-    position: RwLock<usize>,
+    position: IrqRwSpinLock<usize>,
 }
 
 impl Fat32DirectoryObject {
     pub fn new(node: Arc<Fat32Node>) -> Self {
         Self {
             node,
-            position: RwLock::new(0),
+            position: IrqRwSpinLock::new(0),
         }
     }
 }
@@ -1100,7 +1141,7 @@ impl MemoryMappingOps for Fat32DirectoryObject {
         &self,
         _offset: usize,
         _length: usize,
-    ) -> Result<(usize, usize, bool), &'static str> {
+    ) -> Result<crate::object::capability::MemoryMappingInfo, &'static str> {
         Err("Memory mapping not supported for FAT32 directories")
     }
 
@@ -1176,6 +1217,7 @@ impl crate::object::capability::selectable::Selectable for Fat32DirectoryObject 
         _interest: crate::object::capability::selectable::ReadyInterest,
         _trapframe: &mut crate::arch::Trapframe,
         _timeout_ticks: Option<u64>,
+        _min_wait_ticks: u64,
     ) -> crate::object::capability::selectable::SelectWaitOutcome {
         crate::object::capability::selectable::SelectWaitOutcome::Ready
     }

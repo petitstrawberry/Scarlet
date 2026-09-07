@@ -3,17 +3,19 @@
 
 extern crate scarlet_std as std;
 
-use std::fs::OpenOptions;
+use std::fs::{File, OpenOptions};
 use std::handle::Handle;
-use std::io::Read;
 use std::{
-    format, print, println,
+    format,
+    ipc::{ProcessControl, send_process_control_to_group},
+    print, println,
     string::String,
-    task::{execve, exit, fork, pipe, waitpid},
+    task::{WAIT_NOHANG, WAIT_STOPPED, WAIT_STOPPED_STATUS, execve, exit, fork, pipe, waitpid},
+    tty::{KeyboardMode, ReadPolicy, Terminal},
     vec::Vec,
 };
 
-// New modules for enhanced shell
+// Interactive shell modules
 mod history;
 mod line_editor;
 mod parser;
@@ -25,6 +27,7 @@ use parser::{Command, Pipeline, RedirectType};
 struct Job {
     job_id: usize,
     pid: i32,
+    process_group_id: i32,
     command: String,
     is_running: bool,
 }
@@ -41,36 +44,37 @@ fn init_jobs() {
 }
 
 /// Add a job to the job list
-fn add_job(pid: i32, command: String) -> usize {
-    println!(
-        "DEBUG: add_job called with pid={}, command={}",
-        pid, command
-    );
+fn add_job(pid: i32, process_group_id: i32, command: String, is_running: bool) -> usize {
+    // println!(
+    //     "DEBUG: add_job called with pid={}, pgid={}, command={}",
+    //     pid, process_group_id, command
+    // );
     unsafe {
         let next_id_ptr = core::ptr::addr_of_mut!(NEXT_JOB_ID);
         let job_id = *next_id_ptr;
         *next_id_ptr += 1;
-        println!("DEBUG: job_id={}", job_id);
+        // println!("DEBUG: job_id={}", job_id);
 
         let jobs_ptr = core::ptr::addr_of_mut!(JOB_LIST_ARRAY);
-        println!("DEBUG: Got JOB_LIST_ARRAY pointer: {:p}", jobs_ptr);
+        // println!("DEBUG: Got JOB_LIST_ARRAY pointer: {:p}", jobs_ptr);
 
         // Find an empty slot
         for i in 0..MAX_JOBS {
             if (*jobs_ptr)[i].is_none() {
-                println!("DEBUG: Found empty slot at index {}", i);
+                // println!("DEBUG: Found empty slot at index {}", i);
                 (*jobs_ptr)[i] = Some(Job {
                     job_id,
                     pid,
+                    process_group_id,
                     command,
-                    is_running: true,
+                    is_running,
                 });
-                println!("DEBUG: Job added successfully at index {}", i);
+                // println!("DEBUG: Job added successfully at index {}", i);
                 return job_id;
             }
         }
 
-        println!("DEBUG: No empty slot found, job list full!");
+        // println!("DEBUG: No empty slot found, job list full!");
         job_id
     }
 }
@@ -83,7 +87,7 @@ fn cleanup_jobs() {
         for i in 0..MAX_JOBS {
             if let Some(job) = &(*jobs_ptr)[i] {
                 // Check if the process is still running using waitpid with WNOHANG (0x1)
-                let (wait_pid, _status) = waitpid(job.pid, 1);
+                let (wait_pid, _status) = waitpid(job.pid, WAIT_NOHANG);
                 if wait_pid == job.pid {
                     println!("\n[{}] Done: {}", job.job_id, job.command);
                     (*jobs_ptr)[i] = None; // Remove from list
@@ -264,12 +268,12 @@ fn execute_command(program: &str, args: &[String]) -> i32 {
     }
 
     // DEBUG: show what we're about to run and any redirections
-    crate::println!(
-        "sh: execute_command: program='{}' args={:?} redirs_count={}",
-        program,
-        cleaned_args,
-        redirs.len()
-    );
+    // crate::println!(
+    //     "sh: execute_command: program='{}' args={:?} redirs_count={}",
+    //     program,
+    //     cleaned_args,
+    //     redirs.len()
+    // );
 
     // First check if it's a built-in command
     if let Some(exit_code) = handle_builtin_command(program, args) {
@@ -286,6 +290,8 @@ fn execute_command(program: &str, args: &[String]) -> i32 {
 
     match fork() {
         0 => {
+            make_child_process_group_leader();
+
             // Convert args to &[&str] for execve
             let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
 
@@ -306,7 +312,10 @@ fn execute_command(program: &str, args: &[String]) -> i32 {
             1
         }
         pid => {
-            let (_, status) = waitpid(pid, 0);
+            join_child_process_group(pid, pid);
+            set_foreground_group(pid as usize);
+            let (_, status) = waitpid(pid, WAIT_STOPPED);
+            set_foreground_group(current_process_group_or_pid());
             status
         }
     }
@@ -383,18 +392,13 @@ fn execute_script_content(content: &str) -> i32 {
     last_exit_code
 }
 
-// TTY control opcodes
-const SCTL_TTY_SET_ECHO: u32 = 0x5354_0001;
-const SCTL_TTY_SET_CANONICAL: u32 = 0x5354_0003;
-const SCTL_TTY_SET_READ_POLICY: u32 = 0x5354_0007;
-const SCTL_TTY_SET_KBMODE: u32 = 0x5354_000C;
-const KB_XLATE: usize = 0;
-
 /// Restore TTY to canonical mode before executing external commands
 fn restore_canonical_mode() {
     if let Ok(stdin_handle) = unsafe { Handle::from_raw(0) } {
-        let _ = stdin_handle.control(SCTL_TTY_SET_CANONICAL, 1); // canonical mode
-        let _ = stdin_handle.control(SCTL_TTY_SET_ECHO, 1); // echo enabled
+        let terminal = Terminal::from_handle(&stdin_handle);
+        let _ = terminal.set_canonical(true);
+        let _ = terminal.set_echo(true);
+        let _ = terminal.set_signal_chars_enabled(true);
         core::mem::forget(stdin_handle); // Don't close stdin
     }
 }
@@ -402,13 +406,128 @@ fn restore_canonical_mode() {
 /// Restore TTY to raw mode after external command finishes
 fn restore_raw_mode() {
     if let Ok(stdin_handle) = unsafe { Handle::from_raw(0) } {
-        let _ = stdin_handle.control(SCTL_TTY_SET_CANONICAL, 0); // raw mode (non-canonical)
-        let _ = stdin_handle.control(SCTL_TTY_SET_ECHO, 0); // echo disabled
-        let _ = stdin_handle.control(SCTL_TTY_SET_KBMODE, KB_XLATE); // keyboard mode
-        let read_policy = 1; // min=1, timeout=0
-        let _ = stdin_handle.control(SCTL_TTY_SET_READ_POLICY, read_policy);
+        let terminal = Terminal::from_handle(&stdin_handle);
+        let _ = terminal.set_canonical(false);
+        let _ = terminal.set_echo(false);
+        let _ = terminal.set_signal_chars_enabled(false);
+        let _ = terminal.set_keyboard_mode(KeyboardMode::Xlate);
+        let _ = terminal.set_read_policy(ReadPolicy::new(1, 0));
         core::mem::forget(stdin_handle); // Don't close stdin
     }
+}
+
+fn set_foreground_group(task_group_id: usize) {
+    if let Ok(stdin_handle) = unsafe { Handle::from_raw(0) } {
+        let _ = Terminal::from_handle(&stdin_handle).set_foreground_group(task_group_id);
+        core::mem::forget(stdin_handle);
+    }
+}
+
+fn current_process_group_or_pid() -> usize {
+    std::task::process_group_id(None).unwrap_or_else(|_| std::task::getpid()) as usize
+}
+
+fn make_child_process_group_leader() {
+    let _ = std::task::set_process_group(None, None);
+}
+
+fn join_child_process_group(pid: i32, process_group_id: i32) {
+    if pid > 0 && process_group_id > 0 {
+        let _ = std::task::set_process_group(Some(pid as u32), Some(process_group_id as u32));
+    }
+}
+
+fn wait_status_is_stopped(status: i32) -> bool {
+    status == WAIT_STOPPED_STATUS
+}
+
+fn is_builtin_command(program: &str) -> bool {
+    matches!(
+        program,
+        "exit" | "env" | "export" | "cd" | "unset" | "echo" | "source" | "." | "jobs" | "fg" | "bg"
+    )
+}
+
+fn apply_child_redirects(cmd: &Command) -> Result<(), i32> {
+    for (rtype, filename) in &cmd.redirects {
+        match rtype {
+            RedirectType::Input => match std::fs::File::open(filename.as_str()) {
+                Ok(file) => {
+                    if let Ok(stdin) = unsafe { Handle::from_raw(0) } {
+                        let _ = stdin.close();
+                    }
+                    match file.into_handle().duplicate() {
+                        Ok(new_h) => std::mem::forget(new_h),
+                        Err(_) => return Err(1),
+                    }
+                }
+                Err(_) => {
+                    println!("sh: {}: Failed to open file", filename);
+                    return Err(1);
+                }
+            },
+            RedirectType::Output | RedirectType::Append => {
+                let mut opts = OpenOptions::new();
+                opts.write(true).create(true);
+                if *rtype == RedirectType::Append {
+                    opts.append(true);
+                } else {
+                    opts.truncate(true);
+                }
+
+                match opts.open(filename.as_str()) {
+                    Ok(file) => {
+                        if let Ok(stdout) = unsafe { Handle::from_raw(1) } {
+                            let _ = stdout.close();
+                        }
+                        match file.into_handle().duplicate() {
+                            Ok(new_h) => std::mem::forget(new_h),
+                            Err(_) => return Err(1),
+                        }
+                    }
+                    Err(_) => {
+                        println!("sh: {}: Failed to open file", filename);
+                        return Err(1);
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn exec_command_in_current_process(cmd: &Command) -> ! {
+    if let Err(code) = apply_child_redirects(cmd) {
+        exit(code);
+    }
+
+    if is_builtin_command(&cmd.program) {
+        if let Some(code) = handle_builtin_command(&cmd.program, &cmd.args) {
+            exit(code);
+        }
+        exit(0);
+    }
+
+    let executable_path = match find_executable_in_path(&cmd.program) {
+        Some(path) => path,
+        None => {
+            println!("sh: {}: command not found", cmd.program);
+            exit(127);
+        }
+    };
+
+    let arg_refs: Vec<&str> = cmd.args.iter().map(|s| s.as_str()).collect();
+    let env_vars = std::env::vars();
+    let env_strings: Vec<String> = env_vars
+        .map(|(key, value)| format!("{key}={value}"))
+        .collect();
+    let env_refs: Vec<&str> = env_strings.iter().map(|s| s.as_str()).collect();
+
+    if execve(&executable_path, &arg_refs, &env_refs) != 0 {
+        println!("sh: {}: execution failed", executable_path);
+    }
+    exit(126);
 }
 
 /// Execute a single command from the new Command struct
@@ -427,7 +546,7 @@ fn execute_single_command(cmd: &Command, is_background: bool) -> i32 {
                 opts.write(true).create(true).truncate(true);
                 match opts.open(filename.as_str()) {
                     Ok(f) => {
-                        println!("DEBUG: Opened {} for output redirection", filename);
+                        // println!("DEBUG: Opened {} for output redirection", filename);
                         stdout_handle = Some(f.into_handle());
                     }
                     Err(_) => {
@@ -462,10 +581,7 @@ fn execute_single_command(cmd: &Command, is_background: bool) -> i32 {
     }
 
     // Check if it's a built-in command
-    let is_builtin = match program.as_str() {
-        "exit" | "env" | "export" | "cd" | "unset" | "echo" | "source" | "." => true,
-        _ => false,
-    };
+    let is_builtin = is_builtin_command(program);
 
     // If builtin with no redirects, run directly
     if is_builtin && stdin_handle.is_none() && stdout_handle.is_none() {
@@ -494,6 +610,8 @@ fn execute_single_command(cmd: &Command, is_background: bool) -> i32 {
 
     match fork() {
         0 => {
+            make_child_process_group_leader();
+
             // Child: apply redirects and execute
             // For stdin: close handle 0, then dup to get handle 0
             if let Some(h) = stdin_handle {
@@ -504,14 +622,14 @@ fn execute_single_command(cmd: &Command, is_background: bool) -> i32 {
                 // Duplicate the input file handle - should get assigned to handle 0
                 if let Ok(new_h) = h.duplicate() {
                     // If not handle 0, we have a problem, but continue anyway
-                    println!("DEBUG: Stdin redirect got handle {}", new_h.as_raw());
+                    // println!("DEBUG: Stdin redirect got handle {}", new_h.as_raw());
                     std::mem::forget(new_h);
                 }
                 std::mem::forget(h); // Don't close the original
             }
             // For stdout: close handle 1, then dup to get handle 1
             if let Some(h) = stdout_handle {
-                println!("DEBUG: Closing stdout and duplicating file");
+                // println!("DEBUG: Closing stdout and duplicating file");
                 // Close stdout (handle 1)
                 if let Ok(h) = unsafe { Handle::from_raw(1) } {
                     let _ = h.close();
@@ -519,11 +637,11 @@ fn execute_single_command(cmd: &Command, is_background: bool) -> i32 {
                 // Duplicate the output file handle - should get assigned to handle 1
                 match h.duplicate() {
                     Ok(new_h) => {
-                        println!("DEBUG: Stdout redirect got handle {}", new_h.as_raw());
+                        // println!("DEBUG: Stdout redirect got handle {}", new_h.as_raw());
                         std::mem::forget(new_h);
                     }
                     Err(_) => {
-                        println!("DEBUG: Failed to duplicate stdout handle!");
+                        // println!("DEBUG: Failed to duplicate stdout handle!");
                     }
                 }
                 std::mem::forget(h); // Don't close the original
@@ -550,23 +668,33 @@ fn execute_single_command(cmd: &Command, is_background: bool) -> i32 {
             1
         }
         pid => {
+            join_child_process_group(pid, pid);
             // Parent: wait for child or add to job list if background
             if is_background {
-                println!("DEBUG: Parent process, about to add job");
+                // println!("DEBUG: Parent process, about to add job");
                 let cmd_str = cmd.args.join(" ");
-                println!("DEBUG: Command string created: {}", cmd_str);
-                let job_id = add_job(pid, cmd_str);
+                // println!("DEBUG: Command string created: {}", cmd_str);
+                let job_id = add_job(pid, pid, cmd_str, true);
                 println!("[{}] {} &", job_id, pid);
-                println!("DEBUG: Job added, about to restore raw mode");
+                // println!("DEBUG: Job added, about to restore raw mode");
                 // Restore raw mode for shell after background job starts
                 restore_raw_mode();
-                println!("DEBUG: Raw mode restored");
+                // println!("DEBUG: Raw mode restored");
                 // Return immediately to shell prompt
                 0
             } else {
-                let (_, status) = waitpid(pid, 0);
+                // Set foreground group to child so Ctrl+C targets it
+                set_foreground_group(pid as usize);
+                let (_, status) = waitpid(pid, WAIT_STOPPED);
+                // Restore foreground group to shell
+                set_foreground_group(current_process_group_or_pid());
                 // Restore raw mode for shell after foreground command completes
                 restore_raw_mode();
+                if wait_status_is_stopped(status) {
+                    let cmd_str = cmd.args.join(" ");
+                    let job_id = add_job(pid, pid, cmd_str, false);
+                    println!("[{}] Stopped {}", job_id, pid);
+                }
                 status
             }
         }
@@ -582,11 +710,7 @@ fn execute_pipeline(pipeline: &Pipeline) -> i32 {
         let cmd = &pipeline.commands[0];
 
         // Check if it's a built-in command
-        let is_builtin = match cmd.program.as_str() {
-            "exit" | "env" | "export" | "cd" | "unset" | "echo" | "source" | "." | "jobs"
-            | "fg" | "bg" => true,
-            _ => false,
-        };
+        let is_builtin = is_builtin_command(&cmd.program);
 
         // Built-in commands cannot be run in background
         if is_builtin && pipeline.is_background {
@@ -627,6 +751,11 @@ fn execute_pipeline(pipeline: &Pipeline) -> i32 {
         match fork() {
             0 => {
                 // Child process
+                if let Some(process_group_id) = pids.first().copied() {
+                    let _ = std::task::set_process_group(None, Some(process_group_id as u32));
+                } else {
+                    make_child_process_group_leader();
+                }
 
                 // Set up stdin from previous pipe
                 if i > 0 {
@@ -650,9 +779,7 @@ fn execute_pipeline(pipeline: &Pipeline) -> i32 {
                 // The handles will be automatically closed when the child process exits
                 // or they go out of scope
 
-                // Execute the command (never background for pipeline components)
-                let exit_code = execute_single_command(cmd, false);
-                exit(exit_code);
+                exec_command_in_current_process(cmd);
             }
             -1 => {
                 println!("sh: fork failed");
@@ -661,6 +788,8 @@ fn execute_pipeline(pipeline: &Pipeline) -> i32 {
             }
             pid => {
                 // Parent process
+                let process_group_id = pids.first().copied().unwrap_or(pid);
+                join_child_process_group(pid, process_group_id);
                 pids.push(pid);
             }
         }
@@ -682,7 +811,7 @@ fn execute_pipeline(pipeline: &Pipeline) -> i32 {
             .collect::<Vec<_>>()
             .join(" | ");
 
-        let job_id = add_job(pids[0], cmd_str);
+        let job_id = add_job(pids[0], pids[0], cmd_str, true);
         println!("[{}] {} &", job_id, pids[0]);
         // Restore raw mode for shell after background job starts
         restore_raw_mode();
@@ -692,25 +821,47 @@ fn execute_pipeline(pipeline: &Pipeline) -> i32 {
 
     // Wait for all children
     let mut last_status = 0;
-    for pid in pids {
-        let (_, status) = waitpid(pid, 0);
+    let mut stopped = false;
+    // Set foreground group to first child in pipeline
+    set_foreground_group(pids[0] as usize);
+    for pid in pids.iter().copied() {
+        let (_, status) = waitpid(pid, WAIT_STOPPED);
+        if wait_status_is_stopped(status) {
+            stopped = true;
+        }
         last_status = status;
     }
+    // Restore foreground group to shell
+    set_foreground_group(current_process_group_or_pid());
 
     // Restore raw mode for shell after pipeline completes
     restore_raw_mode();
 
+    if stopped {
+        let cmd_str = pipeline
+            .commands
+            .iter()
+            .map(|c| c.args.join(" "))
+            .collect::<Vec<_>>()
+            .join(" | ");
+        let job_id = add_job(pids[0], pids[0], cmd_str, false);
+        println!("[{}] Stopped {}", job_id, pids[0]);
+    }
+
     last_status
 }
 
-/// Interactive shell mode (enhanced version with line editing and history)
+/// Interactive shell mode with line editing and history.
 fn interactive_shell() -> i32 {
-    println!("Scarlet Shell (Enhanced Interactive Mode)");
-    println!("Features: cursor movement, command history, pipes, background jobs");
-    println!("Tip: After starting a background job, press Enter to see the prompt");
+    print_motd();
+    println!("Scarlet Shell");
 
     // Initialize job list
     init_jobs();
+
+    // Set shell as foreground group on the TTY
+    let _ = std::task::set_process_group(None, None);
+    set_foreground_group(current_process_group_or_pid());
 
     // Try to execute .shrc on startup
     execute_shrc();
@@ -722,7 +873,7 @@ fn interactive_shell() -> i32 {
     // HOME/.sh_history
     let history_file = match std::env::var("HOME") {
         Some(home) => format!("{}/.sh_history", home),
-        None => String::from(".sh_history"),
+        None => String::from("/root/.sh_history"),
     };
 
     // Try to load history from file
@@ -788,6 +939,40 @@ fn interactive_shell() -> i32 {
         let _ = history.save_to_file(&history_file);
         0
     }
+}
+
+fn print_motd() {
+    if !terminal_supports_motd() {
+        return;
+    }
+
+    for path in ["/etc/motd"] {
+        let Ok(mut file) = File::open(path) else {
+            continue;
+        };
+
+        let mut bytes = Vec::new();
+        let mut buffer = [0u8; 512];
+        loop {
+            match file.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(read_len) => bytes.extend_from_slice(&buffer[..read_len]),
+                Err(_) => return,
+            }
+        }
+
+        if let Ok(text) = core::str::from_utf8(&bytes) {
+            print!("{}", text);
+        }
+        return;
+    }
+}
+
+fn terminal_supports_motd() -> bool {
+    let Some(term) = std::env::var("TERM") else {
+        return false;
+    };
+    term.contains("xterm") || term.contains("screen") || term.contains("tmux")
 }
 
 /// Expand environment variables in a string
@@ -948,7 +1133,24 @@ fn handle_builtin_command(program: &str, args: &[String]) -> Option<i32> {
                         let job_copy = job.clone();
                         (*jobs_ptr)[i] = None; // Remove from list
                         println!("{}", job_copy.command);
-                        let (_, status) = waitpid(job_copy.pid, 0);
+                        restore_canonical_mode();
+                        set_foreground_group(job_copy.process_group_id as usize);
+                        let _ = send_process_control_to_group(
+                            Some(job_copy.process_group_id as u32),
+                            ProcessControl::Continue,
+                        );
+                        let (_, status) = waitpid(job_copy.pid, WAIT_STOPPED);
+                        set_foreground_group(current_process_group_or_pid());
+                        restore_raw_mode();
+                        if wait_status_is_stopped(status) {
+                            let job_id = add_job(
+                                job_copy.pid,
+                                job_copy.process_group_id,
+                                job_copy.command,
+                                false,
+                            );
+                            println!("[{}] Stopped {}", job_id, job_copy.pid);
+                        }
                         return Some(status);
                     }
                 }
@@ -957,9 +1159,42 @@ fn handle_builtin_command(program: &str, args: &[String]) -> Option<i32> {
             }
         }
         "bg" => {
-            // Resume a stopped job in background (simplified - just show message)
-            println!("bg: not fully implemented (no job control signals yet)");
-            Some(0)
+            cleanup_jobs();
+            let job_id = if args.len() > 1 {
+                match args[1].trim_start_matches('%').parse::<usize>() {
+                    Ok(id) => id,
+                    Err(_) => {
+                        println!("bg: invalid job id");
+                        return Some(1);
+                    }
+                }
+            } else {
+                let jobs = get_jobs();
+                if jobs.is_empty() {
+                    println!("bg: no current job");
+                    return Some(1);
+                }
+                jobs.last().unwrap().job_id
+            };
+
+            unsafe {
+                let jobs_ptr = core::ptr::addr_of_mut!(JOB_LIST_ARRAY);
+                for i in 0..MAX_JOBS {
+                    if let Some(job) = &mut (*jobs_ptr)[i]
+                        && job.job_id == job_id
+                    {
+                        let _ = send_process_control_to_group(
+                            Some(job.process_group_id as u32),
+                            ProcessControl::Continue,
+                        );
+                        job.is_running = true;
+                        println!("[{}] {} &", job.job_id, job.command);
+                        return Some(0);
+                    }
+                }
+                println!("bg: {}: no such job", job_id);
+                Some(1)
+            }
         }
         "exit" => {
             let exit_code = if args.len() > 1 {
@@ -1029,8 +1264,11 @@ fn handle_builtin_command(program: &str, args: &[String]) -> Option<i32> {
 
             match std::fs::change_directory(target_dir) {
                 Ok(()) => {
-                    // Success - update PWD environment variable
-                    std::env::set_var("PWD", target_dir);
+                    // Success - update PWD environment variable with kernel-resolved absolute path
+                    match std::fs::get_cwd_path() {
+                        Ok(resolved_path) => std::env::set_var("PWD", &resolved_path),
+                        Err(_) => std::env::set_var("PWD", target_dir),
+                    }
                     Some(0)
                 }
                 Err(_) => {
@@ -1157,7 +1395,6 @@ fn execute_shrc() {
         // Check if file exists by trying to open it
         match std::fs::File::open(shrc_path) {
             Ok(_) => {
-                println!("Loading {}", shrc_path);
                 let exit_code = execute_script(shrc_path);
                 if exit_code != 0 {
                     println!("Warning: {} exited with code {}", shrc_path, exit_code);
@@ -1196,7 +1433,15 @@ fn main() -> i32 {
             execute_script(script_or_command)
         }
     } else {
-        // Interactive mode
+        // Session launchers use a leading '-' in argv[0] for a login shell.
+        // Ordinary subshells must keep their caller's working directory.
+        if args.first().is_some_and(|name| name.starts_with('-')) {
+            if let Some(home) = std::env::var("HOME") {
+                if let Err(err) = std::fs::change_directory(&home) {
+                    println!("sh: cannot change directory to '{}': {}", home, err);
+                }
+            }
+        }
         interactive_shell()
     }
 }

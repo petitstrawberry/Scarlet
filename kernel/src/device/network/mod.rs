@@ -3,9 +3,9 @@
 //! This module defines the interface for network devices in the kernel.
 //! It provides abstractions for network packet operations and device management.
 
+use crate::sync::IrqSpinLock;
 use alloc::{boxed::Box, vec::Vec};
 use core::any::Any;
-use spin::Mutex;
 
 use alloc::sync::Arc;
 
@@ -255,9 +255,9 @@ pub struct GenericNetworkDevice {
     config: Option<NetworkInterfaceConfig>,
     link_up: bool,
     promiscuous: bool,
-    tx_queue: Mutex<Vec<DevicePacket>>,
-    rx_queue: Mutex<Vec<DevicePacket>>,
-    stats: Mutex<NetworkStats>,
+    tx_queue: IrqSpinLock<Vec<DevicePacket>>,
+    rx_queue: IrqSpinLock<Vec<DevicePacket>>,
+    stats: IrqSpinLock<NetworkStats>,
 }
 
 impl GenericNetworkDevice {
@@ -268,9 +268,9 @@ impl GenericNetworkDevice {
             config: None,
             link_up: false,
             promiscuous: false,
-            tx_queue: Mutex::new(Vec::new()),
-            rx_queue: Mutex::new(Vec::new()),
-            stats: Mutex::new(NetworkStats::default()),
+            tx_queue: IrqSpinLock::new(Vec::new()),
+            rx_queue: IrqSpinLock::new(Vec::new()),
+            stats: IrqSpinLock::new(NetworkStats::default()),
         }
     }
 
@@ -324,7 +324,7 @@ impl MemoryMappingOps for GenericNetworkDevice {
         &self,
         _offset: usize,
         _length: usize,
-    ) -> Result<(usize, usize, bool), &'static str> {
+    ) -> Result<crate::object::capability::MemoryMappingInfo, &'static str> {
         Err("Memory mapping not supported by this network device")
     }
 
@@ -347,6 +347,7 @@ impl Selectable for GenericNetworkDevice {
         _interest: crate::object::capability::selectable::ReadyInterest,
         _trapframe: &mut crate::arch::Trapframe,
         _timeout_ticks: Option<u64>,
+        _min_wait_ticks: u64,
     ) -> crate::object::capability::selectable::SelectWaitOutcome {
         crate::object::capability::selectable::SelectWaitOutcome::Ready
     }

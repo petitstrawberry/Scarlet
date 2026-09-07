@@ -41,11 +41,11 @@ dependencies = ["build-only-debug"]
 
 [tasks.build-only-debug]
 description = "Build user programs in debug mode without OSABI setting (internal)"
-script = 'cargo build --target "${TARGET_SPEC}" --out-dir "${DIST_DIR}"'
+script = 'CC_riscv64gc_unknown_scarlet_elf="${PWD}/../../tools/riscv64-clang" cargo build --target "${TARGET_SPEC}" --out-dir "${DIST_DIR}"'
 
 [tasks.build-only-release]
 description = "Build user programs in release mode without OSABI setting (internal)"
-script = 'cargo build --release --target "${TARGET_SPEC}" --out-dir "${DIST_DIR}"'
+script = 'CC_riscv64gc_unknown_scarlet_elf="${PWD}/../../tools/riscv64-clang" cargo build --release --target "${TARGET_SPEC}" --out-dir "${DIST_DIR}"'
 
 [tasks.build-aarch64]
 description = "Build all user programs for AArch64 with OSABI=83 (debug mode)"
@@ -223,6 +223,8 @@ for binary_path in "${DIST_DIR}"/*; do
     if [ -f "${binary_path}" ] && [ -x "${binary_path}" ]; then
         binary=$(basename "${binary_path}")
         debug_file="${DEBUG_DIR}/${binary}.debug"
+        # Break hardlink created by cargo --out-dir to avoid modifying target/
+        cp "${binary_path}" "${binary_path}.tmp" && mv "${binary_path}.tmp" "${binary_path}"
         "$OBJCOPY" --only-keep-debug "${binary_path}" "${debug_file}"
         "$OBJCOPY" --strip-debug --strip-unneeded "${binary_path}"
         "$OBJCOPY" --add-gnu-debuglink="${debug_file}" "${binary_path}"
@@ -254,6 +256,8 @@ for binary_path in "${DIST_DIR}"/*; do
     if [ -f "${binary_path}" ] && [ -x "${binary_path}" ]; then
         binary=$(basename "${binary_path}")
         debug_file="${DEBUG_DIR}/${binary}.debug"
+        # Break hardlink created by cargo --out-dir to avoid modifying target/
+        cp "${binary_path}" "${binary_path}.tmp" && mv "${binary_path}.tmp" "${binary_path}"
         "$OBJCOPY" --only-keep-debug "${binary_path}" "${debug_file}"
         "$OBJCOPY" --strip-debug --strip-unneeded "${binary_path}"
         "$OBJCOPY" --add-gnu-debuglink="${debug_file}" "${binary_path}"

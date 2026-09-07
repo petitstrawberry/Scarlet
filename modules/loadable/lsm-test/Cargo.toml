@@ -1,0 +1,10 @@
+[package]
+name = "scarlet-module-lsm-test"
+version = "1.0.0"
+edition = "2024"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+scarlet = { path = "../../../kernel", default-features = false }

@@ -1,10 +1,15 @@
 [package]
 name = "scarlet-desktop-config"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2024"
 
 [lib]
 path = "src/lib.rs"
 
+[features]
+default = ["legacy-scarlet-std"]
+legacy-scarlet-std = ["dep:scarlet-std"]
+std = []
+
 [dependencies]
-scarlet_std = { path = "../std" }
+scarlet-std = { path = "../std", optional = true }

@@ -12,18 +12,20 @@
 //!
 //! This design supports multiple network interfaces (eth0, eth1, wlan0, etc.).
 
+use crate::sync::IrqRwSpinLock;
 use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use spin::RwLock;
 
 use crate::device::network::DevicePacket;
 use crate::device::network::MacAddress;
-use crate::early_println;
 use crate::network::NetworkInterface;
 use crate::network::protocol_stack::{LayerContext, NetworkLayer, NetworkLayerStats};
 use crate::network::socket::SocketError;
+use crate::println;
+
+const LOG_ETHERNET_PACKET_TRACE: bool = false;
 
 /// Ethernet frame header (14 bytes)
 #[derive(Debug, Clone, Copy)]
@@ -117,26 +119,26 @@ pub struct EthernetInterfaceInfo {
 /// Manages multiple interfaces and routes frames based on EtherType field.
 pub struct EthernetLayer {
     /// Registered interfaces: name -> info
-    interfaces: RwLock<BTreeMap<String, EthernetInterfaceInfo>>,
-    /// Interface devices: name -> device (kept separate for Arc<dyn> handling)
-    devices: RwLock<BTreeMap<String, Arc<dyn NetworkInterface>>>,
+    interfaces: IrqRwSpinLock<BTreeMap<String, EthernetInterfaceInfo>>,
+    /// Interface devices: name -> device (kept separate for `Arc<dyn NetworkInterface>` handling)
+    devices: IrqRwSpinLock<BTreeMap<String, Arc<dyn NetworkInterface>>>,
     /// Default interface name
-    default_interface: RwLock<Option<String>>,
+    default_interface: IrqRwSpinLock<Option<String>>,
     /// Protocol handlers registered by EtherType
-    protocols: RwLock<BTreeMap<u16, Arc<dyn NetworkLayer>>>,
+    protocols: IrqRwSpinLock<BTreeMap<u16, Arc<dyn NetworkLayer>>>,
     /// Statistics
-    stats: RwLock<NetworkLayerStats>,
+    stats: IrqRwSpinLock<NetworkLayerStats>,
 }
 
 impl EthernetLayer {
     /// Create a new Ethernet layer
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
-            interfaces: RwLock::new(BTreeMap::new()),
-            devices: RwLock::new(BTreeMap::new()),
-            default_interface: RwLock::new(None),
-            protocols: RwLock::new(BTreeMap::new()),
-            stats: RwLock::new(NetworkLayerStats::default()),
+            interfaces: IrqRwSpinLock::new(BTreeMap::new()),
+            devices: IrqRwSpinLock::new(BTreeMap::new()),
+            default_interface: IrqRwSpinLock::new(None),
+            protocols: IrqRwSpinLock::new(BTreeMap::new()),
+            stats: IrqRwSpinLock::new(NetworkLayerStats::default()),
         })
     }
 
@@ -245,7 +247,11 @@ impl EthernetLayer {
         }
 
         // 2. Check if destination IP is broadcast
-        if let Some(dst_ip_bytes) = context.get("dst_ip") {
+        if let Some(dst_ip_bytes) = context
+            .get("dst_ip")
+            .or_else(|| context.get("ip_dst"))
+            .or_else(|| context.get("next_hop"))
+        {
             if dst_ip_bytes.len() >= 4 {
                 // Broadcast IP (255.255.255.255) → Broadcast MAC
                 if dst_ip_bytes[0] == 255
@@ -284,13 +290,9 @@ impl EthernetLayer {
                         }
 
                         // Not in cache - trigger ARP request
-                        early_println!(
+                        println!(
                             "[Ethernet] ARP cache miss for {}.{}.{}.{} on {}, need resolution",
-                            ip_bytes[0],
-                            ip_bytes[1],
-                            ip_bytes[2],
-                            ip_bytes[3],
-                            interface
+                            ip_bytes[0], ip_bytes[1], ip_bytes[2], ip_bytes[3], interface
                         );
 
                         // Trigger ARP request with interface info
@@ -305,7 +307,7 @@ impl EthernetLayer {
         }
 
         // No way to determine destination MAC
-        early_println!("[Ethernet] Cannot resolve destination MAC: no dst_ip or eth_dst_mac");
+        println!("[Ethernet] Cannot resolve destination MAC: no dst_ip or eth_dst_mac");
         Err(SocketError::NoRoute)
     }
 
@@ -321,12 +323,14 @@ impl EthernetLayer {
         let header = EthernetHeader::from_bytes(&frame[..ETHERNET_HEADER_SIZE])
             .ok_or(SocketError::InvalidPacket)?;
 
-        early_println!(
-            "[Ethernet] RX on {}: {} bytes (type=0x{:04X})",
-            interface,
-            frame.len(),
-            header.ether_type
-        );
+        if LOG_ETHERNET_PACKET_TRACE {
+            println!(
+                "[Ethernet] RX on {}: {} bytes (type=0x{:04X})",
+                interface,
+                frame.len(),
+                header.ether_type
+            );
+        }
 
         let payload = &frame[ETHERNET_HEADER_SIZE..];
 
@@ -341,8 +345,8 @@ impl EthernetLayer {
         context.set("eth_src_mac", &header.src_mac);
         context.set("eth_dst_mac", &header.dest_mac);
 
-        let protocols = self.protocols.read();
-        if let Some(handler) = protocols.get(&header.ether_type) {
+        let handler = self.protocols.read().get(&header.ether_type).cloned();
+        if let Some(handler) = handler {
             handler.receive(payload, Some(&context))
         } else {
             Ok(())
@@ -396,7 +400,7 @@ impl NetworkLayer for EthernetLayer {
                                 .as_any()
                                 .downcast_ref::<crate::network::arp::ArpLayer>()
                             {
-                                early_println!(
+                                println!(
                                     "[Ethernet] Queuing packet ({} bytes) for ARP resolution of {}.{}.{}.{}",
                                     packet.len(),
                                     ip_bytes[0],
@@ -445,26 +449,30 @@ impl NetworkLayer for EthernetLayer {
 
         // Send through device
         if let Some(device) = self.get_device(&interface_name) {
-            early_println!(
-                "[Ethernet] Sending {} bytes via {} to {:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X} (type=0x{:04X})",
-                frame_len,
-                interface_name,
-                dest_mac[0],
-                dest_mac[1],
-                dest_mac[2],
-                dest_mac[3],
-                dest_mac[4],
-                dest_mac[5],
-                ether_type
-            );
+            if LOG_ETHERNET_PACKET_TRACE {
+                println!(
+                    "[Ethernet] Sending {} bytes via {} to {:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X} (type=0x{:04X})",
+                    frame_len,
+                    interface_name,
+                    dest_mac[0],
+                    dest_mac[1],
+                    dest_mac[2],
+                    dest_mac[3],
+                    dest_mac[4],
+                    dest_mac[5],
+                    ether_type
+                );
+            }
             let pkt = DevicePacket::with_data(frame);
             device.send(pkt).map_err(|e| {
-                early_println!("[Ethernet] Send failed: {}", e);
+                println!("[Ethernet] Send failed: {}", e);
                 SocketError::Other("send failed".into())
             })?;
-            early_println!("[Ethernet] Send succeeded");
+            if LOG_ETHERNET_PACKET_TRACE {
+                println!("[Ethernet] Send succeeded");
+            }
         } else {
-            early_println!("[Ethernet] No device for interface {}", interface_name);
+            println!("[Ethernet] No device for interface {}", interface_name);
             return Err(SocketError::NoRoute);
         }
 
@@ -494,20 +502,24 @@ impl NetworkLayer for EthernetLayer {
             let header = EthernetHeader::from_bytes(&frame[..ETHERNET_HEADER_SIZE])
                 .ok_or(SocketError::InvalidPacket)?;
 
-            early_println!(
-                "[Ethernet] RX: {} bytes (type=0x{:04X})",
-                frame.len(),
-                header.ether_type
-            );
+            if LOG_ETHERNET_PACKET_TRACE {
+                println!(
+                    "[Ethernet] RX: {} bytes (type=0x{:04X})",
+                    frame.len(),
+                    header.ether_type
+                );
+            }
 
             let payload = &frame[ETHERNET_HEADER_SIZE..];
 
-            let mut stats = self.stats.write();
-            stats.packets_received += 1;
-            stats.bytes_received += frame.len() as u64;
+            {
+                let mut stats = self.stats.write();
+                stats.packets_received += 1;
+                stats.bytes_received += frame.len() as u64;
+            }
 
-            let protocols = self.protocols.read();
-            if let Some(handler) = protocols.get(&header.ether_type) {
+            let handler = self.protocols.read().get(&header.ether_type).cloned();
+            if let Some(handler) = handler {
                 handler.receive(payload, None)
             } else {
                 Ok(())
@@ -607,5 +619,14 @@ mod tests {
         let eth_layer = EthernetLayer::new();
         // Initially no default
         assert!(eth_layer.get_default_interface().is_none());
+    }
+
+    #[test_case]
+    fn ipv4_limited_broadcast_uses_ethernet_broadcast() {
+        let eth_layer = EthernetLayer::new();
+        let mut context = LayerContext::new();
+        context.set("ip_dst", &[255, 255, 255, 255]);
+
+        assert_eq!(eth_layer.resolve_dest_mac(&context, "eth0"), Ok([0xff; 6]));
     }
 }

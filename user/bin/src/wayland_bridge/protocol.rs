@@ -80,9 +80,10 @@ pub enum WaylandArg {
     NewId(u32),
     /// Array of bytes
     Array(Vec<u8>),
-    /// File descriptor placeholder
-    /// The FD placeholder (0) is encoded in the message body
-    /// The actual handle is sent separately via send_handle_and_data
+    /// File descriptor argument transferred out-of-band.
+    ///
+    /// Wayland does not encode file descriptors in the message body. The
+    /// actual handle is sent separately via `SCM_RIGHTS`.
     FdPlaceholder,
 }
 
@@ -148,7 +149,7 @@ impl WaylandArg {
                 // size (4 bytes) + data + padding
                 4 + ((a.len() + 3) & !3) as u32
             }
-            WaylandArg::FdPlaceholder => 4, // FD placeholder is 4 bytes (u32 with value 0)
+            WaylandArg::FdPlaceholder => 0,
         }
     }
 
@@ -179,11 +180,7 @@ impl WaylandArg {
                     bytes.push(0);
                 }
             }
-            WaylandArg::FdPlaceholder => {
-                // FD placeholder: always encode as 0
-                // The actual handle is sent via SCM_RIGHTS separately
-                bytes.extend_from_slice(&0u32.to_ne_bytes());
-            }
+            WaylandArg::FdPlaceholder => {}
         }
     }
 }
@@ -258,6 +255,8 @@ pub mod surface_request {
     pub const COMMIT: u16 = 6;
     pub const SET_BUFFER_TRANSFORM: u16 = 7;
     pub const SET_BUFFER_SCALE: u16 = 8;
+    /// Damage in buffer (physical) coordinates. Available since wl_surface version 4.
+    pub const DAMAGE_BUFFER: u16 = 9;
 }
 
 /// wl_surface opcodes (events from server)
@@ -279,8 +278,47 @@ pub mod callback_event {
     pub const DONE: u16 = 0;
 }
 
-/// wl_data_device_manager opcodes (events from server)
-pub mod data_device_manager_event {
-    // No standard events for this protocol
-    // Advertised as placeholder for GTK3 compatibility
+/// wl_data_device_manager opcodes (requests from client)
+pub mod data_device_manager_request {
+    pub const CREATE_DATA_SOURCE: u16 = 0;
+    pub const GET_DATA_DEVICE: u16 = 1;
+}
+
+/// wl_data_source opcodes (requests from client)
+pub mod data_source_request {
+    pub const OFFER: u16 = 0;
+    pub const DESTROY: u16 = 1;
+    pub const SET_ACTIONS: u16 = 2;
+}
+
+/// wl_data_device opcodes (requests from client)
+pub mod data_device_request {
+    pub const START_DRAG: u16 = 0;
+    pub const SET_SELECTION: u16 = 1;
+    pub const RELEASE: u16 = 2;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fd_arguments_do_not_consume_wayland_wire_bytes() {
+        let mut keymap = WaylandMessage::new(7, 0);
+        keymap.add_arg(WaylandArg::Uint(1));
+        keymap.add_arg(WaylandArg::FdPlaceholder);
+        keymap.add_arg(WaylandArg::Uint(4096));
+
+        let encoded = keymap.encode();
+        assert_eq!(encoded.len(), 16);
+        assert_eq!(
+            MessageHeader::from_bytes(&encoded[..8].try_into().unwrap()).size(),
+            16
+        );
+        assert_eq!(u32::from_ne_bytes(encoded[8..12].try_into().unwrap()), 1);
+        assert_eq!(
+            u32::from_ne_bytes(encoded[12..16].try_into().unwrap()),
+            4096
+        );
+    }
 }

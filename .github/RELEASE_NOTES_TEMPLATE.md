@@ -31,7 +31,7 @@
 - 
 
 ### User Space & UI
-<!-- scarlet-ui, SWS, slint, user programs, tools, etc. -->
+<!-- ScarletUI, SWS, user programs, tools, etc. -->
 - 
 
 ### Build & Tooling

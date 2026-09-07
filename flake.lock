@@ -1,0 +1,139 @@
+{
+  "nodes": {
+    "macvdmtool-src": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1773521079,
+        "narHash": "sha256-df+aK3id7bhgArwWMw26JWLwDRyIIFzKaRUqOfg6o2c=",
+        "owner": "AsahiLinux",
+        "repo": "macvdmtool",
+        "rev": "b22ae51eb43a0e1daa21d41616ac899f28e7bf8a",
+        "type": "github"
+      },
+      "original": {
+        "owner": "AsahiLinux",
+        "repo": "macvdmtool",
+        "type": "github"
+      }
+    },
+    "nixpkgs": {
+      "locked": {
+        "lastModified": 1781607440,
+        "narHash": "sha256-rxO+uc/KFbSJp+pgyXRuAX6QlG9hJdnt0BXpEQRXY+U=",
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "3e41b24abd260e8f71dbe2f5737d24122f972158",
+        "type": "github"
+      },
+      "original": {
+        "owner": "NixOS",
+        "ref": "nixpkgs-unstable",
+        "repo": "nixpkgs",
+        "type": "github"
+      }
+    },
+    "nixpkgs_2": {
+      "locked": {
+        "lastModified": 1780365719,
+        "narHash": "sha256-QfWfccTN+70ZQ4m2qlU9PiKfz2Yppq94058iJyARNwc=",
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "ffa10e26ae11d676b2db836259889f1f571cb14f",
+        "type": "github"
+      },
+      "original": {
+        "owner": "NixOS",
+        "ref": "nixpkgs-unstable",
+        "repo": "nixpkgs",
+        "type": "github"
+      }
+    },
+    "qemu-scarlet": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1786759057,
+        "narHash": "sha256-W4DaRldMKjc5jsUTbuVTLfrH343rOoFwiyg5A+3LJQ0=",
+        "ref": "scarlet",
+        "rev": "13299d8d5462278f6f03d744ff2d4f7504fe06c9",
+        "revCount": 131588,
+        "submodules": true,
+        "type": "git",
+        "url": "https://gitlab.com/petitstrawberry/qemu.git"
+      },
+      "original": {
+        "ref": "scarlet",
+        "submodules": true,
+        "type": "git",
+        "url": "https://gitlab.com/petitstrawberry/qemu.git"
+      }
+    },
+    "root": {
+      "inputs": {
+        "macvdmtool-src": "macvdmtool-src",
+        "nixpkgs": "nixpkgs",
+        "qemu-scarlet": "qemu-scarlet",
+        "scarlet-rust-toolchain": "scarlet-rust-toolchain",
+        "scarlet-sdk": "scarlet-sdk"
+      }
+    },
+    "rust-overlay": {
+      "inputs": {
+        "nixpkgs": [
+          "scarlet-rust-toolchain",
+          "nixpkgs"
+        ]
+      },
+      "locked": {
+        "lastModified": 1780715792,
+        "narHash": "sha256-4+8gPeiPeud89mjo865RwpqmKwa1MThRsq2SvRxo7mg=",
+        "owner": "oxalica",
+        "repo": "rust-overlay",
+        "rev": "27b7e78c6935293ee868469cc4172e9b8b17823b",
+        "type": "github"
+      },
+      "original": {
+        "owner": "oxalica",
+        "repo": "rust-overlay",
+        "type": "github"
+      }
+    },
+    "scarlet-rust-toolchain": {
+      "inputs": {
+        "nixpkgs": "nixpkgs_2",
+        "rust-overlay": "rust-overlay"
+      },
+      "locked": {
+        "lastModified": 1788500970,
+        "narHash": "sha256-h9IilWrAlWeWdIN82Afw5s4YCeYREQvjlcD4CYuGhEg=",
+        "owner": "petitstrawberry",
+        "repo": "scarlet-rust-nix",
+        "rev": "2b4ddd555389a8c53806bbc2586440b2662c38dd",
+        "type": "github"
+      },
+      "original": {
+        "owner": "petitstrawberry",
+        "repo": "scarlet-rust-nix",
+        "type": "github"
+      }
+    },
+    "scarlet-sdk": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1788797781,
+        "narHash": "sha256-OATuVMOo3HKZ3vwWlQWLBHDg68ryrauppXwg43xO8sI=",
+        "owner": "petitstrawberry",
+        "repo": "scarlet-sdk",
+        "rev": "f63ffddf5051c9d4ae113179f96a60e3053ad675",
+        "type": "github"
+      },
+      "original": {
+        "owner": "petitstrawberry",
+        "repo": "scarlet-sdk",
+        "rev": "f63ffddf5051c9d4ae113179f96a60e3053ad675",
+        "type": "github"
+      }
+    }
+  },
+  "root": "root",
+  "version": 7
+}

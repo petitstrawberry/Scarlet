@@ -27,6 +27,57 @@ fn make_mount_and_entry(fs: Arc<dyn FileSystemOperations>) -> (Arc<MountPoint>, 
 }
 
 #[test_case]
+fn test_vfs_exclusive_create_checks_lower_layer_before_creating_upper() {
+    use crate::fs::{FileSystemErrorKind, VfsManager};
+
+    const CREATE_NEW: u32 = 0x2 | 0x40 | 0x80;
+    let lower = TmpFS::new(0);
+    let upper = TmpFS::new(0);
+    let lower_root = lower.root_node();
+    let upper_root = upper.root_node();
+    for (name, file_type) in [
+        ("existing", FileType::RegularFile),
+        ("dir", FileType::Directory),
+        ("dangling", FileType::SymbolicLink("/missing".to_string())),
+    ] {
+        lower
+            .create(&lower_root, &name.to_string(), file_type, 0o644)
+            .unwrap();
+    }
+    let overlay = OverlayFS::new(
+        Some(make_mount_and_entry(upper.clone())),
+        vec![make_mount_and_entry(lower.clone())],
+        "exclusive-create".to_string(),
+    )
+    .unwrap();
+    let vfs = VfsManager::new_with_root(overlay);
+
+    for name in ["existing", "dir", "dangling"] {
+        let path = alloc::format!("/{name}");
+        assert!(matches!(
+            vfs.open(&path, CREATE_NEW | 0x200),
+            Err(error) if error.kind == FileSystemErrorKind::AlreadyExists
+        ));
+        assert!(matches!(
+            upper.lookup(&upper_root, &name.to_string()),
+            Err(error) if error.kind == FileSystemErrorKind::NotFound
+        ));
+    }
+
+    let handle = vfs.open("/new", CREATE_NEW).unwrap();
+    assert_eq!(handle.as_file().unwrap().write(b"upper").unwrap(), 5);
+    let node = upper.lookup(&upper_root, &"new".to_string()).unwrap();
+    let file = upper.open(&node, 0).unwrap();
+    let mut bytes = [0; 5];
+    assert_eq!(file.read(&mut bytes).unwrap(), bytes.len());
+    assert_eq!(&bytes, b"upper");
+    assert!(matches!(
+        lower.lookup(&lower_root, &"new".to_string()),
+        Err(error) if error.kind == FileSystemErrorKind::NotFound
+    ));
+}
+
+#[test_case]
 fn test_overlayfs_basic() {
     /*
     Directory structure:
@@ -601,7 +652,7 @@ fn test_overlayfs_nested_mnt_bind_mounts() {
     let (mnt_entry, mnt_mp) = lower_mgr.mount_tree.resolve_path("/mnt").unwrap();
     // Check mnt_mp has child mount
     let children = &mnt_mp.children;
-    assert!(children.read().values().any(|c| c.path == "child"));
+    assert!(children.read().values().any(|c| *c.path.read() == "child"));
 
     // Upper layer is an empty TmpFS
     let upper = TmpFS::new(0);

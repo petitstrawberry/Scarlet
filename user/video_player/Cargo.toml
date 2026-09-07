@@ -1,0 +1,35 @@
+[package]
+name = "video_player"
+version = "1.0.0"
+edition = "2024"
+workspace = "../../.cargo"
+
+[[bin]]
+name = "video-player"
+path = "src/main.rs"
+
+[features]
+default = ["av1-stateful-hw", "h264-stateful-hw", "mp4-aac"]
+av1-stateful-hw = ["scarlet-video-client/av1-stateful-hw"]
+h264-stateful-hw = ["scarlet-video-client/h264-stateful-hw"]
+# H.264 stateless and software paths are opt-in because H.264/AVC may be
+# patent-encumbered in some jurisdictions. The default build keeps only the
+# platform/stateful hardware path.
+h264-stateless-hw = ["scarlet-video-client/h264-stateless-hw"]
+h264-sw = ["dep:rust_h264"]
+hevc-stateful-hw = ["scarlet-video-client/hevc-stateful-hw"]
+mp4-aac = ["dep:symphonia-core", "dep:symphonia-codec-aac"]
+vp9-stateful-hw = ["scarlet-video-client/vp9-stateful-hw"]
+vp9-stateless-hw = ["scarlet-video-client/vp9-stateless-hw"]
+
+[dependencies]
+scarlet-std = { path = "../lib/std", features = ["alloc_debug"] }
+scarlet-video-client = { path = "../lib/scarlet-video-client", default-features = false, features = ["legacy-scarlet-std"] }
+scarlet-ui = { git = "https://github.com/petitstrawberry/scarlet-ui", package = "scarlet-ui", default-features = false, features = ["legacy-scarlet-std", "platform-sws"] }
+sas-client = { path = "../lib/sas-client", default-features = false, features = ["legacy-scarlet-std"] }
+sbus = { path = "../lib/sbus" }
+sbus-client = { path = "../lib/sbus-client", default-features = false, features = ["legacy-scarlet-std"] }
+scarlet-desktop-config = { path = "../lib/scarlet-desktop-config", default-features = false, features = ["legacy-scarlet-std"] }
+rust_h264 = { git = "https://github.com/petitstrawberry/rust_h264.git", rev = "a559fe2545fd88def12146dcc06286475b53ead3", default-features = false, features = ["portable-simd"], optional = true }
+symphonia-core = { git = "https://github.com/petitstrawberry/Symphonia.git", rev = "71f92f0bc0fdd9d4f2a77129a543ee6c99611009", default-features = false, optional = true }
+symphonia-codec-aac = { git = "https://github.com/petitstrawberry/Symphonia.git", rev = "71f92f0bc0fdd9d4f2a77129a543ee6c99611009", default-features = false, optional = true }

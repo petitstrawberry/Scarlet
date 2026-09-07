@@ -1,17 +1,21 @@
 # Linux ABI Support Status
 
-Scarlet includes an early Linux ABI layer focused on running selected RISC-V 64-bit userland binaries. This note captures the current scope, known gaps, and the recommended way to exercise the demo.
+Scarlet includes a partial Linux ABI layer used for selected Buildroot-based
+userlands, GUI applications, services, and KVM-oriented VMM workloads. This note
+captures the current scope, known gaps, and the recommended way to exercise it.
 
 ## Summary
 
-- **Architecture**: RISC-V 64-bit userland built via Buildroot
+- **Architectures**: RISC-V 64-bit and AArch64 userlands built via Buildroot
 - **Kernel interface**: Direct syscall translation layer into Scarlet kernel primitives
-- **State**: Partial – intended for demos and experimentation rather than production workloads
+- **State**: Partial but actively used for selected workloads, including
+  BusyBox-style userlands, Wayland bridge applications, Mozc, and `/dev/kvm`
+  userspace VMMs
 - **Demo**: See [demo.md](demo.md) for running instructions.
 
 ## System Call Support Matrix
 
-The following system calls are currently handled by the Linux ABI module (`linux-riscv64`).
+The following system calls are currently handled by the Linux ABI module.
 
 ### File System & I/O
 | Syscall | Status | Notes |
@@ -36,12 +40,23 @@ The following system calls are currently handled by the Linux ABI module (`linux
 | `umask` | 🚧 Stub | Returns provided mask, does not affect creation. |
 | `fchmod` | 🚧 Stub | Always succeeds. |
 | `faccessat` | 🚧 Stub | Always succeeds. |
-| `fsync` | 🚧 Stub | Always succeeds. |
-| `linkat` | 🚧 Stub | Always succeeds (no-op). |
-| `renameat2` | 🚧 Stub | Checks flags, returns success (no-op). |
+| `fsync` | ✅ Supported | Delegates to the file object's sync operation; durability depends on the backing filesystem. |
+| `linkat` | ❌ Unsupported | Returns `ENOSYS`; does not create a link. |
+| `renameat2` | ⚠️ Partial | Supports directory FDs and atomic `RENAME_NOREPLACE`. Exchange/whiteout return `ENOSYS`. |
 | `epoll_create1` | 🚧 Stub | Returns dummy file descriptor. |
 | `epoll_ctl`, `epoll_wait` | 🚧 Stub | Minimal/No-op implementation. |
 | `pselect6`, `ppoll` | ✅ Supported | `sigmask` ignored. `pselect6` limited to 64 FDs. |
+| `ftruncate` | ✅ Supported | |
+| `fallocate` | ✅ Supported | |
+| `flock` | ✅ Supported | |
+| `inotify_init1` | ✅ Supported | |
+| `eventfd2` | ✅ Supported | |
+| `timerfd_create` | ✅ Supported | |
+| `timerfd_settime`, `timerfd_gettime` | ✅ Supported | |
+| `statx` | ✅ Supported | |
+| `getrandom` | ✅ Supported | |
+| `memfd_create` | ✅ Supported | |
+| `mount` | ✅ Supported | |
 
 ### Process Management
 | Syscall | Status | Notes |
@@ -60,6 +75,18 @@ The following system calls are currently handled by the Linux ABI module (`linux
 | `setuid`, `setgid`, `setpgid` | 🚧 Stub | Always succeeds. |
 | `getpgid` | ✅ Supported | Returns task ID. |
 | `membarrier` | 🚧 Stub | Always succeeds. |
+| `unshare` | ✅ Supported | |
+| `prctl` | ✅ Supported | |
+| `sysinfo` | ✅ Supported | |
+| `pidfd_open` | ✅ Supported | |
+| `waitid` | ✅ Supported | |
+| `sched_yield` | ✅ Supported | |
+| `sched_getscheduler`, `sched_getparam` | ✅ Supported | |
+| `sched_getaffinity` | ✅ Supported | |
+| `setsid`, `getsid` | ✅ Supported | |
+| `getresuid`, `getresgid` | ✅ Supported | |
+| `sigaltstack` | ✅ Supported | |
+| `kill`, `tkill`, `tgkill` | ✅ Supported | Signal delivery. |
 
 ### Memory Management
 | Syscall | Status | Notes |
@@ -67,6 +94,13 @@ The following system calls are currently handled by the Linux ABI module (`linux
 | `mmap` | ✅ Supported | `MAP_ANONYMOUS`, `MAP_FIXED`, `MAP_SHARED`/`PRIVATE`, file-backed. |
 | `munmap` | ✅ Supported | |
 | `mprotect` | ✅ Supported | |
+| `mremap` | ✅ Supported | |
+| `msync` | ✅ Supported | |
+| `mlock`, `munlock` | ✅ Supported | |
+| `mlockall`, `munlockall` | ✅ Supported | |
+| `mlock2` | ✅ Supported | |
+| `mincore` | ✅ Supported | |
+| `madvise` | ✅ Supported | |
 
 ### Time & Timers
 | Syscall | Status | Notes |
@@ -86,14 +120,28 @@ The following system calls are currently handled by the Linux ABI module (`linux
 | `futex` | ⚠️ Partial | `FUTEX_WAIT`, `FUTEX_WAKE` implemented. |
 
 ### Networking (Sockets)
-**Note:** Networking is currently mocked to allow applications to start without hanging.
+Socket syscalls have real implementations backed by the kernel network stack.
 | Syscall | Status | Notes |
 |---------|--------|-------|
-| `socket` | 🚧 Mock | Creates a pipe to simulate a socket fd. |
-| `bind`, `listen`, `connect` | 🚧 Mock | Always succeeds. |
-| `accept` | 🚧 Mock | Returns a new pipe fd. |
-| `getsockname` | 🚧 Mock | Returns `AF_UNIX`. |
-| `setsockopt`, `getsockopt` | 🚧 Mock | Success / Dummy values. |
+| `socket` | ✅ Supported | Creates socket via kernel network stack. |
+| `socketpair` | ✅ Supported | |
+| `bind`, `listen` | ✅ Supported | |
+| `connect` | ✅ Supported | |
+| `accept`, `accept4` | ✅ Supported | |
+| `getsockname`, `getpeername` | ✅ Supported | |
+| `sendto`, `recvfrom` | ✅ Supported | |
+| `sendmsg`, `recvmsg` | ✅ Supported | |
+| `setsockopt`, `getsockopt` | ✅ Supported | |
+| `shutdown` | ✅ Supported | |
+
+### Hypervisor / KVM
+| Interface | Status | Notes |
+|-----------|--------|-------|
+| `/dev/kvm` | ✅ Supported | Linux KVM ioctl compatibility layer backed by SHV. |
+| KVM VM/vCPU lifecycle | ✅ Supported | `KVM_CREATE_VM`, `KVM_CREATE_VCPU`, `KVM_RUN`. |
+| KVM memory slots | ✅ Supported | `KVM_SET_USER_MEMORY_REGION`. |
+| KVM register access | ✅ Supported | Architecture-specific RISC-V and AArch64 register paths. |
+| KVM IRQ/device ioctls | ⚠️ Partial | Enough for current kvmtool/Firecracker-class workloads; not full KVM parity. |
 
 ## File System Implementation Notes
 
@@ -106,20 +154,22 @@ While basic file operations work, the current implementation has significant dev
 
 ## What Works Today
 
-- Buildroot root filesystem generation (via `tools/linux/build_buildroot.sh`)
-- Toolchain exports (under `/opt/buildroot/output/host`) for building userspace
-- Demo binaries `green` and `fbdoom` built with the Buildroot toolchain
-- Process launch, basic file I/O, and framebuffer output through Scarlet-managed devices
+- Buildroot root filesystem generation (via `bundles/linux/tools/build_buildroot.sh`)
+- Toolchain exports from Buildroot for building userspace
+- Demo binaries `green`, `fbdoom`, and the Linux zathura PDF viewer built with
+  the Buildroot toolchain
+- Process launch, basic file I/O, framebuffer output, and Wayland bridge clients
+  through Scarlet-managed devices
 
 Refer to [userspace-artifacts.md](userspace-artifacts.md) for the exact build steps, and [demo.md](demo.md) for execution instructions.
 
 ## Known Limitations
 
-- **Networking**: No real network stack integration yet; sockets are pipes.
+- **Networking**: Real socket syscalls backed by the kernel network stack; coverage of socket options and edge cases is still expanding.
 - **Signals**: Signal delivery logic is basic; complex signal handling (stacks, nesting) is WIP.
 - **User/Group**: Single-user (root) environment assumed.
 - **Permissions**: File permissions, ownership, and access modes (e.g. read-only enforcement) are currently ignored.
-- **Filesystem**: `linkat`, `renameat2` are stubs; hard links not fully supported in VFS v2.
+- **Filesystem**: Linux `linkat` and `renameat2` exchange/whiteout operations return `ENOSYS`. Native VFS hard-link support is separate.
 - **Epoll**: Stubs only; event-driven I/O applications may not function correctly.
 - **Device Support**: `ioctl` commands are device-dependent. Basic TTY support is available.
 

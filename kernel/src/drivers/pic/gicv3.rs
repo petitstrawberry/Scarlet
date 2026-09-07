@@ -6,6 +6,7 @@
 //!
 //! The distributor / redistributor are still configured via MMIO during init.
 
+use crate::device::platform::resource::PlatformDeviceResource;
 use crate::{
     arch::mmio,
     device::{
@@ -16,19 +17,32 @@ use crate::{
     },
     early_initcall,
     interrupt::{
-        CpuId, InterruptError, InterruptId, InterruptManager, InterruptResult, Priority,
-        controllers::ExternalInterruptController,
+        CpuId, InterruptError, InterruptId, InterruptResult, Priority,
+        controllers::{
+            ExternalInterruptController, InterruptControllerInitMode, IrqFlow, IrqMapping,
+            PendingIrq,
+        },
     },
 };
 
 use alloc::{boxed::Box, vec};
 use core::arch::asm;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 /// Maximum number of interrupts supported by this implementation.
 const MAX_INTERRUPTS: InterruptId = 1020;
 
 /// Maximum number of CPUs supported by this implementation.
 const MAX_CPUS: CpuId = 8;
+
+/// SGI used by the scheduler to request a reschedule on another CPU.
+const RESCHEDULE_SGI: u32 = 0;
+
+/// Sentinel used until a logical CPU publishes its architectural affinity.
+const INVALID_MPIDR_AFFINITY: u64 = u64::MAX;
+
+/// MPIDR affinity fields (Aff3 and Aff2:Aff0), excluding U/MT and RES0 bits.
+const MPIDR_AFFINITY_MASK: u64 = 0xFF00_FFFF_FF;
 
 // Distributor register offsets (GICD)
 const GICD_CTLR: usize = 0x0000;
@@ -37,17 +51,35 @@ const GICD_IGROUPR: usize = 0x0080;
 const GICD_ISENABLER: usize = 0x0100;
 const GICD_ICENABLER: usize = 0x0180;
 const GICD_ISPENDR: usize = 0x0200;
+const GICD_ICACTIVER: usize = 0x0380;
 const GICD_IPRIORITYR: usize = 0x0400;
+const GICD_ICFGR: usize = 0x0c00;
+const GICD_IROUTER: usize = 0x6000;
+
+const GICD_CTLR_ENABLE_G1: u32 = 1 << 0;
+const GICD_CTLR_ENABLE_G1A: u32 = 1 << 1;
+const GICD_CTLR_ARE_NS: u32 = 1 << 4;
+const GICD_CTLR_RWP: u32 = 1 << 31;
 
 // Redistributor register offsets (GICR)
 // GICv3 redistributor has RD frame at base, and SGI/PPI frame at base + 0x10000.
 const GICR_WAKER: usize = 0x0014;
+const GICR_CTLR: usize = 0x0000;
 const GICR_SGI_BASE: usize = 0x10000;
 const GICR_IGROUPR0: usize = 0x0080;
 const GICR_ISENABLER0: usize = 0x0100;
 const GICR_ICENABLER0: usize = 0x0180;
 const GICR_ISPENDR0: usize = 0x0200;
+const GICR_ICACTIVER0: usize = 0x0380;
 const GICR_IPRIORITYR: usize = 0x0400;
+const GICR_CTLR_RWP: u32 = 1 << 3;
+
+/// Linux's ordinary GIC interrupt priority. Scarlet currently uses one normal
+/// IRQ priority class, so every owned interrupt starts at this value.
+const GIC_DEFAULT_PRIORITY: u8 = 0xc0;
+const GIC_DEFAULT_PRIORITY_X4: u32 = u32::from_ne_bytes([GIC_DEFAULT_PRIORITY; 4]);
+const GIC_DEFAULT_PMR: u64 = 0xf0;
+const GIC_RWP_SPIN_LIMIT: usize = 1_000_000;
 
 #[inline]
 fn read_icc_iar1_el1() -> u32 {
@@ -71,9 +103,34 @@ fn write_icc_eoir1_el1(v: u32) {
 }
 
 #[inline]
+fn current_el() -> u64 {
+    let el: u64;
+    unsafe {
+        asm!("mrs {}, CurrentEL", out(reg) el, options(nostack));
+    }
+    (el >> 2) & 0x3
+}
+
+#[inline]
 fn write_icc_sre_el1(v: u64) {
     unsafe {
         asm!("msr ICC_SRE_EL1, {0}", "isb", in(reg) v, options(nostack));
+    }
+}
+
+#[inline]
+fn read_icc_sre_el1() -> u64 {
+    let v: u64;
+    unsafe {
+        asm!("mrs {0}, ICC_SRE_EL1", out(reg) v, options(nostack));
+    }
+    v
+}
+
+#[inline]
+fn write_icc_sre_el2(v: u64) {
+    unsafe {
+        asm!("msr ICC_SRE_EL2, {0}", "isb", in(reg) v, options(nostack));
     }
 }
 
@@ -99,10 +156,74 @@ fn write_icc_ctlr_el1(v: u64) {
 }
 
 #[inline]
+fn read_icc_ctlr_el1() -> u64 {
+    let v: u64;
+    unsafe {
+        asm!("mrs {0}, ICC_CTLR_EL1", out(reg) v, options(nostack));
+    }
+    v
+}
+
+#[inline]
+fn clear_icc_ap1r_el1(priority_bits: u64) {
+    unsafe {
+        if priority_bits >= 7 {
+            asm!(
+                "msr ICC_AP1R3_EL1, xzr",
+                "msr ICC_AP1R2_EL1, xzr",
+                options(nostack)
+            );
+        }
+        if priority_bits >= 6 {
+            asm!("msr ICC_AP1R1_EL1, xzr", options(nostack));
+        }
+        asm!("msr ICC_AP1R0_EL1, xzr", "isb", options(nostack));
+    }
+}
+
+#[inline]
 fn write_icc_igrpen1_el1(v: u64) {
     unsafe {
         asm!("msr ICC_IGRPEN1_EL1, {0}", "isb", in(reg) v, options(nostack));
     }
+}
+
+#[inline]
+fn write_icc_sgi1r_el1(v: u64) {
+    unsafe {
+        asm!(
+            "dsb ishst",
+            "msr ICC_SGI1R_EL1, {0}",
+            "isb",
+            in(reg) v,
+            options(nostack)
+        );
+    }
+}
+
+#[inline]
+fn current_mpidr_affinity() -> u64 {
+    let mpidr: u64;
+    unsafe {
+        asm!("mrs {0}, MPIDR_EL1", out(reg) mpidr, options(nostack));
+    }
+    mpidr & MPIDR_AFFINITY_MASK
+}
+
+#[inline]
+fn sgi1r_for_affinity(intid: u64, affinity: u64) -> InterruptResult<u64> {
+    let aff0 = affinity & 0xff;
+    let aff1 = (affinity >> 8) & 0xff;
+    let aff2 = (affinity >> 16) & 0xff;
+    let aff3 = (affinity >> 32) & 0xff;
+
+    // ICC_SGI1R_EL1.TargetList addresses Aff0[3:0]. Range Selector support
+    // for Aff0 >= 16 is optional and Scarlet does not negotiate it yet.
+    if aff0 >= 16 {
+        return Err(InterruptError::InvalidCpuId);
+    }
+
+    Ok((aff3 << 48) | (aff2 << 32) | (intid << 24) | (aff1 << 16) | (1u64 << aff0))
 }
 
 #[inline]
@@ -115,12 +236,18 @@ fn gicd_max_interrupt_id(dist_base_addr: usize) -> InterruptId {
     total.saturating_sub(1)
 }
 
+#[inline]
+const fn gicd_irouter_offset(interrupt_id: InterruptId) -> usize {
+    GICD_IROUTER + interrupt_id as usize * 8
+}
+
 /// ARM GICv3 implementation.
 pub struct GicV3 {
     dist_base_addr: usize,
     redist_base_addr: usize,
     max_interrupts: InterruptId,
     max_cpus: CpuId,
+    cpu_mpidr_affinity: [AtomicU64; MAX_CPUS as usize],
 }
 
 impl GicV3 {
@@ -135,6 +262,8 @@ impl GicV3 {
             redist_base_addr,
             max_interrupts: max_interrupts.min(MAX_INTERRUPTS),
             max_cpus: max_cpus.min(MAX_CPUS),
+            cpu_mpidr_affinity: [const { AtomicU64::new(INVALID_MPIDR_AFFINITY) };
+                MAX_CPUS as usize],
         }
     }
 
@@ -172,78 +301,175 @@ impl GicV3 {
         }
     }
 
-    fn init_distributor(&self) {
-        // Put all interrupts into Group 1 (non-secure).
-        let words = (self.max_interrupts as usize + 32) / 32;
+    fn wait_for_dist_rwp(&self) -> InterruptResult<()> {
+        for _ in 0..GIC_RWP_SPIN_LIMIT {
+            if unsafe { mmio::read32(self.dist_reg_addr(GICD_CTLR)) } & GICD_CTLR_RWP == 0 {
+                return Ok(());
+            }
+            core::hint::spin_loop();
+        }
+        crate::println!("[interrupt] GICv3 distributor RWP timeout");
+        Err(InterruptError::HardwareError)
+    }
 
-        crate::early_println!(
-            "[interrupt] GICv3 dist: CTLR@{:#x} <= 0",
-            self.dist_reg_addr(GICD_CTLR)
-        );
+    fn wait_for_redist_rwp(&self, cpu_id: CpuId) -> InterruptResult<()> {
+        for _ in 0..GIC_RWP_SPIN_LIMIT {
+            if unsafe { mmio::read32(self.redist_reg_addr(cpu_id, GICR_CTLR)) } & GICR_CTLR_RWP == 0
+            {
+                return Ok(());
+            }
+            core::hint::spin_loop();
+        }
+        crate::println!("[interrupt] GICv3 CPU {} redistributor RWP timeout", cpu_id);
+        Err(InterruptError::HardwareError)
+    }
+
+    fn init_distributor(&self) -> InterruptResult<()> {
+        let interrupt_count = self.max_interrupts as usize + 1;
+        let boot_cpu = crate::arch::get_cpu().get_cpuid() as CpuId;
+        self.validate_cpu_id(boot_cpu)?;
+        let boot_affinity = current_mpidr_affinity();
+        self.cpu_mpidr_affinity[boot_cpu as usize].store(boot_affinity, Ordering::Release);
+
         unsafe {
-            // Disable distributor while programming.
             mmio::write32(self.dist_reg_addr(GICD_CTLR), 0x0);
         }
+        self.wait_for_dist_rwp()?;
 
-        crate::early_println!(
-            "[interrupt] GICv3 dist: IGROUPR words={} base={:#x}",
-            words,
-            self.dist_reg_addr(GICD_IGROUPR)
-        );
-        for i in 0..words {
-            // Keep per-iteration logging off; HVF aborts are synchronous so the last marker is enough.
+        // Linux-style cold ownership transfer: every SPI becomes Group-1,
+        // level-triggered, default-priority, inactive and disabled. Pending
+        // state is intentionally not cleared; asserted level sources remain
+        // observable when their Scarlet driver later unmasks them.
+        for intid in (32..interrupt_count).step_by(32) {
             unsafe {
-                mmio::write32(self.dist_reg_addr(GICD_IGROUPR + i * 4), 0xFFFF_FFFF);
+                mmio::write32(
+                    self.dist_reg_addr(GICD_IGROUPR + (intid / 32) * 4),
+                    u32::MAX,
+                );
+            }
+        }
+        for intid in (32..interrupt_count).step_by(16) {
+            unsafe {
+                mmio::write32(self.dist_reg_addr(GICD_ICFGR + (intid / 16) * 4), 0);
+            }
+        }
+        for intid in (32..interrupt_count).step_by(4) {
+            unsafe {
+                mmio::write32(
+                    self.dist_reg_addr(GICD_IPRIORITYR + intid),
+                    GIC_DEFAULT_PRIORITY_X4,
+                );
+            }
+        }
+        for intid in (32..interrupt_count).step_by(32) {
+            unsafe {
+                mmio::write32(
+                    self.dist_reg_addr(GICD_ICACTIVER + (intid / 32) * 4),
+                    u32::MAX,
+                );
+                mmio::write32(
+                    self.dist_reg_addr(GICD_ICENABLER + (intid / 32) * 4),
+                    u32::MAX,
+                );
             }
         }
 
-        crate::early_println!(
-            "[interrupt] GICv3 dist: CTLR@{:#x} <= 3",
-            self.dist_reg_addr(GICD_CTLR)
-        );
         unsafe {
-            // Enable Group 0 + Group 1.
-            mmio::write32(self.dist_reg_addr(GICD_CTLR), 0x3);
+            mmio::write32(
+                self.dist_reg_addr(GICD_CTLR),
+                GICD_CTLR_ARE_NS | GICD_CTLR_ENABLE_G1A | GICD_CTLR_ENABLE_G1,
+            );
         }
+        self.wait_for_dist_rwp()?;
+
+        for intid in 32..interrupt_count {
+            unsafe {
+                mmio::write64(
+                    self.dist_reg_addr(gicd_irouter_offset(intid as InterruptId)),
+                    boot_affinity,
+                );
+            }
+        }
+        unsafe { asm!("dsb sy", options(nostack, preserves_flags)) };
+
+        crate::println!(
+            "[interrupt] GICv3 dist cold-reset: SPIs=32..={} priority={:#04x} route_cpu={}",
+            self.max_interrupts,
+            GIC_DEFAULT_PRIORITY,
+            boot_cpu
+        );
+        Ok(())
     }
 
-    fn init_redistributor(&self, cpu_id: CpuId) {
-        // Wake up redistributor (best-effort).
+    fn init_redistributor(&self, cpu_id: CpuId) -> InterruptResult<()> {
         let waker = self.redist_reg_addr(cpu_id, GICR_WAKER);
         unsafe {
             let mut v = mmio::read32(waker);
-            // Clear ProcessorSleep (bit 1).
             v &= !(1 << 1);
             mmio::write32(waker, v);
-
-            // Wait for ChildrenAsleep (bit 2) to clear.
-            for _ in 0..1_000_000 {
-                let cur = mmio::read32(waker);
-                if (cur & (1 << 2)) == 0 {
-                    break;
-                }
+        }
+        for _ in 0..GIC_RWP_SPIN_LIMIT {
+            if unsafe { mmio::read32(waker) } & (1 << 2) == 0 {
+                break;
             }
+            core::hint::spin_loop();
+        }
+        if unsafe { mmio::read32(waker) } & (1 << 2) != 0 {
+            crate::println!(
+                "[interrupt] GICv3 CPU {} redistributor wake timeout",
+                cpu_id
+            );
+            return Err(InterruptError::HardwareError);
+        }
 
-            // Group 1 for SGI/PPI.
-            mmio::write32(self.redist_sgi_reg_addr(cpu_id, GICR_IGROUPR0), 0xFFFF_FFFF);
+        unsafe {
+            mmio::write32(self.redist_sgi_reg_addr(cpu_id, GICR_IGROUPR0), u32::MAX);
+            mmio::write32(self.redist_sgi_reg_addr(cpu_id, GICR_ICACTIVER0), u32::MAX);
+            mmio::write32(self.redist_sgi_reg_addr(cpu_id, GICR_ICENABLER0), u32::MAX);
+            for word in 0..8 {
+                mmio::write32(
+                    self.redist_sgi_reg_addr(cpu_id, GICR_IPRIORITYR + word * 4),
+                    GIC_DEFAULT_PRIORITY_X4,
+                );
+            }
+        }
+        self.wait_for_redist_rwp(cpu_id)?;
 
-            // Set virtual timer PPI priority to 0x80.
-            let timer_ppi = crate::drivers::pic::arm_generic_timer::CNTV_PPI_IRQ;
-            mmio::write8(
-                self.redist_sgi_reg_addr(cpu_id, GICR_IPRIORITYR) + timer_ppi as usize,
-                0x80,
+        // The scheduler owns SGI 0 immediately; every PPI remains disabled
+        // until its Scarlet source driver explicitly enables it.
+        unsafe {
+            mmio::write32(
+                self.redist_sgi_reg_addr(cpu_id, GICR_ISENABLER0),
+                1 << RESCHEDULE_SGI,
             );
         }
+        self.wait_for_redist_rwp(cpu_id)
     }
 
-    fn init_cpu_interface_sysregs(&self) {
+    fn init_cpu_interface_sysregs(&self) -> InterruptResult<()> {
         // Enable system register interface and unmask Group 1 interrupts.
         // ICC_SRE_EL1.SRE (bit 0) must be 1.
+        // ICC_SRE_EL2.SRE must also be 1 to allow ICH_*_EL2 register access
+        // from the hypervisor (VGIC save/restore). Without this, any MRS/MSR
+        // on ICH_HCR_EL2, ICH_VMCR_EL2, etc. traps with EC=0x18.
+        // Only write ICC_SRE_EL2 when running at EL2; accessing EL2 registers
+        // from EL1 causes an Undefined Instruction exception.
+        if current_el() >= 2 {
+            write_icc_sre_el2(1);
+        }
         write_icc_sre_el1(1);
-        write_icc_pmr_el1(0xFF);
+        if read_icc_sre_el1() & 1 == 0 {
+            return Err(InterruptError::HardwareError);
+        }
+
+        write_icc_igrpen1_el1(0);
+        let priority_bits = ((read_icc_ctlr_el1() >> 8) & 0x7) + 1;
+        write_icc_pmr_el1(GIC_DEFAULT_PMR);
         write_icc_bpr1_el1(0);
         write_icc_ctlr_el1(0);
+        clear_icc_ap1r_el1(priority_bits);
         write_icc_igrpen1_el1(1);
+        Ok(())
     }
 
     fn dist_enable_addr(&self, interrupt_id: InterruptId) -> usize {
@@ -262,32 +488,17 @@ impl GicV3 {
 }
 
 impl ExternalInterruptController for GicV3 {
-    fn init(&mut self) -> InterruptResult<()> {
-        crate::early_println!(
+    fn init(&mut self, mode: InterruptControllerInitMode) -> InterruptResult<()> {
+        debug_assert_eq!(mode, InterruptControllerInitMode::ColdBootReset);
+        crate::println!(
             "[interrupt] GICv3 init: dist={:#x} redist={:#x}",
             self.dist_base_addr,
             self.redist_base_addr
         );
-        // Configure distributor + redistributor for CPU0.
-
-        crate::early_println!("[interrupt] GICv3 init: distributor...");
-        self.init_distributor();
-
-        crate::early_println!("[interrupt] GICv3 init: redistributor...");
-        self.init_redistributor(0);
-
-        crate::early_println!("[interrupt] GICv3 init: sysregs...");
-        self.init_cpu_interface_sysregs();
-
-        crate::early_println!("[interrupt] GICv3 init: done");
-        Ok(())
+        self.init_distributor()
     }
 
-    fn enable_interrupt(
-        &mut self,
-        interrupt_id: InterruptId,
-        cpu_id: CpuId,
-    ) -> InterruptResult<()> {
+    fn enable_interrupt(&self, interrupt_id: InterruptId, cpu_id: CpuId) -> InterruptResult<()> {
         self.validate_interrupt_id(interrupt_id)?;
         self.validate_cpu_id(cpu_id)?;
 
@@ -298,6 +509,14 @@ impl ExternalInterruptController for GicV3 {
                 // SGI/PPI live in redistributor.
                 mmio::write32(self.redist_sgi_reg_addr(cpu_id, GICR_ISENABLER0), bit);
             } else {
+                let affinity = self.cpu_mpidr_affinity[cpu_id as usize].load(Ordering::Acquire);
+                if affinity == INVALID_MPIDR_AFFINITY {
+                    return Err(InterruptError::InvalidCpuId);
+                }
+                mmio::write64(
+                    self.dist_reg_addr(gicd_irouter_offset(interrupt_id)),
+                    affinity,
+                );
                 mmio::write32(self.dist_enable_addr(interrupt_id), bit);
             }
         }
@@ -305,12 +524,9 @@ impl ExternalInterruptController for GicV3 {
         Ok(())
     }
 
-    fn disable_interrupt(
-        &mut self,
-        interrupt_id: InterruptId,
-        cpu_id: CpuId,
-    ) -> InterruptResult<()> {
+    fn disable_interrupt(&self, interrupt_id: InterruptId, cpu_id: CpuId) -> InterruptResult<()> {
         self.validate_interrupt_id(interrupt_id)?;
+
         self.validate_cpu_id(cpu_id)?;
 
         let bit = 1u32 << (interrupt_id % 32);
@@ -326,12 +542,24 @@ impl ExternalInterruptController for GicV3 {
         Ok(())
     }
 
+    fn mask_irq(&self, irq: &PendingIrq) -> InterruptResult<()> {
+        self.disable_interrupt(irq.mapping.hwirq, irq.cpu_id)
+    }
+
+    fn unmask_irq(&self, irq: &PendingIrq) -> InterruptResult<()> {
+        self.enable_interrupt(irq.mapping.hwirq, irq.cpu_id)
+    }
+
     fn set_priority(
         &mut self,
         interrupt_id: InterruptId,
         priority: Priority,
     ) -> InterruptResult<()> {
         self.validate_interrupt_id(interrupt_id)?;
+
+        if priority > u8::MAX as Priority {
+            return Err(InterruptError::InvalidPriority);
+        }
 
         unsafe {
             if interrupt_id < 32 {
@@ -372,7 +600,7 @@ impl ExternalInterruptController for GicV3 {
         Ok(0)
     }
 
-    fn claim_interrupt(&mut self, cpu_id: CpuId) -> InterruptResult<Option<InterruptId>> {
+    fn claim_interrupt(&self, cpu_id: CpuId) -> InterruptResult<Option<InterruptId>> {
         self.validate_cpu_id(cpu_id)?;
 
         let iar = read_icc_iar1_el1();
@@ -386,17 +614,26 @@ impl ExternalInterruptController for GicV3 {
         }
     }
 
-    fn complete_interrupt(
-        &mut self,
-        cpu_id: CpuId,
-        interrupt_id: InterruptId,
-    ) -> InterruptResult<()> {
+    fn claim_pending_irq(&self, cpu_id: CpuId) -> InterruptResult<Option<PendingIrq>> {
+        Ok(self
+            .claim_interrupt(cpu_id)?
+            .map(|interrupt_id| PendingIrq {
+                mapping: IrqMapping::legacy(interrupt_id, IrqFlow::FastEoi),
+                cpu_id,
+            }))
+    }
+
+    fn complete_interrupt(&self, cpu_id: CpuId, interrupt_id: InterruptId) -> InterruptResult<()> {
         self.validate_interrupt_id(interrupt_id)?;
         self.validate_cpu_id(cpu_id)?;
 
         // Stateless completion: write INTID back.
         write_icc_eoir1_el1(interrupt_id);
         Ok(())
+    }
+
+    fn eoi_irq(&self, irq: &PendingIrq) -> InterruptResult<()> {
+        self.complete_interrupt(irq.cpu_id, irq.mapping.hwirq)
     }
 
     fn is_pending(&self, interrupt_id: InterruptId) -> bool {
@@ -425,6 +662,77 @@ impl ExternalInterruptController for GicV3 {
     fn max_cpus(&self) -> CpuId {
         self.max_cpus
     }
+
+    fn translate_irq_resource(
+        &self,
+        resource: &PlatformDeviceResource,
+    ) -> InterruptResult<InterruptId> {
+        if resource.res_type != PlatformDeviceResourceType::IRQ {
+            return Err(InterruptError::InvalidInterruptId);
+        }
+
+        Ok(resource
+            .irq_metadata
+            .map_or(resource.start as InterruptId, |metadata| {
+                match metadata.irq_type {
+                    0 => 32 + metadata.irq_number,
+                    1 => 16 + metadata.irq_number,
+                    _ => metadata.irq_number,
+                }
+            }))
+    }
+
+    fn map_irq_resource(&self, resource: &PlatformDeviceResource) -> InterruptResult<IrqMapping> {
+        let hwirq = self.translate_irq_resource(resource)?;
+        Ok(IrqMapping::legacy(hwirq, IrqFlow::FastEoi))
+    }
+
+    fn init_for_cpu(
+        &mut self,
+        cpu_id: CpuId,
+        mode: InterruptControllerInitMode,
+    ) -> InterruptResult<()> {
+        debug_assert_eq!(mode, InterruptControllerInitMode::ColdBootReset);
+        self.validate_cpu_id(cpu_id)?;
+        self.cpu_mpidr_affinity[cpu_id as usize].store(current_mpidr_affinity(), Ordering::Release);
+        self.init_redistributor(cpu_id)?;
+        self.init_cpu_interface_sysregs()
+    }
+
+    fn send_ipi(
+        &self,
+        target_cpu_id: CpuId,
+        ipi_type: crate::interrupt::controllers::LocalInterruptType,
+    ) -> InterruptResult<()> {
+        self.validate_cpu_id(target_cpu_id)?;
+
+        let intid = match ipi_type {
+            crate::interrupt::controllers::LocalInterruptType::Software => RESCHEDULE_SGI as u64,
+            crate::interrupt::controllers::LocalInterruptType::External => 1u64,
+            crate::interrupt::controllers::LocalInterruptType::Timer => {
+                crate::drivers::pic::arm_generic_timer::timer_ppi_irq() as u64
+            }
+        };
+
+        if intid >= 16 {
+            return Err(InterruptError::InvalidInterruptId);
+        }
+
+        let affinity = self.cpu_mpidr_affinity[target_cpu_id as usize].load(Ordering::Acquire);
+        if affinity == INVALID_MPIDR_AFFINITY {
+            return Err(InterruptError::InvalidCpuId);
+        }
+
+        // ICC_SGI1R_EL1 targets architectural affinity, not Scarlet's
+        // scheduler CPU number. In particular, SC7180 identifies its CPUs as
+        // Aff1=0..7, Aff0=0, whereas QEMU's flat topology uses Aff1=0,
+        // Aff0=0..N. Record each CPU's MPIDR during per-CPU initialization and
+        // encode the target from that affinity.
+        let sgi1r = sgi1r_for_affinity(intid, affinity)?;
+        write_icc_sgi1r_el1(sgi1r);
+
+        Ok(())
+    }
 }
 
 unsafe impl Send for GicV3 {}
@@ -438,21 +746,49 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         .filter(|r| matches!(r.res_type, PlatformDeviceResourceType::MEM))
         .collect();
 
-    let dist_base_addr = mem_resources
+    let dist_paddr = mem_resources
         .get(0)
-        .map(|r| r.start as usize)
+        .map(|r| r.start)
         .ok_or("No memory resource found for GICv3 distributor")?;
+    let dist_size = mem_resources
+        .get(0)
+        .map(|r| r.end - r.start + 1)
+        .unwrap_or(0x10000);
 
-    let redist_base_addr = mem_resources
+    let redist_paddr = mem_resources
         .get(1)
-        .map(|r| r.start as usize)
+        .map(|r| r.start)
         .ok_or("No memory resource found for GICv3 redistributor")?;
+    let redist_size = mem_resources
+        .get(1)
+        .map(|r| r.end - r.start + 1)
+        .unwrap_or(0x20000);
+
+    // Map distributor and redistributor MMIO regions into the kernel virtual address space.
+    let dist_base_addr = crate::vm::ioremap(dist_paddr, dist_size).map_err(|e| {
+        crate::println!(
+            "[interrupt] GICv3 dist ioremap({:#x}, {:#x}) failed: {}",
+            dist_paddr,
+            dist_size,
+            e
+        );
+        e
+    })?;
+    let redist_base_addr = crate::vm::ioremap(redist_paddr, redist_size).map_err(|e| {
+        crate::println!(
+            "[interrupt] GICv3 redist ioremap({:#x}, {:#x}) failed: {}",
+            redist_paddr,
+            redist_size,
+            e
+        );
+        crate::vm::iounmap(dist_base_addr);
+        e
+    })?;
 
     let max_interrupts = gicd_max_interrupt_id(dist_base_addr);
-    // PlatformDeviceInfo doesn't expose CPU topology here; current bring-up is single-core.
-    let max_cpus = 1;
+    let max_cpus = crate::environment::MAX_NUM_CPUS as u32;
 
-    crate::early_println!(
+    crate::println!(
         "[interrupt] GICv3 selected: dist={:#x} redist={:#x} max_intid={} max_cpus={}",
         dist_base_addr,
         redist_base_addr,
@@ -467,12 +803,14 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         max_cpus,
     ));
 
-    InterruptManager::with_manager(|manager| {
-        manager
-            .register_external_controller(gic)
-            .map_err(|_| "Failed to register GICv3")?;
-        Ok(())
-    })?;
+    crate::interrupt::InterruptManager::global()
+        .register_external_controller(gic)
+        .map_err(|_| "Failed to register GICv3")?;
+
+    crate::arch::interrupt::configure_timer_interrupt_route(
+        crate::arch::interrupt::TimerInterruptRoute::ExternalControllerIrq,
+        Some(crate::drivers::pic::arm_generic_timer::timer_ppi_irq()),
+    );
 
     Ok(())
 }
@@ -493,3 +831,14 @@ fn register_driver() {
 }
 
 early_initcall!(register_driver);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test_case]
+    fn spi_irouter_offsets_use_the_intid_index() {
+        assert_eq!(gicd_irouter_offset(32), 0x6100);
+        assert_eq!(gicd_irouter_offset(165), 0x6528);
+    }
+}

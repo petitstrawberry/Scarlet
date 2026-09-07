@@ -5,6 +5,7 @@
 
 #[cfg(test)]
 mod tests {
+    use crate::sync::IrqSpinLock;
     use crate::{
         device::{Device, DeviceType, char::CharDevice},
         fs::{DeviceFileInfo, FileObject, FileType},
@@ -12,21 +13,20 @@ mod tests {
     };
     use alloc::vec::Vec;
     use core::any::Any;
-    use spin::Mutex;
 
     /// Mock character device for testing
     struct MockCharDevice {
         name: &'static str,
-        data: Mutex<Vec<u8>>,
-        position: Mutex<usize>,
+        data: IrqSpinLock<Vec<u8>>,
+        position: IrqSpinLock<usize>,
     }
 
     impl MockCharDevice {
         fn new(name: &'static str) -> Self {
             Self {
                 name,
-                data: Mutex::new(Vec::new()),
-                position: Mutex::new(0),
+                data: IrqSpinLock::new(Vec::new()),
+                position: IrqSpinLock::new(0),
             }
         }
     }
@@ -59,6 +59,7 @@ mod tests {
             _interest: crate::object::capability::selectable::ReadyInterest,
             _trapframe: &mut crate::arch::Trapframe,
             _timeout_ticks: Option<u64>,
+            _min_wait_ticks: u64,
         ) -> crate::object::capability::selectable::SelectWaitOutcome {
             crate::object::capability::selectable::SelectWaitOutcome::Ready
         }
@@ -124,26 +125,26 @@ mod tests {
             &self,
             _offset: usize,
             _length: usize,
-        ) -> Result<(usize, usize, bool), &'static str> {
+        ) -> Result<crate::object::capability::MemoryMappingInfo, &'static str> {
             Err("Memory mapping not supported")
         }
     }
 
     #[test_case]
     fn test_ext2_char_device_create_and_open() {
-        crate::early_println!("[test] Testing ext2 character device creation and open");
+        crate::println!("[test] Testing ext2 character device creation and open");
 
         // Actual tests can only be executed in an environment where
         // the device manager and ext2 filesystem are initialized.
         // This test functions as a compilation test to ensure syntax
         // and trait implementations are correct.
 
-        crate::early_println!("[test] ext2 character device test completed successfully");
+        crate::println!("[test] ext2 character device test completed successfully");
     }
 
     #[test_case]
     fn test_ext2_char_device_file_object_creation() {
-        crate::early_println!("[test] Testing ext2 character device file object creation");
+        crate::println!("[test] Testing ext2 character device file object creation");
 
         // Test creation of DeviceFileInfo
         let device_info = DeviceFileInfo {
@@ -168,14 +169,12 @@ mod tests {
             _ => panic!("Expected CharDevice file type"),
         }
 
-        crate::early_println!(
-            "[test] ext2 character device file object test completed successfully"
-        );
+        crate::println!("[test] ext2 character device file object test completed successfully");
     }
 
     #[test_case]
     fn test_ext2_char_device_file_type_conversion() {
-        crate::early_println!("[test] Testing ext2 character device file type conversion");
+        crate::println!("[test] Testing ext2 character device file type conversion");
 
         // Test conversion from ext2 inode to character device FileType
         let mut inode = crate::fs::vfs_v2::drivers::ext2::structures::Ext2Inode::empty();
@@ -188,6 +187,6 @@ mod tests {
 
         // Creating filesystem requires actual block device,
         // so we only test struct creation here
-        crate::early_println!("[test] ext2 character device file type conversion test completed");
+        crate::println!("[test] ext2 character device file type conversion test completed");
     }
 }

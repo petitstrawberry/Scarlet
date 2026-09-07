@@ -8,19 +8,23 @@
 
 extern crate alloc;
 
+use crate::sync::IrqSpinLock;
+use crate::vm::addr::{phys_to_virt, virt_to_phys};
 use alloc::boxed::Box;
 use alloc::string::ToString;
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::mem::size_of;
-use spin::Mutex;
 
 use crate::device::input::event_device::EventDevice;
 use crate::device::manager::DeviceManager;
 use crate::drivers::virtio::device::{DeviceStatus, Register, VirtioDevice};
 use crate::drivers::virtio::queue::{DescriptorFlag, VirtQueue};
-use crate::early_println;
+use crate::environment::PAGE_SIZE;
+use crate::interrupt::InterruptClaim;
+use crate::mem::page::ContiguousPages;
+use crate::println;
 
 /// VirtIO Input event structure (matches Linux virtio_input_event)
 #[repr(C)]
@@ -62,12 +66,12 @@ mod config_select {
 /// VirtIO Input Device
 pub struct VirtioInputDevice {
     base_addr: usize,
-    eventq: Mutex<VirtQueue<'static>>, // Event queue (device -> driver)
-    statusq: Mutex<VirtQueue<'static>>, // Status queue (driver -> device)
+    eventq: IrqSpinLock<VirtQueue<'static>>, // Event queue (device -> driver)
+    statusq: IrqSpinLock<VirtQueue<'static>>, // Status queue (driver -> device)
     event_device: Arc<EventDevice>,
-    initialized: Mutex<bool>,
-    event_buffers: Mutex<Vec<Box<[u8]>>>,
-    interrupt_id: Mutex<Option<u32>>,
+    initialized: IrqSpinLock<bool>,
+    event_buffer_alloc: IrqSpinLock<Option<ContiguousPages>>, // Single page for all event buffers
+    interrupt_id: IrqSpinLock<Option<u32>>,
 }
 
 impl VirtioInputDevice {
@@ -119,6 +123,8 @@ impl VirtioInputDevice {
         let name_lower = name.to_lowercase();
         if name_lower.contains("keyboard") || name_lower.contains("kbd") {
             "keyboard"
+        } else if name_lower.contains("touchpad") || name_lower.contains("trackpad") {
+            "touchpad"
         } else if name_lower.contains("mouse") {
             "mouse"
         } else if name_lower.contains("tablet") {
@@ -141,12 +147,12 @@ impl VirtioInputDevice {
         // Create a temporary device to read configuration
         let temp_device = Self {
             base_addr,
-            eventq: Mutex::new(VirtQueue::new(8)),
-            statusq: Mutex::new(VirtQueue::new(8)),
+            eventq: IrqSpinLock::new(VirtQueue::new(8)),
+            statusq: IrqSpinLock::new(VirtQueue::new(8)),
             event_device: Arc::new(EventDevice::new("input")),
-            initialized: Mutex::new(false),
-            event_buffers: Mutex::new(Vec::new()),
-            interrupt_id: Mutex::new(None),
+            initialized: IrqSpinLock::new(false),
+            event_buffer_alloc: IrqSpinLock::new(None),
+            interrupt_id: IrqSpinLock::new(None),
         };
 
         // Read device name from VirtIO config
@@ -157,26 +163,25 @@ impl VirtioInputDevice {
         // Determine device type
         let device_type = Self::determine_device_type(&virtio_name);
 
-        early_println!(
+        println!(
             "[virtio-input] Device at {:#x}: \"{}\"",
-            base_addr,
-            virtio_name
+            base_addr, virtio_name
         );
 
         // Create the EventDevice with the device type (it will assign the name)
         let event_device = Arc::new(EventDevice::new(device_type));
         let device_name = event_device.get_name();
 
-        early_println!("[virtio-input] Registered as /dev/{}", device_name);
+        println!("[virtio-input] Registered as /dev/{}", device_name);
 
         let mut device = Self {
             base_addr,
-            eventq: Mutex::new(VirtQueue::new(8)),
-            statusq: Mutex::new(VirtQueue::new(8)),
+            eventq: IrqSpinLock::new(VirtQueue::new(8)),
+            statusq: IrqSpinLock::new(VirtQueue::new(8)),
             event_device: event_device.clone(),
-            initialized: Mutex::new(false),
-            event_buffers: Mutex::new(Vec::new()),
-            interrupt_id: Mutex::new(None),
+            initialized: IrqSpinLock::new(false),
+            event_buffer_alloc: IrqSpinLock::new(None),
+            interrupt_id: IrqSpinLock::new(None),
         };
 
         // Initialize the VirtIO device
@@ -188,7 +193,7 @@ impl VirtioInputDevice {
         DeviceManager::get_manager()
             .register_device_with_name(device_name.to_string(), event_device);
 
-        early_println!("[virtio-input] Device initialized successfully");
+        println!("[virtio-input] Device initialized successfully");
 
         device
     }
@@ -258,9 +263,9 @@ impl VirtioInputDevice {
         eventq.init();
 
         // Set queue addresses
-        let desc_addr = eventq.get_raw_ptr() as u64;
-        let driver_addr = eventq.avail.flags as *const _ as u64;
-        let device_addr = eventq.used.flags as *const _ as u64;
+        let desc_addr = virt_to_phys(eventq.get_raw_ptr() as usize) as u64;
+        let driver_addr = virt_to_phys(eventq.avail.flags as *const _ as usize) as u64;
+        let device_addr = virt_to_phys(eventq.used.flags as *const _ as usize) as u64;
 
         self.write32_register(Register::QueueDescLow, desc_addr as u32);
         self.write32_register(Register::QueueDescHigh, (desc_addr >> 32) as u32);
@@ -283,9 +288,9 @@ impl VirtioInputDevice {
             let mut statusq = self.statusq.lock();
             statusq.init();
 
-            let desc_addr = statusq.get_raw_ptr() as u64;
-            let driver_addr = statusq.avail.flags as *const _ as u64;
-            let device_addr = statusq.used.flags as *const _ as u64;
+            let desc_addr = virt_to_phys(statusq.get_raw_ptr() as usize) as u64;
+            let driver_addr = virt_to_phys(statusq.avail.flags as *const _ as usize) as u64;
+            let device_addr = virt_to_phys(statusq.used.flags as *const _ as usize) as u64;
 
             self.write32_register(Register::QueueDescLow, desc_addr as u32);
             self.write32_register(Register::QueueDescHigh, (desc_addr >> 32) as u32);
@@ -303,27 +308,23 @@ impl VirtioInputDevice {
     /// Prefill event queue with receive buffers
     fn prefill_event_queue(&mut self) -> Result<(), &'static str> {
         let queue_size = 8;
-        let mut buffers = self.event_buffers.lock();
         let mut eventq = self.eventq.lock();
 
-        for _ in 0..queue_size {
-            // Allocate buffer for VirtioInputEvent
-            let buffer: Box<[u8]> = vec![0u8; VirtioInputEvent::size()].into_boxed_slice();
-            let buffer_ptr = Box::into_raw(buffer);
-            let buffer_addr = buffer_ptr as *mut u8 as usize;
+        // Allocate single page from PMM for all event buffers
+        let buffer_alloc =
+            ContiguousPages::new(1).ok_or("Failed to allocate event buffer page from PMM")?;
+        let buffer_phys = buffer_alloc.as_paddr();
 
+        for i in 0..queue_size {
+            // Calculate offset within the page for this event
+            let offset = i * VirtioInputEvent::size();
             // Allocate descriptor
             let desc_idx = eventq
                 .alloc_desc()
                 .ok_or("Failed to allocate event queue descriptor")?;
 
-            // Translate virtual address to physical
-            let buffer_phys = crate::vm::get_kernel_vm_manager()
-                .translate_vaddr(buffer_addr)
-                .ok_or("Failed to translate event buffer vaddr")?;
-
             // Setup descriptor - device writes events here
-            eventq.desc[desc_idx].addr = buffer_phys as u64;
+            eventq.desc[desc_idx].addr = (buffer_phys + offset) as u64;
             eventq.desc[desc_idx].len = VirtioInputEvent::size() as u32;
             eventq.desc[desc_idx].flags = DescriptorFlag::Write as u16; // Device writes
             eventq.desc[desc_idx].next = 0; // No chaining
@@ -332,10 +333,10 @@ impl VirtioInputDevice {
             eventq
                 .push(desc_idx)
                 .map_err(|_| "Failed to push descriptor to event queue")?;
-
-            // Store buffer pointer for cleanup
-            buffers.push(unsafe { Box::from_raw(buffer_ptr) });
         }
+
+        // Store the allocation for cleanup
+        *self.event_buffer_alloc.lock() = Some(buffer_alloc);
 
         // Notify device that buffers are available
         self.write32_register(Register::QueueNotify, 0);
@@ -376,15 +377,14 @@ impl VirtioInputDevice {
             let length = eventq.desc[desc_idx].len;
 
             if length != VirtioInputEvent::size() as u32 {
-                early_println!("[virtio-input] Warning: unexpected event size {}", length);
+                println!("[virtio-input] Warning: unexpected event size {}", length);
                 eventq.free_desc(desc_idx);
                 continue;
             }
 
-            // Read the VirtIO event directly from physical address
-            // Note: In identity-mapped kernel space, physical == virtual
+            let buffer_vaddr = phys_to_virt(buffer_addr as usize);
             let virtio_event =
-                unsafe { core::ptr::read_volatile(buffer_addr as *const VirtioInputEvent) };
+                unsafe { core::ptr::read_volatile(buffer_vaddr as *const VirtioInputEvent) };
 
             // Convert to Scarlet event and push to EventDevice
             self.event_device
@@ -396,7 +396,7 @@ impl VirtioInputDevice {
 
             // Re-add to available ring
             if let Err(e) = eventq.push(desc_idx) {
-                early_println!("[virtio-input] Failed to re-add buffer: {:?}", e);
+                println!("[virtio-input] Failed to re-add buffer: {:?}", e);
                 eventq.free_desc(desc_idx);
             }
         }
@@ -405,7 +405,7 @@ impl VirtioInputDevice {
         self.write32_register(Register::QueueNotify, 0);
     }
 
-    /// Enable interrupts for this device
+    /// Enable device-side interrupt state after the controller line has been registered.
     pub fn enable_interrupts(&self, interrupt_id: u32) -> Result<(), &'static str> {
         // Store the interrupt ID
         *self.interrupt_id.lock() = Some(interrupt_id);
@@ -417,12 +417,6 @@ impl VirtioInputDevice {
             // Process any pending events
             self.process_events();
         }
-
-        // Enable interrupt in PLIC for CPU 0
-        crate::interrupt::InterruptManager::with_manager(|mgr| {
-            mgr.enable_external_interrupt(interrupt_id, 0)
-        })
-        .map_err(|_| "Failed to enable interrupt in PLIC")?;
 
         Ok(())
     }
@@ -439,7 +433,7 @@ impl crate::object::capability::memory_mapping::MemoryMappingOps for VirtioInput
         &self,
         _offset: usize,
         _length: usize,
-    ) -> Result<(usize, usize, bool), &'static str> {
+    ) -> Result<crate::object::capability::MemoryMappingInfo, &'static str> {
         Err("Memory mapping not supported")
     }
 }
@@ -470,6 +464,7 @@ impl crate::object::capability::selectable::Selectable for VirtioInputDevice {
         _interest: crate::object::capability::selectable::ReadyInterest,
         _trapframe: &mut crate::arch::Trapframe,
         _timeout_ticks: Option<u64>,
+        _min_wait_ticks: u64,
     ) -> crate::object::capability::selectable::SelectWaitOutcome {
         crate::object::capability::selectable::SelectWaitOutcome::Ready
     }
@@ -503,24 +498,24 @@ impl VirtioDevice for VirtioInputDevice {
 
     fn get_queue_desc_addr(&self, queue_idx: usize) -> Option<u64> {
         match queue_idx {
-            0 => Some(self.eventq.lock().get_raw_ptr() as u64),
-            1 => Some(self.statusq.lock().get_raw_ptr() as u64),
+            0 => Some(virt_to_phys(self.eventq.lock().get_raw_ptr() as usize) as u64),
+            1 => Some(virt_to_phys(self.statusq.lock().get_raw_ptr() as usize) as u64),
             _ => None,
         }
     }
 
     fn get_queue_driver_addr(&self, queue_idx: usize) -> Option<u64> {
         match queue_idx {
-            0 => Some(self.eventq.lock().avail.flags as *const _ as u64),
-            1 => Some(self.statusq.lock().avail.flags as *const _ as u64),
+            0 => Some(virt_to_phys(self.eventq.lock().avail.flags as *const _ as usize) as u64),
+            1 => Some(virt_to_phys(self.statusq.lock().avail.flags as *const _ as usize) as u64),
             _ => None,
         }
     }
 
     fn get_queue_device_addr(&self, queue_idx: usize) -> Option<u64> {
         match queue_idx {
-            0 => Some(self.eventq.lock().used.flags as *const _ as u64),
-            1 => Some(self.statusq.lock().used.flags as *const _ as u64),
+            0 => Some(virt_to_phys(self.eventq.lock().used.flags as *const _ as usize) as u64),
+            1 => Some(virt_to_phys(self.statusq.lock().used.flags as *const _ as usize) as u64),
             _ => None,
         }
     }
@@ -555,10 +550,19 @@ mod tests {
 // Implement InterruptCapableDevice for VirtioInputDevice
 impl crate::device::events::InterruptCapableDevice for VirtioInputDevice {
     fn handle_interrupt(&self) -> crate::interrupt::InterruptResult<()> {
+        let _ = self.claim_interrupt()?;
+        Ok(())
+    }
+
+    fn interrupt_id(&self) -> Option<crate::interrupt::InterruptId> {
+        *self.interrupt_id.lock()
+    }
+
+    fn claim_interrupt(&self) -> crate::interrupt::InterruptResult<InterruptClaim> {
         // Read ISR status to acknowledge interrupt
         let isr_status = self.read32_register(Register::InterruptStatus);
         if isr_status == 0 {
-            return Ok(());
+            return Ok(InterruptClaim::NotMine);
         }
 
         // Acknowledge the interrupt
@@ -567,10 +571,6 @@ impl crate::device::events::InterruptCapableDevice for VirtioInputDevice {
         // Process pending events
         self.process_events();
 
-        Ok(())
-    }
-
-    fn interrupt_id(&self) -> Option<crate::interrupt::InterruptId> {
-        None
+        Ok(InterruptClaim::Handled)
     }
 }

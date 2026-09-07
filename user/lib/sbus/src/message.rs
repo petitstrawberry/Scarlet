@@ -1,10 +1,8 @@
 //! sbus message types and serialization
 
 use crate::{Argument, msg};
-use alloc::string::ToString;
-
-// Re-export from parent module's std aliases
-use crate::{String, Vec};
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
 
 /// sbus message header (16 bytes)
 #[repr(C)]
@@ -126,7 +124,13 @@ impl Message {
             Message::UnregisterService { bus_name } => {
                 serialize_string(bus_name, payload);
             }
-            Message::CallMethod { destination, path, interface, method, args } => {
+            Message::CallMethod {
+                destination,
+                path,
+                interface,
+                method,
+                args,
+            } => {
                 serialize_string(destination, payload);
                 serialize_string(path, payload);
                 serialize_string(interface, payload);
@@ -137,12 +141,22 @@ impl Message {
                 payload.extend_from_slice(&serial.to_le_bytes());
                 serialize_arguments(result, payload)?;
             }
-            Message::MethodError { serial, error_name, message } => {
+            Message::MethodError {
+                serial,
+                error_name,
+                message,
+            } => {
                 payload.extend_from_slice(&serial.to_le_bytes());
                 serialize_string(error_name, payload);
                 serialize_string(message, payload);
             }
-            Message::Signal { sender, path, interface, signal, args } => {
+            Message::Signal {
+                sender,
+                path,
+                interface,
+                signal,
+                args,
+            } => {
                 serialize_string(sender, payload);
                 serialize_string(path, payload);
                 serialize_string(interface, payload);
@@ -227,7 +241,11 @@ pub fn from_bytes(bytes: Vec<u8>) -> Result<Message, &'static str> {
             offset = o;
             let (message, _) = deserialize_string_at(payload, offset)?;
 
-            Ok(Message::MethodError { serial, error_name, message })
+            Ok(Message::MethodError {
+                serial,
+                error_name,
+                message,
+            })
         }
         msg::SIGNAL => {
             let mut offset = 0;
@@ -300,7 +318,10 @@ fn deserialize_u32_at(bytes: &[u8], offset: usize) -> Result<u32, &'static str> 
 }
 
 /// Deserialize arguments at offset
-fn deserialize_arguments_at(bytes: &[u8], offset: usize) -> Result<(Vec<Argument>, usize), &'static str> {
+fn deserialize_arguments_at(
+    bytes: &[u8],
+    offset: usize,
+) -> Result<(Vec<Argument>, usize), &'static str> {
     if bytes.len() < offset + 4 {
         return Err("Arguments count missing");
     }

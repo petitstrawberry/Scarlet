@@ -66,6 +66,17 @@ impl CharDevice for ConsoleDevice {
         Err("TTY device not available")
     }
 
+    fn write(&self, buffer: &[u8]) -> Result<usize, &'static str> {
+        let device_manager = DeviceManager::get_manager();
+        if let Some(tty_device) = device_manager.get_device_by_name("tty0") {
+            if let Some(char_device) = tty_device.as_char_device() {
+                return char_device.write(buffer);
+            }
+        }
+
+        Err("TTY device not available")
+    }
+
     fn can_read(&self) -> bool {
         // Check TTY availability and read capability
         let device_manager = DeviceManager::get_manager();
@@ -101,7 +112,7 @@ impl MemoryMappingOps for ConsoleDevice {
         &self,
         _offset: usize,
         _length: usize,
-    ) -> Result<(usize, usize, bool), &'static str> {
+    ) -> Result<crate::object::capability::MemoryMappingInfo, &'static str> {
         Err("Memory mapping not supported by console device")
     }
 
@@ -124,6 +135,7 @@ impl Selectable for ConsoleDevice {
         _interest: crate::object::capability::selectable::ReadyInterest,
         _trapframe: &mut crate::arch::Trapframe,
         _timeout_ticks: Option<u64>,
+        _min_wait_ticks: u64,
     ) -> crate::object::capability::selectable::SelectWaitOutcome {
         crate::object::capability::selectable::SelectWaitOutcome::Ready
     }

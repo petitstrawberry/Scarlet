@@ -1,0 +1,58 @@
+name: Nix Binary Cache
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ "main", "dev" ]
+    paths:
+      - flake.nix
+      - flake.lock
+      - nix/**
+      - .github/workflows/nix-cache.yml
+
+jobs:
+  devshell:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - system: x86_64-linux
+            runner: ubuntu-latest
+          - system: aarch64-linux
+            runner: ubuntu-24.04-arm
+          - system: aarch64-darwin
+            runner: macos-14
+    runs-on: ${{ matrix.runner }}
+    env:
+      CACHIX_CACHE_NAME: ${{ vars.CACHIX_CACHE_NAME }}
+    steps:
+      - name: Free Disk Space (Ubuntu)
+        if: runner.os == 'Linux'
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+
+      - uses: actions/checkout@v5
+
+      - uses: cachix/install-nix-action@v31
+        with:
+          github_access_token: ${{ secrets.GITHUB_TOKEN }}
+          extra_nix_config: |
+            accept-flake-config = true
+            extra-substituters = https://scarlet-rust-toolchain.cachix.org
+            extra-trusted-public-keys = scarlet-rust-toolchain.cachix.org-1:p+coBExi0nNTIvWF/oM9H9/1/GhwFtqGZ2Vs+4pYl6o=
+
+      - uses: cachix/cachix-action@v17
+        if: env.CACHIX_CACHE_NAME != ''
+        with:
+          name: ${{ env.CACHIX_CACHE_NAME }}
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+
+      - name: Build devShell closure
+        run: nix build --no-link .#devShells.${{ matrix.system }}.default
