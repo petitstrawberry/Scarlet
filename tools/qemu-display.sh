@@ -11,7 +11,7 @@ scarlet_qemu_display() {
 
     case "$(uname -s)" in
         Darwin)
-            printf '%s\n' 'cocoa,gl=on,retina=on'
+            printf '%s\n' 'cocoa,gl=on,retina=on,full-grab=on'
             return 0
             ;;
         Linux)
@@ -23,7 +23,11 @@ scarlet_qemu_display() {
                 fi
                 for backend in gtk sdl; do
                     if printf '%s\n' "$available_displays" | grep -Fxq "$backend"; then
-                        printf '%s,gl=on\n' "$backend"
+                        if [ "$backend" = "gtk" ]; then
+                            printf '%s,gl=on,grab-on-hover=on\n' "$backend"
+                        else
+                            printf '%s,gl=on\n' "$backend"
+                        fi
                         return 0
                     fi
                 done

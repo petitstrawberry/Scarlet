@@ -96,8 +96,9 @@ above are not a replacement for that setup.
 
 Full projects use these automatic display defaults:
 
-- macOS: `cocoa,gl=on,retina=on`.
-- Linux with `DISPLAY` or `WAYLAND_DISPLAY` set: `gtk,gl=on`, or
+- macOS: `cocoa,gl=on,retina=on,full-grab=on`.
+- Linux with `DISPLAY` or `WAYLAND_DISPLAY` set:
+  `gtk,gl=on,grab-on-hover=on`, or
   `sdl,gl=on` if GTK is unavailable in QEMU.
 - Without a local GUI session or supported Linux GUI backend: `vnc=:0`.
 
@@ -108,12 +109,26 @@ to `none` for both display and GPU. Serial output remains in the terminal.
 
 | Variable | Scope | Default | Effect |
 | --- | --- | --- | --- |
-| `SCARLET_QEMU_DISPLAY` | All | Full: host-based selection above; microvm: `none` | Replaces the entire `-display` value, including options. Explicit values do not inherit `gl=on` or `retina=on`. |
+| `SCARLET_QEMU_DISPLAY` | All | Full: host-based selection above; microvm: `none` | Replaces the entire `-display` value, including options. Explicit values do not inherit the default display options listed above. |
 | `SCARLET_QEMU_GPU` | All | Full: display-based selection above; microvm: `none` | GPU `-device` value, or `none` to omit the GPU. Explicit values override display-based selection. |
 | `SCARLET_QEMU_INPUT` | Full | `1` | Adds virtio keyboard and mouse devices. |
 | `SCARLET_QEMU_AUDIO` | All | `0` | Adds a virtio sound device and a host audio backend. |
 | `SCARLET_QEMU_AUDIO_DRIVER` | All | `coreaudio` | QEMU audio backend used when audio is enabled. This default is not selected by host OS; Linux users must choose an available backend. |
 | `SCARLET_QEMU_SERIAL` | AArch64 full | `mon:stdio` | Replaces the QEMU serial backend. RISC-V full and microvm keep `mon:stdio`. |
+
+Input capture differs by backend:
+
+- Cocoa's `full-grab=on` captures system key combinations and requires
+  macOS Accessibility permission for QEMU.
+- GTK's `grab-on-hover=on` grabs the keyboard when the pointer enters the
+  guest display and releases it when the pointer leaves. It controls when
+  keyboard grabbing is requested, rather than enabling Cocoa's global
+  key-event capture. See [QEMU display options](https://www.qemu.org/docs/master/system/invocation.html#display-options)
+  for these backend-specific settings.
+- SDL already enables keyboard grabbing and disables Alt-Tab passthrough
+  while grabbed in [QEMU's SDL backend](https://github.com/qemu/qemu/blob/master/ui/sdl2.c).
+  It has no separate `full-grab` display option. Keep the normal SDL grab
+  behavior; the default toggle is Ctrl-Alt-G.
 
 Examples:
 
@@ -125,10 +140,10 @@ SCARLET_QEMU_DISPLAY=none cargo make run-aarch64
 SCARLET_QEMU_DISPLAY='vnc=:0' cargo make run-riscv64
 
 # Cocoa with GL but without Retina.
-SCARLET_QEMU_DISPLAY='cocoa,gl=on,retina=off' cargo make run-aarch64
+SCARLET_QEMU_DISPLAY='cocoa,gl=on,retina=off,full-grab=on' cargo make run-aarch64
 
 # Disable GL while keeping Retina.
-SCARLET_QEMU_DISPLAY='cocoa,gl=off,retina=on' \
+SCARLET_QEMU_DISPLAY='cocoa,gl=off,retina=on,full-grab=on' \
 SCARLET_QEMU_GPU=virtio-gpu-pci \
 cargo make run-aarch64
 ```

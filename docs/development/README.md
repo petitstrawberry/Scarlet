@@ -53,9 +53,10 @@ runner checks which backends the selected QEMU supports. Without a local GUI
 session or supported GUI backend, it keeps the VNC display (`vnc=:0`). Serial
 output stays in the terminal. The same selection applies to debug runs.
 Local GUI defaults include `gl=on` and `virtio-gpu-gl-pci`, independently of
-whether the CPU uses TCG, KVM, or HVF. Cocoa also enables `retina=on` by
-default. VNC and non-GL displays keep `virtio-gpu-pci`. The GPU-less microvm
-project remains headless by default.
+whether the CPU uses TCG, KVM, or HVF. Cocoa also enables `retina=on` and
+`full-grab=on` by default. GTK uses `grab-on-hover=on` to grab keyboard input
+while the pointer is over the guest display. VNC and non-GL displays keep
+`virtio-gpu-pci`. The GPU-less microvm project remains headless by default.
 
 CPU acceleration defaults to TCG on every host. Select KVM or HVF explicitly
 when your host supports running the guest architecture:
