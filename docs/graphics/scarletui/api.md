@@ -1222,10 +1222,10 @@ Example dependency selection:
 
 ```toml
 [target.'cfg(target_os = "scarlet")'.dependencies]
-scarlet-ui = { path = "../lib/scarlet-ui", default-features = false, features = ["std", "platform-sws"] }
+scarlet-ui = { git = "https://github.com/petitstrawberry/scarlet-ui", default-features = false, features = ["std", "platform-sws"] }
 
 [target.'cfg(not(target_os = "scarlet"))'.dependencies]
-scarlet-ui = { path = "../lib/scarlet-ui", default-features = false, features = ["std", "platform-winit"] }
+scarlet-ui = { git = "https://github.com/petitstrawberry/scarlet-ui", default-features = false, features = ["std", "platform-winit"] }
 ```
 
 The application entry point stays unchanged:

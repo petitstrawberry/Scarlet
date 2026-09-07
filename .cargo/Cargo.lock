@@ -1013,7 +1013,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3086,7 +3086,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3400,7 +3400,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3604,7 +3604,7 @@ dependencies = [
 [[package]]
 name = "scarlet-ui"
 version = "1.0.0"
-source = "git+https://github.com/petitstrawberry/scarlet-ui#4525a221681a5d3967d77ef9032a253c3b395136"
+source = "git+https://github.com/petitstrawberry/scarlet-ui#c980c960b073b6a7c71a2ab501210e3b3a570e77"
 dependencies = [
  "scarlet-ui-core",
  "scarlet-ui-platform-sws",
@@ -3614,7 +3614,7 @@ dependencies = [
 [[package]]
 name = "scarlet-ui-core"
 version = "1.0.0"
-source = "git+https://github.com/petitstrawberry/scarlet-ui#4525a221681a5d3967d77ef9032a253c3b395136"
+source = "git+https://github.com/petitstrawberry/scarlet-ui#c980c960b073b6a7c71a2ab501210e3b3a570e77"
 dependencies = [
  "ab_glyph",
  "bitflags 2.13.1",
@@ -3632,7 +3632,7 @@ dependencies = [
 [[package]]
 name = "scarlet-ui-icons-tabler"
 version = "1.0.0"
-source = "git+https://github.com/petitstrawberry/scarlet-ui#4525a221681a5d3967d77ef9032a253c3b395136"
+source = "git+https://github.com/petitstrawberry/scarlet-ui#c980c960b073b6a7c71a2ab501210e3b3a570e77"
 dependencies = [
  "svgtypes",
 ]
@@ -3640,7 +3640,7 @@ dependencies = [
 [[package]]
 name = "scarlet-ui-macros"
 version = "1.0.0"
-source = "git+https://github.com/petitstrawberry/scarlet-ui#4525a221681a5d3967d77ef9032a253c3b395136"
+source = "git+https://github.com/petitstrawberry/scarlet-ui#c980c960b073b6a7c71a2ab501210e3b3a570e77"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3650,7 +3650,7 @@ dependencies = [
 [[package]]
 name = "scarlet-ui-platform-sws"
 version = "1.0.0"
-source = "git+https://github.com/petitstrawberry/scarlet-ui#4525a221681a5d3967d77ef9032a253c3b395136"
+source = "git+https://github.com/petitstrawberry/scarlet-ui#c980c960b073b6a7c71a2ab501210e3b3a570e77"
 dependencies = [
  "scarlet-std",
  "scarlet-ui-core",
@@ -3663,7 +3663,7 @@ dependencies = [
 [[package]]
 name = "scarlet-ui-platform-winit"
 version = "1.0.0"
-source = "git+https://github.com/petitstrawberry/scarlet-ui#4525a221681a5d3967d77ef9032a253c3b395136"
+source = "git+https://github.com/petitstrawberry/scarlet-ui#c980c960b073b6a7c71a2ab501210e3b3a570e77"
 dependencies = [
  "objc2-app-kit",
  "objc2-quartz-core 0.2.2",
@@ -3678,7 +3678,7 @@ dependencies = [
 [[package]]
 name = "scarlet-ui-renderer-sgfx"
 version = "1.0.0"
-source = "git+https://github.com/petitstrawberry/scarlet-ui#4525a221681a5d3967d77ef9032a253c3b395136"
+source = "git+https://github.com/petitstrawberry/scarlet-ui#c980c960b073b6a7c71a2ab501210e3b3a570e77"
 dependencies = [
  "libm",
  "scarlet-ui-core",
@@ -3812,8 +3812,8 @@ dependencies = [
 
 [[package]]
 name = "sgfx"
-version = "0.16.0"
-source = "git+https://github.com/petitstrawberry/sgfx#0800d976d065b2585ec873dca8ce29e17c9fe61d"
+version = "1.0.0"
+source = "git+https://github.com/petitstrawberry/sgfx#fbc0cf2267b1c37377cb07670ae6b70a1a0ab168"
 dependencies = [
  "gpu-raw",
  "raw-window-handle",
@@ -3840,8 +3840,8 @@ dependencies = [
 
 [[package]]
 name = "sgfx-backend-scarlet-virgl"
-version = "0.16.0"
-source = "git+https://github.com/petitstrawberry/sgfx#0800d976d065b2585ec873dca8ce29e17c9fe61d"
+version = "1.0.0"
+source = "git+https://github.com/petitstrawberry/sgfx#fbc0cf2267b1c37377cb07670ae6b70a1a0ab168"
 dependencies = [
  "gpu-raw",
  "scarlet-os",
@@ -3852,8 +3852,8 @@ dependencies = [
 
 [[package]]
 name = "sgfx-backend-wgpu"
-version = "0.16.0"
-source = "git+https://github.com/petitstrawberry/sgfx#0800d976d065b2585ec873dca8ce29e17c9fe61d"
+version = "1.0.0"
+source = "git+https://github.com/petitstrawberry/sgfx#fbc0cf2267b1c37377cb07670ae6b70a1a0ab168"
 dependencies = [
  "bytemuck",
  "pollster",
@@ -3875,16 +3875,16 @@ dependencies = [
 
 [[package]]
 name = "sgfx-codegen-virgl"
-version = "0.16.0"
-source = "git+https://github.com/petitstrawberry/sgfx#0800d976d065b2585ec873dca8ce29e17c9fe61d"
+version = "1.0.0"
+source = "git+https://github.com/petitstrawberry/sgfx#fbc0cf2267b1c37377cb07670ae6b70a1a0ab168"
 dependencies = [
  "sgfx-core",
 ]
 
 [[package]]
 name = "sgfx-core"
-version = "0.16.0"
-source = "git+https://github.com/petitstrawberry/sgfx#0800d976d065b2585ec873dca8ce29e17c9fe61d"
+version = "1.0.0"
+source = "git+https://github.com/petitstrawberry/sgfx#fbc0cf2267b1c37377cb07670ae6b70a1a0ab168"
 
 [[package]]
 name = "sha1"
@@ -4391,7 +4391,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.4",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -5297,7 +5297,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]

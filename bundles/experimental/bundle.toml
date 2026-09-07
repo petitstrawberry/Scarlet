@@ -8,7 +8,7 @@ to = "/"
 
 [[layers]]
 kind = "cargo"
-source = { git = "https://github.com/petitstrawberry/moonlight-scarlet.git", rev = "0a0a263b8b1538d0f98d9ad7820a589230228c6b" }
+source = { git = "https://github.com/petitstrawberry/moonlight-scarlet.git", rev = "05035ee9cfaa886b4359dba51edf8b0254a8308b" }
 package = "moonlight"
 bin = "moonlight"
 to = "/bin/moonlight"
@@ -25,14 +25,14 @@ to = "/bin/video-player"
 
 [[layers]]
 kind = "cargo"
-source = { git = "https://github.com/petitstrawberry/yt-for-scarlet" }
+source = { git = "https://github.com/petitstrawberry/yt-for-scarlet", rev = "56cafc70b13218b42013814720213c869b1e2a6a" }
 package = "yt"
 bin = "yt"
 to = "/bin/yt"
 
 [[layers]]
 kind = "cargo"
-source = { git = "https://github.com/petitstrawberry/yt-for-scarlet" }
+source = { git = "https://github.com/petitstrawberry/yt-for-scarlet", rev = "56cafc70b13218b42013814720213c869b1e2a6a" }
 package = "yt-gui"
 bin = "yt-gui"
 to = "/bin/yt-gui"
