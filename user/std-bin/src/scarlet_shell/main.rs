@@ -2763,6 +2763,7 @@ impl ShellApp {
                 application_drawer_accepts_keyboard(presentation) && self.home_search_focused.get(),
             )
             .placeholder("Search applications")
+            .blur_on_empty(true)
             .font_size(14.0)
             .padding(8.0)
             .background_color(search_palette.window_background().with_opacity(0.86))
