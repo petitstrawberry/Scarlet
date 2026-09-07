@@ -42,7 +42,7 @@ The following system calls are currently handled by the Linux ABI module.
 | `faccessat` | 🚧 Stub | Always succeeds. |
 | `fsync` | ✅ Supported | Delegates to the file object's sync operation; durability depends on the backing filesystem. |
 | `linkat` | ❌ Unsupported | Returns `ENOSYS`; does not create a link. |
-| `renameat2` | ⚠️ Partial | Performs rename, but ignores directory FDs and the `RENAME_NOREPLACE` check is not atomic. Exchange/whiteout are unsupported. |
+| `renameat2` | ⚠️ Partial | Supports directory FDs and atomic `RENAME_NOREPLACE`. Exchange/whiteout return `ENOSYS`. |
 | `epoll_create1` | 🚧 Stub | Returns dummy file descriptor. |
 | `epoll_ctl`, `epoll_wait` | 🚧 Stub | Minimal/No-op implementation. |
 | `pselect6`, `ppoll` | ✅ Supported | `sigmask` ignored. `pselect6` limited to 64 FDs. |
@@ -169,7 +169,7 @@ Refer to [userspace-artifacts.md](userspace-artifacts.md) for the exact build st
 - **Signals**: Signal delivery logic is basic; complex signal handling (stacks, nesting) is WIP.
 - **User/Group**: Single-user (root) environment assumed.
 - **Permissions**: File permissions, ownership, and access modes (e.g. read-only enforcement) are currently ignored.
-- **Filesystem**: Linux `linkat` returns `ENOSYS`. `renameat2` has incomplete directory-FD and atomic no-replace semantics. Native VFS hard-link support is separate.
+- **Filesystem**: Linux `linkat` and `renameat2` exchange/whiteout operations return `ENOSYS`. Native VFS hard-link support is separate.
 - **Epoll**: Stubs only; event-driven I/O applications may not function correctly.
 - **Device Support**: `ioctl` commands are device-dependent. Basic TTY support is available.
 

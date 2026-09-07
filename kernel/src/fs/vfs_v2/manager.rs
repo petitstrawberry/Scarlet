@@ -1355,6 +1355,17 @@ impl VfsManager {
     /// * `NotSupported`     - Underlying filesystem does not support rename
     /// * `Busy`             - Namespace mutation would block with preemption disabled
     pub fn rename(&self, old_path: &str, new_path: &str) -> Result<(), FileSystemError> {
+        self.rename_with_no_replace(old_path, new_path, false)
+    }
+
+    /// Optionally reject an existing destination under the same namespace lock
+    /// that protects the rename itself, including dangling destination symlinks.
+    pub(crate) fn rename_with_no_replace(
+        &self,
+        old_path: &str,
+        new_path: &str,
+        no_replace: bool,
+    ) -> Result<(), FileSystemError> {
         let _namespace_guard = lock_namespace_mutations()?;
         // Resolve old path (do not follow the final symlink, like POSIX rename)
         let options = PathResolutionOptions::no_follow();
@@ -1397,6 +1408,19 @@ impl VfsManager {
                 FileSystemErrorKind::CrossDevice,
                 "Rename cannot cross filesystem boundaries",
             ));
+        }
+
+        if no_replace {
+            match new_fs.lookup(&new_parent_node, &new_name) {
+                Ok(_) => {
+                    return Err(vfs_error(
+                        FileSystemErrorKind::AlreadyExists,
+                        "Rename destination already exists",
+                    ));
+                }
+                Err(error) if error.kind == FileSystemErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
         }
 
         // Delegate to the filesystem driver
@@ -1688,6 +1712,12 @@ mod exclusive_create_tests {
                 );
                 assert_eq!(
                     vfs.rename("/existing", "/moved").unwrap_err().kind,
+                    FileSystemErrorKind::Busy
+                );
+                assert_eq!(
+                    vfs.rename_with_no_replace("/existing", "/moved", true)
+                        .unwrap_err()
+                        .kind,
                     FileSystemErrorKind::Busy
                 );
                 assert_eq!(

@@ -50,6 +50,36 @@ fn test_nested_cwd_retains_ancestors_and_releases_them() {
     assert!(weak_usr.upgrade().is_none());
 }
 
+#[test_case]
+fn test_rename_no_replace_preserves_existing_entries() {
+    use crate::fs::{FileSystemErrorKind, FileType};
+
+    let vfs = VfsManager::new();
+    vfs.create_file("/source", FileType::RegularFile).unwrap();
+    vfs.create_file("/target", FileType::RegularFile).unwrap();
+    let source_id = vfs.metadata("/source").unwrap().file_id;
+    let target_id = vfs.metadata("/target").unwrap().file_id;
+    assert_eq!(
+        vfs.rename_with_no_replace("/source", "/target", true)
+            .unwrap_err()
+            .kind,
+        FileSystemErrorKind::AlreadyExists
+    );
+    assert_eq!(vfs.metadata("/source").unwrap().file_id, source_id);
+    assert_eq!(vfs.metadata("/target").unwrap().file_id, target_id);
+
+    vfs.create_symlink("/dangling", "/missing").unwrap();
+    assert_eq!(
+        vfs.rename_with_no_replace("/source", "/dangling", true)
+            .unwrap_err()
+            .kind,
+        FileSystemErrorKind::AlreadyExists
+    );
+    vfs.rename_with_no_replace("/source", "/new", true).unwrap();
+    assert!(vfs.metadata("/source").is_err());
+    assert_eq!(vfs.metadata("/new").unwrap().file_id, source_id);
+}
+
 /// Test basic mount tree operations
 #[test_case]
 fn test_mount_tree_basic() {

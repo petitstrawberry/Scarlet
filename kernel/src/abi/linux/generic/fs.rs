@@ -5244,6 +5244,10 @@ pub fn sys_chdir(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 ///
 /// `0` on success, or a negative Linux errno encoded in `usize` on failure.
 pub fn sys_renameat(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
+    renameat_impl(abi, trapframe, false)
+}
+
+fn renameat_impl(abi: &mut LinuxAbi, trapframe: &mut Trapframe, no_replace: bool) -> usize {
     let task = match mytask() {
         Some(task) => task,
         None => return errno::to_result(errno::EIO),
@@ -5286,7 +5290,7 @@ pub fn sys_renameat(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         );
     }
 
-    match vfs.rename(&old_absolute_path, &new_absolute_path) {
+    match vfs.rename_with_no_replace(&old_absolute_path, &new_absolute_path, no_replace) {
         Ok(()) => 0,
         Err(error) => {
             if MOZC_IPC_TRACE_ENABLED && is_mozc_server_task(&task) {
@@ -5307,144 +5311,25 @@ const RENAME_EXCHANGE: u32 = 1 << 1; // Exchange source and target
 #[allow(dead_code)]
 const RENAME_WHITEOUT: u32 = 1 << 2; // Create whiteout object
 
-/// Linux sys_renameat2 system call implementation (syscall 276)
-/// Rename/move a file or directory with additional flags
-///
-/// Arguments:
-/// - olddirfd: Old directory file descriptor (or AT_FDCWD)
-/// - oldpath: Pointer to old path string
-/// - newdirfd: New directory file descriptor (or AT_FDCWD)  
-/// - newpath: Pointer to new path string
-/// - flags: Rename operation flags
-///
-/// Returns:
-/// - 0 on success
-/// - usize::MAX on error
-pub fn sys_renameat2(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
-    let task = match mytask() {
-        Some(t) => t,
-        None => return usize::MAX,
-    };
-
-    let olddirfd = trapframe.get_arg(0) as i32;
-    let oldpath_ptr = match task.vm_manager.translate_to_kva(trapframe.get_arg(1)) {
-        Some(ptr) => ptr as *const u8,
-        None => return usize::MAX,
-    };
-    let newdirfd = trapframe.get_arg(2) as i32;
-    let newpath_ptr = match task.vm_manager.translate_to_kva(trapframe.get_arg(3)) {
-        Some(ptr) => ptr as *const u8,
-        None => return usize::MAX,
-    };
+/// Rename relative to directory FDs, optionally refusing to replace a target.
+/// Exchange and whiteout operations are not implemented.
+pub fn sys_renameat2(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let flags = trapframe.get_arg(4) as u32;
+    if flags == 0 || flags == RENAME_NOREPLACE {
+        return renameat_impl(abi, trapframe, flags == RENAME_NOREPLACE);
+    }
 
-    // Increment PC to avoid infinite loop
+    let task = match mytask() {
+        Some(task) => task,
+        None => return errno::to_result(errno::EIO),
+    };
     trapframe.increment_pc_next(&task);
-
-    // Parse old path from user space
-    let oldpath_str = match cstring_to_string(oldpath_ptr, MAX_PATH_LENGTH) {
-        Ok((path, _)) => path,
-        Err(_) => return usize::MAX, // Invalid UTF-8 or path too long
-    };
-
-    // Parse new path from user space
-    let newpath_str = match cstring_to_string(newpath_ptr, MAX_PATH_LENGTH) {
-        Ok((path, _)) => path,
-        Err(_) => return usize::MAX, // Invalid UTF-8 or path too long
-    };
-
-    crate::println!(
-        "sys_renameat2: olddirfd={}, oldpath='{}', newdirfd={}, newpath='{}', flags={:#x}",
-        olddirfd,
-        oldpath_str,
-        newdirfd,
-        newpath_str,
-        flags
-    );
-
-    // Check for unsupported flags
-    const SUPPORTED_FLAGS: u32 = RENAME_NOREPLACE | RENAME_EXCHANGE;
-    if (flags & !SUPPORTED_FLAGS) != 0 {
-        crate::println!(
-            "sys_renameat2: Unsupported flags: {:#x}",
-            flags & !SUPPORTED_FLAGS
-        );
-        return usize::MAX; // EINVAL - unsupported flags
+    if flags & !(RENAME_NOREPLACE | RENAME_EXCHANGE | RENAME_WHITEOUT) != 0
+        || (flags & RENAME_EXCHANGE != 0 && flags & (RENAME_NOREPLACE | RENAME_WHITEOUT) != 0)
+    {
+        return errno::to_result(errno::EINVAL);
     }
-
-    // RENAME_EXCHANGE and RENAME_NOREPLACE are mutually exclusive
-    if (flags & RENAME_EXCHANGE) != 0 && (flags & RENAME_NOREPLACE) != 0 {
-        crate::println!(
-            "sys_renameat2: RENAME_EXCHANGE and RENAME_NOREPLACE are mutually exclusive"
-        );
-        return usize::MAX; // EINVAL
-    }
-
-    let vfs = match task.vfs.read().clone() {
-        Some(v) => v,
-        None => return usize::MAX,
-    };
-
-    // Note: Current implementation ignores dirfd and only uses absolute path resolution
-    // TODO: Implement proper *at support for relative paths from directory file descriptors
-
-    // Resolve absolute paths using basic path resolution
-    let old_absolute_path = if oldpath_str.starts_with('/') {
-        oldpath_str
-    } else {
-        match to_absolute_path_v2(&task, &oldpath_str) {
-            Ok(p) => p,
-            Err(_) => return usize::MAX,
-        }
-    };
-
-    let new_absolute_path = if newpath_str.starts_with('/') {
-        newpath_str
-    } else {
-        match to_absolute_path_v2(&task, &newpath_str) {
-            Ok(p) => p,
-            Err(_) => return usize::MAX,
-        }
-    };
-
-    crate::println!(
-        "sys_renameat2: Resolved paths: '{}' -> '{}'",
-        old_absolute_path,
-        new_absolute_path
-    );
-
-    // Handle different rename operations based on flags
-    if (flags & RENAME_EXCHANGE) != 0 {
-        // Exchange operation: swap the two files/directories
-        crate::println!("sys_renameat2: Exchange operation not yet implemented");
-        return usize::MAX; // ENOSYS - not implemented
-    } else {
-        // Standard rename/move operation
-        let no_replace = (flags & RENAME_NOREPLACE) != 0;
-
-        // Check if target exists when RENAME_NOREPLACE is set
-        if no_replace {
-            match vfs.resolve_path(&new_absolute_path) {
-                Ok(_) => {
-                    crate::println!(
-                        "sys_renameat2: Target exists and RENAME_NOREPLACE flag is set"
-                    );
-                    return usize::MAX; // EEXIST - target exists
-                }
-                Err(_) => {
-                    // Target doesn't exist, which is what we want for RENAME_NOREPLACE
-                }
-            }
-        }
-
-        match vfs.rename(&old_absolute_path, &new_absolute_path) {
-            Ok(()) => 0,
-            Err(e) => {
-                crate::println!("sys_renameat2: rename failed: {:?}", e);
-                errno::to_result(errno::from_fs_error(&e))
-            }
-        }
-    }
+    errno::to_result(errno::ENOSYS)
 }
 
 /// eventfd2 - create file descriptor for event notification
