@@ -519,7 +519,7 @@ fn spawn_shell(slave: PtySlave, inherited_master_handle: i32, inherited_writer_h
             let env_strings = shell_environment();
             let env_refs: Vec<&str> = env_strings.iter().map(|s| s.as_str()).collect();
             for path in candidates {
-                let argv = [path];
+                let argv = ["-sh"];
                 let rc = execve_with_flags(path, &argv, &env_refs, EXECVE_FORCE_ABI_REBUILD);
                 if rc == 0 {
                     break;

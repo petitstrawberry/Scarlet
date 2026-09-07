@@ -705,7 +705,7 @@ fn spawn_session(
                     EXECVE_FORCE_ABI_REBUILD,
                 )
             } else {
-                let arguments = [shell];
+                let arguments = ["-sh"];
                 execve_with_flags(
                     shell,
                     &arguments,

@@ -1434,7 +1434,15 @@ fn main() -> i32 {
             execute_script(script_or_command)
         }
     } else {
-        // Interactive mode
+        // Session launchers use a leading '-' in argv[0] for a login shell.
+        // Ordinary subshells must keep their caller's working directory.
+        if args.first().is_some_and(|name| name.starts_with('-')) {
+            if let Some(home) = std::env::var("HOME") {
+                if let Err(err) = std::fs::change_directory(&home) {
+                    println!("sh: cannot change directory to '{}': {}", home, err);
+                }
+            }
+        }
         interactive_shell()
     }
 }
