@@ -651,6 +651,9 @@ impl MountTree {
         if component == "." {
             return Ok(entry);
         }
+        if component == ".." {
+            return Ok(entry.parent().unwrap_or(entry));
+        }
 
         // Check cache first (fast path)
         let component_string = component.to_string();
@@ -763,6 +766,9 @@ impl MountTree {
         // Handle special cases
         if component == "." {
             return Ok(entry);
+        }
+        if component == ".." {
+            return Ok(entry.parent().unwrap_or(entry));
         }
 
         // Check cache first (fast path)

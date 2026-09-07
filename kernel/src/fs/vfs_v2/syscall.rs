@@ -179,8 +179,7 @@ pub fn sys_vfs_truncate(trapframe: &mut Trapframe) -> usize {
         Err(_) => return usize::MAX,
     };
 
-    let vfs_guard = task.vfs.read();
-    let vfs = match vfs_guard.as_ref() {
+    let vfs = match task.get_vfs() {
         Some(vfs) => vfs,
         None => return usize::MAX, // VFS not initialized
     };
@@ -324,8 +323,7 @@ pub fn sys_vfs_create_file(trapframe: &mut Trapframe) -> usize {
         Err(_) => return usize::MAX,
     };
 
-    let vfs_guard = task.vfs.read();
-    let vfs = match vfs_guard.as_ref() {
+    let vfs = match task.get_vfs() {
         Some(vfs) => vfs,
         None => return usize::MAX, // VFS not initialized
     };
@@ -362,8 +360,7 @@ pub fn sys_vfs_create_directory(trapframe: &mut Trapframe) -> usize {
         Err(_) => return usize::MAX,
     };
 
-    let vfs_guard = task.vfs.read();
-    let vfs = match vfs_guard.as_ref() {
+    let vfs = match task.get_vfs() {
         Some(vfs) => vfs,
         None => return usize::MAX, // VFS not initialized
     };
@@ -425,8 +422,7 @@ pub fn sys_fs_mount(trapframe: &mut Trapframe) -> usize {
     };
 
     // Get VFS reference
-    let vfs_guard = task.vfs.read();
-    let vfs = match vfs_guard.as_ref() {
+    let vfs = match task.get_vfs() {
         Some(vfs) => vfs,
         None => return usize::MAX,
     };
@@ -444,7 +440,7 @@ pub fn sys_fs_mount(trapframe: &mut Trapframe) -> usize {
         _ => {
             // Handle filesystem creation using drivers
             let options = data_str.unwrap_or_default();
-            match create_filesystem_and_mount(vfs, &fstype_str, &target_str, &options) {
+            match create_filesystem_and_mount(&vfs, &fstype_str, &target_str, &options) {
                 Ok(_) => 0,
                 Err(_) => usize::MAX,
             }
@@ -525,8 +521,7 @@ pub fn sys_fs_umount(trapframe: &mut Trapframe) -> usize {
     };
 
     // Get VFS reference
-    let vfs_guard = task.vfs.read();
-    let vfs = match vfs_guard.as_ref() {
+    let vfs = match task.get_vfs() {
         Some(vfs) => vfs,
         None => return usize::MAX,
     };
@@ -734,78 +729,10 @@ pub fn sys_vfs_change_directory(trapframe: &mut Trapframe) -> usize {
         Err(_) => return usize::MAX,
     };
 
-    let task_name = task.name.read().clone();
-
-    // Dump actual cwd state before chdir
-    {
-        let cwd_guard = vfs.cwd.read();
-        match &*cwd_guard {
-            Some((entry, mp)) => {
-                crate::println!(
-                    "[chdir] BEFORE task={} cwd_entry_name='{}' cwd_entry_id={} mount_path='{}' built_path='{}'",
-                    task_name,
-                    entry.name(),
-                    entry.node().id(),
-                    mp.path.read(),
-                    vfs.build_absolute_path(entry, mp)
-                );
-            }
-            None => {
-                crate::println!("[chdir] BEFORE task={} cwd=None", task_name);
-            }
-        }
-    }
-
-    crate::println!(
-        "[chdir] task={} requested='{}' absolute='{}'",
-        task_name,
-        path,
-        absolute_path
-    );
-
-    // Check if the path exists and is a directory
-    match vfs.resolve_path(&absolute_path) {
-        Ok((entry, _mount_point)) => {
-            if entry.node().file_type().unwrap() == FileType::Directory {
-                // Update the current working directory via VfsManager
-                match vfs.set_cwd_by_path(&absolute_path) {
-                    Ok(()) => {
-                        // Dump actual cwd state after chdir
-                        let cwd_guard = vfs.cwd.read();
-                        if let Some((e, mp)) = &*cwd_guard {
-                            crate::println!(
-                                "[chdir] AFTER task={} cwd_entry_name='{}' cwd_entry_id={} mount_path='{}' built_path='{}'",
-                                task_name,
-                                e.name(),
-                                e.node().id(),
-                                mp.path.read(),
-                                vfs.build_absolute_path(e, mp)
-                            );
-                        }
-                        0
-                    }
-                    Err(e) => {
-                        crate::println!(
-                            "[chdir] task={} FAIL set_cwd_by_path error={:?}",
-                            task_name,
-                            e
-                        );
-                        usize::MAX
-                    }
-                }
-            } else {
-                usize::MAX // Not a directory
-            }
-        }
-        Err(e) => {
-            crate::println!(
-                "[chdir] task={} FAIL resolve_path '{}' error={:?}",
-                task_name,
-                absolute_path,
-                e
-            );
-            usize::MAX // Path resolution error
-        }
+    // set_cwd_by_path resolves the path and checks that it is a directory.
+    match vfs.set_cwd_by_path(&absolute_path) {
+        Ok(()) => 0,
+        Err(_) => usize::MAX,
     }
 }
 
@@ -897,8 +824,7 @@ pub fn sys_vfs_create_symlink(trapframe: &mut Trapframe) -> usize {
             Err(_) => return usize::MAX,
         };
 
-    let vfs_guard = task.vfs.read();
-    let vfs = match vfs_guard.as_ref() {
+    let vfs = match task.get_vfs() {
         Some(vfs) => vfs,
         None => return usize::MAX, // VFS not initialized
     };
@@ -940,8 +866,7 @@ pub fn sys_vfs_readlink(trapframe: &mut Trapframe) -> usize {
             Err(_) => return usize::MAX,
         };
 
-    let vfs_guard = task.vfs.read();
-    let vfs = match vfs_guard.as_ref() {
+    let vfs = match task.get_vfs() {
         Some(vfs) => vfs,
         None => return usize::MAX, // VFS not initialized
     };
@@ -1001,8 +926,7 @@ pub fn sys_vfs_get_cwd_path(trapframe: &mut Trapframe) -> usize {
 
     trapframe.increment_pc_next(&task);
 
-    let vfs_guard = task.vfs.read();
-    let vfs = match vfs_guard.as_ref() {
+    let vfs = match task.get_vfs() {
         Some(vfs) => vfs,
         None => return usize::MAX,
     };
@@ -1064,8 +988,7 @@ pub fn sys_vfs_rename(trapframe: &mut Trapframe) -> usize {
         Err(_) => return usize::MAX,
     };
 
-    let vfs_guard = task.vfs.read();
-    let vfs = match vfs_guard.as_ref() {
+    let vfs = match task.get_vfs() {
         Some(vfs) => vfs,
         None => return usize::MAX,
     };

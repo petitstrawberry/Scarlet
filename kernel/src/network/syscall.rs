@@ -745,9 +745,8 @@ pub fn sys_socket_bind(tf: &mut Trapframe) -> usize {
 
     // Create socket file in VFS for filesystem visibility
     // Note: This is optional - the socket is already functional via named_sockets
-    let vfs_guard = task.vfs.read();
-    let vfs = match vfs_guard.as_ref() {
-        Some(vfs) => vfs.clone(),
+    let vfs = match task.get_vfs() {
+        Some(vfs) => vfs,
         None => {
             // Use global VFS if task doesn't have its own
             crate::fs::vfs_v2::manager::get_global_vfs_manager()
@@ -861,22 +860,13 @@ pub fn sys_socket_listen(tf: &mut Trapframe) -> usize {
         .and_then(KernelObject::into_socket_arc)
     {
         Some(socket) => socket,
-        None => {
-            crate::println!("[sys_socket_listen] Invalid handle {}", handle_id);
-            return usize::MAX;
-        }
+        None => return usize::MAX,
     };
 
     // Start listening
     match socket.listen(backlog) {
-        Ok(()) => {
-            crate::println!("[sys_socket_listen] Socket {} now listening", handle_id);
-            0
-        }
-        Err(error) => {
-            crate::println!("[sys_socket_listen] listen() failed: {:?}", error);
-            socket_error_result(error)
-        }
+        Ok(()) => 0,
+        Err(error) => socket_error_result(error),
     }
 }
 
@@ -1001,13 +991,7 @@ pub fn sys_socket_accept(tf: &mut Trapframe) -> usize {
             // LocalSocket accept
             match local_socket.accept_blocking(task.get_id(), tf) {
                 Ok(socket) => socket,
-                Err(error) => {
-                    crate::println!(
-                        "[sys_socket_accept] LocalSocket accept_blocking failed: {:?}",
-                        error
-                    );
-                    return socket_error_result(error);
-                }
+                Err(error) => return socket_error_result(error),
             }
         } else if let Some(tcp_socket) =
             crate::network::tcp::TcpSocket::from_socket_object(socket_obj.as_ref())
@@ -1018,7 +1002,6 @@ pub fn sys_socket_accept(tf: &mut Trapframe) -> usize {
                 Err(error) => return socket_error_result(error),
             }
         } else {
-            crate::println!("[sys_socket_accept] Not a supported socket type");
             return usize::MAX;
         };
 

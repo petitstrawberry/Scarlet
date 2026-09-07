@@ -14,6 +14,42 @@ use crate::fs::vfs_v2::{
 };
 use alloc::{string::ToString, sync::Arc};
 
+#[test_case]
+fn test_nested_cwd_retains_ancestors_and_releases_them() {
+    let vfs = VfsManager::new();
+    vfs.create_dir("/usr").unwrap();
+    vfs.create_dir("/usr/share").unwrap();
+    vfs.create_dir("/usr/share/icons").unwrap();
+    vfs.set_cwd_by_path("/usr").unwrap();
+    vfs.set_cwd_by_path("share").unwrap();
+    vfs.set_cwd_by_path("icons").unwrap();
+
+    assert_eq!(vfs.get_cwd_path(), "/usr/share/icons");
+    assert_eq!(vfs.resolve_path_to_absolute("."), "/usr/share/icons");
+    assert_eq!(vfs.resolve_path_to_absolute("../"), "/usr/share");
+    assert!(vfs.open(".", 0).is_ok());
+
+    let (icons, _) = vfs.get_cwd().unwrap();
+    let share = icons.parent().unwrap();
+    let usr = share.parent().unwrap();
+    let weak_icons = Arc::downgrade(&icons);
+    let weak_share = Arc::downgrade(&share);
+    let weak_usr = Arc::downgrade(&usr);
+    let (resolved_parent, _) = vfs.resolve_path("..").unwrap();
+    assert!(Arc::ptr_eq(&resolved_parent, &share));
+    drop((icons, share, usr, resolved_parent));
+
+    vfs.set_cwd_by_path("..").unwrap();
+    assert_eq!(vfs.get_cwd_path(), "/usr/share");
+    assert!(weak_icons.upgrade().is_none());
+    assert!(weak_share.upgrade().is_some());
+    assert!(weak_usr.upgrade().is_some());
+
+    vfs.set_cwd_by_path("/").unwrap();
+    assert!(weak_share.upgrade().is_none());
+    assert!(weak_usr.upgrade().is_none());
+}
+
 /// Test basic mount tree operations
 #[test_case]
 fn test_mount_tree_basic() {

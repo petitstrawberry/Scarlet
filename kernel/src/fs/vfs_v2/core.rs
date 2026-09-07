@@ -64,8 +64,9 @@ pub type FileSystemRef = Arc<dyn FileSystemOperations>;
 ///
 /// VfsEntry is designed to be thread-safe and can be shared across threads.
 pub struct VfsEntry {
-    /// Weak reference to parent VfsEntry (prevents circular references)
-    parent: IrqRwSpinLock<Weak<VfsEntry>>,
+    /// Keep ancestors alive while this entry is in use (for cwd, openat, etc.).
+    /// The reverse child-cache links are weak, so this does not form a cycle.
+    parent: IrqRwSpinLock<Option<Arc<VfsEntry>>>,
 
     /// Name of this VfsEntry (e.g., "user", "file.txt")
     name: String,
@@ -93,7 +94,7 @@ impl VfsEntry {
         );
 
         Arc::new(Self {
-            parent: IrqRwSpinLock::new(parent.unwrap_or_else(|| Weak::new())),
+            parent: IrqRwSpinLock::new(parent.and_then(|parent| parent.upgrade())),
             name,
             node,
             children: IrqRwSpinLock::new(BTreeMap::new()),
@@ -112,11 +113,11 @@ impl VfsEntry {
 
     /// Get parent VfsEntry if it exists
     pub fn parent(&self) -> Option<Arc<VfsEntry>> {
-        self.parent.read().upgrade()
+        self.parent.read().clone()
     }
 
     pub fn set_parent(&self, parent: Weak<VfsEntry>) {
-        *self.parent.write() = parent;
+        *self.parent.write() = parent.upgrade();
     }
 
     /// Add a child to the cache
