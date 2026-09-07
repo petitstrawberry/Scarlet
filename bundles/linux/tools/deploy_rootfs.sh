@@ -7,7 +7,7 @@ set -euo pipefail
 #  PREBUILT_DIR - artifact staging directory, defaults to bundles/linux/prebuilt
 #  PROJECT_ROOT - Scarlet checkout root, defaults to the root containing this bundle
 #  ROOTFS_DEST_DIR - deployed rootfs location, defaults to
-#                    bundles/linux/rootfs/system/linux-${ARCH}
+#                    bundles/linux/rootfs/systems/linux-${ARCH}
 #  ALLOW_ROOTFS_DEST_OVERRIDE - must be 1 to deploy outside the default tree
 #  TARGET_UID - if set, chown the deployed files to this UID
 #  TARGET_GID - if set, chown the deployed files to this GID
@@ -18,7 +18,7 @@ PROJECT_ROOT="${PROJECT_ROOT:-$(cd "${SCRIPT_DIR}/../../.." && pwd)}"
 ARCH="${ARCH:-riscv64}"
 PREBUILT_DIR="${PREBUILT_DIR:-${BUNDLE_DIR}/prebuilt}"
 TAR_SRC="${PREBUILT_DIR}/${ARCH}/rootfs.tar"
-DEFAULT_DEST_DIR="${PROJECT_ROOT}/bundles/linux/rootfs/system/linux-${ARCH}"
+DEFAULT_DEST_DIR="${PROJECT_ROOT}/bundles/linux/rootfs/systems/linux-${ARCH}"
 DEST_DIR="${ROOTFS_DEST_DIR:-${DEFAULT_DEST_DIR}}"
 
 case "$ARCH" in
@@ -60,7 +60,7 @@ mkdir -p "$DEST_DIR"
 if [ "$DEST_DIR" = "$DEFAULT_DEST_DIR" ]; then
   PROJECT_ROOT_REAL="$(cd "$PROJECT_ROOT" && pwd -P)"
   DEST_DIR_REAL="$(cd "$DEST_DIR" && pwd -P)"
-  EXPECTED_DEST_REAL="${PROJECT_ROOT_REAL}/bundles/linux/rootfs/system/linux-${ARCH}"
+  EXPECTED_DEST_REAL="${PROJECT_ROOT_REAL}/bundles/linux/rootfs/systems/linux-${ARCH}"
   if [ "$DEST_DIR_REAL" != "$EXPECTED_DEST_REAL" ]; then
     echo "Refusing rootfs destination that escapes the project tree: $DEST_DIR_REAL" >&2
     exit 1

@@ -12,8 +12,8 @@ path = "../cli-utils/bundle.toml"
 
 [[layers]]
 kind = "copy"
-source = "fs/system"
-to = "/roots"
+source = "fs/systems"
+to = "/systems"
 
 [[layers]]
 kind = "copy"
@@ -25,83 +25,83 @@ kind = "cargo"
 source = "../../user/bin"
 package = "user-bin"
 bin = "scarlet-desktop"
-to = "/roots/scarlet/bin/scarlet-desktop"
+to = "/systems/scarlet/bin/scarlet-desktop"
 
 [[layers]]
 kind = "cargo"
 source = "../../user/bin"
 package = "user-bin"
 bin = "desktop-settings"
-to = "/roots/scarlet/bin/desktop-settings"
+to = "/systems/scarlet/bin/desktop-settings"
 
 [[layers]]
 kind = "cargo"
 source = "../../user/std-bin"
 package = "scarlet-std-bin"
 bin = "files"
-to = "/roots/scarlet/bin/files"
+to = "/systems/scarlet/bin/files"
 
 [[layers]]
 kind = "cargo"
 source = "../../user/std-bin"
 package = "scarlet-std-bin"
 bin = "notepad"
-to = "/roots/scarlet/bin/notepad"
+to = "/systems/scarlet/bin/notepad"
 
 [[layers]]
 kind = "cargo"
 source = "../../user/std-bin"
 package = "scarlet-std-bin"
 bin = "scarlet-shell"
-to = "/roots/scarlet/bin/scarlet-shell"
+to = "/systems/scarlet/bin/scarlet-shell"
 
 [[layers]]
 kind = "cargo"
 source = "../../user/bin"
 package = "user-bin"
 bin = "terminal"
-to = "/roots/scarlet/bin/terminal"
+to = "/systems/scarlet/bin/terminal"
 
 [[layers]]
 kind = "cargo"
 source = "../../user/std-bin"
 package = "scarlet-std-bin"
 bin = "sws"
-to = "/roots/scarlet/bin/sws"
+to = "/systems/scarlet/bin/sws"
 
 [[layers]]
 kind = "cargo"
 source = "../../user/bin"
 package = "user-bin"
 bin = "sas"
-to = "/roots/scarlet/bin/sas"
+to = "/systems/scarlet/bin/sas"
 
 [[layers]]
 kind = "cargo"
 source = "../../user/std-bin"
 bin = "sasctl"
-to = "/roots/scarlet/bin/sasctl"
+to = "/systems/scarlet/bin/sasctl"
 
 [[layers]]
 kind = "cargo"
 source = "../../user/bin"
 package = "user-bin"
 bin = "mplayer"
-to = "/roots/scarlet/bin/mplayer"
+to = "/systems/scarlet/bin/mplayer"
 
 [[layers]]
 kind = "cargo"
 source = "../../user/bin"
 package = "user-bin"
 bin = "ui-demo"
-to = "/roots/scarlet/bin/ui-demo"
+to = "/systems/scarlet/bin/ui-demo"
 
 [[layers]]
 kind = "cargo"
 source = "../../user/bin"
 package = "user-bin"
 bin = "ui-benchmark"
-to = "/roots/scarlet/bin/ui-benchmark"
+to = "/systems/scarlet/bin/ui-benchmark"
 
 [[layers]]
 kind = "cargo"
@@ -109,52 +109,52 @@ source = { git = "https://github.com/petitstrawberry/scarlet-ui" }
 subdir = "examples/widget-factory"
 package = "scarlet-ui-widget-factory"
 bin = "scarlet-ui-widget-factory"
-to = "/roots/scarlet/bin/widget-factory"
+to = "/systems/scarlet/bin/widget-factory"
 
 [[layers]]
 kind = "cargo"
 source = "../../user/std-bin"
 bin = "ui-sgfx-showcase"
-to = "/roots/scarlet/bin/ui-sgfx-showcase"
+to = "/systems/scarlet/bin/ui-sgfx-showcase"
 
 [[layers]]
 kind = "cargo"
 source = "../../user/bin"
 package = "user-bin"
 bin = "settings"
-to = "/roots/scarlet/bin/settings"
+to = "/systems/scarlet/bin/settings"
 
 [[layers]]
 kind = "cargo"
 source = "../../user/std-bin"
 bin = "task-manager"
-to = "/roots/scarlet/bin/task-manager"
+to = "/systems/scarlet/bin/task-manager"
 
 [[layers]]
 kind = "cargo"
 source = "../../user/bin"
 package = "user-bin"
 bin = "scarlet-skk"
-to = "/roots/scarlet/bin/scarlet-skk"
+to = "/systems/scarlet/bin/scarlet-skk"
 
 [[layers]]
 kind = "script"
 source = "tools/fetch_skk_dictionary.sh"
 output = ".scarlet/cache/skk/SKK-JISYO.L"
-to = "/roots/scarlet/share/skk/SKK-JISYO.L"
+to = "/systems/scarlet/share/skk/SKK-JISYO.L"
 
 [[layers]]
 kind = "cargo"
 source = "../../user/bin"
 package = "user-bin"
 bin = "wayland-bridge"
-to = "/roots/scarlet/bin/wayland-bridge"
+to = "/systems/scarlet/bin/wayland-bridge"
 
 [[layers]]
 kind = "cargo"
 source = "../../user/std-bin"
 bin = "ansi-banner"
-to = "/roots/scarlet/bin/ansi-banner"
+to = "/systems/scarlet/bin/ansi-banner"
 
 [[layers]]
 kind = "cargo"
@@ -163,144 +163,144 @@ package = "video_player"
 bin = "video-player"
 default-features = false
 features = ["av1-stateful-hw", "h264-stateful-hw", "mp4-aac"]
-to = "/roots/scarlet/bin/video-player"
+to = "/systems/scarlet/bin/video-player"
 
 [[layers]]
 kind = "cargo"
 source = "../../user/bin"
 package = "user-bin"
 bin = "sgfx-probe"
-to = "/roots/scarlet/bin/sgfx-probe"
+to = "/systems/scarlet/bin/sgfx-probe"
 
 [[layers]]
 kind = "cargo"
 source = "../../user/std-bin"
 bin = "sgfx-cube"
-to = "/roots/scarlet/bin/sgfx-cube"
+to = "/systems/scarlet/bin/sgfx-cube"
 
 [[layers]]
 kind = "cargo"
 source = "../../user/std-bin"
 bin = "sgfx-texture"
-to = "/roots/scarlet/bin/sgfx-texture"
+to = "/systems/scarlet/bin/sgfx-texture"
 
 [[layers]]
 kind = "cargo"
 source = "../../user/std-bin"
 bin = "sgfx-showcase"
-to = "/roots/scarlet/bin/sgfx-showcase"
+to = "/systems/scarlet/bin/sgfx-showcase"
 
 [[layers]]
 kind = "cargo"
 source = "../../user/std-bin"
 bin = "httpd"
-to = "/roots/scarlet/bin/httpd"
+to = "/systems/scarlet/bin/httpd"
 
 [[layers]]
 kind = "cargo"
 source = "../../user/bin"
 package = "user-bin"
 bin = "ushv"
-to = "/roots/scarlet/bin/ushv"
+to = "/systems/scarlet/bin/ushv"
 
 [[layers]]
 kind = "cargo"
 source = "../../user/std-bin"
 bin = "lsm-list"
-to = "/roots/scarlet/bin/lsm-list"
+to = "/systems/scarlet/bin/lsm-list"
 
 [[layers]]
 kind = "cargo"
 source = "../../user/std-bin"
 bin = "clock"
-to = "/roots/scarlet/bin/clock"
+to = "/systems/scarlet/bin/clock"
 
 [[layers]]
 kind = "cargo"
 source = "../../user/std-bin"
 bin = "lsm-load"
-to = "/roots/scarlet/bin/lsm-load"
+to = "/systems/scarlet/bin/lsm-load"
 
 [[layers]]
 kind = "cargo"
 source = "../../user/std-bin"
 bin = "lsm-unload"
-to = "/roots/scarlet/bin/lsm-unload"
+to = "/systems/scarlet/bin/lsm-unload"
 
 [[layers]]
 kind = "cargo"
 source = "../../user/std-bin"
 bin = "input-dump"
-to = "/roots/scarlet/bin/input-dump"
+to = "/systems/scarlet/bin/input-dump"
 
 [[layers]]
 kind = "cargo"
 source = "../../user/std-bin"
 bin = "displayctl"
-to = "/roots/scarlet/bin/displayctl"
+to = "/systems/scarlet/bin/displayctl"
 
 [[layers]]
 kind = "cargo"
 source = "../../user/std-bin"
 bin = "sensor-dump"
-to = "/roots/scarlet/bin/sensor-dump"
+to = "/systems/scarlet/bin/sensor-dump"
 
 [[layers]]
 kind = "cargo"
 source = "../../user/std-bin"
 bin = "tabletctl"
-to = "/roots/scarlet/bin/tabletctl"
+to = "/systems/scarlet/bin/tabletctl"
 
 [[layers]]
 kind = "cargo"
 source = "../../user/bin"
 bin = "mozc-server"
-to = "/roots/scarlet/bin/mozc-server"
+to = "/systems/scarlet/bin/mozc-server"
 
 [[layers]]
 kind = "cargo"
 source = "../../user/bin"
 package = "user-bin"
 bin = "scarlet-mozc"
-to = "/roots/scarlet/bin/scarlet-mozc"
+to = "/systems/scarlet/bin/scarlet-mozc"
 
 [[layers]]
 kind = "cargo"
 source = "../../user/bin"
 package = "user-bin"
 bin = "dcp-flip-test"
-to = "/roots/scarlet/bin/dcp-flip-test"
+to = "/systems/scarlet/bin/dcp-flip-test"
 
 [[layers]]
 kind = "cargo"
 source = { git = "https://github.com/petitstrawberry/carmine" }
 package = "carmine"
 bin = "carmine"
-to = "/roots/scarlet/bin/carmine"
+to = "/systems/scarlet/bin/carmine"
 
 [[layers]]
 kind = "cargo"
 source = { git = "https://github.com/petitstrawberry/myrica", rev = "6deb1dbd582e56393db3958e00873d15a1312c5e" }
 package = "myrica"
 bin = "myrica"
-to = "/roots/scarlet/bin/myrica"
+to = "/systems/scarlet/bin/myrica"
 
 [[layers]]
 kind = "cargo"
 source = { git = "https://github.com/petitstrawberry/vellum" }
 package = "vellum"
 bin = "vellum"
-to = "/roots/scarlet/bin/vellum"
+to = "/systems/scarlet/bin/vellum"
 
 [[layers]]
 kind = "cargo"
 source = { git = "https://github.com/petitstrawberry/boxcraft" }
 package = "boxcraft"
 bin = "boxcraft"
-to = "/roots/scarlet/bin/boxcraft"
+to = "/systems/scarlet/bin/boxcraft"
 
 [[layers]]
 kind = "cargo"
 source = "../../user/std-bin"
 bin = "remote-desktop"
-to = "/roots/scarlet/bin/remote-desktop"
+to = "/systems/scarlet/bin/remote-desktop"

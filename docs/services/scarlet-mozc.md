@@ -70,7 +70,7 @@ remains supported. Use the same `PREBUILT_DIR` for `build_buildroot.sh`,
 `rootfs.tar` and overlay artifacts.
 
 For an already deployed local rootfs, the staged binary can be copied into
-`bundles/linux/rootfs/system/linux-aarch64/usr/lib/mozc/mozc_server`.
+`bundles/linux/rootfs/systems/linux-aarch64/usr/lib/mozc/mozc_server`.
 
 `build_mozc_server.sh` must be run on Linux. It intentionally does not import a
 distro `mozc_server`; the output is linked against the Buildroot musl sysroot so

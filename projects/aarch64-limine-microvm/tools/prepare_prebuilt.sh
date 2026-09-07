@@ -14,7 +14,7 @@ FIRECRACKER_URL="${SCARLET_FIRECRACKER_URL:-https://github.com/firecracker-micro
 FIRECRACKER_CACHE_DIR="${SCARLET_FIRECRACKER_CACHE_DIR:-$PROJECT_DIR/.scarlet/cache/firecracker}"
 FIRECRACKER_ARCHIVE_SHA256="${SCARLET_FIRECRACKER_ARCHIVE_SHA256:-00654ac1e702a22744121ea9f10a4f792ebd7c3a744cba587dfac9fcb79b41a5}"
 
-target_bin="$PREBUILT_DIR/system/linux-aarch64/usr/bin"
+target_bin="$PREBUILT_DIR/systems/linux-aarch64/usr/bin"
 mkdir -p "$target_bin"
 
 find_guest_bin_dir() {
@@ -25,7 +25,7 @@ find_guest_bin_dir() {
 
     for candidate in \
         "$REPO_DIR/bundles/linux/prebuilt/aarch64/bin" \
-        "$REPO_DIR/bundles/linux/rootfs/system/linux-aarch64/usr/bin" \
+        "$REPO_DIR/bundles/linux/rootfs/systems/linux-aarch64/usr/bin" \
         "/opt/prebuilt/aarch64/bin"
     do
         if [ -f "$candidate/guest-Image" ] && [ -f "$candidate/guest-initramfs.cpio.gz" ]; then

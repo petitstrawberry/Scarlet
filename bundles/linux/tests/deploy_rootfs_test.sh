@@ -21,7 +21,7 @@ run_deploy_case() {
     local project_root="${case_dir}/project"
     local prebuilt_dir="${case_dir}/prebuilt"
     local rootfs_fixture="${case_dir}/rootfs-fixture"
-    local dest_dir="${project_root}/bundles/linux/rootfs/system/linux-${arch}"
+    local dest_dir="${project_root}/bundles/linux/rootfs/systems/linux-${arch}"
 
     mkdir -p \
         "${rootfs_fixture}/etc" \
@@ -79,9 +79,9 @@ assert_file_contents 'preserve-me' "${guard_victim}/sentinel"
 
 symlink_project="${TEST_DIR}/symlink-project"
 symlink_victim="${TEST_DIR}/symlink-victim"
-mkdir -p "${symlink_project}/bundles/linux/rootfs/system" "$symlink_victim"
+mkdir -p "${symlink_project}/bundles/linux/rootfs/systems" "$symlink_victim"
 printf '%s\n' 'preserve-me' > "${symlink_victim}/sentinel"
-ln -s "$symlink_victim" "${symlink_project}/bundles/linux/rootfs/system/linux-aarch64"
+ln -s "$symlink_victim" "${symlink_project}/bundles/linux/rootfs/systems/linux-aarch64"
 if ARCH=aarch64 PREBUILT_DIR="$guard_prebuilt" PROJECT_ROOT="$symlink_project" \
     bash "$DEPLOY_ROOTFS_SCRIPT" >/dev/null 2>&1; then
     echo "deploy_rootfs_test: symlink destination unexpectedly succeeded" >&2

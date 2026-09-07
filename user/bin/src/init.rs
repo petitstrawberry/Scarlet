@@ -26,7 +26,7 @@ fn boot() -> Result<core::convert::Infallible, &'static str> {
     // Retain construction authority in PID 1. These handles remain CLOEXEC, so
     // ordinary service execs do not inherit them.
     handles.push(HandleMapping {
-        source: backing.as_handle(),
+        source: backing.view.as_handle(),
         target: 3,
     });
     handles.extend(views.iter().enumerate().map(|(index, view)| HandleMapping {

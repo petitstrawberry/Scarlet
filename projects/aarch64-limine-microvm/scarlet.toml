@@ -52,13 +52,13 @@ path = "../../bundles/linux/bundle.toml"
 
 [[images.rootfs.layers]]
 kind = "copy"
-source = "prebuilt/system"
-to = "/roots"
+source = "prebuilt/systems"
+to = "/systems"
 
 [[images.rootfs.layers]]
 kind = "copy"
-source = "rootfs"
-to = "/roots"
+source = "rootfs/systems"
+to = "/systems"
 
 [images.boot]
 format = "limine-uefi"

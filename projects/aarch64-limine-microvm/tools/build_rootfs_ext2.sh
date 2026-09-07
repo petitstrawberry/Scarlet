@@ -37,21 +37,21 @@ rm -rf "$STAGE_DIR"
 mkdir -p "$STAGE_DIR"
 cp -a "$ROOTFS_BASE"/. "$STAGE_DIR"/
 
-mkdir -p "$STAGE_DIR/roots/scarlet/bin"
-find "$SCARLET_BIN_DIR" -maxdepth 1 -type f ! -name '*.debug' -exec cp -a {} "$STAGE_DIR/roots/scarlet/bin/" \;
+mkdir -p "$STAGE_DIR/systems/scarlet/bin"
+find "$SCARLET_BIN_DIR" -maxdepth 1 -type f ! -name '*.debug' -exec cp -a {} "$STAGE_DIR/systems/scarlet/bin/" \;
 
 if [ -d "$MODULES_DIR" ]; then
-    mkdir -p "$STAGE_DIR/roots/scarlet/modules"
-    cp -a "$MODULES_DIR"/. "$STAGE_DIR/roots/scarlet/modules"/
+    mkdir -p "$STAGE_DIR/systems/scarlet/modules"
+    cp -a "$MODULES_DIR"/. "$STAGE_DIR/systems/scarlet/modules"/
 fi
 
 if [ -n "$PROJECT_PREBUILT_DIR" ] && [ -d "$PROJECT_PREBUILT_DIR" ]; then
-    mkdir -p "$STAGE_DIR/roots"
-    cp -a "$PROJECT_PREBUILT_DIR/system"/. "$STAGE_DIR/roots"/
+    mkdir -p "$STAGE_DIR/systems"
+    cp -a "$PROJECT_PREBUILT_DIR/systems"/. "$STAGE_DIR/systems"/
 fi
 
 ensure_firecracker() {
-    target="$STAGE_DIR/roots/linux-aarch64/usr/bin/firecracker"
+    target="$STAGE_DIR/systems/linux-aarch64/usr/bin/firecracker"
     if [ -x "$target" ]; then
         return 0
     fi
@@ -96,19 +96,19 @@ ensure_firecracker() {
 }
 
 write_firecracker_config() {
-    config_dir="$STAGE_DIR/roots/linux-aarch64/etc/firecracker"
+    config_dir="$STAGE_DIR/systems/linux-aarch64/etc/firecracker"
     mkdir -p "$config_dir"
-    cp "$SCRIPT_DIR/../rootfs/linux-aarch64/etc/firecracker/scarlet-microvm-aarch64.json" "$config_dir/"
+    cp "$SCRIPT_DIR/../rootfs/systems/linux-aarch64/etc/firecracker/scarlet-microvm-aarch64.json" "$config_dir/"
 }
 
 ensure_firecracker
 write_firecracker_config
 
 for required in \
-    "$STAGE_DIR/roots/linux-aarch64/usr/bin/firecracker" \
-    "$STAGE_DIR/roots/linux-aarch64/etc/firecracker/scarlet-microvm-aarch64.json" \
-    "$STAGE_DIR/roots/linux-aarch64/usr/bin/guest-Image" \
-    "$STAGE_DIR/roots/linux-aarch64/usr/bin/guest-initramfs.cpio.gz"
+    "$STAGE_DIR/systems/linux-aarch64/usr/bin/firecracker" \
+    "$STAGE_DIR/systems/linux-aarch64/etc/firecracker/scarlet-microvm-aarch64.json" \
+    "$STAGE_DIR/systems/linux-aarch64/usr/bin/guest-Image" \
+    "$STAGE_DIR/systems/linux-aarch64/usr/bin/guest-initramfs.cpio.gz"
 do
     if [ ! -f "$required" ]; then
         echo "microvm rootfs is missing required artifact: ${required#$STAGE_DIR/}" >&2

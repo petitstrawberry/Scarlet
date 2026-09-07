@@ -127,14 +127,18 @@ Microvm init instead execs Firecracker in the Linux view.
 The bundles use this **userspace-owned** backing layout:
 
 ```text
-/init                         bootstrap program
-/roots/<abi>/                 base filesystem data
-/state/overlays/<abi>/        writable overlay data
+/init                       bootstrap program
+/systems/<abi>/             each ABI's filesystem data
 /home, /shared, /tmp, /dev    explicitly shared resources
 ```
 
-Each ABI sees its own overlay as `/`. The default views share `/home`,
-`/shared`, `/tmp`, `/dev` and `/dev/pts`; Linux also shares the native
+Disk-backed boot roots each ABI view directly at `/systems/<abi>`; file writes
+modify that filesystem without an overlay or separate upper-layer directory.
+Diskless boot uses the same bundle layout, but adds an anonymous tmpfs upper
+layer to each ABI view because CpioFS is read-only. Those writes are volatile.
+
+The default views share `/home`, `/shared`, `/tmp`, `/dev` and `/dev/pts`;
+Linux also shares the native
 `/root`. Thus Mozc's launcher opens `/usr/lib/mozc/mozc_server` in the Linux
 view, and both sides use `/root/.config/mozc` for its profile.
 
@@ -146,8 +150,9 @@ transfer open handles. PDFview, for example, opens a document in the caller's
 view and passes it to zathura through stdin. Custom Environments may omit
 `/scarlet` entirely.
 
-Repository source directories such as `bundles/base/fs/system/scarlet` are
-inputs to bundle layers; their names do not prescribe runtime paths.
+In-tree bundle and project source directories use the same `systems/<abi>`
+layout, such as `bundles/base/fs/systems/scarlet`. This remains an init policy,
+not a kernel-defined path convention.
 
 Environment isolation covers filesystem views and explicit handle transfer.
 It does not isolate networks, PIDs, IPC registries or users and is not a complete

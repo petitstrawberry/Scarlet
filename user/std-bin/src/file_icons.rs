@@ -117,7 +117,7 @@ fn theme_root() -> PathBuf {
     }
 
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../bundles/desktop/fs/system/scarlet/share/icons/default")
+        .join("../../bundles/desktop/fs/systems/scarlet/share/icons/default")
 }
 
 fn load_asset(relative: &str) -> Option<Arc<VectorImageData>> {

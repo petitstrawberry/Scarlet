@@ -35,8 +35,8 @@ set -euo pipefail
 #   ./prepare.sh --steps buildroot,user-programs,mozc,deploy --arch aarch64
 #
 # This script is self-contained: running it with default options produces a
-# fully populated rootfs/system/linux-<arch>/ tree that the bundle's copy layer
-# picks up during cargo-scarlet image builds.
+# fully populated rootfs/systems/linux-<arch>/ tree for local artifact development.
+# Standard image builds consume the release archives pinned in bundle.toml.
 #
 # macOS note: Buildroot and kernel builds require a Linux host. Run inside
 # scarlet-dev Docker, a Linux VM, or a Linux Nix shell.

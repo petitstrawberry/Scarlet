@@ -107,7 +107,7 @@ those artifact-building helpers.
 
 The [Linux userspace artifact guide](../abi/linux/userspace-artifacts.md) and
 [deployment guide](../abi/linux/deployment.md) describe toolchains and the
-`bundles/linux/rootfs/system/linux-<arch>/` destinations. Building a Linux
+`bundles/linux/rootfs/systems/linux-<arch>/` destinations. Building a Linux
 binary does not establish that Scarlet implements every syscall it needs.
 
 ## Running and tests

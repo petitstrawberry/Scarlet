@@ -41,9 +41,14 @@ pub fn console() -> Result<[Handle; 3], &'static str> {
     Ok([input, output, error])
 }
 
-/// Select backing storage while still in the bootstrap view. A diskless boot
-/// keeps the initramfs as lower data and places writable state in tmpfs.
-pub fn backing(cmdline: &str, require_disk: bool) -> Result<VfsView, &'static str> {
+pub struct Backing {
+    pub view: VfsView,
+    disk_backed: bool,
+}
+
+/// Select backing storage while still in the bootstrap view. Disk roots are
+/// writable directly; diskless boot keeps the read-only initramfs as lower data.
+pub fn backing(cmdline: &str, require_disk: bool) -> Result<Backing, &'static str> {
     directory("/mnt")?;
     directory("/mnt/newroot")?;
     let fstype = cmdline_value(cmdline, "rootfstype=").unwrap_or("ext2");
@@ -69,26 +74,37 @@ pub fn backing(cmdline: &str, require_disk: bool) -> Result<VfsView, &'static st
         if require_disk || root.is_some() {
             return Err("configured root disk is unavailable");
         }
-        for path in ["/state", "/home", "/shared"] {
+        for path in ["/home", "/shared"] {
             directory(path)?;
             fs::mount("tmpfs", path, "tmpfs", 0, Some("size=128M"))
                 .map_err(|_| "cannot mount volatile backing storage")?;
         }
     }
-    for path in ["/state", "/state/overlays", "/home", "/shared", "/tmp"] {
+    for path in ["/home", "/shared", "/tmp"] {
         directory(path)?;
     }
     fs::mount("tmpfs", "/tmp", "tmpfs", 0, Some("size=128M"))
         .map_err(|_| "cannot mount shared temporary storage")?;
-    VfsView::current_admin().map_err(|_| "bootstrap view authority unavailable")
+    Ok(Backing {
+        view: VfsView::current_admin().map_err(|_| "bootstrap view authority unavailable")?,
+        disk_backed: mounted,
+    })
 }
 
-fn abi_view(base: &VfsView, abi: &str) -> Result<VfsView, &'static str> {
-    let lower = format!("/roots/{}", abi);
-    let upper = format!("/state/overlays/{}", abi);
-    directory(&upper)?;
-    let view = VfsView::overlay(base, &lower, Some((base, &upper)))
-        .map_err(|_| "cannot construct ABI overlay")?;
+fn abi_view(base: &Backing, abi: &str) -> Result<VfsView, &'static str> {
+    let root = format!("/systems/{}", abi);
+    let view = if base.disk_backed {
+        base.view
+            .rooted_at(&root)
+            .map_err(|_| "cannot construct ABI root view")?
+    } else {
+        // CpioFS is read-only. Keep this upper layer anonymous and volatile,
+        // without a separate backing directory or persistent overlay layout.
+        let upper = VfsView::create("tmpfs", "size=128M")
+            .map_err(|_| "cannot create volatile ABI storage")?;
+        VfsView::overlay(&base.view, &root, Some((&upper, "/")))
+            .map_err(|_| "cannot construct volatile ABI view")?
+    };
     for (target, source) in [
         ("/dev", "/dev"),
         ("/dev/pts", "/dev/pts"),
@@ -98,7 +114,7 @@ fn abi_view(base: &VfsView, abi: &str) -> Result<VfsView, &'static str> {
         ("/scarlet", "/"),
     ] {
         view_directory(&view, target)?;
-        view.bind(target, base, source)
+        view.bind(target, &base.view, source)
             .map_err(|_| "cannot bind shared directory")?;
     }
     Ok(view)
@@ -106,7 +122,7 @@ fn abi_view(base: &VfsView, abi: &str) -> Result<VfsView, &'static str> {
 
 /// Scarlet's default Environment. /scarlet is an ordinary, non-recursive
 /// backing-root gateway chosen here. Custom/isolated environments can omit it.
-pub fn environment(base: &VfsView) -> Result<(Environment, Vec<VfsView>), &'static str> {
+pub fn environment(base: &Backing) -> Result<(Environment, Vec<VfsView>), &'static str> {
     let env = Environment::create().map_err(|_| "cannot create Environment")?;
     let native = abi_view(base, "scarlet")?;
     env.set_root("scarlet", &native)
@@ -117,7 +133,7 @@ pub fn environment(base: &VfsView) -> Result<(Environment, Vec<VfsView>), &'stat
     const OTHER_ABIS: &[&str] = &["linux-riscv64", "xv6-riscv64"];
     let mut views = Vec::new();
     for abi in OTHER_ABIS {
-        if fs::list_directory(&format!("/roots/{}", abi)).is_err() {
+        if fs::list_directory(&format!("/systems/{}", abi)).is_err() {
             continue;
         }
         let view = abi_view(base, abi)?;

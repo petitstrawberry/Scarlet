@@ -3,10 +3,10 @@
 The Linux bundle packages the published Linux userspace into Scarlet images.
 Public Scarlet architecture names remain `aarch64` and `riscv64`.
 
-The standard full-image manifest consumes the pinned runtime manifest from
+The standard full-image manifest consumes the release archives from
 [`scarlet-bundle-linux`](https://github.com/petitstrawberry/scarlet-bundle-linux).
-That manifest selects the architecture-specific release archive and its
-checksum, including the Mozc runtime, so the generated rootfs is reproducible
+`bundle.toml` pins the architecture-specific archives and their checksums,
+including the Mozc runtime, so the generated rootfs is reproducible
 without storing the Linux userspace tree in this repository.
 
 The local Buildroot scripts below are still available when rebuilding or
@@ -15,7 +15,7 @@ standard full-image build.
 
 ## Layout
 
-- Local deployed rootfs: `rootfs/system/linux-${ARCH}`
+- Local deployed rootfs: `rootfs/systems/linux-${ARCH}`
 - Buildroot tarball: `prebuilt/${ARCH}/rootfs.tar`
 - Generated executable artifacts: `prebuilt/${ARCH}/bin`
 - Optional staged overlays: `prebuilt/${ARCH}/root`, `lib`, and `share`

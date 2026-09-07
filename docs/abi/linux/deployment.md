@@ -6,7 +6,7 @@ artifacts into the Scarlet workspace.
 ## Overview
 
 `bundles/linux/tools/deploy_rootfs.sh` extracts a Buildroot `rootfs.tar` and overlays
-additional prebuilt programs into `bundles/linux/rootfs/system/linux-$ARCH`,
+additional prebuilt programs into `bundles/linux/rootfs/systems/linux-$ARCH`,
 which is the tree included in the final Scarlet disk image.
 
 Buildroot generation should be done on Linux. Deployment itself only needs the
@@ -53,7 +53,7 @@ PREBUILT_DIR="$PWD/bundles/linux/prebuilt" \
 bash bundles/linux/tools/deploy_rootfs.sh
 ```
 
-The script extracts to `bundles/linux/rootfs/system/linux-$ARCH`, then copies staged
+The script extracts to `bundles/linux/rootfs/systems/linux-$ARCH`, then copies staged
 binaries into `usr/bin`, staged libraries into `usr/lib`, staged data into
 `usr/share`, and any staged root overlay into the extracted root.
 

@@ -3,13 +3,8 @@
 
 [[layers]]
 kind = "copy"
-source = "fs/system"
-to = "/roots"
-
-[[layers]]
-kind = "copy"
-source = "fs/data/config"
-to = "/state/overlays"
+source = "fs/systems"
+to = "/systems"
 
 [[layers]]
 kind = "copy"
@@ -58,106 +53,106 @@ kind = "cargo"
 source = "../../user/bin"
 package = "user-bin"
 bin = "sh"
-to = "/roots/scarlet/bin/sh"
+to = "/systems/scarlet/bin/sh"
 
 [[layers]]
 kind = "cargo"
 source = "../../user/bin"
 package = "user-bin"
 bin = "login"
-to = "/roots/scarlet/bin/login"
+to = "/systems/scarlet/bin/login"
 
 [[layers]]
 kind = "cargo"
 source = "../../user/std-bin"
 package = "scarlet-std-bin"
 bin = "stemd"
-to = "/roots/scarlet/bin/stemd"
+to = "/systems/scarlet/bin/stemd"
 
 [[layers]]
 kind = "cargo"
 source = "../../user/std-bin"
 package = "scarlet-std-bin"
 bin = "logd"
-to = "/roots/scarlet/bin/logd"
+to = "/systems/scarlet/bin/logd"
 
 [[layers]]
 kind = "cargo"
 source = "../../user/std-bin"
 package = "scarlet-std-bin"
 bin = "logctl"
-to = "/roots/scarlet/bin/logctl"
+to = "/systems/scarlet/bin/logctl"
 
 [[layers]]
 kind = "cargo"
 source = "../../user/bin"
 package = "user-bin"
 bin = "sbusd"
-to = "/roots/scarlet/bin/sbusd"
+to = "/systems/scarlet/bin/sbusd"
 
 [[layers]]
 kind = "cargo"
 source = "../../user/std-bin"
 bin = "hello"
-to = "/roots/scarlet/bin/hello"
+to = "/systems/scarlet/bin/hello"
 
 [[layers]]
 kind = "cargo"
 source = "../../user/std-bin"
 package = "scarlet-std-bin"
 bin = "kernel-info"
-to = "/roots/scarlet/bin/kernel-info"
+to = "/systems/scarlet/bin/kernel-info"
 
 [[layers]]
 kind = "cargo"
 source = "../../user/bin"
 package = "user-bin"
 bin = "ps"
-to = "/roots/scarlet/bin/ps"
+to = "/systems/scarlet/bin/ps"
 
 [[layers]]
 kind = "cargo"
 source = "../../user/std-bin"
 bin = "shutdown"
-to = "/roots/scarlet/bin/shutdown"
+to = "/systems/scarlet/bin/shutdown"
 
 [[layers]]
 kind = "cargo"
 source = "../../user/std-bin"
 package = "scarlet-std-bin"
 bin = "top"
-to = "/roots/scarlet/bin/top"
+to = "/systems/scarlet/bin/top"
 
 [[layers]]
 kind = "cargo"
 source = "../../user/std-bin"
 package = "scarlet-std-bin"
 bin = "kill"
-to = "/roots/scarlet/bin/kill"
+to = "/systems/scarlet/bin/kill"
 
 [[layers]]
 kind = "cargo"
 source = "../../user/bin"
 package = "user-bin"
 bin = "scpm"
-to = "/roots/scarlet/bin/scpm"
+to = "/systems/scarlet/bin/scpm"
 
 [[layers]]
 kind = "cargo"
 source = "../../user/bin"
 package = "user-bin"
 bin = "netcfgd"
-to = "/roots/scarlet/bin/netcfgd"
+to = "/systems/scarlet/bin/netcfgd"
 
 [[layers]]
 kind = "cargo"
 source = "../../user/bin"
 package = "user-bin"
 bin = "sshd"
-to = "/roots/scarlet/bin/sshd"
+to = "/systems/scarlet/bin/sshd"
 
 [[layers]]
 kind = "cargo"
 source = "../../user/std-bin"
 bin = "resolverd"
-to = "/roots/scarlet/bin/resolverd"
+to = "/systems/scarlet/bin/resolverd"

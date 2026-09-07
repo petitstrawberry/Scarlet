@@ -45,15 +45,15 @@ toolchain and rootfs tarball under `$BUILDROOT_DIR` and
 
 `prepare_prebuilt.sh` copies the guest artifacts into
 `projects/aarch64-limine-microvm/prebuilt` and downloads Firecracker if the
-project-local copy is missing. The actual binaries under `prebuilt/system/` are
-ignored by git. The image layer maps this source directory to `/roots`;
+project-local copy is missing. The actual binaries under `prebuilt/systems/` are
+ignored by git. The image layer maps this source directory to `/systems`;
 `microvm-init` starts Firecracker at `/usr/bin/firecracker` in the Linux view.
 
 After this setup, `cargo scarlet image` and `cargo scarlet run` use the
 project-local prebuilt artifacts and do not need to fetch Firecracker during
 image creation.
 
-If `bundles/linux/rootfs/system/linux-aarch64/usr/bin/guest-Image` and
+If `bundles/linux/rootfs/systems/linux-aarch64/usr/bin/guest-Image` and
 `guest-initramfs.cpio.gz` already exist, `prepare_prebuilt.sh` can copy from
 there without rebuilding Buildroot.
 
@@ -77,7 +77,7 @@ The image configuration lives in `scarlet.toml`.
 - The initramfs is assembled from the ordered layers in `scarlet.toml`.
 - The rootfs is assembled from the ordered layers in `scarlet.toml`.
 - MicroVM-specific guest artifacts live under `prebuilt/`; the binary payloads
-  under `prebuilt/system/` are intentionally ignored by git.
+  under `prebuilt/systems/` are intentionally ignored by git.
 
 Current userland inputs are declared in `scarlet.toml` as bundle and Cargo
 layers. When moving more build steps local, prefer replacing those inputs with
