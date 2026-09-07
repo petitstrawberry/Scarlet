@@ -17,8 +17,9 @@
 //! Output uses earlycon until device initialization enables the normal console.
 //! Callers use the same macros throughout boot and normal operation. UART writers
 //! implement the `Write` trait and handle CR+LF conversion for newlines.
-//! Normal-console discovery does not allocate a device snapshot or wait for the
-//! device registry lock. If no console can be reached, output falls back to earlycon.
+//! Normal-console discovery does not allocate a device snapshot. It waits for the
+//! device registry lock; contention alone never switches output to earlycon.
+//! If no console can be reached after discovery, output falls back to earlycon.
 //! The print lock still serializes messages, and UART drivers retain their TX locks.
 
 use core::fmt;
@@ -144,10 +145,10 @@ fn write_to_normal_console(args: fmt::Arguments) -> bool {
 
     // Prefer Serial devices, then other non-TTY character devices. Never use
     // the null sink as a console. Each lookup releases the registry lock before
-    // invoking any device methods; a busy registry leads back to earlycon.
+    // invoking any device methods; a busy registry is waited on, not skipped.
     for serial_only in [true, false] {
         let mut after = None;
-        while let Some((id, dev)) = manager.try_get_next_device(after) {
+        while let Some((id, dev)) = manager.get_next_device(after) {
             after = Some(id);
             if dev.device_type() != DeviceType::Char || dev.name() == "null" {
                 continue;

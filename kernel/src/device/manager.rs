@@ -1314,8 +1314,9 @@ impl DeviceManager {
             .collect()
     }
 
-    /// Get the next registered device without allocating a snapshot or waiting for the registry.
+    /// Get the next registered device without allocating a snapshot.
     ///
+    /// Waits for the registry lock rather than treating contention as a missing device.
     /// The registry lock is released before returning. The returned [`Arc`]
     /// keeps the device alive while the caller inspects or writes to it.
     /// Unlike a snapshot, successive calls can observe registration changes.
@@ -1326,15 +1327,12 @@ impl DeviceManager {
     ///
     /// # Returns
     ///
-    /// The next `(id, device)`, or `None` if no device follows `after` or the
-    /// registry is locked. Console output can use earlycon in either case.
-    pub(crate) fn try_get_next_device(
-        &self,
-        after: Option<usize>,
-    ) -> Option<(usize, SharedDevice)> {
+    /// The next `(id, device)`, or `None` if no device follows `after`.
+    /// Registry lock contention does not cause this method to return `None`.
+    pub(crate) fn get_next_device(&self, after: Option<usize>) -> Option<(usize, SharedDevice)> {
         use core::ops::Bound;
 
-        let devices = self.devices.try_lock()?;
+        let devices = self.devices.lock();
         let start = after.map_or(Bound::Unbounded, Bound::Excluded);
         devices
             .range((start, Bound::Unbounded))
@@ -5833,9 +5831,9 @@ mod tests {
     }
 
     #[test_case]
-    fn test_try_get_next_device_walks_sparse_ids_and_retains_devices() {
+    fn test_get_next_device_walks_sparse_ids_and_retains_devices() {
         let manager = DeviceManager::new();
-        assert!(manager.try_get_next_device(None).is_none());
+        assert!(manager.get_next_device(None).is_none());
 
         let first_id = manager.register_device(Arc::new(GenericDevice::new("first")));
         let middle_id = manager.register_device(Arc::new(GenericDevice::new("middle")));
@@ -5845,15 +5843,15 @@ mod tests {
             .expect("middle device should be registered");
 
         let (id, _) = manager
-            .try_get_next_device(None)
+            .get_next_device(None)
             .expect("first device should be available");
         assert_eq!(id, first_id);
         let (id, retained) = manager
-            .try_get_next_device(Some(first_id))
+            .get_next_device(Some(first_id))
             .expect("iteration should skip the removed device");
         assert_eq!(id, last_id);
-        assert!(manager.try_get_next_device(Some(last_id)).is_none());
-        assert!(manager.try_get_next_device(Some(usize::MAX)).is_none());
+        assert!(manager.get_next_device(Some(last_id)).is_none());
+        assert!(manager.get_next_device(Some(usize::MAX)).is_none());
 
         manager
             .unregister_device(last_id)
@@ -5862,12 +5860,15 @@ mod tests {
     }
 
     #[test_case]
-    fn test_try_get_next_device_does_not_wait_for_registry_lock() {
+    fn test_get_next_device_releases_registry_lock_before_returning() {
         let manager = DeviceManager::new();
         manager.register_device(Arc::new(GenericDevice::new("test")));
 
-        let _guard = manager.devices.lock();
-        assert!(manager.try_get_next_device(None).is_none());
+        let (_, device) = manager
+            .get_next_device(None)
+            .expect("registered device should be available");
+        assert_eq!(device.name(), "test");
+        assert!(manager.devices.try_lock().is_some());
     }
 
     #[test_case]
