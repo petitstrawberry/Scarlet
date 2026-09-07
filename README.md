@@ -73,10 +73,12 @@ instructions.
 
 ## Quick Start
 
-From the repository root, enter the Nix development shell and choose a QEMU
-target:
+Clone the `distro-v1.0.0` release tag for **Scarlet 1.0.0 "Akane"**, then enter
+the Nix development shell and choose a QEMU target:
 
 ```bash
+git clone --branch distro-v1.0.0 --depth 1 https://github.com/petitstrawberry/Scarlet.git
+cd Scarlet
 nix develop
 
 # Build and run the default RISC-V full image.
@@ -85,6 +87,9 @@ cargo make run-riscv64
 # Or build and run the AArch64 full image.
 cargo make run-aarch64
 ```
+
+This checks out the distribution release tag, not a development branch. For
+working on development sources, see the [development guide](docs/development/README.md).
 
 On desktop hosts, full images open a GL-enabled QEMU window automatically
 (Cocoa with Retina on macOS; GTK or SDL on Linux). CPU emulation defaults to

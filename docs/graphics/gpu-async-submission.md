@@ -11,12 +11,11 @@ This is not a performance claim or completion of the coordinated 1.0 release gat
 
 The user approved portable completion tracking and actual asynchronous Scarlet
 execution for 1.0; the portable semantics are recorded in the
-[SGFX completion contract](https://github.com/petitstrawberry/sgfx/blob/main/docs/completion-contract.md).
-Scarlet currently patches SGFX and ScarletUI to the sibling local checkouts
-while repairing the consumer rendering regression. The experimental diagnostic
-also builds the sibling SGFX checkout so it exercises the same repair.
-SGFX's own lockfile includes the asynchronous Scarlet GPU transport at
-`f7adec91`. The native adapter stages each bounded logical stream before queue
+[SGFX completion contract](https://github.com/petitstrawberry/sgfx/blob/v1.0.0/docs/completion-contract.md).
+The release consumes SGFX and ScarletUI from public Git sources, with compatible
+native GPU dependencies recorded in each consuming workspace's `Cargo.lock`.
+Sibling checkout patches and the former experimental diagnostic are not release
+inputs. The native adapter stages each bounded logical stream before queue
 acceptance and restores CPU initialization/revision state on rejection.
 SGFX's context-owned worker now partitions and dispatches that stream; the
 kernel's 2 MiB native-request limit is not a UI mesh-size limit.
