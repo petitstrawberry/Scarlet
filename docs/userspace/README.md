@@ -30,6 +30,17 @@ implementation. Legacy `no_std` programs should pass per-thread state into
 their `thread::spawn` closures; there is no replacement typed TLS API in the
 legacy facade. Runtime TLS allocation and thread-exit cleanup remain unchanged.
 
+## System identification
+
+The desktop distribution provides `/etc/os-release` with the Scarlet version
+and release codename. The file belongs to the desktop bundle; the common base
+bundle and microvm project do not inherit the Akane identity.
+
+Use `scarlet_os::system::kernel_info()` to query the running kernel's `name`,
+`version`, and build `target`. Its version is embedded from `kernel/Cargo.toml`,
+independently of the distribution metadata. Linux-compatible `uname` values
+remain separate compatibility information, not the native kernel version.
+
 ## In-tree builds
 
 The root is not a single Cargo workspace. [.cargo/Cargo.toml](../../.cargo/Cargo.toml)
