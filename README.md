@@ -20,6 +20,8 @@ Scarlet is an operating system written primarily in Rust, combining a multi-ABI
 kernel, native userland, a graphical desktop, and tooling for composing bootable
 distributions.
 
+The 1.0 release is named **Scarlet 1.0 "Akane"**.
+
 Scarlet-native, xv6, and Linux-compatible programs share kernel services and
 objects. This repository is the reference distribution, bringing together the
 kernel, applications, drivers, and reusable image bundles.
