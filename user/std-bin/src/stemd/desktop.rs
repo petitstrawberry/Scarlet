@@ -505,6 +505,25 @@ mod tests {
     }
 
     #[test]
+    fn notepad_desktop_entry_preserves_the_selected_path() {
+        let entry = DesktopParser::new(String::from(include_str!(
+            "../../../../bundles/desktop/fs/system/scarlet/etc/stemd.d/apps/org.scarlet-os.desktop.notepad.desktop"
+        )))
+        .parse("org.scarlet-os.desktop.notepad.desktop")
+        .expect("Notepad desktop entry should parse");
+        let files = vec![String::from("/tmp/メモ with spaces.txt")];
+
+        assert_eq!(
+            expand_exec(&entry.exec, &files).expect("Notepad file launch should expand"),
+            vec!["/bin/notepad", "/tmp/メモ with spaces.txt"]
+        );
+        assert_eq!(
+            expand_exec(&entry.exec, &[]).expect("Notepad launcher entry should expand"),
+            vec!["/bin/notepad"]
+        );
+    }
+
+    #[test]
     fn detects_common_mime_types() {
         assert_eq!(mime_type_for_path("movie.MP4"), Some("video/mp4"));
         assert_eq!(mime_type_for_path("clip.webm"), Some("video/webm"));

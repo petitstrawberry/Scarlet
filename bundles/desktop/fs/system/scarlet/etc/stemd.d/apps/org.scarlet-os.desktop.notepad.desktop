@@ -1,6 +1,6 @@
 [Desktop Entry]
 Name=Notepad
-Exec=/bin/notepad
+Exec=/bin/notepad %f
 Icon=text-editor
 Type=Application
 Terminal=false
