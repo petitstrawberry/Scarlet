@@ -78,6 +78,116 @@ fn test_vfs_exclusive_create_checks_lower_layer_before_creating_upper() {
 }
 
 #[test_case]
+fn test_overlayfs_mounts_do_not_alias_layer_ids_and_copy_up_preserves_ids() {
+    use crate::fs::VfsManager;
+
+    let lower = TmpFS::new(0);
+    let upper = TmpFS::new(0);
+    let lower_bin = lower
+        .create(
+            &lower.root_node(),
+            &"bin".to_string(),
+            FileType::Directory,
+            0o755,
+        )
+        .unwrap();
+    let lower_stemd = lower
+        .create(
+            &lower_bin,
+            &"stemd".to_string(),
+            FileType::RegularFile,
+            0o755,
+        )
+        .unwrap();
+    lower
+        .open(&lower_stemd, 0x2)
+        .unwrap()
+        .write(b"stemd")
+        .unwrap();
+    let overlay = OverlayFS::new(
+        Some(make_mount_and_entry(upper.clone())),
+        vec![make_mount_and_entry(lower.clone())],
+        "bootstrap-mounts".to_string(),
+    )
+    .unwrap();
+    let vfs = VfsManager::new_with_root(overlay.clone());
+
+    // Diskless bootstrap creates /dev in the upper layer before binding it.
+    // Both layers allocate their first child the same underlying inode ID.
+    vfs.create_dir("/dev").unwrap();
+    let upper_dev = upper
+        .lookup(&upper.root_node(), &"dev".to_string())
+        .unwrap();
+    assert_eq!(lower_bin.id(), upper_dev.id());
+    let root = overlay.root_node();
+    let bin = overlay.lookup(&root, &"bin".to_string()).unwrap();
+    let dev = overlay.lookup(&root, &"dev".to_string()).unwrap();
+    let stemd = overlay.lookup(&bin, &"stemd".to_string()).unwrap();
+    let bin_id = bin.id();
+    let stemd_id = stemd.id();
+    assert_ne!(bin_id, dev.id());
+    assert_ne!(stemd_id, bin_id);
+    assert_ne!(stemd_id, dev.id());
+    assert_ne!(root.id(), bin_id);
+
+    let devices = Arc::new(VfsManager::new_with_root(TmpFS::new(0)));
+    vfs.bind_mount_from(&devices, "/", "/dev").unwrap();
+    let executable = vfs.open("/bin/stemd", 0).unwrap();
+    let mut bytes = [0; 5];
+    assert_eq!(executable.as_file().unwrap().read(&mut bytes).unwrap(), 5);
+    assert_eq!(&bytes, b"stemd");
+
+    for copied_up in [false, true] {
+        if copied_up {
+            // This copies both /bin and its file to newly allocated upper IDs.
+            vfs.open("/bin/stemd", 0x2).unwrap();
+            let upper_bin = upper
+                .lookup(&upper.root_node(), &"bin".to_string())
+                .unwrap();
+            let upper_stemd = upper.lookup(&upper_bin, &"stemd".to_string()).unwrap();
+            assert_ne!(upper_bin.id(), lower_bin.id());
+            assert_ne!(upper_stemd.id(), lower_stemd.id());
+        }
+
+        let fresh_bin = overlay.lookup(&root, &"bin".to_string()).unwrap();
+        let fresh_stemd = overlay.lookup(&fresh_bin, &"stemd".to_string()).unwrap();
+        assert_eq!(fresh_bin.id(), bin_id);
+        assert_eq!(fresh_stemd.id(), stemd_id);
+        assert_eq!(bin.metadata().unwrap().file_id, bin_id);
+        assert_eq!(stemd.metadata().unwrap().file_id, stemd_id);
+        let root_entries = overlay.readdir(&root).unwrap();
+        for (name, expected_id) in [("bin", bin_id), ("dev", dev.id())] {
+            assert_eq!(
+                root_entries
+                    .iter()
+                    .find(|entry| entry.name == name)
+                    .unwrap()
+                    .file_id,
+                expected_id
+            );
+        }
+        let bin_entries = overlay.readdir(&fresh_bin).unwrap();
+        for (name, expected_id) in [(".", bin_id), ("..", root.id()), ("stemd", stemd_id)] {
+            assert_eq!(
+                bin_entries
+                    .iter()
+                    .find(|entry| entry.name == name)
+                    .unwrap()
+                    .file_id,
+                expected_id
+            );
+        }
+        let executable = vfs.open("/bin/stemd", 0).unwrap();
+        assert_eq!(
+            executable.as_file().unwrap().metadata().unwrap().file_id,
+            stemd_id
+        );
+        assert_eq!(executable.as_file().unwrap().read(&mut bytes).unwrap(), 5);
+        assert_eq!(&bytes, b"stemd");
+    }
+}
+
+#[test_case]
 fn test_overlayfs_basic() {
     /*
     Directory structure:
