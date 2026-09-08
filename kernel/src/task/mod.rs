@@ -230,105 +230,16 @@ impl TaskInfo {
     pub const NAME_CAP: usize = 63;
 }
 
-/// Version of the task-debug snapshot ABI implemented by the kernel.
-pub const TASK_DEBUG_INFO_VERSION_V1: u16 = 1;
-/// The snapshot contains a valid last-observed instruction address.
-pub const TASK_DEBUG_FLAG_PC_VALID: u32 = 1 << 0;
-/// The last-observed instruction address was sampled in privileged mode.
-pub const TASK_DEBUG_FLAG_PC_PRIVILEGED: u32 = 1 << 1;
-/// The snapshot contains information about a system call entered by the task.
-pub const TASK_DEBUG_FLAG_SYSCALL_VALID: u32 = 1 << 2;
-/// The task has not yet returned from the reported system call.
-pub const TASK_DEBUG_FLAG_SYSCALL_ACTIVE: u32 = 1 << 3;
-/// The task is configured for periodic deadline scheduling.
-pub const TASK_DEBUG_FLAG_DEADLINE: u32 = 1 << 4;
-/// The deadline task has exhausted its current runtime budget.
-pub const TASK_DEBUG_FLAG_DEADLINE_THROTTLED: u32 = 1 << 5;
-/// At least one task-owned software timer is currently registered.
-pub const TASK_DEBUG_FLAG_SOFTWARE_TIMER_ARMED: u32 = 1 << 6;
-/// Deadline state could not be sampled without waiting for its lock.
-pub const TASK_DEBUG_FLAG_DEADLINE_UNAVAILABLE: u32 = 1 << 7;
-
-/// Fixed-layout diagnostic snapshot returned by `GetTaskDebugInfo`.
-///
-/// The debug syscall is available only when the kernel is built with the
-/// `sync-debug` feature. Its caller supplies the expected entry size, allowing
-/// future versions to reject incompatible user-space layouts safely.
-#[derive(Debug, Clone, Copy)]
-#[repr(C)]
-pub struct TaskDebugInfo {
-    /// Size of this entry in bytes.
-    pub size: u32,
-    /// ABI version, currently [`TASK_DEBUG_INFO_VERSION_V1`].
-    pub version: u16,
-    /// Task state encoded with [`TaskState::to_u8`].
-    pub state: u8,
-    /// Task type: 0 = kernel, 1 = user.
-    pub task_type: u8,
-    /// Combination of `TASK_DEBUG_FLAG_*` values.
-    pub flags: u32,
-    /// Last scheduler CPU, or `u32::MAX` when unknown.
-    pub cpu_id: u32,
-    /// Namespace-local thread ID.
-    pub pid: usize,
-    /// Namespace-local thread-group ID.
-    pub tgid: usize,
-    /// Most recent instruction address sampled by a timer interrupt.
-    pub observed_pc: u64,
-    /// Most recent system-call number, or `u64::MAX` when unavailable.
-    pub syscall_number: u64,
-    /// User instruction address from which `syscall_number` was entered.
-    pub syscall_pc: u64,
-    /// Cumulative task CPU time in nanoseconds.
-    pub cpu_time_ns: u64,
-}
-
-const _: [(); 64] = [(); core::mem::size_of::<TaskDebugInfo>()];
-
-/// Version of the per-CPU debug snapshot ABI implemented by the kernel.
-pub const CPU_DEBUG_INFO_VERSION_V1: u16 = 1;
-/// The snapshot contains a namespace-visible current task ID.
-pub const CPU_DEBUG_FLAG_CURRENT_TASK_VALID: u16 = 1 << 0;
-/// The CPU's published current task is its idle task.
-pub const CPU_DEBUG_FLAG_IDLE: u16 = 1 << 1;
-/// The CPU has a deferred reschedule request pending.
-pub const CPU_DEBUG_FLAG_PENDING_RESCHEDULE: u16 = 1 << 2;
-/// The CPU's local hardware timer has a programmed deadline.
-pub const CPU_DEBUG_FLAG_TIMER_ARMED: u16 = 1 << 3;
-
-/// Fixed-layout lock-free diagnostic snapshot returned by `GetCpuDebugInfo`.
-///
-/// The debug syscall is available only when the kernel is built with the
-/// `sync-debug` feature. All sampled fields are atomic so a surviving CPU can
-/// inspect a stalled CPU without acquiring scheduler or timer locks.
-#[derive(Debug, Clone, Copy)]
-#[repr(C)]
-pub struct CpuDebugInfo {
-    /// Size of this entry in bytes.
-    pub size: u32,
-    /// ABI version, currently [`CPU_DEBUG_INFO_VERSION_V1`].
-    pub version: u16,
-    /// Combination of `CPU_DEBUG_FLAG_*` values.
-    pub flags: u16,
-    /// Logical CPU ID represented by this snapshot.
-    pub cpu_id: u32,
-    /// Low 32 bits of the breadcrumb commit sequence.
-    pub reserved: u32,
-    /// Namespace-local current task ID, or zero when unavailable.
-    pub current_task_id: usize,
-    /// Number of local timer interrupts observed by this CPU.
-    pub timer_irq_count: u64,
-    /// Last lock-free kernel execution breadcrumb phase.
-    pub breadcrumb_phase: u64,
-    /// First context value associated with `breadcrumb_phase`.
-    pub breadcrumb_aux: u64,
-    /// Second context value associated with `breadcrumb_phase`.
-    pub breadcrumb_aux2: u64,
-    /// Last requested local timer deadline, or zero when stopped.
-    pub timer_deadline_ns: u64,
-}
-
-const _: [(); 64] = [(); core::mem::size_of::<CpuDebugInfo>()];
+// Keep the fixed-width diagnostic wire records identical on both sides of the
+// syscall boundary. Runtime task identifiers remain native Rust values.
+pub use scarlet_abi::{
+    CPU_DEBUG_FLAG_CURRENT_TASK_VALID, CPU_DEBUG_FLAG_IDLE, CPU_DEBUG_FLAG_PENDING_RESCHEDULE,
+    CPU_DEBUG_FLAG_TIMER_ARMED, CPU_DEBUG_INFO_VERSION_V1, RawCpuDebugInfoV1 as CpuDebugInfo,
+    RawTaskDebugInfoV1 as TaskDebugInfo, TASK_DEBUG_FLAG_DEADLINE,
+    TASK_DEBUG_FLAG_DEADLINE_THROTTLED, TASK_DEBUG_FLAG_DEADLINE_UNAVAILABLE,
+    TASK_DEBUG_FLAG_PC_PRIVILEGED, TASK_DEBUG_FLAG_PC_VALID, TASK_DEBUG_FLAG_SOFTWARE_TIMER_ARMED,
+    TASK_DEBUG_FLAG_SYSCALL_ACTIVE, TASK_DEBUG_FLAG_SYSCALL_VALID, TASK_DEBUG_INFO_VERSION_V1,
+};
 
 /// Snapshot of system-wide CPU usage exposed to user space.
 ///

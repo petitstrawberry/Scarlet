@@ -60,8 +60,13 @@ dependencies = [
  "font8x8",
  "hashbrown",
  "lock_api",
+ "scarlet-abi",
  "talc",
 ]
+
+[[package]]
+name = "scarlet-abi"
+version = "1.0.0"
 
 [[package]]
 name = "scarlet-module-prototype"

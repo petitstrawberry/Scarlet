@@ -9,6 +9,7 @@ path = "src/lib.rs"
 doctest = false
 
 [dependencies]
+scarlet-abi = { path = "../user/lib/scarlet-abi" }
 fdt = "0.1.5"
 talc = "4.4"
 hashbrown = "0.16.0"

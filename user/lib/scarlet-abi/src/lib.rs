@@ -86,7 +86,8 @@ pub const TASK_DEBUG_FLAG_DEADLINE_UNAVAILABLE: u32 = 1 << 7;
 /// Raw v1 task execution snapshot returned by `GetTaskDebugInfo`.
 ///
 /// This interface is available only in kernels built with `sync-debug`.
-#[repr(C)]
+/// IDs use explicit 64-bit slots, preserving the published 64-bit v1 layout.
+#[repr(C, align(8))]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RawTaskDebugInfoV1 {
     /// Size of this entry in bytes.
@@ -101,10 +102,10 @@ pub struct RawTaskDebugInfoV1 {
     pub flags: u32,
     /// Last scheduler CPU, or `u32::MAX` when unknown.
     pub cpu_id: u32,
-    /// Namespace-local thread ID.
-    pub pid: usize,
-    /// Namespace-local thread-group ID.
-    pub tgid: usize,
+    /// Namespace-local thread ID in the v1 fixed-width wire slot.
+    pub pid: u64,
+    /// Namespace-local thread-group ID in the v1 fixed-width wire slot.
+    pub tgid: u64,
     /// Most recent timer-sampled instruction address.
     pub observed_pc: u64,
     /// Most recently entered system-call number, or `u64::MAX`.
@@ -116,6 +117,15 @@ pub struct RawTaskDebugInfoV1 {
 }
 
 const _: [(); 64] = [(); core::mem::size_of::<RawTaskDebugInfoV1>()];
+const _: () = {
+    use core::mem::offset_of;
+    assert!(offset_of!(RawTaskDebugInfoV1, pid) == 16);
+    assert!(offset_of!(RawTaskDebugInfoV1, tgid) == 24);
+    assert!(offset_of!(RawTaskDebugInfoV1, observed_pc) == 32);
+    assert!(offset_of!(RawTaskDebugInfoV1, syscall_number) == 40);
+    assert!(offset_of!(RawTaskDebugInfoV1, syscall_pc) == 48);
+    assert!(offset_of!(RawTaskDebugInfoV1, cpu_time_ns) == 56);
+};
 
 /// Version of the per-CPU debug snapshot ABI implemented by Scarlet.
 pub const CPU_DEBUG_INFO_VERSION_V1: u16 = 1;
@@ -131,7 +141,8 @@ pub const CPU_DEBUG_FLAG_TIMER_ARMED: u16 = 1 << 3;
 /// Raw v1 lock-free per-CPU snapshot returned by `GetCpuDebugInfo`.
 ///
 /// This interface is available only in kernels built with `sync-debug`.
-#[repr(C)]
+/// The task ID occupies a 64-bit slot on every data model.
+#[repr(C, align(8))]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RawCpuDebugInfoV1 {
     /// Size of this entry in bytes.
@@ -144,8 +155,8 @@ pub struct RawCpuDebugInfoV1 {
     pub cpu_id: u32,
     /// Low 32 bits of the breadcrumb commit sequence.
     pub reserved: u32,
-    /// Namespace-local current task ID, or zero when unavailable.
-    pub current_task_id: usize,
+    /// Namespace-local current task ID in a fixed-width slot, or zero when unavailable.
+    pub current_task_id: u64,
     /// Number of local timer interrupts observed by this CPU.
     pub timer_irq_count: u64,
     /// Last lock-free kernel execution breadcrumb phase.
@@ -159,6 +170,15 @@ pub struct RawCpuDebugInfoV1 {
 }
 
 const _: [(); 64] = [(); core::mem::size_of::<RawCpuDebugInfoV1>()];
+const _: () = {
+    use core::mem::offset_of;
+    assert!(offset_of!(RawCpuDebugInfoV1, current_task_id) == 16);
+    assert!(offset_of!(RawCpuDebugInfoV1, timer_irq_count) == 24);
+    assert!(offset_of!(RawCpuDebugInfoV1, breadcrumb_phase) == 32);
+    assert!(offset_of!(RawCpuDebugInfoV1, breadcrumb_aux) == 40);
+    assert!(offset_of!(RawCpuDebugInfoV1, breadcrumb_aux2) == 48);
+    assert!(offset_of!(RawCpuDebugInfoV1, timer_deadline_ns) == 56);
+};
 
 /// Scheduler utilization scale used by Scarlet Native util-clamp syscalls.
 ///
