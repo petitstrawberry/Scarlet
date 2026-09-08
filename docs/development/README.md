@@ -28,20 +28,23 @@ image tools, firmware paths, fontconfig, and the other tools described in
 
 Run these tasks from the Scarlet repository root in the Nix development shell:
 
+AArch64 currently receives more runtime validation and is the recommended
+starting point. RISC-V tasks remain available for that architecture.
+
 ```sh
 # Build kernel and core user components (image composition is separate).
-cargo make build-riscv64
 cargo make build-aarch64
+cargo make build-riscv64
 
 # Build images and run through the project runner.
-cargo make run-riscv64
 cargo make run-aarch64
+cargo make run-riscv64
 cargo make run-aarch64-microvm
 ```
 
 The `build-*` tasks do not compose the complete project image. The `run-*`
 tasks compose release images and launch the runner; `run-debug-*` selects the
-debug build. The `debug-riscv64` and `debug-aarch64` tasks start QEMU paused
+debug build. The `debug-aarch64` and `debug-riscv64` tasks start QEMU paused
 with a GDB server. See [userspace development](../userspace/README.md) for
 application-only builds.
 
@@ -106,21 +109,21 @@ cargo make fmt
 cargo make fmt-check
 
 # Clippy
-cargo make clippy-riscv64
 cargo make clippy-aarch64
+cargo make clippy-riscv64
 
 # Kernel tests
-cargo make test-riscv64
 cargo make test-aarch64
+cargo make test-riscv64
 ```
 
 The root test tasks run the kernel tests under QEMU and require the same Nix
-shell environment as normal runs. CI currently expects both `test-riscv64` and
-`test-aarch64` to pass. To run an individual kernel test:
+shell environment as normal runs. CI currently expects both `test-aarch64` and
+`test-riscv64` to pass. To run an individual kernel test:
 
 ```sh
 cd kernel
-cargo test --target targets/riscv64gc-unknown-none-elf.json test_name
+cargo test --target targets/aarch64-unknown-none-elf.json test_name
 ```
 
 ## Rust documentation
@@ -128,7 +131,7 @@ cargo test --target targets/riscv64gc-unknown-none-elf.json test_name
 From the repository root:
 
 ```sh
-cargo make doc-riscv64
+cargo make doc-aarch64
 cargo make doc-kernel
 cargo make doc-userlib
 ```

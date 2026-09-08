@@ -1,3 +1,6 @@
+use core::arch::naked_asm;
+use core::mem::{MaybeUninit, offset_of};
+
 use limine::mp::MpInfo;
 
 use crate::boot::limine::{
@@ -14,7 +17,7 @@ use crate::{BootInfo, DeviceSource, println, start_ap, start_kernel, wait_for_ap
 use limine::paging;
 use limine::request::{BspHartidRequest, PagingModeRequest};
 
-static mut EARLY_BOOTINFO: Option<BootInfo> = None;
+static mut EARLY_BOOTINFO: MaybeUninit<BootInfo> = MaybeUninit::uninit();
 
 #[unsafe(link_section = ".limine_requests")]
 #[used]
@@ -28,15 +31,34 @@ static PAGING_MODE_REQUEST: PagingModeRequest = PagingModeRequest::new(
     paging::PagingMode::RISCV_SV48,
 );
 
-unsafe extern "C" fn limine_ap_entry(info: &MpInfo) -> ! {
-    // SAFETY: sscratch holds whatever firmware left; explicitly clear it so
-    // try_get_cpuid() can deterministically treat 0 as "uninitialized"
-    // until init_cpu publishes the per-CPU pointer.
-    unsafe {
-        core::arch::asm!("csrw sscratch, zero");
-    }
+#[unsafe(naked)]
+unsafe extern "C" fn limine_ap_entry(_info: &MpInfo) -> ! {
+    naked_asm!(
+        ".option push",
+        ".option norelax",
+        ".option arch, +m",
+        "csrci sstatus, 0x2",
+        "csrw sscratch, zero",
+        "ld a0, {hartid_offset}(a0)",
+        // Limine's stack is not mapped by Scarlet's runtime page table.
+        // Select this hart's permanent stack before entering any Rust frame.
+        "la t0, {kernel_stack}",
+        "li t1, {stack_size}",
+        "addi t2, a0, 1",
+        "mul t1, t1, t2",
+        "add sp, t0, t1",
+        "tail {ap_wait}",
+        ".option pop",
+        hartid_offset = const offset_of!(MpInfo, hartid),
+        kernel_stack = sym KERNEL_STACK,
+        stack_size = const STACK_SIZE,
+        ap_wait = sym secondary_cpu_entry,
+    );
+}
+
+extern "C" fn secondary_cpu_entry(cpu_id: usize) -> ! {
     wait_for_ap_release();
-    start_ap(info.hartid as usize)
+    start_ap(cpu_id)
 }
 
 fn start_secondary_cpus() {
@@ -152,10 +174,11 @@ pub fn limine_entry() -> ! {
     bootstrap_aps();
 
     unsafe {
-        let stack_top = (&raw const KERNEL_STACK) as *const _ as usize + STACK_SIZE;
-        EARLY_BOOTINFO = Some(bootinfo);
-        let bootinfo_ptr =
-            (&raw const EARLY_BOOTINFO) as *const Option<BootInfo> as *const BootInfo;
+        // The BSP may be any hart. Do not share hart 0's stack with AP 0.
+        let stack_top = (&raw const KERNEL_STACK) as *const _ as usize
+            + STACK_SIZE * (bsp.bsp_hartid as usize + 1);
+        (&raw mut EARLY_BOOTINFO).write(MaybeUninit::new(bootinfo));
+        let bootinfo_ptr = (&raw const EARLY_BOOTINFO).cast::<BootInfo>();
         crate::arch::riscv64::switch_stack_and_jump(
             start_kernel as *const () as usize,
             bootinfo_ptr as usize,

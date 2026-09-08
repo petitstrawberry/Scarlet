@@ -114,7 +114,7 @@ to `none` for both display and GPU. Serial output remains in the terminal.
 | `SCARLET_QEMU_INPUT` | Full | `1` | Adds virtio keyboard and mouse devices. |
 | `SCARLET_QEMU_AUDIO` | All | `0` | Adds a virtio sound device and a host audio backend. |
 | `SCARLET_QEMU_AUDIO_DRIVER` | All | `coreaudio` | QEMU audio backend used when audio is enabled. This default is not selected by host OS; Linux users must choose an available backend. |
-| `SCARLET_QEMU_SERIAL` | AArch64 full | `mon:stdio` | Replaces the QEMU serial backend. RISC-V full and microvm keep `mon:stdio`. |
+| `SCARLET_QEMU_SERIAL` | Full | `mon:stdio` | Replaces the QEMU serial backend. Microvm keeps `mon:stdio`. |
 
 Input capture differs by backend:
 
@@ -137,7 +137,7 @@ Examples:
 SCARLET_QEMU_DISPLAY=none cargo make run-aarch64
 
 # Explicit VNC instead of a local GUI.
-SCARLET_QEMU_DISPLAY='vnc=:0' cargo make run-riscv64
+SCARLET_QEMU_DISPLAY='vnc=:0' cargo make run-aarch64
 
 # Cocoa with GL but without Retina.
 SCARLET_QEMU_DISPLAY='cocoa,gl=on,retina=off,full-grab=on' cargo make run-aarch64
@@ -189,9 +189,13 @@ cargo make run-aarch64
 These variables apply only to full projects unless a narrower scope is
 listed. `<project>` means the runner's project directory.
 
+Both full projects attach one GPT disk containing the EFI boot partition and
+the ext2 root partition at `/dev/vblk0p2`. Their default rootfs transport is
+`none` because no additional rootfs disk is needed.
+
 | Variable | Scope | Default | Effect |
 | --- | --- | --- | --- |
-| `SCARLET_QEMU_PROJECT_DIR` | AArch64 full | Runner's project directory | Changes where the runner looks for its manifest and project artifacts. Does not select a different project for the preceding build. |
+| `SCARLET_QEMU_PROJECT_DIR` | Full | Runner's project directory | Changes where the runner looks for its manifest and project artifacts. Does not select a different project for the preceding build. |
 | `SCARLET_QEMU_ROOTFS_TRANSPORT` | Full | `usb` when `scarlet.toml` contains a `cmdline` with `root=/dev/usbblk0`; otherwise `none` | Selects `usb`, `virtio`, or `none` for the rootfs disk attachment. Does not change the kernel command line. |
 | `SCARLET_QEMU_USB_STORAGE` | Full | `1` when rootfs transport is `usb`; otherwise `0` | Adds a USB mass-storage device and xHCI controller. |
 | `SCARLET_QEMU_USB_STORAGE_IMAGE` | Full | Rootfs image for USB rootfs; otherwise `<project>/.scarlet/images/qemu-usb-storage.img` | Raw image attached to the USB storage device. |
@@ -245,8 +249,8 @@ to zero when `virt-fw-vars` is available.
 | `SCARLET_QEMU_GUEST_ERRORS_LOG` | All | `<repo>/qemu-guest-errors-<arch>.log` | Log path when the effective debug flags are exactly `guest_errors`. |
 | `SCARLET_QEMU_DEBUG_LOG` | All | `<repo>/qemu-debug-<arch>.log` | Log path for other debug-flag combinations. |
 | `SCARLET_QEMU_CHECK_TEST_OUTPUT` | All | `0` | Captures QEMU stdout and checks the Scarlet test-runner pass/fail markers after exit. Not needed for ordinary desktop runs. |
-| `SCARLET_QEMU_QMP` | AArch64 full | Unset | Unix socket path for QMP, configured with `server=on,wait=off`. |
-| `SCARLET_QEMU_SNAPSHOT` | AArch64 full | `0` | `1` passes QEMU `-snapshot` for temporary disk changes. Does not stop the preceding image build from writing artifacts. |
+| `SCARLET_QEMU_QMP` | Full | Unset | Unix socket path for QMP, configured with `server=on,wait=off`. |
+| `SCARLET_QEMU_SNAPSHOT` | Full | `0` | `1` passes QEMU `-snapshot` for temporary disk changes. Does not stop the preceding image build from writing artifacts. |
 
 In the log defaults, `<arch>` is `aarch64` or `riscv64`. The current runners
 assemble `-d`/`-D` arguments through shell word splitting, so use debug-log

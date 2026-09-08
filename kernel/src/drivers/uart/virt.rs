@@ -53,6 +53,11 @@ pub const IER_RLS: u8 = 0x04; // Receiver Line Status
 // IIR bits
 pub const IIR_PENDING: u8 = 0x01; // 0=interrupt pending, 1=no interrupt
 pub const IIR_RDA: u8 = 0x04; // Received Data Available
+pub const IIR_RX_TIMEOUT: u8 = 0x0C; // Receive FIFO has unread data after an idle interval
+
+const fn receive_interrupt_pending(iir: u8) -> bool {
+    iir & IIR_PENDING == 0 && matches!(iir & 0x0E, IIR_RDA | IIR_RX_TIMEOUT)
+}
 
 // FCR bits
 pub const FCR_ENABLE: u8 = 0x01; // FIFO enable
@@ -314,8 +319,10 @@ impl InterruptCapableDevice for Uart {
             return Ok(InterruptClaim::NotMine);
         }
 
-        let cause = iir & 0x0E;
-        if cause == IIR_RDA {
+        // A receive timeout also requires draining the FIFO. Acknowledging it
+        // without reading leaves the UART line asserted, causing an IRQ storm
+        // and preventing subsequent console input from making progress.
+        if receive_interrupt_pending(iir) {
             self.drain_rx();
         }
         Ok(InterruptClaim::Handled)
@@ -421,3 +428,22 @@ fn uart_remove(_device_info: &PlatformDeviceInfo) -> Result<(), &'static str> {
 }
 
 driver_initcall!(register_uart);
+
+#[cfg(test)]
+mod tests {
+    use super::receive_interrupt_pending;
+
+    #[test_case]
+    fn receive_data_and_fifo_timeout_both_require_draining() {
+        for iir in [0x04, 0xC4, 0x0C, 0xCC] {
+            assert!(receive_interrupt_pending(iir), "IIR={iir:#x}");
+        }
+    }
+
+    #[test_case]
+    fn non_receive_interrupts_do_not_require_draining() {
+        for iir in [0x01, 0xC1, 0x02, 0xC2, 0x06, 0xC6, 0x0E, 0xCE] {
+            assert!(!receive_interrupt_pending(iir), "IIR={iir:#x}");
+        }
+    }
+}

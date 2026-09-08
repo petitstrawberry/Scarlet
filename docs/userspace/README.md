@@ -9,7 +9,7 @@ userspace program.
 
 | Component | Role |
 | --- | --- |
-| Scarlet Rust toolchain | Supplies Rust `std` for `riscv64gc-unknown-scarlet` and `aarch64-unknown-scarlet` |
+| Scarlet Rust toolchain | Supplies Rust `std` for `aarch64-unknown-scarlet` and `riscv64gc-unknown-scarlet` |
 | [scarlet-abi](../../user/lib/scarlet-abi/Cargo.toml) | Shared ABI numbers and records |
 | [scarlet-sys](../../user/lib/scarlet-sys/Cargo.toml) | Raw syscall/native entry layer; unsafe inputs remain the caller's responsibility |
 | [scarlet-os](../../user/lib/scarlet-os/Cargo.toml) | Typed native handles and OS operations for std and supported no_std consumers |

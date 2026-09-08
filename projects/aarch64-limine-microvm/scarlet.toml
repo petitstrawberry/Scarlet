@@ -8,11 +8,11 @@ path = "bsp"
 package = "scarlet"
 
 [bsp.kernel]
-source = { git = "https://github.com/petitstrawberry/Scarlet", tag = "kernel-v1.0.0" }
+source = { git = "https://github.com/petitstrawberry/Scarlet", tag = "kernel-v1.0.1" }
 features = ["network", "user-fpu", "user-vector", "hypervisor", "limine"]
 
 [modules]
-"scarlet-module-prototype" = { git = "https://github.com/petitstrawberry/Scarlet", tag = "kernel-v1.0.0", enabled = false }
+"scarlet-module-prototype" = { git = "https://github.com/petitstrawberry/Scarlet", tag = "kernel-v1.0.1", enabled = false }
 
 [images]
 

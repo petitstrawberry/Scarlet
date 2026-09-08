@@ -4,10 +4,10 @@
 
 **A Rust operating system kernel and reference distribution for multi-ABI systems.**
 
-[![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)](https://github.com/petitstrawberry/Scarlet)
+[![Version](https://img.shields.io/badge/version-1.0.1-blue.svg)](https://github.com/petitstrawberry/Scarlet)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![RISC-V](https://img.shields.io/badge/arch-RISC--V%2064-green)](https://riscv.org/)
 [![AArch64](https://img.shields.io/badge/arch-AArch64-orange)](https://www.arm.com/)
+[![RISC-V](https://img.shields.io/badge/arch-RISC--V%2064-green)](https://riscv.org/)
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/petitstrawberry/Scarlet)
 
 <img src="docs/assets/screenshots/scarlet-desktop.png" alt="Scarlet 1.0.0 Akane desktop with Boxcraft, Files, Terminal, Clock, and Video Player" width="900">
@@ -28,7 +28,7 @@ kernel, applications, drivers, and reusable image bundles.
 
 ## Highlights
 
-- RISC-V 64 and AArch64 support, with [QEMU images](#quick-start) and experimental
+- AArch64 and RISC-V 64 support, with [QEMU images](#quick-start) and experimental
   [real-hardware projects](#hardware-support).
 - [Multi-ABI kernel](docs/abi/README.md): Scarlet-native, xv6, and partial Linux
   ABI support over shared kernel objects.
@@ -73,19 +73,22 @@ instructions.
 
 ## Quick Start
 
-Clone the `distro-v1.0.0` release tag for **Scarlet 1.0.0 "Akane"**, then enter
+Clone the `distro-v1.0.1` release tag for **Scarlet 1.0.1 "Akane"**, then enter
 the Nix development shell and choose a QEMU target:
 
+AArch64 is the recommended starting point, with more runtime validation at
+present. RISC-V 64 is also available.
+
 ```bash
-git clone --branch distro-v1.0.0 --depth 1 https://github.com/petitstrawberry/Scarlet.git
+git clone --branch distro-v1.0.1 --depth 1 https://github.com/petitstrawberry/Scarlet.git
 cd Scarlet
 nix develop
 
-# Build and run the default RISC-V full image.
-cargo make run-riscv64
-
-# Or build and run the AArch64 full image.
+# Build and run the recommended AArch64 full image.
 cargo make run-aarch64
+
+# Or build and run the RISC-V full image.
+cargo make run-riscv64
 ```
 
 This checks out the distribution release tag, not a development branch. For

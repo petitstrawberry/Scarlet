@@ -8,11 +8,11 @@ path = "bsp"
 package = "scarlet"
 
 [bsp.kernel]
-source = { git = "https://github.com/petitstrawberry/Scarlet", tag = "kernel-v1.0.0" }
+source = { git = "https://github.com/petitstrawberry/Scarlet", tag = "kernel-v1.0.1" }
 features = ["network", "user-fpu", "user-vector", "hypervisor", "limine"]
 
 [modules]
-"scarlet-module-prototype" = { git = "https://github.com/petitstrawberry/Scarlet", tag = "kernel-v1.0.0", enabled = true }
+"scarlet-module-prototype" = { git = "https://github.com/petitstrawberry/Scarlet", tag = "kernel-v1.0.1", enabled = true }
 
 [images]
 
@@ -43,14 +43,29 @@ to = "/root"
 
 [images.boot]
 format = "limine-uefi"
-output = ".scarlet/images/limine-riscv64-full.img"
-cmdline = "console=ttyS0 root=/dev/vblk1"
+output = ".scarlet/images/esp-riscv64-full.img"
+cmdline = "console=ttyS0 root=/dev/vblk0p2 rootfstype=ext2"
 deps = ["initramfs"]
 
 [[images.boot.layers]]
 kind = "image"
 source = "initramfs"
 to = "/boot/initramfs"
+
+[images.disk]
+format = "gpt"
+output = ".scarlet/images/limine-riscv64-full.img"
+deps = ["boot", "rootfs"]
+
+[[images.disk.partitions]]
+source = "boot"
+name = "SCARLET_BOOT"
+type = "efi-system"
+
+[[images.disk.partitions]]
+source = "rootfs"
+name = "SCARLET_ROOT"
+type = "linux-filesystem"
 
 [runner]
 command = "tools/run.sh"
