@@ -17,7 +17,7 @@ use mmu::PageTable;
 #[cfg(test)]
 use mmu::PageTableEntry;
 
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::mem::page::{Page, allocate_raw_pages, allocate_raw_pages_aligned, free_raw_pages};
 
@@ -31,7 +31,7 @@ use crate::vm::addr::kernel_virt_to_phys;
 use crate::vm::manager::VirtualMemoryManager;
 use crate::vm::vmem::{MemoryArea, MemoryAttribute, VirtualMemoryMap, VirtualMemoryPermission};
 
-static KERNEL_SATP: AtomicU64 = AtomicU64::new(0);
+static KERNEL_SATP: AtomicUsize = AtomicUsize::new(0);
 
 /// Invalidates one address space's translations locally and on every remote hart.
 ///
@@ -68,7 +68,7 @@ pub(in crate::arch::riscv::vm) fn synchronize_tlb(asid: u16) {
 }
 
 pub fn save_kernel_page_table() {
-    let satp: u64;
+    let satp: usize;
     unsafe {
         core::arch::asm!("csrr {}, satp", out(reg) satp);
     }
@@ -92,7 +92,7 @@ unsafe extern "C" {
     static __TRAMPOLINE_END: usize;
 }
 
-const NUM_OF_ASID: usize = u16::MAX as usize + 1; // Maximum ASID value
+const NUM_OF_ASID: usize = 1 << mmu::ASID_BITS;
 static ASID_BITMAP_TABLES: Once<IrqRwSpinLock<Box<[u64]>>> = Once::new();
 static PAGE_TABLE_LOCKS: [IrqSpinLock<()>; NUM_OF_ASID] =
     [const { IrqSpinLock::new(()) }; NUM_OF_ASID];
@@ -128,7 +128,7 @@ impl RootPageTableGuard {
         self.table().switch(self.asid);
     }
 
-    pub(crate) fn get_val_for_satp(&self) -> u64 {
+    pub(crate) fn get_val_for_satp(&self) -> usize {
         self.table().get_val_for_satp(self.asid)
     }
 

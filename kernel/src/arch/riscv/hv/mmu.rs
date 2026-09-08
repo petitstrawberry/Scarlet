@@ -282,7 +282,7 @@ pub fn map_stage2_page_at_level(
         (*pte).entry |= 8;
         (*pte).entry |= 0x10;
         (*pte).entry |= 0x40;
-        (*pte).entry |= ppn << 10;
+        (*pte).set_ppn(usize::try_from(ppn).expect("guest physical page number exceeds XLEN"));
     }
 
     // crate::println!("[map_stage2_new] pte={:#x}", unsafe { *pte }.entry);

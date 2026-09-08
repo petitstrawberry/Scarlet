@@ -9,7 +9,10 @@ use crate::vm::vmem::MemoryAttribute;
 use crate::vm::vmem::VirtualMemoryMap;
 use crate::vm::vmem::VirtualMemoryPermission;
 
-const MAX_PAGING_LEVEL: usize = 3;
+use super::{
+    ASID_BITS, INDEX_BITS, MAX_PAGING_LEVEL, PPN_BITS, SATP_MODE, SATP_MODE_SHIFT, SATP_PPN_BITS,
+    TABLE_ENTRIES, is_canonical,
+};
 
 /// Attributes applied to a leaf page-table entry.
 #[derive(Clone, Copy)]
@@ -19,28 +22,19 @@ struct MapAttrs {
     dirty: bool,
 }
 
-/// Returns whether a virtual address is canonical for Sv48.
-///
-/// Sv48 requires bits 63:48 to be copies of bit 47: all zero for the lower
-/// canonical range and all one for the upper canonical range.
-fn is_canonical_sv48(vaddr: usize) -> bool {
-    let canonical_check = (vaddr >> 47) & 1;
-    let upper_bits = (vaddr >> 48) & 0xffff;
-    (canonical_check == 1 && upper_bits == 0xffff) || (canonical_check == 0 && upper_bits == 0)
-}
-
-fn assert_canonical_sv48(vaddr: usize) {
-    if !is_canonical_sv48(vaddr) {
-        panic!("Non-canonical virtual address: {:#x}", vaddr);
-    }
+fn assert_canonical(vaddr: usize) {
+    assert!(
+        is_canonical(vaddr),
+        "Non-canonical virtual address: {vaddr:#x}"
+    );
 }
 
 /// Returns the page size represented by a page-table level.
 ///
-/// Level 0 is 4 KiB, level 1 is 2 MiB, level 2 is 1 GiB, and level 3 is
-/// 512 GiB.
+/// Level 0 is 4 KiB. Each further level contributes INDEX_BITS address bits:
+/// Sv32 has a 4 MiB leaf, while Sv48 also has 2 MiB, 1 GiB and 512 GiB leaves.
 fn page_size_for_level(level: usize) -> usize {
-    1usize << (12 + 9 * level)
+    1usize << (12 + INDEX_BITS * level)
 }
 
 /// Chooses the largest page-table level usable for a mapping chunk.
@@ -57,10 +51,10 @@ fn best_page_level(vaddr: usize, paddr: usize, size: usize) -> usize {
     0
 }
 
-#[repr(align(8))]
+#[repr(transparent)]
 #[derive(Clone, Copy, Debug)]
 pub struct PageTableEntry {
-    pub entry: u64,
+    pub entry: usize,
 }
 
 impl PageTableEntry {
@@ -69,12 +63,11 @@ impl PageTableEntry {
     }
 
     pub fn get_ppn(&self) -> usize {
-        ((self.entry >> 10) & 0x3ffffffffff) as usize // Mask to get the PPN bits (44 bits)
-        // (self.entry >> 10) as usize
+        (self.entry >> 10) & ((1usize << PPN_BITS) - 1)
     }
 
     pub fn get_flags(&self) -> u64 {
-        self.entry & 0x3ff
+        (self.entry & 0x3ff) as u64
     }
 
     pub fn is_valid(&self) -> bool {
@@ -96,7 +89,7 @@ impl PageTableEntry {
     /// Huge-page leaves must have zero lower PPN fields for all lower page-table
     /// levels.
     pub fn is_aligned_for_level(&self, level: usize) -> bool {
-        let mask = (1usize << (9 * level)) - 1;
+        let mask = (1usize << (INDEX_BITS * level)) - 1;
         self.get_ppn() & mask == 0
     }
 
@@ -109,17 +102,20 @@ impl PageTableEntry {
     }
 
     pub fn set_ppn(&mut self, ppn: usize) -> &mut Self {
-        let ppn_mask = 0x3ffffffffff; // Mask for the PPN bits
-        let masked_ppn = (ppn as u64) & ppn_mask; // Mask the PPN to fit in the entry
+        let ppn_mask = (1usize << PPN_BITS) - 1;
+        assert!(
+            ppn <= ppn_mask,
+            "physical page number exceeds the selected paging mode"
+        );
 
         self.entry &= !(ppn_mask << 10); // Clear the PPN bits in the entry
-        self.entry |= masked_ppn << 10; // Set the new PPN bits
+        self.entry |= ppn << 10; // Set the new PPN bits
         self
     }
 
     pub fn set_flags(&mut self, flags: u64) -> &mut Self {
         let mask = 0x3ff;
-        self.entry |= flags & mask;
+        self.entry |= (flags & mask) as usize;
         self
     }
 
@@ -174,14 +170,14 @@ impl Default for PageTableEntry {
 #[repr(align(4096))]
 #[derive(Debug)]
 pub struct PageTable {
-    pub entries: [PageTableEntry; 512],
+    pub entries: [PageTableEntry; TABLE_ENTRIES],
 }
 
 impl PageTable {
     /// Create a new page table with all entries initialized to zero
     pub(in crate::arch::riscv::vm) fn new() -> Self {
         PageTable {
-            entries: [PageTableEntry::new(); 512],
+            entries: [PageTableEntry::new(); TABLE_ENTRIES],
         }
     }
 
@@ -209,12 +205,13 @@ impl PageTable {
     ///
     /// # Note
     ///
-    /// Only for RISC-V (Sv48).
-    pub(in crate::arch::riscv::vm) fn get_val_for_satp(&self, asid: u16) -> u64 {
+    /// The PPN, ASID and MODE fields follow the selected paging geometry.
+    pub(in crate::arch::riscv::vm) fn get_val_for_satp(&self, asid: u16) -> usize {
         let asid = asid as usize;
-        let mode = 9;
+        assert!(asid < (1usize << ASID_BITS));
         let ppn = kernel_virt_to_phys(self as *const _ as usize) >> 12;
-        (mode << 60 | asid << 44 | ppn) as u64
+        assert!(ppn < (1usize << SATP_PPN_BITS));
+        SATP_MODE << SATP_MODE_SHIFT | asid << SATP_PPN_BITS | ppn
     }
 
     pub(in crate::arch::riscv::vm) fn map_memory_area(
@@ -293,7 +290,7 @@ impl PageTable {
 
     /// Validates an existing range after a direct-map attribute change.
     ///
-    /// Sv48 does not encode Scarlet's memory attributes in stage-1 leaves, so
+    /// This implementation does not encode Scarlet's memory attributes in stage-1 leaves, so
     /// the live mapping only needs to remain physically consistent and have its
     /// translations synchronized after the metadata transition.
     pub(in crate::arch::riscv::vm) fn retag_memory_area(
@@ -352,7 +349,7 @@ impl PageTable {
     /// * `vaddr` - Virtual address to map.
     /// * `paddr` - Physical address to map.
     /// * `permissions` - Requested virtual-memory permissions.
-    /// * `_memory_attribute` - Requested cacheability or device attribute; Sv48 does not encode it.
+    /// * `_memory_attribute` - Requested cacheability or device attribute; This implementation does not encode it.
     /// * `accessed` - Whether to set the accessed bit.
     /// * `dirty` - Whether to set the dirty bit.
     pub(in crate::arch::riscv::vm) fn map(
@@ -365,11 +362,11 @@ impl PageTable {
         accessed: bool,
         dirty: bool,
     ) {
-        // Check if the virtual address is properly canonicalized for Sv48
-        assert_canonical_sv48(vaddr);
+        // Check if the virtual address is properly canonicalized for the paging mode
+        assert_canonical(vaddr);
 
-        let vaddr = vaddr & 0xffff_ffff_ffff_f000; // Page align
-        let paddr = paddr & 0xffff_ffff_ffff_f000;
+        let vaddr = vaddr & !(PAGE_SIZE - 1); // Page align
+        let paddr = paddr & !(PAGE_SIZE - 1);
 
         let attrs = MapAttrs {
             permissions,
@@ -407,7 +404,7 @@ impl PageTable {
             return Err("Cannot replace existing page table with a leaf");
         }
         // Allow remapping - just update the existing entry
-        let ppn = (paddr >> 12) & 0xfffffffffff;
+        let ppn = paddr >> 12;
 
         // Clear existing flags before setting new ones
         pte.clear_all();
@@ -444,15 +441,7 @@ impl PageTable {
     // If alloc == true, create any required page-table pages.
     // Returns None if walk() couldn't allocate a needed page-table page.
     //
-    // The RISC-V Sv48 scheme has four levels of page-table pages.
-    // A page-table page contains 512 64-bit PTEs.
-    // A 48-bit virtual address is split into five fields:
-    //   47..48 -- must be zero.
-    //   39..47 -- 9 bits of level-3 index.
-    //   30..38 -- 9 bits of level-2 index.
-    //   21..29 -- 9 bits of level-1 index.
-    //   12..20 -- 9 bits of level-0 index.
-    //    0..11 -- 12 bits of byte offset within the page.
+    // Geometry selects Sv32 (2 x 10-bit indices) or Sv48 (4 x 9-bit indices).
     pub(in crate::arch::riscv::vm) fn walk(
         &mut self,
         vaddr: usize,
@@ -476,14 +465,14 @@ impl PageTable {
     ) -> Option<&mut PageTableEntry> {
         let mut pagetable = self as *mut PageTable;
 
-        // Check if virtual address is within valid canonical range for Sv48
-        if !is_canonical_sv48(vaddr) {
+        // Check if virtual address is within valid canonical range for the paging mode
+        if !is_canonical(vaddr) {
             return None;
         }
 
         unsafe {
             for level in ((target_level + 1)..=MAX_PAGING_LEVEL).rev() {
-                let vpn = (vaddr >> (12 + 9 * level)) & 0x1ff;
+                let vpn = (vaddr >> (12 + INDEX_BITS * level)) & (TABLE_ENTRIES - 1);
                 let pte = &mut (*pagetable).entries[vpn];
 
                 if pte.is_valid() {
@@ -508,7 +497,7 @@ impl PageTable {
                 }
             }
 
-            let vpn = (vaddr >> (12 + 9 * target_level)) & 0x1ff;
+            let vpn = (vaddr >> (12 + INDEX_BITS * target_level)) & (TABLE_ENTRIES - 1);
             Some(&mut (*pagetable).entries[vpn])
         }
     }
@@ -519,13 +508,13 @@ impl PageTable {
     fn walk_leaf(&mut self, vaddr: usize) -> Option<(&mut PageTableEntry, usize)> {
         let mut pagetable = self as *mut PageTable;
 
-        if !is_canonical_sv48(vaddr) {
+        if !is_canonical(vaddr) {
             return None;
         }
 
         unsafe {
             for level in (0..=MAX_PAGING_LEVEL).rev() {
-                let vpn = (vaddr >> (12 + 9 * level)) & 0x1ff;
+                let vpn = (vaddr >> (12 + INDEX_BITS * level)) & (TABLE_ENTRIES - 1);
                 let pte = &mut (*pagetable).entries[vpn];
                 if !pte.is_valid() {
                     return None;
@@ -597,10 +586,10 @@ impl PageTable {
     }
 
     fn unmap(&mut self, vaddr: usize) -> bool {
-        // Check if the virtual address is properly canonicalized for Sv48
-        assert_canonical_sv48(vaddr);
+        // Check if the virtual address is properly canonicalized for the paging mode
+        assert_canonical(vaddr);
 
-        let vaddr = vaddr & 0xffff_ffff_ffff_f000; // Page align
+        let vaddr = vaddr & !(PAGE_SIZE - 1); // Page align
 
         if let Some((pte, _)) = self.walk_leaf(vaddr) {
             pte.clear_all();
@@ -625,8 +614,8 @@ impl PageTable {
             return;
         }
 
-        assert_canonical_sv48(vaddr_start);
-        assert_canonical_sv48(vaddr_end);
+        assert_canonical(vaddr_start);
+        assert_canonical(vaddr_end);
 
         let mut vaddr = vaddr_start & !(PAGE_SIZE - 1);
         let mut changed = false;
@@ -677,7 +666,7 @@ impl PageTable {
     /// **must** call [`synchronize_tlb`] or equivalent before the affected
     /// address space becomes visible to any hart.
     pub(in crate::arch::riscv::vm) fn unmap_all_no_flush(&mut self) {
-        for i in 0..512 {
+        for i in 0..TABLE_ENTRIES {
             let entry = &mut self.entries[i];
             entry.clear_all();
         }
@@ -697,7 +686,27 @@ mod tests {
     use crate::vm::vmem::MemoryArea;
 
     #[test_case]
-    fn test_map_memory_area_uses_2m_huge_page() {
+    fn test_pte_preserves_the_complete_physical_page_number() {
+        let mut entry = PageTableEntry::new();
+        let ppn = (1usize << PPN_BITS) - 1;
+        entry.set_ppn(ppn).readable().accessed();
+        entry.validate();
+        assert_eq!(entry.get_ppn(), ppn);
+        assert!(entry.is_valid() && entry.is_leaf());
+        assert_eq!(
+            core::mem::size_of::<PageTableEntry>(),
+            core::mem::size_of::<usize>()
+        );
+        assert_eq!(core::mem::size_of::<PageTable>(), PAGE_SIZE);
+        // Sv32's 22-bit PPN represents physical addresses wider than XLEN.
+        assert_eq!(
+            (entry.get_ppn() as u64) << 12,
+            ((1u64 << PPN_BITS) - 1) << 12
+        );
+    }
+
+    #[test_case]
+    fn test_map_memory_area_uses_native_huge_page() {
         let asid = alloc_virtual_address_space();
         let mut root =
             crate::arch::vm::get_root_pagetable(asid).expect("root page table not found");
@@ -733,8 +742,8 @@ mod tests {
             crate::arch::vm::get_root_pagetable(asid).expect("root page table not found");
         let huge_page_size = page_size_for_level(1);
         let map_size = huge_page_size + PAGE_SIZE;
-        let vaddr = 0x4020_0000;
-        let paddr = 0x8020_0000;
+        let vaddr = 0x4000_0000 + huge_page_size;
+        let paddr = 0x8000_0000 + huge_page_size;
         let mmap = VirtualMemoryMap::new(
             MemoryArea::new(paddr, paddr + map_size - 1),
             MemoryArea::new(vaddr, vaddr + map_size - 1),

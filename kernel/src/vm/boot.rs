@@ -43,18 +43,15 @@ fn boot_walk(
     vaddr: usize,
     alloc: bool,
 ) -> Option<&'static mut ArchPageTableEntry> {
-    let canonical_check = (vaddr >> 47) & 1;
-    let upper_bits = (vaddr >> 48) & 0xffff;
-    if canonical_check == 1 && upper_bits != 0xffff {
-        return None;
-    } else if canonical_check == 0 && upper_bits != 0 {
+    use crate::arch::vm::mmu::{INDEX_BITS, MAX_PAGING_LEVEL, TABLE_ENTRIES, is_canonical};
+    if !is_canonical(vaddr) {
         return None;
     }
 
     let mut pagetable = root;
     unsafe {
-        for level in (1..=3).rev() {
-            let vpn = (vaddr >> (12 + 9 * level)) & 0x1ff;
+        for level in (1..=MAX_PAGING_LEVEL).rev() {
+            let vpn = (vaddr >> (12 + INDEX_BITS * level)) & (TABLE_ENTRIES - 1);
             let pte = &mut (*pagetable).entries[vpn];
 
             if pte.is_valid() {
@@ -74,7 +71,7 @@ fn boot_walk(
             }
         }
 
-        let vpn = (vaddr >> 12) & 0x1ff;
+        let vpn = (vaddr >> 12) & (TABLE_ENTRIES - 1);
         Some(&mut (*pagetable).entries[vpn])
     }
 }
