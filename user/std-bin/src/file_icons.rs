@@ -116,8 +116,7 @@ fn theme_root() -> PathBuf {
         return installed.to_owned();
     }
 
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../bundles/desktop/fs/share/icons/default")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../bundles/desktop/fs/share/icons/default")
 }
 
 fn load_asset(relative: &str) -> Option<Arc<VectorImageData>> {
