@@ -35,6 +35,49 @@ impl MockBlockDevice {
             request_queue: IrqSpinLock::new(Vec::new()),
         }
     }
+
+    fn process_request(&self, request: &mut BlockIORequest) -> Result<(), &'static str> {
+        if request.sector_count == 0 {
+            if request.request_type == BlockIORequestType::Read {
+                request.buffer.clear();
+            }
+            return Ok(());
+        }
+
+        let end = request
+            .sector
+            .checked_add(request.sector_count)
+            .ok_or("Invalid sector range")?;
+        let mut data = self.data.lock();
+        let sectors = data
+            .get_mut(request.sector..end)
+            .ok_or("Invalid sector range")?;
+
+        match request.request_type {
+            BlockIORequestType::Read => {
+                request.buffer.clear();
+                for sector in sectors {
+                    request.buffer.extend_from_slice(sector);
+                }
+            }
+            BlockIORequestType::Write => {
+                // Validate the entire transfer before modifying any sectors.
+                let byte_count: usize = sectors.iter().map(Vec::len).sum();
+                if request.buffer.len() < byte_count {
+                    return Err("Buffer too small");
+                }
+
+                let mut buffer = request.buffer.as_slice();
+                for sector in sectors {
+                    let (bytes, rest) = buffer.split_at(sector.len());
+                    sector.copy_from_slice(bytes);
+                    buffer = rest;
+                }
+            }
+        }
+
+        Ok(())
+    }
 }
 
 impl Device for MockBlockDevice {
@@ -105,36 +148,7 @@ impl BlockDevice for MockBlockDevice {
         let mut results = Vec::with_capacity(requests.len());
         // Process all requests without holding the request_queue lock
         for mut request in requests {
-            let result = match request.request_type {
-                BlockIORequestType::Read => {
-                    let sector = request.sector;
-                    // Acquire data lock only for this operation
-                    let data = self.data.lock();
-                    if sector < data.len() {
-                        request.buffer = data[sector].clone();
-                        Ok(())
-                    } else {
-                        Err("Invalid sector")
-                    }
-                    // data lock is automatically released here
-                }
-                BlockIORequestType::Write => {
-                    let sector = request.sector;
-                    // Acquire data lock only for this operation
-                    let mut data = self.data.lock();
-                    if sector < data.len() {
-                        let buffer_len = request.buffer.len();
-                        let sector_len = data[sector].len();
-                        let len = buffer_len.min(sector_len);
-
-                        data[sector][..len].copy_from_slice(&request.buffer[..len]);
-                        Ok(())
-                    } else {
-                        Err("Invalid sector")
-                    }
-                    // data lock is automatically released here
-                }
-            };
+            let result = self.process_request(&mut request);
 
             results.push(BlockIOResult { request, result });
         }
@@ -181,5 +195,127 @@ impl Selectable for MockBlockDevice {
         _min_wait_ticks: u64,
     ) -> crate::object::capability::selectable::SelectWaitOutcome {
         crate::object::capability::selectable::SelectWaitOutcome::Ready
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn request(
+        request_type: BlockIORequestType,
+        sector: usize,
+        sector_count: usize,
+        buffer: Vec<u8>,
+    ) -> Box<BlockIORequest> {
+        Box::new(BlockIORequest {
+            request_type,
+            sector,
+            sector_count,
+            head: 0,
+            cylinder: 0,
+            buffer,
+        })
+    }
+
+    #[test_case]
+    fn test_multi_sector_read() {
+        let device = MockBlockDevice::new("mock_read", 512, 4);
+        for sector in 0..4 {
+            device.enqueue_request(request(
+                BlockIORequestType::Write,
+                sector,
+                1,
+                vec![sector as u8; 512],
+            ));
+        }
+        let writes = device.process_requests();
+        assert_eq!(writes.len(), 4);
+        assert!(writes.iter().all(|result| result.result.is_ok()));
+
+        // Include a read ending exactly at the device boundary.
+        for start in [1, 2] {
+            let reads = device.submit_requests(vec![request(
+                BlockIORequestType::Read,
+                start,
+                2,
+                vec![0; 1024],
+            )]);
+            assert_eq!(reads.len(), 1);
+            assert_eq!(reads[0].result, Ok(()));
+            assert_eq!(reads[0].request.buffer.len(), 1024);
+            assert_eq!(&reads[0].request.buffer[..512], &vec![start as u8; 512]);
+            assert_eq!(
+                &reads[0].request.buffer[512..],
+                &vec![(start + 1) as u8; 512]
+            );
+        }
+    }
+
+    #[test_case]
+    fn test_multi_sector_write() {
+        let device = MockBlockDevice::new("mock_write", 512, 4);
+        let mut buffer = vec![0xab; 512];
+        buffer.extend_from_slice(&[0xcd; 512]);
+        device.enqueue_request(request(BlockIORequestType::Write, 1, 2, buffer));
+        let writes = device.process_requests();
+        assert_eq!(writes.len(), 1);
+        assert_eq!(writes[0].result, Ok(()));
+
+        // Read each sector separately so a broken read cannot mask a broken write.
+        for (sector, byte) in [0, 0xab, 0xcd, 0].into_iter().enumerate() {
+            let reads = device.submit_requests(vec![request(
+                BlockIORequestType::Read,
+                sector,
+                1,
+                vec![0; 512],
+            )]);
+            assert_eq!(reads[0].result, Ok(()));
+            assert_eq!(reads[0].request.buffer, vec![byte; 512]);
+        }
+    }
+
+    #[test_case]
+    fn test_invalid_requests_leave_data_unchanged() {
+        let device = MockBlockDevice::new("mock_bounds", 512, 4);
+        for request_type in [BlockIORequestType::Read, BlockIORequestType::Write] {
+            for (sector, count) in [(4, 1), (3, 2), (usize::MAX, 2), (1, usize::MAX)] {
+                let results = device.submit_requests(vec![request(
+                    request_type,
+                    sector,
+                    count,
+                    vec![0xff; 1024],
+                )]);
+                assert!(results[0].result.is_err());
+            }
+        }
+
+        for len in [0, 512, 1023] {
+            let results = device.submit_requests(vec![request(
+                BlockIORequestType::Write,
+                1,
+                2,
+                vec![0xff; len],
+            )]);
+            assert!(results[0].result.is_err());
+        }
+
+        let reads =
+            device.submit_requests(vec![request(BlockIORequestType::Read, 0, 4, vec![0; 2048])]);
+        assert_eq!(reads[0].result, Ok(()));
+        assert_eq!(reads[0].request.buffer, vec![0; 2048]);
+    }
+
+    #[test_case]
+    fn test_zero_sector_requests_are_noops() {
+        let device = MockBlockDevice::new("mock_empty", 512, 0);
+        for request_type in [BlockIORequestType::Read, BlockIORequestType::Write] {
+            let results =
+                device.submit_requests(vec![request(request_type, usize::MAX, 0, vec![0xff; 512])]);
+            assert_eq!(results[0].result, Ok(()));
+            if request_type == BlockIORequestType::Read {
+                assert!(results[0].request.buffer.is_empty());
+            }
+        }
     }
 }

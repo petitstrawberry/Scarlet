@@ -1419,6 +1419,10 @@ impl MemoryMappingOps for Ext2DirectoryObject {
     ) -> Result<crate::object::capability::MemoryMappingInfo, &'static str> {
         Err("Memory mapping not supported for directories")
     }
+
+    fn supports_mmap(&self) -> bool {
+        false
+    }
 }
 
 impl FileObject for Ext2DirectoryObject {
