@@ -20,13 +20,11 @@
 //! itself is unnecessary. Reentrancy via interrupt is gated by IRQ state,
 //! not by the count value.
 
-#[cfg(feature = "sync-debug")]
-use crate::sync::atomic::{AtomicU64, try_load_u64};
 use core::marker::PhantomData;
 #[cfg(feature = "sync-debug")]
 use core::panic::Location;
 #[cfg(feature = "sync-debug")]
-use core::sync::atomic::{AtomicPtr, AtomicU8, AtomicUsize};
+use core::sync::atomic::{AtomicPtr, AtomicU8, AtomicU64, AtomicUsize};
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use crate::arch::try_get_cpuid;
@@ -260,7 +258,7 @@ fn snapshot_debug_slot(cpu: usize, slot_index: usize) -> Option<PreemptDebugSnap
         lock_address: slot.lock_address.load(Ordering::Relaxed),
         task_id: slot.task_id.load(Ordering::Relaxed),
         spin_iterations: slot.spin_iterations.load(Ordering::Relaxed) as u64,
-        acquired_at_ns: try_load_u64(&slot.acquired_at_ns, Ordering::Relaxed)?,
+        acquired_at_ns: slot.acquired_at_ns.load(Ordering::Relaxed),
         acquisition_pc: slot.acquisition_pc.load(Ordering::Relaxed),
         acquisition_lr: slot.acquisition_lr.load(Ordering::Relaxed),
         location: slot.location.load(Ordering::Relaxed),

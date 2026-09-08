@@ -1,19 +1,16 @@
-//! Per-CPU bounded breadcrumb diagnostics for SMP hang localization.
+//! Per-CPU lock-free breadcrumb diagnostics for SMP hang localization.
 //!
 //! When a CPU hangs with FIQ masked it cannot print. Each CPU therefore records
-//! its last execution phase in shared scalar storage. Surviving CPUs periodically
+//! its last execution phase in a lock-free atomic. Surviving CPUs periodically
 //! sample a stopped CPU's latest breadcrumb from a timer heartbeat, revealing
 //! where that CPU stopped and whether the state is still changing.
 //!
 //! Each record is enclosed by an odd/even sequence generation. Readers accept
 //! the phase and context fields only when the generation remains unchanged and
-//! even. Readers never wait for a writer. On targets without 64-bit atomics,
-//! payload writes use short raw IRQ-masked critical sections; readers report
-//! an in-progress publication if a payload is busy. No path formats or enters
-//! the instrumented kernel locks.
+//! even. The path uses no locks or formatting, so it remains safe from FIQ
+//! handlers and trap-vector prologues reached after `daifset`.
 
-use crate::sync::atomic::{AtomicU64, try_compare_exchange_u64, try_load_u64};
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::arch::get_cpu;
 use crate::environment::MAX_NUM_CPUS;
@@ -213,9 +210,9 @@ impl BreadcrumbSlot {
     fn snapshot(&self) -> BreadcrumbSnapshot {
         self.snapshot_with_probe(|| {})
             .unwrap_or_else(|| BreadcrumbSnapshot {
-                sequence: try_load_u64(&self.sequence, Ordering::SeqCst).unwrap_or(u64::MAX),
+                sequence: self.sequence.load(Ordering::SeqCst),
                 phase: PUBLICATION_IN_PROGRESS,
-                aux: try_load_u64(&self.sequence, Ordering::SeqCst).unwrap_or(u64::MAX),
+                aux: self.sequence.load(Ordering::SeqCst),
                 aux2: 0,
             })
     }
@@ -223,16 +220,16 @@ impl BreadcrumbSlot {
     #[inline(always)]
     fn snapshot_with_probe(&self, mut after_aux: impl FnMut()) -> Option<BreadcrumbSnapshot> {
         for _ in 0..SNAPSHOT_RETRY_LIMIT {
-            let sequence_before = try_load_u64(&self.sequence, Ordering::SeqCst)?;
+            let sequence_before = self.sequence.load(Ordering::SeqCst);
             if sequence_before & 1 != 0 {
                 continue;
             }
 
-            let phase = try_load_u64(&self.phase, Ordering::SeqCst)?;
-            let aux = try_load_u64(&self.aux, Ordering::SeqCst)?;
+            let phase = self.phase.load(Ordering::SeqCst);
+            let aux = self.aux.load(Ordering::SeqCst);
             after_aux();
-            let aux2 = try_load_u64(&self.aux2, Ordering::SeqCst)?;
-            let sequence_after = try_load_u64(&self.sequence, Ordering::SeqCst)?;
+            let aux2 = self.aux2.load(Ordering::SeqCst);
+            let sequence_after = self.sequence.load(Ordering::SeqCst);
             if sequence_before == sequence_after {
                 return Some(BreadcrumbSnapshot {
                     sequence: sequence_after,
@@ -250,7 +247,7 @@ impl BreadcrumbSlot {
 static BREADCRUMBS: [BreadcrumbSlot; MAX_NUM_CPUS] =
     [const { BreadcrumbSlot::new() }; MAX_NUM_CPUS];
 
-/// Non-waiting breadcrumb state sampled from one CPU.
+/// Lock-free breadcrumb state sampled from one CPU.
 #[derive(Clone, Copy, Debug)]
 pub struct BreadcrumbSnapshot {
     /// Even commit sequence for this record; changes on every publication.
@@ -263,7 +260,7 @@ pub struct BreadcrumbSnapshot {
     pub aux2: u64,
 }
 
-/// Return a non-waiting snapshot of a CPU's last breadcrumb.
+/// Return a lock-free snapshot of a CPU's last breadcrumb.
 ///
 /// # Arguments
 ///
@@ -294,7 +291,7 @@ pub fn snapshot(cpu_id: usize) -> Option<BreadcrumbSnapshot> {
 /// # Arguments
 ///
 /// * `observer_cpu` - CPU collecting the diagnostic sample.
-/// * `timer_irq_count` - Non-waiting local timer IRQ counter accessor.
+/// * `timer_irq_count` - Lock-free local timer IRQ counter accessor.
 /// * `now_ns` - Observer's monotonic timestamp used for report rate limiting.
 ///
 /// This diagnostic boundary keeps the timer core independent from scheduler
@@ -351,23 +348,19 @@ pub fn sample_timer_stalls(
             || (stale_samples > STALL_REPORT_AFTER_SAMPLES
                 && (stale_samples - STALL_REPORT_AFTER_SAMPLES) % STALL_REPEAT_SAMPLES == 0);
         let report_slot = &STALL_LAST_REPORT_NS[target_cpu];
-        let Some(last_report_ns) = try_load_u64(report_slot, Ordering::Relaxed) else {
-            continue;
-        };
+        let last_report_ns = report_slot.load(Ordering::Relaxed);
         let rate_limited = last_report_ns != 0
             && now_ns.saturating_sub(last_report_ns) < STALL_REPORT_RATE_LIMIT_NS;
         if should_report
             && !rate_limited
-            && matches!(
-                try_compare_exchange_u64(
-                    report_slot,
+            && report_slot
+                .compare_exchange(
                     last_report_ns,
                     now_ns.max(1),
                     Ordering::AcqRel,
                     Ordering::Relaxed,
-                ),
-                Some(Ok(_))
-            )
+                )
+                .is_ok()
         {
             let timer = crate::timer::timer_diagnostic_snapshot(target_cpu).unwrap_or_default();
             let slice =

@@ -886,8 +886,7 @@ impl Clk for ClkMux {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sync::atomic::AtomicU64;
-    use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
     struct TestClk {
         name: &'static str,

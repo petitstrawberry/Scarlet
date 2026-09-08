@@ -31,8 +31,9 @@
 
 extern crate alloc;
 
-use crate::sync::atomic::{AtomicU64, try_load_u64};
-use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU8, AtomicU32, AtomicUsize, Ordering};
+use core::sync::atomic::{
+    AtomicBool, AtomicPtr, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering,
+};
 
 use alloc::{
     collections::{BTreeMap, BTreeSet, vec_deque::VecDeque},
@@ -393,31 +394,30 @@ impl SliceDiagnosticSlot {
 
     #[inline(always)]
     fn snapshot(&self) -> SliceDiagnosticSnapshot {
-        (0..4)
-            .find_map(|_| self.try_snapshot())
-            .unwrap_or_else(|| SliceDiagnosticSnapshot::default())
-    }
-
-    fn try_snapshot(&self) -> Option<SliceDiagnosticSnapshot> {
-        let sequence_before = try_load_u64(&self.sequence, Ordering::SeqCst)?;
-        if sequence_before & 1 != 0 {
-            return None;
+        for _ in 0..4 {
+            let sequence_before = self.sequence.load(Ordering::SeqCst);
+            if sequence_before & 1 != 0 {
+                continue;
+            }
+            let snapshot = SliceDiagnosticSnapshot {
+                action: self.action.load(Ordering::SeqCst),
+                task_id: self.task_id.load(Ordering::SeqCst),
+                token: self.token.load(Ordering::SeqCst),
+                handle_id: self.handle_id.load(Ordering::SeqCst),
+                generation: self.generation.load(Ordering::SeqCst),
+                duration_ns: self.duration_ns.load(Ordering::SeqCst),
+                timer_deadline_ns: self.timer_deadline_ns.load(Ordering::SeqCst),
+                fair_vruntime_ns: self.fair_vruntime_ns.load(Ordering::SeqCst),
+                fair_vdeadline_ns: self.fair_vdeadline_ns.load(Ordering::SeqCst),
+                deadline_remaining_ns: self.deadline_remaining_ns.load(Ordering::SeqCst),
+                deadline_absolute_ns: self.deadline_absolute_ns.load(Ordering::SeqCst),
+                flags: self.flags.load(Ordering::SeqCst),
+            };
+            if sequence_before == self.sequence.load(Ordering::SeqCst) {
+                return snapshot;
+            }
         }
-        let snapshot = SliceDiagnosticSnapshot {
-            action: try_load_u64(&self.action, Ordering::SeqCst)?,
-            task_id: try_load_u64(&self.task_id, Ordering::SeqCst)?,
-            token: try_load_u64(&self.token, Ordering::SeqCst)?,
-            handle_id: try_load_u64(&self.handle_id, Ordering::SeqCst)?,
-            generation: try_load_u64(&self.generation, Ordering::SeqCst)?,
-            duration_ns: try_load_u64(&self.duration_ns, Ordering::SeqCst)?,
-            timer_deadline_ns: try_load_u64(&self.timer_deadline_ns, Ordering::SeqCst)?,
-            fair_vruntime_ns: try_load_u64(&self.fair_vruntime_ns, Ordering::SeqCst)?,
-            fair_vdeadline_ns: try_load_u64(&self.fair_vdeadline_ns, Ordering::SeqCst)?,
-            deadline_remaining_ns: try_load_u64(&self.deadline_remaining_ns, Ordering::SeqCst)?,
-            deadline_absolute_ns: try_load_u64(&self.deadline_absolute_ns, Ordering::SeqCst)?,
-            flags: try_load_u64(&self.flags, Ordering::SeqCst)?,
-        };
-        (sequence_before == try_load_u64(&self.sequence, Ordering::SeqCst)?).then_some(snapshot)
+        SliceDiagnosticSnapshot::default()
     }
 }
 
@@ -519,7 +519,7 @@ fn should_log_deadline_slice_anomaly(cpu_id: usize, now_ns: u64) -> bool {
     }
 }
 
-/// Sample the last scheduler-slice operation for one CPU without waiting.
+/// Return the last lock-free scheduler-slice operation for one CPU.
 ///
 /// # Arguments
 ///
@@ -1769,7 +1769,7 @@ fn release_deferred_prev(cpu_id: usize) {
         prev_id as u64,
         cpu_id as u64,
     );
-    // The breadcrumb above retains release diagnostics without
+    // The lock-free breadcrumb above retains release diagnostics without
     // serializing every traced task switch through the early-console lock.
     // if is_fork_trace_task(prev_id) {
     //     crate::println!(

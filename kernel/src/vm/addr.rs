@@ -6,9 +6,8 @@
 //! checks sparse regions. Neither check establishes ownership, access permissions,
 //! or the safety of dereferencing the returned integer address.
 
-use core::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
 
-use crate::sync::atomic::AtomicU64;
 use crate::sync::{IrqSpinLock, IrqSpinLockGuard, Once};
 
 use crate::vm::direct_map::DirectMapRegions;

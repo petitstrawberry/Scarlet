@@ -6,7 +6,6 @@
 //! - FileSystemOperations: Driver API for filesystem operations
 
 use crate::sync::IrqRwSpinLock;
-use crate::sync::atomic::AtomicU64;
 use alloc::{
     collections::BTreeMap,
     string::{String, ToString},
@@ -14,7 +13,7 @@ use alloc::{
     vec::Vec,
 };
 use core::fmt;
-use core::sync::atomic::Ordering;
+use core::sync::atomic::{AtomicU64, Ordering};
 use core::{any::Any, fmt::Debug};
 
 use super::mount_tree::MountPoint;

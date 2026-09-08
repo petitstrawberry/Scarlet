@@ -20,7 +20,6 @@ use core::{cell::UnsafeCell, marker::PhantomData, ops::Deref, ptr::NonNull, sync
 use crate::abi::{AbiModule, EventProcessOutcome, scarlet::ScarletAbi};
 use crate::device::char::tty::TtyDevice;
 use crate::sync::Once;
-use crate::sync::atomic::AtomicU64;
 use crate::sync::waker::Waker;
 use crate::{
     arch::{
@@ -55,7 +54,9 @@ use crate::{
 };
 use alloc::collections::BTreeMap;
 use core::ops::Range;
-use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32, AtomicUsize, Ordering};
+use core::sync::atomic::{
+    AtomicBool, AtomicI32, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering,
+};
 
 pub(crate) const INIT_TASK_ID: usize = 1;
 const LOG_EXIT_GROUP_SIBLINGS: bool = false;

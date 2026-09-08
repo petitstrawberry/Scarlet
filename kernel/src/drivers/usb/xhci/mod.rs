@@ -54,7 +54,6 @@ use crate::interrupt::{
 };
 use crate::mem::page::ContiguousPages;
 use crate::object::capability::{ControlOps, MemoryMappingInfo, MemoryMappingOps, Selectable};
-use crate::sync::atomic::AtomicU64;
 use crate::sync::{IrqSpinLock, Mutex, Once};
 use crate::timer::get_time_ns;
 use crate::vm;
@@ -67,7 +66,7 @@ use alloc::vec::Vec;
 use core::any::Any;
 use core::mem::size_of;
 use core::ptr::{read_unaligned, read_volatile, write_volatile};
-use core::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering, fence};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering, fence};
 
 const COMMAND_RING_TRBS: usize = 256;
 const EVENT_RING_TRBS: usize = 256;

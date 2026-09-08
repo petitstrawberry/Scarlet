@@ -21,7 +21,6 @@
 //! - `Ext2Driver`: Filesystem driver for registration
 //! - Data structures for ext2 format (superblock, inode, directory entries, etc.)
 
-use crate::sync::atomic::AtomicU64;
 use crate::sync::{IrqRwSpinLock, IrqSpinLock};
 use alloc::{
     boxed::Box,
@@ -32,7 +31,7 @@ use alloc::{
     vec,
     vec::Vec,
 };
-use core::sync::atomic::Ordering;
+use core::sync::atomic::{AtomicU64, Ordering};
 use core::{any::Any, mem};
 use hashbrown::HashMap;
 
