@@ -5,7 +5,7 @@ The reference projects boot through UEFI and Limine on RISC-V 64 and AArch64.
 `cargo-scarlet-plugin-limine` packages the UEFI loader, kernel, configuration,
 and boot inputs. The project runner owns QEMU and firmware configuration.
 
-This describes the checked-in manifests on 2026-09-06, not every external BSP.
+This describes the checked-in reference manifests, not every external BSP.
 See the [build-system guide](../build-system/README.md) for composition rules.
 
 ## Reference image layouts
@@ -14,7 +14,7 @@ All paths below are relative to the selected project's `.scarlet/images/`.
 
 | Project | Boot payload | Root filesystem and final disk |
 | --- | --- | --- |
-| [RISC-V full](../../projects/riscv64-limine-full/scarlet.toml) | `limine-riscv64-full.img`, a `limine-uefi` FAT image | Separate `rootfs-riscv64-full.ext2` |
+| [RISC-V full](../../projects/riscv64-limine-full/scarlet.toml) | `esp-riscv64-full.img`, a `limine-uefi` FAT image | `gpt` disk `limine-riscv64-full.img` combines the boot payload and `rootfs-riscv64-full.ext2` |
 | [AArch64 full](../../projects/aarch64-limine-full/scarlet.toml) | `esp-aarch64-full.img`, a `limine-uefi` FAT image | `gpt` disk `limine-aarch64-full.img` combines the boot payload and `rootfs-aarch64-full.ext2` |
 | [AArch64 microvm](../../projects/aarch64-limine-microvm/scarlet.toml) | `limine-aarch64-microvm.img`, a `limine-uefi` FAT image | Separate `rootfs-aarch64-microvm.ext2` |
 
@@ -22,7 +22,7 @@ There are no separate tracked `*-limine-desktop` projects. Full images select
 their desktop content through bundles. A FAT boot payload and a final GPT
 disk are different artifacts; do not substitute one for the other in a runner.
 
-The AArch64 full project explicitly declares this dependency order:
+Both full projects explicitly declare this dependency order:
 
 ```text
 initramfs (newc) ──> boot (Limine FAT / ESP) ──┐
@@ -90,8 +90,7 @@ the literal final FAT filename.
 The manifest's `[images.boot].cmdline` supplies the kernel command line.
 It is project policy, not a universal SDK default:
 
-- RISC-V full: `console=ttyS0 root=/dev/vblk1`.
-- AArch64 full: `console=ttyS0 root=/dev/vblk0p2 rootfstype=ext2`.
+- RISC-V full and AArch64 full: `console=ttyS0 root=/dev/vblk0p2 rootfstype=ext2`.
 - AArch64 microvm: `console=ttyAMA0`.
 
 The normal [init](../../user/bin/src/init.rs) interprets the root-device

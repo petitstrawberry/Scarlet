@@ -178,8 +178,8 @@ cycles and unknown dependency names are errors.
 | `limine-uefi` | Invoke the matching Limine image plugin |
 
 Full boot/rootfs recipes are in the reference manifests, not an implicit global
-SDK image. In particular, AArch64 full composes a FAT ESP and ext2 rootfs into
-one GPT disk; RISC-V full uses separate boot/rootfs images. See
+SDK image. Both RISC-V full and AArch64 full compose a FAT ESP and ext2 rootfs
+into one GPT disk. See
 [Limine boot](../boot/limine.md).
 
 Layers are applied in declaration order. Local paths are relative to the file
