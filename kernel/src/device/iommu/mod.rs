@@ -11,14 +11,7 @@ use core::ops::{BitOr, BitOrAssign};
 
 use crate::sync::IrqSpinLock;
 
-/// Physical address type used by DMA mappings.
-pub type PhysAddr = u64;
-
-/// I/O virtual address type used by IOMMU domains.
-pub type Iova = u64;
-
-/// DMA address returned to device drivers.
-pub type DmaAddr = u64;
+pub use crate::mem::address::{DmaAddr, Iova, PhysAddr};
 
 /// IOMMU operation errors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -384,6 +377,12 @@ struct DmaIovaRange {
     len: u64,
 }
 
+impl DmaIovaRange {
+    fn last_address(self) -> Option<Iova> {
+        self.start.checked_add(self.len.checked_sub(1)?)
+    }
+}
+
 struct DmaIovaAllocator {
     free: Vec<DmaIovaRange>,
 }
@@ -405,10 +404,15 @@ impl DmaIovaAllocator {
 
         for index in 0..self.free.len() {
             let range = self.free[index];
-            let Some(start) = align_up_u64(range.start, align) else {
+            if range.last_address().is_none() {
+                continue;
+            }
+            let Some(start) = align_up_u64(range.start.as_u64(), align).map(Iova::new) else {
                 continue;
             };
-            let padding = start - range.start;
+            let padding = start
+                .checked_offset_from(range.start)
+                .expect("aligned IOVA precedes free range");
             if padding > range.len {
                 continue;
             }
@@ -418,7 +422,6 @@ impl DmaIovaAllocator {
             }
 
             let before = padding;
-            let after_start = start.checked_add(len).ok_or(IommuError::OutOfIova)?;
             let after_len = available - len;
             match (before, after_len) {
                 (0, 0) => {
@@ -426,7 +429,7 @@ impl DmaIovaAllocator {
                 }
                 (0, _) => {
                     self.free[index] = DmaIovaRange {
-                        start: after_start,
+                        start: start.checked_add(len).expect("validated IOVA tail"),
                         len: after_len,
                     };
                 }
@@ -438,7 +441,7 @@ impl DmaIovaAllocator {
                     self.free.insert(
                         index + 1,
                         DmaIovaRange {
-                            start: after_start,
+                            start: start.checked_add(len).expect("validated IOVA tail"),
                             len: after_len,
                         },
                     );
@@ -461,10 +464,14 @@ impl DmaIovaAllocator {
         let mut merged: Vec<DmaIovaRange> = Vec::new();
         for range in self.free.drain(..) {
             if let Some(last) = merged.last_mut() {
-                let last_end = last.start.saturating_add(last.len);
-                if range.start <= last_end {
-                    let range_end = range.start.saturating_add(range.len);
-                    last.len = range_end.max(last_end).saturating_sub(last.start);
+                let last_end = last.last_address().expect("valid free IOVA range");
+                if range.start <= last_end || last_end.checked_add(1) == Some(range.start) {
+                    let range_end = range.last_address().expect("valid returned IOVA range");
+                    last.len = range_end
+                        .max(last_end)
+                        .checked_offset_from(last.start)
+                        .and_then(|offset| offset.checked_add(1))
+                        .expect("merged free range fits its IOVA aperture");
                     continue;
                 }
             }
@@ -506,14 +513,15 @@ impl DmaContext {
         additional_iommus: Vec<IommuAttachment>,
         config: IommuDomainConfig,
     ) -> Self {
-        let iova_allocator = if iommu.is_some() && config.iova_base != 0 && config.iova_size != 0 {
-            Some(Arc::new(IrqSpinLock::new(DmaIovaAllocator::new(
-                config.iova_base,
-                config.iova_size,
-            ))))
-        } else {
-            None
-        };
+        let iova_allocator =
+            if iommu.is_some() && !config.iova_base.is_zero() && config.iova_size != 0 {
+                Some(Arc::new(IrqSpinLock::new(DmaIovaAllocator::new(
+                    config.iova_base,
+                    config.iova_size,
+                ))))
+            } else {
+                None
+            };
         Self {
             iommu,
             additional_iommus,
@@ -549,8 +557,15 @@ impl DmaContext {
         len: usize,
         flags: IommuMapFlags,
     ) -> Result<(DmaAddr, usize), IommuError> {
+        let last_offset = len.checked_sub(1).ok_or(IommuError::MapFailed)? as u64;
+        paddr
+            .checked_add(last_offset)
+            .ok_or(IommuError::MapFailed)?;
         if let Some(attachment) = &self.iommu {
             let mapped_len = self.mapped_len(len)?;
+            paddr
+                .checked_add(mapped_len as u64 - 1)
+                .ok_or(IommuError::MapFailed)?;
             let iova = self.alloc_iova(paddr, mapped_len)?;
             if let Err(error) = attachment.domain.map(iova, paddr, mapped_len, flags) {
                 self.free_iova(iova, mapped_len);
@@ -568,14 +583,18 @@ impl DmaContext {
                 }
                 mapped_additionals += 1;
             }
-            Ok((iova, mapped_len))
+            Ok((DmaAddr::new(iova.as_u64()), mapped_len))
         } else {
-            Ok((
+            let dma_addr = DmaAddr::new(
                 paddr
+                    .as_u64()
                     .checked_add_signed(self.direct_dma_offset)
                     .ok_or(IommuError::MapFailed)?,
-                len,
-            ))
+            );
+            dma_addr
+                .checked_add(last_offset)
+                .ok_or(IommuError::MapFailed)?;
+            Ok((dma_addr, len))
         }
     }
 
@@ -681,17 +700,20 @@ impl DmaContext {
         };
         let granule = self.mapping_granule();
         let mut total_len = 0usize;
-        let mut expected_paddr = first_paddr;
+        let mut expected_paddr = Some(first_paddr);
         let mut physically_contiguous = true;
         for &(paddr, len) in segments {
-            if len == 0 || paddr % granule as u64 != 0 || len % granule != 0 {
+            if len == 0 || paddr.as_u64() % granule as u64 != 0 || len % granule != 0 {
                 return Err(IommuError::MapFailed);
             }
-            if paddr != expected_paddr {
+            if Some(paddr) != expected_paddr {
                 physically_contiguous = false;
             }
             total_len = total_len.checked_add(len).ok_or(IommuError::MapFailed)?;
-            expected_paddr = paddr.checked_add(len as u64).ok_or(IommuError::MapFailed)?;
+            let last = paddr
+                .checked_add(len as u64 - 1)
+                .ok_or(IommuError::MapFailed)?;
+            expected_paddr = last.checked_add(1);
         }
 
         if self.iova_allocator.is_none() {
@@ -707,7 +729,13 @@ impl DmaContext {
         let map_segments = |target: &IommuAttachment| -> Result<(), IommuError> {
             let mut offset = 0usize;
             for &(paddr, len) in segments {
-                if let Err(error) = target.domain.map(iova + offset as u64, paddr, len, flags) {
+                if let Err(error) = target.domain.map(
+                    iova.checked_add(offset as u64)
+                        .expect("allocated IOVA range contains every segment"),
+                    paddr,
+                    len,
+                    flags,
+                ) {
                     if offset != 0 {
                         let _ = target.domain.unmap(iova, offset);
                     }
@@ -735,7 +763,11 @@ impl DmaContext {
             mapped_additionals += 1;
         }
 
-        Ok(DmaMapping::new(self.clone(), iova, total_len))
+        Ok(DmaMapping::new(
+            self.clone(),
+            DmaAddr::new(iova.as_u64()),
+            total_len,
+        ))
     }
 
     /// Map physical memory at a caller-selected device address.
@@ -761,31 +793,42 @@ impl DmaContext {
         len: usize,
         flags: IommuMapFlags,
     ) -> Result<DmaMapping, IommuError> {
-        if len == 0 {
-            return Err(IommuError::MapFailed);
-        }
+        let last_offset = len.checked_sub(1).ok_or(IommuError::MapFailed)? as u64;
+        paddr
+            .checked_add(last_offset)
+            .ok_or(IommuError::MapFailed)?;
+        dma_addr
+            .checked_add(last_offset)
+            .ok_or(IommuError::MapFailed)?;
         if self.iova_allocator.is_some() {
             return Err(IommuError::Busy);
         }
 
         if let Some(attachment) = &self.iommu {
-            attachment.domain.map(dma_addr, paddr, len, flags)?;
+            attachment
+                .domain
+                .map(Iova::new(dma_addr.as_u64()), paddr, len, flags)?;
             let mut mapped_additionals = 0usize;
             for additional in &self.additional_iommus {
-                if let Err(error) = additional.domain.map(dma_addr, paddr, len, flags) {
+                if let Err(error) =
+                    additional
+                        .domain
+                        .map(Iova::new(dma_addr.as_u64()), paddr, len, flags)
+                {
                     for mapped in self.additional_iommus.iter().take(mapped_additionals).rev() {
-                        let _ = mapped.domain.unmap(dma_addr, len);
+                        let _ = mapped.domain.unmap(Iova::new(dma_addr.as_u64()), len);
                     }
-                    let _ = attachment.domain.unmap(dma_addr, len);
+                    let _ = attachment.domain.unmap(Iova::new(dma_addr.as_u64()), len);
                     return Err(error);
                 }
                 mapped_additionals += 1;
             }
         } else {
             let direct = paddr
+                .as_u64()
                 .checked_add_signed(self.direct_dma_offset)
                 .ok_or(IommuError::MapFailed)?;
-            if direct != dma_addr {
+            if direct != dma_addr.as_u64() {
                 return Err(IommuError::NotSupported);
             }
         }
@@ -806,11 +849,15 @@ impl DmaContext {
     pub fn unmap(&self, dma_addr: DmaAddr, len: usize) -> Result<(), IommuError> {
         if let Some(attachment) = &self.iommu {
             let mapped_len = self.mapped_len(len)?;
-            attachment.domain.unmap(dma_addr as Iova, mapped_len)?;
+            attachment
+                .domain
+                .unmap(Iova::new(dma_addr.as_u64()), mapped_len)?;
             for additional in &self.additional_iommus {
-                additional.domain.unmap(dma_addr as Iova, mapped_len)?;
+                additional
+                    .domain
+                    .unmap(Iova::new(dma_addr.as_u64()), mapped_len)?;
             }
-            self.free_iova(dma_addr as Iova, mapped_len);
+            self.free_iova(Iova::new(dma_addr.as_u64()), mapped_len);
             Ok(())
         } else {
             Ok(())
@@ -831,7 +878,7 @@ impl DmaContext {
                 .lock()
                 .alloc(len as u64, self.mapping_granule() as u64)
         } else {
-            Ok(paddr as Iova)
+            Ok(Iova::new(paddr.as_u64()))
         }
     }
 
@@ -990,7 +1037,7 @@ mod tests {
     fn identity_iova_config() -> IommuDomainConfig {
         IommuDomainConfig {
             domain_type: IommuDomainType::Dma,
-            iova_base: 0,
+            iova_base: Iova::new(0),
             iova_size: 0,
         }
     }
@@ -998,7 +1045,7 @@ mod tests {
     fn allocated_iova_config() -> IommuDomainConfig {
         IommuDomainConfig {
             domain_type: IommuDomainType::Dma,
-            iova_base: 0x4000_0000,
+            iova_base: Iova::new(0x4000_0000),
             iova_size: 0x1_0000,
         }
     }
@@ -1030,13 +1077,61 @@ mod tests {
     }
 
     #[test_case]
+    fn direct_dma_preserves_wide_addresses_and_checks_entire_ranges() {
+        let mut context = DmaContext::direct();
+        let flags = IommuMapFlags::READ;
+        let last_page = PhysAddr::new(u64::MAX - 0xfff);
+        let mapping = context
+            .map_phys_segments_owned(&[(last_page, 0x1000)], flags)
+            .unwrap();
+        assert_eq!(mapping.dma_addr(), DmaAddr::new(last_page.as_u64()));
+        context.direct_dma_offset = 0x1000;
+        assert_eq!(
+            context.map_phys(PhysAddr::new(0x1_8000_0000), 0x1000, flags),
+            Ok(DmaAddr::new(0x1_8000_1000))
+        );
+        // A representable device base is insufficient if the final byte wraps.
+        assert_eq!(
+            context.map_phys(PhysAddr::new(u64::MAX - 0x1000), 2, flags),
+            Err(IommuError::MapFailed)
+        );
+        // A negative offset must not disguise overflow in the physical range.
+        context.direct_dma_offset = -0x1000;
+        assert_eq!(
+            context.map_phys(PhysAddr::new(u64::MAX), 2, flags),
+            Err(IommuError::MapFailed)
+        );
+        assert_eq!(
+            context.map_phys(PhysAddr::new(0xfff), 1, flags),
+            Err(IommuError::MapFailed)
+        );
+        assert_eq!(
+            context.map_phys(PhysAddr::new(0x1000), 0, flags),
+            Err(IommuError::MapFailed)
+        );
+    }
+
+    #[test_case]
+    fn iova_allocator_preserves_the_last_byte_of_its_address_space() {
+        let base = Iova::new(u64::MAX - 0xfff);
+        let mut allocator = DmaIovaAllocator::new(base, 0x1000);
+        assert_eq!(allocator.alloc(0x1000, 0x1000), Ok(base));
+        assert_eq!(allocator.alloc(1, 1), Err(IommuError::OutOfIova));
+        allocator.free(base, 0x800);
+        allocator.free(base.checked_add(0x800).unwrap(), 0x800);
+        assert_eq!(allocator.alloc(0x1000, 0x1000), Ok(base));
+        let mut invalid = DmaIovaAllocator::new(base, 0x1001);
+        assert_eq!(invalid.alloc(1, 1), Err(IommuError::OutOfIova));
+    }
+
+    #[test_case]
     fn test_dma_context_direct_map_phys() {
         let context = DmaContext::direct();
         assert_eq!(
             context
-                .map_phys(0x1000, 0x100, IommuMapFlags::READ)
+                .map_phys(PhysAddr::new(0x1000), 0x100, IommuMapFlags::READ)
                 .unwrap(),
-            0x1000
+            DmaAddr::new(0x1000)
         );
     }
 
@@ -1057,14 +1152,18 @@ mod tests {
         );
 
         let dma_addr = context
-            .map_phys(0x2000, 0x200, IommuMapFlags::READ | IommuMapFlags::WRITE)
+            .map_phys(
+                PhysAddr::new(0x2000),
+                0x200,
+                IommuMapFlags::READ | IommuMapFlags::WRITE,
+            )
             .unwrap();
-        assert_eq!(dma_addr, 0x2000);
+        assert_eq!(dma_addr, DmaAddr::new(0x2000));
         assert_eq!(
             domain.last_map(),
             Some(RecordedMap {
-                iova: 0x2000,
-                paddr: 0x2000,
+                iova: Iova::new(0x2000),
+                paddr: PhysAddr::new(0x2000),
                 len: 0x200,
                 flags: IommuMapFlags::READ | IommuMapFlags::WRITE,
             })
@@ -1096,11 +1195,13 @@ mod tests {
         );
 
         let flags = IommuMapFlags::READ | IommuMapFlags::WRITE;
-        let dma_addr = context.map_phys(0x3000, 0x400, flags).unwrap();
-        assert_eq!(dma_addr, 0x3000);
+        let dma_addr = context
+            .map_phys(PhysAddr::new(0x3000), 0x400, flags)
+            .unwrap();
+        assert_eq!(dma_addr, DmaAddr::new(0x3000));
         let expected = Some(RecordedMap {
-            iova: 0x3000,
-            paddr: 0x3000,
+            iova: Iova::new(0x3000),
+            paddr: PhysAddr::new(0x3000),
             len: 0x400,
             flags,
         });
@@ -1138,7 +1239,7 @@ mod tests {
     #[test_case]
     fn test_dma_context_unmap_passthrough_when_no_iommu() {
         let context = DmaContext::direct();
-        assert_eq!(context.unmap(0x1000, 0x100), Ok(()));
+        assert_eq!(context.unmap(DmaAddr::new(0x1000), 0x100), Ok(()));
     }
 
     #[test_case]
@@ -1159,13 +1260,13 @@ mod tests {
 
         {
             let mapping = context
-                .map_phys_owned(0x4000, 0x1000, IommuMapFlags::READ)
+                .map_phys_owned(PhysAddr::new(0x4000), 0x1000, IommuMapFlags::READ)
                 .unwrap();
-            assert_eq!(mapping.dma_addr(), 0x4000);
+            assert_eq!(mapping.dma_addr(), DmaAddr::new(0x4000));
             assert_eq!(mapping.len(), 0x1000);
         }
 
-        assert_eq!(domain.last_unmap(), Some((0x4000, 0x1000)));
+        assert_eq!(domain.last_unmap(), Some((Iova::new(0x4000), 0x1000)));
         assert_eq!(domain.unmap_count(), 1);
     }
 
@@ -1186,11 +1287,11 @@ mod tests {
         );
 
         let mapping = context
-            .map_phys_owned(0x5000, 0x1000, IommuMapFlags::WRITE)
+            .map_phys_owned(PhysAddr::new(0x5000), 0x1000, IommuMapFlags::WRITE)
             .unwrap();
         mapping.unmap().unwrap();
 
-        assert_eq!(domain.last_unmap(), Some((0x5000, 0x1000)));
+        assert_eq!(domain.last_unmap(), Some((Iova::new(0x5000), 0x1000)));
         assert_eq!(domain.unmap_count(), 1);
     }
 
@@ -1213,22 +1314,28 @@ mod tests {
 
         {
             let mapping = context
-                .map_phys_segments_owned(&[(0x10_0000, 0x2000), (0x30_0000, 0x1000)], flags)
+                .map_phys_segments_owned(
+                    &[
+                        (PhysAddr::new(0x10_0000), 0x2000),
+                        (PhysAddr::new(0x30_0000), 0x1000),
+                    ],
+                    flags,
+                )
                 .unwrap();
-            assert_eq!(mapping.dma_addr(), 0x4000_0000);
+            assert_eq!(mapping.dma_addr(), DmaAddr::new(0x4000_0000));
             assert_eq!(mapping.len(), 0x3000);
             assert_eq!(
                 domain.maps(),
                 alloc::vec![
                     RecordedMap {
-                        iova: 0x4000_0000,
-                        paddr: 0x10_0000,
+                        iova: Iova::new(0x4000_0000),
+                        paddr: PhysAddr::new(0x10_0000),
                         len: 0x2000,
                         flags,
                     },
                     RecordedMap {
-                        iova: 0x4000_2000,
-                        paddr: 0x30_0000,
+                        iova: Iova::new(0x4000_2000),
+                        paddr: PhysAddr::new(0x30_0000),
                         len: 0x1000,
                         flags,
                     },
@@ -1236,7 +1343,7 @@ mod tests {
             );
         }
 
-        assert_eq!(domain.last_unmap(), Some((0x4000_0000, 0x3000)));
+        assert_eq!(domain.last_unmap(), Some((Iova::new(0x4000_0000), 0x3000)));
         assert_eq!(domain.unmap_count(), 1);
     }
 
@@ -1246,7 +1353,10 @@ mod tests {
         assert_eq!(
             context
                 .map_phys_segments_owned(
-                    &[(0x10_0000, 0x1000), (0x30_0000, 0x1000)],
+                    &[
+                        (PhysAddr::new(0x10_0000), 0x1000),
+                        (PhysAddr::new(0x30_0000), 0x1000)
+                    ],
                     IommuMapFlags::READ,
                 )
                 .err(),
@@ -1273,22 +1383,22 @@ mod tests {
 
         {
             let mapping = context
-                .map_phys_at_owned(0, 0x8f60_0000, 0x500000, flags)
+                .map_phys_at_owned(DmaAddr::new(0), PhysAddr::new(0x8f60_0000), 0x500000, flags)
                 .unwrap();
-            assert_eq!(mapping.dma_addr(), 0);
+            assert_eq!(mapping.dma_addr(), DmaAddr::new(0));
             assert_eq!(mapping.len(), 0x500000);
             assert_eq!(
                 domain.last_map(),
                 Some(RecordedMap {
-                    iova: 0,
-                    paddr: 0x8f60_0000,
+                    iova: Iova::new(0),
+                    paddr: PhysAddr::new(0x8f60_0000),
                     len: 0x500000,
                     flags,
                 })
             );
         }
 
-        assert_eq!(domain.last_unmap(), Some((0, 0x500000)));
+        assert_eq!(domain.last_unmap(), Some((Iova::new(0), 0x500000)));
         assert_eq!(domain.unmap_count(), 1);
     }
 
@@ -1310,7 +1420,12 @@ mod tests {
 
         assert_eq!(
             context
-                .map_phys_at_owned(0, 0x8f60_0000, 0x1000, IommuMapFlags::READ)
+                .map_phys_at_owned(
+                    DmaAddr::new(0),
+                    PhysAddr::new(0x8f60_0000),
+                    0x1000,
+                    IommuMapFlags::READ
+                )
                 .err(),
             Some(IommuError::Busy)
         );
@@ -1322,7 +1437,12 @@ mod tests {
         let context = DmaContext::direct();
         assert_eq!(
             context
-                .map_phys_at_owned(0, 0x8f60_0000, 0x1000, IommuMapFlags::READ)
+                .map_phys_at_owned(
+                    DmaAddr::new(0),
+                    PhysAddr::new(0x8f60_0000),
+                    0x1000,
+                    IommuMapFlags::READ
+                )
                 .err(),
             Some(IommuError::NotSupported)
         );
@@ -1345,25 +1465,25 @@ mod tests {
         );
 
         let dma_addr = context
-            .map_phys(0x8_0000_0000, 0x2000, IommuMapFlags::READ)
+            .map_phys(PhysAddr::new(0x8_0000_0000), 0x2000, IommuMapFlags::READ)
             .unwrap();
-        assert_eq!(dma_addr, 0x4000_0000);
+        assert_eq!(dma_addr, DmaAddr::new(0x4000_0000));
         assert_eq!(
             domain.last_map(),
             Some(RecordedMap {
-                iova: 0x4000_0000,
-                paddr: 0x8_0000_0000,
+                iova: Iova::new(0x4000_0000),
+                paddr: PhysAddr::new(0x8_0000_0000),
                 len: 0x4000,
                 flags: IommuMapFlags::READ,
             })
         );
 
         context.unmap(dma_addr, 0x2000).unwrap();
-        assert_eq!(domain.last_unmap(), Some((0x4000_0000, 0x4000)));
+        assert_eq!(domain.last_unmap(), Some((Iova::new(0x4000_0000), 0x4000)));
 
         let dma_addr = context
-            .map_phys(0x8_0004_0000, 0x1000, IommuMapFlags::WRITE)
+            .map_phys(PhysAddr::new(0x8_0004_0000), 0x1000, IommuMapFlags::WRITE)
             .unwrap();
-        assert_eq!(dma_addr, 0x4000_0000);
+        assert_eq!(dma_addr, DmaAddr::new(0x4000_0000));
     }
 }

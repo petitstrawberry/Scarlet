@@ -848,7 +848,7 @@ impl IommuDomain for IdentityDomain {
         _len: usize,
         _flags: IommuMapFlags,
     ) -> Result<(), IommuError> {
-        if iova != paddr as Iova {
+        if iova.as_u64() != paddr.as_u64() {
             return Err(IommuError::MapFailed);
         }
         Ok(())
@@ -859,7 +859,7 @@ impl IommuDomain for IdentityDomain {
     }
 
     fn iova_to_phys(&self, iova: Iova) -> Option<PhysAddr> {
-        Some(iova)
+        Some(PhysAddr::new(iova.as_u64()))
     }
 
     fn page_size(&self) -> usize {
@@ -969,7 +969,7 @@ impl DmaPageTables {
         arch::clean_dcache_to_poc_range(page as usize, PAGE_SIZE);
         arch::wmb();
         let paddr = virt_to_phys(page as usize);
-        if (paddr as u64)
+        if paddr
             .checked_add(PAGE_SIZE as u64)
             .is_none_or(|end| end > table_address_limit)
         {
@@ -1079,9 +1079,9 @@ impl DmaPageTables {
     }
 
     fn leaf_table(&mut self, iova: Iova) -> Result<(u64, usize), IommuError> {
-        let l1 = ((iova >> 30) & 0x1ff) as usize;
-        let l2 = ((iova >> 21) & 0x1ff) as usize;
-        let l3 = ((iova >> 12) & 0x1ff) as usize;
+        let l1 = ((iova.as_u64() >> 30) & 0x1ff) as usize;
+        let l2 = ((iova.as_u64() >> 21) & 0x1ff) as usize;
+        let l3 = ((iova.as_u64() >> 12) & 0x1ff) as usize;
         let second = self.next_table(self.root, l1)?;
         let leaf = self.next_table(second, l2)?;
         Ok((leaf, l3))
@@ -1090,13 +1090,13 @@ impl DmaPageTables {
     fn existing_leaf_table(&self, iova: Iova) -> Option<(u64, usize)> {
         let mut table = self.root;
         for shift in [30, 21] {
-            let entry = Self::read_entry(table, ((iova >> shift) & 0x1ff) as usize);
+            let entry = Self::read_entry(table, ((iova.as_u64() >> shift) & 0x1ff) as usize);
             if entry & (TABLE_VALID | TABLE_DESCRIPTOR) != TABLE_VALID | TABLE_DESCRIPTOR {
                 return None;
             }
             table = (entry & TABLE_ADDRESS_MASK);
         }
-        Some((table, ((iova >> 12) & 0x1ff) as usize))
+        Some((table, ((iova.as_u64() >> 12) & 0x1ff) as usize))
     }
 
     fn lookup(&self, iova: Iova) -> Option<PhysAddr> {
@@ -1105,7 +1105,9 @@ impl DmaPageTables {
         if entry & (TABLE_VALID | TABLE_DESCRIPTOR) != TABLE_VALID | TABLE_DESCRIPTOR {
             return None;
         }
-        Some((entry & TABLE_ADDRESS_MASK) | (iova & (PAGE_SIZE as u64 - 1)))
+        Some(PhysAddr::new(
+            (entry & TABLE_ADDRESS_MASK) | (iova.as_u64() & (PAGE_SIZE as u64 - 1)),
+        ))
     }
 
     fn map_page(
@@ -1118,7 +1120,7 @@ impl DmaPageTables {
         if Self::read_entry(table, index) & TABLE_VALID != 0 {
             return Err(IommuError::MapFailed);
         }
-        let mut descriptor = paddr as u64
+        let mut descriptor = paddr.as_u64()
             | TABLE_VALID
             | TABLE_DESCRIPTOR
             | PTE_ACCESS_FLAG
@@ -1228,7 +1230,7 @@ impl IommuDomain for DmaDomain {
             );
             return Err(error);
         }
-        if paddr & (PAGE_SIZE as u64 - 1) != 0 {
+        if paddr.as_u64() & (PAGE_SIZE as u64 - 1) != 0 {
             println!(
                 "[arm-smmu-v2] DMA map rejected reason=paddr-alignment iova={:#x} paddr={:#x} len={:#x} flags={:#x}",
                 iova,
@@ -1238,7 +1240,8 @@ impl IommuDomain for DmaDomain {
             );
             return Err(IommuError::MapFailed);
         }
-        if (paddr as u64)
+        if paddr
+            .as_u64()
             .checked_add(len as u64)
             .is_none_or(|end| end > self.output_address_limit)
         {
@@ -1265,16 +1268,31 @@ impl IommuDomain for DmaDomain {
         let mut tables = self.tables.lock();
         let tables = tables.as_mut().ok_or(IommuError::MapFailed)?;
         for offset in (0..len).step_by(PAGE_SIZE) {
-            if tables.lookup(iova + offset as u64).is_some() {
+            if tables
+                .lookup(
+                    iova.checked_add(offset as u64)
+                        .expect("validated IOMMU range"),
+                )
+                .is_some()
+            {
                 return Err(IommuError::MapFailed);
             }
         }
         let mut mapped = 0;
         for offset in (0..len).step_by(PAGE_SIZE) {
-            if let Err(error) = tables.map_page(iova + offset as u64, paddr + offset as u64, flags)
-            {
+            if let Err(error) = tables.map_page(
+                iova.checked_add(offset as u64)
+                    .expect("validated IOMMU range"),
+                paddr
+                    .checked_add(offset as u64)
+                    .expect("validated IOMMU range"),
+                flags,
+            ) {
                 for rollback in (0..mapped).step_by(PAGE_SIZE) {
-                    let _ = tables.unmap_page(iova + rollback as u64);
+                    let _ = tables.unmap_page(
+                        iova.checked_add(rollback as u64)
+                            .expect("validated IOMMU range"),
+                    );
                 }
                 tables.sync_dirty();
                 let _ = self
@@ -1295,12 +1313,21 @@ impl IommuDomain for DmaDomain {
         let mut tables = self.tables.lock();
         let tables = tables.as_mut().ok_or(IommuError::UnmapFailed)?;
         for offset in (0..len).step_by(PAGE_SIZE) {
-            if tables.lookup(iova + offset as u64).is_none() {
+            if tables
+                .lookup(
+                    iova.checked_add(offset as u64)
+                        .expect("validated IOMMU range"),
+                )
+                .is_none()
+            {
                 return Err(IommuError::UnmapFailed);
             }
         }
         for offset in (0..len).step_by(PAGE_SIZE) {
-            tables.unmap_page(iova + offset as u64)?;
+            tables.unmap_page(
+                iova.checked_add(offset as u64)
+                    .expect("validated IOMMU range"),
+            )?;
         }
         tables.sync_dirty();
         self.hardware
@@ -1380,10 +1407,10 @@ fn validate_dma_range(
     len: usize,
 ) -> Result<(), IommuError> {
     if aperture_size == 0
-        || aperture_base & (PAGE_SIZE as u64 - 1) != 0
+        || aperture_base.as_u64() & (PAGE_SIZE as u64 - 1) != 0
         || aperture_size & (PAGE_SIZE as u64 - 1) != 0
         || len == 0
-        || iova & (PAGE_SIZE as u64 - 1) != 0
+        || iova.as_u64() & (PAGE_SIZE as u64 - 1) != 0
         || len & (PAGE_SIZE - 1) != 0
     {
         return Err(IommuError::MapFailed);
@@ -1392,7 +1419,7 @@ fn validate_dma_range(
         .checked_add(aperture_size)
         .ok_or(IommuError::MapFailed)?;
     let end = iova.checked_add(len as u64).ok_or(IommuError::MapFailed)?;
-    if aperture_end > iova_address_limit || iova < aperture_base || end > aperture_end {
+    if aperture_end.as_u64() > iova_address_limit || iova < aperture_base || end > aperture_end {
         return Err(IommuError::MapFailed);
     }
     Ok(())
@@ -1406,7 +1433,7 @@ fn required_iova_address_bits(aperture_base: Iova, aperture_size: u64) -> Result
         .checked_add(aperture_size)
         .ok_or(IommuError::MapFailed)?;
     let maximum_iova = aperture_end.checked_sub(1).ok_or(IommuError::MapFailed)?;
-    Ok((u64::BITS - maximum_iova.leading_zeros()).max(MIN_DMA_IOVA_BITS))
+    Ok((u64::BITS - maximum_iova.as_u64().leading_zeros()).max(MIN_DMA_IOVA_BITS))
 }
 
 fn dma_permissions_valid(flags: IommuMapFlags) -> bool {
@@ -1747,7 +1774,7 @@ mod tests {
         expand_stream_mask, required_iova_address_bits, validate_dma_range,
     };
     use crate::{
-        device::iommu::{IommuError, IommuMapFlags},
+        device::iommu::{IommuError, IommuMapFlags, Iova},
         environment::PAGE_SIZE,
     };
 
@@ -1762,32 +1789,68 @@ mod tests {
     #[test_case]
     fn validates_programmed_dma_aperture_and_alignment() {
         assert_eq!(
-            validate_dma_range(0, 1u64 << 32, 1u64 << 32, 0x54000, PAGE_SIZE),
+            validate_dma_range(
+                Iova::new(0),
+                1u64 << 32,
+                1u64 << 32,
+                Iova::new(0x54000),
+                PAGE_SIZE
+            ),
             Ok(())
         );
         assert_eq!(
-            validate_dma_range(0, 1u64 << 32, 1u64 << 32, 0x54001, PAGE_SIZE),
+            validate_dma_range(
+                Iova::new(0),
+                1u64 << 32,
+                1u64 << 32,
+                Iova::new(0x54001),
+                PAGE_SIZE
+            ),
             Err(IommuError::MapFailed)
         );
         assert_eq!(
-            validate_dma_range(0, 1u64 << 32, 1u64 << 32, 1u64 << 32, PAGE_SIZE,),
+            validate_dma_range(
+                Iova::new(0),
+                1u64 << 32,
+                1u64 << 32,
+                Iova::new(1u64 << 32),
+                PAGE_SIZE
+            ),
             Err(IommuError::MapFailed)
         );
         assert_eq!(
-            validate_dma_range(1u64 << 32, 1u64 << 32, 1u64 << 33, 1u64 << 32, PAGE_SIZE,),
+            validate_dma_range(
+                Iova::new(1u64 << 32),
+                1u64 << 32,
+                1u64 << 33,
+                Iova::new(1u64 << 32),
+                PAGE_SIZE
+            ),
             Ok(())
         );
         assert_eq!(
-            validate_dma_range(1u64 << 32, 1u64 << 32, 1u64 << 32, 1u64 << 32, PAGE_SIZE,),
+            validate_dma_range(
+                Iova::new(1u64 << 32),
+                1u64 << 32,
+                1u64 << 32,
+                Iova::new(1u64 << 32),
+                PAGE_SIZE
+            ),
             Err(IommuError::MapFailed)
         );
     }
 
     #[test_case]
     fn derives_gpu_iova_width_from_aperture_end() {
-        assert_eq!(required_iova_address_bits(0, 1u64 << 32), Ok(32));
-        assert_eq!(required_iova_address_bits(1u64 << 32, 1u64 << 32), Ok(33));
-        assert_eq!(required_iova_address_bits(0, 0), Err(IommuError::MapFailed));
+        assert_eq!(required_iova_address_bits(Iova::new(0), 1u64 << 32), Ok(32));
+        assert_eq!(
+            required_iova_address_bits(Iova::new(1u64 << 32), 1u64 << 32),
+            Ok(33)
+        );
+        assert_eq!(
+            required_iova_address_bits(Iova::new(0), 0),
+            Err(IommuError::MapFailed)
+        );
     }
 
     #[test_case]

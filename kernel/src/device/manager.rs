@@ -3747,6 +3747,7 @@ mod tests {
     use crate::interrupt::msi::{
         MsiAllocation, MsiError, MsiMessage, MsiRequest, MsiRequestFlags, MsiVector,
     };
+    use crate::mem::address::{DmaAddr, Iova};
     use alloc::string::String;
     use alloc::vec;
     use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -4275,12 +4276,12 @@ mod tests {
 
         let channel = manager.resolve_dma_channel(&device, "tx0a").unwrap();
         let config = DmaCyclicConfig {
-            buffer_addr: 0x1000,
+            buffer_addr: DmaAddr::new(0x1000),
             buffer_len: 0x1000,
             period_len: 0x400,
             direction: DmaDirection::MemToDev,
             peripheral: Some(DmaPeripheralConfig {
-                addr: 0x2000,
+                addr: DmaAddr::new(0x2000),
                 width: DmaBusWidth::Width4,
                 burst_len: 4,
             }),
@@ -5123,7 +5124,7 @@ mod tests {
     fn test_iommu_config() -> IommuDomainConfig {
         IommuDomainConfig {
             domain_type: IommuDomainType::Dma,
-            iova_base: 0,
+            iova_base: Iova::new(0),
             iova_size: 0x1_0000,
         }
     }

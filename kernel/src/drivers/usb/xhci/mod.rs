@@ -52,6 +52,7 @@ use crate::drivers::usb::xhci::trb::{Trb, TrbType};
 use crate::interrupt::{
     DeferredInterruptCompletion, InterruptClaim, InterruptId, InterruptManager,
 };
+use crate::mem::address::PhysAddr;
 use crate::mem::page::ContiguousPages;
 use crate::object::capability::{ControlOps, MemoryMappingInfo, MemoryMappingOps, Selectable};
 use crate::sync::{IrqSpinLock, Mutex, Once};
@@ -1182,9 +1183,9 @@ impl XhciController {
     ) -> Result<u64, &'static str> {
         let dma_addr = self
             .dma_context
-            .map_phys(paddr, len, flags)
+            .map_phys(PhysAddr::new(paddr), len, flags)
             .map_err(|_| "xHCI: failed to map DMA buffer")?;
-        Ok(dma_addr)
+        Ok(dma_addr.as_u64())
     }
 
     fn dma_map_pages(
@@ -1206,7 +1207,7 @@ impl XhciController {
     ) -> Result<DmaMapping, &'static str> {
         let len = pages.len() * crate::environment::PAGE_SIZE;
         self.dma_context
-            .map_phys_owned(pages.as_paddr(), len, flags)
+            .map_phys_owned(PhysAddr::new(pages.as_paddr()), len, flags)
             .map_err(|_| "xHCI: failed to map DMA buffer")
     }
 
@@ -1217,7 +1218,7 @@ impl XhciController {
         flags: IommuMapFlags,
     ) -> Result<DmaMapping, &'static str> {
         self.dma_context
-            .map_phys_owned(paddr, len, flags)
+            .map_phys_owned(PhysAddr::new(paddr), len, flags)
             .map_err(|_| "xHCI: failed to map DMA buffer")
     }
 
@@ -1814,7 +1815,7 @@ impl XhciController {
                             Err("CDC-NCM transmit pipeline is full")
                         } else {
                             match ncm.bulk_out.ring.enqueue(Trb::normal_transfer(
-                                buffer.mapping.dma_addr(),
+                                buffer.mapping.dma_addr().as_u64(),
                                 request.ntb.len() as u32,
                             )) {
                                 Ok(trb_index) => {
@@ -2251,7 +2252,7 @@ impl XhciController {
         sync_pages_for_device(&input_pages);
         ep0_ring.sync_for_device();
         let event = self.send_command(Trb::address_device_command(
-            input_dma_mapping.dma_addr(),
+            input_dma_mapping.dma_addr().as_u64(),
             slot_id,
             false,
         ))?;
@@ -2427,7 +2428,7 @@ impl XhciController {
         }
         sync_pages_for_device(&slot.input_context);
         let event = self.send_command(Trb::evaluate_context_command(
-            input_dma_mapping.dma_addr(),
+            input_dma_mapping.dma_addr().as_u64(),
             slot.slot_id,
         ))?;
         if event.slot_id() != slot.slot_id {
@@ -2517,7 +2518,7 @@ impl XhciController {
             }
             let mapping = self.dma_map_owned_pages(buffer, flags)?;
             slot.ring.enqueue(Trb::data_stage(
-                mapping.dma_addr(),
+                mapping.dma_addr().as_u64(),
                 length as u32,
                 direction_in,
             ))?;
@@ -2874,7 +2875,7 @@ impl XhciController {
 
         sync_pages_before_device_write(buffer);
         let trb_index = ring.enqueue(Trb::normal_transfer_in(
-            buffer_mapping.dma_addr(),
+            buffer_mapping.dma_addr().as_u64(),
             max_packet as u32,
         ))?;
         slot.interrupt_trb_dma = Some(ring.dma_address() + (trb_index * size_of::<Trb>()) as u64);
@@ -2904,7 +2905,7 @@ impl XhciController {
 
         sync_pages_before_device_write(runtime.buffer.as_ref());
         let trb_index = runtime.ring.enqueue(Trb::normal_transfer_in(
-            runtime.buffer_mapping.dma_addr(),
+            runtime.buffer_mapping.dma_addr().as_u64(),
             u32::from(runtime.max_packet_size),
         ))?;
         runtime.trb_dma = Some(runtime.ring.dma_address() + (trb_index * size_of::<Trb>()) as u64);
@@ -3052,7 +3053,7 @@ impl XhciController {
         interrupt_ring.sync_for_device();
 
         let event = self.send_command(Trb::configure_endpoint_command(
-            input_dma_mapping.dma_addr(),
+            input_dma_mapping.dma_addr().as_u64(),
             slot_id,
             false,
         ))?;
@@ -3251,7 +3252,7 @@ impl XhciController {
         interrupt_ring.sync_for_device();
 
         let event = self.send_command(Trb::configure_endpoint_command(
-            input_dma_mapping.dma_addr(),
+            input_dma_mapping.dma_addr().as_u64(),
             slot_id,
             false,
         ))?;
@@ -3460,7 +3461,7 @@ impl XhciController {
         bulk_out_ring.sync_for_device();
 
         let event = self.send_command(Trb::configure_endpoint_command(
-            input_dma_mapping.dma_addr(),
+            input_dma_mapping.dma_addr().as_u64(),
             slot_id,
             false,
         ))?;
@@ -3828,19 +3829,19 @@ impl XhciController {
             notification_ring.dma_len(),
             dma_rw_flags(),
         )?;
-        notification_ring.set_dma_address(notification_ring_mapping.dma_addr())?;
+        notification_ring.set_dma_address(notification_ring_mapping.dma_addr().as_u64())?;
         let bulk_in_ring_mapping = self.dma_map_owned_phys(
             bulk_in_ring.physical_address(),
             bulk_in_ring.dma_len(),
             dma_rw_flags(),
         )?;
-        bulk_in_ring.set_dma_address(bulk_in_ring_mapping.dma_addr())?;
+        bulk_in_ring.set_dma_address(bulk_in_ring_mapping.dma_addr().as_u64())?;
         let bulk_out_ring_mapping = self.dma_map_owned_phys(
             bulk_out_ring.physical_address(),
             bulk_out_ring.dma_len(),
             dma_rw_flags(),
         )?;
-        bulk_out_ring.set_dma_address(bulk_out_ring_mapping.dma_addr())?;
+        bulk_out_ring.set_dma_address(bulk_out_ring_mapping.dma_addr().as_u64())?;
 
         let input_pages = self
             .dma_alloc_pages(
@@ -3911,7 +3912,7 @@ impl XhciController {
         bulk_out_ring.sync_for_device();
 
         let event = self.send_command(Trb::configure_endpoint_command(
-            input_dma_mapping.dma_addr(),
+            input_dma_mapping.dma_addr().as_u64(),
             slot_id,
             false,
         ))?;
@@ -4351,7 +4352,7 @@ impl XhciController {
         interrupt_ring.sync_for_device();
 
         let event = self.send_command(Trb::configure_endpoint_command(
-            input_dma_mapping.dma_addr(),
+            input_dma_mapping.dma_addr().as_u64(),
             slot_id,
             false,
         ))?;
@@ -4419,7 +4420,7 @@ impl XhciController {
         sync_pages_for_device(&input_pages);
 
         let event = self.send_command(Trb::configure_endpoint_command(
-            input_dma_mapping.dma_addr(),
+            input_dma_mapping.dma_addr().as_u64(),
             slot_id,
             false,
         ))?;
@@ -5603,9 +5604,9 @@ impl XhciController {
             }
             dma_mapping = self.dma_map_owned_pages(buffer, flags)?;
             let trb = if direction_in {
-                Trb::normal_transfer_in(dma_mapping.dma_addr(), length as u32)
+                Trb::normal_transfer_in(dma_mapping.dma_addr().as_u64(), length as u32)
             } else {
-                Trb::normal_transfer(dma_mapping.dma_addr(), length as u32)
+                Trb::normal_transfer(dma_mapping.dma_addr().as_u64(), length as u32)
             };
             let trb_index = ring.enqueue(trb)?;
             trb_dma = ring.dma_address() + (trb_index * size_of::<Trb>()) as u64;
@@ -5622,7 +5623,7 @@ impl XhciController {
                     dci,
                     if direction_in { "in" } else { "out" },
                     length,
-                    dma_mapping.dma_addr(),
+                    dma_mapping.dma_addr().as_u64(),
                     ring.dma_address(),
                     trb_index
                 );
@@ -5712,7 +5713,7 @@ impl XhciController {
                 };
                 sync_pages_before_device_write(&buffer.pages);
                 match ncm.bulk_in.ring.enqueue(Trb::normal_transfer_in(
-                    buffer.mapping.dma_addr(),
+                    buffer.mapping.dma_addr().as_u64(),
                     ncm.rx_transfer_size as u32,
                 )) {
                     Ok(trb_index) => {
@@ -5753,7 +5754,7 @@ impl XhciController {
             dci = notification.dci;
             sync_pages_before_device_write(&notification.buffer);
             notification.ring.enqueue(Trb::normal_transfer_in(
-                notification.buffer_mapping.dma_addr(),
+                notification.buffer_mapping.dma_addr().as_u64(),
                 u32::from(notification.max_packet_size),
             ))?;
         }
@@ -6016,7 +6017,7 @@ impl XhciController {
             let device = ncm.device.clone();
             sync_pages_before_device_write(&ncm.notification.buffer);
             let resubmit = ncm.notification.ring.enqueue(Trb::normal_transfer_in(
-                ncm.notification.buffer_mapping.dma_addr(),
+                ncm.notification.buffer_mapping.dma_addr().as_u64(),
                 u32::from(ncm.notification.max_packet_size),
             ));
             let dci = ncm.notification.dci;
@@ -6086,7 +6087,7 @@ impl XhciController {
             let resubmit = if device.is_attached() {
                 sync_pages_before_device_write(&completed.buffer.pages);
                 match ncm.bulk_in.ring.enqueue(Trb::normal_transfer_in(
-                    completed.buffer.mapping.dma_addr(),
+                    completed.buffer.mapping.dma_addr().as_u64(),
                     ncm.rx_transfer_size as u32,
                 )) {
                     Ok(trb_index) => {
