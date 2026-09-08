@@ -6,15 +6,15 @@ that every ABI, driver, or hardware configuration is complete.
 
 Scarlet's kernel is the `scarlet` **library crate** in
 [kernel/Cargo.toml](../../kernel/Cargo.toml). It is `no_std`; the project BSP
-provides the executable and boot entry. RISC-V 64 and AArch64 are implemented.
+provides the executable and boot entry. AArch64 and RISC-V 64 are implemented.
 ABI compatibility translates operating-system interfaces over shared kernel
 objects, not CPU instructions between architectures.
 
 ## Build boundaries
 
 The tracked reference projects are
-[RISC-V full](../../projects/riscv64-limine-full/scarlet.toml),
-[AArch64 full](../../projects/aarch64-limine-full/scarlet.toml), and
+[AArch64 full](../../projects/aarch64-limine-full/scarlet.toml),
+[RISC-V full](../../projects/riscv64-limine-full/scarlet.toml), and
 [AArch64 microvm](../../projects/aarch64-limine-microvm/scarlet.toml).
 Each owns a `bsp/` Cargo package, target configuration, linker script, image
 recipe, and runner. `cargo-scarlet` from the separate `scarlet-sdk` repository
@@ -25,8 +25,8 @@ From the Scarlet root in the Nix development environment:
 
 ```sh
 # Kernel/BSP only; this does not compose all userspace layers.
-cargo scarlet build --project projects/riscv64-limine-full
 cargo scarlet build --project projects/aarch64-limine-full
+cargo scarlet build --project projects/riscv64-limine-full
 
 # Complete project image, including the selected userland layers.
 cargo scarlet image --project projects/aarch64-limine-full

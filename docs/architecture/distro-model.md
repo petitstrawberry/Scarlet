@@ -55,7 +55,7 @@ manifest format to consume path, git, URL, and generated sources.
 | Term | Meaning |
 |---|---|
 | Project | A directory with `scarlet.toml`, a selected BSP, image/runner configuration, generated `.scarlet/`, and optional project-local files. |
-| Project variant | A named project such as `riscv64-limine-full`, `aarch64-limine-full`, or `aarch64-limine-microvm`. |
+| Project variant | A named project such as `aarch64-limine-full`, `riscv64-limine-full`, or `aarch64-limine-microvm`. |
 | BSP boundary | The executable Cargo package selected by `[bsp].path` (currently `bsp/`), with target, boot entry and linker scripts; image and runner policy remains in the project. |
 | Distro shape | The selected ordered layer composition for initramfs/rootfs/boot in a project manifest. |
 | Layer | One ordered composition operation: `bundle`, `cargo`, `copy`, `archive`, `script`, or `image`. |
@@ -100,7 +100,7 @@ Scarlet/
     full/
       bundle.toml
   projects/
-    riscv64-limine-full/
+    aarch64-limine-full/
       scarlet.toml
       scarlet.lock
       bsp/
@@ -112,7 +112,7 @@ Scarlet/
         lds/
       tools/
       .scarlet/
-    aarch64-limine-full/
+    riscv64-limine-full/
     aarch64-limine-microvm/
   docs/
   flake.nix
@@ -282,13 +282,13 @@ Cargo locks separately select transitive Rust dependencies.
 Current commands are:
 
 ```sh
-cargo scarlet build --project projects/riscv64-limine-full
-cargo scarlet check --project projects/riscv64-limine-full
-cargo scarlet clippy --project projects/riscv64-limine-full
-cargo scarlet image --project projects/riscv64-limine-full
-cargo scarlet run --project projects/riscv64-limine-full --release
-cargo scarlet update --project projects/riscv64-limine-full
-cargo scarlet new --project my-board --target riscv64gc-unknown-none-elf
+cargo scarlet build --project projects/aarch64-limine-full
+cargo scarlet check --project projects/aarch64-limine-full
+cargo scarlet clippy --project projects/aarch64-limine-full
+cargo scarlet image --project projects/aarch64-limine-full
+cargo scarlet run --project projects/aarch64-limine-full --release
+cargo scarlet update --project projects/aarch64-limine-full
+cargo scarlet new --project my-board --target aarch64-unknown-none-elf
 cargo scarlet new --lsm my-module
 ```
 

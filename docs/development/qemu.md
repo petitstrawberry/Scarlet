@@ -137,7 +137,7 @@ Examples:
 SCARLET_QEMU_DISPLAY=none cargo make run-aarch64
 
 # Explicit VNC instead of a local GUI.
-SCARLET_QEMU_DISPLAY='vnc=:0' cargo make run-riscv64
+SCARLET_QEMU_DISPLAY='vnc=:0' cargo make run-aarch64
 
 # Cocoa with GL but without Retina.
 SCARLET_QEMU_DISPLAY='cocoa,gl=on,retina=off,full-grab=on' cargo make run-aarch64
