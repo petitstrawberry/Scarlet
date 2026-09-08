@@ -20,6 +20,7 @@ use core::{cell::UnsafeCell, marker::PhantomData, ops::Deref, ptr::NonNull, sync
 use crate::abi::{AbiModule, EventProcessOutcome, scarlet::ScarletAbi};
 use crate::device::char::tty::TtyDevice;
 use crate::sync::Once;
+use crate::sync::atomic::AtomicU64;
 use crate::sync::waker::Waker;
 use crate::{
     arch::{
@@ -54,9 +55,7 @@ use crate::{
 };
 use alloc::collections::BTreeMap;
 use core::ops::Range;
-use core::sync::atomic::{
-    AtomicBool, AtomicI32, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering,
-};
+use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32, AtomicUsize, Ordering};
 
 pub(crate) const INIT_TASK_ID: usize = 1;
 const LOG_EXIT_GROUP_SIBLINGS: bool = false;
@@ -827,13 +826,15 @@ pub struct Task {
     /// Monotonic timestamp at which the current CPU run began.
     cpu_run_start_ns: AtomicU64,
     /// Most recent instruction address sampled while this task was running.
-    last_observed_pc: AtomicU64,
+    last_observed_pc: AtomicUsize,
     /// Whether `last_observed_pc` was sampled from privileged execution.
     last_observed_pc_privileged: AtomicBool,
     /// Most recent system-call number entered by this task.
-    last_syscall_number: AtomicU64,
+    last_syscall_number: AtomicUsize,
+    /// Whether a syscall number has been published, including usize::MAX.
+    syscall_recorded: AtomicBool,
     /// User instruction address that entered `last_syscall_number`.
-    last_syscall_pc: AtomicU64,
+    last_syscall_pc: AtomicUsize,
     /// Whether this task is currently executing its system-call dispatcher.
     syscall_active: AtomicBool,
     /// Start of the current CPU-hog diagnostic wall-clock window.
@@ -841,7 +842,7 @@ pub struct Task {
     /// Cumulative task CPU time at the start of the diagnostic window.
     cpu_hog_window_start_runtime_ns: AtomicU64,
     /// Sampled instruction address at the start of the diagnostic window.
-    cpu_hog_window_start_pc: AtomicU64,
+    cpu_hog_window_start_pc: AtomicUsize,
     /// Privilege mode associated with `cpu_hog_window_start_pc`.
     cpu_hog_window_start_pc_privileged: AtomicBool,
     /// Stack size in bytes
@@ -1132,14 +1133,15 @@ impl Task {
             sched_exec_start_ns: AtomicU64::new(0),
             cpu_time_ns: AtomicU64::new(0),
             cpu_run_start_ns: AtomicU64::new(0),
-            last_observed_pc: AtomicU64::new(0),
+            last_observed_pc: AtomicUsize::new(0),
             last_observed_pc_privileged: AtomicBool::new(false),
-            last_syscall_number: AtomicU64::new(u64::MAX),
-            last_syscall_pc: AtomicU64::new(0),
+            last_syscall_number: AtomicUsize::new(0),
+            syscall_recorded: AtomicBool::new(false),
+            last_syscall_pc: AtomicUsize::new(0),
             syscall_active: AtomicBool::new(false),
             cpu_hog_window_start_ns: AtomicU64::new(0),
             cpu_hog_window_start_runtime_ns: AtomicU64::new(0),
-            cpu_hog_window_start_pc: AtomicU64::new(0),
+            cpu_hog_window_start_pc: AtomicUsize::new(0),
             cpu_hog_window_start_pc_privileged: AtomicBool::new(false),
             stack_size: AtomicUsize::new(0),
             data_size: vm_manager.data_size_handle(),
@@ -1653,7 +1655,10 @@ impl Task {
     /// * `pc` - Saved instruction address from the interrupt trapframe.
     /// * `privileged` - Whether the interrupted context was privileged.
     pub(crate) fn record_observed_pc(&self, pc: u64, privileged: bool) {
-        self.last_observed_pc.store(pc, Ordering::Relaxed);
+        self.last_observed_pc.store(
+            usize::try_from(pc).expect("sampled PC must fit the native address width"),
+            Ordering::Relaxed,
+        );
         self.last_observed_pc_privileged
             .store(privileged, Ordering::Relaxed);
     }
@@ -1668,10 +1673,10 @@ impl Task {
     /// * `syscall_number` - ABI-specific system-call number.
     /// * `user_pc` - User instruction address that entered the kernel.
     pub(crate) fn record_syscall_entry(&self, syscall_number: usize, user_pc: usize) {
-        self.last_syscall_pc
-            .store(user_pc as u64, Ordering::Relaxed);
+        self.last_syscall_pc.store(user_pc, Ordering::Relaxed);
         self.last_syscall_number
-            .store(syscall_number as u64, Ordering::Release);
+            .store(syscall_number, Ordering::Release);
+        self.syscall_recorded.store(true, Ordering::Release);
         self.syscall_active.store(true, Ordering::Release);
     }
 
@@ -1689,11 +1694,21 @@ impl Task {
     /// been recorded yet.
     pub(crate) fn execution_debug_snapshot(&self) -> TaskExecutionDebugSnapshot {
         TaskExecutionDebugSnapshot {
-            observed_pc: self.last_observed_pc.load(Ordering::Relaxed),
+            observed_pc: self.last_observed_pc.load(Ordering::Relaxed) as u64,
             observed_pc_privileged: self.last_observed_pc_privileged.load(Ordering::Relaxed),
-            syscall_number: self.last_syscall_number.load(Ordering::Acquire),
-            syscall_pc: self.last_syscall_pc.load(Ordering::Relaxed),
+            syscall_number: self.debug_syscall_number(),
+            syscall_pc: self.last_syscall_pc.load(Ordering::Relaxed) as u64,
             syscall_active: self.syscall_active.load(Ordering::Acquire),
+        }
+    }
+
+    // The wire sentinel is u64::MAX. Keep validity separate from the native
+    // word so an actual RV32 syscall number of 0xffff_ffff remains representable.
+    fn debug_syscall_number(&self) -> u64 {
+        if self.syscall_recorded.load(Ordering::Acquire) {
+            self.last_syscall_number.load(Ordering::Acquire) as u64
+        } else {
+            u64::MAX
         }
     }
 
@@ -1711,8 +1726,8 @@ impl Task {
         let runtime_ns = self.cpu_time_snapshot_ns(now_ns);
         let current_pc = self.last_observed_pc.load(Ordering::Relaxed);
         let current_pc_privileged = self.last_observed_pc_privileged.load(Ordering::Relaxed);
-        let last_syscall_number = self.last_syscall_number.load(Ordering::Acquire);
-        let last_syscall_pc = self.last_syscall_pc.load(Ordering::Relaxed);
+        let last_syscall_number = self.debug_syscall_number();
+        let last_syscall_pc = self.last_syscall_pc.load(Ordering::Relaxed) as u64;
         let syscall_active = self.syscall_active.load(Ordering::Acquire);
         let window_start_ns = self.cpu_hog_window_start_ns.load(Ordering::Acquire);
 
@@ -1755,9 +1770,9 @@ impl Task {
             usage_per_mille,
             window_ns,
             runtime_ns: consumed_runtime_ns,
-            start_pc,
+            start_pc: start_pc as u64,
             start_pc_privileged,
-            current_pc,
+            current_pc: current_pc as u64,
             current_pc_privileged,
             last_syscall_number,
             last_syscall_pc,
@@ -4585,6 +4600,21 @@ mod tests {
             "sustained util={}",
             util
         );
+    }
+
+    #[test_case]
+    fn test_native_diagnostic_words_preserve_fixed_width_wire_values() {
+        let task = Task::new("DebugWords".to_string(), 1, TaskType::User);
+        assert_eq!(task.execution_debug_snapshot().syscall_number, u64::MAX);
+        let pc = usize::MAX - 0xfff;
+        task.record_observed_pc(pc as u64, true);
+        task.record_syscall_entry(u32::MAX as usize, pc);
+        task.record_syscall_exit();
+        let snapshot = task.execution_debug_snapshot();
+        assert_eq!(snapshot.observed_pc, pc as u64);
+        assert_eq!(snapshot.syscall_pc, pc as u64);
+        assert_eq!(snapshot.syscall_number, u32::MAX as u64);
+        assert!(!snapshot.syscall_active);
     }
 
     #[test_case]
