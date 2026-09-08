@@ -820,101 +820,23 @@ pub fn is_direct_mapped(vaddr: usize) -> bool {
     }
 }
 
-/// A wrapper type representing a physical address.
-///
-/// Construction does not validate the address, allocate memory, or retain ownership.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct PhysAddr(pub u64);
+// Keep the established import path while sharing the address value types
+// with boot, physical memory and DMA code.
+pub use crate::mem::address::{PhysAddr, VirtAddr};
 
 impl PhysAddr {
-    /// Create a new `PhysAddr` from a raw address value.
-    #[inline(always)]
-    pub const fn new(addr: u64) -> Self {
-        Self(addr)
-    }
-
-    /// Return the raw address value.
-    #[inline(always)]
-    pub const fn as_u64(&self) -> u64 {
-        self.0
-    }
-
-    /// Convert this physical address to a virtual address.
-    ///
-    /// Uses `phys_to_virt()` for the translation.
-    #[inline(always)]
-    pub fn to_virt(&self) -> VirtAddr {
-        VirtAddr::new(phys_to_virt(self.0))
-    }
-
-    /// Check if the address is aligned to the given power-of-two alignment.
-    #[inline(always)]
-    pub const fn is_aligned(&self, align: u64) -> bool {
-        assert!(align != 0 && align.is_power_of_two());
-        self.0 & (align - 1) == 0
-    }
-
-    /// Align the address down to the given power-of-two boundary.
-    #[inline(always)]
-    pub const fn align_down(&self, align: u64) -> Self {
-        assert!(align != 0 && align.is_power_of_two());
-        Self::new(self.0 & !(align - 1))
-    }
-
-    /// Align the address up to the given power-of-two boundary.
-    #[inline(always)]
-    pub const fn align_up(&self, align: u64) -> Self {
-        assert!(align != 0 && align.is_power_of_two());
-        Self::new((self.0 + align - 1) & !(align - 1))
+    /// Translate through the current kernel image, heap or direct map.
+    /// Panics if this physical address is outside those mappings.
+    pub fn to_virt(self) -> VirtAddr {
+        VirtAddr::new(phys_to_virt(self.as_u64()))
     }
 }
 
-/// A wrapper type representing a virtual address.
-///
-/// Construction does not validate a mapping, permissions, or pointer provenance.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct VirtAddr(pub usize);
-
 impl VirtAddr {
-    /// Create a new `VirtAddr` from a raw address value.
-    #[inline(always)]
-    pub const fn new(addr: usize) -> Self {
-        Self(addr)
-    }
-
-    /// Return the raw address value.
-    #[inline(always)]
-    pub const fn as_usize(&self) -> usize {
-        self.0
-    }
-
-    /// Convert this virtual address to a physical address.
-    ///
-    /// Uses `virt_to_phys()` for the translation.
-    #[inline(always)]
-    pub fn to_phys(&self) -> PhysAddr {
-        PhysAddr::new(virt_to_phys(self.0))
-    }
-
-    /// Check if the address is aligned to the given power-of-two alignment.
-    #[inline(always)]
-    pub const fn is_aligned(&self, align: usize) -> bool {
-        assert!(align != 0 && align.is_power_of_two());
-        self.0 & (align - 1) == 0
-    }
-
-    /// Align the address down to the given power-of-two boundary.
-    #[inline(always)]
-    pub const fn align_down(&self, align: usize) -> Self {
-        assert!(align != 0 && align.is_power_of_two());
-        Self::new(self.0 & !(align - 1))
-    }
-
-    /// Align the address up to the given power-of-two boundary.
-    #[inline(always)]
-    pub const fn align_up(&self, align: usize) -> Self {
-        assert!(align != 0 && align.is_power_of_two());
-        Self::new((self.0 + align - 1) & !(align - 1))
+    /// Translate a current kernel image, heap or direct-map address.
+    /// Panics if the virtual address is outside those mappings.
+    pub fn to_phys(self) -> PhysAddr {
+        PhysAddr::new(virt_to_phys(self.as_usize()))
     }
 }
 
