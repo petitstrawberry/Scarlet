@@ -362,7 +362,7 @@ fn arch_guest_trap_handler_inner(
                     };
 
                     let epc = csr::read_sepc();
-                    trapframe.epc = epc.wrapping_add(inst_len as u64);
+                    trapframe.set_pc(epc.wrapping_add(inst_len as u64));
 
                     Some(if is_write {
                         VmExit::MmioWrite {
@@ -385,7 +385,7 @@ fn arch_guest_trap_handler_inner(
         }
         CAUSE_ECALL_FROM_VS => {
             let epc = csr::read_sepc();
-            trapframe.epc = epc.wrapping_add(4);
+            trapframe.set_pc(epc.wrapping_add(4));
             Some(VmExit::FirmwareCall { epc })
         }
         CAUSE_VIRTUAL_INSTRUCTION => {
@@ -407,7 +407,7 @@ fn arch_guest_trap_handler_inner(
             let sie_enabled = (vsstatus & 0x02) != 0;
 
             if inst == INST_WFI {
-                trapframe.epc = epc.wrapping_add(4);
+                trapframe.set_pc(epc.wrapping_add(4));
                 if active != 0 && sie_enabled {
                     let c = WFI_NONE_COUNT.fetch_add(1, Ordering::Relaxed);
                     if c % 10000 == 0 {

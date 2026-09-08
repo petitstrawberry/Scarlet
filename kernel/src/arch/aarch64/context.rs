@@ -54,9 +54,9 @@ impl KernelContext {
     }
 
     /// Get the bottom of the kernel stack
-    pub fn get_kernel_stack_bottom_paddr(&self) -> u64 {
-        (self.kernel_stack.as_ptr() as u64)
-            + (self.kernel_stack.len() as u64 * crate::environment::PAGE_SIZE as u64)
+    pub fn get_kernel_stack_top(&self) -> usize {
+        self.kernel_stack.as_ptr() as usize
+            + self.kernel_stack.len() * crate::environment::PAGE_SIZE
     }
 
     pub fn get_kernel_stack_memory_area_paddr(&self) -> MemoryArea {

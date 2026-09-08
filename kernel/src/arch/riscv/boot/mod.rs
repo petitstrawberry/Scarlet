@@ -25,7 +25,7 @@ pub fn init_cpu(cpu_id: usize) {
     // SAFETY: Boot code initializes each `CPUS[cpu_id]` slot exactly once on
     // its assigned hart before publishing the pointer through `sscratch`.
     let riscv = unsafe { &mut *(&raw mut CPUS[cpu_id]) };
-    riscv.hartid = cpu_id as u64;
+    riscv.hartid = cpu_id;
     trap_init(riscv);
     println!(
         "[riscv64] init_cpu: cpu_id={} cpu struct={:#x} done",
@@ -40,8 +40,8 @@ pub(crate) fn trap_init(riscv: &mut Riscv) {
     let stack_size = STACK_SIZE;
 
     let trap_stack = trap_stack_start + stack_size * (riscv.hartid + 1) as usize;
-    riscv.kernel_stack = trap_stack as u64;
-    riscv.kernel_trap = arch_kernel_trap_handler as u64;
+    riscv.kernel_stack = trap_stack;
+    riscv.kernel_trap = arch_kernel_trap_handler as usize;
     let scratch_addr = riscv as *const _ as usize;
 
     let sie: usize = 0x20;

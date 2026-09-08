@@ -4006,8 +4006,8 @@ impl Task {
     ///
     /// # Returns
     /// The kernel stack bottom address as u64, or 0 if no kernel stack is allocated
-    pub fn get_kernel_stack_bottom_paddr(&self) -> u64 {
-        self.kernel_context.lock().get_kernel_stack_bottom_paddr()
+    pub fn get_kernel_stack_top(&self) -> usize {
+        self.kernel_context.lock().get_kernel_stack_top()
     }
 
     /// Get the kernel stack memory area for this task

@@ -23,7 +23,7 @@ pub struct Vcpu {
     pub vector: Option<Box<VectorContext>>,
     /// Whether this task has ever used the Vector extension (V).
     pub vector_used: bool,
-    pc: u64,
+    pc: usize,
     asid: usize,
     mode: Mode,
 }
@@ -47,11 +47,11 @@ impl Vcpu {
     }
 
     pub fn set_pc(&mut self, pc: u64) {
-        self.pc = pc;
+        self.pc = usize::try_from(pc).expect("task PC exceeds XLEN");
     }
 
     pub fn get_pc(&self) -> u64 {
-        self.pc
+        self.pc as u64
     }
 
     pub fn set_sp(&mut self, sp: usize) {

@@ -1,6 +1,6 @@
-//! RISC-V 64-bit register module.
+//! RISC-V XLEN-sized register module.
 //!
-//! This module provides the register file for the RISC-V 64-bit architecture.
+//! This module provides the register file for the RISC-V XLEN-sized architecture.
 //! The register file is responsible for storing the general-purpose registers
 //! of the CPU.
 
@@ -46,4 +46,18 @@ impl IntRegisters {
     pub fn set_tp(&mut self, value: usize) {
         self.reg[4] = value;
     }
+}
+
+// Keep the opcode selection and frame size in one place. The register arrays
+// are repr(C), and the per-CPU offsets are asserted next to their Rust types.
+macro_rules! riscv_naked_asm {
+    ($($body:expr),* $(,)?) => {
+        core::arch::naked_asm!(
+            include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/arch/riscv/registers.S")),
+            $($body),*,
+            ".purgem SCARLET_L", ".purgem SCARLET_S",
+            word_bytes = const core::mem::size_of::<usize>(),
+            trapframe_size = const core::mem::size_of::<crate::arch::Trapframe>(),
+        );
+    };
 }

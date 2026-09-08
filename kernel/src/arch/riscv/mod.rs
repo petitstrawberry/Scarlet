@@ -18,6 +18,8 @@ use crate::println;
 use crate::sched::scheduler::get_task_by_id;
 use crate::task::Task;
 
+#[macro_use]
+pub mod registers;
 pub mod boot;
 pub mod context;
 pub mod earlycon;
@@ -30,7 +32,6 @@ pub mod interrupt;
 pub mod kernel;
 pub mod lsm;
 pub mod mmio;
-pub mod registers;
 pub mod switch;
 pub mod timer;
 pub mod trap;
@@ -388,7 +389,7 @@ pub fn configure_user_entry(_trapframe: &mut Trapframe, options: crate::arch::Us
 pub fn first_switch_to_user(task: &Task) -> ! {
     // Prefer the high-VA kernel stack window if available.
     let kernel_sp = if let Some((_slot, base)) = task.get_kernel_stack_window_base() {
-        (base + crate::environment::PAGE_SIZE + crate::environment::TASK_KERNEL_STACK_SIZE) as u64
+        (base + crate::environment::PAGE_SIZE + crate::environment::TASK_KERNEL_STACK_SIZE) as usize
     } else {
         panic!("Task has no kernel stack window");
     };
@@ -440,23 +441,23 @@ pub fn get_device_memory_areas() -> alloc::vec::Vec<MemoryArea> {
 #[unsafe(link_section = ".trampoline.data")]
 static mut CPUS: [Riscv; MAX_NUM_CPUS] = [const { Riscv::new(0) }; MAX_NUM_CPUS];
 
-#[repr(align(4))]
+#[repr(C)]
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct Riscv {
-    scratch: u64,             // offeset: 0
-    pub hartid: u64,          // offset: 8
-    satp: u64,                // offset: 16
-    kernel_stack: u64,        // offset: 24
-    kernel_trap: u64,         // offset: 32
-    guest_trapframe_ptr: u64, // offset: 40
+    scratch: usize,             // word: 0
+    pub hartid: usize,          // word: 1
+    satp: usize,                // word: 2
+    kernel_stack: usize,        // word: 3
+    kernel_trap: usize,         // word: 4
+    guest_trapframe_ptr: usize, // word: 5
 }
 
 impl Riscv {
     pub const fn new(cpu_id: usize) -> Self {
         Riscv {
             scratch: 0,
-            hartid: cpu_id as u64,
+            hartid: cpu_id,
             kernel_stack: 0,
             kernel_trap: 0,
             satp: 0,
@@ -474,31 +475,31 @@ impl Riscv {
         addr
     }
 
-    pub fn get_kernel_stack(&self) -> u64 {
+    pub fn get_kernel_stack(&self) -> usize {
         self.kernel_stack
     }
 
-    pub fn set_kernel_stack(&mut self, initial_top: u64) {
+    pub fn set_kernel_stack(&mut self, initial_top: usize) {
         self.kernel_stack = initial_top;
     }
 
-    // pub fn get_satp(&self) -> u64 {
+    // pub fn get_satp(&self) -> usize {
     //     self.satp
     // }
 
-    // pub fn set_satp(&mut self, val: u64) {
+    // pub fn set_satp(&mut self, val: usize) {
     //     self.satp = val;
     // }
 
     pub fn set_trap_handler(&mut self, addr: usize) {
-        self.kernel_trap = addr as u64;
+        self.kernel_trap = addr;
     }
 
     pub fn set_next_address_space(&mut self, asid: u16) {
         let root_pagetable = get_root_pagetable(asid).expect("No root page table found for ASID");
 
         let satp = root_pagetable.get_val_for_satp();
-        self.satp = satp as u64;
+        self.satp = satp;
     }
 
     pub fn as_paddr_cpu(&mut self) -> &mut Riscv {
@@ -507,10 +508,10 @@ impl Riscv {
 }
 
 pub struct ArchCpuState {
-    kernel_stack: u64,
-    trap_handler: u64,
-    satp: u64,
-    guest_trapframe_ptr: u64,
+    kernel_stack: usize,
+    trap_handler: usize,
+    satp: usize,
+    guest_trapframe_ptr: usize,
 }
 
 impl ArchCpuState {
@@ -535,8 +536,8 @@ impl ArchCpuState {
 #[derive(Debug, Clone)]
 pub struct Trapframe {
     pub regs: IntRegisters,
-    pub epc: u64,
-    pub _padding: u64,
+    pub epc: usize,
+    pub _padding: usize,
 }
 
 impl Trapframe {
@@ -544,7 +545,7 @@ impl Trapframe {
         Trapframe {
             regs: IntRegisters::new(),
             epc: 0,
-            _padding: 0xdeadbeefdeadbeef,
+            _padding: usize::MAX,
         }
     }
 
@@ -577,11 +578,11 @@ impl Trapframe {
     }
 
     pub fn get_current_pc(&self) -> u64 {
-        self.epc
+        self.epc as u64
     }
 
     pub fn set_pc(&mut self, pc: u64) {
-        self.epc = pc;
+        self.epc = usize::try_from(pc).expect("PC exceeds XLEN");
     }
 
     /// Increment the program counter (epc) to the next instruction
@@ -596,7 +597,7 @@ impl Trapframe {
             println!("Warning: Invalid instruction length encountered. Defaulting to 4 bytes.");
             self.epc += 4; // Default to 4 bytes for invalid instruction length
         } else {
-            self.epc += len as u64;
+            self.epc += len;
         }
     }
 }
@@ -876,3 +877,17 @@ pub fn shutdown_with_code(exit_code: u32) -> ! {
 pub fn reboot() -> ! {
     sbi_system_reset(1, 0);
 }
+
+const _: () = {
+    use core::mem::{offset_of, size_of};
+    let word = size_of::<usize>();
+    assert!(offset_of!(Riscv, scratch) == 0);
+    assert!(offset_of!(Riscv, hartid) == word);
+    assert!(offset_of!(Riscv, satp) == 2 * word);
+    assert!(offset_of!(Riscv, kernel_stack) == 3 * word);
+    assert!(offset_of!(Riscv, kernel_trap) == 4 * word);
+    assert!(offset_of!(Riscv, guest_trapframe_ptr) == 5 * word);
+    assert!(offset_of!(Trapframe, regs) == 0);
+    assert!(offset_of!(Trapframe, epc) == 32 * word);
+    assert!(size_of::<Trapframe>() % 16 == 0);
+};

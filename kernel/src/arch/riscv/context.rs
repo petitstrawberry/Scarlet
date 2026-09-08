@@ -1,16 +1,14 @@
-//! Kernel context switching for RISC-V 64-bit
+//! Kernel context switching for RISC-V
 //!
 //! This module implements kernel-level context switching between tasks.
 //! It handles saving and restoring callee-saved registers when switching
 //! between kernel threads.
 
-use core::arch::naked_asm;
-
 use crate::arch::Trapframe;
 use crate::mem::page::ContiguousPages;
 use crate::vm::vmem::MemoryArea;
 
-/// Kernel context for RISC-V 64-bit
+/// Kernel context for RISC-V
 ///
 /// Contains callee-saved registers that need to be preserved across
 /// function calls and context switches in kernel mode, as well as
@@ -18,9 +16,9 @@ use crate::vm::vmem::MemoryArea;
 #[repr(C, align(16))]
 #[derive(Debug)]
 pub struct KernelContext {
-    pub sp: u64,
-    pub ra: u64,
-    pub s: [u64; 12],
+    pub sp: usize,
+    pub ra: usize,
+    pub s: [usize; 12],
     pub kernel_stack: ContiguousPages,
 }
 
@@ -34,26 +32,26 @@ impl KernelContext {
         let num_pages = crate::environment::TASK_KERNEL_STACK_SIZE / crate::environment::PAGE_SIZE;
         let kernel_stack =
             ContiguousPages::new(num_pages).expect("Failed to allocate kernel stack");
-        let stack_top = kernel_stack.as_ptr() as u64
-            + (kernel_stack.len() * crate::environment::PAGE_SIZE) as u64;
+        let stack_top =
+            kernel_stack.as_ptr() as usize + kernel_stack.len() * crate::environment::PAGE_SIZE;
 
-        let trapframe_size = core::mem::size_of::<Trapframe>() as u64;
-        let trapframe_align = core::mem::align_of::<Trapframe>() as u64;
+        let trapframe_size = core::mem::size_of::<Trapframe>();
+        let trapframe_align = core::mem::align_of::<Trapframe>();
         debug_assert!(trapframe_align.is_power_of_two());
         let trapframe_addr = (stack_top - trapframe_size) & !(trapframe_align - 1);
 
         Self {
             sp: trapframe_addr,
-            ra: crate::task::task_initial_kernel_entrypoint as u64,
+            ra: crate::task::task_initial_kernel_entrypoint as usize,
             s: [0; 12],
             kernel_stack,
         }
     }
 
     /// Get the bottom of the kernel stack
-    pub fn get_kernel_stack_bottom_paddr(&self) -> u64 {
-        self.kernel_stack.as_paddr() as u64
-            + (self.kernel_stack.len() as u64 * crate::environment::PAGE_SIZE as u64)
+    pub fn get_kernel_stack_top(&self) -> usize {
+        self.kernel_stack.as_ptr() as usize
+            + self.kernel_stack.len() * crate::environment::PAGE_SIZE
     }
 
     pub fn get_kernel_stack_memory_area_paddr(&self) -> MemoryArea {
@@ -75,7 +73,7 @@ impl KernelContext {
     /// * `entry_point` - Function address to set as entry point
     ///
     pub fn set_entry_point(&mut self, entry_point: u64) {
-        self.ra = entry_point;
+        self.ra = usize::try_from(entry_point).expect("kernel entry exceeds XLEN");
     }
 
     /// Get entry point of this context
@@ -84,12 +82,12 @@ impl KernelContext {
     ///
     /// Function address of the entry point
     pub fn get_entry_point(&self) -> u64 {
-        self.ra
+        self.ra as u64
     }
 
     // Set stack pointer for this context (VA)
     pub fn set_sp(&mut self, sp_vaddr: u64) {
-        self.sp = sp_vaddr;
+        self.sp = usize::try_from(sp_vaddr).expect("kernel stack exceeds XLEN");
     }
 
     /// Get a mutable reference to the trapframe
@@ -128,37 +126,37 @@ impl KernelContext {
 /// and that both contexts point to valid memory.
 #[unsafe(naked)]
 pub unsafe extern "C" fn switch_to(current: *mut KernelContext, target: *const KernelContext) {
-    naked_asm!(
+    riscv_naked_asm!(
         // Save current context
-        "sd sp, 0(a0)",    // Save stack pointer
-        "sd ra, 8(a0)",    // Save return address
-        "sd s0, 16(a0)",   // Save s0
-        "sd s1, 24(a0)",   // Save s1
-        "sd s2, 32(a0)",   // Save s2
-        "sd s3, 40(a0)",   // Save s3
-        "sd s4, 48(a0)",   // Save s4
-        "sd s5, 56(a0)",   // Save s5
-        "sd s6, 64(a0)",   // Save s6
-        "sd s7, 72(a0)",   // Save s7
-        "sd s8, 80(a0)",   // Save s8
-        "sd s9, 88(a0)",   // Save s9
-        "sd s10, 96(a0)",  // Save s10
-        "sd s11, 104(a0)", // Save s11
+        "SCARLET_S sp, 0*SCARLET_WORD_BYTES(a0)", // Save stack pointer
+        "SCARLET_S ra, 1*SCARLET_WORD_BYTES(a0)", // Save return address
+        "SCARLET_S s0, 2*SCARLET_WORD_BYTES(a0)", // Save s0
+        "SCARLET_S s1, 3*SCARLET_WORD_BYTES(a0)", // Save s1
+        "SCARLET_S s2, 4*SCARLET_WORD_BYTES(a0)", // Save s2
+        "SCARLET_S s3, 5*SCARLET_WORD_BYTES(a0)", // Save s3
+        "SCARLET_S s4, 6*SCARLET_WORD_BYTES(a0)", // Save s4
+        "SCARLET_S s5, 7*SCARLET_WORD_BYTES(a0)", // Save s5
+        "SCARLET_S s6, 8*SCARLET_WORD_BYTES(a0)", // Save s6
+        "SCARLET_S s7, 9*SCARLET_WORD_BYTES(a0)", // Save s7
+        "SCARLET_S s8, 10*SCARLET_WORD_BYTES(a0)", // Save s8
+        "SCARLET_S s9, 11*SCARLET_WORD_BYTES(a0)", // Save s9
+        "SCARLET_S s10, 12*SCARLET_WORD_BYTES(a0)", // Save s10
+        "SCARLET_S s11, 13*SCARLET_WORD_BYTES(a0)", // Save s11
         // Load target context
-        "ld sp, 0(a1)",    // Load stack pointer
-        "ld ra, 8(a1)",    // Load return address
-        "ld s0, 16(a1)",   // Load s0
-        "ld s1, 24(a1)",   // Load s1
-        "ld s2, 32(a1)",   // Load s2
-        "ld s3, 40(a1)",   // Load s3
-        "ld s4, 48(a1)",   // Load s4
-        "ld s5, 56(a1)",   // Load s5
-        "ld s6, 64(a1)",   // Load s6
-        "ld s7, 72(a1)",   // Load s7
-        "ld s8, 80(a1)",   // Load s8
-        "ld s9, 88(a1)",   // Load s9
-        "ld s10, 96(a1)",  // Load s10
-        "ld s11, 104(a1)", // Load s11
+        "SCARLET_L sp, 0*SCARLET_WORD_BYTES(a1)", // Load stack pointer
+        "SCARLET_L ra, 1*SCARLET_WORD_BYTES(a1)", // Load return address
+        "SCARLET_L s0, 2*SCARLET_WORD_BYTES(a1)", // Load s0
+        "SCARLET_L s1, 3*SCARLET_WORD_BYTES(a1)", // Load s1
+        "SCARLET_L s2, 4*SCARLET_WORD_BYTES(a1)", // Load s2
+        "SCARLET_L s3, 5*SCARLET_WORD_BYTES(a1)", // Load s3
+        "SCARLET_L s4, 6*SCARLET_WORD_BYTES(a1)", // Load s4
+        "SCARLET_L s5, 7*SCARLET_WORD_BYTES(a1)", // Load s5
+        "SCARLET_L s6, 8*SCARLET_WORD_BYTES(a1)", // Load s6
+        "SCARLET_L s7, 9*SCARLET_WORD_BYTES(a1)", // Load s7
+        "SCARLET_L s8, 10*SCARLET_WORD_BYTES(a1)", // Load s8
+        "SCARLET_L s9, 11*SCARLET_WORD_BYTES(a1)", // Load s9
+        "SCARLET_L s10, 12*SCARLET_WORD_BYTES(a1)", // Load s10
+        "SCARLET_L s11, 13*SCARLET_WORD_BYTES(a1)", // Load s11
         // Return to target context
         "ret",
     );

@@ -4,7 +4,6 @@
 //! enabling kernel tasks to yield execution and resume later at the same point.
 
 use crate::arch::context::KernelContext;
-use core::arch::naked_asm;
 
 /// Switch from the current kernel context to the next kernel context
 ///
@@ -27,45 +26,45 @@ use core::arch::naked_asm;
 /// - Once when this context is resumed later
 #[unsafe(naked)]
 pub unsafe extern "C" fn switch_to(prev_ctx: *mut KernelContext, next_ctx: *const KernelContext) {
-    naked_asm!(
+    riscv_naked_asm!(
         // Save current context (prev_ctx)
         // a0 = prev_ctx, a1 = next_ctx
 
         // Save stack pointer
-        "sd sp, 0(a0)",
+        "SCARLET_S sp, 0*SCARLET_WORD_BYTES(a0)",
         // Save return address
-        "sd ra, 8(a0)",
+        "SCARLET_S ra, 1*SCARLET_WORD_BYTES(a0)",
         // Save callee-saved registers s0-s11
-        "sd s0, 16(a0)",
-        "sd s1, 24(a0)",
-        "sd s2, 32(a0)",
-        "sd s3, 40(a0)",
-        "sd s4, 48(a0)",
-        "sd s5, 56(a0)",
-        "sd s6, 64(a0)",
-        "sd s7, 72(a0)",
-        "sd s8, 80(a0)",
-        "sd s9, 88(a0)",
-        "sd s10, 96(a0)",
-        "sd s11, 104(a0)",
+        "SCARLET_S s0, 2*SCARLET_WORD_BYTES(a0)",
+        "SCARLET_S s1, 3*SCARLET_WORD_BYTES(a0)",
+        "SCARLET_S s2, 4*SCARLET_WORD_BYTES(a0)",
+        "SCARLET_S s3, 5*SCARLET_WORD_BYTES(a0)",
+        "SCARLET_S s4, 6*SCARLET_WORD_BYTES(a0)",
+        "SCARLET_S s5, 7*SCARLET_WORD_BYTES(a0)",
+        "SCARLET_S s6, 8*SCARLET_WORD_BYTES(a0)",
+        "SCARLET_S s7, 9*SCARLET_WORD_BYTES(a0)",
+        "SCARLET_S s8, 10*SCARLET_WORD_BYTES(a0)",
+        "SCARLET_S s9, 11*SCARLET_WORD_BYTES(a0)",
+        "SCARLET_S s10, 12*SCARLET_WORD_BYTES(a0)",
+        "SCARLET_S s11, 13*SCARLET_WORD_BYTES(a0)",
         // Restore next context (next_ctx)
         // Load stack pointer
-        "ld sp, 0(a1)",
+        "SCARLET_L sp, 0*SCARLET_WORD_BYTES(a1)",
         // Load return address
-        "ld ra, 8(a1)",
+        "SCARLET_L ra, 1*SCARLET_WORD_BYTES(a1)",
         // Load callee-saved registers s0-s11
-        "ld s0, 16(a1)",
-        "ld s1, 24(a1)",
-        "ld s2, 32(a1)",
-        "ld s3, 40(a1)",
-        "ld s4, 48(a1)",
-        "ld s5, 56(a1)",
-        "ld s6, 64(a1)",
-        "ld s7, 72(a1)",
-        "ld s8, 80(a1)",
-        "ld s9, 88(a1)",
-        "ld s10, 96(a1)",
-        "ld s11, 104(a1)",
+        "SCARLET_L s0, 2*SCARLET_WORD_BYTES(a1)",
+        "SCARLET_L s1, 3*SCARLET_WORD_BYTES(a1)",
+        "SCARLET_L s2, 4*SCARLET_WORD_BYTES(a1)",
+        "SCARLET_L s3, 5*SCARLET_WORD_BYTES(a1)",
+        "SCARLET_L s4, 6*SCARLET_WORD_BYTES(a1)",
+        "SCARLET_L s5, 7*SCARLET_WORD_BYTES(a1)",
+        "SCARLET_L s6, 8*SCARLET_WORD_BYTES(a1)",
+        "SCARLET_L s7, 9*SCARLET_WORD_BYTES(a1)",
+        "SCARLET_L s8, 10*SCARLET_WORD_BYTES(a1)",
+        "SCARLET_L s9, 11*SCARLET_WORD_BYTES(a1)",
+        "SCARLET_L s10, 12*SCARLET_WORD_BYTES(a1)",
+        "SCARLET_L s11, 13*SCARLET_WORD_BYTES(a1)",
         // Return to the saved return address
         // This will either:
         // - Return to the original caller (first time)
@@ -85,8 +84,8 @@ pub unsafe extern "C" fn switch_to(prev_ctx: *mut KernelContext, next_ctx: *cons
 /// * `stack_top` - Top of the stack for this context
 pub fn init_kernel_context(ctx: &mut KernelContext, entry_point: fn(), stack_top: u64) {
     // Set up initial state for first-time execution
-    ctx.sp = stack_top;
-    ctx.ra = entry_point as u64;
+    ctx.sp = usize::try_from(stack_top).expect("kernel stack exceeds XLEN");
+    ctx.ra = entry_point as usize;
 
     // Clear all saved registers
     ctx.s = [0; 12];
@@ -111,8 +110,8 @@ mod tests {
 
         init_kernel_context(&mut ctx, test_entry, stack_top);
 
-        assert_eq!(ctx.sp, stack_top);
-        assert_eq!(ctx.ra, test_entry as u64);
+        assert_eq!(ctx.sp as u64, stack_top);
+        assert_eq!(ctx.ra, test_entry as usize);
         assert_eq!(ctx.s, [0; 12]);
     }
 }

@@ -545,12 +545,12 @@ impl ScarletAbi {
                 .vm_manager
                 .translate_to_kva(frame_base + 280)
                 .ok_or("Failed to translate signal frame address")?;
-            *(paddr as *mut u64) = trapframe.epc;
+            *(paddr as *mut u64) = trapframe.get_current_pc();
         }
 
         write_event_info(task, event_info_addr, content_type, subtype)?;
 
-        trapframe.epc = handler.handler as u64;
+        trapframe.set_pc(handler.handler as u64);
         trapframe.regs.reg[2] = sp;
         trapframe.regs.reg[10] = event_info_addr;
         trapframe.regs.reg[11] = subtype;
@@ -593,7 +593,7 @@ impl ScarletAbi {
                 .vm_manager
                 .translate_to_kva(frame_base + 280)
                 .ok_or("Failed to translate signal frame address")?;
-            trapframe.epc = *(paddr as *const u64);
+            trapframe.set_pc(*(paddr as *const u64));
         }
 
         Ok(())

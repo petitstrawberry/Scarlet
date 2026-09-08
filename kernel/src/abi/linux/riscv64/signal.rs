@@ -59,10 +59,10 @@ pub fn setup_signal_handler(trapframe: &mut Trapframe, handler_addr: usize, sign
             Some(p) => p,
             None => return,
         };
-        *(paddr as *mut u64) = trapframe.epc;
+        *(paddr as *mut u64) = trapframe.get_current_pc();
     }
 
-    trapframe.epc = handler_addr as u64;
+    trapframe.set_pc(handler_addr as u64);
     trapframe.regs.reg[2] = sp;
     trapframe.regs.reg[10] = signal as usize; // a0 = signal number
     trapframe.regs.reg[1] = frame_base; // ra = trampoline (rt_sigreturn)
@@ -93,7 +93,7 @@ pub fn sys_rt_sigreturn(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -
             Some(p) => p,
             None => return usize::MAX,
         };
-        trapframe.epc = *(paddr as *const u64);
+        trapframe.set_pc(*(paddr as *const u64));
     }
 
     0

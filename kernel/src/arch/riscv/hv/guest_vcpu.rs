@@ -66,12 +66,12 @@ impl GuestVcpu {
 
     pub fn switch(&mut self, trapframe: &mut Trapframe) {
         trapframe.regs = self.iregs;
-        trapframe.epc = self.pc;
+        trapframe.set_pc(self.pc);
     }
 
     pub fn save(&mut self, trapframe: &Trapframe) {
         self.iregs = trapframe.regs;
-        self.pc = trapframe.epc;
+        self.pc = trapframe.get_current_pc();
         self.csrs = GuestCsrState::save();
         // TODO: Refactor SPP handling to avoid this hack. We need to determine the guest mode based on the SPP bit in sstatus, but we can't read sstatus until we've saved the guest CSRs. For now, we'll just set the mode based on the previous mode before trap entry, which should be correct for most cases. (Issue #383)
         self.mode = match crate::arch::riscv::trap::prev_mode() {

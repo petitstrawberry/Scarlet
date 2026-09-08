@@ -50,6 +50,10 @@ pub use user_context::{
 pub mod riscv;
 #[cfg(target_arch = "riscv64")]
 pub use riscv::*;
+// Preserve the existing RV64 BSP module path while implementation code shares
+// the ISA module. RV32 never exposes an architecture named riscv64.
+#[cfg(target_arch = "riscv64")]
+pub use riscv as riscv64;
 
 #[cfg(target_arch = "aarch64")]
 pub mod aarch64;

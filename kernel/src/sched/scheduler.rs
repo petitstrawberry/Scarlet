@@ -5841,17 +5841,17 @@ fn kernel_context_switch(cpu_id: usize, from_task_id: usize, to_task_id: usize) 
 fn setup_task_cpu_state(cpu: &mut Arch, task: &Task) {
     let cpuid = cpu.get_cpuid();
     let sp = if let Some((_slot, base)) = task.get_kernel_stack_window_base() {
-        (base + crate::environment::PAGE_SIZE + crate::environment::TASK_KERNEL_STACK_SIZE) as u64
+        base + crate::environment::PAGE_SIZE + crate::environment::TASK_KERNEL_STACK_SIZE
     } else {
-        task.get_kernel_stack_bottom_paddr()
+        task.get_kernel_stack_top()
     };
 
     let trampoline_arch = crate::vm::get_trampoline_arch(cpuid);
     crate::breadcrumb::drop_cpu(cpuid, crate::breadcrumb::TRAMP_GET, trampoline_arch as u64);
     crate::arch::set_arch(trampoline_arch);
-    crate::breadcrumb::drop_cpu(cpuid, crate::breadcrumb::SET_ARCH_DONE, sp);
+    crate::breadcrumb::drop_cpu(cpuid, crate::breadcrumb::SET_ARCH_DONE, sp as u64);
     cpu.set_kernel_stack(sp);
-    crate::breadcrumb::drop_cpu(cpuid, crate::breadcrumb::SETSP_DONE, sp);
+    crate::breadcrumb::drop_cpu(cpuid, crate::breadcrumb::SETSP_DONE, sp as u64);
     cpu.set_trap_handler(get_user_trap_handler());
     crate::breadcrumb::drop_cpu(cpuid, crate::breadcrumb::SETTH_DONE, 0);
     let asid = task.vm_manager.get_asid();
