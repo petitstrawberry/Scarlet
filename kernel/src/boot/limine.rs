@@ -1,5 +1,5 @@
+use crate::sync::Once;
 use core::cell::UnsafeCell;
-use core::sync::atomic::{AtomicU64, Ordering};
 use limine::BaseRevision;
 use limine::memmap;
 
@@ -73,8 +73,8 @@ pub fn ensure_base_revision_supported() {
 
 /// Cached wall-clock nanoseconds from Limine's `Date at Boot`.
 ///
-/// `u64::MAX` is the "not captured" sentinel.
-static DATE_AT_BOOT_NS: AtomicU64 = AtomicU64::new(u64::MAX);
+/// Published once before leaving the bootloader's address space.
+static DATE_AT_BOOT_NS: Once<u64> = Once::new();
 const CMDLINE_BUFFER_SIZE: usize = 4096;
 
 struct CmdlineBuffer(UnsafeCell<[u8; CMDLINE_BUFFER_SIZE]>);
@@ -139,7 +139,7 @@ pub fn capture_date_at_boot() {
     );
     if secs > 0 {
         if let Some(ns) = (secs as u64).checked_mul(1_000_000_000) {
-            DATE_AT_BOOT_NS.store(ns, Ordering::SeqCst);
+            let _ = DATE_AT_BOOT_NS.set(ns);
         } else {
             crate::println!("[boot] Limine Date at Boot: timestamp overflow, ignored");
         }
@@ -154,8 +154,7 @@ pub fn capture_date_at_boot() {
 /// `Date at Boot`. Returns `None` if not captured (e.g. non-EFI boot). The
 /// value has ~1s granularity (Limine exposes a whole-second timestamp).
 pub fn date_at_boot_ns() -> Option<u64> {
-    let ns = DATE_AT_BOOT_NS.load(Ordering::Acquire);
-    if ns == u64::MAX { None } else { Some(ns) }
+    DATE_AT_BOOT_NS.get().copied()
 }
 
 pub fn response<T>(response: Option<&'static T>, name: &str) -> &'static T {

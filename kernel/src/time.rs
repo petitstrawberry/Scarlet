@@ -3,7 +3,7 @@
 //! This module provides time-related functionality for the kernel,
 //! including current time access for filesystem operations.
 
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use crate::sync::Once;
 
 use crate::timer::get_time_us;
 
@@ -47,8 +47,9 @@ pub fn udelay(us: u64) {
 // Wall-clock (system / real) time
 // ---------------------------------------------------------------------------
 
-static WALL_CLOCK_BASE_NS: AtomicU64 = AtomicU64::new(0);
-static WALL_CLOCK_INITIALIZED: AtomicBool = AtomicBool::new(false);
+// Immutable after the first RTC sample. Once publishes the value before its
+// ready flag, so readers cannot observe an initialized clock with a zero base.
+static WALL_CLOCK_BASE_NS: Once<u64> = Once::new();
 
 /// Get the current wall-clock time in nanoseconds since the Unix epoch.
 ///
@@ -57,12 +58,9 @@ static WALL_CLOCK_INITIALIZED: AtomicBool = AtomicBool::new(false);
 /// `Some(ns)` once an RTC source has initialized the wall clock, or `None`
 /// before the first RTC probe completes.
 pub fn system_time_ns() -> Option<u64> {
-    if WALL_CLOCK_INITIALIZED.load(Ordering::Acquire) {
-        let base = WALL_CLOCK_BASE_NS.load(Ordering::Relaxed);
-        Some(base.wrapping_add(current_time_ns()))
-    } else {
-        None
-    }
+    WALL_CLOCK_BASE_NS
+        .get()
+        .map(|base| base.wrapping_add(current_time_ns()))
 }
 
 /// Get the current wall-clock time in microseconds since the Unix epoch.
@@ -85,7 +83,7 @@ pub fn system_time_s() -> Option<u64> {
 
 /// Whether the wall clock has been initialized from an RTC source.
 pub fn is_system_time_available() -> bool {
-    WALL_CLOCK_INITIALIZED.load(Ordering::Acquire)
+    WALL_CLOCK_BASE_NS.is_completed()
 }
 
 /// Establish the wall-clock epoch from a single RTC sample.
@@ -125,15 +123,9 @@ pub fn initialize_wall_clock_from_rtc_sample(
     let base_ns = rtc_epoch_ns - midpoint_ns;
 
     // First-wins: only the first RTC source seeds the wall clock.
-    if WALL_CLOCK_INITIALIZED
-        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-        .is_err()
-    {
-        return Err("wall clock already initialized");
-    }
-
-    WALL_CLOCK_BASE_NS.store(base_ns, Ordering::Relaxed);
-    Ok(())
+    WALL_CLOCK_BASE_NS
+        .set(base_ns)
+        .map_err(|_| "wall clock already initialized")
 }
 
 /// Convert microseconds to a human-readable format (for debugging)
