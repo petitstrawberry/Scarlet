@@ -3,12 +3,13 @@
 //! This module provides a full TCP implementation with 3-way handshake,
 //! flow control, and retransmission.
 
+use crate::sync::atomic::AtomicU64;
 use crate::sync::{IrqRwSpinLock, IrqSpinLock, WaitResult};
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::string::String;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicUsize, Ordering};
 
 use crate::network::ipv4::Ipv4Address;
 use crate::network::protocol_stack::get_network_manager;

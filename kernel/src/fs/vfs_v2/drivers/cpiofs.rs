@@ -4,6 +4,7 @@
 //! used as initramfs. It implements the VFS v2 architecture.
 
 use crate::sync::IrqRwSpinLock;
+use crate::sync::atomic::AtomicU64;
 use alloc::sync::Weak;
 use alloc::{
     boxed::Box,
@@ -14,7 +15,7 @@ use alloc::{
     vec::Vec,
 };
 use core::any::Any;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::Ordering;
 
 use crate::fs::{
     FileMetadata, FileObject, FilePermission, FileSystemError, FileSystemErrorKind, FileType,

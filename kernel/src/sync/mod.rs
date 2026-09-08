@@ -7,6 +7,7 @@
 //! modules import these types from `crate::sync`; the `spin` crate is no
 //! longer re-exported.
 
+pub mod atomic;
 pub mod cpu_local;
 pub mod futex;
 pub mod irq_guard;

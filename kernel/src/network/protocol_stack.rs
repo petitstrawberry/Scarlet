@@ -757,8 +757,9 @@ mod tests {
     use super::*;
     use crate::network::NetworkManager;
     use crate::sync::IrqRwSpinLock;
+    use crate::sync::atomic::AtomicU64;
     use alloc::{string::ToString, sync::Arc};
-    use core::sync::atomic::{AtomicU64, Ordering};
+    use core::sync::atomic::Ordering;
 
     #[test_case]
     fn test_protocol_stack_manager_creation() {

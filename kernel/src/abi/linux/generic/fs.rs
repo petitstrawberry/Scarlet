@@ -1,3 +1,4 @@
+use crate::sync::atomic::AtomicU64;
 use crate::sync::{IrqRwSpinLock, Once};
 use crate::{
     abi::linux::generic::LinuxAbi,
@@ -17,7 +18,7 @@ use alloc::{
     vec,
     vec::Vec,
 };
-use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU32, Ordering};
 
 use super::errno;
 

@@ -31,9 +31,8 @@
 
 extern crate alloc;
 
-use core::sync::atomic::{
-    AtomicBool, AtomicPtr, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering,
-};
+use crate::sync::atomic::{AtomicU64, try_load_u64};
+use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU8, AtomicU32, AtomicUsize, Ordering};
 
 use alloc::{
     collections::{BTreeMap, BTreeSet, vec_deque::VecDeque},
@@ -394,30 +393,31 @@ impl SliceDiagnosticSlot {
 
     #[inline(always)]
     fn snapshot(&self) -> SliceDiagnosticSnapshot {
-        for _ in 0..4 {
-            let sequence_before = self.sequence.load(Ordering::SeqCst);
-            if sequence_before & 1 != 0 {
-                continue;
-            }
-            let snapshot = SliceDiagnosticSnapshot {
-                action: self.action.load(Ordering::SeqCst),
-                task_id: self.task_id.load(Ordering::SeqCst),
-                token: self.token.load(Ordering::SeqCst),
-                handle_id: self.handle_id.load(Ordering::SeqCst),
-                generation: self.generation.load(Ordering::SeqCst),
-                duration_ns: self.duration_ns.load(Ordering::SeqCst),
-                timer_deadline_ns: self.timer_deadline_ns.load(Ordering::SeqCst),
-                fair_vruntime_ns: self.fair_vruntime_ns.load(Ordering::SeqCst),
-                fair_vdeadline_ns: self.fair_vdeadline_ns.load(Ordering::SeqCst),
-                deadline_remaining_ns: self.deadline_remaining_ns.load(Ordering::SeqCst),
-                deadline_absolute_ns: self.deadline_absolute_ns.load(Ordering::SeqCst),
-                flags: self.flags.load(Ordering::SeqCst),
-            };
-            if sequence_before == self.sequence.load(Ordering::SeqCst) {
-                return snapshot;
-            }
+        (0..4)
+            .find_map(|_| self.try_snapshot())
+            .unwrap_or_else(|| SliceDiagnosticSnapshot::default())
+    }
+
+    fn try_snapshot(&self) -> Option<SliceDiagnosticSnapshot> {
+        let sequence_before = try_load_u64(&self.sequence, Ordering::SeqCst)?;
+        if sequence_before & 1 != 0 {
+            return None;
         }
-        SliceDiagnosticSnapshot::default()
+        let snapshot = SliceDiagnosticSnapshot {
+            action: try_load_u64(&self.action, Ordering::SeqCst)?,
+            task_id: try_load_u64(&self.task_id, Ordering::SeqCst)?,
+            token: try_load_u64(&self.token, Ordering::SeqCst)?,
+            handle_id: try_load_u64(&self.handle_id, Ordering::SeqCst)?,
+            generation: try_load_u64(&self.generation, Ordering::SeqCst)?,
+            duration_ns: try_load_u64(&self.duration_ns, Ordering::SeqCst)?,
+            timer_deadline_ns: try_load_u64(&self.timer_deadline_ns, Ordering::SeqCst)?,
+            fair_vruntime_ns: try_load_u64(&self.fair_vruntime_ns, Ordering::SeqCst)?,
+            fair_vdeadline_ns: try_load_u64(&self.fair_vdeadline_ns, Ordering::SeqCst)?,
+            deadline_remaining_ns: try_load_u64(&self.deadline_remaining_ns, Ordering::SeqCst)?,
+            deadline_absolute_ns: try_load_u64(&self.deadline_absolute_ns, Ordering::SeqCst)?,
+            flags: try_load_u64(&self.flags, Ordering::SeqCst)?,
+        };
+        (sequence_before == try_load_u64(&self.sequence, Ordering::SeqCst)?).then_some(snapshot)
     }
 }
 
@@ -519,7 +519,7 @@ fn should_log_deadline_slice_anomaly(cpu_id: usize, now_ns: u64) -> bool {
     }
 }
 
-/// Return the last lock-free scheduler-slice operation for one CPU.
+/// Sample the last scheduler-slice operation for one CPU without waiting.
 ///
 /// # Arguments
 ///
@@ -527,7 +527,8 @@ fn should_log_deadline_slice_anomaly(cpu_id: usize, now_ns: u64) -> bool {
 ///
 /// # Returns
 ///
-/// The latest completed operation, or `None` for an invalid CPU ID.
+/// The latest completed operation, a default snapshot if publication is busy,
+/// or `None` for an invalid CPU ID.
 pub(crate) fn slice_diagnostic_snapshot(cpu_id: usize) -> Option<SliceDiagnosticSnapshot> {
     (cpu_id < MAX_NUM_CPUS).then(|| SLICE_DIAGNOSTICS[cpu_id].snapshot())
 }
@@ -602,8 +603,8 @@ static FORK_TRACE_PICKED_TASKS: Once<IrqSpinLock<BTreeSet<usize>>> = Once::new()
 const FORK_TRACE_ATOMIC_SLOTS: usize = 1024;
 static FORK_TRACE_ATOMIC_TASKS: [AtomicUsize; FORK_TRACE_ATOMIC_SLOTS] =
     [const { AtomicUsize::new(0) }; FORK_TRACE_ATOMIC_SLOTS];
-static FORK_TRACE_ATOMIC_CPU_MASKS: [AtomicU64; FORK_TRACE_ATOMIC_SLOTS] =
-    [const { AtomicU64::new(0) }; FORK_TRACE_ATOMIC_SLOTS];
+static FORK_TRACE_ATOMIC_CPU_MASKS: [AtomicUsize; FORK_TRACE_ATOMIC_SLOTS] =
+    [const { AtomicUsize::new(0) }; FORK_TRACE_ATOMIC_SLOTS];
 
 /// Get the global task pool (lazy initialization on first call)
 pub fn get_task_pool() -> &'static TaskPool {
@@ -1015,8 +1016,9 @@ static DEADLINE_QUEUES: [IrqSpinLock<DeadlineQueue>; MAX_NUM_CPUS] =
 static DEADLINE_ADMISSION: [AtomicU32; MAX_NUM_CPUS] = [const { AtomicU32::new(0) }; MAX_NUM_CPUS];
 static ZOMBIE_QUEUE: IrqSpinLock<VecDeque<usize>> = IrqSpinLock::new(VecDeque::new());
 static BLOCKED_QUEUE: IrqSpinLock<VecDeque<usize>> = IrqSpinLock::new(VecDeque::new());
-const _: () = assert!(MAX_NUM_CPUS <= u64::BITS as usize);
-static ONLINE_CPU_MASK: AtomicU64 = AtomicU64::new(0);
+// CPU masks index the configured CPU array; they do not need a u64 counter.
+const _: () = assert!(MAX_NUM_CPUS <= usize::BITS as usize);
+static ONLINE_CPU_MASK: AtomicUsize = AtomicUsize::new(0);
 static IDLE_TASK_IDS: [AtomicUsize; MAX_NUM_CPUS] = [const { AtomicUsize::new(0) }; MAX_NUM_CPUS];
 static PENDING_IDLE_TO_USER_TRAP_TASK: [AtomicUsize; MAX_NUM_CPUS] =
     [const { AtomicUsize::new(0) }; MAX_NUM_CPUS];
@@ -1692,7 +1694,6 @@ fn diagnostic_run_task_on_bsp(task: &Task) -> bool {
     })
 }
 
-static DEBUG_TICK: AtomicU64 = AtomicU64::new(0);
 static NEXT_CPU: AtomicUsize = AtomicUsize::new(0);
 
 pub const DEBUG_SMP_TASK_FLOW: bool = false;
@@ -1768,7 +1769,7 @@ fn release_deferred_prev(cpu_id: usize) {
         prev_id as u64,
         cpu_id as u64,
     );
-    // The lock-free breadcrumb above retains release diagnostics without
+    // The breadcrumb above retains release diagnostics without
     // serializing every traced task switch through the early-console lock.
     // if is_fork_trace_task(prev_id) {
     //     crate::println!(
@@ -2625,7 +2626,7 @@ pub fn refresh_current_task_slice(cpu_id: usize) {
 pub fn register_online_cpu(cpu_id: usize) {
     debug_assert!(cpu_id < MAX_NUM_CPUS);
     if cpu_id < MAX_NUM_CPUS {
-        ONLINE_CPU_MASK.fetch_or(cpu_mask_bit(cpu_id), Ordering::Release);
+        ONLINE_CPU_MASK.fetch_or(1usize << cpu_id, Ordering::Release);
     }
 }
 
@@ -2641,10 +2642,10 @@ fn cpu_mask_bit(cpu_id: usize) -> u64 {
 ///
 /// # Returns
 ///
-/// A CPU mask with bit `n` set when scheduler CPU `n` is online. CPU IDs that
-/// do not fit in a 64-bit mask are omitted.
+/// A CPU mask with bit `n` set when scheduler CPU `n` is online. The configured
+/// CPU count must fit a native word; the diagnostic return type remains u64.
 pub fn online_cpu_mask() -> u64 {
-    ONLINE_CPU_MASK.load(Ordering::Acquire)
+    ONLINE_CPU_MASK.load(Ordering::Acquire) as u64
 }
 
 #[inline]
@@ -4677,7 +4678,7 @@ pub fn is_fork_trace_task(task_id: usize) -> bool {
 ///
 /// `true` when the caller should emit the first-trap diagnostic.
 pub fn take_fork_trace_first_user_trap(cpu_id: usize, task_id: usize) -> bool {
-    if cpu_id >= MAX_NUM_CPUS || cpu_id >= u64::BITS as usize {
+    if cpu_id >= MAX_NUM_CPUS {
         return false;
     }
 
@@ -4688,7 +4689,7 @@ pub fn take_fork_trace_first_user_trap(cpu_id: usize, task_id: usize) -> bool {
             continue;
         }
 
-        let cpu_bit = 1u64 << cpu_id;
+        let cpu_bit = 1usize << cpu_id;
         return FORK_TRACE_ATOMIC_CPU_MASKS[slot].fetch_or(cpu_bit, Ordering::AcqRel) & cpu_bit
             == 0;
     }
@@ -5916,7 +5917,6 @@ pub fn reset() {
     slice_callback_contexts().lock().clear();
     deadline_callback_contexts().lock().clear();
     NEXT_CPU.store(0, Ordering::SeqCst);
-    DEBUG_TICK.store(0, Ordering::SeqCst);
     DEBUG_ENQUEUE_SEQ.store(0, Ordering::SeqCst);
     SCHED_MIGRATIONS_TOTAL.store(0, Ordering::SeqCst);
     SCHED_MIGRATION_PROMOTIONS.store(0, Ordering::SeqCst);

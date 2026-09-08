@@ -7,12 +7,13 @@
 
 extern crate alloc;
 
+use crate::sync::atomic::{AtomicU64, try_load_u64};
 use alloc::collections::{BTreeMap, BinaryHeap};
 use alloc::sync::{Arc, Weak};
 use core::cell::UnsafeCell;
 use core::cmp::Ordering as CmpOrdering;
 use core::marker::PhantomData;
-use core::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU8, Ordering};
 
 use crate::arch::timer::ArchTimer;
 use crate::environment::MAX_NUM_CPUS;
@@ -153,7 +154,7 @@ static TIMER_STALL_LAST_SAMPLE_NS: [AtomicU64; MAX_NUM_CPUS] =
 const TIMER_QUEUE_SNAPSHOT_RETRY_LIMIT: usize = 4;
 const TIMER_STALL_SAMPLE_INTERVAL_NS: u64 = 1_000_000_000;
 
-/// Lock-free diagnostic view of one CPU's software-timer queue.
+/// Non-waiting diagnostic view of one CPU's software-timer queue.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct TimerQueueDiagnosticSnapshot {
     /// Even publication sequence for this snapshot.
@@ -174,7 +175,7 @@ pub(crate) struct TimerQueueDiagnosticSnapshot {
     pub stale_heap_nodes: u64,
 }
 
-/// Combined lock-free timer state used by cross-CPU stall diagnostics.
+/// Combined non-waiting timer state used by cross-CPU stall diagnostics.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct TimerDiagnosticSnapshot {
     /// Timer ID whose hard deadline was last programmed, or zero when stopped.
@@ -187,7 +188,7 @@ pub(crate) struct TimerDiagnosticSnapshot {
     pub arch: ArchTimerDiagnosticSnapshot,
 }
 
-/// Lock-free architected-timer state published at a critical execution boundary.
+/// Non-waiting architected-timer state published at a critical execution boundary.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct ArchTimerDiagnosticSnapshot {
     /// Selected timer control register.
@@ -253,29 +254,30 @@ impl TimerQueueDiagnosticSlot {
 
     #[inline(always)]
     fn snapshot(&self) -> TimerQueueDiagnosticSnapshot {
-        for _ in 0..TIMER_QUEUE_SNAPSHOT_RETRY_LIMIT {
-            let sequence_before = self.sequence.load(Ordering::SeqCst);
-            if sequence_before & 1 != 0 {
-                continue;
-            }
-            let snapshot = TimerQueueDiagnosticSnapshot {
-                sequence: sequence_before,
-                head_id: self.head_id.load(Ordering::SeqCst),
-                head_soft_deadline_ns: self.head_soft_deadline_ns.load(Ordering::SeqCst),
-                head_hard_deadline_ns: self.head_hard_deadline_ns.load(Ordering::SeqCst),
-                head_context: self.head_context.load(Ordering::SeqCst),
-                live_entries: self.live_entries.load(Ordering::SeqCst),
-                heap_nodes: self.heap_nodes.load(Ordering::SeqCst),
-                stale_heap_nodes: self.stale_heap_nodes.load(Ordering::SeqCst),
-            };
-            if sequence_before == self.sequence.load(Ordering::SeqCst) {
-                return snapshot;
-            }
+        (0..TIMER_QUEUE_SNAPSHOT_RETRY_LIMIT)
+            .find_map(|_| self.try_snapshot())
+            .unwrap_or_else(|| TimerQueueDiagnosticSnapshot {
+                sequence: u64::MAX,
+                ..TimerQueueDiagnosticSnapshot::default()
+            })
+    }
+
+    fn try_snapshot(&self) -> Option<TimerQueueDiagnosticSnapshot> {
+        let sequence_before = try_load_u64(&self.sequence, Ordering::SeqCst)?;
+        if sequence_before & 1 != 0 {
+            return None;
         }
-        TimerQueueDiagnosticSnapshot {
-            sequence: u64::MAX,
-            ..TimerQueueDiagnosticSnapshot::default()
-        }
+        let snapshot = TimerQueueDiagnosticSnapshot {
+            sequence: sequence_before,
+            head_id: try_load_u64(&self.head_id, Ordering::SeqCst)?,
+            head_soft_deadline_ns: try_load_u64(&self.head_soft_deadline_ns, Ordering::SeqCst)?,
+            head_hard_deadline_ns: try_load_u64(&self.head_hard_deadline_ns, Ordering::SeqCst)?,
+            head_context: try_load_u64(&self.head_context, Ordering::SeqCst)?,
+            live_entries: try_load_u64(&self.live_entries, Ordering::SeqCst)?,
+            heap_nodes: try_load_u64(&self.heap_nodes, Ordering::SeqCst)?,
+            stale_heap_nodes: try_load_u64(&self.stale_heap_nodes, Ordering::SeqCst)?,
+        };
+        (sequence_before == try_load_u64(&self.sequence, Ordering::SeqCst)?).then_some(snapshot)
     }
 }
 
@@ -320,30 +322,31 @@ impl ArchTimerDiagnosticSlot {
 
     #[inline(always)]
     fn snapshot(&self) -> ArchTimerDiagnosticSnapshot {
-        for _ in 0..TIMER_QUEUE_SNAPSHOT_RETRY_LIMIT {
-            let sequence_before = self.sequence.load(Ordering::SeqCst);
-            if sequence_before & 1 != 0 {
-                continue;
-            }
-            let snapshot = ArchTimerDiagnosticSnapshot {
-                control: self.control.load(Ordering::SeqCst),
-                counter: self.counter.load(Ordering::SeqCst),
-                compare: self.compare.load(Ordering::SeqCst),
-                return_spsr: self.return_spsr.load(Ordering::SeqCst),
-                return_pc: self.return_pc.load(Ordering::SeqCst),
-            };
-            if sequence_before == self.sequence.load(Ordering::SeqCst) {
-                return snapshot;
-            }
+        (0..TIMER_QUEUE_SNAPSHOT_RETRY_LIMIT)
+            .find_map(|_| self.try_snapshot())
+            .unwrap_or_else(|| ArchTimerDiagnosticSnapshot::default())
+    }
+
+    fn try_snapshot(&self) -> Option<ArchTimerDiagnosticSnapshot> {
+        let sequence_before = try_load_u64(&self.sequence, Ordering::SeqCst)?;
+        if sequence_before & 1 != 0 {
+            return None;
         }
-        ArchTimerDiagnosticSnapshot::default()
+        let snapshot = ArchTimerDiagnosticSnapshot {
+            control: try_load_u64(&self.control, Ordering::SeqCst)?,
+            counter: try_load_u64(&self.counter, Ordering::SeqCst)?,
+            compare: try_load_u64(&self.compare, Ordering::SeqCst)?,
+            return_spsr: try_load_u64(&self.return_spsr, Ordering::SeqCst)?,
+            return_pc: try_load_u64(&self.return_pc, Ordering::SeqCst)?,
+        };
+        (sequence_before == try_load_u64(&self.sequence, Ordering::SeqCst)?).then_some(snapshot)
     }
 }
 
 static ARCH_TIMER_DIAGNOSTICS: [ArchTimerDiagnosticSlot; MAX_NUM_CPUS] =
     [const { ArchTimerDiagnosticSlot::new() }; MAX_NUM_CPUS];
 
-/// Return a CPU's local timer IRQ count without taking a lock.
+/// Sample a CPU's local timer IRQ count without waiting.
 ///
 /// # Arguments
 ///
@@ -351,10 +354,12 @@ static ARCH_TIMER_DIAGNOSTICS: [ArchTimerDiagnosticSlot; MAX_NUM_CPUS] =
 ///
 /// # Returns
 ///
-/// The current count, or `None` when `cpu_id` is outside the supported range.
+/// The current count, or `None` for an invalid CPU ID or busy software atomic.
 #[inline(always)]
 pub fn timer_irq_count(cpu_id: usize) -> Option<u64> {
-    (cpu_id < MAX_NUM_CPUS).then(|| TIMER_IRQ_COUNTS[cpu_id].load(Ordering::Relaxed))
+    TIMER_IRQ_COUNTS
+        .get(cpu_id)
+        .and_then(|count| try_load_u64(count, Ordering::Relaxed))
 }
 
 /// Return the last local hardware-timer deadline requested for a CPU.
@@ -366,13 +371,15 @@ pub fn timer_irq_count(cpu_id: usize) -> Option<u64> {
 /// # Returns
 ///
 /// The requested absolute monotonic deadline in nanoseconds, zero when the
-/// timer was stopped, or `None` when `cpu_id` is outside the supported range.
+/// timer was stopped, or `None` for an invalid CPU ID or busy software atomic.
 #[inline(always)]
 pub fn timer_programmed_deadline_ns(cpu_id: usize) -> Option<u64> {
-    (cpu_id < MAX_NUM_CPUS).then(|| TIMER_PROGRAMMED_DEADLINES_NS[cpu_id].load(Ordering::Acquire))
+    TIMER_PROGRAMMED_DEADLINES_NS
+        .get(cpu_id)
+        .and_then(|deadline| try_load_u64(deadline, Ordering::Acquire))
 }
 
-/// Return the last published timer-program and logical queue state without locking.
+/// Return the last published timer-program and logical queue state without waiting.
 ///
 /// # Arguments
 ///
@@ -380,12 +387,20 @@ pub fn timer_programmed_deadline_ns(cpu_id: usize) -> Option<u64> {
 ///
 /// # Returns
 ///
-/// A combined diagnostic snapshot, or `None` for an invalid CPU ID.
+/// A combined diagnostic snapshot, or `None` for an invalid CPU ID or busy
+/// timer-program state. A busy queue sample has sequence `u64::MAX`; a busy
+/// register sample is zeroed.
 #[inline(always)]
 pub(crate) fn timer_diagnostic_snapshot(cpu_id: usize) -> Option<TimerDiagnosticSnapshot> {
-    (cpu_id < MAX_NUM_CPUS).then(|| TimerDiagnosticSnapshot {
-        programmed_id: TIMER_PROGRAMMED_IDS[cpu_id].load(Ordering::Acquire),
-        programmed_deadline_ns: TIMER_PROGRAMMED_DEADLINES_NS[cpu_id].load(Ordering::Acquire),
+    if cpu_id >= MAX_NUM_CPUS {
+        return None;
+    }
+    Some(TimerDiagnosticSnapshot {
+        programmed_id: try_load_u64(&TIMER_PROGRAMMED_IDS[cpu_id], Ordering::Acquire)?,
+        programmed_deadline_ns: try_load_u64(
+            &TIMER_PROGRAMMED_DEADLINES_NS[cpu_id],
+            Ordering::Acquire,
+        )?,
         queue: TIMER_QUEUE_DIAGNOSTICS[cpu_id].snapshot(),
         arch: ARCH_TIMER_DIAGNOSTICS[cpu_id].snapshot(),
     })

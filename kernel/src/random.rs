@@ -21,13 +21,14 @@
 //! RandomManager::get_random_bytes(&mut buffer);
 //! ```
 
+use crate::sync::atomic::AtomicU64;
 use crate::sync::{IrqSpinLock, Once};
 use alloc::collections::VecDeque;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::any::Any;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::Ordering;
 
 use crate::device::char::CharDevice;
 use crate::device::manager::DeviceManager;

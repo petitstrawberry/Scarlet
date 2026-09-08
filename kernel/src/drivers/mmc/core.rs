@@ -2,9 +2,10 @@
 
 extern crate alloc;
 
+use crate::sync::atomic::AtomicU64;
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use core::any::Any;
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::device::block::BlockDevice;
 use crate::device::block::request::{BlockIORequest, BlockIORequestType, BlockIOResult};

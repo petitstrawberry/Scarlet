@@ -7,12 +7,13 @@
 //! - Efficient mount point lookup and traversal
 
 use crate::sync::IrqRwSpinLock;
+use crate::sync::atomic::AtomicU64;
 use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::Ordering;
 
 use super::core::{FileSystemOperations, VfsEntry};
 use super::manager::{PathResolutionOptions, VfsManager};

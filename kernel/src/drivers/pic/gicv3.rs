@@ -25,9 +25,10 @@ use crate::{
     },
 };
 
+use crate::sync::atomic::AtomicU64;
 use alloc::{boxed::Box, vec};
 use core::arch::asm;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::Ordering;
 
 /// Maximum number of interrupts supported by this implementation.
 const MAX_INTERRUPTS: InterruptId = 1020;

@@ -20,12 +20,14 @@
 //! itself is unnecessary. Reentrancy via interrupt is gated by IRQ state,
 //! not by the count value.
 
+#[cfg(feature = "sync-debug")]
+use crate::sync::atomic::{AtomicU64, try_load_u64};
 use core::marker::PhantomData;
 #[cfg(feature = "sync-debug")]
 use core::panic::Location;
 #[cfg(feature = "sync-debug")]
 use core::sync::atomic::{AtomicPtr, AtomicU8, AtomicUsize};
-use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU32, Ordering};
 
 use crate::arch::try_get_cpuid;
 use crate::environment::MAX_NUM_CPUS;
@@ -145,7 +147,7 @@ struct PreemptDebugSlot {
     /// Lifecycle phase, written under the WRITING/ACTIVE sequence.
     phase: AtomicU8,
     /// Acquisition-attempt iterations sampled when the watchdog fires.
-    spin_iterations: AtomicU64,
+    spin_iterations: AtomicU32,
     /// Monotonic time at which acquisition completed.
     acquired_at_ns: AtomicU64,
     /// Instruction address sampled when acquisition completed.
@@ -164,7 +166,7 @@ impl PreemptDebugSlot {
             lock_address: AtomicUsize::new(0),
             task_id: AtomicUsize::new(0),
             phase: AtomicU8::new(0),
-            spin_iterations: AtomicU64::new(0),
+            spin_iterations: AtomicU32::new(0),
             acquired_at_ns: AtomicU64::new(0),
             acquisition_pc: AtomicUsize::new(0),
             acquisition_lr: AtomicUsize::new(0),
@@ -257,8 +259,8 @@ fn snapshot_debug_slot(cpu: usize, slot_index: usize) -> Option<PreemptDebugSnap
         phase,
         lock_address: slot.lock_address.load(Ordering::Relaxed),
         task_id: slot.task_id.load(Ordering::Relaxed),
-        spin_iterations: slot.spin_iterations.load(Ordering::Relaxed),
-        acquired_at_ns: slot.acquired_at_ns.load(Ordering::Relaxed),
+        spin_iterations: slot.spin_iterations.load(Ordering::Relaxed) as u64,
+        acquired_at_ns: try_load_u64(&slot.acquired_at_ns, Ordering::Relaxed)?,
         acquisition_pc: slot.acquisition_pc.load(Ordering::Relaxed),
         acquisition_lr: slot.acquisition_lr.load(Ordering::Relaxed),
         location: slot.location.load(Ordering::Relaxed),
@@ -362,10 +364,12 @@ pub fn preempt_enable() {
 // goal is observability, not a hard timeout that could turn a slow device
 // into a kernel panic.
 
-const SPIN_CONTENTION_REPORT_THRESHOLD: u64 = 1 << 22;
+// Counts one report window, resetting at the threshold; it is not a lifetime
+// statistic. Keep it native on RV32, especially inside lock diagnostics.
+const SPIN_CONTENTION_REPORT_THRESHOLD: u32 = 1 << 22;
 
-static SPIN_CONTENTION_COUNT: [AtomicU64; MAX_NUM_CPUS] =
-    [const { AtomicU64::new(0) }; MAX_NUM_CPUS];
+static SPIN_CONTENTION_COUNT: [AtomicU32; MAX_NUM_CPUS] =
+    [const { AtomicU32::new(0) }; MAX_NUM_CPUS];
 
 /// Note one busy-wait iteration in a lock's spin loop.
 ///
@@ -379,7 +383,7 @@ pub fn note_spin_contention() {
     };
     let count = SPIN_CONTENTION_COUNT[cpu].fetch_add(1, Ordering::Relaxed) + 1;
     if count == SPIN_CONTENTION_REPORT_THRESHOLD {
-        report_spin_contention(cpu, count);
+        report_spin_contention(cpu, count as u64);
         SPIN_CONTENTION_COUNT[cpu].store(0, Ordering::Relaxed);
     }
     core::hint::spin_loop();
@@ -582,7 +586,8 @@ fn report_spin_contention(cpu: usize, spin_count: u64) {
             if waiter.phase != PreemptDebugPhase::Acquiring || waiter.lock_address == 0 {
                 continue;
             }
-            slot.spin_iterations.store(spin_count, Ordering::Relaxed);
+            slot.spin_iterations
+                .store(spin_count as u32, Ordering::Relaxed);
             waiter.spin_iterations = spin_count;
             tracked_waiters += 1;
             report_tracked_lock_contention(cpu, slot_index, waiter, spin_count);
