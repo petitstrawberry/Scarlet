@@ -1,10 +1,13 @@
 //! Scarlet Native ABI definitions.
 //!
-//! This crate contains raw ABI definitions shared by Scarlet userland
-//! libraries and the Scarlet Rust `std` integration. It intentionally avoids
+//! This crate contains raw ABI definitions and byte codecs shared by the kernel,
+//! Scarlet userland libraries and the Scarlet Rust `std` integration. It avoids
 //! syscall assembly or safe wrappers so it can stay `no_std` and dependency-free.
 
 #![no_std]
+
+pub mod data_model;
+pub mod environment;
 
 /// Raw kernel object handle value used at the Scarlet Native ABI boundary.
 pub type RawHandle = i32;
@@ -40,6 +43,20 @@ pub struct RawEnvironmentExec {
 
 #[cfg(target_pointer_width = "64")]
 const _: [(); 48] = [(); core::mem::size_of::<RawEnvironmentExec>()];
+#[cfg(target_pointer_width = "32")]
+const _: [(); 28] = [(); core::mem::size_of::<RawEnvironmentExec>()];
+#[cfg(target_pointer_width = "32")]
+const _: () = {
+    use core::mem::{align_of, offset_of};
+    assert!(align_of::<RawEnvironmentExec>() == 4);
+    assert!(offset_of!(RawEnvironmentExec, size) == 0);
+    assert!(offset_of!(RawEnvironmentExec, flags) == 4);
+    assert!(offset_of!(RawEnvironmentExec, argv) == 8);
+    assert!(offset_of!(RawEnvironmentExec, envp) == 12);
+    assert!(offset_of!(RawEnvironmentExec, cwd) == 16);
+    assert!(offset_of!(RawEnvironmentExec, handles) == 20);
+    assert!(offset_of!(RawEnvironmentExec, handle_count) == 24);
+};
 const _: [(); 8] = [(); core::mem::size_of::<RawEnvironmentHandleMapping>()];
 
 /// Require `GetRandom` to use a registered entropy source instead of the
