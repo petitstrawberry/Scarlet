@@ -125,7 +125,10 @@ fn decode_scheduler_attr(
             SchedulerAffinity::Single(decode_native_u32(bytes, 20) as usize)
         }
         SCHED_AFFINITY_MASK => {
-            let mask_ptr = decode_native_u64(bytes, 32) as usize;
+            let mask_ptr = scarlet_abi::data_model::AbiDataModel::NATIVE
+                .user_address(decode_native_u64(bytes, 32))
+                .and_then(|address| address.to_usize())
+                .map_err(|_| SchedulerControlResult::BadAddress)?;
             let mask_bytes = decode_native_u32(bytes, 40) as usize;
             let nbits = decode_native_u32(bytes, 44) as usize;
             if decode_native_u32(bytes, 20) != SCHED_CPU_ID_NONE

@@ -1,5 +1,6 @@
 use alloc::string::String;
 use alloc::vec::Vec;
+use scarlet_abi::data_model::AbiDataModel;
 
 use crate::library::std::usercopy::copy_from_user;
 
@@ -57,7 +58,10 @@ pub fn parse_c_string_from_userspace(
     let mut found_nul = false;
     for i in 0..max_len {
         let mut byte = [0u8; 1];
-        copy_from_user(&task, ptr + i, &mut byte)
+        let address = ptr
+            .checked_add(i)
+            .ok_or(StringConversionError::TranslationError)?;
+        copy_from_user(task, address, &mut byte)
             .map_err(|_| StringConversionError::TranslationError)?;
         if byte[0] == 0 {
             found_nul = true;
@@ -85,16 +89,24 @@ pub fn parse_string_array_from_userspace(
 
     let mut strings = Vec::new();
     let mut i = 0;
+    let model = AbiDataModel::NATIVE;
+    let base = model
+        .user_address(array_ptr as u64)
+        .map_err(|_| StringConversionError::TranslationError)?;
 
     loop {
         let mut raw_ptr = [0u8; core::mem::size_of::<usize>()];
-        copy_from_user(
-            &task,
-            array_ptr + i * core::mem::size_of::<usize>(),
-            &mut raw_ptr,
-        )
-        .map_err(|_| StringConversionError::TranslationError)?;
-        let str_ptr = usize::from_le_bytes(raw_ptr);
+        let slot = base
+            .element(i as u64, model.word_width.bytes() as u64)
+            .and_then(|address| address.to_usize())
+            .map_err(|_| StringConversionError::TranslationError)?;
+        copy_from_user(task, slot, &mut raw_ptr)
+            .map_err(|_| StringConversionError::TranslationError)?;
+        let str_ptr = model
+            .read_word(&raw_ptr, 0)
+            .and_then(|word| model.user_address(word.unsigned()))
+            .and_then(|address| address.to_usize())
+            .map_err(|_| StringConversionError::TranslationError)?;
 
         if str_ptr == 0 {
             break;
