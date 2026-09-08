@@ -249,9 +249,22 @@ pub fn sbi_debug_console_write_byte(c: char) {
     let _ = sbi_call(Extension::DebugConsole, 0x2, c as usize, 0);
 }
 
+/// SBI encodes a 2*XLEN argument as low word then high word, without ABI padding.
+const fn timer_request_args(deadline: u64) -> [usize; 2] {
+    #[cfg(target_pointer_width = "32")]
+    {
+        [deadline as u32 as usize, (deadline >> 32) as usize]
+    }
+    #[cfg(target_pointer_width = "64")]
+    {
+        [deadline as usize, 0]
+    }
+}
+
 /// Programs the SBI timer.
 pub fn sbi_set_timer(stime_value: u64) {
-    let _ = sbi_call(Extension::Timer, 0, stime_value as usize, 0);
+    let args = timer_request_args(stime_value);
+    let _ = sbi_call(Extension::Timer, 0, args[0], args[1]);
 }
 
 /// Sends an SBI software interrupt to the selected harts.
@@ -321,6 +334,16 @@ fn sbi_call_v02_raw(extension: Extension, function: usize, args: [usize; 6]) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test_case]
+    fn test_timer_arguments_preserve_high_counter_bits() {
+        let deadline = 0x1234_5678_9abc_def0;
+        let args = timer_request_args(deadline);
+        #[cfg(target_pointer_width = "32")]
+        assert_eq!(args, [0x9abc_def0, 0x1234_5678]);
+        #[cfg(target_pointer_width = "64")]
+        assert_eq!(args, [deadline as usize, 0]);
+    }
 
     #[test_case]
     fn test_unknown_error_maps_without_panic() {

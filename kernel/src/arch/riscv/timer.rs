@@ -140,20 +140,46 @@ impl Stimer {
         )
     }
 
-    /// Get the current clock time
+    /// Get the full hardware clock independent of XLEN.
     fn get_time(&self) -> u64 {
-        let time: u64;
-        unsafe {
-            asm!(
-                "rdtime {0}",
-                out(reg) time,
-            );
-        }
-        time
+        read_time()
     }
 
     fn set_next_event(&mut self, next_event: u64) {
         self.next_event = next_event;
+    }
+}
+
+/// Sample the complete architectural time counter without a torn RV32 read.
+#[inline]
+pub fn read_time() -> u64 {
+    #[cfg(target_pointer_width = "64")]
+    {
+        let value: u64;
+        // SAFETY: this reads the supervisor-visible architectural time counter.
+        unsafe { asm!("rdtime {value}", value = out(reg) value, options(nostack, nomem)) };
+        value
+    }
+    #[cfg(target_pointer_width = "32")]
+    {
+        loop {
+            let high_before: u32;
+            let low: u32;
+            let high_after: u32;
+            // SAFETY: timeh/time are read-only CSR halves. Retry across rollover.
+            unsafe {
+                asm!(
+                    "rdtimeh {high_before}", "rdtime {low}", "rdtimeh {high_after}",
+                    high_before = out(reg) high_before,
+                    low = out(reg) low,
+                    high_after = out(reg) high_after,
+                    options(nostack, nomem),
+                );
+            }
+            if high_before == high_after {
+                return (high_before as u64) << 32 | low as u64;
+            }
+        }
     }
 }
 

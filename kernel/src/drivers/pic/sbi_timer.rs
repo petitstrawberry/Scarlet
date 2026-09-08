@@ -69,7 +69,7 @@ impl TimerController for SbiTimer {
 
     /// Get the current timer counter value.
     fn get_time(&self) -> u64 {
-        read_rdtime()
+        crate::arch::riscv::timer::read_time()
     }
 
     /// Get the timer clock frequency.
@@ -80,20 +80,6 @@ impl TimerController for SbiTimer {
 
 unsafe impl Send for SbiTimer {}
 unsafe impl Sync for SbiTimer {}
-
-fn read_rdtime() -> u64 {
-    let time: u64;
-    // SAFETY: rdtime reads the architectural RISC-V time counter and has no
-    // memory side effects.
-    unsafe {
-        asm!(
-            "rdtime {0}",
-            out(reg) time,
-            options(nostack, nomem)
-        );
-    }
-    time
-}
 
 fn read_sip() -> usize {
     let sip: usize;
