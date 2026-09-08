@@ -3,6 +3,11 @@
 Status: initial inventory and proposed refactoring sequence, 2026-09-08.
 Source baseline: `7f591dd5898e09d137ba97b0a591d6f09f97dec8`.
 
+Implementation updates are tracked in the
+[foundation progress note](32bit-foundation-progress.md). Counts and findings
+in this audit retain the source baseline above; they are not current completion
+claims after subsequent fixes.
+
 The objective is to make Scarlet's common implementation suitable for future
 32-bit targets. ARMv5TE and RISC-V 32 are design constraints that expose different
 assumptions. This work does not select a board, add a CPU port, promise boot on
