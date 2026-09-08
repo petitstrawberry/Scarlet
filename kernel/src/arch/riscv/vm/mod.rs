@@ -24,7 +24,7 @@ use crate::mem::page::{Page, allocate_raw_pages, allocate_raw_pages_aligned, fre
 use crate::arch::Arch;
 use crate::arch::get_cpu;
 use crate::arch::get_user_trapvector_paddr;
-use crate::arch::riscv64::instruction::sbi::remote_sfence_vma_asid_all_harts;
+use crate::arch::riscv::instruction::sbi::remote_sfence_vma_asid_all_harts;
 use crate::environment::{KERNEL_KSTACK_REGION_END, KERNEL_KSTACK_REGION_START, TRAMPOLINE_VA_END};
 use crate::println;
 use crate::vm::addr::kernel_virt_to_phys;
@@ -42,7 +42,7 @@ static KERNEL_SATP: AtomicU64 = AtomicU64::new(0);
 /// # Arguments
 ///
 /// * `asid` - Address-space identifier whose translations were changed.
-pub(in crate::arch::riscv64::vm) fn synchronize_tlb(asid: u16) {
+pub(in crate::arch::riscv::vm) fn synchronize_tlb(asid: u16) {
     // SAFETY: the caller has completed page-table writes while holding the
     // corresponding page-table lock. The fence publishes those writes before
     // local translation-cache invalidation.

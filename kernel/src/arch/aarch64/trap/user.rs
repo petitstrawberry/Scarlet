@@ -1,6 +1,6 @@
 //! AArch64 User trap entry/exit trampoline (Optimized)
 //!
-//! Layout matches generic "Riscv64/Aarch64" struct:
+//! Layout matches generic "Riscv/Aarch64" struct:
 //!   0: scratch (8)
 //!   8: cpuid (8)
 //!  16: ttbr0 / user_satp (8)

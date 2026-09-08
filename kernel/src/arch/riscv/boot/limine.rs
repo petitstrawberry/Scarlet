@@ -101,7 +101,7 @@ pub fn limine_entry() -> ! {
     init_bss();
 
     let bsp = response(RISCV_BSP_HARTID_REQUEST.response(), "riscv-bsp-hartid");
-    crate::arch::riscv64::boot::init_cpu(bsp.bsp_hartid as usize);
+    crate::arch::riscv::boot::init_cpu(bsp.bsp_hartid as usize);
 
     let hhdm = response(HHDM_REQUEST.response(), "hhdm");
     let executable = response(EXECUTABLE_ADDRESS_REQUEST.response(), "executable-address");
@@ -179,7 +179,7 @@ pub fn limine_entry() -> ! {
             + STACK_SIZE * (bsp.bsp_hartid as usize + 1);
         (&raw mut EARLY_BOOTINFO).write(MaybeUninit::new(bootinfo));
         let bootinfo_ptr = (&raw const EARLY_BOOTINFO).cast::<BootInfo>();
-        crate::arch::riscv64::switch_stack_and_jump(
+        crate::arch::riscv::switch_stack_and_jump(
             start_kernel as *const () as usize,
             bootinfo_ptr as usize,
             stack_top,

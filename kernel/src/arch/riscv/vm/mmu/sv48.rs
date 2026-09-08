@@ -1,7 +1,7 @@
 use core::arch::asm;
 use core::result::Result;
 
-use crate::arch::riscv64::vm::synchronize_tlb;
+use crate::arch::riscv::vm::synchronize_tlb;
 use crate::arch::vm::new_raw_pagetable;
 use crate::environment::PAGE_SIZE;
 use crate::vm::addr::{kernel_virt_to_phys, phys_to_virt};
@@ -179,13 +179,13 @@ pub struct PageTable {
 
 impl PageTable {
     /// Create a new page table with all entries initialized to zero
-    pub(in crate::arch::riscv64::vm) fn new() -> Self {
+    pub(in crate::arch::riscv::vm) fn new() -> Self {
         PageTable {
             entries: [PageTableEntry::new(); 512],
         }
     }
 
-    pub(in crate::arch::riscv64::vm) fn switch(&self, asid: u16) {
+    pub(in crate::arch::riscv::vm) fn switch(&self, asid: u16) {
         let satp = self.get_val_for_satp(asid);
         unsafe {
             asm!(
@@ -210,14 +210,14 @@ impl PageTable {
     /// # Note
     ///
     /// Only for RISC-V (Sv48).
-    pub(in crate::arch::riscv64::vm) fn get_val_for_satp(&self, asid: u16) -> u64 {
+    pub(in crate::arch::riscv::vm) fn get_val_for_satp(&self, asid: u16) -> u64 {
         let asid = asid as usize;
         let mode = 9;
         let ppn = kernel_virt_to_phys(self as *const _ as usize) >> 12;
         (mode << 60 | asid << 44 | ppn) as u64
     }
 
-    pub(in crate::arch::riscv64::vm) fn map_memory_area(
+    pub(in crate::arch::riscv::vm) fn map_memory_area(
         &mut self,
         asid: u16,
         mmap: VirtualMemoryMap,
@@ -296,7 +296,7 @@ impl PageTable {
     /// Sv48 does not encode Scarlet's memory attributes in stage-1 leaves, so
     /// the live mapping only needs to remain physically consistent and have its
     /// translations synchronized after the metadata transition.
-    pub(in crate::arch::riscv64::vm) fn retag_memory_area(
+    pub(in crate::arch::riscv::vm) fn retag_memory_area(
         &mut self,
         asid: u16,
         mmap: VirtualMemoryMap,
@@ -355,7 +355,7 @@ impl PageTable {
     /// * `_memory_attribute` - Requested cacheability or device attribute; Sv48 does not encode it.
     /// * `accessed` - Whether to set the accessed bit.
     /// * `dirty` - Whether to set the dirty bit.
-    pub(in crate::arch::riscv64::vm) fn map(
+    pub(in crate::arch::riscv::vm) fn map(
         &mut self,
         asid: u16,
         vaddr: usize,
@@ -453,7 +453,7 @@ impl PageTable {
     //   21..29 -- 9 bits of level-1 index.
     //   12..20 -- 9 bits of level-0 index.
     //    0..11 -- 12 bits of byte offset within the page.
-    pub(in crate::arch::riscv64::vm) fn walk(
+    pub(in crate::arch::riscv::vm) fn walk(
         &mut self,
         vaddr: usize,
         alloc: bool,
@@ -467,7 +467,7 @@ impl PageTable {
     /// Intermediate page tables are allocated when `alloc` is true. Existing
     /// leaf entries above `target_level` stop the walk to avoid splitting or
     /// overwriting a huge-page mapping implicitly.
-    pub(in crate::arch::riscv64::vm) fn walk_to_level(
+    pub(in crate::arch::riscv::vm) fn walk_to_level(
         &mut self,
         vaddr: usize,
         target_level: usize,
@@ -554,7 +554,7 @@ impl PageTable {
     /// # Returns
     ///
     /// The physical address if the mapping exists, or `None` if unmapped.
-    pub(in crate::arch::riscv64::vm) fn translate(&mut self, vaddr: usize) -> Option<usize> {
+    pub(in crate::arch::riscv::vm) fn translate(&mut self, vaddr: usize) -> Option<usize> {
         let (pte, level) = self.walk_leaf(vaddr)?;
         let page_offset = vaddr & (page_size_for_level(level) - 1);
         Some((pte.get_ppn() << 12) | page_offset)
@@ -615,7 +615,7 @@ impl PageTable {
     /// Whole huge-page leaves are cleared directly. If the range only covers
     /// part of a huge-page leaf, the leaf is split into the next lower level so
     /// mappings outside the requested range are preserved.
-    pub(in crate::arch::riscv64::vm) fn unmap_range(
+    pub(in crate::arch::riscv::vm) fn unmap_range(
         &mut self,
         asid: u16,
         vaddr_start: usize,
@@ -666,7 +666,7 @@ impl PageTable {
         }
     }
 
-    pub(in crate::arch::riscv64::vm) fn unmap_all(&mut self, asid: u16) {
+    pub(in crate::arch::riscv::vm) fn unmap_all(&mut self, asid: u16) {
         self.unmap_all_no_flush();
         synchronize_tlb(asid);
     }
@@ -676,7 +676,7 @@ impl PageTable {
     /// Intended for batched page-table rebuilds (e.g. `exec`). The caller
     /// **must** call [`synchronize_tlb`] or equivalent before the affected
     /// address space becomes visible to any hart.
-    pub(in crate::arch::riscv64::vm) fn unmap_all_no_flush(&mut self) {
+    pub(in crate::arch::riscv::vm) fn unmap_all_no_flush(&mut self) {
         for i in 0..512 {
             let entry = &mut self.entries[i];
             entry.clear_all();

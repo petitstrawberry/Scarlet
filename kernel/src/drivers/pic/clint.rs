@@ -130,7 +130,7 @@ impl TimerController for Clint {
         self.validate_cpu_id(cpu_id)?;
 
         // Set the timer compare register to the specified time using SBI
-        crate::arch::riscv64::instruction::sbi::sbi_set_timer(time);
+        crate::arch::riscv::instruction::sbi::sbi_set_timer(time);
 
         Ok(())
     }
@@ -236,7 +236,7 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
     // Prefer the timebase frequency provided by the device tree.
     // Fallback keeps QEMU virt default (10MHz) working even if FDT is unavailable.
     let timebase_frequency_hz =
-        crate::arch::riscv64::fdt::timebase_frequency_hz_from_fdt().unwrap_or(10_000_000);
+        crate::arch::riscv::fdt::timebase_frequency_hz_from_fdt().unwrap_or(10_000_000);
 
     // Create CLINT controllers
     let timer_controller = Box::new(Clint::new(

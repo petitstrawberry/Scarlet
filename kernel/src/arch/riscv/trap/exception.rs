@@ -196,26 +196,26 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, cause: usize) {
                     let mut vcpu = task.vcpu.lock();
                     if vcpu.vector.is_none() {
                         vcpu.vector = Some(alloc::boxed::Box::new(
-                            crate::arch::riscv64::fpu::VectorContext::new(),
+                            crate::arch::riscv::fpu::VectorContext::new(),
                         ));
                     }
                     vcpu.vector_used = true;
                 }
-                crate::arch::riscv64::fpu::enable_vector();
+                crate::arch::riscv::fpu::enable_vector();
                 unsafe { task.vcpu.lock().vector.as_ref().unwrap().restore() };
-                crate::arch::riscv64::fpu::mark_vector_clean();
+                crate::arch::riscv::fpu::mark_vector_clean();
                 let cpu_id = crate::arch::get_cpu().get_cpuid();
-                crate::arch::riscv64::set_vector_owner(cpu_id, task.get_id());
-                crate::arch::riscv64::set_vector_owner_dirty(cpu_id, false);
+                crate::arch::riscv::set_vector_owner(cpu_id, task.get_id());
+                crate::arch::riscv::set_vector_owner_dirty(cpu_id, false);
                 return;
             }
 
             #[cfg(feature = "user-fpu")]
             if user_fpu_allowed && fs_off && is_fpu_insn {
                 task.vcpu.lock().fpu_used = true;
-                crate::arch::riscv64::fpu::enable_fpu();
+                crate::arch::riscv::fpu::enable_fpu();
                 unsafe { task.vcpu.lock().fpu.restore() };
-                crate::arch::riscv64::fpu::mark_fpu_clean();
+                crate::arch::riscv::fpu::mark_fpu_clean();
                 return;
             }
 
@@ -224,9 +224,9 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, cause: usize) {
             #[cfg(feature = "user-fpu")]
             if user_fpu_allowed && fs_off {
                 task.vcpu.lock().fpu_used = true;
-                crate::arch::riscv64::fpu::enable_fpu();
+                crate::arch::riscv::fpu::enable_fpu();
                 unsafe { task.vcpu.lock().fpu.restore() };
-                crate::arch::riscv64::fpu::mark_fpu_clean();
+                crate::arch::riscv::fpu::mark_fpu_clean();
                 return;
             }
 
@@ -236,17 +236,17 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, cause: usize) {
                     let mut vcpu = task.vcpu.lock();
                     if vcpu.vector.is_none() {
                         vcpu.vector = Some(alloc::boxed::Box::new(
-                            crate::arch::riscv64::fpu::VectorContext::new(),
+                            crate::arch::riscv::fpu::VectorContext::new(),
                         ));
                     }
                     vcpu.vector_used = true;
                 }
-                crate::arch::riscv64::fpu::enable_vector();
+                crate::arch::riscv::fpu::enable_vector();
                 unsafe { task.vcpu.lock().vector.as_ref().unwrap().restore() };
-                crate::arch::riscv64::fpu::mark_vector_clean();
+                crate::arch::riscv::fpu::mark_vector_clean();
                 let cpu_id = crate::arch::get_cpu().get_cpuid();
-                crate::arch::riscv64::set_vector_owner(cpu_id, task.get_id());
-                crate::arch::riscv64::set_vector_owner_dirty(cpu_id, false);
+                crate::arch::riscv::set_vector_owner(cpu_id, task.get_id());
+                crate::arch::riscv::set_vector_owner_dirty(cpu_id, false);
                 return;
             }
 

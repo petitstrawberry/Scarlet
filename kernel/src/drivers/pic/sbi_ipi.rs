@@ -57,7 +57,7 @@ impl SoftwareInterruptController for SbiIpi {
     /// Send a software interrupt to a CPU.
     fn send_software_interrupt(&self, target_cpu: CpuId) -> InterruptResult<()> {
         self.validate_cpu_id(target_cpu)?;
-        crate::arch::riscv64::instruction::sbi::sbi_send_ipi(1 << target_cpu, 0);
+        crate::arch::riscv::instruction::sbi::sbi_send_ipi(1 << target_cpu, 0);
         Ok(())
     }
 }

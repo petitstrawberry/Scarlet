@@ -23,20 +23,20 @@ pub extern "C" fn _user_trap_entry() {
                 /* Disable the interrupt */
                 csrci   sstatus, 0x2
 
-                /* Save a0 to sscratch and load the Riscv64 struct pointer */
+                /* Save a0 to sscratch and load the Riscv struct pointer */
                 csrrw   a0, sscratch, a0
-                /* Store sp to Riscv64.scratch */
+                /* Store sp to Riscv.scratch */
                 sd      sp, 0(a0)
 
-                /* Load the satp for the kernel space from Riscv64.satp */
-                ld      sp, 16(a0) // sp = Riscv64.satp
+                /* Load the satp for the kernel space from Riscv.satp */
+                ld      sp, 16(a0) // sp = Riscv.satp
                 /* Switch to kernel memory space */
                 csrrw   sp, satp, sp
                 sfence.vma zero, zero
                 /* Store the user memory space */
-                sd      sp, 16(a0) // Riscv64.satp = sp
+                sd      sp, 16(a0) // Riscv.satp = sp
 
-                /* Load kernel stack pointer from Riscv64.kernel_stack */
+                /* Load kernel stack pointer from Riscv.kernel_stack */
                 ld      sp, 24(a0)
 
                 /* Allocate space on the kernel stack for saving user context */
@@ -78,24 +78,24 @@ pub extern "C" fn _user_trap_entry() {
                 csrr    t0, sepc
                 sd      t0, 256(sp)
 
-                // Load sp from Riscv64.scratch and store sp to trapframe
-                ld      t0, 0(a0)  // t0 = Riscv64.scratch (old sp)
+                // Load sp from Riscv.scratch and store sp to trapframe
+                ld      t0, 0(a0)  // t0 = Riscv.scratch (old sp)
                 sd      t0, 16(sp) // trapframe.sp = t0
 
                 // Save original a0 (currently in sscratch) to trapframe
                 csrr    t0, sscratch  // t0 = original a0 value
                 sd      t0, 80(sp)    // trapframe.a0 = original a0
 
-                // Restore sscratch to Riscv64 pointer
+                // Restore sscratch to Riscv pointer
                 csrw   sscratch, a0
 
                 /* Call the user trap handler */
-                /* Load the function pointer from Riscv64.kernel_trap */
+                /* Load the function pointer from Riscv.kernel_trap */
                 ld      t1, 32(a0)
 
                 /* Pass the trapframe pointer as the first argument */
                 mv      a0, sp
-                jalr    ra, t1, 0 // Riscv64.kernel_trap(a0: &mut Trapframe)
+                jalr    ra, t1, 0 // Riscv.kernel_trap(a0: &mut Trapframe)
 
                      /* Keep S-mode interrupts masked while sscratch temporarily
                          contains the user a0 during the trampoline return path. */
@@ -144,24 +144,24 @@ pub extern "C" fn _user_trap_entry() {
                 /* Restore a0 from trapframe */
                 ld     a0, 80(a0)
 
-                /* Swap a0 with sscratch to get Riscv64 pointer */
-                csrrw  a0, sscratch, a0  // a0 = Riscv64 pointer, sscratch = original a0
+                /* Swap a0 with sscratch to get Riscv pointer */
+                csrrw  a0, sscratch, a0  // a0 = Riscv pointer, sscratch = original a0
 
-                /* Store original t0 in Riscv64.scratch temporarily */
-                sd     t0, 0(a0)        // Riscv64.scratch = original t0
+                /* Store original t0 in Riscv.scratch temporarily */
+                sd     t0, 0(a0)        // Riscv.scratch = original t0
 
                 /* Restore the user memory space using t0 as temp */
-                ld     t0, 16(a0)       // t0 = Riscv64.satp (user satp)
+                ld     t0, 16(a0)       // t0 = Riscv.satp (user satp)
                 csrrw  t0, satp, t0
                 /* Store back the kernel memory space */
-                sd     t0, 16(a0)       // Riscv64.satp = t0
+                sd     t0, 16(a0)       // Riscv.satp = t0
                 sfence.vma zero, zero
 
-                /* Restore trapframe t0 from Riscv64.scratch */
+                /* Restore trapframe t0 from Riscv.scratch */
                 ld     t0, 0(a0)        // t0 = original t0
 
                 /* Swap back sscratch to original a0 */
-                csrrw   a0, sscratch, a0     // a0 = original a0, sscratch = Riscv64 pointer
+                csrrw   a0, sscratch, a0     // a0 = original a0, sscratch = Riscv pointer
 
                 sret
             "
@@ -179,12 +179,12 @@ pub extern "C" fn _guest_trap_entry() {
         .option norvc
         .option norelax
         .align 8
-                /* Save a0 to sscratch and load the Riscv64 struct pointer */
+                /* Save a0 to sscratch and load the Riscv struct pointer */
                 csrrw   a0, sscratch, a0
-                /* Store sp to Riscv64.scratch */
+                /* Store sp to Riscv.scratch */
                 sd      sp, 0(a0)
 
-                /* Load kernel guest trapframe pointer from Riscv64.guest_trapframe_ptr */
+                /* Load kernel guest trapframe pointer from Riscv.guest_trapframe_ptr */
                 ld      sp, 40(a0)
 
                 /* Save the context of the current hart */
@@ -223,25 +223,25 @@ pub extern "C" fn _guest_trap_entry() {
                 csrr    t0, sepc
                 sd      t0, 256(sp)
 
-                // Load sp from Riscv64.scratch and store sp to trapframe
-                ld      t0, 0(a0)  // t0 = Riscv64.scratch (old sp)
+                // Load sp from Riscv.scratch and store sp to trapframe
+                ld      t0, 0(a0)  // t0 = Riscv.scratch (old sp)
                 sd      t0, 16(sp) // trapframe.sp = t0
 
                 // Save original a0 (currently in sscratch) to trapframe
                 csrr    t0, sscratch  // t0 = original a0 value
                 sd      t0, 80(sp)    // trapframe.a0 = original a0
 
-                // Restore sscratch to Riscv64 pointer
+                // Restore sscratch to Riscv pointer
                 csrw   sscratch, a0
 
                 /* Call the user trap handler */
-                /* Load the function pointer from Riscv64.kernel_trap */
+                /* Load the function pointer from Riscv.kernel_trap */
                 ld      t1, 32(a0)
 
                 /* Save trapframe pointer in t2 before changing sp */
                 mv      t2, sp
 
-                /* Load the kernel stack pointer from Riscv64.kernel_stack */
+                /* Load the kernel stack pointer from Riscv.kernel_stack */
                 ld      sp, 24(a0)
 
                 /* Save a0 (trapframe ptr) on stack */
@@ -251,7 +251,7 @@ pub extern "C" fn _guest_trap_entry() {
                 /* Pass trapframe pointer as first argument */
                 mv      a0, t2
 
-                jalr    ra, t1, 0 // Riscv64.kernel_trap(a0: &mut Trapframe)
+                jalr    ra, t1, 0 // Riscv.kernel_trap(a0: &mut Trapframe)
 
                 /* Return from Rust handler - restore trapframe and sret */
                 /* Load trapframe pointer from stack */
@@ -361,24 +361,24 @@ pub extern "C" fn _switch_to_user(trapframe: &mut Trapframe) -> ! {
                 /* Restore a0 from trapframe */
                 ld     a0, 80(a0)
 
-                /* Swap a0 with sscratch to get Riscv64 pointer */
-                csrrw  a0, sscratch, a0  // a0 = Riscv64 pointer, sscratch = original a0
+                /* Swap a0 with sscratch to get Riscv pointer */
+                csrrw  a0, sscratch, a0  // a0 = Riscv pointer, sscratch = original a0
 
-                /* Store original t0 in Riscv64.scratch temporarily */
-                sd     t0, 0(a0)        // Riscv64.scratch = original t0
+                /* Store original t0 in Riscv.scratch temporarily */
+                sd     t0, 0(a0)        // Riscv.scratch = original t0
 
                 /* Restore the user memory space using t0 as temp */
-                ld     t0, 16(a0)       // t0 = Riscv64.satp (user satp)
+                ld     t0, 16(a0)       // t0 = Riscv.satp (user satp)
                 csrrw  t0, satp, t0
                 /* Store back the kernel memory space */
-                sd     t0, 16(a0)       // Riscv64.satp = t0
+                sd     t0, 16(a0)       // Riscv.satp = t0
                 sfence.vma zero, zero
 
-                /* Restore trapframe t0 from Riscv64.scratch */
+                /* Restore trapframe t0 from Riscv.scratch */
                 ld     t0, 0(a0)        // t0 = original t0
 
                 /* Swap back sscratch to original a0 */
-                csrrw   a0, sscratch, a0     // a0 = original a0, sscratch = Riscv64 pointer
+                csrrw   a0, sscratch, a0     // a0 = original a0, sscratch = Riscv pointer
 
                 sret
             "
@@ -401,9 +401,9 @@ pub extern "C" fn arch_user_trap_handler(addr: usize) {
             if let Some(task) = mytask() {
                 let mode = match prev_mode() {
                     // from VU-mode
-                    arch::riscv64::trap::PRIV_U_MODE => Mode::GuestUser,
+                    arch::riscv::trap::PRIV_U_MODE => Mode::GuestUser,
                     // from VS-mode
-                    arch::riscv64::trap::PRIV_S_MODE => Mode::GuestKernel,
+                    arch::riscv::trap::PRIV_S_MODE => Mode::GuestKernel,
                     _ => {
                         panic!("Invalid previous mode in guest trap: {}", prev_mode());
                     }
@@ -414,8 +414,8 @@ pub extern "C" fn arch_user_trap_handler(addr: usize) {
         } else {
             if let Some(task) = mytask() {
                 let mode = match prev_mode() {
-                    arch::riscv64::trap::PRIV_U_MODE => Mode::User,
-                    arch::riscv64::trap::PRIV_S_MODE => Mode::Kernel,
+                    arch::riscv::trap::PRIV_U_MODE => Mode::User,
+                    arch::riscv::trap::PRIV_S_MODE => Mode::Kernel,
                     _ => panic!("Invalid previous mode in user trap: {}", prev_mode()),
                 };
                 task.vcpu.lock().set_mode(mode);
@@ -426,8 +426,8 @@ pub extern "C" fn arch_user_trap_handler(addr: usize) {
     {
         if let Some(task) = mytask() {
             let mode = match prev_mode() {
-                arch::riscv64::trap::PRIV_U_MODE => Mode::User,
-                arch::riscv64::trap::PRIV_S_MODE => Mode::Kernel,
+                arch::riscv::trap::PRIV_U_MODE => Mode::User,
+                arch::riscv::trap::PRIV_S_MODE => Mode::Kernel,
                 _ => panic!("Invalid previous mode in user trap: {}", prev_mode()),
             };
         }

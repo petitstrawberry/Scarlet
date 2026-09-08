@@ -42,7 +42,7 @@ pub use registers::IntRegisters;
 
 use crate::vm::vmem::MemoryArea;
 
-pub type Arch = Riscv64;
+pub type Arch = Riscv;
 
 const USER_BACKTRACE_MAX_FRAMES: usize = 16;
 const USER_BACKTRACE_MAX_FRAME_DISTANCE: usize = 8 * 1024 * 1024;
@@ -328,11 +328,11 @@ pub fn configure_user_entry(_trapframe: &mut Trapframe, options: crate::arch::Us
     };
 
     if !crate::arch::user_fpu_enabled() || !task.vcpu.lock().fpu_used {
-        crate::arch::riscv64::fpu::disable_fpu();
+        crate::arch::riscv::fpu::disable_fpu();
     }
 
     if !crate::arch::user_vector_enabled() || !task.vcpu.lock().vector_used {
-        crate::arch::riscv64::fpu::disable_vector();
+        crate::arch::riscv::fpu::disable_vector();
         return;
     }
 
@@ -351,9 +351,9 @@ pub fn configure_user_entry(_trapframe: &mut Trapframe, options: crate::arch::Us
             .vector
             .as_mut()
             .expect("dirty vector owner must have a vector context");
-        crate::arch::riscv64::fpu::enable_vector();
+        crate::arch::riscv::fpu::enable_vector();
         unsafe { vector.save() };
-        crate::arch::riscv64::fpu::mark_vector_clean();
+        crate::arch::riscv::fpu::mark_vector_clean();
         set_vector_owner_dirty(cpu_id, false);
     }
 
@@ -361,7 +361,7 @@ pub fn configure_user_entry(_trapframe: &mut Trapframe, options: crate::arch::Us
     // - Restore only when ownership changed on this hart.
     // - Otherwise just re-enable access without a full restore.
     if owner_id != current_task_id {
-        crate::arch::riscv64::fpu::enable_vector();
+        crate::arch::riscv::fpu::enable_vector();
         unsafe {
             task.vcpu
                 .lock()
@@ -370,12 +370,12 @@ pub fn configure_user_entry(_trapframe: &mut Trapframe, options: crate::arch::Us
                 .expect("vector task is marked used without a vector context")
                 .restore()
         };
-        crate::arch::riscv64::fpu::mark_vector_clean();
+        crate::arch::riscv::fpu::mark_vector_clean();
         set_vector_owner(cpu_id, current_task_id);
         set_vector_owner_dirty(cpu_id, false);
-    } else if !crate::arch::riscv64::fpu::is_vector_enabled() {
-        crate::arch::riscv64::fpu::enable_vector();
-        crate::arch::riscv64::fpu::mark_vector_clean();
+    } else if !crate::arch::riscv::fpu::is_vector_enabled() {
+        crate::arch::riscv::fpu::enable_vector();
+        crate::arch::riscv::fpu::mark_vector_clean();
         // Preserve owner-dirty: if we kept live unsaved state, it stays dirty.
     }
 }
@@ -421,7 +421,7 @@ pub fn first_switch_to_user(task: &Task) -> ! {
     set_trapvector(crate::vm::get_trampoline_trap_vector());
 
     // Final transition via trampoline exit path.
-    crate::arch::riscv64::trap::user::arch_switch_to_user(task.get_trapframe())
+    crate::arch::riscv::trap::user::arch_switch_to_user(task.get_trapframe())
 }
 
 /// Returns the device memory areas for RISC-V QEMU virt platform.
@@ -438,12 +438,12 @@ pub fn get_device_memory_areas() -> alloc::vec::Vec<MemoryArea> {
 }
 
 #[unsafe(link_section = ".trampoline.data")]
-static mut CPUS: [Riscv64; MAX_NUM_CPUS] = [const { Riscv64::new(0) }; MAX_NUM_CPUS];
+static mut CPUS: [Riscv; MAX_NUM_CPUS] = [const { Riscv::new(0) }; MAX_NUM_CPUS];
 
 #[repr(align(4))]
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
-pub struct Riscv64 {
+pub struct Riscv {
     scratch: u64,             // offeset: 0
     pub hartid: u64,          // offset: 8
     satp: u64,                // offset: 16
@@ -452,9 +452,9 @@ pub struct Riscv64 {
     guest_trapframe_ptr: u64, // offset: 40
 }
 
-impl Riscv64 {
+impl Riscv {
     pub const fn new(cpu_id: usize) -> Self {
-        Riscv64 {
+        Riscv {
             scratch: 0,
             hartid: cpu_id as u64,
             kernel_stack: 0,
@@ -501,7 +501,7 @@ impl Riscv64 {
         self.satp = satp as u64;
     }
 
-    pub fn as_paddr_cpu(&mut self) -> &mut Riscv64 {
+    pub fn as_paddr_cpu(&mut self) -> &mut Riscv {
         unsafe { &mut CPUS[self.hartid as usize] }
     }
 }
@@ -514,7 +514,7 @@ pub struct ArchCpuState {
 }
 
 impl ArchCpuState {
-    pub fn save(cpu: &Riscv64) -> Self {
+    pub fn save(cpu: &Riscv) -> Self {
         ArchCpuState {
             kernel_stack: cpu.kernel_stack,
             trap_handler: cpu.kernel_trap,
@@ -523,7 +523,7 @@ impl ArchCpuState {
         }
     }
 
-    pub fn restore(&self, cpu: &mut Riscv64) {
+    pub fn restore(&self, cpu: &mut Riscv) {
         cpu.kernel_stack = self.kernel_stack;
         cpu.kernel_trap = self.trap_handler;
         cpu.satp = self.satp;
@@ -752,7 +752,7 @@ pub fn mmio_fence() {
     io_mb()
 }
 
-pub fn get_cpu() -> &'static mut Riscv64 {
+pub fn get_cpu() -> &'static mut Riscv {
     let scratch: usize;
 
     unsafe {
@@ -763,7 +763,7 @@ pub fn get_cpu() -> &'static mut Riscv64 {
         );
     }
 
-    unsafe { &mut *(scratch as *mut Riscv64) }
+    unsafe { &mut *(scratch as *mut Riscv) }
 }
 
 /// Return the current CPU's ID if its per-CPU pointer is published.
@@ -793,7 +793,7 @@ pub fn try_get_cpuid() -> Option<usize> {
     // SAFETY: Non-zero `sscratch` is published only by `init_cpu` after
     // `hartid` is set. Boot entry code zeroes `sscratch` first, so any
     // non-zero value here is the per-CPU pointer.
-    let riscv = unsafe { &*(scratch as *const Riscv64) };
+    let riscv = unsafe { &*(scratch as *const Riscv) };
     Some(riscv.hartid as usize)
 }
 

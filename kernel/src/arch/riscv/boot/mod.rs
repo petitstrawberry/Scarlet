@@ -7,8 +7,8 @@ use core::arch::asm;
 
 use crate::{
     arch::{
-        Riscv64, fpu,
-        riscv64::CPUS,
+        Riscv, fpu,
+        riscv::CPUS,
         trap::kernel::{_kernel_trap_entry, arch_kernel_trap_handler},
     },
     environment::STACK_SIZE,
@@ -34,7 +34,7 @@ pub fn init_cpu(cpu_id: usize) {
 }
 
 #[allow(static_mut_refs)]
-pub(crate) fn trap_init(riscv: &mut Riscv64) {
+pub(crate) fn trap_init(riscv: &mut Riscv) {
     // SAFETY: Per-hart boot owns its assigned kernel-stack slot.
     let trap_stack_start = unsafe { KERNEL_STACK.start() };
     let stack_size = STACK_SIZE;

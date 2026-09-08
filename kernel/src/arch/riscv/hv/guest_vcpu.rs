@@ -1,8 +1,8 @@
 //! Guest VCPU state for Type-2 hypervisor
 
 use crate::arch::hv::csr::{GuestCsrState, write_hstatus, write_vsatp};
-use crate::arch::riscv64::fpu::{FpuContext, VectorContext};
-use crate::arch::riscv64::{IntRegisters, Mode, Trapframe};
+use crate::arch::riscv::fpu::{FpuContext, VectorContext};
+use crate::arch::riscv::{IntRegisters, Mode, Trapframe};
 use crate::arch::vcpu::Vcpu;
 use alloc::boxed::Box;
 
@@ -74,9 +74,9 @@ impl GuestVcpu {
         self.pc = trapframe.epc;
         self.csrs = GuestCsrState::save();
         // TODO: Refactor SPP handling to avoid this hack. We need to determine the guest mode based on the SPP bit in sstatus, but we can't read sstatus until we've saved the guest CSRs. For now, we'll just set the mode based on the previous mode before trap entry, which should be correct for most cases. (Issue #383)
-        self.mode = match crate::arch::riscv64::trap::prev_mode() {
-            crate::arch::riscv64::trap::PRIV_U_MODE => Mode::GuestUser,
-            crate::arch::riscv64::trap::PRIV_S_MODE => Mode::GuestKernel,
+        self.mode = match crate::arch::riscv::trap::prev_mode() {
+            crate::arch::riscv::trap::PRIV_U_MODE => Mode::GuestUser,
+            crate::arch::riscv::trap::PRIV_S_MODE => Mode::GuestKernel,
             _ => Mode::GuestKernel,
         };
     }

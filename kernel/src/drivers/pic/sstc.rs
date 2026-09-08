@@ -119,12 +119,12 @@ fn write_stimecmp(time: u64) {
 }
 
 fn register_driver() {
-    if !crate::arch::riscv64::fdt::all_cpus_have_isa_extension_from_fdt("sstc").unwrap_or(false) {
+    if !crate::arch::riscv::fdt::all_cpus_have_isa_extension_from_fdt("sstc").unwrap_or(false) {
         return;
     }
 
     let timebase_frequency_hz =
-        crate::arch::riscv64::fdt::timebase_frequency_hz_from_fdt().unwrap_or(10_000_000);
+        crate::arch::riscv::fdt::timebase_frequency_hz_from_fdt().unwrap_or(10_000_000);
 
     let controller = Box::new(SstcTimer {
         max_cpus: crate::environment::MAX_NUM_CPUS as usize,

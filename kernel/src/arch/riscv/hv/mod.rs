@@ -35,7 +35,7 @@ pub fn arch_init_hv() {
 }
 
 pub fn init_hv_per_cpu(cpu_id: usize) {
-    use crate::arch::riscv64::trap::cause::*;
+    use crate::arch::riscv::trap::cause::*;
 
     crate::println!(
         "[shv] Initializing RISC-V H-extension CSRs for CPU {}",
