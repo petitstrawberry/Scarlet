@@ -7,6 +7,8 @@ use crate::task::new_user_task;
 
 use super::*;
 
+const O_RDWR: u32 = 0x2;
+
 #[test_case]
 fn test_parse_elf_header() {
     let elf_data: &[u8] = include_bytes!("test.elf");
@@ -325,9 +327,8 @@ fn test_load_elf_invalid_alignment() {
     invalid_elf_data.extend_from_slice(&[0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0]); // p_align = 0
 
     let kernel_obj = manager
-        .open("/invalid_align.elf", 0o777)
-        .map_err(|_| "Failed to create file")
-        .unwrap();
+        .open("/invalid_align.elf", O_RDWR)
+        .expect("Failed to open test ELF file");
     let file = kernel_obj.as_file().expect("Failed to get file reference");
     file.write(&invalid_elf_data)
         .expect("Failed to write invalid ELF data");
@@ -359,9 +360,8 @@ fn test_load_elf_bss_zeroed() {
         .create_file(file_path, FileType::RegularFile)
         .expect("Failed to create test file");
     let kernel_obj = manager
-        .open(file_path, 0o777)
-        .map_err(|_| "Failed to create file")
-        .unwrap();
+        .open(file_path, O_RDWR)
+        .expect("Failed to open test ELF file");
     let file = kernel_obj.as_file().expect("Failed to get file reference");
 
     // Create a mock ELF file with a .bss section

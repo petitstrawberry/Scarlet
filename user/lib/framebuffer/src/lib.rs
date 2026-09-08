@@ -11,17 +11,17 @@ extern crate scarlet_std as std;
 
 use alloc::{format, vec};
 #[cfg(feature = "std")]
-use scarlet_os::handle::capability::SeekFrom;
-#[cfg(feature = "std")]
 use scarlet_os::handle::capability::memory_mapping::{flags, munmap, prot};
+#[cfg(feature = "std")]
+use scarlet_os::handle::capability::SeekFrom;
 #[cfg(feature = "std")]
 use scarlet_os::handle::{Handle, HandleError, HandleResult};
 #[cfg(not(feature = "std"))]
 use std::{
     fs::File,
     handle::{
-        Handle, HandleError, HandleResult,
         capability::memory_mapping::{flags, munmap, prot},
+        Handle, HandleError, HandleResult,
     },
     io::SeekFrom,
 };
@@ -2405,7 +2405,7 @@ impl Drop for DisplaySurface {
 
 #[cfg(test)]
 mod tests {
-    use super::{HandleError, brightness_percent_from_control};
+    use super::{brightness_percent_from_control, HandleError};
 
     #[test]
     fn brightness_control_result_accepts_inclusive_range() {

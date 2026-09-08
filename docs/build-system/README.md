@@ -20,13 +20,13 @@ From the Scarlet root in the
 
 ```sh
 # Kernel/BSP only.
-cargo scarlet build --project projects/riscv64-limine-full
+cargo scarlet build --project projects/aarch64-limine-full
 
 # Build kernel and compose the project's declared images.
-cargo scarlet image --project projects/riscv64-limine-full
+cargo scarlet image --project projects/aarch64-limine-full
 
 # Compose release images, then launch the project runner.
-cargo scarlet run --project projects/riscv64-limine-full --release
+cargo scarlet run --project projects/aarch64-limine-full --release
 ```
 
 See [userspace development](../userspace/README.md) for application-only builds.
@@ -34,8 +34,8 @@ See [userspace development](../userspace/README.md) for application-only builds.
 ## Project layout
 
 The tracked reference projects are
-[RISC-V full](../../projects/riscv64-limine-full/scarlet.toml),
-[AArch64 full](../../projects/aarch64-limine-full/scarlet.toml), and
+[AArch64 full](../../projects/aarch64-limine-full/scarlet.toml),
+[RISC-V full](../../projects/riscv64-limine-full/scarlet.toml), and
 [AArch64 microvm](../../projects/aarch64-limine-microvm/scarlet.toml).
 Their layout is:
 
@@ -178,8 +178,8 @@ cycles and unknown dependency names are errors.
 | `limine-uefi` | Invoke the matching Limine image plugin |
 
 Full boot/rootfs recipes are in the reference manifests, not an implicit global
-SDK image. In particular, AArch64 full composes a FAT ESP and ext2 rootfs into
-one GPT disk; RISC-V full uses separate boot/rootfs images. See
+SDK image. Both AArch64 full and RISC-V full compose a FAT ESP and ext2 rootfs
+into one GPT disk. See
 [Limine boot](../boot/limine.md).
 
 Layers are applied in declaration order. Local paths are relative to the file
@@ -334,7 +334,7 @@ dependencies; change source manifests instead. Aggregation
 project-specific configuration is retained.
 
 ```sh
-cargo scarlet new --project my-board --target riscv64gc-unknown-none-elf --kernel-path kernel
+cargo scarlet new --project my-board --target aarch64-unknown-none-elf --kernel-path kernel
 cargo scarlet new --lsm my-module --kernel-path kernel
 ```
 

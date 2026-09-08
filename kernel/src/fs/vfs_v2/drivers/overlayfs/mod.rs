@@ -41,7 +41,13 @@
 use crate::sync::IrqRwSpinLock;
 use alloc::boxed::Box;
 use alloc::string::ToString;
-use alloc::{collections::BTreeSet, format, string::String, sync::Arc, vec::Vec};
+use alloc::{
+    collections::{BTreeMap, BTreeSet},
+    format,
+    string::String,
+    sync::Arc,
+    vec::Vec,
+};
 use core::any::Any;
 
 use crate::driver_initcall;
@@ -87,6 +93,15 @@ pub struct OverlayFS {
     name: String,
     /// Root node (composite of all layers)
     root_node: Arc<OverlayNode>,
+    /// Overlay inode identities are independent of backing filesystems and
+    /// remain stable when a lower path is copied to the upper layer.
+    inode_ids: Arc<IrqRwSpinLock<OverlayInodeIds>>,
+}
+
+#[derive(Default)]
+struct OverlayInodeIds {
+    by_path: BTreeMap<String, u64>,
+    next_id: u64,
 }
 
 /// A composite node that represents a file/directory across overlay layers
@@ -225,9 +240,39 @@ impl OverlayFS {
             lower_layers,
             name,
             root_node: root_node.clone(),
+            inode_ids: Arc::new(IrqRwSpinLock::new(OverlayInodeIds {
+                by_path: BTreeMap::new(),
+                next_id: 2,
+            })),
         });
         root_node.set_overlay_fs(overlay.clone());
         Ok(overlay)
+    }
+
+    fn inode_for_path(&self, path: &str) -> u64 {
+        if path == "/" {
+            return 1;
+        }
+        if let Some(id) = self.inode_ids.read().by_path.get(path) {
+            return *id;
+        }
+        let mut ids = self.inode_ids.write();
+        if let Some(id) = ids.by_path.get(path) {
+            return *id;
+        }
+        let id = ids.next_id;
+        ids.next_id = id.checked_add(1).expect("overlay inode IDs exhausted");
+        ids.by_path.insert(path.to_string(), id);
+        id
+    }
+
+    fn child_inode(&self, parent_path: &str, name: &str) -> u64 {
+        let path = if parent_path == "/" {
+            format!("/{}", name)
+        } else {
+            format!("{}/{}", parent_path, name)
+        };
+        self.inode_for_path(&path)
     }
 
     /// Create a new OverlayFS from VFS paths
@@ -386,14 +431,18 @@ impl OverlayFS {
         // Check upper layer first
         if let Some((ref upper_fs, ref upper_node)) = self.upper {
             if let Ok(node) = self.resolve_in_layer(upper_fs, upper_node, path) {
-                return node.metadata();
+                let mut metadata = node.metadata()?;
+                metadata.file_id = self.inode_for_path(path);
+                return Ok(metadata);
             }
         }
 
         // Check lower layers
         for (lower_fs, lower_node) in &self.lower_layers {
             if let Ok(node) = self.resolve_in_layer(lower_fs, lower_node, path) {
-                return node.metadata();
+                let mut metadata = node.metadata()?;
+                metadata.file_id = self.inode_for_path(path);
+                return Ok(metadata);
             }
         }
 
@@ -778,17 +827,7 @@ impl FileSystemOperations for OverlayFS {
                 "/"
             };
             let parent_name = parent_path.split('/').last().unwrap_or("/");
-            let parent_file_id = self
-                .get_metadata_for_path(parent_path)
-                .map(|m| m.file_id)
-                .unwrap_or_else(|_| {
-                    // Deterministic fallback from path hash
-                    let mut hash: u64 = 5381;
-                    for byte in parent_path.bytes() {
-                        hash = hash.wrapping_mul(33).wrapping_add(byte as u64);
-                    }
-                    hash
-                });
+            let parent_file_id = self.inode_for_path(parent_path);
             let node = OverlayNode::new(
                 parent_name.to_string(),
                 parent_path.to_string(),
@@ -980,12 +1019,8 @@ impl FileSystemOperations for OverlayFS {
 
         // Return overlay node
         let metadata = new_node.metadata()?;
-        let overlay_node = OverlayNode::new(
-            name.clone(),
-            child_path,
-            metadata.file_type,
-            metadata.file_id,
-        );
+        let file_id = self.inode_for_path(&child_path);
+        let overlay_node = OverlayNode::new(name.clone(), child_path, metadata.file_type, file_id);
         if let Some(ref fs) = *overlay_parent.overlay_fs.read() {
             overlay_node.set_overlay_fs(Arc::clone(fs));
         }
@@ -1026,6 +1061,7 @@ impl FileSystemOperations for OverlayFS {
                             break;
                         }
                     }
+                    self.inode_ids.write().by_path.remove(&child_path);
                     return Ok(());
                 }
             }
@@ -1038,6 +1074,7 @@ impl FileSystemOperations for OverlayFS {
                 .is_ok()
             {
                 self.create_whiteout(&child_path)?;
+                self.inode_ids.write().by_path.remove(&child_path);
                 return Ok(());
             }
         }
@@ -1164,6 +1201,11 @@ impl FileSystemOperations for OverlayFS {
                         }
                     }
                 }
+            }
+        }
+        for entry in &mut entries {
+            if entry.name != "." && entry.name != ".." {
+                entry.file_id = self.child_inode(&overlay_node.path, &entry.name);
             }
         }
         entries.sort_by(|a, b| a.file_id.cmp(&b.file_id)); // Sort entries by file_id
@@ -1315,6 +1357,9 @@ impl OverlayDirectoryObject {
             }
         }
 
+        for entry in &mut all_entries {
+            entry.file_id = self.overlay_fs.child_inode(&self.path, &entry.name);
+        }
         // Sort entries by file_id to maintain consistent order
         all_entries.sort_by(|a, b| a.file_id.cmp(&b.file_id));
         special_entries.extend(all_entries);

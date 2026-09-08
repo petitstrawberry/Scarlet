@@ -524,7 +524,11 @@ impl FileObject for VfsFileObject {
     }
 
     fn metadata(&self) -> Result<FileMetadata, StreamError> {
-        self.inner.metadata()
+        let mut metadata = self.inner.metadata()?;
+        // Filesystems such as overlay expose their own inode identity while
+        // delegating I/O to a file from another backing filesystem.
+        metadata.file_id = self.vfs_entry.node().id();
+        Ok(metadata)
     }
 
     fn truncate(&self, size: u64) -> Result<(), StreamError> {

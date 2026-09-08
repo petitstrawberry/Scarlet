@@ -3,7 +3,7 @@ use super::mock::MockTaskFileObject;
 use crate::fs::{FileType, SeekFrom};
 use crate::object::handle::HandleTable;
 use crate::sched::scheduler::{add_task, get_task_by_id, reset};
-use crate::task::{CloneFlags, new_user_task};
+use crate::task::{CloneFlags, CloneFlagsDef, new_user_task};
 use alloc::format;
 use alloc::string::ToString;
 use alloc::sync::Arc;
@@ -187,9 +187,10 @@ fn test_task_handle_table_clone_behavior() {
 
     assert_eq!(parent_task.handle_table.open_count(), 2);
 
-    // Clone the task with default flags (CLONE_FILES is set by default)
-    // Since CLONE_FILES is set, the handle table is shared (shallow clone)
-    let child_task = parent_task.clone_task(CloneFlags::default()).unwrap();
+    // Explicitly request a shared handle table; default clones copy the table.
+    let mut flags = CloneFlags::default();
+    flags.set(CloneFlagsDef::Files);
+    let child_task = parent_task.clone_task(flags).unwrap();
 
     // With CLONE_FILES, child shares handle table with parent
     // When we remove handle1 from child, it affects parent too
