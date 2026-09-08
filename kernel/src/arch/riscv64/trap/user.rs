@@ -448,8 +448,6 @@ pub extern "C" fn arch_user_trap_handler(addr: usize) {
         arch_exception_handler(trapframe, cause);
     }
 
-    set_trapvector(saved_stvec);
-
     let cpu_id = get_cpu().get_cpuid();
     if crate::sched::scheduler::may_schedule_from_interrupt(cpu_id)
         && crate::sched::scheduler::take_deferred_reschedule(cpu_id)
@@ -461,6 +459,13 @@ pub extern "C" fn arch_user_trap_handler(addr: usize) {
     // Do not consume events from `schedule()` itself: it may resume inside a
     // blocking operation while owned values are still live on its stack.
     crate::sched::scheduler::process_pending_events_before_user_return(trapframe);
+
+    // Scheduling (including pending-event delivery) installs the kernel trap
+    // vector when this task resumes. Restore the user/guest vector only after
+    // all such work; it must be mapped when the trampoline restores user satp.
+    // Keep interrupts masked until sret, including the Rust epilogue.
+    crate::arch::interrupt::disable_interrupts();
+    set_trapvector(saved_stvec);
 }
 
 /// Switch to user space using the trampoline mechanism
@@ -479,6 +484,9 @@ pub fn arch_switch_to_user(trapframe: &mut Trapframe) -> ! {
     // above, but still pass through this true userspace boundary.
     crate::sched::scheduler::process_pending_events_before_user_return(trapframe);
     let addr = trapframe as *mut Trapframe as usize;
+
+    // Do not take a kernel interrupt after installing the trampoline vector.
+    crate::arch::interrupt::disable_interrupts();
 
     // Configure the upcoming user return. This affects sstatus.SPIE, not the current kernel SIE.
     crate::arch::configure_user_entry(
