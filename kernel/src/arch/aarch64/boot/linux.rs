@@ -14,7 +14,7 @@ use crate::environment::{PAGE_SIZE, SCARLET_HHDM_BASE};
 use crate::mem::init_bss;
 use crate::vm::addr::{init_boot_addressing, init_bootloader_direct_map_bound, phys_to_virt};
 use crate::vm::direct_map::DirectMapRegions;
-use crate::vm::vmem::{MemoryArea, MemoryAttribute};
+use crate::vm::vmem::{MemoryAttribute, PhysicalMemoryArea};
 use crate::{BootInfo, DeviceSource, start_kernel};
 
 const FDT_MAGIC: u32 = 0xd00d_feed;
@@ -131,10 +131,10 @@ pub extern "C" fn linux_image_entry(dtb_paddr: usize) -> ! {
     let early_fdt = unsafe { fdt::Fdt::from_ptr(dtb_paddr as *const u8) }
         .unwrap_or_else(|error| panic!("Linux boot FDT parse failed: {:?}", error));
     let kernel_area = linked_kernel_area();
-    let dtb_area = MemoryArea::new(
-        dtb_paddr,
-        dtb_paddr
-            .checked_add(early_fdt.total_size() - 1)
+    let dtb_area = PhysicalMemoryArea::new(
+        dtb_paddr as u64,
+        (dtb_paddr as u64)
+            .checked_add(early_fdt.total_size() as u64 - 1)
             .expect("Linux boot FDT range overflows"),
     );
     let original_initramfs = initramfs_area(&early_fdt);
@@ -158,7 +158,7 @@ pub extern "C" fn linux_image_entry(dtb_paddr: usize) -> ! {
     init_boot_addressing(
         SCARLET_HHDM_BASE,
         kernel_area.start,
-        kernel_area.start,
+        usize::try_from(kernel_area.start).expect("identity kernel address exceeds pointer width"),
         kernel_area.size(),
     );
     init_bootloader_direct_map_bound(direct_map_bounds.start, direct_map_bounds.end);
@@ -172,13 +172,13 @@ pub extern "C" fn linux_image_entry(dtb_paddr: usize) -> ! {
     );
     init_fdt(dtb_paddr);
 
-    let fdt_destination_paddr = unsafe { &__FDT_RESERVED_START as *const usize as usize };
+    let fdt_destination_paddr = unsafe { &__FDT_RESERVED_START as *const usize as usize as u64 };
     let relocated_fdt = relocate_fdt(phys_to_virt(fdt_destination_paddr) as *mut u8);
     let relocated_fdt_end = align_up(
         fdt_destination_paddr
-            .checked_add(relocated_fdt.size())
+            .checked_add(relocated_fdt.size() as u64)
             .expect("relocated FDT range overflows"),
-        PAGE_SIZE,
+        PAGE_SIZE as u64,
     );
     assert!(
         relocated_fdt_end <= kernel_area.end + 1,
@@ -250,9 +250,9 @@ fn validate_dtb(dtb_paddr: usize) {
 
 fn build_memory_map(
     fdt: &fdt::Fdt<'_>,
-) -> Result<(DirectMapRegions, MemoryArea, Option<usize>), &'static str> {
+) -> Result<(DirectMapRegions, PhysicalMemoryArea, Option<usize>), &'static str> {
     let mut regions = DirectMapRegions::new();
-    let mut best_usable: Option<MemoryArea> = None;
+    let mut best_usable: Option<PhysicalMemoryArea> = None;
 
     for node in fdt.all_nodes() {
         let is_memory = node.name == "memory"
@@ -274,11 +274,11 @@ fn build_memory_map(
             if size == 0 {
                 continue;
             }
-            let start = region.starting_address as usize;
+            let start = region.starting_address as usize as u64;
             let end = start
-                .checked_add(size - 1)
+                .checked_add(size as u64 - 1)
                 .ok_or("FDT RAM region overflows")?;
-            let area = MemoryArea::new(start, end);
+            let area = PhysicalMemoryArea::new(start, end);
             regions.insert(area, MemoryAttribute::Normal)?;
 
             let candidate = largest_usable_area(fdt, area);
@@ -307,7 +307,7 @@ fn build_memory_map(
         });
     if let Some(paddr) = early_uart {
         regions.insert(
-            MemoryArea::new(paddr, paddr + PAGE_SIZE - 1),
+            PhysicalMemoryArea::new(paddr as u64, paddr as u64 + PAGE_SIZE as u64 - 1),
             MemoryAttribute::Device,
         )?;
     }
@@ -315,7 +315,7 @@ fn build_memory_map(
     Ok((regions, usable, early_uart))
 }
 
-fn largest_usable_area(fdt: &fdt::Fdt<'_>, ram: MemoryArea) -> Option<MemoryArea> {
+fn largest_usable_area(fdt: &fdt::Fdt<'_>, ram: PhysicalMemoryArea) -> Option<PhysicalMemoryArea> {
     let mut reserved = [None; MAX_EARLY_RESERVED_AREAS];
     let mut reserved_len = 0;
 
@@ -325,12 +325,12 @@ fn largest_usable_area(fdt: &fdt::Fdt<'_>, ram: MemoryArea) -> Option<MemoryArea
         if size == 0 {
             continue;
         }
-        let reserved_start = reservation.address() as usize;
-        let reserved_end = reserved_start.checked_add(size - 1)?;
+        let reserved_start = reservation.address() as usize as u64;
+        let reserved_end = reserved_start.checked_add(size as u64 - 1)?;
         push_reserved(
             &mut reserved,
             &mut reserved_len,
-            MemoryArea::new(reserved_start, reserved_end),
+            PhysicalMemoryArea::new(reserved_start, reserved_end),
         )?;
     }
     if let Some(initramfs) = initramfs_area(fdt) {
@@ -348,31 +348,32 @@ fn largest_usable_area(fdt: &fdt::Fdt<'_>, ram: MemoryArea) -> Option<MemoryArea
                 if size == 0 {
                     continue;
                 }
-                let start = region.starting_address as usize;
-                let end = start.checked_add(size - 1)?;
+                let start = region.starting_address as usize as u64;
+                let end = start.checked_add(size as u64 - 1)?;
                 push_reserved(
                     &mut reserved,
                     &mut reserved_len,
-                    MemoryArea::new(start, end),
+                    PhysicalMemoryArea::new(start, end),
                 )?;
             }
         }
     }
 
     reserved[..reserved_len].sort_unstable_by_key(|area| area.expect("reserved slot").start);
-    let mut cursor = align_up(ram.start, PAGE_SIZE);
-    let ram_end_exclusive = align_down(ram.end.checked_add(1)?, PAGE_SIZE);
+    let mut cursor = align_up(ram.start, PAGE_SIZE as u64);
+    let ram_end_exclusive = align_down(ram.end.checked_add(1)?, PAGE_SIZE as u64);
     let mut best = None;
     for area in reserved[..reserved_len].iter().flatten().copied() {
         if area.end < ram.start || area.start > ram.end {
             continue;
         }
-        let reserved_start = align_down(area.start.max(ram.start), PAGE_SIZE);
-        let reserved_end_exclusive = align_up(area.end.min(ram.end).checked_add(1)?, PAGE_SIZE);
+        let reserved_start = align_down(area.start.max(ram.start), PAGE_SIZE as u64);
+        let reserved_end_exclusive =
+            align_up(area.end.min(ram.end).checked_add(1)?, PAGE_SIZE as u64);
         if cursor < reserved_start {
             choose_larger(
                 &mut best,
-                MemoryArea::new(cursor, reserved_start.checked_sub(1)?),
+                PhysicalMemoryArea::new(cursor, reserved_start.checked_sub(1)?),
             );
         }
         cursor = cursor.max(reserved_end_exclusive);
@@ -383,16 +384,16 @@ fn largest_usable_area(fdt: &fdt::Fdt<'_>, ram: MemoryArea) -> Option<MemoryArea
     if cursor < ram_end_exclusive {
         choose_larger(
             &mut best,
-            MemoryArea::new(cursor, ram_end_exclusive.checked_sub(1)?),
+            PhysicalMemoryArea::new(cursor, ram_end_exclusive.checked_sub(1)?),
         );
     }
     best
 }
 
-fn linked_kernel_area() -> MemoryArea {
-    let start = unsafe { &__KERNEL_SPACE_START as *const usize as usize };
-    let end_exclusive = unsafe { &__KERNEL_SPACE_END as *const usize as usize };
-    MemoryArea::new(
+fn linked_kernel_area() -> PhysicalMemoryArea {
+    let start = unsafe { &__KERNEL_SPACE_START as *const usize as usize as u64 };
+    let end_exclusive = unsafe { &__KERNEL_SPACE_END as *const usize as usize as u64 };
+    PhysicalMemoryArea::new(
         start,
         end_exclusive
             .checked_sub(1)
@@ -401,9 +402,9 @@ fn linked_kernel_area() -> MemoryArea {
 }
 
 fn push_reserved(
-    reserved: &mut [Option<MemoryArea>; MAX_EARLY_RESERVED_AREAS],
+    reserved: &mut [Option<PhysicalMemoryArea>; MAX_EARLY_RESERVED_AREAS],
     len: &mut usize,
-    area: MemoryArea,
+    area: PhysicalMemoryArea,
 ) -> Option<()> {
     if *len == reserved.len() {
         return None;
@@ -413,7 +414,7 @@ fn push_reserved(
     Some(())
 }
 
-fn choose_larger(best: &mut Option<MemoryArea>, candidate: MemoryArea) {
+fn choose_larger(best: &mut Option<PhysicalMemoryArea>, candidate: PhysicalMemoryArea) {
     if best
         .map(|area| candidate.size() > area.size())
         .unwrap_or(true)
@@ -422,7 +423,7 @@ fn choose_larger(best: &mut Option<MemoryArea>, candidate: MemoryArea) {
     }
 }
 
-fn initramfs_area(fdt: &fdt::Fdt<'_>) -> Option<MemoryArea> {
+fn initramfs_area(fdt: &fdt::Fdt<'_>) -> Option<PhysicalMemoryArea> {
     let chosen = fdt.find_node("/chosen")?;
     let start = chosen
         .property("linux,initrd-start")
@@ -432,13 +433,13 @@ fn initramfs_area(fdt: &fdt::Fdt<'_>) -> Option<MemoryArea> {
         .property("linux,initrd-end")
         .or_else(|| chosen.property("initrd-end"))
         .and_then(property_address)?;
-    (end > start).then_some(MemoryArea::new(start, end - 1))
+    (end > start).then_some(PhysicalMemoryArea::new(start, end - 1))
 }
 
-fn property_address(property: fdt::node::NodeProperty<'_>) -> Option<usize> {
+fn property_address(property: fdt::node::NodeProperty<'_>) -> Option<u64> {
     match property.value.len() {
-        4 => Some(u32::from_be_bytes(property.value.try_into().ok()?) as usize),
-        8 => Some(u64::from_be_bytes(property.value.try_into().ok()?) as usize),
+        4 => Some(u32::from_be_bytes(property.value.try_into().ok()?) as u64),
+        8 => Some(u64::from_be_bytes(property.value.try_into().ok()?) as u64),
         _ => None,
     }
 }
@@ -449,10 +450,10 @@ fn is_pl011(node: &fdt::node::FdtNode<'_, '_>) -> bool {
         .unwrap_or(false)
 }
 
-const fn align_up(value: usize, alignment: usize) -> usize {
+const fn align_up(value: u64, alignment: u64) -> u64 {
     (value + alignment - 1) & !(alignment - 1)
 }
 
-const fn align_down(value: usize, alignment: usize) -> usize {
+const fn align_down(value: u64, alignment: u64) -> u64 {
     value & !(alignment - 1)
 }

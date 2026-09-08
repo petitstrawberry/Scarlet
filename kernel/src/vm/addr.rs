@@ -8,10 +8,11 @@
 
 use core::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 
+use crate::sync::atomic::AtomicU64;
 use crate::sync::{IrqSpinLock, IrqSpinLockGuard, Once};
 
 use crate::vm::direct_map::DirectMapRegions;
-use crate::vm::vmem::{MemoryArea, MemoryAttribute};
+use crate::vm::vmem::{MemoryAttribute, PhysicalMemoryArea};
 
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -35,7 +36,7 @@ impl KernelMemoryPhase {
 
 #[derive(Clone, Copy, Debug)]
 struct KernelImageLayout {
-    phys_base: usize,
+    phys_base: u64,
     virt_base: usize,
     size: usize,
 }
@@ -47,8 +48,8 @@ impl KernelImageLayout {
     }
 
     #[inline(always)]
-    fn phys_end(&self) -> usize {
-        self.phys_base + self.size
+    fn phys_end(&self) -> u64 {
+        self.phys_base + self.size as u64
     }
 
     #[inline(always)]
@@ -57,7 +58,7 @@ impl KernelImageLayout {
     }
 
     #[inline(always)]
-    fn contains_phys(&self, paddr: usize) -> bool {
+    fn contains_phys(&self, paddr: u64) -> bool {
         paddr >= self.phys_base && paddr < self.phys_end()
     }
 }
@@ -65,24 +66,26 @@ impl KernelImageLayout {
 #[derive(Clone, Copy, Debug)]
 struct BootloaderDirectMapLayout {
     offset: usize,
-    phys_start: usize,
-    phys_end: usize,
+    phys_start: u64,
+    phys_end: u64,
 }
 
 impl BootloaderDirectMapLayout {
     #[inline(always)]
-    fn contains_phys(&self, paddr: usize) -> bool {
+    fn contains_phys(&self, paddr: u64) -> bool {
         paddr >= self.phys_start && paddr <= self.phys_end
     }
 
     #[inline(always)]
     fn virt_start(&self) -> usize {
-        self.offset + self.phys_start
+        usize::try_from(self.offset as u64 + self.phys_start)
+            .expect("boot direct-map address exceeds pointer width")
     }
 
     #[inline(always)]
     fn virt_end(&self) -> usize {
-        self.offset + self.phys_end
+        usize::try_from(self.offset as u64 + self.phys_end)
+            .expect("boot direct-map address exceeds pointer width")
     }
 
     #[inline(always)]
@@ -93,7 +96,7 @@ impl BootloaderDirectMapLayout {
 
 #[derive(Clone, Copy, Debug)]
 struct HeapLayout {
-    phys_base: usize,
+    phys_base: u64,
     virt_base: usize,
     size: usize,
 }
@@ -115,12 +118,12 @@ struct KernelMemoryLayout {
     kernel_image: Once<KernelImageLayout>,
     bootloader_direct_map_offset: AtomicUsize,
     runtime_direct_map_offset: AtomicUsize,
-    bootloader_direct_map_phys_start: AtomicUsize,
-    bootloader_direct_map_phys_end: AtomicUsize,
-    runtime_direct_map_phys_start: AtomicUsize,
-    runtime_direct_map_phys_end: AtomicUsize,
+    bootloader_direct_map_phys_start: AtomicU64,
+    bootloader_direct_map_phys_end: AtomicU64,
+    runtime_direct_map_phys_start: AtomicU64,
+    runtime_direct_map_phys_end: AtomicU64,
     runtime_direct_map_regions: Once<IrqSpinLock<DirectMapRegions>>,
-    heap_phys_base: AtomicUsize,
+    heap_phys_base: AtomicU64,
     heap_virt_base: AtomicUsize,
     heap_size: AtomicUsize,
 }
@@ -132,12 +135,12 @@ impl KernelMemoryLayout {
             kernel_image: Once::new(),
             bootloader_direct_map_offset: AtomicUsize::new(0),
             runtime_direct_map_offset: AtomicUsize::new(0),
-            bootloader_direct_map_phys_start: AtomicUsize::new(0),
-            bootloader_direct_map_phys_end: AtomicUsize::new(0),
-            runtime_direct_map_phys_start: AtomicUsize::new(0),
-            runtime_direct_map_phys_end: AtomicUsize::new(0),
+            bootloader_direct_map_phys_start: AtomicU64::new(0),
+            bootloader_direct_map_phys_end: AtomicU64::new(0),
+            runtime_direct_map_phys_start: AtomicU64::new(0),
+            runtime_direct_map_phys_end: AtomicU64::new(0),
             runtime_direct_map_regions: Once::new(),
-            heap_phys_base: AtomicUsize::new(0),
+            heap_phys_base: AtomicU64::new(0),
             heap_virt_base: AtomicUsize::new(0),
             heap_size: AtomicUsize::new(0),
         }
@@ -151,7 +154,7 @@ impl KernelMemoryLayout {
     fn init_from_boot(
         &self,
         hhdm_offset: usize,
-        kernel_phys_base: usize,
+        kernel_phys_base: u64,
         kernel_virt_base: usize,
         kernel_image_size: usize,
     ) {
@@ -168,7 +171,7 @@ impl KernelMemoryLayout {
             .store(KernelMemoryPhase::Bootloader as u8, Ordering::Release);
     }
 
-    fn set_bootloader_direct_map_bound(&self, phys_start: usize, phys_end: usize) {
+    fn set_bootloader_direct_map_bound(&self, phys_start: u64, phys_end: u64) {
         self.bootloader_direct_map_phys_start
             .store(phys_start, Ordering::Release);
         self.bootloader_direct_map_phys_end
@@ -179,7 +182,7 @@ impl KernelMemoryLayout {
         &self,
         direct_map_offset: usize,
         direct_map_regions: DirectMapRegions,
-        heap_phys_base: usize,
+        heap_phys_base: u64,
         heap_virt_base: usize,
         heap_size: usize,
     ) {
@@ -275,7 +278,7 @@ impl KernelMemoryLayout {
         self.runtime_direct_map_regions.get()
     }
 
-    fn phys_to_current_virt(&self, paddr: usize) -> usize {
+    fn phys_to_current_virt(&self, paddr: u64) -> usize {
         let direct_map = self.current_direct_map_bound();
         let is_mapped = if self.phase() == KernelMemoryPhase::Bootloader {
             direct_map.contains_phys(paddr)
@@ -290,24 +293,28 @@ impl KernelMemoryLayout {
             paddr,
         );
         paddr
-            .checked_add(direct_map.offset)
+            .checked_add(direct_map.offset as u64)
+            .and_then(|address| usize::try_from(address).ok())
             .unwrap_or_else(|| panic!("phys_to_virt overflow: paddr={:#x}", paddr))
     }
 
-    fn virt_to_current_phys(&self, vaddr: usize) -> Option<usize> {
+    fn virt_to_current_phys(&self, vaddr: usize) -> Option<u64> {
         let kernel_image = self.kernel_image();
         if kernel_image.contains_virt(vaddr) {
-            return Some(kernel_image.phys_base + (vaddr - kernel_image.virt_base));
+            return Some(kernel_image.phys_base + (vaddr - kernel_image.virt_base) as u64);
         }
 
         if let Some(heap) = self.heap_layout() {
             if heap.contains_virt(vaddr) {
-                return Some(heap.phys_base + (vaddr - heap.virt_base));
+                return Some(heap.phys_base + (vaddr - heap.virt_base) as u64);
             }
         }
 
         let direct_map = self.current_direct_map_bound();
-        if let Some(paddr) = vaddr.checked_sub(direct_map.offset) {
+        if let Some(paddr) = vaddr
+            .checked_sub(direct_map.offset)
+            .map(|address| address as u64)
+        {
             let is_mapped = if self.phase() == KernelMemoryPhase::Bootloader {
                 direct_map.contains_phys(paddr)
             } else {
@@ -323,21 +330,21 @@ impl KernelMemoryLayout {
         None
     }
 
-    fn virt_to_boot_phys(&self, vaddr: usize) -> Option<usize> {
+    fn virt_to_boot_phys(&self, vaddr: usize) -> Option<u64> {
         let kernel_image = self.kernel_image();
         if kernel_image.contains_virt(vaddr) {
-            return Some(kernel_image.phys_base + (vaddr - kernel_image.virt_base));
+            return Some(kernel_image.phys_base + (vaddr - kernel_image.virt_base) as u64);
         }
 
         let direct_map = self.bootloader_direct_map();
         if direct_map.contains_virt(vaddr) {
-            return Some(vaddr - direct_map.offset);
+            return Some((vaddr - direct_map.offset) as u64);
         }
 
         None
     }
 
-    fn phys_to_boot_virt(&self, paddr: usize) -> usize {
+    fn phys_to_boot_virt(&self, paddr: u64) -> usize {
         let direct_map = self.bootloader_direct_map();
         assert!(
             direct_map.contains_phys(paddr),
@@ -347,7 +354,8 @@ impl KernelMemoryLayout {
             direct_map.phys_end
         );
         paddr
-            .checked_add(direct_map.offset)
+            .checked_add(direct_map.offset as u64)
+            .and_then(|address| usize::try_from(address).ok())
             .unwrap_or_else(|| panic!("boot_phys_to_virt overflow: paddr={:#x}", paddr))
     }
 }
@@ -380,7 +388,7 @@ fn layout() -> &'static KernelMemoryLayout {
 /// No value. Records the boot layout and selects the bootloader translation phase.
 pub fn init_boot_addressing(
     hhdm_offset: usize,
-    kernel_phys_base: usize,
+    kernel_phys_base: u64,
     kernel_virt_base: usize,
     kernel_image_size: usize,
 ) {
@@ -409,7 +417,7 @@ pub fn init_boot_addressing(
 /// No value. Has the same metadata-only effect as [`init_boot_addressing`].
 pub fn init_limine_addressing(
     hhdm_offset: usize,
-    kernel_phys_base: usize,
+    kernel_phys_base: u64,
     kernel_virt_base: usize,
     kernel_image_size: usize,
 ) {
@@ -447,7 +455,7 @@ pub fn address_translation_ready() -> bool {
 /// # Returns
 ///
 /// No value. Updates metadata without changing page tables.
-pub fn init_bootloader_direct_map_bound(start: usize, end: usize) {
+pub fn init_bootloader_direct_map_bound(start: u64, end: u64) {
     layout().set_bootloader_direct_map_bound(start, end);
 }
 
@@ -478,7 +486,7 @@ pub fn init_bootloader_direct_map_bound(start: usize, end: usize) {
 pub fn transition_kernel_memory_layout(
     direct_map_offset: usize,
     direct_map_regions: DirectMapRegions,
-    heap_phys_base: usize,
+    heap_phys_base: u64,
     heap_virt_base: usize,
     heap_size: usize,
 ) {
@@ -514,7 +522,7 @@ pub fn finalize_runtime_memory_layout() {
 /// # Returns
 ///
 /// A tuple of `(start, end)` physical addresses (inclusive).
-pub fn get_current_direct_map_phys_range() -> (usize, usize) {
+pub fn get_current_direct_map_phys_range() -> (u64, u64) {
     let current = layout().current_direct_map_bound();
     (current.phys_start, current.phys_end)
 }
@@ -557,7 +565,7 @@ pub(crate) fn lock_runtime_direct_map_regions()
 /// direct-map region, or every overlap uses the same attribute. Returns an
 /// error for a conflicting alias.
 pub fn validate_direct_map_alias(
-    area: MemoryArea,
+    area: PhysicalMemoryArea,
     memory_attribute: MemoryAttribute,
 ) -> Result<(), &'static str> {
     if let Some(regions) = runtime_direct_map_regions() {
@@ -575,7 +583,7 @@ pub fn validate_direct_map_alias(
 ///
 /// `Some((phys_base, virt_base, size))` if heap is initialized,
 /// `None` otherwise.
-pub fn get_heap_phys_layout() -> Option<(usize, usize, usize)> {
+pub fn get_heap_phys_layout() -> Option<(u64, usize, usize)> {
     layout()
         .heap_layout()
         .map(|heap| (heap.phys_base, heap.virt_base, heap.size))
@@ -656,7 +664,7 @@ pub fn get_boot_hhdm_offset() -> usize {
 /// Panics if the boot layout is unavailable, the physical address is outside
 /// its direct-map bounds, or adding the offset overflows.
 #[inline(always)]
-pub fn boot_phys_to_virt(paddr: usize) -> usize {
+pub fn boot_phys_to_virt(paddr: u64) -> usize {
     layout().phys_to_boot_virt(paddr)
 }
 
@@ -680,7 +688,7 @@ pub fn boot_phys_to_virt(paddr: usize) -> usize {
 /// to a physical address in the current layout.
 #[inline(always)]
 #[track_caller]
-pub fn virt_to_phys(vaddr: usize) -> usize {
+pub fn virt_to_phys(vaddr: usize) -> u64 {
     layout().virt_to_current_phys(vaddr).unwrap_or_else(|| {
         let caller = core::panic::Location::caller();
         panic!(
@@ -711,7 +719,7 @@ pub fn virt_to_phys(vaddr: usize) -> usize {
 /// to a physical address in the boot layout.
 #[inline(always)]
 #[track_caller]
-pub fn boot_virt_to_phys(vaddr: usize) -> usize {
+pub fn boot_virt_to_phys(vaddr: usize) -> u64 {
     layout().virt_to_boot_phys(vaddr).unwrap_or_else(|| {
         let caller = core::panic::Location::caller();
         panic!(
@@ -742,7 +750,7 @@ pub fn boot_virt_to_phys(vaddr: usize) -> usize {
 /// Panics if the layout is unavailable, the address is outside the selected
 /// direct map, or adding the offset overflows.
 #[inline(always)]
-pub fn phys_to_virt(paddr: usize) -> usize {
+pub fn phys_to_virt(paddr: u64) -> usize {
     layout().phys_to_current_virt(paddr)
 }
 
@@ -750,7 +758,7 @@ pub fn phys_to_virt(paddr: usize) -> usize {
 ///
 /// This is an alias for `phys_to_virt()`.
 #[inline(always)]
-pub fn phys_to_kernel_virt(paddr: usize) -> usize {
+pub fn phys_to_kernel_virt(paddr: u64) -> usize {
     phys_to_virt(paddr)
 }
 
@@ -758,7 +766,7 @@ pub fn phys_to_kernel_virt(paddr: usize) -> usize {
 ///
 /// This is an alias for `virt_to_phys()`.
 #[inline(always)]
-pub fn kernel_virt_to_phys(vaddr: usize) -> usize {
+pub fn kernel_virt_to_phys(vaddr: usize) -> u64 {
     virt_to_phys(vaddr)
 }
 
@@ -771,10 +779,12 @@ pub fn kernel_virt_to_phys(vaddr: usize) -> usize {
 ///
 /// Panics if the physical address is outside the kernel image range.
 #[inline(always)]
-pub fn phys_to_kernel_image_virt(paddr: usize) -> usize {
+pub fn phys_to_kernel_image_virt(paddr: u64) -> usize {
     let kernel_image = layout().kernel_image();
     if kernel_image.contains_phys(paddr) {
-        return kernel_image.virt_base + (paddr - kernel_image.phys_base);
+        return kernel_image.virt_base
+            + usize::try_from(paddr - kernel_image.phys_base)
+                .expect("kernel image offset exceeds pointer width");
     }
     panic!(
         "phys_to_kernel_image_virt: physical address {:#x} is outside kernel image range",
@@ -795,7 +805,10 @@ pub fn phys_to_kernel_image_virt(paddr: usize) -> usize {
 #[inline(always)]
 pub fn is_direct_mapped(vaddr: usize) -> bool {
     let direct_map = layout().current_direct_map_bound();
-    let Some(paddr) = vaddr.checked_sub(direct_map.offset) else {
+    let Some(paddr) = vaddr
+        .checked_sub(direct_map.offset)
+        .map(|address| address as u64)
+    else {
         return false;
     };
 
@@ -812,18 +825,18 @@ pub fn is_direct_mapped(vaddr: usize) -> bool {
 ///
 /// Construction does not validate the address, allocate memory, or retain ownership.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct PhysAddr(pub usize);
+pub struct PhysAddr(pub u64);
 
 impl PhysAddr {
     /// Create a new `PhysAddr` from a raw address value.
     #[inline(always)]
-    pub const fn new(addr: usize) -> Self {
+    pub const fn new(addr: u64) -> Self {
         Self(addr)
     }
 
     /// Return the raw address value.
     #[inline(always)]
-    pub const fn as_usize(&self) -> usize {
+    pub const fn as_u64(&self) -> u64 {
         self.0
     }
 
@@ -837,21 +850,21 @@ impl PhysAddr {
 
     /// Check if the address is aligned to the given power-of-two alignment.
     #[inline(always)]
-    pub const fn is_aligned(&self, align: usize) -> bool {
+    pub const fn is_aligned(&self, align: u64) -> bool {
         assert!(align != 0 && align.is_power_of_two());
         self.0 & (align - 1) == 0
     }
 
     /// Align the address down to the given power-of-two boundary.
     #[inline(always)]
-    pub const fn align_down(&self, align: usize) -> Self {
+    pub const fn align_down(&self, align: u64) -> Self {
         assert!(align != 0 && align.is_power_of_two());
         Self::new(self.0 & !(align - 1))
     }
 
     /// Align the address up to the given power-of-two boundary.
     #[inline(always)]
-    pub const fn align_up(&self, align: usize) -> Self {
+    pub const fn align_up(&self, align: u64) -> Self {
         assert!(align != 0 && align.is_power_of_two());
         Self::new((self.0 + align - 1) & !(align - 1))
     }
@@ -904,4 +917,13 @@ impl VirtAddr {
         assert!(align != 0 && align.is_power_of_two());
         Self::new((self.0 + align - 1) & !(align - 1))
     }
+}
+
+/// Calculate the virtual position in the kernel direct-map window.
+/// Membership is checked separately against the sparse region set.
+pub(crate) fn kernel_direct_map_vaddr(paddr: u64) -> usize {
+    (crate::environment::SCARLET_HHDM_BASE as u64)
+        .checked_add(paddr)
+        .and_then(|vaddr| usize::try_from(vaddr).ok())
+        .expect("physical range does not fit the kernel direct-map window")
 }

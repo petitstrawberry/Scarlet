@@ -99,7 +99,7 @@ use core::result::Result;
 use fdt::{Fdt, FdtError};
 
 use crate::println;
-use crate::vm::vmem::MemoryArea;
+use crate::vm::vmem::{MemoryArea, PhysicalMemoryArea};
 use crate::{BootInfo, DeviceSource};
 
 use crate::sync::Once;
@@ -221,7 +221,7 @@ impl<'a> FdtManager<'a> {
     /// # Returns
     /// `Option<MemoryArea>`: If the initramfs region is found, returns `Some(MemoryArea)`,
     /// otherwise returns `None`.
-    pub fn get_initramfs(&self) -> Option<MemoryArea> {
+    pub fn get_initramfs(&self) -> Option<PhysicalMemoryArea> {
         let fdt = self.get_fdt()?;
 
         // Find the /chosen node which contains initramfs information
@@ -241,7 +241,7 @@ impl<'a> FdtManager<'a> {
                     prop.value[6],
                     prop.value[7],
                 ]);
-                Some(val as usize)
+                Some(val as u64)
             } else if prop.value.len() == 4 {
                 let val = u32::from_be_bytes([
                     prop.value[0],
@@ -249,7 +249,7 @@ impl<'a> FdtManager<'a> {
                     prop.value[2],
                     prop.value[3],
                 ]);
-                Some(val as usize)
+                Some(val as u64)
             } else {
                 None
             }
@@ -262,7 +262,7 @@ impl<'a> FdtManager<'a> {
                     prop.value[2],
                     prop.value[3],
                 ]);
-                Some(val as usize)
+                Some(val as u64)
             } else {
                 None
             }
@@ -284,7 +284,7 @@ impl<'a> FdtManager<'a> {
                     prop.value[6],
                     prop.value[7],
                 ]);
-                Some(val as usize)
+                Some(val as u64)
             } else if prop.value.len() == 4 {
                 let val = u32::from_be_bytes([
                     prop.value[0],
@@ -292,7 +292,7 @@ impl<'a> FdtManager<'a> {
                     prop.value[2],
                     prop.value[3],
                 ]);
-                Some(val as usize)
+                Some(val as u64)
             } else {
                 None
             }
@@ -305,7 +305,7 @@ impl<'a> FdtManager<'a> {
                     prop.value[2],
                     prop.value[3],
                 ]);
-                Some(val as usize)
+                Some(val as u64)
             } else {
                 None
             }
@@ -319,45 +319,19 @@ impl<'a> FdtManager<'a> {
                 return None;
             }
 
-            let memory_area = MemoryArea::new(start, end - 1);
+            let memory_area = PhysicalMemoryArea::new(start, end - 1);
             return Some(memory_area);
         }
 
         None
     }
 
-    pub fn get_dram_memoryarea(&self) -> Option<MemoryArea> {
+    pub fn get_dram_memoryarea(&self) -> Option<PhysicalMemoryArea> {
         let fdt = self.get_fdt()?;
-        let memory_node = fdt.find_node("/memory")?;
-
-        let reg = memory_node.property("reg")?;
-        if reg.value.len() < 16 {
-            return None;
-        }
-        let reg_start = u64::from_be_bytes([
-            reg.value[0],
-            reg.value[1],
-            reg.value[2],
-            reg.value[3],
-            reg.value[4],
-            reg.value[5],
-            reg.value[6],
-            reg.value[7],
-        ]);
-        let start = reg_start as usize;
-        let size = u64::from_be_bytes([
-            reg.value[8],
-            reg.value[9],
-            reg.value[10],
-            reg.value[11],
-            reg.value[12],
-            reg.value[13],
-            reg.value[14],
-            reg.value[15],
-        ]) as usize;
-        Some(
-            MemoryArea::new(start as usize, start + size - 1), // end is inclusive
-        )
+        let memory = fdt
+            .all_nodes()
+            .find(|node| node.property("device_type").and_then(|p| p.as_str()) == Some("memory"))?;
+        physical_reg(memory.raw_reg()?.next()?)
     }
 
     pub fn get_cpu_count(&self) -> Option<usize> {
@@ -505,7 +479,7 @@ pub fn relocate_fdt(dest_ptr: *mut u8) -> MemoryArea {
 /// start_kernel(&bootinfo);
 /// ```
 ///
-pub fn create_bootinfo_from_fdt(cpu_id: usize, relocated_fdt_addr: usize) -> BootInfo {
+pub fn create_bootinfo_from_fdt(cpu_id: usize, relocated_fdt_addr: u64) -> BootInfo {
     let fdt_manager = FdtManager::get_manager();
 
     // Get DRAM area
@@ -514,8 +488,10 @@ pub fn create_bootinfo_from_fdt(cpu_id: usize, relocated_fdt_addr: usize) -> Boo
         .expect("Memory area not found");
 
     // Calculate usable memory area (simplified for now)
-    let kernel_end = unsafe { &crate::mem::__KERNEL_SPACE_END as *const usize as usize };
-    let mut usable_memory = MemoryArea::new(kernel_end, dram_area.end);
+    let kernel_end = crate::vm::addr::kernel_virt_to_phys(unsafe {
+        &crate::mem::__KERNEL_SPACE_END as *const usize as usize
+    });
+    let mut usable_memory = PhysicalMemoryArea::new(kernel_end, dram_area.end);
 
     // Relocate initramfs
     crate::println!("Relocating initramfs...");
@@ -556,4 +532,23 @@ pub fn create_bootinfo_from_fdt(cpu_id: usize, relocated_fdt_addr: usize) -> Boo
 fn bytes_to_cstr(bytes: &[u8]) -> Option<&str> {
     let len = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
     core::str::from_utf8(&bytes[..len]).ok()
+}
+
+/// Decode one or two big-endian FDT address cells without pointer-width truncation.
+pub fn decode_address(bytes: &[u8]) -> Option<u64> {
+    match bytes.len() {
+        4 => Some(u32::from_be_bytes(bytes.try_into().ok()?) as u64),
+        8 => Some(u64::from_be_bytes(bytes.try_into().ok()?)),
+        _ => None,
+    }
+}
+
+/// Decode a nonempty physical `reg` range. The end is inclusive.
+pub fn physical_reg(reg: fdt::node::RawReg<'_>) -> Option<PhysicalMemoryArea> {
+    let start = decode_address(reg.address)?;
+    let size = decode_address(reg.size)?;
+    Some(PhysicalMemoryArea::new(
+        start,
+        start.checked_add(size.checked_sub(1)?)?,
+    ))
 }

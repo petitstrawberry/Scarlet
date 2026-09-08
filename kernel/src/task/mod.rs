@@ -2260,9 +2260,9 @@ impl Task {
         let size = num_of_pages * PAGE_SIZE;
         let paddr = virt_to_phys(page_alloc.as_ptr() as usize);
         let mmap = VirtualMemoryMap {
-            pmarea: MemoryArea {
+            pmarea: crate::vm::vmem::PhysicalMemoryArea {
                 start: paddr,
-                end: paddr + size - 1,
+                end: paddr + size as u64 - 1,
             },
             vmarea: MemoryArea {
                 start: vaddr,
@@ -2436,7 +2436,7 @@ impl Task {
     ) -> Result<VirtualMemoryMap, &'static str> {
         let permissions = VirtualMemoryRegion::Guard.default_permissions();
         let mmap = VirtualMemoryMap {
-            pmarea: MemoryArea { start: 0, end: 0 },
+            pmarea: crate::vm::vmem::PhysicalMemoryArea { start: 0, end: 0 },
             vmarea: MemoryArea {
                 start: vaddr,
                 end: vaddr + num_of_pages * PAGE_SIZE - 1,
@@ -2450,11 +2450,7 @@ impl Task {
         Ok(mmap)
     }
 
-    fn take_exact_page_allocation(
-        &self,
-        paddr: usize,
-        page_count: usize,
-    ) -> Option<ContiguousPages> {
+    fn take_exact_page_allocation(&self, paddr: u64, page_count: usize) -> Option<ContiguousPages> {
         let mut allocations = self.page_allocations.write();
         let index = allocations
             .iter()
@@ -2979,7 +2975,7 @@ impl Task {
                 } else if let Some(owner) = &mmap.owner {
                     if let Some(cloned_owner) = owner.fork_clone() {
                         let new_mmap = VirtualMemoryMap {
-                            pmarea: MemoryArea { start: 0, end: 0 },
+                            pmarea: crate::vm::vmem::PhysicalMemoryArea { start: 0, end: 0 },
                             vmarea: mmap.vmarea,
                             vm_start: mmap.vm_start,
                             permissions: mmap.permissions,
@@ -2995,7 +2991,7 @@ impl Task {
                         if mmap.pmarea.start == 0 {
                             // Lazy: clone Arc, child COWs independently on fault
                             let new_mmap = VirtualMemoryMap {
-                                pmarea: MemoryArea { start: 0, end: 0 },
+                                pmarea: crate::vm::vmem::PhysicalMemoryArea { start: 0, end: 0 },
                                 vmarea: mmap.vmarea,
                                 vm_start: mmap.vm_start,
                                 permissions: mmap.permissions,
@@ -3015,9 +3011,9 @@ impl Task {
                             let size = num_pages * PAGE_SIZE;
                             let paddr = virt_to_phys(page_alloc.as_ptr() as usize);
                             let new_mmap = VirtualMemoryMap {
-                                pmarea: MemoryArea {
+                                pmarea: crate::vm::vmem::PhysicalMemoryArea {
                                     start: paddr,
-                                    end: paddr + (size - 1),
+                                    end: paddr + (size - 1) as u64,
                                 },
                                 vmarea: MemoryArea {
                                     start: vaddr,
@@ -3054,7 +3050,7 @@ impl Task {
                         let base_page_idx = (mmap.vmarea.start - mmap.vm_start) / PAGE_SIZE;
                         let cow_owner = Arc::new(ForkCowPageOwner::new(base_page_idx, page_alloc));
                         let cow_map = VirtualMemoryMap {
-                            pmarea: MemoryArea { start: 0, end: 0 },
+                            pmarea: crate::vm::vmem::PhysicalMemoryArea { start: 0, end: 0 },
                             vmarea: mmap.vmarea,
                             vm_start: mmap.vm_start,
                             permissions: mmap.permissions,
@@ -3083,9 +3079,9 @@ impl Task {
                     let size = num_pages * PAGE_SIZE;
                     let paddr = virt_to_phys(page_alloc.as_ptr() as usize);
                     let new_mmap = VirtualMemoryMap {
-                        pmarea: MemoryArea {
+                        pmarea: crate::vm::vmem::PhysicalMemoryArea {
                             start: paddr,
-                            end: paddr + (size - 1),
+                            end: paddr + (size - 1) as u64,
                         },
                         vmarea: MemoryArea {
                             start: vaddr,
@@ -4015,7 +4011,7 @@ impl Task {
     /// # Returns
     /// The kernel stack memory area as a MemoryArea
     ///
-    pub fn get_kernel_stack_memory_area_paddr(&self) -> MemoryArea {
+    pub fn get_kernel_stack_memory_area_paddr(&self) -> crate::vm::vmem::PhysicalMemoryArea {
         self.kernel_context
             .lock()
             .get_kernel_stack_memory_area_paddr()
@@ -4299,7 +4295,7 @@ mod tests {
             Err("mapping info is not used by this test")
         }
 
-        fn on_mapped(&self, _vaddr: usize, _paddr: usize, _length: usize, _offset: usize) {
+        fn on_mapped(&self, _vaddr: usize, _paddr: u64, _length: usize, _offset: usize) {
             self.mappings.fetch_add(1, Ordering::SeqCst);
         }
 
@@ -5460,7 +5456,8 @@ mod tests {
         ];
         unsafe {
             let stack_ptr =
-                phys_to_virt(stack_mmap.pmarea.start + crate::environment::PAGE_SIZE) as *mut u8;
+                phys_to_virt(stack_mmap.pmarea.start + crate::environment::PAGE_SIZE as u64)
+                    as *mut u8;
             core::ptr::copy_nonoverlapping(
                 stack_test_data.as_ptr(),
                 stack_ptr,
@@ -5585,9 +5582,9 @@ mod tests {
         let paddr = virt_to_phys(pages as usize);
 
         let shared_mmap = VirtualMemoryMap {
-            pmarea: MemoryArea {
+            pmarea: crate::vm::vmem::PhysicalMemoryArea {
                 start: paddr,
-                end: paddr + PAGE_SIZE - 1,
+                end: paddr + PAGE_SIZE as u64 - 1,
             },
             vmarea: MemoryArea {
                 start: shared_vaddr,
@@ -5701,9 +5698,9 @@ mod tests {
         parent
             .vm_manager
             .add_memory_map(VirtualMemoryMap {
-                pmarea: MemoryArea {
+                pmarea: crate::vm::vmem::PhysicalMemoryArea {
                     start: 0x8000_0000,
-                    end: 0x8000_0000 + PAGE_SIZE - 1,
+                    end: 0x8000_0000 + PAGE_SIZE as u64 - 1,
                 },
                 vmarea: MemoryArea {
                     start: shared_vaddr,

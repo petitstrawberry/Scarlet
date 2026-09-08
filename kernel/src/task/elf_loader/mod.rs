@@ -1280,9 +1280,9 @@ fn map_elf_segment(
         crate::mem::page::ContiguousPages::new(num_of_pages).ok_or("Failed to allocate memory")?;
     let ptr = page_alloc.as_ptr() as *mut u8;
     let pm_start = virt_to_phys(ptr as usize);
-    let pmarea = MemoryArea {
+    let pmarea = crate::vm::vmem::PhysicalMemoryArea {
         start: pm_start,
-        end: pm_start + size - 1,
+        end: pm_start + size as u64 - 1,
     };
 
     let map = VirtualMemoryMap {

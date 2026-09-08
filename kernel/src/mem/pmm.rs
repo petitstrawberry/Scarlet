@@ -11,7 +11,7 @@ use alloc::vec::Vec;
 use crate::environment::PAGE_SIZE;
 use crate::println;
 use crate::vm::phys_to_virt;
-use crate::vm::vmem::MemoryArea;
+use crate::vm::vmem::PhysicalMemoryArea;
 
 const MAX_ORDER: usize = 22;
 const MAX_REGIONS: usize = 16;
@@ -19,8 +19,8 @@ const MAX_TRACKED_ALIGNED_ALLOCATIONS: usize = 64;
 
 #[derive(Clone, Copy)]
 struct TrackedAlignedAllocation {
-    returned_paddr: usize,
-    base_paddr: usize,
+    returned_paddr: u64,
+    base_paddr: u64,
     backing_pages: usize,
     requested_pages: usize,
 }
@@ -103,7 +103,7 @@ impl FreeArea {
 }
 
 struct BuddyRegion {
-    mem_start: usize,
+    mem_start: u64,
     mem_size: usize,
     page_count: usize,
     pages: *mut Page,
@@ -164,8 +164,11 @@ impl BuddyRegion {
     /// - The metadata region must not be freed or allocated from external code.
     /// - `page_count` covers the full region including the metadata pages, so
     ///   `self.pages.add(i)` is valid for any `i < page_count`.
-    fn init(&mut self, start: usize, size: usize) {
-        self.mem_start = align_up(start, PAGE_SIZE);
+    fn init(&mut self, start: u64, size: usize) {
+        self.mem_start = start
+            .checked_add(PAGE_SIZE as u64 - 1)
+            .expect("physical region start overflows")
+            & !(PAGE_SIZE as u64 - 1);
         self.mem_size = align_down(size, PAGE_SIZE);
         self.active = false;
 
@@ -255,19 +258,19 @@ impl BuddyRegion {
         unsafe { self.pages.add(pfn) }
     }
 
-    fn pfn_to_addr(&self, pfn: usize) -> usize {
-        self.mem_start + pfn * PAGE_SIZE
+    fn pfn_to_addr(&self, pfn: usize) -> u64 {
+        self.mem_start + (pfn * PAGE_SIZE) as u64
     }
 
-    fn addr_to_pfn(&self, addr: usize) -> usize {
-        (addr - self.mem_start) / PAGE_SIZE
+    fn addr_to_pfn(&self, addr: u64) -> Option<usize> {
+        usize::try_from(addr.checked_sub(self.mem_start)? / PAGE_SIZE as u64).ok()
     }
 
     unsafe fn page_is_buddy(&self, page: *const Page, order: usize) -> bool {
         (*page).order == order as u8 && ((*page).flags & PAGE_FLAG_BUDDY) != 0
     }
 
-    fn alloc(&mut self, pages: usize) -> Option<usize> {
+    fn alloc(&mut self, pages: usize) -> Option<u64> {
         if pages == 0 || !self.active {
             return None;
         }
@@ -284,7 +287,7 @@ impl BuddyRegion {
         self.alloc_from_order(order)
     }
 
-    fn alloc_from_order(&mut self, order: usize) -> Option<usize> {
+    fn alloc_from_order(&mut self, order: usize) -> Option<u64> {
         if order > MAX_ORDER || !self.active {
             return None;
         }
@@ -325,7 +328,7 @@ impl BuddyRegion {
         }
     }
 
-    fn free(&mut self, paddr: usize, pages: usize) {
+    fn free(&mut self, paddr: u64, pages: usize) {
         if !self.active || paddr < self.mem_start {
             return;
         }
@@ -339,7 +342,9 @@ impl BuddyRegion {
             return;
         }
 
-        let mut page_idx = self.addr_to_pfn(paddr);
+        let Some(mut page_idx) = self.addr_to_pfn(paddr) else {
+            return;
+        };
         if page_idx >= self.page_count {
             return;
         }
@@ -373,8 +378,8 @@ impl BuddyRegion {
         }
     }
 
-    fn contains(&self, paddr: usize) -> bool {
-        self.active && paddr >= self.mem_start && paddr < self.mem_start + self.mem_size
+    fn contains(&self, paddr: u64) -> bool {
+        self.active && paddr >= self.mem_start && paddr < self.mem_start + self.mem_size as u64
     }
 
     fn free_pages(&self) -> usize {
@@ -395,7 +400,12 @@ impl BuddyRegion {
         }
 
         let old_pages_start = self.pages as usize;
-        let new_pages_start = self.mem_start + new_offset;
+        let new_pages_start = usize::try_from(
+            self.mem_start
+                .checked_add(new_offset as u64)
+                .expect("metadata direct-map address overflows"),
+        )
+        .expect("metadata direct-map address exceeds pointer width");
         let pages_bytes = self.page_count * core::mem::size_of::<Page>();
         let old_pages_end = old_pages_start + pages_bytes;
 
@@ -494,8 +504,8 @@ impl PmmInner {
 
     fn track_aligned_allocation(
         &mut self,
-        returned_paddr: usize,
-        base_paddr: usize,
+        returned_paddr: u64,
+        base_paddr: u64,
         backing_pages: usize,
         requested_pages: usize,
     ) -> Result<(), &'static str> {
@@ -515,7 +525,7 @@ impl PmmInner {
 
     fn take_tracked_aligned_allocation(
         &mut self,
-        returned_paddr: usize,
+        returned_paddr: u64,
     ) -> Option<TrackedAlignedAllocation> {
         for slot in &mut self.tracked_aligned_allocations {
             if slot
@@ -528,7 +538,7 @@ impl PmmInner {
         None
     }
 
-    fn add_region(&mut self, start: usize, size: usize) -> Result<(), &'static str> {
+    fn add_region(&mut self, start: u64, size: usize) -> Result<(), &'static str> {
         for region in &mut self.regions {
             if !region.active {
                 region.init(start, size);
@@ -540,7 +550,7 @@ impl PmmInner {
         Err("Maximum number of PMM regions reached or region too small")
     }
 
-    fn alloc(&mut self, pages: usize) -> Option<usize> {
+    fn alloc(&mut self, pages: usize) -> Option<u64> {
         for region in &mut self.regions {
             if region.active {
                 if let Some(addr) = region.alloc(pages) {
@@ -551,7 +561,7 @@ impl PmmInner {
         None
     }
 
-    fn alloc_from_order(&mut self, order: usize) -> Option<usize> {
+    fn alloc_from_order(&mut self, order: usize) -> Option<u64> {
         for region in &mut self.regions {
             if region.active {
                 if let Some(addr) = region.alloc_from_order(order) {
@@ -562,7 +572,7 @@ impl PmmInner {
         None
     }
 
-    fn free(&mut self, paddr: usize, pages: usize) {
+    fn free(&mut self, paddr: u64, pages: usize) {
         if let Some(allocation) = self.take_tracked_aligned_allocation(paddr) {
             debug_assert_eq!(allocation.requested_pages, pages);
             for region in &mut self.regions {
@@ -615,19 +625,16 @@ static PMM: IrqSpinLock<PmmInner> = IrqSpinLock::new(PmmInner::new());
 ///
 /// No value. Logs and skips an unusable region or a registration failure; it does
 /// not reset existing allocator state.
-pub unsafe fn init(area: MemoryArea) {
+pub unsafe fn init(area: PhysicalMemoryArea) {
     println!(
         "[PMM] Initializing buddy system with region: {:#x} - {:#x}",
         area.start, area.end
     );
 
-    let start = align_up(area.start, PAGE_SIZE);
-    let size = align_down(area.end + 1 - start, PAGE_SIZE);
-
-    if size == 0 {
-        println!("[PMM] Region too small, skipping");
+    let Some((start, size)) = aligned_region(area) else {
+        println!("[PMM] Invalid or unrepresentable region, skipping");
         return;
-    }
+    };
 
     if let Err(e) = PMM.lock().add_region(start, size) {
         println!("[PMM] Failed to add region: {}", e);
@@ -643,13 +650,8 @@ pub unsafe fn init(area: MemoryArea) {
     let _ = total_pages;
 }
 
-pub fn add_region(area: MemoryArea) -> Result<(), &'static str> {
-    let start = align_up(area.start, PAGE_SIZE);
-    let size = align_down(area.end + 1 - start, PAGE_SIZE);
-
-    if size == 0 {
-        return Err("Region too small");
-    }
+pub fn add_region(area: PhysicalMemoryArea) -> Result<(), &'static str> {
+    let (start, size) = aligned_region(area).ok_or("Invalid or unrepresentable PMM region")?;
 
     PMM.lock().add_region(start, size)
 }
@@ -666,7 +668,7 @@ pub fn add_region(area: MemoryArea) -> Result<(), &'static str> {
 ///
 /// The starting physical address of an owned allocation, or `None` if it cannot
 /// be allocated. Contents are not zeroed here. Free with the original page count.
-pub fn alloc_contiguous_pages(pages: usize) -> Option<usize> {
+pub fn alloc_contiguous_pages(pages: usize) -> Option<u64> {
     PMM.lock().alloc(pages)
 }
 
@@ -683,7 +685,7 @@ pub fn alloc_contiguous_pages(pages: usize) -> Option<usize> {
 /// The starting physical address of an owned, uninitialized allocation, or `None`
 /// if sizing, allocation, or aligned-allocation tracking fails. Release with
 /// [`free_contiguous_pages`] using the returned address and original `pages` count.
-pub fn alloc_contiguous_pages_aligned(pages: usize, align_pages: usize) -> Option<usize> {
+pub fn alloc_contiguous_pages_aligned(pages: usize, align_pages: usize) -> Option<u64> {
     if align_pages == 0 || align_pages == 1 {
         return alloc_contiguous_pages(pages);
     }
@@ -702,8 +704,8 @@ pub fn alloc_contiguous_pages_aligned(pages: usize, align_pages: usize) -> Optio
     let requested_buddy_pages = pages.checked_next_power_of_two()?;
     let base_paddr = PMM.lock().alloc_from_order(backing_order)?;
     let returned_paddr = match base_paddr
-        .checked_add(align_bytes - 1)
-        .map(|addr| addr & !(align_bytes - 1))
+        .checked_add(align_bytes as u64 - 1)
+        .map(|addr| addr & !(align_bytes as u64 - 1))
     {
         Some(paddr) => paddr,
         None => {
@@ -712,8 +714,8 @@ pub fn alloc_contiguous_pages_aligned(pages: usize, align_pages: usize) -> Optio
         }
     };
 
-    let allocation_end = returned_paddr.checked_add(allocation_bytes);
-    let backing_end = base_paddr.checked_add(backing_bytes);
+    let allocation_end = returned_paddr.checked_add(allocation_bytes as u64);
+    let backing_end = base_paddr.checked_add(backing_bytes as u64);
     let (Some(allocation_end), Some(backing_end)) = (allocation_end, backing_end) else {
         PMM.lock().free(base_paddr, backing_pages);
         return None;
@@ -757,7 +759,7 @@ fn aligned_allocation_backing_order(pages: usize, align_pages: usize) -> Option<
 
 /// Allocate individual pages (may be non-contiguous).
 /// Suitable for task memory where physical contiguity is not required.
-pub fn alloc_individual_pages(count: usize) -> Option<Vec<usize>> {
+pub fn alloc_individual_pages(count: usize) -> Option<Vec<u64>> {
     let mut pages = Vec::with_capacity(count);
     for _ in 0..count {
         match PMM.lock().alloc(1) {
@@ -775,22 +777,22 @@ pub fn alloc_individual_pages(count: usize) -> Option<Vec<usize>> {
 }
 
 /// Free contiguous pages.
-pub fn free_contiguous_pages(paddr: usize, pages: usize) {
+pub fn free_contiguous_pages(paddr: u64, pages: usize) {
     PMM.lock().free(paddr, pages);
 }
 
 /// Free individual pages.
-pub fn free_individual_pages(pages: &[usize]) {
+pub fn free_individual_pages(pages: &[u64]) {
     for &paddr in pages {
         PMM.lock().free(paddr, 1);
     }
 }
 
-pub fn alloc_frame() -> Option<usize> {
+pub fn alloc_frame() -> Option<u64> {
     alloc_contiguous_pages(1)
 }
 
-pub fn free_frame(paddr: usize) {
+pub fn free_frame(paddr: u64) {
     free_contiguous_pages(paddr, 1);
 }
 
@@ -828,13 +830,13 @@ mod tests {
         let frame = frame.unwrap();
         // Verify it's a valid physical address (not null and page aligned)
         assert!(frame > 0);
-        assert_eq!(frame % PAGE_SIZE, 0);
+        assert_eq!(frame % PAGE_SIZE as u64, 0);
 
         // Test multi-page allocation
         let addr = alloc_contiguous_pages(4);
         assert!(addr.is_some());
         let addr = addr.unwrap();
-        assert_eq!(addr % PAGE_SIZE, 0);
+        assert_eq!(addr % PAGE_SIZE as u64, 0);
 
         // Test stats - should report available memory
         let (total, free) = stats();
@@ -851,7 +853,7 @@ mod tests {
         let (_, free_before) = stats();
 
         let addr = alloc_contiguous_pages_aligned(4, 4).expect("aligned allocation failed");
-        assert_eq!(addr % (4 * PAGE_SIZE), 0);
+        assert_eq!(addr % (4 * PAGE_SIZE as u64), 0);
 
         free_contiguous_pages(addr, 4);
 
@@ -867,4 +869,32 @@ mod tests {
         assert_eq!(aligned_allocation_backing_order(0, 4), None);
         assert_eq!(aligned_allocation_backing_order(1, 3), None);
     }
+}
+
+fn aligned_region(area: PhysicalMemoryArea) -> Option<(u64, usize)> {
+    let start = area.start.checked_add(PAGE_SIZE as u64 - 1)? & !(PAGE_SIZE as u64 - 1);
+    let end = area.end.checked_add(1)? & !(PAGE_SIZE as u64 - 1);
+    let size = usize::try_from(end.checked_sub(start)?).ok()?;
+    (size != 0).then_some((start, size))
+}
+
+#[cfg(test)]
+#[test_case]
+fn physical_region_alignment_preserves_wide_addresses_and_rejects_empty_ranges() {
+    assert_eq!(
+        aligned_region(PhysicalMemoryArea::new(0x1_0000_0001, 0x1_0000_3fff)),
+        Some((0x1_0000_1000, 3 * PAGE_SIZE))
+    );
+    assert_eq!(
+        aligned_region(PhysicalMemoryArea::new(1, PAGE_SIZE as u64 - 1)),
+        None
+    );
+    assert_eq!(
+        aligned_region(PhysicalMemoryArea::new(0x2000, 0x1000)),
+        None
+    );
+    assert_eq!(
+        aligned_region(PhysicalMemoryArea::new(u64::MAX, u64::MAX)),
+        None
+    );
 }

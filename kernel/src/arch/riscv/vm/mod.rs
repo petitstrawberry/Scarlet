@@ -161,7 +161,7 @@ impl RootPageTableGuard {
     pub(crate) fn map(
         &mut self,
         vaddr: usize,
-        paddr: usize,
+        paddr: u64,
         flags: usize,
         memory_attribute: MemoryAttribute,
         user: bool,
@@ -182,7 +182,7 @@ impl RootPageTableGuard {
     ///
     /// The physical address when a valid leaf translation exists, or `None` when
     /// the address is unmapped.
-    pub(crate) fn translate(&mut self, vaddr: usize) -> Option<usize> {
+    pub(crate) fn translate(&mut self, vaddr: usize) -> Option<u64> {
         self.table_mut().translate(vaddr)
     }
 
@@ -384,15 +384,18 @@ fn setup_trampoline_at_end(manager: &VirtualMemoryManager, trampoline_vaddr_end:
         kernel_virt_to_phys(unsafe { &__TRAMPOLINE_START as *const usize as usize });
     let trampoline_end =
         kernel_virt_to_phys(unsafe { &__TRAMPOLINE_END as *const usize as usize }) - 1;
-    let trampoline_size = trampoline_end - trampoline_start;
+    let trampoline_size = usize::try_from(trampoline_end - trampoline_start)
+        .expect("trampoline offset exceeds native address width");
 
     let arch = get_cpu().as_paddr_cpu();
     let trampoline_vaddr_start = trampoline_vaddr_end - trampoline_size;
 
     let trap_entry_paddr = kernel_virt_to_phys(get_user_trapvector_paddr());
     let arch_paddr = kernel_virt_to_phys(arch as *const Arch as usize);
-    let trap_entry_offset = trap_entry_paddr - trampoline_start;
-    let arch_offset = arch_paddr - trampoline_start;
+    let trap_entry_offset = usize::try_from(trap_entry_paddr - trampoline_start)
+        .expect("trampoline offset exceeds native address width");
+    let arch_offset = usize::try_from(arch_paddr - trampoline_start)
+        .expect("trampoline offset exceeds native address width");
 
     let trap_entry_vaddr = trampoline_vaddr_start + trap_entry_offset;
     let arch_vaddr = trampoline_vaddr_start + arch_offset;
@@ -418,7 +421,7 @@ fn setup_trampoline_at_end(manager: &VirtualMemoryManager, trampoline_vaddr_end:
             start: trampoline_vaddr_start,
             end: trampoline_vaddr_end,
         },
-        pmarea: MemoryArea {
+        pmarea: crate::vm::vmem::PhysicalMemoryArea {
             start: trampoline_start,
             end: trampoline_end,
         },
@@ -505,12 +508,14 @@ pub fn register_trampoline_for_ap() {
         kernel_virt_to_phys(unsafe { &__TRAMPOLINE_START as *const usize as usize });
     let trampoline_end =
         kernel_virt_to_phys(unsafe { &__TRAMPOLINE_END as *const usize as usize }) - 1;
-    let trampoline_size = trampoline_end - trampoline_start;
+    let trampoline_size = usize::try_from(trampoline_end - trampoline_start)
+        .expect("trampoline offset exceeds native address width");
 
     let arch = get_cpu().as_paddr_cpu();
     let trampoline_vaddr_start = TRAMPOLINE_VA_END - trampoline_size;
     let arch_paddr = kernel_virt_to_phys(arch as *const Arch as usize);
-    let arch_offset = arch_paddr - trampoline_start;
+    let arch_offset = usize::try_from(arch_paddr - trampoline_start)
+        .expect("trampoline offset exceeds native address width");
     let arch_vaddr = trampoline_vaddr_start + arch_offset;
 
     crate::vm::set_trampoline_arch(arch.get_cpuid(), arch_vaddr);

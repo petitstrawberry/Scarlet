@@ -35,7 +35,7 @@ enum FutexKey {
         address: usize,
     },
     Shared {
-        physical_address: usize,
+        physical_address: u64,
     },
 }
 

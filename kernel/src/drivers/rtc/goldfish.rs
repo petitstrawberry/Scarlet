@@ -34,7 +34,7 @@ fn goldfish_rtc_probe(device_info: &PlatformDeviceInfo) -> Result<(), &'static s
         .ok_or("No memory resource found for goldfish-rtc")?;
 
     let paddr = memory_resource.start;
-    let size = memory_resource.end - memory_resource.start + 1;
+    let size = memory_resource.size()?;
     let base = crate::vm::ioremap(paddr, size).inspect_err(|e| {
         crate::println!(
             "goldfish-rtc: ioremap({:#x}, {:#x}) failed: {}",

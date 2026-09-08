@@ -1121,7 +1121,7 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         .ok_or("Memory resource not found")?;
 
     let paddr = mem_res.start;
-    let size = mem_res.end - mem_res.start + 1;
+    let size = mem_res.size()?;
 
     // Map the device's physical MMIO region into the kernel virtual address space.
     let base_addr = crate::vm::ioremap(paddr, size).map_err(|e| {

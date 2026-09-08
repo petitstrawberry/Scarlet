@@ -630,7 +630,7 @@ impl MemoryMappingOps for DevPtsFileObject {
         }
     }
 
-    fn on_mapped(&self, vaddr: usize, paddr: usize, length: usize, offset: usize) {
+    fn on_mapped(&self, vaddr: usize, paddr: u64, length: usize, offset: usize) {
         match &self.endpoint {
             DevPtsEndpoint::Master(master) => master.on_mapped(vaddr, paddr, length, offset),
             DevPtsEndpoint::Slave(slave) => slave.on_mapped(vaddr, paddr, length, offset),
@@ -786,7 +786,7 @@ impl MemoryMappingOps for DevPtsDirectoryObject {
         Err("Memory mapping not supported for DevPTS directories")
     }
 
-    fn on_mapped(&self, _vaddr: usize, _paddr: usize, _length: usize, _offset: usize) {}
+    fn on_mapped(&self, _vaddr: usize, _paddr: u64, _length: usize, _offset: usize) {}
 
     fn on_unmapped(&self, _vaddr: usize, _length: usize) {}
 

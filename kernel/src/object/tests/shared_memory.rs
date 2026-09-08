@@ -120,19 +120,19 @@ fn test_shared_memory_mapping_offset() {
         let result1 = mem_mappable.get_mapping_info(offset1, 4096);
         assert!(result1.is_ok());
         let info1 = result1.unwrap();
-        assert_eq!(info1.paddr, paddr + offset1);
+        assert_eq!(info1.paddr, paddr + offset1 as u64);
 
         let offset2 = 4096;
         let result2 = mem_mappable.get_mapping_info(offset2, 4096);
         assert!(result2.is_ok());
         let info2 = result2.unwrap();
-        assert_eq!(info2.paddr, paddr + offset2);
+        assert_eq!(info2.paddr, paddr + offset2 as u64);
 
         let offset3 = 8192;
         let result3 = mem_mappable.get_mapping_info(offset3, 4096);
         assert!(result3.is_ok());
         let info3 = result3.unwrap();
-        assert_eq!(info3.paddr, paddr + offset3);
+        assert_eq!(info3.paddr, paddr + offset3 as u64);
 
         // Test out of bounds mapping
         let result_oob = mem_mappable.get_mapping_info(size, 1);

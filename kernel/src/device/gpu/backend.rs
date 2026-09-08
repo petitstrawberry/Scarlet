@@ -252,7 +252,7 @@ pub struct GpuBackendQueueInfo {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GpuBufferCreateInfo {
     /// Physical address of the stable contiguous backing allocation.
-    pub paddr: usize,
+    pub paddr: u64,
     /// Page-rounded allocation size in bytes.
     pub allocation_size: u64,
 }
@@ -268,7 +268,7 @@ impl GpuBufferCreateInfo {
     /// # Returns
     ///
     /// Backend-neutral buffer backing information.
-    pub const fn new(paddr: usize, allocation_size: u64) -> Self {
+    pub const fn new(paddr: u64, allocation_size: u64) -> Self {
         Self {
             paddr,
             allocation_size,
@@ -511,7 +511,7 @@ impl GpuBackendImageLayout {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GpuImageBackingInfo {
     /// Physical address of the first backing extent.
-    pub paddr: usize,
+    pub paddr: u64,
     /// Page-rounded allocation size in bytes.
     pub allocation_size: u64,
     physical_segments: Arc<[GpuBackingSegment]>,
@@ -528,7 +528,7 @@ impl GpuImageBackingInfo {
     /// # Returns
     ///
     /// Backend-neutral image backing information.
-    pub fn new(paddr: usize, allocation_size: u64) -> Self {
+    pub fn new(paddr: u64, allocation_size: u64) -> Self {
         let segment_length = usize::try_from(allocation_size).unwrap_or(0);
         Self {
             paddr,

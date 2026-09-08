@@ -342,8 +342,10 @@ use sched::scheduler::{enqueue_task, get_task_by_id, register_task, start_schedu
 use task::new_user_task;
 use timer::get_kernel_timer;
 use vm::{
-    boot::switch_to_boot_page_table, direct_map::DirectMapRegions, kernel_vm_init, phys_to_virt,
-    transition_kernel_memory_layout, vmem::MemoryArea,
+    boot::switch_to_boot_page_table,
+    direct_map::DirectMapRegions,
+    kernel_vm_init, phys_to_virt, transition_kernel_memory_layout,
+    vmem::{MemoryArea, PhysicalMemoryArea},
 };
 
 fn is_pci_host_node(node: &fdt::node::FdtNode<'_, '_>) -> bool {
@@ -355,7 +357,7 @@ fn is_pci_host_node(node: &fdt::node::FdtNode<'_, '_>) -> bool {
             .unwrap_or(false)
 }
 
-fn find_pci_ecam(fdt: &fdt::Fdt<'_>) -> Option<(usize, usize)> {
+fn find_pci_ecam(fdt: &fdt::Fdt<'_>) -> Option<(u64, usize)> {
     for parent_path in ["/soc", "/"] {
         let Some(parent) = fdt.find_node(parent_path) else {
             continue;
@@ -366,10 +368,11 @@ fn find_pci_ecam(fdt: &fdt::Fdt<'_>) -> Option<(usize, usize)> {
                 continue;
             }
 
-            if let Some(regions) = child.reg() {
-                for region in regions {
-                    if let Some(size) = region.size {
-                        return Some((region.starting_address as usize, size));
+            if let Some(regions) = child.raw_reg() {
+                for raw in regions {
+                    if let Some(area) = crate::device::fdt::physical_reg(raw) {
+                        let size = usize::try_from(area.byte_len()?).ok()?;
+                        return Some((area.start, size));
                     }
                 }
             }
@@ -411,7 +414,7 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
 pub enum DeviceSource {
     /// Flattened Device Tree (FDT) source
     /// Used by RISC-V, ARM, and other architectures that support device trees
-    Fdt(usize),
+    Fdt(u64),
     /// Unified Extensible Firmware Interface (UEFI) source
     /// Modern firmware interface providing comprehensive hardware information
     Uefi,
@@ -459,7 +462,7 @@ pub struct BootInfo {
     /// Used to drive SMP initialization and per-CPU resource sizing
     pub cpu_count: usize,
     /// Physical memory area available for PMM allocation (usable RAM excluding reserved regions)
-    pub usable_memory_paddr: MemoryArea,
+    pub usable_memory_paddr: PhysicalMemoryArea,
     /// Every physical RAM region available to the PMM.
     ///
     /// `usable_memory_paddr` remains the primary boot-time scratch region for
@@ -469,7 +472,7 @@ pub struct BootInfo {
     /// Sparse physical regions mapped into Scarlet's HHDM (direct map).
     pub direct_map_regions: DirectMapRegions,
     /// Optional initramfs physical memory area
-    pub initramfs_paddr: Option<MemoryArea>,
+    pub initramfs_paddr: Option<PhysicalMemoryArea>,
     /// HHDM offset: hhdm_va = paddr + hhdm_offset
     pub hhdm_offset: usize,
     /// Optional kernel command line parameters
@@ -480,7 +483,7 @@ pub struct BootInfo {
     pub device_source: DeviceSource,
     /// Optional framebuffer physical memory area
     /// Used for early console output before graphics subsystem initialization
-    pub framebuffer_paddr: Option<MemoryArea>,
+    pub framebuffer_paddr: Option<PhysicalMemoryArea>,
     /// Optional BSP hook to start secondary CPUs.
     ///
     /// Called by `start_kernel()` after all global one-time init is complete.
@@ -512,13 +515,13 @@ impl BootInfo {
     pub fn new(
         cpu_id: usize,
         cpu_count: usize,
-        usable_memory_paddr: MemoryArea,
+        usable_memory_paddr: PhysicalMemoryArea,
         direct_map_regions: DirectMapRegions,
-        initramfs_paddr: Option<MemoryArea>,
+        initramfs_paddr: Option<PhysicalMemoryArea>,
         hhdm_offset: usize,
         cmdline: Option<&'static str>,
         device_source: DeviceSource,
-        framebuffer_paddr: Option<MemoryArea>,
+        framebuffer_paddr: Option<PhysicalMemoryArea>,
         start_secondary_cpus_hook: Option<fn()>,
     ) -> Self {
         let mut usable_memory_regions = DirectMapRegions::new();
@@ -607,12 +610,8 @@ impl BootInfo {
                     )
                 }
                 Some(_) => MemoryArea::new(
-                    SCARLET_HHDM_BASE
-                        .checked_add(area.start)
-                        .expect("initramfs HHDM virtual start overflows"),
-                    SCARLET_HHDM_BASE
-                        .checked_add(area.end)
-                        .expect("initramfs HHDM virtual end overflows"),
+                    crate::vm::addr::kernel_direct_map_vaddr(area.start),
+                    crate::vm::addr::kernel_direct_map_vaddr(area.end),
                 ),
                 None => MemoryArea::new(
                     crate::vm::addr::phys_to_virt(area.start),
@@ -733,10 +732,10 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
             .get(index)
             .expect("usable memory region index must be valid")
             .area();
-        let pmm_start_aligned = (region.start + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+        let pmm_start_aligned = (region.start + PAGE_SIZE as u64 - 1) & !(PAGE_SIZE as u64 - 1);
         if pmm_start_aligned < region.end {
             unsafe {
-                mem::pmm::init(MemoryArea::new(pmm_start_aligned, region.end));
+                mem::pmm::init(PhysicalMemoryArea::new(pmm_start_aligned, region.end));
             }
         }
     }
@@ -746,8 +745,8 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
     let heap_pages = heap_size / PAGE_SIZE;
     let heap_start_phys =
         mem::pmm::alloc_contiguous_pages(heap_pages).expect("Failed to allocate heap from PMM");
-    let heap_end_phys = heap_start_phys + heap_size - 1;
-    let heap_paddr = MemoryArea::new(heap_start_phys, heap_end_phys);
+    let heap_end_phys = heap_start_phys + heap_size as u64 - 1;
+    let heap_paddr = PhysicalMemoryArea::new(heap_start_phys, heap_end_phys);
 
     println!("[Scarlet Kernel] Building Scarlet boot page table...");
     // crate::earlyfb::deactivate();

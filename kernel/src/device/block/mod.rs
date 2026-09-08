@@ -138,7 +138,7 @@ impl MemoryMappingOps for GenericBlockDevice {
         Err("Memory mapping not supported by this block device")
     }
 
-    fn on_mapped(&self, _vaddr: usize, _paddr: usize, _length: usize, _offset: usize) {
+    fn on_mapped(&self, _vaddr: usize, _paddr: u64, _length: usize, _offset: usize) {
         // Generic block devices don't support memory mapping
     }
 

@@ -12,7 +12,7 @@ use limine::{RequestsEndMarker, RequestsStartMarker};
 
 use crate::vm::addr::boot_virt_to_phys;
 use crate::vm::direct_map::{DirectMapRegion, DirectMapRegions};
-use crate::vm::vmem::{MemoryArea, MemoryAttribute};
+use crate::vm::vmem::{MemoryAttribute, PhysicalMemoryArea};
 
 #[unsafe(link_section = ".limine_requests_start")]
 #[used]
@@ -161,18 +161,15 @@ pub fn response<T>(response: Option<&'static T>, name: &str) -> &'static T {
     response.unwrap_or_else(|| panic!("missing Limine response: {}", name))
 }
 
-pub fn select_usable_region(memmap: &[&memmap::Entry]) -> MemoryArea {
-    let mut best: Option<MemoryArea> = None;
+pub fn select_usable_region(memmap: &[&memmap::Entry]) -> PhysicalMemoryArea {
+    let mut best: Option<PhysicalMemoryArea> = None;
 
     for entry in memmap {
         if entry.type_ != memmap::MEMMAP_USABLE {
             continue;
         }
 
-        let area = MemoryArea::new(
-            entry.base as usize,
-            (entry.base + entry.length - 1) as usize,
-        );
+        let area = PhysicalMemoryArea::new(entry.base, (entry.base + entry.length - 1));
         best = match best {
             Some(current) if current.size() >= area.size() => Some(current),
             _ => Some(area),
@@ -189,9 +186,9 @@ pub fn select_usable_region(memmap: &[&memmap::Entry]) -> MemoryArea {
 /// firmware reports it inside a usable entry.
 pub fn usable_memory_regions(
     memmap: &[&memmap::Entry],
-    primary_before_reservation: MemoryArea,
-    primary_after_reservation: MemoryArea,
-    framebuffer: Option<MemoryArea>,
+    primary_before_reservation: PhysicalMemoryArea,
+    primary_after_reservation: PhysicalMemoryArea,
+    framebuffer: Option<PhysicalMemoryArea>,
 ) -> Result<DirectMapRegions, &'static str> {
     let mut regions = DirectMapRegions::new();
     let mut replaced_primary = false;
@@ -204,12 +201,7 @@ pub fn usable_memory_regions(
             .base
             .checked_add(entry.length)
             .ok_or("Limine usable memory region end overflows")?;
-        let mut area = MemoryArea::new(
-            usize::try_from(entry.base)
-                .map_err(|_| "Limine usable memory start does not fit usize")?,
-            usize::try_from(end_exclusive - 1)
-                .map_err(|_| "Limine usable memory end does not fit usize")?,
-        );
+        let mut area = PhysicalMemoryArea::new(entry.base, end_exclusive - 1);
         if area.start == primary_before_reservation.start
             && area.end == primary_before_reservation.end
         {
@@ -230,8 +222,8 @@ pub fn usable_memory_regions(
 
 fn insert_usable_region_excluding(
     regions: &mut DirectMapRegions,
-    area: MemoryArea,
-    excluded: Option<MemoryArea>,
+    area: PhysicalMemoryArea,
+    excluded: Option<PhysicalMemoryArea>,
 ) -> Result<(), &'static str> {
     let Some(excluded) = excluded else {
         return regions.insert(area, MemoryAttribute::Normal);
@@ -241,13 +233,13 @@ fn insert_usable_region_excluding(
     }
     if area.start < excluded.start {
         regions.insert(
-            MemoryArea::new(area.start, excluded.start - 1),
+            PhysicalMemoryArea::new(area.start, excluded.start - 1),
             MemoryAttribute::Normal,
         )?;
     }
     if excluded.end < area.end {
         regions.insert(
-            MemoryArea::new(excluded.end + 1, area.end),
+            PhysicalMemoryArea::new(excluded.end + 1, area.end),
             MemoryAttribute::Normal,
         )?;
     }
@@ -267,26 +259,26 @@ fn insert_usable_region_excluding(
 /// # Returns
 ///
 /// The inclusive physical bounds covered by Limine's direct map.
-pub fn bootloader_hhdm_physical_bound(memmap: &[&memmap::Entry]) -> MemoryArea {
-    let mut start = usize::MAX;
-    let mut end = 0usize;
+pub fn bootloader_hhdm_physical_bound(memmap: &[&memmap::Entry]) -> PhysicalMemoryArea {
+    let mut start = u64::MAX;
+    let mut end = 0u64;
 
     for entry in memmap {
         if entry.length == 0 {
             continue;
         }
 
-        let entry_start = entry.base as usize;
-        let entry_end = (entry.base + entry.length - 1) as usize;
+        let entry_start = entry.base;
+        let entry_end = (entry.base + entry.length - 1);
         start = start.min(entry_start);
         end = end.max(entry_end);
     }
 
-    if start == usize::MAX {
+    if start == u64::MAX {
         panic!("no Limine memmap entries available for HHDM span");
     }
 
-    MemoryArea::new(start, end)
+    PhysicalMemoryArea::new(start, end)
 }
 
 /// Builds Scarlet's sparse runtime direct-map regions from Limine's memory map.
@@ -306,7 +298,7 @@ pub fn bootloader_hhdm_physical_bound(memmap: &[&memmap::Entry]) -> MemoryArea {
 /// ranges, capacity exhaustion, or incompatible overlapping attributes.
 pub fn runtime_direct_map_regions(
     memmap: &[&memmap::Entry],
-    framebuffer: Option<MemoryArea>,
+    framebuffer: Option<PhysicalMemoryArea>,
 ) -> Result<DirectMapRegions, &'static str> {
     let framebuffer_region = framebuffer
         .map(|area| DirectMapRegion::new(area, MemoryAttribute::DeviceBurstable))
@@ -325,20 +317,16 @@ pub fn runtime_direct_map_regions(
             continue;
         }
 
-        let entry_start = usize::try_from(entry.base)
-            .map_err(|_| "Limine direct-map region start does not fit usize")?;
+        let entry_start = entry.base;
         let entry_end_exclusive = entry
             .base
             .checked_add(entry.length)
             .ok_or("Limine direct-map region end overflows")?;
-        let entry_end = usize::try_from(
-            entry_end_exclusive
-                .checked_sub(1)
-                .ok_or("Limine direct-map region is empty")?,
-        )
-        .map_err(|_| "Limine direct-map region end does not fit usize")?;
+        let entry_end = entry_end_exclusive
+            .checked_sub(1)
+            .ok_or("Limine direct-map region is empty")?;
         let normal_region = DirectMapRegion::new(
-            MemoryArea::new(entry_start, entry_end),
+            PhysicalMemoryArea::new(entry_start, entry_end),
             MemoryAttribute::Normal,
         )?;
 
@@ -362,8 +350,8 @@ pub fn runtime_direct_map_regions(
 
 fn insert_normal_region_excluding(
     regions: &mut DirectMapRegions,
-    normal: MemoryArea,
-    excluded: MemoryArea,
+    normal: PhysicalMemoryArea,
+    excluded: PhysicalMemoryArea,
 ) -> Result<(), &'static str> {
     if normal.end < excluded.start || excluded.end < normal.start {
         return regions.insert(normal, MemoryAttribute::Normal);
@@ -375,7 +363,7 @@ fn insert_normal_region_excluding(
             .checked_sub(1)
             .ok_or("framebuffer exclusion underflows")?;
         regions.insert(
-            MemoryArea::new(normal.start, before_end),
+            PhysicalMemoryArea::new(normal.start, before_end),
             MemoryAttribute::Normal,
         )?;
     }
@@ -385,7 +373,7 @@ fn insert_normal_region_excluding(
             .checked_add(1)
             .ok_or("framebuffer exclusion overflows")?;
         regions.insert(
-            MemoryArea::new(after_start, normal.end),
+            PhysicalMemoryArea::new(after_start, normal.end),
             MemoryAttribute::Normal,
         )?;
     }
@@ -393,20 +381,22 @@ fn insert_normal_region_excluding(
     Ok(())
 }
 
-pub fn module_area(module_response: Option<&'static ModulesResponse>) -> Option<MemoryArea> {
+pub fn module_area(
+    module_response: Option<&'static ModulesResponse>,
+) -> Option<PhysicalMemoryArea> {
     let file = module_response?.modules().first()?;
     let start = boot_virt_to_phys(file.data().as_ptr() as usize);
-    let end = start + file.data().len() - 1;
-    Some(MemoryArea::new(start, end))
+    let end = start + file.data().len() as u64 - 1;
+    Some(PhysicalMemoryArea::new(start, end))
 }
 
-fn align_up(addr: usize, align: usize) -> usize {
+fn align_up(addr: u64, align: u64) -> u64 {
     (addr + align - 1) & !(align - 1)
 }
 
-pub fn reserve_front(area: MemoryArea, reserved_bytes: usize) -> MemoryArea {
+pub fn reserve_front(area: PhysicalMemoryArea, reserved_bytes: usize) -> PhysicalMemoryArea {
     let reserved_start = align_up(area.start, 4096);
-    let reserved_end = align_up(reserved_start + reserved_bytes, 4096);
+    let reserved_end = align_up(reserved_start + reserved_bytes as u64, 4096);
 
     if reserved_end > area.end {
         panic!(
@@ -415,21 +405,23 @@ pub fn reserve_front(area: MemoryArea, reserved_bytes: usize) -> MemoryArea {
         );
     }
 
-    MemoryArea::new(reserved_end, area.end)
+    PhysicalMemoryArea::new(reserved_end, area.end)
 }
 
 /// Get framebuffer physical memory area from Limine response.
 ///
 /// Returns the framebuffer's physical address range for use in early console
 /// after page table transition.
-pub fn framebuffer_area(fb_response: Option<&'static FramebufferResponse>) -> Option<MemoryArea> {
+pub fn framebuffer_area(
+    fb_response: Option<&'static FramebufferResponse>,
+) -> Option<PhysicalMemoryArea> {
     let fb = fb_response?.framebuffers().first()?;
     let addr = fb.address() as usize;
     // Calculate size: pitch * height (pitch is bytes per row)
     let size = fb.pitch as usize * fb.height as usize;
     let start = boot_virt_to_phys(addr);
-    let end = start + size - 1;
-    Some(MemoryArea::new(start, end))
+    let end = start + size as u64 - 1;
+    Some(PhysicalMemoryArea::new(start, end))
 }
 
 #[cfg(test)]
@@ -454,23 +446,23 @@ mod tests {
             type_: memmap::MEMMAP_RESERVED,
         };
         let entries = [&usable, &module, &reserved];
-        let framebuffer = MemoryArea::new(0x2000, 0x2fff);
+        let framebuffer = PhysicalMemoryArea::new(0x2000, 0x2fff);
 
         let regions = runtime_direct_map_regions(&entries, Some(framebuffer)).unwrap();
 
         assert!(regions.contains_area_with_attribute(
-            MemoryArea::new(0x1000, 0x1fff),
+            PhysicalMemoryArea::new(0x1000, 0x1fff),
             MemoryAttribute::Normal,
         ));
         assert!(
             regions.contains_area_with_attribute(framebuffer, MemoryAttribute::DeviceBurstable,)
         );
         assert!(regions.contains_area_with_attribute(
-            MemoryArea::new(0x3000, 0x4fff),
+            PhysicalMemoryArea::new(0x3000, 0x4fff),
             MemoryAttribute::Normal,
         ));
         assert!(regions.contains_area_with_attribute(
-            MemoryArea::new(0x8000, 0x8fff),
+            PhysicalMemoryArea::new(0x8000, 0x8fff),
             MemoryAttribute::Normal,
         ));
         assert!(!regions.contains(0xa000));
@@ -496,9 +488,9 @@ mod tests {
         let entries = [&low, &high];
         let regions = usable_memory_regions(
             &entries,
-            MemoryArea::new(0x1000, 0x5fff),
-            MemoryArea::new(0x3000, 0x5fff),
-            Some(MemoryArea::new(0x4000, 0x4fff)),
+            PhysicalMemoryArea::new(0x1000, 0x5fff),
+            PhysicalMemoryArea::new(0x3000, 0x5fff),
+            Some(PhysicalMemoryArea::new(0x4000, 0x4fff)),
         )
         .unwrap();
 

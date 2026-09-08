@@ -1119,28 +1119,18 @@ impl DeviceManager {
     ) {
         resources.push(PlatformDeviceResource {
             res_type: PlatformDeviceResourceType::IRQ,
-            start: irq_num,
-            end: irq_num,
+            start: irq_num as u64,
+            end: irq_num as u64,
             irq_metadata: metadata,
         });
     }
 
-    fn mem_resource_from_region(
-        region: fdt::standard_nodes::MemoryRegion,
-    ) -> Option<PlatformDeviceResource> {
-        let start = region.starting_address as usize;
-        let size = region.size?;
-
-        if size == 0 {
-            return None;
-        }
-
-        let end = start.checked_add(size - 1)?;
-
+    fn mem_resource_from_region(region: fdt::node::RawReg<'_>) -> Option<PlatformDeviceResource> {
+        let area = crate::device::fdt::physical_reg(region)?;
         Some(PlatformDeviceResource {
             res_type: PlatformDeviceResourceType::MEM,
-            start,
-            end,
+            start: area.start,
+            end: area.end,
             irq_metadata: None,
         })
     }
@@ -2197,23 +2187,10 @@ impl DeviceManager {
         let node = Self::find_node_by_phandle(fdt, phandle)
             .ok_or("platform: memory-region phandle not found")?;
         let region = node
-            .reg()
+            .raw_reg()
             .and_then(|mut regions| regions.next())
             .ok_or("platform: memory-region has no address")?;
-        let start = region.starting_address as usize;
-        let size = region
-            .size
-            .filter(|size| *size != 0)
-            .ok_or("platform: memory-region has no size")?;
-        let end = start
-            .checked_add(size - 1)
-            .ok_or("platform: memory-region range overflows")?;
-        Ok(PlatformDeviceResource {
-            res_type: PlatformDeviceResourceType::MEM,
-            start,
-            end,
-            irq_metadata: None,
-        })
+        Self::mem_resource_from_region(region).ok_or("platform: invalid physical memory-region")
     }
 
     /// Resolve a DMA context from a named child of a platform device.
@@ -3171,7 +3148,7 @@ impl DeviceManager {
         let mut resources = alloc::vec::Vec::new();
 
         // Add memory regions
-        if let Some(regions) = child.reg() {
+        if let Some(regions) = child.raw_reg() {
             for region in regions {
                 if let Some(res) = Self::mem_resource_from_region(region) {
                     resources.push(res);
@@ -5902,9 +5879,9 @@ mod tests {
 
     #[test_case]
     fn test_mem_resource_from_region_without_size() {
-        let region = fdt::standard_nodes::MemoryRegion {
-            starting_address: 0x1000 as *const u8,
-            size: None,
+        let region = fdt::node::RawReg {
+            address: &0x1000u64.to_be_bytes(),
+            size: &[],
         };
 
         assert!(DeviceManager::mem_resource_from_region(region).is_none());
@@ -5912,14 +5889,14 @@ mod tests {
 
     #[test_case]
     fn test_mem_resource_from_region_with_size() {
-        let region = fdt::standard_nodes::MemoryRegion {
-            starting_address: 0x1000 as *const u8,
-            size: Some(0x100),
+        let region = fdt::node::RawReg {
+            address: &0x1_0000_1000u64.to_be_bytes(),
+            size: &0x100u64.to_be_bytes(),
         };
 
         let resource = DeviceManager::mem_resource_from_region(region).unwrap();
-        assert_eq!(resource.start, 0x1000);
-        assert_eq!(resource.end, 0x10ff);
+        assert_eq!(resource.start, 0x1_0000_1000);
+        assert_eq!(resource.end, 0x1_0000_10ff);
         assert_eq!(resource.res_type, PlatformDeviceResourceType::MEM);
         assert!(resource.irq_metadata.is_none());
     }

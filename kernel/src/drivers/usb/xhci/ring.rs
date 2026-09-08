@@ -11,7 +11,7 @@ use crate::mem::page::ContiguousPages;
 /// DMA-allocated TRB ring for xHCI command/event/transfer rings.
 pub struct DmaTrbRing {
     pages: ContiguousPages,
-    dma_addr: IrqSpinLock<usize>,
+    dma_addr: IrqSpinLock<u64>,
     capacity: usize,
     linked: bool,
     producer_index: IrqSpinLock<usize>,
@@ -114,7 +114,7 @@ impl DmaTrbRing {
         self.capacity.saturating_sub(1)
     }
 
-    pub fn physical_address(&self) -> usize {
+    pub fn physical_address(&self) -> u64 {
         self.pages.as_paddr()
     }
 
@@ -123,7 +123,7 @@ impl DmaTrbRing {
     /// # Returns
     ///
     /// Device-visible DMA address for the start of the ring.
-    pub fn dma_address(&self) -> usize {
+    pub fn dma_address(&self) -> u64 {
         *self.dma_addr.lock()
     }
 
@@ -136,7 +136,7 @@ impl DmaTrbRing {
     /// # Returns
     ///
     /// `Ok(())` when the ring metadata was updated.
-    pub fn set_dma_address(&self, dma_addr: usize) -> Result<(), &'static str> {
+    pub fn set_dma_address(&self, dma_addr: u64) -> Result<(), &'static str> {
         *self.dma_addr.lock() = dma_addr;
         if self.linked {
             let cycle = *self.cycle_state.lock();
@@ -257,7 +257,7 @@ impl DmaTrbRing {
         }
     }
 
-    pub fn enqueue_link(&self, target_paddr: usize) -> Result<(), &'static str> {
+    pub fn enqueue_link(&self, target_paddr: u64) -> Result<(), &'static str> {
         let cycle = *self.cycle_state.lock();
         self.write_link_trb(self.usable_capacity(), cycle, target_paddr)?;
         Ok(())
@@ -338,7 +338,7 @@ impl DmaTrbRing {
         &self,
         index: usize,
         cycle: bool,
-        target_paddr: usize,
+        target_paddr: u64,
     ) -> Result<(), &'static str> {
         if index >= self.capacity {
             return Err("Link TRB index out of bounds");
@@ -454,7 +454,7 @@ impl ErstEntry {
 pub struct EventRing {
     ring: DmaTrbRing,
     erst: ContiguousPages,
-    erst_dma_addr: IrqSpinLock<usize>,
+    erst_dma_addr: IrqSpinLock<u64>,
     erst_count: usize,
     dequeue_index: IrqSpinLock<usize>,
     current_cycle: IrqSpinLock<bool>,
@@ -504,7 +504,7 @@ impl EventRing {
         })
     }
 
-    pub fn physical_address(&self) -> usize {
+    pub fn physical_address(&self) -> u64 {
         self.ring.physical_address()
     }
 
@@ -513,11 +513,11 @@ impl EventRing {
     /// # Returns
     ///
     /// Device-visible address for event TRBs.
-    pub fn dma_address(&self) -> usize {
+    pub fn dma_address(&self) -> u64 {
         self.ring.dma_address()
     }
 
-    pub fn erst_physical_address(&self) -> usize {
+    pub fn erst_physical_address(&self) -> u64 {
         self.erst.as_paddr()
     }
 
@@ -526,7 +526,7 @@ impl EventRing {
     /// # Returns
     ///
     /// Device-visible address for ERST entries.
-    pub fn erst_dma_address(&self) -> usize {
+    pub fn erst_dma_address(&self) -> u64 {
         *self.erst_dma_addr.lock()
     }
 
@@ -560,8 +560,8 @@ impl EventRing {
     /// `Ok(())` when the ERST entry was updated.
     pub fn set_dma_addresses(
         &self,
-        ring_dma_addr: usize,
-        erst_dma_addr: usize,
+        ring_dma_addr: u64,
+        erst_dma_addr: u64,
     ) -> Result<(), &'static str> {
         self.ring.set_dma_address(ring_dma_addr)?;
         *self.erst_dma_addr.lock() = erst_dma_addr;
@@ -660,9 +660,9 @@ impl EventRing {
         None
     }
 
-    pub fn event_ring_dequeue_pointer(&self) -> usize {
+    pub fn event_ring_dequeue_pointer(&self) -> u64 {
         let index = *self.dequeue_index.lock();
-        self.ring.dma_address() + index * size_of::<Trb>()
+        self.ring.dma_address() + (index * size_of::<Trb>()) as u64
     }
 }
 

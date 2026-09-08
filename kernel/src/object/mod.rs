@@ -193,7 +193,7 @@ impl MemoryMappingOps for GpuMemoryMappingOwner {
             .get_mapping_info_with(offset, length, is_shared)
     }
 
-    fn on_mapped(&self, vaddr: usize, paddr: usize, length: usize, offset: usize) {
+    fn on_mapped(&self, vaddr: usize, paddr: u64, length: usize, offset: usize) {
         if let Some(mapping) = self.gpu.as_memory_mappable() {
             mapping.on_mapped(vaddr, paddr, length, offset);
         }

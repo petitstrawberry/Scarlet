@@ -324,7 +324,7 @@ impl VirtioInputDevice {
                 .ok_or("Failed to allocate event queue descriptor")?;
 
             // Setup descriptor - device writes events here
-            eventq.desc[desc_idx].addr = (buffer_phys + offset) as u64;
+            eventq.desc[desc_idx].addr = (buffer_phys + offset as u64) as u64;
             eventq.desc[desc_idx].len = VirtioInputEvent::size() as u32;
             eventq.desc[desc_idx].flags = DescriptorFlag::Write as u16; // Device writes
             eventq.desc[desc_idx].next = 0; // No chaining
@@ -382,7 +382,7 @@ impl VirtioInputDevice {
                 continue;
             }
 
-            let buffer_vaddr = phys_to_virt(buffer_addr as usize);
+            let buffer_vaddr = phys_to_virt(buffer_addr);
             let virtio_event =
                 unsafe { core::ptr::read_volatile(buffer_vaddr as *const VirtioInputEvent) };
 

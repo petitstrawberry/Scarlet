@@ -454,7 +454,7 @@ impl SmmuHardware {
     fn configure_dma_context(
         &self,
         lease: &ContextLease,
-        root: usize,
+        root: u64,
         iova_address_bits: u32,
     ) -> Result<(), IommuError> {
         if !(MIN_DMA_IOVA_BITS..=self.dma_iova_address_bits).contains(&iova_address_bits) {
@@ -859,7 +859,7 @@ impl IommuDomain for IdentityDomain {
     }
 
     fn iova_to_phys(&self, iova: Iova) -> Option<PhysAddr> {
-        usize::try_from(iova).ok()
+        Some(iova)
     }
 
     fn page_size(&self) -> usize {
@@ -917,15 +917,15 @@ impl Drop for IdentityDomain {
 }
 
 struct DmaTablePage {
-    paddr: usize,
+    paddr: u64,
     dirty: bool,
 }
 
 struct DmaPageTables {
-    root: usize,
+    root: u64,
     pages: Vec<DmaTablePage>,
     dirty_pages: Vec<usize>,
-    last_dirty: Option<usize>,
+    last_dirty: Option<u64>,
     table_address_limit: u64,
 }
 
@@ -953,7 +953,7 @@ impl DmaPageTables {
         })
     }
 
-    fn allocate_table(table_address_limit: u64) -> Result<usize, IommuError> {
+    fn allocate_table(table_address_limit: u64) -> Result<u64, IommuError> {
         let page = allocate_raw_pages(1);
         if page.is_null() {
             println!(
@@ -995,22 +995,22 @@ impl DmaPageTables {
         Ok(paddr)
     }
 
-    fn table_entry(table: usize, index: usize) -> *mut u64 {
+    fn table_entry(table: u64, index: usize) -> *mut u64 {
         (phys_to_virt(table) as *mut u64).wrapping_add(index)
     }
 
-    fn read_entry(table: usize, index: usize) -> u64 {
+    fn read_entry(table: u64, index: usize) -> u64 {
         // SAFETY: every table passed here is a live, page-aligned table page and
         // every AArch64 translation table contains exactly 512 u64 entries.
         unsafe { Self::table_entry(table, index).read() }
     }
 
-    fn write_entry(table: usize, index: usize, value: u64) {
+    fn write_entry(table: u64, index: usize, value: u64) {
         // SAFETY: see `read_entry`; domain locking serializes all mutations.
         unsafe { Self::table_entry(table, index).write(value) }
     }
 
-    fn mark_dirty(&mut self, table: usize) {
+    fn mark_dirty(&mut self, table: u64) {
         if self.last_dirty == Some(table) {
             return;
         }
@@ -1059,13 +1059,13 @@ impl DmaPageTables {
         Ok(())
     }
 
-    fn next_table(&mut self, table: usize, index: usize) -> Result<usize, IommuError> {
+    fn next_table(&mut self, table: u64, index: usize) -> Result<u64, IommuError> {
         let entry = Self::read_entry(table, index);
         if entry & TABLE_VALID != 0 {
             if entry & TABLE_DESCRIPTOR == 0 {
                 return Err(IommuError::MapFailed);
             }
-            return Ok((entry & TABLE_ADDRESS_MASK) as usize);
+            return Ok((entry & TABLE_ADDRESS_MASK));
         }
         self.reserve_table_metadata()?;
         let next = Self::allocate_table(self.table_address_limit)?;
@@ -1078,7 +1078,7 @@ impl DmaPageTables {
         Ok(next)
     }
 
-    fn leaf_table(&mut self, iova: Iova) -> Result<(usize, usize), IommuError> {
+    fn leaf_table(&mut self, iova: Iova) -> Result<(u64, usize), IommuError> {
         let l1 = ((iova >> 30) & 0x1ff) as usize;
         let l2 = ((iova >> 21) & 0x1ff) as usize;
         let l3 = ((iova >> 12) & 0x1ff) as usize;
@@ -1087,14 +1087,14 @@ impl DmaPageTables {
         Ok((leaf, l3))
     }
 
-    fn existing_leaf_table(&self, iova: Iova) -> Option<(usize, usize)> {
+    fn existing_leaf_table(&self, iova: Iova) -> Option<(u64, usize)> {
         let mut table = self.root;
         for shift in [30, 21] {
             let entry = Self::read_entry(table, ((iova >> shift) & 0x1ff) as usize);
             if entry & (TABLE_VALID | TABLE_DESCRIPTOR) != TABLE_VALID | TABLE_DESCRIPTOR {
                 return None;
             }
-            table = (entry & TABLE_ADDRESS_MASK) as usize;
+            table = (entry & TABLE_ADDRESS_MASK);
         }
         Some((table, ((iova >> 12) & 0x1ff) as usize))
     }
@@ -1105,7 +1105,7 @@ impl DmaPageTables {
         if entry & (TABLE_VALID | TABLE_DESCRIPTOR) != TABLE_VALID | TABLE_DESCRIPTOR {
             return None;
         }
-        Some((entry & TABLE_ADDRESS_MASK) as usize | (iova as usize & (PAGE_SIZE - 1)))
+        Some((entry & TABLE_ADDRESS_MASK) | (iova & (PAGE_SIZE as u64 - 1)))
     }
 
     fn map_page(
@@ -1228,7 +1228,7 @@ impl IommuDomain for DmaDomain {
             );
             return Err(error);
         }
-        if paddr & (PAGE_SIZE - 1) != 0 {
+        if paddr & (PAGE_SIZE as u64 - 1) != 0 {
             println!(
                 "[arm-smmu-v2] DMA map rejected reason=paddr-alignment iova={:#x} paddr={:#x} len={:#x} flags={:#x}",
                 iova,
@@ -1271,7 +1271,8 @@ impl IommuDomain for DmaDomain {
         }
         let mut mapped = 0;
         for offset in (0..len).step_by(PAGE_SIZE) {
-            if let Err(error) = tables.map_page(iova + offset as u64, paddr + offset, flags) {
+            if let Err(error) = tables.map_page(iova + offset as u64, paddr + offset as u64, flags)
+            {
                 for rollback in (0..mapped).step_by(PAGE_SIZE) {
                     let _ = tables.unmap_page(iova + rollback as u64);
                 }
@@ -1585,11 +1586,7 @@ fn probe(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         .iter()
         .find(|resource| resource.res_type == PlatformDeviceResourceType::MEM)
         .ok_or("arm-smmu-v2: missing register resource")?;
-    let resource_size = resource
-        .end
-        .checked_sub(resource.start)
-        .and_then(|size| size.checked_add(1))
-        .ok_or("arm-smmu-v2: invalid register resource")?;
+    let resource_size = resource.size()?;
     if resource_size < MINIMUM_REGISTER_WINDOW_SIZE {
         return Err("arm-smmu-v2: register resource is too small");
     }

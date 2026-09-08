@@ -300,7 +300,7 @@ impl MemoryMappingOps for GenericCharDevice {
         Err("Memory mapping not supported by this character device")
     }
 
-    fn on_mapped(&self, _vaddr: usize, _paddr: usize, _length: usize, _offset: usize) {
+    fn on_mapped(&self, _vaddr: usize, _paddr: u64, _length: usize, _offset: usize) {
         // Generic character devices don't support memory mapping
     }
 

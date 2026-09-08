@@ -566,7 +566,7 @@ impl MemoryMappingOps for CpioFileObject {
         Err("Memory mapping not supported for CPIO files")
     }
 
-    fn on_mapped(&self, _vaddr: usize, _paddr: usize, _length: usize, _offset: usize) {
+    fn on_mapped(&self, _vaddr: usize, _paddr: u64, _length: usize, _offset: usize) {
         // CPIO files don't support memory mapping
     }
 
@@ -775,7 +775,7 @@ impl MemoryMappingOps for CpioDirectoryObject {
         Err("Memory mapping not supported for directories")
     }
 
-    fn on_mapped(&self, _vaddr: usize, _paddr: usize, _length: usize, _offset: usize) {
+    fn on_mapped(&self, _vaddr: usize, _paddr: u64, _length: usize, _offset: usize) {
         // Directories don't support memory mapping
     }
 
@@ -905,7 +905,7 @@ impl MemoryMappingOps for CpioSymlinkObject {
         Err("Memory mapping not supported for symbolic links")
     }
 
-    fn on_mapped(&self, _vaddr: usize, _paddr: usize, _length: usize, _offset: usize) {
+    fn on_mapped(&self, _vaddr: usize, _paddr: u64, _length: usize, _offset: usize) {
         // Symbolic links don't support memory mapping
     }
 

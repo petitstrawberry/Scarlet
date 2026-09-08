@@ -43,7 +43,7 @@ use crate::mem::page::ContiguousPages;
 pub type PageIndex = u64;
 
 /// Physical address of a page
-pub type PhysicalAddress = usize;
+pub type PhysicalAddress = u64;
 
 /// Entry in the page cache representing a single cached page
 pub struct PageCacheEntry {

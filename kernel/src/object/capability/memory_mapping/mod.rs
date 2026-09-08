@@ -14,7 +14,7 @@ pub use syscall::{sys_memory_map, sys_memory_unmap};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MemoryMappingInfo {
     /// Physical address backing the mapping.
-    pub paddr: usize,
+    pub paddr: u64,
     /// Scarlet virtual-memory permission bits allowed by the object.
     pub permissions: usize,
     /// Whether the mapping is shared with other tasks.
@@ -33,7 +33,7 @@ impl MemoryMappingInfo {
     ///
     /// # Returns
     /// Mapping information with [`MemoryAttribute::Normal`].
-    pub const fn new(paddr: usize, permissions: usize, is_shared: bool) -> Self {
+    pub const fn new(paddr: u64, permissions: usize, is_shared: bool) -> Self {
         Self {
             paddr,
             permissions,
@@ -121,7 +121,7 @@ pub trait MemoryMappingOps: Send + Sync {
     /// # Returns
     /// No value. The default does not track mappings. A notification can describe
     /// a reserved VMA whose individual pages have not yet been faulted in.
-    fn on_mapped(&self, vaddr: usize, paddr: usize, length: usize, offset: usize) {}
+    fn on_mapped(&self, vaddr: usize, paddr: u64, length: usize, offset: usize) {}
 
     /// Notification that a mapping has been removed
     ///
@@ -304,7 +304,7 @@ pub struct AccessKind {
 
 #[derive(Clone, Copy, Debug)]
 pub struct ResolveFaultResult {
-    pub paddr_page_base: usize,
+    pub paddr_page_base: u64,
     pub is_tail: bool,
 }
 
@@ -345,11 +345,15 @@ mod tests {
                 Err("Mock get_mapping_info failure")
             } else {
                 // Return mock physical address, read/write permissions, not shared
-                Ok(MemoryMappingInfo::new(0x80000000 + offset, 0x3, false))
+                Ok(MemoryMappingInfo::new(
+                    0x80000000 + offset as u64,
+                    0x3,
+                    false,
+                ))
             }
         }
 
-        fn on_mapped(&self, vaddr: usize, _paddr: usize, length: usize, _offset: usize) {
+        fn on_mapped(&self, vaddr: usize, _paddr: u64, length: usize, _offset: usize) {
             if !self.should_fail {
                 self.mapped_regions.write().push((vaddr, length));
             }

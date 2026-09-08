@@ -12,7 +12,7 @@ use core::fmt;
 
 use crate::environment::PAGE_SIZE;
 use crate::vm::addr::{phys_to_virt, virt_to_phys};
-use crate::vm::vmem::{MemoryArea, MemoryAttribute};
+use crate::vm::vmem::{MemoryAttribute, PhysicalMemoryArea};
 
 #[repr(C, align(4096))]
 #[derive(Clone, Debug)]
@@ -207,7 +207,7 @@ impl ContiguousPages {
     }
 
     /// Get the physical address of the first page.
-    pub fn as_paddr(&self) -> usize {
+    pub fn as_paddr(&self) -> u64 {
         virt_to_phys(self.ptr as usize)
     }
 
@@ -329,10 +329,10 @@ impl ContiguousPages {
         self.ptr as usize
     }
 
-    pub fn contains_paddr_range(&self, paddr: usize, len: usize) -> bool {
+    pub fn contains_paddr_range(&self, paddr: u64, len: usize) -> bool {
         let self_paddr = self.as_paddr();
-        let self_end = self_paddr + self.count * PAGE_SIZE;
-        let range_end = paddr + len;
+        let self_end = self_paddr + (self.count * PAGE_SIZE) as u64;
+        let range_end = paddr + len as u64;
 
         paddr < self_end && range_end > self_paddr
     }
@@ -343,13 +343,13 @@ impl ContiguousPages {
             .ok_or("PMM allocation byte length overflows")
     }
 
-    fn physical_area(&self) -> Result<MemoryArea, &'static str> {
+    fn physical_area(&self) -> Result<PhysicalMemoryArea, &'static str> {
         let paddr = self.as_paddr();
         let end = paddr
-            .checked_add(self.byte_len()?)
+            .checked_add(self.byte_len()? as u64)
             .and_then(|end| end.checked_sub(1))
             .ok_or("PMM allocation physical range overflows")?;
-        Ok(MemoryArea::new(paddr, end))
+        Ok(PhysicalMemoryArea::new(paddr, end))
     }
 
     fn restore_normal_before_release(&mut self) {
@@ -420,7 +420,7 @@ impl fmt::Debug for ContiguousPages {
 }
 
 pub struct TaskPages {
-    pages: Vec<usize>,
+    pages: Vec<u64>,
 }
 
 impl TaskPages {
@@ -428,7 +428,7 @@ impl TaskPages {
         crate::mem::pmm::alloc_individual_pages(count).map(|pages| Self { pages })
     }
 
-    pub fn page_paddr(&self, index: usize) -> Option<usize> {
+    pub fn page_paddr(&self, index: usize) -> Option<u64> {
         self.pages.get(index).copied()
     }
 
@@ -445,18 +445,18 @@ impl TaskPages {
             return;
         }
         let end = (offset + count).min(self.pages.len());
-        let to_free: Vec<usize> = self.pages.drain(offset..end).collect();
+        let to_free: Vec<u64> = self.pages.drain(offset..end).collect();
         crate::mem::pmm::free_individual_pages(&to_free);
     }
 
-    pub fn reclaim_paddr_range(&mut self, start: usize, end: usize) -> usize {
+    pub fn reclaim_paddr_range(&mut self, start: u64, end: u64) -> usize {
         if self.pages.is_empty() {
             return 0;
         }
 
         let mut to_free = Vec::new();
         self.pages.retain(|&paddr| {
-            let page_end = paddr.saturating_add(PAGE_SIZE - 1);
+            let page_end = paddr.saturating_add(PAGE_SIZE as u64 - 1);
             let in_range = paddr >= start && page_end <= end;
             if in_range {
                 to_free.push(paddr);
@@ -485,7 +485,7 @@ mod tests {
         let p1 = pages.page_paddr(1).unwrap();
 
         let start = core::cmp::min(p0, p1);
-        let end = core::cmp::max(p0, p1) + PAGE_SIZE - 1;
+        let end = core::cmp::max(p0, p1) + PAGE_SIZE as u64 - 1;
 
         let before = pages.len();
         let freed = pages.reclaim_paddr_range(start, end);

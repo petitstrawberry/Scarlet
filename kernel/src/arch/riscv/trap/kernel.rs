@@ -141,7 +141,7 @@ fn arch_kernel_exception_handler(trapframe: &mut Trapframe, cause: usize) {
             match manager.search_memory_map(vaddr) {
                 Some(mmap) => match manager.get_root_page_table() {
                     Some(mut root_page_table) => {
-                        let paddr = mmap.pmarea.start + (vaddr - mmap.vmarea.start);
+                        let paddr = mmap.pmarea.start + (vaddr - mmap.vmarea.start) as u64;
                         root_page_table.map(
                             vaddr,
                             paddr,
@@ -187,7 +187,7 @@ fn arch_kernel_exception_handler(trapframe: &mut Trapframe, cause: usize) {
                             let kernel_stack_area = task.get_kernel_stack_memory_area_paddr();
                             let page_offset =
                                 (vaddr - kstack_start) & !(crate::environment::PAGE_SIZE - 1);
-                            let page_paddr = kernel_stack_area.start + page_offset;
+                            let page_paddr = kernel_stack_area.start + page_offset as u64;
                             let page_vaddr = vaddr & !(crate::environment::PAGE_SIZE - 1);
                             root_page_table.map(
                                 page_vaddr,

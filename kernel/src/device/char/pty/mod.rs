@@ -415,7 +415,7 @@ impl MemoryMappingOps for PtyMasterDevice {
         Err("Memory mapping not supported by PTY master")
     }
 
-    fn on_mapped(&self, _vaddr: usize, _paddr: usize, _length: usize, _offset: usize) {}
+    fn on_mapped(&self, _vaddr: usize, _paddr: u64, _length: usize, _offset: usize) {}
 
     fn on_unmapped(&self, _vaddr: usize, _length: usize) {}
 

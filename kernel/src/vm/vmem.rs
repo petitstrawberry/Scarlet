@@ -24,7 +24,7 @@ use core::fmt;
 ///   The mapping owns this reference, so the owner stays alive as long as the mapping exists.
 #[derive(Clone)]
 pub struct VirtualMemoryMap {
-    pub pmarea: MemoryArea,
+    pub pmarea: PhysicalMemoryArea,
     pub vmarea: MemoryArea,
     pub vm_start: usize,
     pub permissions: usize,
@@ -50,7 +50,7 @@ impl fmt::Debug for VirtualMemoryMap {
 impl Default for VirtualMemoryMap {
     fn default() -> Self {
         Self {
-            pmarea: MemoryArea::new(0, 0),
+            pmarea: PhysicalMemoryArea::new(0, 0),
             vmarea: MemoryArea::new(0, 0),
             vm_start: 0,
             permissions: 0,
@@ -79,7 +79,7 @@ impl VirtualMemoryMap {
     /// A new virtual memory map with the given physical and virtual memory areas,
     /// `vm_start` set to `vmarea.start`, and the `Normal` memory attribute.
     pub fn new(
-        pmarea: MemoryArea,
+        pmarea: PhysicalMemoryArea,
         vmarea: MemoryArea,
         permissions: usize,
         is_shared: bool,
@@ -125,10 +125,39 @@ pub enum MemoryAttribute {
     Device,
 }
 
+/// A physical address range, independent of the kernel pointer width.
+///
+/// Physical addresses may be wider than virtual addresses (for example Sv32).
+/// This descriptor cannot be dereferenced; access requires an installed virtual
+/// mapping. `MemoryArea` is reserved for native virtual-address ranges.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PhysicalMemoryArea {
+    pub start: u64,
+    pub end: u64,
+}
+
+impl PhysicalMemoryArea {
+    pub const fn new(start: u64, end: u64) -> Self {
+        Self { start, end }
+    }
+
+    /// Inclusive byte count, if the range is nonempty and representable.
+    pub fn byte_len(&self) -> Option<u64> {
+        self.end.checked_sub(self.start)?.checked_add(1)
+    }
+
+    /// Length of a physical range being used as one native-size allocation or mapping.
+    /// The range's addresses remain 64-bit even when its byte count is native.
+    pub fn size(&self) -> usize {
+        usize::try_from(self.byte_len().expect("invalid physical memory range"))
+            .expect("physical span is too large for one native-size mapping")
+    }
+}
+
 /// An inclusive address range, without ownership or mapping validation.
 ///
-/// The caller determines whether the addresses are physical or virtual. Copying
-/// this descriptor does not copy, retain, or map the underlying memory.
+/// This descriptor contains virtual addresses. Physical ranges use
+/// `PhysicalMemoryArea`. Copying a descriptor does not retain or map memory.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MemoryArea {
     /// First address in the range.

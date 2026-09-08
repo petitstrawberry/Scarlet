@@ -880,7 +880,7 @@ impl GpuImageBacking {
                 result.push(GpuBackingSegment::new(
                     segment
                         .physical_addr()
-                        .checked_add(segment_offset)
+                        .checked_add(segment_offset as u64)
                         .ok_or("GPU image physical segment address overflows")?,
                     part_length,
                 ));
@@ -1317,7 +1317,7 @@ impl GpuObject for GpuImage {
 
 /// Stable page-backed allocation retained by a GPU buffer and its attachments.
 pub(crate) struct GpuBufferBacking {
-    paddr: usize,
+    paddr: u64,
     allocation_size: usize,
 }
 
@@ -1477,7 +1477,7 @@ impl MemoryMappingOps for GpuBuffer {
         let paddr = self
             .backing
             .paddr
-            .checked_add(offset)
+            .checked_add(offset as u64)
             .ok_or("GPU buffer physical address overflows")?;
         Ok(MemoryMappingInfo::new(paddr, 0x3, true))
     }
@@ -1520,7 +1520,7 @@ impl MemoryMappingOps for GpuBuffer {
             paddr_page_base: self
                 .backing
                 .paddr
-                .checked_add(offset)
+                .checked_add(offset as u64)
                 .ok_or(ResolveFaultError::Invalid)?,
             is_tail: false,
         })

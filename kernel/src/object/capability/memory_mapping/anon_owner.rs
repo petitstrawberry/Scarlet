@@ -10,7 +10,7 @@ use crate::vm::addr::{phys_to_virt, virt_to_phys};
 use super::{AccessKind, AccessOp, MemoryMappingOps, ResolveFaultError, ResolveFaultResult};
 
 pub struct AnonymousPageOwner {
-    pages: IrqRwSpinLock<BTreeMap<usize, usize>>,
+    pages: IrqRwSpinLock<BTreeMap<usize, u64>>,
 }
 
 impl AnonymousPageOwner {
@@ -20,7 +20,7 @@ impl AnonymousPageOwner {
         }
     }
 
-    fn alloc_page(&self) -> Option<usize> {
+    fn alloc_page(&self) -> Option<u64> {
         let ptr = allocate_raw_pages(1);
         if ptr.is_null() {
             return None;
@@ -174,7 +174,7 @@ impl MemoryMappingOps for ForkCowPageOwner {
             return Err(ResolveFaultError::Unmapped);
         }
         Ok(ResolveFaultResult {
-            paddr_page_base: pages.as_paddr() + offset * PAGE_SIZE,
+            paddr_page_base: pages.as_paddr() + (offset * PAGE_SIZE) as u64,
             is_tail: false,
         })
     }

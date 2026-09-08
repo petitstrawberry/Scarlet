@@ -1,7 +1,7 @@
 //! Sparse physical-memory regions mapped by Scarlet's higher-half direct map.
 
 use crate::environment::PAGE_SIZE;
-use crate::vm::vmem::{MemoryArea, MemoryAttribute};
+use crate::vm::vmem::{MemoryAttribute, PhysicalMemoryArea};
 
 /// Maximum number of sparse physical regions in Scarlet's direct map.
 pub const MAX_DIRECT_MAP_REGIONS: usize = 64;
@@ -9,7 +9,7 @@ pub const MAX_DIRECT_MAP_REGIONS: usize = 64;
 /// One physical region and the memory attribute used for its direct-map alias.
 #[derive(Clone, Copy, Debug)]
 pub struct DirectMapRegion {
-    area: MemoryArea,
+    area: PhysicalMemoryArea,
     memory_attribute: MemoryAttribute,
 }
 
@@ -25,26 +25,29 @@ impl DirectMapRegion {
     ///
     /// A page-aligned region, or an error if the input range is invalid or
     /// cannot be aligned without overflowing.
-    pub fn new(area: MemoryArea, memory_attribute: MemoryAttribute) -> Result<Self, &'static str> {
+    pub fn new(
+        area: PhysicalMemoryArea,
+        memory_attribute: MemoryAttribute,
+    ) -> Result<Self, &'static str> {
         if area.start > area.end {
             return Err("direct-map region has an invalid physical range");
         }
 
-        let start = area.start & !(PAGE_SIZE - 1);
+        let start = area.start & !(PAGE_SIZE as u64 - 1);
         let end_exclusive = area
             .end
             .checked_add(1)
             .ok_or("direct-map region end overflows while aligning")?;
         let aligned_end_exclusive = end_exclusive
-            .checked_add(PAGE_SIZE - 1)
+            .checked_add(PAGE_SIZE as u64 - 1)
             .ok_or("direct-map region end overflows while aligning")?
-            & !(PAGE_SIZE - 1);
+            & !(PAGE_SIZE as u64 - 1);
         let end = aligned_end_exclusive
             .checked_sub(1)
             .ok_or("direct-map region has an empty aligned range")?;
 
         Ok(Self {
-            area: MemoryArea::new(start, end),
+            area: PhysicalMemoryArea::new(start, end),
             memory_attribute,
         })
     }
@@ -54,7 +57,7 @@ impl DirectMapRegion {
     /// # Returns
     ///
     /// The physical memory area represented by this region.
-    pub const fn area(&self) -> MemoryArea {
+    pub const fn area(&self) -> PhysicalMemoryArea {
         self.area
     }
 
@@ -70,7 +73,7 @@ impl DirectMapRegion {
 
 /// Fixed-capacity, sorted set of attribute-aware sparse direct-map regions.
 ///
-/// Regions retain [`MemoryArea`]'s inclusive-end semantics. Overlapping or
+/// Regions retain [`PhysicalMemoryArea`]'s inclusive-end semantics. Overlapping or
 /// adjacent equal-attribute regions merge, while overlapping different-
 /// attribute regions are rejected so one physical page cannot gain conflicting
 /// aliases.
@@ -143,7 +146,7 @@ impl DirectMapRegions {
     /// overflow, or conflicting overlapping attributes.
     pub fn insert(
         &mut self,
-        area: MemoryArea,
+        area: PhysicalMemoryArea,
         memory_attribute: MemoryAttribute,
     ) -> Result<(), &'static str> {
         let region = DirectMapRegion::new(area, memory_attribute)?;
@@ -168,12 +171,12 @@ impl DirectMapRegions {
     /// is invalid, partially covered, mixed, or cannot fit after splitting.
     pub fn retag(
         &mut self,
-        area: MemoryArea,
+        area: PhysicalMemoryArea,
         memory_attribute: MemoryAttribute,
     ) -> Result<MemoryAttribute, &'static str> {
         if area.start > area.end
-            || !area.start.is_multiple_of(PAGE_SIZE)
-            || area.end % PAGE_SIZE != PAGE_SIZE - 1
+            || !area.start.is_multiple_of(PAGE_SIZE as u64)
+            || area.end % PAGE_SIZE as u64 != PAGE_SIZE as u64 - 1
         {
             return Err("direct-map retag range must be page-aligned and non-empty");
         }
@@ -247,7 +250,7 @@ impl DirectMapRegions {
                         &mut replacement,
                         &mut replacement_len,
                         DirectMapRegion {
-                            area: MemoryArea::new(region.area.start, area.start - 1),
+                            area: PhysicalMemoryArea::new(region.area.start, area.start - 1),
                             memory_attribute: region.memory_attribute,
                         },
                     )?;
@@ -267,7 +270,7 @@ impl DirectMapRegions {
                     &mut replacement,
                     &mut replacement_len,
                     DirectMapRegion {
-                        area: MemoryArea::new(area.end + 1, region.area.end),
+                        area: PhysicalMemoryArea::new(area.end + 1, region.area.end),
                         memory_attribute: region.memory_attribute,
                     },
                 )?;
@@ -288,7 +291,7 @@ impl DirectMapRegions {
     /// # Returns
     ///
     /// `true` if one recorded region contains `paddr`.
-    pub fn contains(&self, paddr: usize) -> bool {
+    pub fn contains(&self, paddr: u64) -> bool {
         self.region_containing(paddr).is_some()
     }
 
@@ -305,7 +308,7 @@ impl DirectMapRegions {
     /// attribute.
     pub fn contains_area_with_attribute(
         &self,
-        area: MemoryArea,
+        area: PhysicalMemoryArea,
         memory_attribute: MemoryAttribute,
     ) -> bool {
         self.regions[..self.len].iter().flatten().any(|region| {
@@ -328,7 +331,7 @@ impl DirectMapRegions {
     /// uses the same attribute. Returns an error for a conflicting overlap.
     pub fn validate_alias(
         &self,
-        area: MemoryArea,
+        area: PhysicalMemoryArea,
         memory_attribute: MemoryAttribute,
     ) -> Result<(), &'static str> {
         if area.start > area.end {
@@ -352,13 +355,13 @@ impl DirectMapRegions {
     /// # Returns
     ///
     /// `Some(bounds)` for a non-empty set, or `None` when no regions exist.
-    pub fn bounding_area(&self) -> Option<MemoryArea> {
+    pub fn bounding_area(&self) -> Option<PhysicalMemoryArea> {
         let first = self.get(0)?;
         let last = self.get(self.len.checked_sub(1)?)?;
-        Some(MemoryArea::new(first.area.start, last.area.end))
+        Some(PhysicalMemoryArea::new(first.area.start, last.area.end))
     }
 
-    fn region_containing(&self, paddr: usize) -> Option<DirectMapRegion> {
+    fn region_containing(&self, paddr: u64) -> Option<DirectMapRegion> {
         self.regions[..self.len]
             .iter()
             .flatten()
@@ -379,7 +382,7 @@ impl DirectMapRegions {
                 if existing.memory_attribute == candidate.memory_attribute
                     && areas_touch_or_overlap(existing.area, candidate.area)
                 {
-                    let merged = MemoryArea::new(
+                    let merged = PhysicalMemoryArea::new(
                         existing.area.start.min(candidate.area.start),
                         existing.area.end.max(candidate.area.end),
                     );
@@ -444,7 +447,7 @@ impl DirectMapRegions {
             && areas_touch_or_overlap(previous.area, candidate.area)
         {
             regions[*len - 1] = Some(DirectMapRegion {
-                area: MemoryArea::new(
+                area: PhysicalMemoryArea::new(
                     previous.area.start.min(candidate.area.start),
                     previous.area.end.max(candidate.area.end),
                 ),
@@ -468,11 +471,11 @@ impl Default for DirectMapRegions {
     }
 }
 
-fn areas_overlap(left: MemoryArea, right: MemoryArea) -> bool {
+fn areas_overlap(left: PhysicalMemoryArea, right: PhysicalMemoryArea) -> bool {
     left.start <= right.end && right.start <= left.end
 }
 
-fn areas_touch_or_overlap(left: MemoryArea, right: MemoryArea) -> bool {
+fn areas_touch_or_overlap(left: PhysicalMemoryArea, right: PhysicalMemoryArea) -> bool {
     areas_overlap(left, right)
         || left.end.checked_add(1) == Some(right.start)
         || right.end.checked_add(1) == Some(left.start)
@@ -486,16 +489,22 @@ mod tests {
     fn direct_map_regions_align_and_merge_matching_regions() {
         let mut regions = DirectMapRegions::new();
         regions
-            .insert(MemoryArea::new(0x1003, 0x1fff), MemoryAttribute::Normal)
+            .insert(
+                PhysicalMemoryArea::new(0x1003, 0x1fff),
+                MemoryAttribute::Normal,
+            )
             .unwrap();
         regions
-            .insert(MemoryArea::new(0x2000, 0x2fff), MemoryAttribute::Normal)
+            .insert(
+                PhysicalMemoryArea::new(0x2000, 0x2fff),
+                MemoryAttribute::Normal,
+            )
             .unwrap();
 
         assert_eq!(regions.len(), 1);
         assert_eq!(
             regions.get(0).unwrap().area(),
-            MemoryArea::new(0x1000, 0x2fff)
+            PhysicalMemoryArea::new(0x1000, 0x2fff)
         );
     }
 
@@ -503,10 +512,16 @@ mod tests {
     fn direct_map_regions_keep_holes_outside_membership() {
         let mut regions = DirectMapRegions::new();
         regions
-            .insert(MemoryArea::new(0x1000, 0x1fff), MemoryAttribute::Normal)
+            .insert(
+                PhysicalMemoryArea::new(0x1000, 0x1fff),
+                MemoryAttribute::Normal,
+            )
             .unwrap();
         regions
-            .insert(MemoryArea::new(0x3000, 0x3fff), MemoryAttribute::Normal)
+            .insert(
+                PhysicalMemoryArea::new(0x3000, 0x3fff),
+                MemoryAttribute::Normal,
+            )
             .unwrap();
 
         assert!(regions.contains(0x1000));
@@ -518,22 +533,34 @@ mod tests {
     fn direct_map_regions_reject_conflicting_attributes_and_aliases() {
         let mut regions = DirectMapRegions::new();
         regions
-            .insert(MemoryArea::new(0x1000, 0x1fff), MemoryAttribute::Normal)
+            .insert(
+                PhysicalMemoryArea::new(0x1000, 0x1fff),
+                MemoryAttribute::Normal,
+            )
             .unwrap();
 
         assert!(
             regions
-                .insert(MemoryArea::new(0x1800, 0x2fff), MemoryAttribute::Device)
+                .insert(
+                    PhysicalMemoryArea::new(0x1800, 0x2fff),
+                    MemoryAttribute::Device
+                )
                 .is_err()
         );
         assert!(
             regions
-                .validate_alias(MemoryArea::new(0x1000, 0x1fff), MemoryAttribute::Normal)
+                .validate_alias(
+                    PhysicalMemoryArea::new(0x1000, 0x1fff),
+                    MemoryAttribute::Normal
+                )
                 .is_ok()
         );
         assert!(
             regions
-                .validate_alias(MemoryArea::new(0x1000, 0x1fff), MemoryAttribute::Device)
+                .validate_alias(
+                    PhysicalMemoryArea::new(0x1000, 0x1fff),
+                    MemoryAttribute::Device
+                )
                 .is_err()
         );
     }
@@ -542,13 +569,16 @@ mod tests {
     fn direct_map_regions_retag_splits_a_region_and_returns_original_attribute() {
         let mut regions = DirectMapRegions::new();
         regions
-            .insert(MemoryArea::new(0x1000, 0x3fff), MemoryAttribute::Normal)
+            .insert(
+                PhysicalMemoryArea::new(0x1000, 0x3fff),
+                MemoryAttribute::Normal,
+            )
             .unwrap();
 
         assert_eq!(
             regions
                 .retag(
-                    MemoryArea::new(0x2000, 0x2fff),
+                    PhysicalMemoryArea::new(0x2000, 0x2fff),
                     MemoryAttribute::DeviceBurstable,
                 )
                 .unwrap(),
@@ -557,7 +587,7 @@ mod tests {
         assert_eq!(regions.len(), 3);
         assert_eq!(
             regions.get(0).unwrap().area(),
-            MemoryArea::new(0x1000, 0x1fff)
+            PhysicalMemoryArea::new(0x1000, 0x1fff)
         );
         assert_eq!(
             regions.get(1).unwrap().memory_attribute(),
@@ -565,7 +595,7 @@ mod tests {
         );
         assert_eq!(
             regions.get(2).unwrap().area(),
-            MemoryArea::new(0x3000, 0x3fff)
+            PhysicalMemoryArea::new(0x3000, 0x3fff)
         );
     }
 
@@ -573,26 +603,35 @@ mod tests {
     fn direct_map_regions_retag_merges_matching_neighbors() {
         let mut regions = DirectMapRegions::new();
         regions
-            .insert(MemoryArea::new(0x1000, 0x1fff), MemoryAttribute::Normal)
+            .insert(
+                PhysicalMemoryArea::new(0x1000, 0x1fff),
+                MemoryAttribute::Normal,
+            )
             .unwrap();
         regions
             .insert(
-                MemoryArea::new(0x2000, 0x2fff),
+                PhysicalMemoryArea::new(0x2000, 0x2fff),
                 MemoryAttribute::DeviceBurstable,
             )
             .unwrap();
         regions
-            .insert(MemoryArea::new(0x3000, 0x3fff), MemoryAttribute::Normal)
+            .insert(
+                PhysicalMemoryArea::new(0x3000, 0x3fff),
+                MemoryAttribute::Normal,
+            )
             .unwrap();
 
         regions
-            .retag(MemoryArea::new(0x2000, 0x2fff), MemoryAttribute::Normal)
+            .retag(
+                PhysicalMemoryArea::new(0x2000, 0x2fff),
+                MemoryAttribute::Normal,
+            )
             .unwrap();
 
         assert_eq!(regions.len(), 1);
         assert_eq!(
             regions.get(0).unwrap().area(),
-            MemoryArea::new(0x1000, 0x3fff)
+            PhysicalMemoryArea::new(0x1000, 0x3fff)
         );
         assert_eq!(
             regions.get(0).unwrap().memory_attribute(),
@@ -604,31 +643,46 @@ mod tests {
     fn direct_map_regions_retag_rejects_gaps_and_mixed_source_attributes() {
         let mut regions = DirectMapRegions::new();
         regions
-            .insert(MemoryArea::new(0x1000, 0x1fff), MemoryAttribute::Normal)
+            .insert(
+                PhysicalMemoryArea::new(0x1000, 0x1fff),
+                MemoryAttribute::Normal,
+            )
             .unwrap();
         regions
-            .insert(MemoryArea::new(0x3000, 0x3fff), MemoryAttribute::Normal)
+            .insert(
+                PhysicalMemoryArea::new(0x3000, 0x3fff),
+                MemoryAttribute::Normal,
+            )
             .unwrap();
         assert!(
             regions
-                .retag(MemoryArea::new(0x1000, 0x3fff), MemoryAttribute::Device)
+                .retag(
+                    PhysicalMemoryArea::new(0x1000, 0x3fff),
+                    MemoryAttribute::Device
+                )
                 .is_err()
         );
         assert_eq!(regions.len(), 2);
 
         let mut mixed = DirectMapRegions::new();
         mixed
-            .insert(MemoryArea::new(0x1000, 0x1fff), MemoryAttribute::Normal)
+            .insert(
+                PhysicalMemoryArea::new(0x1000, 0x1fff),
+                MemoryAttribute::Normal,
+            )
             .unwrap();
         mixed
             .insert(
-                MemoryArea::new(0x2000, 0x2fff),
+                PhysicalMemoryArea::new(0x2000, 0x2fff),
                 MemoryAttribute::DeviceBurstable,
             )
             .unwrap();
         assert!(
             mixed
-                .retag(MemoryArea::new(0x1000, 0x2fff), MemoryAttribute::Device)
+                .retag(
+                    PhysicalMemoryArea::new(0x1000, 0x2fff),
+                    MemoryAttribute::Device
+                )
                 .is_err()
         );
         assert_eq!(
@@ -641,7 +695,10 @@ mod tests {
         );
         assert!(
             mixed
-                .retag(MemoryArea::new(0x1001, 0x1fff), MemoryAttribute::Device)
+                .retag(
+                    PhysicalMemoryArea::new(0x1001, 0x1fff),
+                    MemoryAttribute::Device
+                )
                 .is_err()
         );
     }
@@ -650,10 +707,10 @@ mod tests {
     fn direct_map_regions_retag_capacity_failure_does_not_mutate() {
         let mut regions = DirectMapRegions::new();
         for index in 0..MAX_DIRECT_MAP_REGIONS {
-            let start = 0x1000 + index * PAGE_SIZE * 4;
+            let start = 0x1000 + (index * PAGE_SIZE * 4) as u64;
             regions
                 .insert(
-                    MemoryArea::new(start, start + PAGE_SIZE * 3 - 1),
+                    PhysicalMemoryArea::new(start, start + PAGE_SIZE as u64 * 3 - 1),
                     MemoryAttribute::Normal,
                 )
                 .unwrap();
@@ -663,9 +720,9 @@ mod tests {
         assert!(
             regions
                 .retag(
-                    MemoryArea::new(
-                        original_first.area().start + PAGE_SIZE,
-                        original_first.area().start + PAGE_SIZE * 2 - 1,
+                    PhysicalMemoryArea::new(
+                        original_first.area().start + PAGE_SIZE as u64,
+                        original_first.area().start + PAGE_SIZE as u64 * 2 - 1,
                     ),
                     MemoryAttribute::Device,
                 )

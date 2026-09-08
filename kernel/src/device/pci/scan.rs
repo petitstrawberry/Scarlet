@@ -153,8 +153,8 @@ impl<'a> PciScanner<'a> {
             0 => None,
             3 => Some(PlatformDeviceResource {
                 res_type: PlatformDeviceResourceType::IRQ,
-                start: parent_irq_cells[1] as usize,
-                end: parent_irq_cells[1] as usize,
+                start: parent_irq_cells[1] as u64,
+                end: parent_irq_cells[1] as u64,
                 irq_metadata: Some(IrqMetadata {
                     irq_type: parent_irq_cells[0],
                     irq_number: parent_irq_cells[1],
@@ -165,8 +165,8 @@ impl<'a> PciScanner<'a> {
                 let irq = *parent_irq_cells.first()? as usize;
                 Some(PlatformDeviceResource {
                     res_type: PlatformDeviceResourceType::IRQ,
-                    start: irq,
-                    end: irq,
+                    start: irq as u64,
+                    end: irq as u64,
                     irq_metadata: None,
                 })
             }

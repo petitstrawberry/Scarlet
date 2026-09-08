@@ -149,7 +149,7 @@ fn test_framebuffer_drawing_operations() {
     let fb_pages = (fb_size + 4095) / 4096;
     let fb_addr = crate::mem::page::allocate_raw_pages(fb_pages) as usize;
     assert_ne!(fb_addr, 0);
-    device.set_framebuffer_address(fb_addr);
+    device.set_framebuffer_address(crate::vm::addr::virt_to_phys(fb_addr));
 
     // Test basic framebuffer operations
     let retrieved_config = device.get_framebuffer_config().unwrap();
@@ -158,7 +158,7 @@ fn test_framebuffer_drawing_operations() {
     assert_eq!(retrieved_config.format, PixelFormat::RGBA8888);
 
     let retrieved_addr = device.get_framebuffer_address().unwrap();
-    assert_eq!(retrieved_addr, fb_addr);
+    assert_eq!(retrieved_addr, crate::vm::addr::virt_to_phys(fb_addr));
 
     // Draw a test pattern
     unsafe {
@@ -273,7 +273,7 @@ fn test_pixel_format_operations() {
         // Allocate and set framebuffer
         let fb_pages = (fb_size + 4095) / 4096;
         let fb_addr = crate::mem::page::allocate_raw_pages(fb_pages) as usize;
-        device.set_framebuffer_address(fb_addr);
+        device.set_framebuffer_address(crate::vm::addr::virt_to_phys(fb_addr));
 
         // Test pixel writing based on format
         // SAFETY: fb_addr is a valid pointer to allocated framebuffer memory with sufficient size

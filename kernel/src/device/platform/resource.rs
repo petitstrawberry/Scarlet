@@ -12,8 +12,8 @@
 #[derive(Debug)]
 pub struct PlatformDeviceResource {
     pub res_type: PlatformDeviceResourceType,
-    pub start: usize,
-    pub end: usize,
+    pub start: u64,
+    pub end: u64,
     /// Optional metadata for IRQ resources (e.g., type, flags from Device Tree)
     pub irq_metadata: Option<IrqMetadata>,
 }
@@ -40,4 +40,15 @@ pub enum PlatformDeviceResourceType {
     IO,
     IRQ,
     DMA,
+}
+
+impl PlatformDeviceResource {
+    /// Byte length representable by one CPU mapping.
+    pub fn size(&self) -> Result<usize, &'static str> {
+        self.end
+            .checked_sub(self.start)
+            .and_then(|n| n.checked_add(1))
+            .and_then(|n| usize::try_from(n).ok())
+            .ok_or("platform resource length exceeds mapping address width")
+    }
 }

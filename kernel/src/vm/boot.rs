@@ -3,7 +3,7 @@ use crate::environment::{KERNEL_HEAP_BASE, PAGE_SIZE, SCARLET_HHDM_BASE};
 use crate::mem::pmm;
 use crate::vm::addr::{boot_phys_to_virt, kernel_virt_to_phys};
 use crate::vm::direct_map::DirectMapRegions;
-use crate::vm::vmem::{MemoryArea, MemoryAttribute, VirtualMemoryPermission};
+use crate::vm::vmem::{MemoryArea, MemoryAttribute, PhysicalMemoryArea, VirtualMemoryPermission};
 
 const BOOT_ASID: u16 = 0;
 
@@ -15,18 +15,14 @@ fn align_up(addr: usize, align: usize) -> usize {
     (addr + align - 1) & !(align - 1)
 }
 
-fn direct_map_virtual_area(physical_area: MemoryArea) -> MemoryArea {
+fn direct_map_virtual_area(physical_area: PhysicalMemoryArea) -> MemoryArea {
     MemoryArea {
-        start: SCARLET_HHDM_BASE
-            .checked_add(physical_area.start)
-            .expect("direct-map virtual start overflows"),
-        end: SCARLET_HHDM_BASE
-            .checked_add(physical_area.end)
-            .expect("direct-map virtual end overflows"),
+        start: crate::vm::addr::kernel_direct_map_vaddr(physical_area.start),
+        end: crate::vm::addr::kernel_direct_map_vaddr(physical_area.end),
     }
 }
 
-fn alloc_boot_pagetable() -> (usize, *mut ArchPageTable) {
+fn alloc_boot_pagetable() -> (u64, *mut ArchPageTable) {
     let paddr = pmm::alloc_frame().expect("Failed to allocate boot page table frame");
     let vaddr = boot_phys_to_virt(paddr);
     unsafe {
@@ -80,12 +76,12 @@ fn boot_walk(
 fn boot_map_page(
     root: *mut ArchPageTable,
     vaddr: usize,
-    paddr: usize,
+    paddr: u64,
     permissions: usize,
     _memory_attribute: MemoryAttribute,
 ) {
     let vaddr = vaddr & !(PAGE_SIZE - 1);
-    let paddr = paddr & !(PAGE_SIZE - 1);
+    let paddr = paddr & !(PAGE_SIZE as u64 - 1);
     let pte = boot_walk(root, vaddr, true).expect("boot_map_page: failed to allocate walk path");
 
     pte.clear_all();
@@ -155,7 +151,7 @@ fn boot_walk(
 fn boot_map_page(
     root: *mut ArchPageTable,
     vaddr: usize,
-    paddr: usize,
+    paddr: u64,
     permissions: usize,
     memory_attribute: MemoryAttribute,
 ) {
@@ -168,7 +164,7 @@ fn boot_map_page(
     }
 
     let vaddr = vaddr & !(PAGE_SIZE - 1);
-    let paddr = paddr & !(PAGE_SIZE - 1);
+    let paddr = paddr & !(PAGE_SIZE as u64 - 1);
     let pte = boot_walk(root, vaddr, true).expect("boot_map_page: failed to allocate walk path");
 
     pte.set_entry(ArchPageTable::make_leaf_entry(
@@ -187,12 +183,12 @@ fn boot_map_page(
 fn boot_map_range(
     root: *mut ArchPageTable,
     varea: MemoryArea,
-    parea: MemoryArea,
+    parea: PhysicalMemoryArea,
     permissions: usize,
     memory_attribute: MemoryAttribute,
 ) {
     if varea.start % PAGE_SIZE != 0
-        || parea.start % PAGE_SIZE != 0
+        || parea.start % PAGE_SIZE as u64 != 0
         || varea.size() % PAGE_SIZE != 0
         || parea.size() % PAGE_SIZE != 0
     {
@@ -210,7 +206,7 @@ fn boot_map_range(
             .checked_add(PAGE_SIZE)
             .expect("boot_map_range: vaddr overflow");
         paddr = paddr
-            .checked_add(PAGE_SIZE)
+            .checked_add(PAGE_SIZE as u64)
             .expect("boot_map_range: paddr overflow");
     }
 }
@@ -218,8 +214,8 @@ fn boot_map_range(
 #[allow(static_mut_refs)]
 pub fn switch_to_boot_page_table(
     direct_map_regions: DirectMapRegions,
-    initramfs_paddr: Option<MemoryArea>,
-    heap_paddr: MemoryArea,
+    initramfs_paddr: Option<PhysicalMemoryArea>,
+    heap_paddr: PhysicalMemoryArea,
 ) {
     unsafe extern "C" {
         static __KERNEL_SPACE_START: usize;
@@ -238,14 +234,14 @@ pub fn switch_to_boot_page_table(
             PAGE_SIZE,
         ) - 1,
     };
-    let kernel_phys_area = MemoryArea {
-        start: align_down(kernel_virt_to_phys(kernel_area.start), PAGE_SIZE),
-        end: align_up(kernel_virt_to_phys(kernel_area.end) + 1, PAGE_SIZE) - 1,
+    let kernel_phys_area = PhysicalMemoryArea {
+        start: phys_align_down(kernel_virt_to_phys(kernel_area.start), PAGE_SIZE as u64),
+        end: phys_align_up(kernel_virt_to_phys(kernel_area.end) + 1, PAGE_SIZE as u64) - 1,
     };
 
-    let heap_phys_area = MemoryArea {
-        start: align_down(heap_paddr.start, PAGE_SIZE),
-        end: align_up(heap_paddr.end + 1, PAGE_SIZE) - 1,
+    let heap_phys_area = PhysicalMemoryArea {
+        start: phys_align_down(heap_paddr.start, PAGE_SIZE as u64),
+        end: phys_align_up(heap_paddr.end + 1, PAGE_SIZE as u64) - 1,
     };
     let heap_area = MemoryArea {
         start: KERNEL_HEAP_BASE,
@@ -283,9 +279,9 @@ pub fn switch_to_boot_page_table(
     );
 
     if let Some(initramfs) = initramfs_paddr {
-        let initramfs_phys_area = MemoryArea {
-            start: align_down(initramfs.start, PAGE_SIZE),
-            end: align_up(initramfs.end + 1, PAGE_SIZE) - 1,
+        let initramfs_phys_area = PhysicalMemoryArea {
+            start: phys_align_down(initramfs.start, PAGE_SIZE as u64),
+            end: phys_align_up(initramfs.end + 1, PAGE_SIZE as u64) - 1,
         };
         if !direct_map_regions
             .contains_area_with_attribute(initramfs_phys_area, MemoryAttribute::Normal)
@@ -308,4 +304,13 @@ pub fn switch_to_boot_page_table(
     unsafe {
         (*root).switch_for_boot(BOOT_ASID);
     }
+}
+
+fn phys_align_down(addr: u64, align: u64) -> u64 {
+    addr & !(align - 1)
+}
+fn phys_align_up(addr: u64, align: u64) -> u64 {
+    addr.checked_add(align - 1)
+        .expect("physical alignment overflows")
+        & !(align - 1)
 }

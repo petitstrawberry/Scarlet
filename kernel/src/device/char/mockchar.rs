@@ -120,7 +120,7 @@ impl MemoryMappingOps for MockCharDevice {
         Err("Memory mapping not supported by mock character device")
     }
 
-    fn on_mapped(&self, _vaddr: usize, _paddr: usize, _length: usize, _offset: usize) {
+    fn on_mapped(&self, _vaddr: usize, _paddr: u64, _length: usize, _offset: usize) {
         // Mock implementation - no operation
     }
 

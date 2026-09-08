@@ -49,7 +49,9 @@ use crate::{
 };
 
 use super::addr::{phys_to_virt, validate_direct_map_alias};
-use super::vmem::{MemoryArea, MemoryAttribute, VirtualMemoryMap, VirtualMemoryPermission};
+use super::vmem::{
+    MemoryArea, MemoryAttribute, PhysicalMemoryArea, VirtualMemoryMap, VirtualMemoryPermission,
+};
 
 const WRITE_SITE_OWNER_TASK: u64 = 0x4f54;
 const WRITE_SITE_SET_ASID: u64 = 0x5341;
@@ -162,15 +164,15 @@ impl VirtualMemoryManager {
         existing_map: &VirtualMemoryMap,
         sub_start: usize,
         sub_end: usize,
-    ) -> MemoryArea {
+    ) -> PhysicalMemoryArea {
         if existing_map.pmarea.start == 0 && existing_map.pmarea.end == 0 {
-            return MemoryArea { start: 0, end: 0 };
+            return PhysicalMemoryArea { start: 0, end: 0 };
         }
 
-        let pm_offset = sub_start - existing_map.vmarea.start;
-        MemoryArea {
+        let pm_offset = (sub_start - existing_map.vmarea.start) as u64;
+        PhysicalMemoryArea {
             start: existing_map.pmarea.start + pm_offset,
-            end: existing_map.pmarea.start + pm_offset + (sub_end - sub_start),
+            end: existing_map.pmarea.start + pm_offset + (sub_end - sub_start) as u64,
         }
     }
 
@@ -250,7 +252,7 @@ impl VirtualMemoryManager {
         self.page_allocations.write().push(alloc);
     }
 
-    fn sync_executable_page_for_mapping(permissions: usize, paddr: usize) {
+    fn sync_executable_page_for_mapping(permissions: usize, paddr: u64) {
         if VirtualMemoryPermission::Execute.contained_in(permissions) {
             crate::arch::sync_icache_for_execution(phys_to_virt(paddr), PAGE_SIZE);
         }
@@ -406,7 +408,7 @@ impl VirtualMemoryManager {
             return Err("Address or size is not aligned to PAGE_SIZE");
         }
         if map.pmarea.start != 0
-            && (map.pmarea.start % PAGE_SIZE != 0 || map.pmarea.size() % PAGE_SIZE != 0)
+            && (map.pmarea.start % PAGE_SIZE as u64 != 0 || map.pmarea.size() % PAGE_SIZE != 0)
         {
             return Err("pmarea is not aligned to PAGE_SIZE");
         }
@@ -876,13 +878,13 @@ impl VirtualMemoryManager {
         self.lazy_map_page_with(access)
     }
 
-    fn page_backing_at(map: &VirtualMemoryMap, page_vaddr: usize) -> Option<usize> {
+    fn page_backing_at(map: &VirtualMemoryMap, page_vaddr: usize) -> Option<u64> {
         if map.pmarea.start == 0 {
             return Some(0);
         }
 
         let offset = page_vaddr.checked_sub(map.vmarea.start)?;
-        map.pmarea.start.checked_add(offset)
+        map.pmarea.start.checked_add(offset as u64)
     }
 
     fn commit_private_cow_page(
@@ -900,10 +902,10 @@ impl VirtualMemoryManager {
         let physical_page_end = replacement
             .pmarea
             .start
-            .checked_add(PAGE_SIZE - 1)
+            .checked_add((PAGE_SIZE - 1) as u64)
             .ok_or("COW page physical address overflow")?;
         if replacement.pmarea.start == 0
-            || replacement.pmarea.start % PAGE_SIZE != 0
+            || replacement.pmarea.start % PAGE_SIZE as u64 != 0
             || replacement.pmarea.end != physical_page_end
         {
             return Err("COW replacement is not one aligned physical page");
@@ -1053,7 +1055,10 @@ impl VirtualMemoryManager {
                             );
                         }
                         let cow_map = VirtualMemoryMap {
-                            pmarea: MemoryArea::new(new_paddr, new_paddr + PAGE_SIZE - 1),
+                            pmarea: crate::vm::vmem::PhysicalMemoryArea::new(
+                                new_paddr,
+                                new_paddr + PAGE_SIZE as u64 - 1,
+                            ),
                             vmarea: MemoryArea::new(page_vaddr, page_vaddr + PAGE_SIZE - 1),
                             vm_start: memory_map.vm_start,
                             permissions: perms,
@@ -1111,14 +1116,14 @@ impl VirtualMemoryManager {
                 }
                 Err(_) => {
                     if memory_map.pmarea.start != 0 {
-                        memory_map.pmarea.start + (page_vaddr - memory_map.vmarea.start)
+                        memory_map.pmarea.start + (page_vaddr - memory_map.vmarea.start) as u64
                     } else {
                         return Err("Owner failed to resolve fault");
                     }
                 }
             }
         } else {
-            memory_map.pmarea.start + (page_vaddr - memory_map.vmarea.start)
+            memory_map.pmarea.start + (page_vaddr - memory_map.vmarea.start) as u64
         };
 
         let asid = self.get_asid();
@@ -1170,7 +1175,7 @@ impl VirtualMemoryManager {
         let page_vaddr = vaddr & !(PAGE_SIZE - 1);
 
         // Result of successful extend: (paddr_page_base, permissions, memory_attribute)
-        let extend_result: Option<(usize, usize, MemoryAttribute)>;
+        let extend_result: Option<(u64, usize, MemoryAttribute)>;
 
         {
             // Lock scope
@@ -1326,7 +1331,7 @@ impl VirtualMemoryManager {
             .map(phys_to_virt)
     }
 
-    pub fn translate_to_phys_with_access(&self, vaddr: usize, op: AccessOp) -> Option<usize> {
+    pub fn translate_to_phys_with_access(&self, vaddr: usize, op: AccessOp) -> Option<u64> {
         let map = self.search_memory_map(vaddr)?;
 
         match op {
@@ -1366,22 +1371,22 @@ impl VirtualMemoryManager {
                 size: Some(1),
             };
             if let Ok(res) = owner.resolve_fault(&access, page_idx, map.vm_start) {
-                return Some(res.paddr_page_base + (vaddr & (PAGE_SIZE - 1)));
+                return Some(res.paddr_page_base + (vaddr & (PAGE_SIZE - 1)) as u64);
             }
             if map.pmarea.start != 0 {
-                return Some(map.pmarea.start + (vaddr - map.vmarea.start));
+                return Some(map.pmarea.start + (vaddr - map.vmarea.start) as u64);
             }
             return None;
         }
 
         if map.pmarea.start != 0 {
-            Some(map.pmarea.start + (vaddr - map.vmarea.start))
+            Some(map.pmarea.start + (vaddr - map.vmarea.start) as u64)
         } else {
             None
         }
     }
 
-    pub fn translate_to_phys(&self, vaddr: usize) -> Option<usize> {
+    pub fn translate_to_phys(&self, vaddr: usize) -> Option<u64> {
         let map = self.search_memory_map(vaddr)?;
 
         if let Some(owner) = &map.owner {
@@ -1393,16 +1398,16 @@ impl VirtualMemoryManager {
                 size: Some(1),
             };
             if let Ok(res) = owner.resolve_fault(&access, page_idx, map.vm_start) {
-                return Some(res.paddr_page_base + (vaddr & (PAGE_SIZE - 1)));
+                return Some(res.paddr_page_base + (vaddr & (PAGE_SIZE - 1)) as u64);
             }
             if map.pmarea.start != 0 {
-                return Some(map.pmarea.start + (vaddr - map.vmarea.start));
+                return Some(map.pmarea.start + (vaddr - map.vmarea.start) as u64);
             }
             return None;
         }
 
         if map.pmarea.start != 0 {
-            Some(map.pmarea.start + (vaddr - map.vmarea.start))
+            Some(map.pmarea.start + (vaddr - map.vmarea.start) as u64)
         } else {
             None
         }
@@ -1412,7 +1417,7 @@ impl VirtualMemoryManager {
         self.translate_to_kva(vaddr)
     }
 
-    pub fn translate_vaddr_to_phys(&self, vaddr: usize) -> Option<usize> {
+    pub fn translate_vaddr_to_phys(&self, vaddr: usize) -> Option<u64> {
         self.translate_to_phys(vaddr)
     }
 
@@ -1513,7 +1518,7 @@ impl VirtualMemoryManager {
             return Err("Address or size is not aligned to PAGE_SIZE");
         }
         if map.pmarea.start != 0
-            && (map.pmarea.start % PAGE_SIZE != 0 || map.pmarea.size() % PAGE_SIZE != 0)
+            && (map.pmarea.start % PAGE_SIZE as u64 != 0 || map.pmarea.size() % PAGE_SIZE != 0)
         {
             return Err("pmarea is not aligned to PAGE_SIZE");
         }
@@ -1680,7 +1685,7 @@ impl VirtualMemoryManager {
                             start: prev_memory_map.vmarea.start,
                             end: memory_map.vmarea.end,
                         },
-                        pmarea: super::vmem::MemoryArea {
+                        pmarea: PhysicalMemoryArea {
                             start: prev_memory_map.pmarea.start,
                             end: memory_map.pmarea.end,
                         },
@@ -1822,7 +1827,7 @@ mod tests {
         };
         let map = VirtualMemoryMap {
             vmarea: vma,
-            pmarea: vma,
+            pmarea: crate::vm::vmem::PhysicalMemoryArea::new(vma.start as u64, vma.end as u64),
             vm_start: vma.start,
             permissions: 0,
             is_shared: false,
@@ -1848,19 +1853,29 @@ mod tests {
     fn restore_memory_maps_replaces_partial_exec_state_transactionally() {
         let vmm = VirtualMemoryManager::new();
         let vmarea = MemoryArea::new(0x2000, 0x2fff);
-        let partial_map =
-            VirtualMemoryMap::new(MemoryArea::new(0x3000, 0x3fff), vmarea, 0, false, None);
+        let partial_map = VirtualMemoryMap::new(
+            crate::vm::vmem::PhysicalMemoryArea::new(0x3000, 0x3fff),
+            vmarea,
+            0,
+            false,
+            None,
+        );
         vmm.add_memory_map(partial_map).unwrap();
 
-        let original_map =
-            VirtualMemoryMap::new(MemoryArea::new(0x1000, 0x1fff), vmarea, 0, false, None);
+        let original_map = VirtualMemoryMap::new(
+            crate::vm::vmem::PhysicalMemoryArea::new(0x1000, 0x1fff),
+            vmarea,
+            0,
+            false,
+            None,
+        );
         vmm.restore_memory_maps([original_map]).unwrap();
 
         assert_eq!(vmm.memmap_len(), 1);
         assert_eq!(vmm.search_memory_map(0x2000).unwrap().pmarea.start, 0x1000);
 
         let invalid_map = VirtualMemoryMap::new(
-            MemoryArea::new(0x5000, 0x5fff),
+            crate::vm::vmem::PhysicalMemoryArea::new(0x5000, 0x5fff),
             MemoryArea::new(0x2800, 0x37ff),
             0,
             false,
@@ -1880,7 +1895,7 @@ mod tests {
         };
         let map = VirtualMemoryMap {
             vmarea: vma,
-            pmarea: vma,
+            pmarea: crate::vm::vmem::PhysicalMemoryArea::new(vma.start as u64, vma.end as u64),
             vm_start: vma.start,
             permissions: 0,
             is_shared: false,
@@ -1908,7 +1923,7 @@ mod tests {
         };
         let map1 = VirtualMemoryMap {
             vmarea: vma1,
-            pmarea: vma1,
+            pmarea: crate::vm::vmem::PhysicalMemoryArea::new(vma1.start as u64, vma1.end as u64),
             vm_start: vma1.start,
             permissions: 0,
             is_shared: false,
@@ -1921,7 +1936,7 @@ mod tests {
         };
         let map2 = VirtualMemoryMap {
             vmarea: vma2,
-            pmarea: vma2,
+            pmarea: crate::vm::vmem::PhysicalMemoryArea::new(vma2.start as u64, vma2.end as u64),
             vm_start: vma2.start,
             permissions: 0,
             is_shared: false,
@@ -1966,7 +1981,7 @@ mod tests {
 
         // Add some memory maps to test collision avoidance
         let map1 = VirtualMemoryMap::new(
-            crate::vm::vmem::MemoryArea {
+            crate::vm::vmem::PhysicalMemoryArea {
                 start: 0x80000000,
                 end: 0x80000fff,
             }, // pmarea
@@ -1989,7 +2004,7 @@ mod tests {
         // find_unmapped_area must not return an address inside that mapping.
         manager.set_mmap_base(0x60000000);
         let overlapping_base_map = VirtualMemoryMap::new(
-            crate::vm::vmem::MemoryArea {
+            crate::vm::vmem::PhysicalMemoryArea {
                 start: 0x90000000,
                 end: 0x9001ffff,
             },
@@ -2017,7 +2032,7 @@ mod tests {
 
         // Add another non-adjacent map to create another gap
         let map2 = VirtualMemoryMap::new(
-            crate::vm::vmem::MemoryArea {
+            crate::vm::vmem::PhysicalMemoryArea {
                 start: 0x80002000,
                 end: 0x80002fff,
             }, // pmarea
@@ -2074,7 +2089,7 @@ mod tests {
 
         // Add two adjacent memory maps that can be merged
         let map1 = VirtualMemoryMap::new(
-            crate::vm::vmem::MemoryArea {
+            crate::vm::vmem::PhysicalMemoryArea {
                 start: 0x80000000,
                 end: 0x80000fff,
             },
@@ -2087,7 +2102,7 @@ mod tests {
             None,
         );
         let map2 = VirtualMemoryMap::new(
-            crate::vm::vmem::MemoryArea {
+            crate::vm::vmem::PhysicalMemoryArea {
                 start: 0x80001000,
                 end: 0x80001fff,
             },
@@ -2130,7 +2145,7 @@ mod tests {
         // Set up existing memory maps for comprehensive overlap testing
         // Map 1: [0x1000, 0x2000)
         let map1 = VirtualMemoryMap::new(
-            crate::vm::vmem::MemoryArea {
+            crate::vm::vmem::PhysicalMemoryArea {
                 start: 0x10000000,
                 end: 0x10000fff,
             }, // pmarea
@@ -2146,7 +2161,7 @@ mod tests {
 
         // Map 2: [0x4000, 0x5000)
         let map2 = VirtualMemoryMap::new(
-            crate::vm::vmem::MemoryArea {
+            crate::vm::vmem::PhysicalMemoryArea {
                 start: 0x20000000,
                 end: 0x20000fff,
             }, // pmarea
@@ -2162,7 +2177,7 @@ mod tests {
 
         // Map 3: [0x7000, 0x8000)
         let map3 = VirtualMemoryMap::new(
-            crate::vm::vmem::MemoryArea {
+            crate::vm::vmem::PhysicalMemoryArea {
                 start: 0x30000000,
                 end: 0x30000fff,
             }, // pmarea
@@ -2179,7 +2194,7 @@ mod tests {
         // Test Case 1: Overlap with previous map (end boundary)
         // Try to add [0x1800, 0x2800) - overlaps with map1's end
         let overlap_with_prev = VirtualMemoryMap::new(
-            crate::vm::vmem::MemoryArea {
+            crate::vm::vmem::PhysicalMemoryArea {
                 start: 0x40000000,
                 end: 0x40000fff,
             }, // pmarea
@@ -2196,7 +2211,7 @@ mod tests {
         // Test Case 2: Overlap with next map (start boundary)
         // Try to add [0x3800, 0x4800) - overlaps with map2's start
         let overlap_with_next = VirtualMemoryMap::new(
-            crate::vm::vmem::MemoryArea {
+            crate::vm::vmem::PhysicalMemoryArea {
                 start: 0x50000000,
                 end: 0x50000fff,
             }, // pmarea
@@ -2213,7 +2228,7 @@ mod tests {
         // Test Case 3: Complete containment by existing map
         // Try to add [0x1200, 0x1800) - completely inside map1
         let contained_map = VirtualMemoryMap::new(
-            crate::vm::vmem::MemoryArea {
+            crate::vm::vmem::PhysicalMemoryArea {
                 start: 0x60000000,
                 end: 0x600005ff,
             }, // pmarea
@@ -2230,7 +2245,7 @@ mod tests {
         // Test Case 4: Containing an existing map
         // Try to add [0x800, 0x2800) - contains map1 completely
         let containing_map = VirtualMemoryMap::new(
-            crate::vm::vmem::MemoryArea {
+            crate::vm::vmem::PhysicalMemoryArea {
                 start: 0x70000000,
                 end: 0x70001fff,
             }, // pmarea
@@ -2247,7 +2262,7 @@ mod tests {
         // Test Case 5: Exact boundary collision (touching exactly)
         // Try to add [0x2000, 0x3000) - starts exactly where map1 ends
         let exact_boundary = VirtualMemoryMap::new(
-            crate::vm::vmem::MemoryArea {
+            crate::vm::vmem::PhysicalMemoryArea {
                 start: 0x80000000,
                 end: 0x80000fff,
             }, // pmarea
@@ -2264,7 +2279,7 @@ mod tests {
         // Test Case 6: Valid gap insertion
         // Add [0x5000, 0x6000) - fits perfectly between map2 and map3
         let gap_insertion = VirtualMemoryMap::new(
-            crate::vm::vmem::MemoryArea {
+            crate::vm::vmem::PhysicalMemoryArea {
                 start: 0x90000000,
                 end: 0x90000fff,
             }, // pmarea
@@ -2281,7 +2296,7 @@ mod tests {
         // Test Case 7: Edge case - inserting at the very beginning
         // Add [0x0, 0x1000) - before all existing maps
         let beginning_map = VirtualMemoryMap::new(
-            crate::vm::vmem::MemoryArea {
+            crate::vm::vmem::PhysicalMemoryArea {
                 start: 0xa0000000,
                 end: 0xa0000fff,
             }, // pmarea
@@ -2298,7 +2313,7 @@ mod tests {
         // Test Case 8: Edge case - inserting at the very end
         // Add [0x8000, 0x9000) - after all existing maps
         let end_map = VirtualMemoryMap::new(
-            crate::vm::vmem::MemoryArea {
+            crate::vm::vmem::PhysicalMemoryArea {
                 start: 0xb0000000,
                 end: 0xb0000fff,
             }, // pmarea
@@ -2333,7 +2348,7 @@ mod tests {
 
         // Test Case 1: Non-aligned virtual address (should fail)
         let misaligned_virtual = VirtualMemoryMap::new(
-            crate::vm::vmem::MemoryArea {
+            crate::vm::vmem::PhysicalMemoryArea {
                 start: 0x10000000,
                 end: 0x10000fff,
             }, // pmarea
@@ -2349,7 +2364,7 @@ mod tests {
 
         // Test Case 2: Non-aligned physical address (should fail)
         let misaligned_physical = VirtualMemoryMap::new(
-            crate::vm::vmem::MemoryArea {
+            crate::vm::vmem::PhysicalMemoryArea {
                 start: 0x10000001,
                 end: 0x10001000,
             }, // pmarea - Not PAGE_SIZE aligned
@@ -2365,7 +2380,7 @@ mod tests {
 
         // Test Case 3: Non-aligned size (should fail)
         let misaligned_size = VirtualMemoryMap::new(
-            crate::vm::vmem::MemoryArea {
+            crate::vm::vmem::PhysicalMemoryArea {
                 start: 0x10000000,
                 end: 0x10000800,
             }, // pmarea
@@ -2381,7 +2396,7 @@ mod tests {
 
         // Test Case 4: Zero-size mapping (should fail)
         let zero_size = VirtualMemoryMap::new(
-            crate::vm::vmem::MemoryArea {
+            crate::vm::vmem::PhysicalMemoryArea {
                 start: 0x10000000,
                 end: 0x10000000,
             }, // pmarea - Start == End
@@ -2397,7 +2412,7 @@ mod tests {
 
         // Test Case 5: Single page mapping (should succeed)
         let single_page = VirtualMemoryMap::new(
-            crate::vm::vmem::MemoryArea {
+            crate::vm::vmem::PhysicalMemoryArea {
                 start: 0x10000000,
                 end: 0x10000fff,
             }, // pmarea
@@ -2413,7 +2428,7 @@ mod tests {
 
         // Test Case 6: Large mapping (multiple pages)
         let large_mapping = VirtualMemoryMap::new(
-            crate::vm::vmem::MemoryArea {
+            crate::vm::vmem::PhysicalMemoryArea {
                 start: 0x20000000,
                 end: 0x2000ffff,
             }, // pmarea - 64KB
@@ -2436,7 +2451,7 @@ mod tests {
 
         // Add initial mapping
         let map1 = VirtualMemoryMap::new(
-            crate::vm::vmem::MemoryArea {
+            crate::vm::vmem::PhysicalMemoryArea {
                 start: 0x10000000,
                 end: 0x10000fff,
             }, // pmarea
@@ -2460,7 +2475,7 @@ mod tests {
 
         // Add another mapping, which should invalidate cache
         let map2 = VirtualMemoryMap::new(
-            crate::vm::vmem::MemoryArea {
+            crate::vm::vmem::PhysicalMemoryArea {
                 start: 0x20000000,
                 end: 0x20000fff,
             }, // pmarea
@@ -2490,7 +2505,7 @@ mod tests {
 
         // Add initial mapping at [0x2000, 0x3000)
         let initial_map = VirtualMemoryMap::new(
-            crate::vm::vmem::MemoryArea {
+            crate::vm::vmem::PhysicalMemoryArea {
                 start: 0x10000000,
                 end: 0x10000fff,
             }, // pmarea
@@ -2507,7 +2522,7 @@ mod tests {
 
         // Add fixed mapping that completely contains the existing mapping [0x1000, 0x4000)
         let fixed_map = VirtualMemoryMap::new(
-            crate::vm::vmem::MemoryArea {
+            crate::vm::vmem::PhysicalMemoryArea {
                 start: 0x20000000,
                 end: 0x20002fff,
             }, // pmarea - 3 pages
@@ -2542,7 +2557,7 @@ mod tests {
 
         // Add initial mapping at [0x1000, 0x3000) - 2 pages
         let initial_map = VirtualMemoryMap::new(
-            crate::vm::vmem::MemoryArea {
+            crate::vm::vmem::PhysicalMemoryArea {
                 start: 0x10000000,
                 end: 0x10001fff,
             }, // pmarea - 2 pages
@@ -2559,7 +2574,7 @@ mod tests {
 
         // Add fixed mapping that overlaps from middle: [0x2000, 0x4000) - 2 pages
         let fixed_map = VirtualMemoryMap::new(
-            crate::vm::vmem::MemoryArea {
+            crate::vm::vmem::PhysicalMemoryArea {
                 start: 0x20000000,
                 end: 0x20001fff,
             }, // pmarea - 2 pages
@@ -2601,7 +2616,7 @@ mod tests {
 
         // Add initial mapping at [0x1000, 0x5000) - 4 pages
         let initial_map = VirtualMemoryMap::new(
-            crate::vm::vmem::MemoryArea {
+            crate::vm::vmem::PhysicalMemoryArea {
                 start: 0x10000000,
                 end: 0x10003fff,
             }, // pmarea - 4 pages
@@ -2618,7 +2633,7 @@ mod tests {
 
         // Add fixed mapping in the middle: [0x2000, 0x4000) - 2 pages
         let fixed_map = VirtualMemoryMap::new(
-            crate::vm::vmem::MemoryArea {
+            crate::vm::vmem::PhysicalMemoryArea {
                 start: 0x20000000,
                 end: 0x20001fff,
             }, // pmarea - 2 pages
@@ -2666,7 +2681,7 @@ mod tests {
 
         // Add initial mapping at [0x1000, 0x2000)
         let initial_map = VirtualMemoryMap::new(
-            crate::vm::vmem::MemoryArea {
+            crate::vm::vmem::PhysicalMemoryArea {
                 start: 0x10000000,
                 end: 0x10000fff,
             }, // pmarea
@@ -2682,7 +2697,7 @@ mod tests {
 
         // Add fixed mapping with no overlap at [0x3000, 0x4000)
         let fixed_map = VirtualMemoryMap::new(
-            crate::vm::vmem::MemoryArea {
+            crate::vm::vmem::PhysicalMemoryArea {
                 start: 0x20000000,
                 end: 0x20000fff,
             }, // pmarea
@@ -2722,7 +2737,7 @@ mod tests {
             start: 0x1000,
             end: 0x1fff,
         };
-        let pma = MemoryArea {
+        let pma = crate::vm::vmem::PhysicalMemoryArea {
             start: dm_phys_start,
             end: dm_phys_start + 0xfff,
         };
@@ -2765,9 +2780,9 @@ mod tests {
                 start: 0x2000,
                 end: 0x2fff,
             },
-            pmarea: MemoryArea {
+            pmarea: crate::vm::vmem::PhysicalMemoryArea {
                 start: 0,
-                end: PAGE_SIZE - 1,
+                end: PAGE_SIZE as u64 - 1,
             },
             vm_start: 0x2000,
             permissions: 0,
@@ -2784,7 +2799,7 @@ mod tests {
     fn test_remove_memory_map_range_split_left_and_right_segments() {
         let manager = VirtualMemoryManager::new();
         let map = VirtualMemoryMap::new(
-            MemoryArea {
+            crate::vm::vmem::PhysicalMemoryArea {
                 start: 0x8000_0000,
                 end: 0x8000_3fff,
             },
@@ -2817,7 +2832,7 @@ mod tests {
     fn test_remove_memory_map_range_rounds_unaligned_length_to_pages() {
         let manager = VirtualMemoryManager::new();
         let map = VirtualMemoryMap::new(
-            MemoryArea {
+            crate::vm::vmem::PhysicalMemoryArea {
                 start: 0x8000_0000,
                 end: 0x8000_4fff,
             },
@@ -2855,7 +2870,7 @@ mod tests {
                 start: 0x4000,
                 end: 0x7fff,
             },
-            pmarea: MemoryArea { start: 0, end: 0 },
+            pmarea: crate::vm::vmem::PhysicalMemoryArea { start: 0, end: 0 },
             vm_start: 0x4000,
             permissions: 0o644,
             is_shared: false,
@@ -2869,7 +2884,7 @@ mod tests {
                 start: 0x5000,
                 end: 0x5fff,
             },
-            pmarea: MemoryArea {
+            pmarea: crate::vm::vmem::PhysicalMemoryArea {
                 start: 0x8000_0000,
                 end: 0x8000_0fff,
             },
@@ -2882,17 +2897,26 @@ mod tests {
         let removed = manager.add_memory_map_fixed(replacement).unwrap();
 
         assert_eq!(removed.len(), 1);
-        assert_eq!(removed[0].pmarea, MemoryArea { start: 0, end: 0 });
+        assert_eq!(
+            removed[0].pmarea,
+            crate::vm::vmem::PhysicalMemoryArea { start: 0, end: 0 }
+        );
 
         let left = manager.search_memory_map(0x4000).unwrap();
         assert_eq!(left.vmarea.start, 0x4000);
         assert_eq!(left.vmarea.end, 0x4fff);
-        assert_eq!(left.pmarea, MemoryArea { start: 0, end: 0 });
+        assert_eq!(
+            left.pmarea,
+            crate::vm::vmem::PhysicalMemoryArea { start: 0, end: 0 }
+        );
 
         let right = manager.search_memory_map(0x6000).unwrap();
         assert_eq!(right.vmarea.start, 0x6000);
         assert_eq!(right.vmarea.end, 0x7fff);
-        assert_eq!(right.pmarea, MemoryArea { start: 0, end: 0 });
+        assert_eq!(
+            right.pmarea,
+            crate::vm::vmem::PhysicalMemoryArea { start: 0, end: 0 }
+        );
     }
 
     #[test_case]
@@ -2906,7 +2930,7 @@ mod tests {
                 start: 0x4000,
                 end: 0x6fff,
             },
-            pmarea: MemoryArea { start: 0, end: 0 },
+            pmarea: crate::vm::vmem::PhysicalMemoryArea { start: 0, end: 0 },
             vm_start: 0x4000,
             permissions: 0o603,
             is_shared: false,
@@ -2922,7 +2946,7 @@ mod tests {
                 start: 0x5000,
                 end: 0x5fff,
             },
-            pmarea: MemoryArea {
+            pmarea: crate::vm::vmem::PhysicalMemoryArea {
                 start: 0x8000_0000,
                 end: 0x8000_0fff,
             },
@@ -2943,7 +2967,7 @@ mod tests {
                 start: 0x5000,
                 end: 0x5fff,
             },
-            pmarea: MemoryArea {
+            pmarea: crate::vm::vmem::PhysicalMemoryArea {
                 start: 0x9000_0000,
                 end: 0x9000_0fff,
             },
@@ -2987,7 +3011,7 @@ mod tests {
                 start: 0x4000,
                 end: 0x4fff,
             },
-            pmarea: MemoryArea { start: 0, end: 0 },
+            pmarea: crate::vm::vmem::PhysicalMemoryArea { start: 0, end: 0 },
             vm_start: 0x4000,
             permissions: 0x0b,
             is_shared: false,

@@ -602,7 +602,7 @@ extern "C" fn limine_entry_after_el_drop(_arg0: usize, inherited_sctlr: u64) -> 
     let kernel_end = unsafe { &__KERNEL_SPACE_END as *const usize as usize };
     init_limine_addressing(
         hhdm.offset as usize,
-        executable.physical_base as usize,
+        executable.physical_base,
         executable.virtual_base as usize,
         kernel_end - kernel_start,
     );
@@ -646,7 +646,10 @@ extern "C" fn limine_entry_after_el_drop(_arg0: usize, inherited_sctlr: u64) -> 
             .checked_add(PAGE_SIZE - 1)
             .expect("Qualcomm GENI early UART range overflows");
         direct_map_regions
-            .insert(MemoryArea::new(paddr, end), MemoryAttribute::Device)
+            .insert(
+                crate::vm::vmem::PhysicalMemoryArea::new(paddr as u64, end as u64),
+                MemoryAttribute::Device,
+            )
             .unwrap_or_else(|error| panic!("failed to map Qualcomm GENI early UART: {}", error));
         crate::arch::aarch64::earlycon::prepare_limine_qcom_geni(paddr);
     }

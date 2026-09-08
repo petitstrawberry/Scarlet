@@ -22,12 +22,12 @@ pub(super) const LOG_SHARED_MEMORY_RESIZE: bool = false;
 /// physical address is never exposed through a userspace ABI.
 #[derive(Debug, Clone, Copy)]
 pub struct SharedMemoryBacking {
-    paddr: usize,
+    paddr: u64,
     size: usize,
 }
 
 impl SharedMemoryBacking {
-    pub(crate) const fn paddr(&self) -> usize {
+    pub(crate) const fn paddr(&self) -> u64 {
         self.paddr
     }
 
@@ -108,7 +108,7 @@ pub trait SharedMemoryObject: MemoryMappingOps + Send + Sync {
 /// Internal state of a shared memory object
 struct SharedMemoryState {
     /// Physical address of the shared memory region
-    paddr: usize,
+    paddr: u64,
     /// Size of the shared memory region in bytes
     size: usize,
     /// Allocated capacity of the shared memory region in bytes
@@ -122,13 +122,13 @@ struct SharedMemoryState {
     /// Number of active kernel imports retaining this backing.
     pin_count: usize,
     /// Old allocations kept alive while mappings still exist
-    stale_pages: Vec<(usize, usize)>,
+    stale_pages: Vec<(u64, usize)>,
     /// Whether this object owns the physical memory (should free on drop)
     owns_memory: bool,
 }
 
 impl SharedMemoryState {
-    fn new(paddr: usize, size: usize, permissions: usize, owns_memory: bool) -> Self {
+    fn new(paddr: u64, size: usize, permissions: usize, owns_memory: bool) -> Self {
         Self {
             paddr,
             size,
@@ -205,7 +205,7 @@ impl SharedMemory {
     /// The physical memory must remain valid for the lifetime of this object.
     /// This object will NOT free the memory on drop - the caller is responsible for
     /// managing the memory lifetime.
-    pub unsafe fn from_paddr(paddr: usize, size: usize, permissions: usize) -> Self {
+    pub unsafe fn from_paddr(paddr: u64, size: usize, permissions: usize) -> Self {
         let state = SharedMemoryState::new(paddr, size, permissions, false);
         let id = format!("shmem_{:#x}", paddr);
 
@@ -380,7 +380,7 @@ impl MemoryMappingOps for SharedMemory {
         // Return physical address (base + offset), permissions, and shared flag.
         let paddr = state
             .paddr
-            .checked_add(offset)
+            .checked_add(offset as u64)
             .ok_or("Physical address overflow in shared memory mapping")?;
 
         Ok(crate::object::capability::MemoryMappingInfo::new(
@@ -390,7 +390,7 @@ impl MemoryMappingOps for SharedMemory {
         ))
     }
 
-    fn on_mapped(&self, _vaddr: usize, _paddr: usize, _length: usize, _offset: usize) {
+    fn on_mapped(&self, _vaddr: usize, _paddr: u64, _length: usize, _offset: usize) {
         let mut state = self.state.write();
         state.mapping_count += 1;
     }
@@ -459,7 +459,7 @@ impl MemoryMappingOps for SharedMemory {
         // map.pmarea.startは古い可能性があるので使わない
         let paddr_page_base = state
             .paddr
-            .checked_add(offset_in_mapping)
+            .checked_add(offset_in_mapping as u64)
             .ok_or(ResolveFaultError::Invalid)?;
 
         Ok(ResolveFaultResult {

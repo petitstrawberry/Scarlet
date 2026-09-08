@@ -12,7 +12,7 @@ use core::ops::{BitOr, BitOrAssign};
 use crate::sync::IrqSpinLock;
 
 /// Physical address type used by DMA mappings.
-pub type PhysAddr = usize;
+pub type PhysAddr = u64;
 
 /// I/O virtual address type used by IOMMU domains.
 pub type Iova = u64;
@@ -302,7 +302,7 @@ pub struct DmaContext {
     /// Additional IOMMU attachments for devices whose DMA reaches multiple controllers.
     pub additional_iommus: Vec<IommuAttachment>,
     /// Offset applied to physical addresses for direct DMA.
-    pub direct_dma_offset: isize,
+    pub direct_dma_offset: i64,
     iova_allocator: Option<Arc<IrqSpinLock<DmaIovaAllocator>>>,
 }
 
@@ -570,7 +570,12 @@ impl DmaContext {
             }
             Ok((iova, mapped_len))
         } else {
-            Ok(((paddr as isize + self.direct_dma_offset) as DmaAddr, len))
+            Ok((
+                paddr
+                    .checked_add_signed(self.direct_dma_offset)
+                    .ok_or(IommuError::MapFailed)?,
+                len,
+            ))
         }
     }
 
@@ -679,14 +684,14 @@ impl DmaContext {
         let mut expected_paddr = first_paddr;
         let mut physically_contiguous = true;
         for &(paddr, len) in segments {
-            if len == 0 || paddr % granule != 0 || len % granule != 0 {
+            if len == 0 || paddr % granule as u64 != 0 || len % granule != 0 {
                 return Err(IommuError::MapFailed);
             }
             if paddr != expected_paddr {
                 physically_contiguous = false;
             }
             total_len = total_len.checked_add(len).ok_or(IommuError::MapFailed)?;
-            expected_paddr = paddr.checked_add(len).ok_or(IommuError::MapFailed)?;
+            expected_paddr = paddr.checked_add(len as u64).ok_or(IommuError::MapFailed)?;
         }
 
         if self.iova_allocator.is_none() {
@@ -777,7 +782,9 @@ impl DmaContext {
                 mapped_additionals += 1;
             }
         } else {
-            let direct = (paddr as isize + self.direct_dma_offset) as DmaAddr;
+            let direct = paddr
+                .checked_add_signed(self.direct_dma_offset)
+                .ok_or(IommuError::MapFailed)?;
             if direct != dma_addr {
                 return Err(IommuError::NotSupported);
             }

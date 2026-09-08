@@ -1172,7 +1172,7 @@ impl Ext2FileSystem {
         &self,
         inode_num: u32,
         page_index: u64,
-        paddr: usize,
+        paddr: u64,
     ) -> Result<(), FileSystemError> {
         use crate::environment::PAGE_SIZE;
         use crate::vm::addr::phys_to_virt;
@@ -1288,7 +1288,7 @@ impl Ext2FileSystem {
         &self,
         inode_num: u32,
         file_size: usize,
-        pages: &[(u64, usize)],
+        pages: &[(u64, u64)],
     ) -> Result<(), FileSystemError> {
         profile_scope!("ext2::write_cached_pages");
 

@@ -89,7 +89,7 @@ pub struct DisplayInfo {
     ///
     /// This value changes when the display surface's mapped backing changes,
     /// even if `buffer_len` remains the same.
-    pub backing_id: usize,
+    pub backing_id: u64,
 }
 
 /// Region argument for DISPLAY_PRESENT_REGION.
@@ -169,7 +169,7 @@ pub const DISPLAY_PRESENT_IMAGE_FLAGS_VALID: u32 =
 #[derive(Debug, Clone)]
 struct DisplayBackingInfo {
     config: FramebufferConfig,
-    physical_addr: usize,
+    physical_addr: u64,
     size: usize,
 }
 
@@ -736,7 +736,7 @@ impl MemoryMappingOps for DisplayCharDevice {
         if info.physical_addr == 0 || info.size == 0 {
             return Err("Invalid display backing configuration");
         }
-        if info.physical_addr % crate::environment::PAGE_SIZE != 0 {
+        if info.physical_addr % crate::environment::PAGE_SIZE as u64 != 0 {
             return Err("Display backing physical address must be page-aligned");
         }
         if offset >= info.size {
@@ -755,7 +755,7 @@ impl MemoryMappingOps for DisplayCharDevice {
                 return Err("Requested length exceeds scanout buffer size");
             }
             let mapping_paddr = physical_addr
-                .checked_add(buffer_offset)
+                .checked_add(buffer_offset as u64)
                 .ok_or("Display scanout physical address overflow")?;
             return Ok(
                 crate::object::capability::MemoryMappingInfo::new(mapping_paddr, 0x3, true)
@@ -770,7 +770,7 @@ impl MemoryMappingOps for DisplayCharDevice {
 
         let mapping_paddr = info
             .physical_addr
-            .checked_add(offset)
+            .checked_add(offset as u64)
             .ok_or("Display backing physical address overflow")?;
         Ok(
             crate::object::capability::MemoryMappingInfo::new(mapping_paddr, 0x3, true)
@@ -778,7 +778,7 @@ impl MemoryMappingOps for DisplayCharDevice {
         )
     }
 
-    fn on_mapped(&self, vaddr: usize, _paddr: usize, length: usize, _offset: usize) {
+    fn on_mapped(&self, vaddr: usize, _paddr: u64, length: usize, _offset: usize) {
         self.mappings
             .write()
             .insert(vaddr, DisplayMapping { vaddr, length });
@@ -924,14 +924,14 @@ mod tests {
             Ok(FramebufferConfig::new(1, 1, PixelFormat::XRGB8888))
         }
 
-        fn get_framebuffer_address(&self) -> Result<usize, &'static str> {
+        fn get_framebuffer_address(&self) -> Result<u64, &'static str> {
             Ok(0x1000)
         }
 
         fn present_framebuffer_region(
             &self,
             _config: &FramebufferConfig,
-            _physical_addr: usize,
+            _physical_addr: u64,
             _region: crate::device::graphics::output::DisplayRegion,
         ) -> Result<(), &'static str> {
             Ok(())

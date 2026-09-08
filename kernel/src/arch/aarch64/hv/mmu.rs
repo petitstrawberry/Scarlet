@@ -136,7 +136,7 @@ fn allocate_stage2_table(vmid: u16) -> *mut PageTable {
 }
 
 #[inline(always)]
-fn table_descriptor(table_pa: usize) -> u64 {
+fn table_descriptor(table_pa: u64) -> u64 {
     S2_VALID | S2_TABLE | ((table_pa as u64) & S2_ADDR_MASK)
 }
 
@@ -164,8 +164,8 @@ fn stage2_index(gpa: usize, level: usize) -> usize {
 }
 
 #[inline(always)]
-fn descriptor_output_pa(entry: u64) -> usize {
-    (entry & S2_ADDR_MASK) as usize
+fn descriptor_output_pa(entry: u64) -> u64 {
+    entry & S2_ADDR_MASK
 }
 
 pub fn verify_hgatp_stage2(expected_pagetable: &Stage2PageTable, vmid: u16) {

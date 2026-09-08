@@ -59,11 +59,11 @@ impl KernelContext {
             + self.kernel_stack.len() * crate::environment::PAGE_SIZE
     }
 
-    pub fn get_kernel_stack_memory_area_paddr(&self) -> MemoryArea {
-        MemoryArea::new(
+    pub fn get_kernel_stack_memory_area_paddr(&self) -> crate::vm::vmem::PhysicalMemoryArea {
+        crate::vm::vmem::PhysicalMemoryArea::new(
             self.kernel_stack.as_paddr(),
             self.kernel_stack.as_paddr()
-                + (self.kernel_stack.len() * crate::environment::PAGE_SIZE)
+                + (self.kernel_stack.len() * crate::environment::PAGE_SIZE) as u64
                 - 1,
         )
     }

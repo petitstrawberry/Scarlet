@@ -173,7 +173,7 @@ impl MemoryMappingOps for MockBlockDevice {
         Err("Memory mapping not supported")
     }
 
-    fn on_mapped(&self, _vaddr: usize, _paddr: usize, _length: usize, _offset: usize) {
+    fn on_mapped(&self, _vaddr: usize, _paddr: u64, _length: usize, _offset: usize) {
         // Mock implementation - no operation
     }
 

@@ -17,7 +17,7 @@ pub struct SimpleFramebufferDevice {
     name: &'static str,
     display_name: &'static str,
     config: FramebufferConfig,
-    framebuffer_addr: usize,
+    framebuffer_addr: u64,
 }
 
 impl SimpleFramebufferDevice {
@@ -25,7 +25,7 @@ impl SimpleFramebufferDevice {
         name: &'static str,
         display_name: &'static str,
         config: FramebufferConfig,
-        framebuffer_addr: usize,
+        framebuffer_addr: u64,
     ) -> Self {
         Self {
             name,
@@ -73,7 +73,7 @@ impl MemoryMappingOps for SimpleFramebufferDevice {
         Err("Memory mapping not supported by simple framebuffer device")
     }
 
-    fn on_mapped(&self, _vaddr: usize, _paddr: usize, _length: usize, _offset: usize) {}
+    fn on_mapped(&self, _vaddr: usize, _paddr: u64, _length: usize, _offset: usize) {}
 
     fn on_unmapped(&self, _vaddr: usize, _length: usize) {}
 
@@ -107,14 +107,14 @@ impl GraphicsDevice for SimpleFramebufferDevice {
         Ok(self.config.clone())
     }
 
-    fn get_framebuffer_address(&self) -> Result<usize, &'static str> {
+    fn get_framebuffer_address(&self) -> Result<u64, &'static str> {
         Ok(self.framebuffer_addr)
     }
 
     fn present_framebuffer_region(
         &self,
         _config: &FramebufferConfig,
-        _physical_addr: usize,
+        _physical_addr: u64,
         _region: DisplayRegion,
     ) -> Result<(), &'static str> {
         Ok(())
@@ -206,13 +206,13 @@ fn parse_pixel_format(device: &PlatformDeviceInfo) -> Result<PixelFormat, &'stat
     }
 }
 
-fn framebuffer_resource(device: &PlatformDeviceInfo) -> Result<(usize, usize), &'static str> {
+fn framebuffer_resource(device: &PlatformDeviceInfo) -> Result<(u64, usize), &'static str> {
     let resource = device
         .get_resources()
         .iter()
         .find(|resource| matches!(resource.res_type, PlatformDeviceResourceType::MEM))
         .ok_or("No framebuffer memory resource found")?;
-    Ok((resource.start, resource.end - resource.start + 1))
+    Ok((resource.start, resource.size()?))
 }
 
 fn device_status_allows_probe(device: &PlatformDeviceInfo) -> bool {

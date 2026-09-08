@@ -187,7 +187,6 @@ fn map_cap(device: &PciDeviceInfo, cap: VirtioPciCap) -> Result<MappedCap, &'sta
     let paddr = bar
         .base
         .checked_add(u64::from(cap.offset))
-        .and_then(|addr| usize::try_from(addr).ok())
         .ok_or("VirtIO PCI capability address overflow")?;
     let vaddr = vm::ioremap(paddr, cap.length as usize)?;
 

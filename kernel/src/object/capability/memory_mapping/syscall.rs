@@ -40,7 +40,7 @@ pub(crate) fn reclaim_private_removed_mapping(
         let mut retained = Vec::new();
         for alloc in allocs.drain(..) {
             let alloc_start = alloc.as_paddr();
-            let alloc_end = alloc_start + alloc.len() * PAGE_SIZE - 1;
+            let alloc_end = alloc_start + (alloc.len() * PAGE_SIZE) as u64 - 1;
 
             if alloc_start >= pm_start && alloc_end <= pm_end {
                 drop(alloc);
@@ -72,15 +72,18 @@ const PROT_READ: usize = 0x1;
 const PROT_WRITE: usize = 0x2;
 const PROT_EXEC: usize = 0x4;
 
-fn physical_area_for_mapping(paddr: usize, length: usize) -> Option<MemoryArea> {
+fn physical_area_for_mapping(
+    paddr: u64,
+    length: usize,
+) -> Option<crate::vm::vmem::PhysicalMemoryArea> {
     if paddr == 0 {
         // A zero physical address is the sentinel used by owner-backed demand
         // mappings. No PTE exists until the owner resolves a page fault.
-        return Some(MemoryArea { start: 0, end: 0 });
+        return Some(crate::vm::vmem::PhysicalMemoryArea { start: 0, end: 0 });
     }
 
-    let end = paddr.checked_add(length)?.checked_sub(1)?;
-    Some(MemoryArea::new(paddr, end))
+    let end = paddr.checked_add(length as u64)?.checked_sub(1)?;
+    Some(crate::vm::vmem::PhysicalMemoryArea::new(paddr, end))
 }
 
 /// System call for memory mapping a KernelObject with MemoryMappingOps capability
@@ -193,7 +196,7 @@ pub fn sys_memory_map(trapframe: &mut Trapframe) -> usize {
             None => return usize::MAX,
         };
         let vm_map = VirtualMemoryMap {
-            pmarea: MemoryArea { start: 0, end: 0 },
+            pmarea: crate::vm::vmem::PhysicalMemoryArea { start: 0, end: 0 },
             vmarea: MemoryArea::new(final_vaddr, final_vaddr + aligned_length - 1),
             vm_start: final_vaddr,
             permissions: prot_perm,
@@ -376,7 +379,7 @@ fn handle_anonymous_mapping(
 
     let vmarea = MemoryArea::new(final_vaddr, final_vaddr + aligned_length - 1);
     let vm_map = VirtualMemoryMap {
-        pmarea: MemoryArea { start: 0, end: 0 },
+        pmarea: crate::vm::vmem::PhysicalMemoryArea { start: 0, end: 0 },
         vmarea,
         vm_start: final_vaddr,
         permissions,
@@ -541,7 +544,7 @@ mod tests {
     fn owner_backed_mapping_uses_unresolved_physical_sentinel() {
         assert_eq!(
             physical_area_for_mapping(0, PAGE_SIZE * 4),
-            Some(MemoryArea { start: 0, end: 0 })
+            Some(crate::vm::vmem::PhysicalMemoryArea { start: 0, end: 0 })
         );
     }
 
@@ -549,13 +552,15 @@ mod tests {
     fn physical_mapping_preserves_complete_range() {
         assert_eq!(
             physical_area_for_mapping(0x20_0000, PAGE_SIZE * 2),
-            Some(MemoryArea::new(0x20_0000, 0x20_1fff))
+            Some(crate::vm::vmem::PhysicalMemoryArea::new(
+                0x20_0000, 0x20_1fff
+            ))
         );
     }
 
     #[test_case]
     fn physical_mapping_rejects_overflow() {
-        assert_eq!(physical_area_for_mapping(usize::MAX, PAGE_SIZE), None);
+        assert_eq!(physical_area_for_mapping(u64::MAX, PAGE_SIZE), None);
     }
 }
 // - This change requires careful updates to trap handling and the Task-managed page

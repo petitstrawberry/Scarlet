@@ -119,7 +119,7 @@ pub fn limine_entry() -> ! {
     let kernel_end = unsafe { &__KERNEL_SPACE_END as *const usize as usize };
     init_limine_addressing(
         hhdm.offset as usize,
-        executable.physical_base as usize,
+        executable.physical_base,
         executable.virtual_base as usize,
         kernel_end - kernel_start,
     );

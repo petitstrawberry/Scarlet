@@ -40,7 +40,7 @@ fn probe_sdhci_pci(device: &PciDeviceInfo) -> Result<(), &'static str> {
     let bar = device
         .mmio_bar(0)
         .ok_or("SDHCI PCI function has no assigned BAR 0")?;
-    let physical_base = usize::try_from(bar.base).map_err(|_| "SDHCI BAR address is too large")?;
+    let physical_base = bar.base;
     let aperture_size = usize::try_from(bar.size.max(PAGE_SIZE as u64))
         .map_err(|_| "SDHCI BAR aperture is too large")?;
 

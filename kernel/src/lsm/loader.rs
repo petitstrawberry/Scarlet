@@ -396,9 +396,9 @@ pub fn load_module(data: &[u8]) -> Result<u64, LsmError> {
         let permissions = loading_permissions(section.sh_flags);
 
         let memory_map = VirtualMemoryMap {
-            pmarea: MemoryArea {
+            pmarea: crate::vm::vmem::PhysicalMemoryArea {
                 start: base_paddr,
-                end: base_paddr + mapped_size - 1,
+                end: base_paddr + mapped_size as u64 - 1,
             },
             vmarea: MemoryArea {
                 start: base_vaddr,

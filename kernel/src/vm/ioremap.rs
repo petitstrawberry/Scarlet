@@ -37,7 +37,9 @@ use alloc::collections::BTreeMap;
 use crate::environment::{IOREMAP_END, IOREMAP_START, PAGE_SIZE};
 use crate::vm::addr::validate_direct_map_alias;
 use crate::vm::get_kernel_vm_manager;
-use crate::vm::vmem::{MemoryArea, MemoryAttribute, VirtualMemoryMap, VirtualMemoryPermission};
+use crate::vm::vmem::{
+    MemoryArea, MemoryAttribute, PhysicalMemoryArea, VirtualMemoryMap, VirtualMemoryPermission,
+};
 
 // ---------------------------------------------------------------------------
 // Internal allocator
@@ -137,7 +139,7 @@ pub fn ioremap_init() {
 /// * `Ok(vaddr)` – Virtual address corresponding to `paddr`; the caller uses
 ///   this address for MMIO register accesses.
 /// * `Err(&'static str)` – Descriptive error if mapping failed.
-pub fn ioremap(paddr: usize, size: usize) -> Result<usize, &'static str> {
+pub fn ioremap(paddr: u64, size: usize) -> Result<usize, &'static str> {
     map_physical_memory(paddr, size, MemoryAttribute::Device)
 }
 
@@ -156,12 +158,12 @@ pub fn ioremap(paddr: usize, size: usize) -> Result<usize, &'static str> {
 ///
 /// A kernel virtual address with normal cacheable memory attributes, or an
 /// error when the range conflicts with the direct map or cannot be mapped.
-pub fn memremap_normal(paddr: usize, size: usize) -> Result<usize, &'static str> {
+pub fn memremap_normal(paddr: u64, size: usize) -> Result<usize, &'static str> {
     map_physical_memory(paddr, size, MemoryAttribute::Normal)
 }
 
 fn map_physical_memory(
-    paddr: usize,
+    paddr: u64,
     size: usize,
     memory_attribute: MemoryAttribute,
 ) -> Result<usize, &'static str> {
@@ -174,18 +176,18 @@ fn map_physical_memory(
         .ok_or("physical map: subsystem not initialized")?;
 
     // Align physical address down to a page boundary.
-    let offset = paddr & (PAGE_SIZE - 1);
-    let aligned_paddr = paddr - offset;
+    let offset = (paddr & (PAGE_SIZE - 1) as u64) as usize;
+    let aligned_paddr = paddr - offset as u64;
     let aligned_size = checked_align_up(
         size.checked_add(offset)
             .ok_or("ioremap: physical range size overflows")?,
         PAGE_SIZE,
     )?;
     let aligned_end = aligned_paddr
-        .checked_add(aligned_size)
+        .checked_add(aligned_size as u64)
         .and_then(|end| end.checked_sub(1))
         .ok_or("ioremap: physical range overflows")?;
-    let physical_area = MemoryArea::new(aligned_paddr, aligned_end);
+    let physical_area = PhysicalMemoryArea::new(aligned_paddr, aligned_end);
 
     // Reject incompatible aliases before consuming IOREMAP virtual address space.
     validate_direct_map_alias(physical_area, memory_attribute)?;

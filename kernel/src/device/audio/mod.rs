@@ -345,7 +345,7 @@ impl AudioVolumeCurve {
 #[derive(Clone, Copy, Debug)]
 pub struct AudioPcmBuffer {
     /// Physical address of the first byte of the PCM ring.
-    pub paddr: usize,
+    pub paddr: u64,
     /// Kernel virtual address of the first byte of the PCM ring.
     pub vaddr: usize,
     /// Usable PCM ring length in bytes.
@@ -641,7 +641,7 @@ impl AudioPcmRing {
         }
     }
 
-    fn paddr(&self) -> usize {
+    fn paddr(&self) -> u64 {
         self.pages.as_paddr()
     }
 
@@ -1253,13 +1253,13 @@ impl MemoryMappingOps for AudioCharDevice {
             return Err("PCM mmap length exceeds ring size");
         }
         Ok(crate::object::capability::MemoryMappingInfo::new(
-            ring.paddr() + offset,
+            ring.paddr() + offset as u64,
             0x3,
             true,
         ))
     }
 
-    fn on_mapped(&self, _vaddr: usize, _paddr: usize, _length: usize, _offset: usize) {}
+    fn on_mapped(&self, _vaddr: usize, _paddr: u64, _length: usize, _offset: usize) {}
 
     fn on_unmapped(&self, _vaddr: usize, _length: usize) {}
 

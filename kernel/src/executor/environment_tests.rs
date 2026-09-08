@@ -55,7 +55,7 @@ impl AbiModule for TestImageAbi {
         let paddr = page.as_paddr();
         image.page_allocations.write().push(page);
         image.vm_manager.add_memory_map(VirtualMemoryMap::new(
-            MemoryArea::new(paddr, paddr + 4095),
+            crate::vm::vmem::PhysicalMemoryArea::new(paddr, paddr + 4095),
             MemoryArea::new(0x40_0000, 0x40_0fff),
             0,
             false,

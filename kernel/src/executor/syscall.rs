@@ -552,7 +552,10 @@ mod tests {
         let physical = crate::vm::virt_to_phys(backing.0.as_mut_ptr() as usize);
         task.vm_manager
             .add_memory_map(VirtualMemoryMap::new(
-                MemoryArea::new(physical, physical + 2 * PAGE_SIZE - 1),
+                crate::vm::vmem::PhysicalMemoryArea::new(
+                    physical,
+                    physical + 2 * PAGE_SIZE as u64 - 1,
+                ),
                 MemoryArea::new(base, base + 2 * PAGE_SIZE - 1),
                 VirtualMemoryPermission::Read as usize | VirtualMemoryPermission::Write as usize,
                 false,
