@@ -132,6 +132,40 @@ use crate::task::syscall::{
 #[macro_use]
 mod macros;
 
+/// Decode a fixed-width Native scalar from consecutive argument slots.
+pub(crate) fn u64_arg(tf: &Trapframe, first: usize) -> u64 {
+    scarlet_abi::native_scalar::u64_from_words(core::array::from_fn(|i| tf.get_arg(first + i)))
+}
+
+/// Publish the high result word on RV32 and return the low/native word for
+/// the existing syscall dispatcher. Call only after reading input arguments.
+pub(crate) fn u64_result(_tf: &mut Trapframe, value: u64) -> usize {
+    let words = scarlet_abi::native_scalar::u64_to_words(value);
+    #[cfg(target_pointer_width = "32")]
+    _tf.set_arg(1, words[1]);
+    words[0]
+}
+
+#[cfg(test)]
+#[test_case]
+fn native_wide_scalars_preserve_signed_offsets_and_full_results() {
+    use scarlet_abi::native_scalar::{U64_WORDS, u64_to_words};
+    for value in [0, 0x1234_5678_9abc_def0, (-17i64) as u64, u64::MAX] {
+        let mut tf = Trapframe::new();
+        tf.set_arg(0, 42);
+        for (i, word) in u64_to_words(value).into_iter().enumerate() {
+            tf.set_arg(1 + i, word);
+        }
+        tf.set_arg(1 + U64_WORDS, 2);
+        assert_eq!(u64_arg(&tf, 1), value);
+        assert_eq!(tf.get_arg(0), 42);
+        assert_eq!(tf.get_arg(1 + U64_WORDS), 2);
+        let result = u64_result(&mut tf, value);
+        tf.set_return_value(result);
+        assert_eq!(u64_arg(&tf, 0), value);
+    }
+}
+
 /// Debug/Profiler system call to dump profiler statistics
 #[cfg(feature = "profiler")]
 fn sys_profiler_dump(tf: &mut Trapframe) -> usize {

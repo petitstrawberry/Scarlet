@@ -63,13 +63,13 @@ impl TimerController for SbiTimer {
     /// Set the next timer compare value for a CPU.
     fn set_timer(&self, cpu_id: CpuId, time: u64) -> InterruptResult<()> {
         self.validate_cpu_id(cpu_id)?;
-        crate::arch::riscv64::instruction::sbi::sbi_set_timer(time);
+        crate::arch::riscv::instruction::sbi::sbi_set_timer(time);
         Ok(())
     }
 
     /// Get the current timer counter value.
     fn get_time(&self) -> u64 {
-        read_rdtime()
+        crate::arch::riscv::timer::read_time()
     }
 
     /// Get the timer clock frequency.
@@ -80,20 +80,6 @@ impl TimerController for SbiTimer {
 
 unsafe impl Send for SbiTimer {}
 unsafe impl Sync for SbiTimer {}
-
-fn read_rdtime() -> u64 {
-    let time: u64;
-    // SAFETY: rdtime reads the architectural RISC-V time counter and has no
-    // memory side effects.
-    unsafe {
-        asm!(
-            "rdtime {0}",
-            out(reg) time,
-            options(nostack, nomem)
-        );
-    }
-    time
-}
 
 fn read_sip() -> usize {
     let sip: usize;
@@ -110,13 +96,13 @@ fn read_sip() -> usize {
 }
 
 fn register_driver() {
-    if crate::arch::riscv64::fdt::all_cpus_have_isa_extension_from_fdt("sstc").unwrap_or(false) {
+    if crate::arch::riscv::fdt::all_cpus_have_isa_extension_from_fdt("sstc").unwrap_or(false) {
         crate::println!("[interrupt] RISC-V timer: skipping SBI TIME, Sstc is available");
         return;
     }
 
     let timebase_frequency_hz =
-        crate::arch::riscv64::fdt::timebase_frequency_hz_from_fdt().unwrap_or(10_000_000);
+        crate::arch::riscv::fdt::timebase_frequency_hz_from_fdt().unwrap_or(10_000_000);
 
     let controller = Box::new(SbiTimer {
         max_cpus: crate::environment::MAX_NUM_CPUS as usize,

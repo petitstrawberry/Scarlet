@@ -13,7 +13,8 @@ use crate::boot::limine::{
 use crate::device::fdt::{FdtManager, init_fdt, relocate_fdt};
 use crate::environment::{PAGE_SIZE, STACK_SIZE};
 use crate::mem::{KERNEL_STACK, init_bss};
-use crate::vm::addr::{init_bootloader_direct_map_bound, init_limine_addressing, phys_to_virt};
+use crate::vm::addr::{PhysAddr, VirtAddr, init_boot_addressing, phys_to_virt};
+use crate::vm::direct_map::DirectMapWindow;
 use crate::vm::vmem::{MemoryArea, MemoryAttribute};
 use crate::{BootInfo, DeviceSource, println, start_ap, start_kernel, wait_for_ap_release};
 
@@ -600,10 +601,18 @@ extern "C" fn limine_entry_after_el_drop(_arg0: usize, inherited_sctlr: u64) -> 
 
     let kernel_start = unsafe { &__KERNEL_SPACE_START as *const usize as usize };
     let kernel_end = unsafe { &__KERNEL_SPACE_END as *const usize as usize };
-    init_limine_addressing(
-        hhdm.offset as usize,
-        executable.physical_base as usize,
-        executable.virtual_base as usize,
+    let bootloader_hhdm_bound = bootloader_hhdm_physical_bound(memmap.entries());
+    let boot_direct_map = DirectMapWindow::from_offset(
+        usize::try_from(hhdm.offset).expect("Limine HHDM offset exceeds pointer width"),
+        bootloader_hhdm_bound,
+    )
+    .expect("invalid Limine direct-map window");
+    init_boot_addressing(
+        boot_direct_map,
+        PhysAddr::new(executable.physical_base),
+        VirtAddr::new(
+            usize::try_from(executable.virtual_base).expect("kernel VA exceeds pointer width"),
+        ),
         kernel_end - kernel_start,
     );
     let cpu_id = bsp_logical_cpu_id();
@@ -632,9 +641,6 @@ extern "C" fn limine_entry_after_el_drop(_arg0: usize, inherited_sctlr: u64) -> 
     init_fdt(dtb_ptr);
 
     let usable_region = select_usable_region(memmap.entries());
-    let bootloader_hhdm_bound = bootloader_hhdm_physical_bound(memmap.entries());
-    init_bootloader_direct_map_bound(bootloader_hhdm_bound.start, bootloader_hhdm_bound.end);
-    let hhdm_offset = hhdm.offset as usize;
     let framebuffer_paddr = framebuffer_area(FRAMEBUFFER_REQUEST.response());
     let early_qcom_geni_paddr = FdtManager::get_manager()
         .get_fdt()
@@ -646,7 +652,10 @@ extern "C" fn limine_entry_after_el_drop(_arg0: usize, inherited_sctlr: u64) -> 
             .checked_add(PAGE_SIZE - 1)
             .expect("Qualcomm GENI early UART range overflows");
         direct_map_regions
-            .insert(MemoryArea::new(paddr, end), MemoryAttribute::Device)
+            .insert(
+                crate::vm::vmem::PhysicalMemoryArea::new(paddr as u64, end as u64),
+                MemoryAttribute::Device,
+            )
             .unwrap_or_else(|error| panic!("failed to map Qualcomm GENI early UART: {}", error));
         crate::arch::aarch64::earlycon::prepare_limine_qcom_geni(paddr);
     }
@@ -681,7 +690,7 @@ extern "C" fn limine_entry_after_el_drop(_arg0: usize, inherited_sctlr: u64) -> 
         usable_memory_paddr,
         direct_map_regions,
         initramfs_paddr,
-        hhdm_offset,
+        boot_direct_map,
         cmdline,
         DeviceSource::Fdt(relocated_fdt_paddr),
         framebuffer_paddr,

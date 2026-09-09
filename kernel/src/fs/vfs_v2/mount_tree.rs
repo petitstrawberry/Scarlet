@@ -7,12 +7,12 @@
 //! - Efficient mount point lookup and traversal
 
 use crate::sync::IrqRwSpinLock;
+use crate::sync::sequence::IdSequence;
 use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU64, Ordering};
 
 use super::core::{FileSystemOperations, VfsEntry};
 use super::manager::{PathResolutionOptions, VfsManager};
@@ -32,9 +32,10 @@ fn vfs_error(kind: FileSystemErrorKind, message: &str) -> FileSystemError {
 pub struct MountId(u64);
 
 impl MountId {
+    /// Allocate a non-reused identity; panics if the 64-bit space is exhausted.
     pub(crate) fn new() -> Self {
-        static COUNTER: AtomicU64 = AtomicU64::new(1);
-        Self(COUNTER.fetch_add(1, Ordering::Relaxed))
+        static IDS: IdSequence = IdSequence::new();
+        Self(IDS.reserve().expect("MountId identities exhausted").get())
     }
 }
 
@@ -43,9 +44,14 @@ impl MountId {
 pub struct VfsManagerId(u64);
 
 impl VfsManagerId {
+    /// Allocate a non-reused identity; panics if the 64-bit space is exhausted.
     pub fn new() -> Self {
-        static COUNTER: AtomicU64 = AtomicU64::new(1);
-        Self(COUNTER.fetch_add(1, Ordering::Relaxed))
+        static IDS: IdSequence = IdSequence::new();
+        Self(
+            IDS.reserve()
+                .expect("VfsManagerId identities exhausted")
+                .get(),
+        )
     }
 }
 

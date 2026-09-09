@@ -97,10 +97,16 @@ pub fn early_putc(c: u8) {
 ///
 /// * `paddr` - Physical base of the PL011 register window.
 #[cfg(feature = "linux-boot")]
-pub(crate) fn register_linux_boot_pl011(paddr: usize) {
+pub(crate) fn register_linux_boot_pl011(
+    paddr: usize,
+    direct_map: crate::vm::direct_map::DirectMapWindow,
+) {
     publish_uart(
         EarlyUartKind::Pl011,
-        crate::environment::SCARLET_HHDM_BASE + paddr,
+        direct_map
+            .phys_to_virt(crate::mem::address::PhysAddr::new(paddr as u64))
+            .expect("early UART is outside the direct map")
+            .as_usize(),
     );
 }
 
@@ -122,7 +128,9 @@ pub(crate) fn prepare_limine_qcom_geni(paddr: usize) {
 /// # Returns
 ///
 /// `true` when a pending Qualcomm GENI UART was activated.
-pub(crate) fn activate_after_boot_page_table_switch() -> bool {
+pub(crate) fn activate_after_boot_page_table_switch(
+    direct_map: crate::vm::direct_map::DirectMapWindow,
+) -> bool {
     #[cfg(feature = "limine")]
     {
         let paddr = PENDING_QCOM_GENI_PADDR.load(Ordering::Acquire);
@@ -130,7 +138,10 @@ pub(crate) fn activate_after_boot_page_table_switch() -> bool {
             crate::earlyfb::deactivate();
             publish_uart(
                 EarlyUartKind::QcomGeni,
-                crate::environment::SCARLET_HHDM_BASE + paddr,
+                direct_map
+                    .phys_to_virt(crate::mem::address::PhysAddr::new(paddr as u64))
+                    .expect("early UART is outside the direct map")
+                    .as_usize(),
             );
             for &byte in b"\x1b[2J\x1b[H" {
                 emergency_uart_putc(byte);

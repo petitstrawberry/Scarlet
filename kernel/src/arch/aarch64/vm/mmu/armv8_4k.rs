@@ -55,9 +55,9 @@ const MAX_BLOCK_LEVEL: usize = 2;
 /// `root_paddr` must be a page-aligned physical address of a complete,
 /// cache-clean AArch64 4 KiB translation table. Its mappings must remain valid
 /// until Scarlet installs the allocator-backed boot page table.
-pub(crate) unsafe fn activate_early_boot_page_table(root_paddr: usize) {
+pub(crate) unsafe fn activate_early_boot_page_table(root_paddr: u64) {
     assert_eq!(
-        root_paddr & (PAGE_SIZE - 1),
+        root_paddr & (PAGE_SIZE as u64 - 1),
         0,
         "early boot page-table root must be page aligned"
     );
@@ -138,10 +138,13 @@ fn page_size_for_level(level: usize) -> usize {
 ///
 /// A block level is selected only when the remaining size is large enough and
 /// both virtual and physical addresses are aligned to that level's size.
-fn best_page_level(vaddr: usize, paddr: usize, size: usize) -> usize {
+fn best_page_level(vaddr: usize, paddr: u64, size: usize) -> usize {
     for level in (1..=MAX_BLOCK_LEVEL).rev() {
         let page_size = page_size_for_level(level);
-        if size >= page_size && vaddr.is_multiple_of(page_size) && paddr.is_multiple_of(page_size) {
+        if size >= page_size
+            && vaddr.is_multiple_of(page_size)
+            && paddr.is_multiple_of(page_size as u64)
+        {
             return level;
         }
     }
@@ -160,8 +163,8 @@ impl PageTableEntry {
         PageTableEntry { entry: 0 }
     }
 
-    pub fn get_ppn(&self) -> usize {
-        ((self.entry >> 12) & 0xfffffffff) as usize
+    pub fn get_ppn(&self) -> u64 {
+        (self.entry >> 12) & 0xfffffffff
     }
 
     pub fn is_valid(&self) -> bool {
@@ -189,7 +192,7 @@ impl PageTableEntry {
         self.entry &= !1;
     }
 
-    pub fn set_ppn(&mut self, ppn: usize) -> &mut Self {
+    pub fn set_ppn(&mut self, ppn: u64) -> &mut Self {
         let ppn_mask = 0xfffffffff;
         self.entry &= !(ppn_mask << 12);
         self.entry |= ((ppn as u64) & ppn_mask) << 12;
@@ -280,7 +283,7 @@ impl PageTableEntry {
     /// for all lower page-table levels.
     pub fn is_aligned_for_level(&self, level: usize) -> bool {
         let mask = (1usize << (9 * level)) - 1;
-        self.get_ppn() & mask == 0
+        self.get_ppn() & mask as u64 == 0
     }
 
     pub fn set_flags(&mut self, flags: u64) -> &mut Self {
@@ -574,7 +577,7 @@ impl PageTable {
     ) -> Result<(), &'static str> {
         let is_user_mapping = VirtualMemoryPermission::User.contained_in(mmap.permissions);
         if mmap.vmarea.start % PAGE_SIZE != 0
-            || mmap.pmarea.start % PAGE_SIZE != 0
+            || mmap.pmarea.start % PAGE_SIZE as u64 != 0
             || mmap.vmarea.size() % PAGE_SIZE != 0
             || mmap.pmarea.size() % PAGE_SIZE != 0
         {
@@ -612,7 +615,7 @@ impl PageTable {
                 Some(addr) => vaddr = addr,
                 None => break,
             }
-            match paddr.checked_add(page_size) {
+            match paddr.checked_add(page_size as u64) {
                 Some(addr) => paddr = addr,
                 None => break,
             }
@@ -646,7 +649,7 @@ impl PageTable {
         mmap: VirtualMemoryMap,
     ) -> Result<(), &'static str> {
         if mmap.vmarea.start % PAGE_SIZE != 0
-            || mmap.pmarea.start % PAGE_SIZE != 0
+            || mmap.pmarea.start % PAGE_SIZE as u64 != 0
             || mmap.vmarea.size() % PAGE_SIZE != 0
             || mmap.pmarea.size() % PAGE_SIZE != 0
             || mmap.vmarea.size() != mmap.pmarea.size()
@@ -691,7 +694,7 @@ impl PageTable {
                 .checked_add(1)
                 .ok_or("retag virtual range overflows")?;
             paddr = paddr
-                .checked_add(leaf_size)
+                .checked_add(leaf_size as u64)
                 .ok_or("retag physical range overflows")?;
         }
 
@@ -727,7 +730,7 @@ impl PageTable {
         &mut self,
         asid: u16,
         vaddr: usize,
-        paddr: usize,
+        paddr: u64,
         permissions: usize,
         memory_attribute: MemoryAttribute,
         _accessed: bool,
@@ -775,14 +778,14 @@ impl PageTable {
         &mut self,
         asid: u16,
         vaddr: usize,
-        paddr: usize,
+        paddr: u64,
         attrs: MapAttrs,
         level: usize,
     ) -> Result<PageTableMutation, &'static str> {
         let page_size = page_size_for_level(level);
         if level > MAX_BLOCK_LEVEL
             || !vaddr.is_multiple_of(page_size)
-            || !paddr.is_multiple_of(page_size)
+            || !paddr.is_multiple_of(page_size as u64)
         {
             return Err("Address is not aligned to page size");
         }
@@ -825,7 +828,7 @@ impl PageTable {
     /// attributes are encoded from the mapping request.
     pub(crate) fn make_leaf_entry(
         vaddr: usize,
-        paddr: usize,
+        paddr: u64,
         permissions: usize,
         level: usize,
         memory_attribute: MemoryAttribute,
@@ -1061,10 +1064,10 @@ impl PageTable {
     /// # Returns
     ///
     /// The physical address if the mapping exists, or `None` if unmapped.
-    pub(in crate::arch::aarch64::vm) fn translate(&mut self, vaddr: usize) -> Option<usize> {
+    pub(in crate::arch::aarch64::vm) fn translate(&mut self, vaddr: usize) -> Option<u64> {
         let (pte, level) = self.walk_leaf(vaddr)?;
         let page_offset = vaddr & (page_size_for_level(level) - 1);
-        Some((pte.get_ppn() << 12) | page_offset)
+        Some((pte.get_ppn() << 12) | page_offset as u64)
     }
 
     /// Unmap a single page (like RISC-V's unmap())
@@ -1168,7 +1171,7 @@ impl PageTable {
                 child_pte.entry = leaf_entry;
                 child_pte.entry &= !0x3;
                 child_pte.entry |= if child_level == 0 { 0x3 } else { 0x1 };
-                child_pte.set_ppn(leaf_ppn + idx * child_ppn_step);
+                child_pte.set_ppn(leaf_ppn + (idx * child_ppn_step) as u64);
             }
             crate::arch::aarch64::clean_dcache_to_poc_range(
                 child_table as usize,
@@ -1367,7 +1370,7 @@ mod tests {
 
         let vaddr = 0x4100_0000;
         let mmap = VirtualMemoryMap::new(
-            MemoryArea::new(0, 0),
+            crate::vm::vmem::PhysicalMemoryArea::new(0, 0),
             MemoryArea::new(vaddr, vaddr + PAGE_SIZE - 1),
             VirtualMemoryPermission::Read as usize | VirtualMemoryPermission::User as usize,
             true,
@@ -1399,7 +1402,7 @@ mod tests {
         let vaddr = 0x4100_0000;
         let paddr = 0x8100_0000;
         let mmap = VirtualMemoryMap::new(
-            MemoryArea::new(paddr, paddr + PAGE_SIZE - 1),
+            crate::vm::vmem::PhysicalMemoryArea::new(paddr, paddr + PAGE_SIZE as u64 - 1),
             MemoryArea::new(vaddr, vaddr + PAGE_SIZE - 1),
             VirtualMemoryPermission::Read as usize
                 | VirtualMemoryPermission::Write as usize
@@ -1605,7 +1608,7 @@ mod tests {
         let vaddr = 0x4000_0000;
         let paddr = 0x8000_0000;
         let mmap = VirtualMemoryMap::new(
-            MemoryArea::new(paddr, paddr + page_size - 1),
+            crate::vm::vmem::PhysicalMemoryArea::new(paddr, paddr + page_size as u64 - 1),
             MemoryArea::new(vaddr, vaddr + page_size - 1),
             VirtualMemoryPermission::Read as usize | VirtualMemoryPermission::Write as usize,
             false,
@@ -1636,7 +1639,7 @@ mod tests {
         let vaddr = 0x4020_0000;
         let paddr = 0x8020_0000;
         let mmap = VirtualMemoryMap::new(
-            MemoryArea::new(paddr, paddr + map_size - 1),
+            crate::vm::vmem::PhysicalMemoryArea::new(paddr, paddr + map_size as u64 - 1),
             MemoryArea::new(vaddr, vaddr + map_size - 1),
             VirtualMemoryPermission::Read as usize | VirtualMemoryPermission::Write as usize,
             false,
@@ -1661,7 +1664,7 @@ mod tests {
         assert_eq!(root.translate(vaddr + 0x1234), Some(paddr + 0x1234));
         assert_eq!(
             root.translate(tail_vaddr + 0x123),
-            Some(paddr + huge_page_size + 0x123)
+            Some(paddr + huge_page_size as u64 + 0x123)
         );
 
         drop(root);
@@ -1677,7 +1680,7 @@ mod tests {
         let vaddr = 0x4040_0000;
         let paddr = 0x8040_0000;
         let mmap = VirtualMemoryMap::new(
-            MemoryArea::new(paddr, paddr + huge_page_size - 1),
+            crate::vm::vmem::PhysicalMemoryArea::new(paddr, paddr + huge_page_size as u64 - 1),
             MemoryArea::new(vaddr, vaddr + huge_page_size - 1),
             VirtualMemoryPermission::Read as usize | VirtualMemoryPermission::Write as usize,
             false,
@@ -1698,7 +1701,7 @@ mod tests {
         assert_eq!(root.translate(vaddr + PAGE_SIZE), None);
         assert_eq!(
             root.translate(vaddr + 2 * PAGE_SIZE),
-            Some(paddr + 2 * PAGE_SIZE)
+            Some(paddr + 2 * PAGE_SIZE as u64)
         );
         assert!(
             root.walk_to_level(vaddr, 0, false)
@@ -1719,7 +1722,7 @@ mod tests {
         let vaddr = 0x8000_0000;
         let paddr = 0x1_0000_0000;
         let mmap = VirtualMemoryMap::new(
-            MemoryArea::new(paddr, paddr + huge_page_size - 1),
+            crate::vm::vmem::PhysicalMemoryArea::new(paddr, paddr + huge_page_size as u64 - 1),
             MemoryArea::new(vaddr, vaddr + huge_page_size - 1),
             VirtualMemoryPermission::Read as usize | VirtualMemoryPermission::Write as usize,
             false,
@@ -1741,7 +1744,7 @@ mod tests {
         assert_eq!(root.translate(removed_vaddr), None);
         assert_eq!(
             root.translate(removed_vaddr + PAGE_SIZE),
-            Some(paddr + page_size_for_level(1) + PAGE_SIZE)
+            Some(paddr + page_size_for_level(1) as u64 + PAGE_SIZE as u64)
         );
         assert!(
             root.walk_to_level(vaddr, 1, false)

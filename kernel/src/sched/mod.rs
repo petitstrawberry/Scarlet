@@ -4,4 +4,5 @@
 //! managing tasks and their execution.
 //!
 
+mod accounting;
 pub mod scheduler;

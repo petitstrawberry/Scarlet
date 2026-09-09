@@ -3,9 +3,10 @@
 use core::ptr::{read_volatile, write_volatile};
 
 use crate::arch::aarch64::clean_dcache_to_poc_range;
-use crate::environment::{PAGE_SIZE, SCARLET_HHDM_BASE};
-use crate::vm::direct_map::DirectMapRegions;
-use crate::vm::vmem::{MemoryArea, MemoryAttribute};
+use crate::environment::PAGE_SIZE;
+use crate::mem::address::PhysAddr;
+use crate::vm::direct_map::{DirectMapRegions, DirectMapWindow};
+use crate::vm::vmem::{MemoryAttribute, PhysicalMemoryArea};
 
 const ENTRY_COUNT: usize = 512;
 const EARLY_TABLE_COUNT: usize = 512;
@@ -49,10 +50,11 @@ static mut EARLY_PAGE_TABLES: EarlyPageTablePool = EarlyPageTablePool {
 /// `Ok(())` after the MMU is active, or an error when the fixed page-table
 /// pool cannot represent the supplied map.
 pub fn install(
+    direct_map: DirectMapWindow,
     regions: &DirectMapRegions,
-    kernel_area: MemoryArea,
-    dtb_area: MemoryArea,
-    initramfs_area: Option<MemoryArea>,
+    kernel_area: PhysicalMemoryArea,
+    dtb_area: PhysicalMemoryArea,
+    initramfs_area: Option<PhysicalMemoryArea>,
 ) -> Result<(), &'static str> {
     // SAFETY: Linux Image entry is single-threaded, .bss has been cleared, and
     // no CPU can observe these tables until activate_early_boot_page_table().
@@ -73,9 +75,10 @@ pub fn install(
             let area = region.area();
             let size = area.size();
 
-            let hhdm_start = SCARLET_HHDM_BASE
-                .checked_add(area.start)
-                .ok_or("early HHDM virtual address overflows")?;
+            let hhdm_start = direct_map
+                .phys_to_virt(PhysAddr::new(area.start))
+                .ok_or("early RAM is outside direct map")?
+                .as_usize();
             map_range(
                 root,
                 hhdm_start,
@@ -87,7 +90,7 @@ pub fn install(
         }
 
         clean_allocated_tables();
-        crate::arch::aarch64::vm::mmu::activate_early_boot_page_table(root);
+        crate::arch::aarch64::vm::mmu::activate_early_boot_page_table(root as u64);
     }
 
     Ok(())
@@ -95,15 +98,15 @@ pub fn install(
 
 unsafe fn map_identity_area(
     root: usize,
-    area: MemoryArea,
+    area: PhysicalMemoryArea,
     executable: bool,
 ) -> Result<(), &'static str> {
-    let start = area.start & !(PAGE_SIZE - 1);
+    let start = area.start & !(PAGE_SIZE as u64 - 1);
     let end_exclusive = area
         .end
         .checked_add(1)
-        .and_then(|value| value.checked_add(PAGE_SIZE - 1))
-        .map(|value| value & !(PAGE_SIZE - 1))
+        .and_then(|value| value.checked_add(PAGE_SIZE as u64 - 1))
+        .map(|value| value & !(PAGE_SIZE as u64 - 1))
         .ok_or("early identity range overflows")?;
     let size = end_exclusive
         .checked_sub(start)
@@ -113,9 +116,9 @@ unsafe fn map_identity_area(
     unsafe {
         map_range(
             root,
+            usize::try_from(start).map_err(|_| "identity address exceeds pointer width")?,
             start,
-            start,
-            size,
+            usize::try_from(size).map_err(|_| "identity range exceeds pointer width")?,
             MemoryAttribute::Normal,
             executable,
         )
@@ -164,13 +167,13 @@ unsafe fn clean_allocated_tables() {
 unsafe fn map_range(
     root: usize,
     mut vaddr: usize,
-    mut paddr: usize,
+    mut paddr: u64,
     mut size: usize,
     memory_attribute: MemoryAttribute,
     executable: bool,
 ) -> Result<(), &'static str> {
     if vaddr & (PAGE_SIZE - 1) != 0
-        || paddr & (PAGE_SIZE - 1) != 0
+        || paddr & (PAGE_SIZE as u64 - 1) != 0
         || size == 0
         || size & (PAGE_SIZE - 1) != 0
     {
@@ -189,7 +192,7 @@ unsafe fn map_range(
             .checked_add(chunk_size)
             .ok_or("early mapping virtual address overflows")?;
         paddr = paddr
-            .checked_add(chunk_size)
+            .checked_add(chunk_size as u64)
             .ok_or("early mapping physical address overflows")?;
         size -= chunk_size;
     }
@@ -197,12 +200,12 @@ unsafe fn map_range(
     Ok(())
 }
 
-fn best_level(vaddr: usize, paddr: usize, size: usize) -> usize {
+fn best_level(vaddr: usize, paddr: u64, size: usize) -> usize {
     for level in [2usize, 1] {
         let block_size = level_size(level);
         if size >= block_size
             && vaddr.is_multiple_of(block_size)
-            && paddr.is_multiple_of(block_size)
+            && paddr.is_multiple_of(block_size as u64)
         {
             return level;
         }
@@ -221,7 +224,7 @@ const fn level_size(level: usize) -> usize {
 unsafe fn map_leaf(
     root: usize,
     vaddr: usize,
-    paddr: usize,
+    paddr: u64,
     target_level: usize,
     memory_attribute: MemoryAttribute,
     executable: bool,
@@ -268,7 +271,7 @@ unsafe fn map_leaf(
 }
 
 fn leaf_descriptor(
-    paddr: usize,
+    paddr: u64,
     level: usize,
     memory_attribute: MemoryAttribute,
     executable: bool,

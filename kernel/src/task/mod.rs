@@ -8,6 +8,11 @@ pub mod syscall;
 
 extern crate alloc;
 
+mod accounting;
+mod scheduling;
+use accounting::{CpuAccounting, CpuHog, SchedUtil};
+use scheduling::{ExecutionClock, FairRequest, PlacementHistory, SchedulingQuantum};
+
 use crate::sync::{IrqRwSpinLock, IrqSpinLock, Mutex};
 use alloc::{
     boxed::Box,
@@ -54,9 +59,7 @@ use crate::{
 };
 use alloc::collections::BTreeMap;
 use core::ops::Range;
-use core::sync::atomic::{
-    AtomicBool, AtomicI32, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering,
-};
+use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32, AtomicUsize, Ordering};
 
 pub(crate) const INIT_TASK_ID: usize = 1;
 const LOG_EXIT_GROUP_SIBLINGS: bool = false;
@@ -230,105 +233,16 @@ impl TaskInfo {
     pub const NAME_CAP: usize = 63;
 }
 
-/// Version of the task-debug snapshot ABI implemented by the kernel.
-pub const TASK_DEBUG_INFO_VERSION_V1: u16 = 1;
-/// The snapshot contains a valid last-observed instruction address.
-pub const TASK_DEBUG_FLAG_PC_VALID: u32 = 1 << 0;
-/// The last-observed instruction address was sampled in privileged mode.
-pub const TASK_DEBUG_FLAG_PC_PRIVILEGED: u32 = 1 << 1;
-/// The snapshot contains information about a system call entered by the task.
-pub const TASK_DEBUG_FLAG_SYSCALL_VALID: u32 = 1 << 2;
-/// The task has not yet returned from the reported system call.
-pub const TASK_DEBUG_FLAG_SYSCALL_ACTIVE: u32 = 1 << 3;
-/// The task is configured for periodic deadline scheduling.
-pub const TASK_DEBUG_FLAG_DEADLINE: u32 = 1 << 4;
-/// The deadline task has exhausted its current runtime budget.
-pub const TASK_DEBUG_FLAG_DEADLINE_THROTTLED: u32 = 1 << 5;
-/// At least one task-owned software timer is currently registered.
-pub const TASK_DEBUG_FLAG_SOFTWARE_TIMER_ARMED: u32 = 1 << 6;
-/// Deadline state could not be sampled without waiting for its lock.
-pub const TASK_DEBUG_FLAG_DEADLINE_UNAVAILABLE: u32 = 1 << 7;
-
-/// Fixed-layout diagnostic snapshot returned by `GetTaskDebugInfo`.
-///
-/// The debug syscall is available only when the kernel is built with the
-/// `sync-debug` feature. Its caller supplies the expected entry size, allowing
-/// future versions to reject incompatible user-space layouts safely.
-#[derive(Debug, Clone, Copy)]
-#[repr(C)]
-pub struct TaskDebugInfo {
-    /// Size of this entry in bytes.
-    pub size: u32,
-    /// ABI version, currently [`TASK_DEBUG_INFO_VERSION_V1`].
-    pub version: u16,
-    /// Task state encoded with [`TaskState::to_u8`].
-    pub state: u8,
-    /// Task type: 0 = kernel, 1 = user.
-    pub task_type: u8,
-    /// Combination of `TASK_DEBUG_FLAG_*` values.
-    pub flags: u32,
-    /// Last scheduler CPU, or `u32::MAX` when unknown.
-    pub cpu_id: u32,
-    /// Namespace-local thread ID.
-    pub pid: usize,
-    /// Namespace-local thread-group ID.
-    pub tgid: usize,
-    /// Most recent instruction address sampled by a timer interrupt.
-    pub observed_pc: u64,
-    /// Most recent system-call number, or `u64::MAX` when unavailable.
-    pub syscall_number: u64,
-    /// User instruction address from which `syscall_number` was entered.
-    pub syscall_pc: u64,
-    /// Cumulative task CPU time in nanoseconds.
-    pub cpu_time_ns: u64,
-}
-
-const _: [(); 64] = [(); core::mem::size_of::<TaskDebugInfo>()];
-
-/// Version of the per-CPU debug snapshot ABI implemented by the kernel.
-pub const CPU_DEBUG_INFO_VERSION_V1: u16 = 1;
-/// The snapshot contains a namespace-visible current task ID.
-pub const CPU_DEBUG_FLAG_CURRENT_TASK_VALID: u16 = 1 << 0;
-/// The CPU's published current task is its idle task.
-pub const CPU_DEBUG_FLAG_IDLE: u16 = 1 << 1;
-/// The CPU has a deferred reschedule request pending.
-pub const CPU_DEBUG_FLAG_PENDING_RESCHEDULE: u16 = 1 << 2;
-/// The CPU's local hardware timer has a programmed deadline.
-pub const CPU_DEBUG_FLAG_TIMER_ARMED: u16 = 1 << 3;
-
-/// Fixed-layout lock-free diagnostic snapshot returned by `GetCpuDebugInfo`.
-///
-/// The debug syscall is available only when the kernel is built with the
-/// `sync-debug` feature. All sampled fields are atomic so a surviving CPU can
-/// inspect a stalled CPU without acquiring scheduler or timer locks.
-#[derive(Debug, Clone, Copy)]
-#[repr(C)]
-pub struct CpuDebugInfo {
-    /// Size of this entry in bytes.
-    pub size: u32,
-    /// ABI version, currently [`CPU_DEBUG_INFO_VERSION_V1`].
-    pub version: u16,
-    /// Combination of `CPU_DEBUG_FLAG_*` values.
-    pub flags: u16,
-    /// Logical CPU ID represented by this snapshot.
-    pub cpu_id: u32,
-    /// Low 32 bits of the breadcrumb commit sequence.
-    pub reserved: u32,
-    /// Namespace-local current task ID, or zero when unavailable.
-    pub current_task_id: usize,
-    /// Number of local timer interrupts observed by this CPU.
-    pub timer_irq_count: u64,
-    /// Last lock-free kernel execution breadcrumb phase.
-    pub breadcrumb_phase: u64,
-    /// First context value associated with `breadcrumb_phase`.
-    pub breadcrumb_aux: u64,
-    /// Second context value associated with `breadcrumb_phase`.
-    pub breadcrumb_aux2: u64,
-    /// Last requested local timer deadline, or zero when stopped.
-    pub timer_deadline_ns: u64,
-}
-
-const _: [(); 64] = [(); core::mem::size_of::<CpuDebugInfo>()];
+// Keep the fixed-width diagnostic wire records identical on both sides of the
+// syscall boundary. Runtime task identifiers remain native Rust values.
+pub use scarlet_abi::{
+    CPU_DEBUG_FLAG_CURRENT_TASK_VALID, CPU_DEBUG_FLAG_IDLE, CPU_DEBUG_FLAG_PENDING_RESCHEDULE,
+    CPU_DEBUG_FLAG_TIMER_ARMED, CPU_DEBUG_INFO_VERSION_V1, RawCpuDebugInfoV1 as CpuDebugInfo,
+    RawTaskDebugInfoV1 as TaskDebugInfo, TASK_DEBUG_FLAG_DEADLINE,
+    TASK_DEBUG_FLAG_DEADLINE_THROTTLED, TASK_DEBUG_FLAG_DEADLINE_UNAVAILABLE,
+    TASK_DEBUG_FLAG_PC_PRIVILEGED, TASK_DEBUG_FLAG_PC_VALID, TASK_DEBUG_FLAG_SOFTWARE_TIMER_ARMED,
+    TASK_DEBUG_FLAG_SYSCALL_ACTIVE, TASK_DEBUG_FLAG_SYSCALL_VALID, TASK_DEBUG_INFO_VERSION_V1,
+};
 
 /// Snapshot of system-wide CPU usage exposed to user space.
 ///
@@ -755,7 +669,7 @@ pub(crate) struct TaskDeadlineState {
     pub(crate) admission_units: u32,
     pub(crate) generation: u64,
     pub(crate) replenishment_timer: Option<TimerHandle>,
-    pub(crate) replenishment_token: Option<usize>,
+    pub(crate) replenishment_handler: Option<Arc<crate::sched::scheduler::DeadlineTimerHandler>>,
 }
 
 impl TaskDeadlineState {
@@ -772,7 +686,7 @@ impl TaskDeadlineState {
             admission_units: 0,
             generation: 0,
             replenishment_timer: None,
-            replenishment_token: None,
+            replenishment_handler: None,
         }
     }
 }
@@ -852,7 +766,7 @@ pub struct Task {
     pub max_data_size: usize,
     pub max_text_size: usize,
 
-    // === Atomic fields (lock-free) ===
+    // === Concurrent task and scheduler state ===
     /// Task state with atomic transitions
     pub state: AtomicTaskState,
     /// Task priority
@@ -861,26 +775,12 @@ pub struct Task {
     core_preference: AtomicU8,
     /// Minimum scheduler utilization required by this task.
     sched_util_min: AtomicU32,
-    /// Measured scheduler utilization for this task.
-    sched_util_avg: AtomicU32,
-    /// Last timestamp at which measured scheduler utilization was updated.
-    sched_util_last_update_ns: AtomicU64,
-    /// CPU runtime accumulated for the current scheduler utilization window.
-    sched_util_window_runtime_ns: AtomicU64,
-    /// Last timestamp charged into the scheduler utilization window.
-    sched_util_accounted_until_ns: AtomicU64,
-    /// Last timestamp at which the scheduler migrated this task.
-    ///
-    /// Used to rate-limit scheduler-driven cross-CPU movement.
-    sched_last_migration_ns: AtomicU64,
-    /// Number of scheduler-directed migrations for this task.
-    sched_migration_count: AtomicU64,
-    /// First timestamp at which this task was observed below its current CPU capacity.
-    ///
-    /// Used to avoid demoting a task after only one low-utilization sample.
-    sched_low_util_since_ns: AtomicU64,
-    /// Scheduler time-slice duration in absolute nanoseconds.
-    pub time_slice_duration_ns: AtomicU64,
+    /// Measured utilization and its coherent runtime window.
+    sched_util: SchedUtil,
+    /// Placement timestamps and the cumulative migration measurement.
+    placement: PlacementHistory,
+    /// Default wall-time quantum; the public API uses nanoseconds on every target.
+    quantum: SchedulingQuantum,
     /// Nice value used by the EEVDF fair scheduler (Linux parity, -20..+19).
     ///
     /// 0 is the default. Higher values lower the task's load weight and the
@@ -889,50 +789,31 @@ pub struct Task {
     pub sched_nice: AtomicI32,
     /// Load weight derived from [`Task::sched_nice`] via [`nice_to_weight`].
     pub(crate) sched_weight: AtomicU32,
-    /// EEVDF virtual runtime. Advances with consumed CPU time scaled by
-    /// `NICE_0_LOAD / sched_weight` so heavier tasks run longer per virtual
-    /// unit. Owned by the scheduler; updated under the per-CPU fair queue
-    /// lock or via `account_*` paths.
-    pub sched_vruntime: AtomicU64,
-    /// EEVDF virtual deadline of the form `vruntime + slice / weight`.
-    ///
-    /// The fair scheduler picks the eligible entity with the smallest
-    /// deadline, so this field drives both fairness and latency.
-    pub sched_deadline: AtomicU64,
-    /// Current fair-scheduler quantum in nanoseconds.
-    ///
-    /// Recomputed by the scheduler when a new request is placed as
-    /// `sched_period(nr_running) * weight / total_weight`, clamped to
-    /// `SCHED_MIN_GRANULARITY_NS`.
-    pub(crate) sched_slice_ns: AtomicU64,
+    /// Coherent virtual runtime, deadline and quantum. Queue ownership is
+    /// still required when changing an entity's ordering key.
+    pub(crate) fair_request: FairRequest,
     /// True while the task is currently inserted in a per-CPU fair run queue.
     pub(crate) sched_on_rq: AtomicBool,
     /// True while the task is inserted in its partitioned deadline run queue.
     pub(crate) deadline_on_rq: AtomicBool,
     /// Monotonic timestamp from which the current EEVDF execution interval is charged.
-    pub(crate) sched_exec_start_ns: AtomicU64,
-    /// Cumulative CPU time charged to this task, in nanoseconds.
-    pub cpu_time_ns: AtomicU64,
-    /// Monotonic timestamp at which the current CPU run began.
-    cpu_run_start_ns: AtomicU64,
+    pub(crate) exec_clock: ExecutionClock,
+    /// Committed time and the active interval are one coherent accounting state.
+    cpu_accounting: CpuAccounting,
     /// Most recent instruction address sampled while this task was running.
-    last_observed_pc: AtomicU64,
+    last_observed_pc: AtomicUsize,
     /// Whether `last_observed_pc` was sampled from privileged execution.
     last_observed_pc_privileged: AtomicBool,
     /// Most recent system-call number entered by this task.
-    last_syscall_number: AtomicU64,
+    last_syscall_number: AtomicUsize,
+    /// Whether a syscall number has been published, including usize::MAX.
+    syscall_recorded: AtomicBool,
     /// User instruction address that entered `last_syscall_number`.
-    last_syscall_pc: AtomicU64,
+    last_syscall_pc: AtomicUsize,
     /// Whether this task is currently executing its system-call dispatcher.
     syscall_active: AtomicBool,
-    /// Start of the current CPU-hog diagnostic wall-clock window.
-    cpu_hog_window_start_ns: AtomicU64,
-    /// Cumulative task CPU time at the start of the diagnostic window.
-    cpu_hog_window_start_runtime_ns: AtomicU64,
-    /// Sampled instruction address at the start of the diagnostic window.
-    cpu_hog_window_start_pc: AtomicU64,
-    /// Privilege mode associated with `cpu_hog_window_start_pc`.
-    cpu_hog_window_start_pc_privileged: AtomicBool,
+    /// Best-effort CPU-hog window, independent from correctness-critical time.
+    cpu_hog: CpuHog,
     /// Stack size in bytes
     pub stack_size: AtomicUsize,
     /// Data segment size in bytes
@@ -1201,35 +1082,25 @@ impl Task {
             priority: AtomicU32::new(priority),
             core_preference: AtomicU8::new(TaskCorePreference::Any.to_u8()),
             sched_util_min: AtomicU32::new(0),
-            sched_util_avg: AtomicU32::new(0),
-            sched_util_last_update_ns: AtomicU64::new(0),
-            sched_util_window_runtime_ns: AtomicU64::new(0),
-            sched_util_accounted_until_ns: AtomicU64::new(0),
-            sched_last_migration_ns: AtomicU64::new(0),
-            sched_migration_count: AtomicU64::new(0),
-            sched_low_util_since_ns: AtomicU64::new(0),
-            time_slice_duration_ns: AtomicU64::new(
+            sched_util: SchedUtil::new(),
+            placement: PlacementHistory::new(),
+            quantum: SchedulingQuantum::new(
                 (DEFAULT_TIME_SLICE as u64).saturating_mul(ms_to_ns(10)),
             ),
             sched_nice: AtomicI32::new(0),
             sched_weight: AtomicU32::new(NICE_0_LOAD),
-            sched_vruntime: AtomicU64::new(0),
-            sched_deadline: AtomicU64::new(0),
-            sched_slice_ns: AtomicU64::new(0),
+            fair_request: FairRequest::new(),
             sched_on_rq: AtomicBool::new(false),
             deadline_on_rq: AtomicBool::new(false),
-            sched_exec_start_ns: AtomicU64::new(0),
-            cpu_time_ns: AtomicU64::new(0),
-            cpu_run_start_ns: AtomicU64::new(0),
-            last_observed_pc: AtomicU64::new(0),
+            exec_clock: ExecutionClock::new(),
+            cpu_accounting: CpuAccounting::new(),
+            last_observed_pc: AtomicUsize::new(0),
             last_observed_pc_privileged: AtomicBool::new(false),
-            last_syscall_number: AtomicU64::new(u64::MAX),
-            last_syscall_pc: AtomicU64::new(0),
+            last_syscall_number: AtomicUsize::new(0),
+            syscall_recorded: AtomicBool::new(false),
+            last_syscall_pc: AtomicUsize::new(0),
             syscall_active: AtomicBool::new(false),
-            cpu_hog_window_start_ns: AtomicU64::new(0),
-            cpu_hog_window_start_runtime_ns: AtomicU64::new(0),
-            cpu_hog_window_start_pc: AtomicU64::new(0),
-            cpu_hog_window_start_pc_privileged: AtomicBool::new(false),
+            cpu_hog: CpuHog::new(),
             stack_size: AtomicUsize::new(0),
             data_size: vm_manager.data_size_handle(),
             text_size: AtomicUsize::new(0),
@@ -1463,24 +1334,6 @@ impl Task {
         Ok(())
     }
 
-    fn decay_sched_util_avg(avg: u32, elapsed_ns: u64) -> u32 {
-        let mut periods = elapsed_ns / SCHED_UTIL_DECAY_INTERVAL_NS;
-        if periods == 0 {
-            return avg;
-        }
-
-        let mut next = avg as u64;
-        periods = periods.min(64);
-        for _ in 0..periods {
-            next = next.saturating_mul(SCHED_UTIL_DECAY_NUM as u64) / SCHED_UTIL_DECAY_DEN as u64;
-            if next == 0 {
-                break;
-            }
-        }
-
-        next.min(SCHED_UTIL_SCALE as u64) as u32
-    }
-
     /// Return the measured scheduler utilization for this task.
     ///
     /// # Returns
@@ -1488,7 +1341,7 @@ impl Task {
     /// Measured utilization in scheduler capacity units, where
     /// [`SCHED_UTIL_SCALE`] represents a full-capacity CPU.
     pub fn sched_util_avg(&self) -> u32 {
-        self.sched_util_avg.load(Ordering::SeqCst)
+        self.sched_util.average()
     }
 
     /// Return a decayed measured scheduler utilization snapshot.
@@ -1502,13 +1355,7 @@ impl Task {
     /// Measured utilization in scheduler capacity units after applying sleep
     /// decay since the last update.
     pub fn sched_util_avg_snapshot(&self, now_ns: u64) -> u32 {
-        let avg = self.sched_util_avg();
-        let last_update_ns = self.sched_util_last_update_ns.load(Ordering::SeqCst);
-        if avg == 0 || last_update_ns == 0 {
-            return avg;
-        }
-
-        Self::decay_sched_util_avg(avg, now_ns.saturating_sub(last_update_ns))
+        self.sched_util.decayed_average(now_ns)
     }
 
     /// Account scheduler utilization runtime while this task is running.
@@ -1525,41 +1372,7 @@ impl Task {
     ///
     /// Updated measured utilization in scheduler capacity units.
     pub fn account_sched_util_running(&self, now_ns: u64) -> u32 {
-        let last_accounted_ns = self
-            .sched_util_accounted_until_ns
-            .swap(now_ns, Ordering::SeqCst);
-        if last_accounted_ns != 0 {
-            let delta_ns = now_ns.saturating_sub(last_accounted_ns);
-            self.sched_util_window_runtime_ns
-                .fetch_add(delta_ns, Ordering::SeqCst);
-        }
-
-        let last_update_ns = self.sched_util_last_update_ns.load(Ordering::SeqCst);
-        if last_update_ns == 0 {
-            self.sched_util_last_update_ns
-                .store(now_ns, Ordering::SeqCst);
-            return self.sched_util_avg();
-        }
-
-        let elapsed_ns = now_ns.saturating_sub(last_update_ns);
-        if elapsed_ns < SCHED_UTIL_DECAY_INTERVAL_NS {
-            return self.sched_util_avg();
-        }
-
-        let runtime_ns = self.sched_util_window_runtime_ns.swap(0, Ordering::SeqCst);
-        let sample = ((runtime_ns as u128 * SCHED_UTIL_SCALE as u128) / elapsed_ns as u128)
-            .min(SCHED_UTIL_SCALE as u128) as u32;
-        let avg = self.sched_util_avg_snapshot(now_ns);
-        let next = if sample > avg {
-            avg.saturating_add(sample.saturating_sub(avg).saturating_add(1) / 2)
-        } else {
-            avg.saturating_mul(7).saturating_add(sample) / 8
-        }
-        .min(SCHED_UTIL_SCALE);
-        self.sched_util_avg.store(next, Ordering::SeqCst);
-        self.sched_util_last_update_ns
-            .store(now_ns, Ordering::SeqCst);
-        next
+        self.sched_util.account(now_ns)
     }
 
     /// Return the last scheduler migration timestamp for this task.
@@ -1569,7 +1382,7 @@ impl Task {
     /// Monotonic timestamp in nanoseconds, or `0` if this task has not been
     /// migrated by the scheduler.
     pub fn sched_last_migration_ns(&self) -> u64 {
-        self.sched_last_migration_ns.load(Ordering::SeqCst)
+        self.placement.last_migration_ns()
     }
 
     /// Return the task's current nice value (`-20..=19`).
@@ -1584,17 +1397,17 @@ impl Task {
 
     /// Return the task's current fair-scheduler virtual runtime.
     pub fn sched_vruntime(&self) -> u64 {
-        self.sched_vruntime.load(Ordering::SeqCst)
+        self.fair_request.snapshot().vruntime
     }
 
     /// Return the task's current fair-scheduler virtual deadline.
     pub fn sched_deadline(&self) -> u64 {
-        self.sched_deadline.load(Ordering::SeqCst)
+        self.fair_request.snapshot().deadline
     }
 
     /// Return the task's current fair-scheduler quantum in nanoseconds.
     pub fn sched_slice_ns(&self) -> u64 {
-        self.sched_slice_ns.load(Ordering::SeqCst)
+        self.fair_request.snapshot().slice_ns
     }
 
     /// Invalidate the active EEVDF request after its weight changes.
@@ -1602,8 +1415,7 @@ impl Task {
     /// The scheduler will derive a new slice and virtual deadline when the task
     /// is next placed on a fair queue.
     pub(crate) fn reset_sched_request(&self) {
-        self.sched_slice_ns.store(0, Ordering::SeqCst);
-        self.sched_deadline.store(0, Ordering::SeqCst);
+        self.fair_request.reset_request();
     }
 
     /// Return whether the task is currently inserted in a fair run queue.
@@ -1633,7 +1445,7 @@ impl Task {
     ///
     /// Count of scheduler placement moves, including work steals.
     pub fn sched_migration_count(&self) -> u64 {
-        self.sched_migration_count.load(Ordering::SeqCst)
+        self.placement.migration_count()
     }
 
     /// Record that the scheduler migrated this task.
@@ -1642,9 +1454,7 @@ impl Task {
     ///
     /// * `now_ns` - Current monotonic timestamp in nanoseconds.
     pub fn mark_sched_migrated(&self, now_ns: u64) {
-        self.sched_last_migration_ns.store(now_ns, Ordering::SeqCst);
-        self.sched_migration_count.fetch_add(1, Ordering::SeqCst);
-        self.clear_sched_low_util();
+        self.placement.migrated(now_ns);
     }
 
     /// Return the timestamp at which this task first looked eligible for demotion.
@@ -1654,7 +1464,7 @@ impl Task {
     /// Monotonic timestamp in nanoseconds, or `0` if no low-utilization window
     /// is currently being tracked.
     pub fn sched_low_util_since_ns(&self) -> u64 {
-        self.sched_low_util_since_ns.load(Ordering::SeqCst)
+        self.placement.low_since_ns()
     }
 
     /// Record that this task is still below its current CPU capacity.
@@ -1667,21 +1477,22 @@ impl Task {
     ///
     /// The first timestamp in the current low-utilization window.
     pub fn note_sched_low_util(&self, now_ns: u64) -> u64 {
-        let observed_ns = now_ns.max(1);
-        match self.sched_low_util_since_ns.compare_exchange(
-            0,
-            observed_ns,
-            Ordering::SeqCst,
-            Ordering::SeqCst,
-        ) {
-            Ok(_) => observed_ns,
-            Err(since_ns) => since_ns,
-        }
+        self.placement.observe_low_utilization(now_ns)
     }
 
     /// Clear the tracked low-utilization demotion window for this task.
     pub fn clear_sched_low_util(&self) {
-        self.sched_low_util_since_ns.store(0, Ordering::SeqCst);
+        self.placement.clear_low_utilization();
+    }
+
+    /// Read the task's default wall-time quantum in nanoseconds.
+    pub fn time_slice_duration_ns(&self) -> u64 {
+        self.quantum.duration_ns()
+    }
+
+    /// Set the default wall-time quantum without changing its scheduler request.
+    pub fn set_time_slice_duration_ns(&self, duration_ns: u64) {
+        self.quantum.set_duration_ns(duration_ns);
     }
 
     /// Mark the task as running for CPU accounting.
@@ -1690,10 +1501,11 @@ impl Task {
     ///
     /// * `now_ns` - Current monotonic timestamp in nanoseconds.
     pub fn start_cpu_accounting(&self, now_ns: u64) {
-        self.cpu_run_start_ns.store(now_ns, Ordering::SeqCst);
-        self.sched_exec_start_ns.store(now_ns, Ordering::SeqCst);
-        self.sched_util_accounted_until_ns
-            .store(now_ns, Ordering::SeqCst);
+        if !self.cpu_accounting.begin(now_ns) {
+            return;
+        }
+        self.exec_clock.start(now_ns);
+        self.sched_util.begin(now_ns);
     }
 
     /// Stop charging CPU time to this task and return the elapsed delta.
@@ -1706,14 +1518,9 @@ impl Task {
     ///
     /// The nanoseconds charged by this stop operation.
     pub fn stop_cpu_accounting(&self, now_ns: u64) -> u64 {
-        let start_ns = self.cpu_run_start_ns.swap(0, Ordering::SeqCst);
-        self.sched_exec_start_ns.store(0, Ordering::SeqCst);
-        if start_ns == 0 {
-            return 0;
-        }
-        let delta_ns = now_ns.saturating_sub(start_ns);
-        self.cpu_time_ns.fetch_add(delta_ns, Ordering::SeqCst);
-        delta_ns
+        self.sched_util.finish(now_ns);
+        self.exec_clock.stop();
+        self.cpu_accounting.finish(now_ns)
     }
 
     /// Return the current CPU time snapshot for this task.
@@ -1726,9 +1533,7 @@ impl Task {
     ///
     /// Cumulative CPU time, including the current running interval if any.
     pub fn cpu_time_snapshot_ns(&self, now_ns: u64) -> u64 {
-        self.cpu_time_ns
-            .load(Ordering::SeqCst)
-            .saturating_add(self.current_cpu_delta_ns(now_ns))
+        self.cpu_accounting.total_ns(now_ns)
     }
 
     /// Record the most recent instruction address observed for this task.
@@ -1742,7 +1547,10 @@ impl Task {
     /// * `pc` - Saved instruction address from the interrupt trapframe.
     /// * `privileged` - Whether the interrupted context was privileged.
     pub(crate) fn record_observed_pc(&self, pc: u64, privileged: bool) {
-        self.last_observed_pc.store(pc, Ordering::Relaxed);
+        self.last_observed_pc.store(
+            usize::try_from(pc).expect("sampled PC must fit the native address width"),
+            Ordering::Relaxed,
+        );
         self.last_observed_pc_privileged
             .store(privileged, Ordering::Relaxed);
     }
@@ -1757,10 +1565,10 @@ impl Task {
     /// * `syscall_number` - ABI-specific system-call number.
     /// * `user_pc` - User instruction address that entered the kernel.
     pub(crate) fn record_syscall_entry(&self, syscall_number: usize, user_pc: usize) {
-        self.last_syscall_pc
-            .store(user_pc as u64, Ordering::Relaxed);
+        self.last_syscall_pc.store(user_pc, Ordering::Relaxed);
         self.last_syscall_number
-            .store(syscall_number as u64, Ordering::Release);
+            .store(syscall_number, Ordering::Release);
+        self.syscall_recorded.store(true, Ordering::Release);
         self.syscall_active.store(true, Ordering::Release);
     }
 
@@ -1778,11 +1586,21 @@ impl Task {
     /// been recorded yet.
     pub(crate) fn execution_debug_snapshot(&self) -> TaskExecutionDebugSnapshot {
         TaskExecutionDebugSnapshot {
-            observed_pc: self.last_observed_pc.load(Ordering::Relaxed),
+            observed_pc: self.last_observed_pc.load(Ordering::Relaxed) as u64,
             observed_pc_privileged: self.last_observed_pc_privileged.load(Ordering::Relaxed),
-            syscall_number: self.last_syscall_number.load(Ordering::Acquire),
-            syscall_pc: self.last_syscall_pc.load(Ordering::Relaxed),
+            syscall_number: self.debug_syscall_number(),
+            syscall_pc: self.last_syscall_pc.load(Ordering::Relaxed) as u64,
             syscall_active: self.syscall_active.load(Ordering::Acquire),
+        }
+    }
+
+    // The wire sentinel is u64::MAX. Keep validity separate from the native
+    // word so an actual RV32 syscall number of 0xffff_ffff remains representable.
+    fn debug_syscall_number(&self) -> u64 {
+        if self.syscall_recorded.load(Ordering::Acquire) {
+            self.last_syscall_number.load(Ordering::Acquire) as u64
+        } else {
+            u64::MAX
         }
     }
 
@@ -1797,56 +1615,22 @@ impl Task {
     /// A diagnostic snapshot when this task consumed at least 99 percent of
     /// one sampling window, or `None` otherwise.
     pub(crate) fn sample_cpu_hog(&self, now_ns: u64) -> Option<TaskCpuHogSnapshot> {
-        let runtime_ns = self.cpu_time_snapshot_ns(now_ns);
+        let runtime_ns = self.cpu_accounting.try_total_ns(now_ns)?;
         let current_pc = self.last_observed_pc.load(Ordering::Relaxed);
         let current_pc_privileged = self.last_observed_pc_privileged.load(Ordering::Relaxed);
-        let last_syscall_number = self.last_syscall_number.load(Ordering::Acquire);
-        let last_syscall_pc = self.last_syscall_pc.load(Ordering::Relaxed);
+        let last_syscall_number = self.debug_syscall_number();
+        let last_syscall_pc = self.last_syscall_pc.load(Ordering::Relaxed) as u64;
         let syscall_active = self.syscall_active.load(Ordering::Acquire);
-        let window_start_ns = self.cpu_hog_window_start_ns.load(Ordering::Acquire);
-
-        if window_start_ns == 0 {
-            self.cpu_hog_window_start_runtime_ns
-                .store(runtime_ns, Ordering::Relaxed);
-            self.cpu_hog_window_start_pc
-                .store(current_pc, Ordering::Relaxed);
-            self.cpu_hog_window_start_pc_privileged
-                .store(current_pc_privileged, Ordering::Relaxed);
-            self.cpu_hog_window_start_ns
-                .store(now_ns, Ordering::Release);
-            return None;
-        }
-
-        let window_ns = now_ns.saturating_sub(window_start_ns);
-        if window_ns < TASK_CPU_HOG_WINDOW_NS {
-            return None;
-        }
-
-        let window_start_runtime_ns = self.cpu_hog_window_start_runtime_ns.load(Ordering::Relaxed);
-        let start_pc = self.cpu_hog_window_start_pc.load(Ordering::Relaxed);
-        let start_pc_privileged = self
-            .cpu_hog_window_start_pc_privileged
-            .load(Ordering::Relaxed);
-        let consumed_runtime_ns = runtime_ns.saturating_sub(window_start_runtime_ns);
-        let usage_per_mille =
-            ((consumed_runtime_ns as u128 * 1_000) / window_ns as u128).min(1_000) as u32;
-
-        self.cpu_hog_window_start_runtime_ns
-            .store(runtime_ns, Ordering::Relaxed);
-        self.cpu_hog_window_start_pc
-            .store(current_pc, Ordering::Relaxed);
-        self.cpu_hog_window_start_pc_privileged
-            .store(current_pc_privileged, Ordering::Relaxed);
-        self.cpu_hog_window_start_ns
-            .store(now_ns, Ordering::Release);
-
-        (usage_per_mille >= TASK_CPU_HOG_THRESHOLD_PER_MILLE).then_some(TaskCpuHogSnapshot {
-            usage_per_mille,
-            window_ns,
-            runtime_ns: consumed_runtime_ns,
-            start_pc,
-            start_pc_privileged,
-            current_pc,
+        let sample = self
+            .cpu_hog
+            .sample(now_ns, runtime_ns, current_pc, current_pc_privileged)?;
+        Some(TaskCpuHogSnapshot {
+            usage_per_mille: sample.usage_per_mille,
+            window_ns: sample.window_ns,
+            runtime_ns: sample.runtime_ns,
+            start_pc: sample.start_pc as u64,
+            start_pc_privileged: sample.start_privileged,
+            current_pc: current_pc as u64,
             current_pc_privileged,
             last_syscall_number,
             last_syscall_pc,
@@ -1864,12 +1648,7 @@ impl Task {
     ///
     /// Nanoseconds elapsed since the task was last scheduled in.
     pub fn current_cpu_delta_ns(&self, now_ns: u64) -> u64 {
-        let start_ns = self.cpu_run_start_ns.load(Ordering::SeqCst);
-        if start_ns == 0 {
-            0
-        } else {
-            now_ns.saturating_sub(start_ns)
-        }
+        self.cpu_accounting.active_ns(now_ns)
     }
 
     pub fn get_id(&self) -> usize {
@@ -2334,9 +2113,9 @@ impl Task {
         let size = num_of_pages * PAGE_SIZE;
         let paddr = virt_to_phys(page_alloc.as_ptr() as usize);
         let mmap = VirtualMemoryMap {
-            pmarea: MemoryArea {
+            pmarea: crate::vm::vmem::PhysicalMemoryArea {
                 start: paddr,
-                end: paddr + size - 1,
+                end: paddr + size as u64 - 1,
             },
             vmarea: MemoryArea {
                 start: vaddr,
@@ -2510,7 +2289,7 @@ impl Task {
     ) -> Result<VirtualMemoryMap, &'static str> {
         let permissions = VirtualMemoryRegion::Guard.default_permissions();
         let mmap = VirtualMemoryMap {
-            pmarea: MemoryArea { start: 0, end: 0 },
+            pmarea: crate::vm::vmem::PhysicalMemoryArea { start: 0, end: 0 },
             vmarea: MemoryArea {
                 start: vaddr,
                 end: vaddr + num_of_pages * PAGE_SIZE - 1,
@@ -2524,11 +2303,7 @@ impl Task {
         Ok(mmap)
     }
 
-    fn take_exact_page_allocation(
-        &self,
-        paddr: usize,
-        page_count: usize,
-    ) -> Option<ContiguousPages> {
+    fn take_exact_page_allocation(&self, paddr: u64, page_count: usize) -> Option<ContiguousPages> {
         let mut allocations = self.page_allocations.write();
         let index = allocations
             .iter()
@@ -3042,8 +2817,9 @@ impl Task {
                         );
                     }
 
-                    // Pre-map trampoline page if applicable
-                    if mmap.vmarea.start == 0xffff_ffff_ffff_f000 {
+                    // Architecture trampoline mappings end at the native high-VA
+                    // anchor and can span more than one page.
+                    if mmap.vmarea.end == crate::environment::TRAMPOLINE_VA_END {
                         if let Some(mut root_pagetable) = child.vm_manager.get_root_page_table() {
                             root_pagetable
                                 .map_memory_area(shared_mmap, true, true)
@@ -3053,7 +2829,7 @@ impl Task {
                 } else if let Some(owner) = &mmap.owner {
                     if let Some(cloned_owner) = owner.fork_clone() {
                         let new_mmap = VirtualMemoryMap {
-                            pmarea: MemoryArea { start: 0, end: 0 },
+                            pmarea: crate::vm::vmem::PhysicalMemoryArea { start: 0, end: 0 },
                             vmarea: mmap.vmarea,
                             vm_start: mmap.vm_start,
                             permissions: mmap.permissions,
@@ -3069,7 +2845,7 @@ impl Task {
                         if mmap.pmarea.start == 0 {
                             // Lazy: clone Arc, child COWs independently on fault
                             let new_mmap = VirtualMemoryMap {
-                                pmarea: MemoryArea { start: 0, end: 0 },
+                                pmarea: crate::vm::vmem::PhysicalMemoryArea { start: 0, end: 0 },
                                 vmarea: mmap.vmarea,
                                 vm_start: mmap.vm_start,
                                 permissions: mmap.permissions,
@@ -3089,9 +2865,9 @@ impl Task {
                             let size = num_pages * PAGE_SIZE;
                             let paddr = virt_to_phys(page_alloc.as_ptr() as usize);
                             let new_mmap = VirtualMemoryMap {
-                                pmarea: MemoryArea {
+                                pmarea: crate::vm::vmem::PhysicalMemoryArea {
                                     start: paddr,
-                                    end: paddr + (size - 1),
+                                    end: paddr + (size - 1) as u64,
                                 },
                                 vmarea: MemoryArea {
                                     start: vaddr,
@@ -3128,7 +2904,7 @@ impl Task {
                         let base_page_idx = (mmap.vmarea.start - mmap.vm_start) / PAGE_SIZE;
                         let cow_owner = Arc::new(ForkCowPageOwner::new(base_page_idx, page_alloc));
                         let cow_map = VirtualMemoryMap {
-                            pmarea: MemoryArea { start: 0, end: 0 },
+                            pmarea: crate::vm::vmem::PhysicalMemoryArea { start: 0, end: 0 },
                             vmarea: mmap.vmarea,
                             vm_start: mmap.vm_start,
                             permissions: mmap.permissions,
@@ -3157,9 +2933,9 @@ impl Task {
                     let size = num_pages * PAGE_SIZE;
                     let paddr = virt_to_phys(page_alloc.as_ptr() as usize);
                     let new_mmap = VirtualMemoryMap {
-                        pmarea: MemoryArea {
+                        pmarea: crate::vm::vmem::PhysicalMemoryArea {
                             start: paddr,
-                            end: paddr + (size - 1),
+                            end: paddr + (size - 1) as u64,
                         },
                         vmarea: MemoryArea {
                             start: vaddr,
@@ -3268,10 +3044,7 @@ impl Task {
         child.is_session_leader.store(false, Ordering::SeqCst);
 
         // Copy scheduling and event handling state
-        child.time_slice_duration_ns.store(
-            self.time_slice_duration_ns.load(Ordering::SeqCst),
-            Ordering::SeqCst,
-        );
+        child.set_time_slice_duration_ns(self.time_slice_duration_ns());
         // Fair-scheduler state: nice/weight are inherited, but vruntime and
         // deadline must start fresh. The child will be `place`-d against the
         // destination CPU's avg_vruntime when it is first enqueued.
@@ -4080,8 +3853,8 @@ impl Task {
     ///
     /// # Returns
     /// The kernel stack bottom address as u64, or 0 if no kernel stack is allocated
-    pub fn get_kernel_stack_bottom_paddr(&self) -> u64 {
-        self.kernel_context.lock().get_kernel_stack_bottom_paddr()
+    pub fn get_kernel_stack_top(&self) -> usize {
+        self.kernel_context.lock().get_kernel_stack_top()
     }
 
     /// Get the kernel stack memory area for this task
@@ -4089,7 +3862,7 @@ impl Task {
     /// # Returns
     /// The kernel stack memory area as a MemoryArea
     ///
-    pub fn get_kernel_stack_memory_area_paddr(&self) -> MemoryArea {
+    pub fn get_kernel_stack_memory_area_paddr(&self) -> crate::vm::vmem::PhysicalMemoryArea {
         self.kernel_context
             .lock()
             .get_kernel_stack_memory_area_paddr()
@@ -4373,7 +4146,7 @@ mod tests {
             Err("mapping info is not used by this test")
         }
 
-        fn on_mapped(&self, _vaddr: usize, _paddr: usize, _length: usize, _offset: usize) {
+        fn on_mapped(&self, _vaddr: usize, _paddr: u64, _length: usize, _offset: usize) {
             self.mappings.fetch_add(1, Ordering::SeqCst);
         }
 
@@ -4651,6 +4424,7 @@ mod tests {
 
         task.start_cpu_accounting(1 * MS);
         assert_eq!(task.account_sched_util_running(2 * MS), 0);
+        task.stop_cpu_accounting(2 * MS);
 
         task.start_cpu_accounting(101 * MS);
         let util = task.account_sched_util_running(102 * MS);
@@ -4677,6 +4451,21 @@ mod tests {
     }
 
     #[test_case]
+    fn test_native_diagnostic_words_preserve_fixed_width_wire_values() {
+        let task = Task::new("DebugWords".to_string(), 1, TaskType::User);
+        assert_eq!(task.execution_debug_snapshot().syscall_number, u64::MAX);
+        let pc = usize::MAX - 0xfff;
+        task.record_observed_pc(pc as u64, true);
+        task.record_syscall_entry(u32::MAX as usize, pc);
+        task.record_syscall_exit();
+        let snapshot = task.execution_debug_snapshot();
+        assert_eq!(snapshot.observed_pc, pc as u64);
+        assert_eq!(snapshot.syscall_pc, pc as u64);
+        assert_eq!(snapshot.syscall_number, u32::MAX as u64);
+        assert!(!snapshot.syscall_active);
+    }
+
+    #[test_case]
     fn test_cpu_hog_sampling_reports_only_near_full_runtime_windows() {
         const MS: u64 = 1_000_000;
         let task = Task::new("CpuHog".to_string(), 1, TaskType::User);
@@ -4685,7 +4474,8 @@ mod tests {
         task.record_syscall_entry(20, 0x0ffc);
         assert!(task.sample_cpu_hog(1).is_none());
 
-        task.cpu_time_ns.store(995 * MS, Ordering::SeqCst);
+        task.start_cpu_accounting(1);
+        task.stop_cpu_accounting(995 * MS + 1);
         task.record_observed_pc(0x1010, false);
         let sample = task
             .sample_cpu_hog(1_000 * MS + 1)
@@ -4711,9 +4501,10 @@ mod tests {
             }
         );
 
-        task.cpu_time_ns.store(1_495 * MS, Ordering::SeqCst);
+        task.start_cpu_accounting(1_000 * MS + 1);
+        task.stop_cpu_accounting(1_500 * MS + 1);
         task.record_syscall_exit();
-        task.record_observed_pc(0xffff_ffff_8000_1000, true);
+        task.record_observed_pc((usize::MAX - 0xfff) as u64, true);
         assert!(task.sample_cpu_hog(2_000 * MS + 1).is_none());
     }
 
@@ -5519,7 +5310,8 @@ mod tests {
         ];
         unsafe {
             let stack_ptr =
-                phys_to_virt(stack_mmap.pmarea.start + crate::environment::PAGE_SIZE) as *mut u8;
+                phys_to_virt(stack_mmap.pmarea.start + crate::environment::PAGE_SIZE as u64)
+                    as *mut u8;
             core::ptr::copy_nonoverlapping(
                 stack_test_data.as_ptr(),
                 stack_ptr,
@@ -5644,9 +5436,9 @@ mod tests {
         let paddr = virt_to_phys(pages as usize);
 
         let shared_mmap = VirtualMemoryMap {
-            pmarea: MemoryArea {
+            pmarea: crate::vm::vmem::PhysicalMemoryArea {
                 start: paddr,
-                end: paddr + PAGE_SIZE - 1,
+                end: paddr + PAGE_SIZE as u64 - 1,
             },
             vmarea: MemoryArea {
                 start: shared_vaddr,
@@ -5760,9 +5552,9 @@ mod tests {
         parent
             .vm_manager
             .add_memory_map(VirtualMemoryMap {
-                pmarea: MemoryArea {
+                pmarea: crate::vm::vmem::PhysicalMemoryArea {
                     start: 0x8000_0000,
-                    end: 0x8000_0000 + PAGE_SIZE - 1,
+                    end: 0x8000_0000 + PAGE_SIZE as u64 - 1,
                 },
                 vmarea: MemoryArea {
                     start: shared_vaddr,
@@ -6110,8 +5902,10 @@ mod tests {
             super::nice_to_weight(super::SCHED_NICE_MAX)
         );
 
-        task.sched_slice_ns.store(1_000, Ordering::SeqCst);
-        task.sched_deadline.store(2_000, Ordering::SeqCst);
+        task.fair_request.update(|request| {
+            request.slice_ns = 1_000;
+            request.deadline = 2_000;
+        });
         task.reset_sched_request();
         assert_eq!(task.sched_slice_ns(), 0);
         assert_eq!(task.sched_deadline(), 0);

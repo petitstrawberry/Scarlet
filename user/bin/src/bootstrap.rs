@@ -124,6 +124,8 @@ pub fn environment(native: VfsView) -> Result<(Environment, Vec<VfsView>), &'sta
     const OTHER_ABIS: &[&str] = &["linux-aarch64"];
     #[cfg(target_arch = "riscv64")]
     const OTHER_ABIS: &[&str] = &["linux-riscv64", "xv6-riscv64"];
+    #[cfg(target_arch = "riscv32")]
+    const OTHER_ABIS: &[&str] = &[];
     let mut views = Vec::new();
     for abi in OTHER_ABIS {
         let root = format!("/systems/{}", abi);

@@ -142,17 +142,7 @@ struct NetworkStatus {
 const NETWORK_CONFIGURE_HAS_GATEWAY: u32 = 1 << 0;
 const NETWORK_CONFIGURE_MAKE_DEFAULT: u32 = 1 << 1;
 
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct NetworkConfigureIpv4Request {
-    iface_ptr: usize,
-    iface_len: usize,
-    address: [u8; 4],
-    netmask: [u8; 4],
-    gateway: [u8; 4],
-    flags: u32,
-    metric: u32,
-}
+use scarlet_abi::RawNetworkConfigureIpv4Request as NetworkConfigureIpv4Request;
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
@@ -169,7 +159,6 @@ struct NetworkInterfaceInfoV2 {
     metric: u32,
 }
 
-const _: [(); 40] = [(); core::mem::size_of::<NetworkConfigureIpv4Request>()];
 const _: [(); 60] = [(); core::mem::size_of::<NetworkInterfaceInfoV2>()];
 
 fn read_user_string(ptr: usize, len: usize) -> Option<String> {

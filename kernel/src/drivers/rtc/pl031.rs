@@ -42,7 +42,7 @@ fn pl031_rtc_probe(device_info: &PlatformDeviceInfo) -> Result<(), &'static str>
         .ok_or("No memory resource found for pl031-rtc")?;
 
     let paddr = memory_resource.start;
-    let size = memory_resource.end - memory_resource.start + 1;
+    let size = memory_resource.size()?;
     let base = crate::vm::ioremap(paddr, size).inspect_err(|e| {
         crate::println!(
             "pl031-rtc: ioremap({:#x}, {:#x}) failed: {}",

@@ -1,9 +1,10 @@
 use crate::arch::vm::mmu::{PageTable as ArchPageTable, PageTableEntry as ArchPageTableEntry};
-use crate::environment::{KERNEL_HEAP_BASE, PAGE_SIZE, SCARLET_HHDM_BASE};
+use crate::environment::{KERNEL_HEAP_BASE, PAGE_SIZE};
+use crate::mem::address::PhysAddr;
 use crate::mem::pmm;
 use crate::vm::addr::{boot_phys_to_virt, kernel_virt_to_phys};
-use crate::vm::direct_map::DirectMapRegions;
-use crate::vm::vmem::{MemoryArea, MemoryAttribute, VirtualMemoryPermission};
+use crate::vm::direct_map::{DirectMapRegions, DirectMapWindow};
+use crate::vm::vmem::{MemoryArea, MemoryAttribute, PhysicalMemoryArea, VirtualMemoryPermission};
 
 const BOOT_ASID: u16 = 0;
 
@@ -15,18 +16,23 @@ fn align_up(addr: usize, align: usize) -> usize {
     (addr + align - 1) & !(align - 1)
 }
 
-fn direct_map_virtual_area(physical_area: MemoryArea) -> MemoryArea {
+fn direct_map_virtual_area(
+    window: DirectMapWindow,
+    physical_area: PhysicalMemoryArea,
+) -> MemoryArea {
     MemoryArea {
-        start: SCARLET_HHDM_BASE
-            .checked_add(physical_area.start)
-            .expect("direct-map virtual start overflows"),
-        end: SCARLET_HHDM_BASE
-            .checked_add(physical_area.end)
-            .expect("direct-map virtual end overflows"),
+        start: window
+            .phys_to_virt(PhysAddr::new(physical_area.start))
+            .expect("physical range exceeds boot window")
+            .as_usize(),
+        end: window
+            .phys_to_virt(PhysAddr::new(physical_area.end))
+            .expect("physical range exceeds boot window")
+            .as_usize(),
     }
 }
 
-fn alloc_boot_pagetable() -> (usize, *mut ArchPageTable) {
+fn alloc_boot_pagetable() -> (u64, *mut ArchPageTable) {
     let paddr = pmm::alloc_frame().expect("Failed to allocate boot page table frame");
     let vaddr = boot_phys_to_virt(paddr);
     unsafe {
@@ -37,24 +43,21 @@ fn alloc_boot_pagetable() -> (usize, *mut ArchPageTable) {
     (paddr, vaddr as *mut ArchPageTable)
 }
 
-#[cfg(target_arch = "riscv64")]
+#[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
 fn boot_walk(
     root: *mut ArchPageTable,
     vaddr: usize,
     alloc: bool,
 ) -> Option<&'static mut ArchPageTableEntry> {
-    let canonical_check = (vaddr >> 47) & 1;
-    let upper_bits = (vaddr >> 48) & 0xffff;
-    if canonical_check == 1 && upper_bits != 0xffff {
-        return None;
-    } else if canonical_check == 0 && upper_bits != 0 {
+    use crate::arch::vm::mmu::{INDEX_BITS, MAX_PAGING_LEVEL, TABLE_ENTRIES, is_canonical};
+    if !is_canonical(vaddr) {
         return None;
     }
 
     let mut pagetable = root;
     unsafe {
-        for level in (1..=3).rev() {
-            let vpn = (vaddr >> (12 + 9 * level)) & 0x1ff;
+        for level in (1..=MAX_PAGING_LEVEL).rev() {
+            let vpn = (vaddr >> (12 + INDEX_BITS * level)) & (TABLE_ENTRIES - 1);
             let pte = &mut (*pagetable).entries[vpn];
 
             if pte.is_valid() {
@@ -74,21 +77,21 @@ fn boot_walk(
             }
         }
 
-        let vpn = (vaddr >> 12) & 0x1ff;
+        let vpn = (vaddr >> 12) & (TABLE_ENTRIES - 1);
         Some(&mut (*pagetable).entries[vpn])
     }
 }
 
-#[cfg(target_arch = "riscv64")]
+#[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
 fn boot_map_page(
     root: *mut ArchPageTable,
     vaddr: usize,
-    paddr: usize,
+    paddr: u64,
     permissions: usize,
     _memory_attribute: MemoryAttribute,
 ) {
     let vaddr = vaddr & !(PAGE_SIZE - 1);
-    let paddr = paddr & !(PAGE_SIZE - 1);
+    let paddr = paddr & !(PAGE_SIZE as u64 - 1);
     let pte = boot_walk(root, vaddr, true).expect("boot_map_page: failed to allocate walk path");
 
     pte.clear_all();
@@ -158,7 +161,7 @@ fn boot_walk(
 fn boot_map_page(
     root: *mut ArchPageTable,
     vaddr: usize,
-    paddr: usize,
+    paddr: u64,
     permissions: usize,
     memory_attribute: MemoryAttribute,
 ) {
@@ -171,7 +174,7 @@ fn boot_map_page(
     }
 
     let vaddr = vaddr & !(PAGE_SIZE - 1);
-    let paddr = paddr & !(PAGE_SIZE - 1);
+    let paddr = paddr & !(PAGE_SIZE as u64 - 1);
     let pte = boot_walk(root, vaddr, true).expect("boot_map_page: failed to allocate walk path");
 
     pte.set_entry(ArchPageTable::make_leaf_entry(
@@ -190,12 +193,12 @@ fn boot_map_page(
 fn boot_map_range(
     root: *mut ArchPageTable,
     varea: MemoryArea,
-    parea: MemoryArea,
+    parea: PhysicalMemoryArea,
     permissions: usize,
     memory_attribute: MemoryAttribute,
 ) {
     if varea.start % PAGE_SIZE != 0
-        || parea.start % PAGE_SIZE != 0
+        || parea.start % PAGE_SIZE as u64 != 0
         || varea.size() % PAGE_SIZE != 0
         || parea.size() % PAGE_SIZE != 0
     {
@@ -213,16 +216,17 @@ fn boot_map_range(
             .checked_add(PAGE_SIZE)
             .expect("boot_map_range: vaddr overflow");
         paddr = paddr
-            .checked_add(PAGE_SIZE)
+            .checked_add(PAGE_SIZE as u64)
             .expect("boot_map_range: paddr overflow");
     }
 }
 
 #[allow(static_mut_refs)]
 pub fn switch_to_boot_page_table(
+    direct_map: DirectMapWindow,
     direct_map_regions: DirectMapRegions,
-    initramfs_paddr: Option<MemoryArea>,
-    heap_paddr: MemoryArea,
+    initramfs_paddr: Option<PhysicalMemoryArea>,
+    heap_paddr: PhysicalMemoryArea,
 ) {
     unsafe extern "C" {
         static __KERNEL_SPACE_START: usize;
@@ -241,14 +245,14 @@ pub fn switch_to_boot_page_table(
             PAGE_SIZE,
         ) - 1,
     };
-    let kernel_phys_area = MemoryArea {
-        start: align_down(kernel_virt_to_phys(kernel_area.start), PAGE_SIZE),
-        end: align_up(kernel_virt_to_phys(kernel_area.end) + 1, PAGE_SIZE) - 1,
+    let kernel_phys_area = PhysicalMemoryArea {
+        start: phys_align_down(kernel_virt_to_phys(kernel_area.start), PAGE_SIZE as u64),
+        end: phys_align_up(kernel_virt_to_phys(kernel_area.end) + 1, PAGE_SIZE as u64) - 1,
     };
 
-    let heap_phys_area = MemoryArea {
-        start: align_down(heap_paddr.start, PAGE_SIZE),
-        end: align_up(heap_paddr.end + 1, PAGE_SIZE) - 1,
+    let heap_phys_area = PhysicalMemoryArea {
+        start: phys_align_down(heap_paddr.start, PAGE_SIZE as u64),
+        end: phys_align_up(heap_paddr.end + 1, PAGE_SIZE as u64) - 1,
     };
     let heap_area = MemoryArea {
         start: KERNEL_HEAP_BASE,
@@ -271,7 +275,7 @@ pub fn switch_to_boot_page_table(
         let physical_area = region.area();
         boot_map_range(
             root,
-            direct_map_virtual_area(physical_area),
+            direct_map_virtual_area(direct_map, physical_area),
             physical_area,
             VirtualMemoryPermission::Read as usize | VirtualMemoryPermission::Write as usize,
             region.memory_attribute(),
@@ -286,9 +290,9 @@ pub fn switch_to_boot_page_table(
     );
 
     if let Some(initramfs) = initramfs_paddr {
-        let initramfs_phys_area = MemoryArea {
-            start: align_down(initramfs.start, PAGE_SIZE),
-            end: align_up(initramfs.end + 1, PAGE_SIZE) - 1,
+        let initramfs_phys_area = PhysicalMemoryArea {
+            start: phys_align_down(initramfs.start, PAGE_SIZE as u64),
+            end: phys_align_up(initramfs.end + 1, PAGE_SIZE as u64) - 1,
         };
         if !direct_map_regions
             .contains_area_with_attribute(initramfs_phys_area, MemoryAttribute::Normal)
@@ -300,7 +304,7 @@ pub fn switch_to_boot_page_table(
                 });
             boot_map_range(
                 root,
-                direct_map_virtual_area(initramfs_phys_area),
+                direct_map_virtual_area(direct_map, initramfs_phys_area),
                 initramfs_phys_area,
                 VirtualMemoryPermission::Read as usize | VirtualMemoryPermission::Write as usize,
                 MemoryAttribute::Normal,
@@ -311,4 +315,13 @@ pub fn switch_to_boot_page_table(
     unsafe {
         (*root).switch_for_boot(BOOT_ASID);
     }
+}
+
+fn phys_align_down(addr: u64, align: u64) -> u64 {
+    addr & !(align - 1)
+}
+fn phys_align_up(addr: u64, align: u64) -> u64 {
+    addr.checked_add(align - 1)
+        .expect("physical alignment overflows")
+        & !(align - 1)
 }

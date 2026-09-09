@@ -59,11 +59,13 @@ pub fn register_emergency_putc(putc: EmergencyPutc) {
 
 /// Write a single byte through the registered emergency emitter.
 ///
-/// No-op when no emitter has been registered (e.g. very early boot or a
-/// platform without a UART driver).
+/// Before UART discovery, RISC-V can still use the firmware's byte console.
+/// This path must not acquire the ordinary early-console or log-ring locks.
 pub fn emergency_putc(byte: u8) {
     let addr = EMERGENCY_PUTC.load(Ordering::Acquire);
     if addr == 0 {
+        #[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
+        crate::arch::riscv::earlycon::early_putc(byte);
         return;
     }
     // SAFETY: the address was published by `register_emergency_putc` from a

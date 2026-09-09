@@ -68,7 +68,7 @@ impl TimerController for SstcTimer {
 
     /// Get current timer value
     fn get_time(&self) -> u64 {
-        read_rdtime()
+        crate::arch::riscv::timer::read_time()
     }
 
     /// Returns the timer clock frequency in Hz
@@ -80,20 +80,7 @@ impl TimerController for SstcTimer {
 unsafe impl Send for SstcTimer {}
 unsafe impl Sync for SstcTimer {}
 
-fn read_rdtime() -> u64 {
-    let time: u64;
-    // SAFETY: rdtime reads the architectural RISC-V time counter and has no
-    // memory side effects.
-    unsafe {
-        asm!(
-            "rdtime {0}",
-            out(reg) time,
-            options(nostack, nomem)
-        );
-    }
-    time
-}
-
+#[cfg(target_pointer_width = "64")]
 fn read_stimecmp() -> u64 {
     let time: u64;
     // SAFETY: this driver registers only when FDT reports the Sstc extension.
@@ -107,6 +94,7 @@ fn read_stimecmp() -> u64 {
     time
 }
 
+#[cfg(target_pointer_width = "64")]
 fn write_stimecmp(time: u64) {
     // SAFETY: this driver registers only when FDT reports the Sstc extension.
     unsafe {
@@ -118,13 +106,41 @@ fn write_stimecmp(time: u64) {
     }
 }
 
+#[cfg(target_pointer_width = "32")]
+fn read_stimecmp() -> u64 {
+    let saved = crate::arch::interrupt::save_and_disable_interrupts();
+    let low: u32;
+    let high: u32;
+    // SAFETY: Sstc is probed before registration, and IRQ masking excludes a
+    // local timer reprogram between the two CSR reads.
+    unsafe {
+        asm!("csrr {low}, stimecmp", "csrr {high}, stimecmph",
+            low = out(reg) low, high = out(reg) high, options(nostack));
+    }
+    crate::arch::interrupt::restore_interrupts(saved);
+    (high as u64) << 32 | low as u64
+}
+
+#[cfg(target_pointer_width = "32")]
+fn write_stimecmp(time: u64) {
+    let saved = crate::arch::interrupt::save_and_disable_interrupts();
+    // SAFETY: while IRQs are masked, first move the deadline into the future,
+    // then install both halves. No intermediate value can trigger an early IRQ.
+    unsafe {
+        asm!("csrw stimecmph, {max}", "csrw stimecmp, {low}", "csrw stimecmph, {high}",
+            max = in(reg) u32::MAX, low = in(reg) time as u32,
+            high = in(reg) (time >> 32) as u32, options(nostack));
+    }
+    crate::arch::interrupt::restore_interrupts(saved);
+}
+
 fn register_driver() {
-    if !crate::arch::riscv64::fdt::all_cpus_have_isa_extension_from_fdt("sstc").unwrap_or(false) {
+    if !crate::arch::riscv::fdt::all_cpus_have_isa_extension_from_fdt("sstc").unwrap_or(false) {
         return;
     }
 
     let timebase_frequency_hz =
-        crate::arch::riscv64::fdt::timebase_frequency_hz_from_fdt().unwrap_or(10_000_000);
+        crate::arch::riscv::fdt::timebase_frequency_hz_from_fdt().unwrap_or(10_000_000);
 
     let controller = Box::new(SstcTimer {
         max_cpus: crate::environment::MAX_NUM_CPUS as usize,

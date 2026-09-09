@@ -153,17 +153,19 @@ impl<'a> FileObject<'a> {
     pub fn seek(&self, pos: SeekFrom) -> FileResult<u64> {
         let (offset, whence) = pos.to_syscall_args();
 
-        // SAFETY: The borrowed handle remains live; offset and whence are scalar seek arguments.
-        let result = unsafe {
-            syscall3(
-                Syscall::FileSeek,
-                self.handle.as_raw() as usize,
-                offset as usize,
-                whence as usize,
-            )
-        };
-
-        FileError::from_syscall_result(result).map(|pos| pos as u64)
+        let words = scarlet_sys::native_scalar::u64_to_words(offset as u64);
+        let mut args = [0; 6];
+        args[0] = self.handle.as_raw() as usize;
+        args[1..1 + words.len()].copy_from_slice(&words);
+        args[1 + words.len()] = whence as usize;
+        // SAFETY: The handle stays live. The signed offset retains all its bits,
+        // and the argument/result slots follow the Native wide-scalar convention.
+        let result = unsafe { scarlet_sys::syscall_u64(Syscall::FileSeek, args) };
+        if result == u64::MAX {
+            Err(FileError::SystemError(-1))
+        } else {
+            Ok(result)
+        }
     }
 
     /// Truncate the file to the specified size
@@ -174,12 +176,17 @@ impl<'a> FileObject<'a> {
     /// # Returns
     /// Success or FileError on failure
     pub fn truncate(&self, size: u64) -> FileResult<()> {
-        // SAFETY: The borrowed file handle remains live; the kernel validates the scalar length.
+        let words = scarlet_sys::native_scalar::u64_to_words(size);
+        let mut args = [0; 2];
+        args[..words.len()].copy_from_slice(&words);
+        // SAFETY: The borrowed file handle remains live; the full-width scalar
+        // length is encoded in the Native ABI's one or two consecutive words.
         let result = unsafe {
-            syscall2(
+            syscall3(
                 Syscall::FileTruncate,
                 self.handle.as_raw() as usize,
-                size as usize,
+                args[0],
+                args[1],
             )
         };
 

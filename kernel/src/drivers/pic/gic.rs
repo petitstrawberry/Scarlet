@@ -560,7 +560,8 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
     };
     let dist_size = mem_resources
         .get(0)
-        .map(|r| r.end - r.start + 1)
+        .map(|r| r.size())
+        .transpose()?
         .unwrap_or(0x10000);
 
     // Map GIC distributor MMIO region.
@@ -578,7 +579,7 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
     // Fallback: common GICv2 layout uses dist + 0x10000.
     let cpu_base_addr = if let Some(cpu_res) = mem_resources.get(1) {
         let cpu_paddr = cpu_res.start;
-        let cpu_size = cpu_res.end - cpu_res.start + 1;
+        let cpu_size = cpu_res.size()?;
         crate::vm::ioremap(cpu_paddr, cpu_size).map_err(|e| {
             crate::println!(
                 "[interrupt] GIC cpu ioremap({:#x}, {:#x}) failed: {}",

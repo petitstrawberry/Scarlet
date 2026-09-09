@@ -1,44 +1,7 @@
-//! ELF Loading Module
-//!
-//! This module provides functionality for loading ELF (Executable and Linkable Format)
-//! executables into a task's memory space. It supports 64-bit ELF files with full dynamic
-//! linking capabilities and handles the parsing of ELF headers and program headers, as well
-//! as the mapping of loadable segments into memory.
-//!
-//! # Components
-//!
-//! - `ElfHeader`: Represents the ELF file header which contains metadata about the file
-//! - `ProgramHeader`: Represents a program header which describes a segment in the ELF file
-//! - `LoadedSegment`: Represents a segment after it has been loaded into memory
-//! - Dynamic linking support for shared libraries and position-independent executables
-//! - Error types for handling various failure scenarios during ELF parsing and loading
-//!
-//! # Main Functions
-//!
-//! - `load_elf_into_task`: Loads an ELF file from a file object into a task's memory space
-//! - `map_elf_segment`: Maps an ELF segment into a task's virtual memory
-//! - Dynamic linker integration for shared library resolution
-//!
-//! # Dynamic Linking Support
-//!
-//! The module now includes comprehensive dynamic linking capabilities:
-//! - Dynamic symbol resolution
-//! - Shared library loading and linking
-//! - Position-independent executable (PIE) support
-//! - Runtime relocation handling
-//!
-//! # Constants
-//!
-//! The module defines various constants for ELF parsing, including:
-//! - Magic numbers for identifying ELF files
-//! - ELF class identifiers (64-bit)
-//! - Data encoding formats (little/big endian)
-//! - Program header types and segment flags (Read/Write/Execute)
-//!
-//! # Endian Support
-//!
-//! The module provides endian-aware data reading functions to correctly parse ELF files
-//! regardless of the endianness used in the file.
+//! Native ELF process loading. Headers are decoded as ELF32 or ELF64, then
+//! checked against the selected native machine and ABI before mapping PT_LOAD.
+//! PT_INTERP transfers control to a userspace linker; symbol resolution and
+//! library relocation remain the linker's responsibility.
 
 use crate::environment::PAGE_SIZE;
 use crate::fs::{FileObject, SeekFrom};
@@ -55,7 +18,7 @@ use super::TaskType;
 // ELF Magic Number
 const ELFMAG: [u8; 4] = [0x7F, b'E', b'L', b'F'];
 // ELF Class
-// const ELFCLASS32: u8 = 1; // 32-bit
+const ELFCLASS32: u8 = 1; // 32-bit
 const ELFCLASS64: u8 = 2; // 64-bit
 // ELF Data Endian
 const ELFDATA2LSB: u8 = 1; // Little Endian
@@ -275,101 +238,196 @@ pub struct ElfLoaderError {
     pub message: String,
 }
 
-impl ElfHeader {
-    pub fn parse(buffer: &[u8]) -> Result<Self, ElfHeaderParseError> {
-        if buffer.len() < 64 {
-            return Err(ElfHeaderParseError {
-                kind: ElfHeaderParseErrorKind::InvalidData,
-                message: "ELF header too small".to_string(),
-            });
-        }
+fn elf_sizes(class: u8) -> Option<(usize, usize)> {
+    match class {
+        ELFCLASS32 => Some((52, 32)),
+        ELFCLASS64 => Some((64, 56)),
+        _ => None,
+    }
+}
 
-        if buffer[EI_MAG0] != ELFMAG[0]
-            || buffer[EI_MAG1] != ELFMAG[1]
-            || buffer[EI_MAG2] != ELFMAG[2]
-            || buffer[EI_MAG3] != ELFMAG[3]
-        {
+impl ElfHeader {
+    /// Decode the file's own class, independently of the host pointer width.
+    pub fn parse(buffer: &[u8]) -> Result<Self, ElfHeaderParseError> {
+        let invalid = |message: &str| ElfHeaderParseError {
+            kind: ElfHeaderParseErrorKind::InvalidData,
+            message: message.to_string(),
+        };
+        if buffer.len() < 16 {
+            return Err(invalid("ELF identification is truncated"));
+        }
+        if buffer[..4] != ELFMAG {
             return Err(ElfHeaderParseError {
                 kind: ElfHeaderParseErrorKind::InvalidMagicNumber,
                 message: "Invalid ELF magic number".to_string(),
             });
         }
-
         let ei_class = buffer[EI_CLASS];
-        if ei_class != ELFCLASS64 {
-            return Err(ElfHeaderParseError {
-                kind: ElfHeaderParseErrorKind::UnsupportedClass,
-                message: "Only 64-bit ELF is supported".to_string(),
-            });
+        let (header_size, ph_size) = elf_sizes(ei_class).ok_or_else(|| ElfHeaderParseError {
+            kind: ElfHeaderParseErrorKind::UnsupportedClass,
+            message: "Unknown ELF class".to_string(),
+        })?;
+        if buffer.len() < header_size {
+            return Err(invalid("ELF header is truncated"));
         }
-
-        // Read each field considering endianness
         let ei_data = buffer[EI_DATA];
-        let is_little_endian = ei_data == ELFDATA2LSB;
-        let e_type = read_u16(buffer, 16, is_little_endian);
-        let e_machine = read_u16(buffer, 18, is_little_endian);
-        let e_version = read_u32(buffer, 20, is_little_endian);
-        let e_entry = read_u64(buffer, 24, is_little_endian);
-        let e_phoff = read_u64(buffer, 32, is_little_endian);
-        let e_shoff = read_u64(buffer, 40, is_little_endian);
-        let e_flags = read_u32(buffer, 48, is_little_endian);
-        let e_ehsize = read_u16(buffer, 52, is_little_endian);
-        let e_phentsize = read_u16(buffer, 54, is_little_endian);
-        let e_phnum = read_u16(buffer, 56, is_little_endian);
-        let e_shentsize = read_u16(buffer, 58, is_little_endian);
-        let e_shnum = read_u16(buffer, 60, is_little_endian);
-        let e_shstrndx = read_u16(buffer, 62, is_little_endian);
-
-        Ok(Self {
+        if !matches!(ei_data, 1 | 2) || buffer[6] != 1 {
+            return Err(invalid("Invalid ELF encoding or identification version"));
+        }
+        let le = ei_data == ELFDATA2LSB;
+        let (e_entry, e_phoff, e_shoff, tail) = match ei_class {
+            ELFCLASS32 => (
+                read_u32(buffer, 24, le) as u64,
+                read_u32(buffer, 28, le) as u64,
+                read_u32(buffer, 32, le) as u64,
+                36,
+            ),
+            ELFCLASS64 => (
+                read_u64(buffer, 24, le),
+                read_u64(buffer, 32, le),
+                read_u64(buffer, 40, le),
+                48,
+            ),
+            _ => unreachable!(),
+        };
+        let header = Self {
             ei_class,
             ei_data,
-            e_type,
-            e_machine,
-            e_version,
+            e_type: read_u16(buffer, 16, le),
+            e_machine: read_u16(buffer, 18, le),
+            e_version: read_u32(buffer, 20, le),
             e_entry,
             e_phoff,
             e_shoff,
-            e_flags,
-            e_ehsize,
-            e_phentsize,
-            e_phnum,
-            e_shentsize,
-            e_shnum,
-            e_shstrndx,
-        })
+            e_flags: read_u32(buffer, tail, le),
+            e_ehsize: read_u16(buffer, tail + 4, le),
+            e_phentsize: read_u16(buffer, tail + 6, le),
+            e_phnum: read_u16(buffer, tail + 8, le),
+            e_shentsize: read_u16(buffer, tail + 10, le),
+            e_shnum: read_u16(buffer, tail + 12, le),
+            e_shstrndx: read_u16(buffer, tail + 14, le),
+        };
+        if header.e_version != 1
+            || header.e_ehsize as usize != header_size
+            || (header.e_phnum != 0 && header.e_phentsize as usize != ph_size)
+        {
+            return Err(invalid("ELF version or header entry sizes are invalid"));
+        }
+        Ok(header)
+    }
+
+    fn validate_executable(&self) -> Result<(), ElfLoaderError> {
+        let class = if usize::BITS == 32 {
+            ELFCLASS32
+        } else {
+            ELFCLASS64
+        };
+        #[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
+        let machine = 243;
+        #[cfg(target_arch = "aarch64")]
+        let machine = 183;
+        if self.ei_class != class || self.e_machine != machine || self.ei_data != ELFDATA2LSB {
+            return Err(elf_error(
+                "ELF class, machine or byte order does not match the execution architecture",
+            ));
+        }
+        if !matches!(self.e_type, ET_EXEC | ET_DYN) || self.e_phnum == 0 || self.e_phnum == u16::MAX
+        {
+            return Err(elf_error(
+                "ELF is not an executable with a supported program-header table",
+            ));
+        }
+        self.e_phoff
+            .checked_add(self.e_phnum as u64 * self.e_phentsize as u64)
+            .ok_or_else(|| elf_error("ELF program-header table overflows"))?;
+        #[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
+        {
+            use crate::arch::riscv::fdt::all_cpus_have_isa_extension_from_fdt as all_have;
+            let float_abi = self.e_flags & 6;
+            if self.e_flags & !0x1f != 0
+                || self.e_flags & 8 != 0
+                || float_abi == 6
+                || (float_abi != 0 && !crate::arch::user_fpu_enabled())
+                || (self.e_flags & 1 != 0
+                    && !(all_have("c").unwrap_or(false) || all_have("zca").unwrap_or(false)))
+                || (self.e_flags & 0x10 != 0 && !all_have("ztso").unwrap_or(false))
+            {
+                return Err(elf_error(
+                    "RISC-V ELF ABI flags require unsupported register state or ISA features",
+                ));
+            }
+        }
+        Ok(())
     }
 }
 
 impl ProgramHeader {
-    pub fn parse(buffer: &[u8], is_little_endian: bool) -> Result<Self, ProgramHeaderParseError> {
-        if buffer.len() < 56 {
-            return Err(ProgramHeaderParseError {
-                kind: ProgramHeaderParseErrorKind::InvalidSize,
-                message: "Program header too small".to_string(),
-            });
+    pub fn parse(buffer: &[u8], class: u8, le: bool) -> Result<Self, ProgramHeaderParseError> {
+        let invalid = || ProgramHeaderParseError {
+            kind: ProgramHeaderParseErrorKind::InvalidSize,
+            message: "Unsupported or truncated program header".to_string(),
+        };
+        let (_, size) = elf_sizes(class).ok_or_else(invalid)?;
+        if buffer.len() < size {
+            return Err(invalid());
         }
-
-        // Read each field considering endianness
-        let p_type = read_u32(buffer, 0, is_little_endian);
-        let p_flags = read_u32(buffer, 4, is_little_endian);
-        let p_offset = read_u64(buffer, 8, is_little_endian);
-        let p_vaddr = read_u64(buffer, 16, is_little_endian);
-        let p_paddr = read_u64(buffer, 24, is_little_endian);
-        let p_filesz = read_u64(buffer, 32, is_little_endian);
-        let p_memsz = read_u64(buffer, 40, is_little_endian);
-        let p_align = read_u64(buffer, 48, is_little_endian);
-
-        Ok(Self {
-            p_type,
-            p_flags,
-            p_offset,
-            p_vaddr,
-            p_paddr,
-            p_filesz,
-            p_memsz,
-            p_align,
+        Ok(match class {
+            ELFCLASS32 => Self {
+                p_type: read_u32(buffer, 0, le),
+                p_offset: read_u32(buffer, 4, le) as u64,
+                p_vaddr: read_u32(buffer, 8, le) as u64,
+                p_paddr: read_u32(buffer, 12, le) as u64,
+                p_filesz: read_u32(buffer, 16, le) as u64,
+                p_memsz: read_u32(buffer, 20, le) as u64,
+                p_flags: read_u32(buffer, 24, le),
+                p_align: read_u32(buffer, 28, le) as u64,
+            },
+            ELFCLASS64 => Self {
+                p_type: read_u32(buffer, 0, le),
+                p_flags: read_u32(buffer, 4, le),
+                p_offset: read_u64(buffer, 8, le),
+                p_vaddr: read_u64(buffer, 16, le),
+                p_paddr: read_u64(buffer, 24, le),
+                p_filesz: read_u64(buffer, 32, le),
+                p_memsz: read_u64(buffer, 40, le),
+                p_align: read_u64(buffer, 48, le),
+            },
+            _ => unreachable!(),
         })
     }
+}
+
+fn elf_error(message: &str) -> ElfLoaderError {
+    ElfLoaderError {
+        message: message.to_string(),
+    }
+}
+
+fn read_exact(file: &dyn FileObject, mut buffer: &mut [u8]) -> Result<(), ElfLoaderError> {
+    while !buffer.is_empty() {
+        let read = file.read(buffer).map_err(|error| ElfLoaderError {
+            message: format!("ELF read failed: {:?}", error),
+        })?;
+        if read == 0 || read > buffer.len() {
+            return Err(elf_error("ELF file is truncated"));
+        }
+        buffer = &mut buffer[read..];
+    }
+    Ok(())
+}
+
+fn read_elf_header(file: &dyn FileObject) -> Result<ElfHeader, ElfLoaderError> {
+    file.seek(SeekFrom::Start(0))
+        .map_err(|_| elf_error("ELF header seek failed"))?;
+    let mut bytes = [0u8; 64];
+    read_exact(file, &mut bytes[..16])?;
+    let (size, _) = elf_sizes(bytes[EI_CLASS]).ok_or_else(|| elf_error("Unsupported ELF class"))?;
+    read_exact(file, &mut bytes[16..size])?;
+    let header = ElfHeader::parse(&bytes[..size]).map_err(|error| ElfLoaderError {
+        message: error.message,
+    })?;
+    header.validate_executable()?;
+    Ok(header)
 }
 
 /// Read and parse a program header at the specified index
@@ -378,7 +436,13 @@ fn read_program_header(
     file_obj: &dyn FileObject,
     index: u16,
 ) -> Result<ProgramHeader, ElfLoaderError> {
-    let offset = header.e_phoff + (index as u64) * (header.e_phentsize as u64);
+    if index >= header.e_phnum {
+        return Err(elf_error("Program header index out of bounds"));
+    }
+    let offset = header
+        .e_phoff
+        .checked_add(index as u64 * header.e_phentsize as u64)
+        .ok_or_else(|| elf_error("Program header offset overflows"))?;
     file_obj
         .seek(SeekFrom::Start(offset))
         .map_err(|e| ElfLoaderError {
@@ -386,13 +450,27 @@ fn read_program_header(
         })?;
 
     let mut ph_buffer = vec![0u8; header.e_phentsize as usize];
-    file_obj.read(&mut ph_buffer).map_err(|e| ElfLoaderError {
-        message: format!("Failed to read program header {}: {:?}", index, e),
-    })?;
-
-    ProgramHeader::parse(&ph_buffer, header.ei_data == ELFDATA2LSB).map_err(|e| ElfLoaderError {
-        message: format!("Failed to parse program header {}: {:?}", index, e),
-    })
+    read_exact(file_obj, &mut ph_buffer)?;
+    let ph = ProgramHeader::parse(&ph_buffer, header.ei_class, header.ei_data == ELFDATA2LSB)
+        .map_err(|error| ElfLoaderError {
+            message: error.message,
+        })?;
+    if ph.p_type == PT_LOAD {
+        if ph.p_filesz > ph.p_memsz
+            || (ph.p_align > 1
+                && (!ph.p_align.is_power_of_two()
+                    || ph.p_vaddr % ph.p_align != ph.p_offset % ph.p_align))
+        {
+            return Err(elf_error("Invalid ELF segment size or alignment"));
+        }
+        ph.p_vaddr
+            .checked_add(ph.p_memsz)
+            .ok_or_else(|| elf_error("ELF segment address overflows"))?;
+    }
+    ph.p_offset
+        .checked_add(ph.p_filesz)
+        .ok_or_else(|| elf_error("ELF segment file range overflows"))?;
+    Ok(ph)
 }
 
 /// Iterate through all program headers and call a closure for each one
@@ -493,124 +571,48 @@ pub fn analyze_and_load_elf_with_strategy(
     task: &Task,
     strategy: &LoadStrategy,
 ) -> Result<LoadElfResult, ElfLoaderError> {
-    // Move to the beginning of the file
-    file_obj
-        .seek(SeekFrom::Start(0))
-        .map_err(|e| ElfLoaderError {
-            message: format!("Failed to seek to start of file: {:?}", e),
-        })?;
-
-    // Read the ELF header
-    let mut header_buffer = vec![0u8; 64]; // 64-bit ELF header size
-    file_obj
-        .read(&mut header_buffer)
-        .map_err(|e| ElfLoaderError {
-            message: format!("Failed to read ELF header: {:?}", e),
-        })?;
-
-    let header = match ElfHeader::parse(&header_buffer) {
-        Ok(header) => header,
-        Err(e) => {
-            return Err(ElfLoaderError {
-                message: format!("Failed to parse ELF header: {:?}", e),
-            });
-        }
+    let header = read_elf_header(file_obj)?;
+    let interpreter = match find_interpreter_path(&header, file_obj)? {
+        Some(path) => Some(
+            (strategy.resolve_interpreter)(Some(&path))
+                .ok_or_else(|| elf_error("Dynamic linking not supported by current ABI"))?,
+        ),
+        None => None,
     };
-
-    // Step 1: Check for PT_INTERP segment
-    let interpreter_path = find_interpreter_path(&header, file_obj)?;
-
-    // Convert ELF type to format-agnostic information
     let needs_relocation = header.e_type == ET_DYN;
-
-    match interpreter_path {
-        Some(interp_path) => {
-            // Dynamic linking required
-            crate::println!(
-                "ELF requires dynamic linking with interpreter: {}",
-                interp_path
-            );
-
-            // Let strategy resolve the actual interpreter to use
-            let actual_interpreter = (strategy.resolve_interpreter)(Some(&interp_path));
-
-            if let Some(final_interp_path) = actual_interpreter {
-                crate::println!("Using interpreter: {}", final_interp_path);
-                let base_address =
-                    load_elf_segments_for_interpreter(&header, file_obj, task, strategy)?;
-                let (interpreter_entry, interpreter_base) =
-                    load_interpreter(&final_interp_path, task, strategy)?;
-
-                // Prepare program headers info for auxiliary vector
-                let phdr_info = ProgramHeadersInfo {
-                    phdr_addr: base_address + header.e_phoff,
-                    phdr_size: header.e_phentsize as u64,
-                    phdr_count: header.e_phnum as u64,
-                };
-
-                // Calculate original entry point correctly based on ELF type
-                // For ET_EXEC: e_entry is an absolute address
-                // For ET_DYN: e_entry is relative to base_address
-                let original_entry = if needs_relocation {
-                    base_address + header.e_entry
-                } else {
-                    header.e_entry
-                };
-
-                Ok(LoadElfResult {
-                    mode: ExecutionMode::Dynamic {
-                        interpreter_path: final_interp_path,
-                    },
-                    entry_point: interpreter_entry,
-                    original_entry_point: Some(original_entry),
-                    base_address: Some(base_address),
-                    interpreter_base: Some(interpreter_base),
-                    program_headers: phdr_info,
-                })
-            } else {
-                // Strategy rejected dynamic linking (e.g., xv6 ABI)
-                return Err(ElfLoaderError {
-                    message: "Dynamic linking not supported by current ABI".to_string(),
-                });
-            }
-        }
-        None => {
-            // Static linking - use existing implementation
-            let base_address =
-                (strategy.choose_base_address)(LoadTarget::MainProgram, needs_relocation);
-            let entry_point = load_elf_into_task_static(&header, file_obj, task, strategy)?;
-
-            // For static executables, load program headers into memory if needed
-            let phdr_info = if needs_relocation {
-                // PIE static executable - program headers are loaded with the executable
-                ProgramHeadersInfo {
-                    phdr_addr: base_address + header.e_phoff,
-                    phdr_size: header.e_phentsize as u64,
-                    phdr_count: header.e_phnum as u64,
-                }
-            } else {
-                // Traditional static executable - load program headers into memory
-                let phdr_mem_addr = load_program_headers_into_memory(&header, file_obj, task)?;
-                ProgramHeadersInfo {
-                    phdr_addr: phdr_mem_addr,
-                    phdr_size: header.e_phentsize as u64,
-                    phdr_count: header.e_phnum as u64,
-                }
-            };
-
-            Ok(LoadElfResult {
-                mode: ExecutionMode::Static,
-                entry_point,
-                original_entry_point: None, // Same as entry_point for static executables
-                base_address: if needs_relocation {
-                    Some(base_address)
-                } else {
-                    None
-                },
-                interpreter_base: None, // No interpreter for static linking
-                program_headers: phdr_info,
-            })
-        }
+    let base = if needs_relocation {
+        (strategy.choose_base_address)(LoadTarget::MainProgram, true)
+    } else {
+        0
+    };
+    load_elf_segments_with_base(&header, file_obj, task, base, true)?;
+    let entry = executable_entry(&header, file_obj, task, base)?;
+    let phdr_info = ProgramHeadersInfo {
+        phdr_addr: program_headers_address(&header, file_obj, task, base)?,
+        phdr_size: header.e_phentsize as u64,
+        phdr_count: header.e_phnum as u64,
+    };
+    if let Some(path) = interpreter {
+        let (interpreter_entry, interpreter_base) = load_interpreter(&path, task)?;
+        Ok(LoadElfResult {
+            mode: ExecutionMode::Dynamic {
+                interpreter_path: path,
+            },
+            entry_point: interpreter_entry,
+            original_entry_point: Some(entry),
+            base_address: Some(base),
+            interpreter_base: Some(interpreter_base),
+            program_headers: phdr_info,
+        })
+    } else {
+        Ok(LoadElfResult {
+            mode: ExecutionMode::Static,
+            entry_point: entry,
+            original_entry_point: None,
+            base_address: needs_relocation.then_some(base),
+            interpreter_base: None,
+            program_headers: phdr_info,
+        })
     }
 }
 
@@ -630,17 +632,22 @@ fn find_interpreter_path(
                     message: format!("Failed to seek to interpreter path: {:?}", e),
                 })?;
 
-            let mut interp_buffer = vec![0u8; ph.p_filesz as usize];
-            file_obj
-                .read(&mut interp_buffer)
-                .map_err(|e| ElfLoaderError {
-                    message: format!("Failed to read interpreter path: {:?}", e),
-                })?;
-
-            // Remove null terminator and convert to string
-            if let Some(null_pos) = interp_buffer.iter().position(|&x| x == 0) {
-                interp_buffer.truncate(null_pos);
+            let size = usize::try_from(ph.p_filesz)
+                .map_err(|_| elf_error("ELF interpreter path exceeds pointer width"))?;
+            if size == 0 || size > 4096 {
+                return Err(elf_error("ELF interpreter path length is invalid"));
             }
+            let mut interp_buffer = vec![0u8; size];
+            read_exact(file_obj, &mut interp_buffer)?;
+            if interp_buffer.last() != Some(&0)
+                || size == 1
+                || interp_buffer[..size - 1].contains(&0)
+            {
+                return Err(elf_error(
+                    "ELF interpreter path must be one nonempty NUL-terminated string",
+                ));
+            }
+            interp_buffer.pop();
 
             let path = core::str::from_utf8(&interp_buffer)
                 .map_err(|_| ElfLoaderError {
@@ -657,91 +664,8 @@ fn find_interpreter_path(
     Ok(result)
 }
 
-/// Load ELF segments for dynamic execution (without executing)
-fn load_elf_segments_for_interpreter(
-    header: &ElfHeader,
-    file_obj: &dyn FileObject,
-    task: &Task,
-    strategy: &LoadStrategy,
-) -> Result<u64, ElfLoaderError> {
-    // Use strategy to determine base address
-    let needs_relocation = header.e_type == ET_DYN;
-    // crate::println!("[ELF Loader] Main program: e_type={:#x}, needs_relocation={}, e_phoff={:#x}",
-    //     header.e_type, needs_relocation, header.e_phoff);
-    let base_address = (strategy.choose_base_address)(LoadTarget::MainProgram, needs_relocation);
-    // crate::println!("[ELF Loader] Chosen base_address={:#x}", base_address);
-
-    // Track the actual load address of the first LOAD segment for program headers
-    let mut first_load_addr: Option<u64> = None;
-    let mut _load_segment_count = 0;
-
-    // Load PT_LOAD segments using simplified approach
-    for_each_program_header(header, file_obj, |_i, ph| {
-        if ph.p_type == PT_LOAD {
-            let segment_addr = base_address + ph.p_vaddr;
-            // crate::println!("[ELF Loader] PT_LOAD[{}]: p_vaddr={:#x}, p_memsz={:#x}, p_filesz={:#x}, p_flags={:#x} -> load_addr={:#x}",
-            //     i, ph.p_vaddr, ph.p_memsz, ph.p_filesz, ph.p_flags, segment_addr);
-            if first_load_addr.is_none() {
-                first_load_addr = Some(segment_addr);
-                // crate::println!("[ELF Loader] First LOAD segment at {:#x}", segment_addr);
-            }
-            load_elf_segment_at_address(ph, file_obj, task, segment_addr)?;
-            _load_segment_count += 1;
-        }
-        Ok(true) // Continue iteration
-    })?;
-
-    // crate::println!("[ELF Loader] Loaded {} PT_LOAD segments, e_entry={:#x}", _load_segment_count, header.e_entry);
-
-    // Calculate phdr_addr based on actual load address
-    // Program headers are typically in the first LOAD segment
-    let actual_base = first_load_addr.unwrap_or(base_address);
-
-    // Program headers are already loaded as part of the first LOAD segment
-    // (which typically includes the ELF header and program headers)
-    // No need to create a separate mapping - just return the address
-    // crate::println!("[ELF Loader] Program headers at {:#x} (actual_base={:#x} + e_phoff={:#x})",
-    //     actual_base + header.e_phoff, actual_base, header.e_phoff);
-
-    // Return the actual base address where the first segment was loaded
-    Ok(actual_base)
-}
-
-/// Load interpreter (dynamic linker) into task memory  
-/// Maximum recursion depth for interpreter loading to prevent infinite loops
-const MAX_INTERPRETER_DEPTH: usize = 5;
-
-fn load_interpreter(
-    interpreter_path: &str,
-    task: &Task,
-    strategy: &LoadStrategy,
-) -> Result<(u64, u64), ElfLoaderError> {
-    load_interpreter_recursive(interpreter_path, task, strategy, 0)
-}
-
-/// Recursive interpreter loading with depth limiting
-fn load_interpreter_recursive(
-    interpreter_path: &str,
-    task: &Task,
-    strategy: &LoadStrategy,
-    depth: usize,
-) -> Result<(u64, u64), ElfLoaderError> {
-    // Check recursion depth to prevent infinite loops
-    if depth >= MAX_INTERPRETER_DEPTH {
-        return Err(ElfLoaderError {
-            message: format!(
-                "Maximum interpreter recursion depth ({}) exceeded",
-                MAX_INTERPRETER_DEPTH
-            ),
-        });
-    }
-
-    crate::println!(
-        "Loading interpreter (depth {}): {}",
-        depth,
-        interpreter_path
-    );
-
+/// Load one userspace interpreter and return its entry and additive load bias.
+fn load_interpreter(interpreter_path: &str, task: &Task) -> Result<(u64, u64), ElfLoaderError> {
     // Step 1: Open interpreter file from VFS
     let vfs = task.get_vfs().ok_or_else(|| ElfLoaderError {
         message: "Task VFS not available for interpreter loading".to_string(),
@@ -775,112 +699,78 @@ fn load_interpreter_recursive(
             message: format!("Failed to seek to start of interpreter file: {:?}", e),
         })?;
 
-    // ELF header is always 64 bytes for 64-bit ELF files
-    let mut header_buffer = vec![0u8; 64];
-    let bytes_read = file_object
-        .read(&mut header_buffer)
-        .map_err(|e| ElfLoaderError {
-            message: format!("Failed to read interpreter ELF header: {:?}", e),
-        })?;
+    let interp_header = read_elf_header(file_object)?;
 
-    crate::println!(
-        "Read {} bytes for interpreter ELF header (expected 64)",
-        bytes_read
-    );
+    // A process has one AT_BASE/AT_ENTRY handoff. Chaining interpreters would
+    // require a separate contract; silently skipping the requested linker is invalid.
+    if find_interpreter_path(&interp_header, file_object)?.is_some() {
+        return Err(elf_error("Nested ELF interpreters are unsupported"));
+    }
+    let interp_needs_relocation = interp_header.e_type == ET_DYN;
 
-    // Check if we actually read enough bytes
-    if bytes_read < 64 {
+    // Determine total span of PT_LOAD segments to avoid overlap
+    let mut min_vaddr: u64 = u64::MAX;
+    let mut max_end: u64 = 0;
+    let mut align = PAGE_SIZE;
+    for_each_program_header(&interp_header, file_object, |_i, ph| {
+        if ph.p_type == PT_LOAD && ph.p_memsz != 0 {
+            align = align.max(
+                usize::try_from(ph.p_align)
+                    .map_err(|_| elf_error("Interpreter alignment exceeds pointer width"))?,
+            );
+            if ph.p_vaddr < min_vaddr {
+                min_vaddr = ph.p_vaddr;
+            }
+            let end = ph
+                .p_vaddr
+                .checked_add(ph.p_memsz)
+                .ok_or_else(|| elf_error("Interpreter segment overflows"))?;
+            if end > max_end {
+                max_end = end;
+            }
+        }
+        Ok(true)
+    })?;
+
+    if min_vaddr == u64::MAX {
         return Err(ElfLoaderError {
-            message: format!(
-                "Interpreter ELF header too small: read {} bytes, expected 64",
-                bytes_read
-            ),
+            message: "Interpreter has no PT_LOAD segments".to_string(),
         });
     }
 
-    let interp_header = ElfHeader::parse(&header_buffer).map_err(|e| ElfLoaderError {
-        message: format!("Failed to parse interpreter ELF header: {}", e.message),
-    })?;
+    let min_vaddr = min_vaddr & !(align as u64 - 1);
+    let span = usize::try_from(
+        max_end
+            .checked_sub(min_vaddr)
+            .ok_or_else(|| elf_error("ELF interpreter range reversed"))?,
+    )
+    .map_err(|_| elf_error("ELF interpreter range exceeds pointer width"))?;
+    let span_aligned = span
+        .checked_add(align - 1)
+        .ok_or_else(|| elf_error("ELF interpreter pages overflow"))?
+        & !(align - 1);
 
-    // Step 3: Check if this interpreter itself has an interpreter (recursive case)
-    let nested_interpreter_path = find_interpreter_path(&interp_header, file_object)?;
-    let (final_entry_point, final_base) = if let Some(nested_path) = nested_interpreter_path {
-        let resolved_nested_path =
-            (strategy.resolve_interpreter)(Some(&nested_path)).unwrap_or(nested_path);
-        crate::println!(
-            "Interpreter {} requests nested interpreter: {}",
-            interpreter_path,
-            resolved_nested_path
-        );
-
-        // Recursively load the nested interpreter first
-        load_interpreter_recursive(&resolved_nested_path, task, strategy, depth + 1)?
-    } else {
-        // No nested interpreter, load this interpreter normally
-        let interp_needs_relocation = interp_header.e_type == ET_DYN;
-
-        // Determine total span of PT_LOAD segments to avoid overlap
-        let mut min_vaddr: u64 = u64::MAX;
-        let mut max_end: u64 = 0;
-        for_each_program_header(&interp_header, file_object, |_i, ph| {
-            if ph.p_type == PT_LOAD {
-                if ph.p_vaddr < min_vaddr {
-                    min_vaddr = ph.p_vaddr;
-                }
-                let end = ph.p_vaddr.saturating_add(ph.p_memsz);
-                if end > max_end {
-                    max_end = end;
-                }
-            }
-            Ok(true)
-        })?;
-
-        if min_vaddr == u64::MAX {
-            return Err(ElfLoaderError {
-                message: "Interpreter has no PT_LOAD segments".to_string(),
-            });
-        }
-
-        let span = max_end.saturating_sub(min_vaddr) as usize;
-        let align = crate::environment::PAGE_SIZE;
-        let span_aligned = (span + align - 1) & !(align - 1);
-
-        // Prefer the strategy's hint, but pick an actually free area in the task's VM
-        let _preferred =
-            (strategy.choose_base_address)(LoadTarget::Interpreter, interp_needs_relocation);
+    let interpreter_base_add = if interp_needs_relocation {
         let start = task
             .vm_manager
             .find_unmapped_area(span_aligned, align)
-            .ok_or_else(|| ElfLoaderError {
-                message: "No unmapped area available for interpreter".to_string(),
-            })? as u64;
-
-        // Compute additive base so that the lowest PT_LOAD maps to `start`
-        let interpreter_base_add = start.saturating_sub(min_vaddr);
-        crate::println!(
-            "Interpreter base address: {:#x} (mapped span: {:#x} bytes)",
-            interpreter_base_add,
-            span_aligned
-        );
-
-        // Load interpreter segments with this base
-        load_elf_segments_with_base(&interp_header, file_object, task, interpreter_base_add)?;
-
-        // Calculate actual entry point and return base used for relocations/AT_BASE
-        let entry = if interp_needs_relocation {
-            interpreter_base_add + interp_header.e_entry as u64
-        } else {
-            interp_header.e_entry
-        };
-        (entry, interpreter_base_add)
+            .ok_or_else(|| elf_error("No unmapped area available for interpreter"))?
+            as u64;
+        start
+            .checked_sub(min_vaddr)
+            .ok_or_else(|| elf_error("Interpreter load bias cannot be represented"))?
+    } else {
+        0
     };
-
-    crate::println!(
-        "Interpreter entry point (depth {}): {:#x}",
-        depth,
-        final_entry_point
-    );
-    Ok((final_entry_point, final_base))
+    load_elf_segments_with_base(
+        &interp_header,
+        file_object,
+        task,
+        interpreter_base_add,
+        false,
+    )?;
+    let entry = executable_entry(&interp_header, file_object, task, interpreter_base_add)?;
+    Ok((entry, interpreter_base_add))
 }
 
 /// Load ELF segments for interpreter with specified base address
@@ -889,12 +779,18 @@ fn load_elf_segments_with_base(
     file_obj: &dyn FileObject,
     task: &Task,
     base_address: u64,
+    main_program: bool,
 ) -> Result<(), ElfLoaderError> {
     // Load PT_LOAD segments with provided base address
     for_each_program_header(header, file_obj, |_i, ph| {
-        if ph.p_type == PT_LOAD {
-            let segment_addr = base_address + ph.p_vaddr;
-            load_elf_segment_at_address(ph, file_obj, task, segment_addr)?;
+        if ph.p_type == PT_LOAD && ph.p_memsz != 0 {
+            if ph.p_align > 1 && base_address % ph.p_align != 0 {
+                return Err(elf_error("ELF load bias violates segment alignment"));
+            }
+            let segment_addr = base_address
+                .checked_add(ph.p_vaddr)
+                .ok_or_else(|| elf_error("ELF relocation overflows"))?;
+            load_elf_segment_at_address(ph, file_obj, task, segment_addr, main_program)?;
         }
         Ok(true) // Continue iteration
     })?;
@@ -902,257 +798,68 @@ fn load_elf_segments_with_base(
     Ok(())
 }
 
-/// Load ELF using the static linking logic with strategy support
-fn load_elf_into_task_static(
+/// Validate the relocated entry against an actual executable PT_LOAD range.
+fn executable_entry(
     header: &ElfHeader,
     file_obj: &dyn FileObject,
     task: &Task,
-    strategy: &LoadStrategy,
+    base: u64,
 ) -> Result<u64, ElfLoaderError> {
-    // Use strategy to determine base address for main program
-    let needs_relocation = header.e_type == ET_DYN;
-    // let needs_relocation = false;
-
-    let base_address = (strategy.choose_base_address)(LoadTarget::MainProgram, needs_relocation);
-    // Read program headers and load LOAD segments (existing logic)
+    let entry = base
+        .checked_add(header.e_entry)
+        .ok_or_else(|| elf_error("ELF entry relocation overflows"))?;
+    let address =
+        usize::try_from(entry).map_err(|_| elf_error("ELF entry exceeds pointer width"))?;
+    let mut executable_entry = false;
     for_each_program_header(header, file_obj, |_i, ph| {
-        // For LOAD segments, load them into memory
-        if ph.p_type == PT_LOAD {
-            // Calculate proper alignment-aware mapping with base address
-            let segment_addr = base_address + ph.p_vaddr;
-            let align = ph.p_align as usize;
-
-            // Calculate the final mapping parameters according to ELF specification
-            let (mapping_addr, aligned_size, effective_align) = if align == 0 || align == 1 {
-                // No specific alignment requirement, use page alignment
-                let page_offset = (segment_addr as usize) % PAGE_SIZE;
-                let mapping_start = (segment_addr as usize) - page_offset;
-                let mapping_size = (ph.p_memsz as usize) + page_offset;
-                let aligned_size = (mapping_size + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
-                (mapping_start, aligned_size, PAGE_SIZE)
-            } else {
-                // Use p_align, but ensure it's at least PAGE_SIZE for memory mapping
-                let effective_align = core::cmp::max(align, PAGE_SIZE);
-
-                // Calculate aligned base address following ELF specification:
-                // The aligned base should satisfy: (vaddr % p_align) == (offset % p_align)
-                let vaddr_offset = (segment_addr as usize) % align;
-                let file_offset = (ph.p_offset as usize) % align;
-
-                // Ensure the alignment relationship is preserved
-                if vaddr_offset != file_offset {
-                    // Adjust the base address to maintain the required relationship
-                    let adjustment = if vaddr_offset >= file_offset {
-                        vaddr_offset - file_offset
-                    } else {
-                        align - (file_offset - vaddr_offset)
-                    };
-                    let adjusted_segment_addr = (segment_addr as usize) - adjustment;
-                    let aligned_addr = (adjusted_segment_addr) & !(effective_align - 1);
-                    let offset = (segment_addr as usize) - aligned_addr;
-                    let mapping_size = (ph.p_memsz as usize) + offset;
-                    let aligned_size = (mapping_size + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
-                    (aligned_addr, aligned_size, effective_align)
-                } else {
-                    // Normal case: alignment relationship is already correct
-                    let aligned_addr = (segment_addr as usize) & !(effective_align - 1);
-                    let offset = (segment_addr as usize) - aligned_addr;
-                    let mapping_size = (ph.p_memsz as usize) + offset;
-                    let aligned_size = (mapping_size + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
-                    (aligned_addr, aligned_size, effective_align)
-                }
-            };
-
-            // Map the segment with calculated parameters
-            map_elf_segment(
-                task,
-                mapping_addr,
-                aligned_size,
-                effective_align,
-                ph.p_flags,
-            )
-            .map_err(|e| ElfLoaderError {
-                message: format!("Failed to map ELF segment at {:#x}: {:?}", mapping_addr, e),
-            })?;
-
-            // Inference segment type
-            let segment_type = if ph.p_flags & PF_X != 0 {
-                VirtualMemoryRegion::Text
-            } else if ph.p_flags & PF_W != 0 || ph.p_flags & PF_R != 0 {
-                VirtualMemoryRegion::Data
-            } else {
-                VirtualMemoryRegion::Unknown
-            };
-
-            match segment_type {
-                VirtualMemoryRegion::Text => {
-                    task.text_size
-                        .fetch_add(aligned_size as usize, Ordering::SeqCst);
-                }
-                VirtualMemoryRegion::Data => {
-                    task.data_size
-                        .fetch_add(aligned_size as usize, Ordering::SeqCst);
-                }
-                _ => {
-                    return Err(ElfLoaderError {
-                        message: format!("Unknown segment type: {:#x}", ph.p_flags),
-                    });
-                }
-            }
-
-            // Update brk to track the end of the loaded program
-            // brk should be set to the maximum end address of all loaded segments
-            let segment_end = mapping_addr + aligned_size;
-            let current_brk_raw = task.brk.load(core::sync::atomic::Ordering::SeqCst);
-            let current_brk = if current_brk_raw == usize::MAX {
-                0
-            } else {
-                current_brk_raw
-            };
-            if segment_end > current_brk {
-                task.brk
-                    .store(segment_end, core::sync::atomic::Ordering::SeqCst);
-                // crate::println!("[ELF loader] Updated brk to {:#x} (segment end at {:#x})", segment_end, mapping_addr);
-            }
-
-            // Load segment data using common function (if there's file data)
-            if ph.p_filesz > 0 {
-                let mut segment_data = vec![0u8; ph.p_filesz as usize];
-
-                // Seek to segment data position
-                file_obj
-                    .seek(SeekFrom::Start(ph.p_offset))
-                    .map_err(|e| ElfLoaderError {
-                        message: format!("Failed to seek to segment data: {:?}", e),
-                    })?;
-
-                // Read segment data
-                file_obj
-                    .read(&mut segment_data)
-                    .map_err(|e| ElfLoaderError {
-                        message: format!("Failed to read segment data: {:?}", e),
-                    })?;
-
-                // Copy data to task's memory space at the correct virtual address
-                // Calculate the offset from the mapped region to the actual segment address
-                let data_offset = (segment_addr as usize) - mapping_addr;
-                let target_vaddr = mapping_addr + data_offset;
-
-                // // Debug: Check if this segment contains the entry point
-                // let entry_point = 0x5d912; // Known entry point for debugging
-                // if segment_addr <= entry_point && entry_point < segment_addr + ph.p_memsz {
-                //     crate::println!("DEBUG: Loading segment containing entry point {:#x}", entry_point);
-                //     crate::println!("  segment_addr={:#x}, size={:#x}, file_offset={:#x}",
-                //         segment_addr, ph.p_filesz, ph.p_offset);
-                //     crate::println!("  target_vaddr={:#x}, first 16 bytes of data:", target_vaddr);
-                //     let preview_len = core::cmp::min(16, segment_data.len());
-                //     let mut hex_str = alloc::string::String::new();
-                //     for i in 0..preview_len {
-                //         hex_str.push_str(&format!("{:02x} ", segment_data[i]));
-                //     }
-                //     crate::println!("  data: {}", hex_str);
-                // }
-
-                match task.vm_manager.translate_to_kva(target_vaddr) {
-                    Some(kaddr) => unsafe {
-                        core::ptr::copy_nonoverlapping(
-                            segment_data.as_ptr(),
-                            kaddr as *mut u8,
-                            ph.p_filesz as usize,
-                        );
-                        if ph.p_flags & PF_X != 0 {
-                            crate::arch::sync_icache_for_execution(kaddr, ph.p_filesz as usize);
-                        }
-                    },
-                    None => {
-                        return Err(ElfLoaderError {
-                            message: format!(
-                                "Failed to translate virtual address {:#x}",
-                                target_vaddr
-                            ),
-                        });
-                    }
-                }
-            }
+        if ph.p_type == PT_LOAD && ph.p_flags & PF_X != 0 {
+            let start = base
+                .checked_add(ph.p_vaddr)
+                .ok_or_else(|| elf_error("ELF relocation overflows"))?;
+            let end = start
+                .checked_add(ph.p_memsz)
+                .ok_or_else(|| elf_error("ELF segment end overflows"))?;
+            executable_entry |= start <= entry && entry < end;
         }
-        Ok(true) // Continue iteration
+        Ok(true)
     })?;
-
-    // Return entry point adjusted for base address
-    // crate::println!(
-    //     "[ELF Loader] base_address={:#x}, e_entry={:#x}, needs_relocation={}",
-    //     base_address,
-    //     header.e_entry,
-    //     needs_relocation
-    // );
-    let final_entry_point = if needs_relocation {
-        base_address + header.e_entry
-    } else {
-        header.e_entry
-    };
-    // crate::println!(
-    //     "[ELF Loader] final_entry_point before validation: {:#x}",
-    //     final_entry_point
-    // );
-
-    // Validate that the entry point is actually mapped
-    let entry_vaddr = final_entry_point as usize;
-    if task.vm_manager.translate_to_kva(entry_vaddr).is_none() {
-        // Entry point is not mapped - try to fix it by checking if e_entry
-        // falls within a PT_LOAD segment
-        let mut fixed_entry = None;
-        for_each_program_header(header, file_obj, |_i, ph| {
-            if ph.p_type == PT_LOAD {
-                let seg_start = ph.p_vaddr;
-                let seg_end = ph.p_vaddr.saturating_add(ph.p_memsz);
-                if header.e_entry >= seg_start && header.e_entry < seg_end {
-                    // Entry point is inside this segment - calculate the actual virtual address
-                    let seg_load_addr = base_address + ph.p_vaddr;
-                    let entry_offset = header.e_entry - ph.p_vaddr;
-                    fixed_entry = Some((seg_load_addr + entry_offset) as u64);
-                    return Ok(false); // Stop iteration
-                }
-            }
-            Ok(true) // Continue iteration
-        })?;
-
-        if let Some(fixed) = fixed_entry {
-            // crate::println!(
-            //     "[ELF Loader] Fixed entry point from {:#x} to {:#x}",
-            //     final_entry_point,
-            //     fixed
-            // );
-            return Ok(fixed);
-        } else {
-            return Err(ElfLoaderError {
-                message: format!(
-                    "Entry point {:#x} is not mapped and not within any loaded segment",
-                    final_entry_point
-                ),
-            });
-        }
+    if !executable_entry || task.vm_manager.translate_to_kva(address).is_none() {
+        return Err(elf_error("ELF entry is outside loaded executable segments"));
     }
-
-    Ok(final_entry_point)
+    Ok(entry)
 }
 
-/// Load program headers into task memory for static executables
-///
-/// This function allocates memory space for program headers and copies them
-/// from the ELF file, returning the virtual address where they are loaded.
-/// This is needed for static executables where program headers are not
-/// automatically loaded as part of any segment.
-///
-/// # Arguments
-///
-/// * `header`: The parsed ELF header containing program header information
-/// * `file_obj`: The file object to read program header data from
-/// * `task`: The task to load program headers into
-///
-/// # Returns
-///
-/// * `Result<u64, ElfLoaderError>`: Virtual address where program headers are loaded
-///
+/// Locate the header table by its file range, not by assuming that the first
+/// PT_LOAD begins at file offset zero or at the additive relocation bias.
+fn program_headers_address(
+    header: &ElfHeader,
+    file: &dyn FileObject,
+    task: &Task,
+    base: u64,
+) -> Result<u64, ElfLoaderError> {
+    let end = header
+        .e_phoff
+        .checked_add(header.e_phnum as u64 * header.e_phentsize as u64)
+        .ok_or_else(|| elf_error("Program-header file range overflows"))?;
+    let mut address = None;
+    for_each_program_header(header, file, |_, ph| {
+        if ph.p_type == PT_LOAD && ph.p_offset <= header.e_phoff && end <= ph.p_offset + ph.p_filesz
+        {
+            address = Some(
+                base.checked_add(ph.p_vaddr)
+                    .and_then(|start| start.checked_add(header.e_phoff - ph.p_offset))
+                    .ok_or_else(|| elf_error("Program-header address overflows"))?,
+            );
+            return Ok(false);
+        }
+        Ok(true)
+    })?;
+    match address {
+        Some(address) => Ok(address),
+        None => load_program_headers_into_memory(header, file, task),
+    }
+}
+
 fn load_program_headers_into_memory(
     header: &ElfHeader,
     file_obj: &dyn FileObject,
@@ -1167,13 +874,16 @@ fn load_program_headers_into_memory(
         });
     }
 
-    // Find a suitable virtual address for program headers
-    // Place them after the highest loaded segment to avoid conflicts
-    // For simplicity, use a fixed address in the upper memory region
-    let phdr_vaddr = 0x70000000u64; // 1.75GB - safe region for program headers
-
-    // Calculate page-aligned size
-    let page_aligned_size = ((phdr_table_size as usize) + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+    let table_size = usize::try_from(phdr_table_size)
+        .map_err(|_| elf_error("Program-header size exceeds pointer width"))?;
+    let page_aligned_size = table_size
+        .checked_add(PAGE_SIZE - 1)
+        .ok_or_else(|| elf_error("Program-header mapping overflows"))?
+        & !(PAGE_SIZE - 1);
+    let phdr_vaddr =
+        task.vm_manager
+            .find_unmapped_area(page_aligned_size, PAGE_SIZE)
+            .ok_or_else(|| elf_error("No unmapped area for program headers"))? as u64;
 
     // Map memory for program headers (read-only for security)
     map_elf_segment(
@@ -1195,9 +905,7 @@ fn load_program_headers_into_memory(
         })?;
 
     let mut phdr_data = vec![0u8; phdr_table_size as usize];
-    file_obj.read(&mut phdr_data).map_err(|e| ElfLoaderError {
-        message: format!("Failed to read program headers: {:?}", e),
-    })?;
+    read_exact(file_obj, &mut phdr_data)?;
 
     // Copy program headers to task memory
     match task.vm_manager.translate_to_kva(phdr_vaddr as usize) {
@@ -1263,10 +971,11 @@ fn map_elf_segment(
     }
 
     // Create memory area
-    let vmarea = MemoryArea {
-        start: vaddr,
-        end: vaddr + size - 1,
-    };
+    let end = vaddr.checked_add(size - 1).ok_or("ELF mapping overflows")?;
+    if end >= crate::environment::USER_LOWER_CANONICAL_END {
+        return Err("ELF mapping exceeds user address space");
+    }
+    let vmarea = MemoryArea { start: vaddr, end };
 
     // Check if the area is overlapping with existing mappings
     if let Some(_existing) = task.vm_manager.search_memory_map(vaddr) {
@@ -1275,14 +984,14 @@ fn map_elf_segment(
         return Err("Memory area overlaps with existing mapping");
     }
 
-    let num_of_pages = (size + PAGE_SIZE - 1) / PAGE_SIZE;
+    let num_of_pages = size / PAGE_SIZE;
     let page_alloc =
         crate::mem::page::ContiguousPages::new(num_of_pages).ok_or("Failed to allocate memory")?;
     let ptr = page_alloc.as_ptr() as *mut u8;
     let pm_start = virt_to_phys(ptr as usize);
-    let pmarea = MemoryArea {
+    let pmarea = crate::vm::vmem::PhysicalMemoryArea {
         start: pm_start,
-        end: pm_start + size - 1,
+        end: pm_start + size as u64 - 1,
     };
 
     let map = VirtualMemoryMap {
@@ -1360,47 +1069,92 @@ pub fn build_auxiliary_vector(load_result: &LoadElfResult) -> alloc::vec::Vec<Au
     auxv
 }
 
-/// Setup auxiliary vector on the task's stack
-///
-/// This function places the auxiliary vector at the top of the stack,
-/// which is expected by the dynamic linker and C runtime.
-pub fn setup_auxiliary_vector_on_stack(
-    task: &Task,
+/// Encode the selected ABI's word pairs, without exposing the in-kernel
+/// representation or silently narrowing addresses in ELF32 auxiliary entries.
+fn encode_auxiliary_vector(
     auxv: &[AuxVec],
-) -> Result<usize, ElfLoaderError> {
-    // Calculate size needed for auxiliary vector
-    // Each AuxVec entry is 16 bytes (two u64 values)
-    let auxv_size = auxv.len() * core::mem::size_of::<AuxVec>();
-
-    // Find the top of the stack
-    let stack_top = crate::environment::USER_STACK_END;
-    let auxv_start = stack_top - auxv_size;
-
-    // Write auxiliary vector to stack
-    for (i, entry) in auxv.iter().enumerate() {
-        let offset = i * core::mem::size_of::<AuxVec>();
-        let vaddr = auxv_start + offset;
-
-        // Translate to physical address and write
-        match task.vm_manager.translate_to_kva(vaddr) {
-            Some(kaddr) => unsafe {
-                let ptr = kaddr as *mut AuxVec;
-                ptr.write(*entry);
-            },
-            None => {
-                return Err(ElfLoaderError {
-                    message: format!("Failed to translate auxiliary vector address {:#x}", vaddr),
-                });
-            }
-        }
+    model: scarlet_abi::data_model::AbiDataModel,
+) -> Result<alloc::vec::Vec<u8>, ElfLoaderError> {
+    let word = model.word_width.bytes();
+    let size = auxv
+        .len()
+        .checked_mul(2 * word)
+        .ok_or_else(|| elf_error("Auxiliary vector size overflows"))?;
+    let mut bytes = vec![0; size];
+    for (index, entry) in auxv.iter().enumerate() {
+        model
+            .write_word(&mut bytes, index * 2 * word, entry.a_type)
+            .and_then(|_| model.write_word(&mut bytes, (index * 2 + 1) * word, entry.a_val))
+            .map_err(|_| elf_error("Auxiliary vector value exceeds ABI word width"))?;
     }
+    Ok(bytes)
+}
 
-    crate::println!(
-        "Setup auxiliary vector at {:#x} (size: {} entries)",
-        auxv_start,
-        auxv.len()
-    );
-    Ok(auxv_start)
+/// Construct one native process-start stack: argc, argv, NULL, envp, NULL,
+/// auxv, then string storage. Metadata always uses native words and the stack
+/// pointer is aligned to 16 bytes. RISC-V and AArch64 share this layout.
+pub(crate) fn setup_native_stack(
+    task: &Task,
+    argv: &[&str],
+    envp: &[&str],
+    top: usize,
+    auxv: &[AuxVec],
+) -> Result<(usize, usize), &'static str> {
+    let model = scarlet_abi::data_model::AbiDataModel::NATIVE;
+    let word = model.word_width.bytes();
+    let aux_bytes =
+        encode_auxiliary_vector(auxv, model).map_err(|_| "Invalid native auxiliary vector")?;
+    let strings_size = argv
+        .iter()
+        .chain(envp)
+        .try_fold(0usize, |size, string| {
+            if string.as_bytes().contains(&0) {
+                return None;
+            }
+            size.checked_add(string.len())?.checked_add(1)
+        })
+        .ok_or("Invalid or oversized process arguments")?;
+    let pointer_bytes = argv
+        .len()
+        .checked_add(envp.len())
+        .and_then(|n| n.checked_add(3))
+        .and_then(|n| n.checked_mul(word))
+        .ok_or("Process pointer arrays overflow")?;
+    let metadata_size = pointer_bytes
+        .checked_add(aux_bytes.len())
+        .ok_or("Process metadata overflows")?;
+    let total = metadata_size
+        .checked_add(strings_size)
+        .ok_or("Process stack size overflows")?;
+    let start = top.checked_sub(total).ok_or("Process stack underflows")? & !15;
+    let stack_map = task
+        .vm_manager
+        .search_memory_map(top.checked_sub(1).ok_or("Empty process stack")?)
+        .ok_or("Process stack is not mapped")?;
+    if start < stack_map.vmarea.start {
+        return Err("Process arguments exceed stack mapping");
+    }
+    let mut bytes = vec![0; top - start];
+    model
+        .write_word(&mut bytes, 0, argv.len() as u64)
+        .map_err(|_| "Invalid argument count")?;
+    let mut pointer = word;
+    let mut string_offset = metadata_size;
+    for strings in [argv, envp] {
+        for string in strings {
+            model
+                .write_word(&mut bytes, pointer, (start + string_offset) as u64)
+                .map_err(|_| "Invalid process string address")?;
+            bytes[string_offset..string_offset + string.len()].copy_from_slice(string.as_bytes());
+            string_offset += string.len() + 1;
+            pointer += word;
+        }
+        pointer += word; // Zero-filled argv/envp terminator.
+    }
+    bytes[pointer..pointer + aux_bytes.len()].copy_from_slice(&aux_bytes);
+    crate::library::std::usercopy::copy_to_user(task, start, &bytes)
+        .map_err(|_| "Cannot write process stack")?;
+    Ok((start, start + word))
 }
 
 #[cfg(test)]
@@ -1412,23 +1166,36 @@ fn load_elf_segment_at_address(
     file_obj: &dyn FileObject,
     task: &Task,
     segment_addr: u64,
+    main_program: bool,
 ) -> Result<(), ElfLoaderError> {
-    let align = if ph.p_align == 0 || ph.p_align == 1 {
-        PAGE_SIZE
-    } else {
-        core::cmp::max(ph.p_align as usize, PAGE_SIZE)
-    };
-
-    // Calculate page-aligned mapping parameters
-    let page_offset = (segment_addr as usize) % PAGE_SIZE;
-    let mapping_start = (segment_addr as usize) - page_offset;
-    let mapping_size = (ph.p_memsz as usize) + page_offset;
-    let aligned_size = (mapping_size + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
-
-    // crate::println!("[ELF Loader] Loading segment: vaddr={:#x}, memsz={:#x}, filesz={:#x}, flags={:#x}",
-    //     segment_addr, ph.p_memsz, ph.p_filesz, ph.p_flags);
-    // crate::println!("[ELF Loader]   mapping: start={:#x}, size={:#x}, aligned_size={:#x}",
-    //     mapping_start, mapping_size, aligned_size);
+    if ph.p_memsz == 0 {
+        return Ok(());
+    }
+    let segment = usize::try_from(segment_addr)
+        .map_err(|_| elf_error("ELF segment exceeds pointer width"))?;
+    let size = usize::try_from(ph.p_memsz)
+        .map_err(|_| elf_error("ELF segment size exceeds pointer width"))?;
+    let file_size = usize::try_from(ph.p_filesz)
+        .map_err(|_| elf_error("ELF file size exceeds pointer width"))?;
+    if file_size > size {
+        return Err(elf_error("ELF file data exceeds segment memory"));
+    }
+    let align = usize::try_from(ph.p_align)
+        .map_err(|_| elf_error("ELF alignment exceeds pointer width"))?
+        .max(PAGE_SIZE);
+    let page_offset = segment % PAGE_SIZE;
+    let mapping_start = segment - page_offset;
+    let aligned_size = size
+        .checked_add(page_offset)
+        .and_then(|size| size.checked_add(PAGE_SIZE - 1))
+        .map(|size| size & !(PAGE_SIZE - 1))
+        .ok_or_else(|| elf_error("ELF page extent overflows"))?;
+    let mapping_end = mapping_start
+        .checked_add(aligned_size)
+        .ok_or_else(|| elf_error("ELF mapping end overflows"))?;
+    if mapping_end > crate::environment::USER_LOWER_CANONICAL_END {
+        return Err(elf_error("ELF mapping exceeds user address space"));
+    }
 
     // Map segment with proper page alignment
     map_elf_segment(task, mapping_start, aligned_size, align, ph.p_flags).map_err(|e| {
@@ -1439,31 +1206,23 @@ fn load_elf_segment_at_address(
 
     // Copy file data to memory if there's any
     if ph.p_filesz > 0 {
-        let mut segment_data = vec![0u8; ph.p_filesz as usize];
+        let mut segment_data = vec![0u8; file_size];
         file_obj
             .seek(SeekFrom::Start(ph.p_offset))
             .map_err(|e| ElfLoaderError {
                 message: format!("Failed to seek to segment data: {:?}", e),
             })?;
-        file_obj
-            .read(&mut segment_data)
-            .map_err(|e| ElfLoaderError {
-                message: format!("Failed to read segment data: {:?}", e),
-            })?;
+        read_exact(file_obj, &mut segment_data)?;
 
         // Write data to task memory at the correct offset within the mapped region
-        let data_offset = (segment_addr as usize) - mapping_start;
+        let data_offset = segment - mapping_start;
         let target_vaddr = mapping_start + data_offset;
 
         match task.vm_manager.translate_to_kva(target_vaddr) {
             Some(paddr) => unsafe {
-                core::ptr::copy_nonoverlapping(
-                    segment_data.as_ptr(),
-                    paddr as *mut u8,
-                    ph.p_filesz as usize,
-                );
+                core::ptr::copy_nonoverlapping(segment_data.as_ptr(), paddr as *mut u8, file_size);
                 if ph.p_flags & PF_X != 0 {
-                    crate::arch::sync_icache_for_execution(paddr, ph.p_filesz as usize);
+                    crate::arch::sync_icache_for_execution(paddr, file_size);
                 }
             },
             None => {
@@ -1475,6 +1234,11 @@ fn load_elf_segment_at_address(
                 });
             }
         }
+    }
+
+    let old_brk = task.brk.load(Ordering::Relaxed);
+    if main_program && (old_brk == usize::MAX || old_brk < mapping_end) {
+        task.brk.store(mapping_end, Ordering::Relaxed);
     }
 
     // Update task size information for proper memory management

@@ -67,8 +67,13 @@ dependencies = [
  "hashbrown",
  "limine",
  "lock_api",
+ "scarlet-abi",
  "talc",
 ]
+
+[[package]]
+name = "scarlet-abi"
+version = "1.0.0"
 
 [[package]]
 name = "scopeguard"

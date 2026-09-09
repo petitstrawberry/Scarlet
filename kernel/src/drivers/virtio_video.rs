@@ -103,7 +103,7 @@ struct MappedFrameInfo {
 }
 
 enum PendingDecodeBuffer {
-    ExternalMapped { output_paddr: usize },
+    ExternalMapped { output_paddr: u64 },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -915,7 +915,7 @@ impl VirtioVideoDevice {
 
     fn read_external_frame_header(
         &self,
-        output_paddr: usize,
+        output_paddr: u64,
         decoded_size: usize,
         output_len: usize,
         output_offset: usize,

@@ -700,7 +700,7 @@ impl MemoryMappingOps for VirtioBlockDevice {
         Err("Memory mapping not supported by VirtIO block device")
     }
 
-    fn on_mapped(&self, _vaddr: usize, _paddr: usize, _length: usize, _offset: usize) {
+    fn on_mapped(&self, _vaddr: usize, _paddr: u64, _length: usize, _offset: usize) {
         // VirtIO block devices don't support memory mapping
     }
 
@@ -889,7 +889,7 @@ pub mod tests {
     use alloc::vec;
 
     /// Physical address of the VirtIO Block device on QEMU RISC-V virt.
-    const VIRTIO_BLK_PADDR: usize = 0x10001000;
+    const VIRTIO_BLK_PADDR: u64 = 0x10001000;
 
     /// Map the VirtIO Block MMIO region for use in tests.
     fn map_blk() -> usize {

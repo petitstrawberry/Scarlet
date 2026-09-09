@@ -183,7 +183,7 @@ pub fn sys_mmap(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
             None => return to_result(errno::ENODEV),
         };
         let vm_map = VirtualMemoryMap {
-            pmarea: MemoryArea { start: 0, end: 0 },
+            pmarea: crate::vm::vmem::PhysicalMemoryArea { start: 0, end: 0 },
             vmarea: MemoryArea::new(final_vaddr, final_vaddr + aligned_length - 1),
             vm_start: final_vaddr,
             permissions: final_permissions,
@@ -241,11 +241,7 @@ pub fn sys_mmap(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let Some(mapping_info) = mapping_info else {
         return to_result(errno::EINVAL);
     };
-    let paddr = if mapping_info.paddr != 0 && is_direct_mapped(mapping_info.paddr) {
-        virt_to_phys(mapping_info.paddr)
-    } else {
-        mapping_info.paddr
-    };
+    let paddr = mapping_info.paddr;
 
     final_permissions = mapping_info.permissions & prot_mask;
     if prot != 0 {
@@ -258,7 +254,7 @@ pub fn sys_mmap(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     }
 
     let vmarea = MemoryArea::new(final_vaddr, final_vaddr + ok_len_aligned - 1);
-    let pmarea = MemoryArea::new(paddr, paddr + ok_len_aligned - 1);
+    let pmarea = crate::vm::vmem::PhysicalMemoryArea::new(paddr, paddr + ok_len_aligned as u64 - 1);
 
     let owner = task
         .handle_table
@@ -393,7 +389,7 @@ fn handle_anonymous_mapping(
 
     let vmarea = MemoryArea::new(final_vaddr, final_vaddr + aligned_length - 1);
     let vm_map = VirtualMemoryMap {
-        pmarea: MemoryArea { start: 0, end: 0 },
+        pmarea: crate::vm::vmem::PhysicalMemoryArea { start: 0, end: 0 },
         vmarea,
         vm_start: final_vaddr,
         permissions,
@@ -513,9 +509,9 @@ pub fn sys_mprotect(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         }
 
         let offset_in_mapping = page_addr - original_mapping.vmarea.start;
-        let new_paddr = original_mapping.pmarea.start + offset_in_mapping;
+        let new_paddr = original_mapping.pmarea.start + offset_in_mapping as u64;
         let new_map = VirtualMemoryMap::new(
-            MemoryArea::new(new_paddr, new_paddr + PAGE_SIZE - 1),
+            crate::vm::vmem::PhysicalMemoryArea::new(new_paddr, new_paddr + PAGE_SIZE as u64 - 1),
             MemoryArea::new(page_addr, page_addr + PAGE_SIZE - 1),
             new_permissions,
             original_mapping.is_shared,
@@ -827,7 +823,7 @@ fn handle_kvm_vcpu_mmap(
         prot_mask |= 0x08;
     }
 
-    let pmarea = MemoryArea::new(paddr, paddr + map_length - 1);
+    let pmarea = crate::vm::vmem::PhysicalMemoryArea::new(paddr, paddr + map_length as u64 - 1);
     let vmarea = MemoryArea::new(final_vaddr, final_vaddr + map_length - 1);
     let vm_map = VirtualMemoryMap::new(pmarea, vmarea, prot_mask, is_shared, None);
 

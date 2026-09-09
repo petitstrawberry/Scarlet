@@ -442,7 +442,7 @@ fn print_task_debug(pid: usize) -> ExitCode {
         };
         let command = tasks
             .iter()
-            .find(|task| task.pid == entry.pid)
+            .find(|task| task.pid as u64 == entry.pid)
             .map(|task| task.name.as_str())
             .unwrap_or("<exited>");
         println!(

@@ -6,6 +6,7 @@
 //! - FileSystemOperations: Driver API for filesystem operations
 
 use crate::sync::IrqRwSpinLock;
+use crate::sync::sequence::IdSequence;
 use alloc::{
     collections::BTreeMap,
     string::{String, ToString},
@@ -13,7 +14,6 @@ use alloc::{
     vec::Vec,
 };
 use core::fmt;
-use core::sync::atomic::{AtomicU64, Ordering};
 use core::{any::Any, fmt::Debug};
 
 use super::mount_tree::MountPoint;
@@ -38,10 +38,15 @@ pub struct DirectoryEntryInternal {
 pub struct FileSystemId(u64);
 
 impl FileSystemId {
-    /// Generate a new unique FileSystemId.
+    /// Allocate a unique filesystem identity, independent of pointer width.
+    /// Panics on exhaustion rather than reusing an identity still held by VFS.
     pub fn new() -> Self {
-        static NEXT_ID: AtomicU64 = AtomicU64::new(1);
-        Self(NEXT_ID.fetch_add(1, Ordering::Relaxed))
+        static IDS: IdSequence = IdSequence::new();
+        Self(
+            IDS.reserve()
+                .expect("FileSystemId identities exhausted")
+                .get(),
+        )
     }
 
     /// Get the raw u64 value.
@@ -481,7 +486,7 @@ impl MemoryMappingOps for VfsFileObject {
         self.inner.get_mapping_info_with(offset, length, is_shared)
     }
 
-    fn on_mapped(&self, vaddr: usize, paddr: usize, length: usize, offset: usize) {
+    fn on_mapped(&self, vaddr: usize, paddr: u64, length: usize, offset: usize) {
         self.inner.on_mapped(vaddr, paddr, length, offset);
     }
 

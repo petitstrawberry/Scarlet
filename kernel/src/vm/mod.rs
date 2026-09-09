@@ -12,26 +12,28 @@ pub mod vmem;
 
 pub use addr::{
     PhysAddr, VirtAddr, boot_phys_to_virt, boot_virt_to_phys, finalize_runtime_memory_layout,
-    get_boot_hhdm_offset, get_current_direct_map_phys_range, get_heap_phys_layout, get_hhdm_offset,
-    phys_to_virt, set_hhdm_offset, transition_kernel_memory_layout, virt_to_phys,
+    get_boot_direct_map, get_current_direct_map, get_current_direct_map_phys_range,
+    get_heap_phys_layout, phys_to_virt, transition_kernel_memory_layout, virt_to_phys,
 };
 pub use ioremap::{ioremap, iounmap, memremap_normal};
 
 use direct_map::DirectMapRegions;
 use manager::VirtualMemoryManager;
-use vmem::{MemoryArea, MemoryAttribute, VirtualMemoryMap, VirtualMemoryPermission};
+use vmem::{
+    MemoryArea, MemoryAttribute, PhysicalMemoryArea, VirtualMemoryMap, VirtualMemoryPermission,
+};
 
 use crate::arch::Arch;
 use crate::arch::get_kernel_trapvector_paddr;
 use crate::arch::set_trapvector;
 use crate::arch::vm::alloc_virtual_address_space;
 use crate::arch::vm::get_root_pagetable;
+use crate::environment::KERNEL_HEAP_BASE;
 use crate::environment::KERNEL_VM_STACK_SIZE;
 use crate::environment::KERNEL_VM_STACK_START;
 use crate::environment::MAX_NUM_CPUS;
 use crate::environment::PAGE_SIZE;
 use crate::environment::USER_STACK_END;
-use crate::environment::{KERNEL_HEAP_BASE, SCARLET_HHDM_BASE};
 use crate::environment::{
     KERNEL_HEAP_SIZE, KERNEL_KSTACK_REGION_END, KERNEL_KSTACK_REGION_START,
     KERNEL_KSTACK_SLOT_SIZE, KERNEL_KSTACK_SLOTS, TASK_KERNEL_STACK_SIZE,
@@ -46,7 +48,7 @@ extern crate alloc;
 
 static KERNEL_VM_MANAGER: Once<VirtualMemoryManager> = Once::new();
 static KERNEL_HEAP_AREA: Once<MemoryArea> = Once::new();
-static KERNEL_HEAP_PHYS_AREA: Once<MemoryArea> = Once::new();
+static KERNEL_HEAP_PHYS_AREA: Once<PhysicalMemoryArea> = Once::new();
 static DIRECT_MAP_RETAG_LOCK: IrqSpinLock<()> = IrqSpinLock::new(());
 
 fn align_down(addr: usize, align: usize) -> usize {
@@ -69,7 +71,7 @@ pub fn get_kernel_vm_manager() -> &'static VirtualMemoryManager {
 /// runtime direct-map metadata lock is held only while planning and publishing
 /// the metadata change, never while acquiring the kernel page-table lock.
 pub(crate) fn retag_direct_map_memory_attribute(
-    physical_area: MemoryArea,
+    physical_area: PhysicalMemoryArea,
     memory_attribute: MemoryAttribute,
 ) -> Result<MemoryAttribute, &'static str> {
     let _retag_guard = DIRECT_MAP_RETAG_LOCK.lock();
@@ -85,12 +87,8 @@ pub(crate) fn retag_direct_map_memory_attribute(
     }
 
     let hhdm_area = MemoryArea::new(
-        SCARLET_HHDM_BASE
-            .checked_add(physical_area.start)
-            .ok_or("HHDM retag virtual start overflows")?,
-        SCARLET_HHDM_BASE
-            .checked_add(physical_area.end)
-            .ok_or("HHDM retag virtual end overflows")?,
+        crate::vm::addr::kernel_direct_map_vaddr(physical_area.start),
+        crate::vm::addr::kernel_direct_map_vaddr(physical_area.end),
     );
     let hhdm_map = VirtualMemoryMap {
         vmarea: hhdm_area,
@@ -144,8 +142,8 @@ static KERNEL_AREA: Once<MemoryArea> = Once::new();
 #[allow(static_mut_refs)]
 pub fn kernel_vm_init(
     direct_map_regions: DirectMapRegions,
-    initramfs_paddr: Option<MemoryArea>,
-    heap_paddr: MemoryArea,
+    initramfs_paddr: Option<PhysicalMemoryArea>,
+    heap_paddr: PhysicalMemoryArea,
 ) {
     let manager = get_kernel_vm_manager();
 
@@ -164,13 +162,13 @@ pub fn kernel_vm_init(
         start: unsafe { &__KERNEL_SPACE_START as *const usize as usize },
         end: unsafe { &__KERNEL_SPACE_END as *const usize as usize } - 1,
     };
-    let kernel_phys_area = MemoryArea {
+    let kernel_phys_area = PhysicalMemoryArea {
         start: addr::kernel_virt_to_phys(kernel_area.start),
         end: addr::kernel_virt_to_phys(kernel_area.end),
     };
-    let heap_phys_area = MemoryArea {
-        start: align_down(heap_paddr.start, PAGE_SIZE),
-        end: align_up(heap_paddr.end + 1, PAGE_SIZE) - 1,
+    let heap_phys_area = PhysicalMemoryArea {
+        start: phys_align_down(heap_paddr.start, PAGE_SIZE as u64),
+        end: phys_align_up(heap_paddr.end + 1, PAGE_SIZE as u64) - 1,
     };
     let kernel_heap_area = MemoryArea {
         start: KERNEL_HEAP_BASE,
@@ -203,12 +201,8 @@ pub fn kernel_vm_init(
             .expect("direct-map region index must be valid");
         let physical_area = region.area();
         let hhdm_area = MemoryArea {
-            start: SCARLET_HHDM_BASE
-                .checked_add(physical_area.start)
-                .expect("HHDM virtual start overflows"),
-            end: SCARLET_HHDM_BASE
-                .checked_add(physical_area.end)
-                .expect("HHDM virtual end overflows"),
+            start: crate::vm::addr::kernel_direct_map_vaddr(physical_area.start),
+            end: crate::vm::addr::kernel_direct_map_vaddr(physical_area.end),
         };
         let hhdm_map = VirtualMemoryMap {
             vmarea: hhdm_area,
@@ -241,17 +235,13 @@ pub fn kernel_vm_init(
         .unwrap();
 
     let initramfs_map = initramfs_paddr.and_then(|initramfs_paddr| {
-        let initramfs_phys_area = MemoryArea {
-            start: align_down(initramfs_paddr.start, PAGE_SIZE),
-            end: align_up(initramfs_paddr.end + 1, PAGE_SIZE) - 1,
+        let initramfs_phys_area = PhysicalMemoryArea {
+            start: phys_align_down(initramfs_paddr.start, PAGE_SIZE as u64),
+            end: phys_align_up(initramfs_paddr.end + 1, PAGE_SIZE as u64) - 1,
         };
         let initramfs_hhdm_area = MemoryArea {
-            start: SCARLET_HHDM_BASE
-                .checked_add(initramfs_phys_area.start)
-                .expect("initramfs HHDM virtual start overflows"),
-            end: SCARLET_HHDM_BASE
-                .checked_add(initramfs_phys_area.end)
-                .expect("initramfs HHDM virtual end overflows"),
+            start: crate::vm::addr::kernel_direct_map_vaddr(initramfs_phys_area.start),
+            end: crate::vm::addr::kernel_direct_map_vaddr(initramfs_phys_area.end),
         };
         let initramfs_map = VirtualMemoryMap {
             vmarea: initramfs_hhdm_area,
@@ -289,12 +279,8 @@ pub fn kernel_vm_init(
             .expect("direct-map region index must be valid");
         let physical_area = region.area();
         let hhdm_area = MemoryArea {
-            start: SCARLET_HHDM_BASE
-                .checked_add(physical_area.start)
-                .expect("HHDM virtual start overflows"),
-            end: SCARLET_HHDM_BASE
-                .checked_add(physical_area.end)
-                .expect("HHDM virtual end overflows"),
+            start: crate::vm::addr::kernel_direct_map_vaddr(physical_area.start),
+            end: crate::vm::addr::kernel_direct_map_vaddr(physical_area.end),
         };
         root_page_table
             .map_memory_area(
@@ -336,8 +322,8 @@ pub fn kernel_vm_init(
         let area = region.area();
         println!(
             "HHDM mapped               : {:#018x} - {:#018x} ({:?})",
-            SCARLET_HHDM_BASE + area.start,
-            SCARLET_HHDM_BASE + area.end,
+            crate::vm::addr::kernel_direct_map_vaddr(area.start),
+            crate::vm::addr::kernel_direct_map_vaddr(area.end),
             region.memory_attribute(),
         );
     }
@@ -419,7 +405,7 @@ pub fn user_kernel_vm_init(task: &Task) {
 
     let kernel_map = VirtualMemoryMap {
         vmarea: kernel_area,
-        pmarea: MemoryArea::new(
+        pmarea: crate::vm::vmem::PhysicalMemoryArea::new(
             addr::kernel_virt_to_phys(kernel_area.start),
             addr::kernel_virt_to_phys(kernel_area.end),
         ),
@@ -444,12 +430,8 @@ pub fn user_kernel_vm_init(task: &Task) {
             .expect("direct-map region index must be valid");
         let physical_area = region.area();
         let hhdm_area = MemoryArea {
-            start: SCARLET_HHDM_BASE
-                .checked_add(physical_area.start)
-                .expect("HHDM virtual start overflows"),
-            end: SCARLET_HHDM_BASE
-                .checked_add(physical_area.end)
-                .expect("HHDM virtual end overflows"),
+            start: crate::vm::addr::kernel_direct_map_vaddr(physical_area.start),
+            end: crate::vm::addr::kernel_direct_map_vaddr(physical_area.end),
         };
         task.vm_manager
             .add_memory_map(VirtualMemoryMap {
@@ -495,12 +477,8 @@ pub fn user_kernel_vm_init(task: &Task) {
             .expect("direct-map region index must be valid");
         let physical_area = region.area();
         let hhdm_area = MemoryArea {
-            start: SCARLET_HHDM_BASE
-                .checked_add(physical_area.start)
-                .expect("HHDM virtual start overflows"),
-            end: SCARLET_HHDM_BASE
-                .checked_add(physical_area.end)
-                .expect("HHDM virtual end overflows"),
+            start: crate::vm::addr::kernel_direct_map_vaddr(physical_area.start),
+            end: crate::vm::addr::kernel_direct_map_vaddr(physical_area.end),
         };
         root_page_table
             .map_memory_area(
@@ -624,7 +602,7 @@ pub fn setup_trampoline_for_task_kstack_window(task: &Task) -> Result<(), &'stat
             .checked_add(1)
             .and_then(|end| end.checked_sub(paddr_start))
             .ok_or("Kernel stack memory area is invalid")?;
-        if paddr_start % PAGE_SIZE != 0 || stack_size % PAGE_SIZE != 0 {
+        if paddr_start % PAGE_SIZE as u64 != 0 || stack_size % PAGE_SIZE as u64 != 0 {
             return Err("Kernel stack memory area is not page-aligned");
         }
 
@@ -633,7 +611,7 @@ pub fn setup_trampoline_for_task_kstack_window(task: &Task) -> Result<(), &'stat
                 start: vaddr_start,
                 end: vaddr_end,
             },
-            pmarea: MemoryArea {
+            pmarea: crate::vm::vmem::PhysicalMemoryArea {
                 start: paddr_start,
                 end: paddr_end,
             },
@@ -842,4 +820,13 @@ pub fn switch_to_user_vm(cpu: &mut Arch) {
         .expect("Root page table is not set");
     set_trapvector(get_trampoline_trap_vector());
     root_page_table.switch();
+}
+
+fn phys_align_down(addr: u64, align: u64) -> u64 {
+    addr & !(align - 1)
+}
+fn phys_align_up(addr: u64, align: u64) -> u64 {
+    addr.checked_add(align - 1)
+        .expect("physical alignment overflows")
+        & !(align - 1)
 }

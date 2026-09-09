@@ -1461,7 +1461,7 @@ impl MemoryMappingOps for OverlayDirectoryObject {
         Err("Memory mapping not supported for directories")
     }
 
-    fn on_mapped(&self, _vaddr: usize, _paddr: usize, _length: usize, _offset: usize) {
+    fn on_mapped(&self, _vaddr: usize, _paddr: u64, _length: usize, _offset: usize) {
         // Directories don't support memory mapping
     }
 

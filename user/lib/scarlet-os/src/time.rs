@@ -1,7 +1,7 @@
 //! Scarlet Native monotonic and wall-clock time APIs.
 
 use core::time::Duration;
-use scarlet_sys::{Syscall, syscall0};
+use scarlet_sys::{Syscall, syscall_u64};
 
 /// Return boot-relative monotonic time in nanoseconds.
 ///
@@ -13,7 +13,7 @@ use scarlet_sys::{Syscall, syscall0};
 /// Nanoseconds elapsed since boot.
 pub fn monotonic_time_ns() -> u64 {
     // SAFETY: This fixed clock query has no arguments or userspace memory effects.
-    (unsafe { syscall0(Syscall::MonotonicTime) }) as u64
+    unsafe { syscall_u64(Syscall::MonotonicTime, [0; 6]) }
 }
 
 /// Return boot-relative monotonic time as a [`Duration`].
@@ -33,7 +33,7 @@ pub fn monotonic_time() -> Duration {
 /// wall-clock time is unavailable (e.g. no RTC present).
 pub fn system_time_ns() -> Option<u64> {
     // SAFETY: This fixed clock query has no arguments or userspace memory effects.
-    let ns = (unsafe { syscall0(Syscall::SystemTime) }) as u64;
+    let ns = unsafe { syscall_u64(Syscall::SystemTime, [0; 6]) };
     if ns == u64::MAX { None } else { Some(ns) }
 }
 

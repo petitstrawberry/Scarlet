@@ -31,15 +31,15 @@ use crate::network::udp::{UdpHeader, UdpLayer, UdpSocket};
 use crate::network::{LayerContext, NetworkInterface, NetworkLayer, get_network_manager};
 
 /// Base MMIO address for virtio devices on RISC-V virt machine
-const VIRTIO_MMIO_BASE: usize = 0x10001000;
+const VIRTIO_MMIO_BASE: u64 = 0x10001000;
 
 /// Offset per virtio device (0x1000 bytes each)
-const VIRTIO_MMIO_STRIDE: usize = 0x1000;
+const VIRTIO_MMIO_STRIDE: u64 = 0x1000;
 
 /// VirtIO-net device MMIO addresses (bus indices from test.sh)
-const NET0_MMIO_ADDR: usize = VIRTIO_MMIO_BASE + (2 * VIRTIO_MMIO_STRIDE); // 0x10003000
-const NET1_MMIO_ADDR: usize = VIRTIO_MMIO_BASE + (3 * VIRTIO_MMIO_STRIDE); // 0x10004000
-const NET2_MMIO_ADDR: usize = VIRTIO_MMIO_BASE + (4 * VIRTIO_MMIO_STRIDE); // 0x10005000
+const NET0_MMIO_ADDR: u64 = VIRTIO_MMIO_BASE + (2 * VIRTIO_MMIO_STRIDE); // 0x10003000
+const NET1_MMIO_ADDR: u64 = VIRTIO_MMIO_BASE + (3 * VIRTIO_MMIO_STRIDE); // 0x10004000
+const NET2_MMIO_ADDR: u64 = VIRTIO_MMIO_BASE + (4 * VIRTIO_MMIO_STRIDE); // 0x10005000
 
 /// MAC addresses for test interfaces (from test.sh)
 const NET0_MAC: [u8; 6] = [0x52, 0x54, 0x00, 0x12, 0x34, 0x56];

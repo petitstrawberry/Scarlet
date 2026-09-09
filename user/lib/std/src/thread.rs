@@ -53,12 +53,12 @@ const STACK_ALIGN: usize = 16;
 const TLS_MAPPING_SIZE: usize = PAGE_SIZE;
 const TLS_SIZE: usize = TLS_MAPPING_SIZE;
 const TLS_CLEANUP_OFFSET: usize = 2048;
-const THREAD_CLEANUP_MAGIC: usize = 0x5343_5448_5244_0001;
+const THREAD_CLEANUP_MAGIC: u64 = 0x5343_5448_5244_0001;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct ThreadCleanupRecord {
-    magic: usize,
+    magic: u64,
     stack_mapping_base: usize,
     stack_mapping_len: usize,
     tls_mapping_base: usize,
@@ -236,9 +236,8 @@ pub unsafe fn set_tls_pointer(ptr: usize) {
 
 /// Thread sleep
 pub fn sleep(dur: Duration) -> i32 {
-    let nanosecs = dur.as_nanos() as usize;
-    // SAFETY: This fixed sleep operation takes only a scalar duration and has no userspace pointer arguments.
-    (unsafe { syscall1(Syscall::Sleep, nanosecs) }) as i32
+    let nanosecs = dur.as_nanos().min(u64::MAX as u128) as u64;
+    scarlet_sys::sleep_ns(nanosecs) as i32
 }
 
 /// Yield execution to the scheduler.

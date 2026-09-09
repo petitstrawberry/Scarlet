@@ -3,7 +3,6 @@ extern crate alloc;
 use crate::sync::IrqSpinLock;
 use alloc::sync::Arc;
 use alloc::sync::Weak;
-use core::sync::atomic::Ordering;
 
 #[cfg(feature = "hypervisor")]
 use crate::arch::hv::guest_vcpu::GuestVcpu;
@@ -32,8 +31,7 @@ pub struct VcpuOneReg {
 pub fn mark_current_task_running_hv_vcpu() {
     let cpu_id = crate::arch::get_cpu().get_cpuid();
     if let Some(task) = crate::sched::scheduler::current_task(cpu_id) {
-        task.time_slice_duration_ns
-            .store(HV_VCPU_TIME_SLICE_NS, Ordering::SeqCst);
+        task.set_time_slice_duration_ns(HV_VCPU_TIME_SLICE_NS);
         crate::sched::scheduler::refresh_current_task_slice(cpu_id);
     }
 }

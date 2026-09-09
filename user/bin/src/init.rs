@@ -12,9 +12,16 @@ fn boot() -> Result<core::convert::Infallible, &'static str> {
     let cmdline = args.get(1).map(|s| s.as_str()).unwrap_or("");
     let backing = bootstrap::backing(cmdline, false)?;
     let (environment, views) = bootstrap::environment(backing)?;
+    // Distribution policy is independent of CPU width. A console/recovery
+    // image can explicitly select its first program while using the same
+    // sealed Environment and handle setup as the full service-manager image.
+    let program = bootstrap::cmdline_value(cmdline, "init.exec=").unwrap_or("/bin/stemd");
+    if !program.starts_with('/') || program.as_bytes().contains(&0) {
+        return Err("init.exec must name an absolute executable path");
+    }
     let executable = views[0]
-        .open("/bin/stemd", 0)
-        .map_err(|_| "cannot open /bin/stemd")?;
+        .open(program, 0)
+        .map_err(|_| "cannot open initial program")?;
     let mut handles: Vec<_> = stdio
         .iter()
         .enumerate()
@@ -29,16 +36,16 @@ fn boot() -> Result<core::convert::Infallible, &'static str> {
         source: view.as_handle(),
         target: index as u32 + 3,
     }));
-    println!("init: starting stemd in the default Environment");
+    println!("init: starting {} in the default Environment", program);
     environment
         .exec(
             &executable,
-            &["/bin/stemd"],
+            &[program],
             &["PATH=/bin:/usr/bin", "HOME=/root"],
             "/",
             &handles,
         )
-        .map_err(|_| "Environment exec of /bin/stemd failed")
+        .map_err(|_| "Environment exec of initial program failed")
 }
 
 #[unsafe(no_mangle)]

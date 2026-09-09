@@ -31,9 +31,10 @@
 
 extern crate alloc;
 
-use core::sync::atomic::{
-    AtomicBool, AtomicPtr, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering,
-};
+use super::accounting::{Activity, CpuClock};
+use crate::sync::counter::SaturatingCounter;
+use crate::sync::diagnostic::{DiagnosticRecord, ReportInterval};
+use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU8, AtomicU32, AtomicUsize, Ordering};
 
 use alloc::{
     collections::{BTreeMap, BTreeSet, vec_deque::VecDeque},
@@ -79,20 +80,12 @@ static TASK_POOL: Once<TaskPool> = Once::new();
 static TASK_REAPER_STARTED: AtomicBool = AtomicBool::new(false);
 static TASK_REAPER_WAKER: crate::sync::Waker =
     crate::sync::Waker::new_uninterruptible("task-reaper");
-static SLICE_CALLBACK_TOKENS: AtomicU64 = AtomicU64::new(1);
-static SLICE_CALLBACK_CONTEXTS: Once<IrqSpinLock<BTreeMap<u64, SliceCallbackContext>>> =
-    Once::new();
 static SLICE_STATES: Once<[IrqSpinLock<SliceState>; MAX_NUM_CPUS]> = Once::new();
-static SLICE_TIMER_HANDLER: Once<Arc<SliceTimerHandler>> = Once::new();
-static DEADLINE_TIMER_HANDLER: Once<Arc<DeadlineTimerHandler>> = Once::new();
-static DEADLINE_CALLBACK_TOKENS: AtomicUsize = AtomicUsize::new(1);
-static DEADLINE_CALLBACK_CONTEXTS: Once<IrqSpinLock<BTreeMap<usize, DeadlineCallbackContext>>> =
-    Once::new();
 static TASK_CPU_WATCHDOG_HANDLER: Once<Arc<TaskCpuWatchdogTimerHandler>> = Once::new();
 static TASK_CPU_WATCHDOG_STARTED: [AtomicBool; MAX_NUM_CPUS] =
     [const { AtomicBool::new(false) }; MAX_NUM_CPUS];
-static DEADLINE_SLICE_LAST_LOG_NS: [AtomicU64; MAX_NUM_CPUS] =
-    [const { AtomicU64::new(0) }; MAX_NUM_CPUS];
+static DEADLINE_SLICE_REPORTS: [ReportInterval; MAX_NUM_CPUS] =
+    [const { ReportInterval::new() }; MAX_NUM_CPUS];
 
 const DEADLINE_BANDWIDTH_SCALE: u32 = 1_000_000;
 const DEADLINE_BANDWIDTH_CAP: u32 = 900_000;
@@ -234,48 +227,26 @@ enum SchedulerTransaction {
     LegacyDeadline(Option<TaskDeadlineParams>),
 }
 
-#[derive(Clone, Copy)]
-struct DeadlineCallbackContext {
+/// An individual replenishment registration owns its callback identity.
+/// The timer queue retains a Weak reference; the task retains this Arc until
+/// cancellation or expiry. Pointer identity remains valid while a callback runs.
+pub(crate) struct DeadlineTimerHandler {
     task_id: usize,
     generation: u64,
 }
 
-struct DeadlineTimerHandler;
-
 impl TimerHandler for DeadlineTimerHandler {
-    fn on_timer_expired(self: Arc<Self>, context: usize) {
-        let Some(context) = deadline_callback_contexts().lock().remove(&context) else {
+    fn on_timer_expired(self: Arc<Self>, _context: usize) {
+        let Some(task) = TaskPool::get_task(self.task_id) else {
             return;
         };
-        let Some(task) = TaskPool::get_task(context.task_id) else {
-            return;
-        };
-        replenish_deadline_task(&task, get_time_ns(), context.generation);
+        let _ = advance_deadline_period(&task, get_time_ns(), Some(&self));
     }
 }
 
-fn deadline_callback_contexts() -> &'static IrqSpinLock<BTreeMap<usize, DeadlineCallbackContext>> {
-    DEADLINE_CALLBACK_CONTEXTS.call_once(|| IrqSpinLock::new(BTreeMap::new()))
-}
-
-fn deadline_timer_handler() -> Arc<dyn TimerHandler> {
-    DEADLINE_TIMER_HANDLER
-        .call_once(|| Arc::new(DeadlineTimerHandler))
-        .clone()
-}
-
-#[derive(Clone, Copy)]
-struct SliceCallbackContext {
-    cpu_id: usize,
-    task_id: usize,
-    task_generation: usize,
-    generation: u64,
-}
-
-#[derive(Clone, Copy)]
 struct ActiveSlice {
     handle: Option<TimerHandle>,
-    token: u64,
+    handler: Arc<SliceTimerHandler>,
 }
 
 struct SliceState {
@@ -299,14 +270,14 @@ const SLICE_DIAGNOSTIC_CANCEL_MISSED: u64 = 9;
 const SLICE_DIAGNOSTIC_FLAG_DEADLINE: u64 = 1 << 0;
 const SLICE_DIAGNOSTIC_FLAG_THROTTLED: u64 = 1 << 1;
 
-/// Lock-free view of the last scheduler-slice operation on one CPU.
+/// Best-effort view of the last scheduler-slice operation on one CPU.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct SliceDiagnosticSnapshot {
     /// Last completed slice operation.
     pub action: u64,
     /// Task owning the slice, or zero when no task is associated.
     pub task_id: u64,
-    /// Slice callback token.
+    /// Identity of the retained callback object, for diagnostics only.
     pub token: u64,
     /// Software-timer handle ID, or zero before timer insertion.
     pub handle_id: u64,
@@ -329,95 +300,48 @@ pub(crate) struct SliceDiagnosticSnapshot {
 }
 
 #[repr(align(128))]
-struct SliceDiagnosticSlot {
-    sequence: AtomicU64,
-    action: AtomicU64,
-    task_id: AtomicU64,
-    token: AtomicU64,
-    handle_id: AtomicU64,
-    generation: AtomicU64,
-    duration_ns: AtomicU64,
-    timer_deadline_ns: AtomicU64,
-    fair_vruntime_ns: AtomicU64,
-    fair_vdeadline_ns: AtomicU64,
-    deadline_remaining_ns: AtomicU64,
-    deadline_absolute_ns: AtomicU64,
-    flags: AtomicU64,
-}
+struct SliceDiagnosticSlot(DiagnosticRecord<12>);
 
 impl SliceDiagnosticSlot {
     const fn new() -> Self {
-        Self {
-            sequence: AtomicU64::new(0),
-            action: AtomicU64::new(SLICE_DIAGNOSTIC_NONE),
-            task_id: AtomicU64::new(0),
-            token: AtomicU64::new(0),
-            handle_id: AtomicU64::new(0),
-            generation: AtomicU64::new(0),
-            duration_ns: AtomicU64::new(0),
-            timer_deadline_ns: AtomicU64::new(0),
-            fair_vruntime_ns: AtomicU64::new(0),
-            fair_vdeadline_ns: AtomicU64::new(0),
-            deadline_remaining_ns: AtomicU64::new(0),
-            deadline_absolute_ns: AtomicU64::new(0),
-            flags: AtomicU64::new(0),
-        }
+        Self(DiagnosticRecord::new([0; 12]))
     }
 
     #[inline(always)]
     fn publish(&self, snapshot: SliceDiagnosticSnapshot) {
-        // Every writer holds this CPU's `SliceState` lock, so one odd/even
-        // publication cannot overlap another publication for the same CPU.
-        let odd_sequence = self.sequence.load(Ordering::Relaxed).wrapping_add(1);
-        self.sequence.store(odd_sequence, Ordering::SeqCst);
-        self.action.store(snapshot.action, Ordering::SeqCst);
-        self.task_id.store(snapshot.task_id, Ordering::SeqCst);
-        self.token.store(snapshot.token, Ordering::SeqCst);
-        self.handle_id.store(snapshot.handle_id, Ordering::SeqCst);
-        self.generation.store(snapshot.generation, Ordering::SeqCst);
-        self.duration_ns
-            .store(snapshot.duration_ns, Ordering::SeqCst);
-        self.timer_deadline_ns
-            .store(snapshot.timer_deadline_ns, Ordering::SeqCst);
-        self.fair_vruntime_ns
-            .store(snapshot.fair_vruntime_ns, Ordering::SeqCst);
-        self.fair_vdeadline_ns
-            .store(snapshot.fair_vdeadline_ns, Ordering::SeqCst);
-        self.deadline_remaining_ns
-            .store(snapshot.deadline_remaining_ns, Ordering::SeqCst);
-        self.deadline_absolute_ns
-            .store(snapshot.deadline_absolute_ns, Ordering::SeqCst);
-        self.flags.store(snapshot.flags, Ordering::SeqCst);
-        self.sequence
-            .store(odd_sequence.wrapping_add(1), Ordering::SeqCst);
+        let _ = self.0.try_publish([
+            snapshot.action,
+            snapshot.task_id,
+            snapshot.token,
+            snapshot.handle_id,
+            snapshot.generation,
+            snapshot.duration_ns,
+            snapshot.timer_deadline_ns,
+            snapshot.fair_vruntime_ns,
+            snapshot.fair_vdeadline_ns,
+            snapshot.deadline_remaining_ns,
+            snapshot.deadline_absolute_ns,
+            snapshot.flags,
+        ]);
     }
 
     #[inline(always)]
-    fn snapshot(&self) -> SliceDiagnosticSnapshot {
-        for _ in 0..4 {
-            let sequence_before = self.sequence.load(Ordering::SeqCst);
-            if sequence_before & 1 != 0 {
-                continue;
-            }
-            let snapshot = SliceDiagnosticSnapshot {
-                action: self.action.load(Ordering::SeqCst),
-                task_id: self.task_id.load(Ordering::SeqCst),
-                token: self.token.load(Ordering::SeqCst),
-                handle_id: self.handle_id.load(Ordering::SeqCst),
-                generation: self.generation.load(Ordering::SeqCst),
-                duration_ns: self.duration_ns.load(Ordering::SeqCst),
-                timer_deadline_ns: self.timer_deadline_ns.load(Ordering::SeqCst),
-                fair_vruntime_ns: self.fair_vruntime_ns.load(Ordering::SeqCst),
-                fair_vdeadline_ns: self.fair_vdeadline_ns.load(Ordering::SeqCst),
-                deadline_remaining_ns: self.deadline_remaining_ns.load(Ordering::SeqCst),
-                deadline_absolute_ns: self.deadline_absolute_ns.load(Ordering::SeqCst),
-                flags: self.flags.load(Ordering::SeqCst),
-            };
-            if sequence_before == self.sequence.load(Ordering::SeqCst) {
-                return snapshot;
-            }
-        }
-        SliceDiagnosticSnapshot::default()
+    fn snapshot(&self) -> Option<SliceDiagnosticSnapshot> {
+        let record = self.0.snapshot()?;
+        Some(SliceDiagnosticSnapshot {
+            action: record.words[0],
+            task_id: record.words[1],
+            token: record.words[2],
+            handle_id: record.words[3],
+            generation: record.words[4],
+            duration_ns: record.words[5],
+            timer_deadline_ns: record.words[6],
+            fair_vruntime_ns: record.words[7],
+            fair_vdeadline_ns: record.words[8],
+            deadline_remaining_ns: record.words[9],
+            deadline_absolute_ns: record.words[10],
+            flags: record.words[11],
+        })
     }
 }
 
@@ -436,50 +360,51 @@ impl SliceState {
     }
 }
 
-struct SliceTimerHandler;
+/// Each arm owns its callback context. The timer queue holds a Weak reference;
+/// cancellation releases ownership, while an already claimed callback retains
+/// its Arc until completion. Pointer identity cannot be reused while it lives.
+struct SliceTimerHandler {
+    cpu_id: usize,
+    task_id: usize,
+    task_generation: usize,
+}
+
+impl SliceTimerHandler {
+    fn diagnostic_token(&self) -> u64 {
+        self as *const Self as usize as u64
+    }
+}
 
 impl TimerHandler for SliceTimerHandler {
-    fn on_timer_expired(self: Arc<Self>, context: usize) {
-        let token = context as u64;
-        let Some(context) = slice_callback_contexts().lock().remove(&token) else {
-            return;
-        };
-        let mut state = slice_states()[context.cpu_id].lock();
-        let matched = state.generation == context.generation
-            && state.task_id == Some(context.task_id)
-            && state.task_generation == Some(context.task_generation)
-            && state.active.is_some_and(|active| active.token == token);
+    fn on_timer_expired(self: Arc<Self>, _context: usize) {
+        let mut state = slice_states()[self.cpu_id].lock();
+        let matched = state.task_id == Some(self.task_id)
+            && state.task_generation == Some(self.task_generation)
+            && state
+                .active
+                .as_ref()
+                .is_some_and(|active| Arc::ptr_eq(&active.handler, &self));
         if matched {
             state.active = None;
             state.need_resched = true;
         }
         publish_slice_action(
-            context.cpu_id,
+            self.cpu_id,
             &state,
             if matched {
                 SLICE_DIAGNOSTIC_EXPIRED
             } else {
                 SLICE_DIAGNOSTIC_STALE_EXPIRE
             },
-            Some(context.task_id),
-            token,
+            Some(self.task_id),
+            self.diagnostic_token(),
             0,
         );
     }
 }
 
-fn slice_callback_contexts() -> &'static IrqSpinLock<BTreeMap<u64, SliceCallbackContext>> {
-    SLICE_CALLBACK_CONTEXTS.call_once(|| IrqSpinLock::new(BTreeMap::new()))
-}
-
 fn slice_states() -> &'static [IrqSpinLock<SliceState>; MAX_NUM_CPUS] {
     SLICE_STATES.call_once(|| core::array::from_fn(|_| IrqSpinLock::new(SliceState::new())))
-}
-
-fn slice_timer_handler() -> Arc<dyn TimerHandler> {
-    SLICE_TIMER_HANDLER
-        .call_once(|| Arc::new(SliceTimerHandler))
-        .clone()
 }
 
 #[inline(always)]
@@ -491,7 +416,9 @@ fn publish_slice_action(
     token: u64,
     handle_id: u64,
 ) {
-    let mut snapshot = SLICE_DIAGNOSTICS[cpu_id].snapshot();
+    let Some(mut snapshot) = SLICE_DIAGNOSTICS[cpu_id].snapshot() else {
+        return;
+    };
     snapshot.action = action;
     snapshot.task_id = task_id.unwrap_or(0) as u64;
     snapshot.token = token;
@@ -501,25 +428,10 @@ fn publish_slice_action(
 }
 
 fn should_log_deadline_slice_anomaly(cpu_id: usize, now_ns: u64) -> bool {
-    let last_log = &DEADLINE_SLICE_LAST_LOG_NS[cpu_id];
-    let mut observed = last_log.load(Ordering::Relaxed);
-    loop {
-        if observed != 0 && now_ns.saturating_sub(observed) < DEADLINE_SLICE_LOG_INTERVAL_NS {
-            return false;
-        }
-        match last_log.compare_exchange_weak(
-            observed,
-            now_ns.max(1),
-            Ordering::AcqRel,
-            Ordering::Relaxed,
-        ) {
-            Ok(_) => return true,
-            Err(actual) => observed = actual,
-        }
-    }
+    DEADLINE_SLICE_REPORTS[cpu_id].try_claim(now_ns, DEADLINE_SLICE_LOG_INTERVAL_NS)
 }
 
-/// Return the last lock-free scheduler-slice operation for one CPU.
+/// Try to observe the last scheduler-slice operation without waiting.
 ///
 /// # Arguments
 ///
@@ -527,9 +439,9 @@ fn should_log_deadline_slice_anomaly(cpu_id: usize, now_ns: u64) -> bool {
 ///
 /// # Returns
 ///
-/// The latest completed operation, or `None` for an invalid CPU ID.
+/// The latest completed operation, or None for an invalid CPU or a busy publication.
 pub(crate) fn slice_diagnostic_snapshot(cpu_id: usize) -> Option<SliceDiagnosticSnapshot> {
-    (cpu_id < MAX_NUM_CPUS).then(|| SLICE_DIAGNOSTICS[cpu_id].snapshot())
+    SLICE_DIAGNOSTICS.get(cpu_id)?.snapshot()
 }
 
 /// Return a compact label for a scheduler-slice diagnostic action.
@@ -602,8 +514,8 @@ static FORK_TRACE_PICKED_TASKS: Once<IrqSpinLock<BTreeSet<usize>>> = Once::new()
 const FORK_TRACE_ATOMIC_SLOTS: usize = 1024;
 static FORK_TRACE_ATOMIC_TASKS: [AtomicUsize; FORK_TRACE_ATOMIC_SLOTS] =
     [const { AtomicUsize::new(0) }; FORK_TRACE_ATOMIC_SLOTS];
-static FORK_TRACE_ATOMIC_CPU_MASKS: [AtomicU64; FORK_TRACE_ATOMIC_SLOTS] =
-    [const { AtomicU64::new(0) }; FORK_TRACE_ATOMIC_SLOTS];
+static FORK_TRACE_ATOMIC_CPU_MASKS: [AtomicUsize; FORK_TRACE_ATOMIC_SLOTS] =
+    [const { AtomicUsize::new(0) }; FORK_TRACE_ATOMIC_SLOTS];
 
 /// Get the global task pool (lazy initialization on first call)
 pub fn get_task_pool() -> &'static TaskPool {
@@ -1015,8 +927,9 @@ static DEADLINE_QUEUES: [IrqSpinLock<DeadlineQueue>; MAX_NUM_CPUS] =
 static DEADLINE_ADMISSION: [AtomicU32; MAX_NUM_CPUS] = [const { AtomicU32::new(0) }; MAX_NUM_CPUS];
 static ZOMBIE_QUEUE: IrqSpinLock<VecDeque<usize>> = IrqSpinLock::new(VecDeque::new());
 static BLOCKED_QUEUE: IrqSpinLock<VecDeque<usize>> = IrqSpinLock::new(VecDeque::new());
-const _: () = assert!(MAX_NUM_CPUS <= u64::BITS as usize);
-static ONLINE_CPU_MASK: AtomicU64 = AtomicU64::new(0);
+// CPU masks index the configured CPU array; they do not need a u64 counter.
+const _: () = assert!(MAX_NUM_CPUS <= usize::BITS as usize);
+static ONLINE_CPU_MASK: AtomicUsize = AtomicUsize::new(0);
 static IDLE_TASK_IDS: [AtomicUsize; MAX_NUM_CPUS] = [const { AtomicUsize::new(0) }; MAX_NUM_CPUS];
 static PENDING_IDLE_TO_USER_TRAP_TASK: [AtomicUsize; MAX_NUM_CPUS] =
     [const { AtomicUsize::new(0) }; MAX_NUM_CPUS];
@@ -1026,10 +939,12 @@ static PENDING_RESCHEDULE: [AtomicBool; MAX_NUM_CPUS] =
 // separate from PENDING_RESCHEDULE, which records deferred scheduler work.
 static PENDING_RESCHEDULE_IPI: [AtomicBool; MAX_NUM_CPUS] =
     [const { AtomicBool::new(false) }; MAX_NUM_CPUS];
-static TOTAL_BUSY_CPU_TIME_NS: AtomicU64 = AtomicU64::new(0);
-static TOTAL_IDLE_CPU_TIME_NS: AtomicU64 = AtomicU64::new(0);
-static CPU_BUSY_TIME_NS: [AtomicU64; MAX_NUM_CPUS] = [const { AtomicU64::new(0) }; MAX_NUM_CPUS];
-static CPU_IDLE_TIME_NS: [AtomicU64; MAX_NUM_CPUS] = [const { AtomicU64::new(0) }; MAX_NUM_CPUS];
+static CPU_CLOCKS: Once<[CpuClock; MAX_NUM_CPUS]> = Once::new();
+
+fn cpu_clocks() -> &'static [CpuClock; MAX_NUM_CPUS] {
+    CPU_CLOCKS.call_once(|| core::array::from_fn(|_| CpuClock::new()))
+}
+
 static CPU_UTIL_AVG: [AtomicU32; MAX_NUM_CPUS] = [const { AtomicU32::new(0) }; MAX_NUM_CPUS];
 static CPU_UTIL_MIN: [AtomicU32; MAX_NUM_CPUS] = [const { AtomicU32::new(0) }; MAX_NUM_CPUS];
 static CPU_RUNNABLE_TASKS: [AtomicUsize; MAX_NUM_CPUS] =
@@ -1424,11 +1339,11 @@ static CPU_CAPACITIES: [AtomicU32; MAX_NUM_CPUS] =
 const INVALID_CPU_TOPOLOGY_DOMAIN: u32 = u32::MAX;
 static CPU_TOPOLOGY_DOMAINS: [AtomicU32; MAX_NUM_CPUS] =
     [const { AtomicU32::new(INVALID_CPU_TOPOLOGY_DOMAIN) }; MAX_NUM_CPUS];
-static SCHED_MIGRATIONS_TOTAL: AtomicU64 = AtomicU64::new(0);
-static SCHED_MIGRATION_PROMOTIONS: AtomicU64 = AtomicU64::new(0);
-static SCHED_MIGRATION_DEMOTIONS: AtomicU64 = AtomicU64::new(0);
-static SCHED_MIGRATION_COOLDOWN_SKIPS: AtomicU64 = AtomicU64::new(0);
-static SCHED_WORK_STEALS: AtomicU64 = AtomicU64::new(0);
+static SCHED_MIGRATIONS_TOTAL: SaturatingCounter = SaturatingCounter::new(0);
+static SCHED_MIGRATION_PROMOTIONS: SaturatingCounter = SaturatingCounter::new(0);
+static SCHED_MIGRATION_DEMOTIONS: SaturatingCounter = SaturatingCounter::new(0);
+static SCHED_MIGRATION_COOLDOWN_SKIPS: SaturatingCounter = SaturatingCounter::new(0);
+static SCHED_WORK_STEALS: SaturatingCounter = SaturatingCounter::new(0);
 
 /// Coarse CPU core class used for heterogeneous scheduling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1692,7 +1607,6 @@ fn diagnostic_run_task_on_bsp(task: &Task) -> bool {
     })
 }
 
-static DEBUG_TICK: AtomicU64 = AtomicU64::new(0);
 static NEXT_CPU: AtomicUsize = AtomicUsize::new(0);
 
 pub const DEBUG_SMP_TASK_FLOW: bool = false;
@@ -1896,21 +1810,6 @@ fn current_task_must_switch(task: &Task, current_cpu: usize, now_ns: u64) -> boo
         || migration_target_for_task(task, current_cpu, now_ns, false).is_some()
 }
 
-fn charge_finished_cpu_time(cpu_id: usize, task_id: usize, delta_ns: u64) {
-    if delta_ns == 0 {
-        return;
-    }
-
-    let idle_id = IDLE_TASK_IDS[cpu_id].load(Ordering::SeqCst);
-    if idle_id != 0 && task_id == idle_id {
-        TOTAL_IDLE_CPU_TIME_NS.fetch_add(delta_ns, Ordering::SeqCst);
-        CPU_IDLE_TIME_NS[cpu_id].fetch_add(delta_ns, Ordering::SeqCst);
-    } else {
-        TOTAL_BUSY_CPU_TIME_NS.fetch_add(delta_ns, Ordering::SeqCst);
-        CPU_BUSY_TIME_NS[cpu_id].fetch_add(delta_ns, Ordering::SeqCst);
-    }
-}
-
 fn task_util_min_by_id(task_id: usize) -> u32 {
     TaskPool::get_task(task_id)
         .map(|task| task.sched_util_min())
@@ -2009,11 +1908,11 @@ pub fn cpu_util_snapshot(cpu_id: usize) -> Option<CpuUtilSnapshot> {
 /// Current scheduler migration accounting snapshot.
 pub fn scheduler_migration_stats() -> SchedulerMigrationStats {
     SchedulerMigrationStats {
-        total: SCHED_MIGRATIONS_TOTAL.load(Ordering::SeqCst),
-        promotions: SCHED_MIGRATION_PROMOTIONS.load(Ordering::SeqCst),
-        demotions: SCHED_MIGRATION_DEMOTIONS.load(Ordering::SeqCst),
-        cooldown_skips: SCHED_MIGRATION_COOLDOWN_SKIPS.load(Ordering::SeqCst),
-        work_steals: SCHED_WORK_STEALS.load(Ordering::SeqCst),
+        total: SCHED_MIGRATIONS_TOTAL.snapshot(),
+        promotions: SCHED_MIGRATION_PROMOTIONS.snapshot(),
+        demotions: SCHED_MIGRATION_DEMOTIONS.snapshot(),
+        cooldown_skips: SCHED_MIGRATION_COOLDOWN_SKIPS.snapshot(),
+        work_steals: SCHED_WORK_STEALS.snapshot(),
     }
 }
 
@@ -2034,8 +1933,7 @@ fn account_task_switch(cpu_id: usize, old_id: Option<usize>, next_id: Option<usi
                     update_curr_fair(&task, &mut fair_queue(cpu_id).lock(), now_ns);
                 }
             }
-            let delta_ns = task.stop_cpu_accounting(now_ns);
-            charge_finished_cpu_time(cpu_id, old_id, delta_ns);
+            task.stop_cpu_accounting(now_ns);
             if old_id != idle_id {
                 task.account_sched_util_running(now_ns);
             }
@@ -2047,6 +1945,15 @@ fn account_task_switch(cpu_id: usize, old_id: Option<usize>, next_id: Option<usi
             task.start_cpu_accounting(now_ns);
         }
     }
+    let idle_id = IDLE_TASK_IDS[cpu_id].load(Ordering::SeqCst);
+    let next_activity = next_id.map(|id| {
+        if id == idle_id {
+            Activity::Idle
+        } else {
+            Activity::Busy
+        }
+    });
+    cpu_clocks()[cpu_id].switch(now_ns, next_activity);
 }
 
 fn account_current_task_slice_boundary(cpu_id: usize) {
@@ -2163,25 +2070,15 @@ pub fn update_task_nice(task: &Task, nice: i32) {
 /// Cumulative busy and idle CPU time, including currently running task deltas.
 pub fn cpu_usage_snapshot() -> CpuUsageSnapshot {
     let now_ns = get_time_ns();
-    let mut busy_time_ns = TOTAL_BUSY_CPU_TIME_NS.load(Ordering::SeqCst);
-    let mut idle_time_ns = TOTAL_IDLE_CPU_TIME_NS.load(Ordering::SeqCst);
-
+    let mut busy_time_ns = 0u64;
+    let mut idle_time_ns = 0u64;
+    // Each CPU contributes one coherent sample. This is an aggregate, not a
+    // simultaneous transaction across every online CPU.
     for_each_online_cpu(|cpu_id| {
-        let Some(task_id) = current_task_id(cpu_id) else {
-            return;
-        };
-        let Some(task) = TaskPool::get_task(task_id) else {
-            return;
-        };
-        let delta_ns = task.current_cpu_delta_ns(now_ns);
-        let idle_id = IDLE_TASK_IDS[cpu_id].load(Ordering::SeqCst);
-        if idle_id != 0 && task_id == idle_id {
-            idle_time_ns = idle_time_ns.saturating_add(delta_ns);
-        } else {
-            busy_time_ns = busy_time_ns.saturating_add(delta_ns);
-        }
+        let (busy, idle) = cpu_clocks()[cpu_id].snapshot(now_ns);
+        busy_time_ns = busy_time_ns.saturating_add(busy);
+        idle_time_ns = idle_time_ns.saturating_add(idle);
     });
-
     CpuUsageSnapshot {
         online_cpus: num_online_cpus(),
         busy_time_ns,
@@ -2206,21 +2103,7 @@ pub fn cpu_time_snapshot(cpu_id: usize) -> Option<CpuTimeSnapshot> {
         return None;
     }
 
-    let mut busy_time_ns = CPU_BUSY_TIME_NS[cpu_id].load(Ordering::SeqCst);
-    let mut idle_time_ns = CPU_IDLE_TIME_NS[cpu_id].load(Ordering::SeqCst);
-    let now_ns = get_time_ns();
-
-    if let Some(task_id) = current_task_id(cpu_id)
-        && let Some(task) = TaskPool::get_task(task_id)
-    {
-        let delta_ns = task.current_cpu_delta_ns(now_ns);
-        let idle_id = IDLE_TASK_IDS[cpu_id].load(Ordering::SeqCst);
-        if idle_id != 0 && task_id == idle_id {
-            idle_time_ns = idle_time_ns.saturating_add(delta_ns);
-        } else {
-            busy_time_ns = busy_time_ns.saturating_add(delta_ns);
-        }
-    }
+    let (busy_time_ns, idle_time_ns) = cpu_clocks()[cpu_id].snapshot(get_time_ns());
 
     Some(CpuTimeSnapshot {
         cpu_id,
@@ -2301,7 +2184,7 @@ fn invalidate_local_slice(cpu_id: usize) {
     let (active, task_id) = {
         let mut state = slice_states()[cpu_id].lock();
         let task_id = state.task_id;
-        state.generation = state.generation.wrapping_add(1);
+        state.generation = state.generation.saturating_add(1);
         state.need_resched = false;
         state.task_id = None;
         state.task_generation = None;
@@ -2311,15 +2194,17 @@ fn invalidate_local_slice(cpu_id: usize) {
             &state,
             SLICE_DIAGNOSTIC_INVALIDATED,
             task_id,
-            active.map_or(0, |active| active.token),
             active
+                .as_ref()
+                .map_or(0, |active| active.handler.diagnostic_token()),
+            active
+                .as_ref()
                 .and_then(|active| active.handle)
                 .map_or(0, |handle| handle.id),
         );
         (active, task_id)
     };
     if let Some(active) = active {
-        slice_callback_contexts().lock().remove(&active.token);
         if let Some(handle) = active.handle {
             let cancelled = cancel_timer(handle);
             let state = slice_states()[cpu_id].lock();
@@ -2332,7 +2217,7 @@ fn invalidate_local_slice(cpu_id: usize) {
                     SLICE_DIAGNOSTIC_CANCEL_MISSED
                 },
                 task_id,
-                active.token,
+                active.handler.diagnostic_token(),
                 handle.id,
             );
         }
@@ -2359,14 +2244,15 @@ fn arm_local_slice(cpu_id: usize, task_id: usize) {
         defer_reschedule(cpu_id);
         return;
     }
-    let fair_vruntime_ns = task.sched_vruntime.load(Ordering::SeqCst);
-    let fair_vdeadline_ns = task.sched_deadline.load(Ordering::SeqCst);
-    let fair_slice_ns = task.sched_slice_ns.load(Ordering::SeqCst);
+    let fair = task.fair_request.snapshot();
+    let fair_vruntime_ns = fair.vruntime;
+    let fair_vdeadline_ns = fair.deadline;
+    let fair_slice_ns = fair.slice_ns;
     let duration_ns = if let Some(snapshot) = deadline {
         snapshot.remaining_ns
     } else {
         if fair_slice_ns == 0 {
-            task.time_slice_duration_ns.load(Ordering::SeqCst)
+            task.time_slice_duration_ns()
         } else {
             fair_slice_remaining_ns(
                 fair_vruntime_ns,
@@ -2382,16 +2268,21 @@ fn arm_local_slice(cpu_id: usize, task_id: usize) {
     let fair_anomaly = deadline.is_none()
         && (duration_ns == 0 || (fair_slice_ns != 0 && fair_vdeadline_ns <= fair_vruntime_ns));
     drop(task);
-    let token = SLICE_CALLBACK_TOKENS.fetch_add(1, Ordering::Relaxed);
-    let generation = {
+    let handler = Arc::new(SliceTimerHandler {
+        cpu_id,
+        task_id,
+        task_generation,
+    });
+    let token = handler.diagnostic_token();
+    let (generation, replaced) = {
         let mut state = slice_states()[cpu_id].lock();
-        state.generation = state.generation.wrapping_add(1);
+        state.generation = state.generation.saturating_add(1);
         state.need_resched = false;
         state.task_id = Some(task_id);
         state.task_generation = Some(task_generation);
-        state.active = Some(ActiveSlice {
+        let replaced = state.active.replace(ActiveSlice {
             handle: None,
-            token,
+            handler: handler.clone(),
         });
         let mut diagnostic = SliceDiagnosticSnapshot {
             action: SLICE_DIAGNOSTIC_ARM_PREPARE,
@@ -2416,12 +2307,20 @@ fn arm_local_slice(cpu_id: usize, task_id: usize) {
         };
         diagnostic.generation = state.generation;
         SLICE_DIAGNOSTICS[cpu_id].publish(diagnostic);
-        state.generation
+        (state.generation, replaced)
     };
+    // Cancel and release superseded callbacks outside the slice-state lock.
+    if let Some(replaced) = replaced {
+        if let Some(handle) = replaced.handle {
+            let _ = cancel_timer(handle);
+        }
+    }
     if (deadline_anomaly || fair_anomaly) && should_log_deadline_slice_anomaly(cpu_id, now_ns) {
-        let timer = crate::timer::timer_diagnostic_snapshot(cpu_id).unwrap_or_default();
+        let timer = crate::timer::timer_diagnostic_snapshot(cpu_id);
+        let timer_available = timer.is_some();
+        let timer = timer.unwrap_or_default();
         crate::emergency_println!(
-            "[sched-timer-anomaly] cpu={} task={} class={} throttled={} remaining={} abs={} now={} duration={} vruntime={} vdeadline={} fair_slice={} queue_head={} queue_hard={} programmed_id={} programmed_deadline={}",
+            "[sched-timer-anomaly] cpu={} task={} class={} throttled={} remaining={} abs={} now={} duration={} vruntime={} vdeadline={} fair_slice={} timer_available={} queue_head={} queue_hard={} programmed_id={} programmed_deadline={}",
             cpu_id,
             task_id,
             if deadline.is_some() {
@@ -2437,43 +2336,40 @@ fn arm_local_slice(cpu_id: usize, task_id: usize) {
             fair_vruntime_ns,
             fair_vdeadline_ns,
             fair_slice_ns,
+            timer_available,
             timer.queue.head_id,
             timer.queue.head_hard_deadline_ns,
             timer.programmed_id,
             timer.programmed_deadline_ns,
         );
     }
-    slice_callback_contexts().lock().insert(
-        token,
-        SliceCallbackContext {
-            cpu_id,
-            task_id,
-            task_generation,
-            generation,
-        },
-    );
-    let handler = slice_timer_handler();
+    let timer_handler: Arc<dyn TimerHandler> = handler.clone();
     let deadline_ns = get_time_ns().saturating_add(duration_ns);
     let handle = if deadline.is_some() {
-        add_scheduler_timer(deadline_ns, &handler, token as usize)
+        add_scheduler_timer(deadline_ns, &timer_handler, 0)
     } else {
         add_timer(
             deadline_ns,
             crate::timer::TimerPrecision::Exact,
-            &handler,
-            token as usize,
+            &timer_handler,
+            0,
         )
     };
     let keep_handle = {
         let mut state = slice_states()[cpu_id].lock();
         if state.generation == generation
             && state.task_id == Some(task_id)
-            && state.active.is_some_and(|active| active.token == token)
+            && state.task_generation == Some(task_generation)
+            && state
+                .active
+                .as_ref()
+                .is_some_and(|active| Arc::ptr_eq(&active.handler, &handler))
         {
-            state.active = Some(ActiveSlice {
-                handle: Some(handle),
-                token,
-            });
+            state
+                .active
+                .as_mut()
+                .expect("matched active callback")
+                .handle = Some(handle);
             publish_slice_action(
                 cpu_id,
                 &state,
@@ -2533,14 +2429,17 @@ fn take_local_slice_reschedule(cpu_id: usize) -> bool {
     state.need_resched = false;
     if requested {
         let task_id = state.task_id;
-        let active = state.active;
+        let active = state.active.as_ref();
         publish_slice_action(
             cpu_id,
             &state,
             SLICE_DIAGNOSTIC_RESCHEDULE_TAKEN,
             task_id,
-            active.map_or(0, |active| active.token),
             active
+                .as_ref()
+                .map_or(0, |active| active.handler.diagnostic_token()),
+            active
+                .as_ref()
                 .and_then(|active| active.handle)
                 .map_or(0, |handle| handle.id),
         );
@@ -2625,7 +2524,7 @@ pub fn refresh_current_task_slice(cpu_id: usize) {
 pub fn register_online_cpu(cpu_id: usize) {
     debug_assert!(cpu_id < MAX_NUM_CPUS);
     if cpu_id < MAX_NUM_CPUS {
-        ONLINE_CPU_MASK.fetch_or(cpu_mask_bit(cpu_id), Ordering::Release);
+        ONLINE_CPU_MASK.fetch_or(1usize << cpu_id, Ordering::Release);
     }
 }
 
@@ -2641,10 +2540,10 @@ fn cpu_mask_bit(cpu_id: usize) -> u64 {
 ///
 /// # Returns
 ///
-/// A CPU mask with bit `n` set when scheduler CPU `n` is online. CPU IDs that
-/// do not fit in a 64-bit mask are omitted.
+/// A CPU mask with bit `n` set when scheduler CPU `n` is online. The configured
+/// CPU count must fit a native word; the diagnostic return type remains u64.
 pub fn online_cpu_mask() -> u64 {
-    ONLINE_CPU_MASK.load(Ordering::Acquire)
+    ONLINE_CPU_MASK.load(Ordering::Acquire) as u64
 }
 
 #[inline]
@@ -3340,7 +3239,7 @@ fn migration_cooldown_active(task: &Task, now_ns: u64, record_skip: bool) -> boo
     let active = last_migration_ns != 0
         && now_ns.saturating_sub(last_migration_ns) < SCHED_MIGRATION_COOLDOWN_NS;
     if active && record_skip {
-        SCHED_MIGRATION_COOLDOWN_SKIPS.fetch_add(1, Ordering::SeqCst);
+        SCHED_MIGRATION_COOLDOWN_SKIPS.add(1);
     }
     active
 }
@@ -3410,7 +3309,7 @@ fn migration_target_for_task(
 }
 
 fn record_work_steal(task: &Task, now_ns: u64) {
-    SCHED_WORK_STEALS.fetch_add(1, Ordering::SeqCst);
+    SCHED_WORK_STEALS.add(1);
     task.mark_sched_migrated(now_ns);
 }
 
@@ -3421,11 +3320,11 @@ fn record_scheduler_migration(task: &Task, from_cpu: usize, to_cpu: usize, now_n
 
     let from_capacity = cpu_capacity(from_cpu);
     let to_capacity = cpu_capacity(to_cpu);
-    SCHED_MIGRATIONS_TOTAL.fetch_add(1, Ordering::SeqCst);
+    SCHED_MIGRATIONS_TOTAL.add(1);
     if to_capacity > from_capacity {
-        SCHED_MIGRATION_PROMOTIONS.fetch_add(1, Ordering::SeqCst);
+        SCHED_MIGRATION_PROMOTIONS.add(1);
     } else if to_capacity < from_capacity {
-        SCHED_MIGRATION_DEMOTIONS.fetch_add(1, Ordering::SeqCst);
+        SCHED_MIGRATION_DEMOTIONS.add(1);
     }
     task.mark_sched_migrated(now_ns);
 }
@@ -3679,13 +3578,13 @@ fn publish_scheduler_affinity(task: &Task, affinity: SchedulerAffinity) {
     }
 }
 
-fn cancel_replenishment(timer: Option<TimerHandle>, token: Option<usize>) {
-    if let Some(token) = token {
-        deadline_callback_contexts().lock().remove(&token);
-    }
+fn cancel_replenishment(timer: Option<TimerHandle>, handler: Option<Arc<DeadlineTimerHandler>>) {
     if let Some(timer) = timer {
         let _ = cancel_timer(timer);
     }
+    // Keep ownership until cancellation completes, and deallocate outside the
+    // task's deadline-state guard.
+    drop(handler);
 }
 
 fn initialize_deadline_state(
@@ -3708,8 +3607,8 @@ fn initialize_deadline_state(
     state.budget_overruns = 0;
     state.admission_units = units;
     state.replenishment_timer = None;
-    state.replenishment_token = None;
-    task.sched_exec_start_ns.store(now_ns, Ordering::SeqCst);
+    state.replenishment_handler = None;
+    task.exec_clock.start(now_ns);
 }
 
 fn reconfigure_deadline_state(
@@ -3736,7 +3635,7 @@ fn reconfigure_deadline_state(
 
     let now_ns = get_time_ns();
     let _ = update_curr_deadline(task, now_ns);
-    let (timer, token) = {
+    let (timer, handler) = {
         let mut state = task.deadline.lock();
         if state.params.is_none() {
             if old_cpu == target_cpu && units > old_units {
@@ -3747,7 +3646,7 @@ fn reconfigure_deadline_state(
             return SchedulerControlResult::Busy;
         }
         let timer = state.replenishment_timer.take();
-        let token = state.replenishment_token.take();
+        let handler = state.replenishment_handler.take();
         state.generation = state.generation.wrapping_add(1);
         state.params = Some(params);
         state.remaining_ns = params.runtime_ns;
@@ -3758,10 +3657,10 @@ fn reconfigure_deadline_state(
         state.deadline_misses = 0;
         state.budget_overruns = 0;
         state.admission_units = units;
-        task.sched_exec_start_ns.store(now_ns, Ordering::SeqCst);
-        (timer, token)
+        task.exec_clock.start(now_ns);
+        (timer, handler)
     };
-    cancel_replenishment(timer, token);
+    cancel_replenishment(timer, handler);
 
     if old_cpu == target_cpu {
         if old_units > units {
@@ -3900,8 +3799,7 @@ fn apply_current_task_scheduler_transaction(
                 let _ = update_curr_deadline(task, get_time_ns());
                 release_task_deadline(task);
                 task.reset_sched_request();
-                task.sched_exec_start_ns
-                    .store(get_time_ns(), Ordering::SeqCst);
+                task.exec_clock.start(get_time_ns());
                 SchedulerControlResult::Ok
             }
         },
@@ -4029,7 +3927,7 @@ fn deadline_wakeup_overflows(state: &TaskDeadlineState, now_ns: u64) -> bool {
 /// ahead of queue insertion ensures the queue key is built from the refreshed
 /// absolute deadline.
 fn prepare_deadline_wakeup(task: &Task, now_ns: u64) -> bool {
-    let (timer, token, refreshed) = {
+    let (timer, handler, refreshed) = {
         let mut state = task.deadline.lock();
         let Some(params) = state.params else {
             return false;
@@ -4057,12 +3955,12 @@ fn prepare_deadline_wakeup(task: &Task, now_ns: u64) -> bool {
         }
         (
             state.replenishment_timer.take(),
-            state.replenishment_token.take(),
+            state.replenishment_handler.take(),
             true,
         )
     };
 
-    cancel_replenishment(timer, token);
+    cancel_replenishment(timer, handler);
     refreshed
 }
 
@@ -4144,14 +4042,25 @@ fn remove_deadline_task_from_cpu(cpu_id: usize, task: &Task) -> bool {
     removed
 }
 
-fn advance_deadline_period(task: &Task, now_ns: u64, expected_generation: Option<u64>) -> bool {
-    let (timer, token, should_enqueue) = {
+fn advance_deadline_period(
+    task: &Task,
+    now_ns: u64,
+    expected_callback: Option<&Arc<DeadlineTimerHandler>>,
+) -> bool {
+    let (timer, handler, should_enqueue) = {
         let mut state = task.deadline.lock();
         let Some(params) = state.params else {
             return false;
         };
-        if expected_generation.is_some_and(|generation| generation != state.generation) {
-            return false;
+        if let Some(expected) = expected_callback {
+            if expected.generation != state.generation
+                || !state
+                    .replenishment_handler
+                    .as_ref()
+                    .is_some_and(|active| Arc::ptr_eq(active, expected))
+            {
+                return false;
+            }
         }
         if now_ns < state.next_replenishment_ns {
             return false;
@@ -4160,20 +4069,17 @@ fn advance_deadline_period(task: &Task, now_ns: u64, expected_generation: Option
         debug_assert!(params.period_ns > 0);
         let _ = replenish_deadline_state(&mut state, now_ns);
         let timer = state.replenishment_timer.take();
-        let token = state.replenishment_token.take();
+        let handler = state.replenishment_handler.take();
         let should_enqueue = matches!(task.state.load(Ordering::SeqCst), TaskState::Ready)
             && task.running_cpu.load(Ordering::SeqCst) == NO_CPU
             && !task.deadline_on_rq.load(Ordering::SeqCst);
-        (timer, token, should_enqueue)
+        (timer, handler, should_enqueue)
     };
 
-    if let Some(token) = token {
-        deadline_callback_contexts().lock().remove(&token);
-    }
-    if expected_generation.is_none()
-        && let Some(timer) = timer
-    {
-        let _ = cancel_timer(timer);
+    if expected_callback.is_none() {
+        cancel_replenishment(timer, handler);
+    } else {
+        drop(handler);
     }
     if should_enqueue && enqueue_deadline(task) {
         let cpu_id = task
@@ -4189,39 +4095,30 @@ fn advance_deadline_period(task: &Task, now_ns: u64, expected_generation: Option
     true
 }
 
-fn replenish_deadline_task(task: &Task, now_ns: u64, generation: u64) {
-    let _ = advance_deadline_period(task, now_ns, Some(generation));
-}
-
 fn arm_deadline_replenishment(task: &Task) {
     let mut state = task.deadline.lock();
     if state.params.is_none() || !state.throttled || state.replenishment_timer.is_some() {
         return;
     }
-    let token = DEADLINE_CALLBACK_TOKENS.fetch_add(1, Ordering::Relaxed);
-    deadline_callback_contexts().lock().insert(
-        token,
-        DeadlineCallbackContext {
-            task_id: task.get_id(),
-            generation: state.generation,
-        },
-    );
-    let handler = deadline_timer_handler();
-    let handle = add_scheduler_timer(state.next_replenishment_ns, &handler, token);
+    let handler = Arc::new(DeadlineTimerHandler {
+        task_id: task.get_id(),
+        generation: state.generation,
+    });
+    let timer_handler: Arc<dyn TimerHandler> = handler.clone();
+    // This queue is local to the arming CPU. The deadline guard masks its
+    // interrupts until both the timer handle and its strong owner are stored.
+    let handle = add_scheduler_timer(state.next_replenishment_ns, &timer_handler, 0);
     state.replenishment_timer = Some(handle);
-    state.replenishment_token = Some(token);
+    state.replenishment_handler = Some(handler);
 }
 
 fn update_curr_deadline(task: &Task, now_ns: u64) -> bool {
-    let last_ns = task.sched_exec_start_ns.load(Ordering::SeqCst);
-    if last_ns == 0 {
+    let Some(delta_ns) = task.exec_clock.advance(now_ns) else {
         return false;
-    }
-    let delta_ns = now_ns.saturating_sub(last_ns);
+    };
     if delta_ns == 0 {
         return task.deadline.lock().throttled;
     }
-    task.sched_exec_start_ns.store(now_ns, Ordering::SeqCst);
 
     let exhausted = consume_deadline_budget(&mut task.deadline.lock(), delta_ns);
     if exhausted {
@@ -4369,9 +4266,11 @@ pub fn current_task_scheduler_state() -> Option<SchedulerStateSnapshot> {
     .filter(|cpu_id| *cpu_id < MAX_NUM_CPUS);
     let now_ns = get_time_ns();
     let fair_slice_remaining_ns = if matches!(attributes.policy, SchedulerPolicy::Fair) {
-        let started_ns = task.sched_exec_start_ns.load(Ordering::SeqCst);
-        task.sched_slice_ns()
-            .saturating_sub(now_ns.saturating_sub(started_ns))
+        let elapsed = task
+            .exec_clock
+            .started_at()
+            .map_or(0, |start| now_ns.saturating_sub(start));
+        task.sched_slice_ns().saturating_sub(elapsed)
     } else {
         0
     };
@@ -4405,7 +4304,7 @@ pub fn current_task_scheduler_state() -> Option<SchedulerStateSnapshot> {
 ///
 /// * `task` - Task whose reservation should be released.
 pub(crate) fn release_task_deadline(task: &Task) {
-    let (cpu_id, units, timer, token, was_enabled) = {
+    let (cpu_id, units, timer, handler, was_enabled) = {
         let mut state = task.deadline.lock();
         let was_enabled = state.params.is_some();
         let cpu_id = state.cpu_id;
@@ -4418,7 +4317,7 @@ pub(crate) fn release_task_deadline(task: &Task) {
         task.deadline_on_rq.store(false, Ordering::SeqCst);
         let units = state.admission_units;
         let timer = state.replenishment_timer.take();
-        let token = state.replenishment_token.take();
+        let handler = state.replenishment_handler.take();
         state.params = None;
         state.remaining_ns = 0;
         state.absolute_deadline_ns = 0;
@@ -4427,14 +4326,9 @@ pub(crate) fn release_task_deadline(task: &Task) {
         state.throttled = false;
         state.admission_units = 0;
         state.generation = state.generation.wrapping_add(1);
-        (cpu_id, units, timer, token, was_enabled)
+        (cpu_id, units, timer, handler, was_enabled)
     };
-    if let Some(token) = token {
-        deadline_callback_contexts().lock().remove(&token);
-    }
-    if let Some(timer) = timer {
-        let _ = cancel_timer(timer);
-    }
+    cancel_replenishment(timer, handler);
     if was_enabled {
         release_deadline_bandwidth(cpu_id, units);
     }
@@ -4462,40 +4356,27 @@ enum PlaceMode {
 /// touch the queue itself; pair with [`FairQueue::insert`] to make the
 /// placement visible.
 fn place_entity(task: &Task, queue: &FairQueue, mode: PlaceMode) -> FairKey {
+    let task_id = task.get_id();
     let weight = task.sched_weight();
     let avg = queue.avg_vruntime();
     let min_vruntime = queue.min_vruntime;
-    let vruntime = match mode {
-        PlaceMode::New => avg,
-        PlaceMode::LocalPreempt => task.sched_vruntime(),
-        PlaceMode::Migrate => task.sched_vruntime().max(min_vruntime),
-    };
-    task.sched_vruntime.store(vruntime, Ordering::SeqCst);
-
-    let (slice, deadline) = match mode {
-        PlaceMode::LocalPreempt => {
-            let slice = task.sched_slice_ns.load(Ordering::SeqCst);
-            let deadline = task.sched_deadline.load(Ordering::SeqCst);
-            if slice != 0 && deadline > vruntime {
-                (slice, deadline)
-            } else {
-                let period = sched_period(queue.nr_running.saturating_add(1));
-                let total_weight = queue.avg_load.saturating_add(weight as u64);
-                let slice = sched_slice(period, weight, total_weight);
-                (slice, fair_deadline(vruntime, slice, weight))
-            }
+    let period = sched_period(queue.nr_running.saturating_add(1));
+    let total_weight = queue.avg_load.saturating_add(u64::from(weight));
+    task.fair_request.update(|request| {
+        request.vruntime = match mode {
+            PlaceMode::New => avg,
+            PlaceMode::LocalPreempt => request.vruntime,
+            PlaceMode::Migrate => request.vruntime.max(min_vruntime),
+        };
+        let retain = mode == PlaceMode::LocalPreempt
+            && request.slice_ns != 0
+            && request.deadline > request.vruntime;
+        if !retain {
+            request.slice_ns = sched_slice(period, weight, total_weight);
+            request.deadline = fair_deadline(request.vruntime, request.slice_ns, weight);
         }
-        PlaceMode::New | PlaceMode::Migrate => {
-            let period = sched_period(queue.nr_running.saturating_add(1));
-            let total_weight = queue.avg_load.saturating_add(weight as u64);
-            let slice = sched_slice(period, weight, total_weight);
-            (slice, fair_deadline(vruntime, slice, weight))
-        }
-    };
-    task.sched_slice_ns.store(slice, Ordering::SeqCst);
-    task.sched_deadline.store(deadline, Ordering::SeqCst);
-
-    FairKey::new(deadline, vruntime, task.get_id())
+        FairKey::new(request.deadline, request.vruntime, task_id)
+    })
 }
 
 /// Advance a running task's `vruntime` and `deadline` by the wall-time delta
@@ -4505,31 +4386,25 @@ fn place_entity(task: &Task, queue: &FairQueue, mode: PlaceMode) -> FairKey {
 /// so this only updates authoritative Task fields plus the queue's
 /// `min_vruntime` floor; no `rekey` is needed.
 fn update_curr_fair(task: &Task, queue: &mut FairQueue, now_ns: u64) {
-    let last = task.sched_exec_start_ns.load(Ordering::SeqCst);
-    if last == 0 {
+    let Some(delta_ns) = task.exec_clock.advance(now_ns) else {
         return;
-    }
-    let delta_ns = now_ns.saturating_sub(last);
+    };
     if delta_ns == 0 {
         return;
     }
-    task.sched_exec_start_ns.store(now_ns, Ordering::SeqCst);
-
     let weight = task.sched_weight();
     let delta_fair = calc_delta_fair(delta_ns, weight);
-    let vruntime = task.sched_vruntime.load(Ordering::SeqCst);
-    let new_vruntime = vruntime.saturating_add(delta_fair);
-    task.sched_vruntime.store(new_vruntime, Ordering::SeqCst);
-
-    let prev_deadline = task.sched_deadline.load(Ordering::SeqCst);
-    let slice = task.sched_slice_ns.load(Ordering::SeqCst);
-    let renewed_deadline = renew_deadline_if_consumed(new_vruntime, prev_deadline, slice, weight);
-    if renewed_deadline != prev_deadline {
-        task.sched_deadline
-            .store(renewed_deadline, Ordering::SeqCst);
-    }
-
-    queue.bump_min_vruntime(new_vruntime);
+    let vruntime = task.fair_request.update(|request| {
+        request.vruntime = request.vruntime.saturating_add(delta_fair);
+        request.deadline = renew_deadline_if_consumed(
+            request.vruntime,
+            request.deadline,
+            request.slice_ns,
+            weight,
+        );
+        request.vruntime
+    });
+    queue.bump_min_vruntime(vruntime);
 }
 
 /// Place and insert a task into the destination CPU's fair queue.
@@ -4543,12 +4418,7 @@ fn enqueue_fair(cpu_id: usize, task: &Task, mode: PlaceMode) {
     }
     let mut queue = fair_queue(cpu_id).lock();
     let key = place_entity(task, &queue, mode);
-    queue.insert(
-        task.get_id(),
-        key,
-        task.sched_vruntime.load(Ordering::SeqCst),
-        task.sched_weight(),
-    );
+    queue.insert(task.get_id(), key, key.vruntime, task.sched_weight());
 }
 
 /// Pop the eligible min-deadline entity from the local fair queue and return
@@ -4584,7 +4454,7 @@ fn set_current_task_id(cpu_id: usize, task_id: Option<usize>) {
 #[inline]
 pub fn push_ready_task(cpu_id: usize, task_id: usize) {
     let mode = TaskPool::get_task(task_id).map(|task| {
-        if task.sched_deadline.load(Ordering::SeqCst) == 0 {
+        if task.sched_deadline() == 0 {
             PlaceMode::New
         } else if task.last_cpu.load(Ordering::SeqCst) != cpu_id {
             PlaceMode::Migrate
@@ -4677,7 +4547,7 @@ pub fn is_fork_trace_task(task_id: usize) -> bool {
 ///
 /// `true` when the caller should emit the first-trap diagnostic.
 pub fn take_fork_trace_first_user_trap(cpu_id: usize, task_id: usize) -> bool {
-    if cpu_id >= MAX_NUM_CPUS || cpu_id >= u64::BITS as usize {
+    if cpu_id >= MAX_NUM_CPUS {
         return false;
     }
 
@@ -4688,7 +4558,7 @@ pub fn take_fork_trace_first_user_trap(cpu_id: usize, task_id: usize) -> bool {
             continue;
         }
 
-        let cpu_bit = 1u64 << cpu_id;
+        let cpu_bit = 1usize << cpu_id;
         return FORK_TRACE_ATOMIC_CPU_MASKS[slot].fetch_or(cpu_bit, Ordering::AcqRel) & cpu_bit
             == 0;
     }
@@ -5840,17 +5710,17 @@ fn kernel_context_switch(cpu_id: usize, from_task_id: usize, to_task_id: usize) 
 fn setup_task_cpu_state(cpu: &mut Arch, task: &Task) {
     let cpuid = cpu.get_cpuid();
     let sp = if let Some((_slot, base)) = task.get_kernel_stack_window_base() {
-        (base + crate::environment::PAGE_SIZE + crate::environment::TASK_KERNEL_STACK_SIZE) as u64
+        base + crate::environment::PAGE_SIZE + crate::environment::TASK_KERNEL_STACK_SIZE
     } else {
-        task.get_kernel_stack_bottom_paddr()
+        task.get_kernel_stack_top()
     };
 
     let trampoline_arch = crate::vm::get_trampoline_arch(cpuid);
     crate::breadcrumb::drop_cpu(cpuid, crate::breadcrumb::TRAMP_GET, trampoline_arch as u64);
     crate::arch::set_arch(trampoline_arch);
-    crate::breadcrumb::drop_cpu(cpuid, crate::breadcrumb::SET_ARCH_DONE, sp);
+    crate::breadcrumb::drop_cpu(cpuid, crate::breadcrumb::SET_ARCH_DONE, sp as u64);
     cpu.set_kernel_stack(sp);
-    crate::breadcrumb::drop_cpu(cpuid, crate::breadcrumb::SETSP_DONE, sp);
+    crate::breadcrumb::drop_cpu(cpuid, crate::breadcrumb::SETSP_DONE, sp as u64);
     cpu.set_trap_handler(get_user_trap_handler());
     crate::breadcrumb::drop_cpu(cpuid, crate::breadcrumb::SETTH_DONE, 0);
     let asid = task.vm_manager.get_asid();
@@ -5906,25 +5776,19 @@ pub fn reset() {
         CPU_CORE_CLASSES[cpu_id].store(CpuCoreClass::Balanced as u8, Ordering::SeqCst);
         CPU_CAPACITIES[cpu_id].store(DEFAULT_CPU_CAPACITY, Ordering::SeqCst);
         CPU_TOPOLOGY_DOMAINS[cpu_id].store(INVALID_CPU_TOPOLOGY_DOMAIN, Ordering::SeqCst);
-        CPU_BUSY_TIME_NS[cpu_id].store(0, Ordering::SeqCst);
-        CPU_IDLE_TIME_NS[cpu_id].store(0, Ordering::SeqCst);
+        cpu_clocks()[cpu_id].reset_for_test();
         DEBUG_REMOTE_ENQUEUE_TASK[cpu_id].store(0, Ordering::SeqCst);
         DEBUG_REMOTE_ENQUEUE_FROM_CPU[cpu_id].store(NO_CPU, Ordering::SeqCst);
         DEBUG_REMOTE_ENQUEUE_SEQ[cpu_id].store(0, Ordering::SeqCst);
         *slice_states()[cpu_id].lock() = SliceState::new();
     }
-    slice_callback_contexts().lock().clear();
-    deadline_callback_contexts().lock().clear();
     NEXT_CPU.store(0, Ordering::SeqCst);
-    DEBUG_TICK.store(0, Ordering::SeqCst);
     DEBUG_ENQUEUE_SEQ.store(0, Ordering::SeqCst);
-    SCHED_MIGRATIONS_TOTAL.store(0, Ordering::SeqCst);
-    SCHED_MIGRATION_PROMOTIONS.store(0, Ordering::SeqCst);
-    SCHED_MIGRATION_DEMOTIONS.store(0, Ordering::SeqCst);
-    SCHED_MIGRATION_COOLDOWN_SKIPS.store(0, Ordering::SeqCst);
-    SCHED_WORK_STEALS.store(0, Ordering::SeqCst);
-    TOTAL_BUSY_CPU_TIME_NS.store(0, Ordering::SeqCst);
-    TOTAL_IDLE_CPU_TIME_NS.store(0, Ordering::SeqCst);
+    SCHED_MIGRATIONS_TOTAL.reset_for_test();
+    SCHED_MIGRATION_PROMOTIONS.reset_for_test();
+    SCHED_MIGRATION_DEMOTIONS.reset_for_test();
+    SCHED_MIGRATION_COOLDOWN_SKIPS.reset_for_test();
+    SCHED_WORK_STEALS.reset_for_test();
     ONLINE_CPU_MASK.store(0, Ordering::SeqCst);
     ZOMBIE_QUEUE.lock().clear();
     BLOCKED_QUEUE.lock().clear();
@@ -6014,6 +5878,36 @@ pub fn make_test_tasks() {
 
 #[cfg(test)]
 mod tests {
+    #[test_case]
+    fn stale_slice_callback_cannot_expire_a_replacement_with_the_same_task_metadata() {
+        reset();
+        let old = Arc::new(SliceTimerHandler {
+            cpu_id: 0,
+            task_id: 12,
+            task_generation: 34,
+        });
+        let current = Arc::new(SliceTimerHandler {
+            cpu_id: 0,
+            task_id: 12,
+            task_generation: 34,
+        });
+        {
+            let mut state = slice_states()[0].lock();
+            state.task_id = Some(12);
+            state.task_generation = Some(34);
+            state.active = Some(ActiveSlice {
+                handle: None,
+                handler: current.clone(),
+            });
+        }
+        old.on_timer_expired(0);
+        assert!(!take_local_slice_reschedule(0));
+        current.clone().on_timer_expired(0);
+        assert!(take_local_slice_reschedule(0));
+        current.on_timer_expired(0);
+        assert!(!take_local_slice_reschedule(0));
+    }
+
     use crate::task::{
         TaskCorePreference, TaskType, cleanup_parent_waker, cleanup_task_waker,
         get_parent_waitpid_waker,
@@ -6300,6 +6194,37 @@ mod tests {
     }
 
     #[test_case]
+    fn stale_deadline_callback_cannot_replenish_a_replacement_registration() {
+        let task = crate::task::new_user_task("deadline-owner".to_string(), 0);
+        let old = Arc::new(DeadlineTimerHandler {
+            task_id: 12,
+            generation: u32::MAX as u64 + 9,
+        });
+        let current = Arc::new(DeadlineTimerHandler {
+            task_id: 12,
+            generation: old.generation,
+        });
+        {
+            let mut state = task.deadline.lock();
+            state.params = Some(implicit_deadline_params(5, 20));
+            state.remaining_ns = 0;
+            state.absolute_deadline_ns = 20;
+            state.next_replenishment_ns = 20;
+            state.throttled = true;
+            state.generation = current.generation;
+            state.replenishment_handler = Some(current.clone());
+        }
+        assert!(!advance_deadline_period(&task, 20, Some(&old)));
+        assert_eq!(task.deadline_snapshot().unwrap().remaining_ns, 0);
+        assert!(advance_deadline_period(&task, 20, Some(&current)));
+        assert_eq!(task.deadline_snapshot().unwrap().remaining_ns, 5);
+        // Even once the next period is due, this expired registration has no
+        // authority to replenish a second time.
+        assert!(!advance_deadline_period(&task, 40, Some(&current)));
+        assert_eq!(task.deadline_snapshot().unwrap().next_replenishment_ns, 40);
+    }
+
+    #[test_case]
     fn deadline_budget_exhaustion_throttles_until_replenishment() {
         let task = crate::task::new_user_task("deadline-budget".to_string(), 0);
         let mut state = task.deadline.lock();
@@ -6455,12 +6380,12 @@ mod tests {
             state.remaining_ns = 5;
             state.cpu_id = 0;
         }
-        task.sched_exec_start_ns.store(123, Ordering::SeqCst);
+        task.exec_clock.start(123);
 
         update_task_nice(&task, -5);
 
         assert_eq!(task.nice(), -5);
-        assert_eq!(task.sched_exec_start_ns.load(Ordering::SeqCst), 123);
+        assert_eq!(task.exec_clock.started_at(), Some(123));
         assert_eq!(task.deadline.lock().remaining_ns, 5);
         release_task_deadline(&task);
     }
@@ -7517,7 +7442,7 @@ mod fair_tests {
             crate::task::TaskType::Kernel,
         );
         task.set_id(2);
-        task.sched_vruntime.store(100, Ordering::SeqCst);
+        task.fair_request.update(|request| request.vruntime = 100);
 
         let placed = place_entity(&task, &q, PlaceMode::Migrate);
 
@@ -7534,9 +7459,11 @@ mod fair_tests {
             crate::task::TaskType::Kernel,
         );
         task.set_id(1);
-        task.sched_vruntime.store(100, Ordering::SeqCst);
-        task.sched_slice_ns.store(1_000, Ordering::SeqCst);
-        task.sched_deadline.store(1_100, Ordering::SeqCst);
+        task.fair_request.update(|request| request.vruntime = 100);
+        task.fair_request.update(|request| {
+            request.slice_ns = 1_000;
+            request.deadline = 1_100;
+        });
 
         let placed = place_entity(&task, &q, PlaceMode::LocalPreempt);
 

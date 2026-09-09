@@ -53,7 +53,7 @@ pub enum RemoteprocState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RemoteprocMemoryRegion {
     /// Physical base address of the firmware memory region.
-    pub paddr: usize,
+    pub paddr: u64,
     /// Size of the firmware memory region in bytes.
     pub size: usize,
 }
@@ -88,7 +88,7 @@ pub trait RemoteprocDmaMapper: Send + Sync {
     /// # Returns
     ///
     /// Device virtual address visible to the remote processor.
-    fn map(&self, paddr: usize, size: usize) -> Result<u64, RemoteprocError>;
+    fn map(&self, paddr: u64, size: usize) -> Result<u64, RemoteprocError>;
 
     /// Resolve an existing device virtual address to a physical address.
     ///
@@ -318,7 +318,7 @@ pub trait RemoteProcessor: Send + Sync {
     /// # Returns
     ///
     /// Device virtual address visible to the processor.
-    fn map_dma(&self, paddr: usize, size: usize) -> Result<u64, RemoteprocError> {
+    fn map_dma(&self, paddr: u64, size: usize) -> Result<u64, RemoteprocError> {
         let _ = size;
         Ok(paddr as u64)
     }

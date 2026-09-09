@@ -11,14 +11,16 @@ use crate::device::fdt::FdtManager;
 use crate::fs::FileSystemError;
 use crate::fs::VfsManager;
 use crate::println;
-use crate::vm::vmem::MemoryArea;
+use crate::vm::vmem::{MemoryArea, PhysicalMemoryArea};
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use core::ptr;
 
 /// Relocate initramfs to heap memory
-pub fn relocate_initramfs(usable_area: &mut MemoryArea) -> Result<MemoryArea, &'static str> {
+pub fn relocate_initramfs(
+    usable_area: &mut PhysicalMemoryArea,
+) -> Result<PhysicalMemoryArea, &'static str> {
     let fdt_manager = FdtManager::get_manager();
     let original_area = fdt_manager
         .get_initramfs()
@@ -33,16 +35,16 @@ pub fn relocate_initramfs(usable_area: &mut MemoryArea) -> Result<MemoryArea, &'
         return Err("Invalid initramfs source address");
     }
 
-    let page_size = crate::environment::PAGE_SIZE;
+    let page_size = crate::environment::PAGE_SIZE as u64;
     let aligned_addr = (usable_area.start + page_size - 1) & !(page_size - 1);
 
     // Validate destination memory bounds
-    if aligned_addr + size > usable_area.end {
+    if aligned_addr + size as u64 > usable_area.end {
         return Err("Insufficient memory for initramfs");
     }
 
     // Create the new memory area BEFORE the copy operation
-    let new_area = MemoryArea::new(aligned_addr, aligned_addr + size - 1);
+    let new_area = PhysicalMemoryArea::new(aligned_addr, aligned_addr + size as u64 - 1);
 
     // Perform the copy with explicit memory barriers
     core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
@@ -71,7 +73,7 @@ pub fn relocate_initramfs(usable_area: &mut MemoryArea) -> Result<MemoryArea, &'
         }
     }
 
-    usable_area.start = (aligned_addr + size + page_size - 1) & !(page_size - 1);
+    usable_area.start = (aligned_addr + size as u64 + page_size - 1) & !(page_size - 1);
 
     Ok(new_area)
 }

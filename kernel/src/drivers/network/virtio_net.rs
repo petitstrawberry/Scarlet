@@ -560,7 +560,7 @@ impl VirtioNetDevice {
 
         // Process all completed RX descriptors
         while let Some((desc_idx, used_len)) = rx_queue.pop_used() {
-            let buffer_addr = phys_to_virt(rx_queue.desc[desc_idx].addr as usize) as *mut u8;
+            let buffer_addr = phys_to_virt(rx_queue.desc[desc_idx].addr) as *mut u8;
             let buffer_len = rx_queue.desc[desc_idx].len as usize;
             let used_len = core::cmp::min(used_len as usize, buffer_len);
 
@@ -650,7 +650,7 @@ impl MemoryMappingOps for VirtioNetDevice {
         Err("Memory mapping not supported by VirtIO network device")
     }
 
-    fn on_mapped(&self, _vaddr: usize, _paddr: usize, _length: usize, _offset: usize) {
+    fn on_mapped(&self, _vaddr: usize, _paddr: u64, _length: usize, _offset: usize) {
         // VirtIO network devices don't support memory mapping
     }
 
@@ -930,7 +930,7 @@ mod tests {
 
     /// Map a VirtIO MMIO device at `paddr` for use in tests.
     /// Returns the ioremap'd virtual address.
-    fn map_net(paddr: usize) -> usize {
+    fn map_net(paddr: u64) -> usize {
         crate::vm::ioremap(paddr, crate::environment::PAGE_SIZE)
             .expect("ioremap should succeed for VirtIO Net test device")
     }

@@ -161,7 +161,7 @@ impl MemoryMappingOps for Pl011Uart {
         Err("Memory mapping not supported for UART")
     }
 
-    fn on_mapped(&self, _vaddr: usize, _paddr: usize, _length: usize, _offset: usize) {}
+    fn on_mapped(&self, _vaddr: usize, _paddr: u64, _length: usize, _offset: usize) {}
     fn on_unmapped(&self, _vaddr: usize, _length: usize) {}
 
     fn supports_mmap(&self) -> bool {
@@ -327,7 +327,7 @@ fn pl011_probe(device_info: &PlatformDeviceInfo) -> Result<(), &'static str> {
         .ok_or("No memory resource found for PL011")?;
 
     let paddr = memory_resource.start;
-    let size = memory_resource.end - memory_resource.start + 1;
+    let size = memory_resource.size()?;
     crate::println!("PL011 paddr: {:#x}, size: {:#x}", paddr, size);
 
     // Map the PL011's physical MMIO region into the kernel virtual address space.

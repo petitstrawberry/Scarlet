@@ -48,17 +48,7 @@ pub struct NetworkInterfaceAddress {
     addr: [u8; 4],
 }
 
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct NetworkConfigureIpv4Request {
-    iface_ptr: usize,
-    iface_len: usize,
-    address: [u8; 4],
-    netmask: [u8; 4],
-    gateway: [u8; 4],
-    flags: u32,
-    metric: u32,
-}
+use scarlet_abi::RawNetworkConfigureIpv4Request as NetworkConfigureIpv4Request;
 
 /// IPv4 configuration and link identity for one network interface.
 #[repr(C)]
@@ -85,7 +75,6 @@ pub struct NetworkInterfaceConfig {
     pub metric: u32,
 }
 
-const _: [(); 40] = [(); core::mem::size_of::<NetworkConfigureIpv4Request>()];
 const _: [(); 60] = [(); core::mem::size_of::<NetworkInterfaceConfig>()];
 
 impl NetworkInterfaceConfig {

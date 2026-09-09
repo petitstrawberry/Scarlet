@@ -351,7 +351,7 @@ pub struct FramebufferCharDevice {
 
 struct CurrentFramebufferInfo {
     config: FramebufferConfig,
-    physical_addr: usize,
+    physical_addr: u64,
     size: usize,
 }
 
@@ -537,7 +537,8 @@ impl FramebufferCharDevice {
 
         let task = crate::task::mytask()?;
         let memory_map = task.vm_manager.search_memory_map(access.vaddr)?;
-        let map_object_offset = memory_map.pmarea.start.saturating_sub(info.physical_addr);
+        let map_object_offset =
+            usize::try_from(memory_map.pmarea.start.checked_sub(info.physical_addr)?).ok()?;
         let map_vm_offset = memory_map.vmarea.start.saturating_sub(memory_map.vm_start);
         let base_offset = map_object_offset.saturating_sub(map_vm_offset);
         let mapping = FramebufferMapping {
@@ -593,7 +594,7 @@ impl FramebufferCharDevice {
 
                 root_pagetable.map(
                     page_vaddr,
-                    info.physical_addr.saturating_add(object_offset),
+                    info.physical_addr.saturating_add(object_offset as u64),
                     0x1 | 0x08,
                     memory_attribute,
                     true,
@@ -925,7 +926,7 @@ impl MemoryMappingOps for FramebufferCharDevice {
         if info.physical_addr == 0 || info.size == 0 {
             return Err("Invalid framebuffer configuration");
         }
-        if info.physical_addr % crate::environment::PAGE_SIZE != 0 {
+        if info.physical_addr % crate::environment::PAGE_SIZE as u64 != 0 {
             return Err("Framebuffer physical address must be page-aligned");
         }
 
@@ -940,7 +941,7 @@ impl MemoryMappingOps for FramebufferCharDevice {
             return Err("Requested length exceeds available framebuffer size");
         }
 
-        let paddr = info.physical_addr + offset;
+        let paddr = info.physical_addr + offset as u64;
         let permissions = 0x3; // Read and Write
         let is_shared = true; // Framebuffer mappings are shared
 
@@ -950,7 +951,7 @@ impl MemoryMappingOps for FramebufferCharDevice {
         )
     }
 
-    fn on_mapped(&self, vaddr: usize, paddr: usize, length: usize, offset: usize) {
+    fn on_mapped(&self, vaddr: usize, paddr: u64, length: usize, offset: usize) {
         self.record_mapping_for_current_task(vaddr, length, offset, paddr != 0);
     }
 
@@ -1001,7 +1002,7 @@ impl MemoryMappingOps for FramebufferCharDevice {
         }
 
         Ok(ResolveFaultResult {
-            paddr_page_base: info.physical_addr.saturating_add(object_offset),
+            paddr_page_base: info.physical_addr.saturating_add(object_offset as u64),
             is_tail: false,
         })
     }
@@ -1314,7 +1315,8 @@ impl FramebufferCharDevice {
         let copy_len = fb_name.len().min(fix_info.id.len() - 1);
         fix_info.id[..copy_len].copy_from_slice(&fb_name[..copy_len]);
 
-        fix_info.smem_start = info.physical_addr;
+        fix_info.smem_start = usize::try_from(info.physical_addr)
+            .map_err(|_| "Framebuffer address exceeds Linux ABI field width")?;
         fix_info.smem_len = info.size as u32;
         fix_info.line_length = config.stride;
         fix_info.type_ = 0; // FB_TYPE_PACKED_PIXELS

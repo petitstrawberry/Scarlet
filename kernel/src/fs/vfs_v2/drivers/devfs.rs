@@ -868,7 +868,7 @@ impl MemoryMappingOps for DevFileObject {
         }
     }
 
-    fn on_mapped(&self, vaddr: usize, paddr: usize, length: usize, offset: usize) {
+    fn on_mapped(&self, vaddr: usize, paddr: u64, length: usize, offset: usize) {
         if let Some(ref device_open) = self.device_open {
             let device_guard_ref = device_open.as_ref();
             device_guard_ref.on_mapped(vaddr, paddr, length, offset);
@@ -1075,7 +1075,7 @@ impl MemoryMappingOps for DevDirectoryObject {
         Err("Memory mapping not supported for directories")
     }
 
-    fn on_mapped(&self, _vaddr: usize, _paddr: usize, _length: usize, _offset: usize) {
+    fn on_mapped(&self, _vaddr: usize, _paddr: u64, _length: usize, _offset: usize) {
         // Directories don't support memory mapping
     }
 

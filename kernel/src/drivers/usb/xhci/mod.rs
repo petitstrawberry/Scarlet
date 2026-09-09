@@ -52,8 +52,10 @@ use crate::drivers::usb::xhci::trb::{Trb, TrbType};
 use crate::interrupt::{
     DeferredInterruptCompletion, InterruptClaim, InterruptId, InterruptManager,
 };
+use crate::mem::address::PhysAddr;
 use crate::mem::page::ContiguousPages;
 use crate::object::capability::{ControlOps, MemoryMappingInfo, MemoryMappingOps, Selectable};
+use crate::sync::diagnostic::{DiagnosticCounter, ReportInterval};
 use crate::sync::{IrqSpinLock, Mutex, Once};
 use crate::timer::get_time_ns;
 use crate::vm;
@@ -66,7 +68,7 @@ use alloc::vec::Vec;
 use core::any::Any;
 use core::mem::size_of;
 use core::ptr::{read_unaligned, read_volatile, write_volatile};
-use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering, fence};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering, fence};
 
 const COMMAND_RING_TRBS: usize = 256;
 const EVENT_RING_TRBS: usize = 256;
@@ -377,14 +379,14 @@ struct CdcNcmDmaBuffer {
 
 struct InFlightCdcNcmRx {
     buffer: CdcNcmDmaBuffer,
-    trb_dma: usize,
+    trb_dma: u64,
 }
 
 struct InFlightCdcNcmTx {
     buffer: CdcNcmDmaBuffer,
     transfer_len: usize,
     frame_len: usize,
-    trb_dma: usize,
+    trb_dma: u64,
 }
 
 struct CdcNcmRuntime {
@@ -498,7 +500,7 @@ pub const XHCI_CLASS_CODE: u32 = ((PCI_CLASS_SERIAL_BUS as u32) << 16)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PciBar {
     /// Physical base address of the BAR
-    pub base: usize,
+    pub base: u64,
     /// Size of the BAR region (determined by writing 0xFFFFFFFF)
     pub size: usize,
     /// True if this is a memory BAR (not I/O)
@@ -643,7 +645,7 @@ struct UsbInterruptInRuntime {
     dci: u8,
     endpoint_address: u8,
     max_packet_size: u16,
-    trb_dma: Option<usize>,
+    trb_dma: Option<u64>,
     driver_name: &'static str,
     handler: Arc<dyn UsbInterruptInHandler>,
     rejection_diagnostics: Arc<IrqSpinLock<RejectedReportDiagnostics>>,
@@ -668,7 +670,7 @@ struct SlotRuntime {
     interrupt_dci: Option<u8>,
     interrupt_endpoint_address: Option<u8>,
     interrupt_max_packet_size: Option<u16>,
-    interrupt_trb_dma: Option<usize>,
+    interrupt_trb_dma: Option<u64>,
     storage: Option<MassStorageRuntime>,
     cdc_ncm: Option<CdcNcmRuntime>,
     hid: Option<HidDeviceState>,
@@ -708,12 +710,12 @@ impl Drop for Ep0TransferGuard<'_> {
 
 struct ScratchpadBuffers {
     array: ContiguousPages,
-    array_dma_addr: usize,
+    array_dma_addr: u64,
     buffers: Vec<ContiguousPages>,
 }
 
 impl ScratchpadBuffers {
-    fn array_dma_addr(&self) -> usize {
+    fn array_dma_addr(&self) -> u64 {
         self.array_dma_addr
     }
 
@@ -757,8 +759,8 @@ pub struct XhciController {
     deferred_interrupt_mode: AtomicBool,
     deferred_interrupt_completions: IrqSpinLock<VecDeque<DeferredInterruptCompletion>>,
     deferred_interrupt_cause_seen: AtomicBool,
-    deferred_spurious_count: AtomicU64,
-    deferred_spurious_last_report_ns: AtomicU64,
+    deferred_spurious_count: DiagnosticCounter,
+    deferred_spurious_reports: ReportInterval,
     self_weak: Once<Weak<XhciController>>,
 }
 
@@ -817,17 +819,17 @@ impl TransferTdCompletion {
     }
 }
 
-fn transfer_event_trb_dma(event: Trb) -> usize {
-    event.trb_pointer() as usize & !(size_of::<Trb>() - 1)
+fn transfer_event_trb_dma(event: Trb) -> u64 {
+    event.trb_pointer() & !(size_of::<Trb>() as u64 - 1)
 }
 
-fn command_completion_matches(event: Trb, command_trb_dma: usize) -> bool {
+fn command_completion_matches(event: Trb, command_trb_dma: u64) -> bool {
     event.trb_type() == TrbType::CommandCompletionEvent as u8
         && transfer_event_trb_dma(event) == command_trb_dma
 }
 
-fn transfer_ring_dequeue_pointer(dma_addr: usize, producer_index: usize, cycle: bool) -> u64 {
-    (dma_addr + producer_index * size_of::<Trb>()) as u64 | u64::from(cycle)
+fn transfer_ring_dequeue_pointer(dma_addr: u64, producer_index: usize, cycle: bool) -> u64 {
+    (dma_addr + (producer_index * size_of::<Trb>()) as u64) as u64 | u64::from(cycle)
 }
 
 fn configuration_request_needed(
@@ -884,8 +886,8 @@ fn transfer_event_points_into_td(
     event: Trb,
     slot_id: u8,
     endpoint_id: u8,
-    td_start_dma: usize,
-    td_completion_dma: usize,
+    td_start_dma: u64,
+    td_completion_dma: u64,
 ) -> bool {
     if event.trb_type() != TrbType::TransferEvent as u8
         || event.slot_id() != slot_id
@@ -898,15 +900,15 @@ fn transfer_event_points_into_td(
     let event_dma = transfer_event_trb_dma(event);
     event_dma >= td_start_dma
         && event_dma <= td_completion_dma
-        && (event_dma - td_start_dma).is_multiple_of(size_of::<Trb>())
+        && (event_dma - td_start_dma).is_multiple_of(size_of::<Trb>() as u64)
 }
 
 fn classify_transfer_td_event(
     event: Trb,
     slot_id: u8,
     endpoint_id: u8,
-    td_start_dma: usize,
-    td_completion_dma: usize,
+    td_start_dma: u64,
+    td_completion_dma: u64,
 ) -> TransferTdEventDisposition {
     if !transfer_event_points_into_td(event, slot_id, endpoint_id, td_start_dma, td_completion_dma)
     {
@@ -1026,8 +1028,8 @@ impl XhciController {
                 crate::environment::MAX_NUM_CPUS,
             )),
             deferred_interrupt_cause_seen: AtomicBool::new(false),
-            deferred_spurious_count: AtomicU64::new(0),
-            deferred_spurious_last_report_ns: AtomicU64::new(0),
+            deferred_spurious_count: DiagnosticCounter::new(),
+            deferred_spurious_reports: ReportInterval::new(),
             self_weak: Once::new(),
         })
     }
@@ -1176,22 +1178,22 @@ impl XhciController {
 
     fn dma_map_phys(
         &self,
-        paddr: usize,
+        paddr: u64,
         len: usize,
         flags: IommuMapFlags,
-    ) -> Result<usize, &'static str> {
+    ) -> Result<u64, &'static str> {
         let dma_addr = self
             .dma_context
-            .map_phys(paddr, len, flags)
+            .map_phys(PhysAddr::new(paddr), len, flags)
             .map_err(|_| "xHCI: failed to map DMA buffer")?;
-        usize::try_from(dma_addr).map_err(|_| "xHCI: DMA address does not fit usize")
+        Ok(dma_addr.as_u64())
     }
 
     fn dma_map_pages(
         &self,
         pages: &ContiguousPages,
         flags: IommuMapFlags,
-    ) -> Result<usize, &'static str> {
+    ) -> Result<u64, &'static str> {
         self.dma_map_phys(
             pages.as_paddr(),
             pages.len() * crate::environment::PAGE_SIZE,
@@ -1206,18 +1208,18 @@ impl XhciController {
     ) -> Result<DmaMapping, &'static str> {
         let len = pages.len() * crate::environment::PAGE_SIZE;
         self.dma_context
-            .map_phys_owned(pages.as_paddr(), len, flags)
+            .map_phys_owned(PhysAddr::new(pages.as_paddr()), len, flags)
             .map_err(|_| "xHCI: failed to map DMA buffer")
     }
 
     fn dma_map_owned_phys(
         &self,
-        paddr: usize,
+        paddr: u64,
         len: usize,
         flags: IommuMapFlags,
     ) -> Result<DmaMapping, &'static str> {
         self.dma_context
-            .map_phys_owned(paddr, len, flags)
+            .map_phys_owned(PhysAddr::new(paddr), len, flags)
             .map_err(|_| "xHCI: failed to map DMA buffer")
     }
 
@@ -1608,7 +1610,7 @@ impl XhciController {
         Some(pending.remove(index))
     }
 
-    fn take_pending_command_completion(&self, command_trb_dma: usize) -> Option<Trb> {
+    fn take_pending_command_completion(&self, command_trb_dma: u64) -> Option<Trb> {
         self.take_pending_event(|event| command_completion_matches(*event, command_trb_dma))
     }
 
@@ -1616,8 +1618,8 @@ impl XhciController {
         &self,
         slot_id: u8,
         endpoint_id: u8,
-        td_start_dma: usize,
-        td_completion_dma: usize,
+        td_start_dma: u64,
+        td_completion_dma: u64,
     ) -> Option<Trb> {
         self.take_pending_event(|event| {
             transfer_event_points_into_td(
@@ -1814,12 +1816,12 @@ impl XhciController {
                             Err("CDC-NCM transmit pipeline is full")
                         } else {
                             match ncm.bulk_out.ring.enqueue(Trb::normal_transfer(
-                                buffer.mapping.dma_addr(),
+                                buffer.mapping.dma_addr().as_u64(),
                                 request.ntb.len() as u32,
                             )) {
                                 Ok(trb_index) => {
                                     let trb_dma = ncm.bulk_out.ring.dma_address()
-                                        + trb_index * size_of::<Trb>();
+                                        + (trb_index * size_of::<Trb>()) as u64;
                                     ncm.tx_in_flight.push_back(InFlightCdcNcmTx {
                                         buffer,
                                         transfer_len: request.ntb.len(),
@@ -1985,7 +1987,7 @@ impl XhciController {
                 .as_ref()
                 .ok_or("Command ring not initialized")?;
             let index = cmd_ring.enqueue(trb)?;
-            cmd_ring.dma_address() + index * size_of::<Trb>()
+            cmd_ring.dma_address() + (index * size_of::<Trb>()) as u64
         };
 
         if XHCI_VERBOSE_TRACE {
@@ -2008,7 +2010,7 @@ impl XhciController {
         self.poll_command_completion(command_trb_dma)
     }
 
-    fn poll_command_completion(&self, command_trb_dma: usize) -> Result<Trb, &'static str> {
+    fn poll_command_completion(&self, command_trb_dma: u64) -> Result<Trb, &'static str> {
         let deadline = crate::time::current_time() + XHCI_COMMAND_TIMEOUT_US;
         while crate::time::current_time() < deadline {
             if let Some(event) = self.take_pending_command_completion(command_trb_dma) {
@@ -2251,7 +2253,7 @@ impl XhciController {
         sync_pages_for_device(&input_pages);
         ep0_ring.sync_for_device();
         let event = self.send_command(Trb::address_device_command(
-            input_dma_mapping.dma_addr(),
+            input_dma_mapping.dma_addr().as_u64(),
             slot_id,
             false,
         ))?;
@@ -2427,7 +2429,7 @@ impl XhciController {
         }
         sync_pages_for_device(&slot.input_context);
         let event = self.send_command(Trb::evaluate_context_command(
-            input_dma_mapping.dma_addr(),
+            input_dma_mapping.dma_addr().as_u64(),
             slot.slot_id,
         ))?;
         if event.slot_id() != slot.slot_id {
@@ -2517,7 +2519,7 @@ impl XhciController {
             }
             let mapping = self.dma_map_owned_pages(buffer, flags)?;
             slot.ring.enqueue(Trb::data_stage(
-                mapping.dma_addr(),
+                mapping.dma_addr().as_u64(),
                 length as u32,
                 direction_in,
             ))?;
@@ -2529,8 +2531,8 @@ impl XhciController {
         }
 
         let ring_dma = slot.ring.dma_address();
-        let td_start_dma = ring_dma + setup_trb_index * size_of::<Trb>();
-        let td_completion_dma = ring_dma + status_trb_index * size_of::<Trb>();
+        let td_start_dma = ring_dma + (setup_trb_index * size_of::<Trb>()) as u64;
+        let td_completion_dma = ring_dma + (status_trb_index * size_of::<Trb>()) as u64;
         let recovery_dequeue_pointer = transfer_ring_dequeue_pointer(
             ring_dma,
             slot.ring.current_producer_index(),
@@ -2592,8 +2594,8 @@ impl XhciController {
         &self,
         slot_id: u8,
         endpoint_id: u8,
-        td_start_dma: usize,
-        td_completion_dma: usize,
+        td_start_dma: u64,
+        td_completion_dma: u64,
         recovery_dequeue_pointer: u64,
         deadline: u64,
     ) -> Result<TransferTdCompletion, &'static str> {
@@ -2874,10 +2876,10 @@ impl XhciController {
 
         sync_pages_before_device_write(buffer);
         let trb_index = ring.enqueue(Trb::normal_transfer_in(
-            buffer_mapping.dma_addr(),
+            buffer_mapping.dma_addr().as_u64(),
             max_packet as u32,
         ))?;
-        slot.interrupt_trb_dma = Some(ring.dma_address() + trb_index * size_of::<Trb>());
+        slot.interrupt_trb_dma = Some(ring.dma_address() + (trb_index * size_of::<Trb>()) as u64);
         drop(slots);
         self.ring_endpoint_doorbell(slot_id, dci);
         Ok(())
@@ -2904,10 +2906,10 @@ impl XhciController {
 
         sync_pages_before_device_write(runtime.buffer.as_ref());
         let trb_index = runtime.ring.enqueue(Trb::normal_transfer_in(
-            runtime.buffer_mapping.dma_addr(),
+            runtime.buffer_mapping.dma_addr().as_u64(),
             u32::from(runtime.max_packet_size),
         ))?;
-        runtime.trb_dma = Some(runtime.ring.dma_address() + trb_index * size_of::<Trb>());
+        runtime.trb_dma = Some(runtime.ring.dma_address() + (trb_index * size_of::<Trb>()) as u64);
         let dci = runtime.dci;
         drop(slots);
         self.ring_endpoint_doorbell(slot_id, dci);
@@ -3052,7 +3054,7 @@ impl XhciController {
         interrupt_ring.sync_for_device();
 
         let event = self.send_command(Trb::configure_endpoint_command(
-            input_dma_mapping.dma_addr(),
+            input_dma_mapping.dma_addr().as_u64(),
             slot_id,
             false,
         ))?;
@@ -3251,7 +3253,7 @@ impl XhciController {
         interrupt_ring.sync_for_device();
 
         let event = self.send_command(Trb::configure_endpoint_command(
-            input_dma_mapping.dma_addr(),
+            input_dma_mapping.dma_addr().as_u64(),
             slot_id,
             false,
         ))?;
@@ -3460,7 +3462,7 @@ impl XhciController {
         bulk_out_ring.sync_for_device();
 
         let event = self.send_command(Trb::configure_endpoint_command(
-            input_dma_mapping.dma_addr(),
+            input_dma_mapping.dma_addr().as_u64(),
             slot_id,
             false,
         ))?;
@@ -3828,28 +3830,19 @@ impl XhciController {
             notification_ring.dma_len(),
             dma_rw_flags(),
         )?;
-        notification_ring.set_dma_address(
-            usize::try_from(notification_ring_mapping.dma_addr())
-                .map_err(|_| "xHCI: notification ring DMA address does not fit usize")?,
-        )?;
+        notification_ring.set_dma_address(notification_ring_mapping.dma_addr().as_u64())?;
         let bulk_in_ring_mapping = self.dma_map_owned_phys(
             bulk_in_ring.physical_address(),
             bulk_in_ring.dma_len(),
             dma_rw_flags(),
         )?;
-        bulk_in_ring.set_dma_address(
-            usize::try_from(bulk_in_ring_mapping.dma_addr())
-                .map_err(|_| "xHCI: bulk IN ring DMA address does not fit usize")?,
-        )?;
+        bulk_in_ring.set_dma_address(bulk_in_ring_mapping.dma_addr().as_u64())?;
         let bulk_out_ring_mapping = self.dma_map_owned_phys(
             bulk_out_ring.physical_address(),
             bulk_out_ring.dma_len(),
             dma_rw_flags(),
         )?;
-        bulk_out_ring.set_dma_address(
-            usize::try_from(bulk_out_ring_mapping.dma_addr())
-                .map_err(|_| "xHCI: bulk OUT ring DMA address does not fit usize")?,
-        )?;
+        bulk_out_ring.set_dma_address(bulk_out_ring_mapping.dma_addr().as_u64())?;
 
         let input_pages = self
             .dma_alloc_pages(
@@ -3920,7 +3913,7 @@ impl XhciController {
         bulk_out_ring.sync_for_device();
 
         let event = self.send_command(Trb::configure_endpoint_command(
-            input_dma_mapping.dma_addr(),
+            input_dma_mapping.dma_addr().as_u64(),
             slot_id,
             false,
         ))?;
@@ -4360,7 +4353,7 @@ impl XhciController {
         interrupt_ring.sync_for_device();
 
         let event = self.send_command(Trb::configure_endpoint_command(
-            input_dma_mapping.dma_addr(),
+            input_dma_mapping.dma_addr().as_u64(),
             slot_id,
             false,
         ))?;
@@ -4428,7 +4421,7 @@ impl XhciController {
         sync_pages_for_device(&input_pages);
 
         let event = self.send_command(Trb::configure_endpoint_command(
-            input_dma_mapping.dma_addr(),
+            input_dma_mapping.dma_addr().as_u64(),
             slot_id,
             false,
         ))?;
@@ -5612,12 +5605,12 @@ impl XhciController {
             }
             dma_mapping = self.dma_map_owned_pages(buffer, flags)?;
             let trb = if direction_in {
-                Trb::normal_transfer_in(dma_mapping.dma_addr(), length as u32)
+                Trb::normal_transfer_in(dma_mapping.dma_addr().as_u64(), length as u32)
             } else {
-                Trb::normal_transfer(dma_mapping.dma_addr(), length as u32)
+                Trb::normal_transfer(dma_mapping.dma_addr().as_u64(), length as u32)
             };
             let trb_index = ring.enqueue(trb)?;
-            trb_dma = ring.dma_address() + trb_index * size_of::<Trb>();
+            trb_dma = ring.dma_address() + (trb_index * size_of::<Trb>()) as u64;
             recovery_dequeue_pointer = transfer_ring_dequeue_pointer(
                 ring.dma_address(),
                 ring.current_producer_index(),
@@ -5631,7 +5624,7 @@ impl XhciController {
                     dci,
                     if direction_in { "in" } else { "out" },
                     length,
-                    dma_mapping.dma_addr(),
+                    dma_mapping.dma_addr().as_u64(),
                     ring.dma_address(),
                     trb_index
                 );
@@ -5721,11 +5714,12 @@ impl XhciController {
                 };
                 sync_pages_before_device_write(&buffer.pages);
                 match ncm.bulk_in.ring.enqueue(Trb::normal_transfer_in(
-                    buffer.mapping.dma_addr(),
+                    buffer.mapping.dma_addr().as_u64(),
                     ncm.rx_transfer_size as u32,
                 )) {
                     Ok(trb_index) => {
-                        let trb_dma = ncm.bulk_in.ring.dma_address() + trb_index * size_of::<Trb>();
+                        let trb_dma =
+                            ncm.bulk_in.ring.dma_address() + (trb_index * size_of::<Trb>()) as u64;
                         ncm.rx_in_flight
                             .push_back(InFlightCdcNcmRx { buffer, trb_dma });
                         submitted += 1;
@@ -5761,7 +5755,7 @@ impl XhciController {
             dci = notification.dci;
             sync_pages_before_device_write(&notification.buffer);
             notification.ring.enqueue(Trb::normal_transfer_in(
-                notification.buffer_mapping.dma_addr(),
+                notification.buffer_mapping.dma_addr().as_u64(),
                 u32::from(notification.max_packet_size),
             ))?;
         }
@@ -5926,7 +5920,7 @@ impl XhciController {
                 );
                 return true;
             }
-            let completed_trb_dma = event.trb_pointer() as usize & !0xf;
+            let completed_trb_dma = event.trb_pointer() & !0xf;
             let Some(completed_index) = ncm
                 .tx_in_flight
                 .iter()
@@ -6024,7 +6018,7 @@ impl XhciController {
             let device = ncm.device.clone();
             sync_pages_before_device_write(&ncm.notification.buffer);
             let resubmit = ncm.notification.ring.enqueue(Trb::normal_transfer_in(
-                ncm.notification.buffer_mapping.dma_addr(),
+                ncm.notification.buffer_mapping.dma_addr().as_u64(),
                 u32::from(ncm.notification.max_packet_size),
             ));
             let dci = ncm.notification.dci;
@@ -6043,7 +6037,7 @@ impl XhciController {
             && ncm.bulk_in.dci == endpoint_id
         {
             let device = ncm.device.clone();
-            let completed_trb_dma = event.trb_pointer() as usize & !0xf;
+            let completed_trb_dma = event.trb_pointer() & !0xf;
             let Some(completed_index) = ncm
                 .rx_in_flight
                 .iter()
@@ -6094,12 +6088,12 @@ impl XhciController {
             let resubmit = if device.is_attached() {
                 sync_pages_before_device_write(&completed.buffer.pages);
                 match ncm.bulk_in.ring.enqueue(Trb::normal_transfer_in(
-                    completed.buffer.mapping.dma_addr(),
+                    completed.buffer.mapping.dma_addr().as_u64(),
                     ncm.rx_transfer_size as u32,
                 )) {
                     Ok(trb_index) => {
                         completed.trb_dma =
-                            ncm.bulk_in.ring.dma_address() + trb_index * size_of::<Trb>();
+                            ncm.bulk_in.ring.dma_address() + (trb_index * size_of::<Trb>()) as u64;
                         ncm.rx_in_flight.push_back(completed);
                         Ok(true)
                     }
@@ -6135,7 +6129,7 @@ impl XhciController {
             .position(|runtime| runtime.dci == endpoint_id)
         {
             let runtime = &mut slot.usb_interrupt_in[runtime_index];
-            let completed_trb_dma = event.trb_pointer() as usize & !0xf;
+            let completed_trb_dma = event.trb_pointer() & !0xf;
             let Some(expected_trb_dma) = runtime.trb_dma else {
                 let driver_name = runtime.driver_name;
                 drop(slots);
@@ -6266,7 +6260,7 @@ impl XhciController {
             return false;
         }
 
-        let completed_trb_dma = event.trb_pointer() as usize & !0xf;
+        let completed_trb_dma = event.trb_pointer() & !0xf;
         let Some(expected_trb_dma) = slot.interrupt_trb_dma else {
             drop(slots);
             println!(
@@ -6475,7 +6469,7 @@ impl XhciController {
                 if !cause_seen {
                     self.report_deferred_interrupt_without_cause();
                 }
-                self.deferred_spurious_count.store(0, Ordering::Relaxed);
+                self.deferred_spurious_count.reset();
             }
         }
 
@@ -6548,25 +6542,11 @@ impl XhciController {
     }
 
     fn take_deferred_diagnostic_report_slot(&self) -> Option<u64> {
-        let count = self
-            .deferred_spurious_count
-            .fetch_add(1, Ordering::Relaxed)
-            .saturating_add(1);
-        let now_ns = get_time_ns();
-        let last_report_ns = self
-            .deferred_spurious_last_report_ns
-            .load(Ordering::Relaxed);
+        let count = self.deferred_spurious_count.tick()?;
         if (count == 1 || count.is_power_of_two())
-            && (last_report_ns == 0 || now_ns.saturating_sub(last_report_ns) >= 1_000_000_000)
             && self
-                .deferred_spurious_last_report_ns
-                .compare_exchange(
-                    last_report_ns,
-                    now_ns.max(1),
-                    Ordering::AcqRel,
-                    Ordering::Relaxed,
-                )
-                .is_ok()
+                .deferred_spurious_reports
+                .try_claim(get_time_ns(), 1_000_000_000)
         {
             Some(count)
         } else {
@@ -7362,7 +7342,7 @@ impl MemoryMappingOps for UsbMassStorageBlockDevice {
         Err("Memory mapping not supported by USB storage")
     }
 
-    fn on_mapped(&self, _vaddr: usize, _paddr: usize, _length: usize, _offset: usize) {}
+    fn on_mapped(&self, _vaddr: usize, _paddr: u64, _length: usize, _offset: usize) {}
 
     fn on_unmapped(&self, _vaddr: usize, _length: usize) {}
 
@@ -7396,9 +7376,9 @@ pub fn decode_mmio_bar(low: u32, high: Option<u32>) -> Option<PciBar> {
 
     let base = if is_64bit {
         let high = high? as u64;
-        ((high << 32) | ((low & !0xf) as u64)) as usize
+        (high << 32) | ((low & !0xf) as u64)
     } else {
-        (low & !0xf) as usize
+        (low & !0xf) as u64
     };
 
     Some(PciBar {
@@ -7803,7 +7783,7 @@ mod tests {
     fn transfer_event_for_test(
         slot_id: u8,
         endpoint_id: u8,
-        trb_dma: usize,
+        trb_dma: u64,
         completion_code: u8,
         remaining: u32,
     ) -> Trb {
@@ -7816,7 +7796,7 @@ mod tests {
         }
     }
 
-    fn command_completion_for_test(command_trb_dma: usize) -> Trb {
+    fn command_completion_for_test(command_trb_dma: u64) -> Trb {
         Trb {
             parameter: command_trb_dma as u64,
             status: u32::from(COMMAND_COMPLETION_SUCCESS) << 24,
@@ -7989,7 +7969,7 @@ mod tests {
     #[test_case]
     fn test_decode_32bit_mmio_bar() {
         let bar = decode_mmio_bar(0xfedc_0000, None).unwrap();
-        assert_eq!(bar.base, 0xfedc_0000usize);
+        assert_eq!(bar.base, 0xfedc_0000u64);
         assert!(bar.is_memory);
         assert!(!bar.is_64bit);
     }
@@ -7997,7 +7977,7 @@ mod tests {
     #[test_case]
     fn test_decode_64bit_mmio_bar() {
         let bar = decode_mmio_bar(0x1234_0004, Some(0x0000_0001)).unwrap();
-        assert_eq!(bar.base, 0x0000_0001_1234_0000usize);
+        assert_eq!(bar.base, 0x0000_0001_1234_0000u64);
         assert!(bar.is_64bit);
     }
 

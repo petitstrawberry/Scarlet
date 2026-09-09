@@ -256,7 +256,7 @@
               "--enable-virglrenderer"
               "--enable-vhost-user"
               "--disable-vhost-net"
-              "--target-list=aarch64-softmmu,riscv64-softmmu"
+              "--target-list=aarch64-softmmu,riscv64-softmmu,riscv32-softmmu"
             ];
             buildInputs = (_prevAttrs.buildInputs or [ ]) ++ [
               pkgs.libepoxy
@@ -302,7 +302,7 @@
             cargo-scarlet
             cargo-scarlet-plugin-limine
 
-            # QEMU (system emulation for riscv64 and aarch64)
+            # QEMU (system emulation for riscv32, riscv64 and aarch64)
             qemu
 
             # Cross-compilation toolchains

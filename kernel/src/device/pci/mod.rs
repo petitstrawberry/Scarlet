@@ -100,7 +100,7 @@ impl PciAddress {
 /// Manages PCI device discovery and configuration space access.
 pub struct PciBus {
     /// ECAM (Enhanced Configuration Access Mechanism) base address
-    ecam_base: usize,
+    ecam_base: u64,
     /// ECAM region size in bytes
     ecam_size: usize,
     /// Virtual base of the mapped ECAM region
@@ -120,7 +120,7 @@ impl PciBus {
     /// # Returns
     ///
     /// A new `PciBus` instance
-    pub const fn new(ecam_base: usize, ecam_size: usize) -> Self {
+    pub const fn new(ecam_base: u64, ecam_size: usize) -> Self {
         Self {
             ecam_base,
             ecam_size,
@@ -130,7 +130,7 @@ impl PciBus {
     }
 
     /// Get the ECAM base address
-    pub const fn ecam_base(&self) -> usize {
+    pub const fn ecam_base(&self) -> u64 {
         self.ecam_base
     }
 

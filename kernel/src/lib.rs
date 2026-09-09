@@ -321,11 +321,13 @@ pub mod vm;
 pub mod test;
 
 extern crate alloc;
+use crate::mem::address::{PhysAddr, VirtAddr};
+use crate::vm::direct_map::DirectMapWindow;
 use alloc::string::ToString;
 use device::fdt::FdtManager;
 use device::manager::{DeviceManager, DriverPriority};
 use device::pci::PciBus;
-use environment::{KERNEL_HEAP_BASE, KERNEL_HEAP_SIZE, PAGE_SIZE, SCARLET_HHDM_BASE};
+use environment::{KERNEL_HEAP_BASE, KERNEL_HEAP_SIZE, PAGE_SIZE};
 use initcall::{call_initcalls, driver::driver_initcall_call, early::early_initcall_call};
 
 const MIN_HEAP_SIZE: usize = 32 * 1024;
@@ -342,8 +344,10 @@ use sched::scheduler::{enqueue_task, get_task_by_id, register_task, start_schedu
 use task::new_user_task;
 use timer::get_kernel_timer;
 use vm::{
-    boot::switch_to_boot_page_table, direct_map::DirectMapRegions, kernel_vm_init, phys_to_virt,
-    transition_kernel_memory_layout, vmem::MemoryArea,
+    boot::switch_to_boot_page_table,
+    direct_map::DirectMapRegions,
+    kernel_vm_init, phys_to_virt, transition_kernel_memory_layout,
+    vmem::{MemoryArea, PhysicalMemoryArea},
 };
 
 fn is_pci_host_node(node: &fdt::node::FdtNode<'_, '_>) -> bool {
@@ -355,7 +359,7 @@ fn is_pci_host_node(node: &fdt::node::FdtNode<'_, '_>) -> bool {
             .unwrap_or(false)
 }
 
-fn find_pci_ecam(fdt: &fdt::Fdt<'_>) -> Option<(usize, usize)> {
+fn find_pci_ecam(fdt: &fdt::Fdt<'_>) -> Option<(u64, usize)> {
     for parent_path in ["/soc", "/"] {
         let Some(parent) = fdt.find_node(parent_path) else {
             continue;
@@ -366,10 +370,11 @@ fn find_pci_ecam(fdt: &fdt::Fdt<'_>) -> Option<(usize, usize)> {
                 continue;
             }
 
-            if let Some(regions) = child.reg() {
-                for region in regions {
-                    if let Some(size) = region.size {
-                        return Some((region.starting_address as usize, size));
+            if let Some(regions) = child.raw_reg() {
+                for raw in regions {
+                    if let Some(area) = crate::device::fdt::physical_reg(raw) {
+                        let size = usize::try_from(area.byte_len()?).ok()?;
+                        return Some((area.start, size));
                     }
                 }
             }
@@ -383,7 +388,9 @@ fn find_pci_ecam(fdt: &fdt::Fdt<'_>) -> Option<(usize, usize)> {
 #[cfg(not(test))]
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
-    use arch::instruction::idle;
+    // A fatal CPU must not resume IRQ handlers or scheduling over interrupted
+    // initialization and held locks. The normal idle path enables interrupts.
+    arch::interrupt::disable_interrupts();
 
     crate::emergency_println!(
         "[Scarlet Kernel] panic: cpu={:?} preempt_count={} {}",
@@ -393,13 +400,8 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
     );
     crate::sync::dump_active_preempt_guards();
 
-    // if let Some(task) = get_scheduler().get_current_task(get_cpu().get_cpuid()) {
-    //     task.exit(1); // Exit the task with error code 1
-    //     get_scheduler().schedule(get_cpu());
-    // }
-
     loop {
-        idle();
+        core::hint::spin_loop();
     }
 }
 
@@ -411,7 +413,7 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
 pub enum DeviceSource {
     /// Flattened Device Tree (FDT) source
     /// Used by RISC-V, ARM, and other architectures that support device trees
-    Fdt(usize),
+    Fdt(u64),
     /// Unified Extensible Firmware Interface (UEFI) source
     /// Modern firmware interface providing comprehensive hardware information
     Uefi,
@@ -459,7 +461,7 @@ pub struct BootInfo {
     /// Used to drive SMP initialization and per-CPU resource sizing
     pub cpu_count: usize,
     /// Physical memory area available for PMM allocation (usable RAM excluding reserved regions)
-    pub usable_memory_paddr: MemoryArea,
+    pub usable_memory_paddr: PhysicalMemoryArea,
     /// Every physical RAM region available to the PMM.
     ///
     /// `usable_memory_paddr` remains the primary boot-time scratch region for
@@ -469,9 +471,9 @@ pub struct BootInfo {
     /// Sparse physical regions mapped into Scarlet's HHDM (direct map).
     pub direct_map_regions: DirectMapRegions,
     /// Optional initramfs physical memory area
-    pub initramfs_paddr: Option<MemoryArea>,
-    /// HHDM offset: hhdm_va = paddr + hhdm_offset
-    pub hhdm_offset: usize,
+    pub initramfs_paddr: Option<PhysicalMemoryArea>,
+    /// Boot-protocol mapping, with independent physical and virtual origins.
+    pub boot_direct_map: DirectMapWindow,
     /// Optional kernel command line parameters
     /// Boot arguments passed by bootloader for kernel configuration
     pub cmdline: Option<&'static str>,
@@ -480,7 +482,7 @@ pub struct BootInfo {
     pub device_source: DeviceSource,
     /// Optional framebuffer physical memory area
     /// Used for early console output before graphics subsystem initialization
-    pub framebuffer_paddr: Option<MemoryArea>,
+    pub framebuffer_paddr: Option<PhysicalMemoryArea>,
     /// Optional BSP hook to start secondary CPUs.
     ///
     /// Called by `start_kernel()` after all global one-time init is complete.
@@ -500,7 +502,7 @@ impl BootInfo {
     /// * `usable_memory_paddr` - Physical memory area for PMM allocation
     /// * `direct_map_regions` - Sparse physical regions to map into HHDM
     /// * `initramfs_paddr` - Optional initramfs physical memory area
-    /// * `hhdm_offset` - HHDM offset for VA = PA + offset
+    /// * `boot_direct_map` - Original boot-protocol physical-to-virtual window
     /// * `cmdline` - Optional kernel command line parameters
     /// * `device_source` - Source of device information for hardware discovery
     /// * `framebuffer_paddr` - Optional framebuffer physical memory area
@@ -512,13 +514,13 @@ impl BootInfo {
     pub fn new(
         cpu_id: usize,
         cpu_count: usize,
-        usable_memory_paddr: MemoryArea,
+        usable_memory_paddr: PhysicalMemoryArea,
         direct_map_regions: DirectMapRegions,
-        initramfs_paddr: Option<MemoryArea>,
-        hhdm_offset: usize,
+        initramfs_paddr: Option<PhysicalMemoryArea>,
+        boot_direct_map: DirectMapWindow,
         cmdline: Option<&'static str>,
         device_source: DeviceSource,
-        framebuffer_paddr: Option<MemoryArea>,
+        framebuffer_paddr: Option<PhysicalMemoryArea>,
         start_secondary_cpus_hook: Option<fn()>,
     ) -> Self {
         let mut usable_memory_regions = DirectMapRegions::new();
@@ -535,7 +537,7 @@ impl BootInfo {
             usable_memory_regions,
             direct_map_regions,
             initramfs_paddr,
-            hhdm_offset,
+            boot_direct_map,
             cmdline,
             device_source,
             framebuffer_paddr,
@@ -607,12 +609,8 @@ impl BootInfo {
                     )
                 }
                 Some(_) => MemoryArea::new(
-                    SCARLET_HHDM_BASE
-                        .checked_add(area.start)
-                        .expect("initramfs HHDM virtual start overflows"),
-                    SCARLET_HHDM_BASE
-                        .checked_add(area.end)
-                        .expect("initramfs HHDM virtual end overflows"),
+                    crate::vm::addr::kernel_direct_map_vaddr(area.start),
+                    crate::vm::addr::kernel_direct_map_vaddr(area.end),
                 ),
                 None => MemoryArea::new(
                     crate::vm::addr::phys_to_virt(area.start),
@@ -697,7 +695,10 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
     let usable_memory_paddr = boot_info.usable_memory_paddr;
     let usable_memory_regions = boot_info.usable_memory_regions;
     let direct_map_regions = boot_info.direct_map_regions;
-    let hhdm_offset = boot_info.hhdm_offset;
+    let boot_direct_map = boot_info.boot_direct_map;
+    let runtime_direct_map =
+        DirectMapWindow::for_kernel(&direct_map_regions, boot_info.initramfs_paddr)
+            .expect("physical memory cannot be represented by the kernel direct map");
     println!(
         "[Scarlet Kernel] Usable memory (PA) : {:#x} - {:#x}",
         usable_memory_paddr.start, usable_memory_paddr.end
@@ -715,7 +716,11 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
         direct_map_bounds.end,
         direct_map_regions.len(),
     );
-    println!("[Scarlet Kernel] HHDM offset       : {:#x}", hhdm_offset);
+    println!(
+        "[Scarlet Kernel] Boot direct map    : PA {:#x} -> VA {:#x}",
+        boot_direct_map.physical_base(),
+        boot_direct_map.virtual_base()
+    );
 
     /* Handle initramfs if available in BootInfo */
     if let Some(initramfs_paddr) = boot_info.initramfs_paddr {
@@ -733,10 +738,15 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
             .get(index)
             .expect("usable memory region index must be valid")
             .area();
-        let pmm_start_aligned = (region.start + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+        assert!(
+            direct_map_regions
+                .contains_area_with_attribute(region, crate::vm::vmem::MemoryAttribute::Normal),
+            "PMM region must be fully accessible as Normal RAM in the direct map"
+        );
+        let pmm_start_aligned = (region.start + PAGE_SIZE as u64 - 1) & !(PAGE_SIZE as u64 - 1);
         if pmm_start_aligned < region.end {
             unsafe {
-                mem::pmm::init(MemoryArea::new(pmm_start_aligned, region.end));
+                mem::pmm::init(PhysicalMemoryArea::new(pmm_start_aligned, region.end));
             }
         }
     }
@@ -746,33 +756,40 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
     let heap_pages = heap_size / PAGE_SIZE;
     let heap_start_phys =
         mem::pmm::alloc_contiguous_pages(heap_pages).expect("Failed to allocate heap from PMM");
-    let heap_end_phys = heap_start_phys + heap_size - 1;
-    let heap_paddr = MemoryArea::new(heap_start_phys, heap_end_phys);
+    let heap_end_phys = heap_start_phys + heap_size as u64 - 1;
+    let heap_paddr = PhysicalMemoryArea::new(heap_start_phys, heap_end_phys);
+
+    let runtime_layout = crate::vm::addr::prepare_kernel_memory_layout(
+        runtime_direct_map,
+        direct_map_regions,
+        PhysAddr::new(heap_paddr.start),
+        VirtAddr::new(KERNEL_HEAP_BASE),
+        heap_size,
+    );
 
     println!("[Scarlet Kernel] Building Scarlet boot page table...");
     // crate::earlyfb::deactivate();
-    switch_to_boot_page_table(direct_map_regions, boot_info.initramfs_paddr, heap_paddr);
+    switch_to_boot_page_table(
+        runtime_direct_map,
+        direct_map_regions,
+        boot_info.initramfs_paddr,
+        heap_paddr,
+    );
     #[cfg(target_arch = "aarch64")]
-    if crate::arch::aarch64::earlycon::activate_after_boot_page_table_switch() {
+    if crate::arch::aarch64::earlycon::activate_after_boot_page_table_switch(runtime_direct_map) {
         println!("[earlycon] Qualcomm GENI UART active after page-table handoff");
     }
 
     // Fix PMM metadata pointers immediately after page table switch
     // Must be done before any operation that might touch PMM data structures
-    mem::pmm::fixup_hhdm_offset(hhdm_offset, SCARLET_HHDM_BASE);
+    mem::pmm::relocate_direct_map_metadata(runtime_direct_map);
 
     fence(Ordering::SeqCst);
     compiler_fence(Ordering::SeqCst); // Ensure PMM fixup is visible before proceeding
 
-    crate::earlyfb::fixup_hhdm_offset(hhdm_offset, SCARLET_HHDM_BASE);
+    crate::earlyfb::relocate_direct_map(boot_direct_map, runtime_direct_map);
 
-    transition_kernel_memory_layout(
-        SCARLET_HHDM_BASE,
-        direct_map_regions,
-        heap_paddr.start,
-        KERNEL_HEAP_BASE,
-        heap_size,
-    );
+    transition_kernel_memory_layout(runtime_layout);
 
     fence(Ordering::SeqCst);
 

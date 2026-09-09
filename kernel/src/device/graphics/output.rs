@@ -71,7 +71,7 @@ pub trait DisplayOutput: Send + Sync {
     /// `fb_paddr` is the physical address of the framebuffer memory.
     /// For direct-mapped displays (e.g. simple-fb) this is a no-op.
     /// For coprocessor-driven displays (e.g. DCPext) this triggers DMA/scanout.
-    fn present(&self, config: &FramebufferConfig, fb_paddr: usize) -> Result<(), &'static str>;
+    fn present(&self, config: &FramebufferConfig, fb_paddr: u64) -> Result<(), &'static str>;
 
     /// Present a framebuffer region on this output.
     ///
@@ -87,7 +87,7 @@ pub trait DisplayOutput: Send + Sync {
     fn present_region(
         &self,
         config: &FramebufferConfig,
-        fb_paddr: usize,
+        fb_paddr: u64,
         _region: DisplayRegion,
     ) -> Result<(), &'static str> {
         self.present(config, fb_paddr)
@@ -124,7 +124,7 @@ impl DisplayOutput for SimpleFbOutput {
         true
     }
 
-    fn present(&self, _config: &FramebufferConfig, _fb_paddr: usize) -> Result<(), &'static str> {
+    fn present(&self, _config: &FramebufferConfig, _fb_paddr: u64) -> Result<(), &'static str> {
         Ok(())
     }
 }

@@ -10,8 +10,7 @@ extern crate alloc;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
-/// DMA address visible to a DMA controller.
-pub type DmaAddr = usize;
+pub use crate::mem::address::DmaAddr;
 
 /// Callback invoked after a DMA channel observes completed periods.
 pub type DmaCompletionCallback = Arc<dyn Fn() + Send + Sync>;
@@ -70,7 +69,7 @@ pub struct DmaPeripheralConfig {
 /// Cyclic DMA transfer configuration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DmaCyclicConfig {
-    /// Physical address of the DMA ring buffer.
+    /// Device-visible address of the DMA ring buffer.
     pub buffer_addr: DmaAddr,
     /// Total ring buffer length in bytes.
     pub buffer_len: usize,
@@ -92,6 +91,13 @@ impl DmaCyclicConfig {
         if self.buffer_len == 0 || self.period_len == 0 {
             return Err(DmaError::InvalidConfig);
         }
+        if self
+            .buffer_addr
+            .checked_add(self.buffer_len as u64 - 1)
+            .is_none()
+        {
+            return Err(DmaError::InvalidConfig);
+        }
         if !self.buffer_len.is_multiple_of(self.period_len) {
             return Err(DmaError::InvalidConfig);
         }
@@ -99,7 +105,12 @@ impl DmaCyclicConfig {
             return Err(DmaError::InvalidConfig);
         }
         if let Some(peripheral) = self.peripheral
-            && (peripheral.addr == 0 || peripheral.burst_len == 0)
+            && (peripheral.addr.is_zero()
+                || peripheral.burst_len == 0
+                || peripheral
+                    .addr
+                    .checked_add(peripheral.width.bytes() as u64 - 1)
+                    .is_none())
         {
             return Err(DmaError::InvalidConfig);
         }
@@ -274,4 +285,30 @@ pub trait DmaController: Send + Sync {
     ///
     /// A DMA channel handle on success.
     fn request_channel(&self, spec: &DmaSpec) -> Result<Arc<dyn DmaChannel>, DmaError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test_case]
+    fn cyclic_dma_validates_wide_buffer_and_peripheral_ranges() {
+        let mut config = DmaCyclicConfig {
+            buffer_addr: DmaAddr::new(0x1_8000_0000),
+            buffer_len: 0x1000,
+            period_len: 0x800,
+            direction: DmaDirection::MemToDev,
+            peripheral: Some(DmaPeripheralConfig {
+                addr: DmaAddr::new(0x2_0000_0000),
+                width: DmaBusWidth::Width4,
+                burst_len: 1,
+            }),
+        };
+        assert_eq!(config.validate(), Ok(()));
+        config.buffer_addr = DmaAddr::new(u64::MAX - 0xffe);
+        assert_eq!(config.validate(), Err(DmaError::InvalidConfig));
+        config.buffer_addr = DmaAddr::new(0x1_8000_0000);
+        config.peripheral.as_mut().unwrap().addr = DmaAddr::new(u64::MAX);
+        assert_eq!(config.validate(), Err(DmaError::InvalidConfig));
+    }
 }

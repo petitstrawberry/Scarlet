@@ -1,0 +1,561 @@
+//! Virtual memory module for RISC-V architecture.
+//!
+//! The virtual memory module is responsible for managing the virtual memory of the system.
+//! The module provides functions to initialize the virtual memory system, map physical memory to
+//! virtual memory, and switch page tables.
+//!
+
+pub mod mmu;
+
+extern crate alloc;
+
+use crate::sync::{IrqRwSpinLock, IrqSpinLock, IrqSpinLockGuard, Once};
+use alloc::vec::Vec;
+use alloc::{boxed::Box, vec};
+use hashbrown::HashMap;
+use mmu::PageTable;
+#[cfg(test)]
+use mmu::PageTableEntry;
+
+use core::sync::atomic::{AtomicUsize, Ordering};
+
+use crate::mem::page::{Page, allocate_raw_pages, allocate_raw_pages_aligned, free_raw_pages};
+
+use crate::arch::Arch;
+use crate::arch::get_cpu;
+use crate::arch::get_user_trapvector_paddr;
+use crate::arch::riscv::instruction::sbi::remote_sfence_vma_asid_all_harts;
+use crate::environment::{KERNEL_KSTACK_REGION_END, KERNEL_KSTACK_REGION_START, TRAMPOLINE_VA_END};
+use crate::println;
+use crate::vm::addr::kernel_virt_to_phys;
+use crate::vm::manager::VirtualMemoryManager;
+use crate::vm::vmem::{MemoryArea, MemoryAttribute, VirtualMemoryMap, VirtualMemoryPermission};
+
+static KERNEL_SATP: AtomicUsize = AtomicUsize::new(0);
+
+/// Invalidates one address space's translations locally and on every remote hart.
+///
+/// Mutators hold the per-ASID page-table lock while calling this function. SBI's
+/// all-harts sentinel is deliberate: scheduler CPU IDs need not be hardware hart
+/// IDs, while SBI itself knows the complete supervisor-available hart set.
+///
+/// # Arguments
+///
+/// * `asid` - Address-space identifier whose translations were changed.
+pub(in crate::arch::riscv::vm) fn synchronize_tlb(asid: u16) {
+    // SAFETY: the caller has completed page-table writes while holding the
+    // corresponding page-table lock. The fence publishes those writes before
+    // local translation-cache invalidation.
+    unsafe {
+        core::arch::asm!(
+            "fence rw, rw",
+            "sfence.vma zero, {asid}",
+            asid = in(reg) asid as usize,
+            options(nostack),
+        );
+    }
+
+    if crate::sched::scheduler::num_online_cpus() <= 1 {
+        return;
+    }
+
+    remote_sfence_vma_asid_all_harts(0, 0, asid as usize).unwrap_or_else(|error| {
+        panic!(
+            "SBI RFENCE failed for ASID {} after page-table mutation: {:?}; refusing stale TLB use",
+            asid, error
+        )
+    });
+}
+
+pub fn save_kernel_page_table() {
+    let satp: usize;
+    unsafe {
+        core::arch::asm!("csrr {}, satp", out(reg) satp);
+    }
+    KERNEL_SATP.store(satp, Ordering::Release);
+}
+
+pub fn switch_to_kernel_page_table() {
+    let satp = KERNEL_SATP.load(Ordering::Acquire);
+    assert!(satp != 0, "kernel page table not initialized");
+    unsafe {
+        core::arch::asm!(
+            "csrw satp, {}",
+            "sfence.vma",
+            in(reg) satp,
+        );
+    }
+}
+
+unsafe extern "C" {
+    static __TRAMPOLINE_START: usize;
+    static __TRAMPOLINE_END: usize;
+}
+
+const NUM_OF_ASID: usize = 1 << mmu::ASID_BITS;
+static ASID_BITMAP_TABLES: Once<IrqRwSpinLock<Box<[u64]>>> = Once::new();
+static PAGE_TABLE_LOCKS: [IrqSpinLock<()>; NUM_OF_ASID] =
+    [const { IrqSpinLock::new(()) }; NUM_OF_ASID];
+
+/// Exclusive access to one ASID's stage-1 page-table hierarchy.
+pub struct RootPageTableGuard {
+    asid: u16,
+    table: *mut PageTable,
+    _guard: IrqSpinLockGuard<'static, ()>,
+}
+
+impl RootPageTableGuard {
+    fn table(&self) -> &PageTable {
+        // SAFETY: the ASID registry owns the root while `_guard` prevents teardown.
+        unsafe { &*self.table }
+    }
+
+    fn table_mut(&mut self) -> &mut PageTable {
+        // SAFETY: `_guard` is the unique lock for this ASID's complete hierarchy.
+        unsafe { &mut *self.table }
+    }
+
+    /// Returns the root page-table address for diagnostics.
+    ///
+    /// # Returns
+    ///
+    /// The virtual address of the guarded root page table.
+    pub(crate) fn root_address(&self) -> usize {
+        self.table as usize
+    }
+
+    pub(crate) fn switch(&self) {
+        self.table().switch(self.asid);
+    }
+
+    pub(crate) fn get_val_for_satp(&self) -> usize {
+        self.table().get_val_for_satp(self.asid)
+    }
+
+    pub(crate) fn map_memory_area(
+        &mut self,
+        mmap: VirtualMemoryMap,
+        accessed: bool,
+        dirty: bool,
+    ) -> Result<(), &'static str> {
+        let asid = self.asid;
+        self.table_mut()
+            .map_memory_area(asid, mmap, accessed, dirty)
+    }
+
+    pub(crate) fn retag_memory_area(&mut self, mmap: VirtualMemoryMap) -> Result<(), &'static str> {
+        let asid = self.asid;
+        self.table_mut().retag_memory_area(asid, mmap)
+    }
+
+    /// Maps a single 4 KiB page in this address space.
+    ///
+    /// # Arguments
+    ///
+    /// * `vaddr` - Virtual address to map.
+    /// * `paddr` - Physical address to map.
+    /// * `flags` - Requested virtual-memory permissions.
+    /// * `memory_attribute` - Cacheability or device attribute requested by the mapping.
+    /// * `user` - Whether to set the accessed state for the mapping.
+    /// * `write` - Whether to set the dirty state for the mapping.
+    pub(crate) fn map(
+        &mut self,
+        vaddr: usize,
+        paddr: u64,
+        flags: usize,
+        memory_attribute: MemoryAttribute,
+        user: bool,
+        write: bool,
+    ) {
+        let asid = self.asid;
+        self.table_mut()
+            .map(asid, vaddr, paddr, flags, memory_attribute, user, write);
+    }
+
+    /// Translates a virtual address through this guarded page-table hierarchy.
+    ///
+    /// # Arguments
+    ///
+    /// * `vaddr` - Virtual address to translate.
+    ///
+    /// # Returns
+    ///
+    /// The physical address when a valid leaf translation exists, or `None` when
+    /// the address is unmapped.
+    pub(crate) fn translate(&mut self, vaddr: usize) -> Option<u64> {
+        self.table_mut().translate(vaddr)
+    }
+
+    pub(crate) fn unmap_range(&mut self, vaddr_start: usize, vaddr_end: usize) {
+        let asid = self.asid;
+        self.table_mut().unmap_range(asid, vaddr_start, vaddr_end);
+    }
+
+    pub(crate) fn unmap_all(&mut self) {
+        let asid = self.asid;
+        self.table_mut().unmap_all(asid);
+    }
+
+    /// Clear all root-level entries without issuing a TLB shootdown.
+    ///
+    /// Intended for batched page-table rebuilds (e.g. `exec`). The caller
+    /// **must** call [`flush_all_tlb`] before the address space becomes visible.
+    pub(crate) fn unmap_all_no_flush(&mut self) {
+        self.table_mut().unmap_all_no_flush();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn walk_to_level(
+        &mut self,
+        vaddr: usize,
+        level: usize,
+        alloc: bool,
+    ) -> Option<&mut PageTableEntry> {
+        let asid = self.asid;
+        self.table_mut().walk_to_level(vaddr, level, alloc, asid)
+    }
+}
+
+fn get_asid_tables() -> &'static IrqRwSpinLock<Box<[u64]>> {
+    ASID_BITMAP_TABLES.call_once(|| {
+        // Directly allocate on heap to avoid stack overflow
+        let mut tables = alloc::vec![0u64; NUM_OF_ASID / 64].into_boxed_slice();
+        tables[0] = 1; // Mark the first ASID as used to avoid returning 0, which is reserved
+        IrqRwSpinLock::new(tables)
+    })
+}
+// static mut ROOT_PAGE_TABLES: Lazy<IrqRwSpinLock<HashMap<u16, *mut PageTable>>> = Lazy::new(|| IrqRwSpinLock::new(HashMap::new()));
+static PAGE_TABLES: Once<IrqRwSpinLock<HashMap<u16, Vec<usize>>>> = Once::new();
+
+fn get_page_tables() -> &'static IrqRwSpinLock<HashMap<u16, Vec<usize>>> {
+    PAGE_TABLES.call_once(|| IrqRwSpinLock::new(HashMap::new()))
+}
+
+fn new_pagetable() -> *mut PageTable {
+    let ptr = allocate_raw_pages(1) as *mut PageTable;
+    if ptr.is_null() {
+        panic!("Failed to allocate a new page table");
+    }
+    ptr
+}
+
+fn free_pagetable(ptr: *mut PageTable) {
+    if !ptr.is_null() {
+        // SAFETY: Page-table teardown owns this retired table allocated by
+        // new_pagetable as exactly one PMM page.
+        unsafe { free_raw_pages(ptr as *mut Page, 1) };
+    }
+}
+
+/// Allocates a new raw page table for the given ASID.
+///
+/// # Arguments
+/// * `asid` - The Address Space ID (ASID) for which the page table is allocated.
+///
+/// # Returns
+/// A raw pointer to the newly allocated page table.
+///
+/// # Safety
+///
+/// The caller must hold the [`RootPageTableGuard`] for `asid` until the returned
+/// table has been published into that guarded hierarchy.
+///
+#[allow(static_mut_refs)]
+unsafe fn new_raw_pagetable(asid: u16) -> *mut PageTable {
+    let ptr = new_pagetable();
+
+    let mut page_tables = get_page_tables().write();
+    match page_tables.get_mut(&asid) {
+        Some(vec) => vec.push(ptr as usize),
+        None => {
+            panic!("ASID {} not found in page tables", asid);
+        }
+    }
+
+    ptr
+}
+
+pub fn alloc_virtual_address_space() -> u16 {
+    let mut asid_table = get_asid_tables().write();
+    for word_idx in 0..(NUM_OF_ASID / 64) {
+        let word = asid_table[word_idx];
+        if word != u64::MAX {
+            let bit_pos = (!word).trailing_zeros() as usize;
+            asid_table[word_idx] |= 1 << bit_pos;
+            let asid = (word_idx * 64 + bit_pos) as u16;
+            let root_pagetable_ptr = new_pagetable();
+            let mut page_tables = get_page_tables().write();
+            page_tables.insert(asid, vec![root_pagetable_ptr as usize]);
+
+            if root_pagetable_ptr.is_null() {
+                panic!("Failed to allocate a new root page table");
+            }
+
+            return asid;
+        }
+    }
+    panic!("No available root page table");
+}
+
+pub fn alloc_virtual_address_space_for_stage2() -> u16 {
+    let mut asid_table = get_asid_tables().write();
+    for word_idx in 0..(NUM_OF_ASID / 64) {
+        let word = asid_table[word_idx];
+        if word != u64::MAX {
+            let bit_pos = (!word).trailing_zeros() as usize;
+            asid_table[word_idx] |= 1 << bit_pos;
+            let asid = (word_idx * 64 + bit_pos) as u16;
+            let ptr = allocate_raw_pages_aligned(4, 16384) as *mut PageTable;
+            if ptr.is_null() {
+                panic!("Failed to allocate 16KiB aligned root page table");
+            }
+            assert!(
+                ptr as usize % 16384 == 0,
+                "Allocated page table is not 16KiB aligned"
+            );
+            let mut page_tables = get_page_tables().write();
+            page_tables.insert(asid, vec![ptr as usize]);
+            return asid;
+        }
+    }
+    panic!("No available root page table");
+}
+
+pub fn free_virtual_address_space(asid: u16) {
+    let asid = asid as usize;
+    if asid < NUM_OF_ASID {
+        let _page_table_guard = PAGE_TABLE_LOCKS[asid].lock();
+        let bit_pos = asid % 64;
+        let word_idx = asid / 64;
+        let mut asid_table = get_asid_tables().write();
+        if asid_table[word_idx] & (1 << bit_pos) == 0 {
+            panic!("ASID {} is already free", asid);
+        }
+        synchronize_tlb(asid as u16);
+        let mut page_tables = get_page_tables().write();
+        if let Some(tables) = page_tables.remove(&(asid as u16)) {
+            for addr in tables {
+                free_pagetable(addr as *mut PageTable);
+            }
+        }
+        asid_table[word_idx] &= !(1 << bit_pos);
+    } else {
+        panic!("Invalid ASID: {}", asid);
+    }
+}
+
+pub fn is_asid_used(asid: u16) -> bool {
+    let asid = asid as usize;
+    if asid < NUM_OF_ASID {
+        let word_idx = asid / 64;
+        let bit_pos = asid % 64;
+        let asid_table = get_asid_tables().read();
+        (asid_table[word_idx] & (1 << bit_pos)) != 0
+    } else {
+        false
+    }
+}
+
+fn get_root_pagetable_ptr(asid: u16) -> Option<*mut PageTable> {
+    if is_asid_used(asid) {
+        let page_tables = get_page_tables().read();
+        page_tables.get(&asid).map(|vec| vec[0] as *mut PageTable)
+    } else {
+        None
+    }
+}
+
+pub fn get_root_pagetable(asid: u16) -> Option<RootPageTableGuard> {
+    let guard = PAGE_TABLE_LOCKS[asid as usize].lock();
+    let addr = get_root_pagetable_ptr(asid)?;
+    if addr.is_null() {
+        None
+    } else {
+        Some(RootPageTableGuard {
+            asid,
+            table: addr,
+            _guard: guard,
+        })
+    }
+}
+
+fn setup_trampoline_at_end(manager: &VirtualMemoryManager, trampoline_vaddr_end: usize) {
+    let trampoline_start =
+        kernel_virt_to_phys(unsafe { &__TRAMPOLINE_START as *const usize as usize });
+    let trampoline_end =
+        kernel_virt_to_phys(unsafe { &__TRAMPOLINE_END as *const usize as usize }) - 1;
+    let trampoline_size = usize::try_from(trampoline_end - trampoline_start)
+        .expect("trampoline offset exceeds native address width");
+
+    let arch = get_cpu().as_paddr_cpu();
+    let trampoline_vaddr_start = trampoline_vaddr_end - trampoline_size;
+
+    let trap_entry_paddr = kernel_virt_to_phys(get_user_trapvector_paddr());
+    let arch_paddr = kernel_virt_to_phys(arch as *const Arch as usize);
+    let trap_entry_offset = usize::try_from(trap_entry_paddr - trampoline_start)
+        .expect("trampoline offset exceeds native address width");
+    let arch_offset = usize::try_from(arch_paddr - trampoline_start)
+        .expect("trampoline offset exceeds native address width");
+
+    let trap_entry_vaddr = trampoline_vaddr_start + trap_entry_offset;
+    let arch_vaddr = trampoline_vaddr_start + arch_offset;
+
+    #[cfg(any(debug_assertions, test))]
+    {
+        println!(
+            "Trampoline space planned  : {:#x} - {:#x}",
+            trampoline_vaddr_start, trampoline_vaddr_end
+        );
+        println!(
+            "  Trampoline paddr        : {:#x} - {:#x}",
+            trampoline_start, trampoline_end
+        );
+        println!("  Trap entry paddr        : {:#x}", trap_entry_paddr);
+        println!("  Arch paddr              : {:#x}", arch_paddr);
+        println!("  Trap entry vaddr        : {:#x}", trap_entry_vaddr);
+        println!("  Arch vaddr              : {:#x}", arch_vaddr);
+    }
+
+    let trampoline_map = VirtualMemoryMap {
+        vmarea: MemoryArea {
+            start: trampoline_vaddr_start,
+            end: trampoline_vaddr_end,
+        },
+        pmarea: crate::vm::vmem::PhysicalMemoryArea {
+            start: trampoline_start,
+            end: trampoline_end,
+        },
+        vm_start: trampoline_vaddr_start,
+        permissions: VirtualMemoryPermission::Read as usize
+            | VirtualMemoryPermission::Write as usize
+            | VirtualMemoryPermission::Execute as usize,
+        is_shared: true,
+        memory_attribute: crate::vm::vmem::MemoryAttribute::Normal,
+        owner: None,
+    };
+
+    if let Err(e) = manager.add_memory_map(trampoline_map.clone()) {
+        #[cfg(any(debug_assertions, test))]
+        {
+            println!("[vm] add trampoline map failed: {}", e);
+            if let Some(m) = manager.search_memory_map(trampoline_vaddr_start) {
+                println!(
+                    "[vm] map@trampoline_start: {:#x}-{:#x}",
+                    m.vmarea.start, m.vmarea.end
+                );
+            } else {
+                println!("[vm] map@trampoline_start: <none>");
+            }
+            if let Some(m) = manager.search_memory_map(trampoline_vaddr_end) {
+                println!(
+                    "[vm] map@trampoline_end  : {:#x}-{:#x}",
+                    m.vmarea.start, m.vmarea.end
+                );
+            } else {
+                println!("[vm] map@trampoline_end  : <none>");
+            }
+            manager.with_memmaps(|mm| {
+                println!("[vm] current VMA count   : {}", mm.len());
+                for (_k, m) in mm.iter() {
+                    println!("[vm]   VMA {:#x}-{:#x}", m.vmarea.start, m.vmarea.end);
+                }
+            });
+        }
+        panic!("Failed to add trampoline memory map: {}", e);
+    }
+
+    manager
+        .get_root_page_table()
+        .unwrap()
+        .map_memory_area(trampoline_map, true, true)
+        .map_err(|e| panic!("Failed to map trampoline memory area: {}", e))
+        .unwrap();
+
+    crate::vm::set_trampoline_trap_vector(trap_entry_vaddr);
+    crate::vm::set_trampoline_arch(arch.get_cpuid(), arch_vaddr);
+}
+
+pub fn setup_trampoline_for_kernel(manager: &VirtualMemoryManager) {
+    setup_trampoline_at_end(manager, TRAMPOLINE_VA_END);
+
+    #[cfg(any(debug_assertions, test))]
+    {
+        crate::println!(
+            "[vm] riscv64 high-va(kstack) region: {:#x}-{:#x}",
+            KERNEL_KSTACK_REGION_START,
+            KERNEL_KSTACK_REGION_END
+        );
+        debug_assert!(KERNEL_KSTACK_REGION_START <= KERNEL_KSTACK_REGION_END);
+        debug_assert!(KERNEL_KSTACK_REGION_END < TRAMPOLINE_VA_END);
+    }
+}
+
+pub fn setup_trampoline_for_user(manager: &VirtualMemoryManager) {
+    setup_trampoline_at_end(manager, TRAMPOLINE_VA_END);
+}
+
+/// Issue a synchronous TLB shootdown for the given ASID across all harts.
+///
+/// This is the counterpart to `RootPageTableGuard::unmap_all_no_flush`:
+/// batched page-table rebuild callers clear the old address space without
+/// flushing, install fresh mappings, then call this once.
+pub fn flush_all_tlb(asid: u16) {
+    synchronize_tlb(asid);
+}
+
+pub fn register_trampoline_for_ap() {
+    let trampoline_start =
+        kernel_virt_to_phys(unsafe { &__TRAMPOLINE_START as *const usize as usize });
+    let trampoline_end =
+        kernel_virt_to_phys(unsafe { &__TRAMPOLINE_END as *const usize as usize }) - 1;
+    let trampoline_size = usize::try_from(trampoline_end - trampoline_start)
+        .expect("trampoline offset exceeds native address width");
+
+    let arch = get_cpu().as_paddr_cpu();
+    let trampoline_vaddr_start = TRAMPOLINE_VA_END - trampoline_size;
+    let arch_paddr = kernel_virt_to_phys(arch as *const Arch as usize);
+    let arch_offset = usize::try_from(arch_paddr - trampoline_start)
+        .expect("trampoline offset exceeds native address width");
+    let arch_vaddr = trampoline_vaddr_start + arch_offset;
+
+    crate::vm::set_trampoline_arch(arch.get_cpuid(), arch_vaddr);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test_case]
+    fn test_get_page_table() {
+        let asid = alloc_virtual_address_space();
+        let root = get_root_pagetable(asid).expect("root page table not found");
+        assert_ne!(root.root_address(), 0);
+        drop(root);
+        free_virtual_address_space(asid);
+    }
+
+    #[test_case]
+    fn test_get_root_page_table_idx() {
+        let asid = alloc_virtual_address_space();
+        let root_page_table_idx = get_root_pagetable(asid as u16);
+        assert!(root_page_table_idx.is_some());
+        drop(root_page_table_idx);
+        free_virtual_address_space(asid);
+    }
+
+    #[test_case]
+    fn test_alloc_virtual_address_space() {
+        let asid_0 = alloc_virtual_address_space();
+        crate::println!("Allocated ASID: {}", asid_0);
+        assert!(is_asid_used(asid_0));
+        let asid_1 = alloc_virtual_address_space();
+        crate::println!("Allocated ASID: {}", asid_1);
+        assert_eq!(asid_1, asid_0 + 1);
+        assert!(is_asid_used(asid_1));
+        free_virtual_address_space(asid_1);
+        assert!(!is_asid_used(asid_1));
+
+        free_virtual_address_space(asid_0);
+        assert!(!is_asid_used(asid_0));
+    }
+}

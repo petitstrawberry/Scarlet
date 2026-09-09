@@ -1,3 +1,4 @@
+use crate::random::fill_fallback_random as fill_pseudo_random;
 use crate::sync::{IrqRwSpinLock, Once};
 use crate::{
     abi::linux::generic::LinuxAbi,
@@ -17,11 +18,10 @@ use alloc::{
     vec,
     vec::Vec,
 };
-use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU32, Ordering};
 
 use super::errno;
 
-static XORSHIFT_STATE: AtomicU64 = AtomicU64::new(0);
 static NEXT_EPOLL_HANDLE_ID: AtomicU32 = AtomicU32::new(1);
 static EPOLL_INTERESTS: Once<IrqRwSpinLock<Vec<EpollInterest>>> = Once::new();
 
@@ -657,44 +657,6 @@ fn statx_timestamp_from_secs(seconds: u64) -> LinuxStatxTimestamp {
         tv_sec: seconds as i64,
         tv_nsec: 0,
         __reserved: 0,
-    }
-}
-
-fn next_pseudo_random_u64() -> u64 {
-    loop {
-        let state = XORSHIFT_STATE.load(Ordering::Relaxed);
-        if state == 0 {
-            let seed = crate::time::current_time() ^ 0x9e3779b97f4a7c15;
-            let seed = if seed == 0 { 0x4f1bbcdcb7a43413 } else { seed };
-            if XORSHIFT_STATE
-                .compare_exchange(0, seed, Ordering::Relaxed, Ordering::Relaxed)
-                .is_ok()
-            {
-                return seed;
-            }
-            continue;
-        }
-
-        let mut x = state;
-        x ^= x << 13;
-        x ^= x >> 7;
-        x ^= x << 17;
-        if XORSHIFT_STATE
-            .compare_exchange(state, x, Ordering::Relaxed, Ordering::Relaxed)
-            .is_ok()
-        {
-            return x;
-        }
-    }
-}
-
-fn fill_pseudo_random(buffer: &mut [u8]) {
-    let mut offset = 0;
-    while offset < buffer.len() {
-        let bytes = next_pseudo_random_u64().to_le_bytes();
-        let to_copy = core::cmp::min(bytes.len(), buffer.len() - offset);
-        buffer[offset..offset + to_copy].copy_from_slice(&bytes[..to_copy]);
-        offset += to_copy;
     }
 }
 

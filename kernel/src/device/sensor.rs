@@ -11,7 +11,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::any::Any;
 use core::mem::size_of;
-use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::arch::Trapframe;
 use crate::device::char::CharDevice;
@@ -263,12 +263,18 @@ pub struct SensorEvent {
 const _: [(); 80] = [(); size_of::<SensorInfo>()];
 const _: [(); 40] = [(); size_of::<SensorEvent>()];
 
+struct SensorQueue {
+    events: VecDeque<SensorEvent>,
+    // Sequence assignment and insertion share the same lock, preserving queue
+    // order even when two producers push concurrently. The wire value stays u64.
+    next_sequence: u64,
+}
+
 /// Read-only character device exposing a sensor sample stream.
 pub struct SensorDevice {
     name: String,
     info: SensorInfo,
-    queue: IrqSpinLock<VecDeque<SensorEvent>>,
-    next_sequence: AtomicU64,
+    queue: IrqSpinLock<SensorQueue>,
     waker: Waker,
     nonblocking: IrqSpinLock<bool>,
 }
@@ -291,8 +297,10 @@ impl SensorDevice {
         Ok(Self {
             name,
             info,
-            queue: IrqSpinLock::new(VecDeque::with_capacity(SENSOR_QUEUE_CAPACITY)),
-            next_sequence: AtomicU64::new(1),
+            queue: IrqSpinLock::new(SensorQueue {
+                events: VecDeque::with_capacity(SENSOR_QUEUE_CAPACITY),
+                next_sequence: 1,
+            }),
             waker: Waker::new_interruptible(waker_name),
             nonblocking: IrqSpinLock::new(false),
         })
@@ -369,10 +377,9 @@ impl SensorDevice {
         if flags & (SENSOR_EVENT_FLAG_SAMPLE | SENSOR_EVENT_FLAG_FLUSH) == 0 {
             return Err("Sensor event has no record kind");
         }
-        let sequence = self.next_sequence.fetch_add(1, Ordering::Relaxed);
         let mut event = SensorEvent {
             timestamp_ns,
-            sequence,
+            sequence: 0,
             values,
             flags,
             lost_samples: source_lost,
@@ -382,7 +389,10 @@ impl SensorDevice {
         }
 
         {
-            let mut queue = self.queue.lock();
+            let mut state = self.queue.lock();
+            event.sequence = state.next_sequence;
+            state.next_sequence = state.next_sequence.wrapping_add(1);
+            let queue = &mut state.events;
             if queue.len() >= SENSOR_QUEUE_CAPACITY {
                 if let Some(dropped) = queue.pop_front() {
                     if let Some(next) = queue.front_mut() {
@@ -401,14 +411,14 @@ impl SensorDevice {
     }
 
     fn has_events(&self) -> bool {
-        !self.queue.lock().is_empty()
+        !self.queue.lock().events.is_empty()
     }
 
     fn pop_event(&self, buffer: &mut [u8]) -> usize {
         if buffer.len() < size_of::<SensorEvent>() {
             return 0;
         }
-        let Some(event) = self.queue.lock().pop_front() else {
+        let Some(event) = self.queue.lock().events.pop_front() else {
             return 0;
         };
         // Serialize fields explicitly so the four bytes of repr(C) tail
@@ -690,7 +700,7 @@ mod tests {
             dev.push_sample_at(i as u64, [i as i32, 0, 0], 0, 0)
                 .unwrap();
         }
-        assert_eq!(dev.queue.lock().len(), SENSOR_QUEUE_CAPACITY);
+        assert_eq!(dev.queue.lock().events.len(), SENSOR_QUEUE_CAPACITY);
         let mut bytes = [0_u8; 40];
         assert_eq!(dev.read(&mut bytes), 40);
         let event = decode(&bytes);
@@ -710,6 +720,28 @@ mod tests {
         assert_eq!(dev.read(&mut bytes[..39]), 0);
         assert!(dev.has_events());
         assert_eq!(dev.read(&mut bytes), 40);
+    }
+
+    #[test_case]
+    fn sensor_sequence_retains_u64_width_and_rejects_invalid_pushes() {
+        let dev = SensorDevice::new(accelerometer_info()).unwrap();
+        dev.queue.lock().next_sequence = u32::MAX as u64;
+        assert!(dev.push_event_at(1, [0; 3], 0, 0).is_err());
+        dev.push_sample_at(2, [0; 3], 0, 0).unwrap();
+        dev.push_sample_at(3, [0; 3], 0, 0).unwrap();
+        let mut bytes = [0_u8; 40];
+        assert_eq!(dev.read(&mut bytes), 40);
+        assert_eq!(decode(&bytes).sequence, u32::MAX as u64);
+        assert_eq!(dev.read(&mut bytes), 40);
+        assert_eq!(decode(&bytes).sequence, 0x1_0000_0000);
+
+        dev.queue.lock().next_sequence = u64::MAX;
+        dev.push_sample_at(4, [0; 3], 0, 0).unwrap();
+        dev.push_sample_at(5, [0; 3], 0, 0).unwrap();
+        assert_eq!(dev.read(&mut bytes), 40);
+        assert_eq!(decode(&bytes).sequence, u64::MAX);
+        assert_eq!(dev.read(&mut bytes), 40);
+        assert_eq!(decode(&bytes).sequence, 0);
     }
 
     #[test_case]

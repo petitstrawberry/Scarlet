@@ -38,7 +38,7 @@ impl<T> Once<T> {
     ///
     /// # Returns
     ///
-    /// `true` once a prior [`Once::get_or_init`] call has finished.
+    /// `true` once [`Once::get_or_init`] or [`Once::set`] has published a value.
     #[inline]
     pub fn is_completed(&self) -> bool {
         self.state.load(Ordering::Acquire) == COMPLETE
@@ -58,6 +58,26 @@ impl<T> Once<T> {
         } else {
             None
         }
+    }
+
+    /// Publish an already constructed value if initialization has not begun.
+    ///
+    /// Returns the value unchanged if another caller has claimed initialization.
+    /// Unlike `get_or_init`, this operation never waits for that caller. Readers
+    /// see `None` until the entire value has been published with Release ordering.
+    pub fn set(&self, value: T) -> Result<(), T> {
+        if self
+            .state
+            .compare_exchange(UNINIT, INITIALIZING, Ordering::Acquire, Ordering::Acquire)
+            .is_err()
+        {
+            return Err(value);
+        }
+        // SAFETY: We exclusively claimed INITIALIZING. No reader can access data
+        // until the COMPLETE publication below, and no other writer can enter.
+        unsafe { (*self.data.get()).write(value) };
+        self.state.store(COMPLETE, Ordering::Release);
+        Ok(())
     }
 
     /// Initialize with `f` if needed and return a shared reference.
@@ -204,5 +224,28 @@ mod tests {
         let b: Once<u32> = Once::default();
         assert!(!a.is_completed());
         assert!(!b.is_completed());
+    }
+
+    #[test_case]
+    fn test_set_publishes_the_complete_u64_once() {
+        let once = Once::new();
+        assert_eq!(once.get(), None);
+        assert_eq!(once.set(0xffff_1234_5678_9abcu64), Ok(()));
+        assert_eq!(once.get(), Some(&0xffff_1234_5678_9abc));
+        assert_eq!(once.set(0), Err(0));
+        assert_eq!(once.get(), Some(&0xffff_1234_5678_9abc));
+    }
+
+    #[test_case]
+    fn test_set_does_not_wait_for_an_initializer_or_publish_its_value() {
+        let once = Once::new();
+        let result = once.get_or_init(|| {
+            assert!(!once.is_completed());
+            assert_eq!(once.get(), None);
+            assert_eq!(once.set(99u64), Err(99));
+            0x1234_5678_9abc_def0
+        });
+        assert_eq!(*result, 0x1234_5678_9abc_def0);
+        assert_eq!(once.get(), Some(result));
     }
 }

@@ -752,7 +752,8 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         .ok_or("No memory resource found for GICv3 distributor")?;
     let dist_size = mem_resources
         .get(0)
-        .map(|r| r.end - r.start + 1)
+        .map(|r| r.size())
+        .transpose()?
         .unwrap_or(0x10000);
 
     let redist_paddr = mem_resources
@@ -761,7 +762,8 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         .ok_or("No memory resource found for GICv3 redistributor")?;
     let redist_size = mem_resources
         .get(1)
-        .map(|r| r.end - r.start + 1)
+        .map(|r| r.size())
+        .transpose()?
         .unwrap_or(0x20000);
 
     // Map distributor and redistributor MMIO regions into the kernel virtual address space.

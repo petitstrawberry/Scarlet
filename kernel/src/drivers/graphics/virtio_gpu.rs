@@ -292,7 +292,7 @@ struct VirtioGpuAccelerationResource3d {
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct VirtioGpuAccelerationMemoryEntry {
-    paddr: usize,
+    paddr: u64,
     length: usize,
 }
 
@@ -490,7 +490,7 @@ pub struct VirtioGpuDeviceCore {
     async_submissions: asynchronous::AsyncSubmissions,
     async_enabled: bool,
     display_info: IrqRwSpinLock<Option<VirtioGpuRespDisplayInfo>>,
-    framebuffer_addr: IrqRwSpinLock<Option<usize>>,
+    framebuffer_addr: IrqRwSpinLock<Option<u64>>,
     framebuffer_alloc: IrqRwSpinLock<Option<ContiguousPages>>,
     retired_framebuffer_allocs: IrqSpinLock<Vec<ContiguousPages>>,
     resource_id: IrqSpinLock<u32>,
@@ -502,7 +502,7 @@ pub struct VirtioGpuDeviceCore {
     transport_ready: IrqRwSpinLock<bool>,
     initialized: IrqSpinLock<bool>,
     // Track resources and their associated memory
-    resources: IrqSpinLock<alloc::collections::BTreeMap<u32, (usize, usize)>>, // resource_id -> (addr, size)
+    resources: IrqSpinLock<alloc::collections::BTreeMap<u32, (u64, usize)>>, // resource_id -> (addr, size)
 }
 
 impl VirtioGpuDeviceCore {
@@ -1244,7 +1244,7 @@ impl VirtioGpuDeviceCore {
     fn attach_backing_to_resource(
         &self,
         resource_id: u32,
-        addr: usize,
+        addr: u64,
         size: usize,
     ) -> Result<(), &'static str> {
         self.attach_backing_entries_to_resource(
@@ -1373,7 +1373,7 @@ impl VirtioGpuDeviceCore {
         ))
     }
 
-    fn get_framebuffer_address(&self) -> Result<usize, &'static str> {
+    fn get_framebuffer_address(&self) -> Result<u64, &'static str> {
         self.framebuffer_addr
             .read()
             .ok_or("Framebuffer not initialized")
@@ -1650,7 +1650,7 @@ impl MemoryMappingOps for VirtioGpuDevice {
         Err("Memory mapping not supported by VirtIO GPU device")
     }
 
-    fn on_mapped(&self, _vaddr: usize, _paddr: usize, _length: usize, _offset: usize) {
+    fn on_mapped(&self, _vaddr: usize, _paddr: u64, _length: usize, _offset: usize) {
         // VirtIO GPU devices don't support memory mapping
     }
 
@@ -2232,11 +2232,11 @@ impl GraphicsDevice for VirtioGpuDevice {
         self.core.lock().get_framebuffer_config()
     }
 
-    fn get_framebuffer_address(&self) -> Result<usize, &'static str> {
+    fn get_framebuffer_address(&self) -> Result<u64, &'static str> {
         self.core.lock().get_framebuffer_address()
     }
 
-    fn get_framebuffer_info(&self) -> Result<(FramebufferConfig, usize), &'static str> {
+    fn get_framebuffer_info(&self) -> Result<(FramebufferConfig, u64), &'static str> {
         let core = self.core.lock();
         let _ = core.poll_display_resize();
         let config = core.get_framebuffer_config()?;
@@ -2247,7 +2247,7 @@ impl GraphicsDevice for VirtioGpuDevice {
     fn present_framebuffer_region(
         &self,
         config: &FramebufferConfig,
-        physical_addr: usize,
+        physical_addr: u64,
         region: DisplayRegion,
     ) -> Result<(), &'static str> {
         let core = self.core.lock();
@@ -2367,7 +2367,7 @@ mod tests {
     }
 
     /// Physical address of the VirtIO GPU device on QEMU RISC-V virt.
-    const VIRTIO_GPU_PADDR: usize = 0x10002000;
+    const VIRTIO_GPU_PADDR: u64 = 0x10002000;
 
     /// Map the VirtIO GPU MMIO region for use in tests.
     /// Returns the virtual address to pass to `VirtioGpuDevice::new`.

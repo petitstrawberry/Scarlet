@@ -382,7 +382,7 @@ pub struct KvmRunFailEntry {
 
 struct KvmRunPage {
     vaddr: usize,
-    paddr: usize,
+    paddr: u64,
 }
 
 struct KvmRunPageEntry {
@@ -444,7 +444,7 @@ fn get_vcpu_vm_key(vcpu: &dyn VcpuObject) -> Option<usize> {
 /// Look up the physical address of a vCPU's shared kvm_run page.
 /// Returns `None` if the vCPU was not created through the KVM compat layer
 /// (e.g., U-SHV vcpus created via sys_shv_vcpu_create).
-pub fn get_vcpu_run_paddr(vcpu: &dyn VcpuObject) -> Option<usize> {
+pub fn get_vcpu_run_paddr(vcpu: &dyn VcpuObject) -> Option<u64> {
     let key = vcpu_key(vcpu);
     let pages = get_run_pages().read();
     for entry in pages.iter() {

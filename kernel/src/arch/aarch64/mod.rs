@@ -213,7 +213,7 @@ pub fn init_ap_cpu(cpu_id: usize) {
 pub fn first_switch_to_user(task: &Task) -> ! {
     // Prefer the high-VA kernel stack window if available.
     let kernel_sp = if let Some((_slot, base)) = task.get_kernel_stack_window_base() {
-        (base + crate::environment::PAGE_SIZE + crate::environment::TASK_KERNEL_STACK_SIZE) as u64
+        base + crate::environment::PAGE_SIZE + crate::environment::TASK_KERNEL_STACK_SIZE
     } else {
         panic!("Task has no kernel stack window");
     };
@@ -325,8 +325,8 @@ impl Aarch64 {
         addr
     }
 
-    pub fn set_kernel_stack(&mut self, initial_top: u64) {
-        self.kernel_stack = initial_top;
+    pub fn set_kernel_stack(&mut self, initial_top: usize) {
+        self.kernel_stack = initial_top as u64;
     }
 
     pub fn set_trap_handler(&mut self, addr: usize) {

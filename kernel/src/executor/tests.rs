@@ -79,7 +79,11 @@ fn test_exec_failure_preserves_state() {
         original_vm_mappings_count,
         "VM mappings count should be unchanged"
     );
-    assert_eq!(trapframe.epc, original_pc, "PC should be unchanged");
+    assert_eq!(
+        trapframe.get_current_pc(),
+        original_pc,
+        "PC should be unchanged"
+    );
     assert_eq!(trapframe.regs.reg[2], original_sp, "SP should be unchanged");
     assert_eq!(
         trapframe.regs.reg[10], original_a0,

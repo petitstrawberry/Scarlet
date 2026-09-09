@@ -135,7 +135,7 @@ impl GpuPresentOptions {
 /// Linear framebuffer backing exported by a GPU image for cross-device scanout.
 #[derive(Clone)]
 pub struct GpuLinearDisplayBacking {
-    physical_addr: usize,
+    physical_addr: u64,
     physical_segments: Arc<[GpuBackingSegment]>,
     allocation_size: u64,
     stride: u32,
@@ -149,7 +149,7 @@ pub struct GpuLinearDisplayBacking {
 /// One physically contiguous extent of a logically linear GPU allocation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GpuBackingSegment {
-    physical_addr: usize,
+    physical_addr: u64,
     length: usize,
 }
 
@@ -160,7 +160,7 @@ impl GpuBackingSegment {
     ///
     /// * `physical_addr` - Page-aligned physical base address.
     /// * `length` - Non-zero extent length in bytes.
-    pub const fn new(physical_addr: usize, length: usize) -> Self {
+    pub const fn new(physical_addr: u64, length: usize) -> Self {
         Self {
             physical_addr,
             length,
@@ -168,7 +168,7 @@ impl GpuBackingSegment {
     }
 
     /// Return the physical base address of this extent.
-    pub const fn physical_addr(self) -> usize {
+    pub const fn physical_addr(self) -> u64 {
         self.physical_addr
     }
 
@@ -218,7 +218,7 @@ impl GpuLinearDisplayBacking {
     /// # Returns
     ///
     /// Stable physical address retained by the presenting GPU image.
-    pub const fn physical_addr(&self) -> usize {
+    pub const fn physical_addr(&self) -> u64 {
         self.physical_addr
     }
 
@@ -304,7 +304,7 @@ impl GpuDisplayResource {
     /// A validated cross-device display descriptor, or an error for an invalid
     /// or undersized layout.
     pub fn new_linear(
-        physical_addr: usize,
+        physical_addr: u64,
         allocation_size: u64,
         width: u32,
         height: u32,
@@ -352,7 +352,7 @@ impl GpuDisplayResource {
                 || segment.length() == 0
                 || segment
                     .physical_addr()
-                    .checked_add(segment.length() - 1)
+                    .checked_add((segment.length() - 1) as u64)
                     .is_none()
             {
                 return Err("GPU linear display segment is invalid");
@@ -491,7 +491,7 @@ pub trait GraphicsDevice: Device {
     fn get_framebuffer_config(&self) -> Result<FramebufferConfig, &'static str>;
 
     /// Get framebuffer memory address
-    fn get_framebuffer_address(&self) -> Result<usize, &'static str>;
+    fn get_framebuffer_address(&self) -> Result<u64, &'static str>;
 
     /// Get framebuffer configuration and memory address as one snapshot.
     ///
@@ -499,7 +499,7 @@ pub trait GraphicsDevice: Device {
     ///
     /// Current framebuffer configuration and physical memory address, or an error
     /// if the framebuffer is not initialized.
-    fn get_framebuffer_info(&self) -> Result<(FramebufferConfig, usize), &'static str> {
+    fn get_framebuffer_info(&self) -> Result<(FramebufferConfig, u64), &'static str> {
         let config = self.get_framebuffer_config()?;
         let physical_addr = self.get_framebuffer_address()?;
         Ok((config, physical_addr))
@@ -520,7 +520,7 @@ pub trait GraphicsDevice: Device {
     fn present_framebuffer_region(
         &self,
         config: &FramebufferConfig,
-        physical_addr: usize,
+        physical_addr: u64,
         region: DisplayRegion,
     ) -> Result<(), &'static str>;
 
@@ -568,7 +568,7 @@ pub trait GraphicsDevice: Device {
     fn get_scanout_buffer_info(
         &self,
         _index: usize,
-    ) -> Result<(FramebufferConfig, usize), &'static str> {
+    ) -> Result<(FramebufferConfig, u64), &'static str> {
         Err("Direct scanout buffers are not supported")
     }
 
@@ -673,7 +673,7 @@ pub trait GraphicsDevice: Device {
 pub struct GenericGraphicsDevice {
     display_name: &'static str,
     config: Option<FramebufferConfig>,
-    framebuffer_addr: Option<usize>,
+    framebuffer_addr: Option<u64>,
     boot_framebuffer: bool,
 }
 
@@ -693,7 +693,7 @@ impl GenericGraphicsDevice {
     }
 
     /// Set framebuffer address
-    pub fn set_framebuffer_address(&mut self, addr: usize) {
+    pub fn set_framebuffer_address(&mut self, addr: u64) {
         self.framebuffer_addr = Some(addr);
     }
 
@@ -745,7 +745,7 @@ impl MemoryMappingOps for GenericGraphicsDevice {
         Err("Memory mapping not supported by this graphics device")
     }
 
-    fn on_mapped(&self, _vaddr: usize, _paddr: usize, _length: usize, _offset: usize) {
+    fn on_mapped(&self, _vaddr: usize, _paddr: u64, _length: usize, _offset: usize) {
         // Generic graphics devices don't support memory mapping
     }
 
@@ -783,14 +783,14 @@ impl GraphicsDevice for GenericGraphicsDevice {
         self.config.clone().ok_or("Framebuffer not configured")
     }
 
-    fn get_framebuffer_address(&self) -> Result<usize, &'static str> {
+    fn get_framebuffer_address(&self) -> Result<u64, &'static str> {
         self.framebuffer_addr.ok_or("Framebuffer address not set")
     }
 
     fn present_framebuffer_region(
         &self,
         _config: &FramebufferConfig,
-        _physical_addr: usize,
+        _physical_addr: u64,
         _region: DisplayRegion,
     ) -> Result<(), &'static str> {
         Ok(())

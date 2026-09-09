@@ -7,7 +7,9 @@
 //! modules import these types from `crate::sync`; the `spin` crate is no
 //! longer re-exported.
 
+pub(crate) mod counter;
 pub mod cpu_local;
+pub(crate) mod diagnostic;
 pub mod futex;
 pub mod irq_guard;
 pub mod lazy;
@@ -15,6 +17,8 @@ pub mod mutex;
 pub mod once;
 pub mod preempt;
 pub mod rw_spinlock;
+pub mod sequence;
+pub(crate) mod snapshot;
 pub mod spinlock;
 pub mod waker;
 

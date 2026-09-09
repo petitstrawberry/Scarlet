@@ -687,7 +687,7 @@ impl MemoryMappingOps for VirtioSndDevice {
         Err("VirtIO sound backend does not support direct mmap")
     }
 
-    fn on_mapped(&self, _vaddr: usize, _paddr: usize, _length: usize, _offset: usize) {}
+    fn on_mapped(&self, _vaddr: usize, _paddr: u64, _length: usize, _offset: usize) {}
 
     fn on_unmapped(&self, _vaddr: usize, _length: usize) {}
 

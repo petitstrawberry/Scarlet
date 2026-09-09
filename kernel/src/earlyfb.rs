@@ -236,25 +236,38 @@ pub fn deactivate() {
     console.initialized = false;
 }
 
-/// Update framebuffer address for the new HHDM offset after page table transition.
-///
-/// This should be called after `transition_kernel_memory_layout()` to update
-/// the framebuffer virtual address to use Scarlet's HHDM instead of Limine's.
-///
-/// # Arguments
-///
-/// * `old_hhdm_base` - The bootloader's HHDM base address (from BootInfo.hhdm_offset)
-/// * `new_hhdm_base` - The new HHDM base address (e.g., `SCARLET_HHDM_BASE`)
-pub fn fixup_hhdm_offset(old_hhdm_base: usize, new_hhdm_base: usize) {
+/// Rebind the early framebuffer after the page-table handoff.
+/// Both mappings are explicit; virtual-address ordering does not identify which
+/// mapping a pointer belongs to. The boot path calls this once before rendering.
+pub fn relocate_direct_map(
+    old: crate::vm::direct_map::DirectMapWindow,
+    new: crate::vm::direct_map::DirectMapWindow,
+) {
+    use crate::mem::address::VirtAddr;
     let mut console = EARLY_CONSOLE.lock();
-    if !console.initialized || console.addr == 0 {
+    if !console.initialized {
         return;
     }
-
-    if console.addr >= new_hhdm_base {
-        return;
-    }
-
-    let paddr = console.addr.saturating_sub(old_hhdm_base);
-    console.addr = new_hhdm_base.saturating_add(paddr);
+    let bytes = console
+        .pitch
+        .checked_mul(console.height)
+        .and_then(|size| size.checked_sub(1))
+        .expect("invalid framebuffer byte range");
+    let old_base = VirtAddr::new(console.addr);
+    let paddr = old
+        .virt_to_phys(old_base)
+        .expect("framebuffer is outside the boot mapping");
+    let last_paddr = old
+        .virt_to_phys(
+            old_base
+                .checked_add(bytes)
+                .expect("framebuffer VA overflows"),
+        )
+        .expect("framebuffer end is outside the boot mapping");
+    new.phys_to_virt(last_paddr)
+        .expect("framebuffer end is outside the runtime mapping");
+    console.addr = new
+        .phys_to_virt(paddr)
+        .expect("framebuffer is outside the runtime mapping")
+        .as_usize();
 }

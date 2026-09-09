@@ -284,13 +284,13 @@ pub struct VideoBackendDecodeRequest {
     /// Scarlet coded stream format.
     pub coded_format: u32,
     /// Physical address backing the coded input bytes.
-    pub input_paddr: usize,
+    pub input_paddr: u64,
     /// Kernel virtual address of the coded input bytes.
     pub input_vaddr: usize,
     /// Byte length of the coded input.
     pub input_len: u32,
     /// Physical address backing the output frame buffer.
-    pub output_paddr: usize,
+    pub output_paddr: u64,
     /// Kernel virtual address of the output frame buffer.
     pub output_vaddr: usize,
     /// Offset of the output frame buffer inside the frontend mmap.
@@ -1034,7 +1034,7 @@ impl ScarletVideoDevice {
             (
                 buffer.as_paddr(),
                 buffer.as_vaddr(),
-                buffer.as_paddr() + layout.output_offset,
+                buffer.as_paddr() + layout.output_offset as u64,
                 buffer.as_vaddr() + layout.output_offset,
             )
         };
@@ -1571,7 +1571,7 @@ impl ScarletVideoOpen {
             (
                 buffer.as_paddr(),
                 buffer.as_vaddr(),
-                buffer.as_paddr() + layout.output_offset,
+                buffer.as_paddr() + layout.output_offset as u64,
                 buffer.as_vaddr() + layout.output_offset,
             )
         };
@@ -1981,10 +1981,10 @@ impl MemoryMappingOps for ScarletVideoOpen {
             stream_id,
             offset,
             length,
-            buffer.as_paddr() + offset
+            buffer.as_paddr() + offset as u64
         );
         Ok(MemoryMappingInfo::new(
-            buffer.as_paddr() + offset,
+            buffer.as_paddr() + offset as u64,
             0x3,
             true,
         ))
@@ -2205,10 +2205,10 @@ impl MemoryMappingOps for ScarletVideoDevice {
             "[scarlet-video] legacy mmap map offset={} length={} paddr={:#x}",
             offset,
             length,
-            buffer.as_paddr() + offset
+            buffer.as_paddr() + offset as u64
         );
         Ok(MemoryMappingInfo::new(
-            buffer.as_paddr() + offset,
+            buffer.as_paddr() + offset as u64,
             0x3,
             true,
         ))

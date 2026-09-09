@@ -43,7 +43,7 @@ impl FutexRawMutex {
         };
         if result == usize::MAX {
             // SAFETY: This fixed sleep operation takes only a scalar duration and has no userspace pointer arguments.
-            let _ = unsafe { syscall1(Syscall::Sleep, 10_000_000) };
+            let _ = scarlet_sys::sleep_ns(10_000_000);
         }
     }
 

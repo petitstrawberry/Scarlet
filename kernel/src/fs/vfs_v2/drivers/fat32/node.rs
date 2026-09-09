@@ -605,8 +605,8 @@ impl MemoryMappingOps for Fat32FileObject {
         let backing_guard = self.mmap_backing.read();
         let backing = backing_guard.as_ref().ok_or("mmap backing missing")?;
         let base = backing.as_ptr() as usize;
-        let paddr = base + offset;
-        if paddr % PAGE_SIZE != 0 {
+        let paddr = crate::vm::addr::virt_to_phys(base + offset);
+        if paddr % PAGE_SIZE as u64 != 0 {
             return Err("Backing address not aligned");
         }
 
@@ -640,7 +640,7 @@ impl MemoryMappingOps for Fat32FileObject {
         self.get_mapping_info(offset, length)
     }
 
-    fn on_mapped(&self, vaddr: usize, _paddr: usize, length: usize, offset: usize) {
+    fn on_mapped(&self, vaddr: usize, _paddr: u64, length: usize, offset: usize) {
         if length == 0 {
             return;
         }
@@ -1145,7 +1145,7 @@ impl MemoryMappingOps for Fat32DirectoryObject {
         Err("Memory mapping not supported for FAT32 directories")
     }
 
-    fn on_mapped(&self, _vaddr: usize, _paddr: usize, _length: usize, _offset: usize) {
+    fn on_mapped(&self, _vaddr: usize, _paddr: u64, _length: usize, _offset: usize) {
         // Not supported
     }
 

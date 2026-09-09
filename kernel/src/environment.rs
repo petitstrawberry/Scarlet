@@ -10,9 +10,17 @@ mod common;
 #[path = "environment/aarch64.rs"]
 mod arch;
 
-#[cfg(target_arch = "riscv64")]
-#[path = "environment/riscv64.rs"]
+#[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
+#[path = "environment/riscv.rs"]
 mod arch;
+
+#[cfg(target_pointer_width = "64")]
+#[path = "environment/layout64.rs"]
+mod layout;
+#[cfg(target_pointer_width = "32")]
+#[path = "environment/layout32.rs"]
+mod layout;
+pub use layout::*;
 
 pub use arch::*;
 pub use common::*;

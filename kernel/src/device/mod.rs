@@ -412,7 +412,7 @@ impl<T: Device + ?Sized> MemoryMappingOps for DefaultDeviceOpen<T> {
         self.device.get_mapping_info_with(offset, length, is_shared)
     }
 
-    fn on_mapped(&self, vaddr: usize, paddr: usize, length: usize, offset: usize) {
+    fn on_mapped(&self, vaddr: usize, paddr: u64, length: usize, offset: usize) {
         self.device.on_mapped(vaddr, paddr, length, offset);
     }
 
@@ -600,7 +600,7 @@ impl MemoryMappingOps for GenericDevice {
         Err("Memory mapping not supported by this generic device")
     }
 
-    fn on_mapped(&self, _vaddr: usize, _paddr: usize, _length: usize, _offset: usize) {
+    fn on_mapped(&self, _vaddr: usize, _paddr: u64, _length: usize, _offset: usize) {
         // Generic devices don't support memory mapping
     }
 

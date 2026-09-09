@@ -25,6 +25,7 @@ use alloc::{
     vec::Vec,
 };
 use core::sync::atomic::Ordering;
+use scarlet_abi::{data_model::AbiDataModel, environment::EnvironmentExec};
 
 type Result<T> = core::result::Result<T, &'static str>;
 
@@ -368,12 +369,22 @@ fn string_array(task: &Task, address: usize) -> Result<Vec<String>> {
     if address == 0 {
         return Ok(result);
     }
+    let model = AbiDataModel::NATIVE;
+    let base = model
+        .user_address(address as u64)
+        .map_err(|_| "invalid array")?;
     for index in 0..=256 {
-        let mut bytes = [0u8; 8];
-        let slot = address.checked_add(index * 8).ok_or("invalid array")?;
-        slot.checked_add(bytes.len()).ok_or("invalid array")?;
+        let mut bytes = [0u8; core::mem::size_of::<usize>()];
+        let slot = base
+            .element(index, model.word_width.bytes() as u64)
+            .and_then(|address| address.to_usize())
+            .map_err(|_| "invalid array")?;
         copy_from_user(task, slot, &mut bytes).map_err(|_| "invalid array")?;
-        let ptr = usize::from_ne_bytes(bytes);
+        let ptr = model
+            .read_word(&bytes, 0)
+            .and_then(|word| model.user_address(word.unsigned()))
+            .and_then(|address| address.to_usize())
+            .map_err(|_| "invalid array")?;
         if ptr == 0 {
             return Ok(result);
         }
@@ -385,40 +396,41 @@ fn string_array(task: &Task, address: usize) -> Result<Vec<String>> {
     Err("unterminated string array")
 }
 fn exec_options(task: &Task, address: usize) -> Result<ExecOptions> {
-    // RawEnvironmentExec: size:u32, flags:u32, then five native pointer-sized
-    // words (argv, envp, cwd, handles, handle_count). Both targets are 64-bit.
-    let mut bytes = [0u8; 48];
-    address.checked_add(bytes.len()).ok_or("invalid options")?;
-    copy_from_user(task, address, &mut bytes).map_err(|_| "invalid options")?;
-    if u32::from_ne_bytes(bytes[0..4].try_into().unwrap()) != 48 || bytes[4..8] != [0; 4] {
-        return Err("unsupported exec options");
-    }
-    let word = |n: usize| usize::from_ne_bytes(bytes[n..n + 8].try_into().unwrap());
-    let handle_address = word(32);
-    let count = word(40);
-    if count > HandleTable::MAX_HANDLES {
+    // Native callers currently share the kernel's model. A compatibility ABI
+    // must select its own model before reaching this boundary.
+    let model = AbiDataModel::NATIVE;
+    let mut bytes = [0u8; EnvironmentExec::MAX_ENCODED_SIZE];
+    let bytes = &mut bytes[..EnvironmentExec::encoded_size(model)];
+    copy_from_user(task, address, bytes).map_err(|_| "invalid options")?;
+    let options = EnvironmentExec::decode(model, bytes).map_err(|_| "unsupported exec options")?;
+    if options.handle_count > HandleTable::MAX_HANDLES as u64 {
         return Err("too many handles");
     }
     let mut handles = Vec::new();
-    for index in 0..count {
+    for index in 0..options.handle_count {
         let mut entry = [0u8; 8];
-        let address = handle_address
-            .checked_add(index * 8)
-            .ok_or("invalid handle map")?;
-        address.checked_add(8).ok_or("invalid handle map")?;
+        let address = options
+            .handles
+            .element(index, 8)
+            .and_then(|address| address.to_usize())
+            .map_err(|_| "invalid handle map")?;
         copy_from_user(task, address, &mut entry).map_err(|_| "invalid handle map")?;
         handles.push(HandleMapping {
-            source: u32::from_ne_bytes(entry[..4].try_into().unwrap()),
-            target: u32::from_ne_bytes(entry[4..].try_into().unwrap()),
+            source: model
+                .read_u32(&entry, 0)
+                .map_err(|_| "invalid handle map")?,
+            target: model
+                .read_u32(&entry, 4)
+                .map_err(|_| "invalid handle map")?,
         });
     }
     Ok(ExecOptions {
-        argv: string_array(task, word(8))?,
-        envp: string_array(task, word(16))?,
-        cwd: if word(24) == 0 {
+        argv: string_array(task, options.argv.to_usize().map_err(|_| "invalid argv")?)?,
+        envp: string_array(task, options.envp.to_usize().map_err(|_| "invalid envp")?)?,
+        cwd: if options.cwd.is_null() {
             "/".to_string()
         } else {
-            text_arg(task, word(24))?
+            text_arg(task, options.cwd.to_usize().map_err(|_| "invalid cwd")?)?
         },
         handles,
     })
@@ -506,3 +518,125 @@ handler!(sys_environment_spawn, |task, tf| {
     crate::sched::scheduler::enqueue_task(id, cpu);
     Ok(pid)
 });
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::environment::PAGE_SIZE;
+    use crate::library::std::usercopy::copy_to_user;
+    use crate::vm::vmem::{MemoryArea, VirtualMemoryMap, VirtualMemoryPermission};
+    use alloc::boxed::Box;
+    use scarlet_abi::RawEnvironmentExec;
+
+    #[repr(C, align(4096))]
+    struct UserPages([u8; 2 * PAGE_SIZE]);
+
+    fn write_options(task: &Task, address: usize, options: &RawEnvironmentExec) {
+        // Both native layouts have no padding: two u32s and five words. The
+        // independent scarlet-abi host fixtures freeze their byte encodings.
+        let bytes = unsafe {
+            core::slice::from_raw_parts(
+                options as *const _ as *const u8,
+                core::mem::size_of_val(options),
+            )
+        };
+        copy_to_user(task, address, bytes).unwrap();
+    }
+
+    #[test_case]
+    fn native_exec_options_decode_mapped_unaligned_and_cross_page_inputs() {
+        // Keep the backing allocation alive until after the task's maps drop.
+        let mut backing = Box::new(UserPages([0; 2 * PAGE_SIZE]));
+        let task = crate::task::new_user_task("exec-options-abi".into(), 1);
+        let base = 0x10000;
+        let physical = crate::vm::virt_to_phys(backing.0.as_mut_ptr() as usize);
+        task.vm_manager
+            .add_memory_map(VirtualMemoryMap::new(
+                crate::vm::vmem::PhysicalMemoryArea::new(
+                    physical,
+                    physical + 2 * PAGE_SIZE as u64 - 1,
+                ),
+                MemoryArea::new(base, base + 2 * PAGE_SIZE - 1),
+                VirtualMemoryPermission::Read as usize | VirtualMemoryPermission::Write as usize,
+                false,
+                None,
+            ))
+            .unwrap();
+
+        let arg = base + 0x20;
+        let env = base + 0x40;
+        let cwd = base + 0x60;
+        let argv = base + PAGE_SIZE - 4;
+        copy_to_user(&task, arg, b"program\0").unwrap();
+        copy_to_user(&task, env, b"A=B\0").unwrap();
+        copy_to_user(&task, cwd, b"/child\0").unwrap();
+        copy_to_user(&task, argv, &arg.to_ne_bytes()).unwrap();
+        copy_to_user(
+            &task,
+            argv + core::mem::size_of::<usize>(),
+            &0usize.to_ne_bytes(),
+        )
+        .unwrap();
+        copy_to_user(&task, base + 0x100, &env.to_ne_bytes()).unwrap();
+        copy_to_user(
+            &task,
+            base + 0x180,
+            &[4u32.to_ne_bytes(), 7u32.to_ne_bytes()].concat(),
+        )
+        .unwrap();
+
+        let mut record = RawEnvironmentExec {
+            size: core::mem::size_of::<RawEnvironmentExec>() as u32,
+            flags: 0,
+            argv,
+            envp: base + 0x100,
+            cwd,
+            handles: base + 0x180,
+            handle_count: 1,
+        };
+        let address = base + 0x201;
+        write_options(&task, address, &record);
+        let decoded = exec_options(&task, address).unwrap();
+        assert_eq!(decoded.argv, ["program"]);
+        assert_eq!(decoded.envp, ["A=B"]);
+        assert_eq!(decoded.cwd, "/child");
+        assert_eq!(decoded.handles.len(), 1);
+        assert_eq!(
+            (decoded.handles[0].source, decoded.handles[0].target),
+            (4, 7)
+        );
+        // The legacy exec string helper must use the same checked word decoder.
+        assert_eq!(
+            crate::library::std::string::parse_string_array_from_userspace(&task, argv, 256, 4096)
+                .unwrap(),
+            ["program"]
+        );
+
+        record.flags = 1;
+        write_options(&task, address, &record);
+        assert_eq!(
+            exec_options(&task, address).err(),
+            Some("unsupported exec options")
+        );
+        record.flags = 0;
+        record.handle_count = HandleTable::MAX_HANDLES + 1;
+        write_options(&task, address, &record);
+        assert_eq!(exec_options(&task, address).err(), Some("too many handles"));
+
+        // A null-terminated empty record now straddles the page boundary.
+        record.argv = 0;
+        record.envp = 0;
+        record.cwd = 0;
+        record.handles = 0;
+        record.handle_count = 0;
+        let crossing = base + PAGE_SIZE - 13;
+        write_options(&task, crossing, &record);
+        let decoded = exec_options(&task, crossing).unwrap();
+        assert!(decoded.argv.is_empty() && decoded.envp.is_empty() && decoded.handles.is_empty());
+        assert_eq!(decoded.cwd, "/");
+        assert_eq!(
+            exec_options(&task, base + 2 * PAGE_SIZE - 1).err(),
+            Some("invalid options")
+        );
+    }
+}

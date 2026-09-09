@@ -125,7 +125,10 @@ fn decode_scheduler_attr(
             SchedulerAffinity::Single(decode_native_u32(bytes, 20) as usize)
         }
         SCHED_AFFINITY_MASK => {
-            let mask_ptr = decode_native_u64(bytes, 32) as usize;
+            let mask_ptr = scarlet_abi::data_model::AbiDataModel::NATIVE
+                .user_address(decode_native_u64(bytes, 32))
+                .and_then(|address| address.to_usize())
+                .map_err(|_| SchedulerControlResult::BadAddress)?;
             let mask_bytes = decode_native_u32(bytes, 40) as usize;
             let nbits = decode_native_u32(bytes, 44) as usize;
             if decode_native_u32(bytes, 20) != SCHED_CPU_ID_NONE
@@ -1596,7 +1599,7 @@ mod scheduler_control_tests {
 }
 
 pub fn sys_sleep(trapframe: &mut Trapframe) -> usize {
-    let nanosecs = trapframe.get_arg(0) as u64;
+    let nanosecs = crate::syscall::u64_arg(trapframe, 0);
     let task = mytask().unwrap();
 
     // Increment PC before sleeping to avoid infinite loop
@@ -1621,24 +1624,21 @@ pub fn sys_sleep(trapframe: &mut Trapframe) -> usize {
 pub fn sys_monotonic_time(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     trapframe.increment_pc_next(&task);
-    crate::time::current_time_ns() as usize
+    crate::syscall::u64_result(trapframe, crate::time::current_time_ns())
 }
 
 /// Read the kernel wall-clock (real) time.
 ///
 /// Returns wall-clock nanoseconds since the Unix epoch. If no RTC source has
-/// initialized the wall clock yet, returns `usize::MAX` as a sentinel.
+/// initialized the wall clock yet, returns the full `u64::MAX` sentinel.
 ///
 /// # Returns
 ///
-/// Wall-clock nanoseconds since the Unix epoch, or `usize::MAX` if unavailable.
+/// Wall-clock nanoseconds since the Unix epoch, or `u64::MAX` if unavailable.
 pub fn sys_system_time(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     trapframe.increment_pc_next(&task);
-    match crate::time::system_time_ns() {
-        Some(ns) => ns as usize,
-        None => usize::MAX,
-    }
+    crate::syscall::u64_result(trapframe, crate::time::system_time_ns().unwrap_or(u64::MAX))
 }
 
 /// Read cumulative system-wide CPU usage accounting.
@@ -2262,8 +2262,8 @@ pub fn sys_get_task_debug_info(trapframe: &mut Trapframe) -> usize {
                 },
                 flags,
                 cpu_id: u32::try_from(target.last_cpu.load(Ordering::Relaxed)).unwrap_or(u32::MAX),
-                pid: local_pid,
-                tgid: local_tgid,
+                pid: local_pid as u64,
+                tgid: local_tgid as u64,
                 observed_pc: execution.observed_pc,
                 syscall_number: execution.syscall_number,
                 syscall_pc: execution.syscall_pc,
@@ -2374,7 +2374,7 @@ pub fn sys_get_cpu_debug_info(trapframe: &mut Trapframe) -> usize {
             flags,
             cpu_id: cpu_id_u32,
             reserved: breadcrumb.sequence as u32,
-            current_task_id,
+            current_task_id: current_task_id as u64,
             timer_irq_count,
             breadcrumb_phase: breadcrumb.phase,
             breadcrumb_aux: breadcrumb.aux,

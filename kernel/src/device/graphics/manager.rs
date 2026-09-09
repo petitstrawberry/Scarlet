@@ -46,7 +46,7 @@ pub struct FramebufferResource {
     /// Framebuffer configuration (resolution, format, etc.)
     pub config: FramebufferConfig,
     /// Physical memory address of the framebuffer
-    pub physical_addr: usize,
+    pub physical_addr: u64,
     /// Size of the allocated framebuffer memory in bytes (page-aligned).
     /// This is the actual allocated size, which may be larger than the logical
     /// framebuffer size (config.size()) due to page alignment requirements.
@@ -65,7 +65,7 @@ impl FramebufferResource {
         source_device_id: usize,
         logical_name: String,
         config: FramebufferConfig,
-        physical_addr: usize,
+        physical_addr: u64,
         size: usize,
     ) -> Self {
         Self {
@@ -101,7 +101,7 @@ pub struct MmapRegion {
     /// Virtual address of the mapped region
     pub virtual_addr: usize,
     /// Physical address of the mapped region  
-    pub physical_addr: usize,
+    pub physical_addr: u64,
     /// Size of the mapped region
     pub size: usize,
     /// Associated framebuffer name

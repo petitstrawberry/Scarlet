@@ -18,45 +18,25 @@ use crate::task::mytask;
 ///
 /// # Returns
 /// - On success: new position in file
-/// - On error: usize::MAX
+/// - On error: u64::MAX in the Native wide-result registers
 pub fn sys_file_seek(trapframe: &mut Trapframe) -> usize {
-    let task = match mytask() {
-        Some(task) => task,
-        None => return usize::MAX,
-    };
-
     let handle = trapframe.get_arg(0) as u32;
-    let offset = trapframe.get_arg(1) as i64;
-    let whence = trapframe.get_arg(2) as i32;
-
-    // Increment PC to avoid infinite loop if seek fails
-    trapframe.increment_pc_next(&task);
-
-    // Get KernelObject from handle table
-    let kernel_obj = match task.handle_table.get(handle) {
-        Some(obj) => obj,
-        None => return usize::MAX, // Invalid handle
-    };
-
-    // Check if object supports FileObject operations
-    let file = match kernel_obj.as_file() {
-        Some(file) => file,
-        None => return usize::MAX, // Object doesn't support file operations
-    };
-
-    // Convert whence to SeekFrom
-    let seek_from = match whence {
-        0 => SeekFrom::Start(offset as u64),
-        1 => SeekFrom::Current(offset),
-        2 => SeekFrom::End(offset),
-        _ => return usize::MAX, // Invalid whence
-    };
-
-    // Perform seek operation
-    match file.seek(seek_from) {
-        Ok(new_position) => new_position as usize,
-        Err(_) => usize::MAX, // Seek error
-    }
+    let offset = crate::syscall::u64_arg(trapframe, 1);
+    let whence = trapframe.get_arg(1 + scarlet_abi::native_scalar::U64_WORDS);
+    let result = (|| {
+        let task = mytask()?;
+        trapframe.increment_pc_next(&task);
+        let object = task.handle_table.get(handle)?;
+        let file = object.as_file()?;
+        let position = match whence {
+            0 => SeekFrom::Start(offset),
+            1 => SeekFrom::Current(offset as i64),
+            2 => SeekFrom::End(offset as i64),
+            _ => return None,
+        };
+        file.seek(position).ok()
+    })();
+    crate::syscall::u64_result(trapframe, result.unwrap_or(u64::MAX))
 }
 
 /// System call for truncating a file
@@ -75,7 +55,7 @@ pub fn sys_file_truncate(trapframe: &mut Trapframe) -> usize {
     };
 
     let handle = trapframe.get_arg(0) as u32;
-    let length = trapframe.get_arg(1) as u64;
+    let length = crate::syscall::u64_arg(trapframe, 1);
 
     // Increment PC to avoid infinite loop if truncate fails
     trapframe.increment_pc_next(&task);

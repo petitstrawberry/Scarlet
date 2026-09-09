@@ -9,11 +9,11 @@ skip_core_tasks = true
 
 [tasks.fmt]
 description = "Format all code"
-dependencies = ["fmt-kernel", "fmt-project-riscv64", "fmt-project-aarch64", "fmt-project-aarch64-microvm", "fmt-userlib", "fmt-userbin", "fmt-video-player", "fmt-userbin-std", "fmt-drivers", "fmt-modules", "fmt-cross-cc"]
+dependencies = ["fmt-kernel", "fmt-project-riscv64", "fmt-project-aarch64", "fmt-project-aarch64-microvm", "fmt-userlib", "fmt-userbin", "fmt-video-player", "fmt-userbin-std", "fmt-drivers", "fmt-modules", "fmt-cross-cc", "fmt-abi"]
 
 [tasks.fmt-check]
 description = "Check formatting (no changes)"
-dependencies = ["fmt-kernel-check", "fmt-project-riscv64-check", "fmt-project-aarch64-check", "fmt-project-aarch64-microvm-check", "fmt-userlib-check", "fmt-userbin-check", "fmt-video-player-check", "fmt-userbin-std-check", "fmt-drivers-check", "fmt-modules-check", "fmt-cross-cc-check"]
+dependencies = ["fmt-kernel-check", "fmt-project-riscv64-check", "fmt-project-aarch64-check", "fmt-project-aarch64-microvm-check", "fmt-userlib-check", "fmt-userbin-check", "fmt-video-player-check", "fmt-userbin-std-check", "fmt-drivers-check", "fmt-modules-check", "fmt-cross-cc-check", "fmt-abi-check"]
 
 [tasks.test-cross-cc]
 description = "Check Nix cross C defaults, application overrides, and native compiler selection"
@@ -42,6 +42,14 @@ args = ["fmt", "--manifest-path", "tools/tests/cross-cc/Cargo.toml"]
 [tasks.fmt-cross-cc-check]
 command = "cargo"
 args = ["fmt", "--manifest-path", "tools/tests/cross-cc/Cargo.toml", "--", "--check"]
+
+[tasks.fmt-abi]
+command = "cargo"
+args = ["fmt", "--manifest-path", "user/lib/scarlet-abi/Cargo.toml"]
+
+[tasks.fmt-abi-check]
+command = "cargo"
+args = ["fmt", "--manifest-path", "user/lib/scarlet-abi/Cargo.toml", "--", "--check"]
 
 [tasks.check-sgfx-riscv64]
 description = "Check all std binaries and legacy probes against one SGFX core (RISC-V)"
@@ -74,6 +82,21 @@ contract_host=$(rustc -vV | sed -n 's/^host: //p')
 test -n "$contract_host"
 cargo test --locked --manifest-path user/lib/scarlet-abi/Cargo.toml --target "$contract_host"
 cargo test --locked --manifest-path user/lib/sws-protocol/Cargo.toml --target "$contract_host" --no-default-features --features std
+'''
+
+[tasks.test-abi-foundation]
+description = "Test ABI byte contracts on the host and check common production code on RV32/ARMv5TE"
+script = '''
+set -eu
+# Run at the repository root to avoid the crate-local 64-bit target defaults.
+abi_host=$(rustc -vV | sed -n 's/^host: //p')
+test -n "$abi_host"
+cargo test --locked --manifest-path user/lib/scarlet-abi/Cargo.toml --target "$abi_host"
+# Bare-metal ARMv5TE has no pointer CAS; a Linux target would hide that constraint.
+# These are common-crate compile checks, not Scarlet kernel target definitions.
+for abi_target in riscv32imac-unknown-none-elf armv5te-none-eabi; do
+    cargo check --locked --manifest-path user/lib/scarlet-abi/Cargo.toml --lib --target "$abi_target" -Z build-std=core,compiler_builtins
+done
 '''
 
 [tasks.fmt-kernel-check]
@@ -521,6 +544,10 @@ cwd = "user/std-bin"
 command = "cargo"
 args = ["clean"]
 
+[tasks.test-riscv32]
+description = "Run kernel tests (RV32IMA)"
+dependencies = ["test-kernel-riscv32"]
+
 [tasks.test-riscv64]
 description = "Run tests (RISC-V)"
 dependencies = ["test-kernel-riscv64"]
@@ -528,6 +555,13 @@ dependencies = ["test-kernel-riscv64"]
 [tasks.test-aarch64]
 description = "Run tests (AArch64)"
 dependencies = ["test-kernel-aarch64"]
+
+[tasks.test-kernel-riscv32]
+description = "Run RV32IMA kernel tests through the Linux-compatible entry"
+cwd = "kernel"
+env = { "CARGO_TARGET_RISCV32IMA_UNKNOWN_NONE_ELF_RUNNER" = "tools/test.sh --arch riscv32", "CARGO_TARGET_RISCV32IMA_UNKNOWN_NONE_ELF_RUSTFLAGS" = "-C link-arg=-Tlds/riscv32_sbi.ld" }
+command = "cargo"
+args = ["test", "--locked", "--target", "targets/riscv32ima-unknown-none-elf.json", "--no-default-features", "--features", "linux-boot,network,sync-debug"]
 
 [tasks.test-kernel-riscv64]
 description = "Run kernel tests (RISC-V)"
