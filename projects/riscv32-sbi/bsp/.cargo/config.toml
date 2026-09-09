@@ -1,11 +1,6 @@
 [build]
 target = "../../../kernel/targets/riscv32ima-unknown-none-elf.json"
 
-[target.riscv32ima-unknown-none-elf]
-# Additional QEMU options can follow `cargo run --`, including -initrd/-append
-# and a matching firmware/CPU selection for a strictly IMA machine.
-runner = ["qemu-system-riscv32", "-machine", "virt,acpi=off", "-m", "512M", "-smp", "4", "-nographic", "-no-reboot", "-kernel"]
-
 [unstable]
 build-std = ["core", "alloc", "compiler_builtins"]
 build-std-features = ["compiler-builtins-mem"]

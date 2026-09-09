@@ -1,0 +1,29 @@
+schema_version = 2
+
+[project]
+name = "scarlet-riscv32-sbi"
+
+[bsp]
+path = "bsp"
+package = "scarlet"
+
+[bsp.kernel]
+source = { path = "../../kernel" }
+features = ["sbi-boot", "network", "sync-debug"]
+
+[modules]
+"scarlet-module-prototype" = { path = "../../modules/scarlet-module-prototype", enabled = true }
+
+[userspace]
+target = "../../user/targets/riscv32ima-unknown-scarlet-elf.json"
+
+[images.initramfs]
+format = "newc"
+output = ".scarlet/images/initramfs-riscv32-console.cpio"
+
+[[images.initramfs.layers]]
+kind = "bundle"
+path = "../../bundles/console/bundle.toml"
+
+[runner]
+command = "tools/run.sh"

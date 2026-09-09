@@ -69,10 +69,25 @@ name = "scarlet-abi"
 version = "1.0.0"
 
 [[package]]
-name = "scarlet-riscv32-sbi"
+name = "scarlet-module-prototype"
 version = "1.0.0"
 dependencies = [
  "scarlet",
+]
+
+[[package]]
+name = "scarlet-modules"
+version = "0.1.0"
+dependencies = [
+ "scarlet",
+ "scarlet-module-prototype",
+]
+
+[[package]]
+name = "scarlet-riscv32-sbi"
+version = "1.0.0"
+dependencies = [
+ "scarlet-modules",
 ]
 
 [[package]]
