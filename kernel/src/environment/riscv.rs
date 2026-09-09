@@ -4,6 +4,23 @@ use super::common::PAGE_SIZE;
 
 pub const RISCV_STIMER_FREQ: u64 = 10000000; // 10MHz
 
+#[cfg(target_pointer_width = "64")]
+pub const KERNEL_MODULE_BASE: usize = 0xffff_ffff_9000_0000;
+#[cfg(target_pointer_width = "64")]
+pub const KERNEL_MODULE_SIZE: usize = 256 * 1024 * 1024;
+#[cfg(target_pointer_width = "32")]
+pub const KERNEL_MODULE_BASE: usize = 0x9800_0000;
+#[cfg(target_pointer_width = "32")]
+pub const KERNEL_MODULE_SIZE: usize = 128 * 1024 * 1024;
+
+#[cfg(target_pointer_width = "32")]
+const _: () = {
+    assert!(
+        KERNEL_MODULE_BASE >= super::layout::KERNEL_HEAP_BASE + super::layout::KERNEL_HEAP_SIZE
+    );
+    assert!(KERNEL_MODULE_BASE + KERNEL_MODULE_SIZE <= super::layout::IOREMAP_START);
+};
+
 // Virtual memory maximum address (inclusive)
 // RISC-V SV48: upper canonical end.
 pub const VMMAX: usize = usize::MAX;

@@ -10,8 +10,8 @@ extern crate alloc;
 
 mod accounting;
 mod scheduling;
-use scheduling::{ExecutionClock, FairRequest, PlacementHistory, SchedulingQuantum};
 use accounting::{CpuAccounting, CpuHog, SchedUtil};
+use scheduling::{ExecutionClock, FairRequest, PlacementHistory, SchedulingQuantum};
 
 use crate::sync::{IrqRwSpinLock, IrqSpinLock, Mutex};
 use alloc::{
@@ -59,9 +59,7 @@ use crate::{
 };
 use alloc::collections::BTreeMap;
 use core::ops::Range;
-use core::sync::atomic::{
-    AtomicBool, AtomicI32, AtomicU8, AtomicU32, AtomicUsize, Ordering,
-};
+use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32, AtomicUsize, Ordering};
 
 pub(crate) const INIT_TASK_ID: usize = 1;
 const LOG_EXIT_GROUP_SIBLINGS: bool = false;
@@ -1488,7 +1486,9 @@ impl Task {
     }
 
     /// Read the task's default wall-time quantum in nanoseconds.
-    pub fn time_slice_duration_ns(&self) -> u64 { self.quantum.duration_ns() }
+    pub fn time_slice_duration_ns(&self) -> u64 {
+        self.quantum.duration_ns()
+    }
 
     /// Set the default wall-time quantum without changing its scheduler request.
     pub fn set_time_slice_duration_ns(&self, duration_ns: u64) {
@@ -1501,7 +1501,9 @@ impl Task {
     ///
     /// * `now_ns` - Current monotonic timestamp in nanoseconds.
     pub fn start_cpu_accounting(&self, now_ns: u64) {
-        if !self.cpu_accounting.begin(now_ns) { return; }
+        if !self.cpu_accounting.begin(now_ns) {
+            return;
+        }
         self.exec_clock.start(now_ns);
         self.sched_util.begin(now_ns);
     }
@@ -1619,7 +1621,9 @@ impl Task {
         let last_syscall_number = self.debug_syscall_number();
         let last_syscall_pc = self.last_syscall_pc.load(Ordering::Relaxed) as u64;
         let syscall_active = self.syscall_active.load(Ordering::Acquire);
-        let sample = self.cpu_hog.sample(now_ns, runtime_ns, current_pc, current_pc_privileged)?;
+        let sample = self
+            .cpu_hog
+            .sample(now_ns, runtime_ns, current_pc, current_pc_privileged)?;
         Some(TaskCpuHogSnapshot {
             usage_per_mille: sample.usage_per_mille,
             window_ns: sample.window_ns,
@@ -2813,8 +2817,9 @@ impl Task {
                         );
                     }
 
-                    // Pre-map trampoline page if applicable
-                    if mmap.vmarea.start == 0xffff_ffff_ffff_f000 {
+                    // Architecture trampoline mappings end at the native high-VA
+                    // anchor and can span more than one page.
+                    if mmap.vmarea.end == crate::environment::TRAMPOLINE_VA_END {
                         if let Some(mut root_pagetable) = child.vm_manager.get_root_page_table() {
                             root_pagetable
                                 .map_memory_area(shared_mmap, true, true)
@@ -5897,7 +5902,10 @@ mod tests {
             super::nice_to_weight(super::SCHED_NICE_MAX)
         );
 
-        task.fair_request.update(|request| { request.slice_ns = 1_000; request.deadline = 2_000; });
+        task.fair_request.update(|request| {
+            request.slice_ns = 1_000;
+            request.deadline = 2_000;
+        });
         task.reset_sched_request();
         assert_eq!(task.sched_slice_ns(), 0);
         assert_eq!(task.sched_deadline(), 0);

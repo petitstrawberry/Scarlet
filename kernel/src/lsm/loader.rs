@@ -49,7 +49,7 @@ use crate::arch::lsm::MODULE_VA_START;
 
 use crate::arch::lsm::MODULE_ELF_MACHINE;
 
-const MODULE_VA_SIZE: usize = 256 * 1024 * 1024;
+use crate::environment::KERNEL_MODULE_SIZE as MODULE_VA_SIZE;
 
 struct ModuleVaRegion {
     start: usize,
@@ -58,32 +58,47 @@ struct ModuleVaRegion {
 
 struct ModuleVaAllocator {
     free_list: Vec<ModuleVaRegion>,
+    initialized: bool,
 }
 
 impl ModuleVaAllocator {
     const fn new() -> Self {
         Self {
             free_list: Vec::new(),
+            initialized: false,
         }
     }
 
     fn init(&mut self) {
+        if self.initialized {
+            return;
+        }
         self.free_list.push(ModuleVaRegion {
             start: 0,
             size: MODULE_VA_SIZE,
         });
+        self.initialized = true;
+    }
+
+    fn candidate(region: &ModuleVaRegion, size: usize, alignment: usize) -> Option<(usize, usize)> {
+        let address = MODULE_VA_START.checked_add(region.start)?;
+        let aligned_address = address.checked_add(alignment - 1)? & !(alignment - 1);
+        let aligned = aligned_address.checked_sub(MODULE_VA_START)?;
+        let end = aligned.checked_add(size)?;
+        (end <= region.start.checked_add(region.size)?).then_some((aligned, end))
     }
 
     fn allocate(&mut self, size: usize, alignment: usize) -> Option<usize> {
+        if size == 0 || !alignment.is_power_of_two() {
+            return None;
+        }
         let mut best_idx = None;
         let mut best_waste = usize::MAX;
 
         for (i, region) in self.free_list.iter().enumerate() {
-            let aligned = (region.start + alignment - 1) & !(alignment - 1);
-            let end = aligned + size;
-            if end > region.start + region.size {
+            let Some((aligned, _)) = Self::candidate(region, size, alignment) else {
                 continue;
-            }
+            };
             let waste = aligned - region.start;
             if waste < best_waste {
                 best_waste = waste;
@@ -96,10 +111,8 @@ impl ModuleVaAllocator {
 
         let idx = best_idx?;
         let region = &mut self.free_list[idx];
-        let aligned = (region.start + alignment - 1) & !(alignment - 1);
-        let result = MODULE_VA_START + aligned;
-
-        let end = aligned + size;
+        let (aligned, end) = Self::candidate(region, size, alignment)?;
+        let result = MODULE_VA_START.checked_add(aligned)?;
         let region_end = region.start + region.size;
 
         if aligned > region.start && end < region_end {
@@ -124,6 +137,13 @@ impl ModuleVaAllocator {
     }
 
     fn deallocate(&mut self, offset: usize, size: usize) {
+        assert!(
+            self.initialized
+                && size != 0
+                && offset
+                    .checked_add(size)
+                    .is_some_and(|end| end <= MODULE_VA_SIZE)
+        );
         let start = offset;
         let end = offset + size;
 
@@ -169,9 +189,7 @@ static NEXT_MODULE_ID: IrqSpinLock<u64> = IrqSpinLock::new(1);
 
 fn allocate_module_va(size: usize, alignment: usize) -> Option<usize> {
     let mut allocator = MODULE_VA_ALLOCATOR.lock();
-    if allocator.free_list.is_empty() {
-        allocator.init();
-    }
+    allocator.init();
     allocator.allocate(size, alignment)
 }
 
@@ -610,4 +628,29 @@ pub fn load_module(data: &[u8]) -> Result<u64, LsmError> {
     });
 
     Ok(module_id)
+}
+
+#[cfg(test)]
+mod va_tests {
+    use super::*;
+
+    #[test_case]
+    fn module_window_rejects_overflow_and_does_not_reinitialize_when_exhausted() {
+        let mut allocator = ModuleVaAllocator::new();
+        allocator.init();
+        assert_eq!(allocator.allocate(usize::MAX, PAGE_SIZE), None);
+        assert_eq!(allocator.allocate(PAGE_SIZE, 0), None);
+        assert_eq!(allocator.allocate(0, PAGE_SIZE), None);
+        assert_eq!(
+            allocator.allocate(MODULE_VA_SIZE, PAGE_SIZE),
+            Some(MODULE_VA_START)
+        );
+        allocator.init();
+        assert_eq!(allocator.allocate(PAGE_SIZE, PAGE_SIZE), None);
+        allocator.deallocate(0, MODULE_VA_SIZE);
+        assert_eq!(
+            allocator.allocate(MODULE_VA_SIZE, PAGE_SIZE),
+            Some(MODULE_VA_START)
+        );
+    }
 }

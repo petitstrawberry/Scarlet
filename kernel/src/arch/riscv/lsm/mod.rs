@@ -6,7 +6,7 @@ use crate::lsm::elf::{
     STB_GLOBAL, STB_LOCAL, STB_WEAK, STT_SECTION,
 };
 
-pub const MODULE_VA_START: usize = 0xffffffff90000000;
+pub use crate::environment::KERNEL_MODULE_BASE as MODULE_VA_START;
 pub const MODULE_ELF_MACHINE: u16 = crate::lsm::elf::EM_RISCV;
 
 pub const R_RISCV_NONE: u32 = 0;

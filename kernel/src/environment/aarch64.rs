@@ -2,6 +2,9 @@
 
 use super::common::PAGE_SIZE;
 
+pub const KERNEL_MODULE_BASE: usize = 0xffff_ffff_8100_0000;
+pub const KERNEL_MODULE_SIZE: usize = 256 * 1024 * 1024;
+
 // Virtual memory maximum address (inclusive)
 // AArch64: 48-bit VA (T0SZ/T1SZ=16) requires canonical addresses.
 // The lower canonical range is 0x0000_0000_0000_0000 ..= 0x0000_7fff_ffff_ffff.
