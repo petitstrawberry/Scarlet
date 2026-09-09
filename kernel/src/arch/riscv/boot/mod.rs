@@ -1,7 +1,7 @@
 #[cfg(feature = "limine")]
 pub mod limine;
-#[cfg(all(target_arch = "riscv32", feature = "sbi-boot"))]
-pub mod sbi;
+#[cfg(all(target_arch = "riscv32", feature = "linux-boot"))]
+pub mod linux;
 #[cfg(test)]
 pub mod test;
 

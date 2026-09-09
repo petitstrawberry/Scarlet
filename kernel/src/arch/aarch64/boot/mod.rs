@@ -6,7 +6,7 @@
 
 #[cfg(feature = "limine")]
 pub mod limine;
-#[cfg(feature = "aarch64-linux-boot")]
+#[cfg(feature = "linux-boot")]
 pub mod linux;
 #[cfg(test)]
 pub mod test;

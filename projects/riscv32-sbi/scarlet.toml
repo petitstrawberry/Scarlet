@@ -9,7 +9,7 @@ package = "scarlet"
 
 [bsp.kernel]
 source = { path = "../../kernel" }
-features = ["sbi-boot", "network", "sync-debug"]
+features = ["linux-boot", "network", "sync-debug"]
 
 [modules]
 "scarlet-module-prototype" = { path = "../../modules/scarlet-module-prototype", enabled = true }

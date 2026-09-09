@@ -1,4 +1,7 @@
-//! SBI/FDT entry for an RV32 supervisor kernel with Sv32 paging.
+//! Linux-compatible RISC-V entry for an RV32 supervisor kernel with Sv32 paging.
+//!
+//! The entry receives the boot hart ID in a0 and the physical FDT address in a1,
+//! with satp cleared. Secondary harts are started through SBI HSM.
 
 mod page_table;
 
@@ -28,7 +31,7 @@ extern "C" fn boot_entry(hart_id: usize, dtb_va: usize, dtb_pa: usize, image_pa:
     crate::mem::init_bss();
     super::init_cpu(0);
     crate::println!(
-        "[sbi-boot] RV32 hart={} image PA={:#x}; Sv32 image mapping active",
+        "[linux-boot] RV32 hart={} image PA={:#x}; Sv32 image mapping active",
         hart_id,
         image_pa
     );
