@@ -31,6 +31,7 @@
 
 extern crate alloc;
 
+use super::accounting::{Activity, CpuClock};
 use crate::sync::diagnostic::{DiagnosticRecord, ReportInterval};
 use core::sync::atomic::{
     AtomicBool, AtomicPtr, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering,
@@ -953,10 +954,12 @@ static PENDING_RESCHEDULE: [AtomicBool; MAX_NUM_CPUS] =
 // separate from PENDING_RESCHEDULE, which records deferred scheduler work.
 static PENDING_RESCHEDULE_IPI: [AtomicBool; MAX_NUM_CPUS] =
     [const { AtomicBool::new(false) }; MAX_NUM_CPUS];
-static TOTAL_BUSY_CPU_TIME_NS: AtomicU64 = AtomicU64::new(0);
-static TOTAL_IDLE_CPU_TIME_NS: AtomicU64 = AtomicU64::new(0);
-static CPU_BUSY_TIME_NS: [AtomicU64; MAX_NUM_CPUS] = [const { AtomicU64::new(0) }; MAX_NUM_CPUS];
-static CPU_IDLE_TIME_NS: [AtomicU64; MAX_NUM_CPUS] = [const { AtomicU64::new(0) }; MAX_NUM_CPUS];
+static CPU_CLOCKS: Once<[CpuClock; MAX_NUM_CPUS]> = Once::new();
+
+fn cpu_clocks() -> &'static [CpuClock; MAX_NUM_CPUS] {
+    CPU_CLOCKS.call_once(|| core::array::from_fn(|_| CpuClock::new()))
+}
+
 static CPU_UTIL_AVG: [AtomicU32; MAX_NUM_CPUS] = [const { AtomicU32::new(0) }; MAX_NUM_CPUS];
 static CPU_UTIL_MIN: [AtomicU32; MAX_NUM_CPUS] = [const { AtomicU32::new(0) }; MAX_NUM_CPUS];
 static CPU_RUNNABLE_TASKS: [AtomicUsize; MAX_NUM_CPUS] =
@@ -1822,21 +1825,6 @@ fn current_task_must_switch(task: &Task, current_cpu: usize, now_ns: u64) -> boo
         || migration_target_for_task(task, current_cpu, now_ns, false).is_some()
 }
 
-fn charge_finished_cpu_time(cpu_id: usize, task_id: usize, delta_ns: u64) {
-    if delta_ns == 0 {
-        return;
-    }
-
-    let idle_id = IDLE_TASK_IDS[cpu_id].load(Ordering::SeqCst);
-    if idle_id != 0 && task_id == idle_id {
-        TOTAL_IDLE_CPU_TIME_NS.fetch_add(delta_ns, Ordering::SeqCst);
-        CPU_IDLE_TIME_NS[cpu_id].fetch_add(delta_ns, Ordering::SeqCst);
-    } else {
-        TOTAL_BUSY_CPU_TIME_NS.fetch_add(delta_ns, Ordering::SeqCst);
-        CPU_BUSY_TIME_NS[cpu_id].fetch_add(delta_ns, Ordering::SeqCst);
-    }
-}
-
 fn task_util_min_by_id(task_id: usize) -> u32 {
     TaskPool::get_task(task_id)
         .map(|task| task.sched_util_min())
@@ -1960,8 +1948,7 @@ fn account_task_switch(cpu_id: usize, old_id: Option<usize>, next_id: Option<usi
                     update_curr_fair(&task, &mut fair_queue(cpu_id).lock(), now_ns);
                 }
             }
-            let delta_ns = task.stop_cpu_accounting(now_ns);
-            charge_finished_cpu_time(cpu_id, old_id, delta_ns);
+            task.stop_cpu_accounting(now_ns);
             if old_id != idle_id {
                 task.account_sched_util_running(now_ns);
             }
@@ -1973,6 +1960,10 @@ fn account_task_switch(cpu_id: usize, old_id: Option<usize>, next_id: Option<usi
             task.start_cpu_accounting(now_ns);
         }
     }
+    let idle_id = IDLE_TASK_IDS[cpu_id].load(Ordering::SeqCst);
+    let next_activity = next_id.map(|id| if id == idle_id { Activity::Idle } else { Activity::Busy });
+    cpu_clocks()[cpu_id].switch(now_ns, next_activity);
+
 }
 
 fn account_current_task_slice_boundary(cpu_id: usize) {
@@ -2089,30 +2080,16 @@ pub fn update_task_nice(task: &Task, nice: i32) {
 /// Cumulative busy and idle CPU time, including currently running task deltas.
 pub fn cpu_usage_snapshot() -> CpuUsageSnapshot {
     let now_ns = get_time_ns();
-    let mut busy_time_ns = TOTAL_BUSY_CPU_TIME_NS.load(Ordering::SeqCst);
-    let mut idle_time_ns = TOTAL_IDLE_CPU_TIME_NS.load(Ordering::SeqCst);
-
+    let mut busy_time_ns = 0u64;
+    let mut idle_time_ns = 0u64;
+    // Each CPU contributes one coherent sample. This is an aggregate, not a
+    // simultaneous transaction across every online CPU.
     for_each_online_cpu(|cpu_id| {
-        let Some(task_id) = current_task_id(cpu_id) else {
-            return;
-        };
-        let Some(task) = TaskPool::get_task(task_id) else {
-            return;
-        };
-        let delta_ns = task.current_cpu_delta_ns(now_ns);
-        let idle_id = IDLE_TASK_IDS[cpu_id].load(Ordering::SeqCst);
-        if idle_id != 0 && task_id == idle_id {
-            idle_time_ns = idle_time_ns.saturating_add(delta_ns);
-        } else {
-            busy_time_ns = busy_time_ns.saturating_add(delta_ns);
-        }
+        let (busy, idle) = cpu_clocks()[cpu_id].snapshot(now_ns);
+        busy_time_ns = busy_time_ns.saturating_add(busy);
+        idle_time_ns = idle_time_ns.saturating_add(idle);
     });
-
-    CpuUsageSnapshot {
-        online_cpus: num_online_cpus(),
-        busy_time_ns,
-        idle_time_ns,
-    }
+    CpuUsageSnapshot { online_cpus: num_online_cpus(), busy_time_ns, idle_time_ns }
 }
 
 /// Return cumulative busy and idle time for one logical CPU.
@@ -2132,21 +2109,7 @@ pub fn cpu_time_snapshot(cpu_id: usize) -> Option<CpuTimeSnapshot> {
         return None;
     }
 
-    let mut busy_time_ns = CPU_BUSY_TIME_NS[cpu_id].load(Ordering::SeqCst);
-    let mut idle_time_ns = CPU_IDLE_TIME_NS[cpu_id].load(Ordering::SeqCst);
-    let now_ns = get_time_ns();
-
-    if let Some(task_id) = current_task_id(cpu_id)
-        && let Some(task) = TaskPool::get_task(task_id)
-    {
-        let delta_ns = task.current_cpu_delta_ns(now_ns);
-        let idle_id = IDLE_TASK_IDS[cpu_id].load(Ordering::SeqCst);
-        if idle_id != 0 && task_id == idle_id {
-            idle_time_ns = idle_time_ns.saturating_add(delta_ns);
-        } else {
-            busy_time_ns = busy_time_ns.saturating_add(delta_ns);
-        }
-    }
+    let (busy_time_ns, idle_time_ns) = cpu_clocks()[cpu_id].snapshot(get_time_ns());
 
     Some(CpuTimeSnapshot {
         cpu_id,
@@ -5835,8 +5798,7 @@ pub fn reset() {
         CPU_CORE_CLASSES[cpu_id].store(CpuCoreClass::Balanced as u8, Ordering::SeqCst);
         CPU_CAPACITIES[cpu_id].store(DEFAULT_CPU_CAPACITY, Ordering::SeqCst);
         CPU_TOPOLOGY_DOMAINS[cpu_id].store(INVALID_CPU_TOPOLOGY_DOMAIN, Ordering::SeqCst);
-        CPU_BUSY_TIME_NS[cpu_id].store(0, Ordering::SeqCst);
-        CPU_IDLE_TIME_NS[cpu_id].store(0, Ordering::SeqCst);
+        cpu_clocks()[cpu_id].reset_for_test();
         DEBUG_REMOTE_ENQUEUE_TASK[cpu_id].store(0, Ordering::SeqCst);
         DEBUG_REMOTE_ENQUEUE_FROM_CPU[cpu_id].store(NO_CPU, Ordering::SeqCst);
         DEBUG_REMOTE_ENQUEUE_SEQ[cpu_id].store(0, Ordering::SeqCst);
@@ -5851,8 +5813,6 @@ pub fn reset() {
     SCHED_MIGRATION_DEMOTIONS.store(0, Ordering::SeqCst);
     SCHED_MIGRATION_COOLDOWN_SKIPS.store(0, Ordering::SeqCst);
     SCHED_WORK_STEALS.store(0, Ordering::SeqCst);
-    TOTAL_BUSY_CPU_TIME_NS.store(0, Ordering::SeqCst);
-    TOTAL_IDLE_CPU_TIME_NS.store(0, Ordering::SeqCst);
     ONLINE_CPU_MASK.store(0, Ordering::SeqCst);
     ZOMBIE_QUEUE.lock().clear();
     BLOCKED_QUEUE.lock().clear();
