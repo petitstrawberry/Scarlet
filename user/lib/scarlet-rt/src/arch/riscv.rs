@@ -46,7 +46,7 @@ pub unsafe extern "C" fn _start(a0: usize, a1: usize) -> ! {
     // Calculate envp from stack layout:
     // Stack layout: argc | argv[] | envp[] | argv_strings | envp_strings
     // envp starts right after argv[] (which has argc+1 entries including NULL)
-    let envp = if !argv.is_null() && argc > 0 {
+    let envp = if !argv.is_null() {
         // SAFETY: The Scarlet loader guarantees `argv` points to an argc-sized
         // array followed by a null terminator and envp array.
         unsafe { argv.add(argc + 1) }

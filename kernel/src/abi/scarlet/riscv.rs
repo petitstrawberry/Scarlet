@@ -19,8 +19,8 @@ use crate::{
     late_initcall, register_abi,
     syscall::syscall_handler,
     task::elf_loader::{
-        ExecutionMode, LoadStrategy, LoadTarget, analyze_and_load_elf_with_strategy,
-        build_auxiliary_vector, setup_auxiliary_vector_on_stack,
+        LoadStrategy, LoadTarget, analyze_and_load_elf_with_strategy, build_auxiliary_vector,
+        setup_native_stack,
     },
     vm::setup_user_stack,
 };
@@ -871,47 +871,11 @@ impl AbiModule for ScarletAbi {
                         vm::setup_trampoline_for_user(&task.vm_manager);
                         let stack_pointer = setup_user_stack(task)?.1;
 
-                        // Handle different execution modes
-                        match elf_result.mode {
-                            ExecutionMode::Static => {
-                                // Static linking - direct execution
-                                // crate::println!(
-                                //     "[Scarlet ABI] Setting entry point to {:#x} (from ELF result)",
-                                //     elf_result.entry_point
-                                // );
-                                task.set_entry_point(elf_result.entry_point as usize);
-                            }
-                            ExecutionMode::Dynamic {
-                                ref interpreter_path,
-                            } => {
-                                // Dynamic linking - setup auxiliary vector and jump to interpreter
-                                crate::println!(
-                                    "Scarlet ABI: Using dynamic linker at {}",
-                                    interpreter_path
-                                );
-
-                                // Build auxiliary vector for dynamic linking
-                                let auxv = build_auxiliary_vector(&elf_result);
-
-                                // Setup auxiliary vector on stack
-                                match setup_auxiliary_vector_on_stack(task, &auxv) {
-                                    Ok(_auxv_addr) => {
-                                        crate::println!(
-                                            "Scarlet ABI: Auxiliary vector setup complete"
-                                        );
-                                    }
-                                    Err(e) => {
-                                        crate::println!(
-                                            "Scarlet ABI: Failed to setup auxiliary vector: {}",
-                                            e.message
-                                        );
-                                        return Err("Failed to setup auxiliary vector");
-                                    }
-                                }
-
-                                task.set_entry_point(elf_result.entry_point as usize);
-                            }
-                        }
+                        task.set_entry_point(
+                            usize::try_from(elf_result.entry_point)
+                                .map_err(|_| "ELF entry exceeds native address width")?,
+                        );
+                        let auxv = build_auxiliary_vector(&elf_result);
 
                         // Reset task's registers for clean start
                         task.vcpu.lock().reset_iregs();
@@ -920,7 +884,7 @@ impl AbiModule for ScarletAbi {
 
                         // Setup argv/envp on stack following Unix and RISC-V conventions
                         let (adjusted_sp, argv_ptr) =
-                            self.setup_arguments_on_stack(task, argv, envp, stack_pointer)?;
+                            setup_native_stack(task, argv, envp, stack_pointer, &auxv)?;
                         task.vcpu.lock().set_sp(adjusted_sp);
 
                         // crate::println!(
@@ -1033,161 +997,6 @@ impl AbiModule for ScarletAbi {
 
     fn as_any_mut(&mut self) -> &mut dyn core::any::Any {
         self
-    }
-}
-
-impl ScarletAbi {
-    /// Setup argc, argv, and envp on the user stack following Unix conventions
-    ///
-    /// Standard Unix stack layout (from high to low addresses):
-    /// ```
-    /// [high addresses]
-    /// envp strings (null-terminated)
-    /// argv strings (null-terminated)
-    /// envp[] array (null-terminated pointer array)
-    /// argv[] array (null-terminated pointer array)
-    /// argc (integer)
-    /// [low addresses - returned stack pointer]
-    /// ```
-    ///
-    /// # Arguments
-    /// * `task` - The task to set up arguments for
-    /// * `argv` - Command line arguments
-    /// * `envp` - Environment variables
-    /// * `initial_sp` - Initial stack pointer from setup_user_stack
-    ///
-    /// # Returns
-    /// Tuple of (new stack pointer, argv array pointer)
-    fn setup_arguments_on_stack(
-        &self,
-        task: &crate::task::Task,
-        argv: &[&str],
-        envp: &[&str],
-        initial_sp: usize,
-    ) -> Result<(usize, usize), &'static str> {
-        // Calculate total size needed
-        let argc = argv.len();
-        let envc = envp.len();
-
-        // Calculate string sizes (including null terminators)
-        let argv_strings_size: usize = argv.iter().map(|s| s.len() + 1).sum();
-        let envp_strings_size: usize = envp.iter().map(|s| s.len() + 1).sum();
-
-        // Calculate pointer array sizes (including null terminators)
-        let argv_array_size = (argc + 1) * core::mem::size_of::<usize>(); // +1 for NULL terminator
-        let envp_array_size = (envc + 1) * core::mem::size_of::<usize>(); // +1 for NULL terminator
-        let argc_size = core::mem::size_of::<usize>();
-
-        // Total space needed
-        let total_size =
-            argc_size + argv_array_size + envp_array_size + argv_strings_size + envp_strings_size;
-
-        // Align to 16-byte boundary for ABI compliance
-        let aligned_total_size = (total_size + 15) & !15;
-
-        // Calculate new stack pointer
-        let new_sp = initial_sp - aligned_total_size;
-
-        // Layout from new_sp (low) to initial_sp (high):
-        // argc | argv[] | envp[] | argv_strings | envp_strings
-
-        let mut current_addr = new_sp;
-
-        // 1. Write argc
-        self.write_to_stack_memory(task, current_addr, &argc.to_le_bytes())?;
-        current_addr += argc_size;
-
-        // 2. Save argv array pointer for return value
-        let argv_ptr = current_addr;
-
-        // 3. Calculate string positions first
-        let argv_strings_start = current_addr + argv_array_size + envp_array_size;
-        let envp_strings_start = argv_strings_start + argv_strings_size;
-
-        // 4. Write argv[] array
-        let mut string_addr = argv_strings_start;
-        for i in 0..argc {
-            self.write_to_stack_memory(task, current_addr, &string_addr.to_le_bytes())?;
-            current_addr += core::mem::size_of::<usize>();
-            string_addr += argv[i].len() + 1; // Move to next string position
-        }
-        // NULL terminate argv[]
-        let null_ptr: usize = 0;
-        self.write_to_stack_memory(task, current_addr, &null_ptr.to_le_bytes())?;
-        current_addr += core::mem::size_of::<usize>();
-
-        // 5. Write envp[] array
-        string_addr = envp_strings_start;
-        for i in 0..envc {
-            self.write_to_stack_memory(task, current_addr, &string_addr.to_le_bytes())?;
-            current_addr += core::mem::size_of::<usize>();
-            string_addr += envp[i].len() + 1; // Move to next string position
-        }
-        // NULL terminate envp[]
-        self.write_to_stack_memory(task, current_addr, &null_ptr.to_le_bytes())?;
-        current_addr += core::mem::size_of::<usize>();
-
-        // 6. Write argv strings
-        for arg in argv {
-            self.write_string_to_stack(task, current_addr, arg)?;
-            current_addr += arg.len() + 1; // +1 for null terminator
-        }
-
-        // 7. Write envp strings
-        for env in envp {
-            self.write_string_to_stack(task, current_addr, env)?;
-            current_addr += env.len() + 1; // +1 for null terminator
-        }
-
-        Ok((new_sp, argv_ptr))
-    }
-
-    /// Write bytes to stack memory using virtual memory translation
-    fn write_to_stack_memory(
-        &self,
-        task: &crate::task::Task,
-        vaddr: usize,
-        data: &[u8],
-    ) -> Result<(), &'static str> {
-        let mut written = 0usize;
-        while written < data.len() {
-            let current_vaddr = vaddr + written;
-            let page_off = current_vaddr & (crate::environment::PAGE_SIZE - 1);
-            let chunk_len = core::cmp::min(
-                data.len() - written,
-                crate::environment::PAGE_SIZE - page_off,
-            );
-
-            match task.vm_manager.translate_to_kva(current_vaddr) {
-                Some(kaddr) => {
-                    unsafe {
-                        core::ptr::copy_nonoverlapping(
-                            data[written..written + chunk_len].as_ptr(),
-                            kaddr as *mut u8,
-                            chunk_len,
-                        );
-                    }
-                    written += chunk_len;
-                }
-                None => return Err("Failed to translate virtual address for stack write"),
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Write a null-terminated string to stack memory
-    fn write_string_to_stack(
-        &self,
-        task: &crate::task::Task,
-        vaddr: usize,
-        string: &str,
-    ) -> Result<(), &'static str> {
-        // Write the string content
-        self.write_to_stack_memory(task, vaddr, string.as_bytes())?;
-        // Write null terminator
-        self.write_to_stack_memory(task, vaddr + string.len(), &[0u8])?;
-        Ok(())
     }
 }
 

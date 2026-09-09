@@ -9,6 +9,83 @@ use super::*;
 
 const O_RDWR: u32 = 0x2;
 
+#[test_case]
+fn auxiliary_vectors_use_the_selected_abi_width() {
+    use scarlet_abi::data_model::{AbiDataModel, ByteOrder, WordWidth};
+    let model32 = AbiDataModel::new(WordWidth::Bits32, ByteOrder::Little);
+    let model64 = AbiDataModel::new(WordWidth::Bits64, ByteOrder::Little);
+    let entries = [AuxVec::new(AT_ENTRY, 0x1234_5678), AuxVec::new(AT_NULL, 0)];
+    let bytes = encode_auxiliary_vector(&entries, model32).unwrap();
+    assert_eq!(bytes.len(), 16);
+    assert_eq!(
+        model32.read_word(&bytes, 4).unwrap().unsigned(),
+        0x1234_5678
+    );
+    assert_eq!(model32.read_word(&bytes, 8).unwrap().unsigned(), AT_NULL);
+    assert_eq!(
+        encode_auxiliary_vector(&entries, model64).unwrap().len(),
+        32
+    );
+    let wide = [AuxVec::new(AT_PHDR, 0x1_1234_5678)];
+    assert!(encode_auxiliary_vector(&wide, model32).is_err());
+    assert_eq!(
+        model64
+            .read_word(&encode_auxiliary_vector(&wide, model64).unwrap(), 8)
+            .unwrap()
+            .unsigned(),
+        0x1_1234_5678
+    );
+}
+
+#[test_case]
+fn native_stack_preserves_auxv_and_strings_across_pages() {
+    use crate::library::std::usercopy::copy_from_user;
+    use scarlet_abi::data_model::AbiDataModel;
+    let model = AbiDataModel::NATIVE;
+    let word = model.word_width.bytes();
+    let task = new_user_task("native-stack".into(), 0);
+    let top = crate::environment::USER_STACK_END;
+    task.allocate_stack_pages(top - 4 * PAGE_SIZE, 4).unwrap();
+    let long_argument = "a".repeat(PAGE_SIZE + 17);
+    let auxv = [AuxVec::new(AT_ENTRY, 0x1000), AuxVec::new(AT_NULL, 0)];
+    let (sp, argv) = setup_native_stack(
+        &task,
+        &["program", &long_argument],
+        &["KEY=value"],
+        top,
+        &auxv,
+    )
+    .unwrap();
+    assert_eq!(sp % 16, 0);
+    assert_eq!(argv, sp + word);
+    let mut bytes = vec![0; top - sp];
+    copy_from_user(&task, sp, &mut bytes).unwrap();
+    let read = |index| model.read_word(&bytes, index * word).unwrap().unsigned() as usize;
+    assert_eq!(read(0), 2);
+    assert_eq!(read(3), 0); // argv terminator
+    assert_eq!(read(5), 0); // envp terminator, immediately followed by auxv
+    assert_eq!(read(6), AT_ENTRY as usize);
+    assert_eq!(read(7), 0x1000);
+    assert_eq!(read(8), AT_NULL as usize);
+    for (index, string) in [
+        (1, "program"),
+        (2, long_argument.as_str()),
+        (4, "KEY=value"),
+    ] {
+        let offset = read(index) - sp;
+        assert_eq!(&bytes[offset..offset + string.len()], string.as_bytes());
+        assert_eq!(bytes[offset + string.len()], 0);
+    }
+    assert!(setup_native_stack(&task, &["bad\0argument"], &[], top, &auxv).is_err());
+    assert!(setup_native_stack(&task, &[&"x".repeat(4 * PAGE_SIZE)], &[], top, &auxv).is_err());
+    let (sp, _) = setup_native_stack(&task, &[], &["KEY=value"], top, &auxv).unwrap();
+    let mut words = vec![0; 4 * word];
+    copy_from_user(&task, sp, &mut words).unwrap();
+    assert_eq!(model.read_word(&words, 0).unwrap().unsigned(), 0);
+    assert_eq!(model.read_word(&words, word).unwrap().unsigned(), 0);
+    assert!(model.read_word(&words, 2 * word).unwrap().unsigned() != 0);
+}
+
 // Construct actual class-specific headers for mapped-memory tests. The payload
 // is inspected as data; these fixtures are never executed by a CPU.
 fn fixture(class: u8, machine: u16, payload: &[u8], mem_size: u64) -> alloc::vec::Vec<u8> {

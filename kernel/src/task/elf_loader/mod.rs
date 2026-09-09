@@ -1241,47 +1241,92 @@ pub fn build_auxiliary_vector(load_result: &LoadElfResult) -> alloc::vec::Vec<Au
     auxv
 }
 
-/// Setup auxiliary vector on the task's stack
-///
-/// This function places the auxiliary vector at the top of the stack,
-/// which is expected by the dynamic linker and C runtime.
-pub fn setup_auxiliary_vector_on_stack(
-    task: &Task,
+/// Encode the selected ABI's word pairs, without exposing the in-kernel
+/// representation or silently narrowing addresses in ELF32 auxiliary entries.
+fn encode_auxiliary_vector(
     auxv: &[AuxVec],
-) -> Result<usize, ElfLoaderError> {
-    // Calculate size needed for auxiliary vector
-    // Each AuxVec entry is 16 bytes (two u64 values)
-    let auxv_size = auxv.len() * core::mem::size_of::<AuxVec>();
-
-    // Find the top of the stack
-    let stack_top = crate::environment::USER_STACK_END;
-    let auxv_start = stack_top - auxv_size;
-
-    // Write auxiliary vector to stack
-    for (i, entry) in auxv.iter().enumerate() {
-        let offset = i * core::mem::size_of::<AuxVec>();
-        let vaddr = auxv_start + offset;
-
-        // Translate to physical address and write
-        match task.vm_manager.translate_to_kva(vaddr) {
-            Some(kaddr) => unsafe {
-                let ptr = kaddr as *mut AuxVec;
-                ptr.write(*entry);
-            },
-            None => {
-                return Err(ElfLoaderError {
-                    message: format!("Failed to translate auxiliary vector address {:#x}", vaddr),
-                });
-            }
-        }
+    model: scarlet_abi::data_model::AbiDataModel,
+) -> Result<alloc::vec::Vec<u8>, ElfLoaderError> {
+    let word = model.word_width.bytes();
+    let size = auxv
+        .len()
+        .checked_mul(2 * word)
+        .ok_or_else(|| elf_error("Auxiliary vector size overflows"))?;
+    let mut bytes = vec![0; size];
+    for (index, entry) in auxv.iter().enumerate() {
+        model
+            .write_word(&mut bytes, index * 2 * word, entry.a_type)
+            .and_then(|_| model.write_word(&mut bytes, (index * 2 + 1) * word, entry.a_val))
+            .map_err(|_| elf_error("Auxiliary vector value exceeds ABI word width"))?;
     }
+    Ok(bytes)
+}
 
-    crate::println!(
-        "Setup auxiliary vector at {:#x} (size: {} entries)",
-        auxv_start,
-        auxv.len()
-    );
-    Ok(auxv_start)
+/// Construct one native process-start stack: argc, argv, NULL, envp, NULL,
+/// auxv, then string storage. Metadata always uses native words and the stack
+/// pointer is aligned to 16 bytes. RISC-V and AArch64 share this layout.
+pub(crate) fn setup_native_stack(
+    task: &Task,
+    argv: &[&str],
+    envp: &[&str],
+    top: usize,
+    auxv: &[AuxVec],
+) -> Result<(usize, usize), &'static str> {
+    let model = scarlet_abi::data_model::AbiDataModel::NATIVE;
+    let word = model.word_width.bytes();
+    let aux_bytes =
+        encode_auxiliary_vector(auxv, model).map_err(|_| "Invalid native auxiliary vector")?;
+    let strings_size = argv
+        .iter()
+        .chain(envp)
+        .try_fold(0usize, |size, string| {
+            if string.as_bytes().contains(&0) {
+                return None;
+            }
+            size.checked_add(string.len())?.checked_add(1)
+        })
+        .ok_or("Invalid or oversized process arguments")?;
+    let pointer_bytes = argv
+        .len()
+        .checked_add(envp.len())
+        .and_then(|n| n.checked_add(3))
+        .and_then(|n| n.checked_mul(word))
+        .ok_or("Process pointer arrays overflow")?;
+    let metadata_size = pointer_bytes
+        .checked_add(aux_bytes.len())
+        .ok_or("Process metadata overflows")?;
+    let total = metadata_size
+        .checked_add(strings_size)
+        .ok_or("Process stack size overflows")?;
+    let start = top.checked_sub(total).ok_or("Process stack underflows")? & !15;
+    let stack_map = task
+        .vm_manager
+        .search_memory_map(top.checked_sub(1).ok_or("Empty process stack")?)
+        .ok_or("Process stack is not mapped")?;
+    if start < stack_map.vmarea.start {
+        return Err("Process arguments exceed stack mapping");
+    }
+    let mut bytes = vec![0; top - start];
+    model
+        .write_word(&mut bytes, 0, argv.len() as u64)
+        .map_err(|_| "Invalid argument count")?;
+    let mut pointer = word;
+    let mut string_offset = metadata_size;
+    for strings in [argv, envp] {
+        for string in strings {
+            model
+                .write_word(&mut bytes, pointer, (start + string_offset) as u64)
+                .map_err(|_| "Invalid process string address")?;
+            bytes[string_offset..string_offset + string.len()].copy_from_slice(string.as_bytes());
+            string_offset += string.len() + 1;
+            pointer += word;
+        }
+        pointer += word; // Zero-filled argv/envp terminator.
+    }
+    bytes[pointer..pointer + aux_bytes.len()].copy_from_slice(&aux_bytes);
+    crate::library::std::usercopy::copy_to_user(task, start, &bytes)
+        .map_err(|_| "Cannot write process stack")?;
+    Ok((start, start + word))
 }
 
 #[cfg(test)]
