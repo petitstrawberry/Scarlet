@@ -886,13 +886,13 @@ impl Clk for ClkMux {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+    use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     struct TestClk {
         name: &'static str,
         flags: ClkFlags,
         parent: Option<ClkHandle>,
-        rate: AtomicU64,
+        rate: crate::sync::IrqSpinLock<u64>,
         prepared: AtomicUsize,
         enabled: AtomicUsize,
         fail_enable: AtomicBool,
@@ -905,7 +905,7 @@ mod tests {
                 name,
                 flags: ClkFlags::NONE,
                 parent: None,
-                rate: AtomicU64::new(rate),
+                rate: crate::sync::IrqSpinLock::new(rate),
                 prepared: AtomicUsize::new(0),
                 enabled: AtomicUsize::new(0),
                 fail_enable: AtomicBool::new(false),
@@ -959,14 +959,14 @@ mod tests {
         }
 
         fn recalc_rate(&self, parent_rate: u64) -> u64 {
-            self.rate.load(Ordering::SeqCst) + parent_rate
+            *self.rate.lock() + parent_rate
         }
 
         fn set_rate(&self, rate: u64, _parent_rate: u64) -> Result<u64, ClkError> {
             if !self.allow_set_rate.load(Ordering::SeqCst) {
                 return Err(ClkError::Unsupported);
             }
-            self.rate.store(rate, Ordering::SeqCst);
+            *self.rate.lock() = rate;
             Ok(rate)
         }
 
@@ -1038,7 +1038,7 @@ mod tests {
         child_impl.allow_set_rate.store(false, Ordering::SeqCst);
         let child = ClkHandle::new(child_impl);
         assert_eq!(child.set_rate(48), Err(ClkError::Unsupported));
-        assert_eq!(parent_impl.rate.load(Ordering::SeqCst), 48);
+        assert_eq!(*parent_impl.rate.lock(), 48);
     }
 
     #[test_case]

@@ -758,7 +758,7 @@ mod tests {
     use crate::network::NetworkManager;
     use crate::sync::IrqRwSpinLock;
     use alloc::{string::ToString, sync::Arc};
-    use core::sync::atomic::{AtomicU64, Ordering};
+    use crate::sync::counter::SaturatingCounter;
 
     #[test_case]
     fn test_protocol_stack_manager_creation() {
@@ -994,8 +994,8 @@ mod tests {
         mac_address: [u8; 6],
         arp_table: IrqRwSpinLock<BTreeMap<[u8; 4], [u8; 6]>>, // IP -> MAC mapping
         protocols: IrqRwSpinLock<BTreeMap<u16, Arc<dyn NetworkLayer>>>, // EtherType -> Handler
-        packets_sent: AtomicU64,
-        packets_received: AtomicU64,
+        packets_sent: SaturatingCounter,
+        packets_received: SaturatingCounter,
         last_sent_frame: IrqRwSpinLock<Vec<u8>>,
     }
 
@@ -1006,8 +1006,8 @@ mod tests {
                 mac_address: mac,
                 arp_table: IrqRwSpinLock::new(BTreeMap::new()),
                 protocols: IrqRwSpinLock::new(BTreeMap::new()),
-                packets_sent: AtomicU64::new(0),
-                packets_received: AtomicU64::new(0),
+                packets_sent: SaturatingCounter::new(0),
+                packets_received: SaturatingCounter::new(0),
                 last_sent_frame: IrqRwSpinLock::new(Vec::new()),
             };
             // Pre-populate some ARP entries for testing
@@ -1067,7 +1067,7 @@ mod tests {
             frame.extend_from_slice(packet); // IP packet
 
             *self.last_sent_frame.write() = frame.clone();
-            self.packets_sent.fetch_add(1, Ordering::SeqCst);
+            self.packets_sent.add(1);
 
             Ok(())
         }
@@ -1077,7 +1077,7 @@ mod tests {
             frame: &[u8],
             _context: Option<&LayerContext>,
         ) -> Result<(), SocketError> {
-            self.packets_received.fetch_add(1, Ordering::SeqCst);
+            self.packets_received.add(1);
 
             // Parse Ethernet header
             if frame.len() < 14 {
@@ -1125,8 +1125,8 @@ mod tests {
         name: &'static str,
         local_ip: [u8; 4],
         protocols: IrqRwSpinLock<BTreeMap<u16, Arc<dyn NetworkLayer>>>,
-        packets_sent: AtomicU64,
-        packets_received: AtomicU64,
+        packets_sent: SaturatingCounter,
+        packets_received: SaturatingCounter,
     }
 
     impl MockIpLayer {
@@ -1135,8 +1135,8 @@ mod tests {
                 name,
                 local_ip: ip,
                 protocols: IrqRwSpinLock::new(BTreeMap::new()),
-                packets_sent: AtomicU64::new(0),
-                packets_received: AtomicU64::new(0),
+                packets_sent: SaturatingCounter::new(0),
+                packets_received: SaturatingCounter::new(0),
             }
         }
     }
@@ -1196,7 +1196,7 @@ mod tests {
             ip_packet.extend_from_slice(&dest_ip); // Destination IP
             ip_packet.extend_from_slice(packet); // Payload
 
-            self.packets_sent.fetch_add(1, Ordering::SeqCst);
+            self.packets_sent.add(1);
 
             // Forward to Ethernet layer with updated context
             for layer in next_layers {
@@ -1213,7 +1213,7 @@ mod tests {
             packet: &[u8],
             _context: Option<&LayerContext>,
         ) -> Result<(), SocketError> {
-            self.packets_received.fetch_add(1, Ordering::SeqCst);
+            self.packets_received.add(1);
 
             // Parse IP header
             if packet.len() < 20 {
@@ -1255,8 +1255,8 @@ mod tests {
     /// - Payload (variable)
     struct MockTcpLayer {
         name: &'static str,
-        packets_sent: AtomicU64,
-        packets_received: AtomicU64,
+        packets_sent: SaturatingCounter,
+        packets_received: SaturatingCounter,
         last_received_payload: IrqRwSpinLock<Vec<u8>>,
         received_payloads: IrqRwSpinLock<Vec<Vec<u8>>>, // Store all received payloads
     }
@@ -1265,8 +1265,8 @@ mod tests {
         fn new(name: &'static str) -> Self {
             Self {
                 name,
-                packets_sent: AtomicU64::new(0),
-                packets_received: AtomicU64::new(0),
+                packets_sent: SaturatingCounter::new(0),
+                packets_received: SaturatingCounter::new(0),
                 last_received_payload: IrqRwSpinLock::new(Vec::new()),
                 received_payloads: IrqRwSpinLock::new(Vec::new()),
             }
@@ -1328,7 +1328,7 @@ mod tests {
             tcp_segment.extend_from_slice(&[0x00, 0x00]); // Urgent Pointer
             tcp_segment.extend_from_slice(payload); // Payload
 
-            self.packets_sent.fetch_add(1, Ordering::SeqCst);
+            self.packets_sent.add(1);
 
             // Create new context with IP protocol field
             let mut ip_context = context.clone();
@@ -1347,7 +1347,7 @@ mod tests {
             segment: &[u8],
             _context: Option<&LayerContext>,
         ) -> Result<(), SocketError> {
-            self.packets_received.fetch_add(1, Ordering::SeqCst);
+            self.packets_received.add(1);
 
             // Parse TCP header
             if segment.len() < 20 {
@@ -1415,9 +1415,9 @@ mod tests {
         assert!(result.is_ok());
 
         // Verify all layers processed the packet
-        assert_eq!(tcp.packets_sent.load(Ordering::SeqCst), 1);
-        assert_eq!(ip.packets_sent.load(Ordering::SeqCst), 1);
-        assert_eq!(ethernet.packets_sent.load(Ordering::SeqCst), 1);
+        assert_eq!(tcp.packets_sent.snapshot(), 1);
+        assert_eq!(ip.packets_sent.snapshot(), 1);
+        assert_eq!(ethernet.packets_sent.snapshot(), 1);
 
         // Verify Ethernet frame structure
         let frame = ethernet.get_last_frame();
@@ -1495,7 +1495,7 @@ mod tests {
         assert!(result.is_ok());
 
         // Verify TCP received the payload
-        assert_eq!(tcp.packets_received.load(Ordering::SeqCst), 1);
+        assert_eq!(tcp.packets_received.snapshot(), 1);
         assert_eq!(tcp.get_last_received(), payload);
     }
 
@@ -1538,9 +1538,9 @@ mod tests {
         assert!(result.is_ok());
 
         // Verify both packets were sent
-        assert_eq!(tcp.packets_sent.load(Ordering::SeqCst), 2);
-        assert_eq!(ip.packets_sent.load(Ordering::SeqCst), 2);
-        assert_eq!(ethernet.packets_sent.load(Ordering::SeqCst), 2);
+        assert_eq!(tcp.packets_sent.snapshot(), 2);
+        assert_eq!(ip.packets_sent.snapshot(), 2);
+        assert_eq!(ethernet.packets_sent.snapshot(), 2);
     }
 
     #[test_case]
@@ -1576,7 +1576,7 @@ mod tests {
         assert!(result.is_ok());
 
         // Verify packet was sent successfully
-        assert_eq!(tcp.packets_sent.load(Ordering::SeqCst), 1);
+        assert_eq!(tcp.packets_sent.snapshot(), 1);
         let frame = ethernet.get_last_frame();
         assert!(!frame.is_empty());
     }
@@ -1703,9 +1703,9 @@ mod tests {
         assert!(result.is_ok());
 
         // Verify all layers processed packet
-        assert_eq!(tcp.packets_sent.load(Ordering::SeqCst), 1);
-        assert_eq!(ip.packets_sent.load(Ordering::SeqCst), 1);
-        assert_eq!(ethernet.packets_sent.load(Ordering::SeqCst), 1);
+        assert_eq!(tcp.packets_sent.snapshot(), 1);
+        assert_eq!(ip.packets_sent.snapshot(), 1);
+        assert_eq!(ethernet.packets_sent.snapshot(), 1);
     }
 
     #[test_case]
@@ -1715,14 +1715,14 @@ mod tests {
         // Mock layer that tracks configure calls
         struct ConfigTrackingLayer {
             name: &'static str,
-            configured: AtomicU64,
+            configured: SaturatingCounter,
         }
 
         impl ConfigTrackingLayer {
             fn new(name: &'static str) -> Self {
                 Self {
                     name,
-                    configured: AtomicU64::new(0),
+                    configured: SaturatingCounter::new(0),
                 }
             }
         }
@@ -1756,7 +1756,7 @@ mod tests {
                 config: &SocketConfig,
                 next_layers: &[Arc<dyn NetworkLayer>],
             ) -> Result<(), SocketError> {
-                self.configured.fetch_add(1, Ordering::SeqCst);
+                self.configured.add(1);
 
                 // Pass config down to lower layers
                 for layer in next_layers {
@@ -1782,9 +1782,9 @@ mod tests {
         tcp.configure(&config, &[ip.clone(), eth.clone()]).unwrap();
 
         // Verify all layers were configured
-        assert_eq!(tcp.configured.load(Ordering::SeqCst), 1);
-        assert_eq!(ip.configured.load(Ordering::SeqCst), 1);
-        assert_eq!(eth.configured.load(Ordering::SeqCst), 1);
+        assert_eq!(tcp.configured.snapshot(), 1);
+        assert_eq!(ip.configured.snapshot(), 1);
+        assert_eq!(eth.configured.snapshot(), 1);
     }
 
     #[test_case]
@@ -1835,7 +1835,7 @@ mod tests {
         assert!(ip.receive(ip_packet, None).is_ok());
 
         // Verify TCP received payload
-        assert_eq!(tcp.packets_received.load(Ordering::SeqCst), 1);
+        assert_eq!(tcp.packets_received.snapshot(), 1);
         assert_eq!(tcp.get_last_received(), payload);
     }
 
@@ -1908,7 +1908,7 @@ mod tests {
         );
 
         // Verify bidirectional communication
-        assert_eq!(tcp.packets_sent.load(Ordering::SeqCst), 2);
+        assert_eq!(tcp.packets_sent.snapshot(), 2);
     }
 
     #[test_case]
@@ -1999,7 +1999,7 @@ mod tests {
         );
 
         // Both packets sent successfully
-        assert_eq!(tcp.packets_sent.load(Ordering::SeqCst), 2);
+        assert_eq!(tcp.packets_sent.snapshot(), 2);
     }
 
     #[test_case]
@@ -2127,7 +2127,7 @@ mod tests {
         );
 
         // Verify independence
-        assert_eq!(tcp1.packets_sent.load(Ordering::SeqCst), 1);
-        assert_eq!(tcp2.packets_sent.load(Ordering::SeqCst), 1);
+        assert_eq!(tcp1.packets_sent.snapshot(), 1);
+        assert_eq!(tcp2.packets_sent.snapshot(), 1);
     }
 }

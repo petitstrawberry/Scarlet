@@ -1959,7 +1959,7 @@ mod tests {
         let manager = VirtualMemoryManager::new();
 
         // Test mmap_base functionality
-        assert_eq!(manager.get_mmap_base(), 0x1_0000_0000);
+        assert_eq!(manager.get_mmap_base(), crate::environment::DEFAULT_USER_MMAP_BASE);
         manager.set_mmap_base(0x50000000);
         assert_eq!(manager.get_mmap_base(), 0x50000000);
 
@@ -2052,18 +2052,22 @@ mod tests {
     }
 
     #[test_case]
-    fn test_find_unmapped_area_supports_64_bit_user_addresses() {
+    fn test_find_unmapped_area_supports_native_user_addresses() {
         let manager = VirtualMemoryManager::new();
 
         assert_eq!(
             manager.find_unmapped_area(PAGE_SIZE, PAGE_SIZE),
-            Some(0x1_0000_0000)
+            Some(crate::environment::DEFAULT_USER_MMAP_BASE)
         );
 
-        manager.set_mmap_base(0x2_0000_0000);
+        #[cfg(target_pointer_width = "64")]
+        let relocated_base = 0x2_0000_0000;
+        #[cfg(target_pointer_width = "32")]
+        let relocated_base = 0x6000_0000;
+        manager.set_mmap_base(relocated_base);
         assert_eq!(
             manager.find_unmapped_area(PAGE_SIZE, PAGE_SIZE),
-            Some(0x2_0000_0000)
+            Some(relocated_base)
         );
         assert!(manager.find_unmapped_area(0, PAGE_SIZE).is_none());
         assert!(manager.find_unmapped_area(PAGE_SIZE, 0).is_none());
