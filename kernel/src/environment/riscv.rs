@@ -6,7 +6,7 @@ pub const RISCV_STIMER_FREQ: u64 = 10000000; // 10MHz
 
 // Virtual memory maximum address (inclusive)
 // RISC-V SV48: upper canonical end.
-pub const VMMAX: usize = 0xffff_ffff_ffff_ffff;
+pub const VMMAX: usize = usize::MAX;
 
 // Trampoline-managed high-VA infrastructure anchor.
 //
@@ -22,8 +22,13 @@ pub const TRAMPOLINE_VA_RESERVE: usize = PAGE_SIZE;
 
 // User stack end address (exclusive)
 // NOTE: avoid `TRAMPOLINE_VA_END + 1` because TRAMPOLINE_VA_END may be `usize::MAX`.
+#[cfg(target_pointer_width = "64")]
 pub const USER_STACK_END: usize =
     (TRAMPOLINE_VA_END - TRAMPOLINE_VA_RESERVE + 1) & !(PAGE_SIZE - 1);
 
 // Kernel VM stack end address (inclusive)
-pub const KERNEL_VM_STACK_END: usize = USER_STACK_END - 1;
+pub const KERNEL_VM_STACK_END: usize =
+    ((TRAMPOLINE_VA_END - TRAMPOLINE_VA_RESERVE + 1) & !(PAGE_SIZE - 1)) - 1;
+
+#[cfg(target_pointer_width = "32")]
+pub const USER_STACK_END: usize = super::layout::USER_LOWER_CANONICAL_END;

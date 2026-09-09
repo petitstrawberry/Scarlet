@@ -1,6 +1,7 @@
 //! Sparse physical-memory regions mapped by Scarlet's higher-half direct map.
 
 use crate::environment::PAGE_SIZE;
+use crate::mem::address::{PhysAddr, VirtAddr};
 use crate::vm::vmem::{MemoryAttribute, PhysicalMemoryArea};
 
 /// Maximum number of sparse physical regions in Scarlet's direct map.
@@ -735,4 +736,142 @@ mod tests {
             MemoryAttribute::Normal
         );
     }
+}
+
+/// A linear mapping with independent physical and virtual origins.
+///
+/// This describes address arithmetic only; the sparse region set determines
+/// which pages actually exist. No wrapping arithmetic is used at either edge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DirectMapWindow {
+    physical_base: PhysAddr,
+    virtual_base: VirtAddr,
+    size: usize,
+}
+
+impl DirectMapWindow {
+    pub fn new(
+        physical_base: PhysAddr,
+        virtual_base: VirtAddr,
+        size: usize,
+    ) -> Result<Self, &'static str> {
+        let last = size.checked_sub(1).ok_or("direct-map window is empty")?;
+        physical_base
+            .checked_add(last as u64)
+            .ok_or("direct-map physical window overflows")?;
+        virtual_base
+            .checked_add(last)
+            .ok_or("direct-map virtual window overflows")?;
+        Ok(Self {
+            physical_base,
+            virtual_base,
+            size,
+        })
+    }
+
+    /// Convert a Limine-style additive offset and bounds at the boot-protocol boundary.
+    pub fn from_offset(offset: usize, bounds: PhysicalMemoryArea) -> Result<Self, &'static str> {
+        let virtual_base = (offset as u64)
+            .checked_add(bounds.start)
+            .and_then(|address| usize::try_from(address).ok())
+            .ok_or("boot direct-map virtual origin overflows")?;
+        let size = bounds
+            .byte_len()
+            .and_then(|size| usize::try_from(size).ok())
+            .ok_or("boot direct-map bounds exceed pointer width")?;
+        Self::new(
+            PhysAddr::new(bounds.start),
+            VirtAddr::new(virtual_base),
+            size,
+        )
+    }
+
+    pub const fn physical_base(self) -> PhysAddr {
+        self.physical_base
+    }
+
+    pub const fn virtual_base(self) -> VirtAddr {
+        self.virtual_base
+    }
+
+    pub const fn size(self) -> usize {
+        self.size
+    }
+
+    pub fn phys_to_virt(self, paddr: PhysAddr) -> Option<VirtAddr> {
+        let offset = usize::try_from(paddr.checked_offset_from(self.physical_base)?).ok()?;
+        if offset >= self.size {
+            return None;
+        }
+        self.virtual_base.checked_add(offset)
+    }
+
+    pub fn virt_to_phys(self, vaddr: VirtAddr) -> Option<PhysAddr> {
+        let offset = vaddr.checked_offset_from(self.virtual_base)?;
+        if offset >= self.size {
+            return None;
+        }
+        self.physical_base.checked_add(offset as u64)
+    }
+
+    pub fn physical_area(self) -> PhysicalMemoryArea {
+        PhysicalMemoryArea::new(
+            self.physical_base.as_u64(),
+            self.physical_base.as_u64() + (self.size as u64 - 1),
+        )
+    }
+
+    /// Choose the physical origin for the architecture's bounded kernel VA window.
+    pub fn for_kernel(
+        regions: &DirectMapRegions,
+        initramfs: Option<PhysicalMemoryArea>,
+    ) -> Result<Self, &'static str> {
+        let mut bounds = regions
+            .bounding_area()
+            .ok_or("kernel direct-map regions are empty")?;
+        if let Some(area) = initramfs {
+            bounds.start = bounds.start.min(area.start);
+            bounds.end = bounds.end.max(area.end);
+        }
+        #[cfg(target_pointer_width = "64")]
+        let physical_base = 0;
+        #[cfg(target_pointer_width = "32")]
+        let physical_base = bounds.start & !(PAGE_SIZE as u64 - 1);
+        let window = Self::new(
+            PhysAddr::new(physical_base),
+            VirtAddr::new(crate::environment::SCARLET_HHDM_BASE),
+            crate::environment::KERNEL_DIRECT_MAP_SIZE,
+        )?;
+        if window.phys_to_virt(PhysAddr::new(bounds.start)).is_none()
+            || window.phys_to_virt(PhysAddr::new(bounds.end)).is_none()
+        {
+            return Err("physical memory span exceeds the kernel direct-map VA capacity");
+        }
+        Ok(window)
+    }
+}
+
+#[cfg(test)]
+#[test_case]
+fn direct_map_window_preserves_high_physical_addresses() {
+    let window = DirectMapWindow::new(
+        PhysAddr::new(0x1_8000_0000),
+        VirtAddr::new(0xc000_0000),
+        0x1000,
+    )
+    .unwrap();
+    assert_eq!(
+        window.phys_to_virt(PhysAddr::new(0x1_8000_0123)),
+        Some(VirtAddr::new(0xc000_0123))
+    );
+    assert_eq!(
+        window.virt_to_phys(VirtAddr::new(0xc000_0fff)),
+        Some(PhysAddr::new(0x1_8000_0fff))
+    );
+    assert_eq!(window.phys_to_virt(PhysAddr::new(0x8000_0123)), None);
+    assert_eq!(window.phys_to_virt(PhysAddr::new(0x1_8000_1000)), None);
+    assert_eq!(window.virt_to_phys(VirtAddr::new(0xbfff_ffff)), None);
+    assert!(DirectMapWindow::new(PhysAddr::ZERO, VirtAddr::new(usize::MAX), 2).is_err());
+    assert!(DirectMapWindow::new(PhysAddr::new(u64::MAX), VirtAddr::ZERO, 2).is_err());
+    assert!(DirectMapWindow::new(PhysAddr::ZERO, VirtAddr::ZERO, 0).is_err());
 }

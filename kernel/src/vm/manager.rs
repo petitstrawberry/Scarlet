@@ -69,14 +69,7 @@ const WRITE_SITE_COALESCE: u64 = 0x434f;
 const WRITE_SITE_DROP: u64 = 0x4452;
 const WRITE_SITE_RETAG: u64 = 0x5254;
 const DEBUG_VM_MAPPING_EXTEND_LOGGING: bool = false;
-// Keep the low 4 GiB available to executable images and upward-growing brk
-// heaps. Scarlet only targets 64-bit architectures, so anonymous mappings do
-// not need to compete with the heap at the legacy 1 GiB boundary.
-const DEFAULT_USER_MMAP_BASE: usize = 0x1_0000_0000;
-// AArch64 with 48-bit VAs and RISC-V Sv48 share this lower canonical limit.
-// Keep automatic mappings in the lower half even though RISC-V also exposes a
-// high canonical user-stack region.
-const USER_LOWER_CANONICAL_END: usize = 0x0000_8000_0000_0000;
+use crate::environment::{DEFAULT_USER_MMAP_BASE, USER_LOWER_CANONICAL_END};
 
 fn checked_align_up(value: usize, alignment: usize) -> Option<usize> {
     if !alignment.is_power_of_two() {
