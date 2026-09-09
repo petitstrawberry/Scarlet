@@ -9,6 +9,8 @@ pub mod syscall;
 extern crate alloc;
 
 mod accounting;
+mod scheduling;
+use scheduling::{ExecutionClock, FairRequest, PlacementHistory, SchedulingQuantum};
 use accounting::{CpuAccounting, CpuHog, SchedUtil};
 
 use crate::sync::{IrqRwSpinLock, IrqSpinLock, Mutex};
@@ -58,7 +60,7 @@ use crate::{
 use alloc::collections::BTreeMap;
 use core::ops::Range;
 use core::sync::atomic::{
-    AtomicBool, AtomicI32, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering,
+    AtomicBool, AtomicI32, AtomicU8, AtomicU32, AtomicUsize, Ordering,
 };
 
 pub(crate) const INIT_TASK_ID: usize = 1;
@@ -766,7 +768,7 @@ pub struct Task {
     pub max_data_size: usize,
     pub max_text_size: usize,
 
-    // === Atomic fields (lock-free) ===
+    // === Concurrent task and scheduler state ===
     /// Task state with atomic transitions
     pub state: AtomicTaskState,
     /// Task priority
@@ -777,18 +779,10 @@ pub struct Task {
     sched_util_min: AtomicU32,
     /// Measured utilization and its coherent runtime window.
     sched_util: SchedUtil,
-    /// Last timestamp at which the scheduler migrated this task.
-    ///
-    /// Used to rate-limit scheduler-driven cross-CPU movement.
-    sched_last_migration_ns: AtomicU64,
-    /// Number of scheduler-directed migrations for this task.
-    sched_migration_count: AtomicU64,
-    /// First timestamp at which this task was observed below its current CPU capacity.
-    ///
-    /// Used to avoid demoting a task after only one low-utilization sample.
-    sched_low_util_since_ns: AtomicU64,
-    /// Scheduler time-slice duration in absolute nanoseconds.
-    pub time_slice_duration_ns: AtomicU64,
+    /// Placement timestamps and the cumulative migration measurement.
+    placement: PlacementHistory,
+    /// Default wall-time quantum; the public API uses nanoseconds on every target.
+    quantum: SchedulingQuantum,
     /// Nice value used by the EEVDF fair scheduler (Linux parity, -20..+19).
     ///
     /// 0 is the default. Higher values lower the task's load weight and the
@@ -797,28 +791,15 @@ pub struct Task {
     pub sched_nice: AtomicI32,
     /// Load weight derived from [`Task::sched_nice`] via [`nice_to_weight`].
     pub(crate) sched_weight: AtomicU32,
-    /// EEVDF virtual runtime. Advances with consumed CPU time scaled by
-    /// `NICE_0_LOAD / sched_weight` so heavier tasks run longer per virtual
-    /// unit. Owned by the scheduler; updated under the per-CPU fair queue
-    /// lock or via `account_*` paths.
-    pub sched_vruntime: AtomicU64,
-    /// EEVDF virtual deadline of the form `vruntime + slice / weight`.
-    ///
-    /// The fair scheduler picks the eligible entity with the smallest
-    /// deadline, so this field drives both fairness and latency.
-    pub sched_deadline: AtomicU64,
-    /// Current fair-scheduler quantum in nanoseconds.
-    ///
-    /// Recomputed by the scheduler when a new request is placed as
-    /// `sched_period(nr_running) * weight / total_weight`, clamped to
-    /// `SCHED_MIN_GRANULARITY_NS`.
-    pub(crate) sched_slice_ns: AtomicU64,
+    /// Coherent virtual runtime, deadline and quantum. Queue ownership is
+    /// still required when changing an entity's ordering key.
+    pub(crate) fair_request: FairRequest,
     /// True while the task is currently inserted in a per-CPU fair run queue.
     pub(crate) sched_on_rq: AtomicBool,
     /// True while the task is inserted in its partitioned deadline run queue.
     pub(crate) deadline_on_rq: AtomicBool,
     /// Monotonic timestamp from which the current EEVDF execution interval is charged.
-    pub(crate) sched_exec_start_ns: AtomicU64,
+    pub(crate) exec_clock: ExecutionClock,
     /// Committed time and the active interval are one coherent accounting state.
     cpu_accounting: CpuAccounting,
     /// Most recent instruction address sampled while this task was running.
@@ -1104,20 +1085,16 @@ impl Task {
             core_preference: AtomicU8::new(TaskCorePreference::Any.to_u8()),
             sched_util_min: AtomicU32::new(0),
             sched_util: SchedUtil::new(),
-            sched_last_migration_ns: AtomicU64::new(0),
-            sched_migration_count: AtomicU64::new(0),
-            sched_low_util_since_ns: AtomicU64::new(0),
-            time_slice_duration_ns: AtomicU64::new(
+            placement: PlacementHistory::new(),
+            quantum: SchedulingQuantum::new(
                 (DEFAULT_TIME_SLICE as u64).saturating_mul(ms_to_ns(10)),
             ),
             sched_nice: AtomicI32::new(0),
             sched_weight: AtomicU32::new(NICE_0_LOAD),
-            sched_vruntime: AtomicU64::new(0),
-            sched_deadline: AtomicU64::new(0),
-            sched_slice_ns: AtomicU64::new(0),
+            fair_request: FairRequest::new(),
             sched_on_rq: AtomicBool::new(false),
             deadline_on_rq: AtomicBool::new(false),
-            sched_exec_start_ns: AtomicU64::new(0),
+            exec_clock: ExecutionClock::new(),
             cpu_accounting: CpuAccounting::new(),
             last_observed_pc: AtomicUsize::new(0),
             last_observed_pc_privileged: AtomicBool::new(false),
@@ -1407,7 +1384,7 @@ impl Task {
     /// Monotonic timestamp in nanoseconds, or `0` if this task has not been
     /// migrated by the scheduler.
     pub fn sched_last_migration_ns(&self) -> u64 {
-        self.sched_last_migration_ns.load(Ordering::SeqCst)
+        self.placement.last_migration_ns()
     }
 
     /// Return the task's current nice value (`-20..=19`).
@@ -1422,17 +1399,17 @@ impl Task {
 
     /// Return the task's current fair-scheduler virtual runtime.
     pub fn sched_vruntime(&self) -> u64 {
-        self.sched_vruntime.load(Ordering::SeqCst)
+        self.fair_request.snapshot().vruntime
     }
 
     /// Return the task's current fair-scheduler virtual deadline.
     pub fn sched_deadline(&self) -> u64 {
-        self.sched_deadline.load(Ordering::SeqCst)
+        self.fair_request.snapshot().deadline
     }
 
     /// Return the task's current fair-scheduler quantum in nanoseconds.
     pub fn sched_slice_ns(&self) -> u64 {
-        self.sched_slice_ns.load(Ordering::SeqCst)
+        self.fair_request.snapshot().slice_ns
     }
 
     /// Invalidate the active EEVDF request after its weight changes.
@@ -1440,8 +1417,7 @@ impl Task {
     /// The scheduler will derive a new slice and virtual deadline when the task
     /// is next placed on a fair queue.
     pub(crate) fn reset_sched_request(&self) {
-        self.sched_slice_ns.store(0, Ordering::SeqCst);
-        self.sched_deadline.store(0, Ordering::SeqCst);
+        self.fair_request.reset_request();
     }
 
     /// Return whether the task is currently inserted in a fair run queue.
@@ -1471,7 +1447,7 @@ impl Task {
     ///
     /// Count of scheduler placement moves, including work steals.
     pub fn sched_migration_count(&self) -> u64 {
-        self.sched_migration_count.load(Ordering::SeqCst)
+        self.placement.migration_count()
     }
 
     /// Record that the scheduler migrated this task.
@@ -1480,9 +1456,7 @@ impl Task {
     ///
     /// * `now_ns` - Current monotonic timestamp in nanoseconds.
     pub fn mark_sched_migrated(&self, now_ns: u64) {
-        self.sched_last_migration_ns.store(now_ns, Ordering::SeqCst);
-        self.sched_migration_count.fetch_add(1, Ordering::SeqCst);
-        self.clear_sched_low_util();
+        self.placement.migrated(now_ns);
     }
 
     /// Return the timestamp at which this task first looked eligible for demotion.
@@ -1492,7 +1466,7 @@ impl Task {
     /// Monotonic timestamp in nanoseconds, or `0` if no low-utilization window
     /// is currently being tracked.
     pub fn sched_low_util_since_ns(&self) -> u64 {
-        self.sched_low_util_since_ns.load(Ordering::SeqCst)
+        self.placement.low_since_ns()
     }
 
     /// Record that this task is still below its current CPU capacity.
@@ -1505,21 +1479,20 @@ impl Task {
     ///
     /// The first timestamp in the current low-utilization window.
     pub fn note_sched_low_util(&self, now_ns: u64) -> u64 {
-        let observed_ns = now_ns.max(1);
-        match self.sched_low_util_since_ns.compare_exchange(
-            0,
-            observed_ns,
-            Ordering::SeqCst,
-            Ordering::SeqCst,
-        ) {
-            Ok(_) => observed_ns,
-            Err(since_ns) => since_ns,
-        }
+        self.placement.observe_low_utilization(now_ns)
     }
 
     /// Clear the tracked low-utilization demotion window for this task.
     pub fn clear_sched_low_util(&self) {
-        self.sched_low_util_since_ns.store(0, Ordering::SeqCst);
+        self.placement.clear_low_utilization();
+    }
+
+    /// Read the task's default wall-time quantum in nanoseconds.
+    pub fn time_slice_duration_ns(&self) -> u64 { self.quantum.duration_ns() }
+
+    /// Set the default wall-time quantum without changing its scheduler request.
+    pub fn set_time_slice_duration_ns(&self, duration_ns: u64) {
+        self.quantum.set_duration_ns(duration_ns);
     }
 
     /// Mark the task as running for CPU accounting.
@@ -1529,7 +1502,7 @@ impl Task {
     /// * `now_ns` - Current monotonic timestamp in nanoseconds.
     pub fn start_cpu_accounting(&self, now_ns: u64) {
         if !self.cpu_accounting.begin(now_ns) { return; }
-        self.sched_exec_start_ns.store(now_ns, Ordering::SeqCst);
+        self.exec_clock.start(now_ns);
         self.sched_util.begin(now_ns);
     }
 
@@ -1544,7 +1517,7 @@ impl Task {
     /// The nanoseconds charged by this stop operation.
     pub fn stop_cpu_accounting(&self, now_ns: u64) -> u64 {
         self.sched_util.finish(now_ns);
-        self.sched_exec_start_ns.store(0, Ordering::SeqCst);
+        self.exec_clock.stop();
         self.cpu_accounting.finish(now_ns)
     }
 
@@ -3066,10 +3039,7 @@ impl Task {
         child.is_session_leader.store(false, Ordering::SeqCst);
 
         // Copy scheduling and event handling state
-        child.time_slice_duration_ns.store(
-            self.time_slice_duration_ns.load(Ordering::SeqCst),
-            Ordering::SeqCst,
-        );
+        child.set_time_slice_duration_ns(self.time_slice_duration_ns());
         // Fair-scheduler state: nice/weight are inherited, but vruntime and
         // deadline must start fresh. The child will be `place`-d against the
         // destination CPU's avg_vruntime when it is first enqueued.
@@ -5927,8 +5897,7 @@ mod tests {
             super::nice_to_weight(super::SCHED_NICE_MAX)
         );
 
-        task.sched_slice_ns.store(1_000, Ordering::SeqCst);
-        task.sched_deadline.store(2_000, Ordering::SeqCst);
+        task.fair_request.update(|request| { request.slice_ns = 1_000; request.deadline = 2_000; });
         task.reset_sched_request();
         assert_eq!(task.sched_slice_ns(), 0);
         assert_eq!(task.sched_deadline(), 0);

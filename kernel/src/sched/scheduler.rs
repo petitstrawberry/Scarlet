@@ -2248,14 +2248,15 @@ fn arm_local_slice(cpu_id: usize, task_id: usize) {
         defer_reschedule(cpu_id);
         return;
     }
-    let fair_vruntime_ns = task.sched_vruntime.load(Ordering::SeqCst);
-    let fair_vdeadline_ns = task.sched_deadline.load(Ordering::SeqCst);
-    let fair_slice_ns = task.sched_slice_ns.load(Ordering::SeqCst);
+    let fair = task.fair_request.snapshot();
+    let fair_vruntime_ns = fair.vruntime;
+    let fair_vdeadline_ns = fair.deadline;
+    let fair_slice_ns = fair.slice_ns;
     let duration_ns = if let Some(snapshot) = deadline {
         snapshot.remaining_ns
     } else {
         if fair_slice_ns == 0 {
-            task.time_slice_duration_ns.load(Ordering::SeqCst)
+            task.time_slice_duration_ns()
         } else {
             fair_slice_remaining_ns(
                 fair_vruntime_ns,
@@ -3601,7 +3602,7 @@ fn initialize_deadline_state(
     state.admission_units = units;
     state.replenishment_timer = None;
     state.replenishment_token = None;
-    task.sched_exec_start_ns.store(now_ns, Ordering::SeqCst);
+    task.exec_clock.start(now_ns);
 }
 
 fn reconfigure_deadline_state(
@@ -3650,7 +3651,7 @@ fn reconfigure_deadline_state(
         state.deadline_misses = 0;
         state.budget_overruns = 0;
         state.admission_units = units;
-        task.sched_exec_start_ns.store(now_ns, Ordering::SeqCst);
+        task.exec_clock.start(now_ns);
         (timer, token)
     };
     cancel_replenishment(timer, token);
@@ -3792,8 +3793,7 @@ fn apply_current_task_scheduler_transaction(
                 let _ = update_curr_deadline(task, get_time_ns());
                 release_task_deadline(task);
                 task.reset_sched_request();
-                task.sched_exec_start_ns
-                    .store(get_time_ns(), Ordering::SeqCst);
+                task.exec_clock.start(get_time_ns());
                 SchedulerControlResult::Ok
             }
         },
@@ -4105,15 +4105,8 @@ fn arm_deadline_replenishment(task: &Task) {
 }
 
 fn update_curr_deadline(task: &Task, now_ns: u64) -> bool {
-    let last_ns = task.sched_exec_start_ns.load(Ordering::SeqCst);
-    if last_ns == 0 {
-        return false;
-    }
-    let delta_ns = now_ns.saturating_sub(last_ns);
-    if delta_ns == 0 {
-        return task.deadline.lock().throttled;
-    }
-    task.sched_exec_start_ns.store(now_ns, Ordering::SeqCst);
+    let Some(delta_ns) = task.exec_clock.advance(now_ns) else { return false; };
+    if delta_ns == 0 { return task.deadline.lock().throttled; }
 
     let exhausted = consume_deadline_budget(&mut task.deadline.lock(), delta_ns);
     if exhausted {
@@ -4261,9 +4254,8 @@ pub fn current_task_scheduler_state() -> Option<SchedulerStateSnapshot> {
     .filter(|cpu_id| *cpu_id < MAX_NUM_CPUS);
     let now_ns = get_time_ns();
     let fair_slice_remaining_ns = if matches!(attributes.policy, SchedulerPolicy::Fair) {
-        let started_ns = task.sched_exec_start_ns.load(Ordering::SeqCst);
-        task.sched_slice_ns()
-            .saturating_sub(now_ns.saturating_sub(started_ns))
+        let elapsed = task.exec_clock.started_at().map_or(0, |start| now_ns.saturating_sub(start));
+        task.sched_slice_ns().saturating_sub(elapsed)
     } else {
         0
     };
@@ -4354,40 +4346,25 @@ enum PlaceMode {
 /// touch the queue itself; pair with [`FairQueue::insert`] to make the
 /// placement visible.
 fn place_entity(task: &Task, queue: &FairQueue, mode: PlaceMode) -> FairKey {
+    let task_id = task.get_id();
     let weight = task.sched_weight();
     let avg = queue.avg_vruntime();
     let min_vruntime = queue.min_vruntime;
-    let vruntime = match mode {
-        PlaceMode::New => avg,
-        PlaceMode::LocalPreempt => task.sched_vruntime(),
-        PlaceMode::Migrate => task.sched_vruntime().max(min_vruntime),
-    };
-    task.sched_vruntime.store(vruntime, Ordering::SeqCst);
-
-    let (slice, deadline) = match mode {
-        PlaceMode::LocalPreempt => {
-            let slice = task.sched_slice_ns.load(Ordering::SeqCst);
-            let deadline = task.sched_deadline.load(Ordering::SeqCst);
-            if slice != 0 && deadline > vruntime {
-                (slice, deadline)
-            } else {
-                let period = sched_period(queue.nr_running.saturating_add(1));
-                let total_weight = queue.avg_load.saturating_add(weight as u64);
-                let slice = sched_slice(period, weight, total_weight);
-                (slice, fair_deadline(vruntime, slice, weight))
-            }
+    let period = sched_period(queue.nr_running.saturating_add(1));
+    let total_weight = queue.avg_load.saturating_add(u64::from(weight));
+    task.fair_request.update(|request| {
+        request.vruntime = match mode {
+            PlaceMode::New => avg,
+            PlaceMode::LocalPreempt => request.vruntime,
+            PlaceMode::Migrate => request.vruntime.max(min_vruntime),
+        };
+        let retain = mode == PlaceMode::LocalPreempt && request.slice_ns != 0 && request.deadline > request.vruntime;
+        if !retain {
+            request.slice_ns = sched_slice(period, weight, total_weight);
+            request.deadline = fair_deadline(request.vruntime, request.slice_ns, weight);
         }
-        PlaceMode::New | PlaceMode::Migrate => {
-            let period = sched_period(queue.nr_running.saturating_add(1));
-            let total_weight = queue.avg_load.saturating_add(weight as u64);
-            let slice = sched_slice(period, weight, total_weight);
-            (slice, fair_deadline(vruntime, slice, weight))
-        }
-    };
-    task.sched_slice_ns.store(slice, Ordering::SeqCst);
-    task.sched_deadline.store(deadline, Ordering::SeqCst);
-
-    FairKey::new(deadline, vruntime, task.get_id())
+        FairKey::new(request.deadline, request.vruntime, task_id)
+    })
 }
 
 /// Advance a running task's `vruntime` and `deadline` by the wall-time delta
@@ -4397,31 +4374,16 @@ fn place_entity(task: &Task, queue: &FairQueue, mode: PlaceMode) -> FairKey {
 /// so this only updates authoritative Task fields plus the queue's
 /// `min_vruntime` floor; no `rekey` is needed.
 fn update_curr_fair(task: &Task, queue: &mut FairQueue, now_ns: u64) {
-    let last = task.sched_exec_start_ns.load(Ordering::SeqCst);
-    if last == 0 {
-        return;
-    }
-    let delta_ns = now_ns.saturating_sub(last);
-    if delta_ns == 0 {
-        return;
-    }
-    task.sched_exec_start_ns.store(now_ns, Ordering::SeqCst);
-
+    let Some(delta_ns) = task.exec_clock.advance(now_ns) else { return; };
+    if delta_ns == 0 { return; }
     let weight = task.sched_weight();
     let delta_fair = calc_delta_fair(delta_ns, weight);
-    let vruntime = task.sched_vruntime.load(Ordering::SeqCst);
-    let new_vruntime = vruntime.saturating_add(delta_fair);
-    task.sched_vruntime.store(new_vruntime, Ordering::SeqCst);
-
-    let prev_deadline = task.sched_deadline.load(Ordering::SeqCst);
-    let slice = task.sched_slice_ns.load(Ordering::SeqCst);
-    let renewed_deadline = renew_deadline_if_consumed(new_vruntime, prev_deadline, slice, weight);
-    if renewed_deadline != prev_deadline {
-        task.sched_deadline
-            .store(renewed_deadline, Ordering::SeqCst);
-    }
-
-    queue.bump_min_vruntime(new_vruntime);
+    let vruntime = task.fair_request.update(|request| {
+        request.vruntime = request.vruntime.saturating_add(delta_fair);
+        request.deadline = renew_deadline_if_consumed(request.vruntime, request.deadline, request.slice_ns, weight);
+        request.vruntime
+    });
+    queue.bump_min_vruntime(vruntime);
 }
 
 /// Place and insert a task into the destination CPU's fair queue.
@@ -4438,7 +4400,7 @@ fn enqueue_fair(cpu_id: usize, task: &Task, mode: PlaceMode) {
     queue.insert(
         task.get_id(),
         key,
-        task.sched_vruntime.load(Ordering::SeqCst),
+        key.vruntime,
         task.sched_weight(),
     );
 }
@@ -4476,7 +4438,7 @@ fn set_current_task_id(cpu_id: usize, task_id: Option<usize>) {
 #[inline]
 pub fn push_ready_task(cpu_id: usize, task_id: usize) {
     let mode = TaskPool::get_task(task_id).map(|task| {
-        if task.sched_deadline.load(Ordering::SeqCst) == 0 {
+        if task.sched_deadline() == 0 {
             PlaceMode::New
         } else if task.last_cpu.load(Ordering::SeqCst) != cpu_id {
             PlaceMode::Migrate
@@ -6343,12 +6305,12 @@ mod tests {
             state.remaining_ns = 5;
             state.cpu_id = 0;
         }
-        task.sched_exec_start_ns.store(123, Ordering::SeqCst);
+        task.exec_clock.start(123);
 
         update_task_nice(&task, -5);
 
         assert_eq!(task.nice(), -5);
-        assert_eq!(task.sched_exec_start_ns.load(Ordering::SeqCst), 123);
+        assert_eq!(task.exec_clock.started_at(), Some(123));
         assert_eq!(task.deadline.lock().remaining_ns, 5);
         release_task_deadline(&task);
     }
@@ -7405,7 +7367,7 @@ mod fair_tests {
             crate::task::TaskType::Kernel,
         );
         task.set_id(2);
-        task.sched_vruntime.store(100, Ordering::SeqCst);
+        task.fair_request.update(|request| request.vruntime = 100);
 
         let placed = place_entity(&task, &q, PlaceMode::Migrate);
 
@@ -7422,9 +7384,8 @@ mod fair_tests {
             crate::task::TaskType::Kernel,
         );
         task.set_id(1);
-        task.sched_vruntime.store(100, Ordering::SeqCst);
-        task.sched_slice_ns.store(1_000, Ordering::SeqCst);
-        task.sched_deadline.store(1_100, Ordering::SeqCst);
+        task.fair_request.update(|request| request.vruntime = 100);
+        task.fair_request.update(|request| { request.slice_ns = 1_000; request.deadline = 1_100; });
 
         let placed = place_entity(&task, &q, PlaceMode::LocalPreempt);
 
