@@ -544,6 +544,10 @@ cwd = "user/std-bin"
 command = "cargo"
 args = ["clean"]
 
+[tasks.test-riscv32]
+description = "Run kernel tests (RV32IMA)"
+dependencies = ["test-kernel-riscv32"]
+
 [tasks.test-riscv64]
 description = "Run tests (RISC-V)"
 dependencies = ["test-kernel-riscv64"]
@@ -551,6 +555,13 @@ dependencies = ["test-kernel-riscv64"]
 [tasks.test-aarch64]
 description = "Run tests (AArch64)"
 dependencies = ["test-kernel-aarch64"]
+
+[tasks.test-kernel-riscv32]
+description = "Run RV32IMA kernel tests through the Linux-compatible entry"
+cwd = "kernel"
+env = { "CARGO_TARGET_RISCV32IMA_UNKNOWN_NONE_ELF_RUNNER" = "tools/test.sh --arch riscv32", "CARGO_TARGET_RISCV32IMA_UNKNOWN_NONE_ELF_RUSTFLAGS" = "-C link-arg=-Tlds/riscv32_sbi.ld" }
+command = "cargo"
+args = ["test", "--locked", "--target", "targets/riscv32ima-unknown-none-elf.json", "--no-default-features", "--features", "linux-boot,network,sync-debug"]
 
 [tasks.test-kernel-riscv64]
 description = "Run kernel tests (RISC-V)"
