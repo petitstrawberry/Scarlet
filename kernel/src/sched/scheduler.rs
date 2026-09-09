@@ -31,6 +31,7 @@
 
 extern crate alloc;
 
+use crate::sync::diagnostic::{DiagnosticRecord, ReportInterval};
 use core::sync::atomic::{
     AtomicBool, AtomicPtr, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering,
 };
@@ -91,8 +92,8 @@ static DEADLINE_CALLBACK_CONTEXTS: Once<IrqSpinLock<BTreeMap<usize, DeadlineCall
 static TASK_CPU_WATCHDOG_HANDLER: Once<Arc<TaskCpuWatchdogTimerHandler>> = Once::new();
 static TASK_CPU_WATCHDOG_STARTED: [AtomicBool; MAX_NUM_CPUS] =
     [const { AtomicBool::new(false) }; MAX_NUM_CPUS];
-static DEADLINE_SLICE_LAST_LOG_NS: [AtomicU64; MAX_NUM_CPUS] =
-    [const { AtomicU64::new(0) }; MAX_NUM_CPUS];
+static DEADLINE_SLICE_REPORTS: [ReportInterval; MAX_NUM_CPUS] =
+    [const { ReportInterval::new() }; MAX_NUM_CPUS];
 
 const DEADLINE_BANDWIDTH_SCALE: u32 = 1_000_000;
 const DEADLINE_BANDWIDTH_CAP: u32 = 900_000;
@@ -299,7 +300,7 @@ const SLICE_DIAGNOSTIC_CANCEL_MISSED: u64 = 9;
 const SLICE_DIAGNOSTIC_FLAG_DEADLINE: u64 = 1 << 0;
 const SLICE_DIAGNOSTIC_FLAG_THROTTLED: u64 = 1 << 1;
 
-/// Lock-free view of the last scheduler-slice operation on one CPU.
+/// Best-effort view of the last scheduler-slice operation on one CPU.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct SliceDiagnosticSnapshot {
     /// Last completed slice operation.
@@ -329,95 +330,33 @@ pub(crate) struct SliceDiagnosticSnapshot {
 }
 
 #[repr(align(128))]
-struct SliceDiagnosticSlot {
-    sequence: AtomicU64,
-    action: AtomicU64,
-    task_id: AtomicU64,
-    token: AtomicU64,
-    handle_id: AtomicU64,
-    generation: AtomicU64,
-    duration_ns: AtomicU64,
-    timer_deadline_ns: AtomicU64,
-    fair_vruntime_ns: AtomicU64,
-    fair_vdeadline_ns: AtomicU64,
-    deadline_remaining_ns: AtomicU64,
-    deadline_absolute_ns: AtomicU64,
-    flags: AtomicU64,
-}
+struct SliceDiagnosticSlot(DiagnosticRecord<12>);
 
 impl SliceDiagnosticSlot {
-    const fn new() -> Self {
-        Self {
-            sequence: AtomicU64::new(0),
-            action: AtomicU64::new(SLICE_DIAGNOSTIC_NONE),
-            task_id: AtomicU64::new(0),
-            token: AtomicU64::new(0),
-            handle_id: AtomicU64::new(0),
-            generation: AtomicU64::new(0),
-            duration_ns: AtomicU64::new(0),
-            timer_deadline_ns: AtomicU64::new(0),
-            fair_vruntime_ns: AtomicU64::new(0),
-            fair_vdeadline_ns: AtomicU64::new(0),
-            deadline_remaining_ns: AtomicU64::new(0),
-            deadline_absolute_ns: AtomicU64::new(0),
-            flags: AtomicU64::new(0),
-        }
-    }
+    const fn new() -> Self { Self(DiagnosticRecord::new([0; 12])) }
 
     #[inline(always)]
     fn publish(&self, snapshot: SliceDiagnosticSnapshot) {
-        // Every writer holds this CPU's `SliceState` lock, so one odd/even
-        // publication cannot overlap another publication for the same CPU.
-        let odd_sequence = self.sequence.load(Ordering::Relaxed).wrapping_add(1);
-        self.sequence.store(odd_sequence, Ordering::SeqCst);
-        self.action.store(snapshot.action, Ordering::SeqCst);
-        self.task_id.store(snapshot.task_id, Ordering::SeqCst);
-        self.token.store(snapshot.token, Ordering::SeqCst);
-        self.handle_id.store(snapshot.handle_id, Ordering::SeqCst);
-        self.generation.store(snapshot.generation, Ordering::SeqCst);
-        self.duration_ns
-            .store(snapshot.duration_ns, Ordering::SeqCst);
-        self.timer_deadline_ns
-            .store(snapshot.timer_deadline_ns, Ordering::SeqCst);
-        self.fair_vruntime_ns
-            .store(snapshot.fair_vruntime_ns, Ordering::SeqCst);
-        self.fair_vdeadline_ns
-            .store(snapshot.fair_vdeadline_ns, Ordering::SeqCst);
-        self.deadline_remaining_ns
-            .store(snapshot.deadline_remaining_ns, Ordering::SeqCst);
-        self.deadline_absolute_ns
-            .store(snapshot.deadline_absolute_ns, Ordering::SeqCst);
-        self.flags.store(snapshot.flags, Ordering::SeqCst);
-        self.sequence
-            .store(odd_sequence.wrapping_add(1), Ordering::SeqCst);
+        let _ = self.0.try_publish([snapshot.action, snapshot.task_id, snapshot.token, snapshot.handle_id, snapshot.generation, snapshot.duration_ns, snapshot.timer_deadline_ns, snapshot.fair_vruntime_ns, snapshot.fair_vdeadline_ns, snapshot.deadline_remaining_ns, snapshot.deadline_absolute_ns, snapshot.flags]);
     }
 
     #[inline(always)]
-    fn snapshot(&self) -> SliceDiagnosticSnapshot {
-        for _ in 0..4 {
-            let sequence_before = self.sequence.load(Ordering::SeqCst);
-            if sequence_before & 1 != 0 {
-                continue;
-            }
-            let snapshot = SliceDiagnosticSnapshot {
-                action: self.action.load(Ordering::SeqCst),
-                task_id: self.task_id.load(Ordering::SeqCst),
-                token: self.token.load(Ordering::SeqCst),
-                handle_id: self.handle_id.load(Ordering::SeqCst),
-                generation: self.generation.load(Ordering::SeqCst),
-                duration_ns: self.duration_ns.load(Ordering::SeqCst),
-                timer_deadline_ns: self.timer_deadline_ns.load(Ordering::SeqCst),
-                fair_vruntime_ns: self.fair_vruntime_ns.load(Ordering::SeqCst),
-                fair_vdeadline_ns: self.fair_vdeadline_ns.load(Ordering::SeqCst),
-                deadline_remaining_ns: self.deadline_remaining_ns.load(Ordering::SeqCst),
-                deadline_absolute_ns: self.deadline_absolute_ns.load(Ordering::SeqCst),
-                flags: self.flags.load(Ordering::SeqCst),
-            };
-            if sequence_before == self.sequence.load(Ordering::SeqCst) {
-                return snapshot;
-            }
-        }
-        SliceDiagnosticSnapshot::default()
+    fn snapshot(&self) -> Option<SliceDiagnosticSnapshot> {
+        let record = self.0.snapshot()?;
+        Some(SliceDiagnosticSnapshot {
+            action: record.words[0],
+            task_id: record.words[1],
+            token: record.words[2],
+            handle_id: record.words[3],
+            generation: record.words[4],
+            duration_ns: record.words[5],
+            timer_deadline_ns: record.words[6],
+            fair_vruntime_ns: record.words[7],
+            fair_vdeadline_ns: record.words[8],
+            deadline_remaining_ns: record.words[9],
+            deadline_absolute_ns: record.words[10],
+            flags: record.words[11],
+        })
     }
 }
 
@@ -491,7 +430,9 @@ fn publish_slice_action(
     token: u64,
     handle_id: u64,
 ) {
-    let mut snapshot = SLICE_DIAGNOSTICS[cpu_id].snapshot();
+    let Some(mut snapshot) = SLICE_DIAGNOSTICS[cpu_id].snapshot() else {
+        return;
+    };
     snapshot.action = action;
     snapshot.task_id = task_id.unwrap_or(0) as u64;
     snapshot.token = token;
@@ -501,25 +442,10 @@ fn publish_slice_action(
 }
 
 fn should_log_deadline_slice_anomaly(cpu_id: usize, now_ns: u64) -> bool {
-    let last_log = &DEADLINE_SLICE_LAST_LOG_NS[cpu_id];
-    let mut observed = last_log.load(Ordering::Relaxed);
-    loop {
-        if observed != 0 && now_ns.saturating_sub(observed) < DEADLINE_SLICE_LOG_INTERVAL_NS {
-            return false;
-        }
-        match last_log.compare_exchange_weak(
-            observed,
-            now_ns.max(1),
-            Ordering::AcqRel,
-            Ordering::Relaxed,
-        ) {
-            Ok(_) => return true,
-            Err(actual) => observed = actual,
-        }
-    }
+    DEADLINE_SLICE_REPORTS[cpu_id].try_claim(now_ns, DEADLINE_SLICE_LOG_INTERVAL_NS)
 }
 
-/// Return the last lock-free scheduler-slice operation for one CPU.
+/// Try to observe the last scheduler-slice operation without waiting.
 ///
 /// # Arguments
 ///
@@ -527,10 +453,9 @@ fn should_log_deadline_slice_anomaly(cpu_id: usize, now_ns: u64) -> bool {
 ///
 /// # Returns
 ///
-/// The latest completed operation, a default snapshot if publication is busy,
-/// or `None` for an invalid CPU ID.
+/// The latest completed operation, or None for an invalid CPU or a busy publication.
 pub(crate) fn slice_diagnostic_snapshot(cpu_id: usize) -> Option<SliceDiagnosticSnapshot> {
-    (cpu_id < MAX_NUM_CPUS).then(|| SLICE_DIAGNOSTICS[cpu_id].snapshot())
+    SLICE_DIAGNOSTICS.get(cpu_id)?.snapshot()
 }
 
 /// Return a compact label for a scheduler-slice diagnostic action.

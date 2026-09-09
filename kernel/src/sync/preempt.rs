@@ -20,11 +20,13 @@
 //! itself is unnecessary. Reentrancy via interrupt is gated by IRQ state,
 //! not by the count value.
 
+#[cfg(feature = "sync-debug")]
+use crate::sync::diagnostic::DiagnosticRecord;
 use core::marker::PhantomData;
 #[cfg(feature = "sync-debug")]
 use core::panic::Location;
 #[cfg(feature = "sync-debug")]
-use core::sync::atomic::{AtomicPtr, AtomicU8, AtomicU64, AtomicUsize};
+use core::sync::atomic::AtomicU8;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use crate::arch::try_get_cpuid;
@@ -85,6 +87,8 @@ const DEBUG_SLOT_EMPTY: u8 = 0;
 const DEBUG_SLOT_WRITING: u8 = 1;
 #[cfg(feature = "sync-debug")]
 const DEBUG_SLOT_ACTIVE: u8 = 2;
+#[cfg(feature = "sync-debug")]
+const DEBUG_SLOT_UNAVAILABLE: u8 = 3;
 
 #[cfg(feature = "sync-debug")]
 const DEBUG_PHASE_ACQUIRING: u8 = 1;
@@ -138,21 +142,11 @@ pub(crate) struct PreemptDebugSnapshot {
 #[cfg(feature = "sync-debug")]
 struct PreemptDebugSlot {
     state: AtomicU8,
-    source: AtomicU8,
-    lock_address: AtomicUsize,
-    /// Snapshot of the acquiring task's id, captured at registration time.
-    task_id: AtomicUsize,
-    /// Lifecycle phase, written under the WRITING/ACTIVE sequence.
-    phase: AtomicU8,
-    /// Acquisition-attempt iterations sampled when the watchdog fires.
+    // Source, lock, task, phase, acquisition time/PC/LR and static location
+    // form one record. Reuse cannot combine fields from different guards.
+    record: DiagnosticRecord<8>,
+    // Independent, approximate progress sample, not part of guard identity.
     spin_iterations: AtomicU32,
-    /// Monotonic time at which acquisition completed.
-    acquired_at_ns: AtomicU64,
-    /// Instruction address sampled when acquisition completed.
-    acquisition_pc: AtomicUsize,
-    /// Link/return address sampled when acquisition completed.
-    acquisition_lr: AtomicUsize,
-    location: AtomicPtr<Location<'static>>,
 }
 
 #[cfg(feature = "sync-debug")]
@@ -160,16 +154,28 @@ impl PreemptDebugSlot {
     const fn new() -> Self {
         Self {
             state: AtomicU8::new(DEBUG_SLOT_EMPTY),
-            source: AtomicU8::new(0),
-            lock_address: AtomicUsize::new(0),
-            task_id: AtomicUsize::new(0),
-            phase: AtomicU8::new(0),
+            record: DiagnosticRecord::new([0; 8]),
             spin_iterations: AtomicU32::new(0),
-            acquired_at_ns: AtomicU64::new(0),
-            acquisition_pc: AtomicUsize::new(0),
-            acquisition_lr: AtomicUsize::new(0),
-            location: AtomicPtr::new(core::ptr::null_mut()),
         }
+    }
+
+    fn mark_acquired(&self, time_ns: u64, pc: usize, lr: usize) {
+        self.state.store(DEBUG_SLOT_WRITING, Ordering::Release);
+        let published = self.record.snapshot().is_some_and(|mut record| {
+            record.words[3] = u64::from(DEBUG_PHASE_HELD);
+            record.words[4] = time_ns;
+            record.words[5] = pc as u64;
+            record.words[6] = lr as u64;
+            self.record.try_publish(record.words)
+        });
+        self.state.store(
+            if published {
+                DEBUG_SLOT_ACTIVE
+            } else {
+                DEBUG_SLOT_UNAVAILABLE
+            },
+            Ordering::Release,
+        );
     }
 }
 
@@ -201,21 +207,21 @@ fn register_preempt_source(
             continue;
         }
 
-        slot.source.store(source as u8, Ordering::Relaxed);
-        slot.lock_address.store(lock_address, Ordering::Relaxed);
-        slot.task_id.store(
-            crate::sched::scheduler::current_task_id(cpu).unwrap_or(0),
-            Ordering::Relaxed,
-        );
-        slot.phase.store(DEBUG_PHASE_ACQUIRING, Ordering::Relaxed);
+        let published = slot.record.try_publish([
+            source as u64,
+            lock_address as u64,
+            crate::sched::scheduler::current_task_id(cpu).unwrap_or(0) as u64,
+            u64::from(DEBUG_PHASE_ACQUIRING),
+            0,
+            0,
+            0,
+            location as *const Location<'static> as usize as u64,
+        ]);
+        if !published {
+            slot.state.store(DEBUG_SLOT_EMPTY, Ordering::Release);
+            continue;
+        }
         slot.spin_iterations.store(0, Ordering::Relaxed);
-        slot.acquired_at_ns.store(0, Ordering::Relaxed);
-        slot.acquisition_pc.store(0, Ordering::Relaxed);
-        slot.acquisition_lr.store(0, Ordering::Relaxed);
-        slot.location.store(
-            location as *const Location<'static> as *mut Location<'static>,
-            Ordering::Relaxed,
-        );
         slot.state.store(DEBUG_SLOT_ACTIVE, Ordering::Release);
         return Some(index as u8);
     }
@@ -233,9 +239,11 @@ fn unregister_preempt_source(cpu: usize, slot_index: Option<u8>) {
     };
 
     let slot = &PREEMPT_DEBUG_SLOTS[cpu][slot_index as usize];
-    slot.phase.store(DEBUG_PHASE_RELEASED, Ordering::Relaxed);
     let previous = slot.state.swap(DEBUG_SLOT_EMPTY, Ordering::AcqRel);
-    debug_assert_eq!(previous, DEBUG_SLOT_ACTIVE);
+    debug_assert!(matches!(
+        previous,
+        DEBUG_SLOT_ACTIVE | DEBUG_SLOT_UNAVAILABLE
+    ));
 }
 
 /// Publish a stable snapshot of one diagnostic slot, or `None` when the slot
@@ -249,19 +257,20 @@ fn snapshot_debug_slot(cpu: usize, slot_index: usize) -> Option<PreemptDebugSnap
     if slot.state.load(Ordering::Acquire) != DEBUG_SLOT_ACTIVE {
         return None;
     }
-    let source = PreemptSourceKind::from_raw(slot.source.load(Ordering::Relaxed))?;
-    let phase = PreemptDebugPhase::from_raw(slot.phase.load(Ordering::Acquire))
-        .unwrap_or(PreemptDebugPhase::Acquiring);
+    let record = slot.record.snapshot()?;
+    let words = record.words;
     let snapshot = PreemptDebugSnapshot {
-        source,
-        phase,
-        lock_address: slot.lock_address.load(Ordering::Relaxed),
-        task_id: slot.task_id.load(Ordering::Relaxed),
+        source: PreemptSourceKind::from_raw(words[0] as u8)?,
+        phase: PreemptDebugPhase::from_raw(words[3] as u8)?,
+        lock_address: words[1] as usize,
+        task_id: words[2] as usize,
         spin_iterations: slot.spin_iterations.load(Ordering::Relaxed) as u64,
-        acquired_at_ns: slot.acquired_at_ns.load(Ordering::Relaxed),
-        acquisition_pc: slot.acquisition_pc.load(Ordering::Relaxed),
-        acquisition_lr: slot.acquisition_lr.load(Ordering::Relaxed),
-        location: slot.location.load(Ordering::Relaxed),
+        acquired_at_ns: words[4],
+        acquisition_pc: words[5] as usize,
+        acquisition_lr: words[6] as usize,
+        // The publisher exposes only Location::caller() pointers with static
+        // lifetime; the coherent record preserves their native address bits.
+        location: words[7] as usize as *const Location<'static>,
     };
     if slot.state.load(Ordering::Acquire) == DEBUG_SLOT_ACTIVE {
         Some(snapshot)
@@ -696,10 +705,7 @@ impl PreemptGuard {
             let (acquisition_pc, acquisition_lr) =
                 crate::arch::instruction::capture_execution_site();
             let slot = &PREEMPT_DEBUG_SLOTS[cpu][slot_index as usize];
-            slot.acquired_at_ns.store(acquired_at_ns, Ordering::Relaxed);
-            slot.acquisition_pc.store(acquisition_pc, Ordering::Relaxed);
-            slot.acquisition_lr.store(acquisition_lr, Ordering::Relaxed);
-            slot.phase.store(DEBUG_PHASE_HELD, Ordering::Release);
+            slot.mark_acquired(acquired_at_ns, acquisition_pc, acquisition_lr);
         }
     }
 }
