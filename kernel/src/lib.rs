@@ -388,7 +388,9 @@ fn find_pci_ecam(fdt: &fdt::Fdt<'_>) -> Option<(u64, usize)> {
 #[cfg(not(test))]
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
-    use arch::instruction::idle;
+    // A fatal CPU must not resume IRQ handlers or scheduling over interrupted
+    // initialization and held locks. The normal idle path enables interrupts.
+    arch::interrupt::disable_interrupts();
 
     crate::emergency_println!(
         "[Scarlet Kernel] panic: cpu={:?} preempt_count={} {}",
@@ -398,13 +400,8 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
     );
     crate::sync::dump_active_preempt_guards();
 
-    // if let Some(task) = get_scheduler().get_current_task(get_cpu().get_cpuid()) {
-    //     task.exit(1); // Exit the task with error code 1
-    //     get_scheduler().schedule(get_cpu());
-    // }
-
     loop {
-        idle();
+        core::hint::spin_loop();
     }
 }
 
