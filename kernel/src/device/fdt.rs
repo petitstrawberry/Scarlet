@@ -509,7 +509,7 @@ pub fn create_bootinfo_from_fdt(cpu_id: usize, relocated_fdt_addr: u64) -> BootI
 
     let cpu_count = fdt_manager.get_cpu_count().unwrap_or(1);
 
-    let hhdm_offset = 0xffff_8000_0000_0000_usize;
+    let boot_direct_map = crate::vm::addr::get_boot_direct_map();
     let mut direct_map_regions = crate::vm::direct_map::DirectMapRegions::new();
     direct_map_regions
         .insert(dram_area, crate::vm::vmem::MemoryAttribute::Normal)
@@ -521,7 +521,7 @@ pub fn create_bootinfo_from_fdt(cpu_id: usize, relocated_fdt_addr: u64) -> BootI
         usable_memory,
         direct_map_regions,
         relocated_initramfs,
-        hhdm_offset,
+        boot_direct_map,
         cmdline,
         DeviceSource::Fdt(relocated_fdt_addr),
         None,

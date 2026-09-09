@@ -394,20 +394,30 @@ impl BuddyRegion {
         self.page_count
     }
 
-    fn fixup_hhdm_offset(&mut self, old_offset: usize, new_offset: usize) {
-        if !self.active || old_offset == new_offset {
+    fn relocate_direct_map_metadata(&mut self, window: crate::vm::direct_map::DirectMapWindow) {
+        if !self.active {
             return;
         }
 
         let old_pages_start = self.pages as usize;
-        let new_pages_start = usize::try_from(
-            self.mem_start
-                .checked_add(new_offset as u64)
-                .expect("metadata direct-map address overflows"),
-        )
-        .expect("metadata direct-map address exceeds pointer width");
-        let pages_bytes = self.page_count * core::mem::size_of::<Page>();
-        let old_pages_end = old_pages_start + pages_bytes;
+        let new_pages_start = window
+            .phys_to_virt(crate::mem::address::PhysAddr::new(self.mem_start))
+            .expect("PMM metadata is outside the new direct map")
+            .as_usize();
+        if old_pages_start == new_pages_start {
+            return;
+        }
+        let pages_bytes = self
+            .page_count
+            .checked_mul(core::mem::size_of::<Page>())
+            .expect("PMM metadata size overflows");
+        window
+            .phys_to_virt(
+                crate::mem::address::PhysAddr::new(self.mem_start)
+                    .checked_add(pages_bytes as u64 - 1)
+                    .expect("PMM metadata physical range overflows"),
+            )
+            .expect("PMM metadata end is outside the new direct map");
 
         self.pages = new_pages_start as *mut Page;
 
@@ -417,16 +427,14 @@ impl BuddyRegion {
                 free_list.next = adjust_metadata_ptr(
                     free_list.next,
                     old_pages_start,
-                    old_pages_end,
-                    old_offset,
-                    new_offset,
+                    pages_bytes,
+                    new_pages_start,
                 );
                 free_list.prev = adjust_metadata_ptr(
                     free_list.prev,
                     old_pages_start,
-                    old_pages_end,
-                    old_offset,
-                    new_offset,
+                    pages_bytes,
+                    new_pages_start,
                 );
             }
 
@@ -435,16 +443,14 @@ impl BuddyRegion {
                 (*page).lru.next = adjust_metadata_ptr(
                     (*page).lru.next,
                     old_pages_start,
-                    old_pages_end,
-                    old_offset,
-                    new_offset,
+                    pages_bytes,
+                    new_pages_start,
                 );
                 (*page).lru.prev = adjust_metadata_ptr(
                     (*page).lru.prev,
                     old_pages_start,
-                    old_pages_end,
-                    old_offset,
-                    new_offset,
+                    pages_bytes,
+                    new_pages_start,
                 );
             }
         }
@@ -454,21 +460,22 @@ impl BuddyRegion {
 fn adjust_metadata_ptr(
     ptr: *mut ListHead,
     old_pages_start: usize,
-    old_pages_end: usize,
-    old_offset: usize,
-    new_offset: usize,
+    pages_bytes: usize,
+    new_pages_start: usize,
 ) -> *mut ListHead {
     if ptr.is_null() {
         return ptr;
     }
 
-    let addr = ptr as usize;
-    if !(old_pages_start..old_pages_end).contains(&addr) {
+    let Some(offset) = (ptr as usize).checked_sub(old_pages_start) else {
+        return ptr;
+    };
+    if offset >= pages_bytes {
         return ptr;
     }
-
-    let paddr = addr - old_offset;
-    (paddr + new_offset) as *mut ListHead
+    new_pages_start
+        .checked_add(offset)
+        .expect("PMM metadata virtual range overflows") as *mut ListHead
 }
 
 struct PmmInner {
@@ -800,10 +807,12 @@ pub fn stats() -> (usize, usize) {
     PMM.lock().stats()
 }
 
-pub fn fixup_hhdm_offset(old_offset: usize, new_offset: usize) {
+/// Rebind metadata after the page-table handoff, before any allocation or free.
+/// Linked-list pointers are relocated relative to their owning metadata block.
+pub fn relocate_direct_map_metadata(window: crate::vm::direct_map::DirectMapWindow) {
     let mut pmm = PMM.lock();
     for region in &mut pmm.regions {
-        region.fixup_hhdm_offset(old_offset, new_offset);
+        region.relocate_direct_map_metadata(window);
     }
 }
 
@@ -818,6 +827,59 @@ fn align_down(addr: usize, align: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test_case]
+    fn metadata_handoff_preserves_free_lists_with_high_physical_memory() {
+        use crate::mem::address::{PhysAddr, VirtAddr};
+        use crate::vm::direct_map::DirectMapWindow;
+
+        let mut old_pages = [const { Page::new() }; 4];
+        let mut new_pages = [const { Page::new() }; 4];
+        let mut region = BuddyRegion::new();
+        region.mem_start = 0x1_8000_0000;
+        region.mem_size = 4 * PAGE_SIZE;
+        region.page_count = 4;
+        region.pages = old_pages.as_mut_ptr();
+        region.active = true;
+        // The second array represents the same metadata through a new mapping.
+        // Keep both arrays and the free-list heads at stable addresses throughout.
+        unsafe {
+            for page in &mut old_pages {
+                page.lru.init();
+            }
+            for area in &mut region.free_area {
+                area.free_list.init();
+            }
+            region.add_to_free_list(0, 0);
+            region.add_to_free_list(3, 0);
+            core::ptr::copy_nonoverlapping(old_pages.as_ptr(), new_pages.as_mut_ptr(), 4);
+        }
+        let window = DirectMapWindow::new(
+            PhysAddr::new(region.mem_start),
+            VirtAddr::new(new_pages.as_mut_ptr() as usize),
+            core::mem::size_of_val(&new_pages),
+        )
+        .unwrap();
+        region.relocate_direct_map_metadata(window);
+        assert_eq!(region.pages, new_pages.as_mut_ptr());
+        assert_eq!(
+            region.free_area[0].free_list.next,
+            &raw mut new_pages[3].lru
+        );
+        assert_eq!(
+            region.free_area[0].free_list.prev,
+            &raw mut new_pages[0].lru
+        );
+        let self_link = &raw mut new_pages[1].lru;
+        assert_eq!(new_pages[1].lru.next, self_link);
+        // Removing entries exercises both directions and the unchanged head links.
+        unsafe {
+            region.del_from_free_list(&raw mut new_pages[3], 0);
+            region.del_from_free_list(&raw mut new_pages[0], 0);
+        }
+        assert!(region.free_area[0].free_list.is_empty());
+        assert_eq!(region.free_area[0].nr_free, 0);
+    }
 
     #[test_case]
     fn test_alloc_free_single_page() {

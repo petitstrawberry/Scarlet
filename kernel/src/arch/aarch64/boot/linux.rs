@@ -12,8 +12,9 @@ use core::mem::MaybeUninit;
 use crate::device::fdt::{FdtManager, init_fdt, relocate_fdt};
 use crate::environment::{PAGE_SIZE, SCARLET_HHDM_BASE};
 use crate::mem::init_bss;
-use crate::vm::addr::{init_boot_addressing, init_bootloader_direct_map_bound, phys_to_virt};
+use crate::vm::addr::{PhysAddr, VirtAddr, init_boot_addressing, phys_to_virt};
 use crate::vm::direct_map::DirectMapRegions;
+use crate::vm::direct_map::DirectMapWindow;
 use crate::vm::vmem::{MemoryAttribute, PhysicalMemoryArea};
 use crate::{BootInfo, DeviceSource, start_kernel};
 
@@ -144,7 +145,10 @@ pub extern "C" fn linux_image_entry(dtb_paddr: usize) -> ! {
         .bounding_area()
         .expect("Linux boot direct map must not be empty");
 
+    let boot_direct_map = DirectMapWindow::from_offset(SCARLET_HHDM_BASE, direct_map_bounds)
+        .expect("invalid Linux boot direct-map window");
     page_table::install(
+        boot_direct_map,
         &direct_map_regions,
         kernel_area,
         dtb_area,
@@ -152,16 +156,18 @@ pub extern "C" fn linux_image_entry(dtb_paddr: usize) -> ! {
     )
     .unwrap_or_else(|error| panic!("Linux boot page-table setup: {}", error));
     if let Some(uart_paddr) = early_uart {
-        crate::arch::aarch64::earlycon::register_linux_boot_pl011(uart_paddr);
+        crate::arch::aarch64::earlycon::register_linux_boot_pl011(uart_paddr, boot_direct_map);
     }
 
     init_boot_addressing(
-        SCARLET_HHDM_BASE,
-        kernel_area.start,
-        usize::try_from(kernel_area.start).expect("identity kernel address exceeds pointer width"),
+        boot_direct_map,
+        PhysAddr::new(kernel_area.start),
+        VirtAddr::new(
+            usize::try_from(kernel_area.start)
+                .expect("identity kernel address exceeds pointer width"),
+        ),
         kernel_area.size(),
     );
-    init_bootloader_direct_map_bound(direct_map_bounds.start, direct_map_bounds.end);
 
     // Formatting and FDT initialization both acquire IRQ/preemption guards.
     // Publish the boot CPU's per-CPU identity before either path can log.
@@ -205,7 +211,7 @@ pub extern "C" fn linux_image_entry(dtb_paddr: usize) -> ! {
         usable_memory,
         direct_map_regions,
         initramfs_paddr,
-        SCARLET_HHDM_BASE,
+        boot_direct_map,
         cmdline,
         DeviceSource::Fdt(fdt_destination_paddr),
         None,

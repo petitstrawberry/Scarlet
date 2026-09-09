@@ -1,8 +1,9 @@
 use crate::arch::vm::mmu::{PageTable as ArchPageTable, PageTableEntry as ArchPageTableEntry};
-use crate::environment::{KERNEL_HEAP_BASE, PAGE_SIZE, SCARLET_HHDM_BASE};
+use crate::environment::{KERNEL_HEAP_BASE, PAGE_SIZE};
+use crate::mem::address::PhysAddr;
 use crate::mem::pmm;
 use crate::vm::addr::{boot_phys_to_virt, kernel_virt_to_phys};
-use crate::vm::direct_map::DirectMapRegions;
+use crate::vm::direct_map::{DirectMapRegions, DirectMapWindow};
 use crate::vm::vmem::{MemoryArea, MemoryAttribute, PhysicalMemoryArea, VirtualMemoryPermission};
 
 const BOOT_ASID: u16 = 0;
@@ -15,10 +16,19 @@ fn align_up(addr: usize, align: usize) -> usize {
     (addr + align - 1) & !(align - 1)
 }
 
-fn direct_map_virtual_area(physical_area: PhysicalMemoryArea) -> MemoryArea {
+fn direct_map_virtual_area(
+    window: DirectMapWindow,
+    physical_area: PhysicalMemoryArea,
+) -> MemoryArea {
     MemoryArea {
-        start: crate::vm::addr::kernel_direct_map_vaddr(physical_area.start),
-        end: crate::vm::addr::kernel_direct_map_vaddr(physical_area.end),
+        start: window
+            .phys_to_virt(PhysAddr::new(physical_area.start))
+            .expect("physical range exceeds boot window")
+            .as_usize(),
+        end: window
+            .phys_to_virt(PhysAddr::new(physical_area.end))
+            .expect("physical range exceeds boot window")
+            .as_usize(),
     }
 }
 
@@ -213,6 +223,7 @@ fn boot_map_range(
 
 #[allow(static_mut_refs)]
 pub fn switch_to_boot_page_table(
+    direct_map: DirectMapWindow,
     direct_map_regions: DirectMapRegions,
     initramfs_paddr: Option<PhysicalMemoryArea>,
     heap_paddr: PhysicalMemoryArea,
@@ -264,7 +275,7 @@ pub fn switch_to_boot_page_table(
         let physical_area = region.area();
         boot_map_range(
             root,
-            direct_map_virtual_area(physical_area),
+            direct_map_virtual_area(direct_map, physical_area),
             physical_area,
             VirtualMemoryPermission::Read as usize | VirtualMemoryPermission::Write as usize,
             region.memory_attribute(),
@@ -293,7 +304,7 @@ pub fn switch_to_boot_page_table(
                 });
             boot_map_range(
                 root,
-                direct_map_virtual_area(initramfs_phys_area),
+                direct_map_virtual_area(direct_map, initramfs_phys_area),
                 initramfs_phys_area,
                 VirtualMemoryPermission::Read as usize | VirtualMemoryPermission::Write as usize,
                 MemoryAttribute::Normal,

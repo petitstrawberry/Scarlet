@@ -12,7 +12,8 @@ use crate::boot::limine::{
 use crate::device::fdt::{FdtManager, init_fdt, relocate_fdt};
 use crate::environment::STACK_SIZE;
 use crate::mem::{KERNEL_STACK, init_bss};
-use crate::vm::addr::{init_bootloader_direct_map_bound, init_limine_addressing, phys_to_virt};
+use crate::vm::addr::{PhysAddr, VirtAddr, init_boot_addressing, phys_to_virt};
+use crate::vm::direct_map::DirectMapWindow;
 use crate::{BootInfo, DeviceSource, println, start_ap, start_kernel, wait_for_ap_release};
 use limine::paging;
 use limine::request::{BspHartidRequest, PagingModeRequest};
@@ -117,10 +118,18 @@ pub fn limine_entry() -> ! {
 
     let kernel_start = unsafe { &__KERNEL_SPACE_START as *const usize as usize };
     let kernel_end = unsafe { &__KERNEL_SPACE_END as *const usize as usize };
-    init_limine_addressing(
-        hhdm.offset as usize,
-        executable.physical_base,
-        executable.virtual_base as usize,
+    let bootloader_hhdm_bound = bootloader_hhdm_physical_bound(memmap.entries());
+    let boot_direct_map = DirectMapWindow::from_offset(
+        usize::try_from(hhdm.offset).expect("Limine HHDM offset exceeds pointer width"),
+        bootloader_hhdm_bound,
+    )
+    .expect("invalid Limine direct-map window");
+    init_boot_addressing(
+        boot_direct_map,
+        PhysAddr::new(executable.physical_base),
+        VirtAddr::new(
+            usize::try_from(executable.virtual_base).expect("kernel VA exceeds pointer width"),
+        ),
         kernel_end - kernel_start,
     );
 
@@ -134,9 +143,6 @@ pub fn limine_entry() -> ! {
     init_fdt(dtb.dtb_ptr as usize);
 
     let usable_region = select_usable_region(memmap.entries());
-    let bootloader_hhdm_bound = bootloader_hhdm_physical_bound(memmap.entries());
-    init_bootloader_direct_map_bound(bootloader_hhdm_bound.start, bootloader_hhdm_bound.end);
-    let hhdm_offset = hhdm.offset as usize;
     let direct_map_regions = runtime_direct_map_regions(memmap.entries(), None)
         .unwrap_or_else(|error| panic!("failed to build runtime direct map: {}", error));
     let relocated_fdt = relocate_fdt(phys_to_virt(usable_region.start) as *mut u8);
@@ -162,7 +168,7 @@ pub fn limine_entry() -> ! {
         usable_memory_paddr,
         direct_map_regions,
         initramfs_paddr,
-        hhdm_offset,
+        boot_direct_map,
         cmdline,
         DeviceSource::Fdt(relocated_fdt_paddr),
         None,

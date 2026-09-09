@@ -3,8 +3,9 @@
 use core::ptr::{read_volatile, write_volatile};
 
 use crate::arch::aarch64::clean_dcache_to_poc_range;
-use crate::environment::{PAGE_SIZE, SCARLET_HHDM_BASE};
-use crate::vm::direct_map::DirectMapRegions;
+use crate::environment::PAGE_SIZE;
+use crate::mem::address::PhysAddr;
+use crate::vm::direct_map::{DirectMapRegions, DirectMapWindow};
 use crate::vm::vmem::{MemoryAttribute, PhysicalMemoryArea};
 
 const ENTRY_COUNT: usize = 512;
@@ -49,6 +50,7 @@ static mut EARLY_PAGE_TABLES: EarlyPageTablePool = EarlyPageTablePool {
 /// `Ok(())` after the MMU is active, or an error when the fixed page-table
 /// pool cannot represent the supplied map.
 pub fn install(
+    direct_map: DirectMapWindow,
     regions: &DirectMapRegions,
     kernel_area: PhysicalMemoryArea,
     dtb_area: PhysicalMemoryArea,
@@ -73,7 +75,10 @@ pub fn install(
             let area = region.area();
             let size = area.size();
 
-            let hhdm_start = crate::vm::addr::kernel_direct_map_vaddr(area.start);
+            let hhdm_start = direct_map
+                .phys_to_virt(PhysAddr::new(area.start))
+                .ok_or("early RAM is outside direct map")?
+                .as_usize();
             map_range(
                 root,
                 hhdm_start,

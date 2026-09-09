@@ -12,8 +12,8 @@ pub mod vmem;
 
 pub use addr::{
     PhysAddr, VirtAddr, boot_phys_to_virt, boot_virt_to_phys, finalize_runtime_memory_layout,
-    get_boot_hhdm_offset, get_current_direct_map_phys_range, get_heap_phys_layout, get_hhdm_offset,
-    phys_to_virt, set_hhdm_offset, transition_kernel_memory_layout, virt_to_phys,
+    get_boot_direct_map, get_current_direct_map, get_current_direct_map_phys_range,
+    get_heap_phys_layout, phys_to_virt, transition_kernel_memory_layout, virt_to_phys,
 };
 pub use ioremap::{ioremap, iounmap, memremap_normal};
 
@@ -28,12 +28,12 @@ use crate::arch::get_kernel_trapvector_paddr;
 use crate::arch::set_trapvector;
 use crate::arch::vm::alloc_virtual_address_space;
 use crate::arch::vm::get_root_pagetable;
+use crate::environment::KERNEL_HEAP_BASE;
 use crate::environment::KERNEL_VM_STACK_SIZE;
 use crate::environment::KERNEL_VM_STACK_START;
 use crate::environment::MAX_NUM_CPUS;
 use crate::environment::PAGE_SIZE;
 use crate::environment::USER_STACK_END;
-use crate::environment::{KERNEL_HEAP_BASE, SCARLET_HHDM_BASE};
 use crate::environment::{
     KERNEL_HEAP_SIZE, KERNEL_KSTACK_REGION_END, KERNEL_KSTACK_REGION_START,
     KERNEL_KSTACK_SLOT_SIZE, KERNEL_KSTACK_SLOTS, TASK_KERNEL_STACK_SIZE,

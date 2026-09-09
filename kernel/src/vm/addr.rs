@@ -1,17 +1,16 @@
-//! Address translation utilities backed by the kernel memory layout.
+//! Translation through the kernel's published boot and runtime mappings.
 //!
-//! These helpers translate recorded kernel-image, heap, and direct-map ranges;
-//! they do not walk arbitrary page tables or translate userspace/IOREMAP mappings.
-//! Bootloader translation checks broad bounds, while the kernel-owned direct map
-//! checks sparse regions. Neither check establishes ownership, access permissions,
-//! or the safety of dereferencing the returned integer address.
+//! Layouts are immutable after one-time publication. The phase flag selects a
+//! complete layout; physical addresses never require a machine-wide atomic.
+//! These helpers describe mappings, not allocation ownership or access rights.
 
-use core::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU8, Ordering};
 
 use crate::sync::{IrqSpinLock, IrqSpinLockGuard, Once};
-
-use crate::vm::direct_map::DirectMapRegions;
+use crate::vm::direct_map::{DirectMapRegions, DirectMapWindow};
 use crate::vm::vmem::{MemoryAttribute, PhysicalMemoryArea};
+
+pub use crate::mem::address::{PhysAddr, VirtAddr};
 
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -22,547 +21,329 @@ enum KernelMemoryPhase {
     Runtime = 3,
 }
 
-impl KernelMemoryPhase {
-    fn from_u8(value: u8) -> Self {
-        match value {
-            1 => Self::Bootloader,
-            2 => Self::BootKernel,
-            3 => Self::Runtime,
-            _ => Self::Uninitialized,
+/// A contiguous kernel image or heap mapping, with checked inclusive bounds.
+#[derive(Clone, Copy, Debug)]
+struct KernelMapping {
+    phys_base: PhysAddr,
+    virt_base: VirtAddr,
+    size: usize,
+}
+
+impl KernelMapping {
+    fn new(phys_base: PhysAddr, virt_base: VirtAddr, size: usize) -> Self {
+        let last = size.checked_sub(1).expect("kernel mapping is empty");
+        phys_base
+            .checked_add(last as u64)
+            .expect("kernel physical mapping overflows");
+        virt_base
+            .checked_add(last)
+            .expect("kernel virtual mapping overflows");
+        Self {
+            phys_base,
+            virt_base,
+            size,
         }
     }
-}
 
-#[derive(Clone, Copy, Debug)]
-struct KernelImageLayout {
-    phys_base: u64,
-    virt_base: usize,
-    size: usize,
-}
-
-impl KernelImageLayout {
-    #[inline(always)]
-    fn virt_end(&self) -> usize {
-        self.virt_base + self.size
+    fn virt_to_phys(self, vaddr: VirtAddr) -> Option<PhysAddr> {
+        let offset = vaddr.checked_offset_from(self.virt_base)?;
+        if offset >= self.size {
+            return None;
+        }
+        self.phys_base.checked_add(offset as u64)
     }
 
-    #[inline(always)]
-    fn phys_end(&self) -> u64 {
-        self.phys_base + self.size as u64
+    fn phys_to_virt(self, paddr: PhysAddr) -> Option<VirtAddr> {
+        let offset = usize::try_from(paddr.checked_offset_from(self.phys_base)?).ok()?;
+        if offset >= self.size {
+            return None;
+        }
+        self.virt_base.checked_add(offset)
     }
 
-    #[inline(always)]
-    fn contains_virt(&self, vaddr: usize) -> bool {
-        vaddr >= self.virt_base && vaddr < self.virt_end()
-    }
-
-    #[inline(always)]
-    fn contains_phys(&self, paddr: u64) -> bool {
-        paddr >= self.phys_base && paddr < self.phys_end()
+    fn overlaps_virtual_range(self, base: VirtAddr, size: usize) -> bool {
+        let last = base.checked_add(size - 1).expect("validated mapping");
+        let own_last = self
+            .virt_base
+            .checked_add(self.size - 1)
+            .expect("validated mapping");
+        self.virt_base <= last && base <= own_last
     }
 }
 
-#[derive(Clone, Copy, Debug)]
-struct BootloaderDirectMapLayout {
-    offset: usize,
-    phys_start: u64,
-    phys_end: u64,
+#[derive(Debug)]
+struct BootLayout {
+    kernel_image: KernelMapping,
+    direct_map: DirectMapWindow,
 }
 
-impl BootloaderDirectMapLayout {
-    #[inline(always)]
-    fn contains_phys(&self, paddr: u64) -> bool {
-        paddr >= self.phys_start && paddr <= self.phys_end
-    }
-
-    #[inline(always)]
-    fn virt_start(&self) -> usize {
-        usize::try_from(self.offset as u64 + self.phys_start)
-            .expect("boot direct-map address exceeds pointer width")
-    }
-
-    #[inline(always)]
-    fn virt_end(&self) -> usize {
-        usize::try_from(self.offset as u64 + self.phys_end)
-            .expect("boot direct-map address exceeds pointer width")
-    }
-
-    #[inline(always)]
-    fn contains_virt(&self, vaddr: usize) -> bool {
-        vaddr >= self.virt_start() && vaddr <= self.virt_end()
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-struct HeapLayout {
-    phys_base: u64,
-    virt_base: usize,
-    size: usize,
-}
-
-impl HeapLayout {
-    #[inline(always)]
-    fn virt_end(&self) -> usize {
-        self.virt_base + self.size
-    }
-
-    #[inline(always)]
-    fn contains_virt(&self, vaddr: usize) -> bool {
-        vaddr >= self.virt_base && vaddr < self.virt_end()
-    }
+/// Validated runtime mappings, prepared before changing page tables.
+/// Fields are private so the handoff consumes the layout that was checked.
+pub struct KernelRuntimeLayout {
+    direct_map: DirectMapWindow,
+    regions: IrqSpinLock<DirectMapRegions>,
+    heap: KernelMapping,
 }
 
 struct KernelMemoryLayout {
     phase: AtomicU8,
-    kernel_image: Once<KernelImageLayout>,
-    bootloader_direct_map_offset: AtomicUsize,
-    runtime_direct_map_offset: AtomicUsize,
-    bootloader_direct_map_phys_start: AtomicU64,
-    bootloader_direct_map_phys_end: AtomicU64,
-    runtime_direct_map_phys_start: AtomicU64,
-    runtime_direct_map_phys_end: AtomicU64,
-    runtime_direct_map_regions: Once<IrqSpinLock<DirectMapRegions>>,
-    heap_phys_base: AtomicU64,
-    heap_virt_base: AtomicUsize,
-    heap_size: AtomicUsize,
+    boot: Once<BootLayout>,
+    runtime: Once<KernelRuntimeLayout>,
 }
 
 impl KernelMemoryLayout {
     const fn new() -> Self {
         Self {
-            phase: AtomicU8::new(KernelMemoryPhase::Uninitialized as u8),
-            kernel_image: Once::new(),
-            bootloader_direct_map_offset: AtomicUsize::new(0),
-            runtime_direct_map_offset: AtomicUsize::new(0),
-            bootloader_direct_map_phys_start: AtomicU64::new(0),
-            bootloader_direct_map_phys_end: AtomicU64::new(0),
-            runtime_direct_map_phys_start: AtomicU64::new(0),
-            runtime_direct_map_phys_end: AtomicU64::new(0),
-            runtime_direct_map_regions: Once::new(),
-            heap_phys_base: AtomicU64::new(0),
-            heap_virt_base: AtomicUsize::new(0),
-            heap_size: AtomicUsize::new(0),
+            phase: AtomicU8::new(0),
+            boot: Once::new(),
+            runtime: Once::new(),
         }
     }
 
-    #[inline(always)]
     fn phase(&self) -> KernelMemoryPhase {
-        KernelMemoryPhase::from_u8(self.phase.load(Ordering::Acquire))
+        match self.phase.load(Ordering::Acquire) {
+            0 => KernelMemoryPhase::Uninitialized,
+            1 => KernelMemoryPhase::Bootloader,
+            2 => KernelMemoryPhase::BootKernel,
+            3 => KernelMemoryPhase::Runtime,
+            _ => unreachable!("invalid kernel memory phase"),
+        }
     }
 
-    fn init_from_boot(
-        &self,
-        hhdm_offset: usize,
-        kernel_phys_base: u64,
-        kernel_virt_base: usize,
-        kernel_image_size: usize,
-    ) {
-        self.kernel_image.call_once(|| KernelImageLayout {
-            phys_base: kernel_phys_base,
-            virt_base: kernel_virt_base,
-            size: kernel_image_size,
-        });
-        self.bootloader_direct_map_offset
-            .store(hhdm_offset, Ordering::Release);
-        self.runtime_direct_map_offset
-            .store(hhdm_offset, Ordering::Release);
+    fn init_from_boot(&self, direct_map: DirectMapWindow, kernel_image: KernelMapping) {
+        assert_eq!(self.phase(), KernelMemoryPhase::Uninitialized);
+        self.boot
+            .set(BootLayout {
+                kernel_image,
+                direct_map,
+            })
+            .expect("boot layout already published");
         self.phase
             .store(KernelMemoryPhase::Bootloader as u8, Ordering::Release);
     }
 
-    fn set_bootloader_direct_map_bound(&self, phys_start: u64, phys_end: u64) {
-        self.bootloader_direct_map_phys_start
-            .store(phys_start, Ordering::Release);
-        self.bootloader_direct_map_phys_end
-            .store(phys_end, Ordering::Release);
+    fn prepare_runtime(
+        &self,
+        direct_map: DirectMapWindow,
+        regions: DirectMapRegions,
+        heap: KernelMapping,
+    ) -> KernelRuntimeLayout {
+        assert_eq!(self.phase(), KernelMemoryPhase::Bootloader);
+        let bounds = regions
+            .bounding_area()
+            .expect("runtime direct map is empty");
+        assert!(
+            direct_map
+                .phys_to_virt(PhysAddr::new(bounds.start))
+                .is_some()
+                && direct_map.phys_to_virt(PhysAddr::new(bounds.end)).is_some(),
+            "runtime regions exceed the direct-map window"
+        );
+        let image = self.boot().kernel_image;
+        assert!(
+            !image.overlaps_virtual_range(direct_map.virtual_base(), direct_map.size()),
+            "kernel image overlaps the direct-map virtual window"
+        );
+        assert!(
+            !heap.overlaps_virtual_range(direct_map.virtual_base(), direct_map.size()),
+            "kernel heap overlaps the direct-map virtual window"
+        );
+        assert!(
+            !image.overlaps_virtual_range(heap.virt_base, heap.size),
+            "kernel image overlaps the kernel heap"
+        );
+        let heap_area = PhysicalMemoryArea::new(
+            heap.phys_base.as_u64(),
+            heap.phys_base
+                .checked_add(heap.size as u64 - 1)
+                .unwrap()
+                .as_u64(),
+        );
+        assert!(
+            regions.contains_area_with_attribute(heap_area, MemoryAttribute::Normal),
+            "kernel heap is not backed by direct-mapped RAM"
+        );
+        KernelRuntimeLayout {
+            direct_map,
+            regions: IrqSpinLock::new(regions),
+            heap,
+        }
     }
 
-    fn transition_to_boot_kernel(
-        &self,
-        direct_map_offset: usize,
-        direct_map_regions: DirectMapRegions,
-        heap_phys_base: u64,
-        heap_virt_base: usize,
-        heap_size: usize,
-    ) {
-        let bounds = direct_map_regions
-            .bounding_area()
-            .expect("runtime direct-map regions are empty");
-        self.runtime_direct_map_regions
-            .call_once(|| IrqSpinLock::new(direct_map_regions));
-        self.runtime_direct_map_offset
-            .store(direct_map_offset, Ordering::Release);
-        self.runtime_direct_map_phys_start
-            .store(bounds.start, Ordering::Release);
-        self.runtime_direct_map_phys_end
-            .store(bounds.end, Ordering::Release);
-        self.heap_phys_base.store(heap_phys_base, Ordering::Release);
-        self.heap_virt_base.store(heap_virt_base, Ordering::Release);
-        self.heap_size.store(heap_size, Ordering::Release);
+    fn transition_to_boot_kernel(&self, runtime: KernelRuntimeLayout) {
+        assert_eq!(self.phase(), KernelMemoryPhase::Bootloader);
+        assert!(
+            self.runtime.set(runtime).is_ok(),
+            "runtime layout already published"
+        );
         self.phase
             .store(KernelMemoryPhase::BootKernel as u8, Ordering::Release);
     }
 
     fn finalize_runtime(&self) {
         self.phase
-            .store(KernelMemoryPhase::Runtime as u8, Ordering::Release);
+            .compare_exchange(
+                KernelMemoryPhase::BootKernel as u8,
+                KernelMemoryPhase::Runtime as u8,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .expect("runtime layout must be installed before finalization");
     }
 
-    #[inline(always)]
-    fn kernel_image(&self) -> &KernelImageLayout {
-        self.kernel_image
-            .get()
-            .expect("kernel image layout not initialized")
+    fn boot(&self) -> &BootLayout {
+        self.boot.get().expect("boot layout not initialized")
     }
 
-    #[inline(always)]
-    fn bootloader_direct_map(&self) -> BootloaderDirectMapLayout {
-        let offset = self.bootloader_direct_map_offset.load(Ordering::Acquire);
-        let phys_start = self
-            .bootloader_direct_map_phys_start
-            .load(Ordering::Acquire);
-        let phys_end = self.bootloader_direct_map_phys_end.load(Ordering::Acquire);
-        assert!(offset != 0, "boot direct-map offset not initialized");
-        assert!(
-            phys_end >= phys_start,
-            "boot direct-map range not initialized"
-        );
-        BootloaderDirectMapLayout {
-            offset,
-            phys_start,
-            phys_end,
+    fn current_runtime(&self) -> Option<&KernelRuntimeLayout> {
+        match self.phase() {
+            KernelMemoryPhase::BootKernel | KernelMemoryPhase::Runtime => {
+                Some(self.runtime.get().expect("runtime layout not initialized"))
+            }
+            _ => None,
         }
     }
 
-    #[inline(always)]
-    fn runtime_direct_map_bound(&self) -> BootloaderDirectMapLayout {
-        let offset = self.runtime_direct_map_offset.load(Ordering::Acquire);
-        let phys_start = self.runtime_direct_map_phys_start.load(Ordering::Acquire);
-        let phys_end = self.runtime_direct_map_phys_end.load(Ordering::Acquire);
-        assert!(offset != 0, "runtime direct-map offset not initialized");
-        assert!(
-            phys_end >= phys_start,
-            "runtime direct-map bounds not initialized"
-        );
-        BootloaderDirectMapLayout {
-            offset,
-            phys_start,
-            phys_end,
+    fn current_direct_map(&self) -> (DirectMapWindow, Option<&IrqSpinLock<DirectMapRegions>>) {
+        match self.current_runtime() {
+            Some(runtime) => (runtime.direct_map, Some(&runtime.regions)),
+            None => (self.boot().direct_map, None),
         }
     }
 
-    #[inline(always)]
-    fn current_direct_map_bound(&self) -> BootloaderDirectMapLayout {
-        if self.phase() == KernelMemoryPhase::Bootloader {
-            self.bootloader_direct_map()
-        } else {
-            self.runtime_direct_map_bound()
-        }
-    }
-
-    #[inline(always)]
-    fn heap_layout(&self) -> Option<HeapLayout> {
-        let size = self.heap_size.load(Ordering::Acquire);
-        if size == 0 {
+    fn direct_map_phys(&self, vaddr: VirtAddr) -> Option<PhysAddr> {
+        let (window, regions) = self.current_direct_map();
+        let paddr = window.virt_to_phys(vaddr)?;
+        if regions.is_some_and(|regions| !regions.lock().contains(paddr.as_u64())) {
             return None;
         }
-        Some(HeapLayout {
-            phys_base: self.heap_phys_base.load(Ordering::Acquire),
-            virt_base: self.heap_virt_base.load(Ordering::Acquire),
-            size,
-        })
+        Some(paddr)
     }
 
-    fn runtime_direct_map_regions(&self) -> Option<&IrqSpinLock<DirectMapRegions>> {
-        self.runtime_direct_map_regions.get()
-    }
-
-    fn phys_to_current_virt(&self, paddr: u64) -> usize {
-        let direct_map = self.current_direct_map_bound();
-        let is_mapped = if self.phase() == KernelMemoryPhase::Bootloader {
-            direct_map.contains_phys(paddr)
-        } else {
-            self.runtime_direct_map_regions()
-                .map(|regions| regions.lock().contains(paddr))
-                .unwrap_or(false)
-        };
+    fn phys_to_current_virt(&self, paddr: PhysAddr) -> VirtAddr {
+        let (window, regions) = self.current_direct_map();
         assert!(
-            is_mapped,
-            "phys_to_virt: physical address {:#x} is outside the current sparse direct map",
-            paddr,
+            !regions.is_some_and(|regions| !regions.lock().contains(paddr.as_u64())),
+            "physical address {:#x} is outside the sparse direct map",
+            paddr
         );
-        paddr
-            .checked_add(direct_map.offset as u64)
-            .and_then(|address| usize::try_from(address).ok())
-            .unwrap_or_else(|| panic!("phys_to_virt overflow: paddr={:#x}", paddr))
+        window
+            .phys_to_virt(paddr)
+            .expect("physical address is outside the direct-map window")
     }
 
-    fn virt_to_current_phys(&self, vaddr: usize) -> Option<u64> {
-        let kernel_image = self.kernel_image();
-        if kernel_image.contains_virt(vaddr) {
-            return Some(kernel_image.phys_base + (vaddr - kernel_image.virt_base) as u64);
+    fn virt_to_current_phys(&self, vaddr: VirtAddr) -> Option<PhysAddr> {
+        if let Some(paddr) = self.boot().kernel_image.virt_to_phys(vaddr) {
+            return Some(paddr);
         }
-
-        if let Some(heap) = self.heap_layout() {
-            if heap.contains_virt(vaddr) {
-                return Some(heap.phys_base + (vaddr - heap.virt_base) as u64);
-            }
-        }
-
-        let direct_map = self.current_direct_map_bound();
-        if let Some(paddr) = vaddr
-            .checked_sub(direct_map.offset)
-            .map(|address| address as u64)
+        if let Some(paddr) = self
+            .current_runtime()
+            .and_then(|runtime| runtime.heap.virt_to_phys(vaddr))
         {
-            let is_mapped = if self.phase() == KernelMemoryPhase::Bootloader {
-                direct_map.contains_phys(paddr)
-            } else {
-                self.runtime_direct_map_regions()
-                    .map(|regions| regions.lock().contains(paddr))
-                    .unwrap_or(false)
-            };
-            if is_mapped {
-                return Some(paddr);
-            }
+            return Some(paddr);
         }
-
-        None
+        self.direct_map_phys(vaddr)
     }
 
-    fn virt_to_boot_phys(&self, vaddr: usize) -> Option<u64> {
-        let kernel_image = self.kernel_image();
-        if kernel_image.contains_virt(vaddr) {
-            return Some(kernel_image.phys_base + (vaddr - kernel_image.virt_base) as u64);
-        }
-
-        let direct_map = self.bootloader_direct_map();
-        if direct_map.contains_virt(vaddr) {
-            return Some((vaddr - direct_map.offset) as u64);
-        }
-
-        None
-    }
-
-    fn phys_to_boot_virt(&self, paddr: u64) -> usize {
-        let direct_map = self.bootloader_direct_map();
-        assert!(
-            direct_map.contains_phys(paddr),
-            "boot_phys_to_virt: physical address {:#x} is outside boot direct-map range {:#x}..={:#x}",
-            paddr,
-            direct_map.phys_start,
-            direct_map.phys_end
-        );
-        paddr
-            .checked_add(direct_map.offset as u64)
-            .and_then(|address| usize::try_from(address).ok())
-            .unwrap_or_else(|| panic!("boot_phys_to_virt overflow: paddr={:#x}", paddr))
+    fn virt_to_boot_phys(&self, vaddr: VirtAddr) -> Option<PhysAddr> {
+        self.boot()
+            .kernel_image
+            .virt_to_phys(vaddr)
+            .or_else(|| self.boot().direct_map.virt_to_phys(vaddr))
     }
 }
 
 static KERNEL_MEMORY_LAYOUT: KernelMemoryLayout = KernelMemoryLayout::new();
 
-#[inline(always)]
 fn layout() -> &'static KernelMemoryLayout {
     &KERNEL_MEMORY_LAYOUT
 }
 
-/// Initialize address translation from boot-protocol information.
-///
-/// This must be called early in the boot process
-/// before any address translation is performed. It records the HHDM offset
-/// and kernel image layout provided by the bootloader.
-/// This records metadata only: it does not install page tables. Boot direct-map
-/// bounds must also be supplied with [`init_bootloader_direct_map_bound`] before
-/// translating direct-map addresses. Boot initialization must serialize these updates.
-///
-/// # Arguments
-///
-/// * `hhdm_offset` - The HHDM (Higher Half Direct Map) offset from physical addresses
-/// * `kernel_phys_base` - Physical base address of the kernel image
-/// * `kernel_virt_base` - Virtual base address of the kernel image
-/// * `kernel_image_size` - Size of the kernel image in bytes
-///
-/// # Returns
-///
-/// No value. Records the boot layout and selects the bootloader translation phase.
+/// Publish the complete boot mapping before starting other CPUs or translating
+/// addresses. The boot adapter must already have installed matching page tables.
+/// This is a one-time operation; it never changes page tables itself.
 pub fn init_boot_addressing(
-    hhdm_offset: usize,
-    kernel_phys_base: u64,
-    kernel_virt_base: usize,
+    direct_map: DirectMapWindow,
+    kernel_phys_base: PhysAddr,
+    kernel_virt_base: VirtAddr,
     kernel_image_size: usize,
 ) {
     layout().init_from_boot(
-        hhdm_offset,
-        kernel_phys_base,
-        kernel_virt_base,
-        kernel_image_size,
+        direct_map,
+        KernelMapping::new(kernel_phys_base, kernel_virt_base, kernel_image_size),
     );
 }
 
-/// Initialize address translation from Limine bootloader information.
-///
-/// This compatibility wrapper preserves the existing Limine entry while the
-/// underlying memory-layout contract remains boot-protocol independent.
-///
-/// # Arguments
-///
-/// * `hhdm_offset` - The HHDM (Higher Half Direct Map) offset from physical addresses
-/// * `kernel_phys_base` - Physical base address of the kernel image
-/// * `kernel_virt_base` - Virtual base address of the kernel image
-/// * `kernel_image_size` - Size of the kernel image in bytes
-///
-/// # Returns
-///
-/// No value. Has the same metadata-only effect as [`init_boot_addressing`].
-pub fn init_limine_addressing(
-    hhdm_offset: usize,
-    kernel_phys_base: u64,
-    kernel_virt_base: usize,
-    kernel_image_size: usize,
-) {
-    init_boot_addressing(
-        hhdm_offset,
-        kernel_phys_base,
-        kernel_virt_base,
-        kernel_image_size,
-    );
-}
-
-/// Check whether the layout phase has left its uninitialized state.
-///
-/// # Returns
-///
-/// `true` after boot layout initialization in the normal boot sequence. This
-/// checks only the phase flag, not the direct-map bounds, active page tables,
-/// or whether any particular address is safe to access.
 #[inline(always)]
 pub fn address_translation_ready() -> bool {
     layout().phase() != KernelMemoryPhase::Uninitialized
 }
 
-/// Set the bootloader-only direct-map physical bounds.
-///
-/// This records the bootloader's broad bounds for early translation.
-/// The bounds can include reserved ranges and holes, so Scarlet must not use
-/// them for its runtime sparse direct map or as proof that every byte is mapped RAM.
-///
-/// # Arguments
-///
-/// * `start` - Start of the bootloader's broad direct-map physical bounds.
-/// * `end` - Inclusive end of the bootloader's broad direct-map physical bounds.
-///
-/// # Returns
-///
-/// No value. Updates metadata without changing page tables.
-pub fn init_bootloader_direct_map_bound(start: u64, end: u64) {
-    layout().set_bootloader_direct_map_bound(start, end);
-}
-
-/// Transition to the kernel-owned memory layout.
-///
-/// This should be called after switching from the bootloader's page tables
-/// to Scarlet's own page tables. It updates the direct-map and heap
-/// layout information for runtime address translation.
-/// The boot path must serialize this publication; the region table is installed
-/// only once. This selects the `BootKernel` phase, not the final `Runtime` phase,
-/// and does not itself switch page tables or invalidate TLB entries.
-///
-/// # Arguments
-///
-/// * `direct_map_offset` - HHDM offset for the new page tables
-/// * `direct_map_regions` - Sparse, attribute-aware regions mapped by Scarlet.
-/// * `heap_phys_base` - Physical base address of the kernel heap
-/// * `heap_virt_base` - Virtual base address of the kernel heap
-/// * `heap_size` - Size of the kernel heap in bytes
-///
-/// # Returns
-///
-/// No value. Publishes the kernel-owned translation metadata.
-///
-/// # Panics
-///
-/// Panics if `direct_map_regions` is empty.
-pub fn transition_kernel_memory_layout(
-    direct_map_offset: usize,
+/// Validate and prepare runtime metadata before the page-table handoff.
+/// Rejects overlapping VA windows and regions the direct map cannot represent.
+pub fn prepare_kernel_memory_layout(
+    direct_map: DirectMapWindow,
     direct_map_regions: DirectMapRegions,
-    heap_phys_base: u64,
-    heap_virt_base: usize,
+    heap_phys_base: PhysAddr,
+    heap_virt_base: VirtAddr,
     heap_size: usize,
-) {
-    layout().transition_to_boot_kernel(
-        direct_map_offset,
+) -> KernelRuntimeLayout {
+    layout().prepare_runtime(
+        direct_map,
         direct_map_regions,
-        heap_phys_base,
-        heap_virt_base,
-        heap_size,
-    );
+        KernelMapping::new(heap_phys_base, heap_virt_base, heap_size),
+    )
 }
 
-/// Finalize the memory layout for full runtime operation.
-///
-/// Marks the memory layout as being in the `Runtime` phase after the boot path
-/// has published the kernel-owned layout. This only changes the phase flag;
-/// it does not validate the layout or modify page tables. Boot-specific helpers
-/// still use bootloader metadata, and runtime memory attributes can still change.
-///
-/// # Returns
-///
-/// No value.
+/// Publish the prepared layout after the BSP page-table switch and pointer
+/// relocation. The boot path serializes this one-time handoff; secondary CPUs
+/// retain explicit boot helpers until they switch their own page tables.
+pub fn transition_kernel_memory_layout(runtime: KernelRuntimeLayout) {
+    layout().transition_to_boot_kernel(runtime);
+}
+
 pub fn finalize_runtime_memory_layout() {
     layout().finalize_runtime();
 }
 
-/// Get the current direct-map physical address range.
-///
-/// Returns sparse-region bounds for compatibility with callers that only need
-/// a broad range. The returned range can include holes and must not be used for
-/// direct-map membership validation.
-///
-/// # Returns
-///
-/// A tuple of `(start, end)` physical addresses (inclusive).
+/// Broad inclusive physical bounds; sparse holes are not evidence of mapped RAM.
 pub fn get_current_direct_map_phys_range() -> (u64, u64) {
-    let current = layout().current_direct_map_bound();
-    (current.phys_start, current.phys_end)
+    let area = match layout().current_runtime() {
+        Some(runtime) => runtime
+            .regions
+            .lock()
+            .bounding_area()
+            .expect("runtime direct map is empty"),
+        None => layout().boot().direct_map.physical_area(),
+    };
+    (area.start, area.end)
 }
 
-/// Returns a snapshot of Scarlet's published sparse runtime direct-map regions.
-///
-/// # Returns
-///
-/// `Some(regions)` after Scarlet has switched to its own page tables, or
-/// `None` while only Limine's bootloader mappings are active.
+/// The original mapping is retained even after runtime publication.
+pub fn get_boot_direct_map() -> DirectMapWindow {
+    layout().boot().direct_map
+}
+
+/// Address arithmetic only; use sparse membership checks for mapped RAM.
+pub fn get_current_direct_map() -> DirectMapWindow {
+    layout().current_direct_map().0
+}
+
 pub fn runtime_direct_map_regions() -> Option<DirectMapRegions> {
     layout()
-        .runtime_direct_map_regions()
-        .map(|regions| *regions.lock())
+        .current_runtime()
+        .map(|runtime| *runtime.regions.lock())
 }
 
-/// Locks the published runtime direct-map metadata for an atomic internal update.
 pub(crate) fn lock_runtime_direct_map_regions()
 -> Result<IrqSpinLockGuard<'static, DirectMapRegions>, &'static str> {
     layout()
-        .runtime_direct_map_regions()
-        .map(|regions| regions.lock())
+        .current_runtime()
+        .map(|runtime| runtime.regions.lock())
         .ok_or("runtime direct-map regions not initialized")
 }
 
-/// Validates a physical alias against the published sparse direct map.
-///
-/// This is intentionally a no-op before Scarlet publishes its runtime sparse
-/// direct-map layout, allowing early metadata construction and isolated VMM
-/// tests to run before the runtime layout exists.
-///
-/// # Arguments
-///
-/// * `area` - Inclusive physical range for the requested mapping.
-/// * `memory_attribute` - Attribute requested for the mapping.
-///
-/// # Returns
-///
-/// `Ok(())` when the layout is unpublished, the range does not overlap a
-/// direct-map region, or every overlap uses the same attribute. Returns an
-/// error for a conflicting alias.
+/// Validate cache-attribute compatibility once the runtime sparse map is active.
 pub fn validate_direct_map_alias(
     area: PhysicalMemoryArea,
     memory_attribute: MemoryAttribute,
@@ -574,277 +355,186 @@ pub fn validate_direct_map_alias(
     }
 }
 
-/// Get the kernel heap physical layout information.
-///
-/// Returns the heap layout if it has been initialized.
-///
-/// # Returns
-///
-/// `Some((phys_base, virt_base, size))` if heap is initialized,
-/// `None` otherwise.
 pub fn get_heap_phys_layout() -> Option<(u64, usize, usize)> {
-    layout()
-        .heap_layout()
-        .map(|heap| (heap.phys_base, heap.virt_base, heap.size))
+    layout().current_runtime().map(|runtime| {
+        let heap = runtime.heap;
+        (
+            heap.phys_base.as_u64(),
+            heap.virt_base.as_usize(),
+            heap.size,
+        )
+    })
 }
 
-/// Set the HHDM (Higher Half Direct Map) offset for address translation.
-///
-/// This updates the offset used for converting between physical and virtual
-/// addresses in the direct-mapped region. It is a boot-layout compatibility
-/// helper, not a remapping operation: callers must coordinate the matching page
-/// tables and serialize the update. It reselects the `BootKernel` phase.
-///
-/// # Arguments
-///
-/// * `new_offset` - The new HHDM offset value
-///
-/// # Returns
-///
-/// No value. Changes metadata only, without moving memory or flushing TLBs.
-///
-/// # Panics
-///
-/// Panics if the runtime direct-map regions have not been published.
-pub fn set_hhdm_offset(new_offset: usize) {
-    let direct_map_regions = runtime_direct_map_regions()
-        .expect("cannot update the HHDM offset before the runtime direct map is published");
-    transition_kernel_memory_layout(
-        new_offset,
-        direct_map_regions,
-        layout()
-            .heap_layout()
-            .map(|heap| heap.phys_base)
-            .unwrap_or(0),
-        layout()
-            .heap_layout()
-            .map(|heap| heap.virt_base)
-            .unwrap_or(0),
-        layout().heap_layout().map(|heap| heap.size).unwrap_or(0),
-    );
-}
-
-/// Get the current HHDM (Higher Half Direct Map) offset.
-///
-/// # Returns
-///
-/// The bootloader offset during the bootloader phase, otherwise the kernel-owned
-/// offset. This does not establish that a particular physical address is mapped.
-#[inline(always)]
-pub fn get_hhdm_offset() -> usize {
-    layout().current_direct_map_bound().offset
-}
-
-/// Get the boot-time HHDM (Higher Half Direct Map) offset.
-///
-/// Returns the offset provided by the bootloader during early boot.
-/// This is used for boot-phase address translation.
-#[inline(always)]
-pub fn get_boot_hhdm_offset() -> usize {
-    layout().bootloader_direct_map().offset
-}
-
-/// Convert a boot-time physical address to virtual address.
-///
-/// Uses the bootloader-provided HHDM offset. This should only be called
-/// during early boot before transitioning to kernel-owned page tables.
-/// The broad bound check does not exclude holes or verify access permissions.
-///
-/// # Arguments
-///
-/// * `paddr` - Physical address within the recorded boot direct-map bounds.
-///
-/// # Returns
-///
-/// The bootloader direct-map virtual address, without dereferencing it.
-///
-/// # Panics
-///
-/// Panics if the boot layout is unavailable, the physical address is outside
-/// its direct-map bounds, or adding the offset overflows.
+/// Translate with the boot mapping, even if another CPU published runtime state.
 #[inline(always)]
 pub fn boot_phys_to_virt(paddr: u64) -> usize {
-    layout().phys_to_boot_virt(paddr)
+    layout()
+        .boot()
+        .direct_map
+        .phys_to_virt(PhysAddr::new(paddr))
+        .expect("physical address is outside the boot direct map")
+        .as_usize()
 }
 
-/// Convert a kernel virtual address using the currently selected layout.
-///
-/// Recognizes the kernel image, the recorded heap, and the current direct map.
-/// It is not a general page-table walk: use the relevant address-space/page-table
-/// API for userspace, IOREMAP, and other mappings outside these recorded ranges.
-///
-/// # Arguments
-///
-/// * `vaddr` - Kernel virtual address in one of the recorded ranges.
-///
-/// # Returns
-///
-/// The corresponding physical address. No memory is accessed or retained.
-///
-/// # Panics
-///
-/// Panics with caller information if the virtual address cannot be mapped
-/// to a physical address in the current layout.
+/// Translate a recorded kernel image, heap or current direct-map address.
+/// This does not walk user or IOREMAP page tables.
 #[inline(always)]
 #[track_caller]
 pub fn virt_to_phys(vaddr: usize) -> u64 {
-    layout().virt_to_current_phys(vaddr).unwrap_or_else(|| {
-        let caller = core::panic::Location::caller();
-        panic!(
-            "virt_to_phys: unmapped kernel virtual address {:#x} (caller: {}:{})",
-            vaddr,
-            caller.file(),
-            caller.line()
-        )
-    })
+    layout()
+        .virt_to_current_phys(VirtAddr::new(vaddr))
+        .unwrap_or_else(|| panic!("virt_to_phys: unmapped kernel virtual address {:#x}", vaddr))
+        .as_u64()
 }
 
-/// Convert a boot-time virtual address to physical address.
-///
-/// Uses the bootloader-provided memory layout. This should be called
-/// during early boot for addresses provided by the bootloader.
-///
-/// # Arguments
-///
-/// * `vaddr` - Address in the recorded kernel image or broad boot direct-map bounds.
-///
-/// # Returns
-///
-/// The physical address calculated from boot metadata, without checking page tables.
-///
-/// # Panics
-///
-/// Panics with caller information if the virtual address cannot be mapped
-/// to a physical address in the boot layout.
+/// Translate a boot-protocol pointer using retained boot metadata.
 #[inline(always)]
 #[track_caller]
 pub fn boot_virt_to_phys(vaddr: usize) -> u64 {
-    layout().virt_to_boot_phys(vaddr).unwrap_or_else(|| {
-        let caller = core::panic::Location::caller();
-        panic!(
-            "boot_virt_to_phys: unmapped boot virtual address {:#x} (caller: {}:{})",
-            vaddr,
-            caller.file(),
-            caller.line()
-        )
-    })
+    layout()
+        .virt_to_boot_phys(VirtAddr::new(vaddr))
+        .unwrap_or_else(|| {
+            panic!(
+                "boot_virt_to_phys: unmapped boot virtual address {:#x}",
+                vaddr
+            )
+        })
+        .as_u64()
 }
 
-/// Convert a physical address to its current direct-map virtual address.
-///
-/// Uses broad bounds during the bootloader phase and sparse region membership
-/// after the kernel-owned layout is published. This does not prove the memory is
-/// allocated, readable, writable, or suitable for ordinary rather than MMIO access.
-///
-/// # Arguments
-///
-/// * `paddr` - Physical address covered by the selected direct-map metadata.
-///
-/// # Returns
-///
-/// `paddr` plus the current HHDM offset, without dereferencing it.
-///
-/// # Panics
-///
-/// Panics if the layout is unavailable, the address is outside the selected
-/// direct map, or adding the offset overflows.
+/// Return the current direct-map address; panics for unmapped physical memory.
 #[inline(always)]
 pub fn phys_to_virt(paddr: u64) -> usize {
-    layout().phys_to_current_virt(paddr)
+    layout()
+        .phys_to_current_virt(PhysAddr::new(paddr))
+        .as_usize()
 }
 
-/// Convert a physical address to kernel virtual address.
-///
-/// This is an alias for `phys_to_virt()`.
 #[inline(always)]
 pub fn phys_to_kernel_virt(paddr: u64) -> usize {
     phys_to_virt(paddr)
 }
 
-/// Convert a kernel virtual address to physical address.
-///
-/// This is an alias for `virt_to_phys()`.
 #[inline(always)]
 pub fn kernel_virt_to_phys(vaddr: usize) -> u64 {
     virt_to_phys(vaddr)
 }
 
-/// Convert a physical address to kernel image virtual address.
-///
-/// Only works for addresses within the kernel image (code/data sections).
-/// For general direct-mapped addresses, use `phys_to_virt()` instead.
-///
-/// # Panics
-///
-/// Panics if the physical address is outside the kernel image range.
 #[inline(always)]
 pub fn phys_to_kernel_image_virt(paddr: u64) -> usize {
-    let kernel_image = layout().kernel_image();
-    if kernel_image.contains_phys(paddr) {
-        return kernel_image.virt_base
-            + usize::try_from(paddr - kernel_image.phys_base)
-                .expect("kernel image offset exceeds pointer width");
-    }
-    panic!(
-        "phys_to_kernel_image_virt: physical address {:#x} is outside kernel image range",
-        paddr
-    )
+    layout()
+        .boot()
+        .kernel_image
+        .phys_to_virt(PhysAddr::new(paddr))
+        .expect("physical address is outside the kernel image")
+        .as_usize()
 }
 
-/// Check if a virtual address is in the direct-mapped region.
-///
-/// # Arguments
-///
-/// * `vaddr` - Virtual address to check against the current direct-map metadata.
-///
-/// # Returns
-///
-/// `true` for a recorded sparse region, or for the broad bootloader bounds during
-/// the bootloader phase. This is a metadata membership test, not an access-safety check.
 #[inline(always)]
 pub fn is_direct_mapped(vaddr: usize) -> bool {
-    let direct_map = layout().current_direct_map_bound();
-    let Some(paddr) = vaddr
-        .checked_sub(direct_map.offset)
-        .map(|address| address as u64)
-    else {
-        return false;
-    };
-
-    if layout().phase() == KernelMemoryPhase::Bootloader {
-        direct_map.contains_phys(paddr)
-    } else {
-        runtime_direct_map_regions()
-            .map(|regions| regions.contains(paddr))
-            .unwrap_or(false)
-    }
+    layout().direct_map_phys(VirtAddr::new(vaddr)).is_some()
 }
 
-// Keep the established import path while sharing the address value types
-// with boot, physical memory and DMA code.
-pub use crate::mem::address::{PhysAddr, VirtAddr};
-
 impl PhysAddr {
-    /// Translate through the current kernel image, heap or direct map.
-    /// Panics if this physical address is outside those mappings.
+    /// Translate through the current direct map; panics for unmapped memory.
     pub fn to_virt(self) -> VirtAddr {
-        VirtAddr::new(phys_to_virt(self.as_u64()))
+        layout().phys_to_current_virt(self)
     }
 }
 
 impl VirtAddr {
-    /// Translate a current kernel image, heap or direct-map address.
-    /// Panics if the virtual address is outside those mappings.
+    /// Translate a kernel image, heap or direct-map address.
     pub fn to_phys(self) -> PhysAddr {
-        PhysAddr::new(virt_to_phys(self.as_usize()))
+        layout()
+            .virt_to_current_phys(self)
+            .expect("unmapped kernel virtual address")
     }
 }
 
-/// Calculate the virtual position in the kernel direct-map window.
-/// Membership is checked separately against the sparse region set.
+/// Calculate a position in the published runtime window, including explicit
+/// initramfs mappings outside the sparse RAM set. Does not validate membership.
 pub(crate) fn kernel_direct_map_vaddr(paddr: u64) -> usize {
-    (crate::environment::SCARLET_HHDM_BASE as u64)
-        .checked_add(paddr)
-        .and_then(|vaddr| usize::try_from(vaddr).ok())
-        .expect("physical range does not fit the kernel direct-map window")
+    layout()
+        .current_runtime()
+        .expect("runtime layout is not active")
+        .direct_map
+        .phys_to_virt(PhysAddr::new(paddr))
+        .expect("physical address exceeds the runtime window")
+        .as_usize()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test_case]
+    fn immutable_layout_handoff_preserves_boot_mapping_and_high_physical_bits() {
+        let layout = KernelMemoryLayout::new();
+        let base = PhysAddr::new(0x1_8000_0000);
+        let boot = DirectMapWindow::new(base, VirtAddr::new(0x8000_0000), 0x10000).unwrap();
+        let image = KernelMapping::new(
+            PhysAddr::new(0x1_8001_0000),
+            VirtAddr::new(0xb000_0000),
+            0x1000,
+        );
+        layout.init_from_boot(boot, image);
+        assert_eq!(
+            layout.phys_to_current_virt(base),
+            VirtAddr::new(0x8000_0000)
+        );
+        let runtime = DirectMapWindow::new(base, VirtAddr::new(0xc000_0000), 0x10000).unwrap();
+        let mut regions = DirectMapRegions::new();
+        regions
+            .insert(
+                PhysicalMemoryArea::new(base.as_u64(), base.as_u64() + 0x1fff),
+                MemoryAttribute::Normal,
+            )
+            .unwrap();
+        regions
+            .insert(
+                PhysicalMemoryArea::new(base.as_u64() + 0x3000, base.as_u64() + 0xffff),
+                MemoryAttribute::Normal,
+            )
+            .unwrap();
+        let heap = KernelMapping::new(base, VirtAddr::new(0x9000_0000), 0x1000);
+        let prepared = layout.prepare_runtime(runtime, regions, heap);
+        // Preparation does not select mappings that are not yet installed.
+        assert_eq!(
+            layout.phys_to_current_virt(base),
+            VirtAddr::new(0x8000_0000)
+        );
+        layout.transition_to_boot_kernel(prepared);
+        assert_eq!(
+            layout.phys_to_current_virt(base),
+            VirtAddr::new(0xc000_0000)
+        );
+        assert_eq!(
+            layout.virt_to_current_phys(VirtAddr::new(0xc000_0001)),
+            base.checked_add(1)
+        );
+        assert_eq!(
+            layout.virt_to_current_phys(VirtAddr::new(0x9000_0001)),
+            base.checked_add(1)
+        );
+        assert_eq!(
+            layout.virt_to_current_phys(VirtAddr::new(0xb000_0001)),
+            Some(PhysAddr::new(0x1_8001_0001))
+        );
+        assert_eq!(
+            layout.virt_to_current_phys(VirtAddr::new(0x8000_0001)),
+            None
+        );
+        assert_eq!(
+            layout.virt_to_current_phys(VirtAddr::new(0xc000_2000)),
+            None
+        );
+        assert_eq!(
+            layout.virt_to_boot_phys(VirtAddr::new(0x8000_0001)),
+            base.checked_add(1)
+        );
+        layout.finalize_runtime();
+        assert_eq!(layout.boot().direct_map, boot);
+        assert_eq!(layout.phase(), KernelMemoryPhase::Runtime);
+    }
 }
