@@ -112,6 +112,9 @@
             pname = "cargo-scarlet";
             version = "1.0.0";
             src = scarlet-sdk;
+            # Explicit userspace targets allow native ABI JSON specifications
+            # to differ from the kernel target without changing existing defaults.
+            patches = [ ./nix/patches/cargo-scarlet-userspace-target.patch ];
             buildAndTestSubdir = "cargo-scarlet";
             cargoLock.lockFile = "${scarlet-sdk}/Cargo.lock";
           };
