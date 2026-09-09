@@ -823,6 +823,7 @@ mod tests {
     }
 
     #[test_case]
+    #[cfg(target_pointer_width = "64")]
     fn test_unmap_range_preserves_partial_1g_huge_page() {
         let asid = alloc_virtual_address_space();
         let mut root =

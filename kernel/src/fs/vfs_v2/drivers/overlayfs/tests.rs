@@ -1294,7 +1294,9 @@ fn test_overlayfs_directory_read() {
         }
 
         // Parse the directory entry from the buffer
-        let dir_entry = unsafe { &*(buffer.as_ptr() as *const DirectoryEntry) };
+        assert!(bytes_read >= core::mem::size_of::<DirectoryEntry>());
+        let dir_entry =
+            unsafe { core::ptr::read_unaligned(buffer.as_ptr().cast::<DirectoryEntry>()) };
 
         // Extract the name from the directory entry
         let name_bytes = unsafe {
@@ -1405,7 +1407,9 @@ fn test_overlayfs_directory_read_whiteout() {
             break; // EOF
         }
 
-        let dir_entry = unsafe { &*(buffer.as_ptr() as *const DirectoryEntry) };
+        assert!(bytes_read >= core::mem::size_of::<DirectoryEntry>());
+        let dir_entry =
+            unsafe { core::ptr::read_unaligned(buffer.as_ptr().cast::<DirectoryEntry>()) };
 
         let name_bytes = unsafe {
             core::slice::from_raw_parts(dir_entry.name.as_ptr(), dir_entry.name_len as usize)
