@@ -5,14 +5,14 @@
   "data-layout": "e-m:e-p:32:32-i64:64-n32-S128",
   "eh-frame-header": false,
   "emit-debug-gdb-scripts": false,
-  "features": "+m,+a,+zicsr,+zifencei",
+  "features": "+m,+a,+f,+d,+c,+zicsr,+zifencei",
   "linker": "rust-lld",
   "linker-flavor": "gnu-lld",
-  "llvm-abiname": "ilp32",
+  "llvm-abiname": "ilp32d",
   "llvm-target": "riscv32",
   "max-atomic-width": 32,
   "metadata": {
-    "description": "Scarlet native RV32IMA user programs",
+    "description": "Scarlet native RV32GC user programs",
     "host_tools": false,
     "std": false,
     "tier": 3
