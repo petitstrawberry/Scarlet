@@ -501,7 +501,7 @@ fn report_tracked_lock_contention(
 ) {
     emergency_print_waiter(waiter_cpu, waiter, spin_count);
 
-    let now_ns = crate::timer::get_time_ns();
+    let now_ns = crate::timer::diagnostic_time_ns().unwrap_or(0);
     let mut holder_count = 0usize;
     let mut peer_waiter_count = 0usize;
     for target_cpu in 0..MAX_NUM_CPUS {
@@ -701,7 +701,9 @@ impl PreemptGuard {
         }
         #[cfg(feature = "sync-debug")]
         if let (Some(cpu), Some(slot_index)) = (self.cpu, self.debug_slot) {
-            let acquired_at_ns = crate::timer::get_time_ns();
+            // Zero is this diagnostic record's existing "time unavailable"
+            // marker. Never initialize a clock while recording a lock owner.
+            let acquired_at_ns = crate::timer::diagnostic_time_ns().unwrap_or(0);
             let (acquisition_pc, acquisition_lr) =
                 crate::arch::instruction::capture_execution_site();
             let slot = &PREEMPT_DEBUG_SLOTS[cpu][slot_index as usize];
@@ -756,7 +758,7 @@ pub fn dump_active_preempt_guards() {
         };
         let count = PREEMPT_COUNT[cpu].load(Ordering::Relaxed);
         let untracked = PREEMPT_DEBUG_UNTRACKED[cpu].load(Ordering::Relaxed);
-        let now_ns = crate::timer::get_time_ns();
+        let now_ns = crate::timer::diagnostic_time_ns().unwrap_or(0);
         crate::emergency_println!(
             "[sync-debug] cpu={} preempt_count={} active guard(s):",
             cpu,

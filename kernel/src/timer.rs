@@ -951,6 +951,15 @@ pub fn get_time_ns() -> u64 {
     get_kernel_timer().get_time_ns(cpu_id)
 }
 
+/// Sample an already initialized local clock without starting or waiting for
+/// timer initialization. Lock instrumentation must use this path: constructing
+/// an architecture timer can itself acquire instrumented controller locks.
+pub(crate) fn diagnostic_time_ns() -> Option<u64> {
+    let timer = KERNEL_TIMER.get()?;
+    let cpu_id = crate::arch::try_get_cpuid()?;
+    (cpu_id < MAX_NUM_CPUS).then(|| timer.get_time_ns(cpu_id))
+}
+
 /// Get monotonic local time in microseconds.
 pub fn get_time_us() -> u64 {
     get_time_ns() / NANOSECONDS_PER_MICROSECOND
