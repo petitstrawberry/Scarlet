@@ -106,6 +106,8 @@ struct BuddyRegion {
     mem_start: u64,
     mem_size: usize,
     page_count: usize,
+    /// Buddy indices are relative to the usable extent, after its metadata.
+    first_usable_pfn: usize,
     pages: *mut Page,
     free_area: [FreeArea; MAX_ORDER + 1],
     active: bool,
@@ -119,6 +121,7 @@ impl BuddyRegion {
             mem_start: 0,
             mem_size: 0,
             page_count: 0,
+            first_usable_pfn: 0,
             pages: core::ptr::null_mut(),
             free_area: [
                 FreeArea::new(),
@@ -181,6 +184,7 @@ impl BuddyRegion {
         let pages_size = self.page_count * core::mem::size_of::<Page>();
         let pages_size_aligned = align_up(pages_size, PAGE_SIZE);
         let pages_needed = pages_size_aligned / PAGE_SIZE;
+        self.first_usable_pfn = pages_needed;
 
         if pages_needed >= self.page_count {
             return;
@@ -195,14 +199,23 @@ impl BuddyRegion {
                 (*page).order = 0;
                 (*page).flags = 0;
             }
-
-            for i in 0..=MAX_ORDER {
-                self.free_area[i].free_list.init();
-                self.free_area[i].nr_free = 0;
-            }
         }
 
-        let mut page_idx = pages_needed;
+        self.seed_free_lists();
+        self.active = true;
+    }
+
+    fn seed_free_lists(&mut self) {
+        for area in &mut self.free_area {
+            // SAFETY: Region and metadata storage remain pinned while active.
+            unsafe { area.free_list.init() };
+            area.nr_free = 0;
+        }
+
+        // A metadata prefix must not bisect the largest usable buddy block.
+        // Physical alignment beyond PAGE_SIZE is provided by the explicit
+        // aligned-allocation API, independently of this region-relative origin.
+        let mut page_idx = self.first_usable_pfn;
         while page_idx < self.page_count {
             let remaining = self.page_count - page_idx;
             let mut order = 0usize;
@@ -211,7 +224,7 @@ impl BuddyRegion {
                 let next_order = order + 1;
                 let block_pages = 1usize << next_order;
 
-                if page_idx % block_pages != 0 {
+                if (page_idx - self.first_usable_pfn) % block_pages != 0 {
                     break;
                 }
                 if remaining < block_pages {
@@ -225,8 +238,6 @@ impl BuddyRegion {
             }
             page_idx += 1usize << order;
         }
-
-        self.active = true;
     }
 
     unsafe fn add_to_free_list(&mut self, page_idx: usize, order: usize) {
@@ -247,7 +258,7 @@ impl BuddyRegion {
     }
 
     fn find_buddy_pfn(&self, page_idx: usize, order: usize) -> usize {
-        page_idx ^ (1usize << order)
+        ((page_idx - self.first_usable_pfn) ^ (1usize << order)) + self.first_usable_pfn
     }
 
     fn page_to_pfn(&self, page: *const Page) -> usize {
@@ -329,7 +340,7 @@ impl BuddyRegion {
     }
 
     fn free(&mut self, paddr: u64, pages: usize) {
-        if !self.active || paddr < self.mem_start {
+        if !self.active || pages == 0 || paddr < self.mem_start || paddr % PAGE_SIZE as u64 != 0 {
             return;
         }
 
@@ -345,7 +356,11 @@ impl BuddyRegion {
         let Some(mut page_idx) = self.addr_to_pfn(paddr) else {
             return;
         };
-        if page_idx >= self.page_count {
+        if page_idx < self.first_usable_pfn
+            || page_idx >= self.page_count
+            || (page_idx - self.first_usable_pfn) % (1usize << order) != 0
+            || (1usize << order) > self.page_count - page_idx
+        {
             return;
         }
 
@@ -827,6 +842,37 @@ fn align_down(addr: usize, align: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test_case]
+    fn metadata_prefix_does_not_fragment_the_usable_buddy_extent() {
+        let mut pages = [const { Page::new() }; 23];
+        let mut region = BuddyRegion::new();
+        region.mem_start = 0x1_8000_0000;
+        region.mem_size = pages.len() * PAGE_SIZE;
+        region.page_count = pages.len();
+        region.first_usable_pfn = 3;
+        region.pages = pages.as_mut_ptr();
+        region.active = true;
+        region.seed_free_lists();
+        assert_eq!(region.free_pages(), 20);
+        let large = region
+            .alloc(16)
+            .expect("usable extent contains 16 contiguous pages");
+        assert_eq!(large, region.mem_start + 3 * PAGE_SIZE as u64);
+        assert_eq!(region.free_pages(), 4);
+        assert!(region.alloc(8).is_none());
+        region.free(large, 16);
+        let a = region.alloc(8).unwrap();
+        let b = region.alloc(8).unwrap();
+        assert_ne!(a, b);
+        region.free(a, 8);
+        region.free(b, 8);
+        assert_eq!(region.alloc(16), Some(large));
+        // Reserved metadata can never become an allocatable buddy.
+        region.free(region.mem_start, 1);
+        assert_eq!(region.free_pages(), 4);
+        assert!(pages[..3].iter().all(|page| page.flags == 0));
+    }
 
     #[test_case]
     fn metadata_handoff_preserves_free_lists_with_high_physical_memory() {
