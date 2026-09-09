@@ -8,6 +8,9 @@ pub mod syscall;
 
 extern crate alloc;
 
+mod accounting;
+use accounting::CpuAccounting;
+
 use crate::sync::{IrqRwSpinLock, IrqSpinLock, Mutex};
 use alloc::{
     boxed::Box,
@@ -822,10 +825,8 @@ pub struct Task {
     pub(crate) deadline_on_rq: AtomicBool,
     /// Monotonic timestamp from which the current EEVDF execution interval is charged.
     pub(crate) sched_exec_start_ns: AtomicU64,
-    /// Cumulative CPU time charged to this task, in nanoseconds.
-    pub cpu_time_ns: AtomicU64,
-    /// Monotonic timestamp at which the current CPU run began.
-    cpu_run_start_ns: AtomicU64,
+    /// Committed time and the active interval are one coherent accounting state.
+    cpu_accounting: CpuAccounting,
     /// Most recent instruction address sampled while this task was running.
     last_observed_pc: AtomicUsize,
     /// Whether `last_observed_pc` was sampled from privileged execution.
@@ -1132,8 +1133,7 @@ impl Task {
             sched_on_rq: AtomicBool::new(false),
             deadline_on_rq: AtomicBool::new(false),
             sched_exec_start_ns: AtomicU64::new(0),
-            cpu_time_ns: AtomicU64::new(0),
-            cpu_run_start_ns: AtomicU64::new(0),
+            cpu_accounting: CpuAccounting::new(),
             last_observed_pc: AtomicUsize::new(0),
             last_observed_pc_privileged: AtomicBool::new(false),
             last_syscall_number: AtomicUsize::new(0),
@@ -1604,7 +1604,7 @@ impl Task {
     ///
     /// * `now_ns` - Current monotonic timestamp in nanoseconds.
     pub fn start_cpu_accounting(&self, now_ns: u64) {
-        self.cpu_run_start_ns.store(now_ns, Ordering::SeqCst);
+        self.cpu_accounting.begin(now_ns);
         self.sched_exec_start_ns.store(now_ns, Ordering::SeqCst);
         self.sched_util_accounted_until_ns
             .store(now_ns, Ordering::SeqCst);
@@ -1620,14 +1620,8 @@ impl Task {
     ///
     /// The nanoseconds charged by this stop operation.
     pub fn stop_cpu_accounting(&self, now_ns: u64) -> u64 {
-        let start_ns = self.cpu_run_start_ns.swap(0, Ordering::SeqCst);
         self.sched_exec_start_ns.store(0, Ordering::SeqCst);
-        if start_ns == 0 {
-            return 0;
-        }
-        let delta_ns = now_ns.saturating_sub(start_ns);
-        self.cpu_time_ns.fetch_add(delta_ns, Ordering::SeqCst);
-        delta_ns
+        self.cpu_accounting.finish(now_ns)
     }
 
     /// Return the current CPU time snapshot for this task.
@@ -1640,9 +1634,7 @@ impl Task {
     ///
     /// Cumulative CPU time, including the current running interval if any.
     pub fn cpu_time_snapshot_ns(&self, now_ns: u64) -> u64 {
-        self.cpu_time_ns
-            .load(Ordering::SeqCst)
-            .saturating_add(self.current_cpu_delta_ns(now_ns))
+        self.cpu_accounting.total_ns(now_ns)
     }
 
     /// Record the most recent instruction address observed for this task.
@@ -1724,7 +1716,7 @@ impl Task {
     /// A diagnostic snapshot when this task consumed at least 99 percent of
     /// one sampling window, or `None` otherwise.
     pub(crate) fn sample_cpu_hog(&self, now_ns: u64) -> Option<TaskCpuHogSnapshot> {
-        let runtime_ns = self.cpu_time_snapshot_ns(now_ns);
+        let runtime_ns = self.cpu_accounting.try_total_ns(now_ns)?;
         let current_pc = self.last_observed_pc.load(Ordering::Relaxed);
         let current_pc_privileged = self.last_observed_pc_privileged.load(Ordering::Relaxed);
         let last_syscall_number = self.debug_syscall_number();
@@ -1791,12 +1783,7 @@ impl Task {
     ///
     /// Nanoseconds elapsed since the task was last scheduled in.
     pub fn current_cpu_delta_ns(&self, now_ns: u64) -> u64 {
-        let start_ns = self.cpu_run_start_ns.load(Ordering::SeqCst);
-        if start_ns == 0 {
-            0
-        } else {
-            now_ns.saturating_sub(start_ns)
-        }
+        self.cpu_accounting.active_ns(now_ns)
     }
 
     pub fn get_id(&self) -> usize {
@@ -4574,6 +4561,7 @@ mod tests {
 
         task.start_cpu_accounting(1 * MS);
         assert_eq!(task.account_sched_util_running(2 * MS), 0);
+        task.stop_cpu_accounting(2 * MS);
 
         task.start_cpu_accounting(101 * MS);
         let util = task.account_sched_util_running(102 * MS);
@@ -4623,7 +4611,8 @@ mod tests {
         task.record_syscall_entry(20, 0x0ffc);
         assert!(task.sample_cpu_hog(1).is_none());
 
-        task.cpu_time_ns.store(995 * MS, Ordering::SeqCst);
+        task.start_cpu_accounting(1);
+        task.stop_cpu_accounting(995 * MS + 1);
         task.record_observed_pc(0x1010, false);
         let sample = task
             .sample_cpu_hog(1_000 * MS + 1)
@@ -4649,9 +4638,10 @@ mod tests {
             }
         );
 
-        task.cpu_time_ns.store(1_495 * MS, Ordering::SeqCst);
+        task.start_cpu_accounting(1_000 * MS + 1);
+        task.stop_cpu_accounting(1_500 * MS + 1);
         task.record_syscall_exit();
-        task.record_observed_pc(0xffff_ffff_8000_1000, true);
+        task.record_observed_pc((usize::MAX - 0xfff) as u64, true);
         assert!(task.sample_cpu_hog(2_000 * MS + 1).is_none());
     }
 

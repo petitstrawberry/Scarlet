@@ -18,6 +18,7 @@ pub mod once;
 pub mod preempt;
 pub mod rw_spinlock;
 pub mod sequence;
+pub(crate) mod snapshot;
 pub mod spinlock;
 pub mod waker;
 
