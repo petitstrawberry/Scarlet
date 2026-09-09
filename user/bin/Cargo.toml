@@ -6,6 +6,12 @@ workspace = "../../.cargo"
 
 # User-facing executable names use kebab-case. Rust source paths stay snake_case.
 
+[features]
+# Keep the complete suite as the default. Console programs can be built without
+# pulling UI dependencies (or imposing their hardware requirements).
+default = ["ui"]
+ui = ["dep:scarlet-ui", "dep:scarlet-ui-macros"]
+
 [[bin]]
 name = "init"
 path = "src/init.rs"
@@ -97,14 +103,17 @@ path = "src/scarlet_desktop/settingsd.rs"
 
 [[bin]]
 name = "terminal"
+required-features = ["ui"]
 path = "src/terminal/main.rs"
 
 [[bin]]
 name = "ui-demo"
+required-features = ["ui"]
 path = "src/ui_demo.rs"
 
 [[bin]]
 name = "ui-benchmark"
+required-features = ["ui"]
 path = "src/ui_benchmark.rs"
 
 [[bin]]
@@ -117,10 +126,12 @@ path = "src/event_demo.rs"
 
 [[bin]]
 name = "scarlet-skk"
+required-features = ["ui"]
 path = "src/scarlet_skk.rs"
 
 [[bin]]
 name = "scarlet-mozc"
+required-features = ["ui"]
 path = "src/scarlet_mozc.rs"
 
 [[bin]]
@@ -129,6 +140,7 @@ path = "src/mozc_server.rs"
 
 [[bin]]
 name = "settings"
+required-features = ["ui"]
 path = "src/settings.rs"
 
 [[bin]]
@@ -171,8 +183,8 @@ sgfx = { git = "https://github.com/petitstrawberry/sgfx", default-features = fal
 sws-protocol = { path = "../lib/sws-protocol" }
 sws-client = { path = "../lib/sws-client" }
 scarlet-os = { path = "../lib/scarlet-os" }
-scarlet-ui = { git = "https://github.com/petitstrawberry/scarlet-ui", package = "scarlet-ui", default-features = false, features = ["legacy-scarlet-std", "platform-sws"] }
-scarlet-ui-macros = { git = "https://github.com/petitstrawberry/scarlet-ui", package = "scarlet-ui-macros" }
+scarlet-ui = { optional = true, git = "https://github.com/petitstrawberry/scarlet-ui", package = "scarlet-ui", default-features = false, features = ["legacy-scarlet-std", "platform-sws"] }
+scarlet-ui-macros = { optional = true, git = "https://github.com/petitstrawberry/scarlet-ui", package = "scarlet-ui-macros" }
 scarlet-desktop-config = { path = "../lib/scarlet-desktop-config" }
 scarlet-sys = { path = "../lib/scarlet-sys" }
 sunset = { path = "../lib/sunset", default-features = false, features = ["larger", "mlkem", "openssh-key", "rsa"] }
