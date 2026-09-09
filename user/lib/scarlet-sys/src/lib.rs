@@ -46,8 +46,8 @@ pub use scarlet_abi::{
 #[cfg(target_arch = "aarch64")]
 #[path = "arch/aarch64.rs"]
 mod arch;
-#[cfg(target_arch = "riscv64")]
-#[path = "arch/riscv64.rs"]
+#[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
+#[path = "arch/riscv.rs"]
 mod arch;
 
 /// Invoke a Scarlet Native syscall with no arguments.
