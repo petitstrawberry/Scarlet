@@ -46,9 +46,9 @@ pub use user_context::{
     init_from_fdt as init_user_context_from_fdt, user_fpu_enabled, user_vector_enabled,
 };
 
-#[cfg(target_arch = "riscv64")]
+#[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
 pub mod riscv;
-#[cfg(target_arch = "riscv64")]
+#[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
 pub use riscv::*;
 // Preserve the existing RV64 BSP module path while implementation code shares
 // the ISA module. RV32 never exposes an architecture named riscv64.

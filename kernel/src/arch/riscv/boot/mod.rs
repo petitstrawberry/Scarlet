@@ -65,13 +65,16 @@ pub(crate) fn trap_init(riscv: &mut Riscv) {
         riscv.hartid, trap_stack, scratch_addr
     );
 
-    // Enable FPU for user-space and kernel access
-    fpu::enable_fpu();
-    println!("[riscv64] trap_init: FPU enabled");
-
-    // Enable Vector extension for user-space and kernel access
-    fpu::enable_vector();
-    println!("[riscv64] trap_init: Vector enabled");
+    #[cfg(feature = "user-fpu")]
+    {
+        fpu::enable_fpu();
+        println!("[riscv] trap_init: FPU context enabled");
+    }
+    #[cfg(feature = "user-vector")]
+    {
+        fpu::enable_vector();
+        println!("[riscv] trap_init: Vector context enabled");
+    }
 
     // println!("Trap stack area    : {:#x} - {:#x}", trap_stack - stack_size, trap_stack - 1);
     // println!("Trap stack size    : {:#x}", stack_size);

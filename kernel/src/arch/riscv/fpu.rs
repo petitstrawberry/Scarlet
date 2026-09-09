@@ -1,4 +1,4 @@
-//! Floating-Point Unit and Vector context for RISC-V 64-bit
+//! Floating-Point Unit and Vector context for RISC-V
 //!
 //! This module provides the FPU and Vector context structures for saving and restoring
 //! floating-point and vector register state during context switches.
@@ -21,7 +21,7 @@ pub use fpu_switch::{
     kernel_switch_in_user_fpu, kernel_switch_out_user_fpu, kernel_switch_out_user_vector,
 };
 
-/// FPU context for RISC-V 64-bit (F/D extensions)
+/// FPU context for RISC-V (F/D extensions)
 ///
 /// Contains all floating-point registers and the floating-point control/status register.
 /// This is saved/restored during task context switches to preserve FPU state.
@@ -183,7 +183,7 @@ impl Default for FpuContext {
 /// QEMU virt machine typically uses VLEN=128 (vlenb=16).
 pub const MAX_VLENB: usize = 32;
 
-/// Vector context for RISC-V 64-bit (V extension)
+/// Vector context for RISC-V (V extension)
 ///
 /// Contains all vector registers and vector CSRs.
 /// The actual number of bytes used per register depends on the implementation's VLEN.
@@ -194,20 +194,20 @@ pub struct VectorContext {
     /// Vector registers v0-v31 (up to 256 bits = 32 bytes each)
     /// Stored as arrays of u64 for alignment
     pub v: [[u64; MAX_VLENB / 8]; 32],
-    /// Vector type register (vtype)
-    pub vtype: u64,
+    /// Native XLEN vector type register (vtype)
+    pub vtype: usize,
     /// Vector length register (vl)
-    pub vl: u64,
+    pub vl: usize,
     /// Vector start index register (vstart)
-    pub vstart: u64,
+    pub vstart: usize,
     /// Vector fixed-point rounding mode register (vxrm)
-    pub vxrm: u64,
+    pub vxrm: usize,
     /// Vector fixed-point saturation flag (vxsat)
-    pub vxsat: u64,
+    pub vxsat: usize,
     /// Vector control and status register (vcsr) - combines vxrm and vxsat
-    pub vcsr: u64,
+    pub vcsr: usize,
     /// Cached vlenb value (VLEN/8 in bytes)
-    pub vlenb: u64,
+    pub vlenb: usize,
 }
 
 impl VectorContext {
@@ -233,7 +233,7 @@ impl VectorContext {
     #[inline]
     pub unsafe fn save(&mut self) {
         // Read vlenb to know the actual vector register size
-        let vlenb: u64;
+        let vlenb: usize;
         unsafe {
             asm!(
                 ".option push",

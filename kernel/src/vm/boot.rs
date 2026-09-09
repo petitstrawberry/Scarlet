@@ -43,7 +43,7 @@ fn alloc_boot_pagetable() -> (u64, *mut ArchPageTable) {
     (paddr, vaddr as *mut ArchPageTable)
 }
 
-#[cfg(target_arch = "riscv64")]
+#[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
 fn boot_walk(
     root: *mut ArchPageTable,
     vaddr: usize,
@@ -82,7 +82,7 @@ fn boot_walk(
     }
 }
 
-#[cfg(target_arch = "riscv64")]
+#[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
 fn boot_map_page(
     root: *mut ArchPageTable,
     vaddr: usize,

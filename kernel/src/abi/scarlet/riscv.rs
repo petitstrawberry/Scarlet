@@ -34,6 +34,29 @@ const MAX_PENDING_EVENTS: usize = 1024;
 /// Size of the user-visible `EventInfo` passed to Scarlet event handlers.
 const EVENT_INFO_SIZE: usize = 40;
 
+/// Kernel-built event frame. Instructions are always 32 bits; saved integer
+/// registers follow XLEN. Eight-byte alignment also aligns the following EventInfo.
+#[repr(C, align(8))]
+struct SignalFrame {
+    trampoline: [u32; 2],
+    subtype: usize,
+    content_type: usize,
+    regs: [usize; 32],
+    epc: usize,
+}
+
+const SIGNAL_FRAME_SIZE: usize = core::mem::size_of::<SignalFrame>();
+const SIGNAL_SUBTYPE_OFFSET: usize = core::mem::offset_of!(SignalFrame, subtype);
+const SIGNAL_CONTENT_TYPE_OFFSET: usize = core::mem::offset_of!(SignalFrame, content_type);
+const SIGNAL_REGS_OFFSET: usize = core::mem::offset_of!(SignalFrame, regs);
+const SIGNAL_PC_OFFSET: usize = core::mem::offset_of!(SignalFrame, epc);
+const WORD_BYTES: usize = core::mem::size_of::<usize>();
+
+#[cfg(target_pointer_width = "64")]
+const _: [(); 288] = [(); SIGNAL_FRAME_SIZE];
+#[cfg(target_pointer_width = "32")]
+const _: [(); 152] = [(); SIGNAL_FRAME_SIZE];
+
 /// Event handler function pointer type (user-space address)
 pub type EventHandler = usize;
 
@@ -448,11 +471,12 @@ impl ScarletAbi {
     /// ```text
     /// +--------------------------+  <- original SP
     /// |   EventInfo              |  (40 bytes)
-    /// |   saved epc (8 bytes)    |
-    /// |   saved regs[0..31]      |  (32 × 8 = 256 bytes)
-    /// |   event content type (8) |
-    /// |   event subtype    (8)   |
-    /// |   reserved         (8)   |
+    /// |   alignment padding     |
+    /// |   saved epc             |  (one native word)
+    /// |   saved regs[0..31]      |  (32 native words)
+    /// |   event content type    |  (one native word)
+    /// |   event subtype         |  (one native word)
+    /// |   trampoline            |  (two 32-bit instructions)
     /// +--------------------------+  <- new SP (16-byte aligned)
     /// ```
     ///
@@ -497,9 +521,9 @@ impl ScarletAbi {
 
         let mut sp = trapframe.regs.reg[2];
 
-        // trampoline(8) + subtype(8) + content_type(8) + regs(32×8) + epc(8) = 288
-        const SIGNAL_FRAME_SIZE: usize = 8 + 8 + 8 + (32 * 8) + 8;
-        sp -= SIGNAL_FRAME_SIZE + EVENT_INFO_SIZE;
+        sp = sp
+            .checked_sub(SIGNAL_FRAME_SIZE + EVENT_INFO_SIZE)
+            .ok_or("Insufficient address space for event frame")?;
         sp &= !0xF;
 
         let frame_base = sp;
@@ -523,29 +547,29 @@ impl ScarletAbi {
         unsafe {
             let paddr = task
                 .vm_manager
-                .translate_to_kva(frame_base + 8)
+                .translate_to_kva(frame_base + SIGNAL_SUBTYPE_OFFSET)
                 .ok_or("Failed to translate signal frame address")?;
             *(paddr as *mut usize) = subtype;
 
             let paddr = task
                 .vm_manager
-                .translate_to_kva(frame_base + 16)
+                .translate_to_kva(frame_base + SIGNAL_CONTENT_TYPE_OFFSET)
                 .ok_or("Failed to translate signal frame address")?;
             *(paddr as *mut usize) = content_type;
 
             for i in 0..32 {
                 let paddr = task
                     .vm_manager
-                    .translate_to_kva(frame_base + 24 + i * 8)
+                    .translate_to_kva(frame_base + SIGNAL_REGS_OFFSET + i * WORD_BYTES)
                     .ok_or("Failed to translate signal frame address")?;
                 *(paddr as *mut usize) = trapframe.regs.reg[i];
             }
 
             let paddr = task
                 .vm_manager
-                .translate_to_kva(frame_base + 280)
+                .translate_to_kva(frame_base + SIGNAL_PC_OFFSET)
                 .ok_or("Failed to translate signal frame address")?;
-            *(paddr as *mut u64) = trapframe.get_current_pc();
+            *(paddr as *mut usize) = trapframe.epc;
         }
 
         write_event_info(task, event_info_addr, content_type, subtype)?;
@@ -554,7 +578,7 @@ impl ScarletAbi {
         trapframe.regs.reg[2] = sp;
         trapframe.regs.reg[10] = event_info_addr;
         trapframe.regs.reg[11] = subtype;
-        trapframe.regs.reg[12] = frame_base + 24;
+        trapframe.regs.reg[12] = frame_base + SIGNAL_REGS_OFFSET;
         trapframe.regs.reg[1] = handler.restorer.unwrap_or(frame_base);
 
         Ok(EventProcessOutcome::UserHandlerArmed)
@@ -566,14 +590,9 @@ impl ScarletAbi {
     /// all 32 general-purpose registers plus `epc`.  After this the trapframe
     /// reflects the pre-signal state and execution resumes transparently.
     ///
-    /// # Signal frame layout (RISC-V)
-    /// ```text
-    ///   [sp + 0]:   reserved (8 bytes)
-    ///   [sp + 8]:   event subtype   (8 bytes)
-    ///   [sp + 16]:  content type    (8 bytes)
-    ///   [sp + 24]:  saved regs[0..31] (256 bytes)
-    ///   [sp + 280]: saved epc       (8 bytes)
-    /// ```
+    /// The frame starts with two 32-bit trampoline instructions, followed by
+    /// native-word subtype, content type, 32 registers and the saved PC. The
+    /// frame size includes padding to preserve EventInfo's eight-byte alignment.
     pub fn event_return(
         trapframe: &mut crate::arch::Trapframe,
         task: &crate::task::Task,
@@ -584,16 +603,16 @@ impl ScarletAbi {
             for i in 0..32 {
                 let paddr = task
                     .vm_manager
-                    .translate_to_kva(frame_base + 24 + i * 8)
+                    .translate_to_kva(frame_base + SIGNAL_REGS_OFFSET + i * WORD_BYTES)
                     .ok_or("Failed to translate signal frame address")?;
                 trapframe.regs.reg[i] = *(paddr as *const usize);
             }
 
             let paddr = task
                 .vm_manager
-                .translate_to_kva(frame_base + 280)
+                .translate_to_kva(frame_base + SIGNAL_PC_OFFSET)
                 .ok_or("Failed to translate signal frame address")?;
-            trapframe.set_pc(*(paddr as *const u64));
+            trapframe.epc = *(paddr as *const usize);
         }
 
         Ok(())

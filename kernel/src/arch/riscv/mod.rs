@@ -51,7 +51,7 @@ const USER_BACKTRACE_MAX_FRAME_DISTANCE: usize = 8 * 1024 * 1024;
 /// Log a RISC-V userspace frame-pointer chain from a saved trapframe.
 ///
 /// This follows the standard frame record where the previous frame pointer is
-/// stored at `fp - 16` and the return address at `fp - 8`.
+/// stored two native words below `fp` and the return address one word below it.
 ///
 /// # Arguments
 ///
@@ -70,26 +70,24 @@ pub fn log_user_backtrace(task: &Task, trapframe: &Trapframe) {
         frame_pointer
     );
 
+    const WORD_BYTES: usize = core::mem::size_of::<usize>();
+    const FRAME_BYTES: usize = 2 * WORD_BYTES;
     for depth in 1..=USER_BACKTRACE_MAX_FRAMES {
         if frame_pointer == 0 || !frame_pointer.is_multiple_of(16) {
             break;
         }
-        let Some(frame_address) = frame_pointer.checked_sub(16) else {
+        let Some(frame_address) = frame_pointer.checked_sub(FRAME_BYTES) else {
             break;
         };
 
-        let mut frame = [0u8; 16];
+        let mut frame = [0u8; FRAME_BYTES];
         if crate::library::std::usercopy::copy_from_user(task, frame_address, &mut frame).is_err() {
             crate::println!("[user-bt] stopped: unreadable fp={:#x}", frame_pointer);
             break;
         }
 
-        let previous_frame_pointer = u64::from_ne_bytes([
-            frame[0], frame[1], frame[2], frame[3], frame[4], frame[5], frame[6], frame[7],
-        ]) as usize;
-        let saved_return_address = u64::from_ne_bytes([
-            frame[8], frame[9], frame[10], frame[11], frame[12], frame[13], frame[14], frame[15],
-        ]) as usize;
+        let previous_frame_pointer = usize::from_ne_bytes(frame[..WORD_BYTES].try_into().unwrap());
+        let saved_return_address = usize::from_ne_bytes(frame[WORD_BYTES..].try_into().unwrap());
         if saved_return_address == 0 {
             break;
         }
@@ -812,7 +810,7 @@ pub fn set_next_mode(mode: Mode) {
                 sstatus = in(reg) sstatus,
             );
             #[cfg(feature = "hypervisor")]
-            asm!("csrc hstatus, {0}", in(reg) (1u64 << 7));
+            asm!("csrc hstatus, {0}", in(reg) (1usize << 7));
         },
         Mode::Kernel => unsafe {
             let mut sstatus: usize;
@@ -826,7 +824,7 @@ pub fn set_next_mode(mode: Mode) {
                 sstatus = in(reg) sstatus,
             );
             #[cfg(feature = "hypervisor")]
-            asm!("csrc hstatus, {0}", in(reg) (1u64 << 7));
+            asm!("csrc hstatus, {0}", in(reg) (1usize << 7));
         },
         Mode::GuestUser => unsafe {
             if cfg!(feature = "hypervisor") {
@@ -840,7 +838,7 @@ pub fn set_next_mode(mode: Mode) {
                     "csrw sstatus, {sstatus}",
                     sstatus = in(reg) sstatus,
                 );
-                asm!("csrs hstatus, {0}", in(reg) (1u64 << 7));
+                asm!("csrs hstatus, {0}", in(reg) (1usize << 7));
             } else {
                 panic!("Guest mode not supported without hypervisor feature");
             }
@@ -857,7 +855,7 @@ pub fn set_next_mode(mode: Mode) {
                     "csrw sstatus, {sstatus}",
                     sstatus = in(reg) sstatus,
                 );
-                asm!("csrs hstatus, {0}", in(reg) (1u64 << 7));
+                asm!("csrs hstatus, {0}", in(reg) (1usize << 7));
             } else {
                 panic!("Guest mode not supported without hypervisor feature");
             }

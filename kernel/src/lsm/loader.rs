@@ -217,7 +217,7 @@ fn round_up_to_page(size: usize) -> usize {
     (size + PAGE_SIZE - 1) & !(PAGE_SIZE - 1)
 }
 
-#[cfg(target_arch = "riscv64")]
+#[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
 fn flush_icache_all(_mapped_ranges: &[(usize, usize)]) {
     unsafe {
         core::arch::asm!("fence.i", options(nostack));
