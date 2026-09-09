@@ -9,7 +9,7 @@ pub mod syscall;
 extern crate alloc;
 
 mod accounting;
-use accounting::CpuAccounting;
+use accounting::{CpuAccounting, CpuHog, SchedUtil};
 
 use crate::sync::{IrqRwSpinLock, IrqSpinLock, Mutex};
 use alloc::{
@@ -775,14 +775,8 @@ pub struct Task {
     core_preference: AtomicU8,
     /// Minimum scheduler utilization required by this task.
     sched_util_min: AtomicU32,
-    /// Measured scheduler utilization for this task.
-    sched_util_avg: AtomicU32,
-    /// Last timestamp at which measured scheduler utilization was updated.
-    sched_util_last_update_ns: AtomicU64,
-    /// CPU runtime accumulated for the current scheduler utilization window.
-    sched_util_window_runtime_ns: AtomicU64,
-    /// Last timestamp charged into the scheduler utilization window.
-    sched_util_accounted_until_ns: AtomicU64,
+    /// Measured utilization and its coherent runtime window.
+    sched_util: SchedUtil,
     /// Last timestamp at which the scheduler migrated this task.
     ///
     /// Used to rate-limit scheduler-driven cross-CPU movement.
@@ -839,14 +833,8 @@ pub struct Task {
     last_syscall_pc: AtomicUsize,
     /// Whether this task is currently executing its system-call dispatcher.
     syscall_active: AtomicBool,
-    /// Start of the current CPU-hog diagnostic wall-clock window.
-    cpu_hog_window_start_ns: AtomicU64,
-    /// Cumulative task CPU time at the start of the diagnostic window.
-    cpu_hog_window_start_runtime_ns: AtomicU64,
-    /// Sampled instruction address at the start of the diagnostic window.
-    cpu_hog_window_start_pc: AtomicUsize,
-    /// Privilege mode associated with `cpu_hog_window_start_pc`.
-    cpu_hog_window_start_pc_privileged: AtomicBool,
+    /// Best-effort CPU-hog window, independent from correctness-critical time.
+    cpu_hog: CpuHog,
     /// Stack size in bytes
     pub stack_size: AtomicUsize,
     /// Data segment size in bytes
@@ -1115,10 +1103,7 @@ impl Task {
             priority: AtomicU32::new(priority),
             core_preference: AtomicU8::new(TaskCorePreference::Any.to_u8()),
             sched_util_min: AtomicU32::new(0),
-            sched_util_avg: AtomicU32::new(0),
-            sched_util_last_update_ns: AtomicU64::new(0),
-            sched_util_window_runtime_ns: AtomicU64::new(0),
-            sched_util_accounted_until_ns: AtomicU64::new(0),
+            sched_util: SchedUtil::new(),
             sched_last_migration_ns: AtomicU64::new(0),
             sched_migration_count: AtomicU64::new(0),
             sched_low_util_since_ns: AtomicU64::new(0),
@@ -1140,10 +1125,7 @@ impl Task {
             syscall_recorded: AtomicBool::new(false),
             last_syscall_pc: AtomicUsize::new(0),
             syscall_active: AtomicBool::new(false),
-            cpu_hog_window_start_ns: AtomicU64::new(0),
-            cpu_hog_window_start_runtime_ns: AtomicU64::new(0),
-            cpu_hog_window_start_pc: AtomicUsize::new(0),
-            cpu_hog_window_start_pc_privileged: AtomicBool::new(false),
+            cpu_hog: CpuHog::new(),
             stack_size: AtomicUsize::new(0),
             data_size: vm_manager.data_size_handle(),
             text_size: AtomicUsize::new(0),
@@ -1377,24 +1359,6 @@ impl Task {
         Ok(())
     }
 
-    fn decay_sched_util_avg(avg: u32, elapsed_ns: u64) -> u32 {
-        let mut periods = elapsed_ns / SCHED_UTIL_DECAY_INTERVAL_NS;
-        if periods == 0 {
-            return avg;
-        }
-
-        let mut next = avg as u64;
-        periods = periods.min(64);
-        for _ in 0..periods {
-            next = next.saturating_mul(SCHED_UTIL_DECAY_NUM as u64) / SCHED_UTIL_DECAY_DEN as u64;
-            if next == 0 {
-                break;
-            }
-        }
-
-        next.min(SCHED_UTIL_SCALE as u64) as u32
-    }
-
     /// Return the measured scheduler utilization for this task.
     ///
     /// # Returns
@@ -1402,7 +1366,7 @@ impl Task {
     /// Measured utilization in scheduler capacity units, where
     /// [`SCHED_UTIL_SCALE`] represents a full-capacity CPU.
     pub fn sched_util_avg(&self) -> u32 {
-        self.sched_util_avg.load(Ordering::SeqCst)
+        self.sched_util.average()
     }
 
     /// Return a decayed measured scheduler utilization snapshot.
@@ -1416,13 +1380,7 @@ impl Task {
     /// Measured utilization in scheduler capacity units after applying sleep
     /// decay since the last update.
     pub fn sched_util_avg_snapshot(&self, now_ns: u64) -> u32 {
-        let avg = self.sched_util_avg();
-        let last_update_ns = self.sched_util_last_update_ns.load(Ordering::SeqCst);
-        if avg == 0 || last_update_ns == 0 {
-            return avg;
-        }
-
-        Self::decay_sched_util_avg(avg, now_ns.saturating_sub(last_update_ns))
+        self.sched_util.decayed_average(now_ns)
     }
 
     /// Account scheduler utilization runtime while this task is running.
@@ -1439,41 +1397,7 @@ impl Task {
     ///
     /// Updated measured utilization in scheduler capacity units.
     pub fn account_sched_util_running(&self, now_ns: u64) -> u32 {
-        let last_accounted_ns = self
-            .sched_util_accounted_until_ns
-            .swap(now_ns, Ordering::SeqCst);
-        if last_accounted_ns != 0 {
-            let delta_ns = now_ns.saturating_sub(last_accounted_ns);
-            self.sched_util_window_runtime_ns
-                .fetch_add(delta_ns, Ordering::SeqCst);
-        }
-
-        let last_update_ns = self.sched_util_last_update_ns.load(Ordering::SeqCst);
-        if last_update_ns == 0 {
-            self.sched_util_last_update_ns
-                .store(now_ns, Ordering::SeqCst);
-            return self.sched_util_avg();
-        }
-
-        let elapsed_ns = now_ns.saturating_sub(last_update_ns);
-        if elapsed_ns < SCHED_UTIL_DECAY_INTERVAL_NS {
-            return self.sched_util_avg();
-        }
-
-        let runtime_ns = self.sched_util_window_runtime_ns.swap(0, Ordering::SeqCst);
-        let sample = ((runtime_ns as u128 * SCHED_UTIL_SCALE as u128) / elapsed_ns as u128)
-            .min(SCHED_UTIL_SCALE as u128) as u32;
-        let avg = self.sched_util_avg_snapshot(now_ns);
-        let next = if sample > avg {
-            avg.saturating_add(sample.saturating_sub(avg).saturating_add(1) / 2)
-        } else {
-            avg.saturating_mul(7).saturating_add(sample) / 8
-        }
-        .min(SCHED_UTIL_SCALE);
-        self.sched_util_avg.store(next, Ordering::SeqCst);
-        self.sched_util_last_update_ns
-            .store(now_ns, Ordering::SeqCst);
-        next
+        self.sched_util.account(now_ns)
     }
 
     /// Return the last scheduler migration timestamp for this task.
@@ -1604,10 +1528,9 @@ impl Task {
     ///
     /// * `now_ns` - Current monotonic timestamp in nanoseconds.
     pub fn start_cpu_accounting(&self, now_ns: u64) {
-        self.cpu_accounting.begin(now_ns);
+        if !self.cpu_accounting.begin(now_ns) { return; }
         self.sched_exec_start_ns.store(now_ns, Ordering::SeqCst);
-        self.sched_util_accounted_until_ns
-            .store(now_ns, Ordering::SeqCst);
+        self.sched_util.begin(now_ns);
     }
 
     /// Stop charging CPU time to this task and return the elapsed delta.
@@ -1620,6 +1543,7 @@ impl Task {
     ///
     /// The nanoseconds charged by this stop operation.
     pub fn stop_cpu_accounting(&self, now_ns: u64) -> u64 {
+        self.sched_util.finish(now_ns);
         self.sched_exec_start_ns.store(0, Ordering::SeqCst);
         self.cpu_accounting.finish(now_ns)
     }
@@ -1722,49 +1646,13 @@ impl Task {
         let last_syscall_number = self.debug_syscall_number();
         let last_syscall_pc = self.last_syscall_pc.load(Ordering::Relaxed) as u64;
         let syscall_active = self.syscall_active.load(Ordering::Acquire);
-        let window_start_ns = self.cpu_hog_window_start_ns.load(Ordering::Acquire);
-
-        if window_start_ns == 0 {
-            self.cpu_hog_window_start_runtime_ns
-                .store(runtime_ns, Ordering::Relaxed);
-            self.cpu_hog_window_start_pc
-                .store(current_pc, Ordering::Relaxed);
-            self.cpu_hog_window_start_pc_privileged
-                .store(current_pc_privileged, Ordering::Relaxed);
-            self.cpu_hog_window_start_ns
-                .store(now_ns, Ordering::Release);
-            return None;
-        }
-
-        let window_ns = now_ns.saturating_sub(window_start_ns);
-        if window_ns < TASK_CPU_HOG_WINDOW_NS {
-            return None;
-        }
-
-        let window_start_runtime_ns = self.cpu_hog_window_start_runtime_ns.load(Ordering::Relaxed);
-        let start_pc = self.cpu_hog_window_start_pc.load(Ordering::Relaxed);
-        let start_pc_privileged = self
-            .cpu_hog_window_start_pc_privileged
-            .load(Ordering::Relaxed);
-        let consumed_runtime_ns = runtime_ns.saturating_sub(window_start_runtime_ns);
-        let usage_per_mille =
-            ((consumed_runtime_ns as u128 * 1_000) / window_ns as u128).min(1_000) as u32;
-
-        self.cpu_hog_window_start_runtime_ns
-            .store(runtime_ns, Ordering::Relaxed);
-        self.cpu_hog_window_start_pc
-            .store(current_pc, Ordering::Relaxed);
-        self.cpu_hog_window_start_pc_privileged
-            .store(current_pc_privileged, Ordering::Relaxed);
-        self.cpu_hog_window_start_ns
-            .store(now_ns, Ordering::Release);
-
-        (usage_per_mille >= TASK_CPU_HOG_THRESHOLD_PER_MILLE).then_some(TaskCpuHogSnapshot {
-            usage_per_mille,
-            window_ns,
-            runtime_ns: consumed_runtime_ns,
-            start_pc: start_pc as u64,
-            start_pc_privileged,
+        let sample = self.cpu_hog.sample(now_ns, runtime_ns, current_pc, current_pc_privileged)?;
+        Some(TaskCpuHogSnapshot {
+            usage_per_mille: sample.usage_per_mille,
+            window_ns: sample.window_ns,
+            runtime_ns: sample.runtime_ns,
+            start_pc: sample.start_pc as u64,
+            start_pc_privileged: sample.start_privileged,
             current_pc: current_pc as u64,
             current_pc_privileged,
             last_syscall_number,
