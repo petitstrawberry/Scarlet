@@ -32,6 +32,7 @@
 extern crate alloc;
 
 use super::accounting::{Activity, CpuClock};
+use crate::sync::counter::SaturatingCounter;
 use crate::sync::diagnostic::{DiagnosticRecord, ReportInterval};
 use core::sync::atomic::{
     AtomicBool, AtomicPtr, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering,
@@ -1354,11 +1355,11 @@ static CPU_CAPACITIES: [AtomicU32; MAX_NUM_CPUS] =
 const INVALID_CPU_TOPOLOGY_DOMAIN: u32 = u32::MAX;
 static CPU_TOPOLOGY_DOMAINS: [AtomicU32; MAX_NUM_CPUS] =
     [const { AtomicU32::new(INVALID_CPU_TOPOLOGY_DOMAIN) }; MAX_NUM_CPUS];
-static SCHED_MIGRATIONS_TOTAL: AtomicU64 = AtomicU64::new(0);
-static SCHED_MIGRATION_PROMOTIONS: AtomicU64 = AtomicU64::new(0);
-static SCHED_MIGRATION_DEMOTIONS: AtomicU64 = AtomicU64::new(0);
-static SCHED_MIGRATION_COOLDOWN_SKIPS: AtomicU64 = AtomicU64::new(0);
-static SCHED_WORK_STEALS: AtomicU64 = AtomicU64::new(0);
+static SCHED_MIGRATIONS_TOTAL: SaturatingCounter = SaturatingCounter::new(0);
+static SCHED_MIGRATION_PROMOTIONS: SaturatingCounter = SaturatingCounter::new(0);
+static SCHED_MIGRATION_DEMOTIONS: SaturatingCounter = SaturatingCounter::new(0);
+static SCHED_MIGRATION_COOLDOWN_SKIPS: SaturatingCounter = SaturatingCounter::new(0);
+static SCHED_WORK_STEALS: SaturatingCounter = SaturatingCounter::new(0);
 
 /// Coarse CPU core class used for heterogeneous scheduling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1923,11 +1924,11 @@ pub fn cpu_util_snapshot(cpu_id: usize) -> Option<CpuUtilSnapshot> {
 /// Current scheduler migration accounting snapshot.
 pub fn scheduler_migration_stats() -> SchedulerMigrationStats {
     SchedulerMigrationStats {
-        total: SCHED_MIGRATIONS_TOTAL.load(Ordering::SeqCst),
-        promotions: SCHED_MIGRATION_PROMOTIONS.load(Ordering::SeqCst),
-        demotions: SCHED_MIGRATION_DEMOTIONS.load(Ordering::SeqCst),
-        cooldown_skips: SCHED_MIGRATION_COOLDOWN_SKIPS.load(Ordering::SeqCst),
-        work_steals: SCHED_WORK_STEALS.load(Ordering::SeqCst),
+        total: SCHED_MIGRATIONS_TOTAL.snapshot(),
+        promotions: SCHED_MIGRATION_PROMOTIONS.snapshot(),
+        demotions: SCHED_MIGRATION_DEMOTIONS.snapshot(),
+        cooldown_skips: SCHED_MIGRATION_COOLDOWN_SKIPS.snapshot(),
+        work_steals: SCHED_WORK_STEALS.snapshot(),
     }
 }
 
@@ -3233,7 +3234,7 @@ fn migration_cooldown_active(task: &Task, now_ns: u64, record_skip: bool) -> boo
     let active = last_migration_ns != 0
         && now_ns.saturating_sub(last_migration_ns) < SCHED_MIGRATION_COOLDOWN_NS;
     if active && record_skip {
-        SCHED_MIGRATION_COOLDOWN_SKIPS.fetch_add(1, Ordering::SeqCst);
+        SCHED_MIGRATION_COOLDOWN_SKIPS.add(1);
     }
     active
 }
@@ -3303,7 +3304,7 @@ fn migration_target_for_task(
 }
 
 fn record_work_steal(task: &Task, now_ns: u64) {
-    SCHED_WORK_STEALS.fetch_add(1, Ordering::SeqCst);
+    SCHED_WORK_STEALS.add(1);
     task.mark_sched_migrated(now_ns);
 }
 
@@ -3314,11 +3315,11 @@ fn record_scheduler_migration(task: &Task, from_cpu: usize, to_cpu: usize, now_n
 
     let from_capacity = cpu_capacity(from_cpu);
     let to_capacity = cpu_capacity(to_cpu);
-    SCHED_MIGRATIONS_TOTAL.fetch_add(1, Ordering::SeqCst);
+    SCHED_MIGRATIONS_TOTAL.add(1);
     if to_capacity > from_capacity {
-        SCHED_MIGRATION_PROMOTIONS.fetch_add(1, Ordering::SeqCst);
+        SCHED_MIGRATION_PROMOTIONS.add(1);
     } else if to_capacity < from_capacity {
-        SCHED_MIGRATION_DEMOTIONS.fetch_add(1, Ordering::SeqCst);
+        SCHED_MIGRATION_DEMOTIONS.add(1);
     }
     task.mark_sched_migrated(now_ns);
 }
@@ -5770,11 +5771,11 @@ pub fn reset() {
     deadline_callback_contexts().lock().clear();
     NEXT_CPU.store(0, Ordering::SeqCst);
     DEBUG_ENQUEUE_SEQ.store(0, Ordering::SeqCst);
-    SCHED_MIGRATIONS_TOTAL.store(0, Ordering::SeqCst);
-    SCHED_MIGRATION_PROMOTIONS.store(0, Ordering::SeqCst);
-    SCHED_MIGRATION_DEMOTIONS.store(0, Ordering::SeqCst);
-    SCHED_MIGRATION_COOLDOWN_SKIPS.store(0, Ordering::SeqCst);
-    SCHED_WORK_STEALS.store(0, Ordering::SeqCst);
+    SCHED_MIGRATIONS_TOTAL.reset_for_test();
+    SCHED_MIGRATION_PROMOTIONS.reset_for_test();
+    SCHED_MIGRATION_DEMOTIONS.reset_for_test();
+    SCHED_MIGRATION_COOLDOWN_SKIPS.reset_for_test();
+    SCHED_WORK_STEALS.reset_for_test();
     ONLINE_CPU_MASK.store(0, Ordering::SeqCst);
     ZOMBIE_QUEUE.lock().clear();
     BLOCKED_QUEUE.lock().clear();

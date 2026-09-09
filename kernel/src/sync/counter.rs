@@ -49,6 +49,15 @@ impl SaturatingCounter {
         #[cfg(not(target_has_atomic = "64"))]
         self.value.snapshot()
     }
+
+    /// Reset isolated test fixtures; live cumulative measurements cannot reset.
+    #[cfg(test)]
+    pub(crate) fn reset_for_test(&self) {
+        #[cfg(target_has_atomic = "64")]
+        self.value.store(0, Ordering::Relaxed);
+        #[cfg(not(target_has_atomic = "64"))]
+        { *self.value.value.lock() = 0; }
+    }
 }
 
 impl core::fmt::Debug for SaturatingCounter {
