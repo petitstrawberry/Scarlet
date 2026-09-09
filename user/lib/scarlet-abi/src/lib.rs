@@ -18,6 +18,25 @@ pub type Pid = u32;
 /// Raw thread identifier exposed by Scarlet Native thread syscalls.
 pub type Tid = u32;
 
+/// Native IPv4 configuration request. The interface name is a byte slice in
+/// the caller's address space; its pointer and length follow the caller's XLEN.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct RawNetworkConfigureIpv4Request {
+    pub iface_ptr: usize,
+    pub iface_len: usize,
+    pub address: [u8; 4],
+    pub netmask: [u8; 4],
+    pub gateway: [u8; 4],
+    pub flags: u32,
+    pub metric: u32,
+}
+
+#[cfg(target_pointer_width = "64")]
+const _: [(); 40] = [(); core::mem::size_of::<RawNetworkConfigureIpv4Request>()];
+#[cfg(target_pointer_width = "32")]
+const _: [(); 28] = [(); core::mem::size_of::<RawNetworkConfigureIpv4Request>()];
+
 /// Explicit descriptor transfer for an Environment spawn/exec.
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
