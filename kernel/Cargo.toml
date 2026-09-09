@@ -26,5 +26,6 @@ user-fpu = []
 user-vector = []
 hypervisor = []
 limine = ["dep:limine"]
-linux-boot = []
+# Linux arm64 Image header and AArch64 entry contract.
+aarch64-linux-boot = []
 sbi-boot = []

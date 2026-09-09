@@ -40,7 +40,7 @@ programs are `no_std` from the kernel's build configuration.
 The feature defaults are in `kernel/Cargo.toml`; the actual project selection
 is in `[bsp.kernel].features`. The reference AArch64 full project explicitly
 disables `hypervisor`, while the microvm project enables it. `profiler`,
-`sync-debug`, and `linux-boot` are separate opt-ins. A compiled driver or
+`sync-debug`, and `aarch64-linux-boot` are separate opt-ins. A compiled driver or
 feature is not evidence that a particular board was validated.
 
 ## Source map

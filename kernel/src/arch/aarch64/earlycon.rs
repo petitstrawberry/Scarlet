@@ -96,7 +96,7 @@ pub fn early_putc(c: u8) {
 /// # Arguments
 ///
 /// * `paddr` - Physical base of the PL011 register window.
-#[cfg(feature = "linux-boot")]
+#[cfg(feature = "aarch64-linux-boot")]
 pub(crate) fn register_linux_boot_pl011(
     paddr: usize,
     direct_map: crate::vm::direct_map::DirectMapWindow,
