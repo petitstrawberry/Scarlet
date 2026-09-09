@@ -3,13 +3,16 @@
 //! This module provides a full TCP implementation with 3-way handshake,
 //! flow control, and retransmission.
 
+mod timing;
+use timing::RetransmissionTiming;
+
 use crate::sync::counter::SaturatingCounter;
 use crate::sync::{IrqRwSpinLock, IrqSpinLock, WaitResult};
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::string::String;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicUsize, Ordering};
 
 use crate::network::ipv4::Ipv4Address;
 use crate::network::protocol_stack::get_network_manager;
@@ -394,23 +397,12 @@ pub struct TcpSocket {
     bytes_sent: SaturatingCounter,
     bytes_received: SaturatingCounter,
 
-    /// RTO (Retransmission Timeout) calculation - RFC 6298
-    /// Smoothed RTT in nanoseconds, scaled by eight for fixed-point arithmetic.
-    srtt_ns: AtomicU64,
-    /// RTT variation in nanoseconds, scaled by four for fixed-point arithmetic.
-    rttvar_ns: AtomicU64,
-    /// Current retransmission timeout in nanoseconds.
-    rto_ns: AtomicU64,
-    /// Retransmission count for exponential backoff
+    /// RTT sampling, estimation and capability-selected timeout publication.
+    timing: RetransmissionTiming,
+    /// Retransmission count for exponential backoff.
     retrans_count: AtomicU16,
     /// Active retransmission timer and its strongly retained callback.
     retrans_timer: IrqSpinLock<Option<ActiveRetransTimer>>,
-    /// Timestamp of last segment transmission (for RTT measurement)
-    last_send_time: AtomicU64,
-    /// Whether we're timing an RTT measurement (Karn's algorithm)
-    timing_rtt: AtomicU16,
-    /// Sequence number being timed
-    timed_seq: AtomicU32,
 
     /// List of unacknowledged segments for retransmission
     unacked_segments: IrqSpinLock<VecDeque<UnackedSegment>>,
@@ -531,15 +523,9 @@ impl TcpSocket {
             bytes_sent: SaturatingCounter::new(0),
             bytes_received: SaturatingCounter::new(0),
 
-            // RTO initialization - RFC 6298
-            srtt_ns: AtomicU64::new(0),
-            rttvar_ns: AtomicU64::new(0),
-            rto_ns: AtomicU64::new(Self::INITIAL_RTO_NS),
+            timing: RetransmissionTiming::new(),
             retrans_count: AtomicU16::new(0),
             retrans_timer: IrqSpinLock::new(None),
-            last_send_time: AtomicU64::new(0),
-            timing_rtt: AtomicU16::new(0),
-            timed_seq: AtomicU32::new(0),
 
             // Unacked segments list
             unacked_segments: IrqSpinLock::new(VecDeque::new()),
@@ -1071,11 +1057,8 @@ impl TcpSocket {
         self.peer_mss.store(TCP_IPV4_DEFAULT_MSS, Ordering::SeqCst);
 
         // Reset RTO state
-        self.srtt_ns.store(0, Ordering::SeqCst);
-        self.rttvar_ns.store(0, Ordering::SeqCst);
-        self.rto_ns.store(Self::INITIAL_RTO_NS, Ordering::SeqCst);
+        self.timing.reset();
         self.retrans_count.store(0, Ordering::SeqCst);
-        self.timing_rtt.store(0, Ordering::SeqCst);
 
         // Clear addresses
         *self.local_ip.lock() = None;
@@ -1420,7 +1403,7 @@ impl TcpSocket {
 
         // An ACK after retransmission cannot identify which transmission it
         // acknowledges, so Karn's algorithm excludes it from RTT sampling.
-        self.timing_rtt.store(0, Ordering::SeqCst);
+        self.timing.cancel_measurement();
         let _ = self.send_segment_with_options(
             dest_ip,
             header,
@@ -1988,107 +1971,32 @@ impl TcpSocket {
     // RTO (Retransmission Timeout) - RFC 6298
     // ===================================================================
 
-    /// Update RTO based on RTT measurement (Jacobson/Karels algorithm)
-    /// Uses fixed-point arithmetic for better precision in no_std
-    fn update_rto(&self, rtt_ns: u64) {
-        // RFC 6298: RTO calculation
-        // SRTT = (1 - alpha) * SRTT + alpha * RTT
-        // RTTVAR = (1 - beta) * RTTVAR + beta * |SRTT - RTT|
-        // RTO = SRTT + max(G, K * RTTVAR)
-        // where alpha = 1/8, beta = 1/4, K = 4, G = clock granularity
-
-        const ALPHA_SHIFT: u32 = 3; // alpha = 1/8
-        const BETA_SHIFT: u32 = 2; // beta = 1/4
-        const K: u64 = 4; // multiplier for RTTVAR
-
-        let srtt = self.srtt_ns.load(Ordering::SeqCst);
-        let rttvar = self.rttvar_ns.load(Ordering::SeqCst);
-
-        if srtt == 0 {
-            // First RTT measurement
-            // SRTT = RTT
-            // RTTVAR = RTT / 2
-            self.srtt_ns
-                .store(rtt_ns.saturating_mul(8), Ordering::SeqCst);
-            self.rttvar_ns
-                .store(rtt_ns.saturating_mul(2), Ordering::SeqCst);
-        } else {
-            // Subsequent measurements
-            // RTTVAR = (1 - beta) * RTTVAR + beta * |SRTT - RTT|
-            // SRTT = (1 - alpha) * SRTT + alpha * RTT
-            let srtt_val = srtt >> 3; // Divide by 8
-            let diff = if srtt_val > rtt_ns {
-                srtt_val - rtt_ns
-            } else {
-                rtt_ns - srtt_val
-            };
-
-            // RTTVAR = (3/4) * RTTVAR + (1/4) * |diff|
-            let new_rttvar = ((rttvar.saturating_mul(3)) >> BETA_SHIFT).saturating_add(diff);
-            self.rttvar_ns.store(new_rttvar, Ordering::SeqCst);
-
-            // SRTT = (7/8) * SRTT + (1/8) * RTT
-            let new_srtt = ((srtt.saturating_mul(7)) >> ALPHA_SHIFT).saturating_add(rtt_ns);
-            self.srtt_ns.store(new_srtt, Ordering::SeqCst);
-        }
-
-        // RTO = SRTT + max(G, K * RTTVAR)
-        let srtt_ns = self.srtt_ns.load(Ordering::SeqCst) >> ALPHA_SHIFT;
-        let rttvar_ns = self.rttvar_ns.load(Ordering::SeqCst) >> BETA_SHIFT;
-        let mut rto_ns = srtt_ns.saturating_add(K.saturating_mul(rttvar_ns).max(Self::MIN_RTO_NS));
-
-        // Clamp RTO to bounds
-        rto_ns = rto_ns.clamp(Self::MIN_RTO_NS, Self::MAX_RTO_NS);
-
-        self.rto_ns.store(rto_ns, Ordering::SeqCst);
-    }
-
-    /// Get the current RTO in nanoseconds.
+    /// Read the completed timeout estimate; native 64-bit targets do not lock.
     fn get_rto_ns(&self) -> u64 {
-        self.rto_ns.load(Ordering::SeqCst)
+        self.timing.timeout_ns()
     }
 
-    /// Start RTT measurement for a sequence number
     fn start_rtt_measurement(&self, seq: u32) {
-        // Only start timing if not already timing
-        if self.timing_rtt.load(Ordering::SeqCst) == 0 {
-            self.timed_seq.store(seq, Ordering::SeqCst);
-            self.last_send_time
-                .store(crate::timer::get_time_ns(), Ordering::SeqCst);
-            self.timing_rtt.store(1, Ordering::SeqCst);
-        }
+        self.timing
+            .start_measurement(seq, crate::timer::get_time_ns());
     }
 
-    /// Stop RTT measurement when ACK is received
     fn stop_rtt_measurement(&self, ack_seq: u32) {
-        // Check if we're timing and if this ACK covers the timed sequence
-        if self.timing_rtt.load(Ordering::SeqCst) != 0 {
-            let timed_seq = self.timed_seq.load(Ordering::SeqCst);
-            // Check if ACK acknowledges the segment we were timing
-            // Note: Sequence number comparison needs to handle wraparound
-            if is_seq_acknowledged(timed_seq, ack_seq) {
-                let send_time = self.last_send_time.load(Ordering::SeqCst);
-                let now = crate::timer::get_time_ns();
-                if now > send_time {
-                    self.update_rto(now - send_time);
-                }
-                self.timing_rtt.store(0, Ordering::SeqCst);
-                // Reset retransmission count on successful ACK
-                self.retrans_count.store(0, Ordering::SeqCst);
-            }
+        if self
+            .timing
+            .acknowledge(ack_seq, crate::timer::get_time_ns())
+        {
+            self.retrans_count.store(0, Ordering::SeqCst);
         }
     }
 
-    /// Exponential backoff for retransmission
     fn backoff_rto(&self) {
-        let current_rto = self.rto_ns.load(Ordering::SeqCst);
-        self.rto_ns.store(
-            backed_off_retransmission_timeout_ns(current_rto),
-            Ordering::SeqCst,
-        );
-        let count = self.retrans_count.load(Ordering::SeqCst);
-        self.retrans_count
-            .store(count.saturating_add(1), Ordering::SeqCst);
+        self.timing.backoff();
+        let _ = self
+            .retrans_count
+            .fetch_update(Ordering::SeqCst, Ordering::Relaxed, |count| {
+                Some(count.saturating_add(1))
+            });
     }
 
     /// Handle retransmission timeout
@@ -2137,8 +2045,6 @@ impl TcpSocket {
             (seg, dest_ip, header)
         };
 
-        // Do not use an ACK for a retransmitted segment as an RTT sample.
-        self.timing_rtt.store(0, Ordering::SeqCst);
         let _ = self.send_segment_with_options(
             retransmit.1,
             retransmit.2,
