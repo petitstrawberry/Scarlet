@@ -6,7 +6,8 @@
 //! - Proper path resolution across mount boundaries
 //! - Efficient mount point lookup and traversal
 
-use crate::sync::{IrqRwSpinLock, IrqSpinLock};
+use crate::sync::IrqRwSpinLock;
+use crate::sync::sequence::IdSequence;
 use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -33,11 +34,8 @@ pub struct MountId(u64);
 impl MountId {
     /// Allocate a non-reused identity; panics if the 64-bit space is exhausted.
     pub(crate) fn new() -> Self {
-        static NEXT_ID: IrqSpinLock<MountId> = IrqSpinLock::new(MountId(1));
-        let mut next = NEXT_ID.lock();
-        let id = *next;
-        next.0 = next.0.checked_add(1).expect("mount identities exhausted");
-        id
+        static IDS: IdSequence = IdSequence::new();
+        Self(IDS.reserve().expect("MountId identities exhausted").get())
     }
 }
 
@@ -48,14 +46,12 @@ pub struct VfsManagerId(u64);
 impl VfsManagerId {
     /// Allocate a non-reused identity; panics if the 64-bit space is exhausted.
     pub fn new() -> Self {
-        static NEXT_ID: IrqSpinLock<VfsManagerId> = IrqSpinLock::new(VfsManagerId(1));
-        let mut next = NEXT_ID.lock();
-        let id = *next;
-        next.0 = next
-            .0
-            .checked_add(1)
-            .expect("VFS manager identities exhausted");
-        id
+        static IDS: IdSequence = IdSequence::new();
+        Self(
+            IDS.reserve()
+                .expect("VfsManagerId identities exhausted")
+                .get(),
+        )
     }
 }
 

@@ -5,7 +5,8 @@
 //! - VfsNode: Abstract interface for file entities
 //! - FileSystemOperations: Driver API for filesystem operations
 
-use crate::sync::{IrqRwSpinLock, IrqSpinLock};
+use crate::sync::IrqRwSpinLock;
+use crate::sync::sequence::IdSequence;
 use alloc::{
     collections::BTreeMap,
     string::{String, ToString},
@@ -40,14 +41,12 @@ impl FileSystemId {
     /// Allocate a unique filesystem identity, independent of pointer width.
     /// Panics on exhaustion rather than reusing an identity still held by VFS.
     pub fn new() -> Self {
-        static NEXT_ID: IrqSpinLock<FileSystemId> = IrqSpinLock::new(FileSystemId(1));
-        let mut next = NEXT_ID.lock();
-        let id = *next;
-        next.0 = next
-            .0
-            .checked_add(1)
-            .expect("filesystem identities exhausted");
-        id
+        static IDS: IdSequence = IdSequence::new();
+        Self(
+            IDS.reserve()
+                .expect("FileSystemId identities exhausted")
+                .get(),
+        )
     }
 
     /// Get the raw u64 value.

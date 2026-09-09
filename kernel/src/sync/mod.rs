@@ -15,6 +15,7 @@ pub mod mutex;
 pub mod once;
 pub mod preempt;
 pub mod rw_spinlock;
+pub mod sequence;
 pub mod spinlock;
 pub mod waker;
 
